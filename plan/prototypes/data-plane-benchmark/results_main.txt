@@ -1,0 +1,102 @@
+=== HOST ===
+Architecture:                            aarch64
+CPU(s):                                  20
+Model name:                              Cortex-X925
+CPU(s) scaling MHz:                      100%
+Model name:                              Cortex-A725
+CPU(s) scaling MHz:                      100%
+g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+
+=== A. VDF strip, request-all, 100k curves x 8 CV, 5 stylers ===
+# vdfBench2 element=strip curves=100000 stylers=5 chains=1 simple=0 threads=20 elemBytes=96 requestAll=1
+build_network_ms                     3.57  nodes=11
+schedule_first_ms                   0.307
+run_cold_ms                          7.45  checksum=26792.6545
+  compute_calls=801 elements_touched=500000 (ideal=5 nodes x 100000 elems)
+sparse masks: contiguous 1000/100000  scattered 1000/100000
+run_cached_noop_ms               min     0.001  med~     0.003  max     0.014  (n=7)
+run_full_ms                      min     3.797  med~     8.321  max    13.979  (n=7)
+run_after_sparse_contig_ms       min     3.215  med~     5.350  max     7.395  (n=7)
+run_after_sparse_scatter_ms      min     2.085  med~     4.572  max     6.735  (n=7)
+run_after_last_param_ms          min     0.900  med~     0.918  max     0.957  (n=7)
+run_after_first_param_ms         min     3.280  med~     5.366  max     6.509  (n=7)
+elements_touched: full=500000 contig=500000 scatter=500000 lastparam=100000 firstparam=500000
+narrow_schedule_ms    0.060  narrow_run_ms    0.654  touched=5000 calls=9
+schedule_valid_after_topology_edit  1
+reschedule_ms    0.341  invalidate_topo_ms    0.005  run_after_edit_ms     0.87  touched=100000
+schedule_220_nodes_ms            min     0.388  med~     0.432  max     0.525  (n=7)
+schedule_2200_nodes_ms           min     2.965  med~     3.251  max     4.386  (n=7)
+schedule_11000_nodes_ms          min    13.703  med~    16.384  max    23.042  (n=7)
+
+=== B. VDF cv, request-all, 100k curves ===
+# vdfBench2 element=cv curves=100000 stylers=5 chains=1 simple=0 threads=20 elemBytes=12 requestAll=1
+build_network_ms                     7.16  nodes=11
+schedule_first_ms                   1.955
+run_cold_ms                          7.16  checksum=3355.7599
+  compute_calls=6401 elements_touched=4000000 (ideal=5 nodes x 800000 elems)
+sparse masks: contiguous 8000/800000  scattered 8000/800000
+run_cached_noop_ms               min     0.001  med~     0.002  max     0.010  (n=7)
+run_full_ms                      min     7.656  med~    10.364  max    14.478  (n=7)
+run_after_sparse_contig_ms       min     8.345  med~     9.657  max    11.510  (n=7)
+run_after_sparse_scatter_ms      min     4.386  med~     8.765  max    11.919  (n=7)
+run_after_last_param_ms          min     1.358  med~     1.792  max     4.321  (n=7)
+run_after_first_param_ms         min     5.533  med~     8.950  max    13.185  (n=7)
+elements_touched: full=4000000 contig=4000000 scatter=4000000 lastparam=800000 firstparam=4000000
+narrow_schedule_ms    0.095  narrow_run_ms    0.652  touched=40000 calls=65
+vector sharable=1 shared=0 -> Share()=1
+extract_copy_ms                  min     0.185  med~     0.636  max     3.225  (n=7)
+extract_after_share_ms           min     0.000  med~     0.000  max     0.000  (n=7)
+run_full_after_share_ms              6.41
+schedule_valid_after_topology_edit  1
+reschedule_ms    1.824  invalidate_topo_ms    0.005  run_after_edit_ms     1.34  touched=800000
+schedule_220_nodes_ms            min     0.363  med~     0.412  max     0.485  (n=7)
+schedule_2200_nodes_ms           min     2.931  med~     3.242  max     4.017  (n=7)
+schedule_11000_nodes_ms          min    13.681  med~    14.869  max    17.360  (n=7)
+
+=== C. TBB DAG per-node buffers, 100k curves, chunk 512 ===
+# tbbBench curves=100000 stylers=5 chunk=512 perNodeBuffers=1 serial=0 chunks=196 threads=20
+build_ms                       16.44
+run_cold_ms                     2.12   checksum=3355.7599
+run_full_ms                     1.86
+run_full_ms                     1.78
+run_full_ms                     1.75
+run_full_ms                     1.91
+run_full_ms                     1.83
+run_full_ms                     1.72
+run_full_ms                     1.77
+run_after_sparse_ms            0.040
+run_after_sparse_ms            0.035
+run_after_sparse_ms            0.038
+run_after_sparse_ms            0.044
+run_after_sparse_ms            0.041
+run_after_sparse_ms            0.038
+run_after_sparse_ms            0.039
+run_after_scatter_ms           0.037
+run_after_scatter_ms           0.040
+run_after_scatter_ms           0.037
+run_after_scatter_ms           0.037
+run_after_scatter_ms           0.040
+run_after_scatter_ms           0.036
+run_after_scatter_ms           0.037
+run_after_lastparam_ms         0.411
+run_after_lastparam_ms         0.274
+run_after_lastparam_ms         0.217
+run_after_lastparam_ms         0.236
+run_after_lastparam_ms         0.179
+run_after_lastparam_ms         0.232
+run_after_lastparam_ms         0.183
+run_after_firstparam_ms        1.863
+run_after_firstparam_ms        1.836
+run_after_firstparam_ms        1.751
+run_after_firstparam_ms        1.777
+run_after_firstparam_ms        1.772
+run_after_firstparam_ms        1.969
+run_after_firstparam_ms        1.905
+extract_vtarray_cow_ms        0.0003  n=800000
+extract_vtarray_cow_ms        0.0001  n=800000
+extract_vtarray_cow_ms        0.0000  n=800000
+extract_vtarray_cow_ms        0.0000  n=800000
+extract_vtarray_cow_ms        0.0000  n=800000
+extract_vtarray_cow_ms        0.0001  n=800000
+extract_vtarray_cow_ms        0.0000  n=800000
+run_full_with_outstanding_ref_ms     3.10 keep=0.000

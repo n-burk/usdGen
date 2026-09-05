@@ -1,0 +1,126 @@
+### probe_curves_cpu
+Warning: in Resolve at line 233 of /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/storm-throughput/priv_include/pxr/imaging/hdSt/basisCurvesComputations.h -- HdStBasisCurves(/probe)- Primvar points has incorrect size for vertex interpolation (need 800000, got 1000000), using fallback value (1, 0, 0) for rendering.
+Warning: in Resolve at line 233 of /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/storm-throughput/priv_include/pxr/imaging/hdSt/basisCurvesComputations.h -- HdStBasisCurves(/probe)- Primvar points has incorrect size for vertex interpolation (need 800000, got 1000000), using fallback value (1, 0, 0) for rendering.
+Warning: in Resolve at line 233 of /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/storm-throughput/priv_include/pxr/imaging/hdSt/basisCurvesComputations.h -- HdStBasisCurves(/probe)- Primvar points has incorrect size for vertex interpolation (need 400000, got 1000000), using fallback value (1, 0, 0) for rendering.
+Warning: in Resolve at line 233 of /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/storm-throughput/priv_include/pxr/imaging/hdSt/basisCurvesComputations.h -- HdStBasisCurves(/probe)- Primvar points has incorrect size for vertex interpolation (need 200000, got 1000000), using fallback value (1, 0, 0) for rendering.
+=== PROBE A: does HdSt_BasisCurvesPrimvarInterpolaterComputation copy points? ===
+topology: 100000 curves x 8 CV; CalculateNeededNumberOfControlPoints = 800000 (sum(counts) = 800000)
+          CalculateNeededNumberOfVaryingControlPoints = 600000
+[exact size] out=800000 fallback=0 sharesInputBuffer=1 resolve=0.22 ms
+
+=== PROBE B: points array LONGER than sum(curveVertexCounts), NO curveIndices ===
+[padded, no indices] authored=1000000 expected=800000 -> out=800000 fallback=1 sharesInput=0 resolve=0.54 ms
+
+=== PROBE C: points LONGER, WITH curveIndices covering only the live CVs ===
+  with indices: CalculateNeededNumberOfControlPoints = 800000 (1+max(indices))
+[padded, with indices] authored=1000000 -> out=800000 fallback=0 sharesInput=0 resolve=3.50 ms
+
+=== PROBE D: fewer live curves via curveVertexCounts, same fat points array ===
+[live=100000] expected=800000 authored=1000000 -> out=800000 fallback=1 resolve=0.46 ms
+[live= 50000] expected=400000 authored=1000000 -> out=400000 fallback=1 resolve=0.23 ms
+[live= 25000] expected=200000 authored=1000000 -> out=200000 fallback=1 resolve=0.12 ms
+
+=== PROBE E: varying primvar expansion cost (per-curve -> per-vertex) ===
+[varying] authored=600000 -> out=800000 fallback=0 sharesInput=0 expand=6.07 ms
+
+=== PROBE F: index-buffer rebuild cost (topology change) ===
+[cubic bspline   1000 curves x 8 CV] indices=5000 elems (int32x4) -> 0.08 MB, build=0.05 ms
+[cubic bspline  10000 curves x 8 CV] indices=50000 elems (int32x4) -> 0.76 MB, build=0.26 ms
+[cubic bspline 100000 curves x 8 CV] indices=500000 elems (int32x4) -> 7.63 MB, build=5.04 ms
+[linear      100000 curves x 8 CV] indices=700000 elems (int32x2) -> 5.34 MB, build=1.97 ms
+
+=== PROBE G: topology hash cost (ComputeHash on every DirtyTopology) ===
+[  1000 curves] ComputeHash = 0.0005 ms/call
+[100000 curves] ComputeHash = 0.0171 ms/call
+
+=== PROBE H: pure memcpy reference for a points upload ===
+memcpy 800000 GfVec3f (9.16 MB) = 0.31 ms
+
+### probe_locators_cpu
+=== ComputeDirtyLocators in isolation ===
+    1000 calls =   0.119 ms (0.119 us/call)  [acc=1000]
+   10000 calls =   1.043 ms (0.104 us/call)  [acc=10000]
+  100000 calls =  10.361 ms (0.104 us/call)  [acc=100000]
+
+=== per-frame entry vector build, prim paths PRE-CACHED ===
+  N=    32  cached-locator-set build =   0.000 ms (0.009 us/prim)
+  N=    32  recomputed-per-prim build  =   0.004 ms (0.116 us/prim)
+  N=   256  cached-locator-set build =   0.002 ms (0.008 us/prim)
+  N=   256  recomputed-per-prim build  =   0.028 ms (0.111 us/prim)
+  N=  1000  cached-locator-set build =   0.008 ms (0.008 us/prim)
+  N=  1000  recomputed-per-prim build  =   0.112 ms (0.112 us/prim)
+  N= 10000  cached-locator-set build =   0.094 ms (0.009 us/prim)
+  N= 10000  recomputed-per-prim build  =   1.109 ms (0.111 us/prim)
+  N=100000  cached-locator-set build =  14.518 ms (0.145 us/prim)
+  N=100000  recomputed-per-prim build  =  24.918 ms (0.249 us/prim)
+
+=== HdDataSourceLocatorSet::Intersects cost (the dependency inner loop) ===
+  1000000 Intersects(locator) = 11.922 ms (0.0119 us/call)
+
+### probe_sceneindex_cpu
+=== PROBE I: HdContainerDataSourceEditor::ComputeDirtyLocators cost ===
+  1 leaf 'primvars/points/primvarValue' -> 4 locators:
+     __containerDataSource
+     primvars/__containerDataSource
+     primvars/points/__containerDataSource
+     primvars/points/primvarValue
+  build   1000 DirtiedPrimEntries (path + ComputeDirtyLocators) = 1.772 ms (1.77 us/prim)
+  build  10000 DirtiedPrimEntries (path + ComputeDirtyLocators) = 11.646 ms (1.16 us/prim)
+  build 100000 DirtiedPrimEntries (path + ComputeDirtyLocators) = 89.962 ms (0.90 us/prim)
+  build 100000 entries reusing a CACHED locator set = 65.565 ms (0.66 us/prim)
+  (reference) 100000 SdfPath-from-string constructions = 47.460 ms
+
+=== PROBE J: HdDependencyForwardingSceneIndex fan-out, N curve prims -> 1 mesh ===
+  N=    32  lazy dep population (GetPrim x N) =   0.187 ms |  1 mesh-points dirty -> forwarded entries=33 in  0.005 ms  (0.17 us/affected prim)
+  N=  1000  lazy dep population (GetPrim x N) =   4.078 ms |  1 mesh-points dirty -> forwarded entries=1001 in  0.593 ms  (0.59 us/affected prim)
+  N= 10000  lazy dep population (GetPrim x N) =  42.424 ms |  1 mesh-points dirty -> forwarded entries=10001 in  2.667 ms  (0.27 us/affected prim)
+  N=100000  lazy dep population (GetPrim x N) = 496.408 ms |  1 mesh-points dirty -> forwarded entries=100001 in 65.360 ms  (0.65 us/affected prim)
+
+=== PROBE K: raw notice cost with NO dependency scene index (direct dirty of N prims) ===
+  N=    32  DirtyPrims(N entries) through 1 observer =  0.001 ms (0.02 us/prim)
+  N=  1000  DirtyPrims(N entries) through 1 observer =  0.021 ms (0.02 us/prim)
+  N= 10000  DirtyPrims(N entries) through 1 observer =  0.297 ms (0.03 us/prim)
+  N=100000  DirtyPrims(N entries) through 1 observer = 25.708 ms (0.26 us/prim)
+
+### probe_primvardesc_cpu
+=== PROBE L: GetPrim() through a chain of K filtering scene indices ===
+    (the DirtyPoints fastpath in hdSt/basisCurves.cpp:946-947 does
+     GetTerminalSceneIndex()->GetPrim(id) once per prim per frame)
+  K= 0 filters: GetPrim = 0.186 us/call
+  K= 1 filters: GetPrim = 0.182 us/call
+  K= 3 filters: GetPrim = 0.183 us/call
+  K= 6 filters: GetPrim = 0.188 us/call
+  K=10 filters: GetPrim = 0.193 us/call
+
+=== PROBE M: primvar-descriptor recompute (what the cache clear costs) ===
+  5 primvars: recompute = 0.515 us/prim  [acc=400000]
+
+=== PROBE N: does the locator set that ComputeDirtyLocators emits
+    trip HdSceneIndexAdapterSceneDelegate's descriptor-cache clear? ===
+  bare leaf set                       -> clears cache? (no)
+  ComputeDirtyLocators(leaf) set      -> clears cache? primvars/__containerDataSource
+
+### probe_vtalloc_cpu
+n=  50000 (  0.57 MB): VtArray(n) alloc+init = 0.075 ms | alloc+memcpy = 0.101 ms
+n= 200000 (  2.29 MB): VtArray(n) alloc+init = 0.385 ms | alloc+memcpy = 0.445 ms
+n= 800000 (  9.16 MB): VtArray(n) alloc+init = 1.582 ms | alloc+memcpy = 1.891 ms
+
+staging-buffer threshold (hdSt/stagingBuffer.cpp:73): 512 KiB
+  512 KiB / 12 B per GfVec3f = 43691 points = 5461 curves at 8 CV
+
+### probe_chunkparallel_cpu
+100000 curves x 8 CV = 800000 points (9.60 MB), 20 hw threads
+chunks   pts/chunk     serial (ms)  parallel (ms)        speedup
+1        800000              0.224          0.223          1.00x
+8        100000              0.226          0.441          0.51x
+32       25000               0.230          0.072          3.20x
+128      6248                0.244          0.051          4.79x
+1000     800                 0.369          0.152          2.42x
+
+--- same split, but the TOPOLOGY index build (DirtyTopology path) ---
+chunks   patches/chunk     serial (ms)  parallel (ms)        speedup
+1        500000                  2.545          2.541          1.00x
+8        62500                   2.448          1.345          1.82x
+32       15625                   2.409          0.883          2.73x
+128      3905                    2.484          0.852          2.91x
+1000     500                     2.949          0.872          3.38x

@@ -1,0 +1,273 @@
+
+================ A. UsdImaging terminal scene index (what a downstream SI sees) ================
+/   type=''
+    [ds] system sceneGlobals __usdUpAxis usdMaterialBindings geomModel model skelBinding coordSysBinding primvars purpose visibility xform materialBindings 
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+/World   type=''
+    [ds] __usdPrimInfo primOrigin visibility xform usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose materialBindings 
+    __usdPrimInfo:
+      specifier: def
+      typeName: Xform
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World)
+/World/Cards   type=''
+    [ds] __usdPrimInfo primOrigin usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose visibility xform materialBindings 
+    __usdPrimInfo:
+      specifier: def
+      typeName: 
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/Cards)
+/World/Cards/PI   type='instancer'
+    [ds] instancerTopology __usdPrimInfo primOrigin visibility xform extent primvars usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding purpose materialBindings 
+    instancerTopology:
+      prototypes: [/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0]
+      instanceIndices:
+        [0]: [0, 1, 2]
+      mask: []
+    __usdPrimInfo:
+      specifier: def
+      typeName: PointInstancer
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/Cards/PI)
+    [primvars] hydra:instanceTranslations(instance) hydra:instanceScales(instance) velocities(?) accelerations(?) angularVelocities(?) hydra:instanceRotations(instance) 
+/World/Cards/PI/Prototypes   type=''
+    [ds] __usdPrimInfo geomModel primOrigin usdMaterialBindings model __usdUpAxis skelBinding coordSysBinding primvars purpose visibility xform materialBindings 
+    __usdPrimInfo:
+      niPrototypePath: <other>
+      specifier: def
+      typeName: 
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/Cards/PI/Prototypes)
+/World/Cards/PI/Prototypes/Card   type=''
+    [ds] __usdPrimInfo geomModel primOrigin visibility purpose xform extent primvars mesh usdMaterialBindings model __usdUpAxis skelBinding coordSysBinding materialBindings 
+    __usdPrimInfo:
+      piPropagatedPrototypes:
+        ForInstancer9c60c467c223c3c0: /World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0
+      niPrototypePath: <other>
+      specifier: def
+      typeName: Mesh
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/Cards/PI/Prototypes/Card)
+    [primvars] points(vertex) velocities(?) accelerations(?) normals(?) 
+/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0   type='mesh'
+    [ds] xform __usdPrimInfo primOrigin visibility purpose extent primvars mesh instancedBy usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding materialBindings 
+    instancedBy:
+      paths: [/World/Cards/PI]
+      prototypeRoots: [/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0]
+    __usdPrimInfo:
+      specifier: def
+      typeName: Mesh
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/Cards/PI/Prototypes/Card)
+    [primvars] points(vertex) velocities(?) accelerations(?) normals(?) 
+/World/HeadA   type=''
+    [ds] __usdPrimInfo primOrigin visibility xform geomXformVectors usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose instance materialBindings 
+    instance:
+      instancer: /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer
+      prototypeIndex: 0
+      instanceIndex: 0
+    __usdPrimInfo:
+      specifier: def
+      typeName: Xform
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+      niPrototypePath: /__Prototype_1
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/HeadA)
+/World/HeadB   type=''
+    [ds] __usdPrimInfo primOrigin visibility xform geomXformVectors usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose instance materialBindings 
+    instance:
+      instancer: /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer
+      prototypeIndex: 0
+      instanceIndex: 1
+    __usdPrimInfo:
+      specifier: def
+      typeName: Xform
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+      niPrototypePath: /__Prototype_1
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/HeadB)
+/World/HairCards   type=''
+    [ds] __usdPrimInfo primOrigin usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose visibility xform materialBindings 
+    __usdPrimInfo:
+      specifier: def
+      typeName: 
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/HairCards)
+/World/HairCards/CardProto   type='mesh'
+    [ds] __usdPrimInfo primOrigin visibility xform extent primvars mesh usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding purpose materialBindings 
+    __usdPrimInfo:
+      specifier: def
+      typeName: Mesh
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(/World/HairCards/CardProto)
+    [primvars] points(vertex) velocities(?) accelerations(?) normals(?) 
+/UsdNiPropagatedPrototypes   type=''
+    [ds] materialBindings 
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286   type=''
+    [ds] __usdUpAxis materialBindings 
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1   type=''
+    [ds] materialBindings 
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer   type='instancer'
+    [ds] instancedBy instancerTopology primvars materialBindings 
+    instancerTopology:
+      instanceIndices:
+        [0]: [0, 1]
+      prototypes: [/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+      instanceLocations: [/World/HeadA, /World/HeadB]
+      mask: [1, 1]
+    [primvars] hydra:instanceTransforms(instance) 
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype   type=''
+    [ds] instancedBy xform __usdUpAxis __usdPrimInfo primOrigin model usdMaterialBindings geomModel skelBinding coordSysBinding primvars purpose visibility materialBindings 
+    instancedBy:
+      paths: [/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer]
+      prototypeRoots: [/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+    __usdPrimInfo:
+      specifier: def
+      typeName: 
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+      isNiPrototype: 1
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(.)
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/ScalpMesh   type='mesh'
+    [ds] __usdPrimInfo primOrigin primvars visibility xform extent mesh instancedBy usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding purpose materialBindings 
+    instancedBy:
+      paths: [/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer]
+      prototypeRoots: [/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+    __usdPrimInfo:
+      specifier: def
+      typeName: Mesh
+      isLoaded: 1
+      apiSchemas: <other>
+      kind: <other>
+      variantSelections: <other>
+    xform:
+      matrix: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+      resetXformStack: 1
+    primOrigin:
+      scenePath: HdPrimOriginSchema::OriginPath(ScalpMesh)
+    [primvars] st(faceVarying) points(vertex) velocities(?) accelerations(?) normals(?) 
+
+================ B. synthesized instancer verification ================
+instancer primType = 'instancer'
+  topo.IsDefined = 1
+  prototypes = [/World/HairCards/CardProto]
+  instanceIndices numElements = 1
+    [0] = [0, 1, 2, 3]
+  mask = [1, 1, 0, 1]
+  instanceLocations = <null (correct for explicit)>
+  ComputeInstanceIndicesForProto(/World/HairCards/CardProto) = [0, 1, 3]
+  ComputeInstanceIndicesForProto(/World/Nope) = [] (size 0)
+  proto primType = 'mesh'
+  proto.instancedBy.paths = [/World/HairCards/CardInstancer]
+  proto.instancedBy.prototypeRoots = [/World/HairCards/CardProto]
+  proto still has 'mesh' ds: 1
+  children of /World/HairCards: /World/HairCards/CardProto /World/HairCards/CardInstancer
+
+================ C. emulation round-trip (null render delegate) ================
+renderIndex terminal SI = ok
+GetInstancer(/World/HairCards/CardInstancer) = FOUND
+GetRprim(/World/HairCards/CardProto) = FOUND
+  rprim.GetInstancerId() [pre-Sync] = ''
+  GetSceneDelegateAndInstancerIds(/World/HairCards/CardProto) ok=1 delegate=/ instancer=''
+    sd->GetInstancerId       = '/World/HairCards/CardInstancer'
+    sd->GetInstanceIndices   = [0, 1, 3]
+    sd->GetInstancerPrototypes = [/World/HairCards/CardProto ]
+    sd->GetTransform(instancer) = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    instance-rate primvar descriptors: hydra:instanceTranslations hydra:instanceRotations hydra:instanceScales displayColor 
+      hydra:instanceTranslations = [(0, 0, 0), (0.3, 0, 0), (0.6, 0, 0), (0.9, 0, 0)]
+      hydra:instanceRotations = [(1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0)]
+      hydra:instanceScales = [(1, 1, 1), (1, 1, 1), (1, 1, 1), (1, 1, 1)]
+      displayColor = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)]
+  GetSceneDelegateAndInstancerIds(/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0) ok=1 delegate=/ instancer=''
+    sd->GetInstancerId       = '/World/Cards/PI'
+    sd->GetInstanceIndices   = [0, 1, 2]
+    sd->GetInstancerPrototypes = [/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0 ]
+    sd->GetTransform(instancer) = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    instance-rate primvar descriptors: hydra:instanceTranslations hydra:instanceScales hydra:instanceRotations 
+      hydra:instanceTranslations = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+      hydra:instanceScales = [(1, 1, 1), (1, 1, 1), (1, 1, 1)]
+      hydra:instanceRotations = [(1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0)]
+rprim ids (3):
+   /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/ScalpMesh
+   /World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0
+   /World/HairCards/CardProto
+instancers present in render index:
+   /World/Cards/PI  hasInstancer=1
+   /World/HairCards/CardInstancer  hasInstancer=1
+   /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer  hasInstancer=1

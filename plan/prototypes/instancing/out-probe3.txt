@@ -1,0 +1,11 @@
+discovered niProto     = /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype
+discovered niInstancer = /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer
+synth instancer = /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/HairCardInst
+synth proto     = /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/HairCardInst/Proto
+hasInstancer(synth) = 1
+GetRprim(synth proto) = FOUND
+  proto -> instancer   = /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/HairCardInst
+  instanceIndices      = [0, 1, 2, 3, 4]
+  instancer -> parent  = /UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer
+  parent indices for child instancer = [0, 1]
+  parent -> grandparent= ''

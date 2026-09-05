@@ -1,0 +1,18 @@
+--- (a) synthesized prims WITHOUT primOrigin ---
+  pick instanceIndex=2
+   GetFullPath()  = '/World/HairCards/CardProto'
+   instancerContext (0): 
+   #instancerContexts(raw) = 1
+     instancer=/World/HairCards/CardInstancer instanceId=2 instanceScenePath=
+--- (b) synthesized instancer WITH primOrigin ---
+  pick instanceIndex=2
+   GetFullPath()  = '/World/HairCards/CardProto'
+   instancerContext (1): (/World/Groom/CardInstancer, 2) 
+   #instancerContexts(raw) = 1
+     instancer=/World/HairCards/CardInstancer instanceId=2 instanceScenePath=
+--- (c) stage-authored USD point instancer (control) ---
+   GetFullPath()  = '/World/Cards/PI/Prototypes/Card'
+   instancerContext (1): (/World/Cards/PI, 1) 
+--- (d) natively instanced scalp (control) ---
+   GetFullPath()  = '/World/HeadB/ScalpMesh'
+   instancerContext (0): 

@@ -1,0 +1,200 @@
+
+===== 0. codeless schema registration =====
+prim /World/Clump typeName = UsdGenProbeClumpStyler
+GetPrimTypeInfo().GetSchemaTypeName() = UsdGenProbeClumpStyler
+IsA("UsdGenProbeOperator") = 1
+IsA UsdGeomImageable = 0
+UsdPrimDefinition::GetPropertyNames():
+   usdGen:map  spec=SdfSpecTypeAttribute type=asset
+   usdGen:mapArray  spec=SdfSpecTypeAttribute type=asset[]
+   usdGen:ramp:knots  spec=SdfSpecTypeAttribute type=float2[]
+   usdGen:ramp:values  spec=SdfSpecTypeAttribute type=float[]
+   usdGen:density  spec=SdfSpecTypeAttribute type=float
+   usdGen:frizzAmount  spec=SdfSpecTypeAttribute type=float
+   usdGen:seed  spec=SdfSpecTypeAttribute type=int
+   usdGen:expression  spec=SdfSpecTypeAttribute type=string
+   usdGen:mode  spec=SdfSpecTypeAttribute type=token
+   usdGen:surface  spec=SdfSpecTypeRelationship type=
+   usdGen:inputs  spec=SdfSpecTypeRelationship type=
+   usdGen:clumpRadius  spec=SdfSpecTypeAttribute type=float
+
+===== 1. terminal scene index of UsdImagingCreateSceneIndices =====
+-- /  primType=''
+   names: system sceneGlobals sceneGlobals __usdUpAxis usdMaterialBindings geomModel model skelBinding coordSysBinding primvars purpose visibility xform materialBindings
+
+-- /World  primType=''
+   names: __usdPrimInfo primOrigin visibility xform usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose materialBindings
+
+-- /World/Scalp  primType='mesh'
+   names: __usdPrimInfo primOrigin primvars visibility xform extent mesh usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding purpose materialBindings
+
+-- /World/Clump  primType=''
+   names: __usdPrimInfo primOrigin primvars usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding purpose visibility xform materialBindings
+
+-- /World/Gen  primType=''
+   names: __usdPrimInfo primOrigin usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars purpose visibility xform materialBindings
+
+-- /World/ImageableOp  primType=''
+   names: __usdPrimInfo primOrigin visibility purpose usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding primvars xform materialBindings
+
+-- /World/Hair  primType='basisCurves'
+   names: __usdPrimInfo primOrigin visibility xform extent primvars basisCurves usdMaterialBindings geomModel model __usdUpAxis skelBinding coordSysBinding purpose materialBindings
+
+===== 1b. full data source of /World/Clump (codeless, no adapter) =====  __usdPrimInfo  [container]
+    specifier  [sampled] = (TfToken) def
+    typeName  [sampled] = (TfToken) UsdGenProbeClumpStyler
+    isLoaded  [sampled] = (bool) 1
+    apiSchemas  [null]
+    kind  [null]
+    variantSelections  [null]
+  primOrigin  [container]
+    scenePath  [sampled] = (HdPrimOriginSchema::OriginPath) HdPrimOriginSchema::OriginPath(/World/Clump)
+  primvars  [container]
+    usdGen:clumpRadius  [container]
+      interpolation  [sampled] = (TfToken) constant
+      role  [null]
+      primvarValue  [sampled] = (float) 0.1  contribTimes{-0.25 0.25 }
+    usdGen:map  [container]
+      interpolation  [sampled] = (TfToken) constant
+      role  [null]
+      primvarValue  [sampled] = SdfAssetPath{path='maps/density.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/density.exr'}
+    usdGen:rampKnots  [container]
+      interpolation  [sampled] = (TfToken) constant
+      role  [null]
+      primvarValue  [sampled] = (VtArray<GfVec2f>) [(0, 0), (0.5, 1), (1, 0.2)]
+    usdGen:udimMap  [container]
+      interpolation  [sampled] = (TfToken) constant
+      role  [null]
+      primvarValue  [sampled] = SdfAssetPath{path='maps/clump_<UDIM>.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/clump_<UDIM>.exr'}
+  usdMaterialBindings  [null]
+  geomModel  [null]
+  model  [null]
+  __usdUpAxis  [container]
+    upAxis  [sampled] = (TfToken) Y
+  skelBinding  [null]
+  coordSysBinding  [null]
+  purpose  [null]
+  visibility  [container]
+    visibility  [sampled] = (bool) 1
+  xform  [container]
+    matrix  [sampled] = (GfMatrix4d) ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    resetXformStack  [sampled] = (bool) 1
+  materialBindings  [null]
+
+===== 1c. primOrigin of /World/Clump =====  primOrigin names: scenePath
+   scenePath -> (HdPrimOriginSchema::OriginPath) HdPrimOriginSchema::OriginPath(/World/Clump)
+
+===== 1d. /World/ImageableOp (codeless, Imageable base) =====  __usdPrimInfo  [container]
+    specifier  [sampled] = (TfToken) def
+    typeName  [sampled] = (TfToken) UsdGenProbeImageableOp
+    isLoaded  [sampled] = (bool) 1
+    apiSchemas  [null]
+    kind  [null]
+    variantSelections  [null]
+  primOrigin  [container]
+    scenePath  [sampled] = (HdPrimOriginSchema::OriginPath) HdPrimOriginSchema::OriginPath(/World/ImageableOp)
+  visibility  [container]
+    visibility  [sampled] = (bool) 1
+  purpose  [container]
+    purpose  [sampled] = (TfToken) guide
+    inheritable  [sampled] = (bool) 1
+    fallback  [null]
+  usdMaterialBindings  [null]
+  geomModel  [null]
+  model  [null]
+  __usdUpAxis  [container]
+    upAxis  [sampled] = (TfToken) Y
+  skelBinding  [null]
+  coordSysBinding  [null]
+  primvars  [container]
+  xform  [container]
+    matrix  [sampled] = (GfMatrix4d) ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    resetXformStack  [sampled] = (bool) 1
+  materialBindings  [null]
+
+===== 1e. /World/Scalp mesh points @time1 then @time24 =====  t=1 points = (VtArray<GfVec3f>) [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    contribTimes: -0.25 0 23
+  t=24 points = (VtArray<GfVec3f>) [(0, 0, 5), (1, 0, 5), (1, 1, 5), (0, 1, 5)]
+    contribTimes: -23 0 0.25
+  primvars on Scalp: rest st points velocities accelerations normals
+  primvars:rest @t=24 = (VtArray<GfVec3f>) [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+
+===== 2. direct data sources (UsdImagingDataSourceAttributeNew) =====  usdGen:map (asset)  authored=1  hasSpline=0  mightVary=0
+    @0.0  = SdfAssetPath{path='maps/density.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/density.exr'}
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:mapArray (asset[])  authored=1  hasSpline=0  mightVary=0
+    @0.0  = SdfAssetPath[]{('maps/clump_1001.exr','/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/clump_1001.exr') ('maps/does_not_exist.exr','') }
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:ramp:knots (float2[])  authored=1  hasSpline=0  mightVary=0
+    @0.0  = (VtArray<GfVec2f>) [(0, 0), (0.5, 1), (1, 0.2)]
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:ramp:values (float[])  authored=1  hasSpline=0  mightVary=0
+    @0.0  = (VtArray<float>) [0, 1, 0.2]
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:clumpRadius (float)  authored=1  hasSpline=1  mightVary=1
+    @0.0  = (float) 0.1
+    contributingSampleTimes(-0.25,0.25) = 1 {-0.25 0.25 }
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:frizzAmount (float)  authored=1  hasSpline=0  mightVary=1
+    @0.0  = (float) 0.25
+    contributingSampleTimes(-0.25,0.25) = 1 {-0.25 0 23 }
+    usd GetTimeSamplesInInterval(0,30) = {1 24 }
+  usdGen:seed (int)  authored=1  hasSpline=0  mightVary=0
+    @0.0  = (int) 7
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:expression (string)  authored=1  hasSpline=0  mightVary=0
+    @0.0  = (string) $density * cellnoise($P)
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:mode (token)  authored=1  hasSpline=0  mightVary=0
+    @0.0  = (TfToken) clump
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  usdGen:density (float)  authored=0  hasSpline=0  mightVary=0
+    @0.0  = (float) 1
+    contributingSampleTimes(-0.25,0.25) = 0 {}
+    usd GetTimeSamplesInInterval(0,30) = {}
+  -- stage globals after construction --
+  FlagAsTimeVarying:
+    /World/Clump -> 'usdGen/usdGen:clumpRadius' 'usdGen/usdGen:frizzAmount' 
+  FlagAsAssetPathDependent:
+    /World/Clump.usdGen:map
+
+===== 2b. same spline attribute at stage-global time 24 =====  @0.0 (t=24) = (float) 0.9
+  frizz @0.0 (t=24) = (float) 0.75
+
+===== 3. relationships =====  usdGen:inputs -> (VtArray<SdfPath>) [/World/Gen, /World/Scalp]
+  contributingSampleTimes = 0
+  usdGen:surface -> (VtArray<SdfPath>) [/World/Scalp]
+
+===== 4. UsdImagingDataSourceMapped with nested locators + custom REST factory =====  container names: clumpRadius inputs map ramp surface
+    clumpRadius  [sampled] = (float) 0.9  contribTimes{-0.25 0.25 }
+    inputs  [sampled] = (SdfPath) /World/Gen
+    map  [sampled] = SdfAssetPath{path='maps/density.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/density.exr'}
+    ramp  [container]
+      knots  [sampled] = (VtArray<GfVec2f>) [(0, 0), (0.5, 1), (1, 0.2)]
+      values  [sampled] = (VtArray<float>) [0, 1, 0.2]
+    surface  [sampled] = (VtArray<SdfPath>) [/World/Scalp]
+  Invalidate({usdGen:ramp:knots, usdGen:surface}) -> 'usdGen/ramp/knots' 'usdGen/surface' 
+  -- mapped stage globals --
+  FlagAsTimeVarying:
+    /World/Clump -> 'usdGen/clumpRadius' 
+  FlagAsAssetPathDependent:
+    /World/Clump.usdGen:map
+
+===== 5. REST transport: custom factory sampling UsdTimeCode::Default() =====    deformed  [sampled] = (VtArray<GfVec3f>) [(0, 0, 5), (1, 0, 5), (1, 1, 5), (0, 1, 5)]  contribTimes{-23 0 0.25 }
+    rest  [sampled] = (VtArray<GfVec3f>) [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+  -- rest-factory stage globals (should show only 'usdGenRest/deformed' as time varying) --
+  FlagAsTimeVarying:
+    /World/Scalp -> 'usdGenRest/deformed' 
+  FlagAsAssetPathDependent:
+
+===== 6. UsdImagingStageSceneIndex has no GetStage(); can a downstream index recover a stage? =====  terminal scene index typeid: TfType::_Unknown
+  displayName: UsdImagingRenderSettingsFlatteningSceneIndex
+
+DONE

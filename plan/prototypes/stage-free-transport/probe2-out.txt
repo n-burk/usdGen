@@ -1,0 +1,76 @@
+
+--- A: author /World/Clump.usdGen:clumpRadius = 0.42 (schema attr, no adapter) ---
+    (no notices)
+
+--- B: author /World/Clump.usdGen:seed = 99 (schema attr, no adapter) ---
+    (no notices)
+
+--- C: author /World/Clump.primvars:usdGen:rampKnots (primvar attr) ---
+    *DIRTY /World/Clump {'primvars/usdGen:rampKnots' }
+
+--- D: SetTime(24) ---
+    (no notices)
+
+--- E: SetTime(24) again (same time) ---
+    (no notices)
+
+--- F: SetTime(2) ---
+    (no notices)
+
+--- G: author /World/Scalp.points at time 2 ---
+    *DIRTY /World/Scalp {'primvars/points' }
+
+--- H: send ArNotice::ResolverChanged (simulates a painted-map re-resolve) ---
+    (no notices)
+
+--- I: add a new operator prim /World/Frizz at runtime ---
+    +ADD /World/Frizz type=''
+
+--- J: change /World/Clump type name to UsdGenProbeOperator ---
+    +ADD /World/Clump type=''
+
+--- K: relationship primvar visibility ---
+    primvars GetNames(): usdGen:clumpRadius usdGen:map usdGen:rampKnots usdGen:udimMap
+    primvars->Get('usdGen:surface') = NON-NULL
+      primvarValue = [/World/Scalp]
+      interpolation = constant
+
+--- L: SetStage(nullptr) ---
+    -REM /
+    +ADD / type=''
+    +ADD /World type=''
+    +ADD /World/Scalp type='mesh'
+    +ADD /World/Clump type=''
+    +ADD /World/Gen type=''
+    +ADD /World/ImageableOp type=''
+    +ADD /World/Hair type='basisCurves'
+    +ADD /World/Frizz type=''
+    +ADD / type=''
+    +ADD /World type=''
+    +ADD /World/Scalp type='mesh'
+    +ADD /World/Clump type=''
+    +ADD /World/Gen type=''
+    +ADD /World/ImageableOp type=''
+    +ADD /World/Hair type='basisCurves'
+    +ADD /World/Frizz type=''
+    *DIRTY /World {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+
+--- M: SetStage(stage) again ---
+    +ADD / type=''
+    +ADD /World type=''
+    +ADD /World/Scalp type='mesh'
+    +ADD /World/Clump type=''
+    +ADD /World/Gen type=''
+    +ADD /World/ImageableOp type=''
+    +ADD /World/Hair type='basisCurves'
+    +ADD /World/Frizz type=''
+    *DIRTY /World {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    *DIRTY /World/Hair {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    *DIRTY /World/Gen {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    *DIRTY /World/Frizz {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    *DIRTY /World/ImageableOp {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    *DIRTY /World/Scalp {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    *DIRTY /World/Clump {'__usdUpAxis' 'coordSysBinding' 'geomModel' 'materialBindings' 'model' 'primvars' 'purpose' 'skelBinding' 'visibility' 'xform' }
+    after re-set, GetPrim(/World/Clump) type='' dataSource=yes
+
+DONE

@@ -1,0 +1,40 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Xform "Proto"
+    {
+        def Mesh "Scalp"
+        {
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)]
+            point3f[] primvars:rest = [(0,0,0), (1,0,0), (1,1,0), (0,1,0)] (
+                interpolation = "vertex"
+            )
+        }
+        def UsdGenProbeOperator "Groom"
+        {
+            float usdGen:density = 5
+        }
+    }
+    def "InstA" (
+        instanceable = true
+        prepend references = </World/Proto>
+    )
+    {
+        double3 xformOp:translate = (5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def "InstB" (
+        instanceable = true
+        prepend references = </World/Proto>
+    )
+    {
+        double3 xformOp:translate = (10, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

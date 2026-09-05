@@ -1,0 +1,20 @@
+=== 10 interactive events (1 edit + 1 frame change each), 8-thread pull after each ===
+  M1 EAGER (cook in every notice, hdGp model)                batch=0  cooks= 29  dirtyCallbacks= 29  emittedDirties= 29  getPrim=  4005  final(frame=10,density=10)
+  M1 EAGER (cook in every notice, hdGp model)                batch=1  cooks= 20  dirtyCallbacks= 20  emittedDirties= 20  getPrim=  4005  final(frame=10,density=10)
+  M2 LAZY  (cook in GetPrim, spec-forbidden)                 batch=0  cooks= 10  dirtyCallbacks= 29  emittedDirties=  0  getPrim=  4005  final(frame=10,density=10)
+  M2 LAZY  (cook in GetPrim, spec-forbidden)                 batch=1  cooks= 10  dirtyCallbacks= 20  emittedDirties=  0  getPrim=  4005  final(frame=10,density=10)
+  M3a DEFERRED (cook on the sceneGlobals currentFrame notice) batch=0  cooks= 10  dirtyCallbacks= 29  emittedDirties= 10  getPrim=  4005  final(frame=10,density=10)
+  M3a DEFERRED (cook on the sceneGlobals currentFrame notice) batch=1  cooks= 10  dirtyCallbacks= 20  emittedDirties= 10  getPrim=  4005  final(frame=10,density=10)
+  M3b DEFERRED (cook on an explicit app Commit(), usdRig model) batch=0  cooks= 10  dirtyCallbacks= 29  emittedDirties= 10  getPrim=  4005  final(frame=10,density=10)
+  M3b DEFERRED (cook on an explicit app Commit(), usdRig model) batch=1  cooks= 10  dirtyCallbacks= 20  emittedDirties= 10  getPrim=  4005  final(frame=10,density=10)
+
+Ideal cook count for 10 events = 10.
+
+=== threads that executed a cook (main thread id = 251399682891808) ===
+  M1 EAGER (cook in every notice, hdGp model)                distinct cook threads = 1 
+  M2 LAZY  (cook in GetPrim, spec-forbidden)                 distinct cook threads = 4   <-- RENDER THREADS
+  M3b DEFERRED (cook on an explicit app Commit(), usdRig model) distinct cook threads = 1 
+
+=== atomic-snapshot consistency under concurrent readers ===
+  reads=2035  torn=0  (null-before-first-publish=4235)
+  PASS: readers never saw a mixed generation

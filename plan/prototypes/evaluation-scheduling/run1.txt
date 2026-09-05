@@ -1,0 +1,132 @@
+=== population (SetStage already happened inside UsdImagingCreateSceneIndices) ===
+prims under /World: Scalp0 Scalp1 Scalp2 Hair 
+
+=== WARM PULL (registers time dependencies) ===
+  warmPull: 13 data-source values pulled
+
+----- S1  frame 1.0, engine order, no post-merge batching -----
+  call#1  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  call#2  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S2  frame 1->2, engine order, no post-merge batching -----
+  call#1  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  call#2  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S3  frame 2->3, engine order, WITH MergingSceneIndexNoticeBatch begin/end around the whole block -----
+  call#1  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  call#2  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S4  same frame again (3.0) -- idempotence check -----
+  (no notices at all)
+
+----- S5  edit usdGen:clumpScale on /World/Hair, then engine order (same frame) -----
+  (no notices at all)
+
+----- S6  three attribute edits coalesced into one ApplyPendingUpdates -----
+  call#1  PrimsDirtied  entries=3
+      /World/Scalp0  {primvars/density}
+      /World/Scalp1  {primvars/density}
+      /World/Scalp2  {primvars/density}
+  SUMMARY: PrimsDirtied calls=1 (total entries=3), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S7  edit + frame change in the SAME engine pass (does scene-globals arrive last?) -----
+  call#1  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  call#2  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S8  edit + frame change WITH post-merge batching -----
+  call#1  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  call#2  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S9  new prim defined (resync) + frame change -----
+  call#1  PrimsAdded  entries=1
+      /World/Scalp3  type=mesh
+  call#2  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  call#3  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=1, PrimsRemoved calls=0
+
+----- S10 scene-globals ordering check -----
+  HdSceneGlobalsSchema default prim path = /
+  currentFrame locator = sceneGlobals/currentFrame
+  warmPull: 14 data-source values pulled
+
+----- S9b post-warm frame change (time-varying deps now registered) -----
+  call#1  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  call#2  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S9c post-warm frame change WITH post-merge batching -----
+  call#1  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  call#2  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  SUMMARY: PrimsDirtied calls=2 (total entries=4), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S9d post-warm: 3 edits + frame change, NO post-merge batching -----
+  call#1  PrimsDirtied  entries=3
+      /World/Scalp0  {primvars/density}
+      /World/Scalp1  {primvars/density}
+      /World/Scalp2  {primvars/density}
+  call#2  PrimsDirtied  entries=3
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  call#3  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  SUMMARY: PrimsDirtied calls=3 (total entries=7), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S9e post-warm: 3 edits + frame change, WITH post-merge batching -----
+  call#1  PrimsDirtied  entries=1
+      /  {sceneGlobals/currentFrame}
+  call#2  PrimsDirtied  entries=6
+      /World/Scalp0  {primvars/density}
+      /World/Scalp1  {primvars/density}
+      /World/Scalp2  {primvars/density}
+      /World/Scalp2  {primvars/points/primvarValue}
+      /World/Scalp0  {primvars/points/primvarValue}
+      /World/Scalp1  {primvars/points/primvarValue}
+  SUMMARY: PrimsDirtied calls=2 (total entries=7), PrimsAdded calls=0, PrimsRemoved calls=0
+
+----- S10b read-through-from-inside-the-notice-handler -----
+  in-handler(3 entries, first=/World/Scalp2) points[2].z = 0.200000
+  in-handler(1 entries, first=/) points[2].z = 0.200000
+  (authored points[2].z is 0.1*frame; frame set to 2.0)
+
+----- S11 concurrent GetPrim from N threads -----
+  528 concurrent GetPrim calls survived 10 engine frames (no crash, but note: notices were delivered on the main thread only).
+
+DONE

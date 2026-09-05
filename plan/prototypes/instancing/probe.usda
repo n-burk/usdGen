@@ -1,0 +1,62 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Xform "HeadA" (
+        instanceable = true
+        prepend references = @probe_scalp.usda@
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "HeadB" (
+        instanceable = true
+        prepend references = @probe_scalp.usda@
+    )
+    {
+        double3 xformOp:translate = (5, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def "Cards"
+    {
+        def PointInstancer "PI"
+        {
+            float3[] extent = [(-1, -1, -1), (3, 2, 1)]
+            quath[] orientations = [(1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0)]
+            point3f[] positions = [(0, 0, 0), (1, 0, 0), (2, 0, 0)]
+            int[] protoIndices = [0, 0, 0]
+            rel prototypes = </World/Cards/PI/Prototypes/Card>
+            float3[] scales = [(1, 1, 1), (1, 1, 1), (1, 1, 1)]
+
+            def "Prototypes"
+            {
+                def Mesh "Card"
+                {
+                    float3[] extent = [(-0.1, 0, 0), (0.1, 1, 0)]
+                    int[] faceVertexCounts = [4]
+                    int[] faceVertexIndices = [0, 1, 2, 3]
+                    point3f[] points = [(-0.1, 0, 0), (0.1, 0, 0), (0.1, 1, 0), (-0.1, 1, 0)]
+                    uniform token purpose = "default"
+                }
+            }
+        }
+    }
+
+    def "HairCards"
+    {
+        def Mesh "CardProto"
+        {
+            float3[] extent = [(-0.05, 0, 0), (0.05, 1, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-0.05, 0, 0), (0.05, 0, 0), (0.05, 1, 0), (-0.05, 1, 0)]
+        }
+    }
+}
+

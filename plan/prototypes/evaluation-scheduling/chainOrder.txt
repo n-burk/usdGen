@@ -1,0 +1,36 @@
+=== JSON-registered plugin ids for renderer 'GL' (in run order) ===
+  HdSt_ImplicitSurfaceSceneIndexPlugin
+  HdSt_MaterialBindingResolvingSceneIndexPlugin
+  HdSt_NodeIdentifierResolvingSceneIndexPlugin
+  HdSt_NurbsApproximatingSceneIndexPlugin
+  HdSt_TetMeshConversionSceneIndexPlugin
+  HdSt_VelocityMotionResolvingSceneIndexPlugin
+  HdSt_RenderPassPruneSceneIndexPlugin
+  HdSt_MaterialPrimvarTransferSceneIndexPlugin
+  HdSt_BackPlateSceneIndexPlugin
+  HdSt_RenderPassVisibilitySceneIndexPlugin
+  HdSt_DependencySceneIndexPlugin
+  HdSt_UnboundMaterialPruningSceneIndexPlugin
+  HdSt_DependencyForwardingSceneIndexPlugin
+
+=== resolved chain, terminal first (upstream indented) ===
+HdDependencyForwardingSceneIndex
+  HdsiUnboundMaterialPruningSceneIndex
+    HdSt: declare Storm dependencies
+      HAIR-CANDIDATE phase 10 (AtEnd)
+        (anonymous namespace)::_RenderPassVisibilitySceneIndex
+          HdsiBackPlateSceneIndex
+            HdsiMaterialPrimvarTransferSceneIndex
+              HAIR-CANDIDATE phase 3 (AtEnd)
+                HAIR-CANDIDATE phase 2 (AtEnd)
+                  HdsiRenderPassPruneSceneIndex
+                    HAIR-CANDIDATE phase 1 (AtEnd)
+                      HdsiVelocityMotionResolvingSceneIndex
+                        HdsiTetMeshConversionSceneIndex
+                          HdsiNurbsApproximatingSceneIndex
+                            HdSiNodeIdentifierResolvingSceneIndex (glslfx)
+                              HdsiMaterialBindingResolvingSceneIndex
+                                HdsiImplicitSurfaceSceneIndex
+                                  HAIR-CANDIDATE phase 0 (AtEnd)
+                                    APP: HdsiSceneGlobalsSceneIndex (phase 0/AtStart)
+                                      INPUT (stands for post-merging notice batching SI)

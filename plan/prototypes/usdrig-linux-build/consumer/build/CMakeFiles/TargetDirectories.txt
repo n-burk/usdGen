@@ -1,0 +1,3 @@
+/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/B-build/consumer/build/CMakeFiles/consumerProbe.dir
+/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/B-build/consumer/build/CMakeFiles/edit_cache.dir
+/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/B-build/consumer/build/CMakeFiles/rebuild_cache.dir

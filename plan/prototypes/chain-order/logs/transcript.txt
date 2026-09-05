@@ -1,0 +1,296 @@
+== permutation sweep of UsdImagingSceneIndexPlugin set order ==
+PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiA
+  [2] UsdGenStubUiB
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiB
+  [2] UsdGenStubUiA
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiA
+  [2] UsdGenStubUiB
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiA
+  [2] UsdGenStubUiB
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiB
+  [2] UsdGenStubUiA
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiB
+  [2] UsdGenStubUiA
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+== full chain, rig+skel stage, with stubs and render index ==
+=== PXR_PLUGINPATH_NAME ===
+/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecSchema/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubR/resources
+
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiA
+  [2] UsdGenStubUiB
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+--- registered HdSceneIndexPlugin types (17) ---
+  HdsiDebuggingSceneIndexPlugin
+  UsdGenStubHdA
+  UsdGenStubHdB
+  HdGpSceneIndexPlugin
+  HdSt_BackPlateSceneIndexPlugin
+  HdSt_DependencyForwardingSceneIndexPlugin
+  HdSt_DependencySceneIndexPlugin
+  HdSt_ImplicitSurfaceSceneIndexPlugin
+  HdSt_MaterialBindingResolvingSceneIndexPlugin
+  HdSt_MaterialPrimvarTransferSceneIndexPlugin
+  HdSt_NodeIdentifierResolvingSceneIndexPlugin
+  HdSt_NurbsApproximatingSceneIndexPlugin
+  HdSt_RenderPassPruneSceneIndexPlugin
+  HdSt_RenderPassVisibilitySceneIndexPlugin
+  HdSt_TetMeshConversionSceneIndexPlugin
+  HdSt_UnboundMaterialPruningSceneIndexPlugin
+  HdSt_VelocityMotionResolvingSceneIndexPlugin
+
+rigExecImaging: activated all RigExecRoot prims
+RigExecImaging_Activate -> 0
+--- UsdImaging chain, terminal -> upstream ---
+ 0. UsdImagingRenderSettingsFlatteningSceneIndex
+ 1. UsdImagingSelectionSceneIndex
+ 2. UsdSkelImagingPointsResolvingSceneIndex
+ 3. UsdSkelImagingSkeletonResolvingSceneIndex
+ 4. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiB"]
+ 5. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiA"]
+ 6. RigExecResultsSceneIndex ["rigExec::RigExecResultsSceneIndex"]
+ 7. RigExecBindingResolvingSceneIndex ["rigExec::RigExecBindingResolvingSceneIndex"]
+ 8. RigExecInternalPrimPruningSceneIndex ["rigExec::RigExecInternalPrimPruningSceneIndex"]
+ 9. UsdImagingMaterialBindingsResolvingSceneIndex
+10. UsdImaging_InstanceProxyPathTranslationSceneIndex
+11. HdNoticeBatchingSceneIndex
+12. UsdImagingNiPrototypePropagatingSceneIndex
+13. UsdImagingPiPrototypePropagatingSceneIndex
+14. UsdImagingExtentResolvingSceneIndex
+15. HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"]
+16. UsdImagingStageSceneIndex
+
+--- primvars @ /LatticeAsset/Geom/Slab (usdImaging terminal) primType=mesh ---
+    primvars:points                   NULL       n=0
+    primvars:normals                  NULL       n=0
+    primvars:velocities               NULL       n=0
+    primvars:accelerations            NULL       n=0
+    primvars:skel:geomBindTransform   container  n=1
+    primvars:skel:jointIndices        container  n=10
+    primvars:skel:jointWeights        container  n=10
+    extComputationPrimvars:points
+
+--- notices at terminal for SetTime(1012.0): added=0 removed=0 dirtied=4 ---
+    /LatticeAsset/Geom/Slab : __containerDataSource,extent/__containerDataSource,extent/max,extent/min,primvars/__containerDataSource,primvars/accelerations,primvars/normals/__containerDataSource,primvars/normals/primvarValue,primvars/points/__containerDataSource,primvars/points/primvarValue,primvars/velocities
+    /LatticeAsset/Geom/Slab/skinningPointsInputAggregatorComputation : extComputation/inputValues/restPoints
+    /LatticeAsset/Geom/Slab/skinningPointsComputation : extComputation/dispatchCount,extComputation/elementCount
+    /LatticeAsset/Geom/Slab : primvars/points/primvarValue
+--- notices at terminal for SetTime(1024.0): added=0 removed=0 dirtied=4 ---
+    /LatticeAsset/Geom/Slab : __containerDataSource,extent/__containerDataSource,extent/max,extent/min,primvars/__containerDataSource,primvars/accelerations,primvars/normals/__containerDataSource,primvars/normals/primvarValue,primvars/points/__containerDataSource,primvars/points/primvarValue,primvars/velocities
+    /LatticeAsset/Geom/Slab/skinningPointsInputAggregatorComputation : extComputation/inputValues/restPoints
+    /LatticeAsset/Geom/Slab/skinningPointsComputation : extComputation/dispatchCount,extComputation/elementCount
+    /LatticeAsset/Geom/Slab : primvars/points/primvarValue
+
+--- extComputation inputValues at /LatticeAsset/Geom/Slab/skinningPointsInputAggregatorComputation ---
+  t=1001.0  restPoints n=10  [0]=(-0.2000,0.0000,0.3000)
+  t=1012.0  restPoints n=10  [0]=(-0.2000,0.0000,0.3000)
+  t=1024.0  restPoints n=10  [0]=(-0.2000,0.0000,0.3000)
+
+--- baked chain ---
+ 0. HdSiExtComputationPrimvarPruningSceneIndex ["bake(ExtComputationPrimvarPruning)"]
+ 1. UsdImagingRenderSettingsFlatteningSceneIndex
+ 2. UsdImagingSelectionSceneIndex
+ 3. UsdSkelImagingPointsResolvingSceneIndex
+ 4. UsdSkelImagingSkeletonResolvingSceneIndex
+ 5. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiB"]
+ 6. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiA"]
+ 7. RigExecResultsSceneIndex ["rigExec::RigExecResultsSceneIndex"]
+ 8. RigExecBindingResolvingSceneIndex ["rigExec::RigExecBindingResolvingSceneIndex"]
+ 9. RigExecInternalPrimPruningSceneIndex ["rigExec::RigExecInternalPrimPruningSceneIndex"]
+10. UsdImagingMaterialBindingsResolvingSceneIndex
+11. UsdImaging_InstanceProxyPathTranslationSceneIndex
+12. HdNoticeBatchingSceneIndex
+13. UsdImagingNiPrototypePropagatingSceneIndex
+14. UsdImagingPiPrototypePropagatingSceneIndex
+15. UsdImagingExtentResolvingSceneIndex
+16. HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"]
+17. UsdImagingStageSceneIndex
+
+--- primvars @ /LatticeAsset/Geom/Slab (baked terminal) primType=mesh ---
+    primvars:points                   container  n=10
+    primvars:normals                  NULL       n=0
+    primvars:velocities               NULL       n=0
+    primvars:accelerations            NULL       n=0
+    primvars:skel:geomBindTransform   container  n=1
+    primvars:skel:jointIndices        container  n=10
+    primvars:skel:jointWeights        container  n=10
+    primvars:points                   container  n=10
+  t=1001.0  n=10  p[0]=(-0.2000,0.0000,0.3000) p[5]=(0.3000,0.0000,2.0000)
+  t=1012.0  n=10  p[0]=(-0.2000,0.0000,0.3000) p[5]=(0.3000,0.0000,2.0000)
+  t=1024.0  n=10  p[0]=(-0.2000,0.0000,0.3000) p[5]=(0.3000,0.0000,2.0000)
+
+render delegate display name = "UsdGenStubRenderer"
+--- HdRenderIndex terminal chain (renderer="UsdGenStubRendererPlugin") ---
+ 0. UsdGenStub_RecordingSceneIndex ["UsdGenStubHdB"]
+ 1. UsdGenStub_RecordingSceneIndex ["UsdGenStubHdA"]
+ 2. HdNoticeBatchingSceneIndex ["Post-Merging Notice Batching Scene Index"]
+ 3. HdMergingSceneIndex
+   4. HdLegacyGeomSubsetSceneIndex
+   5. HdNoticeBatchingSceneIndex ["Post-Emulation Notice Batching Scene Index"]
+   6. HdLegacyPrimSceneIndex
+   7. UsdImagingRenderSettingsFlatteningSceneIndex
+   8. UsdImagingSelectionSceneIndex
+   9. UsdSkelImagingPointsResolvingSceneIndex
+  10. UsdSkelImagingSkeletonResolvingSceneIndex
+  11. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiB"]
+  12. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiA"]
+  13. RigExecResultsSceneIndex ["rigExec::RigExecResultsSceneIndex"]
+  14. RigExecBindingResolvingSceneIndex ["rigExec::RigExecBindingResolvingSceneIndex"]
+  15. RigExecInternalPrimPruningSceneIndex ["rigExec::RigExecInternalPrimPruningSceneIndex"]
+  16. UsdImagingMaterialBindingsResolvingSceneIndex
+  17. UsdImaging_InstanceProxyPathTranslationSceneIndex
+  18. HdNoticeBatchingSceneIndex
+  19. UsdImagingNiPrototypePropagatingSceneIndex
+  20. UsdImagingPiPrototypePropagatingSceneIndex
+  21. UsdImagingExtentResolvingSceneIndex
+  22. HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"]
+  23. UsdImagingStageSceneIndex
+
+--- primvars @ /LatticeAsset/Geom/Slab (render index terminal) primType=mesh ---
+    primvars:points                   NULL       n=0
+    primvars:normals                  NULL       n=0
+    primvars:velocities               NULL       n=0
+    primvars:accelerations            NULL       n=0
+    primvars:skel:geomBindTransform   container  n=1
+    primvars:skel:jointIndices        container  n=10
+    primvars:skel:jointWeights        container  n=10
+    extComputationPrimvars:points
+
+probeChainOrder: DONE
+== same, with dirty promotion ON ==
+=== PXR_PLUGINPATH_NAME ===
+/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecSchema/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubR/resources
+
+--- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
+  [0] RigExecUsdImagingSceneIndexPlugin
+  [1] UsdGenStubUiA
+  [2] UsdGenStubUiB
+  [3] UsdSkelImagingResolvingSceneIndexPlugin
+
+--- registered HdSceneIndexPlugin types (17) ---
+  HdsiDebuggingSceneIndexPlugin
+  UsdGenStubHdA
+  UsdGenStubHdB
+  HdGpSceneIndexPlugin
+  HdSt_BackPlateSceneIndexPlugin
+  HdSt_DependencyForwardingSceneIndexPlugin
+  HdSt_DependencySceneIndexPlugin
+  HdSt_ImplicitSurfaceSceneIndexPlugin
+  HdSt_MaterialBindingResolvingSceneIndexPlugin
+  HdSt_MaterialPrimvarTransferSceneIndexPlugin
+  HdSt_NodeIdentifierResolvingSceneIndexPlugin
+  HdSt_NurbsApproximatingSceneIndexPlugin
+  HdSt_RenderPassPruneSceneIndexPlugin
+  HdSt_RenderPassVisibilitySceneIndexPlugin
+  HdSt_TetMeshConversionSceneIndexPlugin
+  HdSt_UnboundMaterialPruningSceneIndexPlugin
+  HdSt_VelocityMotionResolvingSceneIndexPlugin
+
+rigExecImaging: activated all RigExecRoot prims
+RigExecImaging_Activate -> 0
+--- UsdImaging chain, terminal -> upstream ---
+ 0. UsdImagingRenderSettingsFlatteningSceneIndex
+ 1. UsdImagingSelectionSceneIndex
+ 2. UsdSkelImagingPointsResolvingSceneIndex
+ 3. UsdSkelImagingSkeletonResolvingSceneIndex
+ 4. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiB"]
+ 5. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiA"]
+ 6. RigExecResultsSceneIndex ["rigExec::RigExecResultsSceneIndex"]
+ 7. RigExecBindingResolvingSceneIndex ["rigExec::RigExecBindingResolvingSceneIndex"]
+ 8. RigExecInternalPrimPruningSceneIndex ["rigExec::RigExecInternalPrimPruningSceneIndex"]
+ 9. UsdImagingMaterialBindingsResolvingSceneIndex
+10. UsdImaging_InstanceProxyPathTranslationSceneIndex
+11. HdNoticeBatchingSceneIndex
+12. UsdImagingNiPrototypePropagatingSceneIndex
+13. UsdImagingPiPrototypePropagatingSceneIndex
+14. UsdImagingExtentResolvingSceneIndex
+15. HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"]
+16. UsdImagingStageSceneIndex
+
+--- primvars @ /LatticeAsset/Geom/Slab (usdImaging terminal) primType=mesh ---
+    primvars:points                   NULL       n=0
+    primvars:normals                  NULL       n=0
+    primvars:velocities               NULL       n=0
+    primvars:accelerations            NULL       n=0
+    primvars:skel:geomBindTransform   container  n=1
+    primvars:skel:jointIndices        container  n=10
+    primvars:skel:jointWeights        container  n=10
+    extComputationPrimvars:points
+
+--- extComputation inputValues at /LatticeAsset/Geom/Slab/skinningPointsInputAggregatorComputation ---
+  t=1001.0  restPoints n=10  [0]=(-0.2000,0.0000,0.3000)
+  t=1012.0  restPoints n=10  [0]=(-0.2269,0.0000,0.3000)
+  t=1024.0  restPoints n=10  [0]=(-0.2562,0.0000,0.3000)
+
+--- baked chain ---
+ 0. HdSiExtComputationPrimvarPruningSceneIndex ["bake(ExtComputationPrimvarPruning)"]
+ 1. UsdImagingRenderSettingsFlatteningSceneIndex
+ 2. UsdImagingSelectionSceneIndex
+ 3. UsdSkelImagingPointsResolvingSceneIndex
+ 4. UsdSkelImagingSkeletonResolvingSceneIndex
+ 5. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiB"]
+ 6. UsdGenStub_RecordingSceneIndex ["UsdGenStubUiA"]
+ 7. RigExecResultsSceneIndex ["rigExec::RigExecResultsSceneIndex"]
+ 8. RigExecBindingResolvingSceneIndex ["rigExec::RigExecBindingResolvingSceneIndex"]
+ 9. RigExecInternalPrimPruningSceneIndex ["rigExec::RigExecInternalPrimPruningSceneIndex"]
+10. UsdImagingMaterialBindingsResolvingSceneIndex
+11. UsdImaging_InstanceProxyPathTranslationSceneIndex
+12. HdNoticeBatchingSceneIndex
+13. UsdImagingNiPrototypePropagatingSceneIndex
+14. UsdImagingPiPrototypePropagatingSceneIndex
+15. UsdImagingExtentResolvingSceneIndex
+16. HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"]
+17. UsdImagingStageSceneIndex
+
+--- primvars @ /LatticeAsset/Geom/Slab (baked terminal) primType=mesh ---
+    primvars:points                   container  n=10
+    primvars:normals                  NULL       n=0
+    primvars:velocities               NULL       n=0
+    primvars:accelerations            NULL       n=0
+    primvars:skel:geomBindTransform   container  n=1
+    primvars:skel:jointIndices        container  n=10
+    primvars:skel:jointWeights        container  n=10
+    primvars:points                   container  n=10
+  t=1001.0  n=10  p[0]=(-0.2000,0.0000,0.3000) p[5]=(0.3000,0.0000,2.0000)
+  t=1012.0  n=10  p[0]=(-0.2269,0.0000,0.3000) p[5]=(0.3598,0.0000,2.0000)
+  t=1024.0  n=10  p[0]=(-0.2562,0.0000,0.3000) p[5]=(0.4250,0.0000,2.0000)
+
+probeChainOrder: DONE
+== timing, ArmShotAnim, 48 frames ==
+  total=64.286 ms  mean=1.3393 ms/frame  worst=1.7187 ms
+  prims=95 pointsRead=195  total=78.189 ms  mean=1.6289 ms/frame
+  total=64.745 ms  mean=1.3489 ms/frame  worst=1.6189 ms
+  prims=95 pointsRead=195  total=77.099 ms  mean=1.6062 ms/frame
+  total=66.227 ms  mean=1.3797 ms/frame  worst=1.8920 ms
+  prims=95 pointsRead=195  total=76.409 ms  mean=1.5918 ms/frame

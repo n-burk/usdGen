@@ -1,0 +1,85 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    startTimeCode = 1
+    endTimeCode = 24
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Mesh "Scalp"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        # DEFAULT value == the rest/reference pose. timeSamples == deformed.
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        point3f[] points.timeSamples = {
+            1: [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+            24: [(0, 0, 5), (1, 0, 5), (1, 1, 5), (0, 1, 5)],
+        }
+        # Houdini-style explicit rest primvar
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)] (
+            interpolation = "vertex"
+        )
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def UsdGenProbeClumpStyler "Clump"
+    {
+        # --- schema-declared properties (NOT primvars) ---
+        asset usdGen:map = @maps/density.exr@
+        asset[] usdGen:mapArray = [@maps/clump_1001.exr@, @maps/does_not_exist.exr@]
+        float2[] usdGen:ramp:knots = [(0, 0), (0.5, 1), (1, 0.2)]
+        float[] usdGen:ramp:values = [0, 1, 0.2]
+        float usdGen:clumpRadius.spline = {
+            1: 0.1; post held,
+            24: 0.9; post held,
+        }
+        float usdGen:frizzAmount = 0.25
+        float usdGen:frizzAmount.timeSamples = {
+            1: 0.25,
+            24: 0.75,
+        }
+        int usdGen:seed = 7
+        string usdGen:expression = "$density * cellnoise($P)"
+        token usdGen:mode = "clump"
+        rel usdGen:surface = </World/Scalp>
+        rel usdGen:inputs = [</World/Gen>, </World/Scalp>]
+
+        # --- the same parameters expressed as primvars (the usdProc convention) ---
+        asset primvars:usdGen:map = @maps/density.exr@
+        float2[] primvars:usdGen:rampKnots = [(0, 0), (0.5, 1), (1, 0.2)]
+        float primvars:usdGen:clumpRadius.spline = {
+            1: 0.1; post held,
+            24: 0.9; post held,
+        }
+        rel primvars:usdGen:surface = </World/Scalp>
+        # a UDIM asset primvar
+        asset primvars:usdGen:udimMap = @maps/clump_<UDIM>.exr@
+    }
+
+    def UsdGenProbeOperator "Gen"
+    {
+        float usdGen:density = 2.5
+        rel usdGen:surface = </World/Scalp>
+    }
+
+    def UsdGenProbeImageableOp "ImageableOp"
+    {
+        float usdGen:density = 3.5
+        token visibility = "inherited"
+        uniform token purpose = "guide"
+    }
+
+    def BasisCurves "Hair"
+    {
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(0, 0, 0), (0, 0.3, 0), (0, 0.6, 0), (0, 1, 0)]
+        float[] widths = [0.01] (interpolation = "constant")
+        uniform token type = "cubic"
+        uniform token basis = "bspline"
+    }
+}

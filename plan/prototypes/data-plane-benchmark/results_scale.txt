@@ -1,0 +1,12 @@
+=== fixed per-Run overhead (1000 curves) ===
+VDF strip:  run_full_ms                      min     0.118  med~     0.182  max     0.272  (n=7)
+TBB:        run_full_ms                     0.05
+
+=== 1,000,000 curves x 8 CV, 5 stylers ===
+VDF strip:  run_full_ms                      min    69.867  med~   116.357  max   134.826  (n=5)
+run_after_last_param_ms          min    47.202  med~    49.422  max    51.589  (n=5)
+narrow_schedule_ms    0.113  narrow_run_ms   72.013  touched=50000 calls=81
+TBB:        run_full_ms                     7.67
+run_full_ms                     7.59
+run_full_ms                     7.65
+run_full_ms                     7.67

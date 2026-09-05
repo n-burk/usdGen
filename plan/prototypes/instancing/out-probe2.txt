@@ -1,0 +1,82 @@
+==== terminal tree after upstream-inserted generator ====
+/  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards.groomInstancer  type='instancer'
+     topo.prototypes=[/World/HairCards/SubProto/ForInstancercc82760a8c5d0070] locations=<null> indices=[[0, 1, 2] ]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards/CardInstancer  type='instancer'
+     topo.prototypes=[/World/HairCards/CardProto/ForInstancer2d04f1b3dd73655] locations=<null> indices=[[0, 1, 2] ]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards/SubProto  type='basisCurves'
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards/SubProto/ForInstancercc82760a8c5d0070  type='basisCurves'
+     instancedBy.paths=[/World/HairCards.groomInstancer] roots=[/World/HairCards/SubProto/ForInstancercc82760a8c5d0070]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards/CardProto  type='mesh'
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HairCards/CardProto/ForInstancer2d04f1b3dd73655  type='mesh'
+     instancedBy.paths=[/World/HairCards/CardInstancer] roots=[/World/HairCards/CardProto/ForInstancer2d04f1b3dd73655]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/SelfCards  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/SelfCards/Inst  type='instancer'
+     topo.prototypes=[/World/SelfCards/Inst/Proto/ForInstancerb00dc941cb1d5a3c] locations=<null> indices=[[0, 1, 2] ]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/SelfCards/Inst/Proto  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/SelfCards/Inst/Proto/ForInstancerb00dc941cb1d5a3c  type='basisCurves'
+     instancedBy.paths=[/World/SelfCards/Inst] roots=[/World/SelfCards/Inst/Proto/ForInstancerb00dc941cb1d5a3c]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards/PI  type='instancer'
+     topo.prototypes=[/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0] locations=<null> indices=[[0, 1, 2] ]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards/PI/Prototypes  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards/PI/Prototypes/Card  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards/PI/Prototypes/Card/Hair  type=''
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0  type='mesh'
+     instancedBy.paths=[/World/Cards/PI] roots=[/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0/Hair  type='basisCurves'
+     instancedBy.paths=[/World/Cards/PI] roots=[/World/Cards/PI/Prototypes/Card/ForInstancer9c60c467c223c3c0]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HeadA  type=''
+     niPrototypePath=/__Prototype_1
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/World/HeadB  type=''
+     niPrototypePath=/__Prototype_1
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 0, 0, 1) )
+/UsdNiPropagatedPrototypes  type=''
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286  type=''
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1  type=''
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer  type='instancer'
+     topo.prototypes=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype] locations=[/World/HeadA, /World/HeadB] indices=[[0, 1] ]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype  type=''
+     instancedBy.paths=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer] roots=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+     isNiPrototype=1
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/NiCardInst  type='instancer'
+     instancedBy.paths=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer] roots=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+     topo.prototypes=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/NiCardInst/Proto/ForInstancerf3deba0854927837] locations=<null> indices=[[0, 1, 2] ]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/NiCardInst/Proto  type=''
+     instancedBy.paths=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer] roots=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/NiCardInst/Proto/ForInstancerf3deba0854927837  type='basisCurves'
+     instancedBy.paths=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/NiCardInst] roots=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/NiCardInst/Proto/ForInstancerf3deba0854927837]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/ScalpMesh  type='mesh'
+     instancedBy.paths=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer] roots=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype/Hair  type='basisCurves'
+     instancedBy.paths=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer] roots=[/UsdNiPropagatedPrototypes/NoPrimvars___usdUpAxisd827b8678191286/__Prototype_1/UsdNiInstancer/UsdNiPrototype]
+     xform=( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
