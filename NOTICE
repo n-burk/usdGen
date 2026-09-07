@@ -1,0 +1,32 @@
+# usdGen — Hair/Fur Grooming Plugin for OpenUSD
+
+## License
+
+usdGen is provided under the Apache License, Version 2.0.
+See LICENSE for the full text.
+
+## Third-Party Components
+
+| Component   | Version  | License           |
+|-------------|----------|-------------------|
+| OpenUSD     | 26.08    | Apache-2.0        |
+| SeExpr      | main@8f8c8f2 | Apache-2.0 (modified §6) |
+| nanoflann   | 1.12.1   | BSD-2-Clause      |
+| OpenSubdiv  | 3.6.1    | Apache-2.0        |
+| Ptex        | 2.4.3    | BSD-3-Clause (Disney no-endorsement) |
+| TBB         | 2020.3   | Apache-2.0        |
+| zlib        | 1.3      | zlib License      |
+
+### SeExpr License Note
+
+SeExpr is distributed under the Apache License 2.0 with a modification
+to Section 6 (Trademarks): the license does not grant permission to use
+Disney's trade names or trademarks. This modification preserves the
+intent of the original license while making it suitable for inclusion
+in a non-Disney product.
+
+### Ptex License Note
+
+Ptex is distributed under a BSD-3-Clause license with a Disney
+non-endorsement clause. This project does not use the Ptex name in
+marketing or documentation.

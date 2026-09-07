@@ -1,0 +1,22 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "FakeHdPrmanMotionBlurSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "fake hdPrman motionBlur (ordering fixture)",
+                        "loadWithRenderer": "",
+                        "priority": 0,
+                        "tags": ["hdPrman:motionBlur"]
+                    }
+                }
+            },
+            "LibraryPath": "../../$<TARGET_FILE_NAME:fakeHdPrmanPlugin>",
+            "Name": "fakeHdPrman",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

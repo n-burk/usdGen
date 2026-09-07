@@ -1,0 +1,23 @@
+### -O3 -DNDEBUG (matches usdGen release flags: CMAKE_CXX_FLAGS_RELEASE='-O3 -DNDEBUG')
+nanoflann 1.12.1 | host hardware_concurrency=20
+build: 4000 guide roots in 0.427 ms
+queries=100000    threads= 1  median=  26.363 ms  p95=  37.072 ms  samples={37.072,26.449,26.326,26.358,26.363,26.296,26.443}  checksum=205112367335
+queries=100000    threads= 4  median=  11.015 ms  p95=  11.165 ms  samples={11.165,11.129,11.000,11.017,10.967,10.976,11.015}  checksum=205112367335
+queries=100000    threads= 8  median=   5.715 ms  p95=   5.941 ms  samples={5.941,5.772,5.690,5.715,5.630,5.686,5.826}  checksum=205112367335
+queries=100000    threads=20  median=   5.067 ms  p95=   5.872 ms  samples={5.067,5.567,4.663,4.944,5.872,4.802,5.154}  checksum=205112367335
+queries=1000000   threads= 1  median= 267.098 ms  p95= 279.454 ms  samples={279.454,267.232,267.098,266.999,266.607,266.852,267.336}  checksum=2050378987715
+queries=1000000   threads= 4  median=  82.587 ms  p95=  86.838 ms  samples={86.793,82.485,86.838,74.531,82.587,71.839,83.861}  checksum=2050378987715
+queries=1000000   threads= 8  median=  49.303 ms  p95=  49.946 ms  samples={49.946,48.843,49.485,46.677,49.355,47.172,49.303}  checksum=2050378987715
+queries=1000000   threads=20  median=  38.364 ms  p95=  43.003 ms  samples={43.003,41.339,38.980,37.908,38.081,38.364,37.290}  checksum=2050378987715
+
+### -O1 (probe-command reference)
+nanoflann 1.12.1 | host hardware_concurrency=20
+build: 4000 guide roots in 0.430 ms
+queries=100000    threads= 1  median=  33.040 ms  p95=  33.751 ms  samples={33.751,33.291,33.169,33.040,32.917,32.890,32.862}  checksum=205112367335
+queries=100000    threads= 4  median=  14.276 ms  p95=  14.469 ms  samples={14.311,14.276,14.033,14.255,14.407,14.469,14.079}  checksum=205112367335
+queries=100000    threads= 8  median=   7.350 ms  p95=   7.417 ms  samples={7.373,7.366,7.100,7.350,7.164,7.417,7.175}  checksum=205112367335
+queries=100000    threads=20  median=   6.008 ms  p95=   7.030 ms  samples={6.014,5.946,6.008,5.976,6.121,5.901,7.030}  checksum=205112367335
+queries=1000000   threads= 1  median= 329.115 ms  p95= 345.310 ms  samples={345.310,328.979,329.698,328.758,329.014,329.250,329.115}  checksum=2050378987715
+queries=1000000   threads= 4  median= 102.622 ms  p95= 106.419 ms  samples={106.419,102.384,103.321,93.013,92.880,102.622,104.421}  checksum=2050378987715
+queries=1000000   threads= 8  median=  62.490 ms  p95=  62.947 ms  samples={62.490,60.903,62.947,62.796,62.759,61.785,60.799}  checksum=2050378987715
+queries=1000000   threads=20  median=  47.782 ms  p95=  47.962 ms  samples={47.388,47.794,45.983,47.962,47.552,47.782,47.902}  checksum=2050378987715

@@ -1,0 +1,32 @@
+#usda 1.0
+(
+    defaultPrim = "Groom"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# M0 smoke fixture (plan/10-build-dependencies-testing.md §5.3).
+# Codeless schema types resolve through Plug via PXR_PLUGINPATH_NAME; the
+# fixture needs no subLayer reference to the schema plugin.
+
+def UsdGenGroom "Groom"
+{
+    int usdGen:schemaVersion = 1
+    uniform token usdGen:sessionId = "default"
+
+    def UsdGeomMesh "Surface"
+    {
+        int[] faceVertexIndices = [0, 1, 2, 2, 3, 0, 0, 3, 1, 1, 3, 2]
+        int[] faceVertexCounts = [3, 3, 3, 3]
+        point3f[] points = [
+            (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)
+        ]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def UsdGenDescription "Description"
+    {
+        uniform int usdGen:tileTarget = 64
+        rel usdGen:surface = </Groom/Surface>
+    }
+}

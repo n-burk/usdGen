@@ -1,0 +1,17 @@
+#usda 1.0
+(
+    defaultPrim = "Groom"
+)
+
+def Xform "Groom"
+{
+    def Xform "Description"
+    {
+        def Xform "Ops"
+        {
+            def Xform "OpNoise" {}
+            def Xform "OpLength" {}
+            def Xform "OpScatter" {}
+        }
+    }
+}

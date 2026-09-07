@@ -1,0 +1,72 @@
+## A r1 (inData.Neye, no hairTangent, deform)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_A.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=24.2ms firstFrame(sdrCompile)=266.61ms steadyMs=26.002 steadyMin=21.804 steadyMax=53.322 fps=38.5
+
+## B r1 (hairTangent static, points-only deform)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_B.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=24.9ms firstFrame(sdrCompile)=319.61ms steadyMs=26.528 steadyMin=22.652 steadyMax=60.409 fps=37.7
+
+## B+ r1 (hairTangent republished, perturbing)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=1 (tangentAuthored=yes)
+RESULT scene=scene_100k_B.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=1 frames=60 stageOpen=24.3ms firstFrame(sdrCompile)=283.57ms steadyMs=39.957 steadyMin=31.077 steadyMax=78.208 fps=25.0
+
+## A r2 (inData.Neye, no hairTangent, deform)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_A.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=24.2ms firstFrame(sdrCompile)=267.54ms steadyMs=25.456 steadyMin=21.915 steadyMax=51.228 fps=39.3
+
+## B r2 (hairTangent static, points-only deform)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_B.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=25.4ms firstFrame(sdrCompile)=294.79ms steadyMs=26.986 steadyMin=23.026 steadyMax=58.549 fps=37.1
+
+## B+ r2 (hairTangent republished, perturbing)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=1 (tangentAuthored=yes)
+RESULT scene=scene_100k_B.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=1 frames=60 stageOpen=25.1ms firstFrame(sdrCompile)=276.92ms steadyMs=38.503 steadyMin=28.536 steadyMax=70.859 fps=26.0
+
+## A r3 (inData.Neye, no hairTangent, deform)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_A.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=24.6ms firstFrame(sdrCompile)=264.32ms steadyMs=26.125 steadyMin=22.216 steadyMax=54.021 fps=38.3
+
+## B r3 (hairTangent static, points-only deform)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_B.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=13.4ms firstFrame(sdrCompile)=293.47ms steadyMs=26.786 steadyMin=23.245 steadyMax=61.676 fps=37.3
+
+## B+ r3 (hairTangent republished, perturbing)
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=1 (tangentAuthored=yes)
+RESULT scene=scene_100k_B.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=1 frames=60 stageOpen=24.6ms firstFrame(sdrCompile)=272.00ms steadyMs=37.761 steadyMin=30.952 steadyMax=67.559 fps=26.5
+
+## A-HGI r1 (HDST_ENABLE_HGI_RESOURCE_GENERATION=1)
+#######################################################################################
+#  HDST_ENABLE_HGI_RESOURCE_GENERATION is overridden to 'true'.  Default is 'false'.  #
+#######################################################################################
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_A.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=24.8ms firstFrame(sdrCompile)=269.46ms steadyMs=25.475 steadyMin=21.824 steadyMax=51.937 fps=39.3
+
+## A-HGI r2 (HDST_ENABLE_HGI_RESOURCE_GENERATION=1)
+#######################################################################################
+#  HDST_ENABLE_HGI_RESOURCE_GENERATION is overridden to 'true'.  Default is 'false'.  #
+#######################################################################################
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+GL_VERSION=4.6.0 NVIDIA 580.173.02
+SCENE curves=100000 cvs=800000 repubTangent=0 (tangentAuthored=-)
+RESULT scene=scene_100k_A.usdc res=1280x720 complexity=1.2 curves=100000 cvs=800000 deform=1 repubTangent=0 frames=60 stageOpen=23.8ms firstFrame(sdrCompile)=264.08ms steadyMs=25.495 steadyMin=22.303 steadyMax=52.036 fps=39.2
+

@@ -1,0 +1,5 @@
+authored                 OpNoise OpLength OpScatter
+after Sdf reorder(A)     OpScatter OpLength OpNoise
+after primOrder(B)       OpNoise OpScatter OpLength
+after clear              OpNoise OpLength OpScatter
+probeFinalOrder: DONE

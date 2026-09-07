@@ -1,0 +1,21 @@
+# PW-1 raw evidence — 2026-09-06T05:55:09Z
+# host: aarch64  | 20 CPUs
+# compiler: g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+
+### compile probe (g++ -std=c++17 -O1 -w pw1_compile.cpp -o pw1_compile -I thirdparty/nanoflann -pthread)
+k=0  id=26  dist2=3.552500
+k=1  id=25  dist2=5.805625
+k=2  id=27  dist2=6.330625
+COMPILE-AND-RUN OK: exact 3-arg instantiation KDTreeSingleIndexAdaptor<L2_Simple_Adaptor<float, Cloud>, Cloud, 3> (nanoflann 1.12.1)
+
+### benchmark (g++ -std=c++17 -O2 -w pw1_bench.cpp -o pw1_bench -I thirdparty/nanoflann -pthread, kIters=7)
+nanoflann 1.12.1 | host hardware_concurrency=20
+build: 4000 guide roots in 0.360 ms
+queries=100000    threads= 1  median=  28.278 ms  p95=  28.999 ms  samples={28.999,28.405,28.318,28.278,28.165,28.221,28.273}  checksum=205112367335
+queries=100000    threads= 4  median=  12.074 ms  p95=  12.400 ms  samples={12.400,12.078,12.003,11.915,12.018,12.074,12.367}  checksum=205112367335
+queries=100000    threads= 8  median=   6.068 ms  p95=   6.267 ms  samples={6.267,6.073,6.246,6.019,6.045,6.062,6.068}  checksum=205112367335
+queries=100000    threads=20  median=   5.003 ms  p95=   5.560 ms  samples={5.560,5.060,5.024,5.003,4.894,4.677,4.655}  checksum=205112367335
+queries=1000000   threads= 1  median= 283.065 ms  p95= 283.172 ms  samples={282.943,283.065,282.927,282.773,283.126,283.125,283.172}  checksum=2050378987715
+queries=1000000   threads= 4  median=  91.218 ms  p95=  94.488 ms  samples={94.488,91.218,82.569,93.501,93.382,84.567,84.758}  checksum=2050378987715
+queries=1000000   threads= 8  median=  52.992 ms  p95=  54.649 ms  samples={54.649,53.166,51.379,51.776,50.738,54.346,52.992}  checksum=2050378987715
+queries=1000000   threads=20  median=  40.242 ms  p95=  41.173 ms  samples={36.461,41.173,36.779,40.812,40.242,40.811,36.388}  checksum=2050378987715

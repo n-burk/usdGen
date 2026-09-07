@@ -1,0 +1,19 @@
+=== diff: both vs glslfx_only ===
+A=pw4_both.png sha256=9b754c969c8a8c55a9f11084aa2ae4e3685abc0c155111e63f614b316ec5185d shape=(640, 640, 3)
+B=pw4_glslfx_only.png sha256=efcae1e83f368f93334d8e159920d38df87ca642fb7c9f7a9f3b89a683d151d7 shape=(640, 640, 3)
+meanAbsDiff=0.2742 maxAbsDiff=255 fracPixelsDiff>8=0.009768
+
+=== diff: both vs mtlx_only ===
+A=pw4_both.png sha256=9b754c969c8a8c55a9f11084aa2ae4e3685abc0c155111e63f614b316ec5185d shape=(640, 640, 3)
+B=pw4_mtlx_only.png sha256=eb1ebc03fd3994d4faa5355fe4e265f07ca8ffd3cf8c96b8e55d6b28321743c7 shape=(640, 640, 3)
+meanAbsDiff=37.3172 maxAbsDiff=255 fracPixelsDiff>8=0.365640
+
+=== diff: glslfx_only vs mtlx_only (control) ===
+A=pw4_glslfx_only.png sha256=efcae1e83f368f93334d8e159920d38df87ca642fb7c9f7a9f3b89a683d151d7 shape=(640, 640, 3)
+B=pw4_mtlx_only.png sha256=eb1ebc03fd3994d4faa5355fe4e265f07ca8ffd3cf8c96b8e55d6b28321743c7 shape=(640, 640, 3)
+meanAbsDiff=37.2049 maxAbsDiff=255 fracPixelsDiff>8=0.363591
+
+=== diff: glslfx_only vs glslfx_ctx_only (terminal-name control) ===
+A=pw4_glslfx_only.png sha256=efcae1e83f368f93334d8e159920d38df87ca642fb7c9f7a9f3b89a683d151d7 shape=(640, 640, 3)
+B=pw4_glslfx_ctx_only.png sha256=efcae1e83f368f93334d8e159920d38df87ca642fb7c9f7a9f3b89a683d151d7 shape=(640, 640, 3)
+meanAbsDiff=0.0000 maxAbsDiff=0 fracPixelsDiff>8=0.000000

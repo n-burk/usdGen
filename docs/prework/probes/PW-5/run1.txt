@@ -1,0 +1,48 @@
+== plugin path ==
+PXR_PLUGINPATH_NAME=/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:/home/burkard/work/usdGen/build/usd/usdGenImaging/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd
+
+== TfType resolution (triggers plugin discovery + load) ==
+  UsdGenNoise : UsdGenNoise
+  UsdGenScatter : UsdGenScatter
+  UsdGenLength : UsdGenLength
+  UsdGenGroom : UsdGenGroom
+  UsdGenOperator : UsdGenOperator
+  UsdGenMaskAPI : UsdGenMaskAPI
+  UsdGenNoise IsA(UsdGenOperator) = yes
+  UsdGenScatter IsA(UsdGenOperator) = yes
+  UsdGenLength IsA(UsdGenOperator) = yes
+  UsdGenGroom IsA(UsdGenOperator) = no
+
+== UsdSchemaRegistry::GetAutoApplyAPISchemas() ==
+  UsdGenMaskAPI -> [UsdGenOperator,UsdGenOperator]
+
+== FindSchemaInfo (registration evidence) ==
+  UsdGenNoise : identifier=UsdGenNoise kind=concreteTyped TfType=UsdGenNoise
+  UsdGenScatter : identifier=UsdGenScatter kind=concreteTyped TfType=UsdGenScatter
+  UsdGenLength : identifier=UsdGenLength kind=concreteTyped TfType=UsdGenLength
+  UsdGenGroom : identifier=UsdGenGroom kind=concreteTyped TfType=UsdGenGroom
+  UsdGenOperator : identifier=UsdGenOperator kind=abstractTyped TfType=UsdGenOperator
+  UsdGenMaskAPI : identifier=UsdGenMaskAPI kind=singleApplyAPI TfType=UsdGenMaskAPI
+
+== prim definition property sets ==
+UsdGenNoise   ; appliedAPISchemas=[UsdGenMaskAPI]  (6 props): usdGen:algorithmVersion,usdGen:enabled,usdGen:frequency,usdGen:magnitude,usdGen:mask:opacity,usdGen:seed
+UsdGenScatter ; appliedAPISchemas=[UsdGenMaskAPI]  (6 props): usdGen:algorithmVersion,usdGen:density,usdGen:enabled,usdGen:mask:opacity,usdGen:mode,usdGen:seed
+UsdGenLength  ; appliedAPISchemas=[UsdGenMaskAPI]  (4 props): usdGen:algorithmVersion,usdGen:enabled,usdGen:length,usdGen:mask:opacity
+UsdGenGroom   ; appliedAPISchemas=[]  (6 props): proxyPrim,purpose,usdGen:schemaVersion,usdGen:sessionId,usdGen:surface,visibility
+UsdGenOperator (abstract); appliedAPISchemas=[UsdGenMaskAPI]  (3 props): usdGen:algorithmVersion,usdGen:enabled,usdGen:mask:opacity
+UsdGenMaskAPI  (applied API def); appliedAPISchemas=[UsdGenMaskAPI]  (1 props): usdGen:mask:opacity
+
+== stage-level check: applied schemas on a live prim ==
+  UsdGenNoise   applied schemas: [UsdGenMaskAPI]
+  UsdGenScatter applied schemas: [UsdGenMaskAPI]
+  UsdGenLength  applied schemas: [UsdGenMaskAPI]
+  UsdGenGroom   applied schemas: []
+
+== verdict: does the prim definition already carry 'usdGen:mask:opacity'? ==
+  UsdGenNoise   contains mask prop : YES
+  UsdGenScatter contains mask prop : YES
+  UsdGenLength  contains mask prop : YES
+  UsdGenGroom   contains mask prop : no (expected)
+
+== summary ==
+PASS: auto-apply propagated to every codeless UsdGenOperator-derived type; control (UsdGenGroom) correctly excluded.

@@ -1,0 +1,158 @@
+#usda 1.0
+(
+    subLayers = [
+        @usd/schema.usda@,
+        @usdGeom/schema.usda@
+    ]
+)
+
+over "GLOBAL" (
+    customData = {
+        string libraryName = "usdGenSchema"
+        string libraryPath = "usdGenSchema"
+        string libraryPrefix = "UsdGen"
+        bool skipCodeGeneration = true
+    }
+)
+{
+}
+
+class UsdGenGroom "UsdGenGroom" (
+    inherits = </Imageable>
+    customData = {
+        string className = "Groom"
+    }
+)
+{
+    int usdGen:schemaVersion = 1
+    uniform token usdGen:sessionId = "default"
+    rel usdGen:surface
+}
+
+class UsdGenDescription "UsdGenDescription" (
+    inherits = </Boundable>
+    customData = {
+        string className = "Description"
+        bool implementsComputeExtent = true
+    }
+)
+{
+    uniform int usdGen:tileTarget = 64
+    rel usdGen:surface
+    rel usdGen:input
+    rel usdGen:terminal
+}
+
+class "UsdGenOperator" (
+    inherits = </Typed>
+    customData = {
+        string className = "Operator"
+    }
+)
+{
+    bool usdGen:enabled = true
+    uniform int usdGen:algorithmVersion = 0
+}
+
+class UsdGenScatter "UsdGenScatter" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Scatter"
+    }
+)
+{
+    uniform token usdGen:mode = "random" (
+        allowedTokens = ["random", "uniform", "points", "atGuides"]
+    )
+    float usdGen:density = 1.0
+    int usdGen:seed = 0
+}
+
+class UsdGenNoise "UsdGenNoise" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Noise"
+    }
+)
+{
+    float usdGen:magnitude = 0.1
+    float usdGen:frequency = 4.0
+    int usdGen:seed = 0
+}
+
+class UsdGenLength "UsdGenLength" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Length"
+    }
+)
+{
+    float usdGen:length = 1.0
+}
+
+class UsdGenGuideSet "UsdGenGuideSet" (
+    inherits = </Imageable>
+    customData = {
+        string className = "GuideSet"
+    }
+)
+{
+    rel usdGen:surface
+    float[] usdGen:blend = []
+    string usdGen:label = ""
+}
+
+
+class "UsdGenMap" (
+    inherits = </Typed>
+    customData = {
+        string className = "Map"
+    }
+)
+{
+}
+
+class "UsdGenMaskAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "MaskAPI"
+        token apiSchemaType = "singleApply"
+        token[] apiSchemaAutoApplyTo = ["UsdGenOperator"]
+    }
+)
+{
+    float usdGen:mask:opacity = 1.0
+}
+
+class "UsdGenLookAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "LookAPI"
+        token apiSchemaType = "singleApply"
+    }
+)
+{
+}
+
+class "UsdGenRestAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "RestAPI"
+        token apiSchemaType = "singleApply"
+    }
+)
+{
+}
+
+class "UsdGenCurveAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "CurveAPI"
+        token apiSchemaType = "singleApply"
+    }
+)
+{
+    token usdGen:curve:role = "hair" (
+        allowedTokens = ["hair", "guide"]
+    )
+}

@@ -1,0 +1,121 @@
+Coding Error: in _DefineCppType at line 915 of /home/burkard/work/OpenUSD/pxr/base/tf/type.cpp -- TfType 'UsdGenMetadataSceneIndexPlugin' already has a defined C++ type; cannot redefine
+=== registered usdGen plugin types ===
+  UsdGenGroomAdapter                 REGISTERED
+  UsdGenDescriptionAdapter           REGISTERED
+  UsdGenOperatorAdapter              REGISTERED
+  UsdGenMapAdapter                   REGISTERED
+  UsdGenGuideSetAdapter              REGISTERED
+  UsdGenRestAPIAdapter               REGISTERED
+  UsdGenGroomSceneIndexPlugin        REGISTERED
+  UsdGenMetadataSceneIndexPlugin     REGISTERED
+
+=== usdImaging chain (terminal -> deepest) ===
+  0. UsdImagingRenderSettingsFlatteningSceneIndex
+  1. UsdImagingSelectionSceneIndex
+  2. UsdSkelImagingPointsResolvingSceneIndex
+  3. UsdSkelImagingSkeletonResolvingSceneIndex
+  4. UsdImagingMaterialBindingsResolvingSceneIndex
+  5. UsdImaging_InstanceProxyPathTranslationSceneIndex
+  6. HdNoticeBatchingSceneIndex
+  7. UsdImagingNiPrototypePropagatingSceneIndex
+  8. UsdImagingPiPrototypePropagatingSceneIndex
+  9. UsdImagingExtentResolvingSceneIndex
+  10. HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"]
+  11. UsdImagingStageSceneIndex
+
+=== baseline ===
+baseline stage child order of /Groom/Description/Ops : OpNoise OpLength OpScatter
+baseline terminal child order of /Groom/Description/Ops : OpNoise OpLength OpScatter
+
+--- control: Set usdGen:magnitude=0.25 on /Groom/Description/Ops/OpNoise ---
+[control/magnitude] UsdImagingRenderSettingsFlatteningSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImagingSelectionSceneIndex      added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdSkelImagingPointsResolvingSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdSkelImagingSkeletonResolvingSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImagingMaterialBindingsResolvingSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImaging_InstanceProxyPathTranslationSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] HdNoticeBatchingSceneIndex         added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImagingNiPrototypePropagatingSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImagingPiPrototypePropagatingSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImagingExtentResolvingSceneIndex added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] HdsiLocatorCachingSceneIndex ["HdsiLocatorCachingSceneIndex for material (primType material)"] added=0 removed=0 renamed=0 dirtied=0
+
+[control/magnitude] UsdImagingStageSceneIndex          added=0 removed=0 renamed=0 dirtied=0
+
+orders after control:
+post-control stage child order of /Groom/Description/Ops : OpNoise OpLength OpScatter
+post-control terminal child order of /Groom/Description/Ops : OpNoise OpLength OpScatter
+
+--- variant A: Sdf reorder nameChildren (Scatter, Length, Noise) ---
+[variantA/sdf-reorder] UsdImagingRenderSettingsFlatteningSceneIndex added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpLength  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+
+[variantA/sdf-reorder] UsdImagingSelectionSceneIndex      added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpLength  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+
+[variantA/sdf-reorder] UsdSkelImagingPointsResolvingSceneIndex added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpLength  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+
+[variantA/sdf-reorder] UsdSkelImagingSkeletonResolvingSceneIndex added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpLength  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+
+[variantA/sdf-reorder] UsdImagingMaterialBindingsResolvingSceneIndex added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpLength  locs=[__usdUpAxis,coordSysBinding,geomModel,materialBindings,model,primvars,purpose,skelBinding,visibility,xform]
+
+[variantA/sdf-reorder] UsdImaging_InstanceProxyPathTranslationSceneIndex added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,model,primvars,purpose,skelBinding,usdMaterialBindings,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,model,primvars,purpose,skelBinding,usdMaterialBindings,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpLength  locs=[__usdUpAxis,coordSysBinding,geomModel,model,primvars,purpose,skelBinding,usdMaterialBindings,visibility,xform]
+
+[variantA/sdf-reorder] HdNoticeBatchingSceneIndex         added=4 removed=0 renamed=0 dirtied=3
+    ADDED    /Groom/Description/Ops  type=
+    ADDED    /Groom/Description/Ops/OpScatter  type=
+    ADDED    /Groom/Description/Ops/OpLength  type=
+    ADDED    /Groom/Description/Ops/OpNoise  type=
+    DIRTIED  /Groom/Description/Ops/OpScatter  locs=[__usdUpAxis,coordSysBinding,geomModel,model,primvars,purpose,skelBinding,usdMaterialBindings,visibility,xform]
+    DIRTIED  /Groom/Description/Ops/OpNoise  locs=[__usdUpAxis,coordSysBinding,geomModel,model,primvars,purpose,skelBinding,usdMaterialBindings,visibility,xform]
+    DIRTIED  /Groom

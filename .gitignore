@@ -1,0 +1,55 @@
+# Build trees
+build/
+build-*/
+build_check/
+cmake-build-*/
+Testing/
+CTestTestfile.cmake
+
+# CMake generated
+CMakeUserPresets.json
+*.user
+
+# Pre-work probe scratch (probe binaries/objects; source + result docs are kept)
+docs/prework/probes/*/build/
+docs/prework/probes/*/__pycache__/
+docs/prework/probes/*/*.so
+docs/prework/probes/*/*.o
+
+# Regenerable large PW-egl probe stages: the .usdc scenes and the generated
+# pw4_*.usda are produced by make_pw_scenes.py / make_pw4_scenes.py (kept
+# tracked, with the .txt results, .png evidence, .md docs). Re-generate instead
+# of committing (sol X-7).
+docs/prework/probes/PW-egl/scene_*.usdc
+docs/prework/probes/PW-egl/pw4_*.usda
+docs/prework/probes/m0-usdcat-extent/probe_usdcat_extent
+# Probe binaries (extensionless ELF outputs; recompile from the .cpp beside them)
+docs/prework/probes/PW-1/bench_knn
+docs/prework/probes/PW-1/compile_probe
+docs/prework/probes/PW-1/pw1_bench
+docs/prework/probes/PW-1/pw1_bench_O1
+docs/prework/probes/PW-1/pw1_bench_O3
+docs/prework/probes/PW-1/pw1_compile
+docs/prework/probes/PW-5/probe
+docs/prework/probes/PW-6/probeReorder
+docs/prework/probes/PW-6/probeFinalOrder
+docs/prework/probes/PW-egl/probe_attr
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs / scratch
+*.log
+*.ninja_log
+.ninja_*
+scratch/
+
+# T4 workstation artefacts (docs/workstation-protocol.md writes out/t4/§N/)
+out/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

@@ -1,0 +1,1 @@
+PW-1 compile probe: KDTreeSingleIndexAdaptor<L2_Simple_Adaptor<float, Cloud>, Cloud, 3> instantiated OK; dataset=64 pts, knnSearch(k=3) returned 3 (sorted+distinct), radiusSearch returned 17 hits.

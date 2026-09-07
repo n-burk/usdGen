@@ -1,0 +1,7 @@
+## bench_hair (prototype driver) on scene_200k_B cx=1.1 r1
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+RESULT scene=scene_200k_B.usdc res=1280x720 complexity=1.1 curves=200000 cvs=1600000 deform=0 frames=40 ms_per_frame=26.439 fps=37.8
+
+## bench_hair (prototype driver) on scene_200k_B cx=1.2 r2
+eglctx: GL context current on EGL device 0 (EGL 1.5)
+RESULT scene=scene_200k_B.usdc res=1280x720 complexity=1.2 curves=200000 cvs=1600000 deform=0 frames=40 ms_per_frame=28.444 fps=35.2

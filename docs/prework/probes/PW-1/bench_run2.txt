@@ -1,0 +1,23 @@
+PW-1 / E-4 nanoflann 1.12.1 kNN capture bench
+guides=4000 (KD-tree dataset), k=3, uniform [0,100)^3, 11 measured iterations per config (+1 warm-up), fixed std::thread pool, contiguous query partition
+std::thread::hardware_concurrency = 20
+
+config           n_rest       threads 
+N=100000 T=1     n=100000     threads=1   build_med=  0.281 ms  query_med=  26.138 ms  total_med=  26.419 ms  total_p95=  26.579 ms  per1k= 0.2642 ms
+N=100000 T=4     n=100000     threads=4   build_med=  0.332 ms  query_med=  11.023 ms  total_med=  11.412 ms  total_p95=  11.942 ms  per1k= 0.1141 ms
+N=100000 T=8     n=100000     threads=8   build_med=  0.355 ms  query_med=   5.712 ms  total_med=   6.068 ms  total_p95=   6.173 ms  per1k= 0.0607 ms
+N=100000 T=20    n=100000     threads=20  build_med=  0.306 ms  query_med=   3.413 ms  total_med=   3.720 ms  total_p95=   4.855 ms  per1k= 0.0372 ms
+N=1000000 T=1    n=1000000    threads=1   build_med=  0.287 ms  query_med= 276.366 ms  total_med= 276.655 ms  total_p95= 277.298 ms  per1k= 0.2767 ms
+N=1000000 T=4    n=1000000    threads=4   build_med=  0.354 ms  query_med=  81.219 ms  total_med=  81.595 ms  total_p95=  84.288 ms  per1k= 0.0816 ms
+N=1000000 T=8    n=1000000    threads=8   build_med=  0.403 ms  query_med=  48.190 ms  total_med=  48.524 ms  total_p95=  51.250 ms  per1k= 0.0485 ms
+N=1000000 T=20   n=1000000    threads=20  build_med=  0.348 ms  query_med=  22.566 ms  total_med=  22.919 ms  total_p95=  29.321 ms  per1k= 0.0229 ms
+
+linearity ratio (total median, 1M / 100k at same thread count):
+  T=1 : 10.47 x   (100k med 26.42 ms -> 1M med 276.65 ms)
+  T=4 : 7.15 x   (100k med 11.41 ms -> 1M med 81.59 ms)
+  T=8 : 8.00 x   (100k med 6.07 ms -> 1M med 48.52 ms)
+  T=20: 6.16 x   (100k med 3.72 ms -> 1M med 22.92 ms)
+
+ACCEPTANCE:
+  100k @ 8 threads total median = 6.07 ms   gate: <= 25 ms -> PASS
+  1M   @ 8 threads total median = 48.52 ms   stop: > 300 ms triggers SC-6 -> NOT triggered
