@@ -4,7 +4,7 @@
 
 Roadmap `plan/11-roadmap.md` §1.1, PW-2 row (line 110):
 
-> | **PW-2** | S-8 | the default glslfx variant (ADR §5.4), hence whether `hairTangent` is in C2 — settled before M1 freezes C2 | EGL harness (`prototypes/storm-hair-look/{eglctx.h,bench_hair.cpp}`), 100 k × 8 CV deforming, 60 frames: variant A (`inData.Neye`) vs B (`UsdGenHairPreviewPrimvar`, ADR §9 R4); A must also compile under `HDST_ENABLE_HGI_RESOURCE_GENERATION=1`. The mechanism is not in doubt: the points fastpath needs `DirtyPoints` set and `DirtyNormals\|DirtyWidths\|DirtyPrimvar` clear (`pxr/imaging/hdSt/basisCurves.cpp:930-935`, verified) |
+> | **PW-2** | S-8 | the default glslfx variant (ADR §5.4), hence whether `hairTangent` is in C2 — settled before M1 freezes C2 | EGL harness (`plan/prototypes/storm-hair-look/{eglctx.h,bench_hair.cpp}`), 100 k × 8 CV deforming, 60 frames: variant A (`inData.Neye`) vs B (`UsdGenHairPreviewPrimvar`, ADR §9 R4); A must also compile under `HDST_ENABLE_HGI_RESOURCE_GENERATION=1`. The mechanism is not in doubt: the points fastpath needs `DirtyPoints` set and `DirtyNormals\|DirtyWidths\|DirtyPrimvar` clear (`pxr/imaging/hdSt/basisCurves.cpp:930-935`, verified) |
 
 Gate S-8 (`plan/09-performance-and-benchmarks.md` §5): *"A wins on frame time **and** compiles under `HDST_ENABLE_HGI_RESOURCE_GENERATION=1`, else B becomes default"* — status UNMEASURED at planning time. If B wins, `hairTangent` is republished per deforming frame at the measured cost and would enter C2 (the published-tile `basisCurves` contract, ADR §5.3).
 

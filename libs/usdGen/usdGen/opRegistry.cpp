@@ -11,6 +11,8 @@
 #include "usdGen/ops/noise.h"
 #include "usdGen/ops/length.h"
 #include "usdGen/ops/width.h"
+#include "usdGen/ops/curveSource.h"
+#include "usdGen/ops/deform.h"
 
 #include "pxr/pxr.h"
 
@@ -70,6 +72,8 @@ std::unique_ptr<UsdGenOp> CreateGrowOp()    { return std::make_unique<UsdGenGrow
 std::unique_ptr<UsdGenOp> CreateNoiseOp()   { return std::make_unique<UsdGenNoiseOp>(); }
 std::unique_ptr<UsdGenOp> CreateLengthOp()  { return std::make_unique<UsdGenLengthOp>(); }
 std::unique_ptr<UsdGenOp> CreateWidthOp()   { return std::make_unique<UsdGenWidthOp>(); }
+std::unique_ptr<UsdGenOp> CreateCurveSourceOp() { return std::make_unique<UsdGenCurveSourceOp>(); }
+std::unique_ptr<UsdGenOp> CreateDeformOp()    { return std::make_unique<UsdGenDeformOp>(); }
 
 void usdGenRegisterM1Operators()
 {
@@ -78,6 +82,9 @@ void usdGenRegisterM1Operators()
     UsdGenOpRegistry::Get().Register(TfToken("UsdGenNoise"), 0, &CreateNoiseOp);
     UsdGenOpRegistry::Get().Register(TfToken("UsdGenLength"), 0, &CreateLengthOp);
     UsdGenOpRegistry::Get().Register(TfToken("UsdGenWidth"), 0, &CreateWidthOp);
+   // P1 ragged: register curveSource and deform
+   UsdGenOpRegistry::Get().Register(TfToken("UsdGenCurveSource"), 0, &CreateCurveSourceOp);
+   UsdGenOpRegistry::Get().Register(TfToken("UsdGenDeform"), 0, &CreateDeformOp);
 }
 
 }  // namespace usdGen

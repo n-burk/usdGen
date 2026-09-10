@@ -343,8 +343,30 @@ void InterleaveTile(size_t index, void *payload)
     float const *tpy = term.py.empty() ? nullptr : term.py.cdata();
     float const *tpz = term.pz.empty() ? nullptr : term.pz.cdata();
     size_t const nPx = term.px.size();
+    bool const ragged = !term.cvOffsets.empty();
     for (uint32_t i = 0; i < tv.chunkCount; ++i) {
         UsdGenChunkDesc const &cd = pl.tn->chunks[tv.firstChunk + i];
+        // Ragged path (03 §1.3): per-curve CV spans come from cvOffsets, not
+        // liveCount*cvCount (cvCount == 0 on the ragged path). g indexes the
+        // absolute curve so cvOffsets[g] is valid.
+        if (ragged && cd.cvCount == 0) {
+            for (uint32_t c = 0; c < cd.liveCount; ++c) {
+                size_t const g = size_t(cd.firstCurve) + c;
+                if (g + 1 >= term.cvOffsets.size()) break;
+                uint32_t const p0 = static_cast<uint32_t>(term.cvOffsets[g]);
+                uint32_t const len =
+                    static_cast<uint32_t>(term.cvOffsets[g + 1]) - p0;
+                ++liveCurves;
+                liveCvs += len;
+                if (!tpx || !tpy || !tpz) continue;
+                for (uint32_t v = 0; v < len; ++v) {
+                    size_t const p = size_t(p0) + v;
+                    if (p >= nPx) break;
+                    extent.ExtendBy(GfVec3f(tpx[p], tpy[p], tpz[p]));
+                }
+            }
+            continue;
+        }
         liveCurves += cd.liveCount;
         liveCvs += uint64_t(cd.liveCount) * cd.cvCount;
         if (!tpx || !tpy || !tpz) continue;

@@ -10,7 +10,9 @@
 #include "usdGenImaging/usdGenTokens.h"
 
 #include "pxr/usd/sdf/assetPath.h"
+#include "pxr/base/gf/array.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/primRange.h"
@@ -88,6 +90,27 @@ _GetTyped(UsdAttribute const &attr, UsdTimeCode time, T *out)
         return true;
     }
     return false;
+}
+
+/// point3f[] → VtVec3fArray elementwise conversion. USD mesh points author as point3f[];
+/// the engine surface descs carry VtVec3fArray.
+// rest/points pulls come back empty, Scatter captures 0 roots and the
+// commit publishes 0 tiles (surgery gen=0 root cause family).
+bool
+_GetVec3fArray(UsdAttribute const &attr, UsdTimeCode time, VtVec3fArray *out)
+{
+    if (!attr) {
+        return false;
+    }
+    VtValue value;
+    if (!attr.Get(&value, time) || value.IsEmpty()) {
+        return false;
+    }
+    if (value.IsHolding<VtVec3fArray>()) {
+        *out = value.UncheckedGet<VtVec3fArray>();
+        return true;
+    }
+    return _GetTyped(attr, time, out);
 }
 
 void
@@ -174,14 +197,15 @@ struct _GraphWalker
         }
         operatorPaths.insert(prim.GetPath().GetString());
         for (UsdRelationship const &rel : prim.GetRelationships()) {
+            // GetBaseName strips namespaces ("usdGen:input" -> "input").
             std::string const name = rel.GetBaseName().GetString();
-            if (name == "usdGen:input") {
+            if (name == "input") {
                 SdfPathVector targets;
                 rel.GetTargets(&targets);
                 for (SdfPath const &target : targets) {
                     Walk(stage->GetPrimAtPath(target));
                 }
-            } else if (name == "usdGen:guides") {
+            } else if (name == "guides") {
                 SdfPathVector targets;
                 rel.GetTargets(&targets);
                 for (SdfPath const &target : targets) {
@@ -219,14 +243,14 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
               &out->faceVertexCounts);
     _GetTyped(mesh.GetFaceVertexIndicesAttr(), UsdTimeCode::Default(),
               &out->faceVertexIndices);
-    _GetTyped(mesh.GetPointsAttr(), UsdTimeCode(time), &out->points);
+    _GetVec3fArray(mesh.GetPointsAttr(), UsdTimeCode(time), &out->points);
     _GetPrimvarTyped(meshPrim, TfToken("rest"), UsdTimeCode::Default(),
                      &out->restPoints);
     if (out->restPoints.empty()) {
         // S12: no authored rest -> the Default-time deformed opinion IS the
         // rest (the UsdGenRestAPI adapter publishes the same fallback).
-        _GetTyped(mesh.GetPointsAttr(), UsdTimeCode::Default(),
-                  &out->restPoints);
+        _GetVec3fArray(mesh.GetPointsAttr(), UsdTimeCode::Default(),
+                       &out->restPoints);
     }
     _GetPrimvarTyped(meshPrim, TfToken("st"), UsdTimeCode::Default(), &out->uv);
     _GetPrimvarTyped(meshPrim, TfToken("velocities"), UsdTimeCode(time),
@@ -371,17 +395,25 @@ BuildGraphDesc(
         for (UsdRelationship const &rel : prim.GetRelationships()) {
             std::string const name = rel.GetBaseName().GetString();
             SdfPathVector *bucket = &node.references;
-            if (name == "usdGen:input") {
+            if (name == "input") {
                 bucket = &node.inputs;
-            } else if (name == "usdGen:guides" || name == "usdGen:curves" ||
-                       name == "usdGen:frozen:curves") {
+            } else if (name == "guides" || name == "curves" ||
+                       name == "frozen:curves") {
                 bucket = &node.curves;
-            } else if (name == "usdGen:surface") {
+            } else if (name == "surface") {
                 bucket = &node.surfaces;
-            } else if (name == "usdGen:mask:source" || name == "usdGen:map") {
-                bucket = &node.maps;
-            } else if (name.compare(0, 7, "usdGen:") != 0) {
-                continue;  // not ours
+            } else if (name == "source" || name == "map") {
+                // Base names collide ("mask:source" vs "length:source" both
+                // → "source"): disambiguate by full relationship name.
+                std::string const full = rel.GetName().GetString();
+                if (full == "usdGen:mask:source" || full == "usdGen:map" ||
+                    full == "usdGen:length:source") {
+                    bucket = &node.maps;
+                } else {
+                    continue;
+                }
+            } else {
+                continue;  // not a graph edge (base-name match only)
             }
             SdfPathVector relTargets;
             rel.GetTargets(&relTargets);
@@ -392,6 +424,24 @@ BuildGraphDesc(
 
         _PullParams(prim, time, &node.params);
         desc.nodes.push_back(std::move(node));
+    }
+
+    // Surface inheritance (02 §2): an operator with no usdGen:surface of its
+    // own inherits the description's bound surface. The walker collects only
+    // operator prims, so read the description prim's relationship directly.
+    {
+        SdfPathVector descSurfaces;
+        if (UsdRelationship rel = descPrim.GetRelationship(
+                TfToken("usdGen:surface"))) {
+            rel.GetTargets(&descSurfaces);
+        }
+        if (!descSurfaces.empty()) {
+            for (UsdGenNodeDesc &node : desc.nodes) {
+                if (node.surfaces.empty()) {
+                    node.surfaces = descSurfaces;
+                }
+            }
+        }
     }
 
     // ---- shared pools: surfaces / curve sets / maps ----------------------

@@ -3,31 +3,41 @@
 Follow the user's authorized scope and plan/README.md; use plan/11-roadmap.md
 for milestone order and gates. Inspect current evidence before assigning work.
 
-For the coordinator: maintain a shared roster of at most thirteen active workers
-across the entire delegation tree. All worker types share this total budget:
-- `task`: local Qwen (`qwen38-next/qwen3.8-flash-next:low`).
-- `reviewer`: Astra (`openai-codex/gpt-6-astra:high`).
-- `task_remote`, `large-context-task-executor`, `scout`, and `security-reviewer`:
-  Meta Muse Spark Contributor (`meta/muse-spark-1.3-contributor`), at most ten
-  active Meta workers.
-- `lean-context-task-runner`: Hivemind (`hivemind/qwen3.8-27b`), at most two
-  active instances for fast, bounded, lower-context work.
-- `sonic`: Apple (`apple-fast/system`), at most one active instance for short
-  tasks that fit its 4K context.
-Local Qwen and Astra workers count toward the same thirteen-worker total,
-reducing the slots available to other workers while active. Verify actual provider
-routing in session metadata when uncertain. Keep Hivemind assignments focused
-with targeted reads and compact handoffs; route large-context work to Meta.
+Local Qwen is reserved exclusively for the main coordinator thread. Keep the
+main/default/orchestrator/plan/slow model on qwen38-coordinator. Never launch
+workers, reviewers, advisors, nested agents, or utility calls on qwen38-next,
+qwen38-coordinator, or the legacy local qwen38 provider.
 
-Recursion depth is three. Nested delegation shares this same thirteen-worker
-budget; it does not create another pool. Before nested dispatch, reserve capacity
-through the coordinator and update the shared roster; if capacity cannot be
-confirmed, work inline or return the subtask to the coordinator. Release slots
-when workers finish. Provider request caps are four for local Qwen workers,
-ten for Meta, two for Hivemind, and one for Apple; these caps limit simultaneous
-model calls, not live worker sessions. Enforce the shared worker budget and
-per-provider worker limits through roster management. Do not automatically
-substitute providers when the assigned endpoint is unavailable.
+Maintain a shared roster of at most thirteen active workers across the entire
+delegation tree. All worker types share this total budget:
+- `task`, `task_remote`, `large-context-task-executor`, and `scout`:
+  Meta Muse Spark Contributor
+  (`meta/muse-spark-1.3-contributor`), at most ten active Meta workers.
+- `lean-context-task-runner`: Hivemind (`hivemind/qwen3.8-27b`), at most two
+  active instances for focused work within its 80128-token context.
+- `sonic`: Apple (`apple-fast/system`), at most one active instance. Its entire
+  context is only 4K; use short self-contained packets and minimal tools.
+- `nemotron`: OpenRouter (`openrouter/nvidia/nemotron-3.5-lightning:free`),
+  at most one active instance; use only the explicitly free endpoint.
+- `reviewer`, `security-reviewer`, and the passive advisor use Sol at medium
+  effort (`openai-codex/gpt-5.6-sol:medium`). Reviewers share the same thirteen-worker
+  total. They must not use local Qwen or Astra.
+
+Recursion depth is three. Nested delegation shares the thirteen-worker budget;
+it does not create another pool. Reserve capacity through the coordinator
+before nested dispatch. Release slots when workers finish. Provider request
+caps are coordinator 1, Meta 10, Hivemind 2, Apple 1, and OpenRouter 1. These
+limit simultaneous calls, not live worker sessions. The legacy local-worker
+alias remains for compatibility only and must never be selected for delegation.
+Do not fall back to local Qwen when a remote endpoint fails. Return a concrete
+blocker or choose another allowed remote provider with a fitting context window;
+never substitute a paid OpenRouter endpoint for the free Nemotron endpoint.
+
+Existing workers must checkpoint and finish before replacement on the new
+routing; preserve their files and scoped handoffs. Do not resume a persisted
+local-Qwen worker under its old model. Verify actual provider routing in session
+metadata when uncertain. Keep Hivemind/Apple packets compact; use Meta for
+large-context work.
 
 Before dispatch, verify that every referenced path exists and copy exact
 section headings from the source. Canonical files include:

@@ -131,7 +131,16 @@ HdContainerDataSourceHandle UsdGenRestApiContainerFactory(
     HdRetainedContainerDataSourceHandle restContainer =
         HdRetainedContainerDataSource::New(4, restNames.data(), restValues);
 
-    HdDataSourceBaseHandle rootValues[1] = { restContainer };
+    // Contract shape usdGen/rest/* (header + 02 §2.15): the four leaves
+    // sit under an intermediate `rest` container, itself under `usdGen`.
+    // (The factory previously returned usdGen/{leaves} directly — one level
+    // short of the documented tree; the invalidation map already emitted
+    // usdGen/rest/*.)
+    TfToken const restTok("rest");
+    HdDataSourceBaseHandle midValues[1] = { restContainer };
+    HdRetainedContainerDataSourceHandle mid =
+        HdRetainedContainerDataSource::New(1, &restTok, midValues);
+    HdDataSourceBaseHandle rootValues[1] = { mid };
     return HdRetainedContainerDataSource::New(
         1, &UsdGenContainerToken(), rootValues);
 }

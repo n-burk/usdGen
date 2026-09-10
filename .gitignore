@@ -6,6 +6,9 @@ cmake-build-*/
 Testing/
 CTestTestfile.cmake
 
+# Harnesses
+.omg/
+
 # CMake generated
 CMakeUserPresets.json
 *.user

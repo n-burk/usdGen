@@ -35,7 +35,7 @@
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 #include "pxr/base/tf/registryManager.h"
-#include "pxr/usd/sdf/path.h"
+#include "usdGenImaging/usdGenImagingSession.h"
 
 #include <atomic>
 #include <cstdint>
@@ -106,7 +106,7 @@ private:
     void _ForgetGroomsUnder(SdfPath const &path) const;
     // Description resolution: the UsdGenDescription child under an adopted
     // groom root (SI-6 fixture: /groomA/descA). Caller holds _stateMutex.
-    void _ResolveDescriptionLocked(
+    bool _ResolveDescriptionLocked(
         _Groom &groom, HdSceneIndexBaseRefPtr const &input) const;
 
     // Notice routing + commits (06 §3.2, §3.9).
@@ -123,8 +123,27 @@ private:
     void _ReplaySurfaceDirty() const;
     void _CommitNow(usdGen::UsdGenCommitReason reason, bool republishNeeded) const;
 
-    // Publication (06 §3.4, §3.4.1, §5.1): session republish callback body.
-    void _Republish(_Groom &groom, usdGen::UsdGenCommitReason reason) const;
+    // Publication (06 §3.4, §3.4.1, §5.1): payload state update.
+    // Caller must NOT hold _stateMutex (locks internally for the map swap;
+    // notice forward runs after it releases). Attachment fields are
+    // immutable after construction (Review 5); membership validated by the
+    // caller (ByRoot exact-identity check).
+    void _RepublishLocked(
+        _Groom &groom,
+        ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const;
+    // Root-keyed wrapper for the republish callback (lock discipline:
+    // resolves the live slot, then calls _Republish unlocked).
+    void _RepublishByRoot(
+        SdfPath const &groomRoot,
+        ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const;
+
+    // StormSurgery test accessors (testHook.h): lock-free snapshot reads
+    // over the adopted groom's published map. Defined in the .cpp so the
+    // _Groom layout stays private.
+    int64_t _TestPublishedGeneration(SdfPath const &groom) const;
+    size_t _TestPublishedTileCount(SdfPath const &groom) const;
+    // StormSurgery hook reads the private snapshot via the accessors above.
+    friend class UsdGenImagingTestHook;
     static HdDataSourceLocatorSet _DirtiedLocatorsFor(
         usdGen::UsdGenTileDirty const &reportTile,
         usdGen::UsdGenGeneration const &gen, size_t tileIdx,
@@ -136,7 +155,11 @@ private:
     int _renderInstanceId = 0;
 
     mutable std::mutex _stateMutex;   // guards everything below
-    std::vector<std::unique_ptr<_Groom>> _grooms;
+    // Shared ownership: Work snapshots and _RepublishByRoot hold STRONG
+    // refs (lifetime by refcount, never a flag); callbacks hold WEAK refs
+    // and lock() at invocation (expired ⇒ no-op). No raw g.get()/self
+    // captures on the publish path.
+    std::vector<std::shared_ptr<_Groom>> _grooms;
     std::atomic_flag _populated;      // one-shot population attempt (06 §3.1)
     std::vector<HdSceneIndexObserver::AddedPrimEntry> _pendingAdd;
     std::vector<SdfPath> _pendingRemove;

@@ -88,6 +88,22 @@ void HashVec3(uint32_t seed, uint64_t curveId, float out[3])
 
 }  // namespace
 
+#ifdef USDGEN_USE_GPU_NOISE
+// GPU path for Capture (CUDA1b; noise_gpu.cu). Returns false if the
+// device, a transfer, or the launch fails — Capture then falls through
+// to the CPU loop below.
+bool UsdGenNoiseCaptureGPU(const float *base,
+                           const float *cvT,
+                           float frequency,
+                           int octaves,
+                           float lacunarity,
+                           float gain,
+                           int nCurves,
+                           int nCV,
+                           float *field,
+                           float *perCurve);
+#endif
+
 static TfTokenVector _topoParams = [] {
     TfTokenVector v = UsdGenBaseTopologyParams();
     auto m = UsdGenMaskTopologyParams();
@@ -233,6 +249,35 @@ bool UsdGenNoiseOp::Capture(
     cap.perCv.resize(nCv);
     cap.perCurve.resize(nCurve);
 
+    #ifdef USDGEN_USE_GPU_NOISE
+    // CUDA path (CUDA1b): the kernel pins the same field as the CPU
+    // loop below — one thread per curve; the host precomputes the
+    // rest-pinned base positions and the per-CV t-values.
+    if (cvCount > 0) {
+        std::vector<float> base(nCurve * 3u);
+        std::vector<float> cvT(nCv);
+        for (size_t c = 0; c < nCurve; ++c) {
+            float hvec[3];
+            HashVec3(ctx.seed, ids ? ids[c] : 0, hvec);
+            const GfVec3f root =
+                GfVec3f(px[c * cvCount], py[c * cvCount], pz[c * cvCount]);
+            for (int k = 0; k < 3; ++k)
+                base[c * 3 + k] = root[k] * correlation + (1.0f - correlation) * hvec[k];
+        }
+        for (size_t i = 0; i < nCv; ++i) {
+            const int j = int(i % (size_t)cvCount);
+            cvT[i] = hairT
+                ? hairT[i]
+                : (cvCount > 1 ? float(j) / float(cvCount - 1) : 0.0f);
+        }
+        if (UsdGenNoiseCaptureGPU(base.data(), cvT.data(), frequency, octaves,
+                                  lacunarity, gain, int(nCurve), cvCount,
+                                  cap.perCv.data(), cap.perCurve.data())) {
+            return true;
+        }
+    }
+    #endif
+
     // Pin the fBm field: sample positions are rest-pinned (I3) —
     //   pos[c, i] = rootRest[c] * correlation + (1 - correlation) * h_c
     //               + (0, 0, hairT[i] * frequency)
@@ -250,6 +295,8 @@ bool UsdGenNoiseOp::Capture(
         const float baseY = root[1] * correlation + (1.0f - correlation) * hvec[1];
         const float baseZ = root[2] * correlation + (1.0f - correlation) * hvec[2];
 
+        const float captureFrequency = frequency;
+
         float rootOut = 0.0f;
         {
             const float in3[3] = {baseX, baseY, baseZ};
@@ -263,7 +310,7 @@ bool UsdGenNoiseOp::Capture(
                 const float t = hairT
                     ? hairT[c * cvCount + i]
                     : (cvCount > 1 ? float(i) / float(cvCount - 1) : 0.0f);
-                const float in3[3] = {baseX, baseY, baseZ + t * frequency};
+                const float in3[3] = {baseX, baseY, baseZ + t * captureFrequency};
                 float out1 = 0.0f;
                 SeExpr2::FBM<3, 1, false, float>(in3, &out1,
                                                  octaves, lacunarity, gain);

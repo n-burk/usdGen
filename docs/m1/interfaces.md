@@ -485,7 +485,7 @@ The `usdGen/rest` container publishes the REST surface of a bound Mesh:
 primary uv set). Rest points are sampled at `UsdTimeCode::Default()` by a
 custom `UsdImagingDataSourceMapped::AttributeMapping::factory` whose data
 source calls `Get<T>(&r, UsdTimeCode::Default())` — the rest channel costs
-no per-frame dirty even when scene time moves (MEASURED, research/
+no per-frame dirty even when scene time moves (MEASURED, plan/research/
 G-stage-free-parameter-and-time-transport.md §3 route R2). Capture-on-first-
 cook is rejected (S12).
 

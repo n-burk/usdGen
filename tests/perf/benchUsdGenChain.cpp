@@ -20,7 +20,6 @@
 #include "pxr/base/vt/array.h"
 
 #include <algorithm>
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -174,8 +173,12 @@ bool SameArray(A const &a, A const &b)
 
 }  // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+   if (argc > 1 && std::string(argv[1]) == "--ragged") {
+       std::printf("ragged: UNMEASURED (engine ops pending)\\n");
+       return 0;
+   }
     usdGenRegisterM1Operators();
 
     UsdGenEvalContext ctx;

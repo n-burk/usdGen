@@ -32,15 +32,37 @@ _Loc(std::initializer_list<TfToken> tokens)
 /// Locator for a routed parameter. Node paramRouting stores the STRIPPED
 /// name (usdGen: removed by the builder, 02 §0.7), so re-add the prefix
 /// before handing it to the shared property->locator mapping.
+/// Contract §3.2: routes through the SAME pure function as the adapter
+/// (LocatorForProperty), so the §3.1 debug assert below guards both paths.
+/// The sibling set here is the node's own compiled param-name set: ancestor
+/// status is evaluated against the names this node actually routes, which is
+/// exactly the set the adapter maps for the node's prim type. NO
+/// key-matching logic changes (longest-prefix + Intersects is
+/// shape-agnostic).
 HdDataSourceLocator
-_ParamLocator(TfToken const &strippedName)
+_ParamLocator(TfToken const &strippedName,
+              TfTokenVector const &siblingStrippedNames)
 {
     std::string s = strippedName.GetString();
     if (s.compare(0, 7, "usdGen:") != 0) {
         s = "usdGen:" + s;
     }
+    // Rebuild the sibling set in full usdGen:-prefixed form for the
+    // ancestor pass (contract §3.1 pseudocode takes full property names).
+    TfTokenVector siblings;
+    siblings.reserve(siblingStrippedNames.size());
+    for (TfToken const &n : siblingStrippedNames) {
+        std::string ns = n.GetString();
+        if (ns.compare(0, 7, "usdGen:") != 0) {
+            ns = "usdGen:" + ns;
+        }
+        siblings.push_back(TfToken(ns));
+    }
+    // Routed params are attributes (relationships route as graph edges via
+    // curveRefs/mapRefs below, never through paramRouting).
     return HdDataSourceLocator(UsdGenContainerToken())
-        .Append(UsdGenPrimAdapterBase::LocatorForProperty(TfToken(s)));
+        .Append(UsdGenPrimAdapterBase::LocatorForProperty(
+            TfToken(s), /*isRelationship=*/false, siblings));
 }
 
 size_t
@@ -88,10 +110,26 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraph const &graph)
         }
 
         // 02 §6 value rows: every routed parameter of the node.
+        // Sibling set = the node's own compiled param names (contract
+        // §3.2): the ancestor pass sees exactly the routed set.
+        TfTokenVector siblingNames;
+        siblingNames.reserve(node.paramRouting.size());
         for (auto const &routing : node.paramRouting) {
+            siblingNames.push_back(routing.first);
+        }
+        for (auto const &routing : node.paramRouting) {
+            HdDataSourceLocator const loc =
+                _ParamLocator(routing.first, siblingNames);
+            // Contract §3.1 debug assert: every paramRouting name resolves
+            // to a mapped absolute locator. The adapter's cached
+            // Mappings(type) is authoritative — flag staleness loudly.
+            // (Both the container path and this dirty path route through
+            // the one pure LocatorForProperty, so this assert guards both.)
+            TF_VERIFY(!loc.IsEmpty(),
+                      "usdGen: routed param '%s' has no mapped locator",
+                      routing.first.GetText());
             table[node.desc->path].prefixes.emplace_back(
-                _ParamLocator(routing.first),
-                Entry{node.id, routing.second});
+                loc, Entry{node.id, routing.second});
         }
 
         // 02 §6 surface rows: deformation of the node's bound surface and

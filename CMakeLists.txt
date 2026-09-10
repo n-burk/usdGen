@@ -46,7 +46,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 # Per-target cache variables (plan §3.5.2)
 # ---------------------------------------------------------------------------
 set(USDGEN_FP_CONTRACT off CACHE STRING
-    "-ffp-contract value for usdGenMath only (off|fast)")
+    "-ffp-contract value for usdGenMath, usdGen_seexpr and noise.cpp (GPU parity) (off|fast)")
 set_property(CACHE USDGEN_FP_CONTRACT PROPERTY STRINGS off fast)
 
 set(USDGEN_INSTALL_LIBDIR     "lib"         CACHE PATH "lib dir")
@@ -82,6 +82,9 @@ set_target_properties(usdGen_seexpr PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
+# GPU parity: Noise.cpp must not contract; the CUDA kernel pins its bit patterns with --fmad=false (mirrors usdGenMath).
+target_compile_options(usdGen_seexpr PRIVATE
+    -ffp-contract=${USDGEN_FP_CONTRACT})
 # N-7 (plan §1.2): SeExpr2 headers are never installed — usdGen_seexpr only
 # exists to compile Noise.cpp into the hidden archives, is never installed
 # or exported, so no header rule is emitted (supersedes the sol S-6
@@ -109,6 +112,14 @@ set_target_properties(usdGenMath PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
+
+# GPU parity: noise.cpp computes the Capture field the kernel replicates bit-exactly; no contraction (mirrors usdGenMath).
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-ffp-contract=${USDGEN_FP_CONTRACT}" USDGEN_FP_CONTRACT_OK)
+if(USDGEN_FP_CONTRACT_OK)
+    set_source_files_properties(libs/usdGen/usdGen/ops/noise.cpp PROPERTIES
+        COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
+endif()
 
 # ---------------------------------------------------------------------------
 # usdGen (SHARED — the engine core, no usd/usdImaging/hd linkage)
@@ -254,6 +265,66 @@ file(COPY
 file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/hairLook.usda"
     DESTINATION "${_usdgen_shader_resources}")
+
+# ---------------------------------------------------------------------------
+# Optional GPU noise (CUDA) — .omp/gpu-backend-feasibility.md / cuda-0-triage.md
+# ---------------------------------------------------------------------------
+# SeExpr2::FBM<3,1,false,float> (noise.cpp:181-277) gains a CUDA kernel
+# (noise_gpu.cu, landed by a later step). Default OFF: without it no CUDA
+# compiler, toolkit, or language is involved, so configure stays green on
+# GPU-less CI hosts.
+option(USE_GPU_NOISE
+    "Build the CUDA noise kernel for usdGen noise ops (requires CUDA toolchain)" OFF)
+if(USE_GPU_NOISE)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(FATAL_ERROR "USE_GPU_NOISE=ON but no CUDA compiler was found; "
+            "install a CUDA toolkit or set CMAKE_CUDA_COMPILER")
+    endif()
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    # Exact float op order vs the CPU FBM path (04 §2.9): no fused FMA.
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --fmad=false")
+    # Configure-time arch probe: the GB10 dev host is sm_121; try sm_121
+    # first, fall back to sm_120. A trivial kernel is compiled directly
+    # with nvcc per arch (-gencode); first success wins.
+    file(WRITE "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.cu"
+        "__global__ void usdgen_cuda_arch_probe() {}\n")
+    set(USDGEN_CUDA_ARCH "")
+    foreach(_arch 121 120)
+        execute_process(
+            COMMAND "${CMAKE_CUDA_COMPILER}" -c
+                    "-gencode=arch=compute_${_arch},code=sm_${_arch}"
+                    "-o" "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.o"
+                    "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.cu"
+            RESULT_VARIABLE _usdgen_cuda_arch_rc
+            OUTPUT_QUIET ERROR_QUIET)
+        if(_usdgen_cuda_arch_rc EQUAL 0)
+            set(USDGEN_CUDA_ARCH "${_arch}")
+            break()
+        endif()
+    endforeach()
+    if(NOT USDGEN_CUDA_ARCH)
+        message(FATAL_ERROR "USE_GPU_NOISE=ON: no CUDA architecture in "
+            "(sm_121, sm_120) compiles with ${CMAKE_CUDA_COMPILER}")
+    endif()
+    set(CMAKE_CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}" CACHE STRING
+        "CUDA arch for the noise kernel (probed at configure time)" FORCE)
+    # usdGen (line 117) predates the variable, so its empty default was
+    # frozen at creation: pin the property explicitly.
+    set_target_properties(usdGen PROPERTIES CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}")
+    message(STATUS "usdGen GPU noise: CUDA ${CUDAToolkit_VERSION}, arch sm_${USDGEN_CUDA_ARCH}")
+    # The kernel lands at libs/usdGen/usdGen/ops/noise_gpu.cu (CUDA1b); wire
+    # it into usdGen the moment the file exists (hook stays inert until then).
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/ops/noise_gpu.cu")
+        target_sources(usdGen PRIVATE libs/usdGen/usdGen/ops/noise_gpu.cu)
+        # Enables the #ifdef USDGEN_USE_GPU_NOISE branch in noise.cpp (04 §2.9).
+        target_compile_definitions(usdGen PRIVATE USDGEN_USE_GPU_NOISE)
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -444,6 +515,35 @@ foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
 endforeach()
 set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
+
+# ---- P4 / SI-10: testUsdGenSessions registration ----
+# Two indices on one session ⇒ identical generation, prim set and frame for one commit.
+# Adds testUsdGenSessions as a T1 gate:SI-10 test (imaging lane).
+# Placement: after the existing testUsdGenInvalidation block (~line 446).
+
+add_executable(testUsdGenSessions
+    tests/testUsdGenSessions.cpp
+)
+target_link_libraries(testUsdGenSessions
+    PUBLIC usdGen
+    PUBLIC usdGenImaging
+)
+set_target_properties(testUsdGenSessions PROPERTIES
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
+add_test(NAME testUsdGenSessions
+    COMMAND testUsdGenSessions
+)
+set_tests_properties(testUsdGenSessions
+    PROPERTIES
+    LABELS "T1;gate:SI-10"
+    TIMEOUT 120
+)
+
+# Note: testUsdGenInvalidation already carries T1;gate:SI-2 (set at line ~446).
+# The SI-2 overlay extension (bare primvars locator, section 7) is appended
+# within that same test and shares its executable; no new CMake target needed.
 set_tests_properties(testUsdGenScheduling PROPERTIES LABELS "T1;gate:SI-3")
 set_tests_properties(testUsdGenSnapshotRace PROPERTIES LABELS "T1;gate:SI-4")
 set_tests_properties(testUsdGenPopulation PROPERTIES LABELS "T1;gate:SI-6")
@@ -489,6 +589,8 @@ set_tests_properties(testUsdGenStormLook PROPERTIES
 
 add_executable(benchUsdGenStorm tests/perf/benchUsdGenStorm.cpp)
 target_link_libraries(benchUsdGenStorm PRIVATE usdGenTestUtilsHd)
+target_include_directories(benchUsdGenStorm PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
 add_test(NAME benchUsdGenStorm COMMAND benchUsdGenStorm)
 set_tests_properties(benchUsdGenStorm PROPERTIES
     LABELS "T2;perf;gate:S-1;gate:S-5;gate:S-6;gate:S-12"
@@ -507,12 +609,15 @@ set(_usdgen_storm_labels_testUsdGenStormTangent  "T2;gate:S-8")
 set(_usdgen_storm_labels_testUsdGenStormHgiResource "T2;gate:S-8")
 set(_usdgen_storm_labels_testUsdGenStormRefine   "T2;gate:S-9")
 set(_usdgen_storm_labels_testUsdGenStormMaterial "T2;gate:L-1")
+set(_usdgen_storm_labels_testUsdGenStormSurgery  "T2")
 foreach(_t testUsdGenStormTangent testUsdGenStormHgiResource
-           testUsdGenStormRefine  testUsdGenStormMaterial)
+           testUsdGenStormRefine  testUsdGenStormMaterial
+           testUsdGenStormSurgery)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_t}.cpp")
         add_executable(${_t} tests/${_t}.cpp)
         target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
-        set(_usdgen_storm_cmd ${_t})
+        target_include_directories(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
+        set(_usdgen_storm_cmd ${_t} ${PROJECT_SOURCE_DIR})
         set(_usdgen_storm_props SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
     else()
         set(_usdgen_storm_cmd
@@ -526,6 +631,7 @@ foreach(_t testUsdGenStormTangent testUsdGenStormHgiResource
         ENVIRONMENT "${_usdgen_m1_env}"
         ${_usdgen_storm_props})
 endforeach()
+
 
 # ---------------------------------------------------------------------------
 # M0 install-tree tests (plan §6.2, sol S-5/X-4)

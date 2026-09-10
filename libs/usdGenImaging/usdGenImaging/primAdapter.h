@@ -61,6 +61,12 @@ public:
     /// `usdGen:clump:size` -> `clump/size` (the RELATIVE locator; Mappings
     /// makes it absolute under the `usdGen` prefix). Non-usdGen names are
     /// not expected (skip-list filtering); the name passes through.
+    /// 3-arg form implements the locator contract (.omp/locator-
+    /// contract.md §2 FINAL RULE): strict-ancestor properties take
+    /// `-value`/`-rel` on the final element (per prim-type sibling set).
+    static HdDataSourceLocator LocatorForProperty(
+        TfToken const &property, bool isRelationship,
+        TfTokenVector const &siblings);
     static HdDataSourceLocator LocatorForProperty(TfToken const &property);
 
     /// True for the two relationships 02-schema.md §2 declares "exactly one

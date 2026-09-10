@@ -4,7 +4,7 @@
 
 Roadmap `plan/11-roadmap.md` §1.1, PW-3 row (line 111):
 
-> | **PW-3** | S-9 | whether a refineLevel-1 tumble tier ships as an M5 LOD option (ADR §5.5, S31) | same harness, 200 k × 8 CV, `displayStyle/refineLevel` 2 → 1 → 2 every ten frames: ships under 3 ms of switch cost, else LOD is decimation only. Steady state MEASURED 8.17 vs 23.93 ms (row `EV-021`; `research/G-storm-hair-look-prototype.md` §5) |
+> | **PW-3** | S-9 | whether a refineLevel-1 tumble tier ships as an M5 LOD option (ADR §5.5, S31) | same harness, 200 k × 8 CV, `displayStyle/refineLevel` 2 → 1 → 2 every ten frames: ships under 3 ms of switch cost, else LOD is decimation only. Steady state MEASURED 8.17 vs 23.93 ms (row `EV-021`; `plan/research/G-storm-hair-look-prototype.md` §5) |
 
 Gate S-9 (`plan/09-performance-and-benchmarks.md` §5): *"refineLevel 1 vs 2 **and the switch cost** | switch < 3 ms ⇒ the tumble tier ships as an option | `testUsdGenStormRefine` on G4 | M0 pre-work (PW-3), **decides M1** | UNMEASURED switch; the 8.17 vs 23.93 ms lever is MEASURED (EV-021)."*
 
@@ -218,7 +218,7 @@ RESULT scene=scene_200k_B.usdc res=1280x720 complexity=1.2 curves=200000 cvs=160
 
 Stable across harnesses: **r1 ≈ 26.4–27.0 ms, r2 ≈ 28.4–29.1 ms** (steady, frames 2..39 mean ≈ 26.8 / 28.9).
 
-### 3.4 Comparison against EV-021 (idle-host baseline, Sep 4, `research/G-storm-hair-look-prototype.md` §5)
+### 3.4 Comparison against EV-021 (idle-host baseline, Sep 4, `plan/research/G-storm-hair-look-prototype.md` §5)
 
 | Level | EV-021 (idle host) | Re-measured (this host, GPU ~96 % busy) | Δ |
 |---|---:|---:|---:|

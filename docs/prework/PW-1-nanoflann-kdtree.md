@@ -4,7 +4,7 @@
 
 Roadmap `plan/11-roadmap.md` §1.1, PW-1 row (line 109):
 
-> | **PW-1** | E-4 | the M3 capture schedule for `UsdGenGuideInterpolate` and `UsdGenClump` | vendored nanoflann 1.12.1 (S38), `KDTreeSingleIndexAdaptor<L2_Simple_Adaptor<float, Cloud>, Cloud, 3>` — exact template arity **UNVERIFIED**: nanoflann is not on this host and `research/A8-seexpr-ptex-libs.md` §5 quotes the upstream README, so PW-1's first step is to vendor the header and confirm the instantiation compiles. k = 3 over 4 000 guide roots for 100 k and 1 M rest roots at 1/4/8/20 threads: ≤ 25 ms at 100 k on 8 threads and linear in roots; > 300 ms at 1 M triggers SC-6. Today's only figure, `design/proposal-performance.md` §5.6's "~10 ms", is an ASSUMPTION (`design/judge-delivery.md` §5 item 6) |
+> | **PW-1** | E-4 | the M3 capture schedule for `UsdGenGuideInterpolate` and `UsdGenClump` | vendored nanoflann 1.12.1 (S38), `KDTreeSingleIndexAdaptor<L2_Simple_Adaptor<float, Cloud>, Cloud, 3>` — exact template arity **UNVERIFIED**: nanoflann is not on this host and `plan/research/A8-seexpr-ptex-libs.md` §5 quotes the upstream README, so PW-1's first step is to vendor the header and confirm the instantiation compiles. k = 3 over 4 000 guide roots for 100 k and 1 M rest roots at 1/4/8/20 threads: ≤ 25 ms at 100 k on 8 threads and linear in roots; > 300 ms at 1 M triggers SC-6. Today's only figure, `plan/design/proposal-performance.md` §5.6's "~10 ms", is an ASSUMPTION (`plan/design/judge-delivery.md` §5 item 6) |
 
 Gate E-4 (`plan/09-performance-and-benchmarks.md` line 558): *nanoflann kNN capture, 100 k / 1 M rest roots, 4 k guides, 8 threads — ≤ 25 ms at 100 k and linear in roots (ASSUMPTION). Stop: > 300 ms at 1 M ⇒ SC-6. M0 pre-work (PW-1), binding M3. Status before this run: UNMEASURED — the only capture term with no number.*
 
@@ -99,7 +99,7 @@ ACCEPTANCE:
 | 1M rest roots, 8 threads (median) | **48.5 ms** (p95 51.3) | > 300 ms ⇒ SC-6 | **Not triggered** (6.2× below stop line) |
 | Build (4k guides, any thread count) | 0.23–0.40 ms | — | Negligible |
 
-Superseded assumption: `design/proposal-performance.md` §5.6 "~10 ms" (100k capture) — measured **5.9–6.1 ms at 8 threads**; the assumption was conservative.
+Superseded assumption: `plan/design/proposal-performance.md` §5.6 "~10 ms" (100k capture) — measured **5.9–6.1 ms at 8 threads**; the assumption was conservative.
 
 ## 5. DECISION
 

@@ -66,7 +66,7 @@ def chunk_widths(nvert, cv, frame, frames, start_width):
     w = Vt.FloatArray(nvert)
     for i in range(nvert):
         j = (i % cv) / float(cv - 1) if cv > 1 else 0.0
-        w[i] = max(base * (1.0 - 0.8 * j), 1e-4)
+        w[i] = round(max(base * (1.0 - 0.8 * j), 1e-4), 5)
     return w
 
 
@@ -81,10 +81,12 @@ def define_chunk(stage, path, strands, cv, frames=0, start_width=0.02):
             pts[k] = Gf.Vec3f(p[0], p[1], p[2])
             k += 1
     curves.CreatePointsAttr(pts)
-    curves.CreateCurveVerticesAttr(Vt.IntArray([cv * i for i in range(len(strands))]))
+    curves.CreateCurveVertexCountsAttr(Vt.IntArray([cv] * len(strands)))
     curves.CreateTypeAttr(UsdGeom.Tokens.cubic)
     curves.CreateBasisAttr(UsdGeom.Tokens.bspline)
-    curves.CreateWrapAttr(UsdGeom.Tokens.non)
+    curves.CreateWrapAttr(UsdGeom.Tokens.none)
+    curves.GetPrim().CreateAttribute(
+        "widthsInterpolation", Sdf.ValueTypeNames.Token).Set(UsdGeom.Tokens.vertex)
     width_attr = curves.CreateWidthsAttr()
     width_attr.Set(chunk_widths(nvert, cv, 0, 0, start_width))
     for t in range(frames):
@@ -125,9 +127,13 @@ def add_world(stage, curves):
 def chunks(strands, k):
     n = len(strands)
     k = max(1, min(k, n))
-    per = (n + k - 1) // k
-    return [strands[i * per:(i + 1) * per] for i in range(k)
-            if strands[i * per:(i + 1) * per]]
+    per, rem = divmod(n, k)
+    out, i = [], 0
+    for c in range(k):
+        m = per + (1 if c < rem else 0)
+        out.append(strands[i:i + m])
+        i += m
+    return out
 
 
 def write_stage(path, strands, cv, k, frames=0):

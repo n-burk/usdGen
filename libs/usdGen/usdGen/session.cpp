@@ -284,10 +284,14 @@ UsdGenTilePublication UsdGenSession::_BuildTilePublication(
     GfRange3f bounds;
     uint32_t depSurface = 0;
     bool hasDep = false;
+    bool firstChunk = true;
 
     for (uint32_t i = 0; i < tv.chunkCount; ++i) {
         UsdGenChunkDesc const &cd = tn.chunks[tv.firstChunk + i];
-        if (cd.surface != 0) { depSurface = cd.surface; hasDep = true; }
+        // id 0 is a legitimate surface (compiler.cpp assigns dense indices
+        // from 0): the first chunk of the tile always establishes the
+        // dependency, never a `!= 0` sentinel.
+        if (firstChunk) { depSurface = cd.surface; hasDep = true; firstChunk = false; }
         for (uint32_t c = 0; c < cd.liveCount; ++c) {
             const uint32_t g = cd.firstCurve + c;
             uint32_t p0 = 0, len = 0;
@@ -303,7 +307,16 @@ UsdGenTilePublication UsdGenSession::_BuildTilePublication(
                 const uint32_t p = p0 + v;
                 if (p >= term.px.size()) break;
                 pub.points.emplace_back(term.px[p], term.py[p], term.pz[p]);
-                pub.widths.push_back(p < term.width.size() ? term.width[p] : 0.0f);
+                // C2 (06 §4.1): widths/hairT are vertex channels on every
+                // tile. A chain whose terminal never wrote them (grow-only:
+                // kPlanePoints|kPlaneHairT) still publishes FULL-SIZE planes
+                // from desc defaults (02 §2.6/§2.14: width 0.01, look bake),
+                // never a wrong-size array — SI-1 sizes every non-empty
+                // vertex plane against points.
+                float w = 0.01f;
+                if (p < term.width.size()) w = term.width[p];
+                else if (!term.width.empty()) w = term.width.back();
+                pub.widths.push_back(w);
                 pub.hairT.push_back(p < term.hairT.size() ? term.hairT[p] : 0.0f);
             }
             // hairId: UsdGenHash32(curveId, 0) / 2^32 in [0,1) (06, S29).
@@ -313,6 +326,8 @@ UsdGenTilePublication UsdGenSession::_BuildTilePublication(
                 pub.st.push_back(term.rootUV[g]);
             if (displayColor)
                 _GatherColor(*displayColor, g, p0, &pub.displayColor);
+            else if (_desc.look.bakeTarget != TfToken("none"))
+                pub.displayColor.push_back(_desc.look.rootColor);
             for (size_t k = 0; k < uniformPlanes.size(); ++k)
                 _GatherPlane(*uniformPlanes[k], g, p0, /*wantUniform=*/true,
                              &extra[k]);
@@ -328,10 +343,13 @@ UsdGenTilePublication UsdGenSession::_BuildTilePublication(
         pub.extraUniform.push_back(std::move(out));
     }
 
-    // Extent: recomputed every deforming frame (C2 extent rule). Tile
-    // extents come from the interleave pass; fall back to a unit-safe
-    // default so extent/min|max is never inverted.
-    GfRange3f e = tv.extent;
+    // Extent is a pure function of the published points (03 §6.3: min/max
+    // fused into the interleave loop — but InterleaveTile skips untouched
+    // tiles, so tv.extent is empty on any tile this commit did not evaluate
+    // while its points are real). Reduce over pub.points in memory: same
+    // (g,p0,len) ragged walk already emitted them above, one cheap pass.
+    GfRange3f e;
+    for (GfVec3f const &pt : pub.points) e.ExtendBy(pt);
     if (e.IsEmpty()) e = GfRange3f(GfVec3f(0.f), GfVec3f(0.f));
     pub.extentMin = GfVec3d(e.GetMin()[0], e.GetMin()[1], e.GetMin()[2]);
     pub.extentMax = GfVec3d(e.GetMax()[0], e.GetMax()[1], e.GetMax()[2]);

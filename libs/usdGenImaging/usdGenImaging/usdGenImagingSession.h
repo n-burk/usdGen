@@ -119,12 +119,32 @@ public:
     void MarkNeedsDesc() noexcept { _needsDesc.store(true); }
     bool NeedsDesc() const noexcept { return _needsDesc.load(); }
 
-    /// Republish hooks (06 §3.7 "each index republishes the same
-    /// generation"): invoked after a Commit that published, on the commit
-    /// thread, with the reason. Callbacks must not block on GetPrim.
-    int RegisterRepublishCallback(
-        std::function<void(usdGen::UsdGenCommitReason)> cb);
-    void UnregisterRepublishCallback(int token);
+    /// Immutable per-commit payload for republish callbacks (P0 races):
+    /// the generation published by THIS commit plus a COPY of its dirty
+    /// report. Callbacks must never reread live Engine()->Generation() /
+    /// LastReport() — a concurrent commit can replace them mid-iteration
+    /// (report/generation pairing + data race). Empty published==false
+    /// means "nothing published, no republish".
+    struct CommitPayload {
+        bool published = false;
+        usdGen::UsdGenGenerationConstPtr generation;
+        usdGen::UsdGenDirtyReport report;
+    };
+
+    /// Atomic desc-dirty consume for staging (S14): returns true and clears
+    /// the flag when a desc pull is owed. Marks arriving after consumption
+    /// stay set for the next commit (no lost ReloadMaps/structural marks).
+    bool ConsumeNeedsDesc() noexcept
+    {
+        return _needsDesc.exchange(false);
+    }
+
+    /// Stage a built desc through the session (Review 2): the SetGraphDesc
+    /// runs serialized with the engine Commit below (same commit-mutex
+    /// path), so a concurrent app-thread commit cannot interleave between
+    /// staging and commit. Called by the owning index after
+    /// ConsumeNeedsDesc, before Commit — all unlocked from _stateMutex.
+    void StageDesc(usdGen::UsdGenGraphDesc const &desc);
 
     /// Monotonic publication generation (UsdGenImaging_GetGeneration).
     int64_t Generation() const noexcept;
@@ -134,8 +154,13 @@ public:
     int AttachedIndices() const noexcept;
     void NoteAttach();
     void NoteDetach();
-
-private:
+    /// Republish hooks (06 §3.7 "each index republishes the same
+    /// generation"): invoked after a Commit that published, on the commit
+    /// thread, with THIS commit's immutable payload. Callbacks must not
+    /// block on GetPrim and must not reread live engine state.
+    int RegisterRepublishCallback(
+        std::function<void(CommitPayload const &)> cb);
+    void UnregisterRepublishCallback(int token);
     UsdGenSessionKey        _key;
     std::shared_ptr<usdGen::UsdGenSession> _engine;
     double                    _frame = 0.0;
@@ -147,8 +172,12 @@ private:
 
     // Callbacks are copied under _republishMutex and invoked with the lock
     // released, so a callback may re-enter the session (GetPrim, Detach).
+    // Staging serialization (Review 2): StageDesc + Commit run under
+    // _stageCommitMutex so a concurrent store-level commit cannot
+    // interleave between staging and commit. Never _stateMutex-adjacent.
     std::mutex _republishMutex;
-    std::vector<std::pair<int, std::function<void(usdGen::UsdGenCommitReason)>>>
+    std::mutex _stageCommitMutex;
+    std::vector<std::pair<int, std::function<void(CommitPayload const &)>>>
         _callbacks;
     int _nextCallbackToken = 0;
 };

@@ -32,14 +32,17 @@
 #include "pxr/pxr.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/sceneIndex.h"
+#include "pxr/usd/usd/timeCode.h"
 #include "pxr/imaging/hd/tokens.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <memory>
 #include <set>
@@ -68,7 +71,15 @@ const int kCurveCount = 32768;   // >= 32768 per plan 05's SI-1 fixture size
 const int kVertsPerCurve = 4;
 
 // ---------------------------------------------------------------------------
-// Synthetic desc: 32768 straight 2-point guide curves feeding one UsdGenGrow.
+// Synthetic desc: a surface-scatter generator feeding one UsdGenGrow, the
+// canonical M1 groom shape. A generator is required for tiles to exist at
+// all: the scheduler only (re)partitions the tile set when a generator's
+// capture yields curves (scheduler.cpp "Generators establish/refresh the
+// topology"), and the M1 reference lane does not materialize curveSets into
+// buffers (scheduler.cpp header: 03 §1.5). ~32 940 roots come out of a
+// 18.15x18.15 mesh at the default density 100, >= the 32 768 SI-1 fixture
+// size; guides ride along as a declared Reference curveSet (R23).
+
 // ---------------------------------------------------------------------------
 UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
 {
@@ -77,6 +88,7 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
     d.terminal = descPath.AppendChild(TfToken("grow"));
     d.tileTarget = 64;
     d.curveBasis = TfToken("bspline");
+    d.xformMatrix = GfMatrix4d(1.0);   // stage-side: post-flattening desc matrix
     d.purpose = TfToken("render");
     d.visibility = TfToken("invisible");
     d.materialPath = descPath.AppendChild(TfToken("look")).AppendChild(TfToken("material"));
@@ -103,13 +115,41 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
     guides.widths = VtFloatArray(size_t(kCurveCount) * kVertsPerCurve, 1.0f);
     d.curveSets.push_back(std::move(guides));
 
+    // Generator surface: a flat 4x4-corner grid scaled so rest area is
+    // 18.15^2 = 329.42; at the default density 100 scatter emits ~32 940
+    // roots (>= kCurveCount), spread over 9 faces.
+    UsdGenSurfaceDesc surf;
+    surf.path = descPath.AppendChild(TfToken("surface"));
+    surf.id = 0;
+    surf.faceVertexCounts = VtIntArray(9, 4);
+    surf.faceVertexIndices = VtIntArray{0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6,
+                                        4, 5, 9, 8, 5, 6, 10, 9, 6, 7, 11, 10,
+                                        8, 9, 13, 12, 9, 10, 14, 13, 10, 11, 15, 14};
+    surf.restPoints.resize(16);
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i)
+            surf.restPoints[size_t(j) * 4 + i] =
+                GfVec3f(6.05f * i, 6.05f * j, 0.0f);
+    d.surfaces.push_back(std::move(surf));
+
+    UsdGenNodeDesc scatter;
+    scatter.path = descPath.AppendChild(TfToken("scatter"));
+    scatter.type = TfToken("UsdGenScatter");
+    scatter.enabled = true;
+    scatter.blend = 1.0f;
+    scatter.seed = 11;
+    scatter.surfaces.push_back(surf.path);
+    scatter.params.push_back(UsdGenParamValue{TfToken("flip"), VtValue(false), false});
+    d.nodes.push_back(std::move(scatter));
+
     UsdGenNodeDesc grow;
     grow.path = descPath.AppendChild(TfToken("grow"));
     grow.type = TfToken("UsdGenGrow");
     grow.enabled = true;
     grow.blend = 1.0f;
     grow.seed = 7;
-    grow.curves = { guides.path };
+    grow.inputs = { descPath.AppendChild(TfToken("scatter")) };   // scatter's roots
+    grow.params.push_back(UsdGenParamValue{TfToken("segments"), VtValue(8), false});
     grow.params.push_back(UsdGenParamValue{TfToken("width"), VtValue(width), false});
     d.nodes.push_back(std::move(grow));
     return d;
@@ -129,11 +169,54 @@ std::string TilePathRegexCheck(SdfPath const &descPath, UsdGenTileId tile)
     return prefix ? std::string() : ("path is " + s + ", expected " + buf);
 }
 
-std::set<std::string> ChildNames(HdContainerDataSource &c)
+std::set<std::string> ChildNames(HdContainerDataSourceHandle const &c)
 {
     std::set<std::string> names;
-    for (TfToken const &t : c.GetNames()) names.insert(t.GetString());
+    if (!c) return names;
+    for (TfToken const &t : c->GetNames()) names.insert(t.GetString());
     return names;
+}
+
+// 26.08 has no HdDataSourceIsIdentical: compare leaf VtValues recursively.
+bool ValuesIdentical(HdDataSourceBaseHandle const &a, HdDataSourceBaseHandle const &b)
+{
+    HdContainerDataSourceHandle ca = HdContainerDataSource::Cast(a);
+    HdContainerDataSourceHandle cb = HdContainerDataSource::Cast(b);
+    if (ca || cb) {
+        if (!ca || !cb) return false;
+        if (ca->GetNames() != cb->GetNames()) return false;
+        for (TfToken const &t : ca->GetNames())
+            if (!ValuesIdentical(ca->Get(t), cb->Get(t))) return false;
+        return true;
+    }
+    HdSampledDataSourceHandle sa = HdSampledDataSource::Cast(a);
+    HdSampledDataSourceHandle sb = HdSampledDataSource::Cast(b);
+    if (sa && sb) return sa->GetValue(0.0) == sb->GetValue(0.0);
+    return bool(sa) == bool(sb) && !sa;
+}
+
+// Leaf sample value at Default() time, or empty VtValue.
+VtValue LeafValue(HdDataSourceBaseHandle ds)
+{
+    if (HdSampledDataSourceHandle s = HdSampledDataSource::Cast(ds))
+        return s->GetValue(0.0);
+    return VtValue();
+}
+
+// Token-valued leaf, tolerant of TfToken vs std::string storage.
+bool LeafIsToken(VtValue const &v, char const *text)
+{
+    if (v.IsHolding<TfToken>()) return v.UncheckedGet<TfToken>() == TfToken(text);
+    if (v.IsHolding<std::string>()) return v.UncheckedGet<std::string>() == text;
+    return false;
+}
+
+// Int-valued leaf, tolerant of int/int64 storage.
+bool LeafIsInt(VtValue const &v, int64_t expect)
+{
+    if (v.IsHolding<int>()) return int64_t(v.Get<int>()) == expect;
+    if (v.IsHolding<int64_t>()) return v.Get<int64_t>() == expect;
+    return false;
 }
 
 size_t SumCounts(VtIntArray const &counts)
@@ -148,7 +231,6 @@ size_t SumCounts(VtIntArray const &counts)
 int main()
 {
     usdGenRegisterM1Operators();
-    UsdGenTilePublisher::Register();      // idempotent; ensures tokens live
 
     SdfPath const descPath("/groom");
     UsdGenSession session;
@@ -175,6 +257,7 @@ int main()
         if (pub.points.size() != pts) { si1 = false; ++countMismatch; }
         if (pub.hairT.size() != pts) vertexSizes = false;
         if (pub.hairId.size() != curves) uniformSizes = false;
+        if (pub.hairId.empty()) idArrays = false;
         if (pub.st.size() != curves && !pub.st.empty()) uniformSizes = false;
         if (!pub.widths.empty() &&
             pub.widths.size() != curves && pub.widths.size() != pts)
@@ -213,6 +296,7 @@ int main()
     Check(si1, "SI-1: points.size() == sum(curveVertexCounts) on every tile"
                " (mismatches: " + std::to_string(countMismatch) + ")");
     Check(uniformSizes, "uniform primvars sized curveCount on every tile");
+    Check(idArrays, "hairId uniform float array present on every tile (C2)");
     Check(vertexSizes, "vertex primvars sized points on every tile");
     Check(bases, "curve basis == usdGen:curve:basis (bspline) on every tile");
     Check(refines, "refineLevel == 2 (S-9 tier table) on every tile");
@@ -224,48 +308,58 @@ int main()
     // ---- Publisher-built data sources: HdType + C2 child-name set -------
     if (!gen->tiles.empty()) {
         UsdGenTilePublication const &pub = gen->tiles[0];
-        HdDataSourceBaseHandle ds = UsdGenTilePublisher::BuildTileDataSource(pub);
-        Check(bool(ds), "BuildTileDataSource returns a container");
-        if (ds) {
-            Check(ds->GetHdType() == HdType(HfToken("basisCurves")),
-                  "tile prim HdType == basisCurves (got " +
-                      ds->GetHdType().GetString() + ")");
-            if (HdContainerDataSourceHandle c = HdContainerDataSource::Cast(ds)) {
-                std::set<std::string> names = ChildNames(*c);
-                for (char const *req : { "primvars", "extent", "xform", "type", "wrap",
-                                         "refineLevel", "visibility", "purpose",
-                                         "materialBind" }) {
-                    Check(names.count(req) != 0,
-                          std::string("C2 child '") + req + "' published");
+        // T0 scope: BuildTileDataSource is the pure data-source assembler,
+        // so the observable surface here is the container tree the scene
+        // index would hand Hydra. The prim-type token (basisCurves) is a
+        // property of HdSceneIndexPrim, asserted in the T1 imaging test.
+        HdContainerDataSourceHandle c = UsdGenTilePublisher::BuildTileDataSource(pub);
+        Check(bool(c), "BuildTileDataSource returns a container");
+        if (c) {
+            std::set<std::string> names = ChildNames(c);
+            // Contract container is `basisCurves` (06 §4.1); the publisher
+            // also carries displayStyle/purpose/visibility/materialBindings/
+            // primOrigin/__dependencies/generation alongside it.
+            for (char const *req : { "basisCurves", "primvars", "extent", "xform",
+                                     "displayStyle", "purpose", "visibility",
+                                     "materialBindings", "primOrigin" }) {
+                Check(names.count(req) != 0,
+                      std::string("C2 child '") + req + "' published");
+            }
+            if (HdContainerDataSourceHandle topo = HdContainerDataSource::Cast(
+                    c->Get(TfToken("basisCurves")))) {
+                std::set<std::string> tn = ChildNames(topo);
+                for (char const *req : { "curveVertexCounts", "type", "basis", "wrap" }) {
+                    Check(tn.count(req) != 0,
+                          std::string("basisCurves child '") + req + "' published");
                 }
-                if (HdContainerDataSourceHandle primvars =
-                        HdContainerDataSource::Extract(*c, HdTokens->primvars)) {
-                    std::set<std::string> pv = ChildNames(*primvars);
-                    Check(pv.count("usdGenId") == 0,
-                          "usdGenId is NOT published in M1 (S30 reserved)");
-                    for (char const *req : { "points", "widths", "hairT", "hairId", "st",
-                                             "displayColor" }) {
-                        Check(pv.count(req) != 0,
-                              std::string("primvar '") + req + "' published");
-                    }
+                Check(LeafIsToken(LeafValue(topo->Get(TfToken("type"))), "cubic"),
+                      "basisCurves type == cubic (contract constant, C2)");
+                Check(LeafIsToken(LeafValue(topo->Get(TfToken("wrap"))), "pinned"),
+                      "basisCurves wrap == pinned (contract constant, C2)");
+                Check(LeafIsToken(LeafValue(topo->Get(TfToken("basis"))), "bspline"),
+                      "basisCurves basis == usdGen:curve:basis (bspline)");
+            }
+            if (HdContainerDataSourceHandle primvars = HdContainerDataSource::Cast(
+                    c->Get(TfToken("primvars")))) {
+                std::set<std::string> pv = ChildNames(primvars);
+                Check(pv.count("usdGenId") == 0,
+                      "usdGenId is NOT published in M1 (S30 reserved)");
+                Check(pv.count("normals") == 0,
+                      "normals NEVER published (forces Storm ribbon key, C2)");
+                // Always emitted: points/widths/hairT/hairId plus blocked
+                // velocities/accelerations sentinels. st/displayColor/
+                // bakeColor/extra planes ride only when the engine emits
+                // them (look bake / bound data).
+                for (char const *req : { "points", "widths", "hairT", "hairId",
+                                         "velocities", "accelerations" }) {
+                    Check(pv.count(req) != 0,
+                          std::string("primvar '") + req + "' published");
                 }
-                // type/wrap are contract constants, never authored.
-                if (HdValueDataSourceHandle typeDs =
-                        HdValueDataSource::Extract(*c, HfToken("type"))) {
-                    GfToken typeVal;
-                    if (typeDs->Get(HdType::Token(), &typeVal, 1)) {
-                        Check(GfToken(typeVal) == GfToken(TfToken("cubic")),
-                              "topology type == cubic (constant)");
-                    }
-                }
-                if (HdValueDataSourceHandle wrapDs =
-                        HdValueDataSource::Extract(*c, HfToken("wrap"))) {
-                    GfToken wrapVal;
-                    if (wrapDs->Get(HdType::Token(), &wrapVal, 1)) {
-                        Check(GfToken(wrapVal) == GfToken(TfToken("pinned")),
-                              "topology wrap == pinned (constant)");
-                    }
-                }
+            }
+            if (HdContainerDataSourceHandle style = HdContainerDataSource::Cast(
+                    c->Get(TfToken("displayStyle")))) {
+                Check(LeafIsInt(LeafValue(style->Get(TfToken("refineLevel"))), 2),
+                      "displayStyle/refineLevel == 2 (C2, no M1 tumble tier)");
             }
         }
     }
@@ -287,36 +381,149 @@ int main()
                 UsdGenTilePublication const &b = gen2->tiles[i];
                 identical = a.tile == b.tile && a.primPath == b.primPath &&
                     a.points == b.points && a.curveVertexCounts == b.curveVertexCounts;
-                if (HdDataSourceBaseHandle da = UsdGenTilePublisher::BuildTileDataSource(a),
-                    db = UsdGenTilePublisher::BuildTileDataSource(b)) {
-                    if (!HdDataSourceIsIdentical(HdDataSourceBaseHandle(da),
+                HdContainerDataSourceHandle da =
+                    UsdGenTilePublisher::BuildTileDataSource(a);
+                HdContainerDataSourceHandle db =
+                    UsdGenTilePublisher::BuildTileDataSource(b);
+                if (da && db && !ValuesIdentical(HdDataSourceBaseHandle(da),
                                                  HdDataSourceBaseHandle(db)))
-                        dsIdentical = false;
-                }
+                    dsIdentical = false;
             }
         }
         Check(identical, "re-commit of identical desc publishes identical tile payloads");
-        Check(dsIdentical, "re-commit data sources compare HdDataSourceIsIdentical");
+        Check(dsIdentical, "re-commit data sources compare value-identical");
     }
 
     if (gen2 && !gen2->tiles.empty() && !gen->tiles.empty()) {
         // Additive overload (06 §4.1): the container can carry a prim-level
         // `generation` int source with the snapshot id.
-        if (HdContainerDataSourceHandle ca =
-                UsdGenTilePublisher::BuildTileDataSource(gen->tiles[0]),
-            cb = UsdGenTilePublisher::BuildTileDataSource(
-                gen2->tiles[0], int64_t(gen2->id));
-            ca && cb) {
-            Check(ca->Get(TfToken("generation")) == nullptr,
-                  "no generation source without the stamp overload");
-            HdPrimvarAttributeHandle stamp = HdPrimvarAttribute(
-                cb->Get(TfToken("generation")));
-            HdInt64AttributeHandle stampVal = HdInt64Attribute(
-                stamp ? HdPrimvarAttributeGet(stamp) : nullptr);
-            VtValue sv;
-            if (stampVal) sv = stampVal->GetValue();
-            Check(sv.Get<int64_t>() == int64_t(gen2->id),
-                  "stamped generation source carries the snapshot id");
+        HdContainerDataSourceHandle ca =
+            UsdGenTilePublisher::BuildTileDataSource(gen->tiles[0]);
+        HdContainerDataSourceHandle cb =
+            UsdGenTilePublisher::BuildTileDataSource(gen2->tiles[0], int64_t(gen2->id));
+        if (ca && cb) {
+            VtValue sv = LeafValue(cb->Get(TfToken("generation")));
+            bool stampOk = (sv.IsHolding<int>() &&
+                            int64_t(sv.UncheckedGet<int>()) == int64_t(gen2->id)) ||
+                           (sv.IsHolding<int64_t>() &&
+                            sv.UncheckedGet<int64_t>() == int64_t(gen2->id));
+            Check(stampOk, "stamped generation source carries the snapshot id");
         }
+    }
 
-    // ---- Dirty
+    // ---- Path shapes (SI-1): nested, never flat-with-slashes -------------
+    {
+        Check(UsdGenTilePublisher::RenderNamespace() == TfToken("__usdGenRender"),
+              "render namespace token is __usdGenRender (single source of truth)");
+        SdfPath tp = UsdGenTilePublisher::TilePath(descPath, UsdGenTileId(7));
+        Check(tp == descPath.AppendChild(TfToken("__usdGenRender"))
+                        .AppendChild(TfToken("tile_0007")),
+              std::string("TilePath nested, zero-padded: ") + tp.GetText());
+        Check(tp.GetString().find("tile_0007") != std::string::npos &&
+                  tp.GetPathElementCount() == 3,
+              "tile path is 3 elements deep (desc/__usdGenRender/tile_%04u)");
+        SdfPath gp = UsdGenTilePublisher::GuidePath(descPath, TfToken("guideA"));
+        Check(gp == descPath.AppendChild(TfToken("__usdGenRender"))
+                        .AppendChild(TfToken("guides"))
+                        .AppendChild(TfToken("guideA")),
+              std::string("GuidePath nested: ") + gp.GetText());
+    }
+
+    // ---- Dirty -> notice mapping (06 §5.1 channel discipline) -----------
+    // NoticesFor is a pure static of the publisher, so the mapping is graded
+    // unconditionally: the §5.1 bare-leaf precondition (no caching filter
+    // between usdGen and the render index) only constrains a live engine
+    // chain, never these unit assertions. A host-enabled caching scene
+    // index is reported, not graded around.
+    if (char const *cach =
+            std::getenv("USDIMAGINGGL_ENGINE_ENABLE_CACHING_SCENE_INDEX");
+        cach && cach[0] != '\0' && std::string(cach) != "0" &&
+            std::string(cach) != "false" && std::string(cach) != "off") {
+        std::printf("[info] caching scene index enabled (%s); mapping still "
+                    "graded (pure publisher statics)\n", cach);
+    }
+    {
+        auto has = [](std::vector<HdDataSourceLocator> const &v,
+                      std::vector<TfToken> const &path) {
+            for (HdDataSourceLocator const &loc : v) {
+                if (loc.GetElementCount() != path.size())
+                    continue;
+                bool eq = true;
+                for (size_t i = 0; i < path.size(); ++i)
+                    eq = eq && loc.GetElement(i) == path[i];
+                if (eq)
+                    return true;
+            }
+            return false;
+        };
+        const TfToken pv("primvars"), val("primvarValue"), pts("points"),
+            wdt("widths"), ext("extent"), mn("min"), mx("max");
+
+        // §5.1 row 1: points -> bare leaf + extent/min + extent/max.
+        UsdGenTileDirty pointsOnly;
+        pointsOnly.primPath = descPath;
+        pointsOnly.pointsDirty = true;
+        auto nPts = UsdGenTilePublisher::NoticesFor(pointsOnly).all();
+        Check(has(nPts, { pv, pts, val }) && has(nPts, { ext, mn }) &&
+                  has(nPts, { ext, mx }),
+              "points dirty -> bare primvars/points/primvarValue + extent min/max");
+        Check(!has(nPts, { pv, wdt, val }),
+              "points-only notice carries no widths locator");
+
+        // §5.1 row 2: a width-writing node is routed by the engine as an
+        // ADDITIONAL dirtyPrimvars entry; the publisher must surface the
+        // widths leaf alongside points, never as a container sentinel.
+        UsdGenTileDirty pointsPlusWidths;
+        pointsPlusWidths.primPath = descPath;
+        pointsPlusWidths.pointsDirty = true;
+        pointsPlusWidths.dirtyPrimvars = { wdt };
+        auto nW = UsdGenTilePublisher::NoticesFor(pointsPlusWidths).all();
+        Check(has(nW, { pv, pts, val }) && has(nW, { pv, wdt, val }),
+              "width-writing-node dirty -> points AND widths leaves");
+
+        // A widths-only delta must NOT invalidate points (whole-prim scatter).
+        UsdGenTileDirty widthsOnly;
+        widthsOnly.primPath = descPath;
+        widthsOnly.widthsDirty = true;
+        widthsOnly.dirtyPrimvars = { TfToken("st") };
+        auto nw = UsdGenTilePublisher::NoticesFor(widthsOnly).all();
+        Check(!has(nw, { pv, pts, val }) && !has(nw, { ext, mn }) &&
+                  !has(nw, { ext, mx }),
+              "widths-only notice carries no points or extent locator");
+        Check(has(nw, { pv, TfToken("st"), val }),
+              "dirtyPrimvars surfaces a primvars/st/primvarValue dirty locator");
+
+        // §5.1 row 4: a primvar appearing for the first time is announced as
+        // primvars/<name> ONCE — never a /primvarValue dirty (that would not
+        // make Storm build the container). An added tile carries its whole
+        // new-primvar set in newPrimvars.
+        UsdGenTileDirty added;
+        added.primPath = descPath;
+        added.added = true;
+        added.newPrimvars = { TfToken("st"), TfToken("displayColor") };
+        auto nAdd = UsdGenTilePublisher::NoticesFor(added);
+        bool allBare = !nAdd.newPrimvarLocators.empty();
+        for (HdDataSourceLocator const &loc : nAdd.newPrimvarLocators) {
+            allBare = allBare && loc.GetElementCount() == 2 &&
+                loc.GetElement(0) == pv;
+        }
+        Check(allBare,
+              "added tile announces each new primvar once, bare, no leaf dirty");
+        auto nAddAll = nAdd.all();
+        Check(has(nAddAll, { pv, TfToken("st") }) &&
+                  has(nAddAll, { pv, TfToken("displayColor") }),
+              "added-tile notice contains primvars/st and primvars/displayColor");
+
+        // xform-only delta: the tile's own xform/matrix and nothing else
+        // (§5.1: Hydra dirtiness is per prim, never hierarchical).
+        UsdGenTileDirty xformOnly;
+        xformOnly.primPath = descPath;
+        xformOnly.xformDirty = true;
+        auto nx = UsdGenTilePublisher::NoticesFor(xformOnly).all();
+        Check(has(nx, { TfToken("xform"), TfToken("matrix") }) &&
+                  !has(nx, { pv, pts, val }) && !has(nx, { pv, wdt, val }),
+              "xform-only delta is xform-only (no republish, S4)");
+    }
+
+    return g_failures ? 1 : 0;
+}

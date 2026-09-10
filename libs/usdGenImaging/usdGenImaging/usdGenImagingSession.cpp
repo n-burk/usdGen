@@ -50,26 +50,37 @@ void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
 
     // The staged graph desc (if any) was SetGraphDesc'd by the owning index
     // before this call; the engine copies it and recompiles (03 §2.2).
-    // NeedsDesc is consumed whether or not this run published: on supersede
-    // the desc stays staged inside the engine and the leftover _dirty makes
-    // the next commit recompile with it (03 §5.6).
+    // ConsumeNeedsDesc was already consumed by the stager to decide the
+    // SetGraphDesc; clear here unconditionally so a commit without staging
+    // does not leave a stale mark (marks arriving after consume stay set
+    // for the next commit — atomic exchange, no lost ReloadMaps).
     _needsDesc.store(false);
 
+    // Serialize session-side bookkeeping with the engine commit: the
+    // generation-advance check AND the LastReport copy below both happen
+    // while the engine commit mutex serializes Commit callers, so two
+    // racing commits cannot dispatch the same generation twice and no
+    // callback ever iterates a report replaced mid-flight. The payload is
+    // immutable: callbacks reread NOTHING live.
+    // Hold _stageCommitMutex across the engine Commit: pairs with
+    // StageDesc above so staging+commit are atomic w.r.t. concurrent
+    // session commits (Review 2). Callbacks fire inside (synchronously)
+    // but run unlocked from this mutex (copied under _republishMutex).
+    std::unique_lock<std::mutex> stageLock(_stageCommitMutex);
     const int64_t before = _generation;
-    usdGen::UsdGenGenerationConstPtr published;
-    // Engine Commit is serialized on the engine's commit mutex (03 §5.4);
-    // when superseded mid-run it returns the PREVIOUS generation and leaves
-    // the session dirty (03 §5.6) — id == before, so no notice storm here.
     usdGen::UsdGenGenerationConstPtr gen = _engine->Commit(_frame, reason);
+    CommitPayload payload;
     if (gen && gen->id != before) {
         _generation = gen->id;
-        published = gen;
+        payload.published = true;
+        payload.generation = gen;
+        payload.report = _engine->LastReport();
     }
-    if (!published) return;
+    if (!payload.published) return;
 
     // Copy under lock, invoke unlocked: a callback may re-enter the session
     // (GetPrim atomic_loads, Detach takes the store lock, not this one).
-    std::vector<std::function<void(usdGen::UsdGenCommitReason)>> callbacks;
+    std::vector<std::function<void(CommitPayload const &)>> callbacks;
     {
         std::lock_guard<std::mutex> lock(_republishMutex);
         callbacks.reserve(_callbacks.size());
@@ -78,12 +89,22 @@ void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
         }
     }
     for (auto &cb : callbacks) {
-        cb(reason);
+        cb(payload);
     }
 }
 
+void UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const &desc)
+{
+    // Serialized with Commit below via _stageCommitMutex (Review 2): a
+    // concurrent store-level SetTime/Commit blocks here until the paired
+    // Commit below completes, so staging and commit are atomic w.r.t.
+    // other session commits. Engine copies the desc (03 S2.2).
+    std::lock_guard<std::mutex> lock(_stageCommitMutex);
+    if (_engine) _engine->SetGraphDesc(desc);
+}
+
 int UsdGenImagingSession::RegisterRepublishCallback(
-    std::function<void(usdGen::UsdGenCommitReason)> cb)
+    std::function<void(CommitPayload const &)> cb)
 {
     std::lock_guard<std::mutex> lock(_republishMutex);
     const int token = _nextCallbackToken++;
@@ -97,7 +118,7 @@ void UsdGenImagingSession::UnregisterRepublishCallback(int token)
     _callbacks.erase(
         std::remove_if(_callbacks.begin(), _callbacks.end(),
                        [token](std::pair<int,
-                           std::function<void(usdGen::UsdGenCommitReason)>>
+                           std::function<void(CommitPayload const &)>>
                                    const &entry) {
                            return entry.first == token;
                        }),

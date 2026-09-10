@@ -1,0 +1,28 @@
+# ---- P4 / SI-10: testUsdGenSessions registration ----
+# Two indices on one session ⇒ identical generation, prim set and frame for one commit.
+# Adds testUsdGenSessions as a T1 gate:SI-10 test (imaging lane).
+# Placement: after the existing testUsdGenInvalidation block (~line 446).
+
+add_executable(testUsdGenSessions
+    tests/testUsdGenSessions.cpp
+)
+target_link_libraries(testUsdGenSessions
+    PUBLIC usdGen
+    PUBLIC usdGenImaging
+)
+set_target_properties(testUsdGenSessions PROPERTIES
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
+add_test(NAME testUsdGenSessions
+    COMMAND testUsdGenSessions
+)
+set_tests_properties(testUsdGenSessions
+    PROPERTIES
+    LABELS "T1;gate:SI-10"
+    TIMEOUT 120
+)
+
+# Note: testUsdGenInvalidation already carries T1;gate:SI-2 (set at line ~446).
+# The SI-2 overlay extension (bare primvars locator, section 7) is appended
+# within that same test and shares its executable; no new CMake target needed.

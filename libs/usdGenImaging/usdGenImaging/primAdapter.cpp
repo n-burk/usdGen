@@ -39,7 +39,7 @@
 #include <unordered_map>
 
 #include "usdGenImaging/usdGenTokens.h"
-
+#include "usdGenImaging/usdGenImagingSession.h"
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
@@ -99,6 +99,15 @@ UsdGenPrimAdapterBase::GetImagingSubprimData(
 {
     if (subprim != TfToken()) {
         return nullptr;
+    }
+    // 06 §3.7 stage-key contract: the groom prim adapter stashes the live
+    // stage in the weak-stage registry keyed by groom root while the stage
+    // index builds data sources — the only place a stage index with no C
+    // ABI stage handle can learn the stage. Deterministic: runs at data
+    // source build, strictly before adoption/first commit.
+    if (prim.GetPrimTypeInfo().GetTypeName() == TfToken("UsdGenGroom")) {
+        ::usdGenImaging::UsdGenSessionStore::SetStage(
+            prim.GetPath(), prim.GetStage());
     }
     HdContainerDataSourceHandle base =
         UsdImagingDataSourcePrim::New(
@@ -160,7 +169,11 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
     // rule 2's null branch).
     if (UsdPrimDefinition const *def =
             UsdSchemaRegistry::GetInstance().FindConcretePrimDefinition(schemaTypeName)) {
-            for (TfToken const &name : def->GetPropertyNames()) {
+            // Sibling set for the ancestor pass (contract S3.1): the mapping
+            // is built per schema type name, so the full property set is in
+            // hand — no new USD calls.
+            TfTokenVector const &siblings = def->GetPropertyNames();
+            for (TfToken const &name : siblings) {
                 if (_IsPrimBuiltin(name)) {
                     continue;
                 }
@@ -169,7 +182,8 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
                     {
                         UsdImagingDataSourceMapped::AttributeMapping m;
                         m.usdName = name;
-                        m.hdLocator = LocatorForProperty(name);
+                        m.hdLocator = LocatorForProperty(
+                            name, /*isRelationship=*/false, siblings);
                         if (const std::string ps = name.GetString();
                             ps.size() >= 7 && ps.compare(ps.size() - 7, 7, ":spline") == 0) {
                             // Whole-spline ramp transport (06 §2.4): the stock
@@ -183,7 +197,8 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
                 {
                     UsdImagingDataSourceMapped::RelationshipMapping m;
                     m.usdName = name;
-                    m.hdLocator = LocatorForProperty(name);
+                    m.hdLocator = LocatorForProperty(
+                        name, /*isRelationship=*/true, siblings);
                     m.factory = IsSingleTarget(name)
                         ? UsdImagingDataSourceMapped::GetPathFromRelationshipDataSourceFactory()
                         : UsdImagingDataSourceMapped::GetPathArrayFromRelationshipDataSourceFactory();
@@ -201,36 +216,82 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
     return *res.first->second;
 }
 
-HdDataSourceLocator
-UsdGenPrimAdapterBase::LocatorForProperty(TfToken const &property)
+// Split per 02 §0.7 (relative elements, no container prefix).
+static std::vector<std::string>
+_Split02(TfToken const &property)
 {
-    // 02-schema.md §0.7: the locator is the property name with the leading
-    // usdGen: stripped and the remaining ':' separators turned into '/' —
-    // usdGen:clump:size -> clump/size, usdGen:frozen:mode -> frozen/mode.
-    // Mappings() prepends the `usdGen` container prefix (06 §2.2 rule 4).
     const std::string s = property.GetString();
     const size_t prefix = std::string("usdGen:").size();
     const std::string rest =
         (s.size() >= prefix && s.compare(0, prefix, "usdGen:") == 0)
             ? s.substr(prefix)
             : s;
-    TfTokenVector elements;
+    std::vector<std::string> elements;
     size_t begin = 0;
     while (begin <= rest.size()) {
         const size_t pos = rest.find(':', begin);
-        elements.push_back(TfToken(
+        elements.push_back(
             pos == std::string::npos
                 ? rest.substr(begin)
-                : rest.substr(begin, pos - begin)));
+                : rest.substr(begin, pos - begin));
         if (pos == std::string::npos) {
             break;
         }
         begin = pos + 1;
     }
     if (elements.empty()) {
-        elements.push_back(TfToken(property));
+        elements.push_back(s);
     }
-    return HdDataSourceLocator(elements.size(), elements.data());
+    return elements;
+}
+
+HdDataSourceLocator
+UsdGenPrimAdapterBase::LocatorForProperty(TfToken const &property,
+                                         bool isRelationship,
+                                         TfTokenVector const &siblings)
+{
+    // 06 §2.2 rule 4 as amended by the locator contract (.omp/locator-
+    // contract.md §2 FINAL RULE): base rule unchanged (02 §0.7 — strip
+    // "usdGen:", split rest on ':' → clump/size, frozen/mode); Mappings()
+    // prepends the `usdGen` container prefix. DEVIATION & REASON: when this
+    // property's base locator is a STRICT ancestor of any sibling's base
+    // locator on the same prim type, the ancestor's FINAL element takes
+    // "-value" (attribute) / "-rel" (relationship). Without it, an
+    // ancestor/descendant pair (usdGen:length vs usdGen:length:source)
+    // registers a leaf over a container node and UsdImagingDataSourceMapped
+    // TF_CODING_ERRORs (dataSourceMapped.cpp:272 "already an ascendant
+    // locator") and drops the container. Descendants NEVER move (R25
+    // longest-prefix matching preserved); non-colliding properties keep
+    // 02 §0.7 locators exactly (all 02 §6.1 rel rows unchanged).
+    // Pure: same (property, isRelationship, siblings) -> same locator.
+    std::vector<std::string> elements = _Split02(property);
+    for (TfToken const &sib : siblings) {
+        if (sib == property) continue;
+        std::vector<std::string> sels = _Split02(sib);
+        if (elements.size() < sels.size() &&
+            std::equal(elements.begin(), elements.end(), sels.begin())) {
+            elements.back() += isRelationship ? "-rel" : "-value";
+            break;  // one suffix suffices: suffixing only ever extends the
+                    // ancestor side, so no two suffixed forms collide.
+        }
+    }
+    TfTokenVector tokens;
+    tokens.reserve(elements.size());
+    for (std::string const &e : elements) tokens.push_back(TfToken(e));
+    return HdDataSourceLocator(tokens.size(), tokens.data());
+}
+
+HdDataSourceLocator
+UsdGenPrimAdapterBase::LocatorForProperty(TfToken const &property)
+{
+    // Single-property form: no sibling set, so no ancestor check. Used by
+    // test/diagnostic paths that resolve one name outside a type context;
+    // Mappings() always uses the 3-arg form above.
+    std::vector<std::string> elements = _Split02(property);
+    TfTokenVector tokens;
+    tokens.reserve(elements.size());
+    for (std::string const &e : elements) tokens.push_back(TfToken(e));
+    return HdDataSourceLocator(tokens.size(), tokens.data());
 }
 
 bool
