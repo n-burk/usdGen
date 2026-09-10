@@ -7,7 +7,7 @@ Testing/
 CTestTestfile.cmake
 
 # Harnesses
-.omg/
+.omp/
 
 # CMake generated
 CMakeUserPresets.json
