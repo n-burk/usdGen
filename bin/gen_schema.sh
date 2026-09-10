@@ -10,7 +10,7 @@ set -euo pipefail
 usdgen_require_python
 usdgen_require_usd "usdGenSchema"
 
-cd "$USDGEN_ROOT/libs/usdGenSchema"
+cd "$GEN/libs/usdGenSchema"
 "$PY" "$USD/bin/usdGenSchema" schema.usda ../../plugin/usdGenSchema/resources
 
 # Post-process into the checked-in "resource" (data-only) form:

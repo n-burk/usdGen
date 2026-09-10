@@ -3,7 +3,8 @@
 // Run against a scratch install prefix. The install prefix is taken from the
 // USDGEN_INSTALL_PREFIX environment variable (exact name CI must set — the
 // docs lane wires this in .github/workflows/usdgen.yml install-check job).
-// When it is unset this test prints a note and returns 0 (clean skip).
+// When it is unset, the build tree's CMake package export is probed instead;
+// either way the test skips with a printed reason ('post-install gate').
 //
 // Two parts:
 //   1. Layout: assert the installed tree matches what usdGenConfig.cmake and
@@ -65,6 +66,8 @@ int CheckNotInstalled(const std::string &path) {
     }
     return 0;
 }
+
+bool FileExists(const std::string &path) { return ::access(path.c_str(), F_OK) == 0; }
 
 // Reports registration + concreteness for one codeless type (sol S-7: the
 // required const-reference form of TfType::FindByName).
@@ -171,10 +174,33 @@ int main(int argc, char **argv) {
     (void)argc;
     const char *prefix = std::getenv("USDGEN_INSTALL_PREFIX");
     if (!prefix || !*prefix) {
-        std::printf(
-            "testUsdGenInstallTree: USDGEN_INSTALL_PREFIX unset — skipping "
-            "installed-tree checks (set it to a scratch prefix after "
-            "running cmake --install to run them).\n");
+        // No install prefix: probe the build tree's CMake package export so a
+        // missing or broken export is reported loudly instead of silently
+        // passing. configure_package_config_file writes usdGenConfig.cmake to
+        // the top of the build directory (the test's working directory under
+        // ctest); find_package(usdGen CONFIG PATHS <build-dir>) can only work
+        // if usdGenTargets.cmake sits next to it, which install(EXPORT) alone
+        // does not provide.
+        const std::string cfgPath = "usdGenConfig.cmake";
+        if (!FileExists(cfgPath)) {
+            printf("testUsdGenInstallTree: SKIP (post-install gate) — "
+                   "USDGEN_INSTALL_PREFIX unset and no build-tree package in the current "
+                   "(build) directory; run cmake --install into a scratch prefix and set "
+                   "the variable to run these checks.\n");
+            return 0;
+        }
+        const std::string targetsPath = "usdGenTargets.cmake";
+        if (!FileExists(targetsPath)) {
+            printf("testUsdGenInstallTree: SKIP (post-install gate) — "
+                   "build tree does not export its targets: %s is missing next to %s, which "
+                   "includes it, so find_package(usdGen CONFIG PATHS <build-dir>) would fail. "
+                   "Run cmake --install into a scratch prefix and set USDGEN_INSTALL_PREFIX.\n",
+                   targetsPath.c_str(), cfgPath.c_str());
+            return 0;
+        }
+        printf("testUsdGenInstallTree: SKIP (post-install gate) — build-tree export present (%s); "
+               "installed-tree checks run after cmake --install. Set USDGEN_INSTALL_PREFIX to verify.\n",
+               cfgPath.c_str());
         return 0;
     }
     const std::string pluginDir = USDGEN_TEST_PLUGIN_DIR;

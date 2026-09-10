@@ -1,0 +1,54 @@
+// usdGen engine — compiler (03-execution-engine.md §3).
+//
+// Compile() walks UsdGenGraphDesc::nodes and: edges from usdGen:input only
+// (S26); Kahn sort with namespace tie-break; cycle detection (compile error
+// naming the offending pair); dense node ids in topological order; space /
+// readPhase resolution (§1.6); reference-lane ordering (§1.5); OutputPrimvars
+// slot binding (§1.2); Merkle structural digests (§3.3); tile arithmetic
+// (R21); dirty routing table rebuild data (§5.1).
+#ifndef USDGEN_COMPILER_H
+#define USDGEN_COMPILER_H
+
+#include "usdGen/graph.h"
+#include "usdGen/graphDesc.h"
+#include "usdGen/types.h"
+
+#include <string>
+#include <vector>
+
+PXR_NAMESPACE_USING_DIRECTIVE
+
+namespace usdGen {
+
+struct UsdGenCompileResult
+{
+    bool                      ok = false;
+    UsdGenEpoch               structuralDigest {};  // graph-level digest (03 §3.2)
+    std::vector<UsdGenNodeId> rebuilt;       // nodes whose UsdGenOp was recreated
+    std::vector<UsdGenNodeId> reordered;     // nodes whose topological index moved
+    std::vector<std::string>  errors;        // cycle, terminal ambiguity, unknown op, ...
+    std::vector<std::string>  warnings;      // e.g. readPhase "preceding" alias (R9)
+};
+
+class UsdGenCompiler
+{
+public:
+    /// Fills *out (moves the compiled state). ok=false leaves *out untouched.
+    UsdGenCompileResult Compile(UsdGenGraphDesc const &desc, UsdGenGraph *out);
+
+    /// Incremental: rebuild only the sub-graph whose Merkle digest moved
+    /// (03 §3.5). One node appended to a 200-node groom rebuilds exactly one
+    /// node (gate E-6).
+    UsdGenCompileResult Recompile(UsdGenGraphDesc const &newDesc, UsdGenGraph *out);
+
+private:
+    friend class UsdGenGraph;  // fills the compiled structure in place
+    /// Shared pipeline for Compile() / Recompile(); `reuse` (non-null on the
+    /// incremental path) supplies captures/buffers for digest-stable nodes.
+    static void _Build(UsdGenGraphDesc const &desc, UsdGenGraph *out,
+                       UsdGenGraph const *reuse, UsdGenCompileResult &result);
+};
+
+}  // namespace usdGen
+
+#endif  // USDGEN_COMPILER_H

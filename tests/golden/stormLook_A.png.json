@@ -1,0 +1,14 @@
+{
+  "golden": "stormLook_A.png",
+  "git_sha": "831c869e31116401f8e09940cb248e59cbc2bfed-dirty-M1",
+  "host": "spark",
+  "gpu": "Unknown NVIDIA GB10",
+  "gl_version": "4.6.0 NVIDIA 580.173.02",
+  "created_utc": "2026-09-10T02:44:16.634239+00:00",
+  "command": "manual USDGEN_REGEN_GOLDEN=1 ctest (M1 pre-commit deviation; bin/regen_goldens.sh for clean-tree regen)",
+  "tolerance": {
+    "mean_abs_max": 0.00784313725490196,
+    "frac_gt_8_255_max": 0.005
+  },
+  "png_sha256": "57af91215e734e118af0437c5736f9a780cee1800ee9753a20cb5fdc6de0431b"
+}

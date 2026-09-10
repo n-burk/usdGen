@@ -1,96 +1,174 @@
-// Renderer-level scene index plugin for usdGen groom generation.
-// Registered at phase 0 / InsertionOrderAtEnd so it lands after the whole
-// UsdImaging chain (incl. UsdSkel) and before every Storm/hdPrman plugin
-// (ADR S1/S2, §2.1). M0: pass-through filter node so the chain position is
-// observable in the vertical demo; M1 replaces it with the real generator
-// (tile publisher + dirty router).
+// usdGen groom imaging plugin — renderer-level scene index
+// (06-imaging.md §2, §3; ADR §5.1 #4).
+//
+// Two classes:
+//   * UsdGenGroomSceneIndexPlugin — the HdSceneIndexPlugin registration
+//     (AppendSceneIndex rule after stageAdapter, before retiredAdapter;
+//     USDGEN_ENABLE kill switch; 06 §6).
+//   * UsdGenGroomSceneIndex — the filtering index itself. Chain position:
+//     built AFTER the stock HdStageAdapterSceneIndex (so UsdImagingSceneIndex
+//     PrimAdapters have run and the usdGen/* containers exist) and BEFORE the
+//     terminal HdRetiredAdapterSceneIndexFilter. It observes its (pruned)
+//     input with a private HdSceneIndexObserver, routes notices into the
+//     per-groom UsdGenImagingSession / UsdGenDirtyRouter (no cook, I7/S17),
+//     commits on the 06 §3.9 triggers, and publishes the generation as
+//     synthetic Hydra prims <description>/__usdGenRender/tile_NNNN.
+//
+// GetPrim NEVER commits — it atomic_loads the latest generation (I7). The
+// M0 pass-through class is gone: this index owns sessions, synthesizes and
+// announces the published prim set (06 §3.4), and forwards only non-usdGen
+// prims (06 §3.4.1).
+//
+// Both classes live in the pxr namespace so the HdSceneIndexPlugin registry
+// can reference them; the heavy lifting forwards to the global
+// usdGenImaging:: session/router/publisher classes.
+//
+// Symbol visibility follows the usdGen library convention
+// (libs/usdGen/usdGen/export.h): no per-symbol export macro — usdGenImaging
+// is built with default visibility.
 #ifndef USDGEN_IMAGING_GROOM_SCENE_INDEX_PLUGIN_H
 #define USDGEN_IMAGING_GROOM_SCENE_INDEX_PLUGIN_H
 
-#include "usdGenImaging/api.h"
-
+#include "pxr/pxr.h"
 #include "pxr/imaging/hd/sceneIndexPlugin.h"
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/filteringSceneIndex.h"
+#include "pxr/base/tf/registryManager.h"
+#include "pxr/usd/sdf/path.h"
 
-#include "pxr/pxr.h"
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+namespace usdGen {
+class UsdGenDirtyRouter;
+enum class UsdGenCommitReason : uint8_t;
+struct UsdGenGeneration;
+struct UsdGenTileDirty;
+class UsdPrim;
+}  // namespace usdGen
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-/// \class UsdGenGroomSceneIndex
-///
-/// M0: identity pass-through filter. It exists so the plugin registers a real
-/// node in the render index chain (observable in the chain dump) while the
-/// M1 evaluator/publisher replaces it. Notice forwarding is preserved so
-/// downstream observers keep working when it is in the chain.
+class HdSceneIndexBase;
+using HdSceneIndexBaseRefPtr = TfRefPtr<HdSceneIndexBase>;
+
+/// Filtering half: the scene index spliced into the chain.
 class UsdGenGroomSceneIndex final
     : public HdSingleInputFilteringSceneIndexBase
 {
 public:
     static HdSceneIndexBaseRefPtr New(
-        const HdSceneIndexBaseRefPtr &inputScene)
-    {
-        return TfCreateRefPtr(new UsdGenGroomSceneIndex(inputScene));
-    }
+        HdSceneIndexBaseRefPtr const &inputScene,
+        int renderInstanceId = 0);
 
-protected:
-    explicit UsdGenGroomSceneIndex(
-        const HdSceneIndexBaseRefPtr &inputScene)
-        : HdSingleInputFilteringSceneIndexBase(inputScene)
-    {
-    }
-
-    HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override
-    {
-        return _GetInputSceneIndex()->GetPrim(primPath);
-    }
-    SdfPathVector GetChildPrimPaths(const SdfPath &primPath) const override
-    {
-        return _GetInputSceneIndex()->GetChildPrimPaths(primPath);
-    }
-
+    // -- HdSceneIndexInterface ------------------------------------------------
+    HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
+    SdfPathVector GetChildPrimPaths(SdfPath const &path) const override;
+    // -- HdSceneIndexObserver (input observations; 06 §3.2) --------------------
+    // HdSingleInputFilteringSceneIndexBase installs a private bridge observer
+    // on the input; filter subclasses override the underscore hooks below.
     void _PrimsAdded(
-            const HdSceneIndexBase &sender,
-            const HdSceneIndexObserver::AddedPrimEntries &entries) override
-    {
-        _SendPrimsAdded(entries);
-    }
+        HdSceneIndexBase const &sceneIndex,
+        HdSceneIndexObserver::AddedPrimEntries const &entries) override;
     void _PrimsRemoved(
-            const HdSceneIndexBase &sender,
-            const HdSceneIndexObserver::RemovedPrimEntries &entries) override
-    {
-        _SendPrimsRemoved(entries);
-    }
+        HdSceneIndexBase const &sceneIndex,
+        HdSceneIndexObserver::RemovedPrimEntries const &entries) override;
     void _PrimsDirtied(
-            const HdSceneIndexBase &sender,
-            const HdSceneIndexObserver::DirtiedPrimEntries &entries) override
-    {
-        _SendPrimsDirtied(entries);
-    }
+        HdSceneIndexBase const &sceneIndex,
+        HdSceneIndexObserver::DirtiedPrimEntries const &entries) override;
+    void _PrimsRenamed(
+        HdSceneIndexBase const &sceneIndex,
+        HdSceneIndexObserver::RenamedPrimEntries const &entries) override;
+
+    // Cross-thread frame channel (06 §3.9 rule b): SystemMessage is NOT
+    // delivered through the prim-noticed hooks — we install our own
+    // HdSceneIndexBase::Observer (which does override _SystemMessage) on the
+    // pruned input; see _FrameObserver in the .cpp.
+
+private:
+    struct _Groom;  // per-UsdGenGroom state; defined in the .cpp
+
+    UsdGenGroomSceneIndex(
+        HdSceneIndexBaseRefPtr const &inputScene,
+        int renderInstanceId);
+    ~UsdGenGroomSceneIndex() override;
+
+    // Population (06 §3.1): constructor-time observer-driven discovery, with
+    // a bounded traversal as the already-populated fallback.
+    void _PopulateFromInput();
+    void _ScanInputForGrooms() const;
+    void _AdoptGroom(SdfPath const &groomRoot) const;
+    void _AdoptPending() const;
+    void _ForgetGroomsUnder(SdfPath const &path) const;
+    // Description resolution: the UsdGenDescription child under an adopted
+    // groom root (SI-6 fixture: /groomA/descA). Caller holds _stateMutex.
+    void _ResolveDescriptionLocked(
+        _Groom &groom, HdSceneIndexBaseRefPtr const &input) const;
+
+    // Notice routing + commits (06 §3.2, §3.9).
+    void _Forward(
+        std::vector<HdSceneIndexObserver::AddedPrimEntry> const &added,
+        std::vector<HdSceneIndexObserver::RemovedPrimEntry> const &removed,
+        std::vector<HdSceneIndexObserver::DirtiedPrimEntry> const &dirtied) const;
+    bool _IsOwned(SdfPath const &path) const;
+    bool _OwnsDescription(SdfPath const &maybeDescPath) const;
+    void _RouteFrameDirties(
+        std::vector<HdSceneIndexObserver::DirtiedPrimEntry> const &entries) const;
+    /// Replay of batched surface dirties as an inverted MarkDirty
+    /// (06 §3.3 line 825): re-accumulate what the batch just consumed.
+    void _ReplaySurfaceDirty() const;
+    void _CommitNow(usdGen::UsdGenCommitReason reason, bool republishNeeded) const;
+
+    // Publication (06 §3.4, §3.4.1, §5.1): session republish callback body.
+    void _Republish(_Groom &groom, usdGen::UsdGenCommitReason reason) const;
+    static HdDataSourceLocatorSet _DirtiedLocatorsFor(
+        usdGen::UsdGenTileDirty const &reportTile,
+        usdGen::UsdGenGeneration const &gen, size_t tileIdx,
+        bool surfaceXformDirty, bool republishNeeded);
+
+    HdSceneIndexBaseRefPtr _pruned;   // input with extComputationPrimvar
+                                      // pruning spliced (06 §3.5); NEVER
+                                      // spliced into the chain
+    int _renderInstanceId = 0;
+
+    mutable std::mutex _stateMutex;   // guards everything below
+    std::vector<std::unique_ptr<_Groom>> _grooms;
+    std::atomic_flag _populated;      // one-shot population attempt (06 §3.1)
+    std::vector<HdSceneIndexObserver::AddedPrimEntry> _pendingAdd;
+    std::vector<SdfPath> _pendingRemove;
+
+    // Cross-thread frame channel (06 §3.9 rule b): an app thread's SetTime
+    // surfaces here as a root-level sceneGlobals dirty.
+    mutable std::mutex _frameMutex;
+    mutable double _lastGlobalFrame = 0.0;
+    mutable bool _haveGlobalFrame = false;
+    HdDataSourceLocatorSet _frameLocators;
 };
 
-/// \class UsdGenGroomSceneIndexPlugin
+/// Registration half: the HdSceneIndexPlugin consulted by every renderer's
+/// _AppendSceneIndex chain.
 class UsdGenGroomSceneIndexPlugin final : public HdSceneIndexPlugin
 {
 public:
     UsdGenGroomSceneIndexPlugin() = default;
-    ~UsdGenGroomSceneIndexPlugin() override = default;
 
 protected:
-    // The three-arg overload wins when both are overridden
-    // (pxr/imaging/hd/sceneIndexPlugin.h).
-    HdSceneIndexBaseRefPtr
-    _AppendSceneIndex(
-        const std::string &renderInstanceId,
+    // HdSceneIndexPlugin interface: splice UsdGenGroomSceneIndex on top of
+    // the input (2-arg overload; no render-instance discrimination needed).
+    HdSceneIndexBaseRefPtr _AppendSceneIndex(
         const HdSceneIndexBaseRefPtr &inputScene,
         const HdContainerDataSourceHandle &inputArgs) override;
 
-    bool
-    _IsEnabled(
-        const HdContainerDataSourceHandle &inputArgs) const override;
+    // Kill switch (06 §6, ADR §5.1): USDGEN_ENABLE=false → the plugin drops
+    // out of the chain without editing plugInfo.
+    bool _IsEnabled(
+        HdContainerDataSourceHandle const &inputArgs) const override;
 };
 
-PXR_NAMESPACE_CLOSE_SCOPE
+}  // namespace pxr
 
-#endif // USDGEN_IMAGING_GROOM_SCENE_INDEX_PLUGIN_H
+#endif  // USDGEN_IMAGING_GROOM_SCENE_INDEX_PLUGIN_H

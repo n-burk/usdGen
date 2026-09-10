@@ -61,11 +61,13 @@ add_library(nanoflann INTERFACE)
 target_include_directories(nanoflann INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nanoflann>
     $<INSTALL_INTERFACE:include>)
-# sol S-6: nanoflann's include spelling is "nanoflann.hpp" against the build
-# root thirdparty/nanoflann, so the installed header must sit directly under
-# <prefix>/include (its $<INSTALL_INTERFACE:include> root), not in a
-# nested include/nanoflann/ dir.
-install(FILES thirdparty/nanoflann/nanoflann.hpp DESTINATION include)
+# N-7 (plan §1.2/§2.3): nanoflann's header is never installed. It is a
+# private dependency of the usdGenMath archive (compiled hidden, stripped
+# out of libusdGen.so by --exclude-libs,ALL), the install-tree test asserts
+# no include/nanoflann* exists in the prefix, and the target is not in the
+# export set either — so no install rule is emitted at all (supersedes the
+# sol S-6 header-layout fix; the INSTALL_INTERFACE root above is unused by
+# design).
 
 # ---------------------------------------------------------------------------
 # Third-party: SeExpr noise (M0 = Noise.cpp + headers only, S38)
@@ -80,14 +82,10 @@ set_target_properties(usdGen_seexpr PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
-# sol S-6: build include root is thirdparty/seexpr ("SeExpr2/Noise.h"),
-# INSTALL_INTERFACE is include/seexpr, so install the SeExpr2/ directory
-# contents under <prefix>/include/seexpr exactly once — the old rule
-# (no trailing slash, DESTINATION include/seexpr/SeExpr2) produced the
-# double-nested include/seexpr/SeExpr2/SeExpr2/ layout. Headers only.
-install(DIRECTORY thirdparty/seexpr/SeExpr2
-    DESTINATION include/seexpr
-    FILES_MATCHING PATTERN "*.h")
+# N-7 (plan §1.2): SeExpr2 headers are never installed — usdGen_seexpr only
+# exists to compile Noise.cpp into the hidden archives, is never installed
+# or exported, so no header rule is emitted (supersedes the sol S-6
+# double-nesting fix; the INSTALL_INTERFACE root above is unused by design).
 
 # ---------------------------------------------------------------------------
 # usdGenMath (STATIC, -ffp-contract=off)
@@ -120,12 +118,24 @@ add_library(usdGen SHARED ${USDGEN_CORE_SOURCES})
 target_include_directories(usdGen PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>
     $<INSTALL_INTERFACE:include>)
+# Public headers expose SdfPath/TfToken/GfVec3f/VtArray, so those base libs
+# must be PUBLIC for consumers (tests) to link them transitively; sdf in
+# particular is required by SdfPath in the usdGen graph/compiler headers.
+# usdGenMath is PRIVATE (N-7, plan §1.2): it is not installed, so it must
+# not sit in usdGen's export interface (install(EXPORT) would then reference
+# a non-installed target); usdGen's own sources still see its headers
+# through the link, and no public header includes usdGenMath/...
 target_link_libraries(usdGen
-    PUBLIC usdGenMath
-    PRIVATE arch js plug tf gf vt sdf ts ar work trace hio pxOsd
-            usdGen_seexpr TBB::tbb)
+    PUBLIC tf gf vt sdf TBB::tbb
+    PRIVATE usdGenMath arch js plug ts ar work trace hio pxOsd
+            usdGen_seexpr)
+# usdGen is a SHARED plugin-host library: its public API (UsdGenSession,
+# graph/tile types, ...) is consumed across the shared boundary by
+# libusdGenImaging.so, so it must keep default visibility. Third-party code
+# stays hidden: usdGenMath and usdGen_seexpr are compiled with
+# CXX_VISIBILITY_PRESET hidden, and --exclude-libs,ALL keeps their symbols
+# out of libusdGen.so's export table (gate B-1 NoThirdPartyExports).
 set_target_properties(usdGen PROPERTIES
-    CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 target_link_options(usdGen PRIVATE "LINKER:--exclude-libs,ALL")
 
@@ -151,10 +161,15 @@ target_include_directories(usdGenImaging PUBLIC
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(usdGenImaging
     PUBLIC hd hdsi hf usd usdGeom usdShade sdr usdImaging
-           sdf tf gf vt trace pxOsd
-    PRIVATE usdGen usdGenSchema)
+           sdf tf gf vt trace pxOsd usdGen
+    PRIVATE usdGenSchema)
 set_target_properties(usdGenImaging PROPERTIES
     CXX_VISIBILITY_PRESET default)  # plugins need exported symbols
+
+# M1: the usdGenShaders SdrDiscoveryPlugin compiles into usdGenImaging; its
+# resource dir is resolved at runtime by name (PlugRegistry lookup of
+# "usdGenShaders"), so no per-target macro is needed (10-build-dependencies-
+# testing.md §4.4 alternative).
 
 # ---------------------------------------------------------------------------
 # usdGenTestUtils (STATIC, T0 — no Hydra)
@@ -212,6 +227,33 @@ file(READ
     _usdgen_imaging_pluginfo_content)
 file(GENERATE OUTPUT "${_usdgen_imaging_pluginfo}"
     CONTENT "${_usdgen_imaging_pluginfo_content}")
+
+# ---------------------------------------------------------------------------
+# usdGenShaders (9th target, M1 — plan §1.2/§1.6): the usdGen hair preview
+# glslfx shader defs + resources. No C++ of its own: the discovery plugin
+# (UsdGenShadersDiscoveryPlugin, base SdrDiscoveryPlugin) is compiled into
+# usdGenImaging, so this is an INTERFACE target carrying the resource
+# installation. plugInfo points LibraryPath at libusdGenImaging and
+# ShaderResources at shaders/ (mirrors stock usdShaders; 10 §4.4).
+# ---------------------------------------------------------------------------
+add_library(usdGenShaders INTERFACE)
+add_library(usdGen::usdGenShaders ALIAS usdGenShaders)
+
+set(_usdgen_shader_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenShaders/resources")
+set(_usdgen_shader_pluginfo "${_usdgen_shader_resources}/plugInfo.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/plugInfo.json.in")
+file(READ
+    "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/plugInfo.json.in"
+    _usdgen_shader_pluginfo_content)
+file(GENERATE OUTPUT "${_usdgen_shader_pluginfo}"
+    CONTENT "${_usdgen_shader_pluginfo_content}")
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/shaders/"
+    DESTINATION "${_usdgen_shader_resources}/shaders")
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/hairLook.usda"
+    DESTINATION "${_usdgen_shader_resources}")
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -330,8 +372,10 @@ add_executable(testUsdGenChainOrder tests/testUsdGenChainOrder.cpp)
 # while the plugin libraries load (sol S-4/X-8 regression guard).
 target_link_libraries(testUsdGenChainOrder PRIVATE usdImaging hdsi hd usd tf arch)
 add_test(NAME testUsdGenChainOrder COMMAND testUsdGenChainOrder)
+# N-4: this is the plugInfo load-order check, i.e. gate SI-5 (09 §5.2);
+# the gate label belongs on the registration.
 set_tests_properties(testUsdGenChainOrder PROPERTIES
-    LABELS "T1"
+    LABELS "T1;gate:SI-5"
     ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_imaging_resources}:${_fake_prman_resources}:${USD_INSTALL_DIR}/plugin/usd:${USD_INSTALL_DIR}/lib/usd;LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
 
 add_executable(testUsdGenPluginDiscovery tests/testUsdGenPluginDiscovery.cpp)
@@ -344,6 +388,144 @@ add_test(NAME testUsdGenPluginDiscovery
 set_tests_properties(testUsdGenPluginDiscovery PROPERTIES
     LABELS "T1"
     ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_imaging_resources}:${USD_INSTALL_DIR}/plugin/usd;LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
+
+# ---------------------------------------------------------------------------
+# M1 tests (plan 11 §2.2; names/labels from 10-build-dependencies-testing.md
+# §5.6 + §6.5). All are M1-STUB mains: they print "M1-STUB <name>" and exit 77,
+# which must never read as a failure: every M1 stub test gets
+# SKIP_RETURN_CODE "77" (CMake 3.28 ctest: the test reports "Skipped") plus
+# NOT_RUN_RETURN_VALUES "77" (CMake >= 3.29: reports "Not Run"). The implement
+# lanes fill the bodies; the CTest names, tiers and gate labels are frozen
+# here (docs/m1/interfaces.md §8).
+# ---------------------------------------------------------------------------
+# M1 plugin search path: M0 schema + imaging resources plus the usdGenShaders
+# resources (Sdr discovery plugin lands in usdGenImaging; 10 §4.4).
+# M-13: join the dirs with ':' explicitly. The old literal mixed CMake's ';'
+# list separator into the value, so _usdgen_m1_env ("PXR_PLUGINPATH_NAME=a;b;
+# c=d") cut the plugin path after the first dir and mis-split the USD dirs.
+set(_usdgen_m1_pluginpath_dirs
+    "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+    "${_usdgen_shader_resources}"
+    "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+string(JOIN ":" _usdgen_m1_pluginpath ${_usdgen_m1_pluginpath_dirs})
+set(_usdgen_m1_env
+    "PXR_PLUGINPATH_NAME=${_usdgen_m1_pluginpath};LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib:$<TARGET_FILE_DIR:usdGen>")
+
+# M1 T0 engine tests (no Hydra, no stage — gate B-1 keeps them clean).
+foreach(_t testUsdGenGraph testUsdGenKernelDeterminism)
+    add_executable(${_t} tests/${_t}.cpp)
+    target_link_libraries(${_t} PRIVATE usdGenTestUtils)
+    add_test(NAME ${_t} COMMAND ${_t})
+    set_tests_properties(${_t} PROPERTIES SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endforeach()
+set_tests_properties(testUsdGenGraph PROPERTIES LABELS "T0;gate:E-6")
+set_tests_properties(testUsdGenKernelDeterminism PROPERTIES LABELS "T0;gate:E-8")
+
+# M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
+# prototypes/data-plane-benchmark, 11 §2.2).
+foreach(_t benchUsdGenChain benchUsdGenSparse)
+    add_executable(${_t} tests/perf/${_t}.cpp)
+    target_link_libraries(${_t} PRIVATE usdGenTestUtils)
+    add_test(NAME ${_t} COMMAND ${_t})
+    set_tests_properties(${_t} PROPERTIES SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endforeach()
+set_tests_properties(benchUsdGenChain PROPERTIES LABELS "T0;perf;gate:E-1;gate:E-7")
+set_tests_properties(benchUsdGenSparse PROPERTIES LABELS "T0;perf;gate:E-2")
+
+# M1 T1 imaging tests (scene index over the real UsdImaging chain).
+foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
+           testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter
+           testUsdGenRestAdapter testUsdGenAutoApply testUsdGenContracts)
+    add_executable(${_t} tests/${_t}.cpp)
+    target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
+    add_test(NAME ${_t} COMMAND ${_t})
+    set_tests_properties(${_t} PROPERTIES
+        ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endforeach()
+set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
+set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
+set_tests_properties(testUsdGenScheduling PROPERTIES LABELS "T1;gate:SI-3")
+set_tests_properties(testUsdGenSnapshotRace PROPERTIES LABELS "T1;gate:SI-4")
+set_tests_properties(testUsdGenPopulation PROPERTIES LABELS "T1;gate:SI-6")
+set_tests_properties(testUsdGenAdapter PROPERTIES LABELS "T1;gate:SI-7")
+set_tests_properties(testUsdGenRestAdapter PROPERTIES LABELS "T1;gate:SI-7")
+set_tests_properties(testUsdGenAutoApply PROPERTIES LABELS "T1;gate:SI-8")
+set_tests_properties(testUsdGenContracts PROPERTIES LABELS "T1")
+
+# N-5 (09 §5.2, 10 §5.6): schema regeneration-drift guard — the checked-in
+# plugin/usdGenSchema/resources must stay byte-identical to a fresh
+# usdGenSchema run over libs/usdGenSchema/schema.usda (bin/gen_schema.sh is
+# the reference recipe; the N-2 plugInfo post-processing drift is what this
+# catches in CI). The source is a wave-3 deliverable; the frozen CTest name
+# and T1 tier are registered now, and until the source lands the test
+# reports Skipped through the same M1-STUB convention as the compiled stubs
+# (never a fake pass).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/testUsdGenSchemaUpToDate.cpp")
+    add_executable(testUsdGenSchemaUpToDate tests/testUsdGenSchemaUpToDate.cpp)
+    target_link_libraries(testUsdGenSchemaUpToDate PRIVATE usdGenSchema usd tf arch)
+    target_compile_definitions(testUsdGenSchemaUpToDate PRIVATE
+        USDGEN_TEST_SCHEMA_USDA="${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenSchema/schema.usda"
+        USDGEN_TEST_SCHEMA_RESOURCES="${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenSchema/resources"
+        USDGEN_TEST_USD_GEN_SCHEMA_TOOL="${USD_INSTALL_DIR}/bin/usdGenSchema")
+    add_test(NAME testUsdGenSchemaUpToDate COMMAND testUsdGenSchemaUpToDate)
+    set(_usdgen_schema_uptodate_props SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+else()
+    add_test(NAME testUsdGenSchemaUpToDate
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "M1-STUB testUsdGenSchemaUpToDate (tests/testUsdGenSchemaUpToDate.cpp pending wave 3)")
+    set(_usdgen_schema_uptodate_props SKIP_REGULAR_EXPRESSION "M1-STUB")
+endif()
+set_tests_properties(testUsdGenSchemaUpToDate PROPERTIES
+    LABELS "T1" ENVIRONMENT "${_usdgen_m1_env}" ${_usdgen_schema_uptodate_props})
+
+# M1 T2 Storm tests (EGL harness; the S-8/S-9/L-1 PW decisions get confirmed
+# on shipped code here, 11 §2.2 exit-gate table).
+add_executable(testUsdGenStormLook tests/testUsdGenStormLook.cpp)
+target_link_libraries(testUsdGenStormLook PRIVATE usdGenTestUtilsHd)
+target_include_directories(testUsdGenStormLook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
+add_test(NAME testUsdGenStormLook COMMAND testUsdGenStormLook ${PROJECT_SOURCE_DIR})
+set_tests_properties(testUsdGenStormLook PROPERTIES
+    LABELS "T2;gate:L-2" ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+add_executable(benchUsdGenStorm tests/perf/benchUsdGenStorm.cpp)
+target_link_libraries(benchUsdGenStorm PRIVATE usdGenTestUtilsHd)
+add_test(NAME benchUsdGenStorm COMMAND benchUsdGenStorm)
+set_tests_properties(benchUsdGenStorm PROPERTIES
+    LABELS "T2;perf;gate:S-1;gate:S-5;gate:S-6;gate:S-12"
+    ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+# N-4 (09 §5.3/§5.4, 10 §5.6 + §6.5): the remaining M1 Storm decision gates.
+# S-8 (tangent strategy PW decision) needs both the variant A/B timing
+# comparison (`testUsdGenStormTangent`) and the
+# HDST_ENABLE_HGI_RESOURCE_GENERATION=1 compile (`testUsdGenStormHgiResource`);
+# S-9 is the refineLevel live switch, L-1 the preview-material resolution.
+# The four sources land in wave 3; the frozen CTest names, tier and gate
+# labels are registered now so `ctest -N -L 'gate:'` resolves every M1 gate,
+# reporting Skipped via the M1-STUB convention until then. GPU-bound tests:
+# RUN_SERIAL keeps one Storm context per ctest slot.
+set(_usdgen_storm_labels_testUsdGenStormTangent  "T2;gate:S-8")
+set(_usdgen_storm_labels_testUsdGenStormHgiResource "T2;gate:S-8")
+set(_usdgen_storm_labels_testUsdGenStormRefine   "T2;gate:S-9")
+set(_usdgen_storm_labels_testUsdGenStormMaterial "T2;gate:L-1")
+foreach(_t testUsdGenStormTangent testUsdGenStormHgiResource
+           testUsdGenStormRefine  testUsdGenStormMaterial)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_t}.cpp")
+        add_executable(${_t} tests/${_t}.cpp)
+        target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
+        set(_usdgen_storm_cmd ${_t})
+        set(_usdgen_storm_props SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    else()
+        set(_usdgen_storm_cmd
+            ${CMAKE_COMMAND} -E echo "M1-STUB ${_t} (pending wave-3 source)")
+        set(_usdgen_storm_props SKIP_REGULAR_EXPRESSION "M1-STUB")
+    endif()
+    add_test(NAME ${_t} COMMAND ${_usdgen_storm_cmd})
+    set_tests_properties(${_t} PROPERTIES
+        LABELS "${_usdgen_storm_labels_${_t}}"
+        RUN_SERIAL TRUE
+        ENVIRONMENT "${_usdgen_m1_env}"
+        ${_usdgen_storm_props})
+endforeach()
 
 # ---------------------------------------------------------------------------
 # M0 install-tree tests (plan §6.2, sol S-5/X-4)
@@ -377,7 +559,13 @@ set_tests_properties(testUsdGenConsumer PROPERTIES
 # ---------------------------------------------------------------------------
 # Install rules
 # ---------------------------------------------------------------------------
-install(TARGETS usdGen usdGenMath usdGen_seexpr usdGenImaging usdGenSchema nanoflann
+# N-7 (plan §1.2/§1.6): only the four shipped targets are installed and
+# exported. usdGenMath, usdGen_seexpr and nanoflann are private dependency
+# archives (linked hidden, --exclude-libs,ALL, symbols verified out of the
+# shipped objects) — installing them would put libusdGenMath.a /
+# libusdGen_seexpr.a into lib/ and drag their unprefixed INTERFACE include
+# roots into the usdGenTargets export set.
+install(TARGETS usdGen usdGenImaging usdGenSchema usdGenShaders
     EXPORT usdGenTargets
     LIBRARY DESTINATION "${USDGEN_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${USDGEN_INSTALL_LIBDIR}")
@@ -401,6 +589,21 @@ set(_usdgen_imaging_pluginfo
     "${_usdgen_imaging_resources}/plugInfo.json")
 install(FILES "${_usdgen_imaging_pluginfo}"
     DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenImaging/resources")
+
+# usdGenShaders plugin resources (10 §3.4 install tree; C5 contract).
+# shaderDefs.usda lives inside shaders/ and the .glslfx files are its siblings,
+# so the relative @./...@ citations resolve in the installed layout too.
+install(FILES
+    "${_usdgen_shader_pluginfo}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/hairLook.usda"
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenShaders/resources")
+# N-6: a trailing-slash source copies the *contents* of shaders/, so the
+# destination must be .../resources/shaders — the old rule flattened
+# shaderDefs.usda and the .glslfx files straight into resources/, where
+# plugInfo's "ShaderResources": "shaders" never looks (Sdr discovery found
+# zero shaders in the install tree).
+install(DIRECTORY usdGenShaders/resources/shaders/
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenShaders/resources/shaders")
 
 # Export targets so the package config's include(usdGenTargets.cmake) resolves.
 install(EXPORT usdGenTargets
@@ -430,19 +633,18 @@ install(FILES
 # Install public headers for the exported targets' $<INSTALL_INTERFACE:include>
 # dirs. The build-tree include roots are:
 #   usdGen        libs/usdGen          -> #include "usdGen/..."
-#   usdGenMath    libs                 -> #include "usdGenMath/..."
 #   usdGenSchema  libs/usdGenSchema    -> #include "usdGenSchema/..."
 #   usdGenImaging libs/usdGenImaging   -> #include "usdGenImaging/..."
 # so the install mirrors the include spellings directly under
 # <prefix>/include. Trailing source slashes + FILES_MATCHING ship headers
 # only (sol S-6: the previous install(DIRECTORY) rules appended directory
 # basenames a second time — include/usdGen/usdGen/*.h — and installed .cpp
-# files; duplicate rules for math/schema/imaging are removed).
+# files; duplicate rules for schema/imaging are removed).
+# N-7 (plan §1.2): usdGenMath is not an installed target, so no math headers
+# are installed either — they stay in-tree until the public math headers
+# land in M7; the old include/usdGenMath rule is gone.
 install(DIRECTORY libs/usdGen/usdGen/
     DESTINATION include/usdGen
-    FILES_MATCHING PATTERN "*.h")
-install(DIRECTORY libs/usdGenMath/
-    DESTINATION include/usdGenMath
     FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY libs/usdGenSchema/usdGenSchema/
     DESTINATION include/usdGenSchema

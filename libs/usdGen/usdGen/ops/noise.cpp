@@ -1,0 +1,370 @@
+// usdGen — UsdGenNoiseOp implementation (M1). 02-schema.md §2.7.1, 04 §2.9.
+// Frizz: correlated fBm displacement in the ROOT frame (I3).
+//
+// 04 §2.9's evaluate pseudocode re-samples the fBm every frame, but its
+// sample position — rootRest[c]*correlation + h_c + (0,0, hairT[i]*frequency)
+// — depends only on rest data, the per-curve capture hash, hairT and the
+// capture-class parameters. usdGen:space resolves to "rest" for this type, so
+// "the field is evaluated at the rest root and frizz does not swim when the
+// surface animates". We therefore pin the field values into the capture
+// payload (SeExpr2::FBM, S38 — the single noise implementation) and let
+// Evaluate apply only the value-class scale (magnitude * magLUT * mask
+// envelope). The per-frame cost is an add-scale, not a noise sample, which is
+// what keeps gate E-1 (full 5-op run <= 1.5 ms at 100 k x 8 CV) honest: a
+// per-frame SeExpr FBM over 800 k CVs measures ~100 ms single-thread /
+// ~12.5 ms at 8 threads on this host (MEASURED, fbmbench, M1 integration).
+#include "usdGen/ops/noise.h"
+
+#include "usdGen/mask.h"
+#include "usdGen/maskParams.h"
+#include "usdGenMath/usdGenMath/hash.h"
+#include "usdGenMath/usdGenMath/kernels.h"
+#include "usdGenMath/usdGenMath/ramp.h"
+#include "SeExpr2/Noise.h"
+
+#include "pxr/base/gf/vec3f.h"
+#include "pxr/base/tf/diagnostic.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <vector>
+
+PXR_NAMESPACE_USING_DIRECTIVE
+
+namespace usdGen {
+
+namespace {
+
+
+/// Read a float2[] ramp-knots property (02 §2.17 scalar ramp). Missing or
+/// differently typed values fall back to the caller's default.
+VtVec2fArray ReadRampKnots(UsdGenParamView const *p, TfToken const &name)
+{
+    VtVec2fArray knots;
+    if (p) {
+        if (VtValue const v = p->GetVtValue(name, VtValue());
+            v.IsHolding<VtVec2fArray>()) {
+            knots = v.UncheckedGet<VtVec2fArray>();
+        }
+    }
+    return knots;
+}
+
+struct UsdGenNoiseCapture final : public UsdGenCapturePayload
+{
+    // perCv[i]      = pinned fBm field value in [-1, 1] at CV i
+    // perCurve[c]   = pinned field value at the curve root (recorded for the
+    //                 correlation-1 limit and diagnostics)
+    uint64_t upstreamTopologyVersion = 0;
+    uint32_t upstreamCvs = 0;
+
+    std::unique_ptr<UsdGenCapture> Clone() const override
+    {
+        return std::make_unique<UsdGenNoiseCapture>(*this);
+    }
+    bool ValidForTopology(UsdGenCurveBuffer const &upstream) const override
+    {
+        return upstream.topologyVersion == upstreamTopologyVersion &&
+               upstream.totalCvs == upstreamCvs;
+    }
+};
+
+inline uint64_t doubleAsBits(double d)
+{
+    uint64_t u;
+    std::memcpy(&u, &d, sizeof(u));
+    return u;
+}
+
+/// Per-curve hash vector h_c (04 §2.9): three [0,1) draws over the stable
+/// id, distinct salts kSaltNoise .. kSaltNoise + 2.
+void HashVec3(uint32_t seed, uint64_t curveId, float out[3])
+{
+    out[0] = UsdGenDraw01(int(seed), curveId, kSaltNoise + 0u);
+    out[1] = UsdGenDraw01(int(seed), curveId, kSaltNoise + 1u);
+    out[2] = UsdGenDraw01(int(seed), curveId, kSaltNoise + 2u);
+}
+
+}  // namespace
+
+static TfTokenVector _topoParams = [] {
+    TfTokenVector v = UsdGenBaseTopologyParams();
+    auto m = UsdGenMaskTopologyParams();
+    v.insert(v.end(), m.begin(), m.end());
+    return v;
+}();
+
+static TfTokenVector _valueParams = [] {
+    TfTokenVector v = UsdGenBaseValueParams();
+    v.push_back(TfToken("enabled"));      // toggle: value-class (02 §6.3)
+    v.push_back(TfToken("noise:magnitude"));
+    v.push_back(TfToken("noise:magnitude:knots"));
+    v.push_back(TfToken("noise:frequency"));
+    v.push_back(TfToken("noise:correlation"));
+    v.push_back(TfToken("noise:octaves"));
+    v.push_back(TfToken("noise:lacunarity"));
+    v.push_back(TfToken("noise:gain"));
+    v.push_back(TfToken("cumulative"));
+    v.push_back(TfToken("preserveLength"));
+    auto m = UsdGenMaskValueParams();
+    v.insert(v.end(), m.begin(), m.end());
+    return v;
+}();
+
+TfSpan<const TfToken> UsdGenNoiseOp::TopologyParameters() const
+{
+    return TfSpan<const TfToken>(_topoParams.data(), _topoParams.size());
+}
+TfSpan<const TfToken> UsdGenNoiseOp::ValueParameters() const
+{
+    return TfSpan<const TfToken>(_valueParams.data(), _valueParams.size());
+}
+std::unique_ptr<UsdGenCapture> UsdGenNoiseOp::CreateCapture() const
+{
+    return std::make_unique<UsdGenNoiseCapture>();
+}
+uint32_t UsdGenNoiseOp::PlanesTouched() const
+{
+    return kPlanePoints;
+}
+
+bool UsdGenNoiseOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
+{
+    int octaves = params.GetInt(TfToken("noise:octaves"), 1);
+    float lacunarity = static_cast<float>(params.GetDouble(TfToken("noise:lacunarity"), 2.0));
+    float gain = static_cast<float>(params.GetDouble(TfToken("noise:gain"), 0.5));
+    if (octaves < 1 || octaves > 6) {
+        if (diag) diag->Error("UsdGenNoise: usdGen:noise:octaves must be in [1, 6]");
+        return false;
+    }
+    if (lacunarity <= 1.0f) {
+        if (diag) diag->Error("UsdGenNoise: usdGen:noise:lacunarity must be > 1");
+        return false;
+    }
+    if (gain < 0.0f || gain > 1.0f) {
+        if (diag) diag->Error("UsdGenNoise: usdGen:noise:gain must be in [0, 1]");
+        return false;
+    }
+    return true;
+}
+
+UsdGenEpoch UsdGenNoiseOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
+{
+    // The pinned field is a function of: frequency, correlation, octaves,
+    // lacunarity, gain, the mask capture block, seed, and the upstream
+    // topology (rest roots + hairT). Value-class parameters (magnitude, its
+    // knots, cumulative, preserveLength) are applied at evaluate and are
+    // deliberately NOT terms here — that is what keeps a magnitude edit out
+    // of the capture (gate SI-2).
+    UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
+    uint64_t h = 1469598103934665603ULL;
+    auto feed = [&](std::string const &k, uint64_t v) {
+        h ^= v; h *= 0x100000001b3ULL;
+        h ^= k.size(); h *= 0x100000001b3ULL;
+    };
+    if (p) {
+        feed("frequency", static_cast<uint32_t>(
+                              p->GetDouble(TfToken("noise:frequency"), 3.0) * 10000.0));
+        feed("correlation", static_cast<uint32_t>(
+                                p->GetDouble(TfToken("noise:correlation"), 0.5) * 100000.0));
+        feed("octaves", uint64_t(p->GetInt(TfToken("noise:octaves"), 1)));
+        feed("lacunarity", doubleAsBits(
+                               p->GetDouble(TfToken("noise:lacunarity"), 2.0)));
+        feed("gain", doubleAsBits(p->GetDouble(TfToken("noise:gain"), 0.5)));
+    }
+    feed("seed", ctx.seed);
+    feed("upstreamTopology", ctx.upstreamGeneration);
+    return {h, h ^ 0x9E3779B97F4A7C15ull};
+}
+
+bool UsdGenNoiseOp::Capture(
+    UsdGenCaptureContext const &ctx,
+    UsdGenCurveBuffer const &upstream,
+    UsdGenCapture *out,
+    UsdGenDiagnostics *diag)
+{
+    TF_UNUSED(diag);
+    UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
+    auto &cap = *static_cast<UsdGenNoiseCapture *>(out);
+
+    cap.upstreamTopologyVersion = upstream.topologyVersion;
+    cap.upstreamCvs = upstream.totalCvs;
+
+    float frequency = p ? static_cast<float>(p->GetDouble(TfToken("noise:frequency"), 3.0)) : 3.0f;
+    float correlation = p ? static_cast<float>(p->GetDouble(TfToken("noise:correlation"), 0.5)) : 0.5f;
+    correlation = std::clamp(correlation, 0.0f, 1.0f);
+    int octaves = p ? p->GetInt(TfToken("noise:octaves"), 1) : 1;
+    float lacunarity = p ? static_cast<float>(p->GetDouble(TfToken("noise:lacunarity"), 2.0)) : 2.0f;
+    float gain = p ? static_cast<float>(p->GetDouble(TfToken("noise:gain"), 0.5)) : 0.5f;
+
+    // `noise:magnitude` and its knots are value-class (02-schema.md :638-639),
+    // so the magnitude ramp is NOT baked into the capture payload: Evaluate()
+    // rebuilds the 257-entry ramp LUT from the live parameters with
+    // UsdGenBuildRampLut(), honouring the frozen <p>:interpolation token
+    // (02 :598). Baking it here would freeze a value-class edit out of the
+    // frame response (review M-5); the CaptureDigest above deliberately
+    // excludes the knots for the same reason (gate SI-2).
+
+    // Mask block (02 §2.13) — resolved once per capture epoch (I4).
+    if (p) {
+        UsdGenMaskSettings m = UsdGenMaskSettingsFromParams(*p);
+        auto const mask = EvaluateMask(m, upstream.curveId, upstream.px, {}, 0.0);
+        cap.curveMask = mask.curveMask;
+        cap.maskRampLut = mask.rampLut;
+    }
+
+    if (upstream.px.empty()) {
+        cap.perCv.clear();
+        cap.perCurve.clear();
+        return true;
+    }
+
+    const size_t nCv = upstream.totalCvs;
+    const size_t nCurve = upstream.totalCurves;
+    const int cvCount = nCurve ? int(nCv / nCurve) : 0;   // uniform-CV fast path (M1)
+
+    auto const *px = upstream.px.data();
+    auto const *py = upstream.py.data();
+    auto const *pz = upstream.pz.data();
+    auto const *hairT = upstream.hairT.empty() ? nullptr : upstream.hairT.data();
+    auto const *ids = upstream.curveId.empty() ? nullptr : upstream.curveId.data();
+
+    cap.perCv.resize(nCv);
+    cap.perCurve.resize(nCurve);
+
+    // Pin the fBm field: sample positions are rest-pinned (I3) —
+    //   pos[c, i] = rootRest[c] * correlation + (1 - correlation) * h_c
+    //               + (0, 0, hairT[i] * frequency)
+    // correlation = 1 samples every curve at its own rest root (a shared
+    // spatial field, hence "correlated"); correlation = 0 is fully
+    // decorrelated per curve by the hash offset.
+    auto *field = cap.perCv.data();
+    for (size_t c = 0; c < nCurve; ++c) {
+        float hvec[3];
+        HashVec3(ctx.seed, ids ? ids[c] : 0, hvec);
+        const GfVec3f root = (cvCount > 0)
+            ? GfVec3f(px[c * cvCount], py[c * cvCount], pz[c * cvCount])
+            : GfVec3f(0.0f, 0.0f, 0.0f);
+        const float baseX = root[0] * correlation + (1.0f - correlation) * hvec[0];
+        const float baseY = root[1] * correlation + (1.0f - correlation) * hvec[1];
+        const float baseZ = root[2] * correlation + (1.0f - correlation) * hvec[2];
+
+        float rootOut = 0.0f;
+        {
+            const float in3[3] = {baseX, baseY, baseZ};
+            SeExpr2::FBM<3, 1, false, float>(in3, &rootOut,
+                                             octaves, lacunarity, gain);
+        }
+        cap.perCurve[c] = 2.0f * rootOut - 1.0f;
+
+        if (cvCount > 0) {
+            for (int i = 0; i < cvCount; ++i) {
+                const float t = hairT
+                    ? hairT[c * cvCount + i]
+                    : (cvCount > 1 ? float(i) / float(cvCount - 1) : 0.0f);
+                const float in3[3] = {baseX, baseY, baseZ + t * frequency};
+                float out1 = 0.0f;
+                SeExpr2::FBM<3, 1, false, float>(in3, &out1,
+                                                 octaves, lacunarity, gain);
+                field[c * cvCount + i] = 2.0f * out1 - 1.0f;
+            }
+        }
+    }
+    return true;
+}
+
+void UsdGenNoiseOp::Evaluate(
+    UsdGenEvalContext const &ctx,
+    UsdGenCapture const &captureIn,
+    UsdGenChunkView *view) const
+{
+    UsdGenNoiseCapture const &cap =
+        static_cast<UsdGenNoiseCapture const &>(captureIn);
+    if (cap.perCv.empty()) return;
+
+    UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
+    static const TfToken sMagnitude{"noise:magnitude"};
+    static const TfToken sCumulative{"cumulative"};
+    static const TfToken sPreserveLength{"preserveLength"};
+    static const TfToken sMagKnots{"noise:magnitude:knots"};
+    static const TfToken sMagInterp{"noise:magnitude:interpolation"};
+    static const TfToken sCatmullRom{"catmullRom"};
+    const float magnitude = p ? static_cast<float>(p->GetDouble(sMagnitude, 0.05)) : 0.05f;
+    const bool cumulative = p ? p->GetBool(sCumulative, false) : false;
+    const float preserveLength = p ? static_cast<float>(p->GetDouble(sPreserveLength, 1.0f)) : 1.0f;
+    float *px = view->px, *py = view->py, *pz = view->pz;
+    auto const *inPx = view->inPx, *inPy = view->inPy, *inPz = view->inPz;
+    auto const *hairT = view->hairT;
+    auto const *mask = view->curveMask;
+    auto const *rootN = view->rootN;
+    auto const *perCv = cap.perCv.data();
+    // Hoisted LUT (E-1/E-7): chunk-invariant knots resolve at most once per
+    // worker thread; empty knots (the common case) alias a shared flat-1.0
+    // table, bit-identical to building one per chunk.
+    float const *lutPtr = nullptr;
+    thread_local std::vector<float> tLut;
+    {
+        VtVec2fArray const knots = ReadRampKnots(p, sMagKnots);
+        if (knots.empty()) {
+            static const std::vector<float> sFlat(kUsdGenRampLutSize, 1.0f);
+            lutPtr = sFlat.data();
+        } else {
+            if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
+            UsdGenBuildRampLut(knots, p ? p->GetToken(sMagInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
+            lutPtr = tLut.data();
+        }
+    }
+    auto const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.data();
+    const size_t cv = size_t(view->cvCount);
+
+    for (uint32_t c = 0; c < view->curveCount; ++c) {
+        const float w = magnitude * (mask ? mask[c] : 1.0f);
+        if (w == 0.0f) {
+            // Early out: bitwise copy of the input (02 §2.13).
+            for (size_t i = 0; i < cv; ++i) {
+                const size_t o = view->Cv(c, i);
+                px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
+            }
+            continue;
+        }
+        const GfVec3f n = rootN ? rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
+        float runSum = 0.0f;
+        for (size_t i = 0; i < cv; ++i) {
+            const size_t o = view->Cv(c, uint32_t(i));
+            const float t = hairT ? hairT[o]
+                                   : (cv > 1 ? float(i) / float(cv - 1) : 0.0f);
+            const float magScale = UsdGenEvalLut257(lutPtr, t)
+                                   * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
+            float disp = w * magScale * perCv[o];
+            if (cumulative) {
+                runSum += disp;
+                disp = runSum / float(i + 1);
+            }
+            const float dx = inPx[o] + n[0] * disp;
+            const float dy = inPy[o] + n[1] * disp;
+            const float dz = inPz[o] + n[2] * disp;
+            if (preserveLength >= 0.999f && i > 0) {
+                // Restore the rest segment length: rescale the new segment to
+                // the magnitude of the input segment.
+                const float prevX = inPx[o - 1], prevY = inPy[o - 1],
+                            prevZ = inPz[o - 1];
+                const float sx = inPx[o] - prevX, sy = inPy[o] - prevY,
+                            sz = inPz[o] - prevZ;
+                const float sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+                const float qx = dx - prevX, qy = dy - prevY, qz = dz - prevZ;
+                const float ql = std::sqrt(qx * qx + qy * qy + qz * qz);
+                if (sl > 1e-9f && ql > 1e-9f) {
+                    const float f = sl / ql;
+                    px[o] = prevX + qx * f;
+                    py[o] = prevY + qy * f;
+                    pz[o] = prevZ + qz * f;
+                    continue;
+                }
+            }
+            px[o] = dx; py[o] = dy; pz[o] = dz;
+        }
+    }
+}
+
+}  // namespace usdGen

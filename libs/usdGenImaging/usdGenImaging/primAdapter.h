@@ -1,15 +1,23 @@
-// usdGen prim adapters (ADR §5.1 #3).
+// usdGen prim adapters (ADR §5.1 #3; 06-imaging.md §2).
 //
-// One adapter base under FIVE plugInfo entries. primTypeName is a single
+// One adapter body behind the five plugInfo entries (UsdGenGroom/
+// Description/Operator/Map/GuideSet derive types). primTypeName is a single
 // string per plugInfo entry, and UsdGenGroom / UsdGenDescription /
 // UsdGenGuideSet derive from UsdGeomImageable rather than UsdGenOperator, so
 // includeDerivedPrimTypes cannot reach them from an operator base entry.
 // Hence five one-line final subclasses of a single implementation.
+//
+// The subprim is ONE Hydra prim per USD prim: GetImagingSubprims returns
+// {TfToken()} and the usdGen parameter container is published UNDER the
+// prim-level data source at locator `usdGen` (06 §2.1/§2.3). Mappings are
+// built generically from UsdPrimDefinition (R6: skip-list, never a
+// name-prefix test) and cached once per schema type name.
 #ifndef USDGEN_IMAGING_PRIM_ADAPTER_H
 #define USDGEN_IMAGING_PRIM_ADAPTER_H
 
 #include "usdGenImaging/api.h"
 
+#include "pxr/usdImaging/usdImaging/dataSourceMapped.h"
 #include "pxr/usdImaging/usdImaging/sceneIndexPrimAdapter.h"
 #include "pxr/pxr.h"
 
@@ -17,40 +25,47 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 /// \class UsdGenPrimAdapterBase
 ///
-/// Pass-through adapter: usdGen container/operator prims contribute no
-/// subprims of their own; geometry is published by the scene index plugin
-/// under the description. M0 implements the pure virtuals minimally; M1+
-/// extends this to emit usdGen:* data sources.
+/// Publishes every declared usdGen:* property of the prim as a data source
+/// under the `usdGen` container (S14 pull-all), and maps each property edit
+/// to its precise C1 locator so the UsdGenDirtyRouter gets exact dirties
+/// (06 §2.7; 02-schema.md §6 is the property→locator table this emits).
 class UsdGenPrimAdapterBase : public UsdImagingSceneIndexPrimAdapter
 {
 public:
-    TfTokenVector GetImagingSubprims(UsdPrim const &prim) override
-    {
-        return TfTokenVector();
-    }
+    TfTokenVector GetImagingSubprims(UsdPrim const &prim) override;
 
+    /// The empty token for all five registered types (06 §2.1): operator and
+    /// map prims are data-only and must not become rprims; Groom/Description/
+    /// GuideSet carry their Imageable state through
+    /// UsdImagingDataSourcePrim, not through a Hydra type.
     TfToken GetImagingSubprimType(
-            UsdPrim const &prim, TfToken const &subprim) override
-    {
-        return TfToken();
-    }
+            UsdPrim const &prim, TfToken const &subprim) override;
 
     HdContainerDataSourceHandle GetImagingSubprimData(
             UsdPrim const &prim,
             TfToken const &subprim,
-            const UsdImagingDataSourceStageGlobals &stageGlobals) override
-    {
-        return nullptr;
-    }
+            const UsdImagingDataSourceStageGlobals &stageGlobals) override;
 
     HdDataSourceLocatorSet InvalidateImagingSubprim(
             UsdPrim const &prim,
             TfToken const &subprim,
             TfTokenVector const &properties,
-            UsdImagingPropertyInvalidationType invalidationType) override
-    {
-        return HdDataSourceLocatorSet();
-    }
+            UsdImagingPropertyInvalidationType invalidationType) override;
+
+    /// The shared mapping table for one schema type name, built once from
+    /// UsdPrimDefinition (06 §2.2). Owned by a static cache; safe to call
+    /// from any thread (internal lock, released before use).
+    static const UsdImagingDataSourceMapped::PropertyMappings &
+        Mappings(TfToken const &schemaTypeName);
+
+    /// `usdGen:clump:size` -> `clump/size` (the RELATIVE locator; Mappings
+    /// makes it absolute under the `usdGen` prefix). Non-usdGen names are
+    /// not expected (skip-list filtering); the name passes through.
+    static HdDataSourceLocator LocatorForProperty(TfToken const &property);
+
+    /// True for the two relationships 02-schema.md §2 declares "exactly one
+    /// target"; every other usdGen relationship is array-mapped.
+    static bool IsSingleTarget(TfToken const &property);
 };
 
 /// Five one-line final subclasses, one per concrete prim type that must be

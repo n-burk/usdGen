@@ -53,3 +53,11 @@ out/
 .idea/
 .DS_Store
 *.swp
+__pycache__/
+usdGenShaders/test/build-*/
+
+# Test scene fixtures (regenerate with tests/scenes/make_*.py)
+tests/scenes/*.usda
+
+# Generated G1-G5 fixtures (regenerate with usd/fixtures/make_fixtures.py)
+usd/fixtures/*.usda

@@ -21,9 +21,11 @@
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usdGeom/boundable.h"
 
-#include <cstdio>
-#include <cstdlib>
+#include "pxr/base/plug/plugin.h"
+#include "pxr/base/plug/registry.h"
 #include <string>
+#include <unistd.h>
+
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -62,6 +64,24 @@ int main(int argc, char **argv)
     // Register the build-tree plugin resource dirs explicitly (the ctest
     // ENVIRONMENT already puts them on PXR_PLUGINPATH_NAME; this is a belt).
     PlugRegistry::GetInstance().RegisterPlugins({schemaResources, imagingResources});
+    // Plug registry discovery: both plugins must resolve by name from the
+    // resource dirs registered above — this is what SdrCatalog does at runtime,
+    // so a missing or malformed plugInfo.json fails loudly here instead of as
+    // an unexplained "type not found" below.
+    const auto &registry = PlugRegistry::GetInstance();
+    for (const char *pluginName : {"usdGenSchema", "usdGenImaging"}) {
+        const PlugPlugin *plugin = get_pointer(registry.GetPluginWithName(pluginName));
+        if (!plugin) {
+            std::printf("FAIL: plugin '%s' not found in PlugRegistry after registering %s and %s — "
+                        "check that <dir>/plugInfo.json exists, is valid JSON, and names a loadable library\n",
+                        pluginName, schemaResources.c_str(), imagingResources.c_str());
+            ++g_failures;
+        } else {
+            const std::string libPath = plugin->GetPath();
+            Check(!libPath.empty() && ::access(libPath.c_str(), F_OK) == 0,
+                  (std::string("plugin '") + pluginName + "' library exists: " + libPath).c_str());
+        }
+    }
 
     // TfType registry: imaging plugin types (registered via TF_REGISTRY_FUNCTION
     // inside libusdGenImaging.so, which is linked into this test binary).

@@ -229,6 +229,8 @@ template void Noise<4, 1, double>(const double*, double*);
 template void Noise<3, 3, double>(const double*, double*);
 template void Noise<4, 3, double>(const double*, double*);
 template void FBM<3, 1, false, double>(const double*, double*, int, double, double);
+template void Noise<3, 1, float>(const float*, float*);
+template void FBM<3, 1, false, float>(const float*, float*, int, float, float);
 template void FBM<3, 1, true, double>(const double*, double*, int, double, double);
 template void FBM<3, 3, false, double>(const double*, double*, int, double, double);
 template void FBM<3, 3, true, double>(const double*, double*, int, double, double);

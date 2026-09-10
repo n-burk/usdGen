@@ -20,8 +20,11 @@ class UsdGenGroom "UsdGenGroom"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    int usdGen:schemaVersion = 1
-    uniform token usdGen:sessionId = "default"
+    float usdGen:densityScale = 1
+    string usdGen:label = ""
+    float usdGen:renderDensityScale = 1
+    uniform int usdGen:schemaVersion = 1
+    uniform string usdGen:sessionId = ""
     rel usdGen:surface
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
@@ -55,10 +58,25 @@ class UsdGenDescription "UsdGenDescription"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    rel usdGen:input
+    uniform token usdGen:curve:basis = "bspline" (
+        allowedTokens = ["bspline", "catmullRom"]
+    )
+    float usdGen:densityScale = 1
+    rel usdGen:guides
+    string usdGen:label = ""
+    uniform bool usdGen:motion:forwardSurfaceSamples = 0
+    uniform token usdGen:motion:mode = "single" (
+        allowedTokens = ["single", "velocities", "samples"]
+    )
+    uniform int usdGen:motion:sampleCount = 3
+    uniform token usdGen:pickTarget = "description" (
+        allowedTokens = ["description", "terminal"]
+    )
+    float usdGen:renderDensityScale = 1
     rel usdGen:surface
     rel usdGen:terminal
     uniform int usdGen:tileTarget = 64
+    float usdGen:width:default = 0.01
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
@@ -74,39 +92,6 @@ class UsdGenDescription "UsdGenDescription"
         the desired positioning for this prim and its descendant prims."""
         }
     )
-}
-
-class "UsdGenOperator"
-{
-    uniform int usdGen:algorithmVersion = 0
-    bool usdGen:enabled = 1
-}
-
-class UsdGenScatter "UsdGenScatter"
-{
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:density = 1
-    bool usdGen:enabled = 1
-    uniform token usdGen:mode = "random" (
-        allowedTokens = ["random", "uniform", "points", "atGuides"]
-    )
-    int usdGen:seed = 0
-}
-
-class UsdGenNoise "UsdGenNoise"
-{
-    uniform int usdGen:algorithmVersion = 0
-    bool usdGen:enabled = 1
-    float usdGen:frequency = 4
-    float usdGen:magnitude = 0.1
-    int usdGen:seed = 0
-}
-
-class UsdGenLength "UsdGenLength"
-{
-    uniform int usdGen:algorithmVersion = 0
-    bool usdGen:enabled = 1
-    float usdGen:length = 1
 }
 
 class UsdGenGuideSet "UsdGenGuideSet"
@@ -138,27 +123,1016 @@ class UsdGenGuideSet "UsdGenGuideSet"
     )
 }
 
+class "UsdGenOperator"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class "UsdGenGenerator"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class "UsdGenStyler"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class "UsdGenDeformer"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenScatter "UsdGenScatter"
+{
+    uniform int usdGen:algorithmVersion = 0
+    bool usdGen:areaCompensation = 1
+    float usdGen:blend = 1
+    float usdGen:density = 100
+    bool usdGen:enabled = 1
+    bool usdGen:flip = 0
+    rel usdGen:guides
+    rel usdGen:input
+    float usdGen:jitter = 0
+    string usdGen:label = ""
+    uniform token usdGen:mode = "random" (
+        allowedTokens = ["random", "uniform", "points", "atGuides"]
+    )
+    int usdGen:perGuide = 1
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    int usdGen:relaxIterations = 0
+    int[] usdGen:rootPrims = []
+    texCoord2f[] usdGen:rootUVs = []
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    float usdGen:spacingU = 0.02
+    float usdGen:spacingV = 0.02
+    rel usdGen:surface
+}
+
+class UsdGenGrow "UsdGenGrow"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    uniform token usdGen:direction = "surfaceNormal" (
+        allowedTokens = ["surfaceNormal", "attribute", "vector"]
+    )
+    token usdGen:directionPrimvar = ""
+    vector3f usdGen:directionVector = (0, 1, 0)
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    float usdGen:length = 1
+    rel usdGen:length:source
+    float2 usdGen:lengthRandom = (1, 1)
+    float usdGen:lift = 0
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    int usdGen:segments = 8
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    float usdGen:uvBlend = 0
+}
+
+class UsdGenGuideInterpolate "UsdGenGuideInterpolate"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    float usdGen:blendInSkinSpace = 1
+    uniform token usdGen:blendMethod = "linearBlend" (
+        allowedTokens = ["linearBlend", "extrudeAndBlend"]
+    )
+    float usdGen:clumpCrossover = 0
+    int usdGen:cvCount = 8
+    bool usdGen:enabled = 1
+    rel usdGen:guides
+    float usdGen:influenceDecay = 2
+    float usdGen:influenceRadius = 4
+    rel usdGen:input
+    string usdGen:label = ""
+    rel usdGen:length:source
+    float usdGen:maxGuideAngle = 90
+    int usdGen:maxGuides = 3
+    float usdGen:randomizeGuide = 0
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    bool usdGen:useUniqueGuide = 0
+}
+
+class UsdGenCurveSource "UsdGenCurveSource"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    rel usdGen:curves
+    bool usdGen:enabled = 1
+    uniform string usdGen:expectEpoch = ""
+    uniform token usdGen:idSource = "primvar" (
+        allowedTokens = ["primvar", "index"]
+    )
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:lane = "hair" (
+        allowedTokens = ["hair", "reference"]
+    )
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform token usdGen:rebind = "onError" (
+        allowedTokens = ["never", "onError", "always"]
+    )
+    uniform int usdGen:resampleTo = 0
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    uniform token usdGen:staleAction = "warn" (
+        allowedTokens = ["warn", "ignore", "block"]
+    )
+    rel usdGen:surface
+    bool usdGen:useRest = 1
+}
+
+class UsdGenClump "UsdGenClump"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    float usdGen:clump:amount = 0.5
+    rel usdGen:clump:centers
+    float usdGen:clump:copy = 0
+    float usdGen:clump:copyVariance = 0
+    float usdGen:clump:crossover = 0
+    float usdGen:clump:curl:amplitude = 0
+    float usdGen:clump:curl:frequency = 1
+    float usdGen:clump:cut = 0
+    float usdGen:clump:density = 4
+    float usdGen:clump:flatness = 0
+    float usdGen:clump:goalFeedback = 1
+    uniform int usdGen:clump:level = -1
+    int usdGen:clump:levels = 1
+    uniform token usdGen:clump:method = "linearBlend" (
+        allowedTokens = ["linearBlend", "extrudeAndBlend"]
+    )
+    float usdGen:clump:noise:amount = 0
+    float usdGen:clump:noise:correlation = 0
+    float usdGen:clump:noise:frequency = 1
+    float usdGen:clump:offset = 0
+    uniform token usdGen:clump:profile:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)]
+    uniform int usdGen:clump:seed = 0
+    float usdGen:clump:size = 1
+    float usdGen:clump:sizeReduction = 0.5
+    float usdGen:clump:stray:amount = 0
+    float usdGen:clump:stray:falloff = 1
+    float usdGen:clump:stray:rate = 0
+    float usdGen:clump:tightnessReduction = 0.8
+    float usdGen:clump:volumize = 0
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    float usdGen:preserveLength = 1
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenNoise "UsdGenNoise"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:cumulative = 0
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    float usdGen:noise:correlation = 0.5
+    float usdGen:noise:frequency = 3
+    float usdGen:noise:gain = 0.5
+    float usdGen:noise:lacunarity = 2
+    float usdGen:noise:magnitude = 0.05
+    uniform token usdGen:noise:magnitude:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:noise:magnitude:knots = [(0, 0), (1, 1)]
+    int usdGen:noise:octaves = 1
+    float usdGen:preserveLength = 1
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenLength "UsdGenLength"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    float usdGen:cullThreshold = 0
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:length:method = "scale" (
+        allowedTokens = ["scale", "cutExtend"]
+    )
+    uniform token usdGen:length:mode = "scale" (
+        allowedTokens = ["set", "scale", "cull"]
+    )
+    float2 usdGen:length:random = (1, 1)
+    rel usdGen:length:source
+    float usdGen:length:value = 1
+    float usdGen:minRemainingLength = 0
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform token usdGen:rebuild = "keepParam" (
+        allowedTokens = ["keepParam", "reparam"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenWidth "UsdGenWidth"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    bool usdGen:replace = 1
+    float usdGen:rootScale = 1
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    float usdGen:taper = 0
+    float usdGen:taperStart = 0.5
+    float usdGen:tipScale = 1
+    float usdGen:width = 0.01
+    uniform token usdGen:width:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:width:knots = [(0, 1), (1, 1)]
+}
+
+class UsdGenDirection "UsdGenDirection"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:amount = 0
+    float usdGen:aroundN = 0
+    float usdGen:blend = 1
+    vector3f usdGen:direction = (0, 1, 0)
+    uniform token usdGen:direction:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:direction:knots = [(0, 1), (1, 1)]
+    rel usdGen:direction:source
+    bool usdGen:enabled = 1
+    float usdGen:followSkinContour = 0
+    rel usdGen:input
+    string usdGen:label = ""
+    float usdGen:lift = 0
+    uniform token usdGen:mode = "rigid" (
+        allowedTokens = ["rigid", "perSegment"]
+    )
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    float usdGen:tiltN = 0
+    float usdGen:tiltU = 0
+    float usdGen:tiltV = 0
+}
+
+class UsdGenSmooth "UsdGenSmooth"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    int usdGen:iterations = 1
+    string usdGen:label = ""
+    bool usdGen:lockRoot = 1
+    uniform token usdGen:mode = "alongCurve" (
+        allowedTokens = ["alongCurve", "neighbours"]
+    )
+    int usdGen:numNeighbors = 4
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    float usdGen:searchRadius = 0
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    float usdGen:strength = 0.5
+    rel usdGen:surface
+}
+
+class UsdGenResample "UsdGenResample"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    int usdGen:cvCount = 8
+    uniform token usdGen:distribution = "uniform" (
+        allowedTokens = ["uniform", "keepParam"]
+    )
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    bool usdGen:restoreSegmentLengths = 0
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenScale "UsdGenScale"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    float usdGen:scale = 1
+    uniform token usdGen:scale:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:scale:knots = [(0, 1), (1, 1)]
+    float2 usdGen:scaleRandom = (1, 1)
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    bool usdGen:widthToo = 0
+}
+
+class UsdGenCurl "UsdGenCurl"
+{
+    uniform int usdGen:algorithmVersion = 0
+    uniform token usdGen:axisMode = "curveTangent" (
+        allowedTokens = ["curveTangent", "guide"]
+    )
+    float usdGen:blend = 1
+    bool usdGen:clockwise = 1
+    bool usdGen:enabled = 1
+    float usdGen:frequency = 2
+    rel usdGen:input
+    string usdGen:label = ""
+    float usdGen:phase = 0
+    float usdGen:phaseRandom = 0
+    float usdGen:radius = 0.02
+    uniform token usdGen:radius:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:radius:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    bool usdGen:taper = 1
+}
+
+class UsdGenBend "UsdGenBend"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:angle = 0
+    uniform token usdGen:angle:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:angle:knots = [(0, 1), (1, 1)]
+    float2 usdGen:angleRandom = (1, 1)
+    vector3f usdGen:axis = (1, 0, 0)
+    uniform token usdGen:axisMode = "rootDirection" (
+        allowedTokens = ["rootDirection", "uniform", "attribute"]
+    )
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenStraighten "UsdGenStraighten"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    float usdGen:normalStraightness = 0
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    float usdGen:tangentStraightness = 0
+}
+
+class UsdGenDisplace "UsdGenDisplace"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    float usdGen:displace:amount = 0
+    float usdGen:displace:base = 0.5
+    rel usdGen:displace:map
+    float usdGen:displace:offset = 0
+    float usdGen:displace:scale = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:mode = "height" (
+        allowedTokens = ["height", "vector"]
+    )
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenWave "UsdGenWave"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:amplitudeN = 0
+    float usdGen:amplitudeU = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    float usdGen:frequencyN = 1
+    float usdGen:frequencyU = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenPart "UsdGenPart"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    rel usdGen:part:curves
+    float usdGen:part:radius = 0.05
+    float usdGen:part:strength = 1
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenExprOp "UsdGenExprOp"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:expr:maps
+    uniform token usdGen:expr:returnType = "displacement" (
+        allowedTokens = ["displacement", "width", "color"]
+    )
+    string usdGen:expr:source = ""
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:mode = "cv" (
+        allowedTokens = ["cv", "curve"]
+    )
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenSculptLayer "UsdGenSculptLayer"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uint64[] usdGen:sculpt:curveIds = []
+    int[] usdGen:sculpt:cvOffsets = []
+    vector3f[] usdGen:sculpt:deltas = []
+    uniform string usdGen:sculpt:epoch = ""
+    uint64[] usdGen:sculpt:lockedCurves = []
+    int[] usdGen:sculpt:rootPrims = []
+    texCoord2f[] usdGen:sculpt:rootUVs = []
+    uniform token usdGen:sculpt:space = "rootFrame" (
+        allowedTokens = ["rootFrame", "object"]
+    )
+    float usdGen:sculpt:weight = 1
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenDeform "UsdGenDeform"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    string usdGen:label = ""
+    bool usdGen:lockRoots = 1
+    uniform token usdGen:mode = "rigidFrame" (
+        allowedTokens = ["rigidFrame", "rbf", "pointDeform"]
+    )
+    float usdGen:preserveShape = 0
+    int usdGen:preserveShape:iterations = 0
+    int usdGen:rbfSamples = 100
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+    bool usdGen:twistAware = 1
+}
+
+class UsdGenCollide "UsdGenCollide"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    rel usdGen:colliders
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    int usdGen:iterations = 1
+    string usdGen:label = ""
+    float usdGen:offset = 0
+    float usdGen:pushAmount = 0
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform token usdGen:resolveType = "flexible" (
+        allowedTokens = ["flexible", "stiff"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenWind "UsdGenWind"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    float usdGen:constStrength = 0
+    vector3f usdGen:direction = (0, 0, 1)
+    bool usdGen:enabled = 1
+    float usdGen:gustStrength = 0
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    float usdGen:stiffness = 0
+    uniform token usdGen:stiffness:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)]
+    rel usdGen:surface
+}
+
+class UsdGenFreeze "UsdGenFreeze"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:frozen:curves
+    uniform string usdGen:frozen:epoch = ""
+    uniform token usdGen:frozen:mode = "frozen" (
+        allowedTokens = ["frozen", "live"]
+    )
+    uniform token usdGen:frozen:tier = "session" (
+        allowedTokens = ["session", "sublayer", "payload"]
+    )
+    rel usdGen:input
+    string usdGen:label = ""
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
+class UsdGenInstance "UsdGenInstance"
+{
+    uniform int usdGen:algorithmVersion = 0
+    float usdGen:blend = 1
+    bool usdGen:enabled = 1
+    rel usdGen:input
+    float usdGen:instance:length = 0.09
+    float usdGen:instance:normalOffset = 0
+    uniform token usdGen:instance:orient = "surfaceFrame" (
+        allowedTokens = ["surfaceFrame", "curveTangent", "camera", "world"]
+    )
+    float usdGen:instance:scale = 1
+    float2 usdGen:instance:scaleRandom = (1, 1)
+    float usdGen:instance:twist = 0
+    float usdGen:instance:twistRandom = 0
+    token[] usdGen:instance:variationPrimvars = ["displayColor"]
+    float[] usdGen:instance:weights = []
+    float usdGen:instance:width = 0.02
+    uniform token usdGen:instance:width:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:instance:width:knots = [(0, 1), (1, 1)]
+    string usdGen:label = ""
+    uniform token usdGen:primitive = "cards" (
+        allowedTokens = ["cards", "archives", "spheres"]
+    )
+    rel usdGen:prototypes
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    rel usdGen:surface
+}
+
 class "UsdGenMap"
 {
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+}
+
+class UsdGenImageMap "UsdGenImageMap"
+{
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    token usdGen:map:colorSpace = "raw" (
+        allowedTokens = ["auto", "raw", "sRGB"]
+    )
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    asset usdGen:map:file
+    token usdGen:map:filter = "bilinear" (
+        allowedTokens = ["nearest", "bilinear"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+    token usdGen:map:uvSet = "st"
+    token usdGen:map:wrap = "clamp" (
+        allowedTokens = ["clamp", "repeat", "mirror", "black"]
+    )
+}
+
+class UsdGenPtexMap "UsdGenPtexMap"
+{
+    string usdGen:label = ""
+    float usdGen:map:blur = 0
+    token usdGen:map:borderMode = "clamp" (
+        allowedTokens = ["clamp", "black", "periodic"]
+    )
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    int usdGen:map:channelCount = 1
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    asset usdGen:map:file
+    token usdGen:map:filter = "bilinear" (
+        allowedTokens = ["nearest", "bilinear", "box", "gaussian", "bicubic", "bspline", "catmullrom", "mitchell"]
+    )
+    int usdGen:map:firstChannel = 0
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+}
+
+class UsdGenExprMap "UsdGenExprMap"
+{
+    rel usdGen:expr:maps
+    uniform token usdGen:expr:returnType = "float" (
+        allowedTokens = ["float", "color"]
+    )
+    uniform int usdGen:expr:seed = 0
+    string usdGen:expr:source = ""
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+}
+
+class UsdGenPaintMap "UsdGenPaintMap"
+{
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+    asset usdGen:paint:bakedFile
+    token usdGen:paint:interpolation = "faceVarying"
+    token usdGen:paint:primvar = "usdGen:paint:density"
+    int usdGen:paint:resolution = 256
+    token usdGen:paint:storage = "primvar" (
+        allowedTokens = ["primvar", "file"]
+    )
+    rel usdGen:paint:surface
+}
+
+class UsdGenNoiseMap "UsdGenNoiseMap"
+{
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+    float usdGen:noise:frequency = 1
+    float usdGen:noise:gain = 0.5
+    float usdGen:noise:lacunarity = 2
+    int usdGen:noise:octaves = 3
+    uniform int usdGen:noise:seed = 0
+    token usdGen:noise:space = "rest" (
+        allowedTokens = ["rest", "deformed"]
+    )
+    token usdGen:noise:type = "fbm" (
+        allowedTokens = ["perlin", "snoise", "fbm", "turbulence", "cellnoise", "voronoi"]
+    )
+}
+
+class UsdGenCombineMap "UsdGenCombineMap"
+{
+    rel usdGen:combine:inputs
+    token usdGen:combine:mode = "multiply" (
+        allowedTokens = ["multiply", "add", "subtract", "max", "min", "average", "overlay"]
+    )
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+}
+
+class UsdGenGuideProximityMap "UsdGenGuideProximityMap"
+{
+    rel usdGen:guides
+    string usdGen:label = ""
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    float usdGen:map:offset = 0
+    float usdGen:map:scale = 1
+    float usdGen:proximity:decay = 2
+    float usdGen:proximity:radius = 1
 }
 
 class "UsdGenMaskAPI"
 {
-    float usdGen:mask:opacity = 1
+    float usdGen:mask:amount = 1
+    uniform token usdGen:mask:combine = "multiply" (
+        allowedTokens = ["multiply", "add", "subtract", "max", "min", "average", "replace"]
+    )
+    float usdGen:mask:effectPosition = 0.5
+    float usdGen:mask:falloff = 0.5
+    float usdGen:mask:influenceWidth = 0.5
+    bool usdGen:mask:invert = 0
+    float usdGen:mask:noise:amount = 0
+    float usdGen:mask:noise:bias = 0.5
+    float usdGen:mask:noise:frequency = 1
+    float usdGen:mask:noise:gain = 0.5
+    uniform int usdGen:mask:noise:seed = 0
+    uniform token usdGen:mask:ramp:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2[] usdGen:mask:ramp:knots = [(0, 1), (1, 1)]
+    float usdGen:mask:ramp:spline
+    float usdGen:mask:random = 0
+    uniform int usdGen:mask:randomSeed = 0
+    float2 usdGen:mask:range = (0, 1)
+    float usdGen:mask:rangeMax = 1
+    float usdGen:mask:rangeMin = 0
+    uniform token usdGen:mask:rangeMode = "normalized" (
+        allowedTokens = ["normalized", "absoluteLength"]
+    )
+    rel usdGen:mask:region
+    rel usdGen:mask:source
 }
 
 class "UsdGenLookAPI"
 {
+    uniform token usdGen:look:bakeMode = "perCurve" (
+        allowedTokens = ["perCurve", "perCV"]
+    )
+    token usdGen:look:bakePrimvar = "usdGen:albedo"
+    uniform token usdGen:look:bakeTarget = "displayColor" (
+        allowedTokens = ["displayColor", "primvar", "none"]
+    )
+    rel usdGen:look:colorMap
+    uniform token usdGen:look:colorMapMode = "bake" (
+        allowedTokens = ["bake", "shader"]
+    )
+    color3f[] usdGen:look:colorRamp:colors = []
+    uniform token usdGen:look:colorRamp:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float[] usdGen:look:colorRamp:positions = []
+    float usdGen:look:hueJitter = 0
+    uniform int usdGen:look:jitterSeed = 0
+    float usdGen:look:rampExponent = 1
+    color3f usdGen:look:rootColor = (0.035, 0.018, 0.008)
+    color3f usdGen:look:tipColor = (0.21, 0.115, 0.045)
+    float usdGen:look:valueJitter = 0
 }
 
 class "UsdGenRestAPI"
 {
+    asset usdGen:rest:file = @@
+    token usdGen:rest:primvar = "rest"
+    uniform token usdGen:rest:source = "default" (
+        allowedTokens = ["default", "primvar", "asset"]
+    )
 }
 
 class "UsdGenCurveAPI"
 {
-    token usdGen:curve:role = "hair" (
+    uint64[] primvars:usdGen:curveId = []
+    string primvars:usdGen:frozenEpoch = ""
+    token primvars:usdGen:role = "hair" (
         allowedTokens = ["hair", "guide"]
     )
+    matrix4d[] primvars:usdGen:rootFrame = []
 }
 

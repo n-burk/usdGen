@@ -1,4 +1,20 @@
 #usda 1.0
+#
+# usdGen codeless schema domain — M1 (plan/02-schema.md §1–§2, §7.1).
+#
+# Source of truth. Regenerate the checked-in plugin resources after any edit:
+#   bin/gen_schema.sh
+# and review the diff (02-schema.md §7.1).
+#
+# M1 declares the FULL v1–v3 prim-type namespace so C1 freezes the whole
+# vocabulary once (02 §1, §8.1): a declared-but-unimplemented type publishes
+# nothing and raises one TF_WARN per prim at runtime (§8.2). Property names,
+# types, defaults, allowedTokens and uniformity are normative from
+# 02-schema.md §2 (ADR §9 R7); contract C1 is docs/freezes/C1.md.
+#
+# Default notes (recorded in C1.md §7 "adopted defaults"): where §2.8
+# (Deformers) or the v2/v3 rows name a property without a default, the value
+# authored here is adopted and recorded; it is not a registry default.
 (
     subLayers = [
         @usd/schema.usda@,
@@ -17,6 +33,13 @@ over "GLOBAL" (
 {
 }
 
+# ---------------------------------------------------------------------------
+# Containers (02-schema.md §2.2, §2.3, §2.4)
+# ---------------------------------------------------------------------------
+
+# UsdGenGroom — session root; artist-facing globals only (02 §2.2). One per
+# character/asset; the registry keys a session by (stage | usdGen:sessionId,
+# groom root) (S15, ADR §4.5). No machine tuning here (02 §0.9).
 class UsdGenGroom "UsdGenGroom" (
     inherits = </Imageable>
     customData = {
@@ -24,11 +47,17 @@ class UsdGenGroom "UsdGenGroom" (
     }
 )
 {
-    int usdGen:schemaVersion = 1
-    uniform token usdGen:sessionId = "default"
     rel usdGen:surface
+    float usdGen:densityScale = 1.0
+    float usdGen:renderDensityScale = 1.0
+    uniform int usdGen:schemaVersion = 1
+    uniform string usdGen:sessionId = ""
+    string usdGen:label = ""
 }
 
+# UsdGenDescription — one operator chain, one bound surface set, one material,
+# one published Hydra prim set (02 §2.3). Derives from UsdGeomBoundable so a
+# compute-extent function can be registered (02 §1, §7.2).
 class UsdGenDescription "UsdGenDescription" (
     inherits = </Boundable>
     customData = {
@@ -37,59 +66,29 @@ class UsdGenDescription "UsdGenDescription" (
     }
 )
 {
-    uniform int usdGen:tileTarget = 64
     rel usdGen:surface
-    rel usdGen:input
     rel usdGen:terminal
-}
-
-class "UsdGenOperator" (
-    inherits = </Typed>
-    customData = {
-        string className = "Operator"
-    }
-)
-{
-    bool usdGen:enabled = true
-    uniform int usdGen:algorithmVersion = 0
-}
-
-class UsdGenScatter "UsdGenScatter" (
-    inherits = </UsdGenOperator>
-    customData = {
-        string className = "Scatter"
-    }
-)
-{
-    uniform token usdGen:mode = "random" (
-        allowedTokens = ["random", "uniform", "points", "atGuides"]
+    rel usdGen:guides
+    uniform int usdGen:tileTarget = 64
+    float usdGen:densityScale = 1.0
+    float usdGen:renderDensityScale = 1.0
+    uniform token usdGen:curve:basis = "bspline" (
+        allowedTokens = ["bspline", "catmullRom"]
     )
-    float usdGen:density = 1.0
-    int usdGen:seed = 0
+    float usdGen:width:default = 0.01
+    uniform token usdGen:motion:mode = "single" (
+        allowedTokens = ["single", "velocities", "samples"]
+    )
+    uniform int usdGen:motion:sampleCount = 3
+    uniform bool usdGen:motion:forwardSurfaceSamples = false
+    uniform token usdGen:pickTarget = "description" (
+        allowedTokens = ["description", "terminal"]
+    )
+    string usdGen:label = ""
 }
 
-class UsdGenNoise "UsdGenNoise" (
-    inherits = </UsdGenOperator>
-    customData = {
-        string className = "Noise"
-    }
-)
-{
-    float usdGen:magnitude = 0.1
-    float usdGen:frequency = 4.0
-    int usdGen:seed = 0
-}
-
-class UsdGenLength "UsdGenLength" (
-    inherits = </UsdGenOperator>
-    customData = {
-        string className = "Length"
-    }
-)
-{
-    float usdGen:length = 1.0
-}
-
+# UsdGenGuideSet — a named guide set; namespace children are BasisCurves under
+# contract C3 (02 §2.4).
 class UsdGenGuideSet "UsdGenGuideSet" (
     inherits = </Imageable>
     customData = {
@@ -102,6 +101,611 @@ class UsdGenGuideSet "UsdGenGuideSet" (
     string usdGen:label = ""
 }
 
+# ---------------------------------------------------------------------------
+# Operator base and abstract groups (02-schema.md §1, §2.5)
+# ---------------------------------------------------------------------------
+
+# UsdGenOperator (abstract) — everything with usdGen:input. UsdGenMaskAPI
+# (§2.13) is auto-applied to this type (plugInfo AutoApplyAPISchemas), so
+# every operator carries the mask block without hand application.
+class "UsdGenOperator" (
+    inherits = </Typed>
+    customData = {
+        string className = "Operator"
+    }
+)
+{
+    rel usdGen:input
+    bool usdGen:enabled = true
+    float usdGen:blend = 1.0
+    uniform int usdGen:seed = 0
+    uniform token usdGen:space = "auto" (
+        allowedTokens = ["auto", "rest", "deformed"]
+    )
+    uniform token usdGen:readPhase = "final" (
+        allowedTokens = ["base", "final", "preceding"]
+    )
+    rel usdGen:surface
+    uniform int usdGen:algorithmVersion = 0
+    string usdGen:label = ""
+}
+
+# UsdGenGenerator (abstract) — may change the curve or CV count.
+class "UsdGenGenerator" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Generator"
+    }
+)
+{
+}
+
+# UsdGenStyler (abstract) — topology-preserving, except UsdGenResample and
+# UsdGenLength (02 §1, §2.5).
+class "UsdGenStyler" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Styler"
+    }
+)
+{
+}
+
+# UsdGenDeformer (abstract) — deformed-space operators; usdGen:space auto
+# resolves to deformed (02 §2.8).
+class "UsdGenDeformer" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Deformer"
+    }
+)
+{
+}
+
+# ---------------------------------------------------------------------------
+# Generators (02-schema.md §2.6)
+# ---------------------------------------------------------------------------
+
+# UsdGenScatter — roots on the rest surface, stable ids (ADR §9 R12).
+class UsdGenScatter "UsdGenScatter" (
+    inherits = </UsdGenGenerator>
+    customData = {
+        string className = "Scatter"
+    }
+)
+{
+    uniform token usdGen:mode = "random" (
+        allowedTokens = ["random", "uniform", "points", "atGuides"]
+    )
+    float usdGen:density = 100.0
+    float usdGen:spacingU = 0.02
+    float usdGen:spacingV = 0.02
+    float usdGen:jitter = 0.0
+    int[] usdGen:rootPrims = []
+    texCoord2f[] usdGen:rootUVs = []
+    int usdGen:relaxIterations = 0
+    bool usdGen:areaCompensation = true
+    rel usdGen:guides
+    bool usdGen:flip = false
+    int usdGen:perGuide = 1
+}
+
+# UsdGenGrow — roots to straight strands; sets the CV count.
+class UsdGenGrow "UsdGenGrow" (
+    inherits = </UsdGenGenerator>
+    customData = {
+        string className = "Grow"
+    }
+)
+{
+    int usdGen:segments = 8
+    float usdGen:length = 1.0
+    float2 usdGen:lengthRandom = (1, 1)
+    uniform token usdGen:direction = "surfaceNormal" (
+        allowedTokens = ["surfaceNormal", "attribute", "vector"]
+    )
+    vector3f usdGen:directionVector = (0, 1, 0)
+    token usdGen:directionPrimvar = ""
+    float usdGen:lift = 0.0
+    float usdGen:uvBlend = 0.0
+    rel usdGen:length:source
+}
+
+# UsdGenGuideInterpolate — hair from guides; emits guideIndex/guideWeight
+# (uniform, elementSize 3, no usdGen: prefix; C2).
+class UsdGenGuideInterpolate "UsdGenGuideInterpolate" (
+    inherits = </UsdGenGenerator>
+    customData = {
+        string className = "GuideInterpolate"
+    }
+)
+{
+    rel usdGen:guides
+    int usdGen:maxGuides = 3
+    float usdGen:influenceRadius = 4.0
+    float usdGen:influenceDecay = 2.0
+    float usdGen:maxGuideAngle = 90.0
+    uniform token usdGen:blendMethod = "linearBlend" (
+        allowedTokens = ["linearBlend", "extrudeAndBlend"]
+    )
+    float usdGen:blendInSkinSpace = 1.0
+    bool usdGen:useUniqueGuide = false
+    float usdGen:randomizeGuide = 0.0
+    int usdGen:cvCount = 8
+    float usdGen:clumpCrossover = 0.0
+    rel usdGen:length:source
+}
+
+# UsdGenCurveSource — frozen, imported and simulated curves (02 §2.6, C3).
+class UsdGenCurveSource "UsdGenCurveSource" (
+    inherits = </UsdGenGenerator>
+    customData = {
+        string className = "CurveSource"
+    }
+)
+{
+    rel usdGen:curves
+    bool usdGen:useRest = true
+    uniform token usdGen:idSource = "primvar" (
+        allowedTokens = ["primvar", "index"]
+    )
+    uniform token usdGen:lane = "hair" (
+        allowedTokens = ["hair", "reference"]
+    )
+    uniform string usdGen:expectEpoch = ""
+    uniform token usdGen:staleAction = "warn" (
+        allowedTokens = ["warn", "ignore", "block"]
+    )
+    uniform int usdGen:resampleTo = 0
+    uniform token usdGen:rebind = "onError" (
+        allowedTokens = ["never", "onError", "always"]
+    )
+}
+
+# ---------------------------------------------------------------------------
+# Stylers, v1 (02-schema.md §2.7.1 — normative)
+# ---------------------------------------------------------------------------
+
+# UsdGenClump — emits clumpId_<level> (uniform int, no usdGen: prefix; C2).
+class UsdGenClump "UsdGenClump" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Clump"
+    }
+)
+{
+    float usdGen:clump:amount = 0.5
+    float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)]
+    uniform token usdGen:clump:profile:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    rel usdGen:clump:centers
+    float usdGen:clump:density = 4.0
+    float usdGen:clump:size = 1.0
+    uniform int usdGen:clump:seed = 0
+    uniform int usdGen:clump:level = -1
+    int usdGen:clump:levels = 1
+    float usdGen:clump:sizeReduction = 0.5
+    float usdGen:clump:tightnessReduction = 0.8
+    float usdGen:clump:goalFeedback = 1.0
+    uniform token usdGen:clump:method = "linearBlend" (
+        allowedTokens = ["linearBlend", "extrudeAndBlend"]
+    )
+    float usdGen:clump:crossover = 0.0
+    float usdGen:clump:volumize = 0.0
+    float usdGen:clump:stray:amount = 0.0
+    float usdGen:clump:stray:rate = 0.0
+    float usdGen:clump:stray:falloff = 1.0
+    float usdGen:clump:copy = 0.0
+    float usdGen:clump:copyVariance = 0.0
+    float usdGen:clump:cut = 0.0
+    float usdGen:clump:flatness = 0.0
+    float usdGen:clump:offset = 0.0
+    float usdGen:clump:curl:amplitude = 0.0
+    float usdGen:clump:curl:frequency = 1.0
+    float usdGen:clump:noise:amount = 0.0
+    float usdGen:clump:noise:frequency = 1.0
+    float usdGen:clump:noise:correlation = 0.0
+    float usdGen:preserveLength = 1.0
+}
+
+# UsdGenNoise — frizz; correlated fBm in the root frame.
+class UsdGenNoise "UsdGenNoise" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Noise"
+    }
+)
+{
+    float usdGen:noise:magnitude = 0.05
+    float2[] usdGen:noise:magnitude:knots = [(0, 0), (1, 1)]
+    uniform token usdGen:noise:magnitude:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float usdGen:noise:frequency = 3.0
+    float usdGen:noise:correlation = 0.5
+    int usdGen:noise:octaves = 1
+    float usdGen:noise:lacunarity = 2.0
+    float usdGen:noise:gain = 0.5
+    bool usdGen:cumulative = false
+    float usdGen:preserveLength = 1.0
+}
+
+# UsdGenLength — the whole type is topology-bumping (static
+# TopologyEffect() == MayChangeCurveCount; cull mode, 02 §0.4).
+class UsdGenLength "UsdGenLength" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Length"
+    }
+)
+{
+    uniform token usdGen:length:mode = "scale" (
+        allowedTokens = ["set", "scale", "cull"]
+    )
+    float usdGen:length:value = 1.0
+    float2 usdGen:length:random = (1, 1)
+    uniform token usdGen:length:method = "scale" (
+        allowedTokens = ["scale", "cutExtend"]
+    )
+    rel usdGen:length:source
+    uniform token usdGen:rebuild = "keepParam" (
+        allowedTokens = ["keepParam", "reparam"]
+    )
+    float usdGen:minRemainingLength = 0.0
+    float usdGen:cullThreshold = 0.0
+}
+
+# UsdGenWidth — strand profile; usdGen:replace == true sets, false multiplies.
+class UsdGenWidth "UsdGenWidth" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Width"
+    }
+)
+{
+    float usdGen:width = 0.01
+    float2[] usdGen:width:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:width:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float usdGen:taper = 0.0
+    float usdGen:taperStart = 0.5
+    float usdGen:rootScale = 1.0
+    float usdGen:tipScale = 1.0
+    bool usdGen:replace = true
+}
+
+# UsdGenDirection — XGen Tilt.
+class UsdGenDirection "UsdGenDirection" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Direction"
+    }
+)
+{
+    vector3f usdGen:direction = (0, 1, 0)
+    float usdGen:amount = 0.0
+    float usdGen:lift = 0.0
+    float usdGen:tiltU = 0.0
+    float usdGen:tiltV = 0.0
+    float usdGen:tiltN = 0.0
+    float usdGen:aroundN = 0.0
+    float usdGen:followSkinContour = 0.0
+    rel usdGen:direction:source
+    float2[] usdGen:direction:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:direction:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    uniform token usdGen:mode = "rigid" (
+        allowedTokens = ["rigid", "perSegment"]
+    )
+}
+
+# UsdGenSmooth — along-curve Laplacian.
+class UsdGenSmooth "UsdGenSmooth" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Smooth"
+    }
+)
+{
+    float usdGen:strength = 0.5
+    int usdGen:iterations = 1
+    uniform token usdGen:mode = "alongCurve" (
+        allowedTokens = ["alongCurve", "neighbours"]
+    )
+    bool usdGen:lockRoot = true
+    float usdGen:searchRadius = 0.0
+    int usdGen:numNeighbors = 4
+}
+
+# UsdGenResample — changes the CV count (topology).
+class UsdGenResample "UsdGenResample" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Resample"
+    }
+)
+{
+    int usdGen:cvCount = 8
+    uniform token usdGen:distribution = "uniform" (
+        allowedTokens = ["uniform", "keepParam"]
+    )
+    bool usdGen:restoreSegmentLengths = false
+}
+
+# UsdGenScale — global length multiplier.
+class UsdGenScale "UsdGenScale" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Scale"
+    }
+)
+{
+    float usdGen:scale = 1.0
+    float2[] usdGen:scale:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:scale:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2 usdGen:scaleRandom = (1, 1)
+    bool usdGen:widthToo = false
+}
+
+# ---------------------------------------------------------------------------
+# Stylers, v2 (reserved at M1, 02-schema.md §2.7.2 + 04-operators.md §3;
+# kernels ship at M8) and the v3 deformers (02 §2.8)
+# ---------------------------------------------------------------------------
+
+class UsdGenCurl "UsdGenCurl" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Curl"
+    }
+)
+{
+    float usdGen:radius = 0.02
+    float2[] usdGen:radius:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:radius:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float usdGen:frequency = 2.0
+    float usdGen:phase = 0.0
+    float usdGen:phaseRandom = 0.0
+    bool usdGen:taper = true
+    uniform token usdGen:axisMode = "curveTangent" (
+        allowedTokens = ["curveTangent", "guide"]
+    )
+    bool usdGen:clockwise = true
+}
+
+class UsdGenBend "UsdGenBend" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Bend"
+    }
+)
+{
+    float usdGen:angle = 0.0
+    float2[] usdGen:angle:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:angle:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float2 usdGen:angleRandom = (1, 1)
+    vector3f usdGen:axis = (1, 0, 0)
+    uniform token usdGen:axisMode = "rootDirection" (
+        allowedTokens = ["rootDirection", "uniform", "attribute"]
+    )
+}
+
+class UsdGenStraighten "UsdGenStraighten" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Straighten"
+    }
+)
+{
+    float usdGen:tangentStraightness = 0.0
+    float usdGen:normalStraightness = 0.0
+}
+
+class UsdGenDisplace "UsdGenDisplace" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Displace"
+    }
+)
+{
+    float usdGen:displace:amount = 0.0
+    rel usdGen:displace:map
+    float usdGen:displace:base = 0.5
+    float usdGen:displace:scale = 1.0
+    float usdGen:displace:offset = 0.0
+    uniform token usdGen:mode = "height" (
+        allowedTokens = ["height", "vector"]
+    )
+}
+
+class UsdGenWave "UsdGenWave" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Wave"
+    }
+)
+{
+    float usdGen:frequencyU = 1.0
+    float usdGen:frequencyN = 1.0
+    float usdGen:amplitudeU = 0.0
+    float usdGen:amplitudeN = 0.0
+}
+
+# UsdGenPart — parting line; emits partId (uniform int, no usdGen: prefix).
+# Kernels ship at M8 (02 §10 out-of-scope note).
+class UsdGenPart "UsdGenPart" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "Part"
+    }
+)
+{
+    rel usdGen:part:curves
+    float usdGen:part:radius = 0.05
+    float usdGen:part:strength = 1.0
+}
+
+# UsdGenExprOp — capture-time-only expression styler (04 §3, S37).
+class UsdGenExprOp "UsdGenExprOp" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "ExprOp"
+    }
+)
+{
+    string usdGen:expr:source = ""
+    rel usdGen:expr:maps
+    uniform token usdGen:expr:returnType = "displacement" (
+        allowedTokens = ["displacement", "width", "color"]
+    )
+    uniform token usdGen:mode = "cv" (
+        allowedTokens = ["cv", "curve"]
+    )
+}
+
+# UsdGenSculptLayer — hand work keyed by stable curveId (02 §2.10).
+class UsdGenSculptLayer "UsdGenSculptLayer" (
+    inherits = </UsdGenStyler>
+    customData = {
+        string className = "SculptLayer"
+    }
+)
+{
+    float usdGen:sculpt:weight = 1.0
+    uniform token usdGen:sculpt:space = "rootFrame" (
+        allowedTokens = ["rootFrame", "object"]
+    )
+    uint64[] usdGen:sculpt:curveIds = []
+    int[] usdGen:sculpt:cvOffsets = []
+    vector3f[] usdGen:sculpt:deltas = []
+    uniform string usdGen:sculpt:epoch = ""
+    uint64[] usdGen:sculpt:lockedCurves = []
+    int[] usdGen:sculpt:rootPrims = []
+    texCoord2f[] usdGen:sculpt:rootUVs = []
+}
+
+# UsdGenDeform — curves follow the surface (02 §2.8).
+class UsdGenDeform "UsdGenDeform" (
+    inherits = </UsdGenDeformer>
+    customData = {
+        string className = "Deform"
+    }
+)
+{
+    uniform token usdGen:mode = "rigidFrame" (
+        allowedTokens = ["rigidFrame", "rbf", "pointDeform"]
+    )
+    bool usdGen:twistAware = true
+    bool usdGen:lockRoots = true
+    float usdGen:preserveShape = 0.0
+    int usdGen:preserveShape:iterations = 0
+    int usdGen:rbfSamples = 100
+}
+
+# UsdGenCollide (v3) — 02 §2.8; defaults for offset/pushAmount/iterations
+# and the resolveType token set are adopted from 04-operators.md §4
+# (recorded in C1.md §7).
+class UsdGenCollide "UsdGenCollide" (
+    inherits = </UsdGenDeformer>
+    customData = {
+        string className = "Collide"
+    }
+)
+{
+    rel usdGen:colliders
+    float usdGen:offset = 0.0
+    float usdGen:pushAmount = 0.0
+    int usdGen:iterations = 1
+    uniform token usdGen:resolveType = "flexible" (
+        allowedTokens = ["flexible", "stiff"]
+    )
+}
+
+# UsdGenWind (v3) — 02 §2.8; direction/strength defaults adopted
+# (recorded in C1.md §7).
+class UsdGenWind "UsdGenWind" (
+    inherits = </UsdGenDeformer>
+    customData = {
+        string className = "Wind"
+    }
+)
+{
+    vector3f usdGen:direction = (0, 0, 1)
+    float usdGen:constStrength = 0.0
+    float usdGen:gustStrength = 0.0
+    float usdGen:stiffness = 0.0
+    float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:stiffness:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+}
+
+# ---------------------------------------------------------------------------
+# Chain cap and instancer (02-schema.md §2.9, §2.11)
+# ---------------------------------------------------------------------------
+
+# UsdGenFreeze — caps the chain at a snapshot; the unfreeze gesture is the
+# one usdGen:frozen:mode token (02 §2.9).
+class UsdGenFreeze "UsdGenFreeze" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Freeze"
+    }
+)
+{
+    rel usdGen:frozen:curves
+    uniform token usdGen:frozen:mode = "frozen" (
+        allowedTokens = ["frozen", "live"]
+    )
+    uniform string usdGen:frozen:epoch = ""
+    uniform token usdGen:frozen:tier = "session" (
+        allowedTokens = ["session", "sublayer", "payload"]
+    )
+}
+
+# UsdGenInstance — the only operator that does not emit curves: a Hydra
+# instancer over re-rooted prototypes (02 §2.11; v1, M6).
+class UsdGenInstance "UsdGenInstance" (
+    inherits = </UsdGenOperator>
+    customData = {
+        string className = "Instance"
+    }
+)
+{
+    uniform token usdGen:primitive = "cards" (
+        allowedTokens = ["cards", "archives", "spheres"]
+    )
+    rel usdGen:prototypes
+    float[] usdGen:instance:weights = []
+    uniform token usdGen:instance:orient = "surfaceFrame" (
+        allowedTokens = ["surfaceFrame", "curveTangent", "camera", "world"]
+    )
+    float usdGen:instance:scale = 1.0
+    float2 usdGen:instance:scaleRandom = (1, 1)
+    float usdGen:instance:twist = 0.0
+    float usdGen:instance:twistRandom = 0.0
+    float usdGen:instance:normalOffset = 0.0
+    float usdGen:instance:width = 0.02
+    float usdGen:instance:length = 0.09
+    float2[] usdGen:instance:width:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:instance:width:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    token[] usdGen:instance:variationPrimvars = ["displayColor"]
+}
+
+# ---------------------------------------------------------------------------
+# Maps (02-schema.md §2.12). Not chain nodes: no usdGen:input, readPhase,
+# space or enabled.
+# ---------------------------------------------------------------------------
 
 class "UsdGenMap" (
     inherits = </Typed>
@@ -110,20 +714,189 @@ class "UsdGenMap" (
     }
 )
 {
+    uniform token usdGen:map:domain = "root" (
+        allowedTokens = ["root", "cv"]
+    )
+    uniform token usdGen:map:channel = "r" (
+        allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+    )
+    float usdGen:map:scale = 1.0
+    float usdGen:map:offset = 0.0
+    float2 usdGen:map:clamp = (0, 1)
+    float usdGen:map:default = 0.0
+    string usdGen:label = ""
 }
 
+class UsdGenImageMap "UsdGenImageMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "ImageMap"
+    }
+)
+{
+    asset usdGen:map:file
+    token usdGen:map:uvSet = "st"
+    token usdGen:map:wrap = "clamp" (
+        allowedTokens = ["clamp", "repeat", "mirror", "black"]
+    )
+    token usdGen:map:filter = "bilinear" (
+        allowedTokens = ["nearest", "bilinear"]
+    )
+    token usdGen:map:colorSpace = "raw" (
+        allowedTokens = ["auto", "raw", "sRGB"]
+    )
+}
+
+class UsdGenPtexMap "UsdGenPtexMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "PtexMap"
+    }
+)
+{
+    asset usdGen:map:file
+    token usdGen:map:filter = "bilinear" (
+        allowedTokens = ["nearest", "bilinear", "box", "gaussian", "bicubic",
+                         "bspline", "catmullrom", "mitchell"]
+    )
+    float usdGen:map:blur = 0.0
+    int usdGen:map:firstChannel = 0
+    int usdGen:map:channelCount = 1
+    token usdGen:map:borderMode = "clamp" (
+        allowedTokens = ["clamp", "black", "periodic"]
+    )
+}
+
+class UsdGenExprMap "UsdGenExprMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "ExprMap"
+    }
+)
+{
+    string usdGen:expr:source = ""
+    uniform token usdGen:expr:returnType = "float" (
+        allowedTokens = ["float", "color"]
+    )
+    uniform int usdGen:expr:seed = 0
+    rel usdGen:expr:maps
+}
+
+class UsdGenPaintMap "UsdGenPaintMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "PaintMap"
+    }
+)
+{
+    rel usdGen:paint:surface
+    token usdGen:paint:primvar = "usdGen:paint:density"
+    token usdGen:paint:interpolation = "faceVarying"
+    token usdGen:paint:storage = "primvar" (
+        allowedTokens = ["primvar", "file"]
+    )
+    int usdGen:paint:resolution = 256
+    asset usdGen:paint:bakedFile
+}
+
+class UsdGenNoiseMap "UsdGenNoiseMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "NoiseMap"
+    }
+)
+{
+    token usdGen:noise:type = "fbm" (
+        allowedTokens = ["perlin", "snoise", "fbm", "turbulence",
+                         "cellnoise", "voronoi"]
+    )
+    float usdGen:noise:frequency = 1.0
+    float usdGen:noise:lacunarity = 2.0
+    float usdGen:noise:gain = 0.5
+    int usdGen:noise:octaves = 3
+    uniform int usdGen:noise:seed = 0
+    token usdGen:noise:space = "rest" (
+        allowedTokens = ["rest", "deformed"]
+    )
+}
+
+class UsdGenCombineMap "UsdGenCombineMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "CombineMap"
+    }
+)
+{
+    rel usdGen:combine:inputs
+    token usdGen:combine:mode = "multiply" (
+        allowedTokens = ["multiply", "add", "subtract", "max", "min",
+                         "average", "overlay"]
+    )
+}
+
+class UsdGenGuideProximityMap "UsdGenGuideProximityMap" (
+    inherits = </UsdGenMap>
+    customData = {
+        string className = "GuideProximityMap"
+    }
+)
+{
+    rel usdGen:guides
+    float usdGen:proximity:radius = 1.0
+    float usdGen:proximity:decay = 2.0
+}
+
+# ---------------------------------------------------------------------------
+# API schemas (02-schema.md §2.13–§2.16), all single-apply
+# ---------------------------------------------------------------------------
+
+# UsdGenMaskAPI — the universal mask block, auto-applied to UsdGenOperator
+# (and therefore to every derived operator type) by the plugin-level
+# Info/AutoApplyAPISchemas block that bin/gen_schema.sh injects into
+# plugInfo.json (02 §7.4). SI-8 confirmed auto-apply on this codeless
+# domain at M0 pre-work.
 class "UsdGenMaskAPI" (
     inherits = </APISchemaBase>
     customData = {
         string className = "MaskAPI"
         token apiSchemaType = "singleApply"
-        token[] apiSchemaAutoApplyTo = ["UsdGenOperator"]
     }
 )
 {
-    float usdGen:mask:opacity = 1.0
+    rel usdGen:mask:source
+    float usdGen:mask:amount = 1.0
+    bool usdGen:mask:invert = false
+    float2 usdGen:mask:range = (0, 1)
+    uniform token usdGen:mask:rangeMode = "normalized" (
+        allowedTokens = ["normalized", "absoluteLength"]
+    )
+    uniform token usdGen:mask:combine = "multiply" (
+        allowedTokens = ["multiply", "add", "subtract", "max", "min",
+                         "average", "replace"]
+    )
+    float usdGen:mask:random = 0.0
+    uniform int usdGen:mask:randomSeed = 0
+    float2[] usdGen:mask:ramp:knots = [(0, 1), (1, 1)]
+    uniform token usdGen:mask:ramp:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float usdGen:mask:ramp:spline
+    float usdGen:mask:rangeMin = 0.0
+    float usdGen:mask:rangeMax = 1.0
+    float usdGen:mask:effectPosition = 0.5
+    float usdGen:mask:falloff = 0.5
+    float usdGen:mask:influenceWidth = 0.5
+    float usdGen:mask:noise:amount = 0.0
+    float usdGen:mask:noise:frequency = 1.0
+    float usdGen:mask:noise:gain = 0.5
+    float usdGen:mask:noise:bias = 0.5
+    uniform int usdGen:mask:noise:seed = 0
+    rel usdGen:mask:region
 }
 
+# UsdGenLookAPI — single-apply on UsdGenDescription (02 §2.14). Carries only
+# what the displayColor bake needs plus the parameters that must agree
+# between bake and shader (07 §1.1).
 class "UsdGenLookAPI" (
     inherits = </APISchemaBase>
     customData = {
@@ -132,8 +905,33 @@ class "UsdGenLookAPI" (
     }
 )
 {
+    color3f usdGen:look:rootColor = (0.035, 0.018, 0.008)
+    color3f usdGen:look:tipColor = (0.21, 0.115, 0.045)
+    float[] usdGen:look:colorRamp:positions = []
+    color3f[] usdGen:look:colorRamp:colors = []
+    uniform token usdGen:look:colorRamp:interpolation = "catmullRom" (
+        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+    )
+    float usdGen:look:rampExponent = 1.0
+    uniform token usdGen:look:colorMapMode = "bake" (
+        allowedTokens = ["bake", "shader"]
+    )
+    uniform token usdGen:look:bakeMode = "perCurve" (
+        allowedTokens = ["perCurve", "perCV"]
+    )
+    rel usdGen:look:colorMap
+    float usdGen:look:hueJitter = 0.0
+    float usdGen:look:valueJitter = 0.0
+    uniform int usdGen:look:jitterSeed = 0
+    uniform token usdGen:look:bakeTarget = "displayColor" (
+        allowedTokens = ["displayColor", "primvar", "none"]
+    )
+    token usdGen:look:bakePrimvar = "usdGen:albedo"
 }
 
+# UsdGenRestAPI — single-apply on a bound surface Mesh (02 §2.15). The
+# RestAPI adapter publishes usdGen/rest/{points, faceVertexCounts,
+# faceVertexIndices, st} at UsdTimeCode::Default().
 class "UsdGenRestAPI" (
     inherits = </APISchemaBase>
     customData = {
@@ -142,8 +940,15 @@ class "UsdGenRestAPI" (
     }
 )
 {
+    uniform token usdGen:rest:source = "default" (
+        allowedTokens = ["default", "primvar", "asset"]
+    )
+    token usdGen:rest:primvar = "rest"
+    asset usdGen:rest:file = @@
 }
 
+# UsdGenCurveAPI — single-apply on every C3 curve prim (02 §2.16): guides,
+# freezes, imports and sim caches. primvars: spelling is deliberate (02 §2.16).
 class "UsdGenCurveAPI" (
     inherits = </APISchemaBase>
     customData = {
@@ -152,7 +957,10 @@ class "UsdGenCurveAPI" (
     }
 )
 {
-    token usdGen:curve:role = "hair" (
+    token primvars:usdGen:role = "hair" (
         allowedTokens = ["hair", "guide"]
     )
+    uint64[] primvars:usdGen:curveId = []
+    string primvars:usdGen:frozenEpoch = ""
+    matrix4d[] primvars:usdGen:rootFrame = []
 }

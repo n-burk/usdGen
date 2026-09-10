@@ -1,0 +1,112 @@
+#usda 1.0
+#
+# hairLook.usda — the canonical look Material for usdGen grooms
+# (plan/07-look-maps-expressions.md §3.1).
+#
+#   outputs:surface        -> UsdPreviewSurface   (universal fallback, every delegate)
+#   outputs:glslfx:surface -> UsdGenHairPreview   (Storm; the L-1/PW-4 winner)
+#   outputs:mtlx:surface   -> minimal MTLX network (non-Storm delegates only)
+#
+# TERMINAL RECONCILIATION (§3.1 three terminals vs M0 decision L-1, recorded):
+#   07 §3.1 sketches a *three*-terminal material (surface / glslfx:surface /
+#   mtlx:surface). Per the M0 PW-4/L-1 decision the glslfx terminal is what
+#   Storm's materialRenderContexts = {glslfx, mtlx} resolves first, and the
+#   mtlx side is to be "minimal/absent". This M1 material therefore keeps the
+#   three-terminal shape (no batch fragmentation: Storm never resolves the
+#   mtlx terminal) but ships the mtlx side in its *minimal* form — a
+#   two-node ND_chiang_hair_bsdf -> ND_surface with default tints, no
+#   melanin-absorption / roughness pre-nodes and no explicit tangent bridge
+#   (curve_direction falls back to the defaultgeomprop "Tworld"). The full
+#   07 §4.1 chain ships as the usdGenHair.mtlx document beside the glslfx
+#   files; the M7 tooling's "Create hair material" action references it.
+#
+# Canonical example (a) binds this Material to its UsdGenDescription by hand:
+# material:binding is authored onto every published tile by usdGen (ADR §5.3),
+# the description does not bind it itself.
+#
+# Shader prims reference the Sdr identifiers registered by
+# usdGenShaders/resources/shaders/shaderDefs.usda — never an asset path, so
+# the look survives being repacked (07 §3.1).
+
+def Xform "Char"
+{
+    def Material "HairLook"
+    {
+        token outputs:surface.connect = </Char/HairLook/preview.outputs:surface>
+        token outputs:glslfx:surface.connect = </Char/HairLook/storm.outputs:surface>
+        token outputs:mtlx:surface.connect = </Char/HairLook/mtlx/surface.outputs:out>
+
+        def Shader "storm"
+        {
+            uniform token info:id = "UsdGenHairPreview"
+            color3f inputs:rootColor = (0.035, 0.018, 0.008)
+            color3f inputs:tipColor = (0.21, 0.115, 0.045)
+            float inputs:colorRamp = 1.6
+            float inputs:diffuseGain = 0.55
+            float inputs:diffuseWrap = 0.35
+            float inputs:specular1Gain = 0.3
+            color3f inputs:specular1Color = (1, 1, 1)
+            float inputs:specular1Width = 0.075
+            float inputs:specular1Shift = -0.045
+            float inputs:specular2Gain = 0.16
+            color3f inputs:specular2Color = (1, 1, 1)
+            float inputs:specular2Width = 0.22
+            float inputs:specular2Shift = 0.09
+            float inputs:transmissionGain = 0.25
+            color3f inputs:transmissionColor = (1, 0.62, 0.38)
+            float inputs:opacity = 1
+            float inputs:widthFalloff = 0
+            float inputs:randomHue = 0.06
+            float inputs:randomValue = 0.12
+            color3f inputs:rootColorMap = (1, 1, 1)
+            token outputs:surface
+        }
+
+        def Shader "preview"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </Char/HairLook/displayColorReader.outputs:result>
+            token outputs:surface
+        }
+
+        def Prim "displayColorReader" (
+            prepend apiSchemas = ["MaterialShader"]
+        )
+        {
+            uniform token info:id = "UsdPrimvarReader_float3"
+            token inputs:varname = "displayColor"
+            token inputs:source = "index"
+            point3f outputs:result
+        }
+
+        # MTLX terminal — MINIMAL per M0 decision L-1 (PW-4): the glslfx
+        # terminal is what Storm's materialRenderContexts = {glslfx, mtlx}
+        # resolves first, so this network never affects the Storm batch or the
+        # shipped look in M1. It exists to keep the §3.1 three-terminal graph
+        # valid (no dangling references) and to serve non-Storm render
+        # delegates until the full 07 §4.1 chain (melanin absorption ->
+        # chiang roughness -> chiang bsdf + tangent bridge, shipped as
+        # usdGenHair.mtlx) lands with the M7 tooling. MTLX nodedefs are
+        # registered by identifier in this build (no MtlxMaterial Sdr node),
+        # so the minimal network is authored inline: chiang hair BSDF with
+        # defaults -> ND_surface. curve_direction falls back to the
+        # defaultgeomprop "Tworld" (no explicit tangent bridge in M1).
+        def Scope "mtlx"
+        {
+            def Shader "hairBsdf"
+            {
+                uniform token info:id = "ND_chiang_hair_bsdf"
+                color3f inputs:tint_R = (0.21, 0.115, 0.045)
+                color3f inputs:tint_TT = (1, 0.62, 0.38)
+                bsdf outputs:out
+            }
+
+            def Shader "surface"
+            {
+                uniform token info:id = "ND_surface"
+                bsdf inputs:bsdf.connect = </Char/HairLook/mtlx/hairBsdf.outputs:out>
+                color3f outputs:out
+            }
+        }
+    }
+}
