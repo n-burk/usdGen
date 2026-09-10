@@ -14,8 +14,8 @@ if command -v ninja >/dev/null 2>&1; then
 fi
 
 [ -d "$BUILD" ] || cmake -S "$ROOT" -B "$BUILD" -G "$GEN" -DCMAKE_BUILD_TYPE=Release
-cmake --build "$BUILD" -j"$(nproc)"
+cmake --build "$BUILD" --parallel
 
 if [ "${1:-}" = "--test" ]; then
-    ctest --test-dir "$BUILD" -L 'T0|T1' --output-on-failure -j"$(nproc)"
+    ctest --test-dir "$BUILD" -L 'T0|T1' --output-on-failure --parallel
 fi

@@ -55,15 +55,17 @@ if(_usdgen_shader_pysite)
     list(GET _usdgen_shader_pysite 0 _usdgen_shader_pysite)
 endif()
 
-add_executable(render_check render_check.cpp)
-target_include_directories(render_check PRIVATE
-    # vendored copy of the PW-egl probe header (docs/prework/probes/PW-egl/eglctx.h)
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-)
-target_link_libraries(render_check PRIVATE
-    usdAppUtils usdImagingGL usdImaging usdGeom usd garch hd hdSt hgiGL
-    tf gf sdf hio OpenGL::GL dl
-)
+if(UNIX)
+    add_executable(render_check render_check.cpp)
+    target_include_directories(render_check PRIVATE
+        # vendored copy of the PW-egl probe header (docs/prework/probes/PW-egl/eglctx.h)
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(render_check PRIVATE
+        usdAppUtils usdImagingGL usdImaging usdGeom usd garch hd hdSt hgiGL
+        tf gf sdf hio OpenGL::GL ${CMAKE_DL_LIBS}
+    )
+endif()
 
 # ENVIRONMENT entries are baked at configure time so the suite behaves the
 # same from any runner shell: the configurator's value wins (a shell that
@@ -102,13 +104,14 @@ set_tests_properties(testUsdGenShaderC5 PROPERTIES
 # --- L-2, render half: EGL headless Storm draws over make_scene.py scenes --
 set(_scenes "${CMAKE_CURRENT_BINARY_DIR}/scenes")
 
-add_test(NAME testUsdGenShaderScenes
-    COMMAND "${USDGEN_PY}" "${CMAKE_CURRENT_SOURCE_DIR}/make_scene.py")
-set_tests_properties(testUsdGenShaderScenes PROPERTIES
-    LABELS "T2"
-    ENVIRONMENT "${_usdgen_shader_env};USDGEN_SHADER_SCENES=${_scenes}"
-    FIXTURES_SETUP ShaderScenes
-    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+if(UNIX)
+    add_test(NAME testUsdGenShaderScenes
+        COMMAND "${USDGEN_PY}" "${CMAKE_CURRENT_SOURCE_DIR}/make_scene.py")
+    set_tests_properties(testUsdGenShaderScenes PROPERTIES
+        LABELS "T2"
+        ENVIRONMENT "${_usdgen_shader_env};USDGEN_SHADER_SCENES=${_scenes}"
+        FIXTURES_SETUP ShaderScenes
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
 # scene: rendered at complexity 1.2 -> refineLevel 2 (default surface
 # patch repr); A_l1 at 1.1 -> refineLevel 1 (S-9: variant A must not break).
@@ -131,3 +134,4 @@ foreach(_case
         FIXTURES_REQUIRED ShaderScenes
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endforeach()
+endif() # UNIX render harness

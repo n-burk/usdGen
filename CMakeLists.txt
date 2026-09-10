@@ -36,11 +36,21 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------------------
 # Compile hardening
 # ---------------------------------------------------------------------------
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
-add_compile_options(-Wall -Wextra -Wno-cpp)
+if(MSVC)
+    add_compile_options(/W4)
+else()
+    add_compile_options(-Wall -Wextra -Wno-cpp)
+endif()
 
-set(CMAKE_INSTALL_RPATH "$ORIGIN")
-set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+# $ORIGIN is ELF-only.  Use the native loader spelling where applicable and
+# leave Windows without an RPATH.
+if(UNIX AND NOT APPLE)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+elseif(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path")
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+endif()
 
 # ---------------------------------------------------------------------------
 # Per-target cache variables (plan §3.5.2)
@@ -77,14 +87,12 @@ add_library(usdGen_seexpr STATIC
 target_include_directories(usdGen_seexpr PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/seexpr>
     $<INSTALL_INTERFACE:include/seexpr>)
-target_link_libraries(usdGen_seexpr PUBLIC dl pthread)
+target_link_libraries(usdGen_seexpr PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 set_target_properties(usdGen_seexpr PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 # GPU parity: Noise.cpp must not contract; the CUDA kernel pins its bit patterns with --fmad=false (mirrors usdGenMath).
-target_compile_options(usdGen_seexpr PRIVATE
-    -ffp-contract=${USDGEN_FP_CONTRACT})
 # N-7 (plan §1.2): SeExpr2 headers are never installed — usdGen_seexpr only
 # exists to compile Noise.cpp into the hidden archives, is never installed
 # or exported, so no header rule is emitted (supersedes the sol S-6
@@ -98,8 +106,6 @@ add_library(usdGenMath STATIC ${USDGEN_MATH_SOURCES})
 target_include_directories(usdGenMath PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:include>)
-target_compile_options(usdGenMath PRIVATE
-    -ffp-contract=${USDGEN_FP_CONTRACT})
 target_link_libraries(usdGenMath PUBLIC
     arch tf gf vt work
     TBB::tbb
@@ -117,6 +123,10 @@ set_target_properties(usdGenMath PROPERTIES
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-ffp-contract=${USDGEN_FP_CONTRACT}" USDGEN_FP_CONTRACT_OK)
 if(USDGEN_FP_CONTRACT_OK)
+    target_compile_options(usdGen_seexpr PRIVATE
+        "-ffp-contract=${USDGEN_FP_CONTRACT}")
+    target_compile_options(usdGenMath PRIVATE
+        "-ffp-contract=${USDGEN_FP_CONTRACT}")
     set_source_files_properties(libs/usdGen/usdGen/ops/noise.cpp PROPERTIES
         COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
 endif()
@@ -148,7 +158,9 @@ target_link_libraries(usdGen
 # out of libusdGen.so's export table (gate B-1 NoThirdPartyExports).
 set_target_properties(usdGen PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON)
-target_link_options(usdGen PRIVATE "LINKER:--exclude-libs,ALL")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT WIN32)
+    target_link_options(usdGen PRIVATE "LINKER:--exclude-libs,ALL")
+endif()
 
 # ---------------------------------------------------------------------------
 # usdGenSchema (SHARED, minimal — tokens + extent registration)
@@ -329,6 +341,16 @@ endif()
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+if(WIN32)
+    # The current test harnesses use POSIX process and loader APIs (setenv,
+    # execv, dlopen, and ELF symbol inspection).  Keep the production targets
+    # buildable with MSVC while those harnesses remain Unix-only.
+    option(USDGEN_BUILD_TESTS "Build the usdGen test and benchmark targets" OFF)
+else()
+    option(USDGEN_BUILD_TESTS "Build the usdGen test and benchmark targets" ON)
+endif()
+
+if(USDGEN_BUILD_TESTS)
 enable_testing()
 
 # M0: build-rule tests (gate B-1) — see cmake/CheckNoStage*.cmake
@@ -662,6 +684,8 @@ add_test(NAME testUsdGenConsumer COMMAND testUsdGenConsumer)
 set_tests_properties(testUsdGenConsumer PROPERTIES
     LABELS "T0;install")
 
+endif() # USDGEN_BUILD_TESTS
+
 # ---------------------------------------------------------------------------
 # Install rules
 # ---------------------------------------------------------------------------
@@ -673,6 +697,7 @@ set_tests_properties(testUsdGenConsumer PROPERTIES
 # roots into the usdGenTargets export set.
 install(TARGETS usdGen usdGenImaging usdGenSchema usdGenShaders
     EXPORT usdGenTargets
+    RUNTIME DESTINATION "${USDGEN_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${USDGEN_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${USDGEN_INSTALL_LIBDIR}")
 

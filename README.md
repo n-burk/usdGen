@@ -10,12 +10,13 @@ operator engine, tile publisher, shipped shaders, and the usdview tool loop
 land in M1 and later — see `plan/11-roadmap.md` (§2.1 is the M0 exit). The
 full design document is in `plan/` (`plan/README.md` is the entry point).
 
-## Prerequisites (this host)
+## Prerequisites
 
 - OpenUSD v26.08 installed at `../OpenUSD_26_08` (override with
   `-DUSD_INSTALL_DIR=`).
-- CMake ≥ 3.26, g++ 13 (C++17).
-- Ninja. On this host it is the venv copy, **not** on `PATH` by default:
+- CMake ≥ 3.26 and a C++17 compiler (GCC, Clang, or MSVC).
+- Ninja is recommended. On Unix, the shell wrapper uses it when available;
+  on Windows, use `bin/build_usdgen.ps1` from PowerShell.
 
       export PATH=/home/burkard/.venv/bin:$PATH
 
@@ -29,8 +30,14 @@ full design document is in `plan/` (`plan/README.md` is the entry point).
     ninja -C build -j16
 
 `bin/build_usdgen.sh` wraps configure + build (and `--test` runs ctest).
+On Windows, the equivalent is
+`.\bin\build_usdgen.ps1` (add `-Test` to run ctest). Pass `-Build`,
+`-UsdInstallDir`, or `-Generator` when the defaults do not fit the machine.
 Useful cache vars: `USDGEN_FP_CONTRACT` (`off` default; `fast` for the
-`usdGenMath` FP-contract experiment) and `USDGEN_WITH_RIGEXEC` (default `OFF`).
+`usdGenMath` FP-contract experiment), `USDGEN_WITH_RIGEXEC` (default `OFF`),
+and `USDGEN_BUILD_TESTS`. The POSIX process and ELF inspection harnesses are
+enabled by default on Unix and disabled by default on Windows; set
+`-DUSDGEN_BUILD_TESTS=ON` when using a compatible test environment.
 
 ## Test
 
