@@ -9,6 +9,7 @@
 #define USDGEN_GENERATION_STORE_H
 
 #include "usdGen/curveBuffer.h"
+#include "usdGen/deviceGeneration.h"
 
 #include <cstdint>
 #include <memory>
@@ -26,6 +27,9 @@ struct UsdGenGeneration
     std::vector<UsdGenTilePublication> guides;       // guides/<setName> prims (§4.2)
     std::vector<UsdGenInstancerPublication> instancers; // M6
     UsdGenPrimSetSignature signature;
+    // Mutually exclusive with host geometry. Device-aware consumers acquire
+    // leases from this immutable payload; never cast its pointers to VtArray.
+    std::shared_ptr<const UsdGenDeviceGeneration> device;
 };
 using UsdGenGenerationConstPtr = std::shared_ptr<const UsdGenGeneration>;
 

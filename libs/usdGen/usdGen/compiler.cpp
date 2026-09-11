@@ -1,7 +1,8 @@
 // usdGen engine — compiler implementation (03-execution-engine.md §3).
 //
-// Compile() walks UsdGenGraphDesc::nodes and: edges from usdGen:input only
-// (S26); Kahn sort with namespace tie-break; cycle detection (compile error
+// Compile() walks UsdGenGraphDesc::nodes and compiler-owned dependency edges
+// derived from the composed hierarchy by the descriptor builder; Kahn sort
+// with namespace tie-break; cycle detection (compile error
 // naming the offending pair); dense node ids in topological order; space /
 // readPhase resolution (§1.6); reference-lane ordering (§1.5); OutputPrimvars
 // slot binding (§1.2); Merkle structural digests (§3.3); tile arithmetic
@@ -15,6 +16,7 @@
 #include "usdGen/compiler.h"
 
 #include "usdGen/opRegistry.h"
+#include "usdGen/cudaExecution.h"
 #include "usdGen/types.h"
 
 #include "pxr/pxr.h"
@@ -28,12 +30,73 @@
 #include <vector>
 #include <chrono>
 #include <cstdio>
+#include <sstream>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 
 namespace usdGen {
 namespace {
+
+bool ValidateExpressionBindings(UsdGenGraphDesc const &desc,
+                                UsdGenCompileResult &result)
+{
+    bool ok = true;
+    if (!desc.validationErrors.empty()) {
+        result.errors.insert(result.errors.end(), desc.validationErrors.begin(), desc.validationErrors.end());
+        ok = false;
+    }
+    if (desc.executionBackend != UsdGenExecutionBackend::CpuReference &&
+        desc.executionBackend != UsdGenExecutionBackend::Cuda) {
+        result.errors.push_back("invalid execution backend; refusing implicit CPU fallback");
+        ok = false;
+    }
+    if (desc.executionBackend == UsdGenExecutionBackend::Cuda) {
+        UsdGenDiagnostics diagnostics;
+        if (!ValidateCudaGraph(desc, &diagnostics)) {
+            result.errors.insert(result.errors.end(), diagnostics.errors.begin(), diagnostics.errors.end());
+            ok = false;
+        }
+    }
+    std::set<SdfPath> expressionPaths;
+    for (auto const &e : desc.expressions) {
+        if (e.path.IsEmpty() || e.source.empty() || !expressionPaths.insert(e.path).second) {
+            result.errors.push_back("expression has missing path or source"); ok = false;
+        }
+        std::set<TfToken> seen;
+        for (auto const &o : e.outputs)
+            if (o.name.IsEmpty() || o.nativeType.IsEmpty() || !seen.insert(o.name).second) { result.errors.push_back("expression " + e.path.GetString() + " has invalid or duplicate output"); ok = false; }
+    }
+    for (auto const &node : desc.nodes) {
+        std::set<TfToken> destinations;
+        for (auto const &b : node.expressionBindings) {
+            result.errors.push_back("expression binding runtime evaluator is unavailable; refusing connected parameter " + node.path.GetString()); ok = false;
+            auto ei = std::find_if(desc.expressions.begin(), desc.expressions.end(), [&](auto const &e){ return e.path == b.expression; });
+            if (ei == desc.expressions.end()) { result.errors.push_back("expression binding references missing expression " + b.expression.GetString()); ok = false; continue; }
+            auto oi = std::find_if(ei->outputs.begin(), ei->outputs.end(), [&](auto const &o){ return o.name == b.output; });
+            if (oi == ei->outputs.end()) { result.errors.push_back("expression binding references missing or ambiguous output " + b.output.GetString()); ok = false; continue; }
+            if (!destinations.insert(b.destination).second) { result.errors.push_back("duplicate expression consumer " + node.path.GetString() + "." + b.destination.GetString()); ok = false; }
+            if (!(b.domain == expr::Domain::Groom || b.domain == expr::Domain::Primitive || b.domain == expr::Domain::Point)) { result.errors.push_back("invalid expression evaluation domain"); ok = false; }
+            if (b.destination.IsEmpty() || b.nativeType.IsEmpty()) { result.errors.push_back("expression binding has empty destination or native type"); ok = false; }
+            // Hydra transports native property names; direct descriptor
+            // clients may use operator-local names. Strip only our namespace.
+            std::string destination = b.destination.GetString();
+            if (destination.compare(0, 7, "usdGen:") == 0)
+                destination.erase(0, 7);
+            if ((destination == "enabled" || destination == "seed" ||
+                 destination == "segments" || destination == "cvCount" ||
+                 destination == "algorithmVersion") &&
+                b.domain != expr::Domain::Groom) {
+                result.errors.push_back("topology/control expression must evaluate at groom domain"); ok = false;
+            }
+            auto const &a = oi->shape; auto const &d = b.destinationShape;
+            if (b.nativeType != oi->nativeType || a.scalar == expr::ScalarType::Invalid || d.scalar == expr::ScalarType::Invalid || a.scalar != d.scalar || a.elementCount != d.elementCount || a.components != d.components || a.rows != d.rows || a.columns != d.columns || a.isArray != d.isArray) {
+                result.errors.push_back("expression output type/shape does not match destination " + b.destination.GetString()); ok = false;
+            }
+        }
+    }
+    return ok;
+}
 
 // FNV-1a 64-bit.
 uint64_t Fnv1a(uint64_t h, void const *data, size_t n)
@@ -257,8 +320,11 @@ TypeClassTable const &TypeClassification(UsdGenOp const &op)
 UsdGenCompileResult UsdGenCompiler::Compile(UsdGenGraphDesc const &desc, UsdGenGraph *out)
 {
     UsdGenCompileResult result;
-    _Build(desc, out, /*reuse=*/nullptr, result);
+    if (!ValidateExpressionBindings(desc, result)) return result;
+    UsdGenGraph candidate;
+    _Build(desc, &candidate, /*reuse=*/nullptr, result);
     if (result.errors.empty()) {
+        *out = std::move(candidate);
         result.ok = true;
         // Fresh compile: every node re-captures; all chunks value-dirty so
         // the first commit evaluates the whole chain.
@@ -274,6 +340,7 @@ UsdGenCompileResult UsdGenCompiler::Compile(UsdGenGraphDesc const &desc, UsdGenG
 UsdGenCompileResult UsdGenCompiler::Recompile(UsdGenGraphDesc const &newDesc, UsdGenGraph *out)
 {
     UsdGenCompileResult result;
+    if (!ValidateExpressionBindings(newDesc, result)) return result;
     _Build(newDesc, out, out, result);
     if (result.errors.empty()) {
         result.ok = true;
@@ -466,6 +533,15 @@ void UsdGenCompiler::_Build(
     // the new graph; only their desc pointers and digests refresh. This
     // replaces the OldNode snapshot whose per-node Clone + deep copies were
     // the dominant term of the chain-200 append budget.
+    // Validate factories before moving any retained runtime state. A failed
+    // incremental compile must leave the old graph intact, just like Compile.
+    for (auto const& node : desc.nodes) {
+        if (!UsdGenOpRegistry::Get().HasKernel(node.type, node.algorithmVersion)) {
+            result.errors.push_back("UsdGenCompiler: no kernel registered for '" +
+                node.type.GetString() + "' (prim " + node.path.GetString() + ")");
+            return;
+        }
+    }
     std::vector<std::unique_ptr<UsdGenCompiledNode>> oldNodes;
     // descIdx → node index over the OLD graph (E-6): the merge and the node
     // loop map by position, with a linear path scan only for reorder misses
@@ -491,6 +567,10 @@ void UsdGenCompiler::_Build(
     // Entry identity is by path; equality is field-wise (no allocs on hit).
     // Correctness: nodes read their desc entry read-only through desc/paramView.
     auto sameNodeDesc = [](UsdGenNodeDesc const &a, UsdGenNodeDesc const &b) {
+        // Until expression program identity participates in incremental
+        // digests, copy connected descriptors instead of reusing stale source
+        // bindings/literals. This is conservative, not a semantic fallback.
+        if (!a.expressionBindings.empty() || !b.expressionBindings.empty()) return false;
         if (a.path != b.path || a.type != b.type || a.mode != b.mode ||
             a.algorithmVersion != b.algorithmVersion || a.enabled != b.enabled ||
             a.seed != b.seed || a.blend != b.blend || a.space != b.space ||
@@ -521,7 +601,7 @@ void UsdGenCompiler::_Build(
     std::vector<int> oldNodeForNewDesc(desc.nodes.size(), -1);
     // entries copy from the input. Entry ORDER follows the input (S26).
     // Identity is positional (nodeByDesc) with a linear-scan fallback.
-    static_assert(sizeof(UsdGenGraphDesc) == 488,
+    static_assert(sizeof(UsdGenGraphDesc) == 544,
         "UsdGenGraphDesc changed size: update the Recompile shell merge below");
     {
         auto fresh = std::make_unique<UsdGenGraphDesc>();
@@ -530,6 +610,9 @@ void UsdGenCompiler::_Build(
         fresh->curveSets = desc.curveSets;
         fresh->surfaces = desc.surfaces;
         fresh->maps = desc.maps;
+        fresh->expressions = desc.expressions;
+        fresh->validationErrors = desc.validationErrors;
+        fresh->executionBackend = desc.executionBackend;
         fresh->look = desc.look;
         fresh->xformMatrix = desc.xformMatrix;
         fresh->purpose = desc.purpose;
@@ -538,6 +621,7 @@ void UsdGenCompiler::_Build(
         fresh->pickTarget = desc.pickTarget;
         fresh->densityScale = desc.densityScale;
         fresh->renderDensityScale = desc.renderDensityScale;
+        fresh->defaultWidth = desc.defaultWidth;
         fresh->tileTarget = desc.tileTarget;
         fresh->curveBasis = desc.curveBasis;
         fresh->motionMode = desc.motionMode;

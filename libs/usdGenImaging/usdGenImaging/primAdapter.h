@@ -81,6 +81,7 @@ class UsdGenDescriptionAdapter final : public UsdGenPrimAdapterBase {};
 class UsdGenOperatorAdapter final : public UsdGenPrimAdapterBase {};
 class UsdGenMapAdapter final : public UsdGenPrimAdapterBase {};
 class UsdGenGuideSetAdapter final : public UsdGenPrimAdapterBase {};
+class UsdGenExpressionAdapter final : public UsdGenPrimAdapterBase {};
 
 PXR_NAMESPACE_CLOSE_SCOPE
 

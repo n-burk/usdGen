@@ -3,37 +3,64 @@
     defaultPrim = "Character"
     metersPerUnit = 0.01
     upAxis = "Y"
-    doc = "Schema discussion draft: guided hair, shared mask, explicit operator relationships."
+    startTimeCode = 1
+    endTimeCode = 24
+    timeCodesPerSecond = 24
+    framesPerSecond = 24
+    doc = "Schema discussion draft: hierarchy-ordered CUDA operators and execution-time SeExpr over GPU-resident geometry."
 )
 
 # Baseline: plan/02-schema.md, with plan/13-codebase-alignment.md overrides.
+# Proposed extension: operator-expressions.md beside this file defines the
+# new UsdGenExpression type, connections and per-attribute evaluation metadata.
+# gpu-execution.md defines the CUDA, tool and renderer buffer contract.
+# rbf-deformation.md records Unreal/HiPhy research and the animation contract.
+# These extensions are NOT implemented by the current schema or adapters.
 # This is an authored scene example, not a schema class-definition file.
-# GuideInterpolate, Clump and ExprMap are declared but have no kernels in
-# the plan v2 status table. Parsing this file does not imply it can cook yet.
+# GuideInterpolate and Clump have no kernels in the plan v2 status table.
+# Parsing this file does not imply it can cook yet.
 # Omitted parameters use schema defaults; algorithmVersion=0 tracks latest.
 #
 # Execution: scatter -> interpolate -> clump -> frizz -> width -> deform
 # References: head guides -> interpolate and clump
-# Fields: styleMask -> clump and frizz (each has its own mask envelope)
-# Publication: hair.usdGen:terminal -> deform
-# Prim names and child order do not define execution order.
+# Expressions: one groom-level CV count, primitive-level clump strength,
+#              point-level frizz/width and a shared primitive-level mask.
+# Publication: the description publishes its last logical result (deform).
+# No usdGen:input or usdGen:terminal is authored: composed hierarchy orders ops,
+# matching usdRig's reverse-sibling post-order, including nested operator prims.
+# SeExpr programs compile with the graph; values evaluate DURING EXECUTION.
+# All operators and expression values execute on CUDA. Geometry stays in device
+# buffers across operators, brushes, picking and rendering. USD stores authored
+# inputs and instructions; it never stores CUDA pointers or live buffer handles.
+# customData.usdGen.evaluation = groom | primitive | point on numeric inputs.
+# Strings, tokens and asset paths stay literal; relationships retain their roles.
 
 def Xform "Character"
 {
-    # Tiny static scalp: one triangle in the XZ plane, normal +Y.
+    # Five non-coplanar vertices for a small RBF binding example.
+    # Face 0 and both guide roots retain their original rest positions.
+    # Time samples stand in for an upstream animation/deformation provider.
     def Mesh "Scalp" (
         prepend apiSchemas = ["UsdGenRestAPI"]
     )
     {
         uniform token subdivisionScheme = "none"
-        int[] faceVertexCounts = [3]
-        int[] faceVertexIndices = [0, 1, 2]
-        point3f[] points = [(0, 0, 0), (0, 0, 10), (10, 0, 0)]
-        texCoord2f[] primvars:st = [(0, 0), (0, 1), (1, 0)] (
+        int[] faceVertexCounts = [3, 3, 3]
+        int[] faceVertexIndices = [0, 1, 2, 2, 1, 3, 2, 3, 4]
+        point3f[] points = [
+            (0, 0, 0), (0, 0, 10), (10, 0, 0), (10, 2, 10), (15, 1, 5)
+        ]
+        point3f[] points.timeSamples = {
+            1: [(0, 0, 0), (0, 0, 10), (10, 0, 0), (10, 2, 10), (15, 1, 5)],
+            24: [(0, 0, 0), (0, 0, 10), (8, 2, 0), (8, 5, 10), (10, 6, 5)]
+        }
+        texCoord2f[] primvars:st = [(0, 0), (0, 1), (1, 0), (1, 1), (1.5, 0.5)] (
             interpolation = "vertex"
         )
         uniform token usdGen:rest:source = "primvar"
-        point3f[] primvars:rest = [(0, 0, 0), (0, 0, 10), (10, 0, 0)] (
+        point3f[] primvars:rest = [
+            (0, 0, 0), (0, 0, 10), (10, 0, 0), (10, 2, 10), (15, 1, 5)
+        ] (
             interpolation = "vertex"
         )
     }
@@ -42,98 +69,185 @@ def Xform "Character"
     {
         uniform int usdGen:schemaVersion = 1
         string usdGen:label = "Example groom"
+        # Proposed groom-wide requirement, inherited by every description/op.
+        # "cuda" includes GPU-resident tools/rendering, with no CPU fallback.
+        # Device selection and allocation are session state, not asset settings.
+        custom uniform token usdGen:execution:backend = "cuda"
 
         def UsdGenDescription "hair"
         {
             # Operators inherit this surface unless they author an override.
             rel usdGen:surface = </Character/Scalp>
-            rel usdGen:terminal = </Character/Groom/hair/Ops/deform>
             float usdGen:densityScale = 0.25
             float usdGen:renderDensityScale = 1.0
             uniform token usdGen:curve:basis = "bspline"
 
+            # Bottom sibling first; descendants before their operator parent.
+            # The compiler derives preceding-value dependencies from this order.
             def Scope "Ops"
             {
-                # Source: no upstream operator. Produces roots, not strands.
-                def UsdGenScatter "scatter"
+                def UsdGenDeform "deform"
                 {
-                    uniform token usdGen:mode = "random"
-                    uniform int usdGen:seed = 11
-                    float usdGen:density = 20
-                }
-
-                # Roots are the execution input; guides are a reference input.
-                def UsdGenGuideInterpolate "interpolate"
-                {
-                    rel usdGen:input = </Character/Groom/hair/Ops/scatter>
-                    rel usdGen:guides = </Character/Groom/hair/Guides/head>
-                    int usdGen:maxGuides = 2
-                    int usdGen:cvCount = 8
-                    float usdGen:influenceRadius = 15
-                }
-
-                def UsdGenClump "clump"
-                {
-                    rel usdGen:input = </Character/Groom/hair/Ops/interpolate>
-                    rel usdGen:clump:centers = </Character/Groom/hair/Guides/head/curves>
-                    uniform int usdGen:seed = 23
-                    float usdGen:clump:amount = 0.65
-                    float usdGen:clump:size = 5
-                    float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)]
-                    uniform token usdGen:clump:profile:interpolation = "linear"
-
-                    # UsdGenMaskAPI is auto-applied to every operator type.
-                    rel usdGen:mask:source = </Character/Groom/hair/Maps/styleMask>
-                    float usdGen:mask:amount = 0.8
-                }
-
-                def UsdGenNoise "frizz"
-                {
-                    rel usdGen:input = </Character/Groom/hair/Ops/clump>
-                    bool usdGen:enabled = true
-                    float usdGen:blend = 1
-                    uniform int usdGen:seed = 37
-                    uniform token usdGen:space = "rest"
-                    float usdGen:noise:magnitude = 0.12
-                    float usdGen:noise:frequency = 3
-
-                    # Same field, different local envelope: protect the roots.
-                    rel usdGen:mask:source = </Character/Groom/hair/Maps/styleMask>
-                    float usdGen:mask:amount = 1
-                    float2[] usdGen:mask:ramp:knots = [(0, 0), (0.3, 0.2), (1, 1)]
-                    uniform token usdGen:mask:ramp:interpolation = "linear"
+                    # Required animation path: rest-bound RBF surface deformation.
+                    # The mode/sample-count properties already exist in the schema;
+                    # a working CUDA RBF implementation is new required work.
+                    uniform token usdGen:mode = "rbf"
+                    uniform token usdGen:space = "deformed"
+                    rel usdGen:surface = </Character/Scalp>
+                    # Toy fixture: all five vertices. Production budget starts
+                    # around 100, then is tuned to the actual deformation domain.
+                    int usdGen:rbfSamples = 5 (
+                        customData = { dictionary usdGen = { string evaluation = "groom" } }
+                    )
+                    bool usdGen:lockRoots = true (
+                        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                    )
                 }
 
                 def UsdGenWidth "width"
                 {
-                    rel usdGen:input = </Character/Groom/hair/Ops/frizz>
-                    float usdGen:width = 0.03
-                    float2[] usdGen:width:knots = [(0, 1), (0.8, 0.5), (1, 0.05)]
+                    float usdGen:width = 0.03 (
+                        customData = { dictionary usdGen = { string evaluation = "point" } }
+                    )
+                    float usdGen:width.connect = </Character/Groom/hair/Expressions/strandWidth.outputs:result>
+                    # The expression supplies the taper, so the existing ramp is neutral.
+                    float2[] usdGen:width:knots = [(0, 1), (1, 1)] (
+                        customData = { dictionary usdGen = { string evaluation = "groom" } }
+                    )
                     uniform token usdGen:width:interpolation = "linear"
-                    bool usdGen:replace = true
+                    bool usdGen:replace = true (
+                        customData = { dictionary usdGen = { string evaluation = "groom" } }
+                    )
                 }
 
-                # Rest-styled strands follow the final surface pose here.
-                # On this static scalp, rest and final poses coincide.
-                def UsdGenDeform "deform"
+                # A grouping scope orders its descendants but does no computation.
+                def Scope "style"
                 {
-                    rel usdGen:input = </Character/Groom/hair/Ops/width>
-                    uniform token usdGen:mode = "rigidFrame"
-                    uniform token usdGen:space = "deformed"
-                    bool usdGen:lockRoots = true
+                    def UsdGenNoise "frizz"
+                    {
+                        bool usdGen:enabled = true (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                        bool usdGen:enabled.connect = </Character/Groom/hair/Expressions/enableFrizz.outputs:result>
+                        float usdGen:blend = 1 (
+                            customData = { dictionary usdGen = { string evaluation = "point" } }
+                        )
+                        uniform int usdGen:seed = 37 (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                        uniform token usdGen:space = "rest"
+                        float usdGen:noise:magnitude = 0.12 (
+                            customData = { dictionary usdGen = { string evaluation = "point" } }
+                        )
+                        float usdGen:noise:magnitude.connect = </Character/Groom/hair/Expressions/frizzMagnitude.outputs:result>
+                        float usdGen:noise:frequency = 3 (
+                            customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                        )
+
+                        # Same field, different local envelope: protect the roots.
+                        float usdGen:mask:amount = 1 (
+                            customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                        )
+                        float usdGen:mask:amount.connect = </Character/Groom/hair/Expressions/styleMask.outputs:result>
+                        float2[] usdGen:mask:ramp:knots = [(0, 0), (0.3, 0.2), (1, 1)] (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                        uniform token usdGen:mask:ramp:interpolation = "linear"
+                    }
+
+                    def UsdGenClump "clump"
+                    {
+                        rel usdGen:clump:centers = </Character/Groom/hair/Guides/head/curves>
+                        uniform int usdGen:seed = 23 (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                        float usdGen:clump:amount = 0.65 (
+                            customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                        )
+                        float usdGen:clump:amount.connect = </Character/Groom/hair/Expressions/clumpStrength.outputs:result>
+                        float usdGen:clump:size = 5 (
+                            customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                        )
+                        float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)] (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                        uniform token usdGen:clump:profile:interpolation = "linear"
+
+                        # UsdGenMaskAPI is auto-applied to every operator type.
+                        float usdGen:mask:amount = 0.8 (
+                            customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                        )
+                        float usdGen:mask:amount.connect = </Character/Groom/hair/Expressions/styleMask.outputs:result>
+                    }
+                }
+
+                def UsdGenGuideInterpolate "interpolate"
+                {
+                    rel usdGen:guides = </Character/Groom/hair/Guides/head>
+                    int usdGen:maxGuides = 2 (
+                        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                    )
+                    int usdGen:cvCount = 8 (
+                        customData = { dictionary usdGen = { string evaluation = "groom" } }
+                    )
+                    int usdGen:cvCount.connect = </Character/Groom/hair/Expressions/cvCount.outputs:result>
+                    float usdGen:influenceRadius = 15 (
+                        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+                    )
+                    # Child source executes before this interpolation operator.
+                    def UsdGenScatter "scatter"
+                    {
+                        uniform token usdGen:mode = "random"
+                        uniform int usdGen:seed = 11 (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                        float usdGen:density = 20 (
+                            customData = { dictionary usdGen = { string evaluation = "groom" } }
+                        )
+                    }
                 }
             }
 
-            def Scope "Maps"
+            # Proposed reusable expression programs. The consuming attribute
+            # selects evaluation granularity and supplies the input context.
+            # outputs:result declares the type, not a stored evaluated value.
+            def Scope "Expressions"
             {
-                # Field prim: no usdGen:input and no operator-chain position.
-                # An inline expression keeps this example free of asset files.
-                def UsdGenExprMap "styleMask"
+                def UsdGenExpression "cvCount"
                 {
-                    uniform token usdGen:map:domain = "root"
-                    uniform token usdGen:expr:returnType = "float"
-                    string usdGen:expr:source = "0.25 + 0.75 * $u"
-                    float usdGen:map:default = 1
+                    custom string usdGen:expr:source = "4 * 2"
+                    custom int outputs:result
+                }
+
+                def UsdGenExpression "enableFrizz"
+                {
+                    custom string usdGen:expr:source = "$frame >= 1"
+                    custom bool outputs:result
+                }
+
+                def UsdGenExpression "clumpStrength"
+                {
+                    custom string usdGen:expr:source = "$value * (0.5 + 0.5 * $u)"
+                    custom float outputs:result
+                }
+
+                def UsdGenExpression "frizzMagnitude"
+                {
+                    custom string usdGen:expr:source = "$value * $t"
+                    custom float outputs:result
+                }
+
+                def UsdGenExpression "strandWidth"
+                {
+                    custom string usdGen:expr:source = "$value * (1 - 0.95 * $t)"
+                    custom float outputs:result
+                }
+
+                def UsdGenExpression "styleMask"
+                {
+                    # $value is the consumer's literal: 0.8 on clump, 1 on frizz.
+                    custom string usdGen:expr:source = "$value * (0.25 + 0.75 * $u)"
+                    custom float outputs:result
                 }
             }
 

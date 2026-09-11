@@ -41,6 +41,10 @@
                         "bases": ["UsdImagingSceneIndexPrimAdapter"],
                         "primTypeName": "UsdGenGuideSet"
                     },
+                    "UsdGenExpressionAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenExpression"
+                    },
                     "UsdGenRestAPIAdapter": {
                         "bases": ["UsdImagingAPISchemaAdapter"],
                         "apiSchemaName": "UsdGenRestAPI"

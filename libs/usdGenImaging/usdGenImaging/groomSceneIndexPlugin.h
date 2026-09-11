@@ -48,7 +48,6 @@ class UsdGenDirtyRouter;
 enum class UsdGenCommitReason : uint8_t;
 struct UsdGenGeneration;
 struct UsdGenTileDirty;
-class UsdPrim;
 }  // namespace usdGen
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -152,7 +151,7 @@ private:
     HdSceneIndexBaseRefPtr _pruned;   // input with extComputationPrimvar
                                       // pruning spliced (06 §3.5); NEVER
                                       // spliced into the chain
-    int _renderInstanceId = 0;
+    uint64_t _renderInstanceId = 0;
 
     mutable std::mutex _stateMutex;   // guards everything below
     // Shared ownership: Work snapshots and _RepublishByRoot hold STRONG

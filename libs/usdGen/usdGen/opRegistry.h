@@ -36,6 +36,7 @@ public:
 
     /// Highest registered version for a type; -1 when the type is unknown.
     int NewestVersion(TfToken const &type) const;
+    bool HasKernel(TfToken const &type, int algorithmVersion) const;
 
     /// All registered type names (sorted); used by diagnostics.
     std::vector<TfToken> KnownTypes() const;

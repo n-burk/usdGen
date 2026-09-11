@@ -7,6 +7,7 @@
 // the session owns recompile routing (1), generation build + publish (6) and
 // the dirty diff (7).
 #include "usdGen/session.h"
+#include "usdGen/cudaExecution.h"
 
 #include "usdGenMath/usdGenMath/hash.h"
 
@@ -79,6 +80,7 @@ UsdGenSession::~UsdGenSession() = default;
 
 void UsdGenSession::SetGraphDesc(UsdGenGraphDesc const &desc)
 {
+    std::lock_guard<std::mutex> commitLock(_commitMutex);
     // A new desc is a structural dirty: the next commit recompiles from
     // scratch (03 §5.4 step 1). The session copies the desc (03 §2.2).
     _desc = desc;
@@ -90,6 +92,13 @@ void UsdGenSession::SetGraphDesc(UsdGenGraphDesc const &desc)
 }
 
 void UsdGenSession::SetContext(UsdGenContext context) { _context = context; }
+
+void UsdGenSession::SetDevicePublicationEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    _devicePublicationEnabled = enabled;
+    _dirty = true;
+}
 
 void UsdGenSession::AccumulateDirty(UsdGenPendingDirty &&pending)
 {
@@ -115,6 +124,7 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
     std::lock_guard<std::mutex> lock(_commitMutex);
     const auto t0 = std::chrono::steady_clock::now();
     TF_UNUSED(reason);
+    _lastDiagnostics = UsdGenDiagnostics{};
 
     // Supersession ticket (03 §5.6): any newer Commit/trigger bumps the
     // counter; if it moved while we cooked, we abandon publication.
@@ -134,8 +144,14 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
         UsdGenCompileResult cr = _compiler.Compile(_desc, &_graph);
         ++_stats.recompiles;
         if (!cr.ok) {
+            _lastDiagnostics.errors = std::move(cr.errors);
             // Bad graph: keep the previous generation published, stay dirty.
             _dirty = true;
+            // The failed descriptor must be retried as structural work;
+            // draining its dirty flag cannot turn the next trigger into an
+            // evaluation of the previous graph against the rejected inputs.
+            std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+            _pending.structural = true;
             return _store.Get();
         }
         _stats.cookedNodes = static_cast<uint64_t>(_graph.NodeCount());
@@ -152,11 +168,52 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
                 _graph.DirtySurface(s.id, UsdGenDirtySurfaceTopo);
     }
 
+    if (_desc.executionBackend == UsdGenExecutionBackend::Cuda) {
+        auto reject = [&]() {
+            _dirty = true;
+            std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+            _pending.structural = true;
+            return _store.Get();
+        };
+        if (!_devicePublicationEnabled) {
+            _lastDiagnostics.Error("CUDA publication requires a device-aware consumer; renderer graphics interop is unavailable");
+            return reject();
+        }
+        auto device = ExecuteCudaGraph(_desc, static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics);
+        if (!device || _lastDiagnostics.HasErrors()) return reject();
+        UsdGenGeneration gen;
+        gen.frame = frame;
+        gen.device = std::move(device);
+        // Do not call the host scheduler or _BuildTilePublication for a
+        // device generation. Tools retain this snapshot directly.
+        _store.Publish(std::move(gen));
+        _lastReport = UsdGenDirtyReport{};
+        ++_stats.commits;
+        _stats.publishedTiles = 0;
+        _lastNodeStats.clear();
+        {
+            std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+            _dirty = _pending.Any();
+        }
+        return _store.Get();
+    }
+
     // -- steps 2-5: reference lane, capture, evaluate, interleave (03 §5.4)
     UsdGenEvalContext evalCtx;
     evalCtx.time = frame;
     evalCtx.desc = &_desc;
     UsdGenRunResult result = _scheduler.Run(_graph, evalCtx, myReq);
+    _lastDiagnostics = result.diagnostics;
+
+    if (result.diagnostics.HasErrors()) {
+        // A partially executed graph is never a publishable generation.
+        // Rebuild capture/evaluation state on retry; retain the last completed
+        // generation for readers, tools and renderers.
+        _dirty = true;
+        std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+        _pending.structural = true;
+        return _store.Get();
+    }
 
     if (result.superseded ||
         _generationRequested.load(std::memory_order_acquire) != myReq) {
@@ -247,7 +304,10 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
 
     // Remaining chunk dirt (skipped no-op nodes are clean; anything the
     // scheduler could not run stays dirty; 03 §5.4).
-    _dirty = _graph.AnyDirty();
+    {
+        std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+        _dirty = _graph.AnyDirty() || _pending.Any();
+    }
     return next;
 }
 

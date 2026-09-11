@@ -13,9 +13,8 @@ Five deterministic fixtures under usd/fixtures/:
 
 Each scene: a UsdGenGroom with a UsdGeomMesh scalp surface and one
 UsdGenDescription carrying the frozen M1 5-op chain
-Scatter -> Grow -> Noise -> Length -> Width wired by explicit
-rel usdGen:input (02-schema.md section 0.3: no implicit ordering), and
-rel usdGen:terminal pointing at the Width op.
+Scatter -> Grow -> Noise -> Length -> Width derived from reverse sibling
+post-order under Description/Ops (plan/14). No input/terminal edges authored.
 
 Density calibration: UsdGenScatter emits per face
   n_f = floor(density * area_f) (+1 iff frac-draw < frac(expected)),
@@ -112,7 +111,7 @@ def render(name, curves, nx, ny, size, seed):
     out.append('def UsdGenGroom "Groom"')
     out.append("{")
     out.append("    uniform int usdGen:schemaVersion = 1")
-    out.append('    uniform string usdGen:sessionId = "bench"')
+    out.append('    uniform string usdGen:sessionId = "%s"' % label)
     out.append('    string usdGen:label = "%s"' % label)
     out.append("    rel usdGen:surface = </Groom/Scalp>")
     out.append("")
@@ -126,43 +125,26 @@ def render(name, curves, nx, ny, size, seed):
     out.append("    {")
     out.append("        uniform int usdGen:tileTarget = 64")
     out.append("        rel usdGen:surface = </Groom/Scalp>")
-    out.append("        rel usdGen:terminal = </Groom/Description/Width>")
     out.append('        string usdGen:label = "%s"' % label)
     out.append("")
-    out.append('        def UsdGenScatter "Scatter"')
+    out.append('        def Scope "Ops"')
     out.append("        {")
-    out.append("            uniform int usdGen:seed = %d" % seed)
-    out.append("            float usdGen:density = %s" % float(density))
-    out.append("        }")
-    out.append("")
-    out.append('        def UsdGenGrow "Grow"')
-    out.append("        {")
-    out.append("            uniform int usdGen:seed = %d" % CHAIN_SEED)
-    out.append("            rel usdGen:input = </Groom/Description/Scatter>")
-    out.append("            int usdGen:segments = 8")
-    out.append("            float usdGen:length = 1.0")
-    out.append("        }")
-    out.append("")
-    out.append('        def UsdGenNoise "Noise"')
-    out.append("        {")
-    out.append("            uniform int usdGen:seed = %d" % CHAIN_SEED)
-    out.append("            rel usdGen:input = </Groom/Description/Grow>")
-    out.append("            float usdGen:noise:magnitude = 0.05")
-    out.append("            float usdGen:noise:frequency = 3.0")
-    out.append("        }")
-    out.append("")
-    out.append('        def UsdGenLength "Length"')
-    out.append("        {")
-    out.append("            uniform int usdGen:seed = %d" % CHAIN_SEED)
-    out.append("            rel usdGen:input = </Groom/Description/Noise>")
-    out.append("            float usdGen:length:value = 1.0")
-    out.append("        }")
-    out.append("")
-    out.append('        def UsdGenWidth "Width"')
-    out.append("        {")
-    out.append("            uniform int usdGen:seed = %d" % CHAIN_SEED)
-    out.append("            rel usdGen:input = </Groom/Description/Length>")
-    out.append("            float usdGen:width = 0.01")
+    # Top-to-bottom authoring; evaluator traverses siblings bottom-to-top.
+    operators = [
+        ("Width", CHAIN_SEED, ["float usdGen:width = 0.01"]),
+        ("Length", CHAIN_SEED, ["float usdGen:length:value = 1.0"]),
+        ("Noise", CHAIN_SEED, ["float usdGen:noise:magnitude = 0.05",
+                              "float usdGen:noise:frequency = 3.0"]),
+        ("Grow", CHAIN_SEED, ["int usdGen:segments = 8",
+                             "float usdGen:length = 1.0"]),
+        ("Scatter", seed, ["float usdGen:density = %s" % float(density)]),
+    ]
+    for op, op_seed, params in operators:
+        out.append('            def UsdGen%s "%s"' % (op, op))
+        out.append("            {")
+        out.append("                uniform int usdGen:seed = %d" % op_seed)
+        out.extend("                " + p for p in params)
+        out.append("            }")
     out.append("        }")
     out.append("    }")
     out.append("}")

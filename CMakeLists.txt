@@ -37,9 +37,9 @@ find_package(Threads REQUIRED)
 # Compile hardening
 # ---------------------------------------------------------------------------
 if(MSVC)
-    add_compile_options(/W4)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/W4>)
 else()
-    add_compile_options(-Wall -Wextra -Wno-cpp)
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wno-cpp>")
 endif()
 
 # $ORIGIN is ELF-only.  Use the native loader spelling where applicable and
@@ -101,6 +101,22 @@ set_target_properties(usdGen_seexpr PROPERTIES
 # ---------------------------------------------------------------------------
 # usdGenMath (STATIC, -ffp-contract=off)
 # ---------------------------------------------------------------------------
+set(_usdgen_frontend_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/seexprFrontend/SeExpr2")
+file(GLOB _usdgen_frontend_sources "${_usdgen_frontend_dir}/*.cpp")
+list(FILTER _usdgen_frontend_sources EXCLUDE REGEX "ExprLLVMCodeGeneration\\.cpp$")
+add_library(usdGenExprFrontend STATIC ${_usdgen_frontend_sources}
+    "${_usdgen_frontend_dir}/generated/ExprParser.cpp"
+    "${_usdgen_frontend_dir}/generated/ExprParserLex.cpp")
+target_include_directories(usdGenExprFrontend PRIVATE
+    "${_usdgen_frontend_dir}" "${_usdgen_frontend_dir}/generated")
+target_compile_definitions(usdGenExprFrontend PRIVATE
+    SeExpr2=UsdGenSeExprFrontend SeExprInternal2=UsdGenSeExprFrontendInternal
+    USDGEN_SEEXPR_SANDBOX)
+target_link_libraries(usdGenExprFrontend PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+set_target_properties(usdGenExprFrontend PROPERTIES
+    POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+
 file(GLOB_RECURSE USDGEN_MATH_SOURCES libs/usdGenMath/*.cpp)
 add_library(usdGenMath STATIC ${USDGEN_MATH_SOURCES})
 target_include_directories(usdGenMath PUBLIC
@@ -143,6 +159,9 @@ file(GLOB_RECURSE USDGEN_CORE_SOURCES libs/usdGen/*.cpp)
 list(REMOVE_ITEM USDGEN_CORE_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/exprEval.cpp")
 add_library(usdGen SHARED ${USDGEN_CORE_SOURCES})
+set_source_files_properties(libs/usdGen/usdGen/expressions/frontend.cpp PROPERTIES
+    COMPILE_DEFINITIONS "SeExpr2=UsdGenSeExprFrontend;SeExprInternal2=UsdGenSeExprFrontendInternal;USDGEN_SEEXPR_SANDBOX"
+    INCLUDE_DIRECTORIES "${_usdgen_frontend_dir}")
 target_include_directories(usdGen PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>
     $<INSTALL_INTERFACE:include>)
@@ -156,7 +175,7 @@ target_include_directories(usdGen PUBLIC
 target_link_libraries(usdGen
     PUBLIC tf gf vt sdf TBB::tbb
     PRIVATE usdGenMath arch js plug ts ar work trace hio pxOsd
-            usdGen_seexpr)
+            usdGen_seexpr usdGenExprFrontend)
 # usdGen is a SHARED plugin-host library: its public API (UsdGenSession,
 # graph/tile types, ...) is consumed across the shared boundary by
 # libusdGenImaging.so, so it must keep default visibility. Third-party code
@@ -185,6 +204,7 @@ target_link_libraries(usdGenSchema
 # usdGenImaging (SHARED — scene-index plugins + adapters)
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE USDGEN_IMAGING_SOURCES libs/usdGenImaging/*.cpp)
+list(FILTER USDGEN_IMAGING_SOURCES EXCLUDE REGEX "usdGenGraphDescBuilderStage\\.cpp$")
 add_library(usdGenImaging SHARED ${USDGEN_IMAGING_SOURCES})
 target_include_directories(usdGenImaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenImaging>
@@ -216,6 +236,8 @@ target_link_libraries(usdGenTestUtils PUBLIC usdGen)
 file(GLOB_RECURSE USDGEN_TESTUTILS_HD_SOURCES
     testutils/usdGenTestUtilsHd/*.cpp)
 add_library(usdGenTestUtilsHd STATIC ${USDGEN_TESTUTILS_HD_SOURCES})
+target_sources(usdGenTestUtilsHd PRIVATE
+    libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilderStage.cpp)
 target_include_directories(usdGenTestUtilsHd PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/testutils")
 target_link_libraries(usdGenTestUtilsHd PUBLIC
@@ -286,7 +308,7 @@ file(COPY
     DESTINATION "${_usdgen_shader_resources}")
 
 # ---------------------------------------------------------------------------
-# Optional GPU noise (CUDA) — .omp/gpu-backend-feasibility.md / cuda-0-triage.md
+# CUDA foundations and legacy optional GPU noise
 # ---------------------------------------------------------------------------
 # SeExpr2::FBM<3,1,false,float> (noise.cpp:181-277) gains a CUDA kernel
 # (noise_gpu.cu, landed by a later step). Default OFF: without it no CUDA
@@ -294,11 +316,13 @@ file(COPY
 # GPU-less CI hosts.
 option(USE_GPU_NOISE
     "Build the CUDA noise kernel for usdGen noise ops (requires CUDA toolchain)" OFF)
-if(USE_GPU_NOISE)
+option(USDGEN_ENABLE_CUDA
+    "Build persistent CUDA buffers and RBF execution (requires CUDA toolkit)" OFF)
+if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
     if(NOT CMAKE_CUDA_COMPILER)
-        message(FATAL_ERROR "USE_GPU_NOISE=ON but no CUDA compiler was found; "
+        message(FATAL_ERROR "usdGen CUDA requested but no CUDA compiler was found; "
             "install a CUDA toolkit or set CMAKE_CUDA_COMPILER")
     endif()
     enable_language(CUDA)
@@ -338,10 +362,29 @@ if(USE_GPU_NOISE)
     message(STATUS "usdGen GPU noise: CUDA ${CUDAToolkit_VERSION}, arch sm_${USDGEN_CUDA_ARCH}")
     # The kernel lands at libs/usdGen/usdGen/ops/noise_gpu.cu (CUDA1b); wire
     # it into usdGen the moment the file exists (hook stays inert until then).
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/ops/noise_gpu.cu")
+    if(USE_GPU_NOISE)
         target_sources(usdGen PRIVATE libs/usdGen/usdGen/ops/noise_gpu.cu)
         # Enables the #ifdef USDGEN_USE_GPU_NOISE branch in noise.cpp (04 §2.9).
         target_compile_definitions(usdGen PRIVATE USDGEN_USE_GPU_NOISE)
+    endif()
+    if(USDGEN_ENABLE_CUDA)
+        add_library(usdGenGpu STATIC
+            libs/usdGen/usdGen/gpu/deviceBuffer.cu
+            libs/usdGen/usdGen/gpu/rbf.cu
+            libs/usdGen/usdGen/gpu/curveGeometry.cu
+            libs/usdGen/usdGen/gpu/curveSource.cu
+            libs/usdGen/usdGen/gpu/expressionContext.cu
+            libs/usdGen/usdGen/gpu/deformCurves.cu
+            libs/usdGen/usdGen/gpu/styleOps.cu
+            libs/usdGen/usdGen/gpu/expression.cu)
+        target_include_directories(usdGenGpu PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>)
+        target_link_libraries(usdGenGpu PUBLIC CUDA::cudart CUDA::cusolver)
+        target_compile_definitions(usdGen PRIVATE USDGEN_ENABLE_CUDA)
+        target_link_libraries(usdGen PRIVATE usdGenGpu)
+        set_target_properties(usdGenGpu PROPERTIES
+            POSITION_INDEPENDENT_CODE ON CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}")
     endif()
 endif()
 
@@ -359,6 +402,52 @@ endif()
 
 if(USDGEN_BUILD_TESTS)
 enable_testing()
+add_executable(testUsdGenDeviceGeneration tests/testUsdGenDeviceGeneration.cpp)
+target_link_libraries(testUsdGenDeviceGeneration PRIVATE usdGen)
+add_test(NAME testUsdGenDeviceGeneration COMMAND testUsdGenDeviceGeneration)
+set_tests_properties(testUsdGenDeviceGeneration PROPERTIES LABELS "T0;device;sessions")
+if(USDGEN_ENABLE_CUDA)
+    add_executable(testUsdGenCudaSession tests/testUsdGenCudaSession.cpp)
+    target_link_libraries(testUsdGenCudaSession PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaSession COMMAND testUsdGenCudaSession)
+    set_tests_properties(testUsdGenCudaSession PROPERTIES LABELS "T1;cuda;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaSourceInput tests/testUsdGenCudaSourceInput.cpp)
+    target_link_libraries(testUsdGenCudaSourceInput PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaSourceInput COMMAND testUsdGenCudaSourceInput)
+    set_tests_properties(testUsdGenCudaSourceInput PROPERTIES LABELS "T0;cuda;sources")
+    foreach(_cuda_test CurveSource ExpressionContext)
+        add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
+        target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu usdGen)
+        target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)
+        add_test(NAME testUsdGenCuda${_cuda_test} COMMAND testUsdGenCuda${_cuda_test})
+        set_tests_properties(testUsdGenCuda${_cuda_test} PROPERTIES
+            LABELS "T1;cuda" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    endforeach()
+    foreach(_cuda_test Rbf Deform)
+        add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
+        target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu)
+        # These CUDA oracles use assert for both execution and checks.
+        # Release's -DNDEBUG must never turn them into false-green no-ops.
+        target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)
+        add_test(NAME testUsdGenCuda${_cuda_test} COMMAND testUsdGenCuda${_cuda_test})
+        set_tests_properties(testUsdGenCuda${_cuda_test} PROPERTIES
+            LABELS "T1;cuda;rbf" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    endforeach()
+    add_executable(testUsdGenCudaStyle tests/testUsdGenCudaStyle.cu)
+    target_link_libraries(testUsdGenCudaStyle PRIVATE usdGenGpu)
+    add_test(NAME testUsdGenCudaStyle COMMAND testUsdGenCudaStyle)
+    set_tests_properties(testUsdGenCudaStyle PROPERTIES
+        LABELS "T1;cuda;operators" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaExpression tests/testUsdGenCudaExpression.cpp
+        tests/usdGenSeExprOracle.cpp)
+    set_source_files_properties(tests/usdGenSeExprOracle.cpp PROPERTIES
+        COMPILE_DEFINITIONS "SeExpr2=UsdGenSeExprFrontend;SeExprInternal2=UsdGenSeExprFrontendInternal"
+        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/seexprFrontend/SeExpr2")
+    target_link_libraries(testUsdGenCudaExpression PRIVATE usdGenGpu usdGen usdGenExprFrontend)
+    add_test(NAME testUsdGenCudaExpression COMMAND testUsdGenCudaExpression)
+    set_tests_properties(testUsdGenCudaExpression PROPERTIES
+        LABELS "T1;cuda;expressions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+endif()
 
 # M0: build-rule tests (gate B-1) — see cmake/CheckNoStage*.cmake
 set(USDGEN_FORBIDDEN_LIB_REGEX "^libusd_(usd|hd|hgi|glf|garch)")
@@ -654,6 +743,39 @@ set_tests_properties(testUsdGenHydraParity
     LABELS "T1;gate:SI-12"
     TIMEOUT 300
 )
+
+add_executable(testUsdGenHierarchy tests/testUsdGenHierarchy.cpp)
+target_link_libraries(testUsdGenHierarchy PRIVATE usdGenTestUtilsHd)
+add_test(NAME testUsdGenHierarchy COMMAND testUsdGenHierarchy)
+set_tests_properties(testUsdGenHierarchy PROPERTIES
+    ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;hierarchy" TIMEOUT 120)
+
+add_executable(testUsdGenExpressionTransport tests/testUsdGenExpressionTransport.cpp)
+target_link_libraries(testUsdGenExpressionTransport PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenExpressionTransport PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenExpressionTransport COMMAND testUsdGenExpressionTransport)
+set_tests_properties(testUsdGenExpressionTransport PROPERTIES
+    ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;expressions" TIMEOUT 120)
+
+add_executable(testUsdGenSessionIsolation tests/testUsdGenSessionIsolation.cpp)
+target_link_libraries(testUsdGenSessionIsolation PRIVATE usdGenImaging)
+add_test(NAME testUsdGenSessionIsolation COMMAND testUsdGenSessionIsolation)
+set_tests_properties(testUsdGenSessionIsolation PROPERTIES
+    LABELS "T1;sessions" TIMEOUT 120)
+
+foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend ExpressionIr)
+    add_executable(testUsdGen${_expr_test} tests/testUsdGen${_expr_test}.cpp)
+    target_link_libraries(testUsdGen${_expr_test} PRIVATE usdGen)
+    add_test(NAME testUsdGen${_expr_test} COMMAND testUsdGen${_expr_test})
+    set_tests_properties(testUsdGen${_expr_test} PROPERTIES
+        LABELS "T0;expressions" TIMEOUT 120)
+endforeach()
+add_test(NAME testUsdGenExpressionSchema
+    COMMAND ${CMAKE_COMMAND} -E env "GENBUILD=${CMAKE_CURRENT_BINARY_DIR}"
+        bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/run_expression_schema.sh")
+set_tests_properties(testUsdGenExpressionSchema PROPERTIES
+    LABELS "T1;expressions;schema" TIMEOUT 120)
 
 # Note: testUsdGenInvalidation already carries T1;gate:SI-2 (set at line ~446).
 # The SI-2 overlay extension (bare primvars locator, section 7) is appended

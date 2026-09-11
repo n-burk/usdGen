@@ -5,6 +5,7 @@
 #define USDGEN_GRAPH_DESC_H
 
 #include "usdGen/types.h"
+#include "usdGen/expressions/context.h"
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -29,6 +30,24 @@ struct UsdGenParamValue
     bool    animated = false;    // authored with a .spline / time samples
 };
 
+// Invalid is deliberately distinct from CpuReference: a present but
+// malformed/unknown backend request must fail closed instead of silently
+// selecting the legacy CPU implementation.  Keep the existing values of the
+// two established backends stable for descriptor compatibility.
+enum class UsdGenExecutionBackend : uint8_t {
+    CpuReference,
+    Cuda,
+    Invalid
+};
+
+struct UsdGenExpressionOutputDesc { TfToken name{"result"}; TfToken nativeType{"float"}; expr::ValueShape shape; };
+struct UsdGenExpressionDesc { SdfPath path; std::string source; std::vector<UsdGenExpressionOutputDesc> outputs; };
+struct UsdGenExpressionBinding {
+    SdfPath expression; TfToken output{"result"}; TfToken nativeType{"float"}; TfToken destination;
+    expr::ValueShape destinationShape; expr::Domain domain = expr::Domain::Groom;
+    VtValue literal;
+};
+
 /// S11 ramp encodings, already resolved by the adapter (02-schema.md §2.17).
 struct UsdGenRampDesc
 {
@@ -49,13 +68,14 @@ struct UsdGenNodeDesc
     float                        blend = 1.0f;
     TfToken                      space;        // auto | rest | deformed (auto == the type's Space(), R9)
     TfToken                      readPhase;    // base | preceding | final | @<absolute prim path>
-    SdfPathVector                inputs;       // usdGen:input targets, authored order
+    SdfPathVector                inputs;       // compiler-owned hierarchy dependency edges
     SdfPathVector                references;   // guide sets, clump centres, card roots
     SdfPathVector                curves;       // usdGen:guides / usdGen:curves / usdGen:frozen:curves
                                                //   -> indices into UsdGenGraphDesc::curveSets
     SdfPathVector                surfaces;     // usdGen:surface targets (Mesh or GeomSubset, ADR R15)
     SdfPathVector                maps;         // usdGen:mask:source, per-parameter map targets
     std::vector<UsdGenParamValue> params;      // EVERY mapped locator of this prim (S14 pull-all)
+    std::vector<UsdGenExpressionBinding> expressionBindings;
     std::vector<UsdGenRampDesc>   ramps;
 };
 
@@ -68,7 +88,14 @@ struct UsdGenCurveSetDesc
     TfToken         curveRole;         // primvars:usdGen:role: hair | guide (C3 marker)
     VtIntArray      curveVertexCounts;
     VtVec3fArray    points, rest;      // rest == primvars:rest; may share points' buffer
+    // Compatibility builders may lack a Default-time C3 snapshot. CUDA
+    // admission must not mistake a current-frame fallback for bound rest.
+    bool            restFromCurrentPoints = false;
     VtFloatArray    widths;
+    TfToken         type{"cubic"};
+    TfToken         basis{"bspline"};
+    TfToken         wrap{"pinned"};
+    TfToken         widthsInterpolation{"vertex"};
     VtIntArray      skinPrim;          // primvars:skinprim (uniform int)
     VtArray<uint64_t> curveId;         // primvars:usdGen:curveId (uniform uint64[], R12)
     VtVec2fArray    skinPrimUv;        // primvars:skinprimuv (uniform texCoord2f, not "st")
@@ -128,11 +155,12 @@ struct UsdGenLookDesc
 struct UsdGenGraphDesc
 {
     SdfPath                        description;   // the UsdGenDescription prim
-    SdfPath                        terminal;      // usdGen:terminal's single target
-    std::vector<UsdGenNodeDesc>    nodes;         // namespace order, for the Kahn tie-break
+    SdfPath                        terminal;      // hierarchy-derived final operator
+    std::vector<UsdGenNodeDesc>    nodes;         // composed execution order from the builder
     std::vector<UsdGenCurveSetDesc> curveSets;    // every C3 BasisCurves the graph names (R23)
     std::vector<UsdGenSurfaceDesc> surfaces;
     std::vector<UsdGenMapDesc>     maps;
+    std::vector<UsdGenExpressionDesc> expressions;
     UsdGenLookDesc                 look;
     GfMatrix4d                     xformMatrix;    // description world matrix (post-flattening, S4)
     TfToken                        purpose;        // inherited by hand to every tile (C2)
@@ -140,6 +168,7 @@ struct UsdGenGraphDesc
     SdfPath                        materialPath;   // the description's bound Material (C2)
     TfToken                        pickTarget{"description"};  // usdGen:pickTarget (C2 primOrigin)
     float    densityScale = 1.0f, renderDensityScale = 1.0f;
+    float    defaultWidth = 0.01f;                 // usdGen:width:default
     int      tileTarget = 64;                      // uniform int usdGen:tileTarget
     TfToken  curveBasis{"bspline"};                // usdGen:curve:basis (C2)
     TfToken  motionMode;                           // single | velocities | samples
@@ -147,6 +176,8 @@ struct UsdGenGraphDesc
     bool     forwardSurfaceSamples = false;
     int      schemaVersion = 1;
     double   time = 0.0;
+    UsdGenExecutionBackend executionBackend = UsdGenExecutionBackend::CpuReference;
+    std::vector<std::string> validationErrors;
 };
 
 }  // namespace usdGen

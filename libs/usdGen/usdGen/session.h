@@ -56,6 +56,9 @@ public:
     /// next commit recompiles. The session copies the desc (03 §2.2).
     void SetGraphDesc(UsdGenGraphDesc const &desc);
     void SetContext(UsdGenContext context);
+    /// Explicit consumer capability. Stock Hydra publication has no CUDA
+    /// interop bridge, so it leaves this disabled. Device tools may opt in.
+    void SetDevicePublicationEnabled(bool enabled);
     /// OR-accumulate routed dirties; thread-safe (lock-free fast path when clean).
     void AccumulateDirty(UsdGenPendingDirty &&pending);
     bool NeedsCommit() const noexcept;
@@ -84,6 +87,9 @@ public:
 
     // ---- diagnostics -----------------------------------------------------------------
     UsdGenStats const &Stats() const noexcept { return _stats; }
+    /// Commit-thread diagnostic snapshot, including rejected compiles/runs.
+    /// Like LastReport, consume after Commit under the caller's serialization.
+    UsdGenDiagnostics const &LastDiagnostics() const noexcept { return _lastDiagnostics; }
     std::optional<UsdGenNodeStats> NodeStats(UsdGenNodeId id) const;
 
 private:
@@ -95,6 +101,7 @@ private:
 
     UsdGenCompiler _compiler;
     UsdGenDirtyReport _lastReport;
+    UsdGenDiagnostics _lastDiagnostics;
     UsdGenGraphDesc _desc;          // copied by SetGraphDesc (03 §2.2)
     UsdGenGraph _graph;
     UsdGenScheduler _scheduler;
@@ -102,6 +109,7 @@ private:
     UsdGenStats _stats;
     UsdGenContext _context = UsdGenContext::Interactive;
     bool _densityDrag = false;
+    bool _devicePublicationEnabled = false;
     // Last commit's per-node run stats (03 §9.2), keyed by node id.
     std::unordered_map<UsdGenNodeId, UsdGenNodeRunStats> _lastNodeStats;
     // Gathers one tile's publication from the terminal buffer (03 §6.3).

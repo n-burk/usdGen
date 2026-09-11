@@ -67,6 +67,15 @@ std::vector<TfToken> UsdGenOpRegistry::KnownTypes() const
     return types;
 }
 
+bool UsdGenOpRegistry::HasKernel(TfToken const &type, int algorithmVersion) const
+{
+    if (algorithmVersion < 0) return false;
+    for (auto const& entry : _entries)
+        if (entry.type == type && entry.version >= 0 && entry.factory &&
+            (algorithmVersion == 0 || entry.version == algorithmVersion)) return true;
+    return false;
+}
+
 std::unique_ptr<UsdGenOp> CreateScatterOp() { return std::make_unique<UsdGenScatterOp>(); }
 std::unique_ptr<UsdGenOp> CreateGrowOp()    { return std::make_unique<UsdGenGrowOp>(); }
 std::unique_ptr<UsdGenOp> CreateNoiseOp()   { return std::make_unique<UsdGenNoiseOp>(); }

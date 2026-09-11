@@ -2,9 +2,9 @@
 // 03-execution-engine.md §2.5, the S14 pull-everything rule).
 //
 // Builds the pure-value usdGen::UsdGenGraphDesc from Hydra data sources
-// (production path, 13 §7 V2-7–V2-11) or, fenced to T0/offline/tests, from
-// a UsdStage — so the engine never touches a UsdStage (S8; link-enforced
-// by B-1, staging-fenced by B-2).
+// (production path, 13 §7 V2-7–V2-11).  The offline UsdStage oracle is
+// deliberately declared in usdGenGraphDescBuilderStage.h: keeping this
+// production interface stage-free is the B-2 staging fence.
 #ifndef USDGEN_IMAGING_GRAPH_DESC_BUILDER_H
 #define USDGEN_IMAGING_GRAPH_DESC_BUILDER_H
 
@@ -13,7 +13,6 @@
 #include "pxr/pxr.h"
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/usd/sdf/path.h"
-#include "pxr/usd/usd/stage.h"  // stage path only (BuildGraphDescFromStage)
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -26,11 +25,10 @@ struct UsdGenGraphDescBuildOptions
 };
 
 /// Walk one UsdGenDescription:
-///  - usdGen:terminal resolves the single terminal operator (more than one
-///    target is a compile error naming both paths, 02 §2.3);
-///  - operator prims are discovered by following usdGen:input edges in
-///    reverse from the terminal; namespace order is preserved for the
-///    compiler's Kahn tie-break (S26);
+///  - the Description adapter supplies usdGen:operatorOrder, a composed
+///    reverse-sibling post-order aggregate (children before their parent;
+///    lower sibling before upper sibling).  It is the sole source of stack
+///    topology: input edges and terminal are derived, never authored;
 ///  - EVERY mapped usdGen:* property of every node is pulled at least once
 ///    per topology generation (S14) so time-varying and mode-irrelevant
 ///    parameters still register dependencies;
@@ -53,21 +51,8 @@ struct UsdGenGraphDescBuildOptions
 /// with S14 pull-all preserved (every mapped locator pulled at least once
 /// per topology generation so dependencies register; stock subtrees sharing
 /// the overlaid root are pruned from the sweep). Sibling of
-/// BuildGraphDescFromStage below; SI-12 asserts both builders agree exactly
-/// before the stage path is unplugged.
 usdGen::UsdGenGraphDesc BuildGraphDescFromHydra(
     HdSceneIndexBase &input,
-    SdfPath const &descriptionPath,
-    UsdGenGraphDescBuildOptions const &options = UsdGenGraphDescBuildOptions());
-
-/// Stage-sourced staging, fenced to T0/offline/tests (unit tests, fixture
-/// authoring) per V2-11; the production path is BuildGraphDescFromHydra.
-/// Carries the V2-9a absence semantics by hand: Hydra data sources carry
-/// only authored opinions, so stage reads whose fallback differs from the
-/// desired absent-value must gate on HasAuthoredValueOpinion() (notably
-/// `purpose`, whose "default" fallback is render-tag poison).
-usdGen::UsdGenGraphDesc BuildGraphDescFromStage(
-    UsdStageRefPtr const &stage,
     SdfPath const &descriptionPath,
     UsdGenGraphDescBuildOptions const &options = UsdGenGraphDescBuildOptions());
 

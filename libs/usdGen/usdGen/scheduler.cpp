@@ -557,6 +557,10 @@ UsdGenRunResult UsdGenScheduler::Run(
 
         for (auto const &e : nodeDiag.errors) aggregated.Error(e);
         for (auto const &w : nodeDiag.warnings) aggregated.Warn(w);
+        if (aggregated.HasErrors()) {
+            result.diagnostics = std::move(aggregated);
+            return result;
+        }
         nodeDiag = UsdGenDiagnostics();
 
         // Re-capture dirties every chunk of this node AND the same chunks of

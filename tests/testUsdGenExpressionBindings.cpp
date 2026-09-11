@@ -1,0 +1,90 @@
+#include "usdGen/compiler.h"
+#include "usdGen/expressions/context.h"
+#include <cstdio>
+#include <algorithm>
+#include <string>
+
+using namespace usdGen;
+static int failures = 0;
+static void Check(bool v, char const *s) { if (!v) { ++failures; std::printf("FAIL: %s\n",s); } else std::printf("ok: %s\n",s); }
+static expr::ValueShape FloatShape(uint32_t n=1) { return {expr::ScalarType::Float32,n,1,1,1,false}; }
+
+int main()
+{
+    UsdGenCompiler compiler; UsdGenGraph graph;
+    UsdGenGraphDesc baseline;
+    baseline.description = SdfPath("/existing");
+    baseline.defaultWidth = 0.025f;
+    UsdGenNodeDesc baselineNode;
+    baselineNode.path = SdfPath("/existing/width");
+    baselineNode.type = TfToken("UsdGenWidth");
+    baseline.nodes.push_back(baselineNode);
+    baseline.terminal = baselineNode.path;
+    baseline.expressions.push_back({SdfPath("/existing/unusedExpression"), "4*2",
+        {{TfToken("result"),TfToken("float"),FloatShape()}}});
+    Check(compiler.Compile(baseline, &graph).ok, "seed a real existing graph");
+    Check(graph.Desc().expressions.size() == 1 &&
+          graph.Desc().expressions[0].source == "4*2", "compiler retains expression program descriptors");
+    Check(graph.Desc().defaultWidth == baseline.defaultWidth,
+          "compiler retains description width fallback");
+    if (failures) return failures;
+    auto preservesGraph = [&]() {
+        return graph.NodeCount() == 1 &&
+            graph.Desc().description == baseline.description &&
+            graph.Desc().terminal == baseline.terminal &&
+            graph.Node(0).desc && graph.Node(0).desc->path == baselineNode.path;
+    };
+    UsdGenGraphDesc valid;
+    valid.description = SdfPath("/groom");
+    valid.expressions.push_back({SdfPath("/groom/Expressions/width"), "$value", {{TfToken("result"), TfToken("float"), FloatShape()}}});
+    UsdGenNodeDesc node; node.path=SdfPath("/groom/width"); node.type=TfToken("UsdGenWidth");
+    node.expressionBindings.push_back({SdfPath("/groom/Expressions/width"), TfToken("result"), TfToken("float"), TfToken("width"), FloatShape(), expr::Domain::Point, VtValue(0.1f)});
+    valid.nodes.push_back(node);
+    auto first = compiler.Compile(valid,&graph);
+    Check(!first.ok && !first.errors.empty(), "connected binding fails closed without evaluator");
+    Check(preservesGraph(), "unsupported expression leaves existing graph contents intact");
+    auto unknown = baseline;
+    unknown.nodes[0].type = TfToken("UsdGenUnregisteredTestOperator");
+    Check(!compiler.Compile(unknown,&graph).ok && preservesGraph(),
+          "failed fresh compilation leaves graph contents intact");
+    Check(!compiler.Recompile(unknown,&graph).ok && preservesGraph(),
+          "failed incremental compilation leaves graph contents intact");
+    auto invalidBackend = baseline;
+    invalidBackend.executionBackend = static_cast<UsdGenExecutionBackend>(255);
+    Check(!compiler.Compile(invalidBackend,&graph).ok && preservesGraph(),
+          "invalid backend cannot become CPU reference execution");
+    auto invalidTransport = baseline;
+    invalidTransport.validationErrors = {"malformed authored enabled"};
+    Check(!compiler.Compile(invalidTransport,&graph).ok && preservesGraph(),
+          "typed transport errors cannot become default parameters");
+
+    auto expectFail = [&](UsdGenGraphDesc d, char const *label, char const *reason) {
+        UsdGenCompileResult r=compiler.Compile(d,&graph);
+        bool specific = std::any_of(r.errors.begin(), r.errors.end(),
+            [&](std::string const &message) { return message.find(reason) != std::string::npos; });
+        Check(!r.ok && specific, label);
+        Check(preservesGraph(), "failed binding validation preserves existing graph contents");
+    };
+    auto missing = valid; missing.nodes[0].expressionBindings[0].expression=SdfPath("/missing");
+    expectFail(missing,"missing expression fails closed", "references missing expression");
+    auto shape = valid; shape.nodes[0].expressionBindings[0].destinationShape=FloatShape(3);
+    expectFail(shape,"shape mismatch fails closed", "type/shape");
+    auto duplicate = valid; duplicate.nodes[0].expressionBindings.push_back(duplicate.nodes[0].expressionBindings[0]);
+    expectFail(duplicate,"duplicate consumer fails closed", "duplicate expression consumer");
+    auto stringLike = valid; stringLike.expressions[0].outputs[0].shape.scalar=expr::ScalarType::Invalid;
+    expectFail(stringLike,"string-like output fails closed", "type/shape");
+    auto cuda = valid; cuda.executionBackend=UsdGenExecutionBackend::Cuda;
+    expectFail(cuda,"CUDA backend fails closed without runtime evaluator", "CUDA");
+    auto badDomain = valid; badDomain.nodes[0].expressionBindings[0].domain=expr::Domain::All;
+    expectFail(badDomain,"invalid combined domain fails closed", "invalid expression evaluation domain");
+    for (char const *control : {"enabled", "seed", "segments", "cvCount", "algorithmVersion"}) {
+        for (char const *prefix : {"", "usdGen:"}) {
+            auto topology = valid;
+            topology.nodes[0].expressionBindings[0].destination = TfToken(std::string(prefix) + control);
+            expectFail(topology, "native and local control names require groom evaluation",
+                       "topology/control expression must evaluate at groom domain");
+        }
+    }
+    std::printf("testUsdGenExpressionBindings: %s\n", failures ? "FAILED" : "PASS");
+    return failures ? 1 : 0;
+}

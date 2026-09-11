@@ -13,6 +13,7 @@
 // Fixture dir arrives as USDGEN_TEST_FIXTURE_DIR (absolute source path).
 
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
+#include "usdGenImaging/usdGenGraphDescBuilderStage.h"
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -114,6 +115,11 @@ void CheckCurveSet(UsdGenCurveSetDesc const &a, UsdGenCurveSetDesc const &b,
     CheckEq(a.points, b.points, ctx + " points");
     CheckEq(a.rest, b.rest, ctx + " rest");
     CheckEq(a.widths, b.widths, ctx + " widths");
+    CheckEq(a.type, b.type, ctx + " type");
+    CheckEq(a.basis, b.basis, ctx + " basis");
+    CheckEq(a.wrap, b.wrap, ctx + " wrap");
+    CheckEq(a.widthsInterpolation, b.widthsInterpolation,
+            ctx + " widthsInterpolation");
     CheckEq(a.skinPrim, b.skinPrim, ctx + " skinPrim");
     CheckEq(a.curveId, b.curveId, ctx + " curveId");
     CheckEq(a.skinPrimUv, b.skinPrimUv, ctx + " skinPrimUv");
@@ -201,6 +207,7 @@ int CheckDesc(UsdGenGraphDesc const &a, UsdGenGraphDesc const &b,
     CheckEq(a.look.valueJitter, b.look.valueJitter, ctx + "look.valueJitter");
     CheckEq(a.look.jitterSeed, b.look.jitterSeed, ctx + "look.jitterSeed");
     CheckEq(a.densityScale, b.densityScale, ctx + "densityScale");
+    CheckEq(a.defaultWidth, b.defaultWidth, ctx + "defaultWidth");
     CheckEq(a.renderDensityScale, b.renderDensityScale,
             ctx + "renderDensityScale");
     CheckEq(a.tileTarget, b.tileTarget, ctx + "tileTarget");

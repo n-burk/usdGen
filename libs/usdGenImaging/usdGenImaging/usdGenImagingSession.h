@@ -1,13 +1,10 @@
 // usdGen imaging — session key + session + process-global session store
 // (06-imaging.md §3.7; ADR §4.5 "sessions across chains").
 //
-// Session key priority (ADR §4.5): the WEAK UsdStage object is PRIMARY;
-// usdGen:sessionId (uniform string on UsdGenGroom) is the FALLBACK, used only
-// when no stage is known (usdrecord / hdPrman / batch, where the scene index
-// has no stage). When both are available the stage wins — two stages
-// authoring the same sessionId must NOT share a session. When neither is
-// present, the key degrades to the groom root path within the render
-// instance, with one USDGEN_COMMIT debug line (06 §3.7/§9).
+// Stage-free key (plan 13 §7): a nonempty usdGen:sessionId explicitly
+// shares a groom session across renderer chains. Without one, the groom
+// path is scoped to its render instance; unrelated stages never collide
+// merely because they use the same path. No stage registry is consulted.
 //
 // The store holds the session alive (strong refs); scene indices hold weak
 // handles and re-attach on construction (S15). A renderer switch therefore
@@ -23,7 +20,6 @@
 #include "pxr/base/tf/refBase.h"
 #include "pxr/base/tf/weakPtr.h"
 #include "pxr/usd/sdf/path.h"
-#include "pxr/usd/usd/stage.h"
 
 #include <atomic>
 #include <cstdint>
@@ -40,26 +36,14 @@ namespace usdGenImaging {
 
 struct UsdGenSessionKey
 {
-    UsdStageWeakPtr stage;      // primary key (stage OBJECT, never its root layer)
-    std::string     sessionId;  // usdGen:sessionId — fallback only
+    std::string     sessionId;  // explicit cross-renderer sharing identity
     SdfPath         groomRoot;  // the UsdGenGroom prim path this session serves
+    uint64_t        renderInstanceId = 0; // used only without sessionId
 
-    UsdStageRefPtr ResolveStage() const
-    {
-        return TfCreateRefPtrFromProtectedWeakPtr(stage);
-    }
     bool operator==(UsdGenSessionKey const &rhs) const
     {
-        // 26.08: TfRefPtr has no .get(); operator->() yields the raw
-        // pointer — but FATALs on a NULL ref, so guard the expired-stage
-        // (no SetStage yet / stage dead) case explicitly.
-        UsdStageRefPtr a = ResolveStage();
-        UsdStageRefPtr b = rhs.ResolveStage();
-        const UsdStage *pa = a ? a.operator->() : nullptr;
-        const UsdStage *pb = b ? b.operator->() : nullptr;
-        return pa == pb &&
-               sessionId == rhs.sessionId &&
-               groomRoot == rhs.groomRoot;
+        return sessionId == rhs.sessionId && groomRoot == rhs.groomRoot &&
+               (!sessionId.empty() || renderInstanceId == rhs.renderInstanceId);
     }
 };
 
@@ -67,9 +51,8 @@ struct UsdGenSessionKeyHash
 {
     std::size_t operator()(UsdGenSessionKey const &k) const
     {
-        UsdStageRefPtr s = k.ResolveStage();
-        const UsdStage *sp = s ? s.operator->() : nullptr;
-        const std::size_t h0 = std::hash<const void *>()(sp);
+        const std::size_t h0 = k.sessionId.empty()
+            ? std::hash<uint64_t>()(k.renderInstanceId) : 0;
         const std::size_t h1 = std::hash<std::string>()(k.sessionId);
         const std::size_t h2 = std::hash<std::string>()(k.groomRoot.GetText());
         return h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 << 1 | h2 >> 31);
@@ -105,6 +88,11 @@ public:
     /// engine's, so an app-driven commit reaches the app through the
     /// republish callbacks.
     void Commit(usdGen::UsdGenCommitReason reason);
+    /// Install a freshly pulled descriptor and evaluate it under one lock.
+    /// Unlike separate StageDesc/Commit calls, no store-driven commit can
+    /// consume a different descriptor between those operations.
+    void StageAndCommit(usdGen::UsdGenGraphDesc const &desc,
+                        usdGen::UsdGenCommitReason reason);
 
     /// 06 §3.9 rule (b): once an external SetTime has driven this session,
     /// frame dirties never trigger commits (the app owns time). Set by the
@@ -139,11 +127,8 @@ public:
         return _needsDesc.exchange(false);
     }
 
-    /// Stage a built desc through the session (Review 2): the SetGraphDesc
-    /// runs serialized with the engine Commit below (same commit-mutex
-    /// path), so a concurrent app-thread commit cannot interleave between
-    /// staging and commit. Called by the owning index after
-    /// ConsumeNeedsDesc, before Commit — all unlocked from _stateMutex.
+    /// Install a descriptor without committing (offline/test clients).
+    /// Production staging uses StageAndCommit for an atomic pair.
     void StageDesc(usdGen::UsdGenGraphDesc const &desc);
 
     /// Monotonic publication generation (UsdGenImaging_GetGeneration).
@@ -163,9 +148,9 @@ public:
     void UnregisterRepublishCallback(int token);
     UsdGenSessionKey        _key;
     std::shared_ptr<usdGen::UsdGenSession> _engine;
-    double                    _frame = 0.0;
-    usdGen::UsdGenContext     _context = usdGen::UsdGenContext::Interactive;
-    int64_t                   _generation = -1;
+    std::atomic<double>       _frame{0.0};
+    std::atomic<usdGen::UsdGenContext> _context{usdGen::UsdGenContext::Interactive};
+    std::atomic<int64_t>      _generation{-1};
     std::atomic<int>          _attached{0};
     std::atomic<bool>         _hasAppDriver{false};
     std::atomic<bool>         _needsDesc{false};
@@ -180,6 +165,10 @@ public:
     std::vector<std::pair<int, std::function<void(CommitPayload const &)>>>
         _callbacks;
     int _nextCallbackToken = 0;
+
+private:
+    void _Commit(usdGen::UsdGenCommitReason reason,
+                 usdGen::UsdGenGraphDesc const *desc);
 };
 
 using UsdGenImagingSessionRefPtr = TfRefPtr<UsdGenImagingSession>;
@@ -215,15 +204,6 @@ public:
     /// commit re-pulls the desc, whose maps carry the bumped generation)
     /// and warns once.
     void ReloadMaps();
-
-    /// Weak-stage registry for session keys (06 §3.7). The usdprimvar
-    /// adapter for UsdGenGroom calls SetStage while the stage index builds
-    /// its data sources — the only place a scene index with no C ABI stage
-    /// handle can still learn the stage by the time Attach computes its
-    /// key. Entries are weak; a dead stage falls back to sessionId.
-    static void SetStage(SdfPath const &groomRoot,
-                         UsdStageRefPtr const &stage);
-    static UsdStageWeakPtr FindGroomStage(SdfPath const &groomRoot);
 
     /// Snapshot of the live sessions (strong refs), for iteration without
     /// holding the store lock across engine calls.

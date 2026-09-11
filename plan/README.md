@@ -1,7 +1,10 @@
-# usdGen — plan v2
+# usdGen — implementation plan
 
 Date: 2026-09-05 v1; overlay 2026-09-11. Status: plan v2 (accepted: v1 history
-in `00`–`12` plus binding overlay `13-codebase-alignment.md`).
+in `00`–`12` plus overlay `13-codebase-alignment.md`). The subsequent user
+decisions in **[14-hierarchy-cuda-implementation.md](14-hierarchy-cuda-implementation.md)**
+supersede conflicting explicit-edge, CPU-expression, and GPU-deferred claims
+below. Historical measured numbers do not prove the new CUDA implementation.
 
 This directory is the complete plan for **usdGen**, an XGen-like hair/fur grooming and instancing
 plugin for OpenUSD 26.08 and Hydra 2.0. usdGen is built as a sibling CMake project of usdRig, runs
@@ -80,6 +83,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
 | Measured numbers `EV-001…EV-092`, verified `file:line` facts, corrections K1–K25 | `appendix-A-evidence-ledger.md` |
 | Prototype directories and what each is carried into | `appendix-B-prototype-inventory.md` |
 | Plan-vs-codebase alignment (ground truth, kernel-status table, milestone re-baseline, debt register) | `13-codebase-alignment.md` |
+| Current user decisions, CUDA/hierarchy implementation work and evidence limits | `14-hierarchy-cuda-implementation.md` |
 
 ## 4. Index
 

@@ -29,6 +29,21 @@ namespace {
 
 int g_failures = 0;
 
+class FailingCaptureOp final : public UsdGenOp {
+public:
+    TfToken Type() const override { return TfToken("UsdGenFailingCaptureTest"); }
+    TfSpan<const TfToken> TopologyParameters() const override { return {}; }
+    TfSpan<const TfToken> ValueParameters() const override { return {}; }
+    bool Bind(UsdGenParamView const&, UsdGenDiagnostics*) override { return true; }
+    UsdGenEpoch CaptureDigest(UsdGenCaptureContext const&) const override { return {1,1}; }
+    bool Capture(UsdGenCaptureContext const&, UsdGenCurveBuffer const&,
+                 UsdGenCapture*, UsdGenDiagnostics* diagnostics) override {
+        diagnostics->Error("deliberate execution failure for publication regression");
+        return false;
+    }
+    void Evaluate(UsdGenEvalContext const&, UsdGenCapture const&, UsdGenChunkView*) const override {}
+};
+
 void Check(bool ok, std::string const &what)
 {
     if (!ok) {
@@ -239,6 +254,42 @@ int main()
     // Verify graph state after re-run
     Check(!graph.AnyDirty() || graph.NodeCount() > 0,
           "graph state after re-run checked");
+
+    // Failed compilation and execution retain an actual nonempty generation,
+    // including on the next trigger without restaging the rejected descriptor.
+    UsdGenSession failureSession(2);
+    failureSession.SetGraphDesc(desc);
+    auto previous = failureSession.Commit(1, UsdGenCommitReason::SetTime);
+    Check(previous && !previous->tiles.empty(), "failure regression seeds nonempty publication");
+    auto rejected = desc;
+    rejected.nodes.back().type = TfToken("UsdGenMissingKernelTest");
+    failureSession.SetGraphDesc(rejected);
+    Check(failureSession.Commit(2, UsdGenCommitReason::SetTime) == previous,
+          "failed compilation preserves publication");
+    Check(failureSession.LastDiagnostics().HasErrors(), "compile diagnostics remain observable");
+    Check(failureSession.Commit(3, UsdGenCommitReason::SetTime) == previous,
+          "rejected descriptor stays structural-dirty on retry");
+
+    UsdGenOpRegistry::Get().Register(TfToken("UsdGenFailingCaptureTest"), 0,
+        [] { return std::make_unique<FailingCaptureOp>(); });
+    rejected = desc;
+    UsdGenNodeDesc failing;
+    failing.path = SdfPath("/groom/failing");
+    failing.type = TfToken("UsdGenFailingCaptureTest");
+    failing.inputs = {desc.terminal};
+    rejected.nodes.push_back(failing);
+    rejected.terminal = failing.path;
+    failureSession.SetGraphDesc(rejected);
+    Check(failureSession.Commit(4, UsdGenCommitReason::SetTime) == previous,
+          "execution diagnostics block partially computed publication");
+    Check(failureSession.LastDiagnostics().HasErrors(), "execution diagnostics remain observable");
+    Check(failureSession.Commit(5, UsdGenCommitReason::SetTime) == previous,
+          "execution failure cannot publish on retry");
+    failureSession.SetGraphDesc(desc);
+    auto recovered = failureSession.Commit(6, UsdGenCommitReason::SetTime);
+    Check(previous && recovered && recovered->id == previous->id + 1 && recovered->frame == 6,
+          "recovery publishes exactly one new generation after failed attempts");
+    Check(!failureSession.LastDiagnostics().HasErrors(), "successful retry clears stale errors");
 
     std::printf(
         "testUsdGenSessions: %s (SI-10: two indices one session)\n",

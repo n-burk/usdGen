@@ -1,6 +1,6 @@
 // GENERATED from thirdparty/seexpr/SeExpr2/NoiseTables.h NOISE_TABLES<3>::g — do not edit
 #pragma once
-__constant__ double G[514][3] = {
+static __constant__ double G[514][3] = {
   {0x1.686a6e32e3822p-1, 0x1.57a93af74cd31p-1, 0x1.dbad3a604e1e7p-3},
   {0x1.f47496aad1d04p-3, 0x1.63419e30014f9p-1, -0x1.5ad1aeb3dd11cp-1},
   {-0x1.53608d08919fp-2, 0x1.b26223e186983p-1, -0x1.a6a98244e93e2p-2},

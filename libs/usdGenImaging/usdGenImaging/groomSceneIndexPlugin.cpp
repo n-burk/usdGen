@@ -11,15 +11,12 @@
 
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
 #include "pxr/imaging/hd/sceneGlobalsSchema.h"
+#include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
-#include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
-#include "pxr/usdImaging/usdImaging/sceneIndexCreateArgsSchema.h"
-#include "pxr/usdImaging/usdImaging/usdPrimInfoSchema.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/tf/token.h"
-#include "pxr/usd/usd/primRange.h"
 #include "usdGenImaging/usdGenEnable.h"
 #include <algorithm>
 #include <atomic>
@@ -62,9 +59,7 @@ UsdGenGroomSceneIndexPlugin::_AppendSceneIndex(
     TF_UNUSED(inputArgs);
     // M0: pass-through node so the chain position is observable. M1 wraps the
     // input in the real UsdGenGroomSceneIndex (evaluator + tile publisher).
-    // Stage resolution lives in the groom prim adapter (SetStage at data
-    // source build, 06 §3.7) with the registry as _AdoptGroom's fallback;
-    // create-args carry no stage on the GL-engine path (probe-verified).
+    // All staging is sourced from the post-deformation Hydra input.
     return UsdGenGroomSceneIndex::New(inputScene);
 }
 bool
@@ -112,10 +107,15 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(
     int renderInstanceId)
     : HdSingleInputFilteringSceneIndexBase(inputScene)
     , _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(inputScene))
-    , _renderInstanceId(renderInstanceId)
+    , _renderInstanceId(static_cast<uint32_t>(renderInstanceId))
     , _lastGlobalFrame(0.0)
     , _haveGlobalFrame(false)
 {
+    // Explicit host identities occupy the low 32 bits. Unspecified
+    // identities are unique for the index lifetime and never reuse a raw
+    // scene/stage address (two stages may author the same groom path).
+    static std::atomic<uint64_t> nextInstance{uint64_t(1) << 32};
+    if (renderInstanceId == 0) _renderInstanceId = nextInstance.fetch_add(1);
     _populated.clear();
     _frameLocators.insert(HdSceneGlobalsSchema::GetCurrentFrameLocator());
     UsdGenImagingTestHook::_RegisterIndex(this);
@@ -209,10 +209,11 @@ TfToken
 _UsdTypeName(HdSceneIndexPrim const &prim)
 {
     if (!prim.dataSource) return TfToken();
-    UsdImagingUsdPrimInfoSchema info =
-        UsdImagingUsdPrimInfoSchema::GetFromParent(prim.dataSource);
-    if (!info) return TfToken();
-    HdTokenDataSourceHandle typeName = info.GetTypeName();
+    // Read the transported metadata as Hydra data, just like the graph
+    // builder; no UsdImaging schema wrapper or stage API is needed here.
+    HdTokenDataSourceHandle typeName = HdTokenDataSource::Cast(
+        HdContainerDataSource::Get(prim.dataSource,
+            HdDataSourceLocator(TfToken("__usdPrimInfo"), TfToken("typeName"))));
     if (!typeName) return TfToken();
     VtValue v = typeName->GetValue(0);
     if (!v.IsHolding<TfToken>()) return TfToken();
@@ -234,41 +235,6 @@ _IsGroomRootPrim(HdSceneIndexPrim const &prim)
     return t == TfToken("UsdGenGroom") || t == TfToken("UsdGenDescription");
 }
 }  // namespace (groom-root helpers)
-// Stage resolution for desc staging (S8: the engine never sees a stage, so
-// the owning index resolves it). Chain walk wins precedence over the
-// weak-stage registry fallback: UsdImagingStageSceneIndex::_stage is
-// private (no GetStage in 26.08), so the walk finds the stage-scene node
-// and reads the stage off any UsdPrim it serves (prim.GetStage() is the
-// owning stage; object.h). Registry fallback covers indices whose chain
-// has no stage node (usdrecord/batch). usdGen:sessionId stays
-// hardcoded-empty (M1 stub debt).
-UsdStageRefPtr
-_ResolveStage(HdSceneIndexBaseRefPtr const &input, SdfPath const &anchor)
-{
-    // The stage rides the chain in the renderer create args
-    // (usdImagingSceneIndexCreateArgs/stage, sceneIndexCreateArgsSchema.h):
-    // every filtering node forwards its input args, so read the args off
-    // the groom index's own input. Fallback is the weak-stage registry.
-    TF_UNUSED(anchor);
-    std::vector<HdSceneIndexBaseRefPtr> frontier;
-    if (input) frontier.push_back(input);
-    for (size_t i = 0; i < frontier.size(); ++i) {
-        HdSceneIndexBaseRefPtr si = frontier[i];
-        if (!si) continue;
-        HdSceneIndexBase *raw = si.operator->();
-        if (HdFilteringSceneIndexBase const *filter =
-                dynamic_cast<HdFilteringSceneIndexBase const *>(raw)) {
-            for (auto const &in : filter->GetInputScenes()) {
-                if (in) frontier.push_back(in);
-            }
-        }
-        // Non-filtering nodes (the stage scene index itself) carry no
-        // input args accessor — the create-args read happens at _Append
-        // time (see _AppendSceneIndex), not here.
-        (void)raw;
-    }
-    return UsdStageRefPtr();
-}
 void
 UsdGenGroomSceneIndex::_ScanInputForGrooms() const
 {
@@ -308,14 +274,14 @@ UsdGenGroomSceneIndex::_AdoptGroom(SdfPath const &groomRoot) const
     groom->groomRoot = groomRoot;
     groom->description = groomRoot;
     groom->key.groomRoot = groomRoot;
-    groom->key.sessionId = std::string();
-    // Chain walk wins precedence; registry is the fallback (usdrecord/batch
-    // chains expose no stage node). Either way the key carries a live stage
-    // so _CommitNow can BuildGraphDesc/SetGraphDesc before committing.
-    groom->key.stage = _ResolveStage(input, groomRoot);
-    if (!groom->key.stage) {
-        groom->key.stage =
-            ::usdGenImaging::UsdGenSessionStore::FindGroomStage(groomRoot);
+    groom->key.renderInstanceId = self->_renderInstanceId;
+    if (input) {
+        auto data = input->GetPrim(groomRoot).dataSource;
+        // The mapped adapter overlays relative property locators at the
+        // prim root: usdGen:sessionId is Hydra's `sessionId`.
+        auto id = HdStringDataSource::Cast(HdContainerDataSource::Get(
+            data, HdDataSourceLocator(TfToken("sessionId"))));
+        if (id) groom->key.sessionId = id->GetTypedValue(0.0f);
     }
     // (Review 1) Resolve the description BEFORE attach/first staging:
     // _ScanInputForGrooms stops descending at the groom root, so no later
@@ -588,6 +554,18 @@ UsdGenGroomSceneIndex::_PrimsAdded(
     bool structural = false;
     HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
     for (auto const &e : entries) {
+        // A newly added operator (or a resynced grouping Scope) is not in
+        // the compiled router yet. Re-pull the owning hierarchy even when
+        // this is not a Groom/Description arrival.
+        {
+            std::lock_guard<std::mutex> lock(_stateMutex);
+            for (auto const &g : _grooms) {
+                if (g && g->session && e.primPath.HasPrefix(g->description)) {
+                    g->session->MarkNeedsDesc();
+                    structural = true;
+                }
+            }
+        }
         TfToken t = e.primType;
         if (t.IsEmpty() && input) t = _UsdTypeName(input->GetPrim(e.primPath));
         if (t == TfToken("UsdGenGroom")) {
@@ -622,6 +600,15 @@ UsdGenGroomSceneIndex::_PrimsRemoved(
     HdSceneIndexObserver::RemovedPrimEntries const &entries)
 {
     _PopulateFromInput();
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        for (auto const &e : entries) {
+            for (auto const &g : _grooms) {
+                if (g && g->session && e.primPath.HasPrefix(g->description))
+                    g->session->MarkNeedsDesc();
+            }
+        }
+    }
     for (auto const &e : entries) _ForgetGroomsUnder(e.primPath);
     _SendPrimsRemoved(entries);
     if (!entries.empty()) {
@@ -660,11 +647,22 @@ UsdGenGroomSceneIndex::_PrimsDirtied(
             }
             for (auto const &g : _grooms) {
                 if (!g || !g->session || !g->session->Engine()) continue;
+                // Composed child-order dirties may originate at an Ops
+                // Scope rather than at an operator. The aggregate is live;
+                // re-pulling it reconstructs hierarchy after such edits.
+                if (e.primPath.HasPrefix(g->description)) {
+                    g->session->MarkNeedsDesc();
+                    routedDirty = true;
+                }
                 usdGen::UsdGenPendingDirty pending;
                 HdSceneIndexObserver::DirtiedPrimEntries single;
                 single.push_back(e);
                 g->router.Route(single, &pending);
                 if (pending.Any()) {
+                    // The current engine stores value snapshots, so an
+                    // input dirty must refresh them before evaluation.
+                    // Incremental descriptor refresh remains separate work.
+                    g->session->MarkNeedsDesc();
                     g->session->Engine()->AccumulateDirty(std::move(pending));
                     routedDirty = true;
                 }
@@ -751,7 +749,7 @@ UsdGenGroomSceneIndex::_CommitNow(
     // Self-deadlock guard: UsdGenImagingSession::Commit fires republish
     // callbacks synchronously, and our callback (_Republish) locks
     // _stateMutex. _stateMutex is non-recursive, so Commit must NEVER run
-    // under it. Snapshot (groom*, session, desc, key-stage) under the lock,
+    // under it. Snapshot (groom*, session, desc) under the lock,
     // then stage + Commit + router rebuild + _Republish unlocked.
     struct Work {
         // STRONG groom ref: lifetime by refcount — a _ForgetGroomsUnder
@@ -759,7 +757,6 @@ UsdGenGroomSceneIndex::_CommitNow(
         std::shared_ptr<_Groom> groom;
         ::usdGenImaging::UsdGenSessionHandle session;
         SdfPath description;
-        UsdStageRefPtr stage;
         bool needsDesc = false;
     };
     auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
@@ -781,14 +778,11 @@ UsdGenGroomSceneIndex::_CommitNow(
                 w.session->ConsumeNeedsDesc() ||
                 !w.session->Engine() ||
                 w.session->Engine()->Generation() == nullptr;
-            if (w.needsDesc) {
-                w.stage = w.session->Key().ResolveStage();
-            }
             if (char const *dbg = std::getenv("USDGEN_DEBUG_STAGING")) {
                 (void)dbg;
-                std::printf("[staging] groom=%s needsDesc=%d keyStage=%d\n",
+                std::printf("[staging] groom=%s needsDesc=%d hydraInput=%d\n",
                             g->groomRoot.GetText(), int(w.needsDesc),
-                            int(w.stage != nullptr));
+                            int(bool(self->_pruned)));
             }
             work.push_back(std::move(w));
         }
@@ -797,19 +791,23 @@ UsdGenGroomSceneIndex::_CommitNow(
         if (!w.groom) continue;
         if (!w.session) continue;
         w.groom->bridge.GateCommit(w.description, "_CommitNow");
-        if (w.needsDesc && w.stage) {
-            // (Review 2) Stage THROUGH the session: StageDesc + Commit
-            // serialize on _stageCommitMutex, so concurrent store-level
-            // commits cannot interleave. Build (pure stage reads) happens
-            // here, unlocked; the engine copy runs inside StageDesc.
+        bool committed = false;
+        if (w.needsDesc && self->_pruned) {
+            // Pull the post-deformation Hydra input, never the authored
+            // stage. Hydra sample times are shutter offsets: zero samples
+            // the current frame supplied by the upstream scene index.
             ::usdGenImaging::UsdGenGraphDescBuildOptions opts;
             usdGen::UsdGenGraphDesc desc =
-                ::usdGenImaging::BuildGraphDescFromStage(w.stage, w.description, opts);
-            w.session->StageDesc(desc);
+                ::usdGenImaging::BuildGraphDescFromHydra(
+                    *self->_pruned, w.description, opts);
+            w.session->StageAndCommit(desc, reason);
+            committed = true;
             if (std::getenv("USDGEN_DEBUG_STAGING")) {
                 std::printf("[staging] staged nodes=%zu terminal=%s\n",
                             desc.nodes.size(), desc.terminal.GetText());
             }
+        } else if (w.needsDesc) {
+            w.session->MarkNeedsDesc(); // no input: do not lose the request
         }
         // Unlocked: session Commit fires the payload _Republish
         // callback synchronously per attached index; EACH recipient
@@ -817,7 +815,7 @@ UsdGenGroomSceneIndex::_CommitNow(
         // (Review 4 — no initiating-index-only rebuild here, which would
         // leave store-level commits' indices stale and race synchronous
         // observers against old tables).
-        w.session->Commit(reason);
+        if (!committed) w.session->Commit(reason);
         if (std::getenv("USDGEN_DEBUG_STAGING")) {
             usdGen::UsdGenGenerationConstPtr gg =
                 w.session->Engine() ? w.session->Engine()->Generation()
@@ -854,6 +852,10 @@ UsdGenGroomSceneIndex::_RepublishLocked(
     // _ForgetGroomsUnder (which only erases membership + detaches).
     if (!payload.published || !payload.generation) return;
     usdGen::UsdGenGenerationConstPtr const &gen = payload.generation;
+    if (gen->device) {
+        TF_WARN("usdGen: stock Hydra publication cannot consume CUDA device generations; retaining displayed geometry");
+        return;
+    }
     usdGen::UsdGenDirtyReport const &report = payload.report;
     auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
     std::vector<HdSceneIndexObserver::RemovedPrimEntry> removed;

@@ -41,20 +41,27 @@ void UsdGenImagingSession::SetTime(double frame) { _frame = frame; }
 void UsdGenImagingSession::SetContext(usdGen::UsdGenContext context)
 {
     _context = context;
-    if (_engine) _engine->SetContext(context);
 }
 
 void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
 {
+    _Commit(reason, nullptr);
+}
+
+void UsdGenImagingSession::StageAndCommit(
+    usdGen::UsdGenGraphDesc const &desc, usdGen::UsdGenCommitReason reason)
+{
+    _Commit(reason, &desc);
+}
+
+void UsdGenImagingSession::_Commit(usdGen::UsdGenCommitReason reason,
+                                  usdGen::UsdGenGraphDesc const *desc)
+{
     if (!_engine) return;
 
-    // The staged graph desc (if any) was SetGraphDesc'd by the owning index
-    // before this call; the engine copies it and recompiles (03 §2.2).
-    // ConsumeNeedsDesc was already consumed by the stager to decide the
-    // SetGraphDesc; clear here unconditionally so a commit without staging
-    // does not leave a stale mark (marks arriving after consume stay set
-    // for the next commit — atomic exchange, no lost ReloadMaps).
-    _needsDesc.store(false);
+    // Only the stager consumes _needsDesc. Clearing it here would discard
+    // structural/reload marks arriving after its snapshot, or marks on a
+    // store-driven commit that did not stage a fresh description at all.
 
     // Serialize session-side bookkeeping with the engine commit: the
     // generation-advance check AND the LastReport copy below both happen
@@ -63,12 +70,19 @@ void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
     // callback ever iterates a report replaced mid-flight. The payload is
     // immutable: callbacks reread NOTHING live.
     // Hold _stageCommitMutex across the engine Commit: pairs with
-    // StageDesc above so staging+commit are atomic w.r.t. concurrent
-    // session commits (Review 2). Callbacks fire inside (synchronously)
-    // but run unlocked from this mutex (copied under _republishMutex).
+    // StageAndCommit so staging+commit are atomic w.r.t. concurrent
+    // session commits. Callbacks remain inside this serialization boundary
+    // to preserve publication order, but do not hold _republishMutex.
+    // They may pull generations or detach, but must not recursively commit.
     std::unique_lock<std::mutex> stageLock(_stageCommitMutex);
-    const int64_t before = _generation;
-    usdGen::UsdGenGenerationConstPtr gen = _engine->Commit(_frame, reason);
+    _engine->SetContext(_context.load());
+    if (desc) _engine->SetGraphDesc(*desc);
+    const int64_t before = _generation.load();
+    usdGen::UsdGenGenerationConstPtr gen = _engine->Commit(_frame.load(), reason);
+    for (auto const& error : _engine->LastDiagnostics().errors)
+        TF_WARN("usdGen commit rejected: %s", error.c_str());
+    for (auto const& warning : _engine->LastDiagnostics().warnings)
+        TF_WARN("usdGen commit: %s", warning.c_str());
     CommitPayload payload;
     if (gen && gen->id != before) {
         _generation = gen->id;
@@ -78,7 +92,7 @@ void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
     }
     if (!payload.published) return;
 
-    // Copy under lock, invoke unlocked: a callback may re-enter the session
+    // Copy under callback lock, invoke without that lock: a callback may re-enter
     // (GetPrim atomic_loads, Detach takes the store lock, not this one).
     std::vector<std::function<void(CommitPayload const &)>> callbacks;
     {
@@ -95,10 +109,8 @@ void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
 
 void UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const &desc)
 {
-    // Serialized with Commit below via _stageCommitMutex (Review 2): a
-    // concurrent store-level SetTime/Commit blocks here until the paired
-    // Commit below completes, so staging and commit are atomic w.r.t.
-    // other session commits. Engine copies the desc (03 S2.2).
+    // Standalone staging is serialized but does not reserve a subsequent
+    // commit. Production callers use StageAndCommit instead.
     std::lock_guard<std::mutex> lock(_stageCommitMutex);
     if (_engine) _engine->SetGraphDesc(desc);
 }
@@ -125,7 +137,7 @@ void UsdGenImagingSession::UnregisterRepublishCallback(int token)
         _callbacks.end());
 }
 
-int64_t UsdGenImagingSession::Generation() const noexcept { return _generation; }
+int64_t UsdGenImagingSession::Generation() const noexcept { return _generation.load(); }
 
 usdGen::UsdGenGenerationConstPtr UsdGenImagingSession::LatestGeneration() const noexcept
 {
@@ -247,48 +259,6 @@ void UsdGenSessionStore::ReloadMaps()
     for (auto const &session : LiveSessions()) {
         session->MarkNeedsDesc();
     }
-}
-
-namespace {
-
-struct _SdfPathTextHash
-{
-    std::size_t operator()(SdfPath const &p) const noexcept
-    {
-        return std::hash<std::string>{}(p.GetText());
-    }
-};
-
-// One registry, shared by SetStage/FindGroomStage; entries are weak so the
-// registry never extends a stage's lifetime.
-std::mutex &_StageRegistryMutex()
-{
-    static std::mutex mutex;
-    return mutex;
-}
-std::unordered_map<SdfPath, UsdStageWeakPtr, _SdfPathTextHash>
-&_StageRegistry()
-{
-    static std::unordered_map<SdfPath, UsdStageWeakPtr, _SdfPathTextHash> reg;
-    return reg;
-}
-
-}  // namespace
-
-void UsdGenSessionStore::SetStage(SdfPath const &groomRoot,
-                                  UsdStageRefPtr const &stage)
-{
-    // Called from the UsdGenGroom prim adapter while the stage index builds
-    // its prim data sources (06 §3.7 stage-key contract).
-    std::lock_guard<std::mutex> lock(_StageRegistryMutex());
-    _StageRegistry()[groomRoot] = stage;
-}
-
-UsdStageWeakPtr UsdGenSessionStore::FindGroomStage(SdfPath const &groomRoot)
-{
-    std::lock_guard<std::mutex> lock(_StageRegistryMutex());
-    auto it = _StageRegistry().find(groomRoot);
-    return it == _StageRegistry().end() ? UsdStageWeakPtr() : it->second;
 }
 
 }  // namespace usdGenImaging

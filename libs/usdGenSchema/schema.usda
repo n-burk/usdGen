@@ -48,9 +48,18 @@ class UsdGenGroom "UsdGenGroom" (
 )
 {
     rel usdGen:surface
-    float usdGen:densityScale = 1.0
-    float usdGen:renderDensityScale = 1.0
-    uniform int usdGen:schemaVersion = 1
+    float usdGen:densityScale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:renderDensityScale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    uniform int usdGen:schemaVersion = 1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    custom uniform token usdGen:execution:backend = "cuda" (
+        allowedTokens = ["cuda"]
+    )
     uniform string usdGen:sessionId = ""
     string usdGen:label = ""
 }
@@ -69,18 +78,30 @@ class UsdGenDescription "UsdGenDescription" (
     rel usdGen:surface
     rel usdGen:terminal
     rel usdGen:guides
-    uniform int usdGen:tileTarget = 64
-    float usdGen:densityScale = 1.0
-    float usdGen:renderDensityScale = 1.0
+    uniform int usdGen:tileTarget = 64 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:densityScale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:renderDensityScale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     uniform token usdGen:curve:basis = "bspline" (
         allowedTokens = ["bspline", "catmullRom"]
     )
-    float usdGen:width:default = 0.01
+    float usdGen:width:default = 0.01 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     uniform token usdGen:motion:mode = "single" (
         allowedTokens = ["single", "velocities", "samples"]
     )
-    uniform int usdGen:motion:sampleCount = 3
-    uniform bool usdGen:motion:forwardSurfaceSamples = false
+    uniform int usdGen:motion:sampleCount = 3 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    uniform bool usdGen:motion:forwardSurfaceSamples = false (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:pickTarget = "description" (
         allowedTokens = ["description", "terminal"]
     )
@@ -97,7 +118,9 @@ class UsdGenGuideSet "UsdGenGuideSet" (
 )
 {
     rel usdGen:surface
-    float[] usdGen:blend = []
+    float[] usdGen:blend = [] (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     string usdGen:label = ""
 }
 
@@ -116,9 +139,15 @@ class "UsdGenOperator" (
 )
 {
     rel usdGen:input
-    bool usdGen:enabled = true
-    float usdGen:blend = 1.0
-    uniform int usdGen:seed = 0
+    bool usdGen:enabled = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:blend = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    uniform int usdGen:seed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:space = "auto" (
         allowedTokens = ["auto", "rest", "deformed"]
     )
@@ -126,7 +155,9 @@ class "UsdGenOperator" (
         allowedTokens = ["base", "final", "preceding"]
     )
     rel usdGen:surface
-    uniform int usdGen:algorithmVersion = 0
+    uniform int usdGen:algorithmVersion = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     string usdGen:label = ""
 }
 
@@ -162,6 +193,19 @@ class "UsdGenDeformer" (
 {
 }
 
+# UsdGenExpression — codeless execution-time SeExpr parameter provider.
+# The output type is authored per expression as a typed custom outputs:result
+# property (see examples); no schema-level float assumption is imposed.
+class UsdGenExpression "UsdGenExpression" (
+    inherits = </Typed>
+    customData = {
+        string className = "Expression"
+    }
+)
+{
+    custom string usdGen:expr:source = ""
+}
+
 # ---------------------------------------------------------------------------
 # Generators (02-schema.md §2.6)
 # ---------------------------------------------------------------------------
@@ -177,17 +221,37 @@ class UsdGenScatter "UsdGenScatter" (
     uniform token usdGen:mode = "random" (
         allowedTokens = ["random", "uniform", "points", "atGuides"]
     )
-    float usdGen:density = 100.0
-    float usdGen:spacingU = 0.02
-    float usdGen:spacingV = 0.02
-    float usdGen:jitter = 0.0
-    int[] usdGen:rootPrims = []
-    texCoord2f[] usdGen:rootUVs = []
-    int usdGen:relaxIterations = 0
-    bool usdGen:areaCompensation = true
+    float usdGen:density = 100.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:spacingU = 0.02 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:spacingV = 0.02 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:jitter = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int[] usdGen:rootPrims = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    texCoord2f[] usdGen:rootUVs = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int usdGen:relaxIterations = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    bool usdGen:areaCompensation = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     rel usdGen:guides
-    bool usdGen:flip = false
-    int usdGen:perGuide = 1
+    bool usdGen:flip = false (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int usdGen:perGuide = 1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenGrow — roots to straight strands; sets the CV count.
@@ -198,16 +262,28 @@ class UsdGenGrow "UsdGenGrow" (
     }
 )
 {
-    int usdGen:segments = 8
-    float usdGen:length = 1.0
-    float2 usdGen:lengthRandom = (1, 1)
+    int usdGen:segments = 8 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:length = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float2 usdGen:lengthRandom = (1, 1) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     uniform token usdGen:direction = "surfaceNormal" (
         allowedTokens = ["surfaceNormal", "attribute", "vector"]
     )
-    vector3f usdGen:directionVector = (0, 1, 0)
+    vector3f usdGen:directionVector = (0, 1, 0) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     token usdGen:directionPrimvar = ""
-    float usdGen:lift = 0.0
-    float usdGen:uvBlend = 0.0
+    float usdGen:lift = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:uvBlend = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     rel usdGen:length:source
 }
 
@@ -221,18 +297,36 @@ class UsdGenGuideInterpolate "UsdGenGuideInterpolate" (
 )
 {
     rel usdGen:guides
-    int usdGen:maxGuides = 3
-    float usdGen:influenceRadius = 4.0
-    float usdGen:influenceDecay = 2.0
-    float usdGen:maxGuideAngle = 90.0
+    int usdGen:maxGuides = 3 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:influenceRadius = 4.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:influenceDecay = 2.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:maxGuideAngle = 90.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     uniform token usdGen:blendMethod = "linearBlend" (
         allowedTokens = ["linearBlend", "extrudeAndBlend"]
     )
-    float usdGen:blendInSkinSpace = 1.0
-    bool usdGen:useUniqueGuide = false
-    float usdGen:randomizeGuide = 0.0
-    int usdGen:cvCount = 8
-    float usdGen:clumpCrossover = 0.0
+    float usdGen:blendInSkinSpace = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    bool usdGen:useUniqueGuide = false (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:randomizeGuide = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int usdGen:cvCount = 8 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clumpCrossover = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     rel usdGen:length:source
 }
 
@@ -245,7 +339,9 @@ class UsdGenCurveSource "UsdGenCurveSource" (
 )
 {
     rel usdGen:curves
-    bool usdGen:useRest = true
+    bool usdGen:useRest = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:idSource = "primvar" (
         allowedTokens = ["primvar", "index"]
     )
@@ -256,7 +352,9 @@ class UsdGenCurveSource "UsdGenCurveSource" (
     uniform token usdGen:staleAction = "warn" (
         allowedTokens = ["warn", "ignore", "block"]
     )
-    uniform int usdGen:resampleTo = 0
+    uniform int usdGen:resampleTo = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:rebind = "onError" (
         allowedTokens = ["never", "onError", "always"]
     )
@@ -274,39 +372,91 @@ class UsdGenClump "UsdGenClump" (
     }
 )
 {
-    float usdGen:clump:amount = 0.5
-    float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)]
+    float usdGen:clump:amount = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:clump:profile:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
     rel usdGen:clump:centers
-    float usdGen:clump:density = 4.0
-    float usdGen:clump:size = 1.0
-    uniform int usdGen:clump:seed = 0
-    uniform int usdGen:clump:level = -1
-    int usdGen:clump:levels = 1
-    float usdGen:clump:sizeReduction = 0.5
-    float usdGen:clump:tightnessReduction = 0.8
-    float usdGen:clump:goalFeedback = 1.0
+    float usdGen:clump:density = 4.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:size = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    uniform int usdGen:clump:seed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    uniform int usdGen:clump:level = -1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int usdGen:clump:levels = 1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:sizeReduction = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:tightnessReduction = 0.8 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:clump:goalFeedback = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     uniform token usdGen:clump:method = "linearBlend" (
         allowedTokens = ["linearBlend", "extrudeAndBlend"]
     )
-    float usdGen:clump:crossover = 0.0
-    float usdGen:clump:volumize = 0.0
-    float usdGen:clump:stray:amount = 0.0
-    float usdGen:clump:stray:rate = 0.0
-    float usdGen:clump:stray:falloff = 1.0
-    float usdGen:clump:copy = 0.0
-    float usdGen:clump:copyVariance = 0.0
-    float usdGen:clump:cut = 0.0
-    float usdGen:clump:flatness = 0.0
-    float usdGen:clump:offset = 0.0
-    float usdGen:clump:curl:amplitude = 0.0
-    float usdGen:clump:curl:frequency = 1.0
-    float usdGen:clump:noise:amount = 0.0
-    float usdGen:clump:noise:frequency = 1.0
-    float usdGen:clump:noise:correlation = 0.0
-    float usdGen:preserveLength = 1.0
+    float usdGen:clump:crossover = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:clump:volumize = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:clump:stray:amount = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:clump:stray:rate = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:stray:falloff = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:clump:copy = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:copyVariance = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:cut = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:flatness = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:clump:offset = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:clump:curl:amplitude = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:clump:curl:frequency = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:clump:noise:amount = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:clump:noise:frequency = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:clump:noise:correlation = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:preserveLength = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
 }
 
 # UsdGenNoise — frizz; correlated fBm in the root frame.
@@ -317,18 +467,36 @@ class UsdGenNoise "UsdGenNoise" (
     }
 )
 {
-    float usdGen:noise:magnitude = 0.05
-    float2[] usdGen:noise:magnitude:knots = [(0, 0), (1, 1)]
+    float usdGen:noise:magnitude = 0.05 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float2[] usdGen:noise:magnitude:knots = [(0, 0), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:noise:magnitude:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float usdGen:noise:frequency = 3.0
-    float usdGen:noise:correlation = 0.5
-    int usdGen:noise:octaves = 1
-    float usdGen:noise:lacunarity = 2.0
-    float usdGen:noise:gain = 0.5
-    bool usdGen:cumulative = false
-    float usdGen:preserveLength = 1.0
+    float usdGen:noise:frequency = 3.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:noise:correlation = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    int usdGen:noise:octaves = 1 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:noise:lacunarity = 2.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:noise:gain = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    bool usdGen:cumulative = false (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:preserveLength = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
 }
 
 # UsdGenLength — the whole type is topology-bumping (static
@@ -343,8 +511,12 @@ class UsdGenLength "UsdGenLength" (
     uniform token usdGen:length:mode = "scale" (
         allowedTokens = ["set", "scale", "cull"]
     )
-    float usdGen:length:value = 1.0
-    float2 usdGen:length:random = (1, 1)
+    float usdGen:length:value = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2 usdGen:length:random = (1, 1) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     uniform token usdGen:length:method = "scale" (
         allowedTokens = ["scale", "cutExtend"]
     )
@@ -352,8 +524,12 @@ class UsdGenLength "UsdGenLength" (
     uniform token usdGen:rebuild = "keepParam" (
         allowedTokens = ["keepParam", "reparam"]
     )
-    float usdGen:minRemainingLength = 0.0
-    float usdGen:cullThreshold = 0.0
+    float usdGen:minRemainingLength = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:cullThreshold = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenWidth — strand profile; usdGen:replace == true sets, false multiplies.
@@ -364,16 +540,30 @@ class UsdGenWidth "UsdGenWidth" (
     }
 )
 {
-    float usdGen:width = 0.01
-    float2[] usdGen:width:knots = [(0, 1), (1, 1)]
+    float usdGen:width = 0.01 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float2[] usdGen:width:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:width:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float usdGen:taper = 0.0
-    float usdGen:taperStart = 0.5
-    float usdGen:rootScale = 1.0
-    float usdGen:tipScale = 1.0
-    bool usdGen:replace = true
+    float usdGen:taper = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:taperStart = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:rootScale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:tipScale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    bool usdGen:replace = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenDirection — XGen Tilt.
@@ -384,16 +574,34 @@ class UsdGenDirection "UsdGenDirection" (
     }
 )
 {
-    vector3f usdGen:direction = (0, 1, 0)
-    float usdGen:amount = 0.0
-    float usdGen:lift = 0.0
-    float usdGen:tiltU = 0.0
-    float usdGen:tiltV = 0.0
-    float usdGen:tiltN = 0.0
-    float usdGen:aroundN = 0.0
-    float usdGen:followSkinContour = 0.0
+    vector3f usdGen:direction = (0, 1, 0) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:amount = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:lift = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:tiltU = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:tiltV = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:tiltN = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:aroundN = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:followSkinContour = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     rel usdGen:direction:source
-    float2[] usdGen:direction:knots = [(0, 1), (1, 1)]
+    float2[] usdGen:direction:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:direction:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
@@ -410,14 +618,24 @@ class UsdGenSmooth "UsdGenSmooth" (
     }
 )
 {
-    float usdGen:strength = 0.5
-    int usdGen:iterations = 1
+    float usdGen:strength = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int usdGen:iterations = 1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:mode = "alongCurve" (
         allowedTokens = ["alongCurve", "neighbours"]
     )
-    bool usdGen:lockRoot = true
-    float usdGen:searchRadius = 0.0
-    int usdGen:numNeighbors = 4
+    bool usdGen:lockRoot = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:searchRadius = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int usdGen:numNeighbors = 4 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
 }
 
 # UsdGenResample — changes the CV count (topology).
@@ -428,11 +646,15 @@ class UsdGenResample "UsdGenResample" (
     }
 )
 {
-    int usdGen:cvCount = 8
+    int usdGen:cvCount = 8 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:distribution = "uniform" (
         allowedTokens = ["uniform", "keepParam"]
     )
-    bool usdGen:restoreSegmentLengths = false
+    bool usdGen:restoreSegmentLengths = false (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenScale — global length multiplier.
@@ -443,13 +665,21 @@ class UsdGenScale "UsdGenScale" (
     }
 )
 {
-    float usdGen:scale = 1.0
-    float2[] usdGen:scale:knots = [(0, 1), (1, 1)]
+    float usdGen:scale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2[] usdGen:scale:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:scale:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float2 usdGen:scaleRandom = (1, 1)
-    bool usdGen:widthToo = false
+    float2 usdGen:scaleRandom = (1, 1) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    bool usdGen:widthToo = false (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
 }
 
 # ---------------------------------------------------------------------------
@@ -464,19 +694,33 @@ class UsdGenCurl "UsdGenCurl" (
     }
 )
 {
-    float usdGen:radius = 0.02
-    float2[] usdGen:radius:knots = [(0, 1), (1, 1)]
+    float usdGen:radius = 0.02 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2[] usdGen:radius:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:radius:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float usdGen:frequency = 2.0
-    float usdGen:phase = 0.0
-    float usdGen:phaseRandom = 0.0
-    bool usdGen:taper = true
+    float usdGen:frequency = 2.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:phase = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:phaseRandom = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    bool usdGen:taper = true (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     uniform token usdGen:axisMode = "curveTangent" (
         allowedTokens = ["curveTangent", "guide"]
     )
-    bool usdGen:clockwise = true
+    bool usdGen:clockwise = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 class UsdGenBend "UsdGenBend" (
@@ -486,13 +730,21 @@ class UsdGenBend "UsdGenBend" (
     }
 )
 {
-    float usdGen:angle = 0.0
-    float2[] usdGen:angle:knots = [(0, 1), (1, 1)]
+    float usdGen:angle = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float2[] usdGen:angle:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:angle:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float2 usdGen:angleRandom = (1, 1)
-    vector3f usdGen:axis = (1, 0, 0)
+    float2 usdGen:angleRandom = (1, 1) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    vector3f usdGen:axis = (1, 0, 0) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     uniform token usdGen:axisMode = "rootDirection" (
         allowedTokens = ["rootDirection", "uniform", "attribute"]
     )
@@ -505,8 +757,12 @@ class UsdGenStraighten "UsdGenStraighten" (
     }
 )
 {
-    float usdGen:tangentStraightness = 0.0
-    float usdGen:normalStraightness = 0.0
+    float usdGen:tangentStraightness = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:normalStraightness = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 class UsdGenDisplace "UsdGenDisplace" (
@@ -516,11 +772,19 @@ class UsdGenDisplace "UsdGenDisplace" (
     }
 )
 {
-    float usdGen:displace:amount = 0.0
+    float usdGen:displace:amount = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     rel usdGen:displace:map
-    float usdGen:displace:base = 0.5
-    float usdGen:displace:scale = 1.0
-    float usdGen:displace:offset = 0.0
+    float usdGen:displace:base = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:displace:scale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:displace:offset = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     uniform token usdGen:mode = "height" (
         allowedTokens = ["height", "vector"]
     )
@@ -533,10 +797,18 @@ class UsdGenWave "UsdGenWave" (
     }
 )
 {
-    float usdGen:frequencyU = 1.0
-    float usdGen:frequencyN = 1.0
-    float usdGen:amplitudeU = 0.0
-    float usdGen:amplitudeN = 0.0
+    float usdGen:frequencyU = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:frequencyN = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:amplitudeU = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:amplitudeN = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenPart — parting line; emits partId (uniform int, no usdGen: prefix).
@@ -549,8 +821,12 @@ class UsdGenPart "UsdGenPart" (
 )
 {
     rel usdGen:part:curves
-    float usdGen:part:radius = 0.05
-    float usdGen:part:strength = 1.0
+    float usdGen:part:radius = 0.05 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:part:strength = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
 }
 
 # UsdGenExprOp — capture-time-only expression styler (04 §3, S37).
@@ -579,17 +855,31 @@ class UsdGenSculptLayer "UsdGenSculptLayer" (
     }
 )
 {
-    float usdGen:sculpt:weight = 1.0
+    float usdGen:sculpt:weight = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:sculpt:space = "rootFrame" (
         allowedTokens = ["rootFrame", "object"]
     )
-    uint64[] usdGen:sculpt:curveIds = []
-    int[] usdGen:sculpt:cvOffsets = []
-    vector3f[] usdGen:sculpt:deltas = []
+    uint64[] usdGen:sculpt:curveIds = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int[] usdGen:sculpt:cvOffsets = [] (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    vector3f[] usdGen:sculpt:deltas = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform string usdGen:sculpt:epoch = ""
-    uint64[] usdGen:sculpt:lockedCurves = []
-    int[] usdGen:sculpt:rootPrims = []
-    texCoord2f[] usdGen:sculpt:rootUVs = []
+    uint64[] usdGen:sculpt:lockedCurves = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int[] usdGen:sculpt:rootPrims = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    texCoord2f[] usdGen:sculpt:rootUVs = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenDeform — curves follow the surface (02 §2.8).
@@ -603,11 +893,21 @@ class UsdGenDeform "UsdGenDeform" (
     uniform token usdGen:mode = "rigidFrame" (
         allowedTokens = ["rigidFrame", "rbf", "pointDeform"]
     )
-    bool usdGen:twistAware = true
-    bool usdGen:lockRoots = true
-    float usdGen:preserveShape = 0.0
-    int usdGen:preserveShape:iterations = 0
-    int usdGen:rbfSamples = 100
+    bool usdGen:twistAware = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    bool usdGen:lockRoots = true (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:preserveShape = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int usdGen:preserveShape:iterations = 0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int usdGen:rbfSamples = 100 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # UsdGenCollide (v3) — 02 §2.8; defaults for offset/pushAmount/iterations
@@ -621,9 +921,15 @@ class UsdGenCollide "UsdGenCollide" (
 )
 {
     rel usdGen:colliders
-    float usdGen:offset = 0.0
-    float usdGen:pushAmount = 0.0
-    int usdGen:iterations = 1
+    float usdGen:offset = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:pushAmount = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    int usdGen:iterations = 1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:resolveType = "flexible" (
         allowedTokens = ["flexible", "stiff"]
     )
@@ -638,11 +944,21 @@ class UsdGenWind "UsdGenWind" (
     }
 )
 {
-    vector3f usdGen:direction = (0, 0, 1)
-    float usdGen:constStrength = 0.0
-    float usdGen:gustStrength = 0.0
-    float usdGen:stiffness = 0.0
-    float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)]
+    vector3f usdGen:direction = (0, 0, 1) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:constStrength = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:gustStrength = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:stiffness = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:stiffness:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
@@ -684,18 +1000,36 @@ class UsdGenInstance "UsdGenInstance" (
         allowedTokens = ["cards", "archives", "spheres"]
     )
     rel usdGen:prototypes
-    float[] usdGen:instance:weights = []
+    float[] usdGen:instance:weights = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:instance:orient = "surfaceFrame" (
         allowedTokens = ["surfaceFrame", "curveTangent", "camera", "world"]
     )
-    float usdGen:instance:scale = 1.0
-    float2 usdGen:instance:scaleRandom = (1, 1)
-    float usdGen:instance:twist = 0.0
-    float usdGen:instance:twistRandom = 0.0
-    float usdGen:instance:normalOffset = 0.0
-    float usdGen:instance:width = 0.02
-    float usdGen:instance:length = 0.09
-    float2[] usdGen:instance:width:knots = [(0, 1), (1, 1)]
+    float usdGen:instance:scale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2 usdGen:instance:scaleRandom = (1, 1) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:instance:twist = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:instance:twistRandom = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:instance:normalOffset = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:instance:width = 0.02 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:instance:length = 0.09 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float2[] usdGen:instance:width:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:instance:width:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
@@ -720,10 +1054,18 @@ class "UsdGenMap" (
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
     )
-    float usdGen:map:scale = 1.0
-    float usdGen:map:offset = 0.0
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0.0
+    float usdGen:map:scale = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:map:offset = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:map:default = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     string usdGen:label = ""
 }
 
@@ -759,9 +1101,15 @@ class UsdGenPtexMap "UsdGenPtexMap" (
         allowedTokens = ["nearest", "bilinear", "box", "gaussian", "bicubic",
                          "bspline", "catmullrom", "mitchell"]
     )
-    float usdGen:map:blur = 0.0
-    int usdGen:map:firstChannel = 0
-    int usdGen:map:channelCount = 1
+    float usdGen:map:blur = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int usdGen:map:firstChannel = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int usdGen:map:channelCount = 1 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     token usdGen:map:borderMode = "clamp" (
         allowedTokens = ["clamp", "black", "periodic"]
     )
@@ -778,7 +1126,9 @@ class UsdGenExprMap "UsdGenExprMap" (
     uniform token usdGen:expr:returnType = "float" (
         allowedTokens = ["float", "color"]
     )
-    uniform int usdGen:expr:seed = 0
+    uniform int usdGen:expr:seed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     rel usdGen:expr:maps
 }
 
@@ -795,7 +1145,9 @@ class UsdGenPaintMap "UsdGenPaintMap" (
     token usdGen:paint:storage = "primvar" (
         allowedTokens = ["primvar", "file"]
     )
-    int usdGen:paint:resolution = 256
+    int usdGen:paint:resolution = 256 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     asset usdGen:paint:bakedFile
 }
 
@@ -810,11 +1162,21 @@ class UsdGenNoiseMap "UsdGenNoiseMap" (
         allowedTokens = ["perlin", "snoise", "fbm", "turbulence",
                          "cellnoise", "voronoi"]
     )
-    float usdGen:noise:frequency = 1.0
-    float usdGen:noise:lacunarity = 2.0
-    float usdGen:noise:gain = 0.5
-    int usdGen:noise:octaves = 3
-    uniform int usdGen:noise:seed = 0
+    float usdGen:noise:frequency = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:noise:lacunarity = 2.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:noise:gain = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    int usdGen:noise:octaves = 3 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    uniform int usdGen:noise:seed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     token usdGen:noise:space = "rest" (
         allowedTokens = ["rest", "deformed"]
     )
@@ -842,8 +1204,12 @@ class UsdGenGuideProximityMap "UsdGenGuideProximityMap" (
 )
 {
     rel usdGen:guides
-    float usdGen:proximity:radius = 1.0
-    float usdGen:proximity:decay = 2.0
+    float usdGen:proximity:radius = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:proximity:decay = 2.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }
 
 # ---------------------------------------------------------------------------
@@ -864,9 +1230,15 @@ class "UsdGenMaskAPI" (
 )
 {
     rel usdGen:mask:source
-    float usdGen:mask:amount = 1.0
-    bool usdGen:mask:invert = false
-    float2 usdGen:mask:range = (0, 1)
+    float usdGen:mask:amount = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    bool usdGen:mask:invert = false (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float2 usdGen:mask:range = (0, 1) (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:mask:rangeMode = "normalized" (
         allowedTokens = ["normalized", "absoluteLength"]
     )
@@ -874,23 +1246,51 @@ class "UsdGenMaskAPI" (
         allowedTokens = ["multiply", "add", "subtract", "max", "min",
                          "average", "replace"]
     )
-    float usdGen:mask:random = 0.0
-    uniform int usdGen:mask:randomSeed = 0
-    float2[] usdGen:mask:ramp:knots = [(0, 1), (1, 1)]
+    float usdGen:mask:random = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    uniform int usdGen:mask:randomSeed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float2[] usdGen:mask:ramp:knots = [(0, 1), (1, 1)] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:mask:ramp:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float usdGen:mask:ramp:spline
-    float usdGen:mask:rangeMin = 0.0
-    float usdGen:mask:rangeMax = 1.0
-    float usdGen:mask:effectPosition = 0.5
-    float usdGen:mask:falloff = 0.5
-    float usdGen:mask:influenceWidth = 0.5
-    float usdGen:mask:noise:amount = 0.0
-    float usdGen:mask:noise:frequency = 1.0
-    float usdGen:mask:noise:gain = 0.5
-    float usdGen:mask:noise:bias = 0.5
-    uniform int usdGen:mask:noise:seed = 0
+    float usdGen:mask:ramp:spline (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:mask:rangeMin = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:mask:rangeMax = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:mask:effectPosition = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    float usdGen:mask:falloff = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:mask:influenceWidth = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:mask:noise:amount = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:mask:noise:frequency = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:mask:noise:gain = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    float usdGen:mask:noise:bias = 0.5 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
+    uniform int usdGen:mask:noise:seed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "point" } }
+    )
     rel usdGen:mask:region
 }
 
@@ -905,14 +1305,24 @@ class "UsdGenLookAPI" (
     }
 )
 {
-    color3f usdGen:look:rootColor = (0.035, 0.018, 0.008)
-    color3f usdGen:look:tipColor = (0.21, 0.115, 0.045)
-    float[] usdGen:look:colorRamp:positions = []
-    color3f[] usdGen:look:colorRamp:colors = []
+    color3f usdGen:look:rootColor = (0.035, 0.018, 0.008) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    color3f usdGen:look:tipColor = (0.21, 0.115, 0.045) (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float[] usdGen:look:colorRamp:positions = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    color3f[] usdGen:look:colorRamp:colors = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:look:colorRamp:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
     )
-    float usdGen:look:rampExponent = 1.0
+    float usdGen:look:rampExponent = 1.0 (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     uniform token usdGen:look:colorMapMode = "bake" (
         allowedTokens = ["bake", "shader"]
     )
@@ -920,9 +1330,15 @@ class "UsdGenLookAPI" (
         allowedTokens = ["perCurve", "perCV"]
     )
     rel usdGen:look:colorMap
-    float usdGen:look:hueJitter = 0.0
-    float usdGen:look:valueJitter = 0.0
-    uniform int usdGen:look:jitterSeed = 0
+    float usdGen:look:hueJitter = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    float usdGen:look:valueJitter = 0.0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
+    uniform int usdGen:look:jitterSeed = 0 (
+        customData = { dictionary usdGen = { string evaluation = "primitive" } }
+    )
     uniform token usdGen:look:bakeTarget = "displayColor" (
         allowedTokens = ["displayColor", "primvar", "none"]
     )
@@ -960,7 +1376,11 @@ class "UsdGenCurveAPI" (
     token primvars:usdGen:role = "hair" (
         allowedTokens = ["hair", "guide"]
     )
-    uint64[] primvars:usdGen:curveId = []
+    uint64[] primvars:usdGen:curveId = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     string primvars:usdGen:frozenEpoch = ""
-    matrix4d[] primvars:usdGen:rootFrame = []
+    matrix4d[] primvars:usdGen:rootFrame = [] (
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
 }

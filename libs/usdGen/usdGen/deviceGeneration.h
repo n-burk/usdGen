@@ -1,0 +1,222 @@
+// usdGen engine — immutable device-generation handoff.
+//
+// This header deliberately contains no CUDA, Hydra, or VtArray types.  A
+// backend owner supplies the native allocation and synchronization details;
+// the generation is only the immutable identity/shape contract shared by the
+// engine, tools, and a renderer adapter.
+#ifndef USDGEN_DEVICE_GENERATION_H
+#define USDGEN_DEVICE_GENERATION_H
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace usdGen {
+
+enum class UsdGenDeviceBackend : uint8_t {
+    Unknown = 0,
+    Cuda = 1,
+    Other = 255
+};
+
+enum class UsdGenDeviceValueType : uint8_t {
+    Float32 = 0,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Int32,
+    UInt32,
+    UInt64
+};
+
+enum class UsdGenDeviceDomain : uint8_t {
+    Groom = 0,
+    Primitive,
+    Point,
+    Tile,
+    Topology,
+    Tool
+};
+
+enum class UsdGenDeviceChannelSemantic : uint8_t {
+    Generic = 0,
+    Points,
+    RestPoints,
+    Widths,
+    HairT,
+    CurveOffsets,
+    StableIds,
+    RootPrim,
+    RootUV
+};
+
+enum class UsdGenDeviceStatus : uint8_t {
+    Ok = 0,
+    InvalidArgument,
+    InvalidLease,
+    ProducerNotReady,
+    ConsumerRejected,
+    SynchronizationFailed
+};
+
+/// An opaque native stream/queue token.  Zero denotes the backend default
+/// queue.  The concrete owner interprets this value; this API never casts or
+/// dereferences it and does not claim ownership of the native queue.
+using UsdGenDeviceStream = uintptr_t;
+
+struct UsdGenDeviceIdentity
+{
+    UsdGenDeviceBackend backend = UsdGenDeviceBackend::Unknown;
+    int32_t deviceIndex = -1;
+    uint64_t generation = 0;
+};
+
+struct UsdGenDeviceChannelMetadata
+{
+    std::string name;
+    UsdGenDeviceValueType type = UsdGenDeviceValueType::Float32;
+    UsdGenDeviceDomain domain = UsdGenDeviceDomain::Point;
+    uint64_t elementCount = 0;
+    uint32_t arity = 1;
+    uint32_t strideBytes = 0;
+    bool readOnly = true;
+    UsdGenDeviceChannelSemantic semantic =
+        UsdGenDeviceChannelSemantic::Generic;
+};
+
+/// A range into the backend-owned geometry channels.  The range is metadata;
+/// it is not a host copy of curve offsets or points.
+struct UsdGenDeviceTileMetadata
+{
+    uint32_t tile = 0;
+    uint64_t firstCurve = 0;
+    uint64_t curveCount = 0;
+    uint64_t firstPoint = 0;
+    uint64_t pointCount = 0;
+};
+
+struct UsdGenDeviceGeometryMetadata
+{
+    uint64_t topologyVersion = 0;
+    uint64_t valueVersion = 0;
+    uint64_t curveCount = 0;
+    uint64_t pointCount = 0;
+    std::vector<UsdGenDeviceTileMetadata> tiles;
+    // Already-deformed C3 caches must not have scalp motion applied again.
+    bool alreadyDeformed = false;
+};
+
+/// Tool identity is retained with a geometry snapshot so a tool cannot
+/// accidentally consume a later graph/device generation.
+struct UsdGenDeviceToolMetadata
+{
+    std::string toolId;
+    uint64_t graphVersion = 0;
+    uint64_t snapshotVersion = 0;
+};
+
+/// Backend-specific implementation of allocation ownership and fencing.
+/// Implementations may add typed accessors in a private/backend header, but
+/// the generation and lease only depend on this synchronization contract.
+class UsdGenDeviceOwner
+{
+public:
+    virtual ~UsdGenDeviceOwner() = default;
+
+    /// Return true only when all producer work needed by the generation has
+    /// completed or can safely be waited on.
+    virtual bool ProducerReady() const noexcept = 0;
+
+    /// Acquire a consumer use.  The owner may reject a stream that cannot be
+    /// fenced safely.  token is owner-defined and is released exactly once.
+    virtual UsdGenDeviceStatus AcquireConsumer(
+        UsdGenDeviceStream stream, uint64_t *token) const noexcept = 0;
+
+    /// Insert/wait for producer completion on stream.  This must be called on
+    /// a valid lease before the consumer dereferences backend channels.
+    virtual UsdGenDeviceStatus WaitForProducer(
+        UsdGenDeviceStream stream, uint64_t token) const noexcept = 0;
+
+    /// Release a consumer use after all asynchronous work on stream has been
+    /// ordered against the generation.  Must not throw.
+    virtual void ReleaseConsumer(
+        UsdGenDeviceStream stream, uint64_t token) const noexcept = 0;
+};
+
+/// Shared lease state makes copies safe and keeps the owner alive until the
+/// asynchronous consumer has completed.  It carries no raw allocation
+/// pointer and is valid independently of the generation snapshot.
+class UsdGenDeviceLease
+{
+public:
+    UsdGenDeviceLease() = default;
+    ~UsdGenDeviceLease();
+    UsdGenDeviceLease(UsdGenDeviceLease const &) = default;
+    UsdGenDeviceLease &operator=(UsdGenDeviceLease const &) = default;
+    UsdGenDeviceLease(UsdGenDeviceLease &&) noexcept = default;
+    UsdGenDeviceLease &operator=(UsdGenDeviceLease &&) noexcept = default;
+
+    explicit operator bool() const noexcept { return bool(_state); }
+    bool IsValid() const noexcept { return bool(_state); }
+    UsdGenDeviceStream Stream() const noexcept;
+
+    /// Performs the producer-to-consumer ordering operation.  A false/failed
+    /// result leaves the lease held so the caller can report and release it.
+    UsdGenDeviceStatus WaitUntilReady() const noexcept;
+
+    /// Releases this lease's shared use state.  Other copies, if any, retain
+    /// the use until they are also destroyed.
+    void Complete() noexcept;
+
+private:
+    struct State;
+    explicit UsdGenDeviceLease(std::shared_ptr<State> state)
+        : _state(std::move(state)) {}
+    std::shared_ptr<State> _state;
+
+    friend class UsdGenDeviceGeneration;
+};
+
+class UsdGenDeviceGeneration
+{
+public:
+    struct CreateInfo
+    {
+        UsdGenDeviceIdentity identity;
+        UsdGenDeviceGeometryMetadata geometry;
+        UsdGenDeviceToolMetadata tool;
+        std::vector<UsdGenDeviceChannelMetadata> channels;
+        std::shared_ptr<const UsdGenDeviceOwner> owner;
+    };
+
+    /// Returns null and writes a short reason when the immutable snapshot is
+    /// malformed or has no owner.  The owner is the only backend payload
+    /// retained by this neutral interface.
+    static std::shared_ptr<const UsdGenDeviceGeneration> Create(
+        CreateInfo info, std::string *reason = nullptr);
+
+    UsdGenDeviceIdentity const &Identity() const noexcept;
+    UsdGenDeviceGeometryMetadata const &Geometry() const noexcept;
+    UsdGenDeviceToolMetadata const &Tool() const noexcept;
+    std::vector<UsdGenDeviceChannelMetadata> const &Channels() const noexcept;
+    std::shared_ptr<const UsdGenDeviceOwner> Owner() const noexcept;
+
+    /// Acquires a lifetime/fence lease for a concrete consumer stream.  An
+    /// invalid lease means the owner rejected the asynchronous use.
+    UsdGenDeviceLease AcquireLease(UsdGenDeviceStream stream) const noexcept;
+
+private:
+    UsdGenDeviceGeneration() = default;
+
+    UsdGenDeviceIdentity _identity;
+    UsdGenDeviceGeometryMetadata _geometry;
+    UsdGenDeviceToolMetadata _tool;
+    std::vector<UsdGenDeviceChannelMetadata> _channels;
+    std::shared_ptr<const UsdGenDeviceOwner> _owner;
+};
+
+} // namespace usdGen
+
+#endif // USDGEN_DEVICE_GENERATION_H

@@ -37,12 +37,207 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "usdGenImaging/usdGenTokens.h"
-#include "usdGenImaging/usdGenImagingSession.h"
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
+
+// A typed mapped source can suppress an incompatible authored property before
+// the builder sees its VtValue. Preserve that error as independent metadata.
+class _DedicatedTypeErrorsDataSource final
+    : public HdTypedSampledDataSource<VtStringArray> {
+public:
+    HD_DECLARE_DATASOURCE(_DedicatedTypeErrorsDataSource);
+    explicit _DedicatedTypeErrorsDataSource(UsdPrim const& prim) : _prim(prim) {}
+    bool GetContributingSampleTimesForInterval(Time, Time, std::vector<Time>*) override { return false; }
+    VtValue GetValue(Time t) override { return VtValue(GetTypedValue(t)); }
+    VtStringArray GetTypedValue(Time) override {
+        VtStringArray errors;
+        const std::pair<char const*, char const*> fields[] = {
+            {"usdGen:enabled", "bool"}, {"usdGen:blend", "float"},
+            {"usdGen:seed", "int"}, {"usdGen:algorithmVersion", "int"},
+            {"usdGen:width:default", "float"}, {"usdGen:tileTarget", "int"}};
+        for (auto const& field : fields) {
+            auto attr = _prim.GetAttribute(TfToken(field.first));
+            VtValue value;
+            if (!attr || !attr.Get(&value, UsdTimeCode::Default()) || value.IsEmpty()) continue;
+            const std::string expected = field.second;
+            const bool valid = expected == "bool" ? value.IsHolding<bool>() :
+                expected == "float" ? value.IsHolding<float>() : value.IsHolding<int>();
+            if (!valid)
+                errors.push_back(_prim.GetPath().GetString() + ": " + field.first + " has wrong authored type");
+        }
+        return errors;
+    }
+private:
+    UsdPrim _prim;
+};
+
+// Composed hierarchy is the stack topology.  USD's child range preserves the
+// final composed order; visit it backwards and append an operator after its
+// descendants.  Scopes deliberately contribute no entry.  Use the codeless
+// base-schema query, not a concrete type-name list, so future operator types
+// participate without adapter edits.
+void
+_AppendOperatorPostOrder(UsdPrim const &prim, VtArray<SdfPath> *out)
+{
+    std::vector<UsdPrim> children;
+    for (UsdPrim const &child : prim.GetChildren()) children.push_back(child);
+    for (auto child = children.rbegin(); child != children.rend(); ++child) {
+        _AppendOperatorPostOrder(*child, out);
+    }
+    if (prim.IsA(TfToken("UsdGenOperator"))) {
+        out->push_back(prim.GetPath());
+    }
+}
+
+class _OperatorOrderDataSource final
+    : public HdTypedSampledDataSource<VtArray<SdfPath>>
+{
+public:
+    HD_DECLARE_DATASOURCE(_OperatorOrderDataSource);
+    explicit _OperatorOrderDataSource(UsdPrim const &description)
+        : _description(description) {}
+    bool GetContributingSampleTimesForInterval(Time, Time,
+                                                std::vector<Time> *) override
+    { return false; }
+    VtValue GetValue(Time t) override { return VtValue(GetTypedValue(t)); }
+    VtArray<SdfPath> GetTypedValue(Time) override {
+        VtArray<SdfPath> result;
+        UsdPrim const ops = _description.GetChild(TfToken("Ops"));
+        if (!ops) return result;
+        std::vector<UsdPrim> children;
+        for (UsdPrim const &child : ops.GetChildren()) children.push_back(child);
+        for (auto child = children.rbegin(); child != children.rend(); ++child) {
+            _AppendOperatorPostOrder(*child, &result);
+        }
+        return result;
+    }
+private:
+    UsdPrim _description;
+};
+
+HdContainerDataSourceHandle
+_OperatorOrderDataSource(UsdPrim const &description)
+{
+    return HdRetainedContainerDataSource::New(
+        TfToken("operatorOrder"),
+        _OperatorOrderDataSource::New(description));
+}
+
+HdSampledDataSourceHandle
+_Value(VtValue const &value)
+{
+    return HdRetainedSampledDataSource::New(value);
+}
+
+// Dynamic expression metadata is not an authored schema property, so the
+// mapped source cannot publish it.  Transport it as ordinary retained Hydra
+// leaves.  Numeric child indices plus a `path` leaf are collision-free and
+// preserve arbitrary USD names/paths without inventing an escaping grammar.
+HdContainerDataSourceHandle
+_ExpressionsDataSource(UsdPrim const &description)
+{
+    UsdPrim const root = description.GetChild(TfToken("Expressions"));
+    TfTokenVector names;
+    std::vector<HdDataSourceBaseHandle> values;
+    size_t index = 0;
+    if (!root) return HdRetainedContainerDataSource::New();
+    for (UsdPrim const &expr : root.GetChildren()) {
+        if (expr.GetPrimTypeInfo().GetTypeName() != TfToken("UsdGenExpression")) continue;
+        TfTokenVector fields;
+        std::vector<HdDataSourceBaseHandle> fieldValues;
+        fields.push_back(TfToken("path")); fieldValues.push_back(_Value(VtValue(expr.GetPath())));
+        std::string source;
+        if (UsdAttribute a = expr.GetAttribute(TfToken("usdGen:expr:source"))) a.Get(&source);
+        fields.push_back(TfToken("source")); fieldValues.push_back(_Value(VtValue(source)));
+        TfTokenVector outputNames;
+        std::vector<HdDataSourceBaseHandle> outputValues;
+        size_t outputIndex = 0;
+        for (UsdAttribute const &a : expr.GetAttributes()) {
+            std::string const n = a.GetName().GetString();
+            if (n.rfind("outputs:", 0) != 0) continue;
+            TfTokenVector outFields{TfToken("name"), TfToken("nativeType"), TfToken("shape")};
+            std::vector<HdDataSourceBaseHandle> outValues{
+                _Value(VtValue(TfToken(n.substr(8)))),
+                _Value(VtValue(a.GetTypeName().GetAsToken())),
+                _Value(VtValue(a.GetTypeName().GetAsToken()))};
+            outputNames.push_back(TfToken(std::to_string(outputIndex++)));
+            outputValues.push_back(HdRetainedContainerDataSource::New(
+                outFields.size(), outFields.data(), outValues.data()));
+        }
+        fields.push_back(TfToken("outputs"));
+        fieldValues.push_back(HdRetainedContainerDataSource::New(
+            outputNames.size(), outputNames.data(), outputValues.data()));
+        names.push_back(TfToken(std::to_string(index++)));
+        values.push_back(HdRetainedContainerDataSource::New(
+            fields.size(), fields.data(), fieldValues.data()));
+    }
+    return HdRetainedContainerDataSource::New(names.size(), names.data(), values.data());
+}
+
+HdContainerDataSourceHandle
+_ExpressionBindingsDataSource(UsdPrim const &prim)
+{
+    TfTokenVector names;
+    std::vector<HdDataSourceBaseHandle> values;
+    size_t index = 0;
+    for (UsdAttribute const &attr : prim.GetAttributes()) {
+        SdfPathVector connections;
+        attr.GetConnections(&connections);
+        for (SdfPath const &connection : connections) {
+            SdfPath const exprPath = connection.GetPrimPath();
+            TfToken const property = connection.GetNameToken();
+            // Preserve malformed connections too.  The compiler owns the
+            // fail-closed diagnostic; dropping one here would silently turn
+            // a connected parameter back into its literal.
+            bool const isOutput = property.GetString().rfind("outputs:", 0) == 0;
+            TfToken domain("groom");
+            VtValue cd = attr.GetCustomDataByKey(TfToken("usdGen:evaluation"));
+            if (cd.IsHolding<std::string>()) domain = TfToken(cd.UncheckedGet<std::string>());
+            VtValue literal; attr.Get(&literal);
+            TfTokenVector fields{TfToken("expression"), TfToken("output"),
+                TfToken("destination"), TfToken("nativeType"), TfToken("shape"),
+                TfToken("domain"), TfToken("literal")};
+            std::vector<HdDataSourceBaseHandle> fieldValues{
+                _Value(VtValue(exprPath)), _Value(VtValue(isOutput ? TfToken(property.GetString().substr(8)) : TfToken())),
+                _Value(VtValue(attr.GetName())), _Value(VtValue(attr.GetTypeName().GetAsToken())),
+                _Value(VtValue(attr.GetTypeName().GetAsToken())), _Value(VtValue(domain)), _Value(literal)};
+            names.push_back(TfToken(std::to_string(index++)));
+            values.push_back(HdRetainedContainerDataSource::New(
+                fields.size(), fields.data(), fieldValues.data()));
+        }
+    }
+    return HdRetainedContainerDataSource::New(names.size(), names.data(), values.data());
+}
+
+// The stage scene index retains adapter data-source handles across edits.
+// Keep expression snapshots live at the container boundary so a source,
+// output, connection, or evaluation metadata edit is visible without
+// rebuilding the scene-index chain.
+class _LiveExpressionsDataSource final : public HdContainerDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_LiveExpressionsDataSource);
+    explicit _LiveExpressionsDataSource(UsdPrim const &prim) : _prim(prim) {}
+    TfTokenVector GetNames() override { return _ExpressionsDataSource(_prim)->GetNames(); }
+    HdDataSourceBaseHandle Get(TfToken const &name) override
+    { return _ExpressionsDataSource(_prim)->Get(name); }
+private: UsdPrim _prim;
+};
+
+class _LiveExpressionBindingsDataSource final : public HdContainerDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_LiveExpressionBindingsDataSource);
+    explicit _LiveExpressionBindingsDataSource(UsdPrim const &prim) : _prim(prim) {}
+    TfTokenVector GetNames() override { return _ExpressionBindingsDataSource(_prim)->GetNames(); }
+    HdDataSourceBaseHandle Get(TfToken const &name) override
+    { return _ExpressionBindingsDataSource(_prim)->Get(name); }
+private: UsdPrim _prim;
+};
 
 // 06 §2.2 rule 3: the skip-list is exactly what
 bool
@@ -100,15 +295,6 @@ UsdGenPrimAdapterBase::GetImagingSubprimData(
     if (subprim != TfToken()) {
         return nullptr;
     }
-    // 06 §3.7 stage-key contract: the groom prim adapter stashes the live
-    // stage in the weak-stage registry keyed by groom root while the stage
-    // index builds data sources — the only place a stage index with no C
-    // ABI stage handle can learn the stage. Deterministic: runs at data
-    // source build, strictly before adoption/first commit.
-    if (prim.GetPrimTypeInfo().GetTypeName() == TfToken("UsdGenGroom")) {
-        ::usdGenImaging::UsdGenSessionStore::SetStage(
-            prim.GetPath(), prim.GetStage());
-    }
     HdContainerDataSourceHandle base =
         UsdImagingDataSourcePrim::New(
             prim.GetPath(), prim, stageGlobals);
@@ -120,10 +306,25 @@ UsdGenPrimAdapterBase::GetImagingSubprimData(
     if (!usdGen) {
         return base;
     }
+    if (prim.GetPrimTypeInfo().GetTypeName() == TfToken("UsdGenDescription")) {
+        // This sits above the mapped root because it is derived composition
+        // state, rather than an authored usdGen property.
+        usdGen = HdOverlayContainerDataSource::OverlayedContainerDataSources(
+            _OperatorOrderDataSource(prim), usdGen);
+        usdGen = HdOverlayContainerDataSource::OverlayedContainerDataSources(
+            HdRetainedContainerDataSource::New(TfToken("expressions"),
+                                               _LiveExpressionsDataSource::New(prim)), usdGen);
+    } else if (prim.IsA(TfToken("UsdGenOperator"))) {
+        usdGen = HdOverlayContainerDataSource::OverlayedContainerDataSources(
+            HdRetainedContainerDataSource::New(TfToken("expressionBindings"),
+                                               _LiveExpressionBindingsDataSource::New(prim)), usdGen);
+    }
     // The usdGen container and the prim-level containers are disjoint
     // locators; the overlay exists so downstream flattening sees one root.
+    auto combined = HdOverlayContainerDataSource::OverlayedContainerDataSources(usdGen, base);
     return HdOverlayContainerDataSource::OverlayedContainerDataSources(
-        usdGen, base);
+        HdRetainedContainerDataSource::New(TfToken("__usdGenValidationErrors"),
+                                          _DedicatedTypeErrorsDataSource::New(prim)), combined);
 }
 
 HdDataSourceLocatorSet
@@ -145,6 +346,30 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
     result.insert(
         UsdImagingDataSourcePrim::Invalidate(
             prim, subprim, properties, invalidationType));
+    for (auto const& property : properties) {
+        if (property == TfToken("usdGen:enabled") || property == TfToken("usdGen:blend") ||
+            property == TfToken("usdGen:seed") || property == TfToken("usdGen:algorithmVersion") ||
+            property == TfToken("usdGen:width:default") || property == TfToken("usdGen:tileTarget")) {
+            result.insert(HdDataSourceLocator(TfToken("__usdGenValidationErrors")));
+            break;
+        }
+    }
+    if (prim.GetPrimTypeInfo().GetTypeName() == TfToken("UsdGenDescription")) {
+        // Child-order metadata produces a resync on the Description.  The
+        // groom scene index also forwards descendant add/remove/reorder to
+        // this locator; accepting every Description invalidation here keeps
+        // the aggregate coherent for direct USD notice delivery.
+        result.insert(HdDataSourceLocator(
+            PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
+                TfToken("operatorOrder")));
+        result.insert(HdDataSourceLocator(
+            PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
+                TfToken("expressions")));
+    } else if (prim.IsA(TfToken("UsdGenOperator"))) {
+        result.insert(HdDataSourceLocator(
+            PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
+                TfToken("expressionBindings")));
+    }
     return result;
 }
 
@@ -316,6 +541,7 @@ USDGEN_DEFINE_PRIM_ADAPTER(UsdGenDescriptionAdapter)
 USDGEN_DEFINE_PRIM_ADAPTER(UsdGenOperatorAdapter)
 USDGEN_DEFINE_PRIM_ADAPTER(UsdGenMapAdapter)
 USDGEN_DEFINE_PRIM_ADAPTER(UsdGenGuideSetAdapter)
+USDGEN_DEFINE_PRIM_ADAPTER(UsdGenExpressionAdapter)
 
 #undef USDGEN_DEFINE_PRIM_ADAPTER
 
