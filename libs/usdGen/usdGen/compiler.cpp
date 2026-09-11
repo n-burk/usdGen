@@ -327,7 +327,7 @@ UsdGenCompileResult UsdGenCompiler::Compile(UsdGenGraphDesc const &desc, UsdGenG
     _Build(desc, &candidate, /*reuse=*/nullptr, result);
     if (result.errors.empty() && desc.executionBackend == UsdGenExecutionBackend::Cuda) {
         UsdGenDiagnostics diagnostics;
-        candidate._cudaPlan = CompileCudaGraph(desc, &diagnostics);
+        candidate._cudaPlan = CompileCudaGraph(desc, &diagnostics, out->_cudaPlan);
         result.errors.insert(result.errors.end(), diagnostics.errors.begin(), diagnostics.errors.end());
         if (!candidate._cudaPlan && result.errors.empty())
             result.errors.push_back("CUDA plan compilation failed");

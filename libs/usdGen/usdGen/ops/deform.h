@@ -7,8 +7,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 
-/// UsdGenDeformOp — deforms rest-curve points by applying a per-curve transform.
-/// Reads rest points from capture/upstream and applies the deformation offset.
+/// Metadata for the topology-preserving persistent CUDA RBF deformation.
+/// Host execution is unavailable; it must never synthesize displacement.
 class UsdGenDeformOp final : public UsdGenOp
 {
 public:
@@ -17,7 +17,7 @@ public:
 
    TfToken Type() const override { return TfToken("UsdGenDeform"); }
    UsdGenSpace Space() const override { return UsdGenSpace::Deformed; }
-   UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CurveCount; }
+   UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::None; }
    UsdGenRole Role() const override { return UsdGenRole::Curves; }
    bool IsGenerator() const override { return false; }
 

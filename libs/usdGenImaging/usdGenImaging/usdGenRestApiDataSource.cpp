@@ -10,10 +10,9 @@
 //
 // Rest points are `primvars:rest` when authored (the Houdini convention,
 // S12 — it passes through the chain untouched), otherwise the deformed
-// `points` opinion at UsdTimeCode::Default(). Both are read ONCE, at
-// Default time, into retained data sources: the rest channel is never
-// flagged time-varying, so a SetTime costs it no per-frame dirty
-// (MEASURED, research/G-stage-free-parameter-and-time-transport.md §3).
+// `points` opinion at UsdTimeCode::Default(). Live leaves re-read Default
+// time after edits, including through cached handles. They never register
+// as time-varying; editing rest still emits its dedicated dirty locator.
 // Capture-on-first-cook is rejected (S12): the first drawn frame is not
 // necessarily the rest frame.
 //
@@ -42,6 +41,53 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace usdGenImaging {
 
 namespace {
+
+class _LiveRestValueDataSource final : public HdSampledDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_LiveRestValueDataSource);
+    enum Leaf { Points, Counts, Indices, St };
+    _LiveRestValueDataSource(UsdPrim const& prim, Leaf leaf) : _prim(prim), _leaf(leaf) {}
+
+    VtValue GetValue(Time) override {
+        UsdGeomMesh mesh(_prim);
+        if (!mesh) return VtValue();
+        if (_leaf == Points) {
+            TfToken source("default");
+            if (auto attr = _prim.GetAttribute(TfToken("usdGen:rest:source")))
+                attr.Get(&source, UsdTimeCode::Default());
+            // Alternate rest assets/named primvars are not implemented here.
+            // An absent value makes descriptor validation fail closed instead
+            // of silently substituting a different binding surface.
+            if (source != TfToken("default")) return VtValue();
+            UsdGeomPrimvar rest = UsdGeomPrimvarsAPI(_prim).GetPrimvar(TfToken("rest"));
+            UsdAttribute attr = rest ? rest.GetAttr() : UsdAttribute();
+            // ResolveInfo distinguishes an authored empty opinion from no
+            // opinion; the former must not fall through to points.
+            if (attr && attr.GetResolveInfo().HasAuthoredValueOpinion()) {
+                VtValue value;
+                return attr.Get(&value, UsdTimeCode::Default()) &&
+                    value.IsHolding<VtVec3fArray>() ? value : VtValue(VtVec3fArray());
+            }
+            VtValue value;
+            return mesh.GetPointsAttr().Get(&value, UsdTimeCode::Default()) &&
+                value.IsHolding<VtVec3fArray>() ? value : VtValue(VtVec3fArray());
+        }
+        if (_leaf == St) {
+            UsdGeomPrimvar st = UsdGeomPrimvarsAPI(_prim).GetPrimvar(TfToken("st"));
+            VtValue value;
+            return st && st.GetAttr().Get(&value, UsdTimeCode::Default()) &&
+                value.IsHolding<VtVec2fArray>() ? value : VtValue(VtVec2fArray());
+        }
+        VtValue value;
+        UsdAttribute attr = _leaf == Counts ? mesh.GetFaceVertexCountsAttr() : mesh.GetFaceVertexIndicesAttr();
+        return attr.Get(&value, UsdTimeCode::Default()) &&
+            value.IsHolding<VtIntArray>() ? value : VtValue(VtIntArray());
+    }
+    bool GetContributingSampleTimesForInterval(Time, Time, std::vector<Time>*) override { return false; }
+private:
+    UsdPrim _prim; Leaf _leaf;
+};
 
 // One hard diagnostic per prim, not per pull (06 §9: "emitted once per groom
 // per compile"; a scene-index pull happens many times a frame).
@@ -84,47 +130,14 @@ HdContainerDataSourceHandle UsdGenRestApiContainerFactory(
         return nullptr;
     }
 
-    UsdGeomMesh mesh(prim);
-    const UsdGeomPrimvarsAPI primvars(prim);
-    const UsdTimeCode rest = UsdTimeCode::Default();
-
-    // points: authored primvars:rest wins; otherwise the Default-time
-    // deformed opinion (S12).
-    VtVec3fArray restPoints;
-    if (UsdGeomPrimvar restPrimvar = primvars.GetPrimvar(TfToken("rest"));
-        restPrimvar && restPrimvar.HasValue()) {
-        restPrimvar.Get(&restPoints, rest);
-    }
-    if (restPoints.empty()) {
-        VtValue pointsValue;
-        if (mesh.GetPointsAttr().Get(&pointsValue, rest) &&
-            pointsValue.IsHolding<VtVec3fArray>()) {
-            restPoints = pointsValue.UncheckedGet<VtVec3fArray>();
-        }
-    }
-
-    VtValue fvcValue, fviValue;
-    mesh.GetFaceVertexCountsAttr().Get(&fvcValue, rest);
-    mesh.GetFaceVertexIndicesAttr().Get(&fviValue, rest);
-    const VtIntArray faceVertexCounts =
-        fvcValue.IsHolding<VtIntArray>() ? fvcValue.UncheckedGet<VtIntArray>() : VtIntArray();
-    const VtIntArray faceVertexIndices =
-        fviValue.IsHolding<VtIntArray>() ? fviValue.UncheckedGet<VtIntArray>() : VtIntArray();
-
-    VtVec2fArray uv;
-    if (UsdGeomPrimvar stPrimvar = primvars.GetPrimvar(TfToken("st"));
-        stPrimvar && stPrimvar.HasValue()) {
-        stPrimvar.Get(&uv, rest);
-    }
-
-    HdSampledDataSourceHandle pointsSrc = HdRetainedTypedSampledDataSource<VtVec3fArray>::New(restPoints);
-    HdSampledDataSourceHandle countsSrc = HdRetainedTypedSampledDataSource<VtIntArray>::New(faceVertexCounts);
-    HdSampledDataSourceHandle indicesSrc = HdRetainedTypedSampledDataSource<VtIntArray>::New(faceVertexIndices);
-    HdSampledDataSourceHandle uvSrc = HdRetainedTypedSampledDataSource<VtVec2fArray>::New(uv);
+    HdSampledDataSourceHandle pointsSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::Points);
+    HdSampledDataSourceHandle countsSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::Counts);
+    HdSampledDataSourceHandle indicesSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::Indices);
+    HdSampledDataSourceHandle uvSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::St);
 
     // Build the retained tree by hand: usdGen/rest/{points,faceVertexCounts,
-    // faceVertexIndices,st}. Retained sources are never time-varying, so the
-    // container inherits the rest channel's zero per-frame cost (S12).
+    // faceVertexIndices,st}. Only the containers are retained: the live leaves
+    // sample Default time without registering per-frame variability.
     TfTokenVector restNames{TfToken("points"), TfToken("faceVertexCounts"), TfToken("faceVertexIndices"), TfToken("st")};
     HdDataSourceBaseHandle restValues[4] = {
         pointsSrc, countsSrc, indicesSrc, uvSrc};

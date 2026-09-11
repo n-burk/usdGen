@@ -33,6 +33,10 @@ public:
 
     cudaError_t reset(size_t count);
     void release() noexcept;
+    // Only for a lost device or unprovable completion: abandon handles rather
+    // than free storage still potentially in use. Context teardown reclaims
+    // these intentionally quarantined allocations/events.
+    void quarantine() noexcept { data_ = nullptr; size_ = 0; ready_ = nullptr; }
     DeviceView<T> view() { return {data_, size_}; }
     DeviceView<const T> view() const { return {data_, size_}; }
     size_t size() const { return size_; }

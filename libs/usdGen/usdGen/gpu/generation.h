@@ -11,7 +11,8 @@ namespace usdGen::gpu {
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation,
     std::string* reason = nullptr, bool alreadyDeformed = false,
-    std::unique_ptr<DeviceBuffer<float>> widths = {});
+    std::unique_ptr<DeviceBuffer<float>> widths = {},
+    std::unique_ptr<DeviceBuffer<float3>> points = {});
 
 // Read-only geometry access for CUDA tools/consumers. The native stream must
 // remain alive until every copy of the lease is released. Destruction waits

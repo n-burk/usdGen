@@ -75,8 +75,9 @@ can proceed without claiming those criteria passed.
   'bench|SchemaUpToDate|Cuda|Hierarchy' --output-on-failure`.
   These are intermediate-tree results, not release-commit or complete gate
   evidence. Subsequent expression transport changes still require reruns.
-- `ops/deform.cpp` still has a placeholder implementation. A standalone RBF
-  library/test does not replace it or prove a groom renders correctly.
+- At this early checkpoint `ops/deform.cpp` still had a placeholder. The CUDA
+  RBF checkpoint below replaces it; standalone tests alone were not accepted
+  as proof that a groom renders correctly.
 - Later integration checkpoint: `ctest --test-dir build-codex -L 'T0|T1'
   -E 'bench' --output-on-failure` passed **41/41** tests, including schema
   regeneration drift, expression transport, hierarchy, B-1/B-2, sessions,
@@ -235,6 +236,75 @@ larger discussion network remains unsupported as a complete cook/render.
   reset. These functional checks are not performance or full-release gates.
   Native workers were Luna, with local Qwen and Hivemind review lanes; root
   reviewed, corrected and ran the integrated code.
+
+### CUDA RBF execution checkpoint
+
+[cuda-rbf-network.usda](examples/cuda-rbf-network.usda) is now an executable
+small `CurveSource -> Deform(rbf) -> Width` hierarchy for an explicitly
+device-aware consumer. The larger schema discussion network is still not a
+fully supported cook/render. Width operators can precede or follow the one
+rest-to-animated Deform step; a second deformation is rejected.
+
+- The CUDA executor integrates persistent surface sampling and RBF solve state.
+  Deterministic GPU farthest-point sampling uses O(vertices × samples) work,
+  parallel distance updates and a deterministic single-block argmax reduction.
+  Duplicate centers are suppressed. Rest positions, topology, surface path,
+  algorithm version and evaluated sample budget govern rebinding; pose changes
+  and frame scrubbing reuse the rest factorization. Sample count is a permitted
+  scalar control readback, not a geometry readback.
+- Deform evaluates incoming styled points, retaining canonical C3 rest as a
+  separate channel. Triangle barycentric and quad bilinear root targets are
+  sampled on the GPU. Root correction translates the entire warped strand,
+  then point/groom/primitive blend and mask fields apply. Runtime SeExpr can
+  control groom `rbfSamples`/`enabled`, groom or primitive `lockRoots`, and all
+  three domains for scalar blend/mask amount. Shaped controls and the remaining
+  non-identity mask controls are not implemented.
+- Output points are privately staged and retained by the published immutable
+  device generation and its leases. Source topology/rest/IDs and previous Width
+  outputs remain independent. Invalid surfaces, failed/rank-deficient bindings,
+  wrong root-binding surfaces and already-deformed source input cannot replace
+  the last good generation. The former fake CPU Deform path now rejects rather
+  than fabricating geometry. Device-loss cleanup quarantines the new binding
+  and deformation buffers; actual fault-injection coverage is still due.
+- Hydra surface descriptors now consume `usdGen/rest/*` from `UsdGenRestAPI`
+  instead of binding to the current animated points. Live Default-time leaves
+  survive cached handles and preserve explicit empty rest. Current/rest topology
+  mismatch is rejected. Unsupported alternative rest source modes fail closed;
+  asset/named-primvar rest sources remain to implement. C3/mesh object transforms
+  must currently be identity; subsets, general polygons, automatic C3 root
+  rebinding and source resampling remain unsupported.
+- Functional tests cover rest identity, affine motion, nonlinear root targets,
+  repeated poses/scrubbing without rebinding, rest edits, runtime sample-count
+  changes, typed expression domains, retained older leases and failure retention.
+  The real USD/Hydra example also checks Default-time rest edits, their actual
+  scene-index dirty notice, changed binding identity and invalid topology.
+  An intermediate full run passed **55/55** non-benchmark T0/T1 tests; subsequent
+  hardening and stronger numerical oracles require the final rerun below.
+  The CUDA-disabled core target also rebuilt successfully.
+- Source and animated driver uploads still repeat; incremental refresh and
+  persistent instruction/context allocation remain open. Full-rank affine
+  support is required; no planar/rank-deficient fallback is silently applied.
+  Guide-motion transfer, remaining operators, brushes, renderer graphics
+  interoperability, production memory/performance measurements and release
+  gates remain unfinished. A passing tool-consumer test is not a render claim.
+- Root review also corrected worker test oracles that used stale last-good
+  generations, assumed absolute cache counts and accepted errors larger than
+  the expected motion. A paired unlocked nonlinear cook now proves primitive
+  root locking actually changes the intended strand while leaving the other
+  unchanged. Root caught an unwritten sample-index tail after deduplication;
+  CUDA initcheck then exposed nine uninitialized staging/control copies in
+  failed-bind tests. Both were corrected. `compute-sanitizer --tool initcheck
+  --error-exitcode 1` and `--tool memcheck --error-exitcode 1` each now report
+  **0 errors** for both `testUsdGenCudaSurfaceBinding` and
+  `testUsdGenCudaRbfSession`. These are bounded memory checks, not full fault
+  injection or a performance gate. Native workers were Luna; local Qwen
+  supplied review, while the later Hivemind attempts returned empty responses
+  or timed out and are not counted as completed substantive reviews.
+- Final checkpoint rerun: `cmake --build build-codex -j6` succeeded and
+  `ctest --test-dir build-codex -L 'T0|T1' -E bench --output-on-failure`
+  passed **55/55** after the memory-check fixes. The CUDA-disabled core target
+  built successfully in `/tmp/usdgen-cpu-check-4XIfVs`. No full-plan, renderer,
+  performance or release completion is implied.
 
 ## Validation discipline
 

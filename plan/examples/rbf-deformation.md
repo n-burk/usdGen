@@ -5,7 +5,10 @@ animation and HiPhyEngine's Curves Motion Mapper. This extends the hierarchy,
 execution-time SeExpr and persistent CUDA geometry requirements in the companion
 drafts. `UsdGenDeform` in the mock now authors `usdGen:mode = "rbf"`; RBF is a
 required animation path, replacing the old plan's rigidFrame-first/v2-RBF split.
-No RBF kernel or renderer integration was implemented in this design change.
+The original design change did not implement a runtime. The subsequent limited
+CUDA session implementation is tracked in
+[the implementation overlay](../14-hierarchy-cuda-implementation.md#cuda-rbf-execution-checkpoint);
+renderer integration remains unfinished.
 
 ## What the references establish
 
@@ -175,7 +178,9 @@ Required runtime checks include rest identity, translation/rotation, bend/twist,
 animated roots, nonuniform scale, close/opposing surface regions, degenerate
 sample layouts, strand/guide ID stability, curls under guide twist, changing
 parting, frame scrubbing, motion samples, tool edits and zero geometry readbacks.
-Compare to a CPU mathematical oracle for validation only. The current
-`libs/usdGen/usdGen/ops/deform.cpp` does not implement an RBF solve; setting the
-authored token alone cannot deliver this behavior. Existing plan kernel-status
-claims must not be used as proof of the new path.
+Compare to a CPU mathematical oracle for validation only. The CUDA executor now
+routes supported `UsdGenDeform` nodes to the persistent RBF library; the old
+CPU placeholder is removed and host execution rejects this operator. The small
+[executable example](cuda-rbf-network.usda) exercises this route for a device
+consumer. It does not establish full operator coverage or a working renderer;
+the original discussion network remains a design artifact.

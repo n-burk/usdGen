@@ -557,7 +557,7 @@ _HCollectSubtree(HdSceneIndexBase &input, SdfPath const &root,
 // matrix post-flattening (S4).
 void
 _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
-               _HdTime t, UsdGenSurfaceDesc *out)
+               _HdTime t, UsdGenSurfaceDesc *out, std::vector<std::string>* errors)
 {
     HdContainerDataSourceHandle primDs;
     TfToken primType;
@@ -583,12 +583,22 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
         // points source on the final index).
         _HPrimvarTyped(primDs, "points", t, &out->points);
     }
-    _HPrimvarTyped(primDs, "rest", t, &out->restPoints);
-    if (out->restPoints.empty()) {
-        // S12: no authored rest -> the deformed opinion IS the rest (the
-        // UsdGenRestAPI adapter publishes the same fallback; static fixtures
-        // read it at the sample time, matching Default-time stage reads).
-        out->restPoints = out->points;
+    auto rest = _HChild(_HChild(primDs, "usdGen"), "rest");
+    if (rest) {
+        VtIntArray restCounts, restIndices;
+        bool valid = _HGetTyped(rest, t, &out->restPoints, {"points"}) &&
+            _HGetTyped(rest, t, &restCounts, {"faceVertexCounts"}) &&
+            _HGetTyped(rest, t, &restIndices, {"faceVertexIndices"});
+        if (!valid || restCounts != out->faceVertexCounts || restIndices != out->faceVertexIndices) {
+            errors->push_back(path.GetString() + ": missing rest data or animated/rest topology mismatch");
+            out->restFromCurrentPoints = true;
+        }
+    } else {
+        // Legacy reference clients may omit RestAPI. Keep their old data
+        // visible, but CUDA RBF must not bind from a posed first-pull sample.
+        _HPrimvarTyped(primDs, "rest", t, &out->restPoints);
+        if (out->restPoints.empty()) out->restPoints = out->points;
+        out->restFromCurrentPoints = true;
     }
     _HPrimvarTyped(primDs, "st", t, &out->uv);
     _HPrimvarTyped(primDs, "velocities", t, &out->velocities);
@@ -615,6 +625,8 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
     HdContainerDataSourceHandle const ug = _HUsdGen(primDs);
     out->path = path;
     out->role = role;
+    if (auto matrix = HdXformSchema::GetFromParent(primDs).GetMatrix())
+        out->worldMatrix = matrix->GetTypedValue(t);
 
     HdContainerDataSourceHandle const topo =
         _HChild(_HChild(primDs, "basisCurves"), "topology");
@@ -899,7 +911,7 @@ BuildGraphDescFromHydra(
                 slot.subsetFaces = idx->GetTypedValue(t);
             }
         } else {
-            _HBuildSurface(input, p, time, t, &slot);
+            _HBuildSurface(input, p, time, t, &slot, &desc.validationErrors);
         }
     };
 

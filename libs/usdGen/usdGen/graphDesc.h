@@ -91,6 +91,7 @@ struct UsdGenCurveSetDesc
     // Compatibility builders may lack a Default-time C3 snapshot. CUDA
     // admission must not mistake a current-frame fallback for bound rest.
     bool            restFromCurrentPoints = false;
+    GfMatrix4d      worldMatrix{1.0}; // source object space must be explicit for deformation
     VtFloatArray    widths;
     TfToken         type{"cubic"};
     TfToken         basis{"bspline"};
@@ -114,13 +115,14 @@ struct UsdGenSurfaceDesc
     UsdGenSurfaceId id = 0;
     VtIntArray     faceVertexCounts, faceVertexIndices;
     VtVec3fArray   restPoints;        // usdGen/rest/points (S12), UsdTimeCode::Default()
+    bool          restFromCurrentPoints = false; // compatibility fallback, never a valid RBF binding
     VtVec3fArray   points;            // deformed, at UsdGenGraphDesc::time
     /// Sorted by time; samples[0].time == UsdGenGraphDesc::time (R23).
     std::vector<UsdGenSurfaceSample> samples;
     VtVec3fArray   velocities;        // motion profile P1 only; empty otherwise
     VtVec2fArray   uv;                // the surface's primary uv set
     VtIntArray     subsetFaces;       // empty == whole mesh; a GeomSubset restricts scatter (R15)
-    GfMatrix4d     worldMatrix;       // post-flattening, resetXformStack (S4)
+    GfMatrix4d     worldMatrix{1.0};  // post-flattening, resetXformStack (S4)
     uint64_t       surfaceGeneration = 0; // bumped by any points/topology change
 };
 
@@ -162,7 +164,7 @@ struct UsdGenGraphDesc
     std::vector<UsdGenMapDesc>     maps;
     std::vector<UsdGenExpressionDesc> expressions;
     UsdGenLookDesc                 look;
-    GfMatrix4d                     xformMatrix;    // description world matrix (post-flattening, S4)
+    GfMatrix4d                     xformMatrix{1.0}; // description world matrix (post-flattening, S4)
     TfToken                        purpose;        // inherited by hand to every tile (C2)
     TfToken                        visibility;     // inherited by hand to every tile (C2)
     SdfPath                        materialPath;   // the description's bound Material (C2)

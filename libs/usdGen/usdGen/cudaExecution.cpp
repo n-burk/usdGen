@@ -6,12 +6,16 @@
 #include <map>
 #include <array>
 #include <mutex>
+#include <atomic>
 
 #ifdef USDGEN_ENABLE_CUDA
 #include "usdGen/cudaSourceInput.h"
 #include "usdGen/gpu/generation.h"
 #include "usdGen/cudaParameters.h"
 #include "usdGen/gpu/width.h"
+#include "usdGen/cudaSurfaceInput.h"
+#include "usdGen/gpu/surfaceBinding.h"
+#include "usdGen/gpu/deformCurves.h"
 #include "usdGenMath/usdGenMath/ramp.h"
 #endif
 
@@ -99,6 +103,66 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
     }
     return true;
 }
+bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
+    if (node.mode != TfToken("rbf") || node.algorithmVersion < 0 || node.algorithmVersion > 1)
+        return Fail(diagnostics, "Deform requires the supported rbf mode/version");
+    if (node.surfaces.size() != 1 || !node.references.empty() || !node.curves.empty() || !node.maps.empty())
+        return Fail(diagnostics, "RBF Deform requires exactly one surface and no guide/map inputs");
+    if ((!node.space.IsEmpty() && node.space != TfToken("auto") && node.space != TfToken("deformed")) ||
+        (!node.readPhase.IsEmpty() && node.readPhase != TfToken("final")))
+        return Fail(diagnostics, "RBF Deform requires deformed space and final driver sampling");
+    if (!std::isfinite(node.blend) || node.blend < 0 || node.blend > 1)
+        return Fail(diagnostics, "Deform blend must be in [0,1]");
+    std::set<std::string> seen;
+    for (auto const& param : node.params) {
+        auto name = param.name.GetString();
+        bool valid = seen.insert(name).second;
+        if (name == "rbfSamples")
+            valid &= param.value.IsHolding<int>() && param.value.UncheckedGet<int>() >= 4 && param.value.UncheckedGet<int>() <= 46336;
+        else if (name == "lockRoots") valid &= param.value.IsHolding<bool>();
+        else if (name == "twistAware") valid &= param.value == VtValue(true);
+        else if (name == "preserveShape") valid &= param.value == VtValue(0.0f);
+        else if (name == "preserveShape:iterations") valid &= param.value == VtValue(0);
+        else if (name == "label") valid &= param.value.IsHolding<std::string>();
+        else if (name == "mask:amount")
+            valid &= param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>()) &&
+                param.value.UncheckedGet<float>() >= 0 && param.value.UncheckedGet<float>() <= 1;
+        else if (name == "mask:ramp:interpolation") valid &= param.value.IsHolding<TfToken>();
+        else if (name == "mask:ramp:knots") {
+            valid &= param.value.IsHolding<VtVec2fArray>();
+            float previous = -1;
+            if (valid) for (auto const& knot : param.value.UncheckedGet<VtVec2fArray>()) {
+                valid &= std::isfinite(knot[0]) && std::isfinite(knot[1]) &&
+                    knot[0] >= 0 && knot[0] <= 1 && knot[0] >= previous;
+                previous = knot[0];
+            }
+        } else {
+            auto found = IdentityMask().find(name);
+            valid &= found != IdentityMask().end() && param.value == found->second;
+        }
+        if (!valid) return Fail(diagnostics, "unsupported or malformed RBF parameter " + name);
+    }
+    for (auto const& ramp : node.ramps)
+        if (!ramp.knots.empty() || !ramp.colors.empty() || !ramp.positions.empty())
+            return Fail(diagnostics, "RBF ramps require named parameters");
+    seen.clear();
+    for (auto const& binding : node.expressionBindings) {
+        auto name = LocalName(binding.destination);
+        bool boolean = name == "enabled" || name == "lockRoots";
+        bool integer = name == "rbfSamples";
+        auto const& shape = binding.destinationShape;
+        if ((!boolean && !integer && name != "blend" && name != "mask:amount") ||
+            !seen.insert(name).second || shape.isArray || shape.elementCount != 1 ||
+            shape.components != 1 || shape.rows != 1 || shape.columns != 1 ||
+            shape.scalar != (boolean ? expr::ScalarType::Bool : integer ? expr::ScalarType::Int32 : expr::ScalarType::Float32) ||
+            binding.nativeType != TfToken(boolean ? "bool" : integer ? "int" : "float"))
+            return Fail(diagnostics, "unsupported or incorrectly typed RBF expression " + name);
+        if (((name == "enabled" || integer) && binding.domain != expr::Domain::Groom) ||
+            (name == "lockRoots" && binding.domain == expr::Domain::Point))
+            return Fail(diagnostics, "RBF structural/enabled controls require groom; root locking requires groom/primitive");
+    }
+    return true;
+}
 #endif
 }
 
@@ -106,13 +170,119 @@ class UsdGenCudaExecutionPlan {
 public:
     std::mutex mutex;
 #ifdef USDGEN_ENABLE_CUDA
-    struct Width {
+    struct RbfCache;
+    struct Step {
+        SdfPath path;
+        TfToken type;
         CudaParameterPlan parameters;
         std::array<float, kUsdGenRampLutSize> profile{}, mask{};
+        CudaSurfacePrepared surface;
+        std::shared_ptr<RbfCache> rbf;
     };
-    std::vector<std::unique_ptr<Width>> widths;
+    std::vector<std::unique_ptr<Step>> steps;
 #endif
 };
+
+#ifdef USDGEN_ENABLE_CUDA
+struct UsdGenCudaExecutionPlan::RbfCache {
+    struct State {
+        struct Resources {
+            gpu::CudaSurfaceBinding surface;
+            gpu::CudaRbfBinding field;
+            gpu::DeviceBuffer<float3> currentVertices;
+        };
+        int device = -1;
+        uint32_t sampleBudget = 0;
+        uint64_t identity = 0;
+        std::unique_ptr<Resources> resources = std::make_unique<Resources>();
+        ~State() {
+            int previous = -1;
+            cudaGetDevice(&previous);
+            if (device < 0 || cudaSetDevice(device) != cudaSuccess) {
+                resources.release(); // cannot safely free a foreign/lost context
+                return;
+            }
+            resources.reset();
+            if (previous >= 0 && previous != device) cudaSetDevice(previous);
+        }
+    };
+    std::mutex mutex;
+    CudaSurfaceBindingKey key;
+    std::unique_ptr<State> state;
+    uint64_t bindCount = 0, solveCount = 0;
+};
+
+namespace {
+bool SameRest(CudaSurfaceBindingKey const& a, CudaSurfaceBindingKey const& b) {
+    // Runtime sample-count expressions control a rebind separately. Sharing
+    // this cache must not depend on a frame's evaluated count or posed points.
+    return a.path == b.path && a.restPoints == b.restPoints &&
+        a.faceVertexCounts == b.faceVertexCounts && a.faceVertexIndices == b.faceVertexIndices &&
+        a.algorithmVersion == b.algorithmVersion;
+}
+template<class T> bool Upload(gpu::DeviceBuffer<T>& buffer, std::vector<T> const& values) {
+    return buffer.reset(values.size()) == cudaSuccess &&
+        (values.empty() || cudaMemcpyAsync(buffer.data(), values.data(), values.size() * sizeof(T),
+            cudaMemcpyHostToDevice, nullptr) == cudaSuccess);
+}
+
+bool UpdateRbf(UsdGenCudaExecutionPlan::Step& step, uint32_t budget,
+               gpu::CudaCurveSource const& source, UsdGenDiagnostics* diagnostics) {
+    auto& cache = *step.rbf;
+    int device = -1;
+    if (cudaGetDevice(&device) != cudaSuccess) return Fail(diagnostics, "cannot select RBF device");
+    if (cache.state && cache.state->device != device)
+        return Fail(diagnostics, "RBF binding belongs to a different CUDA device");
+    if (!cache.state || cache.state->sampleBudget != budget) {
+        auto candidate = std::make_unique<UsdGenCudaExecutionPlan::RbfCache::State>();
+        candidate->device = device;
+        candidate->sampleBudget = budget;
+        auto& state = *candidate->resources;
+        gpu::DeviceBuffer<float3> rest;
+        gpu::DeviceBuffer<uint32_t> offsets, indices;
+        if (!Upload(rest, step.surface.restPoints) || !Upload(offsets, step.surface.faceOffsets) ||
+            !Upload(indices, step.surface.faceVertexIndices))
+            return Fail(diagnostics, "RBF rest-surface upload failed");
+        if (state.surface.Bind({rest.data(), rest.size()}, {offsets.data(), offsets.size()},
+                offsets.size() - 1, {indices.data(), indices.size()}, budget, nullptr) != gpu::SurfaceBindingStatus::Ok ||
+            state.surface.Finish(nullptr) != gpu::SurfaceBindingStatus::Ok)
+            return Fail(diagnostics, std::string("RBF sample binding: ") + state.surface.diagnostic());
+        if (state.field.Bind(state.surface.restSamples(), 0.0, nullptr) != gpu::RbfStatus::Ok)
+            return Fail(diagnostics, std::string("RBF factorization: ") + state.field.diagnostic());
+        static std::atomic<uint64_t> nextIdentity{1};
+        candidate->identity = nextIdentity.fetch_add(1);
+        cache.state = std::move(candidate);
+        ++cache.bindCount;
+    }
+    auto& state = *cache.state->resources;
+    if (!Upload(state.currentVertices, step.surface.currentPoints))
+        return Fail(diagnostics, "RBF animated-surface upload failed");
+    if (state.surface.Update({state.currentVertices.data(), state.currentVertices.size()},
+            source.rootPrim(), source.rootUV(), nullptr) != gpu::SurfaceBindingStatus::Ok ||
+        state.surface.Finish(nullptr) != gpu::SurfaceBindingStatus::Ok)
+        return Fail(diagnostics, std::string("RBF current samples/roots: ") + state.surface.diagnostic());
+    if (state.field.Solve(state.surface.currentSamples(), nullptr) != gpu::RbfStatus::Ok)
+        return Fail(diagnostics, std::string("RBF pose solve: ") + state.field.diagnostic());
+    ++cache.solveCount;
+    return true;
+}
+} // namespace
+#endif
+
+std::vector<UsdGenCudaBindingStats> GetCudaBindingStats(UsdGenCudaExecutionPlan& plan) {
+    std::lock_guard<std::mutex> lock(plan.mutex);
+    std::vector<UsdGenCudaBindingStats> result;
+#ifdef USDGEN_ENABLE_CUDA
+    for (auto const& step : plan.steps) if (step->rbf) {
+        std::lock_guard<std::mutex> cacheLock(step->rbf->mutex);
+        auto const& cache = *step->rbf;
+        result.push_back({step->path, cache.state ? cache.state->identity : 0,
+            cache.bindCount, cache.solveCount,
+            cache.state ? cache.state->resources->field.sampleCount() : 0});
+    }
+#endif
+    return result;
+}
 
 bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics) {
 #ifndef USDGEN_ENABLE_CUDA
@@ -123,11 +293,19 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         return Fail(diagnostics, "CUDA hierarchy must begin with CurveSource");
     if (!std::isfinite(desc.timeCodesPerSecond) || desc.timeCodesPerSecond <= 0)
         return Fail(diagnostics, "timeCodesPerSecond must be finite and positive");
+    bool sawDeform = false;
     for (size_t i = 1; i < desc.nodes.size(); ++i) {
         auto const& next = desc.nodes[i];
         if (next.inputs.size() != 1 || next.inputs[0] != desc.nodes[i-1].path)
-            return Fail(diagnostics, "CUDA Width chain must follow the hierarchy-derived execution order");
-        if (!ValidateWidth(next, diagnostics)) return false;
+            return Fail(diagnostics, "CUDA chain must follow the hierarchy-derived execution order");
+        if (next.type == TfToken("UsdGenDeform")) {
+            if (sawDeform) return Fail(diagnostics, "a second rest-to-animated deformation would apply surface motion twice");
+            sawDeform = true;
+            if (!ValidateDeform(next, diagnostics)) return false;
+            if (desc.nodes.front().surfaces.size() != 1 ||
+                desc.nodes.front().surfaces.front() != next.surfaces.front())
+                return Fail(diagnostics, "RBF target must match the CurveSource root-binding surface");
+        } else if (!ValidateWidth(next, diagnostics)) return false;
     }
     auto const& node = desc.nodes.front();
     if (!node.expressionBindings.empty())
@@ -151,6 +329,15 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         return Fail(diagnostics, "description default width must be finite and non-negative");
     if (!node.mode.IsEmpty()) return Fail(diagnostics, "CurveSource has no mode property");
     UsdGenParamView params; params.desc = &desc; params.node = &node;
+    if (sawDeform && !params.GetBool(TfToken("useRest"), true))
+        return Fail(diagnostics, "already-deformed CurveSource cannot feed rest-to-animated RBF Deform");
+    if (sawDeform) {
+        auto source = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
+            [&](auto const& curves) { return curves.path == node.curves.front(); });
+        if (desc.xformMatrix != GfMatrix4d(1.0) || source == desc.curveSets.end() ||
+            source->worldMatrix != GfMatrix4d(1.0))
+            return Fail(diagnostics, "RBF currently requires identity Description and CurveSource transforms");
+    }
     if (params.GetToken(TfToken("lane"), TfToken("hair")) != TfToken("hair"))
         return Fail(diagnostics, "reference-lane CurveSource is not yet integrated");
     // Never silently ignore an authored effect just because this is a source.
@@ -182,16 +369,21 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
 }
 
 std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
-    UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics) {
+    UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics,
+    std::shared_ptr<UsdGenCudaExecutionPlan> const& previous) {
     if (!ValidateCudaGraph(desc, diagnostics)) return {};
     auto plan = std::make_shared<UsdGenCudaExecutionPlan>();
 #ifdef USDGEN_ENABLE_CUDA
+    std::unique_lock<std::mutex> previousLock;
+    if (previous) previousLock = std::unique_lock<std::mutex>(previous->mutex);
     for (size_t i = 1; i < desc.nodes.size(); ++i) {
-        auto width = std::make_unique<UsdGenCudaExecutionPlan::Width>();
+        auto width = std::make_unique<UsdGenCudaExecutionPlan::Step>();
+        width->path = desc.nodes[i].path;
+        width->type = desc.nodes[i].type;
         std::vector<std::string> errors;
         if (CudaParameterPlan::Compile(desc, desc.nodes[i], &width->parameters, &errors) != CudaParameterStatus::Ok) {
             for (auto const& error : errors) Fail(diagnostics, error);
-            if (errors.empty()) Fail(diagnostics, "Width parameter compilation failed");
+            if (errors.empty()) Fail(diagnostics, "operator parameter compilation failed");
             return {};
         }
         UsdGenParamView params; params.desc = &desc; params.node = &desc.nodes[i];
@@ -200,10 +392,33 @@ std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
             UsdGenBuildRampLut(value.UncheckedGet<VtVec2fArray>(),
                 params.GetToken(TfToken(interpolationName), TfToken("catmullRom")), output.data(), output.size());
         };
-        lut("width:knots", "width:interpolation", width->profile);
+        if (width->type == TfToken("UsdGenWidth"))
+            lut("width:knots", "width:interpolation", width->profile);
         lut("mask:ramp:knots", "mask:ramp:interpolation", width->mask);
-        plan->widths.push_back(std::move(width));
+        if (width->type == TfToken("UsdGenDeform")) {
+            auto found = std::find_if(desc.surfaces.begin(), desc.surfaces.end(),
+                [&](auto const& surface) { return surface.path == desc.nodes[i].surfaces.front(); });
+            if (found == desc.surfaces.end()) { Fail(diagnostics, "missing RBF surface"); return {}; }
+            if (PrepareCudaSurface(*found, params.GetInt(TfToken("rbfSamples"), 100),
+                    desc.nodes[i].algorithmVersion == 0 ? 1 : desc.nodes[i].algorithmVersion,
+                    &width->surface, &errors) != CudaSurfacePreparationStatus::Ok) {
+                for (auto const& error : errors) Fail(diagnostics, error);
+                return {};
+            }
+            if (previous) for (auto const& old : previous->steps)
+                if (old->path == width->path && old->rbf && SameRest(old->rbf->key, width->surface.key)) {
+                    width->rbf = old->rbf;
+                    break;
+                }
+            if (!width->rbf) {
+                width->rbf = std::make_shared<UsdGenCudaExecutionPlan::RbfCache>();
+                width->rbf->key = width->surface.key;
+            }
+        }
+        plan->steps.push_back(std::move(width));
     }
+#else
+    (void)previous;
 #endif
     return plan;
 }
@@ -218,7 +433,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     (void)frame;
     return {};
 #else
-    if (!std::isfinite(frame) || plan.widths.size() + 1 != desc.nodes.size()) {
+    if (!std::isfinite(frame) || plan.steps.size() + 1 != desc.nodes.size()) {
         Fail(diagnostics, "invalid frame or mismatched compiled CUDA plan"); return {};
     }
     auto const& node = desc.nodes.front();
@@ -326,8 +541,10 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     }
     auto geometry = source->view();
     std::unique_ptr<gpu::DeviceBuffer<float>> finalWidths;
-    for (size_t i = 0; i < plan.widths.size(); ++i) {
-        auto& width = *plan.widths[i];
+    std::unique_ptr<gpu::DeviceBuffer<float3>> finalPoints;
+    bool deformed = !options.useRest;
+    for (size_t i = 0; i < plan.steps.size(); ++i) {
+        auto& width = *plan.steps[i];
         auto const& op = desc.nodes[i+1];
         expr::Context context;
         context.frame = frame;
@@ -338,7 +555,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         if (width.parameters.Evaluate(geometry, {source->hairT(), source->rootUV()},
                 context, nullptr, &errors) != CudaParameterStatus::Ok) {
             for (auto const& error : errors) Fail(diagnostics, error);
-            if (errors.empty()) Fail(diagnostics, "Width expression evaluation failed at " + op.path.GetString());
+            if (errors.empty()) Fail(diagnostics, "expression evaluation failed at " + op.path.GetString());
             return {};
         }
         UsdGenParamView values; values.desc = &desc; values.node = &op;
@@ -354,6 +571,56 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
                     {static_cast<uint8_t const*>(expression->data), expression->count}, expression->domain);
             return gpu::BoolField::Literal(values.GetBool(TfToken(name), fallback));
         };
+        if (width.type == TfToken("UsdGenDeform")) {
+            int budget = values.GetInt(TfToken("rbfSamples"), 100);
+            if (auto const* expression = width.parameters.Find(TfToken("rbfSamples"))) {
+                // This one groom-level integer changes binding structure. It
+                // is control data, not a geometry/parameter-field readback.
+                if (cudaMemcpy(&budget, expression->data, sizeof(budget), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                    Fail(diagnostics, "cannot read expression-driven RBF sample count"); return {};
+                }
+            }
+            if (budget < 4 || budget > 46336) {
+                Fail(diagnostics, "RBF sample count exceeds the supported solver range [4,46336]"); return {};
+            }
+            auto nextPoints = std::make_unique<gpu::DeviceBuffer<float3>>();
+            if (nextPoints->reset(geometry.pointCount) != cudaSuccess) {
+                Fail(diagnostics, "RBF point allocation failed"); return {};
+            }
+            if (geometry.pointCount) {
+                if (source->rootPrim().size != geometry.curveCount || source->rootUV().size != geometry.curveCount) {
+                    Fail(diagnostics, "RBF deformation requires persistent C3 root bindings"); return {};
+                }
+                std::lock_guard<std::mutex> cacheLock(width.rbf->mutex);
+                if (!UpdateRbf(width, static_cast<uint32_t>(budget), *source, diagnostics)) return {};
+                gpu::DeformParameters parameters;
+                parameters.blend = field("blend", op.blend);
+                parameters.maskAmount = field("mask:amount", 1);
+                parameters.enabled = boolean("enabled", op.enabled);
+                parameters.lockRoots = boolean("lockRoots", true);
+                parameters.hairT = source->hairT();
+                gpu::DeviceBuffer<float> mask;
+                if (mask.reset(width.mask.size()) != cudaSuccess ||
+                    cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, nullptr) != cudaSuccess) {
+                    Fail(diagnostics, "RBF mask upload failed"); return {};
+                }
+                parameters.maskProfile = {mask.data(), mask.size()};
+                auto& state = *width.rbf->state->resources;
+                gpu::CudaRbfCurveDeformer kernel;
+                if (kernel.Deform(state.field, geometry, state.surface.rootTargets(), parameters,
+                        nextPoints->view(), nullptr) != gpu::RbfStatus::Ok ||
+                    kernel.Finish(state.field, nullptr) != gpu::RbfStatus::Ok) {
+                    Fail(diagnostics, "RBF deformation failed; previous generation retained"); return {};
+                }
+            }
+            if (nextPoints->recordUse(nullptr) != cudaSuccess) {
+                Fail(diagnostics, "RBF publication event failed"); return {};
+            }
+            finalPoints = std::move(nextPoints);
+            geometry.points = {finalPoints->data(), finalPoints->size()};
+            deformed = true;
+            continue;
+        }
         gpu::WidthParameters parameters;
         parameters.width = field("width", .01f);
         parameters.rootScale = field("rootScale", 1);
@@ -386,7 +653,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     }
     std::string reason;
     auto result = gpu::MakeSourceGeneration(std::move(source), generation, &reason,
-        !options.useRest, std::move(finalWidths));
+        deformed, std::move(finalWidths), std::move(finalPoints));
     if (!result) Fail(diagnostics, reason);
     return result;
 #endif

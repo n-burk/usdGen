@@ -44,7 +44,9 @@ int main() {
         const std::vector<uint32_t> offsets = {0,2,5}; // variable 2/3 CVs
         DeviceBuffer<float3> drivers, posed, points, targets, output, warp;
         DeviceBuffer<uint32_t> deviceOffsets;
-        DeviceBuffer<float> primitive, pointMask;
+        DeviceBuffer<float> primitive, pointMask, blend, mask, profile, hairT;
+        DeviceBuffer<float3> incoming;
+        DeviceBuffer<uint8_t> enabled, lockRoots;
         CHECK(Upload(drivers, samples) && Upload(points, rest) &&
               Upload(deviceOffsets, offsets));
         CHECK(output.reset(5) == cudaSuccess && warp.reset(5) == cudaSuccess);
@@ -115,6 +117,85 @@ int main() {
                     rest[i].z+(locked[i].z-rest[i].z)*e)));
             }
         }
+
+        // The typed path consumes incoming styled points, not canonical
+        // restPoints.  Exercise all supported field domains and authored hairT
+        // profile sampling, including a primitive-domain whole-strand lock.
+        const std::vector<float3> styled = {
+            P(3,.2f,-1), P(4,.3f,-2), P(5,.4f,-3), P(6,.5f,-4), P(7,.6f,-5)};
+        const std::vector<float> blendValues = {.5f, 1.f};
+        const std::vector<float> maskValues = {1.f,.5f,1.f,.5f,1.f};
+        std::vector<float> profileValues(257);
+        for (unsigned i = 0; i < profileValues.size(); ++i)
+            profileValues[i] = float(i) / 256.f;
+        const std::vector<float> authoredHairT = {0.f,.5f,1.f,0.f,.25f};
+        CHECK(Upload(incoming, styled) && Upload(blend, blendValues) &&
+              Upload(mask, maskValues) && Upload(profile, profileValues) &&
+              Upload(hairT, authoredHairT) &&
+              Upload(enabled, std::vector<uint8_t>{1u}) &&
+              Upload(lockRoots, std::vector<uint8_t>{0u,1u}));
+        DeviceCurveGeometryView styledGeometry = geometry;
+        styledGeometry.points = {incoming.data(), 5};
+        DeformParameters parameters;
+        parameters.blend = ScalarField::Device({blend.data(),2}, usdGen::expr::Domain::Primitive);
+        parameters.maskAmount = ScalarField::Device({mask.data(),5}, usdGen::expr::Domain::Point);
+        parameters.enabled = BoolField::Device({enabled.data(),1}, usdGen::expr::Domain::Groom);
+        parameters.lockRoots = BoolField::Device({lockRoots.data(),2}, usdGen::expr::Domain::Primitive);
+        parameters.maskProfile = {profile.data(), profile.size()};
+        parameters.hairT = {hairT.data(), hairT.size()};
+        CHECK(binding.Evaluate({incoming.data(),5}, warp.view(), producer) == RbfStatus::Ok);
+        CHECK(binding.Finish(consumer) == RbfStatus::Ok);
+        const auto typedWarped = Read(warp);
+        CHECK(typedWarped.size() == 5);
+        CHECK(deform.Deform(binding, styledGeometry, {targets.data(),2}, parameters,
+                            output.view(), producer) == RbfStatus::Ok);
+        CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);
+        actual = Read(output);
+        CHECK(actual.size() == styled.size());
+        for (unsigned i = 0; i < actual.size(); ++i) {
+            const unsigned curve = i < 2 ? 0 : 1;
+            const unsigned root = curve == 0 ? 0 : 2;
+            const float t = authoredHairT[i];
+            const float profileAtT = t; // the test LUT is linear 0..1
+            const float e = blendValues[curve] * maskValues[i] * profileAtT;
+            const float3 destination = curve == 1
+                ? P(typedWarped[i].x + rest[root].x - typedWarped[root].x,
+                    typedWarped[i].y + rest[root].y - typedWarped[root].y,
+                    typedWarped[i].z + rest[root].z - typedWarped[root].z)
+                : typedWarped[i];
+            CHECK(Near(actual[i], P(styled[i].x + (destination.x-styled[i].x)*e,
+                styled[i].y + (destination.y-styled[i].y)*e,
+                styled[i].z + (destination.z-styled[i].z)*e)));
+        }
+        // Blend zero is also a strict incoming-geometry pass-through; this
+        // catches accidentally using canonical restPoints as the source.
+        parameters.blend = ScalarField::Literal(0.f);
+        parameters.enabled = BoolField::Literal(true);
+        CHECK(deform.Deform(binding, styledGeometry, {targets.data(),2}, parameters,
+                            output.view(), producer) == RbfStatus::Ok);
+        CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);
+        actual = Read(output);
+        for (unsigned i = 0; i < actual.size(); ++i) CHECK(Near(actual[i], styled[i]));
+        // A disabled groom still validates its controls, but is a strict
+        // incoming-geometry pass-through and never publishes canonical rest.
+        parameters.enabled = BoolField::Literal(false);
+        CHECK(deform.Deform(binding, styledGeometry, {targets.data(),2}, parameters,
+                            output.view(), producer) == RbfStatus::Ok);
+        CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);
+        actual = Read(output);
+        for (unsigned i = 0; i < actual.size(); ++i) CHECK(Near(actual[i], styled[i]));
+        DeviceBuffer<uint32_t> emptyOffsets;
+        CHECK(Upload(emptyOffsets, std::vector<uint32_t>{0}));
+        DeviceCurveGeometryView emptyGeometry{};
+        emptyGeometry.curveOffsets = {emptyOffsets.data(), 1};
+        CHECK(deform.Deform(binding, emptyGeometry, {}, DeformParameters{}, {}, producer) ==
+              RbfStatus::Ok);
+        CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);
+        DeviceCurveGeometryView legacyEmpty{};
+        CHECK(deform.Deform(binding, legacyEmpty, {}, 1.f, {}, {}, {}, producer) ==
+              RbfStatus::Ok);
+        CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);
+
         const auto beforeInvalid = actual;
         for (auto invalid : {std::vector<uint32_t>{0,2,4},
                              std::vector<uint32_t>{0,2,6},
@@ -142,6 +223,9 @@ int main() {
         CHECK(deform.Deform(binding, geometry, {targets.data(),2}, 1,
             {primitive.data(),2}, {}, output.view(), producer) == RbfStatus::Ok);
         CHECK(deform.Finish(binding, consumer) == RbfStatus::NonFiniteInput);
+        actual = Read(output);
+        CHECK(actual.size() == beforeInvalid.size());
+        for (unsigned i = 0; i < actual.size(); ++i) CHECK(Near(actual[i], beforeInvalid[i]));
     }
     CHECK(cudaStreamDestroy(consumer) == cudaSuccess);
     CHECK(cudaStreamDestroy(producer) == cudaSuccess);

@@ -11,7 +11,15 @@ bool ValidateCudaGraph(UsdGenGraphDesc const&, UsdGenDiagnostics*);
 class UsdGenCudaExecutionPlan;
 // CPU-only compilation. Runtime device buffers belong to this graph plan.
 std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
-    UsdGenGraphDesc const&, UsdGenDiagnostics*);
+    UsdGenGraphDesc const&, UsdGenDiagnostics*,
+    std::shared_ptr<UsdGenCudaExecutionPlan> const& previous = {});
+struct UsdGenCudaBindingStats {
+    SdfPath path;
+    uint64_t identity = 0, bindCount = 0, solveCount = 0;
+    size_t sampleCount = 0;
+};
+// Diagnostic control data only; no geometry readback or CUDA pointers.
+std::vector<UsdGenCudaBindingStats> GetCudaBindingStats(UsdGenCudaExecutionPlan&);
 std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     UsdGenCudaExecutionPlan&, UsdGenGraphDesc const&, double frame,
     uint64_t generation, UsdGenDiagnostics*);

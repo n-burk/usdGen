@@ -377,6 +377,7 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/deformCurves.cu
             libs/usdGen/usdGen/gpu/styleOps.cu
             libs/usdGen/usdGen/gpu/width.cu
+            libs/usdGen/usdGen/gpu/surfaceBinding.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -414,6 +415,15 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaParameters PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaParameters COMMAND testUsdGenCudaParameters)
     set_tests_properties(testUsdGenCudaParameters PROPERTIES LABELS "T1;cuda;expressions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaSurfaceInput tests/testUsdGenCudaSurfaceInput.cpp)
+    target_compile_definitions(testUsdGenCudaSurfaceInput PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaSurfaceInput PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaSurfaceInput COMMAND testUsdGenCudaSurfaceInput)
+    set_tests_properties(testUsdGenCudaSurfaceInput PROPERTIES LABELS "T0;cuda;sources")
+    add_executable(testUsdGenCudaRbfSession tests/testUsdGenCudaRbfSession.cpp)
+    target_link_libraries(testUsdGenCudaRbfSession PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaRbfSession COMMAND testUsdGenCudaRbfSession)
+    set_tests_properties(testUsdGenCudaRbfSession PROPERTIES LABELS "T1;cuda;rbf;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaSession tests/testUsdGenCudaSession.cpp)
     target_link_libraries(testUsdGenCudaSession PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSession COMMAND testUsdGenCudaSession)
@@ -422,7 +432,7 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaSourceInput PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSourceInput COMMAND testUsdGenCudaSourceInput)
     set_tests_properties(testUsdGenCudaSourceInput PROPERTIES LABELS "T0;cuda;sources")
-    foreach(_cuda_test CurveSource ExpressionContext Width)
+    foreach(_cuda_test CurveSource ExpressionContext Width SurfaceBinding)
         add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
         target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu usdGen)
         target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)

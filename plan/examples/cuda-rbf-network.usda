@@ -1,0 +1,69 @@
+#usda 1.0
+(
+    defaultPrim = "Groom"
+    timeCodesPerSecond = 24
+)
+
+# CUDA tool-consumer example: source -> RBF deformation -> point-driven width.
+# Samples bind to Default-time scalp vertices and retain their correspondence.
+# The five non-coplanar vertices provide full affine support for this toy skin.
+# Identity object transforms keep source and surface in the same domain.
+def Mesh "Scalp" (prepend apiSchemas = ["UsdGenRestAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [3, 3, 3]
+    int[] faceVertexIndices = [0, 1, 2, 0, 1, 3, 1, 2, 4]
+    point3f[] points = [(0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,1)]
+    point3f[] points.timeSamples = {
+        1: [(0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,1)],
+        24: [(1,0,0), (2,0,0), (1,1,0), (1,0,1), (2,1,1)]
+    }
+}
+def UsdGenGroom "Groom"
+{
+    def UsdGenDescription "hair"
+    {
+        uniform token usdGen:execution:backend = "cuda"
+        rel usdGen:surface = </Scalp>
+        def Scope "Ops"
+        {
+            def UsdGenWidth "width"
+            {
+                float usdGen:width = 0.02 (
+                    customData = { dictionary usdGen = { string evaluation = "point" } }
+                )
+                float usdGen:width.connect = </Groom/hair/Expressions/width.outputs:result>
+            }
+            def UsdGenDeform "deform"
+            {
+                uniform token usdGen:mode = "rbf"
+                int usdGen:rbfSamples = 5
+                bool usdGen:lockRoots = true
+            }
+            def UsdGenCurveSource "source"
+            {
+                rel usdGen:curves = </Groom/hair/curves>
+            }
+        }
+        def Scope "Expressions"
+        {
+            def UsdGenExpression "width"
+            {
+                string usdGen:expr:source = "$value * (1 + $P[0])"
+                custom float outputs:result
+            }
+        }
+        def BasisCurves "curves" (prepend apiSchemas = ["UsdGenCurveAPI"])
+        {
+            uniform token type = "cubic"
+            uniform token basis = "bspline"
+            uniform token wrap = "pinned"
+            int[] curveVertexCounts = [3, 2]
+            point3f[] points = [(.25,.25,0), (.25,.25,.5), (.25,.25,1), (.75,.1,0), (.75,.1,1)]
+            uniform token primvars:usdGen:role = "hair"
+            uint64[] primvars:usdGen:curveId = [10, 20] (interpolation = "uniform")
+            int[] primvars:skinprim = [0, 0] (interpolation = "uniform")
+            texCoord2f[] primvars:skinprimuv = [(.25,.25), (.75,.1)] (interpolation = "uniform")
+        }
+    }
+}

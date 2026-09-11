@@ -344,9 +344,17 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
     _GetTyped(mesh.GetFaceVertexIndicesAttr(), UsdTimeCode::Default(),
               &out->faceVertexIndices);
     _GetVec3fArray(mesh.GetPointsAttr(), UsdTimeCode(time), &out->points);
-    _GetPrimvarTyped(meshPrim, TfToken("rest"), UsdTimeCode::Default(),
-                     &out->restPoints);
-    if (out->restPoints.empty()) {
+    auto restPrimvar = UsdGeomPrimvarsAPI(meshPrim).GetPrimvar(TfToken("rest"));
+    TfToken restSource("default");
+    if (auto attr = meshPrim.GetAttribute(TfToken("usdGen:rest:source")))
+        attr.Get(&restSource, UsdTimeCode::Default());
+    bool authoredRest = restPrimvar && restPrimvar.GetAttr().GetResolveInfo().HasAuthoredValueOpinion();
+    if (restSource != TfToken("default")) {
+        // Match the adapter's fail-closed unsupported rest-source behavior.
+        out->restFromCurrentPoints = true;
+    } else if (authoredRest) {
+        _GetPrimvarTyped(meshPrim, TfToken("rest"), UsdTimeCode::Default(), &out->restPoints);
+    } else {
         // S12: no authored rest -> the Default-time deformed opinion IS the
         // rest (the UsdGenRestAPI adapter publishes the same fallback).
         _GetVec3fArray(mesh.GetPointsAttr(), UsdTimeCode::Default(),
@@ -375,6 +383,7 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
     if (!curves) return;
     out->path = path;
     out->role = role;
+    out->worldMatrix = UsdGeomImageable(prim).ComputeLocalToWorldTransform(UsdTimeCode(time));
 
     _GetTyped(curves.GetTypeAttr(), UsdTimeCode(time), &out->type);
     _GetTyped(curves.GetBasisAttr(), UsdTimeCode(time), &out->basis);

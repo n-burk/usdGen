@@ -12,8 +12,9 @@ using Status = UsdGenDeviceStatus;
 class SourceOwner final : public UsdGenDeviceOwner {
 public:
     SourceOwner(std::unique_ptr<CudaCurveSource> source, int device,
-                std::unique_ptr<DeviceBuffer<float>> widths)
-        : source_(std::move(source)), widths_(std::move(widths)), device_(device) {}
+                std::unique_ptr<DeviceBuffer<float>> widths,
+                std::unique_ptr<DeviceBuffer<float3>> points)
+        : source_(std::move(source)), widths_(std::move(widths)), points_(std::move(points)), device_(device) {}
     ~SourceOwner() override {
         int previous = -1;
         cudaGetDevice(&previous);
@@ -23,12 +24,14 @@ public:
             // Driver/context teardown is the recovery boundary for this case.
             source_.release();
             widths_.release();
+            points_.release();
             return;
         }
         // Leases keep this owner alive through ReleaseConsumer. No outstanding
         // consumer may remain when its last strong reference is destroyed.
         source_.reset();
         widths_.reset();
+        points_.reset();
         if (previous >= 0 && previous != device_) cudaSetDevice(previous);
     }
     bool ProducerReady() const noexcept override {
@@ -59,7 +62,8 @@ public:
             return Status::ConsumerRejected;
         auto nativeStream = reinterpret_cast<cudaStream_t>(stream);
         if (source_->waitOn(nativeStream) != CurveSourceStatus::Ok ||
-            (widths_ && widths_->waitOn(nativeStream) != cudaSuccess))
+            (widths_ && widths_->waitOn(nativeStream) != cudaSuccess) ||
+            (points_ && points_->waitOn(nativeStream) != cudaSuccess))
             return Status::SynchronizationFailed;
         return Status::Ok;
     }
@@ -84,11 +88,13 @@ public:
     DeviceCurveGeometryView Geometry() const noexcept {
         auto view = source_->view();
         if (widths_) view.widths = {widths_->data(), widths_->size()};
+        if (points_) view.points = {points_->data(), points_->size()};
         return view;
     }
 private:
     std::unique_ptr<CudaCurveSource> source_;
     std::unique_ptr<DeviceBuffer<float>> widths_;
+    std::unique_ptr<DeviceBuffer<float3>> points_;
     int device_;
     mutable std::mutex mutex_;
     mutable uint64_t nextToken_ = 0;
@@ -99,7 +105,8 @@ private:
 
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation, std::string* reason,
-    bool alreadyDeformed, std::unique_ptr<DeviceBuffer<float>> widths) {
+    bool alreadyDeformed, std::unique_ptr<DeviceBuffer<float>> widths,
+    std::unique_ptr<DeviceBuffer<float3>> points) {
     int device = -1;
     if (!source || source->pending() || !source->generation() ||
         cudaGetDevice(&device) != cudaSuccess || source->deviceIndex() != device) {
@@ -112,6 +119,15 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
             (widths->size() && (cudaPointerGetAttributes(&attributes, widths->data()) != cudaSuccess ||
               attributes.type != cudaMemoryTypeDevice || attributes.device != device))) {
             if (reason) *reason = "CUDA width revision has incompatible shape or device";
+            return {};
+        }
+    }
+    if (points) {
+        cudaPointerAttributes attributes{};
+        if (points->size() != source->pointCount() ||
+            (points->size() && (cudaPointerGetAttributes(&attributes, points->data()) != cudaSuccess ||
+              attributes.type != cudaMemoryTypeDevice || attributes.device != device))) {
+            if (reason) *reason = "CUDA point revision has incompatible shape or device";
             return {};
         }
     }
@@ -138,7 +154,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
         channel("skinprim", Type::Int32, Domain::Primitive, view.curveCount, 1, sizeof(int32_t), Semantic::RootPrim);
     if (source->rootUV().size)
         channel("skinprimuv", Type::Float32x2, Domain::Primitive, view.curveCount, 2, sizeof(float2), Semantic::RootUV);
-    info.owner = std::make_shared<SourceOwner>(std::move(source), device, std::move(widths));
+    info.owner = std::make_shared<SourceOwner>(std::move(source), device, std::move(widths), std::move(points));
     return UsdGenDeviceGeneration::Create(std::move(info), reason);
 }
 

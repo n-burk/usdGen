@@ -19,6 +19,8 @@
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/subset.h"
+#include "pxr/usd/usdGeom/primvarsAPI.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usdImaging/usdImaging/dataSourceStageGlobals.h"
 
 #include <cstdio>
@@ -119,10 +121,35 @@ int main()
         Check(indices.IsHolding<VtIntArray>() &&
                   indices.UncheckedGet<VtIntArray>() == fvi,
               "usdGen/rest/faceVertexIndices served");
-        // Time-varying: the rest channel must NOT flag (retained sources).
-        HdSceneIndexPrim probe;
-        (void)probe;
-        Check(true, "rest channel retained (never time-varying by construction)");
+        auto pointsLeaf = HdSampledDataSource::Cast(GetAt(c, HdDataSourceLocator(
+            TfToken("usdGen"), TfToken("rest"), TfToken("points"))));
+        std::vector<HdSampledDataSource::Time> times;
+        Check(pointsLeaf && !pointsLeaf->GetContributingSampleTimesForInterval(0, 24, &times),
+              "rest leaf reports no time-varying samples");
+
+        // The retained handle must re-read the composed Default opinion after
+        // a live edit, while still remaining uniform from Hydra's time view.
+        mesh.GetPointsAttr().Set(VtValue(defPts), UsdTimeCode::Default());
+        Check(LeafValue(GetAt(c, HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"), TfToken("points")))).
+                  UncheckedGet<VtVec3fArray>() == defPts,
+              "cached rest handle follows Default-time points edit");
+        mesh.GetFaceVertexCountsAttr().Set(VtValue(VtIntArray{3}), UsdTimeCode::Default());
+        Check(LeafValue(GetAt(c, HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"), TfToken("faceVertexCounts")))).
+                  UncheckedGet<VtIntArray>() == VtIntArray{3},
+              "cached rest handle follows topology edit");
+        UsdGeomPrimvar explicitEmpty = UsdGeomPrimvarsAPI(meshPrim).CreatePrimvar(
+            TfToken("rest"), SdfValueTypeNames->Point3fArray);
+        explicitEmpty.Set(VtValue(VtVec3fArray{}), UsdTimeCode::Default());
+        VtValue emptyRest = LeafValue(GetAt(c, HdDataSourceLocator(
+            TfToken("usdGen"), TfToken("rest"), TfToken("points"))));
+        Check(emptyRest.IsHolding<VtVec3fArray>() && emptyRest.UncheckedGet<VtVec3fArray>().empty(),
+              "explicit empty rest opinion wins over points fallback");
+        auto sourceAttr = meshPrim.CreateAttribute(TfToken("usdGen:rest:source"), SdfValueTypeNames->Token);
+        sourceAttr.Set(TfToken("asset"));
+        Check(pointsLeaf->GetValue(0).IsEmpty(), "unsupported rest asset source fails closed through cached leaf");
+        sourceAttr.Set(TfToken("default"));
+        explicitEmpty.Set(VtValue(restPts), UsdTimeCode::Default());
+        Check(pointsLeaf->GetValue(0) == VtValue(restPts), "cached leaf follows repaired authored rest");
     }
 
     // ---- factory: GeomSubset refused (R15) --------------------------------
@@ -146,6 +173,18 @@ int main()
         Check(inv.Contains(HdDataSourceLocator(
                   TfToken("usdGen"), TfToken("rest"), TfToken("points"))),
               "points edit invalidates usdGen/rest/points");
+        for (auto const& property : {TfToken("primvars:rest"), TfToken("usdGen:rest:source")}) {
+            auto edited = adapter.InvalidateImagingSubprim(meshPrim, TfToken(), TfToken(),
+                TfTokenVector{property}, UsdImagingPropertyInvalidationType::Update);
+            Check(edited.Contains(HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"), TfToken("points"))),
+                  property.GetString() + " edit invalidates rest points");
+        }
+        for (auto const& property : {TfToken("faceVertexCounts"), TfToken("faceVertexIndices")}) {
+            auto edited = adapter.InvalidateImagingSubprim(meshPrim, TfToken(), TfToken(),
+                TfTokenVector{property}, UsdImagingPropertyInvalidationType::Update);
+            Check(edited.Contains(HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"), property)),
+                  property.GetString() + " edit invalidates precise rest topology leaf");
+        }
     }
 
     std::printf("testUsdGenRestAdapter: %s (%d failures)\n",
