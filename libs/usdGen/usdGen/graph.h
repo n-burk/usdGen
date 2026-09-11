@@ -20,6 +20,7 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
+class UsdGenCudaExecutionPlan;
 
 /// One compiled node. Owns its UsdGenOp, its output buffer, its capture, its
 /// chunk dirty bytes and its digests (03 §3.2).
@@ -109,6 +110,7 @@ public:
     bool AnyDirty() const noexcept;
 
     UsdGenGraphDesc const &Desc() const noexcept { return *_desc; }
+    std::shared_ptr<UsdGenCudaExecutionPlan> const& CudaPlan() const noexcept { return _cudaPlan; }
     UsdGenNodeDesc const &NodeDesc(NodeId id) const;
 
     // Chunk/tile partition state (R21; terminal-node topology in M1).
@@ -133,6 +135,7 @@ private:
     void _PropagateDescendantBits(uint32_t bits, std::vector<bool> const &descendants);
 
     std::unique_ptr<UsdGenGraphDesc> _desc;  // owned copy taken at Compile
+    std::shared_ptr<UsdGenCudaExecutionPlan> _cudaPlan;
     std::vector<std::unique_ptr<UsdGenCompiledNode>> _nodes; // indexed by id
     std::vector<UsdGenTileView> _tiles;          // terminal tile partition
     UsdGenNodeId      _terminal = InvalidNode;

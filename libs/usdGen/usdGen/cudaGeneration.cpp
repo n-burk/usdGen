@@ -11,8 +11,9 @@ using Status = UsdGenDeviceStatus;
 
 class SourceOwner final : public UsdGenDeviceOwner {
 public:
-    SourceOwner(std::unique_ptr<CudaCurveSource> source, int device)
-        : source_(std::move(source)), device_(device) {}
+    SourceOwner(std::unique_ptr<CudaCurveSource> source, int device,
+                std::unique_ptr<DeviceBuffer<float>> widths)
+        : source_(std::move(source)), widths_(std::move(widths)), device_(device) {}
     ~SourceOwner() override {
         int previous = -1;
         cudaGetDevice(&previous);
@@ -21,11 +22,13 @@ public:
             // of freeing storage that a consumer could still be touching.
             // Driver/context teardown is the recovery boundary for this case.
             source_.release();
+            widths_.release();
             return;
         }
         // Leases keep this owner alive through ReleaseConsumer. No outstanding
         // consumer may remain when its last strong reference is destroyed.
         source_.reset();
+        widths_.reset();
         if (previous >= 0 && previous != device_) cudaSetDevice(previous);
     }
     bool ProducerReady() const noexcept override {
@@ -54,8 +57,11 @@ public:
         int device = -1;
         if (cudaGetDevice(&device) != cudaSuccess || device != device_)
             return Status::ConsumerRejected;
-        return source_->waitOn(reinterpret_cast<cudaStream_t>(stream)) == CurveSourceStatus::Ok
-            ? Status::Ok : Status::SynchronizationFailed;
+        auto nativeStream = reinterpret_cast<cudaStream_t>(stream);
+        if (source_->waitOn(nativeStream) != CurveSourceStatus::Ok ||
+            (widths_ && widths_->waitOn(nativeStream) != cudaSuccess))
+            return Status::SynchronizationFailed;
+        return Status::Ok;
     }
     void ReleaseConsumer(UsdGenDeviceStream stream, uint64_t token) const noexcept override {
         {
@@ -75,8 +81,14 @@ public:
         consumers_.erase(token);
     }
     CudaCurveSource const& Source() const noexcept { return *source_; }
+    DeviceCurveGeometryView Geometry() const noexcept {
+        auto view = source_->view();
+        if (widths_) view.widths = {widths_->data(), widths_->size()};
+        return view;
+    }
 private:
     std::unique_ptr<CudaCurveSource> source_;
+    std::unique_ptr<DeviceBuffer<float>> widths_;
     int device_;
     mutable std::mutex mutex_;
     mutable uint64_t nextToken_ = 0;
@@ -87,12 +99,21 @@ private:
 
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation, std::string* reason,
-    bool alreadyDeformed) {
+    bool alreadyDeformed, std::unique_ptr<DeviceBuffer<float>> widths) {
     int device = -1;
     if (!source || source->pending() || !source->generation() ||
         cudaGetDevice(&device) != cudaSuccess || source->deviceIndex() != device) {
         if (reason) *reason = "CUDA source is not a completed generation";
         return {};
+    }
+    if (widths) {
+        cudaPointerAttributes attributes{};
+        if (widths->size() != source->pointCount() ||
+            (widths->size() && (cudaPointerGetAttributes(&attributes, widths->data()) != cudaSuccess ||
+              attributes.type != cudaMemoryTypeDevice || attributes.device != device))) {
+            if (reason) *reason = "CUDA width revision has incompatible shape or device";
+            return {};
+        }
     }
     UsdGenDeviceGeneration::CreateInfo info;
     info.identity = {UsdGenDeviceBackend::Cuda, device, generation};
@@ -117,7 +138,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
         channel("skinprim", Type::Int32, Domain::Primitive, view.curveCount, 1, sizeof(int32_t), Semantic::RootPrim);
     if (source->rootUV().size)
         channel("skinprimuv", Type::Float32x2, Domain::Primitive, view.curveCount, 2, sizeof(float2), Semantic::RootUV);
-    info.owner = std::make_shared<SourceOwner>(std::move(source), device);
+    info.owner = std::make_shared<SourceOwner>(std::move(source), device, std::move(widths));
     return UsdGenDeviceGeneration::Create(std::move(info), reason);
 }
 
@@ -129,7 +150,7 @@ CudaGeometryLease AcquireGeometry(
     if (!owner) return result;
     auto lease = generation->AcquireLease(reinterpret_cast<UsdGenDeviceStream>(stream));
     if (!lease || lease.WaitUntilReady() != Status::Ok) return result;
-    result.geometry_ = owner->Source().view();
+    result.geometry_ = owner->Geometry();
     result.hairT_ = owner->Source().hairT();
     result.rootPrim_ = owner->Source().rootPrim();
     result.rootUV_ = owner->Source().rootUV();

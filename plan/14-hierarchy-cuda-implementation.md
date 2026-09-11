@@ -191,6 +191,51 @@ can proceed without claiming those criteria passed.
   the source and actual executions; local Qwen and both Hivemind lanes supplied
   usable reviews during this checkpoint. All native workers were Luna.
 
+### CUDA Width execution checkpoint
+
+The source-only checkpoint above is now extended to `CurveSource -> Width`
+chains. [cuda-width-network.usda](examples/cuda-width-network.usda) is a small
+executable schema example for an explicitly device-aware tool consumer. The
+larger discussion network remains unsupported as a complete cook/render.
+
+- Width has a staged CUDA kernel with width/mask profile LUTs, root/tip scales,
+  taper, replace/multiply, blend and enabled behavior. Supported scalar controls
+  use groom/primitive/point fields; `enabled` is groom-only and boolean outputs
+  retain byte typing. Exact zero-envelope/disabled passthrough is tested.
+  Maps, non-identity mask random/noise/range controls, shaped ramp expressions,
+  and connected CurveSource controls still fail explicitly.
+- The graph owns immutable SeExpr IR compiled on the CPU without evaluating
+  values. Execution builds incoming-geometry contexts and evaluates typed CUDA
+  fields immediately before each Width operator. Frame-only commits reuse the
+  compiled plan. Literal staging is lifetime-safe; half, scalar and vector
+  native types are checked, and 64-bit integer literals outside the currently
+  exact double range (2^53) are rejected. Arrays/matrices remain unsupported.
+  GPU instruction/context allocations are currently rebuilt at execution;
+  caching and incremental dirty execution remain open.
+- Width changes only the published device width channel; points/rest/topology
+  remain in the source allocation. The final width allocation is retained with
+  the generation's source owner and consumer leases. Source uploads still
+  repeat per commit; there is no renderer interop or complete GPU tool suite.
+- A live `UsdGenCurveAPI` adapter supplies Default-time rest independently of
+  animated points. Explicit empty rest is preserved; absent rest uses Default
+  points, not current-frame points. Rest dirties and live edits are tested.
+  Stage rate metadata is transported with USD's time-code/FPS/24 precedence,
+  so runtime `$time` is `$frame / timeCodesPerSecond`. Live rate edits notify;
+  zero/nonfinite rates are rejected.
+- The real Hydra-to-CUDA test exposed expression-binding metadata incorrectly
+  entering the operator parameter sweep; those derived roots are now excluded.
+  Runtime tests also caught and fixed empty-domain rejection in both Width and
+  expression contexts. Empty primitive/point contexts have zero invocations
+  while preserving their declared domain and validating the offset sentinel.
+- Validation: `cmake --build build-codex -j6` and the expanded non-benchmark
+  `ctest --test-dir build-codex -L 'T0|T1' -E bench --output-on-failure`
+  passed **52/52**. The CUDA-disabled core target also rebuilt successfully
+  in `/tmp/usdgen-cpu-check-4XIfVs`. Earlier targeted runs encountered
+  intermittent CUDA stream-allocation failures; no services were stopped or
+  reset. These functional checks are not performance or full-release gates.
+  Native workers were Luna, with local Qwen and Hivemind review lanes; root
+  reviewed, corrected and ran the integrated code.
+
 ## Validation discipline
 
 Record exact commands/results against the current tree. Every operator needs

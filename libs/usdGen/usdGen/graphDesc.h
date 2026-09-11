@@ -176,6 +176,7 @@ struct UsdGenGraphDesc
     bool     forwardSurfaceSamples = false;
     int      schemaVersion = 1;
     double   time = 0.0;
+    double   timeCodesPerSecond = 24.0; // USD default; expressions expose seconds
     UsdGenExecutionBackend executionBackend = UsdGenExecutionBackend::CpuReference;
     std::vector<std::string> validationErrors;
 };

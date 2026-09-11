@@ -30,6 +30,7 @@
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/schemaRegistry.h"
+#include "pxr/usd/usd/stage.h"
 #include "pxr/usdImaging/usdImaging/dataSourceMapped.h"
 #include "pxr/usdImaging/usdImaging/dataSourcePrim.h"
 #include "pxr/base/tf/hash.h"
@@ -239,6 +240,63 @@ public:
 private: UsdPrim _prim;
 };
 
+// Stage metadata is not a prim property, so it cannot be transported by the
+// generic mapped source.  Keep this description-level source live: a retained
+// Hydra handle re-reads the composed stage metadata after an edit rather than
+// freezing the first frame's rate.
+class _TimeCodesPerSecondDataSource final : public HdSampledDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_TimeCodesPerSecondDataSource);
+    explicit _TimeCodesPerSecondDataSource(UsdPrim const &prim) : _prim(prim) {}
+
+    VtValue GetValue(Time) override
+    {
+        VtValue value;
+        UsdStageRefPtr const stage = _prim ? _prim.GetStage() : nullptr;
+        if (!stage) return VtValue();
+
+        // Preserve an authored malformed value for the builder's strict
+        // validation.  Otherwise use USD's resolved accessor, which applies
+        // the documented timeCodesPerSecond/session/root, then
+        // framesPerSecond/session/root, then 24 fallback precedence.
+        if (stage->HasAuthoredMetadata(TfToken("timeCodesPerSecond"))) {
+            if (stage->GetMetadata(TfToken("timeCodesPerSecond"), &value)) {
+                return value;
+            }
+            return VtValue();
+        }
+        return VtValue(stage->GetTimeCodesPerSecond());
+    }
+
+    bool GetContributingSampleTimesForInterval(
+        Time, Time, std::vector<Time> *) override
+    { return false; }
+
+private:
+    UsdPrim _prim;
+};
+
+class _LiveDescriptionRuntimeDataSource final : public HdContainerDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_LiveDescriptionRuntimeDataSource);
+    explicit _LiveDescriptionRuntimeDataSource(UsdPrim const &prim)
+        : _prim(prim) {}
+
+    TfTokenVector GetNames() override
+    { return TfTokenVector{TfToken("timeCodesPerSecond")}; }
+
+    HdDataSourceBaseHandle Get(TfToken const &name) override
+    {
+        if (name != TfToken("timeCodesPerSecond")) return nullptr;
+        return _TimeCodesPerSecondDataSource::New(_prim);
+    }
+
+private:
+    UsdPrim _prim;
+};
+
 // 06 §2.2 rule 3: the skip-list is exactly what
 bool
 _IsPrimBuiltin(TfToken const &name)
@@ -314,6 +372,10 @@ UsdGenPrimAdapterBase::GetImagingSubprimData(
         usdGen = HdOverlayContainerDataSource::OverlayedContainerDataSources(
             HdRetainedContainerDataSource::New(TfToken("expressions"),
                                                _LiveExpressionsDataSource::New(prim)), usdGen);
+        usdGen = HdOverlayContainerDataSource::OverlayedContainerDataSources(
+            HdRetainedContainerDataSource::New(
+                TfToken("usdGenRuntime"),
+                _LiveDescriptionRuntimeDataSource::New(prim)), usdGen);
     } else if (prim.IsA(TfToken("UsdGenOperator"))) {
         usdGen = HdOverlayContainerDataSource::OverlayedContainerDataSources(
             HdRetainedContainerDataSource::New(TfToken("expressionBindings"),

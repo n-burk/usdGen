@@ -144,6 +144,28 @@ int main() {
     check(context.Finish(stream) == ExpressionContextStatus::InvalidChannel,
           "reject hairT without root-tip endpoints");
 
+    // Empty primitive/point domains are valid zero-invocation contexts, not
+    // a groom invocation and not malformed geometry. Keep the offset sentinel.
+    DeviceCurveGeometryView emptyGeometry;
+    emptyGeometry.curveOffsets = {offsets.data(), 1};
+    for (auto domain : {expr::Domain::Primitive, expr::Domain::Point}) {
+        auto emptyControls = controls;
+        emptyControls.domain = domain;
+        check(context.Build(emptyGeometry, {}, emptyControls, stream) == ExpressionContextStatus::Ok,
+              "queue empty-domain context");
+        check(context.Finish(stream) == ExpressionContextStatus::Ok,
+              "validate empty-domain context");
+        check(context.Inputs().count == 0 && context.Inputs().context.domain == domain,
+              "empty domain has zero invocations and retains declared rate");
+    }
+    uint32_t badSentinel = 1;
+    check(cudaMemcpy(offsets.data(), &badSentinel, sizeof(badSentinel), cudaMemcpyHostToDevice) == cudaSuccess,
+          "upload invalid empty sentinel");
+    check(context.Build(emptyGeometry, {}, controls, stream) == ExpressionContextStatus::Ok,
+          "queue invalid empty sentinel");
+    check(context.Finish(stream) == ExpressionContextStatus::InvalidGeometry,
+          "reject invalid empty sentinel");
+
     cudaStreamDestroy(consumer); cudaStreamDestroy(stream);
     return failures;
 }

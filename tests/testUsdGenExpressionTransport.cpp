@@ -10,6 +10,7 @@
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 
 #include <cstdio>
+#include <limits>
 #include <string>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -67,6 +68,74 @@ int main()
     auto hydraDesc = usdGenImaging::BuildGraphDescFromHydra(*indices.finalSceneIndex, descPath);
     if (!Same(stageDesc, hydraDesc)) return Fail("Stage/Hydra expression descriptor parity");
     if (stageDesc.executionBackend != usdGen::UsdGenExecutionBackend::Cuda) return Fail("cuda backend transport");
+    for (auto const &curve : hydraDesc.curveSets) {
+        if (curve.path.GetName() == TfToken("curves")) {
+            if (curve.restFromCurrentPoints)
+                return Fail("valid Default-time C3 rest was marked current-frame");
+        }
+    }
+
+    // The description metadata source is dynamic rather than a retained
+    // first-pull value.  Exercise it through the same live scene index.
+    double const originalRate = stage->GetTimeCodesPerSecond();
+    notice.Reset();
+    stage->SetTimeCodesPerSecond(30.0);
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    if (!notice.seen) return Fail("timeCodesPerSecond edit emitted no notice");
+    auto rateStage = usdGenImaging::BuildGraphDescFromStage(stage, descPath);
+    auto rateHydra = usdGenImaging::BuildGraphDescFromHydra(
+        *indices.finalSceneIndex, descPath);
+    if (rateStage.timeCodesPerSecond != 30.0 ||
+        rateHydra.timeCodesPerSecond != 30.0)
+        return Fail("live timeCodesPerSecond metadata was not transported");
+    stage->SetTimeCodesPerSecond(originalRate);
+    indices.stageSceneIndex->ApplyPendingUpdates();
+
+    // USD resolves framesPerSecond when timeCodesPerSecond is absent, then
+    // falls back to 24 when both are absent.
+    SdfLayerRefPtr const rootLayer = stage->GetRootLayer();
+    rootLayer->ClearTimeCodesPerSecond();
+    rootLayer->SetFramesPerSecond(30.0);
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    auto fpsStage = usdGenImaging::BuildGraphDescFromStage(stage, descPath);
+    auto fpsHydra = usdGenImaging::BuildGraphDescFromHydra(
+        *indices.finalSceneIndex, descPath);
+    if (fpsStage.timeCodesPerSecond != 30.0 ||
+        fpsHydra.timeCodesPerSecond != 30.0)
+        return Fail("framesPerSecond fallback was not transported");
+    rootLayer->ClearFramesPerSecond();
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    auto defaultRateStage = usdGenImaging::BuildGraphDescFromStage(stage, descPath);
+    auto defaultRateHydra = usdGenImaging::BuildGraphDescFromHydra(
+        *indices.finalSceneIndex, descPath);
+    if (defaultRateStage.timeCodesPerSecond != 24.0 ||
+        defaultRateHydra.timeCodesPerSecond != 24.0)
+        return Fail("USD default time rate was not transported");
+    rootLayer->SetFramesPerSecond(24.0);
+    rootLayer->SetTimeCodesPerSecond(originalRate);
+    indices.stageSceneIndex->ApplyPendingUpdates();
+
+    // Invalid authored stage rates are transported as diagnostics in both
+    // builders; neither may silently reinstate the 24 fallback.
+    rootLayer->SetTimeCodesPerSecond(0.0);
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    auto zeroRateStage = usdGenImaging::BuildGraphDescFromStage(stage, descPath);
+    auto zeroRateHydra = usdGenImaging::BuildGraphDescFromHydra(
+        *indices.finalSceneIndex, descPath);
+    if (zeroRateStage.validationErrors.empty() ||
+        zeroRateHydra.validationErrors.empty())
+        return Fail("non-positive time rate was silently accepted");
+    rootLayer->SetTimeCodesPerSecond(
+        std::numeric_limits<double>::quiet_NaN());
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    auto nanRateStage = usdGenImaging::BuildGraphDescFromStage(stage, descPath);
+    auto nanRateHydra = usdGenImaging::BuildGraphDescFromHydra(
+        *indices.finalSceneIndex, descPath);
+    if (nanRateStage.validationErrors.empty() ||
+        nanRateHydra.validationErrors.empty())
+        return Fail("non-finite time rate was silently accepted");
+    rootLayer->SetTimeCodesPerSecond(originalRate);
+    indices.stageSceneIndex->ApplyPendingUpdates();
 
     // An authored but unknown backend is not a request for the legacy CPU
     // path.  Check both transports while they share this live scene index.

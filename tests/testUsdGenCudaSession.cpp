@@ -1,7 +1,11 @@
 #include "usdGen/session.h"
 #include "usdGen/gpu/generation.h"
 
+#include <cmath>
 #include <cstdio>
+#include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 using namespace usdGen;
@@ -36,6 +40,76 @@ static UsdGenGraphDesc SourceDesc() {
     curves.curveId = {91,37};
     curves.skinPrim = {4,8}; curves.skinPrimUv = {GfVec2f(.1f,.2f),GfVec2f(.3f,.4f)};
     desc.curveSets.push_back(curves);
+    return desc;
+}
+
+static expr::ValueShape ScalarShape(expr::ScalarType scalar) {
+    return {scalar, 1, 1, 1, 1, false};
+}
+
+static void AddCudaExpression(UsdGenGraphDesc* desc, char const* path,
+                              char const* source, bool boolean = false) {
+    UsdGenExpressionDesc expression;
+    expression.path = SdfPath(path);
+    expression.source = source;
+    expression.outputs.push_back({TfToken("result"),
+                                  TfToken(boolean ? "bool" : "float"),
+                                  ScalarShape(boolean ? expr::ScalarType::Bool
+                                                      : expr::ScalarType::Float32)});
+    desc->expressions.push_back(std::move(expression));
+}
+
+static void BindCudaExpression(UsdGenNodeDesc* node, char const* expression,
+                               char const* destination, expr::Domain domain,
+                               bool boolean, VtValue literal) {
+    UsdGenExpressionBinding binding;
+    binding.expression = SdfPath(expression);
+    binding.destination = TfToken(destination);
+    binding.nativeType = TfToken(boolean ? "bool" : "float");
+    binding.destinationShape = ScalarShape(boolean ? expr::ScalarType::Bool
+                                                   : expr::ScalarType::Float32);
+    binding.domain = domain;
+    binding.literal = std::move(literal);
+    node->expressionBindings.push_back(std::move(binding));
+}
+
+static UsdGenGraphDesc WidthChainDesc() {
+    auto desc = SourceDesc();
+    desc.timeCodesPerSecond = 24.0;
+
+    UsdGenNodeDesc first;
+    first.path = desc.description.AppendChild(TfToken("Ops")).AppendChild(TfToken("WidthLiteral"));
+    first.type = TfToken("UsdGenWidth");
+    first.inputs.push_back(desc.nodes.front().path);
+    first.params.push_back({TfToken("width"), VtValue(0.1f), false});
+
+    UsdGenNodeDesc second;
+    second.path = desc.description.AppendChild(TfToken("Ops")).AppendChild(TfToken("WidthExpr"));
+    second.type = TfToken("UsdGenWidth");
+    second.inputs.push_back(first.path);
+    second.params.push_back({TfToken("width"), VtValue(0.5f), false});
+    desc.terminal = second.path;
+    desc.nodes.push_back(std::move(first));
+    desc.nodes.push_back(std::move(second));
+
+    // The point field deliberately uses both commit frame and seconds.  The
+    // usdGen: prefix is part of the authored transport contract and is
+    // normalized by the CUDA executor before it reaches the primitive API.
+    AddCudaExpression(&desc, "/Groom/Description/Expressions/pointWidth",
+                      "$frame * 0.1 + $time");
+    AddCudaExpression(&desc, "/Groom/Description/Expressions/replaceFirst",
+                      "$primIndex == 0", true);
+    AddCudaExpression(&desc, "/Groom/Description/Expressions/enabled",
+                      "$frame < 3", true);
+    BindCudaExpression(&desc.nodes[2],
+                       "/Groom/Description/Expressions/pointWidth",
+                       "usdGen:width", expr::Domain::Point, false, VtValue(0.5f));
+    BindCudaExpression(&desc.nodes[2],
+                       "/Groom/Description/Expressions/replaceFirst",
+                       "replace", expr::Domain::Primitive, true, VtValue(false));
+    BindCudaExpression(&desc.nodes[2],
+                       "/Groom/Description/Expressions/enabled",
+                       "enabled", expr::Domain::Groom, true, VtValue(true));
     return desc;
 }
 
@@ -160,6 +234,125 @@ int main() {
     CHECK(retained && !oldOwner.expired());
     retained = {};
     CHECK(oldOwner.expired());
+
+    // A compiled Source -> Width -> Width chain is reusable across frames.
+    // Keep the first width generation leased while later commits replace the
+    // session's published generation, proving that its borrowed device data
+    // remains valid until the consumer releases it.
+    gpu::CudaGeometryLease retainedWidths;
+    std::weak_ptr<const UsdGenDeviceOwner> widthOwner;
+    {
+        UsdGenSession session;
+        auto desc = WidthChainDesc();
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto first = session.Commit(1, UsdGenCommitReason::SetTime);
+        if (!first) for (auto const& error : session.LastDiagnostics().errors)
+            std::fprintf(stderr, "%s\n", error.c_str());
+        CHECK(first && first->device && first->id == 0 && first->frame == 1);
+        auto const* plan = session.Graph().CudaPlan().get();
+        CHECK(plan != nullptr);
+        retainedWidths = gpu::AcquireGeometry(first->device, consumer);
+        CHECK(retainedWidths && retainedWidths.Geometry().pointCount == 5);
+        widthOwner = first->device->Owner();
+        auto firstView = retainedWidths.Geometry();
+        std::vector<float> widths(5);
+        auto readWidths = [&](gpu::DeviceCurveGeometryView view) {
+            if (cudaMemcpyAsync(widths.data(), view.widths.data,
+                                widths.size() * sizeof(float),
+                                cudaMemcpyDeviceToHost, consumer) != cudaSuccess)
+                return false;
+            return cudaStreamSynchronize(consumer) == cudaSuccess;
+        };
+
+        // WidthLiteral supplies a literal width of .1. WidthExpr then uses a
+        // typed point field, primitive replace, and groom enabled field.
+        CHECK(readWidths(firstView));
+        float const pointFrame1 = 0.1f + 1.0f / 24.0f;
+        CHECK(std::fabs(widths[0] - pointFrame1) < 2e-5f);
+        CHECK(std::fabs(widths[1] - pointFrame1) < 2e-5f);
+        CHECK(std::fabs(widths[2] - pointFrame1) < 2e-5f);
+        CHECK(std::fabs(widths[3] - 0.1f * pointFrame1) < 2e-5f);
+        CHECK(std::fabs(widths[4] - 0.1f * pointFrame1) < 2e-5f);
+
+        auto second = session.Commit(2, UsdGenCommitReason::SetTime);
+        CHECK(second && second->device && second->id == 1 && second->frame == 2);
+        CHECK(session.Graph().CudaPlan().get() == plan);
+        // Primitive 0 has replace=true; primitive 1 has replace=false. The
+        // latter multiplies WidthLiteral's .1 by the point target.
+        auto secondLease = gpu::AcquireGeometry(second->device, consumer);
+        CHECK(secondLease);
+        CHECK(readWidths(secondLease.Geometry()));
+        float const pointFrame2 = 0.2f + 2.0f / 24.0f;
+        CHECK(std::fabs(widths[0] - pointFrame2) < 2e-5f);
+        CHECK(std::fabs(widths[1] - pointFrame2) < 2e-5f);
+        CHECK(std::fabs(widths[2] - pointFrame2) < 2e-5f);
+        CHECK(std::fabs(widths[3] - 0.1f * pointFrame2) < 2e-5f);
+        CHECK(std::fabs(widths[4] - 0.1f * pointFrame2) < 2e-5f);
+        CHECK(!widthOwner.expired());
+        first.reset();
+        CHECK(readWidths(firstView));
+        CHECK(std::fabs(widths[0] - pointFrame1) < 2e-5f);
+        CHECK(std::fabs(widths[3] - 0.1f * pointFrame1) < 2e-5f);
+
+        auto third = session.Commit(3, UsdGenCommitReason::SetTime);
+        CHECK(third && third->device && third->id == 2 && third->frame == 3);
+        // enabled is false at frame 3, so WidthExpr is an exact passthrough
+        // and the preceding literal Width remains .1 everywhere.
+        auto thirdLease = gpu::AcquireGeometry(third->device, consumer);
+        CHECK(thirdLease);
+        CHECK(readWidths(thirdLease.Geometry()));
+        for (float width : widths) CHECK(width == 0.1f);
+
+        // A malformed program must leave the last-good generation and plan
+        // published. A runtime non-finite result must do the same.
+        auto lastGood = third;
+        auto malformed = desc;
+        malformed.expressions[0].source = "$frame +";
+        session.SetGraphDesc(malformed);
+        CHECK(session.Commit(4, UsdGenCommitReason::SetTime) == lastGood);
+        CHECK(session.LastDiagnostics().HasErrors() && session.NeedsCommit());
+        CHECK(session.Graph().CudaPlan().get() == plan);
+
+        auto runtimeBad = desc;
+        runtimeBad.expressions[0].source = "$frame / ($frame - 4)";
+        session.SetGraphDesc(runtimeBad);
+        CHECK(session.Commit(4, UsdGenCommitReason::SetTime) == lastGood);
+        CHECK(session.LastDiagnostics().HasErrors() && session.NeedsCommit());
+        // Compilation succeeded, so Graph()/CudaPlan() may now describe the
+        // attempted program even though publication correctly retained the
+        // last-good generation.
+
+        session.SetGraphDesc(desc);
+        auto recovered = session.Commit(5, UsdGenCommitReason::SetTime);
+        CHECK(recovered && recovered->device && recovered != lastGood && recovered->frame == 5);
+
+        // Empty authored tiles still produce a valid empty Source -> Width
+        // generation. The point binding is intentionally retained: empty
+        // domains must not force a null field dereference or a stale publish.
+        auto empty = desc;
+        auto& curves = empty.curveSets[0];
+        curves.curveVertexCounts.clear();
+        curves.points.clear();
+        curves.rest.clear();
+        curves.curveId.clear();
+        curves.skinPrim.clear();
+        curves.skinPrimUv.clear();
+        session.SetGraphDesc(empty);
+        auto emptyGeneration = session.Commit(6, UsdGenCommitReason::SetTime);
+        for (auto const& error : session.LastDiagnostics().errors)
+            std::fprintf(stderr, "%s\n", error.c_str());
+        CHECK(emptyGeneration && emptyGeneration->device && emptyGeneration != recovered);
+        CHECK(!session.LastDiagnostics().HasErrors());
+        auto emptyLease = gpu::AcquireGeometry(emptyGeneration->device, consumer);
+        CHECK(emptyLease && emptyLease.Geometry().curveCount == 0 &&
+              emptyLease.Geometry().pointCount == 0 &&
+              emptyLease.Geometry().curveOffsets.size == 1 &&
+              emptyLease.Geometry().widths.size == 0);
+    }
+    CHECK(retainedWidths && !widthOwner.expired());
+    retainedWidths = {};
+    CHECK(widthOwner.expired());
     CHECK(cudaStreamDestroy(consumer) == cudaSuccess);
     std::puts("testUsdGenCudaSession: PASS");
     return 0;

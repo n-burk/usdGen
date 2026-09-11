@@ -48,6 +48,10 @@
                     "UsdGenRestAPIAdapter": {
                         "bases": ["UsdImagingAPISchemaAdapter"],
                         "apiSchemaName": "UsdGenRestAPI"
+                    },
+                    "UsdGenCurveAPIAdapter": {
+                        "bases": ["UsdImagingAPISchemaAdapter"],
+                        "apiSchemaName": "UsdGenCurveAPI"
                     }
                 }
             },

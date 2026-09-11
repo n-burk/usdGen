@@ -22,6 +22,7 @@
 #include "pxr/usd/usdShade/materialBindingAPI.h"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -454,6 +455,34 @@ BuildGraphDescFromStage(
         TF_CODING_ERROR("usdGen: description prim %s does not exist.",
                         descriptionPath.GetText());
         return desc;
+    }
+
+    // Stage metadata is the oracle counterpart of the live Hydra description
+    // source.  Read the raw value so malformed/non-positive rates become
+    // validation errors rather than silently using a default.
+    VtValue timeCodesPerSecond;
+    if (stage->HasAuthoredMetadata(TfToken("timeCodesPerSecond"))) {
+        stage->GetMetadata(TfToken("timeCodesPerSecond"),
+                           &timeCodesPerSecond);
+    } else {
+        // GetTimeCodesPerSecond applies USD's framesPerSecond fallback and
+        // the schema's default 24 when no explicit timeCodesPerSecond exists.
+        timeCodesPerSecond = VtValue(stage->GetTimeCodesPerSecond());
+    }
+    if (timeCodesPerSecond.IsEmpty() ||
+        !timeCodesPerSecond.IsHolding<double>()) {
+        desc.validationErrors.push_back(
+            desc.description.GetString() +
+            ": timeCodesPerSecond has wrong authored type");
+    } else {
+        double const rate = timeCodesPerSecond.UncheckedGet<double>();
+        if (!std::isfinite(rate) || rate <= 0.0) {
+            desc.validationErrors.push_back(
+                desc.description.GetString() +
+                ": timeCodesPerSecond must be finite and positive");
+        } else {
+            desc.timeCodesPerSecond = rate;
+        }
     }
     double const time = options.time;
 

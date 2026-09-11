@@ -70,7 +70,9 @@ bool ValidateExpressionBindings(UsdGenGraphDesc const &desc,
     for (auto const &node : desc.nodes) {
         std::set<TfToken> destinations;
         for (auto const &b : node.expressionBindings) {
-            result.errors.push_back("expression binding runtime evaluator is unavailable; refusing connected parameter " + node.path.GetString()); ok = false;
+            if (desc.executionBackend != UsdGenExecutionBackend::Cuda) {
+                result.errors.push_back("expression binding runtime evaluator is unavailable for CPU reference backend; refusing connected parameter " + node.path.GetString()); ok = false;
+            }
             auto ei = std::find_if(desc.expressions.begin(), desc.expressions.end(), [&](auto const &e){ return e.path == b.expression; });
             if (ei == desc.expressions.end()) { result.errors.push_back("expression binding references missing expression " + b.expression.GetString()); ok = false; continue; }
             auto oi = std::find_if(ei->outputs.begin(), ei->outputs.end(), [&](auto const &o){ return o.name == b.output; });
@@ -323,6 +325,13 @@ UsdGenCompileResult UsdGenCompiler::Compile(UsdGenGraphDesc const &desc, UsdGenG
     if (!ValidateExpressionBindings(desc, result)) return result;
     UsdGenGraph candidate;
     _Build(desc, &candidate, /*reuse=*/nullptr, result);
+    if (result.errors.empty() && desc.executionBackend == UsdGenExecutionBackend::Cuda) {
+        UsdGenDiagnostics diagnostics;
+        candidate._cudaPlan = CompileCudaGraph(desc, &diagnostics);
+        result.errors.insert(result.errors.end(), diagnostics.errors.begin(), diagnostics.errors.end());
+        if (!candidate._cudaPlan && result.errors.empty())
+            result.errors.push_back("CUDA plan compilation failed");
+    }
     if (result.errors.empty()) {
         *out = std::move(candidate);
         result.ok = true;
@@ -339,6 +348,10 @@ UsdGenCompileResult UsdGenCompiler::Compile(UsdGenGraphDesc const &desc, UsdGenG
 
 UsdGenCompileResult UsdGenCompiler::Recompile(UsdGenGraphDesc const &newDesc, UsdGenGraph *out)
 {
+    // CUDA programs are immutable per descriptor. Compile transactionally so
+    // a failed edit cannot invalidate the last usable program or generation.
+    if (newDesc.executionBackend == UsdGenExecutionBackend::Cuda)
+        return Compile(newDesc, out);
     UsdGenCompileResult result;
     if (!ValidateExpressionBindings(newDesc, result)) return result;
     _Build(newDesc, out, out, result);
@@ -601,7 +614,7 @@ void UsdGenCompiler::_Build(
     std::vector<int> oldNodeForNewDesc(desc.nodes.size(), -1);
     // entries copy from the input. Entry ORDER follows the input (S26).
     // Identity is positional (nodeByDesc) with a linear-scan fallback.
-    static_assert(sizeof(UsdGenGraphDesc) == 544,
+    static_assert(sizeof(UsdGenGraphDesc) == 552,
         "UsdGenGraphDesc changed size: update the Recompile shell merge below");
     {
         auto fresh = std::make_unique<UsdGenGraphDesc>();
@@ -629,6 +642,7 @@ void UsdGenCompiler::_Build(
         fresh->forwardSurfaceSamples = desc.forwardSurfaceSamples;
         fresh->schemaVersion = desc.schemaVersion;
         fresh->time = desc.time;
+        fresh->timeCodesPerSecond = desc.timeCodesPerSecond;
         fresh->nodes.reserve(desc.nodes.size());
         // Per-input-order entry change flags for digest-change propagation
         // below (plan §3.5: only changed nodes and their descendants pay).

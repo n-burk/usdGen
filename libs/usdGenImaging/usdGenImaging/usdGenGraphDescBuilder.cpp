@@ -25,6 +25,7 @@
 #include "pxr/imaging/hd/xformSchema.h"
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <map>
 #include <string>
@@ -144,6 +145,10 @@ _HIsStock(std::string const &name)
         "primOrigin", "__usdPrimInfo", "__usdUpAxis", "skelBinding",
         "coordSysBinding", "usdMaterialBindings", "displayStyle",
         "categories",
+        // Adapter-owned derived metadata is consumed explicitly by the
+        // builder and must not enter S14's authored parameter sweep.
+        "expressionBindings", "expressions", "operatorOrder",
+        "usdGenRuntime", "usdGenCurveRest",
     };
     if (stock.count(name) != 0) {
         return true;
@@ -623,10 +628,51 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
     if (!_HGetTyped(primDs, t, &out->points, {"points"})) {
         _HPrimvarTyped(primDs, "points", t, &out->points);
     }
-    _HPrimvarTyped(primDs, "rest", t, &out->rest);
-    if (out->rest.empty()) {
+    // UsdGenCurveAPI publishes a live Default-time rest source.  Presence of
+    // the source, rather than array emptiness, is significant: an explicitly
+    // authored empty primvar must remain empty and must not be replaced by
+    // current-frame points.  The provenance leaf distinguishes that source
+    // from the compatibility fallback used when the API adapter is absent.
+    bool curveRestRead = false;
+    bool curveRestProvenanceRead = false;
+    HdContainerDataSourceHandle const curveRest =
+        _HChild(primDs, "usdGenCurveRest");
+    if (curveRest) {
+        HdSampledDataSourceHandle const restPoints =
+            HdSampledDataSource::Cast(curveRest->Get(TfToken("points")));
+        if (restPoints) {
+            VtValue const value = restPoints->GetValue(t);
+            if (value.IsHolding<VtVec3fArray>()) {
+                out->rest = value.UncheckedGet<VtVec3fArray>();
+                curveRestRead = true;
+            }
+        }
+        HdSampledDataSourceHandle const provenance =
+            HdSampledDataSource::Cast(
+                curveRest->Get(TfToken("hasAuthoredRest")));
+        if (provenance) {
+            VtValue const value = provenance->GetValue(t);
+            if (value.IsHolding<bool>()) {
+                // The bool records provenance, not whether the valid
+                // Default-time fallback is usable.  Both authored rest and
+                // Default-time points are proper C3 rest sources.
+                curveRestProvenanceRead = true;
+            }
+        }
+    }
+    if (curveRestRead) {
+        // A valid adapter read is never a current-frame fallback, regardless
+        // of hasAuthoredRest's value.  Missing/malformed provenance remains
+        // marked conservatively for CUDA admission.
+        out->restFromCurrentPoints = !curveRestProvenanceRead;
+    } else {
+        // Missing adapter/current fallback is retained for compatibility but
+        // explicitly marked so CUDA admission cannot treat it as bound rest.
+        _HPrimvarTyped(primDs, "rest", t, &out->rest);
+        if (out->rest.empty()) {
+            out->rest = out->points;
+        }
         out->restFromCurrentPoints = true;
-        out->rest = out->points;
     }
     if (!_HGetTyped(primDs, t, &out->widths, {"widths"})) {
         _HPrimvarTyped(primDs, "widths", t, &out->widths);
@@ -689,6 +735,32 @@ BuildGraphDescFromHydra(
     VtStringArray descriptionErrors;
     _HGetTyped(descDs, t, &descriptionErrors, {"__usdGenValidationErrors"});
     desc.validationErrors.insert(desc.validationErrors.end(), descriptionErrors.begin(), descriptionErrors.end());
+
+    // The description adapter exposes the composed stage rate as a live
+    // metadata source.  Inspect its raw VtValue: malformed, non-finite, and
+    // non-positive rates must be diagnosed instead of reaching $time math.
+    if (HdContainerDataSourceHandle const runtime =
+            _HChild(descUg, "usdGenRuntime")) {
+        if (HdSampledDataSourceHandle const rateSource =
+                HdSampledDataSource::Cast(
+                    runtime->Get(TfToken("timeCodesPerSecond")))) {
+            VtValue const value = rateSource->GetValue(t);
+            if (!value.IsHolding<double>()) {
+                desc.validationErrors.push_back(
+                    desc.description.GetString() +
+                    ": timeCodesPerSecond has wrong authored type");
+            } else {
+                double const rate = value.UncheckedGet<double>();
+                if (!std::isfinite(rate) || rate <= 0.0) {
+                    desc.validationErrors.push_back(
+                        desc.description.GetString() +
+                        ": timeCodesPerSecond must be finite and positive");
+                } else {
+                    desc.timeCodesPerSecond = rate;
+                }
+            }
+        }
+    }
 
     // The Description adapter carries composed child order explicitly: a
     // scene-index child enumeration is not an authoring-order API.  This is

@@ -37,17 +37,16 @@ struct UsdGenGraphDescBuildOptions
 ///    indices (02 §2.20 rules 1-2);
 ///  - usdGen:guides / usdGen:curves / usdGen:frozen:curves yield
 ///    UsdGenCurveSetDesc entries (rest points at UsdTimeCode::Default(),
-///    S12 via the UsdGenRestAPI adapter where applied).
+///    via the UsdGenCurveAPI adapter where applied).
 ///
 /// Fill-in policy: C1 schema defaults (docs/freezes/C1.md) are materialized
 /// for missing properties so the engine's param partition (S14 union rule)
 /// sees a complete set.
 ///
-/// Hydra-sourced staging (production path, V2-9 homing table): operator
-/// discovery follows input path-array data sources back from the
-/// terminal target; parameters are read from flat relative-locator sampled
+/// Hydra-sourced staging: operator discovery consumes the Description's
+/// composed hierarchy order; parameters are read from flat relative-locator sampled
 /// data sources (the adapter overlays its mapped source at the prim root,
-/// so usdGen:terminal -> `terminal`, usdGen:motion:mode -> motion/mode)
+/// so usdGen:motion:mode -> motion/mode)
 /// with S14 pull-all preserved (every mapped locator pulled at least once
 /// per topology generation so dependencies register; stock subtrees sharing
 /// the overlaid root are pruned from the sweep). Sibling of

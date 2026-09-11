@@ -179,7 +179,12 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
             _lastDiagnostics.Error("CUDA publication requires a device-aware consumer; renderer graphics interop is unavailable");
             return reject();
         }
-        auto device = ExecuteCudaGraph(_desc, static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics);
+        if (!_graph.CudaPlan()) {
+            _lastDiagnostics.Error("CUDA graph has no compiled execution plan");
+            return reject();
+        }
+        auto device = ExecuteCudaGraph(*_graph.CudaPlan(), _desc, frame,
+            static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics);
         if (!device || _lastDiagnostics.HasErrors()) return reject();
         UsdGenGeneration gen;
         gen.frame = frame;

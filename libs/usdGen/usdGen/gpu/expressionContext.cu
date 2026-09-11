@@ -25,7 +25,7 @@ __device__ bool Finite(float2 const& p) { return isfinite(p.x) && isfinite(p.y);
 __global__ void Validate(DeviceCurveGeometryView g,
                          ExpressionGeometryChannels channels, int* error) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
-        if (!g.curveOffsets.data || g.curveCount == 0 ||
+        if (!g.curveOffsets.data ||
             g.curveOffsets.size != g.curveCount + 1 ||
             g.curveOffsets.data[0] != 0 ||
             g.curveOffsets.data[g.curveCount] != g.pointCount)
@@ -172,11 +172,13 @@ ExpressionContextStatus CudaExpressionContext::Build(
         pending_ = true;
         return ExpressionContextStatus::Ok;
     }
-    if (geometry.curveCount == 0 || geometry.pointCount == 0 ||
+    if ((geometry.curveCount == 0) != (geometry.pointCount == 0) ||
         geometry.curveCount > UINT32_MAX - 1 || geometry.pointCount > UINT32_MAX ||
         !geometry.curveOffsets.data ||
-        geometry.curveOffsets.size != geometry.curveCount + 1 || !geometry.points.data ||
-        geometry.points.size != geometry.pointCount || !geometry.stableIds.data ||
+        geometry.curveOffsets.size != geometry.curveCount + 1 ||
+        (geometry.pointCount && !geometry.points.data) ||
+        geometry.points.size != geometry.pointCount ||
+        (geometry.curveCount && !geometry.stableIds.data) ||
         geometry.stableIds.size != geometry.curveCount)
         return ExpressionContextStatus::InvalidGeometry;
     if (geometry.restPoints.data && geometry.restPoints.size != geometry.pointCount)
@@ -190,6 +192,7 @@ ExpressionContextStatus CudaExpressionContext::Build(
     size_t n = context.domain == Domain::Groom ? 1 :
                context.domain == Domain::Primitive ? geometry.curveCount : geometry.pointCount;
     inputs_.count = n; inputs_.primitiveCount = geometry.curveCount;
+    inputs_.context.count = static_cast<uint32_t>(n);
     const unsigned u = static_cast<unsigned>(expr::Variable::CountVariables);
     for (unsigned v = 0; v < u; ++v) {
         bool vec = v == unsigned(Variable::P) || v == unsigned(Variable::PRef) || v == unsigned(Variable::RootP) || v == unsigned(Variable::RootPRef);
@@ -207,9 +210,10 @@ ExpressionContextStatus CudaExpressionContext::Build(
     inputs_.pointToPrimitive = {owners_.data(), geometry.pointCount};
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess) return ExpressionContextStatus::CudaError;
     if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess) return ExpressionContextStatus::CudaError;
-    const unsigned blocks = static_cast<unsigned>((std::max(geometry.curveCount, geometry.pointCount) + 127) / 128);
+    const unsigned blocks = std::max(1u, static_cast<unsigned>((std::max(geometry.curveCount, geometry.pointCount) + 127) / 128));
     Validate<<<blocks,128,0,stream>>>(geometry, channels, error_.data());
-    BuildOwnersAndArc<<<(geometry.curveCount + 127) / 128,128,0,stream>>>(geometry, owners_.data(), arcLength_.data(), error_.data());
+    if (geometry.curveCount)
+        BuildOwnersAndArc<<<(geometry.curveCount + 127) / 128,128,0,stream>>>(geometry, owners_.data(), arcLength_.data(), error_.data());
     BuildFields<<<blocks,128,0,stream>>>(geometry, channels, context.domain, arcLength_.data(), inputs_, error_.data());
     if (cudaGetLastError() != cudaSuccess || cudaEventRecord(ready_, stream) != cudaSuccess) return ExpressionContextStatus::CudaError;
     pending_ = true;

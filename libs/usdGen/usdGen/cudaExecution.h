@@ -8,7 +8,12 @@ namespace usdGen {
 // CUDA backend admission is explicit and shared by compilation/execution.
 // Unsupported operators/configurations are errors, never CPU fallbacks.
 bool ValidateCudaGraph(UsdGenGraphDesc const&, UsdGenDiagnostics*);
+class UsdGenCudaExecutionPlan;
+// CPU-only compilation. Runtime device buffers belong to this graph plan.
+std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
+    UsdGenGraphDesc const&, UsdGenDiagnostics*);
 std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
-    UsdGenGraphDesc const&, uint64_t generation, UsdGenDiagnostics*);
+    UsdGenCudaExecutionPlan&, UsdGenGraphDesc const&, double frame,
+    uint64_t generation, UsdGenDiagnostics*);
 }
 #endif

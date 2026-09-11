@@ -10,7 +10,8 @@ namespace usdGen::gpu {
 // gets distinct mutable storage; it is never replaced underneath a reader.
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation,
-    std::string* reason = nullptr, bool alreadyDeformed = false);
+    std::string* reason = nullptr, bool alreadyDeformed = false,
+    std::unique_ptr<DeviceBuffer<float>> widths = {});
 
 // Read-only geometry access for CUDA tools/consumers. The native stream must
 // remain alive until every copy of the lease is released. Destruction waits

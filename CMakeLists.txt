@@ -376,6 +376,7 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/expressionContext.cu
             libs/usdGen/usdGen/gpu/deformCurves.cu
             libs/usdGen/usdGen/gpu/styleOps.cu
+            libs/usdGen/usdGen/gpu/width.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -407,6 +408,12 @@ target_link_libraries(testUsdGenDeviceGeneration PRIVATE usdGen)
 add_test(NAME testUsdGenDeviceGeneration COMMAND testUsdGenDeviceGeneration)
 set_tests_properties(testUsdGenDeviceGeneration PROPERTIES LABELS "T0;device;sessions")
 if(USDGEN_ENABLE_CUDA)
+    add_executable(testUsdGenCudaParameters tests/testUsdGenCudaParameters.cpp)
+    target_compile_definitions(testUsdGenCudaParameters PRIVATE USDGEN_ENABLE_CUDA)
+    target_compile_options(testUsdGenCudaParameters PRIVATE -UNDEBUG)
+    target_link_libraries(testUsdGenCudaParameters PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaParameters COMMAND testUsdGenCudaParameters)
+    set_tests_properties(testUsdGenCudaParameters PROPERTIES LABELS "T1;cuda;expressions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaSession tests/testUsdGenCudaSession.cpp)
     target_link_libraries(testUsdGenCudaSession PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSession COMMAND testUsdGenCudaSession)
@@ -415,7 +422,7 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaSourceInput PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSourceInput COMMAND testUsdGenCudaSourceInput)
     set_tests_properties(testUsdGenCudaSourceInput PROPERTIES LABELS "T0;cuda;sources")
-    foreach(_cuda_test CurveSource ExpressionContext)
+    foreach(_cuda_test CurveSource ExpressionContext Width)
         add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
         target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu usdGen)
         target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)
@@ -681,7 +688,7 @@ set_tests_properties(benchUsdGenSparse PROPERTIES LABELS "T0;perf;gate:E-2")
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter
-           testUsdGenRestAdapter testUsdGenAutoApply testUsdGenContracts)
+           testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenAutoApply testUsdGenContracts)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -785,6 +792,15 @@ set_tests_properties(testUsdGenSnapshotRace PROPERTIES LABELS "T1;gate:SI-4")
 set_tests_properties(testUsdGenPopulation PROPERTIES LABELS "T1;gate:SI-6")
 set_tests_properties(testUsdGenAdapter PROPERTIES LABELS "T1;gate:SI-7")
 set_tests_properties(testUsdGenRestAdapter PROPERTIES LABELS "T1;gate:SI-7")
+set_tests_properties(testUsdGenCurveRestAdapter PROPERTIES LABELS "T1;gate:SI-7")
+if(USDGEN_ENABLE_CUDA)
+    add_executable(testUsdGenCudaHierarchy tests/testUsdGenCudaHierarchy.cpp)
+    target_link_libraries(testUsdGenCudaHierarchy PRIVATE usdGenTestUtilsHd usdGenGpu)
+    target_compile_definitions(testUsdGenCudaHierarchy PRIVATE USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME testUsdGenCudaHierarchy COMMAND testUsdGenCudaHierarchy)
+    set_tests_properties(testUsdGenCudaHierarchy PROPERTIES
+        ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;cuda;hierarchy" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+endif()
 set_tests_properties(testUsdGenAutoApply PROPERTIES LABELS "T1;gate:SI-8")
 set_tests_properties(testUsdGenContracts PROPERTIES LABELS "T1")
 
