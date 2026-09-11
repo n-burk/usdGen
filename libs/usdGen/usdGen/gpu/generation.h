@@ -6,10 +6,19 @@
 
 namespace usdGen::gpu {
 
+class CudaCurveCompaction;
+
 // Takes exclusive ownership of a completed source. Each published generation
 // gets distinct mutable storage; it is never replaced underneath a reader.
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation,
+    std::string* reason = nullptr, bool alreadyDeformed = false,
+    std::unique_ptr<DeviceBuffer<float>> widths = {},
+    std::unique_ptr<DeviceBuffer<float3>> points = {});
+
+// Owns a completed GPU topology revision, including every reordered channel.
+std::shared_ptr<const UsdGenDeviceGeneration> MakeCompactedGeneration(
+    std::unique_ptr<CudaCurveCompaction> geometry, uint64_t generation,
     std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
     std::unique_ptr<DeviceBuffer<float3>> points = {});

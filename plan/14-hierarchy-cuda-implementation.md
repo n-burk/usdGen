@@ -306,6 +306,71 @@ rest-to-animated Deform step; a second deformation is rejected.
   built successfully in `/tmp/usdgen-cpu-check-4XIfVs`. No full-plan, renderer,
   performance or release completion is implied.
 
+### CUDA Length and topology revision checkpoint
+
+[cuda-length-network.usda](examples/cuda-length-network.usda) exercises a real
+hierarchy-derived `CurveSource -> Length(cull) -> Width` device cook. Length can
+also precede RBF or another Length; downstream expression contexts and root
+bindings consume the surviving, reordered GPU channels.
+
+- Length now implements scale/set and actual curve removal, plus `cutExtend`
+  with `keepParam` (preserve interior arc positions and collapse past the cut)
+  and `reparam` (redistribute CV samples over the target arc). Extension follows
+  the last nondegenerate tangent. Positive requested length on a zero-length
+  curve rejects because no direction can be inferred; a disabled/zero-envelope
+  operator remains an exact no-op. Min-length floors apply before the envelope.
+  Binary culling uses the resulting arc length; all-zero envelopes protect a
+  strand. Culling does not fabricate zero-length parked curves.
+- Scalar values, floors, blend and mask amount support groom/primitive/point
+  CUDA expression fields. Random ranges are native float2 at groom/primitive
+  rates and use the pinned seeded stable-ID draw, checked against the existing
+  CPU hash oracle in a test. Thresholds are groom/primitive and enabled is
+  groom-level in graph admission. Named mask profiles are supported; maps,
+  non-identity random/noise/range masks, shaped expressions and connected seed
+  controls still require implementation.
+- `CudaCurveCompaction` uses GPU CUB prefix scans and stable scatter, retaining
+  points, rest, widths, hairT, curve IDs, root faces and root UVs together. Only
+  output curve/point counts and diagnostic flags are read back. Offsets always
+  include the sentinel, including the zero-curve case. Published generations
+  own the complete topology revision; later points/widths may independently
+  override its channels, and old consumer leases retain prior allocations.
+- Root review corrected point fields inadvertently evaluated only at roots,
+  scale floors being ignored, keepParam accidentally behaving like reparam,
+  disabled/zero-mask culling, an overlapping offset write and capped-grid
+  kernels missing large-array tails. It also corrected a reversed USDA stack,
+  missing C3 API/type metadata, mismatched hairT/count goldens, inherited
+  expression overrides invalidating cut tests, and weak output-retention tests.
+  These corrections were checked in execution, not accepted from worker prose.
+- `cmake --build build-codex -j6` succeeded. The full non-benchmark T0/T1 command
+  passed **58/58**. Both `compute-sanitizer --tool initcheck --error-exitcode 1`
+  and `--tool memcheck --error-exitcode 1` reported **0 errors** for
+  `testUsdGenCudaLength`, `testUsdGenCudaCurveCompaction`, and
+  `testUsdGenCudaLengthSession`. The CUDA-disabled core target also rebuilt.
+  The live Hydra fixture observes a precise threshold dirty and cooks an empty
+  revision on the same scene index. Session checks cover two successive Length
+  compactions, translated downstream RBF and retained earlier leases. The final
+  rerun also covers a frame-dependent threshold on the same compiled session
+  and an active primitive float2 random-range expression.
+- This is not a complete Length/tools milestone. Stable capture-time cull sets
+  across animation and gesture-time maximum-count parking (S28/S-7) remain to
+  integrate. The current CUDA path recomputes keep decisions at execution, so
+  changed evaluated controls or incoming shape can change topology. Incremental
+  reuse and the planned performance thresholds are unverified. Source uploads
+  and full-channel copies still repeat; no zero-transfer rendering claim follows.
+
+### Next tool integration boundary
+
+The local-Qwen lane audited the tool declarations and root confirmed that
+`cApi.h` declares, but the implementation does not define, the nineteen C ABI
+entry points. There is no implemented brush/stroke/live-override bridge yet.
+`gpu/generation.h` exposes GPU geometry leases, but the stock tile publisher
+still handles host arrays and explicitly refuses device generations. The next
+tool slice needs GPU picking, generation-scoped sparse device overrides and
+actual commit/undo/gesture wiring. CPU geometry readback for picking would
+violate the user's residency requirement and is not an acceptable fallback.
+All ten brushes, all nineteen ABI functions, renderer interop and the original
+release/gate registry remain required; this audit does not retire them.
+
 ## Validation discipline
 
 Record exact commands/results against the current tree. Every operator needs
@@ -326,8 +391,12 @@ verified for the new implementation; old CPU numbers are historical only.
 
 Root integrates and validates. Native workers use Terra or Luna, as requested.
 One lane uses local Qwen (`qwen3.8-flash-next`); two use the Hivemind LMStudio
-endpoint (`qwen3.8-27b`) for substantive implementation/review tasks. A model
+endpoint (currently loaded as `qwen3.8-27b@q4_0`, verified through `/v1/models`)
+for substantive implementation/review tasks. A model
 request is only counted as used when its response was received and inspected.
+The Length/compaction audit requests reached this loaded model, but exhausted
+their token budgets in reasoning without visible answer content despite
+thinking-disable options. They are not counted as completed reviews.
 Missing process handles permit a new request; observation timeouts do not.
 The native session currently permits three workers plus root, not twenty
 simultaneous native workers. No larger worker pool is claimed.

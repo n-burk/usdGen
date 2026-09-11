@@ -27,6 +27,19 @@ public:
     }
 };
 
+class LengthNotice final : public HdSceneIndexObserver {
+public:
+    bool seen = false;
+    void PrimsAdded(HdSceneIndexBase const&, AddedPrimEntries const&) override {}
+    void PrimsRemoved(HdSceneIndexBase const&, RemovedPrimEntries const&) override {}
+    void PrimsRenamed(HdSceneIndexBase const&, RenamedPrimEntries const&) override {}
+    void PrimsDirtied(HdSceneIndexBase const&, DirtiedPrimEntries const& entries) override {
+        for (auto const& e : entries)
+            seen |= e.primPath == SdfPath("/Character/Groom/hair/Ops/length") &&
+                e.dirtyLocators.Intersects(HdDataSourceLocator(TfToken("usdGen"), TfToken("cullThreshold")));
+    }
+};
+
 int main() {
     auto stage = UsdStage::Open(std::string(USDGEN_TEST_SOURCE_DIR) +
         "/plan/examples/cuda-width-network.usda");
@@ -123,5 +136,44 @@ int main() {
     CHECK(session.Commit(24, UsdGenCommitReason::SetTime) == edited);
     CHECK(session.LastDiagnostics().HasErrors());
     rbfIndices.finalSceneIndex->RemoveObserver(observer);
+    auto lengthStage = UsdStage::Open(std::string(USDGEN_TEST_SOURCE_DIR) +
+        "/plan/examples/cuda-length-network.usda");
+    CHECK(lengthStage);
+    UsdImagingCreateSceneIndicesInfo lengthInfo; lengthInfo.stage = lengthStage;
+    auto lengthIndices = UsdImagingCreateSceneIndices(lengthInfo);
+    lengthIndices.stageSceneIndex->SetTime(UsdTimeCode(1));
+    auto lengthDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *lengthIndices.finalSceneIndex, SdfPath("/Character/Groom/hair"));
+    CHECK(lengthDesc.validationErrors.empty() && lengthDesc.nodes.size() == 3);
+    CHECK(lengthDesc.nodes[0].type == TfToken("UsdGenCurveSource") &&
+          lengthDesc.nodes[1].type == TfToken("UsdGenLength"));
+    session.SetGraphDesc(lengthDesc);
+    auto culled = session.Commit(1, UsdGenCommitReason::SetTime);
+    for (auto const& error : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", error.c_str());
+    CHECK(culled && culled != edited && culled->device && !session.LastDiagnostics().HasErrors());
+    auto culledLease = gpu::AcquireGeometry(culled->device, nullptr);
+    CHECK(culledLease && culledLease.Geometry().curveCount == 2 && culledLease.Geometry().pointCount == 7);
+    uint64_t lengthIds[2]{};
+    float lengthWidths[7]{};
+    CHECK(cudaMemcpy(lengthIds, culledLease.Geometry().stableIds.data, sizeof(lengthIds), cudaMemcpyDeviceToHost) == cudaSuccess);
+    CHECK(lengthIds[0] == 10 && lengthIds[1] == 20);
+    CHECK(cudaMemcpy(lengthWidths, culledLease.Geometry().widths.data, sizeof(lengthWidths), cudaMemcpyDeviceToHost) == cudaSuccess);
+    for (size_t i = 0; i < 7; ++i) CHECK(std::abs(lengthWidths[i] - (i < 3 ? .03f : .06f)) < 1e-6f);
+    LengthNotice lengthNotice;
+    auto lengthObserver = TfCreateWeakPtr(&lengthNotice);
+    lengthIndices.finalSceneIndex->AddObserver(lengthObserver);
+    CHECK(lengthStage->GetPrimAtPath(SdfPath("/Character/Groom/hair/Ops/length"))
+        .GetAttribute(TfToken("usdGen:cullThreshold")).Set(.9f));
+    lengthIndices.stageSceneIndex->ApplyPendingUpdates();
+    CHECK(lengthNotice.seen);
+    auto emptyLengthDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *lengthIndices.finalSceneIndex, SdfPath("/Character/Groom/hair"));
+    session.SetGraphDesc(emptyLengthDesc);
+    auto emptyLength = session.Commit(1, UsdGenCommitReason::SetTime);
+    CHECK(emptyLength && emptyLength != culled && emptyLength->device && !session.LastDiagnostics().HasErrors());
+    auto emptyLengthLease = gpu::AcquireGeometry(emptyLength->device, nullptr);
+    CHECK(emptyLengthLease && emptyLengthLease.Geometry().curveCount == 0 && emptyLengthLease.Geometry().pointCount == 0);
+    CHECK(culledLease.Geometry().curveCount == 2);
+    lengthIndices.finalSceneIndex->RemoveObserver(lengthObserver);
     std::puts("testUsdGenCudaHierarchy: PASS");
 }
