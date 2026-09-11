@@ -100,11 +100,31 @@ void PrepareNodeForEval(
             buf.topologyVersion = upBuf.topologyVersion;
         }
         InheritPerCurve(buf, upBuf);
+        if (!(node.capture && node.capture->OwnsBuffer())) {
+            // Topology metadata refresh/clear on pass-through preps only; owning
+            // captures (e.g. Deform) keep their authored cvOffsets.
+            buf.cvOffsets = upBuf.cvOffsets;
+        } else if (buf.cvOffsets.empty() && !upBuf.cvOffsets.empty() &&
+                   buf.totalCurves == upBuf.totalCurves &&
+                   buf.totalCvs == upBuf.totalCvs) {
+            // FIX (P1, ragged-at-Deform): an owning capture that authored NO
+            // topology of its own (Deform — the totals just above are the
+            // inherited upstream ones) must not drop a ragged input layout:
+            // ragged totals with EMPTY offsets make Repartition derive a
+            // uniform cvp (totalCvs/totalCurves == 12/3 == 4) and sweep
+            // ragged spans as uniform. Carry the input cvOffsets verbatim,
+            // mirroring the pass-through carry; the totals equality pins
+            // "no topology authored" so a re-topologised owner keeps its own.
+            buf.cvOffsets = upBuf.cvOffsets;
+        }
     }
 
     uint32_t const nCurves = buf.totalCurves;
     uint32_t const cvp = node.chunks.empty() ? 0 : node.chunks[0].cvCount;
-    uint32_t const nCvs = nCurves * cvp;
+    uint32_t const nCvs = (cvp == 0 && !buf.cvOffsets.empty() &&
+                           size_t(nCurves) < buf.cvOffsets.size())
+        ? uint32_t(buf.cvOffsets[nCurves])   // ragged: total CVs from offsets
+        : nCurves * cvp;
 
     // Plane policy (03 §1.2/§8.5, S24): a plane the OP WRITES must be THIS
     // node's own storage (VtArray CoW sharing would make the kernel's write
@@ -177,7 +197,13 @@ void SweepChunk(size_t index, void *payload)
     UsdGenChunkDesc const *upC = (pl.up && pl.up->chunks.size() == node.chunks.size())
         ? &pl.up->chunks[index] : nullptr;
 
-    uint32_t const nCvs = cd.curveCount * cd.cvCount;
+    uint32_t nCvs = cd.curveCount * cd.cvCount;
+    if (cd.cvCount == 0 && !buf.cvOffsets.empty()) {
+        // Ragged span [firstCurve, firstCurve+curveCount) from topology offsets.
+        size_t const f = cd.firstCurve;
+        if (f + cd.curveCount < buf.cvOffsets.size())
+            nCvs = uint32_t(buf.cvOffsets[f + cd.curveCount] - buf.cvOffsets[f]);
+    }
     size_t const base = cd.firstCv;
     size_t const upBase = upC ? upC->firstCv : 0;
 
@@ -192,7 +218,13 @@ void SweepChunk(size_t index, void *payload)
     view.outI = nullptr;
     view.inF = nullptr;
     view.inI = nullptr;
-    view.cvOffsets = nullptr;      // M1: uniform CV count only
+    // Chunk-local BY BINDING (zero copy): absolute offsets; planes below slice at
+    // base=cd.firstCv, so the op-facing plane-relative CV index is
+    //   view->cvOffsets[c] - int(desc->firstCv) + i
+    // (ops MUST apply the -firstCv subtraction; uniform fast path stays null).
+    view.cvOffsets = (cd.cvCount == 0 && !buf.cvOffsets.empty() &&
+                      size_t(cd.firstCurve) < buf.cvOffsets.size())
+        ? buf.cvOffsets.cdata() + cd.firstCurve : nullptr;
 
     auto outPlane = [&](VtFloatArray &a) -> float * {
         // cdata(), NOT data(): detach is hoisted to the commit thread
@@ -500,9 +532,11 @@ UsdGenRunResult UsdGenScheduler::Run(
                 int const cvp = int(node.buffer.totalCvs /
                                     std::max<uint32_t>(1, node.buffer.totalCurves));
                 int const nChunks = ComputeNumChunks(total, graph.ChunkSize());
-                bool const layoutMoved =
-                    int(node.chunks.size()) != nChunks ||
-                    (node.chunks.empty() ? false : int(node.chunks[0].cvCount) != cvp);
+    bool layoutMoved =
+        int(node.chunks.size()) != nChunks ||
+        (node.chunks.empty() ? false : int(node.chunks[0].cvCount) != cvp) ||
+        !node.buffer.cvOffsets.empty();   // ragged recapture: Repartition itself
+                                          // compares per-chunk desired layout
                 if (layoutMoved) {
                     if (graph.Repartition(total, cvp))
                         result.topologyChanged = true;

@@ -133,8 +133,18 @@ UsdGenMaskResult EvaluateMask(
         }
     }
 
-    // Neutral ramp: w(c,i) = blend * curveMask(c) * 1.
-    result.rampLut = VtFloatArray(kRampLutSize, 1.0f);
+    // Neutral ramp: w(c,i) = blend * curveMask(c) * 1. An all-1.0 ramp is
+    // published as empty == unused (op.h): kernels fall back to the 1.0
+    // literal, which is bitwise-identical (IEEE x*1.0==x; the flat LUT also
+    // evaluates to exactly 1.0) while skipping one out-of-line LUT eval per
+    // CV per op (E-1). Canonicalized on content so M4 ramps flow through
+    // untouched the moment a ramp term evaluates.
+    VtFloatArray lut(kRampLutSize, 1.0f);
+    bool flat = true;
+    for (float v : lut) {
+        if (v != 1.0f) { flat = false; break; }
+    }
+    if (!flat) result.rampLut = lut;
 
     // Unsupported authored terms are ignored, never silently (review M-6):
     // one short diagnostic per term, at most.

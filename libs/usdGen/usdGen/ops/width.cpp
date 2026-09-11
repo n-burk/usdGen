@@ -70,6 +70,10 @@ static TfTokenVector _valueParams = [] {
     v.push_back(TfToken("enabled"));       // toggle: value-class (02 §6.3)
     v.push_back(TfToken("width"));
     v.push_back(TfToken("width:knots"));
+    // C1 property is usdGen:width:interpolation (schema.usda:369, 02 §2.7.1);
+    // the param name is the prefix-stripped form. Value-class: the 257-entry
+    // LUT is rebuilt from the live parameters every evaluate (see below).
+    v.push_back(TfToken("width:interpolation"));
     v.push_back(TfToken("taper"));
     v.push_back(TfToken("taperStart"));
     v.push_back(TfToken("rootScale"));
@@ -184,7 +188,10 @@ void UsdGenWidthOp::Evaluate(
     static const TfToken sTipScale{"tipScale"};
     static const TfToken sReplace{"replace"};
     static const TfToken sKnots{"width:knots"};
-    static const TfToken sKnotsInterp{"width:knots:interpolation"};
+    // NOTE: this was "width:knots:interpolation" until 2026-09-12, which
+    // matched no C1 property — the authored token was silently ignored and
+    // every ramp built catmullRom. C1/schema name is width:interpolation.
+    static const TfToken sKnotsInterp{"width:interpolation"};
     static const TfToken sCatmullRom{"catmullRom"};
     const float width = p ? static_cast<float>(p->GetDouble(sWidth, 0.01)) : 0.01f;
     const float taper = p ? static_cast<float>(p->GetDouble(sTaper, 0.0)) : 0.0f;
@@ -200,15 +207,16 @@ void UsdGenWidthOp::Evaluate(
     // distinct input — never heap-built per chunk. Empty knots (the common
     // case) alias a shared flat-1.0 table, bit-identical to building one.
     float const *lutPtr = nullptr;
+    VtVec2fArray const widthKnots = ReadRampKnots(p, sKnots);
+    bool const magFlat = widthKnots.empty();
     thread_local std::vector<float> tLut;
     {
-        VtVec2fArray const knots = ReadRampKnots(p, sKnots);
-        if (knots.empty()) {
+        if (magFlat) {
             static const std::vector<float> sFlat(kUsdGenRampLutSize, 1.0f);
             lutPtr = sFlat.data();
         } else {
             if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
-            UsdGenBuildRampLut(knots, p ? p->GetToken(sKnotsInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
+            UsdGenBuildRampLut(widthKnots, p ? p->GetToken(sKnotsInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
             lutPtr = tLut.data();
         }
     }
@@ -222,7 +230,8 @@ void UsdGenWidthOp::Evaluate(
             const size_t o = view->Cv(c, i);
             const float t = hairT ? hairT[o] : (cv > 1 ? float(i) / float(cv - 1) : 0.0f);
             // Interpolated ramp sampling — never a nearest LUT bin (04 §2.17).
-            float w = width * UsdGenEvalLut257(lutPtr, t)
+            // Flat ramp (no knots) is exactly 1.0: skip the call (E-1).
+            float w = width * (magFlat ? 1.0f : UsdGenEvalLut257(lutPtr, t))
                       * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
             // Taper: linear fall-off from taperStart to the tip.
             if (taper > 0.0f && t > taperStart)

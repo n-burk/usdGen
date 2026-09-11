@@ -238,7 +238,14 @@ bool UsdGenNoiseOp::Capture(
 
     const size_t nCv = upstream.totalCvs;
     const size_t nCurve = upstream.totalCurves;
-    const int cvCount = nCurve ? int(nCv / nCurve) : 0;   // uniform-CV fast path (M1)
+    // Ragged layout (03 §1.3): per-curve starts come from cvOffsets (size
+    // nCurve+1); the c*cvCount stride is meaningless there, so cvCount is
+    // forced to 0 and every indexing site below branches on `ragged`.
+    const bool ragged = !upstream.cvOffsets.empty() &&
+                        size_t(upstream.cvOffsets.size()) == nCurve + 1;
+    auto const *offs = ragged ? upstream.cvOffsets.cdata() : nullptr;
+    const int cvCount = ragged
+        ? 0 : (nCurve ? int(nCv / nCurve) : 0);   // uniform-CV fast path (M1)
 
     auto const *px = upstream.px.data();
     auto const *py = upstream.py.data();
@@ -253,7 +260,11 @@ bool UsdGenNoiseOp::Capture(
     // CUDA path (CUDA1b): the kernel pins the same field as the CPU
     // loop below — one thread per curve; the host precomputes the
     // rest-pinned base positions and the per-CV t-values.
-    if (cvCount > 0) {
+    // GPU is UNIFORM-STRIDE ONLY (plan/05): the kernel walks c*cvCount+i
+    // with a fixed stride, so ragged buffers take the CPU fill below.
+    // Without the !ragged test a ragged buffer passed the old gate with
+    // the bogus mean cvCount = nCv/nCurve — false positive, wrong field.
+    if (cvCount > 0 && !ragged) {
         std::vector<float> base(nCurve * 3u);
         std::vector<float> cvT(nCv);
         for (size_t c = 0; c < nCurve; ++c) {
@@ -288,9 +299,11 @@ bool UsdGenNoiseOp::Capture(
     for (size_t c = 0; c < nCurve; ++c) {
         float hvec[3];
         HashVec3(ctx.seed, ids ? ids[c] : 0, hvec);
-        const GfVec3f root = (cvCount > 0)
-            ? GfVec3f(px[c * cvCount], py[c * cvCount], pz[c * cvCount])
-            : GfVec3f(0.0f, 0.0f, 0.0f);
+        const size_t g = ragged ? size_t(offs[c]) : c * size_t(cvCount);
+        const GfVec3f root = ragged
+            ? GfVec3f(px[g], py[g], pz[g])
+            : (cvCount > 0 ? GfVec3f(px[g], py[g], pz[g])
+                           : GfVec3f(0.0f, 0.0f, 0.0f));
         const float baseX = root[0] * correlation + (1.0f - correlation) * hvec[0];
         const float baseY = root[1] * correlation + (1.0f - correlation) * hvec[1];
         const float baseZ = root[2] * correlation + (1.0f - correlation) * hvec[2];
@@ -305,17 +318,18 @@ bool UsdGenNoiseOp::Capture(
         }
         cap.perCurve[c] = 2.0f * rootOut - 1.0f;
 
-        if (cvCount > 0) {
-            for (int i = 0; i < cvCount; ++i) {
-                const float t = hairT
-                    ? hairT[c * cvCount + i]
-                    : (cvCount > 1 ? float(i) / float(cvCount - 1) : 0.0f);
-                const float in3[3] = {baseX, baseY, baseZ + t * captureFrequency};
-                float out1 = 0.0f;
-                SeExpr2::FBM<3, 1, false, float>(in3, &out1,
-                                                 octaves, lacunarity, gain);
-                field[c * cvCount + i] = 2.0f * out1 - 1.0f;
-            }
+        const int n = ragged ? int(offs[c + 1] - offs[c]) : cvCount;
+        // cap.perCv stays GLOBAL-indexed (length totalCvs, plan/05:497):
+        // curve c owns field [g, g+n).
+        for (int i = 0; i < n; ++i) {
+            const float t = hairT
+                ? hairT[g + i]
+                : (n > 1 ? float(i) / float(n - 1) : 0.0f);
+            const float in3[3] = {baseX, baseY, baseZ + t * captureFrequency};
+            float out1 = 0.0f;
+            SeExpr2::FBM<3, 1, false, float>(in3, &out1,
+                                             octaves, lacunarity, gain);
+            field[g + i] = 2.0f * out1 - 1.0f;
         }
     }
     return true;
@@ -350,40 +364,56 @@ void UsdGenNoiseOp::Evaluate(
     // worker thread; empty knots (the common case) alias a shared flat-1.0
     // table, bit-identical to building one per chunk.
     float const *lutPtr = nullptr;
+    VtVec2fArray const magKnots = ReadRampKnots(p, sMagKnots);
+    bool const magFlat = magKnots.empty();
     thread_local std::vector<float> tLut;
     {
-        VtVec2fArray const knots = ReadRampKnots(p, sMagKnots);
-        if (knots.empty()) {
+        if (magFlat) {
             static const std::vector<float> sFlat(kUsdGenRampLutSize, 1.0f);
             lutPtr = sFlat.data();
         } else {
             if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
-            UsdGenBuildRampLut(knots, p ? p->GetToken(sMagInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
+            UsdGenBuildRampLut(magKnots, p ? p->GetToken(sMagInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
             lutPtr = tLut.data();
         }
     }
     auto const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.data();
     const size_t cv = size_t(view->cvCount);
+    // Ragged chunk (03 §1.3): cvCount == 0 and view->cvOffsets is ALREADY
+    // shifted by desc->firstCurve (scheduler SweepChunk, scheduler.cpp:213),
+    // so chunk-local curve c spans [cvOffsets[c] - cvOffsets[0], + n) of the
+    // chunk-local planes.
+    auto const *cvOff = view->cvOffsets;
+    const bool ragged = cvOff != nullptr;   // null == uniform fast path
+    // cap.perCv is GLOBAL per-CV (length totalCvs): a chunk-local plane
+    // index o addresses the field at firstCv + o (plan/05:497).
+    const size_t firstCv = view->desc ? size_t(view->desc->firstCv) : 0;
 
     for (uint32_t c = 0; c < view->curveCount; ++c) {
         const float w = magnitude * (mask ? mask[c] : 1.0f);
+        const size_t nCVs = ragged ? size_t(cvOff[c + 1] - cvOff[c]) : cv;
+        const size_t g = ragged ? size_t(cvOff[c] - cvOff[0])
+                                : view->Cv(c, 0);
         if (w == 0.0f) {
-            // Early out: bitwise copy of the input (02 §2.13).
-            for (size_t i = 0; i < cv; ++i) {
-                const size_t o = view->Cv(c, i);
+            // Early-out: bitwise copy of the input (02 §2.13).
+            for (size_t i = 0; i < nCVs; ++i) {
+                const size_t o = g + i;
                 px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
             }
             continue;
         }
         const GfVec3f n = rootN ? rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
         float runSum = 0.0f;
-        for (size_t i = 0; i < cv; ++i) {
-            const size_t o = view->Cv(c, uint32_t(i));
+        for (size_t i = 0; i < nCVs; ++i) {
+            const size_t o = g + i;
             const float t = hairT ? hairT[o]
-                                   : (cv > 1 ? float(i) / float(cv - 1) : 0.0f);
-            const float magScale = UsdGenEvalLut257(lutPtr, t)
-                                   * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
-            float disp = w * magScale * perCv[o];
+                                   : (nCVs > 1 ? float(i) / float(nCVs - 1) : 0.0f);
+            // Flat magnitude ramp (no knots) evaluates to exactly 1.0, so
+            // skip the out-of-line LUT call: bitwise-identical, fewer CV costs.
+            const float magScale = magFlat ? 1.0f
+                : UsdGenEvalLut257(lutPtr, t)
+                    * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
+            float disp = w * magScale * perCv[firstCv + o];
             if (cumulative) {
                 runSum += disp;
                 disp = runSum / float(i + 1);

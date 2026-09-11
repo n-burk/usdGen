@@ -3,12 +3,16 @@
 An XGen-like procedural hair/fur grooming and instancing plugin for
 OpenUSD 26.08 and Hydra 2.0.
 
-**Status: M0 (skeleton).** The repository builds, the codeless schema and its
-`UsdGenDescription` compute-extent registration are wired, the chain-order
-vertical demo passes, and the test tiers T0–T4 are defined with CI. The
-operator engine, tile publisher, shipped shaders, and the usdview tool loop
-land in M1 and later — see `plan/11-roadmap.md` (§2.1 is the M0 exit). The
-full design document is in `plan/` (`plan/README.md` is the entry point).
+**Status: M1 near-exit (plan v2).** The repository builds; the codeless schema
+(C1 frozen), the 7-kernel operator engine (Scatter/Grow/Noise/Length/Width +
+CurveSource/Deform), the groom scene index with dirty router, tile publisher
+(C2 frozen) and sessions, and the shipped shaders (C5 frozen, variant A) are
+wired; 15/21 M1 gates pass (open: E-1 perf, S-1/S-5/S-6/S-12 bench runs).
+The usdview tool loop (M5) is not started — `cApi.h` declares the C ABI but
+no `cApi.cpp` implements it. The full design document is in `plan/`
+(`plan/README.md` is the entry point); `plan/13-codebase-alignment.md` is the
+binding plan-vs-code re-baseline and owns the current start line (M2:
+SculptLayer + Freeze kernels, C3 freeze, Hydra-sourced graph builder).
 
 ## Prerequisites
 

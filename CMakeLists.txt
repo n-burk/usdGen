@@ -135,6 +135,13 @@ endif()
 # usdGen (SHARED — the engine core, no usd/usdImaging/hd linkage)
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE USDGEN_CORE_SOURCES libs/usdGen/*.cpp)
+# D4 (`13-codebase-alignment.md` §5): exprEval.cpp is M4 expression-lane WIP
+# whose SeExpr2 engine headers are not vendored yet (see its BUILD NOTE) —
+# the glob above would otherwise break the whole lib build. Excluded until
+# the engine lands; its only consumer is the likewise-unwired
+# tests/testUsdGenExpr.cpp. Revert this exclusion when wiring M4.
+list(REMOVE_ITEM USDGEN_CORE_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/exprEval.cpp")
 add_library(usdGen SHARED ${USDGEN_CORE_SOURCES})
 target_include_directories(usdGen PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>
@@ -435,6 +442,62 @@ foreach(_f testUsdGenLinkRuleNegativeFixture testUsdGenLinkRulePositiveFixture
         PROPERTIES LABELS "T0;build")
 endforeach()
 
+# M2: staging-rule tests (gate B-2) — the Hydra-sourced staging fence
+# (13-codebase-alignment.md §7 V2-8). Mirrors the B-1 gate pattern: an
+# include-regex half over the fenced staging TUs plus an nm
+# undefined-symbol half over their compiled objects, with negative/positive
+# fixtures proving the mechanism bites both ways. Fenced TUs are the
+# Hydra-builder and _CommitNow staging path (09 §5.1 B-2); the renamed
+# stage builder (BuildGraphDescFromStage, V2-11) lives outside this list
+# by design as the fenced-off T0/offline path.
+set(USDGEN_FORBIDDEN_STAGING_INC_REGEX
+    "pxr/usd/(usd/(stage|prim|attribute|relationship|primRange)\\.h|usdGeom/|usdShade/)")
+set(USDGEN_FORBIDDEN_STAGING_SYM_REGEX
+    "Usd(Stage|Prim|Attribute|Relationship|Geom|Shade)")
+find_program(USDGEN_NM nm)
+set(_usdgen_staging_tus
+    "libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilder.h|libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilder.cpp|libs/usdGenImaging/usdGenImaging/groomSceneIndexPlugin.h|libs/usdGenImaging/usdGenImaging/groomSceneIndexPlugin.cpp")
+set(_usdgen_staging_objs
+    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/usdGenImaging.dir/libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilder.cpp.o|${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/usdGenImaging.dir/libs/usdGenImaging/usdGenImaging/groomSceneIndexPlugin.cpp.o")
+add_test(NAME testUsdGenStagingRule
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DSTAGING_TUS=${_usdgen_staging_tus}
+        -DOBJECTS=${_usdgen_staging_objs}
+        -DFORBIDDEN_INC=${USDGEN_FORBIDDEN_STAGING_INC_REGEX}
+        -DFORBIDDEN_SYM=${USDGEN_FORBIDDEN_STAGING_SYM_REGEX}
+        -DNM=${USDGEN_NM}
+        -DEXPECT=pass
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckNoStageStaging.cmake)
+set_tests_properties(testUsdGenStagingRule
+    PROPERTIES LABELS "T0;build;gate:B-2")
+add_test(NAME testUsdGenStagingRuleNegativeFixture
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/gateStagingForbidden
+        -DSTAGING_TUS=staging_bad.cpp
+        -DOBJECTS=
+        -DFORBIDDEN_INC=${USDGEN_FORBIDDEN_STAGING_INC_REGEX}
+        -DFORBIDDEN_SYM=${USDGEN_FORBIDDEN_STAGING_SYM_REGEX}
+        -DNM=${USDGEN_NM}
+        -DEXPECT=fail
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckNoStageStaging.cmake)
+add_test(NAME testUsdGenStagingRulePositiveFixture
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/gateStagingClean
+        -DSTAGING_TUS=staging_clean.cpp
+        -DOBJECTS=
+        -DFORBIDDEN_INC=${USDGEN_FORBIDDEN_STAGING_INC_REGEX}
+        -DFORBIDDEN_SYM=${USDGEN_FORBIDDEN_STAGING_SYM_REGEX}
+        -DNM=${USDGEN_NM}
+        -DEXPECT=pass
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckNoStageStaging.cmake)
+# Fixture tests verify the gate *mechanism*, not the tree: T0;build only,
+# so `ctest -L '^gate:B-2$'` selects exactly testUsdGenStagingRule.
+foreach(_f testUsdGenStagingRuleNegativeFixture testUsdGenStagingRulePositiveFixture)
+    set_tests_properties(${_f}
+        PROPERTIES LABELS "T0;build")
+endforeach()
+
 # M0: T1 tests
 # The plugin resource dirs (build tree) must be on the plugin search path so the
 # codeless schema types and the plugInfo entries are discoverable.
@@ -484,12 +547,12 @@ set_tests_properties(testUsdGenPluginDiscovery PROPERTIES
 
 # ---------------------------------------------------------------------------
 # M1 tests (plan 11 §2.2; names/labels from 10-build-dependencies-testing.md
-# §5.6 + §6.5). All are M1-STUB mains: they print "M1-STUB <name>" and exit 77,
-# which must never read as a failure: every M1 stub test gets
-# SKIP_RETURN_CODE "77" (CMake 3.28 ctest: the test reports "Skipped") plus
-# NOT_RUN_RETURN_VALUES "77" (CMake >= 3.29: reports "Not Run"). The implement
-# lanes fill the bodies; the CTest names, tiers and gate labels are frozen
-# here (docs/m1/interfaces.md §8).
+# §5.6 + §6.5; re-baselined by plan/13-codebase-alignment.md §1: all sources
+# are implemented — no "M1-STUB" string remains under tests/ or libs/. The
+# SKIP_RETURN_CODE 77 / SKIP_REGULAR_EXPRESSION "M1-STUB" properties below are
+# retained only as the honest-skip convention (EGL-gated Storm tests exit 77
+# without a GPU); they must never read as a failure. CTest names, tiers and
+# gate labels are frozen here (docs/m1/interfaces.md §8).
 # ---------------------------------------------------------------------------
 # M1 plugin search path: M0 schema + imaging resources plus the usdGenShaders
 # resources (Sdr discovery plugin lands in usdGenImaging; 10 §4.4).
@@ -505,7 +568,7 @@ set(_usdgen_m1_env
     "PXR_PLUGINPATH_NAME=${_usdgen_m1_pluginpath};LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib:$<TARGET_FILE_DIR:usdGen>")
 
 # M1 T0 engine tests (no Hydra, no stage — gate B-1 keeps them clean).
-foreach(_t testUsdGenGraph testUsdGenKernelDeterminism)
+foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -513,6 +576,7 @@ foreach(_t testUsdGenGraph testUsdGenKernelDeterminism)
 endforeach()
 set_tests_properties(testUsdGenGraph PROPERTIES LABELS "T0;gate:E-6")
 set_tests_properties(testUsdGenKernelDeterminism PROPERTIES LABELS "T0;gate:E-8")
+set_tests_properties(testUsdGenWidth PROPERTIES LABELS "T0")
 
 # M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
 # prototypes/data-plane-benchmark, 11 §2.2).
@@ -563,6 +627,34 @@ set_tests_properties(testUsdGenSessions
     TIMEOUT 120
 )
 
+# ---- SI-12: testUsdGenHydraParity registration ----
+# Hydra/stage builder parity on G1–G4 (imaging lane, V2-11 item 4): both
+# builders must produce an identical UsdGenGraphDesc before the stage path
+# is unplugged. Fixture dir arrives as USDGEN_TEST_FIXTURE_DIR (absolute
+# source path, mirrors the bench --scene pattern); plugin discovery comes
+# from _usdgen_m1_env like every adapter-dependent T1 test.
+add_executable(testUsdGenHydraParity
+    tests/testUsdGenHydraParity.cpp
+)
+target_link_libraries(testUsdGenHydraParity
+    PUBLIC usdGenTestUtilsHd
+    PUBLIC usdGenImaging
+)
+target_compile_definitions(testUsdGenHydraParity PRIVATE
+    USDGEN_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures")
+set_target_properties(testUsdGenHydraParity PROPERTIES
+    VISIBILITY_INLINES_HIDDEN ON
+)
+add_test(NAME testUsdGenHydraParity
+    COMMAND testUsdGenHydraParity
+)
+set_tests_properties(testUsdGenHydraParity
+    PROPERTIES
+    ENVIRONMENT "${_usdgen_m1_env}"
+    LABELS "T1;gate:SI-12"
+    TIMEOUT 300
+)
+
 # Note: testUsdGenInvalidation already carries T1;gate:SI-2 (set at line ~446).
 # The SI-2 overlay extension (bare primvars locator, section 7) is appended
 # within that same test and shares its executable; no new CMake target needed.
@@ -578,10 +670,8 @@ set_tests_properties(testUsdGenContracts PROPERTIES LABELS "T1")
 # plugin/usdGenSchema/resources must stay byte-identical to a fresh
 # usdGenSchema run over libs/usdGenSchema/schema.usda (bin/gen_schema.sh is
 # the reference recipe; the N-2 plugInfo post-processing drift is what this
-# catches in CI). The source is a wave-3 deliverable; the frozen CTest name
-# and T1 tier are registered now, and until the source lands the test
-# reports Skipped through the same M1-STUB convention as the compiled stubs
-# (never a fake pass).
+# catches in CI). The source has landed (plan/13 §1); the else() echo-stub
+# branch below is retained only for missing sources (never a fake pass).
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/testUsdGenSchemaUpToDate.cpp")
     add_executable(testUsdGenSchemaUpToDate tests/testUsdGenSchemaUpToDate.cpp)
     target_link_libraries(testUsdGenSchemaUpToDate PRIVATE usdGenSchema usd tf arch)
@@ -613,19 +703,42 @@ add_executable(benchUsdGenStorm tests/perf/benchUsdGenStorm.cpp)
 target_link_libraries(benchUsdGenStorm PRIVATE usdGenTestUtilsHd)
 target_include_directories(benchUsdGenStorm PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
-add_test(NAME benchUsdGenStorm COMMAND benchUsdGenStorm)
+add_test(NAME benchUsdGenStorm
+    COMMAND benchUsdGenStorm
+        --scene ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda
+        --static --refine 2)
+# --scene is required (bare bench exits 2): the S-1 scene is the G3
+# canonical groom at refineLevel 2 (the S-1 gate condition, 09 §5.3).
+# The fixture is generated (usdGenFixtures below; gitignored build
+# artifact like the binaries); a missing file fails loudly in OpenScene,
+# never silently. HD_ENABLE_PERFLOG=1 feeds the drawBatches/drawCalls/
+# itemsDrawn counters the S-5/S-6/S-12 assertions read.
 set_tests_properties(benchUsdGenStorm PROPERTIES
     LABELS "T2;perf;gate:S-1;gate:S-5;gate:S-6;gate:S-12"
-    ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    ENVIRONMENT "${_usdgen_m1_env};HD_ENABLE_PERFLOG=1" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+# Groom fixtures G1-G5 (S-1/S-5/S-6/S-12/E-5 scenes): pure-text output of
+# usd/fixtures/make_fixtures.py (stdlib only, no pxr), so T2 stays
+# self-contained wherever python3 exists. Regeneration is byte-identical
+# (short decimals, fixed emission order); the files stay gitignored.
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_fixtures.py
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_fixtures.py
+    COMMENT "Generating usdGen groom fixtures G1-G5 (gitignored)"
+    VERBATIM)
+add_custom_target(usdGenFixtures ALL
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda)
+add_dependencies(benchUsdGenStorm usdGenFixtures)
 
 # N-4 (09 §5.3/§5.4, 10 §5.6 + §6.5): the remaining M1 Storm decision gates.
 # S-8 (tangent strategy PW decision) needs both the variant A/B timing
 # comparison (`testUsdGenStormTangent`) and the
 # HDST_ENABLE_HGI_RESOURCE_GENERATION=1 compile (`testUsdGenStormHgiResource`);
 # S-9 is the refineLevel live switch, L-1 the preview-material resolution.
-# The four sources land in wave 3; the frozen CTest names, tier and gate
-# labels are registered now so `ctest -N -L 'gate:'` resolves every M1 gate,
-# reporting Skipped via the M1-STUB convention until then. GPU-bound tests:
+# All sources except testUsdGenStormSurgery have landed (plan/13 §1, §3.3);
+# the else() echo branch below is retained for missing sources so
+# `ctest -N -L 'gate:'` still resolves every M1 gate. GPU-bound tests:
 # RUN_SERIAL keeps one Storm context per ctest slot.
 set(_usdgen_storm_labels_testUsdGenStormTangent  "T2;gate:S-8")
 set(_usdgen_storm_labels_testUsdGenStormHgiResource "T2;gate:S-8")

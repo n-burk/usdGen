@@ -148,8 +148,8 @@ specifies it in full), exit gates, freezes, risks and the prototypes carried in
 
 ### 2.0 Gate → milestone
 
-Transcribed from ADR §9 R40, then completed from `09-performance-and-benchmarks.md` §5 for the six
-ids R40 does not name (SI-10, SI-11, S-11, S-12, T-EXPR-1, T-PTEX-1 — "where 09 already places a gate
+Transcribed from ADR §9 R40, then completed from `09-performance-and-benchmarks.md` §5 for the nine
+ids R40 does not name (SI-10, SI-11, S-11, S-12, T-EXPR-1, T-PTEX-1, B-2, SI-12, SI-13 — "where 09 already places a gate
 not named here, 09 stands"). Every gate id in the registry appears below exactly once as an exit,
 except the five pre-work gates (E-4, S-8, S-9, L-1, SI-8), which appear twice — as an M0 recording
 requirement and at the milestone where they become binding — and SI-11, a record-only M0 item.
@@ -159,7 +159,7 @@ Re-runs are regression checks, not exits.
 |---|---|---|
 | M0 | B-1; PW-1…PW-6 results and decision lines recorded (E-4, S-8, S-9, L-1, SI-8 pre-work; SI-11 record only) | — |
 | M1 | E-1, E-2, E-6, E-7, E-8; SI-1, SI-2, SI-3, SI-4, SI-5, SI-6, SI-7, SI-8; S-1, S-5, S-6, S-8, S-9, **S-12**; L-1, L-2 | — |
-| M2 | E-1r, E-3; SI-9, SI-10; S-2, S-3, S-4 | SI-2 on the overlaid-prim case |
+| M2 | E-1r, E-3; B-2; SI-9, SI-10, SI-12, SI-13; S-2, S-3, S-4 | SI-2 on the overlaid-prim case |
 | M3 | E-4 on the shipped capture, E-5 | E-1 with 7 nodes and on `head1M` |
 | M4 | L-3, L-4, L-5; **T-EXPR-1**, **T-PTEX-1**; the map/expression goldens of §2.5 | E-1, E-5, E-8 with the map and expression nodes in the chain |
 | M5 | S-7; T-1, T-2, T-3, T-4 | — |

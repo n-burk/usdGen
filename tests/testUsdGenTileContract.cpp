@@ -327,8 +327,14 @@ int main()
             }
             if (HdContainerDataSourceHandle topo = HdContainerDataSource::Cast(
                     c->Get(TfToken("basisCurves")))) {
+                // C2 (docs/freezes/C2.md:20-23): Hydra nests topology ONE
+                // level down — basisCurves/topology/curveVertexCounts, with
+                // type/basis/wrap as SIBLINGS of the topology container
+                // (hd/basisCurvesSchema.h:38). A flat layout serves Storm no
+                // topology and the prim is silently dropped (2026-09-12:
+                // 49 published tiles, itemsDrawn == 1).
                 std::set<std::string> tn = ChildNames(topo);
-                for (char const *req : { "curveVertexCounts", "type", "basis", "wrap" }) {
+                for (char const *req : { "topology", "type", "basis", "wrap" }) {
                     Check(tn.count(req) != 0,
                           std::string("basisCurves child '") + req + "' published");
                 }
@@ -338,6 +344,16 @@ int main()
                       "basisCurves wrap == pinned (contract constant, C2)");
                 Check(LeafIsToken(LeafValue(topo->Get(TfToken("basis"))), "bspline"),
                       "basisCurves basis == usdGen:curve:basis (bspline)");
+                if (HdContainerDataSourceHandle inner =
+                        HdContainerDataSource::Cast(topo->Get(TfToken("topology")))) {
+                    Check(ChildNames(inner).count("curveVertexCounts") != 0,
+                          "basisCurves/topology/curveVertexCounts published");
+                } else {
+                    Check(false,
+                          "basisCurves/topology container published (Hd nesting, C2)");
+                }
+            } else {
+                Check(false, "basisCurves container published");
             }
             if (HdContainerDataSourceHandle primvars = HdContainerDataSource::Cast(
                     c->Get(TfToken("primvars")))) {
@@ -360,6 +376,35 @@ int main()
                     c->Get(TfToken("displayStyle")))) {
                 Check(LeafIsInt(LeafValue(style->Get(TfToken("refineLevel"))), 2),
                       "displayStyle/refineLevel == 2 (C2, no M1 tumble tier)");
+            }
+            // Purpose: omitted when the publication carries none (unauthored
+            // description purpose) so Hydra resolves the geometry render tag;
+            // publishing purpose="default" would match NO tag and Storm would
+            // never sync the tile (2026-09-12: 49 tiles, itemsDrawn == 1).
+            // Authored values pass through verbatim (they ARE render tags).
+            if (pub.purpose.IsEmpty()) {
+                Check(ChildNames(c).count("purpose") == 0,
+                      "no purpose container when publication purpose is empty "
+                      "(-> geometry render tag)");
+            }
+            {
+                UsdGenTilePublication authored = pub;
+                authored.purpose = TfToken("render");
+                HdContainerDataSourceHandle ca =
+                    UsdGenTilePublisher::BuildTileDataSource(authored);
+                HdContainerDataSourceHandle pa = HdContainerDataSource::Cast(
+                    ca ? ca->Get(TfToken("purpose")) : nullptr);
+                Check(bool(pa) &&
+                          LeafIsToken(LeafValue(pa->Get(TfToken("purpose"))),
+                                      "render"),
+                      "authored purpose passes through verbatim");
+                UsdGenTilePublication bare = pub;
+                bare.purpose = TfToken();
+                HdContainerDataSourceHandle cb =
+                    UsdGenTilePublisher::BuildTileDataSource(bare);
+                Check(cb && ChildNames(cb).count("purpose") == 0,
+                      "no purpose container when publication purpose is empty "
+                      "(-> geometry render tag)");
             }
         }
     }

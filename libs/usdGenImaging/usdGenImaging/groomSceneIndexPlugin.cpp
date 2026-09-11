@@ -804,7 +804,7 @@ UsdGenGroomSceneIndex::_CommitNow(
             // here, unlocked; the engine copy runs inside StageDesc.
             ::usdGenImaging::UsdGenGraphDescBuildOptions opts;
             usdGen::UsdGenGraphDesc desc =
-                ::usdGenImaging::BuildGraphDesc(w.stage, w.description, opts);
+                ::usdGenImaging::BuildGraphDescFromStage(w.stage, w.description, opts);
             w.session->StageDesc(desc);
             if (std::getenv("USDGEN_DEBUG_STAGING")) {
                 std::printf("[staging] staged nodes=%zu terminal=%s\n",

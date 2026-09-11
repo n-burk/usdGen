@@ -1,6 +1,7 @@
-# usdGen — plan v1
+# usdGen — plan v2
 
-Date: 2026-09-05. Status: plan v1 (draft, pending review).
+Date: 2026-09-05 v1; overlay 2026-09-11. Status: plan v2 (accepted: v1 history
+in `00`–`12` plus binding overlay `13-codebase-alignment.md`).
 
 This directory is the complete plan for **usdGen**, an XGen-like hair/fur grooming and instancing
 plugin for OpenUSD 26.08 and Hydra 2.0. usdGen is built as a sibling CMake project of usdRig, runs
@@ -45,7 +46,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
   `SubtreeSnapshot`, freeze by `SetActive(false)`, never `RemovePrim` interactively.
 * **Contracts and schedule.** C1 names, C2 tiles and C5 glslfx inputs freeze at M1; C3 at M2; C4 at
   M5. Nine milestones M0–M8, serial vertical slices, 34 weeks with three engineers (ASSUMPTION).
-  Every claim is gated: fifty gates in `09-performance-and-benchmarks.md` §5, each with a tier,
+  Every claim is gated: fifty-three gates in `09-performance-and-benchmarks.md` §5, each with a tier,
   a threshold, a milestone and a status.
 
 ## 2. Status vocabulary
@@ -78,6 +79,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
 | Risks RK-, questions Q-, assumptions A-, rejected alternatives X- | `12-risks-decisions-open-questions.md` |
 | Measured numbers `EV-001…EV-092`, verified `file:line` facts, corrections K1–K25 | `appendix-A-evidence-ledger.md` |
 | Prototype directories and what each is carried into | `appendix-B-prototype-inventory.md` |
+| Plan-vs-codebase alignment (ground truth, kernel-status table, milestone re-baseline, debt register) | `13-codebase-alignment.md` |
 
 ## 4. Index
 
@@ -96,6 +98,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
 | `10-build-dependencies-testing.md` | CMake targets and the link rule, vendored third party, install layout, registries, test tiers and harnesses. |
 | `11-roadmap.md` | Pre-work, milestones M0–M8 with exit gates, dependency graph, estimates, stop conditions, definition of done. |
 | `12-risks-decisions-open-questions.md` | Settled decisions S1–S46 and rulings, rejected alternatives, risk register, open questions, assumptions. |
+| `13-codebase-alignment.md` | **v2 overlay (binding): ground truth vs code, operators-as-prims, relationships-form-the-graph at Hydra runtime, milestone re-baseline, debt register, §9 harness handoff (the current start line). Owns plan-vs-codebase alignment; wins over `00`–`12` where they disagree (§6 lists every superseded claim).** |
 | `appendix-A-evidence-ledger.md` | Host facts, every measured number as an `EV-nnn` row, verified `file:line` facts, unmeasured claims, corrections. |
 | `appendix-B-prototype-inventory.md` | The twelve prototype directories: files, build lines, what each proved, what it is carried into. |
 | `design/` | `brief-v1.md` (requirements R1–R9, decisions S1–S46), the three proposals, the three judge reports, `adr-v1.md`, the four consistency-lens reports. |
@@ -135,6 +138,12 @@ ids, test names, forbidden names) on 2026-09-05. usdRig and OpenUSD were read bu
 
 ## 8. What happens next
 
-M0 (`11-roadmap.md` §2.1): fix the target names and install layout, prove chain order on the
-shipped plugin, stand up the T0–T4 harnesses and CI, write `docs/workstation-protocol.md`, and run
-the six pre-work decision checks PW-1…PW-6 before M1 is planned in detail.
+M0 is done; M1 is at near-exit (open: E-1 perf, S-1/S-5/S-6/S-12 bench runs —
+`.omp/gate-status.md`). Next, in order: tag M1, then M2 (SculptLayer + Freeze
+kernels, C3 freeze, and the Hydra-sourced graph builder of `13-…` §3.3, which
+removes the stage-sourced staging debt). `13-codebase-alignment.md` §4 owns
+the milestone re-baseline; **§9 is the current start line** (M2 mid-V2-11
+handoff, 2026-09-11: split the stage builder out of the B-2 fence, migrate
+`_CommitNow` to `BuildGraphDescFromHydra`, unplug the stage side channels,
+close gate B-2). `.omp/handoff-20260911.md` is the harness entry pointer.
+`11-roadmap.md` §2.3+ milestone contents stand.

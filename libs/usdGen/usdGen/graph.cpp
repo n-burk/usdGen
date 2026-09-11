@@ -202,6 +202,21 @@ void UsdGenGraph::DirtyCurves(SdfPath const &curvePrim)
     }
 }
 
+// Effective curve buffer for a node: a pure passthrough node (no topo fx)
+// presents its input's buffer — topology, cv totals and offsets — so stale
+// downstream totals never override a changed upstream layout; a topo fx
+// regenerates curves and owns the layout again. Traced through passthrough
+// inputs only; depth guards against accidental cycles in the input chain.
+static UsdGenCurveBuffer const &_EffBuffer(UsdGenGraph const &g,
+                                           UsdGenNodeId id, int depth)
+{
+    UsdGenCompiledNode const &n = g.Node(id);
+    if (n.topoFx != UsdGenTopoFx::None ||
+        n.input == kUsdGenInvalidNode || depth > 64)
+        return n.buffer;
+    return _EffBuffer(g, n.input, depth + 1);
+}
+
 bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
 {
     int const nChunks = ComputeNumChunks(totalCurves, _chunkSize);
@@ -228,19 +243,38 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
         }
     }
 
-    for (auto &nPtr : _nodes) {
-        if (!nPtr) continue;
-        UsdGenCompiledNode &n = *nPtr;
-        uint32_t cvp = static_cast<uint32_t>(std::max(0, cvCount));
-        if (n.buffer.totalCurves > 0 &&
-            n.buffer.totalCvs % n.buffer.totalCurves == 0) {
-            cvp = n.buffer.totalCvs / n.buffer.totalCurves;
+    bool layoutDiff = false;
+
+    for (size_t ni = 0; ni < _nodes.size(); ++ni) {
+        if (!_nodes[ni]) continue;
+        UsdGenCompiledNode &n = *_nodes[ni];
+        // Per-node cvp: prefer the node's actual curve data (its effective
+        // buffer, possibly a pure passthrough input's) over the partition's
+        // uniform override. Ragged buffers (non-empty cvOffsets) are carried
+        // verbatim: per-chunk firstCv is the source offset, cvCount == 0
+        // means "variable cv/curve" per UsdGenChunkDesc.
+        UsdGenNodeId const id = static_cast<UsdGenNodeId>(ni);
+        UsdGenCurveBuffer const &eff = _EffBuffer(*this, id, 0);
+        VtIntArray const &offs = eff.cvOffsets;
+        uint32_t cvpUniform = static_cast<uint32_t>(std::max(0, cvCount));
+        if (eff.totalCurves > 0 &&
+            eff.totalCvs % eff.totalCurves == 0) {
+            cvpUniform = eff.totalCvs / eff.totalCurves;
         }
-        // Layout unchanged for this node: keep chunks AND its dirty bytes
-        // (a re-partition must not force a full re-eval of nodes whose
-        // curve ranges and cv/curve are untouched — gate E-2 relies on this).
-        if (!n.chunks.empty() && int(n.chunks.size()) == nChunks &&
-            (n.chunks[0].cvCount == cvp || (n.chunks[0].cvCount == 0 && cvp == 0))) {
+        uint32_t const cvp = offs.empty() ? cvpUniform : 0u;
+        // Keep existing chunks only if the count matches and EVERY chunk's
+        // (firstCv, cvCount) still equals the desired values.
+        bool keep = !n.chunks.empty() && int(n.chunks.size()) == nChunks;
+        for (int c = 0; keep && c < nChunks; ++c) {
+            uint32_t const firstCurve = static_cast<uint32_t>(c * _chunkSize);
+            uint32_t const wantFirstCv = offs.empty()
+                ? firstCurve * cvp
+                : static_cast<uint32_t>(
+                      offs[std::min<size_t>(firstCurve, offs.size() - 1)]);
+            keep = n.chunks[c].cvCount == cvp &&
+                   n.chunks[c].firstCv == wantFirstCv;
+        }
+        if (keep) {
             if (tileLayoutChanged) {
                 // Tile ids moved under a kept chunk set: refresh them.
                 for (auto &cd : n.chunks)
@@ -256,15 +290,24 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
             cd.firstCurve = static_cast<uint32_t>(c * _chunkSize);
             cd.curveCount = static_cast<uint32_t>(
                 std::min(_chunkSize, totalCurves - c * _chunkSize));
-            cd.firstCv = cd.firstCurve * cvp;
-            cd.cvCount = cvp;
+            if (offs.empty()) {
+                cd.firstCv = cd.firstCurve * cvp;
+                cd.cvCount = cvp;
+            } else {
+                // Ragged: cvCount == 0 = variable cv/curve; firstCv is the
+                // source-curve offset (clamped for safety).
+                cd.cvCount = 0;
+                cd.firstCv = static_cast<uint32_t>(
+                    offs[std::min<size_t>(cd.firstCurve, offs.size() - 1)]);
+            }
             cd.liveCount = cd.curveCount;
             cd.tile = static_cast<UsdGenTileId>(c / std::max(1, _chunksPerTile));
         }
+        layoutDiff = true;
         n.chunkDirty.assign(nChunks, UsdGenDirtyParameter);
         n.chunkCaptured.assign(nChunks, 0);
     }
-    return changed;
+    return changed || layoutDiff;
 }
 
 void UsdGenGraph::_PropagateDescendantBits(uint32_t bits,

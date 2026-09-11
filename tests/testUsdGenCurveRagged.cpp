@@ -1,0 +1,205 @@
+// testUsdGenCurveRagged — UsdGenCurveSourceOp resampleTo fork (plan
+// 04-operators.md §2.4, resampleTo row) through the REAL pipeline.
+//
+// FIX-4 (review): the chunk-descriptor assertions need real chunks, so both
+// modes are driven through UsdGenCompiler + UsdGenScheduler::Run with the
+// graph harness copied from tests/testUsdGenRaggedTopo.cpp (source -> one
+// position-only Deform), not a bare op.Capture() call.
+//
+//   * resampleTo == 0 (default): source CV counts PRESERVED ragged —
+//     cvOffsets = {0,2,8,12} (size nCurves+1, [n] == totalCvs == 12),
+//     chunk cvCount == 0 on every deform chunk, CVs verbatim on the source
+//     node's own buffer.
+//   * resampleTo == 4: uniform — cvOffsets stays EMPTY, every deform chunk
+//     carries cvCount == 4 == totalCvs/totalCurves, interiors interpolated.
+//
+// Tier T0: engine core only, no stage, no Hydra (gate B-1). Standalone
+// main(): PASS/FAIL + exit code.
+
+#include "usdGen/compiler.h"
+#include "usdGen/graph.h"
+#include "usdGen/graphDesc.h"
+#include "usdGen/opRegistry.h"
+#include "usdGen/scheduler.h"
+#include "usdGen/types.h"
+
+#include "pxr/pxr.h"
+#include "pxr/base/gf/vec3f.h"
+#include "pxr/base/vt/array.h"
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+PXR_NAMESPACE_USING_DIRECTIVE
+
+using namespace usdGen;
+
+namespace {
+
+int g_failures = 0;
+void Check(bool ok, std::string const &what)
+{
+    if (!ok) {
+        ++g_failures;
+        std::printf("FAIL: %s\n", what.c_str());
+    } else {
+        std::printf("ok:   %s\n", what.c_str());
+    }
+}
+
+// Source surface: 3 curves with counts [2, 6, 4] (totalCvs == 12); curve c
+// runs along +x from (0,c,0) to (count-1,c,0). resampleTo > 0 is authored on
+// the source node (prefix-stripped param name per C1, FIX-2).
+UsdGenGraphDesc MakeRaggedCurveDesc(int resampleTo)
+{
+    UsdGenGraphDesc d;
+    d.description = SdfPath("/curveRagged");
+    d.terminal    = SdfPath("/curveRagged/deform");
+    d.time        = 0.0;
+
+    UsdGenSurfaceDesc s;
+    s.path = SdfPath("/curveRagged/sourceCurves");
+    s.id   = 0;
+    s.faceVertexCounts  = VtIntArray({2, 6, 4});
+    s.faceVertexIndices = VtIntArray(12);
+    s.restPoints        = VtVec3fArray(12);
+    s.points            = VtVec3fArray(12);
+    size_t k = 0;
+    for (int c = 0; c < 3; ++c)
+        for (int i = 0; i < s.faceVertexCounts[c]; ++i, ++k) {
+            s.faceVertexIndices[k] = int(k);
+            s.restPoints[k] = GfVec3f(float(i), float(c), 0.0f);
+            s.points[k]     = s.restPoints[k];
+        }
+    d.surfaces.push_back(std::move(s));
+
+    UsdGenNodeDesc src;
+    src.path    = SdfPath("/curveRagged/src");
+    src.type    = TfToken("UsdGenCurveSource");
+    src.enabled = true;
+    src.blend   = 1.0f;
+    src.surfaces.push_back(SdfPath("/curveRagged/sourceCurves"));
+    if (resampleTo > 0) {
+        UsdGenParamValue p;
+        p.name  = TfToken("resampleTo");   // C1: usdGen: prefix stripped
+        p.value = VtValue(resampleTo);
+        src.params.push_back(p);
+    }
+    d.nodes.push_back(std::move(src));
+
+    UsdGenNodeDesc def;
+    def.path    = SdfPath("/curveRagged/deform");
+    def.type    = TfToken("UsdGenDeform");
+    def.enabled = true;
+    def.blend   = 1.0f;
+    def.inputs.push_back(SdfPath("/curveRagged/src"));
+    d.nodes.push_back(std::move(def));
+    return d;
+}
+
+// Compile + one Run; leaves graph/params alive for the caller's asserts.
+struct Harness {
+    UsdGenGraphDesc desc;
+    UsdGenCompiler  compiler;
+    UsdGenGraph     graph;
+
+    explicit Harness(int resampleTo) : desc(MakeRaggedCurveDesc(resampleTo))
+    {
+        UsdGenCompileResult const cr = compiler.Compile(desc, &graph);
+        if (!cr.ok) {
+            std::printf("compile failed:");
+            for (auto const &e : cr.errors) std::printf(" %s", e.c_str());
+            std::printf("\n");
+            ++g_failures;
+            return;
+        }
+        UsdGenScheduler scheduler(8);
+        UsdGenEvalContext ctx;
+        ctx.desc = &graph.Desc();
+        ctx.time = desc.time;
+        UsdGenRunResult const run = scheduler.Run(graph, ctx, 1);
+        if (run.diagnostics.HasErrors()) {
+            std::printf("run diagnostics:");
+            for (auto const &e : run.diagnostics.errors) std::printf(" %s", e.c_str());
+            std::printf("\n");
+            ++g_failures;
+        }
+    }
+
+    UsdGenCurveBuffer const &Terminal() const { return graph.Output(); }
+    UsdGenCurveBuffer const &Source() const {
+        return graph.Node(graph.NodeIdForPath(SdfPath("/curveRagged/src"))).buffer;
+    }
+    std::vector<UsdGenChunkDesc> const &DeformChunks() const {
+        return graph.Chunks(graph.NodeIdForPath(SdfPath("/curveRagged/deform")));
+    }
+};
+
+}  // namespace
+
+int main()
+{
+    usdGenRegisterM1Operators();
+
+    // ---- mode 1: resampleTo == 0 (default) — ragged through the pipeline --
+    {
+        Harness h(0);
+        UsdGenCurveBuffer const &out = h.Terminal();
+        Check(out.totalCurves == 3, "ragged: terminal totalCurves == 3");
+        Check(out.totalCvs == 12, "ragged: terminal totalCvs == 12");
+        VtIntArray want{0, 2, 8, 12};
+        Check(h.Source().cvOffsets == want,
+              "ragged: source cvOffsets == {0,2,8,12}");
+        Check(h.Source().cvOffsets.size() == 4 &&
+              h.Source().cvOffsets.back() == int(h.Source().totalCvs),
+              "ragged: cvOffsets[n] == totalCvs");
+        Check(out.cvOffsets == want,
+              "ragged: cvOffsets preserved through Deform (FIX-1 carry)");
+
+        std::vector<UsdGenChunkDesc> const &chunks = h.DeformChunks();
+        Check(!chunks.empty(), "ragged: deform has real chunk descriptors");
+        Check(std::all_of(chunks.begin(), chunks.end(),
+                          [](UsdGenChunkDesc const &cd) { return cd.cvCount == 0; }),
+              "ragged: every deform chunk cvCount == 0");
+        int covered = 0;
+        for (UsdGenChunkDesc const &cd : chunks) covered += int(cd.curveCount);
+        Check(covered == 3, "ragged: chunk curve spans cover all 3 curves");
+
+        // Source-node buffer carries the CVs verbatim (ragged, counts [2,6,4]).
+        UsdGenCurveBuffer const &src = h.Source();
+        Check(src.px.size() == 12 && src.px[0] == 0.0f && src.px[1] == 1.0f &&
+              src.px[2] == 0.0f && src.py[2] == 1.0f &&   // curve 1 verbatim
+              src.px[7] == 5.0f && src.px[8] == 0.0f && src.py[8] == 2.0f,
+              "ragged: CVs verbatim, source counts [2,6,4] preserved");
+    }
+
+    // ---- mode 2: resampleTo == 4 — uniform, cvOffsets stays empty ---------
+    {
+        Harness h(4);
+        UsdGenCurveBuffer const &out = h.Terminal();
+        UsdGenCurveBuffer const &src = h.Source();
+        Check(src.cvOffsets.empty(), "uniform: source cvOffsets stays empty");
+        Check(out.cvOffsets.empty(), "uniform: terminal cvOffsets stays empty");
+        Check(src.totalCurves == 3 && src.totalCvs == 12,
+              "uniform: source totalCvs == 3 * resampleTo == 12");
+        Check(out.totalCurves == 3 && out.totalCvs == 12 &&
+              out.totalCvs / out.totalCurves == 4,
+              "uniform: terminal cvCount == totalCvs/totalCurves == 4");
+
+        std::vector<UsdGenChunkDesc> const &chunks = h.DeformChunks();
+        Check(!chunks.empty() &&
+              std::all_of(chunks.begin(), chunks.end(),
+                          [](UsdGenChunkDesc const &cd) { return cd.cvCount == 4; }),
+              "uniform: every deform chunk carries cvCount == 4");
+
+        // curve 0 = 2 source CVs resampled to 4 along the polyline: endpoints
+        // exact, interior strictly interpolated.
+        Check(src.px.size() == 12 && src.px[0] == 0.0f && src.px[1] > 0.3f &&
+              src.px[1] < 0.7f && src.px[3] == 1.0f && src.py[3] == 0.0f,
+              "uniform: curve0 [0,1] resampled to 4, interiors interpolated");
+    }
+
+    std::printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");
+    return g_failures == 0 ? 0 : 1;
+}

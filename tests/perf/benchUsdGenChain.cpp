@@ -1,7 +1,7 @@
 // benchUsdGenChain — timing + bit-identity gates E-1, E-6, E-7, E-8
 // (plan/09 §5.1). Exit is nonzero on bitwise mismatch ALWAYS, and on timing
 // FAIL only when USDGEN_GATE=1 (CI must not flake on absolute timings).
-//   E-1 full-dirty commit, G3 @8 threads   : median <= 6.4 ms (9 runs)
+//   E-1 full-dirty commit, G3 @8 threads   : median <= 1.5 ms (9 runs)
 //   E-6 chain-200 append Recompile @8      : median <= 0.2 ms, rebuilds == 1
 //   E-7 E-1 scaling, 1 vs 8 threads        : median1 / median8 >= 3x
 //   E-8 1-thread vs 8-thread terminal      : bitwise identical (ALWAYS hard)
@@ -176,9 +176,35 @@ bool SameArray(A const &a, A const &b)
 int main(int argc, char **argv)
 {
    if (argc > 1 && std::string(argv[1]) == "--ragged") {
-       std::printf("ragged: UNMEASURED (engine ops pending)\\n");
-       return 0;
-   }
+        std::printf("ragged: UNMEASURED (engine ops pending)\\n");
+        return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "--perop") {
+        // Per-node capture/eval split of one full-dirty G3 commit @8 threads
+        // (reads UsdGenRunResult::nodeStats; feeds the E-1 breakdown).
+        usdGenRegisterM1Operators();
+        UsdGenCompiler c;
+        UsdGenGraph g;
+        if (!c.Compile(MakeG3(), &g).ok) {
+            std::printf("perop: compile failed\n");
+            return 1;
+        }
+        UsdGenEvalContext ctx;
+        ctx.desc = &g.Desc();
+        UsdGenScheduler s8(8);
+        uint64_t gen = 0;
+        s8.Run(g, ctx, ++gen);
+        for (int i = 0; i < 3; ++i) {
+            ForceFullDirty(g);
+            UsdGenRunResult const r = s8.Run(g, ctx, ++gen);
+            for (UsdGenNodeRunStats const &st : r.nodeStats)
+                std::printf("perop run=%d node=%u type=%s captureMs=%.3f evalMs=%.3f chunks=%llu\n",
+                            i, st.id, g.Node(st.id).type.GetText(),
+                            st.captureMs, st.evalMs,
+                            (unsigned long long)st.chunksEvaluated);
+        }
+        return 0;
+    }
     usdGenRegisterM1Operators();
 
     UsdGenEvalContext ctx;
@@ -214,7 +240,7 @@ int main(int argc, char **argv)
             t1.push_back(std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - t0).count());
         }
-        ReportTiming("E-1 (G3 full-dirty commit, ms, 8 threads)", Median(t8), 6.4, true);
+        ReportTiming("E-1 (G3 full-dirty commit, ms, 8 threads)", Median(t8), 1.5, true);
         ReportTiming("E-7 (1-thread / 8-thread scaling ratio)",
                      Median(t1) / Median(t8), 3.0, false);
     }

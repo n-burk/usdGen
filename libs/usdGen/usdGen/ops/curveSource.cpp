@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <vector>
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -68,6 +69,7 @@ TfSpan<const TfToken> UsdGenCurveSourceOp::TopologyParameters() const
       v.push_back(TfToken("mode"));
       v.push_back(TfToken("usdGen:useRest"));
       auto m = UsdGenMaskTopologyParams();
+      v.push_back(TfToken("resampleTo"));
       v.insert(v.end(), m.begin(), m.end());
       return v;
    }();
@@ -110,31 +112,71 @@ bool UsdGenCurveSourceOp::Capture(UsdGenCaptureContext const &ctx,
       buf.totalCvs = 0;
       return true;
    }
+   int const resampleTo = ctx.params
+       ? std::max(ctx.params->GetInt(TfToken("resampleTo"),
+                                    ctx.params->GetInt(TfToken("usdGen:resampleTo"), 0)), 0)
+       : 0;
    int totalCurves = static_cast<int>(surf.faceVertexCounts.size());
    int totalCvs = 0;
-   for (int c = 0; c < totalCurves; ++c) totalCvs += surf.faceVertexCounts[c];
+   if (resampleTo > 0) {
+      size_t const uni = size_t(totalCurves) * size_t(resampleTo);
+      if (uni > size_t(std::numeric_limits<int>::max())) {
+         if (diag) diag->Error("UsdGenCurveSource::Capture: totalCurves * resampleTo exceeds INT_MAX");
+         return false;  // reject; *buf left unwritten
+      }
+      totalCvs = int(uni);  // uniform: resampleTo CVs per curve
+   } else {
+      for (int c = 0; c < totalCurves; ++c) totalCvs += surf.faceVertexCounts[c];
+   }
    UsdGenCurveSourceCapture &cap = *static_cast<UsdGenCurveSourceCapture *>(out);
    UsdGenCurveBuffer &buf = cap.MutableBuffer();
    buf.topologyVersion += 1;
    buf.totalCurves = totalCurves;
    buf.totalCvs = totalCvs;
+   // 04 §2.4 `usdGen:resampleTo`: 0 = keep the source CV counts -> ragged
+   // (cvOffsets = {0, cumsum(counts)}, size totalCurves+1, [totalCurves] ==
+   // totalCvs; chunks stay cvCount == 0). > 0 = uniform resample at capture;
+   // cvOffsets stays empty (uniform fast path).
+   if (resampleTo == 0) {
+      buf.cvOffsets.assign(totalCurves + 1, 0);
+      for (int c = 0; c < totalCurves; ++c)
+         buf.cvOffsets[c + 1] = buf.cvOffsets[c] + surf.faceVertexCounts[c];
+   } else {
+      buf.cvOffsets.clear();
+   }
    buf.px.resize(totalCvs);
    buf.py.resize(totalCvs);
    buf.pz.resize(totalCvs);
    buf.width.resize(totalCvs);
    buf.hairT.resize(totalCvs);
+   size_t srcBase = 0, dst = 0;
    for (int c = 0; c < totalCurves; ++c) {
-      int cvc = surf.faceVertexCounts[c];
-      size_t base = 0;
-      for (int k = 0; k < c; ++k) base += surf.faceVertexCounts[k];
-      for (int i = 0; i < cvc; ++i) {
-         GfVec3f const &p = surf.restPoints[base + i];
-         buf.px[base + i] = p[0];
-         buf.py[base + i] = p[1];
-         buf.pz[base + i] = p[2];
-         if (!buf.width.empty()) buf.width[base + i] = 1.0f;
-         if (!buf.hairT.empty()) buf.hairT[base + i] = 0.5f;
+      int const srcCount = surf.faceVertexCounts[c];
+      int const n = resampleTo > 0 ? resampleTo : srcCount;
+      for (int i = 0; i < n; ++i) {
+         GfVec3f p(0.0f);
+         if (srcCount > 0) {
+            // ragged: source CV i verbatim (t == i, f == 0); uniform: walk
+            // the source polyline at an even index step (linear resample).
+            double t = (resampleTo > 0 && srcCount > 1 && n > 1)
+                ? double(i) * double(srcCount - 1) / double(n - 1)
+                : double(resampleTo == 0 ? i : 0);
+            int j = static_cast<int>(t);
+            if (j > srcCount - 1) j = srcCount - 1;
+            int const j2 = std::min(j + 1, srcCount - 1);
+            float const f = float(t - double(j));
+            GfVec3f const &a = surf.restPoints[srcBase + size_t(j)];
+            GfVec3f const &b = surf.restPoints[srcBase + size_t(j2)];
+            p = a + f * (b - a);
+         }
+         buf.px[dst] = p[0];
+         buf.py[dst] = p[1];
+         buf.pz[dst] = p[2];
+         if (!buf.width.empty()) buf.width[dst] = 1.0f;
+         if (!buf.hairT.empty()) buf.hairT[dst] = 0.5f;
+         ++dst;
       }
+      srcBase += size_t(std::max(srcCount, 0));
    }
    return true;
 }

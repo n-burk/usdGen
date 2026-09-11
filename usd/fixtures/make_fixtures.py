@@ -71,7 +71,11 @@ def _mesh_block(nx, ny, size):
     for j in range(ny):
         for i in range(nx):
             v = j * npx + i
-            idx += [v, v + 1, v + npx + 1, v + npx]
+            # CCW seen from +Y (normal UP): UsdGenGrow's default
+            # direction="surfaceNormal" grows hair along the normal, so a
+            # downward (clockwise) winding would plant the groom UNDER the
+            # scalp (2026-09-12: thatch render). Order is a->d->c->b.
+            idx += [v, v + npx, v + npx + 1, v + 1]
     lines.append("        int[] faceVertexIndices = [%s]" % ", ".join(str(k) for k in idx))
     pts = []
     for j in range(ny + 1):
@@ -112,7 +116,7 @@ def render(name, curves, nx, ny, size, seed):
     out.append('    string usdGen:label = "%s"' % label)
     out.append("    rel usdGen:surface = </Groom/Scalp>")
     out.append("")
-    out.append('    def UsdGeomMesh "Scalp"')
+    out.append('    def Mesh "Scalp"  # NOT UsdGeomMesh: the USD type name is Mesh')
     out.append("    {")
     out.append('        uniform token subdivisionScheme = "none"')
     out.append(_mesh_block(nx, ny, size))
@@ -161,6 +165,28 @@ def render(name, curves, nx, ny, size, seed):
     out.append("            float usdGen:width = 0.01")
     out.append("        }")
     out.append("    }")
+    out.append("}")
+    out.append("")
+    # Framing camera (benchUsdGenStorm auto-uses the first UsdGeomCamera):
+    # above and in front of the scalp centre, pitched down at the origin so
+    # the whole unit-quad grid plus hair length is in frame. Parametric in
+    # the grid extent so G1..G5 all frame. NOT groom content (outside Groom).
+    import math
+    extent = float(max(nx, ny))
+    dist = extent * 1.35
+    height = dist * 0.45
+    pitch = -math.degrees(math.atan2(height, dist))
+    out.append('def Camera "Cam"')
+    out.append("{")
+    out.append("    float focalLength = 35")
+    out.append("    float horizontalAperture = 36")
+    out.append("    float2 clippingRange = (%s, %s)"
+               % (_fmt(dist / 100.0), _fmt(dist * 20.0)))
+    out.append("    double3 xformOp:translate = (0, %s, %s)"
+               % (_fmt(height), _fmt(dist)))
+    out.append("    float3 xformOp:rotateXYZ = (%s, 0, 0)" % _fmt(pitch))
+    out.append('    uniform token[] xformOpOrder = ["xformOp:translate", '
+               '"xformOp:rotateXYZ"]')
     out.append("}")
     out.append("")
     return "\n".join(out)

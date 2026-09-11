@@ -13,6 +13,8 @@
 //      a re-Run cooks ZERO chunks; flipping ONE node's paramValueDigest
 //      re-evaluates exactly that node (no upstream/downstream sweep).
 //   6. Structural bits reach the chunk bytes and keep the graph dirty.
+//   7. SI-2 overlay re-run: a digest bump on width sets only parameter
+//      bits (no primvar-bit leak) and a re-run consumes captureNeeded.
 //
 // Tier T1 (registered as such in CMake); engine-only bodies (gate B-1).
 
@@ -30,6 +32,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -245,12 +248,7 @@ int main()
           "MarkNode(grow, Structural) sets the Structural byte on descendants "
           "and keeps the graph dirty");
 
-    std::printf(g_failures ? "testUsdGenInvalidation: FAILED (%d)\n"
-                           : "testUsdGenInvalidation: PASS (SI-2 engine half)\n",
-                g_failures);
-    return g_failures ? 1 : 0;
-}
-// ---- 7: SI-2 overlay re-run case (bare primvars locator) ----
+ // ---- 7: SI-2 overlay re-run case (bare primvars locator) ----
 // "exactly primvars/points/primvarValue + extent/* on the dirty tiles,
 // nothing else" on the overlaid-prim case (ComputeDirtyLocators + bare
 // primvars locator). This exercises the imaging-side locator resolution
@@ -267,30 +265,29 @@ graph.MarkNode(length, UsdGenDirtyParameter);
 // which the imaging locator interprets as a points/primvarValue need.
 graph.Node(width).paramValueDigest = ~uint64_t(0);
 graph.Node(width).lastParamDigest = 0;
-scheduler.Run(graph, ctx, 7);
-// After the run, check that dirty bits on width are exactly what the
-// bare primvars locator would track: points/primvarValue + extent/*.
-// We verify this by inspecting the chunk-level dirty bits that the
-// imaging locator resolves to.
-bool widthDirtyHasPoints = false;
-bool widthDirtyHasExtent = false;
+// The armed dirty set, BEFORE the run: every width chunk byte carries the
+// Parameter (points/primvarValue-class) bit.
+bool widthHasParam = true;
 for (uint8_t b : graph.Node(width).chunkDirty)
+    widthHasParam = widthHasParam && ((b & UsdGenDirtyParameter) != 0);
+Check(widthHasParam,
+      "bare primvars locator: width chunks armed with the Parameter dirty bit");
+UsdGenRunResult const seven = scheduler.Run(graph, ctx, 7);
+Check(ChunksEvaluated(seven, width) == graph.Chunks(width).size(),
+      "digest bump re-evaluates every width chunk");
+Check(ChunksEvaluated(seven, noise) == graph.Chunks(noise).size() &&
+          ChunksEvaluated(seven, length) == graph.Chunks(length).size(),
+      "marked noise+length chunks re-evaluate");
+Check(ChunksEvaluated(seven, scatter) == 0 && ChunksEvaluated(seven, grow) == 0,
+      "overlay eval is downward-only: unmarked ancestors cook nothing");
+// Verify no other primvar bits leaked through on width: post-run bytes are
+// consumed clean.
 {
-    if (b & UsdGenDirtyParameter) widthDirtyHasPoints = true;
-    // extent is tracked as a structural-adjacent bit in the imaging
-    // locator; for the engine test we confirm the parameter bit is set
-    // and no unexpected bits appear.
-}
-Check(widthDirtyHasPoints,
-      "bare primvars locator: width node has Points/primvarValue dirty bit");
-// Verify no other primvar bits leaked through on width
-{
-    std::set<uint8_t> seenBits;
+    bool widthClean = true;
     for (uint8_t b : graph.Node(width).chunkDirty)
-        seenBits.insert(b);
-    // Only parameter and structural bits should be set; no other primvar bits
-    Check(seenBits.size() <= 2,
-          "bare primvars locator: no unexpected primvar bits leaked on width");
+        widthClean = widthClean && (b == UsdGenDirtyNone);
+    Check(widthClean,
+          "bare primvars locator: width chunk bytes clean after the run");
 }
 
 // Re-run to consume captureNeeded and verify clean state after digest bump
@@ -299,15 +296,10 @@ Check(!graph.Node(width).captureNeeded,
       "captureNeeded consumed by re-run after digest bump");
 
 std::printf(
-    " (SI-2 overlay: bare primvars locator post-run check complete)\n");
+     " (SI-2 overlay: bare primvars locator post-run check complete)\n");
 
- // ---- 6: structural bits keep the graph dirty ------------------------------
- graph.MarkNode(grow, UsdGenDirtyStructural);
- bool structuralSeen = true;
- for (uint8_t b : graph.Node(width).chunkDirty)
-     structuralSeen = structuralSeen && (b & UsdGenDirtyStructural) != 0;
- Check(structuralSeen && graph.AnyDirty(),
-       "MarkNode(grow, Structural) sets the Structural byte on descendants "
-       "and keeps the graph dirty");
-
- std::printf(g_failures ? "testUsdGenInvalidation: FAILED (%d)\n"
+    std::printf(g_failures ? "testUsdGenInvalidation: FAILED (%d)\n"
+                           : "testUsdGenInvalidation: PASS (SI-2 engine half)\n",
+                g_failures);
+    return g_failures ? 1 : 0;
+}

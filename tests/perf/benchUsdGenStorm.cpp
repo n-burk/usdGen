@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// benchUsdGenStorm - M1 storm timing-gate driver (plan/09 S-1/S-5/S-6/S-12).
+// benchUsdGenStorm - M1/M2 storm timing-gate driver (plan/09 S-1/S-2/S-3/S-4/S-5/S-6/S-12).
 //
 // UsdImagingGLEngine + HdStormRendererPlugin on a headless EGL device context
 // (usdGenShaders/test/eglctx.h). Timing (plan/09 4.5): per repeat, `warmup`
@@ -20,11 +20,14 @@
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/usd/sdf/path.h>
+#include <pxr/usd/usd/attribute.h>
 #include <pxr/usd/usd/primRange.h>
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usd/timeCode.h>
 #include <pxr/usd/usdGeom/basisCurves.h>
+#include <pxr/usd/usdGeom/bboxCache.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usdImaging/usdImagingGL/engine.h>
 #include <pxr/usdImaging/usdImagingGL/renderParams.h>
 
@@ -412,6 +415,56 @@ void AppendUsdGenStats(std::string* j, const char* indent)
           "\"recompiles\": null, \"evictions\": null },\n";
 }
 
+// Single timed render with the same params Measure uses (S-3 edit frames,
+// S-4 close-up passes). Caller owns warmup/camera setup.
+double RenderOnce(UsdImagingGLEngine* engine, const UsdPrim& root,
+                  int refineLevel, PFNGLFINISH glFinish)
+{
+    UsdImagingGLRenderParams params;
+    params.complexity = 1.0f + 0.5f * (float)refineLevel;
+    auto t = std::chrono::steady_clock::now();
+    engine->Render(root, params);
+    if (glFinish) glFinish();
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t).count();
+}
+
+// itemsDrawn for one pass: HdPerfLog authoritative, GetRenderStats fallback,
+// absent (perflog off) when neither has it — JSON null, never 0.
+bool ItemsDrawn(const RunResult& rr, double* val)
+{
+    if (rr.perf.haveItems) { *val = rr.perf.items; return true; }
+    const char* subs[] = { "itemsdrawn", 0 };
+    return FindCounter(rr.stats, subs, val);
+}
+
+// vboRelocated ditto (S-6: == 0 across deform frames).
+bool VboRelocated(const RunResult& rr, double* val)
+{
+    const char* subs[] = { "relocat", 0 };
+    return FindCounter(rr.stats, subs, val);
+}
+
+// Stage-edit target for --onetile (S-3): the Noise magnitude attribute of
+// the M1 5-op chain present in every G1..G5 fixture. Invalid when absent.
+UsdAttribute FindNoiseMagnitudeAttr(const UsdStageRefPtr& stage)
+{
+    UsdPrim groom = stage->GetDefaultPrim();
+    if (!groom) return UsdAttribute();
+    UsdPrim desc = groom.GetChild(TfToken("Description"));
+    if (!desc) return UsdAttribute();
+    UsdPrim noise = desc.GetChild(TfToken("Noise"));
+    UsdAttribute attr;
+    if (noise)
+        attr = noise.GetAttribute(TfToken("usdGen:noise:magnitude"));
+    if (attr.IsValid()) return attr;
+    for (const UsdPrim& child : desc.GetChildren()) {
+        attr = child.GetAttribute(TfToken("usdGen:noise:magnitude"));
+        if (attr.IsValid()) return attr;
+    }
+    return UsdAttribute();
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -436,7 +489,9 @@ int main(int argc, char** argv)
         else if (a == "--scene-list") sceneList = next("--scene-list");
         else if (a == "--static") { mode = "static"; gate = "S-1"; }
         else if (a == "--batches") { mode = "batches"; gate = "S-5"; }
-        else if (a == "--deform") { mode = "deform"; gate = "S-6"; }
+        else if (a == "--deform") { mode = "deform"; gate = "S-2"; }
+        else if (a == "--onetile") { mode = "onetile"; gate = "S-3"; }
+        else if (a == "--cull") { mode = "cull"; gate = "S-4"; }
         else if (a == "--tilesweep") { mode = "tilesweep"; gate = "S-12"; }
         else if (a == "--res") {
             if (std::sscanf(next("--res"), "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0) {
@@ -452,13 +507,18 @@ int main(int argc, char** argv)
         else if (a == "--counters") countersDump = true;
         else {
             std::fprintf(stderr,
-                "usage: benchUsdGenStorm --scene PATH [--static|--batches|--deform]"
-                " [--tilesweep --scene-list p1,p2] [--res WxH] [--refine {1,2}]"
+                "usage: benchUsdGenStorm --scene PATH [--static|--batches|--deform|--onetile|--cull]"
+                " [--tilesweep --scene-list p1,p2] [--cull --scene-list p1,p2 | --scene PATH]"
+                " [--res WxH] [--refine {1,2}]"
                 " [--frames N] [--warmup N] [--repeats N] [--json OUT] [--counters]\n");
             return 2;
         }
     }
-    if (mode != "tilesweep" && scenePath.empty()) {
+    if ((mode != "tilesweep" && mode != "cull") && scenePath.empty()) {
+        return 2;
+    }
+    if (mode == "cull" && scenePath.empty() && sceneList.empty()) {
+        std::fprintf(stderr, "--cull requires --scene PATH or --scene-list p1,p2,...\n");
         return 2;
     }
     if (refineLevel < 0 || refineLevel > 2) refineLevel = 1;
@@ -544,12 +604,213 @@ int main(int argc, char** argv)
             while (!one.empty() && (one.back() == '\n' || one.back() == ',' ||
                                     one.back() == ' '))
                 one.pop_back();
-            json += (first ? "\n    " : ",\n    ") + one;
+            json += (first ? "\n    " : ",\n    ") + one + "}";
             first = false;
             if (countersDump) DumpCounters(rr.stats);
         }
         json += "\n  ]\n}\n";
         if (!scenePath.empty()) { /* --scene optional alongside list */ }
+    } else if (mode == "onetile") {
+        // S-3 one-tile edit, upper-bound form: a full-description stage edit
+        // (all tiles dirty) costs >= a true 1-of-49 dirty, so an edit-frame
+        // ratio <= 1.2 passes S-3 a fortiori. A single-tile Hydra edit route
+        // arrives with the M5 tool live overrides; until then this bounds it.
+        // In-memory stage edits only (never saved); the attribute is restored.
+        Scene sc;
+        if (!OpenScene(scenePath, &sc)) {
+            std::fprintf(stderr, "FATAL: cannot open %s\n", scenePath.c_str());
+            TeardownPerfLog();
+            return 1;
+        }
+        RunResult rrStatic = Measure(&engine, sc, frames, warmup, repeats,
+                                     refineLevel, false, glFinish);
+        double staticMedian = rrStatic.kept.empty() ? 0.0
+            : MedianOf(rrStatic.medians.empty() ? rrStatic.kept : rrStatic.medians);
+        double staticP90 = rrStatic.kept.empty() ? 0.0 : P90Of(rrStatic.kept);
+        UsdAttribute editAttr = FindNoiseMagnitudeAttr(sc.stage);
+        if (!editAttr.IsValid()) {
+            std::fprintf(stderr, "FATAL: --onetile needs usdGen:noise:magnitude "
+                         "on /Groom/Description/Noise (M1 fixture chain)\n");
+            TeardownPerfLog();
+            return 1;
+        }
+        double base = 0.05;
+        editAttr.Get(&base);
+        const double kDelta = 0.001;
+        std::vector<double> editSamples;
+        editSamples.reserve(frames);
+        double firstEditMs = 0.0;
+        for (int i = 0; i < frames; ++i) {
+            // Set as float: the attribute is float-typed and C++ Set()
+            // does not narrow double -> float (coding error otherwise).
+            editAttr.Set(float(base + ((i % 2) ? kDelta : -kDelta)));
+            double ms = RenderOnce(&engine, sc.root, refineLevel, glFinish);
+            if (i == 0) firstEditMs = ms;
+            if (i >= warmup) editSamples.push_back(ms);
+        }
+        editAttr.Set(float(base));  // restore: leave no trace on the fixture
+        RenderOnce(&engine, sc.root, refineLevel, glFinish);
+        double editMedian = editSamples.empty() ? 0.0 : MedianOf(editSamples);
+        double ratio = staticMedian > 0.0 ? editMedian / staticMedian : 0.0;
+        // Honesty guard: a real recook makes the first edit frame slower
+        // than a static frame. USDGEN_STATS commit publication does not exist
+        // yet (stats.h only), so this timing signal is the propagation check.
+        bool recookObserved = firstEditMs > staticP90;
+        if (!recookObserved)
+            std::fprintf(stderr, "WARNING: --onetile first edit frame %.3f ms "
+                         "<= static p90 %.3f ms; edits may not have propagated\n",
+                         firstEditMs, staticP90);
+        AppendSchemaFields(&json, BaseName(scenePath), gate, w, h, refineLevel,
+                           sc.tiles, frames, warmup, repeats);
+        AppendMs(&json, rrStatic, "  ");
+        json += "  \"editMedianMs\": " + Num(editMedian) +
+                ", \"ratioVsStatic\": " + Num(ratio) + ",\n";
+        json += "  \"editScope\": \"full-description (upper bound; single-tile "
+                "Hydra edit route lands with M5 live overrides)\",\n";
+        json += std::string("  \"editAttr\": \"usdGen:noise:magnitude\", "
+                "\"editPropagated\": ") +
+                (recookObserved ? "true" : "false") + ",\n";
+        json += "  \"firstEditMs\": " + Num(firstEditMs) + ",\n";
+        AppendCounters(&json, rrStatic.stats, rrStatic.perf, "  ");
+        AppendUsdGenStats(&json, "  ");
+        while (!json.empty() && (json.back() == '\n' || json.back() == ',' ||
+                                 json.back() == ' '))
+            json.pop_back();
+        json += "\n}\n";
+        std::printf("%s static %s ms edit %s ms ratio %s recook %s\n",
+                    gate, Num(staticMedian).c_str(), Num(editMedian).c_str(),
+                    Num(ratio).c_str(), recookObserved ? "yes" : "NO");
+    } else if (mode == "cull") {
+        // S-4 culling: per scene, wide (authored Cam) vs close-up (same view
+        // direction, halved distance ~= quarter-area framing) passes; report
+        // itemsDrawn both + ratio. Runs on whatever --scene-list is given;
+        // the 1/32/196-tile G3/G4 variants arrive with the P6 fixtures.
+        std::vector<std::string> paths;
+        if (!sceneList.empty()) {
+            paths = TfStringSplit(sceneList, ",");
+        } else {
+            paths.push_back(scenePath);
+        }
+        json = "{\n  \"gate\": \"S-4\", \"tier\": \"T2\", \"host\": \"" + HostName() +
+               "\", \"resolution\": [" + Num(w) + ", " + Num(h) + "],\n" +
+               "  \"refineLevel\": " + Num(refineLevel) + ", \"threads\": " +
+               Num(ThreadCount()) + ", \"frames\": " + Num(frames) +
+               ", \"warmup\": " + Num(warmup) + ", \"repeats\": " + Num(repeats) +
+               ",\n  \"scenes\": [";
+        bool first = true;
+        for (size_t k = 0; k < paths.size(); ++k) {
+            std::string p = TfStringTrim(paths[k]);
+            Scene sc;
+            if (!OpenScene(p, &sc)) {
+                std::fprintf(stderr, "FATAL: cannot open %s\n", p.c_str());
+                TeardownPerfLog();
+                return 1;
+            }
+            RunResult rrWide = Measure(&engine, sc, frames, warmup, repeats,
+                                       refineLevel, false, glFinish);
+            double wideMs = rrWide.kept.empty() ? 0.0
+                : MedianOf(rrWide.medians.empty() ? rrWide.kept : rrWide.medians);
+            double wideItems = 0.0;
+            bool haveWide = ItemsDrawn(rrWide, &wideItems);
+            // Close-up: halve the eye-to-center distance along the current
+            // view vector (same orientation). Fixture grids center on the
+            // origin and cams carry no yaw, so this frames ~1/4 of the area.
+            UsdPrim camPrim = sc.stage->GetPrimAtPath(sc.camPath);
+            UsdAttribute eyeAttr = camPrim
+                ? camPrim.GetAttribute(TfToken("xformOp:translate"))
+                : UsdAttribute();
+            GfVec3d eye(0, 0, 0);
+            bool haveEye = eyeAttr.IsValid() && eyeAttr.Get(&eye);
+            GfVec3d center(0, 0, 0);
+            bool haveBox = false;
+            if (haveEye) {
+                // Scope the bound to Mesh prims: UsdGen operator prims are
+                // not UsdGeomBoundable (extent plugin coding errors) and the
+                // generated tiles are Hydra-only, so the scalp mesh is the
+                // frameable authored content.
+                UsdPrim boundPrim;
+                for (const UsdPrim& prim :
+                     UsdPrimRange(sc.root, UsdTraverseInstanceProxies())) {
+                    if (prim.IsA<UsdGeomMesh>()) {
+                        boundPrim = prim;
+                        break;
+                    }
+                }
+                if (!boundPrim) boundPrim = sc.root;
+                UsdGeomBBoxCache bboxCache(
+                    UsdTimeCode::Default(),
+                    UsdGeomImageable::GetOrderedPurposeTokens());
+                GfBBox3d bbox = bboxCache.ComputeWorldBound(boundPrim);
+                if (!bbox.GetRange().IsEmpty()) {
+                    center = GfVec3d(bbox.ComputeCentroid());
+                    haveBox = true;
+                }
+                std::fprintf(stderr, "cull %s: eye=(%.1f,%.1f,%.1f) "
+                             "center=(%.1f,%.1f,%.1f) range=(%.1f,%.1f,%.1f) %s\n",
+                             BaseName(p).c_str(), eye[0], eye[1], eye[2],
+                             center[0], center[1], center[2],
+                             bbox.GetRange().GetSize()[0],
+                             bbox.GetRange().GetSize()[1],
+                             bbox.GetRange().GetSize()[2],
+                             haveBox ? "box-ok" : "box-EMPTY");
+            }
+            double closeMs = 0.0, closeItems = 0.0;
+            bool haveClose = false, didDolly = false;
+            if (haveEye && haveBox) {
+                GfVec3d dolly = center + (eye - center) * 0.5;
+                if (!eyeAttr.Set(dolly)) {
+                    std::fprintf(stderr, "WARNING: --cull %s: eye Set() "
+                                 "failed; close-up pass skipped\n",
+                                 BaseName(p).c_str());
+                } else {
+                    std::fprintf(stderr, "cull %s: dolly=(%.1f,%.1f,%.1f)\n",
+                                 BaseName(p).c_str(),
+                                 dolly[0], dolly[1], dolly[2]);
+                    didDolly = true;
+                }
+            } else {
+                std::fprintf(stderr, "WARNING: --cull %s: no bbox/eye; "
+                             "close-up pass skipped\n", BaseName(p).c_str());
+            }
+            RunResult rrClose;
+            if (didDolly) {
+                rrClose = Measure(&engine, sc, frames, warmup, repeats,
+                                  refineLevel, false, glFinish);
+                closeMs = rrClose.kept.empty() ? 0.0
+                    : MedianOf(rrClose.medians.empty() ? rrClose.kept
+                                                       : rrClose.medians);
+                haveClose = ItemsDrawn(rrClose, &closeItems);
+                eyeAttr.Set(eye);  // restore authored framing
+            }
+            double ratio = (haveWide && haveClose && wideItems > 0.0)
+                ? closeItems / wideItems : 0.0;
+            std::string one;
+            AppendSchemaFields(&one, BaseName(p), gate, w, h, refineLevel,
+                               sc.tiles, frames, warmup, repeats);
+            one += "  \"wideMs\": " + Num(wideMs) + ", \"closeMs\": " +
+                   Num(closeMs) + ",\n";
+            one += std::string("  \"itemsWide\": ") +
+                   (haveWide ? Num(wideItems) : std::string("null")) +
+                   ", \"itemsClose\": " +
+                   (haveClose ? Num(closeItems) : std::string("null")) +
+                   ", \"closeToWideRatio\": " + Num(ratio) + ",\n";
+            one += "  ";
+            AppendCounters(&one, rrClose.stats, rrClose.perf, "  ");
+            AppendUsdGenStats(&one, "  ");
+            std::fprintf(stderr, "cull %s: tiles=%d wide %.3f ms close %.3f ms "
+                         "items %s/%s ratio %s\n",
+                         BaseName(p).c_str(), sc.tiles, wideMs, closeMs,
+                         haveWide ? Num(wideItems).c_str() : "null",
+                         haveClose ? Num(closeItems).c_str() : "null",
+                         (haveWide && haveClose) ? Num(ratio).c_str() : "null");
+            while (!one.empty() && (one.back() == '\n' || one.back() == ',' ||
+                                    one.back() == ' '))
+                one.pop_back();
+            json += (first ? "\n    " : ",\n    ") + one + "}";
+            first = false;
+            if (countersDump) DumpCounters(rrClose.stats);
+        }
+        json += "\n  ]\n}\n";
     } else {
         Scene sc;
         if (!OpenScene(scenePath, &sc)) {
@@ -560,6 +821,26 @@ int main(int argc, char** argv)
         bool cycleTime = (mode == "deform");
         RunResult rr = Measure(&engine, sc, frames, warmup, repeats,
                                refineLevel, cycleTime, glFinish);
+        // S-2 deform delta: static baseline in the same invocation so the
+        // delta is a same-process comparison. G1..G5 fixtures carry no time
+        // samples (static scalps, no Deform op in the M1 chain), so cycleTime
+        // re-renders the same frame and the delta is vacuous ~0: a
+        // non-vacuous S-2 needs the P6 animated-scalp + Deform-chain fixture.
+        double staticMedian = 0.0, deformDeltaMs = 0.0;
+        if (mode == "deform") {
+            RunResult rrStatic = Measure(&engine, sc, frames, warmup, repeats,
+                                         refineLevel, false, glFinish);
+            staticMedian = rrStatic.kept.empty() ? 0.0
+                : MedianOf(rrStatic.medians.empty() ? rrStatic.kept
+                                                    : rrStatic.medians);
+            double deformMedian = rr.kept.empty() ? 0.0
+                : MedianOf(rr.medians.empty() ? rr.kept : rr.medians);
+            deformDeltaMs = deformMedian - staticMedian;
+            if (!sc.animated)
+                std::fprintf(stderr, "NOTE: --deform on a static scene "
+                             "(no time samples): delta is vacuous; non-vacuous "
+                             "S-2 needs the P6 deforming-scalp fixture\n");
+        }
         // stats-enable fallback: if dict still empty, try the console command
         if (rr.stats.all.empty()) {
             HdCommandArgs args;
@@ -571,9 +852,21 @@ int main(int argc, char** argv)
         AppendSchemaFields(&json, BaseName(scenePath), gate, w, h, refineLevel,
                            sc.tiles, frames, warmup, repeats);
         AppendMs(&json, rr, "  ");
+        if (mode == "deform") {
+            // S-2 evidence lives here; the vboRelocated counter below is the
+            // S-6 evidence (same invocation covers both gates).
+            json += "  \"covers\": [\"S-6\"],\n";
+            json += "  \"staticMedianMs\": " + Num(staticMedian) +
+                    ", \"deformDeltaMs\": " + Num(deformDeltaMs) + ",\n";
+        }
         AppendCounters(&json, rr.stats, rr.perf, "  ");
         AppendUsdGenStats(&json, "  ");
-        json += "}\n";
+        // Single-mode object: strip the trailing comma the section writers
+        // leave for the tilesweep-list context, else the JSON is invalid.
+        while (!json.empty() && (json.back() == '\n' || json.back() == ',' ||
+                                 json.back() == ' '))
+            json.pop_back();
+        json += "\n}\n";
         // human line (gate expectations live ctest-side; never assert here)
         double batches = rr.perf.haveBatches ? rr.perf.batches : 0.0;
         double calls = rr.perf.haveCalls ? rr.perf.calls : 0.0;
@@ -582,15 +875,29 @@ int main(int argc, char** argv)
         bool hb = rr.perf.haveBatches ||
                   FindCounter(rr.stats, bsubs, &batches);
         bool hc = rr.perf.haveCalls || FindCounter(rr.stats, csubs, &calls);
-        std::printf("%s median %s ms (p90 %s min %s) drawBatches=%s drawCalls=%s\n",
-                    gate,
-                    Num(rr.kept.empty() ? 0.0
-                        : MedianOf(rr.medians.empty() ? rr.kept : rr.medians)).c_str(),
-                    Num(rr.kept.empty() ? 0.0 : P90Of(rr.kept)).c_str(),
-                    Num(rr.kept.empty() ? 0.0
-                        : *std::min_element(rr.kept.begin(), rr.kept.end())).c_str(),
-                    hb ? Num(std::llround(batches)).c_str() : "null",
-                    hc ? Num(std::llround(calls)).c_str() : "null");
+        double vbo = 0.0;
+        bool hv = VboRelocated(rr, &vbo);
+        if (mode == "deform") {
+            std::printf("%s median %s ms static %s ms delta %s ms "
+                        "drawBatches=%s drawCalls=%s vboRelocated=%s\n",
+                        gate,
+                        Num(rr.kept.empty() ? 0.0
+                            : MedianOf(rr.medians.empty() ? rr.kept : rr.medians)).c_str(),
+                        Num(staticMedian).c_str(), Num(deformDeltaMs).c_str(),
+                        hb ? Num(std::llround(batches)).c_str() : "null",
+                        hc ? Num(std::llround(calls)).c_str() : "null",
+                        hv ? Num(std::llround(vbo)).c_str() : "null");
+        } else {
+            std::printf("%s median %s ms (p90 %s min %s) drawBatches=%s drawCalls=%s\n",
+                        gate,
+                        Num(rr.kept.empty() ? 0.0
+                            : MedianOf(rr.medians.empty() ? rr.kept : rr.medians)).c_str(),
+                        Num(rr.kept.empty() ? 0.0 : P90Of(rr.kept)).c_str(),
+                        Num(rr.kept.empty() ? 0.0
+                            : *std::min_element(rr.kept.begin(), rr.kept.end())).c_str(),
+                        hb ? Num(std::llround(batches)).c_str() : "null",
+                        hc ? Num(std::llround(calls)).c_str() : "null");
+        }
     }
 
     std::ofstream ofs(jsonOut);

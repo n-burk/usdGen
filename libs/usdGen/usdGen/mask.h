@@ -77,7 +77,9 @@ struct UsdGenMaskResult
     ///   curveMask(c) = clamp( combine(amount*s, r) * n * region(c) * locked(c), 0, 1 )
     VtFloatArray curveMask;
     /// 257-entry LUT over hairT: rampLUT[i] = ramp(i/256); the 257th entry
-    /// keeps the lerp read (j+1) in range (02 §2.13).
+    /// keeps the lerp read (j+1) in range (02 §2.13). Empty == unused: an
+    /// all-1.0 ramp is canonicalized to empty by EvaluateMask, kernels take
+    /// the 1.0 fallback (bitwise-identical).
     VtFloatArray rampLut;
     std::vector<std::string> diagnostics;
 };

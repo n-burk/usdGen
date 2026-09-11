@@ -89,11 +89,18 @@ _Container(std::vector<TfToken> &&names,
 HdContainerDataSourceHandle
 _Topology(usdGen::UsdGenTilePublication const &tile)
 {
-    // C2: curveVertexCounts, type = cubic, basis = tile.basis, wrap pinned
-    // (basis carries the open/closed semantics; open is Hydra-exact).
+    // C2 (docs/freezes/C2.md:20-23; 06 §4.1): the Hydra BasisCurves schema
+    // nests topology ONE level down — basisCurves/topology/curveVertexCounts
+    // with type/basis/wrap as SIBLINGS of the topology container
+    // (pxr/imaging/hd/basisCurvesSchema.h:38 — the schema token IS
+    // "topology"). A flat layout serves no topology to Storm, which drops
+    // the prim silently (2026-09-12: 49 published tiles, itemsDrawn == 1).
+    // NOTE: basis carries the open/closed semantics; open is Hydra-exact.
     return HdRetainedContainerDataSource::New(
-        /*name1*/ TfToken("curveVertexCounts"),
-        /*value1*/ _Samp(tile.curveVertexCounts),
+        /*name1*/ TfToken("topology"),
+        /*value1*/ HdRetainedContainerDataSource::New(
+            /*tname1*/ TfToken("curveVertexCounts"),
+            /*tvalue1*/ _Samp(tile.curveVertexCounts)),
         /*name2*/ TfToken("type"),
         /*value2*/ _Tok(TfToken("cubic")),
         /*name3*/ TfToken("basis"),
@@ -255,13 +262,25 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
 
     // Storm P0 (06 §4.1): the publication's refineLevel (engine default 2);
     // tessellation stays at the Osd default (S14: never USDGEN_TESSELLATION_LEVEL).
+    // Storm P0 (06 §4.1): the publication's refineLevel (engine default 2);
+    // tessellation stays at the Osd default (S14: never USDGEN_TESSELLATION_LEVEL).
     _Add(&names, &values, TfToken("displayStyle"),
          _Container({TfToken("refineLevel")},
                     {HdDataSourceBaseHandle(_Samp(tile.refineLevel))}));
 
-    _Add(&names, &values, TfToken("purpose"),
-         _Container({TfToken("purpose")},
-                    {HdDataSourceBaseHandle(_Tok(tile.purpose))}));
+    // Purpose: publish ONLY when authored. An empty purpose omits the
+    // container, which Hydra resolves to the geometry render tag
+    // (HdSceneIndexAdapterSceneDelegate::GetRenderTag falls back to geometry
+    // iff the container is absent/empty). Publishing purpose="default" is
+    // FATAL — "default" is not a render tag, so the tile matches no
+    // collection and Storm never syncs it (2026-09-12: 49 published tiles,
+    // itemsDrawn == 1, zero HdStBasisCurves sync lines). Authored values
+    // (render/guide/proxy) pass through verbatim — they ARE render tags.
+    if (!tile.purpose.IsEmpty()) {
+        _Add(&names, &values, TfToken("purpose"),
+             _Container({TfToken("purpose")},
+                        {HdDataSourceBaseHandle(_Tok(tile.purpose))}));
+    }
     _Add(&names, &values, TfToken("visibility"),
          _Container({TfToken("visibility")},
                     {HdDataSourceBaseHandle(_Tok(tile.visibility))}));

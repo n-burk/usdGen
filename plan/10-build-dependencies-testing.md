@@ -1015,7 +1015,7 @@ assertions and wall-clock animation interpolation, both of which produced false 
 `09-performance-and-benchmarks.md` §5 is the gate registry (`ADR §9.5 R40`): it owns each gate's
 metric, pass criterion, tier and milestone. **This table restates the registry as reconciled by R40
 and adds the CTest name and harness for each id; where the two disagree, 09 §5 as reconciled by R40
-wins.** Every id 09 §5 registers has a row here — all fifty — so `ctest -L 'gate:'` covers the
+wins.** Every id 09 §5 registers has a row here — all fifty-three — so `ctest -L 'gate:'` covers the
 whole registry, and no id is minted here that 09 §5 does not carry.
 
 Three pairs of ids are easy to confuse. **SI-9** is the pruning-wrapper cost **only**; the
@@ -1026,6 +1026,7 @@ R29's v2 in-place overlay and `S-11` is the 1 M-curve record.
 | Gate | Tier | Test | Milestone exit |
 |---|---|---|---|
 | **B-1** link rule (`DT_NEEDED` of `libusdGen.so` carries no forbidden family) | T0 | `testUsdGenLinkRule_*` + `testUsdGenIncludeRule` | **M0** |
+| **B-2** staging stage-API fence (no `UsdStage`/`UsdPrim`/`UsdGeom`/`UsdShade` in the Hydra-builder and `_CommitNow` staging TUs) | T0 | `testUsdGenStagingRule` (include-regex + `nm` symbol check, B-1 pattern) | **M2** |
 | E-1 chain throughput | T0 | `benchUsdGenChain` | M1 |
 | E-1r ragged path ≤ 2× uniform | T0 | `benchUsdGenChain --ragged` | M2 |
 | E-2 sparse edit | T0 | `benchUsdGenSparse` | M1 |
@@ -1046,6 +1047,8 @@ R29's v2 in-place overlay and `S-11` is the 1 M-curve record.
 | **SI-9** pruning-wrapper cost on a production-density skinned scalp | T1 | `testUsdGenPruningCost` (`06-imaging.md` §10.2) | **M2** |
 | **SI-10** two attached indices agree on generation, prim set and frame for one commit | T1 | `testUsdGenSessions` | **M2** |
 | **SI-11** `reorder nameChildren` reaches the scene index as an invalidation | T1 | `testUsdGenReorderNotice` | **M0** pre-work (PW-6) — record only, nothing depends on the answer |
+| **SI-12** Hydra/stage builder parity (identical `GraphDesc` on G1–G4) | T1 | `testUsdGenHydraParity` | **M2** |
+| **SI-13** Hydra staging cost ≤ 0.2 ms on G3 | T1 | `testUsdGenHydraParity` (timing section) | **M2** |
 | S-1 Storm static (re-measured at 100 k) | T2 | `benchUsdGenStorm --static` | M1 |
 | S-2 deform frame delta | T2 | `benchUsdGenStorm --deform` | M2 |
 | S-3 one-tile edit | T2 | `benchUsdGenStorm --onetile` | M2 |
@@ -1334,7 +1337,7 @@ anything in tier 4, which by construction cannot run here.
 | usdRig source | `CMakeLists.txt:14-16, 31-39, 409-421, 410-460, 433-437, 461-463, 495-520`; `bin/gen_schema.sh:11-14`; `bin/_env.sh:41-55`; `libs/rigExecSchema/schema.usda:18-27`; `libs/rigExecImaging/{sceneIndices.h:29-31, registry.h:135-156}`; `tests/probeImagingPipeline.cpp` |
 
 **Sibling registries this document depends on, re-checked 2026-09-05.**
-`09-performance-and-benchmarks.md` §5 agrees with §6.5 on the tier and milestone of all fifty gates,
+`09-performance-and-benchmarks.md` §5 agrees with §6.5 on the tier and milestone of all fifty-three gates,
 and its §4.3 prints `docs/workstation-protocol.md` as §§1–11 (§5.2); `02-schema.md` §7.2 and
 `06-imaging.md` §8 both route `UsdGeomRegisterComputeExtentFunction` and the schema `LibraryPath` to
 `libusdGenSchema.so` (`ADR §9.2 R19`, §1.2, §4.3); `06-imaging.md` §9 prints §7.2's six `TF_DEBUG`
