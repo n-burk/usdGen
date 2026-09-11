@@ -1,0 +1,183 @@
+#usda 1.0
+(
+    defaultPrim = "Character"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    doc = "Schema discussion draft: guided hair, shared mask, explicit operator relationships."
+)
+
+# Baseline: plan/02-schema.md, with plan/13-codebase-alignment.md overrides.
+# This is an authored scene example, not a schema class-definition file.
+# GuideInterpolate, Clump and ExprMap are declared but have no kernels in
+# the plan v2 status table. Parsing this file does not imply it can cook yet.
+# Omitted parameters use schema defaults; algorithmVersion=0 tracks latest.
+#
+# Execution: scatter -> interpolate -> clump -> frizz -> width -> deform
+# References: head guides -> interpolate and clump
+# Fields: styleMask -> clump and frizz (each has its own mask envelope)
+# Publication: hair.usdGen:terminal -> deform
+# Prim names and child order do not define execution order.
+
+def Xform "Character"
+{
+    # Tiny static scalp: one triangle in the XZ plane, normal +Y.
+    def Mesh "Scalp" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (0, 0, 10), (10, 0, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (0, 1), (1, 0)] (
+            interpolation = "vertex"
+        )
+        uniform token usdGen:rest:source = "primvar"
+        point3f[] primvars:rest = [(0, 0, 0), (0, 0, 10), (10, 0, 0)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def UsdGenGroom "Groom"
+    {
+        uniform int usdGen:schemaVersion = 1
+        string usdGen:label = "Example groom"
+
+        def UsdGenDescription "hair"
+        {
+            # Operators inherit this surface unless they author an override.
+            rel usdGen:surface = </Character/Scalp>
+            rel usdGen:terminal = </Character/Groom/hair/Ops/deform>
+            float usdGen:densityScale = 0.25
+            float usdGen:renderDensityScale = 1.0
+            uniform token usdGen:curve:basis = "bspline"
+
+            def Scope "Ops"
+            {
+                # Source: no upstream operator. Produces roots, not strands.
+                def UsdGenScatter "scatter"
+                {
+                    uniform token usdGen:mode = "random"
+                    uniform int usdGen:seed = 11
+                    float usdGen:density = 20
+                }
+
+                # Roots are the execution input; guides are a reference input.
+                def UsdGenGuideInterpolate "interpolate"
+                {
+                    rel usdGen:input = </Character/Groom/hair/Ops/scatter>
+                    rel usdGen:guides = </Character/Groom/hair/Guides/head>
+                    int usdGen:maxGuides = 2
+                    int usdGen:cvCount = 8
+                    float usdGen:influenceRadius = 15
+                }
+
+                def UsdGenClump "clump"
+                {
+                    rel usdGen:input = </Character/Groom/hair/Ops/interpolate>
+                    rel usdGen:clump:centers = </Character/Groom/hair/Guides/head/curves>
+                    uniform int usdGen:seed = 23
+                    float usdGen:clump:amount = 0.65
+                    float usdGen:clump:size = 5
+                    float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)]
+                    uniform token usdGen:clump:profile:interpolation = "linear"
+
+                    # UsdGenMaskAPI is auto-applied to every operator type.
+                    rel usdGen:mask:source = </Character/Groom/hair/Maps/styleMask>
+                    float usdGen:mask:amount = 0.8
+                }
+
+                def UsdGenNoise "frizz"
+                {
+                    rel usdGen:input = </Character/Groom/hair/Ops/clump>
+                    bool usdGen:enabled = true
+                    float usdGen:blend = 1
+                    uniform int usdGen:seed = 37
+                    uniform token usdGen:space = "rest"
+                    float usdGen:noise:magnitude = 0.12
+                    float usdGen:noise:frequency = 3
+
+                    # Same field, different local envelope: protect the roots.
+                    rel usdGen:mask:source = </Character/Groom/hair/Maps/styleMask>
+                    float usdGen:mask:amount = 1
+                    float2[] usdGen:mask:ramp:knots = [(0, 0), (0.3, 0.2), (1, 1)]
+                    uniform token usdGen:mask:ramp:interpolation = "linear"
+                }
+
+                def UsdGenWidth "width"
+                {
+                    rel usdGen:input = </Character/Groom/hair/Ops/frizz>
+                    float usdGen:width = 0.03
+                    float2[] usdGen:width:knots = [(0, 1), (0.8, 0.5), (1, 0.05)]
+                    uniform token usdGen:width:interpolation = "linear"
+                    bool usdGen:replace = true
+                }
+
+                # Rest-styled strands follow the final surface pose here.
+                # On this static scalp, rest and final poses coincide.
+                def UsdGenDeform "deform"
+                {
+                    rel usdGen:input = </Character/Groom/hair/Ops/width>
+                    uniform token usdGen:mode = "rigidFrame"
+                    uniform token usdGen:space = "deformed"
+                    bool usdGen:lockRoots = true
+                }
+            }
+
+            def Scope "Maps"
+            {
+                # Field prim: no usdGen:input and no operator-chain position.
+                # An inline expression keeps this example free of asset files.
+                def UsdGenExprMap "styleMask"
+                {
+                    uniform token usdGen:map:domain = "root"
+                    uniform token usdGen:expr:returnType = "float"
+                    string usdGen:expr:source = "0.25 + 0.75 * $u"
+                    float usdGen:map:default = 1
+                }
+            }
+
+            def Scope "Guides"
+            {
+                def UsdGenGuideSet "head"
+                {
+                    rel usdGen:surface = </Character/Scalp>
+
+                    # Two 4-CV guides, packed in one BasisCurves prim (C3).
+                    # Triangle UVs are weights for vertices 1 and 2:
+                    # root = (1-u-v)*P0 + u*P1 + v*P2.
+                    def BasisCurves "curves" (
+                        prepend apiSchemas = ["UsdGenCurveAPI"]
+                    )
+                    {
+                        uniform token purpose = "guide"
+                        uniform token type = "cubic"
+                        uniform token basis = "bspline"
+                        uniform token wrap = "pinned"
+                        int[] curveVertexCounts = [4, 4]
+                        point3f[] points = [
+                            (2, 0, 2), (2, 1, 2), (2.3, 2, 2), (3, 3, 2),
+                            (2, 0, 6), (2, 1, 6), (2.3, 2, 6), (3, 3, 6)
+                        ]
+                        point3f[] primvars:rest = [
+                            (2, 0, 2), (2, 1, 2), (2.3, 2, 2), (3, 3, 2),
+                            (2, 0, 6), (2, 1, 6), (2.3, 2, 6), (3, 3, 6)
+                        ] (interpolation = "vertex")
+                        float[] primvars:widths = [0.06] (interpolation = "constant")
+                        int[] primvars:skinprim = [0, 0] (interpolation = "uniform")
+                        texCoord2f[] primvars:skinprimuv = [(0.2, 0.2), (0.6, 0.2)] (
+                            interpolation = "uniform"
+                        )
+                        uint64[] primvars:usdGen:curveId = [101, 102] (
+                            interpolation = "uniform"
+                        )
+                        token primvars:usdGen:role = "guide" (interpolation = "constant")
+                    }
+                }
+            }
+
+            # Generated hair is published under hair/__usdGenRender in Hydra.
+            # That scope and its tiles are never authored into this file.
+        }
+    }
+}
