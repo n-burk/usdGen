@@ -380,6 +380,7 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/surfaceBinding.cu
             libs/usdGen/usdGen/gpu/length.cu
             libs/usdGen/usdGen/gpu/curveCompaction.cu
+            libs/usdGen/usdGen/gpu/curveResample.cu
             libs/usdGen/usdGen/gpu/picking.cu
             libs/usdGen/usdGen/gpu/pointOverride.cu
             libs/usdGen/usdGen/gpu/topology.cu
@@ -491,6 +492,11 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaCurveTiles COMMAND testUsdGenCudaCurveTiles)
     set_tests_properties(testUsdGenCudaCurveTiles PROPERTIES
         LABELS "T1;cuda;topology;tiles" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaCurveResample tests/testUsdGenCudaCurveResample.cpp)
+    target_link_libraries(testUsdGenCudaCurveResample PRIVATE usdGenGpu)
+    add_test(NAME testUsdGenCudaCurveResample COMMAND testUsdGenCudaCurveResample)
+    set_tests_properties(testUsdGenCudaCurveResample PROPERTIES
+        LABELS "T1;cuda;topology;resample" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaCurveTileBounds tests/testUsdGenCudaCurveTileBounds.cpp)
     target_link_libraries(testUsdGenCudaCurveTileBounds PRIVATE usdGenGpu)
     add_test(NAME testUsdGenCudaCurveTileBounds COMMAND testUsdGenCudaCurveTileBounds)
