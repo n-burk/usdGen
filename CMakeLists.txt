@@ -385,6 +385,7 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/topology.cu
             libs/usdGen/usdGen/gpu/curveIndices.cu
             libs/usdGen/usdGen/gpu/curveTiles.cu
+            libs/usdGen/usdGen/gpu/curveTileBounds.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -490,6 +491,11 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaCurveTiles COMMAND testUsdGenCudaCurveTiles)
     set_tests_properties(testUsdGenCudaCurveTiles PROPERTIES
         LABELS "T1;cuda;topology;tiles" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaCurveTileBounds tests/testUsdGenCudaCurveTileBounds.cpp)
+    target_link_libraries(testUsdGenCudaCurveTileBounds PRIVATE usdGenGpu)
+    add_test(NAME testUsdGenCudaCurveTileBounds COMMAND testUsdGenCudaCurveTileBounds)
+    set_tests_properties(testUsdGenCudaCurveTileBounds PROPERTIES
+        LABELS "T1;cuda;topology;tiles" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaTileLease tests/testUsdGenCudaTileLease.cpp)
     target_compile_definitions(testUsdGenCudaTileLease PRIVATE USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaTileLease PRIVATE usdGen usdGenGpu)
@@ -502,6 +508,12 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaTileExecution COMMAND testUsdGenCudaTileExecution)
     set_tests_properties(testUsdGenCudaTileExecution PROPERTIES
         LABELS "T1;cuda;tiles;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaDevicePresentation tests/testUsdGenCudaDevicePresentation.cpp)
+    target_compile_definitions(testUsdGenCudaDevicePresentation PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaDevicePresentation PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaDevicePresentation COMMAND testUsdGenCudaDevicePresentation)
+    set_tests_properties(testUsdGenCudaDevicePresentation PROPERTIES
+        LABELS "T1;cuda;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaGlInterop tests/testUsdGenCudaGlInterop.cpp)
     target_compile_definitions(testUsdGenCudaGlInterop PRIVATE USDGEN_ENABLE_CUDA)
     target_include_directories(testUsdGenCudaGlInterop PRIVATE ${PROJECT_SOURCE_DIR}/usdGenShaders/test)

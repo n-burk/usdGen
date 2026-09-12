@@ -21,15 +21,76 @@ namespace usdGen {
 
 namespace {
 
+SdfPath _RenderNamespace(SdfPath const &description)
+{
+    return description.AppendChild(TfToken("__usdGenRender"));
+}
+
 // <description>/__usdGenRender/tile_NNNN — must stay byte-identical to the
 // imaging-side UsdGenTilePublisher::TilePath formula (06 §4.2).
 SdfPath _TilePath(SdfPath const &description, UsdGenTileId tile)
 {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "tile_%04d", static_cast<int>(tile));
-    return description
-        .AppendChild(TfToken("__usdGenRender"))
-        .AppendChild(TfToken(buf));
+    return _RenderNamespace(description).AppendChild(TfToken(buf));
+}
+
+struct _PresentationScalars
+{
+    GfMatrix4d xformMatrix{1.0};
+    TfToken purpose;
+    TfToken visibility;
+    SdfPath materialPath;
+    TfToken materialPurpose{TfToken("allPurpose")};
+    int refineLevel = 2;
+    SdfPath primOrigin;
+    SdfPath dependencySurface;
+};
+
+_PresentationScalars _BuildPresentationScalars(
+    UsdGenGraphDesc const &desc, SdfPath const &dependencySurface)
+{
+    _PresentationScalars result;
+    result.xformMatrix = desc.xformMatrix;
+    result.purpose = desc.purpose;
+    result.visibility = desc.visibility;
+    result.materialPath = desc.materialPath;
+    result.primOrigin = desc.pickTarget == TfToken("description")
+        ? desc.description : SdfPath();
+    result.dependencySurface = dependencySurface;
+    return result;
+}
+
+// CUDA admission permits at most one CurveSource root-binding surface and
+// ExecuteCudaGraph rejects a named binding that is absent from desc.surfaces.
+// Return no dependency for the valid empty/no-binding case; never invent one.
+SdfPath _CudaSourceDependencySurface(UsdGenGraphDesc const &desc)
+{
+    if (desc.nodes.empty() || desc.nodes.front().surfaces.size() != 1)
+        return SdfPath();
+    SdfPath const &candidate = desc.nodes.front().surfaces.front();
+    auto found = std::find_if(desc.surfaces.begin(), desc.surfaces.end(),
+        [&](UsdGenSurfaceDesc const &surface) { return surface.path == candidate; });
+    return found == desc.surfaces.end() ? SdfPath() : found->path;
+}
+
+UsdGenDevicePresentationMetadata _BuildDevicePresentation(
+    UsdGenGraphDesc const &desc)
+{
+    _PresentationScalars const scalars = _BuildPresentationScalars(
+        desc, _CudaSourceDependencySurface(desc));
+    UsdGenDevicePresentationMetadata result;
+    result.description = desc.description;
+    result.renderNamespace = _RenderNamespace(desc.description);
+    result.xformMatrix = scalars.xformMatrix;
+    result.purpose = scalars.purpose;
+    result.visibility = scalars.visibility;
+    result.materialPath = scalars.materialPath;
+    result.materialPurpose = scalars.materialPurpose;
+    result.refineLevel = scalars.refineLevel;
+    result.primOrigin = scalars.primOrigin;
+    result.dependencySurface = scalars.dependencySurface;
+    return result;
 }
 
 // Sample a named curve buffer plane into the publication's uniform array.
@@ -185,6 +246,10 @@ UsdGenGenerationConstPtr UsdGenSessionCooker::Cook(
         UsdGenGeneration gen;
         gen.frame = frame;
         gen.device = std::move(device);
+        // `_desc` is the copied command descriptor that compiled the accepted
+        // CUDA plan above.  Capture its presentation once with the device
+        // payload; publishing must not consult a later graph descriptor.
+        gen.devicePresentation = _BuildDevicePresentation(_desc);
         // Do not call the host scheduler or _BuildTilePublication for a
         // device generation. Tools retain this snapshot directly.
         _store.Publish(std::move(gen));
@@ -402,17 +467,21 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     pub.extentMin = GfVec3d(e.GetMin()[0], e.GetMin()[1], e.GetMin()[2]);
     pub.extentMax = GfVec3d(e.GetMax()[0], e.GetMax()[1], e.GetMax()[2]);
 
-    pub.xformMatrix = _desc.xformMatrix;
-    pub.purpose = _desc.purpose;
-    pub.visibility = _desc.visibility;
-    pub.materialPath = _desc.materialPath;
-    pub.materialPurpose = TfToken("allPurpose");
-    pub.primOrigin = _desc.pickTarget == TfToken("description")
-        ? _desc.description : SdfPath();
+    SdfPath dependencySurface;
     if (hasDep) {
         for (UsdGenSurfaceDesc const &s : _desc.surfaces)
-            if (s.id == depSurface) { pub.dependencySurface = s.path; break; }
+            if (s.id == depSurface) { dependencySurface = s.path; break; }
     }
+    _PresentationScalars const scalars = _BuildPresentationScalars(
+        _desc, dependencySurface);
+    pub.xformMatrix = scalars.xformMatrix;
+    pub.purpose = scalars.purpose;
+    pub.visibility = scalars.visibility;
+    pub.materialPath = scalars.materialPath;
+    pub.materialPurpose = scalars.materialPurpose;
+    pub.refineLevel = scalars.refineLevel;
+    pub.primOrigin = scalars.primOrigin;
+    pub.dependencySurface = scalars.dependencySurface;
     return pub;
 }
 

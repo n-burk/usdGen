@@ -13,11 +13,31 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
+
+/// Scalar scene-presentation state paired with a CUDA generation.  This is
+/// intentionally separate from UsdGenDeviceGeneration: the device payload is
+/// geometry/tool data, while these values are the immutable descriptor
+/// snapshot that a renderer needs to publish that payload.  No geometry or
+/// per-curve host mirror is retained here.
+struct UsdGenDevicePresentationMetadata
+{
+    SdfPath description;
+    SdfPath renderNamespace;
+    GfMatrix4d xformMatrix{1.0};
+    TfToken purpose;
+    TfToken visibility;
+    SdfPath materialPath;
+    TfToken materialPurpose = TfToken("allPurpose");
+    int refineLevel = 2;
+    SdfPath primOrigin;
+    SdfPath dependencySurface;
+};
 
 struct UsdGenGeneration
 {
@@ -30,6 +50,9 @@ struct UsdGenGeneration
     // Mutually exclusive with host geometry. Device-aware consumers acquire
     // leases from this immutable payload; never cast its pointers to VtArray.
     std::shared_ptr<const UsdGenDeviceGeneration> device;
+    // Present only for a CUDA publication.  It is built from the same accepted
+    // descriptor snapshot as `device`, never from a later scene read.
+    std::optional<UsdGenDevicePresentationMetadata> devicePresentation;
 };
 using UsdGenGenerationConstPtr = std::shared_ptr<const UsdGenGeneration>;
 

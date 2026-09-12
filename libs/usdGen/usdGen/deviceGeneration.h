@@ -7,6 +7,7 @@
 #ifndef USDGEN_DEVICE_GENERATION_H
 #define USDGEN_DEVICE_GENERATION_H
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -61,6 +62,32 @@ enum class UsdGenDeviceStatus : uint8_t {
     SynchronizationFailed
 };
 
+/// Renderer-neutral curve topology for a device generation.  Unknown is the
+/// backwards-compatible state for consumers that do not opt into device
+/// rendering; CUDA C3 publication admits only the concrete values below.
+enum class UsdGenDeviceCurveType : uint8_t {
+    Unknown = 0,
+    Cubic = 1
+};
+
+enum class UsdGenDeviceCurveBasis : uint8_t {
+    Unknown = 0,
+    BSpline = 1,
+    CatmullRom = 2
+};
+
+enum class UsdGenDeviceCurveWrap : uint8_t {
+    Unknown = 0,
+    Pinned = 1
+};
+
+struct UsdGenDeviceCurveTopologyMetadata
+{
+    UsdGenDeviceCurveType type = UsdGenDeviceCurveType::Unknown;
+    UsdGenDeviceCurveBasis basis = UsdGenDeviceCurveBasis::Unknown;
+    UsdGenDeviceCurveWrap wrap = UsdGenDeviceCurveWrap::Unknown;
+};
+
 /// An opaque native stream/queue token.  Zero denotes the backend default
 /// queue.  The concrete owner interprets this value; this API never casts or
 /// dereferences it and does not claim ownership of the native queue.
@@ -95,6 +122,12 @@ struct UsdGenDeviceTileMetadata
     uint64_t curveCount = 0;
     uint64_t firstPoint = 0;
     uint64_t pointCount = 0;
+    // Scalar conservative render bounds paired with this immutable tile
+    // range.  False preserves range-only legacy consumers and is required
+    // after a point revision until a producer recomputes bounds.
+    std::array<float, 3> extentMin{};
+    std::array<float, 3> extentMax{};
+    bool boundsValid = false;
 };
 
 struct UsdGenDeviceGeometryMetadata
@@ -106,6 +139,8 @@ struct UsdGenDeviceGeometryMetadata
     std::vector<UsdGenDeviceTileMetadata> tiles;
     // Already-deformed C3 caches must not have scalp motion applied again.
     bool alreadyDeformed = false;
+    // Appended to preserve existing aggregate initializers above.
+    UsdGenDeviceCurveTopologyMetadata curveTopology;
 };
 
 /// Tool identity is retained with a geometry snapshot so a tool cannot

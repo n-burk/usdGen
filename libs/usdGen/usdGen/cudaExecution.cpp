@@ -19,6 +19,7 @@
 #include "usdGen/gpu/curveCompaction.h"
 #include "usdGen/gpu/topology.h"
 #include "usdGen/gpu/curveTiles.h"
+#include "usdGen/gpu/curveTileBounds.h"
 #include "usdGenMath/usdGenMath/ramp.h"
 #endif
 
@@ -590,6 +591,12 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     }
     if (curves.wrap == TfToken("nonperiodic") && diagnostics)
         diagnostics->Warn("CUDA CurveSource promotes nonperiodic wrap to pinned; endpoints now reach the first/last CV");
+    UsdGenDeviceCurveTopologyMetadata const curveTopology{
+        UsdGenDeviceCurveType::Cubic,
+        curves.basis == TfToken("catmullRom")
+            ? UsdGenDeviceCurveBasis::CatmullRom
+            : UsdGenDeviceCurveBasis::BSpline,
+        UsdGenDeviceCurveWrap::Pinned};
     if (!curves.widths.empty() &&
         curves.widthsInterpolation != TfToken("vertex") && curves.widthsInterpolation != TfToken("constant")) {
         Fail(diagnostics, "C3 widths must use vertex or constant interpolation"); return {};
@@ -891,20 +898,70 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     if (tileError != 0) {
         Fail(diagnostics, "CUDA tile metadata validation failed; previous generation retained"); return {};
     }
+    gpu::DeviceBuffer<float3> tileMinimums, tileMaximums;
+    gpu::DeviceBuffer<gpu::CurveTileBoundsScratch> tileBoundsScratch;
+    gpu::DeviceBuffer<uint32_t> boundsStatus;
+    if (tileMinimums.reset(tileRequirements.tileCount) != cudaSuccess ||
+        tileMaximums.reset(tileRequirements.tileCount) != cudaSuccess ||
+        tileBoundsScratch.reset(tileRequirements.tileCount) != cudaSuccess ||
+        boundsStatus.reset(1) != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile bounds allocation failed; previous generation retained"); return {};
+    }
+    gpu::CurveTileBoundsOptions boundsOptions;
+    boundsOptions.basis = curves.basis == TfToken("catmullRom")
+        ? gpu::CurveTileBoundsBasis::CatmullRom
+        : gpu::CurveTileBoundsBasis::BSpline;
+    gpu::CurveTileBoundsInput boundsInput{
+        geometry.points, geometry.widths,
+        static_cast<gpu::DeviceBuffer<gpu::CurveTileSpan> const&>(deviceTiles).view()};
+    gpu::CurveTileBoundsWorkspace boundsWorkspace{tileBoundsScratch.view()};
+    gpu::CurveTileBoundsOutput boundsOutput{
+        tileMinimums.view(), tileMaximums.view(), boundsStatus.view()};
+    if (gpu::BuildCurveTileBounds(boundsOptions, boundsInput, boundsWorkspace,
+            boundsOutput, stream) != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile bounds launch failed; previous generation retained"); return {};
+    }
     std::vector<gpu::CurveTileSpan> tileSpans(tileRequirements.tileCount);
+    std::vector<float3> tileMins(tileRequirements.tileCount);
+    std::vector<float3> tileMaxs(tileRequirements.tileCount);
+    uint32_t boundsError = 0;
+    cudaError_t boundsStatusCopy = cudaMemcpyAsync(&boundsError, boundsStatus.data(),
+        sizeof(boundsError), cudaMemcpyDeviceToHost, stream);
+    cudaError_t const boundsStatusFence = cudaStreamSynchronize(stream);
+    if (boundsStatusCopy != cudaSuccess || boundsStatusFence != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile bounds status readback failed; previous generation retained"); return {};
+    }
+    if (boundsError != 0) {
+        Fail(diagnostics, "CUDA tile bounds validation failed; previous generation retained"); return {};
+    }
+
     cudaError_t spanCopy = cudaSuccess;
-    if (tileRequirements.tileCount)
+    cudaError_t minimumCopy = cudaSuccess;
+    cudaError_t maximumCopy = cudaSuccess;
+    if (tileRequirements.tileCount) {
         spanCopy = cudaMemcpyAsync(tileSpans.data(), deviceTiles.data(),
             tileSpans.size() * sizeof(gpu::CurveTileSpan), cudaMemcpyDeviceToHost, stream);
+        minimumCopy = cudaMemcpyAsync(tileMins.data(), tileMinimums.data(),
+            tileMins.size() * sizeof(float3), cudaMemcpyDeviceToHost, stream);
+        maximumCopy = cudaMemcpyAsync(tileMaxs.data(), tileMaximums.data(),
+            tileMaxs.size() * sizeof(float3), cudaMemcpyDeviceToHost, stream);
+    }
     cudaError_t const spanFence = cudaStreamSynchronize(stream);
-    if (spanCopy != cudaSuccess || spanFence != cudaSuccess) {
-        Fail(diagnostics, "CUDA tile metadata readback failed; previous generation retained"); return {};
+    if (spanCopy != cudaSuccess || minimumCopy != cudaSuccess ||
+        maximumCopy != cudaSuccess || spanFence != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile bounds readback failed; previous generation retained"); return {};
     }
     std::vector<UsdGenDeviceTileMetadata> tiles;
     tiles.reserve(tileSpans.size());
-    for (gpu::CurveTileSpan const& span : tileSpans)
+    for (size_t i = 0; i != tileSpans.size(); ++i) {
+        gpu::CurveTileSpan const& span = tileSpans[i];
         tiles.push_back({span.tile, span.firstCurve, span.curveCount,
                          span.firstPoint, span.pointCount});
+        UsdGenDeviceTileMetadata &tile = tiles.back();
+        tile.extentMin = {tileMins[i].x, tileMins[i].y, tileMins[i].z};
+        tile.extentMax = {tileMaxs[i].x, tileMaxs[i].y, tileMaxs[i].z};
+        tile.boundsValid = true;
+    }
 
     uint64_t topologyVersion = generation;
     if (previous) {
@@ -921,7 +978,12 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
                         a.curveCount == b.curveCount && a.firstPoint == b.firstPoint &&
                         a.pointCount == b.pointCount;
                 });
-        if (same && sameTiles) topologyVersion = previous->Geometry().topologyVersion;
+        auto const &previousTopology = previous->Geometry().curveTopology;
+        bool const sameCurveTopology = previousTopology.type == curveTopology.type &&
+            previousTopology.basis == curveTopology.basis &&
+            previousTopology.wrap == curveTopology.wrap;
+        if (same && sameTiles && sameCurveTopology)
+            topologyVersion = previous->Geometry().topologyVersion;
     }
     std::string reason;
     auto result = compacted
@@ -931,7 +993,8 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
             deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion);
     if (!result) Fail(diagnostics, reason);
     if (result) {
-        result = gpu::WithTileMetadata(result, std::move(tiles), &reason);
+        result = gpu::WithTileMetadata(result, std::move(tiles), &reason,
+            curveTopology);
         if (!result) Fail(diagnostics, reason);
     }
     if (result) {

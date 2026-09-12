@@ -1,4 +1,5 @@
 #include "deviceBuffer.h"
+#include "curveTileBounds.h"
 #include "curveTiles.h"
 #include <cstdint>
 
@@ -37,5 +38,6 @@ template class DeviceBuffer<unsigned char>;
 template class DeviceBuffer<uint32_t>;
 template class DeviceBuffer<uint64_t>;
 template class DeviceBuffer<float3>;
+template class DeviceBuffer<CurveTileBoundsScratch>;
 template class DeviceBuffer<CurveTileSpan>;
 }}

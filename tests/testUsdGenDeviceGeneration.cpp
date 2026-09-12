@@ -124,6 +124,26 @@ int main()
     Check(generation && generation->Tool().toolId == "brushA",
           "tool snapshot is retained", &failures);
 
+    // Legacy range-only snapshots retain the all-Unknown topology contract;
+    // a partially supplied topology is never ambiguous for a device renderer.
+    usdGen::UsdGenDeviceGeneration::CreateInfo legacyInfo;
+    legacyInfo.identity = generation->Identity();
+    legacyInfo.geometry = generation->Geometry();
+    legacyInfo.tool = generation->Tool();
+    legacyInfo.channels = generation->Channels();
+    legacyInfo.owner = generation->Owner();
+    Check(bool(usdGen::UsdGenDeviceGeneration::Create(std::move(legacyInfo), &reason)),
+          "all-Unknown curve topology preserves legacy generation admission", &failures);
+    usdGen::UsdGenDeviceGeneration::CreateInfo mixedTopology;
+    mixedTopology.identity = generation->Identity();
+    mixedTopology.geometry = generation->Geometry();
+    mixedTopology.geometry.curveTopology.type = usdGen::UsdGenDeviceCurveType::Cubic;
+    mixedTopology.tool = generation->Tool();
+    mixedTopology.channels = generation->Channels();
+    mixedTopology.owner = generation->Owner();
+    Check(!usdGen::UsdGenDeviceGeneration::Create(std::move(mixedTopology), &reason),
+          "mixed Unknown and concrete curve topology is rejected", &failures);
+
     auto invalid = usdGen::UsdGenDeviceGeneration::Create(
         usdGen::UsdGenDeviceGeneration::CreateInfo{}, &reason);
     Check(!invalid && !reason.empty(), "invalid generation is rejected", &failures);

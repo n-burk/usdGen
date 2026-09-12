@@ -103,7 +103,8 @@ CudaGeometryTileLease AcquireGeometryTile(
 std::shared_ptr<const UsdGenDeviceGeneration> WithTileMetadata(
     std::shared_ptr<const UsdGenDeviceGeneration> const& candidate,
     std::vector<UsdGenDeviceTileMetadata> tiles,
-    std::string* reason = nullptr);
+    std::string* reason = nullptr,
+    UsdGenDeviceCurveTopologyMetadata curveTopology = {});
 
 } // namespace usdGen::gpu
 #endif

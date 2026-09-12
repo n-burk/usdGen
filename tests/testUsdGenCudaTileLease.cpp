@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -58,11 +59,28 @@ int main()
     std::vector<UsdGenDeviceTileMetadata> tiles{
         {1, 0, 0, 0, 0}, {3, 0, 1, 0, 2},
         {9, 1, 1, 2, 3}, {12, 2, 0, 5, 0}};
+    tiles[0].boundsValid = true;
+    tiles[1].extentMin = {-.6f, -.7f, -.1f};
+    tiles[1].extentMax = {-.4f, .7f, .1f};
+    tiles[1].boundsValid = true;
+    tiles[2].extentMin = {.4f, -.7f, -.1f};
+    tiles[2].extentMax = {.6f, .7f, .1f};
+    tiles[2].boundsValid = true;
+    tiles[3].boundsValid = true;
+    UsdGenDeviceCurveTopologyMetadata const topology{
+        UsdGenDeviceCurveType::Cubic, UsdGenDeviceCurveBasis::BSpline,
+        UsdGenDeviceCurveWrap::Pinned};
     std::string reason;
-    auto tiled = WithTileMetadata(generation, tiles, &reason);
+    auto tiled = WithTileMetadata(generation, tiles, &reason, topology);
     CHECK(tiled);
     CHECK(tiled->Geometry().topologyVersion == generation->Geometry().topologyVersion);
     CHECK(tiled->Geometry().valueVersion == generation->Geometry().valueVersion);
+    CHECK(tiled->Geometry().curveTopology.type == UsdGenDeviceCurveType::Cubic &&
+          tiled->Geometry().curveTopology.basis == UsdGenDeviceCurveBasis::BSpline &&
+          tiled->Geometry().curveTopology.wrap == UsdGenDeviceCurveWrap::Pinned &&
+          tiled->Geometry().tiles[1].boundsValid &&
+          tiled->Geometry().tiles[1].extentMin[0] == -.6f &&
+          tiled->Geometry().tiles[2].extentMax[1] == .7f);
 
     cudaStream_t stream = nullptr;
     CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess);
@@ -110,6 +128,9 @@ int main()
     CHECK(!WithTileMetadata(generation, pointOverflow, &reason));
     std::vector<UsdGenDeviceTileMetadata> duplicate{{3, 0, 1, 0, 2}, {3, 1, 1, 2, 3}};
     CHECK(!WithTileMetadata(generation, duplicate, &reason));
+    auto invalidBounds = tiles;
+    invalidBounds[1].extentMin[0] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!WithTileMetadata(generation, invalidBounds, &reason, topology));
 
     // The tile lease retains the parent owner independently of both handles.
     auto retained = AcquireGeometryTile(tiled, 9, 0, stream);
@@ -159,8 +180,12 @@ int main()
 
     auto noRoots = MakeNoRootsGeneration();
     CHECK(noRoots);
-    auto noRootsTiled = WithTileMetadata(noRoots, {
-        {2, 0, 2, 0, 5}}, &reason);
+    UsdGenDeviceTileMetadata noRootsRange{2, 0, 2, 0, 5};
+    noRootsRange.extentMin = {-.6f, -.7f, -.1f};
+    noRootsRange.extentMax = {.6f, .7f, .1f};
+    noRootsRange.boundsValid = true;
+    auto noRootsTiled = WithTileMetadata(noRoots, {noRootsRange}, &reason,
+        topology);
     CHECK(noRootsTiled);
     auto noRootsTile = AcquireGeometryTile(noRootsTiled, 2, 0, stream);
     CHECK(noRootsTile && noRootsTile.View().rootPrim.size == 0 &&
@@ -180,6 +205,8 @@ int main()
     CHECK(revision->Geometry().tiles.size() == 1 &&
           revision->Geometry().tiles[0].curveCount == 2);
     CHECK(revision->Geometry().topologyVersion == noRootsTiled->Geometry().topologyVersion);
+    CHECK(!revision->Geometry().tiles[0].boundsValid &&
+          revision->Geometry().curveTopology.type == UsdGenDeviceCurveType::Cubic);
     auto oldRest = Copy(noRootsTile.View().restPoints, stream);
     auto revisionTile = AcquireGeometryTile(revision, 2, 1, stream);
     CHECK(revisionTile && revisionTile.View().points.size == 5);

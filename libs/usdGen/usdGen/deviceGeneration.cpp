@@ -1,6 +1,7 @@
 #include "usdGen/deviceGeneration.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace usdGen {
@@ -76,6 +77,37 @@ bool ValidSemantic(UsdGenDeviceChannelSemantic semantic)
         return true;
     }
     return false;
+}
+
+bool ValidCurveTopology(UsdGenDeviceCurveTopologyMetadata const &topology)
+{
+    using Type = UsdGenDeviceCurveType;
+    using Basis = UsdGenDeviceCurveBasis;
+    using Wrap = UsdGenDeviceCurveWrap;
+    if (topology.type == Type::Unknown || topology.basis == Basis::Unknown ||
+        topology.wrap == Wrap::Unknown) {
+        return topology.type == Type::Unknown &&
+            topology.basis == Basis::Unknown && topology.wrap == Wrap::Unknown;
+    }
+    return topology.type == Type::Cubic &&
+        (topology.basis == Basis::BSpline || topology.basis == Basis::CatmullRom) &&
+        topology.wrap == Wrap::Pinned;
+}
+
+bool ValidBounds(UsdGenDeviceTileMetadata const &tile)
+{
+    for (size_t axis = 0; axis != tile.extentMin.size(); ++axis) {
+        if (!std::isfinite(tile.extentMin[axis]) ||
+            !std::isfinite(tile.extentMax[axis]) ||
+            tile.extentMin[axis] > tile.extentMax[axis]) {
+            return false;
+        }
+        if (tile.curveCount == 0 && tile.pointCount == 0 &&
+            (tile.extentMin[axis] != 0.0f || tile.extentMax[axis] != 0.0f)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ValidSemanticShape(UsdGenDeviceChannelMetadata const &channel,
@@ -190,6 +222,10 @@ UsdGenDeviceGeneration::Create(CreateInfo info, std::string *reason)
         Fail(reason, "device geometry has mismatched curve and point counts");
         return {};
     }
+    if (!ValidCurveTopology(info.geometry.curveTopology)) {
+        Fail(reason, "device geometry has invalid curve topology metadata");
+        return {};
+    }
 
     std::vector<std::string> names;
     names.reserve(info.channels.size());
@@ -230,6 +266,10 @@ UsdGenDeviceGeneration::Create(CreateInfo info, std::string *reason)
         }
         if (std::find(tileIds.begin(), tileIds.end(), tile.tile) != tileIds.end()) {
             Fail(reason, "device generation has duplicate tile");
+            return {};
+        }
+        if (tile.boundsValid && !ValidBounds(tile)) {
+            Fail(reason, "device tile has invalid conservative bounds");
             return {};
         }
         tileIds.push_back(tile.tile);

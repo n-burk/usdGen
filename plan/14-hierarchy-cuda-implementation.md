@@ -1331,3 +1331,46 @@ Actual local Qwen supplied the destination capacity of 3072 but also proposed
 an erroneous draw count of 6144; coordinator/root review rejected that
 draw-count interpretation. Larger Hivemind requests ended in server protocol
 errors with no visible answer and are not counted as substantive review.
+
+### CUDA bounds and scalar presentation checkpoint (2026-09-11)
+
+The full main build passed. `CurveTileBounds`, `TileLease`, `TileExecution`,
+and `DevicePresentation` each passed ten consecutive targeted runs (root run
+74073); each also reported zero Compute Sanitizer memcheck and InitCheck errors
+(root run 38700). The complete serial non-benchmark T0/T1 suite passed **83/83**
+(root run 93140). An earlier `-j6` full run passed only 74/83 after nine CUDA
+context/stream out-of-memory failures before these kernels were implicated.
+Those failures are neither waived nor assigned a proven cause. Separately, a
+clean strong-async P8 stress recorded 24 signal-139 process failures among 400
+runs (root run 19694); H1 is diagnosing it, and no asynchronous fix is claimed.
+The rebuilt private-HdSt bridge and test translation units also passed all six
+native ASAN/UBSAN tests, including the latest tile-zero, `nullopt`, and
+malformed-partition cases (root run 19929). That build used
+`ASAN_OPTIONS=detect_leaks=0` and `UBSAN_OPTIONS=halt_on_error=1`; usdGen core
+and GPU objects remained Release/uninstrumented, so it is qualified bridge/test
+coverage rather than an instrumented-core or leak-check claim.
+After rebuilding against the new metadata/core, all six selected native
+Release-6 tests passed (root run 43935).
+
+`BuildCurveTileBounds` is a four-pass, caller-owned-scratch CUDA helper: it
+allocates nothing, reads back nothing, and takes no mutex. A single global
+device status rejects every output publish. B-spline/linear ranges expand by
+`maxWidth / 2`; uniform pinned Catmull-Rom expands the control-vertex hull by
+one eighth of its axis range and by `9 * maxWidth / 16`. Directed double
+arithmetic followed by outward float conversion preserves a finite conservative
+bound or rejects the candidate. This scope does not claim future
+centripetal-Catmull-Rom support.
+
+At the cook boundary only the status, tile spans, and six bound scalars per
+tile (at most 256 tiles) cross to the host. The status is copied and fenced
+before any output range is read; geometry, offsets, indices, and draw counts
+remain device-resident. Neutral C3 type/basis/wrap metadata participates in
+topology-stamp retention, while a point revision invalidates bound presence
+until recomputed. Immutable generation-paired scalar presentation survives the
+actual tool Live Override path.
+
+The final publish kernel supplied by local Qwen is used; incorrect mathematical
+oracles were rejected and the conservative derivation was independently
+reviewed by coordinator/root. Live all-tile atomic rendering remains open and
+requires a renderer-level transaction; these scalar metadata/presentation
+tests are not evidence for that frontend render contract.

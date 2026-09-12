@@ -218,7 +218,10 @@ static std::shared_ptr<const UsdGenDeviceGeneration> MakeGeneration(
     }
     UsdGenDeviceGeneration::CreateInfo info;
     info.identity = {UsdGenDeviceBackend::Cuda, device, generation};
-    info.geometry = {generation, generation, view.curveCount, view.pointCount, {}};
+    info.geometry.topologyVersion = generation;
+    info.geometry.valueVersion = generation;
+    info.geometry.curveCount = view.curveCount;
+    info.geometry.pointCount = view.pointCount;
     if (topologyVersion != UINT64_MAX) info.geometry.topologyVersion = topologyVersion;
     info.geometry.alreadyDeformed = alreadyDeformed;
     using Type = UsdGenDeviceValueType;
@@ -282,6 +285,11 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakePointRevisionGeneration(
     info.identity = {UsdGenDeviceBackend::Cuda, device, generation};
     info.geometry = base->Geometry();
     info.geometry.valueVersion = generation;
+    if (points) {
+        for (UsdGenDeviceTileMetadata &tile : info.geometry.tiles) {
+            tile.boundsValid = false;
+        }
+    }
     info.channels = base->Channels();
     info.tool = std::move(tool);
     info.owner = std::make_shared<SourceOwner>(std::move(base), device, std::move(points));
@@ -379,7 +387,8 @@ CudaGeometryTileLease AcquireGeometryTile(
 
 std::shared_ptr<const UsdGenDeviceGeneration> WithTileMetadata(
     std::shared_ptr<const UsdGenDeviceGeneration> const& candidate,
-    std::vector<UsdGenDeviceTileMetadata> tiles, std::string* reason)
+    std::vector<UsdGenDeviceTileMetadata> tiles, std::string* reason,
+    UsdGenDeviceCurveTopologyMetadata curveTopology)
 {
     if (!candidate || !candidate->Owner()) {
         if (reason) *reason = "tile metadata requires an owned generation";
@@ -423,6 +432,11 @@ std::shared_ptr<const UsdGenDeviceGeneration> WithTileMetadata(
     info.identity = candidate->Identity();
     info.geometry = geometry;
     info.geometry.tiles = std::move(tiles);
+    if (curveTopology.type != UsdGenDeviceCurveType::Unknown ||
+        curveTopology.basis != UsdGenDeviceCurveBasis::Unknown ||
+        curveTopology.wrap != UsdGenDeviceCurveWrap::Unknown) {
+        info.geometry.curveTopology = curveTopology;
+    }
     info.tool = candidate->Tool();
     info.channels = candidate->Channels();
     info.owner = candidate->Owner();
