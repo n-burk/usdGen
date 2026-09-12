@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: [ON, OFF]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependency
+        run: brew install googletest
+      - name: Configure
+        run: >-
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+          -DBUILD_TESTING=ON -DNOODLES_REQUIRE_TESTS=ON
+          -DCMAKE_PREFIX_PATH="$(brew --prefix googletest)"
+      - name: Build and test
+        run: |
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+      - name: Verify installed consumer
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/noodles-install"
+          cmake -S tests/package -B package-consumer \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/noodles-install"
+          cmake --build package-consumer --parallel
+          ./package-consumer/noodles_package_consumer
+
+  ios-device-archive:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build arm64 iOS archive
+        run: |
+          cmake -S . -B build-ios \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ios --parallel

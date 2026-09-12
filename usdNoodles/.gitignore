@@ -1,0 +1,70 @@
+# Build directories
+build/
+build-*/
+out/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+Testing/
+CTestTestfile.cmake
+_deps/
+compile_commands.json
+
+# Generated CMake config / pkg-config
+noodlesConfig.cmake
+noodlesConfigVersion.cmake
+noodlesTargets*.cmake
+
+# Editor / IDE
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.ccls-cache/
+.clangd/
+.omc/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Compiler / linker artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# Visual Studio
+*.suo
+*.user
+*.sln.docstates
+
+# Test outputs
+Testing/Temporary/
+*.gcda
+*.gcno
+*.gcov
+coverage/
+
+# Python (used by helper scripts)
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

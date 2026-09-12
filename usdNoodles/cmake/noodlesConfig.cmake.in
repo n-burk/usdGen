@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(_noodles_gl_backend "@NOODLES_PACKAGE_GL_BACKEND@")
+if(_noodles_gl_backend STREQUAL "OpenGL" OR
+   _noodles_gl_backend STREQUAL "SystemGLEW" OR
+   _noodles_gl_backend STREQUAL "BundledGLEW")
+    find_dependency(OpenGL REQUIRED)
+endif()
+if(_noodles_gl_backend STREQUAL "SystemGLEW")
+    find_dependency(GLEW REQUIRED)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/noodlesTargets.cmake")
+
+set_and_check(noodles_ASSET_DIR "@PACKAGE_NOODLES_INSTALL_ASSETDIR@")
+set(NOODLES_ASSET_DIR "${noodles_ASSET_DIR}")
+set_property(TARGET noodles::noodles PROPERTY NOODLES_ASSET_DIR "${noodles_ASSET_DIR}")
+
+check_required_components(noodles)
