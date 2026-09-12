@@ -58,13 +58,29 @@ int main() {
     CHECK(desc.nodes[1].expressionBindings[0].domain == expr::Domain::Point);
     CHECK(desc.curveSets.size() == 1 && !desc.curveSets[0].restFromCurrentPoints);
     CHECK(desc.curveSets[0].rest.size() == 5 && desc.curveSets[0].rest[0][2] == 0);
+    // Canonical authored useRest connection: the bool groom expression
+    // overrides a false literal without replacing loaded points/rest channels.
+    UsdPrim const useRestSourcePrim = stage->GetPrimAtPath(SdfPath("/Groom/hair/Ops/source"));
+    UsdPrim const useRestExpression = stage->DefinePrim(
+        SdfPath("/Groom/hair/Expressions/useRest"), TfToken("UsdGenExpression"));
+    CHECK(useRestSourcePrim && useRestExpression);
+    CHECK(useRestExpression.GetAttribute(TfToken("usdGen:expr:source")).Set(std::string("$frame < 25")));
+    CHECK(useRestExpression.CreateAttribute(TfToken("outputs:result"), SdfValueTypeNames->Bool, true));
+    UsdAttribute const useRestConnect = useRestSourcePrim.CreateAttribute(TfToken("usdGen:useRest"), SdfValueTypeNames->Bool, true);
+    CHECK(useRestConnect.Set(false));
+    CHECK(useRestConnect.SetConnections(SdfPathVector{SdfPath("/Groom/hair/Expressions/useRest.outputs:result")}));
+    useRestConnect.SetCustomDataByKey(TfToken("usdGen:evaluation"), VtValue(std::string("groom")));
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    auto useRestDesc = usdGenImaging::BuildGraphDescFromHydra(*indices.finalSceneIndex, SdfPath("/Groom/hair"));
+    CHECK(useRestDesc.validationErrors.empty() && useRestDesc.nodes[0].expressionBindings.size() == 1);
     UsdGenSession session;
     session.SetDevicePublicationEnabled(true);
-    session.SetGraphDesc(desc);
+    session.SetGraphDesc(useRestDesc);
     auto generation = session.Commit(24, UsdGenCommitReason::SetTime);
     if (session.LastDiagnostics().HasErrors())
         for (auto const& error : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", error.c_str());
     CHECK(generation && generation->device && generation->tiles.empty());
+    CHECK(!generation->device->Geometry().alreadyDeformed);
     auto lease = gpu::AcquireGeometry(generation->device, nullptr);
     CHECK(lease && lease.Geometry().pointCount == 5);
     float widths[5]{};
@@ -80,6 +96,9 @@ int main() {
         // separate; useRest declares space, it does not overwrite points.
         CHECK(points[i].z == 5 && rest[i].z == 0);
     }
+    auto currentGeneration = session.Commit(25, UsdGenCommitReason::SetTime);
+    CHECK(currentGeneration && currentGeneration != generation && currentGeneration->device &&
+          currentGeneration->device->Geometry().alreadyDeformed);
     auto rbfStage = UsdStage::Open(std::string(USDGEN_TEST_SOURCE_DIR) +
         "/plan/examples/cuda-rbf-network.usda");
     CHECK(rbfStage);
