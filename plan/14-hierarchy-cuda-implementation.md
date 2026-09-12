@@ -440,7 +440,7 @@ The four async-imaging/scene-owner/scene-exit/publication tests also passed
 additionally drops its last external scene-index handle inside a synthetic
 addition callback and verifies balanced retirement.
 
-This is not completion of the execution/imaging milestones. Capture currently
+This was not completion of the execution/imaging milestones. At that checkpoint capture
 rescans the input and rebuilds descriptions on every notice; incremental
 source capture, filtering/coalescing and the actual performance thresholds
 remain required. The scene retirement registry retains weak bookkeeping
@@ -449,6 +449,61 @@ complete operators/maps/tools, robust fault recovery, collision-notice
 coverage and all original release requirements remain open. Local Qwen gave
 an inspected visible audit; the two Hivemind audit requests returned no usable
 visible answers and are not counted as completed model reviews.
+
+### Incremental source and operator capture follow-through
+
+Dirty-only notices now select affected groom roots from an immutable,
+owner-published dependency catalog instead of discovering the entire input
+scene. A recording facade tracks builder queries, including absent targets
+and GeomSubset parent meshes; expression and reference paths transported by
+adapter aggregates supplement those queries. Owning-namespace dirties and
+exact/ancestor dependency dirties select a root. Unrelated dirty notices
+perform no source reads and do not recook an unrelated session.
+
+- Initial and structural notices still perform full discovery. Incremental
+  selection requires the catalog's contiguous applied-capture watermark to
+  equal the immediately preceding ingress sequence. A delayed earlier query
+  forces conservative discovery. Failed captures retain existing membership
+  and mark the catalog untrusted until a later successful full discovery;
+  sequence ordering prevents an older successful packet restoring trust over
+  a newer failure. Partial captures never prune unselected members.
+- A new opaque immutable operator-value cache supports explicit reuse within
+  the same input scene. Description identity, composed order and sample
+  offset must match; dirty equal/ancestor paths force operator reads. Full
+  topology captures still pull every mapped operator property (S14).
+  Operator validation errors and guide-role contributions survive reuse.
+  Hierarchy inputs and inherited surfaces are rebuilt, not cached as authored
+  dependencies. No live Hydra handles enter the cache or scene owner.
+- The scene caller disables node reuse when the absolute frame changes.
+  Hydra sampling itself remains at shutter offset zero (current stage frame),
+  not at an absolute frame offset. This distinction is documented at the API.
+  The graph descriptor header now directly includes its required `GfVec2f`
+  definition instead of relying on transitive client includes.
+
+Validation: full CUDA build and **74/74 non-benchmark T0/T1 tests pass**.
+The new `testUsdGenCaptureCache` checks exact upstream read counts, mapped
+values, old-descriptor immutability, inherited surfaces, diagnostic retention
+and correction, guide role removal, topology reorder, and sample-offset/full
+capture invalidation. `testUsdGenIncrementalCapture` checks unrelated/local
+selection, external mesh/subset and curve dependencies, operator reuse and
+rereads, relationship retargets, failed-capture recovery, and a deterministic
+delayed-capture/full-discovery case using separate framework reply graphs.
+The actual-stage publication test now checks animated widths `.04` and `.12`
+at frames 1 and 2 in addition to its static edit and lifetime cases. Five
+CUDA-disabled ASan/UBSan tests (both capture tests, publication, async imaging,
+population) pass with `detect_leaks=0` and `halt_on_error=1`.
+Incremental capture and animated publication also passed 30 consecutive
+runs each in the CUDA-enabled build and 20 each in the sanitizer build.
+
+This does not establish the performance gates: geometry/maps/description
+sections are still rebuilt for affected descriptions, structural changes
+still scan the full scene, and cache/snapshot copying and coalescing need
+measurement and further work. No GPU graphics interop or production CPU
+fallback is introduced. The original milestone/release scope remains open.
+Native Terra/Luna lanes supplied implementation/review assistance; local Qwen
+returned visible review suggestions which were checked against the actual
+Hydra contracts. The two Hivemind requests again exhausted their reasoning
+budgets without visible answers and are not counted as successful reviews.
 
 ## Original scope remains required
 

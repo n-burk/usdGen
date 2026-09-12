@@ -37,6 +37,23 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
 
+class UsdGenGraphDescCaptureCache
+{
+public:
+    struct NodeCapture {
+        SdfPath path;
+        usdGen::UsdGenNodeDesc node;       // no inherited surfaces / inputs
+        std::vector<std::string> validationErrors;
+        SdfPathVector guides;
+        bool exists = false;
+    };
+
+    SdfPath description;
+    double time = 0.0;
+    SdfPathVector operatorOrder;
+    std::vector<NodeCapture> nodes;
+};
+
 namespace {
 
 using usdGen::UsdGenCurveSetDesc;
@@ -722,16 +739,86 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
     _HPrimvarTyped(primDs, "usdGen:blend", t, &out->guideBlend);
 }
 
+// Read precisely the operator-owned portion.  Inputs and inherited surfaces
+// are intentionally absent from this value: both are assembled from the
+// current composed hierarchy below, even if this raw read is reused.
+UsdGenGraphDescCaptureCache::NodeCapture
+_HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
+{
+    UsdGenGraphDescCaptureCache::NodeCapture captured;
+    captured.path = p;
+    HdContainerDataSourceHandle primDs;
+    TfToken primType;
+    if (!_HPrim(input, p, &primDs, &primType)) return captured;
+    captured.exists = true;
+    HdContainerDataSourceHandle const ug = _HUsdGen(primDs);
+    VtStringArray operatorErrors;
+    _HGetTyped(primDs, t, &operatorErrors, {"__usdGenValidationErrors"});
+    captured.validationErrors.insert(captured.validationErrors.end(),
+        operatorErrors.begin(), operatorErrors.end());
+
+    UsdGenNodeDesc &node = captured.node;
+    node.path = p;
+    TfToken type;
+    _HGetToken(ug, t, &type, {"type"});
+    if (type.IsEmpty()) type = primType.IsEmpty() ? _HUsdTypeName(primDs) : primType;
+    node.type = type;
+    _HGetToken(ug, t, &node.mode, {"mode"});
+    _HGetToken(ug, t, &node.space, {"space"});
+    _HGetToken(ug, t, &node.readPhase, {"readPhase"});
+    _HGetDedicated(ug, t, &node.algorithmVersion, &captured.validationErrors,
+        node.path, "algorithmVersion", {"algorithmVersion"});
+    bool enabled = true;
+    _HGetDedicated(ug, t, &enabled, &captured.validationErrors,
+        node.path, "enabled", {"enabled"});
+    node.enabled = enabled;
+    _HGetDedicated(ug, t, &node.seed, &captured.validationErrors,
+        node.path, "seed", {"seed"});
+    _HGetDedicated(ug, t, &node.blend, &captured.validationErrors,
+        node.path, "blend", {"blend"});
+    _HPullUsdGen(ug, t, &node, &node.params, "usdGen");
+    // Legacy authored inputs are observed for S14 but never become graph
+    // topology.  Keep the cached payload pre-derived.
+    node.inputs.clear();
+    if (HdContainerDataSourceHandle bindings = _HChild(ug, "expressionBindings")) {
+        for (TfToken const &bn : bindings->GetNames()) {
+            HdContainerDataSourceHandle const b = HdContainerDataSource::Cast(bindings->Get(bn));
+            usdGen::UsdGenExpressionBinding binding;
+            _HGetTyped(b, t, &binding.expression, {"expression"});
+            _HGetToken(b, t, &binding.output, {"output"});
+            _HGetToken(b, t, &binding.destination, {"destination"});
+            _HGetToken(b, t, &binding.nativeType, {"nativeType"});
+            binding.destinationShape = _HExpressionShape(binding.nativeType);
+            TfToken domain; _HGetToken(b, t, &domain, {"domain"});
+            binding.domain = domain == TfToken("point") ? usdGen::expr::Domain::Point :
+                (domain == TfToken("primitive") ? usdGen::expr::Domain::Primitive : usdGen::expr::Domain::Groom);
+            _HGetTyped(b, t, &binding.literal, {"literal"});
+            node.expressionBindings.push_back(std::move(binding));
+        }
+    }
+    _HGetPathArray(ug, &captured.guides, {"guides"});
+    return captured;
+}
+
+bool
+_HNodeDirty(SdfPath const &node, SdfPathVector const &dirtyPaths)
+{
+    for (SdfPath const &dirty : dirtyPaths)
+        if (node.HasPrefix(dirty)) return true;
+    return false;
+}
+
 }  // namespace
 
 
-usdGen::UsdGenGraphDesc
-BuildGraphDescFromHydra(
+UsdGenGraphDescCapture
+CaptureGraphDescFromHydra(
     HdSceneIndexBase &input,
     SdfPath const &descriptionPath,
     UsdGenGraphDescBuildOptions const &options)
 {
-    UsdGenGraphDesc desc;
+    UsdGenGraphDescCapture result;
+    UsdGenGraphDesc &desc = result.desc;
     desc.description = descriptionPath;
     desc.time = options.time;
     double const time = options.time;
@@ -741,7 +828,7 @@ BuildGraphDescFromHydra(
     if (!_HPrim(input, descriptionPath, &descDs, nullptr)) {
         TF_CODING_ERROR("usdGen: description prim %s does not exist.",
                         descriptionPath.GetText());
-        return desc;
+        return result;
     }
     HdContainerDataSourceHandle const descUg = _HUsdGen(descDs);
     VtStringArray descriptionErrors;
@@ -782,7 +869,7 @@ BuildGraphDescFromHydra(
     if (operatorOrder.empty()) {
         TF_CODING_ERROR("usdGen: %s has no usdGen:operatorOrder.",
                         descriptionPath.GetText());
-        return desc;
+        return result;
     }
     desc.terminal = operatorOrder.back();
     std::unordered_map<std::string, UsdGenRole> curveRoles;
@@ -807,61 +894,31 @@ BuildGraphDescFromHydra(
 
     // ---- nodes, supplied composed reverse-sibling post-order -------------
     {
-        for (SdfPath const &p : operatorOrder) {
-            HdContainerDataSourceHandle primDs;
-            TfToken primType;
-            if (!_HPrim(input, p, &primDs, &primType)) {
-                continue;
+        auto const previous = options.reuseNodes ? options.previousCache : nullptr;
+        bool const reusable = previous && previous->description == descriptionPath &&
+            previous->time == options.time && previous->operatorOrder == operatorOrder;
+        auto cache = std::make_shared<UsdGenGraphDescCaptureCache>();
+        cache->description = descriptionPath;
+        cache->time = options.time;
+        cache->operatorOrder = operatorOrder;
+        cache->nodes.reserve(operatorOrder.size());
+        for (size_t index = 0; index != operatorOrder.size(); ++index) {
+            SdfPath const &p = operatorOrder[index];
+            UsdGenGraphDescCaptureCache::NodeCapture captured;
+            if (reusable && index < previous->nodes.size() &&
+                previous->nodes[index].path == p &&
+                !_HNodeDirty(p, options.dirtyPrimPaths)) {
+                captured = previous->nodes[index];
+            } else {
+                captured = _HReadNode(input, p, t);
             }
-            HdContainerDataSourceHandle const ug = _HUsdGen(primDs);
-            VtStringArray operatorErrors;
-            _HGetTyped(primDs, t, &operatorErrors, {"__usdGenValidationErrors"});
-            desc.validationErrors.insert(desc.validationErrors.end(), operatorErrors.begin(), operatorErrors.end());
-            UsdGenNodeDesc node;
-            node.path = p;
-            TfToken type;
-            _HGetToken(ug, t, &type, {"type"});
-            if (type.IsEmpty()) {
-                type = primType.IsEmpty() ? _HUsdTypeName(primDs) : primType;
-            }
-            node.type = type;
-            _HGetToken(ug, t, &node.mode, {"mode"});
-            _HGetToken(ug, t, &node.space, {"space"});
-            _HGetToken(ug, t, &node.readPhase, {"readPhase"});
-            _HGetDedicated(ug, t, &node.algorithmVersion, &desc.validationErrors,
-                       node.path, "algorithmVersion", {"algorithmVersion"});
-            bool enabled = true;
-            _HGetDedicated(ug, t, &enabled, &desc.validationErrors,
-                       node.path, "enabled", {"enabled"});
-            node.enabled = enabled;
-            _HGetDedicated(ug, t, &node.seed, &desc.validationErrors,
-                       node.path, "seed", {"seed"});
-            _HGetDedicated(ug, t, &node.blend, &desc.validationErrors,
-                       node.path, "blend", {"blend"});
-
-            _HPullUsdGen(ug, t, &node, &node.params, "usdGen");
-            if (HdContainerDataSourceHandle bindings = _HChild(ug, "expressionBindings")) {
-                for (TfToken const &bn : bindings->GetNames()) {
-                    HdContainerDataSourceHandle const b = HdContainerDataSource::Cast(bindings->Get(bn));
-                    usdGen::UsdGenExpressionBinding binding;
-                    _HGetTyped(b, t, &binding.expression, {"expression"});
-                    _HGetToken(b, t, &binding.output, {"output"});
-                    _HGetToken(b, t, &binding.destination, {"destination"});
-                    _HGetToken(b, t, &binding.nativeType, {"nativeType"});
-                    binding.destinationShape = _HExpressionShape(binding.nativeType);
-                    TfToken domain; _HGetToken(b, t, &domain, {"domain"});
-                    binding.domain = domain == TfToken("point") ? usdGen::expr::Domain::Point :
-                        (domain == TfToken("primitive") ? usdGen::expr::Domain::Primitive : usdGen::expr::Domain::Groom);
-                    _HGetTyped(b, t, &binding.literal, {"literal"});
-                    node.expressionBindings.push_back(std::move(binding));
-                }
-            }
-            SdfPathVector guides;
-            if (_HGetPathArray(ug, &guides, {"guides"})) {
-                for (SdfPath const &guide : guides) {
-                    curveRoles[guide.GetString()] = UsdGenRole::Reference;
-                }
-            }
+            cache->nodes.push_back(captured);
+            desc.validationErrors.insert(desc.validationErrors.end(),
+                captured.validationErrors.begin(), captured.validationErrors.end());
+            if (!captured.exists) continue;
+            UsdGenNodeDesc node = captured.node;
+            for (SdfPath const &guide : captured.guides)
+                curveRoles[guide.GetString()] = UsdGenRole::Reference;
             // Hierarchy is the topology contract.  Do not permit a legacy
             // authored input relationship to alter it.
             node.inputs.clear();
@@ -870,6 +927,7 @@ BuildGraphDescFromHydra(
             }
             desc.nodes.push_back(std::move(node));
         }
+        result.cache = std::move(cache);
     }
 
     // ---- surface inheritance (02 §2) -------------------------------------
@@ -1067,7 +1125,16 @@ BuildGraphDescFromHydra(
         }
     }
 
-    return desc;
+    return result;
+}
+
+usdGen::UsdGenGraphDesc
+BuildGraphDescFromHydra(
+    HdSceneIndexBase &input,
+    SdfPath const &descriptionPath,
+    UsdGenGraphDescBuildOptions const &options)
+{
+    return CaptureGraphDescFromHydra(input, descriptionPath, options).desc;
 }
 
 }  // namespace usdGenImaging

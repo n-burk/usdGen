@@ -14,15 +14,47 @@
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/usd/sdf/path.h"
 
+#include <memory>
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
 
+/// Opaque, immutable capture-side cache.  It deliberately contains only
+/// operator reads: geometry, maps and description fields are always pulled
+/// from Hydra by this first incremental slice.
+class UsdGenGraphDescCaptureCache;
+
 struct UsdGenGraphDescBuildOptions
 {
-    /// Sample time for deformed surface points / C3 curve sets.
+    /// Hydra shutter offset for sampled values (0 = the scene's current
+    /// frame). The offline UsdStage oracle interprets this as absolute time.
     double time = 0.0;
+    /// Explicit opt-in only.  A first/topology capture leaves this false so
+    /// S14 still pulls every mapped operator property. The caller must use
+    /// the same input scene and report all intervening dirties; caches have
+    /// no cross-scene identity. Disable reuse after structural/time changes
+    /// or whenever continuity of the dirty stream cannot be established.
+    bool reuseNodes = false;
+    std::shared_ptr<const UsdGenGraphDescCaptureCache> previousCache;
+    /// Prim paths from the caller-boundary dirty packet.  A dirty path that
+    /// is an ancestor of, or equal to, an operator forces that node to read.
+    SdfPathVector dirtyPrimPaths;
 };
+
+struct UsdGenGraphDescCapture
+{
+    usdGen::UsdGenGraphDesc desc;
+    std::shared_ptr<const UsdGenGraphDescCaptureCache> cache;
+};
+
+/// Capture a pure descriptor and its immutable node-read cache.  The cache
+/// is usable only when options explicitly request node reuse; all other
+/// descriptor sections are rebuilt on every call.
+UsdGenGraphDescCapture CaptureGraphDescFromHydra(
+    HdSceneIndexBase &input,
+    SdfPath const &descriptionPath,
+    UsdGenGraphDescBuildOptions const &options = UsdGenGraphDescBuildOptions());
 
 /// Walk one UsdGenDescription:
 ///  - the Description adapter supplies usdGen:operatorOrder, a composed

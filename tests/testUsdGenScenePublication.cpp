@@ -8,6 +8,7 @@
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usd/timeCode.h"
 #include "pxr/usdImaging/usdImaging/sceneIndices.h"
 #include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
@@ -224,6 +225,26 @@ int main()
     first.owner->Synchronize();
     Check(!hold.timedOut.load(std::memory_order_acquire),
           "held synthetic tile notice was released before its bounded timeout");
+
+    // Time-varying mapped parameters must be sampled at the current stage
+    // time on each capture; cache reuse must not freeze the initial width.
+    Check(width.Set(0.04f, UsdTimeCode(1.0)) &&
+              width.Set(0.12f, UsdTimeCode(2.0)),
+          "animated width time samples author successfully");
+    first.indices.stageSceneIndex->SetTime(UsdTimeCode(1.0));
+    first.indices.stageSceneIndex->ApplyPendingUpdates();
+    first.owner->Synchronize();
+    float const frameOne = tile.IsEmpty() ? -1.0f : FirstWidth(first, tile);
+    Check(std::fabs(frameOne - 0.04f) < 1e-6f,
+          "frame 1 synthetic tile samples animated width");
+
+    first.indices.stageSceneIndex->SetTime(UsdTimeCode(2.0));
+    first.indices.stageSceneIndex->ApplyPendingUpdates();
+    first.owner->Synchronize();
+    float const frameTwo = tile.IsEmpty() ? -1.0f : FirstWidth(first, tile);
+    Check(std::fabs(frameTwo - 0.12f) < 1e-6f,
+          "frame 2 synthetic tile samples animated width");
+
     std::printf("testUsdGenScenePublication: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

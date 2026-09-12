@@ -47,6 +47,7 @@ using Session = ::usdGenImaging::UsdGenImagingSession;
 using Handle = ::usdGenImaging::UsdGenSessionHandle;
 using Key = ::usdGenImaging::UsdGenSessionKey;
 using Desc = usdGen::UsdGenGraphDesc;
+using CaptureCache = ::usdGenImaging::UsdGenGraphDescCaptureCache;
 using Added = HdSceneIndexObserver::AddedPrimEntries;
 using Removed = HdSceneIndexObserver::RemovedPrimEntries;
 using Dirtied = HdSceneIndexObserver::DirtiedPrimEntries;
@@ -63,6 +64,35 @@ TfToken TypeName(HdSceneIndexPrim const& prim) {
 bool IsGroom(TfToken const& type) {
     return type == TfToken("UsdGenGroom") || type == TfToken("UsdGenDescription");
 }
+
+// Records actual builder reads, including missing targets and GeomSubset
+// parent meshes. No live data-source handle enters the owner catalog.
+class RecordingInput final : public HdSceneIndexBase {
+public:
+    explicit RecordingInput(HdSceneIndexBaseRefPtr input) : input(std::move(input)) {}
+    HdSceneIndexPrim GetPrim(SdfPath const& path) const override {
+        paths.insert(path);
+        return input->GetPrim(path);
+    }
+    SdfPathVector GetChildPrimPaths(SdfPath const& path) const override {
+        paths.insert(path);
+        return input->GetChildPrimPaths(path);
+    }
+    std::shared_ptr<const SdfPathVector> Dependencies(Desc const& desc) const {
+        // Some adapter aggregates transport referenced values directly,
+        // without a separate GetPrim through this recording facade.
+        for (auto const& expression : desc.expressions) paths.insert(expression.path);
+        for (auto const& node : desc.nodes) {
+            for (auto const& binding : node.expressionBindings) paths.insert(binding.expression.GetPrimPath());
+            for (auto const& path : node.references) paths.insert(path.GetPrimPath());
+        }
+        paths.erase(SdfPath());
+        return std::make_shared<const SdfPathVector>(paths.begin(), paths.end());
+    }
+private:
+    HdSceneIndexBaseRefPtr input;
+    mutable std::set<SdfPath> paths;
+};
 }
 
 struct UsdGenGroomSceneIndex::_Ingress {
@@ -70,12 +100,16 @@ struct UsdGenGroomSceneIndex::_Ingress {
         SdfPath root, description;
         Key key;
         std::shared_ptr<const Desc> desc;
+        std::shared_ptr<const SdfPathVector> dependencies;
+        std::shared_ptr<const CaptureCache> cache;
         bool authoredRender = false;
     };
     uint64_t sequence = 0;
     int device = -2;
     double frame = 0;
     bool initial = false, failed = false;
+    bool fullPopulation = true;
+    SdfPathVector captureRoots;
     Added added;
     Removed removed;
     Dirtied dirtied;
@@ -130,6 +164,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         int callback = -1, device = -2;
         double frame = 0;
         std::shared_ptr<const Desc> desc;
+        std::shared_ptr<const SdfPathVector> dependencies;
+        std::shared_ptr<const CaptureCache> cache;
         std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter> router;
         std::shared_ptr<const TileMap> tiles = std::make_shared<const TileMap>();
         int64_t generation = -1;
@@ -138,8 +174,15 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         SdfPath root, description;
         std::shared_ptr<const TileMap> tiles;
         int64_t generation;
+        std::shared_ptr<const SdfPathVector> dependencies;
+        std::shared_ptr<const CaptureCache> cache;
+        double frame = 0;
     };
-    struct Snapshot { std::vector<View> members; };
+    struct Snapshot {
+        std::vector<View> members;
+        uint64_t capturedThrough = 0;
+        bool captureTrusted = true;
+    };
     std::shared_ptr<const Snapshot> published = std::make_shared<const Snapshot>();
     HdSceneIndexBasePtr recipient; // initialized before admission; weak
     std::atomic<uint64_t> issued{0};
@@ -154,6 +197,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     struct Waiter { uint64_t watermark; std::function<void()> done; };
     std::vector<Waiter> waiters;
     bool closeProcessed = false;
+    bool captureTrusted = true;
+    uint64_t captureTrustSequence = 0;
     std::vector<TfWeakPtr<Session>> usedSessions;
     std::unique_ptr<Pipeline> owner; // removed at process shutdown, even if public index survives
 
@@ -162,9 +207,12 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     auto SnapshotValue() const { return std::atomic_load(&published); }
     void PublishSnapshot() {
         auto next = std::make_shared<Snapshot>();
+        next->capturedThrough = completedPrefix;
+        next->captureTrusted = captureTrusted;
         for (auto const& item : members) {
             auto const& g = *item.second;
-            next->members.push_back({g.root, g.description, g.tiles, g.generation});
+            next->members.push_back({g.root, g.description, g.tiles, g.generation,
+                                     g.dependencies, g.cache, g.frame});
         }
         std::atomic_store(&published, std::shared_ptr<const Snapshot>(std::move(next)));
     }
@@ -203,6 +251,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         };
         prune(events);
         prune(tombstones);
+        // Catalog reuse is safe only after every earlier capture has been
+        // applied. Publication callbacks do not advance this source watermark.
+        PublishSnapshot();
         CheckWaiters();
     }
     void Synchronize() {
@@ -386,7 +437,15 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     }
     void Apply(_Ingress const& packet) {
         const uint64_t seq = packet.sequence;
+        if (packet.failed && seq >= captureTrustSequence) {
+            captureTrusted = false;
+            captureTrustSequence = seq;
+        }
         if (closing.load() || packet.failed) { CompleteIngress(seq); return; }
+        if (packet.fullPopulation && seq >= captureTrustSequence) {
+            captureTrusted = true;
+            captureTrustSequence = seq;
+        }
         Added forwardAdded;
         Removed forwardRemoved;
         Dirtied forwardDirtied;
@@ -419,7 +478,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         for (auto it = members.begin(); it != members.end();) {
             bool found = std::any_of(packet.inputs.begin(), packet.inputs.end(),
                 [&](auto const& input) { return input.root == it->first; });
-            if (!found && it->second->captured <= seq && !NewerEvent(it->first, seq)) {
+            bool captured = packet.fullPopulation ||
+                std::find(packet.captureRoots.begin(), packet.captureRoots.end(), it->first) !=
+                    packet.captureRoots.end();
+            if (captured && !found && it->second->captured <= seq && !NewerEvent(it->first, seq)) {
                 if (!it->second->authoredRender)
                     forwardRemoved.emplace_back(RenderPath(it->second->description));
                 Remove(it->second, seq);
@@ -456,6 +518,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             }
             groom->captured = seq;
             groom->desc = input.desc;
+            groom->dependencies = input.dependencies;
+            groom->cache = input.cache;
             groom->device = packet.device;
             groom->frame = packet.frame;
         }
@@ -554,21 +618,45 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
     packet.sequence = state->issued.fetch_add(1, std::memory_order_acq_rel) + 1;
     packet.device = usdGen::UsdGenSession::CaptureCallerDevice();
     try {
-        // Snapshot each description at the source boundary. Incremental
-        // topology/input capture reuse is still a performance requirement.
+        // Use only an owner-published complete catalog. An older in-flight
+        // capture may establish new external dependencies, so fall back to
+        // full discovery until its ingress has been applied.
+        auto catalog = state->SnapshotValue();
+        std::vector<SdfPath> stack;
+        if (!packet.initial && packet.added.empty() && packet.removed.empty() &&
+            catalog->captureTrusted && catalog->capturedThrough == packet.sequence - 1) {
+            packet.fullPopulation = false;
+            for (auto const& member : catalog->members) {
+                bool affected = !member.dependencies;
+                for (auto const& dirty : packet.dirtied) {
+                    auto const& path = dirty.primPath;
+                    if (path.HasPrefix(member.root) || member.root.HasPrefix(path)) affected = true;
+                    if (member.dependencies) for (auto const& dependency : *member.dependencies)
+                        // A dirty on an ancestor can change a resolved input.
+                        // A sibling child of a queried metadata container
+                        // cannot change that container's own sampled values.
+                        if (dependency.HasPrefix(path)) affected = true;
+                    if (affected) break;
+                }
+                if (affected) stack.push_back(member.root);
+            }
+            packet.captureRoots = stack;
+        } else stack.push_back(SdfPath::AbsoluteRootPath());
+
         auto input = _GetInputSceneIndex();
-        if (input) {
+        if (input && !stack.empty()) {
             auto frame = HdSceneGlobalsSchema::GetFromParent(
                 input->GetPrim(SdfPath::AbsoluteRootPath()).dataSource).GetCurrentFrame();
             if (frame) {
                 double value = frame->GetTypedValue(0);
                 if (std::isfinite(value)) packet.frame = value;
             }
-            std::vector<SdfPath> stack{SdfPath::AbsoluteRootPath()};
             while (!stack.empty()) {
                 const auto path = stack.back(); stack.pop_back();
                 const auto prim = input->GetPrim(path);
                 if (path != SdfPath::AbsoluteRootPath() && IsGroom(TypeName(prim))) {
+                    auto known = std::find_if(catalog->members.begin(), catalog->members.end(),
+                        [&](auto const& member) { return member.root == path; });
                     _Ingress::Input captured;
                     captured.root = captured.description = path;
                     captured.key.groomRoot = path;
@@ -576,7 +664,11 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                     auto id = HdStringDataSource::Cast(HdContainerDataSource::Get(
                         prim.dataSource, HdDataSourceLocator(TfToken("sessionId"))));
                     if (id) captured.key.sessionId = id->GetTypedValue(0);
-                    if (TypeName(prim) == TfToken("UsdGenGroom")) {
+                    if (!packet.fullPopulation && known != catalog->members.end()) {
+                        // Dirty-only notices cannot change child prim types.
+                        // Structural resyncs always take the discovery path.
+                        captured.description = known->description;
+                    } else if (TypeName(prim) == TfToken("UsdGenGroom")) {
                         for (auto const& child : input->GetChildPrimPaths(path))
                             if (TypeName(input->GetPrim(child)) == TfToken("UsdGenDescription")) {
                                 captured.description = child; break;
@@ -584,8 +676,24 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                     }
                     auto authored = input->GetPrim(RenderPath(captured.description));
                     captured.authoredRender = authored.dataSource || !authored.primType.IsEmpty();
-                    auto desc = ::usdGenImaging::BuildGraphDescFromHydra(*_pruned, captured.description);
-                    captured.desc = std::make_shared<const Desc>(std::move(desc));
+                    RecordingInput recorder(_pruned);
+                    ::usdGenImaging::UsdGenGraphDescBuildOptions options;
+                    // Hydra samples are relative to the current stage frame:
+                    // keep offset zero, and gate reuse with the absolute
+                    // packet frame separately. Passing packet.frame as the
+                    // offset here would sample at twice the current frame.
+                    if (!packet.fullPopulation && known != catalog->members.end() &&
+                        known->frame == packet.frame) {
+                        options.reuseNodes = true;
+                        options.previousCache = known->cache;
+                        for (auto const& dirty : packet.dirtied)
+                            options.dirtyPrimPaths.push_back(dirty.primPath);
+                    }
+                    auto result = ::usdGenImaging::CaptureGraphDescFromHydra(
+                        recorder, captured.description, options);
+                    captured.desc = std::make_shared<const Desc>(std::move(result.desc));
+                    captured.cache = std::move(result.cache);
+                    captured.dependencies = recorder.Dependencies(*captured.desc);
                     packet.inputs.push_back(std::move(captured));
                     continue; // never adopt nested roots under a groom
                 }
