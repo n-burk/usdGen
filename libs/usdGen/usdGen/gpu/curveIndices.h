@@ -67,5 +67,15 @@ cudaError_t BuildCurveIndices(CurveIndexOptions options,
     CurveIndexRequirements const& requirements, CurveIndexWorkspace workspace,
     CurveIndexOutput output, cudaStream_t stream);
 
+// Enqueue the native indirect-draw count corresponding to the generated
+// records.  The result is zero when the upstream GPU validation status is
+// nonzero, the record count exceeds maxRecords, or records*indexArity cannot
+// be represented by uint32_t.  This performs no host readback or allocation
+// and is safe to place in a CUDA graph after BuildCurveIndices.
+cudaError_t PackCurveDrawCount(DeviceView<const uint64_t> recordCount,
+    DeviceView<const uint32_t> status, uint32_t indexArity,
+    size_t maxRecords, DeviceView<uint32_t> drawCount,
+    cudaStream_t stream);
+
 } // namespace usdGen::gpu
 #endif

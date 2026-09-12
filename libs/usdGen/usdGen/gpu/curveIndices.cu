@@ -138,6 +138,19 @@ __global__ void EmitKernel(CurveIndexOptions o, size_t curves, const uint32_t* c
     }
 }
 
+__global__ void PackDrawCountKernel(const uint64_t* recordCount,
+    const uint32_t* status, uint32_t arity, uint64_t maxRecords,
+    uint32_t* drawCount) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    uint64_t records = *recordCount;
+    if (*status != 0 || records > maxRecords ||
+        records > uint64_t(UINT32_MAX) / uint64_t(arity)) {
+        *drawCount = 0;
+        return;
+    }
+    *drawCount = static_cast<uint32_t>(records * uint64_t(arity));
+}
+
 bool Same(CurveIndexRequirements const&a, CurveIndexRequirements const&b) {
     return a.maxRecords==b.maxRecords && a.indexArity==b.indexArity &&
         a.scanBytes==b.scanBytes && a.deviceIndex==b.deviceIndex && a.stream==b.stream;
@@ -202,6 +215,20 @@ cudaError_t BuildCurveIndices(CurveIndexOptions o,size_t curves,size_t points,De
     TotalKernel<<<1,1,0,stream>>>(curves,ws.recordOffsets.data,out.recordCount.data,out.status.data,req.maxRecords);
     if ((e=cudaGetLastError())!=cudaSuccess) return e;
     if(curves) EmitKernel<<<curves,kThreads,0,stream>>>(o,curves,offsets.data,ws.recordOffsets.data,out.status.data,out.indices.data,out.primitiveParam.data);
+    return cudaGetLastError();
+}
+
+cudaError_t PackCurveDrawCount(DeviceView<const uint64_t> recordCount,
+    DeviceView<const uint32_t> status, uint32_t indexArity,
+    size_t maxRecords, DeviceView<uint32_t> drawCount,
+    cudaStream_t stream) {
+    if ((indexArity != 1 && indexArity != 2 && indexArity != 4) ||
+        recordCount.size != 1 || status.size != 1 || drawCount.size != 1 ||
+        !recordCount.data || !status.data || !drawCount.data) {
+        return cudaErrorInvalidValue;
+    }
+    PackDrawCountKernel<<<1, 1, 0, stream>>>(recordCount.data, status.data,
+        indexArity, static_cast<uint64_t>(maxRecords), drawCount.data);
     return cudaGetLastError();
 }
 } // namespace usdGen::gpu

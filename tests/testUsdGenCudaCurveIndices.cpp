@@ -149,6 +149,76 @@ void CompactedTopology() {
           "GPU-compacted topology directly feeds native-layout cubic indices");
 }
 
+void DrawCountPacking() {
+    cudaStream_t stream = nullptr;
+    Cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "draw count stream");
+    DeviceBuffer<uint64_t> records;
+    DeviceBuffer<uint32_t> status, output;
+    Cuda(records.reset(1), "draw count records");
+    Cuda(status.reset(1), "draw count status");
+    Cuda(output.reset(1), "draw count output");
+    auto run = [&](uint64_t n, uint32_t s, uint32_t arity, size_t cap,
+                   uint32_t expected) {
+        Cuda(cudaMemcpyAsync(records.data(), &n, sizeof(n), cudaMemcpyHostToDevice, stream),
+             "draw count record upload");
+        Cuda(cudaMemcpyAsync(status.data(), &s, sizeof(s), cudaMemcpyHostToDevice, stream),
+             "draw count status upload");
+        Cuda(PackCurveDrawCount(Read(records), Read(status), arity, cap,
+                                output.view(), stream), "draw count enqueue");
+        Cuda(cudaStreamSynchronize(stream), "draw count synchronize");
+        uint32_t actual = 0;
+        Cuda(cudaMemcpy(&actual, output.data(), sizeof(actual), cudaMemcpyDeviceToHost),
+             "draw count readback");
+        Check(actual == expected, "draw count packed value");
+    };
+    run(0, 0, 1, 5, 0);
+    run(5, 0, 4, 5, 20);
+    run(6, 0, 2, 5, 0);
+    run(uint64_t(UINT32_MAX) / 4 + 1, 0, 4, size_t(UINT64_MAX), 0);
+    run(5, 1, 2, 5, 0);
+    Check(PackCurveDrawCount(Read(records), Read(status), 3, 5,
+                             output.view(), stream) == cudaErrorInvalidValue,
+          "draw count rejects unsupported arity");
+    DeviceView<uint32_t> emptyOutput{output.data(), 0};
+    Check(PackCurveDrawCount(Read(records), Read(status), 2, 5,
+                             emptyOutput, stream) == cudaErrorInvalidValue,
+          "draw count rejects non-scalar output");
+
+    uint64_t capturedRecords = 3;
+    uint32_t capturedStatus = 0;
+    Cuda(cudaMemcpy(records.data(), &capturedRecords, sizeof(capturedRecords),
+                    cudaMemcpyHostToDevice), "capture records upload");
+    Cuda(cudaMemcpy(status.data(), &capturedStatus, sizeof(capturedStatus),
+                    cudaMemcpyHostToDevice), "capture status upload");
+    Cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "draw count capture");
+    Cuda(PackCurveDrawCount(Read(records), Read(status), 2, 5,
+                            output.view(), stream), "draw count capture enqueue");
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t executable = nullptr;
+    Cuda(cudaStreamEndCapture(stream, &graph), "draw count capture end");
+    Cuda(cudaGraphInstantiate(&executable, graph, 0), "draw count graph instantiate");
+    Cuda(cudaGraphLaunch(executable, stream), "draw count graph launch");
+    Cuda(cudaStreamSynchronize(stream), "draw count graph synchronize");
+    uint32_t actual = 0;
+    Cuda(cudaMemcpy(&actual, output.data(), sizeof(actual), cudaMemcpyDeviceToHost),
+         "draw count captured readback");
+    Check(actual == 6, "draw count graph full result");
+    capturedRecords = 9;
+    capturedStatus = 1;
+    Cuda(cudaMemcpy(records.data(), &capturedRecords, sizeof(capturedRecords),
+                    cudaMemcpyHostToDevice), "draw count replay records");
+    Cuda(cudaMemcpy(status.data(), &capturedStatus, sizeof(capturedStatus),
+                    cudaMemcpyHostToDevice), "draw count replay status");
+    Cuda(cudaGraphLaunch(executable, stream), "draw count graph replay");
+    Cuda(cudaStreamSynchronize(stream), "draw count replay synchronize");
+    Cuda(cudaMemcpy(&actual, output.data(), sizeof(actual), cudaMemcpyDeviceToHost),
+         "draw count replay readback");
+    Check(actual == 0, "draw count graph upstream error result");
+    Cuda(cudaGraphExecDestroy(executable), "draw count graph executable destroy");
+    Cuda(cudaGraphDestroy(graph), "draw count graph destroy");
+    Cuda(cudaStreamDestroy(stream), "draw count stream destroy");
+}
+
 #ifdef USDGEN_HAS_STORM_INDEX_ORACLE
 void CompareNative(std::vector<uint32_t> const& counts, CurveIndexOptions options) {
     TfErrorMark mark;
@@ -231,6 +301,7 @@ int main(int argc,char** argv) {
           "point indices and owning curves");
     Run({},{}); Run({1,1},{});
     CompactedTopology();
+    DrawCountPacking();
     for (int corrupt=1;corrupt<=4;++corrupt) Run({2,3},{},false,corrupt);
     Run({2,3},{CurveIndexBasis::Linear,CurveIndexWrap::Segmented,CurveIndexMode::Curves});
     CurveIndexRequirements req{123,99,321}, unchanged=req;
