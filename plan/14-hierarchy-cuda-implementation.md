@@ -664,6 +664,49 @@ topology-identity handling. No OpenUSD dependency source was modified during
 this investigation; the existing direct-BAR draw test is not stock
 BasisCurves integration proof.
 
+### GPU-native curve index generation
+
+`gpu/curveIndices.{h,cu}` now generates Storm-layout index records and owning
+curve IDs directly from device ragged offsets. It supports linear strips,
+loops and segmented pairs, cubic Bezier/BSpline/Catmull-Rom/centripetal
+Catmull-Rom, pinned endpoints, hulls and points. Pinned endpoints repeat
+indices, not geometry. Counts and prefix offsets are computed on-device with
+CUB; the resulting record count remains a GPU scalar.
+
+The preparation boundary derives conservative capacities from scalar shape
+metadata and binds requirements to a device and live stream. Execution uses
+borrowed, caller-owned buffers, without allocation, host waits, readback or
+application locks, and supports CUDA graph capture and replay. Stream-device
+validation happens before capture: Compute Sanitizer caught
+`cudaStreamGetDevice` rejecting an actively captured stream during initial
+development. Invalid device offsets or odd segmented counts produce a zero
+GPU record count and leave index/primitive outputs untouched. Shape, enum,
+capacity and signed Storm index limits are checked before enqueueing.
+
+The optional native oracle compares exact indices and primitive IDs against
+the actual OpenUSD 26.08 Storm builder in 136 basis/wrap/mode/shape cases,
+including empty, very short, long and ragged curves. It needs matching OpenUSD
+private source headers; SDK-only builds skip that oracle explicitly, without
+adding a source-tree dependency to production targets. A separate test feeds
+actual GPU-compacted offsets directly into captured index generation, without
+downloading or re-uploading those offsets. The existing compaction `Finish`
+remains an explicit completion/count boundary; this does not claim the whole
+compaction chain is asynchronous.
+
+Validation: all 79 T0/T1 tests pass, including the two performance-labelled
+tests; all six selected non-benchmark/non-Surgery T2 tests pass. Both new
+index tests pass 30 consecutive runs. Compute Sanitizer memcheck is clean for
+both the native oracle and the validation/capture test; the latter's final
+compacted-input version also passes racecheck with zero errors or warnings.
+Local Qwen's latest review request returned an empty answer, which is not
+counted as successful model review.
+
+This is the GPU topology prerequisite, **not native renderer integration**.
+Stock BasisCurves still needs the renderer-side admission/BAR publication,
+GPU draw-count, culling and topology-identity changes described above. There
+is no arbitrary USD indexed-curve remapping, tile-offset rebasing or measured
+production frame-throughput claim in this checkpoint.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the

@@ -383,6 +383,7 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/picking.cu
             libs/usdGen/usdGen/gpu/pointOverride.cu
             libs/usdGen/usdGen/gpu/topology.cu
+            libs/usdGen/usdGen/gpu/curveIndices.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -462,6 +463,22 @@ target_link_libraries(testUsdGenDeviceGeneration PRIVATE usdGen)
 add_test(NAME testUsdGenDeviceGeneration COMMAND testUsdGenDeviceGeneration)
 set_tests_properties(testUsdGenDeviceGeneration PROPERTIES LABELS "T0;device;sessions")
 if(USDGEN_ENABLE_CUDA)
+    # The optional oracle uses the actual native Storm index builder. Its
+    # private header is not installed with the SDK; never add this source-tree
+    # dependency to production targets or installed interfaces.
+    set(USDGEN_OPENUSD_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../OpenUSD" CACHE PATH
+        "Matching OpenUSD source tree for native Storm index oracle tests")
+    add_executable(testUsdGenCudaCurveIndices tests/testUsdGenCudaCurveIndices.cpp)
+    target_link_libraries(testUsdGenCudaCurveIndices PRIVATE usdGenGpu hdSt)
+    if(EXISTS "${USDGEN_OPENUSD_SOURCE_DIR}/pxr/imaging/hdSt/basisCurvesTopology.h")
+        target_include_directories(testUsdGenCudaCurveIndices SYSTEM PRIVATE "${USDGEN_OPENUSD_SOURCE_DIR}")
+        target_compile_definitions(testUsdGenCudaCurveIndices PRIVATE USDGEN_HAS_STORM_INDEX_ORACLE)
+    endif()
+    add_test(NAME testUsdGenCudaCurveIndices COMMAND testUsdGenCudaCurveIndices)
+    add_test(NAME testUsdGenCudaCurveIndicesStorm COMMAND testUsdGenCudaCurveIndices --native)
+    set_tests_properties(testUsdGenCudaCurveIndices testUsdGenCudaCurveIndicesStorm PROPERTIES
+        LABELS "T1;cuda;topology;interop" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    set_tests_properties(testUsdGenCudaCurveIndicesStorm PROPERTIES SKIP_RETURN_CODE 77)
     add_executable(testUsdGenCudaGlInterop tests/testUsdGenCudaGlInterop.cpp)
     target_compile_definitions(testUsdGenCudaGlInterop PRIVATE USDGEN_ENABLE_CUDA)
     target_include_directories(testUsdGenCudaGlInterop PRIVATE ${PROJECT_SOURCE_DIR}/usdGenShaders/test)
