@@ -70,6 +70,29 @@ int main() {
     CHECK(std::fabs(points[0].x - .8f) < 2e-3f && std::fabs(points[0].y - .4f) < 2e-3f &&
           std::fabs(points[0].z - .2f) < 2e-3f);
 
+    // Effective groom useRest, rather than its false authored fallback,
+    // controls RBF admission and retains the last good generation on false.
+    {
+        UsdGenSession useRestSession; useRestSession.SetDevicePublicationEnabled(true);
+        auto useRestDesc = desc;
+        useRestDesc.nodes[0].params.push_back({TfToken("useRest"), VtValue(false), false});
+        UsdGenExpressionDesc useRestExpr;
+        useRestExpr.path = SdfPath("/UseRestExpr"); useRestExpr.source = "$frame < 2";
+        useRestExpr.outputs.push_back({TfToken("result"), TfToken("bool"), Scalar(expr::ScalarType::Bool)});
+        useRestDesc.expressions.push_back(useRestExpr);
+        UsdGenExpressionBinding useRestBinding;
+        useRestBinding.expression = useRestExpr.path; useRestBinding.destination = TfToken("useRest");
+        useRestBinding.nativeType = TfToken("bool"); useRestBinding.destinationShape = Scalar(expr::ScalarType::Bool);
+        useRestBinding.domain = expr::Domain::Groom; useRestBinding.literal = VtValue(false);
+        useRestDesc.nodes[0].expressionBindings.push_back(useRestBinding);
+        useRestSession.SetGraphDesc(useRestDesc);
+        auto enabledRest = useRestSession.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(enabledRest && enabledRest->device && !useRestSession.LastDiagnostics().HasErrors());
+        useRestSession.SetGraphDesc(useRestDesc);
+        CHECK(useRestSession.Commit(2, UsdGenCommitReason::SetTime) == enabledRest &&
+              useRestSession.LastDiagnostics().HasErrors());
+    }
+
     // Resampling precedes the RBF chain.  Each published topology owns its
     // own device buffers, so the outstanding first-generation lease remains
     // readable while target counts change.
@@ -96,25 +119,25 @@ int main() {
             CHECK(std::isfinite(points[i].x) && std::isfinite(points[i].y) && std::isfinite(points[i].z));
             CHECK(std::fabs(widths[i] - .5f) < 1e-5f);
         }
-    auto fourStats = resampleSession.CudaBindingStats();
-    CHECK(fourStats.size() == 1 && fourStats[0].identity == baseStats[0].identity &&
+        auto fourStats = resampleSession.CudaBindingStats();
+        CHECK(fourStats.size() == 1 && fourStats[0].identity == baseStats[0].identity &&
           fourStats[0].bindCount == baseStats[0].bindCount);
-    CHECK(std::fabs(points[0].x - .8f) < 2e-3f && std::fabs(points[0].y - .4f) < 2e-3f &&
+        CHECK(std::fabs(points[0].x - .8f) < 2e-3f && std::fabs(points[0].y - .4f) < 2e-3f &&
           std::fabs(points[0].z - .2f) < 2e-3f);
-    CHECK(Read(retainedResampleLease, &points, &widths, &ids, stream));
-    CHECK(points.size() == 5 && std::fabs(points[0].x - .8f) < 2e-3f &&
+        CHECK(Read(retainedResampleLease, &points, &widths, &ids, stream));
+        CHECK(points.size() == 5 && std::fabs(points[0].x - .8f) < 2e-3f &&
           ids == std::vector<uint64_t>({3,7}));
-    auto resampleThree = resampleFour;
-    resampleThree.nodes[0].params.front().value = VtValue(3);
-    resampleSession.SetGraphDesc(resampleThree);
-    auto three = resampleSession.Commit(3, UsdGenCommitReason::SetTime);
-    CHECK(three && three != four && three->device && !resampleSession.LastDiagnostics().HasErrors());
-    auto threeLease = gpu::AcquireGeometry(three->device, stream); CHECK(threeLease);
-    CHECK(Read(threeLease, &points, &widths, &ids, stream));
-    CHECK(points.size() == 6 && ids == std::vector<uint64_t>({3,7}) &&
+        auto resampleThree = resampleFour;
+        resampleThree.nodes[0].params.front().value = VtValue(3);
+        resampleSession.SetGraphDesc(resampleThree);
+        auto three = resampleSession.Commit(3, UsdGenCommitReason::SetTime);
+        CHECK(three && three != four && three->device && !resampleSession.LastDiagnostics().HasErrors());
+        auto threeLease = gpu::AcquireGeometry(three->device, stream); CHECK(threeLease);
+        CHECK(Read(threeLease, &points, &widths, &ids, stream));
+        CHECK(points.size() == 6 && ids == std::vector<uint64_t>({3,7}) &&
           three->device->Geometry().topologyVersion != four->device->Geometry().topologyVersion);
-    auto threeStats = resampleSession.CudaBindingStats();
-    CHECK(threeStats.size() == 1 && threeStats[0].identity == baseStats[0].identity &&
+        auto threeStats = resampleSession.CudaBindingStats();
+        CHECK(threeStats.size() == 1 && threeStats[0].identity == baseStats[0].identity &&
           threeStats[0].bindCount == baseStats[0].bindCount);
     } // resample leases/session complete before the shared stream is destroyed
 

@@ -440,11 +440,15 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
     auto const& node = desc.nodes.front();
     for (auto const& binding : node.expressionBindings) {
         auto const& shape = binding.destinationShape;
-        if (LocalName(binding.destination) != "resampleTo" || binding.domain != expr::Domain::Groom ||
-            binding.nativeType != TfToken("int") || shape.isArray || shape.elementCount != 1 ||
-            shape.components != 1 || shape.rows != 1 || shape.columns != 1 ||
-            shape.scalar != expr::ScalarType::Int32)
-            return Fail(diagnostics, "CurveSource only supports groom native-int resampleTo expressions");
+        auto const name = LocalName(binding.destination);
+        const bool resample = name == "resampleTo" && binding.nativeType == TfToken("int") &&
+            shape.scalar == expr::ScalarType::Int32;
+        const bool useRest = name == "useRest" && binding.nativeType == TfToken("bool") &&
+            shape.scalar == expr::ScalarType::Bool;
+        if ((!resample && !useRest) || binding.domain != expr::Domain::Groom ||
+            shape.isArray || shape.elementCount != 1 ||
+            shape.components != 1 || shape.rows != 1 || shape.columns != 1)
+            return Fail(diagnostics, "CurveSource only supports groom native resampleTo/useRest expressions");
     }
     if (!node.enabled || node.blend != 1 || node.algorithmVersion < 0 || node.algorithmVersion > 1)
         return Fail(diagnostics, "unsupported CurveSource enabled/blend/algorithmVersion configuration");
@@ -465,7 +469,9 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         return Fail(diagnostics, "description default width must be finite and non-negative");
     if (!node.mode.IsEmpty()) return Fail(diagnostics, "CurveSource has no mode property");
     UsdGenParamView params; params.desc = &desc; params.node = &node;
-    if (sawDeform && !params.GetBool(TfToken("useRest"), true))
+    const bool connectedUseRest = std::any_of(node.expressionBindings.begin(), node.expressionBindings.end(),
+        [](UsdGenExpressionBinding const& binding) { return LocalName(binding.destination) == "useRest"; });
+    if (sawDeform && !connectedUseRest && !params.GetBool(TfToken("useRest"), true))
         return Fail(diagnostics, "already-deformed CurveSource cannot feed rest-to-animated RBF Deform");
     if (sawDeform) {
         auto source = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
@@ -629,6 +635,43 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     CudaSourcePreparationOptions options;
     options.defaultWidth = desc.defaultWidth;
     options.useRest = params.GetBool(TfToken("useRest"), true);
+    options.resampleTo = params.GetInt(TfToken("resampleTo"), 0);
+    if (plan.sourceParameters) {
+        expr::Context context; context.frame = frame; context.time = frame / desc.timeCodesPerSecond;
+        context.seed = node.seed; context.descId = expr::DescriptionId(desc.description.GetText());
+        std::vector<std::string> errors;
+        if (!execution.sourceParameters)
+            execution.sourceParameters = std::make_unique<CudaParameterEvaluator>();
+        if (execution.sourceParameters->Evaluate(*plan.sourceParameters, {}, {}, context, stream, &errors) != CudaParameterStatus::Ok) {
+            for (auto const& error : errors) Fail(diagnostics, error);
+            Fail(diagnostics, "source expression evaluation failed; previous generation retained"); return {};
+        }
+        if (auto const* field = execution.sourceParameters->Find(TfToken("useRest"))) {
+            uint8_t value = 0;
+            if (field->type != expr::ScalarType::Bool || field->count != 1 ||
+                cudaMemcpyAsync(&value, field->data, sizeof(value), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+                cudaStreamSynchronize(stream) != cudaSuccess) {
+                Fail(diagnostics, "invalid useRest expression value; previous generation retained"); return {};
+            }
+            if (value > 1) { Fail(diagnostics, "invalid useRest expression value; previous generation retained"); return {}; }
+            options.useRest = value != 0;
+        }
+        if (auto const* field = execution.sourceParameters->Find(TfToken("resampleTo"))) {
+            int value = 0;
+            if (field->type != expr::ScalarType::Int32 || field->count != 1 ||
+                cudaMemcpyAsync(&value, field->data, sizeof(value), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+                cudaStreamSynchronize(stream) != cudaSuccess || value < 0 || value == 1) {
+                Fail(diagnostics, "invalid resampleTo expression value; previous generation retained"); return {};
+            }
+            options.resampleTo = value;
+        }
+    }
+    const bool hasRbfDeform = std::any_of(plan.steps.begin(), plan.steps.end(),
+        [](auto const& step) { return step->type == TfToken("UsdGenDeform"); });
+    if (!options.useRest && hasRbfDeform) {
+        Fail(diagnostics, "effective useRest=false cannot feed CUDA RBF Deform; previous generation retained");
+        return {};
+    }
     if (options.useRest && !curves.points.empty() &&
         (curves.rest.empty() || curves.restFromCurrentPoints)) {
         Fail(diagnostics, "useRest requires an authored/default-time C3 rest snapshot; current-frame fallback is not a rest binding");
@@ -652,7 +695,6 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     // A connected groom scalar is the effective value. Do not reject its
     // authored literal fallback before the evaluator has had a chance to
     // override it; source preparation itself never host-resamples.
-    options.resampleTo = plan.sourceParameters ? 0 : params.GetInt(TfToken("resampleTo"), 0);
     options.rebind = params.GetToken(TfToken("rebind"), TfToken("onError")).GetString();
     const UsdGenSurfaceDesc* surface = nullptr;
     if (!node.surfaces.empty()) {
@@ -704,29 +746,6 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     if (source->Set(prepared.Input(), stream) != gpu::CurveSourceStatus::Ok ||
         source->Finish(stream) != gpu::CurveSourceStatus::Ok) {
         Fail(diagnostics, "source upload failed; previous generation retained"); return {};
-    }
-    if (plan.sourceParameters) {
-        expr::Context context;
-        context.frame = frame;
-        context.time = frame / desc.timeCodesPerSecond;
-        context.seed = node.seed;
-        context.descId = expr::DescriptionId(desc.description.GetText());
-        std::vector<std::string> errors;
-        if (!execution.sourceParameters)
-            execution.sourceParameters = std::make_unique<CudaParameterEvaluator>();
-        if (execution.sourceParameters->Evaluate(*plan.sourceParameters, source->view(),
-                {source->hairT(), source->rootUV()}, context, stream, &errors) != CudaParameterStatus::Ok) {
-            for (auto const& error : errors) Fail(diagnostics, error);
-            Fail(diagnostics, "resampleTo expression evaluation failed; previous generation retained"); return {};
-        }
-        auto const* field = execution.sourceParameters->Find(TfToken("resampleTo"));
-        int value = 0;
-        if (!field || field->type != expr::ScalarType::Int32 || field->count != 1 ||
-            cudaMemcpyAsync(&value, field->data, sizeof(value), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-            cudaStreamSynchronize(stream) != cudaSuccess || value < 0 || value == 1) {
-            Fail(diagnostics, "invalid resampleTo expression value; previous generation retained"); return {};
-        }
-        options.resampleTo = value;
     }
     std::unique_ptr<gpu::CudaCurveResample> resampled;
     if (options.resampleTo) {

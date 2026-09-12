@@ -1660,3 +1660,26 @@ excluding exactly `testUsdGenCudaNativeBasisCurves` and
 `testUsdGenCudaGroomRender` passed (`44a56c`, 4.07 s). This is not a full
 16-target harness result and does not change the known bare-provider
 regression.
+
+### CurveSource groom-control checkpoint (2026-09-12)
+
+CUDA CurveSource now supports groom-domain typed expressions for native
+`bool useRest` and `int resampleTo`. Literals initialize independently and
+each present expression field overrides only its own literal before source
+preparation; omitted fields retain their literal values. Effective
+`useRest=false` is rejected before an RBF Deform and preserves the last good
+publication. `useRest` remains a space declaration: loaded points and the
+independent authored `rest` channel are deliberately not substituted.
+
+This checkpoint does not claim support for all CurveSource attributes. It
+credits bounded local-Qwen reviews `chatcmpl-b5ecc036f96881cc` and
+`chatcmpl-a3eb3bab46f9d24c`. The persisted `chatcmpl-8f02cfd7a5932cc8` reply
+was specification-only (no source excerpt was supplied), not a code review.
+The root review corrected an earlier point-selection misinterpretation, which
+was reverted in favor of the documented loaded-points/rest separation.
+
+Final source-slice validation passed the 86/86 main selection (`1f1237`),
+with session memcheck/initcheck (`448d65`/`903800`) and RBF memcheck/initcheck
+(`dda7ed`/`20495c`) all reporting zero errors. CUDA-off core rebuilt
+successfully (`69dafe`); this is a core-only result, not a full CPU-suite
+claim.

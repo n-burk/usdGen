@@ -232,6 +232,91 @@ int main() {
         session.SetGraphDesc(desc);
         CHECK(session.Commit(4, UsdGenCommitReason::SetTime) == uniform && session.LastDiagnostics().HasErrors());
     }
+    {
+        UsdGenSession session;
+        auto desc = SourceDesc();
+        desc.curveSets[0].points[0][2] = 5.0f; // independent authored rest remains z=0
+        UsdGenExpressionDesc expression;
+        expression.path = SdfPath("/Groom/Description/Expressions/useRest");
+        expression.source = "$frame < 2";
+        expression.outputs.push_back({TfToken("result"), TfToken("bool"), ScalarShape(expr::ScalarType::Bool)});
+        desc.expressions.push_back(expression);
+        UsdGenExpressionBinding binding;
+        binding.expression = expression.path; binding.destination = TfToken("useRest");
+        binding.nativeType = TfToken("bool"); binding.destinationShape = ScalarShape(expr::ScalarType::Bool);
+        binding.domain = expr::Domain::Groom; binding.literal = VtValue(false);
+        desc.nodes.front().params.push_back({TfToken("resampleTo"), VtValue(4), false});
+        desc.nodes.front().expressionBindings.push_back(binding);
+        {
+            UsdGenSession literalSession; literalSession.SetDevicePublicationEnabled(true);
+            literalSession.SetGraphDesc(desc);
+            auto literalRest = literalSession.Commit(1, UsdGenCommitReason::SetTime);
+            auto literalCurrent = literalSession.Commit(2, UsdGenCommitReason::SetTime);
+            CHECK(literalRest && literalCurrent && literalRest->device && literalCurrent->device &&
+                  literalRest != literalCurrent && literalRest->device->Geometry().pointCount == 8 &&
+                  literalCurrent->device->Geometry().pointCount == 8 &&
+                  !literalRest->device->Geometry().alreadyDeformed &&
+                  literalCurrent->device->Geometry().alreadyDeformed);
+        }
+        UsdGenExpressionDesc resampleExpression;
+        resampleExpression.path = SdfPath("/Groom/Description/Expressions/useRestResample");
+        resampleExpression.source = "$frame < 2 ? 3 : 2";
+        resampleExpression.outputs.push_back({TfToken("result"), TfToken("int"), ScalarShape(expr::ScalarType::Int32)});
+        desc.expressions.push_back(resampleExpression);
+        UsdGenExpressionBinding resampleBinding;
+        resampleBinding.expression = resampleExpression.path; resampleBinding.destination = TfToken("resampleTo");
+        resampleBinding.nativeType = TfToken("int"); resampleBinding.destinationShape = ScalarShape(expr::ScalarType::Int32);
+        resampleBinding.domain = expr::Domain::Groom; resampleBinding.literal = VtValue(4);
+        desc.nodes.front().expressionBindings.push_back(resampleBinding);
+        session.SetGraphDesc(desc); session.SetDevicePublicationEnabled(true);
+        auto rootFor91 = [](gpu::CudaGeometryLease const& lease, bool rest = false) {
+            auto geometry = lease.Geometry();
+            auto const* channel = rest ? geometry.restPoints.data : geometry.points.data;
+            if (!lease || !geometry.stableIds.data || !geometry.curveOffsets.data || !channel)
+                return float3{NAN, NAN, NAN};
+            std::vector<uint64_t> ids(geometry.curveCount);
+            std::vector<uint32_t> offsets(geometry.curveCount + 1);
+            if (cudaMemcpy(ids.data(), geometry.stableIds.data, ids.size() * sizeof(uint64_t), cudaMemcpyDeviceToHost) != cudaSuccess ||
+                cudaMemcpy(offsets.data(), geometry.curveOffsets.data, offsets.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost) != cudaSuccess)
+                return float3{NAN, NAN, NAN};
+            for (size_t curve = 0; curve < ids.size(); ++curve) if (ids[curve] == 91) {
+                if (offsets[curve] >= offsets[curve + 1] || offsets[curve] >= geometry.pointCount)
+                    return float3{NAN, NAN, NAN};
+                float3 point{};
+                if (cudaMemcpy(&point, channel + offsets[curve], sizeof(point), cudaMemcpyDeviceToHost) != cudaSuccess)
+                    return float3{NAN, NAN, NAN};
+                return point;
+            }
+            return float3{NAN, NAN, NAN};
+        };
+        auto restGeneration = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(restGeneration && restGeneration->device && !restGeneration->device->Geometry().alreadyDeformed &&
+              restGeneration->device->Geometry().pointCount == 6);
+        auto restLease = gpu::AcquireGeometry(restGeneration->device, nullptr);
+        CHECK(restLease);
+        float3 restPoint = rootFor91(restLease);
+        CHECK(std::fabs(restPoint.z - 5.0f) < 1e-6f);
+        CHECK(std::fabs(rootFor91(restLease, true).z) < 1e-6f);
+        auto currentGeneration = session.Commit(2, UsdGenCommitReason::SetTime);
+        CHECK(currentGeneration && currentGeneration != restGeneration && currentGeneration->device &&
+              currentGeneration->device->Geometry().alreadyDeformed && currentGeneration->device->Geometry().pointCount == 4);
+        auto currentLease = gpu::AcquireGeometry(currentGeneration->device, nullptr);
+        CHECK(currentLease);
+        float3 currentPoint = rootFor91(currentLease);
+        CHECK(std::fabs(currentPoint.z - 5.0f) < 1e-6f);
+        CHECK(std::fabs(rootFor91(currentLease, true).z) < 1e-6f);
+        auto badType = desc;
+        badType.nodes.front().expressionBindings[0].nativeType = TfToken("float");
+        badType.nodes.front().expressionBindings[0].destinationShape = ScalarShape(expr::ScalarType::Float32);
+        session.SetGraphDesc(badType);
+        CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == currentGeneration && session.LastDiagnostics().HasErrors());
+        for (expr::Domain domain : {expr::Domain::Primitive, expr::Domain::Point}) {
+            auto badDomain = desc;
+            badDomain.nodes.front().expressionBindings[0].domain = domain;
+            session.SetGraphDesc(badDomain);
+            CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == currentGeneration && session.LastDiagnostics().HasErrors());
+        }
+    }
     // The renderer selection belongs to the immutable request, not a
     // separately posted mutable side channel.  Start CUDA-enabled, reject two
     // false/absent requests against the retained device generation, then
