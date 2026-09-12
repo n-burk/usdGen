@@ -91,6 +91,20 @@ if(USDGEN_CUDA_BUILD_DIR)
     set_tests_properties(testUsdGenCudaBasisCurvesProvider PROPERTIES
         LABELS "T2;storm-extension;basis-curves;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
         ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+    add_executable(testUsdGenCudaTiledBasisCurvesProvider testCudaTiledBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp)
+    target_compile_definitions(testUsdGenCudaTiledBasisCurvesProvider PRIVATE
+        USDGEN_HAS_CUDA_GL_INTEROP USDGEN_ENABLE_CUDA)
+    target_include_directories(testUsdGenCudaTiledBasisCurvesProvider PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenCudaTiledBasisCurvesProvider PRIVATE usdGenPatchedStorm
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so" "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenCudaTiledBasisCurvesProvider COMMAND testUsdGenCudaTiledBasisCurvesProvider)
+    set_tests_properties(testUsdGenCudaTiledBasisCurvesProvider PROPERTIES
+        LABELS "T2;storm-extension;basis-curves;cuda;tiles" SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
     add_executable(testUsdGenCudaNativeBasisCurves testCudaNativeBasisCurves.cpp
         ../../libs/usdGenImaging/usdGenImaging/cudaBasisCurvesProvider.cpp
         ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp)

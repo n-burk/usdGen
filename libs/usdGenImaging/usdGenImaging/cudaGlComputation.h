@@ -15,7 +15,9 @@
 #include "pxr/base/tf/token.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -36,7 +38,8 @@ public:
     UsdGenCudaGlComputation(
         std::shared_ptr<const usdGen::UsdGenDeviceGeneration> generation,
         usdGen::UsdGenDeviceChannelSemantic semantic,
-        TfToken destinationName);
+        TfToken destinationName,
+        std::optional<uint32_t> tileId = std::nullopt);
 
     void Execute(HdBufferArrayRangeSharedPtr const &range,
                  HdResourceRegistry *resourceRegistry) override;
@@ -49,12 +52,15 @@ public:
 private:
     bool _Describe(HdTupleType *tuple, size_t *count,
                    size_t *elementBytes) const noexcept;
+    bool _SelectedTile(usdGen::UsdGenDeviceTileMetadata *tile) const noexcept;
+    bool _WholeChannelCount(uint64_t *count) const noexcept;
     void _Fail(char const *where, int cudaError) noexcept;
     void _Fail(std::string message) noexcept;
 
     std::shared_ptr<const usdGen::UsdGenDeviceGeneration> _generation;
     usdGen::UsdGenDeviceChannelSemantic _semantic;
     TfToken _destinationName;
+    std::optional<uint32_t> _tileId;
     bool _succeeded = false;
     std::string _error;
 };

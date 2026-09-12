@@ -11,7 +11,9 @@
 #include "pxr/imaging/hdSt/basisCurvesGpuDataSource.h"
 #include "pxr/base/gf/bbox3d.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -33,6 +35,9 @@ public:
         GfBBox3d conservativeBounds;
         bool basisWidthInterpolation = false;
         bool basisNormalInterpolation = false;
+        // A present tile ID publishes only that immutable device tile.  An
+        // absent ID preserves the established whole-generation provider.
+        std::optional<uint32_t> tileId = std::nullopt;
     };
 
     explicit UsdGenCudaBasisCurvesProvider(CreateInfo info);

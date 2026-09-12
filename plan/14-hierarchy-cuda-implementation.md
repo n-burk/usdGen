@@ -1302,3 +1302,32 @@ core and all five native Release tests passed. The CUDA-off usdGen core build
 passed; this is not a claim that the full CPU suite is green. The T0/T1 status
 remains 80/81 because of the earlier async scene-publication timeout under
 `-j6`; H1 investigation is ongoing.
+
+### Native tiled BAR transfer checkpoint (2026-09-11)
+
+The latest private Release-6 run passed each of the six selected native tests
+for ten consecutive repetitions (root run 15403). The new tiled-provider test
+reported zero Compute Sanitizer memcheck **and InitCheck** errors; the existing
+provider and `StormCudaPublication` tests also reported zero memcheck errors.
+This is bounded native bridge evidence, not a full-suite-green claim: final
+async diagnostic cleanup has not yet been rebuilt and rerun.
+
+The tiled BAR transfer test exercises a shared aggregate with slices at
+nonzero bases, whole-generation versus tile-zero selection, and an empty tile
+in a fresh, separate Hgi/registry. It covers generation zero, unknown tile ID,
+malformed partition rejection before `Commit`, and the valid empty-output
+path. It does **not** yet render a live frontend tiled frame buffer or prove
+live per-tile frontend publication.
+
+The earlier single six-test ASAN/UBSAN pass predates the added tile-zero,
+`nullopt`, and malformed-partition cases and has not been revalidated against
+these latest sources. An earlier repeated native run observed a
+`StormCudaPublication` segmentation fault and a provider failure with generic
+CUDA status 6 and a last-error string of out of memory; the latter's provenance
+is unknown. Later 30-then-10 provider passes and the latest six-times-ten
+Release passes do not establish the cause of those earlier failures.
+
+Actual local Qwen supplied the destination capacity of 3072 but also proposed
+an erroneous draw count of 6144; coordinator/root review rejected that
+draw-count interpretation. Larger Hivemind requests ended in server protocol
+errors with no visible answer and are not counted as substantive review.

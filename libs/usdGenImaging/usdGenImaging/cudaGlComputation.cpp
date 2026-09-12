@@ -50,15 +50,27 @@ _FitsInt(size_t value)
     return value <= static_cast<size_t>(std::numeric_limits<int>::max());
 }
 
+bool
+_ToSize(uint64_t value, size_t *result)
+{
+    if (value > std::numeric_limits<size_t>::max()) {
+        return false;
+    }
+    *result = static_cast<size_t>(value);
+    return true;
+}
+
 } // namespace
 
 UsdGenCudaGlComputation::UsdGenCudaGlComputation(
     std::shared_ptr<const usdGen::UsdGenDeviceGeneration> generation,
     usdGen::UsdGenDeviceChannelSemantic semantic,
-    TfToken destinationName)
+    TfToken destinationName,
+    std::optional<uint32_t> tileId)
     : _generation(std::move(generation))
     , _semantic(semantic)
     , _destinationName(std::move(destinationName))
+    , _tileId(tileId)
 {
 }
 
@@ -79,12 +91,123 @@ UsdGenCudaGlComputation::_Fail(std::string message) noexcept
 }
 
 bool
+UsdGenCudaGlComputation::_WholeChannelCount(uint64_t *count) const noexcept
+{
+    if (!_generation || !count) {
+        return false;
+    }
+    using S = usdGen::UsdGenDeviceChannelSemantic;
+    switch (_semantic) {
+    case S::Points:
+    case S::RestPoints:
+    case S::Widths:
+    case S::HairT:
+        *count = _generation->Geometry().pointCount;
+        return true;
+    case S::CurveOffsets:
+        if (_generation->Geometry().curveCount ==
+            std::numeric_limits<uint64_t>::max()) {
+            return false;
+        }
+        *count = _generation->Geometry().curveCount + 1;
+        return true;
+    case S::StableIds:
+    case S::RootPrim:
+    case S::RootUV:
+        *count = _generation->Geometry().curveCount;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool
+UsdGenCudaGlComputation::_SelectedTile(
+    usdGen::UsdGenDeviceTileMetadata *tile) const noexcept
+{
+    if (!_tileId || !_generation || !tile) {
+        return false;
+    }
+
+    auto const &geometry = _generation->Geometry();
+    uint64_t curveEnd = 0;
+    uint64_t pointEnd = 0;
+    uint32_t previousId = 0;
+    bool havePreviousId = false;
+    bool found = false;
+    for (usdGen::UsdGenDeviceTileMetadata const &candidate : geometry.tiles) {
+        // Validate the complete partition, not just the requested range: a
+        // malformed sibling can otherwise make a generation's tile layout
+        // ambiguous even when this candidate happens to be in bounds.
+        if ((havePreviousId && candidate.tile <= previousId) ||
+            candidate.curveCount > candidate.pointCount ||
+            (candidate.curveCount == 0 && candidate.pointCount != 0) ||
+            candidate.firstCurve != curveEnd || candidate.firstPoint != pointEnd ||
+            candidate.firstCurve > geometry.curveCount ||
+            candidate.curveCount > geometry.curveCount - candidate.firstCurve ||
+            candidate.firstPoint > geometry.pointCount ||
+            candidate.pointCount > geometry.pointCount - candidate.firstPoint ||
+            candidate.firstPoint > std::numeric_limits<uint32_t>::max() ||
+            candidate.pointCount >
+                std::numeric_limits<uint32_t>::max() - candidate.firstPoint) {
+            return false;
+        }
+        curveEnd += candidate.curveCount;
+        pointEnd += candidate.pointCount;
+        previousId = candidate.tile;
+        havePreviousId = true;
+        if (candidate.tile == *_tileId) {
+            *tile = candidate;
+            found = true;
+        }
+    }
+    return found && curveEnd == geometry.curveCount &&
+        pointEnd == geometry.pointCount;
+}
+
+bool
 UsdGenCudaGlComputation::_Describe(
     HdTupleType *tuple, size_t *count, size_t *elementBytes) const noexcept
 {
     if (_destinationName.IsEmpty() || !_generation ||
         _generation->Identity().backend != usdGen::UsdGenDeviceBackend::Cuda ||
-        _generation->Identity().deviceIndex < 0) {
+        _generation->Identity().deviceIndex < 0 || !tuple || !count ||
+        !elementBytes) {
+        return false;
+    }
+
+    uint64_t channelCount = 0;
+    if (_tileId) {
+        usdGen::UsdGenDeviceTileMetadata tile;
+        if (!_SelectedTile(&tile)) {
+            return false;
+        }
+        using S = usdGen::UsdGenDeviceChannelSemantic;
+        switch (_semantic) {
+        case S::Points:
+        case S::RestPoints:
+        case S::Widths:
+        case S::HairT:
+            channelCount = tile.pointCount;
+            break;
+        case S::CurveOffsets:
+            if (tile.curveCount == std::numeric_limits<uint64_t>::max()) {
+                return false;
+            }
+            channelCount = tile.curveCount + 1;
+            break;
+        case S::StableIds:
+        case S::RootPrim:
+        case S::RootUV:
+            channelCount = tile.curveCount;
+            break;
+        default:
+            return false;
+        }
+    } else if (!_WholeChannelCount(&channelCount)) {
+        return false;
+    }
+    if (!_ToSize(channelCount, count)) {
         return false;
     }
 
@@ -93,38 +216,28 @@ UsdGenCudaGlComputation::_Describe(
     case S::Points:
     case S::RestPoints:
         *tuple = HdTupleType{HdTypeFloatVec3, 1};
-        *count = _generation->Geometry().pointCount;
         *elementBytes = sizeof(float) * 3;
         return true;
     case S::Widths:
     case S::HairT:
         *tuple = HdTupleType{HdTypeFloat, 1};
-        *count = _generation->Geometry().pointCount;
         *elementBytes = sizeof(float);
         return true;
     case S::CurveOffsets:
         *tuple = HdTupleType{HdTypeUInt32, 1};
-        if (_generation->Geometry().curveCount ==
-            std::numeric_limits<uint64_t>::max()) {
-            return false;
-        }
-        *count = _generation->Geometry().curveCount + 1;
         *elementBytes = sizeof(uint32_t);
         return true;
     case S::StableIds:
         // HdTypeUInt32Vec2 preserves each uint64 id as its exact two words.
         *tuple = HdTupleType{HdTypeUInt32Vec2, 1};
-        *count = _generation->Geometry().curveCount;
         *elementBytes = sizeof(uint64_t);
         return true;
     case S::RootPrim:
         *tuple = HdTupleType{HdTypeInt32, 1};
-        *count = _generation->Geometry().curveCount;
         *elementBytes = sizeof(int32_t);
         return true;
     case S::RootUV:
         *tuple = HdTupleType{HdTypeFloatVec2, 1};
-        *count = _generation->Geometry().curveCount;
         *elementBytes = sizeof(float) * 2;
         return true;
     default:
@@ -202,10 +315,17 @@ UsdGenCudaGlComputation::Execute(
     case S::HairT: break;
     default: _Fail("unsupported CUDA channel semantic"); return;
     }
+    uint64_t metadataCount = 0;
+    if (!_WholeChannelCount(&metadataCount)) {
+        _Fail("CUDA channel metadata has an invalid whole-generation cardinality");
+        return;
+    }
     bool metadataMatches = false;
     for (usdGen::UsdGenDeviceChannelMetadata const &channel :
          _generation->Channels()) {
-        if (channel.semantic == _semantic && channel.elementCount == count &&
+        // Channel metadata always describes the entire immutable generation;
+        // `count` above intentionally describes only this destination tile.
+        if (channel.semantic == _semantic && channel.elementCount == metadataCount &&
             channel.type == expectedValueType && channel.arity == expectedArity &&
             channel.strideBytes == elementBytes) {
             metadataMatches = true;
@@ -216,41 +336,6 @@ UsdGenCudaGlComputation::Execute(
         _Fail("CUDA channel metadata does not match its required Storm layout");
         return;
     }
-    if (!destination->GetHandle()) {
-        _Fail("destination has no allocated Hgi buffer");
-        return;
-    }
-    HgiGLBuffer *const glBuffer = dynamic_cast<HgiGLBuffer *>(
-        destination->GetHandle().Get());
-    if (!glBuffer || !glBuffer->GetBufferId()) {
-        _Fail("destination is not an HgiGLBuffer");
-        return;
-    }
-    if (destination->GetOffset() < 0 || destination->GetStride() <= 0 ||
-        destinationRange->GetByteOffset(_destinationName) < 0) {
-        _Fail("destination has a negative Storm byte offset or stride");
-        return;
-    }
-
-    size_t destinationOffset = 0;
-    if (!_Add(static_cast<size_t>(destinationRange->GetByteOffset(_destinationName)),
-              static_cast<size_t>(destination->GetOffset()), &destinationOffset) ||
-        static_cast<size_t>(destination->GetStride()) < elementBytes) {
-        _Fail("destination Storm layout overflows or has an incompatible stride");
-        return;
-    }
-    size_t lastOffset = destinationOffset;
-    if (count > 0) {
-        size_t span = 0;
-        if (!_Mul(count - 1, static_cast<size_t>(destination->GetStride()), &span) ||
-            !_Add(destinationOffset, span, &lastOffset) ||
-            !_Add(lastOffset, elementBytes, &lastOffset) ||
-            lastOffset > glBuffer->GetByteSizeOfResource()) {
-            _Fail("destination Storm range exceeds its GL buffer");
-            return;
-        }
-    }
-
     int glDevices[16] = {};
     unsigned int glDeviceCount = 0;
     cudaError_t status = cudaGLGetDevices(
@@ -290,36 +375,129 @@ UsdGenCudaGlComputation::Execute(
         return;
     }
 
-    // AcquireGeometry owns producer ordering and keeps its CUDA source alive.
-    // It must be destroyed before this stream is destroyed (it fences stream).
-    usdGen::gpu::CudaGeometryLease lease =
-        usdGen::gpu::AcquireGeometry(_generation, stream);
-    if (!lease) {
+    // A tile lease retains its parent source lease.  Keep either lease alive
+    // until after GL is unmapped and the consumer stream is fenced.
+    usdGen::gpu::CudaGeometryLease lease;
+    usdGen::gpu::CudaGeometryTileLease tileLease;
+    if (_tileId) {
+        tileLease = usdGen::gpu::AcquireGeometryTile(
+            _generation, *_tileId, _generation->Identity().generation, stream);
+    } else {
+        lease = usdGen::gpu::AcquireGeometry(_generation, stream);
+    }
+    if ((_tileId && !tileLease) || (!_tileId && !lease)) {
         cudaStreamDestroy(stream);
         restoreDevice();
-        _Fail("CUDA generation rejected the consumer stream");
+        _Fail(_tileId ? "CUDA tile generation rejected the consumer stream" :
+                        "CUDA generation rejected the consumer stream");
         return;
     }
 
     void const *source = nullptr;
     size_t sourceCount = 0;
-    auto const geometry = lease.Geometry();
-    switch (_semantic) {
-    case S::Points: source = geometry.points.data; sourceCount = geometry.points.size; break;
-    case S::RestPoints: source = geometry.restPoints.data; sourceCount = geometry.restPoints.size; break;
-    case S::Widths: source = geometry.widths.data; sourceCount = geometry.widths.size; break;
-    case S::HairT: { auto v = lease.HairT(); source = v.data; sourceCount = v.size; break; }
-    case S::CurveOffsets: source = geometry.curveOffsets.data; sourceCount = geometry.curveOffsets.size; break;
-    case S::StableIds: source = geometry.stableIds.data; sourceCount = geometry.stableIds.size; break;
-    case S::RootPrim: { auto v = lease.RootPrim(); source = v.data; sourceCount = v.size; break; }
-    case S::RootUV: { auto v = lease.RootUV(); source = v.data; sourceCount = v.size; break; }
-    default: break;
+    if (_tileId) {
+        // Do not reconstruct a whole-geometry view from tile storage: offset
+        // values remain global, while every other channel is tile-local.
+        auto const geometry = tileLease.View();
+        switch (_semantic) {
+        case S::Points: source = geometry.points.data; sourceCount = geometry.points.size; break;
+        case S::RestPoints: source = geometry.restPoints.data; sourceCount = geometry.restPoints.size; break;
+        case S::Widths: source = geometry.widths.data; sourceCount = geometry.widths.size; break;
+        case S::HairT: source = geometry.hairT.data; sourceCount = geometry.hairT.size; break;
+        case S::CurveOffsets: source = geometry.curveOffsets.data; sourceCount = geometry.curveOffsets.size; break;
+        case S::StableIds: source = geometry.stableIds.data; sourceCount = geometry.stableIds.size; break;
+        case S::RootPrim: source = geometry.rootPrim.data; sourceCount = geometry.rootPrim.size; break;
+        case S::RootUV: source = geometry.rootUV.data; sourceCount = geometry.rootUV.size; break;
+        default: break;
+        }
+    } else {
+        auto const geometry = lease.Geometry();
+        switch (_semantic) {
+        case S::Points: source = geometry.points.data; sourceCount = geometry.points.size; break;
+        case S::RestPoints: source = geometry.restPoints.data; sourceCount = geometry.restPoints.size; break;
+        case S::Widths: source = geometry.widths.data; sourceCount = geometry.widths.size; break;
+        case S::HairT: { auto v = lease.HairT(); source = v.data; sourceCount = v.size; break; }
+        case S::CurveOffsets: source = geometry.curveOffsets.data; sourceCount = geometry.curveOffsets.size; break;
+        case S::StableIds: source = geometry.stableIds.data; sourceCount = geometry.stableIds.size; break;
+        case S::RootPrim: { auto v = lease.RootPrim(); source = v.data; sourceCount = v.size; break; }
+        case S::RootUV: { auto v = lease.RootUV(); source = v.data; sourceCount = v.size; break; }
+        default: break;
+        }
     }
     if (sourceCount != count || (count && !source)) {
+        tileLease = {};
         lease = {};
         cudaStreamDestroy(stream);
         restoreDevice();
         _Fail("CUDA channel shape does not match immutable generation metadata");
+        return;
+    }
+
+    // A fresh empty-only Storm BAR is structurally valid but need not own a
+    // backing Hgi allocation.  It has no CUDA geometry copy to submit; retain
+    // the source lease through its completion fence before reporting Ready.
+    if (count == 0) {
+        cudaError_t const fenceStatus = cudaStreamSynchronize(stream);
+        tileLease = {};
+        lease = {};
+        cudaError_t const destroyStatus = cudaStreamDestroy(stream);
+        cudaError_t const restoreStatus = restoreDevice();
+        if (fenceStatus != cudaSuccess) {
+            _Fail("cudaStreamSynchronize for empty CUDA-GL transfer", fenceStatus);
+            return;
+        }
+        if (destroyStatus != cudaSuccess || restoreStatus != cudaSuccess) {
+            _Fail("CUDA-GL empty transfer cleanup",
+                  destroyStatus != cudaSuccess ? destroyStatus : restoreStatus);
+            return;
+        }
+        _succeeded = true;
+        return;
+    }
+
+    if (!destination->GetHandle()) {
+        tileLease = {};
+        lease = {};
+        cudaStreamDestroy(stream);
+        restoreDevice();
+        _Fail("destination has no allocated Hgi buffer");
+        return;
+    }
+    HgiGLBuffer *const glBuffer = dynamic_cast<HgiGLBuffer *>(
+        destination->GetHandle().Get());
+    if (!glBuffer || !glBuffer->GetBufferId()) {
+        tileLease = {};
+        lease = {};
+        cudaStreamDestroy(stream);
+        restoreDevice();
+        _Fail("destination is not an HgiGLBuffer");
+        return;
+    }
+    if (destination->GetOffset() < 0 || destination->GetStride() <= 0 ||
+        destinationRange->GetByteOffset(_destinationName) < 0) {
+        tileLease = {};
+        lease = {};
+        cudaStreamDestroy(stream);
+        restoreDevice();
+        _Fail("destination has a negative Storm byte offset or stride");
+        return;
+    }
+
+    size_t destinationOffset = 0;
+    size_t span = 0;
+    size_t destinationEnd = 0;
+    if (!_Add(static_cast<size_t>(destinationRange->GetByteOffset(_destinationName)),
+              static_cast<size_t>(destination->GetOffset()), &destinationOffset) ||
+        static_cast<size_t>(destination->GetStride()) < elementBytes ||
+        !_Mul(count - 1, static_cast<size_t>(destination->GetStride()), &span) ||
+        !_Add(destinationOffset, span, &destinationEnd) ||
+        !_Add(destinationEnd, elementBytes, &destinationEnd) ||
+        destinationEnd > glBuffer->GetByteSizeOfResource()) {
+        tileLease = {};
+        lease = {};
+        cudaStreamDestroy(stream);
+        restoreDevice();
+        _Fail("destination Storm range overflows or exceeds its GL buffer");
         return;
     }
 
@@ -373,6 +551,7 @@ UsdGenCudaGlComputation::Execute(
     }
     // Completion fences the consumer stream, including the asynchronous
     // unmap, before the GL resource registration is released.
+    tileLease = {};
     lease = {};
     if (graphics) {
         cudaError_t const unregisterStatus = cudaGraphicsUnregisterResource(graphics);

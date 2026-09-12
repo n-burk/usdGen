@@ -23,8 +23,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include <cuda_gl_interop.h>
@@ -67,11 +69,12 @@ public:
         usdGen::gpu::CurveIndexOptions options,
         usdGen::gpu::CurveIndexRequirements requirements,
         TfToken indicesName, TfToken primitiveName,
-        HdBufferArrayRangeSharedPtr countRange, TfToken countName)
+        HdBufferArrayRangeSharedPtr countRange, TfToken countName,
+        std::optional<usdGen::UsdGenDeviceTileMetadata> tile)
         : _generation(std::move(generation)), _options(options),
           _requirements(requirements), _indicesName(std::move(indicesName)),
           _primitiveName(std::move(primitiveName)), _countRange(std::move(countRange)),
-          _countName(std::move(countName)) {}
+          _countName(std::move(countName)), _tile(std::move(tile)) {}
 
     int GetNumOutputElements() const override {
         return _requirements.maxRecords <= size_t(std::numeric_limits<int>::max())
@@ -150,33 +153,68 @@ public:
         {
             // This scope is the external graphics boundary: workspace remains
             // alive until the lease has fenced the stream and GL owns buffers.
-            usdGen::gpu::CudaGeometryLease lease = usdGen::gpu::AcquireGeometry(_generation, stream);
-            if (!lease) {
-                cudaStreamDestroy(stream); restoreDevice();
-                _error = "CUDA generation rejected the consumer stream"; return;
+            usdGen::gpu::CudaGeometryLease geometryLease;
+            usdGen::gpu::CudaGeometryTileLease tileLease;
+            usdGen::gpu::DeviceView<const uint32_t> curveOffsets;
+            size_t curveCount = 0, pointCount = 0;
+            uint32_t pointBase = 0;
+            if (_tile) {
+                tileLease = usdGen::gpu::AcquireGeometryTile(_generation, _tile->tile,
+                    _generation->Identity().generation, stream);
+                if (!tileLease) {
+                    cudaStreamDestroy(stream); restoreDevice();
+                    _error = "CUDA generation rejected the selected tile consumer stream"; return;
+                }
+                auto const view = tileLease.View();
+                auto const &range = view.range;
+                if (view.generation != _generation->Identity().generation ||
+                    range.tile != _tile->tile || range.firstCurve != _tile->firstCurve ||
+                    range.curveCount != _tile->curveCount || range.firstPoint != _tile->firstPoint ||
+                    range.pointCount != _tile->pointCount ||
+                    range.firstPoint > uint64_t(UINT32_MAX) ||
+                    range.pointCount > uint64_t(UINT32_MAX) - range.firstPoint ||
+                    range.curveCount > std::numeric_limits<size_t>::max() ||
+                    range.pointCount > std::numeric_limits<size_t>::max() ||
+                    view.curveOffsets.size != size_t(range.curveCount) + 1) {
+                    tileLease = {}; cudaStreamDestroy(stream); restoreDevice();
+                    _error = "selected CUDA tile metadata or offsets changed after preparation"; return;
+                }
+                curveOffsets = view.curveOffsets;
+                curveCount = size_t(range.curveCount);
+                pointCount = size_t(range.pointCount);
+                pointBase = static_cast<uint32_t>(range.firstPoint);
+            } else {
+                geometryLease = usdGen::gpu::AcquireGeometry(_generation, stream);
+                if (!geometryLease) {
+                    cudaStreamDestroy(stream); restoreDevice();
+                    _error = "CUDA generation rejected the consumer stream"; return;
+                }
+                auto const geometry = geometryLease.Geometry();
+                curveOffsets = geometry.curveOffsets;
+                curveCount = geometry.curveCount;
+                pointCount = geometry.pointCount;
             }
-            auto const geometry = lease.Geometry();
             usdGen::gpu::CurveIndexRequirements requirements;
             status = usdGen::gpu::GetCurveIndexRequirements(
-                _options, geometry.curveCount, geometry.pointCount, &requirements, stream);
+                _options, curveCount, pointCount, &requirements, stream);
             if (status != cudaSuccess || requirements.maxRecords != _requirements.maxRecords ||
                 requirements.indexArity != _requirements.indexArity ||
                 requirements.scanBytes != _requirements.scanBytes ||
                 requirements.deviceIndex != _generation->Identity().deviceIndex ||
                 _requirements.deviceIndex != _generation->Identity().deviceIndex) {
-                lease = {}; cudaStreamDestroy(stream); restoreDevice();
+                geometryLease = {}; tileLease = {}; cudaStreamDestroy(stream); restoreDevice();
                 _error = "CUDA topology requirements do not match prepared Storm capacity"; return;
             }
 
             usdGen::gpu::DeviceBuffer<uint64_t> counts, offsets, recordCount;
             usdGen::gpu::DeviceBuffer<unsigned char> scratch;
             usdGen::gpu::DeviceBuffer<uint32_t> validation;
-            if ((status = counts.reset(geometry.curveCount + 1)) != cudaSuccess ||
-                (status = offsets.reset(geometry.curveCount + 1)) != cudaSuccess ||
+            if ((status = counts.reset(curveCount + 1)) != cudaSuccess ||
+                (status = offsets.reset(curveCount + 1)) != cudaSuccess ||
                 (status = scratch.reset(requirements.scanBytes)) != cudaSuccess ||
                 (status = recordCount.reset(1)) != cudaSuccess ||
                 (status = validation.reset(1)) != cudaSuccess) {
-                lease = {};
+                geometryLease = {}; tileLease = {};
                 counts.release(); offsets.release(); scratch.release();
                 recordCount.release(); validation.release();
                 cudaStreamDestroy(stream); restoreDevice();
@@ -223,7 +261,7 @@ public:
                     addMapping(indicesBuffer, &indicesMapping) && addMapping(primitiveBuffer, &primitiveMapping);
             }
             if (!layoutOK) {
-                lease = {};
+                geometryLease = {}; tileLease = {};
                 counts.release(); offsets.release(); scratch.release();
                 recordCount.release(); validation.release();
                 cudaStreamDestroy(stream); restoreDevice();
@@ -267,9 +305,16 @@ public:
                     empty ? 0 : requirements.maxRecords * requirements.indexArity,
                     empty ? nullptr : reinterpret_cast<int32_t *>(bytePointer(primitiveMapping, primitiveOffset)),
                     empty ? 0 : requirements.maxRecords, recordCount.view(), validation.view()};
-                status = usdGen::gpu::BuildCurveIndices(_options, geometry.curveCount,
-                    geometry.pointCount, geometry.curveOffsets, requirements,
-                    {counts.view(), offsets.view(), scratch.view()}, output, stream);
+                if (_tile) {
+                    status = usdGen::gpu::BuildCurveIndices(_options,
+                        usdGen::gpu::CurveIndexSpan{curveOffsets, curveCount,
+                            pointCount, pointBase}, requirements,
+                        {counts.view(), offsets.view(), scratch.view()}, output, stream);
+                } else {
+                    status = usdGen::gpu::BuildCurveIndices(_options, curveCount,
+                        pointCount, curveOffsets, requirements,
+                        {counts.view(), offsets.view(), scratch.view()}, output, stream);
+                }
                 if (status == cudaSuccess) status = usdGen::gpu::PackCurveDrawCount(
                     {recordCount.data(), recordCount.size()},
                     {validation.data(), validation.size()}, requirements.indexArity,
@@ -299,7 +344,8 @@ public:
             }
             // Complete fences the external producer before its storage can be
             // reclaimed; workspace is still alive on this selected device.
-            lease = {};
+            geometryLease = {};
+            tileLease = {};
             for (size_t i = 0; i != resourceCount; ++i) {
                 if (cudaGraphicsUnregisterResource(resources[i]) != cudaSuccess) {
                     _error = "cudaGraphicsUnregisterResource failed for CUDA topology output";
@@ -329,6 +375,7 @@ private:
     TfToken _indicesName, _primitiveName;
     HdBufferArrayRangeSharedPtr _countRange;
     TfToken _countName;
+    std::optional<usdGen::UsdGenDeviceTileMetadata> _tile;
     bool _succeeded = false;
     std::string _error;
 };
@@ -372,6 +419,29 @@ UsdGenCudaBasisCurvesProvider::Prepare(HdStResourceRegistry *registry,
         registry->GetHgi()->GetAPIName() != HgiTokens->OpenGL ||
         !registry->GetHgi()->GetCapabilities()->IsSet(HgiDeviceCapabilitiesBitsMultiDrawIndirect)) return {};
 
+    auto const &geometry = _info.generation->Geometry();
+    std::optional<usdGen::UsdGenDeviceTileMetadata> selectedTile;
+    if (_info.tileId) {
+        auto const found = std::find_if(geometry.tiles.begin(), geometry.tiles.end(),
+            [this](usdGen::UsdGenDeviceTileMetadata const &tile) {
+                return tile.tile == *_info.tileId;
+            });
+        if (found == geometry.tiles.end()) return {};
+        if (found->firstCurve > geometry.curveCount ||
+            found->curveCount > geometry.curveCount - found->firstCurve ||
+            found->firstPoint > geometry.pointCount ||
+            found->pointCount > geometry.pointCount - found->firstPoint ||
+            found->firstPoint > uint64_t(UINT32_MAX) ||
+            found->pointCount > uint64_t(UINT32_MAX) - found->firstPoint ||
+            found->curveCount > std::numeric_limits<size_t>::max() ||
+            found->pointCount > std::numeric_limits<size_t>::max()) return {};
+        selectedTile = *found;
+    }
+    size_t const curveCount = selectedTile ? size_t(selectedTile->curveCount)
+                                           : size_t(geometry.curveCount);
+    size_t const pointCount = selectedTile ? size_t(selectedTile->pointCount)
+                                           : size_t(geometry.pointCount);
+
     auto result = std::make_shared<HdStBasisCurvesGpuBundle>();
     result->generation = _info.generation->Identity().generation;
     result->curveType = _info.curveType;
@@ -383,11 +453,11 @@ UsdGenCudaBasisCurvesProvider::Prepare(HdStResourceRegistry *registry,
 
     HdBufferSourceSharedPtrVector vertexSources;
     auto points = std::make_shared<UsdGenCudaGlComputation>(_info.generation,
-        usdGen::UsdGenDeviceChannelSemantic::Points, HdTokens->points);
+        usdGen::UsdGenDeviceChannelSemantic::Points, HdTokens->points, _info.tileId);
     auto widths = std::make_shared<UsdGenCudaGlComputation>(_info.generation,
-        usdGen::UsdGenDeviceChannelSemantic::Widths, HdTokens->widths);
+        usdGen::UsdGenDeviceChannelSemantic::Widths, HdTokens->widths, _info.tileId);
     auto hairT = std::make_shared<UsdGenCudaGlComputation>(_info.generation,
-        usdGen::UsdGenDeviceChannelSemantic::HairT, TfToken("hairT"));
+        usdGen::UsdGenDeviceChannelSemantic::HairT, TfToken("hairT"), _info.tileId);
     HdBufferSpecVector vertexSpecs;
     points->GetBufferSpecs(&vertexSpecs); widths->GetBufferSpecs(&vertexSpecs); hairT->GetBufferSpecs(&vertexSpecs);
     if (vertexSpecs.empty()) return {};
@@ -410,8 +480,7 @@ UsdGenCudaBasisCurvesProvider::Prepare(HdStResourceRegistry *registry,
         if (cudaGetDevice(&previousDevice) != cudaSuccess ||
             cudaSetDevice(_info.generation->Identity().deviceIndex) != cudaSuccess) return {};
         cudaError_t const requirementStatus = usdGen::gpu::GetCurveIndexRequirements(options,
-            _info.generation->Geometry().curveCount,
-            _info.generation->Geometry().pointCount, &requirements);
+            curveCount, pointCount, &requirements);
         cudaError_t const restoreStatus = previousDevice != _info.generation->Identity().deviceIndex
             ? cudaSetDevice(previousDevice) : cudaSuccess;
         if (requirementStatus != cudaSuccess || restoreStatus != cudaSuccess ||
@@ -424,7 +493,8 @@ UsdGenCudaBasisCurvesProvider::Prepare(HdStResourceRegistry *registry,
         if (!countRange) return {};
         countRange->Resize(1);
         auto comp = std::make_shared<_CurveTopologyComputation>(_info.generation, options, requirements,
-            HdTokens->indices, HdTokens->primitiveParam, countRange, TfToken("drawCount"));
+            HdTokens->indices, HdTokens->primitiveParam, countRange, TfToken("drawCount"),
+            selectedTile);
         HdBufferSpecVector specs; comp->GetBufferSpecs(&specs); if (specs.empty()) return {};
         HdStBasisCurvesGpuTopologyRange range; range.mode = mode;
         range.topologyRange = registry->AllocateNonUniformBufferArrayRange(HdTokens->topology, specs,
