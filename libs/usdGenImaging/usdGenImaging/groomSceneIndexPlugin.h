@@ -170,12 +170,6 @@ private:
     std::vector<HdSceneIndexObserver::AddedPrimEntry> _pendingAdd;
     std::vector<SdfPath> _pendingRemove;
 
-    // Cross-thread frame channel (06 §3.9 rule b): an app thread's SetTime
-    // surfaces here as a root-level sceneGlobals dirty.
-    mutable std::mutex _frameMutex;
-    mutable double _lastGlobalFrame = 0.0;
-    mutable bool _haveGlobalFrame = false;
-    HdDataSourceLocatorSet _frameLocators;
 };
 
 /// Registration half: the HdSceneIndexPlugin consulted by every renderer's

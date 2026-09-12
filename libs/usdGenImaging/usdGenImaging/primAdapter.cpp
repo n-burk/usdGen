@@ -35,10 +35,9 @@
 #include "pxr/usdImaging/usdImaging/dataSourcePrim.h"
 #include "pxr/base/tf/hash.h"
 
-#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
+#include <tbb/concurrent_unordered_map.h>
 
 #include "usdGenImaging/usdGenTokens.h"
 PXR_NAMESPACE_OPEN_SCOPE
@@ -438,14 +437,12 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
 const UsdImagingDataSourceMapped::PropertyMappings &
 UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
 {
-    static std::unordered_map<
-        TfToken,
-        std::unique_ptr<UsdImagingDataSourceMapped::PropertyMappings>,
-        TfHash> cache;
-    static std::mutex mutex;
-    // The cache holds pointers into live PropertyMappings; Hydra pulls from
-    // several scene-index threads, so lookup and build both run under lock.
-    std::lock_guard<std::mutex> lock(mutex);
+    using Mapping = UsdImagingDataSourceMapped::PropertyMappings;
+    // Entries are append-only and values are immutable after publication.
+    // shared_ptr keeps the returned reference valid even if a concurrent
+    // duplicate loses insertion; the map itself is never cleared/erased.
+    static tbb::concurrent_unordered_map<
+        TfToken, std::shared_ptr<const Mapping>, TfHash> cache;
     if (auto it = cache.find(schemaTypeName); it != cache.end()) {
         return *it->second;
     }
@@ -497,8 +494,11 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
             }
         }
     }
-    auto slot = std::make_unique<UsdImagingDataSourceMapped::PropertyMappings>(
+    auto slot = std::make_shared<const Mapping>(
         mappings, HdDataSourceLocator(PXR_NS::usdGenImaging::UsdGenContainerToken()));
+    // Concurrent builders may construct equivalent candidates.  Only the
+    // canonical inserted value is returned, so all callers retain a stable
+    // reference and no mutable published object is ever replaced.
     auto res = cache.emplace(schemaTypeName, std::move(slot));
     return *res.first->second;
 }

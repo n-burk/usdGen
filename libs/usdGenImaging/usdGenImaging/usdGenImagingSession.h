@@ -25,10 +25,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -130,6 +128,8 @@ public:
         std::optional<double> frame;
         std::optional<usdGen::UsdGenContext> context;
         std::shared_ptr<const usdGen::UsdGenGraphDesc> desc;
+        // Upstream owner relays preserve the original CUDA caller affinity.
+        std::optional<int> callerDevice;
     };
     using Completion = std::function<void(CommitPayload const&,
         usdGen::UsdGenExecutionPipeline::Outcome)>;
@@ -184,6 +184,28 @@ class UsdGenSessionStore
 {
 public:
     static UsdGenSessionStore &GetInstance();
+    ~UsdGenSessionStore();
+
+    /// Primary mutation APIs. Completion runs on the store command owner;
+    /// it may enqueue follow-up commands, but must not synchronously wait.
+    /// Attach reports an empty handle on failure/cancellation. False means
+    /// the request was not accepted and no completion will be delivered.
+    bool AttachAsync(UsdGenSessionKey key,
+                     std::function<void(UsdGenSessionHandle)> completion);
+    /// Key-only compatibility adapter resolves the currently published
+    /// identity, not a pending AttachAsync. Prefer the exact-handle overload.
+    bool DetachAsync(UsdGenSessionKey key, std::function<void()> completion = {});
+    /// Identity-aware release: a delayed release cannot touch a same-key
+    /// replacement. Each successful Attach still requires exactly one release.
+    bool DetachAsync(UsdGenSessionKey key, UsdGenSessionHandle expected,
+                     std::function<void()> completion = {});
+    /// Batch dispatch is one store command; independent sessions execute in
+    /// parallel. Completion runs as final imaging reply owner work (or store
+    /// owner work for an empty/rejected batch), with no OS-thread affinity.
+    /// External cooperative waits may execute framework work on their caller.
+    bool SetTimeAsync(double frame, std::function<void()> completion = {});
+    bool CommitAsync(usdGen::UsdGenCommitReason reason,
+                     std::function<void()> completion = {});
 
     /// Find-or-create the session for \p key; increments its attach count.
     /// The engine session is created with the thread limit resolved by the
@@ -192,6 +214,7 @@ public:
     /// Decrements the attach count; drops the store's strong reference at
     /// zero so the session is destroyed once every index detaches.
     void Detach(UsdGenSessionKey const &key);
+    void Detach(UsdGenSessionKey const &key, UsdGenSessionHandle const &expected);
     UsdGenSessionHandle Find(UsdGenSessionKey const &key) const;
 
     /// Registry-level forwarding (06 §3.7): applied to every live session.
@@ -210,18 +233,17 @@ public:
     /// and warns once.
     void ReloadMaps();
 
-    /// Snapshot of the live sessions (strong refs), for iteration without
-    /// holding the store lock across engine calls.
+    /// Immutable membership snapshot (strong refs). These reads never enter
+    /// or await the command owner; returned handles survive later detachment.
     std::vector<UsdGenImagingSessionRefPtr> LiveSessions() const;
 
 private:
-    UsdGenSessionStore() = default;
+    UsdGenSessionStore();
     UsdGenSessionStore(const UsdGenSessionStore &) = delete;
     UsdGenSessionStore &operator=(const UsdGenSessionStore &) = delete;
 
-    mutable std::mutex _mutex;  // released before any re-entrant call
-    std::unordered_map<UsdGenSessionKey, UsdGenImagingSessionRefPtr,
-                       UsdGenSessionKeyHash> _sessions;
+    struct State;
+    std::unique_ptr<State> _state;
 };
 
 }  // namespace usdGenImaging

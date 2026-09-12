@@ -4,9 +4,9 @@
 // groom roots adopted by live UsdGenGroomSceneIndex instances, so
 // testUsdGenStormSurgery can assert the P0 race contract from the render
 // thread: every observation corresponds to one complete generation
-// snapshot, never a torn map. Both entry points are lock-free on the read
-// path (registry mutex only; the per-groom published map is atomic_load'ed,
-// exactly like GetPrim).
+// snapshot, never a torn map. Both entry points perform no owner wait (an
+// immutable registry snapshot and the per-groom published map are
+// atomic_load'ed, exactly like GetPrim).
 //
 // Lives in its own translation unit (NOT the plugin registration TU) so the
 // symbols link into libusdGenImaging for testUsdGenStormSurgery
@@ -14,32 +14,70 @@
 #include "usdGenImaging/testHook.h"
 
 #include "usdGenImaging/groomSceneIndexPlugin.h"
+#include "usdGen/executionPipeline.h"
 
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
+#include "pxr/base/tf/weakPtr.h"
 #include "pxr/usd/sdf/path.h"
 
-#include <mutex>
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
-// Process-wide registry of live groom indices, populated by the index
-// ctor/dtor. Guarded by a plain mutex; hook readers copy the weak handles
-// out and promote them without holding it.
-std::mutex &_HookRegistryMutex()
+struct RegistryEntry {
+    HdSceneIndexBasePtr weak;
+    // TfWeakPtr<void> compares the remnant/control identity, rather than a
+    // raw address which may be reused after a scene-index destructor runs.
+    TfWeakPtr<void> identity;
+};
+using RegistrySnapshot = std::shared_ptr<std::vector<RegistryEntry> const>;
+
+// All membership mutation belongs to this serial framework owner. Readers
+// load a completed immutable vector; weak promotion then keeps an index alive
+// for a probe without an owner command or scene-index mutation.
+struct HookRegistry {
+    usdGen::UsdGenExecutionRuntime runtime{8};
+    RegistrySnapshot published = std::make_shared<std::vector<RegistryEntry>>();
+    // Destroyed first: Shutdown/Drain runs while published and runtime still
+    // exist, so no queued command can access a destroyed snapshot slot.
+    usdGen::UsdGenExecutionPipeline owner{runtime};
+};
+
+HookRegistry &_HookRegistry()
 {
-    static std::mutex mutex;
-    return mutex;
+    // This is initialized while the first index is constructed, so ordinary
+    // static destruction tears that index down before this registry. External
+    // shutdown must still quiesce callback producers/readers before static
+    // destruction; Drain is the explicit test/shutdown boundary.
+    static HookRegistry registry;
+    return registry;
 }
 
-std::vector<HdSceneIndexBasePtr> &_HookRegistry()
+template <class Mutation>
+void _MutateRegistry(Mutation mutation)
 {
-    static std::vector<HdSceneIndexBasePtr> registry;
-    return registry;
+    HookRegistry &registry = _HookRegistry();
+    auto command = [&registry, mutation=std::move(mutation)]() mutable {
+        RegistrySnapshot before = std::atomic_load(&registry.published);
+        auto next = std::make_shared<std::vector<RegistryEntry>>(
+            before ? *before : std::vector<RegistryEntry>{});
+        mutation(*next);
+        std::atomic_store(&registry.published,
+            std::static_pointer_cast<std::vector<RegistryEntry> const>(next));
+    };
+    // Construction/destruction may happen from a framework callback.  Such a
+    // callback must never wait behind its own owner.  External construction
+    // retains the old immediate-visibility contract needed by test probes.
+    if (usdGen::UsdGenExecutionPipeline::IsExecuting()) {
+        registry.owner.PostCommand(std::move(command));
+    } else {
+        registry.owner.InvokeOwner(std::move(command));
+    }
 }
 
 }  // namespace
@@ -47,29 +85,34 @@ std::vector<HdSceneIndexBasePtr> &_HookRegistry()
 void
 UsdGenImagingTestHook::_RegisterIndex(HdSceneIndexBase *index)
 {
-    std::lock_guard<std::mutex> lock(_HookRegistryMutex());
-    auto &registry = _HookRegistry();
-    for (auto const &weak : registry) {
-        HdSceneIndexBaseRefPtr live =
-            TfCreateRefPtrFromProtectedWeakPtr(weak);
-        if (live && live.operator->() == index) return;
-    }
-    registry.push_back(TfCreateWeakPtr(index));
+    HdSceneIndexBasePtr weak = TfCreateWeakPtr(index);
+    TfWeakPtr<void> identity(weak);
+    _MutateRegistry([weak=std::move(weak), identity=std::move(identity)](
+                        std::vector<RegistryEntry> &registry) mutable {
+        for (auto const &candidate : registry) {
+            if (candidate.identity == identity) return;
+        }
+        registry.erase(std::remove_if(registry.begin(), registry.end(),
+            [](RegistryEntry const &candidate) {
+                return candidate.weak.IsExpired();
+            }), registry.end());
+        registry.push_back({std::move(weak), std::move(identity)});
+    });
 }
 
 void
 UsdGenImagingTestHook::_UnregisterIndex(HdSceneIndexBase *index)
 {
-    std::lock_guard<std::mutex> lock(_HookRegistryMutex());
-    auto &registry = _HookRegistry();
-    registry.erase(
-        std::remove_if(registry.begin(), registry.end(),
-                       [index](HdSceneIndexBasePtr const &weak) {
-                           HdSceneIndexBaseRefPtr live =
-                               TfCreateRefPtrFromProtectedWeakPtr(weak);
-                           return !live || live.operator->() == index;
+    TfWeakPtr<void> identity(TfCreateWeakPtr(index));
+    _MutateRegistry([identity=std::move(identity)](
+                        std::vector<RegistryEntry> &registry) {
+        registry.erase(std::remove_if(registry.begin(), registry.end(),
+                       [&identity](RegistryEntry const &candidate) {
+                           return candidate.weak.IsExpired() ||
+                               candidate.identity == identity;
                        }),
         registry.end());
+    });
 }
 
 // Snapshot one index's published-tile generation stamps for `groom`:
@@ -99,15 +142,12 @@ UsdGenImagingTestHook::_PublishedTileCountOn(
 int64_t
 UsdGenImagingTestHook::publishedGeneration(SdfPath const &groom)
 {
-    std::vector<HdSceneIndexBasePtr> weaks;
-    {
-        std::lock_guard<std::mutex> lock(_HookRegistryMutex());
-        weaks = _HookRegistry();
-    }
+    RegistrySnapshot weaks = std::atomic_load(&_HookRegistry().published);
     int64_t best = -1;
-    for (auto const &weak : weaks) {
+    if (!weaks) return 0;
+    for (auto const &entry : *weaks) {
         HdSceneIndexBaseRefPtr live =
-            TfCreateRefPtrFromProtectedWeakPtr(weak);
+            TfCreateRefPtrFromProtectedWeakPtr(entry.weak);
         if (!live) continue;
         best = std::max(best, _PublishedGenerationOn(*live, groom));
     }
@@ -117,19 +157,29 @@ UsdGenImagingTestHook::publishedGeneration(SdfPath const &groom)
 size_t
 UsdGenImagingTestHook::publishedTileCount(SdfPath const &groom)
 {
-    std::vector<HdSceneIndexBasePtr> weaks;
-    {
-        std::lock_guard<std::mutex> lock(_HookRegistryMutex());
-        weaks = _HookRegistry();
-    }
+    RegistrySnapshot weaks = std::atomic_load(&_HookRegistry().published);
     size_t total = 0;
-    for (auto const &weak : weaks) {
+    if (!weaks) return 0;
+    for (auto const &entry : *weaks) {
         HdSceneIndexBaseRefPtr live =
-            TfCreateRefPtrFromProtectedWeakPtr(weak);
+            TfCreateRefPtrFromProtectedWeakPtr(entry.weak);
         if (!live) continue;
         total += _PublishedTileCountOn(*live, groom);
     }
     return total;
+}
+
+size_t
+UsdGenImagingTestHook::registeredIndexCount()
+{
+    RegistrySnapshot snapshot = std::atomic_load(&_HookRegistry().published);
+    return snapshot ? snapshot->size() : 0;
+}
+
+void
+UsdGenImagingTestHook::Drain()
+{
+    _HookRegistry().owner.Drain();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

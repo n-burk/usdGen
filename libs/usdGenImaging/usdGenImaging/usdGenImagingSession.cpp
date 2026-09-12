@@ -16,7 +16,6 @@
 
 #include <algorithm>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <limits>
@@ -196,7 +195,8 @@ void UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const& desc) {
 bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done) {
     auto* state = _state.get();
     if (!state->accepting.load()) return false;
-    const int device = usdGen::UsdGenSession::CaptureCallerDevice();
+    const int device = request.callerDevice ? *request.callerDevice :
+        usdGen::UsdGenSession::CaptureCallerDevice();
     return state->owner.PostCommand([state, request=std::move(request), device, done] {
         state->Start(request, device, done);
     }, [done] { if (done) done({}, Pipeline::Outcome::Superseded); });
@@ -250,6 +250,148 @@ bool UsdGenImagingSession::ConsumeNeedsDesc() noexcept { return _state->needsDes
 
 // ---------------------------------------------------------------------------
 
+namespace {
+void StartCommitBatch(std::vector<UsdGenSessionHandle> sessions,
+    usdGen::UsdGenCommitReason reason, std::optional<double> frame,
+    std::optional<usdGen::UsdGenContext> context, int device,
+    std::function<void()> completion, std::function<void()> retired)
+{
+    if (sessions.empty()) {
+        try { if (completion) completion(); }
+        catch (...) { TF_WARN("usdGen store batch completion threw"); }
+        retired();
+        return;
+    }
+    struct Batch {
+        std::vector<UsdGenSessionHandle> sessions;
+        std::atomic<size_t> remaining;
+        std::function<void()> done;
+        std::function<void()> retired;
+        Batch(std::vector<UsdGenSessionHandle> input, std::function<void()> callback,
+              std::function<void()> release)
+            : sessions(std::move(input)), remaining(sessions.size()),
+              done(std::move(callback)), retired(std::move(release)) {}
+        ~Batch() {
+            // Teardown waits for ownership release, not merely for the user
+            // completion. Last public handles must enqueue their retirement
+            // before the process-global store can finish shutting down.
+            done = {};
+            sessions.clear();
+            retired();
+        }
+        void Complete() {
+            if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1 && done) {
+                try { done(); }
+                catch (...) { TF_WARN("usdGen store batch completion threw"); }
+            }
+        }
+    };
+    auto batch = std::make_shared<Batch>(std::move(sessions), std::move(completion), std::move(retired));
+    // Hold every handle through its reply, including after registry removal.
+    // This command submits all descriptions without waiting for any cook.
+    for (auto const& session : batch->sessions) {
+        UsdGenImagingSession::CommitRequest request;
+        request.frame = frame;
+        request.context = context;
+        request.reason = reason;
+        request.callerDevice = device;
+        try {
+            if (session->CommitAsync(std::move(request),
+                [batch](UsdGenImagingSession::CommitPayload const&, Pipeline::Outcome) {
+                    batch->Complete();
+                })) continue;
+        } catch (...) { TF_WARN("usdGen imaging batch request could not be dispatched"); }
+        batch->Complete();
+    }
+}
+}
+
+struct UsdGenSessionStore::State {
+    using Members = std::unordered_map<UsdGenSessionKey, UsdGenSessionHandle,
+                                       UsdGenSessionKeyHash>;
+    std::shared_ptr<const Members> published = std::make_shared<const Members>();
+    bool warnedReload = false; // command-owner-only
+    std::optional<double> frame;
+    std::optional<usdGen::UsdGenContext> context;
+    std::atomic<bool> accepting{true};
+    size_t outstandingBatches = 0;
+    std::function<void()> closeDone;
+    Pipeline owner; // destroyed/drained before membership handles are released
+
+    State() : owner(ImagingRuntime()) {}
+    ~State() {
+        accepting.store(false);
+        owner.Await([this](std::function<void()> done) {
+            if (!owner.PostCommand([this, done] { closeDone = done; CompleteClose(); }))
+                std::terminate();
+        });
+        owner.Shutdown();
+    }
+    void CompleteClose() {
+        if (outstandingBatches == 0 && closeDone) {
+            auto done = std::move(closeDone);
+            done();
+        }
+    }
+    void StartBatch(std::vector<UsdGenSessionHandle> sessions,
+                    usdGen::UsdGenCommitReason reason, int device,
+                    std::function<void()> completion) {
+        ++outstandingBatches;
+        try {
+            StartCommitBatch(std::move(sessions), reason, frame, context, device, completion,
+                [this] {
+                    try {
+                        if (!owner.PostCommand([this] { --outstandingBatches; CompleteClose(); }))
+                            std::terminate();
+                    } catch (...) { std::terminate(); }
+                });
+        } catch (...) {
+            --outstandingBatches;
+            CompleteClose();
+            throw; // preparation failed before accepting session work
+        }
+    }
+    std::shared_ptr<const Members> Snapshot() const { return std::atomic_load(&published); }
+    UsdGenSessionHandle Attach(UsdGenSessionKey const& key) {
+        auto current = Snapshot();
+        auto found = current->find(key);
+        if (found != current->end()) {
+            found->second->NoteAttach();
+            return found->second;
+        }
+        auto next = std::make_shared<Members>(*current);
+        auto session = TfCreateRefPtr(new UsdGenImagingSession(
+            key, std::make_shared<usdGen::UsdGenSession>(), frame.value_or(0.0),
+            context.value_or(usdGen::UsdGenContext::Interactive)));
+        if (frame) session->MarkAppDriver();
+        next->emplace(key, session);
+        session->NoteAttach();
+        std::atomic_store(&published, std::shared_ptr<const Members>(std::move(next)));
+        return session;
+    }
+    void Detach(UsdGenSessionKey const& key, UsdGenSessionHandle const& expected) {
+        // An empty identity is never a wildcard. Key-only adapters resolve
+        // identity when the request is made, before it can be delayed.
+        if (!expected) return;
+        auto current = Snapshot();
+        auto found = current->find(key);
+        if (found == current->end() || found->second != expected) return;
+        if (expected->AttachedIndices() > 1) {
+            expected->NoteDetach();
+            return;
+        }
+        // Allocate before changing counts; a failed copy leaves membership
+        // and its attachment count unchanged.
+        auto next = std::make_shared<Members>(*current);
+        next->erase(key);
+        expected->NoteDetach();
+        std::atomic_store(&published, std::shared_ptr<const Members>(std::move(next)));
+    }
+};
+
+UsdGenSessionStore::UsdGenSessionStore() : _state(new State) {}
+UsdGenSessionStore::~UsdGenSessionStore() = default;
+
 UsdGenSessionStore &UsdGenSessionStore::GetInstance()
 {
     // The store can own the last public handles until process teardown.
@@ -261,105 +403,129 @@ UsdGenSessionStore &UsdGenSessionStore::GetInstance()
 
 UsdGenSessionHandle UsdGenSessionStore::Attach(UsdGenSessionKey const &key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _sessions.find(key);
-    if (it != _sessions.end()) {
-        it->second->NoteAttach();
-        return it->second;
-    }
-    auto session = TfCreateRefPtr(new UsdGenImagingSession(
-        key, std::make_shared<usdGen::UsdGenSession>()));
-    _sessions.emplace(key, session);
-    session->NoteAttach();
+    UsdGenSessionHandle session;
+    _state->owner.InvokeOwner([this, key, &session] { session = _state->Attach(key); });
     return session;
+}
+
+bool UsdGenSessionStore::AttachAsync(UsdGenSessionKey key,
+    std::function<void(UsdGenSessionHandle)> completion)
+{
+    auto* state = _state.get();
+    if (!state->accepting.load()) return false;
+    return state->owner.PostCommand([state, key=std::move(key), completion] {
+        UsdGenSessionHandle session;
+        try { session = state->Attach(key); }
+        catch (...) { TF_WARN("usdGen session attachment failed"); }
+        if (completion) completion(std::move(session));
+    }, [completion] { if (completion) completion({}); });
 }
 
 void UsdGenSessionStore::Detach(UsdGenSessionKey const &key)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _sessions.find(key);
-    if (it == _sessions.end()) return;
-    it->second->NoteDetach();
-    if (it->second->AttachedIndices() <= 0) {
-        _sessions.erase(it);  // last index gone: store drops its strong ref
-    }
+    Detach(key, Find(key));
+}
+
+void UsdGenSessionStore::Detach(UsdGenSessionKey const& key,
+                               UsdGenSessionHandle const& expected)
+{
+    _state->owner.InvokeOwner([this, key, expected] { _state->Detach(key, expected); });
+}
+
+bool UsdGenSessionStore::DetachAsync(UsdGenSessionKey key, std::function<void()> completion)
+{
+    auto expected = Find(key);
+    return DetachAsync(std::move(key), std::move(expected), std::move(completion));
+}
+
+bool UsdGenSessionStore::DetachAsync(UsdGenSessionKey key, UsdGenSessionHandle expected,
+                                    std::function<void()> completion)
+{
+    auto* state = _state.get();
+    if (!state->accepting.load()) return false;
+    return state->owner.PostCommand([state, key=std::move(key), expected, completion] {
+        try { state->Detach(key, expected); }
+        catch (...) { TF_WARN("usdGen session detachment failed"); }
+        if (completion) completion();
+    }, [completion] { if (completion) completion(); });
 }
 
 UsdGenSessionHandle UsdGenSessionStore::Find(UsdGenSessionKey const &key) const
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-    auto it = _sessions.find(key);
-    if (it != _sessions.end()) return it->second;
+    auto snapshot = _state->Snapshot();
+    auto it = snapshot->find(key);
+    if (it != snapshot->end()) return it->second;
     return UsdGenSessionHandle();
 }
 
 std::vector<UsdGenImagingSessionRefPtr> UsdGenSessionStore::LiveSessions() const
 {
     std::vector<UsdGenImagingSessionRefPtr> out;
-    std::lock_guard<std::mutex> lock(_mutex);
-    out.reserve(_sessions.size());
-    for (auto &entry : _sessions) {
+    auto snapshot = _state->Snapshot();
+    out.reserve(snapshot->size());
+    for (auto const &entry : *snapshot) {
         out.push_back(entry.second);
     }
     return out;
 }
 
-namespace {
-void CommitBatch(std::vector<UsdGenSessionHandle> const& sessions,
-                 usdGen::UsdGenCommitReason reason, std::optional<double> frame = {}) {
-    if (Pipeline::IsExecuting()) throw std::logic_error("callback must submit asynchronous imaging requests");
-    if (sessions.empty()) return;
-    Pipeline boundary(ImagingRuntime());
-    struct Batch {
-        std::atomic<size_t> remaining;
-        std::function<void()> release;
-        Batch(size_t count, std::function<void()> done) : remaining(count), release(std::move(done)) {}
-        void Complete() { if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) release(); }
-    };
-    boundary.Await([&](std::function<void()> release) {
-        auto batch = std::make_shared<Batch>(sessions.size(), std::move(release));
-        // Submit every description before waiting: unrelated sessions execute
-        // in parallel rather than serializing the whole store on each reply.
-        for (auto const& session : sessions) {
-            UsdGenImagingSession::CommitRequest request;
-            request.frame = frame;
-            request.reason = reason;
-            try {
-                if (session->CommitAsync(std::move(request),
-                    [batch](UsdGenImagingSession::CommitPayload const&, Pipeline::Outcome) {
-                        batch->Complete();
-                    })) continue;
-            } catch (...) {
-                // Already accepted siblings must still complete their replies.
-                TF_WARN("usdGen imaging batch request could not be dispatched");
-            }
-            batch->Complete();
-        }
-    });
-}
-}
-
 void UsdGenSessionStore::SetTime(double frame)
 {
-    // The UsdGenImaging_SetTime C ABI (06 §6.1, item 9) forwards here: the
-    // app owns time from now on (rule b deactivates, 06 §3.9).
-    // Each frame+commit is one scheduled request. The external adapter waits
-    // for replies without holding the store guard across execution (S15).
-    auto sessions = LiveSessions();
-    for (auto const& session : sessions) session->MarkAppDriver();
-    CommitBatch(sessions, usdGen::UsdGenCommitReason::SetTime, frame);
+    _state->owner.Await([&](std::function<void()> done) {
+        if (!SetTimeAsync(frame, std::move(done)))
+            throw std::runtime_error("store rejected frame request");
+    });
+}
+
+bool UsdGenSessionStore::SetTimeAsync(double frame, std::function<void()> completion)
+{
+    auto* state = _state.get();
+    if (!state->accepting.load()) return false;
+    const int device = usdGen::UsdGenSession::CaptureCallerDevice();
+    return state->owner.PostCommand([this, state, frame, device, completion] {
+        try {
+            state->frame = frame;
+            auto sessions = LiveSessions();
+            for (auto const& session : sessions) session->MarkAppDriver();
+            state->StartBatch(std::move(sessions), usdGen::UsdGenCommitReason::SetTime,
+                              device, completion);
+        } catch (...) {
+            TF_WARN("usdGen store frame batch could not be prepared");
+            if (completion) completion();
+        }
+    }, completion);
 }
 
 void UsdGenSessionStore::SetContext(usdGen::UsdGenContext context)
 {
-    for (auto const &session : LiveSessions()) {
-        session->SetContext(context);
-    }
+    auto* state = _state.get();
+    state->owner.PostCommand([state, context] {
+        state->context = context;
+        for (auto const& entry : *state->Snapshot()) entry.second->SetContext(context);
+    });
 }
 
 void UsdGenSessionStore::Commit(usdGen::UsdGenCommitReason reason)
 {
-    CommitBatch(LiveSessions(), reason);
+    _state->owner.Await([&](std::function<void()> done) {
+        if (!CommitAsync(reason, std::move(done)))
+            throw std::runtime_error("store rejected commit request");
+    });
+}
+
+bool UsdGenSessionStore::CommitAsync(usdGen::UsdGenCommitReason reason,
+                                   std::function<void()> completion)
+{
+    auto* state = _state.get();
+    if (!state->accepting.load()) return false;
+    const int device = usdGen::UsdGenSession::CaptureCallerDevice();
+    return state->owner.PostCommand([this, state, reason, device, completion] {
+        try { state->StartBatch(LiveSessions(), reason, device, completion); }
+        catch (...) {
+            TF_WARN("usdGen store commit batch could not be prepared");
+            if (completion) completion();
+        }
+    }, completion);
 }
 
 int64_t UsdGenSessionStore::Generation() const noexcept
@@ -378,8 +544,10 @@ void UsdGenSessionStore::ReloadMaps()
     // reload is delivered by re-pulling the desc — MarkNeedsDesc routes the
     // next commit through the desc builder (descBuilder reads
     // ArAssetInfo::GetGeneration per map at build time).
-    static std::once_flag warned;
-    std::call_once(warned, []() {
+    auto* state = _state.get();
+    state->owner.PostCommand([state] {
+        if (state->warnedReload) return;
+        state->warnedReload = true;
         TF_WARN("usdGen ReloadMaps: no engine-level map reload hook in M1; "
                 "marking sessions desc-dirty so the next commit re-resolves "
                 "map textureGenerations (06 §3.7 S13).");

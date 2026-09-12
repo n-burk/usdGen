@@ -1,10 +1,10 @@
-// usdGen imaging — engine bridge: commit-thread gate + stats-ring drain.
+// usdGen imaging — scheduled commit-thread gate + stats-ring drain.
 //
-// E-2: UsdGenSession::Commit is commit-thread-only (03 §1.1). The gate flags
-// the first commit thread per session and TF_CODING_ERRORs any later commit
-// from a different thread. DrainStats forwards the engine's ring buffer of
-// per-commit timings (usdGen::UsdGenStats::ring, 03 §7) to an optional hook
-// exactly once per entry.
+// E-2 capture gate: a serial owner records the first Hydra authoring caller
+// and reports later off-thread capture requests. Actual engine execution
+// belongs to the session's scheduled owner/work nodes, not this caller thread.
+// DrainStats copies the engine's immutable stats value into that owner, which
+// forwards unseen ring entries to an optional hook exactly once per entry.
 //
 // Plan: plan/06-imaging.md §3.1 (per-session member of UsdGenImagingSession).
 #ifndef USDGEN_IMAGING_ENGINE_BRIDGE_H
@@ -17,7 +17,7 @@
 
 #include <atomic>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <thread>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -29,30 +29,36 @@ class UsdGenEngineBridge
 public:
     using TimingHook = std::function<void(usdGen::UsdGenCommitTiming const &)>;
 
-    /// Records the thread allowed to run engine commits (E-2).
+    UsdGenEngineBridge();
+    ~UsdGenEngineBridge();
+    UsdGenEngineBridge(UsdGenEngineBridge const&) = delete;
+    UsdGenEngineBridge& operator=(UsdGenEngineBridge const&) = delete;
+
+    /// Enqueues recording of the thread allowed to run engine commits (E-2).
     void RegisterCommitThread(std::thread::id tid);
 
     /// False until the first commit registers a thread.
     bool HasCommitThread() const;
     bool IsCommitThread() const;
 
-    /// Call before every engine Commit; TF_CODING_ERRORs off-thread commits.
+    /// Enqueues validation before every engine Commit; owner reports violations.
     void GateCommit(SdfPath const &descriptionPath, char const *where);
 
-    /// Installs the timing sink; pass an empty function to remove it.
+    /// Enqueues installation of the timing sink; empty removes it.
     void SetTimingHook(TimingHook hook);
 
-    /// Forwards every ring entry not seen yet, oldest first.
+    /// Enqueues a copied stats value; forwards unseen entries, oldest first.
     void DrainStats(usdGen::UsdGenStats const &stats);
 
-private:
-    std::thread::id _commitThread = std::thread::id();
-    std::atomic<bool> _hasCommitThread{false};
+    /// External test/shutdown boundary only. Never call from an owner callback.
+    void Drain();
 
-    TimingHook _timingHook;
-    std::mutex _hookMutex;
-    size_t _seenEntries = 0;
-    bool _firstDrain = true;
+    // Opaque owner state.  Kept public only so the implementation's
+    // process-level owner can retain it in queued commands.
+    struct State;
+
+private:
+    std::shared_ptr<State> _state;
 };
 
 }  // namespace usdGenImaging

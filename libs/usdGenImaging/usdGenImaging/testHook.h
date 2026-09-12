@@ -3,9 +3,9 @@
 // Exposes the atomic published-tile snapshot for adopted groom roots so
 // testUsdGenStormSurgery can assert the P0 race contract from the render
 // thread: every observation corresponds to one complete generation
-// snapshot, never a torn map. Both entry points are lock-free on the read
-// path (registry mutex only; the per-groom published map is atomic_load'ed,
-// exactly like GetPrim). No new public plugin API.
+// snapshot, never a torn map. Both entry points perform no owner wait: the
+// owner publishes an immutable registry snapshot and each groom map is
+// atomic_load'ed, exactly like GetPrim. No new public plugin API.
 #ifndef USDGEN_IMAGING_TEST_HOOK_H
 #define USDGEN_IMAGING_TEST_HOOK_H
 
@@ -33,6 +33,14 @@ public:
 
     /// Published tile count for the groom across live indices.
     static size_t publishedTileCount(SdfPath const &groom);
+
+    /// Number of registry entries in the published immutable snapshot. This
+    /// does not promote weak handles; it is test-only observability.
+    static size_t registeredIndexCount();
+
+    /// External test/shutdown boundary only. Never invoke from graph work or
+    /// a callback; waits until earlier hook-owner mutations have completed.
+    static void Drain();
 
     // Registry wiring, called by the groom index ctor/dtor (NOT test API).
     static void _RegisterIndex(HdSceneIndexBase *index);

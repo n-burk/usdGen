@@ -10,9 +10,9 @@
 #include "usdGenImaging/usdGenTokens.h"
 
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
-#include "pxr/imaging/hd/sceneGlobalsSchema.h"
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
+#include "pxr/imaging/hd/sceneGlobalsSchema.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
 #include "pxr/base/tf/staticTokens.h"
@@ -28,6 +28,20 @@
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
+
+namespace {
+void _ReleaseSessionAttachment(::usdGenImaging::UsdGenSessionKey const& key,
+    ::usdGenImaging::UsdGenSessionHandle const& session)
+{
+    auto& store = ::usdGenImaging::UsdGenSessionStore::GetInstance();
+    // Last protected scene-index handles can disappear during publication.
+    // Their cleanup must enqueue the exact release, never await another owner.
+    if (usdGen::UsdGenExecutionPipeline::IsExecuting())
+        store.DetachAsync(key, session);
+    else
+        store.Detach(key, session);
+}
+}
 
 // Kill switch (ADR §5.1): the registry consults _IsEnabled per append, so a
 // disabled plugin returns its input unchanged and drops out of the chain
@@ -109,8 +123,6 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(
     : HdSingleInputFilteringSceneIndexBase(inputScene)
     , _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(inputScene))
     , _renderInstanceId(static_cast<uint32_t>(renderInstanceId))
-    , _lastGlobalFrame(0.0)
-    , _haveGlobalFrame(false)
 {
     // Explicit host identities occupy the low 32 bits. Unspecified
     // identities are unique for the index lifetime and never reuse a raw
@@ -118,7 +130,6 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(
     static std::atomic<uint64_t> nextInstance{uint64_t(1) << 32};
     if (renderInstanceId == 0) _renderInstanceId = nextInstance.fetch_add(1);
     _populated.clear();
-    _frameLocators.insert(HdSceneGlobalsSchema::GetCurrentFrameLocator());
     UsdGenImagingTestHook::_RegisterIndex(this);
 }
 int64_t
@@ -189,7 +200,7 @@ UsdGenGroomSceneIndex::~UsdGenGroomSceneIndex()
             g->republishToken = -1;
         }
         if (g->session) {
-            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(g->key);
+            _ReleaseSessionAttachment(g->key, g->session);
         }
     }
 }
@@ -347,7 +358,7 @@ UsdGenGroomSceneIndex::_AdoptGroom(SdfPath const &groomRoot) const
         if (groom && groom->republishToken >= 0 && groom->session)
             groom->session->UnregisterRepublishCallback(groom->republishToken);
         if (groom && groom->session)
-            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(groom->key);
+            _ReleaseSessionAttachment(groom->key, groom->session);
         throw;
     }
 
@@ -368,7 +379,7 @@ UsdGenGroomSceneIndex::_AdoptGroom(SdfPath const &groomRoot) const
         if (groom->republishToken >= 0 && groom->session)
             groom->session->UnregisterRepublishCallback(groom->republishToken);
         if (groom->session)
-            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(groom->key);
+            _ReleaseSessionAttachment(groom->key, groom->session);
     }
 }
 // child under the groom root (fixture: /groomA/descA). Resolved eagerly
@@ -473,7 +484,7 @@ UsdGenGroomSceneIndex::_ForgetGroomsUnder(SdfPath const &path) const
             g->republishToken = -1;
         }
         if (g->session) {
-            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(g->key);
+            _ReleaseSessionAttachment(g->key, g->session);
             g->session = ::usdGenImaging::UsdGenSessionHandle();
         }
     }

@@ -320,6 +320,69 @@ dispatch, device retirement/interop, fault injection and release/performance
 gates remain unfinished. This checkpoint does not complete the no-mutex
 revision or shrink the original milestone scope.
 
+### Store and auxiliary registry ownership follow-through
+
+The next checkpoint removes the store and auxiliary registry application
+mutexes, without serializing description cooking behind those registries:
+
+- The session store owns membership on a short command lane and publishes an
+  immutable key-to-strong-handle snapshot. `Find` and `LiveSessions` never
+  await that owner. Same-key concurrent attachments return one canonical
+  session. Async detach carries the expected session identity; an old release
+  cannot decrement a same-key replacement. This is not an idempotent lease
+  API: every successful attach still requires exactly one balanced release.
+- `AttachAsync`, `DetachAsync`, `SetTimeAsync` and `CommitAsync` are primary
+  scheduled requests; synchronous mutation/commit adapters reject owner
+  callback re-entry. Store-wide frame/context dispatch is one owner command,
+  which submits every description without waiting for its cook. Requests
+  carry the original caller's CUDA device through both owner relays. Newly
+  attached sessions inherit explicit store frame/context and app-driver state.
+- Batches retain their session handles until all reply closures release them.
+  Store shutdown waits for this ownership release, not just the user callback:
+  the last handles must enqueue session retirement before the process-global
+  retirement queue can drain and disappear. A subprocess test returns from
+  `main` with a deliberately held completion and verifies all 64 individual
+  callback counts after store teardown. Dispatch failure in a required
+  lifetime relay remains fatal; general allocation-failure recovery is open.
+- The test-hook registry has scheduled mutations and immutable weak-handle
+  snapshots. Queued removal compares weak-control identity, not a recyclable
+  raw address, and the registry owner never promotes/destroys scene indices.
+  Its owner drains before registry storage is destroyed. Test-only external
+  drains provide visibility boundaries; callbacks cannot use those waits.
+- The timing bridge retains plain shared state in process-owner commands, so
+  dropping a bridge from its own timing hook does not destroy a pipeline on
+  that callback. Hook changes and copied stats/cursor updates are ordered.
+  The Hydra authoring-caller diagnostic is distinct from actual scheduled
+  engine execution. Unknown-route warning deduplication also has an owner.
+- The adapter mapping cache uses the framework's append-only concurrent map
+  to publish immutable per-schema entries. Duplicate builders return the
+  canonical insertion; published values are never edited or erased. This
+  preserves returned-reference lifetime without an application accessor lock.
+
+Validation: full CUDA-enabled build and **69/69 non-benchmark T0/T1** tests
+pass. Store/registry/adapter checks cover concurrent attachment, callback
+queries/re-entry, same-key replacement, inherited-frame execution, retained
+snapshots, timing-hook destruction/re-entry, queued weak-registry mutation,
+and canonical mapping references during concurrent insertions. The four-test
+store/exit/registry/adapter stress run passed **50 consecutive executions per
+test**, including the held-completion process-exit case. A separate
+CUDA-disabled ASan/UBSan build passes the six async-imaging, store, pending-exit,
+registry, adapter and population checks with `detect_leaks=0` and
+`halt_on_error=1`; the previous leak-clean limitation remains unchanged.
+CUDA tools memcheck and initcheck each reported **0 errors**.
+
+The remaining explicit application mutex in `libs/` is scene-index
+`_stateMutex`. Its membership, notices, adoption continuation and publication
+ordering still need a real owner/snapshot migration. The unused frame mutex
+and never-read frame fields were removed, **not** counted as an implemented
+scene-global frame channel. Upstream scene reads/adoption and notice forwarding
+are not yet fully asynchronous. Render-context density selection remains open:
+the cooker currently stores context, but these tests do not demonstrate its
+density effect. GPU retirement/interop, full tools/operators/maps, fault
+injection, performance gates and all original release requirements remain.
+Framework-internal synchronization and standard-library atomic shared-pointer
+implementation details are not claims of hardware wait-freedom.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the

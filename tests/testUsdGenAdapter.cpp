@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -341,6 +342,58 @@ int main()
         }
         Check(precise && inv.Contains(ExpectLocator(TfToken("usdGen:seed"))),
               "uniform edit dirties only its own leaf (no invalidate-for-precision)");
+    }
+
+    // Mapping cache regression: concurrent lookups must publish one immutable
+    // canonical table per schema name.  Unknown and abstract names
+    // intentionally exercise the cached-empty branch.  Unrelated insertions
+    // run concurrently to catch reference invalidation from cache growth.
+    {
+        using Mapping = UsdImagingDataSourceMapped::PropertyMappings;
+        constexpr int workers = 8;
+        std::vector<const Mapping *> known(workers), abstract(workers), unknown(workers);
+        std::vector<std::thread> lookupThreads;
+        for (int worker = 0; worker < workers; ++worker) {
+            lookupThreads.emplace_back([&, worker] {
+                known[worker] = &UsdGenPrimAdapterBase::Mappings(
+                    TfToken("UsdGenScatter"));
+                abstract[worker] = &UsdGenPrimAdapterBase::Mappings(
+                    TfToken("UsdGenOperator"));
+                unknown[worker] = &UsdGenPrimAdapterBase::Mappings(
+                    TfToken("UsdGenNoSuchSchema"));
+                for (int i = 0; i < 64; ++i) {
+                    (void)UsdGenPrimAdapterBase::Mappings(TfToken(
+                        "UsdGenUnrelated_" + std::to_string(worker * 64 + i)));
+                }
+            });
+        }
+        for (auto &thread : lookupThreads) thread.join();
+        bool addressesStable = true;
+        for (int worker = 1; worker < workers; ++worker)
+            addressesStable = addressesStable && known[worker] == known[0] &&
+                              abstract[worker] == abstract[0] &&
+                              unknown[worker] == unknown[0];
+        Check(addressesStable, "parallel mapping lookups publish canonical addresses");
+
+        TfTokenVector probes{TfToken("usdGen:seed"), TfToken("usdGen:input"),
+                             TfToken("usdGen:terminal")};
+        auto equivalent = [&](const Mapping &a, const Mapping &b) {
+            HdDataSourceLocatorSet lhs =
+                UsdImagingDataSourceMapped::Invalidate(probes, a);
+            HdDataSourceLocatorSet rhs =
+                UsdImagingDataSourceMapped::Invalidate(probes, b);
+            return lhs == rhs;
+        };
+        bool contentsStable = true;
+        for (int worker = 1; worker < workers; ++worker) {
+            contentsStable = contentsStable && equivalent(*known[0], *known[worker]) &&
+                              equivalent(*abstract[0], *abstract[worker]) &&
+                              equivalent(*unknown[0], *unknown[worker]);
+        }
+        Check(contentsStable, "parallel mapping lookups retain identical contents");
+        Check(UsdImagingDataSourceMapped::Invalidate(probes, *abstract[0]).IsEmpty() &&
+                  UsdImagingDataSourceMapped::Invalidate(probes, *unknown[0]).IsEmpty(),
+              "abstract and unknown mapping tables are stably empty");
     }
 
     Check(errorMark.IsClean(), "no Tf coding errors");

@@ -5,12 +5,12 @@
 
 #include "usdGenImaging/primAdapter.h"
 #include "usdGenImaging/usdGenTokens.h"
+#include "usdGen/executionPipeline.h"
 
 #include "pxr/base/tf/diagnostic.h"
 
 #include <algorithm>
 #include <map>
-#include <mutex>
 #include <set>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -76,17 +76,21 @@ _LocatorDepth(HdDataSourceLocator const &loc)
 void
 _WarnUnknownRoute(SdfPath const &path, TfToken const &leaf)
 {
-    static std::mutex mutex;
-    static std::unordered_map<SdfPath, std::set<TfToken>,
-                              SdfPathHash> warned;
-    std::lock_guard<std::mutex> lock(mutex);
-    if (warned[path].insert(leaf).second) {
-        TF_WARN("usdGen: dirty locator '%s' on %s matches no routed property "
-                "(compiled graph may be stale, or the property is not part "
-                "of any operator).",
-                TfToken(leaf.GetString()).GetString().c_str(),
-                path.GetText());
-    }
+    struct Warnings {
+        usdGen::UsdGenExecutionRuntime runtime{8};
+        std::unordered_map<SdfPath, std::set<TfToken>, SdfPathHash> seen;
+        usdGen::UsdGenExecutionPipeline owner{runtime}; // drains before seen
+        ~Warnings() { owner.Drain(); }
+    };
+    static Warnings warnings;
+    // Diagnostics do not make notice routing await the warning registry.
+    // The owner deduplicates immutable keys and emits each warning once.
+    warnings.owner.PostCommand([path, leaf] {
+        if (warnings.seen[path].insert(leaf).second)
+            TF_WARN("usdGen: dirty locator '%s' on %s matches no routed property "
+                    "(compiled graph may be stale, or the property is not part "
+                    "of any operator).", leaf.GetText(), path.GetText());
+    });
 }
 
 }  // namespace
