@@ -10,6 +10,7 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/pxr.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/systemMessages.h"
 
 #include <atomic>
 #include <chrono>
@@ -380,6 +381,7 @@ void TestCancelledAdoptionCannotReplaceNewAttachment()
     auto *groomIndex = dynamic_cast<UsdGenGroomSceneIndex *>(index.operator->());
     Check(groomIndex != nullptr, "adoption test obtains scene owner boundary");
     if (groomIndex) groomIndex->Synchronize();
+    index->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
     input->gateArmed.store(true, std::memory_order_release);
     input->Remove();
     std::thread discover([&] { input->Add(); });

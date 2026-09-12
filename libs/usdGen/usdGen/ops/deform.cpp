@@ -6,6 +6,23 @@
 
 namespace usdGen {
 
+UsdGenDeformOp::UsdGenDeformOp()
+    : topologyParameters_(UsdGenBaseTopologyParams()),
+      valueParameters_(UsdGenBaseValueParams())
+{
+    topologyParameters_.push_back(TfToken("rbfSamples"));
+    topologyParameters_.push_back(TfToken("twistAware"));
+    auto topologyMask = UsdGenMaskTopologyParams();
+    topologyParameters_.insert(topologyParameters_.end(),
+                               topologyMask.begin(), topologyMask.end());
+    valueParameters_.push_back(TfToken("enabled"));
+    valueParameters_.push_back(TfToken("lockRoots"));
+    valueParameters_.push_back(TfToken("preserveShape"));
+    valueParameters_.push_back(TfToken("preserveShape:iterations"));
+    auto valueMask = UsdGenMaskValueParams();
+    valueParameters_.insert(valueParameters_.end(), valueMask.begin(), valueMask.end());
+}
+
 bool UsdGenDeformOp::Bind(UsdGenParamView const& params, UsdGenDiagnostics* diagnostics) {
     if (!params.desc || params.desc->executionBackend != UsdGenExecutionBackend::Cuda) {
         if (diagnostics) diagnostics->Error("UsdGenDeform requires the CUDA RBF executor; CPU reference deformation is unavailable");
@@ -19,28 +36,10 @@ bool UsdGenDeformOp::Bind(UsdGenParamView const& params, UsdGenDiagnostics* diag
 }
 
 TfSpan<const TfToken> UsdGenDeformOp::TopologyParameters() const {
-    static TfTokenVector values = [] {
-        auto result = UsdGenBaseTopologyParams();
-        result.push_back(TfToken("rbfSamples"));
-        result.push_back(TfToken("twistAware"));
-        auto mask = UsdGenMaskTopologyParams();
-        result.insert(result.end(), mask.begin(), mask.end());
-        return result;
-    }();
-    return TfSpan<const TfToken>(values.data(), values.size());
+    return TfSpan<const TfToken>(topologyParameters_.data(), topologyParameters_.size());
 }
 TfSpan<const TfToken> UsdGenDeformOp::ValueParameters() const {
-    static TfTokenVector values = [] {
-        auto result = UsdGenBaseValueParams();
-        result.push_back(TfToken("enabled"));
-        result.push_back(TfToken("lockRoots"));
-        result.push_back(TfToken("preserveShape"));
-        result.push_back(TfToken("preserveShape:iterations"));
-        auto mask = UsdGenMaskValueParams();
-        result.insert(result.end(), mask.begin(), mask.end());
-        return result;
-    }();
-    return TfSpan<const TfToken>(values.data(), values.size());
+    return TfSpan<const TfToken>(valueParameters_.data(), valueParameters_.size());
 }
 
 UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const&) const {

@@ -229,9 +229,8 @@ void UsdGenLengthOp::Evaluate(
     auto const *mult = cap.perCurve.empty() ? nullptr : cap.perCurve.cdata();
     const size_t curveBase = view->desc ? view->desc->firstCurve : 0;
     const bool thresholded = cap.cullThreshold > 0.0 || cap.minRemaining > 0.0;
-    // Interned once: this compare runs per curve (100k/commit) on workers;
-    // a TfToken("literal") temporary re-probes the global registry (E-7).
-    static const TfToken sSet{"set"};
+    // sSet is operator-owned: no per-curve token interning and no lazy
+    // static destruction while an asynchronous evaluation is still running.
 
     for (uint32_t c = 0; c < view->curveCount; ++c) {
         const size_t base = view->Cv(c, 0);

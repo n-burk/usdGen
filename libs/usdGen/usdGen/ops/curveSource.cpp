@@ -32,6 +32,21 @@ struct UsdGenCurveSourceCapture final : public UsdGenCapture
 
 }  // namespace
 
+UsdGenCurveSourceOp::UsdGenCurveSourceOp()
+   : topologyParameters_(UsdGenBaseTopologyParams()),
+     valueParameters_(UsdGenBaseValueParams())
+{
+   topologyParameters_.push_back(TfToken("enabled"));
+   topologyParameters_.push_back(TfToken("mode"));
+   topologyParameters_.push_back(TfToken("usdGen:useRest"));
+   auto topologyMask = UsdGenMaskTopologyParams();
+   topologyParameters_.push_back(TfToken("resampleTo"));
+   topologyParameters_.insert(topologyParameters_.end(),
+                              topologyMask.begin(), topologyMask.end());
+   auto valueMask = UsdGenMaskValueParams();
+   valueParameters_.insert(valueParameters_.end(), valueMask.begin(), valueMask.end());
+}
+
 UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
 {
    UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
@@ -63,28 +78,12 @@ uint32_t UsdGenCurveSourceOp::PlanesTouched() const
 
 TfSpan<const TfToken> UsdGenCurveSourceOp::TopologyParameters() const
 {
-   static TfTokenVector params = [] {
-      TfTokenVector v = UsdGenBaseTopologyParams();
-      v.push_back(TfToken("enabled"));
-      v.push_back(TfToken("mode"));
-      v.push_back(TfToken("usdGen:useRest"));
-      auto m = UsdGenMaskTopologyParams();
-      v.push_back(TfToken("resampleTo"));
-      v.insert(v.end(), m.begin(), m.end());
-      return v;
-   }();
-   return TfSpan<const TfToken>(params.data(), params.size());
+   return TfSpan<const TfToken>(topologyParameters_.data(), topologyParameters_.size());
 }
 
 TfSpan<const TfToken> UsdGenCurveSourceOp::ValueParameters() const
 {
-   static TfTokenVector params = [] {
-      TfTokenVector v = UsdGenBaseValueParams();
-      auto m = UsdGenMaskValueParams();
-      v.insert(v.end(), m.begin(), m.end());
-      return v;
-   }();
-   return TfSpan<const TfToken>(params.data(), params.size());
+   return TfSpan<const TfToken>(valueParameters_.data(), valueParameters_.size());
 }
 
 bool UsdGenCurveSourceOp::Capture(UsdGenCaptureContext const &ctx,

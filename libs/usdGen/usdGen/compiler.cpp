@@ -180,35 +180,47 @@ UsdGenEpoch ComputeNodeDigest(
 // graph-structural rows are DIGEST terms (a change recompiles the node);
 // the §6.2 topology rows and the §6.4 capture rows are not.
 
-// Interned once: E-6 measures the WHOLE-node walk (every routed param of
-// every node), so the classification tables must compare token POINTERS,
-// not re-intern a `TfToken("literal")` per comparison.
+// Eager library-owned tokens preserve E-6's pointer-comparison path without
+// lazy function-static construction/destruction. They initialize before the
+// runtime-owner singleton is first constructed, so the owner quiesces before
+// these TU statics are destroyed at process exit.
 namespace tok {
-const TfToken &T() { static const TfToken t{"input"}; return t; }
-const TfToken &AlgorithmVersion() { static const TfToken t{"algorithmVersion"}; return t; }
-const TfToken &Space() { static const TfToken t{"space"}; return t; }
-const TfToken &ReadPhase() { static const TfToken t{"readPhase"}; return t; }
-const TfToken &Guides() { static const TfToken t{"guides"}; return t; }
-const TfToken &Curves() { static const TfToken t{"curves"}; return t; }
-const TfToken &Surface() { static const TfToken t{"surface"}; return t; }
-const TfToken &Enabled() { static const TfToken t{"enabled"}; return t; }
-const TfToken &Seed() { static const TfToken t{"seed"}; return t; }
-const TfToken &MaskSource() { static const TfToken t{"mask:source"}; return t; }
-const TfToken &MaskCombine() { static const TfToken t{"mask:combine"}; return t; }
-const TfToken &MaskRangeMode() { static const TfToken t{"mask:rangeMode"}; return t; }
-const TfToken &Mode() { static const TfToken t{"mode"}; return t; }
-const TfToken &Segments() { static const TfToken t{"segments"}; return t; }
-const TfToken &Direction() { static const TfToken t{"direction"}; return t; }
-const TfToken &LengthSource() { static const TfToken t{"length:source"}; return t; }
-const TfToken &LengthMethod() { static const TfToken t{"length:method"}; return t; }
-const TfToken &Rebuild() { static const TfToken t{"rebuild"}; return t; }
-const TfToken &Replace() { static const TfToken t{"replace"}; return t; }
-const TfToken &LengthMode() { static const TfToken t{"length:mode"}; return t; }
-const TfToken &CullThreshold() { static const TfToken t{"cullThreshold"}; return t; }
-const TfToken &Scatter() { static const TfToken t{"UsdGenScatter"}; return t; }
-const TfToken &Grow() { static const TfToken t{"UsdGenGrow"}; return t; }
-const TfToken &Length() { static const TfToken t{"UsdGenLength"}; return t; }
-const TfToken &Width() { static const TfToken t{"UsdGenWidth"}; return t; }
+namespace {
+const TfToken t{"input"}, algorithmVersion{"algorithmVersion"}, space{"space"},
+    readPhase{"readPhase"}, guides{"guides"}, curves{"curves"}, surface{"surface"},
+    enabled{"enabled"}, seed{"seed"}, maskSource{"mask:source"},
+    maskCombine{"mask:combine"}, maskRangeMode{"mask:rangeMode"}, mode{"mode"},
+    segments{"segments"}, direction{"direction"}, lengthSource{"length:source"},
+    lengthMethod{"length:method"}, rebuild{"rebuild"}, replace{"replace"},
+    lengthMode{"length:mode"}, cullThreshold{"cullThreshold"},
+    scatter{"UsdGenScatter"}, grow{"UsdGenGrow"}, length{"UsdGenLength"},
+    width{"UsdGenWidth"};
+}
+const TfToken &T() { return t; }
+const TfToken &AlgorithmVersion() { return algorithmVersion; }
+const TfToken &Space() { return space; }
+const TfToken &ReadPhase() { return readPhase; }
+const TfToken &Guides() { return guides; }
+const TfToken &Curves() { return curves; }
+const TfToken &Surface() { return surface; }
+const TfToken &Enabled() { return enabled; }
+const TfToken &Seed() { return seed; }
+const TfToken &MaskSource() { return maskSource; }
+const TfToken &MaskCombine() { return maskCombine; }
+const TfToken &MaskRangeMode() { return maskRangeMode; }
+const TfToken &Mode() { return mode; }
+const TfToken &Segments() { return segments; }
+const TfToken &Direction() { return direction; }
+const TfToken &LengthSource() { return lengthSource; }
+const TfToken &LengthMethod() { return lengthMethod; }
+const TfToken &Rebuild() { return rebuild; }
+const TfToken &Replace() { return replace; }
+const TfToken &LengthMode() { return lengthMode; }
+const TfToken &CullThreshold() { return cullThreshold; }
+const TfToken &Scatter() { return scatter; }
+const TfToken &Grow() { return grow; }
+const TfToken &Length() { return length; }
+const TfToken &Width() { return width; }
 }  // namespace tok
 
 /// §6.1: this parameter is a term of the node's Merkle structural digest

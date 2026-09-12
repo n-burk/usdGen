@@ -242,11 +242,10 @@ void UsdGenGrowOp::Evaluate(
         uint32_t const r = c * view->inCvCount;
         float const rx = inPx[r], ry = inPy[r], rz = inPz[r];
 
-        // Direction compares go against INTERNED statics: constructing a
+        // Direction compares use operator-owned tokens: constructing a
         // TfToken("literal") per curve re-hashes + re-probes the global
         // token table 100k times per run (measured: most of the 7 ms
         // single-thread grow sweep).
-        static const TfToken sVector{"vector"}, sAttr{"attribute"};
         GfVec3f dir;
         if (cap.direction == sVector) {
             dir = cap.directionVector;

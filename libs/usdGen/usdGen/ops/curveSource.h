@@ -12,7 +12,7 @@ namespace usdGen {
 class UsdGenCurveSourceOp final : public UsdGenOp
 {
 public:
-   UsdGenCurveSourceOp() = default;
+   UsdGenCurveSourceOp();
    ~UsdGenCurveSourceOp() override = default;
 
    TfToken Type() const override { return TfToken("UsdGenCurveSource"); }
@@ -35,6 +35,10 @@ public:
                  UsdGenChunkView *view) const override;
    std::unique_ptr<UsdGenCapture> CreateCapture() const override;
    uint32_t PlanesTouched() const override;
+
+private:
+   TfTokenVector topologyParameters_;
+   TfTokenVector valueParameters_;
 };
 
 }  // namespace usdGen

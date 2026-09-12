@@ -574,6 +574,96 @@ resource retirement, multi-device tests, hdPrman ingestion and performance
 gates also remain required. This test draws directly from Storm's resources;
 it does not claim stock Storm BasisCurves consumes a device generation yet.
 
+### Frontend publication and asynchronous shutdown follow-through
+
+The scene owner no longer calls Hydra observers from its TBB worker. It
+queues immutable snapshot/notice packets through a TBB concurrent queue.
+The serialized Hydra frontend installs the matching synthetic snapshot
+immediately before delivering each packet's removals, additions and dirties.
+The owner/capture catalog and frontend-visible snapshot are distinct: a
+background cook cannot silently change generated geometry before its notice.
+Authored input prims still pass through the upstream scene index; this is
+not a historical snapshot of the entire input scene.
+
+- Without `asyncAllow`, each upstream notice boundary waits for its causal
+  owner/attach/cook work and delivers on the calling frontend thread.
+- After opt-in, `asyncPoll` publishes already-ready packets without awaiting
+  cooking. An acquired ready-count watermark fixes the batch at poll entry;
+  new owner packets cannot extend that poll indefinitely. This is a finite
+  batch, not a measured frame-time budget or a bound on observer cost.
+- Explicit frontend `Synchronize()` waits and delivers. Observer re-entry
+  into that explicit wait is rejected. Reentrant default-mode edits queue
+  behind the current packet and are flushed by the outer frontend turn.
+- Public index references are pinned across frontend delivery, including
+  callbacks which release the last external reference. Queries read immutable
+  snapshots without owner waits. No application mutex/spinlock is introduced;
+  framework queues and library-managed shared-pointer publication are not
+  claimed to be universally lock-free internally.
+- A background-only store/tool republish has no legal spontaneous delivery
+  point for a non-async host. Such a host must call `Synchronize()` or cause
+  another frontend ingress. Async hosts poll. Frontend operations are
+  serialized by the host; concurrent read-only queries remain supported.
+
+`testUsdGenAsyncScenePublication` covers opt-in, caller-thread identity,
+default-mode reentrant edits, removal-before-replacement ordering and
+synthetic namespace visibility. The real-stage publication test additionally
+keeps width `.12` visible before polling and obtains newly cooked width `.16`
+through `asyncPoll` alone, rather than testing only structural population.
+
+Sanitizer stress exposed an additional exit-time use-after-free in
+`Graph::RoutingSnapshot`: CurveSource's lazily initialized static parameter
+vector was destroyed before pending asynchronous work finished. CurveSource
+and Deform parameter tables now belong to the operator instance. CPU
+Width/Noise/Grow/Length evaluation tokens likewise have operator lifetime;
+unused flat-ramp static vectors are removed. Compiler classification tokens
+are initialized with the library before runtime services, preserving cached
+token comparisons while ordering destruction after service shutdown. The
+empty graph-output fallback is graph-owned. The real-stage test deliberately
+leaves a final async frame edit pending when it exits. This does not remove
+the host's existing obligation to stop new submissions before shutdown.
+
+Validation after these changes: the full CUDA Release build and all 75
+non-benchmark T0/T1 tests pass. All six selected non-benchmark/non-Surgery T2
+tests pass five consecutive runs each, including the previously failing
+StormLook and StormMaterial tests. The seven targeted CUDA-disabled
+ASan/UBSan tests (async imaging, async scene publication, incremental capture,
+scene exit, scene ownership, real-stage publication, Width) each pass 30
+consecutive runs with `detect_leaks=0` and `halt_on_error=1`. The instrumented
+Graph test passes its structural assertions but fails its 0.2 ms Release
+timing threshold (43.65 ms); that timing test is not claimed green under
+sanitizers. KernelDeterminism passes one instrumented run (73 seconds); its
+second redundant stress repetition was deliberately terminated, not counted
+as a pass. No production performance/release gate is waived by these checks.
+
+Terra/Luna supplied bounded implementation and review assistance. Local Qwen
+returned visible but generic/speculative reviews that were checked against
+the actual source rather than accepted as proof. Both Hivemind review lanes
+again returned empty visible answers; those calls are not successful reviews.
+
+### Remaining native Storm integration boundary
+
+Inspection of the local OpenUSD 26.08 source establishes that adding retained
+scene-index data sources alone cannot connect the current CUDA BAR bridge to
+stock BasisCurves. `HdStBasisCurves` is final (`hdSt/basisCurves.h`), and its
+`_PopulateVertexPrimvars` method owns the computation/spec/BAR setup and
+`HdStResourceRegistry::AddComputation` calls (`basisCurves.cpp`). Stock GPU
+external computations use Hgi shader computations and input BARs; their
+primvar descriptor is not an arbitrary CUDA allocation import API.
+
+The candidate integration needs a renderer-side extension at that BAR
+computation boundary, plus immutable device-generation publication from
+usdGen. A static-topology source could retain its original authored CPU
+counts while all deformed points/widths remain GPU-resident. That is only an
+intermediate slice, **not** the required dynamic-topology end state:
+`HdBasisCurvesTopology` currently owns CPU `VtIntArray` counts/indices, and
+`HdSt_BasisCurvesTopology::GetPointsIndexBuilderComputation` constructs CPU
+index arrays. GPU-generated/compacted offsets cannot be read back and renamed
+"metadata" to claim compliance. Dynamic topology requires a GPU-native index
+generation/consumption path and coherent draw-count, range, culling and
+topology-identity handling. No OpenUSD dependency source was modified during
+this investigation; the existing direct-BAR draw test is not stock
+BasisCurves integration proof.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the

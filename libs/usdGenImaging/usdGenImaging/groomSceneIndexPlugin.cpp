@@ -12,6 +12,8 @@
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
+#include "pxr/imaging/hd/systemMessages.h"
+#include <tbb/concurrent_queue.h>
 #include <tbb/concurrent_vector.h>
 #include <tbb/flow_graph.h>
 #include <algorithm>
@@ -183,11 +185,24 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         uint64_t capturedThrough = 0;
         bool captureTrusted = true;
     };
-    std::shared_ptr<const Snapshot> published = std::make_shared<const Snapshot>();
+    // catalog is owner-written/capture-read. visible is only installed by
+    // the serialized Hydra frontend immediately before its matching notice.
+    std::shared_ptr<const Snapshot> catalog = std::make_shared<const Snapshot>();
+    std::shared_ptr<const Snapshot> visible = std::make_shared<const Snapshot>();
+    struct PublicationPacket {
+        std::shared_ptr<const Snapshot> snapshot;
+        Added added;
+        Removed removed;
+        Dirtied dirtied;
+    };
+    tbb::concurrent_queue<PublicationPacket> publications;
+    std::atomic<uint64_t> readyPublications{0};
+    uint64_t deliveredPublications = 0; // serialized frontend only
     HdSceneIndexBasePtr recipient; // initialized before admission; weak
     std::atomic<uint64_t> issued{0};
     std::atomic<bool> closing{false};
     std::atomic<bool> quiesced{false};
+    std::atomic<bool> asyncAllowed{false};
     // Owner-only state below.
     std::map<SdfPath, std::shared_ptr<Groom>> members;
     std::map<SdfPath, uint64_t> events, tombstones;
@@ -204,8 +219,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
 
     explicit _State(usdGen::UsdGenExecutionRuntime& runtime) : owner(new Pipeline(runtime)) {}
     ~_State() { if (owner) owner->Shutdown(); }
-    auto SnapshotValue() const { return std::atomic_load(&published); }
-    void PublishSnapshot() {
+    auto SnapshotValue() const { return std::atomic_load(&catalog); }
+    auto VisibleSnapshot() const { return std::atomic_load(&visible); }
+    std::shared_ptr<const Snapshot> PublishSnapshot() {
         auto next = std::make_shared<Snapshot>();
         next->capturedThrough = completedPrefix;
         next->captureTrusted = captureTrusted;
@@ -214,7 +230,17 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             next->members.push_back({g.root, g.description, g.tiles, g.generation,
                                      g.dependencies, g.cache, g.frame});
         }
-        std::atomic_store(&published, std::shared_ptr<const Snapshot>(std::move(next)));
+        auto result = std::shared_ptr<const Snapshot>(std::move(next));
+        std::atomic_store(&catalog, result);
+        return result;
+    }
+    void QueuePublication(Added added = {}, Removed removed = {}, Dirtied dirtied = {}) {
+        // The queue is single-owner producer and serialized-Hydra consumer.
+        // A packet is retained even when empty so the visible catalog cannot
+        // leap ahead of a delayed structural notice.
+        publications.push({PublishSnapshot(), std::move(added), std::move(removed),
+                           std::move(dirtied)});
+        readyPublications.fetch_add(1, std::memory_order_release);
     }
     void Post(std::function<void()> command) {
         // Required lifetime relays cannot be silently discarded.
@@ -253,7 +279,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         prune(tombstones);
         // Catalog reuse is safe only after every earlier capture has been
         // applied. Publication callbacks do not advance this source watermark.
-        PublishSnapshot();
+        QueuePublication();
         CheckWaiters();
     }
     void Synchronize() {
@@ -283,17 +309,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     }
     void Notify(Added const& added, Removed const& removed, Dirtied const& dirtied) {
         if (closing.load()) return;
-        auto live = TfCreateRefPtrFromProtectedWeakPtr(recipient);
-        auto* index = dynamic_cast<UsdGenGroomSceneIndex*>(live ? live.operator->() : nullptr);
-        if (!index) return;
-        // Snapshot first, then observers on the SAME owner. Re-entry queues.
-        // A throwing consumer cannot strand scene admission/retirement.
-        try { if (!removed.empty()) index->_SendPrimsRemoved(removed); }
-        catch (...) { TF_WARN("usdGen removal observer threw"); }
-        try { if (!added.empty()) index->_SendPrimsAdded(added); }
-        catch (...) { TF_WARN("usdGen addition observer threw"); }
-        try { if (!dirtied.empty()) index->_SendPrimsDirtied(dirtied); }
-        catch (...) { TF_WARN("usdGen dirty observer threw"); }
+        // Owner callbacks never enter Hydra observers.  The immutable packet
+        // is delivered by the serialized frontend on a synchronous ingress or
+        // negotiated asyncPoll boundary.
+        QueuePublication(added, removed, dirtied);
     }
     void Detach(Handle session, Key key, uint64_t seq) {
         if (!session) return;
@@ -375,7 +394,6 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->router = std::move(router);
         g->generation = generation.id;
         g->tiles = std::move(fresh);
-        PublishSnapshot();
         Notify(added, removed, dirtied);
     }
     void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
@@ -523,7 +541,6 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             groom->device = packet.device;
             groom->frame = packet.frame;
         }
-        PublishSnapshot();
         Notify(forwardAdded, forwardRemoved, forwardDirtied);
         for (auto const& groom : startAttach) Attach(groom, seq);
         for (auto const& groom : startCook) Cook(groom, seq);
@@ -609,10 +626,69 @@ UsdGenGroomSceneIndex::~UsdGenGroomSceneIndex() {
     _state->Close();
     if (!_state->quiesced.load()) UsdGenImagingTestHook::_UnregisterIndex(this);
 }
-void UsdGenGroomSceneIndex::Synchronize() { _state->Synchronize(); }
+void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explicitWait) {
+    // HdSceneIndex frontend entry points are serialized by Hydra.  Query
+    // methods remain concurrent immutable snapshot reads; do not add an
+    // application mutex here.
+    if (_dispatching) {
+        if (explicitWait)
+            throw std::logic_error("Synchronize cannot re-enter from a scene-index notice");
+        if (waitForIngress) _deferredSynchronousFlush = true;
+        return;
+    }
+    auto live = TfCreateRefPtrFromProtectedWeakPtr(_state->recipient);
+    auto *const index = dynamic_cast<UsdGenGroomSceneIndex *>(
+        live ? live.operator->() : nullptr);
+    if (!index) return;
+
+    _dispatching = true;
+    try {
+        do {
+            if (waitForIngress) _state->Synchronize();
+            _deferredSynchronousFlush = false;
+            // Take a finite ready watermark. Work produced while callbacks
+            // run belongs to a later poll, not an ever-growing render turn.
+            const auto ready = _state->readyPublications.load(std::memory_order_acquire);
+            _State::PublicationPacket packet;
+            while (_state->deliveredPublications < ready &&
+                   _state->publications.try_pop(packet)) {
+                ++_state->deliveredPublications;
+                // Observers may query during _Send: they must see precisely
+                // this packet's immutable post-state, never a later owner
+                // catalog snapshot.
+                std::atomic_store(&_state->visible, packet.snapshot);
+                try { if (!packet.removed.empty()) index->_SendPrimsRemoved(packet.removed); }
+                catch (...) { TF_WARN("usdGen removal observer threw"); }
+                try { if (!packet.added.empty()) index->_SendPrimsAdded(packet.added); }
+                catch (...) { TF_WARN("usdGen addition observer threw"); }
+                try { if (!packet.dirtied.empty()) index->_SendPrimsDirtied(packet.dirtied); }
+                catch (...) { TF_WARN("usdGen dirty observer threw"); }
+            }
+            // An observer can synchronously cause another input ingress.  It
+            // cannot wait recursively; its causal flush belongs to this outer
+            // frontend turn and remains FIFO after the current packet.
+            waitForIngress = _deferredSynchronousFlush;
+        } while (waitForIngress);
+    } catch (...) {
+        _dispatching = false;
+        throw;
+    }
+    _dispatching = false;
+}
+void UsdGenGroomSceneIndex::Synchronize() {
+    // An observer invoked by the drain may release the caller's final public
+    // reference.  Keep this frontend object alive until this method returns.
+    auto live = TfCreateRefPtrFromProtectedWeakPtr(_state->recipient);
+    if (!live) return;
+    _DrainPublications(true, true);
+}
 void UsdGenGroomSceneIndex::DrainRetired() { SceneService().DrainRetired(); }
 
 void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
+    // A synchronous default-mode drain below can re-enter arbitrary client
+    // code. Pin the public index for the entire caller-boundary operation.
+    auto live = TfCreateRefPtrFromProtectedWeakPtr(_state->recipient);
+    if (!live) return;
     auto state = _state;
     if (state->closing.load()) return;
     packet.sequence = state->issued.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -716,6 +792,11 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
             std::terminate();
         }
     });
+    // Without asyncAllow, the upstream observer call is the only legal
+    // frontend delivery point.  Wait through causal attach/cook/publication
+    // work, then send from this caller rather than the owner worker.
+    if (!state->asyncAllowed.load(std::memory_order_acquire))
+        _DrainPublications(true);
 }
 void UsdGenGroomSceneIndex::_PrimsAdded(HdSceneIndexBase const&, Added const& entries) {
     _Ingress packet; packet.added = entries; _CaptureAndSubmit(std::move(packet));
@@ -734,8 +815,24 @@ void UsdGenGroomSceneIndex::_PrimsRenamed(HdSceneIndexBase const& sender,
     _CaptureAndSubmit(std::move(packet));
 }
 
+void UsdGenGroomSceneIndex::_SystemMessage(
+    TfToken const& messageType, HdDataSourceBaseHandle const&) {
+    if (messageType == HdSystemMessageTokens->asyncAllow) {
+        _state->asyncAllowed.store(true, std::memory_order_release);
+        return;
+    }
+    if (messageType == HdSystemMessageTokens->asyncPoll &&
+        _state->asyncAllowed.load(std::memory_order_acquire)) {
+        // Poll is a render-thread flush only: it must not await owner work or
+        // start cooking.  The engine's temporary observer sees these notices.
+        auto live = TfCreateRefPtrFromProtectedWeakPtr(_state->recipient);
+        if (!live) return;
+        _DrainPublications(false);
+    }
+}
+
 HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
-    auto snapshot = _state->SnapshotValue();
+    auto snapshot = _state->VisibleSnapshot();
     auto input = _GetInputSceneIndex();
     auto authored = input ? input->GetPrim(path) : HdSceneIndexPrim();
     // Authored namespace collisions win, including authored tile paths.
@@ -753,7 +850,7 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
     return {};
 }
 SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) const {
-    auto snapshot = _state->SnapshotValue();
+    auto snapshot = _state->VisibleSnapshot();
     auto input = _GetInputSceneIndex();
     auto result = input ? input->GetChildPrimPaths(path) : SdfPathVector();
     auto append = [&](SdfPath const& child) {
@@ -767,12 +864,12 @@ SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) cons
     return result;
 }
 int64_t UsdGenGroomSceneIndex::_TestPublishedGeneration(SdfPath const& root) const {
-    auto snapshot = _state->SnapshotValue();
+    auto snapshot = _state->VisibleSnapshot();
     for (auto const& g : snapshot->members) if (g.root == root) return g.generation;
     return -1;
 }
 size_t UsdGenGroomSceneIndex::_TestPublishedTileCount(SdfPath const& root) const {
-    auto snapshot = _state->SnapshotValue();
+    auto snapshot = _state->VisibleSnapshot();
     for (auto const& g : snapshot->members) if (g.root == root) return g.tiles->size();
     return 0;
 }

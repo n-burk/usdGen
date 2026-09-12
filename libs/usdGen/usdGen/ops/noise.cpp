@@ -345,12 +345,6 @@ void UsdGenNoiseOp::Evaluate(
     if (cap.perCv.empty()) return;
 
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
-    static const TfToken sMagnitude{"noise:magnitude"};
-    static const TfToken sCumulative{"cumulative"};
-    static const TfToken sPreserveLength{"preserveLength"};
-    static const TfToken sMagKnots{"noise:magnitude:knots"};
-    static const TfToken sMagInterp{"noise:magnitude:interpolation"};
-    static const TfToken sCatmullRom{"catmullRom"};
     const float magnitude = p ? static_cast<float>(p->GetDouble(sMagnitude, 0.05)) : 0.05f;
     const bool cumulative = p ? p->GetBool(sCumulative, false) : false;
     const float preserveLength = p ? static_cast<float>(p->GetDouble(sPreserveLength, 1.0f)) : 1.0f;
@@ -360,22 +354,16 @@ void UsdGenNoiseOp::Evaluate(
     auto const *mask = view->curveMask;
     auto const *rootN = view->rootN;
     auto const *perCv = cap.perCv.data();
-    // Hoisted LUT (E-1/E-7): chunk-invariant knots resolve at most once per
-    // worker thread; empty knots (the common case) alias a shared flat-1.0
-    // table, bit-identical to building one per chunk.
+    // Worker-local storage avoids per-chunk allocations. Empty knots use
+    // scalar 1.0 below; there is no shared table with static exit lifetime.
     float const *lutPtr = nullptr;
     VtVec2fArray const magKnots = ReadRampKnots(p, sMagKnots);
     bool const magFlat = magKnots.empty();
     thread_local std::vector<float> tLut;
-    {
-        if (magFlat) {
-            static const std::vector<float> sFlat(kUsdGenRampLutSize, 1.0f);
-            lutPtr = sFlat.data();
-        } else {
-            if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
-            UsdGenBuildRampLut(magKnots, p ? p->GetToken(sMagInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
-            lutPtr = tLut.data();
-        }
+    if (!magFlat) {
+        if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
+        UsdGenBuildRampLut(magKnots, p ? p->GetToken(sMagInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
+        lutPtr = tLut.data();
     }
     auto const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.data();
     const size_t cv = size_t(view->cvCount);

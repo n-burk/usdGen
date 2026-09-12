@@ -5,6 +5,7 @@
 
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
+#include "pxr/imaging/hd/systemMessages.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
@@ -188,7 +189,10 @@ int main()
     UsdAttribute width = first.stage->GetAttributeAtPath(
         SdfPath("/Groom/hair/Ops/width.usdGen:width"));
     Check(bool(width) && width.Set(0.08f), "authored width edit succeeds");
-    first.indices.stageSceneIndex->ApplyPendingUpdates();
+    // The frontend owns delivery, not a background scene command. Transfer
+    // frontend ownership to this thread while its observer is held; only
+    // read-only queries run concurrently on the first scene.
+    std::thread delivery([&] { first.indices.stageSceneIndex->ApplyPendingUpdates(); });
 
     Check(WaitFor(hold.entered), "synthetic tile notice is held at publication boundary");
     std::atomic<bool> readDone{false}, readExactWidth{false};
@@ -222,7 +226,9 @@ int main()
     hold.release.store(true, std::memory_order_release);
     reader.join();
     independent.join();
+    delivery.join();
     first.owner->Synchronize();
+    first.groom->RemoveObserver(TfCreateWeakPtr(&hold));
     Check(!hold.timedOut.load(std::memory_order_acquire),
           "held synthetic tile notice was released before its bounded timeout");
 
@@ -244,6 +250,29 @@ int main()
     float const frameTwo = tile.IsEmpty() ? -1.0f : FirstWidth(first, tile);
     Check(std::fabs(frameTwo - 0.12f) < 1e-6f,
           "frame 2 synthetic tile samples animated width");
+
+    first.groom->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
+    Check(width.Set(0.16f, UsdTimeCode(3.0)), "async width sample authors successfully");
+    first.indices.stageSceneIndex->SetTime(UsdTimeCode(3.0));
+    first.indices.stageSceneIndex->ApplyPendingUpdates();
+    Check(std::fabs(FirstWidth(first, tile) - 0.12f) < 1e-6f,
+          "async edit retains previously delivered geometry before polling");
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool delivered = false;
+    do {
+        first.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+        delivered = std::fabs(FirstWidth(first, tile) - 0.16f) < 1e-6f;
+        if (delivered) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    Check(delivered, "asyncPoll alone installs the exact newly cooked width 0.16");
+
+    // Exercise shutdown with accepted work still in flight. Lazy static
+    // operator tables used to be destroyed before the retirement service
+    // drained this cook (caught by ASan in Graph::RoutingSnapshot).
+    Check(width.Set(0.20f, UsdTimeCode(4.0)), "exit-time width sample authors successfully");
+    first.indices.stageSceneIndex->SetTime(UsdTimeCode(4.0));
+    first.indices.stageSceneIndex->ApplyPendingUpdates();
 
     std::printf("testUsdGenScenePublication: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

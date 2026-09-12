@@ -5,6 +5,7 @@
 
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/retainedSceneIndex.h"
+#include "pxr/imaging/hd/systemMessages.h"
 #include "pxr/base/vt/array.h"
 
 #include <atomic>
@@ -125,6 +126,7 @@ int main()
     Check(owner != nullptr, "incremental capture owner cast succeeds");
     if (!owner) return 1;
     owner->Synchronize();
+    index->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
     auto &store = usdGenImaging::UsdGenSessionStore::GetInstance();
     const usdGenImaging::UsdGenSessionKey keyA{"", a, renderInstance};
     const usdGenImaging::UsdGenSessionKey keyB{"", b, renderInstance};

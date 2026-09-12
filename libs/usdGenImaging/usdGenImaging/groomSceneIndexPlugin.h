@@ -13,7 +13,7 @@
 //     independent per-description cooking, and ordered publication as
 //     synthetic Hydra prims <description>/__usdGenRender/tile_NNNN.
 //
-// GetPrim NEVER commits — it atomic_loads the latest generation (I7). The
+// GetPrim NEVER commits — it reads the frontend-visible generation (I7). The
 // M0 pass-through class is gone: this index owns sessions, synthesizes and
 // announces the published prim set and forwards upstream notices.
 //
@@ -65,8 +65,8 @@ public:
     // -- HdSceneIndexInterface ------------------------------------------------
     HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
     SdfPathVector GetChildPrimPaths(SdfPath const &path) const override;
-    // Explicit external host/test boundary. Reads never call this. Each
-    // caller owns a framework reply; owner callbacks must not wait.
+    // Explicit serialized frontend host/test boundary. Reads never call this.
+    // Delivers completed notices here; observer/owner callbacks must not wait.
     void Synchronize();
     // External shutdown/test boundary after clients have stopped submitting.
     static void DrainRetired();
@@ -85,6 +85,9 @@ public:
     void _PrimsRenamed(
         HdSceneIndexBase const &sceneIndex,
         HdSceneIndexObserver::RenamedPrimEntries const &entries) override;
+    void _SystemMessage(
+        TfToken const &messageType,
+        HdDataSourceBaseHandle const &args) override;
 
 private:
     struct _State;
@@ -99,6 +102,10 @@ private:
     // Hydra capture stays on the caller/notice boundary. Only owning value
     // packets enter the scene owner; no worker assumes upstream affinity.
     void _CaptureAndSubmit(_Ingress ingress);
+    // Hydra serializes scene-index frontend calls.  This boundary alone
+    // installs visible snapshots and sends notices; owner work only queues
+    // immutable packets.  Explicit waits during observer delivery are invalid.
+    void _DrainPublications(bool waitForIngress, bool explicitWait = false);
 
     // StormSurgery test accessors (testHook.h): immutable snapshot reads
     // over the adopted groom's published map, with no owner wait.
@@ -113,6 +120,8 @@ private:
     uint64_t _renderInstanceId = 0;
 
     std::shared_ptr<_State> _state;
+    bool _dispatching = false;
+    bool _deferredSynchronousFlush = false;
 
 };
 

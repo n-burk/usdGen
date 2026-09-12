@@ -35,6 +35,8 @@ public:
                   UsdGenChunkView *view) const override;
     std::unique_ptr<UsdGenCapture> CreateCapture() const override;
     uint32_t PlanesTouched() const override;
+private:
+    const TfToken sSet{"set"};
 };
 
 }  // namespace usdGen

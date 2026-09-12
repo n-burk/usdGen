@@ -36,6 +36,10 @@ public:
                   UsdGenChunkView *view) const override;
     std::unique_ptr<UsdGenCapture> CreateCapture() const override;
     uint32_t PlanesTouched() const override;
+private:
+    const TfToken sMagnitude{"noise:magnitude"}, sCumulative{"cumulative"};
+    const TfToken sPreserveLength{"preserveLength"}, sMagKnots{"noise:magnitude:knots"};
+    const TfToken sMagInterp{"noise:magnitude:interpolation"}, sCatmullRom{"catmullRom"};
 };
 
 }  // namespace usdGen

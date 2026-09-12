@@ -436,6 +436,11 @@ set_tests_properties(testUsdGenRegistryOwners PROPERTIES LABELS "T1;scheduling;i
 add_executable(testUsdGenSceneOwner tests/testUsdGenSceneOwner.cpp)
 add_executable(testUsdGenIncrementalCapture tests/testUsdGenIncrementalCapture.cpp)
 add_executable(testUsdGenCaptureCache tests/testUsdGenCaptureCache.cpp)
+add_executable(testUsdGenAsyncScenePublication tests/testUsdGenAsyncScenePublication.cpp)
+target_link_libraries(testUsdGenAsyncScenePublication PRIVATE usdGenImaging usdGen)
+add_test(NAME testUsdGenAsyncScenePublication COMMAND testUsdGenAsyncScenePublication)
+set_tests_properties(testUsdGenAsyncScenePublication PROPERTIES
+    LABELS "T1;scheduling;imaging;async-publication" TIMEOUT 60)
 target_link_libraries(testUsdGenCaptureCache PRIVATE usdGenImaging usdGen)
 add_test(NAME testUsdGenCaptureCache COMMAND testUsdGenCaptureCache)
 set_tests_properties(testUsdGenCaptureCache PROPERTIES

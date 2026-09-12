@@ -178,6 +178,9 @@ private:
     int _tileTarget = kUsdGenTileTargetDefault;
     int _chunksPerTile = 1;
     int _partitionCurves = 0;   // totalCurves of the last partition (0 == unpartitioned)
+    // Fallback lifetime belongs to the graph, not process static teardown.
+    // It is private and Output exposes it only as const.
+    UsdGenCurveBuffer _emptyOutput;
 };
 
 }  // namespace usdGen

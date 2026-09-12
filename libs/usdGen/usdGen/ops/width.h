@@ -35,6 +35,12 @@ public:
                   UsdGenChunkView *view) const override;
     std::unique_ptr<UsdGenCapture> CreateCapture() const override;
     uint32_t PlanesTouched() const override;
+private:
+    // Intern once per operator, with the same lifetime as its scheduled work.
+    const TfToken sWidth{"width"}, sTaper{"taper"}, sTaperStart{"taperStart"};
+    const TfToken sRootScale{"rootScale"}, sTipScale{"tipScale"}, sReplace{"replace"};
+    const TfToken sKnots{"width:knots"}, sKnotsInterp{"width:interpolation"};
+    const TfToken sCatmullRom{"catmullRom"};
 };
 
 }  // namespace usdGen

@@ -88,9 +88,8 @@ UsdGenNodeId UsdGenGraph::NodeIdForPath(SdfPath const &path) const
 
 UsdGenCurveBuffer const &UsdGenGraph::Output() const
 {
-    static UsdGenCurveBuffer const empty;
     if (_terminal == InvalidNode || _nodes.empty() || !_nodes[_terminal]) {
-        return empty;
+        return _emptyOutput;
     }
     return _nodes[_terminal]->buffer;
 }

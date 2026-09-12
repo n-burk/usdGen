@@ -179,20 +179,8 @@ void UsdGenWidthOp::Evaluate(
     UsdGenWidthCapture const &cap =
         static_cast<UsdGenWidthCapture const &>(captureIn);
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
-    // Interned once: Evaluate runs per chunk (196x/commit) on workers; each
-    // TfToken("literal") re-probes the global token registry (E-7).
-    static const TfToken sWidth{"width"};
-    static const TfToken sTaper{"taper"};
-    static const TfToken sTaperStart{"taperStart"};
-    static const TfToken sRootScale{"rootScale"};
-    static const TfToken sTipScale{"tipScale"};
-    static const TfToken sReplace{"replace"};
-    static const TfToken sKnots{"width:knots"};
-    // NOTE: this was "width:knots:interpolation" until 2026-09-12, which
-    // matched no C1 property — the authored token was silently ignored and
-    // every ramp built catmullRom. C1/schema name is width:interpolation.
-    static const TfToken sKnotsInterp{"width:interpolation"};
-    static const TfToken sCatmullRom{"catmullRom"};
+    // Parameter tokens are operator-owned: no per-chunk interning and no
+    // function-static destruction racing an asynchronous cook at exit.
     const float width = p ? static_cast<float>(p->GetDouble(sWidth, 0.01)) : 0.01f;
     const float taper = p ? static_cast<float>(p->GetDouble(sTaper, 0.0)) : 0.0f;
     const float taperStart = p ? static_cast<float>(p->GetDouble(sTaperStart, 0.5)) : 0.5f;
@@ -202,23 +190,16 @@ void UsdGenWidthOp::Evaluate(
     auto const *hairT = view->hairT;
     auto const *inWidth = view->inWidth;
     auto const *mask = view->curveMask;
-    // Hoisted LUT (E-1/E-7): the knots are value-class but chunk-invariant,
-    // so the 257-entry table is resolved at most once per worker thread per
-    // distinct input — never heap-built per chunk. Empty knots (the common
-    // case) alias a shared flat-1.0 table, bit-identical to building one.
+    // Reuse worker-local LUT storage for nonempty knots. Flat ramps use the
+    // exact scalar 1.0 below and require no allocated table.
     float const *lutPtr = nullptr;
     VtVec2fArray const widthKnots = ReadRampKnots(p, sKnots);
     bool const magFlat = widthKnots.empty();
     thread_local std::vector<float> tLut;
-    {
-        if (magFlat) {
-            static const std::vector<float> sFlat(kUsdGenRampLutSize, 1.0f);
-            lutPtr = sFlat.data();
-        } else {
-            if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
-            UsdGenBuildRampLut(widthKnots, p ? p->GetToken(sKnotsInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
-            lutPtr = tLut.data();
-        }
+    if (!magFlat) {
+        if (tLut.size() != kUsdGenRampLutSize) tLut.assign(kUsdGenRampLutSize, 1.0f);
+        UsdGenBuildRampLut(widthKnots, p ? p->GetToken(sKnotsInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
+        lutPtr = tLut.data();
     }
     auto const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.data();
     const size_t cv = size_t(view->cvCount);
