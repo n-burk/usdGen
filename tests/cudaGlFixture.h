@@ -17,7 +17,7 @@
 namespace usdGenTest {
 
 inline std::shared_ptr<const usdGen::UsdGenDeviceGeneration>
-MakeCudaGlFixture(float width)
+MakeCudaGlFixture(float width, uint64_t generation = 1, float xOffset = 0.0f)
 {
     using namespace usdGen::gpu;
     constexpr size_t pointCount = 5;
@@ -27,9 +27,9 @@ MakeCudaGlFixture(float width)
     auto source = std::make_unique<CudaCurveSource>();
     const int32_t counts[] = {2, 3};
     const float3 points[] = {
-        make_float3(-.5f, -.6f, 0), make_float3(-.5f, .6f, 0),
-        make_float3(.5f, -.6f, 0), make_float3(.5f, 0, 0),
-        make_float3(.5f, .6f, 0)};
+        make_float3(-.5f + xOffset, -.6f, 0), make_float3(-.5f + xOffset, .6f, 0),
+        make_float3(.5f + xOffset, -.6f, 0), make_float3(.5f + xOffset, 0, 0),
+        make_float3(.5f + xOffset, .6f, 0)};
     const int32_t rootPrim[] = {4, 8};
     const float2 rootUV[] = {make_float2(.1f, .2f), make_float2(.3f, .4f)};
     const uint64_t stableIds[] = {0x123456780000005bULL,
@@ -72,13 +72,13 @@ MakeCudaGlFixture(float width)
     }
 
     std::string reason;
-    auto generation = MakeSourceGeneration(std::move(source), 1, &reason,
+    auto generationResult = MakeSourceGeneration(std::move(source), generation, &reason,
                                            false, std::move(output));
-    if (!generation) {
+    if (!generationResult) {
         std::fprintf(stderr, "MakeCudaGlFixture: generation failed: %s\n",
                      reason.c_str());
     }
-    return generation;
+    return generationResult;
 }
 
 } // namespace usdGenTest

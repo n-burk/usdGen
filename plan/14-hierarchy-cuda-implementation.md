@@ -760,12 +760,12 @@ against the clean original v26.08 checkout. Local Qwen returned generic but
 visible review guidance that was checked against source; both Hivemind lanes
 again returned empty visible answers and are not counted as reviews.
 
-The production scene index still declines device-generation publication.
-Next is the native BasisCurves immutable-provider/pending-bundle integration,
-including independently owned callback state invalidated before rprim
-destruction (a raw `this` plus an epoch check is not lifetime protection),
-GPU draw counts, coherent topology/shader/extent/motion updates, asynchronous
-interop lifetime and the unchanged full renderer/performance/release gates.
+The production scene index still declines live device-generation publication.
+The isolated native BasisCurves provider, pending-bundle lifetime, GPU draw
+counts, and framebuffer path are now validated. Remaining work is wiring that
+provider into live groom publication, including coherent topology/shader/extent/
+motion updates, asynchronous interop lifetime, multi-tile atomicity, and the
+unchanged full renderer/performance/release gates.
 
 ## Original scope remains required
 
@@ -1152,6 +1152,33 @@ bindings consume the surviving, reordered GPU channels.
 
 ## Validation discipline
 
+## Native-provider / draw-count contract (isolated validation)
+
+The private OpenUSD native patch artifact is generated and passes clean
+baseline/application and reverse-equivalence checks. Its isolated native
+provider, draw-count, and retained-scene-index framebuffer fixtures are
+validated; live groom/device publication and multi-tile integration remain
+open. When a valid CUDA device generation provider is present, it is authoritative: the renderer must not
+silently instantiate or select a CPU geometry fallback. A Storm candidate is
+publishable only as one complete bundle of all required channels; any partial
+or failed channel invalidates the candidate and leaves the prior visible
+bundle selected.
+
+The private post-commit callback state is independently owned by the pending
+bundle and is invalidated when that bundle is finalized or rejected. Callbacks
+must not retain the registry, re-enter Commit, or outlive their owner state.
+The draw-count packer writes the actual `uint32` draw count
+`records * indexArity`, never allocation capacity. Host code may validate
+scalar shape, arity, and capacity before enqueue; device validation consumes
+the upstream status and overflow conditions. Neither generated geometry nor
+draw counts may be read back to the host.
+
+Conservative visibility/culling behavior and interactive performance remain
+open; this contract makes no throughput or latency claim. The isolated native
+fixture validates scalar metadata, device-side structural validation, and
+framebuffer output. It is not evidence that live groom `Publish`, atomic
+multi-tile publication, or full end-to-end Storm integration is complete.
+
 Record exact commands/results against the current tree. Every operator needs
 both value tests and notification tests; pulling an updated value alone cannot
 prove a dirty was emitted. Test hostile authored legacy edges, composed child
@@ -1179,3 +1206,26 @@ thinking-disable options. They are not counted as completed reviews.
 Missing process handles permit a new request; observation timeouts do not.
 The native session currently permits three workers plus root, not twenty
 simultaneous native workers. No larger worker pool is claimed.
+
+### Current evidence checkpoint (2026-09-11)
+
+Core CUDA curve-index validation passed in 10 repeated runs and memcheck,
+along with the nonbenchmark T0/T1 session/publication tests. The private Storm
+helper test covers count-word copying, malformed count rejection, and
+conservative GPU-count visibility. Provider ingress rejection handling is
+covered. The isolated native provider and retained-scene-index framebuffer
+paths are validated; successful live groom/device publication remains
+unverified.
+
+Latest checkpoint: private Storm CMake build passed and all five selected tests
+passed; the nonbenchmark T0/T1 suite passed 78/78. Abstract draw-count rendering
+produced 18 lit pixels for count 2 and 35 for count 4; rejected candidates
+retained exact finite framebuffers. Production CUDA generation 0 rendered 50
+pixels, rejected candidates retained the prior result, and generation 1 changed
+geometry/width to 51 pixels. Native CUDA memcheck reported zero errors. Both
+patch checks passed. A fresh initial-generation regression passed in both
+Release and ASAN/UBSAN configurations. The ASAN/UBSAN build instrumented
+private HdSt, bridge, and fixture/test translation units; the linked usdGen core
+remained Release and leak detection was disabled, so this is not a leak check.
+Live device Publish, multi-tile atomic publication, persistent async
+interop, motion, culling performance, and full SDK gates remain open.

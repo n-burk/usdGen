@@ -1,0 +1,1075 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] hdSt GPU BasisCurves and indirect draw counts
+
+Generated from the private OpenUSD extension tree; resourceRegistry changes
+are intentionally excluded because they belong to patch 0001.
+
+--- a/pxr/imaging/hdSt/CMakeLists.txt	2026-09-03 21:05:59.409624644 -0700
++++ b/pxr/imaging/hdSt/CMakeLists.txt	2026-09-11 20:49:12.722745877 -0700
+@@ -60,6 +60,7 @@
+     PUBLIC_CLASSES
+         backPlateSceneIndexPlugin
+         basisCurves
++        basisCurvesGpuDataSource
+         binding
+         bufferArrayRange
+         bufferResource
+@@ -165,6 +166,7 @@
+         fieldTextureCpuData
+         imageShaderShaderKey
+         indirectDrawBatch
++        indirectDrawCount
+         materialNetworkShader
+         materialBindingResolvingSceneIndexPlugin
+         materialPrimvarTransferSceneIndexPlugin
+--- a/pxr/imaging/hdSt/basisCurves.h	2026-09-03 20:58:34.959390940 -0700
++++ b/pxr/imaging/hdSt/basisCurves.h	2026-09-11 20:54:59.376883693 -0700
+@@ -19,10 +19,14 @@
+ #include "pxr/base/vt/array.h"
+ 
+ #include <memory>
++#include <cstdint>
+ 
+ PXR_NAMESPACE_OPEN_SCOPE
+ 
+ class HdStDrawItem;
++class HdStResourceRegistry;
++class HdStBasisCurvesGpuDataSource;
++struct HdStBasisCurvesGpuBundle;
+ using HdSt_BasisCurvesTopologySharedPtr =
+     std::shared_ptr<class HdSt_BasisCurvesTopology>;
+ 
+@@ -158,6 +162,14 @@
+     void _UpdateMaterialTagsForAllReprs(HdSceneDelegate *sceneDelegate,
+                                         HdRenderParam *renderParam);
+ 
++    bool _StageGpuBundle(HdSceneDelegate *sceneDelegate,
++                         HdRenderParam *renderParam);
++    void _PublishGpuBundle();
++    void _UpdateGpuGeometricShaders(HdRenderParam *renderParam);
++    void _InvalidateGpuCallbackState();
++
++    struct _GpuCallbackState;
++
+     HdSt_BasisCurvesTopologySharedPtr _topology;
+     HdTopology::ID _topologyId;
+     HdDirtyBits _customDirtyBitsInUse;
+@@ -167,6 +179,20 @@
+     bool _displayInOverlay : 1;
+     bool _occludedSelectionShowsThrough : 1;
+     bool _pointsShadingEnabled : 1;
++
++    // A present GPU datasource disables CPU curve ingestion even if its next
++    // generation is incomplete.  The old complete generation remains visible.
++    bool _gpuProviderPresent : 1;
++    uint64_t _gpuEpoch = 0;
++    std::shared_ptr<_GpuCallbackState> _gpuCallbackState;
++    std::shared_ptr<const HdStBasisCurvesGpuBundle> _pendingGpuBundle;
++    std::shared_ptr<HdStResourceRegistry> _gpuResourceRegistry;
++    HdRenderParam *_gpuRenderParam = nullptr;
++    int _pendingGpuRefineLevel = 0;
++    bool _pendingGpuDisplayInOverlay = false;
++    bool _pendingGpuOccludedSelectionShowsThrough = false;
++    bool _pendingGpuPointsShadingEnabled = false;
++    TfToken _gpuShadingStyle;
+ };
+ 
+ 
+--- a/pxr/imaging/hdSt/drawItem.h	2026-09-03 20:58:34.961230524 -0700
++++ b/pxr/imaging/hdSt/drawItem.h	2026-09-11 20:50:44.642547433 -0700
+@@ -121,6 +121,18 @@
+         return _geometricShader;
+     }
+ 
++    /// Optional immutable one-element UInt32 'drawCount' BAR. Its value is
++    /// the actual index/vertex count, not a topology capacity or record count.
++    /// The producer must bound it by the published geometry/index allocation.
++    /// Publish together with the matching topology/vertex ranges and mark
++    /// draw batches dirty. Empty restores ordinary host-authored draw counts.
++    void SetIndirectDrawCountRange(HdBufferArrayRangeSharedPtr const &range) {
++        _indirectDrawCountRange = range;
++    }
++    HdBufferArrayRangeSharedPtr const &GetIndirectDrawCountRange() const {
++        return _indirectDrawCountRange;
++    }
++
+     HdSt_MaterialNetworkShaderSharedPtr const &
+     GetMaterialNetworkShader() const {
+         return _materialNetworkShader;
+@@ -164,6 +176,7 @@
+ private:
+     HdSt_GeometricShaderSharedPtr _geometricShader;
+     HdSt_MaterialNetworkShaderSharedPtr _materialNetworkShader;
++    HdBufferArrayRangeSharedPtr _indirectDrawCountRange;
+     bool _materialIsFinal;
+ };
+ 
+--- a/pxr/imaging/hdSt/drawBatch.cpp	2026-09-03 20:58:34.961149004 -0700
++++ b/pxr/imaging/hdSt/drawBatch.cpp	2026-09-11 21:13:00.228834738 -0700
+@@ -162,6 +162,15 @@
+         _drawItemInstances.front()->GetDrawItem());
+     TF_VERIFY(batchItem);
+ 
++    // GPU draw-count batches have no GPU-owned bounds yet and therefore use a
++    // different culling/dispatch policy.  Keep them out of mixed batches so
++    // command traits and culling programs are selected consistently from the
++    // first item and cannot become stale when an item is appended.
++    if (bool(drawItem->GetIndirectDrawCountRange()) !=
++        bool(batchItem->GetIndirectDrawCountRange())) {
++        return false;
++    }
++
+     if (_IsAggregated(drawItem, batchItem)) {
+         drawItemInstance->SetBatchIndex(_drawItemInstances.size());
+         drawItemInstance->SetBatch(this);
+@@ -536,4 +545,3 @@
+ }
+ 
+ PXR_NAMESPACE_CLOSE_SCOPE
+-
+--- a/pxr/imaging/hdSt/drawItem.cpp	2026-09-03 20:58:34.961187404 -0700
++++ b/pxr/imaging/hdSt/drawItem.cpp	2026-09-11 21:03:32.105247165 -0700
+@@ -52,6 +52,7 @@
+         _GetVersion(GetVaryingPrimvarRange()),
+         _GetVersion(GetFaceVaryingPrimvarRange()),
+         _GetVersion(GetTopologyRange()),
++        _GetVersion(GetIndirectDrawCountRange()),
+         _GetVersion(GetTopologyVisibilityRange()),
+         _GetVersion(GetInstanceIndexRange()),
+         _GetVersion(_GetShaderBar(GetMaterialNetworkShader())));
+@@ -75,6 +76,7 @@
+         _GetElementOffset(GetVaryingPrimvarRange()),
+         _GetElementOffset(GetFaceVaryingPrimvarRange()),
+         _GetElementOffset(GetTopologyRange()),
++        _GetElementOffset(GetIndirectDrawCountRange()),
+         _GetElementOffset(GetTopologyVisibilityRange()),
+         _GetElementOffset(GetInstanceIndexRange()),
+         _GetElementOffset(_GetShaderBar(GetMaterialNetworkShader())));
+@@ -91,6 +93,13 @@
+ bool
+ HdStDrawItem::IntersectsViewVolume(GfMatrix4d const &viewProjMatrix) const
+ {
++    // External GPU draw-count providers currently publish no GPU-owned
++    // bounds BAR.  Treat their item as conservatively visible; otherwise a
++    // stale/empty CPU bound can cull a draw whose final count is GPU-owned.
++    // CPU-authored items retain the normal bounds/instance behavior below.
++    if (GetIndirectDrawCountRange()) {
++        return true;
++    }
+     if (GetInstanceIndexRange()) {
+         // XXX: need to test intersections of the bound of all instances.
+         return true;
+@@ -101,4 +110,3 @@
+ 
+ 
+ PXR_NAMESPACE_CLOSE_SCOPE
+-
+--- a/pxr/imaging/hdSt/indirectDrawBatch.h	2026-09-03 21:05:59.411146155 -0700
++++ b/pxr/imaging/hdSt/indirectDrawBatch.h	2026-09-11 20:55:45.385750010 -0700
+@@ -142,7 +142,8 @@
+                 HdSt_GeometricShaderSharedPtr const & geometricShader,
+                 HdStDispatchBufferSharedPtr const & dispatchBuffer,
+                 HdStBufferArrayRangeSharedPtr const & indexBar,
+-                _DrawingProgram const & program);
++                _DrawingProgram const & program,
++                bool allowIndirectDraw);
+ 
+     void _ExecuteFrustumCull(
+                 bool updateDispatchBuffer,
+@@ -161,6 +162,7 @@
+ 
+     std::vector<uint32_t> _drawCommandBuffer;
+     bool _drawCommandBufferDirty;
++    bool _gpuDrawCountsReady = true;
+     size_t _bufferArraysHash;
+     size_t _barElementOffsetsHash;
+ 
+--- a/pxr/imaging/hdSt/indirectDrawBatch.cpp	2026-09-03 21:05:59.411146155 -0700
++++ b/pxr/imaging/hdSt/indirectDrawBatch.cpp	2026-09-11 21:13:11.035763332 -0700
+@@ -21,6 +21,7 @@
+ #include "pxr/imaging/hdSt/glConversions.h"
+ #include "pxr/imaging/hdSt/materialNetworkShader.h"
+ #include "pxr/imaging/hdSt/indirectDrawBatch.h"
++#include "pxr/imaging/hdSt/indirectDrawCount.h"
+ #include "pxr/imaging/hdSt/renderPassState.h"
+ #include "pxr/imaging/hdSt/resourceRegistry.h"
+ #include "pxr/imaging/hdSt/shaderCode.h"
+@@ -124,7 +125,22 @@
+     _useInstanceCulling = _useInstancing &&
+         _useGpuCulling && IsEnabledGPUInstanceFrustumCulling();
+ 
+-    if (_useGpuCulling) {
++    // GPU-produced draw counts do not yet carry a GPU-owned bounds BAR.  Do
++    // not let frustum culling consume stale/empty CPU bounds and suppress a
++    // valid GPU item.  The draw-count copy remains fail-closed below; normal
++    // CPU-authored batches retain the existing culling path.
++    bool hasExternalGpuCount = false;
++    for (HdStDrawItemInstance const *instance : _drawItemInstances) {
++        if (instance && instance->GetDrawItem()->GetIndirectDrawCountRange()) {
++            hasExternalGpuCount = true;
++            break;
++        }
++    }
++    if (hasExternalGpuCount) {
++        _useGpuCulling = false;
++        _useInstanceCulling = false;
++    }
++    if (_useGpuCulling && !hasExternalGpuCount) {
+         _cullingProgram.Initialize(
+             _useDrawIndexed, _useInstanceCulling, _bufferArraysHash);
+     }
+@@ -747,6 +763,17 @@
+     // copy data
+     _dispatchBuffer->CopyData(_drawCommandBuffer);
+ 
++    bool hasExternalGpuCount = false;
++    for (HdStDrawItemInstance const *instance : _drawItemInstances) {
++        if (instance && instance->GetDrawItem()->GetIndirectDrawCountRange()) {
++            hasExternalGpuCount = true;
++            break;
++        }
++    }
++    if (hasExternalGpuCount) {
++        _useGpuCulling = false;
++        _useInstanceCulling = false;
++    }
+     if (_useGpuCulling) {
+         // Make a duplicate of the draw dispatch buffer to use as an input
+         // for GPU frustum culling (a single buffer cannot be bound for
+@@ -941,6 +968,9 @@
+         _ExecuteFrustumCull(updateBufferData,
+                             renderPassState, resourceRegistry);
+     }
++    _gpuDrawCountsReady = HdStApplyIndirectDrawCounts(
++        _drawItemInstances, _dispatchBuffer, resourceRegistry.get());
++    if (!_gpuDrawCountsReady) TF_WARN("Invalid GPU indirect draw-count range; skipping batch");
+ }
+ 
+ void
+@@ -1145,6 +1175,7 @@
+     HdStResourceRegistrySharedPtr const &resourceRegistry)
+ {
+     TRACE_FUNCTION();
++    if (!_gpuDrawCountsReady) return;
+     GLF_GROUP_FUNCTION();
+ 
+     if (!TF_VERIFY(!_drawItemInstances.empty())) return;
+@@ -1200,7 +1231,8 @@
+             geometricShader, _dispatchBuffer, state.indexBar);
+     } else {
+         _ExecuteDrawImmediate(
+-            geometricShader, _dispatchBuffer, state.indexBar, program);
++            geometricShader, _dispatchBuffer, state.indexBar, program,
++            capabilities->IsSet(HgiDeviceCapabilitiesBitsMultiDrawIndirect));
+     }
+ 
+     state.UnbindResourcesForDrawing(renderPassState, *capabilities);
+@@ -1260,7 +1292,8 @@
+     HdSt_GeometricShaderSharedPtr const & geometricShader,
+     HdStDispatchBufferSharedPtr const & dispatchBuffer,
+     HdStBufferArrayRangeSharedPtr const & indexBar,
+-    _DrawingProgram const & program)
++    _DrawingProgram const & program,
++    bool allowIndirectDraw)
+ {
+     TRACE_FUNCTION();
+ 
+@@ -1303,6 +1336,23 @@
+                     &currentTextureResourceID);
+             }
+ 
++            if (_drawItemInstances[i]->GetDrawItem()->GetIndirectDrawCountRange() &&
++                allowIndirectDraw) {
++                // Per-item texture rebinding can require this loop even when
++                // MDI is supported. Still consume the GPU command, never the
++                // host capacity stored in _drawCommandBuffer.
++                glDrawArraysIndirect(primitiveMode,
++                    reinterpret_cast<const void*>(static_cast<uintptr_t>(i) * stride));
++                continue;
++            }
++
++            // The host command contains only capacity for GPU-count items.
++            // Never use that capacity as a visible draw count when indirect
++            // drawing is unavailable.
++            if (_drawItemInstances[i]->GetDrawItem()->GetIndirectDrawCountRange()) {
++                continue;
++            }
++
+             glDrawArraysInstancedBaseInstance(
+                 primitiveMode,
+                 cmd->baseVertex,
+@@ -1336,6 +1386,17 @@
+             uint32_t const indexBufferByteOffset =
+                 static_cast<uint32_t>(cmd->baseIndex * sizeof(uint32_t));
+ 
++            if (_drawItemInstances[i]->GetDrawItem()->GetIndirectDrawCountRange() &&
++                allowIndirectDraw) {
++                glDrawElementsIndirect(primitiveMode, GL_UNSIGNED_INT,
++                    reinterpret_cast<const void*>(static_cast<uintptr_t>(i) * stride));
++                continue;
++            }
++
++            if (_drawItemInstances[i]->GetDrawItem()->GetIndirectDrawCountRange()) {
++                continue;
++            }
++
+             glDrawElementsInstancedBaseVertexBaseInstance(
+                 primitiveMode,
+                 cmd->count,
+--- a/pxr/imaging/hdSt/pipelineDrawBatch.h	2026-09-03 21:05:59.411916415 -0700
++++ b/pxr/imaging/hdSt/pipelineDrawBatch.h	2026-09-11 20:55:56.529717125 -0700
+@@ -166,6 +166,7 @@
+ 
+     std::vector<uint32_t> _drawCommandBuffer;
+     bool _drawCommandBufferDirty;
++    bool _gpuDrawCountsReady = true;
+ 
+     size_t _bufferArraysHash;
+     size_t _barElementOffsetsHash;
+--- a/pxr/imaging/hdSt/pipelineDrawBatch.cpp	2026-09-03 21:05:59.411868175 -0700
++++ b/pxr/imaging/hdSt/pipelineDrawBatch.cpp	2026-09-11 21:13:11.036763325 -0700
+@@ -18,6 +18,7 @@
+ #include "pxr/imaging/hdSt/hgiConversions.h"
+ #include "pxr/imaging/hdSt/materialNetworkShader.h"
+ #include "pxr/imaging/hdSt/indirectDrawBatch.h"
++#include "pxr/imaging/hdSt/indirectDrawCount.h"
+ #include "pxr/imaging/hdSt/renderPassState.h"
+ #include "pxr/imaging/hdSt/resourceRegistry.h"
+ #include "pxr/imaging/hdSt/shaderCode.h"
+@@ -130,7 +131,22 @@
+     _useInstanceCulling = _useInstancing &&
+         _useGpuCulling && IsEnabledGPUInstanceFrustumCulling();
+ 
+-    if (_useGpuCulling) {
++    // GPU-produced draw counts do not yet carry a GPU-owned bounds BAR.  Do
++    // not let frustum culling consume stale/empty CPU bounds and suppress a
++    // valid GPU item.  The draw-count copy remains fail-closed below; normal
++    // CPU-authored batches retain the existing culling path.
++    bool hasExternalGpuCount = false;
++    for (HdStDrawItemInstance const *instance : _drawItemInstances) {
++        if (instance && instance->GetDrawItem()->GetIndirectDrawCountRange()) {
++            hasExternalGpuCount = true;
++            break;
++        }
++    }
++    if (hasExternalGpuCount) {
++        _useGpuCulling = false;
++        _useInstanceCulling = false;
++    }
++    if (_useGpuCulling && !hasExternalGpuCount) {
+         _cullingProgram.Initialize(
+             _useDrawIndexed, _useInstanceCulling, _bufferArraysHash);
+     }
+@@ -857,6 +873,17 @@
+     // copy data
+     _dispatchBuffer->CopyData(_drawCommandBuffer);
+ 
++    bool hasExternalGpuCount = false;
++    for (HdStDrawItemInstance const *instance : _drawItemInstances) {
++        if (instance && instance->GetDrawItem()->GetIndirectDrawCountRange()) {
++            hasExternalGpuCount = true;
++            break;
++        }
++    }
++    if (hasExternalGpuCount) {
++        _useGpuCulling = false;
++        _useInstanceCulling = false;
++    }
+     if (_useGpuCulling) {
+         // Make a duplicate of the draw dispatch buffer to use as an input
+         // for GPU frustum culling (a single buffer cannot be bound for
+@@ -983,6 +1010,9 @@
+         _ExecuteFrustumCull(updateBufferData,
+                             renderPassState, resourceRegistry);
+     }
++    _gpuDrawCountsReady = HdStApplyIndirectDrawCounts(
++        _drawItemInstances, _dispatchBuffer, resourceRegistry.get());
++    if (!_gpuDrawCountsReady) TF_WARN("Invalid GPU indirect draw-count range; skipping batch");
+ }
+ 
+ void
+@@ -991,6 +1021,7 @@
+     HdStResourceRegistrySharedPtr const & resourceRegistry,
+     bool firstDrawBatch)
+ {
++    if (!_gpuDrawCountsReady) return;
+     if (_HasNothingToDraw()) return;
+ 
+     Hgi *hgi = resourceRegistry->GetHgi();
+@@ -1359,6 +1390,7 @@
+     bool firstDrawBatch)
+ {
+     TRACE_FUNCTION();
++    if (!_gpuDrawCountsReady) return;
+ 
+     if (!TF_VERIFY(!_drawItemInstances.empty())) return;
+ 
+@@ -1487,6 +1519,10 @@
+ 
+     if (!_useDrawIndexed) {
+         for (uint32_t i = 0; i < drawCount; ++i) {
++            if (_drawItemInstances[i]->GetDrawItem()->GetIndirectDrawCountRange()) {
++                TF_WARN("GPU draw counts require indirect-draw capability; skipping item");
++                continue;
++            }
+             _DrawNonIndexedCommand const * cmd =
+                 reinterpret_cast<_DrawNonIndexedCommand*>(
+                     &_drawCommandBuffer[i * strideUInt32]);
+@@ -1509,6 +1545,10 @@
+                     GetGeometricShader()->GetUseMetalTessellation();
+ 
+         for (uint32_t i = 0; i < drawCount; ++i) {
++            if (_drawItemInstances[i]->GetDrawItem()->GetIndirectDrawCountRange()) {
++                TF_WARN("GPU draw counts require indirect-draw capability; skipping item");
++                continue;
++            }
+             _DrawIndexedCommand const * cmd =
+                 reinterpret_cast<_DrawIndexedCommand*>(
+                     &_drawCommandBuffer[i * strideUInt32]);
+--- a/pxr/imaging/hdSt/basisCurves.cpp	2026-09-03 21:05:59.409893238 -0700
++++ b/pxr/imaging/hdSt/basisCurves.cpp	2026-09-11 21:22:16.320652935 -0700
+@@ -7,6 +7,7 @@
+ #include "pxr/pxr.h"
+ 
+ #include "pxr/imaging/hdSt/basisCurves.h"
++#include "pxr/imaging/hdSt/basisCurvesGpuDataSource.h"
+ #include "pxr/imaging/hdSt/basisCurvesComputations.h"
+ #include "pxr/imaging/hdSt/basisCurvesShaderKey.h"
+ #include "pxr/imaging/hdSt/basisCurvesTopology.h"
+@@ -41,9 +42,18 @@
+ #include "pxr/imaging/hd/primvarSchema.h"
+ 
+ #include "pxr/imaging/hd/sceneIndexAdapterSceneDelegate.h"
++#include "pxr/imaging/hgi/tokens.h"
++#include "pxr/imaging/hgi/capabilities.h"
++
++#include <set>
+ 
+ PXR_NAMESPACE_OPEN_SCOPE
+ 
++struct HdStBasisCurves::_GpuCallbackState {
++    HdStBasisCurves *owner = nullptr;
++    uint64_t epoch = 0;
++};
++
+ HdStBasisCurves::HdStBasisCurves(SdfPath const& id)
+     : HdBasisCurves(id)
+     , _topology()
+@@ -55,12 +65,17 @@
+     , _displayInOverlay(false)
+     , _occludedSelectionShowsThrough(false)
+     , _pointsShadingEnabled(false)
++    , _gpuProviderPresent(false)
++    , _gpuCallbackState(std::make_shared<_GpuCallbackState>())
+ {
+-    /*NOTHING*/
++    _gpuCallbackState->owner = this;
+ }
+ 
+ 
+-HdStBasisCurves::~HdStBasisCurves() = default;
++HdStBasisCurves::~HdStBasisCurves()
++{
++    _InvalidateGpuCallbackState();
++}
+ 
+ void
+ HdStBasisCurves::UpdateRenderTag(HdSceneDelegate *delegate,
+@@ -69,6 +84,202 @@
+     HdStUpdateRenderTag(delegate, renderParam, this);
+ }
+ 
++namespace {
++
++TfToken const _gpuBasisCurvesDataSourceToken("hdStBasisCurvesGpu");
++
++HdStBasisCurvesGpuTopologyMode
++_GetGpuTopologyMode(HdStDrawItem *drawItem)
++{
++    const int index = drawItem->GetDrawingCoord()->GetTopologyIndex();
++    if (index == HdDrawingCoord::CustomSlotsBegin) {
++        return HdStBasisCurvesGpuTopologyMode::Hull;
++    }
++    if (index == HdDrawingCoord::CustomSlotsBegin + 1) {
++        return HdStBasisCurvesGpuTopologyMode::Points;
++    }
++    return HdStBasisCurvesGpuTopologyMode::Curves;
++}
++
++} // anonymous namespace
++
++bool
++HdStBasisCurves::_StageGpuBundle(HdSceneDelegate *sceneDelegate,
++                                 HdRenderParam *renderParam)
++{
++    HdRenderIndex &renderIndex = sceneDelegate->GetRenderIndex();
++    HdSceneIndexPrim const prim =
++        renderIndex.GetTerminalSceneIndex()->GetPrim(GetId());
++    HdStBasisCurvesGpuDataSourceHandle const provider =
++        HdStBasisCurvesGpuDataSource::Cast(
++            prim.dataSource ? prim.dataSource->Get(_gpuBasisCurvesDataSourceToken)
++                            : HdDataSourceBaseHandle());
++    if (!provider) {
++        // A provider was removed: old indirect GPU counts must not shadow the
++        // host-authored topology path on the next ordinary sync.
++        if (_gpuProviderPresent) {
++            for (auto const &reprPair : _reprs) {
++                for (HdRepr::DrawItemUniquePtr const &item :
++                     reprPair.second->GetDrawItems()) {
++                    static_cast<HdStDrawItem *>(item.get())
++                        ->SetIndirectDrawCountRange({});
++                }
++            }
++            ++_gpuEpoch;
++            _gpuCallbackState->epoch = _gpuEpoch;
++            _pendingGpuBundle.reset();
++        }
++        return false;
++    }
++
++    // Supersede an older candidate before Prepare, including when Prepare
++    // subsequently fails.  Its callback will observe the new epoch and drop.
++    const uint64_t requestEpoch = ++_gpuEpoch;
++    _gpuCallbackState->epoch = requestEpoch;
++    _pendingGpuBundle.reset();
++    _gpuRenderParam = nullptr;
++
++    // Presence is authoritative: a provider that cannot make a complete next
++    // bundle preserves the old bundle (or an initially empty rprim), rather
++    // than falling through to CPU topology/primvar ingestion.
++    HdStResourceRegistrySharedPtr const registry =
++        std::static_pointer_cast<HdStResourceRegistry>(
++            renderIndex.GetResourceRegistry());
++    if (!registry || registry->GetHgi()->GetAPIName() != HgiTokens->OpenGL ||
++        !registry->GetHgi()->GetCapabilities()->IsSet(
++            HgiDeviceCapabilitiesBitsMultiDrawIndirect)) {
++        TF_WARN("HdSt GPU BasisCurves provider requires HgiGL with MultiDrawIndirect");
++        return true;
++    }
++
++    HdStBasisCurvesGpuPrepareRequest request;
++    request.rprimId = GetId();
++    std::set<HdStBasisCurvesGpuTopologyMode> modes;
++    for (auto const &reprPair : _reprs) {
++        HdReprSharedPtr const &repr = reprPair.second;
++        for (HdRepr::DrawItemUniquePtr const &item : repr->GetDrawItems()) {
++            modes.insert(_GetGpuTopologyMode(
++                static_cast<HdStDrawItem *>(item.get())));
++        }
++    }
++    request.topologyModes.assign(modes.begin(), modes.end());
++
++    HdStBasisCurvesGpuBundleSharedPtr const bundle =
++        provider->Prepare(registry.get(), request);
++    if (!bundle || !bundle->IsCompleteFor(request.topologyModes)) {
++        return true;
++    }
++
++    _pendingGpuBundle = bundle;
++    _gpuResourceRegistry = registry;
++    _gpuRenderParam = renderParam;
++    HdDisplayStyle const style = GetDisplayStyle(sceneDelegate);
++    _pendingGpuRefineLevel = style.refineLevel;
++    _pendingGpuDisplayInOverlay = style.displayInOverlay;
++    _pendingGpuOccludedSelectionShowsThrough =
++        style.occludedSelectionShowsThrough;
++    _pendingGpuPointsShadingEnabled = style.pointsShadingEnabled;
++    _gpuShadingStyle = sceneDelegate->GetShadingStyle(GetId())
++        .GetWithDefault<TfToken>();
++    std::shared_ptr<_GpuCallbackState> const callbackState = _gpuCallbackState;
++    registry->AddPostCommitCallback([callbackState, requestEpoch]() {
++        // Finalize/destruction clears owner before this callback can touch it.
++        if (!callbackState->owner || callbackState->epoch != requestEpoch) {
++            return;
++        }
++        callbackState->owner->_PublishGpuBundle();
++    });
++    return true;
++}
++
++void
++HdStBasisCurves::_PublishGpuBundle()
++{
++    HdStBasisCurvesGpuBundleSharedPtr const bundle = _pendingGpuBundle;
++    struct _PendingCleanup {
++        HdStBasisCurves *owner;
++        ~_PendingCleanup() {
++            owner->_pendingGpuBundle.reset();
++            owner->_gpuRenderParam = nullptr;
++        }
++    } cleanup{this};
++    if (!bundle || !bundle->Ready()) {
++        return;
++    }
++
++    // Metadata only: never feed this empty topology to a native index builder.
++    _topology = HdSt_BasisCurvesTopology::New(HdBasisCurvesTopology(
++        bundle->curveType, bundle->curveBasis, bundle->curveWrap,
++        VtIntArray(), VtIntArray()));
++    _refineLevel = _pendingGpuRefineLevel;
++    _displayInOverlay = _pendingGpuDisplayInOverlay;
++    _occludedSelectionShowsThrough = _pendingGpuOccludedSelectionShowsThrough;
++    _pointsShadingEnabled = _pendingGpuPointsShadingEnabled;
++    _basisWidthInterpolation = bundle->basisWidthInterpolation;
++    _basisNormalInterpolation = bundle->basisNormalInterpolation;
++
++    std::set<int> publishedSlots;
++    bool publishedVertex = false;
++    for (auto const &reprPair : _reprs) {
++        HdReprSharedPtr const &repr = reprPair.second;
++        for (HdRepr::DrawItemUniquePtr const &item : repr->GetDrawItems()) {
++            HdStDrawItem * const drawItem =
++                static_cast<HdStDrawItem *>(item.get());
++            if (!publishedVertex) {
++                HdStUpdateDrawItemBAR(bundle->vertexRange,
++                    drawItem->GetDrawingCoord()->GetVertexPrimvarIndex(),
++                    &_sharedData, _gpuRenderParam, nullptr);
++                publishedVertex = true;
++            }
++            const HdStBasisCurvesGpuTopologyRange * const topo =
++                bundle->FindTopologyRange(_GetGpuTopologyMode(drawItem));
++            const int topologySlot = drawItem->GetDrawingCoord()->GetTopologyIndex();
++            if (topo && publishedSlots.insert(topologySlot).second) {
++                HdStUpdateDrawItemBAR(topo->topologyRange, topologySlot,
++                    &_sharedData, _gpuRenderParam, nullptr);
++            }
++            if (topo) {
++                drawItem->SetIndirectDrawCountRange(topo->drawCountRange);
++            }
++        }
++    }
++    _sharedData.bounds = bundle->bounds;
++    _UpdateGpuGeometricShaders(_gpuRenderParam);
++    // drawCount BAR values are consumed by the indirect dispatch path and can
++    // change while the topology/vertex allocations are reused.
++    HdStMarkDrawBatchesDirty(_gpuRenderParam);
++}
++
++void
++HdStBasisCurves::_UpdateGpuGeometricShaders(HdRenderParam *renderParam)
++{
++    for (auto const &reprPair : _reprs) {
++        _BasisCurvesReprConfig::DescArray const &descs =
++            _GetReprDesc(reprPair.first);
++        HdReprSharedPtr const &repr = reprPair.second;
++        int drawItemIndex = 0;
++        for (HdBasisCurvesReprDesc const &desc : descs) {
++            if (desc.geomStyle != HdBasisCurvesGeomStyleInvalid) {
++                _UpdateDrawItemGeometricShader(nullptr, renderParam,
++                    static_cast<HdStDrawItem *>(
++                        repr->GetDrawItem(drawItemIndex++)), desc);
++            }
++        }
++    }
++}
++
++void
++HdStBasisCurves::_InvalidateGpuCallbackState()
++{
++    ++_gpuEpoch;
++    _pendingGpuBundle.reset();
++    _gpuRenderParam = nullptr;
++    if (_gpuCallbackState) {
++        _gpuCallbackState->owner = nullptr;
++        _gpuCallbackState->epoch = _gpuEpoch;
++    }
++}
++
+ 
+ void
+ HdStBasisCurves::Sync(HdSceneDelegate *delegate,
+@@ -76,6 +287,15 @@
+                       HdDirtyBits     *dirtyBits,
+                       TfToken const   &reprToken)
+ {
++    const bool hadGpuProvider = _gpuProviderPresent;
++    _gpuProviderPresent = _StageGpuBundle(delegate, renderParam);
++    if (hadGpuProvider && !_gpuProviderPresent) {
++        // Provider removal is the only authorization to resume ordinary
++        // authored ingestion; force it to rebuild without stale GPU counts.
++        *dirtyBits |= HdChangeTracker::DirtyTopology |
++            HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyNormals |
++            HdChangeTracker::DirtyWidths | HdChangeTracker::DirtyPrimvar;
++    }
+     _UpdateVisibility(delegate, dirtyBits);
+ 
+     bool updateMaterialTags = false;
+@@ -115,9 +335,10 @@
+         _UpdateMaterialTagsForAllReprs(delegate, renderParam);
+     }
+ 
+-    if (updateMaterialNetworkShader || updateGeometricShader) {
++    if (updateMaterialNetworkShader || (updateGeometricShader && !_gpuProviderPresent)) {
+         _UpdateShadersForAllReprs(delegate, renderParam,
+-                          updateMaterialNetworkShader, updateGeometricShader);
++                          updateMaterialNetworkShader,
++                          !_gpuProviderPresent && updateGeometricShader);
+     }
+ 
+ 
+@@ -132,6 +353,7 @@
+ void
+ HdStBasisCurves::Finalize(HdRenderParam *renderParam)
+ {
++    _InvalidateGpuCallbackState();
+     HdStMarkGarbageCollectionNeeded(renderParam);
+ 
+     HdStRenderParam * const stRenderParam =
+@@ -220,23 +442,23 @@
+     /* TOPOLOGY */
+     // XXX: _PopulateTopology should be split into two phase
+     //      for scene dirtybits and for repr dirtybits.
+-    if (*dirtyBits & (HdChangeTracker::DirtyTopology
++    if (!_gpuProviderPresent && (*dirtyBits & (HdChangeTracker::DirtyTopology
+                     | HdChangeTracker::DirtyDisplayStyle
+                     | DirtyIndices
+                     | DirtyHullIndices
+-                    | DirtyPointsIndices)) {
++                    | DirtyPointsIndices))) {
+         _PopulateTopology(
+             sceneDelegate, renderParam, drawItem, dirtyBits, desc);
+     }
+ 
+     /* PRIMVAR */
+-    if (HdChangeTracker::IsAnyPrimvarDirty(*dirtyBits, id)) {
++    if (!_gpuProviderPresent && HdChangeTracker::IsAnyPrimvarDirty(*dirtyBits, id)) {
+         _PopulateVertexPrimvars(
+             sceneDelegate, renderParam, drawItem, dirtyBits);
+     }
+-    if (*dirtyBits & HdChangeTracker::DirtyNormals ||
++    if (!_gpuProviderPresent && (*dirtyBits & HdChangeTracker::DirtyNormals ||
+         *dirtyBits & HdChangeTracker::DirtyWidths ||
+-        *dirtyBits & HdChangeTracker::DirtyPrimvar) {
++        *dirtyBits & HdChangeTracker::DirtyPrimvar)) {
+         _PopulateVaryingPrimvars(
+             sceneDelegate, renderParam, drawItem, dirtyBits);
+         _PopulateElementPrimvars(
+@@ -281,11 +503,17 @@
+ {
+     if (!TF_VERIFY(_topology)) return;
+ 
+-    HdRenderIndex &renderIndex = sceneDelegate->GetRenderIndex();
+-    
+-    HdStResourceRegistrySharedPtr resourceRegistry =
+-        std::static_pointer_cast<HdStResourceRegistry>(
++    HdStResourceRegistrySharedPtr resourceRegistry;
++    if (sceneDelegate) {
++        HdRenderIndex &renderIndex = sceneDelegate->GetRenderIndex();
++        resourceRegistry = std::static_pointer_cast<HdStResourceRegistry>(
+             renderIndex.GetResourceRegistry());
++    } else {
++        resourceRegistry = _gpuResourceRegistry;
++    }
++    if (!TF_VERIFY(resourceRegistry)) {
++        return;
++    }
+     
+     TfToken curveType = _topology->GetCurveType();
+     TfToken curveBasis = _topology->GetCurveBasis();
+@@ -365,7 +593,8 @@
+     TfToken shadingTerminal = desc.shadingTerminal;
+     if (shadingTerminal == HdBasisCurvesReprDescTokens->surfaceShader) {
+         TfToken shadingStyle =
+-            sceneDelegate->GetShadingStyle(GetId()).GetWithDefault<TfToken>();
++            sceneDelegate ? sceneDelegate->GetShadingStyle(GetId())
++                          .GetWithDefault<TfToken>() : _gpuShadingStyle;
+         if (shadingStyle == HdStTokens->constantLighting) {
+             shadingTerminal = HdBasisCurvesReprDescTokens->surfaceShaderUnlit;
+         }
+--- /dev/null	2026-09-05 05:33:08.808959794 -0700
++++ b/pxr/imaging/hdSt/basisCurvesGpuDataSource.h	2026-09-11 20:54:59.376883693 -0700
+@@ -0,0 +1,123 @@
++//
++// usdGen development extension for OpenUSD
++//
++// Licensed under the terms set forth in the LICENSE.txt file available at
++// https://openusd.org/license.
++//
++#ifndef PXR_IMAGING_HD_ST_BASIS_CURVES_GPU_DATA_SOURCE_H
++#define PXR_IMAGING_HD_ST_BASIS_CURVES_GPU_DATA_SOURCE_H
++
++#include "pxr/pxr.h"
++#include "pxr/imaging/hdSt/api.h"
++
++#include "pxr/imaging/hd/dataSource.h"
++#include "pxr/imaging/hd/bufferArrayRange.h"
++
++#include "pxr/base/gf/bbox3d.h"
++#include "pxr/base/tf/token.h"
++#include "pxr/usd/sdf/path.h"
++
++#include <cstdint>
++#include <functional>
++#include <memory>
++#include <vector>
++
++PXR_NAMESPACE_OPEN_SCOPE
++
++class HdStResourceRegistry;
++
++/// The topology slots used by BasisCurves representations.  A provider is
++/// asked only for slots currently required by active representations.
++enum class HdStBasisCurvesGpuTopologyMode : uint8_t {
++    Curves,
++    Hull,
++    Points
++};
++
++using HdStBasisCurvesGpuTopologyModeVector =
++    std::vector<HdStBasisCurvesGpuTopologyMode>;
++
++/// Input to a GPU curve provider.  Prepare is called during Sync.  The
++/// provider owns allocation and computation queueing against ‘registry’;
++/// HdSt only stages the returned immutable BAR bundle for publication after
++/// Commit.
++struct HdStBasisCurvesGpuPrepareRequest {
++    SdfPath rprimId;
++    HdStBasisCurvesGpuTopologyModeVector topologyModes;
++};
++
++/// A topology BAR and the one-element GPU draw-count BAR paired with it.
++/// topologyRange's element count is a capacity.  drawCountRange, not that
++/// capacity, is the true draw index/vertex count for the GPU indirect path
++/// (for example, four times a cubic record count).
++struct HdStBasisCurvesGpuTopologyRange {
++    HdStBasisCurvesGpuTopologyMode mode =
++        HdStBasisCurvesGpuTopologyMode::Curves;
++    HdBufferArrayRangeSharedPtr topologyRange;
++    HdBufferArrayRangeSharedPtr drawCountRange;
++};
++
++/// Immutable complete generation prepared by an external GPU producer.
++/// The provider must queue all BAR allocation/computations in Prepare and
++/// must not mutate this object thereafter.  vertexRange may contain a
++/// composite layout (points, widths, hairT, etc.); per-channel CPU fallback
++/// is intentionally not part of this contract.
++struct HdStBasisCurvesGpuBundle {
++    uint64_t generation = 0;
++    TfToken curveType;
++    TfToken curveBasis;
++    TfToken curveWrap;
++    GfBBox3d bounds;
++    bool basisWidthInterpolation = false;
++    bool basisNormalInterpolation = false;
++
++    HdBufferArrayRangeSharedPtr vertexRange;
++    std::vector<HdStBasisCurvesGpuTopologyRange> topologyRanges;
++
++    /// Called only after HdStResourceRegistry has committed the work queued by
++    /// Prepare.  It must validate every requested topology, draw-count, and
++    /// vertex computation.  A false result keeps the prior complete bundle
++    /// visible (or leaves an initially unpublished prim empty).
++    std::function<bool()> ready;
++
++    HDST_API
++    bool IsCompleteFor(
++        HdStBasisCurvesGpuTopologyModeVector const &requestedModes) const;
++
++    HDST_API
++    bool Ready() const;
++
++    HDST_API
++    HdStBasisCurvesGpuTopologyRange const *FindTopologyRange(
++        HdStBasisCurvesGpuTopologyMode mode) const;
++};
++
++using HdStBasisCurvesGpuBundleSharedPtr =
++    std::shared_ptr<const HdStBasisCurvesGpuBundle>;
++
++/// HdSt-owned opaque scene-index datasource.  An application may derive this
++/// class and place it under its own scene data only by using the public HdSt
++/// token selected by its integration.  HdSt has no dependency on the
++/// application or on any GPU runtime.
++class HdStBasisCurvesGpuDataSource : public HdDataSourceBase
++{
++public:
++    HD_DECLARE_DATASOURCE_ABSTRACT(HdStBasisCurvesGpuDataSource);
++
++    /// Prepare a complete generation during Sync.  Prepare owns all resource
++    /// allocation and AddComputation calls.  Null is a failed/unavailable
++    /// generation, not permission for HdSt to ingest CPU curve attributes.
++    virtual HdStBasisCurvesGpuBundleSharedPtr Prepare(
++        HdStResourceRegistry *registry,
++        HdStBasisCurvesGpuPrepareRequest const &request) = 0;
++
++protected:
++    HDST_API
++    ~HdStBasisCurvesGpuDataSource() override;
++};
++
++HD_DECLARE_DATASOURCE_HANDLES(HdStBasisCurvesGpuDataSource);
++
++PXR_NAMESPACE_CLOSE_SCOPE
++
++#endif // PXR_IMAGING_HD_ST_BASIS_CURVES_GPU_DATA_SOURCE_H
+--- /dev/null	2026-09-05 05:33:08.808959794 -0700
++++ b/pxr/imaging/hdSt/basisCurvesGpuDataSource.cpp	2026-09-11 20:49:40.420688875 -0700
+@@ -0,0 +1,57 @@
++//
++// usdGen development extension for OpenUSD
++//
++// Licensed under the terms set forth in the LICENSE.txt file available at
++// https://openusd.org/license.
++//
++#include "pxr/pxr.h"
++#include "pxr/imaging/hdSt/basisCurvesGpuDataSource.h"
++
++#include <algorithm>
++
++PXR_NAMESPACE_OPEN_SCOPE
++
++HdStBasisCurvesGpuDataSource::~HdStBasisCurvesGpuDataSource() = default;
++
++HdStBasisCurvesGpuTopologyRange const *
++HdStBasisCurvesGpuBundle::FindTopologyRange(
++    HdStBasisCurvesGpuTopologyMode const mode) const
++{
++    const auto it = std::find_if(
++        topologyRanges.begin(), topologyRanges.end(),
++        [mode](HdStBasisCurvesGpuTopologyRange const &range) {
++            return range.mode == mode;
++        });
++    return it == topologyRanges.end() ? nullptr : &*it;
++}
++
++bool
++HdStBasisCurvesGpuBundle::IsCompleteFor(
++    HdStBasisCurvesGpuTopologyModeVector const &requestedModes) const
++{
++    // Generation zero is the first valid producer generation.  Bundle
++    // presence and the resources below, rather than the numeric stamp,
++    // establish whether this candidate is complete.
++    if (curveType.IsEmpty() || !vertexRange ||
++        !vertexRange->IsValid()) {
++        return false;
++    }
++    for (HdStBasisCurvesGpuTopologyMode const mode : requestedModes) {
++        HdStBasisCurvesGpuTopologyRange const * const range =
++            FindTopologyRange(mode);
++        if (!range || !range->topologyRange || !range->drawCountRange ||
++            !range->topologyRange->IsValid() ||
++            !range->drawCountRange->IsValid()) {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool
++HdStBasisCurvesGpuBundle::Ready() const
++{
++    return ready && ready();
++}
++
++PXR_NAMESPACE_CLOSE_SCOPE
+--- /dev/null	2026-09-05 05:33:08.808959794 -0700
++++ b/pxr/imaging/hdSt/indirectDrawCount.h	2026-09-11 21:06:48.356564161 -0700
+@@ -0,0 +1,21 @@
++// usdGen development extension for OpenUSD.
++// Licensed under the terms at https://openusd.org/license.
++#ifndef PXR_IMAGING_HD_ST_INDIRECT_DRAW_COUNT_H
++#define PXR_IMAGING_HD_ST_INDIRECT_DRAW_COUNT_H
++#include "pxr/pxr.h"
++#include "pxr/imaging/hdSt/api.h"
++#include <memory>
++#include <vector>
++PXR_NAMESPACE_OPEN_SCOPE
++class HdStDrawItemInstance;
++class HdStDispatchBuffer;
++class HdStResourceRegistry;
++// Called after command uploads/culling, before drawing. Copies only the count
++// word, preserving GPU culling's instance count and all aggregate offsets.
++// False means fail closed: the caller must not execute/encode this batch.
++HDST_API bool HdStApplyIndirectDrawCounts(
++    std::vector<HdStDrawItemInstance const *> const &items,
++    std::shared_ptr<HdStDispatchBuffer> const &dispatch,
++    HdStResourceRegistry *registry);
++PXR_NAMESPACE_CLOSE_SCOPE
++#endif
+--- /dev/null	2026-09-05 05:33:08.808959794 -0700
++++ b/pxr/imaging/hdSt/indirectDrawCount.cpp	2026-09-11 21:06:48.357564157 -0700
+@@ -0,0 +1,84 @@
++// usdGen development extension for OpenUSD.
++// Licensed under the terms at https://openusd.org/license.
++#include "pxr/imaging/hdSt/indirectDrawCount.h"
++#include "pxr/imaging/hdSt/drawItemInstance.h"
++#include "pxr/imaging/hdSt/dispatchBuffer.h"
++#include "pxr/imaging/hdSt/resourceRegistry.h"
++#include "pxr/imaging/hd/tokens.h"
++#include "pxr/imaging/hgi/blitCmds.h"
++#include "pxr/imaging/hgi/blitCmdsOps.h"
++#include "pxr/imaging/hgi/buffer.h"
++#include <limits>
++PXR_NAMESPACE_OPEN_SCOPE
++namespace {
++bool _Fits(size_t offset, size_t size, size_t capacity) {
++    return offset <= capacity && size <= capacity - offset;
++}
++}
++bool HdStApplyIndirectDrawCounts(
++    std::vector<HdStDrawItemInstance const *> const &items,
++    std::shared_ptr<HdStDispatchBuffer> const &dispatch,
++    HdStResourceRegistry *registry)
++{
++    bool any = false;
++    for (auto const *item : items) {
++        if (!item) return false;
++        any |= bool(item->GetDrawItem()->GetIndirectDrawCountRange());
++    }
++    if (!any) return true;
++    if (!registry || !dispatch || dispatch->GetCount() < 0 ||
++        size_t(dispatch->GetCount()) != items.size()) return false;
++    const auto destination = dispatch->GetResource(HdTokens->drawDispatch);
++    if (!destination || !destination->GetHandle() || destination->GetOffset() < 0 ||
++        destination->GetStride() == 0)
++        return false;
++    const size_t stride = size_t(dispatch->GetCommandNumUints()) * sizeof(uint32_t);
++    if (stride < sizeof(uint32_t) || destination->GetStride() != stride)
++        return false;
++    // HdStDispatchBuffer is monolithic; its dispatch BAR intentionally does
++    // not implement GetByteOffset().  The resource offset is therefore the
++    // complete destination address.
++    const size_t destinationOffset = size_t(destination->GetOffset());
++    if (destinationOffset % alignof(uint32_t)) return false;
++    const size_t capacity = destination->GetHandle()->GetByteSizeOfResource();
++    std::vector<HgiBufferGpuToGpuOp> copies;
++    copies.reserve(items.size());
++    const TfToken name("drawCount");
++    for (size_t i = 0; i < items.size(); ++i) {
++        auto const &range = items[i]->GetDrawItem()->GetIndirectDrawCountRange();
++        if (!range) continue;
++        auto sourceRange = std::dynamic_pointer_cast<HdStBufferArrayRange>(range);
++        auto source = sourceRange ? sourceRange->GetResource(name) : nullptr;
++        if (!source || sourceRange->GetNumElements() != 1 ||
++            source->GetTupleType() != HdTupleType{HdTypeUInt32, 1} ||
++            !source->GetHandle() || source->GetOffset() < 0 ||
++            sourceRange->GetByteOffset(name) < 0 || source->GetStride() < 4)
++            return false;
++        const size_t fieldOffset = size_t(source->GetOffset());
++        const size_t rangeOffset = size_t(sourceRange->GetByteOffset(name));
++        if (fieldOffset > std::numeric_limits<size_t>::max() - rangeOffset ||
++            i > (std::numeric_limits<size_t>::max() - destinationOffset) / stride)
++            return false;
++        HgiBufferGpuToGpuOp op;
++        op.gpuSourceBuffer = source->GetHandle();
++        op.gpuDestinationBuffer = destination->GetHandle();
++        op.sourceByteOffset = fieldOffset + rangeOffset;
++        op.destinationByteOffset = destinationOffset + i * stride;
++        op.byteSize = sizeof(uint32_t);
++        if (op.sourceByteOffset % alignof(uint32_t) || !_Fits(op.sourceByteOffset, op.byteSize,
++                   source->GetHandle()->GetByteSizeOfResource()) ||
++            !_Fits(op.destinationByteOffset, op.byteSize, capacity)) return false;
++        copies.push_back(op);
++    }
++    // Native dispatch uploads may still be queued when culling is disabled.
++    // Submit earlier work first; no host fence or readback is needed.
++    registry->SubmitBlitWork();
++    registry->SubmitComputeWork();
++    auto *commands = registry->GetGlobalBlitCmds();
++    commands->InsertMemoryBarrier(HgiMemoryBarrierAll);
++    for (auto const &copy : copies) commands->CopyBufferGpuToGpu(copy);
++    commands->InsertMemoryBarrier(HgiMemoryBarrierAll);
++    registry->SubmitBlitWork();
++    return true;
++}
++PXR_NAMESPACE_CLOSE_SCOPE

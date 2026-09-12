@@ -8,10 +8,16 @@
 #include "pxr/imaging/hdSt/bufferArrayRange.h"
 #include "pxr/imaging/hdSt/bufferResource.h"
 #include "pxr/imaging/hdSt/computation.h"
+#include "pxr/imaging/hdSt/drawItem.h"
+#include "pxr/imaging/hdSt/drawItemInstance.h"
+#include "pxr/imaging/hdSt/dispatchBuffer.h"
+#include "pxr/imaging/hdSt/indirectDrawCount.h"
+#include "pxr/imaging/hd/vtBufferSource.h"
 #include "pxr/imaging/hdSt/resourceRegistry.h"
 #include "pxr/imaging/hdSt/primUtils.h"
 #include "pxr/imaging/hdSt/renderParam.h"
 #include "pxr/imaging/hgiGL/hgi.h"
+#include "pxr/imaging/hgiGL/buffer.h"
 
 #include <atomic>
 #include <cstdio>
@@ -19,6 +25,7 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include "pxr/base/gf/range3d.h"
 
 PXR_NAMESPACE_USING_DIRECTIVE
 namespace {
@@ -141,6 +148,72 @@ void ConcurrentRegistration(HdStResourceRegistry& registry) {
     for (int count : visited) Check(count == 1, "parallel registration delivered exactly once");
     Check(wrongThread == 0, "parallel registrations execute serially on graphics owner");
 }
+
+void VisibilityPolicy() {
+    HdRprimSharedData shared(1);
+    HdStDrawItem item(&shared);
+    shared.bounds.SetRange(GfRange3d(GfVec3d(-0.25), GfVec3d(0.25)));
+    Check(item.IntersectsViewVolume(GfMatrix4d(1)),
+          "ordinary CPU draw item remains visible in frustum");
+    shared.bounds.SetRange(GfRange3d(GfVec3d(10), GfVec3d(11)));
+    Check(!item.IntersectsViewVolume(GfMatrix4d(1)),
+          "ordinary CPU draw item remains culled outside frustum");
+}
+
+void IndirectDrawCountCopy(HdStResourceRegistry& registry, HgiGL& hgi) {
+    HdBufferSpecVector specs;
+    specs.emplace_back(TfToken("drawCount"), HdTupleType{HdTypeUInt32, 1});
+    auto countRange = registry.AllocateNonUniformBufferArrayRange(
+        HdTokens->primvar, specs, HdBufferArrayUsageHintBitsStorage);
+    registry.AddSource(countRange, std::make_shared<HdVtBufferSource>(
+        TfToken("drawCount"), VtValue(uint32_t(3))));
+    registry.Commit();
+
+    auto dispatch = std::make_shared<HdStDispatchBuffer>(
+        &registry, HdTokens->drawDispatch, 1, 5);
+    dispatch->AddBufferResourceView(HdTokens->drawDispatch,
+        HdTupleType{HdTypeUInt32, 1}, 0);
+    dispatch->CopyData({99, 7, 8, 9, 10});
+
+    HdRprimSharedData shared(1);
+    HdStDrawItem item(&shared);
+    item.SetIndirectDrawCountRange(countRange);
+    HdStDrawItemInstance instance(&item);
+    std::vector<HdStDrawItemInstance const *> items{&instance};
+    Check(HdStApplyIndirectDrawCounts(items, dispatch, &registry),
+          "valid GPU draw-count range accepted");
+    registry.SubmitBlitWork(HgiSubmitWaitTypeWaitUntilCompleted);
+
+    auto *buffer = dynamic_cast<HgiGLBuffer *>(
+        dispatch->GetEntireResource()->GetHandle().Get());
+    uint32_t words[5] = {};
+    if (buffer) {
+        glBindBuffer(GL_ARRAY_BUFFER, buffer->GetRawResource());
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(words), words);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    Check(buffer && words[0] == 3 && words[1] == 7 && words[2] == 8 &&
+              words[3] == 9 && words[4] == 10,
+          "GPU draw-count copy replaces only the count word");
+
+    shared.bounds.SetRange(GfRange3d(GfVec3d(10), GfVec3d(11)));
+    Check(item.IntersectsViewVolume(GfMatrix4d(1)),
+          "GPU-count item remains conservatively visible outside CPU bounds");
+    item.SetIndirectDrawCountRange({});
+    Check(!item.IntersectsViewVolume(GfMatrix4d(1)),
+          "removing GPU count restores ordinary CPU bounds culling");
+
+    HdBufferSpecVector badSpecs;
+    badSpecs.emplace_back(TfToken("drawCount"), HdTupleType{HdTypeUInt32, 1});
+    auto badRange = registry.AllocateNonUniformBufferArrayRange(
+        HdTokens->primvar, badSpecs, HdBufferArrayUsageHintBitsStorage);
+    registry.AddSource(badRange, std::make_shared<HdVtBufferSource>(
+        TfToken("drawCount"), VtValue(VtUIntArray{1, 2})));
+    registry.Commit();
+    item.SetIndirectDrawCountRange(badRange);
+    Check(!HdStApplyIndirectDrawCounts(items, dispatch, &registry),
+          "non-singleton GPU draw-count range rejected");
+}
 } // namespace
 
 int main() {
@@ -153,6 +226,8 @@ int main() {
         Publication(registry);
         CallbackPhases(registry);
         ConcurrentRegistration(registry);
+        VisibilityPolicy();
+        IndirectDrawCountCopy(registry, hgi);
     }
     std::weak_ptr<int> retained;
     bool invoked = false;

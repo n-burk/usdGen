@@ -43,6 +43,19 @@ set_tests_properties(testUsdGenStormCommitPublication PROPERTIES
     LABELS "T2;storm-extension;publication" SKIP_RETURN_CODE 77 TIMEOUT 60
     ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
 
+# Native retained-scene-index ingress smoke test.  This intentionally remains
+# separate from the BAR-only publication test: it registers a real retained
+# scene index with Storm and supplies the hdStBasisCurvesGpu datasource.
+add_executable(testUsdGenNativeBasisCurves testUsdGenNativeBasisCurves.cpp)
+target_include_directories(testUsdGenNativeBasisCurves PRIVATE
+    ../../usdGenShaders/test)
+target_link_libraries(testUsdGenNativeBasisCurves PRIVATE
+    usdGenPatchedStorm hdx ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenNativeBasisCurves COMMAND testUsdGenNativeBasisCurves)
+set_tests_properties(testUsdGenNativeBasisCurves PROPERTIES
+    LABELS "T2;storm-extension;native-basis-curves" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+
 set(USDGEN_CUDA_BUILD_DIR "" CACHE PATH "Optional matching usdGen CUDA build for real transfer validation")
 if(USDGEN_CUDA_BUILD_DIR)
     find_package(CUDAToolkit REQUIRED)
@@ -63,5 +76,33 @@ if(USDGEN_CUDA_BUILD_DIR)
     add_test(NAME testUsdGenStormCudaPublication COMMAND testUsdGenStormCudaPublication)
     set_tests_properties(testUsdGenStormCudaPublication PROPERTIES
         LABELS "T2;storm-extension;publication;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+    add_executable(testUsdGenCudaBasisCurvesProvider testCudaBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp)
+    target_compile_definitions(testUsdGenCudaBasisCurvesProvider PRIVATE
+        USDGEN_HAS_CUDA_GL_INTEROP USDGEN_ENABLE_CUDA)
+    target_include_directories(testUsdGenCudaBasisCurvesProvider PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenCudaBasisCurvesProvider PRIVATE usdGenPatchedStorm
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so" "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenCudaBasisCurvesProvider COMMAND testUsdGenCudaBasisCurvesProvider)
+    set_tests_properties(testUsdGenCudaBasisCurvesProvider PROPERTIES
+        LABELS "T2;storm-extension;basis-curves;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+    add_executable(testUsdGenCudaNativeBasisCurves testCudaNativeBasisCurves.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp)
+    target_compile_definitions(testUsdGenCudaNativeBasisCurves PRIVATE
+        USDGEN_HAS_CUDA_GL_INTEROP USDGEN_ENABLE_CUDA)
+    target_include_directories(testUsdGenCudaNativeBasisCurves PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenCudaNativeBasisCurves PRIVATE usdGenPatchedStorm hdx
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so" "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenCudaNativeBasisCurves COMMAND testUsdGenCudaNativeBasisCurves)
+    set_tests_properties(testUsdGenCudaNativeBasisCurves PROPERTIES
+        LABELS "T2;storm-extension;native-basis-curves;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
         ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
 endif()
