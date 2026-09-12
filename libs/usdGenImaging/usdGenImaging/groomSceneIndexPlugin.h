@@ -38,6 +38,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -60,7 +61,8 @@ class UsdGenGroomSceneIndex final
 public:
     static HdSceneIndexBaseRefPtr New(
         HdSceneIndexBaseRefPtr const &inputScene,
-        int renderInstanceId = 0);
+        int renderInstanceId = 0,
+        bool enableDeviceGroupIngress = false);
 
     // -- HdSceneIndexInterface ------------------------------------------------
     HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
@@ -98,7 +100,8 @@ private:
 
     UsdGenGroomSceneIndex(
         HdSceneIndexBaseRefPtr const &inputScene,
-        int renderInstanceId);
+        int renderInstanceId,
+        bool enableDeviceGroupIngress);
     ~UsdGenGroomSceneIndex() override;
 
     // Hydra capture stays on the caller/notice boundary. Only owning value
@@ -135,9 +138,11 @@ public:
     UsdGenGroomSceneIndexPlugin() = default;
 
 protected:
-    // HdSceneIndexPlugin interface: splice UsdGenGroomSceneIndex on top of
-    // the input (2-arg overload; no render-instance discrimination needed).
+    // HdSceneIndexPlugin interface: registry inputArgs carries the exact
+    // renderer display name. Device ingress is admitted only for the private
+    // GL group path; other delegates retain the CPU publication route.
     HdSceneIndexBaseRefPtr _AppendSceneIndex(
+        const std::string &renderInstanceId,
         const HdSceneIndexBaseRefPtr &inputScene,
         const HdContainerDataSourceHandle &inputArgs) override;
 

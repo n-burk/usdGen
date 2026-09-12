@@ -146,6 +146,7 @@ struct UsdGenImagingSession::State {
         input.context = context;
         input.reason = request.reason;
         input.desc = std::move(staged);
+        input.devicePublication = request.devicePublication;
         input.callerDevice = callerDevice;
         ++outstanding;
         try {

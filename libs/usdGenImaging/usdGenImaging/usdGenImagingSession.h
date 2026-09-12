@@ -2,9 +2,10 @@
 // (06-imaging.md §3.7; ADR §4.5 "sessions across chains").
 //
 // Stage-free key (plan 13 §7): a nonempty usdGen:sessionId explicitly
-// shares a groom session across renderer chains. Without one, the groom
-// path is scoped to its render instance; unrelated stages never collide
-// merely because they use the same path. No stage registry is consulted.
+// shares a CPU groom session across renderer chains. Device/GL publication
+// sets rendererLocal, retaining the renderer instance in the key because its
+// CUDA/GL resources cannot be shared across registries. Without an id, every
+// groom is scoped to its render instance. No stage registry is consulted.
 //
 // The store holds the session alive (strong refs); scene indices hold weak
 // handles and re-attach on construction (S15). A renderer switch therefore
@@ -38,11 +39,19 @@ struct UsdGenSessionKey
     std::string     sessionId;  // explicit cross-renderer sharing identity
     SdfPath         groomRoot;  // the UsdGenGroom prim path this session serves
     uint64_t        renderInstanceId = 0; // used only without sessionId
+    // CUDA/GL device generations own renderer-registry resources and must
+    // never cross a renderer boundary, even when an authored sessionId would
+    // otherwise request CPU session sharing. Appended for aggregate callers.
+    bool            rendererLocal = false;
 
     bool operator==(UsdGenSessionKey const &rhs) const
     {
-        return sessionId == rhs.sessionId && groomRoot == rhs.groomRoot &&
-               (!sessionId.empty() || renderInstanceId == rhs.renderInstanceId);
+        if (sessionId != rhs.sessionId || groomRoot != rhs.groomRoot ||
+            rendererLocal != rhs.rendererLocal) return false;
+        // An authored CPU session is deliberately shareable.  Anonymous and
+        // renderer-local sessions both include their renderer identity.
+        return (!sessionId.empty() && !rendererLocal) ||
+            renderInstanceId == rhs.renderInstanceId;
     }
 };
 
@@ -50,11 +59,13 @@ struct UsdGenSessionKeyHash
 {
     std::size_t operator()(UsdGenSessionKey const &k) const
     {
-        const std::size_t h0 = k.sessionId.empty()
+        const std::size_t h0 = (k.sessionId.empty() || k.rendererLocal)
             ? std::hash<uint64_t>()(k.renderInstanceId) : 0;
         const std::size_t h1 = std::hash<std::string>()(k.sessionId);
         const std::size_t h2 = std::hash<std::string>()(k.groomRoot.GetText());
-        return h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 << 1 | h2 >> 31);
+        const std::size_t h3 = std::hash<bool>()(k.rendererLocal);
+        return h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 << 1 | h2 >> 31) ^
+            (h3 * 0x85EBCA6Bull);
     }
 };
 
@@ -130,6 +141,9 @@ public:
         std::shared_ptr<const usdGen::UsdGenGraphDesc> desc;
         // Upstream owner relays preserve the original CUDA caller affinity.
         std::optional<int> callerDevice;
+        // Relayed atomically to the core commit owner.  Absent preserves the
+        // core session's existing renderer-admission selection.
+        std::optional<bool> devicePublication;
     };
     using Completion = std::function<void(CommitPayload const&,
         usdGen::UsdGenExecutionPipeline::Outcome)>;

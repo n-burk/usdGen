@@ -2,6 +2,7 @@
 // re-entry, retirement, and terminal shutdown behavior.
 
 #include "usdGen/opRegistry.h"
+#include "usdGen/cudaExecution.h"
 #include "usdGenImaging/usdGenImagingSession.h"
 #include "usdGenImaging/groomSceneIndexPlugin.h"
 
@@ -91,6 +92,50 @@ UsdGenGraphDesc MakeDesc(float width)
     widthNode.inputs = {SdfPath("/asyncImaging/grow")};
     widthNode.params.push_back({TfToken("width"), VtValue(width), false});
     desc.nodes.push_back(std::move(widthNode));
+    return desc;
+}
+
+// Keep this CUDA descriptor intentionally scalar and source-only.  The
+// request-relay test must reach the cooker admission check; the ordinary
+// Scatter/Grow fixture is not admitted by the CUDA graph compiler.
+UsdGenGraphDesc MakeCudaSourceDesc()
+{
+    UsdGenGraphDesc desc;
+    desc.description = SdfPath("/asyncImaging/cudaRequest");
+    desc.executionBackend = UsdGenExecutionBackend::Cuda;
+    desc.defaultWidth = .025f;
+
+    UsdGenNodeDesc source;
+    source.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("Source"));
+    source.type = TfToken("UsdGenCurveSource");
+    source.curves = {SdfPath("/asyncImaging/cudaRequest/curves")};
+    source.surfaces = {SdfPath("/asyncImaging/cudaRequest/surface")};
+    desc.terminal = source.path;
+    desc.nodes.push_back(source);
+
+    UsdGenSurfaceDesc surface;
+    surface.path = source.surfaces.front();
+    surface.faceVertexCounts = VtIntArray{3};
+    surface.faceVertexIndices = VtIntArray{0, 1, 2};
+    surface.restPoints = VtVec3fArray{
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0)};
+    surface.points = surface.restPoints;
+    desc.surfaces.push_back(std::move(surface));
+
+    UsdGenCurveSetDesc curves;
+    curves.path = source.curves.front();
+    curves.role = UsdGenRole::Curves;
+    curves.curveRole = TfToken("hair");
+    curves.curveVertexCounts = VtIntArray{2, 3};
+    curves.points = VtVec3fArray{
+        GfVec3f(0, 0, 0), GfVec3f(0, 1, 0), GfVec3f(1, 0, 0),
+        GfVec3f(1, .5f, 0), GfVec3f(1, 1, 0)};
+    curves.rest = curves.points;
+    curves.curveId = {37, 91};
+    curves.skinPrim = VtIntArray{0, 0};
+    curves.skinPrimUv = VtVec2fArray{GfVec2f(0, 0), GfVec2f(1, 0)};
+    desc.curveSets.push_back(std::move(curves));
     return desc;
 }
 
@@ -189,6 +234,91 @@ void TestPairedConcurrentRequests()
     Check(accepted.load() == 2, "both concurrent imaging requests are accepted");
     Check(publications.load() > 0 && publications.load() <= accepted.load() && mismatches.load() == 0,
           "published imaging payload keeps descriptor geometry paired with frame");
+    session->Shutdown();
+    session.Reset();
+    UsdGenImagingSession::DrainRetired();
+}
+
+void TestDevicePublicationRequestRelay()
+{
+    auto session = NewSession();
+    // A CUDA-enabled build can exercise false admission without allocating a
+    // CUDA workspace.  CPU-off builds reject graph compilation before this
+    // admission point, which is reported as unavailable rather than treated
+    // as relay evidence.
+    auto cudaDesc = std::make_shared<const UsdGenGraphDesc>(MakeCudaSourceDesc());
+    UsdGenDiagnostics preflight;
+
+    struct Result {
+        std::atomic<bool> done{false};
+        bool accepted = false;
+        UsdGenImagingSession::CommitPayload payload;
+        UsdGenExecutionPipeline::Outcome outcome =
+            UsdGenExecutionPipeline::Outcome::Superseded;
+    };
+    auto submit = [&](UsdGenImagingSession::CommitRequest request) {
+        auto result = std::make_shared<Result>();
+        result->accepted = session->CommitAsync(std::move(request), [result](
+            UsdGenImagingSession::CommitPayload const& payload,
+            UsdGenExecutionPipeline::Outcome outcome) {
+                result->payload = payload;
+                result->outcome = outcome;
+                result->done.store(true, std::memory_order_release);
+            });
+        return result;
+    };
+    auto disabledDiagnostic = [](UsdGenImagingSession::CommitPayload const& payload) {
+        for (std::string const& error : payload.diagnostics.errors)
+            if (error.find("CUDA publication requires a device-aware consumer") !=
+                std::string::npos)
+                return true;
+        return false;
+    };
+    auto backendUnavailable = [](UsdGenDiagnostics const& diagnostics) {
+        for (std::string const& error : diagnostics.errors)
+            if (error.find("backend is not built") != std::string::npos)
+                return true;
+        return false;
+    };
+    if (!ValidateCudaGraph(*cudaDesc, &preflight)) {
+        Check(backendUnavailable(preflight),
+            "CPU-disabled build reports CUDA relay admission as unavailable");
+        session->Shutdown();
+        session.Reset();
+        UsdGenImagingSession::DrainRetired();
+        return;
+    }
+    Check(preflight.errors.empty(), "scalar CUDA source descriptor passes preflight");
+
+    // The core starts true so the first imaging request must actively relay
+    // false.  callerDevice=0 avoids the CPU caller-capture sentinel; false
+    // exits at the admission guard before any CUDA workspace is allocated.
+    session->Engine()->SetDevicePublicationEnabled(true);
+
+    UsdGenImagingSession::CommitRequest disable =
+        Request(cudaDesc, 31.0);
+    disable.callerDevice = 0;
+    disable.devicePublication = false;
+    auto first = submit(std::move(disable));
+    Check(first->accepted && WaitFor([&] {
+              return first->done.load(std::memory_order_acquire);
+          }), "imaging device-disable request reaches completion");
+    Check(first->outcome == UsdGenExecutionPipeline::Outcome::Failed &&
+              disabledDiagnostic(first->payload),
+          "imaging request relays false device publication before CUDA admission");
+
+    UsdGenImagingSession::CommitRequest absent;
+    absent.reason = UsdGenCommitReason::SetTime;
+    absent.frame = 32.0;
+    absent.callerDevice = 0;
+    auto second = submit(std::move(absent));
+    Check(second->accepted && WaitFor([&] {
+              return second->done.load(std::memory_order_acquire);
+          }), "imaging absent-selection request reaches completion");
+    Check(second->outcome == UsdGenExecutionPipeline::Outcome::Failed &&
+              disabledDiagnostic(second->payload),
+          "imaging absent device publication preserves the prior false selection");
+
     session->Shutdown();
     session.Reset();
     UsdGenImagingSession::DrainRetired();
@@ -454,6 +584,7 @@ int main()
     UsdGenOpRegistry::Get().Register(TfToken("UsdGenImagingBatchHold"), 0,
         [] { return std::make_unique<BatchHoldOp>(); });
     TestPairedConcurrentRequests();
+    TestDevicePublicationRequestRelay();
     TestCallbackUnregisterAndReentry();
     TestLastHandleReleaseInCompletion();
     TestShutdownCompletesAcceptedQueue();

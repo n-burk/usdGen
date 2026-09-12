@@ -1506,3 +1506,138 @@ reentrant-observer test. Coordinator/root integrated and corrected the APIs
 and authored the exception cleanup from the root reproducer; Qwen is not
 credited with that cleanup. The actual Hivemind service provided no usable
 current visible answer; coordinator/root source-backed review was the fallback.
+
+### GPU group-control removal and ingress checkpoint (2026-09-12)
+
+The main CUDA rebuild passed (`22a445`), followed by `ctest -L 'T0|T1' -j4`
+with **85/85** in 10.60 seconds (`321595`), including `benchUsdGenChain` and
+`benchUsdGenSparse`. The new
+device-group mapper passed ten focused Release repetitions (`9d3b58`) and its
+CUDA memcheck was clean (`fa5443`). Its scope is metadata/control admission;
+it does not render or read host geometry.
+
+The group-control-clear regression was semantically red before the minimal
+private-SDK removal fix (`3b0e37`). After that fix, eight focused Release
+targets passed (`f0626b`), excluding the deliberately red live-Groom ingress
+test. The matching CUDA-enabled private-HdSt ASAN/UBSAN run passed the same
+eight targets (`df9a65`) with leak detection disabled; stock dependencies and
+the main CUDA/core objects were Release. The separate async session pair passed
+CPU-off ASAN/UBSAN (`b429c9`). The relay scenario is unavailable in that CPU-off
+configuration; the CUDA-enabled main test covers false/absent relay behavior.
+
+Patch artifacts `0001` through `0005` freshly applied to the original archive
+at `/tmp/usdgen-control-removal-check-Jg0SvJ`; the final staging C++ source was
+byte-identical (`cd8586`). `0005` has SHA-256
+`0e6f68e966eaced6b6876613975d64d36e007fb3044f38cf19f31e8c9c776b11`.
+The private harness currently has 15 targets and is explicitly not green: the
+old bare-provider failure is a known unexpected regression, and the new real-Groom test remains
+intentionally red (`f12af8`/`f0626b`) because live Groom has not yet emitted a
+device group control. That test uses the isolated matching imaging plugin and
+the actual `Source -> Length -> Width` USD stage path, not a helper-produced
+candidate.
+
+`UsdGenImagingSession::CommitRequest::devicePublication` is an optional field
+appended after `callerDevice` and is atomically relayed to the core commit
+owner. No live Groom enablement, subtree CPU fallback, or device-generation
+stamp-format change is included in this checkpoint. A local-Qwen cleanup block
+(`bce8feee8ef70d59`) was inspected and integrated only where source review
+confirmed it; current Hivemind calls produced no usable visible completion.
+
+The current private-harness run completed 13/15 targets in 4.69 seconds
+(`eb4205`). The two exact failures were the known unexpected
+`testUsdGenCudaNativeBasisCurves` bare-provider regression and the intentionally
+red `testUsdGenCudaGroomGroupPublication` ingress regression. This is evidence
+of the stated two failures, not a green-harness claim.
+
+### Attribute-connection and optional noodles package checkpoint (2026-09-12)
+
+After the shared type decoder and CUDA `float2` hierarchy changes, the main
+`T0|T1` suite passed **85/85** in 10.17 seconds (`d60a49`). Stage/Hydra
+compound-shape parity passed (`51b053`), and the CUDA hierarchy test passed
+(`856720`), including an authored attribute-connection scale change from 0.2
+to 0.4. The host-agnostic noodles core passed **397/397** (`57ae52`).
+
+The installed optional `noodles::usd` package was independently configured,
+built, and run by its consumer fixture (`eb8819`/`2b99ec`/`736fd4`), covering
+the export-name and nested-package-prefix fixes. The final noodles-on run
+passed all **397 core** and **5 USD-adapter** tests with no skips (`4d3442`).
+The adapter coverage includes raw list-op preservation, command-created custom
+attribute baselines that exclude connection bookkeeping fields, variant-mapped
+cleanup, and unrelated metadata retention. The connection controller and USD
+adapter are headless library seams; no mouse host or visible UI integration has
+been identified or implemented. This is not a full M0--M8 completion claim.
+
+### Private HdSt accepted-subtree ownership checkpoint (2026-09-12)
+
+Patch 0006 adds an opt-in, aggregate-compatible `ownsSubtree = false` field
+to the private GPU group candidate. A candidate with ownership may overlap CPU
+paths while pending; only an accepted complete result masks strict descendants,
+including for an empty group. Pending and rejected replacements preserve the
+last accepted GPU snapshot. Exact control clear cancels staged state, removes
+the accepted GPU members, and reveals the current CPU subtree; masked upstream
+add/remove/dirty changes and nested foreign controls stay hidden.
+
+Patch 0006 clean-applied to a fresh prior-0005 archive (`c40ff7`); its three
+modified private header/source files matched the compiled tree byte-for-byte
+after application (`af2439`). Six focused private Release targets passed
+(`0835e6`, 0.94 seconds): group datasource, member, controller, staging,
+reentry, and native CUDA. The staging/reentry pair passed ASAN/UBSAN
+(`79b21d`, 0.30 seconds) with leak detection disabled; private HdSt and tests
+were instrumented while stock OpenUSD and the main core remained Release.
+Coverage includes same-path collision admission, nested synthetic parents,
+empty groups, rejection retention, hidden churn, clear/unmask transitions,
+and observer snapshot coherence. No full harness ran after 0006, and Groom
+ingress/H2 frontend work was unbuilt at this checkpoint. The separate
+bare-provider regression remained red (`d622ad`), with 50 pixels falling to 0
+after rejected prepare and material leaking from `/Looks/Accepted` to
+`/Looks/Rejected`.
+
+### Live CUDA Groom raw-control ingress checkpoint (2026-09-12)
+
+Live Groom now relays the optional per-request `devicePublication` selection,
+uses renderer-local keys for CUDA sessions while preserving explicit CPU
+session sharing, and publishes a renderer-neutral, `ownsSubtree` raw group
+control only for the compiled private-HdSt GL route. Attachment epochs plus a
+weak session callback reject stale A-to-B-to-A session callbacks without a
+session/callback ownership cycle. A CPU-reference test seam (absent backend
+leaf, not an invented `cpu` token) verified exact CPU child datasource
+retention through rejected CUDA admission, recovery raw-control publication,
+and no render-scope remove/add flicker.
+
+The main selected suite passed 85/85 excluding the new unbuilt resampler
+(`9c6fc4`); the private imaging build passed (`79d9e0`) and the focused real
+Groom ingress test passed (`d56c2d`, 0.49 s). The conservative GPU resample
+kernel landed in `2e9a191`; its focused test passed (`d28898`) and memcheck
+(`5e75a5`) plus InitCheck (`f50655`) reported zero errors. Runtime
+`resampleTo` integration was unbuilt at that checkpoint.
+
+At this earlier raw-control checkpoint, no actual Groom-to-staging-to-EGL
+rendered acceptance proof or registry capability-routing test existed; no new
+full harness ran, and the old bare-provider regression remained red.
+
+### Clean-0006 live Groom render baseline (2026-09-12)
+
+A fresh private build at `/tmp/usdgen-storm-six-baseline-JVidm0` used only the
+verified 0001--0006 archive
+(`/tmp/usdgen-control-removal-check-Jg0SvJ`) plus the unchanged pinned
+`pxr/imaging/hdx/unitTestDelegate.h`; it contains no scratch 0007 presentation
+guard. Its build passed (`18a336`) and the three real application checks passed (`ce779b`,
+1.56 s): raw Groom ingress, registry-built GL chain through staging to EGL,
+and the device-group mapper. The renderer collection was rooted at Groom's
+synthetic scope, so finite/nonzero pixels came from Groom output rather than
+the source mesh/curves; an authored Width edit changed those pixels.
+
+No full 16-target harness ran on that baseline, and the known bare-provider
+baseline regression remains red. The scratch 0007 prototype's bare-provider
+pass (`39cb51`) is uncommitted and has incomplete instancer work; it is not
+baseline evidence. Runtime session/hierarchy validation passed two focused
+tests (`786f78`), with hierarchy memcheck (`7d9b28`) and session InitCheck
+(`2a1682`) reporting zero errors. The 86/86 result (`0bb2e1`) predates the
+latest RBF extension; the later OOM-marked run was not a pass claim.
+
+Final main revalidation after the latest session, hierarchy, destructor, and
+RBF lease fixes passed 86/86 (`ef595f`, 10.57 s). The RBF scope fix's CUDA
+memcheck reported zero errors (`c022db`). This includes the source RBF-cache,
+root/stable-ID, and retained-lease tests; it makes no broader workstation or
+sanitizer claim. The earlier OOM-marked run was not a pass; its isolated rerun
+is now green.

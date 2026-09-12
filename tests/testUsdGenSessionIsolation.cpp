@@ -39,6 +39,24 @@ int main()
     Check(sharedA == sharedB, "explicit equivalent sessions merge");
     Check(sharedA->AttachedIndices() == 2, "merged session counts both attachments");
 
+    // The same authored id remains shareable for CPU publication, but a
+    // renderer-local CUDA/GL session owns registry-specific GPU resources and
+    // must isolate each renderer instance.
+    UsdGenSessionKey gpuA{"shared-session", pathA, 3001, true};
+    UsdGenSessionKey gpuB{"shared-session", pathA, 3002, true};
+    Check(!(gpuA == gpuB), "renderer-local GPU keys include render instance");
+    auto gpuSessionA = store.Attach(gpuA);
+    auto gpuSessionB = store.Attach(gpuB);
+    Check(gpuSessionA && gpuSessionB && gpuSessionA != gpuSessionB &&
+              gpuSessionA != sharedA && gpuSessionB != sharedA,
+          "same authored GPU session id never shares across renderer registries");
+    UsdGenSessionKey cpuAfterGpu{"shared-session", pathA, 4001, false};
+    auto sharedCpu = store.Attach(cpuAfterGpu);
+    Check(cpuAfterGpu == explicitA && sharedCpu == sharedA,
+          "CPU sharing resumes after a renderer-local GPU session");
+    Check(sharedA->AttachedIndices() == 3,
+          "CPU reattachment is independent of isolated GPU attachments");
+
     UsdGenSessionKey differentPath{"shared-session", pathB, 2001};
     UsdGenSessionKey differentId{"other-session", pathA, 2001};
     Check(!(explicitA == differentPath) && !(explicitA == differentId),
@@ -59,11 +77,13 @@ int main()
     Check(sharedA->ConsumeNeedsDesc(), "pending mark can be consumed next cycle");
     Check(!sharedA->ConsumeNeedsDesc(), "repeated consume is idempotent");
 
-    // Detach one of the merged handles, then the final attachment. Keep the
-    // local strong pointer to verify the object remains safe after store drop.
+    // Detach each shared CPU attachment. Keep the local strong pointer to
+    // verify the object remains safe after the store drops its entry.
     store.Detach(explicitA);
-    Check(sharedB->AttachedIndices() == 1, "detach decrements merged count");
+    Check(sharedB->AttachedIndices() == 2, "detach decrements merged count");
     store.Detach(explicitB);
+    Check(sharedB->AttachedIndices() == 1, "second CPU detach retains recovery attachment");
+    store.Detach(cpuAfterGpu);
     Check(!store.Find(explicitA), "final detach removes store entry");
     Check(sharedB->AttachedIndices() == 0, "final detach reaches zero");
 
@@ -71,6 +91,8 @@ int main()
     store.Detach(emptyB);
     store.Detach(differentPath);
     store.Detach(differentId);
+    store.Detach(gpuA);
+    store.Detach(gpuB);
     Check(!store.Find(emptyA) && !store.Find(emptyB), "empty-id sessions detach independently");
     Check(store.LiveSessions().empty(), "all test sessions detached");
     std::printf("testUsdGenSessionIsolation: %s\n", failures ? "FAILED" : "PASS");

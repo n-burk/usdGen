@@ -144,11 +144,87 @@ set_tests_properties(testUsdGenStormGpuGroupStagingReentry PROPERTIES
 set(USDGEN_CUDA_BUILD_DIR "" CACHE PATH "Optional matching usdGen CUDA build for real transfer validation")
 if(USDGEN_CUDA_BUILD_DIR)
     find_package(CUDAToolkit REQUIRED)
-    foreach(_library libusdGen.so libusdGenGpu.a)
+    foreach(_library libusdGen.so libusdGenGpu.a libusdGenSchema.so)
         if(NOT EXISTS "${USDGEN_CUDA_BUILD_DIR}/${_library}")
             message(FATAL_ERROR "Missing ${USDGEN_CUDA_BUILD_DIR}/${_library}; build usdGen with CUDA first")
         endif()
     endforeach()
+    # Build the application imaging plugin against this harness's private
+    # HdSt.  Linking the production usdGenImaging library here would instead
+    # pull in the stock-SDK HdSt ABI and make plugin discovery ambiguous.
+    file(GLOB_RECURSE _usdgen_private_imaging_sources CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/usdGenImaging/*.cpp")
+    list(FILTER _usdgen_private_imaging_sources EXCLUDE REGEX
+        "usdGenGraphDescBuilderStage\\.cpp$")
+    add_library(usdGenPrivateImaging SHARED ${_usdgen_private_imaging_sources})
+    target_include_directories(usdGenPrivateImaging BEFORE PUBLIC
+        "${USDGEN_PATCHED_OPENUSD_SOURCE}")
+    target_include_directories(usdGenPrivateImaging PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/usdGenImaging"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/usdGen"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../libs/usdGenSchema")
+    target_link_libraries(usdGenPrivateImaging
+        PUBLIC hd hdsi hf usd usdGeom usdShade sdr usdImaging
+               sdf tf gf vt trace pxOsd
+               "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so"
+               usdGenPatchedStorm
+        PRIVATE "${USDGEN_CUDA_BUILD_DIR}/libusdGenSchema.so"
+                "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+                hgiGL CUDA::cudart CUDA::cusolver)
+    target_compile_definitions(usdGenPrivateImaging PUBLIC
+        USDGEN_HAS_CUDA_GL_INTEROP)
+    set_target_properties(usdGenPrivateImaging PROPERTIES
+        CXX_VISIBILITY_PRESET default)
+
+    # This generated metadata is visible only to the real-Groom CUDA test.
+    # Keep the public plugin name/types, but resolve its library directly to
+    # the private imaging target so Plug never opens stock libusdGenImaging.
+    set(_usdgen_private_imaging_resources
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenPrivateImaging/resources")
+    file(MAKE_DIRECTORY "${_usdgen_private_imaging_resources}")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../plugin/usdGenImaging/resources/plugInfo.json.in"
+        _usdgen_private_imaging_pluginfo)
+    string(REPLACE "../../$<TARGET_FILE_NAME:usdGenImaging>"
+        "$<TARGET_FILE:usdGenPrivateImaging>"
+        _usdgen_private_imaging_pluginfo "${_usdgen_private_imaging_pluginfo}")
+    file(GENERATE
+        OUTPUT "${_usdgen_private_imaging_resources}/plugInfo.json"
+        CONTENT "${_usdgen_private_imaging_pluginfo}")
+
+    add_executable(testUsdGenCudaGroomGroupPublication
+        testCudaGroomGroupPublication.cpp)
+    target_compile_definitions(testUsdGenCudaGroomGroupPublication PRIVATE
+        USDGEN_ENABLE_CUDA
+        USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../..")
+    target_include_directories(testUsdGenCudaGroomGroupPublication PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenCudaGroomGroupPublication PRIVATE
+        usdGenPrivateImaging usdGenPatchedStorm hdx
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so"
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenCudaGroomGroupPublication
+        COMMAND testUsdGenCudaGroomGroupPublication)
+    set_tests_properties(testUsdGenCudaGroomGroupPublication PROPERTIES
+        LABELS "T2;storm-extension;groom-group-ingress;cuda"
+        SKIP_RETURN_CODE 77 TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_private_imaging_resources}:${_hdst_gpu_group_staging_resources};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:usdGenPrivateImaging>:$<TARGET_FILE_DIR:usdGenPatchedStorm>:${USD_INSTALL_DIR}/lib")
+    add_executable(testUsdGenCudaGroomRender testCudaGroomRender.cpp)
+    target_compile_definitions(testUsdGenCudaGroomRender PRIVATE
+        USDGEN_ENABLE_CUDA
+        USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../..")
+    target_include_directories(testUsdGenCudaGroomRender PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenCudaGroomRender PRIVATE
+        usdGenPrivateImaging usdGenPatchedStorm hdx
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so"
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenCudaGroomRender COMMAND testUsdGenCudaGroomRender)
+    set_tests_properties(testUsdGenCudaGroomRender PROPERTIES
+        LABELS "T2;storm-extension;groom-group-render;cuda"
+        SKIP_RETURN_CODE 77 TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_private_imaging_resources}:${_hdst_gpu_group_staging_resources};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:usdGenPrivateImaging>:$<TARGET_FILE_DIR:usdGenPatchedStorm>:${USD_INSTALL_DIR}/lib")
     add_executable(testUsdGenStormCudaPublication ../testUsdGenCudaGlInterop.cpp
         ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp)
     target_compile_definitions(testUsdGenStormCudaPublication PRIVATE
@@ -217,5 +293,26 @@ if(USDGEN_CUDA_BUILD_DIR)
     add_test(NAME testUsdGenCudaGpuGroupPublication COMMAND testUsdGenCudaGpuGroupPublication)
     set_tests_properties(testUsdGenCudaGpuGroupPublication PROPERTIES
         LABELS "T2;storm-extension;gpu-group-publication;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+    # This compiles the application-side CUDA-group mapper directly against
+    # private HdSt.  Do not link usdGenImaging here: that shared library is
+    # built against the stock SDK and would load duplicate HdSt definitions.
+    add_executable(testUsdGenDeviceCurveGroupPublisher testDeviceCurveGroupPublisher.cpp
+        ../../libs/usdGenImaging/usdGenImaging/deviceCurveGroupPublisher.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp
+        ../../libs/usdGenImaging/usdGenImaging/usdGenTilePublisher.cpp)
+    target_compile_definitions(testUsdGenDeviceCurveGroupPublisher PRIVATE
+        USDGEN_HAS_CUDA_GL_INTEROP USDGEN_ENABLE_CUDA)
+    target_include_directories(testUsdGenDeviceCurveGroupPublisher PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenDeviceCurveGroupPublisher PRIVATE usdGenPatchedStorm hdx
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so" "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenDeviceCurveGroupPublisher
+        COMMAND testUsdGenDeviceCurveGroupPublisher)
+    set_tests_properties(testUsdGenDeviceCurveGroupPublisher PROPERTIES
+        LABELS "T2;storm-extension;device-curve-group-publisher;cuda"
+        SKIP_RETURN_CODE 77 TIMEOUT 60
         ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
 endif()

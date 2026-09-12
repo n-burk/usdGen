@@ -200,3 +200,115 @@ device-resident with no host readback.
 Conservative visibility/culling behavior is intentionally conservative and
 has no performance claim. The framebuffer result above is from the isolated
 native fixture, not a claim that live groom `Publish` is complete.
+
+## Control removal and live-Groom ingress checkpoint (patch 0005)
+
+`0005-hdst-gpu-group-control-removal.patch` follows patches 0001 through 0004.
+It fixes private renderer control removal semantics; it does not wire Groom
+device publication. A fresh application sequence of 0001–0005 against the
+original archive at `/tmp/usdgen-control-removal-check-Jg0SvJ` produced final
+staging C++ source byte-identical to the compiled tree (`cd8586`). The SHA-256 of
+0005 is
+`0e6f68e966eaced6b6876613975d64d36e007fb3044f38cf19f31e8c9c776b11`.
+
+The control-clear regression was semantically red before this minimal fix
+(`3b0e37`) and eight focused private targets passed in Release afterward
+(`f0626b`). The equivalent CUDA-enabled private-HdSt ASAN/UBSAN run passed
+those eight targets (`df9a65`) with leak detection disabled; stock dependencies
+and the main CUDA/core objects remained Release. The private harness currently contains
+15 targets and is not a green-suite claim: the old bare-provider failure is a
+known unexpected regression, and the real-Groom CUDA ingress test intentionally remains red
+(`f12af8`/`f0626b`) until Groom emits renderer-neutral device group control.
+That ingress test loads an isolated matching imaging plugin and drives the
+actual `Source -> Length -> Width` USD stage path; it does not substitute a
+helper-built candidate for Groom.
+
+At the application seam, `devicePublication` is an optional
+`UsdGenImagingSession::CommitRequest` field appended after `callerDevice` and
+is relayed atomically to the core commit owner. It is not yet enabled by live
+Groom. No subtree CPU fallback, host geometry readback, or live all-tile
+publication claim follows from this checkpoint. The full main CUDA rebuild
+passed (`22a445`) and `ctest -L 'T0|T1' -j4` passed 85/85 in 10.60 seconds
+(`321595`), including `benchUsdGenChain` and `benchUsdGenSparse`; the mapper passed ten focused Release runs
+(`9d3b58`) and a clean CUDA memcheck (`fa5443`).
+
+The latest private-harness run completed 13/15 targets in 4.69 seconds
+(`eb4205`). Its exact failures were the known unexpected bare-provider
+`testUsdGenCudaNativeBasisCurves` regression and the intentionally red
+`testUsdGenCudaGroomGroupPublication` ingress regression. It is not a
+green-harness claim.
+
+## Accepted subtree ownership (patch 0006)
+
+`0006-hdst-gpu-group-subtree-ownership.patch` follows 0001--0005 and appends
+the backward-compatible `ownsSubtree = false` candidate flag. An opted-in
+candidate may overlap authored CPU descendants while pending, but the staging
+index masks those descendants only after its complete group result is accepted.
+An accepted empty group masks its entire descendant subtree as well. A rejected
+or pending replacement retains the exact accepted view. Clearing the exact
+control cancels the staged state, removes the accepted GPU members, and reveals
+the current upstream CPU subtree; hidden upstream add/remove/dirty churn and
+nested foreign controls do not escape the accepted owner.
+
+The patch clean-applied to a fresh prior-0005 archive (`c40ff7`), and all three
+modified private header/source files were byte-identical to the compiled tree
+after application (`af2439`). Six focused private Release targets passed
+(`0835e6`, 0.94 seconds): group datasource, member, controller, staging,
+reentry, and native CUDA. The staging and reentry pair also passed under
+ASAN/UBSAN (`79b21d`, 0.30 seconds) with leak detection disabled; private HdSt
+and test translation units were instrumented while stock OpenUSD and the main
+core remained Release. Coverage includes a same-path CPU/GPU collision, nested
+synthetic-parent replacement, empty ownership, rejected replacement retention,
+masked upstream churn, control-clear unmasking, and observer-visible snapshot
+coherence. No full harness was run after 0006, and live Groom device
+publication/H2 frontend wiring are not included. The known bare-provider
+regression remains red (`d622ad`): a rejected prepare produced 0 rather than
+50 pixels and leaked `/Looks/Accepted` to `/Looks/Rejected`.
+
+## Live CUDA Groom raw-control ingress checkpoint
+
+The application-side Groom path now requests device publication atomically per
+commit, isolates CUDA sessions per renderer registry while retaining explicit
+CPU-session sharing, and emits an opt-in `ownsSubtree` raw group control only
+for the compiled private-HdSt GL route. Attachment epochs and weak callback
+ownership reject stale key-switch callbacks. A CPU-reference filtering test
+seam verified exact retained CPU child datasources across rejected CUDA
+admission, recovery raw-control publication, and no render-scope remove/add
+flicker; it does not author a fictitious `cpu` backend token.
+
+The selected main suite passed 85/85 excluding the unbuilt new resampler
+(`9c6fc4`), the private imaging build passed (`79d9e0`), and the focused real
+Groom ingress target passed (`d56c2d`, 0.49 s). The resample kernel commit
+`2e9a191` had a focused pass (`d28898`) and clean CUDA memcheck/InitCheck
+(`5e75a5`/`f50655`); runtime `resampleTo` integration was unbuilt at that checkpoint.
+
+At that earlier raw-control checkpoint, this did **not** prove an actual
+Groom-to-staging-to-EGL rendered frame or registry capability routing. No
+fresh full harness was run, and the existing bare-provider retention regression
+remained red.
+
+## Clean-0006 live Groom render baseline
+
+A fresh private build at `/tmp/usdgen-storm-six-baseline-JVidm0` used only the
+verified 0001--0006 archive at `/tmp/usdgen-control-removal-check-Jg0SvJ` plus
+the unchanged pinned `pxr/imaging/hdx/unitTestDelegate.h`; no scratch 0007 presentation
+guard was present. Build `18a336` passed, and three real application checks
+passed in `ce779b` (1.56 s): raw Groom ingress, the registry-built GL
+Groom-to-staging-to-EGL path, and the mapper. The render collection was rooted
+at Groom's synthetic scope, proving finite/nonzero pixels from Groom output
+rather than the source mesh/curves; an authored Width edit changed the frame.
+
+The clean baseline did not run the full 16-target harness and retains the
+known bare-provider regression. The scratch 0007 bare-provider pass (`39cb51`)
+is uncommitted, has incomplete instancer work, and is not baseline evidence.
+Runtime session/hierarchy focused tests passed (`786f78`); hierarchy memcheck
+(`7d9b28`) and session InitCheck (`2a1682`) were clean. The 86/86 run
+(`0bb2e1`) predates the latest RBF extension; the later OOM-marked run was not
+claimed as a pass.
+
+Final main revalidation after the latest session, hierarchy, destructor, and
+RBF lease fixes passed 86/86 (`ef595f`, 10.57 s). CUDA memcheck for the RBF
+scope fix reported zero errors (`c022db`). This includes the source RBF-cache,
+root/stable-ID, and retained-lease tests only; it makes no broader workstation
+or sanitizer claim. The earlier OOM-marked run was not a pass; its isolated
+rerun is now green.

@@ -3,6 +3,7 @@
 #include "usdGenImaging/groomSceneIndexPlugin.h"
 #include "usdGenImaging/usdGenDirtyRouter.h"
 #include "usdGenImaging/usdGenTilePublisher.h"
+#include "usdGenImaging/deviceCurveGroupPublisher.h"
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
 #include "usdGenImaging/usdGenEnable.h"
 #include "usdGenImaging/testHook.h"
@@ -18,9 +19,18 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <utility>
+
+#if defined(USDGEN_HAS_CUDA_GL_INTEROP) && \
+    __has_include("pxr/imaging/hdSt/basisCurvesGpuGroupController.h") && \
+    __has_include("pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.h")
+#define USDGEN_GROOM_DEVICE_GROUP_INGRESS 1
+#include "pxr/imaging/hdSt/basisCurvesGpuGroupController.h"
+#include "pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.h"
+#endif
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -34,9 +44,25 @@ TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
         TfToken("UsdGenGroomSceneIndexPlugin"), nullptr, 0,
         HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
 }
+bool _SupportsDeviceGroupIngress(HdContainerDataSourceHandle const& inputArgs) {
+#if defined(USDGEN_GROOM_DEVICE_GROUP_INGRESS)
+    auto const display = HdStringDataSource::Cast(HdContainerDataSource::Get(
+        inputArgs, HdDataSourceLocator(
+            HdSceneIndexPluginRegistryTokens->rendererDisplayName)));
+    // The registry supplies the renderer's real display name as
+    // __rendererDisplayName. Header presence alone is not a capability: only
+    // the private GL renderer chain consumes this control datasource.
+    return display && display->GetTypedValue(0) == "GL";
+#else
+    (void)inputArgs;
+    return false;
+#endif
+}
+
 HdSceneIndexBaseRefPtr UsdGenGroomSceneIndexPlugin::_AppendSceneIndex(
-    HdSceneIndexBaseRefPtr const& input, HdContainerDataSourceHandle const&) {
-    return UsdGenGroomSceneIndex::New(input);
+    std::string const&, HdSceneIndexBaseRefPtr const& input,
+    HdContainerDataSourceHandle const& inputArgs) {
+    return UsdGenGroomSceneIndex::New(input, 0, _SupportsDeviceGroupIngress(inputArgs));
 }
 bool UsdGenGroomSceneIndexPlugin::_IsEnabled(HdContainerDataSourceHandle const&) const {
     return TfGetEnvSetting(USDGEN_ENABLE);
@@ -64,6 +90,19 @@ TfToken TypeName(HdSceneIndexPrim const& prim) {
 }
 bool IsGroom(TfToken const& type) {
     return type == TfToken("UsdGenGroom") || type == TfToken("UsdGenDescription");
+}
+
+HdContainerDataSourceHandle RenderDataSource(HdDataSourceBaseHandle const& control) {
+#if defined(USDGEN_GROOM_DEVICE_GROUP_INGRESS)
+    if (control) {
+        TfToken const& token = HdStGetBasisCurvesGpuGroupDataSourceToken();
+        HdDataSourceBaseHandle const values[] = {control};
+        return HdRetainedContainerDataSource::New(1, &token, values);
+    }
+#else
+    (void)control;
+#endif
+    return HdRetainedContainerDataSource::New();
 }
 
 // Records actual builder reads, including missing targets and GeomSubset
@@ -104,6 +143,7 @@ struct UsdGenGroomSceneIndex::_Ingress {
         std::shared_ptr<const SdfPathVector> dependencies;
         std::shared_ptr<const CaptureCache> cache;
         bool authoredRender = false;
+        bool deviceGroupIngress = false;
     };
     uint64_t sequence = 0;
     int device = -2;
@@ -168,7 +208,11 @@ UsdGenSceneService& SceneService() {
 struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     struct Groom {
         uint64_t id = 0, captured = 0;
-        bool alive = true, authoredRender = false;
+        // Incremented for every attachment attempt and release.  A key can
+        // return to an equal value (A -> B -> A), so key/handle equality is
+        // not sufficient to admit delayed store or session callbacks.
+        uint64_t attachmentEpoch = 0;
+        bool alive = true, authoredRender = false, deviceGroupIngress = false;
         SdfPath root, description;
         Key key;
         Handle session;
@@ -179,7 +223,13 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         std::shared_ptr<const CaptureCache> cache;
         std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter> router;
         std::shared_ptr<const TileMap> tiles = std::make_shared<const TileMap>();
+        // displayGeneration describes the visible CPU/GPU presentation;
+        // sessionGeneration is reset when an isolated CUDA session replaces a
+        // shared CPU session.  Keeping them separate retains last-good tiles
+        // through that replacement without rejecting its generation zero.
         int64_t generation = -1;
+        int64_t sessionGeneration = -1;
+        HdDataSourceBaseHandle deviceControl;
     };
     struct View {
         SdfPath root, description;
@@ -188,6 +238,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         std::shared_ptr<const SdfPathVector> dependencies;
         std::shared_ptr<const CaptureCache> cache;
         double frame = 0;
+        HdDataSourceBaseHandle deviceControl;
     };
     struct Snapshot {
         std::vector<View> members;
@@ -212,10 +263,12 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     std::atomic<bool> closing{false};
     std::atomic<bool> quiesced{false};
     std::atomic<bool> asyncAllowed{false};
+    bool const deviceGroupIngress;
     // Owner-only state below.
     std::map<SdfPath, std::shared_ptr<Groom>> members;
     std::map<SdfPath, uint64_t> events, tombstones;
     uint64_t nextId = 0, completedPrefix = 0;
+    uint64_t nextDeviceGroupTicket = 0;
     std::set<uint64_t> completed;
     std::map<uint64_t, size_t> holds;
     struct Waiter { uint64_t watermark; std::function<void()> done; };
@@ -226,7 +279,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     std::vector<TfWeakPtr<Session>> usedSessions;
     std::unique_ptr<Pipeline> owner; // removed at process shutdown, even if public index survives
 
-    explicit _State(usdGen::UsdGenExecutionRuntime& runtime) : owner(new Pipeline(runtime)) {}
+    explicit _State(usdGen::UsdGenExecutionRuntime& runtime, bool enableDeviceGroupIngress)
+        : deviceGroupIngress(enableDeviceGroupIngress), owner(new Pipeline(runtime)) {}
     ~_State() { if (owner) owner->Shutdown(); }
     auto SnapshotValue() const { return std::atomic_load(&catalog); }
     auto VisibleSnapshot() const { return std::atomic_load(&visible); }
@@ -237,7 +291,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         for (auto const& item : members) {
             auto const& g = *item.second;
             next->members.push_back({g.root, g.description, g.tiles, g.generation,
-                                     g.dependencies, g.cache, g.frame});
+                                     g.dependencies, g.cache, g.frame, g.deviceControl});
         }
         auto result = std::shared_ptr<const Snapshot>(std::move(next));
         std::atomic_store(&catalog, result);
@@ -334,20 +388,38 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         } catch (...) { std::terminate(); }
         if (!accepted) Release(seq);
     }
-    void Remove(std::shared_ptr<Groom> const& g, uint64_t seq) {
-        g->alive = false;
+    uint64_t AdvanceAttachmentEpoch(Groom& g) {
+        // Wrapping would re-admit a callback from a prior lifetime.  This is
+        // an unrecoverable owner-state corruption rather than a safe reset.
+        if (g.attachmentEpoch == std::numeric_limits<uint64_t>::max())
+            std::terminate();
+        return ++g.attachmentEpoch;
+    }
+    void ReleaseSession(std::shared_ptr<Groom> const& g, uint64_t seq) {
+        // This also invalidates an AttachAsync that has not acquired a
+        // session yet.  It deliberately does not clear last-good display.
+        AdvanceAttachmentEpoch(*g);
         if (g->session) {
-            if (g->callback >= 0) {
+            Handle const session = g->session;
+            Key const key = g->key;
+            int const callback = g->callback;
+            g->session = {};
+            g->callback = -1;
+            if (callback >= 0) {
                 Hold(seq);
                 auto self = shared_from_this();
                 try {
-                    if (!g->session->UnregisterRepublishCallbackAsync(g->callback,
+                    if (!session->UnregisterRepublishCallbackAsync(callback,
                         [self, seq] { self->Post([self, seq] { self->Release(seq); }); }))
                         Release(seq);
                 } catch (...) { std::terminate(); }
             }
-            Detach(g->session, g->key, seq);
+            Detach(session, key, seq);
         }
+    }
+    void Remove(std::shared_ptr<Groom> const& g, uint64_t seq) {
+        g->alive = false;
+        ReleaseSession(g, seq);
     }
     void Close() {
         if (closing.exchange(true)) return;
@@ -363,12 +435,35 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             } catch (...) { std::terminate(); }
         });
     }
-    void Publish(std::shared_ptr<Groom> const& g, Session::CommitPayload const& payload) {
+    void Publish(std::shared_ptr<Groom> const& g, Handle const& sourceSession,
+                 uint64_t attachmentEpoch,
+                 Session::CommitPayload const& payload) {
         if (closing.load() || !Current(g) || !payload.published || !payload.generation ||
-            payload.generation->id <= g->generation) return;
+            !sourceSession || g->session != sourceSession ||
+            g->attachmentEpoch != attachmentEpoch ||
+            payload.generation->id <= g->sessionGeneration) return;
         auto const& generation = *payload.generation;
         if (generation.device) {
-            TF_WARN("usdGen: stock Hydra publication requires unfinished device interop; retaining displayed geometry");
+#if defined(USDGEN_GROOM_DEVICE_GROUP_INGRESS)
+            if (!g->deviceGroupIngress || nextDeviceGroupTicket ==
+                    std::numeric_limits<uint64_t>::max()) return;
+            auto device = ::usdGenImaging::UsdGenDeviceCurveGroupPublisher::Build(
+                payload.generation, g->description, ++nextDeviceGroupTicket,
+                /* ownsSubtree = */ true);
+            if (!device) {
+                TF_WARN("usdGen CUDA group candidate rejected: %s", device.reason.c_str());
+                return; // retain last-good CPU tiles/control while staging has no replacement
+            }
+            g->sessionGeneration = generation.id;
+            g->generation = generation.id;
+            g->deviceControl = device.control;
+            HdDataSourceLocatorSet locators;
+            locators.insert(HdDataSourceLocator(
+                HdStGetBasisCurvesGpuGroupDataSourceToken()));
+            Notify({}, {}, {{RenderPath(g->description), std::move(locators)}});
+#else
+            (void)g;
+#endif
             return;
         }
         auto fresh = std::make_shared<TileMap>();
@@ -401,26 +496,37 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto router = std::make_shared<usdGenImaging::UsdGenDirtyRouter>();
         if (payload.routing) router->Rebuild(*payload.routing);
         g->router = std::move(router);
+        g->sessionGeneration = generation.id;
         g->generation = generation.id;
         g->tiles = std::move(fresh);
+        // A CPU fallback/recovery replaces the displayed CPU tiles and clears
+        // raw control in the same immutable snapshot/notice packet.
+        g->deviceControl = {};
+        HdDataSourceLocatorSet controlCleared;
+        controlCleared.insert(HdDataSourceLocator());
+        dirtied.emplace_back(RenderPath(g->description), std::move(controlCleared));
         Notify(added, removed, dirtied);
     }
     void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
         if (!g->session || !g->desc || closing.load() || !Current(g)) return;
+        uint64_t const attachmentEpoch = g->attachmentEpoch;
         Session::CommitRequest request;
         request.reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
         request.desc = g->desc;
         request.callerDevice = g->device;
+        request.devicePublication = g->deviceGroupIngress;
         if (!g->session->HasAppDriver()) request.frame = g->frame;
         g->session->ConsumeNeedsDesc();
         auto self = shared_from_this();
         Hold(seq);
         bool accepted = false;
         try {
-            accepted = g->session->CommitAsync(std::move(request),
-                [self, g, seq](Session::CommitPayload const& payload, Pipeline::Outcome) {
-                    self->Post([self, g, seq, payload] {
-                        try { self->Publish(g, payload); }
+            Handle const sourceSession = g->session;
+            accepted = sourceSession->CommitAsync(std::move(request),
+                [self, g, sourceSession, attachmentEpoch, seq](
+                    Session::CommitPayload const& payload, Pipeline::Outcome) {
+                    self->Post([self, g, sourceSession, attachmentEpoch, seq, payload] {
+                        try { self->Publish(g, sourceSession, attachmentEpoch, payload); }
                         catch (...) { TF_WARN("usdGen scene publication failed"); }
                         self->Release(seq);
                     });
@@ -430,29 +536,42 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     }
     void Attach(std::shared_ptr<Groom> const& g, uint64_t seq) {
         auto self = shared_from_this();
+        Key const requestedKey = g->key;
+        uint64_t const attachmentEpoch = AdvanceAttachmentEpoch(*g);
         Hold(seq);
         bool accepted = false;
         try {
-            accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().AttachAsync(g->key,
-                [self, g, seq](Handle session) {
-                    self->Post([self, g, seq, session] {
+            accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().AttachAsync(requestedKey,
+                [self, g, requestedKey, attachmentEpoch, seq](Handle session) {
+                    self->Post([self, g, requestedKey, attachmentEpoch, seq, session] {
                         try {
                             if (!session) { self->Release(seq); return; }
                             self->usedSessions.push_back(TfCreateWeakPtr(session.operator->()));
-                            if (self->closing.load() || !self->Current(g)) {
-                                self->Detach(session, g->key, seq);
+                            if (self->closing.load() || !self->Current(g) ||
+                                !(g->key == requestedKey) ||
+                                g->attachmentEpoch != attachmentEpoch) {
+                                self->Detach(session, requestedKey, seq);
                                 self->Release(seq);
                                 return;
                             }
                             g->session = session;
                             std::weak_ptr<_State> weak(self);
                             std::weak_ptr<Groom> groom(g);
+                            TfWeakPtr<Session> weakSession(session);
                             g->callback = session->RegisterRepublishCallback(
-                                [weak, groom](Session::CommitPayload const& payload) {
+                                [weak, groom, weakSession, attachmentEpoch](
+                                    Session::CommitPayload const& payload) {
                                     auto state = weak.lock();
                                     auto member = groom.lock();
-                                    if (!state || !member || state->closing.load()) return;
-                                    state->Post([state, member, payload] { state->Publish(member, payload); });
+                                    Handle sourceSession =
+                                        TfCreateRefPtrFromProtectedWeakPtr(weakSession);
+                                    if (!state || !member || !sourceSession ||
+                                        state->closing.load()) return;
+                                    state->Post([state, member, sourceSession,
+                                                 attachmentEpoch, payload] {
+                                        state->Publish(member, sourceSession,
+                                                       attachmentEpoch, payload);
+                                    });
                                 });
                             self->Cook(g, seq);
                             self->Release(seq);
@@ -519,8 +638,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             if (RemovedSince(input.root, seq) || NewerEvent(input.root, seq)) continue;
             auto it = members.find(input.root);
             if (it != members.end() && it->second->captured > seq) continue;
-            if (it != members.end() && (it->second->description != input.description ||
-                                       !(it->second->key == input.key))) {
+            if (it != members.end() && it->second->description != input.description) {
                 if (!it->second->authoredRender)
                     forwardRemoved.emplace_back(RenderPath(it->second->description));
                 Remove(it->second, seq);
@@ -535,13 +653,26 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                 groom->description = input.description;
                 groom->key = input.key;
                 groom->authoredRender = input.authoredRender;
+                groom->deviceGroupIngress = input.deviceGroupIngress;
                 members.emplace(input.root, groom);
                 if (!input.authoredRender)
                     forwardAdded.emplace_back(RenderPath(input.description), TfToken("scope"));
                 startAttach.push_back(groom);
             } else {
                 groom = it->second;
-                if (groom->session) startCook.push_back(groom);
+                if (!(groom->key == input.key)) {
+                    // CUDA/GL capability changes move to a renderer-local
+                    // session key. Retain displayed CPU tiles and any prior
+                    // control at this same scope while the replacement cooks;
+                    // old callbacks carry their old handle and are rejected.
+                    ReleaseSession(groom, seq);
+                    groom->key = input.key;
+                    groom->deviceGroupIngress = input.deviceGroupIngress;
+                    groom->sessionGeneration = -1;
+                    startAttach.push_back(groom);
+                } else if (groom->session) {
+                    startCook.push_back(groom);
+                }
             }
             groom->captured = seq;
             groom->desc = input.desc;
@@ -626,15 +757,19 @@ void UsdGenSceneService::DrainRetired() {
     for (auto const& record : records) record->Wait();
 }
 
-UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id)
+UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id,
+                                               bool enableDeviceGroupIngress)
     : HdSingleInputFilteringSceneIndexBase(input),
       _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(input)),
       _renderInstanceId(static_cast<uint32_t>(id)) {
     static std::atomic<uint64_t> next{uint64_t(1) << 32};
     if (id == 0) _renderInstanceId = next.fetch_add(1);
+#if !defined(USDGEN_GROOM_DEVICE_GROUP_INGRESS)
+    enableDeviceGroupIngress = false;
+#endif
     auto& service = SceneService();
     auto record = std::make_shared<UsdGenSceneService::RetirementRecord>();
-    _state = std::shared_ptr<_State>(new _State(service.runtime), [&service, record](_State* state) {
+    _state = std::shared_ptr<_State>(new _State(service.runtime, enableDeviceGroupIngress), [&service, record](_State* state) {
         if (state->quiesced.load(std::memory_order_acquire)) {
             // A static public handle may outlive the process service. All
             // pipelines/subscriptions have already been removed externally.
@@ -645,8 +780,9 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input
     // the serialized external drain transfers it into the catalog.
     service.registrations.push(UsdGenSceneService::Entry{_state, record});
 }
-HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input, int id) {
-    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id));
+HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input, int id,
+                                                    bool enableDeviceGroupIngress) {
+    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id, enableDeviceGroupIngress));
     index->_state->recipient = TfCreateWeakPtr(index.operator->());
     UsdGenImagingTestHook::_RegisterIndex(index.operator->());
     _Ingress initial;
@@ -800,6 +936,13 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                     auto result = ::usdGenImaging::CaptureGraphDescFromHydra(
                         recorder, captured.description, options);
                     captured.desc = std::make_shared<const Desc>(std::move(result.desc));
+                    // A CUDA graph always has renderer-local session identity,
+                    // even when this renderer lacks the private GL ingress.
+                    // CPU graphs retain existing explicit-session sharing.
+                    captured.key.rendererLocal = captured.desc->executionBackend ==
+                        usdGen::UsdGenExecutionBackend::Cuda;
+                    captured.deviceGroupIngress = state->deviceGroupIngress &&
+                        captured.key.rendererLocal;
                     captured.cache = std::move(result.cache);
                     captured.dependencies = recorder.Dependencies(*captured.desc);
                     packet.inputs.push_back(std::move(captured));
@@ -875,7 +1018,8 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
     }
     for (auto const& g : snapshot->members) {
         if (path == g.root) return {TfToken("UsdGenGroom"), {}};
-        if (path == RenderPath(g.description)) return {TfToken("scope"), HdRetainedContainerDataSource::New()};
+        if (path == RenderPath(g.description))
+            return {TfToken("scope"), RenderDataSource(g.deviceControl)};
         auto tile = g.tiles->find(path);
         if (tile != g.tiles->end()) return {TfToken("basisCurves"), tile->second};
     }
