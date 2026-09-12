@@ -1,10 +1,13 @@
 #include "usdGen/session.h"
 #include "usdGen/gpu/generation.h"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -113,9 +116,185 @@ static UsdGenGraphDesc WidthChainDesc() {
     return desc;
 }
 
+struct AsyncCommitResult {
+    std::atomic<bool> done{false};
+    bool accepted = false;
+    UsdGenSession::SnapshotPtr snapshot;
+    UsdGenExecutionPipeline::Outcome outcome =
+        UsdGenExecutionPipeline::Outcome::Superseded;
+};
+
+static std::shared_ptr<AsyncCommitResult>
+SubmitRequest(UsdGenSession& session, UsdGenSession::CommitRequest request)
+{
+    auto result = std::make_shared<AsyncCommitResult>();
+    result->accepted = session.CommitAsync(std::move(request), [result](
+        UsdGenSession::SnapshotPtr snapshot,
+        UsdGenExecutionPipeline::Outcome outcome) {
+            result->snapshot = std::move(snapshot);
+            result->outcome = outcome;
+            result->done.store(true, std::memory_order_release);
+        });
+    return result;
+}
+
+static bool WaitFor(AsyncCommitResult const& result)
+{
+    auto const deadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds(10);
+    while (!result.done.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    return result.done.load(std::memory_order_acquire);
+}
+
+static bool HasDiagnostic(UsdGenSession::SnapshotPtr const& snapshot,
+                          char const* text)
+{
+    if (!snapshot) return false;
+    for (std::string const& error : snapshot->diagnostics.errors)
+        if (error.find(text) != std::string::npos) return true;
+    return false;
+}
+
 int main() {
     cudaStream_t consumer = nullptr;
     CHECK(cudaStreamCreateWithFlags(&consumer, cudaStreamNonBlocking) == cudaSuccess);
+    // Source resampling happens after the GPU source upload: literal targets
+    // change topology without changing the authored host curve set.
+    {
+        UsdGenSession session;
+        auto uniform = SourceDesc();
+        uniform.nodes.front().params.push_back({TfToken("resampleTo"), VtValue(4), false});
+        session.SetGraphDesc(uniform);
+        session.SetDevicePublicationEnabled(true);
+        auto four = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(four && four->device);
+        auto lease = gpu::AcquireGeometry(four->device, consumer);
+        CHECK(lease && lease.Geometry().curveCount == 2 && lease.Geometry().pointCount == 8);
+        std::vector<float3> points(8);
+        std::vector<uint32_t> offsets(3);
+        CHECK(cudaMemcpyAsync(points.data(), lease.Geometry().points.data, points.size() * sizeof(float3), cudaMemcpyDeviceToHost, consumer) == cudaSuccess);
+        CHECK(cudaMemcpyAsync(offsets.data(), lease.Geometry().curveOffsets.data, offsets.size() * sizeof(uint32_t), cudaMemcpyDeviceToHost, consumer) == cudaSuccess);
+        CHECK(cudaStreamSynchronize(consumer) == cudaSuccess);
+        CHECK(offsets == std::vector<uint32_t>({0,4,8}) &&
+              std::fabs(points[0].x - 20.0f) < 1e-4f && std::fabs(points[1].x - 20.666666f) < 1e-4f &&
+              std::fabs(points[2].x - 22.0f) < 1e-4f && std::fabs(points[3].x - 24.0f) < 1e-4f &&
+              std::fabs(points[4].x - 10.0f) < 1e-4f && std::fabs(points[5].x - 10.333334f) < 1e-4f &&
+              std::fabs(points[6].x - 10.666666f) < 1e-4f && std::fabs(points[7].x - 11.0f) < 1e-4f);
+        auto const lastGood = four;
+        auto invalid = uniform;
+        invalid.nodes.front().params.front().value = VtValue(1);
+        session.SetGraphDesc(invalid);
+        CHECK(session.Commit(2, UsdGenCommitReason::SetTime) == lastGood && session.LastDiagnostics().HasErrors());
+        invalid.nodes.front().params.front().value = VtValue(-2);
+        session.SetGraphDesc(invalid);
+        CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == lastGood && session.LastDiagnostics().HasErrors());
+        auto ragged = uniform;
+        ragged.nodes.front().params.front().value = VtValue(0);
+        session.SetGraphDesc(ragged);
+        auto zero = session.Commit(4, UsdGenCommitReason::SetTime);
+        CHECK(zero && zero != lastGood);
+        auto zeroLease = gpu::AcquireGeometry(zero->device, consumer);
+        CHECK(zeroLease && zeroLease.Geometry().pointCount == 5);
+    }
+    // Groom scalar Int32 controls are evaluated per commit, before source
+    // resampling; an invalid evaluated value must retain the last publication.
+    {
+        UsdGenSession session;
+        auto desc = SourceDesc();
+        UsdGenExpressionDesc expression;
+        expression.path = SdfPath("/Groom/Description/Expressions/resample");
+        expression.source = "$frame > 1 ? 4 : 0";
+        expression.outputs.push_back({TfToken("result"), TfToken("int"), ScalarShape(expr::ScalarType::Int32)});
+        desc.expressions.push_back(expression);
+        UsdGenExpressionBinding binding;
+        binding.expression = expression.path;
+        binding.destination = TfToken("resampleTo");
+        binding.nativeType = TfToken("int");
+        binding.destinationShape = ScalarShape(expr::ScalarType::Int32);
+        binding.domain = expr::Domain::Groom;
+        binding.literal = VtValue(0);
+        // This literal would be invalid without the connected groom result;
+        // frame 2 evaluates to four and must win before source validation.
+        desc.nodes.front().params.push_back({TfToken("resampleTo"), VtValue(1), false});
+        desc.nodes.front().expressionBindings.push_back(binding);
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto ragged = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(ragged && ragged->device && ragged->device->Geometry().pointCount == 5);
+        auto uniform = session.Commit(2, UsdGenCommitReason::SetTime);
+        CHECK(uniform && uniform != ragged && uniform->device->Geometry().pointCount == 8);
+        desc.expressions[0].source = "1";
+        session.SetGraphDesc(desc);
+        CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == uniform && session.LastDiagnostics().HasErrors());
+        desc.expressions[0].source = "-2";
+        session.SetGraphDesc(desc);
+        CHECK(session.Commit(4, UsdGenCommitReason::SetTime) == uniform && session.LastDiagnostics().HasErrors());
+    }
+    // The renderer selection belongs to the immutable request, not a
+    // separately posted mutable side channel.  Start CUDA-enabled, reject two
+    // false/absent requests against the retained device generation, then
+    // recover and prove an absent request preserves the recovered true mode.
+    {
+        UsdGenSession session;
+        auto desc = std::make_shared<const UsdGenGraphDesc>(SourceDesc());
+        UsdGenSession::CommitRequest enable;
+        enable.frame = 101.0;
+        enable.reason = UsdGenCommitReason::SetTime;
+        enable.desc = desc;
+        enable.devicePublication = true;
+        auto first = SubmitRequest(session, std::move(enable));
+        CHECK(first->accepted && WaitFor(*first));
+        CHECK(first->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              first->snapshot && first->snapshot->generation &&
+              first->snapshot->generation->device &&
+              first->snapshot->generation->frame == 101.0);
+        auto const retained = first->snapshot->generation;
+
+        UsdGenSession::CommitRequest disable;
+        disable.frame = 102.0;
+        disable.reason = UsdGenCommitReason::SetTime;
+        disable.devicePublication = false;
+        auto rejected = SubmitRequest(session, std::move(disable));
+        CHECK(rejected->accepted && WaitFor(*rejected));
+        CHECK(rejected->outcome == UsdGenExecutionPipeline::Outcome::Failed &&
+              rejected->snapshot && rejected->snapshot->generation == retained &&
+              HasDiagnostic(rejected->snapshot, "device-aware consumer"));
+
+        UsdGenSession::CommitRequest absentFalse;
+        absentFalse.frame = 103.0;
+        absentFalse.reason = UsdGenCommitReason::SetTime;
+        auto stillRejected = SubmitRequest(session, std::move(absentFalse));
+        CHECK(stillRejected->accepted && WaitFor(*stillRejected));
+        CHECK(stillRejected->outcome == UsdGenExecutionPipeline::Outcome::Failed &&
+              stillRejected->snapshot &&
+              stillRejected->snapshot->generation == retained &&
+              HasDiagnostic(stillRejected->snapshot, "device-aware consumer"));
+
+        UsdGenSession::CommitRequest recover;
+        recover.frame = 104.0;
+        recover.reason = UsdGenCommitReason::SetTime;
+        recover.devicePublication = true;
+        auto recovered = SubmitRequest(session, std::move(recover));
+        CHECK(recovered->accepted && WaitFor(*recovered));
+        CHECK(recovered->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              recovered->snapshot && recovered->snapshot->generation &&
+              recovered->snapshot->generation->device &&
+              recovered->snapshot->generation != retained &&
+              recovered->snapshot->generation->frame == 104.0);
+
+        UsdGenSession::CommitRequest absentTrue;
+        absentTrue.frame = 105.0;
+        absentTrue.reason = UsdGenCommitReason::SetTime;
+        auto stillEnabled = SubmitRequest(session, std::move(absentTrue));
+        CHECK(stillEnabled->accepted && WaitFor(*stillEnabled));
+        CHECK(stillEnabled->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              stillEnabled->snapshot && stillEnabled->snapshot->generation &&
+              stillEnabled->snapshot->generation->device &&
+              stillEnabled->snapshot->generation != recovered->snapshot->generation &&
+              stillEnabled->snapshot->generation->frame == 105.0);
+    }
     gpu::CudaGeometryLease retained;
     std::weak_ptr<const UsdGenDeviceOwner> oldOwner;
     {

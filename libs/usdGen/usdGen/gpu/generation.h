@@ -3,6 +3,7 @@
 
 #include "usdGen/deviceGeneration.h"
 #include "curveSource.h"
+#include "curveResample.h"
 
 namespace usdGen::gpu {
 
@@ -13,6 +14,16 @@ class CudaCurveCompaction;
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation,
     std::string* reason = nullptr, bool alreadyDeformed = false,
+    std::unique_ptr<DeviceBuffer<float>> widths = {},
+    std::unique_ptr<DeviceBuffer<float3>> points = {},
+    uint64_t topologyVersion = UINT64_MAX);
+
+// Owns both the immutable uploaded source and its completed device-only
+// resample. The source remains alive because the resampler borrowed it until
+// Finish; consumers expose only the resampled channels.
+std::shared_ptr<const UsdGenDeviceGeneration> MakeResampledGeneration(
+    std::unique_ptr<CudaCurveSource> source, std::unique_ptr<CudaCurveResample> resampled,
+    uint64_t generation, std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
     std::unique_ptr<DeviceBuffer<float3>> points = {},
     uint64_t topologyVersion = UINT64_MAX);

@@ -29,9 +29,15 @@ gpu::CurveSourceInput CudaSourcePrepared::Input() const {
 CudaSourcePreparationStatus PrepareCudaSourceImpl(
     CudaSourcePreparationInput const& source, CudaSourcePreparationOptions const& options,
     CudaSourcePrepared* out, std::vector<std::string>* diagnostics) {
-    if (!out || options.resampleTo != 0 || options.rebind != "never" || options.hasRootFrame) {
-        Diag(diagnostics, "resample, rebind, and rootFrame are unsupported by CUDA source preparation");
+    if (!out || options.rebind != "never" || options.hasRootFrame) {
+        Diag(diagnostics, "rebind and rootFrame are unsupported by CUDA source preparation");
         return CudaSourcePreparationStatus::UnsupportedFeature;
+    }
+    // This stage preserves authored ragged data. CUDA execution resolves the
+    // target before upload and resamples device-to-device after source staging.
+    if (options.resampleTo < 0 || options.resampleTo == 1) {
+        Diag(diagnostics, "resampleTo must be zero or at least two");
+        return CudaSourcePreparationStatus::InvalidArgument;
     }
     if (options.staleAction != CudaSourceStaleAction::Warn &&
         options.staleAction != CudaSourceStaleAction::Ignore &&

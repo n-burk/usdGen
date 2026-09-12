@@ -235,6 +235,8 @@ bool UsdGenSession::CommitAsync(CommitRequest request, Completion completion) {
             // another command could otherwise split this request in two.
             if (request.desc) state.SetDesc(request.desc);
             if (request.context) state.SetContext(*request.context);
+            if (request.devicePublication)
+                state.SetDevicePublication(*request.devicePublication);
             const double frame = request.frame;
             const UsdGenCommitReason reason = request.reason;
             auto baseline = Snapshot();

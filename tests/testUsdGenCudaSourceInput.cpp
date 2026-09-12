@@ -82,8 +82,15 @@ int main() {
           "stale block rejects");
 
     auto unsupported = CudaSourcePreparationOptions{}; unsupported.resampleTo = 4;
-    check(PrepareCudaSource(source, unsupported, &prepared, nullptr) == CudaSourcePreparationStatus::UnsupportedFeature,
-          "resampling is explicit unsupported error");
+    check(PrepareCudaSource(source, unsupported, &prepared, nullptr) == CudaSourcePreparationStatus::Ok &&
+          prepared.curveVertexCounts == std::vector<int32_t>({3,2}) && prepared.points.size() == 5,
+          "resample target is accepted while preparation preserves authored ragged data");
+    unsupported.resampleTo = 1;
+    check(PrepareCudaSource(source, unsupported, &prepared, nullptr) == CudaSourcePreparationStatus::InvalidArgument,
+          "one-CV resample target rejects");
+    unsupported.resampleTo = -1;
+    check(PrepareCudaSource(source, unsupported, &prepared, nullptr) == CudaSourcePreparationStatus::InvalidArgument,
+          "negative resample target rejects");
     unsupported.resampleTo = 0; unsupported.rebind = "always";
     check(PrepareCudaSource(source, unsupported, &prepared, nullptr) == CudaSourcePreparationStatus::UnsupportedFeature,
           "rebind is explicit unsupported error");

@@ -19,6 +19,12 @@ public:
                 std::unique_ptr<CudaCurveCompaction> compacted = {})
         : source_(std::move(source)), compacted_(std::move(compacted)),
           widths_(std::move(widths)), points_(std::move(points)), device_(device) {}
+    SourceOwner(std::unique_ptr<CudaCurveSource> source,
+                std::unique_ptr<CudaCurveResample> resampled, int device,
+                std::unique_ptr<DeviceBuffer<float>> widths = {},
+                std::unique_ptr<DeviceBuffer<float3>> points = {})
+        : source_(std::move(source)), resampled_(std::move(resampled)),
+          widths_(std::move(widths)), points_(std::move(points)), device_(device) {}
     SourceOwner(std::shared_ptr<const UsdGenDeviceGeneration> base, int device,
                 std::unique_ptr<DeviceBuffer<float3>> points)
         : base_(std::move(base)), points_(std::move(points)), device_(device) {}
@@ -27,16 +33,20 @@ public:
     std::unique_ptr<UsdGenDeviceConsumer> AcquireConsumer(
         UsdGenDeviceStream stream) const noexcept override;
     DeviceView<const float> HairT() const noexcept {
-        return base_ ? BaseOwner()->HairT() : compacted_ ? compacted_->hairT() : source_->hairT();
+        return base_ ? BaseOwner()->HairT() : compacted_ ? compacted_->hairT() :
+            resampled_ ? resampled_->hairT() : source_->hairT();
     }
     DeviceView<const int32_t> RootPrim() const noexcept {
-        return base_ ? BaseOwner()->RootPrim() : compacted_ ? compacted_->rootPrim() : source_->rootPrim();
+        return base_ ? BaseOwner()->RootPrim() : compacted_ ? compacted_->rootPrim() :
+            resampled_ ? resampled_->rootPrim() : source_->rootPrim();
     }
     DeviceView<const float2> RootUV() const noexcept {
-        return base_ ? BaseOwner()->RootUV() : compacted_ ? compacted_->rootUV() : source_->rootUV();
+        return base_ ? BaseOwner()->RootUV() : compacted_ ? compacted_->rootUV() :
+            resampled_ ? resampled_->rootUV() : source_->rootUV();
     }
     DeviceCurveGeometryView Geometry() const noexcept {
-        auto view = base_ ? BaseOwner()->Geometry() : compacted_ ? compacted_->view() : source_->view();
+        auto view = base_ ? BaseOwner()->Geometry() : compacted_ ? compacted_->view() :
+            resampled_ ? resampled_->view() : source_->view();
         if (widths_) view.widths = {widths_->data(), widths_->size()};
         if (points_) view.points = {points_->data(), points_->size()};
         return view;
@@ -48,6 +58,7 @@ private:
     }
     std::shared_ptr<const UsdGenDeviceGeneration> base_;
     std::unique_ptr<CudaCurveSource> source_;
+    std::unique_ptr<CudaCurveResample> resampled_;
     std::unique_ptr<CudaCurveCompaction> compacted_;
     std::unique_ptr<DeviceBuffer<float>> widths_;
     std::unique_ptr<DeviceBuffer<float3>> points_;
@@ -84,6 +95,7 @@ public:
             return Status::SynchronizationFailed;
         cudaStream_t const native = reinterpret_cast<cudaStream_t>(stream_);
         if ((owner_->source_ && owner_->source_->waitOn(native) != CurveSourceStatus::Ok) ||
+            (owner_->resampled_ && owner_->resampled_->waitOn(native) != cudaSuccess) ||
             (owner_->compacted_ && owner_->compacted_->waitOn(native) != cudaSuccess) ||
             (owner_->widths_ && owner_->widths_->waitOn(native) != cudaSuccess) ||
             (owner_->points_ && owner_->points_->waitOn(native) != cudaSuccess))
@@ -129,6 +141,7 @@ SourceOwner::~SourceOwner()
         if (widths_) widths_->quarantine();
         if (points_) points_->quarantine();
         source_.release();
+        resampled_.release();
         compacted_.release();
         widths_.release();
         points_.release();
@@ -136,6 +149,7 @@ SourceOwner::~SourceOwner()
         return;
     }
     source_.reset();
+    resampled_.reset();
     compacted_.reset();
     widths_.reset();
     points_.reset();
@@ -145,7 +159,8 @@ SourceOwner::~SourceOwner()
 bool SourceOwner::ProducerReady() const noexcept
 {
     return !quarantined_.load() &&
-        ((source_ && source_->generation() && !source_->pending()) ||
+        ((resampled_ && !resampled_->pending()) ||
+         (source_ && source_->generation() && !source_->pending()) ||
          (compacted_ && compacted_->generation() && !compacted_->pending()) ||
          (base_ && base_->Owner()->ProducerReady()));
 }
@@ -181,16 +196,18 @@ static std::shared_ptr<const UsdGenDeviceGeneration> MakeGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation, std::string* reason,
     bool alreadyDeformed, std::unique_ptr<DeviceBuffer<float>> widths,
     std::unique_ptr<DeviceBuffer<float3>> points, std::unique_ptr<CudaCurveCompaction> compacted,
-    uint64_t topologyVersion) {
+    uint64_t topologyVersion, std::unique_ptr<CudaCurveResample> resampled = {}) {
     int device = -1;
-    if (bool(source) == bool(compacted) || cudaGetDevice(&device) != cudaSuccess ||
+    if ((!source && !compacted) || (compacted && (source || resampled)) ||
+        (resampled && !source) || cudaGetDevice(&device) != cudaSuccess ||
         (source && (source->pending() || !source->generation() || source->deviceIndex() != device)) ||
+        (resampled && (resampled->pending() || resampled->deviceIndex() != device)) ||
         (compacted && (compacted->pending() || !compacted->generation() || compacted->deviceIndex() != device))) {
         if (reason) *reason = "CUDA source is not a completed generation";
         return {};
     }
-    auto view = compacted ? compacted->view() : source->view();
-    auto hairT = compacted ? compacted->hairT() : source->hairT();
+    auto view = compacted ? compacted->view() : resampled ? resampled->view() : source->view();
+    auto hairT = compacted ? compacted->hairT() : resampled ? resampled->hairT() : source->hairT();
     if (view.points.size != view.pointCount || view.restPoints.size != view.pointCount ||
         view.widths.size != view.pointCount || view.stableIds.size != view.curveCount ||
         view.curveOffsets.size != view.curveCount + 1 || hairT.size != view.pointCount ||
@@ -238,12 +255,26 @@ static std::shared_ptr<const UsdGenDeviceGeneration> MakeGeneration(
     // Offsets are topology storage (C+1), not a per-primitive value (C).
     channel("curveOffsets", Type::UInt32, Domain::Topology, view.curveOffsets.size, 1, sizeof(uint32_t), Semantic::CurveOffsets);
     channel("curveId", Type::UInt64, Domain::Primitive, view.curveCount, 1, sizeof(uint64_t), Semantic::StableIds);
-    if ((compacted ? compacted->rootPrim() : source->rootPrim()).size)
+    if ((compacted ? compacted->rootPrim() : resampled ? resampled->rootPrim() : source->rootPrim()).size)
         channel("skinprim", Type::Int32, Domain::Primitive, view.curveCount, 1, sizeof(int32_t), Semantic::RootPrim);
-    if ((compacted ? compacted->rootUV() : source->rootUV()).size)
+    if ((compacted ? compacted->rootUV() : resampled ? resampled->rootUV() : source->rootUV()).size)
         channel("skinprimuv", Type::Float32x2, Domain::Primitive, view.curveCount, 2, sizeof(float2), Semantic::RootUV);
-    info.owner = std::make_shared<SourceOwner>(std::move(source), device, std::move(widths), std::move(points), std::move(compacted));
+    info.owner = resampled
+        ? std::make_shared<SourceOwner>(std::move(source), std::move(resampled), device,
+                                        std::move(widths), std::move(points))
+        : std::make_shared<SourceOwner>(std::move(source), device, std::move(widths),
+                                        std::move(points), std::move(compacted));
     return UsdGenDeviceGeneration::Create(std::move(info), reason);
+}
+
+std::shared_ptr<const UsdGenDeviceGeneration> MakeResampledGeneration(
+    std::unique_ptr<CudaCurveSource> source, std::unique_ptr<CudaCurveResample> resampled,
+    uint64_t generation, std::string* reason, bool alreadyDeformed,
+    std::unique_ptr<DeviceBuffer<float>> widths, std::unique_ptr<DeviceBuffer<float3>> points,
+    uint64_t topologyVersion) {
+    return MakeGeneration(std::move(source), generation, reason, alreadyDeformed,
+                          std::move(widths), std::move(points), {},
+                          topologyVersion, std::move(resampled));
 }
 
 std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(

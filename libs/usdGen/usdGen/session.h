@@ -84,6 +84,10 @@ struct UsdGenSessionCommitRequest
     // Captured by an upstream owner when it must relay the original caller's
     // CUDA device. Absent means capture at this Session API boundary.
     std::optional<int> callerDevice;
+    // Optional renderer admission selection.  Applied with desc/context in
+    // this one owner command before its publication baseline is captured;
+    // absent preserves the previously selected device-publication mode.
+    std::optional<bool> devicePublication;
 };
 
 class UsdGenSession

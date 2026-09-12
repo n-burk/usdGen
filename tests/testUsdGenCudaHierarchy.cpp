@@ -150,6 +150,40 @@ int main() {
     CHECK(lengthDesc.nodes[0].type == TfToken("UsdGenCurveSource") &&
           lengthDesc.nodes[1].type == TfToken("UsdGenLength"));
 
+    // Exercise the authored transport, not a hand-built graph description:
+    // canonical source connect carries a groom-native Int32 expression.
+    UsdPrim const sourcePrim = lengthStage->GetPrimAtPath(
+        SdfPath("/Character/Groom/hair/Ops/source"));
+    UsdPrim const resampleExpression = lengthStage->DefinePrim(
+        SdfPath("/Character/Groom/hair/Expressions/resampleTo"), TfToken("UsdGenExpression"));
+    CHECK(sourcePrim && resampleExpression);
+    CHECK(resampleExpression.GetAttribute(TfToken("usdGen:expr:source")).Set(
+        std::string("$frame > 1 ? 4 : 0")));
+    CHECK(resampleExpression.CreateAttribute(TfToken("outputs:result"), SdfValueTypeNames->Int, true));
+    UsdAttribute const resampleConnect = sourcePrim.CreateAttribute(
+        TfToken("usdGen:resampleTo"), SdfValueTypeNames->Int, true);
+    CHECK(resampleConnect.SetConnections(SdfPathVector{
+        SdfPath("/Character/Groom/hair/Expressions/resampleTo.outputs:result")}));
+    resampleConnect.SetCustomDataByKey(TfToken("usdGen:evaluation"), VtValue(std::string("groom")));
+    lengthIndices.stageSceneIndex->ApplyPendingUpdates();
+    auto resampleDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *lengthIndices.finalSceneIndex, SdfPath("/Character/Groom/hair"));
+    CHECK(resampleDesc.validationErrors.empty() && resampleDesc.nodes[0].expressionBindings.size() == 1);
+    session.SetGraphDesc(resampleDesc);
+    auto resampleRagged = session.Commit(1, UsdGenCommitReason::SetTime);
+    CHECK(resampleRagged && resampleRagged->device);
+    auto resampleUniform = session.Commit(2, UsdGenCommitReason::SetTime);
+    CHECK(resampleUniform && resampleUniform != resampleRagged && resampleUniform->device);
+    auto resampleLease = gpu::AcquireGeometry(resampleUniform->device, nullptr);
+    CHECK(resampleLease && resampleLease.Geometry().pointCount == 8);
+    uint64_t resampleIds[2]{};
+    CHECK(cudaMemcpy(resampleIds, resampleLease.Geometry().stableIds.data,
+                     sizeof(resampleIds), cudaMemcpyDeviceToHost) == cudaSuccess);
+    CHECK(resampleIds[0] == 10 && resampleIds[1] == 20);
+    CHECK(resampleConnect.ClearConnections());
+    CHECK(lengthStage->RemovePrim(resampleExpression.GetPath()));
+    lengthIndices.stageSceneIndex->ApplyPendingUpdates();
+
     // Author the supported primitive-domain float2 random binding through
     // USD, then take both Stage and Hydra transport paths into actual CUDA
     // compilation/execution.  This is specifically not a hand-built graph.

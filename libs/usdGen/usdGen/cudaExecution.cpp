@@ -240,6 +240,7 @@ class UsdGenCudaExecutionPlan {
 public:
     UsdGenGraphDesc desc;
 #ifdef USDGEN_ENABLE_CUDA
+    std::shared_ptr<const CudaParameterProgram> sourceParameters;
     struct Step {
         SdfPath path;
         TfToken type;
@@ -299,6 +300,7 @@ struct UsdGenCudaExecutionWorkspace::Impl {
         std::make_shared<const std::vector<UsdGenCudaBindingStats>>();
 #ifdef USDGEN_ENABLE_CUDA
     cudaStream_t stream = nullptr;
+    std::unique_ptr<CudaParameterEvaluator> sourceParameters;
     struct Step {
         CudaParameterEvaluator parameters;
         std::unique_ptr<CudaRbfCache> rbf;
@@ -320,6 +322,7 @@ UsdGenCudaExecutionWorkspace::~UsdGenCudaExecutionWorkspace() {
         return;
     }
     impl_->steps.clear();
+    impl_->sourceParameters.reset();
     cudaStreamDestroy(impl_->stream);
 #endif
 }
@@ -435,8 +438,14 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         } else if (!ValidateWidth(next, diagnostics)) return false;
     }
     auto const& node = desc.nodes.front();
-    if (!node.expressionBindings.empty())
-        return Fail(diagnostics, "connected CurveSource controls are not yet wired to the execution-time evaluator");
+    for (auto const& binding : node.expressionBindings) {
+        auto const& shape = binding.destinationShape;
+        if (LocalName(binding.destination) != "resampleTo" || binding.domain != expr::Domain::Groom ||
+            binding.nativeType != TfToken("int") || shape.isArray || shape.elementCount != 1 ||
+            shape.components != 1 || shape.rows != 1 || shape.columns != 1 ||
+            shape.scalar != expr::ScalarType::Int32)
+            return Fail(diagnostics, "CurveSource only supports groom native-int resampleTo expressions");
+    }
     if (!node.enabled || node.blend != 1 || node.algorithmVersion < 0 || node.algorithmVersion > 1)
         return Fail(diagnostics, "unsupported CurveSource enabled/blend/algorithmVersion configuration");
     if (!node.inputs.empty() || !node.references.empty() || !node.maps.empty())
@@ -501,6 +510,13 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
     auto plan = std::make_shared<UsdGenCudaExecutionPlan>();
     plan->desc = desc;
 #ifdef USDGEN_ENABLE_CUDA
+    if (!desc.nodes.front().expressionBindings.empty()) {
+        std::vector<std::string> errors;
+        if (CudaParameterProgram::Compile(desc, desc.nodes.front(), &plan->sourceParameters, &errors) != CudaParameterStatus::Ok) {
+            for (auto const& error : errors) Fail(diagnostics, error);
+            return {};
+        }
+    }
     for (size_t i = 1; i < desc.nodes.size(); ++i) {
         auto width = std::make_unique<UsdGenCudaExecutionPlan::Step>();
         width->path = desc.nodes[i].path;
@@ -633,7 +649,10 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     if (!epoch.IsHolding<std::string>()) { Fail(diagnostics, "expectEpoch must be a string"); return {}; }
     options.expectedEpoch = epoch.UncheckedGet<std::string>();
     options.actualEpoch = curves.frozenEpoch;
-    options.resampleTo = params.GetInt(TfToken("resampleTo"), 0);
+    // A connected groom scalar is the effective value. Do not reject its
+    // authored literal fallback before the evaluator has had a chance to
+    // override it; source preparation itself never host-resamples.
+    options.resampleTo = plan.sourceParameters ? 0 : params.GetInt(TfToken("resampleTo"), 0);
     options.rebind = params.GetToken(TfToken("rebind"), TfToken("onError")).GetString();
     const UsdGenSurfaceDesc* surface = nullptr;
     if (!node.surfaces.empty()) {
@@ -686,15 +705,47 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         source->Finish(stream) != gpu::CurveSourceStatus::Ok) {
         Fail(diagnostics, "source upload failed; previous generation retained"); return {};
     }
-    auto geometry = source->view();
+    if (plan.sourceParameters) {
+        expr::Context context;
+        context.frame = frame;
+        context.time = frame / desc.timeCodesPerSecond;
+        context.seed = node.seed;
+        context.descId = expr::DescriptionId(desc.description.GetText());
+        std::vector<std::string> errors;
+        if (!execution.sourceParameters)
+            execution.sourceParameters = std::make_unique<CudaParameterEvaluator>();
+        if (execution.sourceParameters->Evaluate(*plan.sourceParameters, source->view(),
+                {source->hairT(), source->rootUV()}, context, stream, &errors) != CudaParameterStatus::Ok) {
+            for (auto const& error : errors) Fail(diagnostics, error);
+            Fail(diagnostics, "resampleTo expression evaluation failed; previous generation retained"); return {};
+        }
+        auto const* field = execution.sourceParameters->Find(TfToken("resampleTo"));
+        int value = 0;
+        if (!field || field->type != expr::ScalarType::Int32 || field->count != 1 ||
+            cudaMemcpyAsync(&value, field->data, sizeof(value), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+            cudaStreamSynchronize(stream) != cudaSuccess || value < 0 || value == 1) {
+            Fail(diagnostics, "invalid resampleTo expression value; previous generation retained"); return {};
+        }
+        options.resampleTo = value;
+    }
+    std::unique_ptr<gpu::CudaCurveResample> resampled;
+    if (options.resampleTo) {
+        resampled = std::make_unique<gpu::CudaCurveResample>();
+        if (resampled->Apply(source->view(), source->hairT(), source->rootPrim(), source->rootUV(),
+                             options.resampleTo, stream) != gpu::CurveResampleStatus::Ok ||
+            resampled->Finish(stream) != gpu::CurveResampleStatus::Ok) {
+            Fail(diagnostics, "CUDA source resample failed; previous generation retained"); return {};
+        }
+    }
+    auto geometry = resampled ? resampled->view() : source->view();
     // PrepareCudaSource establishes this strictly ordered capture identity.
     // Keep the borrowed view alive through tile assignment even if a later
     // Length pass compacts the survivor geometry.
     auto const captureStableIds = geometry.stableIds;
     size_t const captureCurveCount = geometry.curveCount;
-    auto hairT = source->hairT();
-    auto rootPrim = source->rootPrim();
-    auto rootUV = source->rootUV();
+    auto hairT = resampled ? resampled->hairT() : source->hairT();
+    auto rootPrim = resampled ? resampled->rootPrim() : source->rootPrim();
+    auto rootUV = resampled ? resampled->rootUV() : source->rootUV();
     std::unique_ptr<gpu::CudaCurveCompaction> compacted;
     std::unique_ptr<gpu::DeviceBuffer<float>> finalWidths;
     std::unique_ptr<gpu::DeviceBuffer<float3>> finalPoints;
@@ -989,6 +1040,9 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     auto result = compacted
         ? gpu::MakeCompactedGeneration(std::move(compacted), generation, &reason,
             deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion)
+        : resampled
+        ? gpu::MakeResampledGeneration(std::move(source), std::move(resampled), generation,
+            &reason, deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion)
         : gpu::MakeSourceGeneration(std::move(source), generation, &reason,
             deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion);
     if (!result) Fail(diagnostics, reason);
