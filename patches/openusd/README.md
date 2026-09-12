@@ -327,3 +327,35 @@ separate stable 14-test selection passed (`44a56c`, 4.07 s), excluding exactly
 the known bare-provider target and this render target. These focused results
 are not a full private-harness claim and do not change the bare-provider
 regression.
+
+## Transactional instancer presentation (patch 0007)
+
+`0007-hdst-gpu-basis-curves-instancer-transaction.patch` follows 0001--0006.
+It is a private-HdSt overlay, not a stock-SDK ABI replacement.  Its only Hd
+header addition is an inline protected `HdRprim` helper: it preserves layout,
+does not add a vtable entry or out-of-line Hd symbol, and commits the captured
+instancer dependency only after a GPU candidate is ready.  Candidate constant,
+instance-primvar, and instance-index BARs are independently allocated and
+queued before Commit; accepted draw-item ranges and scalar presentation are
+swapped only from the post-Commit Ready path.  The candidate owns those BAR
+handles until publication, while failed candidates leave the accepted handles
+and presentation untouched.
+
+The patch distinguishes a staging/allocation failure from a valid instancer
+with no instance primvars.  The latter publishes null instance-primvar slots,
+an empty instance-index BAR, and therefore zero indirect instances; a rejected
+empty replacement retains the preceding nonempty rendering.  The explicit
+path walks and stages each parent in a nested hierarchy and captures the
+flattened instance-index tuple before Ready.  It does not make a blanket claim
+that all renderer metadata is transactional: `UpdateRenderTag` remains outside
+this pending-presentation capture and needs separate work.
+
+The final 0007 artifact clean-applied to a fresh 0006 checkout in the root
+verification (`aa2005`/`9ad4f1`), then all five patched files matched the
+compiled private tree (`eb2d7c`). The private ASAN/UBSAN build passed
+(`6a199b`) and four focused targets—staging, reentry, native CUDA, and CUDA
+group publication—passed (`bc1204`, 5.93 seconds), with leak detection
+disabled; stock SDK and usdGen core objects remained uninstrumented. The
+strengthened native empty/nested-instancer fixture passed (`3505ec`, 0.70
+seconds). The final 16-target private harness, including this revision, passed
+(`4aa46b`, 5.41 seconds).

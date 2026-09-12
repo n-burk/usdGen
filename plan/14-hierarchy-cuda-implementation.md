@@ -1683,3 +1683,19 @@ with session memcheck/initcheck (`448d65`/`903800`) and RBF memcheck/initcheck
 (`dda7ed`/`20495c`) all reporting zero errors. CUDA-off core rebuilt
 successfully (`69dafe`); this is a core-only result, not a full CPU-suite
 claim.
+
+### Private Storm instancer transaction checkpoint (2026-09-12)
+
+Patch 0007 captures candidate constant, instance-primvar, and instance-index
+BARs before Commit and swaps them only after Ready. Its additive protected
+inline `HdRprim` helper retains the existing member layout/vtable and has no
+new out-of-line Hd symbol. Valid empty instance primvars publish null slots
+and zero indirect instances; a rejected empty candidate preserves the prior
+nonempty frame. Nested parent traversal is captured before Ready. The final
+artifact fresh-applied to clean 0006 (`aa2005`/`9ad4f1`) and all five patched
+files matched (`eb2d7c`). The private ASAN/UBSAN build passed (`6a199b`) and
+four focused targets passed (`bc1204`, 5.93 seconds), with leak detection
+disabled and stock SDK/core uninstrumented. The strengthened empty/nested
+native fixture passed (`3505ec`, 0.70 seconds), and the final 16-target
+private harness passed (`4aa46b`, 5.41 seconds). This does not make render-tag
+publication transactional; that path remains separately open.

@@ -1,0 +1,978 @@
+--- a/pxr/imaging/hd/rprim.h
++++ b/pxr/imaging/hd/rprim.h
+@@ -9,6 +9,7 @@
+ 
+ #include "pxr/pxr.h"
+ #include "pxr/imaging/hd/api.h"
++#include "pxr/imaging/hd/changeTracker.h"
+ #include "pxr/imaging/hd/version.h"
+ #include "pxr/imaging/hd/rprimSharedData.h"
+ #include "pxr/imaging/hd/repr.h"
+@@ -260,6 +261,26 @@
+     void _UpdateInstancer(HdSceneDelegate *sceneDelegate,
+                           HdDirtyBits *dirtyBits);
+ 
++    // Commits an already-staged instancer relationship without consulting a
++    // scene delegate.  Renderer implementations that stage asynchronous
++    // data use this only once the associated draw-item BARs are ready to
++    // become visible.  Keep this inline: the private Storm overlay links the
++    // stock Hd library, so this must not add an out-of-line Hd ABI symbol.
++    void _CommitInstancerId(HdChangeTracker &tracker,
++                            SdfPath const &instancerId)
++    {
++        if (instancerId == _instancerId) {
++            return;
++        }
++        if (!_instancerId.IsEmpty()) {
++            tracker.RemoveInstancerRprimDependency(_instancerId, GetId());
++        }
++        if (!instancerId.IsEmpty()) {
++            tracker.AddInstancerRprimDependency(instancerId, GetId());
++        }
++        _instancerId = instancerId;
++    }
++
+ private:
+     SdfPath _instancerId;
+     SdfPath _materialId;
+--- a/pxr/imaging/hdSt/basisCurves.h
++++ b/pxr/imaging/hdSt/basisCurves.h
+@@ -164,11 +164,15 @@
+ 
+     bool _StageGpuBundle(HdSceneDelegate *sceneDelegate,
+                          HdRenderParam *renderParam);
++    bool _StageGpuPresentation(HdSceneDelegate *sceneDelegate,
++                               HdRenderParam *renderParam,
++                               HdStBasisCurvesGpuBundle const &bundle);
+     void _PublishGpuBundle();
+     void _UpdateGpuGeometricShaders(HdRenderParam *renderParam);
+     void _InvalidateGpuCallbackState();
+ 
+     struct _GpuCallbackState;
++    struct _GpuPresentation;
+ 
+     HdSt_BasisCurvesTopologySharedPtr _topology;
+     HdTopology::ID _topologyId;
+@@ -186,6 +190,7 @@
+     uint64_t _gpuEpoch = 0;
+     std::shared_ptr<_GpuCallbackState> _gpuCallbackState;
+     std::shared_ptr<const HdStBasisCurvesGpuBundle> _pendingGpuBundle;
++    std::unique_ptr<_GpuPresentation> _pendingGpuPresentation;
+     std::shared_ptr<HdStResourceRegistry> _gpuResourceRegistry;
+     HdRenderParam *_gpuRenderParam = nullptr;
+     int _pendingGpuRefineLevel = 0;
+--- a/pxr/imaging/hdSt/basisCurves.cpp
++++ b/pxr/imaging/hdSt/basisCurves.cpp
+@@ -32,6 +32,7 @@
+ #include "pxr/base/gf/vec2i.h"
+ 
+ #include "pxr/imaging/hd/bufferSource.h"
++#include "pxr/imaging/hd/rprimSharedData.h"
+ #include "pxr/imaging/hd/repr.h"
+ #include "pxr/imaging/hf/diagnostic.h"
+ #include "pxr/base/vt/value.h"
+@@ -46,6 +47,8 @@
+ #include "pxr/imaging/hgi/capabilities.h"
+ 
+ #include <set>
++#include <utility>
++#include <vector>
+ 
+ PXR_NAMESPACE_OPEN_SCOPE
+ 
+@@ -54,6 +57,32 @@
+     uint64_t epoch = 0;
+ };
+ 
++struct HdStBasisCurves::_GpuPresentation {
++    struct _ConstantRange {
++        int drawingCoordIndex = -1;
++        HdBufferArrayRangeSharedPtr range;
++    };
++    struct _InstanceRange {
++        int drawingCoordIndex = -1;
++        HdBufferArrayRangeSharedPtr range;
++    };
++
++    bool visible = true;
++    SdfPath materialId;
++    GfMatrix4d transform{1.0};
++    HdDisplayStyle displayStyle;
++    TfToken shadingStyle;
++    TfToken materialTag;
++    HdSt_MaterialNetworkShaderSharedPtr materialNetworkShader;
++    bool displayOpacityFromPrimvars = false;
++    bool displayOpacityFromInstancer = false;
++    SdfPath instancerId;
++    int instancerLevels = 0;
++    HdChangeTracker *changeTracker = nullptr;
++    std::vector<_ConstantRange> constantRanges;
++    std::vector<_InstanceRange> instanceRanges;
++};
++
+ HdStBasisCurves::HdStBasisCurves(SdfPath const& id)
+     : HdBasisCurves(id)
+     , _topology()
+@@ -101,9 +130,178 @@
+     return HdStBasisCurvesGpuTopologyMode::Curves;
+ }
+ 
++TfToken
++_ComputeGpuMaterialTag(HdSceneDelegate *delegate,
++                       SdfPath const &materialId,
++                       bool hasDisplayOpacityPrimvar,
++                       HdDisplayStyle const &displayStyle)
++{
++    if (displayStyle.displayInOverlay) {
++        return HdStMaterialTagTokens->displayInOverlay;
++    }
++    if (displayStyle.occludedSelectionShowsThrough) {
++        return HdStMaterialTagTokens->translucentToSelection;
++    }
++
++    HdStMaterial const *material = static_cast<HdStMaterial const *>(
++        delegate->GetRenderIndex().GetSprim(
++            HdPrimTypeTokens->material, materialId));
++    if (material && !material->IsUsingFallbackShader()) {
++        return material->GetMaterialTag();
++    }
++    if (hasDisplayOpacityPrimvar) {
++        return HdStMaterialTagTokens->masked;
++    }
++    return HdMaterialTagTokens->defaultMaterialTag;
++}
++
+ } // anonymous namespace
+ 
+ bool
++HdStBasisCurves::_StageGpuPresentation(
++    HdSceneDelegate *sceneDelegate,
++    HdRenderParam *renderParam,
++    HdStBasisCurvesGpuBundle const &bundle)
++{
++    std::unique_ptr<_GpuPresentation> presentation(
++        new _GpuPresentation);
++    presentation->visible = sceneDelegate->GetVisible(GetId());
++    presentation->materialId = sceneDelegate->GetMaterialId(GetId());
++    presentation->transform = sceneDelegate->GetTransform(GetId());
++    presentation->displayStyle = GetDisplayStyle(sceneDelegate);
++    presentation->shadingStyle = sceneDelegate->GetShadingStyle(GetId())
++        .GetWithDefault<TfToken>();
++    presentation->materialNetworkShader = HdStGetMaterialNetworkShader(
++        this, sceneDelegate, presentation->materialId);
++    presentation->instancerId = sceneDelegate->GetInstancerId(GetId());
++    presentation->changeTracker =
++        &sceneDelegate->GetRenderIndex().GetChangeTracker();
++    if (!presentation->instancerId.IsEmpty()) {
++        // Constant primvars embed the instancer transform hierarchy.  Sync it
++        // before capturing that BAR, rather than after the capture as the
++        // ordinary draw-item path does.
++        HdInstancer::_SyncInstancerAndParents(
++            sceneDelegate->GetRenderIndex(), presentation->instancerId);
++    }
++
++    std::set<int> stagedConstantSlots;
++    std::set<int> stagedInstanceSlots;
++    for (auto const &reprPair : _reprs) {
++        for (HdRepr::DrawItemUniquePtr const &item :
++             reprPair.second->GetDrawItems()) {
++            HdStDrawItem * const drawItem =
++                static_cast<HdStDrawItem *>(item.get());
++            const int constantSlot =
++                drawItem->GetDrawingCoord()->GetConstantPrimvarIndex();
++            const bool stageConstants =
++                stagedConstantSlots.insert(constantSlot).second;
++
++            // Populate an independent full constant BAR.  The ordinary path
++            // updates the live shared-data slot before Commit; that would let
++            // a later Ready() failure leak a new transform or primvar.
++            HdRprimSharedData scratchSharedData(0);
++            scratchSharedData.rprimID = GetId();
++            scratchSharedData.bounds = bundle.bounds;
++            HdStDrawItem scratchDrawItem(&scratchSharedData);
++            *scratchDrawItem.GetDrawingCoord() = *drawItem->GetDrawingCoord();
++            scratchDrawItem.SetMaterialNetworkShader(
++                presentation->materialNetworkShader);
++
++            if (stageConstants) {
++                HdDirtyBits scratchDirtyBits =
++                    HdChangeTracker::DirtyTransform |
++                    HdChangeTracker::DirtyExtent |
++                    HdChangeTracker::DirtyPrimID |
++                    HdChangeTracker::DirtyPrimvar |
++                    HdChangeTracker::DirtyNormals |
++                    HdChangeTracker::DirtyWidths;
++                bool hasDisplayOpacity = false;
++                HdStPopulateConstantPrimvars(
++                    this, &scratchSharedData, sceneDelegate, renderParam,
++                    &scratchDrawItem, &scratchDirtyBits, nullptr,
++                    HdMeshGeomStyleInvalid, 0, 0, HdBufferSpecVector(),
++                    presentation->instancerId, nullptr, &hasDisplayOpacity,
++                    nullptr);
++
++                HdBufferArrayRangeSharedPtr const &range =
++                    scratchDrawItem.GetConstantPrimvarRange();
++                if (!range || !range->IsValid()) {
++                    TF_WARN("HdSt GPU BasisCurves candidate could not stage "
++                            "its constant primvar BAR");
++                    return false;
++                }
++                presentation->constantRanges.push_back({constantSlot, range});
++                presentation->displayOpacityFromPrimvars =
++                    presentation->displayOpacityFromPrimvars ||
++                    hasDisplayOpacity;
++            }
++
++            if (!presentation->instancerId.IsEmpty()) {
++                bool hasInstancerDisplayOpacity = false;
++                bool instancerStagingSucceeded = false;
++                HdStUpdateInstancerData(
++                    sceneDelegate->GetRenderIndex(), renderParam, GetId(),
++                    presentation->instancerId, &scratchDrawItem,
++                    &scratchSharedData,
++                    HdChangeTracker::DirtyInstancer |
++                        HdChangeTracker::DirtyInstanceIndex,
++                    &hasInstancerDisplayOpacity, nullptr,
++                    &instancerStagingSucceeded);
++                if (!instancerStagingSucceeded) {
++                    TF_WARN("HdSt GPU BasisCurves candidate could not "
++                            "stage instancer data");
++                    return false;
++                }
++                presentation->displayOpacityFromInstancer =
++                    presentation->displayOpacityFromInstancer ||
++                    hasInstancerDisplayOpacity;
++                presentation->instancerLevels =
++                    scratchSharedData.instancerLevels;
++
++                for (int level = 0;
++                     level < scratchSharedData.instancerLevels;
++                     ++level) {
++                    const int instanceSlot = scratchDrawItem.GetDrawingCoord()
++                        ->GetInstancePrimvarIndex(level);
++                    if (!stagedInstanceSlots.insert(instanceSlot).second) {
++                        continue;
++                    }
++                    HdBufferArrayRangeSharedPtr const &range =
++                        scratchDrawItem.GetInstancePrimvarRange(level);
++                    if (range && !range->IsValid()) {
++                        TF_WARN("HdSt GPU BasisCurves candidate could not "
++                                "stage an instance primvar BAR");
++                        return false;
++                    }
++                    presentation->instanceRanges.push_back({instanceSlot, range});
++                }
++
++                const int indexSlot = scratchDrawItem.GetDrawingCoord()
++                    ->GetInstanceIndexIndex();
++                if (stagedInstanceSlots.insert(indexSlot).second) {
++                    HdBufferArrayRangeSharedPtr const &range =
++                        scratchDrawItem.GetInstanceIndexRange();
++                    if (!range || !range->IsValid()) {
++                        TF_WARN("HdSt GPU BasisCurves candidate could not "
++                                "stage an instance index BAR");
++                        return false;
++                    }
++                    presentation->instanceRanges.push_back({indexSlot, range});
++                }
++            }
++        }
++    }
++
++    presentation->materialTag = _ComputeGpuMaterialTag(
++        sceneDelegate, presentation->materialId,
++        presentation->displayOpacityFromPrimvars ||
++            presentation->displayOpacityFromInstancer,
++        presentation->displayStyle);
++    _pendingGpuPresentation = std::move(presentation);
++    return true;
++}
++
++bool
+ HdStBasisCurves::_StageGpuBundle(HdSceneDelegate *sceneDelegate,
+                                  HdRenderParam *renderParam)
+ {
+@@ -118,6 +316,10 @@
+         // A provider was removed: old indirect GPU counts must not shadow the
+         // host-authored topology path on the next ordinary sync.
+         if (_gpuProviderPresent) {
++            // The GPU path committed its captured instancer identity only at
++            // Ready().  Remove that dependency before ordinary Sync obtains
++            // the delegate's current identity again.
++            _CommitInstancerId(renderIndex.GetChangeTracker(), SdfPath());
+             for (auto const &reprPair : _reprs) {
+                 for (HdRepr::DrawItemUniquePtr const &item :
+                      reprPair.second->GetDrawItems()) {
+@@ -128,6 +330,7 @@
+             ++_gpuEpoch;
+             _gpuCallbackState->epoch = _gpuEpoch;
+             _pendingGpuBundle.reset();
++            _pendingGpuPresentation.reset();
+         }
+         return false;
+     }
+@@ -137,6 +340,7 @@
+     const uint64_t requestEpoch = ++_gpuEpoch;
+     _gpuCallbackState->epoch = requestEpoch;
+     _pendingGpuBundle.reset();
++    _pendingGpuPresentation.reset();
+     _gpuRenderParam = nullptr;
+ 
+     // Presence is authoritative: a provider that cannot make a complete next
+@@ -170,17 +374,19 @@
+         return true;
+     }
+ 
++    if (!_StageGpuPresentation(sceneDelegate, renderParam, *bundle)) {
++        return true;
++    }
++
+     _pendingGpuBundle = bundle;
+     _gpuResourceRegistry = registry;
+     _gpuRenderParam = renderParam;
+-    HdDisplayStyle const style = GetDisplayStyle(sceneDelegate);
++    HdDisplayStyle const &style = _pendingGpuPresentation->displayStyle;
+     _pendingGpuRefineLevel = style.refineLevel;
+     _pendingGpuDisplayInOverlay = style.displayInOverlay;
+     _pendingGpuOccludedSelectionShowsThrough =
+         style.occludedSelectionShowsThrough;
+     _pendingGpuPointsShadingEnabled = style.pointsShadingEnabled;
+-    _gpuShadingStyle = sceneDelegate->GetShadingStyle(GetId())
+-        .GetWithDefault<TfToken>();
+     std::shared_ptr<_GpuCallbackState> const callbackState = _gpuCallbackState;
+     registry->AddPostCommitCallback([callbackState, requestEpoch]() {
+         // Finalize/destruction clears owner before this callback can touch it.
+@@ -200,31 +406,108 @@
+         HdStBasisCurves *owner;
+         ~_PendingCleanup() {
+             owner->_pendingGpuBundle.reset();
++            owner->_pendingGpuPresentation.reset();
+             owner->_gpuRenderParam = nullptr;
+         }
+     } cleanup{this};
+-    if (!bundle || !bundle->Ready()) {
++    _GpuPresentation const * const presentation =
++        _pendingGpuPresentation.get();
++    if (!bundle || !presentation || !bundle->Ready()) {
+         return;
+     }
+ 
++    if (GetMaterialId() != presentation->materialId) {
++        SetMaterialId(presentation->materialId);
++        HdStMarkDrawBatchesDirty(_gpuRenderParam);
++    }
++    _sharedData.visible = presentation->visible;
++    _refineLevel = presentation->displayStyle.refineLevel;
++    _displayInOverlay = presentation->displayStyle.displayInOverlay;
++    _occludedSelectionShowsThrough =
++        presentation->displayStyle.occludedSelectionShowsThrough;
++    _pointsShadingEnabled = presentation->displayStyle.pointsShadingEnabled;
++    _displayOpacityFromInstancer =
++        presentation->displayOpacityFromInstancer;
++    _displayOpacityFromPrimvars =
++        presentation->displayOpacityFromPrimvars;
++    _gpuShadingStyle = presentation->shadingStyle;
++
++    for (auto const &pendingRange : presentation->constantRanges) {
++        HdStUpdateDrawItemBAR(pendingRange.range,
++            pendingRange.drawingCoordIndex, &_sharedData,
++            _gpuRenderParam, nullptr);
++    }
++    std::set<int> stagedInstanceSlots;
++    for (auto const &pendingRange : presentation->instanceRanges) {
++        stagedInstanceSlots.insert(pendingRange.drawingCoordIndex);
++    }
++    int const oldInstancerLevels = _sharedData.instancerLevels;
++    if (oldInstancerLevels != presentation->instancerLevels) {
++        // Retire any accepted instance BARs no longer referenced by the next
++        // hierarchy before changing the level count seen by draw items.
++        std::set<int> clearedInstanceSlots;
++        for (auto const &reprPair : _reprs) {
++            for (HdRepr::DrawItemUniquePtr const &item :
++                 reprPair.second->GetDrawItems()) {
++                HdStDrawItem * const drawItem =
++                    static_cast<HdStDrawItem *>(item.get());
++                for (int level = 0; level < oldInstancerLevels; ++level) {
++                    const int slot = drawItem->GetDrawingCoord()
++                        ->GetInstancePrimvarIndex(level);
++                    if (stagedInstanceSlots.count(slot) ||
++                        !clearedInstanceSlots.insert(slot).second) {
++                        continue;
++                    }
++                    HdStUpdateDrawItemBAR({}, slot, &_sharedData,
++                        _gpuRenderParam, nullptr);
++                }
++                const int indexSlot = drawItem->GetDrawingCoord()
++                    ->GetInstanceIndexIndex();
++                if (!stagedInstanceSlots.count(indexSlot) &&
++                    clearedInstanceSlots.insert(indexSlot).second) {
++                    HdStUpdateDrawItemBAR({}, indexSlot, &_sharedData,
++                        _gpuRenderParam, nullptr);
++                }
++            }
++        }
++        HdStMarkGarbageCollectionNeeded(_gpuRenderParam);
++        HdStMarkDrawBatchesDirty(_gpuRenderParam);
++    }
++    _sharedData.instancerLevels = presentation->instancerLevels;
++    for (auto const &pendingRange : presentation->instanceRanges) {
++        HdStUpdateDrawItemBAR(pendingRange.range,
++            pendingRange.drawingCoordIndex, &_sharedData,
++            _gpuRenderParam, nullptr);
++    }
++    if (presentation->changeTracker) {
++        _CommitInstancerId(*presentation->changeTracker,
++                           presentation->instancerId);
++    }
++
+     // Metadata only: never feed this empty topology to a native index builder.
+     _topology = HdSt_BasisCurvesTopology::New(HdBasisCurvesTopology(
+         bundle->curveType, bundle->curveBasis, bundle->curveWrap,
+         VtIntArray(), VtIntArray()));
+-    _refineLevel = _pendingGpuRefineLevel;
+-    _displayInOverlay = _pendingGpuDisplayInOverlay;
+-    _occludedSelectionShowsThrough = _pendingGpuOccludedSelectionShowsThrough;
+-    _pointsShadingEnabled = _pendingGpuPointsShadingEnabled;
+     _basisWidthInterpolation = bundle->basisWidthInterpolation;
+     _basisNormalInterpolation = bundle->basisNormalInterpolation;
+ 
+     std::set<int> publishedSlots;
+     bool publishedVertex = false;
++    bool materialIsFinalChanged = false;
+     for (auto const &reprPair : _reprs) {
+         HdReprSharedPtr const &repr = reprPair.second;
+         for (HdRepr::DrawItemUniquePtr const &item : repr->GetDrawItems()) {
+             HdStDrawItem * const drawItem =
+                 static_cast<HdStDrawItem *>(item.get());
++            drawItem->SetMaterialNetworkShader(
++                presentation->materialNetworkShader);
++            materialIsFinalChanged = materialIsFinalChanged ||
++                drawItem->GetMaterialIsFinal() !=
++                presentation->displayStyle.materialIsFinal;
++            drawItem->SetMaterialIsFinal(
++                presentation->displayStyle.materialIsFinal);
++            HdStSetMaterialTag(_gpuRenderParam, drawItem,
++                presentation->materialTag);
+             if (!publishedVertex) {
+                 HdStUpdateDrawItemBAR(bundle->vertexRange,
+                     drawItem->GetDrawingCoord()->GetVertexPrimvarIndex(),
+@@ -244,6 +527,10 @@
+         }
+     }
+     _sharedData.bounds = bundle->bounds;
++    _sharedData.bounds.SetMatrix(presentation->transform);
++    if (materialIsFinalChanged) {
++        HdStMarkDrawBatchesDirty(_gpuRenderParam);
++    }
+     _UpdateGpuGeometricShaders(_gpuRenderParam);
+     // drawCount BAR values are consumed by the indirect dispatch path and can
+     // change while the topology/vertex allocations are reused.
+@@ -273,6 +560,7 @@
+ {
+     ++_gpuEpoch;
+     _pendingGpuBundle.reset();
++    _pendingGpuPresentation.reset();
+     _gpuRenderParam = nullptr;
+     if (_gpuCallbackState) {
+         _gpuCallbackState->owner = nullptr;
+@@ -294,51 +582,54 @@
+         // authored ingestion; force it to rebuild without stale GPU counts.
+         *dirtyBits |= HdChangeTracker::DirtyTopology |
+             HdChangeTracker::DirtyPoints | HdChangeTracker::DirtyNormals |
+-            HdChangeTracker::DirtyWidths | HdChangeTracker::DirtyPrimvar;
+-    }
+-    _UpdateVisibility(delegate, dirtyBits);
+-
+-    bool updateMaterialTags = false;
+-    if (*dirtyBits & HdChangeTracker::DirtyMaterialId) {
+-        HdStSetMaterialId(delegate, renderParam, this);
+-        updateMaterialTags = true;
+-    }
+-    if (*dirtyBits & (HdChangeTracker::DirtyDisplayStyle|
+-                      HdChangeTracker::NewRepr)) {
+-        updateMaterialTags = true;
+-    }
+-
+-    // Check if either the material or geometric shaders need updating for
+-    // draw items of all the reprs.
+-    bool updateMaterialNetworkShader = false;
+-    if (*dirtyBits & (HdChangeTracker::DirtyMaterialId |
+-                      HdChangeTracker::NewRepr)) {
+-        updateMaterialNetworkShader = true;
+-    }
++            HdChangeTracker::DirtyWidths | HdChangeTracker::DirtyPrimvar |
++            HdChangeTracker::DirtyInstancer |
++            HdChangeTracker::DirtyInstanceIndex;
++    }
++    if (!_gpuProviderPresent) {
++        _UpdateVisibility(delegate, dirtyBits);
++
++        bool updateMaterialTags = false;
++        if (*dirtyBits & HdChangeTracker::DirtyMaterialId) {
++            HdStSetMaterialId(delegate, renderParam, this);
++            updateMaterialTags = true;
++        }
++        if (*dirtyBits & (HdChangeTracker::DirtyDisplayStyle|
++                          HdChangeTracker::NewRepr)) {
++            updateMaterialTags = true;
++        }
+ 
+-    bool updateGeometricShader = false;
+-    if (*dirtyBits & (HdChangeTracker::DirtyDisplayStyle |
+-                      HdChangeTracker::DirtyMaterialId |
+-                      HdChangeTracker::DirtyTopology| // topological visibility
+-                      HdChangeTracker::NewRepr)) {
+-        updateGeometricShader = true;
+-    }
++        // Check if either the material or geometric shaders need updating for
++        // draw items of all the reprs.
++        bool updateMaterialNetworkShader = false;
++        if (*dirtyBits & (HdChangeTracker::DirtyMaterialId |
++                          HdChangeTracker::NewRepr)) {
++            updateMaterialNetworkShader = true;
++        }
+ 
+-    bool displayOpacity =
+-        _displayOpacityFromInstancer || _displayOpacityFromPrimvars;
+-    _UpdateRepr(delegate, renderParam, reprToken, dirtyBits);
++        bool updateGeometricShader = false;
++        if (*dirtyBits & (HdChangeTracker::DirtyDisplayStyle |
++                          HdChangeTracker::DirtyMaterialId |
++                          HdChangeTracker::DirtyTopology|
++                          HdChangeTracker::NewRepr)) {
++            updateGeometricShader = true;
++        }
+ 
+-    if (updateMaterialTags || 
+-        (GetMaterialId().IsEmpty() &&
+-         displayOpacity !=
+-         (_displayOpacityFromPrimvars || _displayOpacityFromInstancer))) { 
+-        _UpdateMaterialTagsForAllReprs(delegate, renderParam);
+-    }
++        bool displayOpacity =
++            _displayOpacityFromInstancer || _displayOpacityFromPrimvars;
++        _UpdateRepr(delegate, renderParam, reprToken, dirtyBits);
++
++        if (updateMaterialTags ||
++            (GetMaterialId().IsEmpty() &&
++             displayOpacity !=
++             (_displayOpacityFromPrimvars || _displayOpacityFromInstancer))) {
++            _UpdateMaterialTagsForAllReprs(delegate, renderParam);
++        }
+ 
+-    if (updateMaterialNetworkShader || (updateGeometricShader && !_gpuProviderPresent)) {
+-        _UpdateShadersForAllReprs(delegate, renderParam,
+-                          updateMaterialNetworkShader,
+-                          !_gpuProviderPresent && updateGeometricShader);
++        if (updateMaterialNetworkShader || updateGeometricShader) {
++            _UpdateShadersForAllReprs(delegate, renderParam,
++                updateMaterialNetworkShader, updateGeometricShader);
++        }
+     }
+ 
+ 
+--- a/pxr/imaging/hdSt/primUtils.h
++++ b/pxr/imaging/hdSt/primUtils.h
+@@ -239,6 +239,27 @@
+     bool *hasDisplayOpacity = nullptr,
+     bool *hasNormals = nullptr);
+ 
++// As above, but use the explicitly captured instancer hierarchy rather than
++// the rprim's accepted hierarchy.  This supports staging a candidate without
++// mutating HdRprim until its GPU work is known to be ready.
++HDST_API
++void HdStPopulateConstantPrimvars(
++    HdRprim *prim,
++    HdRprimSharedData *sharedData,
++    HdSceneDelegate *delegate,
++    HdRenderParam *renderParam,
++    HdStDrawItem *drawItem,
++    HdDirtyBits *dirtyBits,
++    HdReprSharedPtr const &repr,
++    HdMeshGeomStyle descGeomStyle,
++    int geomSubsetDescIndex,
++    size_t numGeomSubsets,
++    HdBufferSpecVector const& customSpecs,
++    SdfPath const &instancerId,
++    bool *hasMirroredTransform = nullptr,
++    bool *hasDisplayOpacity = nullptr,
++    bool *hasNormals = nullptr);
++
+ HDST_API
+ void HdStPopulateConstantPrimvars(
+     HdRprim *prim,
+@@ -271,6 +292,22 @@
+     bool *hasDisplayOpacity = nullptr,
+     bool *hasNormals = nullptr);
+ 
++// As above, but stage bindings for an explicitly captured instancer ID.  The
++// caller owns the scratch shared data/draw item until it swaps the resulting
++// BARs into accepted rprim state.
++HDST_API
++void HdStUpdateInstancerData(
++    HdRenderIndex &renderIndex,
++    HdRenderParam *renderParam,
++    SdfPath const &rprimId,
++    SdfPath const &instancerId,
++    HdStDrawItem *drawItem,
++    HdRprimSharedData *sharedData,
++    HdDirtyBits rprimDirtyBits,
++    bool *hasDisplayOpacity = nullptr,
++    bool *hasNormals = nullptr,
++    bool *stagingSucceeded = nullptr);
++
+ // Returns true if primvar with primvarName exists among instance primvar
+ // descriptors.
+ HDST_API
+--- a/pxr/imaging/hdSt/primUtils.cpp
++++ b/pxr/imaging/hdSt/primUtils.cpp
+@@ -37,6 +37,8 @@
+ 
+ #include "pxr/imaging/hgi/capabilities.h"
+ 
++#include "pxr/base/gf/matrix4d.h"
++#include "pxr/base/gf/matrix4f.h"
+ #include "pxr/base/tf/envSetting.h"
+ #include "pxr/base/tf/staticData.h"
+ #include "pxr/base/arch/hash.h"
+@@ -800,6 +802,7 @@
+     int geomSubsetDescIndex,
+     size_t numGeomSubsets,
+     HdBufferSpecVector const& customSpecs,
++    SdfPath const& instancerId,
+     bool *hasMirroredTransform,
+     bool *hasDisplayOpacity,
+     bool *hasNormals)
+@@ -808,8 +811,6 @@
+     HF_MALLOC_TAG_FUNCTION();
+ 
+     SdfPath const& id = prim->GetId();
+-    SdfPath const& instancerId = prim->GetInstancerId();
+-
+     HdRenderIndex &renderIndex = delegate->GetRenderIndex();
+     HdStResourceRegistrySharedPtr const& hdStResourceRegistry = 
+         std::static_pointer_cast<HdStResourceRegistry>(
+@@ -1082,6 +1083,30 @@
+     HdMeshGeomStyle descGeomStyle,
+     int geomSubsetDescIndex,
+     size_t numGeomSubsets,
++    HdBufferSpecVector const& customSpecs,
++    bool *hasMirroredTransform,
++    bool *hasDisplayOpacity,
++    bool *hasNormals)
++{
++    HdStPopulateConstantPrimvars(
++        prim, sharedData, delegate, renderParam, drawItem, dirtyBits, repr,
++        descGeomStyle, geomSubsetDescIndex, numGeomSubsets, customSpecs,
++        prim->GetInstancerId(), hasMirroredTransform, hasDisplayOpacity,
++        hasNormals);
++}
++
++void
++HdStPopulateConstantPrimvars(
++    HdRprim *prim,
++    HdRprimSharedData *sharedData,
++    HdSceneDelegate *delegate,
++    HdRenderParam *renderParam,
++    HdStDrawItem *drawItem,
++    HdDirtyBits *dirtyBits,
++    HdReprSharedPtr const &repr,
++    HdMeshGeomStyle descGeomStyle,
++    int geomSubsetDescIndex,
++    size_t numGeomSubsets,
+     bool *hasMirroredTransform,
+     bool *hasDisplayOpacity,
+     bool *hasNormals)
+@@ -1110,17 +1135,103 @@
+ // Instancer processing utilities
+ // -----------------------------------------------------------------------------
+ 
+-void
+-HdStUpdateInstancerData(
++struct _StagedInstancerPrimvarRange {
++    HdBufferArrayRangeSharedPtr range;
++    bool succeeded = true;
++};
++
++static _StagedInstancerPrimvarRange
++_StageInstancerPrimvarRange(HdStResourceRegistry *resourceRegistry,
++                            HdStInstancer *instancer)
++{
++    if (!resourceRegistry) {
++        TF_CODING_ERROR("Cannot stage instance primvars without a registry");
++        return {{}, false};
++    }
++    HdSceneDelegate * const delegate = instancer->GetDelegate();
++    if (!delegate) {
++        TF_CODING_ERROR("Instancer has no scene delegate");
++        return {{}, false};
++    }
++
++    HdPrimvarDescriptorVector const primvars =
++        HdStGetInstancerPrimvarDescriptors(instancer, delegate);
++    HdBufferSourceSharedPtrVector sources;
++    sources.reserve(primvars.size());
++    HgiCapabilities const * const capabilities =
++        resourceRegistry->GetHgi()->GetCapabilities();
++    bool const doublesSupported = capabilities->IsSet(
++        HgiDeviceCapabilitiesBitsShaderDoublePrecision);
++
++    for (HdPrimvarDescriptor const &primvar : primvars) {
++        VtValue const value = delegate->Get(instancer->GetId(), primvar.name);
++        if (value.IsEmpty()) {
++            continue;
++        }
++
++        HdBufferSourceSharedPtr source;
++        if (primvar.name == HdInstancerTokens->instanceTransforms) {
++            if (value.IsHolding<VtArray<GfMatrix4d>>()) {
++                source = std::make_shared<HdVtBufferSource>(
++                    primvar.name, value.UncheckedGet<VtArray<GfMatrix4d>>(),
++                    1, doublesSupported);
++            } else if (value.IsHolding<VtArray<GfMatrix4f>>()) {
++                source = std::make_shared<HdVtBufferSource>(
++                    primvar.name, value, 1, false);
++            }
++        } else {
++            source = std::make_shared<HdVtBufferSource>(primvar.name, value);
++        }
++
++        if (!source) {
++            TF_WARN("Could not stage instance primvar '%s' for <%s>",
++                    primvar.name.GetText(), instancer->GetId().GetText());
++            return {{}, false};
++        }
++        if (source->GetNumElements() == 0) {
++            continue;
++        }
++        sources.push_back(std::move(source));
++    }
++
++    if (sources.empty()) {
++        // A no-primvar instancer is valid.  The caller must publish this
++        // null range to clear a formerly populated accepted slot.
++        return {};
++    }
++
++    HdBufferSpecVector bufferSpecs;
++    HdBufferSpec::GetBufferSpecs(sources, &bufferSpecs);
++    HdBufferArrayRangeSharedPtr const range =
++        resourceRegistry->UpdateNonUniformBufferArrayRange(
++            HdTokens->primvar, {}, bufferSpecs, {},
++            HdBufferArrayUsageHintBitsStorage);
++    if (!range || !range->IsValid()) {
++        TF_WARN("Could not stage instance primvars for <%s>",
++                instancer->GetId().GetText());
++        return {{}, false};
++    }
++    resourceRegistry->AddSources(range, std::move(sources));
++    return {range, true};
++}
++
++static void
++_UpdateInstancerData(
+     HdRenderIndex &renderIndex,
+     HdRenderParam *renderParam,
+-    HdRprim *prim,
++    SdfPath const &rprimId,
++    SdfPath const &instancerId,
+     HdStDrawItem *drawItem,
+     HdRprimSharedData *sharedData,
+     HdDirtyBits rprimDirtyBits,
++    bool stageInstancePrimvars,
+     bool *hasDisplayOpacity,
+-    bool *hasNormals)
++    bool *hasNormals,
++    bool *stagingSucceeded)
+ {
++    if (stagingSucceeded) {
++        *stagingSucceeded = true;
++    }
+     // If there's nothing to do, bail.
+     if (!(rprimDirtyBits & HdChangeTracker::DirtyInstancer)) {
+         return;
+@@ -1134,7 +1245,7 @@
+     }
+ 
+     // XXX: This belongs in HdRenderIndex!!!
+-    HdInstancer::_SyncInstancerAndParents(renderIndex, prim->GetInstancerId());
++    HdInstancer::_SyncInstancerAndParents(renderIndex, instancerId);
+ 
+     HdDrawingCoord *drawingCoord = drawItem->GetDrawingCoord();
+     HdChangeTracker &changeTracker = renderIndex.GetChangeTracker();
+@@ -1145,8 +1256,18 @@
+ 
+     // If the instancer topology has changed, we might need to change
+     // how many levels we allocate in the drawing coord.
+-    int instancerLevels = HdInstancer::GetInstancerNumLevels(
+-            renderIndex, *prim); 
++    int instancerLevels = 0;
++    for (SdfPath parentId = instancerId; !parentId.IsEmpty();) {
++        HdInstancer * const instancer = renderIndex.GetInstancer(parentId);
++        if (!TF_VERIFY(instancer)) {
++            if (stagingSucceeded) {
++                *stagingSucceeded = false;
++            }
++            return;
++        }
++        ++instancerLevels;
++        parentId = instancer->GetParentId();
++    }
+ 
+     if (instancerLevels != sharedData->instancerLevels) {
+         sharedData->barContainer.Resize(
+@@ -1161,15 +1282,34 @@
+     /* INSTANCE PRIMVARS */
+     // Populate all instance primvars by backtracing hierarachy.
+     int level = 0;
+-    SdfPath parentId = prim->GetInstancerId();
++    SdfPath parentId = instancerId;
+     while (!parentId.IsEmpty()) {
+         HdInstancer * const instancer = renderIndex.GetInstancer(parentId);
+         if(!TF_VERIFY(instancer)) {
++            if (stagingSucceeded) {
++                *stagingSucceeded = false;
++            }
+             return;
+         }
+         const int drawCoordIndex = drawingCoord->GetInstancePrimvarIndex(level);
+-        HdBufferArrayRangeSharedPtr const instancerRange =
+-            static_cast<HdStInstancer*>(instancer)->GetInstancePrimvarRange();
++        HdBufferArrayRangeSharedPtr instancerRange;
++        if (stageInstancePrimvars) {
++            _StagedInstancerPrimvarRange const stagedRange =
++                _StageInstancerPrimvarRange(
++                    static_cast<HdStResourceRegistry*>(
++                        renderIndex.GetResourceRegistry().get()),
++                    static_cast<HdStInstancer*>(instancer));
++            if (!stagedRange.succeeded) {
++                if (stagingSucceeded) {
++                    *stagingSucceeded = false;
++                }
++                return;
++            }
++            instancerRange = stagedRange.range;
++        } else {
++            instancerRange = static_cast<HdStInstancer*>(instancer)
++                ->GetInstancePrimvarRange();
++        }
+ 
+         // If we need to update the BAR, that indicates an instancing topology
+         // change and we want to force an index rebuild.
+@@ -1179,7 +1319,7 @@
+ 
+         // update instance primvar slot in the drawing coordinate.
+         HdStUpdateDrawItemBAR(
+-            static_cast<HdStInstancer*>(instancer)->GetInstancePrimvarRange(),
++            instancerRange,
+             drawCoordIndex,
+             sharedData,
+             renderParam,
+@@ -1202,32 +1342,39 @@
+     // Note, GetInstanceIndices will check index sizes against primvar sizes.
+     // The instance indices are a cartesian product of each level, so they need
+     // to be recomputed per-rprim.
+-    if (HdChangeTracker::IsInstanceIndexDirty(rprimDirtyBits, prim->GetId()) ||
++    if (HdChangeTracker::IsInstanceIndexDirty(rprimDirtyBits, rprimId) ||
+         forceIndexRebuild) {
+-        parentId = prim->GetInstancerId();
++        parentId = instancerId;
+         if (!parentId.IsEmpty()) {
+             HdInstancer * const instancer = renderIndex.GetInstancer(parentId);
+             if (!TF_VERIFY(instancer)) {
++                if (stagingSucceeded) {
++                    *stagingSucceeded = false;
++                }
+                 return;
+             }
+ 
+             // update instance indices
+             //
+-            // We add a zero as the first value in instanceIndices. This is 
++            // We add a zero as the first value in instanceIndices. This is
+             // added as a way of avoiding correctness issues in the instance
+-            // frustum cull vertex shader. This issue happens when an instanced 
++            // frustum cull vertex shader. This issue happens when an instanced
+             // prim has geom subsets resulting in multiple draw items. See
+             // ViewFrustumCull.VertexInstancing in frustumCull.glslfx for
+-            // details.
++            // details.  A staged candidate deliberately keeps an empty source
++            // empty: a sentinel would turn a zero-instance candidate into one
++            // indirect instance when it is later published.
+             VtIntArray const originalInstanceIndices =
+                 static_cast<HdStInstancer*>(instancer)->
+-                GetInstanceIndices(prim->GetId());
+-            VtIntArray instanceIndices =
+-                VtIntArray(originalInstanceIndices.size() + 1);
+-            instanceIndices[0] = 0;
+-            std::copy(originalInstanceIndices.cbegin(),
+-                      originalInstanceIndices.cend(),
+-                      instanceIndices.begin() + 1);
++                GetInstanceIndices(rprimId);
++            VtIntArray instanceIndices;
++            if (!stageInstancePrimvars || !originalInstanceIndices.empty()) {
++                instanceIndices = VtIntArray(originalInstanceIndices.size() + 1);
++                instanceIndices[0] = 0;
++                std::copy(originalInstanceIndices.cbegin(),
++                          originalInstanceIndices.cend(),
++                          instanceIndices.begin() + 1);
++            }
+ 
+             HdStResourceRegistry* const resourceRegistry =
+                 static_cast<HdStResourceRegistry*>(
+@@ -1257,6 +1404,13 @@
+                         bufferSpecs,
+                         usageHint);
+ 
++                if (!range || !range->IsValid()) {
++                    if (stagingSucceeded) {
++                        *stagingSucceeded = false;
++                    }
++                    return;
++                }
++
+                 HdStUpdateDrawItemBAR(
+                     range,
+                     drawingCoord->GetInstanceIndexIndex(),
+@@ -1292,6 +1446,41 @@
+     }
+ }
+ 
++void
++HdStUpdateInstancerData(
++    HdRenderIndex &renderIndex,
++    HdRenderParam *renderParam,
++    SdfPath const &rprimId,
++    SdfPath const &instancerId,
++    HdStDrawItem *drawItem,
++    HdRprimSharedData *sharedData,
++    HdDirtyBits rprimDirtyBits,
++    bool *hasDisplayOpacity,
++    bool *hasNormals,
++    bool *stagingSucceeded)
++{
++    _UpdateInstancerData(
++        renderIndex, renderParam, rprimId, instancerId, drawItem, sharedData,
++        rprimDirtyBits, true, hasDisplayOpacity, hasNormals, stagingSucceeded);
++}
++
++void
++HdStUpdateInstancerData(
++    HdRenderIndex &renderIndex,
++    HdRenderParam *renderParam,
++    HdRprim *prim,
++    HdStDrawItem *drawItem,
++    HdRprimSharedData *sharedData,
++    HdDirtyBits rprimDirtyBits,
++    bool *hasDisplayOpacity,
++    bool *hasNormals)
++{
++    _UpdateInstancerData(
++        renderIndex, renderParam, prim->GetId(), prim->GetInstancerId(),
++        drawItem, sharedData, rprimDirtyBits, false, hasDisplayOpacity,
++        hasNormals, nullptr);
++}
++
+ bool HdStIsInstancePrimvarExistentAndValid(
+     HdRenderIndex &renderIndex,
+     HdRprim *rprim,
