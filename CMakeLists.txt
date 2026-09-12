@@ -387,6 +387,8 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/curveIndices.cu
             libs/usdGen/usdGen/gpu/curveTiles.cu
             libs/usdGen/usdGen/gpu/curveTileBounds.cu
+            libs/usdGen/usdGen/gpu/rootFrames.cu
+            libs/usdGen/usdGen/gpu/noise.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -584,6 +586,18 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaStyle COMMAND testUsdGenCudaStyle)
     set_tests_properties(testUsdGenCudaStyle PROPERTIES
         LABELS "T1;cuda;operators" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaNoise tests/testUsdGenCudaNoise.cpp)
+    # The oracle calls the explicitly-instantiated SeExpr 3->3 double FBM;
+    # CUDA itself is deliberately float and built with global --fmad=false.
+    target_link_libraries(testUsdGenCudaNoise PRIVATE usdGenGpu usdGenMath usdGen_seexpr)
+    add_test(NAME testUsdGenCudaNoise COMMAND testUsdGenCudaNoise)
+    set_tests_properties(testUsdGenCudaNoise PROPERTIES
+        LABELS "T1;cuda;operators;noise" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaRootFrames tests/testUsdGenCudaRootFrames.cpp)
+    target_link_libraries(testUsdGenCudaRootFrames PRIVATE usdGenGpu gf)
+    add_test(NAME testUsdGenCudaRootFrames COMMAND testUsdGenCudaRootFrames)
+    set_tests_properties(testUsdGenCudaRootFrames PROPERTIES
+        LABELS "T1;cuda;root-frames" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaExpression tests/testUsdGenCudaExpression.cpp
         tests/usdGenSeExprOracle.cpp)
     set_source_files_properties(tests/usdGenSeExprOracle.cpp PROPERTIES

@@ -1,6 +1,8 @@
 #include "cudaSourceInput.h"
 
+#include <array>
 #include <cstdio>
+#include <limits>
 
 using namespace usdGen;
 
@@ -18,9 +20,18 @@ int main() {
     source.curveId = {9, 3};
     source.rootPrim = {90,30};
     source.rootUV = {{.9f,.1f},{.3f,.7f}};
+    std::array<double, 16> frame9{};
+    std::array<double, 16> frame3{};
+    frame9[0] = frame9[5] = frame9[10] = frame9[15] = 1.0;
+    frame3[0] = frame3[5] = frame3[10] = frame3[15] = 1.0;
+    frame9[12] = 90.0;
+    frame3[12] = 30.0;
+    source.rootFrames = {frame9, frame3};
     CudaSourcePrepared prepared;
     std::vector<std::string> diagnostics;
-    check(PrepareCudaSource(source, {}, &prepared, &diagnostics) == CudaSourcePreparationStatus::Ok,
+    auto rootFrameOption = CudaSourcePreparationOptions{};
+    rootFrameOption.hasRootFrame = true;
+    check(PrepareCudaSource(source, rootFrameOption, &prepared, &diagnostics) == CudaSourcePreparationStatus::Ok,
           "prepare and sort source");
     check(prepared.curveId == std::vector<uint64_t>({3,9}) &&
           prepared.curveVertexCounts == std::vector<int32_t>({3,2}), "sort stable IDs and counts");
@@ -28,7 +39,9 @@ int main() {
           "reorder all CV positions");
     check(prepared.widths[0] == 3 && prepared.widths[3] == 1 && prepared.hairT[1] == .5f,
           "reorder CV channels");
-    check(prepared.rootPrim == std::vector<int32_t>({30,90}) && prepared.rootUV[0].x == .3f,
+    check(prepared.rootPrim == std::vector<int32_t>({30,90}) && prepared.rootUV[0].x == .3f &&
+          prepared.rootFrames.size() == 2 && prepared.rootFrames[0][12] == 30.0 &&
+          prepared.rootFrames[1][12] == 90.0,
           "reorder root channels");
     auto descriptor = prepared.Input();
     check(descriptor.points.data == prepared.points.data() && descriptor.stableIds.data == prepared.curveId.data(),
@@ -44,6 +57,21 @@ int main() {
                      prepared.points[i].z == lastGood.points[i].z;
     check(prepared.curveId == lastGood.curveId && samePoints,
           "invalid input preserves last good output");
+    auto badFrames = source;
+    badFrames.rootFrames[0][12] = std::numeric_limits<double>::quiet_NaN();
+    check(PrepareCudaSource(badFrames, {}, &prepared, nullptr) == CudaSourcePreparationStatus::NonFiniteInput &&
+          prepared.rootFrames == lastGood.rootFrames,
+          "non-finite rootFrame rejects and retains last good output");
+    auto needsFrames = CudaSourcePreparationOptions{};
+    needsFrames.hasRootFrame = true;
+    auto missingFrames = source;
+    missingFrames.rootFrames.clear();
+    check(PrepareCudaSource(missingFrames, needsFrames, &prepared, nullptr) == CudaSourcePreparationStatus::InvalidArgument,
+          "rootFrame flag cannot silently accept a missing payload");
+    auto shortFrames = source;
+    shortFrames.rootFrames.pop_back();
+    check(PrepareCudaSource(shortFrames, {}, &prepared, nullptr) == CudaSourcePreparationStatus::InvalidArgument,
+          "rootFrame payload must be uniform per curve");
     auto badEnum = CudaSourcePreparationOptions{};
     badEnum.staleAction = static_cast<CudaSourceStaleAction>(99);
     check(PrepareCudaSource(source, badEnum, &prepared, nullptr) == CudaSourcePreparationStatus::InvalidArgument,

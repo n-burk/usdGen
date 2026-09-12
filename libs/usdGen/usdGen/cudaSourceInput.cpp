@@ -14,6 +14,12 @@ template<class T> bool Finite(std::vector<T> const&) { return true; }
 template<> bool Finite(std::vector<float> const& a) { for (float v : a) if (!std::isfinite(v)) return false; return true; }
 template<> bool Finite(std::vector<float3> const& a) { for (auto const& v : a) if (!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)) return false; return true; }
 template<> bool Finite(std::vector<float2> const& a) { for (auto const& v : a) if (!std::isfinite(v.x)||!std::isfinite(v.y)) return false; return true; }
+bool FiniteRootFrames(std::vector<std::array<double, 16>> const& frames) {
+    for (auto const& frame : frames)
+        for (double value : frame)
+            if (!std::isfinite(value)) return false;
+    return true;
+}
 }
 
 gpu::CurveSourceInput CudaSourcePrepared::Input() const {
@@ -29,9 +35,13 @@ gpu::CurveSourceInput CudaSourcePrepared::Input() const {
 CudaSourcePreparationStatus PrepareCudaSourceImpl(
     CudaSourcePreparationInput const& source, CudaSourcePreparationOptions const& options,
     CudaSourcePrepared* out, std::vector<std::string>* diagnostics) {
-    if (!out || options.rebind != "never" || options.hasRootFrame) {
-        Diag(diagnostics, "rebind and rootFrame are unsupported by CUDA source preparation");
+    if (!out || options.rebind != "never") {
+        Diag(diagnostics, "rebind is unsupported by CUDA source preparation");
         return CudaSourcePreparationStatus::UnsupportedFeature;
+    }
+    if (options.hasRootFrame && source.rootFrames.empty()) {
+        Diag(diagnostics, "rootFrame flag requires a per-curve matrix payload");
+        return CudaSourcePreparationStatus::InvalidArgument;
     }
     // This stage preserves authored ragged data. CUDA execution resolves the
     // target before upload and resamples device-to-device after source staging.
@@ -57,11 +67,12 @@ CudaSourcePreparationStatus PrepareCudaSourceImpl(
         return CudaSourcePreparationStatus::InvalidArgument;
     if (source.curveVertexCounts.empty()) {
         if (!source.points.empty() || !source.rest.empty() || !source.widths.empty() ||
-            !source.hairT.empty() || !source.curveId.empty() || !source.rootPrim.empty() || !source.rootUV.empty())
+            !source.hairT.empty() || !source.curveId.empty() || !source.rootPrim.empty() || !source.rootUV.empty() ||
+            !source.rootFrames.empty())
             return CudaSourcePreparationStatus::InvalidArgument;
         out->curveVertexCounts.clear(); out->points.clear(); out->rest.clear();
         out->widths.clear(); out->hairT.clear(); out->curveId.clear();
-        out->rootPrim.clear(); out->rootUV.clear(); out->useRest = options.useRest;
+        out->rootPrim.clear(); out->rootUV.clear(); out->rootFrames.clear(); out->useRest = options.useRest;
         out->warningFlags = gpu::CurveSourceWarningNone;
         return CudaSourcePreparationStatus::Ok;
     }
@@ -79,9 +90,11 @@ CudaSourcePreparationStatus PrepareCudaSourceImpl(
         (!source.widths.empty() && source.widths.size() != total && source.widths.size() != 1) ||
         (!source.curveId.empty() && source.curveId.size() != source.curveVertexCounts.size()) ||
         (!source.rootPrim.empty() && source.rootPrim.size() != source.curveVertexCounts.size()) ||
-        (!source.rootUV.empty() && source.rootUV.size() != source.curveVertexCounts.size()))
+        (!source.rootUV.empty() && source.rootUV.size() != source.curveVertexCounts.size()) ||
+        (!source.rootFrames.empty() && source.rootFrames.size() != source.curveVertexCounts.size()))
         return CudaSourcePreparationStatus::InvalidArgument;
-    if (!Finite(source.points) || !Finite(source.rest) || !Finite(source.widths) || !Finite(source.hairT) || !Finite(source.rootUV))
+    if (!Finite(source.points) || !Finite(source.rest) || !Finite(source.widths) || !Finite(source.hairT) || !Finite(source.rootUV) ||
+        !FiniteRootFrames(source.rootFrames))
         return CudaSourcePreparationStatus::NonFiniteInput;
     for (float width : source.widths)
         if (width < 0.0f) return CudaSourcePreparationStatus::InvalidArgument;
@@ -117,11 +130,12 @@ CudaSourcePreparationStatus PrepareCudaSourceImpl(
         sourceOffset += size_t(source.curveVertexCounts[i]);
     }
     CudaSourcePrepared candidate;
-    candidate.curveVertexCounts.clear(); candidate.points.clear(); candidate.rest.clear(); candidate.widths.clear(); candidate.hairT.clear(); candidate.curveId.clear(); candidate.rootPrim.clear(); candidate.rootUV.clear();
+    candidate.curveVertexCounts.clear(); candidate.points.clear(); candidate.rest.clear(); candidate.widths.clear(); candidate.hairT.clear(); candidate.curveId.clear(); candidate.rootPrim.clear(); candidate.rootUV.clear(); candidate.rootFrames.clear();
     for (size_t old : order) {
         int32_t n = source.curveVertexCounts[old]; candidate.curveVertexCounts.push_back(n); candidate.curveId.push_back(ids[old]);
         if (!source.rootPrim.empty()) candidate.rootPrim.push_back(source.rootPrim[old]);
         if (!source.rootUV.empty()) candidate.rootUV.push_back(source.rootUV[old]);
+        if (!source.rootFrames.empty()) candidate.rootFrames.push_back(source.rootFrames[old]);
         const size_t pointBase = sourceBase[old];
         for (int32_t j=0;j<n;++j) { candidate.points.push_back(source.points[pointBase+j]); if (!source.rest.empty()) candidate.rest.push_back(source.rest[pointBase+j]); if (!source.hairT.empty()) candidate.hairT.push_back(source.hairT[pointBase+j]); if (source.widths.size()==total) candidate.widths.push_back(source.widths[pointBase+j]); }
     }

@@ -3,6 +3,7 @@
 
 #include "gpu/curveSource.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -33,6 +34,9 @@ struct CudaSourcePreparationInput {
     std::vector<uint64_t> curveId;
     std::vector<int32_t> rootPrim;
     std::vector<float2> rootUV;
+    // USD/Gf row-major doubles, one optional rest frame per curve. CUDA
+    // upload and device validation intentionally happen in a later layer.
+    std::vector<std::array<double, 16>> rootFrames;
 };
 
 struct CudaSourcePrepared {
@@ -42,6 +46,7 @@ struct CudaSourcePrepared {
     std::vector<uint64_t> curveId;
     std::vector<int32_t> rootPrim;
     std::vector<float2> rootUV;
+    std::vector<std::array<double, 16>> rootFrames;
     bool useRest = true;
     uint32_t warningFlags = gpu::CurveSourceWarningNone;
 

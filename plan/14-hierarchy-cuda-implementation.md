@@ -1699,3 +1699,46 @@ disabled and stock SDK/core uninstrumented. The strengthened empty/nested
 native fixture passed (`3505ec`, 0.70 seconds), and the final 16-target
 private harness passed (`4aa46b`, 5.41 seconds). This does not make render-tag
 publication transactional; that path remains separately open.
+
+### Standalone CUDA rest-frame and Noise helper checkpoint (2026-09-12)
+
+Two device-only helpers are now validated but are **not** yet wired into the
+live graph/CUDA execution path. `CudaRestRootFrames` publishes canonical
+`F=[T|B|N]` views (local `x,y,z` maps to `T*x+B*y+N*z`) from rest-surface
+triangles/quads, authored Gf matrices, or supported authored-normal domains.
+It fail-closes malformed topology, roots, and authored frames; degenerate
+curves publish a drop/invalid entry rather than invented axes, retain the last
+good generation on a failed replacement, and keep scheduler-consumer fences
+on the active device storage.
+
+`CudaNoise` consumes those canonical borrowed frames for SeExpr vector
+`vfbm`, with typed scalar/bool/int fields, groom/primitive seed, stable IDs,
+ragged hairT, 257-entry named LUTs, and private staging followed by a single
+scalar-status readback. Its cumulative mode accumulates the vector field
+before the current-CV weight. A zero resolved envelope writes the input
+bitwise while still retaining cumulative field state for later CVs; fractional
+preserve-length restores authored rest-segment lengths sequentially. It also
+rejects unrepresentable finite lattice coordinates before SeExpr's
+floor-to-int noise conversion. `maskAmount` remains only an envelope seam:
+this is not a full shared mask-block implementation.
+
+The corrected targets built (`be5304` Noise; `5802bc` root-frames relink) and
+the focused pair passed (`dde0c6`). Noise memcheck/initcheck reported zero
+errors (`194556`/`643f99`), as did root-frames (`581237`/`b7ca3a`). Reviewed
+source identities were Noise `230ae88d...` and root-frames `1e85bcd9...`
+(`45b787`). These results are helper-only evidence, not a live graph
+integration, full-mask, renderer, or full-main-suite claim.
+
+Actual local-Qwen contributions were the root-math review
+`chatcmpl-baaa4c8c35d208d3` and verbatim lifecycle review
+`chatcmpl-9e4593938bc88303`; coordinator/root integrated and constrained the
+result. The two attempted Hivemind qwen3.8-27b@q4_0 requests both ended in
+transport timeout with zero response bytes, so they contributed no review.
+
+The main T0/T1 selection subsequently passed **88/88** (`4eba54`, 28.88 s)
+after build `eff1e1`. This is T0/T1 evidence, not an all-tier or private
+harness claim. The bounded CurveSource preparation payload now validates and
+stable-ID-sorts optional per-curve authored `GfMatrix4d` root-frame values
+alongside the reordered source arrays; it does **not** upload or apply those
+matrices to live CUDA root frames yet. The same limitation applies to Noise:
+graph/rest-normal transport and execution integration remain open.
