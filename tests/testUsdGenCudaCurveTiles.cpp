@@ -1,0 +1,245 @@
+// Test-only tile-span metadata readback.  Production retains these spans on
+// device until the explicit publication boundary.
+#include "gpu/curveTiles.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <vector>
+
+using namespace usdGen::gpu;
+
+namespace {
+int failures = 0;
+void Check(bool value, char const* label) {
+    if (!value) { ++failures; std::fprintf(stderr, "FAIL: %s\n", label); }
+}
+void Cuda(cudaError_t value, char const* label) {
+    if (value != cudaSuccess) {
+        std::fprintf(stderr, "%s: %s\n", label, cudaGetErrorString(value));
+        std::exit(1);
+    }
+}
+template <class T> DeviceView<const T> Read(DeviceBuffer<T> const& buffer) {
+    return buffer.view();
+}
+template <class T> std::vector<T> Download(DeviceBuffer<T> const& buffer) {
+    std::vector<T> result(buffer.size());
+    if (!result.empty()) Cuda(cudaMemcpy(result.data(), buffer.data(),
+        result.size() * sizeof(T), cudaMemcpyDeviceToHost), "tile oracle readback");
+    return result;
+}
+
+struct Result {
+    CurveTileRequirements requirements;
+    uint32_t status = 0;
+    std::vector<CurveTileSpan> spans;
+};
+
+Result Run(CurveTileOptions options, std::vector<uint64_t> const& capture,
+           std::vector<uint64_t> const& survivors,
+           std::vector<uint32_t> const& offsets, size_t pointCount,
+           bool captureGraph = false,
+           std::vector<uint64_t> const& replaySurvivors = {},
+           std::vector<uint32_t> const& replayOffsets = {}) {
+    cudaStream_t stream = nullptr;
+    Cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "tile stream");
+    CurveTileRequirements requirements;
+    Cuda(GetCurveTileRequirements(options, capture.size(), survivors.size(), pointCount,
+                                  &requirements, stream), "tile requirements");
+    DeviceBuffer<uint64_t> captureIds, survivorIds;
+    DeviceBuffer<uint32_t> curveOffsets, status;
+    DeviceBuffer<CurveTileSpan> spans;
+    Cuda(captureIds.reset(capture.size()), "capture ID allocation");
+    Cuda(survivorIds.reset(survivors.size()), "survivor ID allocation");
+    Cuda(curveOffsets.reset(offsets.size()), "survivor offset allocation");
+    Cuda(status.reset(1), "tile status allocation");
+    Cuda(spans.reset(requirements.tileCount + 2), "tile span allocation");
+    if (!capture.empty()) Cuda(cudaMemcpyAsync(captureIds.data(), capture.data(),
+        capture.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, stream), "capture ID upload");
+    if (!survivors.empty()) Cuda(cudaMemcpyAsync(survivorIds.data(), survivors.data(),
+        survivors.size() * sizeof(uint64_t), cudaMemcpyHostToDevice, stream), "survivor ID upload");
+    if (!offsets.empty()) Cuda(cudaMemcpyAsync(curveOffsets.data(), offsets.data(),
+        offsets.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, stream), "survivor offset upload");
+    Cuda(cudaMemsetAsync(spans.data(), 0x5a, spans.size() * sizeof(CurveTileSpan), stream),
+         "tile span sentinel");
+    CurveTileInput input{Read(captureIds), Read(survivorIds), Read(curveOffsets),
+                         capture.size(), survivors.size(), pointCount};
+    CurveTileOutput output{spans.view(), status.view()};
+    if (captureGraph) Cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+                           "tile graph capture begin");
+    Cuda(BuildCurveTiles(input, requirements, output, stream), "tile enqueue");
+    if (captureGraph) {
+        cudaGraph_t graph = nullptr;
+        cudaGraphExec_t executable = nullptr;
+        Cuda(cudaStreamEndCapture(stream, &graph), "tile graph capture end");
+        Cuda(cudaGraphInstantiate(&executable, graph, 0), "tile graph instantiate");
+        Cuda(cudaGraphLaunch(executable, stream), "tile graph launch");
+        Cuda(cudaStreamSynchronize(stream), "tile graph completion");
+        if (!replaySurvivors.empty()) Cuda(cudaMemcpyAsync(survivorIds.data(),
+            replaySurvivors.data(), replaySurvivors.size() * sizeof(uint64_t),
+            cudaMemcpyHostToDevice, stream), "tile graph replay survivor upload");
+        if (!replayOffsets.empty()) Cuda(cudaMemcpyAsync(curveOffsets.data(),
+            replayOffsets.data(), replayOffsets.size() * sizeof(uint32_t),
+            cudaMemcpyHostToDevice, stream), "tile graph replay offset upload");
+        Cuda(cudaGraphLaunch(executable, stream), "tile graph replay");
+        Cuda(cudaStreamSynchronize(stream), "tile graph replay completion");
+        Cuda(cudaGraphExecDestroy(executable), "tile graph destroy");
+        Cuda(cudaGraphDestroy(graph), "tile graph definition destroy");
+    } else {
+        Cuda(cudaStreamSynchronize(stream), "tile completion");
+    }
+    Result result;
+    result.requirements = requirements;
+    result.status = Download(status)[0];
+    result.spans = Download(spans);
+    Cuda(cudaStreamDestroy(stream), "destroy tile stream");
+    return result;
+}
+
+bool Same(CurveTileSpan a, CurveTileSpan b) {
+    return a.tile == b.tile && a.firstCurve == b.firstCurve &&
+        a.curveCount == b.curveCount && a.firstPoint == b.firstPoint &&
+        a.pointCount == b.pointCount;
+}
+bool Sentinel(CurveTileSpan const& span) {
+    CurveTileSpan const expected{0x5a5a5a5aU, 0x5a5a5a5aU, 0x5a5a5a5aU,
+                                 0x5a5a5a5aU, 0x5a5a5a5aU};
+    return Same(span, expected);
+}
+bool GuardsUntouched(Result const& result) {
+    return result.spans.size() == result.requirements.tileCount + 2 &&
+        Sentinel(result.spans[result.requirements.tileCount]) &&
+        Sentinel(result.spans[result.requirements.tileCount + 1]);
+}
+
+void GoldenRanges() {
+    std::vector<uint64_t> capture(300);
+    for (uint64_t i = 0; i < capture.size(); ++i) capture[i] = i;
+    CurveTileOptions const options{128, 64};
+    auto result = Run(options, capture, {0,127,128,129,255,299},
+                      {0,2,5,9,14,20,27}, 27);
+    Check(result.status == 0 && result.requirements.tileCount == 3,
+          "ragged stable-ID tile build succeeds with three capture tiles");
+    std::vector<CurveTileSpan> const initial{{0,0,2,0,5}, {1,2,3,5,15}, {2,5,1,20,7}};
+    Check(std::equal(initial.begin(), initial.end(), result.spans.begin(), Same),
+          "exact initial ragged stable-ID tile ranges");
+    result = Run(options, capture, {0,127,128,129,255,299},
+                 {0,2,5,9,14,20,27}, 27, true,
+                      {0,127,128,255,256,299}, {0,2,5,9,14,20,27});
+    Check(result.status == 0 && result.requirements.tileCount == 3,
+          "ragged stable-ID graph replay succeeds");
+    std::vector<CurveTileSpan> const expected{{0,0,2,0,5}, {1,2,2,5,9}, {2,4,2,14,13}};
+    Check(std::equal(expected.begin(), expected.end(), result.spans.begin(), Same),
+          "graph replay uses updated ragged stable-ID tile inputs");
+    Check(GuardsUntouched(result), "tile graph output guards remain untouched");
+    result = Run(options, capture, {0,299}, {0,2,9}, 9);
+    std::vector<CurveTileSpan> const sparse{{0,0,1,0,2}, {1,1,0,2,0}, {2,1,1,2,7}};
+    Check(result.status == 0 && std::equal(sparse.begin(), sparse.end(),
+          result.spans.begin(), Same), "post-cull empty capture tile is retained");
+    Check(GuardsUntouched(result), "sparse tile output guards remain untouched");
+    result = Run(options, capture, {}, {0}, 0);
+    Check(result.status == 0 && std::all_of(result.spans.begin(),
+          result.spans.begin() + result.requirements.tileCount,
+          [](CurveTileSpan const& span) { return span.curveCount == 0 && span.pointCount == 0; }),
+          "all-cull retains every frozen capture tile");
+    result = Run(options, {}, {}, {0}, 0);
+    Check(result.status == 0 && result.requirements.tileCount == 0,
+          "empty capture and cull are valid");
+}
+
+void PartitionEdges() {
+    auto exactPartition = [](Result const& result,
+                             std::vector<uint32_t> const& curveCounts,
+                             char const* label) {
+        bool exact = result.status == 0 &&
+            result.requirements.tileCount == curveCounts.size() &&
+            GuardsUntouched(result);
+        uint32_t first = 0;
+        for (size_t tile = 0; tile < curveCounts.size(); ++tile) {
+            CurveTileSpan const expected{static_cast<uint32_t>(tile), first,
+                curveCounts[tile], first, curveCounts[tile]};
+            exact = exact && Same(result.spans[tile], expected);
+            first += curveCounts[tile];
+        }
+        Check(exact, label);
+    };
+    std::vector<uint64_t> capture(33 * 128), survivors(33 * 128);
+    std::vector<uint32_t> offsets(capture.size() + 1);
+    for (size_t i = 0; i < capture.size(); ++i) {
+        capture[i] = survivors[i] = i;
+        offsets[i] = static_cast<uint32_t>(i);
+    }
+    offsets.back() = static_cast<uint32_t>(capture.size());
+    auto result = Run({128,32}, capture, survivors, offsets, capture.size());
+    std::vector<uint32_t> counts33(32, 128);
+    counts33.front() = 256;
+    exactPartition(result, counts33,
+                   "33 chunks reserve exact 2-plus-31 capture-chunk tile boundaries");
+
+    capture.resize(65 * 128); survivors.resize(capture.size());
+    offsets.resize(capture.size() + 1);
+    for (size_t i = 0; i < capture.size(); ++i) {
+        capture[i] = survivors[i] = i;
+        offsets[i] = static_cast<uint32_t>(i);
+    }
+    offsets.back() = static_cast<uint32_t>(capture.size());
+    result = Run({128,32}, capture, survivors, offsets, capture.size());
+    std::vector<uint32_t> counts65;
+    counts65.insert(counts65.end(), 16, 3 * 128);
+    counts65.push_back(2 * 128);
+    counts65.insert(counts65.end(), 15, 128);
+    exactPartition(result, counts65,
+                   "65 chunks reserve exact 16x3-plus-2-plus-15 capture-chunk boundaries");
+
+    std::vector<uint64_t> ids100k(100000);
+    for (uint64_t i = 0; i < ids100k.size(); ++i) ids100k[i] = i;
+    CurveTileRequirements requirements;
+    Cuda(GetCurveTileRequirements({}, ids100k.size(), 0, 0, &requirements),
+         "100k tile requirements");
+    Check(requirements.chunkCount == 196 && requirements.chunksPerTile == 4 &&
+          requirements.tileCount == 49, "100k default partition is 49 tiles");
+    Cuda(GetCurveTileRequirements({512,32}, ids100k.size(), 0, 0, &requirements),
+         "tile target edit requirements");
+    Check(requirements.tileCount == 32, "tileTarget edit changes frozen tile layout");
+    Cuda(GetCurveTileRequirements({1,999}, 300, 0, 0, &requirements),
+         "clamped tile requirements");
+    Check(requirements.chunkSize == 128 && requirements.tileTarget == 256,
+          "chunk and tile target clamp to contract bounds");
+    Cuda(GetCurveTileRequirements({0,0}, 300, 0, 0, &requirements),
+         "defaulted tile requirements");
+    Check(requirements.chunkSize == 512 && requirements.tileTarget == 64,
+          "zero configuration selects core defaults");
+}
+
+void InvalidInput() {
+    std::vector<uint64_t> capture{10,20,30};
+    auto invalid = [&](std::vector<uint64_t> survivors, std::vector<uint32_t> offsets,
+                       size_t points, char const* label) {
+        Result result = Run({128,64}, capture, survivors, offsets, points);
+        Check(result.status == 1 && std::all_of(result.spans.begin(), result.spans.end(), Sentinel),
+              label);
+    };
+    invalid({10,25}, {0,1,2}, 2, "unknown survivor ID fails closed");
+    invalid({10,10}, {0,1,2}, 2, "duplicate survivor IDs fail closed");
+    invalid({20,10}, {0,1,2}, 2, "reordered survivor IDs fail closed");
+    invalid({10,20}, {1,2,3}, 3, "nonzero first offset fails closed");
+    invalid({10,20}, {0,2,2}, 3, "bad terminal offset fails closed");
+    invalid({10,20,30}, {0,2,1,3}, 3, "nonmonotonic interior offset fails closed");
+    Result duplicateCapture = Run({128,64}, {10,10,30}, {10}, {0,1}, 1);
+    Check(duplicateCapture.status == 1 && std::all_of(duplicateCapture.spans.begin(),
+          duplicateCapture.spans.end(), Sentinel), "duplicate capture IDs fail closed");
+    CurveTileRequirements requirements;
+    Check(GetCurveTileRequirements({}, size_t(UINT32_MAX) + 1, 0, 0, &requirements)
+              == cudaErrorInvalidValue, "overflowing scalar capture count rejected");
+}
+} // namespace
+
+int main() {
+    GoldenRanges();
+    PartitionEdges();
+    InvalidInput();
+    std::printf("GPU stable tile spans: %s\n", failures ? "FAIL" : "PASS");
+    return failures ? 1 : 0;
+}

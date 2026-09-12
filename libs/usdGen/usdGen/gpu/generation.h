@@ -55,9 +55,55 @@ private:
         std::shared_ptr<const UsdGenDeviceGeneration> const&, cudaStream_t);
 };
 
+/// A zero-copy tile view over a geometry lease. curveOffsets retain their
+/// global values (the slice has curveCount + 1 entries); use CurveIndexSpan
+/// when passing this view to the index builder.
+struct CudaGeometryTileView {
+    DeviceView<const float3> points;
+    DeviceView<const float3> restPoints;
+    DeviceView<const float> widths;
+    DeviceView<const float> hairT;
+    DeviceView<const uint32_t> curveOffsets;
+    DeviceView<const uint64_t> stableIds;
+    DeviceView<const int32_t> rootPrim;
+    DeviceView<const float2> rootUV;
+    UsdGenDeviceTileMetadata range;
+    uint64_t generation = 0;
+    uint64_t topologyVersion = 0;
+    uint64_t valueVersion = 0;
+};
+
+/// Owns the parent geometry lease while exposing one zero-copy tile slice.
+/// This deliberately does not expose DeviceCurveGeometryView, whose offsets
+/// are implicitly zero-based and would misrepresent a tile slice.
+class CudaGeometryTileLease {
+public:
+    explicit operator bool() const noexcept { return bool(parent_); }
+    CudaGeometryTileView View() const noexcept {
+        return parent_ ? view_ : CudaGeometryTileView{};
+    }
+private:
+    CudaGeometryLease parent_;
+    CudaGeometryTileView view_{};
+    friend CudaGeometryTileLease AcquireGeometryTile(
+        std::shared_ptr<const UsdGenDeviceGeneration> const&, uint32_t,
+        uint64_t, cudaStream_t);
+};
+
 CudaGeometryLease AcquireGeometry(
     std::shared_ptr<const UsdGenDeviceGeneration> const& generation,
     cudaStream_t stream);
+
+CudaGeometryTileLease AcquireGeometryTile(
+    std::shared_ptr<const UsdGenDeviceGeneration> const& generation,
+    uint32_t tileId, uint64_t expectedGeneration, cudaStream_t stream);
+
+/// Attach immutable tile-range metadata without copying or replacing any
+/// backend channels/owner. Returns a new immutable wrapper on success.
+std::shared_ptr<const UsdGenDeviceGeneration> WithTileMetadata(
+    std::shared_ptr<const UsdGenDeviceGeneration> const& candidate,
+    std::vector<UsdGenDeviceTileMetadata> tiles,
+    std::string* reason = nullptr);
 
 } // namespace usdGen::gpu
 #endif

@@ -384,6 +384,7 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/pointOverride.cu
             libs/usdGen/usdGen/gpu/topology.cu
             libs/usdGen/usdGen/gpu/curveIndices.cu
+            libs/usdGen/usdGen/gpu/curveTiles.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -484,6 +485,23 @@ if(USDGEN_ENABLE_CUDA)
     set_tests_properties(testUsdGenCudaCurveIndices testUsdGenCudaCurveIndicesStorm PROPERTIES
         LABELS "T1;cuda;topology;interop" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     set_tests_properties(testUsdGenCudaCurveIndicesStorm PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(testUsdGenCudaCurveTiles tests/testUsdGenCudaCurveTiles.cpp)
+    target_link_libraries(testUsdGenCudaCurveTiles PRIVATE usdGenGpu)
+    add_test(NAME testUsdGenCudaCurveTiles COMMAND testUsdGenCudaCurveTiles)
+    set_tests_properties(testUsdGenCudaCurveTiles PROPERTIES
+        LABELS "T1;cuda;topology;tiles" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaTileLease tests/testUsdGenCudaTileLease.cpp)
+    target_compile_definitions(testUsdGenCudaTileLease PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaTileLease PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaTileLease COMMAND testUsdGenCudaTileLease)
+    set_tests_properties(testUsdGenCudaTileLease PROPERTIES
+        LABELS "T1;cuda;tilelease" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaTileExecution tests/testUsdGenCudaTileExecution.cpp)
+    target_compile_definitions(testUsdGenCudaTileExecution PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaTileExecution PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaTileExecution COMMAND testUsdGenCudaTileExecution)
+    set_tests_properties(testUsdGenCudaTileExecution PROPERTIES
+        LABELS "T1;cuda;tiles;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaGlInterop tests/testUsdGenCudaGlInterop.cpp)
     target_compile_definitions(testUsdGenCudaGlInterop PRIVATE USDGEN_ENABLE_CUDA)
     target_include_directories(testUsdGenCudaGlInterop PRIVATE ${PROJECT_SOURCE_DIR}/usdGenShaders/test)

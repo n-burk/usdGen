@@ -18,6 +18,7 @@
 #include "usdGen/gpu/length.h"
 #include "usdGen/gpu/curveCompaction.h"
 #include "usdGen/gpu/topology.h"
+#include "usdGen/gpu/curveTiles.h"
 #include "usdGenMath/usdGenMath/ramp.h"
 #endif
 
@@ -679,6 +680,11 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         Fail(diagnostics, "source upload failed; previous generation retained"); return {};
     }
     auto geometry = source->view();
+    // PrepareCudaSource establishes this strictly ordered capture identity.
+    // Keep the borrowed view alive through tile assignment even if a later
+    // Length pass compacts the survivor geometry.
+    auto const captureStableIds = geometry.stableIds;
+    size_t const captureCurveCount = geometry.curveCount;
     auto hairT = source->hairT();
     auto rootPrim = source->rootPrim();
     auto rootUV = source->rootUV();
@@ -851,6 +857,55 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         finalWidths = std::move(nextWidths);
         geometry.widths = {finalWidths->data(), finalWidths->size()};
     }
+    gpu::CurveTileRequirements tileRequirements;
+    gpu::CurveTileOptions tileOptions;
+    tileOptions.tileTarget = static_cast<uint32_t>(std::clamp(
+        desc.tileTarget, 32, 256));
+    if (gpu::GetCurveTileRequirements(tileOptions, captureCurveCount,
+            geometry.curveCount, geometry.pointCount, &tileRequirements, stream) != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile metadata requirements failed; previous generation retained"); return {};
+    }
+    gpu::DeviceBuffer<gpu::CurveTileSpan> deviceTiles;
+    gpu::DeviceBuffer<uint32_t> tileStatus;
+    if (deviceTiles.reset(tileRequirements.tileCount) != cudaSuccess ||
+        tileStatus.reset(1) != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile metadata allocation failed; previous generation retained"); return {};
+    }
+    gpu::CurveTileInput tileInput{captureStableIds, geometry.stableIds,
+        geometry.curveOffsets, captureCurveCount, geometry.curveCount,
+        geometry.pointCount};
+    gpu::CurveTileOutput tileOutput{deviceTiles.view(), tileStatus.view()};
+    if (gpu::BuildCurveTiles(tileInput, tileRequirements, tileOutput, stream) != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile metadata launch failed; previous generation retained"); return {};
+    }
+    // This is the deliberate publication boundary.  Fence producer work and
+    // read the status before touching spans: a rejected GPU candidate leaves
+    // its span buffer untouched by contract.
+    uint32_t tileError = 0;
+    cudaError_t const statusCopy = cudaMemcpyAsync(&tileError, tileStatus.data(),
+        sizeof(tileError), cudaMemcpyDeviceToHost, stream);
+    cudaError_t const statusFence = cudaStreamSynchronize(stream);
+    if (statusCopy != cudaSuccess || statusFence != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile metadata status readback failed; previous generation retained"); return {};
+    }
+    if (tileError != 0) {
+        Fail(diagnostics, "CUDA tile metadata validation failed; previous generation retained"); return {};
+    }
+    std::vector<gpu::CurveTileSpan> tileSpans(tileRequirements.tileCount);
+    cudaError_t spanCopy = cudaSuccess;
+    if (tileRequirements.tileCount)
+        spanCopy = cudaMemcpyAsync(tileSpans.data(), deviceTiles.data(),
+            tileSpans.size() * sizeof(gpu::CurveTileSpan), cudaMemcpyDeviceToHost, stream);
+    cudaError_t const spanFence = cudaStreamSynchronize(stream);
+    if (spanCopy != cudaSuccess || spanFence != cudaSuccess) {
+        Fail(diagnostics, "CUDA tile metadata readback failed; previous generation retained"); return {};
+    }
+    std::vector<UsdGenDeviceTileMetadata> tiles;
+    tiles.reserve(tileSpans.size());
+    for (gpu::CurveTileSpan const& span : tileSpans)
+        tiles.push_back({span.tile, span.firstCurve, span.curveCount,
+                         span.firstPoint, span.pointCount});
+
     uint64_t topologyVersion = generation;
     if (previous) {
         auto lease = gpu::AcquireGeometry(previous, stream);
@@ -858,7 +913,15 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         if (!lease || gpu::CompareCurveTopology(lease.Geometry(), geometry, stream, &same) != cudaSuccess) {
             Fail(diagnostics, "cannot compare GPU topology against the previous publication"); return {};
         }
-        if (same) topologyVersion = previous->Geometry().topologyVersion;
+        auto const& previousTiles = previous->Geometry().tiles;
+        bool const sameTiles = previousTiles.size() == tiles.size() &&
+            std::equal(previousTiles.begin(), previousTiles.end(), tiles.begin(),
+                [](UsdGenDeviceTileMetadata const& a, UsdGenDeviceTileMetadata const& b) {
+                    return a.tile == b.tile && a.firstCurve == b.firstCurve &&
+                        a.curveCount == b.curveCount && a.firstPoint == b.firstPoint &&
+                        a.pointCount == b.pointCount;
+                });
+        if (same && sameTiles) topologyVersion = previous->Geometry().topologyVersion;
     }
     std::string reason;
     auto result = compacted
@@ -867,6 +930,10 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         : gpu::MakeSourceGeneration(std::move(source), generation, &reason,
             deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion);
     if (!result) Fail(diagnostics, reason);
+    if (result) {
+        result = gpu::WithTileMetadata(result, std::move(tiles), &reason);
+        if (!result) Fail(diagnostics, reason);
+    }
     if (result) {
         auto stats = std::make_shared<std::vector<UsdGenCudaBindingStats>>();
         for (auto const& step : plan.steps) {

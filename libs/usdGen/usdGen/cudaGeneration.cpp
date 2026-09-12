@@ -3,6 +3,7 @@
 #include "usdGen/gpu/curveCompaction.h"
 
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -301,6 +302,131 @@ CudaGeometryLease AcquireGeometry(
     result.rootUV_ = owner->RootUV();
     result.lease_ = std::move(lease);
     return result;
+}
+
+namespace {
+template <class T>
+bool _Slice(DeviceView<const T> source, uint64_t begin, uint64_t count,
+            DeviceView<const T>* result)
+{
+    if (begin > source.size || count > source.size - begin ||
+        begin > std::numeric_limits<size_t>::max() ||
+        count > std::numeric_limits<size_t>::max()) return false;
+    size_t const b = static_cast<size_t>(begin);
+    size_t const n = static_cast<size_t>(count);
+    if (n && !source.data) return false;
+    result->data = n ? source.data + b : nullptr;
+    result->size = n;
+    return true;
+}
+}
+
+CudaGeometryTileLease AcquireGeometryTile(
+    std::shared_ptr<const UsdGenDeviceGeneration> const& generation,
+    uint32_t tileId, uint64_t expectedGeneration, cudaStream_t stream)
+{
+    CudaGeometryTileLease result;
+    if (!generation || generation->Identity().backend != UsdGenDeviceBackend::Cuda ||
+        generation->Identity().generation != expectedGeneration)
+        return result;
+
+    UsdGenDeviceTileMetadata const* tile = nullptr;
+    for (UsdGenDeviceTileMetadata const& candidate : generation->Geometry().tiles) {
+        if (candidate.tile == tileId) { tile = &candidate; break; }
+    }
+    if (!tile) return result;
+
+    CudaGeometryLease parent = AcquireGeometry(generation, stream);
+    if (!parent) return result;
+    DeviceCurveGeometryView const geometry = parent.Geometry();
+    DeviceView<const uint32_t> offsets{geometry.curveOffsets.data,
+                                       geometry.curveOffsets.size};
+    CudaGeometryTileView view;
+    view.range = *tile;
+    view.generation = generation->Identity().generation;
+    view.topologyVersion = generation->Geometry().topologyVersion;
+    view.valueVersion = generation->Geometry().valueVersion;
+
+    // The extra offset sentinel is part of every non-empty and empty tile.
+    if (tile->curveCount > tile->pointCount ||
+        (tile->curveCount == 0 && tile->pointCount != 0) ||
+        tile->firstCurve > geometry.curveCount ||
+        tile->curveCount > geometry.curveCount - tile->firstCurve ||
+        tile->curveCount == std::numeric_limits<uint64_t>::max() ||
+        tile->firstPoint > std::numeric_limits<uint32_t>::max() ||
+        tile->pointCount > std::numeric_limits<uint32_t>::max() - tile->firstPoint)
+        return result;
+    uint64_t const offsetCount = tile->curveCount + 1;
+    if (!_Slice(offsets, tile->firstCurve, offsetCount, &view.curveOffsets) ||
+        !_Slice(parent.HairT(), tile->firstPoint, tile->pointCount, &view.hairT) ||
+        !_Slice(geometry.points, tile->firstPoint, tile->pointCount, &view.points) ||
+        !_Slice(geometry.restPoints, tile->firstPoint, tile->pointCount, &view.restPoints) ||
+        !_Slice(geometry.widths, tile->firstPoint, tile->pointCount, &view.widths) ||
+        !_Slice(geometry.stableIds, tile->firstCurve, tile->curveCount, &view.stableIds))
+        return result;
+
+    DeviceView<const int32_t> const roots = parent.RootPrim();
+    DeviceView<const float2> const uvs = parent.RootUV();
+    if ((roots.size == 0) != (uvs.size == 0)) return result;
+    if (roots.size == 0) view.rootPrim = {};
+    else if (!_Slice(roots, tile->firstCurve, tile->curveCount, &view.rootPrim)) return result;
+    if (uvs.size == 0) view.rootUV = {};
+    else if (!_Slice(uvs, tile->firstCurve, tile->curveCount, &view.rootUV)) return result;
+    result.view_ = view;
+    result.parent_ = std::move(parent);
+    return result;
+}
+
+std::shared_ptr<const UsdGenDeviceGeneration> WithTileMetadata(
+    std::shared_ptr<const UsdGenDeviceGeneration> const& candidate,
+    std::vector<UsdGenDeviceTileMetadata> tiles, std::string* reason)
+{
+    if (!candidate || !candidate->Owner()) {
+        if (reason) *reason = "tile metadata requires an owned generation";
+        return {};
+    }
+    auto const& geometry = candidate->Geometry();
+    uint64_t curveEnd = 0, pointEnd = 0, previousId = 0;
+    bool first = true;
+    for (UsdGenDeviceTileMetadata const& tile : tiles) {
+        if (!first && tile.tile <= previousId) {
+            if (reason) *reason = "tile IDs must be strictly increasing";
+            return {};
+        }
+        first = false;
+        previousId = tile.tile;
+        if (tile.curveCount > tile.pointCount ||
+            (tile.curveCount == 0 && tile.pointCount != 0) ||
+            tile.firstPoint > std::numeric_limits<uint32_t>::max() ||
+            tile.pointCount > std::numeric_limits<uint32_t>::max() - tile.firstPoint ||
+            tile.firstCurve != curveEnd || tile.firstPoint != pointEnd ||
+            tile.curveCount > geometry.curveCount - curveEnd ||
+            tile.pointCount > geometry.pointCount - pointEnd ||
+            tile.curveCount > std::numeric_limits<uint64_t>::max() - curveEnd ||
+            tile.pointCount > std::numeric_limits<uint64_t>::max() - pointEnd) {
+            if (reason) *reason = "tile ranges must be contiguous and in bounds";
+            return {};
+        }
+        curveEnd += tile.curveCount;
+        pointEnd += tile.pointCount;
+    }
+    if (tiles.empty()) {
+        if (geometry.curveCount != 0 || geometry.pointCount != 0) {
+            if (reason) *reason = "non-empty geometry requires tile metadata";
+            return {};
+        }
+    } else if (curveEnd != geometry.curveCount || pointEnd != geometry.pointCount) {
+        if (reason) *reason = "tile metadata does not cover geometry";
+        return {};
+    }
+    UsdGenDeviceGeneration::CreateInfo info;
+    info.identity = candidate->Identity();
+    info.geometry = geometry;
+    info.geometry.tiles = std::move(tiles);
+    info.tool = candidate->Tool();
+    info.channels = candidate->Channels();
+    info.owner = candidate->Owner();
+    return UsdGenDeviceGeneration::Create(std::move(info), reason);
 }
 } // namespace usdGen::gpu
 #endif

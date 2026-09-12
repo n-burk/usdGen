@@ -1,4 +1,5 @@
 #include "deviceBuffer.h"
+#include "curveTiles.h"
 #include <cstdint>
 
 namespace usdGen { namespace gpu {
@@ -36,4 +37,5 @@ template class DeviceBuffer<unsigned char>;
 template class DeviceBuffer<uint32_t>;
 template class DeviceBuffer<uint64_t>;
 template class DeviceBuffer<float3>;
+template class DeviceBuffer<CurveTileSpan>;
 }}

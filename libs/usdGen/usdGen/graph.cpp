@@ -262,7 +262,9 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
         std::clamp(_tileTarget, kUsdGenTileMin, kUsdGenTileMax);
     int const cpt = ComputeChunksPerTile(nChunks, tileTarget);
     int const nTiles = ComputeNumTiles(nChunks, tileTarget);
-    bool const tileLayoutChanged = (_chunksPerTile != cpt ||
+    int const previousChunks = ComputeNumChunks(_partitionCurves, _chunkSize);
+    bool const chunkLayoutChanged = previousChunks != nChunks;
+    bool const tileLayoutChanged = (chunkLayoutChanged || _chunksPerTile != cpt ||
                                     int(_tiles.size()) != nTiles);
     bool const changed = (_partitionCurves != totalCurves || tileLayoutChanged);
     _partitionCurves = totalCurves;
@@ -270,15 +272,31 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
     if (tileLayoutChanged) {
         _chunksPerTile = cpt;
         _tiles.assign(nTiles, UsdGenTileView());
+        auto boundary = [=](int t) -> int {
+            // Reserve one chunk for each remaining tile before taking the
+            // packed upper bound; this keeps every tile non-empty while
+            // preserving the cpt ceiling when nChunks is just above nTiles.
+            int64_t const packed = int64_t(t) * int64_t(cpt);
+            int64_t const tail = int64_t(nChunks) - int64_t(nTiles - t);
+            return static_cast<int>(std::min(packed, tail));
+        };
         for (int t = 0; t < nTiles; ++t) {
             _tiles[t].tile = static_cast<UsdGenTileId>(t);
-            _tiles[t].firstChunk = static_cast<uint32_t>(t * cpt);
-            // M-10: each tile takes AT MOST chunksPerTile chunks — the last
-            // tile holds the remainder, never the whole tail.
+            _tiles[t].firstChunk = static_cast<uint32_t>(boundary(t));
             _tiles[t].chunkCount =
-                static_cast<uint32_t>(std::min(cpt, nChunks - t * cpt));
+                static_cast<uint32_t>(boundary(t + 1) - boundary(t));
         }
     }
+
+    auto tileForChunk = [=](int chunk) -> UsdGenTileId {
+        auto const it = std::upper_bound(
+            _tiles.begin(), _tiles.end(), static_cast<uint32_t>(chunk),
+            [](uint32_t value, UsdGenTileView const& tile) {
+                return value < tile.firstChunk;
+            });
+        return static_cast<UsdGenTileId>(
+            it == _tiles.begin() ? 0 : std::distance(_tiles.begin(), it) - 1);
+    };
 
     bool layoutDiff = false;
 
@@ -315,9 +333,8 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
             if (tileLayoutChanged) {
                 // Tile ids moved under a kept chunk set: refresh them.
                 for (auto &cd : n.chunks)
-                    cd.tile = static_cast<UsdGenTileId>(
-                        cd.firstCurve / std::max<size_t>(1, _chunkSize) /
-                        std::max(1, _chunksPerTile));
+                    cd.tile = tileForChunk(static_cast<int>(
+                        cd.firstCurve / std::max<size_t>(1, _chunkSize)));
             }
             continue;
         }
@@ -338,7 +355,7 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
                     offs[std::min<size_t>(cd.firstCurve, offs.size() - 1)]);
             }
             cd.liveCount = cd.curveCount;
-            cd.tile = static_cast<UsdGenTileId>(c / std::max(1, _chunksPerTile));
+            cd.tile = tileForChunk(c);
         }
         layoutDiff = true;
         n.chunkDirty.assign(nChunks, UsdGenDirtyParameter);

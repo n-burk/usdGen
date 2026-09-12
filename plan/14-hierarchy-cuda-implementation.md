@@ -1250,9 +1250,55 @@ five selected tests passing. This is not evidence for full stable tiling; the
 earlier native ASAN result predates the tile-slice changes, while the new
 kernel’s memcheck and InitCheck results are zero.
 
-This does not provide the planned no-copy owning tile lease, stable tile
-catalog/compaction membership, generation-paired render metadata, or live
-atomic multi-tile `Publish`; those remain required. Local Qwen supplied a
-usable scalar-range review suggestion, but its helper is not integrated and is
-not claimed as implementation evidence. Hivemind requests for this review
+At that earlier checkpoint, this did not provide stable capture-ordinal
+compaction membership,
+generation-paired render metadata, or live atomic multi-tile `Publish`; those
+remain required. Hivemind requests for the lease review
 returned empty visible answers after token exhaustion and are not counted.
+
+### Stable GPU-tile architecture checkpoint (2026-09-11)
+
+The device-side tile contract specifies a stable capture-ordinal partition:
+capture preparation sorts stable IDs and assigns deterministic ordinals; tile
+membership is represented by immutable scalar ranges rather than host
+geometry. Leading,
+interior, and trailing empty tiles retain tile identity and one global offset
+sentinel. The owning tile lease exposes global-offset views over the parent
+lease, so a consumer cannot mistake a tile slice for a zero-based geometry
+buffer.
+
+At the CUDA cook boundary, `ExecuteCudaGraph` computes a layout-aware
+`topologyVersion` before generation creation, and `WithTileMetadata` attaches
+validated ordered tile ranges while preserving the supplied immutable stamps;
+neither operation copies channels. Only GPU status and at most 256 per-tile
+scalar range descriptors are downloaded by this path; geometry/offset
+arrays/indices/drawcounts are not. `topologyVersion` is host-computed metadata,
+not a GPU readback. `BuildCurveTiles`
+validates capture/survivor stable-ID uniqueness and offset shape; the index
+kernel additionally validates device offset monotonicity and terminal values.
+The CPU reserve-tail partition fix covers 33-, 34-, and 65-chunk clamp
+boundaries while preserving the canonical 49-tile case.
+
+The expanded `CurveTiles`, `TileLease`, and `TileContract` tests are the
+current targeted evidence; the kernel's prior repeated-run, memcheck, and
+InitCheck results remain applicable. The real session path includes the
+metadata/lease integration;
+live frontend per-tile CUDA-to-Storm provider wiring remains required, as do
+the full-plan gates. Local Qwen contributed the adapted copy helper in the new
+session test; this is not attributed to the earlier curve-index test.
+
+The full build succeeded. The nonbenchmark T0/T1 run currently reports 80/81
+passing, including the new CUDA tile-execution test; the async scene-publication
+test timed out at 60 seconds under `-j6` (a direct rerun passed, so the suite is
+not claimed green). The session test verifies exact 1100-range publication,
+width edits with an old-width lease, all-cull behavior, invalid-last-good
+retention, and `tileTarget` changes from 17000 curves producing 34 then 32
+tiles.
+
+Final tile validation: `CurveTiles`, `TileLease`, and `TileExecution` each
+passed 10 consecutive runs, with memcheck and InitCheck reporting zero errors
+for each. The private Storm bridge was rebuilt/relinked against the updated
+core and all five native Release tests passed. The CUDA-off usdGen core build
+passed; this is not a claim that the full CPU suite is green. The T0/T1 status
+remains 80/81 because of the earlier async scene-publication timeout under
+`-j6`; H1 investigation is ongoing.

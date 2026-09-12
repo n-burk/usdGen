@@ -22,6 +22,8 @@
 // Timing-soft (plan 09): nothing here is budget-gated.
 
 #include "usdGen/curveBuffer.h"
+#include "usdGen/compiler.h"
+#include "usdGen/graph.h"
 #include "usdGen/graphDesc.h"
 #include "usdGen/opRegistry.h"
 #include "usdGen/session.h"
@@ -226,11 +228,67 @@ size_t SumCounts(VtIntArray const &counts)
     return n;
 }
 
+void CheckPartitionBoundaries()
+{
+    UsdGenGraphDesc desc = MakeGroomDesc(SdfPath("/partition"));
+    desc.tileTarget = 32;
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    UsdGenCompileResult result = compiler.Compile(desc, &graph);
+    Check(result.ok, "boundary partition fixture compiles");
+    if (!result.ok) return;
+    for (int nChunks : {33, 34, 65}) {
+        Check(graph.Repartition(nChunks * kUsdGenDefaultChunkSize, 1),
+              "boundary repartition reports layout");
+        auto tiles = graph.Tiles();
+        Check(tiles.size() == 32, "small partition clamps to 32 tiles");
+        uint32_t covered = 0;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            Check(tiles[i].firstChunk == covered && tiles[i].chunkCount >= 1 &&
+                  tiles[i].chunkCount <= 3, "tile boundary has no phantom chunk");
+            covered += tiles[i].chunkCount;
+        }
+        Check(covered == static_cast<uint32_t>(nChunks),
+              "tile boundaries cover every chunk exactly once");
+        if (nChunks == 33) {
+            Check(tiles[0].chunkCount == 2 && tiles[1].chunkCount == 1 &&
+                  tiles[31].chunkCount == 1, "33 chunks use [2,31x1]");
+        } else if (nChunks == 34) {
+            Check(tiles[0].chunkCount == 2 && tiles[1].chunkCount == 2 &&
+                  tiles[2].chunkCount == 1 && tiles[31].chunkCount == 1,
+                  "34 chunks use [2,2,30x1]");
+        } else {
+            bool golden = tiles[16].chunkCount == 2;
+            for (int i = 0; i < 16; ++i) golden &= tiles[i].chunkCount == 3;
+            for (int i = 17; i < 32; ++i) golden &= tiles[i].chunkCount == 1;
+            Check(golden, "65 chunks use [16x3,2,15x1]");
+        }
+        for (int node = 0; node < graph.NodeCount(); ++node) {
+            auto chunks = graph.Chunks(static_cast<UsdGenGraph::NodeId>(node));
+            for (size_t c = 0; c < chunks.size(); ++c) {
+                auto const &chunk = chunks[c];
+                Check(chunk.tile < tiles.size() &&
+                      c >= tiles[chunk.tile].firstChunk &&
+                      c < tiles[chunk.tile].firstChunk + tiles[chunk.tile].chunkCount,
+                      "chunk tile ID agrees with tile interval");
+            }
+        }
+    }
+    desc.tileTarget = 64;
+    UsdGenGraph canonical;
+    result = compiler.Compile(desc, &canonical);
+    Check(result.ok && canonical.Repartition(100000, 4),
+          "canonical 100k repartition reports layout");
+    Check(canonical.Tiles().size() == 49,
+          "100k/512/tileTarget64 remains 49 tiles");
+}
+
 }  // namespace
 
 int main()
 {
     usdGenRegisterM1Operators();
+    CheckPartitionBoundaries();
 
     SdfPath const descPath("/groom");
     UsdGenSession session;
