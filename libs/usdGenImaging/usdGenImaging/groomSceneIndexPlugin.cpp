@@ -174,8 +174,15 @@ UsdGenGroomSceneIndex::_TestPublishedTileCount(SdfPath const &groom) const
 UsdGenGroomSceneIndex::~UsdGenGroomSceneIndex()
 {
     UsdGenImagingTestHook::_UnregisterIndex(this);
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    for (auto &g : _grooms) {
+    std::vector<std::shared_ptr<_Groom>> retired;
+    {
+        std::lock_guard<std::mutex> lock(_stateMutex);
+        retired.swap(_grooms);
+        _pendingAdoptions.clear();
+    }
+    // Session callbacks can enter their own command owner/arena; never do
+    // that while holding membership state.
+    for (auto &g : retired) {
         if (!g) continue;
         if (g->republishToken >= 0 && g->session) {
             g->session->UnregisterRepublishCallback(g->republishToken);
@@ -262,68 +269,107 @@ UsdGenGroomSceneIndex::_AdoptGroom(SdfPath const &groomRoot) const
 {
     auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
     HdSceneIndexBaseRefPtr input = self->_GetInputSceneIndex();
-    std::lock_guard<std::mutex> lock(self->_stateMutex);
-    for (auto &g : self->_grooms) {
-        if (g && g->groomRoot == groomRoot) {
-            if (self->_ResolveDescriptionLocked(*g, input) && g->session) {
-                g->session->MarkNeedsDesc();
-            }
-            return;
+    std::shared_ptr<_Groom> existing;
+    ::usdGenImaging::UsdGenImagingSessionRefPtr existingSession;
+    uint64_t ticket = 0;
+    {
+        std::lock_guard<std::mutex> lock(self->_stateMutex);
+        for (auto const &g : self->_grooms)
+            if (g && g->groomRoot == groomRoot) { existing = g; break; }
+        if (!existing) {
+            if (self->_pendingAdoptions.find(groomRoot) !=
+                self->_pendingAdoptions.end()) return;
+            if (self->_nextAdoptionTicket == UINT64_MAX) return;
+            ticket = ++self->_nextAdoptionTicket;
+            self->_pendingAdoptions.emplace(groomRoot, ticket);
         }
     }
-    auto groom = std::make_shared<_Groom>();
-    groom->groomRoot = groomRoot;
-    groom->description = groomRoot;
-    groom->key.groomRoot = groomRoot;
-    groom->key.renderInstanceId = self->_renderInstanceId;
-    if (input) {
-        auto data = input->GetPrim(groomRoot).dataSource;
-        // The mapped adapter overlays relative property locators at the
-        // prim root: usdGen:sessionId is Hydra's `sessionId`.
-        auto id = HdStringDataSource::Cast(HdContainerDataSource::Get(
-            data, HdDataSourceLocator(TfToken("sessionId"))));
-        if (id) groom->key.sessionId = id->GetTypedValue(0.0f);
+    if (existing) {
+        _Groom resolved;
+        resolved.groomRoot = groomRoot;
+        resolved.description = groomRoot;
+        self->_ResolveDescriptionLocked(resolved, input);
+        {
+            std::lock_guard<std::mutex> lock(self->_stateMutex);
+            if (std::find(self->_grooms.begin(), self->_grooms.end(), existing) != self->_grooms.end() &&
+                existing->description != resolved.description) {
+                existing->description = resolved.description;
+                existingSession = existing->session;
+            }
+        }
+        if (existingSession) existingSession->MarkNeedsDesc();
+        return;
     }
-    // (Review 1) Resolve the description BEFORE attach/first staging:
-    // _ScanInputForGrooms stops descending at the groom root, so no later
-    // entry repairs this value — staging from the groom root instead of its
-    // UsdGenDescription child builds the wrong desc.
-    self->_ResolveDescriptionLocked(*groom, input);
-    groom->session =
-        ::usdGenImaging::UsdGenSessionStore::GetInstance().Attach(groom->key);
-    // Lifetime: callback holds WEAK groom + WEAK index refs and lock()s at
-    // invocation (expired ⇒ no-op). No raw self/slot captures, no
-    // alive-flag (refcount owns lifetime). Lock discipline: the callback
-    // resolves the live slot via _RepublishByRoot (locks itself) — never
-    // nested under a held _stateMutex.
-    if (groom->session) {
-        groom->session->MarkNeedsDesc();
-        std::weak_ptr<_Groom> weakGroom(groom);
-        // HdSceneIndexBase is TF_DECLARE_WEAK_AND_REF_PTRS (sceneIndex.h),
-        // so the weak type is HdSceneIndexBasePtr (TfWeakPtr facade).
-        HdSceneIndexBasePtr weakSelf = TfCreateWeakPtr(self);
-        groom->republishToken = groom->session->RegisterRepublishCallback(
-            [weakSelf, weakGroom,
-             groomRoot](::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) {
-                // Lifetime: weak groom + weak index, lock() both at
-                // invocation (expired => no-op). Lock discipline: resolve
-                // the live slot via _RepublishByRoot (locks itself) —
-                // never nested under a held _stateMutex. No raw
-                // self/slot captures, no alive-flag.
-                std::shared_ptr<_Groom> groomLocked = weakGroom.lock();
-                HdSceneIndexBaseRefPtr selfLocked =
-                    TfCreateRefPtrFromProtectedWeakPtr(weakSelf);
-                UsdGenGroomSceneIndex const *index =
-                    dynamic_cast<UsdGenGroomSceneIndex const *>(
+
+    std::shared_ptr<_Groom> groom;
+    try {
+        groom = std::make_shared<_Groom>();
+        groom->groomRoot = groomRoot;
+        groom->description = groomRoot;
+        groom->key.groomRoot = groomRoot;
+        groom->key.renderInstanceId = self->_renderInstanceId;
+        if (input) {
+            auto data = input->GetPrim(groomRoot).dataSource;
+            auto id = HdStringDataSource::Cast(HdContainerDataSource::Get(
+                data, HdDataSourceLocator(TfToken("sessionId"))));
+            if (id) groom->key.sessionId = id->GetTypedValue(0.0f);
+        }
+        // The scan stops at groom roots; resolve their description before
+        // attaching, with no membership guard held during upstream queries.
+        self->_ResolveDescriptionLocked(*groom, input);
+        groom->session =
+            ::usdGenImaging::UsdGenSessionStore::GetInstance().Attach(groom->key);
+        if (groom->session) {
+            groom->session->MarkNeedsDesc();
+            std::weak_ptr<_Groom> weakGroom(groom);
+            HdSceneIndexBasePtr weakSelf = TfCreateWeakPtr(self);
+            groom->republishToken = groom->session->RegisterRepublishCallback(
+                [weakSelf, weakGroom, groomRoot](
+                    ::usdGenImaging::UsdGenImagingSession::CommitPayload const& payload) {
+                    // Both recipients are weak, and publication revalidates
+                    // the exact attachment. No live engine rereads occur.
+                    auto groomLocked = weakGroom.lock();
+                    auto selfLocked = TfCreateRefPtrFromProtectedWeakPtr(weakSelf);
+                    auto const* index = dynamic_cast<UsdGenGroomSceneIndex const*>(
                         selfLocked ? selfLocked.operator->() : nullptr);
-                if (!groomLocked || !index) return;
-                // (Review 3) payload travels — never reread live
-                // Generation()/LastReport(). Unpublished commits no-op.
-                if (!payload.published) return;
-                index->_RepublishByRoot(groomRoot, groomLocked, payload);
-            });
+                    if (!groomLocked || !index || !payload.published) return;
+                    index->_RepublishByRoot(groomRoot, groomLocked, payload);
+                });
+        }
+    } catch (...) {
+        // A failed candidate cannot retain its reservation.
+        {
+            std::lock_guard<std::mutex> lock(self->_stateMutex);
+            auto found = self->_pendingAdoptions.find(groomRoot);
+            if (found != self->_pendingAdoptions.end() && found->second == ticket)
+                self->_pendingAdoptions.erase(found);
+        }
+        if (groom && groom->republishToken >= 0 && groom->session)
+            groom->session->UnregisterRepublishCallback(groom->republishToken);
+        if (groom && groom->session)
+            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(groom->key);
+        throw;
     }
-    self->_grooms.push_back(std::move(groom));
+
+    bool install = false;
+    {
+        std::lock_guard<std::mutex> lock(self->_stateMutex);
+        auto found = self->_pendingAdoptions.find(groomRoot);
+        if (found != self->_pendingAdoptions.end() && found->second == ticket) {
+            self->_pendingAdoptions.erase(found);
+            install = std::none_of(self->_grooms.begin(), self->_grooms.end(),
+                [&groomRoot](std::shared_ptr<_Groom> const& other) {
+                    return other && other->groomRoot == groomRoot;
+                });
+            if (install) self->_grooms.push_back(groom);
+        }
+    }
+    if (!install) {
+        if (groom->republishToken >= 0 && groom->session)
+            groom->session->UnregisterRepublishCallback(groom->republishToken);
+        if (groom->session)
+            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(groom->key);
+    }
 }
 // child under the groom root (fixture: /groomA/descA). Resolved eagerly
 // when the child is already present and re-resolved on later arrivals, so
@@ -401,29 +447,36 @@ void
 UsdGenGroomSceneIndex::_ForgetGroomsUnder(SdfPath const &path) const
 {
     auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    std::lock_guard<std::mutex> lock(self->_stateMutex);
-    for (auto &g : self->_grooms) {
+    std::vector<std::shared_ptr<_Groom>> retired;
+    {
+        std::lock_guard<std::mutex> lock(self->_stateMutex);
+        for (auto it = self->_pendingAdoptions.begin();
+             it != self->_pendingAdoptions.end();) {
+            if (it->first == path || it->first.HasPrefix(path))
+                it = self->_pendingAdoptions.erase(it);
+            else ++it;
+        }
+        auto keep = self->_grooms.begin();
+        for (auto it = self->_grooms.begin(); it != self->_grooms.end(); ++it) {
+            if (*it && ((*it)->groomRoot == path || (*it)->groomRoot.HasPrefix(path)))
+                retired.push_back(std::move(*it));
+            else *keep++ = std::move(*it);
+        }
+        self->_grooms.erase(keep, self->_grooms.end());
+    }
+    // No session/callback operation is nested below _stateMutex. Strong
+    // retired refs keep callback payloads safe until unregister completes.
+    for (auto &g : retired) {
         if (!g) continue;
-        if (g->groomRoot == path || g->groomRoot.HasPrefix(path)) {
-            if (g->republishToken >= 0 && g->session) {
-                g->session->UnregisterRepublishCallback(g->republishToken);
-                g->republishToken = -1;
-            }
-            if (g->session) {
-                ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(
-                    g->key);
-                g->session = ::usdGenImaging::UsdGenSessionHandle();
-            }
-            // No alive-flag: lifetime is the shared_ptr refcount. Weak
-            // callback refs lock() and expire once the entry below is
-            // erased (strong Work/_RepublishByRoot refs keep a removed
-            // groom alive until their own publish finishes).
-            g = nullptr;
+        if (g->republishToken >= 0 && g->session) {
+            g->session->UnregisterRepublishCallback(g->republishToken);
+            g->republishToken = -1;
+        }
+        if (g->session) {
+            ::usdGenImaging::UsdGenSessionStore::GetInstance().Detach(g->key);
+            g->session = ::usdGenImaging::UsdGenSessionHandle();
         }
     }
-    self->_grooms.erase(
-        std::remove(self->_grooms.begin(), self->_grooms.end(), nullptr),
-        self->_grooms.end());
 }
 
 bool
@@ -665,7 +718,7 @@ UsdGenGroomSceneIndex::_PrimsDirtied(
                     // input dirty must refresh them before evaluation.
                     // Incremental descriptor refresh remains separate work.
                     g->session->MarkNeedsDesc();
-                    g->session->Engine()->AccumulateDirty(std::move(pending));
+                    g->session->Engine()->PostDirty(std::move(pending));
                     routedDirty = true;
                 }
             }
@@ -741,7 +794,7 @@ UsdGenGroomSceneIndex::_ReplaySurfaceDirty() const
         if (!g || !g->session || !g->session->Engine()) continue;
         usdGen::UsdGenPendingDirty pending;
         pending.surfaceTopology = true;
-        g->session->Engine()->AccumulateDirty(std::move(pending));
+        g->session->Engine()->PostDirty(std::move(pending));
     }
 }
 void

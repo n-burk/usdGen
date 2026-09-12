@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -73,6 +74,7 @@ public:
         std::shared_ptr<usdGen::UsdGenSession> engineSession,
         double frame = 0.0,
         usdGen::UsdGenContext context = usdGen::UsdGenContext::Interactive);
+    ~UsdGenImagingSession() override;
 
     UsdGenSessionKey const &Key() const { return _key; }
     usdGen::UsdGenSession *Engine() const { return _engine.get(); }
@@ -88,24 +90,25 @@ public:
     /// engine's, so an app-driven commit reaches the app through the
     /// republish callbacks.
     void Commit(usdGen::UsdGenCommitReason reason);
-    /// Install a freshly pulled descriptor and evaluate it under one lock.
+    /// Install a freshly pulled descriptor and evaluate it as one command.
     /// Unlike separate StageDesc/Commit calls, no store-driven commit can
     /// consume a different descriptor between those operations.
     void StageAndCommit(usdGen::UsdGenGraphDesc const &desc,
                         usdGen::UsdGenCommitReason reason);
+    void CommitAtTime(double frame, usdGen::UsdGenCommitReason reason);
 
     /// 06 §3.9 rule (b): once an external SetTime has driven this session,
     /// frame dirties never trigger commits (the app owns time). Set by the
     /// store-level SetTime only; scene indices never set it.
-    void MarkAppDriver() noexcept { _hasAppDriver.store(true); }
-    bool HasAppDriver() const noexcept { return _hasAppDriver.load(); }
+    void MarkAppDriver() noexcept;
+    bool HasAppDriver() const noexcept;
 
     /// The staged UsdGenGraphDesc (built by the owning scene index) is to be
     /// consumed by the next Commit. Set on structural changes and map
     /// reloads (S13); never on frame-only dirties (S14: one desc pull per
     /// topology generation, not per frame).
-    void MarkNeedsDesc() noexcept { _needsDesc.store(true); }
-    bool NeedsDesc() const noexcept { return _needsDesc.load(); }
+    void MarkNeedsDesc() noexcept;
+    bool NeedsDesc() const noexcept;
 
     /// Immutable per-commit payload for republish callbacks (P0 races):
     /// the generation published by THIS commit plus a COPY of its dirty
@@ -122,13 +125,27 @@ public:
         usdGen::UsdGenStats stats;
     };
 
+    struct CommitRequest {
+        usdGen::UsdGenCommitReason reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
+        std::optional<double> frame;
+        std::optional<usdGen::UsdGenContext> context;
+        std::shared_ptr<const usdGen::UsdGenGraphDesc> desc;
+    };
+    using Completion = std::function<void(CommitPayload const&,
+        usdGen::UsdGenExecutionPipeline::Outcome)>;
+    bool CommitAsync(CommitRequest request, Completion completion = {});
+    // Single external boundary: finish accepted requests/callbacks, then stop.
+    // Concurrent Shutdown callers are rejected, not made to wait on each other. Never
+    // call from a pipeline callback. Destruction otherwise retires state on
+    // the framework, so accepted completion captures must own their lifetimes.
+    void Shutdown();
+    // Single external draining caller; no callback may wait for retirement.
+    static void DrainRetired();
+
     /// Atomic desc-dirty consume for staging (S14): returns true and clears
     /// the flag when a desc pull is owed. Marks arriving after consumption
     /// stay set for the next commit (no lost ReloadMaps/structural marks).
-    bool ConsumeNeedsDesc() noexcept
-    {
-        return _needsDesc.exchange(false);
-    }
+    bool ConsumeNeedsDesc() noexcept;
 
     /// Install a descriptor without committing (offline/test clients).
     /// Production staging uses StageAndCommit for an atomic pair.
@@ -143,35 +160,20 @@ public:
     void NoteAttach();
     void NoteDetach();
     /// Republish hooks (06 §3.7 "each index republishes the same
-    /// generation"): invoked after a Commit that published, on the commit
-    /// thread, with THIS commit's immutable payload. Callbacks must not
+    /// generation"): invoked after a Commit that published, on the scheduled
+    /// command owner, with THIS commit's immutable payload. Callbacks must not
     /// block on GetPrim and must not reread live engine state.
     int RegisterRepublishCallback(
         std::function<void(CommitPayload const &)> cb);
     void UnregisterRepublishCallback(int token);
+    // Registration/removal enqueue nonblocking owner commands. A currently
+    // executing callback may finish; later publications observe the removal.
+private:
     UsdGenSessionKey        _key;
     std::shared_ptr<usdGen::UsdGenSession> _engine;
-    std::atomic<double>       _frame{0.0};
-    std::atomic<usdGen::UsdGenContext> _context{usdGen::UsdGenContext::Interactive};
-    std::atomic<int64_t>      _generation{-1};
-    std::atomic<int>          _attached{0};
-    std::atomic<bool>         _hasAppDriver{false};
-    std::atomic<bool>         _needsDesc{false};
-
-    // Callbacks are copied under _republishMutex and invoked with the lock
-    // released, so a callback may re-enter the session (GetPrim, Detach).
-    // Staging serialization (Review 2): StageDesc + Commit run under
-    // _stageCommitMutex so a concurrent store-level commit cannot
-    // interleave between staging and commit. Never _stateMutex-adjacent.
-    std::mutex _republishMutex;
-    std::mutex _stageCommitMutex;
-    std::vector<std::pair<int, std::function<void(CommitPayload const &)>>>
-        _callbacks;
-    int _nextCallbackToken = 0;
-
-private:
-    void _Commit(usdGen::UsdGenCommitReason reason,
-                 usdGen::UsdGenGraphDesc const *desc);
+    struct State;
+    std::unique_ptr<State> _state;
+    void _Commit(CommitRequest request);
 };
 
 using UsdGenImagingSessionRefPtr = TfRefPtr<UsdGenImagingSession>;

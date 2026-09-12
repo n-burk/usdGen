@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 using namespace usdGen;
@@ -334,6 +335,76 @@ int main()
           "callback can enqueue asynchronous follow-up");
     Check(callbackRejected.load(std::memory_order_acquire),
           "synchronous CommitSnapshot from callback is rejected");
+
+    // A bundled request carries descriptor/context/frame as one owner command.
+    // Either concurrent request may be superseded, but a published callback
+    // must never observe the other request's descriptor or frame.
+    auto requestA = std::make_shared<const UsdGenGraphDesc>(MakeDesc(0.11f));
+    auto requestB = std::make_shared<const UsdGenGraphDesc>(MakeDesc(0.17f));
+    std::atomic<unsigned> requestCallbacks{0}, requestPublications{0};
+    std::atomic<bool> requestMismatch{false}, requestAccepted{true};
+    auto submitRequest = [&](std::shared_ptr<const UsdGenGraphDesc> desc,
+                             double frame, UsdGenContext context, float width) {
+        UsdGenSession::CommitRequest request;
+        request.frame = frame;
+        request.reason = UsdGenCommitReason::NoticeBatchEnd;
+        request.desc = std::move(desc);
+        request.context = context;
+        // This explicit value is important for an imaging owner relaying a
+        // caller's device. CPU builds use -2 and intentionally ignore it.
+        request.callerDevice = UsdGenSession::CaptureCallerDevice();
+        if (!session.CommitAsync(std::move(request),
+            [&, frame, width](UsdGenSession::SnapshotPtr snapshot,
+                              UsdGenExecutionPipeline::Outcome outcome) {
+                if (outcome == UsdGenExecutionPipeline::Outcome::Published) {
+                    ++requestPublications;
+                    const bool matches = snapshot && snapshot->generation &&
+                        snapshot->generation->frame == frame &&
+                        !snapshot->graphInfo.Desc().nodes.empty() &&
+                        snapshot->graphInfo.Desc().nodes.back().params.front().value ==
+                            VtValue(width);
+                    if (!matches) requestMismatch.store(true, std::memory_order_release);
+                }
+                ++requestCallbacks;
+            })) requestAccepted.store(false, std::memory_order_release);
+    };
+    std::thread requestThreadA(submitRequest, requestA, 10.0,
+                               UsdGenContext::Interactive, 0.11f);
+    std::thread requestThreadB(submitRequest, requestB, 11.0,
+                               UsdGenContext::Render, 0.17f);
+    requestThreadA.join();
+    requestThreadB.join();
+    // Both terminal callbacks are required.
+    auto callbackDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (requestCallbacks.load(std::memory_order_acquire) != 2 &&
+           std::chrono::steady_clock::now() < callbackDeadline)
+        std::this_thread::yield();
+    Check(requestAccepted.load(std::memory_order_acquire) &&
+              requestCallbacks.load(std::memory_order_acquire) == 2,
+          "both concurrent bundled request commands accepted");
+    Check(requestPublications.load(std::memory_order_acquire) <= 2 &&
+              !requestMismatch.load(std::memory_order_acquire),
+          "each published bundled outcome is paired with its own descriptor and frame");
+
+    // PostDirty is callback-safe: it queues the owner mutation and the later
+    // external commit observes it without entering a synchronous owner wait.
+    std::atomic<bool> dirtyCallback{false};
+    auto node = session.Graph().NodeIdForPath(SdfPath("/async/width"));
+    Check(session.CommitAsync(12.0, UsdGenCommitReason::NoticeBatchEnd,
+        [&](UsdGenSession::SnapshotPtr,
+            UsdGenExecutionPipeline::Outcome outcome) {
+            if (outcome == UsdGenExecutionPipeline::Outcome::Published) {
+                UsdGenPendingDirty dirty;
+                dirty.nodeBits[node] = UsdGenDirtyParameter;
+                session.PostDirty(std::move(dirty));
+            }
+            dirtyCallback.store(true, std::memory_order_release);
+        }), "callback-safe dirty source commit accepted");
+    Check(WaitFor(dirtyCallback), "callback-safe dirty post callback completes");
+    auto postDirtySnapshot = session.CommitSnapshot(13.0, UsdGenCommitReason::NoticeBatchEnd);
+    Check(postDirtySnapshot && postDirtySnapshot->generation &&
+              !postDirtySnapshot->diagnostics.HasErrors(),
+          "PostDirty queued from callback is consumed by a later owner commit");
 
     // Destruction drains accepted work and gives its callback a terminal
     // outcome; this scope intentionally ends without an explicit Drain().

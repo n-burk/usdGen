@@ -105,6 +105,13 @@ UsdGenSession::~UsdGenSession() {
 UsdGenSession::SnapshotPtr UsdGenSession::Snapshot() const noexcept {
     return std::atomic_load(&_snapshot);
 }
+int UsdGenSession::CaptureCallerDevice() noexcept {
+    int device = -2;
+#ifdef USDGEN_ENABLE_CUDA
+    if (cudaGetDevice(&device) != cudaSuccess) device = -2;
+#endif
+    return device;
+}
 bool UsdGenSession::NeedsCommit() const noexcept {
     return _state->dirty.load(std::memory_order_acquire);
 }
@@ -117,6 +124,13 @@ void UsdGenSession::PostContext(UsdGenContext context) {
 }
 void UsdGenSession::PostDevicePublicationEnabled(bool value) {
     _state->pipeline.PostCommand([this, value] { _state->SetDevicePublication(value); });
+}
+void UsdGenSession::PostDirty(UsdGenPendingDirty pending) {
+    if (!pending.Any()) return;
+    _state->pipeline.PostCommand([this, pending=std::move(pending)] {
+        Merge(_state->pending, pending);
+        _state->Invalidate();
+    });
 }
 void UsdGenSession::SetGraphDesc(UsdGenGraphDesc const& desc) {
     auto value = std::make_shared<const UsdGenGraphDesc>(desc);
@@ -205,18 +219,22 @@ bool UsdGenSession::EndDeviceEdit(uint64_t token,
     return ok;
 }
 
-bool UsdGenSession::CommitAsync(double frame, UsdGenCommitReason reason, Completion completion) {
+bool UsdGenSession::CommitAsync(CommitRequest request, Completion completion) {
     // CUDA's current device is thread-local. Capture it at the caller boundary,
     // never infer it from whichever framework worker picks up this request.
-    int callerDevice = -2;
-#ifdef USDGEN_ENABLE_CUDA
-    if (cudaGetDevice(&callerDevice) != cudaSuccess) callerDevice = -2;
-#endif
+    const int callerDevice = request.callerDevice ? *request.callerDevice : CaptureCallerDevice();
     auto reply = std::make_shared<CommitReply>();
     reply->completion = std::move(completion);
-    return _state->pipeline.PostCommand([this, frame, reason, callerDevice, reply] {
+    return _state->pipeline.PostCommand([this, request=std::move(request), callerDevice, reply] {
         auto& state = *_state;
         try {
+            // These optional mutations and the baseline capture are one owner
+            // command.  Do not route them through PostGraphDesc/PostContext:
+            // another command could otherwise split this request in two.
+            if (request.desc) state.SetDesc(request.desc);
+            if (request.context) state.SetContext(*request.context);
+            const double frame = request.frame;
+            const UsdGenCommitReason reason = request.reason;
             auto baseline = Snapshot();
             auto previous = baseline ? baseline->generation : nullptr;
             if (state.staged && reason == UsdGenCommitReason::LiveOverride &&
@@ -309,15 +327,31 @@ bool UsdGenSession::CommitAsync(double frame, UsdGenCommitReason reason, Complet
     }, [this, reply] { reply->Finish(Snapshot(), UsdGenExecutionPipeline::Outcome::Superseded); });
 }
 
-UsdGenSession::SnapshotPtr UsdGenSession::CommitSnapshot(double frame, UsdGenCommitReason reason) {
+bool UsdGenSession::CommitAsync(double frame, UsdGenCommitReason reason,
+                                Completion completion) {
+    CommitRequest request;
+    request.frame = frame;
+    request.reason = reason;
+    return CommitAsync(std::move(request), std::move(completion));
+}
+
+UsdGenSession::SnapshotPtr UsdGenSession::CommitSnapshot(CommitRequest request) {
     SnapshotPtr result;
     _state->pipeline.Await([&](std::function<void()> release) {
-        if (!CommitAsync(frame, reason, [&, release](SnapshotPtr snapshot, UsdGenExecutionPipeline::Outcome) {
+        if (!CommitAsync(std::move(request), [&, release](SnapshotPtr snapshot, UsdGenExecutionPipeline::Outcome) {
                 result = std::move(snapshot);
                 release();
             })) throw std::runtime_error("session rejected commit command");
     });
     return result;
+}
+
+UsdGenSession::SnapshotPtr UsdGenSession::CommitSnapshot(
+    double frame, UsdGenCommitReason reason) {
+    CommitRequest request;
+    request.frame = frame;
+    request.reason = reason;
+    return CommitSnapshot(std::move(request));
 }
 std::vector<UsdGenCudaBindingStats> UsdGenSession::CudaBindingStats() const {
     auto snapshot = Snapshot();

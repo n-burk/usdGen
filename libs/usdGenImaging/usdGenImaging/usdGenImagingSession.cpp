@@ -19,144 +19,242 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <limits>
+#include <stdexcept>
+#include <tbb/flow_graph.h>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
 
-UsdGenImagingSession::UsdGenImagingSession(
-    UsdGenSessionKey const &key,
-    std::shared_ptr<usdGen::UsdGenSession> engineSession,
-    double frame,
-    usdGen::UsdGenContext context)
-    : _key(key),
-      _engine(std::move(engineSession)),
-      _frame(frame),
-      _context(context)
-{
+namespace {
+using Pipeline = usdGen::UsdGenExecutionPipeline;
+usdGen::UsdGenExecutionRuntime& ImagingRuntime() {
+    static usdGen::UsdGenExecutionRuntime runtime(8);
+    return runtime;
 }
 
-void UsdGenImagingSession::SetTime(double frame) { _frame = frame; }
-
-void UsdGenImagingSession::SetContext(usdGen::UsdGenContext context)
-{
-    _context = context;
-}
-
-void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason)
-{
-    _Commit(reason, nullptr);
-}
-
-void UsdGenImagingSession::StageAndCommit(
-    usdGen::UsdGenGraphDesc const &desc, usdGen::UsdGenCommitReason reason)
-{
-    _Commit(reason, &desc);
-}
-
-void UsdGenImagingSession::_Commit(usdGen::UsdGenCommitReason reason,
-                                  usdGen::UsdGenGraphDesc const *desc)
-{
-    if (!_engine) return;
-
-    // Only the stager consumes _needsDesc. Clearing it here would discard
-    // structural/reload marks arriving after its snapshot, or marks on a
-    // store-driven commit that did not stage a fresh description at all.
-
-    // Serialize session-side bookkeeping with the engine snapshot commit:
-    // generation, report, diagnostics, stats and routing are copied from one
-    // paired immutable result, so callbacks reread NOTHING live.
-    // Hold _stageCommitMutex across the engine Commit: pairs with
-    // StageAndCommit so staging+commit are atomic w.r.t. concurrent
-    // session commits. Callbacks remain inside this serialization boundary
-    // to preserve publication order, but do not hold _republishMutex.
-    // They may pull generations or detach, but must not recursively commit.
-    std::unique_lock<std::mutex> stageLock(_stageCommitMutex);
-    _engine->SetContext(_context.load());
-    if (desc) _engine->SetGraphDesc(*desc);
-    const int64_t before = _generation.load();
-    auto snapshot = _engine->CommitSnapshot(_frame.load(), reason);
-    if (!snapshot) return;
-    for (auto const& error : snapshot->diagnostics.errors)
-        TF_WARN("usdGen commit rejected: %s", error.c_str());
-    for (auto const& warning : snapshot->diagnostics.warnings)
-        TF_WARN("usdGen commit: %s", warning.c_str());
-    CommitPayload payload;
-    usdGen::UsdGenGenerationConstPtr const &gen = snapshot->generation;
-    if (gen && gen->id != before) {
-        _generation = gen->id;
-        payload.published = true;
-        payload.generation = gen;
-        payload.report = snapshot->report;
-        payload.routing = snapshot->routing;
-        payload.diagnostics = snapshot->diagnostics;
-        payload.stats = snapshot->stats;
+// Public TfRefPtr handles may disappear during a notice callback. Retirement
+// is a separate framework graph, never an inline wait/destructor in that
+// callback. Its nodes own the retired state until all relayed replies finish.
+class Retirements {
+    tbb::flow::graph graph;
+    tbb::flow::function_node<std::function<void()>> cleanup;
+public:
+    Retirements() : cleanup(graph, tbb::flow::unlimited,
+        [](std::function<void()> action) { action(); return tbb::flow::continue_msg{}; }) {}
+    ~Retirements() { graph.wait_for_all(); }
+    void Post(std::function<void()> action) { cleanup.try_put(std::move(action)); }
+    void Drain() {
+        if (Pipeline::IsExecuting()) throw std::logic_error("callback cannot drain retired imaging states");
+        graph.wait_for_all();
     }
-    if (!payload.published) return;
+};
+Retirements& RetirementQueue() { static Retirements queue; return queue; }
+}
 
-    // Copy under callback lock, invoke without that lock: a callback may re-enter
-    // (GetPrim atomic_loads, Detach takes the store lock, not this one).
-    std::vector<std::function<void(CommitPayload const &)>> callbacks;
-    {
-        std::lock_guard<std::mutex> lock(_republishMutex);
-        callbacks.reserve(_callbacks.size());
-        for (auto &entry : _callbacks) {
-            callbacks.push_back(entry.second);
+struct UsdGenImagingSession::State {
+    std::shared_ptr<usdGen::UsdGenSession> engine;
+    std::atomic<bool> accepting{true}, stopped{false}, closeClaimed{false};
+    std::atomic<bool> appDriver{false}, needsDesc{false};
+    std::atomic<int> attached{0};
+    std::atomic<int64_t> generation{-1};
+    std::atomic<uint64_t> nextToken{0};
+    // Everything below is imaging-command-owner-only.
+    double frame;
+    usdGen::UsdGenContext context;
+    std::shared_ptr<const usdGen::UsdGenGraphDesc> staged;
+    std::vector<std::pair<int, std::function<void(CommitPayload const&)>>> callbacks;
+    unsigned outstanding = 0;
+    bool closing = false;
+    std::function<void()> closeDone;
+    Pipeline owner;
+
+    State(std::shared_ptr<usdGen::UsdGenSession> e, double f, usdGen::UsdGenContext c)
+        : engine(std::move(e)), frame(f), context(c), owner(ImagingRuntime()) {}
+
+    void CompleteClose() {
+        if (closing && outstanding == 0 && closeDone) {
+            auto done = std::move(closeDone);
+            done();
         }
     }
-    for (auto &cb : callbacks) {
-        cb(payload);
+    void Close() {
+        if (Pipeline::IsExecuting()) throw std::logic_error("callback cannot shut down imaging synchronously");
+        if (stopped.load()) return;
+        // Lifecycle admission, not a waiting lock: only one external boundary
+        // may drain a graph. Reject competing close callers immediately.
+        if (closeClaimed.exchange(true))
+            throw std::logic_error("concurrent imaging shutdown is not supported");
+        accepting.store(false, std::memory_order_release);
+        owner.Await([this](std::function<void()> done) {
+            if (!owner.PostCommand([this, done] {
+                closing = true;
+                closeDone = done;
+                CompleteClose();
+            })) throw std::runtime_error("imaging close command rejected");
+        });
+        owner.Shutdown();
+        stopped.store(true, std::memory_order_release);
     }
+
+    void Finish(usdGen::UsdGenSession::SnapshotPtr snapshot,
+                Pipeline::Outcome outcome, Completion const& done) {
+        CommitPayload payload;
+        if (!accepting.load()) outcome = Pipeline::Outcome::Superseded;
+        if (snapshot) {
+            payload.generation = snapshot->generation;
+            payload.report = snapshot->report;
+            payload.routing = snapshot->routing;
+            payload.diagnostics = snapshot->diagnostics;
+            payload.stats = snapshot->stats;
+        }
+        if (outcome == Pipeline::Outcome::Published && payload.generation &&
+            payload.generation->id > generation.load()) {
+            payload.published = true;
+            generation.store(payload.generation->id);
+            for (auto const& warning : payload.diagnostics.warnings)
+                TF_WARN("usdGen commit: %s", warning.c_str());
+            // All mutations enqueue commands; callbacks cannot modify this
+            // collection recursively while this publication is being sent.
+            for (auto const& entry : callbacks) {
+                if (!accepting.load()) break;
+                try { entry.second(payload); }
+                catch (...) { TF_WARN("usdGen republish callback threw"); }
+            }
+        } else if (outcome == Pipeline::Outcome::Failed) {
+            for (auto const& error : payload.diagnostics.errors)
+                TF_WARN("usdGen commit rejected: %s", error.c_str());
+        }
+        if (done) {
+            try { done(payload, outcome); }
+            catch (...) { TF_WARN("usdGen imaging completion threw"); }
+        }
+        --outstanding;
+        CompleteClose();
+    }
+
+    void Start(CommitRequest request, int callerDevice, Completion done) {
+        if (!accepting.load() || !engine) {
+            if (done) done({}, Pipeline::Outcome::Superseded);
+            return;
+        }
+        if (request.frame) frame = *request.frame;
+        if (request.context) context = *request.context;
+        if (request.desc) staged = std::move(request.desc);
+        usdGen::UsdGenSession::CommitRequest input;
+        input.frame = frame;
+        input.context = context;
+        input.reason = request.reason;
+        input.desc = std::move(staged);
+        input.callerDevice = callerDevice;
+        ++outstanding;
+        try {
+            if (engine->CommitAsync(std::move(input),
+                [this, done](usdGen::UsdGenSession::SnapshotPtr snapshot, Pipeline::Outcome outcome) {
+                    // Close leaves the owner alive until every relay arrives.
+                    // A framework dispatch failure is fatal: swallowing it
+                    // would strand the outstanding reply and hang retirement.
+                    try {
+                        if (!owner.PostCommand([this, snapshot, outcome, done] { Finish(snapshot, outcome, done); }))
+                            std::terminate();
+                    } catch (...) { std::terminate(); }
+                })) return;
+        } catch (...) {
+            Finish({}, Pipeline::Outcome::Failed, done);
+            return;
+        }
+        Finish({}, Pipeline::Outcome::Superseded, done);
+    }
+};
+
+UsdGenImagingSession::UsdGenImagingSession(UsdGenSessionKey const& key,
+    std::shared_ptr<usdGen::UsdGenSession> engine, double frame, usdGen::UsdGenContext context)
+    : _key(key), _engine(std::move(engine)), _state(new State(_engine, frame, context)) {
+    (void)RetirementQueue();
 }
-
-void UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const &desc)
-{
-    // Standalone staging is serialized but does not reserve a subsequent
-    // commit. Production callers use StageAndCommit instead.
-    std::lock_guard<std::mutex> lock(_stageCommitMutex);
-    if (_engine) _engine->SetGraphDesc(desc);
+UsdGenImagingSession::~UsdGenImagingSession() {
+    State* state = _state.release();
+    state->accepting.store(false, std::memory_order_release);
+    RetirementQueue().Post([state] { state->Close(); delete state; });
 }
-
-int UsdGenImagingSession::RegisterRepublishCallback(
-    std::function<void(CommitPayload const &)> cb)
-{
-    std::lock_guard<std::mutex> lock(_republishMutex);
-    const int token = _nextCallbackToken++;
-    _callbacks.emplace_back(token, std::move(cb));
-    return token;
+void UsdGenImagingSession::Shutdown() { _state->Close(); }
+void UsdGenImagingSession::DrainRetired() { RetirementQueue().Drain(); }
+void UsdGenImagingSession::SetTime(double frame) {
+    auto* state = _state.get();
+    state->owner.PostCommand([state, frame] { state->frame = frame; });
 }
-
-void UsdGenImagingSession::UnregisterRepublishCallback(int token)
-{
-    std::lock_guard<std::mutex> lock(_republishMutex);
-    _callbacks.erase(
-        std::remove_if(_callbacks.begin(), _callbacks.end(),
-                       [token](std::pair<int,
-                           std::function<void(CommitPayload const &)>>
-                                   const &entry) {
-                           return entry.first == token;
-                       }),
-        _callbacks.end());
+void UsdGenImagingSession::SetContext(usdGen::UsdGenContext context) {
+    auto* state = _state.get();
+    state->owner.PostCommand([state, context] { state->context = context; });
 }
-
-int64_t UsdGenImagingSession::Generation() const noexcept { return _generation.load(); }
-
-usdGen::UsdGenGenerationConstPtr UsdGenImagingSession::LatestGeneration() const noexcept
-{
+void UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const& desc) {
+    auto* state = _state.get();
+    auto value = std::make_shared<const usdGen::UsdGenGraphDesc>(desc);
+    state->owner.PostCommand([state, value] { state->staged = value; });
+}
+bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done) {
+    auto* state = _state.get();
+    if (!state->accepting.load()) return false;
+    const int device = usdGen::UsdGenSession::CaptureCallerDevice();
+    return state->owner.PostCommand([state, request=std::move(request), device, done] {
+        state->Start(request, device, done);
+    }, [done] { if (done) done({}, Pipeline::Outcome::Superseded); });
+}
+void UsdGenImagingSession::_Commit(CommitRequest request) {
+    _state->owner.Await([this, request=std::move(request)](std::function<void()> release) mutable {
+        if (!CommitAsync(std::move(request), [release](CommitPayload const&, Pipeline::Outcome) {
+            release();
+        })) throw std::runtime_error("imaging session rejected commit");
+    });
+}
+void UsdGenImagingSession::Commit(usdGen::UsdGenCommitReason reason) {
+    CommitRequest request; request.reason = reason; _Commit(std::move(request));
+}
+void UsdGenImagingSession::CommitAtTime(double frame, usdGen::UsdGenCommitReason reason) {
+    CommitRequest request; request.reason = reason; request.frame = frame; _Commit(std::move(request));
+}
+void UsdGenImagingSession::StageAndCommit(usdGen::UsdGenGraphDesc const& desc, usdGen::UsdGenCommitReason reason) {
+    CommitRequest request; request.reason = reason;
+    request.desc = std::make_shared<const usdGen::UsdGenGraphDesc>(desc);
+    _Commit(std::move(request));
+}
+int UsdGenImagingSession::RegisterRepublishCallback(std::function<void(CommitPayload const&)> callback) {
+    auto* state = _state.get();
+    const auto token = state->nextToken.fetch_add(1);
+    if (token > static_cast<uint64_t>(std::numeric_limits<int>::max()) || !state->accepting.load()) return -1;
+    if (!state->owner.PostCommand([state, token, callback=std::move(callback)] {
+        state->callbacks.emplace_back(static_cast<int>(token), callback);
+    })) return -1;
+    return static_cast<int>(token);
+}
+void UsdGenImagingSession::UnregisterRepublishCallback(int token) {
+    auto* state = _state.get();
+    state->owner.PostCommand([state, token] {
+        state->callbacks.erase(std::remove_if(state->callbacks.begin(), state->callbacks.end(),
+            [token](auto const& entry) { return entry.first == token; }), state->callbacks.end());
+    });
+}
+int64_t UsdGenImagingSession::Generation() const noexcept { return _state->generation.load(); }
+usdGen::UsdGenGenerationConstPtr UsdGenImagingSession::LatestGeneration() const noexcept {
     return _engine ? _engine->Generation() : usdGen::UsdGenGenerationConstPtr();
 }
-
-int UsdGenImagingSession::AttachedIndices() const noexcept
-{
-    return _attached.load();
-}
-void UsdGenImagingSession::NoteAttach() { _attached.fetch_add(1); }
-void UsdGenImagingSession::NoteDetach() { _attached.fetch_sub(1); }
+int UsdGenImagingSession::AttachedIndices() const noexcept { return _state->attached.load(); }
+void UsdGenImagingSession::NoteAttach() { _state->attached.fetch_add(1); }
+void UsdGenImagingSession::NoteDetach() { _state->attached.fetch_sub(1); }
+void UsdGenImagingSession::MarkAppDriver() noexcept { _state->appDriver.store(true); }
+bool UsdGenImagingSession::HasAppDriver() const noexcept { return _state->appDriver.load(); }
+void UsdGenImagingSession::MarkNeedsDesc() noexcept { _state->needsDesc.store(true); }
+bool UsdGenImagingSession::NeedsDesc() const noexcept { return _state->needsDesc.load(); }
+bool UsdGenImagingSession::ConsumeNeedsDesc() noexcept { return _state->needsDesc.exchange(false); }
 
 // ---------------------------------------------------------------------------
 
 UsdGenSessionStore &UsdGenSessionStore::GetInstance()
 {
+    // The store can own the last public handles until process teardown.
+    // Construct retirement first so its graph outlives the store destructor.
+    (void)RetirementQueue();
     static UsdGenSessionStore instance;
     return instance;
 }
@@ -206,20 +304,50 @@ std::vector<UsdGenImagingSessionRefPtr> UsdGenSessionStore::LiveSessions() const
     return out;
 }
 
+namespace {
+void CommitBatch(std::vector<UsdGenSessionHandle> const& sessions,
+                 usdGen::UsdGenCommitReason reason, std::optional<double> frame = {}) {
+    if (Pipeline::IsExecuting()) throw std::logic_error("callback must submit asynchronous imaging requests");
+    if (sessions.empty()) return;
+    Pipeline boundary(ImagingRuntime());
+    struct Batch {
+        std::atomic<size_t> remaining;
+        std::function<void()> release;
+        Batch(size_t count, std::function<void()> done) : remaining(count), release(std::move(done)) {}
+        void Complete() { if (remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) release(); }
+    };
+    boundary.Await([&](std::function<void()> release) {
+        auto batch = std::make_shared<Batch>(sessions.size(), std::move(release));
+        // Submit every description before waiting: unrelated sessions execute
+        // in parallel rather than serializing the whole store on each reply.
+        for (auto const& session : sessions) {
+            UsdGenImagingSession::CommitRequest request;
+            request.frame = frame;
+            request.reason = reason;
+            try {
+                if (session->CommitAsync(std::move(request),
+                    [batch](UsdGenImagingSession::CommitPayload const&, Pipeline::Outcome) {
+                        batch->Complete();
+                    })) continue;
+            } catch (...) {
+                // Already accepted siblings must still complete their replies.
+                TF_WARN("usdGen imaging batch request could not be dispatched");
+            }
+            batch->Complete();
+        }
+    });
+}
+}
+
 void UsdGenSessionStore::SetTime(double frame)
 {
     // The UsdGenImaging_SetTime C ABI (06 §6.1, item 9) forwards here: the
     // app owns time from now on (rule b deactivates, 06 §3.9).
-    // Threading note: the commits run inline on the caller thread. Engine
-    // commits serialize on the engine commit mutex and a superseded run
-    // returns immediately (03 §5.6), so racing SetTime calls are safe; the
-    // shipping ABI should marshal to the registered commit thread (06 §4.4).
-    // The lock is NOT held across engine calls (S15).
-    for (auto const &session : LiveSessions()) {
-        session->MarkAppDriver();
-        session->SetTime(frame);
-        session->Commit(usdGen::UsdGenCommitReason::SetTime);
-    }
+    // Each frame+commit is one scheduled request. The external adapter waits
+    // for replies without holding the store guard across execution (S15).
+    auto sessions = LiveSessions();
+    for (auto const& session : sessions) session->MarkAppDriver();
+    CommitBatch(sessions, usdGen::UsdGenCommitReason::SetTime, frame);
 }
 
 void UsdGenSessionStore::SetContext(usdGen::UsdGenContext context)
@@ -231,9 +359,7 @@ void UsdGenSessionStore::SetContext(usdGen::UsdGenContext context)
 
 void UsdGenSessionStore::Commit(usdGen::UsdGenCommitReason reason)
 {
-    for (auto const &session : LiveSessions()) {
-        session->Commit(reason);
-    }
+    CommitBatch(LiveSessions(), reason);
 }
 
 int64_t UsdGenSessionStore::Generation() const noexcept

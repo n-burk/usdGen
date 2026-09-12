@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace usdGen {
@@ -160,6 +161,11 @@ private:
     // and lock() at invocation (expired ⇒ no-op). No raw g.get()/self
     // captures on the publish path.
     std::vector<std::shared_ptr<_Groom>> _grooms;
+    // A ticket reserves a root while its session/callback attachment is
+    // constructed outside _stateMutex. Removal erases the ticket so a late
+    // candidate cannot reinstall a removed groom.
+    uint64_t _nextAdoptionTicket = 0;
+    std::unordered_map<SdfPath, uint64_t, SdfPath::Hash> _pendingAdoptions;
     std::atomic_flag _populated;      // one-shot population attempt (06 §3.1)
     std::vector<HdSceneIndexObserver::AddedPrimEntry> _pendingAdd;
     std::vector<SdfPath> _pendingRemove;

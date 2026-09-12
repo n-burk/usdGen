@@ -262,6 +262,64 @@ core builds. CUDA tools memcheck and RBF-session initcheck each reported
 **0 errors** after the session migration. These are functional checks, not
 release or full-plan completion claims.
 
+### Imaging command ownership follow-through
+
+The next checkpoint removes imaging-session stage/republish mutexes and
+integrates the asynchronous engine rather than waiting from an owner node:
+
+- Engine `CommitRequest` atomically applies optional immutable description and
+  context inputs with frame/reason capture. An optional captured CUDA device
+  survives relay through another owner; the original caller, not an arbitrary
+  imaging worker, supplies the device. `PostDirty` is callback-safe.
+- Each imaging session has a serial command owner for staging, frame/context,
+  callback registration and publication. It submits one bundled engine request
+  and receives one immutable completion message. No imaging command waits for
+  an engine cook. Legacy synchronous commits use an external reply boundary;
+  callback code must use `CommitAsync` and cannot call synchronous shutdown.
+- Store-level time/commit operations submit every live description before
+  waiting on a framework completion barrier. Their frame is part of each
+  immutable request, not a separate `SetTime`/`Commit` pair. A held-capture
+  test verifies that two descriptions both start before either is released.
+- Public imaging-handle lifetime is separate from scheduled state. Dropping
+  the last handle inside a callback schedules retirement on a separate TBB
+  graph. Closing stops acceptance, waits for all engine replies to relay back,
+  completes accepted requests, and only then destroys the owner and engine
+  reference. Explicit `Shutdown` and `DrainRetired` are single-external-caller
+  boundaries. Concurrent shutdown is rejected, not implemented as a waiting
+  lock. Framework relay-dispatch failure is fatal rather than a silently lost
+  completion; allocation-failure recovery remains unimplemented.
+- The retirement graph is constructed before the process-global session store
+  so it outlives stored handles during process teardown. The first regression
+  run caught the inverse static-destruction order; the fix then passed 30
+  repeated session-process shutdown runs.
+- Groom attachment construction and callback registration happen outside the
+  scene membership guard. Per-root adoption tickets let removal cancel an
+  in-progress candidate; a late candidate cannot overwrite a same-path
+  replacement. Removal erases membership first, then unregisters/detaches
+  outside that guard. Input dirty delivery no longer synchronously enters the
+  engine while holding scene membership state.
+
+Validation includes the full CUDA-enabled build, **66/66 non-benchmark T0/T1**
+tests, and **100 consecutive runs** of the new async-imaging test. That test
+checks per-request frame/width pairing, owner-ordered unregister and callback
+re-entry, last-handle release on a callback, 48 queued shutdown completions,
+retained geometry/routing, removal and same-path re-adoption while the old
+candidate is held, and independent store-batch execution.
+
+A separate CUDA-disabled AddressSanitizer/UndefinedBehaviorSanitizer build
+ran async-imaging, sessions and population with `detect_leaks=0` and
+`halt_on_error=1`. This is address/UB evidence only: the initial leak-enabled
+run reported allocations in OpenUSD registry/path-cache and diagnostic stacks
+(2343, 3367 and 32683 bytes across the three processes). Leak-clean teardown
+is **not verified**, and no leak suppression was added to the repository.
+
+The session store, remaining scene-state/frame handling, timing/test-hook and
+warning registries still need scheduled ownership. Scene-notice ordering
+through removal after a publication map swap, full asynchronous scene/tool
+dispatch, device retirement/interop, fault injection and release/performance
+gates remain unfinished. This checkpoint does not complete the no-mutex
+revision or shrink the original milestone scope.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the

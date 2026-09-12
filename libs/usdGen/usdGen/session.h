@@ -71,12 +71,28 @@ struct UsdGenSessionSnapshot
     std::vector<UsdGenCudaBindingStats> cudaBindings;
 };
 
+/// One atomic command-owner commit request. Optional input changes are applied
+/// immediately before capturing the publication baseline and submitting work,
+/// so they cannot interleave with a separately posted descriptor/context
+/// command.
+struct UsdGenSessionCommitRequest
+{
+    double frame = 0.0;
+    UsdGenCommitReason reason = UsdGenCommitReason::NoticeBatchEnd;
+    std::shared_ptr<const UsdGenGraphDesc> desc;
+    std::optional<UsdGenContext> context;
+    // Captured by an upstream owner when it must relay the original caller's
+    // CUDA device. Absent means capture at this Session API boundary.
+    std::optional<int> callerDevice;
+};
+
 class UsdGenSession
 {
 public:
     using SnapshotPtr = std::shared_ptr<const UsdGenSessionSnapshot>;
     using Completion = std::function<void(
         SnapshotPtr, UsdGenExecutionPipeline::Outcome)>;
+    using CommitRequest = UsdGenSessionCommitRequest;
 
     explicit UsdGenSession(int threadLimit = 0);
     // External ownership boundary: stop/join submitters first. Accepted work
@@ -95,6 +111,7 @@ public:
     void PostGraphDesc(UsdGenGraphDesc);
     void PostContext(UsdGenContext);
     void PostDevicePublicationEnabled(bool);
+    void PostDirty(UsdGenPendingDirty);
 
     bool BeginDeviceEdit(UsdGenGenerationConstPtr const&, uint64_t*,
                          std::string* = nullptr);
@@ -104,12 +121,16 @@ public:
     bool EndDeviceEdit(uint64_t, UsdGenGenerationConstPtr const&, bool = true);
     void AccumulateDirty(UsdGenPendingDirty&&);
     bool NeedsCommit() const noexcept;
+    /// Captures CUDA's thread-local current device, or -2 on CPU/failure.
+    static int CaptureCallerDevice() noexcept;
 
     /// Asynchronously accept a command snapshot and schedule private cooking.
     /// The completion runs on the command owner and may enqueue follow-up
     /// commands, but must not make synchronous Session calls.
+    bool CommitAsync(CommitRequest, Completion = {});
     bool CommitAsync(double, UsdGenCommitReason, Completion = {});
     /// Compatibility boundary that cooperatively waits for one CommitAsync.
+    SnapshotPtr CommitSnapshot(CommitRequest);
     SnapshotPtr CommitSnapshot(double, UsdGenCommitReason);
     UsdGenGenerationConstPtr Commit(double frame, UsdGenCommitReason reason) {
         auto snapshot = CommitSnapshot(frame, reason);
