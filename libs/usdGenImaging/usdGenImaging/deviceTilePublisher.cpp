@@ -4,6 +4,7 @@
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/materialBindingSchema.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
@@ -17,6 +18,10 @@ template<class T> HdSampledDataSourceHandle _S(T const &v) {
     return HdRetainedTypedSampledDataSource<T>::New(v);
 }
 HdDataSourceBaseHandle _Tok(TfToken const &v) { return _S(v); }
+TfToken _HydraMaterialPurpose(TfToken const &purpose) {
+    return purpose.IsEmpty() || purpose == TfToken("allPurpose")
+        ? HdMaterialBindingsSchemaTokens->allPurpose : purpose;
+}
 bool _PrimPath(SdfPath const &p) {
     return !p.IsEmpty() && p.IsAbsolutePath() && p.IsPrimPath() &&
         p != SdfPath::AbsoluteRootPath();
@@ -62,8 +67,7 @@ HdContainerDataSourceHandle BuildDeviceTileDataSource(
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             if (!std::isfinite(m.xform[r][c])) return {};
-    if ((!m.materialPath.IsEmpty() && (!_PrimPath(m.materialPath) ||
-         m.materialPurpose.IsEmpty())) ||
+    if ((!m.materialPath.IsEmpty() && !_PrimPath(m.materialPath)) ||
         (!m.primOrigin.IsEmpty() && !_PrimPath(m.primOrigin)) ||
         (!m.dependencySurface.IsEmpty() && !_PrimPath(m.dependencySurface)))
         return {};
@@ -100,7 +104,8 @@ HdContainerDataSourceHandle BuildDeviceTileDataSource(
             .SetPath(HdRetainedTypedSampledDataSource<SdfPath>::New(
                 m.materialPath)).Build();
         names.push_back(TfToken("materialBindings"));
-        values.push_back(_C({m.materialPurpose}, {binding}));
+        values.push_back(_C({_HydraMaterialPurpose(m.materialPurpose)},
+                            {binding}));
     }
     if (!m.primOrigin.IsEmpty()) {
         names.push_back(TfToken("primOrigin"));

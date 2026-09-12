@@ -10,8 +10,11 @@
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/imaging/hd/dependencySchema.h"
+#include "pxr/imaging/hd/materialBindingSchema.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 
 #include <cstdio>
@@ -44,6 +47,13 @@ HdDataSourceBaseHandle
 _Block()
 {
     return HdDataSourceBaseHandle(HdBlockDataSource::New());
+}
+
+TfToken
+_HydraMaterialPurpose(TfToken const &purpose)
+{
+    return purpose.IsEmpty() || purpose == TfToken("allPurpose")
+        ? HdMaterialBindingsSchemaTokens->allPurpose : purpose;
 }
 
 // One primvars/<name> entry: { values, interpolation, type?, role?,
@@ -282,21 +292,21 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
                         {HdDataSourceBaseHandle(_Tok(tile.purpose))}));
     }
     _Add(&names, &values, TfToken("visibility"),
-         _Container({TfToken("visibility")},
-                    {HdDataSourceBaseHandle(_Tok(tile.visibility))}));
+         HdVisibilitySchema::Builder()
+             .SetVisibility(HdRetainedTypedSampledDataSource<bool>::New(
+                 tile.visibility != TfToken("invisible")))
+             .Build());
 
     if (!tile.materialPath.IsEmpty()) {
-        // materialBindings/allPurpose/<empty-token binding> (06 §4.1).
-        TfToken const bindingName;  // the empty-token child (R: binding slot)
-        HdDataSourceBaseHandle binding(_Samp(tile.materialPath));
+        // The app-facing allPurpose spelling maps to Hydra's empty-token
+        // default binding child; the value is a MaterialBindingSchema.
+        HdDataSourceBaseHandle binding = HdMaterialBindingSchema::Builder()
+            .SetPath(HdRetainedTypedSampledDataSource<SdfPath>::New(
+                tile.materialPath))
+            .Build();
         _Add(&names, &values, TfToken("materialBindings"),
-             _Container(
-                 {tile.materialPurpose.IsEmpty()
-                      ? TfToken("allPurpose")
-                      : tile.materialPurpose},
-                 {HdDataSourceBaseHandle(
-                     HdRetainedContainerDataSource::New(
-                         1, &bindingName, &binding))}));
+             _Container({_HydraMaterialPurpose(tile.materialPurpose)},
+                        {binding}));
     }
     if (!tile.primOrigin.IsEmpty()) {
         _Add(&names, &values, TfToken("primOrigin"),
@@ -427,4 +437,3 @@ UsdGenTilePublisher::GuidePath(
 }
 
 }  // namespace usdGenImaging
-

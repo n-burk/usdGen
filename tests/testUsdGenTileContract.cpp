@@ -38,7 +38,9 @@
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/sceneIndex.h"
+#include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/imaging/hd/tokens.h"
 
@@ -435,6 +437,28 @@ int main()
                 Check(LeafIsInt(LeafValue(style->Get(TfToken("refineLevel"))), 2),
                       "displayStyle/refineLevel == 2 (C2, no M1 tumble tier)");
             }
+            // The app-facing literal "allPurpose" is normalized to Hydra's
+            // empty-token default child, whose value is a binding schema.
+            HdMaterialBindingsSchema bindings =
+                HdMaterialBindingsSchema::GetFromParent(c);
+            auto materialPath = bindings.GetMaterialBinding().GetPath();
+            Check(bindings.IsDefined() && materialPath &&
+                      materialPath->GetTypedValue(0) == pub.materialPath,
+                  "materialBindings default empty-token child carries path");
+            HdVisibilitySchema visibility = HdVisibilitySchema::GetFromParent(c);
+            Check(visibility.IsDefined() && visibility.GetVisibility() &&
+                      visibility.GetVisibility()->GetTypedValue(0) ==
+                          (pub.visibility != TfToken("invisible")),
+                  "visibility/visibility is Hydra bool, not an app token");
+            UsdGenTilePublication emptyPurpose = pub;
+            emptyPurpose.materialPurpose = TfToken();
+            HdMaterialBindingsSchema emptyBindings =
+                HdMaterialBindingsSchema::GetFromParent(
+                    UsdGenTilePublisher::BuildTileDataSource(emptyPurpose));
+            auto emptyPath = emptyBindings.GetMaterialBinding().GetPath();
+            Check(emptyBindings.IsDefined() && emptyPath &&
+                      emptyPath->GetTypedValue(0) == pub.materialPath,
+                  "empty app material purpose uses Hydra default binding");
             // Purpose: omitted when the publication carries none (unauthored
             // description purpose) so Hydra resolves the geometry render tag;
             // publishing purpose="default" would match NO tag and Storm would

@@ -9,8 +9,53 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
+
+static bool CheckMaterialVisibilityMatrix(
+    usdGenImaging::UsdGenDeviceTileMetadata const& base,
+    HdDataSourceBaseHandle const& provider) {
+    if (base.materialPath.IsEmpty()) return false;
+
+    auto checkBinding = [&](HdMaterialBindingSchema const& binding,
+                            bool expectPath) -> bool {
+        auto path = binding.GetPath();
+        return expectPath ? path && path->GetTypedValue(0) == base.materialPath
+                          : !path;
+    };
+    auto checkVisibility = [](HdContainerDataSourceHandle const& prim,
+                              bool expected) -> bool {
+        auto visibility = HdVisibilitySchema::GetFromParent(prim).GetVisibility();
+        return visibility && visibility->GetTypedValue(0) == expected;
+    };
+
+    std::vector<TfToken> const purposes{
+        TfToken(), TfToken("allPurpose"), TfToken("preview"), TfToken("full"),
+        TfToken("custom")};
+    for (TfToken const& purpose : purposes) {
+        auto metadata = base;
+        metadata.materialPurpose = purpose;
+        auto prim = usdGenImaging::BuildDeviceTileDataSource(metadata, provider);
+        auto bindings = HdMaterialBindingsSchema::GetFromParent(prim);
+        bool const defaultPurpose = purpose.IsEmpty() || purpose == TfToken("allPurpose");
+        if (!prim || !bindings.IsDefined() ||
+            !checkBinding(bindings.GetMaterialBinding(), defaultPurpose) ||
+            !checkBinding(bindings.GetMaterialBinding(purpose), true) ||
+            !checkBinding(bindings.GetMaterialBinding(TfToken("unmatched")), defaultPurpose))
+            return false;
+    }
+
+    auto inherited = base;
+    inherited.visibility = TfToken("inherited");
+    auto inheritedPrim = usdGenImaging::BuildDeviceTileDataSource(inherited, provider);
+    auto invisible = base;
+    invisible.visibility = TfToken("invisible");
+    auto invisiblePrim = usdGenImaging::BuildDeviceTileDataSource(invisible, provider);
+    return inheritedPrim && invisiblePrim &&
+        checkVisibility(inheritedPrim, true) && checkVisibility(invisiblePrim, false);
+}
+
 int main() {
     usdGenImaging::UsdGenDeviceTileMetadata m;
     m.primPath = SdfPath("/g/__usdGenRender/tile_0000");
@@ -54,7 +99,9 @@ int main() {
     auto bindings = HdMaterialBindingsSchema::GetFromParent(prim);
     auto visibility = HdVisibilitySchema::GetFromParent(prim);
     auto xform = HdXformSchema::GetFromParent(prim);
-    auto materialPath = bindings.GetMaterialBinding(m.materialPurpose).GetPath();
+    // usdGen's application-facing "allPurpose" spelling maps to Hydra's
+    // empty-token default binding child.
+    auto materialPath = bindings.GetMaterialBinding().GetPath();
     if (!prim || !bindings.IsDefined() || !materialPath ||
         materialPath->GetTypedValue(0) != m.materialPath ||
         !visibility.IsDefined() || !visibility.GetVisibility() ||
@@ -62,6 +109,7 @@ int main() {
     if (xform.GetResetXformStack()->GetTypedValue(0) != true ||
         xform.GetMatrix()->GetTypedValue(0) != m.xform ||
         !visibility.GetVisibility()->GetTypedValue(0)) return 1;
+    if (!CheckMaterialVisibilityMatrix(m, retainedProvider)) return 1;
     auto origin = prim->Get(TfToken("primOrigin"));
     auto deps = prim->Get(TfToken("__dependencies"));
     if (!origin || !deps) return 1;
@@ -103,9 +151,22 @@ int main() {
     invalid = m;
     invalid.materialPath = SdfPath("/");
     if (usdGenImaging::BuildDeviceTileDataSource(invalid, retainedProvider)) return 1;
-    invalid = m;
-    invalid.materialPurpose = TfToken();
-    if (usdGenImaging::BuildDeviceTileDataSource(invalid, retainedProvider)) return 1;
+    auto emptyPurpose = m;
+    emptyPurpose.materialPurpose = TfToken();
+    auto emptyPurposePrim = usdGenImaging::BuildDeviceTileDataSource(
+        emptyPurpose, retainedProvider);
+    auto emptyPurposePath = HdMaterialBindingsSchema::GetFromParent(
+        emptyPurposePrim).GetMaterialBinding().GetPath();
+    if (!emptyPurposePrim || !emptyPurposePath ||
+        emptyPurposePath->GetTypedValue(0) != m.materialPath) return 1;
+    auto previewPurpose = m;
+    previewPurpose.materialPurpose = TfToken("preview");
+    auto previewPurposePrim = usdGenImaging::BuildDeviceTileDataSource(
+        previewPurpose, retainedProvider);
+    auto previewPurposePath = HdMaterialBindingsSchema::GetFromParent(
+        previewPurposePrim).GetMaterialBinding(previewPurpose.materialPurpose).GetPath();
+    if (!previewPurposePrim || !previewPurposePath ||
+        previewPurposePath->GetTypedValue(0) != m.materialPath) return 1;
     invalid = m;
     invalid.refineLevel = -1;
     if (usdGenImaging::BuildDeviceTileDataSource(invalid, retainedProvider)) return 1;
@@ -124,6 +185,8 @@ int main() {
     accepted.curveType = TfToken("cubic");
     accepted.curveBasis = TfToken("centripetalCatmullRom");
     if (!usdGenImaging::BuildDeviceTileDataSource(accepted, retainedProvider)) return 1;
+    emptyPurposePrim.reset();
+    previewPurposePrim.reset();
     retainedProvider.reset();
     prim = {};
     if (!providerWeak.expired()) return 1;
