@@ -6,6 +6,7 @@
 #include "pxr/base/gf/bbox3d.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/range3d.h"
+#include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/retainedSceneIndex.h"
 #include "pxr/imaging/hdSt/basisCurvesGpuGroupController.h"
@@ -81,13 +82,45 @@ private:
     HdStBasisCurvesGpuGroupMailboxSharedPtr const _mailbox;
 };
 
+// The retained scene index only publishes notifications; the scene-index
+// contract permits a backing datasource to change before a Dirtied notice.
+// This small fixture exercises disappearance of the exact control child.
+class _MutableControlContainer final : public HdContainerDataSource {
+public:
+    HD_DECLARE_DATASOURCE(_MutableControlContainer);
+
+    TfTokenVector GetNames() override {
+        TfTokenVector names;
+        names.reserve(_entries.size());
+        for (auto const& entry : _entries) names.push_back(entry.first);
+        return names;
+    }
+    HdDataSourceBaseHandle Get(TfToken const& name) override {
+        for (auto const& entry : _entries)
+            if (entry.first == name) return entry.second;
+        return {};
+    }
+    void Set(TfToken const& name, HdDataSourceBaseHandle const& value) {
+        for (auto& entry : _entries) {
+            if (entry.first == name) { entry.second = value; return; }
+        }
+        _entries.emplace_back(name, value);
+    }
+
+private:
+    explicit _MutableControlContainer(
+        std::vector<std::pair<TfToken, HdDataSourceBaseHandle>> entries)
+        : _entries(std::move(entries)) {}
+    std::vector<std::pair<TfToken, HdDataSourceBaseHandle>> _entries;
+};
+
 GfBBox3d _Bounds() {
     return GfBBox3d(GfRange3d(GfVec3d(-1.0), GfVec3d(1.0)), GfMatrix4d(1.0));
 }
 
 HdStBasisCurvesGpuGroupCandidateSharedPtr _Candidate(
     SdfPath const& group, uint64_t ticket, uint64_t generation, uint32_t id,
-    SdfPath const& memberPath) {
+    SdfPath const& memberPath, bool ownsSubtree = false) {
     auto candidate = std::make_shared<HdStBasisCurvesGpuGroupCandidate>();
     candidate->groupPath = group; candidate->ticket = ticket; candidate->generation = generation;
     HdStBasisCurvesGpuGroupMember member;
@@ -98,28 +131,38 @@ HdStBasisCurvesGpuGroupCandidateSharedPtr _Candidate(
     member.presentation.bounds = _Bounds();
     member.provider = _Provider::New();
     candidate->members.push_back(std::move(member));
+    candidate->ownsSubtree = ownsSubtree;
     return candidate;
 }
 
 HdStBasisCurvesGpuGroupResult _Ready(
     HdStBasisCurvesGpuGroupCandidateSharedPtr const& candidate,
     HdStBasisCurvesGpuRegistryIdentitySharedPtr const& identity) {
-    auto bundle = std::make_shared<HdStBasisCurvesGpuBundle>();
-    bundle->generation = candidate->generation;
-    bundle->curveType = TfToken("linear"); bundle->curveBasis = TfToken("linear");
-    bundle->curveWrap = TfToken("nonperiodic"); bundle->bounds = _Bounds();
-    bundle->vertexRange = std::make_shared<_Range>();
-    for (auto mode : {HdStBasisCurvesGpuTopologyMode::Curves,
-                      HdStBasisCurvesGpuTopologyMode::Hull,
-                      HdStBasisCurvesGpuTopologyMode::Points}) {
-        HdStBasisCurvesGpuTopologyRange range;
-        range.mode = mode; range.topologyRange = std::make_shared<_Range>();
-        range.drawCountRange = std::make_shared<_Range>();
-        bundle->topologyRanges.push_back(std::move(range));
+    std::vector<HdStBasisCurvesGpuGroupPreparedMember> prepared;
+    for (auto const& member : candidate->members) {
+        auto bundle = std::make_shared<HdStBasisCurvesGpuBundle>();
+        bundle->generation = candidate->generation;
+        bundle->curveType = TfToken("linear"); bundle->curveBasis = TfToken("linear");
+        bundle->curveWrap = TfToken("nonperiodic"); bundle->bounds = _Bounds();
+        bundle->vertexRange = std::make_shared<_Range>();
+        for (auto mode : {HdStBasisCurvesGpuTopologyMode::Curves,
+                          HdStBasisCurvesGpuTopologyMode::Hull,
+                          HdStBasisCurvesGpuTopologyMode::Points}) {
+            HdStBasisCurvesGpuTopologyRange range;
+            range.mode = mode; range.topologyRange = std::make_shared<_Range>();
+            range.drawCountRange = std::make_shared<_Range>();
+            bundle->topologyRanges.push_back(std::move(range));
+        }
+        bundle->ready = [] { return true; };
+        prepared.push_back({member.id, std::move(bundle)});
     }
-    bundle->ready = [] { return true; };
-    return HdStMakeBasisCurvesGpuGroupReadyResult(
-        *candidate, identity, {{candidate->members.front().id, bundle}});
+    return HdStMakeBasisCurvesGpuGroupReadyResult(*candidate, identity, prepared);
+}
+
+HdStBasisCurvesGpuGroupResult _EmptyReady(
+    HdStBasisCurvesGpuGroupCandidateSharedPtr const& candidate,
+    HdStBasisCurvesGpuRegistryIdentitySharedPtr const& identity) {
+    return HdStMakeBasisCurvesGpuGroupReadyResult(*candidate, identity, {});
 }
 
 HdStBasisCurvesGpuGroupDataSourceHandle _ControlAt(
@@ -163,6 +206,127 @@ public:
     void PrimsDirtied(HdSceneIndexBase const&, DirtiedPrimEntries const&) override {}
     void PrimsRenamed(HdSceneIndexBase const&, RenamedPrimEntries const&) override {}
 };
+
+class _VisibilityObserver final : public HdSceneIndexObserver {
+public:
+    HdStBasisCurvesGpuGroupStagingSceneIndex* index = nullptr;
+    SdfPath scope;
+    SdfPathVector added;
+    SdfPathVector removed;
+    SdfPathVector dirtied;
+    bool coherent = true;
+
+    void _CheckSnapshot() {
+        if (!index || index->GetPrim(scope).primType.IsEmpty()) { coherent = false; return; }
+        for (SdfPath const& child : index->GetChildPrimPaths(scope))
+            if (index->GetPrim(child).primType.IsEmpty()) coherent = false;
+    }
+    void PrimsAdded(HdSceneIndexBase const&, AddedPrimEntries const& entries) override {
+        for (auto const& entry : entries) added.push_back(entry.primPath);
+        _CheckSnapshot();
+    }
+    void PrimsRemoved(HdSceneIndexBase const&, RemovedPrimEntries const& entries) override {
+        for (auto const& entry : entries) removed.push_back(entry.primPath);
+        _CheckSnapshot();
+    }
+    void PrimsDirtied(HdSceneIndexBase const&, DirtiedPrimEntries const& entries) override {
+        for (auto const& entry : entries) dirtied.push_back(entry.primPath);
+        _CheckSnapshot();
+    }
+    void PrimsRenamed(HdSceneIndexBase const&, RenamedPrimEntries const&) override {}
+};
+
+bool _Contains(SdfPathVector const& paths, SdfPath const& path) {
+    return std::find(paths.begin(), paths.end(), path) != paths.end();
+}
+
+void _TestControlDisappearance(
+    HdStBasisCurvesGpuRegistryIdentitySharedPtr const& identity) {
+    TfToken const token = HdStGetBasisCurvesGpuGroupDataSourceToken();
+    for (bool const empty : {false, true}) {
+        for (bool const dirtied : {false, true}) {
+            std::string const suffix = std::string(empty ? "empty" : "nonempty") +
+                (dirtied ? "_dirtied" : "_added");
+            SdfPath const scope("/ControlGone/" + suffix);
+            auto makeCandidate = [&](uint64_t ticket) {
+                auto mutableCandidate =
+                    std::make_shared<HdStBasisCurvesGpuGroupCandidate>();
+                mutableCandidate->groupPath = scope;
+                mutableCandidate->ticket = ticket;
+                mutableCandidate->generation = 70 + uint64_t(empty) * 2 + uint64_t(dirtied);
+                if (!empty) {
+                    *mutableCandidate = *_Candidate(scope, mutableCandidate->ticket,
+                                                    mutableCandidate->generation, 1,
+                                                    scope.AppendChild(TfToken("tile")));
+                }
+                return HdStBasisCurvesGpuGroupCandidateSharedPtr(mutableCandidate);
+            };
+            auto const candidate = makeCandidate(100 + uint64_t(empty) * 2 + uint64_t(dirtied));
+            HdStBasisCurvesGpuGroupResult const ready =
+                empty ? _EmptyReady(candidate, identity) : _Ready(candidate, identity);
+            CHECK(ready.status == HdStBasisCurvesGpuGroupResultStatus::Ready);
+            HdDataSourceBaseHandle const control = _Control::Make(candidate);
+            auto input = HdRetainedSceneIndex::New();
+            HdContainerDataSourceHandle source;
+            _MutableControlContainer::Handle mutableSource;
+            if (dirtied) {
+                std::vector<std::pair<TfToken, HdDataSourceBaseHandle>> entries{{token, control}};
+                mutableSource = _MutableControlContainer::New(std::move(entries));
+                source = mutableSource;
+            } else {
+                source = HdRetainedContainerDataSource::New(1, &token, &control);
+            }
+            input->AddPrims({{scope, TfToken("scope"), source}});
+            HdSceneIndexBaseRefPtr index = HdStBasisCurvesGpuGroupStagingSceneIndex::New(input);
+            auto* staging = static_cast<HdStBasisCurvesGpuGroupStagingSceneIndex*>(
+                index.operator->());
+            auto mailbox = _ControlAt(index, scope)->GetMailbox();
+            mailbox->Post(ready);
+            staging->Poll();
+            CHECK(_ControlAt(index, scope));
+            if (!empty)
+                CHECK(index->GetPrim(scope.AppendChild(TfToken("tile"))).primType ==
+                      TfToken("basisCurves"));
+
+            // A newer candidate is still pending when the control vanishes.
+            // Its unconsumed mailbox, rather than the terminal accepted one,
+            // must be canceled and must not restore the retained subtree.
+            auto const replacement = makeCandidate(candidate->ticket + 10);
+            HdStBasisCurvesGpuGroupResult const replacementReady =
+                empty ? _EmptyReady(replacement, identity) : _Ready(replacement, identity);
+            CHECK(replacementReady.status == HdStBasisCurvesGpuGroupResultStatus::Ready);
+            HdDataSourceBaseHandle const replacementControl = _Control::Make(replacement);
+            if (dirtied) {
+                mutableSource->Set(token, replacementControl);
+                input->DirtyPrims({{scope, HdDataSourceLocatorSet(HdDataSourceLocator())}});
+            } else {
+                input->AddPrims({{scope, TfToken("scope"),
+                                  HdRetainedContainerDataSource::New(
+                                      1, &token, &replacementControl)}});
+            }
+            auto pendingMailbox = _ControlAt(index, scope)->GetMailbox();
+            CHECK(pendingMailbox != mailbox);
+
+            if (dirtied) {
+                mutableSource->Set(token, {});
+                input->DirtyPrims({{scope, HdDataSourceLocatorSet(HdDataSourceLocator())}});
+            } else {
+                input->AddPrims({{scope, TfToken("scope"),
+                                  HdRetainedContainerDataSource::New()}});
+            }
+            // Empty groups have no synthetic member to inspect: the control
+            // itself is the required acceptance/retention oracle.
+            CHECK(!_ControlAt(index, scope));
+            CHECK(mailbox->IsCanceled());
+            CHECK(pendingMailbox->IsCanceled());
+            pendingMailbox->Post(replacementReady);
+            staging->Poll();
+            CHECK(!_ControlAt(index, scope));
+            if (!empty)
+                CHECK(index->GetPrim(scope.AppendChild(TfToken("tile"))).primType.IsEmpty());
+        }
+    }
+}
 
 void _TestPublicationRetentionAndHierarchy() {
     auto owner = std::make_shared<int>(1);
@@ -300,9 +464,140 @@ void _TestPublicationRetentionAndHierarchy() {
     index->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
+void _TestOwnedSubtreeTransitions(
+    HdStBasisCurvesGpuRegistryIdentitySharedPtr const& identity) {
+    TfToken const token = HdStGetBasisCurvesGpuGroupDataSourceToken();
+    SdfPath const scope("/Owned");
+    SdfPath const cpuTile("/Owned/cpuTile");
+    SdfPath const cpuParent("/Owned/transform");
+    SdfPath const cpuLeaf("/Owned/transform/cpuLeaf");
+    auto input = HdRetainedSceneIndex::New();
+    auto first = _Candidate(scope, 1, 90, 1, cpuTile, true);
+    auto firstMutable = std::make_shared<HdStBasisCurvesGpuGroupCandidate>(*first);
+    HdStBasisCurvesGpuGroupMember nested;
+    nested.id = 2;
+    nested.rprimPath = cpuParent.AppendChild(TfToken("gpuNested"));
+    nested.presentation = firstMutable->members.front().presentation;
+    nested.provider = _Provider::New();
+    firstMutable->members.push_back(std::move(nested));
+    first = HdStBasisCurvesGpuGroupCandidateSharedPtr(firstMutable);
+    HdDataSourceBaseHandle firstControl = _Control::Make(first);
+    std::vector<std::pair<TfToken, HdDataSourceBaseHandle>> controlEntries{
+        {token, firstControl}};
+    auto source = _MutableControlContainer::New(std::move(controlEntries));
+    HdContainerDataSourceHandle const cpuTileData = HdRetainedContainerDataSource::New();
+    input->AddPrims({
+        {scope, TfToken("scope"), source},
+        {cpuTile, TfToken("basisCurves"), cpuTileData},
+        {cpuParent, TfToken("xform"), HdRetainedContainerDataSource::New()},
+        {cpuLeaf, TfToken("basisCurves"), HdRetainedContainerDataSource::New()}});
+    HdSceneIndexBaseRefPtr index = HdStBasisCurvesGpuGroupStagingSceneIndex::New(input);
+    auto* staging = static_cast<HdStBasisCurvesGpuGroupStagingSceneIndex*>(index.operator->());
+    auto firstMailbox = _ControlAt(index, scope)->GetMailbox();
+    _VisibilityObserver observer;
+    observer.index = staging;
+    observer.scope = scope;
+    index->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    // Pending ownership has no visibility effect: CPU remains the exact
+    // last-good subtree until the complete group result is accepted.
+    CHECK(index->GetPrim(cpuTile).primType == TfToken("basisCurves"));
+    CHECK(index->GetPrim(cpuTile).dataSource == cpuTileData);
+    firstMailbox->Post(_Ready(first, identity));
+    staging->Poll();
+    CHECK(index->GetPrim(cpuTile).primType == TfToken("basisCurves"));
+    CHECK(index->GetPrim(cpuTile).dataSource != cpuTileData);
+    CHECK(_Contains(observer.removed, cpuTile));
+    CHECK(_Contains(observer.removed, cpuParent));
+    CHECK(_Contains(observer.added, cpuTile));
+    CHECK(_Contains(observer.added, cpuParent));
+    // An authored parent colliding with a synthetic GPU parent is represented
+    // as a synthetic scope, not leaked authored data.
+    CHECK(index->GetPrim(cpuParent).primType == TfToken("scope"));
+    CHECK(index->GetPrim(cpuParent.AppendChild(TfToken("gpuNested"))).primType ==
+          TfToken("basisCurves"));
+
+    // Hidden upstream churn is neither forwarded into visibility nor allowed
+    // to cancel the accepted owner.
+    SdfPath const hiddenNew("/Owned/transform/newCpuLeaf");
+    size_t const noticesBeforeHiddenChurn =
+        observer.added.size() + observer.removed.size() + observer.dirtied.size();
+    input->AddPrims({{hiddenNew, TfToken("basisCurves"),
+                      HdRetainedContainerDataSource::New()}});
+    input->RemovePrims({cpuTile});
+    CHECK(index->GetPrim(cpuTile).primType ==
+          TfToken("basisCurves"));
+    CHECK(index->GetPrim(hiddenNew).primType.IsEmpty());
+    CHECK(observer.added.size() + observer.removed.size() + observer.dirtied.size() ==
+          noticesBeforeHiddenChurn);
+
+    // A foreign nested control is likewise masked rather than admitted.
+    SdfPath const foreignScope = scope.AppendChild(TfToken("foreign"));
+    auto foreign = _Candidate(foreignScope, 1, 1, 1,
+                              foreignScope.AppendChild(TfToken("tile")));
+    HdDataSourceBaseHandle foreignControl = _Control::Make(foreign);
+    input->AddPrims({{foreignScope, TfToken("scope"),
+                      HdRetainedContainerDataSource::New(1, &token, &foreignControl)}});
+    CHECK(index->GetPrim(foreignScope).primType.IsEmpty());
+
+    // A rejected owning replacement retains the complete accepted GPU group.
+    auto replacement = _Candidate(scope, 2, 91, 2,
+        scope.AppendChild(TfToken("replacement")), true);
+    HdDataSourceBaseHandle replacementControl = _Control::Make(replacement);
+    source->Set(token, replacementControl);
+    input->DirtyPrims({{scope, HdDataSourceLocatorSet(HdDataSourceLocator())}});
+    auto replacementMailbox = _ControlAt(index, scope)->GetMailbox();
+    CHECK(replacementMailbox != firstMailbox);
+    HdStBasisCurvesGpuGroupResult rejected;
+    rejected.groupPath = scope; rejected.ticket = replacement->ticket;
+    rejected.generation = replacement->generation;
+    rejected.status = HdStBasisCurvesGpuGroupResultStatus::Rejected;
+    replacementMailbox->Post(rejected); staging->Poll();
+    CHECK(index->GetPrim(cpuTile).primType ==
+          TfToken("basisCurves"));
+    CHECK(index->GetPrim(hiddenNew).primType.IsEmpty());
+
+    // A ready empty owner masks every CPU descendant as well.
+    auto empty = std::make_shared<HdStBasisCurvesGpuGroupCandidate>();
+    empty->groupPath = scope; empty->ticket = 3; empty->generation = 92;
+    empty->ownsSubtree = true;
+    HdStBasisCurvesGpuGroupCandidateSharedPtr emptyCandidate(empty);
+    HdDataSourceBaseHandle emptyControl = _Control::Make(emptyCandidate);
+    source->Set(token, emptyControl);
+    input->DirtyPrims({{scope, HdDataSourceLocatorSet(HdDataSourceLocator())}});
+    auto emptyMailbox = _ControlAt(index, scope)->GetMailbox();
+    emptyMailbox->Post(_EmptyReady(emptyCandidate, identity)); staging->Poll();
+    CHECK(index->GetPrim(cpuTile).primType.IsEmpty());
+    CHECK(index->GetPrim(cpuParent).primType.IsEmpty());
+    CHECK(index->GetChildPrimPaths(scope).empty());
+
+    // Clearing exactly the control is the GPU-to-CPU handoff: it cancels the
+    // pending/accepted state and exposes the current (including churned) CPU
+    // subtree atomically on the next scene-index packet.
+    source->Set(token, {});
+    input->DirtyPrims({{scope, HdDataSourceLocatorSet(HdDataSourceLocator())}});
+    CHECK(!_ControlAt(index, scope));
+    CHECK(index->GetPrim(cpuParent).primType == TfToken("xform"));
+    CHECK(index->GetPrim(hiddenNew).primType == TfToken("basisCurves"));
+    SdfPathVector const children = index->GetChildPrimPaths(scope);
+    CHECK(std::find(children.begin(), children.end(), cpuParent) != children.end());
+    CHECK(_Contains(observer.added, cpuParent));
+    CHECK(_Contains(observer.added, hiddenNew));
+    CHECK(observer.coherent);
+    index->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
 } // anonymous namespace
 
 int main() {
     _TestPublicationRetentionAndHierarchy();
+    auto owner = std::make_shared<int>(3);
+    auto registryOwner = std::shared_ptr<HdStResourceRegistry const>(
+        owner, reinterpret_cast<HdStResourceRegistry*>(uintptr_t(0x3)));
+    auto identity = std::make_shared<HdStBasisCurvesGpuRegistryIdentity>(
+        reinterpret_cast<HdStResourceRegistry*>(uintptr_t(0x3)), 3,
+        std::weak_ptr<void const>(registryOwner));
+    _TestControlDisappearance(identity);
+    _TestOwnedSubtreeTransitions(identity);
     return failures == 0 ? 0 : 1;
 }

@@ -1,0 +1,22 @@
+diff --git a/pxr/imaging/hdSt/basisCurvesGpuGroupStagingSceneIndex.cpp b/pxr/imaging/hdSt/basisCurvesGpuGroupStagingSceneIndex.cpp
+--- a/pxr/imaging/hdSt/basisCurvesGpuGroupStagingSceneIndex.cpp
++++ b/pxr/imaging/hdSt/basisCurvesGpuGroupStagingSceneIndex.cpp
+@@ -161,7 +161,17 @@ bool HdStBasisCurvesGpuGroupStagingSceneIndex::_CaptureControl(SdfPath const& s
+     auto prim = input->GetPrim(scope);
+     auto control = HdStBasisCurvesGpuGroupDataSource::Cast(
+         prim.dataSource ? prim.dataSource->Get(HdStGetBasisCurvesGpuGroupDataSourceToken()) : nullptr);
+-    if (!control) return false;
++    if (!control) {
++        // An exact, formerly controlled scope may become an ordinary upstream
++        // scope without any member paths (an accepted empty group).  Its
++        // disappearance is distinct from an unrelated dirty notification.
++        if (_active.count(scope) || _Working()->controls.count(scope) ||
++            _Working()->groups.count(scope)) {
++            _RemoveScopes(scope);
++            return true;
++        }
++        return false;
++    }
+     auto upstream = control->GetCandidate();
+     // A recognized control resync must not be mistaken for an authored CPU
+     // prim transition, even if its candidate is stale or malformed.
