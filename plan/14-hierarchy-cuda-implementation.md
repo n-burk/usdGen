@@ -1463,3 +1463,46 @@ fenced and accepted before bounds are read. Overflow, cancellation/restore,
 and empty candidates preserve the prior staged generation. Targeted coverage
 includes Catmull-Rom and B-spline geometry plus leased-width behavior; no host
 geometry, offsets, indices, or draw-count arrays are read back.
+
+### Private HdSt group-controller/staging checkpoint (2026-09-12)
+
+The private `0004-hdst-gpu-curve-group-controller.patch` adds a
+renderer-local group controller, immutable member datasource, staging scene
+index/plugin, and `HdStRenderDelegate` terminal-scene-index wiring on top of
+patches 0001–0003. The terminal observer snapshots/queues controls only; the
+render-owned update path prepares all members and produces the sole terminal
+Ready/rejected result through normal post-Commit. Superseding or removing a
+pending candidate cancels only that candidate, preserving previously accepted
+providers until renderer teardown. The staging bridge is registry/rprim scoped
+and accepts zero, one, or many members; it has no application mutex, does not
+do GL work or scene-index notices in the terminal observer, and retains
+last-good presentation through a rejected replacement.
+
+The reentry regression initially reproduced stale old scene data/generation 1
+after a throwing observer (`RED719243`). The included exception-recovery
+fix then passed the final selected seven private targets ten consecutive times
+in Release (10.72 seconds, root run `350e75`), after a 7/7 Release checkpoint
+(`7cbb6a`) and a 7/7 ASAN/UBSAN checkpoint (`a481ed`, leak detection disabled).
+The sanitizer build instrumented private HdSt, bridge, and test translation
+units; stock OpenUSD dependencies and usdGen GPU/core objects remained Release.
+The latest private SDK native memcheck and InitCheck each reported zero errors
+(`84da55` and `a93649`). The isolated plugin-order test exercised actual
+Hybrid and JsonMetadataOnly 17-node chains with Groom before staging before
+pruning. The native CUDA group-publication test exercised real EGL CUDA device
+0 with exact framebuffer/material/generation/membership rejection retention,
+recovery, hidden-member preparation, and an empty group.
+
+A fresh original `ee47c679a` archive applied 0001–0004 sequentially and all
+13 modified HdSt files exactly matched the compiled private tree (`09459a`).
+The freshly rebuilt 13-test full harness had 12 passes and one failure with no
+skips (`8de0cc`): the existing bare-provider test retained 0 instead of 50
+pixels and leaked `/Looks/Accepted` to `/Looks/Rejected`; the new group test
+passed. This is explicitly not a green-suite claim. Live groom `Publish`, full
+application frontend routing, and live all-tile atomic publication are not
+wired. The new frontend helper is unbuilt and outside this checkpoint.
+
+Local Qwen contributed portions of the member/control helpers and the
+reentrant-observer test. Coordinator/root integrated and corrected the APIs
+and authored the exception cleanup from the root reproducer; Qwen is not
+credited with that cleanup. The actual Hivemind service provided no usable
+current visible answer; coordinator/root source-backed review was the fallback.

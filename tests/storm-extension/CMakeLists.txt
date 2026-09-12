@@ -64,6 +64,83 @@ set_tests_properties(testUsdGenStormGpuGroupDataSource PROPERTIES
     LABELS "T2;storm-extension;gpu-group-datasource" SKIP_RETURN_CODE 77 TIMEOUT 60
     ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
 
+add_executable(testUsdGenStormGpuGroupMemberDataSource
+    testUsdGenStormGpuGroupMemberDataSource.cpp)
+target_link_libraries(testUsdGenStormGpuGroupMemberDataSource PRIVATE
+    usdGenPatchedStorm ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenStormGpuGroupMemberDataSource
+    COMMAND testUsdGenStormGpuGroupMemberDataSource)
+set_tests_properties(testUsdGenStormGpuGroupMemberDataSource PROPERTIES
+    LABELS "T2;storm-extension;gpu-group-member-datasource" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+
+add_executable(testUsdGenStormGpuGroupController
+    testUsdGenStormGpuGroupController.cpp)
+target_include_directories(testUsdGenStormGpuGroupController PRIVATE
+    ../../usdGenShaders/test)
+target_link_libraries(testUsdGenStormGpuGroupController PRIVATE
+    usdGenPatchedStorm ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenStormGpuGroupController
+    COMMAND testUsdGenStormGpuGroupController)
+set_tests_properties(testUsdGenStormGpuGroupController PROPERTIES
+    LABELS "T2;storm-extension;gpu-group-controller" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+
+# This private plugin metadata is generated only for the ordering test.  The
+# normal retained/native fixtures deliberately run without it, avoiding a
+# second staging wrapper in those tests.
+set(USDGEN_RESOURCE_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../build-codex"
+    CACHE PATH "usdGen build tree providing schema/imaging test resources")
+set(_usdgen_schema_resources
+    "${USDGEN_RESOURCE_BUILD_DIR}/usd/usdGenSchema/resources")
+set(_usdgen_imaging_resources
+    "${USDGEN_RESOURCE_BUILD_DIR}/usd/usdGenImaging/resources")
+set(_hdst_gpu_group_staging_resources
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/hdStGpuGroupStaging/resources")
+file(MAKE_DIRECTORY "${_hdst_gpu_group_staging_resources}")
+# Use the full private-HdSt metadata, not a second fixture plugin entry: a
+# process must never discover stock and patched libusd_hdSt side by side.
+# The generated entry keeps stock shader resources while binding every HdSt
+# type (including the staging plugin) to usdGenPatchedStorm.
+set(PLUG_INFO_LIBRARY_PATH "$<TARGET_FILE:usdGenPatchedStorm>")
+set(PLUG_INFO_RESOURCE_PATH "resources")
+set(PLUG_INFO_ROOT "${USD_INSTALL_DIR}/lib/usd/hdSt")
+configure_file(
+    "${USDGEN_PATCHED_OPENUSD_SOURCE}/pxr/imaging/hdSt/plugInfo.json"
+    "${_hdst_gpu_group_staging_resources}/plugInfo.json.configure" @ONLY)
+file(GENERATE
+    OUTPUT "${_hdst_gpu_group_staging_resources}/plugInfo.json"
+    INPUT "${_hdst_gpu_group_staging_resources}/plugInfo.json.configure")
+add_executable(testUsdGenStormGpuGroupStagingPluginOrder
+    testUsdGenStormGpuGroupStagingPluginOrder.cpp)
+target_link_libraries(testUsdGenStormGpuGroupStagingPluginOrder PRIVATE
+    usdGenPatchedStorm hdsi ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenStormGpuGroupStagingPluginOrder
+    COMMAND testUsdGenStormGpuGroupStagingPluginOrder)
+set_tests_properties(testUsdGenStormGpuGroupStagingPluginOrder PROPERTIES
+    LABELS "T2;storm-extension;gpu-group-staging-plugin-order" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_imaging_resources}:${_hdst_gpu_group_staging_resources};LD_LIBRARY_PATH=$<TARGET_FILE_DIR:usdGenPatchedStorm>:${USD_INSTALL_DIR}/lib")
+
+add_executable(testUsdGenStormGpuGroupStagingSceneIndex
+    testUsdGenStormGpuGroupStagingSceneIndex.cpp)
+target_link_libraries(testUsdGenStormGpuGroupStagingSceneIndex PRIVATE
+    usdGenPatchedStorm ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenStormGpuGroupStagingSceneIndex
+    COMMAND testUsdGenStormGpuGroupStagingSceneIndex)
+set_tests_properties(testUsdGenStormGpuGroupStagingSceneIndex PROPERTIES
+    LABELS "T2;storm-extension;gpu-group-staging-scene-index" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+
+add_executable(testUsdGenStormGpuGroupStagingReentry
+    testUsdGenStormGpuGroupStagingReentry.cpp)
+target_link_libraries(testUsdGenStormGpuGroupStagingReentry PRIVATE
+    usdGenPatchedStorm ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenStormGpuGroupStagingReentry
+    COMMAND testUsdGenStormGpuGroupStagingReentry)
+set_tests_properties(testUsdGenStormGpuGroupStagingReentry PROPERTIES
+    LABELS "T2;storm-extension;gpu-group-staging-reentry" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+
 set(USDGEN_CUDA_BUILD_DIR "" CACHE PATH "Optional matching usdGen CUDA build for real transfer validation")
 if(USDGEN_CUDA_BUILD_DIR)
     find_package(CUDAToolkit REQUIRED)
@@ -126,5 +203,19 @@ if(USDGEN_CUDA_BUILD_DIR)
     add_test(NAME testUsdGenCudaNativeBasisCurves COMMAND testUsdGenCudaNativeBasisCurves)
     set_tests_properties(testUsdGenCudaNativeBasisCurves PROPERTIES
         LABELS "T2;storm-extension;native-basis-curves;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
+        ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+    add_executable(testUsdGenCudaGpuGroupPublication testCudaGpuGroupPublication.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaBasisCurvesProvider.cpp
+        ../../libs/usdGenImaging/usdGenImaging/cudaGlComputation.cpp)
+    target_compile_definitions(testUsdGenCudaGpuGroupPublication PRIVATE
+        USDGEN_HAS_CUDA_GL_INTEROP USDGEN_ENABLE_CUDA)
+    target_include_directories(testUsdGenCudaGpuGroupPublication PRIVATE
+        ../../libs/usdGen ../../libs/usdGenImaging ../../usdGenShaders/test)
+    target_link_libraries(testUsdGenCudaGpuGroupPublication PRIVATE usdGenPatchedStorm hdx
+        "${USDGEN_CUDA_BUILD_DIR}/libusdGen.so" "${USDGEN_CUDA_BUILD_DIR}/libusdGenGpu.a"
+        CUDA::cudart CUDA::cusolver ${CMAKE_DL_LIBS})
+    add_test(NAME testUsdGenCudaGpuGroupPublication COMMAND testUsdGenCudaGpuGroupPublication)
+    set_tests_properties(testUsdGenCudaGpuGroupPublication PROPERTIES
+        LABELS "T2;storm-extension;gpu-group-publication;cuda" SKIP_RETURN_CODE 77 TIMEOUT 60
         ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
 endif()
