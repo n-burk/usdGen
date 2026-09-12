@@ -62,7 +62,18 @@ public:
     // Non-coalesced short mutation of owner state. Capture input values, not
     // caller-owned mutable references. Commands may enqueue work/commands but
     // must not wait for them. They do not themselves change the work epoch.
-    bool PostCommand(std::function<void()> command);
+    // onCancel runs if shutdown discards an accepted command before execution.
+    bool PostCommand(std::function<void()> command, std::function<void()> onCancel = {});
+    // Synchronous compatibility boundaries only. Every call owns a separate
+    // framework completion graph, so concurrent callers never drain the same
+    // graph. Waiting cooperates with TBB; no application mutex/future/spin loop.
+    // Both reject calls from ANY pipeline work item or callback.
+    void InvokeOwner(std::function<void()> command);
+    // dispatch must invoke/retain completion and eventually call it. It may
+    // throw only if no asynchronous work retaining caller references was
+    // accepted. The completion is idempotent, including immediate completion.
+    void Await(std::function<void(std::function<void()>)> dispatch);
+    static bool IsExecuting() noexcept;
     uint64_t CancelPending();
     uint64_t AcceptedEpoch() const noexcept;
     uint64_t CallbackFailures() const noexcept;
@@ -70,6 +81,9 @@ public:
     // callback/work item; callback re-entry uses Submit, which never waits.
     // Before destruction the owner must stop/join external submitters.
     void Drain();
+    // Stop acceptance and complete/cancel queued callbacks while caller-owned
+    // state still exists. Same external-only/single-waiter rule as Drain.
+    void Shutdown();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

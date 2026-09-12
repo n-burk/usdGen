@@ -26,6 +26,8 @@ public:
 
     /// Register a kernel for (type, version). The registry owns the factory,
     /// not the instances. Returns false on duplicate (type, version).
+    /// Extension registration is startup-only: finish before launching any
+    /// compiler/readers. Runtime graph compilation never mutates the registry.
     bool Register(TfToken const &type, int algorithmVersion, Factory factory);
 
     /// Create an operator instance. *outVersion receives the resolved version.
@@ -42,7 +44,7 @@ public:
     std::vector<TfToken> KnownTypes() const;
 
 private:
-    UsdGenOpRegistry() = default;
+    UsdGenOpRegistry();
     struct Entry { TfToken type; int version; Factory factory; };
     std::vector<Entry> _entries;
 };
@@ -54,7 +56,8 @@ std::unique_ptr<UsdGenOp> CreateNoiseOp();
 std::unique_ptr<UsdGenOp> CreateLengthOp();
 std::unique_ptr<UsdGenOp> CreateWidthOp();
 
-/// Idempotent; called once from the session on first compile.
+/// Compatibility initializer. Built-ins are installed by registry construction;
+/// concurrent compiler calls only obtain that completed immutable initial state.
 void usdGenRegisterM1Operators();
 
 }  // namespace usdGen

@@ -127,5 +127,54 @@ int main() {
     CHECK(Until([&] { return started.load(); }));
     shutdown.reset();
     CHECK(observedCancellation && stalePublications == 0);
+
+    // Concurrent external compatibility callers each own a reply graph;
+    // none concurrently wait on the shared execution graph.
+    int ownerValue = 0;
+    std::atomic<int> replyFailures{0};
+    submitters.clear();
+    for (int t=0;t<8;++t) submitters.emplace_back([&] {
+        for (int i=0;i<32;++i) {
+            int mine = 0;
+            pipeline.InvokeOwner([&] { mine = ++ownerValue; });
+            if (mine <= 0) ++replyFailures;
+        }
+    });
+    for (auto& thread : submitters) thread.join();
+    CHECK(ownerValue == 256 && replyFailures == 0);
+    bool commandError = false;
+    try { pipeline.InvokeOwner([] { throw std::runtime_error("owner command failure"); }); }
+    catch (std::runtime_error const&) { commandError = true; }
+    CHECK(commandError);
+    pipeline.Await([](auto done) { done(); done(); }); // immediate/idempotent
+    bool dispatchError = false;
+    try { pipeline.Await([](auto) { throw std::runtime_error("dispatch failed before acceptance"); }); }
+    catch (std::runtime_error const&) { dispatchError = true; }
+    CHECK(dispatchError);
+    int rejectedReplies = 0;
+    pipeline.PostCommand([&] {
+        try { pipeline.InvokeOwner([] {}); }
+        catch (std::logic_error const&) { ++rejectedReplies; }
+        try { pipeline.Await([](auto done) { done(); }); }
+        catch (std::logic_error const&) { ++rejectedReplies; }
+    });
+    pipeline.Drain(); CHECK(rejectedReplies == 2);
+
+    // Invalidation from an owner command takes effect during that command,
+    // not behind an already queued Finished message.
+    uint64_t invalidated = 0;
+    pipeline.InvokeOwner([&] {
+        invalidated = pipeline.CancelPending();
+        if (pipeline.AcceptedEpoch() != invalidated) ++replyFailures;
+    });
+    CHECK(invalidated && replyFailures == 0);
+
+    int completedCommands = 0, cancelledCommands = 0;
+    {
+        Pipeline closing(runtime);
+        for (int i=0;i<128;++i)
+            CHECK(closing.PostCommand([&] { ++completedCommands; }, [&] { ++cancelledCommands; }));
+    }
+    CHECK(completedCommands + cancelledCommands == 128);
     return 0;
 }

@@ -8,10 +8,26 @@
 namespace usdGen {
 namespace {
 thread_local bool executingPipeline = false;
+thread_local void const* executingOwner = nullptr;
 struct ExecutionScope {
     bool previous = executingPipeline;
-    ExecutionScope() { executingPipeline = true; }
-    ~ExecutionScope() { executingPipeline = previous; }
+    void const* previousOwner = executingOwner;
+    explicit ExecutionScope(void const* owner = nullptr) {
+        executingPipeline = true; executingOwner = owner;
+    }
+    ~ExecutionScope() { executingPipeline = previous; executingOwner = previousOwner; }
+};
+
+// A distinct graph per external reply: reserve/release_wait is TBB's supported
+// external-completion protocol, while wait_for_all steals runnable work. No
+// graph here has concurrent waiters or inherits another request's exceptions.
+struct AwaitState {
+    tbb::flow::graph graph;
+    std::atomic<bool> signalled{false};
+    AwaitState() { graph.reserve_wait(); }
+    void Signal() {
+        if (!signalled.exchange(true, std::memory_order_acq_rel)) graph.release_wait();
+    }
 };
 }
 
@@ -47,7 +63,7 @@ struct UsdGenExecutionPipeline::Impl {
     explicit Impl(std::shared_ptr<UsdGenExecutionRuntime::Impl> runtime_)
         : runtime(std::move(runtime_)),
           owner(graph, tbb::flow::serial, [this](Message message) {
-              ExecutionScope scope;
+              ExecutionScope scope(this);
               Accept(std::move(message));
               return tbb::flow::continue_msg{};
           }),
@@ -125,8 +141,7 @@ UsdGenExecutionPipeline::UsdGenExecutionPipeline(UsdGenExecutionRuntime& runtime
 }
 UsdGenExecutionPipeline::~UsdGenExecutionPipeline() {
     if (executingPipeline) std::terminate();
-    impl_->closing->store(true, std::memory_order_release);
-    impl_->graph.wait_for_all();
+    Shutdown();
 }
 uint64_t UsdGenExecutionPipeline::Submit(Work work, Completion completion) {
     if (!work) return 0;
@@ -136,6 +151,10 @@ uint64_t UsdGenExecutionPipeline::Submit(Work work, Completion completion) {
     message.epoch = epoch;
     message.work = std::move(work);
     message.completion = std::move(completion);
+    if (executingOwner == impl_.get()) {
+        impl_->Accept(std::move(message));
+        return epoch;
+    }
     return impl_->owner.try_put(std::move(message)) ? epoch : 0;
 }
 uint64_t UsdGenExecutionPipeline::CancelPending() {
@@ -144,14 +163,54 @@ uint64_t UsdGenExecutionPipeline::CancelPending() {
     Impl::Message message;
     message.kind = Impl::Message::Kind::Cancel;
     message.epoch = epoch;
+    if (executingOwner == impl_.get()) {
+        impl_->Accept(std::move(message));
+        return epoch;
+    }
     return impl_->owner.try_put(message) ? epoch : 0;
 }
-bool UsdGenExecutionPipeline::PostCommand(std::function<void()> command) {
+bool UsdGenExecutionPipeline::PostCommand(std::function<void()> command,
+                                         std::function<void()> onCancel) {
     if (!command || impl_->closing->load(std::memory_order_acquire)) return false;
     Impl::Message message;
     message.kind = Impl::Message::Kind::Command;
     message.publish = std::move(command);
+    if (onCancel) message.completion = [onCancel=std::move(onCancel)](
+        uint64_t, Outcome outcome, std::exception_ptr) {
+        if (outcome == Outcome::Superseded) onCancel();
+    };
     return impl_->owner.try_put(std::move(message));
+}
+bool UsdGenExecutionPipeline::IsExecuting() noexcept { return executingPipeline; }
+
+void UsdGenExecutionPipeline::Await(std::function<void(std::function<void()>)> dispatch) {
+    if (executingPipeline) throw std::logic_error("graph work must not synchronously await a reply");
+    if (!dispatch) throw std::invalid_argument("missing reply dispatcher");
+    std::shared_ptr<AwaitState> state;
+    impl_->runtime->arena.execute([&] { state = std::make_shared<AwaitState>(); });
+    std::exception_ptr dispatchError;
+    try { dispatch([state] { state->Signal(); }); }
+    catch (...) { dispatchError = std::current_exception(); state->Signal(); }
+    state->graph.wait_for_all();
+    (void)state->signalled.load(std::memory_order_acquire);
+    if (dispatchError) std::rethrow_exception(dispatchError);
+}
+
+void UsdGenExecutionPipeline::InvokeOwner(std::function<void()> command) {
+    if (!command) throw std::invalid_argument("missing owner command");
+    struct Reply { std::exception_ptr error; };
+    auto reply = std::make_shared<Reply>();
+    Await([&, reply, command=std::move(command)](std::function<void()> done) mutable {
+        if (!PostCommand([reply, command=std::move(command), done] {
+                try { command(); }
+                catch (...) { reply->error = std::current_exception(); }
+                done();
+            }, [reply, done] {
+                reply->error = std::make_exception_ptr(std::runtime_error("pipeline closed before command execution"));
+                done();
+            })) throw std::runtime_error("pipeline rejected owner command");
+    });
+    if (reply->error) std::rethrow_exception(reply->error);
 }
 uint64_t UsdGenExecutionPipeline::AcceptedEpoch() const noexcept {
     return impl_->accepted->load(std::memory_order_acquire);
@@ -161,6 +220,12 @@ uint64_t UsdGenExecutionPipeline::CallbackFailures() const noexcept {
 }
 void UsdGenExecutionPipeline::Drain() {
     if (executingPipeline) throw std::logic_error("graph work must not synchronously drain a pipeline");
+    impl_->graph.wait_for_all();
+}
+
+void UsdGenExecutionPipeline::Shutdown() {
+    if (executingPipeline) throw std::logic_error("graph work must not synchronously shut down a pipeline");
+    impl_->closing->store(true, std::memory_order_release);
     impl_->graph.wait_for_all();
 }
 

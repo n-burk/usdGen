@@ -92,7 +92,8 @@ struct UsdGenGroomSceneIndex::_Groom {
     SdfPath description;
     ::usdGenImaging::UsdGenSessionKey key;
     ::usdGenImaging::UsdGenSessionHandle session;
-    usdGenImaging::UsdGenDirtyRouter router;
+    using RouterSnapshot = std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter>;
+    RouterSnapshot router;
     usdGenImaging::UsdGenEngineBridge bridge;
     int republishToken = -1;
     // P0 race fix: readers snapshot-and-release (atomic_load, no mutex on
@@ -319,7 +320,7 @@ UsdGenGroomSceneIndex::_AdoptGroom(SdfPath const &groomRoot) const
                 // (Review 3) payload travels — never reread live
                 // Generation()/LastReport(). Unpublished commits no-op.
                 if (!payload.published) return;
-                index->_RepublishByRoot(groomRoot, payload);
+                index->_RepublishByRoot(groomRoot, groomLocked, payload);
             });
     }
     self->_grooms.push_back(std::move(groom));
@@ -657,7 +658,8 @@ UsdGenGroomSceneIndex::_PrimsDirtied(
                 usdGen::UsdGenPendingDirty pending;
                 HdSceneIndexObserver::DirtiedPrimEntries single;
                 single.push_back(e);
-                g->router.Route(single, &pending);
+                auto router = std::atomic_load(&g->router);
+                if (router) router->Route(single, &pending);
                 if (pending.Any()) {
                     // The current engine stores value snapshots, so an
                     // input dirty must refresh them before evaluation.
@@ -847,9 +849,8 @@ UsdGenGroomSceneIndex::_RepublishLocked(
     _Groom &groom,
     ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const
 {
-    // Attachment fields are immutable after construction (Review 5):
-    // session/key/description never mutate, so no data race with
-    // _ForgetGroomsUnder (which only erases membership + detaches).
+    // Consume the paired payload, not the live session attachment, which can
+    // be cleared during detach. Membership is checked again at the map swap.
     if (!payload.published || !payload.generation) return;
     usdGen::UsdGenGenerationConstPtr const &gen = payload.generation;
     if (gen->device) {
@@ -864,14 +865,18 @@ UsdGenGroomSceneIndex::_RepublishLocked(
     // Copy-on-write under _stateMutex: clone the current snapshot, apply
     // the report diff, build new tile sources, then atomic_store the fresh
     // map. Readers holding older snapshots keep reading them lock-free.
-    // (Review 4) Rebuild THIS recipient's router from the payload
-    // generation's graph BEFORE the map swap + notice forwarding.
-    if (groom.session && groom.session->Engine()) {
-        groom.router.Rebuild(groom.session->Engine()->Graph());
-    }
+    // Rebuild THIS recipient's router from the paired routing snapshot before
+    // the map swap + notice forwarding. Do not consult the live engine: a
+    // concurrent commit may already have replaced its graph/report.
+    auto router = std::make_shared<usdGenImaging::UsdGenDirtyRouter>();
+    if (payload.routing) router->Rebuild(*payload.routing);
     _Groom::PublishedSnapshot next;
     {
         std::lock_guard<std::mutex> lock(self->_stateMutex);
+        if (std::none_of(self->_grooms.begin(), self->_grooms.end(),
+                [&](auto const& member) { return member.get() == &groom; })) return;
+        std::atomic_store(&groom.router,
+            std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter>(std::move(router)));
         _Groom::PublishedMap fresh;
         if (_Groom::PublishedSnapshot cur =
                 std::atomic_load(&groom.published)) {
@@ -935,6 +940,7 @@ UsdGenGroomSceneIndex::_RepublishLocked(
 void
 UsdGenGroomSceneIndex::_RepublishByRoot(
     SdfPath const &groomRoot,
+    std::shared_ptr<_Groom> const &expectedGroom,
     ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const
 {
     std::shared_ptr<_Groom> slot;
@@ -944,7 +950,7 @@ UsdGenGroomSceneIndex::_RepublishByRoot(
             // Exact identity: same shared_ptr instance still a member.
             // A stale weak ref that expired is already filtered by the
             // callback's lock(); this covers re-adoption at the same path.
-            if (g && g->groomRoot == groomRoot) {
+            if (g && g == expectedGroom && g->groomRoot == groomRoot) {
                 slot = g;
                 break;
             }

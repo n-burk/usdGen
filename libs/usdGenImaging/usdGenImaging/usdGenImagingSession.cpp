@@ -63,12 +63,9 @@ void UsdGenImagingSession::_Commit(usdGen::UsdGenCommitReason reason,
     // structural/reload marks arriving after its snapshot, or marks on a
     // store-driven commit that did not stage a fresh description at all.
 
-    // Serialize session-side bookkeeping with the engine commit: the
-    // generation-advance check AND the LastReport copy below both happen
-    // while the engine commit mutex serializes Commit callers, so two
-    // racing commits cannot dispatch the same generation twice and no
-    // callback ever iterates a report replaced mid-flight. The payload is
-    // immutable: callbacks reread NOTHING live.
+    // Serialize session-side bookkeeping with the engine snapshot commit:
+    // generation, report, diagnostics, stats and routing are copied from one
+    // paired immutable result, so callbacks reread NOTHING live.
     // Hold _stageCommitMutex across the engine Commit: pairs with
     // StageAndCommit so staging+commit are atomic w.r.t. concurrent
     // session commits. Callbacks remain inside this serialization boundary
@@ -78,17 +75,22 @@ void UsdGenImagingSession::_Commit(usdGen::UsdGenCommitReason reason,
     _engine->SetContext(_context.load());
     if (desc) _engine->SetGraphDesc(*desc);
     const int64_t before = _generation.load();
-    usdGen::UsdGenGenerationConstPtr gen = _engine->Commit(_frame.load(), reason);
-    for (auto const& error : _engine->LastDiagnostics().errors)
+    auto snapshot = _engine->CommitSnapshot(_frame.load(), reason);
+    if (!snapshot) return;
+    for (auto const& error : snapshot->diagnostics.errors)
         TF_WARN("usdGen commit rejected: %s", error.c_str());
-    for (auto const& warning : _engine->LastDiagnostics().warnings)
+    for (auto const& warning : snapshot->diagnostics.warnings)
         TF_WARN("usdGen commit: %s", warning.c_str());
     CommitPayload payload;
+    usdGen::UsdGenGenerationConstPtr const &gen = snapshot->generation;
     if (gen && gen->id != before) {
         _generation = gen->id;
         payload.published = true;
         payload.generation = gen;
-        payload.report = _engine->LastReport();
+        payload.report = snapshot->report;
+        payload.routing = snapshot->routing;
+        payload.diagnostics = snapshot->diagnostics;
+        payload.stats = snapshot->stats;
     }
     if (!payload.published) return;
 

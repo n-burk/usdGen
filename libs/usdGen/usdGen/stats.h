@@ -46,7 +46,8 @@ struct UsdGenNodeStats
     uint32_t warnings = 0;   // e.g. "guide angle rejected 42% of candidates"
 };
 
-/// Atomic counters, lock-free (03 §9.2). Imaging-side counters written by
+/// Plain values collected by their execution owner and published as immutable
+/// snapshots; the fields themselves are not atomic. Imaging counters include
 /// usdGenImaging: commits, publishedTiles, noticeEntries, supersessions
 /// (06-imaging.md §9).
 struct UsdGenStats

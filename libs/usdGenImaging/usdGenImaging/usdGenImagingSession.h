@@ -117,6 +117,9 @@ public:
         bool published = false;
         usdGen::UsdGenGenerationConstPtr generation;
         usdGen::UsdGenDirtyReport report;
+        std::shared_ptr<const usdGen::UsdGenGraphRoutingSnapshot> routing;
+        usdGen::UsdGenDiagnostics diagnostics;
+        usdGen::UsdGenStats stats;
     };
 
     /// Atomic desc-dirty consume for staging (S14): returns true and clears

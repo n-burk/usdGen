@@ -9,6 +9,7 @@
 
 #include "usdGen/opRegistry.h"
 #include "usdGen/session.h"
+#include "usdGen/scheduler.h"
 #include "usdGen/graph.h"
 #include "usdGen/graphDesc.h"
 #include "usdGen/compiler.h"

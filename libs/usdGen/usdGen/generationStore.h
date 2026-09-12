@@ -36,11 +36,16 @@ using UsdGenGenerationConstPtr = std::shared_ptr<const UsdGenGeneration>;
 class UsdGenGenerationStore
 {
 public:
+    /// Private worker candidate stores start from the last published immutable
+    /// generation. Discarded candidates consume no public generation ids;
+    /// only the accepted publication advances the public sequence.
+    explicit UsdGenGenerationStore(UsdGenGenerationConstPtr baseline = {});
     /// Commit thread only: assigns the next generation id, wraps the
     /// (moved) generation in a const shared_ptr and std::atomic_stores it.
     void Publish(UsdGenGeneration gen);
 
-    /// Lock-free read (Hydra readers: GetPrim only atomic_loads — I7).
+    /// Atomic snapshot read without an application-owned guard. The standard
+    /// library does not promise lock-free shared_ptr atomic operations.
     UsdGenGenerationConstPtr Get() const noexcept;
 
     /// Cheap structural diff of two generations (03 §6.1): payload changes via

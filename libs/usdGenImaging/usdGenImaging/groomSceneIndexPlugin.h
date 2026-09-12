@@ -134,6 +134,7 @@ private:
     // resolves the live slot, then calls _Republish unlocked).
     void _RepublishByRoot(
         SdfPath const &groomRoot,
+        std::shared_ptr<_Groom> const &expectedGroom,
         ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const;
 
     // StormSurgery test accessors (testHook.h): lock-free snapshot reads

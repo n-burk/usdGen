@@ -16,6 +16,12 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 
+UsdGenGenerationStore::UsdGenGenerationStore(UsdGenGenerationConstPtr baseline)
+    : _current(std::move(baseline))
+{
+    if (_current) _nextId = _current->id + 1;
+}
+
 void UsdGenGenerationStore::Publish(UsdGenGeneration gen)
 {
     // Zero-based ids: the first published generation has id 0, so across any

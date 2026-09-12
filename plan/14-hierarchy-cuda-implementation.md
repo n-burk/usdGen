@@ -174,7 +174,7 @@ cache mutexes through resource ownership changes:
   overload extracts a snapshot; live imaging callback payload integration
   and removal of its graph rereads remain next steps.
 
-This does not finish the concurrency revision. The legacy engine session and
+At this checkpoint, this did not finish the concurrency revision. The legacy engine session and
 imaging entry points still use their old synchronization, although their CUDA
 execution now uses private workspaces. The new asynchronous queue is not yet
 the usdview/imaging/tool-session dispatch path. GPU kernel helpers still use
@@ -196,6 +196,71 @@ classification after graph destruction. The CUDA-disabled core also builds.
 not full-plan completion or release/performance sign-off.
 The queue test also passed **30 consecutive runs**; the updated CUDA RBF session
 and parameter tests each passed memcheck and initcheck with **0 errors**.
+
+### Scheduled engine sessions and paired imaging payloads
+
+The engine `UsdGenSession` now uses the execution framework rather than its
+former commit/pending mutexes:
+
+- A short command owner accepts immutable descriptor snapshots, dirties,
+  context/device-publication changes and tool reservations. A separate serial
+  work owner exclusively holds the compiler, graph, scheduler and CUDA
+  workspace. An occupied cook does not prevent owner commands being accepted.
+- `CommitAsync` is the primary execution API. `CommitSnapshot`, `Commit` and
+  synchronous setters are external compatibility adapters using independent
+  TBB reply graphs (`reserve_wait`/`release_wait`), not mutexes, futures or spin
+  waits. Callback/work-node synchronous waits are rejected; callbacks can post
+  mutations and submit follow-up work. Default pipelines share an arena;
+  explicit thread limits still select private runtimes. This is scheduling
+  ownership evidence, not a measured global CPU/GPU concurrency-budget gate.
+- Input mutations immediately invalidate accepted work. Pending dirt remains
+  until successful current publication. The cooker compares immutable input
+  identity and the last published/cooked work epochs: stale or failed private
+  caches cannot become the baseline for a later incremental evaluation.
+  Value-only benchmark invalidation does not require recompilation.
+- Built-in operator registration is completed by registry construction, not
+  repeated mutable insertion on each compile. Concurrent cold compiles only
+  read it. Custom registration remains an explicitly startup-only API; dynamic
+  runtime plugin registration is not implemented by this change.
+- Candidates are numbered from the last public generation, and stats start
+  from that same baseline. Rejected/superseded candidates consume no public
+  generation IDs or commit counts. A failed current attempt exposes its
+  diagnostics and compiled graph metadata with the retained last-good
+  generation and empty dirty report; it completes as `Failed` and stays dirty.
+- One immutable session snapshot pairs geometry, report, diagnostics, stats,
+  detached routing/graph metadata, node stats and CUDA binding stats. Public
+  `Graph()` now returns an owning metadata value, not a reference to a mutable
+  compiled graph. Shared-pointer atomic publication is library-managed; no
+  claim is made that the standard library implements it lock-free.
+- CUDA device selection is captured on the submitting thread and explicitly
+  passed to private workspace creation/execution. Existing tool reservation,
+  revision-identity/topology checks and press-time override publication now
+  execute on the command owner. Shutdown closes acceptance and delivers
+  terminal callbacks while session state and retained resources still exist.
+- Imaging consumes the paired result, including routing, rather than rereading
+  a live graph/report. Each groom router is an immutable snapshot. Republish
+  verifies the exact attachment instance (not just the same path), including
+  rechecking membership when swapping the published map.
+
+This is **not** the end of the no-application-mutex migration. Imaging's stage,
+callback, store, scene-state/frame and auxiliary registry guards remain; their
+owner-lane migration must preserve notice ordering and detach/re-adopt behavior.
+In particular, the attachment check is not proof of notice ordering across
+concurrent removal after the map swap. Stock Hydra device interop, asynchronous
+device retirement, full tool dispatch, failure injection and performance gates
+also remain open. The original M0–M8/release scope below is unchanged.
+
+Validation: the full CUDA-enabled build and all **65/65 non-benchmark T0/T1**
+tests pass. The new async-session test covers a deliberately held capture,
+same-path edits accepted during work, supersession, numerical width output,
+paired snapshots, failure/retry, concurrent external waits, callback re-entry
+and shutdown. It passed **100 consecutive runs**. The pipeline reply tests
+cover eight concurrent waiting callers, exceptions, forbidden callback waits,
+immediate/idempotent replies and queued-command shutdown; a standalone
+AddressSanitizer/UndefinedBehaviorSanitizer run also passed. The CUDA-disabled
+core builds. CUDA tools memcheck and RBF-session initcheck each reported
+**0 errors** after the session migration. These are functional checks, not
+release or full-plan completion claims.
 
 ## Original scope remains required
 
