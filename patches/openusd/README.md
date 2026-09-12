@@ -312,3 +312,18 @@ scope fix reported zero errors (`c022db`). This includes the source RBF-cache,
 root/stable-ID, and retained-lease tests only; it makes no broader workstation
 or sanitizer claim. The earlier OOM-marked run was not a pass; its isolated
 rerun is now green.
+
+### Renderer-capability and same-session Groom revalidation
+
+The application render regression now creates two registry-built GL chains
+from one authored `usdGen:sessionId`. It observes two renderer-local CUDA
+sessions, distinct raw controls/candidates, and independent control
+ticket/generation updates for the same Width edit. Only the first branch is
+rendered to EGL; the second checks ingress/session isolation. A non-GL registry
+branch and a direct Groom-plugin append lacking renderer-display input emit no
+private control. The Groom render target built successfully (`ded4f4`), its
+focused runtime test passed (`b303d1`, 1.61 s), and it passed ten repeats (`6bd444`, 6.61 s). The
+separate stable 14-test selection passed (`44a56c`, 4.07 s), excluding exactly
+the known bare-provider target and this render target. These focused results
+are not a full private-harness claim and do not change the bare-provider
+regression.

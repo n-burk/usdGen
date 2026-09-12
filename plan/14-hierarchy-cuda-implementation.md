@@ -1641,3 +1641,22 @@ memcheck reported zero errors (`c022db`). This includes the source RBF-cache,
 root/stable-ID, and retained-lease tests; it makes no broader workstation or
 sanitizer claim. The earlier OOM-marked run was not a pass; its isolated rerun
 is now green.
+
+### Renderer-capability and same-session Groom revalidation (2026-09-12)
+
+The live EGL Groom render test now uses two registry-built GL chains that share
+one authored `usdGen:sessionId`. It verifies two renderer-local CUDA session
+keys, distinct raw controls/candidates, and independent ticket/generation
+advancement after the same authored Width edit. Only the first chain renders
+to EGL; the second is an ingress/session-isolation assertion, not a second
+framebuffer proof. The same test verifies that a non-GL registry chain and a
+direct Groom-plugin append with missing renderer-display input publish no
+private group control.
+
+The focused Groom render target built successfully (`ded4f4`), the focused
+runtime test passed (`b303d1`, 1.61 s), and the Groom render target then passed ten
+consecutive repetitions (`6bd444`, 6.61 s). A stable 14-test private selection
+excluding exactly `testUsdGenCudaNativeBasisCurves` and
+`testUsdGenCudaGroomRender` passed (`44a56c`, 4.07 s). This is not a full
+16-target harness result and does not change the known bare-provider
+regression.

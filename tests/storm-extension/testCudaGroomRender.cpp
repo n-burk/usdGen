@@ -4,6 +4,7 @@
 
 #include "usdGen/opRegistry.h"
 #include "usdGenImaging/groomSceneIndexPlugin.h"
+#include "usdGenImaging/usdGenImagingSession.h"
 
 #include "pxr/base/tf/errorMark.h"
 #include "pxr/imaging/garch/glApi.h"
@@ -24,8 +25,10 @@
 #include "pxr/imaging/hdx/renderTask.h"
 #include "pxr/imaging/hdx/unitTestDelegate.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usdImaging/usdImaging/sceneIndices.h"
 #include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
@@ -105,22 +108,55 @@ int main() {
     indices.stageSceneIndex->ApplyPendingUpdates();
     usdGen::usdGenRegisterM1Operators();
 
-    // This call is the capability test: registry inputArgs supplies GL, so
-    // Groom may expose the private raw control and the private staging plugin
-    // is present in the same actual renderer branch.
-    auto chain = HdSceneIndexPluginRegistry::GetInstance().AppendSceneIndicesForRenderer(
-        "GL", indices.finalSceneIndex, "cuda-groom-egl");
+    // Both renderer chains deliberately use the same authored session id.
+    // CUDA generations must still receive distinct renderer-local sessions.
+    UsdPrim groomPrim = stage->GetPrimAtPath(SdfPath("/Character/Groom"));
+    UsdAttribute sessionId = groomPrim.CreateAttribute(
+        TfToken("usdGen:sessionId"), SdfValueTypeNames->String,
+        /*custom=*/false, SdfVariabilityUniform);
+    CHECK(sessionId && sessionId.Set(std::string("shared-groom-render-session")));
+    indices.stageSceneIndex->ApplyPendingUpdates();
+
+    // Registry inputArgs supplies GL, so Groom may expose the private raw
+    // control and staging is present in this actual renderer branch.  Create
+    // two renderer branches with the exact same authored session id: their
+    // CUDA keys must nevertheless be renderer-local.
+    auto &registry = HdSceneIndexPluginRegistry::GetInstance();
+    auto chain = registry.AppendSceneIndicesForRenderer(
+        "GL", indices.finalSceneIndex, "cuda-groom-egl-a");
+    auto secondChain = registry.AppendSceneIndicesForRenderer(
+        "GL", indices.finalSceneIndex, "cuda-groom-egl-b");
     auto* groom = _Find<UsdGenGroomSceneIndex>(chain);
     auto* staging = _Find<HdStBasisCurvesGpuGroupStagingSceneIndex>(chain);
-    CHECK(groom && staging);
-    if (!groom || !staging) return 1;
+    auto* secondGroom = _Find<UsdGenGroomSceneIndex>(secondChain);
+    CHECK(groom && staging && secondGroom);
+    if (!groom || !staging || !secondGroom) return 1;
     groom->Synchronize();
+    secondGroom->Synchronize();
     SdfPath const scope("/Character/Groom/hair/__usdGenRender");
     auto control = _Control(*groom, scope);
+    auto secondControl = _Control(*secondGroom, scope);
     CHECK(control && control->GetCandidate() && control->GetCandidate()->ownsSubtree &&
-          !control->GetCandidate()->members.empty());
-    if (!control || !control->GetCandidate() || control->GetCandidate()->members.empty()) return 1;
+          !control->GetCandidate()->members.empty() && secondControl &&
+          secondControl->GetCandidate() && secondControl != control &&
+          secondControl->GetCandidate() != control->GetCandidate());
+    if (!control || !control->GetCandidate() || control->GetCandidate()->members.empty() ||
+        !secondControl || !secondControl->GetCandidate()) return 1;
     CHECK(groom->GetChildPrimPaths(scope).empty());
+    CHECK(secondGroom->GetChildPrimPaths(scope).empty());
+
+    size_t rendererLocalSessions = 0;
+    for (auto const& session : usdGenImaging::UsdGenSessionStore::GetInstance().LiveSessions()) {
+        auto const& key = session->Key();
+        if (key.sessionId == "shared-groom-render-session" &&
+            key.groomRoot == SdfPath("/Character/Groom") && key.rendererLocal) {
+            ++rendererLocalSessions;
+        }
+    }
+    CHECK(rendererLocalSessions == 2);
+
+    auto const firstCandidate = control->GetCandidate();
+    auto const secondCandidate = secondControl->GetCandidate();
     SdfPath const rprim = control ? control->GetCandidate()->members.front().rprimPath : SdfPath();
 
     GarchGLApiLoad(); HgiGL hgi;
@@ -150,10 +186,41 @@ int main() {
 
     UsdAttribute width = stage->GetAttributeAtPath(
         SdfPath("/Character/Groom/hair/Ops/width.usdGen:width"));
-    CHECK(width && width.Set(.12f)); indices.stageSceneIndex->ApplyPendingUpdates(); groom->Synchronize();
+    CHECK(width && width.Set(.12f)); indices.stageSceneIndex->ApplyPendingUpdates();
+    groom->Synchronize(); secondGroom->Synchronize();
+    auto changedControl = _Control(*groom, scope);
+    auto changedSecondControl = _Control(*secondGroom, scope);
+    CHECK(changedControl && changedControl->GetCandidate() && changedSecondControl &&
+          changedSecondControl->GetCandidate() &&
+          changedControl->GetCandidate()->ticket > firstCandidate->ticket &&
+          changedSecondControl->GetCandidate()->ticket > secondCandidate->ticket &&
+          changedControl->GetCandidate()->generation > firstCandidate->generation &&
+          changedSecondControl->GetCandidate()->generation > secondCandidate->generation &&
+          changedControl->GetCandidate() != changedSecondControl->GetCandidate());
     _Execute(engine, *index, &tasks, collection); staging->Poll(); _Execute(engine, *index, &tasks, collection);
     size_t changedLit = 0; auto after = _Pixels(buffer, &changedLit);
     CHECK(!after.empty() && changedLit != 0 && after != before);
+
+    // The plugin is registered for all renderers, but private control
+    // publication is a GL capability, not a header-presence side effect.
+    auto nonGlChain = registry.AppendSceneIndicesForRenderer(
+        "JsonMetadataOnly", indices.finalSceneIndex, "cuda-groom-non-gl");
+    auto* nonGlGroom = _Find<UsdGenGroomSceneIndex>(nonGlChain);
+    CHECK(nonGlGroom); if (nonGlGroom) {
+        nonGlGroom->Synchronize();
+        CHECK(!_Control(*nonGlGroom, scope));
+    }
+
+    // Append the loaded Groom plugin directly without registry inputArgs:
+    // missing __rendererDisplayName must also retain the CPU-only route.
+    auto noDisplayChain = registry.AppendSceneIndex(
+        TfToken("UsdGenGroomSceneIndexPlugin"), indices.finalSceneIndex, nullptr,
+        "cuda-groom-no-display");
+    auto* noDisplayGroom = _Find<UsdGenGroomSceneIndex>(noDisplayChain);
+    CHECK(noDisplayGroom); if (noDisplayGroom) {
+        noDisplayGroom->Synchronize();
+        CHECK(!_Control(*noDisplayGroom, scope));
+    }
     CHECK(errors.IsClean());
     return failures ? 1 : 0;
 }
