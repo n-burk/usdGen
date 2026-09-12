@@ -14,7 +14,6 @@
 #include "pxr/base/tf/refPtr.h"
 #include "pxr/imaging/hd/systemMessages.h"
 #include <tbb/concurrent_queue.h>
-#include <tbb/concurrent_vector.h>
 #include <tbb/flow_graph.h>
 #include <algorithm>
 #include <cmath>
@@ -139,12 +138,22 @@ struct UsdGenSceneService {
     usdGen::UsdGenExecutionRuntime runtime{8};
     tbb::flow::graph retirement;
     tbb::flow::function_node<std::function<void()>> cleanup;
-    tbb::concurrent_vector<Entry> states;
+    // concurrent_vector reserves an index before placement-new constructs its
+    // value.  A concurrent DrainRetired range walk can therefore observe an
+    // unconstructed Entry. Queue registration publishes a fully constructed
+    // value; only the serialized external drainer owns `states`.
+    tbb::concurrent_queue<Entry> registrations;
+    std::vector<Entry> states;
     UsdGenSceneService() : cleanup(retirement, tbb::flow::unlimited,
         [](std::function<void()> action) { action(); return tbb::flow::continue_msg{}; }) {}
     ~UsdGenSceneService();
     void Retire(std::function<void()> action) {
         if (!cleanup.try_put(std::move(action))) std::terminate();
+    }
+    void CollectRegistrations() {
+        Entry entry;
+        while (registrations.try_pop(entry))
+            states.push_back(std::move(entry));
     }
     void DrainRetired();
 };
@@ -549,6 +558,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
 };
 
 UsdGenSceneService::~UsdGenSceneService() {
+    // Process shutdown has stopped public scene construction.  Move any final
+    // complete registrations into the same drainer-owned catalog before
+    // closing states and disarming their retirement records.
+    CollectRegistrations();
     std::vector<std::shared_ptr<UsdGenGroomSceneIndex::_State>> live;
     std::vector<std::shared_ptr<RetirementRecord>> liveRecords;
     for (auto const& entry : states) {
@@ -585,15 +598,32 @@ UsdGenSceneService::~UsdGenSceneService() {
 }
 void UsdGenSceneService::DrainRetired() {
     if (Pipeline::IsExecuting()) throw std::logic_error("scene callback cannot drain retirement");
+    // A producer may register while this drain is underway; entries arriving
+    // after this queue snapshot remain safe for the next external drain.
+    CollectRegistrations();
     std::vector<std::shared_ptr<UsdGenGroomSceneIndex::_State>> retired;
+    std::vector<std::shared_ptr<RetirementRecord>> records;
     for (auto const& entry : states) {
         if (auto state = entry.state.lock()) {
-            if (state->closing.load()) retired.push_back(std::move(state));
-        } else entry.retirement->Wait();
+            if (state->closing.load()) {
+                retired.push_back(std::move(state));
+                records.push_back(entry.retirement);
+            }
+        } else {
+            // The State may have lost its last reference before its custom
+            // deleter could enqueue cleanup. Its record bridges that gap.
+            records.push_back(entry.retirement);
+        }
     }
     for (auto const& state : retired) state->Synchronize();
+    // Release the references captured above before waiting: their final
+    // release can be the producer that enqueues retirement cleanup.
     retired.clear();
-    retirement.wait_for_all();
+    // Do not call retirement.wait_for_all here. The pinned TBB graph resets
+    // its root count after a wait, so a concurrent final-reference producer
+    // can race a global drain. Each record instead waits through exactly its
+    // State's final-reference -> enqueue -> deletion completion boundary.
+    for (auto const& record : records) record->Wait();
 }
 
 UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id)
@@ -611,7 +641,9 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input
             delete state;
         } else service.Retire([state, record] { delete state; record->Done(); });
     });
-    service.states.push_back({_state, record});
+    // Queue handoff happens only after the Entry has been fully constructed;
+    // the serialized external drain transfers it into the catalog.
+    service.registrations.push(UsdGenSceneService::Entry{_state, record});
 }
 HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input, int id) {
     auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id));

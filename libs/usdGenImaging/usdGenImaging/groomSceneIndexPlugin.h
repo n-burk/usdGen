@@ -68,7 +68,9 @@ public:
     // Explicit serialized frontend host/test boundary. Reads never call this.
     // Delivers completed notices here; observer/owner callbacks must not wait.
     void Synchronize();
-    // External shutdown/test boundary after clients have stopped submitting.
+    // Serialized external shutdown/test boundary. Exactly one caller drains
+    // at a time; scene registration/final-reference retirement may continue
+    // concurrently and is collected safely by that caller.
     static void DrainRetired();
     // -- HdSceneIndexObserver (input observations; 06 §3.2) --------------------
     // HdSingleInputFilteringSceneIndexBase installs a private bridge observer

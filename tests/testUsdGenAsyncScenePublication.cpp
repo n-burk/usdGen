@@ -110,6 +110,40 @@ int main() {
           "explicit frontend Synchronize installs completed removal");
     Check(!observer.wrongThread,"no notification escaped onto a worker");
     index->RemoveObserver(TfCreateWeakPtr(&observer));
-    index.Reset(); UsdGenGroomSceneIndex::DrainRetired();
+    index.Reset();
+    UsdGenGroomSceneIndex::DrainRetired();
+    // Final-reference producers may arrive concurrently, while retirement
+    // itself remains a single external drain boundary.
+    std::atomic<bool> startRetirement{false};
+    std::atomic<bool> releaseRetirement{false};
+    std::atomic<unsigned> enteredRetirement{0};
+    std::atomic<unsigned> completedRetirement{0};
+    std::vector<std::thread> retirementProducers;
+    for(int worker=0; worker!=4; ++worker) {
+        retirementProducers.emplace_back([&,worker] {
+            while(!startRetirement.load(std::memory_order_acquire)) std::this_thread::yield();
+            auto localInput=HdRetainedSceneIndex::New();
+            for(int cycle=0; cycle!=8; ++cycle) {
+                auto transient=UsdGenGroomSceneIndex::New(localInput,7000+worker*16+cycle);
+                enteredRetirement.fetch_add(1,std::memory_order_release);
+                while(!releaseRetirement.load(std::memory_order_acquire)) std::this_thread::yield();
+                transient.Reset();
+                completedRetirement.fetch_add(1,std::memory_order_release);
+            }
+        });
+    }
+    startRetirement.store(true,std::memory_order_release);
+    while(enteredRetirement.load(std::memory_order_acquire)!=4) std::this_thread::yield();
+    releaseRetirement.store(true,std::memory_order_release);
+    // The main thread is the sole external drainer while producers continue
+    // releasing final references; completion is monotonic, never transient.
+    while(completedRetirement.load(std::memory_order_acquire)!=32) {
+        UsdGenGroomSceneIndex::DrainRetired();
+        std::this_thread::yield();
+    }
+    for(auto& producer:retirementProducers) producer.join();
+    UsdGenGroomSceneIndex::DrainRetired();
+    Check(completedRetirement.load(std::memory_order_acquire)==32,
+          "concurrent final-reference producers complete through retirement records");
     return failures?1:0;
 }

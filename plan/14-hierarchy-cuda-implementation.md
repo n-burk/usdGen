@@ -1374,3 +1374,34 @@ oracles were rejected and the conservative derivation was independently
 reviewed by coordinator/root. Live all-tile atomic rendering remains open and
 requires a renderer-level transaction; these scalar metadata/presentation
 tests are not evidence for that frontend render contract.
+
+### Async retirement publication checkpoint (2026-09-11)
+
+Two independent retirement races were corrected. Normal `DrainRetired` no
+longer calls a global TBB graph wait while final-reference producers may still
+enqueue cleanup. It captures the affected retirement records, synchronizes
+closing states, releases the captured strong references, then waits each record
+across its final-reference-to-enqueue-to-cleanup completion boundary. The
+global graph wait remains only during static service teardown after producers
+are quiesced.
+
+The scene-service registration catalog now receives fully constructed entries
+through `tbb::concurrent_queue`; one external drainer transfers them into its
+ordinary catalog before inspecting retirement state. This avoids the pinned
+TBB `concurrent_vector` ordering in which `push_back` reserves/increments the
+visible index before placement-constructing the value. `DrainRetired` requires
+exactly one external caller at a time, while scene registration and
+final-reference retirement may continue concurrently; no application mutex or
+runtime diagnostic guard was added.
+
+Before the queue handoff, the strong concurrent regression observed 24
+signal-139 failures in 400 P8 release processes. With the handoff it passed
+400/400 release processes. A CPU-off ASAN/UBSAN core-and-imaging build passed
+50 serial repetitions with `ASAN_OPTIONS=detect_leaks=0` and
+`UBSAN_OPTIONS=halt_on_error=1`. These are qualified checks: the stock SDK was
+not instrumented, leak detection was disabled, and no crash stack was
+captured; the registration diagnosis rests on the pinned TBB
+reserve-before-placement source ordering. A complete post-queue suite result
+is now available: the final main build passed and the post-queue
+non-benchmark T0/T1 suite passed 83/83 under `-j6` in 10.22 seconds, with no
+skips (root run 44165).
