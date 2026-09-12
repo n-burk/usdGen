@@ -1405,3 +1405,61 @@ reserve-before-placement source ordering. A complete post-queue suite result
 is now available: the final main build passed and the post-queue
 non-benchmark T0/T1 suite passed 83/83 under `-j6` in 10.22 seconds, with no
 skips (root run 44165).
+
+### Device-tile schema and retention checkpoint (2026-09-11)
+
+The implemented device-tile and CPU-tile publishers keep the app-facing
+`"allPurpose"` and empty aliases, but normalize both to
+`HdMaterialBindingsSchemaTokens->allPurpose` (Hydra's empty-token child). The
+child value is an `HdMaterialBindingSchema` carrying its `path`, not a naked
+path data source; non-default material-purpose tokens remain preserved.
+`visibility/visibility` is now an `HdBoolDataSource` through
+`HdVisibilitySchema`. Focused contract tests cover the default aliases, an
+explicit `preview` binding, and boolean visibility. These are schema-transport
+fixes only; they do not add a renderer group gate.
+
+The native retained-BasisCurves regression is intentionally red against the
+current private HdSt behavior. In root run 50821f, an accepted frame had 50
+lit pixels; a rejected CUDA candidate yielded 0 retained versus 50 expected,
+a non-identical image, and changed the rprim material from `/Looks/Accepted`
+to `/Looks/Rejected` after two provider prepares. This proves that a
+per-rprim rejected GPU bundle can still publish new presentation state. The
+required per-render-index, all-tile transaction/filter remains unimplemented;
+no quick per-rprim SDK fix is claimed. The full main build passed (root run
+49652), and the non-benchmark T0/T1 suite passed 83/83 under `-j6` in 10.24
+seconds (root run 46668). `CudaTools` and `DevicePresentation` each passed ten
+targeted repetitions (root run 60329); their Compute Sanitizer memcheck and
+InitCheck runs were clean (root runs 140435, 238cf1, 77b224, and 952cab).
+Those results do not include the separate native T2 regression, which remains
+intentionally red at run 50821f.
+
+One bounded Hivemind request reached model `qwen3.8-27b@q4_0`, but ended at
+its token limit with empty visible content (reasoning only); it contributed no
+review finding. The schema conclusions above are source-backed coordinator
+work, not model output.
+
+A later local-Qwen client request used verified `enable_thinking=false` with
+`max_tokens=2048` and returned 673 visible completion tokens with zero
+reasoning tokens (`chatcmpl-9460170a86f34ad8`). Its material/visibility/matrix
+helper was corrected against source (removing nonexistent metadata fields and
+using the actual schema builders), integrated into `testDeviceTilePublisher`,
+and passed both focused Release runs with `TileContract` (root run e584a9).
+This is one bounded, inspected contribution; it is not a general model-quality
+or all-suite claim. The artifact is
+`/tmp/usdGen-local-qwen-tile-publisher-matrix/`.
+
+The current CPU-off ASAN/UBSAN core-and-imaging build passed both
+`DeviceTilePublisher` and `TileContract` with this helper (root run 48526,
+12.17 seconds). This used `ASAN_OPTIONS=detect_leaks=0` and
+`UBSAN_OPTIONS=halt_on_error=1`; the stock SDK was uninstrumented, so it is
+qualified target coverage rather than a leak check or instrumented-SDK claim.
+
+### GPU tool-bounds checkpoint (5be6095)
+
+The implemented GPU bounds path consumes revised device points and leased
+widths. Only a bounded publication summary crosses the host boundary: at most
+256 tile spans, one status value, and six bound floats per tile. Status is
+fenced and accepted before bounds are read. Overflow, cancellation/restore,
+and empty candidates preserve the prior staged generation. Targeted coverage
+includes Catmull-Rom and B-spline geometry plus leased-width behavior; no host
+geometry, offsets, indices, or draw-count arrays are read back.

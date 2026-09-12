@@ -10,12 +10,17 @@
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hd/driver.h"
 #include "pxr/imaging/hd/engine.h"
+#include "pxr/imaging/hd/materialBindingSchema.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/retainedSceneIndex.h"
 #include "pxr/imaging/hd/renderIndex.h"
+#include "pxr/imaging/hd/rprim.h"
 #include "pxr/imaging/hd/rprimCollection.h"
 #include "pxr/imaging/hd/repr.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/hd/visibilitySchema.h"
+#include "pxr/imaging/hd/xformSchema.h"
 #include "pxr/imaging/hdSt/basisCurvesGpuDataSource.h"
 #include "pxr/imaging/hdSt/renderDelegate.h"
 #include "pxr/imaging/hdSt/resourceRegistry.h"
@@ -44,7 +49,14 @@ bool FinitePixels(const float *p, size_t n)
     return true;
 }
 
-HdContainerDataSourceHandle MakePrimDataSource(HdDataSourceBase::Handle const &provider)
+struct Presentation {
+    GfMatrix4d xform{1.0};
+    bool visible = true;
+    SdfPath materialPath;
+};
+
+HdContainerDataSourceHandle MakePrimDataSource(
+    HdDataSourceBase::Handle const &provider, Presentation const &presentation)
 {
     HdBasisCurvesTopologySchema::Builder topology;
     topology.SetBasis(HdRetainedTypedSampledDataSource<TfToken>::New(HdTokens->linear));
@@ -52,10 +64,46 @@ HdContainerDataSourceHandle MakePrimDataSource(HdDataSourceBase::Handle const &p
     topology.SetWrap(HdRetainedTypedSampledDataSource<TfToken>::New(HdTokens->nonperiodic));
     HdBasisCurvesSchema::Builder curves;
     curves.SetTopology(topology.Build());
-    TfToken const names[] = {HdBasisCurvesSchemaTokens->basisCurves, TfToken("hdStBasisCurvesGpu")};
-    HdDataSourceBase::Handle const values[] = {curves.Build(), provider};
-    return HdRetainedContainerDataSource::New(2, names, values);
+    auto xform = HdXformSchema::Builder()
+        .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+            presentation.xform))
+        .SetResetXformStack(HdRetainedTypedSampledDataSource<bool>::New(true))
+        .Build();
+    auto visibility = HdVisibilitySchema::Builder()
+        .SetVisibility(HdRetainedTypedSampledDataSource<bool>::New(
+            presentation.visible))
+        .Build();
+    auto material = HdMaterialBindingSchema::Builder()
+        .SetPath(HdRetainedTypedSampledDataSource<SdfPath>::New(
+            presentation.materialPath))
+        .Build();
+    // allPurpose is the schema's empty-token default child, not the literal
+    // string "allPurpose" used by usdGen's app-side publication metadata.
+    TfToken const materialPurpose = HdMaterialBindingsSchemaTokens->allPurpose;
+    HdDataSourceBaseHandle const materialValue = material;
+    auto bindings = HdRetainedContainerDataSource::New(1, &materialPurpose,
+        &materialValue);
+    TfToken const names[] = {HdBasisCurvesSchemaTokens->basisCurves,
+        TfToken("hdStBasisCurvesGpu"), TfToken("xform"), TfToken("visibility"),
+        TfToken("materialBindings")};
+    HdDataSourceBase::Handle const values[] = {curves.Build(), provider, xform,
+        visibility, bindings};
+    return HdRetainedContainerDataSource::New(5, names, values);
 }
+
+class MutablePrimDataSource final : public HdContainerDataSource {
+public:
+    HD_DECLARE_DATASOURCE(MutablePrimDataSource);
+    explicit MutablePrimDataSource(HdContainerDataSourceHandle value)
+        : _value(std::move(value)) {}
+    TfTokenVector GetNames() override { return _value->GetNames(); }
+    HdDataSourceBaseHandle Get(TfToken const &name) override {
+        return _value->Get(name);
+    }
+    void Set(HdContainerDataSourceHandle value) { _value = std::move(value); }
+private:
+    HdContainerDataSourceHandle _value;
+};
 HdStBasisCurvesGpuBundleSharedPtr MakeCudaBundle(
     std::shared_ptr<const usdGen::UsdGenDeviceGeneration> generation,
     HdStResourceRegistry *registry, HdStBasisCurvesGpuPrepareRequest const &request)
@@ -126,9 +174,13 @@ int main()
     // The datasource is production code.  The adapter sees no counts or
     // indices in authored topology, so CPU topology fallback cannot render.
     auto provider = CudaProvider::New(generation);
+    Presentation acceptedPresentation;
+    acceptedPresentation.materialPath = SdfPath("/Looks/Accepted");
+    auto primData = MutablePrimDataSource::New(MakePrimDataSource(
+        provider, acceptedPresentation));
     HdRetainedSceneIndexRefPtr source = HdRetainedSceneIndex::New();
     SdfPath const path("/cudaNativeCurves");
-    source->AddPrims({{path, HdPrimTypeTokens->basisCurves, MakePrimDataSource(provider)}});
+    source->AddPrims({{path, HdPrimTypeTokens->basisCurves, primData}});
     HdStRenderDelegate renderDelegate;
     std::unique_ptr<HdRenderIndex> index(HdRenderIndex::New(&renderDelegate, {&driver}));
     if (!index) return 77;
@@ -173,7 +225,17 @@ int main()
     for (unsigned i = 0; i != buffer->GetWidth() * buffer->GetHeight(); ++i)
         lit += pixels[i * 4 + 3] > .001f;
     buffer->Unmap();
-    if (!lit) return 1;
+    if (!lit) {
+        std::fprintf(stderr, "initial accepted candidate rendered no pixels\n");
+        return 1;
+    }
+    HdRprim const *rprim = index->GetRprim(path);
+    if (!rprim || rprim->GetMaterialId() != acceptedPresentation.materialPath) {
+        std::fprintf(stderr, "initial accepted material mismatch: rprim=%d actual=%s expected=%s\n",
+            int(bool(rprim)), rprim ? rprim->GetMaterialId().GetText() : "<none>",
+            acceptedPresentation.materialPath.GetText());
+        return 1;
+    }
 
     // An in-place rejected candidate preserves the current rprim/bundle.
     // A different source generation proves acceptance would have changed it.
@@ -182,6 +244,11 @@ int main()
     if (changed->Identity().generation != 1) return 1;
     provider->generation = changed;
     provider->reject = true;
+    Presentation rejectedPresentation = acceptedPresentation;
+    rejectedPresentation.xform.SetTranslate(GfVec3d(.45, 0, 0));
+    rejectedPresentation.visible = false;
+    rejectedPresentation.materialPath = SdfPath("/Looks/Rejected");
+    primData->Set(MakePrimDataSource(provider, rejectedPresentation));
     source->DirtyPrims({{path, HdDataSourceLocatorSet(HdDataSourceLocator())}});
     std::fprintf(stderr, "cuda native phase rejected Execute begin\n");
     engine.Execute(index.get(), &tasks);
@@ -194,8 +261,16 @@ int main()
     bool const identical = FinitePixels(pixels, pixelWords) &&
         std::equal(accepted.begin(), accepted.end(), pixels);
     if (pixels) buffer->Unmap();
-    if (provider->prepares < 2 || retained != lit ||
-        !identical) return 1;
+    SdfPath const currentMaterial = rprim ? rprim->GetMaterialId() : SdfPath();
+    if (provider->prepares < 2 || retained != lit || !identical || !rprim ||
+        currentMaterial != acceptedPresentation.materialPath) {
+        std::fprintf(stderr,
+            "rejected candidate leaked presentation: prepares=%d retained=%zu lit=%zu "
+            "identical=%d rprim=%d oldMaterial=%s currentMaterial=%s\n",
+            provider->prepares, retained, lit, int(identical), int(bool(rprim)),
+            acceptedPresentation.materialPath.GetText(), currentMaterial.GetText());
+        return 1;
+    }
     int const preparesBeforeRecovery = provider->prepares;
     provider->reject = false;
     source->DirtyPrims({{path, HdDataSourceLocatorSet(HdDataSourceLocator())}});
@@ -215,7 +290,11 @@ int main()
     buffer->Unmap();
     std::fprintf(stderr, "cuda native recovery pixels initial=%zu recovered=%zu changed=%d\n",
         lit, recoveredLit, int(changedImage));
-    if (!changedImage || recoveredLit == 0) return 1;
+    // The recovered candidate is deliberately invisible. Its blank frame,
+    // changed material identity and accepted GPU generation must arrive as one
+    // coherent state; a rejected candidate above must leave every one old.
+    if (!changedImage || recoveredLit != 0 || !rprim ||
+        rprim->GetMaterialId() != rejectedPresentation.materialPath) return 1;
     std::printf("CUDA native retained BasisCurves: PASS (%zu pixels)\n", lit);
     return 0;
 }
