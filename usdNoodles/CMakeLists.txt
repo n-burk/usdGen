@@ -12,12 +12,18 @@ option(NOODLES_FETCH_DEPENDENCIES "Fetch missing third-party dependencies" ON)
 option(NOODLES_REQUIRE_TESTS
     "Fail configuration when BUILD_TESTING is on but GoogleTest is unavailable"
     OFF)
+option(NOODLES_ENABLE_USD_EXPRESSION_CONNECTIONS
+    "Build the optional OpenUSD SeExpr attribute-connection adapter"
+    OFF)
+set(NOODLES_USDGEN_SCHEMA_RESOURCE_DIR "" CACHE PATH
+    "usdGenSchema build-tree resources for optional USD adapter tests")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(NOODLES_HEADERS
+    core/AttributeConnectionDrag.h
     core/Animator.h
     core/Glyph.h
     core/GraphLayout.h
@@ -56,6 +62,7 @@ set(NOODLES_HEADERS
 )
 
 set(NOODLES_SOURCES
+    core/AttributeConnectionDrag.cpp
     core/Animator.cpp
     core/GraphLayout.cpp
     core/NodeData.cpp
@@ -215,7 +222,10 @@ else()
                 $<BUILD_INTERFACE:${glew_SOURCE_DIR}/include>
                 $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         )
-        target_compile_definitions(noodles_glew PUBLIC GLEW_STATIC)
+        # GLEW's optional GLU declarations require a system GLU header even
+        # though noodles never uses GLU. Keep this public so every consumer of
+        # the bundled GLEW target sees the same no-GLU header contract.
+        target_compile_definitions(noodles_glew PUBLIC GLEW_STATIC GLEW_NO_GLU)
         target_link_libraries(noodles_glew PUBLIC OpenGL::GL)
         target_link_libraries(noodles PUBLIC noodles_glew)
         list(APPEND _noodles_install_targets noodles_glew)
@@ -224,10 +234,35 @@ else()
     endif()
 endif()
 
+set(NOODLES_PACKAGE_WITH_USD OFF)
+if(NOODLES_ENABLE_USD_EXPRESSION_CONNECTIONS)
+    find_package(pxr REQUIRED CONFIG)
+    add_library(noodles_usd usd/ExpressionConnections.h usd/ExpressionConnections.cpp
+        usd/api.h)
+    add_library(noodles::usd ALIAS noodles_usd)
+    target_link_libraries(noodles_usd PUBLIC noodles::noodles usd)
+    target_include_directories(noodles_usd PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/noodles>)
+    if(BUILD_SHARED_LIBS)
+        target_compile_definitions(noodles_usd PRIVATE NOODLES_USD_EXPORTS)
+    else()
+        target_compile_definitions(noodles_usd PUBLIC NOODLES_USD_STATIC)
+    endif()
+    set_target_properties(noodles_usd PROPERTIES
+        EXPORT_NAME usd
+        POSITION_INDEPENDENT_CODE ON
+        VERSION "${PROJECT_VERSION}"
+        SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+    list(APPEND _noodles_install_targets noodles_usd)
+    set(NOODLES_PACKAGE_WITH_USD ON)
+endif()
+
 if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     find_package(GTest QUIET)
     if(GTest_FOUND)
         add_executable(noodles_tests
+            tests/AttributeConnectionDragTest.cpp
             tests/GraphLayoutTest.cpp
             tests/NodeTransformFrameTest.cpp
             tests/NoodlesCoreTest.cpp
@@ -241,6 +276,19 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         target_link_libraries(noodles_tests PRIVATE noodles::noodles GTest::gtest_main)
         add_test(NAME noodles.unit COMMAND noodles_tests --gtest_color=no)
         set_tests_properties(noodles.unit PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        if(NOODLES_ENABLE_USD_EXPRESSION_CONNECTIONS)
+            if(NOT EXISTS "${NOODLES_USDGEN_SCHEMA_RESOURCE_DIR}/plugInfo.json")
+                message(FATAL_ERROR
+                    "NOODLES_USDGEN_SCHEMA_RESOURCE_DIR must contain plugInfo.json when optional USD tests are enabled")
+            endif()
+            add_executable(noodles_usd_tests tests/ExpressionConnectionsTest.cpp)
+            target_link_libraries(noodles_usd_tests PRIVATE noodles::usd GTest::gtest_main)
+            add_test(NAME noodles.usd.expression_connections
+                COMMAND noodles_usd_tests --gtest_color=no)
+            set_tests_properties(noodles.usd.expression_connections PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                ENVIRONMENT "PXR_PLUGINPATH_NAME=${NOODLES_USDGEN_SCHEMA_RESOURCE_DIR}")
+        endif()
     else()
         if(NOODLES_REQUIRE_TESTS)
             message(FATAL_ERROR
@@ -270,6 +318,10 @@ install(DIRECTORY spatial/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/noodles/spat
     FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY undo/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/noodles/undo"
     FILES_MATCHING PATTERN "*.h")
+if(NOODLES_ENABLE_USD_EXPRESSION_CONNECTIONS)
+    install(DIRECTORY usd/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/noodles/usd"
+        FILES_MATCHING PATTERN "*.h")
+endif()
 install(DIRECTORY assets/ DESTINATION "${NOODLES_INSTALL_ASSETDIR}")
 if(NOODLES_BUNDLED_GLEW_INCLUDE_DIR)
     install(DIRECTORY "${NOODLES_BUNDLED_GLEW_INCLUDE_DIR}/GL"

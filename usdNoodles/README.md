@@ -22,6 +22,8 @@ calls `noodles` to draw into it.
 - Curved Bezier links with forward and polyline rendering modes
 - Spatial index for fast hit-testing and viewport culling
 - Pluggable command-based undo/redo stack
+- Host-neutral attribute-connection drag controller with live dangling-link
+  previews and an optional OpenUSD SeExpr authoring adapter
 - Animator for smooth interpolation of node positions and link geometry
 - Cross-platform rendering backends: OpenGL 3.3 on macOS/Linux/Windows and
   OpenGL ES 3.0 on iOS/iPadOS and Android
@@ -80,6 +82,21 @@ renderConfig.insetWholePrimRelationshipTargets = false;
 
 The default remains `true`, preserving the standalone renderer's arrow-base
 endpoint behavior.
+
+## Attribute connection drags
+
+`core/AttributeConnectionDrag` maps a host's pointer-down, pointer-move,
+pointer-release, and escape/lost-capture events to `Begin`, `Update`, `Drop`,
+and `Cancel`. Endpoints retain their exact namespaced property names. `Preview`
+returns a connected `LinkData` over a compatible port and a cursor-positioned
+dangling `LinkData` otherwise; hosts can render that temporary noodle with
+`LinkRenderManager::renderLinks` without inserting it into `GraphModel`.
+
+The controller has no window, mouse, or USD dependency. Its author callback
+returns an unapplied undo command; the controller executes it once and gives it
+to `NoodlesUndoManager`. The optional `noodles::usd` adapter validates and
+authors expression-output to operator-input connections. A host chooses the
+evaluation grain/domain in that callback; noodles does not infer it.
 
 ## Contributing
 

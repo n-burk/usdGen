@@ -51,6 +51,8 @@ was not generated.
 | `NOODLES_FETCH_DEPENDENCIES` | `ON` | Fetch missing stb, RapidJSON, and desktop GLEW dependencies |
 | `NOODLES_REQUIRE_TESTS` | `OFF` | Fail configuration instead of silently omitting tests when GoogleTest is unavailable |
 | `NOODLES_ASSET_DIR` | source `assets/` | Build-tree runtime font/shader root exposed to parent projects |
+| `NOODLES_ENABLE_USD_EXPRESSION_CONNECTIONS` | `OFF` | Build/install the optional `noodles::usd` OpenUSD SeExpr connection adapter; requires `pxr` |
+| `NOODLES_USDGEN_SCHEMA_RESOURCE_DIR` | empty | Required only for optional adapter tests; directory containing usdGenSchema `plugInfo.json` for typed `UsdGenOperator` inheritance |
 
 The public C++ API is experimental. Shared-library install names include the
 major and minor version (`libnoodles.1.1`) so a later minor release cannot be
@@ -105,6 +107,29 @@ target_link_libraries(my_app PRIVATE noodles::noodles)
 # Runtime font/shader root supplied by the installed package config.
 message(STATUS "noodles assets: ${noodles_ASSET_DIR}")
 ```
+
+### Optional OpenUSD expression connections
+
+The core library remains host- and USD-independent. To build the optional
+adapter and its test, point CMake at matching OpenUSD and usdGen schema
+resources:
+
+```bash
+cmake -S . -B build-usd \
+  -DNOODLES_ENABLE_USD_EXPRESSION_CONNECTIONS=ON \
+  -DNOODLES_USDGEN_SCHEMA_RESOURCE_DIR=/path/to/build/usd/usdGenSchema/resources \
+  -Dpxr_DIR=/path/to/OpenUSD/lib/cmake/pxr
+```
+
+The test sets `PXR_PLUGINPATH_NAME` only for itself so OpenUSD discovers the
+schema plugin. It exercises `AttributeConnectionDrag` from an operator input
+back to an expression output, then verifies the adapter's undoable USD edit.
+The consuming host supplies its selected evaluation domain to the adapter
+callback; no noodles component creates a window or performs mouse dispatch.
+
+`tests/package-consumer/` is a standalone installed-package smoke consumer.
+Configure it with `-DNOODLES_PACKAGE_CONSUMER_WITH_USD=ON` to require the
+exported `noodles::usd` target as well as the core target.
 
 `tests/package/` is a minimal out-of-tree consumer used to verify the installed
 target, headers, link interface, version file, and asset-root contract.
