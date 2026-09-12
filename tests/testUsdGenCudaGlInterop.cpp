@@ -7,14 +7,17 @@
 #include "pxr/base/tf/errorMark.h"
 #include "pxr/imaging/garch/glApi.h"
 #include "pxr/imaging/hd/bufferSpec.h"
+#include "pxr/imaging/hd/driver.h"
 #include "pxr/imaging/hdSt/bufferArrayRange.h"
 #include "pxr/imaging/hdSt/bufferResource.h"
 #include "pxr/imaging/hdSt/resourceRegistry.h"
+#include "pxr/imaging/hdSt/renderDelegate.h"
 #include "pxr/imaging/hgiGL/buffer.h"
 #include "pxr/imaging/hgiGL/hgi.h"
 #include <array>
 #include <cstdio>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -33,12 +36,16 @@ struct Buffers {
 };
 Buffers Queue(HdStResourceRegistry& registry,
               std::shared_ptr<const usdGen::UsdGenDeviceGeneration> generation,
-              bool interleaved = false) {
+              bool interleaved = false, bool rejectLastChannel = false) {
     Buffers result;
     for (size_t i = 0; i < channels.size(); ++i) {
         auto copy = std::make_shared<UsdGenCudaGlComputation>(generation, channels[i], TfToken("data"));
         HdBufferSpecVector specs;
         copy->GetBufferSpecs(&specs);
+        // Test-only admission failure after other channels may have copied.
+        if (rejectLastChannel && i + 1 == channels.size()) {
+            specs.back().tupleType = HdTupleType{HdTypeFloatVec3, 1};
+        }
         // Same role/spec permits aggregation. Later copies must preserve
         // the earlier range in the same backing GL allocation.
         if (interleaved) {
@@ -162,6 +169,58 @@ int Draw(Buffers const& buffers, GLuint program, float width) {
     std::printf("width %.3f: green=%d red=%d\n",width,green,red);
     return red ? -1 : green;
 }
+
+#ifdef USDGEN_TEST_STORM_POST_COMMIT
+int TestCudaPublication(HdStResourceRegistry& registry, GLuint program) {
+    std::shared_ptr<const Buffers> visible;
+    uint64_t latest = 0;
+    int published = 0, rejected = 0, stale = 0;
+    auto queue = [&](float width, bool fail = false) {
+        auto generation = MakeCudaGlFixture(width);
+        if (!generation) throw std::runtime_error("CUDA publication source failed");
+        std::weak_ptr<const usdGen::UsdGenDeviceOwner> owner = generation->Owner();
+        auto pending = std::make_shared<Buffers>(Queue(registry, generation, false, fail));
+        const uint64_t sequence = ++latest;
+        registry.AddPostCommitCallback([&, pending, sequence] {
+            bool ready = true;
+            for (auto const& copy : pending->copies) ready &= copy->Succeeded();
+            // Execute already established completion/unmapping. The pending
+            // computations are cleared before this callback. Release source
+            // references now; visible GL buffers own independent D2D copies.
+            for (auto& copy : pending->copies) copy.reset();
+            if (sequence != latest) { ++stale; return; }
+            if (!ready) { ++rejected; return; }
+            visible = pending; // Publish all eight channels as one snapshot.
+            ++published;
+        });
+        return owner;
+    };
+    auto firstOwner = queue(.1f);
+    CHECK(!visible && !firstOwner.expired());
+    registry.Commit();
+    CHECK(visible && published == 1 && firstOwner.expired());
+    auto first = visible;
+    const int thin = Draw(*first, program, .1f);
+    CHECK(thin > 100);
+
+    auto failedOwner = queue(.2f, true);
+    CHECK(visible == first && !failedOwner.expired());
+    registry.Commit();
+    CHECK(visible == first && rejected == 1 && published == 1 && failedOwner.expired());
+    CHECK(Draw(*visible, program, .1f) == thin); // No mixed/partial generation.
+
+    auto staleOwner = queue(.2f);
+    auto latestOwner = queue(.3f);
+    CHECK(visible == first && !staleOwner.expired() && !latestOwner.expired());
+    registry.Commit();
+    CHECK(visible != first && stale == 1 && published == 2);
+    CHECK(staleOwner.expired() && latestOwner.expired());
+    CHECK(Draw(*visible, program, .3f) > thin);
+    CHECK(Draw(*first, program, .1f) == thin); // Retained prior generation.
+    std::puts("CUDA post-commit publication: PASS (whole generation, failure, stale replacement)");
+    return 0;
+}
+#endif
 }
 
 int main() {
@@ -169,7 +228,16 @@ int main() {
     if(!eglctx::MakeHeadlessGLContext()) return 77;
     GarchGLApiLoad();
     HgiGL hgi;
-    HdStResourceRegistry registry(&hgi);
+    // Let the SDK construct its own registry. Its public header has a
+    // MaterialX-conditional member but the SDK does not export that feature
+    // macro to consumers, so allocating sizeof(HdStResourceRegistry) here
+    // would assume an ABI/layout which may differ from the shared library.
+    HdStRenderDelegate delegate;
+    HdDriver driver{HgiTokens->renderDriver, VtValue(static_cast<Hgi*>(&hgi))};
+    delegate.SetDrivers({&driver});
+    auto registryOwner = std::dynamic_pointer_cast<HdStResourceRegistry>(delegate.GetResourceRegistry());
+    CHECK(registryOwner);
+    auto& registry = *registryOwner;
     auto first=MakeCudaGlFixture(.1f), second=MakeCudaGlFixture(.2f);
     CHECK(first && second);
     std::weak_ptr<const usdGen::UsdGenDeviceOwner> retained=first->Owner();
@@ -225,6 +293,9 @@ int main() {
     for(auto& copy:c.copies) copy.reset();
     CHECK(retained.expired());
     CHECK(Draw(a,program,.1f)==thin); // GL allocation owns its D2D result
+#ifdef USDGEN_TEST_STORM_POST_COMMIT
+    CHECK(TestCudaPublication(registry, program) == 0);
+#endif
     glBindVertexArray(0); glDeleteVertexArrays(1,&vao); glUseProgram(0); glDeleteProgram(program);
     CHECK(errors.IsClean());
     std::puts("testUsdGenCudaGlInterop: PASS (Storm BAR -> GL draw; not full BasisCurves publication)");

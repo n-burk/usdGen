@@ -1,0 +1,129 @@
+diff --git a/pxr/imaging/hdSt/resourceRegistry.cpp b/pxr/imaging/hdSt/resourceRegistry.cpp
+index a649c5a7d..f2620edde 100644
+--- a/pxr/imaging/hdSt/resourceRegistry.cpp
++++ b/pxr/imaging/hdSt/resourceRegistry.cpp
+@@ -144,6 +144,10 @@ HdStResourceRegistry::HdStResourceRegistry(Hgi * const hgi)
+ 
+ HdStResourceRegistry::~HdStResourceRegistry()
+ {
++    // Drop uncommitted closures before collecting resources: their captured
++    // BARs/leases may own the final reference to a registry-managed resource.
++    // Never invoke publication callbacks during destruction.
++    _pendingPostCommitCallbacks.clear();
+     // XXX Ideally all the HdInstanceRegistry would get destroy here and
+     // they cleanup all GPU resources. Since that mechanism isn't in place
+     // yet, we call GarbageCollect to emulate this behavior.
+@@ -538,6 +542,19 @@ HdStResourceRegistry::AddComputation(HdBufferArrayRangeSharedPtr const &range,
+     }
+ }
+ 
++void
++HdStResourceRegistry::AddPostCommitCallback(std::function<void()> callback)
++{
++    if (!callback) {
++        TF_CODING_ERROR("Cannot add an empty post-commit callback");
++        return;
++    }
++
++    // As with AddComputation, callers may register in parallel while Sync is
++    // running, but the owner must quiesce registration before Commit begins.
++    _pendingPostCommitCallbacks.emplace_back(std::move(callback));
++}
++
+ /// ------------------------------------------------------------------------
+ /// Dispatch & misc buffer API
+ /// ------------------------------------------------------------------------
+@@ -845,6 +862,23 @@ HdStResourceRegistry::_CommitTextures()
+ void
+ HdStResourceRegistry::_Commit()
+ {
++    if (_isCommitting) {
++        TF_CODING_ERROR("Recursive HdStResourceRegistry::Commit is not supported");
++        return;
++    }
++    struct _CommitScope {
++        explicit _CommitScope(bool *isCommitting) : _isCommitting(isCommitting) {
++            *_isCommitting = true;
++        }
++        ~_CommitScope() { *_isCommitting = false; }
++        bool *_isCommitting;
++    } commitScope(&_isCommitting);
++
++    // The Sync/Commit contract has quiesced producers by this point.  Swapping
++    // gives callbacks registered from a callback a fresh next-Commit batch.
++    _PostCommitCallbackList postCommitCallbacks;
++    postCommitCallbacks.swap(_pendingPostCommitCallbacks);
++
+     // Process sub resource registries before other resources in
+     // case they depend on any resources in this resource registry
+     // being committed.
+@@ -1082,6 +1116,19 @@ HdStResourceRegistry::_Commit()
+         compVec.clear();
+     }
+ 
++    // Computation queues have been submitted above and their pending entries
++    // are now released.  Callbacks decide their own readiness/success; this
++    // hook deliberately neither waits for GPU completion nor reports a global
++    // computation result.  One bad callback must not replay or suppress the
++    // remainder of this detached batch.
++    for (std::function<void()> &callback : postCommitCallbacks) {
++        try {
++            callback();
++        } catch (...) {
++            TF_WARN("HdStResourceRegistry post-commit callback threw; ignoring it");
++        }
++    }
++
+     HD_PERF_COUNTER_INCR(HdPerfTokens->committed);
+ }
+ 
+diff --git a/pxr/imaging/hdSt/resourceRegistry.h b/pxr/imaging/hdSt/resourceRegistry.h
+index e5e89037f..e50ce9673 100644
+--- a/pxr/imaging/hdSt/resourceRegistry.h
++++ b/pxr/imaging/hdSt/resourceRegistry.h
+@@ -26,6 +26,7 @@
+ #include <tbb/concurrent_vector.h>
+ 
+ #include <atomic>
++#include <functional>
+ #include <map>
+ #include <memory>
+ 
+@@ -316,6 +317,20 @@ public:
+                         HdStComputationSharedPtr const &computation,
+                         HdStComputeQueue const queue);
+ 
++    /// Register work to run after this registry has submitted all of its
++    /// queued computation work and released the pending sources and
++    /// computations for a Commit.  This is a serialized Commit-context
++    /// callback; it does not imply GPU completion or that any computation
++    /// succeeded.  It is intended for a client which has independently
++    /// established those conditions before publishing a preallocated BAR.
++    ///
++    /// Registration is safe in the normal parallel Sync phase, but must be
++    /// quiesced before Commit just like AddComputation.  A callback registered
++    /// by a callback is deferred to the next Commit.  Callbacks must not draw,
++    /// reenter Commit, or retain resources beyond their documented owners.
++    HDST_API
++    void AddPostCommitCallback(std::function<void()> callback);
++
+     /// ------------------------------------------------------------------------
+     /// Dispatch & buffer API
+     /// ------------------------------------------------------------------------
+@@ -641,6 +656,16 @@ private:
+     typedef tbb::concurrent_vector<_PendingComputation> _PendingComputationList;
+     _PendingComputationList  _pendingComputations[HdStComputeQueueCount];
+ 
++    using _PostCommitCallbackList =
++        tbb::concurrent_vector<std::function<void()>>;
++    // Detached at Commit entry.  Destruction deliberately drops any entries
++    // which were never committed, without invoking them.
++    _PostCommitCallbackList _pendingPostCommitCallbacks;
++
++    // Commits are serialized by the owning render pipeline.  This guard makes
++    // an accidental recursive Commit from a post-commit callback diagnosable.
++    bool _isCommitting = false;
++
+     // aggregated buffer array
+     HdStBufferArrayRegistry _nonUniformBufferArrayRegistry;
+     HdStBufferArrayRegistry _nonUniformImmutableBufferArrayRegistry;

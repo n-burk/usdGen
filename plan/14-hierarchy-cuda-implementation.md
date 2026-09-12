@@ -707,6 +707,66 @@ GPU draw-count, culling and topology-identity changes described above. There
 is no arbitrary USD indexed-curve remapping, tile-offset rebasing or measured
 production frame-throughput claim in this checkpoint.
 
+### Renderer-owned post-commit publication boundary
+
+The first native renderer extension is now a repository-owned patch under
+`patches/openusd/`, applied and built only in a private OpenUSD v26.08
+worktree. The original OpenUSD checkout and installed SDK remain unchanged.
+`HdStResourceRegistry::AddPostCommitCallback` accepts parallel Sync-phase
+registration and invokes a detached batch on the serialized commit context,
+after computation submission and pending-source/computation cleanup. Nested
+callback registration is deferred to the next commit, callback exceptions are
+isolated, and recursive commit is rejected. Destruction drops pending
+closures before registry/Hgi garbage collection. No usdGen/CUDA dependency or
+application mutex is introduced into the renderer hook.
+
+The hook is deliberately **not** a GPU completion fence or a blanket success
+signal. The client must check its complete candidate and independently
+establish transfer completion. `tests/storm-extension` rebuilds the actual
+HdSt implementation against the matching SDK and selects that library only
+for its test processes. This narrow harness is not a production SDK build;
+the changed registry layout requires a consistent renderer/client rebuild.
+
+- The generic test uses real BAR allocation and `HdStUpdateDrawItemBAR`, not
+  a mocked callback queue. It verifies retention of the prior range on failed
+  computation, commit-time draw-batch invalidation for replacement offsets in
+  the same aggregate, 1,024 concurrent registrations delivered exactly once
+  on the commit owner, exception isolation, deferral, recursion diagnostics,
+  and cancellation/reference release on registry destruction.
+- The CUDA test compiles the production transfer bridge against the private
+  renderer. A single callback checks all eight candidate channels before
+  publishing the whole buffer set. A deliberately incompatible last channel
+  leaves the prior frame drawable despite earlier successful candidate
+  copies. Superseded candidates are discarded, source owners expire after
+  completed transfers, and retained old/new GL snapshots redraw correctly.
+  Width .1 and .3 produce 304 and 760 green pixels respectively, with zero
+  error-red pixels; only framebuffer pixels are downloaded.
+- Review also found an ABI bug in the original interop test: it allocated
+  `HdStResourceRegistry` on the stack without the SDK's MaterialX feature
+  definition, which changes the class's header layout. The test now obtains
+  its registry from `HdStRenderDelegate`, letting the SDK allocate it. Earlier
+  interop passes did not prove host allocation safety. The private harness
+  explicitly shares its matching MaterialX definition with its consumers.
+
+Validation: both private renderer tests pass 30 consecutive Release runs each;
+the real CUDA publication test passes Compute Sanitizer memcheck with zero
+errors. The corrected original interop test passes 30 repetitions. All 79
+T0/T1 tests and all six selected non-benchmark/non-Surgery T2 tests pass on the
+final test sources. A separate ASan/UBSan build of the private HdSt, tests and
+CUDA-GL bridge passes both tests ten consecutive times with
+`detect_leaks=0` and `halt_on_error=1`; the remaining SDK and core CUDA build
+are not instrumented by this harness. The patch passes `git apply --check`
+against the clean original v26.08 checkout. Local Qwen returned generic but
+visible review guidance that was checked against source; both Hivemind lanes
+again returned empty visible answers and are not counted as reviews.
+
+The production scene index still declines device-generation publication.
+Next is the native BasisCurves immutable-provider/pending-bundle integration,
+including independently owned callback state invalidated before rprim
+destruction (a raw `this` plus an epoch check is not lifetime protection),
+GPU draw counts, coherent topology/shader/extent/motion updates, asynchronous
+interop lifetime and the unchanged full renderer/performance/release gates.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the
