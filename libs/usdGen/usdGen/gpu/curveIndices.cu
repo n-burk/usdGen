@@ -42,12 +42,15 @@ __device__ uint64_t Count(CurveIndexOptions o, uint32_t n) {
     return core;
 }
 
-__global__ void CountKernel(CurveIndexOptions o, size_t curves, size_t points,
-    const uint32_t* offsets, uint64_t* counts, uint32_t* status) {
+__global__ void CountKernel(CurveIndexOptions o, size_t curves,
+    uint32_t pointBase, uint32_t pointEnd, const uint32_t* offsets,
+    uint64_t* counts, uint32_t* status) {
     size_t c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= curves) return;
     uint32_t a = offsets[c], b = offsets[c + 1];
-    if ((c == 0 && a != 0) || b <= a || b > points || (c + 1 == curves && b != points)) {
+    if ((c == 0 && a != pointBase) || a < pointBase || a >= pointEnd ||
+        b <= a || b > pointEnd ||
+        (c + 1 == curves && b != pointEnd)) {
         atomicCAS(status, 0u, 1u); counts[c] = 0; return;
     }
     uint32_t n = b - a;
@@ -56,11 +59,18 @@ __global__ void CountKernel(CurveIndexOptions o, size_t curves, size_t points,
     }
     counts[c] = Count(o, n);
 }
-__global__ void TerminalKernel(uint64_t* counts, size_t curves, size_t points,
-    const uint32_t* offsets, uint32_t* status) {
+__global__ void TerminalKernel(uint64_t* counts, size_t curves,
+    uint32_t pointBase, uint32_t pointEnd, const uint32_t* offsets,
+    uint32_t* status) {
     if (threadIdx.x || blockIdx.x) return;
     counts[curves] = 0;
-    if (curves == 0 && (offsets[0] != 0 || points != 0)) atomicCAS(status, 0u, 1u);
+    if (curves == 0 && (offsets[0] != pointBase || pointEnd != pointBase))
+        atomicCAS(status, 0u, 1u);
+}
+__global__ void InvalidSpanKernel(uint64_t* total, uint32_t* status) {
+    if (threadIdx.x || blockIdx.x) return;
+    *status = 1;
+    *total = 0;
 }
 __global__ void TotalKernel(size_t curves, const uint64_t* offsets, uint64_t* total,
     uint32_t* status, size_t maxRecords) {
@@ -75,11 +85,12 @@ __device__ void Put(int32_t* dst, uint64_t r, int arity, int a, int b, int c, in
     int32_t* p = dst + r * arity;
     p[0] = a; if (arity > 1) p[1] = b; if (arity > 2) { p[2] = c; p[3] = d; }
 }
-__global__ void EmitKernel(CurveIndexOptions o, size_t curves, const uint32_t* cv,
+__global__ void EmitKernel(CurveIndexOptions o, size_t curves, uint32_t pointBase,
+    const uint32_t* cv,
     const uint64_t* recordOffsets, const uint32_t* status, int32_t* indices, int32_t* prim) {
     size_t curve = blockIdx.x;
     if (curve >= curves || *status) return;
-    uint32_t first = cv[curve], n = cv[curve + 1] - first;
+    uint32_t first = cv[curve] - pointBase, n = cv[curve + 1] - cv[curve];
     uint64_t out = recordOffsets[curve];
     if (o.mode == CurveIndexMode::Points) {
         for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) { Put(indices, out+i, 1, first+i,0,0,0); prim[out+i]=curve; }
@@ -190,8 +201,11 @@ cudaError_t GetCurveIndexRequirements(CurveIndexOptions o, size_t curves,
     return Requirements(o,curves,points,out,stream,true);
 }
 
-cudaError_t BuildCurveIndices(CurveIndexOptions o,size_t curves,size_t points,DeviceView<const uint32_t> offsets,
+cudaError_t BuildCurveIndices(CurveIndexOptions o, CurveIndexSpan span,
  CurveIndexRequirements const& req,CurveIndexWorkspace ws,CurveIndexOutput out,cudaStream_t stream) {
+    size_t const curves = span.curveCount;
+    size_t const points = span.pointCount;
+    DeviceView<const uint32_t> const offsets = span.curveOffsets;
     CurveIndexRequirements expected;
     // cudaStreamGetDevice rejects an actively captured stream. Validate it
     // during preparation, then bind execution to that live stream and device.
@@ -203,19 +217,35 @@ cudaError_t BuildCurveIndices(CurveIndexOptions o,size_t curves,size_t points,De
       (req.maxRecords && (!out.indices.data || !out.primitiveParam.data)) || !out.recordCount.data || !out.status.data ||
       out.indices.size<req.maxRecords*req.indexArity||out.primitiveParam.size<req.maxRecords||out.recordCount.size<1||out.status.size<1) return cudaErrorInvalidValue;
     if((e=cudaMemsetAsync(out.status.data,0,sizeof(uint32_t),stream))!=cudaSuccess|| (e=cudaMemsetAsync(out.recordCount.data,0,sizeof(uint64_t),stream))!=cudaSuccess) return e;
+    if (points > size_t(UINT32_MAX) - span.pointBase) {
+        InvalidSpanKernel<<<1,1,0,stream>>>(out.recordCount.data,out.status.data);
+        return cudaGetLastError();
+    }
+    uint32_t const pointEnd = span.pointBase + static_cast<uint32_t>(points);
     if (curves) {
         dim3 grid((curves+kThreads-1)/kThreads);
-        CountKernel<<<grid,kThreads,0,stream>>>(o,curves,points,offsets.data,ws.recordCounts.data,out.status.data);
+        CountKernel<<<grid,kThreads,0,stream>>>(o,curves,span.pointBase,pointEnd,
+            offsets.data,ws.recordCounts.data,out.status.data);
         if ((e=cudaGetLastError())!=cudaSuccess) return e;
     }
-    TerminalKernel<<<1,1,0,stream>>>(ws.recordCounts.data,curves,points,offsets.data,out.status.data);
+    TerminalKernel<<<1,1,0,stream>>>(ws.recordCounts.data,curves,span.pointBase,
+        pointEnd,offsets.data,out.status.data);
     if ((e=cudaGetLastError())!=cudaSuccess) return e;
     size_t scanBytes = req.scanBytes;
     if((e=cub::DeviceScan::ExclusiveSum(ws.scan.data,scanBytes,ws.recordCounts.data,ws.recordOffsets.data,curves+1,stream))!=cudaSuccess) return e;
     TotalKernel<<<1,1,0,stream>>>(curves,ws.recordOffsets.data,out.recordCount.data,out.status.data,req.maxRecords);
     if ((e=cudaGetLastError())!=cudaSuccess) return e;
-    if(curves) EmitKernel<<<curves,kThreads,0,stream>>>(o,curves,offsets.data,ws.recordOffsets.data,out.status.data,out.indices.data,out.primitiveParam.data);
+    if(curves) EmitKernel<<<curves,kThreads,0,stream>>>(o,curves,span.pointBase,
+        offsets.data,ws.recordOffsets.data,out.status.data,out.indices.data,
+        out.primitiveParam.data);
     return cudaGetLastError();
+}
+
+cudaError_t BuildCurveIndices(CurveIndexOptions o, size_t curves, size_t points,
+    DeviceView<const uint32_t> offsets, CurveIndexRequirements const& req,
+    CurveIndexWorkspace ws, CurveIndexOutput out, cudaStream_t stream) {
+    return BuildCurveIndices(o, CurveIndexSpan{offsets, curves, points, 0},
+        req, ws, out, stream);
 }
 
 cudaError_t PackCurveDrawCount(DeviceView<const uint64_t> recordCount,

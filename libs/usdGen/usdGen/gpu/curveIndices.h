@@ -42,6 +42,17 @@ struct CurveIndexWorkspace {
     DeviceView<unsigned char> scan;
 };
 
+// A contiguous tile of a globally-addressed curve-offset buffer.  The
+// offsets themselves remain global: the first value is pointBase and the
+// terminal value is pointBase + pointCount.  Generated indices and primitive
+// parameters are deliberately tile-local.
+struct CurveIndexSpan {
+    DeviceView<const uint32_t> curveOffsets; // curveCount + 1 global offsets
+    size_t curveCount = 0;
+    size_t pointCount = 0;
+    uint32_t pointBase = 0;
+};
+
 struct CurveIndexOutput {
     DeviceView<int32_t> indices;        // packed records, maxRecords * arity
     DeviceView<int32_t> primitiveParam; // maxRecords, owning curve per record
@@ -64,6 +75,14 @@ struct CurveIndexOutput {
 // There is no implicit host topology or indexed-USD-curve remapping path.
 cudaError_t BuildCurveIndices(CurveIndexOptions options,
     size_t curveCount, size_t pointCount, DeviceView<const uint32_t> curveOffsets,
+    CurveIndexRequirements const& requirements, CurveIndexWorkspace workspace,
+    CurveIndexOutput output, cudaStream_t stream);
+
+// Span overload for a tile in a globally-addressed curve-offset buffer.  A
+// scalar pointBase + pointCount overflow and malformed device offsets fail
+// closed through status/recordCount, leaving indices and primitiveParam
+// untouched.  The legacy overload above forwards pointBase=0.
+cudaError_t BuildCurveIndices(CurveIndexOptions options, CurveIndexSpan span,
     CurveIndexRequirements const& requirements, CurveIndexWorkspace workspace,
     CurveIndexOutput output, cudaStream_t stream);
 

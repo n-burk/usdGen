@@ -1229,3 +1229,30 @@ private HdSt, bridge, and fixture/test translation units; the linked usdGen core
 remained Release and leak detection was disabled, so this is not a leak check.
 Live device Publish, multi-tile atomic publication, persistent async
 interop, motion, culling performance, and full SDK gates remain open.
+
+### CUDA tile-index checkpoint (2026-09-11)
+
+`CurveIndexSpan` now has targeted validation in both
+`testUsdGenCudaCurveIndices` and its native alias: ten repeated runs passed
+for each. The span preserves global curve offsets (`curveCount + 1`) while
+keeping generated indices and primitive parameters tile-local; `pointBase`
+is nonzero-safe, and the zero-base overload remains compatible. Empty spans,
+`UINT32_MAX` boundaries, malformed interior/boundary offsets, and scalar
+overflow are covered. Invalid device validation sets status to 1 and the GPU
+record count to zero while leaving outputs untouched; valid status is zero.
+Graph capture/replay and sentinel preservation are covered, with no allocation,
+host wait, or host count readback. Memcheck and InitCheck for the primary test
+reported zero errors.
+
+The full main build succeeded; the nonbenchmark T0/T1 suite passed 78/78, and
+the private Storm bridge was rebuilt/relinked against the new kernel with all
+five selected tests passing. This is not evidence for full stable tiling; the
+earlier native ASAN result predates the tile-slice changes, while the new
+kernel’s memcheck and InitCheck results are zero.
+
+This does not provide the planned no-copy owning tile lease, stable tile
+catalog/compaction membership, generation-paired render metadata, or live
+atomic multi-tile `Publish`; those remain required. Local Qwen supplied a
+usable scalar-range review suggestion, but its helper is not integrated and is
+not claimed as implementation evidence. Hivemind requests for this review
+returned empty visible answers after token exhaustion and are not counted.

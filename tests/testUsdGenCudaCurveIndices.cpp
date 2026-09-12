@@ -219,6 +219,149 @@ void DrawCountPacking() {
     Cuda(cudaStreamDestroy(stream), "draw count stream destroy");
 }
 
+void TileLocalSpans() {
+    cudaStream_t stream = nullptr;
+    Cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+         "tile span stream");
+    DeviceBuffer<uint32_t> globalOffsets;
+    uint32_t const hostGlobalOffsets[]{5, 9, 14, 18, 23};
+    Cuda(globalOffsets.reset(sizeof(hostGlobalOffsets) / sizeof(hostGlobalOffsets[0])),
+         "tile span offsets");
+    Cuda(cudaMemcpy(globalOffsets.data(), hostGlobalOffsets,
+                    sizeof(hostGlobalOffsets), cudaMemcpyHostToDevice),
+         "tile span upload");
+
+    auto run = [&](CurveIndexOptions options, DeviceView<const uint32_t> offsets,
+                   size_t curves, size_t points, uint32_t base,
+                   std::vector<int32_t> const& expectedIndices,
+                   std::vector<int32_t> const& expectedPrimitives,
+                   bool capture = false) {
+        CurveIndexRequirements req;
+        Cuda(GetCurveIndexRequirements(options, curves, points, &req, stream),
+             "tile span requirements");
+        DeviceBuffer<uint64_t> counts, prefix, total;
+        DeviceBuffer<unsigned char> scratch;
+        DeviceBuffer<uint32_t> status;
+        DeviceBuffer<int32_t> indices, primitives;
+        Cuda(counts.reset(curves + 1), "tile span counts");
+        Cuda(prefix.reset(curves + 1), "tile span prefix");
+        Cuda(scratch.reset(req.scanBytes), "tile span scratch");
+        Cuda(total.reset(1), "tile span total");
+        Cuda(status.reset(1), "tile span status");
+        Cuda(indices.reset(req.maxRecords * req.indexArity + 3), "tile span indices");
+        Cuda(primitives.reset(req.maxRecords + 3), "tile span primitives");
+        Cuda(cudaMemsetAsync(indices.data(), 0x5a, indices.size() * sizeof(int32_t), stream),
+             "tile span index sentinel");
+        Cuda(cudaMemsetAsync(primitives.data(), 0x5a, primitives.size() * sizeof(int32_t), stream),
+             "tile span primitive sentinel");
+        CurveIndexWorkspace workspace{counts.view(), prefix.view(), scratch.view()};
+        CurveIndexOutput output{indices.view(), primitives.view(), total.view(), status.view()};
+        if (capture)
+            Cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
+                 "tile span capture begin");
+        Cuda(BuildCurveIndices(options, CurveIndexSpan{offsets, curves, points, base},
+                               req, workspace, output, stream),
+             "tile span enqueue");
+        if (capture) {
+            cudaGraph_t graph = nullptr;
+            cudaGraphExec_t executable = nullptr;
+            Cuda(cudaStreamEndCapture(stream, &graph), "tile span capture end");
+            Cuda(cudaGraphInstantiate(&executable, graph, 0),
+                 "tile span graph instantiate");
+            Cuda(cudaGraphLaunch(executable, stream), "tile span graph launch");
+            Cuda(cudaStreamSynchronize(stream), "tile span graph completion");
+            Cuda(cudaGraphLaunch(executable, stream), "tile span graph replay");
+            Cuda(cudaStreamSynchronize(stream), "tile span replay completion");
+            Cuda(cudaGraphExecDestroy(executable), "tile span graph destroy");
+            Cuda(cudaGraphDestroy(graph), "tile span graph definition destroy");
+        }
+        Cuda(cudaStreamSynchronize(stream), "tile span completion");
+        Check(Download(status)[0] == 0, "tile span GPU status valid");
+        Check(Download(total)[0] == expectedPrimitives.size(), "tile span record count");
+        auto actualIndices = Download(indices);
+        auto actualPrimitives = Download(primitives);
+        Check(std::all_of(actualIndices.begin() + expectedIndices.size(), actualIndices.end(),
+                          [](int32_t value) { return value == 0x5a5a5a5a; }),
+              "tile span unused index capacity remains untouched");
+        Check(std::all_of(actualPrimitives.begin() + expectedPrimitives.size(), actualPrimitives.end(),
+                          [](int32_t value) { return value == 0x5a5a5a5a; }),
+              "tile span unused primitive capacity remains untouched");
+        actualIndices.resize(expectedIndices.size());
+        actualPrimitives.resize(expectedPrimitives.size());
+        Check(actualIndices == expectedIndices, "tile span exact local indices");
+        Check(actualPrimitives == expectedPrimitives,
+              "tile span exact tile-local primitive parameters");
+    };
+
+    CurveIndexOptions const linear{CurveIndexBasis::Linear,
+                                   CurveIndexWrap::Nonperiodic,
+                                   CurveIndexMode::Curves};
+    // The two source views are consecutive, disjoint global point spans.  The
+    // shared terminal offset is the next tile's base, not a primitive ID.
+    run(linear, {globalOffsets.data(), 3}, 2, 9, 5,
+        {0,1, 1,2, 2,3, 4,5, 5,6, 6,7, 7,8}, {0,0,0,1,1,1,1}, true);
+    run(linear, {globalOffsets.data() + 2, 3}, 2, 9, 14,
+        {0,1, 1,2, 2,3, 4,5, 5,6, 6,7, 7,8}, {0,0,0,1,1,1,1});
+    run({CurveIndexBasis::BSpline, CurveIndexWrap::Nonperiodic,
+         CurveIndexMode::Curves}, {globalOffsets.data(), 3}, 2, 9, 5,
+        {0,1,2,3, 4,5,6,7, 5,6,7,8}, {0,1,1});
+    run({CurveIndexBasis::BSpline, CurveIndexWrap::Pinned,
+         CurveIndexMode::Points}, {globalOffsets.data(), 3}, 2, 9, 5,
+        {0,1,2,3,4,5,6,7,8}, {0,0,0,0,1,1,1,1,1});
+    DeviceBuffer<uint32_t> emptyOffset;
+    uint32_t const emptyBase = UINT32_MAX;
+    Cuda(emptyOffset.reset(1), "empty tile span offset");
+    Cuda(cudaMemcpy(emptyOffset.data(), &emptyBase, sizeof(emptyBase),
+                    cudaMemcpyHostToDevice), "empty tile span upload");
+    run(linear, Read(emptyOffset), 0, 0, emptyBase, {}, {});
+
+    auto failClosed = [&](std::vector<uint32_t> const& hostOffsets,
+                          size_t curves, size_t points, uint32_t base,
+                          char const* label) {
+        CurveIndexRequirements req;
+        Cuda(GetCurveIndexRequirements(linear, curves, points, &req, stream),
+             "bad tile span requirements");
+        DeviceBuffer<uint32_t> offsets, status;
+        DeviceBuffer<uint64_t> counts, prefix, total;
+        DeviceBuffer<unsigned char> scratch;
+        DeviceBuffer<int32_t> indices, primitives;
+        Cuda(offsets.reset(hostOffsets.size()), "bad tile span offsets");
+        Cuda(cudaMemcpyAsync(offsets.data(), hostOffsets.data(),
+                             hostOffsets.size() * sizeof(uint32_t),
+                             cudaMemcpyHostToDevice, stream), "bad tile span upload");
+        Cuda(counts.reset(curves + 1), "bad tile span counts");
+        Cuda(prefix.reset(curves + 1), "bad tile span prefix");
+        Cuda(scratch.reset(req.scanBytes), "bad tile span scratch");
+        Cuda(total.reset(1), "bad tile span total"); Cuda(status.reset(1), "bad tile span status");
+        Cuda(indices.reset(req.maxRecords * req.indexArity + 3), "bad tile span indices");
+        Cuda(primitives.reset(req.maxRecords + 3), "bad tile span primitives");
+        Cuda(cudaMemsetAsync(indices.data(), 0x5a, indices.size() * sizeof(int32_t), stream),
+             "bad tile span index sentinel");
+        Cuda(cudaMemsetAsync(primitives.data(), 0x5a, primitives.size() * sizeof(int32_t), stream),
+             "bad tile span primitive sentinel");
+        CurveIndexWorkspace workspace{counts.view(), prefix.view(), scratch.view()};
+        CurveIndexOutput output{indices.view(), primitives.view(), total.view(), status.view()};
+        Cuda(BuildCurveIndices(linear,
+                               CurveIndexSpan{Read(offsets), curves, points, base},
+                               req, workspace, output, stream), label);
+        Cuda(cudaStreamSynchronize(stream), "bad tile span completion");
+        Check(Download(status)[0] == 1 && Download(total)[0] == 0,
+              "bad tile span fails closed with zero count");
+        auto const flat = Download(indices); auto const owners = Download(primitives);
+        Check(std::all_of(flat.begin(), flat.end(), [](int32_t value) {
+                  return value == 0x5a5a5a5a;
+              }) && std::all_of(owners.begin(), owners.end(), [](int32_t value) {
+                  return value == 0x5a5a5a5a;
+              }), "bad tile span leaves outputs untouched");
+    };
+    failClosed({4, 9, 14}, 2, 9, 5, "bad tile first offset");
+    failClosed({5, 9, 13}, 2, 9, 5, "bad tile terminal offset");
+    failClosed({5, 9, 8, 14}, 3, 9, 5, "bad tile interior offset");
+    failClosed({UINT32_MAX, UINT32_MAX}, 1, 1, UINT32_MAX,
+               "tile span scalar overflow");
+    Cuda(cudaStreamDestroy(stream), "destroy tile span stream");
+}
+
 #ifdef USDGEN_HAS_STORM_INDEX_ORACLE
 void CompareNative(std::vector<uint32_t> const& counts, CurveIndexOptions options) {
     TfErrorMark mark;
@@ -302,6 +445,7 @@ int main(int argc,char** argv) {
     Run({},{}); Run({1,1},{});
     CompactedTopology();
     DrawCountPacking();
+    TileLocalSpans();
     for (int corrupt=1;corrupt<=4;++corrupt) Run({2,3},{},false,corrupt);
     Run({2,3},{CurveIndexBasis::Linear,CurveIndexWrap::Segmented,CurveIndexMode::Curves});
     CurveIndexRequirements req{123,99,321}, unchanged=req;
