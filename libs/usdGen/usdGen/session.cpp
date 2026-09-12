@@ -91,13 +91,80 @@ void UsdGenSession::SetGraphDesc(UsdGenGraphDesc const &desc)
     _dirty = true;
 }
 
-void UsdGenSession::SetContext(UsdGenContext context) { _context = context; }
+void UsdGenSession::SetContext(UsdGenContext context) {
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    if (_context != context) {
+        _context = context;
+        _stagedDeviceRevision.reset();
+        _stagedDeviceExpected.reset();
+        _dirty = true;
+    }
+}
 
 void UsdGenSession::SetDevicePublicationEnabled(bool enabled)
 {
     std::lock_guard<std::mutex> lock(_commitMutex);
     _devicePublicationEnabled = enabled;
+    _stagedDeviceRevision.reset();
+    _stagedDeviceExpected.reset();
     _dirty = true;
+}
+
+bool UsdGenSession::BeginDeviceEdit(UsdGenGenerationConstPtr const& expected,
+    uint64_t* token, std::string* reason)
+{
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+    if (!token || _activeDeviceEdit || _nextDeviceEditToken == UINT64_MAX ||
+        !_devicePublicationEnabled || !expected || !expected->device ||
+        expected != _store.Get() || _dirty || _pending.Any()) {
+        if (reason) *reason = "device stroke is already reserved or its base is not clean/current";
+        return false;
+    }
+    _activeDeviceEdit = ++_nextDeviceEditToken;
+    *token = _activeDeviceEdit;
+    return true;
+}
+
+bool UsdGenSession::StageDeviceRevision(UsdGenGenerationConstPtr const& expected,
+    std::shared_ptr<const UsdGenDeviceGeneration> revision, uint64_t token, std::string* reason)
+{
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+    auto fail = [&](char const* message) { if (reason) *reason = message; return false; };
+    if (!token || token != _activeDeviceEdit || !_devicePublicationEnabled || !expected || !expected->device ||
+        expected != _store.Get() || _pending.Any() || (_dirty && !_stagedDeviceRevision))
+        return fail("device edit base is stale or the graph has pending changes");
+    if (!revision || !revision->Owner()->ProducerReady() ||
+        revision->Identity().backend != expected->device->Identity().backend ||
+        revision->Identity().deviceIndex != expected->device->Identity().deviceIndex ||
+        revision->Identity().generation != static_cast<uint64_t>(_store.NextId()) ||
+        revision->Geometry().topologyVersion != expected->device->Geometry().topologyVersion ||
+        revision->Geometry().curveCount != expected->device->Geometry().curveCount ||
+        revision->Geometry().pointCount != expected->device->Geometry().pointCount ||
+        revision->Geometry().alreadyDeformed != expected->device->Geometry().alreadyDeformed)
+        return fail("device edit revision has incompatible identity or topology");
+    _stagedDeviceRevision = std::move(revision);
+    _stagedDeviceExpected = expected;
+    _dirty = true;
+    return true;
+}
+
+bool UsdGenSession::EndDeviceEdit(uint64_t token,
+    UsdGenGenerationConstPtr const& expected, bool discardStaged)
+{
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+    if (!token || token != _activeDeviceEdit) return false;
+    const bool valid = expected && expected == _store.Get() && !_pending.Any() &&
+        (!_dirty || _stagedDeviceRevision);
+    _activeDeviceEdit = 0;
+    if (discardStaged && _stagedDeviceRevision) {
+        _stagedDeviceRevision.reset();
+        _stagedDeviceExpected.reset();
+        _dirty = _pending.Any();
+    }
+    return valid;
 }
 
 void UsdGenSession::AccumulateDirty(UsdGenPendingDirty &&pending)
@@ -125,6 +192,28 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
     const auto t0 = std::chrono::steady_clock::now();
     TF_UNUSED(reason);
     _lastDiagnostics = UsdGenDiagnostics{};
+
+    {
+        std::lock_guard<std::mutex> pendingLock(_pendingMutex);
+        auto previous = _store.Get();
+        if (_stagedDeviceRevision && reason == UsdGenCommitReason::LiveOverride &&
+            _devicePublicationEnabled && !_pending.Any() && previous && previous->frame == frame &&
+            previous == _stagedDeviceExpected) {
+            UsdGenGeneration next;
+            next.frame = frame;
+            next.device = std::move(_stagedDeviceRevision);
+            _stagedDeviceExpected.reset();
+            _store.Publish(std::move(next));
+            _lastReport = UsdGenDirtyReport{};
+            ++_stats.commits;
+            _dirty = false;
+            return _store.Get();
+        }
+        // A stage/time/context cook must never carry a press-time override
+        // into a different snapshot. The tool detects this as a stale stroke.
+        _stagedDeviceRevision.reset();
+        _stagedDeviceExpected.reset();
+    }
 
     // Supersession ticket (03 §5.6): any newer Commit/trigger bumps the
     // counter; if it moved while we cooked, we abandon publication.
@@ -183,8 +272,10 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
             _lastDiagnostics.Error("CUDA graph has no compiled execution plan");
             return reject();
         }
+        auto previous = _store.Get();
         auto device = ExecuteCudaGraph(*_graph.CudaPlan(), _desc, frame,
-            static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics);
+            static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics,
+            previous ? previous->device : nullptr);
         if (!device || _lastDiagnostics.HasErrors()) return reject();
         UsdGenGeneration gen;
         gen.frame = frame;
@@ -440,6 +531,9 @@ UsdGenGenerationConstPtr UsdGenSession::Generation() const noexcept
 
 void UsdGenSession::InvalidateAllValues()
 {
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    _stagedDeviceRevision.reset();
+    _stagedDeviceExpected.reset();
     // Bench hook (E-1/E-2): break every node's value-equality signature so
     // the evaluation-skip gate (paramValueDigest != lastParamDigest) forces
     // a full re-evaluate on the next commit. Capture state is untouched.
@@ -453,6 +547,7 @@ void UsdGenSession::InvalidateAllValues()
 
 void UsdGenSession::BeginDensityDrag()
 {
+    std::lock_guard<std::mutex> lock(_commitMutex);
     // S28 parked publication mode is deferred (M4, 02 §2.3.1): M1 keeps
     // committed-mode publication through a drag; the flag only marks intent.
     _densityDrag = true;
@@ -460,6 +555,9 @@ void UsdGenSession::BeginDensityDrag()
 
 void UsdGenSession::EndDensityDrag()
 {
+    std::lock_guard<std::mutex> lock(_commitMutex);
+    _stagedDeviceRevision.reset();
+    _stagedDeviceExpected.reset();
     // M1: no parked-mode backlog exists, so a plain dirty recommit republishes
     // the real counts.
     _densityDrag = false;

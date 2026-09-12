@@ -18,6 +18,7 @@
 #include "usdGen/gpu/deformCurves.h"
 #include "usdGen/gpu/length.h"
 #include "usdGen/gpu/curveCompaction.h"
+#include "usdGen/gpu/topology.h"
 #include "usdGenMath/usdGenMath/ramp.h"
 #endif
 
@@ -496,12 +497,14 @@ std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
 
 std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     UsdGenCudaExecutionPlan& plan, UsdGenGraphDesc const& desc, double frame,
-    uint64_t generation, UsdGenDiagnostics* diagnostics) {
+    uint64_t generation, UsdGenDiagnostics* diagnostics,
+    std::shared_ptr<const UsdGenDeviceGeneration> const& previous) {
     std::lock_guard<std::mutex> lock(plan.mutex);
     if (!ValidateCudaGraph(desc, diagnostics)) return {};
 #ifndef USDGEN_ENABLE_CUDA
     (void)generation;
     (void)frame;
+    (void)previous;
     return {};
 #else
     if (!std::isfinite(frame) || plan.steps.size() + 1 != desc.nodes.size()) {
@@ -781,12 +784,21 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         finalWidths = std::move(nextWidths);
         geometry.widths = {finalWidths->data(), finalWidths->size()};
     }
+    uint64_t topologyVersion = generation;
+    if (previous) {
+        auto lease = gpu::AcquireGeometry(previous, nullptr);
+        bool same = false;
+        if (!lease || gpu::CompareCurveTopology(lease.Geometry(), geometry, nullptr, &same) != cudaSuccess) {
+            Fail(diagnostics, "cannot compare GPU topology against the previous publication"); return {};
+        }
+        if (same) topologyVersion = previous->Geometry().topologyVersion;
+    }
     std::string reason;
     auto result = compacted
         ? gpu::MakeCompactedGeneration(std::move(compacted), generation, &reason,
-            deformed, std::move(finalWidths), std::move(finalPoints))
+            deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion)
         : gpu::MakeSourceGeneration(std::move(source), generation, &reason,
-            deformed, std::move(finalWidths), std::move(finalPoints));
+            deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion);
     if (!result) Fail(diagnostics, reason);
     return result;
 #endif

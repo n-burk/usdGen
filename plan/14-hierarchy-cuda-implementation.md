@@ -31,6 +31,111 @@ GPU exclusion in `11` §8. It does not retire unrelated requirements or gates.
 5. The editable design example is
    [examples/operator-network.usda](examples/operator-network.usda). It is a
    schema discussion artifact, not evidence that the runtime implements it.
+6. User revision: no application mutexes. Mutable state must have an explicit
+   scheduled owner; dependencies and parallelism belong to the execution
+   framework and CUDA streams/events. Mutex-protected methods, spinlock
+   substitutions and a global serialized cook are not the target architecture.
+
+## Scheduled ownership revision
+
+This newer decision supersedes the mutex-based concurrency descriptions in
+earlier checkpoints and `03`/`06`. Their functional tests remain necessary,
+but do not prove the revised concurrency requirement.
+
+- Each description has a short-running command/publication owner in a TBB flow
+  graph. Requests carry immutable descriptor/input snapshots and increasing
+  epochs. Accepting a new request does not wait for an old GPU cook.
+- Compile/evaluation is separate scheduled work. Persistent mutable RBF and
+  operator resources have one execution owner; independent descriptions and
+  independent dependency branches can execute concurrently in the private
+  arena and on device streams. Publication returns as a completion message,
+  checks its epoch, then exposes an immutable generation. Superseded work may
+  finish, but cannot publish and retains allocations through device completion.
+- GPU leases own their consumer state directly. There is no shared map of
+  active consumer tokens requiring a registry lock. A copied lease shares that
+  single consumer state; its final release fences the stream and releases its
+  retained parent allocations.
+- Scene-index reads use immutable published data, never block on cooking and
+  never invoke the state owner synchronously. Callback subscriptions and scene
+  mutations are owner commands; notifications are ordered completion work.
+  Registry changes use the framework's ownership/publication facilities, not
+  independent mutex-protected mutable maps.
+- Asynchronous APIs are primary. Compatibility waits are allowed only at
+  external boundaries and must cooperate with the scheduler. Owner callbacks
+  never wait on a command queued behind themselves; CPU/GPU completion is
+  represented by dependencies, not by blocking the command node. Every CUDA
+  work item explicitly binds its captured device; worker threads have no
+  assumed persistent CUDA context affinity.
+- Validation must cover simultaneous submissions, independent-description
+  overlap, ordered publication, supersession while work is in flight, callback
+  re-entry, retained leases and draining shutdown. Audit `libs/` for remaining
+  application mutexes. Framework implementation internals are not represented
+  as a claim of hardware wait-freedom.
+
+Migration is in progress. Existing session, imaging, RBF cache and registry
+locks are still present at this audit; they must be removed through ownership
+changes, not simply deleted. The pre-revision tools tree passed 62/62 tests,
+and four new CUDA targets passed initcheck/memcheck; those results do not
+validate the upcoming scheduling and lease-ownership changes.
+
+The first migration slice now provides `UsdGenExecutionRuntime` and
+`UsdGenExecutionPipeline`. The pipeline uses separate serial command and work
+nodes within a shared private TBB arena. Command acceptance and publication
+are ordered; work for different descriptions can overlap. Non-coalesced owner
+commands are distinct from supersedable work requests. Work returns a
+publication closure; only the currently accepted epoch may execute it.
+Cancellation is cooperative and does not imply CUDA completion. Callback
+re-entry enqueues more work rather than waiting. Draining and destruction are
+external ownership boundaries after submitters have stopped; concurrent
+drainers are not supported. Framework dispatch exceptions are fatal to that
+pipeline, not a promise that every queued callback can be recovered.
+
+This is a tested scheduling foundation, **not yet the engine/imaging execution
+path**. The consumer-token map in `cudaGeneration.cpp` has been replaced by
+per-lease consumer handles. Those handles validate stream/device provenance,
+retain parent revisions, and complete idempotently. Final release currently
+fences the consumer stream synchronously; nonblocking GPU retirement remains
+required. The new scheduler and lease API build with CUDA enabled and disabled;
+the first post-change non-benchmark T0/T1 run passes **63/63** tests.
+
+The next ownership migration must separate three kinds of state explicitly:
+
+| Owner | Exclusive mutable state | Published/cross-owner values |
+|---|---|---|
+| Description command node | pending input commands, accepted epoch, edit reservation, staged revision, publication bookkeeping, subscriptions | copied descriptor/frame/context request; immutable generation/report/diagnostics |
+| Description work node | compiler, mutable compiled graph, scheduler chunks, parameter fields, persistent RBF workspace | completed generation candidate and immutable routing/statistics data |
+| Scene-index command node | membership, attachment identities, routing/subscriptions, notice batches | immutable scene lookup snapshot consumed by `GetPrim`/`GetChildPrimPaths` |
+
+The current `UsdGenGraph` is noncopyable and includes mutable operator state;
+wrapping it in `shared_ptr<const UsdGenGraph>` does not create a safe snapshot
+while a worker retains mutation access. Extract routing/diagnostic values
+instead. Likewise, old/new compiled plans must not independently execute a
+shared mutable RBF solve cache. Reuse rest binding through the description's
+single workspace owner, with immutable rest identity separate from posed data.
+Completion payloads must carry the original groom attachment identity, not
+only its path, to reject delayed callbacks after remove/re-add. Ordered notice
+batches and frame/description pairing must survive the migration.
+
+Final validation of this migration slice:
+
+- `cmake --build build-codex -j6` and
+  `ctest --test-dir build-codex -L 'T0|T1' -E bench --output-on-failure`:
+  **63/63 passed**, including four concurrent host consumers acquiring copied
+  leases of the same retained CUDA point revision. Each consumer uses its own
+  device-selected nonblocking stream; final lease release fences queued D2D
+  copies/test readback, and a retained lease survives all generation handles.
+- `testUsdGenExecutionPipeline`: **100 consecutive runs passed**. A separate
+  current-source build with `-fsanitize=address,undefined` also passed.
+- `compute-sanitizer --tool initcheck --error-exitcode 1` and the equivalent
+  `--tool memcheck` each reported **0 errors** for `testUsdGenCudaPicking`,
+  `testUsdGenCudaPointOverride`, `testUsdGenCudaTopology`, and the updated
+  `testUsdGenCudaTools`.
+- The CUDA-disabled `usdGen` core rebuilt successfully in
+  `/tmp/usdgen-cpu-check-4XIfVs`. This is a core build, not a CPU-only full-suite
+  or release/performance gate claim.
+- The new execution-pipeline and device-lease implementation files contain no
+  application mutex or spinlock. Session, imaging, RBF and registry migration
+  remains unfinished; the full library is not yet mutex-free.
 
 ## Original scope remains required
 
@@ -358,18 +463,62 @@ bindings consume the surviving, reordered GPU channels.
   reuse and the planned performance thresholds are unverified. Source uploads
   and full-channel copies still repeat; no zero-transfer rendering claim follows.
 
-### Next tool integration boundary
+### CUDA picking and device-stroke publication checkpoint
 
-The local-Qwen lane audited the tool declarations and root confirmed that
-`cApi.h` declares, but the implementation does not define, the nineteen C ABI
-entry points. There is no implemented brush/stroke/live-override bridge yet.
-`gpu/generation.h` exposes GPU geometry leases, but the stock tile publisher
-still handles host arrays and explicitly refuses device generations. The next
-tool slice needs GPU picking, generation-scoped sparse device overrides and
-actual commit/undo/gesture wiring. CPU geometry readback for picking would
-violate the user's residency requirement and is not an acceptable fallback.
-All ten brushes, all nineteen ABI functions, renderer interop and the original
-release/gate registry remain required; this audit does not retire them.
+- `CudaPicking` projects CVs in parallel and uses device ArgMin for nearest
+  selection, with the lowest flat CV index breaking ties. Footprints use
+  uint32 flags, a device prefix scan and ordered scatter; their indices remain
+  on the GPU. Host results contain only the scalar hit record or count/error.
+  The matrix uses USD row-vector convention and pixels have a top-left origin.
+  Nonpositive clip w and out-of-range depth are rejected; mesh occlusion/depth
+  buffer integration remains unimplemented.
+- `CudaPointOverride` validates device indices and absolute replacement
+  positions, rejects duplicates deterministically with device radix sort, and
+  copies/scatters into a private GPU point allocation. Invalid edits retain the
+  last completed result. Empty edits and empty completed allocations are valid.
+  Published point revisions share rest, widths, topology, stable IDs and root
+  bindings with their immutable base; nested consumer leases retain both parent
+  channels and edited points through completion on the consumer stream.
+- `CudaToolSession` is a caller-serialized C++ bridge to the engine, not a
+  usdview brush. Begin reserves the engine's single active device stroke using
+  a token. Every move uses the press-time base; active pick/footprint queries
+  also use that base. Moves stage immutable revisions without cooking operators
+  or writing USD. `Commit(LiveOverride)` publishes through the existing imaging
+  callback, rechecking the expected generation and pending graph work. Cancel
+  stages the base restoration; Close releases without republishing and returns
+  the completed edit for a future explicit authoring boundary. Independent
+  wrappers cannot replace each other's strokes. External graph/frame cooks
+  invalidate the current stroke rather than silently applying stale indices.
+- Exact GPU comparison of ordered offsets and stable IDs now preserves
+  `topologyVersion` for point-only graph updates and brush publications. Changed
+  membership or CV layout changes the version. This compares layout identity,
+  not a complete capture/rebase epoch: capture changes that retain the same
+  layout still need the planned explicit epoch contract.
+- Root review replaced a one-thread picker with parallel reduction, corrected
+  uninitialized pick result/padding readback, transactional footprint replacement,
+  uint8 scan accumulation risk, empty point-buffer transfers, async failure
+  fencing, and stale-release/invalidation handling. Tests exercise 1025 ordered
+  footprint hits, translation/perspective/depth projection, duplicate rejection,
+  repeated and replaced moves, cancellation, rival tool wrappers, imaging
+  callbacks, topology edits and leases retained after session/tool destruction.
+  Local Qwen contributed inspected topology/lifetime review; both Hivemind
+  lanes reached the loaded model but again received no visible final answer.
+- The first full non-benchmark T0/T1 run passed **62/62**. CUDA initcheck reported
+  **0 errors** for `testUsdGenCudaPicking`, `testUsdGenCudaPointOverride`,
+  `testUsdGenCudaTopology` and `testUsdGenCudaTools`. These four targets also
+  passed memcheck with **0 errors**. Final invalidation hardening subsequently
+  passed the same 62-test suite and the CUDA-disabled core rebuild, before the
+  scheduling/lease revision described above.
+- M5 remains incomplete: `cApi.h` still only declares its nineteen entry points.
+  The ten brushes, CUDA brush math/falloff/root-frame/locked-curve handling,
+  app-thread dispatch, usdview controls, release-time authoring and undo, GPU
+  surface picking, symmetry, overlays and frozen re-entry remain required.
+  Preserving an active stroke across animation with a changed incoming snapshot
+  is not implemented. The stock tile publisher still refuses device geometry;
+  renderer interop, transfer tracing and the actual T-1/T-2/T-3 thresholds remain
+  open. Allocations, full base copies and synchronous fences are not yet a
+  measured interactive-performance implementation. No CPU geometry readback
+  fallback is provided by the new runtime path; tests read back numeric oracles.
 
 ## Validation discipline
 

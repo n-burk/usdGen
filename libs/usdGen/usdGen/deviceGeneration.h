@@ -117,6 +117,25 @@ struct UsdGenDeviceToolMetadata
     uint64_t snapshotVersion = 0;
 };
 
+/// A single consumer use of a backend generation.  The handle is owned by a
+/// lease state, so a backend can keep all state needed for fencing locally
+/// instead of maintaining a process-wide token registry.
+class UsdGenDeviceConsumer
+{
+public:
+    virtual ~UsdGenDeviceConsumer() = default;
+    virtual UsdGenDeviceStream Stream() const noexcept = 0;
+
+    /// Orders the producer's work before the consumer dereferences channels.
+    /// A failed wait does not complete the handle; the owner remains alive
+    /// until Complete (or destruction) fences and releases it.
+    virtual UsdGenDeviceStatus WaitUntilReady() const noexcept = 0;
+
+    /// Fences the consumer stream and releases the use.  Implementations must
+    /// be idempotent and must not throw.
+    virtual void Complete() noexcept = 0;
+};
+
 /// Backend-specific implementation of allocation ownership and fencing.
 /// Implementations may add typed accessors in a private/backend header, but
 /// the generation and lease only depend on this synchronization contract.
@@ -130,19 +149,10 @@ public:
     virtual bool ProducerReady() const noexcept = 0;
 
     /// Acquire a consumer use.  The owner may reject a stream that cannot be
-    /// fenced safely.  token is owner-defined and is released exactly once.
-    virtual UsdGenDeviceStatus AcquireConsumer(
-        UsdGenDeviceStream stream, uint64_t *token) const noexcept = 0;
-
-    /// Insert/wait for producer completion on stream.  This must be called on
-    /// a valid lease before the consumer dereferences backend channels.
-    virtual UsdGenDeviceStatus WaitForProducer(
-        UsdGenDeviceStream stream, uint64_t token) const noexcept = 0;
-
-    /// Release a consumer use after all asynchronous work on stream has been
-    /// ordered against the generation.  Must not throw.
-    virtual void ReleaseConsumer(
-        UsdGenDeviceStream stream, uint64_t token) const noexcept = 0;
+    /// fenced safely.  The returned handle owns all per-use backend state and
+    /// is released by UsdGenDeviceLease destruction/completion.
+    virtual std::unique_ptr<UsdGenDeviceConsumer> AcquireConsumer(
+        UsdGenDeviceStream stream) const noexcept = 0;
 };
 
 /// Shared lease state makes copies safe and keeps the owner alive until the

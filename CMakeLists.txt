@@ -380,6 +380,9 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             libs/usdGen/usdGen/gpu/surfaceBinding.cu
             libs/usdGen/usdGen/gpu/length.cu
             libs/usdGen/usdGen/gpu/curveCompaction.cu
+            libs/usdGen/usdGen/gpu/picking.cu
+            libs/usdGen/usdGen/gpu/pointOverride.cu
+            libs/usdGen/usdGen/gpu/topology.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
@@ -406,11 +409,19 @@ endif()
 
 if(USDGEN_BUILD_TESTS)
 enable_testing()
+add_executable(testUsdGenExecutionPipeline tests/testUsdGenExecutionPipeline.cpp)
+target_link_libraries(testUsdGenExecutionPipeline PRIVATE usdGen)
+add_test(NAME testUsdGenExecutionPipeline COMMAND testUsdGenExecutionPipeline)
+set_tests_properties(testUsdGenExecutionPipeline PROPERTIES LABELS "T1;scheduling;sessions" TIMEOUT 30)
 add_executable(testUsdGenDeviceGeneration tests/testUsdGenDeviceGeneration.cpp)
 target_link_libraries(testUsdGenDeviceGeneration PRIVATE usdGen)
 add_test(NAME testUsdGenDeviceGeneration COMMAND testUsdGenDeviceGeneration)
 set_tests_properties(testUsdGenDeviceGeneration PROPERTIES LABELS "T0;device;sessions")
 if(USDGEN_ENABLE_CUDA)
+    add_executable(testUsdGenCudaTools tests/testUsdGenCudaTools.cpp)
+    target_link_libraries(testUsdGenCudaTools PRIVATE usdGenImaging usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaTools COMMAND testUsdGenCudaTools)
+    set_tests_properties(testUsdGenCudaTools PROPERTIES LABELS "T1;cuda;tools;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaParameters tests/testUsdGenCudaParameters.cpp)
     target_compile_definitions(testUsdGenCudaParameters PRIVATE USDGEN_ENABLE_CUDA)
     target_compile_options(testUsdGenCudaParameters PRIVATE -UNDEBUG)
@@ -438,7 +449,7 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaSourceInput PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSourceInput COMMAND testUsdGenCudaSourceInput)
     set_tests_properties(testUsdGenCudaSourceInput PROPERTIES LABELS "T0;cuda;sources")
-    foreach(_cuda_test CurveSource ExpressionContext Width SurfaceBinding Length CurveCompaction)
+    foreach(_cuda_test CurveSource ExpressionContext Width SurfaceBinding Length CurveCompaction Picking PointOverride Topology)
         add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
         target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu usdGen)
         target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)

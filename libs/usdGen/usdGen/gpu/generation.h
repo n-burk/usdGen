@@ -14,14 +14,24 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::unique_ptr<CudaCurveSource> source, uint64_t generation,
     std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
-    std::unique_ptr<DeviceBuffer<float3>> points = {});
+    std::unique_ptr<DeviceBuffer<float3>> points = {},
+    uint64_t topologyVersion = UINT64_MAX);
 
 // Owns a completed GPU topology revision, including every reordered channel.
 std::shared_ptr<const UsdGenDeviceGeneration> MakeCompactedGeneration(
     std::unique_ptr<CudaCurveCompaction> geometry, uint64_t generation,
     std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
-    std::unique_ptr<DeviceBuffer<float3>> points = {});
+    std::unique_ptr<DeviceBuffer<float3>> points = {},
+    uint64_t topologyVersion = UINT64_MAX);
+
+// Completed device-only point edit of an immutable snapshot. All other
+// channels and the topology version are shared with base. A null points
+// revision republishes the unmodified base (gesture cancellation).
+std::shared_ptr<const UsdGenDeviceGeneration> MakePointRevisionGeneration(
+    std::shared_ptr<const UsdGenDeviceGeneration> base, uint64_t generation,
+    std::unique_ptr<DeviceBuffer<float3>> points,
+    UsdGenDeviceToolMetadata tool = {}, std::string* reason = nullptr);
 
 // Read-only geometry access for CUDA tools/consumers. The native stream must
 // remain alive until every copy of the lease is released. Destruction waits

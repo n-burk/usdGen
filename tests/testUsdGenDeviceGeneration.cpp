@@ -6,54 +6,76 @@
 
 namespace {
 
+class FakeOwner;
+
+class FakeConsumer final : public usdGen::UsdGenDeviceConsumer
+{
+public:
+    FakeConsumer(FakeOwner const *owner, usdGen::UsdGenDeviceStream stream)
+        : owner_(owner), stream_(stream) {}
+    ~FakeConsumer() override { Complete(); }
+    usdGen::UsdGenDeviceStream Stream() const noexcept override { return stream_; }
+    usdGen::UsdGenDeviceStatus WaitUntilReady() const noexcept override;
+    void Complete() noexcept override;
+private:
+    FakeOwner const *owner_;
+    usdGen::UsdGenDeviceStream stream_;
+    bool completed_ = false;
+};
+
 class FakeOwner final : public usdGen::UsdGenDeviceOwner
 {
 public:
     bool ProducerReady() const noexcept override { return ready; }
-
-    usdGen::UsdGenDeviceStatus AcquireConsumer(
-        usdGen::UsdGenDeviceStream stream, uint64_t *token) const noexcept override
-    {
-        if (!token || stream == 0 || reject) {
-            ++rejected;
-            return usdGen::UsdGenDeviceStatus::ConsumerRejected;
-        }
-        *token = ++nextToken;
-        ++active;
-        ++acquired;
-        lastStream = stream;
-        return usdGen::UsdGenDeviceStatus::Ok;
-    }
-
-    usdGen::UsdGenDeviceStatus WaitForProducer(
-        usdGen::UsdGenDeviceStream stream, uint64_t token) const noexcept override
-    {
-        if (stream != lastStream || token == 0 || active == 0)
-            return usdGen::UsdGenDeviceStatus::InvalidLease;
-        ++waits;
-        return ready ? usdGen::UsdGenDeviceStatus::Ok
-                     : usdGen::UsdGenDeviceStatus::ProducerNotReady;
-    }
-
-    void ReleaseConsumer(
-        usdGen::UsdGenDeviceStream stream, uint64_t token) const noexcept override
-    {
-        if (stream == lastStream && token != 0 && active > 0) {
-            --active;
-            ++released;
-        }
-    }
+    std::unique_ptr<usdGen::UsdGenDeviceConsumer> AcquireConsumer(
+        usdGen::UsdGenDeviceStream stream) const noexcept override;
 
     bool ready = false;
     bool reject = false;
-    mutable uint64_t nextToken = 0;
-    mutable uint64_t lastStream = 0;
+    bool wrongStream = false;
     mutable int active = 0;
     mutable int acquired = 0;
     mutable int rejected = 0;
     mutable int waits = 0;
     mutable int released = 0;
 };
+
+std::unique_ptr<usdGen::UsdGenDeviceConsumer>
+FakeOwner::AcquireConsumer(usdGen::UsdGenDeviceStream stream) const noexcept
+{
+    if (reject) {
+        ++rejected;
+        return {};
+    }
+    try {
+        auto consumer = std::make_unique<FakeConsumer>(
+            this, wrongStream ? stream + 1 : stream);
+        ++active;
+        ++acquired;
+        return consumer;
+    } catch (...) {
+        ++rejected;
+        return {};
+    }
+}
+
+usdGen::UsdGenDeviceStatus FakeConsumer::WaitUntilReady() const noexcept
+{
+    if (!owner_ || completed_) return usdGen::UsdGenDeviceStatus::InvalidLease;
+    ++owner_->waits;
+    return owner_->ready ? usdGen::UsdGenDeviceStatus::Ok
+                         : usdGen::UsdGenDeviceStatus::ProducerNotReady;
+}
+
+void FakeConsumer::Complete() noexcept
+{
+    if (completed_) return;
+    completed_ = true;
+    if (owner_ && owner_->active > 0) {
+        --owner_->active;
+        ++owner_->released;
+    }
+}
 
 int Check(bool condition, char const *message, int *failures)
 {
@@ -132,11 +154,27 @@ int main()
     Check(secondLease.WaitUntilReady() == usdGen::UsdGenDeviceStatus::Ok,
           "lease inserts producer ordering after readiness", &failures);
 
+    owner->reject = true;
+    usdGen::UsdGenDeviceLease rejectedLease = generation->AcquireLease(0x4321);
+    Check(!rejectedLease.IsValid() && owner->rejected == 1,
+          "owner rejection does not create a lease", &failures);
+    owner->reject = false;
+
+    owner->wrongStream = true;
+    auto wrongStreamLease = generation->AcquireLease(0x4321);
+    Check(!wrongStreamLease.IsValid() && owner->active == 1 &&
+              owner->released == 1,
+          "wrong-stream consumer is completed and rejected", &failures);
+    owner->wrongStream = false;
+
     generation.reset();
     owner.reset();
     Check(!weakOwner.expired(), "lease retains owner after generation release", &failures);
     secondLease.Complete();
-    Check(weakOwner.expired(), "owner releases after asynchronous use completes", &failures);
+    secondLease.Complete();
+    Check(weakOwner.expired() &&
+              secondLease.WaitUntilReady() == usdGen::UsdGenDeviceStatus::InvalidLease,
+          "owner releases after asynchronous use completes exactly once", &failures);
 
     std::printf(failures ? "testUsdGenDeviceGeneration: FAILED (%d)\n"
                          : "testUsdGenDeviceGeneration: PASS\n",

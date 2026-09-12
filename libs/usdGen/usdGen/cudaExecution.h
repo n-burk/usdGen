@@ -22,6 +22,7 @@ struct UsdGenCudaBindingStats {
 std::vector<UsdGenCudaBindingStats> GetCudaBindingStats(UsdGenCudaExecutionPlan&);
 std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     UsdGenCudaExecutionPlan&, UsdGenGraphDesc const&, double frame,
-    uint64_t generation, UsdGenDiagnostics*);
+    uint64_t generation, UsdGenDiagnostics*,
+    std::shared_ptr<const UsdGenDeviceGeneration> const& previous = {});
 }
 #endif

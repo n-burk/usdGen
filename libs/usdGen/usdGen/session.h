@@ -59,6 +59,22 @@ public:
     /// Explicit consumer capability. Stock Hydra publication has no CUDA
     /// interop bridge, so it leaves this disabled. Device tools may opt in.
     void SetDevicePublicationEnabled(bool enabled);
+    /// Reserve the session's single active device stroke against a clean
+    /// snapshot. Tokens prevent independent tool bridges replacing each other.
+    bool BeginDeviceEdit(UsdGenGenerationConstPtr const& expected, uint64_t* token,
+                         std::string* reason = nullptr);
+    /// Stage an immutable device point revision against the exact currently
+    /// published snapshot. Commit(LiveOverride) publishes it without recooking
+    /// operators. Scene/time changes supersede staged edits. No stage write.
+    bool StageDeviceRevision(UsdGenGenerationConstPtr const& expected,
+                            std::shared_ptr<const UsdGenDeviceGeneration> revision,
+                            uint64_t token,
+                            std::string* reason = nullptr);
+    /// Release the stroke reservation. Return false if its expected snapshot
+    /// has been superseded or has pending graph work. Cancellation may retain
+    /// its staged restoration; normal release discards an unpublished move.
+    bool EndDeviceEdit(uint64_t token, UsdGenGenerationConstPtr const& expected,
+                       bool discardStaged = true);
     /// OR-accumulate routed dirties; thread-safe (lock-free fast path when clean).
     void AccumulateDirty(UsdGenPendingDirty &&pending);
     bool NeedsCommit() const noexcept;
@@ -110,6 +126,9 @@ private:
     UsdGenContext _context = UsdGenContext::Interactive;
     bool _densityDrag = false;
     bool _devicePublicationEnabled = false;
+    std::shared_ptr<const UsdGenDeviceGeneration> _stagedDeviceRevision;
+    UsdGenGenerationConstPtr _stagedDeviceExpected;
+    uint64_t _activeDeviceEdit = 0, _nextDeviceEditToken = 0;
     // Last commit's per-node run stats (03 §9.2), keyed by node id.
     std::unordered_map<UsdGenNodeId, UsdGenNodeRunStats> _lastNodeStats;
     // Gathers one tile's publication from the terminal buffer (03 §6.3).
