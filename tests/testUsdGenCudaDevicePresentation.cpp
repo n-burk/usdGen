@@ -10,6 +10,7 @@
 #include <pxr/base/gf/vec3f.h>
 
 #include <cstdio>
+#include <vector>
 
 using namespace usdGen;
 using namespace usdGen::gpu;
@@ -47,6 +48,8 @@ static UsdGenGraphDesc MakeDesc()
     hair.wrap = TfToken("pinned");
     hair.curveVertexCounts = {2, 2};
     hair.curveId = {10, 20};
+    hair.widths = {.2f, .2f, .2f, .2f};
+    hair.widthsInterpolation = TfToken("vertex");
     hair.skinPrim = {0, 0};
     hair.skinPrimUv = {GfVec2f(.25f, .25f), GfVec2f(.5f, .25f)};
     hair.points = {{0, 0, 0}, {0, 1, 0}, {.5f, 0, 0}, {.5f, 1, 0}};
@@ -74,6 +77,15 @@ static bool SamePresentation(UsdGenDevicePresentationMetadata const &a,
         a.materialPurpose == b.materialPurpose &&
         a.refineLevel == b.refineLevel && a.primOrigin == b.primOrigin &&
         a.dependencySurface == b.dependencySurface;
+}
+
+static bool Read(CudaGeometryLease const& lease, std::vector<float3>* points,
+                 cudaStream_t stream)
+{
+    points->resize(lease.Geometry().pointCount);
+    return cudaMemcpyAsync(points->data(), lease.Geometry().points.data,
+        points->size() * sizeof(float3), cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+        cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
 int main()
@@ -121,13 +133,22 @@ int main()
     // Retained immutable generations must retain their own descriptor epoch.
     CHECK(SamePresentation(*first->devicePresentation, initial));
 
+    auto const baseGeometry = second->device->Geometry();
+    CHECK(baseGeometry.tiles.size() == 1 && baseGeometry.tiles[0].boundsValid);
+    auto const oldTile = baseGeometry.tiles[0];
+    auto oldLease = AcquireGeometry(second->device, stream);
+    std::vector<float3> oldPoints, oldAfter;
+    CHECK(oldLease && Read(oldLease, &oldPoints, stream) && oldPoints.size() == 4 &&
+          oldPoints[1].x == 0.0f && oldPoints[1].y == 1.0f);
+
     // Exercise the production point-revision path: it replaces only the
     // device geometry/tool snapshot, so presentation must copy from its base.
     DeviceBuffer<int32_t> indices;
     DeviceBuffer<float3> positions;
     CHECK(indices.reset(1) == cudaSuccess && positions.reset(1) == cudaSuccess);
-    int32_t const index = 0;
-    float3 const position{.125f, .25f, .0f};
+    int32_t const index = 1;
+    // This is beyond the base tile's width-expanded x bound (.6).
+    float3 const position{1.0f, 1.0f, .0f};
     CHECK(cudaMemcpyAsync(indices.data(), &index, sizeof(index), cudaMemcpyHostToDevice, stream) == cudaSuccess &&
           cudaMemcpyAsync(positions.data(), &position, sizeof(position), cudaMemcpyHostToDevice, stream) == cudaSuccess &&
           cudaStreamSynchronize(stream) == cudaSuccess);
@@ -140,6 +161,23 @@ int main()
     CHECK(SamePresentation(*revised->devicePresentation, changedPresentation));
     CHECK(revised->device->Tool().toolId == "pointEdit" &&
           revised->device->Tool().graphVersion == 99);
+    auto const& revisedGeometry = revised->device->Geometry();
+    CHECK(revisedGeometry.tiles.size() == 1);
+    auto const& revisedTile = revisedGeometry.tiles[0];
+    CHECK(revisedTile.boundsValid &&
+          revisedTile.extentMin[0] <= .9f && revisedTile.extentMax[0] >= 1.1f &&
+          revisedTile.extentMin[1] <= .9f && revisedTile.extentMax[1] >= 1.1f &&
+          revisedTile.extentMin[2] <= -.1f && revisedTile.extentMax[2] >= .1f);
+    CHECK(position.x > oldTile.extentMax[0] &&
+          revisedTile.extentMax[0] > oldTile.extentMax[0]);
+    CHECK(revisedGeometry.topologyVersion == baseGeometry.topologyVersion &&
+          SamePresentation(*revised->devicePresentation, *second->devicePresentation));
+    CHECK(second->device->Geometry().tiles[0].extentMin == oldTile.extentMin &&
+          second->device->Geometry().tiles[0].extentMax == oldTile.extentMax &&
+          Read(oldLease, &oldAfter, stream) && oldAfter.size() == oldPoints.size() &&
+          oldAfter[1].x == oldPoints[1].x && oldAfter[1].y == oldPoints[1].y &&
+          oldAfter[1].z == oldPoints[1].z);
+    oldLease = {};
     CHECK(tool.Close());
 
     positions.release();

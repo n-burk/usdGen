@@ -22,6 +22,8 @@ static UsdGenGraphDesc Desc() {
     d.surfaces.push_back(surface);
     UsdGenCurveSetDesc curves; curves.path = SdfPath("/Hair");
     curves.role = UsdGenRole::Curves; curves.curveRole = TfToken("hair");
+    curves.type = TfToken("cubic"); curves.basis = TfToken("catmullRom");
+    curves.wrap = TfToken("pinned");
     curves.curveVertexCounts = {2,3}; curves.curveId = {20,10};
     curves.points = {{0,.5f,0},{0,1,0},{-.5f,0,0},{0,0,0},{.5f,0,0}};
     curves.rest = curves.points; curves.skinPrim = {0,0};
@@ -33,6 +35,15 @@ static UsdGenGraphDesc Desc() {
     return d;
 }
 
+static UsdGenGraphDesc EmptyDesc() {
+    auto d = Desc();
+    auto& curves = d.curveSets.front();
+    curves.curveVertexCounts.clear(); curves.curveId.clear();
+    curves.points.clear(); curves.rest.clear(); curves.widths.clear();
+    curves.skinPrim.clear(); curves.skinPrimUv.clear();
+    return d;
+}
+
 static bool Read(CudaGeometryLease const& lease, std::vector<float3>* points, cudaStream_t stream) {
     points->resize(lease.Geometry().pointCount);
     return cudaMemcpyAsync(points->data(), lease.Geometry().points.data,
@@ -41,6 +52,35 @@ static bool Read(CudaGeometryLease const& lease, std::vector<float3>* points, cu
 }
 static bool Equal(std::vector<float3> const& a, std::vector<float3> const& b) {
     return a.size() == b.size() && std::memcmp(a.data(),b.data(),a.size()*sizeof(float3)) == 0;
+}
+static bool ValidBounds(UsdGenDeviceGeometryMetadata const& geometry) {
+    for (auto const& tile : geometry.tiles) {
+        if (!tile.boundsValid) return false;
+        for (size_t axis = 0; axis != 3; ++axis)
+            if (!std::isfinite(tile.extentMin[axis]) || !std::isfinite(tile.extentMax[axis]) ||
+                tile.extentMin[axis] > tile.extentMax[axis]) return false;
+    }
+    return true;
+}
+static bool Contains(UsdGenDeviceGeometryMetadata const& geometry, uint64_t point,
+                     float3 value) {
+    for (auto const& tile : geometry.tiles) {
+        if (point < tile.firstPoint || point - tile.firstPoint >= tile.pointCount) continue;
+        return tile.boundsValid && value.x >= tile.extentMin[0] && value.x <= tile.extentMax[0] &&
+            value.y >= tile.extentMin[1] && value.y <= tile.extentMax[1] &&
+            value.z >= tile.extentMin[2] && value.z <= tile.extentMax[2];
+    }
+    return false;
+}
+static bool SameBounds(UsdGenDeviceGeometryMetadata const& a,
+                       UsdGenDeviceGeometryMetadata const& b) {
+    if (a.tiles.size() != b.tiles.size()) return false;
+    for (size_t i = 0; i != a.tiles.size(); ++i) {
+        if (a.tiles[i].boundsValid != b.tiles[i].boundsValid ||
+            a.tiles[i].extentMin != b.tiles[i].extentMin ||
+            a.tiles[i].extentMax != b.tiles[i].extentMax) return false;
+    }
+    return true;
 }
 
 int main() {
@@ -64,6 +104,8 @@ int main() {
         auto first = engine->Generation();
         if (!first) for (auto const& e : engine->LastDiagnostics().errors) std::fprintf(stderr,"%s\n",e.c_str());
         CHECK(first && first->device && publications == 1 && callbackGeneration == first);
+        auto const firstGeometry = first->device->Geometry();
+        CHECK(ValidBounds(firstGeometry));
         auto baseLease = AcquireGeometry(first->device,reader); CHECK(baseLease);
         std::vector<float3> original, values, edited;
         CHECK(Read(baseLease,&original,reader) && original.size() == 5 && original[1].x == 0);
@@ -98,6 +140,8 @@ int main() {
         retainedGeneration = move1->device;
         CHECK(move1->device->Geometry().topologyVersion == topology && move1->device->Geometry().valueVersion == uint64_t(move1->id));
         CHECK(move1->device->Tool().graphVersion == 77 && move1->device->Tool().snapshotVersion == first->device->Identity().generation);
+        CHECK(ValidBounds(move1->device->Geometry()) &&
+              Contains(move1->device->Geometry(), 1, {.1f, .2f, 0}));
         retained = AcquireGeometry(move1->device,reader); CHECK(retained && Read(retained,&edited,reader));
         CHECK(edited[1].x == .1f && edited[1].y == .2f && edited[4].y == original[4].y);
         CHECK(retained.Geometry().restPoints.data == baseLease.Geometry().restPoints.data &&
@@ -108,10 +152,34 @@ int main() {
         // Same move is bitwise idempotent; duplicate updates fail without staging.
         CHECK(!tool.UpdateIndexed({indices.data(),2},{replacements.data(),2}));
         CHECK(!engine->NeedsCommit() && engine->Generation() == move1);
+        hostPositions[0].x = std::numeric_limits<float>::quiet_NaN();
+        CHECK(upload());
+        CHECK(!tool.UpdateIndexed({indices.data(),1},{replacements.data(),1}) &&
+              !engine->NeedsCommit() && engine->Generation() == move1);
+        // A finite override can still fail only after the conservative
+        // Catmull-Rom bounds stage overflows.  That failure must leave the
+        // preceding, uncommitted staged edit intact for publication.
+        hostIndices[0] = 4; hostPositions[0] = {.6f,.6f,0}; CHECK(upload());
+        CHECK(tool.UpdateIndexed({indices.data(),1},{replacements.data(),1}) &&
+              engine->NeedsCommit() && engine->Generation() == move1);
+        hostPositions[0] = {std::numeric_limits<float>::max(),0,0}; CHECK(upload());
+        CHECK(!tool.UpdateIndexed({indices.data(),1},{replacements.data(),1}) &&
+              engine->NeedsCommit() && engine->Generation() == move1);
+        imaging->Commit(UsdGenCommitReason::LiveOverride);
+        auto boundsFailureRetained = engine->Generation();
+        CHECK(boundsFailureRetained != move1 &&
+              Read(AcquireGeometry(boundsFailureRetained->device,reader),&values,reader) &&
+              values[4].x == .6f &&
+              ValidBounds(boundsFailureRetained->device->Geometry()) &&
+              Contains(boundsFailureRetained->device->Geometry(), 4, {.6f,.6f,0}));
+        hostPositions[0] = {.1f,.2f,0};
+        hostIndices[0] = 1;
+        CHECK(upload());
         CHECK(tool.UpdateIndexed({indices.data(),1},{replacements.data(),1}));
         imaging->Commit(UsdGenCommitReason::LiveOverride);
         auto repeated = engine->Generation();
-        CHECK(repeated != move1 && Read(AcquireGeometry(repeated->device,reader),&values,reader) && Equal(values,edited));
+        CHECK(repeated != boundsFailureRetained &&
+              Read(AcquireGeometry(repeated->device,reader),&values,reader) && Equal(values,edited));
         // Two moves before publication replace the staged move; neither
         // accumulates the previous move's sparse values.
         hostIndices[0] = 4; hostPositions[0] = {.8f,.8f,0}; CHECK(upload());
@@ -122,11 +190,15 @@ int main() {
         auto move2 = engine->Generation();
         CHECK(Read(AcquireGeometry(move2->device,reader),&values,reader));
         CHECK(values[1].x == original[1].x && values[1].y == original[1].y && values[4].x == .7f);
+        CHECK(ValidBounds(move2->device->Geometry()) &&
+              Contains(move2->device->Geometry(), 4, {.7f, .7f, 0}) &&
+              !Contains(firstGeometry, 4, {.7f, .7f, 0}));
         CHECK(tool.Cancel() && !tool.active() && engine->Generation() == move2);
         imaging->Commit(UsdGenCommitReason::LiveOverride);
         auto cancelled = engine->Generation(); CHECK(cancelled != move2);
         CHECK(Read(AcquireGeometry(cancelled->device,reader),&values,reader) && Equal(values,original));
         CHECK(cancelled->device->Geometry().topologyVersion == topology);
+        CHECK(SameBounds(cancelled->device->Geometry(), firstGeometry));
         CHECK(rival.Begin() && rival.Close());
         // Release closes without publishing; the completed edit can be
         // retained for a later explicit authoring/bake boundary.
@@ -168,6 +240,26 @@ int main() {
               values[4].x == original[4].x);
         CHECK(Read(retained,&values,reader) && Equal(values,edited));
         baseLease = {};
+    }
+    // Empty C3 geometry has no tile bounds to allocate/read back, yet an
+    // empty point edit remains a valid device publication.
+    {
+        UsdGenSession empty;
+        empty.SetDevicePublicationEnabled(true);
+        empty.SetGraphDesc(EmptyDesc());
+        auto firstEmpty = empty.Commit(0, UsdGenCommitReason::SetTime);
+        CHECK(firstEmpty && firstEmpty->device &&
+              firstEmpty->device->Geometry().pointCount == 0 &&
+              firstEmpty->device->Geometry().tiles.empty());
+        CudaToolSession emptyTool(empty, stream);
+        CHECK(emptyTool.Begin() &&
+              emptyTool.UpdateIndexed(DeviceView<const int32_t>{},
+                                      DeviceView<const float3>{}));
+        auto revisedEmpty = empty.Commit(0, UsdGenCommitReason::LiveOverride);
+        CHECK(revisedEmpty && revisedEmpty != firstEmpty && revisedEmpty->device &&
+              revisedEmpty->device->Geometry().pointCount == 0 &&
+              revisedEmpty->device->Geometry().tiles.empty() &&
+              emptyTool.Close());
     }
     // Independently acquired consumers share immutable point/base storage
     // after the engine and tool have been destroyed.

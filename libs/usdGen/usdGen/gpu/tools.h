@@ -2,9 +2,12 @@
 #define USDGEN_GPU_TOOLS_H
 
 #include "generation.h"
+#include "curveTileBounds.h"
 #include "picking.h"
 #include "pointOverride.h"
 #include "usdGen/session.h"
+
+#include <vector>
 
 namespace usdGen::gpu {
 
@@ -40,6 +43,10 @@ public:
 private:
     bool Fail(char const* message);
     bool CheckCurrent(UsdGenGenerationConstPtr const& current);
+    bool RefreshTileBounds(CudaGeometryLease const& lease,
+                           DeviceView<const float3> revisedPoints,
+                           std::vector<UsdGenDeviceTileMetadata>* tiles,
+                           bool* boundsReady);
     UsdGenSession& engine_;
     cudaStream_t stream_;
     UsdGenGenerationConstPtr base_;
@@ -50,6 +57,13 @@ private:
     uint64_t editToken_ = 0;
     CudaPicking picking_;
     CudaPointOverride override_;
+    // Reused exclusively by this caller-serialized tool session. They are
+    // always enqueued on stream_, never on an implicit/default stream.
+    DeviceBuffer<CurveTileSpan> spans_;
+    DeviceBuffer<CurveTileBoundsScratch> boundsScratch_;
+    DeviceBuffer<float3> boundsMinimums_;
+    DeviceBuffer<float3> boundsMaximums_;
+    DeviceBuffer<uint32_t> boundsStatus_;
     std::string diagnostic_;
 };
 

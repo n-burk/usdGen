@@ -1,5 +1,7 @@
 #ifdef USDGEN_ENABLE_CUDA
 #include "usdGen/gpu/tools.h"
+#include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace usdGen::gpu {
@@ -17,6 +19,127 @@ bool CudaToolSession::CheckCurrent(UsdGenGenerationConstPtr const& current) {
         return Fail("device stroke is stale; close it before using a new graph snapshot");
     if (current->id == std::numeric_limits<int64_t>::max())
         return Fail("device publication identity exhausted");
+    return true;
+}
+
+bool CudaToolSession::RefreshTileBounds(CudaGeometryLease const& lease,
+    DeviceView<const float3> revisedPoints,
+    std::vector<UsdGenDeviceTileMetadata>* tiles, bool* boundsReady) {
+    if (!tiles || !boundsReady || !base_) return Fail("missing point-edit bounds state");
+    *boundsReady = false;
+    auto const& geometry = base_->device->Geometry();
+    auto const& topology = geometry.curveTopology;
+    // Range-only legacy generations are legal, but cannot be declared render
+    // ready without a concrete shader topology.
+    if (topology.type == UsdGenDeviceCurveType::Unknown &&
+        topology.basis == UsdGenDeviceCurveBasis::Unknown &&
+        topology.wrap == UsdGenDeviceCurveWrap::Unknown)
+        return true;
+    CurveTileBoundsBasis basis;
+    if (topology.type != UsdGenDeviceCurveType::Cubic ||
+        topology.wrap != UsdGenDeviceCurveWrap::Pinned) {
+        return Fail("point-edit bounds require concrete pinned C3 topology");
+    }
+    if (topology.basis == UsdGenDeviceCurveBasis::BSpline)
+        basis = CurveTileBoundsBasis::BSpline;
+    else if (topology.basis == UsdGenDeviceCurveBasis::CatmullRom)
+        basis = CurveTileBoundsBasis::CatmullRom;
+    else
+        return Fail("point-edit bounds require B-spline or Catmull-Rom topology");
+    DeviceCurveGeometryView const baseGeometry = lease.Geometry();
+    if (revisedPoints.size != geometry.pointCount ||
+        baseGeometry.widths.size != geometry.pointCount ||
+        (geometry.pointCount && (!revisedPoints.data || !baseGeometry.widths.data))) {
+        return Fail("point-edit bounds have incompatible device channels");
+    }
+    if (geometry.tiles.size() > 256)
+        return Fail("point-edit bounds exceed the 256-tile readback contract");
+
+    std::vector<CurveTileSpan> hostSpans;
+    hostSpans.reserve(geometry.tiles.size());
+    uint64_t curveEnd = 0, pointEnd = 0, previousId = 0;
+    bool first = true;
+    for (UsdGenDeviceTileMetadata const& tile : geometry.tiles) {
+        if ((!first && tile.tile <= previousId) || tile.firstCurve != curveEnd ||
+            tile.firstPoint != pointEnd || tile.curveCount > tile.pointCount ||
+            (tile.curveCount == 0 && tile.pointCount != 0) ||
+            tile.firstCurve > UINT32_MAX || tile.curveCount > UINT32_MAX - tile.firstCurve ||
+            tile.firstPoint > UINT32_MAX || tile.pointCount > UINT32_MAX - tile.firstPoint ||
+            tile.curveCount > geometry.curveCount - curveEnd ||
+            tile.pointCount > geometry.pointCount - pointEnd) {
+            return Fail("point-edit bounds found malformed tile metadata");
+        }
+        hostSpans.push_back({tile.tile, static_cast<uint32_t>(tile.firstCurve),
+            static_cast<uint32_t>(tile.curveCount), static_cast<uint32_t>(tile.firstPoint),
+            static_cast<uint32_t>(tile.pointCount)});
+        curveEnd += tile.curveCount;
+        pointEnd += tile.pointCount;
+        previousId = tile.tile;
+        first = false;
+    }
+    if ((hostSpans.empty() && (geometry.curveCount || geometry.pointCount)) ||
+        (!hostSpans.empty() &&
+         (curveEnd != geometry.curveCount || pointEnd != geometry.pointCount))) {
+        return Fail("point-edit bounds do not cover base geometry");
+    }
+    size_t const count = hostSpans.size();
+    if (spans_.reset(count) != cudaSuccess || boundsScratch_.reset(count) != cudaSuccess ||
+        boundsMinimums_.reset(count) != cudaSuccess || boundsMaximums_.reset(count) != cudaSuccess ||
+        boundsStatus_.reset(1) != cudaSuccess) {
+        return Fail("point-edit bounds workspace allocation failed");
+    }
+    if (!(hostSpans.empty() || cudaMemcpyAsync(spans_.data(), hostSpans.data(),
+            hostSpans.size() * sizeof(CurveTileSpan), cudaMemcpyHostToDevice,
+            stream_) == cudaSuccess)) {
+        return Fail("point-edit bounds span upload failed");
+    }
+    DeviceView<const CurveTileSpan> const deviceSpans =
+        static_cast<DeviceBuffer<CurveTileSpan> const&>(spans_).view();
+    CurveTileBoundsInput const input{revisedPoints, baseGeometry.widths, deviceSpans};
+    CurveTileBoundsWorkspace const workspace{boundsScratch_.view()};
+    CurveTileBoundsOutput const output{boundsMinimums_.view(), boundsMaximums_.view(),
+                                       boundsStatus_.view()};
+    cudaError_t const launch = BuildCurveTileBounds({basis}, input, workspace, output, stream_);
+    if (launch != cudaSuccess) {
+        // The helper can have queued work before reporting a later launch
+        // error. Retire the same-stream H2D span copy before hostSpans dies.
+        cudaStreamSynchronize(stream_);
+        return Fail("point-edit bounds launch failed");
+    }
+    uint32_t status = 0;
+    cudaError_t const statusCopy = cudaMemcpyAsync(&status, boundsStatus_.data(),
+        sizeof(status), cudaMemcpyDeviceToHost, stream_);
+    // Always retire every queued launch even if status-copy enqueue failed.
+    cudaError_t const statusFence = cudaStreamSynchronize(stream_);
+    if (statusCopy != cudaSuccess || statusFence != cudaSuccess || status != 0)
+        return Fail("point-edit bounds validation failed");
+
+    std::vector<float3> minimums(count), maximums(count);
+    cudaError_t minimumCopy = cudaSuccess, maximumCopy = cudaSuccess;
+    if (count) {
+        minimumCopy = cudaMemcpyAsync(minimums.data(), boundsMinimums_.data(),
+            count * sizeof(float3), cudaMemcpyDeviceToHost, stream_);
+        maximumCopy = cudaMemcpyAsync(maximums.data(), boundsMaximums_.data(),
+            count * sizeof(float3), cudaMemcpyDeviceToHost, stream_);
+    }
+    cudaError_t const boundsFence = cudaStreamSynchronize(stream_);
+    if (minimumCopy != cudaSuccess || maximumCopy != cudaSuccess ||
+        boundsFence != cudaSuccess)
+        return Fail("point-edit bounds readback failed");
+    *tiles = geometry.tiles;
+    for (size_t i = 0; i != count; ++i) {
+        float const minimum[3] = {minimums[i].x, minimums[i].y, minimums[i].z};
+        float const maximum[3] = {maximums[i].x, maximums[i].y, maximums[i].z};
+        for (size_t axis = 0; axis != 3; ++axis) {
+            if (!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) ||
+                minimum[axis] > maximum[axis])
+                return Fail("point-edit bounds readback is not conservative");
+            (*tiles)[i].extentMin[axis] = minimum[axis];
+            (*tiles)[i].extentMax[axis] = maximum[axis];
+        }
+        (*tiles)[i].boundsValid = true;
+    }
+    *boundsReady = true;
     return true;
 }
 
@@ -45,10 +168,15 @@ bool CudaToolSession::UpdateIndexed(DeviceView<const int32_t> indices,
     auto status = override_.Apply(lease.Geometry().points, indices, absolutePositions, stream_);
     if (status == PointOverrideStatus::Ok) status = override_.Finish(stream_);
     if (status != PointOverrideStatus::Ok) return Fail("invalid or failed sparse GPU point edit");
+    std::vector<UsdGenDeviceTileMetadata> tiles;
+    bool boundsReady = false;
+    if (!RefreshTileBounds(lease, override_.view(), &tiles, &boundsReady)) return false;
     auto points = override_.releaseCompleted();
     if (!points) return Fail("GPU point edit did not produce a completed allocation");
     auto revision = MakePointRevisionGeneration(base_->device, uint64_t(current->id + 1),
         std::move(points), {"pointEdit", graphVersion_, base_->device->Identity().generation}, &diagnostic_);
+    if (revision && boundsReady)
+        revision = WithTileMetadata(revision, std::move(tiles), &diagnostic_);
     if (!revision || !engine_.StageDeviceRevision(current, revision, editToken_, &diagnostic_)) return false;
     latest_ = staged_ = std::move(revision);
     expected_ = current;
