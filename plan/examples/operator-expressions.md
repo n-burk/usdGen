@@ -104,6 +104,23 @@ topology step. Dynamic array construction and exact 64-bit integer arithmetic
 need explicit engine support; scalar-only expression plumbing is insufficient
 to implement the full requirement.
 
+### Current transport versus execution support
+
+The Stage and Hydra graph-descriptor paths preserve declared shapes for USD
+bool/numeric scalars, role aliases, vectors, quaternions, matrices, and fixed
+arrays. An authored empty array has length zero; an array declaration without a
+typed value is shape-unknown and is rejected. `uchar` deliberately remains
+unsupported because the value ABI has no byte scalar type; it is not widened to
+an integer type.
+
+This is authoring/validation transport, not blanket CUDA execution support. The
+CUDA compiler still admits only the parameter/type/domain combinations each
+operator implements (for example, Length accepts primitive or groom `float2`
+`usdGen:length:random`). Transport does not establish executable support for
+matrices, fixed arrays, or exact 64-bit arithmetic; unsupported combinations
+must produce diagnostics. Strings, tokens, asset paths, and other
+configuration-like attributes remain literal as described above.
+
 `customData.usdGen.evaluation` records spatial evaluation granularity. It is
 independent of USD's temporal `uniform`/`varying` variability and of primvar
 interpolation. The mock explicitly annotates every authored numeric operator

@@ -25,6 +25,8 @@
 // rule 2).
 #include "usdGenImaging/primAdapter.h"
 
+#include "usdGen/expressions/valueShape.h"
+
 #include "pxr/base/ts/spline.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
@@ -133,6 +135,17 @@ _Value(VtValue const &value)
     return HdRetainedSampledDataSource::New(value);
 }
 
+void
+_ExpressionArrayCount(UsdAttribute const& attr, uint32_t* count, bool* known)
+{
+    *count = 0;
+    *known = !attr.GetTypeName().IsArray();
+    if (*known) return;
+    VtValue declaration;
+    *known = attr.Get(&declaration) &&
+        usdGen::expr::FixedArrayElementCount(attr.GetTypeName(), declaration, count);
+}
+
 // Dynamic expression metadata is not an authored schema property, so the
 // mapped source cannot publish it.  Transport it as ordinary retained Hydra
 // leaves.  Numeric child indices plus a `path` leaf are collision-free and
@@ -159,11 +172,16 @@ _ExpressionsDataSource(UsdPrim const &description)
         for (UsdAttribute const &a : expr.GetAttributes()) {
             std::string const n = a.GetName().GetString();
             if (n.rfind("outputs:", 0) != 0) continue;
-            TfTokenVector outFields{TfToken("name"), TfToken("nativeType"), TfToken("shape")};
+            uint32_t arrayElementCount = 0;
+            bool arrayCountKnown = false;
+            _ExpressionArrayCount(a, &arrayElementCount, &arrayCountKnown);
+            TfTokenVector outFields{TfToken("name"), TfToken("nativeType"), TfToken("shape"),
+                TfToken("arrayElementCount"), TfToken("arrayCountKnown")};
             std::vector<HdDataSourceBaseHandle> outValues{
                 _Value(VtValue(TfToken(n.substr(8)))),
                 _Value(VtValue(a.GetTypeName().GetAsToken())),
-                _Value(VtValue(a.GetTypeName().GetAsToken()))};
+                _Value(VtValue(a.GetTypeName().GetAsToken())),
+                _Value(VtValue(arrayElementCount)), _Value(VtValue(arrayCountKnown))};
             outputNames.push_back(TfToken(std::to_string(outputIndex++)));
             outputValues.push_back(HdRetainedContainerDataSource::New(
                 outFields.size(), outFields.data(), outValues.data()));

@@ -5,6 +5,8 @@
 // UsdStage dependencies (B-2/V2-11).
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
 
+#include "usdGen/expressions/valueShape.h"
+
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/assetPath.h"
@@ -284,25 +286,13 @@ _StageOperatorOrder(UsdPrim const &description)
 }
 
 usdGen::expr::ValueShape
-_ExpressionShape(SdfValueTypeName const &type)
+_ExpressionShape(SdfValueTypeName const &type, VtValue const *declaration)
 {
-    usdGen::expr::ValueShape shape;
-    TfToken const scalar = type.GetScalarType().GetAsToken();
-    shape.isArray = type.IsArray();
-    if (scalar == TfToken("bool")) shape.scalar = usdGen::expr::ScalarType::Bool;
-    else if (scalar == TfToken("int")) shape.scalar = usdGen::expr::ScalarType::Int32;
-    else if (scalar == TfToken("uint")) shape.scalar = usdGen::expr::ScalarType::UInt32;
-    else if (scalar == TfToken("int64")) shape.scalar = usdGen::expr::ScalarType::Int64;
-    else if (scalar == TfToken("uint64")) shape.scalar = usdGen::expr::ScalarType::UInt64;
-    else if (scalar == TfToken("half")) shape.scalar = usdGen::expr::ScalarType::Float16;
-    else if (scalar == TfToken("float")) shape.scalar = usdGen::expr::ScalarType::Float32;
-    else if (scalar == TfToken("double")) shape.scalar = usdGen::expr::ScalarType::Float64;
-    else return shape;
-    std::string const n = type.GetAsToken().GetString();
-    if (!n.empty() && n.back() >= '2' && n.back() <= '4') {
-        shape.components = uint32_t(n.back() - '0');
-    }
-    return shape;
+    uint32_t count = 0;
+    bool const countKnown = !type.IsArray() ||
+        (declaration && usdGen::expr::FixedArrayElementCount(
+            type, *declaration, &count));
+    return usdGen::expr::ValueShapeFromSdfType(type, count, countKnown);
 }
 
 usdGen::expr::Domain
@@ -520,7 +510,10 @@ BuildGraphDescFromStage(
                 usdGen::UsdGenExpressionOutputDesc output;
                 output.name = TfToken(n.substr(8));
                 output.nativeType = a.GetTypeName().GetAsToken();
-                output.shape = _ExpressionShape(a.GetTypeName());
+                VtValue declaration;
+                output.shape = _ExpressionShape(
+                    a.GetTypeName(), a.Get(&declaration, UsdTimeCode::Default())
+                        ? &declaration : nullptr);
                 e.outputs.push_back(std::move(output));
             }
             desc.expressions.push_back(std::move(e));
@@ -600,9 +593,12 @@ BuildGraphDescFromStage(
                     ? TfToken(output.substr(8)) : TfToken();
                 binding.destination = a.GetName();
                 binding.nativeType = a.GetTypeName().GetAsToken();
-                binding.destinationShape = _ExpressionShape(a.GetTypeName());
                 binding.domain = _ExpressionDomain(a);
-                a.Get(&binding.literal, UsdTimeCode(time));
+                VtValue literal;
+                bool const hasLiteral = a.Get(&literal, UsdTimeCode(time));
+                binding.destinationShape = _ExpressionShape(
+                    a.GetTypeName(), hasLiteral ? &literal : nullptr);
+                binding.literal = std::move(literal);
                 node.expressionBindings.push_back(std::move(binding));
             }
         }

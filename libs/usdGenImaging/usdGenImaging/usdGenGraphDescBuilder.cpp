@@ -9,9 +9,12 @@
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
 #include "usdGenImaging/usdGenTokens.h"
 
+#include "usdGen/expressions/valueShape.h"
+
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/sdf/schema.h"
 
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
@@ -300,19 +303,12 @@ _HResolveExecutionBackend(HdContainerDataSourceHandle const &root,
     return usdGen::UsdGenExecutionBackend::Invalid;
 }
 
-usdGen::expr::ValueShape
-_HExpressionShape(TfToken const &native)
+bool
+_BindingArrayCount(TfToken const& nativeType, VtValue const& literal,
+                   uint32_t* count)
 {
-    usdGen::expr::ValueShape s;
-    std::string n = native.GetString();
-    if (n.size() > 5 && n.substr(n.size()-5) == "Array") { s.isArray = true; n.resize(n.size()-5); }
-    if (!n.empty() && n.back() >= '2' && n.back() <= '4') { s.components = n.back()-'0'; n.pop_back(); }
-    if (n == "bool") s.scalar=usdGen::expr::ScalarType::Bool;
-    else if (n == "int") s.scalar=usdGen::expr::ScalarType::Int32;
-    else if (n == "uint") s.scalar=usdGen::expr::ScalarType::UInt32;
-    else if (n == "float") s.scalar=usdGen::expr::ScalarType::Float32;
-    else if (n == "double") s.scalar=usdGen::expr::ScalarType::Float64;
-    return s;
+    SdfValueTypeName const type = SdfSchema::GetInstance().FindType(nativeType);
+    return !type.IsArray() || usdGen::expr::FixedArrayElementCount(type, literal, count);
 }
 
 TfToken
@@ -788,11 +784,15 @@ _HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
             _HGetToken(b, t, &binding.output, {"output"});
             _HGetToken(b, t, &binding.destination, {"destination"});
             _HGetToken(b, t, &binding.nativeType, {"nativeType"});
-            binding.destinationShape = _HExpressionShape(binding.nativeType);
             TfToken domain; _HGetToken(b, t, &domain, {"domain"});
             binding.domain = domain == TfToken("point") ? usdGen::expr::Domain::Point :
                 (domain == TfToken("primitive") ? usdGen::expr::Domain::Primitive : usdGen::expr::Domain::Groom);
             _HGetTyped(b, t, &binding.literal, {"literal"});
+            uint32_t arrayElementCount = 0;
+            bool const arrayCountKnown = _BindingArrayCount(
+                binding.nativeType, binding.literal, &arrayElementCount);
+            binding.destinationShape = usdGen::expr::ValueShapeFromNativeType(
+                binding.nativeType, arrayElementCount, arrayCountKnown);
             node.expressionBindings.push_back(std::move(binding));
         }
     }
@@ -885,7 +885,12 @@ CaptureGraphDescFromHydra(
                 usdGen::UsdGenExpressionOutputDesc output;
                 _HGetToken(o, t, &output.name, {"name"});
                 _HGetToken(o, t, &output.nativeType, {"nativeType"});
-                output.shape = _HExpressionShape(output.nativeType);
+                uint32_t arrayElementCount = 0;
+                bool arrayCountKnown = false;
+                _HGetTyped(o, t, &arrayElementCount, {"arrayElementCount"});
+                _HGetTyped(o, t, &arrayCountKnown, {"arrayCountKnown"});
+                output.shape = usdGen::expr::ValueShapeFromNativeType(
+                    output.nativeType, arrayElementCount, arrayCountKnown);
                 expression.outputs.push_back(std::move(output));
             }
             desc.expressions.push_back(std::move(expression));

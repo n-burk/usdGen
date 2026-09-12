@@ -2,7 +2,9 @@
 #include "usdGen/cudaExecution.h"
 #include "usdGen/gpu/generation.h"
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
+#include "usdGenImaging/usdGenGraphDescBuilderStage.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/usdImaging/usdImaging/sceneIndices.h"
@@ -147,6 +149,46 @@ int main() {
     CHECK(lengthDesc.validationErrors.empty() && lengthDesc.nodes.size() == 3);
     CHECK(lengthDesc.nodes[0].type == TfToken("UsdGenCurveSource") &&
           lengthDesc.nodes[1].type == TfToken("UsdGenLength"));
+
+    // Author the supported primitive-domain float2 random binding through
+    // USD, then take both Stage and Hydra transport paths into actual CUDA
+    // compilation/execution.  This is specifically not a hand-built graph.
+    SdfPath const randomExpressionPath(
+        "/Character/Groom/hair/Expressions/lengthRandom");
+    UsdPrim const randomExpression = lengthStage->DefinePrim(
+        randomExpressionPath, TfToken("UsdGenExpression"));
+    CHECK(randomExpression);
+    CHECK(randomExpression.GetAttribute(TfToken("usdGen:expr:source")).Set(
+        std::string("[$primIndex * 0 + 2, $primIndex * 0 + 2]")));
+    CHECK(randomExpression.CreateAttribute(
+        TfToken("outputs:result"), SdfValueTypeNames->Float2, true));
+    UsdAttribute const randomAttribute = lengthStage->GetAttributeAtPath(
+        SdfPath("/Character/Groom/hair/Ops/length.usdGen:length:random"));
+    CHECK(randomAttribute);
+    auto hasRandomTransport = [](UsdGenGraphDesc const& graph) {
+        bool output = false;
+        for (auto const& expression : graph.expressions)
+            if (expression.path.GetName() == TfToken("lengthRandom") &&
+                expression.outputs.size() == 1) {
+                auto const& shape = expression.outputs.front().shape;
+                output = expression.outputs.front().nativeType == TfToken("float2") &&
+                    shape.scalar == expr::ScalarType::Float32 &&
+                    shape.components == 2 && shape.elementCount == 1 &&
+                    !shape.isArray;
+            }
+        bool binding = false;
+        for (auto const& node : graph.nodes) if (node.type == TfToken("UsdGenLength"))
+            for (auto const& value : node.expressionBindings)
+                if (value.destination == TfToken("usdGen:length:random")) {
+                    auto const& shape = value.destinationShape;
+                    binding = value.nativeType == TfToken("float2") &&
+                        value.domain == expr::Domain::Primitive &&
+                        shape.scalar == expr::ScalarType::Float32 &&
+                        shape.components == 2 && shape.elementCount == 1 &&
+                        !shape.isArray;
+                }
+        return output && binding;
+    };
     session.SetGraphDesc(lengthDesc);
     auto culled = session.Commit(1, UsdGenCommitReason::SetTime);
     for (auto const& error : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", error.c_str());
@@ -159,6 +201,70 @@ int main() {
     CHECK(lengthIds[0] == 10 && lengthIds[1] == 20);
     CHECK(cudaMemcpy(lengthWidths, culledLease.Geometry().widths.data, sizeof(lengthWidths), cudaMemcpyDeviceToHost) == cudaSuccess);
     for (size_t i = 0; i < 7; ++i) CHECK(std::abs(lengthWidths[i] - (i < 3 ? .03f : .06f)) < 1e-6f);
+    // Culling intentionally uses the current curve length and does not apply
+    // the random multiplier.  Switch to the supported scale path so the
+    // connected primitive float2 has an observable geometry effect.
+    UsdPrim const lengthPrim = lengthStage->GetPrimAtPath(
+        SdfPath("/Character/Groom/hair/Ops/length"));
+    UsdAttribute const lengthMode = lengthPrim.GetAttribute(
+        TfToken("usdGen:length:mode"));
+    UsdAttribute const lengthValue = lengthPrim.GetAttribute(
+        TfToken("usdGen:length:value"));
+    UsdAttribute const cullThreshold = lengthPrim.GetAttribute(
+        TfToken("usdGen:cullThreshold"));
+    CHECK(lengthMode.Set(TfToken("scale")) && lengthValue.Set(.5f) &&
+          cullThreshold.Set(0.0f));
+    lengthIndices.stageSceneIndex->ApplyPendingUpdates();
+    auto const scaledLiteralHydraDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *lengthIndices.finalSceneIndex, SdfPath("/Character/Groom/hair"));
+    CHECK(scaledLiteralHydraDesc.validationErrors.empty());
+    session.SetGraphDesc(scaledLiteralHydraDesc);
+    auto scaledLength = session.Commit(1, UsdGenCommitReason::SetTime);
+    CHECK(scaledLength && scaledLength != culled && scaledLength->device &&
+          !session.LastDiagnostics().HasErrors());
+    auto scaledLengthLease = gpu::AcquireGeometry(scaledLength->device, nullptr);
+    CHECK(scaledLengthLease && scaledLengthLease.Geometry().curveCount == 3 &&
+          scaledLengthLease.Geometry().pointCount == 9);
+    float3 scaledLengthPoints[9]{};
+    CHECK(cudaMemcpy(scaledLengthPoints, scaledLengthLease.Geometry().points.data,
+                     sizeof(scaledLengthPoints), cudaMemcpyDeviceToHost) == cudaSuccess);
+    CHECK(std::abs(scaledLengthPoints[8].y - .2f) < 2e-3f);
+
+    CHECK(randomAttribute.SetConnections(SdfPathVector{
+        SdfPath("/Character/Groom/hair/Expressions/lengthRandom.outputs:result")}));
+    lengthIndices.stageSceneIndex->ApplyPendingUpdates();
+    auto const randomStageDesc = usdGenImaging::BuildGraphDescFromStage(
+        lengthStage, SdfPath("/Character/Groom/hair"));
+    auto const randomHydraDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *lengthIndices.finalSceneIndex, SdfPath("/Character/Groom/hair"));
+    CHECK(randomStageDesc.validationErrors.empty() &&
+          randomHydraDesc.validationErrors.empty());
+    CHECK(hasRandomTransport(randomStageDesc) && hasRandomTransport(randomHydraDesc));
+    session.SetGraphDesc(randomHydraDesc);
+    auto randomLength = session.Commit(1, UsdGenCommitReason::SetTime);
+    CHECK(randomLength && randomLength != scaledLength && randomLength->device &&
+          !session.LastDiagnostics().HasErrors());
+    auto randomLengthLease = gpu::AcquireGeometry(randomLength->device, nullptr);
+    CHECK(randomLengthLease && randomLengthLease.Geometry().curveCount == 3 &&
+          randomLengthLease.Geometry().pointCount == 9);
+    uint64_t randomLengthIds[3]{};
+    CHECK(cudaMemcpy(randomLengthIds, randomLengthLease.Geometry().stableIds.data,
+                     sizeof(randomLengthIds), cudaMemcpyDeviceToHost) == cudaSuccess);
+    CHECK(randomLengthIds[0] == 10 && randomLengthIds[1] == 20 &&
+          randomLengthIds[2] == 30);
+    float3 randomLengthPoints[9]{};
+    CHECK(cudaMemcpy(randomLengthPoints, randomLengthLease.Geometry().points.data,
+                     sizeof(randomLengthPoints), cudaMemcpyDeviceToHost) == cudaSuccess);
+    // The primitive [2,2] field doubles the .5 scale field, restoring the
+    // third sorted curve's .4-unit tip rather than only changing metadata.
+    CHECK(std::abs(randomLengthPoints[8].y - .4f) < 2e-3f &&
+          std::abs(randomLengthPoints[8].y - scaledLengthPoints[8].y) > .1f);
+
+    // Restore the fixture's original cull configuration before exercising the
+    // independent high-threshold all-cull path below.
+    CHECK(randomAttribute.ClearConnections());
+    CHECK(lengthMode.Set(TfToken("cull")) && lengthValue.Set(1.0f));
+    lengthIndices.stageSceneIndex->ApplyPendingUpdates();
     LengthNotice lengthNotice;
     auto lengthObserver = TfCreateWeakPtr(&lengthNotice);
     lengthIndices.finalSceneIndex->AddObserver(lengthObserver);

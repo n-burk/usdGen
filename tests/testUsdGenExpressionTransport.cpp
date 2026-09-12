@@ -39,7 +39,11 @@ bool Same(usdGen::UsdGenGraphDesc const &a, usdGen::UsdGenGraphDesc const &b)
         if (x.path!=y.path || x.source!=y.source || x.outputs.size()!=y.outputs.size()) return false;
         for (size_t j=0;j<x.outputs.size();++j)
             if (x.outputs[j].name!=y.outputs[j].name || x.outputs[j].nativeType!=y.outputs[j].nativeType ||
-                x.outputs[j].shape.scalar!=y.outputs[j].shape.scalar || x.outputs[j].shape.components!=y.outputs[j].shape.components ||
+                x.outputs[j].shape.scalar!=y.outputs[j].shape.scalar ||
+                x.outputs[j].shape.elementCount!=y.outputs[j].shape.elementCount ||
+                x.outputs[j].shape.components!=y.outputs[j].shape.components ||
+                x.outputs[j].shape.rows!=y.outputs[j].shape.rows ||
+                x.outputs[j].shape.columns!=y.outputs[j].shape.columns ||
                 x.outputs[j].shape.isArray!=y.outputs[j].shape.isArray) return false;
     }
     for (size_t i=0;i<a.nodes.size();++i) {
@@ -48,7 +52,144 @@ bool Same(usdGen::UsdGenGraphDesc const &a, usdGen::UsdGenGraphDesc const &b)
         for (size_t j=0;j<x.size();++j)
             if (x[j].expression!=y[j].expression || x[j].output!=y[j].output ||
                 x[j].destination!=y[j].destination || x[j].nativeType!=y[j].nativeType ||
+                x[j].destinationShape.scalar!=y[j].destinationShape.scalar ||
+                x[j].destinationShape.elementCount!=y[j].destinationShape.elementCount ||
+                x[j].destinationShape.components!=y[j].destinationShape.components ||
+                x[j].destinationShape.rows!=y[j].destinationShape.rows ||
+                x[j].destinationShape.columns!=y[j].destinationShape.columns ||
+                x[j].destinationShape.isArray!=y[j].destinationShape.isArray ||
                 x[j].domain!=y[j].domain || x[j].literal!=y[j].literal) return false;
+    }
+    return true;
+}
+
+bool CheckShapeParity()
+{
+    SdfLayerRefPtr const layer = SdfLayer::CreateAnonymous("expression-shapes.usda");
+    if (!layer || !layer->ImportFromString(R"usda(
+#usda 1.0
+def UsdGenDescription "D"
+{
+    def Scope "Ops"
+    {
+        def UsdGenWidth "op"
+        {
+            custom bool boolValue
+            bool boolValue.connect = </D/Expressions/bool.outputs:result>
+            custom int64 int64Value
+            int64 int64Value.connect = </D/Expressions/int64.outputs:result>
+            custom half halfValue
+            half halfValue.connect = </D/Expressions/half.outputs:result>
+            custom vector3f vectorValue (
+                customData = { dictionary usdGen = { string evaluation = "primitive" } }
+            )
+            vector3f vectorValue.connect = </D/Expressions/vector.outputs:result>
+            custom float[] scalarArrayValue = [1, 2, 3]
+            float[] scalarArrayValue.connect = </D/Expressions/scalarArray.outputs:result>
+            custom vector3f[] vectorArrayValue = [(1, 2, 3), (4, 5, 6)]
+            vector3f[] vectorArrayValue.connect = </D/Expressions/vectorArray.outputs:result>
+        }
+    }
+    def Scope "Expressions"
+    {
+        def UsdGenExpression "bool" {
+            custom string usdGen:expr:source = "0"
+            custom bool outputs:result = false
+        }
+        def UsdGenExpression "int64" {
+            custom string usdGen:expr:source = "0"
+            custom int64 outputs:result = 7
+        }
+        def UsdGenExpression "half" {
+            custom string usdGen:expr:source = "0"
+            custom half outputs:result = 0.5
+        }
+        def UsdGenExpression "vector" {
+            custom string usdGen:expr:source = "0"
+            custom vector3f outputs:result
+        }
+        def UsdGenExpression "point" {
+            custom string usdGen:expr:source = "0"
+            custom point3f outputs:result
+        }
+        def UsdGenExpression "quat" {
+            custom string usdGen:expr:source = "0"
+            custom quatf outputs:result
+        }
+        def UsdGenExpression "halfQuat" {
+            custom string usdGen:expr:source = "0"
+            custom quath outputs:result
+        }
+        def UsdGenExpression "matrix" {
+            custom string usdGen:expr:source = "0"
+            custom matrix4d outputs:result
+        }
+        def UsdGenExpression "scalarArray" {
+            custom string usdGen:expr:source = "0"
+            custom float[] outputs:result = [1, 2, 3]
+        }
+        def UsdGenExpression "vectorArray" {
+            custom string usdGen:expr:source = "0"
+            custom vector3f[] outputs:result = [(1, 2, 3), (4, 5, 6)]
+        }
+        def UsdGenExpression "emptyArray" {
+            custom string usdGen:expr:source = "0"
+            custom float[] outputs:result = []
+        }
+        def UsdGenExpression "undeclaredArray" {
+            custom string usdGen:expr:source = "0"
+            custom float[] outputs:result
+        }
+    }
+}
+)usda")) return false;
+    UsdStageRefPtr const stage = UsdStage::Open(layer);
+    if (!stage) return false;
+    UsdImagingCreateSceneIndicesInfo info; info.stage = stage;
+    UsdImagingSceneIndices const indices = UsdImagingCreateSceneIndices(info);
+    auto const stageDesc = usdGenImaging::BuildGraphDescFromStage(stage, SdfPath("/D"));
+    auto const hydraDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *indices.finalSceneIndex, SdfPath("/D"));
+    if (!Same(stageDesc, hydraDesc)) return false;
+
+    auto output = [](usdGen::UsdGenGraphDesc const& desc, char const* name) {
+        for (auto const& expression : desc.expressions)
+            if (expression.path.GetName() == TfToken(name) && !expression.outputs.empty())
+                return expression.outputs.front().shape;
+        return usdGen::expr::ValueShape{};
+    };
+    auto expect = [&](char const* name, usdGen::expr::ScalarType scalar,
+                      uint32_t elements, uint32_t components, uint32_t rows,
+                      uint32_t columns, bool array) {
+        auto const shape = output(stageDesc, name);
+        return shape.scalar == scalar && shape.elementCount == elements &&
+            shape.components == components && shape.rows == rows &&
+            shape.columns == columns && shape.isArray == array;
+    };
+    if (!expect("bool", usdGen::expr::ScalarType::Bool, 1, 1, 1, 1, false) ||
+        !expect("int64", usdGen::expr::ScalarType::Int64, 1, 1, 1, 1, false) ||
+        !expect("half", usdGen::expr::ScalarType::Float16, 1, 1, 1, 1, false) ||
+        !expect("vector", usdGen::expr::ScalarType::Float32, 1, 3, 1, 1, false) ||
+        !expect("point", usdGen::expr::ScalarType::Float32, 1, 3, 1, 1, false) ||
+        !expect("quat", usdGen::expr::ScalarType::Float32, 1, 4, 1, 1, false) ||
+        !expect("halfQuat", usdGen::expr::ScalarType::Float16, 1, 4, 1, 1, false) ||
+        !expect("matrix", usdGen::expr::ScalarType::Float64, 1, 1, 4, 4, false) ||
+        !expect("scalarArray", usdGen::expr::ScalarType::Float32, 3, 1, 1, 1, true) ||
+        !expect("vectorArray", usdGen::expr::ScalarType::Float32, 2, 3, 1, 1, true) ||
+        !expect("emptyArray", usdGen::expr::ScalarType::Float32, 0, 1, 1, 1, true) ||
+        !expect("undeclaredArray", usdGen::expr::ScalarType::Invalid, 0, 1, 1, 1, true))
+        return false;
+
+    if (stageDesc.nodes.size() != 1 || stageDesc.nodes.front().expressionBindings.size() != 6)
+        return false;
+    for (auto const& binding : stageDesc.nodes.front().expressionBindings) {
+        if (binding.destination == TfToken("vectorValue") &&
+            binding.domain != usdGen::expr::Domain::Primitive) return false;
+        if (binding.destination == TfToken("scalarArrayValue") &&
+            (binding.destinationShape.elementCount != 3 || !binding.destinationShape.isArray)) return false;
+        if (binding.destination == TfToken("vectorArrayValue") &&
+            (binding.destinationShape.elementCount != 2 ||
+             binding.destinationShape.components != 3 || !binding.destinationShape.isArray)) return false;
     }
     return true;
 }
@@ -56,6 +197,7 @@ bool Same(usdGen::UsdGenGraphDesc const &a, usdGen::UsdGenGraphDesc const &b)
 
 int main()
 {
+    if (!CheckShapeParity()) return Fail("typed expression shape parity");
     std::string const file = std::string(USDGEN_TEST_SOURCE_DIR) + "/plan/examples/operator-network.usda";
     UsdStageRefPtr const stage = UsdStage::Open(file);
     if (!stage) return Fail("open operator-network mock");
