@@ -505,6 +505,75 @@ returned visible review suggestions which were checked against the actual
 Hydra contracts. The two Hivemind requests again exhausted their reasoning
 budgets without visible answers and are not counted as successful reviews.
 
+### CUDA to Storm-owned OpenGL buffer bridge
+
+`UsdGenCudaGlComputation` now implements the actual `HdStComputation`
+interface. The graphics commit caller allocates an unpublished Storm BAR,
+registers this computation with `HdStResourceRegistry::AddComputation`, and
+checks `Succeeded()` after registry commit before exposing the destination.
+The bridge registers the backing `HgiGLBuffer` with CUDA, maps it, copies
+device-to-device with the BAR byte offset plus resource field offset and
+resource stride, then unmaps/fences/unregisters. It supports points, rest,
+widths, hairT, curve offsets, stable IDs, root primitive IDs and root UVs.
+Stable IDs are copied as two exact uint32 words, not converted to float.
+
+This follows the local OpenUSD 26.08 `HdStComputation`, resource registry and
+`HdStCopyComputationGPU` layout contracts. NVIDIA specifies the graphics/CUDA
+ordering guarantees of [map and unmap](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__INTEROP.html)
+and [OpenGL resource registration](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__OPENGL.html).
+The registry's ordinary CPU `HdBufferSource` upload is not used for generated
+channels; a CUDA address is never disguised as a host array.
+
+- GL/CUDA device compatibility, backend, channel metadata, exact tuple/count,
+  stride, signed offsets, arithmetic overflow and mapped allocation capacity
+  are checked. Registration does not use write-discard: other fields/ranges
+  may share the same GL buffer and must survive the copy.
+- The source generation and its consumer lease remain alive through transfer
+  completion; the stream is destroyed only after lease completion. Caller
+  CUDA device selection is restored. Once copied, the independently owned GL
+  allocation remains renderable after the CUDA source is released.
+- No application mutex or geometry readback is introduced. This initial
+  bridge is an **external graphics-commit boundary**, not the asynchronous
+  steady-state renderer implementation: it creates/registers/fences per
+  transfer. Engine command-owner execution is explicitly rejected. An unsafe
+  unmap/fence/unregister failure is fatal; ordinary validation/copy failures
+  return an error and do not authorize publication. Partial copies do not
+  have rollback semantics, so callers must use unpublished destination BARs.
+- CUDA builds export `USDGEN_HAS_CUDA_GL_INTEROP` and the public HdSt link
+  dependency through the imaging CMake target. CUDA-disabled builds omit the
+  implementation and continue to build without the toolkit dependency.
+
+`testUsdGenCudaGlInterop` is a real T2 handoff test: an actual CUDA Width
+operator produces widths for two ragged source curves, all eight channels
+are copied into Storm-allocated buffers, and GLSL validates their contents
+before rasterizing hair strips from GPU offsets/points/widths. It exercises
+adjacent aggregated ranges and padded interleaved fields, checks exact 64-bit
+IDs, rejects invalid inputs/tuples/command-owner calls, and redraws after CUDA
+source retirement. Only final framebuffer pixels cross to the host. Measured
+green coverage is 304/456/760 pixels for widths .1/.2/.3, with zero error-red
+pixels; the earlier thin result remains unchanged after later copies.
+
+Validation: full CUDA build and 74/74 non-benchmark T0/T1 tests pass. The
+interop test passed 50 consecutive runs, then 20 more with a clean-Tf-error
+assertion enabled; CUDA Compute Sanitizer memcheck
+reports zero errors. The CUDA-disabled ASan/UBSan incremental-capture and
+publication checks pass. One earlier rerun failed in source setup before the
+handoff; subsequent stress runs did not reproduce it. More specific source
+diagnostics are now present; no root cause or general fault-recovery claim is
+made for that observation.
+
+Broader T2 validation is **not green**: 4/6 selected non-benchmark tests pass;
+`testUsdGenStormLook` and `testUsdGenStormMaterial` fail. Logs include notices
+arriving on background threads during Hydra `SyncAll`, and a missing
+`surfaceShader` link in the dual-material case. These are open integration
+failures, not waived gates. The scene owner needs the framework's
+`asyncAllow`/`asyncPoll` rendering-thread publication protocol (and correct
+behavior for clients that never opt in). Actual BasisCurves publisher wiring,
+GPU topology adaptation/culling/motion samples, persistent asynchronous
+resource retirement, multi-device tests, hdPrman ingestion and performance
+gates also remain required. This test draws directly from Storm's resources;
+it does not claim stock Storm BasisCurves consumes a device generation yet.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the
