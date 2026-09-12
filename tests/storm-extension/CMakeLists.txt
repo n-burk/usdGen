@@ -56,6 +56,14 @@ set_tests_properties(testUsdGenNativeBasisCurves PROPERTIES
     LABELS "T2;storm-extension;native-basis-curves" SKIP_RETURN_CODE 77 TIMEOUT 60
     ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
 
+add_executable(testUsdGenStormGpuGroupDataSource testUsdGenStormGpuGroupDataSource.cpp)
+target_link_libraries(testUsdGenStormGpuGroupDataSource PRIVATE
+    usdGenPatchedStorm ${CMAKE_DL_LIBS})
+add_test(NAME testUsdGenStormGpuGroupDataSource COMMAND testUsdGenStormGpuGroupDataSource)
+set_tests_properties(testUsdGenStormGpuGroupDataSource PROPERTIES
+    LABELS "T2;storm-extension;gpu-group-datasource" SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPatchedStorm>")
+
 set(USDGEN_CUDA_BUILD_DIR "" CACHE PATH "Optional matching usdGen CUDA build for real transfer validation")
 if(USDGEN_CUDA_BUILD_DIR)
     find_package(CUDAToolkit REQUIRED)

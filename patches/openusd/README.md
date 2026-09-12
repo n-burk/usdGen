@@ -41,6 +41,8 @@ git -C /path/to/private/OpenUSD apply --check /path/to/usdGen/patches/openusd/00
 git -C /path/to/private/OpenUSD apply /path/to/usdGen/patches/openusd/0001-hdst-post-commit-publication.patch
 git -C /path/to/private/OpenUSD apply --check /path/to/usdGen/patches/openusd/0002-hdst-gpu-basis-curves.patch
 git -C /path/to/private/OpenUSD apply /path/to/usdGen/patches/openusd/0002-hdst-gpu-basis-curves.patch
+git -C /path/to/private/OpenUSD apply --check /path/to/usdGen/patches/openusd/0003-hdst-gpu-curve-groups.patch
+git -C /path/to/private/OpenUSD apply /path/to/usdGen/patches/openusd/0003-hdst-gpu-curve-groups.patch
 cmake -S tests/storm-extension -B /path/to/private/build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DUSD_INSTALL_DIR=/path/to/OpenUSD_26_08 \
@@ -73,6 +75,18 @@ rendering and replacement retention. Neither is live groom `Publish` wiring.
 Live groom `Publish` still refuses device generations, and multi-tile atomic
 device publication is not wired. Persistent asynchronous interop, motion,
 culling performance, full SDK rebuild, and remaining plan gates are open.
+
+## Renderer-neutral group API (patch 0003)
+
+`0003-hdst-gpu-curve-groups.patch` is relative to `0001` and `0002`. It adds
+only a private HdSt API for immutable renderer-neutral group candidates,
+validated post-Commit ready providers, a registry-lifetime identity, and a
+nonblocking mailbox. It registers its header/source in HdSt CMake.
+
+The API neither observes scene indices nor installs scene data, callbacks, or
+draw-item BARs. In particular, it does **not** implement the per-render-index
+staging filter, renderer controller, frontend acknowledgement, or all-tile
+publication policy. Those are a later integration layer and remain open.
 
 Checkpoint (2026-09-11): core CUDA curve-index tests passed in 10 repeated
 runs plus memcheck; nonbenchmark T0/T1 session/publication tests also passed.

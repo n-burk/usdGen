@@ -1,0 +1,564 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] hdSt renderer-neutral GPU BasisCurves group API
+
+Generated from the private OpenUSD extension tree. This patch is relative
+to patches 0001 and 0002: it adds only the group candidate/ready-provider/
+mailbox SDK and its HdSt build registration; it does not install a filter,
+wire render-delegate callbacks, or publish groom scene data.
+
+--- a/pxr/imaging/hdSt/CMakeLists.txt
++++ b/pxr/imaging/hdSt/CMakeLists.txt
+@@ -61,6 +61,7 @@
+         backPlateSceneIndexPlugin
+         basisCurves
+         basisCurvesGpuDataSource
++        basisCurvesGpuGroupDataSource
+         binding
+         bufferArrayRange
+         bufferResource
+diff --git a/pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.h b/pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.h
+new file mode 100644
+index 000000000..08cb065df
+--- /dev/null
++++ b/pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.h
+@@ -0,0 +1,228 @@
++//
++// usdGen development extension for OpenUSD
++//
++// Licensed under the terms set forth in the LICENSE.txt file available at
++// https://openusd.org/license.
++//
++#ifndef PXR_IMAGING_HD_ST_BASIS_CURVES_GPU_GROUP_DATA_SOURCE_H
++#define PXR_IMAGING_HD_ST_BASIS_CURVES_GPU_GROUP_DATA_SOURCE_H
++
++#include "pxr/pxr.h"
++#include "pxr/imaging/hdSt/api.h"
++#include "pxr/imaging/hdSt/basisCurvesGpuDataSource.h"
++
++#include "pxr/base/gf/bbox3d.h"
++#include "pxr/base/tf/token.h"
++#include "pxr/imaging/hd/dataSource.h"
++#include "pxr/usd/sdf/path.h"
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++PXR_NAMESPACE_OPEN_SCOPE
++
++class HdStResourceRegistry;
++struct HdStBasisCurvesGpuGroupCandidate;
++struct HdStBasisCurvesGpuGroupPreparedMember;
++struct HdStBasisCurvesGpuGroupResult;
++
++/// A renderer-owned, lifetime-qualified resource-registry identity.
++///
++/// The pointer alone is deliberately not an identity: a later registry can
++/// reuse an address.  The render delegate supplies a monotonically unique
++/// serial plus an aliasing weak lease.  Acquire() takes a transient strong
++/// lease for one Prepare lookup; the identity itself never keeps a registry
++/// alive across a pending callback or mailbox result.
++class HdStBasisCurvesGpuRegistryIdentity final
++{
++public:
++    HDST_API
++    HdStBasisCurvesGpuRegistryIdentity(
++        HdStResourceRegistry const *registry,
++        uint64_t serial,
++        std::weak_ptr<void const> registryLease);
++
++    HDST_API bool Matches(HdStResourceRegistry const *registry) const;
++    HDST_API std::shared_ptr<void const> Acquire(
++        HdStResourceRegistry const *registry) const;
++    HDST_API bool IsLive() const;
++    HDST_API void Invalidate();
++    uint64_t GetSerial() const { return _serial; }
++
++private:
++    HdStResourceRegistry const * const _registry;
++    uint64_t const _serial;
++    std::atomic<bool> _live{true};
++    std::weak_ptr<void const> const _registryLease;
++};
++
++using HdStBasisCurvesGpuRegistryIdentitySharedPtr =
++    std::shared_ptr<HdStBasisCurvesGpuRegistryIdentity>;
++
++/// A no-allocation provider for a bundle that a particular registry has
++/// already completed and accepted.  Its Ready callback is deliberately a
++/// cached success; it never re-enters a producer's potentially fallible
++/// readiness callback.
++class HdStBasisCurvesGpuReadyProvider final
++    : public HdStBasisCurvesGpuDataSource
++{
++public:
++    HD_DECLARE_DATASOURCE_ABSTRACT(HdStBasisCurvesGpuReadyProvider);
++
++    HDST_API HdStBasisCurvesGpuBundleSharedPtr Prepare(
++        HdStResourceRegistry *registry,
++        HdStBasisCurvesGpuPrepareRequest const &request) override;
++
++    uint64_t GetTicket() const { return _ticket; }
++    uint64_t GetGeneration() const { return _generation; }
++
++private:
++    HDST_API
++    HdStBasisCurvesGpuReadyProvider(
++        HdStBasisCurvesGpuRegistryIdentitySharedPtr identity,
++        HdStBasisCurvesGpuBundleSharedPtr bundle,
++        SdfPath rprimPath,
++        uint64_t ticket,
++        uint64_t generation);
++
++    static Handle _NewAccepted(
++        HdStBasisCurvesGpuRegistryIdentitySharedPtr identity,
++        HdStBasisCurvesGpuBundleSharedPtr bundle,
++        SdfPath rprimPath,
++        uint64_t ticket,
++        uint64_t generation);
++
++    friend HdStBasisCurvesGpuGroupResult
++    HdStMakeBasisCurvesGpuGroupReadyResult(
++        HdStBasisCurvesGpuGroupCandidate const &candidate,
++        HdStBasisCurvesGpuRegistryIdentitySharedPtr const &identity,
++        std::vector<HdStBasisCurvesGpuGroupPreparedMember> const &prepared);
++
++    HdStBasisCurvesGpuRegistryIdentitySharedPtr const _identity;
++    HdStBasisCurvesGpuBundleSharedPtr const _bundle;
++    SdfPath const _rprimPath;
++    uint64_t const _ticket;
++    uint64_t const _generation;
++};
++
++HD_DECLARE_DATASOURCE_HANDLES(HdStBasisCurvesGpuReadyProvider);
++
++/// Immutable renderer-neutral member description.  Scalar presentation is a
++/// value snapshot, so HdSt can verify that a prepared GPU bundle agrees with
++/// the paired curve tokens and conservative local bbox without retaining a
++/// mutable frontend datasource.
++struct HdStBasisCurvesGpuGroupMember {
++    uint32_t id = 0;
++    SdfPath rprimPath;
++    /// Value-only, renderer-neutral presentation snapshot.  No live scene
++    /// datasource is retained, so later source mutation cannot pair new
++    /// scalar presentation with an already-ready bundle.
++    struct Presentation {
++        TfToken curveType;
++        TfToken curveBasis;
++        TfToken curveWrap;
++        GfBBox3d bounds;
++        int refineLevel = 0;
++        TfToken purpose;
++        TfToken visibility;
++        SdfPath materialPath;
++        TfToken materialPurpose;
++        SdfPath primOrigin;
++        SdfPath dependencySurface;
++    } presentation;
++    HdStBasisCurvesGpuDataSourceHandle provider;
++};
++
++struct HdStBasisCurvesGpuGroupCandidate {
++    SdfPath groupPath;
++    uint64_t ticket = 0;
++    uint64_t generation = 0;
++    std::vector<HdStBasisCurvesGpuGroupMember> members;
++};
++
++using HdStBasisCurvesGpuGroupCandidateSharedPtr =
++    std::shared_ptr<HdStBasisCurvesGpuGroupCandidate const>;
++
++/// Prepared bundles are supplied in exactly the candidate member order.
++struct HdStBasisCurvesGpuGroupPreparedMember {
++    uint32_t id = 0;
++    HdStBasisCurvesGpuBundleSharedPtr bundle;
++};
++
++enum class HdStBasisCurvesGpuGroupResultStatus : uint8_t {
++    Rejected,
++    Ready,
++    Canceled
++};
++
++struct HdStBasisCurvesGpuGroupResult {
++    SdfPath groupPath;
++    uint64_t ticket = 0;
++    uint64_t generation = 0;
++    HdStBasisCurvesGpuGroupResultStatus status =
++        HdStBasisCurvesGpuGroupResultStatus::Rejected;
++    HdStBasisCurvesGpuRegistryIdentitySharedPtr registryIdentity;
++    std::vector<HdStBasisCurvesGpuReadyProviderHandle> providers;
++};
++
++/// Candidate admission is intentionally generic: empty and one-member groups
++/// are valid.  Application policies such as a maximum tile count are enforced
++/// by the frontend, not this HdSt extension.
++HDST_API
++bool HdStValidateBasisCurvesGpuGroupCandidate(
++    HdStBasisCurvesGpuGroupCandidate const &candidate);
++
++/// Validates the complete, already-Ready bundle set and creates providers
++/// scoped to \p identity.  A rejected result contains no provider handles.
++HDST_API
++HdStBasisCurvesGpuGroupResult HdStMakeBasisCurvesGpuGroupReadyResult(
++    HdStBasisCurvesGpuGroupCandidate const &candidate,
++    HdStBasisCurvesGpuRegistryIdentitySharedPtr const &identity,
++    std::vector<HdStBasisCurvesGpuGroupPreparedMember> const &prepared);
++
++/// Nonblocking endpoint shared by a per-renderer staging scene index and the
++/// renderer's post-Commit callback.  Cancellation is terminal; any queued or
++/// racing result is intentionally invisible to the frontend.  It is a raw
++/// transport: its serialized controller owns ticket/generation stale checks
++/// and exactly-once result admission.
++class HdStBasisCurvesGpuGroupMailbox final
++{
++public:
++    HDST_API HdStBasisCurvesGpuGroupMailbox();
++    HDST_API ~HdStBasisCurvesGpuGroupMailbox();
++    HDST_API void Post(HdStBasisCurvesGpuGroupResult result);
++    HDST_API bool TryPop(HdStBasisCurvesGpuGroupResult *result);
++    HDST_API void Cancel();
++    HDST_API bool IsCanceled() const;
++
++private:
++    std::atomic<bool> _canceled{false};
++    class _Queue;
++    std::unique_ptr<_Queue> _queue;
++};
++
++using HdStBasisCurvesGpuGroupMailboxSharedPtr =
++    std::shared_ptr<HdStBasisCurvesGpuGroupMailbox>;
++
++/// Opaque control datasource placed on a scope/control prim.  It carries no
++/// geometry and no renderer-specific resources.  A terminal observer copies
++/// Candidate(), while its post-Commit callback posts only to Mailbox().
++class HdStBasisCurvesGpuGroupDataSource : public HdDataSourceBase
++{
++public:
++    HD_DECLARE_DATASOURCE_ABSTRACT(HdStBasisCurvesGpuGroupDataSource);
++
++    virtual HdStBasisCurvesGpuGroupCandidateSharedPtr GetCandidate() const = 0;
++    virtual HdStBasisCurvesGpuGroupMailboxSharedPtr GetMailbox() const = 0;
++
++protected:
++    HDST_API ~HdStBasisCurvesGpuGroupDataSource() override;
++};
++
++HD_DECLARE_DATASOURCE_HANDLES(HdStBasisCurvesGpuGroupDataSource);
++
++PXR_NAMESPACE_CLOSE_SCOPE
++
++#endif // PXR_IMAGING_HD_ST_BASIS_CURVES_GPU_GROUP_DATA_SOURCE_H
+diff --git a/pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.cpp b/pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.cpp
+new file mode 100644
+index 000000000..68d826b00
+--- /dev/null
++++ b/pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.cpp
+@@ -0,0 +1,306 @@
++//
++// usdGen development extension for OpenUSD
++//
++// Licensed under the terms set forth in the LICENSE.txt file available at
++// https://openusd.org/license.
++//
++#include "pxr/pxr.h"
++#include "pxr/imaging/hdSt/basisCurvesGpuGroupDataSource.h"
++
++#include "pxr/imaging/hdSt/resourceRegistry.h"
++
++#include "pxr/base/gf/matrix4d.h"
++#include "pxr/base/gf/range3d.h"
++
++#include <cmath>
++#include <set>
++#include <utility>
++
++#include <tbb/concurrent_queue.h>
++
++PXR_NAMESPACE_OPEN_SCOPE
++
++namespace {
++
++bool
++_Finite(GfBBox3d const &bounds)
++{
++    GfRange3d const range = bounds.GetRange();
++    GfVec3d const &minimum = range.GetMin();
++    GfVec3d const &maximum = range.GetMax();
++    for (int i = 0; i != 3; ++i) {
++        if (!std::isfinite(minimum[i]) || !std::isfinite(maximum[i]) ||
++            minimum[i] > maximum[i]) {
++            return false;
++        }
++    }
++    GfMatrix4d const matrix = bounds.GetMatrix();
++    for (int row = 0; row != 4; ++row) {
++        for (int column = 0; column != 4; ++column) {
++            if (!std::isfinite(matrix[row][column])) {
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
++bool
++_SameBounds(GfBBox3d const &lhs, GfBBox3d const &rhs)
++{
++    return lhs.GetRange() == rhs.GetRange() &&
++        lhs.GetMatrix() == rhs.GetMatrix();
++}
++
++HdStBasisCurvesGpuBundleSharedPtr
++_CachedReadyBundle(HdStBasisCurvesGpuBundleSharedPtr const &bundle)
++{
++    if (!bundle) {
++        return {};
++    }
++    auto result = std::make_shared<HdStBasisCurvesGpuBundle>(*bundle);
++    result->ready = [] { return true; };
++    return result;
++}
++
++bool
++_ReadySafely(HdStBasisCurvesGpuBundleSharedPtr const &bundle)
++{
++    try {
++        return bundle && bundle->Ready();
++    } catch (...) {
++        return false;
++    }
++}
++
++} // anonymous namespace
++
++class HdStBasisCurvesGpuGroupMailbox::_Queue final
++{
++public:
++    tbb::concurrent_queue<HdStBasisCurvesGpuGroupResult> values;
++};
++
++HdStBasisCurvesGpuGroupMailbox::HdStBasisCurvesGpuGroupMailbox()
++    : _queue(new _Queue)
++{
++}
++
++HdStBasisCurvesGpuGroupMailbox::~HdStBasisCurvesGpuGroupMailbox() = default;
++
++HdStBasisCurvesGpuRegistryIdentity::HdStBasisCurvesGpuRegistryIdentity(
++    HdStResourceRegistry const * const registry,
++    uint64_t const serial,
++    std::weak_ptr<void const> registryLease)
++    : _registry(registry)
++    , _serial(serial)
++    , _registryLease(std::move(registryLease))
++{
++}
++
++bool
++HdStBasisCurvesGpuRegistryIdentity::Matches(
++    HdStResourceRegistry const * const registry) const
++{
++    return Acquire(registry) != nullptr;
++}
++
++std::shared_ptr<void const>
++HdStBasisCurvesGpuRegistryIdentity::Acquire(
++    HdStResourceRegistry const * const registry) const
++{
++    if (_serial == 0 || _registry == nullptr || _registry != registry ||
++        !_live.load(std::memory_order_acquire)) {
++        return {};
++    }
++    std::shared_ptr<void const> lease = _registryLease.lock();
++    if (!lease || lease.get() != _registry ||
++        !_live.load(std::memory_order_acquire)) {
++        return {};
++    }
++    return lease;
++}
++
++bool
++HdStBasisCurvesGpuRegistryIdentity::IsLive() const
++{
++    if (_serial == 0 || _registry == nullptr ||
++        !_live.load(std::memory_order_acquire)) {
++        return false;
++    }
++    std::shared_ptr<void const> const lease = _registryLease.lock();
++    return lease && lease.get() == _registry &&
++        _live.load(std::memory_order_acquire);
++}
++
++void
++HdStBasisCurvesGpuRegistryIdentity::Invalidate()
++{
++    _live.store(false, std::memory_order_release);
++}
++
++HdStBasisCurvesGpuReadyProvider::HdStBasisCurvesGpuReadyProvider(
++    HdStBasisCurvesGpuRegistryIdentitySharedPtr identity,
++    HdStBasisCurvesGpuBundleSharedPtr bundle,
++    SdfPath rprimPath,
++    uint64_t const ticket,
++    uint64_t const generation)
++    : _identity(std::move(identity))
++    , _bundle(_CachedReadyBundle(bundle))
++    , _rprimPath(std::move(rprimPath))
++    , _ticket(ticket)
++    , _generation(generation)
++{
++}
++
++HdStBasisCurvesGpuReadyProvider::Handle
++HdStBasisCurvesGpuReadyProvider::_NewAccepted(
++    HdStBasisCurvesGpuRegistryIdentitySharedPtr identity,
++    HdStBasisCurvesGpuBundleSharedPtr bundle,
++    SdfPath rprimPath,
++    uint64_t const ticket,
++    uint64_t const generation)
++{
++    return std::shared_ptr<HdStBasisCurvesGpuReadyProvider>(
++        new HdStBasisCurvesGpuReadyProvider(std::move(identity),
++            std::move(bundle), std::move(rprimPath), ticket, generation));
++}
++
++HdStBasisCurvesGpuBundleSharedPtr
++HdStBasisCurvesGpuReadyProvider::Prepare(
++    HdStResourceRegistry * const registry,
++    HdStBasisCurvesGpuPrepareRequest const &request)
++{
++    std::shared_ptr<void const> const lease =
++        _identity ? _identity->Acquire(registry) : std::shared_ptr<void const>();
++    if (!lease || !_bundle ||
++        _ticket == 0 || _bundle->generation != _generation ||
++        request.rprimId != _rprimPath ||
++        !_bundle->IsCompleteFor(request.topologyModes)) {
++        return {};
++    }
++    return _bundle;
++}
++
++bool
++HdStValidateBasisCurvesGpuGroupCandidate(
++    HdStBasisCurvesGpuGroupCandidate const &candidate)
++{
++    if (!candidate.groupPath.IsAbsolutePath() || !candidate.groupPath.IsPrimPath() ||
++        candidate.groupPath.IsEmpty() || candidate.groupPath.IsAbsoluteRootPath() ||
++        candidate.ticket == 0) {
++        return false;
++    }
++
++    std::set<uint32_t> ids;
++    std::set<SdfPath> paths;
++    for (HdStBasisCurvesGpuGroupMember const &member : candidate.members) {
++        if (!ids.insert(member.id).second || !paths.insert(member.rprimPath).second ||
++            !member.rprimPath.IsAbsolutePath() || !member.rprimPath.IsPrimPath() ||
++            member.rprimPath.IsEmpty() || member.presentation.curveType.IsEmpty() ||
++            member.presentation.curveBasis.IsEmpty() ||
++            member.presentation.curveWrap.IsEmpty() ||
++            !member.rprimPath.HasPrefix(candidate.groupPath) ||
++            member.rprimPath == candidate.groupPath || !member.provider ||
++            member.presentation.refineLevel < 0 ||
++            !_Finite(member.presentation.bounds) ||
++            (!member.presentation.materialPath.IsEmpty() &&
++             (!member.presentation.materialPath.IsAbsolutePath() ||
++              !member.presentation.materialPath.IsPrimPath() ||
++              member.presentation.materialPath.IsAbsoluteRootPath())) ||
++            (!member.presentation.primOrigin.IsEmpty() &&
++             (!member.presentation.primOrigin.IsAbsolutePath() ||
++              !member.presentation.primOrigin.IsPrimPath() ||
++              member.presentation.primOrigin.IsAbsoluteRootPath())) ||
++            (!member.presentation.dependencySurface.IsEmpty() &&
++             (!member.presentation.dependencySurface.IsAbsolutePath() ||
++              !member.presentation.dependencySurface.IsPrimPath() ||
++              member.presentation.dependencySurface.IsAbsoluteRootPath()))) {
++            return false;
++        }
++    }
++    return true;
++}
++
++HdStBasisCurvesGpuGroupResult
++HdStMakeBasisCurvesGpuGroupReadyResult(
++    HdStBasisCurvesGpuGroupCandidate const &candidate,
++    HdStBasisCurvesGpuRegistryIdentitySharedPtr const &identity,
++    std::vector<HdStBasisCurvesGpuGroupPreparedMember> const &prepared)
++{
++    HdStBasisCurvesGpuGroupResult result;
++    result.groupPath = candidate.groupPath;
++    result.ticket = candidate.ticket;
++    result.generation = candidate.generation;
++    result.registryIdentity = identity;
++    if (!HdStValidateBasisCurvesGpuGroupCandidate(candidate) || !identity ||
++        !identity->IsLive() || prepared.size() != candidate.members.size()) {
++        return result;
++    }
++
++    try {
++        result.providers.reserve(prepared.size());
++        HdStBasisCurvesGpuTopologyModeVector const allModes = {
++            HdStBasisCurvesGpuTopologyMode::Curves,
++            HdStBasisCurvesGpuTopologyMode::Hull,
++            HdStBasisCurvesGpuTopologyMode::Points};
++        for (size_t i = 0; i != prepared.size(); ++i) {
++            HdStBasisCurvesGpuGroupMember const &member = candidate.members[i];
++            HdStBasisCurvesGpuGroupPreparedMember const &entry = prepared[i];
++            HdStBasisCurvesGpuBundleSharedPtr const &bundle = entry.bundle;
++            if (entry.id != member.id || !bundle ||
++                bundle->generation != candidate.generation ||
++                bundle->curveType != member.presentation.curveType ||
++                bundle->curveBasis != member.presentation.curveBasis ||
++                bundle->curveWrap != member.presentation.curveWrap ||
++                !_SameBounds(bundle->bounds, member.presentation.bounds) ||
++                !bundle->IsCompleteFor(allModes) || !_ReadySafely(bundle)) {
++                result.providers.clear();
++                return result;
++            }
++            result.providers.push_back(HdStBasisCurvesGpuReadyProvider::_NewAccepted(
++                identity, bundle, member.rprimPath, candidate.ticket,
++                candidate.generation));
++        }
++    } catch (...) {
++        result.providers.clear();
++        return result;
++    }
++
++    result.status = HdStBasisCurvesGpuGroupResultStatus::Ready;
++    return result;
++}
++
++void
++HdStBasisCurvesGpuGroupMailbox::Post(HdStBasisCurvesGpuGroupResult result)
++{
++    if (!_canceled.load(std::memory_order_acquire) && _queue) {
++        _queue->values.push(std::move(result));
++    }
++}
++
++bool
++HdStBasisCurvesGpuGroupMailbox::TryPop(HdStBasisCurvesGpuGroupResult * const result)
++{
++    if (!result || _canceled.load(std::memory_order_acquire) || !_queue) {
++        return false;
++    }
++    return _queue->values.try_pop(*result) &&
++        !_canceled.load(std::memory_order_acquire);
++}
++
++void
++HdStBasisCurvesGpuGroupMailbox::Cancel()
++{
++    _canceled.store(true, std::memory_order_release);
++}
++
++bool
++HdStBasisCurvesGpuGroupMailbox::IsCanceled() const
++{
++    return _canceled.load(std::memory_order_acquire);
++}
++
++HdStBasisCurvesGpuGroupDataSource::~HdStBasisCurvesGpuGroupDataSource() = default;
++
++PXR_NAMESPACE_CLOSE_SCOPE
