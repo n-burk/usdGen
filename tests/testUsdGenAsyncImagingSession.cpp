@@ -346,16 +346,17 @@ void TestShutdownCompletesAcceptedQueue()
 class AdoptionInput final : public HdSceneIndexBase {
 public:
     SdfPath const root{"/adoptionRace"};
-    std::atomic<bool> present{true}, entered{false}, release{false}, timedOut{false};
-    mutable std::atomic<unsigned> reads{0};
+    std::atomic<bool> present{true}, gateArmed{false}, release{false}, timedOut{false};
+    mutable std::atomic<bool> entered{false};
     HdSceneIndexPrim GetPrim(SdfPath const& path) const override {
         if (path != root) return {};
         const bool exists = present.load();
-        // First read discovers the root; second reads private candidate data
-        // after the adoption ticket has been reserved.
-        if (reads.fetch_add(1) == 1) {
+        // Constructor-time population may read the root. Arm the gate only
+        // after that initial owner synchronization, then block one later
+        // candidate query to exercise cancellation ordering.
+        if (gateArmed.load(std::memory_order_acquire) &&
+            !entered.exchange(true, std::memory_order_acq_rel)) {
             auto* self = const_cast<AdoptionInput*>(this);
-            self->entered.store(true, std::memory_order_release);
             if (!WaitFor([&] { return release.load(std::memory_order_acquire); }))
                 self->timedOut.store(true);
         }
@@ -376,7 +377,12 @@ void TestCancelledAdoptionCannotReplaceNewAttachment()
     auto index = UsdGenGroomSceneIndex::New(input, 7321);
     auto& store = UsdGenSessionStore::GetInstance();
     UsdGenSessionKey key{"", input->root, 7321};
-    std::thread discover([&] { index->GetChildPrimPaths(SdfPath::AbsoluteRootPath()); });
+    auto *groomIndex = dynamic_cast<UsdGenGroomSceneIndex *>(index.operator->());
+    Check(groomIndex != nullptr, "adoption test obtains scene owner boundary");
+    if (groomIndex) groomIndex->Synchronize();
+    input->gateArmed.store(true, std::memory_order_release);
+    input->Remove();
+    std::thread discover([&] { input->Add(); });
     const bool entered = WaitFor([&] { return input->entered.load(std::memory_order_acquire); });
     Check(entered, "candidate adoption reaches bounded input gate");
     if (!entered) {
@@ -386,15 +392,18 @@ void TestCancelledAdoptionCannotReplaceNewAttachment()
     }
     input->Remove();
     Check(!input->timedOut.load(), "removal is accepted while candidate construction is held");
+    input->gateArmed.store(false, std::memory_order_release);
     input->Add();
+    input->release.store(true, std::memory_order_release);
+    discover.join();
+    if (groomIndex) groomIndex->Synchronize();
     auto replacement = store.Find(key);
     Check(replacement && replacement->AttachedIndices() == 1,
           "same-path replacement installs a fresh adoption ticket");
-    input->release.store(true, std::memory_order_release);
-    discover.join();
     Check(replacement && store.Find(key) == replacement && replacement->AttachedIndices() == 1,
           "late cancelled candidate cannot replace or leak an attachment");
     input->Remove();
+    if (groomIndex) groomIndex->Synchronize();
     Check(!store.Find(key), "replacement detach removes the final store attachment");
     index.Reset();
     replacement.Reset();

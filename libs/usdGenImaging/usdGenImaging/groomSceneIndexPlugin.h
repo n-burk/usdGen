@@ -8,16 +8,14 @@
 //   * UsdGenGroomSceneIndex — the filtering index itself. Chain position:
 //     built AFTER the stock HdStageAdapterSceneIndex (so UsdImagingSceneIndex
 //     PrimAdapters have run and the usdGen/* containers exist) and BEFORE the
-//     terminal HdRetiredAdapterSceneIndexFilter. It observes its (pruned)
-//     input with a private HdSceneIndexObserver, routes notices into the
-//     per-groom UsdGenImagingSession / UsdGenDirtyRouter (no cook, I7/S17),
-//     commits on the 06 §3.9 triggers, and publishes the generation as
+//     terminal HdRetiredAdapterSceneIndexFilter. It captures owning input
+//     packets at the caller boundary and schedules per-scene membership,
+//     independent per-description cooking, and ordered publication as
 //     synthetic Hydra prims <description>/__usdGenRender/tile_NNNN.
 //
 // GetPrim NEVER commits — it atomic_loads the latest generation (I7). The
 // M0 pass-through class is gone: this index owns sessions, synthesizes and
-// announces the published prim set (06 §3.4), and forwards only non-usdGen
-// prims (06 §3.4.1).
+// announces the published prim set and forwards upstream notices.
 //
 // Both classes live in the pxr namespace so the HdSceneIndexPlugin registry
 // can reference them; the heavy lifting forwards to the global
@@ -40,7 +38,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -68,6 +65,11 @@ public:
     // -- HdSceneIndexInterface ------------------------------------------------
     HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
     SdfPathVector GetChildPrimPaths(SdfPath const &path) const override;
+    // Explicit external host/test boundary. Reads never call this. Each
+    // caller owns a framework reply; owner callbacks must not wait.
+    void Synchronize();
+    // External shutdown/test boundary after clients have stopped submitting.
+    static void DrainRetired();
     // -- HdSceneIndexObserver (input observations; 06 §3.2) --------------------
     // HdSingleInputFilteringSceneIndexBase installs a private bridge observer
     // on the input; filter subclasses override the underscore hooks below.
@@ -84,91 +86,33 @@ public:
         HdSceneIndexBase const &sceneIndex,
         HdSceneIndexObserver::RenamedPrimEntries const &entries) override;
 
-    // Cross-thread frame channel (06 §3.9 rule b): SystemMessage is NOT
-    // delivered through the prim-noticed hooks — we install our own
-    // HdSceneIndexBase::Observer (which does override _SystemMessage) on the
-    // pruned input; see _FrameObserver in the .cpp.
-
 private:
-    struct _Groom;  // per-UsdGenGroom state; defined in the .cpp
+    struct _State;
+    struct _Ingress;
+    friend struct UsdGenSceneService;
 
     UsdGenGroomSceneIndex(
         HdSceneIndexBaseRefPtr const &inputScene,
         int renderInstanceId);
     ~UsdGenGroomSceneIndex() override;
 
-    // Population (06 §3.1): constructor-time observer-driven discovery, with
-    // a bounded traversal as the already-populated fallback.
-    void _PopulateFromInput();
-    void _ScanInputForGrooms() const;
-    void _AdoptGroom(SdfPath const &groomRoot) const;
-    void _AdoptPending() const;
-    void _ForgetGroomsUnder(SdfPath const &path) const;
-    // Description resolution: the UsdGenDescription child under an adopted
-    // groom root (SI-6 fixture: /groomA/descA). Caller holds _stateMutex.
-    bool _ResolveDescriptionLocked(
-        _Groom &groom, HdSceneIndexBaseRefPtr const &input) const;
+    // Hydra capture stays on the caller/notice boundary. Only owning value
+    // packets enter the scene owner; no worker assumes upstream affinity.
+    void _CaptureAndSubmit(_Ingress ingress);
 
-    // Notice routing + commits (06 §3.2, §3.9).
-    void _Forward(
-        std::vector<HdSceneIndexObserver::AddedPrimEntry> const &added,
-        std::vector<HdSceneIndexObserver::RemovedPrimEntry> const &removed,
-        std::vector<HdSceneIndexObserver::DirtiedPrimEntry> const &dirtied) const;
-    bool _IsOwned(SdfPath const &path) const;
-    bool _OwnsDescription(SdfPath const &maybeDescPath) const;
-    void _RouteFrameDirties(
-        std::vector<HdSceneIndexObserver::DirtiedPrimEntry> const &entries) const;
-    /// Replay of batched surface dirties as an inverted MarkDirty
-    /// (06 §3.3 line 825): re-accumulate what the batch just consumed.
-    void _ReplaySurfaceDirty() const;
-    void _CommitNow(usdGen::UsdGenCommitReason reason, bool republishNeeded) const;
-
-    // Publication (06 §3.4, §3.4.1, §5.1): payload state update.
-    // Caller must NOT hold _stateMutex (locks internally for the map swap;
-    // notice forward runs after it releases). Attachment fields are
-    // immutable after construction (Review 5); membership validated by the
-    // caller (ByRoot exact-identity check).
-    void _RepublishLocked(
-        _Groom &groom,
-        ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const;
-    // Root-keyed wrapper for the republish callback (lock discipline:
-    // resolves the live slot, then calls _Republish unlocked).
-    void _RepublishByRoot(
-        SdfPath const &groomRoot,
-        std::shared_ptr<_Groom> const &expectedGroom,
-        ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const;
-
-    // StormSurgery test accessors (testHook.h): lock-free snapshot reads
-    // over the adopted groom's published map. Defined in the .cpp so the
-    // _Groom layout stays private.
+    // StormSurgery test accessors (testHook.h): immutable snapshot reads
+    // over the adopted groom's published map, with no owner wait.
     int64_t _TestPublishedGeneration(SdfPath const &groom) const;
     size_t _TestPublishedTileCount(SdfPath const &groom) const;
     // StormSurgery hook reads the private snapshot via the accessors above.
     friend class UsdGenImagingTestHook;
-    static HdDataSourceLocatorSet _DirtiedLocatorsFor(
-        usdGen::UsdGenTileDirty const &reportTile,
-        usdGen::UsdGenGeneration const &gen, size_t tileIdx,
-        bool surfaceXformDirty, bool republishNeeded);
 
     HdSceneIndexBaseRefPtr _pruned;   // input with extComputationPrimvar
                                       // pruning spliced (06 §3.5); NEVER
                                       // spliced into the chain
     uint64_t _renderInstanceId = 0;
 
-    mutable std::mutex _stateMutex;   // guards everything below
-    // Shared ownership: Work snapshots and _RepublishByRoot hold STRONG
-    // refs (lifetime by refcount, never a flag); callbacks hold WEAK refs
-    // and lock() at invocation (expired ⇒ no-op). No raw g.get()/self
-    // captures on the publish path.
-    std::vector<std::shared_ptr<_Groom>> _grooms;
-    // A ticket reserves a root while its session/callback attachment is
-    // constructed outside _stateMutex. Removal erases the ticket so a late
-    // candidate cannot reinstall a removed groom.
-    uint64_t _nextAdoptionTicket = 0;
-    std::unordered_map<SdfPath, uint64_t, SdfPath::Hash> _pendingAdoptions;
-    std::atomic_flag _populated;      // one-shot population attempt (06 §3.1)
-    std::vector<HdSceneIndexObserver::AddedPrimEntry> _pendingAdd;
-    std::vector<SdfPath> _pendingRemove;
+    std::shared_ptr<_State> _state;
 
 };
 

@@ -383,6 +383,73 @@ injection, performance gates and all original release requirements remain.
 Framework-internal synchronization and standard-library atomic shared-pointer
 implementation details are not claims of hardware wait-freedom.
 
+### Scene-index owner and lifetime follow-through
+
+The scene membership guard is now replaced by a per-index framework command
+owner. Reads load one immutable membership/tile snapshot; they never initiate
+population, cook, or wait for that owner. Ordinary upstream Hydra queries
+remain on the read/notice caller and retain upstream affinity requirements.
+The implementation does not claim those upstream queries are wait-free.
+
+- `New` eagerly captures population. Notice callers capture owning graph
+  descriptors and the original CUDA device before scheduling mutation. A
+  reserved ingress sequence plus per-path events/tombstones suppresses delayed
+  obsolete captures without blocking unrelated descriptions behind one slow
+  source query. Suppression history is pruned when the contiguous completion
+  watermark proves that no older capture can still arrive.
+- Attachment, descriptor staging/cooking, callback unregistration and exact
+  detachment are asynchronous relays. Each scene has its own command owner;
+  description cooks retain independent engine work lanes. `Synchronize` is
+  an explicit external watermark/reply boundary, not a render-read operation
+  or a promise to await future store-driven requests. It includes accepted
+  ingress's attach/cook/detach/subscription acknowledgements.
+- Publication rebuilds the tile set from the full immutable generation,
+  checks exact membership identity and monotonic generation, swaps before
+  notifying, and forwards notices on the same owner. Skipped generations use
+  full invalidation for surviving tiles instead of trusting an intermediate
+  dirty report. A type resync away from Groom/Description retires membership
+  even without a separate Removed notice. Authored prim data wins queries at
+  colliding paths; complete authored/synthetic collision notice semantics
+  still need dedicated coverage.
+- Scene destruction from an observer callback schedules plain State
+  retirement. Process shutdown closes scene subscriptions, drains source
+  callback frames and destroys scene pipelines while holding live States.
+  A pre-reserved per-State framework retirement record covers the gap between
+  the last strong reference and enqueueing its deletion. Quiesced States can
+  outlive the process service through a static public index handle; their
+  later deletion does not access the destroyed service/test-hook registry.
+  External engine/store drains exist only for quiescent shutdown/test use.
+- Throwing observers are diagnosed without stranding completion holds.
+  Unexpected allocation/framework failures during nontransactional ownership
+  updates are fatal; allocation-failure recovery is not implemented. No
+  application mutex or spinlock remains in the library C++/CUDA sources.
+  Standard-library atomic shared-pointer and framework internals are not
+  claims of hardware lock-freedom.
+
+Validation so far: full CUDA-enabled build and **72/72 non-benchmark T0/T1**
+tests pass. Five CUDA-disabled ASan/UBSan checks (scene owner, static process
+exit, actual tile publication, async imaging, population) pass with
+`detect_leaks=0` and `halt_on_error=1`. The publication test verifies exact
+`.02 -> .08` widths through a legacy CPU uniform fixture, a held synthetic
+notice with reads still available, and a second independently executing scene.
+It is not GPU renderer-interoperability evidence. The CPU reference Width
+operator still does not evaluate ragged chunks; the fixture explicitly
+resamples uniformly and does not introduce a production CPU fallback.
+The four async-imaging/scene-owner/scene-exit/publication tests also passed
+50 consecutive runs each, and 20 each in the ASan/UBSan build. The owner test
+additionally drops its last external scene-index handle inside a synthetic
+addition callback and verifies balanced retirement.
+
+This is not completion of the execution/imaging milestones. Capture currently
+rescans the input and rebuilds descriptions on every notice; incremental
+source capture, filtering/coalescing and the actual performance thresholds
+remain required. The scene retirement registry retains weak bookkeeping
+until process shutdown. GPU renderer interop, render-context density effects,
+complete operators/maps/tools, robust fault recovery, collision-notice
+coverage and all original release requirements remain open. Local Qwen gave
+an inspected visible audit; the two Hivemind audit requests returned no usable
+visible answers and are not counted as completed model reviews.
+
 ## Original scope remains required
 
 The complete requirement registry remains `00-request-and-scope.md`, the

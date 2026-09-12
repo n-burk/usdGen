@@ -228,12 +228,21 @@ int UsdGenImagingSession::RegisterRepublishCallback(std::function<void(CommitPay
     })) return -1;
     return static_cast<int>(token);
 }
-void UsdGenImagingSession::UnregisterRepublishCallback(int token) {
+bool UsdGenImagingSession::UnregisterRepublishCallbackAsync(
+    int token, std::function<void()> completion) {
     auto* state = _state.get();
-    state->owner.PostCommand([state, token] {
+    if (!state->accepting.load()) return false;
+    auto cancelled = completion;
+    return state->owner.PostCommand([state, token, completion=std::move(completion)] {
         state->callbacks.erase(std::remove_if(state->callbacks.begin(), state->callbacks.end(),
             [token](auto const& entry) { return entry.first == token; }), state->callbacks.end());
+        if (completion) completion();
+    }, [completion=std::move(cancelled)] {
+        if (completion) completion();
     });
+}
+void UsdGenImagingSession::UnregisterRepublishCallback(int token) {
+    (void)UnregisterRepublishCallbackAsync(token);
 }
 int64_t UsdGenImagingSession::Generation() const noexcept { return _state->generation.load(); }
 usdGen::UsdGenGenerationConstPtr UsdGenImagingSession::LatestGeneration() const noexcept {
@@ -457,6 +466,8 @@ UsdGenSessionHandle UsdGenSessionStore::Find(UsdGenSessionKey const &key) const
     if (it != snapshot->end()) return it->second;
     return UsdGenSessionHandle();
 }
+
+void UsdGenSessionStore::Drain() { _state->owner.Drain(); }
 
 std::vector<UsdGenImagingSessionRefPtr> UsdGenSessionStore::LiveSessions() const
 {

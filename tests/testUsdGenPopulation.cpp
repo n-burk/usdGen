@@ -101,6 +101,15 @@ std::set<std::string> CollectAll(const HdSceneIndexBaseRefPtr &index)
     return out;
 }
 
+void Check(bool ok, std::string const &what);
+
+void Synchronize(const HdSceneIndexBaseRefPtr &index)
+{
+    auto *groom = dynamic_cast<UsdGenGroomSceneIndex *>(index.operator->());
+    Check(groom != nullptr, "population index exposes Synchronize owner boundary");
+    if (groom) groom->Synchronize();
+}
+
 int g_failures = 0;
 
 void Check(bool ok, std::string const &what)
@@ -131,10 +140,8 @@ int main()
         UsdImagingCreateSceneIndices(infoA);
     merging->InsertInputScenes({ { sisA.finalSceneIndex } });
 
-    // ---- Path B: query-first.  Fresh stage with identical content, the
-    // groom index constructed directly on the terminal index; NOTHING has
-    // been observed yet -- the first GetChildPrimPaths must trigger
-    // population lazily.
+    // ---- Path B: eager capture. Fresh stage with identical content; the
+    // groom index captures its initial membership during New().
     UsdStageRefPtr stageB = UsdStage::CreateInMemory("popB");
     DefineFixture(stageB);
 
@@ -145,16 +152,20 @@ int main()
     const HdSceneIndexBaseRefPtr groomB =
         UsdGenGroomSceneIndex::New(sisB.finalSceneIndex);
 
+    // Population is an explicit owner operation. Keep the paths distinct:
+    // replay for A and eager construction for B, followed by synchronization.
+    Synchronize(groomA);
+    Synchronize(groomB);
+
     // ---- Assertions -----------------------------------------------------
     // Both paths must observe exactly the same prim set.  Path A is
-    // populated by the notice/replay machinery; path B by the lazy first
-    // query (the very call below is path B's population trigger).
+    // populated by notice/replay; path B by eager construction.
     const std::set<std::string> setA = CollectAll(groomA);
     const std::set<std::string> setB = CollectAll(groomB);
 
     Check(setA == setB,
           "identical prim set from both population paths "
-          "(InsertInputScenes replay == lazy first query)");
+          "(InsertInputScenes replay == eager construction)");
     if (setA != setB) {
         std::size_t shown = 0;
         for (const std::string &s : setA) {
@@ -217,11 +228,11 @@ int main()
         infoT.stage = stageT;
         const UsdImagingSceneIndices sisT =
             UsdImagingCreateSceneIndices(infoT);
+        const auto t0 = std::chrono::steady_clock::now();
         const HdSceneIndexBaseRefPtr groomT =
             UsdGenGroomSceneIndex::New(sisT.finalSceneIndex);
 
-        const auto t0 = std::chrono::steady_clock::now();
-        groomT->GetChildPrimPaths(SdfPath::AbsoluteRootPath());
+        Synchronize(groomT);
         const double ms = std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - t0)
                               .count();

@@ -95,6 +95,8 @@ struct UsdGenSession::State {
 };
 
 UsdGenSession::UsdGenSession(int limit) : _state(new State(limit)) {}
+void UsdGenSession::Drain() { _state->pipeline.Drain(); }
+
 UsdGenSession::~UsdGenSession() {
     // External submitters must already have stopped. Keep _snapshot alive while
     // closing invokes terminal callbacks for accepted work and commands.

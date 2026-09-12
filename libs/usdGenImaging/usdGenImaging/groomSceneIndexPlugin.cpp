@@ -1,1040 +1,672 @@
-// usdGenGroom renderer-level scene index plugin.
+// Caller-boundary Hydra capture -> per-scene owner -> independent session work.
+// One immutable scene snapshot and ordered notices; no application mutex.
 #include "usdGenImaging/groomSceneIndexPlugin.h"
-
-#include "usdGenImaging/usdGenImagingSession.h"
 #include "usdGenImaging/usdGenDirtyRouter.h"
-#include "usdGenImaging/usdGenEngineBridge.h"
 #include "usdGenImaging/usdGenTilePublisher.h"
-#include "usdGenImaging/testHook.h"
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
-#include "usdGenImaging/usdGenTokens.h"
-
+#include "usdGenImaging/usdGenEnable.h"
+#include "usdGenImaging/testHook.h"
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
-#include "pxr/imaging/hd/dataSourceTypeDefs.h"
-#include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/imaging/hd/sceneGlobalsSchema.h"
+#include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
-#include "pxr/base/tf/staticTokens.h"
-#include "pxr/base/tf/token.h"
-#include "usdGenImaging/usdGenEnable.h"
+#include <tbb/concurrent_vector.h>
+#include <tbb/flow_graph.h>
 #include <algorithm>
-#include <atomic>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <unordered_map>
+#include <cmath>
+#include <map>
+#include <set>
+#include <stdexcept>
 #include <utility>
-#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-namespace {
-void _ReleaseSessionAttachment(::usdGenImaging::UsdGenSessionKey const& key,
-    ::usdGenImaging::UsdGenSessionHandle const& session)
-{
-    auto& store = ::usdGenImaging::UsdGenSessionStore::GetInstance();
-    // Last protected scene-index handles can disappear during publication.
-    // Their cleanup must enqueue the exact release, never await another owner.
-    if (usdGen::UsdGenExecutionPipeline::IsExecuting())
-        store.DetachAsync(key, session);
-    else
-        store.Detach(key, session);
-}
-}
-
-// Kill switch (ADR §5.1): the registry consults _IsEnabled per append, so a
-// disabled plugin returns its input unchanged and drops out of the chain
-// without editing plugInfo. Shared with the metadata plugin via usdGenEnable.h
-// (single TF_DEFINE_ENV_SETTING lives in this translation unit).
-TF_DEFINE_ENV_SETTING(
-    USDGEN_ENABLE, true,
-    "Enable the usdGen scene index plugins (false disables both the groom "
-    "resolution plugin and the metadata-only plugin).");
-
+TF_DEFINE_ENV_SETTING(USDGEN_ENABLE, true, "Enable usdGen scene index plugins.");
 TF_REGISTRY_FUNCTION(TfType) {
     HdSceneIndexPluginRegistry::Define<UsdGenGroomSceneIndexPlugin>();
 }
-
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
     HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
         HdSceneIndexPluginRegistryTokens->allRenderers.GetString(),
-        TfToken("UsdGenGroomSceneIndexPlugin"),
-        /*inputArgs      =*/ nullptr,
-        /*insertionPhase =*/ 0,
+        TfToken("UsdGenGroomSceneIndexPlugin"), nullptr, 0,
         HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
 }
-
-HdSceneIndexBaseRefPtr
-UsdGenGroomSceneIndexPlugin::_AppendSceneIndex(
-    const HdSceneIndexBaseRefPtr &inputScene,
-    const HdContainerDataSourceHandle &inputArgs)
-{
-    TF_UNUSED(inputArgs);
-    // M0: pass-through node so the chain position is observable. M1 wraps the
-    // input in the real UsdGenGroomSceneIndex (evaluator + tile publisher).
-    // All staging is sourced from the post-deformation Hydra input.
-    return UsdGenGroomSceneIndex::New(inputScene);
+HdSceneIndexBaseRefPtr UsdGenGroomSceneIndexPlugin::_AppendSceneIndex(
+    HdSceneIndexBaseRefPtr const& input, HdContainerDataSourceHandle const&) {
+    return UsdGenGroomSceneIndex::New(input);
 }
-bool
-UsdGenGroomSceneIndexPlugin::_IsEnabled(
-    const HdContainerDataSourceHandle &inputArgs) const
-{
-    TF_UNUSED(inputArgs);
+bool UsdGenGroomSceneIndexPlugin::_IsEnabled(HdContainerDataSourceHandle const&) const {
     return TfGetEnvSetting(USDGEN_ENABLE);
 }
 
-// ---------------------------------------------------------------------------
-// M1 chunk A: UsdGenGroomSceneIndex filtering half — construction,
-// population scaffolding, and read paths (06 §3.1, §3.4, §3.5).
-// Chunks B/C (notice routing, commit, publish) follow in this file.
-//
-// Namespace note: the session key/handle/store live in the GLOBAL
-// ::usdGenImaging namespace (usdGenImagingSession.h), while the router,
-// bridge and SdfPathHash live in pxr::usdGenImaging. This file sits inside
-// PXR_NAMESPACE, so session types are spelled ::usdGenImaging:: and router
-// types usdGenImaging::.
-// ---------------------------------------------------------------------------
+namespace {
+using Pipeline = usdGen::UsdGenExecutionPipeline;
+using Session = ::usdGenImaging::UsdGenImagingSession;
+using Handle = ::usdGenImaging::UsdGenSessionHandle;
+using Key = ::usdGenImaging::UsdGenSessionKey;
+using Desc = usdGen::UsdGenGraphDesc;
+using Added = HdSceneIndexObserver::AddedPrimEntries;
+using Removed = HdSceneIndexObserver::RemovedPrimEntries;
+using Dirtied = HdSceneIndexObserver::DirtiedPrimEntries;
+using TileMap = std::map<SdfPath, HdContainerDataSourceHandle>;
+SdfPath RenderPath(SdfPath const& description) {
+    return description.AppendChild(TfToken("__usdGenRender"));
+}
+TfToken TypeName(HdSceneIndexPrim const& prim) {
+    if (!prim.primType.IsEmpty()) return prim.primType;
+    auto type = HdTokenDataSource::Cast(HdContainerDataSource::Get(prim.dataSource,
+        HdDataSourceLocator(TfToken("__usdPrimInfo"), TfToken("typeName"))));
+    return type ? type->GetTypedValue(0) : TfToken();
+}
+bool IsGroom(TfToken const& type) {
+    return type == TfToken("UsdGenGroom") || type == TfToken("UsdGenDescription");
+}
+}
 
-// Per-UsdGenGroom state: session attachment plus the router/bridge pair that
-// chunks B/C drive. Published tile sources land here (chunk C).
-struct UsdGenGroomSceneIndex::_Groom {
-    using PublishedMap = std::unordered_map<SdfPath, HdContainerDataSourceHandle,
-                                            usdGenImaging::SdfPathHash>;
-    using PublishedSnapshot = std::shared_ptr<PublishedMap const>;
-    SdfPath groomRoot;
-    SdfPath description;
-    ::usdGenImaging::UsdGenSessionKey key;
-    ::usdGenImaging::UsdGenSessionHandle session;
-    using RouterSnapshot = std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter>;
-    RouterSnapshot router;
-    usdGenImaging::UsdGenEngineBridge bridge;
-    int republishToken = -1;
-    // P0 race fix: readers snapshot-and-release (atomic_load, no mutex on
-    // the read path); _Republish swaps a fresh map under _stateMutex.
-    // C++17 free-function atomic shared_ptr idiom (R20, as the generation
-    // handoff in generationStore.cpp).
-    PublishedSnapshot published;
+struct UsdGenGroomSceneIndex::_Ingress {
+    struct Input {
+        SdfPath root, description;
+        Key key;
+        std::shared_ptr<const Desc> desc;
+        bool authoredRender = false;
+    };
+    uint64_t sequence = 0;
+    int device = -2;
+    double frame = 0;
+    bool initial = false, failed = false;
+    Added added;
+    Removed removed;
+    Dirtied dirtied;
+    std::vector<Input> inputs;
 };
 
-UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(
-    HdSceneIndexBaseRefPtr const &inputScene,
-    int renderInstanceId)
-    : HdSingleInputFilteringSceneIndexBase(inputScene)
-    , _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(inputScene))
-    , _renderInstanceId(static_cast<uint32_t>(renderInstanceId))
-{
-    // Explicit host identities occupy the low 32 bits. Unspecified
-    // identities are unique for the index lifetime and never reuse a raw
-    // scene/stage address (two stages may author the same groom path).
-    static std::atomic<uint64_t> nextInstance{uint64_t(1) << 32};
-    if (renderInstanceId == 0) _renderInstanceId = nextInstance.fetch_add(1);
-    _populated.clear();
-    UsdGenImagingTestHook::_RegisterIndex(this);
-}
-int64_t
-UsdGenGroomSceneIndex::_TestPublishedGeneration(SdfPath const &groom) const
-{
-    // Lock-free past the groom lookup: the published map is atomic_load'ed,
-    // exactly like GetPrim. Returns the max `generation` stamp, or -1 when
-    // the groom is unknown / unpublished.
-    _Groom::PublishedSnapshot snap;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &g : _grooms) {
-            if (g && g->groomRoot == groom) {
-                snap = std::atomic_load(&g->published);
-                break;
-            }
-        }
+// Constructed after the store: scenes close before store/retirement teardown.
+// Every scene has its OWN pipeline on the shared runtime.
+struct UsdGenSceneService {
+    struct RetirementRecord {
+        std::unique_ptr<tbb::flow::graph> completion{new tbb::flow::graph};
+        std::atomic<bool> pending{true};
+        RetirementRecord() { completion->reserve_wait(); }
+        ~RetirementRecord() { if (completion) Done(); }
+        void Done() { if (pending.exchange(false)) completion->release_wait(); }
+        void Wait() { completion->wait_for_all(); }
+        // Called only with a strong live State after all its work is gone.
+        // A public static handle can then outlive framework static teardown.
+        void Disarm() { Done(); completion.reset(); }
+    };
+    struct Entry {
+        std::weak_ptr<UsdGenGroomSceneIndex::_State> state;
+        std::shared_ptr<RetirementRecord> retirement;
+    };
+    usdGen::UsdGenExecutionRuntime runtime{8};
+    tbb::flow::graph retirement;
+    tbb::flow::function_node<std::function<void()>> cleanup;
+    tbb::concurrent_vector<Entry> states;
+    UsdGenSceneService() : cleanup(retirement, tbb::flow::unlimited,
+        [](std::function<void()> action) { action(); return tbb::flow::continue_msg{}; }) {}
+    ~UsdGenSceneService();
+    void Retire(std::function<void()> action) {
+        if (!cleanup.try_put(std::move(action))) std::terminate();
     }
-    if (!snap || snap->empty()) return -1;
-    int64_t best = -1;
-    HdDataSourceLocator const genLoc(TfToken("generation"));
-    for (auto const &kv : *snap) {
-        if (!kv.second) continue;
-        HdDataSourceBaseHandle found =
-            HdContainerDataSource::Get(kv.second, genLoc);
-        HdSampledDataSourceHandle sampled =
-            HdSampledDataSource::Cast(found);
-        if (!sampled) continue;
-        VtValue v = sampled->GetValue(0);
-        if (v.IsHolding<int>()) {
-            best = std::max(best, int64_t(v.UncheckedGet<int>()));
-        }
-    }
-    return best;
-}
-
-size_t
-UsdGenGroomSceneIndex::_TestPublishedTileCount(SdfPath const &groom) const
-{
-    _Groom::PublishedSnapshot snap;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &g : _grooms) {
-            if (g && g->groomRoot == groom) {
-                snap = std::atomic_load(&g->published);
-                break;
-            }
-        }
-    }
-    return snap ? snap->size() : 0;
-}
-
-UsdGenGroomSceneIndex::~UsdGenGroomSceneIndex()
-{
-    UsdGenImagingTestHook::_UnregisterIndex(this);
-    std::vector<std::shared_ptr<_Groom>> retired;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        retired.swap(_grooms);
-        _pendingAdoptions.clear();
-    }
-    // Session callbacks can enter their own command owner/arena; never do
-    // that while holding membership state.
-    for (auto &g : retired) {
-        if (!g) continue;
-        if (g->republishToken >= 0 && g->session) {
-            g->session->UnregisterRepublishCallback(g->republishToken);
-            g->republishToken = -1;
-        }
-        if (g->session) {
-            _ReleaseSessionAttachment(g->key, g->session);
-        }
-    }
-}
-
-HdSceneIndexBaseRefPtr
-UsdGenGroomSceneIndex::New(
-    HdSceneIndexBaseRefPtr const &inputScene,
-    int renderInstanceId)
-{
-    return TfCreateRefPtr(new UsdGenGroomSceneIndex(inputScene, renderInstanceId));
-}
-
-void
-UsdGenGroomSceneIndex::_PopulateFromInput()
-{
-    if (_populated.test_and_set()) return;
-    _ScanInputForGrooms();
-    _AdoptPending();
-}
+    void DrainRetired();
+};
 namespace {
-// USD type name from __usdPrimInfo (carried regardless of adapter subprim
-// type). Observed: terminal index serves primType == "" with
-// __usdPrimInfo/typeName == "UsdGenGroom" intact (probeGroomType).
-TfToken
-_UsdTypeName(HdSceneIndexPrim const &prim)
-{
-    if (!prim.dataSource) return TfToken();
-    // Read the transported metadata as Hydra data, just like the graph
-    // builder; no UsdImaging schema wrapper or stage API is needed here.
-    HdTokenDataSourceHandle typeName = HdTokenDataSource::Cast(
-        HdContainerDataSource::Get(prim.dataSource,
-            HdDataSourceLocator(TfToken("__usdPrimInfo"), TfToken("typeName"))));
-    if (!typeName) return TfToken();
-    VtValue v = typeName->GetValue(0);
-    if (!v.IsHolding<TfToken>()) return TfToken();
-    return v.UncheckedGet<TfToken>();
+UsdGenSceneService& SceneService() {
+    (void)::usdGenImaging::UsdGenSessionStore::GetInstance();
+    static UsdGenSceneService service;
+    return service;
 }
-// Root-set test (06 §3.6): the groom root set is UsdGenGroom OR
-// UsdGenDescription. Our adapters return the empty subprim type (06 §2.1),
-// so usdGen prims MEASURED-arrive with primType == "" (06 §2.7 probe2) —
-// string-matching the Hydra type misses them on BOTH paths. Fall back to
-// __usdPrimInfo/typeName, which carries the USD type name regardless.
-bool
-_IsGroomRootPrim(HdSceneIndexPrim const &prim)
-{
-    if (prim.primType == TfToken("UsdGenGroom") ||
-        prim.primType == TfToken("UsdGenDescription")) {
-        return true;
-    }
-    TfToken const t = _UsdTypeName(prim);
-    return t == TfToken("UsdGenGroom") || t == TfToken("UsdGenDescription");
-}
-}  // namespace (groom-root helpers)
-void
-UsdGenGroomSceneIndex::_ScanInputForGrooms() const
-{
-    HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
-    if (!input) return;
-    std::vector<SdfPath> stack{SdfPath::AbsoluteRootPath()};
-    while (!stack.empty()) {
-        SdfPath path = stack.back();
-        stack.pop_back();
-        if (path != SdfPath::AbsoluteRootPath()) {
-            HdSceneIndexPrim prim = input->GetPrim(path);
-            if (_IsGroomRootPrim(prim)) {
-                _AdoptGroom(path);
-                continue;  // never descend below a groom root (06 §3.6)
-            }
-        }
-        SdfPathVector children = input->GetChildPrimPaths(path);
-        for (SdfPath const &c : children) stack.push_back(c);
-    }
 }
 
-void
-UsdGenGroomSceneIndex::_AdoptGroom(SdfPath const &groomRoot) const
-{
-    auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    HdSceneIndexBaseRefPtr input = self->_GetInputSceneIndex();
-    std::shared_ptr<_Groom> existing;
-    ::usdGenImaging::UsdGenImagingSessionRefPtr existingSession;
-    uint64_t ticket = 0;
-    {
-        std::lock_guard<std::mutex> lock(self->_stateMutex);
-        for (auto const &g : self->_grooms)
-            if (g && g->groomRoot == groomRoot) { existing = g; break; }
-        if (!existing) {
-            if (self->_pendingAdoptions.find(groomRoot) !=
-                self->_pendingAdoptions.end()) return;
-            if (self->_nextAdoptionTicket == UINT64_MAX) return;
-            ticket = ++self->_nextAdoptionTicket;
-            self->_pendingAdoptions.emplace(groomRoot, ticket);
+struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
+    struct Groom {
+        uint64_t id = 0, captured = 0;
+        bool alive = true, authoredRender = false;
+        SdfPath root, description;
+        Key key;
+        Handle session;
+        int callback = -1, device = -2;
+        double frame = 0;
+        std::shared_ptr<const Desc> desc;
+        std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter> router;
+        std::shared_ptr<const TileMap> tiles = std::make_shared<const TileMap>();
+        int64_t generation = -1;
+    };
+    struct View {
+        SdfPath root, description;
+        std::shared_ptr<const TileMap> tiles;
+        int64_t generation;
+    };
+    struct Snapshot { std::vector<View> members; };
+    std::shared_ptr<const Snapshot> published = std::make_shared<const Snapshot>();
+    HdSceneIndexBasePtr recipient; // initialized before admission; weak
+    std::atomic<uint64_t> issued{0};
+    std::atomic<bool> closing{false};
+    std::atomic<bool> quiesced{false};
+    // Owner-only state below.
+    std::map<SdfPath, std::shared_ptr<Groom>> members;
+    std::map<SdfPath, uint64_t> events, tombstones;
+    uint64_t nextId = 0, completedPrefix = 0;
+    std::set<uint64_t> completed;
+    std::map<uint64_t, size_t> holds;
+    struct Waiter { uint64_t watermark; std::function<void()> done; };
+    std::vector<Waiter> waiters;
+    bool closeProcessed = false;
+    std::vector<TfWeakPtr<Session>> usedSessions;
+    std::unique_ptr<Pipeline> owner; // removed at process shutdown, even if public index survives
+
+    explicit _State(usdGen::UsdGenExecutionRuntime& runtime) : owner(new Pipeline(runtime)) {}
+    ~_State() { if (owner) owner->Shutdown(); }
+    auto SnapshotValue() const { return std::atomic_load(&published); }
+    void PublishSnapshot() {
+        auto next = std::make_shared<Snapshot>();
+        for (auto const& item : members) {
+            auto const& g = *item.second;
+            next->members.push_back({g.root, g.description, g.tiles, g.generation});
+        }
+        std::atomic_store(&published, std::shared_ptr<const Snapshot>(std::move(next)));
+    }
+    void Post(std::function<void()> command) {
+        // Required lifetime relays cannot be silently discarded.
+        try { if (!owner->PostCommand(std::move(command))) std::terminate(); }
+        catch (...) { std::terminate(); }
+    }
+    void CheckWaiters() {
+        auto it = waiters.begin();
+        while (it != waiters.end()) {
+            bool ready = (!closing.load() || closeProcessed) && completedPrefix >= it->watermark &&
+                (holds.empty() || holds.begin()->first > it->watermark);
+            if (!ready) { ++it; continue; }
+            auto done = std::move(it->done);
+            it = waiters.erase(it);
+            done();
         }
     }
-    if (existing) {
-        _Groom resolved;
-        resolved.groomRoot = groomRoot;
-        resolved.description = groomRoot;
-        self->_ResolveDescriptionLocked(resolved, input);
-        {
-            std::lock_guard<std::mutex> lock(self->_stateMutex);
-            if (std::find(self->_grooms.begin(), self->_grooms.end(), existing) != self->_grooms.end() &&
-                existing->description != resolved.description) {
-                existing->description = resolved.description;
-                existingSession = existing->session;
+    void Hold(uint64_t seq) { ++holds[seq]; }
+    void Release(uint64_t seq) {
+        auto it = holds.find(seq);
+        if (it == holds.end() || it->second == 0) std::terminate();
+        if (--it->second == 0) holds.erase(it);
+        CheckWaiters();
+    }
+    void CompleteIngress(uint64_t seq) {
+        completed.insert(seq);
+        while (completed.erase(completedPrefix + 1)) ++completedPrefix;
+        // Every capture at/below this prefix has arrived. Its suppression
+        // history is no longer needed by any delayed ingress.
+        auto prune = [this](auto& history) {
+            for (auto it = history.begin(); it != history.end();)
+                if (it->second <= completedPrefix) it = history.erase(it);
+                else ++it;
+        };
+        prune(events);
+        prune(tombstones);
+        CheckWaiters();
+    }
+    void Synchronize() {
+        if (quiesced.load()) return;
+        auto self = shared_from_this();
+        const uint64_t watermark = issued.load(std::memory_order_acquire);
+        owner->Await([self, watermark](std::function<void()> done) {
+            self->Post([self, watermark, done] {
+                self->waiters.push_back({watermark, done});
+                self->CheckWaiters();
+            });
+        });
+    }
+    bool Current(std::shared_ptr<Groom> const& g) const {
+        auto it = members.find(g->root);
+        return g->alive && it != members.end() && it->second == g;
+    }
+    bool NewerEvent(SdfPath const& path, uint64_t seq) const {
+        for (auto const& e : events)
+            if (e.second > seq && (path.HasPrefix(e.first) || e.first.HasPrefix(path))) return true;
+        return false;
+    }
+    bool RemovedSince(SdfPath const& root, uint64_t seq) const {
+        for (auto const& e : tombstones)
+            if (root.HasPrefix(e.first) && e.second >= seq) return true;
+        return false;
+    }
+    void Notify(Added const& added, Removed const& removed, Dirtied const& dirtied) {
+        if (closing.load()) return;
+        auto live = TfCreateRefPtrFromProtectedWeakPtr(recipient);
+        auto* index = dynamic_cast<UsdGenGroomSceneIndex*>(live ? live.operator->() : nullptr);
+        if (!index) return;
+        // Snapshot first, then observers on the SAME owner. Re-entry queues.
+        // A throwing consumer cannot strand scene admission/retirement.
+        try { if (!removed.empty()) index->_SendPrimsRemoved(removed); }
+        catch (...) { TF_WARN("usdGen removal observer threw"); }
+        try { if (!added.empty()) index->_SendPrimsAdded(added); }
+        catch (...) { TF_WARN("usdGen addition observer threw"); }
+        try { if (!dirtied.empty()) index->_SendPrimsDirtied(dirtied); }
+        catch (...) { TF_WARN("usdGen dirty observer threw"); }
+    }
+    void Detach(Handle session, Key key, uint64_t seq) {
+        if (!session) return;
+        Hold(seq);
+        auto self = shared_from_this();
+        bool accepted = false;
+        try {
+            accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().DetachAsync(key, session,
+                [self, session, seq] { self->Post([self, session, seq] { self->Release(seq); }); });
+        } catch (...) { std::terminate(); }
+        if (!accepted) Release(seq);
+    }
+    void Remove(std::shared_ptr<Groom> const& g, uint64_t seq) {
+        g->alive = false;
+        if (g->session) {
+            if (g->callback >= 0) {
+                Hold(seq);
+                auto self = shared_from_this();
+                try {
+                    if (!g->session->UnregisterRepublishCallbackAsync(g->callback,
+                        [self, seq] { self->Post([self, seq] { self->Release(seq); }); }))
+                        Release(seq);
+                } catch (...) { std::terminate(); }
+            }
+            Detach(g->session, g->key, seq);
+        }
+    }
+    void Close() {
+        if (closing.exchange(true)) return;
+        auto self = shared_from_this();
+        Post([self] {
+            try {
+                const uint64_t seq = self->issued.load();
+                for (auto const& item : self->members) self->Remove(item.second, seq);
+                self->members.clear();
+                self->PublishSnapshot();
+                self->closeProcessed = true;
+                self->CheckWaiters();
+            } catch (...) { std::terminate(); }
+        });
+    }
+    void Publish(std::shared_ptr<Groom> const& g, Session::CommitPayload const& payload) {
+        if (closing.load() || !Current(g) || !payload.published || !payload.generation ||
+            payload.generation->id <= g->generation) return;
+        auto const& generation = *payload.generation;
+        if (generation.device) {
+            TF_WARN("usdGen: stock Hydra publication requires unfinished device interop; retaining displayed geometry");
+            return;
+        }
+        auto fresh = std::make_shared<TileMap>();
+        const auto render = RenderPath(g->description);
+        for (auto const& tile : generation.tiles) {
+            if (!tile.primPath.HasPrefix(render)) return; // old description namespace
+            fresh->emplace(tile.primPath,
+                ::usdGenImaging::UsdGenTilePublisher::BuildTileDataSource(tile, generation.id));
+        }
+        Added added;
+        Removed removed;
+        Dirtied dirtied;
+        for (auto const& old : *g->tiles)
+            if (!fresh->count(old.first)) removed.emplace_back(old.first);
+        for (auto const& tile : *fresh) {
+            if (!g->tiles->count(tile.first)) added.emplace_back(tile.first, TfToken("basisCurves"));
+            else {
+                // Missed intermediate publications make their report an
+                // invalid diff against THIS scene's displayed baseline.
+                HdDataSourceLocatorSet locators;
+                if (g->generation + 1 != generation.id) locators.insert(HdDataSourceLocator());
+                else for (auto const& report : payload.report.tiles) {
+                    if (report.primPath != tile.first) continue;
+                    for (auto const& loc : ::usdGenImaging::UsdGenTilePublisher::NoticesFor(report).all())
+                        locators.insert(loc);
+                }
+                if (!locators.IsEmpty()) dirtied.emplace_back(tile.first, locators);
             }
         }
-        if (existingSession) existingSession->MarkNeedsDesc();
-        return;
+        auto router = std::make_shared<usdGenImaging::UsdGenDirtyRouter>();
+        if (payload.routing) router->Rebuild(*payload.routing);
+        g->router = std::move(router);
+        g->generation = generation.id;
+        g->tiles = std::move(fresh);
+        PublishSnapshot();
+        Notify(added, removed, dirtied);
     }
-
-    std::shared_ptr<_Groom> groom;
-    try {
-        groom = std::make_shared<_Groom>();
-        groom->groomRoot = groomRoot;
-        groom->description = groomRoot;
-        groom->key.groomRoot = groomRoot;
-        groom->key.renderInstanceId = self->_renderInstanceId;
-        if (input) {
-            auto data = input->GetPrim(groomRoot).dataSource;
-            auto id = HdStringDataSource::Cast(HdContainerDataSource::Get(
-                data, HdDataSourceLocator(TfToken("sessionId"))));
-            if (id) groom->key.sessionId = id->GetTypedValue(0.0f);
-        }
-        // The scan stops at groom roots; resolve their description before
-        // attaching, with no membership guard held during upstream queries.
-        self->_ResolveDescriptionLocked(*groom, input);
-        groom->session =
-            ::usdGenImaging::UsdGenSessionStore::GetInstance().Attach(groom->key);
-        if (groom->session) {
-            groom->session->MarkNeedsDesc();
-            std::weak_ptr<_Groom> weakGroom(groom);
-            HdSceneIndexBasePtr weakSelf = TfCreateWeakPtr(self);
-            groom->republishToken = groom->session->RegisterRepublishCallback(
-                [weakSelf, weakGroom, groomRoot](
-                    ::usdGenImaging::UsdGenImagingSession::CommitPayload const& payload) {
-                    // Both recipients are weak, and publication revalidates
-                    // the exact attachment. No live engine rereads occur.
-                    auto groomLocked = weakGroom.lock();
-                    auto selfLocked = TfCreateRefPtrFromProtectedWeakPtr(weakSelf);
-                    auto const* index = dynamic_cast<UsdGenGroomSceneIndex const*>(
-                        selfLocked ? selfLocked.operator->() : nullptr);
-                    if (!groomLocked || !index || !payload.published) return;
-                    index->_RepublishByRoot(groomRoot, groomLocked, payload);
+    void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
+        if (!g->session || !g->desc || closing.load() || !Current(g)) return;
+        Session::CommitRequest request;
+        request.reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
+        request.desc = g->desc;
+        request.callerDevice = g->device;
+        if (!g->session->HasAppDriver()) request.frame = g->frame;
+        g->session->ConsumeNeedsDesc();
+        auto self = shared_from_this();
+        Hold(seq);
+        bool accepted = false;
+        try {
+            accepted = g->session->CommitAsync(std::move(request),
+                [self, g, seq](Session::CommitPayload const& payload, Pipeline::Outcome) {
+                    self->Post([self, g, seq, payload] {
+                        try { self->Publish(g, payload); }
+                        catch (...) { TF_WARN("usdGen scene publication failed"); }
+                        self->Release(seq);
+                    });
                 });
+        } catch (...) { TF_WARN("usdGen scene cook request failed"); }
+        if (!accepted) Release(seq);
+    }
+    void Attach(std::shared_ptr<Groom> const& g, uint64_t seq) {
+        auto self = shared_from_this();
+        Hold(seq);
+        bool accepted = false;
+        try {
+            accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().AttachAsync(g->key,
+                [self, g, seq](Handle session) {
+                    self->Post([self, g, seq, session] {
+                        try {
+                            if (!session) { self->Release(seq); return; }
+                            self->usedSessions.push_back(TfCreateWeakPtr(session.operator->()));
+                            if (self->closing.load() || !self->Current(g)) {
+                                self->Detach(session, g->key, seq);
+                                self->Release(seq);
+                                return;
+                            }
+                            g->session = session;
+                            std::weak_ptr<_State> weak(self);
+                            std::weak_ptr<Groom> groom(g);
+                            g->callback = session->RegisterRepublishCallback(
+                                [weak, groom](Session::CommitPayload const& payload) {
+                                    auto state = weak.lock();
+                                    auto member = groom.lock();
+                                    if (!state || !member || state->closing.load()) return;
+                                    state->Post([state, member, payload] { state->Publish(member, payload); });
+                                });
+                            self->Cook(g, seq);
+                            self->Release(seq);
+                        } catch (...) { std::terminate(); }
+                    });
+                });
+        } catch (...) { TF_WARN("usdGen scene attachment request failed"); }
+        if (!accepted) Release(seq);
+    }
+    void Apply(_Ingress const& packet) {
+        const uint64_t seq = packet.sequence;
+        if (closing.load() || packet.failed) { CompleteIngress(seq); return; }
+        Added forwardAdded;
+        Removed forwardRemoved;
+        Dirtied forwardDirtied;
+        for (auto const& e : packet.removed) {
+            if (NewerEvent(e.primPath, seq)) continue;
+            events[e.primPath] = std::max(events[e.primPath], seq);
+            tombstones[e.primPath] = std::max(tombstones[e.primPath], seq);
+            for (auto it = members.begin(); it != members.end();) {
+                if (it->first.HasPrefix(e.primPath)) {
+                    Remove(it->second, seq);
+                    it = members.erase(it);
+                } else ++it;
+            }
+            forwardRemoved.push_back(e);
+        }
+        for (auto const& e : packet.added) {
+            if (NewerEvent(e.primPath, seq)) continue;
+            events[e.primPath] = std::max(events[e.primPath], seq);
+            forwardAdded.push_back(e);
+        }
+        for (auto const& e : packet.dirtied) {
+            if (NewerEvent(e.primPath, seq)) continue;
+            events[e.primPath] = std::max(events[e.primPath], seq);
+            forwardDirtied.push_back(e);
+        }
+        std::vector<std::shared_ptr<Groom>> startAttach, startCook;
+        // A Hydra Added notice can resync an existing groom to a non-groom
+        // type without an explicit Removed. Retire roots absent from this
+        // authoritative capture, but never overwrite a newer ingress.
+        for (auto it = members.begin(); it != members.end();) {
+            bool found = std::any_of(packet.inputs.begin(), packet.inputs.end(),
+                [&](auto const& input) { return input.root == it->first; });
+            if (!found && it->second->captured <= seq && !NewerEvent(it->first, seq)) {
+                if (!it->second->authoredRender)
+                    forwardRemoved.emplace_back(RenderPath(it->second->description));
+                Remove(it->second, seq);
+                it = members.erase(it);
+            } else ++it;
+        }
+        for (auto const& input : packet.inputs) {
+            if (RemovedSince(input.root, seq) || NewerEvent(input.root, seq)) continue;
+            auto it = members.find(input.root);
+            if (it != members.end() && it->second->captured > seq) continue;
+            if (it != members.end() && (it->second->description != input.description ||
+                                       !(it->second->key == input.key))) {
+                if (!it->second->authoredRender)
+                    forwardRemoved.emplace_back(RenderPath(it->second->description));
+                Remove(it->second, seq);
+                members.erase(it);
+                it = members.end();
+            }
+            std::shared_ptr<Groom> groom;
+            if (it == members.end()) {
+                groom = std::make_shared<Groom>();
+                groom->id = ++nextId;
+                groom->root = input.root;
+                groom->description = input.description;
+                groom->key = input.key;
+                groom->authoredRender = input.authoredRender;
+                members.emplace(input.root, groom);
+                if (!input.authoredRender)
+                    forwardAdded.emplace_back(RenderPath(input.description), TfToken("scope"));
+                startAttach.push_back(groom);
+            } else {
+                groom = it->second;
+                if (groom->session) startCook.push_back(groom);
+            }
+            groom->captured = seq;
+            groom->desc = input.desc;
+            groom->device = packet.device;
+            groom->frame = packet.frame;
+        }
+        PublishSnapshot();
+        Notify(forwardAdded, forwardRemoved, forwardDirtied);
+        for (auto const& groom : startAttach) Attach(groom, seq);
+        for (auto const& groom : startCook) Cook(groom, seq);
+        CompleteIngress(seq);
+    }
+};
+
+UsdGenSceneService::~UsdGenSceneService() {
+    std::vector<std::shared_ptr<UsdGenGroomSceneIndex::_State>> live;
+    std::vector<std::shared_ptr<RetirementRecord>> liveRecords;
+    for (auto const& entry : states) {
+        if (auto state = entry.state.lock()) {
+            live.push_back(std::move(state));
+            liveRecords.push_back(entry.retirement);
+        }
+        else entry.retirement->Wait(); // includes final-ref -> enqueue gap
+    }
+    for (auto const& state : live) state->Close();
+    for (auto const& state : live) state->Synchronize();
+    ::usdGenImaging::UsdGenSessionStore::GetInstance().Drain();
+    // Process shutdown only: finish source callback frames before destroying
+    // the retirement service captured by a scene state's final deleter.
+    std::vector<Handle> sessions;
+    for (auto const& state : live) state->owner->InvokeOwner([&] {
+        for (auto const& weak : state->usedSessions)
+            if (auto session = TfCreateRefPtrFromProtectedWeakPtr(weak))
+                sessions.push_back(std::move(session));
+    });
+    for (auto const& session : sessions) session->Shutdown();
+    for (auto const& session : sessions) if (session->Engine()) session->Engine()->Drain();
+    for (size_t i = 0; i < live.size(); ++i) {
+        auto const& state = live[i];
+        state->owner->Shutdown();
+        state->owner.reset();
+        liveRecords[i]->Disarm();
+        state->quiesced.store(true, std::memory_order_release);
+    }
+    live.clear();
+    retirement.wait_for_all();
+    sessions.clear();
+    Session::DrainRetired();
+}
+void UsdGenSceneService::DrainRetired() {
+    if (Pipeline::IsExecuting()) throw std::logic_error("scene callback cannot drain retirement");
+    std::vector<std::shared_ptr<UsdGenGroomSceneIndex::_State>> retired;
+    for (auto const& entry : states) {
+        if (auto state = entry.state.lock()) {
+            if (state->closing.load()) retired.push_back(std::move(state));
+        } else entry.retirement->Wait();
+    }
+    for (auto const& state : retired) state->Synchronize();
+    retired.clear();
+    retirement.wait_for_all();
+}
+
+UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id)
+    : HdSingleInputFilteringSceneIndexBase(input),
+      _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(input)),
+      _renderInstanceId(static_cast<uint32_t>(id)) {
+    static std::atomic<uint64_t> next{uint64_t(1) << 32};
+    if (id == 0) _renderInstanceId = next.fetch_add(1);
+    auto& service = SceneService();
+    auto record = std::make_shared<UsdGenSceneService::RetirementRecord>();
+    _state = std::shared_ptr<_State>(new _State(service.runtime), [&service, record](_State* state) {
+        if (state->quiesced.load(std::memory_order_acquire)) {
+            // A static public handle may outlive the process service. All
+            // pipelines/subscriptions have already been removed externally.
+            delete state;
+        } else service.Retire([state, record] { delete state; record->Done(); });
+    });
+    service.states.push_back({_state, record});
+}
+HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input, int id) {
+    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id));
+    index->_state->recipient = TfCreateWeakPtr(index.operator->());
+    UsdGenImagingTestHook::_RegisterIndex(index.operator->());
+    _Ingress initial;
+    initial.initial = true;
+    index->_CaptureAndSubmit(std::move(initial));
+    return index;
+}
+UsdGenGroomSceneIndex::~UsdGenGroomSceneIndex() {
+    _state->Close();
+    if (!_state->quiesced.load()) UsdGenImagingTestHook::_UnregisterIndex(this);
+}
+void UsdGenGroomSceneIndex::Synchronize() { _state->Synchronize(); }
+void UsdGenGroomSceneIndex::DrainRetired() { SceneService().DrainRetired(); }
+
+void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
+    auto state = _state;
+    if (state->closing.load()) return;
+    packet.sequence = state->issued.fetch_add(1, std::memory_order_acq_rel) + 1;
+    packet.device = usdGen::UsdGenSession::CaptureCallerDevice();
+    try {
+        // Snapshot each description at the source boundary. Incremental
+        // topology/input capture reuse is still a performance requirement.
+        auto input = _GetInputSceneIndex();
+        if (input) {
+            auto frame = HdSceneGlobalsSchema::GetFromParent(
+                input->GetPrim(SdfPath::AbsoluteRootPath()).dataSource).GetCurrentFrame();
+            if (frame) {
+                double value = frame->GetTypedValue(0);
+                if (std::isfinite(value)) packet.frame = value;
+            }
+            std::vector<SdfPath> stack{SdfPath::AbsoluteRootPath()};
+            while (!stack.empty()) {
+                const auto path = stack.back(); stack.pop_back();
+                const auto prim = input->GetPrim(path);
+                if (path != SdfPath::AbsoluteRootPath() && IsGroom(TypeName(prim))) {
+                    _Ingress::Input captured;
+                    captured.root = captured.description = path;
+                    captured.key.groomRoot = path;
+                    captured.key.renderInstanceId = _renderInstanceId;
+                    auto id = HdStringDataSource::Cast(HdContainerDataSource::Get(
+                        prim.dataSource, HdDataSourceLocator(TfToken("sessionId"))));
+                    if (id) captured.key.sessionId = id->GetTypedValue(0);
+                    if (TypeName(prim) == TfToken("UsdGenGroom")) {
+                        for (auto const& child : input->GetChildPrimPaths(path))
+                            if (TypeName(input->GetPrim(child)) == TfToken("UsdGenDescription")) {
+                                captured.description = child; break;
+                            }
+                    }
+                    auto authored = input->GetPrim(RenderPath(captured.description));
+                    captured.authoredRender = authored.dataSource || !authored.primType.IsEmpty();
+                    auto desc = ::usdGenImaging::BuildGraphDescFromHydra(*_pruned, captured.description);
+                    captured.desc = std::make_shared<const Desc>(std::move(desc));
+                    packet.inputs.push_back(std::move(captured));
+                    continue; // never adopt nested roots under a groom
+                }
+                auto children = input->GetChildPrimPaths(path);
+                stack.insert(stack.end(), children.begin(), children.end());
+            }
         }
     } catch (...) {
-        // A failed candidate cannot retain its reservation.
-        {
-            std::lock_guard<std::mutex> lock(self->_stateMutex);
-            auto found = self->_pendingAdoptions.find(groomRoot);
-            if (found != self->_pendingAdoptions.end() && found->second == ticket)
-                self->_pendingAdoptions.erase(found);
-        }
-        if (groom && groom->republishToken >= 0 && groom->session)
-            groom->session->UnregisterRepublishCallback(groom->republishToken);
-        if (groom && groom->session)
-            _ReleaseSessionAttachment(groom->key, groom->session);
+        packet.failed = true;
+        packet.inputs.clear();
+        state->Post([state, packet=std::move(packet)] { state->Apply(packet); });
         throw;
     }
-
-    bool install = false;
-    {
-        std::lock_guard<std::mutex> lock(self->_stateMutex);
-        auto found = self->_pendingAdoptions.find(groomRoot);
-        if (found != self->_pendingAdoptions.end() && found->second == ticket) {
-            self->_pendingAdoptions.erase(found);
-            install = std::none_of(self->_grooms.begin(), self->_grooms.end(),
-                [&groomRoot](std::shared_ptr<_Groom> const& other) {
-                    return other && other->groomRoot == groomRoot;
-                });
-            if (install) self->_grooms.push_back(groom);
+    state->Post([state, packet=std::move(packet)] {
+        try { state->Apply(packet); }
+        catch (...) {
+            // Required ownership/hold updates are not transactionally
+            // recoverable after an allocation/framework failure yet.
+            // Never disguise partial mutation as a completed ingress.
+            std::terminate();
         }
-    }
-    if (!install) {
-        if (groom->republishToken >= 0 && groom->session)
-            groom->session->UnregisterRepublishCallback(groom->republishToken);
-        if (groom->session)
-            _ReleaseSessionAttachment(groom->key, groom->session);
-    }
+    });
 }
-// child under the groom root (fixture: /groomA/descA). Resolved eagerly
-// when the child is already present and re-resolved on later arrivals, so
-// both notice orderings converge. Falls back to the groom root itself.
-// Returns true when the resolved description changed (caller marks the
-// session descriptor-dirty so an already-compiled session re-stages).
-bool
-UsdGenGroomSceneIndex::_ResolveDescriptionLocked(
-    _Groom &groom, HdSceneIndexBaseRefPtr const &input) const
-{
-    if (!input) return false;
-    SdfPathVector children = input->GetChildPrimPaths(groom.groomRoot);
-    for (SdfPath const &c : children) {
-        HdSceneIndexPrim prim = input->GetPrim(c);
-        TfToken const t = prim.primType.IsEmpty() ? _UsdTypeName(prim)
-                                                  : prim.primType;
-        if (t == TfToken("UsdGenDescription")) {
-            if (groom.description == c) return false;  // already resolved
-            groom.description = c;
-            return true;
-        }
-    }
-    return false;
+void UsdGenGroomSceneIndex::_PrimsAdded(HdSceneIndexBase const&, Added const& entries) {
+    _Ingress packet; packet.added = entries; _CaptureAndSubmit(std::move(packet));
+}
+void UsdGenGroomSceneIndex::_PrimsRemoved(HdSceneIndexBase const&, Removed const& entries) {
+    _Ingress packet; packet.removed = entries; _CaptureAndSubmit(std::move(packet));
+}
+void UsdGenGroomSceneIndex::_PrimsDirtied(HdSceneIndexBase const&, Dirtied const& entries) {
+    _Ingress packet; packet.dirtied = entries; _CaptureAndSubmit(std::move(packet));
+}
+void UsdGenGroomSceneIndex::_PrimsRenamed(HdSceneIndexBase const& sender,
+    HdSceneIndexObserver::RenamedPrimEntries const& entries) {
+    _Ingress packet;
+    HdSceneIndexObserver::ConvertPrimsRenamedToRemovedAndAdded(sender, entries,
+        &packet.removed, &packet.added);
+    _CaptureAndSubmit(std::move(packet));
 }
 
-void
-UsdGenGroomSceneIndex::_AdoptPending() const
-{
-    std::vector<HdSceneIndexObserver::AddedPrimEntry> added;
-    std::vector<SdfPath> removed;
-    {
-        auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-        std::lock_guard<std::mutex> lock(self->_stateMutex);
-        added.swap(self->_pendingAdd);
-        removed.swap(self->_pendingRemove);
+HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
+    auto snapshot = _state->SnapshotValue();
+    auto input = _GetInputSceneIndex();
+    auto authored = input ? input->GetPrim(path) : HdSceneIndexPrim();
+    // Authored namespace collisions win, including authored tile paths.
+    if (authored.dataSource || !authored.primType.IsEmpty()) {
+        if (authored.primType.IsEmpty() && IsGroom(TypeName(authored)))
+            authored.primType = TypeName(authored);
+        return authored;
     }
-    HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
-    bool structural = false;
-    for (auto const &e : added) {
-        TfToken t = e.primType;
-        if (t.IsEmpty() && input) t = _UsdTypeName(input->GetPrim(e.primPath));
-        if (t == TfToken("UsdGenGroom")) {
-            _AdoptGroom(e.primPath);
-            structural = true;
-        } else if (t == TfToken("UsdGenDescription")) {
-            // A description arriving after its groom: upgrade that groom's
-            // resolved description (ordering-proof both ways).
-            auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-            std::lock_guard<std::mutex> lock(self->_stateMutex);
-            for (auto &g : self->_grooms) {
-                if (g && g->groomRoot == e.primPath.GetParentPath()) {
-                    // (Review 1) live description change re-stages: an
-                    // already-compiled session keeps its old desc unless
-                    // marked descriptor-dirty here.
-                    if (self->_ResolveDescriptionLocked(*g, input) &&
-                        g->session) {
-                        g->session->MarkNeedsDesc();
-                    }
-                }
-            }
-            structural = true;
-        }
+    for (auto const& g : snapshot->members) {
+        if (path == g.root) return {TfToken("UsdGenGroom"), {}};
+        if (path == RenderPath(g.description)) return {TfToken("scope"), HdRetainedContainerDataSource::New()};
+        auto tile = g.tiles->find(path);
+        if (tile != g.tiles->end()) return {TfToken("basisCurves"), tile->second};
     }
-    for (SdfPath const &p : removed) _ForgetGroomsUnder(p);
-    if (structural) {
-        // New topology arrived after attach: re-pull the desc next commit.
-        std::lock_guard<std::mutex> lock(
-            const_cast<UsdGenGroomSceneIndex *>(this)->_stateMutex);
-        for (auto &g : const_cast<UsdGenGroomSceneIndex *>(this)->_grooms) {
-            if (g && g->session) g->session->MarkNeedsDesc();
-        }
-    }
+    return {};
 }
-void
-UsdGenGroomSceneIndex::_ForgetGroomsUnder(SdfPath const &path) const
-{
-    auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    std::vector<std::shared_ptr<_Groom>> retired;
-    {
-        std::lock_guard<std::mutex> lock(self->_stateMutex);
-        for (auto it = self->_pendingAdoptions.begin();
-             it != self->_pendingAdoptions.end();) {
-            if (it->first == path || it->first.HasPrefix(path))
-                it = self->_pendingAdoptions.erase(it);
-            else ++it;
-        }
-        auto keep = self->_grooms.begin();
-        for (auto it = self->_grooms.begin(); it != self->_grooms.end(); ++it) {
-            if (*it && ((*it)->groomRoot == path || (*it)->groomRoot.HasPrefix(path)))
-                retired.push_back(std::move(*it));
-            else *keep++ = std::move(*it);
-        }
-        self->_grooms.erase(keep, self->_grooms.end());
-    }
-    // No session/callback operation is nested below _stateMutex. Strong
-    // retired refs keep callback payloads safe until unregister completes.
-    for (auto &g : retired) {
-        if (!g) continue;
-        if (g->republishToken >= 0 && g->session) {
-            g->session->UnregisterRepublishCallback(g->republishToken);
-            g->republishToken = -1;
-        }
-        if (g->session) {
-            _ReleaseSessionAttachment(g->key, g->session);
-            g->session = ::usdGenImaging::UsdGenSessionHandle();
-        }
-    }
-}
-
-bool
-UsdGenGroomSceneIndex::_IsOwned(SdfPath const &path) const
-{
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    for (auto const &g : _grooms) {
-        if (!g || !g->session) continue;
-        SdfPath const render = g->description.AppendChild(
-            usdGenImaging::UsdGenRenderNamespaceToken());
-        if (path == render || path.HasPrefix(render)) return true;
-    }
-    return false;
-}
-
-bool
-UsdGenGroomSceneIndex::_OwnsDescription(SdfPath const &maybeDescPath) const
-{
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    for (auto const &g : _grooms) {
-        if (g && g->description == maybeDescPath) return true;
-    }
-    return false;
-}
-
-HdSceneIndexPrim
-UsdGenGroomSceneIndex::GetPrim(SdfPath const &primPath) const
-{
-    // I7/S17: snapshot loads only — never commits, never cooks, never
-    // locks the engine.
-    const_cast<UsdGenGroomSceneIndex *>(this)->_PopulateFromInput();
-    {
-        // Snapshot-and-release: atomic_load the per-groom published map;
-        // all reads below run lock-free against the snapshot.
-        std::vector<_Groom::PublishedSnapshot> snaps;
-        {
-            std::lock_guard<std::mutex> lock(_stateMutex);
-            snaps.reserve(_grooms.size());
-            for (auto const &g : _grooms) {
-                if (g) snaps.push_back(std::atomic_load(&g->published));
-            }
-        }
-        for (auto const &snap : snaps) {
-            if (!snap) continue;
-            auto it = snap->find(primPath);
-            if (it != snap->end() && it->second) {
-                return HdSceneIndexPrim{TfToken("basisCurves"), it->second};
-            }
-        }
-    }
-    HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
-    HdSceneIndexPrim out = input ? input->GetPrim(primPath) : HdSceneIndexPrim();
-    // Adopted groom roots: the terminal index serves primType == "" (our
-    // adapters return the empty subprim type, 06 §2.1). SI-6 pins the
-    // UsdGenGroom type on the root; the USD type name rides in
-    // __usdPrimInfo/typeName (observed), so report it. Pass-through
-    // otherwise — never invent types for non-groom prims.
-    if (!out.primType.IsEmpty()) return out;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &g : _grooms) {
-            if (g && g->groomRoot == primPath) {
-                out.primType = TfToken("UsdGenGroom");
-                return out;
-            }
-        }
-    }
-    return out;
-}
-
-SdfPathVector
-UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const &path) const
-{
-    const_cast<UsdGenGroomSceneIndex *>(this)->_PopulateFromInput();
-    HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
-    SdfPathVector result =
-        input ? input->GetChildPrimPaths(path) : SdfPathVector();
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &g : _grooms) {
-            if (!g) continue;
-            if (path == g->description) {
-                // Authored prims win: serve __usdGenRender only where the
-                // input has no prim at that path (06 §3.4).
-                SdfPath const render = g->description.AppendChild(
-                    usdGenImaging::UsdGenRenderNamespaceToken());
-                if (std::find(result.begin(), result.end(), render) ==
-                    result.end()) {
-                    result.push_back(render);
-                }
-            } else if (path == g->description.AppendChild(
-                           usdGenImaging::UsdGenRenderNamespaceToken())) {
-                _Groom::PublishedSnapshot snap =
-                    std::atomic_load(&g->published);
-                if (!snap) continue;
-                for (auto const &kv : *snap) {
-                    if (std::find(result.begin(), result.end(), kv.first) ==
-                        result.end()) {
-                        result.push_back(kv.first);
-                    }
-                }
-            }
-        }
+SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) const {
+    auto snapshot = _state->SnapshotValue();
+    auto input = _GetInputSceneIndex();
+    auto result = input ? input->GetChildPrimPaths(path) : SdfPathVector();
+    auto append = [&](SdfPath const& child) {
+        if (std::find(result.begin(), result.end(), child) == result.end()) result.push_back(child);
+    };
+    for (auto const& g : snapshot->members) {
+        if (path == g.description) append(RenderPath(g.description));
+        if (path == RenderPath(g.description))
+            for (auto const& tile : *g.tiles) append(tile.first);
     }
     return result;
 }
+int64_t UsdGenGroomSceneIndex::_TestPublishedGeneration(SdfPath const& root) const {
+    auto snapshot = _state->SnapshotValue();
+    for (auto const& g : snapshot->members) if (g.root == root) return g.generation;
+    return -1;
+}
+size_t UsdGenGroomSceneIndex::_TestPublishedTileCount(SdfPath const& root) const {
+    auto snapshot = _state->SnapshotValue();
+    for (auto const& g : snapshot->members) if (g.root == root) return g.tiles->size();
+    return 0;
+}
 
-// ---------------------------------------------------------------------------
-// Chunk B: notice routing + commit triggers (06 §3.2, §3.3, §3.9).
-// Shape per handler: route into UsdGenPendingDirty (table lookups, never a
-// cook) -> forward input entries downstream UNCHANGED, immediately -> commit
-// on trigger (b)/(c) and emit our own notices after the forward.
-// ---------------------------------------------------------------------------
-namespace {
-bool
-_IsFrameDirtyEntry(HdSceneIndexObserver::DirtiedPrimEntry const &e)
-{
-    if (e.primPath != SdfPath::AbsoluteRootPath()) return false;
-    return e.dirtyLocators.Intersects(
-        HdSceneGlobalsSchema::GetCurrentFrameLocator());
-}
-}  // namespace
-void
-UsdGenGroomSceneIndex::_PrimsAdded(
-    HdSceneIndexBase const &,
-    HdSceneIndexObserver::AddedPrimEntries const &entries)
-{
-    _PopulateFromInput();
-    bool structural = false;
-    HdSceneIndexBaseRefPtr input = _GetInputSceneIndex();
-    for (auto const &e : entries) {
-        // A newly added operator (or a resynced grouping Scope) is not in
-        // the compiled router yet. Re-pull the owning hierarchy even when
-        // this is not a Groom/Description arrival.
-        {
-            std::lock_guard<std::mutex> lock(_stateMutex);
-            for (auto const &g : _grooms) {
-                if (g && g->session && e.primPath.HasPrefix(g->description)) {
-                    g->session->MarkNeedsDesc();
-                    structural = true;
-                }
-            }
-        }
-        TfToken t = e.primType;
-        if (t.IsEmpty() && input) t = _UsdTypeName(input->GetPrim(e.primPath));
-        if (t == TfToken("UsdGenGroom")) {
-            _AdoptGroom(e.primPath);
-            structural = true;
-        } else if (t == TfToken("UsdGenDescription") ||
-                   _OwnsDescription(e.primPath)) {
-            // Description arrival: resolve/upgrade the parent groom's
-            // description; structural — the render-ns split appears.
-            auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-            std::lock_guard<std::mutex> lock(self->_stateMutex);
-            for (auto &g : self->_grooms) {
-                if (g && g->groomRoot == e.primPath.GetParentPath()) {
-                    if (self->_ResolveDescriptionLocked(*g, input) &&
-                        g->session) {
-                        g->session->MarkNeedsDesc();
-                    }
-                }
-            }
-            structural = true;
-        }
-    }
-    _SendPrimsAdded(entries);
-    if (structural) {
-        _CommitNow(usdGen::UsdGenCommitReason::NoticeBatchEnd,
-                   /*republishNeeded=*/true);
-    }
-}
-void
-UsdGenGroomSceneIndex::_PrimsRemoved(
-    HdSceneIndexBase const &,
-    HdSceneIndexObserver::RemovedPrimEntries const &entries)
-{
-    _PopulateFromInput();
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &e : entries) {
-            for (auto const &g : _grooms) {
-                if (g && g->session && e.primPath.HasPrefix(g->description))
-                    g->session->MarkNeedsDesc();
-            }
-        }
-    }
-    for (auto const &e : entries) _ForgetGroomsUnder(e.primPath);
-    _SendPrimsRemoved(entries);
-    if (!entries.empty()) {
-        _CommitNow(usdGen::UsdGenCommitReason::NoticeBatchEnd,
-                   /*republishNeeded=*/true);
-    }
-}
-void
-UsdGenGroomSceneIndex::_PrimsDirtied(
-    HdSceneIndexBase const &,
-    HdSceneIndexObserver::DirtiedPrimEntries const &entries)
-{
-    _PopulateFromInput();
-    bool frameDirty = false;
-    bool routedDirty = false;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &e : entries) {
-            // NOTE: _stateMutex is already held here — do NOT call _IsOwned
-            // (it locks). Inline the render-namespace check instead.
-            bool owned = false;
-            for (auto const &g : _grooms) {
-                if (!g || !g->session) continue;
-                SdfPath const render = g->description.AppendChild(
-                    usdGenImaging::UsdGenRenderNamespaceToken());
-                if (e.primPath == render ||
-                    e.primPath.HasPrefix(render)) {
-                    owned = true;
-                    break;
-                }
-            }
-            if (owned) continue;
-            if (_IsFrameDirtyEntry(e)) {
-                frameDirty = true;
-                continue;
-            }
-            for (auto const &g : _grooms) {
-                if (!g || !g->session || !g->session->Engine()) continue;
-                // Composed child-order dirties may originate at an Ops
-                // Scope rather than at an operator. The aggregate is live;
-                // re-pulling it reconstructs hierarchy after such edits.
-                if (e.primPath.HasPrefix(g->description)) {
-                    g->session->MarkNeedsDesc();
-                    routedDirty = true;
-                }
-                usdGen::UsdGenPendingDirty pending;
-                HdSceneIndexObserver::DirtiedPrimEntries single;
-                single.push_back(e);
-                auto router = std::atomic_load(&g->router);
-                if (router) router->Route(single, &pending);
-                if (pending.Any()) {
-                    // The current engine stores value snapshots, so an
-                    // input dirty must refresh them before evaluation.
-                    // Incremental descriptor refresh remains separate work.
-                    g->session->MarkNeedsDesc();
-                    g->session->Engine()->PostDirty(std::move(pending));
-                    routedDirty = true;
-                }
-            }
-        }
-    }
-    _SendPrimsDirtied(entries);
-    if (!frameDirty && !routedDirty) return;
-    // Trigger (b) only when no app driver owns time on ANY live session;
-    bool anyAppDriver = false;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &g : _grooms) {
-            if (g && g->session && g->session->HasAppDriver()) {
-                anyAppDriver = true;
-                break;
-            }
-        }
-    }
-    _CommitNow(frameDirty && !anyAppDriver
-                   ? usdGen::UsdGenCommitReason::SceneFrameDirty
-                   : usdGen::UsdGenCommitReason::NoticeBatchEnd,
-               /*republishNeeded=*/true);
-}
-void
-UsdGenGroomSceneIndex::_PrimsRenamed(
-    HdSceneIndexBase const &sender,
-    HdSceneIndexObserver::RenamedPrimEntries const &entries)
-{
-    HdSceneIndexObserver::RemovedPrimEntries removed;
-    HdSceneIndexObserver::AddedPrimEntries added;
-    HdSceneIndexObserver::ConvertPrimsRenamedToRemovedAndAdded(
-        sender, entries, &removed, &added);
-    if (!removed.empty()) _PrimsRemoved(sender, removed);
-    if (!added.empty()) _PrimsAdded(sender, added);
-}
-void
-UsdGenGroomSceneIndex::_Forward(
-    std::vector<HdSceneIndexObserver::AddedPrimEntry> const &added,
-    std::vector<HdSceneIndexObserver::RemovedPrimEntry> const &removed,
-    std::vector<HdSceneIndexObserver::DirtiedPrimEntry> const &dirtied) const
-{
-    auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    if (!added.empty()) {
-        HdSceneIndexObserver::AddedPrimEntries e;
-        for (auto const &a : added) e.push_back(a);
-        self->_SendPrimsAdded(e);
-    }
-    if (!removed.empty()) {
-        HdSceneIndexObserver::RemovedPrimEntries e;
-        for (auto const &r : removed) e.push_back(r);
-        self->_SendPrimsRemoved(e);
-    }
-    if (!dirtied.empty()) {
-        HdSceneIndexObserver::DirtiedPrimEntries e;
-        for (auto const &d : dirtied) e.push_back(d);
-        self->_SendPrimsDirtied(e);
-    }
-}
-void
-UsdGenGroomSceneIndex::_RouteFrameDirties(
-    std::vector<HdSceneIndexObserver::DirtiedPrimEntry> const &entries) const
-{
-    auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    HdSceneIndexObserver::DirtiedPrimEntries e;
-    for (auto const &d : entries) e.push_back(d);
-    self->_PrimsDirtied(*_GetInputSceneIndex(), e);
-}
-void
-UsdGenGroomSceneIndex::_ReplaySurfaceDirty() const
-{
-    std::lock_guard<std::mutex> lock(_stateMutex);
-    for (auto const &g : _grooms) {
-        if (!g || !g->session || !g->session->Engine()) continue;
-        usdGen::UsdGenPendingDirty pending;
-        pending.surfaceTopology = true;
-        g->session->Engine()->PostDirty(std::move(pending));
-    }
-}
-void
-UsdGenGroomSceneIndex::_CommitNow(
-    usdGen::UsdGenCommitReason reason, bool republishNeeded) const
-{
-    // Self-deadlock guard: UsdGenImagingSession::Commit fires republish
-    // callbacks synchronously, and our callback (_Republish) locks
-    // _stateMutex. _stateMutex is non-recursive, so Commit must NEVER run
-    // under it. Snapshot (groom*, session, desc) under the lock,
-    // then stage + Commit + router rebuild + _Republish unlocked.
-    struct Work {
-        // STRONG groom ref: lifetime by refcount — a _ForgetGroomsUnder
-        // erase between snapshot and use cannot free this storage.
-        std::shared_ptr<_Groom> groom;
-        ::usdGenImaging::UsdGenSessionHandle session;
-        SdfPath description;
-        bool needsDesc = false;
-    };
-    auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    std::vector<Work> work;
-    {
-        std::lock_guard<std::mutex> lock(self->_stateMutex);
-        work.reserve(self->_grooms.size());
-        for (auto &g : self->_grooms) {
-            if (!g || !g->session) continue;
-            Work w;
-            w.groom = g;
-            w.session = g->session;
-            w.description = g->description;
-            // Chunk-C staging decision (06 §3.7/S14): session-owned
-            // ATOMIC consume (Review 2). Marks arriving after consumption
-            // stay set for the next commit — no lost ReloadMaps/structural
-            // marks. First-commit (no generation yet) always stages.
-            w.needsDesc =
-                w.session->ConsumeNeedsDesc() ||
-                !w.session->Engine() ||
-                w.session->Engine()->Generation() == nullptr;
-            if (char const *dbg = std::getenv("USDGEN_DEBUG_STAGING")) {
-                (void)dbg;
-                std::printf("[staging] groom=%s needsDesc=%d hydraInput=%d\n",
-                            g->groomRoot.GetText(), int(w.needsDesc),
-                            int(bool(self->_pruned)));
-            }
-            work.push_back(std::move(w));
-        }
-    }
-    for (Work &w : work) {
-        if (!w.groom) continue;
-        if (!w.session) continue;
-        w.groom->bridge.GateCommit(w.description, "_CommitNow");
-        bool committed = false;
-        if (w.needsDesc && self->_pruned) {
-            // Pull the post-deformation Hydra input, never the authored
-            // stage. Hydra sample times are shutter offsets: zero samples
-            // the current frame supplied by the upstream scene index.
-            ::usdGenImaging::UsdGenGraphDescBuildOptions opts;
-            usdGen::UsdGenGraphDesc desc =
-                ::usdGenImaging::BuildGraphDescFromHydra(
-                    *self->_pruned, w.description, opts);
-            w.session->StageAndCommit(desc, reason);
-            committed = true;
-            if (std::getenv("USDGEN_DEBUG_STAGING")) {
-                std::printf("[staging] staged nodes=%zu terminal=%s\n",
-                            desc.nodes.size(), desc.terminal.GetText());
-            }
-        } else if (w.needsDesc) {
-            w.session->MarkNeedsDesc(); // no input: do not lose the request
-        }
-        // Unlocked: session Commit fires the payload _Republish
-        // callback synchronously per attached index; EACH recipient
-        // rebuilds its own router from the payload BEFORE its map swap
-        // (Review 4 — no initiating-index-only rebuild here, which would
-        // leave store-level commits' indices stale and race synchronous
-        // observers against old tables).
-        if (!committed) w.session->Commit(reason);
-        if (std::getenv("USDGEN_DEBUG_STAGING")) {
-            usdGen::UsdGenGenerationConstPtr gg =
-                w.session->Engine() ? w.session->Engine()->Generation()
-                                    : usdGen::UsdGenGenerationConstPtr();
-            std::printf("[staging] post-commit gen=%lld tiles=%zu nodes=%d\n",
-                        (long long)(gg ? gg->id : -1),
-                        gg ? gg->tiles.size() : 0u,
-                        w.session->Engine()
-                            ? w.session->Engine()->Graph().NodeCount()
-                            : -1);
-        }
-    }
-    // Single publication path: session->Commit fires the registered
-    // _Republish callback synchronously on publish. The manual call below
-    // is DELETED (double-publish: duplicate notices + double hook stamps
-    // break the monotone-generation check). republishNeeded is honored by
-    // the callback registration itself (adopt always registers).
-    (void)republishNeeded;
-}
-// State-update helper (Review 5): caller must NOT hold _stateMutex.
-// Applies the payload report + generation to the groom's published map and
-// rebuilds the groom's router from the payload generation's graph BEFORE
-// the map swap, so synchronous observers never dirty against stale tables.
-// Internal locking: map swap under _stateMutex, notice forward after it
-// releases. ByRoot validates membership first (own scope), then calls here
-// unlocked — never nested.
-void
-UsdGenGroomSceneIndex::_RepublishLocked(
-    _Groom &groom,
-    ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const
-{
-    // Consume the paired payload, not the live session attachment, which can
-    // be cleared during detach. Membership is checked again at the map swap.
-    if (!payload.published || !payload.generation) return;
-    usdGen::UsdGenGenerationConstPtr const &gen = payload.generation;
-    if (gen->device) {
-        TF_WARN("usdGen: stock Hydra publication cannot consume CUDA device generations; retaining displayed geometry");
-        return;
-    }
-    usdGen::UsdGenDirtyReport const &report = payload.report;
-    auto *self = const_cast<UsdGenGroomSceneIndex *>(this);
-    std::vector<HdSceneIndexObserver::RemovedPrimEntry> removed;
-    std::vector<HdSceneIndexObserver::AddedPrimEntry> added;
-    std::vector<HdSceneIndexObserver::DirtiedPrimEntry> dirtied;
-    // Copy-on-write under _stateMutex: clone the current snapshot, apply
-    // the report diff, build new tile sources, then atomic_store the fresh
-    // map. Readers holding older snapshots keep reading them lock-free.
-    // Rebuild THIS recipient's router from the paired routing snapshot before
-    // the map swap + notice forwarding. Do not consult the live engine: a
-    // concurrent commit may already have replaced its graph/report.
-    auto router = std::make_shared<usdGenImaging::UsdGenDirtyRouter>();
-    if (payload.routing) router->Rebuild(*payload.routing);
-    _Groom::PublishedSnapshot next;
-    {
-        std::lock_guard<std::mutex> lock(self->_stateMutex);
-        if (std::none_of(self->_grooms.begin(), self->_grooms.end(),
-                [&](auto const& member) { return member.get() == &groom; })) return;
-        std::atomic_store(&groom.router,
-            std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter>(std::move(router)));
-        _Groom::PublishedMap fresh;
-        if (_Groom::PublishedSnapshot cur =
-                std::atomic_load(&groom.published)) {
-            fresh = *cur;
-        }
-        for (usdGen::UsdGenTileDirty const &td : report.tiles) {
-            if (td.removed) {
-                removed.emplace_back(td.primPath);
-                fresh.erase(td.primPath);
-            } else if (td.added) {
-                added.emplace_back(td.primPath, TfToken("basisCurves"));
-            }
-        }
-        if (gen) {
-            int64_t const snapId = gen->id;
-            for (usdGen::UsdGenTilePublication const &tile : gen->tiles) {
-                // Every tile in the snapshot is (re)built stamped with the
-                // snapshot id — including carried-over payloads, whose data
-                // IS this snapshot's data. Readers comparing stamps across
-                // tiles therefore always agree within one swap.
-                fresh[tile.primPath] =
-                    ::usdGenImaging::UsdGenTilePublisher::BuildTileDataSource(
-                        tile, snapId);
-                bool announced = false;
-                for (auto const &a : added) {
-                    if (a.primPath == tile.primPath) {
-                        announced = true;
-                        break;
-                    }
-                }
-                bool member = false;
-                if (_Groom::PublishedSnapshot cur =
-                        std::atomic_load(&groom.published)) {
-                    member = cur->find(tile.primPath) != cur->end();
-                }
-                if (!announced && !member) {
-                    added.emplace_back(tile.primPath, TfToken("basisCurves"));
-                }
-            }
-        }
-        next = std::make_shared<_Groom::PublishedMap const>(std::move(fresh));
-        std::atomic_store(&groom.published, next);
-    }
-    usdGen::UsdGenGeneration emptyGen;
-    usdGen::UsdGenGeneration const &genRef = gen ? *gen : emptyGen;
-    for (usdGen::UsdGenTileDirty const &td : report.tiles) {
-        if (td.removed || td.added) continue;
-        if (td.pointsDirty || td.widthsDirty || td.xformDirty ||
-            !td.newPrimvars.empty() || !td.dirtyPrimvars.empty()) {
-            dirtied.emplace_back(
-                td.primPath, _DirtiedLocatorsFor(td, genRef, 0, false, false));
-        }
-    }
-    self->_Forward(added, removed, dirtied);
-}
-// Root-keyed entry for the republish callback (Review 5): validates the
-// EXACT shared_ptr identity under the lock (a copied old callback for a
-// removed groom never routes into a newly adopted groom at the same path),
-// then runs the locked state update + unlocked forward. Never nests
-// _stateMutex (non-recursive).
-void
-UsdGenGroomSceneIndex::_RepublishByRoot(
-    SdfPath const &groomRoot,
-    std::shared_ptr<_Groom> const &expectedGroom,
-    ::usdGenImaging::UsdGenImagingSession::CommitPayload const &payload) const
-{
-    std::shared_ptr<_Groom> slot;
-    {
-        std::lock_guard<std::mutex> lock(_stateMutex);
-        for (auto const &g : _grooms) {
-            // Exact identity: same shared_ptr instance still a member.
-            // A stale weak ref that expired is already filtered by the
-            // callback's lock(); this covers re-adoption at the same path.
-            if (g && g == expectedGroom && g->groomRoot == groomRoot) {
-                slot = g;
-                break;
-            }
-        }
-    }
-    if (!slot) return;  // removed after callback copy ⇒ no-op
-    _RepublishLocked(*slot, payload);
-    // Unlocked forward is inside _RepublishLocked's tail (computed notices
-    // forwarded after the lock releases — see helper).
-}
-HdDataSourceLocatorSet
-UsdGenGroomSceneIndex::_DirtiedLocatorsFor(
-    usdGen::UsdGenTileDirty const &reportTile,
-    usdGen::UsdGenGeneration const &, size_t,
-    bool, bool)
-{
-    ::usdGenImaging::UsdGenTilePublisher::TileNotices n =
-        ::usdGenImaging::UsdGenTilePublisher::NoticesFor(reportTile);
-    HdDataSourceLocatorSet out;
-    for (HdDataSourceLocator const &l : n.all()) out.insert(l);
-    return out;
-}
 PXR_NAMESPACE_CLOSE_SCOPE

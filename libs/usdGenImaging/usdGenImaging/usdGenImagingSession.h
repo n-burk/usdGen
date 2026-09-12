@@ -165,6 +165,12 @@ public:
     /// block on GetPrim and must not reread live engine state.
     int RegisterRepublishCallback(
         std::function<void(CommitPayload const &)> cb);
+    /// Enqueues callback removal and acknowledges after the owner has erased
+    /// it. If the accepted command is cancelled during shutdown, completion
+    /// is still invoked; false means it was never accepted and completion is
+    /// not invoked. Completion must not synchronously wait on an owner.
+    bool UnregisterRepublishCallbackAsync(
+        int token, std::function<void()> completion = {});
     void UnregisterRepublishCallback(int token);
     // Registration/removal enqueue nonblocking owner commands. A currently
     // executing callback may finish; later publications observe the removal.
@@ -236,6 +242,9 @@ public:
     /// Immutable membership snapshot (strong refs). These reads never enter
     /// or await the command owner; returned handles survive later detachment.
     std::vector<UsdGenImagingSessionRefPtr> LiveSessions() const;
+    /// Single external shutdown/test boundary after admission has quiesced.
+    /// Drains store command frames, not independent session cook work.
+    void Drain();
 
 private:
     UsdGenSessionStore();

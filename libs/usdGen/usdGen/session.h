@@ -129,6 +129,9 @@ public:
     /// commands, but must not make synchronous Session calls.
     bool CommitAsync(CommitRequest, Completion = {});
     bool CommitAsync(double, UsdGenCommitReason, Completion = {});
+    /// Single external quiescent shutdown/test boundary; never called by
+    /// render reads or other command owners.
+    void Drain();
     /// Compatibility boundary that cooperatively waits for one CommitAsync.
     SnapshotPtr CommitSnapshot(CommitRequest);
     SnapshotPtr CommitSnapshot(double, UsdGenCommitReason);

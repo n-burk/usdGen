@@ -431,6 +431,15 @@ add_executable(testUsdGenRegistryOwners tests/testUsdGenRegistryOwners.cpp)
 target_link_libraries(testUsdGenRegistryOwners PRIVATE usdGenImaging usdGen)
 add_test(NAME testUsdGenRegistryOwners COMMAND testUsdGenRegistryOwners)
 set_tests_properties(testUsdGenRegistryOwners PROPERTIES LABELS "T1;scheduling;imaging" TIMEOUT 60)
+add_executable(testUsdGenSceneOwner tests/testUsdGenSceneOwner.cpp)
+add_executable(testUsdGenSceneExit tests/testUsdGenSceneExit.cpp)
+target_link_libraries(testUsdGenSceneExit PRIVATE usdGenImaging usdGen)
+add_test(NAME testUsdGenSceneExit COMMAND testUsdGenSceneExit)
+set_tests_properties(testUsdGenSceneExit PROPERTIES LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
+target_link_libraries(testUsdGenSceneOwner PRIVATE usdGenImaging usdGen)
+add_test(NAME testUsdGenSceneOwner COMMAND testUsdGenSceneOwner)
+set_tests_properties(testUsdGenSceneOwner PROPERTIES
+    LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 add_executable(testUsdGenDeviceGeneration tests/testUsdGenDeviceGeneration.cpp)
 target_link_libraries(testUsdGenDeviceGeneration PRIVATE usdGen)
 add_test(NAME testUsdGenDeviceGeneration COMMAND testUsdGenDeviceGeneration)
@@ -736,7 +745,7 @@ set_tests_properties(benchUsdGenSparse PROPERTIES LABELS "T0;perf;gate:E-2")
 
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
-           testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter
+           testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenAutoApply testUsdGenContracts)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
@@ -745,6 +754,8 @@ foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
         ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endforeach()
 set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
+set_tests_properties(testUsdGenScenePublication PROPERTIES
+    LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
 
 # ---- P4 / SI-10: testUsdGenSessions registration ----
