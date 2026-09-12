@@ -186,6 +186,10 @@ void UsdGenSession::AccumulateDirty(UsdGenPendingDirty &&pending)
 
 bool UsdGenSession::NeedsCommit() const noexcept { return _dirty.load(); }
 
+std::vector<UsdGenCudaBindingStats> UsdGenSession::CudaBindingStats() const {
+    return *std::atomic_load(&_cudaBindingStats);
+}
+
 UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason reason)
 {
     std::lock_guard<std::mutex> lock(_commitMutex);
@@ -272,11 +276,23 @@ UsdGenGenerationConstPtr UsdGenSession::Commit(double frame, UsdGenCommitReason 
             _lastDiagnostics.Error("CUDA graph has no compiled execution plan");
             return reject();
         }
+        const bool newWorkspace = !_cudaWorkspace || _cudaWorkspaceDescription != _desc.description;
+        if (newWorkspace) {
+            auto replacement = CreateCudaExecutionWorkspace(
+                _cudaWorkspace ? _cudaWorkspace->DeviceIndex() : -1, &_lastDiagnostics);
+            if (!replacement) return reject();
+            _cudaWorkspace = std::move(replacement);
+            _cudaWorkspaceDescription = _desc.description;
+        }
+        if (!_cudaWorkspace) return reject();
         auto previous = _store.Get();
-        auto device = ExecuteCudaGraph(*_graph.CudaPlan(), _desc, frame,
+        auto device = ExecuteCudaGraph(*_graph.CudaPlan(), *_cudaWorkspace, frame,
             static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics,
-            previous ? previous->device : nullptr);
+            previous && !newWorkspace ? previous->device : nullptr);
         if (!device || _lastDiagnostics.HasErrors()) return reject();
+        std::atomic_store(&_cudaBindingStats,
+            std::make_shared<const std::vector<UsdGenCudaBindingStats>>(
+                GetCudaBindingStats(*_cudaWorkspace)));
         UsdGenGeneration gen;
         gen.frame = frame;
         gen.device = std::move(device);

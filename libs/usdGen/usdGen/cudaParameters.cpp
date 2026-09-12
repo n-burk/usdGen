@@ -113,16 +113,17 @@ size_t DomainIndex(Domain domain) {
 }
 } // namespace
 
-CudaParameterField const* CudaParameterPlan::Find(TfToken const& destination) const {
+CudaParameterField const* CudaParameterEvaluator::Find(TfToken const& destination) const {
     auto canonical = CanonicalName(destination);
     for (auto const& field : fields_)
         if (CanonicalName(field.destination) == canonical) return &field;
     return nullptr;
 }
 
-CudaParameterStatus CudaParameterPlan::Compile(
+CudaParameterStatus CudaParameterProgram::Compile(
     UsdGenGraphDesc const& graph, UsdGenNodeDesc const& node,
-    CudaParameterPlan* output, std::vector<std::string>* diagnostics) {
+    std::shared_ptr<const CudaParameterProgram>* output,
+    std::vector<std::string>* diagnostics) {
     if (!output) {
         Error(diagnostics, "null parameter plan");
         return CudaParameterStatus::InvalidArgument;
@@ -173,13 +174,20 @@ CudaParameterStatus CudaParameterPlan::Compile(
     }
     // Only immutable CPU data changes here. An unsuccessful compile leaves
     // both the old program and its published fields usable.
-    output->bindings_ = std::move(bindings);
-    output->items_ = std::move(items);
-    output->fields_.clear();
+    try {
+        auto program = std::make_shared<CudaParameterProgram>();
+        program->bindings_ = std::move(bindings);
+        program->items_ = std::move(items);
+        *output = std::move(program);
+    } catch (...) {
+        Error(diagnostics, "failed to allocate immutable CUDA parameter program");
+        return CudaParameterStatus::CudaError;
+    }
     return CudaParameterStatus::Ok;
 }
 
-CudaParameterStatus CudaParameterPlan::Evaluate(
+CudaParameterStatus CudaParameterEvaluator::Evaluate(
+    CudaParameterProgram const& program,
     gpu::DeviceCurveGeometryView geometry, gpu::ExpressionGeometryChannels channels,
     expr::Context controls, cudaStream_t stream, std::vector<std::string>* diagnostics) {
     fields_.clear();
@@ -189,7 +197,7 @@ CudaParameterStatus CudaParameterPlan::Evaluate(
     outputs_.clear();
     literals_.clear();
     for (auto& context : contexts_) context.reset();
-    for (auto const& item : items_) {
+    for (auto const& item : program.items_) {
         auto index = DomainIndex(item.binding.domain);
         if (!contexts_[index]) contexts_[index] = std::make_unique<gpu::CudaExpressionContext>();
     }
@@ -202,13 +210,13 @@ CudaParameterStatus CudaParameterPlan::Evaluate(
             return CudaParameterStatus::CudaError;
         }
     }
-    literals_.resize(items_.size());
-    outputs_.resize(items_.size());
-    runtime_.reserve(items_.size());
+    literals_.resize(program.items_.size());
+    outputs_.resize(program.items_.size());
+    runtime_.reserve(program.items_.size());
     std::vector<CudaParameterField> candidate;
-    candidate.reserve(items_.size());
-    for (size_t i = 0; i < items_.size(); ++i) {
-        auto const& item = items_[i];
+    candidate.reserve(program.items_.size());
+    for (size_t i = 0; i < program.items_.size(); ++i) {
+        auto const& item = program.items_[i];
         auto const& binding = item.binding;
         auto inputs = contexts_[DomainIndex(binding.domain)]->Inputs();
         size_t const components = binding.destinationShape.components;
@@ -242,6 +250,48 @@ CudaParameterStatus CudaParameterPlan::Evaluate(
     }
     fields_ = std::move(candidate);
     return CudaParameterStatus::Ok;
+}
+
+CudaParameterStatus CudaParameterPlan::Compile(
+    UsdGenGraphDesc const& graph, UsdGenNodeDesc const& node,
+    CudaParameterPlan* output, std::vector<std::string>* diagnostics)
+{
+    if (!output) {
+        Error(diagnostics, "null parameter plan");
+        return CudaParameterStatus::InvalidArgument;
+    }
+    std::shared_ptr<const CudaParameterProgram> program;
+    CudaParameterStatus const status =
+        CudaParameterProgram::Compile(graph, node, &program, diagnostics);
+    if (status != CudaParameterStatus::Ok) return status;
+    try {
+        auto evaluator = std::make_unique<CudaParameterEvaluator>();
+        output->program_ = std::move(program);
+        output->evaluator_ = std::move(evaluator);
+    } catch (...) {
+        Error(diagnostics, "failed to allocate CUDA parameter evaluator");
+        return CudaParameterStatus::CudaError;
+    }
+    return CudaParameterStatus::Ok;
+}
+
+CudaParameterStatus CudaParameterPlan::Evaluate(
+    gpu::DeviceCurveGeometryView geometry, gpu::ExpressionGeometryChannels channels,
+    expr::Context controls, cudaStream_t stream,
+    std::vector<std::string>* diagnostics)
+{
+    if (!program_ || !evaluator_) {
+        Error(diagnostics, "parameter plan has no compiled program");
+        return CudaParameterStatus::InvalidArgument;
+    }
+    return evaluator_->Evaluate(*program_, geometry, channels, controls,
+                                stream, diagnostics);
+}
+
+CudaParameterField const* CudaParameterPlan::Find(
+    TfToken const& destination) const
+{
+    return evaluator_ ? evaluator_->Find(destination) : nullptr;
 }
 } // namespace usdGen
 #endif

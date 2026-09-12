@@ -64,7 +64,7 @@ int main() {
     CHECK(Read(lease, &points, &widths, &ids, stream));
     CHECK(ids == std::vector<uint64_t>({3,7}));
     for (float width : widths) CHECK(std::fabs(width - .5f) < 1e-5f);
-    auto stats1 = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto stats1 = session.CudaBindingStats();
     CHECK(stats1.size() == 1 && stats1[0].bindCount == 1 && stats1[0].solveCount == 1 && stats1[0].sampleCount == 5);
     uint64_t identity = stats1[0].identity;
     CHECK(std::fabs(points[0].x - .8f) < 2e-3f && std::fabs(points[0].y - .4f) < 2e-3f &&
@@ -73,7 +73,7 @@ int main() {
     auto animated = desc; for (auto& p : animated.surfaces[0].points) p[0] += 1.f;
     session.SetGraphDesc(animated); auto second = session.Commit(2, UsdGenCommitReason::SetTime);
     CHECK(second && second->device && second != first && !session.LastDiagnostics().HasErrors());
-    auto stats2 = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto stats2 = session.CudaBindingStats();
     CHECK(stats2.size() == 1 && stats2[0].identity == identity && stats2[0].bindCount == 1 && stats2[0].solveCount == 2);
     auto lease2 = gpu::AcquireGeometry(second->device, stream); CHECK(lease2);
     CHECK(Read(lease2, &points, &widths, &ids, stream));
@@ -83,7 +83,7 @@ int main() {
     // Scrubbing back changes the solve inputs but reuses the same rest bind.
     session.SetGraphDesc(desc); auto scrubbed = session.Commit(1, UsdGenCommitReason::SetTime);
     CHECK(scrubbed && scrubbed != second && !session.LastDiagnostics().HasErrors());
-    auto scrubStats = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto scrubStats = session.CudaBindingStats();
     CHECK(scrubStats.size() == 1 && scrubStats[0].identity == identity && scrubStats[0].bindCount == 1);
     auto affine = desc;
     for (auto& p : affine.surfaces[0].points) { p[0] *= 2.f; p[1] *= .5f; }
@@ -102,7 +102,7 @@ int main() {
     auto restChanged = animated; restChanged.surfaces[0].restPoints[0][0] += .25f;
     session.SetGraphDesc(restChanged); auto third = session.Commit(3, UsdGenCommitReason::SetTime);
     CHECK(third && third->device && third != scrubbed && !session.LastDiagnostics().HasErrors());
-    auto stats3 = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto stats3 = session.CudaBindingStats();
     CHECK(stats3.size() == 1 && stats3[0].identity != identity && stats3[0].bindCount == 1);
     // Exercise execution-time controls at all supported rates: the groom
     // expression changes the structural sample budget, primitive lockRoots
@@ -134,14 +134,14 @@ int main() {
         "/PointBlendExpr", "blend", expr::Domain::Point, expr::ScalarType::Float32, "float", VtValue(.5f)));
     session.SetGraphDesc(controlled); auto controlledFirst = session.Commit(1, UsdGenCommitReason::SetTime);
     CHECK(controlledFirst && controlledFirst != third && !session.LastDiagnostics().HasErrors());
-    auto controlledStats1 = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto controlledStats1 = session.CudaBindingStats();
     CHECK(controlledStats1.size() == 1 && controlledStats1[0].sampleCount == 4);
     auto controlledLease = gpu::AcquireGeometry(controlledFirst->device, stream); CHECK(controlledLease);
     CHECK(Read(controlledLease, &points, &widths, &ids, stream));
     CHECK(std::fabs(points[0].x - 1.3f) < 2e-3f && ids == std::vector<uint64_t>({3,7}));
     auto controlledSecond = session.Commit(2, UsdGenCommitReason::SetTime);
     CHECK(controlledSecond && controlledSecond != controlledFirst && !session.LastDiagnostics().HasErrors());
-    auto controlledStats2 = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto controlledStats2 = session.CudaBindingStats();
     CHECK(controlledStats2.size() == 1 && controlledStats2[0].sampleCount == 5 &&
           controlledStats2[0].identity != controlledStats1[0].identity &&
           controlledStats2[0].bindCount == controlledStats1[0].bindCount + 1);

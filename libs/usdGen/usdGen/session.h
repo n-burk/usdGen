@@ -9,6 +9,7 @@
 #define USDGEN_SESSION_H
 
 #include "usdGen/compiler.h"
+#include "usdGen/cudaExecution.h"
 #include "usdGen/generationStore.h"
 #include "usdGen/graph.h"
 #include "usdGen/scheduler.h"
@@ -89,6 +90,8 @@ public:
     UsdGenGraph const &Graph() const noexcept { return _graph; }
 
     UsdGenGenerationConstPtr Generation() const noexcept;
+    /// Immutable diagnostic copy paired with the last completed CUDA cook.
+    std::vector<UsdGenCudaBindingStats> CudaBindingStats() const;
 
     /// The report of the last commit (consumed by the imaging notice
     /// emitter, 06 §5.1). Valid after a Commit that published.
@@ -120,6 +123,11 @@ private:
     UsdGenDiagnostics _lastDiagnostics;
     UsdGenGraphDesc _desc;          // copied by SetGraphDesc (03 §2.2)
     UsdGenGraph _graph;
+    // Single execution owner; never shared through compiled graph revisions.
+    std::unique_ptr<UsdGenCudaExecutionWorkspace> _cudaWorkspace;
+    SdfPath _cudaWorkspaceDescription;
+    std::shared_ptr<const std::vector<UsdGenCudaBindingStats>> _cudaBindingStats =
+        std::make_shared<const std::vector<UsdGenCudaBindingStats>>();
     UsdGenScheduler _scheduler;
     UsdGenGenerationStore _store;
     UsdGenStats _stats;

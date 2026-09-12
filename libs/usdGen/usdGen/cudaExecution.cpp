@@ -5,7 +5,6 @@
 #include <set>
 #include <map>
 #include <array>
-#include <mutex>
 #include <atomic>
 
 #ifdef USDGEN_ENABLE_CUDA
@@ -237,23 +236,21 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
 
 class UsdGenCudaExecutionPlan {
 public:
-    std::mutex mutex;
+    UsdGenGraphDesc desc;
 #ifdef USDGEN_ENABLE_CUDA
-    struct RbfCache;
     struct Step {
         SdfPath path;
         TfToken type;
-        CudaParameterPlan parameters;
+        std::shared_ptr<const CudaParameterProgram> parameters;
         std::array<float, kUsdGenRampLutSize> profile{}, mask{};
         CudaSurfacePrepared surface;
-        std::shared_ptr<RbfCache> rbf;
     };
-    std::vector<std::unique_ptr<Step>> steps;
+    std::vector<std::unique_ptr<const Step>> steps;
 #endif
 };
 
 #ifdef USDGEN_ENABLE_CUDA
-struct UsdGenCudaExecutionPlan::RbfCache {
+struct CudaRbfCache {
     struct State {
         struct Resources {
             gpu::CudaSurfaceBinding surface;
@@ -275,11 +272,78 @@ struct UsdGenCudaExecutionPlan::RbfCache {
             if (previous >= 0 && previous != device) cudaSetDevice(previous);
         }
     };
-    std::mutex mutex;
     CudaSurfaceBindingKey key;
     std::unique_ptr<State> state;
     uint64_t bindCount = 0, solveCount = 0;
 };
+
+namespace {
+struct CudaDeviceScope {
+    int previous = -1;
+    bool selected = false;
+    explicit CudaDeviceScope(int device) {
+        selected = cudaGetDevice(&previous) == cudaSuccess &&
+            cudaSetDevice(device) == cudaSuccess;
+    }
+    ~CudaDeviceScope() { if (selected) cudaSetDevice(previous); }
+};
+}
+#endif
+
+struct UsdGenCudaExecutionWorkspace::Impl {
+    int device = -1;
+    SdfPath description;
+    std::shared_ptr<const std::vector<UsdGenCudaBindingStats>> stats =
+        std::make_shared<const std::vector<UsdGenCudaBindingStats>>();
+#ifdef USDGEN_ENABLE_CUDA
+    cudaStream_t stream = nullptr;
+    struct Step {
+        CudaParameterEvaluator parameters;
+        std::unique_ptr<CudaRbfCache> rbf;
+    };
+    std::map<SdfPath, std::unique_ptr<Step>> steps;
+#endif
+};
+
+UsdGenCudaExecutionWorkspace::UsdGenCudaExecutionWorkspace()
+    : impl_(std::make_unique<Impl>()) {}
+UsdGenCudaExecutionWorkspace::~UsdGenCudaExecutionWorkspace() {
+#ifdef USDGEN_ENABLE_CUDA
+    if (impl_->device < 0) return;
+    CudaDeviceScope selected(impl_->device);
+    if (!selected.selected || cudaStreamSynchronize(impl_->stream) != cudaSuccess) {
+        // No completion proof: preserve all allocations/handles for context
+        // teardown, including parameter evaluators and shared solver inputs.
+        impl_.release();
+        return;
+    }
+    impl_->steps.clear();
+    cudaStreamDestroy(impl_->stream);
+#endif
+}
+int UsdGenCudaExecutionWorkspace::DeviceIndex() const noexcept { return impl_->device; }
+
+std::unique_ptr<UsdGenCudaExecutionWorkspace> CreateCudaExecutionWorkspace(
+    int device, UsdGenDiagnostics* diagnostics) {
+#ifdef USDGEN_ENABLE_CUDA
+    if (device < -1 || (device == -1 && cudaGetDevice(&device) != cudaSuccess)) {
+        Fail(diagnostics, "cannot capture CUDA workspace device"); return {};
+    }
+    CudaDeviceScope selected(device);
+    if (!selected.selected) { Fail(diagnostics, "cannot select CUDA workspace device"); return {}; }
+    auto workspace = std::unique_ptr<UsdGenCudaExecutionWorkspace>(new UsdGenCudaExecutionWorkspace);
+    if (cudaStreamCreateWithFlags(&workspace->impl_->stream, cudaStreamNonBlocking) != cudaSuccess) {
+        Fail(diagnostics, "cannot create CUDA workspace stream"); return {};
+    }
+    workspace->impl_->device = device;
+    return workspace;
+#else
+    (void)device;
+    Fail(diagnostics, "backend is not built"); return {};
+#endif
+}
+
+#ifdef USDGEN_ENABLE_CUDA
 
 namespace {
 bool SameRest(CudaSurfaceBindingKey const& a, CudaSurfaceBindingKey const& b) {
@@ -289,35 +353,35 @@ bool SameRest(CudaSurfaceBindingKey const& a, CudaSurfaceBindingKey const& b) {
         a.faceVertexCounts == b.faceVertexCounts && a.faceVertexIndices == b.faceVertexIndices &&
         a.algorithmVersion == b.algorithmVersion;
 }
-template<class T> bool Upload(gpu::DeviceBuffer<T>& buffer, std::vector<T> const& values) {
+template<class T> bool Upload(gpu::DeviceBuffer<T>& buffer, std::vector<T> const& values,
+                              cudaStream_t stream) {
     return buffer.reset(values.size()) == cudaSuccess &&
         (values.empty() || cudaMemcpyAsync(buffer.data(), values.data(), values.size() * sizeof(T),
-            cudaMemcpyHostToDevice, nullptr) == cudaSuccess);
+            cudaMemcpyHostToDevice, stream) == cudaSuccess);
 }
 
-bool UpdateRbf(UsdGenCudaExecutionPlan::Step& step, uint32_t budget,
+bool UpdateRbf(CudaRbfCache& cache, UsdGenCudaExecutionPlan::Step const& step, uint32_t budget,
                gpu::DeviceView<const int32_t> rootPrim, gpu::DeviceView<const float2> rootUV,
-               UsdGenDiagnostics* diagnostics) {
-    auto& cache = *step.rbf;
+               cudaStream_t stream, UsdGenDiagnostics* diagnostics) {
     int device = -1;
     if (cudaGetDevice(&device) != cudaSuccess) return Fail(diagnostics, "cannot select RBF device");
     if (cache.state && cache.state->device != device)
         return Fail(diagnostics, "RBF binding belongs to a different CUDA device");
     if (!cache.state || cache.state->sampleBudget != budget) {
-        auto candidate = std::make_unique<UsdGenCudaExecutionPlan::RbfCache::State>();
+        auto candidate = std::make_unique<CudaRbfCache::State>();
         candidate->device = device;
         candidate->sampleBudget = budget;
         auto& state = *candidate->resources;
         gpu::DeviceBuffer<float3> rest;
         gpu::DeviceBuffer<uint32_t> offsets, indices;
-        if (!Upload(rest, step.surface.restPoints) || !Upload(offsets, step.surface.faceOffsets) ||
-            !Upload(indices, step.surface.faceVertexIndices))
+        if (!Upload(rest, step.surface.restPoints, stream) || !Upload(offsets, step.surface.faceOffsets, stream) ||
+            !Upload(indices, step.surface.faceVertexIndices, stream))
             return Fail(diagnostics, "RBF rest-surface upload failed");
         if (state.surface.Bind({rest.data(), rest.size()}, {offsets.data(), offsets.size()},
-                offsets.size() - 1, {indices.data(), indices.size()}, budget, nullptr) != gpu::SurfaceBindingStatus::Ok ||
-            state.surface.Finish(nullptr) != gpu::SurfaceBindingStatus::Ok)
+                offsets.size() - 1, {indices.data(), indices.size()}, budget, stream) != gpu::SurfaceBindingStatus::Ok ||
+            state.surface.Finish(stream) != gpu::SurfaceBindingStatus::Ok)
             return Fail(diagnostics, std::string("RBF sample binding: ") + state.surface.diagnostic());
-        if (state.field.Bind(state.surface.restSamples(), 0.0, nullptr) != gpu::RbfStatus::Ok)
+        if (state.field.Bind(state.surface.restSamples(), 0.0, stream) != gpu::RbfStatus::Ok)
             return Fail(diagnostics, std::string("RBF factorization: ") + state.field.diagnostic());
         static std::atomic<uint64_t> nextIdentity{1};
         candidate->identity = nextIdentity.fetch_add(1);
@@ -325,13 +389,13 @@ bool UpdateRbf(UsdGenCudaExecutionPlan::Step& step, uint32_t budget,
         ++cache.bindCount;
     }
     auto& state = *cache.state->resources;
-    if (!Upload(state.currentVertices, step.surface.currentPoints))
+    if (!Upload(state.currentVertices, step.surface.currentPoints, stream))
         return Fail(diagnostics, "RBF animated-surface upload failed");
     if (state.surface.Update({state.currentVertices.data(), state.currentVertices.size()},
-            rootPrim, rootUV, nullptr) != gpu::SurfaceBindingStatus::Ok ||
-        state.surface.Finish(nullptr) != gpu::SurfaceBindingStatus::Ok)
+            rootPrim, rootUV, stream) != gpu::SurfaceBindingStatus::Ok ||
+        state.surface.Finish(stream) != gpu::SurfaceBindingStatus::Ok)
         return Fail(diagnostics, std::string("RBF current samples/roots: ") + state.surface.diagnostic());
-    if (state.field.Solve(state.surface.currentSamples(), nullptr) != gpu::RbfStatus::Ok)
+    if (state.field.Solve(state.surface.currentSamples(), stream) != gpu::RbfStatus::Ok)
         return Fail(diagnostics, std::string("RBF pose solve: ") + state.field.diagnostic());
     ++cache.solveCount;
     return true;
@@ -339,19 +403,8 @@ bool UpdateRbf(UsdGenCudaExecutionPlan::Step& step, uint32_t budget,
 } // namespace
 #endif
 
-std::vector<UsdGenCudaBindingStats> GetCudaBindingStats(UsdGenCudaExecutionPlan& plan) {
-    std::lock_guard<std::mutex> lock(plan.mutex);
-    std::vector<UsdGenCudaBindingStats> result;
-#ifdef USDGEN_ENABLE_CUDA
-    for (auto const& step : plan.steps) if (step->rbf) {
-        std::lock_guard<std::mutex> cacheLock(step->rbf->mutex);
-        auto const& cache = *step->rbf;
-        result.push_back({step->path, cache.state ? cache.state->identity : 0,
-            cache.bindCount, cache.solveCount,
-            cache.state ? cache.state->resources->field.sampleCount() : 0});
-    }
-#endif
-    return result;
+std::vector<UsdGenCudaBindingStats> GetCudaBindingStats(UsdGenCudaExecutionWorkspace const& workspace) {
+    return *std::atomic_load(&workspace.impl_->stats);
 }
 
 bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics) {
@@ -440,20 +493,18 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
 #endif
 }
 
-std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
-    UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics,
-    std::shared_ptr<UsdGenCudaExecutionPlan> const& previous) {
+std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
+    UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnostics) {
     if (!ValidateCudaGraph(desc, diagnostics)) return {};
     auto plan = std::make_shared<UsdGenCudaExecutionPlan>();
+    plan->desc = desc;
 #ifdef USDGEN_ENABLE_CUDA
-    std::unique_lock<std::mutex> previousLock;
-    if (previous) previousLock = std::unique_lock<std::mutex>(previous->mutex);
     for (size_t i = 1; i < desc.nodes.size(); ++i) {
         auto width = std::make_unique<UsdGenCudaExecutionPlan::Step>();
         width->path = desc.nodes[i].path;
         width->type = desc.nodes[i].type;
         std::vector<std::string> errors;
-        if (CudaParameterPlan::Compile(desc, desc.nodes[i], &width->parameters, &errors) != CudaParameterStatus::Ok) {
+        if (CudaParameterProgram::Compile(desc, desc.nodes[i], &width->parameters, &errors) != CudaParameterStatus::Ok) {
             for (auto const& error : errors) Fail(diagnostics, error);
             if (errors.empty()) Fail(diagnostics, "operator parameter compilation failed");
             return {};
@@ -477,39 +528,53 @@ std::shared_ptr<UsdGenCudaExecutionPlan> CompileCudaGraph(
                 for (auto const& error : errors) Fail(diagnostics, error);
                 return {};
             }
-            if (previous) for (auto const& old : previous->steps)
-                if (old->path == width->path && old->rbf && SameRest(old->rbf->key, width->surface.key)) {
-                    width->rbf = old->rbf;
-                    break;
-                }
-            if (!width->rbf) {
-                width->rbf = std::make_shared<UsdGenCudaExecutionPlan::RbfCache>();
-                width->rbf->key = width->surface.key;
-            }
         }
         plan->steps.push_back(std::move(width));
     }
-#else
-    (void)previous;
 #endif
     return plan;
 }
 
 std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
-    UsdGenCudaExecutionPlan& plan, UsdGenGraphDesc const& desc, double frame,
+    UsdGenCudaExecutionPlan const& plan, UsdGenCudaExecutionWorkspace& workspace, double frame,
     uint64_t generation, UsdGenDiagnostics* diagnostics,
     std::shared_ptr<const UsdGenDeviceGeneration> const& previous) {
-    std::lock_guard<std::mutex> lock(plan.mutex);
-    if (!ValidateCudaGraph(desc, diagnostics)) return {};
+    auto const& desc = plan.desc;
 #ifndef USDGEN_ENABLE_CUDA
     (void)generation;
     (void)frame;
     (void)previous;
+    (void)workspace;
+    (void)desc;
+    Fail(diagnostics, "backend is not built");
     return {};
 #else
+    auto& execution = *workspace.impl_;
+    CudaDeviceScope selected(execution.device);
+    if (!selected.selected) { Fail(diagnostics, "cannot select execution workspace device"); return {}; }
+    auto const stream = execution.stream;
     if (!std::isfinite(frame) || plan.steps.size() + 1 != desc.nodes.size()) {
         Fail(diagnostics, "invalid frame or mismatched compiled CUDA plan"); return {};
     }
+    if (!execution.description.IsEmpty() && execution.description != desc.description) {
+        Fail(diagnostics, "CUDA workspaces cannot be shared between descriptions"); return {};
+    }
+    execution.description = desc.description;
+    // Reconcile runtime storage only on this description's work owner. Rest
+    // identity may survive plan replacement, posed solve state never escapes.
+    std::set<SdfPath> live;
+    for (auto const& step : plan.steps) {
+        live.insert(step->path);
+        auto& runtime = execution.steps[step->path];
+        if (!runtime) runtime = std::make_unique<UsdGenCudaExecutionWorkspace::Impl::Step>();
+        if (step->type != TfToken("UsdGenDeform")) runtime->rbf.reset();
+        else if (!runtime->rbf || !SameRest(runtime->rbf->key, step->surface.key)) {
+            runtime->rbf = std::make_unique<CudaRbfCache>();
+            runtime->rbf->key = step->surface.key;
+        }
+    }
+    for (auto it = execution.steps.begin(); it != execution.steps.end(); )
+        if (!live.count(it->first)) it = execution.steps.erase(it); else ++it;
     auto const& node = desc.nodes.front();
     auto found = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
         [&](auto const& c) { return c.path == node.curves.front(); });
@@ -609,8 +674,8 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     }
     if (diagnostics) for (auto const& message : messages) diagnostics->Warn(message);
     auto source = std::make_unique<gpu::CudaCurveSource>();
-    if (source->Set(prepared.Input(), nullptr) != gpu::CurveSourceStatus::Ok ||
-        source->Finish(nullptr) != gpu::CurveSourceStatus::Ok) {
+    if (source->Set(prepared.Input(), stream) != gpu::CurveSourceStatus::Ok ||
+        source->Finish(stream) != gpu::CurveSourceStatus::Ok) {
         Fail(diagnostics, "source upload failed; previous generation retained"); return {};
     }
     auto geometry = source->view();
@@ -622,7 +687,8 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     std::unique_ptr<gpu::DeviceBuffer<float3>> finalPoints;
     bool deformed = !options.useRest;
     for (size_t i = 0; i < plan.steps.size(); ++i) {
-        auto& width = *plan.steps[i];
+        auto const& width = *plan.steps[i];
+        auto& runtime = *execution.steps.at(width.path);
         auto const& op = desc.nodes[i+1];
         expr::Context context;
         context.frame = frame;
@@ -630,21 +696,21 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         context.seed = op.seed;
         context.descId = expr::DescriptionId(desc.description.GetText());
         std::vector<std::string> errors;
-        if (width.parameters.Evaluate(geometry, {hairT, rootUV},
-                context, nullptr, &errors) != CudaParameterStatus::Ok) {
+        if (runtime.parameters.Evaluate(*width.parameters, geometry, {hairT, rootUV},
+                context, stream, &errors) != CudaParameterStatus::Ok) {
             for (auto const& error : errors) Fail(diagnostics, error);
             if (errors.empty()) Fail(diagnostics, "expression evaluation failed at " + op.path.GetString());
             return {};
         }
         UsdGenParamView values; values.desc = &desc; values.node = &op;
         auto field = [&](char const* name, float fallback) {
-            if (auto const* expression = width.parameters.Find(TfToken(name)))
+            if (auto const* expression = runtime.parameters.Find(TfToken(name)))
                 return gpu::ScalarField::Device(
                     {static_cast<float const*>(expression->data), expression->count}, expression->domain);
             return gpu::ScalarField::Literal(static_cast<float>(values.GetDouble(TfToken(name), fallback)));
         };
         auto boolean = [&](char const* name, bool fallback) {
-            if (auto const* expression = width.parameters.Find(TfToken(name)))
+            if (auto const* expression = runtime.parameters.Find(TfToken(name)))
                 return gpu::BoolField::Device(
                     {static_cast<uint8_t const*>(expression->data), expression->count}, expression->domain);
             return gpu::BoolField::Literal(values.GetBool(TfToken(name), fallback));
@@ -665,7 +731,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
             parameters.cullThreshold = field("cullThreshold", 0);
             parameters.enabled = boolean("enabled", op.enabled);
             parameters.seed = op.seed;
-            if (auto expression = width.parameters.Find(TfToken("length:random")))
+            if (auto expression = runtime.parameters.Find(TfToken("length:random")))
                 parameters.random = gpu::Vec2Field::Device(
                     {static_cast<float2 const*>(expression->data), expression->count}, expression->domain);
             else {
@@ -677,20 +743,20 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
             gpu::DeviceBuffer<uint8_t> keep;
             if (mask.reset(width.mask.size()) != cudaSuccess || changedPoints.reset(geometry.pointCount) != cudaSuccess ||
                 keep.reset(geometry.curveCount) != cudaSuccess ||
-                cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, nullptr) != cudaSuccess) {
+                cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
                 Fail(diagnostics, "Length allocation/profile upload failed"); return {};
             }
             parameters.maskProfile = {mask.data(), mask.size()};
             gpu::CudaLength kernel;
-            if (kernel.Apply(geometry, hairT, parameters, changedPoints.view(), keep.view(), nullptr) != gpu::StyleStatus::Ok ||
-                kernel.Finish(nullptr) != gpu::StyleStatus::Ok) {
+            if (kernel.Apply(geometry, hairT, parameters, changedPoints.view(), keep.view(), stream) != gpu::StyleStatus::Ok ||
+                kernel.Finish(stream) != gpu::StyleStatus::Ok) {
                 Fail(diagnostics, "Length execution failed at " + op.path.GetString()); return {};
             }
             auto changed = geometry;
             changed.points = {changedPoints.data(), changedPoints.size()};
             auto next = std::make_unique<gpu::CudaCurveCompaction>();
-            if (next->Apply(changed, hairT, rootPrim, rootUV, {keep.data(), keep.size()}, nullptr) != gpu::CurveCompactionStatus::Ok ||
-                next->Finish(nullptr) != gpu::CurveCompactionStatus::Ok) {
+            if (next->Apply(changed, hairT, rootPrim, rootUV, {keep.data(), keep.size()}, stream) != gpu::CurveCompactionStatus::Ok ||
+                next->Finish(stream) != gpu::CurveCompactionStatus::Ok) {
                 Fail(diagnostics, "Length curve compaction failed at " + op.path.GetString()); return {};
             }
             // All upstream channels have been copied in the stable surviving
@@ -706,10 +772,12 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         }
         if (width.type == TfToken("UsdGenDeform")) {
             int budget = values.GetInt(TfToken("rbfSamples"), 100);
-            if (auto const* expression = width.parameters.Find(TfToken("rbfSamples"))) {
+            if (auto const* expression = runtime.parameters.Find(TfToken("rbfSamples"))) {
                 // This one groom-level integer changes binding structure. It
                 // is control data, not a geometry/parameter-field readback.
-                if (cudaMemcpy(&budget, expression->data, sizeof(budget), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                if (cudaMemcpyAsync(&budget, expression->data, sizeof(budget), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+                    cudaStreamSynchronize(stream) != cudaSuccess) {
+                    cudaStreamSynchronize(stream);
                     Fail(diagnostics, "cannot read expression-driven RBF sample count"); return {};
                 }
             }
@@ -724,8 +792,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
                 if (rootPrim.size != geometry.curveCount || rootUV.size != geometry.curveCount) {
                     Fail(diagnostics, "RBF deformation requires persistent C3 root bindings"); return {};
                 }
-                std::lock_guard<std::mutex> cacheLock(width.rbf->mutex);
-                if (!UpdateRbf(width, static_cast<uint32_t>(budget), rootPrim, rootUV, diagnostics)) return {};
+                if (!UpdateRbf(*runtime.rbf, width, static_cast<uint32_t>(budget), rootPrim, rootUV, stream, diagnostics)) return {};
                 gpu::DeformParameters parameters;
                 parameters.blend = field("blend", op.blend);
                 parameters.maskAmount = field("mask:amount", 1);
@@ -734,19 +801,19 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
                 parameters.hairT = hairT;
                 gpu::DeviceBuffer<float> mask;
                 if (mask.reset(width.mask.size()) != cudaSuccess ||
-                    cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, nullptr) != cudaSuccess) {
+                    cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
                     Fail(diagnostics, "RBF mask upload failed"); return {};
                 }
                 parameters.maskProfile = {mask.data(), mask.size()};
-                auto& state = *width.rbf->state->resources;
+                auto& state = *runtime.rbf->state->resources;
                 gpu::CudaRbfCurveDeformer kernel;
                 if (kernel.Deform(state.field, geometry, state.surface.rootTargets(), parameters,
-                        nextPoints->view(), nullptr) != gpu::RbfStatus::Ok ||
-                    kernel.Finish(state.field, nullptr) != gpu::RbfStatus::Ok) {
+                        nextPoints->view(), stream) != gpu::RbfStatus::Ok ||
+                    kernel.Finish(state.field, stream) != gpu::RbfStatus::Ok) {
                     Fail(diagnostics, "RBF deformation failed; previous generation retained"); return {};
                 }
             }
-            if (nextPoints->recordUse(nullptr) != cudaSuccess) {
+            if (nextPoints->recordUse(stream) != cudaSuccess) {
                 Fail(diagnostics, "RBF publication event failed"); return {};
             }
             finalPoints = std::move(nextPoints);
@@ -768,15 +835,15 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         auto nextWidths = std::make_unique<gpu::DeviceBuffer<float>>();
         if (profile.reset(width.profile.size()) != cudaSuccess || mask.reset(width.mask.size()) != cudaSuccess ||
             nextWidths->reset(geometry.pointCount) != cudaSuccess ||
-            cudaMemcpyAsync(profile.data(), width.profile.data(), sizeof(width.profile), cudaMemcpyHostToDevice, nullptr) != cudaSuccess ||
-            cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, nullptr) != cudaSuccess) {
+            cudaMemcpyAsync(profile.data(), width.profile.data(), sizeof(width.profile), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+            cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
             Fail(diagnostics, "Width device allocation/upload failed"); return {};
         }
         parameters.widthProfile = {profile.data(), profile.size()};
         parameters.maskProfile = {mask.data(), mask.size()};
         gpu::CudaWidth kernel;
-        if (kernel.Apply(geometry, hairT, parameters, nextWidths->view(), nullptr) != gpu::StyleStatus::Ok ||
-            kernel.Finish(nullptr) != gpu::StyleStatus::Ok || nextWidths->recordUse(nullptr) != cudaSuccess) {
+        if (kernel.Apply(geometry, hairT, parameters, nextWidths->view(), stream) != gpu::StyleStatus::Ok ||
+            kernel.Finish(stream) != gpu::StyleStatus::Ok || nextWidths->recordUse(stream) != cudaSuccess) {
             Fail(diagnostics, "Width execution failed at " + op.path.GetString() + "; previous generation retained"); return {};
         }
         // Finish validates and completes the consumer before its predecessor
@@ -786,9 +853,9 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     }
     uint64_t topologyVersion = generation;
     if (previous) {
-        auto lease = gpu::AcquireGeometry(previous, nullptr);
+        auto lease = gpu::AcquireGeometry(previous, stream);
         bool same = false;
-        if (!lease || gpu::CompareCurveTopology(lease.Geometry(), geometry, nullptr, &same) != cudaSuccess) {
+        if (!lease || gpu::CompareCurveTopology(lease.Geometry(), geometry, stream, &same) != cudaSuccess) {
             Fail(diagnostics, "cannot compare GPU topology against the previous publication"); return {};
         }
         if (same) topologyVersion = previous->Geometry().topologyVersion;
@@ -800,6 +867,19 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         : gpu::MakeSourceGeneration(std::move(source), generation, &reason,
             deformed, std::move(finalWidths), std::move(finalPoints), topologyVersion);
     if (!result) Fail(diagnostics, reason);
+    if (result) {
+        auto stats = std::make_shared<std::vector<UsdGenCudaBindingStats>>();
+        for (auto const& step : plan.steps) {
+            auto const& runtime = *execution.steps.at(step->path);
+            if (!runtime.rbf) continue;
+            auto const& cache = *runtime.rbf;
+            stats->push_back({step->path, cache.state ? cache.state->identity : 0,
+                cache.bindCount, cache.solveCount,
+                cache.state ? cache.state->resources->field.sampleCount() : 0});
+        }
+        std::atomic_store(&execution.stats,
+            std::shared_ptr<const std::vector<UsdGenCudaBindingStats>>(std::move(stats)));
+    }
     return result;
 #endif
 }

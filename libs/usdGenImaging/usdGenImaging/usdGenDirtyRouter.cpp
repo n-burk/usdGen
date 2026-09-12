@@ -94,20 +94,22 @@ _WarnUnknownRoute(SdfPath const &path, TfToken const &leaf)
 void
 UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraph const &graph)
 {
+    auto snapshot = graph.RoutingSnapshot();
+    Rebuild(*snapshot);
+}
+
+void
+UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
+{
     _byPrim.clear();
     _entryCount = 0;
-    if (graph.NodeCount() == 0) {
+    if (snapshot.nodes.empty()) {
         return;  // nothing compiled: route nothing, warn on demand
     }
-    usdGen::UsdGenGraphDesc const &desc = graph.Desc();
 
     std::map<SdfPath, PerPrim> table;
 
-    for (int i = 0, n = graph.NodeCount(); i < n; ++i) {
-        usdGen::UsdGenCompiledNode const &node = graph.Node(i);
-        if (!node.desc) {
-            continue;
-        }
+    for (auto const &node : snapshot.nodes) {
 
         // 02 §6 value rows: every routed parameter of the node.
         // Sibling set = the node's own compiled param names (contract
@@ -128,15 +130,15 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraph const &graph)
             TF_VERIFY(!loc.IsEmpty(),
                       "usdGen: routed param '%s' has no mapped locator",
                       routing.first.GetText());
-            table[node.desc->path].prefixes.emplace_back(
+            table[node.path].prefixes.emplace_back(
                 loc, Entry{node.id, routing.second});
         }
 
         // 02 §6 surface rows: deformation of the node's bound surface and
         // the C3 source behind each curve / map ref (06 §3.6: authored curve
         // prims dirty via their own prims, routed as capture/map re-capture).
-        if (node.hasSurface && node.surface < desc.surfaces.size()) {
-            PerPrim &pp = table[desc.surfaces[node.surface].path];
+        if (node.hasSurface && node.surface < snapshot.surfacePaths.size()) {
+            PerPrim &pp = table[snapshot.surfacePaths[node.surface]];
             Entry const e{node.id, usdGen::UsdGenDirtySurfacePoints,
                           node.surface, true};
             pp.prefixes.emplace_back(
@@ -167,8 +169,8 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraph const &graph)
     // Topology on the terminal node — the engine's Repartition consumes it
     // without a digest bump (03 §5.2, types.h UsdGenDirtyTopology comment).
     {
-        usdGen::UsdGenNodeId const terminal = graph.TerminalNodeId();
-        PerPrim &pp = table[desc.description];
+        usdGen::UsdGenNodeId const terminal = snapshot.terminal;
+        PerPrim &pp = table[snapshot.description];
         pp.prefixes.emplace_back(
             _Loc({UsdGenContainerToken(), TfToken("tileTarget")}),
             Entry{terminal, usdGen::UsdGenDirtyTopology});

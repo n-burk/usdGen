@@ -42,6 +42,44 @@ UsdGenNodeDesc const &UsdGenGraph::NodeDesc(UsdGenNodeId id) const
     return *_nodes[id]->desc;
 }
 
+std::shared_ptr<const UsdGenGraphRoutingSnapshot>
+UsdGenGraph::RoutingSnapshot() const
+{
+    auto snapshot = std::make_shared<UsdGenGraphRoutingSnapshot>();
+    snapshot->terminal = _terminal;
+    if (_desc) {
+        snapshot->description = _desc->description;
+        snapshot->surfacePaths.reserve(_desc->surfaces.size());
+        for (auto const &surface : _desc->surfaces)
+            snapshot->surfacePaths.push_back(surface.path);
+    }
+    snapshot->nodes.reserve(_nodes.size());
+    for (auto const &nodePtr : _nodes) {
+        if (!nodePtr || !nodePtr->desc) continue;
+        UsdGenCompiledNode const &node = *nodePtr;
+        UsdGenGraphRoutingNode copy;
+        copy.id = node.id;
+        copy.type = node.type;
+        copy.algorithmVersion = node.algorithmVersion;
+        copy.hasSurface = node.hasSurface;
+        copy.surface = node.surface;
+        copy.paramRouting = node.paramRouting;
+        copy.curveRefs = node.curveRefs;
+        copy.mapRefs = node.mapRefs;
+        if (node.desc) {
+            copy.path = node.desc->path;
+        }
+        if (node.op) {
+            auto topology = node.op->TopologyParameters();
+            copy.topologyParameters.assign(topology.begin(), topology.end());
+            auto values = node.op->ValueParameters();
+            copy.valueParameters.assign(values.begin(), values.end());
+        }
+        snapshot->nodes.push_back(std::move(copy));
+    }
+    return snapshot;
+}
+
 UsdGenNodeId UsdGenGraph::NodeIdForPath(SdfPath const &path) const
 {
     auto it = _nodeByPath.find(path);

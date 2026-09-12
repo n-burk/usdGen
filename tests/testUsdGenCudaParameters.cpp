@@ -132,6 +132,53 @@ int main() {
         curveSource.Finish(stream) != gpu::CurveSourceStatus::Ok) {
         std::fprintf(stderr, "curve source setup failed\n"); return 2;
     }
+    std::shared_ptr<const CudaParameterProgram> immutableProgram;
+    check(CudaParameterProgram::Compile(graph, runtimeNode, &immutableProgram,
+                                        &diagnostics) == CudaParameterStatus::Ok &&
+              immutableProgram && immutableProgram->Bindings().size() == 4,
+          "compile immutable CUDA parameter program");
+    CudaParameterEvaluator evaluatorA;
+    CudaParameterEvaluator evaluatorB;
+    expr::Context independentControls;
+    independentControls.domain = expr::Domain::Point;
+    independentControls.frame = 1;
+    check(immutableProgram &&
+              evaluatorA.Evaluate(*immutableProgram, curveSource.view(), {},
+                                  independentControls, stream, &diagnostics) ==
+                  CudaParameterStatus::Ok,
+          "evaluate immutable program in first workspace");
+    float firstWorkspaceValue = 0.0f;
+    auto const* firstWorkspaceField = evaluatorA.Find(TfToken("frameValue"));
+    check(firstWorkspaceField &&
+              cudaMemcpyAsync(&firstWorkspaceValue, firstWorkspaceField->data,
+                              sizeof(firstWorkspaceValue), cudaMemcpyDeviceToHost,
+                              stream) == cudaSuccess &&
+              cudaStreamSynchronize(stream) == cudaSuccess &&
+              std::fabs(firstWorkspaceValue - 1.5f) < 1e-5f,
+          "first evaluator publishes independent frame result");
+    independentControls.frame = 2;
+    check(immutableProgram &&
+              evaluatorB.Evaluate(*immutableProgram, curveSource.view(), {},
+                                  independentControls, stream, &diagnostics) ==
+                  CudaParameterStatus::Ok,
+          "evaluate immutable program in second workspace");
+    float secondWorkspaceValue = 0.0f;
+    auto const* secondWorkspaceField = evaluatorB.Find(TfToken("frameValue"));
+    check(secondWorkspaceField &&
+              cudaMemcpyAsync(&secondWorkspaceValue, secondWorkspaceField->data,
+                              sizeof(secondWorkspaceValue), cudaMemcpyDeviceToHost,
+                              stream) == cudaSuccess &&
+              cudaStreamSynchronize(stream) == cudaSuccess &&
+              std::fabs(secondWorkspaceValue - 2.5f) < 1e-5f,
+          "second evaluator publishes a different frame result");
+    float firstWorkspaceAfter = 0.0f;
+    check(firstWorkspaceField &&
+              cudaMemcpyAsync(&firstWorkspaceAfter, firstWorkspaceField->data,
+                              sizeof(firstWorkspaceAfter), cudaMemcpyDeviceToHost,
+                              stream) == cudaSuccess &&
+              cudaStreamSynchronize(stream) == cudaSuccess &&
+              std::fabs(firstWorkspaceAfter - firstWorkspaceValue) < 1e-5f,
+          "second evaluator leaves first workspace unmodified");
     for (int frame = 1; frame <= 2; ++frame) {
         expr::Context controls; controls.domain = expr::Domain::Point;
         controls.frame = frame;

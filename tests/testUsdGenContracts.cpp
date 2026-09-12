@@ -22,7 +22,12 @@
 #include "pxr/usd/usd/primDefinition.h"
 #include "pxr/usd/usd/schemaRegistry.h"
 
+#include "usdGen/compiler.h"
+#include "usdGen/opRegistry.h"
+#include "usdGenImaging/usdGenDirtyRouter.h"
+
 #include <cstdio>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -208,6 +213,60 @@ int main()
         CheckAttr(desc, "usdGen:label", "string", "");
     } else {
         Check(false, "UsdGenDescription: no concrete prim definition (schema not loaded?)");
+    }
+
+    // The imaging router must be able to retain its pure routing input while
+    // the mutable compiled graph is replaced.  This is deliberately kept in
+    // the contract test because it also guards the public graph boundary:
+    // snapshots may not contain pointers into nodes, operators or Desc().
+    usdGen::usdGenRegisterM1Operators();
+    usdGen::UsdGenGraphDesc routingDesc;
+    routingDesc.description = SdfPath("/routing");
+    routingDesc.terminal = SdfPath("/routing/width");
+    usdGen::UsdGenNodeDesc routingNode;
+    routingNode.path = SdfPath("/routing/width");
+    routingNode.type = TfToken("UsdGenWidth");
+    routingNode.params.push_back({TfToken("width"), VtValue(0.02f), false});
+    routingDesc.nodes.push_back(std::move(routingNode));
+    usdGen::UsdGenCompiler routingCompiler;
+    std::shared_ptr<const usdGen::UsdGenGraphRoutingSnapshot> retained;
+    size_t retainedEntryCount = 0;
+    usdGenImaging::UsdGenDirtyRouter router;
+    {
+        usdGen::UsdGenGraph routingGraph;
+        auto routingResult = routingCompiler.Compile(routingDesc, &routingGraph);
+        Check(routingResult.ok, "routing snapshot graph compiles");
+        if (!routingResult.ok) retained.reset();
+        else retained = routingGraph.RoutingSnapshot();
+        if (retained) {
+            Check(retained && retained->description == routingDesc.description &&
+                  retained->nodes.size() == 1 &&
+                  retained->nodes.front().path == routingDesc.nodes.front().path &&
+                  !retained->nodes.front().paramRouting.empty(),
+                  "routing snapshot owns description/node/classification data");
+            router.Rebuild(*retained);
+            retainedEntryCount = router.EntryCount();
+
+            // Recompile into the same graph before destroying it.  The retained
+            // snapshot must remain usable after both operations.
+            routingDesc.description = SdfPath("/replacement");
+            routingDesc.terminal = SdfPath("/replacement/width");
+            routingDesc.nodes.front().path = SdfPath("/replacement/width");
+            Check(routingCompiler.Compile(routingDesc, &routingGraph).ok,
+                  "mutable graph can be recompiled after snapshot capture");
+        }
+    }
+    if (retained) {
+        router.Rebuild(*retained);
+        Check(router.EntryCount() == retainedEntryCount,
+              "router rebuild from retained snapshot survives graph destruction");
+        usdGen::UsdGenPendingDirty routed;
+        router.Route({{SdfPath("/routing/width"), HdDataSourceLocatorSet(
+            HdDataSourceLocator(TfToken("usdGen")).Append(TfToken("width")))}}, &routed);
+        Check(!routed.structural && routed.nodeBits.size() == 1 &&
+                  routed.nodeBits.begin()->first == retained->nodes.front().id &&
+                  routed.nodeBits.begin()->second == usdGen::UsdGenDirtyParameter,
+              "retained router still routes the original width path and value class");
     }
 
     if (g_failures != 0) {

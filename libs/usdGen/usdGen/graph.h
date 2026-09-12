@@ -15,12 +15,39 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 class UsdGenCudaExecutionPlan;
+
+/// Owning, read-only routing input detached from a compiled graph.  The
+/// imaging router may retain this value while the graph is recompiled or
+/// destroyed; none of its fields point into UsdGenGraph or an operator.
+struct UsdGenGraphRoutingNode
+{
+    UsdGenNodeId id = kUsdGenInvalidNode;
+    SdfPath path;
+    TfToken type;
+    int algorithmVersion = 0;
+    std::vector<TfToken> topologyParameters;
+    std::vector<TfToken> valueParameters;
+    std::vector<std::pair<TfToken, uint32_t>> paramRouting;
+    UsdGenSurfaceId surface = 0;
+    bool hasSurface = false;
+    std::vector<SdfPath> curveRefs;
+    std::vector<SdfPath> mapRefs;
+};
+
+struct UsdGenGraphRoutingSnapshot
+{
+    SdfPath description;
+    std::vector<SdfPath> surfacePaths;
+    std::vector<UsdGenGraphRoutingNode> nodes;
+    UsdGenNodeId terminal = kUsdGenInvalidNode;
+};
 
 /// One compiled node. Owns its UsdGenOp, its output buffer, its capture, its
 /// chunk dirty bytes and its digests (03 §3.2).
@@ -110,8 +137,15 @@ public:
     bool AnyDirty() const noexcept;
 
     UsdGenGraphDesc const &Desc() const noexcept { return *_desc; }
-    std::shared_ptr<UsdGenCudaExecutionPlan> const& CudaPlan() const noexcept { return _cudaPlan; }
+    std::shared_ptr<const UsdGenCudaExecutionPlan> const& CudaPlan() const noexcept { return _cudaPlan; }
     UsdGenNodeDesc const &NodeDesc(NodeId id) const;
+
+    /// Make an owning routing snapshot.  This is intentionally a fresh copy:
+    /// callers can hand the result to an asynchronous imaging owner without
+    /// retaining this mutable graph or any operator/node pointers.
+    /// Construct it on the graph's execution owner, never concurrently with
+    /// graph mutation. Only the resulting snapshot is safe for readers.
+    std::shared_ptr<const UsdGenGraphRoutingSnapshot> RoutingSnapshot() const;
 
     // Chunk/tile partition state (R21; terminal-node topology in M1).
     int ChunkSize() const noexcept { return _chunkSize; }
@@ -135,7 +169,7 @@ private:
     void _PropagateDescendantBits(uint32_t bits, std::vector<bool> const &descendants);
 
     std::unique_ptr<UsdGenGraphDesc> _desc;  // owned copy taken at Compile
-    std::shared_ptr<UsdGenCudaExecutionPlan> _cudaPlan;
+    std::shared_ptr<const UsdGenCudaExecutionPlan> _cudaPlan;
     std::vector<std::unique_ptr<UsdGenCompiledNode>> _nodes; // indexed by id
     std::vector<UsdGenTileView> _tiles;          // terminal tile partition
     UsdGenNodeId      _terminal = InvalidNode;

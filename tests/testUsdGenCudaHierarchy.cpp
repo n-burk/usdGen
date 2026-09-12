@@ -104,7 +104,7 @@ int main() {
         CHECK(std::abs(points[i].x - x) < 1e-5f);
         CHECK(std::abs(widths[i] - .02f * (1 + x)) < 1e-6f);
     }
-    auto bindings = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto bindings = session.CudaBindingStats();
     CHECK(bindings.size() == 1 && bindings[0].bindCount == 1 && bindings[0].sampleCount == 5);
     RestNotice notice;
     auto observer = TfCreateWeakPtr(&notice);
@@ -125,7 +125,7 @@ int main() {
     session.SetGraphDesc(editedDesc);
     auto edited = session.Commit(24, UsdGenCommitReason::SetTime);
     CHECK(edited && edited != deformed && !session.LastDiagnostics().HasErrors());
-    auto editedBinding = GetCudaBindingStats(*session.Graph().CudaPlan());
+    auto editedBinding = session.CudaBindingStats();
     CHECK(editedBinding.size() == 1 && editedBinding[0].identity != bindings[0].identity);
     // A failed edit must not replace the last published immutable generation.
     CHECK(scalp.GetFaceVertexIndicesAttr().Set(VtIntArray{99,1,2,0,1,3,1,2,4}));

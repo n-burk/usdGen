@@ -61,6 +61,9 @@ public:
     /// (a dirty on usdGen/clump matches every usdGen:clump:* leaf, but
     /// usdGen/mode does NOT match usdGen/length/mode).
     void Rebuild(usdGen::UsdGenGraph const &graph);
+    /// Rebuild from an owning, graph-independent routing snapshot.  The
+    /// snapshot may outlive and be used independently of its source graph.
+    void Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot);
 
     /// Hop-1 routing from _PrimsDirtied. O(entries): one hash lookup each,
     /// longest-prefix walk per hit. NEVER cooks (I7, S17).

@@ -72,8 +72,8 @@ but do not prove the revised concurrency requirement.
   application mutexes. Framework implementation internals are not represented
   as a claim of hardware wait-freedom.
 
-Migration is in progress. Existing session, imaging, RBF cache and registry
-locks are still present at this audit; they must be removed through ownership
+Migration is in progress. At the initial audit, session, imaging, RBF cache and registry
+locks were still present; they must be removed through ownership
 changes, not simply deleted. The pre-revision tools tree passed 62/62 tests,
 and four new CUDA targets passed initcheck/memcheck; those results do not
 validate the upcoming scheduling and lease-ownership changes.
@@ -136,6 +136,66 @@ Final validation of this migration slice:
 - The new execution-pipeline and device-lease implementation files contain no
   application mutex or spinlock. Session, imaging, RBF and registry migration
   remains unfinished; the full library is not yet mutex-free.
+
+### Immutable CUDA plans and scheduled workspaces
+
+The next implementation slice removes the CUDA execution-plan and shared RBF
+cache mutexes through resource ownership changes:
+
+- `CudaParameterProgram` owns only immutable IR, bindings and CPU literals.
+  `CudaParameterEvaluator` owns per-execution device contexts, programs and
+  fields. Independent evaluators can share one program without overwriting
+  each other's output. The old `CudaParameterPlan` is a compatibility facade,
+  not the new compiled-graph representation.
+- `UsdGenCudaExecutionPlan` owns a copied authored descriptor, immutable
+  parameter programs, LUTs and prepared surface inputs. Execution consumes
+  that exact plan snapshot, not an independently supplied same-length graph.
+  No runtime GPU allocations or mutable RBF state live in the plan.
+- `UsdGenCudaExecutionWorkspace` owns one description's parameter evaluators,
+  RBF resources and nonblocking CUDA stream. Execution selects its captured
+  device on every worker invocation, uses that stream throughout, and restores
+  the previous thread device. A workspace cannot execute another description;
+  the legacy session allocates a new workspace when its description changes.
+- Replacing a plan reconciles the workspace by operator path and exact rest
+  key. Identical rest data retains the factorization/binding identity while
+  posed inputs are solved again. Changed rest data invalidates the binding.
+  Two workspaces never share mutable RBF solve state, even when they use the
+  same immutable plan. Stats are immutable snapshots of completed work.
+- `UsdGenCudaExecutionQueue` is the actual asynchronous CUDA entry point using
+  the TBB pipeline: one serial work owner per workspace, independently queued
+  descriptions, epoch-checked publication, per-request diagnostics, and atomic
+  immutable result snapshots. It does not invoke the legacy session mutex.
+  Completion callbacks may submit follow-up work. Failed/superseded work does
+  not replace the last published snapshot. Shutdown drains the pipeline before
+  destroying its snapshot storage or device workspace.
+- `UsdGenGraph::RoutingSnapshot()` copies owning routing metadata, not a const
+  alias to the mutable graph. `UsdGenDirtyRouter` can rebuild from this snapshot
+  after the original graph is replaced/destroyed. The current compatibility
+  overload extracts a snapshot; live imaging callback payload integration
+  and removal of its graph rereads remain next steps.
+
+This does not finish the concurrency revision. The legacy engine session and
+imaging entry points still use their old synchronization, although their CUDA
+execution now uses private workspaces. The new asynchronous queue is not yet
+the usdview/imaging/tool-session dispatch path. GPU kernel helpers still use
+synchronous validation/completion fences and ordinary allocations; explicit
+nonblocking streams are not evidence of measured GPU overlap, interactive
+latency or nonblocking device retirement. Authored pose/value refresh currently
+produces another plan snapshot; incremental refresh/compile reuse remains due.
+CUDA context-loss/allocation-failure injection is not covered by these tests.
+
+Validation of this slice: the full non-benchmark T0/T1 suite passes **64/64**.
+The new queue test checks shared-plan/independent-workspace numerical isolation,
+frame-dependent expressions, rest-binding reuse across plan replacement,
+immutable input/output retention, execution failure and recovery, concurrent
+submissions, latest-epoch publication, callback re-entry, cancellation and
+shutdown. The updated routing contract test verifies an original path/value
+classification after graph destruction. The CUDA-disabled core also builds.
+`testUsdGenCudaExecutionQueue` passes both CUDA memcheck and initcheck with
+**0 errors**, including queued-request shutdown. These are functional evidence,
+not full-plan completion or release/performance sign-off.
+The queue test also passed **30 consecutive runs**; the updated CUDA RBF session
+and parameter tests each passed memcheck and initcheck with **0 errors**.
 
 ## Original scope remains required
 
