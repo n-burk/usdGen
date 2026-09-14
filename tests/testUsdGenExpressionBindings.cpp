@@ -18,7 +18,12 @@ int main()
     UsdGenNodeDesc baselineNode;
     baselineNode.path = SdfPath("/existing/width");
     baselineNode.type = TfToken("UsdGenWidth");
+    baselineNode.inputs = {SdfPath("/existing/source")};
     baseline.nodes.push_back(baselineNode);
+    UsdGenNodeDesc baselineSource;
+    baselineSource.path = SdfPath("/existing/source");
+    baselineSource.type = TfToken("UsdGenCurveSource");
+    baseline.nodes.push_back(baselineSource);
     baseline.terminal = baselineNode.path;
     baseline.expressions.push_back({SdfPath("/existing/unusedExpression"), "4*2",
         {{TfToken("result"),TfToken("float"),FloatShape()}}});
@@ -29,17 +34,21 @@ int main()
           "compiler retains description width fallback");
     if (failures) return failures;
     auto preservesGraph = [&]() {
-        return graph.NodeCount() == 1 &&
+        return graph.NodeCount() == 2 &&
             graph.Desc().description == baseline.description &&
             graph.Desc().terminal == baseline.terminal &&
-            graph.Node(0).desc && graph.Node(0).desc->path == baselineNode.path;
+            graph.NodeIdForPath(baselineNode.path) != UsdGenGraph::InvalidNode;
     };
     UsdGenGraphDesc valid;
     valid.description = SdfPath("/groom");
     valid.expressions.push_back({SdfPath("/groom/Expressions/width"), "$value", {{TfToken("result"), TfToken("float"), FloatShape()}}});
     UsdGenNodeDesc node; node.path=SdfPath("/groom/width"); node.type=TfToken("UsdGenWidth");
+    node.inputs = {SdfPath("/groom/source")};
     node.expressionBindings.push_back({SdfPath("/groom/Expressions/width"), TfToken("result"), TfToken("float"), TfToken("width"), FloatShape(), expr::Domain::Point, VtValue(0.1f)});
     valid.nodes.push_back(node);
+    UsdGenNodeDesc source; source.path=SdfPath("/groom/source"); source.type=TfToken("UsdGenCurveSource");
+    valid.nodes.push_back(source);
+    valid.terminal = node.path;
     auto first = compiler.Compile(valid,&graph);
     Check(!first.ok && !first.errors.empty(), "connected binding fails closed without evaluator");
     Check(preservesGraph(), "unsupported expression leaves existing graph contents intact");

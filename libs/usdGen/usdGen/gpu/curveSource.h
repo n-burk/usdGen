@@ -62,8 +62,26 @@ public:
     CudaCurveSource(const CudaCurveSource&) = delete;
     CudaCurveSource& operator=(const CudaCurveSource&) = delete;
 
-    CurveSourceStatus Set(CurveSourceInput input, cudaStream_t stream);
+    CurveSourceStatus Set(CurveSourceInput input, cudaStream_t stream,
+                          UsdGenExecutionMemoryReservation* reservation = nullptr);
     CurveSourceStatus Finish(cudaStream_t stream);
+    // Fresh-source async terminal path. `callback` runs on CUDA's native
+    // callback thread with the stream terminal status; it must only signal a
+    // pre-reserved relay and must not destroy `userdata`. This path rejects
+    // stream capture and never waits on/replaces an older active source.
+    CurveSourceStatus FinishFreshAsync(cudaStream_t stream,
+        void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata);
+    // Called by the relay only after FinishFreshAsync's callback reported
+    // cudaSuccess. Pure host ownership commit; no CUDA operation or wait.
+    CurveSourceStatus CommitFreshFinish();
+    // True after an upload path has queued work but failed to establish a
+    // completion proof.  The caller must retain/quarantine this source and
+    // its workspace; destroying DeviceBuffers in that state is unsafe.
+    bool HasUnprovenUpload() const noexcept { return unprovenUpload_; }
+    // A raw-input consumer can transfer completion-proof responsibility to
+    // this owner.  Set this only when that consumer's stream proof is lost;
+    // destruction then quarantines the source storage.
+    void MarkUnprovenUpload() noexcept { unprovenUpload_ = true; }
 
     DeviceCurveGeometryView view() const;
     DeviceView<const float> hairT() const;
@@ -78,7 +96,11 @@ public:
     uint64_t generation() const { return generation_; }
     size_t curveCount() const { return curveCount_; }
     size_t pointCount() const { return pointCount_; }
+    size_t ExclusiveRetainedBytes() const noexcept;
     uint32_t warningFlags() const { return warningFlags_; }
+    // Reclassifies only this completed source's active output channels.  It
+    // is host-only; pending upload storage is intentionally excluded.
+    void ReclassifyPublishedGeneration() noexcept;
 
 private:
     struct Storage {
@@ -96,6 +118,9 @@ private:
         DeviceCurveGeometryView view(size_t curves, size_t pointsCount) const;
         CurveSourceStatus recordUse(cudaStream_t stream);
         CurveSourceStatus waitOn(cudaStream_t stream) const;
+        void quarantine() noexcept;
+        void ReclassifyPublishedGeneration() noexcept;
+        size_t RetainedBytes() const noexcept;
     };
 
     CurveSourceStatus validate(CurveSourceInput input,
@@ -108,8 +133,15 @@ private:
                                std::vector<int32_t> &rootPrim,
                                std::vector<float2> &rootUV,
                                uint32_t &warningFlags) const;
-    CurveSourceStatus copyPending(cudaStream_t stream);
+    CurveSourceStatus copyPending(cudaStream_t stream,
+                                  UsdGenExecutionMemoryReservation* reservation);
+    // Safe only before submission or after a successful terminal stream
+    // proof.  It discards a partial candidate without touching active_.
+    void DiscardPendingCandidate() noexcept;
     CurveSourceStatus validateStream(cudaStream_t stream) const;
+    // General host commit used by the synchronous Finish path.  It permits
+    // replacement of an existing active source after Finish fenced consumers.
+    CurveSourceStatus CommitPending();
 
     Storage active_;
     Storage pendingStorage_;
@@ -127,6 +159,7 @@ private:
     uint64_t generation_ = 0;
     int deviceIndex_ = -1;
     bool pending_ = false;
+    bool unprovenUpload_ = false;
 };
 
 } // namespace usdGen::gpu

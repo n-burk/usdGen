@@ -2,6 +2,15 @@
 
 Date: 2026-09-04. Status: plan v1 (draft, pending review).
 
+Latest ownership amendment (2026-09-12): `14-hierarchy-cuda-implementation.md`
+governs the CUDA path and supersedes this draft where it conflicts. Use
+unmodified OpenUSD/Storm and publish standard Hydra `basisCurves`. All OpenUSD
+patches and their experimental custom-provider integration are retired; no
+custom Storm rprim or renderer is needed to represent usdGen's internal GPU
+hair layouts. A standard, GPU-resident rendering handoff remains to be
+implemented and verified. Host-backed reference publication is not evidence
+of that handoff and must not become an implicit fallback for CUDA geometry.
+
 This document specifies `usdGenImaging`: the library that connects the usdGen evaluator to Hydra 2.0.
 It fixes the four plugin registrations, the UsdImaging adapters that carry every `usdGen:*` property
 into data sources, the renderer-level `UsdGenGroomSceneIndex` that owns the published generation, the

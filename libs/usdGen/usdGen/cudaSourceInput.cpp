@@ -148,6 +148,62 @@ CudaSourcePreparationStatus PrepareCudaSourceImpl(
     return CudaSourcePreparationStatus::Ok;
 }
 
+bool CompactCudaSource(CudaSourcePrepared* prepared,
+                       std::vector<uint64_t> const& retainedStableIds) {
+    if (!prepared) return false;
+    try {
+        auto const& source = *prepared;
+        size_t const curves = source.curveVertexCounts.size();
+        if (source.curveId.size() != curves) return false;
+        size_t points = 0;
+        for (int32_t count : source.curveVertexCounts) {
+            if (count < 2 || size_t(count) > std::numeric_limits<size_t>::max() - points)
+                return false;
+            points += size_t(count);
+        }
+        auto optionalSize = [](auto const& values, size_t size) {
+            return values.empty() || values.size() == size;
+        };
+        if (source.points.size() != points ||
+            !optionalSize(source.rest, points) ||
+            !optionalSize(source.widths, points) ||
+            !optionalSize(source.hairT, points) ||
+            !optionalSize(source.rootPrim, curves) ||
+            !optionalSize(source.rootUV, curves) ||
+            !optionalSize(source.rootFrames, curves)) return false;
+        std::unordered_set<uint64_t> retain(retainedStableIds.begin(), retainedStableIds.end());
+        if (retain.size() != retainedStableIds.size()) return false;
+        std::unordered_set<uint64_t> unique;
+        CudaSourcePrepared candidate;
+        candidate.useRest = source.useRest;
+        candidate.warningFlags = source.warningFlags;
+        auto append = [](auto const& from, auto& to, size_t first, size_t count) {
+            if (!from.empty()) to.insert(to.end(), from.begin() + first,
+                                        from.begin() + first + count);
+        };
+        size_t first = 0;
+        for (size_t c = 0; c != curves; ++c) {
+            if (!unique.insert(source.curveId[c]).second) return false;
+            size_t const count = size_t(source.curveVertexCounts[c]);
+            if (retain.erase(source.curveId[c])) {
+                candidate.curveVertexCounts.push_back(source.curveVertexCounts[c]);
+                candidate.curveId.push_back(source.curveId[c]);
+                append(source.points, candidate.points, first, count);
+                append(source.rest, candidate.rest, first, count);
+                append(source.widths, candidate.widths, first, count);
+                append(source.hairT, candidate.hairT, first, count);
+                append(source.rootPrim, candidate.rootPrim, c, 1);
+                append(source.rootUV, candidate.rootUV, c, 1);
+                append(source.rootFrames, candidate.rootFrames, c, 1);
+            }
+            first += count;
+        }
+        if (!retain.empty()) return false;
+        *prepared = std::move(candidate);
+        return true;
+    } catch (...) { return false; }
+}
+
 CudaSourcePreparationStatus PrepareCudaSource(
     CudaSourcePreparationInput const& source, CudaSourcePreparationOptions const& options,
     CudaSourcePrepared* out, std::vector<std::string>* diagnostics) {

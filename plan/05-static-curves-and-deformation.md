@@ -391,7 +391,7 @@ P0/P1, and once per retained offset in P2 (§4.5).
 | Scene-index pull of a C3 prim (topology + every primvar), 10 k / 100 k / 1 M curves | 0.19 / 0.19 / 0.20 ms; second pull 0.01 ms | MEASURED, **EV-090** (the pull term of **EV-045**, freeze report §4.1) |
 | Reopening a `.usdc` sidecar and reading `points` (800 k CVs) | 0.4–0.8 ms | MEASURED, **EV-047** |
 | SoA transpose + chunk descriptors at 800 k CVs | one memory-bound pass over 9.6 MB in and 9.6 MB out, ≈0.25 ms | **DERIVED from EV-074** (0.49 ms per 19.2 MB `VtArray` pass, `research/G-motion-blur-sampling-strategy.md` §5; that measurement moved twice the bytes). Gate E-1r reports it separately |
-| Binding computation when `skinprim` is absent, 100 k roots | kd-tree build + kNN | UNMEASURED (gate **E-4**, run as M0 pre-work item **PW-1**, threshold ≤ 25 ms and linear in roots) |
+| Binding computation when `skinprim` is absent, 100 k roots | kd-tree build + kNN + patch solve | Production C3 benchmark (4096 faces, 8-way arena): cold 8.599 ms triangles / 15.708 ms bilinear quads; warm 6.992 / 15.440 ms. See `15-resource-aware-execution.md`, conservative quad culling checkpoint. These surface-binding measurements do not close GuideInterpolate **E-4**. |
 
 ---
 
@@ -484,8 +484,14 @@ Imports frequently have no `skinprim`. The loader then binds by closest point on
 1. Build (or reuse) a `UsdGenBindingCache` per surface capture epoch: a nanoflann kd-tree over the
    rest positions of the surface's face centroids (S38, nanoflann 1.12.1).
 2. For each curve root (its first CV in the rest buffer), query the `k = 8` nearest centroids and run
-   an exact point-in-triangle / closest-point-on-triangle test against each candidate's triangles;
-   keep the nearest.
+   an exact point-in-triangle / closest-point-on-triangle test against each candidate's
+   triangle/fan patches; keep the nearest. For quads, use the bilinear patch implied by
+   §3.3, including its boundary edges, rather than treating a split-triangle coordinate
+   as bilinear UV. On a warped quad those are different surface points. The bounded
+   bilinear solver must report failure instead of publishing an unconverged binding.
+   This is a nearest-candidate search over eight centroids, not a proof of global
+   nearest distance across every mesh face. (Convention resolved 2026-09-13; the
+   portable binding helper and its numerical/performance gates are in progress.)
 3. Store `(faceIndex, uv)` and, when `usdGen:rebind != "never"`, author them back onto the source
    prim on the tool's explicit "Bake bindings" action (never automatically — that would be a stage
    write from an evaluator, which R1 forbids).
@@ -1329,7 +1335,7 @@ Three routes, all landing in the same C3 shape:
 | First frame after `frozen -> live` (unfreeze) | one sub-graph recompile **plus a full capture of every re-admitted node** (§5.2) | UNMEASURED — bounded below by E-1's **≤ 1.5 ms** chain (ADR §9 R27; MEASURED 1.02 ms at 8 threads, **EV-008**) and above by the head's capture terms (`03-execution-engine.md` §4.1) | E-1, E-4, E-6 |
 | First frame after `live -> frozen` (re-freeze) | one load, 0.19–0.20 ms, plus the tail | MEASURED (load), **EV-090** — the pull term of **EV-045** | — |
 | P2 motion at k offsets | `k·T + (k−1)·m`, `m ≈ 1.0 ms` per 1.6 M points | `m` MEASURED (**EV-071**…**EV-073**), `T` UNMEASURED | R-1 |
-| Binding computation, 100 k roots | kd-tree + kNN | UNMEASURED | E-4 (M0 pre-work **PW-1**) |
+| Binding computation, 100 k roots | kd-tree + kNN + patch solve | C3 cold 8.599 ms triangles / 15.708 ms bilinear quads over 4096 faces, 8-way arena; detailed workload/limits in plan 15 | E-4 (GuideInterpolate workload remains separate) |
 | Brush move, Python + engine | 21.3 µs Python (**EV-061**) + 0.035–0.044 ms engine (**EV-002**, the 1 %-sparse chunk re-run at 20 threads) | MEASURED | T-1 |
 | CV pick, 100 k / 1 M CVs | 166 µs / 1.66 ms | MEASURED, **EV-064** | T-2, T-3 |
 | GPU cost of a freeze's `PrimsRemoved`+`PrimsAdded` | — | UNMEASURED; the protocol is freeze report §5 | tier T2 in M2, tier T4 at release |

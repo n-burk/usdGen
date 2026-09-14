@@ -223,7 +223,6 @@ void UsdGenLengthOp::Evaluate(
         static_cast<UsdGenLengthCapture const &>(captureIn);
     float *px = view->px, *py = view->py, *pz = view->pz;
     auto const *inPx = view->inPx, *inPy = view->inPy, *inPz = view->inPz;
-    const size_t cv = size_t(view->cvCount);
     // perCurve is a whole-buffer capture payload (the scheduler pre-offsets
     // only buffer planes and curveMask) — index it absolutely, grow.cpp pattern.
     auto const *mult = cap.perCurve.empty() ? nullptr : cap.perCurve.cdata();
@@ -233,7 +232,12 @@ void UsdGenLengthOp::Evaluate(
     // static destruction while an asynchronous evaluation is still running.
 
     for (uint32_t c = 0; c < view->curveCount; ++c) {
-        const size_t base = view->Cv(c, 0);
+        const size_t cv = view->cvCount ? size_t(view->cvCount)
+            : (view->cvOffsets ? size_t(view->cvOffsets[c + 1] - view->cvOffsets[c]) : 0);
+        const size_t base = view->cvCount ? size_t(c) * view->cvCount
+            : (view->cvOffsets ? size_t(view->cvOffsets[c]) -
+                (view->desc ? size_t(view->desc->firstCv) : 0) : 0);
+        if (!cv) continue;
         const float rx = inPx[base], ry = inPy[base], rz = inPz[base];
         const double m = mult ? double(mult[curveBase + c]) : 1.0;
         float f;
@@ -259,13 +263,13 @@ void UsdGenLengthOp::Evaluate(
         }
         if (f == 1.0f) {
             for (size_t i = 0; i < cv; ++i) {
-                const size_t o = view->Cv(c, i);
+                const size_t o = base + i;
                 px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
             }
             continue;
         }
         for (size_t i = 0; i < cv; ++i) {
-            const size_t o = view->Cv(c, i);
+            const size_t o = base + i;
             px[o] = rx + (inPx[o] - rx) * f;
             py[o] = ry + (inPy[o] - ry) * f;
             pz[o] = rz + (inPz[o] - rz) * f;

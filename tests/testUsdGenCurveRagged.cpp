@@ -3,14 +3,14 @@
 //
 // FIX-4 (review): the chunk-descriptor assertions need real chunks, so both
 // modes are driven through UsdGenCompiler + UsdGenScheduler::Run with the
-// graph harness copied from tests/testUsdGenRaggedTopo.cpp (source -> one
-// position-only Deform), not a bare op.Capture() call.
+// graph harness using source -> identity Width, not a bare op.Capture() call.
+// Deform is CUDA-only and cannot serve as a CPU pass-through fixture.
 //
 //   * resampleTo == 0 (default): source CV counts PRESERVED ragged —
 //     cvOffsets = {0,2,8,12} (size nCurves+1, [n] == totalCvs == 12),
-//     chunk cvCount == 0 on every deform chunk, CVs verbatim on the source
+//     chunk cvCount == 0 on every Width chunk, CVs verbatim on the source
 //     node's own buffer.
-//   * resampleTo == 4: uniform — cvOffsets stays EMPTY, every deform chunk
+//   * resampleTo == 4: uniform — cvOffsets stays EMPTY, every Width chunk
 //     carries cvCount == 4 == totalCvs/totalCurves, interiors interpolated.
 //
 // Tier T0: engine core only, no stage, no Hydra (gate B-1). Standalone
@@ -27,7 +27,9 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/vt/array.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -51,12 +53,13 @@ void Check(bool ok, std::string const &what)
 // Source surface: 3 curves with counts [2, 6, 4] (totalCvs == 12); curve c
 // runs along +x from (0,c,0) to (count-1,c,0). resampleTo > 0 is authored on
 // the source node (prefix-stripped param name per C1, FIX-2).
-UsdGenGraphDesc MakeRaggedCurveDesc(int resampleTo)
+UsdGenGraphDesc MakeRaggedCurveDesc(int resampleTo, float defaultWidth = 0.01f)
 {
     UsdGenGraphDesc d;
     d.description = SdfPath("/curveRagged");
-    d.terminal    = SdfPath("/curveRagged/deform");
+    d.terminal    = SdfPath("/curveRagged/width");
     d.time        = 0.0;
+    d.defaultWidth = defaultWidth;
 
     UsdGenSurfaceDesc s;
     s.path = SdfPath("/curveRagged/sourceCurves");
@@ -89,8 +92,10 @@ UsdGenGraphDesc MakeRaggedCurveDesc(int resampleTo)
     d.nodes.push_back(std::move(src));
 
     UsdGenNodeDesc def;
-    def.path    = SdfPath("/curveRagged/deform");
-    def.type    = TfToken("UsdGenDeform");
+    def.path    = SdfPath("/curveRagged/width");
+    def.type    = TfToken("UsdGenWidth");
+    def.params = {{TfToken("width"), VtValue(1.0f), false},
+                  {TfToken("replace"), VtValue(false), false}};
     def.enabled = true;
     def.blend   = 1.0f;
     def.inputs.push_back(SdfPath("/curveRagged/src"));
@@ -104,7 +109,8 @@ struct Harness {
     UsdGenCompiler  compiler;
     UsdGenGraph     graph;
 
-    explicit Harness(int resampleTo) : desc(MakeRaggedCurveDesc(resampleTo))
+    explicit Harness(int resampleTo, float defaultWidth = 0.01f)
+        : desc(MakeRaggedCurveDesc(resampleTo, defaultWidth))
     {
         UsdGenCompileResult const cr = compiler.Compile(desc, &graph);
         if (!cr.ok) {
@@ -131,8 +137,8 @@ struct Harness {
     UsdGenCurveBuffer const &Source() const {
         return graph.Node(graph.NodeIdForPath(SdfPath("/curveRagged/src"))).buffer;
     }
-    std::vector<UsdGenChunkDesc> const &DeformChunks() const {
-        return graph.Chunks(graph.NodeIdForPath(SdfPath("/curveRagged/deform")));
+    TfSpan<const UsdGenChunkDesc> TerminalChunks() const {
+        return graph.Chunks(graph.NodeIdForPath(desc.terminal));
     }
 };
 
@@ -155,13 +161,13 @@ int main()
               h.Source().cvOffsets.back() == int(h.Source().totalCvs),
               "ragged: cvOffsets[n] == totalCvs");
         Check(out.cvOffsets == want,
-              "ragged: cvOffsets preserved through Deform (FIX-1 carry)");
+              "ragged: cvOffsets preserved through Width");
 
-        std::vector<UsdGenChunkDesc> const &chunks = h.DeformChunks();
-        Check(!chunks.empty(), "ragged: deform has real chunk descriptors");
+        auto const chunks = h.TerminalChunks();
+        Check(!chunks.empty(), "ragged: Width has real chunk descriptors");
         Check(std::all_of(chunks.begin(), chunks.end(),
                           [](UsdGenChunkDesc const &cd) { return cd.cvCount == 0; }),
-              "ragged: every deform chunk cvCount == 0");
+              "ragged: every Width chunk cvCount == 0");
         int covered = 0;
         for (UsdGenChunkDesc const &cd : chunks) covered += int(cd.curveCount);
         Check(covered == 3, "ragged: chunk curve spans cover all 3 curves");
@@ -187,17 +193,60 @@ int main()
               out.totalCvs / out.totalCurves == 4,
               "uniform: terminal cvCount == totalCvs/totalCurves == 4");
 
-        std::vector<UsdGenChunkDesc> const &chunks = h.DeformChunks();
+        auto const chunks = h.TerminalChunks();
         Check(!chunks.empty() &&
               std::all_of(chunks.begin(), chunks.end(),
                           [](UsdGenChunkDesc const &cd) { return cd.cvCount == 4; }),
-              "uniform: every deform chunk carries cvCount == 4");
+              "uniform: every Width chunk carries cvCount == 4");
 
         // curve 0 = 2 source CVs resampled to 4 along the polyline: endpoints
         // exact, interior strictly interpolated.
         Check(src.px.size() == 12 && src.px[0] == 0.0f && src.px[1] > 0.3f &&
               src.px[1] < 0.7f && src.px[3] == 1.0f && src.py[3] == 0.0f,
               "uniform: curve0 [0,1] resampled to 4, interiors interpolated");
+    }
+
+    // The CPU surface-source path has no C3 authored-width payload; its
+    // missing-width contract is the description fallback.  Recompile through
+    // the real graph preserves the old VtArray owner while the changed capture
+    // receives a fresh private COW width plane.
+    {
+        Harness h(0, 0.25f);
+        UsdGenCurveBuffer const &initial = h.Source();
+        VtFloatArray oldWidths = initial.width;
+        Check(initial.width == VtFloatArray(12, 0.25f) &&
+                  h.Terminal().width == VtFloatArray(12, 0.25f),
+              "default width: surface source and terminal use description fallback");
+
+        h.desc.defaultWidth = 0.5f;
+        UsdGenCompileResult const recomp = h.compiler.Recompile(h.desc, &h.graph);
+        Check(recomp.ok, "default width: changed fallback recompiles");
+        UsdGenScheduler scheduler(8);
+        UsdGenEvalContext ctx;
+        ctx.desc = &h.graph.Desc();
+        ctx.time = h.desc.time;
+        UsdGenRunResult const run = scheduler.Run(h.graph, ctx, 2);
+        Check(!run.diagnostics.HasErrors(),
+              "default width: changed fallback recaptures cleanly");
+        UsdGenCurveBuffer const &updated = h.Source();
+        Check(oldWidths == VtFloatArray(12, 0.25f) &&
+                  updated.width == VtFloatArray(12, 0.5f) &&
+                  oldWidths.cdata() != updated.width.cdata(),
+              "default width: recapture keeps immutable predecessor COW owner");
+
+        for (float invalidWidth : {-1.0f,
+                 std::numeric_limits<float>::quiet_NaN(),
+                 std::numeric_limits<float>::infinity()}) {
+            h.desc.defaultWidth = invalidWidth;
+            UsdGenCompileResult const invalid = h.compiler.Recompile(h.desc, &h.graph);
+            Check(invalid.ok, "default width: invalid value reaches capture validation");
+            ctx.desc = &h.graph.Desc();
+            UsdGenRunResult const rejected = scheduler.Run(h.graph, ctx, 3);
+            Check(rejected.diagnostics.HasErrors(),
+                  "default width: non-finite/negative fallback is rejected");
+            Check(h.Source().width == VtFloatArray(12, 0.5f),
+                  "default width: rejected capture does not mutate prior COW buffer");
+        }
     }
 
     std::printf("%s\n", g_failures == 0 ? "PASS" : "FAIL");

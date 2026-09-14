@@ -19,6 +19,9 @@ namespace usdGen {
 enum class UsdGenDeviceBackend : uint8_t {
     Unknown = 0,
     Cuda = 1,
+    Metal = 2,
+    Vulkan = 3,
+    CpuReference = 4,
     Other = 255
 };
 
@@ -143,6 +146,18 @@ struct UsdGenDeviceGeometryMetadata
     UsdGenDeviceCurveTopologyMetadata curveTopology;
 };
 
+/// Validate immutable shape metadata before a backend allocates or submits.
+/// Uses the same contract as generation publication, without requiring a dummy
+/// native owner. This does not validate device data or readiness.
+bool ValidateUsdGenDeviceMetadata(UsdGenDeviceGeometryMetadata const& geometry,
+    std::vector<UsdGenDeviceChannelMetadata> const& channels,
+    std::string* reason = nullptr);
+
+/// Minimum byte span for a typed strided channel, with checked arithmetic.
+/// Zero elements require zero bytes. The output is unchanged on failure.
+bool UsdGenDeviceChannelStorageBytes(UsdGenDeviceChannelMetadata const& channel,
+    size_t* bytes, std::string* reason = nullptr);
+
 /// Tool identity is retained with a geometry snapshot so a tool cannot
 /// accidentally consume a later graph/device generation.
 struct UsdGenDeviceToolMetadata
@@ -166,7 +181,9 @@ public:
     /// until Complete (or destruction) fences and releases it.
     virtual UsdGenDeviceStatus WaitUntilReady() const noexcept = 0;
 
-    /// Fences the consumer stream and releases the use.  Implementations must
+    /// Arranges terminal retirement of the consumer stream and releases the
+    /// use. It may return before native work completes; the backend must keep
+    /// the owner alive until that completion is proven. Implementations must
     /// be idempotent and must not throw.
     virtual void Complete() noexcept = 0;
 };
@@ -182,6 +199,21 @@ public:
     /// Return true only when all producer work needed by the generation has
     /// completed or can safely be waited on.
     virtual bool ProducerReady() const noexcept = 0;
+
+    /// Exact bytes owned exclusively by this owner. Shared COW predecessors
+    /// are excluded so a cache can charge each physical delta only once.
+    /// A backend returning zero is ineligible for device-cache admission.
+    virtual size_t ExclusiveRetainedBytes() const noexcept { return 0; }
+
+    /// Conservative physical footprint reachable through this owner,
+    /// including immutable COW predecessors it retains. This is the
+    /// cache-charge view: it may count a shared predecessor again when more
+    /// than one independent cache entry references it, but it cannot
+    /// undercharge an entry whose predecessor outlives its cache record.
+    /// Backends with no COW predecessor inherit the exclusive value.
+    virtual size_t InclusiveRetainedBytes() const noexcept {
+        return ExclusiveRetainedBytes();
+    }
 
     /// Acquire a consumer use.  The owner may reject a stream that cannot be
     /// fenced safely.  The returned handle owns all per-use backend state and
@@ -247,12 +279,27 @@ public:
     UsdGenDeviceToolMetadata const &Tool() const noexcept;
     std::vector<UsdGenDeviceChannelMetadata> const &Channels() const noexcept;
     std::shared_ptr<const UsdGenDeviceOwner> Owner() const noexcept;
+    size_t ExclusiveRetainedBytes() const noexcept;
+    size_t InclusiveRetainedBytes() const noexcept;
+
+    /// Creates a new immutable publication identity over the same backend
+    /// owner. No channel is copied or made writable; this is a COW cache-hit
+    /// wrapper used to keep Session and device generation ids coherent.
+    std::shared_ptr<const UsdGenDeviceGeneration> Republish(
+        uint64_t generation, std::string *reason = nullptr) const;
+    /// Metadata-only publication alias for backends whose immutable payload
+    /// revisions are independent of publication identity. Keeps all geometry
+    /// and channel revisions; legacy Republish still advances valueVersion.
+    std::shared_ptr<const UsdGenDeviceGeneration> RepublishPreservingRevisions(
+        uint64_t generation, std::string *reason = nullptr) const;
 
     /// Acquires a lifetime/fence lease for a concrete consumer stream.  An
     /// invalid lease means the owner rejected the asynchronous use.
     UsdGenDeviceLease AcquireLease(UsdGenDeviceStream stream) const noexcept;
 
 private:
+    std::shared_ptr<const UsdGenDeviceGeneration> _Republish(
+        uint64_t generation, bool preserveRevisions, std::string *reason) const;
     UsdGenDeviceGeneration() = default;
 
     UsdGenDeviceIdentity _identity;

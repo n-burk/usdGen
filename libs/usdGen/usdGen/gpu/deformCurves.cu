@@ -208,19 +208,46 @@ RbfStatus CheckDevice(int *deviceIndex, cudaStream_t stream) {
     return RbfStatus::Ok;
 }
 
+bool DevicePointer(const void* pointer, size_t count, int device) {
+    if (!count) return true;
+    cudaPointerAttributes attributes{};
+    return pointer && cudaPointerGetAttributes(&attributes, pointer) == cudaSuccess &&
+        attributes.type == cudaMemoryTypeDevice && attributes.device == device;
+}
+
+bool FreshProvenance(DeviceCurveGeometryView geometry, DeviceView<const float3> roots,
+                     DeformParameters parameters, DeviceView<float3> output, int device) {
+    auto scalar = [device](ScalarField field) { return !field.data || DevicePointer(field.data, field.count, device); };
+    auto boolean = [device](BoolField field) { return !field.data || DevicePointer(field.data, field.count, device); };
+    return DevicePointer(geometry.points.data, geometry.points.size, device) &&
+        DevicePointer(geometry.curveOffsets.data, geometry.curveOffsets.size, device) &&
+        DevicePointer(roots.data, roots.size, device) && DevicePointer(output.data, output.size, device) &&
+        (!parameters.maskProfile.data || DevicePointer(parameters.maskProfile.data, parameters.maskProfile.size, device)) &&
+        (!parameters.hairT.data || DevicePointer(parameters.hairT.data, parameters.hairT.size, device)) &&
+        scalar(parameters.blend) && scalar(parameters.maskAmount) && boolean(parameters.enabled) && boolean(parameters.lockRoots);
+}
+
 } // namespace anonymous
 
 CudaRbfCurveDeformer::~CudaRbfCurveDeformer() {
+    // A fresh terminal callback proves work later than ready_.  Never use the
+    // legacy event to infer that a fresh D2H/copy callback has completed.
+    if (freshUnproven_ || freshFailed_) {
+        warped_.quarantine(); staged_.quarantine(); flags_.quarantine();
+        ready_ = nullptr; freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
+        return;
+    }
     // DeviceBuffer::release uses the current CUDA context.  Select the owner
     // before synchronizing/destroying anything, and never free through a
     // foreign or lost context.  A deliberately leaked quarantine is safer
     // than handing an opaque allocation to the wrong context.
-    const bool ownsBuffers = warped_.size() || staged_.size() || flags_.size() || ready_;
+    const bool ownsBuffers = warped_.size() || staged_.size() || flags_.size() || ready_ || freshHostError_;
     int previous = -1;
     const bool selected = !ownsBuffers ||
         (cudaGetDevice(&previous) == cudaSuccess && deviceIndex_ >= 0 &&
          cudaSetDevice(deviceIndex_) == cudaSuccess);
-    const bool synchronized = !ownsBuffers ||
+    const bool synchronized = !ownsBuffers || freshUsed_ ||
         (selected && (!ready_ || cudaEventSynchronize(ready_) == cudaSuccess));
     if (!selected || !synchronized) {
         if (ownsBuffers) {
@@ -228,6 +255,8 @@ CudaRbfCurveDeformer::~CudaRbfCurveDeformer() {
             staged_.quarantine();
             flags_.quarantine();
             ready_ = nullptr;
+            freshHostError_ = nullptr;
+            freshHostErrorPermit_.Abandon();
         }
         if (selected && previous >= 0 && previous != deviceIndex_)
             cudaSetDevice(previous);
@@ -237,6 +266,11 @@ CudaRbfCurveDeformer::~CudaRbfCurveDeformer() {
     warped_.reset(0);
     staged_.reset(0);
     flags_.reset(0);
+    if (freshHostError_) {
+        if (cudaFreeHost(freshHostError_) == cudaSuccess) freshHostErrorPermit_.Release();
+        else freshHostErrorPermit_.Abandon();
+        freshHostError_ = nullptr;
+    }
     if (previous >= 0 && previous != deviceIndex_) cudaSetDevice(previous);
 }
 
@@ -271,7 +305,9 @@ RbfStatus CudaRbfCurveDeformer::deformImpl(
     float groomEnvelope, DeviceView<const float> primitiveEnvelope,
     DeviceView<const float> pointEnvelope, DeviceView<float3> output,
     cudaStream_t stream) {
-    if (pending_ || poisoned_) return RbfStatus::InvalidArgument;
+    if (pending_ || poisoned_ || freshPhase_ != FreshPhase::None || freshFailed_ || freshUsed_)
+        return RbfStatus::InvalidArgument;
+    legacyUsed_ = true;
     RbfStatus status = CheckDevice(&deviceIndex_, stream);
     if (status != RbfStatus::Ok) return status;
     if (geometry.curveCount > size_t(std::numeric_limits<int>::max()) ||
@@ -357,6 +393,8 @@ RbfStatus CudaRbfCurveDeformer::deformImpl(
 }
 
 RbfStatus CudaRbfCurveDeformer::Finish(CudaRbfBinding& rbf, cudaStream_t stream) {
+    if (freshPhase_ != FreshPhase::None || freshUnproven_ || freshFailed_ || freshUsed_)
+        return RbfStatus::InvalidArgument;
     RbfStatus status = CheckDevice(&deviceIndex_, stream);
     if (status != RbfStatus::Ok) return status;
     if (!pending_) return rbf.Finish(stream);
@@ -378,6 +416,245 @@ RbfStatus CudaRbfCurveDeformer::Finish(CudaRbfBinding& rbf, cudaStream_t stream)
                         staged_.size() * sizeof(float3), cudaMemcpyDeviceToDevice,
                         stream) != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess)
         return RbfStatus::CudaError;
+    return RbfStatus::Ok;
+}
+
+bool CudaRbfCurveDeformer::HasUnprovenWork() const noexcept {
+    return freshUnproven_ || freshFailed_;
+}
+
+RbfStatus CudaRbfCurveDeformer::BeginFreshShape(
+    DeviceCurveGeometryView geometry, DeviceView<const float3> rootTargets,
+    DeformParameters parameters, DeviceView<float3> output, cudaStream_t stream,
+    UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || poisoned_ || legacyUsed_ || freshPhase_ != FreshPhase::None || freshFailed_)
+        return RbfStatus::InvalidArgument;
+    // Capture must be checked before stream-device queries or allocations.
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return RbfStatus::InvalidArgument;
+    RbfStatus status = CheckDevice(&deviceIndex_, stream);
+    if (status != RbfStatus::Ok) return status;
+    if (geometry.curveCount > size_t(std::numeric_limits<int>::max()) ||
+        geometry.pointCount > size_t(std::numeric_limits<int>::max()) ||
+        geometry.pointCount > size_t(std::numeric_limits<uint32_t>::max()) ||
+        (geometry.curveCount == 0 && geometry.pointCount != 0) ||
+        (geometry.curveCount && geometry.pointCount == 0) ||
+        (geometry.curveCount && (!geometry.curveOffsets.data ||
+            geometry.curveOffsets.size != geometry.curveCount + 1)) ||
+        (!geometry.curveCount && geometry.curveOffsets.size != 0 &&
+            geometry.curveOffsets.size != 1) ||
+        (!geometry.curveCount && geometry.curveOffsets.size == 1 &&
+            !geometry.curveOffsets.data) ||
+        (geometry.pointCount && (!geometry.points.data ||
+            geometry.points.size != geometry.pointCount)) ||
+        (!geometry.pointCount && geometry.points.size != 0) ||
+        (geometry.curveCount && (!rootTargets.data ||
+            rootTargets.size != geometry.curveCount)) ||
+        (!geometry.curveCount && rootTargets.size != 0) ||
+        output.size != geometry.pointCount ||
+        (geometry.pointCount && !output.data) ||
+        (!geometry.pointCount && output.size != 0) ||
+        (!parameters.maskProfile.data && parameters.maskProfile.size != 0) ||
+        (parameters.maskProfile.data && parameters.maskProfile.size != 257) ||
+        (!parameters.hairT.data && parameters.hairT.size != 0) ||
+        (parameters.hairT.data && parameters.hairT.size != geometry.pointCount))
+        return RbfStatus::InvalidArgument;
+    status = ValidateScalar(parameters.blend, geometry);
+    if (status != RbfStatus::Ok) return status;
+    status = ValidateScalar(parameters.maskAmount, geometry);
+    if (status != RbfStatus::Ok) return status;
+    status = ValidateBool(parameters.enabled, geometry, false);
+    if (status != RbfStatus::Ok) return status;
+    status = ValidateBool(parameters.lockRoots, geometry, true);
+    if (status != RbfStatus::Ok) return status;
+    if (!FreshProvenance(geometry, rootTargets, parameters, output, deviceIndex_))
+        return RbfStatus::InvalidArgument;
+
+    // Allocate every deformer-owned candidate before its first submission.
+    if (flags_.reset(1, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
+        warped_.reset(geometry.pointCount, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
+        staged_.reset(geometry.pointCount, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
+        return RbfStatus::CudaError;
+    if (!freshHostError_) {
+        auto permit = TryReserveCudaExecutionBytes(sizeof(int), UsdGenExecutionResourceKind::Scratch, reservation);
+        int* hostError = nullptr;
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&hostError), sizeof(int),
+                                     cudaHostAllocDefault) != cudaSuccess)
+            return RbfStatus::CudaError;
+        freshHostError_ = hostError;
+        freshHostErrorPermit_ = std::move(*permit);
+    }
+    freshGeometry_ = geometry;
+    freshRoots_ = rootTargets;
+    freshParameters_ = parameters;
+    output_ = output;
+    outputCount_ = geometry.pointCount;
+    *freshHostError_ = std::numeric_limits<int>::min();
+    freshPhase_ = FreshPhase::Shape;
+    freshUsed_ = true;
+    freshUnproven_ = true;
+    freshArmed_ = false;
+    if (cudaMemsetAsync(flags_.data(), 0, sizeof(int), stream) != cudaSuccess) {
+        freshFailed_ = true;
+        return RbfStatus::CudaError;
+    }
+    if (parameters.maskProfile.data) {
+        ValidateProfile<<<2, 256, 0, stream>>>(parameters.maskProfile.data, flags_.data());
+        if (cudaGetLastError() != cudaSuccess) {
+            freshFailed_ = true;
+            return RbfStatus::CudaError;
+        }
+    }
+    if (geometry.curveCount || geometry.curveOffsets.data) {
+        size_t const blocks = geometry.curveCount ? (geometry.curveCount + 255) / 256 : 1;
+        ValidateShape<<<blocks, 256, 0, stream>>>(geometry.curveOffsets.data,
+            int(geometry.curveCount), int(geometry.pointCount), rootTargets.data, flags_.data());
+        if (cudaGetLastError() != cudaSuccess) {
+            freshFailed_ = true;
+            return RbfStatus::CudaError;
+        }
+    }
+    if (cudaMemcpyAsync(freshHostError_, flags_.data(), sizeof(int),
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        freshFailed_ = true;
+        return RbfStatus::CudaError;
+    }
+    freshArmed_ = true;
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfCurveDeformer::CommitFreshShape() {
+    if (freshPhase_ != FreshPhase::Shape || !freshArmed_ || freshFailed_ || !freshHostError_)
+        return RbfStatus::InvalidArgument;
+    freshUnproven_ = false;
+    freshArmed_ = false;
+    int const error = *freshHostError_;
+    if (error != 0) {
+        freshPhase_ = FreshPhase::None;
+        output_ = {}; outputCount_ = 0; freshGeometry_ = {}; freshRoots_ = {}; freshParameters_ = {};
+        return error == kNonFinite ? RbfStatus::NonFiniteInput : RbfStatus::InvalidArgument;
+    }
+    freshPhase_ = FreshPhase::ShapeReady;
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfCurveDeformer::BeginFreshEvaluate(CudaRbfBinding& rbf, cudaStream_t stream,
+                                                    UsdGenExecutionMemoryReservation* reservation) {
+    if (freshPhase_ != FreshPhase::ShapeReady || freshFailed_) return RbfStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return RbfStatus::InvalidArgument;
+    if (CheckDevice(&deviceIndex_, stream) != RbfStatus::Ok) return RbfStatus::InvalidArgument;
+    if (!freshGeometry_.pointCount) {
+        freshPhase_ = FreshPhase::EvaluateReady;
+        return RbfStatus::Ok;
+    }
+    freshPhase_ = FreshPhase::Evaluate;
+    freshUnproven_ = true;
+    freshRbf_ = &rbf;
+    RbfStatus const status = rbf.BeginFreshEvaluate(freshGeometry_.points, warped_.view(), stream, reservation);
+    if (status != RbfStatus::Ok) {
+        if (rbf.HasUnprovenWork()) freshFailed_ = true;
+        else { freshPhase_ = FreshPhase::ShapeReady; freshUnproven_ = false; }
+    }
+    return status;
+}
+
+RbfStatus CudaRbfCurveDeformer::CommitFreshEvaluate(CudaRbfBinding& rbf) {
+    if (freshPhase_ == FreshPhase::EvaluateReady && !freshGeometry_.pointCount)
+        return RbfStatus::Ok;
+    if (freshPhase_ != FreshPhase::Evaluate || freshFailed_ || freshRbf_ != &rbf)
+        return RbfStatus::InvalidArgument;
+    RbfStatus const status = rbf.CommitFreshEvaluate();
+    if (status != RbfStatus::Ok && rbf.HasUnprovenWork()) {
+        freshFailed_ = true;
+        return status;
+    }
+    freshUnproven_ = false;
+    freshRbf_ = nullptr;
+    if (status != RbfStatus::Ok) {
+        freshPhase_ = FreshPhase::None;
+        output_ = {}; outputCount_ = 0; freshGeometry_ = {}; freshRoots_ = {}; freshParameters_ = {};
+        return status;
+    }
+    freshPhase_ = FreshPhase::EvaluateReady;
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfCurveDeformer::BeginFreshApply(cudaStream_t stream) {
+    if (freshPhase_ != FreshPhase::EvaluateReady || freshFailed_ || !freshHostError_)
+        return RbfStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return RbfStatus::InvalidArgument;
+    if (CheckDevice(&deviceIndex_, stream) != RbfStatus::Ok) return RbfStatus::InvalidArgument;
+    *freshHostError_ = std::numeric_limits<int>::min();
+    freshPhase_ = FreshPhase::Apply;
+    freshUnproven_ = true;
+    freshArmed_ = false;
+    if (cudaMemsetAsync(flags_.data(), 0, sizeof(int), stream) != cudaSuccess) {
+        freshFailed_ = true;
+        return RbfStatus::CudaError;
+    }
+    auto const& geometry = freshGeometry_;
+    if (geometry.curveCount)
+        ApplyDeformation<<<(geometry.curveCount + 255) / 256, 256, 0, stream>>>(
+            geometry.points.data, warped_.data(), geometry.curveOffsets.data, freshRoots_.data,
+            int(geometry.curveCount), 1.0f, nullptr, nullptr, freshParameters_.blend,
+            freshParameters_.maskAmount, freshParameters_.enabled, freshParameters_.lockRoots,
+            freshParameters_.maskProfile.data, freshParameters_.hairT.data, staged_.data(), flags_.data());
+    if (cudaGetLastError() != cudaSuccess ||
+        cudaMemcpyAsync(freshHostError_, flags_.data(), sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        freshFailed_ = true;
+        return RbfStatus::CudaError;
+    }
+    freshArmed_ = true;
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfCurveDeformer::CommitFreshApply() {
+    if (freshPhase_ != FreshPhase::Apply || !freshArmed_ || freshFailed_ || !freshHostError_)
+        return RbfStatus::InvalidArgument;
+    freshUnproven_ = false;
+    freshArmed_ = false;
+    int const error = *freshHostError_;
+    if (error != 0) {
+        freshPhase_ = FreshPhase::None;
+        output_ = {}; outputCount_ = 0; freshGeometry_ = {}; freshRoots_ = {}; freshParameters_ = {};
+        return error == kNonFinite ? RbfStatus::NonFiniteInput : RbfStatus::InvalidArgument;
+    }
+    freshPhase_ = FreshPhase::ApplyReady;
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfCurveDeformer::BeginFreshCopy(cudaStream_t stream) {
+    if (freshPhase_ != FreshPhase::ApplyReady || freshFailed_ ||
+        (outputCount_ && !output_.data) || outputCount_ != staged_.size())
+        return RbfStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return RbfStatus::InvalidArgument;
+    if (CheckDevice(&deviceIndex_, stream) != RbfStatus::Ok) return RbfStatus::InvalidArgument;
+    freshPhase_ = FreshPhase::Copy;
+    freshUnproven_ = true;
+    if (staged_.size() && cudaMemcpyAsync(output_.data, staged_.data(), staged_.size() * sizeof(float3),
+                                          cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+        freshFailed_ = true;
+        return RbfStatus::CudaError;
+    }
+    return RbfStatus::Ok;
+}
+
+RbfStatus CudaRbfCurveDeformer::CommitFreshFinish() {
+    if (freshPhase_ != FreshPhase::Copy || freshFailed_) return RbfStatus::InvalidArgument;
+    freshUnproven_ = false;
+    freshPhase_ = FreshPhase::None;
+    output_ = {}; outputCount_ = 0; freshGeometry_ = {}; freshRoots_ = {}; freshParameters_ = {};
     return RbfStatus::Ok;
 }
 

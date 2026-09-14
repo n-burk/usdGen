@@ -5,6 +5,7 @@
 #include "SeExpr2/Noise.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -36,6 +37,10 @@ bool Near(float3 a, float3 b, float tolerance = 2.0e-3f) {
 }
 bool Finite(float3 a) {
     return std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.z);
+}
+
+void FreshDone(cudaStream_t, cudaError_t status, void* data) noexcept {
+    static_cast<std::atomic<int>*>(data)->store(int(status), std::memory_order_release);
 }
 
 template <class T>
@@ -142,7 +147,8 @@ int main() {
 
     DeviceCurveGeometryView geometry{View(devicePoints), View(deviceRest), {}, View(deviceOffsets),
                                      View(deviceIds), 2, points.size()};
-    RestRootFrames frames{View(deviceTangent), View(deviceBinormal), View(deviceNormal)};
+    RestRootFrames frames{
+        View(deviceTangent), View(deviceBinormal), View(deviceNormal), {}};
     NoiseParameters parameters = Parameters(View(profile));
     CudaNoise noise;
     CHECK(noise.Apply(geometry, View(deviceHairT), frames, parameters,
@@ -157,6 +163,60 @@ int main() {
             CHECK(Near(raw[point], Add(points[point], FrameVector(tangent[c], binormal[c], normal[c], local))));
         }
     }
+
+    // Fresh publication is copy-on-write: ApplyFresh may fill its private
+    // staging but cannot touch the caller's candidate plane until the
+    // explicit asynchronous finish protocol. The accepted input remains
+    // byte-identical throughout, and all ordinary scratch/pinned accounting
+    // returns to its baseline when the producer is destroyed.
+    DeviceBuffer<float3> freshOutput;
+    CHECK(freshOutput.reset(points.size()) == cudaSuccess);
+    const std::vector<float3> freshSentinel(points.size(), V(91, 92, 93));
+    CHECK(cudaMemcpyAsync(freshOutput.data(), freshSentinel.data(),
+                          freshSentinel.size()*sizeof(float3),
+                          cudaMemcpyHostToDevice, producer) == cudaSuccess &&
+          cudaStreamSynchronize(producer) == cudaSuccess);
+    auto resourcePool = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, 0});
+    CHECK(resourcePool);
+    size_t const freshBaseline = resourcePool->Snapshot().usedBytes;
+    {
+        CudaNoise fresh;
+        std::atomic<int> callbackStatus{int(cudaErrorNotReady)};
+        parameters = Parameters(View(profile));
+        CHECK(fresh.ApplyFresh(geometry, View(deviceHairT), frames, parameters,
+                               freshOutput.view(), producer) == StyleStatus::Ok);
+        std::vector<float3> beforePublish;
+        CHECK(Download(freshOutput, &beforePublish, consumer));
+        CHECK(std::memcmp(beforePublish.data(), freshSentinel.data(),
+                          freshSentinel.size()*sizeof(float3)) == 0);
+        CHECK(resourcePool->Snapshot().usedBytes > freshBaseline);
+        CHECK(fresh.FinishFreshAsync(producer, FreshDone, &callbackStatus) ==
+              StyleStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer) == cudaSuccess &&
+              callbackStatus.load(std::memory_order_acquire) == int(cudaSuccess) &&
+              fresh.CommitFreshFinish() == StyleStatus::Ok);
+        CHECK(Download(freshOutput, &beforePublish, consumer));
+        CHECK(std::memcmp(beforePublish.data(), freshSentinel.data(),
+                          freshSentinel.size()*sizeof(float3)) != 0);
+        std::vector<float3> acceptedInput;
+        CHECK(Download(devicePoints, &acceptedInput, consumer));
+        CHECK(std::memcmp(acceptedInput.data(), points.data(),
+                          points.size()*sizeof(float3)) == 0);
+    }
+    CHECK(resourcePool->Snapshot().usedBytes == freshBaseline);
+    {
+        CudaNoise rejectedFresh;
+        parameters = Parameters(View(profile));
+        parameters.octaves = IntField::Literal(7);
+        CHECK(rejectedFresh.ApplyFresh(geometry, View(deviceHairT), frames,
+                                       parameters, freshOutput.view(), producer) ==
+              StyleStatus::InvalidValue);
+        // Validation occurred before any device or pinned candidate storage
+        // was allocated, so a retry cannot consume the pool incrementally.
+        CHECK(resourcePool->Snapshot().usedBytes == freshBaseline);
+    }
+    CHECK(resourcePool->Snapshot().usedBytes == freshBaseline);
 
     // Typed point float controls, point integer octaves, primitive seed, and
     // primitive cumulative booleans all remain device fields.
@@ -339,6 +399,33 @@ int main() {
     emptyParameters.cumulative = BoolField::Device(DeviceView<const uint8_t>{}, expr::Domain::Primitive);
     CHECK(emptyNoise.Apply(empty, {}, emptyFrames, emptyParameters, {}, producer) == StyleStatus::Ok);
     CHECK(emptyNoise.Finish(consumer) == StyleStatus::Ok);
+
+    // C3 Source/Grow publishes the canonical empty topology with one zero
+    // terminal offset. Exercise the fresh asynchronous publication protocol,
+    // not merely the legacy zero-offset-array representation above.
+    DeviceBuffer<uint32_t> emptyOffsets;
+    CHECK(Upload(emptyOffsets, std::vector<uint32_t>{0u}, producer));
+    empty.curveOffsets = View(emptyOffsets);
+    {
+        CudaNoise freshEmpty;
+        std::atomic<int> completion{int(cudaErrorNotReady)};
+        CHECK(freshEmpty.ApplyFresh(empty, {}, emptyFrames, emptyParameters, {}, producer) == StyleStatus::Ok);
+        CHECK(freshEmpty.FinishFreshAsync(producer, FreshDone, &completion) == StyleStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer) == cudaSuccess &&
+              completion.load(std::memory_order_acquire) == int(cudaSuccess));
+        CHECK(freshEmpty.CommitFreshFinish() == StyleStatus::Ok);
+    }
+    // Even with no curves to launch, a nonzero device-side terminal offset
+    // must fail validation. Invalid host shapes must fail before submission.
+    CHECK(Upload(emptyOffsets, std::vector<uint32_t>{1u}, producer));
+    CHECK(emptyNoise.Apply(empty, {}, emptyFrames, emptyParameters, {}, producer) == StyleStatus::Ok);
+    CHECK(emptyNoise.Finish(consumer) == StyleStatus::InvalidArgument);
+    empty.curveOffsets = {nullptr, 1};
+    CHECK(emptyNoise.ApplyFresh(empty, {}, emptyFrames, emptyParameters, {}, producer) == StyleStatus::InvalidArgument);
+    CHECK(Upload(emptyOffsets, std::vector<uint32_t>{0u, 0u}, producer));
+    empty.curveOffsets = View(emptyOffsets);
+    CHECK(emptyNoise.ApplyFresh(empty, {}, emptyFrames, emptyParameters, {}, producer) == StyleStatus::InvalidArgument);
+    CHECK(cudaStreamSynchronize(producer) == cudaSuccess);
 
     } // All CUDA buffers/events are destroyed before their streams.
 

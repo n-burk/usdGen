@@ -15,12 +15,15 @@
 #include "pxr/usd/sdf/path.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
+
+class UsdGenImagePayload;
 
 /// One authored usdGen:* property, resolved. `name` is the property name with
 /// the `usdGen:` prefix stripped (C1 registry, docs/freezes/C1.md).
@@ -36,9 +39,14 @@ struct UsdGenParamValue
 // selecting the legacy CPU implementation.  Keep the existing values of the
 // two established backends stable for descriptor compatibility.
 enum class UsdGenExecutionBackend : uint8_t {
-    CpuReference,
-    Cuda,
-    Invalid
+    // Keep the original descriptor values stable. These values are carried
+    // by some host-side graph snapshots, so adding portable backend names
+    // must not renumber either established backend or Invalid.
+    CpuReference = 0,
+    Cuda = 1,
+    Invalid = 2,
+    Metal = 3,
+    Vulkan = 4
 };
 
 struct UsdGenExpressionOutputDesc { TfToken name{"result"}; TfToken nativeType{"float"}; expr::ValueShape shape; };
@@ -58,6 +66,49 @@ struct UsdGenRampDesc
     TfToken      interpolation; // linear | catmullRom | bspline | constant (default catmullRom, R11)
 };
 
+/// The authored relationship slot which consumes a map.  A path alone is not
+/// sufficient: mask:source and length:source can intentionally name the same
+/// map while retaining different evaluation semantics.  Generic is the
+/// compatibility spelling for the historical usdGen:map relationship and
+/// direct descriptor clients which only populate UsdGenNodeDesc::maps.
+enum class UsdGenMapBindingPurpose : uint8_t {
+    Generic,
+    MaskSource,
+    LengthSource
+};
+
+struct UsdGenMapBindingDesc
+{
+    SdfPath                  map;
+    UsdGenMapBindingPurpose  purpose = UsdGenMapBindingPurpose::Generic;
+    // Exact authored relationship name, retained for diagnostics. Empty is
+    // valid only for direct/legacy descriptors; consumers which require a
+    // semantic role must reject Generic rather than guessing from the path.
+    TfToken                  relationship;
+};
+
+inline bool
+UsdGenMapBindingHasSemanticPurpose(UsdGenMapBindingDesc const &binding)
+{
+    return binding.purpose != UsdGenMapBindingPurpose::Generic;
+}
+
+/// A named plane authored on a C3 curve set. Descriptor-only transport keeps
+/// the source path backend-neutral: Point becomes vertex, Primitive uniform,
+/// and Groom one constant value in the CPU CurveSource buffer.
+enum class UsdGenAuthoredPlaneType : uint8_t { Float32, Int32 };
+enum class UsdGenAuthoredPlaneDomain : uint8_t { Point, Primitive, Groom };
+
+struct UsdGenAuthoredPlaneDesc
+{
+    TfToken name;
+    UsdGenAuthoredPlaneType type = UsdGenAuthoredPlaneType::Float32;
+    UsdGenAuthoredPlaneDomain domain = UsdGenAuthoredPlaneDomain::Point;
+    uint8_t arity = 1;                 // [1, 16]
+    VtFloatArray floatValues;          // populated only for Float32
+    VtIntArray intValues;              // populated only for Int32
+};
+
 struct UsdGenNodeDesc
 {
     SdfPath                      path;         // the operator prim's scene path (identity + Kahn tie-break)
@@ -74,7 +125,10 @@ struct UsdGenNodeDesc
     SdfPathVector                curves;       // usdGen:guides / usdGen:curves / usdGen:frozen:curves
                                                //   -> indices into UsdGenGraphDesc::curveSets
     SdfPathVector                surfaces;     // usdGen:surface targets (Mesh or GeomSubset, ADR R15)
-    SdfPathVector                maps;         // usdGen:mask:source, per-parameter map targets
+    // Legacy untyped map paths.  Keep this populated by builders and accept
+    // it from old direct clients; mapBindings is the canonical typed form.
+    SdfPathVector                maps;
+    std::vector<UsdGenMapBindingDesc> mapBindings;
     std::vector<UsdGenParamValue> params;      // EVERY mapped locator of this prim (S14 pull-all)
     std::vector<UsdGenExpressionBinding> expressionBindings;
     std::vector<UsdGenRampDesc>   ramps;
@@ -104,11 +158,24 @@ struct UsdGenCurveSetDesc
     VtMatrix4dArray rootFrame;         // primvars:usdGen:rootFrame; may be empty
     std::string     frozenEpoch;       // constant string primvar, "usdgen1:sha1:..." (S42)
     VtFloatArray    guideBlend;        // per-guide usdGen:blend on UsdGenGuideSet
+    std::vector<UsdGenAuthoredPlaneDesc> authoredPlanes;
     uint64_t        curveGeneration = 0;   // bumped by any points/topology/id change on the prim
 };
 
 /// A surface geometry sample at an absolute time (R23).
 struct UsdGenSurfaceSample { double time; VtVec3fArray points; };
+
+// The Default-time mesh-normal interpolation transported by UsdGenRestAPI.
+// Invalid is deliberately distinct from None: a nonempty malformed snapshot
+// must not be silently converted into geometric-normal fallback by CUDA.
+enum class UsdGenSurfaceNormalDomain : uint8_t {
+    None,
+    Constant,
+    Uniform,
+    Vertex,
+    FaceVarying,
+    Invalid
+};
 
 struct UsdGenSurfaceDesc
 {
@@ -116,6 +183,8 @@ struct UsdGenSurfaceDesc
     UsdGenSurfaceId id = 0;
     VtIntArray     faceVertexCounts, faceVertexIndices;
     VtVec3fArray   restPoints;        // usdGen/rest/points (S12), UsdTimeCode::Default()
+    VtVec3fArray   restNormals;       // usdGen/rest/normals, Default-time Mesh normals
+    UsdGenSurfaceNormalDomain restNormalDomain = UsdGenSurfaceNormalDomain::None;
     bool          restFromCurrentPoints = false; // compatibility fallback, never a valid RBF binding
     VtVec3fArray   points;            // deformed, at UsdGenGraphDesc::time
     /// Sorted by time; samples[0].time == UsdGenGraphDesc::time (R23).
@@ -134,6 +203,23 @@ struct UsdGenMapDesc
     std::string  resolvedAssetPath;   // stage-free (S13)
     uint64_t     textureGeneration = 0;  // bumped by ReloadMaps()
     std::vector<UsdGenParamValue> params;
+    // Optional stage-free decoded pixels for a typed ImageMap consumer. The
+    // immutable payload is backend-neutral; callers replacing it must also
+    // advance textureGeneration, which is the deterministic cache identity.
+    std::shared_ptr<const UsdGenImagePayload> imagePayload;
+};
+
+/// Compiler-resolved map value.  It contains no stage or backend handle: the
+/// identity is a deterministic digest of the fully resolved descriptor value
+/// and can therefore be retained safely by a CPU capture (or rejected by a
+/// backend which has no transport for it).
+struct UsdGenResolvedMapValue
+{
+    SdfPath     path;
+    TfToken     type;
+    std::string resolvedAssetPath;
+    uint64_t    textureGeneration = 0;
+    uint64_t    identity = 0;
 };
 
 /// The description's look block (02-schema.md §2.12 defaults; 07 §1.2 bake

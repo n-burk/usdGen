@@ -48,8 +48,26 @@ public:
                       LengthParameters parameters,
                       DeviceView<float3> output,
                       DeviceView<uint8_t> keep,
-                      cudaStream_t stream);
+                      cudaStream_t stream,
+                      UsdGenExecutionMemoryReservation* reservation = nullptr);
     StyleStatus Finish(cudaStream_t stream);
+    // Fresh-only nonblocking publication.  ApplyFresh rejects capture before
+    // device/stream queries or allocation.  FinishFreshAsync conditionally
+    // publishes both points and keep only after device validation, copies the
+    // scalar status to owned pinned storage, then invokes the caller callback.
+    // CommitFreshFinish is host-only and requires the caller relay to prove
+    // native cudaSuccess and launcher return.
+    StyleStatus ApplyFresh(DeviceCurveGeometryView geometry,
+                           DeviceView<const float> hairT,
+                           LengthParameters parameters,
+                           DeviceView<float3> output,
+                           DeviceView<uint8_t> keep,
+                           cudaStream_t stream,
+                           UsdGenExecutionMemoryReservation* reservation = nullptr);
+    StyleStatus FinishFreshAsync(cudaStream_t stream,
+        void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata);
+    StyleStatus CommitFreshFinish();
+    bool HasUnprovenWork() const noexcept { return unprovenWork_; }
     bool pending() const { return pending_; }
     int deviceIndex() const { return deviceIndex_; }
     const char *diagnostic() const { return diagnostic_.c_str(); }
@@ -67,6 +85,14 @@ private:
     size_t points_ = 0, curves_ = 0;
     int deviceIndex_ = -1;
     bool pending_ = false;
+    int* freshHostError_ = nullptr;
+    UsdGenExecutionResourcePermit freshHostErrorPermit_;
+    bool freshPreparing_ = false;
+    bool freshApplying_ = false;
+    bool freshPending_ = false;
+    bool freshCallbackArmed_ = false;
+    bool freshUploadFailed_ = false;
+    bool unprovenWork_ = false;
     std::string diagnostic_;
 };
 }

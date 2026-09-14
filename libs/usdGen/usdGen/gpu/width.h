@@ -40,6 +40,10 @@ struct WidthParameters {
     ScalarField taperStart = ScalarField::Literal(0.5f);
     ScalarField blend = ScalarField::Literal(1.0f);
     ScalarField maskAmount = ScalarField::Literal(1.0f);
+    // Per-domain map scalar sampled from a typed ImageMap MaskSource. This
+    // remains separate from maskAmount so authored and mapped envelopes
+    // multiply rather than one overwriting the other.
+    ScalarField mapMask = ScalarField::Literal(1.0f);
     BoolField enabled = BoolField::Literal(true);
     BoolField replace = BoolField::Literal(true);
     DeviceView<const float> widthProfile{}; // exactly 257 entries
@@ -60,8 +64,25 @@ public:
                       DeviceView<const float> hairT,
                       WidthParameters parameters,
                       DeviceView<float> output,
-                      cudaStream_t stream);
+                      cudaStream_t stream,
+                      UsdGenExecutionMemoryReservation* reservation = nullptr);
     StyleStatus Finish(cudaStream_t stream);
+    // Fresh-only nonblocking publication. ApplyFresh rejects capture before
+    // stream/device queries or allocation. FinishFreshAsync copies the scalar
+    // validation result to owned pinned storage then invokes `callback`.
+    // The callback must only signal retained host state. CommitFreshFinish is
+    // host-only and may be called exactly once only after both launcher return
+    // and a cudaSuccess native callback have been proved by that host relay.
+    StyleStatus ApplyFresh(DeviceCurveGeometryView geometry,
+                           DeviceView<const float> hairT,
+                           WidthParameters parameters,
+                           DeviceView<float> output,
+                           cudaStream_t stream,
+                           UsdGenExecutionMemoryReservation* reservation = nullptr);
+    StyleStatus FinishFreshAsync(cudaStream_t stream,
+        void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata);
+    StyleStatus CommitFreshFinish();
+    bool HasUnprovenWork() const noexcept { return unprovenWork_; }
     bool pending() const { return pending_; }
 
 private:
@@ -71,7 +92,8 @@ private:
                                   DeviceCurveGeometryView geometry,
                                   bool groomOnly) const;
     StyleStatus begin(DeviceCurveGeometryView geometry,
-                      DeviceView<float> output, cudaStream_t stream);
+                      DeviceView<float> output, cudaStream_t stream,
+                      UsdGenExecutionMemoryReservation* reservation);
     StyleStatus finishPublication(cudaStream_t stream);
 
     DeviceBuffer<int> error_;
@@ -81,6 +103,14 @@ private:
     size_t pointCount_ = 0;
     int deviceIndex_ = -1;
     bool pending_ = false;
+    int* freshHostError_ = nullptr;
+    UsdGenExecutionResourcePermit freshHostErrorPermit_;
+    bool freshPreparing_ = false;
+    bool freshApplying_ = false;
+    bool freshPending_ = false;
+    bool freshCallbackArmed_ = false;
+    bool freshUploadFailed_ = false;
+    bool unprovenWork_ = false;
 };
 
 } // namespace usdGen::gpu

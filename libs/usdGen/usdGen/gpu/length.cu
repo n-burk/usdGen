@@ -310,6 +310,20 @@ __global__ void LengthKernel(DeviceCurveGeometryView g,
     }
 }
 
+// Fresh publication is conditional: a device semantic rejection must leave
+// both caller-owned candidate channels untouched.
+__global__ void PublishLength(DeviceView<const float3> staging,
+                              DeviceView<const uint8_t> keepStaging,
+                              DeviceView<float3> output,
+                              DeviceView<uint8_t> keep,
+                              const int* error) {
+    if (LoadError(error) != 0) return;
+    const size_t first = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t stride = size_t(gridDim.x) * blockDim.x;
+    for (size_t i = first; i < staging.size; i += stride) output.data[i] = staging.data[i];
+    for (size_t i = first; i < keepStaging.size; i += stride) keep.data[i] = keepStaging.data[i];
+}
+
 unsigned Blocks(size_t count) {
     const size_t required = (count + 255u) / 256u;
     return static_cast<unsigned>(std::max<size_t>(1u,
@@ -323,19 +337,34 @@ StyleStatus Decode(int code) {
 } // namespace
 
 CudaLength::~CudaLength() {
+    if (unprovenWork_) {
+        error_.quarantine(); staging_.quarantine(); keepStaging_.quarantine();
+        ready_ = nullptr; freshHostError_ = nullptr; freshHostErrorPermit_.Abandon();
+        return;
+    }
+    const bool owns = error_.size() || staging_.size() || keepStaging_.size() ||
+        ready_ || freshHostError_;
+    if (!owns) return;
     int previous = -1;
     const bool gotPrevious = cudaGetDevice(&previous) == cudaSuccess;
     const bool selected = deviceIndex_ >= 0 && cudaSetDevice(deviceIndex_) == cudaSuccess;
     const bool synchronized = selected && (!ready_ || cudaEventSynchronize(ready_) == cudaSuccess);
     if (!selected || !synchronized) {
         error_.quarantine(); staging_.quarantine(); keepStaging_.quarantine();
-        ready_ = nullptr;
+        ready_ = nullptr; freshHostError_ = nullptr; freshHostErrorPermit_.Abandon();
         if (selected && gotPrevious && previous != deviceIndex_) cudaSetDevice(previous);
         return;
     }
     if (ready_) cudaEventDestroy(ready_);
     ready_ = nullptr;
     error_.release(); staging_.release(); keepStaging_.release();
+    if (freshHostError_) {
+        if (selected && cudaFreeHost(freshHostError_) == cudaSuccess)
+            freshHostErrorPermit_.Release();
+        else
+            freshHostErrorPermit_.Abandon();
+        freshHostError_ = nullptr;
+    }
     if (gotPrevious && previous != deviceIndex_) cudaSetDevice(previous);
 }
 
@@ -389,8 +418,10 @@ StyleStatus CudaLength::validateBool(BoolField f,
 
 StyleStatus CudaLength::Apply(DeviceCurveGeometryView g, DeviceView<const float> hairT,
                               LengthParameters p, DeviceView<float3> output,
-                              DeviceView<uint8_t> keep, cudaStream_t stream) {
-    if (pending_) return fail(StyleStatus::InvalidArgument,
+                              DeviceView<uint8_t> keep, cudaStream_t stream,
+                              UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || (freshPreparing_ && !freshApplying_) || freshPending_ ||
+        unprovenWork_ || freshUploadFailed_) return fail(StyleStatus::InvalidArgument,
                               "Finish is required before another Length operation");
     if (g.curveCount > size_t(INT_MAX) || g.pointCount > size_t(UINT32_MAX) ||
         g.curveCount == std::numeric_limits<size_t>::max() ||
@@ -442,41 +473,69 @@ StyleStatus CudaLength::Apply(DeviceCurveGeometryView g, DeviceView<const float>
     if (deviceIndex_ < 0) deviceIndex_ = current;
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess)
         return fail(StyleStatus::CudaError, "Length event creation failed");
-    if (error_.reset(1) != cudaSuccess || staging_.reset(g.pointCount) != cudaSuccess ||
-        keepStaging_.reset(g.curveCount) != cudaSuccess)
+    if (error_.reset(1, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
+        staging_.reset(g.pointCount, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
+        keepStaging_.reset(g.curveCount, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
         return fail(StyleStatus::CudaError, "Length allocation failed");
-    if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess)
+    if (freshPreparing_ && !freshHostError_) {
+        auto permit = TryReserveCudaExecutionBytes(sizeof(int), UsdGenExecutionResourceKind::Scratch, reservation);
+        int* hostError = nullptr;
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&hostError), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return fail(StyleStatus::CudaError, "Length pinned diagnostic allocation failed");
+        freshHostError_ = hostError;
+        freshHostErrorPermit_ = std::move(*permit);
+    }
+    if (freshPreparing_) unprovenWork_ = true;
+    if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess) {
+        // A failed enqueue cannot prove that an earlier operation on this
+        // stream has completed.  The destructor must quarantine this state.
+        unprovenWork_ = true;
         return fail(StyleStatus::CudaError, "Length error reset failed");
+    }
     ValidateKernel<<<Blocks(std::max(g.curveCount, g.pointCount)), 256, 0, stream>>>(
         g, hairT, p.maskProfile, error_.data());
-    if (cudaGetLastError() != cudaSuccess)
+    if (cudaGetLastError() != cudaSuccess) {
+        unprovenWork_ = true;
         return fail(StyleStatus::CudaError, "Length validation launch failed");
+    }
     LengthKernel<<<Blocks(g.curveCount), 256, 0, stream>>>(
         g, hairT, p, staging_.view(), keepStaging_.view(), error_.data());
-    if (cudaGetLastError() != cudaSuccess)
+    if (cudaGetLastError() != cudaSuccess) {
+        unprovenWork_ = true;
         return fail(StyleStatus::CudaError, "Length launch failed");
-    if (cudaEventRecord(ready_, stream) != cudaSuccess)
+    }
+    if (cudaEventRecord(ready_, stream) != cudaSuccess) {
+        unprovenWork_ = true;
         return fail(StyleStatus::CudaError, "Length event record failed");
+    }
     output_ = output; keep_ = keep; points_ = g.pointCount; curves_ = g.curveCount;
     pending_ = true;
     return StyleStatus::Ok;
 }
 
 StyleStatus CudaLength::Finish(cudaStream_t stream) {
-    if (!pending_) return StyleStatus::InvalidArgument;
+    if (!pending_ || freshPending_ || unprovenWork_) return StyleStatus::InvalidArgument;
     int current = -1;
-    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_)
+    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_) {
+        unprovenWork_ = true;
         return StyleStatus::InvalidArgument;
+    }
     if (stream) {
         int streamDevice = -1;
-        if (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess)
+        if (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess) {
+            unprovenWork_ = true;
             return StyleStatus::CudaError;
-        if (streamDevice != deviceIndex_) return StyleStatus::InvalidArgument;
+        }
+        if (streamDevice != deviceIndex_) {
+            unprovenWork_ = true;
+            return StyleStatus::InvalidArgument;
+        }
     }
     int code = 0;
     if (cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess ||
         cudaMemcpyAsync(&code, error_.data(), sizeof(code), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
         cudaStreamSynchronize(stream) != cudaSuccess) {
+        unprovenWork_ = true;
         pending_ = false;
         return fail(StyleStatus::CudaError, "Length diagnostic readback failed");
     }
@@ -489,10 +548,89 @@ StyleStatus CudaLength::Finish(cudaStream_t stream) {
         (curves_ && cudaMemcpyAsync(keep_.data, keepStaging_.data(), curves_*sizeof(uint8_t),
                                      cudaMemcpyDeviceToDevice, stream) != cudaSuccess) ||
         cudaStreamSynchronize(stream) != cudaSuccess) {
+        unprovenWork_ = true;
         pending_ = false;
         return fail(StyleStatus::CudaError, "Length publication failed");
     }
     pending_ = false; output_ = {}; keep_ = {}; points_ = curves_ = 0;
     return StyleStatus::Ok;
+}
+
+StyleStatus CudaLength::ApplyFresh(DeviceCurveGeometryView geometry,
+                                   DeviceView<const float> hairT,
+                                   LengthParameters parameters,
+                                   DeviceView<float3> output,
+                                   DeviceView<uint8_t> keep,
+                                   cudaStream_t stream,
+                                   UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || freshPending_ || freshPreparing_ || unprovenWork_)
+        return StyleStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return StyleStatus::InvalidArgument;
+    freshPreparing_ = true;
+    freshApplying_ = true;
+    StyleStatus const status = Apply(geometry, hairT, parameters, output, keep,
+                                     stream, reservation);
+    freshApplying_ = false;
+    freshPreparing_ = false;
+    if (status != StyleStatus::Ok) {
+        if (unprovenWork_) freshUploadFailed_ = true;
+        return status;
+    }
+    freshPending_ = true;
+    freshUploadFailed_ = false;
+    freshCallbackArmed_ = false;
+    *freshHostError_ = std::numeric_limits<int>::min();
+    return StyleStatus::Ok;
+}
+
+StyleStatus CudaLength::FinishFreshAsync(cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata) {
+    if (!pending_ || !freshPending_ || !callback || freshUploadFailed_ ||
+        freshCallbackArmed_ || !freshHostError_)
+        return StyleStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) {
+        freshUploadFailed_ = true;
+        return StyleStatus::InvalidArgument;
+    }
+    int current = -1, streamDevice = -1;
+    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_ ||
+        (stream && (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess ||
+                    streamDevice != deviceIndex_)) ||
+        cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return StyleStatus::CudaError;
+    }
+    if (points_ || curves_) {
+        PublishLength<<<Blocks(std::max(points_, curves_)), 256, 0, stream>>>(
+            {staging_.data(), staging_.size()}, {keepStaging_.data(), keepStaging_.size()},
+            output_, keep_, error_.data());
+        if (cudaGetLastError() != cudaSuccess) {
+            freshUploadFailed_ = true;
+            return StyleStatus::CudaError;
+        }
+    }
+    if (cudaMemcpyAsync(freshHostError_, error_.data(), sizeof(int),
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaStreamAddCallback(stream, callback, userdata, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return StyleStatus::CudaError;
+    }
+    freshCallbackArmed_ = true;
+    return StyleStatus::Ok;
+}
+
+StyleStatus CudaLength::CommitFreshFinish() {
+    if (!pending_ || !freshPending_ || !freshCallbackArmed_ || freshUploadFailed_ ||
+        !freshHostError_ || *freshHostError_ == std::numeric_limits<int>::min())
+        return StyleStatus::InvalidArgument;
+    pending_ = false; freshPending_ = false; freshCallbackArmed_ = false;
+    freshUploadFailed_ = false; unprovenWork_ = false;
+    points_ = curves_ = 0; output_ = {}; keep_ = {};
+    return *freshHostError_ == 0 ? StyleStatus::Ok : Decode(*freshHostError_);
 }
 } // namespace usdGen::gpu

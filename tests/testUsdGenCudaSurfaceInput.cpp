@@ -1,6 +1,7 @@
 #include "pxr/base/gf/vec2f.h"
 #include "cudaSurfaceInput.h"
 #include <cstdio>
+#include <limits>
 
 using namespace usdGen;
 
@@ -22,6 +23,44 @@ int main() {
         prepared.faceVertexIndices.size() != 7 || prepared.sampleBudget != 8 ||
         prepared.algorithmVersion != 3) {
         std::fprintf(stderr, "prepared surface shape mismatch\n"); return 1;
+    }
+
+    auto normalSource = source;
+    normalSource.restNormals = {{0, 0, 1}};
+    normalSource.restNormalDomain = UsdGenSurfaceNormalDomain::Constant;
+    CudaSurfacePrepared normalPrepared;
+    if (PrepareCudaSurface(normalSource, 8, 3, &normalPrepared, nullptr) !=
+            CudaSurfacePreparationStatus::Ok ||
+        normalPrepared.restNormalDomain != UsdGenSurfaceNormalDomain::Constant ||
+        normalPrepared.restNormals.size() != 1 ||
+        RestBindingMatches(prepared, normalPrepared)) {
+        std::fprintf(stderr, "constant rest normal binding was not retained\n"); return 1;
+    }
+    normalSource.restNormals = {{0, 0, 1}, {0, 1, 0}};
+    normalSource.restNormalDomain = UsdGenSurfaceNormalDomain::Uniform;
+    if (PrepareCudaSurface(normalSource, 8, 3, &normalPrepared, nullptr) !=
+            CudaSurfacePreparationStatus::Ok ||
+        normalPrepared.restNormals.size() != 2 ||
+        normalPrepared.restNormalDomain != UsdGenSurfaceNormalDomain::Uniform) {
+        std::fprintf(stderr, "uniform rest normal binding was rejected\n"); return 1;
+    }
+    normalSource.restNormals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1},
+                                {0, 0, 1}, {0, 0, 1}};
+    normalSource.restNormalDomain = UsdGenSurfaceNormalDomain::Vertex;
+    if (PrepareCudaSurface(normalSource, 8, 3, &normalPrepared, nullptr) !=
+            CudaSurfacePreparationStatus::Ok ||
+        normalPrepared.restNormals.size() != 5 ||
+        normalPrepared.restNormalDomain != UsdGenSurfaceNormalDomain::Vertex) {
+        std::fprintf(stderr, "vertex rest normal binding was rejected\n"); return 1;
+    }
+    normalSource.restNormals = {{0, 0, 1}, {0, 0, 1}, {0, 0, 1}, {0, 0, 1},
+                                {0, 0, 1}, {0, 0, 1}, {0, 0, 1}};
+    normalSource.restNormalDomain = UsdGenSurfaceNormalDomain::FaceVarying;
+    if (PrepareCudaSurface(normalSource, 8, 3, &normalPrepared, nullptr) !=
+            CudaSurfacePreparationStatus::Ok ||
+        normalPrepared.restNormals.size() != 7 ||
+        normalPrepared.restNormalDomain != UsdGenSurfaceNormalDomain::FaceVarying) {
+        std::fprintf(stderr, "face-varying rest normal binding was rejected\n"); return 1;
     }
 
     auto animated = source;
@@ -67,5 +106,23 @@ int main() {
     malformed = source;
     malformed.faceVertexCounts[0] = 5;
     if (PrepareCudaSurface(malformed, 8, 3, &prepared, nullptr) != CudaSurfacePreparationStatus::InvalidTopology) return 1;
+    malformed = source;
+    malformed.restNormals = {{0, 0, 1}};
+    malformed.restNormalDomain = UsdGenSurfaceNormalDomain::None;
+    if (PrepareCudaSurface(malformed, 8, 3, &prepared, nullptr) !=
+            CudaSurfacePreparationStatus::InvalidArgument ||
+        prepared.restPoints.size() != sentinel.restPoints.size()) {
+        std::fprintf(stderr, "normal None/cardinality mismatch was accepted or damaged output\n"); return 1;
+    }
+    malformed = source;
+    malformed.restNormals = {{0, 0, 1}};
+    malformed.restNormalDomain = UsdGenSurfaceNormalDomain::Uniform;
+    if (PrepareCudaSurface(malformed, 8, 3, &prepared, nullptr) !=
+        CudaSurfacePreparationStatus::InvalidArgument) return 1;
+    malformed = source;
+    malformed.restNormals = {{std::numeric_limits<float>::quiet_NaN(), 0, 1}};
+    malformed.restNormalDomain = UsdGenSurfaceNormalDomain::Constant;
+    if (PrepareCudaSurface(malformed, 8, 3, &prepared, nullptr) !=
+        CudaSurfacePreparationStatus::NonFiniteInput) return 1;
     return 0;
 }

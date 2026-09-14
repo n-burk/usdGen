@@ -33,6 +33,7 @@ template <class T> std::vector<T> Download(DeviceBuffer<T> const& buffer) {
 
 struct Result {
     CurveTileRequirements requirements;
+    cudaError_t enqueueStatus = cudaSuccess;
     uint32_t status = 0;
     std::vector<CurveTileSpan> spans;
 };
@@ -42,14 +43,31 @@ Result Run(CurveTileOptions options, std::vector<uint64_t> const& capture,
            std::vector<uint32_t> const& offsets, size_t pointCount,
            bool captureGraph = false,
            std::vector<uint64_t> const& replaySurvivors = {},
-           std::vector<uint32_t> const& replayOffsets = {}) {
+           std::vector<uint32_t> const& replayOffsets = {},
+           CurveTileOrder order = CurveTileOrder::SortedSurvivorSubset,
+           bool corruptDomain = false) {
     cudaStream_t stream = nullptr;
     Cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "tile stream");
     CurveTileRequirements requirements;
     Cuda(GetCurveTileRequirements(options, capture.size(), survivors.size(), pointCount,
                                   &requirements, stream), "tile requirements");
-    DeviceBuffer<uint64_t> captureIds, survivorIds;
-    DeviceBuffer<uint32_t> curveOffsets, status;
+    DeviceBuffer<uint64_t> captureIds, survivorIds, sortedIds;
+    DeviceBuffer<uint32_t> curveOffsets, status, sortedOrdinals;
+    std::vector<std::pair<uint64_t,uint32_t>> lookup;
+    std::vector<uint64_t> lookupIds;
+    std::vector<uint32_t> lookupOrdinals;
+    if (order == CurveTileOrder::CaptureOrderSurvivorSubset) {
+        for (size_t i=0;i<capture.size();++i) lookup.emplace_back(capture[i],uint32_t(i));
+        std::sort(lookup.begin(),lookup.end());
+        for (auto const& entry:lookup) { lookupIds.push_back(entry.first); lookupOrdinals.push_back(entry.second); }
+        if (corruptDomain && !lookupOrdinals.empty()) lookupOrdinals[0]=uint32_t(capture.size());
+        Cuda(sortedIds.reset(lookupIds.size()),"sorted lookup IDs allocation");
+        Cuda(sortedOrdinals.reset(lookupOrdinals.size()),"sorted lookup ordinals allocation");
+        if (!lookup.empty()) {
+            Cuda(cudaMemcpyAsync(sortedIds.data(),lookupIds.data(),lookupIds.size()*sizeof(uint64_t),cudaMemcpyHostToDevice,stream),"sorted lookup IDs upload");
+            Cuda(cudaMemcpyAsync(sortedOrdinals.data(),lookupOrdinals.data(),lookupOrdinals.size()*sizeof(uint32_t),cudaMemcpyHostToDevice,stream),"sorted lookup ordinals upload");
+        }
+    }
     DeviceBuffer<CurveTileSpan> spans;
     Cuda(captureIds.reset(capture.size()), "capture ID allocation");
     Cuda(survivorIds.reset(survivors.size()), "survivor ID allocation");
@@ -65,11 +83,22 @@ Result Run(CurveTileOptions options, std::vector<uint64_t> const& capture,
     Cuda(cudaMemsetAsync(spans.data(), 0x5a, spans.size() * sizeof(CurveTileSpan), stream),
          "tile span sentinel");
     CurveTileInput input{Read(captureIds), Read(survivorIds), Read(curveOffsets),
-                         capture.size(), survivors.size(), pointCount};
+                         capture.size(), survivors.size(), pointCount, order};
+    input.sortedCaptureStableIds=Read(sortedIds);
+    input.sortedCaptureOrdinals=Read(sortedOrdinals);
     CurveTileOutput output{spans.view(), status.view()};
     if (captureGraph) Cuda(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
                            "tile graph capture begin");
-    Cuda(BuildCurveTiles(input, requirements, output, stream), "tile enqueue");
+    cudaError_t const enqueue = BuildCurveTiles(input, requirements, output, stream);
+    if (enqueue != cudaSuccess) {
+        Cuda(cudaStreamSynchronize(stream), "rejected tile completion");
+        Result result;
+        result.requirements = requirements;
+        result.enqueueStatus = enqueue;
+        result.spans = Download(spans);
+        Cuda(cudaStreamDestroy(stream), "destroy tile stream after rejected enqueue");
+        return result;
+    }
     if (captureGraph) {
         cudaGraph_t graph = nullptr;
         cudaGraphExec_t executable = nullptr;
@@ -149,6 +178,59 @@ void GoldenRanges() {
           "empty capture and cull are valid");
 }
 
+void IdentityCaptureOrder() {
+    std::vector<uint64_t> capture(300);
+    std::vector<uint32_t> offsets(capture.size() + 1);
+    for (size_t i = 0; i < capture.size(); ++i) {
+        // Deliberately unsorted: Scatter's capture/Morton order is authoritative.
+        capture[i] = static_cast<uint64_t>(capture.size() - i);
+        offsets[i] = static_cast<uint32_t>(i * 2);
+    }
+    offsets.back() = static_cast<uint32_t>(capture.size() * 2);
+
+    auto result = Run({128,64}, capture, capture, offsets, capture.size() * 2,
+                       false, {}, {}, CurveTileOrder::IdentityCaptureOrder);
+    Check(result.enqueueStatus == cudaSuccess && result.status == 0 &&
+          result.requirements.tileCount == 3,
+          "identity capture order accepts unsorted IDs with matching survivors");
+    std::vector<CurveTileSpan> const expected{
+        {0, 0, 128, 0, 256}, {1, 128, 128, 256, 256}, {2, 256, 44, 512, 88}};
+    Check(std::equal(expected.begin(), expected.end(), result.spans.begin(), Same),
+          "identity capture order emits direct capture-chunk boundaries");
+    Check(GuardsUntouched(result), "identity capture order leaves output guards untouched");
+
+    auto defaultOrder = Run({128,64}, capture, capture, offsets, capture.size() * 2);
+    Check(defaultOrder.status == 1 &&
+          std::all_of(defaultOrder.spans.begin(), defaultOrder.spans.end(), Sentinel),
+          "unsorted IDs remain rejected by the default sorted-subset mode");
+
+    std::vector<uint64_t> mismatch = capture;
+    mismatch[17] = mismatch[17] + 1;
+    result = Run({128,64}, capture, mismatch, offsets, capture.size() * 2,
+                  false, {}, {}, CurveTileOrder::IdentityCaptureOrder);
+    Check(result.enqueueStatus == cudaSuccess && result.status == 1 &&
+          std::all_of(result.spans.begin(), result.spans.end(), Sentinel),
+          "identity capture order rejects an ID mismatch without publishing spans");
+
+    result = Run({128,64}, capture, std::vector<uint64_t>(capture.begin(), capture.end() - 1),
+                  std::vector<uint32_t>(offsets.begin(), offsets.end() - 1),
+                  capture.size() * 2 - 2, false, {}, {},
+                  CurveTileOrder::IdentityCaptureOrder);
+    Check(result.enqueueStatus == cudaErrorInvalidValue &&
+          std::all_of(result.spans.begin(), result.spans.end(), Sentinel),
+          "identity capture order rejects a survivor-count mismatch at enqueue");
+
+    auto invalidOrder = Run({128,64}, capture, capture, offsets, capture.size() * 2,
+                             false, {}, {}, static_cast<CurveTileOrder>(99));
+    Check(invalidOrder.enqueueStatus == cudaErrorInvalidValue &&
+          std::all_of(invalidOrder.spans.begin(), invalidOrder.spans.end(), Sentinel),
+          "invalid tile order is rejected at enqueue");
+
+    // Identity mode intentionally does not sort/hash the capture IDs to prove
+    // uniqueness.  The authoritative Scatter capture contract must prevalidate
+    // uniqueness before opting into this order-preserving mode.
+}
+
 void PartitionEdges() {
     auto exactPartition = [](Result const& result,
                              std::vector<uint32_t> const& curveCounts,
@@ -213,6 +295,37 @@ void PartitionEdges() {
           "zero configuration selects core defaults");
 }
 
+void CaptureOrderSurvivors() {
+    std::vector<uint64_t> capture(300);
+    for(size_t i=0;i<capture.size();++i) capture[i]=1000+(i*137)%300;
+    auto const mode=CurveTileOrder::CaptureOrderSurvivorSubset;
+    std::vector<uint64_t> survivors{capture[0],capture[127],capture[128],capture[255],capture[299]};
+    auto result=Run({128,64},capture,survivors,{0,2,5,9,14,20},20,false,{}, {},mode);
+    std::vector<CurveTileSpan> expected{{0,0,2,0,5},{1,2,2,5,9},{2,4,1,14,6}};
+    Check(result.status==0 && result.requirements.tileCount==3 &&
+          std::equal(expected.begin(),expected.end(),result.spans.begin(),Same) && GuardsUntouched(result),
+          "unsorted capture survivors preserve original tile membership");
+    result=Run({128,64},capture,survivors,{0,2,5,9,14,20},20,true,
+        {capture[128],capture[129],capture[130],capture[131],capture[132]}, {0,2,5,9,14,20},mode);
+    expected={{0,0,0,0,0},{1,0,5,0,20},{2,5,0,20,0}};
+    Check(result.status==0 && std::equal(expected.begin(),expected.end(),result.spans.begin(),Same) && GuardsUntouched(result),
+          "capture-order graph replay preserves empty frozen tiles");
+    result=Run({128,64},capture,{}, {0},0,false,{}, {},mode);
+    Check(result.status==0 && result.requirements.tileCount==3 && GuardsUntouched(result),"all capture-order survivors culled");
+    for(size_t i=0;i<3;++i) Check(Same(result.spans[i],{uint32_t(i),0,0,0,0}),"all-culled tile span is empty");
+    for(int variant=0;variant<4;++variant) {
+        auto invalid=survivors;
+        if(variant==0) invalid[1]=99999;
+        if(variant==1) invalid[1]=invalid[0];
+        if(variant==2) std::swap(invalid[0],invalid[1]);
+        result=Run({128,64},capture,invalid,{0,2,5,9,14,20},20,false,{}, {},mode,variant==3);
+        Check(result.status==1 && std::all_of(result.spans.begin(),result.spans.end(),Sentinel),
+              "invalid capture-order survivor or lookup leaves spans untouched");
+    }
+    result=Run({}, {}, {}, {0},0,false,{}, {},mode);
+    Check(result.status==0 && result.requirements.tileCount==0 && GuardsUntouched(result),"empty capture-order lookup");
+}
+
 void InvalidInput() {
     std::vector<uint64_t> capture{10,20,30};
     auto invalid = [&](std::vector<uint64_t> survivors, std::vector<uint32_t> offsets,
@@ -238,6 +351,8 @@ void InvalidInput() {
 
 int main() {
     GoldenRanges();
+    IdentityCaptureOrder();
+    CaptureOrderSurvivors();
     PartitionEdges();
     InvalidInput();
     std::printf("GPU stable tile spans: %s\n", failures ? "FAIL" : "PASS");

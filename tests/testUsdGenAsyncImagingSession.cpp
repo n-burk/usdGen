@@ -4,6 +4,7 @@
 #include "usdGen/opRegistry.h"
 #include "usdGen/cudaExecution.h"
 #include "usdGenImaging/usdGenImagingSession.h"
+#include "usdGenImaging/imageMapCache.h"
 #include "usdGenImaging/groomSceneIndexPlugin.h"
 
 #include "pxr/base/gf/vec2f.h"
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -139,13 +141,14 @@ UsdGenGraphDesc MakeCudaSourceDesc()
     return desc;
 }
 
-UsdGenSessionHandle NewSession()
+UsdGenSessionHandle NewSession(uint64_t commandCapacity = 4096)
 {
     UsdGenSessionKey key;
     key.groomRoot = SdfPath("/asyncImaging");
     key.renderInstanceId = 991;
     return TfCreateRefPtr(new UsdGenImagingSession(
-        key, std::make_shared<UsdGenSession>(2)));
+        key, std::make_shared<UsdGenSession>(2), 0.0,
+        UsdGenContext::Interactive, commandCapacity));
 }
 
 UsdGenImagingSession::CommitRequest Request(
@@ -333,6 +336,7 @@ void TestCallbackUnregisterAndReentry()
     std::atomic<bool> followupAccepted{false};
     std::atomic<bool> followupDone{false};
     std::atomic<bool> synchronousRejected{false};
+    std::atomic<bool> unregisterAccepted{false};
 
     // The callback intentionally owns a handle while it is registered.  It
     // unregisters before queuing the follow-up, so the follow-up cannot call
@@ -340,13 +344,14 @@ void TestCallbackUnregisterAndReentry()
     UsdGenSessionHandle callbackOwner = session;
     int callbackToken = session->RegisterRepublishCallback(
         [callbackOwner, token, desc, &callbackCount, &followupAccepted,
-         &followupDone, &synchronousRejected](
+         &followupDone, &synchronousRejected, &unregisterAccepted](
             UsdGenImagingSession::CommitPayload const &payload) mutable {
             if (!payload.published) return;
             unsigned const call = callbackCount.fetch_add(
                 1, std::memory_order_relaxed) + 1;
             if (call != 1) return;
-            callbackOwner->UnregisterRepublishCallback(token->load());
+            unregisterAccepted.store(callbackOwner->UnregisterRepublishCallback(token->load()),
+                                     std::memory_order_release);
             UsdGenImagingSession::CommitRequest followup =
                 Request(desc, 2.0);
             followupAccepted.store(callbackOwner->CommitAsync(
@@ -372,6 +377,8 @@ void TestCallbackUnregisterAndReentry()
           "owner-ordered unregister prevents callback on follow-up publication");
     Check(followupAccepted.load(std::memory_order_acquire),
           "republish callback can enqueue asynchronous follow-up");
+    Check(unregisterAccepted.load(std::memory_order_acquire),
+          "ordinary callback unregister reports owner admission");
     Check(synchronousRejected.load(std::memory_order_acquire),
           "synchronous shutdown from callback is rejected");
 
@@ -555,8 +562,8 @@ void TestStoreDispatchesIndependentSessionsTogether()
     hold.inputs = {desc.terminal};
     desc.nodes.push_back(hold);
     desc.terminal = hold.path;
-    a->StageDesc(desc);
-    b->StageDesc(desc);
+    Check(a->StageDesc(desc), "first staged descriptor is admitted");
+    Check(b->StageDesc(desc), "second staged descriptor is admitted");
     std::exception_ptr failure;
     std::thread caller([&] {
         try { store.SetTime(42.0); }
@@ -577,6 +584,165 @@ void TestStoreDispatchesIndependentSessionsTogether()
     UsdGenImagingSession::DrainRetired();
 }
 
+void TestContextMailboxSurvivesOrdinaryCommandPressure()
+{
+    // While the completion callback runs, capacity four is fully accounted
+    // for by the close ticket, durable context mailbox, and two ordinary
+    // commands. The context post must still be accepted by its mailbox.
+    auto session = NewSession(4);
+    std::atomic<bool> callback{false}, first{false}, second{false}, context{false};
+    Check(session->CommitAsync(Request(std::make_shared<UsdGenGraphDesc>(MakeDesc(.02f)), 1.0),
+        [&](UsdGenImagingSession::CommitPayload const&, UsdGenExecutionPipeline::Outcome outcome) {
+            if (outcome == UsdGenExecutionPipeline::Outcome::Published) {
+                first.store(session->SetTime(2.0), std::memory_order_release);
+                second.store(session->StageDesc(MakeDesc(.03f)), std::memory_order_release);
+                context.store(session->SetContext(UsdGenContext::Render),
+                              std::memory_order_release);
+            }
+            callback.store(true, std::memory_order_release);
+        }), "small-cap imaging request reserves its terminal relay");
+    Check(WaitFor([&] { return callback.load(std::memory_order_acquire); }),
+          "small-cap imaging terminal relay completes");
+    Check(first.load(std::memory_order_acquire) && second.load(std::memory_order_acquire) &&
+              context.load(std::memory_order_acquire),
+          "durable context mailbox is admitted while ordinary queue is full");
+    // Close owns its ticket from construction, so queued ordinary/mailbox
+    // traffic cannot consume lifecycle admission.
+    session->Shutdown();
+    Check(!session->SetContext(UsdGenContext::Interactive),
+          "context mailbox rejects only after lifecycle shutdown");
+}
+
+void TestReservedCallbackCleanupSurvivesSourceOwnerPressure()
+{
+    // cap=5: close ticket, context mailbox, register ticket, unregister
+    // ticket, and one held filler saturate the source owner. Registration and
+    // cleanup still consume their pre-reserved admissions in order.
+    auto session = NewSession(5);
+    auto registerTicket = session->ReserveLifecycleCommand();
+    auto unregisterTicket = session->ReserveLifecycleCommand();
+    std::vector<UsdGenExecutionPipeline::CommandTicket> fillers;
+    for (;;) {
+        auto ticket = session->ReserveLifecycleCommand();
+        if (!ticket) break;
+        fillers.emplace_back(std::move(ticket));
+    }
+    Check(registerTicket && unregisterTicket && !fillers.empty(),
+          "session cleanup tickets reserve before source-owner saturation");
+    Check(!session->StageDesc(MakeDesc(.08f)),
+          "ordinary imaging mutation rejects at full source owner");
+    std::atomic<unsigned> calls{0};
+    std::atomic<bool> registered{false};
+    const int token = session->RegisterRepublishCallback(std::move(registerTicket),
+        [&calls](UsdGenImagingSession::CommitPayload const&) {
+            calls.fetch_add(1, std::memory_order_release);
+        }, [&] { registered.store(true, std::memory_order_release); });
+    Check(token >= 0, "reserved callback registration is accepted at full source owner");
+    if (!WaitFor([&] { return registered.load(std::memory_order_acquire); })) std::abort();
+    auto replacementFiller = session->ReserveLifecycleCommand();
+    Check(static_cast<bool>(replacementFiller),
+          "session source credit released after reserved registration");
+    if (replacementFiller) fillers.emplace_back(std::move(replacementFiller));
+    Check(!session->UnregisterRepublishCallback(token),
+          "ordinary callback cleanup rejects at full source owner");
+    std::atomic<bool> unregistered{false}, commitDone{false};
+    Check(session->UnregisterRepublishCallbackAsync(std::move(unregisterTicket), token,
+        [&] { unregistered.store(true, std::memory_order_release); }),
+          "reserved callback cleanup is accepted at full source owner");
+    if (!WaitFor([&] { return unregistered.load(std::memory_order_acquire); })) {
+        Check(false, "reserved callback cleanup completion runs");
+        std::abort(); // callbacks retain this stack state
+    }
+    std::atomic<bool> commitPublished{false};
+    Check(session->CommitAsync(Request(std::make_shared<UsdGenGraphDesc>(MakeDesc(.08f)), 1.0),
+        [&](UsdGenImagingSession::CommitPayload const&, UsdGenExecutionPipeline::Outcome outcome) {
+            commitPublished.store(outcome == UsdGenExecutionPipeline::Outcome::Published,
+                                  std::memory_order_release);
+            commitDone.store(true, std::memory_order_release);
+        }), "post-cleanup imaging commit is accepted");
+    if (!WaitFor([&] { return commitDone.load(std::memory_order_acquire); })) {
+        Check(false, "post-cleanup imaging commit completes");
+        std::abort(); // callbacks retain this stack state
+    }
+    Check(unregistered.load(std::memory_order_acquire) &&
+              commitDone.load(std::memory_order_acquire) &&
+              commitPublished.load(std::memory_order_acquire) &&
+              calls.load(std::memory_order_acquire) == 0,
+          "pre-admitted callback cleanup prevents later republish delivery");
+    fillers.clear(); // release held source credits before Shutdown/retirement
+    session->Shutdown();
+    session.Reset();
+    UsdGenImagingSession::DrainRetired();
+}
+
+void TestImageMapReloadStagesNewCowGeneration()
+{
+    auto session = NewSession();
+    auto desc = MakeDesc(.08f);
+    UsdGenMapDesc map;
+    map.path = SdfPath("/asyncImaging/imageMask");
+    map.type = TfToken("UsdGenImageMap");
+    map.resolvedAssetPath = std::string(USDGEN_TEST_SOURCE_DIR) +
+        "/tests/golden/stormLook_A.png";
+    desc.maps.push_back(map);
+    desc.nodes.back().mapBindings.push_back({map.path,
+        UsdGenMapBindingPurpose::MaskSource,
+        TfToken("usdGen:mask:source")});
+
+    std::atomic<bool> firstDone{false};
+    std::atomic<bool> firstPublished{false};
+    Check(session->CommitAsync(Request(
+        std::make_shared<const UsdGenGraphDesc>(desc), 1.0),
+        [&](UsdGenImagingSession::CommitPayload const&,
+            UsdGenExecutionPipeline::Outcome outcome) {
+            firstPublished.store(
+                outcome == UsdGenExecutionPipeline::Outcome::Published,
+                std::memory_order_release);
+            firstDone.store(true, std::memory_order_release);
+        }), "image-map imaging commit is accepted");
+    Check(WaitFor([&] { return firstDone.load(std::memory_order_acquire); }) &&
+              firstPublished.load(std::memory_order_acquire),
+          "image-map imaging commit publishes");
+    auto firstGraph = session->Engine()->Graph();
+    Check(firstGraph.Desc().maps.size() == 1 &&
+              firstGraph.Desc().maps[0].imagePayload,
+          "imaging session publishes a decoded immutable map payload");
+    auto const oldPayload = firstGraph.Desc().maps[0].imagePayload;
+    uint64_t const oldGeneration = firstGraph.Desc().maps[0].textureGeneration;
+    float const oldFirst = oldPayload ? oldPayload->Data()[0] : 0.0f;
+
+    uint64_t const nextGeneration = InvalidateUsdGenImageMapCache();
+    Check(session->ReloadMaps(),
+          "imaging session accepts an explicit map payload reload");
+    std::atomic<bool> secondDone{false};
+    std::atomic<bool> secondPublished{false};
+    UsdGenImagingSession::CommitRequest request;
+    request.reason = UsdGenCommitReason::NoticeBatchEnd;
+    request.frame = 1.0;
+    Check(session->CommitAsync(std::move(request),
+        [&](UsdGenImagingSession::CommitPayload const&,
+            UsdGenExecutionPipeline::Outcome outcome) {
+            secondPublished.store(
+                outcome == UsdGenExecutionPipeline::Outcome::Published,
+                std::memory_order_release);
+            secondDone.store(true, std::memory_order_release);
+        }), "reloaded image-map commit is accepted");
+    Check(WaitFor([&] { return secondDone.load(std::memory_order_acquire); }) &&
+              secondPublished.load(std::memory_order_acquire),
+          "reloaded image-map generation publishes");
+    auto replacementGraph = session->Engine()->Graph();
+    Check(replacementGraph.Desc().maps.size() == 1 &&
+              replacementGraph.Desc().maps[0].imagePayload &&
+              replacementGraph.Desc().maps[0].textureGeneration == nextGeneration &&
+              replacementGraph.Desc().maps[0].textureGeneration > oldGeneration &&
+              replacementGraph.Desc().maps[0].imagePayload != oldPayload &&
+              oldPayload && oldPayload->Data()[0] == oldFirst,
+          "reload replaces the map COW generation while retained pixels stay immutable");
+    session->Shutdown();
+    session.Reset();
+    UsdGenImagingSession::DrainRetired();
+}
+
 } // namespace
 
 int main()
@@ -590,6 +756,9 @@ int main()
     TestShutdownCompletesAcceptedQueue();
     TestCancelledAdoptionCannotReplaceNewAttachment();
     TestStoreDispatchesIndependentSessionsTogether();
+    TestContextMailboxSurvivesOrdinaryCommandPressure();
+    TestReservedCallbackCleanupSurvivesSourceOwnerPressure();
+    TestImageMapReloadStagesNewCowGeneration();
     std::printf("testUsdGenAsyncImagingSession: %s\n",
                 failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

@@ -44,7 +44,8 @@ public:
         TfToken const &appliedInstanceName,
         const UsdImagingDataSourceStageGlobals &stageGlobals) override;
 
-    /// points / faceVertexCounts / faceVertexIndices / st /
+    /// points / faceVertexCounts / faceVertexIndices / st / normals /
+    /// normalsInterpolation /
     /// primvars:rest / usdGen:rest:* -> their usdGen/rest/* leaves (02 §2.15).
     HdDataSourceLocatorSet InvalidateImagingSubprim(
         UsdPrim const &prim,

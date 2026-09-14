@@ -102,6 +102,7 @@ int main() {
           std::fabs(targets[1].y - .5f) < 1e-6f &&
           std::fabs(targets[1].z - 2.5f) < 1e-6f);
 
+
     // A pose update gathers new samples but never changes the persistent FPS
     // result.  Bind in a second object also proves deterministic selection.
     auto changed = currentHost;
@@ -142,6 +143,79 @@ int main() {
     // Root UV and face validation are separate from surface topology.
     std::vector<float2> invalidUv{make_float2(1.1f, 0), make_float2(.5f, .5f)};
     CHECK(UploadUv(&badUv, invalidUv));
+    // Fresh proof is parent-driven. It exposes only compact status/sample
+    // copies; Finish is rejected while the parent owns terminal proof.
+    CudaSurfaceBinding fresh;
+    CHECK(!fresh.CanAcceptFreshUpdate() && !fresh.CanRollbackFreshUpdate());
+    CHECK(fresh.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::Ok);
+    CHECK(fresh.HasUnprovenFreshWork() && fresh.Finish(stream) == SurfaceBindingStatus::InvalidArgument);
+    CHECK(fresh.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::InvalidArgument);
+    CHECK(fresh.Bind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::InvalidArgument);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(fresh.CommitFreshBind() == SurfaceBindingStatus::Ok && fresh.sampleCount() == 4);
+    std::vector<float3> freshPrior, freshAfter;
+    CHECK(Download(fresh.currentSamples(), &freshPrior));
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {badUv, invalidUv.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(fresh.CommitFreshUpdate() == SurfaceBindingStatus::InvalidRootBinding);
+    CHECK(!fresh.CanAcceptFreshUpdate() && !fresh.CanRollbackFreshUpdate());
+    CHECK(Download(fresh.currentSamples(), &freshAfter) && freshAfter.size() == freshPrior.size());
+    for (size_t i = 0; i < freshPrior.size(); ++i)
+        CHECK(freshAfter[i].x == freshPrior[i].x && freshAfter[i].y == freshPrior[i].y && freshAfter[i].z == freshPrior[i].z);
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && fresh.CommitFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(fresh.CanAcceptFreshUpdate() && fresh.CanRollbackFreshUpdate());
+    // A proved update is visible to a following fresh solve but remains a
+    // transaction: a second update/rebind cannot overtake it, and rollback
+    // restores both samples and roots without CUDA work.
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::InvalidArgument);
+    std::vector<float3> provisional;
+    CHECK(Download(fresh.currentSamples(), &provisional) && provisional.size() == freshPrior.size());
+    CHECK(fresh.RollbackFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(!fresh.CanAcceptFreshUpdate() && !fresh.CanRollbackFreshUpdate());
+    CHECK(Download(fresh.currentSamples(), &freshAfter) && freshAfter.size() == freshPrior.size());
+    for (size_t i = 0; i < freshPrior.size(); ++i)
+        CHECK(freshAfter[i].x == freshPrior[i].x && freshAfter[i].y == freshPrior[i].y && freshAfter[i].z == freshPrior[i].z);
+    CHECK(fresh.AcceptFreshUpdate() == SurfaceBindingStatus::InvalidArgument);
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && fresh.CommitFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(fresh.CanAcceptFreshUpdate() && fresh.CanRollbackFreshUpdate());
+    CHECK(fresh.AcceptFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(!fresh.CanAcceptFreshUpdate() && !fresh.CanRollbackFreshUpdate());
+    CHECK(fresh.BeginFreshUpdate({}, ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::InvalidArgument);
+    CHECK(!fresh.HasUnprovenFreshWork());
+    cudaGraph_t captured = nullptr;
+    CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) == cudaSuccess);
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::InvalidArgument);
+    CHECK(cudaStreamEndCapture(stream, &captured) == cudaSuccess);
+    if (captured) CHECK(cudaGraphDestroy(captured) == cudaSuccess);
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && fresh.CommitFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(fresh.AcceptFreshUpdate() == SurfaceBindingStatus::Ok);
+    // Clean preenqueue allocation rejection is retryable. Conversely, an
+    // injected proof enqueue failure occurs after Bind submitted work: commit
+    // must reject and the parent explicitly abandons the charged candidate.
+    CudaSurfaceBinding freshRetry;
+    failNextCudaSurfaceFreshProofAllocationForTesting();
+    CHECK(freshRetry.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::CudaError);
+    CHECK(!freshRetry.HasUnprovenFreshWork());
+    CHECK(freshRetry.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && freshRetry.CommitFreshBind() == SurfaceBindingStatus::Ok);
+    CudaSurfaceBinding freshSemantic;
+    CHECK(freshSemantic.BeginFreshBind(ConstView(badRest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && freshSemantic.CommitFreshBind() == SurfaceBindingStatus::NonFiniteInput);
+    CHECK(freshSemantic.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && freshSemantic.CommitFreshBind() == SurfaceBindingStatus::Ok);
+    CudaSurfaceBinding freshUnsafe;
+    failNextCudaSurfaceFreshProofEnqueueForTesting();
+    CHECK(freshUnsafe.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::CudaError);
+    CHECK(freshUnsafe.HasUnprovenFreshWork() && freshUnsafe.CommitFreshBind() == SurfaceBindingStatus::InvalidArgument);
+    freshUnsafe.AbandonFresh();
+    CudaSurfaceBinding freshPartial;
+    failNextCudaSurfaceFreshProofAfterStatusForTesting();
+    CHECK(freshPartial.BeginFreshBind(ConstView(rest), ConstView(offsets), 2, ConstView(indices), 4, stream) == SurfaceBindingStatus::CudaError);
+    CHECK(freshPartial.HasUnprovenFreshWork() && freshPartial.CommitFreshBind() == SurfaceBindingStatus::InvalidArgument);
+    freshPartial.AbandonFresh();
     CHECK(binding.Update(ConstView(current), ConstView(skinPrim),
                          {badUv, invalidUv.size()}, stream) == SurfaceBindingStatus::Ok);
     CHECK(binding.Finish(stream) == SurfaceBindingStatus::InvalidRootBinding);
@@ -178,6 +252,10 @@ int main() {
     for (size_t i = 0; i < duplicateIndices.size(); ++i)
         for (size_t j = i + 1; j < duplicateIndices.size(); ++j)
             CHECK(duplicateIndices[i] != duplicateIndices[j]);
+    CudaSurfaceBinding freshDuplicate;
+    CHECK(freshDuplicate.BeginFreshBind(ConstView(duplicateRest), ConstView(offsets), 2, ConstView(indices), 5, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && freshDuplicate.CommitFreshBind() == SurfaceBindingStatus::Ok &&
+          freshDuplicate.sampleCount() == 4);
     auto tiny = restHost;
     for (size_t i = 0; i < tiny.size(); ++i)
         tiny[i] = make_float3(static_cast<float>(i) * 1.0e-20f, 0, 0);
@@ -199,6 +277,10 @@ int main() {
           empty.sampleCount() == 0 && empty.restSamples().size == 0);
     CHECK(empty.Update(ConstView(emptyVertices), {}, {}, stream) == SurfaceBindingStatus::Ok);
     CHECK(empty.Finish(stream) == SurfaceBindingStatus::Ok && empty.rootTargets().size == 0);
+    CudaSurfaceBinding freshEmpty;
+    CHECK(freshEmpty.BeginFreshBind(ConstView(emptyVertices), ConstView(emptyOffsets), 0, {}, 20, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && freshEmpty.CommitFreshBind() == SurfaceBindingStatus::Ok &&
+          freshEmpty.sampleCount() == 0);
 
     cudaFree(skinUv);
     cudaFree(badUv);

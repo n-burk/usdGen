@@ -84,6 +84,10 @@ __global__ void Resample(DeviceCurveGeometryView input,
                          DeviceView<float> outputHairT,
                          DeviceView<int32_t> outputRootPrim,
                          DeviceView<float2> outputRootUV, int* error) {
+    // ApplyFresh runs ValidateInput in the same stream immediately before
+    // this kernel.  Do not dereference a malformed device view when that
+    // validation has already rejected it.
+    if (atomicAdd(error, 0) != 0) return;
     const size_t first = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     const size_t stride = size_t(blockDim.x) * gridDim.x;
     for (size_t curve = first; curve < input.curveCount; curve += stride) {
@@ -196,8 +200,43 @@ cudaError_t CudaCurveResample::Storage::waitOn(cudaStream_t stream) const {
     return result;
 }
 
+void CudaCurveResample::Storage::ReclassifyPublishedGeneration() noexcept {
+    points.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    restPoints.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    widths.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    hairT.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    curveOffsets.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    stableIds.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    rootPrim.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    rootUV.Reclassify(UsdGenExecutionResourceKind::Pinned);
+}
+
+size_t CudaCurveResample::Storage::RetainedBytes() const noexcept {
+    size_t total = 0;
+    auto add = [&total](size_t bytes) {
+        if (bytes > std::numeric_limits<size_t>::max() - total)
+            total = std::numeric_limits<size_t>::max();
+        else total += bytes;
+    };
+    add(points.bytes()); add(restPoints.bytes()); add(widths.bytes());
+    add(hairT.bytes()); add(curveOffsets.bytes()); add(stableIds.bytes());
+    add(rootPrim.bytes()); add(rootUV.bytes());
+    return total;
+}
+
 CudaCurveResample::~CudaCurveResample() {
-    const bool owns = active_.curveOffsets.size() || staging_.curveOffsets.size() || error_.size() || ready_;
+    const bool owns = active_.curveOffsets.size() || staging_.curveOffsets.size() || error_.size() || ready_ || freshHostError_;
+    // ready_ is recorded before the fresh D2H/status callback, so it cannot
+    // prove a nonblocking producer stream reached that later terminal work.
+    const bool freshCompletionUnproven = freshPending_ || unprovenUpload_;
+    if (freshCompletionUnproven) {
+        // Do not issue any CUDA query, wait, or free: an enqueue/terminal
+        // failure can leave work on a stream which is no longer provable.
+        active_.quarantine(); staging_.quarantine(); error_.quarantine(); ready_ = nullptr;
+        freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
+        return;
+    }
     int previous = -1;
     const bool selected = !owns || (cudaGetDevice(&previous) == cudaSuccess && device_ >= 0 &&
                                     cudaSetDevice(device_) == cudaSuccess);
@@ -210,9 +249,19 @@ CudaCurveResample::~CudaCurveResample() {
         cudaStreamSynchronize(nullptr) == cudaSuccess);
     if (!selected || !producerFinished || !consumersFinished) {
         active_.quarantine(); staging_.quarantine(); error_.quarantine(); ready_ = nullptr;
+        // The pinned status is callback/D2H storage.  With no completion
+        // proof it must remain allocated with the quarantined payload rather
+        // than being freed while a stream may still write it.
+        freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
     } else {
         if (ready_) cudaEventDestroy(ready_);
         active_.clear(); staging_.clear(); error_.reset(0);
+        if (freshHostError_) {
+            if (cudaFreeHost(freshHostError_) == cudaSuccess) freshHostErrorPermit_.Release();
+            else freshHostErrorPermit_.Abandon();
+        }
+        freshHostError_ = nullptr;
     }
     if (selected && previous >= 0 && previous != device_) cudaSetDevice(previous);
 }
@@ -226,8 +275,13 @@ void CudaCurveResample::discardStaging(cudaStream_t stream) noexcept {
 
 CurveResampleStatus CudaCurveResample::Apply(DeviceCurveGeometryView geometry,
     DeviceView<const float> inputHairT, DeviceView<const int32_t> inputRootPrim,
-    DeviceView<const float2> inputRootUV, int32_t targetPointCount, cudaStream_t stream) {
-    if (pending_ || targetPointCount < 0 || targetPointCount == 1 || validateStream(stream) != cudaSuccess)
+    DeviceView<const float2> inputRootUV, int32_t targetPointCount,
+    cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation) {
+    // A fresh submission has a callback/D2H lifetime which legacy Finish
+    // cannot establish.  Fail closed instead of letting legacy reuse staging
+    // after any queued fresh work or failed terminal installation.
+    if (pending_ || freshPending_ || unprovenUpload_ || freshUploadFailed_ ||
+        targetPointCount < 0 || targetPointCount == 1 || validateStream(stream) != cudaSuccess)
         return CurveResampleStatus::InvalidArgument;
     if (device_ < 0 && cudaGetDevice(&device_) != cudaSuccess) return CurveResampleStatus::CudaError;
     const size_t maxU32 = std::numeric_limits<uint32_t>::max();
@@ -253,7 +307,8 @@ CurveResampleStatus CudaCurveResample::Apply(DeviceCurveGeometryView geometry,
         return CurveResampleStatus::InvalidArgument;
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess)
         return CurveResampleStatus::CudaError;
-    if (error_.reset(1) != cudaSuccess || cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess)
+    if (error_.reset(1, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
+        cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess)
         return CurveResampleStatus::CudaError;
     ValidateInput<<<Blocks(std::max(geometry.curveCount, geometry.pointCount)), 256, 0, stream>>>(
         geometry, inputHairT, inputRootPrim, inputRootUV, error_.data());
@@ -265,14 +320,15 @@ CurveResampleStatus CudaCurveResample::Apply(DeviceCurveGeometryView geometry,
 
     const size_t outputPointCount = targetPointCount ? geometry.curveCount * size_t(targetPointCount) : geometry.pointCount;
     staging_.clear(); staging_.curveCount = geometry.curveCount; staging_.pointCount = outputPointCount;
-    if (staging_.curveOffsets.reset(geometry.curveCount + 1) != cudaSuccess ||
-        (outputPointCount && staging_.points.reset(outputPointCount) != cudaSuccess) ||
-        (geometry.restPoints.size && outputPointCount && staging_.restPoints.reset(outputPointCount) != cudaSuccess) ||
-        (geometry.widths.size && outputPointCount && staging_.widths.reset(outputPointCount) != cudaSuccess) ||
-        (geometry.curveCount && staging_.stableIds.reset(geometry.curveCount) != cudaSuccess) ||
-        (inputHairT.size && outputPointCount && staging_.hairT.reset(outputPointCount) != cudaSuccess) ||
-        (inputRootPrim.size && geometry.curveCount && staging_.rootPrim.reset(geometry.curveCount) != cudaSuccess) ||
-        (inputRootUV.size && geometry.curveCount && staging_.rootUV.reset(geometry.curveCount * sizeof(float2)) != cudaSuccess)) {
+    constexpr auto active = UsdGenExecutionResourceKind::Active;
+    if (staging_.curveOffsets.reset(geometry.curveCount + 1, reservation, active) != cudaSuccess ||
+        (outputPointCount && staging_.points.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (geometry.restPoints.size && outputPointCount && staging_.restPoints.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (geometry.widths.size && outputPointCount && staging_.widths.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (geometry.curveCount && staging_.stableIds.reset(geometry.curveCount, reservation, active) != cudaSuccess) ||
+        (inputHairT.size && outputPointCount && staging_.hairT.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (inputRootPrim.size && geometry.curveCount && staging_.rootPrim.reset(geometry.curveCount, reservation, active) != cudaSuccess) ||
+        (inputRootUV.size && geometry.curveCount && staging_.rootUV.reset(geometry.curveCount * sizeof(float2), reservation, active) != cudaSuccess)) {
         staging_.clear(); return CurveResampleStatus::CudaError;
     }
     if (geometry.curveCount) {
@@ -291,6 +347,8 @@ CurveResampleStatus CudaCurveResample::Apply(DeviceCurveGeometryView geometry,
 }
 
 CurveResampleStatus CudaCurveResample::Finish(cudaStream_t stream) {
+    if (freshPending_ || unprovenUpload_ || freshUploadFailed_)
+        return CurveResampleStatus::InvalidArgument;
     if (validateStream(stream) != cudaSuccess) return CurveResampleStatus::InvalidArgument;
     if (!pending_) return CurveResampleStatus::NoPendingUpdate;
     int error = 0;
@@ -305,6 +363,137 @@ CurveResampleStatus CudaCurveResample::Finish(cudaStream_t stream) {
     return CurveResampleStatus::Ok;
 }
 
+CurveResampleStatus CudaCurveResample::ApplyFresh(DeviceCurveGeometryView geometry,
+    DeviceView<const float> inputHairT, DeviceView<const int32_t> inputRootPrim,
+    DeviceView<const float2> inputRootUV, int32_t targetPointCount,
+    cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || freshPending_ || unprovenUpload_ || active_.curveOffsets.size() ||
+        targetPointCount < 0 || targetPointCount == 1)
+        return CurveResampleStatus::InvalidArgument;
+    // This must precede CheckStream/cudaStreamGetDevice: those queries are
+    // not capture-safe on every supported CUDA runtime.
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return CurveResampleStatus::InvalidArgument;
+    if (validateStream(stream) != cudaSuccess) return CurveResampleStatus::InvalidArgument;
+    if (device_ < 0 && cudaGetDevice(&device_) != cudaSuccess) return CurveResampleStatus::CudaError;
+    const size_t maxU32 = std::numeric_limits<uint32_t>::max();
+    if (geometry.curveCount > maxU32 || geometry.pointCount > maxU32 ||
+        (geometry.curveCount == 0) != (geometry.pointCount == 0) || !geometry.curveOffsets.data ||
+        geometry.curveOffsets.size != geometry.curveCount + 1 ||
+        (geometry.pointCount && (!geometry.points.data || geometry.points.size != geometry.pointCount)) ||
+        (!geometry.pointCount && geometry.points.size != 0) ||
+        (!geometry.restPoints.data && geometry.restPoints.size != 0) ||
+        (geometry.restPoints.data && geometry.restPoints.size != geometry.pointCount) ||
+        (!geometry.widths.data && geometry.widths.size != 0) ||
+        (geometry.widths.data && geometry.widths.size != geometry.pointCount) ||
+        (!geometry.stableIds.data && geometry.stableIds.size != 0) ||
+        (geometry.stableIds.data && geometry.stableIds.size != geometry.curveCount) ||
+        (!inputHairT.data && inputHairT.size != 0) || (inputHairT.data && inputHairT.size != geometry.pointCount) ||
+        (!inputRootPrim.data && inputRootPrim.size != 0) || (!inputRootUV.data && inputRootUV.size != 0) ||
+        ((inputRootPrim.size != 0) != (inputRootUV.size != 0)) ||
+        (inputRootPrim.size && inputRootPrim.size != geometry.curveCount) ||
+        (inputRootUV.size && inputRootUV.size != geometry.curveCount) ||
+        (targetPointCount > 0 && (geometry.curveCount > maxU32 / size_t(targetPointCount) ||
+         geometry.curveCount > size_t(std::numeric_limits<int32_t>::max()) / size_t(targetPointCount))))
+        return CurveResampleStatus::InvalidArgument;
+    if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess)
+        return CurveResampleStatus::CudaError;
+    // The pinned allocation is charged as Scratch.  Only payload bytes are
+    // charged; allocator page/driver overhead remains resource-pool headroom.
+    if (!freshHostError_) {
+        auto permit = TryReserveCudaExecutionBytes(
+            sizeof(int), UsdGenExecutionResourceKind::Scratch, reservation);
+        int* hostError = nullptr;
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&hostError), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return CurveResampleStatus::CudaError;
+        freshHostError_ = hostError;
+        freshHostErrorPermit_ = std::move(*permit);
+    }
+    const size_t outputPointCount = targetPointCount ? geometry.curveCount * size_t(targetPointCount) : geometry.pointCount;
+    staging_.clear(); staging_.curveCount = geometry.curveCount; staging_.pointCount = outputPointCount;
+    constexpr auto active = UsdGenExecutionResourceKind::Active;
+    if (staging_.curveOffsets.reset(geometry.curveCount + 1, reservation, active) != cudaSuccess ||
+        (outputPointCount && staging_.points.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (geometry.restPoints.size && outputPointCount && staging_.restPoints.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (geometry.widths.size && outputPointCount && staging_.widths.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (geometry.curveCount && staging_.stableIds.reset(geometry.curveCount, reservation, active) != cudaSuccess) ||
+        (inputHairT.size && outputPointCount && staging_.hairT.reset(outputPointCount, reservation, active) != cudaSuccess) ||
+        (inputRootPrim.size && geometry.curveCount && staging_.rootPrim.reset(geometry.curveCount, reservation, active) != cudaSuccess) ||
+        (inputRootUV.size && geometry.curveCount && staging_.rootUV.reset(geometry.curveCount * sizeof(float2), reservation, active) != cudaSuccess)) {
+        staging_.clear(); return CurveResampleStatus::CudaError;
+    }
+    if (error_.reset(1, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
+        return CurveResampleStatus::CudaError;
+    // From the first queued operation onward a failed terminal installation
+    // must not permit destruction/freeing.  FinishFreshAsync separately uses
+    // freshUploadFailed_ so it can install the normal terminal callback.
+    unprovenUpload_ = true;
+    freshUploadFailed_ = false;
+    freshCallbackArmed_ = false;
+    *freshHostError_ = std::numeric_limits<int>::min();
+    if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return CurveResampleStatus::CudaError;
+    }
+    ValidateInput<<<Blocks(std::max(geometry.curveCount, geometry.pointCount)), 256, 0, stream>>>(
+        geometry, inputHairT, inputRootPrim, inputRootUV, error_.data());
+    if (cudaGetLastError() != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return CurveResampleStatus::CudaError;
+    }
+    if (geometry.curveCount) {
+        Resample<<<Blocks(geometry.curveCount), 256, 0, stream>>>(geometry, inputHairT, inputRootPrim,
+            inputRootUV, static_cast<uint32_t>(targetPointCount),
+            {staging_.points.view(), staging_.restPoints.view(), staging_.widths.view(),
+             staging_.curveOffsets.view(), staging_.stableIds.view()}, staging_.hairT.view(),
+            staging_.rootPrim.view(), {reinterpret_cast<float2*>(staging_.rootUV.data()), geometry.curveCount}, error_.data());
+    } else SetEmptyOffset<<<1, 1, 0, stream>>>(staging_.curveOffsets.view());
+    if (cudaGetLastError() != cudaSuccess || cudaEventRecord(ready_, stream) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return CurveResampleStatus::CudaError;
+    }
+    pending_ = true;
+    freshPending_ = true;
+    return CurveResampleStatus::Ok;
+}
+
+CurveResampleStatus CudaCurveResample::FinishFreshAsync(cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata) {
+    if (!pending_ || !freshPending_ || !callback || freshUploadFailed_ || freshCallbackArmed_)
+        return CurveResampleStatus::NoPendingUpdate;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) {
+        freshUploadFailed_ = true;
+        return CurveResampleStatus::InvalidArgument;
+    }
+    if (validateStream(stream) != cudaSuccess || !freshHostError_ ||
+        cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess ||
+        cudaMemcpyAsync(freshHostError_, error_.data(), sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaStreamAddCallback(stream, callback, userdata, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return CurveResampleStatus::CudaError;
+    }
+    freshCallbackArmed_ = true;
+    return CurveResampleStatus::Ok;
+}
+
+CurveResampleStatus CudaCurveResample::CommitFreshFinish() {
+    if (!pending_ || !freshPending_ || !freshCallbackArmed_) return CurveResampleStatus::NoPendingUpdate;
+    if (freshUploadFailed_ || active_.curveOffsets.size()) return CurveResampleStatus::InvalidArgument;
+    freshPending_ = false;
+    pending_ = false;
+    freshCallbackArmed_ = false;
+    freshUploadFailed_ = false;
+    unprovenUpload_ = false;
+    if (!freshHostError_ || *freshHostError_ != 0)
+        return freshHostError_ ? finishError(*freshHostError_) : CurveResampleStatus::CudaError;
+    active_.swap(staging_);
+    return CurveResampleStatus::Ok;
+}
+
 DeviceCurveGeometryView CudaCurveResample::view() const noexcept { return active_.geometry(); }
 DeviceView<const float> CudaCurveResample::hairT() const noexcept { return active_.hairT.view(); }
 DeviceView<const int32_t> CudaCurveResample::rootPrim() const noexcept { return active_.rootPrim.view(); }
@@ -314,6 +503,26 @@ cudaError_t CudaCurveResample::recordUse(cudaStream_t stream) {
 }
 cudaError_t CudaCurveResample::waitOn(cudaStream_t stream) const {
     return validateStream(stream) == cudaSuccess ? active_.waitOn(stream) : cudaErrorInvalidDevice;
+}
+
+void CudaCurveResample::ReclassifyPublishedGeneration() noexcept {
+    // The status buffers remain allocated with this owner after publication,
+    // so they are retained auxiliary storage rather than operation Scratch.
+    active_.ReclassifyPublishedGeneration();
+    error_.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    freshHostErrorPermit_.Reclassify(UsdGenExecutionResourceKind::Pinned);
+}
+
+size_t CudaCurveResample::ExclusiveRetainedBytes() const noexcept {
+    size_t total = active_.RetainedBytes();
+    auto add = [&total](size_t bytes) {
+        if (bytes > std::numeric_limits<size_t>::max() - total)
+            total = std::numeric_limits<size_t>::max();
+        else total += bytes;
+    };
+    add(error_.bytes());
+    add(freshHostErrorPermit_.Bytes());
+    return total;
 }
 
 } // namespace usdGen::gpu

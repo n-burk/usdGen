@@ -143,7 +143,7 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
         float t = 0.0f, base = 0.0f, width = 0.0f;
         float rootScale = 0.0f, tipScale = 0.0f;
         float taper = 0.0f, taperStart = 0.0f, blend = 0.0f;
-        float maskAmount = 0.0f;
+        float maskAmount = 0.0f, mapMask = 0.0f;
         bool enabled = true, replace = true;
         float input = geometry.widths.data[point];
         if (!Finite(input)) {
@@ -163,6 +163,7 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
             !ReadScalar(parameters.taperStart, curve, point, &taperStart, error) ||
             !ReadScalar(parameters.blend, curve, point, &blend, error) ||
             !ReadScalar(parameters.maskAmount, curve, point, &maskAmount, error) ||
+            !ReadScalar(parameters.mapMask, curve, point, &mapMask, error) ||
             !ReadBool(parameters.enabled, curve, point, &enabled, error) ||
             !ReadBool(parameters.replace, curve, point, &replace, error))
             continue;
@@ -173,13 +174,17 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
             SetError(error, kBadValue);
             continue;
         }
+        // The canonical default mask range remap clamps the sampled source
+        // before mask:amount is applied. This remains required when equal
+        // map:clamp components intentionally disable the map-level clamp.
+        mapMask = fminf(1.0f, fmaxf(0.0f, mapMask));
         float maskRamp = parameters.maskProfile.data
             ? Sample257(parameters.maskProfile.data, t) : 1.0f;
         if (!Finite(maskRamp)) {
             SetError(error, kNonFinite);
             continue;
         }
-        float envelope = blend * maskAmount * maskRamp;
+        float envelope = blend * maskAmount * mapMask * maskRamp;
         if (!Finite(envelope) || envelope < 0.0f || envelope > 1.0f) {
             SetError(error, kBadValue);
             continue;
@@ -211,6 +216,15 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
     }
 }
 
+// Publication is stream-ordered after all validation/Width writes.  A
+// semantic error leaves caller-owned output untouched.
+__global__ void PublishWidth(const float* staging, const int* error,
+                             float* output, size_t count) {
+    if (LoadError(error) != 0) return;
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) output[i] = staging[i];
+}
+
 bool IsDomain(expr::Domain domain) {
     return domain == expr::Domain::Groom ||
            domain == expr::Domain::Primitive ||
@@ -227,18 +241,45 @@ StyleStatus DecodeError(int code) {
 } // namespace
 
 CudaWidth::~CudaWidth() {
+    if (unprovenWork_) {
+        staging_.quarantine(); error_.quarantine(); ready_ = nullptr;
+        freshHostError_ = nullptr; freshHostErrorPermit_.Abandon();
+        return;
+    }
+    const bool owns = error_.size() || staging_.size() || ready_ ||
+        freshHostError_;
+    if (!owns) return;
     int previous = -1;
-    cudaGetDevice(&previous);
+    const bool gotPrevious = cudaGetDevice(&previous) == cudaSuccess;
     const bool selected = deviceIndex_ >= 0 &&
         cudaSetDevice(deviceIndex_) == cudaSuccess;
+    const bool synchronized = selected &&
+        (!ready_ || cudaEventSynchronize(ready_) == cudaSuccess);
+    // DeviceBuffer::release and event destruction are only valid after both
+    // device selection and the producer event have been proved.  A foreign,
+    // lost, or otherwise unselectable context must retain the charge and
+    // handles as quarantine rather than freeing them from this thread.
+    if (!selected || !synchronized) {
+        staging_.quarantine(); error_.quarantine(); ready_ = nullptr;
+        freshHostError_ = nullptr; freshHostErrorPermit_.Abandon();
+        if (selected && gotPrevious && previous != deviceIndex_)
+            cudaSetDevice(previous);
+        return;
+    }
     if (ready_) {
-        cudaEventSynchronize(ready_);
         cudaEventDestroy(ready_);
         ready_ = nullptr;
     }
-    staging_ = DeviceBuffer<float>{};
-    error_ = DeviceBuffer<int>{};
-    if (selected && previous >= 0 && previous != deviceIndex_)
+    staging_.release();
+    error_.release();
+    if (freshHostError_) {
+        if (selected && cudaFreeHost(freshHostError_) == cudaSuccess)
+            freshHostErrorPermit_.Release();
+        else
+            freshHostErrorPermit_.Abandon();
+        freshHostError_ = nullptr;
+    }
+    if (gotPrevious && previous != deviceIndex_)
         cudaSetDevice(previous);
 }
 
@@ -288,13 +329,26 @@ StyleStatus CudaWidth::validateBoolField(BoolField field,
 }
 
 StyleStatus CudaWidth::begin(DeviceCurveGeometryView geometry,
-                             DeviceView<float> output, cudaStream_t stream) {
+                             DeviceView<float> output, cudaStream_t stream,
+                             UsdGenExecutionMemoryReservation* reservation) {
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) !=
                      cudaSuccess)
         return StyleStatus::CudaError;
-    if (error_.reset(1) != cudaSuccess ||
-        staging_.reset(geometry.pointCount) != cudaSuccess ||
-        cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess)
+    if (error_.reset(1, reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
+        staging_.reset(geometry.pointCount, reservation,
+                       UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
+        return StyleStatus::CudaError;
+    if (freshPreparing_ && !freshHostError_) {
+        auto permit = TryReserveCudaExecutionBytes(
+            sizeof(int), UsdGenExecutionResourceKind::Scratch, reservation);
+        int* hostError = nullptr;
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&hostError), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return StyleStatus::CudaError;
+        freshHostError_ = hostError;
+        freshHostErrorPermit_ = std::move(*permit);
+    }
+    if (freshPreparing_) unprovenWork_ = true;
+    if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess)
         return StyleStatus::CudaError;
     pointCount_ = geometry.pointCount;
     output_ = output;
@@ -305,8 +359,10 @@ StyleStatus CudaWidth::Apply(DeviceCurveGeometryView geometry,
                              DeviceView<const float> hairT,
                              WidthParameters parameters,
                              DeviceView<float> output,
-                             cudaStream_t stream) {
-    if (pending_) return StyleStatus::InvalidArgument;
+                             cudaStream_t stream,
+                             UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || (freshPreparing_ && !freshApplying_) || freshPending_ || unprovenWork_ ||
+        freshUploadFailed_) return StyleStatus::InvalidArgument;
     int current = -1;
     if (cudaGetDevice(&current) != cudaSuccess) return StyleStatus::CudaError;
     int streamDevice = current;
@@ -373,40 +429,138 @@ StyleStatus CudaWidth::Apply(DeviceCurveGeometryView geometry,
     status = validateBoolField(parameters.replace, geometry, false);
     if (status != StyleStatus::Ok) return status;
 
-    status = begin(geometry, output, stream);
+    status = begin(geometry, output, stream, reservation);
     if (status != StyleStatus::Ok) return status;
     if (geometry.curveCount) {
         ValidateOffsets<<<(geometry.curveCount + 255) / 256, 256, 0, stream>>>(
             geometry.curveOffsets.data, geometry.curveCount,
             geometry.pointCount, error_.data());
-        if (cudaGetLastError() != cudaSuccess) return StyleStatus::CudaError;
+        // A launch/API error does not prove that earlier work on this stream
+        // has stopped.  Keep every buffer referenced by that work quarantined
+        // when the caller destroys this operation.
+        if (cudaGetLastError() != cudaSuccess) {
+            unprovenWork_ = true;
+            return StyleStatus::CudaError;
+        }
         ValidateProfile<<<2, 256, 0, stream>>>(parameters.widthProfile.data,
                                                 parameters.maskProfile.data,
                                                 error_.data());
-        if (cudaGetLastError() != cudaSuccess) return StyleStatus::CudaError;
+        if (cudaGetLastError() != cudaSuccess) {
+            unprovenWork_ = true;
+            return StyleStatus::CudaError;
+        }
         WidthKernel<<<(geometry.curveCount + 255) / 256, 256, 0, stream>>>(
             geometry, hairT, parameters, staging_.data(), error_.data());
-        if (cudaGetLastError() != cudaSuccess) return StyleStatus::CudaError;
+        if (cudaGetLastError() != cudaSuccess) {
+            unprovenWork_ = true;
+            return StyleStatus::CudaError;
+        }
     } else {
         ValidateProfile<<<2, 256, 0, stream>>>(parameters.widthProfile.data,
                                                 parameters.maskProfile.data,
                                                 error_.data());
-        if (cudaGetLastError() != cudaSuccess) return StyleStatus::CudaError;
+        if (cudaGetLastError() != cudaSuccess) {
+            unprovenWork_ = true;
+            return StyleStatus::CudaError;
+        }
     }
-    if (cudaEventRecord(ready_, stream) != cudaSuccess)
+    if (cudaEventRecord(ready_, stream) != cudaSuccess) {
+        unprovenWork_ = true;
         return StyleStatus::CudaError;
+    }
     pending_ = true;
     return StyleStatus::Ok;
 }
 
+StyleStatus CudaWidth::ApplyFresh(DeviceCurveGeometryView geometry,
+                                  DeviceView<const float> hairT,
+                                  WidthParameters parameters,
+                                  DeviceView<float> output,
+                                  cudaStream_t stream,
+                                  UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || freshPending_ || freshPreparing_ || unprovenWork_)
+        return StyleStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) return StyleStatus::InvalidArgument;
+    freshPreparing_ = true;
+    freshApplying_ = true;
+    StyleStatus const status = Apply(geometry, hairT, parameters, output, stream,
+                                     reservation);
+    freshApplying_ = false;
+    freshPreparing_ = false;
+    if (status != StyleStatus::Ok) {
+        if (unprovenWork_) freshUploadFailed_ = true;
+        return status;
+    }
+    freshPending_ = true;
+    freshUploadFailed_ = false;
+    freshCallbackArmed_ = false;
+    *freshHostError_ = std::numeric_limits<int>::min();
+    return StyleStatus::Ok;
+}
+
+StyleStatus CudaWidth::FinishFreshAsync(cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata) {
+    if (!pending_ || !freshPending_ || !callback || freshUploadFailed_ ||
+        freshCallbackArmed_ || !freshHostError_) return StyleStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) {
+        freshUploadFailed_ = true;
+        return StyleStatus::InvalidArgument;
+    }
+    int current = -1, streamDevice = -1;
+    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_ ||
+        (stream && (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess || streamDevice != deviceIndex_)) ||
+        cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return StyleStatus::CudaError;
+    }
+    if (pointCount_) {
+        PublishWidth<<<(pointCount_ + 255) / 256, 256, 0, stream>>>(
+            staging_.data(), error_.data(), output_.data, pointCount_);
+        if (cudaGetLastError() != cudaSuccess) {
+            freshUploadFailed_ = true;
+            return StyleStatus::CudaError;
+        }
+    }
+    if (cudaMemcpyAsync(freshHostError_, error_.data(), sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return StyleStatus::CudaError;
+    }
+    if (cudaStreamAddCallback(stream, callback, userdata, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        return StyleStatus::CudaError;
+    }
+    freshCallbackArmed_ = true;
+    return StyleStatus::Ok;
+}
+
+StyleStatus CudaWidth::CommitFreshFinish() {
+    if (!pending_ || !freshPending_ || !freshCallbackArmed_ || freshUploadFailed_)
+        return StyleStatus::InvalidArgument;
+    // A caller-owned relay proves native cudaSuccess and launcher return.
+    // The D2H sentinel rejects speculative pre-callback commit attempts.
+    if (!freshHostError_ || *freshHostError_ == std::numeric_limits<int>::min())
+        return StyleStatus::InvalidArgument;
+    pending_ = false; freshPending_ = false; freshCallbackArmed_ = false;
+    freshUploadFailed_ = false; unprovenWork_ = false;
+    pointCount_ = 0; output_ = {};
+    return *freshHostError_ == 0 ? StyleStatus::Ok : DecodeError(*freshHostError_);
+}
+
 StyleStatus CudaWidth::finishPublication(cudaStream_t stream) {
     if (pointCount_ == 0) {
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
+        if (cudaStreamSynchronize(stream) != cudaSuccess) {
+            unprovenWork_ = true;
             return StyleStatus::CudaError;
+        }
     } else if (cudaMemcpyAsync(output_.data, staging_.data(),
                                pointCount_ * sizeof(float),
                                cudaMemcpyDeviceToDevice, stream) != cudaSuccess ||
                cudaStreamSynchronize(stream) != cudaSuccess) {
+        unprovenWork_ = true;
         return StyleStatus::CudaError;
     }
     pending_ = false;
@@ -416,20 +570,31 @@ StyleStatus CudaWidth::finishPublication(cudaStream_t stream) {
 }
 
 StyleStatus CudaWidth::Finish(cudaStream_t stream) {
-    if (!pending_) return StyleStatus::InvalidArgument;
+    if (!pending_ || freshPending_ || unprovenWork_) return StyleStatus::InvalidArgument;
     int current = -1;
-    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_)
+    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_) {
+        // The ready event still represents the pending operation.  A device
+        // query failure/mismatch cannot establish that it has completed.
+        unprovenWork_ = true;
         return StyleStatus::InvalidArgument;
+    }
     int streamDevice = current;
-    if (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess)
+    if (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess) {
+        unprovenWork_ = true;
         return StyleStatus::CudaError;
-    if (streamDevice != deviceIndex_) return StyleStatus::InvalidArgument;
+    }
+    if (streamDevice != deviceIndex_) {
+        unprovenWork_ = true;
+        return StyleStatus::InvalidArgument;
+    }
     int code = 0;
     if (cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess ||
         cudaMemcpyAsync(&code, error_.data(), sizeof(code),
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-        cudaStreamSynchronize(stream) != cudaSuccess)
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+        unprovenWork_ = true;
         return StyleStatus::CudaError;
+    }
     if (code != 0) {
         pending_ = false;
         pointCount_ = 0;

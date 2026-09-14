@@ -154,6 +154,22 @@ UsdGenImagingTestHook::publishedGeneration(SdfPath const &groom)
     return best < 0 ? 0 : best;
 }
 
+uint64_t
+UsdGenImagingTestHook::issuedIngresses()
+{
+    RegistrySnapshot snapshot = std::atomic_load(&_HookRegistry().published);
+    uint64_t greatest = 0;
+    if (!snapshot) return greatest;
+    for (auto const &entry : *snapshot) {
+        HdSceneIndexBaseRefPtr live =
+            TfCreateRefPtrFromProtectedWeakPtr(entry.weak);
+        auto const *groom = live ?
+            dynamic_cast<UsdGenGroomSceneIndex const *>(live.operator->()) : nullptr;
+        if (groom) greatest = std::max(greatest, groom->_TestIssuedIngress());
+    }
+    return greatest;
+}
+
 size_t
 UsdGenImagingTestHook::publishedTileCount(SdfPath const &groom)
 {
@@ -174,6 +190,177 @@ UsdGenImagingTestHook::registeredIndexCount()
 {
     RegistrySnapshot snapshot = std::atomic_load(&_HookRegistry().published);
     return snapshot ? snapshot->size() : 0;
+}
+
+bool
+UsdGenImagingTestHook::holdOneGroomOwnerCredit()
+{
+    RegistrySnapshot snapshot = std::atomic_load(&_HookRegistry().published);
+    if (!snapshot) return false;
+    for (auto const &entry : *snapshot) {
+        HdSceneIndexBaseRefPtr live =
+            TfCreateRefPtrFromProtectedWeakPtr(entry.weak);
+        auto *groom = live ? dynamic_cast<UsdGenGroomSceneIndex *>(live.operator->()) : nullptr;
+        if (groom) return groom->_TestHoldOwnerCredit();
+    }
+    return false;
+}
+
+void
+UsdGenImagingTestHook::releaseGroomOwnerCredits()
+{
+    RegistrySnapshot snapshot = std::atomic_load(&_HookRegistry().published);
+    if (!snapshot) return;
+    for (auto const &entry : *snapshot) {
+        HdSceneIndexBaseRefPtr live =
+            TfCreateRefPtrFromProtectedWeakPtr(entry.weak);
+        auto *groom = live ? dynamic_cast<UsdGenGroomSceneIndex *>(live.operator->()) : nullptr;
+        if (groom) groom->_TestReleaseOwnerCredit();
+    }
+}
+
+void
+UsdGenImagingTestHook::setGroomCommandCapacityForTesting(uint64_t capacity)
+{
+    UsdGenGroomSceneIndex::_TestSetCommandCapacity(capacity);
+}
+
+void
+UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    if (groom) groom->_TestDrainOwnerWithoutFrontend();
+}
+
+size_t
+UsdGenImagingTestHook::pendingGroomPublicationCount(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestPendingPublicationCount() : 0;
+}
+
+std::weak_ptr<void const>
+UsdGenImagingTestHook::pendingGroomPublicationSnapshotWeak(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestPendingSnapshotWeak() : std::weak_ptr<void const>();
+}
+
+std::weak_ptr<void const>
+UsdGenImagingTestHook::pendingGroomPublicationTileMapWeak(
+    HdSceneIndexBase const &index, SdfPath const &groomPath)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestPendingTileMapWeak(groomPath) : std::weak_ptr<void const>();
+}
+
+int64_t
+UsdGenImagingTestHook::pendingGroomPublishedGeneration(
+    HdSceneIndexBase const &index, SdfPath const &groomPath)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestPendingPublishedGeneration(groomPath) : -1;
+}
+
+uint64_t
+UsdGenImagingTestHook::groomCaptureCount(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestCaptureCount() : 0;
+}
+
+uint64_t
+UsdGenImagingTestHook::groomCookCount(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestCookCount() : 0;
+}
+
+void
+UsdGenImagingTestHook::groomOwnerCommandBarrier(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    if (groom) groom->_TestOwnerCommandBarrier();
+}
+
+uint64_t
+UsdGenImagingTestHook::groomSequenceLastIssued(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestSequenceLastIssued() : 0;
+}
+
+uint64_t
+UsdGenImagingTestHook::groomSequenceCompletedThrough(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestSequenceCompletedThrough() : 0;
+}
+
+uint64_t
+UsdGenImagingTestHook::groomSequenceCapacity(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestSequenceCapacity() : 0;
+}
+
+size_t
+UsdGenImagingTestHook::groomEventHistoryCount(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestEventHistoryCount() : 0;
+}
+
+size_t
+UsdGenImagingTestHook::groomTombstoneHistoryCount(HdSceneIndexBase const &index)
+{
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestTombstoneHistoryCount() : 0;
+}
+
+void
+UsdGenImagingTestHook::setGroomSequenceCapacityForTesting(uint64_t capacity)
+{
+    UsdGenGroomSceneIndex::_TestSetSequenceCapacity(capacity);
+}
+
+size_t UsdGenImagingTestHook::retainedGroomSceneStateCount() {
+    return UsdGenGroomSceneIndex::_TestRetainedSceneStateCount();
+}
+size_t UsdGenImagingTestHook::liveGroomSceneStateCount() {
+    return UsdGenGroomSceneIndex::_TestLiveSceneStateCount();
+}
+uint64_t UsdGenImagingTestHook::groomRetirementRecordCount() {
+    return UsdGenGroomSceneIndex::_TestRetirementRecordCount();
+}
+void UsdGenImagingTestHook::groomSceneServiceCommandBarrier() {
+    UsdGenGroomSceneIndex::_TestSceneServiceBarrier();
+}
+size_t UsdGenImagingTestHook::groomUsedSessionWeakCount(HdSceneIndexBase const &index) {
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestUsedSessionWeakCount() : 0;
+}
+size_t UsdGenImagingTestHook::groomUsedSessionLiveUniqueCount(HdSceneIndexBase const &index) {
+    auto const *groom = dynamic_cast<UsdGenGroomSceneIndex const *>(&index);
+    return groom ? groom->_TestUsedSessionLiveUniqueCount() : 0;
+}
+void UsdGenImagingTestHook::armGroomFinalDeleterPauseForTesting() {
+    UsdGenGroomSceneIndex::_TestArmFinalDeleterPause();
+}
+void UsdGenImagingTestHook::waitGroomFinalDeleterPauseForTesting() {
+    UsdGenGroomSceneIndex::_TestWaitFinalDeleterPause();
+}
+void UsdGenImagingTestHook::releaseGroomFinalDeleterPauseForTesting() {
+    UsdGenGroomSceneIndex::_TestReleaseFinalDeleterPause();
+}
+void UsdGenImagingTestHook::armGroomDrainWaitForTesting() {
+    UsdGenGroomSceneIndex::_TestArmDrainWait();
+}
+void UsdGenImagingTestHook::waitGroomDrainWaitForTesting() {
+    UsdGenGroomSceneIndex::_TestWaitDrainWait();
+}
+void UsdGenImagingTestHook::releaseGroomDrainWaitForTesting() {
+    UsdGenGroomSceneIndex::_TestReleaseDrainWait();
 }
 
 void

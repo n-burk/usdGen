@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -30,6 +31,7 @@ public:
     /// unknown / unpublished). Atomic snapshot read; safe at any moment,
     /// concurrently with _Republish.
     static int64_t publishedGeneration(SdfPath const &groom);
+    static uint64_t issuedIngresses();
 
     /// Published tile count for the groom across live indices.
     static size_t publishedTileCount(SdfPath const &groom);
@@ -37,6 +39,44 @@ public:
     /// Number of registry entries in the published immutable snapshot. This
     /// does not promote weak handles; it is test-only observability.
     static size_t registeredIndexCount();
+
+    /// Test-only bounded-owner-pressure seam.  It reserves/relinquishes one
+    /// groom scene owner's command credit without queuing application work.
+    static bool holdOneGroomOwnerCredit();
+    static void releaseGroomOwnerCredits();
+    static void setGroomCommandCapacityForTesting(uint64_t capacity);
+
+    /// Owner-only test seam: completes already-admitted work for this exact
+    /// index without polling, sending notices, or capturing input.
+    static void drainGroomOwnersWithoutFrontend(HdSceneIndexBase const &index);
+    static size_t pendingGroomPublicationCount(HdSceneIndexBase const &index);
+    static std::weak_ptr<void const> pendingGroomPublicationSnapshotWeak(
+        HdSceneIndexBase const &index);
+    static std::weak_ptr<void const> pendingGroomPublicationTileMapWeak(
+        HdSceneIndexBase const &index, SdfPath const &groom);
+    static int64_t pendingGroomPublishedGeneration(
+        HdSceneIndexBase const &index, SdfPath const &groom);
+    static uint64_t groomCaptureCount(HdSceneIndexBase const &index);
+    static uint64_t groomCookCount(HdSceneIndexBase const &index);
+    static void groomOwnerCommandBarrier(HdSceneIndexBase const &index);
+    static uint64_t groomSequenceLastIssued(HdSceneIndexBase const &index);
+    static uint64_t groomSequenceCompletedThrough(HdSceneIndexBase const &index);
+    static uint64_t groomSequenceCapacity(HdSceneIndexBase const &index);
+    static size_t groomEventHistoryCount(HdSceneIndexBase const &index);
+    static size_t groomTombstoneHistoryCount(HdSceneIndexBase const &index);
+    static void setGroomSequenceCapacityForTesting(uint64_t capacity);
+    static size_t retainedGroomSceneStateCount();
+    static size_t liveGroomSceneStateCount();
+    static uint64_t groomRetirementRecordCount();
+    static void groomSceneServiceCommandBarrier();
+    static size_t groomUsedSessionWeakCount(HdSceneIndexBase const &index);
+    static size_t groomUsedSessionLiveUniqueCount(HdSceneIndexBase const &index);
+    static void armGroomFinalDeleterPauseForTesting();
+    static void waitGroomFinalDeleterPauseForTesting();
+    static void releaseGroomFinalDeleterPauseForTesting();
+    static void armGroomDrainWaitForTesting();
+    static void waitGroomDrainWaitForTesting();
+    static void releaseGroomDrainWaitForTesting();
 
     /// External test/shutdown boundary only. Never invoke from graph work or
     /// a callback; waits until earlier hook-owner mutations have completed.

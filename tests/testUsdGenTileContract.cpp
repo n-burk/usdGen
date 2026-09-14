@@ -45,6 +45,7 @@
 #include "pxr/imaging/hd/tokens.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -71,6 +72,28 @@ void Check(bool ok, std::string const &what)
     }
 }
 
+class GuideIndexWriter final : public UsdGenOp
+{
+public:
+    TfToken Type() const override { return TfToken("UsdGenTestGuideIndexWriter"); }
+    TfSpan<const TfToken> TopologyParameters() const override { return {}; }
+    TfSpan<const TfToken> ValueParameters() const override { return {}; }
+    TfSpan<const TfToken> OutputPrimvars() const override { return _outputs; }
+    bool Bind(UsdGenParamView const&, UsdGenDiagnostics*) override { return true; }
+    UsdGenEpoch CaptureDigest(UsdGenCaptureContext const&) const override { return {19, 1}; }
+    bool Capture(UsdGenCaptureContext const&, UsdGenCurveBuffer const&,
+                 UsdGenCapture*, UsdGenDiagnostics*) override { return true; }
+    void Evaluate(UsdGenEvalContext const&, UsdGenCapture const&,
+                  UsdGenChunkView* view) const override {
+        if (!view->outI || !view->outI[0]) return;
+        for (uint32_t curve = 0; curve != view->curveCount; ++curve)
+            for (uint32_t component = 0; component != 3; ++component)
+                view->outI[0][curve * 3 + component] = int(component);
+    }
+private:
+    std::array<TfToken, 1> const _outputs{{TfToken("guideIndex")}};
+};
+
 const int kCurveCount = 32768;   // >= 32768 per plan 05's SI-1 fixture size
 const int kVertsPerCurve = 4;
 
@@ -89,7 +112,7 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
 {
     UsdGenGraphDesc d;
     d.description = descPath;
-    d.terminal = descPath.AppendChild(TfToken("grow"));
+    d.terminal = descPath.AppendChild(TfToken("guideIndexWriter"));
     d.tileTarget = 64;
     d.curveBasis = TfToken("bspline");
     d.xformMatrix = GfMatrix4d(1.0);   // stage-side: post-flattening desc matrix
@@ -156,6 +179,11 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
     grow.params.push_back(UsdGenParamValue{TfToken("segments"), VtValue(8), false});
     grow.params.push_back(UsdGenParamValue{TfToken("width"), VtValue(width), false});
     d.nodes.push_back(std::move(grow));
+    UsdGenNodeDesc guideIndex;
+    guideIndex.path = d.terminal;
+    guideIndex.type = TfToken("UsdGenTestGuideIndexWriter");
+    guideIndex.inputs = {descPath.AppendChild(TfToken("grow"))};
+    d.nodes.push_back(std::move(guideIndex));
     return d;
 }
 
@@ -290,6 +318,9 @@ void CheckPartitionBoundaries()
 int main()
 {
     usdGenRegisterM1Operators();
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestGuideIndexWriter"), 0,
+              [] { return std::make_unique<GuideIndexWriter>(); }),
+          "registers typed extra-plane publication writer");
     CheckPartitionBoundaries();
 
     SdfPath const descPath("/groom");
@@ -305,7 +336,7 @@ int main()
 
     // ---- SI-1 / C2 per-tile value contract ------------------------------
     size_t totalCurves = 0, totalPoints = 0;
-    bool si1 = true, uniformSizes = true, vertexSizes = true, bases = true,
+    bool si1 = true, uniformSizes = true, vertexSizes = true, typedExtras = true, bases = true,
          refines = true, extents = true, paths = true, xforms = true,
          inherit = true, idArrays = true;
     size_t countMismatch = 0;
@@ -324,9 +355,28 @@ int main()
             si1 = false;
         if (pub.displayColor.size() != curves && pub.displayColor.size() != pts)
             si1 = false;
-        for (auto const &p : pub.extraUniform)
-            if (p.interpolation == TfToken("uniform") && !p.f.empty() &&
-                p.f.size() != curves) uniformSizes = false;
+        for (auto const &p : pub.extraUniform) {
+            size_t elements = p.interpolation == TfToken("constant") ? 1 :
+                p.interpolation == TfToken("vertex") ? pts : curves;
+            size_t values = elements * p.arity;
+            if (p.type == TfToken("int")) {
+                if (p.i.size() != values || !p.f.empty())
+                    (p.interpolation == TfToken("vertex") ? vertexSizes : uniformSizes) = false;
+            } else if (p.type == TfToken("float")) {
+                if (p.f.size() != values || !p.i.empty())
+                    (p.interpolation == TfToken("vertex") ? vertexSizes : uniformSizes) = false;
+            } else {
+                uniformSizes = false;
+            }
+            if (p.name == TfToken("guideIndex"))
+                typedExtras = typedExtras && p.interpolation == TfToken("uniform") &&
+                    p.type == TfToken("int") && p.arity == 3 &&
+                    p.i.size() == curves * 3 && p.f.empty();
+        }
+        typedExtras = typedExtras && std::any_of(pub.extraUniform.begin(),
+            pub.extraUniform.end(), [](UsdGenPlane const& p) {
+                return p.name == TfToken("guideIndex");
+            });
         if (pub.basis != "bspline") bases = false;
         if (pub.refineLevel != 2) refines = false;
         if (!(pub.extentMin[0] <= pub.extentMax[0] &&
@@ -358,6 +408,7 @@ int main()
     Check(uniformSizes, "uniform primvars sized curveCount on every tile");
     Check(idArrays, "hairId uniform float array present on every tile (C2)");
     Check(vertexSizes, "vertex primvars sized points on every tile");
+    Check(typedExtras, "typed extra-plane publication preserves int arity-3 metadata and payload");
     Check(bases, "curve basis == usdGen:curve:basis (bspline) on every tile");
     Check(refines, "refineLevel == 2 (S-9 tier table) on every tile");
     Check(extents, "extent/min|max == min|max over tile points (exact per frame)");

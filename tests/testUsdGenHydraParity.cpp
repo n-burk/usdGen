@@ -14,6 +14,7 @@
 
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
+#include "usdGen/imagePayload.h"
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -99,6 +100,20 @@ void CheckNode(UsdGenNodeDesc const &a, UsdGenNodeDesc const &b, size_t i)
     CheckEq(a.curves, b.curves, ctx + " curves");
     CheckEq(a.surfaces, b.surfaces, ctx + " surfaces");
     CheckEq(a.maps, b.maps, ctx + " maps");
+    Check(a.mapBindings.size() == b.mapBindings.size(),
+          ctx + " map binding count");
+    for (size_t binding = 0;
+         binding < std::min(a.mapBindings.size(), b.mapBindings.size());
+         ++binding) {
+        CheckEq(a.mapBindings[binding].map, b.mapBindings[binding].map,
+                ctx + " map binding target");
+        CheckEq(a.mapBindings[binding].purpose,
+                b.mapBindings[binding].purpose,
+                ctx + " map binding purpose");
+        CheckEq(a.mapBindings[binding].relationship,
+                b.mapBindings[binding].relationship,
+                ctx + " map binding relationship");
+    }
     CheckParams(a.params, b.params, ctx);
     Check(a.ramps.size() == b.ramps.size(), ctx + " ramps count");
 }
@@ -138,6 +153,9 @@ void CheckSurface(UsdGenSurfaceDesc const &a, UsdGenSurfaceDesc const &b,
     CheckEq(a.faceVertexCounts, b.faceVertexCounts, ctx + " counts");
     CheckEq(a.faceVertexIndices, b.faceVertexIndices, ctx + " indices");
     CheckEq(a.restPoints, b.restPoints, ctx + " restPoints");
+    CheckEq(a.restNormals, b.restNormals, ctx + " restNormals");
+    CheckEq(a.restNormalDomain, b.restNormalDomain,
+            ctx + " restNormalDomain");
     CheckEq(a.points, b.points, ctx + " points");
     Check(a.samples.size() == b.samples.size(), ctx + " samples count");
     for (size_t s = 0; s < std::min(a.samples.size(), b.samples.size());
@@ -162,6 +180,15 @@ void CheckMap(UsdGenMapDesc const &a, UsdGenMapDesc const &b, size_t i)
     CheckEq(a.type, b.type, ctx + " type");
     CheckEq(a.resolvedAssetPath, b.resolvedAssetPath, ctx + " asset");
     CheckEq(a.textureGeneration, b.textureGeneration, ctx + " generation");
+    Check(static_cast<bool>(a.imagePayload) == static_cast<bool>(b.imagePayload),
+          ctx + " decoded payload presence");
+    if (a.imagePayload && b.imagePayload) {
+        Check(a.imagePayload == b.imagePayload,
+              ctx + " shares the immutable decoded COW payload");
+        CheckEq(a.imagePayload->Width(), b.imagePayload->Width(), ctx + " width");
+        CheckEq(a.imagePayload->Height(), b.imagePayload->Height(), ctx + " height");
+        CheckEq(a.imagePayload->Channels(), b.imagePayload->Channels(), ctx + " channels");
+    }
     CheckParams(a.params, b.params, ctx);
 }
 
@@ -224,6 +251,35 @@ int CheckDesc(UsdGenGraphDesc const &a, UsdGenGraphDesc const &b,
     return g_failures - before;
 }
 
+void CheckMapTransport(UsdGenGraphDesc const &desc, std::string const &fixture)
+{
+    if (fixture != "map_bindings.usda") return;
+    Check(desc.maps.size() == 1, "map fixture has one pooled descriptor");
+    if (!desc.maps.empty()) {
+        Check(desc.maps[0].resolvedAssetPath.find("mask.exr") != std::string::npos,
+              "map fixture transports resolved usdGen:map:file");
+    }
+    Check(desc.nodes.size() == 1 && desc.nodes[0].mapBindings.size() == 2,
+          "map fixture retains all authored map relationship slots");
+    if (desc.nodes.size() == 1 && desc.nodes[0].mapBindings.size() == 2) {
+        auto const &bindings = desc.nodes[0].mapBindings;
+        auto const hasBinding = [&](UsdGenMapBindingPurpose purpose,
+                                    TfToken const &relationship) {
+            return std::find_if(bindings.begin(), bindings.end(),
+                [&](UsdGenMapBindingDesc const &binding) {
+                    return binding.purpose == purpose &&
+                        binding.relationship == relationship;
+                }) != bindings.end();
+        };
+        Check(hasBinding(UsdGenMapBindingPurpose::MaskSource,
+                         TfToken("usdGen:mask:source")),
+              "map fixture retains mask relationship purpose");
+        Check(hasBinding(UsdGenMapBindingPurpose::LengthSource,
+                         TfToken("usdGen:length:source")),
+              "map fixture retains length relationship purpose");
+    }
+}
+
 }  // namespace
 
 int
@@ -236,6 +292,7 @@ main(int argc, char **argv)
         "g2_brow40k.usda",
         "g3_head100k.usda",
         "g4_fur200k.usda",
+        "map_bindings.usda",
     };
     int totalNew = 0;
     for (char const *name : kFixtures) {
@@ -278,6 +335,8 @@ main(int argc, char **argv)
         UsdGenGraphDesc const fromHydra =
             BuildGraphDescFromHydra(*sis.finalSceneIndex, descPath, opts);
         int const n = CheckDesc(fromStage, fromHydra, name);
+        CheckMapTransport(fromStage, name);
+        CheckMapTransport(fromHydra, name);
         totalNew += n;
         std::printf("%s: %s (%d new diffs)\n", name,
                     n == 0 ? "PARITY" : "MISMATCH", n);

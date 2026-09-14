@@ -1,5 +1,6 @@
 // Session-key and lifecycle contract checks (stage-free imaging store).
 #include "usdGenImaging/usdGenImagingSession.h"
+#include "usdGenImaging/imageMapCache.h"
 
 #include <cstdio>
 
@@ -56,6 +57,18 @@ int main()
           "CPU sharing resumes after a renderer-local GPU session");
     Check(sharedA->AttachedIndices() == 3,
           "CPU reattachment is independent of isolated GPU attachments");
+
+    uint64_t const imageGeneration = CurrentUsdGenImageMapGeneration();
+    Check(store.ReloadMaps(), "store accepts global image-map cache invalidation");
+    store.Drain();
+    // This synchronous command follows the reload command already posted by
+    // the store and therefore observes its session-local descriptor action.
+    sharedA->Commit(usdGen::UsdGenCommitReason::LiveOverride);
+    Check(CurrentUsdGenImageMapGeneration() > imageGeneration &&
+              sharedA->NeedsDesc(),
+          "store reload advances image generation and marks unstaged sessions");
+    Check(sharedA->ConsumeNeedsDesc(),
+          "store reload description mark is consumable");
 
     UsdGenSessionKey differentPath{"shared-session", pathB, 2001};
     UsdGenSessionKey differentId{"other-session", pathA, 2001};

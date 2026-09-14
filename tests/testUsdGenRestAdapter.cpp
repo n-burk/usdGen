@@ -72,7 +72,7 @@ int main()
     UsdStageRefPtr stage = UsdStage::CreateInMemory("si7rest");
     _TestGlobals globals;
 
-    // Mesh with distinct Default vs time-sampled points.
+    // Mesh with distinct Default vs time-sampled points and normals.
     SdfPath meshPath("/scalp");
     UsdGeomMesh mesh = UsdGeomMesh::Define(stage, meshPath);
     VtVec3fArray restPts(4), defPts(4);
@@ -86,6 +86,14 @@ int main()
     for (int i = 0; i < 4; ++i) fvi[i] = i;
     mesh.CreateFaceVertexCountsAttr(VtValue(fvc));
     mesh.CreateFaceVertexIndicesAttr(VtValue(fvi));
+    VtVec3fArray restNormals(4), sampledNormals(4);
+    for (size_t i = 0; i < 4; ++i) {
+        restNormals[i] = GfVec3f(0, 0, 1);
+        sampledNormals[i] = GfVec3f(0, 1, 0);
+    }
+    mesh.CreateNormalsAttr(VtValue(restNormals));
+    mesh.SetNormalsInterpolation(TfToken("vertex"));
+    mesh.GetNormalsAttr().Set(VtValue(sampledNormals), UsdTimeCode(24.0));
     UsdPrim meshPrim = stage->GetPrimAtPath(meshPath);
     meshPrim.AddAppliedSchema(TfToken("UsdGenRestAPI"));
 
@@ -121,6 +129,18 @@ int main()
         Check(indices.IsHolding<VtIntArray>() &&
                   indices.UncheckedGet<VtIntArray>() == fvi,
               "usdGen/rest/faceVertexIndices served");
+        VtValue normals = LeafValue(GetAt(
+            c, HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"),
+                                   TfToken("normals"))));
+        Check(normals.IsHolding<VtVec3fArray>() &&
+                  normals.UncheckedGet<VtVec3fArray>() == restNormals,
+              "usdGen/rest/normals reads Default(), not time samples");
+        VtValue normalsInterpolation = LeafValue(GetAt(
+            c, HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"),
+                                   TfToken("normalsInterpolation"))));
+        Check(normalsInterpolation.IsHolding<TfToken>() &&
+                  normalsInterpolation.UncheckedGet<TfToken>() == TfToken("vertex"),
+              "usdGen/rest/normalsInterpolation is paired with normals");
         auto pointsLeaf = HdSampledDataSource::Cast(GetAt(c, HdDataSourceLocator(
             TfToken("usdGen"), TfToken("rest"), TfToken("points"))));
         std::vector<HdSampledDataSource::Time> times;
@@ -150,6 +170,30 @@ int main()
         sourceAttr.Set(TfToken("default"));
         explicitEmpty.Set(VtValue(restPts), UsdTimeCode::Default());
         Check(pointsLeaf->GetValue(0) == VtValue(restPts), "cached leaf follows repaired authored rest");
+
+    }
+
+    // A time-sampled-only normals attribute has no immutable rest normal.
+    // Its empty rest leaf intentionally selects geometric fallback; it must
+    // not sample the current frame or shutter offset zero.
+    {
+        UsdGeomMesh sampledOnly = UsdGeomMesh::Define(stage, SdfPath("/sampledOnly"));
+        sampledOnly.CreatePointsAttr(VtValue(restPts));
+        sampledOnly.CreateFaceVertexCountsAttr(VtValue(fvc));
+        sampledOnly.CreateFaceVertexIndicesAttr(VtValue(fvi));
+        sampledOnly.CreateNormalsAttr();
+        sampledOnly.GetNormalsAttr().Set(VtValue(sampledNormals), UsdTimeCode(24.0));
+        sampledOnly.SetNormalsInterpolation(TfToken("vertex"));
+        UsdPrim sampledOnlyPrim = sampledOnly.GetPrim();
+        sampledOnlyPrim.AddAppliedSchema(TfToken("UsdGenRestAPI"));
+        HdContainerDataSourceHandle sampledOnlyRest =
+            usdGenImaging::UsdGenRestApiContainerFactory(sampledOnlyPrim, globals);
+        VtValue normals = LeafValue(GetAt(sampledOnlyRest, HdDataSourceLocator(
+            TfToken("usdGen"), TfToken("rest"), TfToken("normals"))));
+        Check(normals.IsEmpty() ||
+                  (normals.IsHolding<VtVec3fArray>() &&
+                   normals.UncheckedGet<VtVec3fArray>().empty()),
+              "time-sampled-only normals have no Default-time rest normal");
     }
 
     // ---- factory: GeomSubset refused (R15) --------------------------------
@@ -185,6 +229,20 @@ int main()
             Check(edited.Contains(HdDataSourceLocator(TfToken("usdGen"), TfToken("rest"), property)),
                   property.GetString() + " edit invalidates precise rest topology leaf");
         }
+        auto normalEdited = adapter.InvalidateImagingSubprim(
+            meshPrim, TfToken(), TfToken(), TfTokenVector{TfToken("normals")},
+            UsdImagingPropertyInvalidationType::Update);
+        Check(normalEdited.Contains(HdDataSourceLocator(
+                  TfToken("usdGen"), TfToken("rest"), TfToken("normals"))) &&
+                  normalEdited.Contains(HdDataSourceLocator(
+                  TfToken("usdGen"), TfToken("rest"), TfToken("normalsInterpolation"))),
+              "normals edit invalidates paired rest normal leaves");
+        auto interpolationEdited = adapter.InvalidateImagingSubprim(
+            meshPrim, TfToken(), TfToken(), TfTokenVector{TfToken("normalsInterpolation")},
+            UsdImagingPropertyInvalidationType::Update);
+        Check(interpolationEdited.Contains(HdDataSourceLocator(
+                  TfToken("usdGen"), TfToken("rest"), TfToken("normalsInterpolation"))),
+              "normalsInterpolation edit invalidates its rest leaf");
     }
 
     std::printf("testUsdGenRestAdapter: %s (%d failures)\n",

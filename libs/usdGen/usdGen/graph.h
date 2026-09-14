@@ -7,6 +7,7 @@
 #define USDGEN_GRAPH_H
 
 #include "usdGen/curveBuffer.h"
+#include "usdGen/executionCache.h"
 #include "usdGen/op.h"
 #include "usdGen/types.h"
 
@@ -22,6 +23,11 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 class UsdGenCudaExecutionPlan;
+
+/// Extra-plane pointer tables are stack-local in the chunk evaluator.  The
+/// current R24 contract has only a handful of named outputs; keep an explicit
+/// bound so binding them never turns Evaluate() into an allocating path.
+constexpr uint32_t kUsdGenMaxExtraPlaneSlots = 16;
 
 /// Owning, read-only routing input detached from a compiled graph.  The
 /// imaging router may retain this value while the graph is recompiled or
@@ -39,6 +45,7 @@ struct UsdGenGraphRoutingNode
     bool hasSurface = false;
     std::vector<SdfPath> curveRefs;
     std::vector<SdfPath> mapRefs;
+    std::vector<UsdGenMapBindingDesc> mapBindingRefs;
 };
 
 struct UsdGenGraphRoutingSnapshot
@@ -85,10 +92,18 @@ struct UsdGenCompiledNode
     UsdGenParamView        paramView;            // points into the graph's desc copy
     std::vector<std::pair<TfToken, uint32_t>> paramRouting;  // param name -> UsdGenDirtyBits
     std::vector<UsdGenNodeId> descendants;       // strict descendants, topological order
+    // Slot order is the operator declaration order.  The scheduler resolves
+    // these names to the current upstream planes on each preparation, since a
+    // topology revision may replace the backing VtArrays.
+    std::vector<TfToken> outputPrimvars;
+    std::vector<TfToken> inputPrimvars;
     UsdGenSurfaceId        surface = 0;
     bool                   hasSurface = false;
     std::vector<SdfPath>   curveRefs;            // usdGen:curves/guides/frozen:curves targets
-    std::vector<SdfPath>   mapRefs;              // usdGen:mask:source targets
+    std::vector<SdfPath>   mapRefs;              // legacy flat map targets
+    std::vector<UsdGenMapBindingDesc> mapBindingRefs; // typed authored map slots
+    std::vector<uint32_t>  referenceValues;       // indices into graph immutable reference values
+    std::vector<uint32_t>  mapValues;             // indices into graph immutable map values
     bool                   captureNeeded = false; // set by the session, cleared by the capture step
 
     // --- evaluation-skip state (value-class no-op detection; keeps SI-2's
@@ -119,14 +134,23 @@ public:
     void DirtyParameter(NodeId id, TfToken const &param);
     void DirtyCapture(NodeId id);
     void DirtyTopology(NodeId id);
-    void DirtySurface(UsdGenSurfaceId surface, uint32_t bits);
+    void DirtySurface(UsdGenSurfaceId surface, uint32_t bits,
+                      uint64_t generation = UINT64_MAX);
     void DirtyChunks(NodeId id, TfSpan<const UsdGenChunkId> chunks);
     /// Bumps the capture epoch of every node whose UsdGenNodeDesc::maps names this prim
     /// (asset path edit, ReloadMaps(), textureGeneration bump). §3.6, UsdGenDirtyMap.
-    void DirtyMap(SdfPath const &mapPrim);
+    void DirtyMap(SdfPath const &mapPrim, uint64_t generation = UINT64_MAX);
     /// Bumps the capture epoch of every node whose UsdGenNodeDesc::curves names this prim
     /// (a C3 BasisCurves changed: guide edit, re-freeze, re-import). §3.6, §4.5.
-    void DirtyCurves(SdfPath const &curvePrim);
+    void DirtyCurves(SdfPath const &curvePrim,
+                     uint64_t generation = UINT64_MAX);
+
+    /// Immutable-after-publication input generations captured by the last
+    /// compiled descriptor. Dirty routing updates this tuple before marking
+    /// dependent nodes, so cache admission can compare exact versions.
+    UsdGenExecutionInputVersions const& InputVersions() const noexcept {
+        return _inputVersions;
+    }
 
     /// The terminal node's OUTPUT buffer and its tile partition (03 §6.3).
     UsdGenCurveBuffer const &Output() const;
@@ -139,6 +163,9 @@ public:
     UsdGenGraphDesc const &Desc() const noexcept { return *_desc; }
     std::shared_ptr<const UsdGenCudaExecutionPlan> const& CudaPlan() const noexcept { return _cudaPlan; }
     UsdGenNodeDesc const &NodeDesc(NodeId id) const;
+    /// Immutable descriptor-value identities resolved during compilation.
+    TfSpan<const UsdGenResolvedReferenceValue> ReferenceValues() const;
+    TfSpan<const UsdGenResolvedMapValue> MapValues() const;
 
     /// Make an owning routing snapshot.  This is intentionally a fresh copy:
     /// callers can hand the result to an asynchronous imaging owner without
@@ -172,6 +199,8 @@ private:
     std::shared_ptr<const UsdGenCudaExecutionPlan> _cudaPlan;
     std::vector<std::unique_ptr<UsdGenCompiledNode>> _nodes; // indexed by id
     std::vector<UsdGenTileView> _tiles;          // terminal tile partition
+    std::vector<UsdGenResolvedReferenceValue> _referenceValues;
+    std::vector<UsdGenResolvedMapValue> _mapValues;
     UsdGenNodeId      _terminal = InvalidNode;
     std::unordered_map<SdfPath, UsdGenNodeId, SdfPath::Hash> _nodeByPath;
     int _chunkSize = kUsdGenDefaultChunkSize;
@@ -181,6 +210,7 @@ private:
     // Fallback lifetime belongs to the graph, not process static teardown.
     // It is private and Output exposes it only as const.
     UsdGenCurveBuffer _emptyOutput;
+    UsdGenExecutionInputVersions _inputVersions;
 };
 
 }  // namespace usdGen

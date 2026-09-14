@@ -42,6 +42,18 @@ UsdGenNodeDesc const &UsdGenGraph::NodeDesc(UsdGenNodeId id) const
     return *_nodes[id]->desc;
 }
 
+TfSpan<const UsdGenResolvedReferenceValue> UsdGenGraph::ReferenceValues() const
+{
+    return TfSpan<const UsdGenResolvedReferenceValue>(
+        _referenceValues.data(), _referenceValues.size());
+}
+
+TfSpan<const UsdGenResolvedMapValue> UsdGenGraph::MapValues() const
+{
+    return TfSpan<const UsdGenResolvedMapValue>(_mapValues.data(),
+                                                 _mapValues.size());
+}
+
 std::shared_ptr<const UsdGenGraphRoutingSnapshot>
 UsdGenGraph::RoutingSnapshot() const
 {
@@ -66,6 +78,7 @@ UsdGenGraph::RoutingSnapshot() const
         copy.paramRouting = node.paramRouting;
         copy.curveRefs = node.curveRefs;
         copy.mapRefs = node.mapRefs;
+        copy.mapBindingRefs = node.mapBindingRefs;
         if (node.desc) {
             copy.path = node.desc->path;
         }
@@ -171,8 +184,13 @@ void UsdGenGraph::DirtyTopology(UsdGenNodeId id)
     MarkNode(id, UsdGenDirtyTopology | UsdGenDirtyCapture);
 }
 
-void UsdGenGraph::DirtySurface(UsdGenSurfaceId surface, uint32_t bits)
+void UsdGenGraph::DirtySurface(UsdGenSurfaceId surface, uint32_t bits,
+                               uint64_t generation)
 {
+    if (generation != UINT64_MAX && _desc &&
+        surface < _desc->surfaces.size())
+        _inputVersions.UpdateSurface(
+            _desc->surfaces[surface].path, generation);
     // Hop 4: surface-major chunk order -> the chunks binding `surface` are a
     // contiguous range on every node; OR `bits` into them and into the
     // owning nodes + strict descendants.
@@ -217,25 +235,36 @@ void UsdGenGraph::DirtyChunks(UsdGenNodeId id, TfSpan<const UsdGenChunkId> chunk
     }
 }
 
-void UsdGenGraph::DirtyMap(SdfPath const &mapPrim)
+void UsdGenGraph::DirtyMap(SdfPath const &mapPrim, uint64_t generation)
 {
+    if (generation != UINT64_MAX)
+        _inputVersions.UpdateMap(mapPrim, generation);
     for (auto &nPtr : _nodes) {
         if (!nPtr) continue;
         auto &n = *nPtr;
-        for (SdfPath const &m : n.mapRefs) {
-            if (m == mapPrim) { n.captureNeeded = true; break; }
-        }
+        for (SdfPath const &m : n.mapRefs)
+            if (m == mapPrim) {
+                // MarkNode propagates both capture and value dirt to every
+                // strict descendant; map edits cannot leave a stale child
+                // capture behind.
+                MarkNode(n.id, UsdGenDirtyMap | UsdGenDirtyCapture);
+                break;
+            }
     }
 }
 
-void UsdGenGraph::DirtyCurves(SdfPath const &curvePrim)
+void UsdGenGraph::DirtyCurves(SdfPath const &curvePrim, uint64_t generation)
 {
+    if (generation != UINT64_MAX)
+        _inputVersions.UpdateCurve(curvePrim, generation);
     for (auto &nPtr : _nodes) {
         if (!nPtr) continue;
         auto &n = *nPtr;
-        for (SdfPath const &c : n.curveRefs) {
-            if (c == curvePrim) { n.captureNeeded = true; break; }
-        }
+        for (SdfPath const &c : n.curveRefs)
+            if (c == curvePrim) {
+                MarkNode(n.id, UsdGenDirtyCapture);
+                break;
+            }
     }
 }
 
@@ -248,7 +277,14 @@ static UsdGenCurveBuffer const &_EffBuffer(UsdGenGraph const &g,
                                            UsdGenNodeId id, int depth)
 {
     UsdGenCompiledNode const &n = g.Node(id);
-    if (n.topoFx != UsdGenTopoFx::None ||
+    // Length's static CurveCount classification covers its whole family,
+    // but the current non-owning capture only repositions existing CVs.
+    // Follow its input before capture too: its initially empty output must
+    // not turn a ragged source into the partition's uniform fallback.
+    // An actual owning capture remains an authoritative topology boundary.
+    bool const nonOwningLength = n.op && n.op->Type().GetString() == "UsdGenLength" &&
+        (!n.capture || !n.capture->OwnsBuffer());
+    if ((n.topoFx != UsdGenTopoFx::None && !nonOwningLength) ||
         n.input == kUsdGenInvalidNode || depth > 64)
         return n.buffer;
     return _EffBuffer(g, n.input, depth + 1);

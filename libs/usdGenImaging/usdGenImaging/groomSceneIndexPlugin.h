@@ -61,8 +61,7 @@ class UsdGenGroomSceneIndex final
 public:
     static HdSceneIndexBaseRefPtr New(
         HdSceneIndexBaseRefPtr const &inputScene,
-        int renderInstanceId = 0,
-        bool enableDeviceGroupIngress = false);
+        int renderInstanceId = 0);
 
     // -- HdSceneIndexInterface ------------------------------------------------
     HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
@@ -100,8 +99,7 @@ private:
 
     UsdGenGroomSceneIndex(
         HdSceneIndexBaseRefPtr const &inputScene,
-        int renderInstanceId,
-        bool enableDeviceGroupIngress);
+        int renderInstanceId);
     ~UsdGenGroomSceneIndex() override;
 
     // Hydra capture stays on the caller/notice boundary. Only owning value
@@ -116,6 +114,36 @@ private:
     // over the adopted groom's published map, with no owner wait.
     int64_t _TestPublishedGeneration(SdfPath const &groom) const;
     size_t _TestPublishedTileCount(SdfPath const &groom) const;
+    uint64_t _TestIssuedIngress() const noexcept;
+    bool _TestHoldOwnerCredit();
+    void _TestReleaseOwnerCredit();
+    void _TestDrainOwnerWithoutFrontend() const;
+    size_t _TestPendingPublicationCount() const;
+    std::weak_ptr<void const> _TestPendingSnapshotWeak() const;
+    std::weak_ptr<void const> _TestPendingTileMapWeak(SdfPath const& groom) const;
+    int64_t _TestPendingPublishedGeneration(SdfPath const& groom) const;
+    uint64_t _TestCaptureCount() const noexcept;
+    uint64_t _TestCookCount() const noexcept;
+    void _TestOwnerCommandBarrier() const;
+    uint64_t _TestSequenceLastIssued() const noexcept;
+    uint64_t _TestSequenceCompletedThrough() const noexcept;
+    uint64_t _TestSequenceCapacity() const noexcept;
+    size_t _TestEventHistoryCount() const;
+    size_t _TestTombstoneHistoryCount() const;
+    size_t _TestUsedSessionWeakCount() const;
+    size_t _TestUsedSessionLiveUniqueCount() const;
+    static void _TestSetCommandCapacity(uint64_t capacity);
+    static void _TestSetSequenceCapacity(uint64_t capacity);
+    static size_t _TestRetainedSceneStateCount();
+    static size_t _TestLiveSceneStateCount();
+    static uint64_t _TestRetirementRecordCount();
+    static void _TestSceneServiceBarrier();
+    static void _TestArmFinalDeleterPause();
+    static void _TestWaitFinalDeleterPause();
+    static void _TestReleaseFinalDeleterPause();
+    static void _TestArmDrainWait();
+    static void _TestWaitDrainWait();
+    static void _TestReleaseDrainWait();
     // StormSurgery hook reads the private snapshot via the accessors above.
     friend class UsdGenImagingTestHook;
 

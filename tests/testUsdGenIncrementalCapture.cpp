@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <stdexcept>
 #include <memory>
+#include <string>
 #include <thread>
 #include <tbb/flow_graph.h>
 
@@ -91,6 +92,25 @@ void Check(bool value, char const *what) {
     if (!value) { ++failures; std::printf("FAIL: %s\n", what); }
     else std::printf("ok:   %s\n", what);
 }
+
+class PathNoticeObserver final : public HdSceneIndexObserver {
+public:
+    explicit PathNoticeObserver(SdfPath path) : _path(std::move(path)) {}
+    std::atomic<bool> added{false};
+    std::atomic<bool> removed{false};
+    void PrimsAdded(HdSceneIndexBase const &, AddedPrimEntries const &entries) override {
+        for (auto const &entry : entries)
+            if (entry.primPath == _path) added.store(true, std::memory_order_release);
+    }
+    void PrimsRemoved(HdSceneIndexBase const &, RemovedPrimEntries const &entries) override {
+        for (auto const &entry : entries)
+            if (entry.primPath == _path) removed.store(true, std::memory_order_release);
+    }
+    void PrimsDirtied(HdSceneIndexBase const &, DirtiedPrimEntries const &) override {}
+    void PrimsRenamed(HdSceneIndexBase const &, RenamedPrimEntries const &) override {}
+private:
+    SdfPath _path;
+};
 
 } // namespace
 
@@ -228,9 +248,9 @@ int main()
           "incremental filtering resumes after out-of-order captures complete");
 
     // A failed capture must still complete its ingress watermark and leave
-    // the prior session identities intact.  The next unrelated event forces
-    // a conservative full discovery, after which incremental filtering can
-    // resume.
+    // the prior session identities intact.  Its deferred full discovery is
+    // consumed at the next synchronization boundary, after which incremental
+    // filtering can resume.
     input->throwNextA.store(true, std::memory_order_release);
     bool threw = false;
     try {
@@ -240,24 +260,20 @@ int main()
         threw = true;
     }
     Check(threw, "capture failure propagates from Groom A ingress");
-    owner->Synchronize();
-    Check(store.Find(keyA) == sessionA && store.Find(keyB) == sessionB,
-          "failed capture preserves both session identities");
-
     input->Reset();
-    input->retained->DirtyPrims({
-        {SdfPath("/unrelated"), HdDataSourceLocatorSet(HdDataSourceLocator())}});
     owner->Synchronize();
-    Check(input->rootTraversal > 0 && input->groomAReads > 0 &&
+    Check(store.Find(keyA) == sessionA && store.Find(keyB) == sessionB &&
+              input->rootTraversal > 0 && input->groomAReads > 0 &&
               input->groomBReads > 0,
-          "post-failure unrelated dirty performs conservative full discovery");
+          "synchronization recovers failed capture with full discovery and stable sessions");
+
     input->Reset();
     input->retained->DirtyPrims({
         {SdfPath("/unrelated"), HdDataSourceLocatorSet(HdDataSourceLocator())}});
     owner->Synchronize();
     Check(input->rootPrimReads == 0 && input->rootTraversal == 0 &&
               input->groomAReads == 0 && input->groomBReads == 0,
-          "incremental filtering resumes after recovery discovery");
+          "incremental filtering resumes after synchronization recovery");
 
     input->retained->RemovePrims({{a}});
     owner->Synchronize();
@@ -270,6 +286,102 @@ int main()
     UsdGenGroomSceneIndex::DrainRetired();
     UsdGenImagingTestHook::Drain();
     sessionA.Reset(); sessionB.Reset();
+
+    // Bound the sequence window even when its oldest capture is stalled.
+    // Later source mutations continue changing the input, but once the
+    // small window is full they cannot allocate a sequence, run a capture,
+    // or grow owner history.  Releasing the prefix gap recovers the final
+    // namespace in one authoritative synchronization pass.
+    UsdGenImagingTestHook::setGroomSequenceCapacityForTesting(8);
+    {
+        auto stalledInput = TfCreateRefPtr(new CountingInput);
+        SdfPath const stalledGroom("/groomA");
+        stalledInput->retained->AddPrims({
+            {stalledGroom, TfToken("UsdGenGroom"), HdRetainedContainerDataSource::New()}});
+        auto stalledIndex = UsdGenGroomSceneIndex::New(stalledInput, 7311);
+        auto *stalledOwner = dynamic_cast<UsdGenGroomSceneIndex *>(stalledIndex.operator->());
+        Check(stalledOwner != nullptr, "stalled-prefix fixture creates an owner");
+        if (stalledOwner) {
+            stalledOwner->Synchronize();
+            stalledIndex->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
+            SdfPath const finalPath("/stalled/final");
+            PathNoticeObserver finalNotice(finalPath);
+            stalledIndex->AddObserver(TfCreateWeakPtr(&finalNotice));
+
+            stalledInput->captureEntered.reserve_wait();
+            stalledInput->captureRelease.reserve_wait();
+            stalledInput->holdNextA.store(true, std::memory_order_release);
+            std::thread heldCapture([&] {
+                stalledInput->retained->DirtyPrims(
+                    {{stalledGroom, HdDataSourceLocatorSet(HdDataSourceLocator())}});
+            });
+            stalledInput->captureEntered.wait_for_all();
+            uint64_t const issuedBefore =
+                UsdGenImagingTestHook::groomSequenceLastIssued(*stalledIndex);
+
+            constexpr unsigned kSequenceCapacity = 8;
+            constexpr unsigned kLaterMutations = 24;
+            for (unsigned i = 0; i != kLaterMutations; ++i) {
+                SdfPath const transient("/stalled/transient" + std::to_string(i));
+                stalledInput->retained->AddPrims(
+                    {{transient, TfToken("Scope"), HdRetainedContainerDataSource::New()}});
+                stalledInput->retained->RemovePrims({{transient}});
+            }
+            // This last mutation must be rejected while the prefix remains
+            // held, but it is retained upstream for synchronization recovery.
+            stalledInput->retained->AddPrims(
+                {{finalPath, TfToken("Scope"), HdRetainedContainerDataSource::New()}});
+            UsdGenImagingTestHook::groomOwnerCommandBarrier(*stalledIndex);
+            uint64_t const issuedAtCapacity =
+                UsdGenImagingTestHook::groomSequenceLastIssued(*stalledIndex);
+            uint64_t const completedAtCapacity =
+                UsdGenImagingTestHook::groomSequenceCompletedThrough(*stalledIndex);
+            stalledInput->Reset();
+            stalledInput->retained->DirtyPrims(
+                {{SdfPath("/stalled/rejected"), HdDataSourceLocatorSet(HdDataSourceLocator())}});
+            UsdGenImagingTestHook::groomOwnerCommandBarrier(*stalledIndex);
+            Check(UsdGenImagingTestHook::groomSequenceCapacity(*stalledIndex) ==
+                      kSequenceCapacity &&
+                      issuedAtCapacity >= issuedBefore &&
+                      issuedAtCapacity - completedAtCapacity <= kSequenceCapacity &&
+                      UsdGenImagingTestHook::groomEventHistoryCount(*stalledIndex) <=
+                          kSequenceCapacity &&
+                      UsdGenImagingTestHook::groomTombstoneHistoryCount(*stalledIndex) <=
+                          kSequenceCapacity,
+                  "stalled prefix bounds issued sequence span and owner histories");
+            Check(UsdGenImagingTestHook::groomSequenceLastIssued(*stalledIndex) ==
+                      issuedAtCapacity && stalledInput->rootPrimReads == 0 &&
+                      stalledInput->rootTraversal == 0 && stalledInput->groomAReads == 0 &&
+                      stalledInput->groomBReads == 0,
+                  "full sequence window rejects later ingress before sequence allocation or capture");
+
+            stalledInput->captureRelease.release_wait();
+            heldCapture.join();
+            stalledOwner->Synchronize();
+            Check(finalNotice.added.load(std::memory_order_acquire) &&
+                      stalledIndex->GetPrim(finalPath).dataSource &&
+                      UsdGenImagingTestHook::groomSequenceLastIssued(*stalledIndex) ==
+                          UsdGenImagingTestHook::groomSequenceCompletedThrough(*stalledIndex),
+                  "released prefix recovers the latest source namespace and closes the sequence gap");
+
+            uint64_t const issuedBeforeReuse =
+                UsdGenImagingTestHook::groomSequenceLastIssued(*stalledIndex);
+            SdfPath const reusePath("/stalled/reused");
+            stalledInput->retained->AddPrims(
+                {{reusePath, TfToken("Scope"), HdRetainedContainerDataSource::New()}});
+            stalledOwner->Synchronize();
+            Check(UsdGenImagingTestHook::groomSequenceLastIssued(*stalledIndex) ==
+                      issuedBeforeReuse + 1 &&
+                      UsdGenImagingTestHook::groomSequenceCompletedThrough(*stalledIndex) ==
+                          issuedBeforeReuse + 1,
+                  "sequence capacity is reusable after stalled-prefix recovery");
+            stalledIndex->RemoveObserver(TfCreateWeakPtr(&finalNotice));
+        }
+        stalledIndex.Reset();
+        UsdGenGroomSceneIndex::DrainRetired();
+        UsdGenImagingTestHook::Drain();
+    }
+    UsdGenImagingTestHook::setGroomSequenceCapacityForTesting(4096);
     std::printf("testUsdGenIncrementalCapture: %s\n",
                 failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

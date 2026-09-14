@@ -46,6 +46,82 @@ int main() {
     auto descriptor = prepared.Input();
     check(descriptor.points.data == prepared.points.data() && descriptor.stableIds.data == prepared.curveId.data(),
           "compute descriptor spans from current ownership");
+
+    auto compacted = prepared;
+    check(CompactCudaSource(&compacted, {9}) &&
+          compacted.curveId == std::vector<uint64_t>({9}) &&
+          compacted.curveVertexCounts == std::vector<int32_t>({2}) &&
+          compacted.points.size() == 2 && compacted.points[0].x == 10 &&
+          compacted.rest[1].x == 11 && compacted.widths[1] == 2 &&
+          compacted.hairT[1] == 1 && compacted.rootPrim[0] == 90 &&
+          compacted.rootUV[0].x == .9f && compacted.rootFrames[0][12] == 90,
+          "compact every ragged source channel by stable ID");
+    check(prepared.points.size() == 5 && prepared.curveId.size() == 2 &&
+          prepared.points[0].x == 20,
+          "compaction preserves retained prior source owner");
+    auto const* owner = compacted.points.data();
+    check(!CompactCudaSource(&compacted, {999}) &&
+          !CompactCudaSource(&compacted, {9,9}) && compacted.points.data() == owner &&
+          compacted.curveId == std::vector<uint64_t>({9}),
+          "invalid retained IDs preserve candidate ownership");
+    auto reorderedRequest = prepared;
+    check(CompactCudaSource(&reorderedRequest, {9,3}) &&
+          reorderedRequest.curveId == std::vector<uint64_t>({3,9}),
+          "compaction retains canonical source order");
+    check(CompactCudaSource(&compacted, {}) && compacted.points.empty() &&
+          compacted.rest.empty() && compacted.widths.empty() &&
+          compacted.hairT.empty() && compacted.curveId.empty() &&
+          compacted.rootPrim.empty() && compacted.rootUV.empty() &&
+          compacted.rootFrames.empty(), "all dropped source clears every channel");
+    auto malformed = prepared;
+    malformed.rest.pop_back();
+    check(!CompactCudaSource(&malformed, {9}) && malformed.rest.size() == 4,
+          "malformed source compaction fails transactionally");
+    auto absent = prepared;
+    absent.rest.clear(); absent.hairT.clear(); absent.rootPrim.clear();
+    absent.rootUV.clear(); absent.rootFrames.clear();
+    check(CompactCudaSource(&absent, {9}) && absent.rest.empty() &&
+          absent.hairT.empty() && absent.rootPrim.empty() && absent.rootFrames.empty(),
+          "compaction preserves absent optional channels");
+
+    // useRest declares the processing space; it never substitutes the loaded
+    // posed points. The authored rest channel remains separate in both modes.
+    CudaSourcePreparationInput distinct;
+    distinct.curveVertexCounts = {2};
+    distinct.points = {{2.2f,0,0},{2.3f,0,0}};
+    distinct.rest = {{.2f,0,0},{.3f,0,0}};
+    distinct.widths = {.1f,.1f};
+    CudaSourcePrepared restSelected, posedSelected;
+    CudaSourcePreparationOptions selectRest;
+    selectRest.useRest = true;
+    check(PrepareCudaSource(distinct, selectRest, &restSelected) == CudaSourcePreparationStatus::Ok,
+          "prepare distinct rest and posed source");
+    auto restDescriptor = restSelected.Input();
+    check(restDescriptor.points.size == 2 && restDescriptor.points.data == restSelected.points.data() &&
+          restDescriptor.points.data[0].x == 2.2f &&
+          restDescriptor.restPoints.data == restSelected.rest.data() &&
+          restDescriptor.restPoints.data[1].x == .3f,
+          "useRest true preserves loaded points and separate rest channel");
+    selectRest.useRest = false;
+    check(PrepareCudaSource(distinct, selectRest, &posedSelected) == CudaSourcePreparationStatus::Ok,
+          "prepare posed source selection");
+    auto posedDescriptor = posedSelected.Input();
+    check(posedDescriptor.points.size == 2 && posedDescriptor.points.data == posedSelected.points.data() &&
+          posedDescriptor.points.data[0].x == 2.2f &&
+          posedDescriptor.restPoints.data == posedSelected.rest.data() &&
+          posedDescriptor.restPoints.data[0].x == .2f,
+          "useRest false preserves loaded points without replacing canonical rest");
+    auto noRest = distinct;
+    noRest.rest.clear();
+    CudaSourcePrepared noRestPrepared;
+    selectRest.useRest = true;
+    check(PrepareCudaSource(noRest, selectRest, &noRestPrepared) == CudaSourcePreparationStatus::Ok,
+          "prepare standalone source without rest channel");
+    auto noRestDescriptor = noRestPrepared.Input();
+    check(noRestDescriptor.points.data == noRestPrepared.points.data() &&
+          noRestDescriptor.points.data[0].x == 2.2f &&
+          noRestDescriptor.restPoints.size == 0,
+          "missing rest keeps canonical-empty fallback without point substitution");
     CudaSourcePrepared lastGood = prepared;
     auto badWidth = source; badWidth.widths[2] = -1.0f;
     check(PrepareCudaSource(badWidth, {}, &prepared, nullptr) == CudaSourcePreparationStatus::InvalidArgument,

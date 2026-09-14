@@ -4,8 +4,10 @@
 // separate from the production Hydra builder so the production object has no
 // UsdStage dependencies (B-2/V2-11).
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
+#include "usdGenImaging/imageMapCache.h"
 
 #include "usdGen/expressions/valueShape.h"
+#include "usdGen/executionBackend.h"
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
@@ -46,6 +48,7 @@ using usdGen::UsdGenRole;
 using usdGen::UsdGenLookDesc;
 using usdGen::UsdGenSurfaceDesc;
 using usdGen::UsdGenSurfaceSample;
+using usdGen::UsdGenSurfaceNormalDomain;
 
 bool
 _isDedicated(TfToken const &name)
@@ -154,10 +157,7 @@ _ResolveExecutionBackend(UsdPrim const &prim)
         !value.IsHolding<TfToken>()) {
         return usdGen::UsdGenExecutionBackend::Invalid;
     }
-    if (value.UncheckedGet<TfToken>() == TfToken("cuda")) {
-        return usdGen::UsdGenExecutionBackend::Cuda;
-    }
-    return usdGen::UsdGenExecutionBackend::Invalid;
+    return usdGen::ParseUsdGenExecutionBackend(value.UncheckedGet<TfToken>());
 }
 
 void
@@ -186,6 +186,16 @@ _GetPrimvarTyped(UsdPrim const &prim, TfToken const &name, UsdTimeCode time,
     } else if (v.CanCast<T>()) {
         *out = v.template Cast<T>().template UncheckedGet<T>();
     }
+}
+
+UsdGenSurfaceNormalDomain
+_NormalDomain(TfToken const& interpolation)
+{
+    if (interpolation == TfToken("constant")) return UsdGenSurfaceNormalDomain::Constant;
+    if (interpolation == TfToken("uniform")) return UsdGenSurfaceNormalDomain::Uniform;
+    if (interpolation == TfToken("vertex")) return UsdGenSurfaceNormalDomain::Vertex;
+    if (interpolation == TfToken("faceVarying")) return UsdGenSurfaceNormalDomain::FaceVarying;
+    return UsdGenSurfaceNormalDomain::Invalid;
 }
 
 void
@@ -351,6 +361,20 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
                        &out->restPoints);
     }
     _GetPrimvarTyped(meshPrim, TfToken("st"), UsdTimeCode::Default(), &out->uv);
+    // Rest normals are a paired Default-time Mesh attribute/interpolation,
+    // never the current evaluation-time mesh normal. Empty is the valid
+    // geometric-normal fallback; nonempty bad typing/interpolation stays
+    // Invalid for CUDA admission.
+    VtValue normals;
+    if (mesh.GetNormalsAttr().Get(&normals, UsdTimeCode::Default()) && !normals.IsEmpty()) {
+        if (normals.IsHolding<VtVec3fArray>()) {
+            out->restNormals = normals.UncheckedGet<VtVec3fArray>();
+            if (!out->restNormals.empty())
+                out->restNormalDomain = _NormalDomain(mesh.GetNormalsInterpolation());
+        } else {
+            out->restNormalDomain = UsdGenSurfaceNormalDomain::Invalid;
+        }
+    }
     _GetPrimvarTyped(meshPrim, TfToken("velocities"), UsdTimeCode(time),
                      &out->velocities);  // motion profile P1 only
 
@@ -547,6 +571,8 @@ BuildGraphDescFromStage(
             SdfPathVector *bucket = &node.references;
             if (name == "input") {
                 bucket = &node.inputs;
+            } else if (name == "references") {
+                bucket = &node.references;
             } else if (name == "guides" || name == "curves" ||
                        name == "frozen:curves") {
                 bucket = &node.curves;
@@ -556,12 +582,25 @@ BuildGraphDescFromStage(
                 // Base names collide ("mask:source" vs "length:source" both
                 // → "source"): disambiguate by full relationship name.
                 std::string const full = rel.GetName().GetString();
+                usdGen::UsdGenMapBindingPurpose purpose;
                 if (full == "usdGen:mask:source" || full == "usdGen:map" ||
                     full == "usdGen:length:source") {
                     bucket = &node.maps;
+                    purpose = full == "usdGen:mask:source"
+                        ? usdGen::UsdGenMapBindingPurpose::MaskSource
+                        : (full == "usdGen:length:source"
+                            ? usdGen::UsdGenMapBindingPurpose::LengthSource
+                            : usdGen::UsdGenMapBindingPurpose::Generic);
                 } else {
                     continue;
                 }
+                SdfPathVector relTargets;
+                rel.GetTargets(&relTargets);
+                for (SdfPath const &t : relTargets) {
+                    bucket->push_back(t); // legacy flat transport
+                    node.mapBindings.push_back({t, purpose, TfToken(full)});
+                }
+                continue;
             } else {
                 continue;  // not a graph edge (base-name match only)
             }
@@ -678,7 +717,7 @@ BuildGraphDescFromStage(
             _GetToken(prim, "usdGen:type", &type);
             map.type = type.IsEmpty() ? prim.GetPrimTypeInfo().GetTypeName() : type;
             SdfAssetPath asset;
-            if (_GetTyped(prim.GetAttribute(TfToken("usdGen:source")),
+            if (_GetTyped(prim.GetAttribute(TfToken("usdGen:map:file")),
                           UsdTimeCode::Default(), &asset)) {
                 // Stage-free by value (S13): the RESOLVED path travels.
                 map.resolvedAssetPath = asset.GetResolvedPath();
@@ -707,6 +746,9 @@ BuildGraphDescFromStage(
                 role = roleIt->second;
             }
             curveFor(c, role);
+        }
+        for (SdfPath const &reference : node.references) {
+            curveFor(reference, UsdGenRole::Reference);
         }
         for (SdfPath const &m : node.maps) {
             mapFor(m);
@@ -789,6 +831,7 @@ BuildGraphDescFromStage(
 
     desc.executionBackend = _ResolveExecutionBackend(descPrim.GetParent());
 
+    ResolveUsdGenImageMaps(&desc);
     return desc;
 }
 

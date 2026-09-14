@@ -1,7 +1,9 @@
 #include "gpu/length.h"
 #include "../libs/usdGenMath/usdGenMath/hash.h"
+#include "floatUlpFixture.h"
 
 #include <cmath>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -33,6 +35,16 @@ static DeviceCurveGeometryView Geometry(DeviceBuffer<float3> const& points,
                                         DeviceBuffer<uint64_t> const& ids) {
     return {{points.data(), points.size()}, {}, {},
             {offsets.data(), offsets.size()}, {ids.data(), ids.size()}, 2, 5};
+}
+
+struct FreshSignal {
+    std::atomic<int> calls{0};
+    std::atomic<int> status{int(cudaErrorUnknown)};
+};
+static void FreshCallback(cudaStream_t, cudaError_t status, void* userdata) noexcept {
+    auto* signal=static_cast<FreshSignal*>(userdata);
+    signal->status.store(int(status),std::memory_order_release);
+    signal->calls.fetch_add(1,std::memory_order_release);
 }
 
 int main() {
@@ -144,6 +156,80 @@ int main() {
     CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
           op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer));
     CHECK(Near(got[2].x,1.25f) && Near(got[2].y,1.25f) && Near(got[4].z,2.5f));
+    // Binding floor on both ragged curves: their current arcs are 2 and 3.
+    // These hand-derived complete arrays distinguish radial, keepParam, and
+    // Reparam, rather than merely checking whether the dispatch succeeded.
+    const std::vector<float3> minimumRadial{{0,0,0},{1.25f,0,0},{1.25f,1.25f,0},{0,0,0},{0,0,2.5f}};
+    const std::vector<float3> minimumKeep{{0,0,0},{1,0,0},{1,1.5f,0},{0,0,0},{0,0,2.5f}};
+    const std::vector<float3> minimumReparam{{0,0,0},{1,.25f,0},{1,1.5f,0},{0,0,0},{0,0,2.5f}};
+    for (auto mode : {LengthMode::Scale, LengthMode::Set}) {
+        for (auto method : {LengthMethod::Scale, LengthMethod::CutExtend}) {
+            for (auto rebuild : {LengthRebuild::KeepParam, LengthRebuild::Reparam}) {
+                p = LengthParameters{}; p.mode = mode; p.method = method; p.rebuild = rebuild;
+                p.value = ScalarField::Literal(mode == LengthMode::Scale ? .25f : 1.f);
+                p.minRemainingLength = ScalarField::Literal(2.5f);
+                CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+                      op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer) &&
+                      Download(keep, gotKeep, consumer));
+                auto const& expected = method == LengthMethod::Scale ? minimumRadial :
+                    rebuild == LengthRebuild::KeepParam ? minimumKeep : minimumReparam;
+                CHECK(FloatBytesWithinUlps(got.data(), expected.data(), expected.size()*sizeof(float3), 4));
+                CHECK(gotKeep == std::vector<uint8_t>({1,1}));
+            }
+        }
+    }
+    // Actual Reparam output arc is sqrt(1.0625)+1.25, less than the 2.5 target.
+    p.cullThreshold = ScalarField::Literal(2.4f);
+    CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+          op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer) &&
+          Download(keep, gotKeep, consumer));
+    CHECK(FloatBytesWithinUlps(got.data(), minimumReparam.data(), got.size()*sizeof(float3), 4) &&
+          gotKeep == std::vector<uint8_t>({0,1}));
+    // A nonbinding floor does not cap an independently larger requested target.
+    p = LengthParameters{}; p.mode = LengthMode::Set;
+    p.value = ScalarField::Literal(4); p.minRemainingLength = ScalarField::Literal(1);
+    CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+          op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer));
+    const std::vector<float3> nonbindingMinimum{{0,0,0},{2,0,0},{2,2,0},{0,0,0},{0,0,4}};
+    CHECK(FloatBytesWithinUlps(got.data(), nonbindingMinimum.data(), got.size()*sizeof(float3), 4));
+    p = LengthParameters{}; p.mode = LengthMode::Cull;
+    p.minRemainingLength = ScalarField::Literal(1000.0f);
+    p.cullThreshold = ScalarField::Literal(2.5f);
+    CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+          op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer) &&
+          Download(keep, gotKeep, consumer));
+    CHECK(std::memcmp(got.data(), source.data(), source.size()*sizeof(float3)) == 0 &&
+          gotKeep == std::vector<uint8_t>({0,1}));
+    const std::vector<unsigned char> minimumSentinel(got.size()*sizeof(float3), 0xA5);
+    for (float minimum : {-1.f, NAN, INFINITY}) {
+        CHECK(cudaMemsetAsync(output.data(), 0xA5, output.size()*sizeof(float3), producer) == cudaSuccess &&
+              cudaMemsetAsync(keep.data(), 0xA5, keep.size(), producer) == cudaSuccess &&
+              cudaStreamSynchronize(producer) == cudaSuccess);
+        p = LengthParameters{}; p.minRemainingLength = ScalarField::Literal(minimum);
+        auto status = op.Apply(geometry, {}, p, output.view(), keep.view(), producer);
+        if (std::isfinite(minimum)) CHECK(status == StyleStatus::Ok && op.Finish(consumer) == StyleStatus::InvalidValue);
+        else CHECK(status == StyleStatus::NonFiniteInput && !op.pending());
+        CHECK(Download(output, got, consumer) && Download(keep, gotKeep, consumer) &&
+              std::memcmp(got.data(), minimumSentinel.data(), minimumSentinel.size()) == 0 &&
+              gotKeep == std::vector<uint8_t>({0xA5,0xA5}));
+    }
+    DeviceBuffer<float3> zeroPoints;
+    CHECK(zeroPoints.reset(5) == cudaSuccess &&
+          Upload(zeroPoints, std::vector<float3>(5, make_float3(0,0,0)), producer) &&
+          cudaStreamSynchronize(producer) == cudaSuccess);
+    auto zeroGeometry = Geometry(zeroPoints, offsets, ids);
+    CHECK(cudaMemsetAsync(output.data(), 0xA5, output.size()*sizeof(float3), producer) == cudaSuccess &&
+          cudaMemsetAsync(keep.data(), 0xA5, keep.size()*sizeof(uint8_t), producer) == cudaSuccess);
+    p = LengthParameters{}; p.minRemainingLength = ScalarField::Literal(1.0f);
+    p.value = ScalarField::Literal(0);
+    CHECK(op.Apply(zeroGeometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+          op.Finish(consumer) == StyleStatus::InvalidValue && Download(output, got, consumer) &&
+          Download(keep, gotKeep, consumer));
+    CHECK(std::memcmp(got.data(), minimumSentinel.data(), minimumSentinel.size()) == 0 &&
+          gotKeep == std::vector<uint8_t>({0xA5,0xA5}));
+    std::vector<float3> minimumSourceAgain(5);
+    CHECK(Download(points, minimumSourceAgain, consumer) &&
+          std::memcmp(minimumSourceAgain.data(), source.data(), source.size()*sizeof(float3)) == 0);
     p = LengthParameters{}; p.mode = LengthMode::Cull;
     p.cullThreshold = ScalarField::Literal(100);
     p.maskProfile = Const(zeroProfile);
@@ -180,6 +266,70 @@ int main() {
     CudaLength emptyOp;
     CHECK(emptyOp.Apply(empty, {}, LengthParameters{}, {}, {}, producer) == StyleStatus::Ok &&
           emptyOp.Finish(consumer) == StyleStatus::Ok && emptyOp.deviceIndex() >= 0);
+
+    // Fresh Length conditionally publishes both candidate points and keep only
+    // after its device validation scalar is proved by the relay callback.
+    CHECK(Upload(points, source, producer) && Upload(offsets, {0u,3u,5u}, producer));
+    CudaLength fresh;
+    FreshSignal freshSignal;
+    p=LengthParameters{}; p.value=ScalarField::Literal(2.f);
+    CHECK(fresh.ApplyFresh(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+          fresh.HasUnprovenWork() && fresh.CommitFreshFinish() == StyleStatus::InvalidArgument &&
+          fresh.Finish(producer) == StyleStatus::InvalidArgument &&
+          fresh.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::InvalidArgument &&
+          fresh.FinishFreshAsync(producer, FreshCallback, &freshSignal) == StyleStatus::Ok &&
+          cudaStreamSynchronize(producer) == cudaSuccess && freshSignal.calls.load(std::memory_order_acquire)==1 &&
+          freshSignal.status.load(std::memory_order_acquire)==int(cudaSuccess) &&
+          fresh.CommitFreshFinish() == StyleStatus::Ok && !fresh.HasUnprovenWork() &&
+          Download(output,got,consumer) && Download(keep,gotKeep,consumer));
+    CHECK(Near(got[1].x,2) && Near(got[2].y,2) && Near(got[4].z,6) &&
+          gotKeep==std::vector<uint8_t>({1,1}));
+
+    auto freshSemanticFailure = [&](LengthParameters const& invalid) {
+        std::vector<unsigned char> pointSentinel(sizeof(float3)*got.size(),0x6D);
+        std::vector<uint8_t> keepSentinel(keep.size(),0xA7);
+        if (cudaMemsetAsync(output.data(),0x6D,output.size()*sizeof(float3),producer)!=cudaSuccess ||
+            cudaMemsetAsync(keep.data(),0xA7,keep.size(),producer)!=cudaSuccess) return false;
+        FreshSignal signal;
+        if (fresh.ApplyFresh(geometry,{},invalid,output.view(),keep.view(),producer)!=StyleStatus::Ok ||
+            fresh.FinishFreshAsync(producer,FreshCallback,&signal)!=StyleStatus::Ok ||
+            cudaStreamSynchronize(producer)!=cudaSuccess || signal.calls.load(std::memory_order_acquire)!=1 ||
+            signal.status.load(std::memory_order_acquire)!=int(cudaSuccess) ||
+            fresh.CommitFreshFinish()==StyleStatus::Ok || fresh.HasUnprovenWork() ||
+            !Download(output,got,consumer) || !Download(keep,gotKeep,consumer)) return false;
+        return std::memcmp(got.data(),pointSentinel.data(),pointSentinel.size())==0 && gotKeep==keepSentinel;
+    };
+    // Invalid offsets, a device profile value, and an expression-like device
+    // point field are all semantic failures: neither candidate channel leaks.
+    CHECK(Upload(offsets,{0u,3u,9u},producer) && freshSemanticFailure(LengthParameters{}));
+    CHECK(Upload(offsets,{0u,3u,5u},producer));
+    DeviceBuffer<float> badProfile, badExpression;
+    CHECK(badProfile.reset(257)==cudaSuccess && badExpression.reset(5)==cudaSuccess &&
+          Upload(badProfile,std::vector<float>(257,NAN),producer) &&
+          Upload(badExpression,{1.f,-1.f,1.f,1.f,1.f},producer));
+    p=LengthParameters{}; p.maskProfile=Const(badProfile); CHECK(freshSemanticFailure(p));
+    p=LengthParameters{}; p.value=ScalarField::Device(Const(badExpression),expr::Domain::Point);
+    CHECK(freshSemanticFailure(p));
+    // A proven semantic rejection leaves this instance reusable.
+    FreshSignal freshRetry;
+    CHECK(fresh.ApplyFresh(geometry,{},LengthParameters{},output.view(),keep.view(),producer)==StyleStatus::Ok &&
+          fresh.FinishFreshAsync(producer,FreshCallback,&freshRetry)==StyleStatus::Ok &&
+          cudaStreamSynchronize(producer)==cudaSuccess && freshRetry.calls.load()==1 &&
+          fresh.CommitFreshFinish()==StyleStatus::Ok);
+
+    // Capture is refused before the fresh path can query/allocate/submit.
+    CudaLength capture;
+    cudaGraph_t graph=nullptr;
+    CHECK(cudaStreamBeginCapture(producer,cudaStreamCaptureModeGlobal)==cudaSuccess &&
+          capture.ApplyFresh(geometry,{},LengthParameters{},output.view(),keep.view(),producer)==StyleStatus::InvalidArgument &&
+          cudaStreamEndCapture(producer,&graph)==cudaSuccess);
+    if (graph) CHECK(cudaGraphDestroy(graph)==cudaSuccess);
+    CudaLength freshEmpty;
+    FreshSignal emptySignal;
+    CHECK(freshEmpty.ApplyFresh(empty,{},LengthParameters{},{},{},producer)==StyleStatus::Ok &&
+          freshEmpty.FinishFreshAsync(producer,FreshCallback,&emptySignal)==StyleStatus::Ok &&
+          cudaStreamSynchronize(producer)==cudaSuccess && emptySignal.calls.load()==1 &&
+          freshEmpty.CommitFreshFinish()==StyleStatus::Ok);
 
     CHECK(cudaStreamDestroy(producer) == cudaSuccess && cudaStreamDestroy(consumer) == cudaSuccess);
     std::puts("testUsdGenCudaLength: PASS");

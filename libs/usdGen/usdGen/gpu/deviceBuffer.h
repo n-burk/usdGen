@@ -3,6 +3,7 @@
 #define USDGEN_GPU_DEVICE_BUFFER_H
 
 #include <cuda_runtime.h>
+#include "deviceResources.h"
 
 #include <cstddef>
 #include <limits>
@@ -31,25 +32,45 @@ public:
         return *this;
     }
 
-    cudaError_t reset(size_t count);
+    // A non-null reservation is consumed only when this call must replace an
+    // allocation; same-size reuse retains its existing permit unchanged.
+    cudaError_t reset(size_t count,
+                      UsdGenExecutionMemoryReservation* reservation = nullptr,
+                      UsdGenExecutionResourceKind kind =
+                          UsdGenExecutionResourceKind::Active);
+    // Host-only accounting transition for storage which has become part of an
+    // immutable published generation.  It deliberately does not touch the
+    // CUDA allocation, event, or device selection.
+    void Reclassify(UsdGenExecutionResourceKind kind) noexcept {
+        permit_.Reclassify(kind);
+    }
     void release() noexcept;
     // Only for a lost device or unprovable completion: abandon handles rather
     // than free storage still potentially in use. Context teardown reclaims
     // these intentionally quarantined allocations/events.
-    void quarantine() noexcept { data_ = nullptr; size_ = 0; ready_ = nullptr; }
+    void quarantine() noexcept { permit_.Abandon(); data_ = nullptr; size_ = 0; ready_ = nullptr; device_ = -1; }
     DeviceView<T> view() { return {data_, size_}; }
     DeviceView<const T> view() const { return {data_, size_}; }
     size_t size() const { return size_; }
+    size_t bytes() const noexcept { return size_ * sizeof(T); }
     T* data() { return data_; }
     const T* data() const { return data_; }
     cudaError_t recordUse(cudaStream_t stream);
     cudaError_t waitOn(cudaStream_t stream) const;
+    // Poll the last-use event without synchronizing the host.  A caller may
+    // reclaim the allocation only after this reports cudaSuccess.
+    cudaError_t queryUse() const;
+    // Establish a final completion proof for destruction of paired host
+    // sources. Selects the allocation's device for the event wait.
+    cudaError_t synchronizeUse() const;
 
 private:
     void moveFrom(DeviceBuffer& other) noexcept;
     T* data_ = nullptr;
     size_t size_ = 0;
     cudaEvent_t ready_ = nullptr;
+    int device_ = -1;
+    UsdGenExecutionResourcePermit permit_;
 };
 
 }} // namespace usdGen::gpu

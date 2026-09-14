@@ -148,6 +148,47 @@ int main() {
     CHECK(edited && edited != deformed && !session.LastDiagnostics().HasErrors());
     auto editedBinding = session.CudaBindingStats();
     CHECK(editedBinding.size() == 1 && editedBinding[0].identity != bindings[0].identity);
+
+    // Rest normals are a separate Default-time surface binding: authored
+    // Default normals/interpolation must agree through Stage and Hydra,
+    // while a current-time normal sample cannot replace them.
+    VtVec3fArray defaultRestNormals(rbfDesc.surfaces[0].restPoints.size(),
+                                    GfVec3f(0, 0, 1));
+    VtVec3fArray posedNormals(rbfDesc.surfaces[0].restPoints.size(),
+                              GfVec3f(0, 1, 0));
+    CHECK(scalp.CreateNormalsAttr(VtValue(defaultRestNormals)));
+    CHECK(scalp.SetNormalsInterpolation(TfToken("vertex")));
+    CHECK(scalp.GetNormalsAttr().Set(VtValue(posedNormals), UsdTimeCode(24)));
+    rbfIndices.stageSceneIndex->ApplyPendingUpdates();
+    usdGenImaging::UsdGenGraphDescBuildOptions normalOptions;
+    normalOptions.time = 24.0;
+    auto const normalStageDesc = usdGenImaging::BuildGraphDescFromStage(
+        rbfStage, SdfPath("/Groom/hair"), normalOptions);
+    auto const normalHydraDesc = usdGenImaging::BuildGraphDescFromHydra(
+        *rbfIndices.finalSceneIndex, SdfPath("/Groom/hair"), normalOptions);
+    CHECK(normalStageDesc.surfaces.size() == 1 &&
+          normalHydraDesc.surfaces.size() == 1);
+    CHECK(normalStageDesc.surfaces[0].restNormals == defaultRestNormals &&
+          normalHydraDesc.surfaces[0].restNormals == defaultRestNormals &&
+          normalStageDesc.surfaces[0].restNormalDomain ==
+              UsdGenSurfaceNormalDomain::Vertex &&
+          normalHydraDesc.surfaces[0].restNormalDomain ==
+              UsdGenSurfaceNormalDomain::Vertex);
+    CHECK(scalp.SetNormalsInterpolation(TfToken("varying")));
+    rbfIndices.stageSceneIndex->ApplyPendingUpdates();
+    auto const invalidNormalsStage = usdGenImaging::BuildGraphDescFromStage(
+        rbfStage, SdfPath("/Groom/hair"), normalOptions);
+    auto const invalidNormalsHydra = usdGenImaging::BuildGraphDescFromHydra(
+        *rbfIndices.finalSceneIndex, SdfPath("/Groom/hair"), normalOptions);
+    CHECK(invalidNormalsStage.surfaces.size() == 1 &&
+          invalidNormalsHydra.surfaces.size() == 1 &&
+          invalidNormalsStage.surfaces[0].restNormalDomain ==
+              UsdGenSurfaceNormalDomain::Invalid &&
+          invalidNormalsHydra.surfaces[0].restNormalDomain ==
+              UsdGenSurfaceNormalDomain::Invalid);
+    CHECK(scalp.SetNormalsInterpolation(TfToken("vertex")));
+    rbfIndices.stageSceneIndex->ApplyPendingUpdates();
+
     // A failed edit must not replace the last published immutable generation.
     CHECK(scalp.GetFaceVertexIndicesAttr().Set(VtIntArray{99,1,2,0,1,3,1,2,4}));
     rbfIndices.stageSceneIndex->ApplyPendingUpdates();

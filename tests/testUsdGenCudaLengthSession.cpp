@@ -66,9 +66,37 @@ static bool Read(gpu::CudaGeometryLease const& lease, std::vector<float3>* point
     return cudaStreamSynchronize(stream) == cudaSuccess;
 }
 
+template <class T>
+static bool ReadNamed(gpu::CudaNamedChannelLease const& lease,
+                      std::vector<T>* values, cudaStream_t stream) {
+    if (!lease || !values || lease.Bytes().size % sizeof(T)) return false;
+    values->resize(lease.Bytes().size / sizeof(T));
+    return cudaMemcpyAsync(values->data(), lease.Bytes().data, lease.Bytes().size,
+                           cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+           cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
 int main() {
     cudaStream_t stream = nullptr; CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess);
-    UsdGenSession session; session.SetDevicePublicationEnabled(true); auto desc = MakeDesc(); session.SetGraphDesc(desc);
+    UsdGenSession session; session.SetDevicePublicationEnabled(true); auto desc = MakeDesc();
+    UsdGenAuthoredPlaneDesc pointPlane;
+    pointPlane.name = TfToken("pointPayload");
+    pointPlane.type = UsdGenAuthoredPlaneType::Float32;
+    pointPlane.domain = UsdGenAuthoredPlaneDomain::Point;
+    pointPlane.floatValues = {0,1,2,3,4,5,6,7,8};
+    UsdGenAuthoredPlaneDesc primitivePlane;
+    primitivePlane.name = TfToken("primitivePayload");
+    primitivePlane.type = UsdGenAuthoredPlaneType::Int32;
+    primitivePlane.domain = UsdGenAuthoredPlaneDomain::Primitive;
+    primitivePlane.arity = 2;
+    primitivePlane.intValues = {300,301,100,101,200,201};
+    UsdGenAuthoredPlaneDesc groomPlane;
+    groomPlane.name = TfToken("groomPayload");
+    groomPlane.type = UsdGenAuthoredPlaneType::Float32;
+    groomPlane.domain = UsdGenAuthoredPlaneDomain::Groom;
+    groomPlane.floatValues = {.5f};
+    desc.curveSets[0].authoredPlanes = {pointPlane, primitivePlane, groomPlane};
+    session.SetGraphDesc(desc);
     auto first = session.Commit(1, UsdGenCommitReason::SetTime);
     if (!first) for (auto const& e : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", e.c_str());
     CHECK(first && first->device && !session.LastDiagnostics().HasErrors());
@@ -81,6 +109,17 @@ int main() {
     uint32_t offsets[3]{};
     CHECK(cudaMemcpy(offsets, firstLease.Geometry().curveOffsets.data, sizeof(offsets), cudaMemcpyDeviceToHost) == cudaSuccess);
     CHECK(offsets[0] == 0 && offsets[1] == 3 && offsets[2] == 7);
+    auto pointPayload = gpu::AcquireNamedChannel(first->device, "pointPayload", stream);
+    auto primitivePayload = gpu::AcquireNamedChannel(first->device, "primitivePayload", stream);
+    auto groomPayload = gpu::AcquireNamedChannel(first->device, "groomPayload", stream);
+    std::vector<float> pointValues, groomValues;
+    std::vector<int32_t> primitiveValues;
+    CHECK(ReadNamed(pointPayload, &pointValues, stream) &&
+          pointValues == std::vector<float>({2,3,4,5,6,7,8}));
+    CHECK(ReadNamed(primitivePayload, &primitiveValues, stream) &&
+          primitiveValues == std::vector<int32_t>({100,101,200,201}));
+    CHECK(ReadNamed(groomPayload, &groomValues, stream) &&
+          groomValues == std::vector<float>({.5f}));
     std::vector<float> hairT(7); std::vector<int32_t> rootPrim(2); std::vector<float2> rootUV(2);
     CHECK(cudaMemcpyAsync(hairT.data(), firstLease.HairT().data, hairT.size()*sizeof(float), cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
           cudaMemcpyAsync(rootPrim.data(), firstLease.RootPrim().data, rootPrim.size()*sizeof(int32_t), cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
@@ -120,9 +159,18 @@ int main() {
     auto emptyLease = gpu::AcquireGeometry(empty->device, stream); CHECK(emptyLease);
     CHECK(Read(emptyLease, &points, &widths, &ids, stream));
     CHECK(ids.empty() && points.empty() && widths.empty() && emptyLease.Geometry().curveOffsets.size == 1);
+    auto emptyPoint = gpu::AcquireNamedChannel(empty->device, "pointPayload", stream);
+    auto emptyPrimitive = gpu::AcquireNamedChannel(empty->device, "primitivePayload", stream);
+    auto emptyGroom = gpu::AcquireNamedChannel(empty->device, "groomPayload", stream);
+    CHECK(ReadNamed(emptyPoint, &pointValues, stream) && pointValues.empty());
+    CHECK(ReadNamed(emptyPrimitive, &primitiveValues, stream) && primitiveValues.empty());
+    CHECK(ReadNamed(emptyGroom, &groomValues, stream) &&
+          groomValues == std::vector<float>({.5f}));
     CHECK(cudaMemcpy(offsets, emptyLease.Geometry().curveOffsets.data, sizeof(uint32_t), cudaMemcpyDeviceToHost) == cudaSuccess);
     CHECK(offsets[0] == 0);
     CHECK(Read(firstLease, &points, &widths, &ids, stream) && ids == std::vector<uint64_t>({10,20}) && points.size() == 7);
+    CHECK(ReadNamed(pointPayload, &pointValues, stream) &&
+          pointValues == std::vector<float>({2,3,4,5,6,7,8}));
 
     // In non-cull modes length:value is evaluated, while cull ignores it.
     // Use a separate cook so the distinction is observable in the points.
@@ -227,6 +275,8 @@ int main() {
     CHECK(std::fabs(points[8].y - .4f) < 2e-3f); // .5 scale * connected [2,2]
     randomLease = {};
 
+    pointPayload = {}; primitivePayload = {}; groomPayload = {};
+    emptyPoint = {}; emptyPrimitive = {}; emptyGroom = {};
     translatedLease = {}; scaledLease = {}; cutLease = {}; redistributedLease = {};
     firstLease = {}; emptyLease = {}; CHECK(cudaStreamDestroy(stream) == cudaSuccess);
     std::puts("testUsdGenCudaLengthSession: PASS"); return 0;

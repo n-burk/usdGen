@@ -7,6 +7,8 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 
+class UsdGenRestSurfaceBindingCache;
+
 /// UsdGenCurveSourceOp — loads curves from the scene index into a buffer.
 /// Produces uniform or ragged chunks depending on the source data.
 class UsdGenCurveSourceOp final : public UsdGenOp
@@ -20,6 +22,7 @@ public:
    UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CurveCount; }
    UsdGenRole Role() const override { return UsdGenRole::Curves; }
    bool IsGenerator() const override { return true; }
+   size_t GeometryInputArity() const override { return 0; }
 
    TfSpan<const TfToken> TopologyParameters() const override;
    TfSpan<const TfToken> ValueParameters() const override;
@@ -39,6 +42,9 @@ public:
 private:
    TfTokenVector topologyParameters_;
    TfTokenVector valueParameters_;
+   // Capture is serialized by the graph owner; consumers only see immutable
+   // indices, never a process-global mutable cache shared between sessions.
+   std::shared_ptr<const UsdGenRestSurfaceBindingCache> bindingCache_;
 };
 
 }  // namespace usdGen

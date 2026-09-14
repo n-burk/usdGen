@@ -27,12 +27,14 @@ class FakeOwner final : public usdGen::UsdGenDeviceOwner
 {
 public:
     bool ProducerReady() const noexcept override { return ready; }
+    size_t ExclusiveRetainedBytes() const noexcept override { return retainedBytes; }
     std::unique_ptr<usdGen::UsdGenDeviceConsumer> AcquireConsumer(
         usdGen::UsdGenDeviceStream stream) const noexcept override;
 
     bool ready = false;
     bool reject = false;
     bool wrongStream = false;
+    size_t retainedBytes = 4096;
     mutable int active = 0;
     mutable int acquired = 0;
     mutable int rejected = 0;
@@ -114,6 +116,32 @@ int main()
     info.owner = owner;
 
     std::string reason;
+    Check(usdGen::ValidateUsdGenDeviceMetadata(info.geometry, info.channels, &reason),
+          "backend preflight validates metadata without a native owner", &failures);
+    {
+        auto channel = info.channels[0];
+        size_t bytes = 17;
+        Check(usdGen::UsdGenDeviceChannelStorageBytes(channel, &bytes, &reason) && bytes == 144,
+              "packed channel byte span is exact", &failures);
+        channel.strideBytes = 16;
+        Check(usdGen::UsdGenDeviceChannelStorageBytes(channel, &bytes, &reason) && bytes == 188,
+              "strided byte span excludes unused trailing padding", &failures);
+        channel.elementCount = 0;
+        Check(usdGen::UsdGenDeviceChannelStorageBytes(channel, &bytes, &reason) && bytes == 0,
+              "empty typed channel has zero byte span", &failures);
+        channel.elementCount = UINT64_MAX; bytes = 17;
+        Check(!usdGen::UsdGenDeviceChannelStorageBytes(channel, &bytes, &reason) && bytes == 17,
+              "overflow rejects without changing byte-span output", &failures);
+        auto shape = info.geometry; shape.pointCount = UINT64_MAX;
+        Check(!usdGen::ValidateUsdGenDeviceMetadata(shape, {channel}, &reason),
+              "metadata admission rejects unrepresentable payload storage", &failures);
+        channel.elementCount = 1; channel.arity = 0;
+        Check(!usdGen::UsdGenDeviceChannelStorageBytes(channel, &bytes, &reason),
+              "zero arity rejects before span arithmetic", &failures);
+        channel.arity = 3; channel.type = static_cast<usdGen::UsdGenDeviceValueType>(255);
+        Check(!usdGen::UsdGenDeviceChannelStorageBytes(channel, &bytes, &reason),
+              "unknown value type is not silently coerced", &failures);
+    }
     std::shared_ptr<const usdGen::UsdGenDeviceGeneration> generation =
         usdGen::UsdGenDeviceGeneration::Create(std::move(info), &reason);
     Check(bool(generation), "valid device generation creates", &failures);
@@ -123,6 +151,23 @@ int main()
           "tile metadata is retained", &failures);
     Check(generation && generation->Tool().toolId == "brushA",
           "tool snapshot is retained", &failures);
+
+    // The immutable handoff contract names portable backend identities; native
+    // synchronization remains entirely inside each backend owner.
+    for (auto backend : {usdGen::UsdGenDeviceBackend::Metal,
+                         usdGen::UsdGenDeviceBackend::Vulkan}) {
+        usdGen::UsdGenDeviceGeneration::CreateInfo portable;
+        portable.identity = {backend, 0, 1};
+        portable.geometry = generation->Geometry();
+        portable.tool = generation->Tool();
+        portable.channels = generation->Channels();
+        portable.owner = owner;
+        auto candidate = usdGen::UsdGenDeviceGeneration::Create(
+            std::move(portable), &reason);
+        Check(candidate && candidate->Identity().backend == backend,
+              "Metal/Vulkan identities use the backend-neutral generation contract",
+              &failures);
+    }
 
     // Legacy range-only snapshots retain the all-Unknown topology contract;
     // a partially supplied topology is never ambiguous for a device renderer.
@@ -134,6 +179,39 @@ int main()
     legacyInfo.owner = generation->Owner();
     Check(bool(usdGen::UsdGenDeviceGeneration::Create(std::move(legacyInfo), &reason)),
           "all-Unknown curve topology preserves legacy generation admission", &failures);
+    usdGen::UsdGenDeviceGeneration::CreateInfo genericArrays;
+    genericArrays.identity = generation->Identity();
+    genericArrays.geometry = generation->Geometry();
+    genericArrays.tool = generation->Tool();
+    genericArrays.channels = generation->Channels();
+    genericArrays.channels.push_back(
+        {"guideIndex", usdGen::UsdGenDeviceValueType::Int32,
+         usdGen::UsdGenDeviceDomain::Primitive, 3, 3, 12, true,
+         usdGen::UsdGenDeviceChannelSemantic::Generic});
+    genericArrays.channels.push_back(
+        {"guideWeight", usdGen::UsdGenDeviceValueType::Float32,
+         usdGen::UsdGenDeviceDomain::Primitive, 3, 3, 12, true,
+         usdGen::UsdGenDeviceChannelSemantic::Generic});
+    genericArrays.owner = generation->Owner();
+    auto genericGeneration = usdGen::UsdGenDeviceGeneration::Create(
+        std::move(genericArrays), &reason);
+    Check(genericGeneration && genericGeneration->Channels().size() == 5 &&
+              genericGeneration->Channels()[3].arity == 3 &&
+              genericGeneration->Channels()[4].arity == 3,
+          "generic scalar arrays preserve elementSize-three metadata", &failures);
+    usdGen::UsdGenDeviceGeneration::CreateInfo badGenericStride;
+    badGenericStride.identity = generation->Identity();
+    badGenericStride.geometry = generation->Geometry();
+    badGenericStride.tool = generation->Tool();
+    badGenericStride.channels = generation->Channels();
+    badGenericStride.channels.push_back(
+        {"guideIndex", usdGen::UsdGenDeviceValueType::Int32,
+         usdGen::UsdGenDeviceDomain::Primitive, 3, 3, 8, true,
+         usdGen::UsdGenDeviceChannelSemantic::Generic});
+    badGenericStride.owner = generation->Owner();
+    Check(!usdGen::UsdGenDeviceGeneration::Create(
+              std::move(badGenericStride), &reason),
+          "generic scalar arrays reject stride below elementSize", &failures);
     usdGen::UsdGenDeviceGeneration::CreateInfo mixedTopology;
     mixedTopology.identity = generation->Identity();
     mixedTopology.geometry = generation->Geometry();
@@ -171,6 +249,26 @@ int main()
           "consumer cannot use an unfinished producer", &failures);
     owner->ready = true;
     Check(owner->ProducerReady(), "owner exposes producer readiness", &failures);
+    Check(generation->ExclusiveRetainedBytes() == owner->retainedBytes,
+          "generation exposes backend-owner-exclusive cache bytes", &failures);
+    auto republished = generation->Republish(18, &reason);
+    Check(republished && republished->Identity().generation == 18 &&
+              republished->Geometry().valueVersion == 18 &&
+              republished->Geometry().topologyVersion ==
+                  generation->Geometry().topologyVersion &&
+              republished->Owner() == generation->Owner(),
+          "cache republish creates a fresh identity over shared immutable COW owner",
+          &failures);
+    Check(!generation->Republish(17, &reason),
+          "cache republish rejects a recycled device generation identity", &failures);
+    auto immutableAlias = generation->RepublishPreservingRevisions(19, &reason);
+    Check(immutableAlias && immutableAlias->Identity().generation == 19 &&
+              immutableAlias->Geometry().valueVersion == generation->Geometry().valueVersion &&
+              immutableAlias->Geometry().topologyVersion == generation->Geometry().topologyVersion &&
+              immutableAlias->Owner() == generation->Owner(),
+          "immutable republish preserves payload revisions and COW owner", &failures);
+    Check(!generation->RepublishPreservingRevisions(17, &reason),
+          "immutable republish rejects recycled publication identity", &failures);
     Check(secondLease.WaitUntilReady() == usdGen::UsdGenDeviceStatus::Ok,
           "lease inserts producer ordering after readiness", &failures);
 
@@ -187,6 +285,9 @@ int main()
           "wrong-stream consumer is completed and rejected", &failures);
     owner->wrongStream = false;
 
+    genericGeneration.reset();
+    republished.reset();
+    immutableAlias.reset();
     generation.reset();
     owner.reset();
     Check(!weakOwner.expired(), "lease retains owner after generation release", &failures);

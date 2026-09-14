@@ -12,6 +12,8 @@ namespace usdGen {
 struct CudaSurfaceBindingKey {
     SdfPath path;
     VtVec3fArray restPoints;
+    VtVec3fArray restNormals;
+    UsdGenSurfaceNormalDomain restNormalDomain = UsdGenSurfaceNormalDomain::None;
     VtIntArray faceVertexCounts;
     VtIntArray faceVertexIndices;
     uint32_t sampleBudget = 0;
@@ -20,6 +22,8 @@ struct CudaSurfaceBindingKey {
 
 struct CudaSurfacePrepared {
     std::vector<float3> restPoints, currentPoints;
+    std::vector<float3> restNormals;
+    UsdGenSurfaceNormalDomain restNormalDomain = UsdGenSurfaceNormalDomain::None;
     std::vector<uint32_t> faceOffsets, faceVertexIndices;
     CudaSurfaceBindingKey key;
     uint32_t sampleBudget = 0;

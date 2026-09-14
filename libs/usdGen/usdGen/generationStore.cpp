@@ -24,13 +24,28 @@ UsdGenGenerationStore::UsdGenGenerationStore(UsdGenGenerationConstPtr baseline)
 
 void UsdGenGenerationStore::Publish(UsdGenGeneration gen)
 {
+    PreparedPublication prepared = PreparePublication(std::move(gen));
+    // Keep the displaced immutable owner alive until this call has completed.
+    auto retired = PublishPrepared(std::move(prepared));
+    (void)retired;
+}
+
+UsdGenGenerationStore::PreparedPublication
+UsdGenGenerationStore::PreparePublication(UsdGenGeneration gen) const
+{
     // Zero-based ids: the first published generation has id 0, so across any
     // published history `id == Stats().commits - 1` (03 §9: exactly one publish
     // per committed request; superseded or aborted commits allocate no id).
-    gen.id = _nextId++;
-    UsdGenGenerationConstPtr genConst =
-        std::make_shared<const UsdGenGeneration>(std::move(gen));
-    std::atomic_store(&_current, genConst);
+    gen.id = _nextId;
+    return std::make_shared<const UsdGenGeneration>(std::move(gen));
+}
+
+UsdGenGenerationConstPtr UsdGenGenerationStore::PublishPrepared(
+    PreparedPublication prepared) noexcept
+{
+    if (!prepared || prepared->id != _nextId) return prepared;
+    ++_nextId;
+    return std::atomic_exchange(&_current, std::move(prepared));
 }
 
 UsdGenGenerationConstPtr UsdGenGenerationStore::Get() const noexcept

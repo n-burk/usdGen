@@ -157,8 +157,29 @@ file(GLOB_RECURSE USDGEN_CORE_SOURCES libs/usdGen/*.cpp)
 # the engine lands; its only consumer is the likewise-unwired
 # tests/testUsdGenExpr.cpp. Revert this exclusion when wiring M4.
 list(REMOVE_ITEM USDGEN_CORE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/exprEval.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/exprEval.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionResources.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionRetirement.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionBackendCudaProvider.cpp"
+    # CUDA-only helper exposes CUDA vector types; do not compile it in the
+    # CPU-only core build selected by ordinary consumers.
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/cudaScatterInput.cpp")
+add_library(usdGenExecutionResources SHARED
+    libs/usdGen/usdGen/executionResources.cpp
+    libs/usdGen/usdGen/executionRetirement.cpp)
+target_include_directories(usdGenExecutionResources PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>
+    $<INSTALL_INTERFACE:include>)
+target_link_libraries(usdGenExecutionResources PUBLIC TBB::tbb)
+set_target_properties(usdGenExecutionResources PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT WIN32)
+    target_link_options(usdGenExecutionResources PRIVATE "LINKER:--exclude-libs,ALL")
+endif()
 add_library(usdGen SHARED ${USDGEN_CORE_SOURCES})
+target_sources(usdGen PRIVATE
+    libs/usdGen/usdGen/executionBackendCudaProvider.cpp)
 set_source_files_properties(libs/usdGen/usdGen/expressions/frontend.cpp PROPERTIES
     COMPILE_DEFINITIONS "SeExpr2=UsdGenSeExprFrontend;SeExprInternal2=UsdGenSeExprFrontendInternal;USDGEN_SEEXPR_SANDBOX"
     INCLUDE_DIRECTORIES "${_usdgen_frontend_dir}")
@@ -173,7 +194,7 @@ target_include_directories(usdGen PUBLIC
 # a non-installed target); usdGen's own sources still see its headers
 # through the link, and no public header includes usdGenMath/...
 target_link_libraries(usdGen
-    PUBLIC tf gf vt sdf TBB::tbb
+    PUBLIC tf gf vt sdf TBB::tbb usdGenExecutionResources
     PRIVATE usdGenMath arch js plug ts ar work trace hio pxOsd
             usdGen_seexpr usdGenExprFrontend)
 # usdGen is a SHARED plugin-host library: its public API (UsdGenSession,
@@ -212,6 +233,7 @@ target_include_directories(usdGenImaging PUBLIC
 target_link_libraries(usdGenImaging
     PUBLIC hd hdsi hf usd usdGeom usdShade sdr usdImaging
            sdf tf gf vt trace pxOsd usdGen
+    PRIVATE hio
     PRIVATE usdGenSchema)
 set_target_properties(usdGenImaging PROPERTIES
     CXX_VISIBILITY_PRESET default)  # plugins need exported symbols
@@ -242,7 +264,7 @@ target_include_directories(usdGenTestUtilsHd PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/testutils")
 target_link_libraries(usdGenTestUtilsHd PUBLIC
     usdGenImaging usdGenTestUtils
-    hd hdsi usd usdImaging usdImagingGL hdSt hgiGL usdAppUtils)
+    hd hdsi usd usdImaging usdImagingGL hdSt hgiGL usdAppUtils hio)
 
 # ---------------------------------------------------------------------------
 # Build-tree plugin resources (generated at configure time so that the
@@ -368,32 +390,43 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
         target_compile_definitions(usdGen PRIVATE USDGEN_USE_GPU_NOISE)
     endif()
     if(USDGEN_ENABLE_CUDA)
+        target_sources(usdGen PRIVATE libs/usdGen/usdGen/cudaScatterInput.cpp)
         add_library(usdGenGpu STATIC
             libs/usdGen/usdGen/gpu/deviceBuffer.cu
+            libs/usdGen/usdGen/gpu/deviceResources.cu
+            libs/usdGen/usdGen/gpu/imageSampler.cu
             libs/usdGen/usdGen/gpu/rbf.cu
             libs/usdGen/usdGen/gpu/curveGeometry.cu
             libs/usdGen/usdGen/gpu/curveSource.cu
+            libs/usdGen/usdGen/gpu/scatterGrow.cu
+            libs/usdGen/usdGen/gpu/curveGrow.cu
             libs/usdGen/usdGen/gpu/expressionContext.cu
             libs/usdGen/usdGen/gpu/deformCurves.cu
             libs/usdGen/usdGen/gpu/styleOps.cu
             libs/usdGen/usdGen/gpu/width.cu
+            libs/usdGen/usdGen/gpu/widthBlend.cu
+            libs/usdGen/usdGen/gpu/widthOverlapWitness.cu
             libs/usdGen/usdGen/gpu/surfaceBinding.cu
             libs/usdGen/usdGen/gpu/length.cu
             libs/usdGen/usdGen/gpu/curveCompaction.cu
             libs/usdGen/usdGen/gpu/curveResample.cu
+            libs/usdGen/usdGen/gpu/namedChannelTopology.cu
             libs/usdGen/usdGen/gpu/picking.cu
             libs/usdGen/usdGen/gpu/pointOverride.cu
             libs/usdGen/usdGen/gpu/topology.cu
+            libs/usdGen/usdGen/gpu/nonWidthCompare.cu
             libs/usdGen/usdGen/gpu/curveIndices.cu
             libs/usdGen/usdGen/gpu/curveTiles.cu
             libs/usdGen/usdGen/gpu/curveTileBounds.cu
             libs/usdGen/usdGen/gpu/rootFrames.cu
+            libs/usdGen/usdGen/gpu/rootFrameGather.cu
+            libs/usdGen/usdGen/gpu/cudaRetirement.cu
             libs/usdGen/usdGen/gpu/noise.cu
             libs/usdGen/usdGen/gpu/expression.cu)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>)
-        target_link_libraries(usdGenGpu PUBLIC CUDA::cudart CUDA::cusolver)
+        target_link_libraries(usdGenGpu PUBLIC CUDA::cudart CUDA::cusolver usdGenExecutionResources)
         target_compile_definitions(usdGen PRIVATE USDGEN_ENABLE_CUDA)
         target_link_libraries(usdGen PRIVATE usdGenGpu)
         target_compile_definitions(usdGenImaging PUBLIC USDGEN_HAS_CUDA_GL_INTEROP)
@@ -415,18 +448,59 @@ else()
     option(USDGEN_BUILD_TESTS "Build the usdGen test and benchmark targets" ON)
 endif()
 
+
 if(USDGEN_BUILD_TESTS)
 enable_testing()
 add_executable(testUsdGenExecutionPipeline tests/testUsdGenExecutionPipeline.cpp)
 target_link_libraries(testUsdGenExecutionPipeline PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionPipeline COMMAND testUsdGenExecutionPipeline)
 set_tests_properties(testUsdGenExecutionPipeline PROPERTIES LABELS "T1;scheduling;sessions" TIMEOUT 30)
+add_executable(testUsdGenExecutionSequenceWindow tests/testUsdGenExecutionSequenceWindow.cpp)
+target_link_libraries(testUsdGenExecutionSequenceWindow PRIVATE usdGen)
+add_test(NAME testUsdGenExecutionSequenceWindow COMMAND testUsdGenExecutionSequenceWindow)
+set_tests_properties(testUsdGenExecutionSequenceWindow PROPERTIES LABELS "T0;scheduling;resources" TIMEOUT 30)
+add_executable(testUsdGenExecutionTaskGraph tests/testUsdGenExecutionTaskGraph.cpp)
+target_link_libraries(testUsdGenExecutionTaskGraph PRIVATE usdGen)
+add_test(NAME testUsdGenExecutionTaskGraph COMMAND testUsdGenExecutionTaskGraph)
+set_tests_properties(testUsdGenExecutionTaskGraph PROPERTIES LABELS "T1;scheduling" TIMEOUT 30)
+add_executable(testUsdGenExecutionCache tests/testUsdGenExecutionCache.cpp)
+target_link_libraries(testUsdGenExecutionCache PRIVATE usdGen)
+add_test(NAME testUsdGenExecutionCache COMMAND testUsdGenExecutionCache)
+set_tests_properties(testUsdGenExecutionCache PROPERTIES LABELS "T1;scheduling" TIMEOUT 30)
+add_executable(testUsdGenExecutionBackend tests/testUsdGenExecutionBackend.cpp)
+target_link_libraries(testUsdGenExecutionBackend PRIVATE usdGen)
+if(USDGEN_ENABLE_CUDA)
+    target_compile_definitions(testUsdGenExecutionBackend PRIVATE USDGEN_ENABLE_CUDA)
+endif()
+add_test(NAME testUsdGenExecutionBackend COMMAND testUsdGenExecutionBackend)
+set_tests_properties(testUsdGenExecutionBackend PROPERTIES LABELS "T0;backend" TIMEOUT 30)
+add_executable(testUsdGenExecutionBackendNeutral
+    tests/testUsdGenExecutionBackendNeutral.cpp)
+target_link_libraries(testUsdGenExecutionBackendNeutral PRIVATE usdGen)
+add_test(NAME testUsdGenExecutionBackendNeutral
+    COMMAND testUsdGenExecutionBackendNeutral)
+set_tests_properties(testUsdGenExecutionBackendNeutral
+    PROPERTIES LABELS "T0;backend" TIMEOUT 30)
+add_executable(testUsdGenExecutionTaskGraphStress tests/testUsdGenExecutionTaskGraphStress.cpp)
+target_link_libraries(testUsdGenExecutionTaskGraphStress PRIVATE usdGen)
+add_test(NAME testUsdGenExecutionTaskGraphStress COMMAND testUsdGenExecutionTaskGraphStress)
+set_tests_properties(testUsdGenExecutionTaskGraphStress PROPERTIES LABELS "T1;scheduling" TIMEOUT 45)
+add_executable(testUsdGenExecutionResources tests/testUsdGenExecutionResources.cpp)
+target_link_libraries(testUsdGenExecutionResources PRIVATE usdGenExecutionResources)
+add_test(NAME testUsdGenExecutionResources COMMAND testUsdGenExecutionResources)
+set_tests_properties(testUsdGenExecutionResources PROPERTIES LABELS "T0;resources" TIMEOUT 30)
+add_executable(testUsdGenExecutionRetirement tests/testUsdGenExecutionRetirement.cpp)
+target_link_libraries(testUsdGenExecutionRetirement PRIVATE usdGenExecutionResources)
+add_test(NAME testUsdGenExecutionRetirement COMMAND testUsdGenExecutionRetirement)
+set_tests_properties(testUsdGenExecutionRetirement PROPERTIES LABELS "T0;resources;retirement" TIMEOUT 30)
 add_executable(testUsdGenAsyncSession tests/testUsdGenAsyncSession.cpp)
 target_link_libraries(testUsdGenAsyncSession PRIVATE usdGen)
 add_test(NAME testUsdGenAsyncSession COMMAND testUsdGenAsyncSession)
 set_tests_properties(testUsdGenAsyncSession PROPERTIES LABELS "T1;scheduling;sessions" TIMEOUT 60)
 add_executable(testUsdGenAsyncImagingSession tests/testUsdGenAsyncImagingSession.cpp)
 target_link_libraries(testUsdGenAsyncImagingSession PRIVATE usdGenImaging usdGen)
+target_compile_definitions(testUsdGenAsyncImagingSession PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME testUsdGenAsyncImagingSession COMMAND testUsdGenAsyncImagingSession)
 set_tests_properties(testUsdGenAsyncImagingSession PROPERTIES LABELS "T1;scheduling;sessions;imaging" TIMEOUT 60)
 add_executable(testUsdGenSessionStoreOwner tests/testUsdGenSessionStoreOwner.cpp)
@@ -440,11 +514,6 @@ target_link_libraries(testUsdGenRegistryOwners PRIVATE usdGenImaging usdGen)
 add_test(NAME testUsdGenRegistryOwners COMMAND testUsdGenRegistryOwners)
 set_tests_properties(testUsdGenRegistryOwners PROPERTIES LABELS "T1;scheduling;imaging" TIMEOUT 60)
 add_executable(testUsdGenSceneOwner tests/testUsdGenSceneOwner.cpp)
-add_executable(testUsdGenDeviceTilePublisher tests/testUsdGenDeviceTilePublisher.cpp)
-target_link_libraries(testUsdGenDeviceTilePublisher PRIVATE usdGenImaging usdGen)
-add_test(NAME testUsdGenDeviceTilePublisher COMMAND testUsdGenDeviceTilePublisher)
-set_tests_properties(testUsdGenDeviceTilePublisher PROPERTIES
-    LABELS "T1;imaging;device" TIMEOUT 60)
 add_executable(testUsdGenIncrementalCapture tests/testUsdGenIncrementalCapture.cpp)
 add_executable(testUsdGenCaptureCache tests/testUsdGenCaptureCache.cpp)
 add_executable(testUsdGenAsyncScenePublication tests/testUsdGenAsyncScenePublication.cpp)
@@ -472,7 +541,183 @@ add_executable(testUsdGenDeviceGeneration tests/testUsdGenDeviceGeneration.cpp)
 target_link_libraries(testUsdGenDeviceGeneration PRIVATE usdGen)
 add_test(NAME testUsdGenDeviceGeneration COMMAND testUsdGenDeviceGeneration)
 set_tests_properties(testUsdGenDeviceGeneration PROPERTIES LABELS "T0;device;sessions")
+add_executable(testUsdGenImageSampler tests/testUsdGenImageSampler.cpp)
+target_link_libraries(testUsdGenImageSampler PRIVATE usdGen)
+add_test(NAME testUsdGenImageSampler COMMAND testUsdGenImageSampler)
+set_tests_properties(testUsdGenImageSampler PROPERTIES LABELS "T0;image;sampler")
 if(USDGEN_ENABLE_CUDA)
+    add_executable(testUsdGenCudaCurveGrowFailure tests/testUsdGenCudaCurveGrowFailure.cpp)
+    target_compile_definitions(testUsdGenCudaCurveGrowFailure PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaCurveGrowFailure PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaCurveGrowFailure COMMAND testUsdGenCudaCurveGrowFailure)
+    add_test(NAME testUsdGenCudaCurveGrowNamedFailure COMMAND testUsdGenCudaCurveGrowFailure --named)
+    add_test(NAME testUsdGenCudaCurveGrowNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native)
+    add_test(NAME testUsdGenCudaCurveGrowNamedNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native)
+    add_test(NAME testUsdGenCudaCurveGrowSourceTerminalFailure COMMAND testUsdGenCudaCurveGrowFailure --install --source-terminal)
+    add_test(NAME testUsdGenCudaCurveGrowSourceTerminalNamedFailure COMMAND testUsdGenCudaCurveGrowFailure --named --source-terminal)
+    add_test(NAME testUsdGenCudaCurveGrowSourceTerminalNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native --source-terminal)
+    add_test(NAME testUsdGenCudaCurveGrowSourceTerminalNamedNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native --source-terminal)
+    add_test(NAME testUsdGenCudaGrowLengthFailure COMMAND testUsdGenCudaCurveGrowFailure --install --length)
+    add_test(NAME testUsdGenCudaGrowLengthCountsFailure COMMAND testUsdGenCudaCurveGrowFailure --named --length)
+    add_test(NAME testUsdGenCudaGrowLengthNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native --length)
+    add_test(NAME testUsdGenCudaGrowLengthCountsNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native --length)
+    add_test(NAME testUsdGenCudaMixedGrowLengthFailure COMMAND testUsdGenCudaCurveGrowFailure --install --mixed)
+    add_test(NAME testUsdGenCudaMixedGrowLengthCountsFailure COMMAND testUsdGenCudaCurveGrowFailure --named --mixed)
+    add_test(NAME testUsdGenCudaMixedGrowLengthNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native --mixed)
+    add_test(NAME testUsdGenCudaMixedGrowLengthCountsNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native --mixed)
+    add_test(NAME testUsdGenCudaMultiGrowFailure COMMAND testUsdGenCudaCurveGrowFailure --install --multi-grow)
+    add_test(NAME testUsdGenCudaMultiGrowNamedFailure COMMAND testUsdGenCudaCurveGrowFailure --named --multi-grow)
+    add_test(NAME testUsdGenCudaMultiGrowNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native --multi-grow)
+    add_test(NAME testUsdGenCudaMultiGrowNamedNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native --multi-grow)
+    add_test(NAME testUsdGenCudaNoiseGrowFailure COMMAND testUsdGenCudaCurveGrowFailure --install --noise-grow)
+    add_test(NAME testUsdGenCudaNoiseGrowNamedFailure COMMAND testUsdGenCudaCurveGrowFailure --named --noise-grow)
+    add_test(NAME testUsdGenCudaNoiseGrowNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native --noise-grow)
+    add_test(NAME testUsdGenCudaNoiseGrowNamedNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native --noise-grow)
+    add_test(NAME testUsdGenCudaCulledNoiseGrowFailure COMMAND testUsdGenCudaCurveGrowFailure --install --culled-noise-grow)
+    add_test(NAME testUsdGenCudaCulledNoiseGrowNamedFailure COMMAND testUsdGenCudaCurveGrowFailure --named --culled-noise-grow)
+    add_test(NAME testUsdGenCudaCulledNoiseGrowNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --native --culled-noise-grow)
+    add_test(NAME testUsdGenCudaCulledNoiseGrowNamedNativeFailure COMMAND testUsdGenCudaCurveGrowFailure --named-native --culled-noise-grow)
+    set_tests_properties(testUsdGenCudaCurveGrowFailure testUsdGenCudaCurveGrowNamedFailure
+        testUsdGenCudaCurveGrowNativeFailure testUsdGenCudaCurveGrowNamedNativeFailure
+        testUsdGenCudaCurveGrowSourceTerminalFailure testUsdGenCudaCurveGrowSourceTerminalNamedFailure
+        testUsdGenCudaCurveGrowSourceTerminalNativeFailure testUsdGenCudaCurveGrowSourceTerminalNamedNativeFailure
+        testUsdGenCudaGrowLengthFailure testUsdGenCudaGrowLengthCountsFailure
+        testUsdGenCudaGrowLengthNativeFailure testUsdGenCudaGrowLengthCountsNativeFailure
+        testUsdGenCudaMixedGrowLengthFailure testUsdGenCudaMixedGrowLengthCountsFailure
+        testUsdGenCudaMixedGrowLengthNativeFailure testUsdGenCudaMixedGrowLengthCountsNativeFailure
+        testUsdGenCudaMultiGrowFailure testUsdGenCudaMultiGrowNamedFailure
+        testUsdGenCudaMultiGrowNativeFailure testUsdGenCudaMultiGrowNamedNativeFailure
+        testUsdGenCudaNoiseGrowFailure testUsdGenCudaNoiseGrowNamedFailure
+        testUsdGenCudaNoiseGrowNativeFailure testUsdGenCudaNoiseGrowNamedNativeFailure
+        testUsdGenCudaCulledNoiseGrowFailure testUsdGenCudaCulledNoiseGrowNamedFailure
+        testUsdGenCudaCulledNoiseGrowNativeFailure testUsdGenCudaCulledNoiseGrowNamedNativeFailure PROPERTIES
+        LABELS "T0;cuda;topology;curve-grow;cow;quarantine" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaCurveGrowSession tests/testUsdGenCudaCurveGrowSession.cpp)
+    target_compile_definitions(testUsdGenCudaCurveGrowSession PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaCurveGrowSession PRIVATE usdGen usdGenGpu usdGenMath usdGen_seexpr)
+    add_test(NAME testUsdGenCudaCurveGrowSession COMMAND testUsdGenCudaCurveGrowSession)
+    set_tests_properties(testUsdGenCudaCurveGrowSession PROPERTIES
+        LABELS "T0;cuda;topology;curve-grow;cow;session" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaCurveGrowGeneration tests/testUsdGenCudaCurveGrowGeneration.cpp)
+    target_link_libraries(testUsdGenCudaCurveGrowGeneration PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaCurveGrowGeneration COMMAND testUsdGenCudaCurveGrowGeneration)
+    set_tests_properties(testUsdGenCudaCurveGrowGeneration PROPERTIES
+        LABELS "T0;cuda;topology;curve-grow;cow;generation" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaCurveGrow tests/testUsdGenCudaCurveGrow.cu)
+    target_link_libraries(testUsdGenCudaCurveGrow PRIVATE usdGenGpu usdGen)
+    target_include_directories(testUsdGenCudaCurveGrow PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenMath")
+    add_test(NAME testUsdGenCudaCurveGrow COMMAND testUsdGenCudaCurveGrow)
+    add_test(NAME testUsdGenCudaCurveGrowQuarantine COMMAND testUsdGenCudaCurveGrow --quarantine)
+    set_tests_properties(testUsdGenCudaCurveGrowQuarantine PROPERTIES
+        LABELS "T0;cuda;topology;curve-grow;quarantine;cow" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    set_tests_properties(testUsdGenCudaCurveGrow PROPERTIES
+        LABELS "T0;cuda;topology;curve-grow;cow" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaScatterGrow tests/testUsdGenCudaScatterGrow.cu)
+    target_link_libraries(testUsdGenCudaScatterGrow PRIVATE usdGenGpu usdGen)
+    target_include_directories(testUsdGenCudaScatterGrow PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenMath")
+    add_test(NAME testUsdGenCudaScatterGrow COMMAND testUsdGenCudaScatterGrow)
+    set_tests_properties(testUsdGenCudaScatterGrow PROPERTIES
+        LABELS "T0;cuda;topology;scatter-grow" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaScatterGrowPreflight tests/testUsdGenCudaScatterGrowPreflight.cu)
+    target_link_libraries(testUsdGenCudaScatterGrowPreflight PRIVATE usdGenGpu usdGen)
+    target_include_directories(testUsdGenCudaScatterGrowPreflight PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenMath")
+    add_test(NAME testUsdGenCudaScatterGrowPreflight COMMAND testUsdGenCudaScatterGrowPreflight)
+    add_test(NAME testUsdGenCudaScatterGrowHostQuarantine
+        COMMAND testUsdGenCudaScatterGrowPreflight --quarantine-host)
+    set_tests_properties(testUsdGenCudaScatterGrowHostQuarantine PROPERTIES
+        LABELS "T0;cuda;topology;scatter-grow;quarantine" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    set_tests_properties(testUsdGenCudaScatterGrowPreflight PROPERTIES
+        LABELS "T0;cuda;topology;scatter-grow" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaScatterInput tests/testUsdGenCudaScatterInput.cpp)
+    add_executable(testUsdGenCudaScatterGrowSession tests/testUsdGenCudaScatterGrowSession.cpp)
+    add_executable(testUsdGenCudaScatterGrowWidthDag tests/testUsdGenCudaScatterGrowWidthDag.cpp)
+    add_executable(testUsdGenCudaScatterGrowValueDag tests/testUsdGenCudaScatterGrowValueDag.cpp)
+    add_executable(testUsdGenCudaCpuSourceParity tests/testUsdGenCpuCurveSource.cpp)
+    add_executable(testUsdGenCudaSurfaceBindingCache tests/testUsdGenSurfaceBindingCache.cpp)
+    target_compile_definitions(testUsdGenCudaSurfaceBindingCache PRIVATE USDGEN_TEST_CUDA_BINDING_CACHE)
+    target_link_libraries(testUsdGenCudaSurfaceBindingCache PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaSurfaceBindingCache COMMAND testUsdGenCudaSurfaceBindingCache)
+    set_tests_properties(testUsdGenCudaSurfaceBindingCache PROPERTIES
+        LABELS "T1;cuda;sources;cache;cow" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaSurfaceRootFrameParity tests/testUsdGenSurfaceRootFrames.cpp)
+    target_compile_definitions(testUsdGenCudaSurfaceRootFrameParity PRIVATE USDGEN_TEST_CUDA_ROOT_FRAME_PARITY)
+    target_link_libraries(testUsdGenCudaSurfaceRootFrameParity PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaSurfaceRootFrameParity COMMAND testUsdGenCudaSurfaceRootFrameParity)
+    set_tests_properties(testUsdGenCudaSurfaceRootFrameParity PROPERTIES
+        LABELS "T0;cuda;sources;root-frames" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    target_compile_definitions(testUsdGenCudaCpuSourceParity PRIVATE USDGEN_TEST_CUDA_SOURCE_PARITY)
+    target_link_libraries(testUsdGenCudaCpuSourceParity PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaCpuSourceParity COMMAND testUsdGenCudaCpuSourceParity)
+    set_tests_properties(testUsdGenCudaCpuSourceParity PROPERTIES
+        LABELS "T1;cuda;sources;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    target_link_libraries(testUsdGenCudaScatterGrowWidthDag PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaScatterGrowWidthDag COMMAND testUsdGenCudaScatterGrowWidthDag)
+    set_tests_properties(testUsdGenCudaScatterGrowWidthDag PROPERTIES
+        LABELS "T1;cuda;scatter-grow;dag;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    target_link_libraries(testUsdGenCudaScatterGrowValueDag PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaScatterGrowValueDag COMMAND testUsdGenCudaScatterGrowValueDag)
+    set_tests_properties(testUsdGenCudaScatterGrowValueDag PROPERTIES
+        LABELS "T1;cuda;scatter-grow;dag;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_test(NAME testUsdGenCudaScatterGrowRbfDag COMMAND testUsdGenCudaScatterGrowValueDag --rbf)
+    set_tests_properties(testUsdGenCudaScatterGrowRbfDag PROPERTIES
+        LABELS "T1;cuda;scatter-grow;dag;cow;rbf;transaction" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    target_link_libraries(testUsdGenCudaScatterGrowSession PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaScatterGrowSession COMMAND testUsdGenCudaScatterGrowSession)
+    add_test(NAME testUsdGenCudaScatterGrowSourceInstallFailure
+        COMMAND testUsdGenCudaScatterGrowSession --source-install-failure)
+    add_test(NAME testUsdGenCudaScatterGrowSourceNativeFailure
+        COMMAND testUsdGenCudaScatterGrowSession --source-native-failure)
+    set_tests_properties(testUsdGenCudaScatterGrowSourceInstallFailure
+        testUsdGenCudaScatterGrowSourceNativeFailure PROPERTIES
+        LABELS "T1;cuda;scatter-grow;quarantine" TIMEOUT 30 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    set_tests_properties(testUsdGenCudaScatterGrowSession PROPERTIES
+        LABELS "T1;cuda;scatter-grow;session;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    target_link_libraries(testUsdGenCudaScatterInput PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaScatterInput COMMAND testUsdGenCudaScatterInput)
+    set_tests_properties(testUsdGenCudaScatterInput PROPERTIES
+        LABELS "T0;cuda;topology;scatter-input" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaImageSampler tests/testUsdGenCudaImageSampler.cu)
+    target_link_libraries(testUsdGenCudaImageSampler PRIVATE usdGenGpu usdGen)
+    add_test(NAME testUsdGenCudaImageSampler COMMAND testUsdGenCudaImageSampler)
+    set_tests_properties(testUsdGenCudaImageSampler PROPERTIES
+        LABELS "T0;cuda;image;sampler" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaExecutionResources tests/testUsdGenCudaExecutionResources.cpp)
+    target_link_libraries(testUsdGenCudaExecutionResources PRIVATE usdGenGpu)
+    add_test(NAME testUsdGenCudaExecutionResources COMMAND testUsdGenCudaExecutionResources)
+    set_tests_properties(testUsdGenCudaExecutionResources PROPERTIES
+        LABELS "T0;cuda;resources" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaRetirement tests/testUsdGenCudaRetirement.cpp)
+    target_link_libraries(testUsdGenCudaRetirement PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaRetirement COMMAND testUsdGenCudaRetirement)
+    set_tests_properties(testUsdGenCudaRetirement PROPERTIES
+        LABELS "T0;cuda;resources;retirement" TIMEOUT 30 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_test(NAME testUsdGenCudaRetirementExit COMMAND testUsdGenCudaRetirement --exit-retire)
+    set_tests_properties(testUsdGenCudaRetirementExit PROPERTIES
+        LABELS "T1;cuda;resources;retirement;process-exit" TIMEOUT 30 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
     # The optional oracle uses the actual native Storm index builder. Its
     # private header is not installed with the SDK; never add this source-tree
     # dependency to production targets or installed interfaces.
@@ -532,6 +777,43 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaExecutionQueue PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaExecutionQueue COMMAND testUsdGenCudaExecutionQueue)
     set_tests_properties(testUsdGenCudaExecutionQueue PROPERTIES LABELS "T1;cuda;scheduling;rbf" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaExecutionPlan tests/testUsdGenCudaExecutionPlan.cpp)
+    target_link_libraries(testUsdGenCudaExecutionPlan PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaExecutionPlan COMMAND testUsdGenCudaExecutionPlan)
+    set_tests_properties(testUsdGenCudaExecutionPlan PROPERTIES
+        LABELS "T0;cuda;scheduling;metadata" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaWidthDag tests/testUsdGenCudaWidthDag.cpp)
+    target_compile_definitions(testUsdGenCudaWidthDag PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaWidthDag PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaWidthDag COMMAND testUsdGenCudaWidthDag)
+    set_tests_properties(testUsdGenCudaWidthDag PROPERTIES
+        LABELS "T1;cuda;scheduling;dag" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaNamedChannels tests/testUsdGenCudaNamedChannels.cpp)
+    target_compile_definitions(testUsdGenCudaNamedChannels PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaNamedChannels PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaNamedChannels COMMAND testUsdGenCudaNamedChannels)
+    set_tests_properties(testUsdGenCudaNamedChannels PROPERTIES
+        LABELS "T1;cuda;resources;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaNamedChannelTopology tests/testUsdGenCudaNamedChannelTopology.cu)
+    target_link_libraries(testUsdGenCudaNamedChannelTopology PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaNamedChannelTopology COMMAND testUsdGenCudaNamedChannelTopology)
+    set_tests_properties(testUsdGenCudaNamedChannelTopology PROPERTIES
+        LABELS "T1;cuda;topology;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    add_executable(testUsdGenCudaRbfTransaction tests/testUsdGenCudaRbfTransaction.cpp)
+    target_compile_definitions(testUsdGenCudaRbfTransaction PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaRbfTransaction PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaRbfTransaction COMMAND testUsdGenCudaRbfTransaction)
+    add_test(NAME testUsdGenCudaRbfValueDag COMMAND testUsdGenCudaRbfTransaction --value-dag)
+    set_tests_properties(testUsdGenCudaRbfValueDag PROPERTIES
+        LABELS "T1;cuda;rbf;transaction;dag;cow" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    set_tests_properties(testUsdGenCudaRbfTransaction PROPERTIES
+        LABELS "T1;cuda;rbf;transaction" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaExecutionStages tests/testUsdGenCudaExecutionStages.cpp)
+    target_compile_definitions(testUsdGenCudaExecutionStages PRIVATE USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenCudaExecutionStages PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaExecutionStages COMMAND testUsdGenCudaExecutionStages)
+    set_tests_properties(testUsdGenCudaExecutionStages PROPERTIES LABELS "T1;cuda;scheduling;rbf" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaTools tests/testUsdGenCudaTools.cpp)
     target_link_libraries(testUsdGenCudaTools PRIVATE usdGenImaging usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaTools COMMAND testUsdGenCudaTools)
@@ -559,6 +841,10 @@ if(USDGEN_ENABLE_CUDA)
     target_link_libraries(testUsdGenCudaSession PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSession COMMAND testUsdGenCudaSession)
     set_tests_properties(testUsdGenCudaSession PROPERTIES LABELS "T1;cuda;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaSessionTaskGraph tests/testUsdGenCudaSessionTaskGraph.cpp)
+    target_link_libraries(testUsdGenCudaSessionTaskGraph PRIVATE usdGen usdGenGpu)
+    add_test(NAME testUsdGenCudaSessionTaskGraph COMMAND testUsdGenCudaSessionTaskGraph)
+    set_tests_properties(testUsdGenCudaSessionTaskGraph PROPERTIES LABELS "T1;cuda;sessions;scheduling" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaSourceInput tests/testUsdGenCudaSourceInput.cpp)
     target_link_libraries(testUsdGenCudaSourceInput PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaSourceInput COMMAND testUsdGenCudaSourceInput)
@@ -571,6 +857,13 @@ if(USDGEN_ENABLE_CUDA)
         set_tests_properties(testUsdGenCuda${_cuda_test} PROPERTIES
             LABELS "T1;cuda" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     endforeach()
+    add_executable(testUsdGenCudaNonWidthCompare tests/testUsdGenCudaNonWidthCompare.cu)
+    target_link_libraries(testUsdGenCudaNonWidthCompare PRIVATE usdGenGpu usdGen)
+    target_compile_options(testUsdGenCudaNonWidthCompare PRIVATE -UNDEBUG)
+    add_test(NAME testUsdGenCudaNonWidthCompare COMMAND testUsdGenCudaNonWidthCompare)
+    set_tests_properties(testUsdGenCudaNonWidthCompare PROPERTIES
+        LABELS "T1;cuda;dag;cow;topology" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
     foreach(_cuda_test Rbf Deform)
         add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
         target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu)
@@ -593,10 +886,21 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaNoise COMMAND testUsdGenCudaNoise)
     set_tests_properties(testUsdGenCudaNoise PROPERTIES
         LABELS "T1;cuda;operators;noise" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaNoiseSession tests/testUsdGenCudaNoiseSession.cpp)
+    target_link_libraries(testUsdGenCudaNoiseSession PRIVATE usdGenGpu usdGen)
+    add_test(NAME testUsdGenCudaNoiseSession COMMAND testUsdGenCudaNoiseSession)
+    set_tests_properties(testUsdGenCudaNoiseSession PROPERTIES
+        LABELS "T1;cuda;operators;noise;session;cow" TIMEOUT 120
+        RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaRootFrames tests/testUsdGenCudaRootFrames.cpp)
     target_link_libraries(testUsdGenCudaRootFrames PRIVATE usdGenGpu gf)
     add_test(NAME testUsdGenCudaRootFrames COMMAND testUsdGenCudaRootFrames)
     set_tests_properties(testUsdGenCudaRootFrames PROPERTIES
+        LABELS "T1;cuda;root-frames" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    add_executable(testUsdGenCudaRootFrameGather tests/testUsdGenCudaRootFrameGather.cpp)
+    target_link_libraries(testUsdGenCudaRootFrameGather PRIVATE usdGenGpu)
+    add_test(NAME testUsdGenCudaRootFrameGather COMMAND testUsdGenCudaRootFrameGather)
+    set_tests_properties(testUsdGenCudaRootFrameGather PROPERTIES
         LABELS "T1;cuda;root-frames" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaExpression tests/testUsdGenCudaExpression.cpp
         tests/usdGenSeExprOracle.cpp)
@@ -817,7 +1121,11 @@ set(_usdgen_m1_env
     "PXR_PLUGINPATH_NAME=${_usdgen_m1_pluginpath};LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib:$<TARGET_FILE_DIR:usdGen>")
 
 # M1 T0 engine tests (no Hydra, no stage — gate B-1 keeps them clean).
-foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth)
+foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
+           testUsdGenCpuFanout testUsdGenCpuReferenceMap testUsdGenCurveRagged
+           testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
+           testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
+           testUsdGenSurfaceBindingCache)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -826,6 +1134,15 @@ endforeach()
 set_tests_properties(testUsdGenGraph PROPERTIES LABELS "T0;gate:E-6")
 set_tests_properties(testUsdGenKernelDeterminism PROPERTIES LABELS "T0;gate:E-8")
 set_tests_properties(testUsdGenWidth PROPERTIES LABELS "T0")
+set_tests_properties(testUsdGenCpuFanout PROPERTIES LABELS "T0;scheduling;dag")
+set_tests_properties(testUsdGenCpuReferenceMap PROPERTIES LABELS "T0;scheduling;reference;map")
+set_tests_properties(testUsdGenCurveRagged PROPERTIES LABELS "T0;topology;cow;sources")
+set_tests_properties(testUsdGenCpuCurveSource PROPERTIES LABELS "T0;topology;cow;sources")
+set_tests_properties(testUsdGenLengthRaggedLayout PROPERTIES LABELS "T0;topology;cow;operators")
+set_tests_properties(testUsdGenSurfaceRootFrames PROPERTIES LABELS "T0;sources;root-frames")
+set_tests_properties(testUsdGenSurfaceRootBindings PROPERTIES LABELS "T0;sources;root-bindings;cow")
+set_tests_properties(testUsdGenSurfaceRootBindingBoundaries PROPERTIES LABELS "T0;sources;root-bindings")
+set_tests_properties(testUsdGenSurfaceBindingCache PROPERTIES LABELS "T0;sources;cache;cow")
 
 # M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
 # prototypes/data-plane-benchmark, 11 §2.2).
@@ -837,9 +1154,15 @@ foreach(_t benchUsdGenChain benchUsdGenSparse)
 endforeach()
 set_tests_properties(benchUsdGenChain PROPERTIES LABELS "T0;perf;gate:E-1;gate:E-7")
 set_tests_properties(benchUsdGenSparse PROPERTIES LABELS "T0;perf;gate:E-2")
+add_executable(benchUsdGenSurfaceBindings tests/perf/benchUsdGenSurfaceBindings.cpp)
+target_link_libraries(benchUsdGenSurfaceBindings PRIVATE usdGenTestUtils)
+add_test(NAME benchUsdGenSurfaceBindings COMMAND benchUsdGenSurfaceBindings)
+set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
+    LABELS "T0;perf;sources;root-bindings;cache"
+    TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
-foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
+foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenAutoApply testUsdGenContracts)
     add_executable(${_t} tests/${_t}.cpp)
@@ -849,9 +1172,24 @@ foreach(_t testUsdGenTileContract testUsdGenInvalidation testUsdGenScheduling
         ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endforeach()
 set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
+set_tests_properties(testUsdGenStockStormContract PROPERTIES
+    LABELS "T1;stock-hydra;unpatched-openusd")
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
+
+add_test(NAME testUsdGenUnpatchedOpenUsd
+    COMMAND ${CMAKE_COMMAND}
+        -DUSDGEN_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -P ${PROJECT_SOURCE_DIR}/tests/testUsdGenUnpatchedOpenUsd.cmake)
+set_tests_properties(testUsdGenUnpatchedOpenUsd PROPERTIES
+    LABELS "T0;unpatched-openusd")
+add_test(NAME testUsdGenUnpatchedOpenUsdNegative
+    COMMAND ${CMAKE_COMMAND}
+        -DUSDGEN_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -P ${PROJECT_SOURCE_DIR}/tests/testUsdGenUnpatchedOpenUsdNegative.cmake)
+set_tests_properties(testUsdGenUnpatchedOpenUsdNegative PROPERTIES
+    LABELS "T0;unpatched-openusd")
 
 # ---- P4 / SI-10: testUsdGenSessions registration ----
 # Two indices on one session ⇒ identical generation, prim set and frame for one commit.
@@ -860,7 +1198,7 @@ set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
 
 add_executable(testUsdGenSessions
     tests/testUsdGenSessions.cpp
-)
+    )
 target_link_libraries(testUsdGenSessions
     PUBLIC usdGen
     PUBLIC usdGenImaging
@@ -905,6 +1243,14 @@ set_tests_properties(testUsdGenHydraParity
     LABELS "T1;gate:SI-12"
     TIMEOUT 300
 )
+
+add_executable(testUsdGenImageMapStage tests/testUsdGenImageMapStage.cpp)
+target_link_libraries(testUsdGenImageMapStage PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenImageMapStage PRIVATE
+    USDGEN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenImageMapStage COMMAND testUsdGenImageMapStage)
+set_tests_properties(testUsdGenImageMapStage PROPERTIES
+    ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;imaging;map")
 
 add_executable(testUsdGenHierarchy tests/testUsdGenHierarchy.cpp)
 target_link_libraries(testUsdGenHierarchy PRIVATE usdGenTestUtilsHd)
@@ -1095,17 +1441,18 @@ endif() # USDGEN_BUILD_TESTS
 # ---------------------------------------------------------------------------
 # Install rules
 # ---------------------------------------------------------------------------
-# N-7 (plan §1.2/§1.6): only the four shipped targets are installed and
+# N-7 (plan §1.2/§1.6): only the shipped targets are installed and
 # exported. usdGenMath, usdGen_seexpr and nanoflann are private dependency
 # archives (linked hidden, --exclude-libs,ALL, symbols verified out of the
 # shipped objects) — installing them would put libusdGenMath.a /
 # libusdGen_seexpr.a into lib/ and drag their unprefixed INTERFACE include
 # roots into the usdGenTargets export set.
-install(TARGETS usdGen usdGenImaging usdGenSchema usdGenShaders
+install(TARGETS usdGenExecutionResources usdGen usdGenImaging usdGenSchema usdGenShaders
     EXPORT usdGenTargets
     RUNTIME DESTINATION "${USDGEN_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${USDGEN_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${USDGEN_INSTALL_LIBDIR}")
+
 
 # Schema + imaging plugin resources.
 #
@@ -1182,7 +1529,10 @@ install(FILES
 # land in M7; the old include/usdGenMath rule is gone.
 install(DIRECTORY libs/usdGen/usdGen/
     DESTINATION include/usdGen
-    FILES_MATCHING PATTERN "*.h")
+    FILES_MATCHING PATTERN "*.h"
+    # The Session routing bridge deliberately carries cooker/private COW
+    # mechanics and is not part of the installed adapter surface.
+    PATTERN "sessionBackendExecutor.h" EXCLUDE)
 install(DIRECTORY libs/usdGenSchema/usdGenSchema/
     DESTINATION include/usdGenSchema
     FILES_MATCHING PATTERN "*.h")

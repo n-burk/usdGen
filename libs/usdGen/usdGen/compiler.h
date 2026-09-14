@@ -14,11 +14,16 @@
 #include "usdGen/types.h"
 
 #include <string>
+#include <functional>
+#include <memory>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
+
+class UsdGenExecutionPlanHandle;
+struct UsdGenDiagnostics;
 
 struct UsdGenCompileResult
 {
@@ -35,6 +40,18 @@ class UsdGenCompiler
 public:
     /// Fills *out (moves the compiled state). ok=false leaves *out untouched.
     UsdGenCompileResult Compile(UsdGenGraphDesc const &desc, UsdGenGraph *out);
+
+    /// Private integration boundary for an explicitly injected device provider.
+    /// Runs the normal structural/routing compilation, but obtains the native
+    /// plan from this exact descriptor without changing global availability.
+    /// No source capture or CPU geometry evaluation occurs. Both outputs stay
+    /// untouched on failure. Currently restricted to the Vulkan provider route.
+    using DevicePlanCompiler = std::function<
+        std::shared_ptr<const UsdGenExecutionPlanHandle>(
+            UsdGenGraphDesc const&, UsdGenDiagnostics*)>;
+    UsdGenCompileResult CompileInjectedDevice(UsdGenGraphDesc const&,
+        UsdGenGraph*, DevicePlanCompiler const&,
+        std::shared_ptr<const UsdGenExecutionPlanHandle>* plan);
 
     /// Incremental: rebuild only the sub-graph whose Merkle digest moved
     /// (03 §3.5). One node appended to a 200-node groom rebuilds exactly one

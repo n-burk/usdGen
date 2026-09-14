@@ -15,7 +15,12 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/path.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <string>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -57,6 +62,10 @@ struct UsdGenCurveBuffer
 {
     // ---- per CV ----------------------------------------------------------------
     VtFloatArray px, py, pz;          // size == totalCvs
+    // Authored C3 rest positions, kept separately from the current geometry.
+    // Empty means the source did not supply a usable rest channel.  It is an
+    // immutable COW pass-through plane: style/value operators never write it.
+    VtVec3fArray rest;
     VtFloatArray width;               // empty == inherit upstream
     VtFloatArray hairT;               // root->tip parameter, written once by the generator
     std::vector<UsdGenPlane> extraCv; // named per-CV planes, sorted by name
@@ -81,6 +90,311 @@ struct UsdGenCurveBuffer
     uint64_t valueVersion    = 0;        // bumped by every write to this buffer
 };
 
+/// Rebuilds named planes for a topology-preserving curve-count resample.
+/// `target` must already contain the new CV topology. Vertex float payloads
+/// use the same linear index parameter as CurveSource/Resample; integer
+/// payloads use the nearest source sample so their type is never coerced.
+/// Uniform and constant planes are copied into fresh storage. The source is
+/// never modified and `target` is unchanged on failure.
+bool UsdGenResampleExtraPlanes(UsdGenCurveBuffer const &source,
+                               UsdGenCurveBuffer *target,
+                               std::string *error = nullptr);
+
+/// Rebuilds named planes for stable curve compaction. `survivors` is the
+/// strictly ascending source-curve index for every target curve. Per-CV
+/// payload follows each survivor's complete CV span; uniform payload follows
+/// the same survivor order; constant payload is privately copied once. The
+/// source is immutable and `target` is unchanged on failure.
+bool UsdGenCompactExtraPlanes(UsdGenCurveBuffer const &source,
+                              std::vector<uint32_t> const &survivors,
+                              UsdGenCurveBuffer *target,
+                              std::string *error = nullptr);
+
+namespace detail {
+
+inline bool
+_UsdGenExtraPlaneFail(std::string const &message, std::string *error)
+{
+    if (error) *error = message;
+    return false;
+}
+
+inline bool
+_UsdGenCurveSpans(UsdGenCurveBuffer const &buffer,
+                  std::vector<uint32_t> *spans, std::string *error)
+{
+    if (!spans)
+        return _UsdGenExtraPlaneFail("extra-plane transform has no span output", error);
+    spans->assign(size_t(buffer.totalCurves) + 1, 0);
+    if (buffer.cvOffsets.empty()) {
+        if (buffer.totalCurves == 0) {
+            if (buffer.totalCvs != 0)
+                return _UsdGenExtraPlaneFail(
+                    "uniform extra-plane topology has CVs but no curves", error);
+            return true;
+        }
+        if (buffer.totalCvs % buffer.totalCurves != 0)
+            return _UsdGenExtraPlaneFail(
+                "uniform extra-plane topology has non-integral CV count", error);
+        uint32_t const perCurve = buffer.totalCvs / buffer.totalCurves;
+        for (uint32_t curve = 0; curve != buffer.totalCurves; ++curve)
+            (*spans)[curve + 1] = (*spans)[curve] + perCurve;
+        return true;
+    }
+    if (buffer.cvOffsets.size() != size_t(buffer.totalCurves) + 1 ||
+        buffer.cvOffsets.front() != 0)
+        return _UsdGenExtraPlaneFail("ragged extra-plane topology has invalid offsets", error);
+    for (uint32_t curve = 0; curve != buffer.totalCurves; ++curve) {
+        int const first = buffer.cvOffsets[curve];
+        int const last = buffer.cvOffsets[curve + 1];
+        if (first < 0 || last < first)
+            return _UsdGenExtraPlaneFail("ragged extra-plane topology has decreasing offsets", error);
+        (*spans)[curve] = static_cast<uint32_t>(first);
+        (*spans)[curve + 1] = static_cast<uint32_t>(last);
+    }
+    if ((*spans).back() != buffer.totalCvs)
+        return _UsdGenExtraPlaneFail("ragged extra-plane topology count disagrees with offsets", error);
+    return true;
+}
+
+inline bool
+_UsdGenPlaneValueCount(size_t elements, uint8_t arity, size_t *values,
+                       std::string *error)
+{
+    if (!values || arity == 0 ||
+        elements > std::numeric_limits<size_t>::max() / arity)
+        return _UsdGenExtraPlaneFail("extra-plane value count overflows this platform", error);
+    *values = elements * arity;
+    return true;
+}
+
+inline bool
+_UsdGenValidatePlaneList(std::vector<UsdGenPlane> const &planes,
+                         bool vertex, uint32_t elements,
+                         std::string *error)
+{
+    TfToken const expected = vertex ? TfToken("vertex") : TfToken("uniform");
+    TfToken previous;
+    for (UsdGenPlane const &plane : planes) {
+        if (plane.name.IsEmpty() || plane.arity == 0 ||
+            (!previous.IsEmpty() && !(previous < plane.name)))
+            return _UsdGenExtraPlaneFail(
+                "extra-plane names must be nonempty and strictly sorted", error);
+        previous = plane.name;
+        bool const constant = !vertex && plane.interpolation == TfToken("constant");
+        if (plane.interpolation != expected && !constant)
+            return _UsdGenExtraPlaneFail("extra-plane has unsupported interpolation '" +
+                                         plane.interpolation.GetString() + "'", error);
+        size_t values = 0;
+        if (!_UsdGenPlaneValueCount(constant ? 1 : elements, plane.arity,
+                                    &values, error))
+            return false;
+        if (plane.type == TfToken("float")) {
+            if (!plane.i.empty() || plane.f.size() != values)
+                return _UsdGenExtraPlaneFail("float extra-plane has invalid payload size", error);
+        } else if (plane.type == TfToken("int")) {
+            if (!plane.f.empty() || plane.i.size() != values)
+                return _UsdGenExtraPlaneFail("int extra-plane has invalid payload size", error);
+        } else {
+            return _UsdGenExtraPlaneFail("extra-plane has unsupported type '" +
+                                         plane.type.GetString() + "'", error);
+        }
+    }
+    return true;
+}
+
+inline bool
+_UsdGenValidateExtraPlanes(UsdGenCurveBuffer const &source, std::string *error)
+{
+    if (!_UsdGenValidatePlaneList(source.extraCv, true, source.totalCvs, error) ||
+        !_UsdGenValidatePlaneList(source.extraCurve, false, source.totalCurves, error))
+        return false;
+    // A name has one published identity.  Do not silently choose one domain
+    // when malformed input puts it in both vectors.
+    size_t cv = 0, curve = 0;
+    while (cv < source.extraCv.size() && curve < source.extraCurve.size()) {
+        TfToken const &a = source.extraCv[cv].name;
+        TfToken const &b = source.extraCurve[curve].name;
+        if (a == b)
+            return _UsdGenExtraPlaneFail("extra-plane name appears in both vertex and uniform domains", error);
+        if (a < b) ++cv;
+        else ++curve;
+    }
+    return true;
+}
+
+inline bool
+_UsdGenPrivatePlane(UsdGenPlane const &source, uint32_t elements,
+                    UsdGenPlane *result, std::string *error)
+{
+    if (!result)
+        return _UsdGenExtraPlaneFail("extra-plane transform has no plane output", error);
+    size_t values = 0;
+    if (!_UsdGenPlaneValueCount(
+            source.interpolation == TfToken("constant") ? 1 : elements,
+            source.arity, &values, error))
+        return false;
+    result->name = source.name;
+    result->interpolation = source.interpolation;
+    result->type = source.type;
+    result->arity = source.arity;
+    if (source.type == TfToken("int")) result->i = VtIntArray(values, 0);
+    else result->f = VtFloatArray(values, 0.0f);
+    return true;
+}
+
+inline void
+_UsdGenCopyElements(UsdGenPlane const &source, size_t sourceElement,
+                    UsdGenPlane *target, size_t targetElement)
+{
+    size_t const arity = source.arity;
+    if (source.type == TfToken("int"))
+        std::copy_n(source.i.cdata() + sourceElement * arity, arity,
+                    target->i.begin() + targetElement * arity);
+    else
+        std::copy_n(source.f.cdata() + sourceElement * arity, arity,
+                    target->f.begin() + targetElement * arity);
+}
+
+} // namespace detail
+
+inline bool
+UsdGenResampleExtraPlanes(UsdGenCurveBuffer const &source,
+                          UsdGenCurveBuffer *target, std::string *error)
+{
+    if (!target)
+        return detail::_UsdGenExtraPlaneFail("extra-plane resample has no target", error);
+    std::vector<uint32_t> sourceSpans, targetSpans;
+    if (!detail::_UsdGenCurveSpans(source, &sourceSpans, error) ||
+        !detail::_UsdGenCurveSpans(*target, &targetSpans, error) ||
+        !detail::_UsdGenValidateExtraPlanes(source, error))
+        return false;
+    if (target->totalCurves != source.totalCurves)
+        return detail::_UsdGenExtraPlaneFail(
+            "extra-plane resample must preserve the curve count", error);
+
+    try {
+    std::vector<UsdGenPlane> extraCv;
+    std::vector<UsdGenPlane> extraCurve;
+    extraCv.reserve(source.extraCv.size());
+    extraCurve.reserve(source.extraCurve.size());
+    for (UsdGenPlane const &plane : source.extraCv) {
+        UsdGenPlane transformed;
+        if (!detail::_UsdGenPrivatePlane(
+                plane, target->totalCvs, &transformed, error)) return false;
+        for (uint32_t curve = 0; curve != source.totalCurves; ++curve) {
+            uint32_t const inputCount = sourceSpans[curve + 1] - sourceSpans[curve];
+            uint32_t const outputCount = targetSpans[curve + 1] - targetSpans[curve];
+            if (inputCount == 0 && outputCount != 0)
+                return detail::_UsdGenExtraPlaneFail(
+                    "cannot resample a vertex extra-plane from an empty curve", error);
+            for (uint32_t output = 0; output != outputCount; ++output) {
+                double const t = inputCount <= 1 || outputCount <= 1 ? 0.0 :
+                    double(output) * double(inputCount - 1) / double(outputCount - 1);
+                uint32_t const lower = static_cast<uint32_t>(t);
+                uint32_t const upper = std::min(lower + 1, inputCount - 1);
+                size_t const inBase = sourceSpans[curve];
+                size_t const outIndex = size_t(targetSpans[curve]) + output;
+                if (plane.type == TfToken("int")) {
+                    uint32_t const nearest = static_cast<uint32_t>(std::floor(t + 0.5));
+                    detail::_UsdGenCopyElements(plane, inBase + nearest, &transformed, outIndex);
+                } else {
+                    float const fraction = static_cast<float>(t - double(lower));
+                    for (uint32_t component = 0; component != plane.arity; ++component) {
+                        float const a = plane.f[(inBase + lower) * plane.arity + component];
+                        float const b = plane.f[(inBase + upper) * plane.arity + component];
+                        transformed.f[outIndex * plane.arity + component] = a + fraction * (b - a);
+                    }
+                }
+            }
+        }
+        extraCv.push_back(std::move(transformed));
+    }
+    for (UsdGenPlane const &plane : source.extraCurve) {
+        UsdGenPlane transformed;
+        if (!detail::_UsdGenPrivatePlane(
+                plane, target->totalCurves, &transformed, error)) return false;
+        size_t const elements = plane.interpolation == TfToken("constant") ? 1 : source.totalCurves;
+        for (size_t element = 0; element != elements; ++element)
+            detail::_UsdGenCopyElements(plane, element, &transformed, element);
+        extraCurve.push_back(std::move(transformed));
+    }
+    target->extraCv = std::move(extraCv);
+    target->extraCurve = std::move(extraCurve);
+    return true;
+    } catch (...) {
+        return detail::_UsdGenExtraPlaneFail(
+            "extra-plane resample allocation failed", error);
+    }
+}
+
+inline bool
+UsdGenCompactExtraPlanes(UsdGenCurveBuffer const &source,
+                         std::vector<uint32_t> const &survivors,
+                         UsdGenCurveBuffer *target, std::string *error)
+{
+    if (!target)
+        return detail::_UsdGenExtraPlaneFail("extra-plane compaction has no target", error);
+    std::vector<uint32_t> sourceSpans, targetSpans;
+    if (!detail::_UsdGenCurveSpans(source, &sourceSpans, error) ||
+        !detail::_UsdGenCurveSpans(*target, &targetSpans, error) ||
+        !detail::_UsdGenValidateExtraPlanes(source, error))
+        return false;
+    if (target->totalCurves != survivors.size())
+        return detail::_UsdGenExtraPlaneFail(
+            "extra-plane compaction survivor count disagrees with target", error);
+    uint32_t previous = 0;
+    for (size_t output = 0; output != survivors.size(); ++output) {
+        uint32_t const input = survivors[output];
+        if (input >= source.totalCurves || (output != 0 && input <= previous))
+            return detail::_UsdGenExtraPlaneFail(
+                "extra-plane compaction survivors must be valid and strictly ascending", error);
+        previous = input;
+        if (targetSpans[output + 1] - targetSpans[output] !=
+            sourceSpans[input + 1] - sourceSpans[input])
+            return detail::_UsdGenExtraPlaneFail(
+                "extra-plane compaction changed a survivor CV count", error);
+    }
+
+    try {
+    std::vector<UsdGenPlane> extraCv;
+    std::vector<UsdGenPlane> extraCurve;
+    extraCv.reserve(source.extraCv.size());
+    extraCurve.reserve(source.extraCurve.size());
+    for (UsdGenPlane const &plane : source.extraCv) {
+        UsdGenPlane transformed;
+        if (!detail::_UsdGenPrivatePlane(
+                plane, target->totalCvs, &transformed, error)) return false;
+        for (size_t outputCurve = 0; outputCurve != survivors.size(); ++outputCurve) {
+            uint32_t const inputCurve = survivors[outputCurve];
+            uint32_t const count = sourceSpans[inputCurve + 1] - sourceSpans[inputCurve];
+            for (uint32_t cv = 0; cv != count; ++cv)
+                detail::_UsdGenCopyElements(plane, size_t(sourceSpans[inputCurve]) + cv,
+                    &transformed, size_t(targetSpans[outputCurve]) + cv);
+        }
+        extraCv.push_back(std::move(transformed));
+    }
+    for (UsdGenPlane const &plane : source.extraCurve) {
+        UsdGenPlane transformed;
+        if (!detail::_UsdGenPrivatePlane(
+                plane, target->totalCurves, &transformed, error)) return false;
+        if (plane.interpolation == TfToken("constant")) {
+            detail::_UsdGenCopyElements(plane, 0, &transformed, 0);
+        } else {
+            for (size_t output = 0; output != survivors.size(); ++output)
+                detail::_UsdGenCopyElements(plane, survivors[output], &transformed, output);
+        }
+        extraCurve.push_back(std::move(transformed));
+    }
+    target->extraCv = std::move(extraCv);
+    target->extraCurve = std::move(extraCurve);
+    return true;
+    } catch (...) {
+        return detail::_UsdGenExtraPlaneFail(
+            "extra-plane compaction allocation failed", error);
+    }
+}
+
 /// What a kernel is allowed to touch. All pointers are chunk-local bases
 /// (03 §1.2). cvCount == 0 on the ragged path.
 struct UsdGenChunkView
@@ -88,6 +402,9 @@ struct UsdGenChunkView
     const UsdGenChunkDesc *desc;
     float       *px, *py, *pz;               // out: writable
     const float *inPx, *inPy, *inPz, *inWidth;  // in: read-only, never const_cast
+    // Optional ordered second geometry input. WidthBlend merges only this
+    // plane and inherits every other plane from the first input.
+    const float *inWidth2 = nullptr;
     float       *width;                      // out when the node touches kPlaneWidths (scheduler binds fillOut); otherwise aliases upstream
     float       *hairT;                      // out when the node touches kPlaneHairT; otherwise aliases upstream
     const uint64_t *curveId;
@@ -106,6 +423,11 @@ struct UsdGenChunkView
     uint32_t      outCount, inCount;
     uint32_t curveCount, cvCount;            // cvCount == 0 on the ragged path
     uint32_t inCvCount = 0;                  // upstream's CVs per curve (in* base + c*inCvCount + i)
+    // Upstream ragged offsets for this chunk, shifted to firstCurve but still
+    // absolute in the upstream CV array.  `inFirstCv` rebases them onto the
+    // already-sliced inPx/inPy/inPz ports.
+    const int *inCvOffsets = nullptr;
+    uint32_t inFirstCv = 0;
     inline size_t Cv(uint32_t c, uint32_t i) const { return size_t(c) * cvCount + i; }
     inline size_t CvRagged(uint32_t c, uint32_t i) const { return size_t(cvOffsets[c]) + i; }
     inline float *OutF(uint32_t slot) const { return outF[slot]; }
@@ -136,6 +458,17 @@ struct UsdGenReferenceSet
     uint64_t          generation = 0;
 };
 
+/// Immutable compiler-resolved external reference value.  The shared payload
+/// gives a capture a stable value identity without retaining a mutable graph,
+/// descriptor, scene index, or stage object.
+struct UsdGenResolvedReferenceValue
+{
+    SdfPath path;
+    uint64_t curveGeneration = 0;
+    uint64_t identity = 0;
+    std::shared_ptr<const UsdGenReferenceSet> value;
+};
+
 // ---------------------------------------------------------------------------
 // Imaging boundary types (contract C2, docs/freezes/C2.md; 03 §9.1: "the engine
 // only fills them"). One UsdGenTilePublication per published tile prim
@@ -161,8 +494,9 @@ struct UsdGenTilePublication
     VtVec2fArray  st;                         // primvars/st, uniform (root UV)
     VtVec3fArray  displayColor;               // uniform (perCurve bake) or vertex (perCV)
     VtVec3fArray  bakeColor;                  // optional primvars:<bakePrimvar> (bakeTarget=primvar)
-    // Operator-emitted planes (C2): clumpId_<level> uniform int; guideIndex/guideWeight
-    // uniform with elementSize 3.
+    // Operator-emitted planes (C2), preserving their constant/uniform/vertex
+    // interpolation, float/int type, and element arity.  The historical member
+    // name predates publication of per-CV extra planes.
     std::vector<UsdGenPlane> extraUniform;
 
     // Motion profile P1 only (usdGen:motion:mode = "velocities"); empty otherwise,

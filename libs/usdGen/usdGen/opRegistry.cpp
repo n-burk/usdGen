@@ -11,8 +11,10 @@
 #include "usdGen/ops/noise.h"
 #include "usdGen/ops/length.h"
 #include "usdGen/ops/width.h"
+#include "usdGen/ops/widthBlend.h"
 #include "usdGen/ops/curveSource.h"
 #include "usdGen/ops/deform.h"
+#include "usdGen/ops/referenceSource.h"
 
 #include "pxr/pxr.h"
 
@@ -32,7 +34,12 @@ bool UsdGenOpRegistry::Register(
     for (Entry const &e : _entries) {
         if (e.type == type && e.version == algorithmVersion) return false;
     }
-    _entries.push_back(Entry{type, algorithmVersion, std::move(factory)});
+    if (!factory) return false;
+    std::unique_ptr<UsdGenOp> probe = factory();
+    if (!probe) return false;
+    _entries.push_back(Entry{type, algorithmVersion, std::move(factory),
+                             probe->GeometryInputArity(),
+                             probe->ReferenceInputs().size(), probe->Role()});
     return true;
 }
 
@@ -76,24 +83,59 @@ bool UsdGenOpRegistry::HasKernel(TfToken const &type, int algorithmVersion) cons
     return false;
 }
 
+bool UsdGenOpRegistry::GetGeometryInputArity(
+    TfToken const &type, int algorithmVersion, size_t *outArity) const
+{
+    return GetOperatorContract(type, algorithmVersion, outArity, nullptr,
+                               nullptr);
+}
+
+bool UsdGenOpRegistry::GetOperatorContract(
+    TfToken const &type, int algorithmVersion, size_t *outGeometryInputArity,
+    size_t *outReferenceInputArity, UsdGenRole *outRole) const
+{
+    int bestVersion = -1;
+    Entry const *best = nullptr;
+    for (Entry const &entry : _entries) {
+        if (entry.type != type) continue;
+        if (algorithmVersion != 0 && entry.version != algorithmVersion) continue;
+        if (entry.version > bestVersion) {
+            bestVersion = entry.version;
+            best = &entry;
+        }
+    }
+    if (!best) return false;
+    if (outGeometryInputArity)
+        *outGeometryInputArity = best->geometryInputArity;
+    if (outReferenceInputArity)
+        *outReferenceInputArity = best->referenceInputArity;
+    if (outRole) *outRole = best->role;
+    return true;
+}
+
 std::unique_ptr<UsdGenOp> CreateScatterOp() { return std::make_unique<UsdGenScatterOp>(); }
 std::unique_ptr<UsdGenOp> CreateGrowOp()    { return std::make_unique<UsdGenGrowOp>(); }
 std::unique_ptr<UsdGenOp> CreateNoiseOp()   { return std::make_unique<UsdGenNoiseOp>(); }
 std::unique_ptr<UsdGenOp> CreateLengthOp()  { return std::make_unique<UsdGenLengthOp>(); }
 std::unique_ptr<UsdGenOp> CreateWidthOp()   { return std::make_unique<UsdGenWidthOp>(); }
+std::unique_ptr<UsdGenOp> CreateWidthBlendOp() { return std::make_unique<UsdGenWidthBlendOp>(); }
 std::unique_ptr<UsdGenOp> CreateCurveSourceOp() { return std::make_unique<UsdGenCurveSourceOp>(); }
 std::unique_ptr<UsdGenOp> CreateDeformOp()    { return std::make_unique<UsdGenDeformOp>(); }
+std::unique_ptr<UsdGenOp> CreateReferenceSourceOp() { return std::make_unique<UsdGenReferenceSourceOp>(); }
 
 UsdGenOpRegistry::UsdGenOpRegistry()
-    : _entries{
-        {TfToken("UsdGenScatter"), 0, &CreateScatterOp},
-        {TfToken("UsdGenGrow"), 0, &CreateGrowOp},
-        {TfToken("UsdGenNoise"), 0, &CreateNoiseOp},
-        {TfToken("UsdGenLength"), 0, &CreateLengthOp},
-        {TfToken("UsdGenWidth"), 0, &CreateWidthOp},
-        {TfToken("UsdGenCurveSource"), 0, &CreateCurveSourceOp},
-        {TfToken("UsdGenDeform"), 0, &CreateDeformOp}}
-{}
+{
+    _entries.reserve(8);
+    Register(TfToken("UsdGenScatter"), 0, &CreateScatterOp);
+    Register(TfToken("UsdGenGrow"), 0, &CreateGrowOp);
+    Register(TfToken("UsdGenNoise"), 0, &CreateNoiseOp);
+    Register(TfToken("UsdGenLength"), 0, &CreateLengthOp);
+    Register(TfToken("UsdGenWidth"), 0, &CreateWidthOp);
+    Register(TfToken("UsdGenWidthBlend"), 0, &CreateWidthBlendOp);
+    Register(TfToken("UsdGenCurveSource"), 0, &CreateCurveSourceOp);
+    Register(TfToken("UsdGenDeform"), 0, &CreateDeformOp);
+    Register(TfToken("UsdGenReferenceSource"), 0, &CreateReferenceSourceOp);
+}
 
 void usdGenRegisterM1Operators() { (void)UsdGenOpRegistry::Get(); }
 

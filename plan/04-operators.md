@@ -708,6 +708,25 @@ for curve c in chunk:
         P[c][i] = root[c] + dir * len[c] * s
 ```
 
+`uvBlend` uses the retained root-frame U tangent (`T`, the orthonormalized
+`dPdu` direction), not a choice between raw surface derivatives. After lift,
+normalize `T`, then normalize `(1-uvBlend)*dir + uvBlend*T` so blending does
+not shorten the authored strand length. At zero, preserve the lifted direction
+exactly; at one, use normalized `T` exactly. If `T` is absent, has a nonfinite
+norm or a norm at most `1e-12`, retain the lifted direction. Apply that same
+fallback if the mixed direction cancels or has an unusable norm. This defines
+the previously unspecified interpolation and degenerate cases consistently
+for CPU and native GPU lowerings; no additional dPdv selector is implied.
+
+For `length:source`, apply the map's channel/filter/wrap and authored
+scale/offset/clamp/default rules first, then multiply that scalar into the
+double-precision length/random expression before narrowing the target to
+float. Grow imposes no extra [0,1] clamp on the sampled multiplier. Reject a
+negative or nonfinite effective multiplier/target transactionally, retaining
+the last-good generation. The implemented ImageMap lowering samples once per
+root using the retained root UV; other map types retain their own planned
+sampling contracts and are not approximated as images.
+
 **Emitted primvars.** None; it *sets* `curveVertexCounts` and therefore the vertex `hairT`
 (root→tip, ADR §5.3). **Interactions.** `Grow` and `GuideInterpolate` are alternatives, not a
 sequence — whichever runs last sets the CV count; a `Grow` after a `GuideInterpolate` discards the

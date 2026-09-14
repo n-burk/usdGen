@@ -279,6 +279,79 @@ int main() {
                   "out-of-range primitive owner fails without out-of-bounds read");
         }
     }
+
+    // Fresh execution owns its IR through the terminal D2H status proof.  It
+    // never permits a legacy synchronous Finish to consume mixed state, and
+    // semantic device failure clears the proof requirement without publishing
+    // a valid parameter field.
+    {
+        DeviceBuffer<float> freshOutput;
+        check(freshOutput.reset(1) == cudaSuccess, "allocate fresh expression output");
+        auto compiled = expr::Frontend::Compile("2", {expr::Domain::Groom,
+            expr::ScalarType::Float64, 1});
+        check(compiled.ok, "compile fresh expression");
+        if (compiled.ok) {
+            ExpressionInputs freshInputs;
+            freshInputs.context.domain = expr::Domain::Groom;
+            freshInputs.count = 1;
+            CudaExpressionProgram fresh;
+
+            cudaGraph_t graph = nullptr;
+            check(cudaStreamBeginCapture(producer, cudaStreamCaptureModeGlobal) == cudaSuccess,
+                  "begin fresh-expression capture");
+            check(fresh.UploadFresh(compiled.program.IR(), producer) == ExpressionStatus::InvalidArgument,
+                  "fresh upload rejects capture before allocation/query");
+            check(cudaStreamEndCapture(producer, &graph) == cudaSuccess && graph,
+                  "fresh capture remains usable after rejection");
+            if (graph) cudaGraphDestroy(graph);
+
+            auto ir = compiled.program.IR();
+            check(fresh.UploadFresh(ir, producer) == ExpressionStatus::Ok,
+                  "fresh upload owns immutable IR");
+            ir.instructions.clear();
+            check(fresh.HasUnprovenWork(), "fresh upload marks owned IR unproven");
+            check(fresh.Evaluate(freshInputs, {freshOutput.data(), 1,
+                  expr::ScalarType::Float32}, producer) == ExpressionStatus::InvalidArgument,
+                  "legacy evaluate rejects fresh upload state");
+            check(fresh.EvaluateFresh(freshInputs, {freshOutput.data(), 1,
+                  expr::ScalarType::Float32}, producer) == ExpressionStatus::Ok,
+                  "fresh evaluate queues after fresh upload");
+            check(fresh.CommitFreshFinish() == ExpressionStatus::InvalidArgument,
+                  "fresh commit rejects before status enqueue");
+            check(fresh.EnqueueFreshStatus(producer) == ExpressionStatus::Ok,
+                  "fresh status queues pinned D2H result");
+            check(fresh.Finish(consumer) == ExpressionStatus::InvalidArgument,
+                  "legacy finish rejects fresh pending state");
+            check(fresh.CommitFreshFinish() == ExpressionStatus::InvalidArgument,
+                  "fresh commit rejects speculative pre-terminal use");
+            check(cudaStreamSynchronize(producer) == cudaSuccess,
+                  "explicit test-only fresh terminal proof");
+            check(fresh.CommitFreshFinish() == ExpressionStatus::Ok,
+                  "fresh commit consumes successful terminal status");
+            check(!fresh.HasUnprovenWork(), "fresh success clears proof retention");
+            float actual = 0;
+            check(cudaMemcpy(&actual, freshOutput.data(), sizeof(actual), cudaMemcpyDeviceToHost) == cudaSuccess &&
+                  actual == 2.0f, "fresh IR remains valid after caller destroys IR bytes");
+
+            auto invalid = expr::Frontend::Compile("$frame / 0", {expr::Domain::Groom,
+                expr::ScalarType::Float64, 1});
+            check(invalid.ok, "compile invalid fresh expression");
+            if (invalid.ok) {
+                check(fresh.UploadFresh(invalid.program.IR(), producer) == ExpressionStatus::Ok,
+                      "fresh upload permits a new proved instance");
+                check(fresh.EvaluateFresh(freshInputs, {freshOutput.data(), 1,
+                      expr::ScalarType::Float32}, producer) == ExpressionStatus::Ok,
+                      "fresh invalid value still queues device status");
+                check(fresh.EnqueueFreshStatus(producer) == ExpressionStatus::Ok,
+                      "fresh invalid value queues status");
+                check(cudaStreamSynchronize(producer) == cudaSuccess,
+                      "explicit test-only invalid terminal proof");
+                check(fresh.CommitFreshFinish() == ExpressionStatus::InvalidValue,
+                      "fresh commit reports semantic device failure");
+                check(!fresh.HasUnprovenWork(), "semantic status does not quarantine fresh storage");
+            }
+        }
+    }
     cudaStreamDestroy(consumer); cudaStreamDestroy(producer);
     std::printf("testUsdGenCudaExpression: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

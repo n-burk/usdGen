@@ -3,6 +3,7 @@
 
 #include "usdGen/cudaExecution.h"
 #include "usdGen/executionPipeline.h"
+#include "usdGen/executionTaskGraph.h"
 
 #include <cstdint>
 #include <functional>
@@ -39,6 +40,11 @@ public:
     // callback. Accepted requests report their eventual pipeline outcome.
     uint64_t Submit(std::shared_ptr<const UsdGenCudaExecutionPlan> plan,
                     double frame, Completion completion = {});
+    // Selects shared-dispatcher scheduling priority; the three CUDA stages
+    // still serialize through this description's workspace.
+    uint64_t Submit(std::shared_ptr<const UsdGenCudaExecutionPlan> plan,
+                    double frame, Completion,
+                    UsdGenExecutionTaskGraph::RequestClass);
     uint64_t CancelPending();
     std::shared_ptr<const UsdGenCudaQueueSnapshot> Snapshot() const noexcept;
     void Drain();

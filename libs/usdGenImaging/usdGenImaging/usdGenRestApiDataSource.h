@@ -5,6 +5,8 @@
 //   usdGen/rest/faceVertexCounts    VtIntArray
 //   usdGen/rest/faceVertexIndices   VtIntArray
 //   usdGen/rest/st                  VtVec2fArray  (primary uv set)
+//   usdGen/rest/normals             VtVec3fArray  (Mesh normals at Default)
+//   usdGen/rest/normalsInterpolation TfToken       (the paired interpolation)
 //
 // Rest points are sampled at UsdTimeCode::Default() by a custom
 // UsdImagingDataSourceMapped::AttributeMapping::factory whose data source
@@ -32,7 +34,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGenImaging {
 
-/// AttributeMapping::factory for the usdGen/rest container: builds the four
+/// AttributeMapping::factory for the usdGen/rest container: builds the six
 /// rest leaves above on the given prim. Returns nullptr when the prim is not
 /// a Mesh (the caller warns once per prim, 02 §2.15).
 HdContainerDataSourceHandle UsdGenRestApiContainerFactory(
@@ -40,7 +42,8 @@ HdContainerDataSourceHandle UsdGenRestApiContainerFactory(
     UsdImagingDataSourceStageGlobals const &globals);
 
 /// Invalidation mapping required for the container to be dirtiable (02 §2.15):
-///   points / faceVertexCounts / faceVertexIndices -> usdGen/rest/<leaf>
+///   points / faceVertexCounts / faceVertexIndices / normals /
+///   normalsInterpolation -> usdGen/rest/<leaf>
 ///   primvars:rest                                  -> usdGen/rest/points
 ///   usdGen:rest:source|primvar|file                -> their own usdGen/rest/* leaves
 ///   usdGen:rest:file assetPath                     -> usdGen/rest/points (asset)

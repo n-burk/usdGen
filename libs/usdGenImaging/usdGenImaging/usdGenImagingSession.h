@@ -82,16 +82,17 @@ public:
         UsdGenSessionKey const &key,
         std::shared_ptr<usdGen::UsdGenSession> engineSession,
         double frame = 0.0,
-        usdGen::UsdGenContext context = usdGen::UsdGenContext::Interactive);
+        usdGen::UsdGenContext context = usdGen::UsdGenContext::Interactive,
+        uint64_t commandCapacity = 4096);
     ~UsdGenImagingSession() override;
 
     UsdGenSessionKey const &Key() const { return _key; }
     usdGen::UsdGenSession *Engine() const { return _engine.get(); }
 
     /// Trigger (a)/(b) time source (06 §3.9). Frame-only: never commits.
-    void SetTime(double frame);
+    bool SetTime(double frame);
     /// ADR §2.3 explicit context (session property, shared by all indices).
-    void SetContext(usdGen::UsdGenContext context);
+    bool SetContext(usdGen::UsdGenContext context);
     /// Trigger (a) explicit commit (after a live-override change) and
     /// trigger (c) end-of-batch commit (06 §3.9, R32: unconditional).
     /// Publishes a generation only when the session is dirty or a graph desc
@@ -118,6 +119,9 @@ public:
     /// topology generation, not per frame).
     void MarkNeedsDesc() noexcept;
     bool NeedsDesc() const noexcept;
+    /// Rebuilds the retained descriptor's immutable map payloads against the
+    /// current imaging decode generation and stages it for the next commit.
+    bool ReloadMaps();
 
     /// Immutable per-commit payload for republish callbacks (P0 races):
     /// the generation published by THIS commit plus a COPY of its dirty
@@ -163,7 +167,7 @@ public:
 
     /// Install a descriptor without committing (offline/test clients).
     /// Production staging uses StageAndCommit for an atomic pair.
-    void StageDesc(usdGen::UsdGenGraphDesc const &desc);
+    bool StageDesc(usdGen::UsdGenGraphDesc const &desc);
 
     /// Monotonic publication generation (UsdGenImaging_GetGeneration).
     int64_t Generation() const noexcept;
@@ -179,13 +183,27 @@ public:
     /// block on GetPrim and must not reread live engine state.
     int RegisterRepublishCallback(
         std::function<void(CommitPayload const &)> cb);
+    int RegisterRepublishCallback(
+        usdGen::UsdGenExecutionPipeline::CommandTicket&& ticket,
+        std::function<void(CommitPayload const &)> cb,
+        std::function<void()> registered = {});
     /// Enqueues callback removal and acknowledges after the owner has erased
     /// it. If the accepted command is cancelled during shutdown, completion
     /// is still invoked; false means it was never accepted and completion is
     /// not invoked. Completion must not synchronously wait on an owner.
     bool UnregisterRepublishCallbackAsync(
         int token, std::function<void()> completion = {});
-    void UnregisterRepublishCallback(int token);
+    // A lifetime relay reserves this session owner's cleanup admission before
+    // accepting an external source callback. The ticket overload consumes
+    // that exact credit; false means cleanup was never accepted.
+    usdGen::UsdGenExecutionPipeline::CommandTicket ReserveLifecycleCommand();
+    bool UnregisterRepublishCallbackAsync(
+        usdGen::UsdGenExecutionPipeline::CommandTicket&& ticket, int token,
+        std::function<void()> completion = {});
+    // False means the ordinary owner lane was full/closed and the callback
+    // remains registered. Lifetime owners must reserve cleanup admission
+    // before accepting a callback source and use the ticket overload above.
+    bool UnregisterRepublishCallback(int token);
     // Registration/removal enqueue nonblocking owner commands. A currently
     // executing callback may finish; later publications observe the removal.
 private:
@@ -212,12 +230,21 @@ public:
     /// the request was not accepted and no completion will be delivered.
     bool AttachAsync(UsdGenSessionKey key,
                      std::function<void(UsdGenSessionHandle)> completion);
+    bool AttachAsync(usdGen::UsdGenExecutionPipeline::CommandTicket&& ticket,
+                     UsdGenSessionKey key,
+                     std::function<void(UsdGenSessionHandle)> completion);
     /// Key-only compatibility adapter resolves the currently published
     /// identity, not a pending AttachAsync. Prefer the exact-handle overload.
     bool DetachAsync(UsdGenSessionKey key, std::function<void()> completion = {});
     /// Identity-aware release: a delayed release cannot touch a same-key
     /// replacement. Each successful Attach still requires exactly one release.
     bool DetachAsync(UsdGenSessionKey key, UsdGenSessionHandle expected,
+                     std::function<void()> completion = {});
+    // Reserve store-owner cleanup admission before a source lifetime is
+    // accepted. Use the ticket overload for the matching terminal detach.
+    usdGen::UsdGenExecutionPipeline::CommandTicket ReserveLifecycleCommand();
+    bool DetachAsync(usdGen::UsdGenExecutionPipeline::CommandTicket&& ticket,
+                     UsdGenSessionKey key, UsdGenSessionHandle expected,
                      std::function<void()> completion = {});
     /// Batch dispatch is one store command; independent sessions execute in
     /// parallel. Completion runs as final imaging reply owner work (or store
@@ -242,16 +269,12 @@ public:
     /// and commits it at the new frame — the future UsdGenImaging_SetTime
     /// C ABI (06 §6.1) forwards here.
     void SetTime(double frame);
-    void SetContext(usdGen::UsdGenContext context);
+    bool SetContext(usdGen::UsdGenContext context);
     void Commit(usdGen::UsdGenCommitReason reason);
     int64_t Generation() const noexcept;  // max over live sessions
-    /// S13: ArNotice::ResolverChanged + bump every map's textureGeneration
-    /// (usdGenImaging owns the counter handoff to the engine via
-    /// UsdGenGraphDesc::maps). No session-level map-reload hook exists in
-    /// the M1 engine, so this marks every session desc-dirty (the next
-    /// commit re-pulls the desc, whose maps carry the bumped generation)
-    /// and warns once.
-    void ReloadMaps();
+    /// S13: invalidate the shared decoded-image COW cache and stage a newly
+    /// resolved payload generation in every live session.
+    bool ReloadMaps();
 
     /// Immutable membership snapshot (strong refs). These reads never enter
     /// or await the command owner; returned handles survive later detachment.

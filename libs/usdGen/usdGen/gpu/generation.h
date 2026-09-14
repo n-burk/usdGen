@@ -4,10 +4,21 @@
 #include "usdGen/deviceGeneration.h"
 #include "curveSource.h"
 #include "curveResample.h"
+#include "curveGrow.h"
+#include "scatterGrow.h"
 
 namespace usdGen::gpu {
 
 class CudaCurveCompaction;
+
+// Generic, byte-addressed extension channel owned by a CUDA generation. The
+// metadata remains backend-neutral; the byte buffer is only the CUDA storage
+// implementation. Planes may replace an inherited Generic channel by name,
+// but cannot replace C3 geometry semantics.
+struct CudaNamedChannelPlane {
+    UsdGenDeviceChannelMetadata metadata;
+    std::unique_ptr<DeviceBuffer<unsigned char>> bytes;
+};
 
 // Takes exclusive ownership of a completed source. Each published generation
 // gets distinct mutable storage; it is never replaced underneath a reader.
@@ -16,7 +27,8 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeSourceGeneration(
     std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
     std::unique_ptr<DeviceBuffer<float3>> points = {},
-    uint64_t topologyVersion = UINT64_MAX);
+    uint64_t topologyVersion = UINT64_MAX,
+    std::vector<CudaNamedChannelPlane> namedChannels = {});
 
 // Owns both the immutable uploaded source and its completed device-only
 // resample. The source remains alive because the resampler borrowed it until
@@ -26,7 +38,8 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeResampledGeneration(
     uint64_t generation, std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
     std::unique_ptr<DeviceBuffer<float3>> points = {},
-    uint64_t topologyVersion = UINT64_MAX);
+    uint64_t topologyVersion = UINT64_MAX,
+    std::vector<CudaNamedChannelPlane> namedChannels = {});
 
 // Owns a completed GPU topology revision, including every reordered channel.
 std::shared_ptr<const UsdGenDeviceGeneration> MakeCompactedGeneration(
@@ -34,7 +47,32 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakeCompactedGeneration(
     std::string* reason = nullptr, bool alreadyDeformed = false,
     std::unique_ptr<DeviceBuffer<float>> widths = {},
     std::unique_ptr<DeviceBuffer<float3>> points = {},
-    uint64_t topologyVersion = UINT64_MAX);
+    uint64_t topologyVersion = UINT64_MAX,
+    std::vector<CudaNamedChannelPlane> namedChannels = {});
+
+// Owns a completed Scatter-capture/Grow topology expansion.  The producer
+// carries the immutable copied roots and T/B/N frame planes through its
+// completion proof; only its fresh expanded storage is transferred here.
+std::shared_ptr<const UsdGenDeviceGeneration> MakeScatterGrowGeneration(
+    std::unique_ptr<CudaScatterGrow> geometry, uint64_t generation,
+    std::string* reason = nullptr, bool alreadyDeformed = false,
+    uint64_t topologyVersion = UINT64_MAX,
+    std::vector<CudaNamedChannelPlane> namedChannels = {},
+    // Fresh point/width revisions remain private COW planes of this output;
+    // Scatter/Grow's expanded topology and root-frame owner are retained.
+    std::unique_ptr<DeviceBuffer<float>> widths = {},
+    std::unique_ptr<DeviceBuffer<float3>> points = {});
+
+// Owns a completed C3-native Grow topology expansion. The producer has
+// already copied every C3 geometry/binding channel into fresh output storage;
+// named planes are the executor-owned, freshly transformed counterparts.
+std::shared_ptr<const UsdGenDeviceGeneration> MakeCurveGrowGeneration(
+    std::unique_ptr<CudaCurveGrow> geometry, uint64_t generation,
+    std::string* reason = nullptr, bool alreadyDeformed = false,
+    uint64_t topologyVersion = UINT64_MAX,
+    std::vector<CudaNamedChannelPlane> namedChannels = {},
+    std::unique_ptr<DeviceBuffer<float>> widths = {},
+    std::unique_ptr<DeviceBuffer<float3>> points = {});
 
 // Completed device-only point edit of an immutable snapshot. All other
 // channels and the topology version are shared with base. A null points
@@ -44,10 +82,37 @@ std::shared_ptr<const UsdGenDeviceGeneration> MakePointRevisionGeneration(
     std::unique_ptr<DeviceBuffer<float3>> points,
     UsdGenDeviceToolMetadata tool = {}, std::string* reason = nullptr);
 
+std::shared_ptr<const UsdGenDeviceGeneration> MakeNamedChannelRevisionGeneration(
+    std::shared_ptr<const UsdGenDeviceGeneration> base, uint64_t generation,
+    std::vector<CudaNamedChannelPlane> planes, UsdGenDeviceToolMetadata tool = {},
+    std::string* reason = nullptr);
+
+class CudaNamedChannelLease {
+public:
+    explicit operator bool() const noexcept { return bool(lease_); }
+    UsdGenDeviceChannelMetadata const* Metadata() const noexcept {
+        return lease_ ? &metadata_ : nullptr;
+    }
+    DeviceView<const unsigned char> Bytes() const noexcept {
+        return lease_ ? bytes_ : DeviceView<const unsigned char>{};
+    }
+private:
+    UsdGenDeviceLease lease_;
+    UsdGenDeviceChannelMetadata metadata_;
+    DeviceView<const unsigned char> bytes_;
+    friend CudaNamedChannelLease AcquireNamedChannel(
+        std::shared_ptr<const UsdGenDeviceGeneration> const&, std::string const&, cudaStream_t);
+};
+
+CudaNamedChannelLease AcquireNamedChannel(
+    std::shared_ptr<const UsdGenDeviceGeneration> const&, std::string const&, cudaStream_t);
+
 // Read-only geometry access for CUDA tools/consumers. The native stream must
-// remain alive until every copy of the lease is released. Destruction waits
-// for queued consumer work before releasing the last storage reference.
-// Acquire/release run on ordinary host threads, never CUDA host callbacks
+// remain alive until every copy of the lease is released. Destruction arranges
+// backend retirement after queued consumer work before releasing the last
+// storage reference. CUDA lease acquisition rejects a stream under graph
+// capture; Complete must run outside capture. Acquire/release run on ordinary
+// host threads, never CUDA host callbacks
 // (CUDA forbids runtime API calls from those callbacks).
 class CudaGeometryLease {
 public:
@@ -56,12 +121,17 @@ public:
     DeviceView<const float> HairT() const noexcept { return lease_ ? hairT_ : DeviceView<const float>{}; }
     DeviceView<const int32_t> RootPrim() const noexcept { return lease_ ? rootPrim_ : DeviceView<const int32_t>{}; }
     DeviceView<const float2> RootUV() const noexcept { return lease_ ? rootUV_ : DeviceView<const float2>{}; }
+    // Optional immutable rest-frame planes carried by generated topology.
+    DeviceView<const float3> RootT() const noexcept { return lease_ ? rootT_ : DeviceView<const float3>{}; }
+    DeviceView<const float3> RootB() const noexcept { return lease_ ? rootB_ : DeviceView<const float3>{}; }
+    DeviceView<const float3> RootN() const noexcept { return lease_ ? rootN_ : DeviceView<const float3>{}; }
 private:
     UsdGenDeviceLease lease_;
     DeviceCurveGeometryView geometry_{};
     DeviceView<const float> hairT_{};
     DeviceView<const int32_t> rootPrim_{};
     DeviceView<const float2> rootUV_{};
+    DeviceView<const float3> rootT_{}, rootB_{}, rootN_{};
     friend CudaGeometryLease AcquireGeometry(
         std::shared_ptr<const UsdGenDeviceGeneration> const&, cudaStream_t);
 };

@@ -184,10 +184,89 @@ int main() {
         CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);
         actual = Read(output);
         for (unsigned i = 0; i < actual.size(); ++i) CHECK(Near(actual[i], styled[i]));
+        // Fresh binding uses independent host-only proof commits.  The
+        // stream synchronizations below are test-only stand-ins for the
+        // production native terminal callbacks.
+        CudaRbfBinding freshBinding;
+        CHECK(freshBinding.BeginFreshBind({drivers.data(),5},0,producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshBinding.CommitFreshBindExtent()==RbfStatus::Ok);
+        CHECK(freshBinding.BeginFreshBindRank(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshBinding.CommitFreshBindRank()==RbfStatus::Ok);
+        CHECK(freshBinding.BeginFreshBindLu(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshBinding.CommitFreshBindLu()==RbfStatus::Ok);
+        parameters.blend=ScalarField::Device({blend.data(),2},usdGen::expr::Domain::Primitive);
+        parameters.enabled=BoolField::Device({enabled.data(),1},usdGen::expr::Domain::Groom);
+        const auto freshSentinel=Read(output); CudaRbfCurveDeformer fresh;
+        CHECK(fresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::Ok);
+        CHECK(fresh.HasUnprovenWork());
+        CHECK(fresh.Deform(binding,styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::InvalidArgument);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshShape()==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshEvaluate(freshBinding,producer)==RbfStatus::Ok);
+        CHECK(fresh.CommitFreshEvaluate(binding)==RbfStatus::InvalidArgument && fresh.HasUnprovenWork());
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshEvaluate(freshBinding)==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshApply(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshApply()==RbfStatus::Ok);
+        actual=Read(output); for(unsigned i=0;i<actual.size();++i) CHECK(Near(actual[i],freshSentinel[i]));
+        CHECK(fresh.BeginFreshCopy(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshFinish()==RbfStatus::Ok);
+        // Accepted fresh binding is identity: primitive 0 is unlocked and
+        // remains styled, while primitive 1's locked root reaches rest[2].
+        actual=Read(output); CHECK(actual.size()==styled.size());
+        CHECK(Near(actual[0],styled[0]) && Near(actual[2],rest[2]) && Near(actual[3],styled[3]));
+        // Malformed offsets fail at the shape proof and do not touch output;
+        // the same fresh object can start another proven candidate afterward.
+        const auto beforeFreshFailure=Read(output);
+        float3 hostPoint{}; DeviceCurveGeometryView hostPointerGeometry=styledGeometry;
+        hostPointerGeometry.points={&hostPoint,5};
+        CHECK(fresh.BeginFreshShape(hostPointerGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::InvalidArgument);
+        CHECK(Upload(deviceOffsets,std::vector<uint32_t>{0,2,6})); styledGeometry.curveOffsets={deviceOffsets.data(),3};
+        CHECK(fresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshShape()==RbfStatus::InvalidArgument);
+        actual=Read(output); for(unsigned i=0;i<actual.size();++i) CHECK(Near(actual[i],beforeFreshFailure[i]));
+        CHECK(Upload(deviceOffsets,offsets)); styledGeometry.curveOffsets={deviceOffsets.data(),3};
+        // The same object admits a complete retry after a proven semantic
+        // rejection; no failed phase remains sticky.
+        CHECK(fresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshShape()==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshEvaluate(freshBinding,producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshEvaluate(freshBinding)==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshApply(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshApply()==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshCopy(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshFinish()==RbfStatus::Ok);
+        // Device-field NaN is an Apply semantic rejection and never copies
+        // staging into the caller's sentinel destination.
+        const auto beforeFreshNaN=Read(output);
+        CHECK(Upload(blend,std::vector<float>{NAN,1.f}));
+        CHECK(fresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshShape()==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshEvaluate(freshBinding,producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshEvaluate(freshBinding)==RbfStatus::Ok);
+        CHECK(fresh.BeginFreshApply(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshApply()==RbfStatus::NonFiniteInput);
+        actual=Read(output); for(unsigned i=0;i<actual.size();++i) CHECK(Near(actual[i],beforeFreshNaN[i]));
+        CHECK(Upload(blend,blendValues));
         DeviceBuffer<uint32_t> emptyOffsets;
         CHECK(Upload(emptyOffsets, std::vector<uint32_t>{0}));
         DeviceCurveGeometryView emptyGeometry{};
         emptyGeometry.curveOffsets = {emptyOffsets.data(), 1};
+        CudaRbfCurveDeformer freshEmpty;
+        CHECK(freshEmpty.BeginFreshShape(emptyGeometry,{},DeformParameters{}, {},producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshEmpty.CommitFreshShape()==RbfStatus::Ok);
+        // Empty geometry intentionally skips RBF evaluation but still proves
+        // Apply and the final publication boundary.
+        CHECK(freshEmpty.BeginFreshEvaluate(freshBinding,producer)==RbfStatus::Ok);
+        CHECK(freshEmpty.CommitFreshEvaluate(freshBinding)==RbfStatus::Ok);
+        CHECK(freshEmpty.BeginFreshApply(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshEmpty.CommitFreshApply()==RbfStatus::Ok);
+        CHECK(freshEmpty.BeginFreshCopy(producer)==RbfStatus::Ok);
+        CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshEmpty.CommitFreshFinish()==RbfStatus::Ok);
+        cudaGraph_t captureGraph=nullptr;
+        CHECK(cudaStreamBeginCapture(producer,cudaStreamCaptureModeGlobal)==cudaSuccess);
+        CudaRbfCurveDeformer captureFresh;
+        CHECK(captureFresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::InvalidArgument);
+        CHECK(cudaStreamEndCapture(producer,&captureGraph)==cudaSuccess);
+        if (captureGraph) CHECK(cudaGraphDestroy(captureGraph)==cudaSuccess);
         CHECK(deform.Deform(binding, emptyGeometry, {}, DeformParameters{}, {}, producer) ==
               RbfStatus::Ok);
         CHECK(deform.Finish(binding, consumer) == RbfStatus::Ok);

@@ -1,8 +1,8 @@
 // testUsdGenGraph — gate E-6 (T0, plan 11 §2.2 / 09 §5.1):
 //
-//   Build a synthetic 200-node operator groom graph (the 5-op M1 chain
-//   repeated: UsdGenScatter -> UsdGenGrow -> UsdGenNoise -> UsdGenLength ->
-//   UsdGenWidth, x40), append ONE node, and measure the incremental
+//   Build a synthetic 200-node operator groom graph (one UsdGenScatter
+//   source followed by repeating unary Grow -> Noise -> Length -> Width),
+//   append ONE node, and measure the incremental
 //   Recompile:
 //     * <= 0.2 ms, and
 //     * EXACTLY one node rebuilt (digest-keyed per-node reuse; E-6).
@@ -44,11 +44,11 @@ void Check(bool ok, std::string const &what)
 
 TfToken CycleType(int i)
 {
-    switch (i % 5) {
-    case 0:  return TfToken("UsdGenScatter");
-    case 1:  return TfToken("UsdGenGrow");
-    case 2:  return TfToken("UsdGenNoise");
-    case 3:  return TfToken("UsdGenLength");
+    if (i == 0) return TfToken("UsdGenScatter");
+    switch ((i - 1) % 4) {
+    case 0:  return TfToken("UsdGenGrow");
+    case 1:  return TfToken("UsdGenNoise");
+    case 2:  return TfToken("UsdGenLength");
     default: return TfToken("UsdGenWidth");
     }
 }
@@ -74,7 +74,7 @@ void AddTypeParams(UsdGenNodeDesc &n, TfToken const &type)
     }
 }
 
-/// 200-node groom: the 5-op chain repeated 40 times.
+/// 200-node groom: one source followed by a repeating unary transform chain.
 UsdGenGraphDesc MakeChain(int nodeCount)
 {
     UsdGenGraphDesc d;
@@ -107,6 +107,26 @@ UsdGenGraphDesc MakeChain(int nodeCount)
         AddTypeParams(n, n.type);
         d.nodes.push_back(std::move(n));
     }
+    return d;
+}
+
+UsdGenGraphDesc MakeC3SourceSpaceDesc(bool useRest, TfToken space = TfToken())
+{
+    UsdGenGraphDesc d;
+    d.description = SdfPath("/c3Space");
+    d.terminal = SdfPath("/c3Space/source");
+    UsdGenCurveSetDesc curves;
+    curves.path = SdfPath("/c3Space/hair");
+    curves.role = UsdGenRole::Curves;
+    curves.curveRole = TfToken("hair");
+    d.curveSets.push_back(std::move(curves));
+    UsdGenNodeDesc source;
+    source.path = d.terminal;
+    source.type = TfToken("UsdGenCurveSource");
+    source.curves = {SdfPath("/c3Space/hair")};
+    source.params.push_back({TfToken("useRest"), VtValue(useRest), false});
+    source.space = std::move(space);
+    d.nodes.push_back(std::move(source));
     return d;
 }
 
@@ -146,7 +166,7 @@ int main()
     desc2.terminal = SdfPath("/g200/n200");
     UsdGenNodeDesc extra;
     extra.path = SdfPath("/g200/n200");
-    extra.type = CycleType(200);            // == UsdGenScatter
+    extra.type = CycleType(200);            // == UsdGenWidth
     extra.enabled = true;
     extra.blend = 1.0f;
     extra.seed = 1301;
@@ -205,6 +225,108 @@ int main()
         if (graph.Node(i).captureNeeded) ++stableWithCaptureFlag;
     Check(stableWithCaptureFlag == 0,
           "E-6: no pre-existing node marked for re-capture after recompile");
+
+    // A value-class edit must not take the unchanged-node reuse shortcut.  In
+    // particular, the shortcut retains the prior paramValueDigest only after
+    // sameNodeDesc() has proved every value input equal; this regression keeps
+    // that proof honest while checking that an edited node gets a fresh value
+    // digest without incorrectly forcing a structural rebuild.
+    {
+        UsdGenGraphDesc digestDesc = MakeChain(5);
+        UsdGenGraph digestGraph;
+        UsdGenCompiler digestCompiler;
+        UsdGenCompileResult const initial = digestCompiler.Compile(digestDesc, &digestGraph);
+        Check(initial.ok, "value-digest regression baseline compiles");
+        if (initial.ok) {
+            uint64_t const stableSourceDigest = digestGraph.Node(0).paramValueDigest;
+            uint64_t const oldWidthDigest = digestGraph.Node(4).paramValueDigest;
+            UsdGenEpoch const oldWidthStructuralDigest =
+                digestGraph.Node(4).structuralDigest;
+            digestDesc.nodes[4].params[0].value = VtValue(0.04);
+            UsdGenCompileResult const changed =
+                digestCompiler.Recompile(digestDesc, &digestGraph);
+            Check(changed.ok && changed.rebuilt.size() == 1 && changed.rebuilt[0] == 4,
+                  "value-class edit rebuilds the edited node transactionally");
+            Check(digestGraph.Node(0).paramValueDigest == stableSourceDigest,
+                  "unchanged node retains its value digest");
+            Check(digestGraph.Node(4).paramValueDigest != oldWidthDigest,
+                  "edited node receives a new value digest");
+            Check(digestGraph.Node(4).structuralDigest == oldWidthStructuralDigest &&
+                      digestGraph.Node(4).captureNeeded &&
+                      digestGraph.Node(4).lastParamDigest == 0,
+                  "value edit preserves structure while requiring fresh evaluation");
+        }
+    }
+
+    // Geometry dataflow is an operator contract, not a scheduler choice.
+    // Reject unsupported arities before the runtime could silently select a
+    // first input edge.
+    auto checkArityError = [&](UsdGenGraphDesc const &invalid,
+                               std::string const &expected,
+                               std::string const &what) {
+        UsdGenGraph rejected;
+        UsdGenCompileResult const r = compiler.Compile(invalid, &rejected);
+        Check(!r.ok && r.errors.size() == 1 && r.errors.front() == expected, what);
+        if (!r.errors.empty() && r.errors.front() != expected)
+            std::printf("  actual: %s\n", r.errors.front().c_str());
+    };
+    {
+        UsdGenGraphDesc missing = MakeChain(2);
+        missing.nodes[1].inputs.clear();
+        checkArityError(
+            missing,
+            "UsdGenCompiler: operator '/g200/n1' (type 'UsdGenGrow') requires exactly 1 geometry input; found 0",
+            "unary operator without geometry input has an exact diagnostic");
+    }
+    {
+        UsdGenGraphDesc fanIn = MakeChain(2);
+        UsdGenNodeDesc secondSource = fanIn.nodes.front();
+        secondSource.path = SdfPath("/g200/secondSource");
+        fanIn.nodes.push_back(std::move(secondSource));
+        fanIn.nodes[1].inputs.push_back(SdfPath("/g200/secondSource"));
+        checkArityError(
+            fanIn,
+            "UsdGenCompiler: operator '/g200/n1' (type 'UsdGenGrow') requires exactly 1 geometry input; found 2",
+            "unary operator fan-in has an exact diagnostic");
+    }
+    {
+        UsdGenGraphDesc sourceInput = MakeChain(1);
+        UsdGenNodeDesc secondSource = sourceInput.nodes.front();
+        secondSource.path = SdfPath("/g200/secondSource");
+        sourceInput.nodes.push_back(std::move(secondSource));
+        sourceInput.nodes[0].inputs = {SdfPath("/g200/secondSource")};
+        checkArityError(
+            sourceInput,
+            "UsdGenCompiler: operator '/g200/n0' (type 'UsdGenScatter') requires exactly 0 geometry inputs; found 1",
+            "source operator input has an exact diagnostic");
+    }
+    {
+        UsdGenGraphDesc posed = MakeC3SourceSpaceDesc(false);
+        UsdGenCompiler compiler;
+        UsdGenGraph graph;
+        UsdGenCompileResult const compiled = compiler.Compile(posed, &graph);
+        Check(compiled.ok && graph.Node(graph.NodeIdForPath(posed.terminal)).space ==
+                  UsdGenSpace::Deformed,
+              "C3 CurveSource useRest=false resolves auto space to deformed");
+
+        UsdGenGraphDesc rest = posed;
+        rest.nodes[0].params[0].value = VtValue(true);
+        UsdGenCompileResult const recompiled = compiler.Recompile(rest, &graph);
+        Check(recompiled.ok &&
+                  graph.Node(graph.NodeIdForPath(rest.terminal)).space ==
+                      UsdGenSpace::Inherit &&
+                  recompiled.rebuilt.size() == 1,
+              "C3 CurveSource useRest edit changes resolved space and rebuilds node");
+
+        UsdGenGraphDesc contradictory = MakeC3SourceSpaceDesc(
+            false, TfToken("rest"));
+        UsdGenCompileResult const rejected = compiler.Compile(contradictory, &graph);
+        Check(!rejected.ok && rejected.errors.size() == 1 &&
+                  rejected.errors.front() ==
+                      "UsdGenCompiler: CurveSource '/c3Space/source' with useRest=false "
+                      "cannot use space=rest; use space=auto or deformed",
+              "C3 CurveSource rejects explicit rest space for posed points");
+    }
 
     std::printf(g_failures ? "testUsdGenGraph: FAILED (%d)\n"
                            : "testUsdGenGraph: PASS (E-6)\n",

@@ -61,6 +61,11 @@ struct UsdGenStats
     uint64_t noticeEntries = 0;
     uint64_t recompiles = 0;
     uint64_t evictions = 0;
+    uint64_t executionCacheHits = 0;
+    uint64_t executionCacheMisses = 0;
+    uint64_t executionCacheAdmissions = 0;
+    uint64_t executionCacheAdmissionFailures = 0;
+    uint64_t executionCacheCoalesced = 0;
     uint64_t motionSamples = 0;
     uint64_t supersessions = 0;
     std::array<UsdGenCommitTiming, 120> ring;

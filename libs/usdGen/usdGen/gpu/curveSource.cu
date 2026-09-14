@@ -67,19 +67,73 @@ CurveSourceStatus CudaCurveSource::Storage::waitOn(cudaStream_t stream) const {
     return CudaStatus(error);
 }
 
+void CudaCurveSource::Storage::quarantine() noexcept {
+    points.quarantine();
+    restPoints.quarantine();
+    widths.quarantine();
+    hairT.quarantine();
+    offsets.quarantine();
+    stableIds.quarantine();
+    rootPrim.quarantine();
+    rootUV.quarantine();
+}
+
+void CudaCurveSource::Storage::ReclassifyPublishedGeneration() noexcept {
+    points.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    restPoints.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    widths.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    hairT.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    offsets.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    stableIds.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    rootPrim.Reclassify(UsdGenExecutionResourceKind::Pinned);
+    rootUV.Reclassify(UsdGenExecutionResourceKind::Pinned);
+}
+
+size_t CudaCurveSource::Storage::RetainedBytes() const noexcept {
+    size_t total = 0;
+    auto add = [&total](size_t bytes) {
+        if (bytes > std::numeric_limits<size_t>::max() - total)
+            total = std::numeric_limits<size_t>::max();
+        else total += bytes;
+    };
+    add(points.bytes()); add(restPoints.bytes()); add(widths.bytes());
+    add(hairT.bytes()); add(offsets.bytes()); add(stableIds.bytes());
+    add(rootPrim.bytes()); add(rootUV.bytes());
+    return total;
+}
+
 CudaCurveSource::~CudaCurveSource() {
-    // DeviceBuffer::release calls cudaFree/cudaEventDestroy without retaining
-    // a device id.  Select the device that owns this source before destroying
-    // either active or failed/pending allocations; otherwise destruction on a
-    // thread whose current device changed can release through the wrong CUDA
-    // context.  Move-assigning empty storage makes the members empty before
-    // the destructor restores the caller's device.
+    // A failed upload/terminal proof leaves stream ownership unknowable.  In
+    // that state do not query, wait, free, or destroy its CUDA objects: the
+    // allocation permits deliberately remain charged for context teardown.
+    if (unprovenUpload_) {
+        active_.quarantine();
+        pendingStorage_.quarantine();
+        ready_ = nullptr;
+        return;
+    }
+    // DeviceBuffer::release needs the owning CUDA device.  Prove the source
+    // producer event before ordinary destruction; any failed proof becomes
+    // conservative quarantine.  Published consumer fences are retired by
+    // SourceOwner before this owner reaches its retirement payload.  Waiting
+    // for them again here can deadlock a relay gate on the default stream.
+    const bool owns = active_.points.size() || active_.offsets.size() ||
+        pendingStorage_.points.size() || pendingStorage_.offsets.size() || ready_;
     int previous = -1;
-    cudaGetDevice(&previous);
-    const bool selected = deviceIndex_ >= 0 &&
-        cudaSetDevice(deviceIndex_) == cudaSuccess;
+    const bool selected = !owns ||
+        (cudaGetDevice(&previous) == cudaSuccess && deviceIndex_ >= 0 &&
+         cudaSetDevice(deviceIndex_) == cudaSuccess);
+    const bool producerFinished = !owns ||
+        (selected && (!ready_ || cudaEventSynchronize(ready_) == cudaSuccess));
+    if (!selected || !producerFinished) {
+        active_.quarantine();
+        pendingStorage_.quarantine();
+        ready_ = nullptr;
+        if (selected && previous >= 0 && previous != deviceIndex_)
+            cudaSetDevice(previous);
+        return;
+    }
     if (ready_) {
-        cudaEventSynchronize(ready_);
         cudaEventDestroy(ready_);
         ready_ = nullptr;
     }
@@ -237,18 +291,25 @@ CurveSourceStatus CudaCurveSource::validate(
     return CurveSourceStatus::Ok;
 }
 
-CurveSourceStatus CudaCurveSource::copyPending(cudaStream_t stream) {
+CurveSourceStatus CudaCurveSource::copyPending(
+    cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation) {
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess)
         return CurveSourceStatus::CudaError;
-    if (pendingStorage_.points.reset(pendingPointCount_) != cudaSuccess ||
-        pendingStorage_.restPoints.reset(pendingPointCount_) != cudaSuccess ||
-        pendingStorage_.widths.reset(pendingPointCount_) != cudaSuccess ||
-        pendingStorage_.hairT.reset(pendingPointCount_) != cudaSuccess ||
-        pendingStorage_.offsets.reset(pendingCurveCount_ + 1) != cudaSuccess ||
-        pendingStorage_.stableIds.reset(pendingCurveCount_) != cudaSuccess ||
-        pendingStorage_.rootPrim.reset(pendingRootPrim_.size()) != cudaSuccess ||
-        pendingStorage_.rootUV.reset(pendingRootUV_.size() * sizeof(float2)) != cudaSuccess)
+    constexpr auto active = UsdGenExecutionResourceKind::Active;
+    if (pendingStorage_.points.reset(pendingPointCount_, reservation, active) != cudaSuccess ||
+        pendingStorage_.restPoints.reset(pendingPointCount_, reservation, active) != cudaSuccess ||
+        pendingStorage_.widths.reset(pendingPointCount_, reservation, active) != cudaSuccess ||
+        pendingStorage_.hairT.reset(pendingPointCount_, reservation, active) != cudaSuccess ||
+        pendingStorage_.offsets.reset(pendingCurveCount_ + 1, reservation, active) != cudaSuccess ||
+        pendingStorage_.stableIds.reset(pendingCurveCount_, reservation, active) != cudaSuccess ||
+        pendingStorage_.rootPrim.reset(pendingRootPrim_.size(), reservation, active) != cudaSuccess ||
+        pendingStorage_.rootUV.reset(pendingRootUV_.size() * sizeof(float2), reservation, active) != cudaSuccess) {
+        // No upload has been submitted yet.  Release any sequentially
+        // allocated partial storage and reset host candidate bookkeeping so
+        // this object cannot look publishable with stale Active permits.
+        DiscardPendingCandidate();
         return CurveSourceStatus::CudaError;
+    }
     auto copy = [stream](void *dst, const void *src, size_t bytes) {
         return bytes == 0 ? cudaSuccess : cudaMemcpyAsync(
             dst, src, bytes, cudaMemcpyHostToDevice, stream);
@@ -270,18 +331,45 @@ CurveSourceStatus CudaCurveSource::copyPending(cudaStream_t stream) {
     if (error == cudaSuccess) error = copy(pendingStorage_.rootUV.data(), pendingRootUV_.data(),
                                            pendingRootUV_.size() * sizeof(float2));
     if (error != cudaSuccess) {
-        cudaStreamSynchronize(stream);
+        // Some earlier copies can already be queued.  A failed cleanup fence
+        // is not permission to destroy their device buffers or host staging.
+        if (cudaStreamSynchronize(stream) != cudaSuccess)
+            MarkUnprovenUpload();
+        else
+            DiscardPendingCandidate();
         return CurveSourceStatus::CudaError;
     }
     if (cudaEventRecord(ready_, stream) != cudaSuccess) {
-        cudaStreamSynchronize(stream);
+        // The copies preceding a failed event record still need a terminal
+        // proof before ordinary source destruction is safe.
+        if (cudaStreamSynchronize(stream) != cudaSuccess)
+            MarkUnprovenUpload();
+        else
+            DiscardPendingCandidate();
         return CurveSourceStatus::CudaError;
     }
     pending_ = true;
     return CurveSourceStatus::Ok;
 }
 
-CurveSourceStatus CudaCurveSource::Set(CurveSourceInput input, cudaStream_t stream) {
+void CudaCurveSource::DiscardPendingCandidate() noexcept {
+    pendingStorage_ = Storage{};
+    pendingPoints_.clear();
+    pendingRestPoints_.clear();
+    pendingWidths_.clear();
+    pendingHairT_.clear();
+    pendingOffsets_.clear();
+    pendingStableIds_.clear();
+    pendingRootPrim_.clear();
+    pendingRootUV_.clear();
+    pendingCurveCount_ = pendingPointCount_ = 0;
+    pendingWarningFlags_ = CurveSourceWarningNone;
+    pending_ = false;
+}
+
+CurveSourceStatus CudaCurveSource::Set(
+    CurveSourceInput input, cudaStream_t stream,
+    UsdGenExecutionMemoryReservation* reservation) {
     int current = -1;
     if (cudaGetDevice(&current) != cudaSuccess)
         return CurveSourceStatus::CudaError;
@@ -297,6 +385,9 @@ CurveSourceStatus CudaCurveSource::Set(CurveSourceInput input, cudaStream_t stre
     if (stream && streamDevice != deviceIndex_)
         return CurveSourceStatus::InvalidArgument;
     if (pending_) return CurveSourceStatus::InvalidArgument;
+    // A caller which saw an unproven CUDA failure must quarantine rather than
+    // attempting to reuse the source on an unknown stream state.
+    if (unprovenUpload_) return CurveSourceStatus::CudaError;
     std::vector<float3> points, restPoints;
     std::vector<float> widths, hairT;
     std::vector<uint32_t> offsets;
@@ -325,19 +416,80 @@ CurveSourceStatus CudaCurveSource::Set(CurveSourceInput input, cudaStream_t stre
     pendingCurveCount_ = input.curveVertexCounts.size;
     pendingPointCount_ = pendingPoints_.size();
     pendingWarningFlags_ = warningFlags;
-    return copyPending(stream);
+    return copyPending(stream, reservation);
 }
 
 CurveSourceStatus CudaCurveSource::Finish(cudaStream_t stream) {
     if (!pending_) return CurveSourceStatus::NoPendingUpdate;
     CurveSourceStatus streamStatus = validateStream(stream);
-    if (streamStatus != CurveSourceStatus::Ok) return streamStatus;
+    if (streamStatus != CurveSourceStatus::Ok) {
+        MarkUnprovenUpload();
+        return streamStatus;
+    }
     if (cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess ||
-        cudaStreamSynchronize(stream) != cudaSuccess)
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+        MarkUnprovenUpload();
         return CurveSourceStatus::CudaError;
+    }
     CurveSourceStatus status = active_.waitOn(stream);
-    if (status != CurveSourceStatus::Ok || cudaStreamSynchronize(stream) != cudaSuccess)
+    if (status != CurveSourceStatus::Ok || cudaStreamSynchronize(stream) != cudaSuccess) {
+        MarkUnprovenUpload();
         return CurveSourceStatus::CudaError;
+    }
+    // A legacy Finish on the valid source stream has now proven both this
+    // pending upload and the prior active consumer fence.  An earlier async
+    // capture/arm rejection is therefore no longer a reason to refuse the
+    // otherwise established synchronous replacement contract.
+    unprovenUpload_ = false;
+    return CommitPending();
+}
+
+CurveSourceStatus CudaCurveSource::FinishFreshAsync(cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata) {
+    if (!pending_ || !callback) return CurveSourceStatus::NoPendingUpdate;
+    // This is deliberately a fresh producer path: replacing an active source
+    // requires its consumer-use fence and remains the legacy Finish contract.
+    if (generation_ != 0 || curveCount_ != 0 || pointCount_ != 0)
+        return CurveSourceStatus::InvalidArgument;
+    // Capture detection must be the first CUDA query. In particular,
+    // cudaStreamGetDevice is not capture-safe on every supported runtime and
+    // can turn a clean rejection into a failed/invalidated capture.
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) {
+        // Set has already enqueued the upload.  The caller must retain it
+        // rather than treating capture rejection as a synchronous rollback.
+        MarkUnprovenUpload();
+        return CurveSourceStatus::InvalidArgument;
+    }
+    CurveSourceStatus streamStatus = validateStream(stream);
+    if (streamStatus != CurveSourceStatus::Ok) {
+        MarkUnprovenUpload();
+        return streamStatus;
+    }
+    if (cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess) {
+        MarkUnprovenUpload();
+        return CurveSourceStatus::CudaError;
+    }
+    if (cudaStreamAddCallback(stream, callback, userdata, 0) != cudaSuccess) {
+        MarkUnprovenUpload();
+        return CurveSourceStatus::CudaError;
+    }
+    return CurveSourceStatus::Ok;
+}
+
+CurveSourceStatus CudaCurveSource::CommitFreshFinish() {
+    if (!pending_) return CurveSourceStatus::NoPendingUpdate;
+    // This callback path is only safe for a newly-created source.  Legacy
+    // replacement must retain its active-consumer fence in Finish.
+    if (unprovenUpload_ || generation_ != 0 || curveCount_ != 0 || pointCount_ != 0)
+        return CurveSourceStatus::InvalidArgument;
+    return CommitPending();
+}
+
+CurveSourceStatus CudaCurveSource::CommitPending() {
+    if (!pending_) return CurveSourceStatus::NoPendingUpdate;
+    if (unprovenUpload_) return CurveSourceStatus::CudaError;
     active_ = std::move(pendingStorage_);
     curveCount_ = pendingCurveCount_;
     pointCount_ = pendingPointCount_;
@@ -351,6 +503,7 @@ CurveSourceStatus CudaCurveSource::Finish(cudaStream_t stream) {
     pendingRootUV_.clear();
     pendingCurveCount_ = pendingPointCount_ = 0;
     pending_ = false;
+    unprovenUpload_ = false;
     warningFlags_ = pendingWarningFlags_;
     pendingWarningFlags_ = CurveSourceWarningNone;
     ++generation_;
@@ -384,6 +537,16 @@ DeviceView<const int32_t> CudaCurveSource::rootPrim() const {
 DeviceView<const float2> CudaCurveSource::rootUV() const {
     return {reinterpret_cast<const float2 *>(active_.rootUV.data()),
             active_.rootUV.size() / sizeof(float2)};
+}
+
+void CudaCurveSource::ReclassifyPublishedGeneration() noexcept {
+    // active_ is the only storage retained by a completed source.  The host
+    // pending vectors and pendingStorage_ are intentionally not reclassified.
+    active_.ReclassifyPublishedGeneration();
+}
+
+size_t CudaCurveSource::ExclusiveRetainedBytes() const noexcept {
+    return active_.RetainedBytes();
 }
 
 } // namespace usdGen::gpu

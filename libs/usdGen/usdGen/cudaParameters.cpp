@@ -15,13 +15,18 @@
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/gf/vec4i.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <set>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 namespace usdGen {
 namespace {
+std::atomic<bool> s_failNextFreshProgramAllocation{false};
+std::atomic<bool> s_failNextGroomScalarReadbackAllocation{false};
+std::atomic<bool> s_failNextGroomScalarReadbackCopyAfterOne{false};
 using Type = expr::ScalarType;
 using Domain = expr::Domain;
 
@@ -111,6 +116,12 @@ bool Literal(VtValue const& value, expr::ValueShape const& shape,
 size_t DomainIndex(Domain domain) {
     return domain == Domain::Groom ? 0 : domain == Domain::Primitive ? 1 : 2;
 }
+bool EstimateAdd(uint64_t* total, uint64_t value) {
+    return UsdGenExecutionCheckedBytes::Add(total, value);
+}
+bool EstimateMultiply(uint64_t count, uint64_t bytes, uint64_t* result) {
+    return UsdGenExecutionCheckedBytes::Multiply(count, bytes, result);
+}
 } // namespace
 
 CudaParameterField const* CudaParameterEvaluator::Find(TfToken const& destination) const {
@@ -119,6 +130,20 @@ CudaParameterField const* CudaParameterEvaluator::Find(TfToken const& destinatio
         if (CanonicalName(field.destination) == canonical) return &field;
     return nullptr;
 }
+
+struct CudaParameterEvaluator::FreshCandidate {
+    std::shared_ptr<const CudaParameterProgram> program;
+    std::array<std::unique_ptr<gpu::CudaExpressionContext>, 3> contexts;
+    std::vector<gpu::DeviceBuffer<double>> literals;
+    std::vector<gpu::DeviceBuffer<unsigned char>> outputs;
+    std::vector<std::unique_ptr<gpu::CudaExpressionProgram>> runtime;
+    std::vector<CudaParameterField> fields;
+    // Context and program allocations form one candidate; retain the caller's
+    // explicit credit source so a later phase cannot accidentally fall back
+    // to an unrelated exact permit.
+    UsdGenExecutionMemoryReservation* reservation = nullptr;
+    UsdGenExecutionResourceKind kind = UsdGenExecutionResourceKind::Cache;
+};
 
 CudaParameterStatus CudaParameterProgram::Compile(
     UsdGenGraphDesc const& graph, UsdGenNodeDesc const& node,
@@ -186,10 +211,69 @@ CudaParameterStatus CudaParameterProgram::Compile(
     return CudaParameterStatus::Ok;
 }
 
+bool CudaParameterProgram::EstimateFreshCandidateBytes(
+    CudaParameterGeometryMemoryShape const& shape, uint64_t* result) const noexcept {
+    if (!result) return false;
+    uint64_t total = 0;
+    std::array<bool, 3> domains{};
+    for (auto const& item : items_)
+        domains[DomainIndex(item.binding.domain)] = true;
+    auto context = [&](Domain domain) {
+        uint64_t bytes = 0, n = 1, fieldDoubles = 0, value = 0;
+        if (domain == Domain::Groom)
+            return EstimateAdd(&total, 2 * sizeof(int)); // device + pinned status
+        n = domain == Domain::Primitive ? shape.curveCount : shape.pointCount;
+        // P and RootP are always materialized. PRef/RootPRef are materialized
+        // only when the actual geometry has a rest channel.
+        fieldDoubles = shape.hasRestPoints ? 12 : 6;
+        // Scalar field set exactly mirrors CudaExpressionContext::BuildImpl.
+        fieldDoubles += domain == Domain::Primitive ? 7 : 9;
+        if (shape.hasWidths) ++fieldDoubles;
+        if (shape.hasRootUV) fieldDoubles += 2;
+        return EstimateMultiply(n, fieldDoubles * sizeof(double), &value) &&
+            EstimateAdd(&bytes, value) &&
+            // owners + arc are allocated for each non-groom context.
+            EstimateMultiply(shape.pointCount, sizeof(uint32_t) + sizeof(double), &value) &&
+            EstimateAdd(&bytes, value) && EstimateAdd(&bytes, 2 * sizeof(int)) &&
+            EstimateAdd(&total, bytes);
+    };
+    for (size_t i = 0; i != domains.size(); ++i) if (domains[i]) {
+        Domain const domain = i == 0 ? Domain::Groom :
+            i == 1 ? Domain::Primitive : Domain::Point;
+        if (!context(domain)) return false;
+    }
+    for (auto const& item : items_) {
+        uint64_t count = item.binding.domain == Domain::Groom ? 1 :
+            item.binding.domain == Domain::Primitive ? shape.curveCount : shape.pointCount;
+        uint64_t literal = 0, output = 0, code = 0, value = 0;
+        size_t const scalar = ScalarBytes(item.binding.destinationShape.scalar);
+        if (!scalar || !EstimateMultiply(item.binding.destinationShape.components,
+                sizeof(double), &literal) ||
+            !EstimateMultiply(count, scalar, &value) ||
+            !EstimateMultiply(value, item.binding.destinationShape.components, &output) ||
+            !EstimateMultiply(item.ir.instructions.size(), sizeof(expr::IRInstruction), &code) ||
+            // device + pinned IR and device + pinned error status.
+            !EstimateMultiply(code, 2, &code) ||
+            !EstimateAdd(&code, 2 * sizeof(int)) ||
+            !EstimateAdd(&total, literal) || !EstimateAdd(&total, output) ||
+            !EstimateAdd(&total, code)) return false;
+    }
+    *result = total;
+    return true;
+}
+
 CudaParameterStatus CudaParameterEvaluator::Evaluate(
     CudaParameterProgram const& program,
     gpu::DeviceCurveGeometryView geometry, gpu::ExpressionGeometryChannels channels,
-    expr::Context controls, cudaStream_t stream, std::vector<std::string>* diagnostics) {
+    expr::Context controls, cudaStream_t stream, std::vector<std::string>* diagnostics,
+    UsdGenExecutionMemoryReservation* reservation, UsdGenExecutionResourceKind kind) {
+    if (freshPhase_ != FreshPhase::Idle || HasUnprovenWork())
+        return CudaParameterStatus::InvalidArgument;
+    // A legacy evaluation replaces the published field set synchronously.
+    // Fresh candidates are all proven whenever the phase is Idle.
+    fresh_.reset();
+    freshPublished_.reset();
+    freshRetired_.reset();
     fields_.clear();
     // A preceding successful Evaluate finished every GPU reader. No published
     // field survives the next invocation; callers must consume fields first.
@@ -204,7 +288,7 @@ CudaParameterStatus CudaParameterEvaluator::Evaluate(
     for (size_t i = 0; i < 3; ++i) if (contexts_[i]) {
         auto context = controls;
         context.domain = i == 0 ? Domain::Groom : i == 1 ? Domain::Primitive : Domain::Point;
-        if (contexts_[i]->Build(geometry, channels, context, stream) != gpu::ExpressionContextStatus::Ok ||
+        if (contexts_[i]->Build(geometry, channels, context, stream, reservation, kind) != gpu::ExpressionContextStatus::Ok ||
             contexts_[i]->Finish(stream) != gpu::ExpressionContextStatus::Ok) {
             Error(diagnostics, "expression geometry context validation failed");
             return CudaParameterStatus::CudaError;
@@ -230,16 +314,16 @@ CudaParameterStatus CudaParameterEvaluator::Evaluate(
         };
         if (inputs.count > std::numeric_limits<size_t>::max() / stride)
             return fail(CudaParameterStatus::InvalidArgument, "output size overflow");
-        if (literals_[i].reset(components) != cudaSuccess ||
+        if (literals_[i].reset(components, reservation, kind) != cudaSuccess ||
             cudaMemcpyAsync(literals_[i].data(), item.literal.data(), components * sizeof(double),
                 cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-            outputs_[i].reset(inputs.count * stride) != cudaSuccess)
+            outputs_[i].reset(inputs.count * stride, reservation, kind) != cudaSuccess)
             return fail(CudaParameterStatus::CudaError, "device allocation/literal upload failed");
         inputs.fields[static_cast<unsigned>(expr::Variable::Value)] =
             {literals_[i].data(), 1, Domain::Groom, static_cast<uint32_t>(components)};
         runtime_.push_back(std::make_unique<gpu::CudaExpressionProgram>());
         auto& program = *runtime_.back();
-        if (program.Upload(item.ir, stream) != gpu::ExpressionStatus::Ok ||
+        if (program.Upload(item.ir, stream, reservation, kind) != gpu::ExpressionStatus::Ok ||
             program.Evaluate(inputs, {outputs_[i].data(), inputs.count,
                 binding.destinationShape.scalar, static_cast<uint32_t>(components)}, stream) != gpu::ExpressionStatus::Ok)
             return fail(CudaParameterStatus::CudaError, "CUDA expression launch failed");
@@ -250,6 +334,459 @@ CudaParameterStatus CudaParameterEvaluator::Evaluate(
     }
     fields_ = std::move(candidate);
     return CudaParameterStatus::Ok;
+}
+
+CudaParameterEvaluator::CudaParameterEvaluator() = default;
+
+CudaParameterEvaluator::~CudaParameterEvaluator() {
+    if (HasUnprovenWork()) AbandonFresh();
+}
+
+void CudaParameterEvaluator::ResetFreshProven() noexcept {
+    // This is called only after every child has accepted terminal proof.  It
+    // is consequently safe for the candidate's CUDA-owning destructors to
+    // run, including contexts retained for program input lifetime.
+    fresh_.reset();
+    freshPhase_ = FreshPhase::Idle;
+    freshDevice_ = -1;
+    freshSubmitted_ = false;
+}
+
+void CudaParameterEvaluator::AbandonFresh() noexcept {
+    // The candidate was allocated before BuildFresh / the first literal copy.
+    // Releasing it is intentionally permanent: it retains the immutable host
+    // program (pageable literal source), contexts, programs, and buffers
+    // without allocating or invoking a CUDA-owning destructor after proof is
+    // missing.  Lower-level objects quarantine their own buffers on teardown.
+    (void)fresh_.release();
+    freshPhase_ = FreshPhase::Failed;
+}
+
+bool CudaParameterEvaluator::HasUnprovenWork() const noexcept {
+    if (freshSubmitted_) return true;
+    if (!fresh_) return false;
+    for (auto const& context : fresh_->contexts)
+        if (context && context->HasUnprovenWork()) return true;
+    for (auto const& program : fresh_->runtime)
+        if (program && program->HasUnprovenWork()) return true;
+    return false;
+}
+
+bool CudaParameterEvaluator::DiscardFreshProven() noexcept {
+    if (freshPhase_ != FreshPhase::ContextCommitted || HasUnprovenWork() ||
+        !fresh_ || freshRetired_) return false;
+    // This is host-only: the proven candidate is parked until the next Begin
+    // launcher disposes the one bounded retired candidate.
+    freshRetired_ = std::move(fresh_);
+    freshPhase_ = FreshPhase::Idle;
+    freshDevice_ = -1;
+    freshSubmitted_ = false;
+    return true;
+}
+
+void failNextCudaParameterFreshProgramAllocationForTesting() {
+    s_failNextFreshProgramAllocation.store(true, std::memory_order_release);
+}
+
+CudaParameterStatus CudaParameterEvaluator::BeginFreshContexts(
+    std::shared_ptr<const CudaParameterProgram> program,
+    gpu::DeviceCurveGeometryView geometry, gpu::ExpressionGeometryChannels channels,
+    expr::Context controls, cudaStream_t stream, std::vector<std::string>* diagnostics,
+    UsdGenExecutionMemoryReservation* reservation, UsdGenExecutionResourceKind kind) {
+    if (!program || freshPhase_ != FreshPhase::Idle || fresh_ || HasUnprovenWork())
+        return CudaParameterStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    int current = -1, streamDevice = -1;
+    // Capture must be rejected before device/stream queries or allocation,
+    // including for an empty binding program.
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess)
+        return CudaParameterStatus::CudaError;
+    if (capture != cudaStreamCaptureStatusNone)
+        return CudaParameterStatus::InvalidArgument;
+    if (cudaGetDevice(&current) != cudaSuccess ||
+        (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess))
+        return CudaParameterStatus::CudaError;
+    if (stream && streamDevice != current)
+        return CudaParameterStatus::InvalidArgument;
+    try {
+        // Completion never destructs CUDA storage.  This is the next launcher,
+        // before any new submission, so dispose the one bounded retired
+        // candidate left by a prior proven completion.
+        freshRetired_.reset();
+        fresh_ = std::make_unique<FreshCandidate>();
+        fresh_->program = std::move(program);
+        fresh_->reservation = reservation;
+        fresh_->kind = kind;
+        freshDevice_ = current;
+        for (auto const& item : fresh_->program->items_) {
+            auto const index = DomainIndex(item.binding.domain);
+            if (!fresh_->contexts[index]) fresh_->contexts[index] = std::make_unique<gpu::CudaExpressionContext>();
+        }
+        for (size_t i = 0; i != fresh_->contexts.size(); ++i) if (fresh_->contexts[i]) {
+            auto context = controls;
+            context.domain = i == 0 ? Domain::Groom : i == 1 ? Domain::Primitive : Domain::Point;
+            auto status = fresh_->contexts[i]->BuildFresh(geometry, channels, context, stream,
+                reservation, kind);
+            if (status != gpu::ExpressionContextStatus::Ok) {
+                if (diagnostics) diagnostics->push_back("fresh expression geometry context validation failed");
+                if (HasUnprovenWork()) freshPhase_ = FreshPhase::Failed;
+                else ResetFreshProven();
+                return status == gpu::ExpressionContextStatus::InvalidArgument ||
+                               status == gpu::ExpressionContextStatus::InvalidGeometry ||
+                               status == gpu::ExpressionContextStatus::InvalidChannel
+                    ? CudaParameterStatus::InvalidArgument : CudaParameterStatus::CudaError;
+            }
+        }
+        freshPhase_ = FreshPhase::ContextBuilt;
+        return CudaParameterStatus::Ok;
+    } catch (...) {
+        if (HasUnprovenWork()) freshPhase_ = FreshPhase::Failed;
+        else ResetFreshProven();
+        return CudaParameterStatus::CudaError;
+    }
+}
+
+CudaParameterStatus CudaParameterEvaluator::EnqueueFreshContextStatus(cudaStream_t stream) {
+    if (freshPhase_ != FreshPhase::ContextBuilt) return CudaParameterStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    int current = -1, streamDevice = -1;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess)
+        return CudaParameterStatus::CudaError;
+    if (capture != cudaStreamCaptureStatusNone)
+        return CudaParameterStatus::InvalidArgument;
+    if (cudaGetDevice(&current) != cudaSuccess ||
+        (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess))
+        return CudaParameterStatus::CudaError;
+    if (current != freshDevice_ || (stream && streamDevice != current))
+        return CudaParameterStatus::InvalidArgument;
+    for (auto const& context : fresh_->contexts) if (context &&
+        context->EnqueueFreshStatus(stream) != gpu::ExpressionContextStatus::Ok)
+        { freshPhase_ = FreshPhase::Failed; return CudaParameterStatus::CudaError; }
+    freshPhase_ = FreshPhase::ContextStatus;
+    return CudaParameterStatus::Ok;
+}
+
+CudaParameterStatus CudaParameterEvaluator::CommitFreshContexts() {
+    if (freshPhase_ != FreshPhase::ContextStatus) return CudaParameterStatus::InvalidArgument;
+    CudaParameterStatus result = CudaParameterStatus::Ok;
+    for (auto const& context : fresh_->contexts) if (context) {
+        auto status = context->CommitFreshFinish();
+        if (status != gpu::ExpressionContextStatus::Ok && result == CudaParameterStatus::Ok)
+            result = status == gpu::ExpressionContextStatus::InvalidArgument ||
+                     status == gpu::ExpressionContextStatus::InvalidGeometry ||
+                     status == gpu::ExpressionContextStatus::InvalidChannel
+                ? CudaParameterStatus::InvalidArgument : CudaParameterStatus::InvalidValue;
+    }
+    if (HasUnprovenWork()) { freshPhase_ = FreshPhase::Failed; return CudaParameterStatus::CudaError; }
+    freshSubmitted_ = false;
+    if (result != CudaParameterStatus::Ok) {
+        // Host-only completion: park the proven rejected candidate for the
+        // next launcher rather than running context destructors here.
+        if (freshRetired_) { freshPhase_ = FreshPhase::Failed; return CudaParameterStatus::CudaError; }
+        freshRetired_ = std::move(fresh_);
+        freshPhase_ = FreshPhase::Idle;
+        freshDevice_ = -1;
+        return result;
+    }
+    freshPhase_ = FreshPhase::ContextCommitted;
+    return CudaParameterStatus::Ok;
+}
+
+CudaParameterStatus CudaParameterEvaluator::BeginFreshPrograms(
+    cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation,
+    UsdGenExecutionResourceKind kind) {
+    if (freshPhase_ != FreshPhase::ContextCommitted || !fresh_ || !fresh_->program)
+        return CudaParameterStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    int current = -1, streamDevice = -1;
+    // Do this before candidate allocation or the pageable literal upload.
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess)
+        return CudaParameterStatus::CudaError;
+    if (capture != cudaStreamCaptureStatusNone)
+        return CudaParameterStatus::InvalidArgument;
+    if (cudaGetDevice(&current) != cudaSuccess ||
+        (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess))
+        return CudaParameterStatus::CudaError;
+    if (current != freshDevice_ || (stream && streamDevice != current))
+        return CudaParameterStatus::InvalidArgument;
+    if (!reservation) {
+        reservation = fresh_->reservation;
+        kind = fresh_->kind;
+    } else if (reservation != fresh_->reservation || kind != fresh_->kind) {
+        return CudaParameterStatus::InvalidArgument;
+    }
+    // Test seam: deliberately fail before the candidate allocation loop and
+    // therefore before any literal H2D submission.
+    if (s_failNextFreshProgramAllocation.exchange(false, std::memory_order_acq_rel))
+        return CudaParameterStatus::CudaError;
+    try {
+        size_t const count = fresh_->program->items_.size();
+        fresh_->literals.resize(count); fresh_->outputs.resize(count); fresh_->runtime.resize(count);
+        fresh_->fields.clear(); fresh_->fields.reserve(count);
+        // Allocate every candidate buffer before the first literal/upload/evaluate submission.
+        for (size_t i = 0; i != count; ++i) {
+            auto const& item = fresh_->program->items_[i];
+            auto const& inputs = fresh_->contexts[DomainIndex(item.binding.domain)]->Inputs();
+            size_t const components = item.binding.destinationShape.components;
+            size_t const stride = ScalarBytes(item.binding.destinationShape.scalar) * components;
+            if (!stride || inputs.count > std::numeric_limits<size_t>::max() / stride) {
+                fresh_->runtime.clear(); fresh_->outputs.clear(); fresh_->literals.clear(); fresh_->fields.clear();
+                return CudaParameterStatus::InvalidArgument;
+            }
+            if (fresh_->literals[i].reset(components, reservation, kind) != cudaSuccess ||
+                fresh_->outputs[i].reset(inputs.count * stride, reservation, kind) != cudaSuccess) {
+                fresh_->runtime.clear(); fresh_->outputs.clear(); fresh_->literals.clear(); fresh_->fields.clear();
+                return CudaParameterStatus::CudaError;
+            }
+            fresh_->runtime[i] = std::make_unique<gpu::CudaExpressionProgram>();
+        }
+        // This is deliberately before the first pageable H2D: a failure after
+        // that point must retain the immutable program and all candidate
+        // storage until aggregate terminal proof, even if UploadFresh fails.
+        if (count) freshSubmitted_ = true;
+        for (size_t i = 0; i != count; ++i) {
+            auto const& item = fresh_->program->items_[i];
+            auto inputs = fresh_->contexts[DomainIndex(item.binding.domain)]->Inputs();
+            size_t const components = item.binding.destinationShape.components;
+            if (cudaMemcpyAsync(fresh_->literals[i].data(), item.literal.data(), components * sizeof(double),
+                cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+                fresh_->runtime[i]->UploadFresh(item.ir, stream, reservation, kind) != gpu::ExpressionStatus::Ok) {
+                freshPhase_ = FreshPhase::Failed;
+                return CudaParameterStatus::CudaError;
+            }
+            inputs.fields[static_cast<unsigned>(expr::Variable::Value)] =
+                {fresh_->literals[i].data(), 1, Domain::Groom, static_cast<uint32_t>(components)};
+            if (fresh_->runtime[i]->EvaluateFresh(inputs, {fresh_->outputs[i].data(), inputs.count,
+                    item.binding.destinationShape.scalar, static_cast<uint32_t>(components)}, stream) != gpu::ExpressionStatus::Ok) {
+                freshPhase_ = FreshPhase::Failed;
+                return CudaParameterStatus::CudaError;
+            }
+            fresh_->fields.push_back({item.binding.destination, fresh_->outputs[i].data(), inputs.count,
+                item.binding.destinationShape.scalar, static_cast<uint32_t>(components), item.binding.domain});
+        }
+        freshPhase_ = FreshPhase::ProgramsBuilt;
+        return CudaParameterStatus::Ok;
+    } catch (...) {
+        if (freshSubmitted_ || HasUnprovenWork()) freshPhase_ = FreshPhase::Failed;
+        else {
+            fresh_->runtime.clear(); fresh_->outputs.clear(); fresh_->literals.clear(); fresh_->fields.clear();
+        }
+        return CudaParameterStatus::CudaError;
+    }
+}
+
+CudaParameterStatus CudaParameterEvaluator::EnqueueFreshProgramStatus(cudaStream_t stream) {
+    if (freshPhase_ != FreshPhase::ProgramsBuilt) return CudaParameterStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    int current = -1, streamDevice = -1;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess)
+        return CudaParameterStatus::CudaError;
+    if (capture != cudaStreamCaptureStatusNone)
+        return CudaParameterStatus::InvalidArgument;
+    if (cudaGetDevice(&current) != cudaSuccess ||
+        (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess))
+        return CudaParameterStatus::CudaError;
+    if (current != freshDevice_ || (stream && streamDevice != current))
+        return CudaParameterStatus::InvalidArgument;
+    for (auto const& program : fresh_->runtime)
+        if (program->EnqueueFreshStatus(stream) != gpu::ExpressionStatus::Ok) {
+            freshPhase_ = FreshPhase::Failed;
+            return CudaParameterStatus::CudaError;
+        }
+    freshPhase_ = FreshPhase::ProgramStatus;
+    return CudaParameterStatus::Ok;
+}
+
+CudaParameterStatus CudaParameterEvaluator::CommitFreshPrograms() {
+    if (freshPhase_ != FreshPhase::ProgramStatus) return CudaParameterStatus::InvalidArgument;
+    CudaParameterStatus result = CudaParameterStatus::Ok;
+    for (auto const& program : fresh_->runtime)
+        if (program->CommitFreshFinish() != gpu::ExpressionStatus::Ok && result == CudaParameterStatus::Ok)
+            result = CudaParameterStatus::InvalidValue;
+    freshSubmitted_ = false;
+    if (HasUnprovenWork()) { freshPhase_ = FreshPhase::Failed; return CudaParameterStatus::CudaError; }
+    if (result == CudaParameterStatus::Ok) {
+        // Fields borrow output buffers, so transfer that candidate ownership
+        // atomically with publication; old published fields remain intact on
+        // any semantic failure above.
+        if (freshRetired_) { freshPhase_ = FreshPhase::Failed; return CudaParameterStatus::CudaError; }
+        freshRetired_ = std::move(freshPublished_);
+        freshPublished_ = std::move(fresh_);
+        fields_ = std::move(freshPublished_->fields);
+        // Contexts only feed the fresh programs; all program proof is now in.
+        freshPhase_ = FreshPhase::Idle;
+        freshDevice_ = -1;
+        return CudaParameterStatus::Ok;
+    }
+    // Semantic failure is proven and does not publish a partial candidate.
+    if (freshRetired_) { freshPhase_ = FreshPhase::Failed; return CudaParameterStatus::CudaError; }
+    freshRetired_ = std::move(fresh_);
+    freshPhase_ = FreshPhase::Idle;
+    freshDevice_ = -1;
+    return result;
+}
+
+CudaGroomScalarReadback::~CudaGroomScalarReadback() {
+    if (unprovenWork_) {
+        pinned_ = nullptr;
+        pinnedPermit_.Abandon();
+        return;
+    }
+    if (!pinned_) return;
+    int previous = -1;
+    const bool gotPrevious = cudaGetDevice(&previous) == cudaSuccess;
+    const bool selected = deviceIndex_ >= 0 && cudaSetDevice(deviceIndex_) == cudaSuccess;
+    if (!selected) {
+        pinned_ = nullptr;
+        pinnedPermit_.Abandon();
+        return;
+    }
+    if (cudaFreeHost(pinned_) == cudaSuccess) pinnedPermit_.Release();
+    else pinnedPermit_.Abandon();
+    pinned_ = nullptr;
+    if (gotPrevious && previous != deviceIndex_) cudaSetDevice(previous);
+}
+
+CudaParameterStatus CudaGroomScalarReadback::BeginFresh(
+    std::vector<CudaParameterField> const& fields,
+    std::vector<CudaGroomScalarRequest> const& requests, cudaStream_t stream,
+    UsdGenExecutionMemoryReservation* reservation) {
+    if (pendingFresh_ || unprovenWork_ || requests.size() > Capacity)
+        return CudaParameterStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess)
+        return CudaParameterStatus::CudaError;
+    if (capture != cudaStreamCaptureStatusNone)
+        return CudaParameterStatus::InvalidArgument;
+    int current = -1, streamDevice = -1;
+    if (cudaGetDevice(&current) != cudaSuccess ||
+        (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess))
+        return CudaParameterStatus::CudaError;
+    if ((stream && streamDevice != current) ||
+        (deviceIndex_ >= 0 && deviceIndex_ != current))
+        return CudaParameterStatus::InvalidArgument;
+
+    std::array<TfToken, Capacity> requestNames{};
+    std::array<void const*, Capacity> sources{};
+    std::array<size_t, Capacity> bytes{};
+    // Validate all request identities independently of field presence. A
+    // missing duplicate must not be silently accepted merely because it has
+    // no D2H copy in this batch.
+    for (size_t requestIndex = 0; requestIndex != requests.size(); ++requestIndex) {
+        auto const& request = requests[requestIndex];
+        const size_t byteCount = ScalarBytes(request.type);
+        if (request.destination.IsEmpty() || !byteCount || byteCount > pending_[0].bytes.size())
+            return CudaParameterStatus::InvalidArgument;
+        const TfToken destination = CanonicalName(request.destination);
+        for (size_t i = 0; i != requestIndex; ++i)
+            if (requestNames[i] == destination)
+                return CudaParameterStatus::InvalidArgument;
+        requestNames[requestIndex] = destination;
+    }
+
+    size_t pendingCount = 0;
+    for (size_t requestIndex = 0; requestIndex != requests.size(); ++requestIndex) {
+        auto const& request = requests[requestIndex];
+        const TfToken& destination = requestNames[requestIndex];
+        const size_t byteCount = ScalarBytes(request.type);
+        CudaParameterField const* field = nullptr;
+        for (auto const& candidate : fields) {
+            if (CanonicalName(candidate.destination) != destination) continue;
+            // Published evaluator fields must be unique. Do not select an
+            // arbitrary duplicate if a malformed caller bypasses that layer.
+            if (field) return CudaParameterStatus::InvalidArgument;
+            field = &candidate;
+        }
+        // Missing controls are intentionally absent from this compact packet;
+        // do not create a stale metadata/null-source hole in its D2H layout.
+        if (!field) continue;
+        if (field->domain != Domain::Groom || field->count != 1 ||
+            field->components != 1 || field->type != request.type || !field->data)
+            return CudaParameterStatus::InvalidArgument;
+        cudaPointerAttributes attributes{};
+        if (cudaPointerGetAttributes(&attributes, field->data) != cudaSuccess ||
+            attributes.type != cudaMemoryTypeDevice || attributes.device != current)
+            return CudaParameterStatus::InvalidArgument;
+        pending_[pendingCount].destination = destination;
+        pending_[pendingCount].type = request.type;
+        pending_[pendingCount].bytes.fill(0);
+        sources[pendingCount] = field->data;
+        bytes[pendingCount] = byteCount;
+        ++pendingCount;
+    }
+
+    if (!pinned_ && pendingCount) {
+        if (s_failNextGroomScalarReadbackAllocation.exchange(false, std::memory_order_acq_rel))
+            return CudaParameterStatus::CudaError;
+        auto permit = gpu::TryReserveCudaExecutionBytes(
+            Capacity * pending_[0].bytes.size(), UsdGenExecutionResourceKind::Scratch,
+            reservation);
+        if (!permit) return CudaParameterStatus::CudaError;
+        unsigned char* allocation = nullptr;
+        cudaError_t const status = cudaHostAlloc(reinterpret_cast<void**>(&allocation),
+            Capacity * pending_[0].bytes.size(), cudaHostAllocDefault);
+        if (status != cudaSuccess) {
+            if (allocation && cudaFreeHost(allocation) != cudaSuccess) permit->Abandon();
+            return CudaParameterStatus::CudaError;
+        }
+        pinned_ = allocation;
+        pinnedPermit_ = std::move(*permit);
+        deviceIndex_ = current;
+    }
+
+    pendingCount_ = pendingCount;
+    pendingFresh_ = true;
+    freshFailed_ = false;
+    if (!pendingCount) return CudaParameterStatus::Ok;
+    unprovenWork_ = true;
+    for (size_t i = 0; i != pendingCount; ++i) {
+        if (i == 1 && s_failNextGroomScalarReadbackCopyAfterOne.exchange(
+                          false, std::memory_order_acq_rel)) {
+            freshFailed_ = true;
+            return CudaParameterStatus::CudaError;
+        }
+        if (cudaMemcpyAsync(pinned_ + i * pending_[0].bytes.size(), sources[i],
+                bytes[i], cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+            freshFailed_ = true;
+            return CudaParameterStatus::CudaError;
+        }
+    }
+    return CudaParameterStatus::Ok;
+}
+
+CudaParameterStatus CudaGroomScalarReadback::CommitFreshFinish() {
+    if (!pendingFresh_) return CudaParameterStatus::InvalidArgument;
+    // Native terminal proof is owned by the parent. A successful Begin keeps
+    // this flag set until this host-only commit; only a latched enqueue error
+    // makes the packet unsafe to inspect.
+    if (freshFailed_) return CudaParameterStatus::CudaError;
+    for (size_t i = 0; i != pendingCount_; ++i) {
+        pending_[i].bytes.fill(0);
+        std::memcpy(pending_[i].bytes.data(), pinned_ + i * pending_[0].bytes.size(),
+                    ScalarBytes(pending_[i].type));
+    }
+    committed_ = pending_;
+    committedCount_ = pendingCount_;
+    pendingCount_ = 0;
+    pendingFresh_ = false;
+    unprovenWork_ = false;
+    freshFailed_ = false;
+    return CudaParameterStatus::Ok;
+}
+
+void failNextCudaGroomScalarReadbackAllocationForTesting() {
+    s_failNextGroomScalarReadbackAllocation.store(true, std::memory_order_release);
+}
+
+void failNextCudaGroomScalarReadbackCopyAfterOneForTesting() {
+    s_failNextGroomScalarReadbackCopyAfterOne.store(true, std::memory_order_release);
+}
+
+CudaGroomScalarValue const* CudaGroomScalarReadback::Find(TfToken const& destination) const {
+    const TfToken canonical = CanonicalName(destination);
+    for (size_t i = 0; i != committedCount_; ++i)
+        if (committed_[i].destination == canonical) return &committed_[i];
+    return nullptr;
 }
 
 CudaParameterStatus CudaParameterPlan::Compile(
@@ -278,14 +815,15 @@ CudaParameterStatus CudaParameterPlan::Compile(
 CudaParameterStatus CudaParameterPlan::Evaluate(
     gpu::DeviceCurveGeometryView geometry, gpu::ExpressionGeometryChannels channels,
     expr::Context controls, cudaStream_t stream,
-    std::vector<std::string>* diagnostics)
+    std::vector<std::string>* diagnostics,
+    UsdGenExecutionMemoryReservation* reservation, UsdGenExecutionResourceKind kind)
 {
     if (!program_ || !evaluator_) {
         Error(diagnostics, "parameter plan has no compiled program");
         return CudaParameterStatus::InvalidArgument;
     }
     return evaluator_->Evaluate(*program_, geometry, channels, controls,
-                                stream, diagnostics);
+                                stream, diagnostics, reservation, kind);
 }
 
 CudaParameterField const* CudaParameterPlan::Find(

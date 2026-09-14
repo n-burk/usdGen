@@ -58,6 +58,12 @@ enum class CudaSourcePreparationStatus {
     DuplicateStableId, StaleEpoch, UnsupportedFeature, AllocationFailure
 };
 
+// Compact a validated source into fresh owners without renumbering stable IDs.
+// Retained IDs may be unordered; duplicates/unknown IDs and malformed channel
+// cardinalities reject transactionally. Empty optional channels stay absent.
+bool CompactCudaSource(CudaSourcePrepared* prepared,
+                       std::vector<uint64_t> const& retainedStableIds);
+
 CudaSourcePreparationStatus PrepareCudaSource(
     CudaSourcePreparationInput const& source,
     CudaSourcePreparationOptions const& options,

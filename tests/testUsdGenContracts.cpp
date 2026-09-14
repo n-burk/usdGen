@@ -222,11 +222,11 @@ int main()
     usdGen::usdGenRegisterM1Operators();
     usdGen::UsdGenGraphDesc routingDesc;
     routingDesc.description = SdfPath("/routing");
-    routingDesc.terminal = SdfPath("/routing/width");
+    routingDesc.terminal = SdfPath("/routing/source");
     usdGen::UsdGenNodeDesc routingNode;
-    routingNode.path = SdfPath("/routing/width");
-    routingNode.type = TfToken("UsdGenWidth");
-    routingNode.params.push_back({TfToken("width"), VtValue(0.02f), false});
+    routingNode.path = SdfPath("/routing/source");
+    routingNode.type = TfToken("UsdGenCurveSource");
+    routingNode.params.push_back({TfToken("resampleTo"), VtValue(4), false});
     routingDesc.nodes.push_back(std::move(routingNode));
     usdGen::UsdGenCompiler routingCompiler;
     std::shared_ptr<const usdGen::UsdGenGraphRoutingSnapshot> retained;
@@ -250,8 +250,8 @@ int main()
             // Recompile into the same graph before destroying it.  The retained
             // snapshot must remain usable after both operations.
             routingDesc.description = SdfPath("/replacement");
-            routingDesc.terminal = SdfPath("/replacement/width");
-            routingDesc.nodes.front().path = SdfPath("/replacement/width");
+            routingDesc.terminal = SdfPath("/replacement/source");
+            routingDesc.nodes.front().path = SdfPath("/replacement/source");
             Check(routingCompiler.Compile(routingDesc, &routingGraph).ok,
                   "mutable graph can be recompiled after snapshot capture");
         }
@@ -261,12 +261,49 @@ int main()
         Check(router.EntryCount() == retainedEntryCount,
               "router rebuild from retained snapshot survives graph destruction");
         usdGen::UsdGenPendingDirty routed;
-        router.Route({{SdfPath("/routing/width"), HdDataSourceLocatorSet(
-            HdDataSourceLocator(TfToken("usdGen")).Append(TfToken("width")))}}, &routed);
+        router.Route({{SdfPath("/routing/source"), HdDataSourceLocatorSet(
+            HdDataSourceLocator(TfToken("usdGen")).Append(TfToken("blend")))}}, &routed);
         Check(!routed.structural && routed.nodeBits.size() == 1 &&
                   routed.nodeBits.begin()->first == retained->nodes.front().id &&
                   routed.nodeBits.begin()->second == usdGen::UsdGenDirtyParameter,
-              "retained router still routes the original width path and value class");
+              "retained router still routes the original source path and value class");
+    }
+
+    // Default-time rest normal data is a live authored binding input, not a
+    // frame-value deformation. It therefore re-captures every consuming
+    // surface-bound node; current primvars:normals stays intentionally out
+    // of this route until a separately specified current-normal feature.
+    usdGen::UsdGenGraphRoutingSnapshot surfaceRouting;
+    surfaceRouting.description = SdfPath("/routing");
+    surfaceRouting.terminal = 37;
+    surfaceRouting.surfacePaths = {SdfPath("/routing/surface")};
+    surfaceRouting.nodes.push_back(usdGen::UsdGenGraphRoutingNode{
+        37, SdfPath("/routing/source"), TfToken("UsdGenCurveSource"), 1,
+        {}, {}, {}, 0, true, {}, {}});
+    router.Rebuild(surfaceRouting);
+    auto const checkRestNormalRoute = [&](TfToken const &leaf,
+                                          char const *what) {
+        usdGen::UsdGenPendingDirty routed;
+        router.Route({{SdfPath("/routing/surface"), HdDataSourceLocatorSet(
+            HdDataSourceLocator(TfToken("usdGen")).Append(TfToken("rest")).Append(leaf))}},
+            &routed);
+        Check(!routed.structural && routed.surfaceBits.empty() &&
+                  routed.nodeBits.size() == 1 &&
+                  routed.nodeBits[37] == usdGen::UsdGenDirtyCapture,
+              what);
+    };
+    checkRestNormalRoute(TfToken("normals"),
+                         "rest normals dirty re-captures surface consumer");
+    checkRestNormalRoute(TfToken("normalsInterpolation"),
+                         "rest normal interpolation dirty re-captures surface consumer");
+    {
+        usdGen::UsdGenPendingDirty routed;
+        router.Route({{SdfPath("/routing/surface"), HdDataSourceLocatorSet(
+            HdDataSourceLocator(TfToken("primvars")).Append(TfToken("normals")).
+                Append(TfToken("primvarValue")))}}, &routed);
+        Check(!routed.structural && routed.nodeBits.empty() &&
+                  routed.surfaceBits.empty(),
+              "current-frame primvars:normals does not re-capture rest binding");
     }
 
     if (g_failures != 0) {

@@ -39,13 +39,33 @@ public:
     /// Highest registered version for a type; -1 when the type is unknown.
     int NewestVersion(TfToken const &type) const;
     bool HasKernel(TfToken const &type, int algorithmVersion) const;
+    /// Read the complete version-resolved static operator contract without
+    /// allocating an operator during graph compilation.  The metadata is
+    /// captured from the registration-time probe, so it is valid only for
+    /// the selected (type, version) entry; version 0 resolves to newest.
+    bool GetOperatorContract(TfToken const &type, int algorithmVersion,
+                             size_t *outGeometryInputArity,
+                             size_t *outReferenceInputArity,
+                             UsdGenRole *outRole) const;
+    /// Read the version-resolved geometry-input contract without allocating
+    /// an operator during graph compilation. Returns false for an unknown
+    /// type/version.
+    bool GetGeometryInputArity(TfToken const &type, int algorithmVersion,
+                               size_t *outArity) const;
 
     /// All registered type names (sorted); used by diagnostics.
     std::vector<TfToken> KnownTypes() const;
 
 private:
     UsdGenOpRegistry();
-    struct Entry { TfToken type; int version; Factory factory; };
+    struct Entry {
+        TfToken type;
+        int version;
+        Factory factory;
+        size_t geometryInputArity;
+        size_t referenceInputArity;
+        UsdGenRole role;
+    };
     std::vector<Entry> _entries;
 };
 
@@ -55,6 +75,8 @@ std::unique_ptr<UsdGenOp> CreateGrowOp();
 std::unique_ptr<UsdGenOp> CreateNoiseOp();
 std::unique_ptr<UsdGenOp> CreateLengthOp();
 std::unique_ptr<UsdGenOp> CreateWidthOp();
+std::unique_ptr<UsdGenOp> CreateWidthBlendOp();
+std::unique_ptr<UsdGenOp> CreateReferenceSourceOp();
 
 /// Compatibility initializer. Built-ins are installed by registry construction;
 /// concurrent compiler calls only obtain that completed immutable initial state.

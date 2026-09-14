@@ -1,5 +1,6 @@
 #include "gpu/curveResample.h"
 
+#include <atomic>
 #include <cmath>
 #include <climits>
 #include <cstdint>
@@ -38,6 +39,16 @@ static DeviceView<const T> Read(DeviceBuffer<T> const& buffer) {
 }
 
 static bool Near(float a, float b) { return std::fabs(a - b) < 1e-5f; }
+
+struct AsyncStatus {
+    std::atomic<int> value{INT_MIN};
+    std::atomic<unsigned> calls{0};
+};
+static void AsyncDone(cudaStream_t, cudaError_t status, void* data) noexcept {
+    auto* result = static_cast<AsyncStatus*>(data);
+    result->value.store(static_cast<int>(status), std::memory_order_release);
+    result->calls.fetch_add(1, std::memory_order_release);
+}
 
 int main() {
     CHECK(cudaSetDevice(0) == cudaSuccess);
@@ -94,6 +105,47 @@ int main() {
         CHECK(Near(uniformHairT[point], expectedHairT[point]));
     }
 
+    // The fresh async path retains its D2H validation result until the native
+    // callback, then commits without another host stream fence.
+    CudaCurveResample fresh;
+    AsyncStatus asyncStatus;
+    CHECK(fresh.ApplyFresh(input, Read(hairT), Read(rootPrim), rootUV, 4, stream) == CurveResampleStatus::Ok);
+    // A zero-initialized pinned status cannot be mistaken for a completed
+    // terminal D2H before a native callback has been installed.
+    CHECK(fresh.CommitFreshFinish() == CurveResampleStatus::NoPendingUpdate);
+    // Legacy entrypoints cannot consume/reuse a fresh operation's staging
+    // before its terminal callback establishes the asynchronous lifetime.
+    CHECK(fresh.Apply(input, Read(hairT), Read(rootPrim), rootUV, 4, stream) == CurveResampleStatus::InvalidArgument);
+    CHECK(fresh.Finish(stream) == CurveResampleStatus::InvalidArgument);
+    CHECK(fresh.FinishFreshAsync(stream, AsyncDone, &asyncStatus) == CurveResampleStatus::Ok);
+    CHECK(fresh.FinishFreshAsync(stream, AsyncDone, &asyncStatus) == CurveResampleStatus::NoPendingUpdate);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(asyncStatus.value.load(std::memory_order_acquire) == cudaSuccess);
+    CHECK(asyncStatus.calls.load(std::memory_order_acquire) == 1);
+    CHECK(fresh.CommitFreshFinish() == CurveResampleStatus::Ok);
+    CHECK(Download(fresh.view().curveOffsets) == std::vector<uint32_t>({0, 4, 8}));
+    CHECK(Near(Download(fresh.view().points)[5].x, 11.0f));
+    // Fresh async submission forbids replacement; legacy active output cannot
+    // be silently discarded by an asynchronous producer.
+    CHECK(fresh.ApplyFresh(input, Read(hairT), Read(rootPrim), rootUV, 4, stream) == CurveResampleStatus::InvalidArgument);
+    // Once the fresh terminal proof has committed, legacy replacement remains
+    // the original synchronous API contract.
+    CHECK(fresh.Apply(input, Read(hairT), Read(rootPrim), rootUV, 0, stream) == CurveResampleStatus::Ok);
+    CHECK(fresh.Finish(stream) == CurveResampleStatus::Ok);
+
+    // Capture is rejected before ApplyFresh queries stream-device state or
+    // submits validation/upload work; it therefore is not an unsafe upload.
+    cudaStream_t captureStream = nullptr;
+    CHECK(cudaStreamCreateWithFlags(&captureStream, cudaStreamNonBlocking) == cudaSuccess);
+    CudaCurveResample captured;
+    cudaGraph_t graph = nullptr;
+    CHECK(cudaStreamBeginCapture(captureStream, cudaStreamCaptureModeGlobal) == cudaSuccess);
+    CHECK(captured.ApplyFresh(input, Read(hairT), Read(rootPrim), rootUV, 4, captureStream) == CurveResampleStatus::InvalidArgument);
+    CHECK(!captured.HasUnprovenUpload());
+    CHECK(cudaStreamEndCapture(captureStream, &graph) == cudaSuccess);
+    if (graph) CHECK(cudaGraphDestroy(graph) == cudaSuccess);
+    CHECK(cudaStreamDestroy(captureStream) == cudaSuccess);
+
     // target == 0 preserves the source's ragged layout and all supplied channels.
     CHECK(resample.Apply(input, Read(hairT), Read(rootPrim), rootUV, 0, stream) == CurveResampleStatus::Ok);
     CHECK(resample.Finish(stream) == CurveResampleStatus::Ok);
@@ -149,16 +201,42 @@ int main() {
     const size_t retainedPointCount = resample.view().pointCount;
     float3 nonFinite{std::numeric_limits<float>::quiet_NaN(), 0, 0};
     CHECK(cudaMemcpy(points.data(), &nonFinite, sizeof(nonFinite), cudaMemcpyHostToDevice) == cudaSuccess);
+    // Validation remains device-side in the fresh path.  Its terminal D2H
+    // reports the semantic failure without publishing staging output.
+    CudaCurveResample freshInvalid;
+    AsyncStatus invalidAsyncStatus;
+    CHECK(freshInvalid.ApplyFresh(input, Read(hairT), Read(rootPrim), rootUV, 4, stream) == CurveResampleStatus::Ok);
+    CHECK(freshInvalid.FinishFreshAsync(stream, AsyncDone, &invalidAsyncStatus) == CurveResampleStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(invalidAsyncStatus.value.load(std::memory_order_acquire) == cudaSuccess);
+    CHECK(freshInvalid.CommitFreshFinish() == CurveResampleStatus::NonFiniteInput);
+    CHECK(freshInvalid.view().curveOffsets.size == 0 && !freshInvalid.HasUnprovenUpload());
     CHECK(resample.Apply(input, Read(hairT), Read(rootPrim), rootUV, 4, stream) == CurveResampleStatus::NonFiniteInput);
     CHECK(resample.view().pointCount == retainedPointCount && Near(Download(resample.view().points)[2].x, 10.0f));
-    // Restore the source, then check the minimum-CV topology rule.
+    // Restore the source, then prove fresh validation prevents Resample from
+    // dereferencing malformed offsets that otherwise have plausible sizes.
     CHECK(cudaMemcpy(points.data(), sourcePoints.data(), sourcePoints.size() * sizeof(float3),
+                     cudaMemcpyHostToDevice) == cudaSuccess);
+    const std::vector<uint32_t> outOfRangeOffsets{0, UINT32_MAX, 6};
+    CHECK(cudaMemcpy(offsets.data(), outOfRangeOffsets.data(), outOfRangeOffsets.size() * sizeof(uint32_t),
+                     cudaMemcpyHostToDevice) == cudaSuccess);
+    CudaCurveResample freshMalformed;
+    AsyncStatus malformedAsyncStatus;
+    CHECK(freshMalformed.ApplyFresh(input, Read(hairT), Read(rootPrim), rootUV, 2, stream) == CurveResampleStatus::Ok);
+    CHECK(freshMalformed.FinishFreshAsync(stream, AsyncDone, &malformedAsyncStatus) == CurveResampleStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(malformedAsyncStatus.value.load(std::memory_order_acquire) == cudaSuccess);
+    CHECK(malformedAsyncStatus.calls.load(std::memory_order_acquire) == 1);
+    CHECK(freshMalformed.CommitFreshFinish() == CurveResampleStatus::InvalidArgument);
+    CHECK(freshMalformed.view().curveOffsets.size == 0 && !freshMalformed.HasUnprovenUpload());
+    // Restore valid offsets, then check the minimum-CV topology rule.
+    const std::vector<uint32_t> sourceOffsets{0, 2, 6};
+    CHECK(cudaMemcpy(offsets.data(), sourceOffsets.data(), sourceOffsets.size() * sizeof(uint32_t),
                      cudaMemcpyHostToDevice) == cudaSuccess);
     const std::vector<uint32_t> degenerateOffsets{0, 1, 6};
     CHECK(cudaMemcpy(offsets.data(), degenerateOffsets.data(), degenerateOffsets.size() * sizeof(uint32_t),
                      cudaMemcpyHostToDevice) == cudaSuccess);
     CHECK(resample.Apply(input, Read(hairT), Read(rootPrim), rootUV, 2, stream) == CurveResampleStatus::InvalidArgument);
-    const std::vector<uint32_t> sourceOffsets{0, 2, 6};
     CHECK(cudaMemcpy(offsets.data(), sourceOffsets.data(), sourceOffsets.size() * sizeof(uint32_t),
                      cudaMemcpyHostToDevice) == cudaSuccess);
 

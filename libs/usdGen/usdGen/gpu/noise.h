@@ -70,8 +70,25 @@ public:
                       RestRootFrames restFrames,
                       NoiseParameters parameters,
                       DeviceView<float3> output,
-                      cudaStream_t stream);
+                      cudaStream_t stream,
+                      UsdGenExecutionMemoryReservation* reservation = nullptr);
     StyleStatus Finish(cudaStream_t stream);
+    // Fresh-only nonblocking publication. ApplyFresh writes only to the
+    // caller-provided private point plane. FinishFreshAsync publishes that
+    // plane after a scalar device-status readback and invokes the native
+    // callback; CommitFreshFinish is host-only and must follow a proved
+    // cudaSuccess callback. No generated point data is copied to the host.
+    StyleStatus ApplyFresh(DeviceCurveGeometryView geometry,
+                           DeviceView<const float> hairT,
+                           RestRootFrames restFrames,
+                           NoiseParameters parameters,
+                           DeviceView<float3> output,
+                           cudaStream_t stream,
+                           UsdGenExecutionMemoryReservation* reservation = nullptr);
+    StyleStatus FinishFreshAsync(cudaStream_t stream,
+        void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata);
+    StyleStatus CommitFreshFinish();
+    bool HasUnprovenWork() const noexcept { return unprovenWork_; }
     bool pending() const { return pending_; }
     int deviceIndex() const { return deviceIndex_; }
 
@@ -82,7 +99,8 @@ private:
                              bool groomOnly, bool allowPrimitive) const;
     StyleStatus validateInt(IntField field, DeviceCurveGeometryView geometry) const;
     StyleStatus begin(DeviceCurveGeometryView geometry,
-                      DeviceView<float3> output, cudaStream_t stream);
+                      DeviceView<float3> output, cudaStream_t stream,
+                      UsdGenExecutionMemoryReservation* reservation);
     StyleStatus finishPublication(cudaStream_t stream);
 
     DeviceBuffer<int> error_;
@@ -92,6 +110,13 @@ private:
     size_t pointCount_ = 0;
     int deviceIndex_ = -1;
     bool pending_ = false;
+    int* freshHostError_ = nullptr;
+    UsdGenExecutionResourcePermit freshHostErrorPermit_;
+    bool freshPreparing_ = false;
+    bool freshPending_ = false;
+    bool freshCallbackArmed_ = false;
+    bool freshUploadFailed_ = false;
+    bool unprovenWork_ = false;
 };
 
 } // namespace usdGen::gpu

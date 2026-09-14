@@ -3,6 +3,9 @@
 2026-09-11. Binding user decisions; implementation and verification in progress.
 This overlay wins over conflicting statements in `00`–`13`, including the
 GPU exclusion in `11` §8. It does not retire unrelated requirements or gates.
+The current execution-resource overlay is
+[15-resource-aware-execution.md](15-resource-aware-execution.md); it leaves
+the historical checkpoints in this document intact and starts OPEN.
 
 ## Required end state
 
@@ -35,6 +38,16 @@ GPU exclusion in `11` §8. It does not retire unrelated requirements or gates.
    scheduled owner; dependencies and parallelism belong to the execution
    framework and CUDA streams/events. Mutex-protected methods, spinlock
    substitutions and a global serialized cook are not the target architecture.
+7. Latest user revision (2026-09-12): **remove all OpenUSD patches and retain
+   unmodified Storm**, with no new renderer or custom GPU-curve rprim. The
+   scene index publishes standard Hydra `basisCurves`; internal GPU hair
+   structures remain private to usdGen. This supersedes the earlier permission
+   for minimal renderer hooks. Patch-dependent providers, group publication
+   bridges and private SDK harnesses are retired, not kept as a hidden alternate
+   route. GPU residency remains required: stock-SDK GPU handoff is an open
+   implementation/verification task, not permission for CPU geometry readback.
+   Historical patch checkpoints below are historical evidence only. The
+   installed shared OpenUSD SDK must remain untouched.
 
 ## Scheduled ownership revision
 
@@ -1200,6 +1213,9 @@ One lane uses local Qwen (`qwen3.8-flash-next`); two use the Hivemind LMStudio
 endpoint (currently loaded as `qwen3.8-27b@q4_0`, verified through `/v1/models`)
 for substantive implementation/review tasks. A model
 request is only counted as used when its response was received and inspected.
+This two-Hivemind-lane routing is historical and superseded by the bounded
+single-model, two-request-per-service policy recorded in the current no-patch
+checkpoint below.
 The Length/compaction audit requests reached this loaded model, but exhausted
 their token budgets in reasoning without visible answer content despite
 thinking-disable options. They are not counted as completed reviews.
@@ -1742,3 +1758,103 @@ stable-ID-sorts optional per-curve authored `GfMatrix4d` root-frame values
 alongside the reordered source arrays; it does **not** upload or apply those
 matrices to live CUDA root frames yet. The same limitation applies to Noise:
 graph/rest-normal transport and execution integration remain open.
+
+### HISTORICAL / SUPERSEDED: Plugin-local Storm integration (2026-09-12)
+
+This entire checkpoint is historical experiment evidence only. Its
+application-specific GPU group/provider, staging, terminal-observer, private
+SDK lifecycle hooks, harness and patch artifacts have been retired. None of
+the renderer results below describe the current supported integration, and the
+speculative custom-rprim/factory paragraph at the end of this section is not
+an active design direction.
+
+The application-specific group implementation has moved from the experimental
+OpenUSD patches into twelve `usdGenBasisCurvesGpuGroup*` files in
+`libs/usdGenImaging/usdGenImaging`. Candidates, mailboxes, registry identities,
+controllers, member data sources, terminal observation, staging and plugin
+registration are now repository-owned. The installed OpenUSD SDK is unchanged;
+Storm remains the renderer, with no new render delegate or custom rprim.
+
+The old group patches 0003 through 0006 have been removed. A replacement
+0003 supplies only a generic terminal-root factory/lifecycle hook. The current
+application order is **0001, 0002, replacement 0003, 0007, 0008**; the rationale
+for each retained hook and the build instructions are in
+[`patches/openusd/README.md`](../patches/openusd/README.md). In particular, the
+generic Hd dirty-list change in 0008 remains an explicit exception required by
+the current native-provider transaction, not a license for more core policy.
+
+Root reproduced late scene-index input insertion as two failing render tests
+(`79406c`): no factory existed when the render index initially attached its
+terminal. Discovery now retries at normal renderer Update until a factory is
+present, then creates state once per attachment. Replacement and teardown
+cancel that state; exceptions cannot leave a dangling terminal observer.
+The existing application tests require no special initialization call.
+
+Validation: the stock-SDK main suite passed **89/89** (`5466ee`/`7a02ea`);
+the reduced private CUDA harness passed **17/17** (`62a812`/`1388c0`, 5.80 s),
+including lifecycle, plugin ownership/order, live Groom, GPU group rendering
+and rejected-presentation retention. Native/Groom/group rendering also passed
+**3/3** with draw-item caching enabled (`07c66b`). The non-CUDA group-only
+configuration built and passed **9/9** (`621a28`/`905106`), with no skips.
+Export inspection confirmed group implementations belong to the private
+imaging plugin, not HdSt (`454280`/`c21684`). These are migration checks, not
+completion of the remaining CUDA operators, expression/mask, performance or
+release gates. Earlier sanitizer runs do not cover the relocated build.
+The final restored CUDA configuration again passed **17/17** (`14979f`),
+and a live Groom loader trace initialized only private Hd/HdSt/imaging
+libraries (`c93462`/`897007`). The final five-patch clean-apply tree matches
+both complete Hd/HdSt source directories byte-for-byte (`95d383`).
+
+Historical speculative note only: a custom USD curve schema and a future
+generic rprim-factory hook were considered while retaining Storm. Neither is
+implemented, accepted, or proposed by the current no-patch integration.
+
+### Current no-patch stock-Storm checkpoint (2026-09-12)
+
+The current supported integration uses the unmodified OpenUSD 26.08 SDK and
+ordinary host-reference Hydra `basisCurves` publication. The experimental
+`cudaBasisCurvesProvider`, device-curve-group publisher, opaque device-tile
+publisher, twelve GPU group/lifecycle sources, private group harness and all
+OpenUSD patch artifacts are retired. The exact removed-library recovery archive
+is `/tmp/usdgen-hdst-retirement.2jEvsh/libs-usdGenImaging-hdst-retirement.tar.gz`;
+it is not a supported build input.
+
+Internal CUDA execution, device generations, leases, tool support and the
+isolated CUDA-to-GL transfer helper remain available. They are not a renderer
+handoff. Groom preserves CUDA renderer-local session identity but sets
+`CommitRequest.devicePublication=false` for every publication request. A
+device generation that nevertheless reaches Groom is explicitly rejected as
+an unimplemented usdGen stock-Storm GPU-resident BasisCurves handoff; the last
+accepted ordinary BasisCurves snapshot remains visible and no CPU geometry
+readback is introduced.
+
+Final stock validation rebuilt `build-codex` with `cmake --build build-codex
+-j4`, then passed **91/91** T0/T1 tests without skips (19.47 s) and **6/6**
+focused T2 tests (CUDA GL-interoperability plus Storm
+Look/Tangent/HgiResource/Refine/Material; 9.50 s). The stock public-payload
+contract verifies ragged `curveVertexCounts`, points and widths vertex primvars,
+and the absence of `hdStBasisCurvesGpu`. The no-patch guard passes both its
+positive scan and disposable negative probes for every retired token and a
+nested `.patch` file. These cover host-reference Storm and isolated CUDA-to-GL
+transfer, not a live GPU-resident standard-BasisCurves handoff. This checkpoint
+does not claim a completed GPU-resident stock-Storm path, a new renderer/rprim,
+or all renderer/operator work.
+
+Current inference routing is bounded per service: prefer actual local Qwen
+at `http://127.0.0.1:18310/v1` with model `qwen3.8-flash-next`, and actual
+Hivemind at `http://hivemind.local:1235/v1` with the single model
+`qwen3.8-27b@q4_0`. At most two requests may be in flight for each service,
+and no OpenAI endpoint/model substitution is permitted when either fails;
+report the service error instead. Coordinator/agent labels do not prove model
+execution—only a received, inspected response does.
+
+The actual local-Qwen stock audit completed as
+`chatcmpl-80982a0bc1308335` (artifacts:
+`/tmp/usdGen-local-qwen-stock-handoff/request.json` and `response.json`). Its
+inspected contribution was a bounded ExtComputation BAR/Hgi dispatch audit;
+it is not evidence that plugin-side insertion or scheduling is implemented.
+The first cleanup Hivemind review terminated with HTTP 400
+`{"error":"terminated"}` (`/tmp/usdgen-hivemind-cleanup-review-fotwfW`), and
+the regranted current-source retry recorded no response headers or body before
+its bounded transport ended (`/tmp/usdgen-hivemind-cleanup-review-retry-PyRzyF`).
+Neither Hivemind call contributed a review finding.

@@ -20,6 +20,9 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 
+class UsdGenSessionDeviceProvider;
+struct UsdGenSessionDeviceObservers;
+
 /// Value-only dirty input delivered to the command owner. Structural dirt
 /// replaces all finer-grained entries; all other entries are OR-merged.
 struct UsdGenPendingDirty
@@ -32,6 +35,22 @@ struct UsdGenPendingDirty
     bool Any() const {
         return structural || surfaceTopology || !nodeBits.empty() ||
                !surfaceBits.empty();
+    }
+};
+
+/// Backend-neutral context-loss fence recorded by the Session command owner
+/// and consumed by its serialized cooker lane. Native handles never cross
+/// this boundary; CUDA, Metal, and Vulkan adapters identify only backend and
+/// logical device, while `serial` prevents a stale cook from acknowledging a
+/// newer loss event.
+struct UsdGenDeviceContextLoss
+{
+    UsdGenDeviceBackend backend = UsdGenDeviceBackend::Unknown;
+    int32_t deviceIndex = -1; // -1 invalidates every device of this backend.
+    uint64_t serial = 0;
+
+    bool IsValid() const noexcept {
+        return backend != UsdGenDeviceBackend::Unknown && deviceIndex >= -1 && serial != 0;
     }
 };
 
@@ -98,7 +117,13 @@ public:
         SnapshotPtr, UsdGenExecutionPipeline::Outcome)>;
     using CommitRequest = UsdGenSessionCommitRequest;
 
-    explicit UsdGenSession(int threadLimit = 0);
+    // commandCapacity is primarily a deterministic admission-test seam; it
+    // bounds owner mutations independently from retained cook requests.
+    explicit UsdGenSession(
+        int threadLimit = 0, uint64_t commandCapacity = 4096);
+    UsdGenSession(
+        int threadLimit, uint64_t commandCapacity,
+        std::shared_ptr<UsdGenExecutionCacheDomain> executionCacheDomain);
     // External ownership boundary: stop/join submitters first. Accepted work
     // receives terminal callbacks before Session state is destroyed.
     ~UsdGenSession();
@@ -112,10 +137,20 @@ public:
     void SetDevicePublicationEnabled(bool);
 
     // Primary callback-safe mutation API: enqueue a command and return.
-    void PostGraphDesc(UsdGenGraphDesc);
-    void PostContext(UsdGenContext);
-    void PostDevicePublicationEnabled(bool);
-    void PostDirty(UsdGenPendingDirty);
+    // False means bounded command admission rejected the mutation; callers
+    // must retain/retry their authoritative input at a later boundary.
+    bool PostGraphDesc(UsdGenGraphDesc);
+    bool PostContext(UsdGenContext);
+    bool PostDevicePublicationEnabled(bool);
+    bool PostDirty(UsdGenPendingDirty);
+    /// Callback-safe backend context-loss notification. Accepted notification
+    /// cancels stale publication and schedules serialized cache/workspace
+    /// invalidation. False means command admission rejected it.
+    bool PostDeviceContextLost(UsdGenDeviceBackend, int32_t deviceIndex = -1);
+
+    /// External synchronous adapter for the same owner command. It returns
+    /// after the loss fence is recorded, not after native retirement drains.
+    void NotifyDeviceContextLost(UsdGenDeviceBackend, int32_t deviceIndex = -1);
 
     bool BeginDeviceEdit(UsdGenGenerationConstPtr const&, uint64_t*,
                          std::string* = nullptr);
@@ -174,6 +209,13 @@ public:
     void EndDensityDrag();
 
 private:
+    friend std::unique_ptr<UsdGenSession> CreateUsdGenDeviceSession(
+        int, uint64_t, std::shared_ptr<UsdGenExecutionCacheDomain>,
+        std::shared_ptr<UsdGenSessionDeviceProvider>,
+        UsdGenSessionDeviceObservers const&);
+    UsdGenSession(int, uint64_t, std::shared_ptr<UsdGenExecutionCacheDomain>,
+                  std::shared_ptr<UsdGenSessionDeviceProvider>,
+                  UsdGenSessionDeviceObservers const&);
     struct State;
     std::unique_ptr<State> _state;
     std::shared_ptr<const UsdGenSessionSnapshot> _snapshot;

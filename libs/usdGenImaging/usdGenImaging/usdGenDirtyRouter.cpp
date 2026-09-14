@@ -153,6 +153,19 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
                 e);
             pp.prefixes.emplace_back(
                 HdDataSourceLocator(TfToken("extComputationPrimvars")), e);
+
+            // RestAPI normals define the stable root frame used by surface-
+            // bound consumers.  They are a capture dependency rather than a
+            // current-frame deformation: a Default-time normal/interpolation
+            // edit must rebuild the consuming node, while primvars:normals
+            // remains intentionally unrouted here.
+            Entry const restNormals{node.id, usdGen::UsdGenDirtyCapture};
+            pp.prefixes.emplace_back(
+                _Loc({TfToken("usdGen"), TfToken("rest"),
+                      TfToken("normals")}), restNormals);
+            pp.prefixes.emplace_back(
+                _Loc({TfToken("usdGen"), TfToken("rest"),
+                      TfToken("normalsInterpolation")}), restNormals);
         }
         // C3 curves changed -> re-capture the consuming node (no curve scope
         // in UsdGenPendingDirty: the capture class carries it, 02 §6 row 5).

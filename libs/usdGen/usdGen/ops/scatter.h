@@ -24,6 +24,7 @@ public:
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CurveCount; }
     UsdGenRole Role() const override { return UsdGenRole::Curves; }
     bool IsGenerator() const override { return true; }
+    size_t GeometryInputArity() const override { return 0; }
 
     TfSpan<const TfToken> TopologyParameters() const override;
     TfSpan<const TfToken> ValueParameters() const override;

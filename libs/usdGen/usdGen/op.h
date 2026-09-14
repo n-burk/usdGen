@@ -23,6 +23,7 @@
 #include "pxr/base/tf/token.h"
 
 #include <memory>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -157,10 +158,24 @@ struct UsdGenCaptureContext
     UsdGenGraphDesc const *desc = nullptr;   // surfaces, maps, density scales
     UsdGenParamView const *params = nullptr; // this node's resolved parameters and ramps
     UsdGenReferenceSet const **references = nullptr; // resolved ReferenceInputs(), evaluated
+    UsdGenResolvedReferenceValue const **resolvedReferences = nullptr;
+    uint32_t              referenceCount = 0;
+    UsdGenResolvedMapValue const **maps = nullptr;
+    uint32_t              mapCount = 0;
+    // Typed slots are carried by the compiled graph.  Sampling is deliberately
+    // not implemented here; legacy maps/mapCount stay available to existing
+    // CPU operators until a backend consumes the purpose-aware transport.
+    UsdGenMapBindingDesc const *mapBindings = nullptr;
+    uint32_t              mapBindingCount = 0;
     UsdGenSurfaceId        surface = 0;
     UsdGenReadPhase        readPhase = UsdGenReadPhase::Final;
     uint32_t               seed = 0;
     uint64_t               upstreamGeneration = 0; // upstream buffer topologyVersion
+    // Complete ordered input list for a multi-input operator.  Unary kernels
+    // continue to use the legacy Capture() argument and upstreamGeneration;
+    // fan-in kernels opt in by declaring GeometryInputArity() > 1.
+    UsdGenCurveBuffer const **upstreams = nullptr;
+    uint32_t               upstreamCount = 0;
     UsdGenWorkDispatcher  *dispatcher = nullptr;  // capture may parallelise in the arena
     UsdGenDiagnostics     *diag = nullptr;
 };
@@ -172,6 +187,12 @@ struct UsdGenEvalContext
     UsdGenGraphDesc const *desc = nullptr;   // surface points already resolved to time+offset
     UsdGenParamView const *params = nullptr;
     UsdGenReferenceSet const **references = nullptr;
+    UsdGenResolvedReferenceValue const **resolvedReferences = nullptr;
+    uint32_t              referenceCount = 0;
+    UsdGenResolvedMapValue const **maps = nullptr;
+    uint32_t              mapCount = 0;
+    UsdGenMapBindingDesc const *mapBindings = nullptr;
+    uint32_t              mapBindingCount = 0;
     uint32_t seed = 0;
 };
 
@@ -206,6 +227,20 @@ public:
     virtual TfSpan<const TfToken> OutputPrimvars() const { return {}; }
     /// Upstream planes this operator reads, in slot order.
     virtual TfSpan<const TfToken> InputPrimvars() const { return {}; }
+    /// Exact number of geometry-producing usdGen:input edges consumed by
+    /// this kernel. This is deliberately separate from IsGenerator(): Grow
+    /// owns its generated strand topology, but still consumes one upstream
+    /// root geometry. Current kernels are either source operators (0) or
+    /// unary operators (1); a future multi-input kernel must declare and
+    /// implement its merge semantics before increasing this value.
+    virtual size_t GeometryInputArity() const { return 1; }
+    /// Whether the authored order of geometry inputs is semantic.  Unary
+    /// operators retain the historical canonicalized digest behavior.
+    virtual bool GeometryInputsOrdered() const { return false; }
+    /// Most stylers receive the framework's final input/result envelope.  A
+    /// combiner using UsdGenNodeDesc::blend as its interpolation weight opts
+    /// out so the weight is applied exactly once.
+    virtual bool UsesFrameworkBlendEnvelope() const { return true; }
 
     // ---- binding -------------------------------------------------------------
     virtual bool Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag) = 0;

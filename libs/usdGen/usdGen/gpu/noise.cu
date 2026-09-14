@@ -41,6 +41,18 @@ __device__ float3 Mul(float3 a, float b) {
     return make_float3(a.x*b, a.y*b, a.z*b);
 }
 
+__device__ size_t FindFrame(DeviceView<const uint64_t> frameIds,
+                            uint64_t id) {
+    size_t lo = 0, hi = frameIds.size;
+    while (lo < hi) {
+        size_t const mid = lo + (hi - lo) / 2u;
+        uint64_t const value = frameIds.data[mid];
+        if (value < id) lo = mid + 1u;
+        else hi = mid;
+    }
+    return lo < frameIds.size && frameIds.data[lo] == id ? lo : frameIds.size;
+}
+
 // Exact device spelling of usdGenMath's SplitMix64 draw, retained locally
 // because the host header is not annotated for device compilation.
 __device__ uint64_t Hash64(uint64_t key, uint32_t salt) {
@@ -215,9 +227,17 @@ __global__ void ValidateInputs(DeviceCurveGeometryView geometry,
                 end > geometry.pointCount ||
                 (c + 1u == geometry.curveCount && end != geometry.pointCount))
                 SetError(error, kBadOffsets);
-            const float3 tangent = frames.tangent.data[c];
-            const float3 binormal = frames.binormal.data[c];
-            const float3 normal = frames.normal.data[c];
+            size_t frameCurve = c;
+            if (frames.stableIds.data) {
+                frameCurve = FindFrame(frames.stableIds, geometry.stableIds.data[c]);
+                if (frameCurve == frames.stableIds.size) {
+                    SetError(error, kBadValue);
+                    continue;
+                }
+            }
+            const float3 tangent = frames.tangent.data[frameCurve];
+            const float3 binormal = frames.binormal.data[frameCurve];
+            const float3 normal = frames.normal.data[frameCurve];
             const float tangentLength = Length(tangent);
             const float binormalLength = Length(binormal);
             const float normalLength = Length(normal);
@@ -232,6 +252,15 @@ __global__ void ValidateInputs(DeviceCurveGeometryView geometry,
                      Dot(Cross(tangent, binormal), normal) < 0.999f)
                 SetError(error, kBadValue);
         }
+    } else if (geometry.curveOffsets.size == 1u) {
+        // The canonical empty C3 topology owns one terminal offset.  Keep
+        // this check on the device: callers may only provide a device view,
+        // so validating the value on the host would require an otherwise
+        // forbidden synchronous readback.  A non-zero offset is malformed
+        // even though it cannot be consumed by NoiseKernel (which has no
+        // curve launch for an empty topology).
+        if (!geometry.curveOffsets.data || geometry.curveOffsets.data[0] != 0u)
+            SetError(error, kBadOffsets);
     }
     for (size_t point = first; point < geometry.pointCount; point += stride) {
         if (!Finite(geometry.points.data[point]) || !Finite(geometry.restPoints.data[point]))
@@ -267,9 +296,16 @@ __global__ void NoiseKernel(DeviceCurveGeometryView geometry,
         if (!ReadBool(parameters.enabled, curve, &enabled, error) ||
             !ReadBool(parameters.cumulative, curve, &cumulative, error) ||
             !ReadSeed(parameters.seed, curve, &seed, error)) continue;
-        const float3 tangent = frames.tangent.data[curve];
-        const float3 binormal = frames.binormal.data[curve];
-        const float3 normal = frames.normal.data[curve];
+        size_t frameCurve = curve;
+        if (frames.stableIds.data) {
+            frameCurve = FindFrame(frames.stableIds, geometry.stableIds.data[curve]);
+            if (frameCurve == frames.stableIds.size) {
+                SetError(error, kBadValue); continue;
+            }
+        }
+        const float3 tangent = frames.tangent.data[frameCurve];
+        const float3 binormal = frames.binormal.data[frameCurve];
+        const float3 normal = frames.normal.data[frameCurve];
         const float3 rootRest = geometry.restPoints.data[begin];
         const uint64_t stableId = geometry.stableIds.data[curve];
         const float3 hash = make_float3(
@@ -388,7 +424,16 @@ StyleStatus DecodeError(int code) {
 } // namespace
 
 CudaNoise::~CudaNoise() {
-    const bool ownsResources = ready_ || staging_.size() || error_.size();
+    if (unprovenWork_ || freshCallbackArmed_) {
+        staging_.quarantine();
+        error_.quarantine();
+        ready_ = nullptr;
+        freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
+        return;
+    }
+    const bool ownsResources = ready_ || staging_.size() || error_.size() ||
+        freshHostError_;
     int previous = -1;
     const bool selected = !ownsResources || (deviceIndex_ >= 0 &&
         cudaGetDevice(&previous) == cudaSuccess &&
@@ -399,10 +444,23 @@ CudaNoise::~CudaNoise() {
         staging_.quarantine();
         error_.quarantine();
         ready_ = nullptr;
+        // The status D2H may still target this allocation.  Losing the
+        // completion proof means it is intentionally leaked together with
+        // its charge; releasing the permit would make the pool claim bytes
+        // are reusable while CUDA may still own them.
+        freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
     } else {
         if (ready_) cudaEventDestroy(ready_);
         staging_.reset(0);
         error_.reset(0);
+        if (freshHostError_) {
+            if (cudaFreeHost(freshHostError_) == cudaSuccess)
+                freshHostErrorPermit_.Release();
+            else
+                freshHostErrorPermit_.Abandon();
+            freshHostError_ = nullptr;
+        }
     }
     if (selected && previous >= 0 && previous != deviceIndex_) cudaSetDevice(previous);
 }
@@ -479,12 +537,27 @@ static StyleStatus ValidateSeedField(IntField field, DeviceCurveGeometryView geo
 }
 
 StyleStatus CudaNoise::begin(DeviceCurveGeometryView geometry,
-                             DeviceView<float3> output, cudaStream_t stream) {
+                             DeviceView<float3> output, cudaStream_t stream,
+                             UsdGenExecutionMemoryReservation* reservation) {
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess)
         return StyleStatus::CudaError;
-    const cudaError_t errorAllocation = error_.reset(1);
+    const cudaError_t errorAllocation = error_.reset(
+        1, reservation, UsdGenExecutionResourceKind::Scratch);
     const cudaError_t stagingAllocation = errorAllocation == cudaSuccess
-        ? staging_.reset(geometry.pointCount) : cudaErrorMemoryAllocation;
+        ? staging_.reset(geometry.pointCount, reservation,
+                         UsdGenExecutionResourceKind::Scratch)
+        : cudaErrorMemoryAllocation;
+    if (errorAllocation == cudaSuccess && stagingAllocation == cudaSuccess &&
+        freshPreparing_ && !freshHostError_) {
+        auto permit = TryReserveCudaExecutionBytes(
+            sizeof(int), UsdGenExecutionResourceKind::Pinned, reservation);
+        int* hostError = nullptr;
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&hostError),
+                         sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return StyleStatus::CudaError;
+        freshHostError_ = hostError;
+        freshHostErrorPermit_ = std::move(*permit);
+    }
     const cudaError_t clearStatus = stagingAllocation == cudaSuccess
         ? cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) : cudaErrorMemoryAllocation;
     if (errorAllocation != cudaSuccess || stagingAllocation != cudaSuccess ||
@@ -495,6 +568,7 @@ StyleStatus CudaNoise::begin(DeviceCurveGeometryView geometry,
         if (cudaStreamSynchronize(stream) != cudaSuccess) {
             staging_.quarantine();
             error_.quarantine();
+            unprovenWork_ = true;
         } else {
             staging_.reset(0);
             error_.reset(0);
@@ -509,8 +583,10 @@ StyleStatus CudaNoise::begin(DeviceCurveGeometryView geometry,
 StyleStatus CudaNoise::Apply(DeviceCurveGeometryView geometry,
                              DeviceView<const float> hairT, RestRootFrames frames,
                              NoiseParameters parameters, DeviceView<float3> output,
-                             cudaStream_t stream) {
-    if (pending_) return StyleStatus::InvalidArgument;
+                             cudaStream_t stream,
+                             UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || freshPending_ || unprovenWork_)
+        return StyleStatus::InvalidArgument;
     int current = -1, streamDevice = -1;
     if (cudaGetDevice(&current) != cudaSuccess ||
         (stream && cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess) ||
@@ -531,10 +607,14 @@ StyleStatus CudaNoise::Apply(DeviceCurveGeometryView geometry,
             geometry.curveOffsets.size != geometry.curveCount + 1u ||
             geometry.stableIds.size != geometry.curveCount ||
             !frames.tangent.data || !frames.binormal.data || !frames.normal.data ||
-            frames.tangent.size != geometry.curveCount ||
-            frames.binormal.size != geometry.curveCount || frames.normal.size != geometry.curveCount)) ||
+            frames.tangent.size == 0 || frames.binormal.size != frames.tangent.size ||
+            frames.normal.size != frames.tangent.size ||
+            (!frames.stableIds.data && frames.tangent.size != geometry.curveCount) ||
+            (frames.stableIds.data && frames.stableIds.size != frames.tangent.size))) ||
         (!geometry.curveCount && (geometry.points.size || geometry.restPoints.size ||
-            geometry.curveOffsets.size || geometry.stableIds.size || frames.tangent.size ||
+            geometry.curveOffsets.size > 1u ||
+            (geometry.curveOffsets.size == 1u && !geometry.curveOffsets.data) ||
+            geometry.stableIds.size || frames.tangent.size ||
             frames.binormal.size || frames.normal.size)) ||
         !parameters.magnitudeProfile.data || parameters.magnitudeProfile.size != kProfileSize ||
         (parameters.maskProfile.data && parameters.maskProfile.size != kProfileSize) ||
@@ -575,12 +655,13 @@ StyleStatus CudaNoise::Apply(DeviceCurveGeometryView geometry,
     if (status != StyleStatus::Ok) return status;
     status = validateBool(parameters.cumulative, geometry, false, true);
     if (status != StyleStatus::Ok) return status;
-    status = begin(geometry, output, stream);
+    status = begin(geometry, output, stream, reservation);
     if (status != StyleStatus::Ok) return status;
     auto abortSubmission = [&] {
         if (cudaStreamSynchronize(stream) != cudaSuccess) {
             staging_.quarantine();
             error_.quarantine();
+            unprovenWork_ = true;
         }
         pointCount_ = 0;
         output_ = {};
@@ -615,6 +696,7 @@ StyleStatus CudaNoise::finishPublication(cudaStream_t stream) {
         if (fenceStatus != cudaSuccess) {
             staging_.quarantine();
             error_.quarantine();
+            unprovenWork_ = true;
         }
         pending_ = false;
         pointCount_ = 0;
@@ -639,6 +721,7 @@ StyleStatus CudaNoise::Finish(cudaStream_t stream) {
         if (cudaStreamSynchronize(stream) != cudaSuccess) {
             staging_.quarantine();
             error_.quarantine();
+            unprovenWork_ = true;
         }
         pending_ = false;
         pointCount_ = 0;
@@ -652,6 +735,89 @@ StyleStatus CudaNoise::Finish(cudaStream_t stream) {
         return DecodeError(code);
     }
     return finishPublication(stream);
+}
+
+StyleStatus CudaNoise::ApplyFresh(DeviceCurveGeometryView geometry,
+                                  DeviceView<const float> hairT,
+                                  RestRootFrames restFrames,
+                                  NoiseParameters parameters,
+                                  DeviceView<float3> output,
+                                  cudaStream_t stream,
+                                  UsdGenExecutionMemoryReservation* reservation) {
+    if (pending_ || freshPending_ || freshPreparing_ || unprovenWork_)
+        return StyleStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return StyleStatus::InvalidArgument;
+    freshPreparing_ = true;
+    StyleStatus const status = Apply(geometry, hairT, restFrames, parameters,
+                                     output, stream, reservation);
+    freshPreparing_ = false;
+    if (status != StyleStatus::Ok) {
+        if (unprovenWork_) freshUploadFailed_ = true;
+        return status;
+    }
+    freshPending_ = true;
+    freshCallbackArmed_ = false;
+    freshUploadFailed_ = false;
+    *freshHostError_ = std::numeric_limits<int>::min();
+    return StyleStatus::Ok;
+}
+
+StyleStatus CudaNoise::FinishFreshAsync(
+    cudaStream_t stream,
+    void (*callback)(cudaStream_t, cudaError_t, void*) noexcept,
+    void* userdata) {
+    if (!pending_ || !freshPending_ || !callback || freshCallbackArmed_ ||
+        freshUploadFailed_ || !freshHostError_)
+        return StyleStatus::InvalidArgument;
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) {
+        freshUploadFailed_ = true;
+        return StyleStatus::InvalidArgument;
+    }
+    int current = -1, streamDevice = -1;
+    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_ ||
+        (stream && (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess ||
+                    streamDevice != deviceIndex_)) ||
+        cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        unprovenWork_ = true;
+        return StyleStatus::CudaError;
+    }
+    if (pointCount_ && cudaMemcpyAsync(output_.data, staging_.data(),
+            pointCount_ * sizeof(float3), cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        unprovenWork_ = true;
+        return StyleStatus::CudaError;
+    }
+    if (cudaMemcpyAsync(freshHostError_, error_.data(), sizeof(int),
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
+        cudaStreamAddCallback(stream, callback, userdata, 0) != cudaSuccess) {
+        freshUploadFailed_ = true;
+        unprovenWork_ = true;
+        return StyleStatus::CudaError;
+    }
+    freshCallbackArmed_ = true;
+    return StyleStatus::Ok;
+}
+
+StyleStatus CudaNoise::CommitFreshFinish() {
+    if (!pending_ || !freshPending_ || !freshCallbackArmed_ ||
+        freshUploadFailed_ || !freshHostError_ ||
+        *freshHostError_ == std::numeric_limits<int>::min())
+        return StyleStatus::InvalidArgument;
+    int const code = *freshHostError_;
+    pending_ = false;
+    freshPending_ = false;
+    freshCallbackArmed_ = false;
+    freshUploadFailed_ = false;
+    unprovenWork_ = false;
+    pointCount_ = 0;
+    output_ = {};
+    return code == 0 ? StyleStatus::Ok : DecodeError(code);
 }
 
 } // namespace usdGen::gpu

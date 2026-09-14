@@ -37,6 +37,10 @@ struct RestRootFrames {
     DeviceView<const float3> tangent;
     DeviceView<const float3> binormal;
     DeviceView<const float3> normal;
+    // Optional source-order stable IDs. Consumers such as Noise use these to
+    // resolve frames after a topology-preserving reorder/compaction without
+    // copying frame planes on the host.
+    DeviceView<const uint64_t> stableIds;
 };
 
 // Computes rest-space root frames wholly on the owning CUDA device. Inputs are

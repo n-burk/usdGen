@@ -7,6 +7,8 @@
 //   usdGen/rest/faceVertexCounts    VtIntArray
 //   usdGen/rest/faceVertexIndices   VtIntArray
 //   usdGen/rest/st                  VtVec2fArray (primary uv set, may be empty)
+//   usdGen/rest/normals             VtVec3fArray (Mesh normals at Default)
+//   usdGen/rest/normalsInterpolation TfToken
 //
 // Rest points are `primvars:rest` when authored (the Houdini convention,
 // S12 — it passes through the chain untouched), otherwise the deformed
@@ -46,7 +48,7 @@ class _LiveRestValueDataSource final : public HdSampledDataSource
 {
 public:
     HD_DECLARE_DATASOURCE(_LiveRestValueDataSource);
-    enum Leaf { Points, Counts, Indices, St };
+    enum Leaf { Points, Counts, Indices, St, Normals, NormalsInterpolation };
     _LiveRestValueDataSource(UsdPrim const& prim, Leaf leaf) : _prim(prim), _leaf(leaf) {}
 
     VtValue GetValue(Time) override {
@@ -78,6 +80,17 @@ public:
             VtValue value;
             return st && st.GetAttr().Get(&value, UsdTimeCode::Default()) &&
                 value.IsHolding<VtVec2fArray>() ? value : VtValue(VtVec2fArray());
+        }
+        if (_leaf == Normals) {
+            // Preserve a malformed value for the Hydra builder to reject;
+            // returning an empty normal array here would erase Invalid into
+            // the valid geometric-fallback None domain.
+            VtValue value;
+            return mesh.GetNormalsAttr().Get(&value, UsdTimeCode::Default())
+                ? value : VtValue();
+        }
+        if (_leaf == NormalsInterpolation) {
+            return VtValue(mesh.GetNormalsInterpolation());
         }
         VtValue value;
         UsdAttribute attr = _leaf == Counts ? mesh.GetFaceVertexCountsAttr() : mesh.GetFaceVertexIndicesAttr();
@@ -134,15 +147,19 @@ HdContainerDataSourceHandle UsdGenRestApiContainerFactory(
     HdSampledDataSourceHandle countsSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::Counts);
     HdSampledDataSourceHandle indicesSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::Indices);
     HdSampledDataSourceHandle uvSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::St);
+    HdSampledDataSourceHandle normalsSrc = _LiveRestValueDataSource::New(prim, _LiveRestValueDataSource::Normals);
+    HdSampledDataSourceHandle normalsInterpolationSrc = _LiveRestValueDataSource::New(
+        prim, _LiveRestValueDataSource::NormalsInterpolation);
 
     // Build the retained tree by hand: usdGen/rest/{points,faceVertexCounts,
-    // faceVertexIndices,st}. Only the containers are retained: the live leaves
+    // faceVertexIndices,st,normals,normalsInterpolation}. Only containers are retained: live leaves
     // sample Default time without registering per-frame variability.
-    TfTokenVector restNames{TfToken("points"), TfToken("faceVertexCounts"), TfToken("faceVertexIndices"), TfToken("st")};
-    HdDataSourceBaseHandle restValues[4] = {
-        pointsSrc, countsSrc, indicesSrc, uvSrc};
+    TfTokenVector restNames{TfToken("points"), TfToken("faceVertexCounts"), TfToken("faceVertexIndices"),
+                            TfToken("st"), TfToken("normals"), TfToken("normalsInterpolation")};
+    HdDataSourceBaseHandle restValues[6] = {
+        pointsSrc, countsSrc, indicesSrc, uvSrc, normalsSrc, normalsInterpolationSrc};
     HdRetainedContainerDataSourceHandle restContainer =
-        HdRetainedContainerDataSource::New(4, restNames.data(), restValues);
+        HdRetainedContainerDataSource::New(6, restNames.data(), restValues);
 
     // Contract shape usdGen/rest/* (header + 02 §2.15): the four leaves
     // sit under an intermediate `rest` container, itself under `usdGen`.
@@ -175,6 +192,10 @@ HdDataSourceLocatorSet UsdGenRestApiInvalidateMapping(
         TfToken("usdGen"), TfToken("rest"), TfToken("faceVertexIndices")};
     static HdDataSourceLocator const st{
         TfToken("usdGen"), TfToken("rest"), TfToken("st")};
+    static HdDataSourceLocator const normals{
+        TfToken("usdGen"), TfToken("rest"), TfToken("normals")};
+    static HdDataSourceLocator const normalsInterpolation{
+        TfToken("usdGen"), TfToken("rest"), TfToken("normalsInterpolation")};
 
     for (TfToken const &property : properties) {
         const std::string p = property.GetString();
@@ -186,6 +207,11 @@ HdDataSourceLocatorSet UsdGenRestApiInvalidateMapping(
             result.insert(fvi);
         } else if (p == "st" || p == "primvars:st") {
             result.insert(st);
+        } else if (p == "normals") {
+            result.insert(normals);
+            result.insert(normalsInterpolation);
+        } else if (p == "normalsInterpolation") {
+            result.insert(normalsInterpolation);
         } else if (p.rfind("usdGen:rest:", 0) == 0) {
             // The API's own authored knobs (source/primvar/file, S12) all
             // reach the evaluator through the points leaf; the file asset

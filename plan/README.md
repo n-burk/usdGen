@@ -1,10 +1,33 @@
 # usdGen — implementation plan
 
-Date: 2026-09-05 v1; overlay 2026-09-11. Status: plan v2 (accepted: v1 history
+Date: 2026-09-05 v1; overlays 2026-09-11/12. Status: plan v2 (accepted: v1 history
 in `00`–`12` plus overlay `13-codebase-alignment.md`). The subsequent user
 decisions in **[14-hierarchy-cuda-implementation.md](14-hierarchy-cuda-implementation.md)**
 supersede conflicting explicit-edge, CPU-expression, and GPU-deferred claims
 below. Historical measured numbers do not prove the new CUDA implementation.
+The active resource-aware execution overlay is
+**[15-resource-aware-execution.md](15-resource-aware-execution.md)**; its
+implementation evidence is explicitly OPEN.
+
+Current execution work is **phase 6: asynchronous CUDA execution** in overlay
+15. Source upload/resampling, retirement shutdown, and fresh Width/expression
+primitives and production asynchronous Width have recorded limited validation,
+including allocation-rejection recovery. Asynchronous Length/compaction also
+has recorded integration, repeat and CUDA sanitizer validation. Its initially
+empty integration fixture has been corrected and revalidated with nonempty
+geometry. Asynchronous finalization now has limited integration, 210 repeated
+test executions and CUDA sanitizer evidence recorded in overlay 15.
+The asynchronous source-expression control relay and compact scalar-readback
+helper now have limited integration validation, including the full 101-test
+T0/T1 suite. They preserve `useRest` as a space declaration, with loaded points
+and the canonical rest channel kept separate. The synchronous compatibility
+path remains. Fresh surface binding/update, RBF rest factorization/identity
+evaluation, and staged curve deformation now have limited low-level validation,
+including the full 101-test T0/T1 regression suite and CUDA memcheck/initcheck.
+Fresh posed solving and execution-relay/cache integration are still pending;
+the production RBF/deformation path therefore still contains execution waits.
+Phases 7–9 follow, but earlier compiler,
+multi-groom cache/dirty propagation, memory and lifecycle gates remain open.
 
 This directory is the complete plan for **usdGen**, an XGen-like hair/fur grooming and instancing
 plugin for OpenUSD 26.08 and Hydra 2.0. usdGen is built as a sibling CMake project of usdRig, runs

@@ -191,6 +191,157 @@ int main()
         WaitOrAbort([&] { return !store.Find(dropKey); },
                     "callback-destroyed scene owner balances attachment");
     }
+
+    // Completed final-reference cleanup must compact the actual SceneService
+    // registry without an optional external DrainRetired reclamation pass.
+    UsdGenImagingTestHook::groomSceneServiceCommandBarrier();
+    WaitOrAbort([] {
+        return UsdGenImagingTestHook::retainedGroomSceneStateCount() == 0 &&
+            UsdGenImagingTestHook::liveGroomSceneStateCount() == 0 &&
+            UsdGenImagingTestHook::groomRetirementRecordCount() == 0;
+    }, "scene-service baseline cleanup completes without DrainRetired");
+    size_t const stateBaseline = UsdGenImagingTestHook::retainedGroomSceneStateCount();
+    size_t const liveStateBaseline = UsdGenImagingTestHook::liveGroomSceneStateCount();
+    size_t const recordBaseline = UsdGenImagingTestHook::groomRetirementRecordCount();
+    constexpr unsigned kChurn = 256;
+    for (unsigned i = 0; i != kChurn; ++i) {
+        auto churnInput = HdRetainedSceneIndex::New();
+        auto churnIndex = UsdGenGroomSceneIndex::New(churnInput, 5000 + int(i));
+        churnIndex.Reset();
+    }
+    std::vector<std::thread> concurrentChurn;
+    for (unsigned worker = 0; worker != 4; ++worker) {
+        concurrentChurn.emplace_back([worker] {
+            for (unsigned i = 0; i != 32; ++i) {
+                auto churnInput = HdRetainedSceneIndex::New();
+                auto churnIndex = UsdGenGroomSceneIndex::New(
+                    churnInput, 6000 + int(worker * 32 + i));
+                churnIndex.Reset();
+            }
+        });
+    }
+    for (auto &worker : concurrentChurn) worker.join();
+    UsdGenImagingTestHook::groomSceneServiceCommandBarrier();
+    Check(WaitFor([&] {
+              return UsdGenImagingTestHook::retainedGroomSceneStateCount() == stateBaseline &&
+                  UsdGenImagingTestHook::liveGroomSceneStateCount() == liveStateBaseline &&
+                  UsdGenImagingTestHook::groomRetirementRecordCount() == recordBaseline;
+          }),
+          "completed scene churn reclaims registry states and retirement records without DrainRetired");
+
+    // A second index can repeatedly detach/re-attach a groom that remains
+    // anchored by a first index.  Each target re-attach is real, yet shares
+    // the same store session identity and must not duplicate usedSessions.
+    {
+        auto anchorInput = HdRetainedSceneIndex::New();
+        auto targetInput = HdRetainedSceneIndex::New();
+        SdfPath const dedupRoot("/__sceneOwnerDedup");
+        constexpr int dedupRenderInstance = 5101;
+        anchorInput->AddPrims({{dedupRoot, TfToken("UsdGenGroom"),
+                               HdRetainedContainerDataSource::New()}});
+        targetInput->AddPrims({{dedupRoot, TfToken("UsdGenGroom"),
+                               HdRetainedContainerDataSource::New()}});
+        auto anchorIndex = UsdGenGroomSceneIndex::New(anchorInput, dedupRenderInstance);
+        auto targetIndex = UsdGenGroomSceneIndex::New(targetInput, dedupRenderInstance);
+        auto *anchorOwner = dynamic_cast<UsdGenGroomSceneIndex *>(anchorIndex.operator->());
+        auto *targetOwner = dynamic_cast<UsdGenGroomSceneIndex *>(targetIndex.operator->());
+        Check(anchorOwner != nullptr && targetOwner != nullptr,
+              "shared-session dedup fixture creates both owners");
+        if (anchorOwner && targetOwner) {
+            anchorOwner->Synchronize();
+            targetOwner->Synchronize();
+            usdGenImaging::UsdGenSessionKey const dedupKey{
+                "", dedupRoot, dedupRenderInstance};
+            auto shared = usdGenImaging::UsdGenSessionStore::GetInstance().Find(dedupKey);
+            bool attachedTwice = shared && shared->AttachedIndices() == 2;
+            // Create an expired tail B between two uses of live shared A.
+            // The next A re-attach must both prune B and avoid appending A.
+            SdfPath const expiredTail("/__sceneOwnerDedupExpiredTail");
+            targetInput->RemovePrims({{dedupRoot}});
+            targetOwner->Synchronize();
+            targetInput->AddPrims({{expiredTail, TfToken("UsdGenGroom"),
+                                    HdRetainedContainerDataSource::New()}});
+            targetOwner->Synchronize();
+            targetInput->RemovePrims({{expiredTail}});
+            targetOwner->Synchronize();
+            Check(WaitFor([&] {
+                      return UsdGenImagingTestHook::groomUsedSessionWeakCount(*targetIndex) == 2 &&
+                          UsdGenImagingTestHook::groomUsedSessionLiveUniqueCount(*targetIndex) == 1;
+                  }),
+                  "expired tail remains observable before the first shared-session re-attach");
+            targetInput->AddPrims({{dedupRoot, TfToken("UsdGenGroom"),
+                                    HdRetainedContainerDataSource::New()}});
+            targetOwner->Synchronize();
+            attachedTwice = attachedTwice && shared && shared->AttachedIndices() == 2;
+            Check(UsdGenImagingTestHook::groomUsedSessionWeakCount(*targetIndex) == 1 &&
+                      UsdGenImagingTestHook::groomUsedSessionLiveUniqueCount(*targetIndex) == 1,
+                  "first shared-session re-attach prunes expired tail and avoids duplicate live identity");
+            for (unsigned i = 0; i != 16; ++i) {
+                targetInput->RemovePrims({{dedupRoot}});
+                targetOwner->Synchronize();
+                targetInput->AddPrims({{dedupRoot, TfToken("UsdGenGroom"),
+                                        HdRetainedContainerDataSource::New()}});
+                targetOwner->Synchronize();
+                attachedTwice = attachedTwice && shared && shared->AttachedIndices() == 2;
+            }
+            Check(attachedTwice &&
+                      UsdGenImagingTestHook::groomUsedSessionWeakCount(*targetIndex) == 1 &&
+                      UsdGenImagingTestHook::groomUsedSessionLiveUniqueCount(*targetIndex) == 1,
+                  "repeated shared-session re-attachments deduplicate used-session retention");
+        }
+        targetIndex.Reset();
+        anchorIndex.Reset();
+        UsdGenImagingTestHook::groomSceneServiceCommandBarrier();
+        Check(WaitFor([&] {
+                  return UsdGenImagingTestHook::retainedGroomSceneStateCount() == stateBaseline &&
+                      UsdGenImagingTestHook::liveGroomSceneStateCount() == liveStateBaseline &&
+                      UsdGenImagingTestHook::groomRetirementRecordCount() == recordBaseline;
+              }),
+              "deduplicated session fixture reclaims records without external drain");
+    }
+
+    // Preserve the final-reference -> deleter-enqueue gap contract.  The
+    // registration record is present before the deleter pauses; DrainRetired
+    // must wait for that record until the deleter is released.
+    UsdGenImagingTestHook::armGroomFinalDeleterPauseForTesting();
+    auto gapInput = HdRetainedSceneIndex::New();
+    HdSceneIndexBaseRefPtr gapIndex = UsdGenGroomSceneIndex::New(gapInput, 5201);
+    UsdGenImagingTestHook::groomSceneServiceCommandBarrier();
+    std::atomic<bool> finalResetDone{false};
+    std::thread finalReset([&] {
+        gapIndex.Reset();
+        finalResetDone.store(true, std::memory_order_release);
+    });
+    UsdGenImagingTestHook::waitGroomFinalDeleterPauseForTesting();
+    Check(UsdGenImagingTestHook::retainedGroomSceneStateCount() == stateBaseline + 1 &&
+              UsdGenImagingTestHook::liveGroomSceneStateCount() == liveStateBaseline &&
+              UsdGenImagingTestHook::groomRetirementRecordCount() == recordBaseline + 1,
+          "paused final deleter leaves an expired state weak entry protected by its record");
+    std::atomic<bool> drainReturned{false};
+    UsdGenImagingTestHook::armGroomDrainWaitForTesting();
+    std::thread gapDrain([&] {
+        UsdGenGroomSceneIndex::DrainRetired();
+        drainReturned.store(true, std::memory_order_release);
+    });
+    // The test hook below signals that DrainRetired has found this expired
+    // record and is about to wait; it avoids using scheduler timing as proof.
+    UsdGenImagingTestHook::waitGroomDrainWaitForTesting();
+    Check(!drainReturned.load(std::memory_order_acquire),
+          "DrainRetired waits across the registered final-deleter enqueue gap");
+    UsdGenImagingTestHook::releaseGroomFinalDeleterPauseForTesting();
+    finalReset.join();
+    gapDrain.join();
+    UsdGenImagingTestHook::releaseGroomDrainWaitForTesting();
+    Check(finalResetDone.load(std::memory_order_acquire) &&
+              drainReturned.load(std::memory_order_acquire),
+          "released final deleter completes the waiting retirement drain");
+    UsdGenImagingTestHook::groomSceneServiceCommandBarrier();
+    Check(WaitFor([&] {
+              return UsdGenImagingTestHook::retainedGroomSceneStateCount() == stateBaseline &&
+                  UsdGenImagingTestHook::liveGroomSceneStateCount() == liveStateBaseline &&
+                  UsdGenImagingTestHook::groomRetirementRecordCount() == recordBaseline;
+          }),
+          "retirement-gap drain leaves no completed registry records behind");
     std::printf("testUsdGenSceneOwner: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

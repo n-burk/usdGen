@@ -1,5 +1,6 @@
 // Hydra notices belong to the serialized frontend, never a scene worker.
 #include "usdGenImaging/groomSceneIndexPlugin.h"
+#include "usdGenImaging/testHook.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/retainedSceneIndex.h"
 #include "pxr/imaging/hd/systemMessages.h"
@@ -44,7 +45,12 @@ public:
     }
     void PrimsDirtied(HdSceneIndexBase const&,DirtiedPrimEntries const& entries) override {
         if(!OnFrontend()) return;
-        for(auto const& entry:entries) events.push_back("D:"+entry.primPath.GetString());
+        for(auto const& entry:entries) {
+            // Preserve locator precision in the compact event trace: only a
+            // universal dirty can stand in for an omitted final-path add.
+            events.push_back((entry.dirtyLocators == HdDataSourceLocatorSet::UniversalSet()
+                ? "D:" : "d:") + entry.primPath.GetString());
+        }
     }
     void PrimsRenamed(HdSceneIndexBase const&,RenamedPrimEntries const&) override {}
 };
@@ -56,6 +62,22 @@ bool PollUntil(HdSceneIndexBase& index,std::function<bool()> const& predicate) {
         std::this_thread::yield();
     } while(std::chrono::steady_clock::now()<deadline);
     return false;
+}
+bool HasNetResync(std::vector<std::string> const& events, std::string const& path) {
+    for (std::string const& event : events) {
+        // Coalescing intentionally discards historical R/A pairs.  The one
+        // delivered packet must either re-add the final prim or send a
+        // universal dirty for that same prim.  Hydra dirties are not
+        // hierarchical, so a root dirty cannot resync a child path.
+        if (event == "A:" + path || event == "D:" + path) return true;
+    }
+    return false;
+}
+bool HasNoUnrelatedUniversalDirties(std::vector<std::string> const& events,
+                                    std::string const& path) {
+    for (std::string const& event : events)
+        if (event.rfind("D:", 0) == 0 && event != "D:" + path) return false;
+    return true;
 }
 }
 int main() {
@@ -90,9 +112,57 @@ int main() {
     observer.events.clear();
     input->RemovePrims({{SdfPath("/deferred")}});
     add("/deferred");
-    Check(PollUntil(*index,[&] { return observer.events.size()>=2; }),"poll drains replacement");
-    Check(observer.events==std::vector<std::string>{"R:/deferred","A:/deferred"},
-          "one event sequence proves removal precedes replacement addition");
+    UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(*index);
+    Check(observer.events.empty() &&
+              UsdGenImagingTestHook::pendingGroomPublicationCount(*index) <= 1,
+          "unpolled replacement coalesces to one pending frontend snapshot");
+    index->SystemMessage(HdSystemMessageTokens->asyncPoll,nullptr);
+    Check(index->GetPrim(SdfPath("/deferred")).dataSource &&
+              HasNetResync(observer.events,"/deferred") &&
+              HasNoUnrelatedUniversalDirties(observer.events,"/deferred"),
+          "one poll exposes final replacement through a conservative net resync");
+
+    // Keep the frontend idle while more than the former FIFO capacity of
+    // source notices complete.  The owner-only drain makes every accepted
+    // batch finish without granting a frontend delivery turn.
+    observer.events.clear();
+    uint64_t const capturesBeforeBurst = UsdGenImagingTestHook::groomCaptureCount(*index);
+    uint64_t const cooksBeforeBurst = UsdGenImagingTestHook::groomCookCount(*index);
+    constexpr unsigned kSourceBurst = 4098;
+    SdfPath const transient("/transient");
+    bool allSourceBatchesBounded = true;
+    for (unsigned i = 0; i != kSourceBurst; ++i) {
+        if ((i & 1u) == 0)
+            add("/transient");
+        else
+            input->RemovePrims({{transient}});
+        if ((i & 63u) == 63u) {
+            UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(*index);
+            allSourceBatchesBounded =
+                UsdGenImagingTestHook::pendingGroomPublicationCount(*index) <= 1 &&
+                allSourceBatchesBounded;
+        }
+    }
+    // Exercise final-state replacement separately from the net-absent path.
+    add("/netFinal");
+    input->RemovePrims({{SdfPath("/netFinal")}});
+    add("/netFinal");
+    UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(*index);
+    uint64_t const capturesBeforePoll = UsdGenImagingTestHook::groomCaptureCount(*index);
+    uint64_t const cooksBeforePoll = UsdGenImagingTestHook::groomCookCount(*index);
+    Check(observer.events.empty() &&
+              UsdGenImagingTestHook::pendingGroomPublicationCount(*index) <= 1 &&
+              allSourceBatchesBounded &&
+              capturesBeforePoll > capturesBeforeBurst && cooksBeforePoll == cooksBeforeBurst,
+          "4098 completed source notices retain one net snapshot without cooking or frontend delivery");
+    index->SystemMessage(HdSystemMessageTokens->asyncPoll,nullptr);
+    Check(index->GetPrim(transient).primType.IsEmpty() &&
+              index->GetPrim(SdfPath("/netFinal")).dataSource &&
+              HasNetResync(observer.events,"/netFinal") &&
+              HasNoUnrelatedUniversalDirties(observer.events,"/netFinal") &&
+              UsdGenImagingTestHook::groomCaptureCount(*index) == capturesBeforePoll &&
+              UsdGenImagingTestHook::groomCookCount(*index) == cooksBeforePoll,
+          "one asyncPoll installs final net namespace without capture or cook work");
     // Authored roots are live upstream; synthetic namespaces advance only
     // with the corresponding frontend publication packet.
     observer.events.clear();
@@ -103,6 +173,20 @@ int main() {
         return index->GetChildPrimPaths(SdfPath("/asyncGroom"))==
             SdfPathVector{SdfPath("/asyncGroom/__usdGenRender")};
     }),"poll installs matching synthetic snapshot");
+    // An authored child at the virtual render path remains authoritative over
+    // the synthetic scope in the final coalesced snapshot.
+    observer.events.clear();
+    SdfPath const collision("/asyncGroom/__usdGenRender");
+    input->AddPrims({{collision,TfToken("Mesh"),HdRetainedContainerDataSource::New()}});
+    UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(*index);
+    index->SystemMessage(HdSystemMessageTokens->asyncPoll,nullptr);
+    HdSceneIndexPrim const authoredCollision=input->GetPrim(collision);
+    HdSceneIndexPrim const publishedCollision=index->GetPrim(collision);
+    Check(publishedCollision.dataSource==authoredCollision.dataSource &&
+              publishedCollision.primType==authoredCollision.primType &&
+              HasNetResync(observer.events,"/asyncGroom/__usdGenRender") &&
+              HasNoUnrelatedUniversalDirties(observer.events,"/asyncGroom/__usdGenRender"),
+          "authored collision wins over the synthetic render scope after coalescing");
     observer.events.clear();
     input->RemovePrims({{SdfPath("/asyncGroom")}});
     owner->Synchronize();

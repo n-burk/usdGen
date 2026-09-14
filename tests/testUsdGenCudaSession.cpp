@@ -1,4 +1,9 @@
 #include "usdGen/session.h"
+#include "usdGen/sessionCooker.h"
+#include "usdGen/executionRetirement.h"
+#include "usdGen/executionResources.h"
+#include "usdGen/cudaExecution.h"
+#include "usdGen/imagePayload.h"
 #include "usdGen/gpu/generation.h"
 
 #include <atomic>
@@ -13,6 +18,16 @@
 
 using namespace usdGen;
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); return 1; } } while (false)
+
+static bool DrainCudaRetirement() {
+    int device = -1;
+    if (cudaGetDevice(&device) != cudaSuccess) return false;
+    auto service = FindUsdGenExecutionRetirementService(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    if (!service) return false;
+    service->Drain();
+    return true;
+}
 
 static UsdGenGraphDesc SourceDesc() {
     UsdGenGraphDesc desc;
@@ -116,6 +131,99 @@ static UsdGenGraphDesc WidthChainDesc() {
     return desc;
 }
 
+static UsdGenGraphDesc ImageWidthDesc() {
+    auto desc = SourceDesc();
+    UsdGenMapDesc map;
+    map.path = desc.description.AppendChild(TfToken("Maps"))
+        .AppendChild(TfToken("WidthMask"));
+    map.type = TfToken("UsdGenImageMap");
+    map.textureGeneration = 1;
+    map.imagePayload = UsdGenImagePayload::Create(
+        1, 1, 1, std::vector<float>{.5f},
+        UsdGenImageRowOrientation::BottomUp);
+    desc.maps.push_back(std::move(map));
+    UsdGenNodeDesc width;
+    width.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("ImageWidth"));
+    width.type = TfToken("UsdGenWidth");
+    width.inputs = {desc.nodes.front().path};
+    width.params.push_back({TfToken("width"), VtValue(.8f), false});
+    width.mapBindings.push_back({desc.maps.front().path,
+        UsdGenMapBindingPurpose::MaskSource,
+        TfToken("usdGen:mask:source")});
+    desc.nodes.push_back(std::move(width));
+    desc.terminal = desc.nodes.back().path;
+    return desc;
+}
+
+static UsdGenGraphDesc ReferenceSourceWidthDesc()
+{
+    UsdGenGraphDesc desc;
+    desc.description = SdfPath("/Groom/ReferenceSource");
+    desc.executionBackend = UsdGenExecutionBackend::Cuda;
+    desc.defaultWidth = .025f;
+
+    UsdGenCurveSetDesc reference;
+    reference.path = SdfPath("/Reference/Guides");
+    reference.role = UsdGenRole::Reference;
+    reference.curveRole = TfToken("guide");
+    reference.curveGeneration = 41;
+    reference.curveVertexCounts = {2, 2};
+    reference.points = {
+        GfVec3f(1, 2, 3), GfVec3f(1, 3, 3),
+        GfVec3f(4, 5, 6), GfVec3f(4, 6, 6)};
+    reference.rest = reference.points;
+    reference.curveId = {101, 202};
+    reference.skinPrim = {7, 8};
+    reference.skinPrimUv = {GfVec2f(.1f, .2f), GfVec2f(.3f, .4f)};
+    desc.curveSets.push_back(std::move(reference));
+
+    UsdGenNodeDesc source;
+    source.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("ReferenceSource"));
+    source.type = TfToken("UsdGenReferenceSource");
+    source.references = {SdfPath("/Reference/Guides")};
+
+    UsdGenNodeDesc width;
+    width.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("Width"));
+    width.type = TfToken("UsdGenWidth");
+    width.inputs = {source.path};
+    width.params.push_back({TfToken("width"), VtValue(.5f), false});
+
+    desc.nodes = {source, width};
+    desc.terminal = width.path;
+    return desc;
+}
+
+static UsdGenGraphDesc ReferenceSourceLengthWidthDesc()
+{
+    auto desc = ReferenceSourceWidthDesc();
+    UsdGenNodeDesc length;
+    length.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("Length"));
+    length.type = TfToken("UsdGenLength");
+    length.inputs = {desc.nodes[0].path};
+    length.params = {
+        {TfToken("length:mode"), VtValue(TfToken("scale")), false},
+        {TfToken("length:value"), VtValue(.5f), false}};
+    UsdGenNodeDesc terminal;
+    terminal.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("LengthWidth"));
+    terminal.type = TfToken("UsdGenWidth");
+    terminal.inputs = {length.path};
+    terminal.params = {{TfToken("width"), VtValue(.75f), false}};
+    UsdGenNodeDesc sibling;
+    sibling.path = desc.description.AppendChild(TfToken("Ops"))
+        .AppendChild(TfToken("LengthSibling"));
+    sibling.type = TfToken("UsdGenWidth");
+    sibling.inputs = {length.path};
+    sibling.params = {{TfToken("width"), VtValue(.25f), false}};
+    desc.nodes = {desc.nodes[0], length, terminal, sibling};
+    desc.terminal = terminal.path;
+    return desc;
+}
+
 struct AsyncCommitResult {
     std::atomic<bool> done{false};
     bool accepted = false;
@@ -157,9 +265,503 @@ static bool HasDiagnostic(UsdGenSession::SnapshotPtr const& snapshot,
     return false;
 }
 
+struct SourceCallbackGateRelease {
+    bool armed = false;
+    ~SourceCallbackGateRelease() {
+        if (armed) releaseCudaSourceAsyncCallbackGateForTesting();
+    }
+    void Release() {
+        if (armed) releaseCudaSourceAsyncCallbackGateForTesting();
+        armed = false;
+    }
+};
+
+template <class T>
+static bool ReadNamed(gpu::CudaNamedChannelLease const& lease,
+                      cudaStream_t stream, std::vector<T>* values)
+{
+    if (!lease || !values || lease.Bytes().size % sizeof(T)) return false;
+    values->resize(lease.Bytes().size / sizeof(T));
+    return cudaMemcpyAsync(values->data(), lease.Bytes().data, lease.Bytes().size,
+                           cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+           cudaStreamSynchronize(stream) == cudaSuccess;
+}
+
 int main() {
     cudaStream_t consumer = nullptr;
     CHECK(cudaStreamCreateWithFlags(&consumer, cudaStreamNonBlocking) == cudaSuccess);
+    // Authored named planes are uploaded into private buffers and published
+    // with the same generation as their geometry. Retaining the first lease
+    // proves that a later descriptor revision cannot mutate its COW data.
+    {
+        UsdGenSession session;
+        auto desc = SourceDesc();
+        UsdGenAuthoredPlaneDesc point;
+        point.name = TfToken("density");
+        point.type = UsdGenAuthoredPlaneType::Float32;
+        point.domain = UsdGenAuthoredPlaneDomain::Point;
+        point.arity = 1;
+        point.floatValues = {1.f, 2.f, 3.f, 4.f, 5.f};
+        UsdGenAuthoredPlaneDesc primitive;
+        primitive.name = TfToken("classPair");
+        primitive.type = UsdGenAuthoredPlaneType::Int32;
+        primitive.domain = UsdGenAuthoredPlaneDomain::Primitive;
+        primitive.arity = 2;
+        primitive.intValues = {7, 8, 9, 10};
+        UsdGenAuthoredPlaneDesc groom;
+        groom.name = TfToken("groomWeight");
+        groom.type = UsdGenAuthoredPlaneType::Float32;
+        groom.domain = UsdGenAuthoredPlaneDomain::Groom;
+        groom.floatValues = {0.25f};
+        desc.curveSets.front().authoredPlanes = {point, primitive, groom};
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto first = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(first && first->device && !session.LastDiagnostics().HasErrors() &&
+              session.Stats().executionCacheMisses == 1 &&
+              session.Stats().executionCacheAdmissions == 1);
+        auto firstDensity = gpu::AcquireNamedChannel(first->device, "density", consumer);
+        auto firstClasses = gpu::AcquireNamedChannel(first->device, "classPair", consumer);
+        auto firstGroom = gpu::AcquireNamedChannel(first->device, "groomWeight", consumer);
+        std::vector<float> density;
+        std::vector<int32_t> classes;
+        std::vector<float> groomValue;
+        CHECK(ReadNamed(firstDensity, consumer, &density) &&
+              density == std::vector<float>({3.f, 4.f, 5.f, 1.f, 2.f}));
+        CHECK(ReadNamed(firstClasses, consumer, &classes) &&
+              classes == std::vector<int32_t>({9, 10, 7, 8}));
+        CHECK(ReadNamed(firstGroom, consumer, &groomValue) &&
+              groomValue == std::vector<float>({0.25f}));
+
+        desc.curveSets.front().authoredPlanes.front().floatValues[0] = 99.f;
+        session.SetGraphDesc(desc);
+        auto second = session.Commit(2, UsdGenCommitReason::SetTime);
+        CHECK(second && second->device && second != first);
+        auto secondDensity = gpu::AcquireNamedChannel(second->device, "density", consumer);
+        CHECK(ReadNamed(secondDensity, consumer, &density) && density[3] == 99.f);
+        CHECK(ReadNamed(firstDensity, consumer, &density) && density[3] == 1.f);
+    }
+    // Length compaction rebuilds every domain into private phase-5 outputs.
+    // The short curve is culled after source canonicalization; Point and
+    // Primitive payloads gather the surviving stable-id curve, while Groom
+    // remains constant. A later generation cannot mutate the retained lease.
+    {
+        UsdGenSession session;
+        auto desc = SourceDesc();
+        UsdGenAuthoredPlaneDesc point;
+        point.name = TfToken("density");
+        point.type = UsdGenAuthoredPlaneType::Float32;
+        point.domain = UsdGenAuthoredPlaneDomain::Point;
+        point.arity = 1;
+        point.floatValues = {1.f, 2.f, 3.f, 4.f, 5.f};
+        UsdGenAuthoredPlaneDesc primitive;
+        primitive.name = TfToken("classPair");
+        primitive.type = UsdGenAuthoredPlaneType::Int32;
+        primitive.domain = UsdGenAuthoredPlaneDomain::Primitive;
+        primitive.arity = 2;
+        primitive.intValues = {7, 8, 9, 10};
+        UsdGenAuthoredPlaneDesc groom;
+        groom.name = TfToken("groomWeight");
+        groom.type = UsdGenAuthoredPlaneType::Float32;
+        groom.domain = UsdGenAuthoredPlaneDomain::Groom;
+        groom.arity = 1;
+        groom.floatValues = {0.25f};
+        desc.curveSets.front().authoredPlanes = {point, primitive, groom};
+        UsdGenNodeDesc length;
+        length.path = desc.description.AppendChild(TfToken("Ops"))
+            .AppendChild(TfToken("Length"));
+        length.type = TfToken("UsdGenLength");
+        length.inputs = {desc.nodes.front().path};
+        length.params = {
+            {TfToken("length:mode"), VtValue(TfToken("cull")), false},
+            {TfToken("cullThreshold"), VtValue(2.f), false}};
+        desc.nodes.push_back(length);
+        desc.terminal = length.path;
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto compacted = session.Commit(10, UsdGenCommitReason::SetTime);
+        CHECK(compacted && compacted->device &&
+              !session.LastDiagnostics().HasErrors());
+        auto geometry = gpu::AcquireGeometry(compacted->device, consumer);
+        auto densityLease = gpu::AcquireNamedChannel(
+            compacted->device, "density", consumer);
+        auto classLease = gpu::AcquireNamedChannel(
+            compacted->device, "classPair", consumer);
+        auto groomLease = gpu::AcquireNamedChannel(
+            compacted->device, "groomWeight", consumer);
+        std::vector<float> density;
+        std::vector<int32_t> classes;
+        std::vector<float> groomValue;
+        CHECK(geometry && geometry.Geometry().curveCount == 1 &&
+              geometry.Geometry().pointCount == 3);
+        CHECK(densityLease.Metadata() && densityLease.Metadata()->elementCount == 3 &&
+              ReadNamed(densityLease, consumer, &density) &&
+              density == std::vector<float>({3.f, 4.f, 5.f}));
+        CHECK(classLease.Metadata() && classLease.Metadata()->elementCount == 1 &&
+              ReadNamed(classLease, consumer, &classes) &&
+              classes == std::vector<int32_t>({9, 10}));
+        CHECK(groomLease.Metadata() && groomLease.Metadata()->elementCount == 1 &&
+              ReadNamed(groomLease, consumer, &groomValue) &&
+              groomValue == std::vector<float>({0.25f}));
+
+        desc.curveSets.front().authoredPlanes.front().floatValues[2] = 33.f;
+        session.SetGraphDesc(desc);
+        auto revised = session.Commit(11, UsdGenCommitReason::SetTime);
+        CHECK(revised && revised->device && revised != compacted);
+        auto revisedDensity = gpu::AcquireNamedChannel(
+            revised->device, "density", consumer);
+        CHECK(ReadNamed(revisedDensity, consumer, &density) && density.front() == 33.f);
+        CHECK(ReadNamed(densityLease, consumer, &density) && density.front() == 3.f);
+    }
+    // Source resampling rebuilds Point planes into private target-cardinality
+    // buffers while Primitive data follows stable ids and Groom data stays
+    // constant. A retained lease proves the next resampled publication cannot
+    // mutate the first generation's COW payload.
+    {
+        UsdGenSession session;
+        auto desc = SourceDesc();
+        desc.nodes.front().params.push_back(
+            {TfToken("resampleTo"), VtValue(4), false});
+        UsdGenAuthoredPlaneDesc point;
+        point.name = TfToken("density");
+        point.type = UsdGenAuthoredPlaneType::Float32;
+        point.domain = UsdGenAuthoredPlaneDomain::Point;
+        point.arity = 1;
+        point.floatValues = {10.f, 20.f, 30.f, 40.f, 70.f};
+        UsdGenAuthoredPlaneDesc primitive;
+        primitive.name = TfToken("classPair");
+        primitive.type = UsdGenAuthoredPlaneType::Int32;
+        primitive.domain = UsdGenAuthoredPlaneDomain::Primitive;
+        primitive.arity = 2;
+        primitive.intValues = {7, 8, 9, 10};
+        UsdGenAuthoredPlaneDesc groom;
+        groom.name = TfToken("groomWeight");
+        groom.type = UsdGenAuthoredPlaneType::Float32;
+        groom.domain = UsdGenAuthoredPlaneDomain::Groom;
+        groom.floatValues = {0.25f};
+        desc.curveSets.front().authoredPlanes = {point, primitive, groom};
+        auto const originalDesc = desc;
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto first = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(first && first->device && !session.LastDiagnostics().HasErrors());
+        auto const firstOwner = first->device->Owner();
+        auto firstDensity = gpu::AcquireNamedChannel(first->device, "density", consumer);
+        auto firstClasses = gpu::AcquireNamedChannel(first->device, "classPair", consumer);
+        auto firstGroom = gpu::AcquireNamedChannel(first->device, "groomWeight", consumer);
+        std::vector<float> density;
+        std::vector<int32_t> classes;
+        std::vector<float> groomValue;
+        CHECK(ReadNamed(firstDensity, consumer, &density) && density.size() == 8);
+        std::vector<float> const expected{30.f, 36.666667f, 50.f, 70.f,
+                                          10.f, 13.333333f, 16.666667f, 20.f};
+        CHECK(std::equal(density.begin(), density.end(), expected.begin(),
+            [](float a, float b) { return std::fabs(a - b) < 1e-4f; }));
+        CHECK(ReadNamed(firstClasses, consumer, &classes) &&
+              classes == std::vector<int32_t>({9, 10, 7, 8}));
+        CHECK(ReadNamed(firstGroom, consumer, &groomValue) &&
+              groomValue == std::vector<float>({0.25f}));
+
+        desc.curveSets.front().authoredPlanes.front().floatValues[0] = 99.f;
+        session.SetGraphDesc(desc);
+        auto second = session.Commit(2, UsdGenCommitReason::SetTime);
+        CHECK(second && second->device && second != first);
+        auto secondDensity = gpu::AcquireNamedChannel(second->device, "density", consumer);
+        CHECK(ReadNamed(secondDensity, consumer, &density) && density.size() == 8 &&
+              std::fabs(density[4] - 99.f) < 1e-4f);
+        CHECK(ReadNamed(firstDensity, consumer, &density) &&
+              std::equal(density.begin(), density.end(), expected.begin(),
+                  [](float a, float b) { return std::fabs(a - b) < 1e-4f; }));
+
+        desc.curveSets.front().authoredPlanes.front().floatValues[0] = 55.f;
+        failNextCudaSourceRelayNamedNativeCallbackForTesting();
+        session.SetGraphDesc(desc);
+        CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == second &&
+              session.LastDiagnostics().HasErrors());
+        CHECK(ReadNamed(secondDensity, consumer, &density) && density.size() == 8 &&
+              std::fabs(density[4] - 99.f) < 1e-4f);
+
+        // Reverting to the exact first cache tuple after the native callback
+        // failure must execute in a replacement workspace. The poisoned
+        // context clears residency and advances compatibility identity, so it
+        // cannot republish firstOwner even though that immutable COW owner and
+        // its retained consumer lease remain valid.
+        session.SetGraphDesc(originalDesc);
+        auto recovered = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(recovered && recovered->device && recovered != first &&
+              !session.LastDiagnostics().HasErrors() &&
+              recovered->device->Owner() != firstOwner);
+        CHECK(ReadNamed(firstDensity, consumer, &density) &&
+              std::equal(density.begin(), density.end(), expected.begin(),
+                  [](float a, float b) { return std::fabs(a - b) < 1e-4f; }));
+    }
+    // A backend-neutral context-loss fence cancels an in-flight CUDA
+    // publication on the command owner, but cache/workspace mutation occurs
+    // only later on the serialized cooker lane. Recovery of the exact cached
+    // tuple must execute on a new owner while the old COW consumer stays valid.
+    {
+        int device = -1;
+        CHECK(cudaGetDevice(&device) == cudaSuccess && device >= 0);
+        UsdGenSession session(1);
+        auto desc = WidthChainDesc();
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto first = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(first && first->device && !session.LastDiagnostics().HasErrors());
+        auto const oldOwner = first->device->Owner();
+        auto oldLease = gpu::AcquireGeometry(first->device, consumer);
+        CHECK(oldOwner && oldLease);
+        auto const oldPoints = oldLease.Geometry().points.data;
+        float3 oldPoint{};
+        CHECK(cudaMemcpyAsync(&oldPoint, oldPoints, sizeof(oldPoint),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+
+        auto cached = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(cached && cached->device && cached != first &&
+              cached->device->Owner() == oldOwner &&
+              session.Stats().executionCacheHits == 1 &&
+              session.Stats().executionCacheMisses == 1 &&
+              session.Stats().executionCacheAdmissions == 1);
+
+        // Loss signals are backend-scoped. A Vulkan notification cannot
+        // invalidate the active CUDA context, and the exact tuple still hits.
+        CHECK(!session.PostDeviceContextLost(UsdGenDeviceBackend::Unknown, device));
+        CHECK(session.PostDeviceContextLost(UsdGenDeviceBackend::Vulkan, device));
+        auto backendFiltered = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(backendFiltered && backendFiltered->device &&
+              backendFiltered->device->Owner() == oldOwner &&
+              session.Stats().executionCacheHits == 2);
+
+        armCudaSourceAsyncCallbackGateForTesting();
+        SourceCallbackGateRelease releaseGate{true};
+        UsdGenSession::CommitRequest request;
+        request.frame = 2;
+        request.reason = UsdGenCommitReason::SetTime;
+        auto inFlight = SubmitRequest(session, std::move(request));
+        CHECK(inFlight && inFlight->accepted);
+        waitCudaSourceAsyncCallbackGateForTesting();
+        session.NotifyDeviceContextLost(UsdGenDeviceBackend::Cuda, device);
+        CHECK(!inFlight->done.load(std::memory_order_acquire) &&
+              session.NeedsCommit());
+        releaseGate.Release();
+        CHECK(WaitFor(*inFlight) &&
+              inFlight->outcome == UsdGenExecutionPipeline::Outcome::Superseded &&
+              session.Generation() == backendFiltered);
+
+        auto recovered = session.Commit(1, UsdGenCommitReason::SetTime);
+        CHECK(recovered && recovered->device && recovered != backendFiltered &&
+              !session.LastDiagnostics().HasErrors() &&
+              recovered->device->Owner() != oldOwner &&
+              session.Stats().executionCacheMisses == 2 &&
+              session.Stats().executionCacheAdmissions == 2);
+        auto recoveredLease = gpu::AcquireGeometry(recovered->device, consumer);
+        CHECK(recoveredLease && recoveredLease.Geometry().points.data != oldPoints);
+
+        float3 retainedPoint{};
+        CHECK(cudaMemcpyAsync(&retainedPoint, oldPoints, sizeof(retainedPoint),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess &&
+              retainedPoint.x == oldPoint.x && retainedPoint.y == oldPoint.y &&
+              retainedPoint.z == oldPoint.z);
+    }
+    // ReferenceSource is a constrained CUDA source root: it consumes one
+    // immutable reference curve set and hands its full geometry contract to a
+    // normal COW Width stage.  Planning must preserve that logical source ->
+    // Width dependency before a Session ever allocates a device workspace.
+    {
+        auto desc = ReferenceSourceWidthDesc();
+        UsdGenDiagnostics diagnostics;
+        auto plan = CompileCudaGraph(desc, &diagnostics);
+        CHECK(plan && !diagnostics.HasErrors());
+        auto metadata = GetCudaExecutionPlanMetadata(*plan);
+        CHECK(metadata && metadata->Operators().size() == 2 &&
+              metadata->Tasks().size() == 3 && metadata->TerminalTask() == 2);
+        auto const& sourceTask = metadata->Tasks()[0];
+        auto const& widthTask = metadata->Tasks()[1];
+        CHECK(sourceTask.kind == UsdGenExecutionTaskKind::Source &&
+              sourceTask.path == desc.nodes[0].path &&
+              sourceTask.type == TfToken("UsdGenReferenceSource") &&
+              sourceTask.dependencies.empty() &&
+              widthTask.kind == UsdGenExecutionTaskKind::Operator &&
+              widthTask.path == desc.nodes[1].path &&
+              widthTask.type == TfToken("UsdGenWidth") &&
+              widthTask.dependencies == std::vector<uint32_t>{0} &&
+              metadata->Tasks()[2].dependencies == std::vector<uint32_t>({0, 1}));
+
+        UsdGenSession session(1);
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        auto first = session.Commit(3, UsdGenCommitReason::SetTime);
+        CHECK(first && first->device && !session.LastDiagnostics().HasErrors());
+        auto firstOwner = first->device->Owner();
+        auto oldLease = gpu::AcquireGeometry(first->device, consumer);
+        CHECK(firstOwner && oldLease);
+        auto geometry = oldLease.Geometry();
+        CHECK(geometry.curveCount == 2 && geometry.pointCount == 4 &&
+              geometry.points.size == 4 && geometry.curveOffsets.size == 3 &&
+              geometry.stableIds.size == 2 && oldLease.RootPrim().size == 2 &&
+              oldLease.RootUV().size == 2);
+        std::array<float3, 4> points{};
+        std::array<float, 4> widths{};
+        std::array<uint32_t, 3> offsets{};
+        std::array<uint64_t, 2> ids{};
+        std::array<int32_t, 2> rootPrim{};
+        std::array<float2, 2> rootUv{};
+        CHECK(cudaMemcpyAsync(points.data(), geometry.points.data,
+                              sizeof(points), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaMemcpyAsync(widths.data(), geometry.widths.data,
+                              sizeof(widths), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaMemcpyAsync(offsets.data(), geometry.curveOffsets.data,
+                              sizeof(offsets), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaMemcpyAsync(ids.data(), geometry.stableIds.data,
+                              sizeof(ids), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaMemcpyAsync(rootPrim.data(), oldLease.RootPrim().data,
+                              sizeof(rootPrim), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaMemcpyAsync(rootUv.data(), oldLease.RootUV().data,
+                              sizeof(rootUv), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+        CHECK(points[0].x == 1 && points[0].y == 2 && points[0].z == 3 &&
+              points[3].x == 4 && points[3].y == 6 && points[3].z == 6 &&
+              widths[0] == .5f && widths[1] == .5f &&
+              widths[2] == .5f && widths[3] == .5f &&
+              offsets[0] == 0 && offsets[1] == 2 && offsets[2] == 4 &&
+              ids[0] == 101 && ids[1] == 202 &&
+              rootPrim[0] == 7 && rootPrim[1] == 8 &&
+              rootUv[0].x == .1f && rootUv[0].y == .2f &&
+              rootUv[1].x == .3f && rootUv[1].y == .4f);
+
+        auto cached = session.Commit(3, UsdGenCommitReason::SetTime);
+        CHECK(cached && cached != first && cached->device &&
+              cached->device != first->device &&
+              cached->device->Owner() == firstOwner &&
+              session.Stats().executionCacheHits == 1);
+
+        // Reference curve generation is part of the exact cache input tuple.
+        // Changing it forces a new source/owner, while the old consumer lease
+        // remains readable and therefore cannot observe the replacement data.
+        desc.curveSets.front().curveGeneration++;
+        desc.curveSets.front().points.front() = GfVec3f(9, 8, 7);
+        session.SetGraphDesc(desc);
+        auto changed = session.Commit(3, UsdGenCommitReason::SetTime);
+        CHECK(changed && changed->device && changed->device->Owner() != firstOwner &&
+              session.Stats().executionCacheMisses == 2);
+        float3 oldPoint{};
+        CHECK(cudaMemcpyAsync(&oldPoint, geometry.points.data, sizeof(oldPoint),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess &&
+              oldPoint.x == 1 && oldPoint.y == 2 && oldPoint.z == 3);
+
+        // These checks compile only; they must reject before any CUDA workspace
+        // or source upload allocation is attempted.
+        UsdGenAuthoredPlaneDesc plane;
+        plane.name = TfToken("unsupported");
+        plane.type = UsdGenAuthoredPlaneType::Float32;
+        plane.domain = UsdGenAuthoredPlaneDomain::Point;
+        plane.floatValues = {1, 2, 3, 4};
+        auto namedPlane = ReferenceSourceWidthDesc();
+        namedPlane.curveSets.front().authoredPlanes.push_back(plane);
+        diagnostics = {};
+        CHECK(!CompileCudaGraph(namedPlane, &diagnostics) && diagnostics.HasErrors());
+        auto multipleReferences = ReferenceSourceWidthDesc();
+        auto anotherReference = multipleReferences.curveSets.front();
+        anotherReference.path = SdfPath("/Reference/Other");
+        multipleReferences.curveSets.push_back(std::move(anotherReference));
+        multipleReferences.nodes.front().references.push_back(
+            SdfPath("/Reference/Other"));
+        diagnostics = {};
+        CHECK(!CompileCudaGraph(multipleReferences, &diagnostics) && diagnostics.HasErrors());
+        auto mapped = ReferenceSourceWidthDesc();
+        mapped.nodes.front().maps = {SdfPath("/Maps/unsupported")};
+        diagnostics = {};
+        CHECK(!CompileCudaGraph(mapped, &diagnostics) && diagnostics.HasErrors());
+        auto topologyChanging = ReferenceSourceWidthDesc();
+        topologyChanging.nodes.front().params.push_back(
+            {TfToken("resampleTo"), VtValue(3), false});
+        diagnostics = {};
+        CHECK(!CompileCudaGraph(topologyChanging, &diagnostics) && diagnostics.HasErrors());
+    }
+    // The topology-trunk ReferenceSource path also runs through the
+    // asynchronous Session task graph. Hold the source callback at the
+    // source->Length handoff to observe the literal-Length reservation's
+    // Pending balance, then retain the old lease while a changed reference
+    // generation is published.
+    {
+        auto desc = ReferenceSourceLengthWidthDesc();
+        UsdGenSession session(1);
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        int device = -1;
+        CHECK(cudaGetDevice(&device) == cudaSuccess);
+        auto pool = FindUsdGenExecutionResourcePool(
+            {UsdGenExecutionResourceBackend::Cuda, device});
+        CHECK(pool);
+        auto const before = pool->Snapshot();
+
+        armCudaSourceAsyncCallbackGateForTesting();
+        SourceCallbackGateRelease releaseGate{true};
+        UsdGenSession::CommitRequest firstRequest;
+        firstRequest.frame = 12.0;
+        firstRequest.reason = UsdGenCommitReason::SetTime;
+        auto first = SubmitRequest(session, std::move(firstRequest));
+        CHECK(first->accepted);
+        waitCudaSourceAsyncCallbackGateForTesting();
+        auto const during = pool->Snapshot();
+        CHECK(during.byKind[static_cast<size_t>(
+                  UsdGenExecutionResourceKind::Pending)] >
+              before.byKind[static_cast<size_t>(
+                  UsdGenExecutionResourceKind::Pending)] &&
+              during.usedBytes > before.usedBytes);
+        releaseGate.Release();
+        CHECK(WaitFor(*first) &&
+              first->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              first->snapshot && first->snapshot->generation &&
+              first->snapshot->generation->device);
+        auto const firstGeneration = first->snapshot->generation;
+        auto oldLease = gpu::AcquireGeometry(firstGeneration->device,
+                                              consumer);
+        CHECK(oldLease && oldLease.Geometry().pointCount == 4 &&
+              oldLease.RootPrim().size == 2);
+        float3 oldPoint{};
+        CHECK(cudaMemcpyAsync(&oldPoint, oldLease.Geometry().points.data,
+                              sizeof(oldPoint), cudaMemcpyDeviceToHost,
+                              consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+
+        desc.curveSets.front().curveGeneration++;
+        desc.curveSets.front().points.front() = GfVec3f(91, 82, 73);
+        session.SetGraphDesc(desc);
+        UsdGenSession::CommitRequest secondRequest;
+        secondRequest.frame = 12.0;
+        secondRequest.reason = UsdGenCommitReason::SetTime;
+        auto second = SubmitRequest(session, std::move(secondRequest));
+        CHECK(second->accepted && WaitFor(*second) &&
+              second->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              second->snapshot && second->snapshot->generation &&
+              second->snapshot->generation->device &&
+              second->snapshot->generation->device != firstGeneration->device);
+        auto newLease = gpu::AcquireGeometry(
+            second->snapshot->generation->device, consumer);
+        CHECK(newLease);
+        float3 revisedPoint{};
+        CHECK(cudaMemcpyAsync(&revisedPoint, newLease.Geometry().points.data,
+                              sizeof(revisedPoint), cudaMemcpyDeviceToHost,
+                              consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess &&
+              oldPoint.x == 1 && oldPoint.y == 2 && oldPoint.z == 3 &&
+              revisedPoint.x == 91 && revisedPoint.y == 82 &&
+              revisedPoint.z == 73);
+        // Keep the consumer lease alive through the changed publication and
+        // re-read it to prove the old COW owner was not overwritten.
+        float3 retainedPoint{};
+        CHECK(cudaMemcpyAsync(&retainedPoint,
+                              oldLease.Geometry().points.data,
+                              sizeof(retainedPoint), cudaMemcpyDeviceToHost,
+                              consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess &&
+              retainedPoint.x == 1 && retainedPoint.y == 2 &&
+              retainedPoint.z == 3);
+    }
     // Source resampling happens after the GPU source upload: literal targets
     // change topology without changing the authored host curve set.
     {
@@ -437,8 +1039,20 @@ int main() {
         auto malformed = desc;
         malformed.curveSets[0].skinPrim[0] = 900;
         session.SetGraphDesc(malformed);
-        CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == second);
-        CHECK(session.LastDiagnostics().HasErrors());
+        auto repaired = session.Commit(3, UsdGenCommitReason::SetTime);
+        CHECK(repaired && repaired != second && repaired->device &&
+              !session.LastDiagnostics().HasErrors());
+        {
+            auto repairedLease = gpu::AcquireGeometry(repaired->device,consumer);
+            CHECK(repairedLease && repairedLease.RootPrim().size == 2);
+            int32_t repairedPrim[2]{};
+            CHECK(cudaMemcpyAsync(repairedPrim,repairedLease.RootPrim().data,sizeof(repairedPrim),
+                                  cudaMemcpyDeviceToHost,consumer) == cudaSuccess &&
+                  cudaStreamSynchronize(consumer) == cudaSuccess);
+            CHECK(repairedPrim[0] == 8 && repairedPrim[1] >= 0 && repairedPrim[1] < 9 &&
+                  malformed.curveSets[0].skinPrim[0] == 900);
+        }
+        second = repaired; // Subsequent malformed inputs retain this last-good capture.
         malformed = desc;
         malformed.curveSets[0].restFromCurrentPoints = true;
         session.SetGraphDesc(malformed);
@@ -481,7 +1095,7 @@ int main() {
         session.SetGraphDesc(cache);
         session.SetDevicePublicationEnabled(true);
         auto cacheGeneration = session.Commit(7, UsdGenCommitReason::SetTime);
-        CHECK(cacheGeneration && cacheGeneration->id == 2 &&
+        CHECK(cacheGeneration && cacheGeneration->id == second->id + 1 &&
               cacheGeneration->device->Geometry().alreadyDeformed);
         auto empty = desc;
         auto& emptyCurves = empty.curveSets[0];
@@ -490,14 +1104,74 @@ int main() {
         emptyCurves.skinPrim.clear(); emptyCurves.skinPrimUv.clear();
         session.SetGraphDesc(empty);
         auto emptyGeneration = session.Commit(8, UsdGenCommitReason::SetTime);
-        CHECK(emptyGeneration && emptyGeneration->id == 3 && emptyGeneration->device);
+        CHECK(emptyGeneration && emptyGeneration->id == cacheGeneration->id + 1 && emptyGeneration->device);
         auto emptyLease = gpu::AcquireGeometry(emptyGeneration->device, consumer);
         CHECK(emptyLease && emptyLease.Geometry().curveCount == 0 &&
               emptyLease.Geometry().pointCount == 0 && emptyLease.Geometry().curveOffsets.size == 1);
     }
     CHECK(retained && !oldOwner.expired());
     retained = {};
-    CHECK(oldOwner.expired());
+    CHECK(cudaStreamSynchronize(consumer) == cudaSuccess);
+    CHECK(DrainCudaRetirement() && oldOwner.expired());
+
+    // The async Session path retains decoded image data by immutable COW
+    // ownership. A replacement descriptor can publish new texels while an
+    // external lease keeps the prior device generation readable.
+    {
+        UsdGenSession session(1);
+        auto desc = ImageWidthDesc();
+        session.SetGraphDesc(desc);
+        session.SetDevicePublicationEnabled(true);
+        UsdGenSession::CommitRequest request;
+        request.frame = 1;
+        request.reason = UsdGenCommitReason::SetTime;
+        auto first = SubmitRequest(session, std::move(request));
+        CHECK(first->accepted && WaitFor(*first) &&
+              first->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              first->snapshot && first->snapshot->generation &&
+              first->snapshot->generation->device);
+        auto oldLease = gpu::AcquireGeometry(
+            first->snapshot->generation->device, consumer);
+        CHECK(oldLease && oldLease.Geometry().widths.size == 5);
+        std::vector<float> oldWidths(5), newWidths(5);
+        CHECK(cudaMemcpyAsync(oldWidths.data(), oldLease.Geometry().widths.data,
+                              oldWidths.size() * sizeof(float),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+        for (float value : oldWidths)
+            CHECK(std::fabs(value - .4125f) < 2e-5f);
+
+        auto const oldPayload = desc.maps.front().imagePayload;
+        desc.maps.front().textureGeneration++;
+        desc.maps.front().imagePayload = UsdGenImagePayload::Create(
+            1, 1, 1, std::vector<float>{.25f},
+            UsdGenImageRowOrientation::BottomUp);
+        session.SetGraphDesc(desc);
+        request = {};
+        request.frame = 1;
+        request.reason = UsdGenCommitReason::SetTime;
+        auto replacement = SubmitRequest(session, std::move(request));
+        CHECK(replacement->accepted && WaitFor(*replacement) &&
+              replacement->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              replacement->snapshot && replacement->snapshot->generation &&
+              replacement->snapshot->generation->device &&
+              oldPayload && oldPayload->Data()[0] == .5f);
+        auto newLease = gpu::AcquireGeometry(
+            replacement->snapshot->generation->device, consumer);
+        CHECK(newLease && newLease.Geometry().widths.size == 5);
+        CHECK(cudaMemcpyAsync(newWidths.data(), newLease.Geometry().widths.data,
+                              newWidths.size() * sizeof(float),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+        for (float value : newWidths)
+            CHECK(std::fabs(value - .21875f) < 2e-5f);
+        CHECK(cudaMemcpyAsync(oldWidths.data(), oldLease.Geometry().widths.data,
+                              oldWidths.size() * sizeof(float),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+        for (float value : oldWidths)
+            CHECK(std::fabs(value - .4125f) < 2e-5f);
+    }
 
     // A compiled Source -> Width -> Width chain is reusable across frames.
     // Keep the first width generation leased while later commits replace the
@@ -616,7 +1290,274 @@ int main() {
     }
     CHECK(retainedWidths && !widthOwner.expired());
     retainedWidths = {};
-    CHECK(widthOwner.expired());
+    CHECK(cudaStreamSynchronize(consumer) == cudaSuccess);
+    CHECK(DrainCudaRetirement() && widthOwner.expired());
+
+    // The synchronous cooker uses the same device-aware cache contract as the
+    // session owner: a successful device generation first becomes a deferred
+    // candidate, and only an accepted candidate enters residency.  A hit then
+    // republishes a fresh host/device identity while retaining the immutable
+    // COW owner and its native allocations.
+    std::weak_ptr<const UsdGenDeviceOwner> cachedCookerOwner;
+    {
+        int device = -1;
+        CHECK(cudaGetDevice(&device) == cudaSuccess && device >= 0);
+        auto cacheDomain = std::make_shared<UsdGenExecutionCacheDomain>(
+            UsdGenExecutionCacheDomainKey{UsdGenDeviceBackend::Cuda, device, 0},
+            64u * 1024u * 1024u);
+        UsdGenSessionCooker cooker(2, 64u * 1024u * 1024u, cacheDomain);
+        auto cudaDesc = std::make_shared<const UsdGenGraphDesc>(WidthChainDesc());
+        auto first = cooker.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 1.0,
+            UsdGenCommitReason::SetTime, {}, {}, false, 0, 1, device);
+        auto firstCandidate = cooker.TakeCacheCandidate();
+        CHECK(first && first->device && first->id == 0 &&
+              first->device->Identity().generation == 0 && firstCandidate &&
+              cooker.ExecutionCacheSize() == 0 &&
+              cooker.Stats().executionCacheMisses == 1);
+        auto firstOwner = first->device->Owner();
+        cachedCookerOwner = firstOwner;
+        size_t const firstBytes = first->device->ExclusiveRetainedBytes();
+        CHECK(firstOwner && firstOwner->ProducerReady() && firstBytes > 0 &&
+              firstCandidate->bytes > firstBytes);
+        auto mischargedCandidate = *firstCandidate;
+        ++mischargedCandidate.bytes;
+        CHECK(!cooker.CommitCacheCandidate(mischargedCandidate) &&
+              cooker.ExecutionCacheSize() == 0 &&
+              cooker.ExecutionCacheBytes() == 0 &&
+              cooker.Stats().executionCacheAdmissionFailures == 1);
+        CHECK(cooker.CommitCacheCandidate(*firstCandidate) &&
+              cooker.ExecutionCacheSize() == 1 &&
+              cooker.ExecutionCacheBytes() == firstCandidate->bytes &&
+              cooker.Stats().executionCacheAdmissions == 1);
+        size_t const residentBytes = cooker.ExecutionCacheBytes();
+        UsdGenStats const afterAdmission = cooker.Stats();
+
+        // A point revision is a real COW overlay: its owner retains the base
+        // generation while owning only the replacement points itself. The
+        // exclusive value remains delta-only, but the cache-charge value must
+        // include the reachable base even if the base cache record later
+        // disappears.
+        auto replacementPoints = std::make_unique<gpu::DeviceBuffer<float3>>();
+        CHECK(replacementPoints->reset(first->device->Geometry().pointCount) ==
+              cudaSuccess);
+        CHECK(cudaMemset(replacementPoints->data(), 0,
+                         replacementPoints->bytes()) == cudaSuccess &&
+              replacementPoints->recordUse(nullptr) == cudaSuccess);
+        std::string revisionReason;
+        auto revision = gpu::MakePointRevisionGeneration(
+            first->device, 99, std::move(replacementPoints), {},
+            &revisionReason);
+        CHECK(revision && revision->Owner() && revision->Owner() != firstOwner &&
+              revision->ExclusiveRetainedBytes() > 0 &&
+              revision->InclusiveRetainedBytes() >=
+                  first->device->InclusiveRetainedBytes() +
+                  revision->ExclusiveRetainedBytes());
+
+        auto second = cooker.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 1.0,
+            UsdGenCommitReason::SetTime, first, afterAdmission, false, 1, 2, device);
+        CHECK(second && second != first && second->device && second->id == 1 &&
+              second->device->Identity().generation == 1 &&
+              second->device->Geometry().valueVersion == 1 &&
+              second->device->Owner() == firstOwner &&
+              second->device->ExclusiveRetainedBytes() == firstBytes &&
+              !cooker.TakeCacheCandidate() && cooker.ExecutionCacheSize() == 1 &&
+              cooker.ExecutionCacheBytes() == residentBytes &&
+              cooker.Stats().executionCacheHits == 1 &&
+              cooker.Stats().executionCacheMisses == 1);
+        CHECK(!cooker.CommitCacheCandidate(*firstCandidate));
+
+        auto frameMiss = cooker.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 2.0,
+            UsdGenCommitReason::SetTime, second, {}, false, 2, 3, device);
+        auto frameCandidate = cooker.TakeCacheCandidate();
+        CHECK(frameMiss && frameMiss != second && frameMiss->device &&
+              frameMiss->id == 2 && frameMiss->frame == 2.0 && frameCandidate &&
+              cooker.ExecutionCacheSize() == 1 &&
+              cooker.ExecutionCacheBytes() == residentBytes);
+
+        auto changed = WidthChainDesc();
+        changed.nodes[1].params.front().value = VtValue(0.2f);
+        auto changedDesc = std::make_shared<const UsdGenGraphDesc>(
+            std::move(changed));
+        auto parameterMiss = cooker.Cook(
+            changedDesc, UsdGenContext::Interactive, true, {}, 2.0,
+            UsdGenCommitReason::SetTime, frameMiss, {}, false, 3, 4, device);
+        auto parameterCandidate = cooker.TakeCacheCandidate();
+        CHECK(parameterMiss && parameterMiss != frameMiss &&
+              parameterMiss->device && parameterMiss->id == 3 &&
+              parameterCandidate && cooker.ExecutionCacheSize() == 1 &&
+              cooker.ExecutionCacheBytes() == residentBytes);
+        CHECK(frameCandidate &&
+              !cooker.CommitCacheCandidate(*frameCandidate));
+        CHECK(parameterCandidate &&
+              cooker.CommitCacheCandidate(*parameterCandidate) &&
+              cooker.ExecutionCacheSize() == 2);
+        revision.reset();
+    }
+
+    // A completed CUDA result may cross cooker/Session ownership only through
+    // the shared domain's immutable COW snapshot.  The receiving cooker gets
+    // a new public generation and device wrapper, while the native owner is
+    // deliberately shared.  A domain-epoch replacement then makes both a
+    // queued old candidate and the former resident tuple unusable without
+    // invalidating a consumer which already acquired its own geometry lease.
+    {
+        int device = -1;
+        CHECK(cudaGetDevice(&device) == cudaSuccess && device >= 0);
+        auto sharedDomain = std::make_shared<UsdGenExecutionCacheDomain>(
+            UsdGenExecutionCacheDomainKey{
+                UsdGenDeviceBackend::Cuda, device, 0x434f575f43414348ull},
+            64u * 1024u * 1024u);
+        auto cudaDesc = std::make_shared<const UsdGenGraphDesc>(WidthChainDesc());
+        UsdGenSessionCooker leader(2, 64u * 1024u * 1024u, sharedDomain);
+        UsdGenSessionCooker follower(2, 64u * 1024u * 1024u, sharedDomain);
+
+        auto first = leader.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 7.0,
+            UsdGenCommitReason::SetTime, {}, {}, false, 0, 1, device);
+        auto firstCandidate = leader.TakeCacheCandidate();
+        CHECK(first && first->device && firstCandidate &&
+              leader.CommitCacheCandidate(*firstCandidate) &&
+              sharedDomain->Size() == 1);
+        auto const firstOwner = first->device->Owner();
+
+        auto reused = follower.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 7.0,
+            UsdGenCommitReason::SetTime, {}, {}, false, 0, 1, device);
+        CHECK(reused && reused != first && reused->device &&
+              reused->device != first->device &&
+              reused->device->Owner() == firstOwner &&
+              !follower.TakeCacheCandidate() &&
+              follower.Stats().executionCacheHits == 1 &&
+              follower.Stats().executionCacheMisses == 0 &&
+              sharedDomain->Size() == 1);
+        auto oldLease = gpu::AcquireGeometry(reused->device, consumer);
+        CHECK(oldLease);
+        auto const oldPoints = oldLease.Geometry().points.data;
+        float3 oldPoint{};
+        CHECK(cudaMemcpyAsync(&oldPoint, oldPoints, sizeof(oldPoint),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess);
+
+        // Leave a real, unaccepted candidate in the old epoch.  Invalidation
+        // must clear residency first and the stale candidate must not seed it
+        // again, even though its producer generation remains current locally.
+        auto pending = leader.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 8.0,
+            UsdGenCommitReason::SetTime, first, leader.Stats(), false, 1, 2,
+            device);
+        auto staleCandidate = leader.TakeCacheCandidate();
+        CHECK(pending && pending->device && staleCandidate &&
+              sharedDomain->Invalidate() && sharedDomain->Size() == 0 &&
+              !leader.CommitCacheCandidate(*staleCandidate) &&
+              sharedDomain->Size() == 0);
+
+        float3 retainedPoint{};
+        CHECK(cudaMemcpyAsync(&retainedPoint, oldPoints, sizeof(retainedPoint),
+                              cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+              cudaStreamSynchronize(consumer) == cudaSuccess &&
+              retainedPoint.x == oldPoint.x && retainedPoint.y == oldPoint.y &&
+              retainedPoint.z == oldPoint.z);
+
+        auto recovered = follower.Cook(
+            cudaDesc, UsdGenContext::Interactive, true, {}, 7.0,
+            UsdGenCommitReason::SetTime, reused, follower.Stats(), false, 1, 2,
+            device);
+        auto recoveredLease = recovered && recovered->device
+            ? gpu::AcquireGeometry(recovered->device, consumer)
+            : gpu::CudaGeometryLease{};
+        CHECK(recovered && recovered->device && recovered != reused &&
+              recovered->device != reused->device &&
+              recovered->device->Owner() != firstOwner &&
+              recoveredLease &&
+              recoveredLease.Geometry().points.data != oldPoints &&
+              follower.Stats().executionCacheMisses == 1);
+    }
+
+    // Two CUDA Sessions sharing one exact domain join while the leader's
+    // source callback is held. The follower must not launch a second graph;
+    // its wrapper is distinct while the immutable device owner is shared.
+    {
+        int device = -1;
+        CHECK(cudaGetDevice(&device) == cudaSuccess && device >= 0);
+        auto sharedDomain = std::make_shared<UsdGenExecutionCacheDomain>(
+            UsdGenExecutionCacheDomainKey{
+                UsdGenDeviceBackend::Cuda, device, 0},
+            64u * 1024u * 1024u);
+        auto sharedDesc = std::make_shared<const UsdGenGraphDesc>(WidthChainDesc());
+        UsdGenSession leader(2, 4096, sharedDomain);
+        UsdGenSession follower(2, 4096, sharedDomain);
+        UsdGenSession::CommitRequest leaderRequest;
+        leaderRequest.desc = sharedDesc;
+        leaderRequest.devicePublication = true;
+        leaderRequest.callerDevice = device;
+        leaderRequest.frame = 17.0;
+        leaderRequest.reason = UsdGenCommitReason::SetTime;
+        UsdGenSession::CommitRequest followerRequest = leaderRequest;
+        armCudaSourceAsyncCallbackGateForTesting();
+        SourceCallbackGateRelease releaseGate{true};
+        auto leaderResult = SubmitRequest(leader, std::move(leaderRequest));
+        CHECK(leaderResult && leaderResult->accepted);
+        waitCudaSourceAsyncCallbackGateForTesting();
+        auto followerResult = SubmitRequest(follower, std::move(followerRequest));
+        CHECK(followerResult && followerResult->accepted);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(!followerResult->done.load(std::memory_order_acquire));
+        releaseGate.Release();
+        CHECK(WaitFor(*leaderResult) && WaitFor(*followerResult) &&
+              leaderResult->outcome == UsdGenExecutionPipeline::Outcome::Published &&
+              followerResult->outcome == UsdGenExecutionPipeline::Outcome::Published);
+        CHECK(leaderResult->snapshot && followerResult->snapshot &&
+              leaderResult->snapshot->generation && followerResult->snapshot->generation &&
+              leaderResult->snapshot->generation != followerResult->snapshot->generation &&
+              leaderResult->snapshot->generation->device !=
+                  followerResult->snapshot->generation->device &&
+              leaderResult->snapshot->generation->device->Owner() ==
+                  followerResult->snapshot->generation->device->Owner() &&
+              followerResult->snapshot->stats.executionCacheCoalesced == 1);
+    }
+    {
+        int device = -1;
+        CHECK(cudaGetDevice(&device) == cudaSuccess && device >= 0);
+        auto shutdownDomain = std::make_shared<UsdGenExecutionCacheDomain>(
+            UsdGenExecutionCacheDomainKey{
+                UsdGenDeviceBackend::Cuda, device, 0},
+            64u * 1024u * 1024u);
+        auto shutdownDesc = std::make_shared<const UsdGenGraphDesc>(WidthChainDesc());
+        UsdGenSession leader(2, 4096, shutdownDomain);
+        std::atomic<bool> followerCallback{false};
+        armCudaSourceAsyncCallbackGateForTesting();
+        SourceCallbackGateRelease releaseGate{true};
+        UsdGenSession::CommitRequest leaderRequest;
+        leaderRequest.desc = shutdownDesc;
+        leaderRequest.devicePublication = true;
+        leaderRequest.callerDevice = device;
+        leaderRequest.frame = 18.0;
+        auto leaderResult = SubmitRequest(leader, std::move(leaderRequest));
+        CHECK(leaderResult && leaderResult->accepted);
+        waitCudaSourceAsyncCallbackGateForTesting();
+        {
+            UsdGenSession follower(2, 4096, shutdownDomain);
+            UsdGenSession::CommitRequest request;
+            request.desc = shutdownDesc;
+            request.devicePublication = true;
+            request.callerDevice = device;
+            request.frame = 18.0;
+            CHECK(follower.CommitAsync(std::move(request),
+                [&](UsdGenSession::SnapshotPtr,
+                    UsdGenExecutionPipeline::Outcome) {
+                    followerCallback.store(true, std::memory_order_release);
+                }));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(followerCallback.load(std::memory_order_acquire));
+        releaseGate.Release();
+        CHECK(WaitFor(*leaderResult));
+    }
+    CHECK(cudaStreamSynchronize(consumer) == cudaSuccess);
+    CHECK(DrainCudaRetirement() && cachedCookerOwner.expired());
     CHECK(cudaStreamDestroy(consumer) == cudaSuccess);
     std::puts("testUsdGenCudaSession: PASS");
     return 0;

@@ -21,9 +21,24 @@ bool Identity(GfMatrix4d const& m) {
 }
 bool SameKey(CudaSurfaceBindingKey const& a, CudaSurfaceBindingKey const& b) {
     return a.path == b.path && a.restPoints == b.restPoints &&
+        a.restNormals == b.restNormals && a.restNormalDomain == b.restNormalDomain &&
         a.faceVertexCounts == b.faceVertexCounts &&
         a.faceVertexIndices == b.faceVertexIndices &&
         a.sampleBudget == b.sampleBudget && a.algorithmVersion == b.algorithmVersion;
+}
+bool ValidNormalShape(UsdGenSurfaceDesc const& source) {
+    const size_t faceCount = source.faceVertexCounts.size();
+    const size_t vertexCount = source.restPoints.size();
+    const size_t faceVaryingCount = source.faceVertexIndices.size();
+    switch (source.restNormalDomain) {
+    case UsdGenSurfaceNormalDomain::None: return source.restNormals.empty();
+    case UsdGenSurfaceNormalDomain::Constant: return source.restNormals.size() == 1;
+    case UsdGenSurfaceNormalDomain::Uniform: return source.restNormals.size() == faceCount;
+    case UsdGenSurfaceNormalDomain::Vertex: return source.restNormals.size() == vertexCount;
+    case UsdGenSurfaceNormalDomain::FaceVarying: return source.restNormals.size() == faceVaryingCount;
+    case UsdGenSurfaceNormalDomain::Invalid: return false;
+    }
+    return false;
 }
 } // namespace
 
@@ -44,8 +59,9 @@ CudaSurfacePreparationStatus PrepareCudaSurface(
     if (source.restPoints.size() > std::numeric_limits<uint32_t>::max() ||
         source.faceVertexIndices.size() > std::numeric_limits<uint32_t>::max())
         return fail(CudaSurfacePreparationStatus::InvalidTopology, "surface exceeds uint32 index limits");
-    if (!Finite(source.restPoints) || !Finite(source.points))
-        return fail(CudaSurfacePreparationStatus::NonFiniteInput, "surface positions must be finite");
+    if (!Finite(source.restPoints) || !Finite(source.points) || !Finite(source.restNormals))
+        return fail(CudaSurfacePreparationStatus::NonFiniteInput,
+                    "surface positions and rest normals must be finite");
     size_t indexCount = 0;
     for (int count : source.faceVertexCounts) {
         if (count != 3 && count != 4) return fail(CudaSurfacePreparationStatus::InvalidTopology, "surface faces must be triangles or quads");
@@ -58,15 +74,21 @@ CudaSurfacePreparationStatus PrepareCudaSurface(
     for (int index : source.faceVertexIndices)
         if (index < 0 || size_t(index) >= source.points.size())
             return fail(CudaSurfacePreparationStatus::InvalidTopology, "surface face index is out of range");
+    if (!ValidNormalShape(source))
+        return fail(CudaSurfacePreparationStatus::InvalidArgument,
+                    "rest normals must have a supported interpolation and exact cardinality");
 
     try {
         CudaSurfacePrepared candidate;
         candidate.restPoints.reserve(source.restPoints.size());
         candidate.currentPoints.reserve(source.points.size());
+        candidate.restNormals.reserve(source.restNormals.size());
         candidate.faceOffsets.reserve(source.faceVertexCounts.size() + 1);
         candidate.faceVertexIndices.reserve(source.faceVertexIndices.size());
         for (auto const& p : source.restPoints) candidate.restPoints.push_back({p[0], p[1], p[2]});
         for (auto const& p : source.points) candidate.currentPoints.push_back({p[0], p[1], p[2]});
+        for (auto const& p : source.restNormals) candidate.restNormals.push_back({p[0], p[1], p[2]});
+        candidate.restNormalDomain = source.restNormalDomain;
         candidate.faceOffsets.push_back(0);
         uint64_t offset = 0;
         for (int count : source.faceVertexCounts) {
@@ -75,7 +97,8 @@ CudaSurfacePreparationStatus PrepareCudaSurface(
             offset += static_cast<uint64_t>(count);
             candidate.faceOffsets.push_back(static_cast<uint32_t>(offset));
         }
-        candidate.key = {source.path, source.restPoints, source.faceVertexCounts,
+        candidate.key = {source.path, source.restPoints, source.restNormals, source.restNormalDomain,
+                         source.faceVertexCounts,
                          source.faceVertexIndices, sampleBudget, algorithmVersion};
         candidate.sampleBudget = sampleBudget;
         candidate.algorithmVersion = algorithmVersion;

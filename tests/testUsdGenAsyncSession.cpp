@@ -389,6 +389,7 @@ int main()
     // PostDirty is callback-safe: it queues the owner mutation and the later
     // external commit observes it without entering a synchronous owner wait.
     std::atomic<bool> dirtyCallback{false};
+    std::atomic<bool> dirtyPostAccepted{false};
     auto node = session.Graph().NodeIdForPath(SdfPath("/async/width"));
     Check(session.CommitAsync(12.0, UsdGenCommitReason::NoticeBatchEnd,
         [&](UsdGenSession::SnapshotPtr,
@@ -396,15 +397,53 @@ int main()
             if (outcome == UsdGenExecutionPipeline::Outcome::Published) {
                 UsdGenPendingDirty dirty;
                 dirty.nodeBits[node] = UsdGenDirtyParameter;
-                session.PostDirty(std::move(dirty));
+                dirtyPostAccepted.store(session.PostDirty(std::move(dirty)),
+                                        std::memory_order_release);
             }
             dirtyCallback.store(true, std::memory_order_release);
         }), "callback-safe dirty source commit accepted");
     Check(WaitFor(dirtyCallback), "callback-safe dirty post callback completes");
+    Check(dirtyPostAccepted.load(std::memory_order_acquire),
+          "callback-safe dirty source is admitted");
     auto postDirtySnapshot = session.CommitSnapshot(13.0, UsdGenCommitReason::NoticeBatchEnd);
     Check(postDirtySnapshot && postDirtySnapshot->generation &&
               !postDirtySnapshot->diagnostics.HasErrors(),
           "PostDirty queued from callback is consumed by a later owner commit");
+
+    // Command admission is independent from retained cook requests. While an
+    // owner completion is executing, a cap-two command lane admits exactly
+    // two callback-safe edits and exposes the third rejection; the rejected
+    // descriptor must not replace the dirty baseline before a later retry.
+    UsdGenSession capped(1, 2);
+    capped.SetGraphDesc(MakeDesc(.01f));
+    auto cappedInitial = capped.CommitSnapshot(0.0, UsdGenCommitReason::NoticeBatchEnd);
+    std::atomic<bool> cappedCallback{false}, cappedFirst{false}, cappedSecond{false},
+        cappedRejected{false};
+    Check(capped.CommitAsync(1.0, UsdGenCommitReason::NoticeBatchEnd,
+        [&](UsdGenSession::SnapshotPtr, UsdGenExecutionPipeline::Outcome outcome) {
+            if (outcome == UsdGenExecutionPipeline::Outcome::Published) {
+                cappedFirst.store(capped.PostContext(UsdGenContext::Render),
+                                  std::memory_order_release);
+                cappedSecond.store(capped.PostDevicePublicationEnabled(true),
+                                   std::memory_order_release);
+                cappedRejected.store(!capped.PostGraphDesc(MakeDesc(.77f)),
+                                     std::memory_order_release);
+            }
+            cappedCallback.store(true, std::memory_order_release);
+        }), "small-cap source commit accepted");
+    Check(WaitFor(cappedCallback), "small-cap callback completes");
+    Check(cappedFirst.load(std::memory_order_acquire) &&
+              cappedSecond.load(std::memory_order_acquire) &&
+              cappedRejected.load(std::memory_order_acquire),
+          "small command lane exposes the third public mutation rejection");
+    capped.Drain();
+    Check(capped.NeedsCommit(), "rejected descriptor leaves the accepted dirty baseline pending");
+    auto cappedRetry = capped.CommitSnapshot(2.0, UsdGenCommitReason::NoticeBatchEnd);
+    const bool retainedDescriptor = cappedInitial && cappedRetry &&
+        cappedRetry->graphInfo.desc.nodes.size() == 4 &&
+        cappedRetry->graphInfo.desc.nodes.back().params.front().value.Get<float>() == .01f;
+    Check(retainedDescriptor,
+          "retry retains the pre-rejection descriptor rather than a dropped edit");
 
     // Destruction drains accepted work and gives its callback a terminal
     // outcome; this scope intentionally ends without an explicit Drain().
@@ -427,6 +466,104 @@ int main()
           retainedAfterShutdown->generation->id == 0 && retainedAfterShutdown->routing &&
           retainedAfterShutdown->graphInfo.NodeCount() == 4,
           "immutable geometry and routing survive session destruction");
+
+    // Independent sessions sharing one CPU domain join an in-flight exact-key
+    // miss. The leader is held before key registration; the follower parks
+    // without entering the held capture and receives its own COW generation.
+    auto coalescedDomain = std::make_shared<UsdGenExecutionCacheDomain>(
+        UsdGenExecutionCacheDomainKey{UsdGenDeviceBackend::CpuReference, -1, 0},
+        64u * 1024u * 1024u);
+    UsdGenSession coalescedLeader(2, 4096, coalescedDomain);
+    UsdGenSession coalescedFollower(2, 4096, coalescedDomain);
+    auto coalescedDesc = std::make_shared<const UsdGenGraphDesc>(MakeDesc(.031f));
+    coalescedLeader.SetGraphDesc(*coalescedDesc);
+    coalescedFollower.SetGraphDesc(*coalescedDesc);
+    HoldCaptureState::entered.store(false, std::memory_order_release);
+    HoldCaptureState::release.store(false, std::memory_order_release);
+    HoldCaptureState::hold.store(true, std::memory_order_release);
+    std::atomic<bool> coalescedLeaderDone{false}, coalescedFollowerDone{false};
+    UsdGenSession::SnapshotPtr coalescedLeaderSnapshot, coalescedFollowerSnapshot;
+    Check(coalescedLeader.CommitAsync(1.0, UsdGenCommitReason::NoticeBatchEnd,
+        [&](UsdGenSession::SnapshotPtr snapshot, UsdGenExecutionPipeline::Outcome) {
+            coalescedLeaderSnapshot = std::move(snapshot);
+            coalescedLeaderDone.store(true, std::memory_order_release);
+        }), "CPU coalesced leader accepted");
+    Check(WaitFor(HoldCaptureState::entered), "CPU coalesced leader reached hold");
+    HoldCaptureState::hold.store(false, std::memory_order_release);
+    Check(coalescedFollower.CommitAsync(1.0, UsdGenCommitReason::NoticeBatchEnd,
+        [&](UsdGenSession::SnapshotPtr snapshot, UsdGenExecutionPipeline::Outcome) {
+            coalescedFollowerSnapshot = std::move(snapshot);
+            coalescedFollowerDone.store(true, std::memory_order_release);
+        }), "CPU coalesced follower accepted");
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    Check(!coalescedFollowerDone.load(std::memory_order_acquire),
+          "CPU coalesced follower remains nonblocking while leader is held");
+    HoldCaptureState::release.store(true, std::memory_order_release);
+    Check(WaitFor(coalescedLeaderDone) && WaitFor(coalescedFollowerDone),
+          "CPU coalesced leader and follower complete");
+    Check(coalescedLeaderSnapshot && coalescedFollowerSnapshot &&
+              coalescedLeaderSnapshot->generation && coalescedFollowerSnapshot->generation &&
+              coalescedLeaderSnapshot->generation != coalescedFollowerSnapshot->generation &&
+              coalescedLeaderSnapshot->generation->tiles.size() ==
+                  coalescedFollowerSnapshot->generation->tiles.size() &&
+              !coalescedLeaderSnapshot->generation->tiles.empty() &&
+              coalescedLeaderSnapshot->generation->tiles.front().points.cdata() ==
+                  coalescedFollowerSnapshot->generation->tiles.front().points.cdata() &&
+              coalescedLeaderSnapshot->generation->tiles.front().widths.cdata() ==
+                  coalescedFollowerSnapshot->generation->tiles.front().widths.cdata() &&
+              coalescedFollowerSnapshot->stats.executionCacheCoalesced == 1,
+          "CPU coalesced follower publishes a distinct generation with COW payload");
+    auto const retainedPoint = coalescedFollowerSnapshot &&
+        !coalescedFollowerSnapshot->generation->tiles.empty() &&
+        !coalescedFollowerSnapshot->generation->tiles.front().points.empty()
+            ? coalescedFollowerSnapshot->generation->tiles.front().points.front()
+            : GfVec3f(-1);
+    coalescedLeaderSnapshot.reset();
+    Check(coalescedFollowerSnapshot &&
+              !coalescedFollowerSnapshot->generation->tiles.empty() &&
+              !coalescedFollowerSnapshot->generation->tiles.front().points.empty() &&
+              coalescedFollowerSnapshot->generation->tiles.front().points.front() ==
+                  retainedPoint,
+          "CPU follower COW payload remains readable after leader release");
+
+    // Superseding a parked follower withdraws only that waiter. Its pipeline
+    // settles as Superseded while the leader remains allowed to finish.
+    auto supersedeDomain = std::make_shared<UsdGenExecutionCacheDomain>(
+        UsdGenExecutionCacheDomainKey{UsdGenDeviceBackend::CpuReference, -1, 0},
+        64u * 1024u * 1024u);
+    UsdGenSession supersedeLeader(2, 4096, supersedeDomain);
+    UsdGenSession supersedeFollower(2, 4096, supersedeDomain);
+    supersedeLeader.SetGraphDesc(*coalescedDesc);
+    supersedeFollower.SetGraphDesc(*coalescedDesc);
+    HoldCaptureState::entered.store(false, std::memory_order_release);
+    HoldCaptureState::release.store(false, std::memory_order_release);
+    HoldCaptureState::hold.store(true, std::memory_order_release);
+    auto supersedeLeaderDone = std::make_shared<std::atomic<bool>>(false);
+    auto supersedeFollowerDone = std::make_shared<std::atomic<bool>>(false);
+    auto supersedeFollowerOutcome = std::make_shared<UsdGenExecutionPipeline::Outcome>(
+        UsdGenExecutionPipeline::Outcome::Published);
+    Check(supersedeLeader.CommitAsync(2.0, UsdGenCommitReason::NoticeBatchEnd,
+        [supersedeLeaderDone](UsdGenSession::SnapshotPtr,
+                              UsdGenExecutionPipeline::Outcome) {
+            supersedeLeaderDone->store(true, std::memory_order_release);
+        }), "CPU supersession leader accepted");
+    Check(WaitFor(HoldCaptureState::entered), "CPU supersession leader reached hold");
+    HoldCaptureState::hold.store(false, std::memory_order_release);
+    Check(supersedeFollower.CommitAsync(2.0, UsdGenCommitReason::NoticeBatchEnd,
+        [supersedeFollowerDone, supersedeFollowerOutcome](
+            UsdGenSession::SnapshotPtr,
+            UsdGenExecutionPipeline::Outcome outcome) {
+            *supersedeFollowerOutcome = outcome;
+            supersedeFollowerDone->store(true, std::memory_order_release);
+        }), "CPU supersession follower accepted");
+    UsdGenPendingDirty supersedingDirty;
+    supersedingDirty.structural = true;
+    supersedeFollower.PostDirty(std::move(supersedingDirty));
+    Check(WaitFor(*supersedeFollowerDone) &&
+              *supersedeFollowerOutcome == UsdGenExecutionPipeline::Outcome::Superseded,
+          "CPU superseded follower settles without publication");
+    HoldCaptureState::release.store(true, std::memory_order_release);
+    Check(WaitFor(*supersedeLeaderDone), "CPU supersession leader still completes");
 
     std::printf("testUsdGenAsyncSession: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

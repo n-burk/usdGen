@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <vector>
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -124,6 +125,11 @@ bool UsdGenScatterOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *dia
     }
     if (params.GetDouble(TfToken("jitter"), 0.0) < 0.0) {
         if (diag) diag->Error("UsdGenScatter: jitter must be >= 0");
+        return false;
+    }
+    double const density = params.GetDouble(TfToken("density"), 100.0);
+    if (!std::isfinite(density) || density < 0.0) {
+        if (diag) diag->Error("UsdGenScatter: density must be finite and >= 0");
         return false;
     }
     return true;
@@ -231,6 +237,10 @@ bool UsdGenScatterOp::Capture(
         cornerOff[f + 1] = cornerOff[f] + size_t(fvc[f]);
 
     const double density = p ? p->GetDouble(TfToken("density"), 100.0) : 100.0;
+    if (!std::isfinite(density) || density < 0.0) {
+        if (diag) diag->Error("UsdGenScatter::Capture: density must be finite and >= 0");
+        return false;
+    }
     const bool flip = p ? p->GetBool(TfToken("flip"), false) : false;
 
     // Mask settings (02 §2.13; same key spellings as ops/mask.cpp) and the
@@ -312,13 +322,30 @@ bool UsdGenScatterOp::Capture(
 
         double const maskVal = fi < faceMask.size() ? double(faceMask[fi]) : 1.0;
         double const expected = density * areaRest * maskVal;
+        if (!std::isfinite(areaRest) || !std::isfinite(maskVal) ||
+            !std::isfinite(expected)) {
+            if (diag) diag->Error("UsdGenScatter::Capture: non-finite root count on face " +
+                                  std::to_string(f));
+            return false;
+        }
         if (!(expected > 0.0)) continue;  // includes mask:amount == 0 (:676)
         double const whole = std::floor(expected);
         double const frac = expected - whole;
+        if (whole > double(std::numeric_limits<uint32_t>::max())) {
+            if (diag) diag->Error("UsdGenScatter::Capture: root count exceeds uint32 "
+                                  "cardinality on face " + std::to_string(f));
+            return false;
+        }
         uint64_t const faceKey = UsdGenHash64(uint64_t(uint32_t(ctx.seed)),
                                               uint64_t(uint32_t(f)), kSaltScatter);
         uint64_t const nf = uint64_t(whole)
                           + (UsdGenHash01(faceKey, kSaltScatter) < float(frac) ? 1u : 0u);
+        size_t const maxCurves = std::numeric_limits<uint32_t>::max();
+        if (aids.size() > maxCurves || nf > maxCurves - aids.size()) {
+            if (diag) diag->Error("UsdGenScatter::Capture: total root count exceeds "
+                                  "uint32 cardinality at face " + std::to_string(f));
+            return false;
+        }
 
         for (uint64_t k = 0; k < nf; ++k) {
             uint64_t const curveId = UsdGenCurveId(ctx.seed, uint32_t(f), uint32_t(k));

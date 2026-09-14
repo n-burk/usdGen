@@ -39,9 +39,25 @@ public:
     CudaExpressionProgram() = default;
     CudaExpressionProgram(CudaExpressionProgram const&) = delete;
     CudaExpressionProgram& operator=(CudaExpressionProgram const&) = delete;
-    ExpressionStatus Upload(expr::IRProgram const&, cudaStream_t);
+    ExpressionStatus Upload(expr::IRProgram const&, cudaStream_t,
+                            UsdGenExecutionMemoryReservation* reservation = nullptr,
+                            UsdGenExecutionResourceKind kind =
+                                UsdGenExecutionResourceKind::Cache);
     ExpressionStatus Evaluate(ExpressionInputs const&, ExpressionOutput, cudaStream_t);
     ExpressionStatus Finish(cudaStream_t);
+    // Fresh asynchronous path. UploadFresh owns an immutable pinned copy of
+    // the IR, so callers may destroy the compiler result after it returns.
+    // EnqueueFreshStatus only queues a D2H status copy; its parent owns the
+    // one aggregate native callback and calls CommitFreshFinish only after
+    // that callback reports success and the launcher has returned.
+    ExpressionStatus UploadFresh(expr::IRProgram const&, cudaStream_t,
+                                 UsdGenExecutionMemoryReservation* reservation = nullptr,
+                                 UsdGenExecutionResourceKind kind =
+                                     UsdGenExecutionResourceKind::Cache);
+    ExpressionStatus EvaluateFresh(ExpressionInputs const&, ExpressionOutput, cudaStream_t);
+    ExpressionStatus EnqueueFreshStatus(cudaStream_t);
+    ExpressionStatus CommitFreshFinish();
+    bool HasUnprovenWork() const noexcept { return unprovenWork_; }
 private:
     DeviceBuffer<unsigned char> code_;
     DeviceBuffer<int> error_;
@@ -51,6 +67,18 @@ private:
     uint16_t output_[4]{};
     unsigned outputCount_ = 1;
     bool pending_ = false;
+    int* freshHostError_ = nullptr;
+    UsdGenExecutionResourcePermit freshHostErrorPermit_;
+    expr::IRInstruction* freshHostCode_ = nullptr;
+    size_t freshHostCodeBytes_ = 0;
+    UsdGenExecutionResourcePermit freshHostCodePermit_;
+    int deviceIndex_ = -1;
+    bool freshUploadPending_ = false;
+    bool freshEvaluated_ = false;
+    bool freshStatusEnqueued_ = false;
+    bool freshFailed_ = false;
+    bool freshPoisoned_ = false;
+    bool unprovenWork_ = false;
 };
 } // namespace usdGen::gpu
 #endif

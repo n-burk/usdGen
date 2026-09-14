@@ -17,6 +17,8 @@ static bool Near(float3 a, float3 b) {
     return Near(a.x, b.x) && Near(a.y, b.y) && Near(a.z, b.z);
 }
 
+static void FreshCallback(cudaStream_t, cudaError_t, void*) noexcept {}
+
 template <class T>
 static bool Download(DeviceView<const T> view, std::vector<T> &host,
                      cudaStream_t stream) {
@@ -156,11 +158,35 @@ int main() {
     for (size_t i = 0; i < 5; ++i) CHECK(Near(gotRest[i], points[i]));
     CHECK(gotIds[0] == 0 && gotIds[1] == 1);
 
+    // Fresh async commit is never allowed to replace an active generation;
+    // legacy Finish remains the general replacement path and can commit it.
+    const uint64_t activeBeforeFreshReject = source.generation();
+    CHECK(source.Set(input, upload) == CurveSourceStatus::Ok);
+    CHECK(source.CommitFreshFinish() == CurveSourceStatus::InvalidArgument &&
+          source.generation() == activeBeforeFreshReject && source.pending());
+    CHECK(source.Finish(consumer) == CurveSourceStatus::Ok &&
+          source.generation() == activeBeforeFreshReject + 1);
+
+    // Capture rejects the fresh callback path after Set has queued its
+    // upload, marking the source unsafe until legacy Finish proves terminal
+    // completion and commits the pending generation.
+    CudaCurveSource captureRecovery;
+    CHECK(captureRecovery.Set(input, upload) == CurveSourceStatus::Ok);
+    CHECK(cudaStreamBeginCapture(upload, cudaStreamCaptureModeGlobal) == cudaSuccess);
+    CHECK(captureRecovery.FinishFreshAsync(upload, FreshCallback, nullptr) ==
+          CurveSourceStatus::InvalidArgument && captureRecovery.HasUnprovenUpload());
+    cudaGraph_t capturedGraph = nullptr;
+    CHECK(cudaStreamEndCapture(upload, &capturedGraph) == cudaSuccess);
+    if (capturedGraph) CHECK(cudaGraphDestroy(capturedGraph) == cudaSuccess);
+    CHECK(captureRecovery.Finish(upload) == CurveSourceStatus::Ok &&
+          !captureRecovery.HasUnprovenUpload() && captureRecovery.generation() == 1);
+
     // A known consumer use is ordered before replacing the active storage.
+    const uint64_t generationBeforeLegacyReplacement = source.generation();
     CHECK(source.recordUse(consumer) == CurveSourceStatus::Ok);
     CHECK(source.Set(input, upload) == CurveSourceStatus::Ok);
     CHECK(source.Finish(upload) == CurveSourceStatus::Ok);
-    CHECK(source.generation() == (deviceCount > 1 ? 4 : 3));
+    CHECK(source.generation() == generationBeforeLegacyReplacement + 1);
 
     // Empty source is a valid owned generation; non-empty point payload without
     // curves is not a valid topology.

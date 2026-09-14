@@ -2,6 +2,7 @@
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/retainedSceneIndex.h"
+#include "pxr/base/gf/vec3f.h"
 #include <cstdio>
 #include <map>
 #include <vector>
@@ -155,6 +156,61 @@ int main() {
     auto explicitFull = CaptureGraphDescFromHydra(*input, root, options);
     Check(input->reads[source] == 1 && input->reads[width] == 1 && explicitFull.cache,
           "explicit topology/frame rebuild never reuses nodes");
+
+    // A foreign/retained Hydra source can carry malformed rest leaves even
+    // though authored UsdGeomMesh normals are schema typed.  The builder
+    // must preserve that distinction as Invalid rather than treating it as
+    // the valid geometric-normal fallback.
+    auto const rawRoot = SdfPath("/normalDesc");
+    auto const rawSource = SdfPath("/normalDesc/source");
+    auto const rawMesh = SdfPath("/normalMesh");
+    VtVec3fArray const rawPoints{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    VtIntArray const rawCounts{3};
+    VtIntArray const rawIndices{0, 1, 2};
+    auto const captureMalformedRest = [&](HdContainerDataSourceHandle const &rest) {
+        auto raw = TfCreateRefPtr(new Input);
+        HdContainerDataSourceHandle const topology = Flat({
+            {TfToken("faceVertexCounts"), Value(rawCounts)},
+            {TfToken("faceVertexIndices"), Value(rawIndices)}});
+        HdContainerDataSourceHandle const meshSchema = Flat({
+            {TfToken("topology"), topology}});
+        HdContainerDataSourceHandle const restSchema = Flat({
+            {TfToken("rest"), rest}});
+        HdContainerDataSourceHandle const meshData = Flat({
+            {TfToken("points"), Value(rawPoints)},
+            {TfToken("mesh"), meshSchema},
+            {TfToken("usdGen"), restSchema}});
+        raw->data->AddPrims({
+            {rawRoot, TfToken("UsdGenDescription"), Flat({
+                {TfToken("operatorOrder"), Value(SdfPathVector{rawSource})},
+                {TfToken("surface"), Value(SdfPathVector{rawMesh})}})},
+            {rawSource, TfToken("UsdGenCurveSource"),
+             HdRetainedContainerDataSource::New()},
+            {rawMesh, TfToken("mesh"), meshData}});
+        return CaptureGraphDescFromHydra(*raw, rawRoot).desc;
+    };
+    auto const malformedNormal = captureMalformedRest(Flat({
+        {TfToken("points"), Value(rawPoints)},
+        {TfToken("faceVertexCounts"), Value(rawCounts)},
+        {TfToken("faceVertexIndices"), Value(rawIndices)},
+        {TfToken("normals"), Value(VtFloatArray{1.0f})},
+        {TfToken("normalsInterpolation"), Value(TfToken("vertex"))}}));
+    Check(malformedNormal.surfaces.size() == 1 &&
+              malformedNormal.surfaces[0].restNormalDomain ==
+                  usdGen::UsdGenSurfaceNormalDomain::Invalid &&
+              !malformedNormal.validationErrors.empty(),
+          "wrong-typed nonempty rest normals remain Invalid");
+    auto const missingInterpolation = captureMalformedRest(Flat({
+        {TfToken("points"), Value(rawPoints)},
+        {TfToken("faceVertexCounts"), Value(rawCounts)},
+        {TfToken("faceVertexIndices"), Value(rawIndices)},
+        {TfToken("normals"), Value(VtVec3fArray{{0, 0, 1}, {0, 0, 1},
+                                                   {0, 0, 1}})}}));
+    Check(missingInterpolation.surfaces.size() == 1 &&
+              missingInterpolation.surfaces[0].restNormalDomain ==
+                  usdGen::UsdGenSurfaceNormalDomain::Invalid &&
+              !missingInterpolation.validationErrors.empty(),
+          "nonempty rest normals without interpolation remain Invalid");
     std::printf("testUsdGenCaptureCache: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

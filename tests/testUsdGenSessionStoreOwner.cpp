@@ -129,6 +129,9 @@ usdGen::UsdGenGraphDesc MakeFrameProbe()
 
 int main(int argc, char **argv)
 {
+    // Preserve the last completed contract check if an intermittent native
+    // crash terminates this process before stdio would flush its CTest pipe.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     UsdGenSessionStore &store = UsdGenSessionStore::GetInstance();
 
     if (argc > 1 && std::string(argv[1]) == "--pending-exit") {
@@ -300,10 +303,50 @@ int main(int argc, char **argv)
           "stale expected handle cannot decrement replacement count");
     store.Detach(identity, replacement);
 
+    // Reserve both source actions before filling the store owner. The normal
+    // AttachAsync path must reject at capacity, while the pre-admitted attach
+    // and its matching detach still complete exactly once.
+    UsdGenSessionKey lifecycleKey = Key(51);
+    auto attachTicket = store.ReserveLifecycleCommand();
+    auto detachTicket = store.ReserveLifecycleCommand();
+    std::vector<usdGen::UsdGenExecutionPipeline::CommandTicket> lifecycleFillers;
+    for (;;) {
+        auto ticket = store.ReserveLifecycleCommand();
+        if (!ticket) break;
+        lifecycleFillers.emplace_back(std::move(ticket));
+    }
+    Check(attachTicket && detachTicket && !lifecycleFillers.empty(),
+          "store lifecycle tickets reserve before source-owner saturation");
+    Check(!store.AttachAsync(lifecycleKey, [](UsdGenSessionHandle) {}),
+          "ordinary store attach rejects at full source owner");
+    std::atomic<bool> lifecycleAttached{false}, lifecycleDetached{false};
+    UsdGenSessionHandle lifecycleHandle;
+    Check(store.AttachAsync(std::move(attachTicket), lifecycleKey,
+        [&](UsdGenSessionHandle handle) {
+            lifecycleHandle = std::move(handle);
+            lifecycleAttached.store(true, std::memory_order_release);
+        }), "reserved store attach is accepted at full source owner");
+    WaitOrAbort([&] { return lifecycleAttached.load(std::memory_order_acquire); },
+                "reserved store attach completion runs");
+    auto replacementFiller = store.ReserveLifecycleCommand();
+    Check(static_cast<bool>(replacementFiller),
+          "store source credit released after reserved attach");
+    if (replacementFiller) lifecycleFillers.emplace_back(std::move(replacementFiller));
+    Check(store.DetachAsync(std::move(detachTicket), lifecycleKey, lifecycleHandle,
+        [&] { lifecycleDetached.store(true, std::memory_order_release); }),
+          "reserved store detach is accepted at full source owner");
+    WaitOrAbort([&] { return lifecycleDetached.load(std::memory_order_acquire); },
+                "reserved store detach completion runs");
+    Check(!store.Find(lifecycleKey),
+          "reserved store detach removes its pre-admitted lifetime");
+    lifecycleFillers.clear(); // never carry held credits across a wait boundary
+    lifecycleHandle.Reset();
+
     // Registry-wide state is also owner-serialized.  SetTime marks the
     // registry app-driven; a session attached by its completion callback
     // inherits that state, while synchronous re-entry is rejected.
-    store.SetContext(usdGen::UsdGenContext::Render);
+    Check(store.SetContext(usdGen::UsdGenContext::Render),
+          "store context request is admitted");
     UsdGenSessionKey inheritedKey = Key(6);
     std::atomic<bool> setTimeDone{false};
     std::atomic<bool> setTimeRejected{false};

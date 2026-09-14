@@ -6,6 +6,7 @@
 // (a)/(b)/(c). GetPrim paths never commit — they atomic_load the latest
 // generation (I7). Superseded commits leave the session dirty (03 §5.6).
 #include "usdGenImaging/usdGenImagingSession.h"
+#include "usdGenImaging/imageMapCache.h"
 
 #include "usdGen/generationStore.h"
 #include "usdGen/session.h"
@@ -63,14 +64,31 @@ struct UsdGenImagingSession::State {
     double frame;
     usdGen::UsdGenContext context;
     std::shared_ptr<const usdGen::UsdGenGraphDesc> staged;
+    // Last accepted descriptor remains immutable and available for explicit
+    // map reload even after `staged` transfers to the core owner.
+    std::shared_ptr<const usdGen::UsdGenGraphDesc> currentDesc;
     std::vector<std::pair<int, std::function<void(CommitPayload const&)>>> callbacks;
     unsigned outstanding = 0;
     bool closing = false;
     std::function<void()> closeDone;
     Pipeline owner;
+    // This is acquired while the owner is open, before any external producer
+    // can make close depend on a terminal owner relay.
+    Pipeline::CommandTicket closeTicket;
+    // A global context update is required session state, not a best-effort
+    // diagnostic. Keep one bounded latest-wins lane permanently reserved so
+    // ordinary callback traffic cannot drop it.
+    Pipeline::CommandMailbox contextMailbox;
 
-    State(std::shared_ptr<usdGen::UsdGenSession> e, double f, usdGen::UsdGenContext c)
-        : engine(std::move(e)), frame(f), context(c), owner(ImagingRuntime()) {}
+    State(std::shared_ptr<usdGen::UsdGenSession> e, double f, usdGen::UsdGenContext c,
+          uint64_t commandCapacity)
+        : engine(std::move(e)), frame(f), context(c),
+          owner(ImagingRuntime(), 4096, commandCapacity),
+          closeTicket(owner.ReserveCommandTicket()),
+          contextMailbox(owner.ReserveCommandMailbox()) {
+        if (!closeTicket || !contextMailbox)
+            throw std::runtime_error("imaging lifecycle admission unavailable");
+    }
 
     void CompleteClose() {
         if (closing && outstanding == 0 && closeDone) {
@@ -87,7 +105,7 @@ struct UsdGenImagingSession::State {
             throw std::logic_error("concurrent imaging shutdown is not supported");
         accepting.store(false, std::memory_order_release);
         owner.Await([this](std::function<void()> done) {
-            if (!owner.PostCommand([this, done] {
+            if (!owner.PostCommand(std::move(closeTicket), [this, done] {
                 closing = true;
                 closeDone = done;
                 CompleteClose();
@@ -138,28 +156,57 @@ struct UsdGenImagingSession::State {
             if (done) done({}, Pipeline::Outcome::Superseded);
             return;
         }
+        // Reserve before changing command-owner state or handing anything to
+        // the engine. A full terminal lane is a clean rejected request, not a
+        // partial frame/context/staged-descriptor edit.
+        auto finishTicket = std::make_shared<Pipeline::CommandTicket>(
+            owner.ReserveCommandTicket());
+        if (!*finishTicket) {
+            if (done) {
+                try { done({}, Pipeline::Outcome::Failed); }
+                catch (...) { TF_WARN("usdGen imaging completion threw"); }
+            }
+            return;
+        }
         if (request.frame) frame = *request.frame;
         if (request.context) context = *request.context;
-        if (request.desc) staged = std::move(request.desc);
+        if (request.desc) {
+            auto resolved = std::make_shared<usdGen::UsdGenGraphDesc>(*request.desc);
+            ResolveUsdGenImageMaps(resolved.get());
+            currentDesc = resolved;
+            staged = std::move(resolved);
+        }
         usdGen::UsdGenSession::CommitRequest input;
         input.frame = frame;
         input.context = context;
         input.reason = request.reason;
-        input.desc = std::move(staged);
+        // Retain our staged descriptor until the core owner accepts it. This
+        // lets a public retry preserve the exact graph after core admission
+        // rejects a saturated request.
+        input.desc = staged;
         input.devicePublication = request.devicePublication;
         input.callerDevice = callerDevice;
         ++outstanding;
         try {
             if (engine->CommitAsync(std::move(input),
-                [this, done](usdGen::UsdGenSession::SnapshotPtr snapshot, Pipeline::Outcome outcome) {
+                [this, done, finishTicket](
+                    usdGen::UsdGenSession::SnapshotPtr snapshot, Pipeline::Outcome outcome) mutable {
                     // Close leaves the owner alive until every relay arrives.
-                    // A framework dispatch failure is fatal: swallowing it
-                    // would strand the outstanding reply and hang retirement.
-                    try {
-                        if (!owner.PostCommand([this, snapshot, outcome, done] { Finish(snapshot, outcome, done); }))
-                            std::terminate();
-                    } catch (...) { std::terminate(); }
-                })) return;
+                    // A valid reserved ticket cannot be rejected for normal
+                    // pressure. Rejection here is a framework/lifecycle
+                    // breach; never mutate this owner from the producer.
+                    if (!owner.PostCommand(std::move(*finishTicket),
+                        [this, snapshot, outcome, done] { Finish(snapshot, outcome, done); },
+                        [this, done] { Finish({}, Pipeline::Outcome::Superseded, done); }))
+                        std::terminate();
+                })) {
+                // The core owner has retained its input snapshot. Only now
+                // consume this staging slot: keeping it after acceptance
+                // would resend a structural descriptor on every later tool
+                // commit and invalidate an active device edit.
+                staged.reset();
+                return;
+            }
         } catch (...) {
             Finish({}, Pipeline::Outcome::Failed, done);
             return;
@@ -169,8 +216,10 @@ struct UsdGenImagingSession::State {
 };
 
 UsdGenImagingSession::UsdGenImagingSession(UsdGenSessionKey const& key,
-    std::shared_ptr<usdGen::UsdGenSession> engine, double frame, usdGen::UsdGenContext context)
-    : _key(key), _engine(std::move(engine)), _state(new State(_engine, frame, context)) {
+    std::shared_ptr<usdGen::UsdGenSession> engine, double frame, usdGen::UsdGenContext context,
+    uint64_t commandCapacity)
+    : _key(key), _engine(std::move(engine)),
+      _state(new State(_engine, frame, context, commandCapacity)) {
     (void)RetirementQueue();
 }
 UsdGenImagingSession::~UsdGenImagingSession() {
@@ -180,18 +229,19 @@ UsdGenImagingSession::~UsdGenImagingSession() {
 }
 void UsdGenImagingSession::Shutdown() { _state->Close(); }
 void UsdGenImagingSession::DrainRetired() { RetirementQueue().Drain(); }
-void UsdGenImagingSession::SetTime(double frame) {
+bool UsdGenImagingSession::SetTime(double frame) {
     auto* state = _state.get();
-    state->owner.PostCommand([state, frame] { state->frame = frame; });
+    return state->owner.PostCommand([state, frame] { state->frame = frame; });
 }
-void UsdGenImagingSession::SetContext(usdGen::UsdGenContext context) {
+bool UsdGenImagingSession::SetContext(usdGen::UsdGenContext context) {
     auto* state = _state.get();
-    state->owner.PostCommand([state, context] { state->context = context; });
+    return state->owner.PostLatestCommand(state->contextMailbox,
+                                          [state, context] { state->context = context; });
 }
-void UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const& desc) {
+bool UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const& desc) {
     auto* state = _state.get();
     auto value = std::make_shared<const usdGen::UsdGenGraphDesc>(desc);
-    state->owner.PostCommand([state, value] { state->staged = value; });
+    return state->owner.PostCommand([state, value] { state->staged = value; });
 }
 bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done) {
     auto* state = _state.get();
@@ -229,6 +279,24 @@ int UsdGenImagingSession::RegisterRepublishCallback(std::function<void(CommitPay
     })) return -1;
     return static_cast<int>(token);
 }
+int UsdGenImagingSession::RegisterRepublishCallback(
+    Pipeline::CommandTicket&& ticket,
+    std::function<void(CommitPayload const&)> callback,
+    std::function<void()> registered) {
+    auto* state = _state.get();
+    const auto token = state->nextToken.fetch_add(1);
+    if (token > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        !state->accepting.load(std::memory_order_acquire)) return -1;
+    auto cancelled = registered;
+    if (!state->owner.PostCommand(std::move(ticket),
+        [state, token, callback=std::move(callback), registered=std::move(registered)] {
+            state->callbacks.emplace_back(static_cast<int>(token), callback);
+            if (registered) registered();
+        }, [cancelled=std::move(cancelled)] {
+            if (cancelled) cancelled();
+        })) return -1;
+    return static_cast<int>(token);
+}
 bool UsdGenImagingSession::UnregisterRepublishCallbackAsync(
     int token, std::function<void()> completion) {
     auto* state = _state.get();
@@ -242,8 +310,28 @@ bool UsdGenImagingSession::UnregisterRepublishCallbackAsync(
         if (completion) completion();
     });
 }
-void UsdGenImagingSession::UnregisterRepublishCallback(int token) {
-    (void)UnregisterRepublishCallbackAsync(token);
+Pipeline::CommandTicket UsdGenImagingSession::ReserveLifecycleCommand()
+{
+    auto* state = _state.get();
+    if (!state->accepting.load(std::memory_order_acquire)) return {};
+    return state->owner.ReserveCommandTicket();
+}
+bool UsdGenImagingSession::UnregisterRepublishCallbackAsync(
+    Pipeline::CommandTicket&& ticket, int token, std::function<void()> completion) {
+    auto* state = _state.get();
+    if (!state->accepting.load(std::memory_order_acquire)) return false;
+    auto cancelled = completion;
+    return state->owner.PostCommand(std::move(ticket),
+        [state, token, completion=std::move(completion)] {
+            state->callbacks.erase(std::remove_if(state->callbacks.begin(), state->callbacks.end(),
+                [token](auto const& entry) { return entry.first == token; }), state->callbacks.end());
+            if (completion) completion();
+        }, [completion=std::move(cancelled)] {
+            if (completion) completion();
+        });
+}
+bool UsdGenImagingSession::UnregisterRepublishCallback(int token) {
+    return UnregisterRepublishCallbackAsync(token);
 }
 int64_t UsdGenImagingSession::Generation() const noexcept { return _state->generation.load(); }
 usdGen::UsdGenGenerationConstPtr UsdGenImagingSession::LatestGeneration() const noexcept {
@@ -257,6 +345,27 @@ bool UsdGenImagingSession::HasAppDriver() const noexcept { return _state->appDri
 void UsdGenImagingSession::MarkNeedsDesc() noexcept { _state->needsDesc.store(true); }
 bool UsdGenImagingSession::NeedsDesc() const noexcept { return _state->needsDesc.load(); }
 bool UsdGenImagingSession::ConsumeNeedsDesc() noexcept { return _state->needsDesc.exchange(false); }
+bool UsdGenImagingSession::ReloadMaps() {
+    auto* state = _state.get();
+    if (!state->accepting.load(std::memory_order_acquire)) return false;
+    return state->owner.PostCommand([state] {
+        if (!state->currentDesc) {
+            state->needsDesc.store(true, std::memory_order_release);
+            return;
+        }
+        try {
+            auto resolved = std::make_shared<usdGen::UsdGenGraphDesc>(
+                *state->currentDesc);
+            ResolveUsdGenImageMaps(resolved.get());
+            state->currentDesc = resolved;
+            state->staged = std::move(resolved);
+            state->needsDesc.store(false, std::memory_order_release);
+        } catch (...) {
+            state->needsDesc.store(true, std::memory_order_release);
+            TF_WARN("usdGen image-map payload reload could not be staged");
+        }
+    });
+}
 
 // ---------------------------------------------------------------------------
 
@@ -320,20 +429,23 @@ struct UsdGenSessionStore::State {
     using Members = std::unordered_map<UsdGenSessionKey, UsdGenSessionHandle,
                                        UsdGenSessionKeyHash>;
     std::shared_ptr<const Members> published = std::make_shared<const Members>();
-    bool warnedReload = false; // command-owner-only
     std::optional<double> frame;
     std::optional<usdGen::UsdGenContext> context;
     std::atomic<bool> accepting{true};
     size_t outstandingBatches = 0;
     std::function<void()> closeDone;
     Pipeline owner; // destroyed/drained before membership handles are released
+    Pipeline::CommandTicket closeTicket;
 
-    State() : owner(ImagingRuntime()) {}
+    State() : owner(ImagingRuntime()), closeTicket(owner.ReserveCommandTicket()) {
+        if (!closeTicket) throw std::runtime_error("store close admission unavailable");
+    }
     ~State() {
         accepting.store(false);
         owner.Await([this](std::function<void()> done) {
-            if (!owner.PostCommand([this, done] { closeDone = done; CompleteClose(); }))
-                std::terminate();
+            if (!owner.PostCommand(std::move(closeTicket),
+                [this, done] { closeDone = done; CompleteClose(); }))
+                throw std::runtime_error("store close command rejected");
         });
         owner.Shutdown();
     }
@@ -346,14 +458,21 @@ struct UsdGenSessionStore::State {
     void StartBatch(std::vector<UsdGenSessionHandle> sessions,
                     usdGen::UsdGenCommitReason reason, int device,
                     std::function<void()> completion) {
+        auto retiredTicket = std::make_shared<Pipeline::CommandTicket>(
+            owner.ReserveCommandTicket());
+        if (!*retiredTicket) {
+            TF_WARN("usdGen store batch completion admission is full");
+            if (completion) completion();
+            return;
+        }
         ++outstandingBatches;
         try {
             StartCommitBatch(std::move(sessions), reason, frame, context, device, completion,
-                [this] {
-                    try {
-                        if (!owner.PostCommand([this] { --outstandingBatches; CompleteClose(); }))
-                            std::terminate();
-                    } catch (...) { std::terminate(); }
+                [this, retiredTicket]() mutable {
+                    if (!owner.PostCommand(std::move(*retiredTicket), [this] {
+                        --outstandingBatches; CompleteClose();
+                    }, [this] { --outstandingBatches; CompleteClose(); }))
+                        std::terminate();
                 });
         } catch (...) {
             --outstandingBatches;
@@ -430,6 +549,19 @@ bool UsdGenSessionStore::AttachAsync(UsdGenSessionKey key,
         if (completion) completion(std::move(session));
     }, [completion] { if (completion) completion({}); });
 }
+bool UsdGenSessionStore::AttachAsync(Pipeline::CommandTicket&& ticket,
+    UsdGenSessionKey key, std::function<void(UsdGenSessionHandle)> completion)
+{
+    auto* state = _state.get();
+    if (!state->accepting.load(std::memory_order_acquire)) return false;
+    return state->owner.PostCommand(std::move(ticket),
+        [state, key=std::move(key), completion] {
+            UsdGenSessionHandle session;
+            try { session = state->Attach(key); }
+            catch (...) { TF_WARN("usdGen session attachment failed"); }
+            if (completion) completion(std::move(session));
+        }, [completion] { if (completion) completion({}); });
+}
 
 void UsdGenSessionStore::Detach(UsdGenSessionKey const &key)
 {
@@ -458,6 +590,27 @@ bool UsdGenSessionStore::DetachAsync(UsdGenSessionKey key, UsdGenSessionHandle e
         catch (...) { TF_WARN("usdGen session detachment failed"); }
         if (completion) completion();
     }, [completion] { if (completion) completion(); });
+}
+Pipeline::CommandTicket UsdGenSessionStore::ReserveLifecycleCommand()
+{
+    auto* state = _state.get();
+    if (!state->accepting.load(std::memory_order_acquire)) return {};
+    return state->owner.ReserveCommandTicket();
+}
+bool UsdGenSessionStore::DetachAsync(Pipeline::CommandTicket&& ticket,
+    UsdGenSessionKey key, UsdGenSessionHandle expected, std::function<void()> completion)
+{
+    auto* state = _state.get();
+    if (!state->accepting.load(std::memory_order_acquire)) return false;
+    auto cancelled = completion;
+    return state->owner.PostCommand(std::move(ticket),
+        [state, key=std::move(key), expected, completion=std::move(completion)] {
+            try { state->Detach(key, expected); }
+            catch (...) { TF_WARN("usdGen session detachment failed"); }
+            if (completion) completion();
+        }, [completion=std::move(cancelled)] {
+            if (completion) completion();
+        });
 }
 
 UsdGenSessionHandle UsdGenSessionStore::Find(UsdGenSessionKey const &key) const
@@ -508,12 +661,19 @@ bool UsdGenSessionStore::SetTimeAsync(double frame, std::function<void()> comple
     }, completion);
 }
 
-void UsdGenSessionStore::SetContext(usdGen::UsdGenContext context)
+bool UsdGenSessionStore::SetContext(usdGen::UsdGenContext context)
 {
     auto* state = _state.get();
-    state->owner.PostCommand([state, context] {
+    return state->owner.PostCommand([state, context] {
         state->context = context;
-        for (auto const& entry : *state->Snapshot()) entry.second->SetContext(context);
+        for (auto const& entry : *state->Snapshot()) {
+            // Each session has a permanent latest-wins context mailbox. A
+            // false return therefore means only shutdown/framework failure,
+            // never ordinary command pressure; do not silently claim that
+            // the registry-wide current context was applied.
+            if (!entry.second->SetContext(context))
+                throw std::runtime_error("session context mailbox rejected");
+        }
     });
 }
 
@@ -549,24 +709,16 @@ int64_t UsdGenSessionStore::Generation() const noexcept
     return gen;
 }
 
-void UsdGenSessionStore::ReloadMaps()
+bool UsdGenSessionStore::ReloadMaps()
 {
-    // S13. The M1 engine exposes no session-level map-reload entry: the map
-    // textureGeneration rides inside UsdGenGraphDesc::maps (06 §3.7), so the
-    // reload is delivered by re-pulling the desc — MarkNeedsDesc routes the
-    // next commit through the desc builder (descBuilder reads
-    // ArAssetInfo::GetGeneration per map at build time).
     auto* state = _state.get();
-    state->owner.PostCommand([state] {
-        if (state->warnedReload) return;
-        state->warnedReload = true;
-        TF_WARN("usdGen ReloadMaps: no engine-level map reload hook in M1; "
-                "marking sessions desc-dirty so the next commit re-resolves "
-                "map textureGenerations (06 §3.7 S13).");
+    auto sessions = LiveSessions();
+    return state->owner.PostCommand([sessions=std::move(sessions)] {
+        (void)InvalidateUsdGenImageMapCache();
+        for (auto const& session : sessions) {
+            if (!session->ReloadMaps()) session->MarkNeedsDesc();
+        }
     });
-    for (auto const &session : LiveSessions()) {
-        session->MarkNeedsDesc();
-    }
 }
 
 }  // namespace usdGenImaging

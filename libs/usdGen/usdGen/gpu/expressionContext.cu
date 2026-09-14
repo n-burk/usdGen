@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>
+#include <iterator>
 #include <limits>
+#include <utility>
 
 namespace usdGen::gpu {
 namespace {
@@ -12,6 +14,11 @@ using expr::Variable;
 
 constexpr int kBadGeometry = 1;
 constexpr int kBadChannel = 2;
+
+ExpressionContextStatus FinishStatus(int error) {
+    return error == kBadChannel ? ExpressionContextStatus::InvalidChannel
+                                : ExpressionContextStatus::InvalidGeometry;
+}
 
 __device__ void Fail(int* error, int code) { atomicCAS(error, 0, code); }
 __device__ int Error(int const* error) {
@@ -137,7 +144,45 @@ __global__ void BuildFields(DeviceCurveGeometryView g,
 } // namespace
 
 CudaExpressionContext::~CudaExpressionContext() {
-    if (ready_) { cudaEventSynchronize(ready_); cudaEventDestroy(ready_); }
+    if (freshPending_ || unprovenWork_) {
+        // Fresh status/callback work is later than ready_.  Do not query or
+        // free any CUDA allocation without its terminal proof.
+        for (auto& field : fields_) field.quarantine();
+        owners_.quarantine(); arcLength_.quarantine(); error_.quarantine();
+        ready_ = nullptr;
+        freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
+        return;
+    }
+    const bool owns = ready_ || freshHostError_ || error_.size() || owners_.size() ||
+        arcLength_.size() || std::any_of(std::begin(fields_), std::end(fields_),
+            [](DeviceBuffer<double> const& field) { return field.size() != 0; });
+    int previous = -1;
+    const bool selected = !owns ||
+        (cudaGetDevice(&previous) == cudaSuccess && deviceIndex_ >= 0 &&
+         cudaSetDevice(deviceIndex_) == cudaSuccess);
+    if (!selected || (ready_ && cudaEventSynchronize(ready_) != cudaSuccess)) {
+        for (auto& field : fields_) field.quarantine();
+        owners_.quarantine(); arcLength_.quarantine(); error_.quarantine();
+        ready_ = nullptr;
+        freshHostError_ = nullptr;
+        freshHostErrorPermit_.Abandon();
+        if (selected && previous >= 0 && previous != deviceIndex_)
+            cudaSetDevice(previous);
+        return;
+    }
+    if (ready_) { cudaEventDestroy(ready_); ready_ = nullptr; }
+    // Release while the producing device remains selected. Member destruction
+    // happens after this body and must not perform those frees after restoring
+    // the caller's selected device.
+    for (auto& field : fields_) field.reset(0);
+    owners_.reset(0); arcLength_.reset(0); error_.reset(0);
+    if (freshHostError_) {
+        if (cudaFreeHost(freshHostError_) == cudaSuccess) freshHostErrorPermit_.Release();
+        else freshHostErrorPermit_.Abandon();
+        freshHostError_ = nullptr;
+    }
+    if (selected && previous >= 0 && previous != deviceIndex_) cudaSetDevice(previous);
 }
 
 ExpressionInputs const& CudaExpressionContext::Inputs() const {
@@ -153,8 +198,31 @@ ExpressionInputs const& CudaExpressionContext::Inputs() const {
 
 ExpressionContextStatus CudaExpressionContext::Build(
     DeviceCurveGeometryView geometry, ExpressionGeometryChannels channels,
-    expr::Context context, cudaStream_t stream) {
-    if (pending_) return ExpressionContextStatus::InvalidArgument;
+    expr::Context context, cudaStream_t stream,
+    UsdGenExecutionMemoryReservation* reservation,
+    UsdGenExecutionResourceKind kind) {
+    return BuildImpl(geometry, channels, context, stream, false, reservation, kind);
+}
+
+ExpressionContextStatus CudaExpressionContext::BuildFresh(
+    DeviceCurveGeometryView geometry, ExpressionGeometryChannels channels,
+    expr::Context context, cudaStream_t stream,
+    UsdGenExecutionMemoryReservation* reservation,
+    UsdGenExecutionResourceKind kind) {
+    // Capture must be checked before stream-device queries or allocation.
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone)
+        return ExpressionContextStatus::InvalidArgument;
+    return BuildImpl(geometry, channels, context, stream, true, reservation, kind);
+}
+
+ExpressionContextStatus CudaExpressionContext::BuildImpl(
+    DeviceCurveGeometryView geometry, ExpressionGeometryChannels channels,
+    expr::Context context, cudaStream_t stream, bool fresh,
+    UsdGenExecutionMemoryReservation* reservation,
+    UsdGenExecutionResourceKind kind) {
+    if (pending_ || freshPending_ || unprovenWork_) return ExpressionContextStatus::InvalidArgument;
     usable_ = false;
     if (context.domain != Domain::Groom && context.domain != Domain::Primitive && context.domain != Domain::Point)
         return ExpressionContextStatus::InvalidArgument;
@@ -165,11 +233,42 @@ ExpressionContextStatus CudaExpressionContext::Build(
         return ExpressionContextStatus::InvalidArgument;
     if (!std::isfinite(context.frame) || !std::isfinite(context.time))
         return ExpressionContextStatus::InvalidArgument;
-    inputs_ = ExpressionInputs{}; inputs_.context = context; inputs_.count = 1;
+    int current = -1;
+    if (cudaGetDevice(&current) != cudaSuccess) return ExpressionContextStatus::CudaError;
+    if (stream) {
+        int streamDevice = -1;
+        if (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess || streamDevice != current)
+            return ExpressionContextStatus::InvalidArgument;
+    }
+    if (deviceIndex_ >= 0 && deviceIndex_ != current) return ExpressionContextStatus::InvalidArgument;
+    deviceIndex_ = current;
+    pendingInputs_ = ExpressionInputs{}; pendingInputs_.context = context; pendingInputs_.count = 1;
     if (context.domain == Domain::Groom) {
         if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess) return ExpressionContextStatus::CudaError;
-        if (error_.reset(1) != cudaSuccess || cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess || cudaEventRecord(ready_, stream) != cudaSuccess) return ExpressionContextStatus::CudaError;
-        pending_ = true;
+        if (fresh && !freshHostError_) {
+            auto permit = TryReserveCudaExecutionBytes(sizeof(int), kind, reservation);
+            int* status = nullptr;
+            if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&status), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+                return ExpressionContextStatus::CudaError;
+            freshHostError_ = status; freshHostErrorPermit_ = std::move(*permit);
+        }
+        if (error_.reset(1, reservation, kind) != cudaSuccess) return ExpressionContextStatus::CudaError;
+        if (fresh) {
+            // All allocations are complete. From the first stream operation
+            // onward failed terminal installation must quarantine this state.
+            unprovenWork_ = true; freshFailed_ = false; freshStatusEnqueued_ = false;
+            *freshHostError_ = std::numeric_limits<int>::min();
+        }
+        if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess ||
+            cudaEventRecord(ready_, stream) != cudaSuccess) {
+            if (fresh) freshFailed_ = true;
+            return ExpressionContextStatus::CudaError;
+        }
+        if (fresh && cudaGetLastError() != cudaSuccess) {
+            freshFailed_ = true;
+            return ExpressionContextStatus::CudaError;
+        }
+        pending_ = true; freshPending_ = fresh;
         return ExpressionContextStatus::Ok;
     }
     if ((geometry.curveCount == 0) != (geometry.pointCount == 0) ||
@@ -191,8 +290,8 @@ ExpressionContextStatus CudaExpressionContext::Build(
         return ExpressionContextStatus::InvalidChannel;
     size_t n = context.domain == Domain::Groom ? 1 :
                context.domain == Domain::Primitive ? geometry.curveCount : geometry.pointCount;
-    inputs_.count = n; inputs_.primitiveCount = geometry.curveCount;
-    inputs_.context.count = static_cast<uint32_t>(n);
+    pendingInputs_.count = n; pendingInputs_.primitiveCount = geometry.curveCount;
+    pendingInputs_.context.count = static_cast<uint32_t>(n);
     const unsigned u = static_cast<unsigned>(expr::Variable::CountVariables);
     for (unsigned v = 0; v < u; ++v) {
         bool vec = v == unsigned(Variable::P) || v == unsigned(Variable::PRef) || v == unsigned(Variable::RootP) || v == unsigned(Variable::RootPRef);
@@ -202,21 +301,49 @@ ExpressionContextStatus CudaExpressionContext::Build(
             if ((v == unsigned(Variable::U) || v == unsigned(Variable::V)) && !channels.rootUV.data) continue;
         if (vec && n > std::numeric_limits<size_t>::max() / 3) return ExpressionContextStatus::InvalidArgument;
             if (context.domain == Domain::Primitive && (v == unsigned(Variable::PointIndex) || v == unsigned(Variable::PointCount))) continue;
-            if (fields_[v].reset(n * (vec ? 3 : 1)) != cudaSuccess) return ExpressionContextStatus::CudaError;
-            inputs_.fields[v] = {fields_[v].data(), n, context.domain, vec ? 3u : 1u};
+            if (fields_[v].reset(n * (vec ? 3 : 1), reservation, kind) != cudaSuccess) return ExpressionContextStatus::CudaError;
+            pendingInputs_.fields[v] = {fields_[v].data(), n, context.domain, vec ? 3u : 1u};
         }
     }
-    if (owners_.reset(geometry.pointCount) != cudaSuccess || arcLength_.reset(geometry.pointCount) != cudaSuccess || error_.reset(1) != cudaSuccess) return ExpressionContextStatus::CudaError;
-    inputs_.pointToPrimitive = {owners_.data(), geometry.pointCount};
+    if (owners_.reset(geometry.pointCount, reservation, kind) != cudaSuccess ||
+        arcLength_.reset(geometry.pointCount, reservation, kind) != cudaSuccess ||
+        error_.reset(1, reservation, kind) != cudaSuccess) return ExpressionContextStatus::CudaError;
+    pendingInputs_.pointToPrimitive = {owners_.data(), geometry.pointCount};
     if (!ready_ && cudaEventCreateWithFlags(&ready_, cudaEventDisableTiming) != cudaSuccess) return ExpressionContextStatus::CudaError;
-    if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess) return ExpressionContextStatus::CudaError;
+    if (fresh && !freshHostError_) {
+        auto permit = TryReserveCudaExecutionBytes(sizeof(int), kind, reservation);
+        int* status = nullptr;
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&status), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return ExpressionContextStatus::CudaError;
+        freshHostError_ = status; freshHostErrorPermit_ = std::move(*permit);
+    }
+    if (fresh) {
+        unprovenWork_ = true; freshFailed_ = false; freshStatusEnqueued_ = false;
+        *freshHostError_ = std::numeric_limits<int>::min();
+    }
+    if (cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess) {
+        if (fresh) freshFailed_ = true;
+        return ExpressionContextStatus::CudaError;
+    }
     const unsigned blocks = std::max(1u, static_cast<unsigned>((std::max(geometry.curveCount, geometry.pointCount) + 127) / 128));
     Validate<<<blocks,128,0,stream>>>(geometry, channels, error_.data());
+    if (cudaGetLastError() != cudaSuccess) {
+        if (fresh) freshFailed_ = true;
+        return ExpressionContextStatus::CudaError;
+    }
     if (geometry.curveCount)
         BuildOwnersAndArc<<<(geometry.curveCount + 127) / 128,128,0,stream>>>(geometry, owners_.data(), arcLength_.data(), error_.data());
-    BuildFields<<<blocks,128,0,stream>>>(geometry, channels, context.domain, arcLength_.data(), inputs_, error_.data());
-    if (cudaGetLastError() != cudaSuccess || cudaEventRecord(ready_, stream) != cudaSuccess) return ExpressionContextStatus::CudaError;
-    pending_ = true;
+    if (geometry.curveCount && cudaGetLastError() != cudaSuccess) {
+        if (fresh) freshFailed_ = true;
+        return ExpressionContextStatus::CudaError;
+    }
+    BuildFields<<<blocks,128,0,stream>>>(geometry, channels, context.domain,
+                                          arcLength_.data(), pendingInputs_, error_.data());
+    if (cudaGetLastError() != cudaSuccess || cudaEventRecord(ready_, stream) != cudaSuccess) {
+        if (fresh) freshFailed_ = true;
+        return ExpressionContextStatus::CudaError;
+    }
+    pending_ = true; freshPending_ = fresh;
     return ExpressionContextStatus::Ok;
 }
 
@@ -224,12 +351,75 @@ ExpressionContextStatus CudaExpressionContext::Wait(cudaStream_t stream) const {
     return ready_ && cudaStreamWaitEvent(stream, ready_, 0) == cudaSuccess ? ExpressionContextStatus::Ok : ExpressionContextStatus::CudaError;
 }
 
+ExpressionContextStatus CudaExpressionContext::EnqueueFreshStatus(cudaStream_t stream) {
+    if (!pending_ || !freshPending_ || freshStatusEnqueued_ || freshFailed_ ||
+        !ready_ || !freshHostError_)
+        return ExpressionContextStatus::InvalidArgument;
+    // As for BuildFresh, reject capture before a stream-device query.  A
+    // failed terminal installation leaves the already-submitted buffers
+    // unproven and therefore quarantined by destruction.
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &capture) != cudaSuccess ||
+        capture != cudaStreamCaptureStatusNone) {
+        freshFailed_ = true;
+        return ExpressionContextStatus::InvalidArgument;
+    }
+    int current = -1, streamDevice = -1;
+    if (cudaGetDevice(&current) != cudaSuccess || current != deviceIndex_ ||
+        (stream && (cudaStreamGetDevice(stream, &streamDevice) != cudaSuccess ||
+                    streamDevice != deviceIndex_)) ||
+        cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess ||
+        cudaMemcpyAsync(freshHostError_, error_.data(), sizeof(int),
+                        cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
+        freshFailed_ = true;
+        return ExpressionContextStatus::CudaError;
+    }
+    freshStatusEnqueued_ = true;
+    return ExpressionContextStatus::Ok;
+}
+
+ExpressionContextStatus CudaExpressionContext::CommitFreshFinish() {
+    if (!pending_ || !freshPending_ || !freshStatusEnqueued_ || freshFailed_)
+        return ExpressionContextStatus::InvalidArgument;
+    // The sentinel detects an uncompleted D2H status copy. The parent native
+    // callback and successful launcher return remain mandatory proof even if
+    // that copy happens to have completed before the callback runs.
+    if (!freshHostError_ || *freshHostError_ == std::numeric_limits<int>::min())
+        return ExpressionContextStatus::InvalidArgument;
+
+    const int error = *freshHostError_;
+    pending_ = false;
+    freshPending_ = false;
+    freshStatusEnqueued_ = false;
+    freshFailed_ = false;
+    unprovenWork_ = false;
+    usable_ = false;
+    if (error != 0) {
+        ExpressionInputs cleared;
+        pendingInputs_ = cleared;
+        return FinishStatus(error);
+    }
+    inputs_ = pendingInputs_;
+    usable_ = true;
+    return ExpressionContextStatus::Ok;
+}
+
 ExpressionContextStatus CudaExpressionContext::Finish(cudaStream_t stream) {
+    // A fresh operation has a later D2H/callback than ready_.  Letting the
+    // synchronous path consume it would free or publish before that terminal
+    // lifetime proof.
+    if (freshPending_ || unprovenWork_ || freshFailed_)
+        return ExpressionContextStatus::InvalidArgument;
     if (!pending_ || !ready_ || cudaEventSynchronize(ready_) != cudaSuccess) return ExpressionContextStatus::CudaError;
     int error = 0;
     if (cudaMemcpyAsync(&error, error_.data(), sizeof(error), cudaMemcpyDeviceToHost, stream) != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess) return ExpressionContextStatus::CudaError;
     pending_ = false;
-    if (error != 0) return error == kBadChannel ? ExpressionContextStatus::InvalidChannel : ExpressionContextStatus::InvalidGeometry;
+    if (error != 0) {
+        ExpressionInputs cleared;
+        pendingInputs_ = cleared;
+        return FinishStatus(error);
+    }
+    inputs_ = pendingInputs_;
     usable_ = true;
     return ExpressionContextStatus::Ok;
 }

@@ -2,11 +2,25 @@
 #include "usdGen/expressions/frontend.h"
 
 #include <cuda_runtime.h>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 using namespace usdGen;
 using namespace usdGen::gpu;
+
+namespace {
+struct AsyncStatus {
+    std::atomic<int> calls{0};
+    std::atomic<cudaError_t> status{cudaErrorUnknown};
+};
+void CUDART_CB FreshDone(cudaStream_t, cudaError_t status, void* userdata) {
+    auto* result = static_cast<AsyncStatus*>(userdata);
+    result->status.store(status, std::memory_order_release);
+    result->calls.fetch_add(1, std::memory_order_release);
+}
+} // namespace
 
 int main() {
     cudaStream_t stream = nullptr, consumer = nullptr;
@@ -111,6 +125,87 @@ int main() {
     check(primitive.Build(geometry, {{nullptr, 1}, {}}, primitiveControls, stream) ==
               ExpressionContextStatus::InvalidArgument,
           "reject null optional channel with nonzero size");
+
+    // Fresh contexts stage device fields but cannot publish an invocation
+    // until the shared terminal callback has run and the host relay commits.
+    CudaExpressionContext fresh;
+    AsyncStatus freshStatus;
+    check(fresh.BuildFresh(geometry, {{hairT.data(),5},{}}, controls, stream) ==
+              ExpressionContextStatus::Ok && fresh.HasUnprovenWork(),
+          "fresh build submits unproven context work");
+    check(fresh.Inputs().count == 0 && fresh.Inputs().context.domain == expr::Domain::None,
+          "fresh inputs remain unpublished before terminal proof");
+    check(fresh.Build(geometry, {{hairT.data(),5},{}}, controls, stream) ==
+              ExpressionContextStatus::InvalidArgument &&
+          fresh.Finish(stream) == ExpressionContextStatus::InvalidArgument,
+          "legacy entrypoints cannot consume a fresh pending context");
+    check(fresh.EnqueueFreshStatus(stream) == ExpressionContextStatus::Ok,
+          "enqueue fresh context status before shared callback");
+    check(fresh.EnqueueFreshStatus(stream) == ExpressionContextStatus::InvalidArgument,
+          "reject duplicate fresh status copy");
+    check(fresh.CommitFreshFinish() == ExpressionContextStatus::InvalidArgument,
+          "status sentinel rejects commit before terminal callback");
+    check(cudaStreamAddCallback(stream, FreshDone, &freshStatus, 0) == cudaSuccess,
+          "install batch terminal callback after context status");
+    check(cudaStreamSynchronize(stream) == cudaSuccess &&
+          freshStatus.calls.load(std::memory_order_acquire) == 1 &&
+          freshStatus.status.load(std::memory_order_acquire) == cudaSuccess,
+          "fresh terminal callback completes exactly once");
+    check(fresh.CommitFreshFinish() == ExpressionContextStatus::Ok && !fresh.HasUnprovenWork() &&
+          fresh.Inputs().count == 5 && fresh.Inputs().context.domain == expr::Domain::Point,
+          "fresh host commit publishes only proven inputs");
+
+    cudaStream_t captureStream = nullptr;
+    cudaGraph_t graph = nullptr;
+    check(cudaStreamCreateWithFlags(&captureStream, cudaStreamNonBlocking) == cudaSuccess &&
+          cudaStreamBeginCapture(captureStream, cudaStreamCaptureModeGlobal) == cudaSuccess,
+          "begin fresh context capture rejection test");
+    CudaExpressionContext captured;
+    check(captured.BuildFresh(geometry, {{hairT.data(),5},{}}, controls, captureStream) ==
+              ExpressionContextStatus::InvalidArgument && !captured.HasUnprovenWork(),
+          "fresh capture rejects before any allocation or submission");
+    check(cudaStreamEndCapture(captureStream, &graph) == cudaSuccess,
+          "end fresh context capture rejection test");
+    if (graph) check(cudaGraphDestroy(graph) == cudaSuccess, "destroy empty capture graph");
+    check(cudaStreamDestroy(captureStream) == cudaSuccess, "destroy capture stream");
+
+    // Fresh semantic failures carry a guarded status through the same shared
+    // callback path. Invalid offsets must not reach dependent field kernels.
+    o[1] = UINT32_MAX;
+    check(cudaMemcpy(offsets.data(), o, sizeof(o), cudaMemcpyHostToDevice) == cudaSuccess,
+          "upload fresh malformed offsets");
+    CudaExpressionContext malformedFresh;
+    AsyncStatus malformedStatus;
+    check(malformedFresh.BuildFresh(geometry, {{hairT.data(),5},{}}, controls, stream) ==
+              ExpressionContextStatus::Ok &&
+          malformedFresh.EnqueueFreshStatus(stream) == ExpressionContextStatus::Ok &&
+          cudaStreamAddCallback(stream, FreshDone, &malformedStatus, 0) == cudaSuccess &&
+          cudaStreamSynchronize(stream) == cudaSuccess &&
+          malformedStatus.status.load(std::memory_order_acquire) == cudaSuccess,
+          "fresh malformed offsets complete guarded validation");
+    check(malformedFresh.CommitFreshFinish() == ExpressionContextStatus::InvalidGeometry &&
+          malformedFresh.Inputs().count == 0 && !malformedFresh.HasUnprovenWork(),
+          "fresh malformed offsets never publish fields");
+    o[1] = 2;
+    check(cudaMemcpy(offsets.data(), o, sizeof(o), cudaMemcpyHostToDevice) == cudaSuccess,
+          "restore offsets after fresh malformed validation");
+
+    float nanT[] = {0, 1, 0, std::numeric_limits<float>::quiet_NaN(), 1};
+    check(cudaMemcpy(hairT.data(), nanT, sizeof(nanT), cudaMemcpyHostToDevice) == cudaSuccess,
+          "upload fresh nonfinite channel");
+    CudaExpressionContext invalidChannelFresh;
+    AsyncStatus invalidChannelStatus;
+    check(invalidChannelFresh.BuildFresh(geometry, {{hairT.data(),5},{}}, controls, stream) ==
+              ExpressionContextStatus::Ok &&
+          invalidChannelFresh.EnqueueFreshStatus(stream) == ExpressionContextStatus::Ok &&
+          cudaStreamAddCallback(stream, FreshDone, &invalidChannelStatus, 0) == cudaSuccess &&
+          cudaStreamSynchronize(stream) == cudaSuccess,
+          "fresh nonfinite channel reaches terminal callback");
+    check(invalidChannelFresh.CommitFreshFinish() == ExpressionContextStatus::InvalidChannel &&
+          invalidChannelFresh.Inputs().count == 0 && !invalidChannelFresh.HasUnprovenWork(),
+          "fresh invalid channel remains unpublished");
+    check(cudaMemcpy(hairT.data(), t, sizeof(t), cudaMemcpyHostToDevice) == cudaSuccess,
+          "restore valid channel after fresh semantic failure");
 
     // Invalid offsets are rejected after the device validation pass, before
     // any offset-derived field can be consumed.

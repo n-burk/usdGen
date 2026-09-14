@@ -45,9 +45,13 @@ bool Near(float a, float b) { return std::fabs(a - b) <= kEps; }
 
 /// Drive one Width evaluate over 2 curves x 4 CVs with hairT = i/3.
 /// `params` are (prefix-stripped) UsdGenParamValues; `inWidth` null means
-/// no upstream widths (set path). Returns the 8 output widths.
+/// no upstream widths (set path). `curveMask`, when present, supplies the
+/// capture-resolved per-curve portion of Width's local mask envelope.
+/// Returns the 8 output widths.
 std::vector<float> RunWidth(std::vector<UsdGenParamValue> const &params,
-                            float const *inWidth)
+                            float const *inWidth,
+                            float const *curveMask = nullptr,
+                            bool ragged = false)
 {
     std::unique_ptr<UsdGenOp> op = CreateWidthOp();
 
@@ -87,7 +91,16 @@ std::vector<float> RunWidth(std::vector<UsdGenParamValue> const &params,
     chunk.hairT = hairT.data();
     chunk.inWidth = inWidth;
     chunk.width = out.data();
-    chunk.curveMask = nullptr;  // == 1.0
+    chunk.curveMask = curveMask;  // null == 1.0
+    UsdGenChunkDesc chunkDesc{};
+    int const offsets[] = {101, 104, 109};
+    if (ragged) {
+        chunkDesc.firstCv = 101;
+        chunk.desc = &chunkDesc;
+        chunk.cvCount = 0;
+        chunk.cvOffsets = offsets;
+        chunk.hairT = nullptr;
+    }
 
     UsdGenEvalContext ectx;
     ectx.params = &view;
@@ -198,6 +211,48 @@ int main()
         auto out = RunWidth({P("width", VtValue(2.0)),
                              P("replace", VtValue(false))}, in);
         AllNear(out, 6.0f, "replace=false: widths == 2.0 * inWidth");
+    }
+
+    // 7. Masking is an envelope around the Width operation, not a multiplier
+    // on its target.  Pin all three useful weights for both combiners with a
+    // nonzero input so zero is a bitwise pass-through (04 §2.11/§5.2).
+    {
+        float const in[8] = {4, 4, 4, 4, 4, 4, 4, 4};
+        for (float const maskValue : {0.0f, 0.5f, 1.0f}) {
+            float const mask[2] = {maskValue, maskValue};
+            auto replace = RunWidth({P("width", VtValue(2.0)),
+                                     P("replace", VtValue(true))}, in, mask);
+            auto multiply = RunWidth({P("width", VtValue(2.0)),
+                                      P("replace", VtValue(false))}, in, mask);
+            float const expectedReplace = 4.0f + (2.0f - 4.0f) * maskValue;
+            float const expectedMultiply =
+                4.0f * (1.0f + (2.0f - 1.0f) * maskValue);
+            AllNear(replace, expectedReplace,
+                    "replace mask envelope preserves/lerps nonzero input");
+            AllNear(multiply, expectedMultiply,
+                    "multiply mask envelope preserves/lerps identity to target");
+        }
+    }
+
+    // 8. A generic source without a width plane uses the documented .01
+    // fallback in this direct-kernel fixture; masks still envelope it.
+    {
+        float const halfMask[2] = {0.5f, 0.5f};
+        auto out = RunWidth({P("width", VtValue(2.0)),
+                             P("replace", VtValue(true))}, nullptr, halfMask);
+        AllNear(out, 1.005f,
+                "missing input width uses the default baseline under a mask");
+    }
+
+    // Absolute ragged offsets must be rebased to chunk-local data pointers.
+    // Unequal spans and a nonzero first CV catch both uniform-only loops and
+    // accidental absolute indexing into the eight-element output.
+    {
+        float const in[8] = {4, 4, 4, 4, 4, 4, 4, 4};
+        float const masks[2] = {0.0f, 0.5f};
+        auto out = RunWidth({P("width", VtValue(2.0))}, in, masks, true);
+        Check(out == std::vector<float>({4, 4, 4, 3, 3, 3, 3, 3}),
+              "ragged Width rebases absolute offsets and applies each curve mask");
     }
 
     std::printf(g_allOk ? "testUsdGenWidth: PASS\n" : "testUsdGenWidth: FAILED\n");

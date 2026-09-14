@@ -7,9 +7,11 @@
 // honored by sweeping every usdGen:* attribute of every participating prim
 // into UsdGenNodeDesc::params, whether or not a dedicated field exists.
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
+#include "usdGenImaging/imageMapCache.h"
 #include "usdGenImaging/usdGenTokens.h"
 
 #include "usdGen/expressions/valueShape.h"
+#include "usdGen/executionBackend.h"
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
@@ -67,6 +69,7 @@ using usdGen::UsdGenRole;
 using usdGen::UsdGenLookDesc;
 using usdGen::UsdGenSurfaceDesc;
 using usdGen::UsdGenSurfaceSample;
+using usdGen::UsdGenSurfaceNormalDomain;
 
 // Attributes that already own a dedicated desc field; everything else
 // reaches the engine through params (S14 pull-all).
@@ -297,10 +300,7 @@ _HResolveExecutionBackend(HdContainerDataSourceHandle const &root,
         return usdGen::UsdGenExecutionBackend::Invalid;
     }
     TfToken const backend = value.UncheckedGet<TfToken>();
-    if (backend == TfToken("cuda")) {
-        return usdGen::UsdGenExecutionBackend::Cuda;
-    }
-    return usdGen::UsdGenExecutionBackend::Invalid;
+    return usdGen::ParseUsdGenExecutionBackend(backend);
 }
 
 bool
@@ -318,22 +318,6 @@ _HUsdTypeName(HdContainerDataSourceHandle const &primDs)
     _HGetTyped(_HChild(primDs, "__usdPrimInfo"), _HTime(0.0), &type,
                {"typeName"});
     return type;
-}
-
-// Relationship targets do not vary with time; sample them at 0.
-bool
-_HGetSinglePath(HdContainerDataSourceHandle const &root, SdfPath *out,
-                std::initializer_list<char const*> elems)
-{
-    VtValue value;
-    if (!_HSampledValue(root, _HTime(0.0), &value, elems)) {
-        return false;
-    }
-    if (value.IsHolding<SdfPath>()) {
-        *out = value.UncheckedGet<SdfPath>();
-        return true;
-    }
-    return false;
 }
 
 bool
@@ -397,6 +381,16 @@ _HPrimvarTyped(HdContainerDataSourceHandle const &primDs, char const *name,
     return false;
 }
 
+UsdGenSurfaceNormalDomain
+_HNormalDomain(TfToken const& interpolation)
+{
+    if (interpolation == TfToken("constant")) return UsdGenSurfaceNormalDomain::Constant;
+    if (interpolation == TfToken("uniform")) return UsdGenSurfaceNormalDomain::Uniform;
+    if (interpolation == TfToken("vertex")) return UsdGenSurfaceNormalDomain::Vertex;
+    if (interpolation == TfToken("faceVarying")) return UsdGenSurfaceNormalDomain::FaceVarying;
+    return UsdGenSurfaceNormalDomain::Invalid;
+}
+
 // Suffix left by LocatorForProperty on a collision ancestor's final element.
 std::string
 _HStripSuffix(std::string s)
@@ -435,10 +429,8 @@ _HAppendPaths(VtValue const &v, SdfPathVector *out)
 // One recursive walk over the usdGen container fills BOTH the S14 param
 // sweep (attribute leaves) and the graph edges (path-valued leaves),
 // applying the stage builder's bucket switch on (base name, full name) so
-// the two builders classify identically. `references` stays empty on both
-// sides: the stage switch has no references case (its default bucket is
-// unreachable). A null node skips edge classification (map prims: params
-// only).
+// the two builders classify identically. A null node skips edge classification
+// (map prims: params only).
 void
 _HPullUsdGen(HdContainerDataSourceHandle const &usdGen, _HdTime t,
              UsdGenNodeDesc *node, std::vector<UsdGenParamValue> *params,
@@ -474,18 +466,33 @@ _HPullUsdGen(HdContainerDataSourceHandle const &usdGen, _HdTime t,
                 SdfPathVector *bucket = nullptr;
                 if (leaf == "input") {
                     bucket = &node->inputs;
+                } else if (leaf == "references") {
+                    bucket = &node->references;
                 } else if (leaf == "guides" || leaf == "curves") {
                     bucket = &node->curves;
                 } else if (leaf == "surface") {
                     bucket = &node->surfaces;
                 } else if (leaf == "source" || leaf == "map") {
+                    usdGen::UsdGenMapBindingPurpose purpose;
                     if (full == "usdGen:mask:source" ||
                         full == "usdGen:map" ||
                         full == "usdGen:length:source") {
                         bucket = &node->maps;
+                        purpose = full == "usdGen:mask:source"
+                            ? usdGen::UsdGenMapBindingPurpose::MaskSource
+                            : (full == "usdGen:length:source"
+                                ? usdGen::UsdGenMapBindingPurpose::LengthSource
+                                : usdGen::UsdGenMapBindingPurpose::Generic);
                     } else {
                         continue;
                     }
+                    SdfPathVector targets;
+                    _HAppendPaths(v, &targets);
+                    bucket->insert(bucket->end(), targets.begin(), targets.end());
+                    for (SdfPath const &target : targets) {
+                        node->mapBindings.push_back({target, purpose, TfToken(full)});
+                    }
+                    continue;
                 } else {
                     continue;  // not a graph edge (base-name match only)
                 }
@@ -599,9 +606,13 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
     auto rest = _HChild(_HChild(primDs, "usdGen"), "rest");
     if (rest) {
         VtIntArray restCounts, restIndices;
-        bool valid = _HGetTyped(rest, t, &out->restPoints, {"points"}) &&
-            _HGetTyped(rest, t, &restCounts, {"faceVertexCounts"}) &&
-            _HGetTyped(rest, t, &restIndices, {"faceVertexIndices"});
+        // The RestAPI leaves expose the live authored Default-time opinions,
+        // but are time-invariant from Hydra's frame-sampling view. Sampling
+        // their explicit rest time is valid; sampling mesh/current primvars
+        // at a zero shutter offset would not be.
+        bool valid = _HGetTyped(rest, 0.0, &out->restPoints, {"points"}) &&
+            _HGetTyped(rest, 0.0, &restCounts, {"faceVertexCounts"}) &&
+            _HGetTyped(rest, 0.0, &restIndices, {"faceVertexIndices"});
         if (!valid || restCounts != out->faceVertexCounts || restIndices != out->faceVertexIndices) {
             errors->push_back(path.GetString() + ": missing rest data or animated/rest topology mismatch");
             out->restFromCurrentPoints = true;
@@ -615,6 +626,45 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
     }
     _HPrimvarTyped(primDs, "st", t, &out->uv);
     _HPrimvarTyped(primDs, "velocities", t, &out->velocities);
+
+    // Only the RestAPI's live Default-time snapshot is authoritative for
+    // F_rest. It updates on an authored Default edit, never per shutter.
+    // Do not substitute a current mesh primvar sampled at t (or at 0): the
+    // latter is a shutter offset, not UsdTimeCode::Default().
+    if (rest) {
+        HdSampledDataSourceHandle const normals = HdSampledDataSource::Cast(
+            rest->Get(TfToken("normals")));
+        if (normals) {
+            VtValue const normalValue = normals->GetValue(0.0);
+            if (!normalValue.IsEmpty()) {
+                if (!normalValue.IsHolding<VtVec3fArray>()) {
+                    out->restNormalDomain = UsdGenSurfaceNormalDomain::Invalid;
+                    errors->push_back(path.GetString() + ": rest normals have invalid value type");
+                } else {
+                    out->restNormals = normalValue.UncheckedGet<VtVec3fArray>();
+                    if (!out->restNormals.empty()) {
+                        HdSampledDataSourceHandle const interpolation =
+                            HdSampledDataSource::Cast(rest->Get(TfToken("normalsInterpolation")));
+                        if (!interpolation) {
+                            out->restNormalDomain = UsdGenSurfaceNormalDomain::Invalid;
+                            errors->push_back(path.GetString() + ": rest normals are missing interpolation");
+                        } else {
+                            VtValue const interpolationValue = interpolation->GetValue(0.0);
+                            if (!interpolationValue.IsHolding<TfToken>()) {
+                                out->restNormalDomain = UsdGenSurfaceNormalDomain::Invalid;
+                                errors->push_back(path.GetString() + ": rest normal interpolation has invalid value type");
+                            } else {
+                                out->restNormalDomain = _HNormalDomain(
+                                    interpolationValue.UncheckedGet<TfToken>());
+                                if (out->restNormalDomain == UsdGenSurfaceNormalDomain::Invalid)
+                                    errors->push_back(path.GetString() + ": unsupported rest normal interpolation");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     out->samples.push_back(UsdGenSurfaceSample{time, out->points});
     out->worldMatrix = GfMatrix4d(1.0);
@@ -1009,7 +1059,7 @@ CaptureGraphDescFromHydra(
             }
             map.type = type;
             SdfAssetPath asset;
-            if (_HGetTyped(ug, t, &asset, {"source"})) {
+            if (_HGetTyped(ug, t, &asset, {"map", "file"})) {
                 // Stage-free by value (S13): the RESOLVED path travels.
                 map.resolvedAssetPath = asset.GetResolvedPath();
                 if (map.resolvedAssetPath.empty()) {
@@ -1038,6 +1088,9 @@ CaptureGraphDescFromHydra(
                 role = roleIt->second;
             }
             curveFor(c, role);
+        }
+        for (SdfPath const &reference : node.references) {
+            curveFor(reference, UsdGenRole::Reference);
         }
         for (SdfPath const &m : node.maps) {
             mapFor(m);
@@ -1130,6 +1183,7 @@ CaptureGraphDescFromHydra(
         }
     }
 
+    ResolveUsdGenImageMaps(&desc);
     return result;
 }
 
