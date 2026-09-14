@@ -8858,3 +8858,24 @@ concurrency, renderer residency and additional platform/driver evidence remain.
 The documented legacy CPU minimum discrepancy is not resolved by this checkpoint.
 Metal (excluded item 8) remains out of scope. No full CUDA/CPU regression rerun is
 claimed for this Vulkan-production/CUDA-test-only slice.
+
+### CUDA-only main publication validation (2026-09-14)
+
+Prepared CUDA/shared-runtime checkpoint `1d4af5e`, preserving the remote
+documentation update through merge `2ff0e54`. The opt-in Vulkan implementation,
+tests, shader/toolchain scripts and build/package changes are excluded from this
+publication and remain in the original working tree. Shared SDK-free provider
+interfaces, COW/resource/DAG work, CUDA operators, source/imaging contracts and
+their test dependencies are included. Existing removal of patched-OpenUSD/Storm
+integration is part of the unpatched-renderer contract; its old files remain
+recoverable in Git history.
+
+A clean detached checkout of `2ff0e54` configured and built all 387 targets with
+CUDA 13.0, sm_121 and stock OpenUSD 26.08. The complete 178-test run produced
+175 passes, one expected StormSurgery skip, and two schema setup failures in
+96.65s: the scripts defaulted to a nonexistent sibling OpenUSD installation
+under the temporary checkout. Setting the documented USD/GEN/GENBUILD overrides
+to the real install and isolated checkout made both schema checks PASS (2/2,
+0.49s), without any code or schema-resource change. Thus all 177 runnable tests
+have passed on the exact published code snapshot; the one skip remains explicit.
+This validates the existing checkpoint, not completion of the larger goal.
