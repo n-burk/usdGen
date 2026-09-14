@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <limits>
+#include <algorithm>
 
 using namespace usdGen;
 using namespace usdGen::gpu;
@@ -90,6 +92,107 @@ int main() {
     CHECK(Near(got[2].y, 1 + UsdGenDraw01(11, 17, usdGen::kSaltLength)));
     CHECK(Near(got[4].z, 3 * (1 + UsdGenDraw01(11, 29, usdGen::kSaltLength))));
 
+    // Unit lines expose the pinned draw directly as the tip coordinate: require
+    // bit-exact equality, not a geometry tolerance that could hide hash drift.
+    {
+        constexpr uint32_t count = 128;
+        std::vector<float3> unitPoints(2 * count);
+        std::vector<uint32_t> unitOffsets(count + 1);
+        std::vector<uint64_t> unitIds(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            unitPoints[2*i] = make_float3(0,0,0);
+            unitPoints[2*i+1] = make_float3(1,0,0);
+            unitOffsets[i] = 2*i;
+            unitIds[i] = (uint64_t(i * 2654435761u) << 32) | (0xffffffffu-i);
+        }
+        unitOffsets[count] = 2*count;
+        unitIds[0] = 0;
+        unitIds[1] = UINT64_MAX;
+        unitIds[2] = uint64_t(1) << 63;
+        DeviceBuffer<float3> unitInput, unitOutput;
+        DeviceBuffer<uint32_t> unitOffsetBuffer;
+        DeviceBuffer<uint64_t> unitIdBuffer;
+        DeviceBuffer<uint8_t> unitKeep;
+        CHECK(unitInput.reset(2*count) == cudaSuccess &&
+              unitOutput.reset(2*count) == cudaSuccess &&
+              unitOffsetBuffer.reset(count+1) == cudaSuccess &&
+              unitIdBuffer.reset(count) == cudaSuccess &&
+              unitKeep.reset(count) == cudaSuccess);
+        CHECK(Upload(unitInput, unitPoints, producer) &&
+              Upload(unitOffsetBuffer, unitOffsets, producer));
+        DeviceCurveGeometryView unitGeometry{
+            {unitInput.data(), unitInput.size()}, {}, {},
+            {unitOffsetBuffer.data(), unitOffsetBuffer.size()},
+            {unitIdBuffer.data(), unitIdBuffer.size()}, count, 2*count};
+        std::vector<float3> unitGot(2*count);
+        std::vector<uint8_t> unitGotKeep(count);
+        for (int permutation = 0; permutation < 2; ++permutation) {
+            if (permutation) std::reverse(unitIds.begin(), unitIds.end());
+            CHECK(Upload(unitIdBuffer, unitIds, producer));
+            for (int seed : {0, -1, 11, std::numeric_limits<int>::min(),
+                             std::numeric_limits<int>::max()}) {
+                LengthParameters randomParameters;
+                randomParameters.value = ScalarField::Literal(1.f);
+                randomParameters.random = Vec2Field::Literal(make_float2(0.f,1.f));
+                randomParameters.seed = seed;
+                CHECK(op.Apply(unitGeometry, {}, randomParameters, unitOutput.view(),
+                               unitKeep.view(), producer) == StyleStatus::Ok);
+                CHECK(op.Finish(consumer) == StyleStatus::Ok &&
+                      Download(unitOutput, unitGot, consumer) &&
+                      Download(unitKeep, unitGotKeep, consumer));
+                for (uint32_t i = 0; i < count; ++i) {
+                    float const draw = UsdGenDraw01(seed, unitIds[i], usdGen::kSaltLength);
+                    CHECK(std::memcmp(&unitGot[2*i+1].x, &draw, sizeof(float)) == 0);
+                    CHECK(unitGot[2*i].x == 0 && unitGot[2*i].y == 0 &&
+                          unitGot[2*i].z == 0 && unitGot[2*i+1].y == 0 &&
+                          unitGot[2*i+1].z == 0 && unitGotKeep[i] == 1);
+                }
+            }
+        }
+        CHECK(Download(unitInput, unitGot, consumer));
+        CHECK(std::memcmp(unitGot.data(), unitPoints.data(), unitPoints.size()*sizeof(float3)) == 0);
+    }
+
+    // A reversed unit line exposes tiny positive envelopes as subnormal output
+    // coordinates. Zero-underflow must instead be a byte-exact topology no-op.
+    {
+        DeviceBuffer<float3> tinyInput, tinyOutput;
+        DeviceBuffer<uint32_t> tinyOffsets;
+        DeviceBuffer<uint64_t> tinyIds;
+        DeviceBuffer<uint8_t> tinyKeep;
+        CHECK(tinyInput.reset(2) == cudaSuccess && tinyOutput.reset(2) == cudaSuccess &&
+              tinyOffsets.reset(2) == cudaSuccess && tinyIds.reset(1) == cudaSuccess &&
+              tinyKeep.reset(1) == cudaSuccess);
+        std::vector<float3> tinySource{{1,0,0},{0,0,0}}, tinyGot(2);
+        std::vector<uint8_t> tinyGotKeep(1);
+        CHECK(Upload(tinyInput, tinySource, producer) &&
+              Upload(tinyOffsets, {0u,2u}, producer) && Upload(tinyIds, {uint64_t(7)}, producer));
+        DeviceCurveGeometryView tinyGeometry{{tinyInput.data(),2}, {}, {},
+            {tinyOffsets.data(),2}, {tinyIds.data(),1}, 1, 2};
+        LengthParameters tiny;
+        tiny.value = ScalarField::Literal(2.f);
+        tiny.blend = ScalarField::Literal(std::numeric_limits<float>::min());
+        tiny.maskAmount = ScalarField::Literal(.5f);
+        CHECK(op.Apply(tinyGeometry, {}, tiny, tinyOutput.view(), tinyKeep.view(), producer) == StyleStatus::Ok &&
+              op.Finish(consumer) == StyleStatus::Ok && Download(tinyOutput, tinyGot, consumer));
+        float const subnormal = -std::numeric_limits<float>::min()*.5f;
+        CHECK(std::memcmp(&tinyGot[1].x, &subnormal, sizeof(float)) == 0);
+        tiny.blend = ScalarField::Literal(std::numeric_limits<float>::denorm_min());
+        tiny.minRemainingLength = ScalarField::Literal(100.f);
+        tiny.cullThreshold = ScalarField::Literal(1000.f);
+        CHECK(op.Apply(tinyGeometry, {}, tiny, tinyOutput.view(), tinyKeep.view(), producer) == StyleStatus::Ok &&
+              op.Finish(consumer) == StyleStatus::Ok && Download(tinyOutput, tinyGot, consumer) &&
+              Download(tinyKeep, tinyGotKeep, consumer));
+        CHECK(std::memcmp(tinyGot.data(), tinySource.data(), sizeof(float3)*2) == 0 &&
+              tinyGotKeep == std::vector<uint8_t>({1}));
+        tiny.mode = LengthMode::Cull;
+        CHECK(op.Apply(tinyGeometry, {}, tiny, tinyOutput.view(), tinyKeep.view(), producer) == StyleStatus::Ok &&
+              op.Finish(consumer) == StyleStatus::Ok && Download(tinyOutput, tinyGot, consumer) &&
+              Download(tinyKeep, tinyGotKeep, consumer));
+        CHECK(std::memcmp(tinyGot.data(), tinySource.data(), sizeof(float3)*2) == 0 &&
+              tinyGotKeep == std::vector<uint8_t>({1}));
+    }
+
     // Set + cutExtend keepParam cuts and collapses trailing CVs; reparam
     // distributes CVs and extends along the last non-degenerate tangent.
     p = LengthParameters{};
@@ -162,6 +265,27 @@ int main() {
     const std::vector<float3> minimumRadial{{0,0,0},{1.25f,0,0},{1.25f,1.25f,0},{0,0,0},{0,0,2.5f}};
     const std::vector<float3> minimumKeep{{0,0,0},{1,0,0},{1,1.5f,0},{0,0,0},{0,0,2.5f}};
     const std::vector<float3> minimumReparam{{0,0,0},{1,.25f,0},{1,1.5f,0},{0,0,0},{0,0,2.5f}};
+    // Partial scalar envelopes blend the edited curve back onto the original,
+    // not the target length; bent Reparam makes that distinction observable.
+    for (unsigned method = 0; method < 3; ++method) {
+        LengthParameters envelope;
+        envelope.mode = LengthMode::Set;
+        envelope.value = ScalarField::Literal(4.f);
+        envelope.blend = ScalarField::Literal(.5f);
+        envelope.maskAmount = ScalarField::Literal(.5f);
+        envelope.method = method ? LengthMethod::CutExtend : LengthMethod::Scale;
+        envelope.rebuild = method == 2 ? LengthRebuild::Reparam : LengthRebuild::KeepParam;
+        CHECK(op.Apply(geometry, {}, envelope, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+              op.Finish(consumer) == StyleStatus::Ok &&
+              Download(output, got, consumer) && Download(keep, gotKeep, consumer));
+        std::vector<float3> expected = method == 0
+            ? std::vector<float3>{{0,0,0},{1.25f,0,0},{1.25f,1.25f,0},{0,0,0},{0,0,3.25f}}
+            : method == 1
+            ? std::vector<float3>{{0,0,0},{1,0,0},{1,1.5f,0},{0,0,0},{0,0,3.25f}}
+            : std::vector<float3>{{0,0,0},{1,.25f,0},{1,1.5f,0},{0,0,0},{0,0,3.25f}};
+        CHECK(FloatBytesWithinUlps(got.data(), expected.data(), expected.size()*sizeof(float3), 4) &&
+              gotKeep == std::vector<uint8_t>({1,1}));
+    }
     for (auto mode : {LengthMode::Scale, LengthMode::Set}) {
         for (auto method : {LengthMethod::Scale, LengthMethod::CutExtend}) {
             for (auto rebuild : {LengthRebuild::KeepParam, LengthRebuild::Reparam}) {
@@ -185,6 +309,18 @@ int main() {
           Download(keep, gotKeep, consumer));
     CHECK(FloatBytesWithinUlps(got.data(), minimumReparam.data(), got.size()*sizeof(float3), 4) &&
           gotKeep == std::vector<uint8_t>({0,1}));
+    // Finite inputs may overflow the staged Scale product before a zero
+    // multiplier. CUDA fmaxf recovers the finite floor from that raw NaN.
+    p = LengthParameters{};
+    p.value = ScalarField::Literal(std::numeric_limits<float>::max());
+    p.random = Vec2Field::Literal(make_float2(0.f, 0.f));
+    p.minRemainingLength = ScalarField::Literal(2.5f);
+    CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
+          op.Finish(consumer) == StyleStatus::Ok &&
+          Download(output, got, consumer) && Download(keep, gotKeep, consumer));
+    CHECK(FloatBytesWithinUlps(got.data(), minimumRadial.data(), got.size()*sizeof(float3), 4) &&
+          gotKeep == std::vector<uint8_t>({1,1}));
+
     // A nonbinding floor does not cap an independently larger requested target.
     p = LengthParameters{}; p.mode = LengthMode::Set;
     p.value = ScalarField::Literal(4); p.minRemainingLength = ScalarField::Literal(1);
