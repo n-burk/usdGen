@@ -340,7 +340,8 @@ int main(int argc, char** argv) {
             CHECK(angularPlan&&!angularDiagnostics.HasErrors());
             auto angularWorkspace=CreateCudaExecutionWorkspace(-1,&angularDiagnostics);
             CHECK(angularWorkspace);
-            auto angularDirect=ExecuteCudaGraph(*angularPlan,*angularWorkspace,10+variant,200+variant,
+            auto angularDirect=ExecuteCudaGraph(*angularPlan,*angularWorkspace,
+                                                static_cast<double>(10+variant),200+variant,
                                                 &angularDiagnostics);
             std::vector<float> lengths;
             CHECK(angularDirect&&!angularDiagnostics.HasErrors()&&
@@ -352,7 +353,7 @@ int main(int argc, char** argv) {
                     CHECK(Near(lengths[curve],baselineLengths[curve]));
             }
             angularSession.SetGraphDesc(angular);
-            auto angularPublished=angularSession.Commit(10+variant,UsdGenCommitReason::SetTime);
+            auto angularPublished=angularSession.Commit(static_cast<double>(10+variant),UsdGenCommitReason::SetTime);
             CHECK(angularPublished&&angularPublished->device&&
                   !angularSession.LastDiagnostics().HasErrors()&&
                   CheckGrowParity(angularPublished->device,angularReference,stream));
@@ -414,7 +415,7 @@ int main(int argc, char** argv) {
             CHECK(uvPlan&&!uvDiagnostics.HasErrors());
             auto uvWorkspace=CreateCudaExecutionWorkspace(-1,&uvDiagnostics);
             CHECK(uvWorkspace);
-            auto uvDirect=ExecuteCudaGraph(*uvPlan,*uvWorkspace,30+variant,230+variant,&uvDiagnostics);
+            auto uvDirect=ExecuteCudaGraph(*uvPlan,*uvWorkspace,static_cast<double>(30+variant),230+variant,&uvDiagnostics);
             std::vector<float> lengths;
             CHECK(uvDirect&&!uvDiagnostics.HasErrors()&&
                   CheckGrowParity(uvDirect,uvReference,stream,&lengths));
@@ -425,7 +426,7 @@ int main(int argc, char** argv) {
                     CHECK(Near(lengths[curve],uvLengths[curve]));
             }
             uvSession.SetGraphDesc(uv);
-            auto uvPublished=uvSession.Commit(30+variant,UsdGenCommitReason::SetTime);
+            auto uvPublished=uvSession.Commit(static_cast<double>(30+variant),UsdGenCommitReason::SetTime);
             CHECK(uvPublished&&uvPublished->device&&!uvSession.LastDiagnostics().HasErrors()&&
                   CheckGrowParity(uvPublished->device,uvReference,stream));
             if (!variant) {
@@ -469,8 +470,8 @@ int main(int argc, char** argv) {
                 CHECK(meta->Tasks()[0].estimate.scratchPeakBytes >=
                     expected.totalCurves*sizeof(float)+4*sizeof(float));
                 auto work=CreateCudaExecutionWorkspace(-1,&errors);CHECK(work);
-                auto direct=ExecuteCudaGraph(*mappedPlan,*work,120+variant,220+variant,&errors);
-                CHECK(direct&&!errors.HasErrors()&&CheckGrowParity(direct,expected,stream));
+                auto mappedDirect=ExecuteCudaGraph(*mappedPlan,*work,120+variant,220+variant,&errors);
+                CHECK(mappedDirect&&!errors.HasErrors()&&CheckGrowParity(mappedDirect,expected,stream));
                 mapSession.SetGraphDesc(mapped);
                 auto published=mapSession.Commit(120+variant,UsdGenCommitReason::SetTime);
                 CHECK(published&&published->device&&!mapSession.LastDiagnostics().HasErrors()&&

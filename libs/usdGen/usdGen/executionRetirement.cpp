@@ -12,6 +12,13 @@
 #include <vector>
 #include <thread>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace usdGen {
 namespace {
 enum SlotFlags : uint32_t {
@@ -397,6 +404,29 @@ UsdGenExecutionRetirementService::TryReserve() noexcept {
     }
     return {};
 }
+namespace {
+// On Windows a std::atexit handler or static destructor that lives in a DLL
+// runs from the loader's process shutdown, after ExitProcess has terminated
+// every other thread. The cleanup arena's worker is gone by then, so a drain
+// wait issued there can never be serviced and spins for as long as the process
+// is allowed to live (observed under ctest as a 100% CPU timeout after the
+// test body had finished). ntdll exposes that loader state; when it is set
+// the wait is skipped, which changes nothing observable: no thread remains
+// that could run or observe the cleanup, and the OS reclaims the mapping.
+// Linux runs these handlers inside exit() with the workers alive, so the wait
+// stays in place there.
+bool _ProcessShutdownInProgress() noexcept {
+#if defined(_WIN32)
+    using Fn = BOOLEAN(NTAPI*)();
+    static Fn const fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+        ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
+    return fn && fn();
+#else
+    return false;
+#endif
+}
+}
+
 void UsdGenExecutionRetirementService::Shutdown() noexcept {
     if (impl_) impl_->accepting.store(false, std::memory_order_release);
 }
@@ -413,7 +443,7 @@ void UsdGenExecutionRetirementService::QuiesceBackend() {
         uint64_t const observed = slot.state.load(std::memory_order_acquire);
         state->QuarantineUnscheduled(slot, _Generation(observed));
     }
-    state->drainGraph->wait_for_all();
+    if (!_ProcessShutdownInProgress()) state->drainGraph->wait_for_all();
 }
 bool UsdGenExecutionRetirementService::BackendQuiesced() const noexcept {
     auto state = impl_;
@@ -421,7 +451,8 @@ bool UsdGenExecutionRetirementService::BackendQuiesced() const noexcept {
 }
 void UsdGenExecutionRetirementService::Drain() {
     if (_retirementCleanupActive) std::terminate();
-    if (impl_ && impl_->drainGraph) impl_->drainGraph->wait_for_all();
+    if (impl_ && impl_->drainGraph && !_ProcessShutdownInProgress())
+        impl_->drainGraph->wait_for_all();
 }
 
 namespace {

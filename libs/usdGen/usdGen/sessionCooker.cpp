@@ -909,12 +909,12 @@ void UsdGenSessionCooker::CookCudaAsync(UsdGenExecutionRuntime& runtime,
         if (device && device->Owner() && device->Owner()->ProducerReady() &&
             device->Identity().backend == UsdGenDeviceBackend::Cuda &&
             device->Identity().deviceIndex == _cudaWorkspace->DeviceIndex()) {
-            std::string reason;
+            std::string republishReason;
             uint64_t const publicationGeneration =
                 cacheDomain->AllocatePublicationGeneration(
                     static_cast<uint64_t>(_store.NextId()));
             auto republished = publicationGeneration
-                ? device->Republish(publicationGeneration, &reason)
+                ? device->Republish(publicationGeneration, &republishReason)
                 : std::shared_ptr<const UsdGenDeviceGeneration>{};
             if (republished) {
                 UsdGenGeneration hit = cached;
@@ -1586,12 +1586,12 @@ UsdGenStats publishedStats, bool invalidateValues,
                 cachedDevice->Owner()->ProducerReady() &&
                 cachedDevice->Identity().backend == UsdGenDeviceBackend::Cuda &&
                 cachedDevice->Identity().deviceIndex == _cudaWorkspace->DeviceIndex()) {
-                std::string reason;
+                std::string republishReason;
                 uint64_t const publicationGeneration =
                     cacheDomain->AllocatePublicationGeneration(
                         static_cast<uint64_t>(_store.NextId()));
                 auto republished = publicationGeneration
-                    ? cachedDevice->Republish(publicationGeneration, &reason)
+                    ? cachedDevice->Republish(publicationGeneration, &republishReason)
                     : std::shared_ptr<const UsdGenDeviceGeneration>{};
                 if (republished) {
                     UsdGenGeneration hit = cached;
@@ -1617,10 +1617,10 @@ UsdGenStats publishedStats, bool invalidateValues,
                 }
             }
         }
-        auto previous = _store.Get();
+        auto priorGeneration = _store.Get();
         auto device = ExecuteCudaGraph(*_graph.CudaPlan(), *_cudaWorkspace, frame,
             static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics,
-            previous && !newWorkspace ? previous->device : nullptr);
+            priorGeneration && !newWorkspace ? priorGeneration->device : nullptr);
         if (!device || _lastDiagnostics.HasErrors()) {
             _InvalidatePoisonedCudaWorkspace();
             return reject();

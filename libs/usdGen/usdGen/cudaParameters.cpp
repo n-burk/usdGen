@@ -1,5 +1,6 @@
 #ifdef USDGEN_ENABLE_CUDA
 #include "cudaParameters.h"
+#include "usdGen/gpu/cudaCompat.h"
 #include "usdGen/expressions/frontend.h"
 #include "pxr/base/gf/half.h"
 #include "pxr/base/gf/vec2d.h"
@@ -322,12 +323,12 @@ CudaParameterStatus CudaParameterEvaluator::Evaluate(
         inputs.fields[static_cast<unsigned>(expr::Variable::Value)] =
             {literals_[i].data(), 1, Domain::Groom, static_cast<uint32_t>(components)};
         runtime_.push_back(std::make_unique<gpu::CudaExpressionProgram>());
-        auto& program = *runtime_.back();
-        if (program.Upload(item.ir, stream, reservation, kind) != gpu::ExpressionStatus::Ok ||
-            program.Evaluate(inputs, {outputs_[i].data(), inputs.count,
+        auto& runtimeProgram = *runtime_.back();
+        if (runtimeProgram.Upload(item.ir, stream, reservation, kind) != gpu::ExpressionStatus::Ok ||
+            runtimeProgram.Evaluate(inputs, {outputs_[i].data(), inputs.count,
                 binding.destinationShape.scalar, static_cast<uint32_t>(components)}, stream) != gpu::ExpressionStatus::Ok)
             return fail(CudaParameterStatus::CudaError, "CUDA expression launch failed");
-        if (program.Finish(stream) != gpu::ExpressionStatus::Ok)
+        if (runtimeProgram.Finish(stream) != gpu::ExpressionStatus::Ok)
             return fail(CudaParameterStatus::InvalidValue, "CUDA expression value validation failed");
         candidate.push_back({binding.destination, outputs_[i].data(), inputs.count,
             binding.destinationShape.scalar, static_cast<uint32_t>(components), binding.domain});

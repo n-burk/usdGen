@@ -1669,7 +1669,7 @@ int main() {
         auto blocked=prepareFinal(lengthPlan,blockedWorkspace,104,lengthAsyncGeneration); CHECK(blocked);
         std::shared_ptr<const UsdGenDeviceGeneration> result;
         std::atomic<int> calls{0}, blockedCalls{0};
-        gate.arm(); ReleaseFinalizationGate releaseGate{gate.release};
+        gate.arm(); ReleaseFinalizationGate releaseFinalGate{gate.release};
         CHECK(FinalizeCudaExecutionJobAsync(held,[&](auto generation) {
             result=std::move(generation); ++calls;
         }));
@@ -1678,7 +1678,7 @@ int main() {
               !FinalizeCudaExecutionJobAsync(blocked,[&](auto) { ++blockedCalls; }) && blockedCalls==0 &&
               !FinalizeCudaExecutionJobAsync(held,[](auto) {}) &&
               !FinalizeCudaExecutionJob(*held) && !ExecuteCudaJobOperator(*held,0));
-        gate.release(); releaseGate.release=nullptr;
+        gate.release(); releaseFinalGate.release=nullptr;
         auto const deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
         while (calls.load(std::memory_order_acquire)==0 && std::chrono::steady_clock::now()<deadline) std::this_thread::yield();
         CHECK(calls==1 && result && cudaFinalizationRelayOccupiedCountForTesting()==0);

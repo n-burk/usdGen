@@ -1,7 +1,9 @@
 #include "picking.h"
+#include "cudaCompat.h"
 
 #include <cub/device/device_scan.cuh>
 #include <cub/device/device_reduce.cuh>
+#include <cub/version.cuh>
 
 #include <algorithm>
 #include <cmath>
@@ -21,6 +23,37 @@ __device__ bool Finite(float3 p) {
 }
 __device__ int ErrorLoad(int const *error) {
     return atomicAdd(const_cast<int *>(error), 0);
+}
+
+// CUB 2.8 (CUDA 12.8) added the ArgMin overload that writes the extremum and
+// its index to separate outputs. Older CUB only reduces to a
+// KeyValuePair<int, float>: park that in the 8-byte index slot and split it in
+// place, so FinalizePick reads the same (minimum, index) pair either way.
+#if CUB_VERSION < 200800
+__global__ void SplitArgMin(float *minimum, int64_t *index) {
+    auto const pair = *reinterpret_cast<cub::KeyValuePair<int, float> const *>(index);
+    *minimum = pair.value;
+    *index = pair.key;
+}
+#endif
+
+cudaError_t ArgMinDistance(void *temp, size_t &bytes, float const *distances,
+                           float *minimum, int64_t *index, size_t count,
+                           cudaStream_t stream) {
+#if CUB_VERSION >= 200800
+    return cub::DeviceReduce::ArgMin(temp, bytes, distances, minimum, index,
+                                     static_cast<int64_t>(count), stream);
+#else
+    static_assert(sizeof(cub::KeyValuePair<int, float>) <= sizeof(int64_t),
+                  "the argmin pair must fit the index slot");
+    if (count > size_t(INT_MAX)) return cudaErrorInvalidValue;
+    auto *pair = reinterpret_cast<cub::KeyValuePair<int, float> *>(index);
+    cudaError_t const status = cub::DeviceReduce::ArgMin(
+        temp, bytes, distances, pair, static_cast<int>(count), stream);
+    if (status != cudaSuccess || !temp) return status;
+    SplitArgMin<<<1,1,0,stream>>>(minimum, index);
+    return cudaGetLastError();
+#endif
 }
 
 struct DeviceQuery {
@@ -290,13 +323,11 @@ PickingStatus CudaPicking::begin(DeviceCurveGeometryView g, PickQuery query,
             if (cudaGetLastError() != cudaSuccess)
                 return abortBegin(stream, PickingStatus::CudaError, "pick candidate launch failed");
             size_t bytes = 0;
-            if (cub::DeviceReduce::ArgMin(nullptr, bytes, pickDistances_.data(),
-                                          pickMinimum_.data(), reinterpret_cast<int64_t*>(pickIndexBytes_.data()),
-                                          static_cast<int64_t>(n), stream) != cudaSuccess ||
+            if (ArgMinDistance(nullptr, bytes, pickDistances_.data(), pickMinimum_.data(),
+                               reinterpret_cast<int64_t*>(pickIndexBytes_.data()), n, stream) != cudaSuccess ||
                 scanTemp_.reset(bytes) != cudaSuccess ||
-                cub::DeviceReduce::ArgMin(scanTemp_.data(), bytes, pickDistances_.data(),
-                                          pickMinimum_.data(), reinterpret_cast<int64_t*>(pickIndexBytes_.data()),
-                                          static_cast<int64_t>(n), stream) != cudaSuccess)
+                ArgMinDistance(scanTemp_.data(), bytes, pickDistances_.data(), pickMinimum_.data(),
+                               reinterpret_cast<int64_t*>(pickIndexBytes_.data()), n, stream) != cudaSuccess)
                 return abortBegin(stream, PickingStatus::CudaError, "pick reduction failed");
             FinalizePick<<<1,1,0,stream>>>(g,dq,pickMinimum_.data(),
                 reinterpret_cast<int64_t*>(pickIndexBytes_.data()),

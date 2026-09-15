@@ -1,4 +1,5 @@
 #include "deviceBuffer.h"
+#include "cudaCompat.h"
 #include "curveTileBounds.h"
 #include "curveTiles.h"
 #include <cstdint>

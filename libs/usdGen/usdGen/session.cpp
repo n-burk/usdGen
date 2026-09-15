@@ -15,9 +15,13 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 namespace usdGen {
 namespace {
+// Leaked on purpose: the runtime owns a TBB arena, and a static destructor in
+// this library runs at DLL_PROCESS_DETACH on Windows, after ExitProcess has
+// terminated every worker thread. Arena teardown waits for workers that can
+// never answer. The OS releases the mapping at process death regardless.
 UsdGenExecutionRuntime& DefaultRuntime() {
-    static UsdGenExecutionRuntime runtime(8);
-    return runtime;
+    static auto* runtime = new UsdGenExecutionRuntime(8);
+    return *runtime;
 }
 
 void Merge(UsdGenPendingDirty& into, UsdGenPendingDirty const& pending) {

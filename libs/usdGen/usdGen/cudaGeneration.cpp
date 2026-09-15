@@ -1,5 +1,6 @@
 #ifdef USDGEN_ENABLE_CUDA
 #include "usdGen/gpu/generation.h"
+#include "usdGen/gpu/cudaCompat.h"
 #include "usdGen/gpu/curveCompaction.h"
 #include "usdGen/gpu/curveGrow.h"
 #include "usdGen/gpu/scatterGrow.h"

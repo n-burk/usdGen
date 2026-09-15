@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
         curves.curveVertexCounts = {2,2,2};
         // Middle curve is deliberately below the cull threshold; source
         // IDs, frames, and named values make survivor/frame lookup visible.
-        curves.points = {{1,2,3},{1,2,4}, {3,2,3},{3,2,3.1}, {5,2,3},{5,2,5}};
+        curves.points = {{1,2,3},{1,2,4}, {3,2,3},{3,2,3.1f}, {5,2,3},{5,2,5}};
         curves.rest = curves.points;
         curves.curveId = {7,11,19}; curves.skinPrim = {0,1,2};
         curves.skinPrimUv = {{0,0},{.25f,.5f},{.75f,.25f}};

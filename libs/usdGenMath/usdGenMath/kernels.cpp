@@ -35,7 +35,7 @@ std::uint64_t UsdGenMortonInterleave(std::uint32_t x, std::uint32_t y, std::uint
 
 std::uint64_t UsdGenMortonKey3(float x, float y, float z, float cellScale)
 {
-    constexpr int kMax = (1 << 20) - 1;  // +2^20-1, bias window [-2^20, 2^20-1]
+    static constexpr int kMax = (1 << 20) - 1;  // +2^20-1, bias window [-2^20, 2^20-1]
     auto quant = [cellScale](float v) -> std::uint32_t {
         double q = std::floor(double(v) * double(cellScale));
         if (q < double(-(1 << 20))) q = double(-(1 << 20));

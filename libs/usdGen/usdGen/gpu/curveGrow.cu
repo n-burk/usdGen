@@ -1,4 +1,5 @@
 #include "curveGrow.h"
+#include "cudaCompat.h"
 
 #include "usdGen/executionResources.h"
 

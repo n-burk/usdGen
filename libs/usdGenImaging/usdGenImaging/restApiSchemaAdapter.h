@@ -24,14 +24,14 @@ public:
     /// The API adds no child prims: its contribution overlays the prim's
     /// own data source at the usdGen/rest/* locators.
     TfTokenVector GetImagingSubprims(
-        UsdPrim const &prim, TfToken const &appliedInstanceName) override
+        UsdPrim const & /*prim*/, TfToken const & /*appliedInstanceName*/) override
     {
         return TfTokenVector();
     }
 
     TfToken GetImagingSubprimType(
-        UsdPrim const &prim, TfToken const &subprim,
-        TfToken const &appliedInstanceName) override
+        UsdPrim const & /*prim*/, TfToken const & /*subprim*/,
+        TfToken const & /*appliedInstanceName*/) override
     {
         return TfToken();
     }

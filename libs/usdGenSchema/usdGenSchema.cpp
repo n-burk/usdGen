@@ -45,8 +45,15 @@ _ComputeDescriptionExtent(
     GfRange3d range;
     bool any = false;
     for (const UsdPrim &child : prim.GetAllChildren()) {
+        // Only ask boundable children. ComputeExtent on a non-boundable prim
+        // (the Ops Scope every description carries, say) reaches
+        // _ComputeExtentFromPlugins, which posts a TfError rather than
+        // returning false -- and a posted error surfaces in usdview as an
+        // exception out of the bbox cache, not as a skipped child.
+        const UsdGeomBoundable boundableChild(child);
+        if (!boundableChild) continue;
         VtVec3fArray childExtent(2);
-        if (UsdGeomBoundable(child).ComputeExtent(time, &childExtent) &&
+        if (boundableChild.ComputeExtent(time, &childExtent) &&
             childExtent.size() == 2) {
             range.Union(GfRange3d(childExtent[0], childExtent[1]));
             any = true;

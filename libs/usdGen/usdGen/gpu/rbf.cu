@@ -1,4 +1,5 @@
 #include "rbf.h"
+#include "cudaCompat.h"
 #include "deviceResources.h"
 
 #include <cmath>

@@ -35,12 +35,44 @@
 #include <sstream>
 #include <limits>
 #include <cstring>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 
 namespace usdGen {
 namespace {
+
+int _PopCount64(uint64_t value) noexcept
+{
+#if defined(_MSC_VER)
+    return static_cast<int>(__popcnt64(value));
+#elif defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcountll(value);
+#else
+    int count = 0;
+    while (value) { value &= value - 1; ++count; }
+    return count;
+#endif
+}
+
+int _CountTrailingZeros64(uint64_t value) noexcept
+{
+    // All callers pass a nonzero bitmap word.
+#if defined(_MSC_VER)
+    unsigned long index = 0;
+    _BitScanForward64(&index, value);
+    return static_cast<int>(index);
+#elif defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(value);
+#else
+    int count = 0;
+    while ((value & 1u) == 0) { value >>= 1; ++count; }
+    return count;
+#endif
+}
 
 bool ValidateAuthoredPlanes(UsdGenGraphDesc const &desc,
                             UsdGenCompileResult &result)
@@ -472,9 +504,9 @@ bool BuildReferenceValue(UsdGenCurveSetDesc const &curves,
             GfVec3d const tangent = frame.GetRow3(0);
             GfVec3d const binormal = frame.GetRow3(1);
             GfVec3d const normal = frame.GetRow3(2);
-            buffer.rootT[i] = GfVec3f(tangent[0], tangent[1], tangent[2]);
-            buffer.rootB[i] = GfVec3f(binormal[0], binormal[1], binormal[2]);
-            buffer.rootN[i] = GfVec3f(normal[0], normal[1], normal[2]);
+            buffer.rootT[i] = GfVec3f(tangent);
+            buffer.rootB[i] = GfVec3f(binormal);
+            buffer.rootN[i] = GfVec3f(normal);
         }
     }
     buffer.px.resize(buffer.totalCvs);
@@ -994,7 +1026,7 @@ void UsdGenCompiler::_Build(
                     uint64_t const before = dst[w];
                     uint64_t const after = before | src[w];
                     dst[w] = after;
-                    add += __builtin_popcountll(after & ~before);
+                    add += _PopCount64(after & ~before);
                 }
                 uint64_t const bit = 1ull << (cp & 63);
                 if (!(dst[cp >> 6] & bit)) { dst[cp >> 6] |= bit; ++add; }
@@ -1009,7 +1041,7 @@ void UsdGenCompiler::_Build(
                 uint64_t b = row[w];
                 while (b) {
                     v.push_back(static_cast<UsdGenNodeId>(
-                        w * 64 + __builtin_ctzll(b)));
+                        w * 64 + _CountTrailingZeros64(b)));
                     b &= b - 1;   // ascending bit order == dense-id order
                 }
             }

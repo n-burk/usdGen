@@ -1,4 +1,5 @@
 #include "noise.h"
+#include "cudaCompat.h"
 
 #include "seexprNoise.cuh"
 

@@ -20,7 +20,11 @@ SculptLayer + Freeze kernels, C3 freeze, Hydra-sourced graph builder).
   `-DUSD_INSTALL_DIR=`).
 - CMake ≥ 3.26 and a C++17 compiler (GCC, Clang, or MSVC).
 - Ninja is recommended. On Unix, the shell wrapper uses it when available;
-  on Windows, use `bin/build_usdgen.ps1` from PowerShell.
+  on Windows, use `bin/build_usdgen.ps1` from PowerShell. The supplied
+  OpenUSD prefix must be a Windows/MSVC build; Linux and macOS prefixes are
+  not binary-compatible. The PowerShell wrapper initializes Visual Studio's
+  build environment when needed and reports a missing `pxrConfig.cmake`
+  before configuring.
 
       export PATH=/home/burkard/.venv/bin:$PATH
 
@@ -39,9 +43,31 @@ On Windows, the equivalent is
 `-UsdInstallDir`, or `-Generator` when the defaults do not fit the machine.
 Useful cache vars: `USDGEN_FP_CONTRACT` (`off` default; `fast` for the
 `usdGenMath` FP-contract experiment), `USDGEN_WITH_RIGEXEC` (default `OFF`),
-and `USDGEN_BUILD_TESTS`. The POSIX process and ELF inspection harnesses are
-enabled by default on Unix and disabled by default on Windows; set
-`-DUSDGEN_BUILD_TESTS=ON` when using a compatible test environment.
+and `USDGEN_BUILD_TESTS` (default `ON` on Unix, `OFF` on Windows). The portable
+tests build on every platform; the POSIX process/loader/ELF and EGL/Storm
+harnesses are Unix-only and register as honest ctest skips on Windows. Pass
+`-Test` to `build_usdgen.ps1` (it enables `USDGEN_BUILD_TESTS`) or set
+`-DUSDGEN_BUILD_TESTS=ON` directly.
+
+### CUDA
+
+`USDGEN_ENABLE_CUDA` builds the CUDA execution backend. Without it usdGen
+still builds and runs, but any commit that asks for the CUDA backend is
+refused at runtime with *"CUDA support was not enabled in this build"*.
+The sources require **CUDA 12.8 or newer** (`cudaStreamGetDevice`, and CUB's
+separate-output `DeviceReduce::ArgMin`).
+
+`build_usdgen.ps1` turns the backend on by itself when the host can run the
+result: it picks the newest installed toolkit whose `crt/host_config.h`
+accepts the active MSVC toolset, and requires `nvidia-smi` to report a
+compute capability — which is also what CMake's arch probe reads to choose
+`CMAKE_CUDA_ARCHITECTURES` (sm_89 on an Ada workstation, sm_121 on the GB10
+host), falling back to the GB10 pair when no GPU answers. Pass `-Cuda` to
+make a missing toolkit an error instead of a silent CPU-only build,
+`-NoCuda` to opt out, or `-CudaToolkitDir` to name a specific toolkit root.
+CMake cannot retarget a configured tree's CUDA compiler, so after installing
+a new toolkit delete the build directory; the script detects the mismatch and
+says so rather than building against the stale one.
 
 ## Test
 
@@ -52,9 +78,15 @@ complete M0 suite. The tier labels:
     ctest --test-dir build -L T1 --output-on-failure   # chain order + plugin discovery + extent
     ctest --test-dir build --output-on-failure         # all 7
 
-The T1 tests carry `PXR_PLUGINPATH_NAME` (build-tree plugin resource dirs) and
-`LD_LIBRARY_PATH` in their ctest `ENVIRONMENT`, so they run with nothing
-sourced. All five gate B-1 tests (`testUsdGenLinkRule_usdGen`,
+The T1 tests carry `PXR_PLUGINPATH_NAME` (build-tree plugin resource dirs) in
+their ctest `ENVIRONMENT_MODIFICATION`, and *every* test carries the host's
+dynamic-loader variable (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, or `PATH` on
+Windows) pointing at the OpenUSD prefix and the build tree, so they run with
+nothing sourced. These use `ENVIRONMENT_MODIFICATION` rather than
+`ENVIRONMENT` on purpose: the loader variable is extended instead of replaced
+(on Windows it *is* `PATH`, so replacing it strips the inherited system path),
+and `path_list_*` joins with the host's native separator, so no path list has
+to embed a `;` — which CMake would otherwise parse as a list separator. All five gate B-1 tests (`testUsdGenLinkRule_usdGen`,
 `testUsdGenLinkRule_usdGenMath`, `testUsdGenLinkRule_usdGenTestUtils`,
 `testUsdGenIncludeRule`, `testUsdGenNoThirdPartyExports`) carry the `T0`
 label, so the canonical run `ctest --test-dir build -L '^T[01]$' -j8` covers

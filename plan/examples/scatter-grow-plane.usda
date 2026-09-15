@@ -1,0 +1,105 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Smallest executable groom: random Scatter on a unit plane, then Grow straight strands along the surface normal."
+)
+
+# Minimal Scatter -> Grow network on a flat plane.
+#
+# Authoring rules this file relies on (plan/02-schema.md, usdGenGraphDescBuilder):
+#   * The Description binds its surface with usdGen:surface; operators inherit it.
+#   * Operators live under the child Scope named "Ops". Execution order is the
+#     reverse of namespace order (bottom sibling first), and the FIRST child is
+#     the terminal whose result is published. So Grow is authored above Scatter.
+#   * usdGen:input on Grow is optional here (the compiler derives it from the
+#     order) but makes the data flow explicit.
+#   * UsdGenRestAPI + primvars:rest give the engine a rest pose to bind to;
+#     without it the first pulled points are used as rest.
+#
+#   * The groom parent is a plain Xform, not a UsdGenGroom. A UsdGenGroom
+#     carries usdGen:execution:backend = "cuda" as its schema fallback, which
+#     selects the CUDA lane; that lane cooks this network but the stock-Storm
+#     device-resident handoff is not implemented yet, so nothing would be
+#     displayed. Without the attribute the description runs on the CPU
+#     reference engine and publishes BasisCurves tiles that Storm draws.
+#
+# View it:   .\bin\launch_usdview.ps1 plan\examples\scatter-grow-plane.usda
+# Record it: .\bin\record_usd.ps1 -Scene plan\examples\scatter-grow-plane.usda `
+#                -Output out.png -Camera /World/Cam
+
+def Xform "World"
+{
+    # Eye (1.9, 1.3, 2.1) looking at (0.5, 0.12, 0.5), Y up.
+    def Camera "Cam"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = ( (0.752577, 0, -0.658505, 0), (-0.319565, 0.874354, -0.365217, 0), (0.575766, 0.485289, 0.658018, 0), (1.9, 1.3, 2.1, 1) )
+        float2 clippingRange = (0.05, 50)
+        float focalLength = 35
+        float horizontalAperture = 24
+        float verticalAperture = 18
+    }
+
+    # No scene lights on purpose: usdview and usdrecord add a camera light
+    # when a stage has none, and Storm applies UsdLux intensities directly, so
+    # a physically scaled DistantLight washes the viewport out.
+
+    # A unit quad in the XZ plane facing +Y. Winding is counter-clockwise
+    # seen from +Y so the surface normal (and therefore Grow) points up.
+    def Mesh "Plane" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        # usdGen:rest:source stays at its "default" value: the imaging plugin
+        # then takes primvars:rest when authored and the points otherwise.
+        # (The "primvar" and "asset" sources are not implemented yet and make
+        # the commit fail closed with "missing rest data".)
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        color3f[] primvars:displayColor = [(0.25, 0.25, 0.28)]
+    }
+
+    def Xform "Groom"
+    {
+        def UsdGenDescription "Fur"
+        {
+            rel usdGen:surface = </World/Plane>
+            uniform token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.004
+
+            def Scope "Ops"
+            {
+                # Terminal (first child): straight strands from the scattered
+                # roots along the surface normal, 5 segments each, lengths
+                # randomised between 0.7x and 1.3x of 0.25.
+                def UsdGenGrow "grow"
+                {
+                    rel usdGen:input = </World/Groom/Fur/Ops/scatter>
+                    int usdGen:seed = 19
+                    int usdGen:segments = 5
+                    float usdGen:length = 0.25
+                    float2 usdGen:lengthRandom = (0.7, 1.3)
+                    uniform token usdGen:direction = "surfaceNormal"
+                }
+
+                # Runs first: random roots over the plane's area.
+                def UsdGenScatter "scatter"
+                {
+                    uniform token usdGen:mode = "random"
+                    int usdGen:seed = 41
+                    float usdGen:density = 600
+                }
+            }
+        }
+    }
+}

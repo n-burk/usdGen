@@ -1,4 +1,5 @@
 #include "rootFrames.h"
+#include "cudaCompat.h"
 
 #include <algorithm>
 #include <cmath>

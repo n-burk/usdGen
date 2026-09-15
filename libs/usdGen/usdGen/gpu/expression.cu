@@ -1,4 +1,5 @@
 #include "expression.h"
+#include "cudaCompat.h"
 
 #include <climits>
 #include <cmath>

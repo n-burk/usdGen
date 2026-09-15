@@ -187,8 +187,8 @@ int main()
                     "synthetic render callback releases final index reference");
         UsdGenGroomSceneIndex::DrainRetired();
         UsdGenImagingTestHook::Drain();
-        auto &store = usdGenImaging::UsdGenSessionStore::GetInstance();
-        WaitOrAbort([&] { return !store.Find(dropKey); },
+        auto &dropStore = usdGenImaging::UsdGenSessionStore::GetInstance();
+        WaitOrAbort([&] { return !dropStore.Find(dropKey); },
                     "callback-destroyed scene owner balances attachment");
     }
 

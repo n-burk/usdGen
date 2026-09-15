@@ -75,7 +75,7 @@ int main() {
             const auto claim = claims.fetch_add(1, std::memory_order_relaxed);
             if (claim >= stressTotal) return;
             uint64_t sequence = 0;
-            while (!(sequence = stress.TryIssue())) {
+            while ((sequence = stress.TryIssue()) == 0) {
                 if (stopStress.load(std::memory_order_acquire)) return;
                 std::this_thread::yield();
             }

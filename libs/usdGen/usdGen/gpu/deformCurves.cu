@@ -1,4 +1,5 @@
 #include "deformCurves.h"
+#include "cudaCompat.h"
 
 #include <cmath>
 #include <cstdint>

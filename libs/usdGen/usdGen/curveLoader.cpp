@@ -325,9 +325,9 @@ void PutFrame(GfMatrix4d const &frame, UsdGenCurveBuffer *out, size_t index)
     GfVec3d const t = frame.GetRow3(0);
     GfVec3d const b = frame.GetRow3(1);
     GfVec3d const n = frame.GetRow3(2);
-    out->rootT[index] = GfVec3f(t[0], t[1], t[2]);
-    out->rootB[index] = GfVec3f(b[0], b[1], b[2]);
-    out->rootN[index] = GfVec3f(n[0], n[1], n[2]);
+    out->rootT[index] = GfVec3f(t);
+    out->rootB[index] = GfVec3f(b);
+    out->rootN[index] = GfVec3f(n);
 }
 
 } // namespace

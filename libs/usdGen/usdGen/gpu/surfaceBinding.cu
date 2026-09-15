@@ -1,4 +1,5 @@
 #include "surfaceBinding.h"
+#include "cudaCompat.h"
 
 #include <algorithm>
 #include <cmath>

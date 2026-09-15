@@ -1,4 +1,5 @@
 #include "scatterGrow.h"
+#include "cudaCompat.h"
 
 #include <cmath>
 #include <limits>

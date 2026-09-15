@@ -1,4 +1,5 @@
 #include "gpu/topology.h"
+#include "cudaCompat.h"
 #include "gpu/deviceBuffer.h"
 
 #include <cuda_runtime.h>

@@ -52,7 +52,7 @@ UsdGenShadersDiscoveryPlugin::GetSearchURIs() const
 
 SdrShaderNodeDiscoveryResultVec
 UsdGenShadersDiscoveryPlugin::DiscoverShaderNodes(
-    const SdrDiscoveryPluginContext &context)
+    const SdrDiscoveryPluginContext & /*context*/)
 {
     SdrShaderNodeDiscoveryResultVec result;
 

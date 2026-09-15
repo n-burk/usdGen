@@ -187,8 +187,8 @@ void PrepareExtraPlanes(UsdGenCompiledNode &node,
     for (TfToken const &name : node.outputPrimvars) {
         PlaneLookup const source = FindExtraPlane(upstream, name);
         PlaneLookup old;
-        if (UsdGenPlane const *plane = FindPlane(oldCv, name)) old = {plane, true};
-        else if (UsdGenPlane const *plane = FindPlane(oldCurve, name)) old = {plane, false};
+        if (UsdGenPlane const *cvPlane = FindPlane(oldCv, name)) old = {cvPlane, true};
+        else if (UsdGenPlane const *curvePlane = FindPlane(oldCurve, name)) old = {curvePlane, false};
 
         PlaneLookup const layout = source.plane ? source : old;
         bool const cv = layout.plane ? layout.cv : false;

@@ -302,25 +302,25 @@ int main()
     }
     {
         UsdGenGraphDesc posed = MakeC3SourceSpaceDesc(false);
-        UsdGenCompiler compiler;
-        UsdGenGraph graph;
-        UsdGenCompileResult const compiled = compiler.Compile(posed, &graph);
-        Check(compiled.ok && graph.Node(graph.NodeIdForPath(posed.terminal)).space ==
+        UsdGenCompiler spaceCompiler;
+        UsdGenGraph spaceGraph;
+        UsdGenCompileResult const compiled = spaceCompiler.Compile(posed, &spaceGraph);
+        Check(compiled.ok && spaceGraph.Node(spaceGraph.NodeIdForPath(posed.terminal)).space ==
                   UsdGenSpace::Deformed,
               "C3 CurveSource useRest=false resolves auto space to deformed");
 
         UsdGenGraphDesc rest = posed;
         rest.nodes[0].params[0].value = VtValue(true);
-        UsdGenCompileResult const recompiled = compiler.Recompile(rest, &graph);
+        UsdGenCompileResult const recompiled = spaceCompiler.Recompile(rest, &spaceGraph);
         Check(recompiled.ok &&
-                  graph.Node(graph.NodeIdForPath(rest.terminal)).space ==
+                  spaceGraph.Node(spaceGraph.NodeIdForPath(rest.terminal)).space ==
                       UsdGenSpace::Inherit &&
                   recompiled.rebuilt.size() == 1,
               "C3 CurveSource useRest edit changes resolved space and rebuilds node");
 
         UsdGenGraphDesc contradictory = MakeC3SourceSpaceDesc(
             false, TfToken("rest"));
-        UsdGenCompileResult const rejected = compiler.Compile(contradictory, &graph);
+        UsdGenCompileResult const rejected = spaceCompiler.Compile(contradictory, &spaceGraph);
         Check(!rejected.ok && rejected.errors.size() == 1 &&
                   rejected.errors.front() ==
                       "UsdGenCompiler: CurveSource '/c3Space/source' with useRest=false "

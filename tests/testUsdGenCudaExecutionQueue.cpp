@@ -1045,11 +1045,11 @@ int main() {
                     }
                 });
             for (auto& producer : producerThreads) producer.join();
-            auto const latest = producerQueue.Submit(posed,20,producerCompletion);
-            CHECK(latest != 0 && latest > producerMax.load(std::memory_order_relaxed));
+            auto const producerLatest = producerQueue.Submit(posed,20,producerCompletion);
+            CHECK(producerLatest != 0 && producerLatest > producerMax.load(std::memory_order_relaxed));
             producerQueue.Drain();
             auto const latestSnapshot = producerQueue.Snapshot();
-            CHECK(latestSnapshot && latestSnapshot->epoch == latest &&
+            CHECK(latestSnapshot && latestSnapshot->epoch == producerLatest &&
                   Root(latestSnapshot->generation,2.2f,reader) &&
                   failures == 0 && reports == accepted + 1);
         }

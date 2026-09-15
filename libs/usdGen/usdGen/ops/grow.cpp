@@ -647,7 +647,7 @@ void UsdGenGrowOp::Evaluate(
             const float t = i * invSpan;
             const float w = mWeight * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
             const float s = targetLen * t * w;
-            uint32_t const o = view->Cv(c, i);
+            uint32_t const o = static_cast<uint32_t>(view->Cv(c, i));
             px[o] = rx + d[0] * s;
             py[o] = ry + d[1] * s;
             pz[o] = rz + d[2] * s;

@@ -116,6 +116,9 @@ private:
 
 int main()
 {
+    // Keep progress visible when CTest kills a stalled run: a pipe makes stdout
+    // fully buffered, so a timeout would otherwise discard every result line.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     auto input = TfCreateRefPtr(new CountingInput);
     const SdfPath a("/groomA"), b("/groomB");
     const SdfPath opA("/groomA/op"), surfaceSubset("/externalMesh/subset");

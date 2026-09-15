@@ -26,6 +26,30 @@ void Check(bool value, char const *message)
     if (!value) { ++failures; std::printf("FAIL: %s\n", message); }
     else std::printf("ok:   %s\n", message);
 }
+
+// Ar hands back a resolved path in the host's native separator form, so a
+// path that round-trips through the resolver is only expected to match the
+// input up to separators ('\' on Windows, '/' everywhere else). Compare the
+// normalized forms rather than the raw strings.
+std::string NormalizeSeparators(std::string path)
+{
+    for (char &c : path) {
+        if (c == '\\') c = '/';
+    }
+    return path;
+}
+
+void CheckPathsEqual(std::string const &actual, std::string const &expected,
+                     char const *message)
+{
+    bool const equal =
+        NormalizeSeparators(actual) == NormalizeSeparators(expected);
+    Check(equal, message);
+    if (!equal) {
+        std::printf("      expected: %s\n      actual:   %s\n",
+                    expected.c_str(), actual.c_str());
+    }
+}
 }
 
 int main()
@@ -51,8 +75,8 @@ int main()
     Check(desc.maps.size() == 1, "stage builder pools one ImageMap descriptor");
     if (desc.maps.empty()) return 1;
     if (!desc.maps.empty()) {
-        Check(desc.maps[0].resolvedAssetPath == imagePath,
-              "stage builder preserves resolved ImageMap asset path");
+        CheckPathsEqual(desc.maps[0].resolvedAssetPath, imagePath,
+                        "stage builder preserves resolved ImageMap asset path");
         Check(desc.maps[0].imagePayload && desc.maps[0].imagePayload->IsValid(),
               "stage builder decodes ImageMap into immutable payload");
         if (desc.maps[0].imagePayload) {

@@ -1,4 +1,5 @@
 #include "curveTileBounds.h"
+#include "cudaCompat.h"
 
 #include <math_constants.h>
 #include <climits>

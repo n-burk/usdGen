@@ -43,19 +43,20 @@ using RegistrySnapshot = std::shared_ptr<std::vector<RegistryEntry> const>;
 struct HookRegistry {
     usdGen::UsdGenExecutionRuntime runtime{8};
     RegistrySnapshot published = std::make_shared<std::vector<RegistryEntry>>();
-    // Destroyed first: Shutdown/Drain runs while published and runtime still
-    // exist, so no queued command can access a destroyed snapshot slot.
     usdGen::UsdGenExecutionPipeline owner{runtime};
 };
 
 HookRegistry &_HookRegistry()
 {
-    // This is initialized while the first index is constructed, so ordinary
-    // static destruction tears that index down before this registry. External
-    // shutdown must still quiesce callback producers/readers before static
-    // destruction; Drain is the explicit test/shutdown boundary.
-    static HookRegistry registry;
-    return registry;
+    // Leaked on purpose, like every process-lifetime arena owner in this
+    // library (see ImagingRuntime in usdGenImagingSession.cpp): a static
+    // destructor here runs at DLL_PROCESS_DETACH on Windows, after ExitProcess
+    // has killed the TBB workers, so the pipeline shutdown wait and the arena
+    // teardown could never complete. External shutdown must quiesce callback
+    // producers/readers before returning from main; Drain is the explicit
+    // test/shutdown boundary.
+    static auto* registry = new HookRegistry;
+    return *registry;
 }
 
 template <class Mutation>

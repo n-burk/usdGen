@@ -11,6 +11,12 @@ enum class LengthMode { Set, Scale, Cull };
 enum class LengthMethod { Scale, CutExtend };
 enum class LengthRebuild { KeepParam, Reparam };
 
+// float2 carries an alignment specifier, so the layout pads after domain;
+// MSVC reports that as C4324 even though it is the intended layout.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 struct Vec2Field {
     const float2* data = nullptr;
     size_t count = 0;
@@ -21,6 +27,9 @@ struct Vec2Field {
         return {v.data, v.size, d, make_float2(1, 1)};
     }
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 struct LengthParameters {
     LengthMode mode = LengthMode::Scale;

@@ -541,8 +541,17 @@ bool UsdGenExecutionPipeline::IsExecutingOwner() const noexcept { return executi
 void UsdGenExecutionPipeline::Await(std::function<void(std::function<void()>)> dispatch) {
     if (usdGenExecutionGraphActive) throw std::logic_error("graph work must not synchronously await a reply");
     if (!dispatch) throw std::invalid_argument("missing reply dispatcher");
-    std::shared_ptr<AwaitState> state;
-    impl_->runtime->arena.execute([&] { state = std::make_shared<AwaitState>(); });
+    // The reply graph is a pure reserve_wait/release_wait latch: no task is
+    // ever spawned into it, so it does not need the runtime arena, and binding
+    // it there is harmful. wait_for_all runs inside task_arena::execute on the
+    // graph's arena, and the runtime arena reserves no master slot (see
+    // executionRuntimeInternal.h), so this external thread could only enter
+    // when a worker slot happened to be free -- otherwise it spun forever, with
+    // the dispatched work long finished and every worker idle (observed on
+    // Windows in _State::Synchronize). The calling thread's own arena always
+    // has a slot for it, and release_wait from a worker in any arena still
+    // completes the latch.
+    auto state = std::make_shared<AwaitState>();
     std::exception_ptr dispatchError;
     try { dispatch([state] { state->Signal(); }); }
     catch (...) { dispatchError = std::current_exception(); state->Signal(); }

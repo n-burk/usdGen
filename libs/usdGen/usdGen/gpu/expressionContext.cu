@@ -1,4 +1,5 @@
 #include "expressionContext.h"
+#include "cudaCompat.h"
 
 #include <algorithm>
 #include <cmath>

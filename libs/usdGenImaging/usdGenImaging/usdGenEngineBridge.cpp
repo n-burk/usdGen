@@ -15,7 +15,6 @@ namespace {
 struct BridgeOwner {
     usdGen::UsdGenExecutionRuntime runtime{8};
     usdGen::UsdGenExecutionPipeline pipeline{runtime};
-    ~BridgeOwner() { pipeline.Drain(); }
 };
 
 BridgeOwner &_BridgeOwner()
@@ -23,8 +22,14 @@ BridgeOwner &_BridgeOwner()
     // The process owner, rather than an embedded pipeline, owns queued
     // commands.  A bridge may therefore be destroyed from a publication
     // callback: its State is retained by the command and no destructor waits.
-    static BridgeOwner owner;
-    return owner;
+    //
+    // Leaked on purpose, like every process-lifetime arena owner in this
+    // library (see ImagingRuntime in usdGenImagingSession.cpp): a static
+    // destructor here runs at DLL_PROCESS_DETACH on Windows, after ExitProcess
+    // has killed the TBB workers, so its drain could never complete. Callers
+    // that need queued commands delivered before exit call Drain explicitly.
+    static auto* owner = new BridgeOwner;
+    return *owner;
 }
 
 } // namespace

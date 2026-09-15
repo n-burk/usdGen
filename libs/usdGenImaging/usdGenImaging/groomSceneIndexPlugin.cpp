@@ -48,7 +48,10 @@ bool UsdGenGroomSceneIndexPlugin::_IsEnabled(HdContainerDataSourceHandle const&)
 namespace {
 using Pipeline = usdGen::UsdGenExecutionPipeline;
 using Session = ::usdGenImaging::UsdGenImagingSession;
-using Handle = ::usdGenImaging::UsdGenSessionHandle;
+// OpenUSD 26.08 introduces pxr::Handle, so a short Handle alias inside the
+// PXR namespace becomes ambiguous under MSVC and Clang. Keep this session
+// type explicit at the boundary.
+using SessionHandle = ::usdGenImaging::UsdGenSessionHandle;
 using Key = ::usdGenImaging::UsdGenSessionKey;
 using Desc = usdGen::UsdGenGraphDesc;
 using CaptureCache = ::usdGenImaging::UsdGenGraphDescCaptureCache;
@@ -243,8 +246,29 @@ std::atomic<uint64_t> UsdGenSceneService::RetirementRecord::liveCount{0};
 namespace {
 UsdGenSceneService& SceneService() {
     (void)::usdGenImaging::UsdGenSessionStore::GetInstance();
-    static UsdGenSceneService service;
-    return service;
+    // Intentionally leaked, like the process-lifetime registries in
+    // executionRetirement.cpp, so that ~UsdGenSceneService does not run during
+    // static destruction.
+    //
+    // That destructor quiesces through the scheduled actors and through each
+    // scene's pipeline. Every one of those steps needs some other thread to
+    // execute a posted task, and by the time atexit handlers run on Windows
+    // the TBB worker threads are gone: the posted task is never executed (a
+    // task put to the registry node and given two seconds with no help was
+    // still unexecuted) and the wait for it spins at 100% CPU for as long as
+    // the process is allowed to live. A flow graph's wait_for_all only runs
+    // the tasks belonging to that graph, so a reply-graph wait -- Snapshot's,
+    // and UsdGenExecutionPipeline::Await's -- cannot rescue itself by running
+    // the work it is waiting for.
+    //
+    // Leaking removes the need for that quiesce instead of papering over it:
+    // the service now outlives every handle rather than racing them, so the
+    // deleter's "service already gone" path is simply never taken, and the OS
+    // reclaims the mapping at process death. Scenes torn down while the
+    // process is live are unaffected -- they retire through the actors as
+    // before, with the workers running.
+    static UsdGenSceneService* service = new UsdGenSceneService;
+    return *service;
 }
 }
 
@@ -274,7 +298,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         bool alive = true, authoredRender = false;
         SdfPath root, description;
         Key key;
-        Handle session;
+        SessionHandle session;
         int callback = -1, device = -2;
         // A subscription can publish indefinitely.  Its command mailbox owns
         // one durable owner-ingress credit and replaces an undelivered payload
@@ -453,7 +477,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto it = members.find(g->root);
         return g->alive && it != members.end() && it->second == g;
     }
-    void RememberSession(Handle const& session) {
+    void RememberSession(SessionHandle const& session) {
         TfWeakPtr<Session> candidate = TfCreateWeakPtr(session.operator->());
         bool found = false;
         for (auto it = usedSessions.begin(); it != usedSessions.end();) {
@@ -480,7 +504,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // negotiated asyncPoll boundary.
         QueuePublication(added, removed, dirtied);
     }
-    void Detach(Handle session, Key key, uint64_t seq,
+    void Detach(SessionHandle session, Key key, uint64_t seq,
                 Pipeline::CommandTicket&& sourceTicket,
                 Pipeline::CommandTicket&& replyTicket) {
         if (!session) return;
@@ -510,7 +534,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // session yet.  It deliberately does not clear last-good display.
         AdvanceAttachmentEpoch(*g);
         if (g->session) {
-            Handle const session = g->session;
+            SessionHandle const session = g->session;
             Key const key = g->key;
             int const callback = g->callback;
             g->session = {};
@@ -564,7 +588,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             closeProcessed = true;
         }
     }
-    void Publish(std::shared_ptr<Groom> const& g, Handle const& sourceSession,
+    void Publish(std::shared_ptr<Groom> const& g, SessionHandle const& sourceSession,
                  uint64_t attachmentEpoch,
                  Session::CommitPayload const& payload) {
         if (closing.load() || !Current(g) || !payload.published || !payload.generation ||
@@ -636,7 +660,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         Hold(seq);
         bool accepted = false;
         try {
-            Handle const sourceSession = g->session;
+            SessionHandle const sourceSession = g->session;
             accepted = sourceSession->CommitAsync(std::move(request),
                 [self, g, sourceSession, attachmentEpoch, seq, ticket](
                     Session::CommitPayload const& payload, Pipeline::Outcome) {
@@ -674,7 +698,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         try {
             accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().AttachAsync(
                 std::move(replies->sourceAttach), requestedKey,
-                [self, g, requestedKey, attachmentEpoch, seq, replies](Handle session) {
+                [self, g, requestedKey, attachmentEpoch, seq, replies](SessionHandle session) {
                     (void)self->Post(std::move(replies->attachAck), [self, g, requestedKey, attachmentEpoch, seq, session, replies] {
                         try {
                             if (!session) { self->Release(seq); return; }
@@ -711,7 +735,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                                     Session::CommitPayload const& payload) {
                                     auto state = weak.lock();
                                     auto member = groom.lock();
-                                    Handle sourceSession =
+                                    SessionHandle sourceSession =
                                         TfCreateRefPtrFromProtectedWeakPtr(weakSession);
                                     if (!state || !member || !sourceSession ||
                                         state->closing.load()) return;
@@ -981,7 +1005,7 @@ UsdGenSceneService::~UsdGenSceneService() {
     ::usdGenImaging::UsdGenSessionStore::GetInstance().Drain();
     // Process shutdown only: finish source callback frames before destroying
     // the retirement service captured by a scene state's final deleter.
-    std::vector<Handle> sessions;
+    std::vector<SessionHandle> sessions;
     for (auto const& state : live) state->owner->InvokeOwner([&] {
         for (auto const& weak : state->usedSessions)
             if (auto session = TfCreateRefPtrFromProtectedWeakPtr(weak))

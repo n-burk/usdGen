@@ -23,8 +23,8 @@
 
 #include "pxr/base/plug/plugin.h"
 #include "pxr/base/plug/registry.h"
+#include <cstdio>
 #include <string>
-#include <unistd.h>
 
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -40,6 +40,16 @@ bool TypeKnown(const char *name)
 {
     const TfType t = TfType::FindByName(name);
     return !t.IsUnknown();
+}
+
+// Platform-neutral replacement for POSIX ::access(F_OK).
+bool FileExists(const std::string &path)
+{
+    if (FILE *f = std::fopen(path.c_str(), "rb")) {
+        std::fclose(f);
+        return true;
+    }
+    return false;
 }
 
 }  // namespace
@@ -78,7 +88,7 @@ int main(int argc, char **argv)
             ++g_failures;
         } else {
             const std::string libPath = plugin->GetPath();
-            Check(!libPath.empty() && ::access(libPath.c_str(), F_OK) == 0,
+            Check(!libPath.empty() && FileExists(libPath),
                   (std::string("plugin '") + pluginName + "' library exists: " + libPath).c_str());
         }
     }

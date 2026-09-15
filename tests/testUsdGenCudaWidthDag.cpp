@@ -378,7 +378,8 @@ bool LengthTopologyReference(UsdGenGraphDesc desc, UsdGenCurveBuffer* output) {
         result.curveId.push_back(input.curveId[c]);
         result.cvOffsets.push_back(static_cast<int>(result.px.size()));
     }
-    result.totalCurves = result.curveId.size(); result.totalCvs = result.px.size();
+    result.totalCurves = static_cast<uint32_t>(result.curveId.size());
+    result.totalCvs = static_cast<uint32_t>(result.px.size());
     *output = std::move(result);
     return true;
 }
@@ -1945,30 +1946,30 @@ int main() {
         std::shared_ptr<const UsdGenDeviceGeneration> retained;
         UsdGenCurveBuffer retainedReference;
         for (int variant = 0; variant < 4; ++variant) {
-            auto desc = TopologyWidthBlendDesc(.25f, variant == 0,
+            auto sourceDesc = TopologyWidthBlendDesc(.25f, variant == 0,
                 variant == 2 ? .8f : .45f);
-            desc.terminal = SdfPath("/Dag/Source");
+            sourceDesc.terminal = SdfPath("/Dag/Source");
             UsdGenAuthoredPlaneDesc named;
             named.name = TfToken("selectedSourceValue");
             named.type = UsdGenAuthoredPlaneType::Float32;
             named.domain = UsdGenAuthoredPlaneDomain::Point;
             named.arity = 1; named.floatValues = {0,1,2,3,4,5,6,7,8};
-            desc.curveSets.front().authoredPlanes.push_back(named);
-            if (variant == 3) for (auto& node : desc.nodes)
+            sourceDesc.curveSets.front().authoredPlanes.push_back(named);
+            if (variant == 3) for (auto& node : sourceDesc.nodes)
                 if (node.type == TfToken("UsdGenCurveSource"))
                     node.params.push_back({TfToken("resampleTo"), VtValue(2), false});
             UsdGenCurveBuffer expected;
-            CHECK(CpuReference(desc, &expected));
-            CHECK(expected.totalCurves == 3 && expected.totalCvs == (variant == 3 ? 6 : 9));
+            CHECK(CpuReference(sourceDesc, &expected));
+            CHECK(expected.totalCurves == 3 && expected.totalCvs == (variant == 3 ? 6u : 9u));
             diagnostics = {};
-            auto plan = CompileCudaGraph(desc, &diagnostics);
-            CHECK(plan && !diagnostics.HasErrors());
-            auto direct = ExecuteCudaGraph(*plan, *sourceWorkspace, 1, 50 + variant,
+            auto sourcePlan = CompileCudaGraph(sourceDesc, &diagnostics);
+            CHECK(sourcePlan && !diagnostics.HasErrors());
+            auto direct = ExecuteCudaGraph(*sourcePlan, *sourceWorkspace, 1, 50 + variant,
                 &diagnostics, retained);
             for (auto const& error : diagnostics.errors) std::fprintf(stderr, "%s\n", error.c_str());
             CHECK(direct && !diagnostics.HasErrors() && CheckSourcePayload(direct, expected, reader));
             UsdGenSession session;
-            session.SetDevicePublicationEnabled(true); session.SetGraphDesc(desc);
+            session.SetDevicePublicationEnabled(true); session.SetGraphDesc(sourceDesc);
             auto published = session.Commit(1, UsdGenCommitReason::SetTime);
             for (auto const& error : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", error.c_str());
             CHECK(published && published->device && !session.LastDiagnostics().HasErrors() &&
@@ -1977,7 +1978,7 @@ int main() {
                 // Selection happens before relay admission. A rejected
                 // finalization must leave the selected named owners intact
                 // for a second selection by the synchronous finalizer.
-                auto job = CreateCudaExecutionJob(plan, *sourceWorkspace, 1, 60, &diagnostics);
+                auto job = CreateCudaExecutionJob(sourcePlan, *sourceWorkspace, 1, 60, &diagnostics);
                 CHECK(job && ExecuteCudaJobSource(*job));
                 for (size_t i=0; i<CudaExecutionJobOperatorCount(*job); ++i)
                     CHECK(ExecuteCudaJobOperator(*job, i));
@@ -2349,9 +2350,9 @@ int main() {
         diagnostics = {};
         auto equalPlan = CompileCudaGraph(equalDesc, &diagnostics);
         CHECK(equalPlan && !diagnostics.HasErrors());
-        auto metadata=GetCudaExecutionPlanMetadata(*equalPlan);CHECK(metadata);
-        auto mergeTask=TaskByPath(*metadata,"/Dag/CrossOriginBlend");
-        auto rightTask=TaskByPath(*metadata,"/Dag/EqualRightLength");
+        auto equalMetadata=GetCudaExecutionPlanMetadata(*equalPlan);CHECK(equalMetadata);
+        auto mergeTask=TaskByPath(*equalMetadata,"/Dag/CrossOriginBlend");
+        auto rightTask=TaskByPath(*equalMetadata,"/Dag/EqualRightLength");
         CHECK(mergeTask && rightTask && mergeTask->estimate.scratchPeakBytes==16);
         for(auto kind:{UsdGenExecutionDataKind::CurveGeometry,UsdGenExecutionDataKind::CurveTopology,
                       UsdGenExecutionDataKind::StableIds,UsdGenExecutionDataKind::RootBindings,
@@ -2404,34 +2405,34 @@ int main() {
     // Exercise source-vs-transformed frame provenance, a frame-absent authored
     // ReferenceSource, and independently materialized Grow frame selections.
     for(unsigned variant=0;variant<3;++variant) {
-        auto desc=CrossOriginWidthBlendDesc();
+        auto provenanceDesc=CrossOriginWidthBlendDesc();
         if(variant==0) {
-            desc.nodes.erase(std::remove_if(desc.nodes.begin(),desc.nodes.end(),
-                [](auto const& node){return node.path==SdfPath("/Dag/EqualRightLength");}),desc.nodes.end());
-            for(auto& node:desc.nodes) if(node.path==SdfPath("/Dag/EqualRightWidth"))
+            provenanceDesc.nodes.erase(std::remove_if(provenanceDesc.nodes.begin(),provenanceDesc.nodes.end(),
+                [](auto const& node){return node.path==SdfPath("/Dag/EqualRightLength");}),provenanceDesc.nodes.end());
+            for(auto& node:provenanceDesc.nodes) if(node.path==SdfPath("/Dag/EqualRightWidth"))
                 node.inputs={SdfPath("/Dag/Source")};
         } else if(variant==1) {
-            auto& curves=desc.curveSets.front();
+            auto& curves=provenanceDesc.curveSets.front();
             curves.role=UsdGenRole::Reference;curves.curveRole=TfToken("guide");
             curves.authoredPlanes.clear();
-            for(auto& node:desc.nodes) if(node.path==SdfPath("/Dag/Source")) {
+            for(auto& node:provenanceDesc.nodes) if(node.path==SdfPath("/Dag/Source")) {
                 node.type=TfToken("UsdGenReferenceSource");node.curves.clear();node.surfaces.clear();
                 node.references={curves.path};
             }
         } else {
-            for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenLength")) {
+            for(auto& node:provenanceDesc.nodes) if(node.type==TfToken("UsdGenLength")) {
                 node.type=TfToken("UsdGenGrow");
                 node.params={{TfToken("segments"),VtValue(4),false},
                              {TfToken("length"),VtValue(.2f),false}};
             }
         }
         UsdGenCurveBuffer expected;
-        CHECK(CpuReference(desc,&expected) && expected.curveMask.empty() && expected.chunks.empty());
-        diagnostics={};auto plan=CompileCudaGraph(desc,&diagnostics);CHECK(plan && !diagnostics.HasErrors());
+        CHECK(CpuReference(provenanceDesc,&expected) && expected.curveMask.empty() && expected.chunks.empty());
+        diagnostics={};auto provenancePlan=CompileCudaGraph(provenanceDesc,&diagnostics);CHECK(provenancePlan && !diagnostics.HasErrors());
         auto localWorkspace=CreateCudaExecutionWorkspace(-1,&diagnostics);CHECK(localWorkspace);
-        auto result=ExecuteCudaGraph(*plan,*localWorkspace,1,930+variant,&diagnostics);
+        auto result=ExecuteCudaGraph(*provenancePlan,*localWorkspace,1,930+variant,&diagnostics);
         CHECK(result && !diagnostics.HasErrors() && CheckSourcePayload(result,expected,crossOriginReader));
-        UsdGenSession session;session.SetDevicePublicationEnabled(true);session.SetGraphDesc(desc);
+        UsdGenSession session;session.SetDevicePublicationEnabled(true);session.SetGraphDesc(provenanceDesc);
         auto published=session.Commit(1,UsdGenCommitReason::SetTime);
         CHECK(published && published->device && !session.LastDiagnostics().HasErrors() &&
               CheckSourcePayload(published->device,expected,crossOriginReader));
@@ -2442,13 +2443,13 @@ int main() {
     // while Session continues to expose its already-proved COW publication.
     for (auto inject : {failNextCudaOperatorRelayNonWidthCallbackInstallForTesting,
                         failNextCudaOperatorRelayNonWidthNativeCallbackForTesting}) {
-        auto desc=CrossOriginWidthBlendDesc();
-        UsdGenCurveBuffer reference; CHECK(CpuReference(desc,&reference));
+        auto quarantineDesc=CrossOriginWidthBlendDesc();
+        UsdGenCurveBuffer reference; CHECK(CpuReference(quarantineDesc,&reference));
         UsdGenSession session; session.SetDevicePublicationEnabled(true);
-        session.SetGraphDesc(desc);
+        session.SetGraphDesc(quarantineDesc);
         auto prior=session.Commit(1,UsdGenCommitReason::SetTime);
         CHECK(prior && prior->device && !session.LastDiagnostics().HasErrors());
-        auto changed=desc;
+        auto changed=quarantineDesc;
         for(auto& node:changed.nodes) if(node.path==SdfPath("/Dag/EqualRightWidth"))
             node.params[0].value=VtValue(.9f);
         auto const quarantined=cudaOperatorRelayQuarantinedCountForTesting();

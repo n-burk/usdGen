@@ -1,4 +1,5 @@
 #include "nonWidthCompare.h"
+#include "cudaCompat.h"
 
 #include <cuda_runtime.h>
 

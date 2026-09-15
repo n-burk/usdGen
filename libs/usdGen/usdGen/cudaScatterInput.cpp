@@ -36,13 +36,39 @@ bool AllowedScatterParam(TfToken const& name) {
 bool IsToken(VtValue const& v) { return v.IsHolding<TfToken>() || v.IsHolding<std::string>(); }
 bool IsFloat(VtValue const& v) { return v.IsHolding<float>() || v.IsHolding<double>(); }
 bool IsInt(VtValue const& v) { return v.IsHolding<int>() || v.IsHolding<uint32_t>(); }
+bool IntEquals(VtValue const& v, int expected) {
+    return IsInt(v) && (v.IsHolding<int>() ? v.UncheckedGet<int>() == expected
+                                           : v.UncheckedGet<uint32_t>() == uint32_t(expected));
+}
+bool FloatEquals(VtValue const& v, double expected) {
+    return IsFloat(v) && (v.IsHolding<float>() ? double(v.UncheckedGet<float>()) == expected
+                                               : v.UncheckedGet<double>() == expected);
+}
+bool FiniteFloat(VtValue const& v) {
+    return IsFloat(v) && std::isfinite(v.IsHolding<float>() ? double(v.UncheckedGet<float>())
+                                                            : v.UncheckedGet<double>());
+}
+// Controls this slice does not implement are admitted only at their neutral
+// schema fallback. The imaging adapter serves every schema property, so a
+// stage-authored Scatter always carries all of them; the random kernel reads
+// none of the uniform/points/atGuides controls, and a neutral mask is a no-op.
 bool IdentityControl(UsdGenParamValue const& param) {
-    if (param.name == TfToken("relaxIterations"))
-        return IsInt(param.value) && (param.value.IsHolding<int>()
-            ? param.value.UncheckedGet<int>() == 0 : param.value.UncheckedGet<uint32_t>() == 0);
-    if (param.name == TfToken("jitter"))
-        return IsFloat(param.value) && (param.value.IsHolding<float>()
-            ? param.value.UncheckedGet<float>() == 0.0f : param.value.UncheckedGet<double>() == 0.0);
+    TfToken const& n = param.name; VtValue const& v = param.value;
+    if (n == TfToken("relaxIterations")) return IntEquals(v, 0);
+    if (n == TfToken("jitter")) return FloatEquals(v, 0.0);
+    if (n == TfToken("areaCompensation")) return v == VtValue(true);
+    if (n == TfToken("perGuide")) return IntEquals(v, 1);
+    if (n == TfToken("spacingU") || n == TfToken("spacingV")) return FiniteFloat(v);
+    if (n == TfToken("rootPrims")) return v.IsHolding<VtIntArray>() && v.UncheckedGet<VtIntArray>().empty();
+    if (n == TfToken("rootUVs")) return v.IsHolding<VtVec2fArray>() && v.UncheckedGet<VtVec2fArray>().empty();
+    if (n == TfToken("label")) return v.IsHolding<std::string>();
+    if (n == TfToken("mask:range")) return v == VtValue(GfVec2f(0, 1));
+    if (n == TfToken("mask:rangeMode")) return IsToken(v) && (v.IsHolding<TfToken>()
+        ? v.UncheckedGet<TfToken>() == TfToken("normalized") : v.UncheckedGet<std::string>() == "normalized");
+    if (n == TfToken("mask:noise:amount")) return FloatEquals(v, 0.0);
+    if (n == TfToken("mask:noise:frequency")) return FloatEquals(v, 1.0);
+    if (n == TfToken("mask:noise:gain") || n == TfToken("mask:noise:bias")) return FloatEquals(v, 0.5);
+    if (n == TfToken("mask:noise:seed")) return IntEquals(v, 0);
     return false;
 }
 bool ValidScatterParam(UsdGenParamValue const& param) {

@@ -1,4 +1,5 @@
 #include "length.h"
+#include "cudaCompat.h"
 
 #include <algorithm>
 #include <climits>

@@ -31,8 +31,13 @@ struct ExitCounters {
 };
 
 // This object is initialized before GetInstance() first constructs the store
-// singleton.  Its destructor therefore runs after the store destructor and
-// verifies that shutdown drained every accepted owner completion.
+// singleton.  Its destructor runs on the process's own exit path, while the
+// framework workers are still alive, and verifies that returning from main
+// with an accepted batch outstanding loses no owner completion: every one is
+// still delivered exactly once.  The store itself is process-lifetime and is
+// never destroyed (a library static destructor would run on Windows only
+// after ExitProcess has killed every worker), so nothing drains on the
+// test's behalf; the in-flight tail is given a bounded wait instead.
 struct ExitCheck {
     std::shared_ptr<ExitCounters> counters = std::make_shared<ExitCounters>();
     std::atomic<bool> armed{false};
@@ -41,15 +46,26 @@ struct ExitCheck {
     ~ExitCheck()
     {
         if (releaser.joinable()) releaser.join();
-        if (armed.load())
-            for (auto const& count : counters->perRequest)
-                if (count.load() != 1) std::abort();
-        if (armed.load(std::memory_order_acquire) &&
-            counters->accepted.load(std::memory_order_acquire) !=
-                counters->completed.load(std::memory_order_acquire)) {
+        if (!armed.load(std::memory_order_acquire)) return;
+        auto const deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(10);
+        while (counters->completed.load(std::memory_order_acquire) <
+                   counters->accepted.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (counters->accepted.load(std::memory_order_acquire) !=
+            counters->completed.load(std::memory_order_acquire)) {
             std::fprintf(stderr, "pending-exit callback loss: accepted=%d completed=%d\n",
                          counters->accepted.load(), counters->completed.load());
             std::abort();
+        }
+        for (size_t i = 0; i < counters->perRequest.size(); ++i) {
+            int const count = counters->perRequest[i].load();
+            if (count != 1) {
+                std::fprintf(stderr, "pending-exit request %zu completed %d times\n",
+                             i, count);
+                std::abort();
+            }
         }
     }
 };
@@ -136,7 +152,8 @@ int main(int argc, char **argv)
 
     if (argc > 1 && std::string(argv[1]) == "--pending-exit") {
         // Deliberately leave the accepted batch outstanding and return.  The
-        // store's static destructor must own the final wait and completion.
+        // process exit path must still deliver every accepted completion;
+        // g_exitCheck verifies that after main returns.
         auto session = store.Attach(Key(90));
         (void)session;
         constexpr int pendingCount = 64;

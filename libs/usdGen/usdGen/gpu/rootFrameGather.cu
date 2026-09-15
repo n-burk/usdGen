@@ -1,4 +1,5 @@
 #include "rootFrameGather.h"
+#include "cudaCompat.h"
 
 #include <algorithm>
 #include <utility>

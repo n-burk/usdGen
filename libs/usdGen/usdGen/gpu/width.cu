@@ -1,4 +1,5 @@
 #include "width.h"
+#include "cudaCompat.h"
 
 #include <cmath>
 #include <cstdint>

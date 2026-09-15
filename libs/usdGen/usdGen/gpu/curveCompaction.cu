@@ -1,4 +1,5 @@
 #include "curveCompaction.h"
+#include "cudaCompat.h"
 
 #include <cub/device/device_scan.cuh>
 

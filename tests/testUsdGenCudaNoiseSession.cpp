@@ -69,7 +69,7 @@ static UsdGenGraphDesc MakeDesc(bool withNoise) {
             frame[1][0] = 0; frame[1][1] = 0; frame[1][2] = 1;
             frame[2][0] = 1; frame[2][1] = 0; frame[2][2] = 0;
         }
-        frame[3][0] = curves.curveId[i];
+        frame[3][0] = static_cast<double>(curves.curveId[i]);
         curves.rootFrame.push_back(frame);
     }
     desc.curveSets.push_back(curves);
