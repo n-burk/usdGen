@@ -1,0 +1,69 @@
+#version 450
+// Packed Float32x3 source storage: points[3*i + {0,1,2}], never vec3[].
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer P { float v[]; } points;
+layout(set = 0, binding = 1, std430) readonly buffer O { uint v[]; } offsets;
+layout(set = 0, binding = 2, std430) writeonly buffer R { float v[]; } outputPoints;
+layout(set = 0, binding = 3, std430) buffer S { uint error; } status;
+
+layout(push_constant) uniform C {
+    uint curves;
+    uint points;
+    uint phase;
+    float factor;
+} c;
+
+bool finite(float value) { return !isnan(value) && !isinf(value); }
+void fail() { atomicOr(status.error, 1u); }
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (c.phase == 0u) {
+        if (!finite(c.factor) || c.factor < 0.0) fail();
+        if (i <= c.curves) {
+            uint offset = offsets.v[i];
+            if ((i == 0u && offset != 0u) ||
+                (i == c.curves && offset != c.points)) fail();
+            if (i < c.curves && offset >= offsets.v[i + 1u]) fail();
+        }
+        if (i < c.points) {
+            uint point = 3u * i;
+            if (!finite(points.v[point]) || !finite(points.v[point + 1u]) ||
+                !finite(points.v[point + 2u])) fail();
+        }
+        return;
+    }
+
+    // This GPU-visible gate prevents writes when validation found malformed
+    // offsets, non-finite source data, or a bad scalar factor.
+    if (atomicAdd(status.error, 0u) != 0u || i >= c.curves) return;
+
+    uint begin = offsets.v[i];
+    uint end = offsets.v[i + 1u];
+    uint root = 3u * begin;
+    precise float rootX = points.v[root];
+    precise float rootY = points.v[root + 1u];
+    precise float rootZ = points.v[root + 2u];
+    for (uint pointIndex = begin; pointIndex < end; ++pointIndex) {
+        uint point = 3u * pointIndex;
+        // Preserve exact CPU copy semantics for factor == 1.
+        if (c.factor == 1.0) {
+            outputPoints.v[point] = points.v[point];
+            outputPoints.v[point + 1u] = points.v[point + 1u];
+            outputPoints.v[point + 2u] = points.v[point + 2u];
+        } else {
+            // Materialize the CPU-order result before publication: `precise`
+            // prevents contraction of the subtract/multiply/add sequence.
+            precise float x = rootX + (points.v[point] - rootX) * c.factor;
+            precise float y = rootY + (points.v[point + 1u] - rootY) * c.factor;
+            precise float z = rootZ + (points.v[point + 2u] - rootZ) * c.factor;
+            if (!finite(x) || !finite(y) || !finite(z)) {
+                fail();
+                return;
+            }
+            outputPoints.v[point] = x;
+            outputPoints.v[point + 1u] = y;
+            outputPoints.v[point + 2u] = z;
+        }
+    }
+}

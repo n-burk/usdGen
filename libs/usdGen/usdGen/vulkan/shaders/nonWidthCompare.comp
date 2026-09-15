@@ -1,0 +1,7 @@
+#version 450
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) readonly buffer L { uint v[]; } left;
+layout(set=0,binding=1,std430) readonly buffer R { uint v[]; } right;
+layout(set=0,binding=2,std430) buffer S { uint value; } status;
+layout(push_constant) uniform C { uint words; } c;
+void main(){uint i=gl_GlobalInvocationID.x;if(i<c.words&&left.v[i]!=right.v[i])atomicOr(status.value,1u);}

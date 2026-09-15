@@ -2,6 +2,8 @@
 // final image is read back; generated geometry never crosses the host.
 #include "usdGenImaging/cudaGlComputation.h"
 #include "usdGen/executionPipeline.h"
+#include "usdGen/graphDesc.h"
+#include "usdGen/session.h"
 #include "cudaGlFixture.h"
 #include "eglctx.h"
 #include "pxr/base/tf/errorMark.h"
@@ -16,6 +18,7 @@
 #include "pxr/imaging/hgiGL/hgi.h"
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -171,8 +174,305 @@ int Draw(Buffers const& buffers, GLuint program, float width) {
 
 }
 
-int main() {
+// Version acceptance, last-good visibility and renderer retirement through
+// the bridge, end to end with traces. v1 publishes, v2 supersedes into
+// fresh ranges, a failed v3 never becomes displayable, and an explicit
+// render fence retires each displayed version before its destruction.
+static int Lifecycle() {
     TfErrorMark errors;
+    if (!eglctx::MakeHeadlessGLContext()) return 77;
+    GarchGLApiLoad();
+    HgiGL hgi;
+    HdStRenderDelegate delegate;
+    HdDriver driver{HgiTokens->renderDriver, VtValue(static_cast<Hgi*>(&hgi))};
+    delegate.SetDrivers({&driver});
+    auto registryOwner = std::dynamic_pointer_cast<HdStResourceRegistry>(delegate.GetResourceRegistry());
+    CHECK(registryOwner);
+    auto& registry = *registryOwner;
+    auto first = MakeCudaGlFixture(.1f), second = MakeCudaGlFixture(.2f);
+    CHECK(first && second);
+    std::weak_ptr<const usdGen::UsdGenDeviceOwner> firstOwner = first->Owner();
+    std::weak_ptr<const usdGen::UsdGenDeviceOwner> secondOwner = second->Owner();
+    auto a = Queue(registry, first);
+    registry.Commit();
+    for (auto const& copy : a.copies) {
+        if (!copy->Succeeded()) std::fprintf(stderr, "lifecycle v1: %s\n", copy->Error().c_str());
+        CHECK(copy->Succeeded());
+    }
+    GLuint program = Program(), vao = 0;
+    CHECK(program);
+    glGenVertexArrays(1, &vao); glBindVertexArray(vao);
+    int v1pixels = Draw(a, program, .1f);
+    CHECK(v1pixels > 100);
+    std::fprintf(stderr, "lifecycle: version 1 published (%d px)\n", v1pixels);
+    auto b = Queue(registry, second);
+    registry.Commit();
+    for (auto const& copy : b.copies) {
+        if (!copy->Succeeded()) std::fprintf(stderr, "lifecycle v2: %s\n", copy->Error().c_str());
+        CHECK(copy->Succeeded());
+    }
+    int v2pixels = Draw(b, program, .2f);
+    CHECK(v2pixels > v1pixels);
+    std::fprintf(stderr, "lifecycle: version 2 accepted (%d px), version 1 superseded\n", v2pixels);
+    // Destroying the superseded version cannot disturb the displayed one:
+    // ranges are Storm-owned and generations are independently retained.
+    first.reset();
+    for (auto& copy : a.copies) copy.reset();
+    CHECK(firstOwner.expired());
+    CHECK(Draw(b, program, .2f) == v2pixels);
+    std::fprintf(stderr, "lifecycle: version 1 retired, version 2 still displayed\n");
+    // A failed admission never becomes displayable: the caller keeps
+    // showing the last good version.
+    auto third = MakeCudaGlFixture(.3f);
+    CHECK(third);
+    auto c = Queue(registry, third, false, true);
+    registry.Commit();
+    bool sawFailure = false;
+    for (auto const& copy : c.copies) {
+        if (!copy->Succeeded()) {
+            sawFailure = true;
+            CHECK(!copy->Error().empty());
+        }
+    }
+    CHECK(sawFailure);
+    CHECK(Draw(b, program, .2f) == v2pixels);
+    std::fprintf(stderr, "lifecycle: failed version 3 rejected, last-good version 2 displayed\n");
+    // Renderer retirement: fence the displayed draw before destroying
+    // anything the GPU may still read.
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    CHECK(fence);
+    CHECK(glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 10000000000ull) != GL_TIMEOUT_EXPIRED);
+    glDeleteSync(fence);
+    second.reset();
+    for (auto& copy : b.copies) copy.reset();
+    for (auto& copy : c.copies) copy.reset();
+    third.reset();
+    CHECK(secondOwner.expired());
+    std::fprintf(stderr, "lifecycle: retire fence proved, all versions destroyed\n");
+    glBindVertexArray(0); glDeleteVertexArrays(1, &vao); glUseProgram(0); glDeleteProgram(program);
+    CHECK(errors.IsClean());
+    std::puts("testUsdGenCudaGlLifecycle: PASS (versions, last-good, retirement fence)");
+    return 0;
+}
+
+// Tile-scoped transfers carry per-tile channels and global offsets exactly:
+// a tile transfer must equal the corresponding slice of the whole-generation
+// transfer, and an out-of-range tile id must fail closed without touching
+// Storm state.
+static usdGen::UsdGenGraphDesc TileDesc() {
+    usdGen::UsdGenGraphDesc desc;
+    desc.description = SdfPath("/TileHandoff");
+    desc.executionBackend = usdGen::UsdGenExecutionBackend::Cuda;
+    desc.defaultWidth = .025f;
+    usdGen::UsdGenSurfaceDesc scalp;
+    scalp.path = SdfPath("/Scalp");
+    scalp.worldMatrix.SetIdentity();
+    scalp.restPoints = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    scalp.points = scalp.restPoints;
+    scalp.faceVertexCounts = {3};
+    scalp.faceVertexIndices = {0, 1, 2};
+    desc.surfaces.push_back(scalp);
+    usdGen::UsdGenCurveSetDesc hair;
+    hair.path = SdfPath("/Hair");
+    hair.role = usdGen::UsdGenRole::Curves;
+    hair.curveRole = TfToken("hair");
+    hair.type = TfToken("cubic");
+    hair.basis = TfToken("bspline");
+    hair.wrap = TfToken("pinned");
+    hair.curveVertexCounts.assign(600, 2);
+    hair.curveId.resize(600);
+    hair.skinPrim.assign(600, 0);
+    hair.skinPrimUv.assign(600, GfVec2f(.25f, .25f));
+    hair.points.resize(1200);
+    for (size_t curve = 0; curve != 600; ++curve) {
+        float const x = float(curve) * .001f;
+        hair.curveId[curve] = curve;
+        hair.points[2 * curve] = GfVec3f(x, 0, 0);
+        hair.points[2 * curve + 1] = GfVec3f(x, 2.f, 0);
+    }
+    hair.rest = hair.points;
+    desc.curveSets.push_back(hair);
+    usdGen::UsdGenNodeDesc source;
+    source.path = SdfPath("/Ops/Source");
+    source.type = TfToken("UsdGenCurveSource");
+    source.curves = {hair.path};
+    source.surfaces = {scalp.path};
+    usdGen::UsdGenNodeDesc widthNode;
+    widthNode.path = SdfPath("/Ops/Width");
+    widthNode.type = TfToken("UsdGenWidth");
+    widthNode.inputs = {source.path};
+    widthNode.params.push_back({TfToken("width"), VtValue(.5f), false});
+    desc.nodes = {source, widthNode};
+    desc.terminal = widthNode.path;
+    return desc;
+}
+
+static int TileTransfers() {
+    TfErrorMark errors;
+    if (!eglctx::MakeHeadlessGLContext()) return 77;
+    GarchGLApiLoad();
+    HgiGL hgi;
+    HdStRenderDelegate delegate;
+    HdDriver driver{HgiTokens->renderDriver, VtValue(static_cast<Hgi*>(&hgi))};
+    delegate.SetDrivers({&driver});
+    auto registryOwner = std::dynamic_pointer_cast<HdStResourceRegistry>(delegate.GetResourceRegistry());
+    CHECK(registryOwner);
+    auto& registry = *registryOwner;
+    usdGen::UsdGenSession session;
+    session.SetDevicePublicationEnabled(true);
+    session.SetGraphDesc(TileDesc());
+    auto published = session.Commit(1, usdGen::UsdGenCommitReason::SetTime);
+    if (!published || !published->device || session.LastDiagnostics().HasErrors()) {
+        for (auto const& error : session.LastDiagnostics().errors)
+            std::fprintf(stderr, "tile session: %s\n", error.c_str());
+        return 1;
+    }
+    auto generation = published->device;
+    auto const& tiles = generation->Geometry().tiles;
+    CHECK(tiles.size() >= 2);
+    auto const& tail = tiles.back();
+    CHECK(tail.pointCount != 0 && tail.firstPoint != 0);
+    std::fprintf(stderr, "tiles: count=%zu tail curves=%llu points=%llu firstPoint=%llu\n",
+        tiles.size(), static_cast<unsigned long long>(tail.curveCount),
+        static_cast<unsigned long long>(tail.pointCount),
+        static_cast<unsigned long long>(tail.firstPoint));
+    // Whole-generation reference transfers.
+    auto whole = Queue(registry, generation);
+    registry.Commit();
+    for (auto const& copy : whole.copies) {
+        if (!copy->Succeeded()) std::fprintf(stderr, "tile whole: %s\n", copy->Error().c_str());
+        CHECK(copy->Succeeded());
+    }
+    // Tile-scoped transfers must carry the identical bytes.
+    auto transferTile = [&](Semantic semantic, uint32_t tileId,
+                            Buffers* out) {
+        auto copy = std::make_shared<UsdGenCudaGlComputation>(
+            generation, semantic, TfToken("data"), tileId);
+        HdBufferSpecVector specs;
+        copy->GetBufferSpecs(&specs);
+        auto range = registry.AllocateNonUniformBufferArrayRange(
+            TfToken("usdGenInteropTileTest"), specs, HdBufferArrayUsageHintBitsStorage);
+        registry.AddComputation(range, copy, HdStComputeQueueZero);
+        out->ranges[0] = range;
+        out->copies[0] = std::move(copy);
+    };
+    auto compareArrays = [&](HdBufferArrayRangeSharedPtr const& wholeRange,
+                             HdBufferArrayRangeSharedPtr const& tileRange,
+                             uint64_t wholeBaseFloats, uint64_t count) {
+        // Compares tile floats against the whole-generation slice in-shader;
+        // generated geometry never crosses the host in this proof.
+        static GLuint program = 0;
+        static GLuint vao = 0;
+        if (!program) {
+            char const* vertex = R"GLSL(#version 450 core
+layout(std430,binding=0) readonly buffer A { float a[]; };
+layout(std430,binding=1) readonly buffer B { float b[]; };
+uniform int baseA; uniform int baseB; uniform int count;
+flat out int good;
+void main() {
+    int i = gl_VertexID;
+    good = 1;
+    if (i < count) good = (a[baseA+i] == b[baseB+i]) ? 1 : 0;
+    float x = -1.0 + 2.0 * float(i % 64) / 64.0 + 1.0 / 64.0;
+    float y = -1.0 + 2.0 * float(i / 64) / 64.0 + 1.0 / 64.0;
+    gl_Position = vec4(x, y, 0.0, 1.0);
+    gl_PointSize = 1.0;
+})GLSL";
+            char const* fragment = R"GLSL(#version 450 core
+flat in int good;
+out vec4 color;
+void main() { color = good==1 ? vec4(0,1,0,1) : vec4(1,0,0,1); }
+)GLSL";
+            GLuint v = Shader(GL_VERTEX_SHADER, vertex), f = Shader(GL_FRAGMENT_SHADER, fragment);
+            CHECK(v && f);
+            program = glCreateProgram();
+            CHECK(program);
+            glAttachShader(program, v); glAttachShader(program, f); glLinkProgram(program);
+            glDeleteShader(v); glDeleteShader(f);
+            GLint okay = 0; glGetProgramiv(program, GL_LINK_STATUS, &okay);
+            CHECK(okay);
+            glGenVertexArrays(1, &vao); glBindVertexArray(vao);
+        }
+        auto wholeBar = std::dynamic_pointer_cast<HdStBufferArrayRange>(wholeRange);
+        auto tileBar = std::dynamic_pointer_cast<HdStBufferArrayRange>(tileRange);
+        CHECK(wholeBar && tileBar);
+        auto wholeResource = wholeBar->GetResource(TfToken("data"));
+        auto tileResource = tileBar->GetResource(TfToken("data"));
+        CHECK(wholeResource && tileResource);
+        auto* wholeBuffer = dynamic_cast<HgiGLBuffer*>(wholeResource->GetHandle().Get());
+        auto* tileBuffer = dynamic_cast<HgiGLBuffer*>(tileResource->GetHandle().Get());
+        CHECK(wholeBuffer && tileBuffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, wholeBuffer->GetBufferId());
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, tileBuffer->GetBufferId());
+        glUseProgram(program);
+        GLint baseA = GLint((wholeBar->GetByteOffset(TfToken("data")) + wholeResource->GetOffset()) / 4 +
+            wholeBaseFloats);
+        GLint baseB = GLint((tileBar->GetByteOffset(TfToken("data")) + tileResource->GetOffset()) / 4);
+        glUniform1i(glGetUniformLocation(program, "baseA"), baseA);
+        glUniform1i(glGetUniformLocation(program, "baseB"), baseB);
+        glUniform1i(glGetUniformLocation(program, "count"), GLint(count));
+        glViewport(0, 0, 64, 64); glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND);
+        glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_POINTS, 0, GLsizei(count));
+        std::array<unsigned char, 64*64*4> pixels{};
+        glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        if (glGetError() != GL_NO_ERROR) return -1;
+        int green = 0;
+        for (size_t i = 0; i != pixels.size(); i += 4) if (pixels[i+1] > 128) ++green;
+        return green;
+    };
+    {
+        Buffers tilePoints, tileWidths;
+        transferTile(Semantic::Points, 1, &tilePoints);
+        transferTile(Semantic::Widths, 1, &tileWidths);
+            registry.Commit();
+            for (auto* set : {&tilePoints, &tileWidths})
+            for (auto const& copy : set->copies) {
+                if (!copy) continue;
+                if (!copy->Succeeded())
+                    std::fprintf(stderr, "tile transfer: %s\n", copy->Error().c_str());
+                CHECK(copy->Succeeded());
+            }
+        uint64_t const pointFloats = tail.pointCount * 3;
+        int pointGreen = compareArrays(whole.ranges[0], tilePoints.ranges[0],
+                                       tail.firstPoint * 3, pointFloats);
+        std::fprintf(stderr, "tiles: points green=%d/%d\n", pointGreen, int(pointFloats));
+        CHECK(pointGreen == int(pointFloats));
+        int widthGreen = compareArrays(whole.ranges[2], tileWidths.ranges[0],
+                                       tail.firstPoint, tail.pointCount);
+        std::fprintf(stderr, "tiles: widths green=%d/%llu\n", widthGreen,
+                     static_cast<unsigned long long>(tail.pointCount));
+        CHECK(widthGreen == int(tail.pointCount));
+        std::fprintf(stderr, "tiles: tile-1 points+widths match whole-generation slice\n");
+    }
+    {
+        // An out-of-range tile id fails closed: no crash, no hang, an error,
+        // and the valid ranges still draw.
+        auto bad = std::make_shared<UsdGenCudaGlComputation>(
+            generation, Semantic::Points, TfToken("data"), 999u);
+        HdBufferSpecVector specs;
+        bad->GetBufferSpecs(&specs);
+        auto range = registry.AllocateNonUniformBufferArrayRange(
+            TfToken("usdGenInteropTileTest"), specs, HdBufferArrayUsageHintBitsStorage);
+        registry.AddComputation(range, bad, HdStComputeQueueZero);
+        registry.Commit();
+        CHECK(!bad->Succeeded() && !bad->Error().empty());
+        std::fprintf(stderr, "tiles: out-of-range tile id fails closed\n");
+    }
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    CHECK(fence);
+    CHECK(glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 10000000000ull) != GL_TIMEOUT_EXPIRED);
+    glDeleteSync(fence);
+    generation.reset();
+    CHECK(errors.IsClean());
+    std::puts("testUsdGenCudaGlTiles: PASS (tile slices match, bad tile fails closed, fence proved)");
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    TfErrorMark errors;
+    if (argc == 2 && std::strcmp(argv[1], "--lifecycle") == 0) return Lifecycle();
+    if (argc == 2 && std::strcmp(argv[1], "--tiles") == 0) return TileTransfers();
     if(!eglctx::MakeHeadlessGLContext()) return 77;
     GarchGLApiLoad();
     HgiGL hgi;

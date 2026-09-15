@@ -5,6 +5,20 @@
 # (sol S-5/X-4), so a failing dependency cannot shadow them.
 set_and_check(usdGen_PLUGIN_DIR "@PACKAGE_USDGEN_INSTALL_PLUGINDIR@")
 set_and_check(usdGen_LIBRARY_DIR "@PACKAGE_USDGEN_INSTALL_LIBDIR@")
+if(@USDGEN_ENABLE_VULKAN_RUNTIME@)
+    set_and_check(usdGen_VULKAN_WIDTH_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/width.spv")
+    set_and_check(usdGen_VULKAN_WIDTH_PROFILE_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/widthProfile.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthScale.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_COMPACTION_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthCompaction.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_SET_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthSet.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_CUT_EXTEND_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthCutExtend.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_REPARAM_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthReparam.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_MINIMUM_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthMinimum.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_LITERAL_V1_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthLiteralV1.spv")
+    set_and_check(usdGen_VULKAN_LENGTH_ENVELOPE_V1_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/lengthEnvelopeV1.spv")
+    set_and_check(usdGen_VULKAN_WIDTH_BLEND_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/widthBlend.spv")
+    set_and_check(usdGen_VULKAN_NON_WIDTH_COMPARE_SHADER "${PACKAGE_PREFIX_DIR}/share/usdGen/vulkan/nonWidthCompare.spv")
+endif()
 
 # Plugin locations, so a consuming build can compose PXR_PLUGINPATH_NAME
 # without hardcoding the layout.
@@ -13,6 +27,19 @@ set(usdGen_PLUGINPATHS
     "${usdGen_PLUGIN_DIR}/usdGenImaging/resources")
 
 include(CMakeFindDependencyMacro)
+
+if(@USDGEN_ENABLE_VULKAN_RUNTIME@)
+    # Vulkan is required only by consumers linking usdGenVulkanNative or
+    # usdGenVulkanFactory (whose interfaces name Vulkan::Vulkan). Probe
+    # quietly so core-only consumers configure without a Vulkan SDK; a
+    # consumer that links the Vulkan targets without one fails at generate
+    # time on the missing imported target.
+    find_package(Vulkan 1.2 QUIET)
+    if(NOT Vulkan_FOUND)
+        message(STATUS "usdGen: no Vulkan SDK; usdGenVulkanNative/usdGenVulkanFactory unavailable")
+    endif()
+    find_dependency(Threads)
+endif()
 
 # The public link interface of usdGen references pxr imported targets, TBB and
 # OpenGL. The `if(NOT TARGET usd)` guard makes usdGen coexist with a build that

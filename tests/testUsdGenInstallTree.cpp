@@ -93,18 +93,21 @@ int RunLayoutChecks(const std::string &prefix,
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGen.so");
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGenImaging.so");
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGenSchema.so");
-    rc |= CheckFile(prefix + "/" + libDir + "/libusdGenMath.a");
-    rc |= CheckFile(prefix + "/" + libDir + "/libusdGen_seexpr.a");
+    // N-7: usdGenMath, usdGen_seexpr and nanoflann are private dependency
+    // archives (linked hidden, --exclude-libs,ALL); they are never installed
+    // or exported, and no consumer needs them (see testUsdGenConsumer).
+    rc |= CheckNotInstalled(prefix + "/" + libDir + "/libusdGenMath.a");
+    rc |= CheckNotInstalled(prefix + "/" + libDir + "/libusdGen_seexpr.a");
 
     // Headers: advertised layout <prefix>/include/<api>/...
     rc |= CheckFile(prefix + "/include/usdGen/usdGen.h");
     rc |= CheckFile(prefix + "/include/usdGen/export.h");
-    rc |= CheckFile(prefix + "/include/usdGenMath/usdGenMath.h");
+    rc |= CheckNotInstalled(prefix + "/include/usdGenMath/usdGenMath.h");
     rc |= CheckFile(prefix + "/include/usdGenSchema/usdGenSchema.h");
     rc |= CheckFile(prefix + "/include/usdGenImaging/api.h");
     // Third-party roots must match the exported INTERFACE include dirs.
-    rc |= CheckFile(prefix + "/include/nanoflann.hpp");
-    rc |= CheckFile(prefix + "/include/seexpr/SeExpr2/Noise.h");
+    rc |= CheckNotInstalled(prefix + "/include/nanoflann.hpp");
+    rc |= CheckNotInstalled(prefix + "/include/seexpr/SeExpr2/Noise.h");
 
     // Negative layout checks (sol S-6): no double-nesting, no .cpp installed.
     rc |= CheckNotInstalled(prefix + "/include/usdGen/usdGen/usdGen.h");

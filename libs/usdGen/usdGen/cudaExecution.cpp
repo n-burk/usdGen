@@ -1152,6 +1152,10 @@ struct ExecutionState {
     bool sourceValueRecorded = false;
     bool namedChannelsUnproven = false;
     CudaSourcePreparationOptions sourceOptions;
+    // Reference transports carry points but no rest channel; their values
+    // are lineage roots exactly like a direct upload. The async commit path
+    // must reproduce the direct deformed=false marker from the same flag.
+    bool sourceReferenceTransport = false;
     bool finalized = false;
     bool NoiseFrames(gpu::DeviceBuffer<float3>** t,
                      gpu::DeviceBuffer<float3>** b,
@@ -1863,6 +1867,244 @@ bool EstimateTileScratchBytes(uint64_t curves, int tileTarget, uint64_t* result)
 enum class LiteralLengthAdmission { NotEligible, Failed, Admitted };
 enum class LiteralRbfAdmission { NotEligible, Failed, Admitted };
 
+// This is deliberately structural only: compilation and runtime share the
+// exact literal-chain contract, while device-dependent workspace queries stay
+// in admission.  A fixed-cardinality source-rooted value DAG of literal
+// Deform/Width/WidthBlend nodes is admitted by the same recipe: every branch
+// preserves point cardinality, sibling Deforms each own a native cache, and
+// the layout already rejects a second Deform along any lineage before a plan
+// exists (shape detection re-verifies the left lineage below).
+struct LiteralRbfDagDeform {
+    UsdGenCudaExecutionPlan::Step const* step = nullptr;
+    int sampleBudget = 0;
+};
+struct LiteralRbfShape {
+    UsdGenCudaExecutionPlan::Step const* deform = nullptr;
+    UsdGenCurveSetDesc const* source = nullptr;
+    // Non-empty only for the value-DAG form below.
+    std::vector<LiteralRbfDagDeform> dagDeforms;
+    size_t widthCount = 0;
+    // WidthBlend steps whose predecessors need the non-width equality proof.
+    size_t blendProofCount = 0;
+    int sampleBudget = 0;
+    // Capture-route form: points/curves come from the compiled Grow
+    // requirements, not an authored curve set.
+    bool scatterSource = false;
+    // Topology-changing descendants: Length survivor counts are device
+    // results and C3 Grow outputs are generated, so admission charges the
+    // full-input worst case computed from these counts below.
+    size_t lengthCount = 0;
+    std::vector<int> growSegments;
+};
+bool FindLiteralRbfDagShape(UsdGenCudaExecutionPlan const& plan,
+                            LiteralRbfShape* result) {
+    if (!result || !plan.taskDag || plan.widthDag || plan.scatterGrow ||
+        plan.steps.empty() || plan.sourceNode >= plan.desc.nodes.size())
+        return false;
+    LiteralRbfShape shape;
+    std::vector<UsdGenCudaExecutionPlan::Step const*> bySemantic(
+        plan.desc.nodes.size(), nullptr);
+    for (auto const& candidate : plan.steps) {
+        if (!candidate || candidate->semanticNode >= plan.desc.nodes.size() ||
+            bySemantic[candidate->semanticNode]) return false;
+        bySemantic[candidate->semanticNode] = candidate.get();
+    }
+    // Mirror the layout's per-lineage rule: a Deform below an already
+    // deformed left predecessor would apply surface motion twice. The layout
+    // propagates that state through the left WidthBlend input only.
+    auto leftLineageDeformed = [&](UsdGenCudaExecutionPlan::Step const* step) {
+        uint32_t node = step->inputNode;
+        for (size_t guard = 0; guard <= plan.desc.nodes.size(); ++guard) {
+            if (node == UINT32_MAX || node >= plan.desc.nodes.size()) return false;
+            auto const* predecessor = bySemantic[node];
+            if (!predecessor) return false;
+            if (predecessor->type == TfToken("UsdGenDeform")) return true;
+            node = predecessor->inputNode;
+        }
+        return true;
+    };
+    for (auto const& candidate : plan.steps) {
+        auto const& node = plan.desc.nodes[candidate->semanticNode];
+        if (candidate->type == TfToken("UsdGenDeform")) {
+            if (HasExpressionBinding(node, "rbfSamples")) return false;
+            UsdGenParamView deformParams{&plan.desc,
+                &plan.desc.nodes[candidate->semanticNode]};
+            int const budget = deformParams.GetInt(TfToken("rbfSamples"), 100);
+            auto const& surface = candidate->surface;
+            if (budget < 4 || budget > 46336 || surface.restPoints.empty() ||
+                surface.currentPoints.size() != surface.restPoints.size() ||
+                surface.faceOffsets.empty()) return false;
+            if (leftLineageDeformed(candidate.get())) return false;
+            shape.dagDeforms.push_back({candidate.get(), budget});
+        } else if (candidate->type == TfToken("UsdGenLength")) {
+            // Topology-changing survivors are device results; admission
+            // charges the full-input worst case below. Parameter bindings
+            // do not change Length's allocation shape, so they ride the
+            // candidate charging instead of disqualifying the recipe.
+            ++shape.lengthCount;
+        } else if (candidate->type == TfToken("UsdGenGrow")) {
+            // C3 Grow output cardinality is curves times literal segments;
+            // without a literal segment count the worst case is unknowable.
+            // Validation already forbids Grow expressions, maps and ramps.
+            UsdGenParamView growParams{&plan.desc,
+                &plan.desc.nodes[candidate->semanticNode]};
+            int const segments = growParams.GetInt(TfToken("segments"), 8);
+            if (segments < 2 || segments > 64) return false;
+            if ((candidate->parameters && !candidate->parameters->Bindings().empty()) ||
+                !node.expressionBindings.empty()) return false;
+            shape.growSegments.push_back(segments);
+        } else if (candidate->type == TfToken("UsdGenWidth")) {
+            // Parameter bindings ride the per-step candidate charging, and
+            // image maps ride the upload/sample charging below. An empty
+            // compiled program is normal for literal operators.
+            if (candidate->inputNode == UINT32_MAX ||
+                candidate->rightInputNode != UINT32_MAX) return false;
+            ++shape.widthCount;
+        } else if (candidate->type == TfToken("UsdGenWidthBlend")) {
+            if ((candidate->parameters && !candidate->parameters->Bindings().empty()) ||
+                !node.expressionBindings.empty() ||
+                candidate->inputNode == UINT32_MAX ||
+                candidate->rightInputNode == UINT32_MAX ||
+                candidate->rightInputNode == candidate->inputNode) return false;
+            // A blend output obeys the same upper bound as a Width output;
+            // its proof status packet is charged separately below.
+            ++shape.widthCount;
+            if (candidate->requiresNonWidthProof) ++shape.blendProofCount;
+        } else return false;
+    }
+    auto const& source = plan.desc.nodes[plan.sourceNode];
+    if (shape.dagDeforms.empty() || !SourceExpressionCardinalityKnown(source))
+        return false;
+    // A reference root transports its curve set; an authored root owns it.
+    // Both require complete root bindings and fixed cardinality.
+    std::vector<UsdGenCurveSetDesc>::const_iterator found;
+    if (source.type == TfToken("UsdGenReferenceSource")) {
+        if (!source.curves.empty() || source.references.size() != 1) return false;
+        found = std::find_if(plan.desc.curveSets.begin(), plan.desc.curveSets.end(),
+            [&](auto const& curves) { return curves.path == source.references.front(); });
+        if (found == plan.desc.curveSets.end()) return false;
+    } else {
+        if (source.curves.empty()) return false;
+        found = std::find_if(plan.desc.curveSets.begin(), plan.desc.curveSets.end(),
+            [&](auto const& curves) { return curves.path == source.curves.front(); });
+        if (found == plan.desc.curveSets.end()) return false;
+        UsdGenParamView sourceParams{&plan.desc, &source};
+        if (sourceParams.GetInt(TfToken("resampleTo"), 0) != 0) return false;
+    }
+    uint64_t const curves = found->curveVertexCounts.size();
+    if (found->skinPrim.size() != curves || found->skinPrimUv.size() != curves)
+        return false;
+    shape.source = &*found;
+    *result = shape;
+    return true;
+}
+bool FindLiteralRbfScatterDagShape(UsdGenCudaExecutionPlan const& plan,
+                                    LiteralRbfShape* result) {
+    if (!result || !plan.scatterGrow || !plan.taskDag || plan.widthDag ||
+        !plan.scatterRoots || plan.steps.empty())
+        return false;
+    // Length/Noise/Grow descendants keep their existing admission routes;
+    // this recipe covers literal Deform/Width/WidthBlend branches only.
+    LiteralRbfShape shape;
+    shape.scatterSource = true;
+    std::vector<UsdGenCudaExecutionPlan::Step const*> bySemantic(
+        plan.desc.nodes.size(), nullptr);
+    for (auto const& candidate : plan.steps) {
+        if (!candidate || candidate->semanticNode >= plan.desc.nodes.size() ||
+            bySemantic[candidate->semanticNode]) return false;
+        bySemantic[candidate->semanticNode] = candidate.get();
+    }
+    auto leftLineageDeformed = [&](UsdGenCudaExecutionPlan::Step const* step) {
+        uint32_t node = step->inputNode;
+        for (size_t guard = 0; guard <= plan.desc.nodes.size(); ++guard) {
+            if (node == UINT32_MAX || node >= plan.desc.nodes.size()) return false;
+            auto const* predecessor = bySemantic[node];
+            if (!predecessor) return false;
+            if (predecessor->type == TfToken("UsdGenDeform")) return true;
+            node = predecessor->inputNode;
+        }
+        return true;
+    };
+    for (auto const& candidate : plan.steps) {
+        auto const& node = plan.desc.nodes[candidate->semanticNode];
+        if (candidate->type == TfToken("UsdGenDeform")) {
+            if (HasExpressionBinding(node, "rbfSamples")) return false;
+            UsdGenParamView deformParams{&plan.desc,
+                &plan.desc.nodes[candidate->semanticNode]};
+            int const budget = deformParams.GetInt(TfToken("rbfSamples"), 100);
+            auto const& surface = candidate->surface;
+            if (budget < 4 || budget > 46336 || surface.restPoints.empty() ||
+                surface.currentPoints.size() != surface.restPoints.size() ||
+                surface.faceOffsets.empty()) return false;
+            if (leftLineageDeformed(candidate.get())) return false;
+            shape.dagDeforms.push_back({candidate.get(), budget});
+        } else if (candidate->type == TfToken("UsdGenWidth")) {
+            if (candidate->inputNode == UINT32_MAX ||
+                candidate->rightInputNode != UINT32_MAX) return false;
+            ++shape.widthCount;
+        } else if (candidate->type == TfToken("UsdGenWidthBlend")) {
+            if ((candidate->parameters && !candidate->parameters->Bindings().empty()) ||
+                !node.expressionBindings.empty() ||
+                candidate->inputNode == UINT32_MAX ||
+                candidate->rightInputNode == UINT32_MAX ||
+                candidate->rightInputNode == candidate->inputNode) return false;
+            ++shape.widthCount;
+            if (candidate->requiresNonWidthProof) ++shape.blendProofCount;
+        } else return false;
+    }
+    if (shape.dagDeforms.empty()) return false;
+    *result = shape;
+    return true;
+}
+bool FindLiteralRbfShape(UsdGenCudaExecutionPlan const& plan,
+                         LiteralRbfShape* result) {
+    if (!result) return false;
+    if (plan.scatterGrow && plan.taskDag && !plan.widthDag)
+        return FindLiteralRbfScatterDagShape(plan, result);
+    if (plan.taskDag && !plan.widthDag)
+        return FindLiteralRbfDagShape(plan, result);
+    if (plan.taskDag || plan.widthDag || plan.steps.empty() ||
+        plan.sourceNode >= plan.desc.nodes.size()) return false;
+    LiteralRbfShape shape;
+    for (auto const& candidate : plan.steps) {
+        if (!candidate || candidate->semanticNode >= plan.desc.nodes.size()) return false;
+        auto const& node = plan.desc.nodes[candidate->semanticNode];
+        if (candidate->type == TfToken("UsdGenDeform")) {
+            if (shape.deform || HasExpressionBinding(node, "rbfSamples")) return false;
+            shape.deform = candidate.get();
+        } else if (candidate->type == TfToken("UsdGenWidth")) {
+            // Active expressions or image maps change the allocation shape.
+            // An empty compiled program is normal for literal operators.
+            // Keep expression/map paths on per-allocation admission for now.
+            if ((candidate->parameters && !candidate->parameters->Bindings().empty()) || candidate->maskImage ||
+                !node.expressionBindings.empty()) return false;
+            ++shape.widthCount;
+        } else return false;
+    }
+    auto const& source = plan.desc.nodes[plan.sourceNode];
+    if (!shape.deform || source.curves.empty() ||
+        !SourceExpressionCardinalityKnown(source)) return false;
+    auto found = std::find_if(plan.desc.curveSets.begin(), plan.desc.curveSets.end(),
+        [&](auto const& curves) { return curves.path == source.curves.front(); });
+    if (found == plan.desc.curveSets.end()) return false;
+    UsdGenParamView sourceParams{&plan.desc, &source};
+    if (sourceParams.GetInt(TfToken("resampleTo"), 0) != 0) return false;
+    uint64_t const curves = found->curveVertexCounts.size();
+    if (found->skinPrim.size() != curves || found->skinPrimUv.size() != curves)
+        return false;
+    UsdGenParamView deformParams{&plan.desc,
+        &plan.desc.nodes[shape.deform->semanticNode]};
+    shape.sampleBudget = deformParams.GetInt(TfToken("rbfSamples"), 100);
+    auto const& surface = shape.deform->surface;
+    if (shape.sampleBudget < 4 || shape.sampleBudget > 46336 ||
+        surface.restPoints.empty() ||
+        surface.currentPoints.size() != surface.restPoints.size() ||
+        surface.faceOffsets.empty()) return false;
+    shape.source = &*found;
+    *result = shape;
+    return true;
+}
+
 // RBF's factor/cache sizes are fully determined by the prepared literal
 // surface.  Unlike expression-driven RBF, this bound can be admitted before
 // source upload: N is the surface binder's clamped sample count, M=N+4, and
@@ -1870,59 +2112,74 @@ enum class LiteralRbfAdmission { NotEligible, Failed, Admitted };
 // The cold-cache sum includes both the old/public candidate side of every
 // COW exchange; cache permits then stay with the accepted binding after the
 // job reservation itself closes.
+LiteralRbfAdmission ReserveLiteralRbfDagExecution(
+    UsdGenCudaExecutionPlan const& plan, LiteralRbfShape const& shape,
+    int device, cudaStream_t stream, UsdGenDiagnostics* diagnostics,
+    UsdGenExecutionMemoryReservation* result);
+LiteralRbfAdmission ReserveLiteralRbfScatterDagExecution(
+    UsdGenCudaExecutionPlan const& plan, LiteralRbfShape const& shape,
+    int device, cudaStream_t stream, UsdGenDiagnostics* diagnostics,
+    UsdGenExecutionMemoryReservation* result);
 LiteralRbfAdmission ReserveLiteralRbfExecution(
-    UsdGenCudaExecutionPlan const& plan, int device, UsdGenDiagnostics* diagnostics,
+    UsdGenCudaExecutionPlan const& plan, int device, cudaStream_t stream,
+    UsdGenDiagnostics* diagnostics,
     UsdGenExecutionMemoryReservation* result) {
-    if (!result || !plan.metadata ||
-        !plan.metadata->MemoryEstimate().runtimeRefinementAvailable ||
-        plan.metadata->Shape() != UsdGenExecutionPlanShape::LinearAuthoredChain ||
-        plan.sourceNode >= plan.desc.nodes.size() || plan.steps.size() != 1)
+    // Do not use compiler metadata as an admission precondition: this recipe
+    // is also the compiler's proof for a literal linear Deform/Width chain.
+    LiteralRbfShape shape;
+    if (!result || !FindLiteralRbfShape(plan, &shape))
         return LiteralRbfAdmission::NotEligible;
+    if (shape.scatterSource) return ReserveLiteralRbfScatterDagExecution(plan,
+        shape, device, stream, diagnostics, result);
+    if (!shape.deform) return ReserveLiteralRbfDagExecution(plan, shape, device,
+        stream, diagnostics, result);
     auto const& sourceNode = plan.desc.nodes[plan.sourceNode];
-    auto const& step = *plan.steps.front();
-    if (step.type != TfToken("UsdGenDeform") ||
-        !SourceExpressionCardinalityKnown(sourceNode) ||
-        step.semanticNode >= plan.desc.nodes.size() ||
-        HasExpressionBinding(plan.desc.nodes[step.semanticNode], "rbfSamples") ||
-        sourceNode.curves.empty())
-        return LiteralRbfAdmission::NotEligible;
-    auto source = std::find_if(plan.desc.curveSets.begin(), plan.desc.curveSets.end(),
-        [&](auto const& curves) { return curves.path == sourceNode.curves.front(); });
-    if (source == plan.desc.curveSets.end()) return LiteralRbfAdmission::NotEligible;
-    UsdGenParamView sourceParams{&plan.desc, &sourceNode};
-    // The formula below is for the literal cold Source->Deform producer; a
-    // resampled input has an additional retained geometry owner.
-    if (sourceParams.GetInt(TfToken("resampleTo"), 0) != 0) return LiteralRbfAdmission::NotEligible;
-    UsdGenParamView deformParams{&plan.desc, &plan.desc.nodes[step.semanticNode]};
-    int const budget = deformParams.GetInt(TfToken("rbfSamples"), 100);
-    if (budget < 4 || budget > 46336 || step.surface.restPoints.empty() ||
-        step.surface.currentPoints.size() != step.surface.restPoints.size() ||
-        step.surface.faceOffsets.empty())
-        return LiteralRbfAdmission::NotEligible;
+    auto const* deformStep = shape.deform;
+    auto const* source = shape.source;
+    size_t const widthCount = shape.widthCount;
+    auto const& step = *deformStep;
+    int const budget = shape.sampleBudget;
     uint64_t const curves = source->curveVertexCounts.size();
     uint64_t const points = source->points.size();
-    if (source->skinPrim.size() != curves || source->skinPrimUv.size() != curves)
-        return LiteralRbfAdmission::NotEligible;
     uint64_t const vertices = step.surface.restPoints.size();
     uint64_t const faceOffsets = step.surface.faceOffsets.size();
     uint64_t const faceIndices = step.surface.faceVertexIndices.size();
     uint64_t const samples = std::min<uint64_t>(vertices, static_cast<uint64_t>(budget));
     uint64_t order = samples, matrixElements = 0, solverWorkElements = 0;
-    uint64_t sourceBytes = 0, publicationScratch = 0, rbfBytes = 0, peak = 0;
+    uint64_t sourceBytes = 0, authoredBytes = 0, widthBytes = 0,
+        publicationScratch = 0, rbfBytes = 0, peak = 0;
     uint64_t sourceParameterBytes = 0, operatorParameterBytes = 0;
     if (!EstimateAdd(&order, 4) ||
         !EstimateMultiply(order, order, &matrixElements) ||
         !EstimateGeometryBytes(points, curves,
-            source->skinPrim.size() == curves && source->skinPrimUv.size() == curves &&
-                !sourceNode.surfaces.empty(), &sourceBytes) ||
+            SourceMayProduceRootBindings(sourceNode, *source), &sourceBytes) ||
         !EstimateTileScratchBytes(curves, plan.desc.tileTarget, &publicationScratch) ||
         !EstimateParameterCandidateBytes(plan.sourceParameters, points, curves,
             false, &sourceParameterBytes) ||
         !EstimateParameterCandidateBytes(step.parameters, points, curves,
-            source->skinPrim.size() == curves &&
-                source->skinPrimUv.size() == curves && !sourceNode.surfaces.empty(),
+            SourceMayProduceRootBindings(sourceNode, *source),
             &operatorParameterBytes)) {
         Fail(diagnostics, "CUDA literal-RBF memory estimate overflows");
+        return LiteralRbfAdmission::Failed;
+    }
+    for (auto const& plane : source->authoredPlanes) {
+        uint64_t elements = plane.domain == UsdGenAuthoredPlaneDomain::Point ? points :
+            plane.domain == UsdGenAuthoredPlaneDomain::Primitive ? curves : 1;
+        uint64_t values = 0, bytes = 0;
+        if (!EstimateMultiply(elements, static_cast<uint64_t>(plane.arity), &values) ||
+            !EstimateMultiply(values, sizeof(uint32_t), &bytes) ||
+            !EstimateAdd(&authoredBytes, bytes)) {
+            Fail(diagnostics, "CUDA literal-RBF authored-plane memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    // Each literal Width retains its COW output (4P) while its private output,
+    // profile/mask packets and status scalars are live (4P + fixed scratch).
+    uint64_t oneWidth = 0;
+    if (!EstimateMultiply(points, 2 * sizeof(float), &oneWidth) ||
+        !EstimateAdd(&oneWidth, 2 * kUsdGenRampLutSize * sizeof(float) + 2 * sizeof(int)) ||
+        !EstimateMultiply(oneWidth, static_cast<uint64_t>(widthCount), &widthBytes)) {
+        Fail(diagnostics, "CUDA literal-RBF Width memory estimate overflows");
         return LiteralRbfAdmission::Failed;
     }
     CudaDeviceScope selected(device);
@@ -1958,7 +2215,397 @@ LiteralRbfAdmission ReserveLiteralRbfExecution(
         !EstimateMultiply(solverWorkElements, 8, &workTerm) || !EstimateAdd(&rbfBytes, workTerm) ||
         !EstimateMultiply(order, 52, &orderTerm) || !EstimateAdd(&rbfBytes, orderTerm) ||
         !EstimateAdd(&rbfBytes, 1696) ||
-        !EstimateSum({sourceBytes, rbfBytes, publicationScratch,
+        !EstimateSum({sourceBytes, authoredBytes, widthBytes, rbfBytes, publicationScratch,
+                      sourceParameterBytes, operatorParameterBytes,
+                      plan.sourceParameters ? CudaGroomScalarReadback::Capacity * 8 : 0},
+                     &peak) ||
+        peak > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        Fail(diagnostics, "CUDA literal-RBF runtime memory reservation size overflows this platform");
+        return LiteralRbfAdmission::Failed;
+    }
+    auto reservation = gpu::TryReserveCudaExecutionMemory(static_cast<size_t>(peak));
+    if (!reservation) {
+        Fail(diagnostics, "CUDA literal-RBF memory reservation of " + std::to_string(peak) +
+            " bytes was not admitted by the device budget");
+        return LiteralRbfAdmission::Failed;
+    }
+    *result = std::move(*reservation);
+    return LiteralRbfAdmission::Admitted;
+}
+
+// Value-DAG form: source geometry, named channels, source parameters and
+// publication are charged once; every literal Width/WidthBlend output owns
+// its private plane under the same upper bound, each proof step owns the
+// full non-width comparator device/pinned status, and each distinct Deform
+// owns its cache/candidate and evaluator separately. Identical surface
+// descriptors do not share native cache allocations, so per-Deform terms
+// are never deduplicated; inherited aliases are (they ride the single
+// source charge, never a private producer).
+LiteralRbfAdmission ReserveLiteralRbfDagExecution(
+    UsdGenCudaExecutionPlan const& plan, LiteralRbfShape const& shape,
+    int device, cudaStream_t stream, UsdGenDiagnostics* diagnostics,
+    UsdGenExecutionMemoryReservation* result) {
+    auto const& sourceNode = plan.desc.nodes[plan.sourceNode];
+    auto const* source = shape.source;
+    uint64_t const curves = source->curveVertexCounts.size();
+    uint64_t const points = source->points.size();
+    uint64_t const growCount = static_cast<uint64_t>(shape.growSegments.size());
+    bool const hasTopology = growCount != 0 || shape.lengthCount != 0;
+    // Topology-changing descendants can only remove elements, so the worst
+    // case is the largest fixed input: authored points grown by every C3
+    // Grow output below the source.
+    uint64_t inputPoints = points;
+    if (hasTopology) {
+        for (int segments : shape.growSegments) {
+            uint64_t grown = 0;
+            if (!EstimateMultiply(curves, static_cast<uint64_t>(segments), &grown)) {
+                Fail(diagnostics, "CUDA literal-RBF memory estimate overflows while growing");
+                return LiteralRbfAdmission::Failed;
+            }
+            inputPoints = std::max(inputPoints, grown);
+        }
+    }
+    uint64_t sourceBytes = 0, authoredBytes = 0, widthBytes = 0,
+        publicationScratch = 0, rbfBytes = 0, peak = 0;
+    uint64_t sourceParameterBytes = 0, operatorParameterBytes = 0;
+    uint64_t inputNamedBytes = 0, survivorGeometryBytes = 0, doubledCompaction = 0;
+    uint64_t namedPeak = 0, lengthScratch = 0, growFrames = 0, growMapBytes = 0;
+    uint64_t growStatusBytes = 0, topologyStatusBytes = 0;
+    bool const roots = growCount != 0 || SourceMayProduceRootBindings(sourceNode, *source);
+    if (!EstimateGeometryBytes(points, curves, roots, &sourceBytes) ||
+        !EstimateTileScratchBytes(curves, plan.desc.tileTarget, &publicationScratch) ||
+        !EstimateParameterCandidateBytes(plan.sourceParameters, points, curves,
+            false, &sourceParameterBytes)) {
+        Fail(diagnostics, "CUDA literal-RBF memory estimate overflows");
+        return LiteralRbfAdmission::Failed;
+    }
+    for (auto const& plane : source->authoredPlanes) {
+        uint64_t elements = plane.domain == UsdGenAuthoredPlaneDomain::Point ? points :
+            plane.domain == UsdGenAuthoredPlaneDomain::Primitive ? curves : 1;
+        uint64_t values = 0, bytes = 0;
+        if (!EstimateMultiply(elements, static_cast<uint64_t>(plane.arity), &values) ||
+            !EstimateMultiply(values, sizeof(uint32_t), &bytes) ||
+            !EstimateAdd(&authoredBytes, bytes)) {
+            Fail(diagnostics, "CUDA literal-RBF authored-plane memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+        if (hasTopology) {
+            uint64_t grownElements = plane.domain == UsdGenAuthoredPlaneDomain::Point ?
+                inputPoints : plane.domain == UsdGenAuthoredPlaneDomain::Primitive ? curves : 1;
+            uint64_t grownValues = 0, grownBytes = 0;
+            if (!EstimateMultiply(grownElements, static_cast<uint64_t>(plane.arity),
+                    &grownValues) ||
+                !EstimateMultiply(grownValues, sizeof(uint32_t), &grownBytes) ||
+                !EstimateAdd(&inputNamedBytes, grownBytes)) {
+                Fail(diagnostics, "CUDA literal-RBF named-channel memory estimate overflows");
+                return LiteralRbfAdmission::Failed;
+            }
+        }
+    }
+    if (hasTopology) {
+        // Named outputs scale with the grown input; the source upload stays
+        // at the authored cardinality. Reserve their maximum, mirroring the
+        // Length value-DAG accounting.
+        uint64_t sourceNamedPeak = 0;
+        uint64_t const retainedNamed =
+            static_cast<uint64_t>(shape.lengthCount) + growCount + 1;
+        uint64_t doubledNamed = 0;
+        if (!EstimateSum({authoredBytes, inputNamedBytes}, &sourceNamedPeak) ||
+            !EstimateMultiply(inputNamedBytes, retainedNamed, &doubledNamed)) {
+            Fail(diagnostics, "CUDA literal-RBF named-channel memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+        namedPeak = std::max(sourceNamedPeak, doubledNamed);
+    } else {
+        namedPeak = authoredBytes;
+    }
+    // Each literal Width retains its COW output (4P) while its private output,
+    // profile/mask packets and status scalars are live (4P + fixed scratch).
+    // A blend output obeys the same bound; its proof packet is extra. Points
+    // are the worst-case grown input when topology descendants exist.
+    uint64_t oneWidth = 0, proofBytes = 0;
+    if (!EstimateMultiply(inputPoints, 2 * sizeof(float), &oneWidth) ||
+        !EstimateAdd(&oneWidth, 2 * kUsdGenRampLutSize * sizeof(float) + 2 * sizeof(int)) ||
+        !EstimateMultiply(oneWidth, static_cast<uint64_t>(shape.widthCount), &widthBytes) ||
+        !EstimateMultiply(static_cast<uint64_t>(shape.blendProofCount),
+            4 * sizeof(int32_t), &proofBytes) ||
+        !EstimateAdd(&widthBytes, proofBytes)) {
+        Fail(diagnostics, "CUDA literal-RBF Width memory estimate overflows");
+        return LiteralRbfAdmission::Failed;
+    }
+    // Candidate programs are charged for every step at the grown input;
+    // literal programs contribute nothing, as the Length route proves.
+    for (auto const& step : plan.steps) {
+        uint64_t candidateBytes = 0;
+        if (!EstimateParameterCandidateBytes(step->parameters, inputPoints,
+                curves, roots, &candidateBytes) ||
+            !EstimateAdd(&operatorParameterBytes, candidateBytes)) {
+            Fail(diagnostics, "CUDA expression evaluator memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    // Every mapped Width owns its image upload and root-domain sample
+    // plane; on a DAG those candidates can coexist, so their peaks sum.
+    for (auto const& step : plan.steps) {
+        if (!step->maskImage) continue;
+        uint64_t imageBytes = 0, sampleBytes = 0;
+        if (!EstimateMultiply(step->maskImage->TexelCount(), sizeof(float), &imageBytes) ||
+            !EstimateMultiply(curves, sizeof(float), &sampleBytes) ||
+            !EstimateAdd(&widthBytes, imageBytes) ||
+            !EstimateAdd(&widthBytes, sampleBytes)) {
+            Fail(diagnostics, "CUDA literal-RBF Width map memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    // Selected-device LU workspace queries are reused across Deforms that
+    // bind the same sample count; every other per-Deform term is charged
+    // separately even for identical surface descriptors.
+    CudaDeviceScope selected(device);
+    if (!selected.selected) {
+        Fail(diagnostics, "cannot select CUDA workspace device for literal-RBF memory reservation");
+        return LiteralRbfAdmission::Failed;
+    }
+    if (shape.lengthCount != 0) {
+        // Length survivors are device results; every input curve/point may
+        // survive, so the compactor, scratch and retained outputs use the
+        // full grown input with an exact selected-device CUB query.
+        size_t scan = 0;
+        if (gpu::GetCudaCurveCompactionScanTemporaryBytes(
+                static_cast<size_t>(curves), &scan, stream) != cudaSuccess) {
+            Fail(diagnostics, "cannot query CUDA CUB scan workspace for literal-RBF memory reservation");
+            return LiteralRbfAdmission::Failed;
+        }
+        uint64_t scanBytes = static_cast<uint64_t>(scan);
+        uint64_t pointBytes = 0, curveBytes = 0, twoCurveBytes = 0,
+            twoPointBytes = 0, prefixBytes = 0, perCompaction = 0;
+        uint64_t inputBytes = 0;
+        uint64_t const retainedCompactors = std::max<uint64_t>(2,
+            static_cast<uint64_t>(shape.lengthCount));
+        if (!EstimateGeometryBytes(inputPoints, curves, roots, &inputBytes) ||
+            !EstimateMultiply(inputPoints, sizeof(float3), &pointBytes) ||
+            !EstimateMultiply(curves, sizeof(uint32_t), &curveBytes) ||
+            !EstimateMultiply(curves, 2, &twoCurveBytes) ||
+            !EstimateMultiply(pointBytes, 2, &twoPointBytes) ||
+            !EstimateMultiply(curveBytes, 4, &prefixBytes) ||
+            !EstimateSum({sizeof(int), 2 * sizeof(uint32_t), prefixBytes,
+                          scanBytes, sizeof(int) + 2 * sizeof(uint32_t)},
+                         &perCompaction) ||
+            !EstimateSum({257 * sizeof(float), twoPointBytes, twoCurveBytes,
+                          2 * sizeof(int)}, &lengthScratch) ||
+            !EstimateMultiply(perCompaction, retainedCompactors, &doubledCompaction)) {
+            Fail(diagnostics, "CUDA literal-RBF Length memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+        uint64_t const multiplicity = std::max<uint64_t>(2,
+            static_cast<uint64_t>(shape.lengthCount) + growCount);
+        if (!EstimateMultiply(inputBytes, multiplicity, &survivorGeometryBytes) ||
+            !EstimateAdd(&topologyStatusBytes, 2 * sizeof(int))) {
+            Fail(diagnostics, "CUDA literal-RBF Length memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    if (growCount != 0) {
+        uint64_t framePackets = 0, frameBytesPerCurve = 0;
+        if (!EstimateAdd(&framePackets, 1) ||
+            !EstimateAdd(&framePackets, growCount) ||
+            !EstimateAdd(&framePackets, static_cast<uint64_t>(shape.lengthCount)) ||
+            !EstimateMultiply(framePackets, 3 * sizeof(float3), &frameBytesPerCurve) ||
+            !EstimateMultiply(curves, frameBytesPerCurve, &growFrames)) {
+            Fail(diagnostics, "CUDA literal-RBF Grow frame estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+        for (auto const& step : plan.steps) if (step->type == TfToken("UsdGenGrow") &&
+            step->growLengthMap.image) {
+            uint64_t image = 0, samples = 0;
+            if (!EstimateMultiply(step->growLengthMap.image->TexelCount(), sizeof(float),
+                    &image) ||
+                !EstimateMultiply(curves, sizeof(float), &samples) ||
+                !EstimateAdd(&growMapBytes, image) || !EstimateAdd(&growMapBytes, samples)) {
+                Fail(diagnostics, "CUDA literal-RBF Grow map estimate overflows");
+                return LiteralRbfAdmission::Failed;
+            }
+        }
+        if (!EstimateMultiply(growCount, 2 * sizeof(int), &growStatusBytes)) {
+            Fail(diagnostics, "CUDA literal-RBF Grow memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+        if (shape.lengthCount == 0) {
+            uint64_t inputBytes = 0;
+            uint64_t const multiplicity = std::max<uint64_t>(2, growCount);
+            if (!EstimateGeometryBytes(inputPoints, curves, roots, &inputBytes) ||
+                !EstimateMultiply(inputBytes, multiplicity, &survivorGeometryBytes)) {
+                Fail(diagnostics, "CUDA literal-RBF Grow memory estimate overflows");
+                return LiteralRbfAdmission::Failed;
+            }
+        }
+    }
+    std::map<size_t, uint64_t> solverWorkBySamples;
+    for (auto const& deform : shape.dagDeforms) {
+        uint64_t const vertices = deform.step->surface.restPoints.size();
+        uint64_t const faceOffsets = deform.step->surface.faceOffsets.size();
+        uint64_t const faceIndices = deform.step->surface.faceVertexIndices.size();
+        uint64_t const samples = std::min<uint64_t>(vertices,
+            static_cast<uint64_t>(deform.sampleBudget));
+        uint64_t order = samples, matrixElements = 0;
+        uint64_t solverWorkElements = 0;
+        auto cached = solverWorkBySamples.find(static_cast<size_t>(samples));
+        if (cached != solverWorkBySamples.end()) {
+            solverWorkElements = cached->second;
+        } else {
+            size_t solverWork = 0;
+            if (gpu::GetCudaRbfLuWorkspaceElements(
+                    static_cast<size_t>(samples), &solverWork) != cudaSuccess) {
+                Fail(diagnostics, "cannot query CUDA cuSOLVER workspace for literal-RBF memory reservation");
+                return LiteralRbfAdmission::Failed;
+            }
+            solverWorkElements = static_cast<uint64_t>(solverWork);
+            solverWorkBySamples.emplace(static_cast<size_t>(samples), solverWorkElements);
+        }
+        // Cold RBF COW peak per Deform (bytes): 32V + 8(Fo+Fi) + 36P + 64N +
+        // 12C + 8M^2 + 8W + 52M + 1696, with the same mutually exclusive
+        // proof-handle accounting as the linear recipe. Points are the
+        // worst-case grown input; surfaces stay authored.
+        uint64_t value = 0, surfaceIndexCounts = faceOffsets, surfaceIndices = 0,
+            pointTerm = 0, sampleTerm = 0, curveTerm = 0, matrixTerm = 0,
+            workTerm = 0, orderTerm = 0;
+        if (!EstimateAdd(&order, 4) ||
+            !EstimateMultiply(order, order, &matrixElements) ||
+            !EstimateMultiply(vertices, 32, &value) ||
+            !EstimateAdd(&rbfBytes, value) ||
+            !EstimateAdd(&surfaceIndexCounts, faceIndices) ||
+            !EstimateMultiply(surfaceIndexCounts, 8, &surfaceIndices) ||
+            !EstimateAdd(&rbfBytes, surfaceIndices) ||
+            !EstimateMultiply(inputPoints, 36, &pointTerm) || !EstimateAdd(&rbfBytes, pointTerm) ||
+            !EstimateMultiply(samples, 64, &sampleTerm) || !EstimateAdd(&rbfBytes, sampleTerm) ||
+            !EstimateMultiply(curves, 12, &curveTerm) || !EstimateAdd(&rbfBytes, curveTerm) ||
+            !EstimateMultiply(matrixElements, 8, &matrixTerm) || !EstimateAdd(&rbfBytes, matrixTerm) ||
+            !EstimateMultiply(solverWorkElements, 8, &workTerm) || !EstimateAdd(&rbfBytes, workTerm) ||
+            !EstimateMultiply(order, 52, &orderTerm) || !EstimateAdd(&rbfBytes, orderTerm) ||
+            !EstimateAdd(&rbfBytes, 1696)) {
+            Fail(diagnostics, "CUDA literal-RBF memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    if (!EstimateSum({sourceBytes, namedPeak, survivorGeometryBytes, doubledCompaction,
+                      lengthScratch, growFrames, growMapBytes, growStatusBytes,
+                      topologyStatusBytes, widthBytes, rbfBytes, publicationScratch,
+                      sourceParameterBytes, operatorParameterBytes,
+                      plan.sourceParameters ? CudaGroomScalarReadback::Capacity * 8 : 0},
+                     &peak) ||
+        peak > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        Fail(diagnostics, "CUDA literal-RBF runtime memory reservation size overflows this platform");
+        return LiteralRbfAdmission::Failed;
+    }
+    auto reservation = gpu::TryReserveCudaExecutionMemory(static_cast<size_t>(peak));
+    if (!reservation) {
+        Fail(diagnostics, "CUDA literal-RBF memory reservation of " + std::to_string(peak) +
+            " bytes was not admitted by the device budget");
+        return LiteralRbfAdmission::Failed;
+    }
+    *result = std::move(*reservation);
+    return LiteralRbfAdmission::Admitted;
+}
+
+// Capture-route form: the compiled Grow requirements carry the exact source
+// peak (capture upload, generated output, status, map scratch). Generated
+// curves own no authored planes; per-Deform/Width/proof charging matches the
+// authored DAG recipe at the generated cardinality.
+LiteralRbfAdmission ReserveLiteralRbfScatterDagExecution(
+    UsdGenCudaExecutionPlan const& plan, LiteralRbfShape const& shape,
+    int device, cudaStream_t stream, UsdGenDiagnostics* diagnostics,
+    UsdGenExecutionMemoryReservation* result) {
+    (void)stream;
+    if (!plan.scatterRoots) return LiteralRbfAdmission::NotEligible;
+    uint64_t const curves = plan.scatterRoots->positions.size();
+    uint64_t const points = plan.scatterGrowRequirements.pointCount;
+    if (curves == 0 || points == 0 ||
+        curves > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+        points > static_cast<uint64_t>(std::numeric_limits<size_t>::max()))
+        return LiteralRbfAdmission::NotEligible;
+    uint64_t sourceBytes = plan.scatterGrowRequirements.peakBytes;
+    uint64_t widthBytes = 0, publicationScratch = 0, rbfBytes = 0, peak = 0;
+    uint64_t sourceParameterBytes = 0, operatorParameterBytes = 0;
+    if (sourceBytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
+        !EstimateTileScratchBytes(curves, plan.desc.tileTarget, &publicationScratch) ||
+        !EstimateParameterCandidateBytes(plan.sourceParameters, points, curves,
+            true, &sourceParameterBytes)) {
+        Fail(diagnostics, "CUDA literal-RBF memory estimate overflows");
+        return LiteralRbfAdmission::Failed;
+    }
+    uint64_t oneWidth = 0, proofBytes = 0;
+    if (!EstimateMultiply(points, 2 * sizeof(float), &oneWidth) ||
+        !EstimateAdd(&oneWidth, 2 * kUsdGenRampLutSize * sizeof(float) + 2 * sizeof(int)) ||
+        !EstimateMultiply(oneWidth, static_cast<uint64_t>(shape.widthCount), &widthBytes) ||
+        !EstimateMultiply(static_cast<uint64_t>(shape.blendProofCount),
+            4 * sizeof(int32_t), &proofBytes) ||
+        !EstimateAdd(&widthBytes, proofBytes)) {
+        Fail(diagnostics, "CUDA literal-RBF Width memory estimate overflows");
+        return LiteralRbfAdmission::Failed;
+    }
+    for (auto const& step : plan.steps) {
+        if (!step->maskImage) continue;
+        uint64_t imageBytes = 0, sampleBytes = 0;
+        if (!EstimateMultiply(step->maskImage->TexelCount(), sizeof(float), &imageBytes) ||
+            !EstimateMultiply(curves, sizeof(float), &sampleBytes) ||
+            !EstimateAdd(&widthBytes, imageBytes) ||
+            !EstimateAdd(&widthBytes, sampleBytes)) {
+            Fail(diagnostics, "CUDA literal-RBF Width map memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    CudaDeviceScope selected(device);
+    if (!selected.selected) {
+        Fail(diagnostics, "cannot select CUDA workspace device for literal-RBF memory reservation");
+        return LiteralRbfAdmission::Failed;
+    }
+    std::map<size_t, uint64_t> solverWorkBySamples;
+    for (auto const& deform : shape.dagDeforms) {
+        uint64_t const vertices = deform.step->surface.restPoints.size();
+        uint64_t const faceOffsets = deform.step->surface.faceOffsets.size();
+        uint64_t const faceIndices = deform.step->surface.faceVertexIndices.size();
+        uint64_t const samples = std::min<uint64_t>(vertices,
+            static_cast<uint64_t>(deform.sampleBudget));
+        uint64_t order = samples, matrixElements = 0;
+        uint64_t solverWorkElements = 0;
+        auto cached = solverWorkBySamples.find(static_cast<size_t>(samples));
+        if (cached != solverWorkBySamples.end()) {
+            solverWorkElements = cached->second;
+        } else {
+            size_t solverWork = 0;
+            if (gpu::GetCudaRbfLuWorkspaceElements(
+                    static_cast<size_t>(samples), &solverWork) != cudaSuccess) {
+                Fail(diagnostics, "cannot query CUDA cuSOLVER workspace for literal-RBF memory reservation");
+                return LiteralRbfAdmission::Failed;
+            }
+            solverWorkElements = static_cast<uint64_t>(solverWork);
+            solverWorkBySamples.emplace(static_cast<size_t>(samples), solverWorkElements);
+        }
+        uint64_t value = 0, surfaceIndexCounts = faceOffsets, surfaceIndices = 0,
+            pointTerm = 0, sampleTerm = 0, curveTerm = 0, matrixTerm = 0,
+            workTerm = 0, orderTerm = 0;
+        uint64_t deformParameterBytes = 0;
+        if (!EstimateAdd(&order, 4) ||
+            !EstimateMultiply(order, order, &matrixElements) ||
+            !EstimateParameterCandidateBytes(deform.step->parameters, points, curves,
+                true, &deformParameterBytes) ||
+            !EstimateAdd(&operatorParameterBytes, deformParameterBytes) ||
+            !EstimateMultiply(vertices, 32, &value) ||
+            !EstimateAdd(&rbfBytes, value) ||
+            !EstimateAdd(&surfaceIndexCounts, faceIndices) ||
+            !EstimateMultiply(surfaceIndexCounts, 8, &surfaceIndices) ||
+            !EstimateAdd(&rbfBytes, surfaceIndices) ||
+            !EstimateMultiply(points, 36, &pointTerm) || !EstimateAdd(&rbfBytes, pointTerm) ||
+            !EstimateMultiply(samples, 64, &sampleTerm) || !EstimateAdd(&rbfBytes, sampleTerm) ||
+            !EstimateMultiply(curves, 12, &curveTerm) || !EstimateAdd(&rbfBytes, curveTerm) ||
+            !EstimateMultiply(matrixElements, 8, &matrixTerm) || !EstimateAdd(&rbfBytes, matrixTerm) ||
+            !EstimateMultiply(solverWorkElements, 8, &workTerm) || !EstimateAdd(&rbfBytes, workTerm) ||
+            !EstimateMultiply(order, 52, &orderTerm) || !EstimateAdd(&rbfBytes, orderTerm) ||
+            !EstimateAdd(&rbfBytes, 1696)) {
+            Fail(diagnostics, "CUDA literal-RBF memory estimate overflows");
+            return LiteralRbfAdmission::Failed;
+        }
+    }
+    if (!EstimateSum({sourceBytes, widthBytes, rbfBytes, publicationScratch,
                       sourceParameterBytes, operatorParameterBytes,
                       plan.sourceParameters ? CudaGroomScalarReadback::Capacity * 8 : 0},
                      &peak) ||
@@ -2553,10 +3200,13 @@ bool BuildCudaGraphLayout(UsdGenGraphDesc const& desc, CudaGraphLayout* result,
         growCount != 0;
     // Keep the established source-index-zero, authored-linear RBF route out
     // of the value DAG: its literal-RBF reservation/cache contract depends
-    // on the legacy LinearAuthoredChain shape.  Deform becomes a value-DAG
-    // node only for a genuine branch, non-topological ordering, or selected
-    // sibling terminal.
+    // on the legacy LinearAuthoredChain shape. Reference roots never take
+    // the legacy route; their upload boundary differs, so even linear-ordered
+    // reference chains lower as DAGs under the same literal rules. Deform
+    // becomes a value-DAG node only for a genuine branch, non-topological
+    // ordering, or selected sibling terminal.
     bool legacyLinearDeform = hasDeform && result->source == 0 &&
+        desc.nodes[result->source].type != TfToken("UsdGenReferenceSource") &&
         (desc.terminal.IsEmpty() || desc.terminal == desc.nodes.back().path);
     if (legacyLinearDeform) {
         for (uint32_t i = 1; i != desc.nodes.size(); ++i) {
@@ -2781,20 +3431,25 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         return true;
     }
     if (desc.nodes[layout.source].type == TfToken("UsdGenReferenceSource")) {
-        // ReferenceSource has two deliberately narrow lowering shapes:
-        // source -> Width DAG, or source -> exactly one direct Length -> one
-        // or more Width branches. BuildCudaGraphLayout proves the latter's
-        // directness, single-Length cardinality, and dominance before this
-        // check; retain the explicit Width requirement here so a source-only
-        // or source->Length graph cannot publish a reference generation.
+        // ReferenceSource lowers to a Width DAG, a single direct Length
+        // trunk with Width branches, or a literal Deform/Width/WidthBlend
+        // value DAG. Anything else cannot publish a reference generation.
         bool const hasWidth = std::any_of(layout.operators.begin(),
             layout.operators.end(), [&](uint32_t index) {
                 return desc.nodes[index].type == TfToken("UsdGenWidth");
             });
         if ((!layout.widthDag && !layout.topologyDag) ||
-            layout.operators.empty() || !hasWidth)
-            return Fail(diagnostics,
-                "UsdGenReferenceSource CUDA lowering requires one or more Width consumers");
+            layout.operators.empty() || !hasWidth) {
+            bool literalRbfDag = layout.taskDag && !layout.widthDag && hasWidth;
+            for (uint32_t index : layout.operators) {
+                auto const& type = desc.nodes[index].type;
+                if (type == TfToken("UsdGenDeform")) continue;
+                if (!IsCudaWidthValueNode(type)) { literalRbfDag = false; break; }
+            }
+            if (!literalRbfDag)
+                return Fail(diagnostics,
+                    "UsdGenReferenceSource CUDA lowering requires one or more Width consumers");
+        }
     }
     if (!std::isfinite(desc.timeCodesPerSecond) || desc.timeCodesPerSecond <= 0)
         return Fail(diagnostics, "timeCodesPerSecond must be finite and positive");
@@ -2808,7 +3463,31 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         if (next.type == TfToken("UsdGenDeform")) {
             sawDeform = true;
             if (!ValidateDeform(next, diagnostics)) return false;
-            if (desc.nodes[layout.source].surfaces.size() != 1 ||
+            if (desc.nodes[layout.source].type == TfToken("UsdGenReferenceSource")) {
+                // Transported bindings replace the authored source surface:
+                // the target must name one real surface and the reference
+                // must carry complete root bindings for it.
+                auto const& referenceNode = desc.nodes[layout.source];
+                auto const surface = std::find_if(desc.surfaces.begin(),
+                    desc.surfaces.end(), [&](auto const& value) {
+                        return value.path == next.surfaces.front();
+                    });
+                bool bindingsComplete = referenceNode.references.size() == 1;
+                auto reference = desc.curveSets.end();
+                if (bindingsComplete) {
+                    reference = std::find_if(desc.curveSets.begin(),
+                        desc.curveSets.end(), [&](auto const& curves) {
+                            return curves.path == referenceNode.references.front();
+                        });
+                    bindingsComplete = reference != desc.curveSets.end() &&
+                        reference->skinPrim.size() == reference->curveVertexCounts.size() &&
+                        reference->skinPrimUv.size() == reference->curveVertexCounts.size();
+                }
+                if (next.surfaces.size() != 1 || surface == desc.surfaces.end() ||
+                    !bindingsComplete)
+                    return Fail(diagnostics,
+                        "RBF Deform over a reference source requires one resolved surface and complete transported root bindings");
+            } else if (desc.nodes[layout.source].surfaces.size() != 1 ||
                 desc.nodes[layout.source].surfaces.front() != next.surfaces.front())
                 return Fail(diagnostics, "RBF target must match the CurveSource root-binding surface");
         } else if (next.type == TfToken("UsdGenGrow")) {
@@ -3325,7 +4004,13 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         // this known subtotal must not become an aggregate admission bound.
         memory.memoryAvailable=memory.conservativeUpperBound=
             !hasLengthDescendants && !hasDeformDescendants;
-        memory.runtimeRefinementAvailable = hasLengthDescendants && !hasDeformDescendants;
+        // A literal Deform/Width/WidthBlend branch set refines through the
+        // aggregate RBF recipe instead of the Length subtotal above.
+        LiteralRbfShape scatterRbfShape;
+        bool const scatterRbfDag =
+            FindLiteralRbfScatterDagShape(*plan, &scatterRbfShape);
+        memory.runtimeRefinementAvailable =
+            (hasLengthDescendants && !hasDeformDescendants) || scatterRbfDag;
         if (!UsdGenExecutionDependencyCompiler::Lower(&tasks,values,&reason) ||
             !UsdGenExecutionDependencyCompiler::Validate(tasks,values,&reason)) {
             Fail(diagnostics,"Scatter->Grow dependency lowering failed: "+reason); return {};
@@ -4033,15 +4718,8 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         });
     bool literalRbf = false;
 #ifdef USDGEN_ENABLE_CUDA
-    literalRbf = !layout.widthDag && finalCardinalityKnown &&
-        sourceHasCompleteRoots &&
-        literalResample == 0 && layout.operators.size() == 1 &&
-        desc.nodes[layout.operators.front()].type == TfToken("UsdGenDeform") &&
-        !HasExpressionBinding(desc.nodes[layout.operators.front()], "rbfSamples") &&
-        plan->steps.size() == 1 && !plan->steps.front()->surface.restPoints.empty() &&
-        plan->steps.front()->surface.currentPoints.size() ==
-            plan->steps.front()->surface.restPoints.size() &&
-        !plan->steps.front()->surface.faceOffsets.empty();
+    LiteralRbfShape literalRbfShape;
+    literalRbf = FindLiteralRbfShape(*plan, &literalRbfShape);
 #endif
     graphMemory.runtimeRefinementAvailable = !layout.widthDag &&
         ((finalCardinalityKnown && hasLiteralLength &&
@@ -4163,7 +4841,8 @@ std::shared_ptr<UsdGenCudaExecutionJob> CreateCudaExecutionJob(
     } else {
         UsdGenExecutionMemoryReservation literalRbfReservation;
         auto const literalRbfAdmission = ReserveLiteralRbfExecution(
-            *plan, workspace.impl_->device, diagnostics, &literalRbfReservation);
+            *plan, workspace.impl_->device, workspace.impl_->stream, diagnostics,
+            &literalRbfReservation);
         if (literalRbfAdmission == LiteralRbfAdmission::Failed) return {};
         if (literalRbfAdmission == LiteralRbfAdmission::Admitted) {
             try {
@@ -4224,6 +4903,17 @@ size_t CudaExecutionJobOperatorCount(UsdGenCudaExecutionJob const& job) noexcept
     (void)job;
     return 0;
 #endif
+}
+TfToken CudaExecutionJobOperatorType(UsdGenCudaExecutionJob const& job,
+                                     size_t index) noexcept {
+#ifdef USDGEN_ENABLE_CUDA
+    if (job.plan && index < job.plan->steps.size() && job.plan->steps[index])
+        return job.plan->steps[index]->type;
+#else
+    (void)job;
+    (void)index;
+#endif
+    return {};
 }
 
 bool ExecuteCudaJobSource(UsdGenCudaExecutionJob& job) {
@@ -7223,6 +7913,17 @@ std::shared_ptr<const UsdGenDeviceGeneration> FinalizeCudaExecutionJob(
 #endif
 }
 
+void waitForCudaNativeRelayRetirementForTesting() {
+#ifdef USDGEN_ENABLE_CUDA
+    auto& source = SourceRelays();
+    source.arena.execute([&] { source.graph->wait_for_all(); });
+    auto& operators = OperatorRelays();
+    operators.arena.execute([&] { operators.graph->wait_for_all(); });
+    auto& finalization = FinalizationRelays();
+    finalization.arena.execute([&] { finalization.graph->wait_for_all(); });
+#endif
+}
+
 std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
     UsdGenCudaExecutionPlan const& plan, UsdGenCudaExecutionWorkspace& workspace, double frame,
     uint64_t generation, UsdGenDiagnostics* diagnostics,
@@ -7260,7 +7961,8 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         reservation = &memoryReservation;
     if (!reservation) {
         auto const literalRbfAdmission = ReserveLiteralRbfExecution(
-            plan, workspace.impl_->device, diagnostics, &memoryReservation);
+            plan, workspace.impl_->device, workspace.impl_->stream, diagnostics,
+            &memoryReservation);
         if (literalRbfAdmission == LiteralRbfAdmission::Failed) return {};
         if (literalRbfAdmission == LiteralRbfAdmission::Admitted)
             reservation = &memoryReservation;
@@ -7824,6 +8526,14 @@ cudaOperatorAsyncWidthDeviceOverlapWitnessSnapshotForTesting() {
         return witness->Snapshot();
 #endif
     return {};
+}
+void disarmCudaOperatorAsyncWidthDeviceOverlapWitnessForTesting() {
+#ifdef USDGEN_ENABLE_CUDA
+    // Replacing the shared owner releases the previous counters through the
+    // normal retirement path; callers must still drain before baselines.
+    std::atomic_store(&s_operatorAsyncWidthOverlapWitness,
+        std::shared_ptr<WidthOverlapWitness>());
+#endif
 }
 void armCudaOperatorAsyncLengthCallbackGateForTesting() {
 #ifdef USDGEN_ENABLE_CUDA
@@ -8512,10 +9222,11 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
         if (diagnostics) for (auto const& message : messages)
             diagnostics->Warn(message);
         if (!PrepareCudaJobSource(*this, prepared, options, stream, diagnostics,
-                                  finishSource)) {
+                                   finishSource)) {
             this->failed = true;
             return false;
         }
+        sourceReferenceTransport = true;
         if (!finishSource) {
             sourceOptions = options;
             sourceUploadPending = true;
@@ -8809,7 +9520,7 @@ bool ExecutionState::CommitSourceUpload(UsdGenCudaExecutionWorkspace& workspace,
     hairT = resampled ? resampled->hairT() : source->hairT();
     rootPrim = resampled ? resampled->rootPrim() : source->rootPrim();
     rootUV = resampled ? resampled->rootUV() : source->rootUV();
-    deformed = !sourceOptions.useRest;
+    deformed = sourceReferenceTransport ? false : !sourceOptions.useRest;
     sourceUploadPending = false; prepared = true;
     return true;
 }

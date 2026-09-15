@@ -1,16 +1,22 @@
 #include "usdGen/cudaExecution.h"
 #include "usdGen/cudaExecutionQueue.h"
 #include "usdGen/executionResources.h"
+#include "usdGen/executionRetirement.h"
 #include "usdGen/gpu/generation.h"
+#include "usdGen/gpu/deviceResources.h"
+#include "usdGen/imagePayload.h"
 
 #include <cuda_runtime_api.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <memory>
+#include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace usdGen;
@@ -123,6 +129,33 @@ bool SameStatsAccounting(std::vector<UsdGenCudaBindingStats> const& a,
 
 bool SameGeneration(std::shared_ptr<const UsdGenDeviceGeneration> const& a,
                     std::shared_ptr<const UsdGenDeviceGeneration> const& b) {
+    if (!a || !b || a->Channels().size() != b->Channels().size()) return false;
+    auto const& am = a->Geometry();
+    auto const& bm = b->Geometry();
+    // Generation/version identities may differ across independent owners;
+    // topology shape, channel contracts and tile ranges must not.
+    if (am.curveCount != bm.curveCount || am.pointCount != bm.pointCount ||
+        am.curveTopology.type != bm.curveTopology.type ||
+        am.curveTopology.basis != bm.curveTopology.basis ||
+        am.curveTopology.wrap != bm.curveTopology.wrap ||
+        am.tiles.size() != bm.tiles.size()) return false;
+    for (size_t i = 0; i != am.tiles.size(); ++i) {
+        auto const& at = am.tiles[i]; auto const& bt = bm.tiles[i];
+        if (at.tile != bt.tile || at.firstCurve != bt.firstCurve || at.curveCount != bt.curveCount ||
+            at.firstPoint != bt.firstPoint || at.pointCount != bt.pointCount ||
+            at.boundsValid != bt.boundsValid) return false;
+        if (at.boundsValid) for (size_t lane = 0; lane != 3; ++lane)
+            if (!(std::fabs(at.extentMin[lane] - bt.extentMin[lane]) <= 1e-5f) ||
+                !(std::fabs(at.extentMax[lane] - bt.extentMax[lane]) <= 1e-5f)) return false;
+    }
+    for (auto const& ac : a->Channels()) {
+        auto bc = std::find_if(b->Channels().begin(), b->Channels().end(),
+            [&](auto const& channel) { return channel.name == ac.name; });
+        if (bc == b->Channels().end() || ac.type != bc->type || ac.domain != bc->domain ||
+            ac.elementCount != bc->elementCount || ac.arity != bc->arity ||
+            ac.strideBytes != bc->strideBytes || ac.readOnly != bc->readOnly ||
+            ac.semantic != bc->semantic) return false;
+    }
     cudaStream_t stream = nullptr;
     if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess)
         return false;
@@ -764,8 +797,2017 @@ static int ValueDagTransactions() {
     return 0;
 }
 
+// Exercise the aggregate ticket through both native async relays and the
+// compatibility executor. Fill the pool to the reported boundary rather than
+// relying on an unconstrained retry, which can hide a missing child charge.
+static int LiteralRbfChainAdmission() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    uint64_t singlePeak = 0;
+    for (int variant = 0; variant != 4; ++variant) {
+        {
+        std::fprintf(stderr, "RBF aggregate admission variant %d\n", variant);
+        auto desc = RbfDesc();
+        auto& curves = desc.curveSets.front();
+        curves.curveVertexCounts = {2, 3}; curves.curveId = {42, 7};
+        curves.points = {{.2f,.2f,0},{.2f,.4f,0},
+                         {.3f,.2f,0},{.3f,.7f,0},{.3f,1.2f,0}};
+        curves.rest = curves.points; curves.skinPrim = {0,0};
+        curves.skinPrimUv = {{.2f,.2f},{.3f,.2f}};
+        UsdGenAuthoredPlaneDesc point, primitive, groom;
+        point.name = TfToken("pointTag"); point.arity = 4;
+        point.floatValues.resize(20);
+        for (size_t i = 0; i != point.floatValues.size(); ++i)
+            point.floatValues[i] = float(i) + .25f;
+        primitive.name = TfToken("primitiveTag"); primitive.arity = 2;
+        primitive.domain = UsdGenAuthoredPlaneDomain::Primitive;
+        primitive.type = UsdGenAuthoredPlaneType::Int32;
+        primitive.intValues = {42, -42, 7, -7};
+        groom.name = TfToken("groomTag"); groom.arity = 4;
+        groom.domain = UsdGenAuthoredPlaneDomain::Groom;
+        groom.floatValues = {1, -2, 3, -4};
+        curves.authoredPlanes = {point, primitive, groom};
+        constexpr uint64_t namedBytes = (20 + 4 + 4) * sizeof(uint32_t);
+        auto source = desc.nodes.front();
+        auto deform = desc.nodes.back();
+        desc.nodes = {source};
+        auto addWidth = [&](char const* path, SdfPath input) {
+            UsdGenNodeDesc width;
+            width.path = SdfPath(path); width.type = TfToken("UsdGenWidth");
+            width.inputs = {input};
+            width.params = {{TfToken("width"), VtValue(.125f), false}};
+            desc.nodes.push_back(width);
+            return width.path;
+        };
+        unsigned widthCount = 0;
+        if (variant == 1 || variant == 3) {
+            deform.inputs = {addWidth("/RbfAtomic/Prefix", source.path)};
+            ++widthCount;
+        }
+        desc.nodes.push_back(deform);
+        desc.terminal = deform.path;
+        if (variant == 2 || variant == 3) {
+            desc.terminal = addWidth("/RbfAtomic/Tail", desc.terminal);
+            desc.terminal = addWidth("/RbfAtomic/Tail2", desc.terminal);
+            widthCount += 2;
+        }
+        UsdGenDiagnostics diagnostics;
+        auto plan = CompileCudaGraph(desc, &diagnostics);
+        CHECK(plan && !diagnostics.HasErrors());
+        auto metadata = GetCudaExecutionPlanMetadata(*plan);
+        CHECK(metadata && metadata->MemoryEstimate().runtimeRefinementAvailable &&
+              !metadata->MemoryEstimate().memoryAvailable &&
+              !metadata->MemoryEstimate().conservativeUpperBound);
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        auto const baseline = resources->Snapshot();
+        auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const saturated = resources->Snapshot();
+        auto const beforeAttempts = GetAttempts();
+        UsdGenDiagnostics rejectDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 1, 1, &rejectDiagnostics));
+        uint64_t peak = 0;
+        CHECK(ParseLiteralRbfPeak(rejectDiagnostics, &peak));
+        auto const afterAttempts = GetAttempts();
+        CHECK(afterAttempts.rbfAccept == beforeAttempts.rbfAccept &&
+              afterAttempts.rbfRollback == beforeAttempts.rbfRollback &&
+              afterAttempts.surfaceAccept == beforeAttempts.surfaceAccept &&
+              afterAttempts.surfaceRollback == beforeAttempts.surfaceRollback &&
+              GetCudaBindingStats(*workspace).empty() &&
+              resources->Snapshot().byKind == saturated.byKind);
+        // Named-channel accounting must be explicit, not absorbed accidentally
+        // by cold-cache slack. The same descriptor without planes differs by
+        // exactly their upload bytes.
+        auto plainDesc = desc;
+        plainDesc.curveSets.front().authoredPlanes.clear();
+        auto plainPlan = CompileCudaGraph(plainDesc, &diagnostics);
+        CHECK(plainPlan && !diagnostics.HasErrors());
+        UsdGenDiagnostics plainReject;
+        CHECK(!ExecuteCudaGraph(*plainPlan, *workspace, 1, 2, &plainReject));
+        uint64_t plainPeak = 0;
+        CHECK(ParseLiteralRbfPeak(plainReject, &plainPeak) && peak == plainPeak + namedBytes);
+        if (!variant) singlePeak = peak;
+        CHECK(peak == singlePeak + widthCount * (8 * curves.points.size() + 2 * 257 * 4 + 8));
+        filler->Release();
+        if (resources->Snapshot().byKind != baseline.byKind) {
+            auto now = resources->Snapshot();
+            for (size_t kind = 0; kind != now.byKind.size(); ++kind)
+                std::fprintf(stderr, "aggregate baseline kind %zu: %zu -> %zu\n",
+                    kind, baseline.byKind[kind], now.byKind[kind]);
+        }
+        CHECK(resources->Snapshot().byKind == baseline.byKind);
+        // An independently owned reference makes retention checks meaningful:
+        // comparing an old generation with itself cannot detect mutation.
+        auto referenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(referenceWorkspace);
+        auto expected = ExecuteCudaGraph(*plan, *referenceWorkspace, 1, 3, &diagnostics);
+        CHECK(expected && !diagnostics.HasErrors());
+        std::shared_ptr<const UsdGenDeviceGeneration> first;
+        for (int warm = 0; warm != 2; ++warm) {
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            CHECK(before.usableBytes - before.usedBytes >= peak);
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const full = resources->Snapshot();
+            auto const stats = GetCudaBindingStats(*workspace);
+            auto const attempts = GetAttempts();
+            UsdGenDiagnostics belowDiagnostics;
+            CHECK(!ExecuteCudaGraph(*plan, *workspace, 2 + warm, 4 + warm,
+                                     &belowDiagnostics, first));
+            uint64_t belowPeak = 0;
+            auto const rejected = GetAttempts();
+            CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+                  resources->Snapshot().byKind == full.byKind &&
+                  SameStats(stats, GetCudaBindingStats(*workspace)) &&
+                  attempts.rbfAccept == rejected.rbfAccept &&
+                  attempts.rbfRollback == rejected.rbfRollback &&
+                  attempts.surfaceAccept == rejected.surfaceAccept &&
+                  attempts.surfaceRollback == rejected.surfaceRollback);
+            filler->Release();
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto result = ExecuteCudaGraph(*plan, *workspace, 2 + warm, 6 + warm,
+                                           &diagnostics, first);
+            if (!result) for (auto const& error : diagnostics.errors)
+                std::fprintf(stderr, "exact-budget direct: %s\n", error.c_str());
+            CHECK(result && !diagnostics.HasErrors() && SameGeneration(expected, result));
+            CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+                  ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+            if (first) CHECK(first->Owner() != result->Owner() && SameGeneration(expected, first));
+            else first = result;
+            filler->Release();
+        }
+        // Rejection after native work must roll back the candidate and leave
+        // every retained plane and accepted cache identity untouched.
+        {
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            auto const stats = GetCudaBindingStats(*workspace);
+            auto const attempts = GetAttempts();
+            CHECK(before.usableBytes - before.usedBytes >= peak);
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const filled = resources->Snapshot();
+            failNextCudaSynchronousFinalizationForTesting();
+            UsdGenDiagnostics rollbackDiagnostics;
+            CHECK(!ExecuteCudaGraph(*plan, *workspace, 3.5, 8, &rollbackDiagnostics, first));
+            drainRetirement();
+            auto const rejected = GetAttempts();
+            // A clean rollback may discard previously cached scratch. It
+            // must not grow any charged class or alter immutable data/cache.
+            auto const rolledBack = resources->Snapshot();
+            for (size_t kind = 0; kind != filled.byKind.size(); ++kind)
+                CHECK(rolledBack.byKind[kind] <= filled.byKind[kind]);
+            CHECK(rollbackDiagnostics.HasErrors() &&
+                  SameStats(stats, GetCudaBindingStats(*workspace)) &&
+                  SameGeneration(expected, first) &&
+                  rejected.rbfAccept == attempts.rbfAccept &&
+                  rejected.surfaceAccept == attempts.surfaceAccept &&
+                  rejected.rbfRollback == attempts.rbfRollback + 1 &&
+                  rejected.surfaceRollback == attempts.surfaceRollback + 1);
+            filler->Release();
+            auto const retryBaseline = resources->Snapshot();
+            CHECK(retryBaseline.usableBytes - retryBaseline.usedBytes >= peak);
+            filler = resources->TryReserve(retryBaseline.usableBytes - retryBaseline.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto retry = ExecuteCudaGraph(*plan, *workspace, 3.5, 9, &diagnostics, first);
+            CHECK(retry && SameGeneration(expected, retry) && SameGeneration(expected, first));
+            filler->Release();
+        }
+        // Retain explicit native jobs across pressure snapshots. Queue::Drain
+        // proves publication but need not retire the final callback's local
+        // job owner; that later release would change an exact-byte baseline.
+        auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncWorkspace);
+        std::vector<std::shared_ptr<UsdGenCudaExecutionJob>> retainedJobs;
+        std::vector<std::shared_ptr<const UsdGenDeviceGeneration>> retainedGenerations;
+        auto runStage = [](auto launch) {
+            auto promise = std::make_shared<std::promise<bool>>();
+            auto future = promise->get_future();
+            if (!launch([promise](bool success) { promise->set_value(success); })) return false;
+            bool const success = future.get();
+            waitForCudaNativeRelayRetirementForTesting();
+            return success;
+        };
+        auto finalize = [](auto job) {
+            auto promise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+            auto future = promise->get_future();
+            if (!FinalizeCudaExecutionJobAsync(job, [promise](auto result) { promise->set_value(result); }))
+                return std::shared_ptr<const UsdGenDeviceGeneration>{};
+            auto result = future.get();
+            waitForCudaNativeRelayRetirementForTesting();
+            return result;
+        };
+        for (int warm = 0; warm != 2; ++warm) {
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            CHECK(before.usableBytes - before.usedBytes >= peak);
+            auto lastGood = retainedGenerations.empty() ? first : retainedGenerations.back();
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const saturatedAsync = resources->Snapshot();
+            auto const attempts = GetAttempts();
+            UsdGenDiagnostics belowDiagnostics;
+            CHECK(!CreateCudaExecutionJob(plan, *asyncWorkspace, 4 + warm, 10 + warm,
+                                          &belowDiagnostics, lastGood));
+            uint64_t belowPeak = 0;
+            auto const rejectedAttempts = GetAttempts();
+            CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+                  resources->Snapshot().byKind == saturatedAsync.byKind &&
+                  attempts.rbfAccept == rejectedAttempts.rbfAccept &&
+                  attempts.rbfRollback == rejectedAttempts.rbfRollback &&
+                  attempts.surfaceAccept == rejectedAttempts.surfaceAccept &&
+                  attempts.surfaceRollback == rejectedAttempts.surfaceRollback);
+            filler->Release();
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 4 + warm, 12 + warm,
+                                              &diagnostics, lastGood);
+            CHECK(job);
+            retainedJobs.push_back(job);
+            CHECK(runStage([&](auto done) { return ExecuteCudaJobSourceAsync(job, done); }));
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i)
+                CHECK(runStage([&](auto done) { return ExecuteCudaJobOperatorAsync(job, i, done); }));
+            auto accepted = finalize(job);
+            CHECK(accepted && accepted != lastGood &&
+                  SameGeneration(expected, accepted) && SameGeneration(expected, first) &&
+                  SameGeneration(expected, lastGood));
+            retainedGenerations.push_back(accepted);
+            CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+                  ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+            filler->Release();
+        }
+        {
+            auto lastGood = retainedGenerations.back();
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            auto const attempts = GetAttempts();
+            CHECK(lastGood && before.usableBytes - before.usedBytes >= peak);
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const stats = GetCudaBindingStats(*asyncWorkspace);
+            auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 6, 14, &diagnostics, lastGood);
+            CHECK(job);
+            retainedJobs.push_back(job);
+            CHECK(runStage([&](auto done) { return ExecuteCudaJobSourceAsync(job, done); }));
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i)
+                CHECK(runStage([&](auto done) { return ExecuteCudaJobOperatorAsync(job, i, done); }));
+            failNextCudaFinalizationRelayAllocationForTesting();
+            CHECK(!finalize(job));
+            auto const rejected = GetAttempts();
+            CHECK(SameStats(stats, GetCudaBindingStats(*asyncWorkspace)) &&
+                  SameGeneration(expected, lastGood) && SameGeneration(expected, first) &&
+                  rejected.rbfAccept == attempts.rbfAccept &&
+                  rejected.surfaceAccept == attempts.surfaceAccept &&
+                  rejected.rbfRollback == attempts.rbfRollback + 1 &&
+                  rejected.surfaceRollback == attempts.surfaceRollback + 1);
+            filler->Release();
+            auto const retryBaseline = resources->Snapshot();
+            filler = resources->TryReserve(retryBaseline.usableBytes - retryBaseline.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            UsdGenDiagnostics retryDiagnostics;
+            auto retry = CreateCudaExecutionJob(plan, *asyncWorkspace, 6, 15, &retryDiagnostics, lastGood);
+            CHECK(retry);
+            retainedJobs.push_back(retry);
+            CHECK(runStage([&](auto done) { return ExecuteCudaJobSourceAsync(retry, done); }));
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*retry); ++i)
+                CHECK(runStage([&](auto done) { return ExecuteCudaJobOperatorAsync(retry, i, done); }));
+            auto accepted = finalize(retry);
+            CHECK(accepted && !retryDiagnostics.HasErrors() &&
+                  SameGeneration(expected, accepted) && SameGeneration(expected, lastGood));
+            retainedGenerations.push_back(accepted);
+            filler->Release();
+        }
+        }
+        // All callback stacks were joined before releasing the fixture's
+        // retained owners. Join the normal deferred generation/consumer
+        // retirement service too, then require exact per-kind recovery.
+        drainRetirement();
+        CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    }
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
+// Fixed-cardinality source-rooted RBF value DAG: Source feeds two independent
+// literal sibling Deforms, each followed by a literal Width, joined by a
+// WidthBlend terminal. Equal siblings prove admission + parity; the unequal
+// variant proves the non-width join fails closed.
+static UsdGenGraphDesc RbfLengthDagDesc() {
+    auto desc = RbfDesc();
+    auto& curves = desc.curveSets.front();
+    curves.curveVertexCounts = {2, 3}; curves.curveId = {42, 7};
+    curves.points = {{.2f,.2f,0},{.2f,.4f,0},
+                     {.3f,.2f,0},{.3f,.7f,0},{.3f,1.2f,0}};
+    curves.rest = curves.points; curves.skinPrim = {0,0};
+    curves.skinPrimUv = {{.2f,.2f},{.3f,.2f}};
+    UsdGenAuthoredPlaneDesc point;
+    point.name = TfToken("pointTag"); point.arity = 4;
+    point.floatValues.resize(20);
+    for (size_t i = 0; i != point.floatValues.size(); ++i)
+        point.floatValues[i] = float(i) + .25f;
+    curves.authoredPlanes = {point};
+    desc.surfaces.front().points[2][1] += .5f;
+    auto source = desc.nodes.front();
+    UsdGenNodeDesc length;
+    length.path = SdfPath("/RbfAtomic/Length");
+    length.type = TfToken("UsdGenLength");
+    length.inputs = {source.path};
+    length.params = {{TfToken("length:mode"), VtValue(TfToken("scale")), false},
+                     {TfToken("length:value"), VtValue(.5f), false}};
+    auto deform = [&](char const* path, SdfPath input) {
+        UsdGenNodeDesc node;
+        node.path = SdfPath(path);
+        node.type = TfToken("UsdGenDeform");
+        node.inputs = {input};
+        node.surfaces = {desc.surfaces.front().path};
+        node.mode = TfToken("rbf");
+        node.readPhase = TfToken("final");
+        node.params = {{TfToken("rbfSamples"), VtValue(5), false}};
+        return node;
+    };
+    auto width = [](char const* path, SdfPath input, float factor) {
+        UsdGenNodeDesc node;
+        node.path = SdfPath(path);
+        node.type = TfToken("UsdGenWidth");
+        node.inputs = {input};
+        node.params = {{TfToken("width"), VtValue(factor), false},
+                       {TfToken("replace"), VtValue(false), false}};
+        return node;
+    };
+    auto left = deform("/RbfAtomic/LeftDeform", length.path);
+    auto right = deform("/RbfAtomic/RightDeform", length.path);
+    auto wl = width("/RbfAtomic/LeftWidth", left.path, 2.f);
+    auto wr = width("/RbfAtomic/RightWidth", right.path, 3.f);
+    UsdGenNodeDesc blend;
+    blend.path = SdfPath("/RbfAtomic/Blend");
+    blend.type = TfToken("UsdGenWidthBlend");
+    blend.inputs = {wl.path, wr.path};
+    blend.blend = .25f;
+    desc.nodes = {source, length, left, right, wl, wr, blend};
+    desc.terminal = blend.path;
+    return desc;
+}
+
+static UsdGenGraphDesc RbfGrowDagDesc() {
+    auto desc = RbfLengthDagDesc();
+    UsdGenNodeDesc grow;
+    grow.path = SdfPath("/RbfAtomic/Grow");
+    grow.type = TfToken("UsdGenGrow");
+    grow.inputs = {desc.nodes.front().path};
+    grow.seed = 19;
+    grow.params = {{TfToken("segments"), VtValue(5), false},
+                   {TfToken("length"), VtValue(2.f), false},
+                   {TfToken("lengthRandom"), VtValue(GfVec2f(.5f,1.5f)), false}};
+    desc.nodes[1] = grow;
+    for (size_t i = 2; i != 4; ++i) desc.nodes[i].inputs = {grow.path};
+    return desc;
+}
+
+static int ProveTopologyDagAdmission(
+    std::shared_ptr<UsdGenExecutionResourcePool> const& resources, int device,
+    UsdGenGraphDesc desc, char const* tag) {
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    UsdGenDiagnostics diagnostics;
+    auto plan = CompileCudaGraph(desc, &diagnostics);
+    if (!plan || diagnostics.HasErrors())
+        for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "%s dag: %s\n", tag, error.c_str());
+    CHECK(plan && !diagnostics.HasErrors());
+    auto metadata = GetCudaExecutionPlanMetadata(*plan);
+    CHECK(metadata && metadata->Shape() == UsdGenExecutionPlanShape::SourceRootedValueDag &&
+          metadata->MemoryEstimate().runtimeRefinementAvailable &&
+          !metadata->MemoryEstimate().memoryAvailable &&
+          !metadata->MemoryEstimate().conservativeUpperBound);
+    {
+    auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    auto referenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(workspace && referenceWorkspace);
+    auto expected = ExecuteCudaGraph(*plan, *referenceWorkspace, 1, 3, &diagnostics);
+    if (!expected) for (auto const& error : diagnostics.errors)
+        std::fprintf(stderr, "%s dag reference: %s\n", tag, error.c_str());
+    CHECK(expected && !diagnostics.HasErrors());
+    uint64_t peak = 0;
+    {
+        drainRetirement();
+        auto const baseline = resources->Snapshot();
+        auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const saturated = resources->Snapshot();
+        auto const beforeAttempts = GetAttempts();
+        UsdGenDiagnostics rejectDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 1, 1, &rejectDiagnostics));
+        auto const afterAttempts = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(rejectDiagnostics, &peak) &&
+              afterAttempts.rbfAccept == beforeAttempts.rbfAccept &&
+              afterAttempts.rbfRollback == beforeAttempts.rbfRollback &&
+              afterAttempts.surfaceAccept == beforeAttempts.surfaceAccept &&
+              afterAttempts.surfaceRollback == beforeAttempts.surfaceRollback &&
+              GetCudaBindingStats(*workspace).empty() &&
+              resources->Snapshot().byKind == saturated.byKind);
+        filler->Release();
+        CHECK(resources->Snapshot().byKind == baseline.byKind);
+    }
+    std::shared_ptr<const UsdGenDeviceGeneration> first;
+    for (int warm = 0; warm != 2; ++warm) {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const full = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        UsdGenDiagnostics belowDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 2 + warm, 4 + warm,
+                                &belowDiagnostics, first));
+        uint64_t belowPeak = 0;
+        auto const rejected = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+              resources->Snapshot().byKind == full.byKind &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              attempts.rbfAccept == rejected.rbfAccept &&
+              attempts.rbfRollback == rejected.rbfRollback &&
+              attempts.surfaceAccept == rejected.surfaceAccept &&
+              attempts.surfaceRollback == rejected.surfaceRollback);
+        filler->Release();
+        filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto result = ExecuteCudaGraph(*plan, *workspace, 2 + warm, 6 + warm,
+                                       &diagnostics, first);
+        if (!result) for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "%s dag exact-budget direct: %s\n", tag, error.c_str());
+        CHECK(result && !diagnostics.HasErrors() && SameGeneration(expected, result));
+        CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+              ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+        if (first) CHECK(first->Owner() != result->Owner() && SameGeneration(expected, first));
+        else first = result;
+        filler->Release();
+    }
+    {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        CHECK(stats.size() == 2 && before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const filled = resources->Snapshot();
+        failNextCudaSynchronousFinalizationForTesting();
+        UsdGenDiagnostics rollbackDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 3.5, 8, &rollbackDiagnostics, first));
+        drainRetirement();
+        auto const rejected = GetAttempts();
+        auto const rolledBack = resources->Snapshot();
+        for (size_t kind = 0; kind != filled.byKind.size(); ++kind)
+            CHECK(rolledBack.byKind[kind] <= filled.byKind[kind]);
+        CHECK(rollbackDiagnostics.HasErrors() &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              SameGeneration(expected, first) &&
+              rejected.rbfAccept == attempts.rbfAccept &&
+              rejected.surfaceAccept == attempts.surfaceAccept &&
+              rejected.rbfRollback == attempts.rbfRollback + 2 &&
+              rejected.surfaceRollback == attempts.surfaceRollback + 2);
+        filler->Release();
+        auto const retryBaseline = resources->Snapshot();
+        CHECK(retryBaseline.usableBytes - retryBaseline.usedBytes >= peak);
+        filler = resources->TryReserve(retryBaseline.usableBytes - retryBaseline.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto retry = ExecuteCudaGraph(*plan, *workspace, 3.5, 9, &diagnostics, first);
+        CHECK(retry && SameGeneration(expected, retry) && SameGeneration(expected, first));
+        filler->Release();
+    }
+    {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peak);
+        auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncWorkspace);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 4, 12,
+                                          &diagnostics, first);
+        CHECK(job);
+        auto sourcePromise = std::make_shared<std::promise<bool>>();
+        auto sourceFuture = sourcePromise->get_future();
+        CHECK(ExecuteCudaJobSourceAsync(job, [sourcePromise](bool ok) {
+            sourcePromise->set_value(ok);
+        }) && sourceFuture.get());
+        for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i) {
+            auto opPromise = std::make_shared<std::promise<bool>>();
+            auto opFuture = opPromise->get_future();
+            bool const launched = ExecuteCudaJobOperatorAsync(job, i, [opPromise](bool ok) {
+                opPromise->set_value(ok);
+            });
+            bool const ok = launched && opFuture.get();
+            if (!ok) std::fprintf(stderr, "%s dag async operator %zu/%zu launched=%d\n",
+                tag, i, CudaExecutionJobOperatorCount(*job), launched);
+            CHECK(ok);
+        }
+        auto finalPromise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+        auto finalFuture = finalPromise->get_future();
+        CHECK(FinalizeCudaExecutionJobAsync(job, [finalPromise](auto result) {
+            finalPromise->set_value(result);
+        }));
+        auto accepted = finalFuture.get();
+        waitForCudaNativeRelayRetirementForTesting();
+        CHECK(accepted && accepted != first && SameGeneration(expected, accepted));
+        filler->Release();
+    }
+    }
+    drainRetirement();
+    {
+        auto now = resources->Snapshot();
+        if (now.byKind != outerBaseline.byKind)
+            for (size_t kind = 0; kind != now.byKind.size(); ++kind)
+                std::fprintf(stderr, "%s outer kind %zu: %zu -> %zu\n",
+                    tag, kind, outerBaseline.byKind[kind], now.byKind[kind]);
+    }
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
+static int LiteralRbfTopologyDagAdmission() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    CHECK(ProveTopologyDagAdmission(resources, device, RbfLengthDagDesc(), "length") == 0);
+    CHECK(ProveTopologyDagAdmission(resources, device, RbfGrowDagDesc(), "grow") == 0);
+    return 0;
+}
+
+static UsdGenGraphDesc RbfDagDesc(bool unequalRight);
+
+static int LiteralRbfMultiGroomAdmission() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    // Two independent grooms share one device pool. Identical descriptions
+    // must admit identical peaks through independent workspaces, contend
+    // gracefully under pressure, and never observe each other's caches.
+    UsdGenDiagnostics diagnostics;
+    auto descA = RbfDagDesc(false);
+    auto descB = RbfDagDesc(false);
+    auto planA = CompileCudaGraph(descA, &diagnostics);
+    auto planB = CompileCudaGraph(descB, &diagnostics);
+    CHECK(planA && planB && !diagnostics.HasErrors());
+    auto workspaceA = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    auto workspaceB = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    auto referenceA = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    auto referenceB = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(workspaceA && workspaceB && referenceA && referenceB);
+    auto expectedA = ExecuteCudaGraph(*planA, *referenceA, 1, 1, &diagnostics);
+    auto expectedB = ExecuteCudaGraph(*planB, *referenceB, 1, 2, &diagnostics);
+    CHECK(expectedA && expectedB && !diagnostics.HasErrors() &&
+          SameGeneration(expectedA, expectedB));
+    uint64_t peakA = 0, peakB = 0;
+    {
+        drainRetirement();
+        auto const baseline = resources->Snapshot();
+        auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const saturated = resources->Snapshot();
+        UsdGenDiagnostics rejectA, rejectB;
+        CHECK(!ExecuteCudaGraph(*planA, *workspaceA, 1, 3, &rejectA));
+        CHECK(!ExecuteCudaGraph(*planB, *workspaceB, 1, 4, &rejectB));
+        CHECK(ParseLiteralRbfPeak(rejectA, &peakA) &&
+              ParseLiteralRbfPeak(rejectB, &peakB) && peakA == peakB &&
+              peakA != 0 && resources->Snapshot().byKind == saturated.byKind);
+        filler->Release();
+        CHECK(resources->Snapshot().byKind == baseline.byKind);
+    }
+    std::shared_ptr<const UsdGenDeviceGeneration> firstA, firstB;
+    {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peakA + peakB);
+        auto filler = resources->TryReserve(
+            before.usableBytes - before.usedBytes - peakA - peakB,
+            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto resultA = ExecuteCudaGraph(*planA, *workspaceA, 2, 5, &diagnostics, firstA);
+        auto resultB = ExecuteCudaGraph(*planB, *workspaceB, 2, 6, &diagnostics, firstB);
+        if ((!resultA || !resultB) && diagnostics.HasErrors())
+            for (auto const& error : diagnostics.errors)
+                std::fprintf(stderr, "multi-groom exact: %s\n", error.c_str());
+        CHECK(resultA && resultB && !diagnostics.HasErrors() &&
+              SameGeneration(expectedA, resultA) && SameGeneration(expectedB, resultB) &&
+              resultA->Owner() != resultB->Owner());
+        CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+              ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+        firstA = resultA;
+        firstB = resultB;
+        filler->Release();
+    }
+    {
+        // Contention through held reservations: an async job for groom A
+        // holds its exact peak while groom B's creation must fail below
+        // budget, then succeed after A releases. Neither publication may
+        // move, and no attempt counter may advance on the rejection.
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peakA + peakB);
+        auto filler = resources->TryReserve(
+            before.usableBytes - before.usedBytes - peakA - peakB + 1,
+            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto asyncA = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        auto asyncB = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncA && asyncB);
+        std::vector<std::shared_ptr<UsdGenCudaExecutionJob>> retainedJobs;
+        auto jobA = CreateCudaExecutionJob(planA, *asyncA, 3, 7,
+                                           &diagnostics, firstA);
+        CHECK(jobA);
+        retainedJobs.push_back(jobA);
+        auto const full = resources->Snapshot();
+        auto const attempts = GetAttempts();
+        UsdGenDiagnostics belowDiagnostics;
+        CHECK(!CreateCudaExecutionJob(planB, *asyncB, 3, 8,
+                                      &belowDiagnostics, firstB));
+        uint64_t belowPeak = 0;
+        auto const rejected = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peakB &&
+              resources->Snapshot().byKind == full.byKind &&
+              attempts.rbfAccept == rejected.rbfAccept &&
+              attempts.rbfRollback == rejected.rbfRollback &&
+              attempts.surfaceAccept == rejected.surfaceAccept &&
+              attempts.surfaceRollback == rejected.surfaceRollback);
+        auto runStage = [](auto job, auto launch) {
+            auto promise = std::make_shared<std::promise<bool>>();
+            auto future = promise->get_future();
+            if (!launch(job, [promise](bool success) { promise->set_value(success); }))
+                return false;
+            return future.get();
+        };
+        CHECK(runStage(jobA, [](auto job, auto done) {
+            return ExecuteCudaJobSourceAsync(job, done);
+        }));
+        for (size_t i = 0; i != CudaExecutionJobOperatorCount(*jobA); ++i)
+            CHECK(runStage(jobA, [i](auto job, auto done) {
+                return ExecuteCudaJobOperatorAsync(job, i, done);
+            }));
+        auto finalPromise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+        auto finalFuture = finalPromise->get_future();
+        CHECK(FinalizeCudaExecutionJobAsync(jobA, [finalPromise](auto result) {
+            finalPromise->set_value(std::move(result));
+        }));
+        auto acceptedA = finalFuture.get();
+        waitForCudaNativeRelayRetirementForTesting();
+        CHECK(acceptedA && SameGeneration(expectedA, acceptedA));
+        filler->Release();
+        retainedJobs.clear();
+        drainRetirement();
+        auto const retryBaseline = resources->Snapshot();
+        CHECK(retryBaseline.usableBytes - retryBaseline.usedBytes >= peakB);
+        filler = resources->TryReserve(
+            retryBaseline.usableBytes - retryBaseline.usedBytes - peakB,
+            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto retryB = ExecuteCudaGraph(*planB, *workspaceB, 3, 9, &diagnostics, firstB);
+        CHECK(retryB && SameGeneration(expectedB, retryB));
+        filler->Release();
+        firstA = acceptedA;
+        firstB = retryB;
+    }
+    firstA.reset();
+    firstB.reset();
+    expectedA.reset();
+    expectedB.reset();
+    workspaceA.reset();
+    workspaceB.reset();
+    referenceA.reset();
+    referenceB.reset();
+    drainRetirement();
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
+static UsdGenGraphDesc RbfParamMapDagDesc() {
+    auto desc = RbfDagDesc(false);
+    UsdGenExpressionDesc widthExpression;
+    widthExpression.path = SdfPath("/RbfAtomic/Expressions/dagWidth");
+    widthExpression.source = "$value";
+    widthExpression.outputs.push_back({TfToken("result"), TfToken("float"),
+                                       {expr::ScalarType::Float32, 1, 1, 1, 1, false}});
+    desc.expressions.push_back(widthExpression);
+    UsdGenExpressionBinding widthBinding;
+    widthBinding.expression = widthExpression.path;
+    widthBinding.destination = TfToken("width");
+    widthBinding.domain = expr::Domain::Groom;
+    widthBinding.nativeType = TfToken("float");
+    widthBinding.destinationShape = {expr::ScalarType::Float32, 1, 1, 1, 1, false};
+    widthBinding.literal = VtValue(1.f);
+    desc.nodes[3].expressionBindings.push_back(widthBinding);
+    UsdGenMapDesc map;
+    map.path = SdfPath("/RbfAtomic/Mask");
+    map.type = TfToken("UsdGenImageMap");
+    map.textureGeneration = 1;
+    map.imagePayload = ImagePayload::Create(1, 1, 1, std::vector<float>{.5f},
+        UsdGenImageRowOrientation::BottomUp);
+    desc.maps.push_back(std::move(map));
+    desc.nodes[4].mapBindings = {{SdfPath("/RbfAtomic/Mask"),
+        UsdGenMapBindingPurpose::MaskSource, TfToken("usdGen:mask:source")}};
+    return desc;
+}
+
+static int LiteralRbfParamMapDagAdmission() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    UsdGenDiagnostics diagnostics;
+    auto desc = RbfParamMapDagDesc();
+    auto plan = CompileCudaGraph(desc, &diagnostics);
+    if (!plan || diagnostics.HasErrors())
+        for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "parammap dag: %s\n", error.c_str());
+    CHECK(plan && !diagnostics.HasErrors());
+    auto metadata = GetCudaExecutionPlanMetadata(*plan);
+    CHECK(metadata && metadata->Shape() == UsdGenExecutionPlanShape::SourceRootedValueDag &&
+          metadata->MemoryEstimate().runtimeRefinementAvailable &&
+          !metadata->MemoryEstimate().memoryAvailable &&
+          !metadata->MemoryEstimate().conservativeUpperBound);
+    {
+    auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    auto referenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(workspace && referenceWorkspace);
+    auto expected = ExecuteCudaGraph(*plan, *referenceWorkspace, 1, 3, &diagnostics);
+    if (!expected) for (auto const& error : diagnostics.errors)
+        std::fprintf(stderr, "parammap dag reference: %s\n", error.c_str());
+    CHECK(expected && !diagnostics.HasErrors());
+    uint64_t peak = 0;
+    {
+        drainRetirement();
+        auto const baseline = resources->Snapshot();
+        auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const saturated = resources->Snapshot();
+        auto const beforeAttempts = GetAttempts();
+        UsdGenDiagnostics rejectDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 1, 1, &rejectDiagnostics));
+        auto const afterAttempts = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(rejectDiagnostics, &peak) &&
+              afterAttempts.rbfAccept == beforeAttempts.rbfAccept &&
+              afterAttempts.rbfRollback == beforeAttempts.rbfRollback &&
+              afterAttempts.surfaceAccept == beforeAttempts.surfaceAccept &&
+              afterAttempts.surfaceRollback == beforeAttempts.surfaceRollback &&
+              GetCudaBindingStats(*workspace).empty() &&
+              resources->Snapshot().byKind == saturated.byKind);
+        filler->Release();
+        CHECK(resources->Snapshot().byKind == baseline.byKind);
+    }
+    std::shared_ptr<const UsdGenDeviceGeneration> first;
+    for (int warm = 0; warm != 2; ++warm) {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const full = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        UsdGenDiagnostics belowDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 2 + warm, 4 + warm,
+                                &belowDiagnostics, first));
+        uint64_t belowPeak = 0;
+        auto const rejected = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+              resources->Snapshot().byKind == full.byKind &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              attempts.rbfAccept == rejected.rbfAccept &&
+              attempts.rbfRollback == rejected.rbfRollback &&
+              attempts.surfaceAccept == rejected.surfaceAccept &&
+              attempts.surfaceRollback == rejected.surfaceRollback);
+        filler->Release();
+        filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto result = ExecuteCudaGraph(*plan, *workspace, 2 + warm, 6 + warm,
+                                       &diagnostics, first);
+        if (!result) for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "parammap dag exact-budget direct: %s\n", error.c_str());
+        CHECK(result && !diagnostics.HasErrors() && SameGeneration(expected, result));
+        CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+              ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+        if (first) CHECK(first->Owner() != result->Owner() && SameGeneration(expected, first));
+        else first = result;
+        filler->Release();
+    }
+    {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        CHECK(stats.size() == 2 && before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const filled = resources->Snapshot();
+        failNextCudaSynchronousFinalizationForTesting();
+        UsdGenDiagnostics rollbackDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 3.5, 8, &rollbackDiagnostics, first));
+        drainRetirement();
+        auto const rejected = GetAttempts();
+        auto const rolledBack = resources->Snapshot();
+        for (size_t kind = 0; kind != filled.byKind.size(); ++kind)
+            CHECK(rolledBack.byKind[kind] <= filled.byKind[kind]);
+        CHECK(rollbackDiagnostics.HasErrors() &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              SameGeneration(expected, first) &&
+              rejected.rbfAccept == attempts.rbfAccept &&
+              rejected.surfaceAccept == attempts.surfaceAccept &&
+              rejected.rbfRollback == attempts.rbfRollback + 2 &&
+              rejected.surfaceRollback == attempts.surfaceRollback + 2);
+        filler->Release();
+        auto const retryBaseline = resources->Snapshot();
+        CHECK(retryBaseline.usableBytes - retryBaseline.usedBytes >= peak);
+        filler = resources->TryReserve(retryBaseline.usableBytes - retryBaseline.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto retry = ExecuteCudaGraph(*plan, *workspace, 3.5, 9, &diagnostics, first);
+        CHECK(retry && SameGeneration(expected, retry) && SameGeneration(expected, first));
+        filler->Release();
+    }
+    {
+        auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncWorkspace);
+        auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 4, 12,
+                                          &diagnostics, first);
+        CHECK(job);
+        auto sourcePromise = std::make_shared<std::promise<bool>>();
+        auto sourceFuture = sourcePromise->get_future();
+        CHECK(ExecuteCudaJobSourceAsync(job, [sourcePromise](bool ok) {
+            sourcePromise->set_value(ok);
+        }) && sourceFuture.get());
+        for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i) {
+            auto opPromise = std::make_shared<std::promise<bool>>();
+            auto opFuture = opPromise->get_future();
+            bool const launched = ExecuteCudaJobOperatorAsync(job, i, [opPromise](bool ok) {
+                opPromise->set_value(ok);
+            });
+            bool const ok = launched && opFuture.get();
+            if (!ok) std::fprintf(stderr, "parammap dag async operator %zu/%zu launched=%d\n",
+                i, CudaExecutionJobOperatorCount(*job), launched);
+            CHECK(ok);
+        }
+        auto finalPromise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+        auto finalFuture = finalPromise->get_future();
+        CHECK(FinalizeCudaExecutionJobAsync(job, [finalPromise](auto result) {
+            finalPromise->set_value(result);
+        }));
+        auto accepted = finalFuture.get();
+        waitForCudaNativeRelayRetirementForTesting();
+        CHECK(accepted && accepted != first && SameGeneration(expected, accepted));
+    }
+    }
+    drainRetirement();
+    {
+        auto now = resources->Snapshot();
+        if (now.byKind != outerBaseline.byKind)
+            for (size_t kind = 0; kind != now.byKind.size(); ++kind)
+                std::fprintf(stderr, "parammap outer kind %zu: %zu -> %zu\n",
+                    kind, outerBaseline.byKind[kind], now.byKind[kind]);
+    }
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
+static bool DiagnosticContains(UsdGenDiagnostics const& diagnostics, char const* text) {
+    for (auto const& error : diagnostics.errors)
+        if (error.find(text) != std::string::npos) return true;
+    return false;
+}
+
+static bool ReadWidths(std::shared_ptr<const UsdGenDeviceGeneration> const& generation,
+                       std::vector<float>* widths) {
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess)
+        return false;
+    bool ok = false;
+    {
+        auto lease = gpu::AcquireGeometry(generation, stream);
+        if (lease) {
+            auto const geometry = lease.Geometry();
+            widths->resize(geometry.widths.size);
+            ok = (widths->empty() || cudaMemcpyAsync(widths->data(),
+                    geometry.widths.data, widths->size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream) == cudaSuccess) &&
+                cudaStreamSynchronize(stream) == cudaSuccess;
+        }
+    }
+    ok = cudaStreamSynchronize(stream) == cudaSuccess && ok;
+    cudaStreamDestroy(stream);
+    return ok;
+}
+
+struct ReleaseWidthBranchGate {
+    bool armed = true;
+    ~ReleaseWidthBranchGate() {
+        if (armed) releaseCudaOperatorAsyncWidthBranchGateForTesting();
+    }
+    void Release() {
+        if (armed) releaseCudaOperatorAsyncWidthBranchGateForTesting();
+        armed = false;
+    }
+};
+
+// Two independent WidthBlends over disjoint Width branches. Both blends
+// already take branch streams; this test witnesses their hardware overlap
+// without changing scheduler behavior.
+static UsdGenGraphDesc BlendOverlapDesc(SdfPath const& terminal) {
+    UsdGenGraphDesc desc;
+    desc.description = SdfPath("/BlendOverlap");
+    desc.executionBackend = UsdGenExecutionBackend::Cuda;
+    UsdGenCurveSetDesc curves;
+    curves.path = SdfPath("/BlendOverlap/Curves");
+    curves.role = UsdGenRole::Curves;
+    curves.curveRole = TfToken("hair");
+    curves.curveVertexCounts = {2, 3};
+    curves.curveId = {42, 7};
+    curves.points = {{.2f,.2f,0},{.2f,.4f,0},
+                     {.3f,.2f,0},{.3f,.7f,0},{.3f,1.2f,0}};
+    curves.rest = curves.points;
+    curves.skinPrim = {0, 0};
+    curves.skinPrimUv = {{.2f,.2f},{.3f,.2f}};
+    desc.curveSets.push_back(curves);
+    UsdGenSurfaceDesc scalp;
+    scalp.path = SdfPath("/BlendOverlap/Scalp");
+    scalp.restPoints = {{0,0,0},{1,0,0},{0,1,0},{0,0,1},{1,1,1}};
+    scalp.points = scalp.restPoints;
+    scalp.faceVertexCounts = {3,3,3};
+    scalp.faceVertexIndices = {0,1,2, 0,1,3, 1,2,4};
+    desc.surfaces.push_back(scalp);
+    UsdGenNodeDesc source;
+    source.path = SdfPath("/BlendOverlap/Source");
+    source.type = TfToken("UsdGenCurveSource");
+    source.curves = {curves.path};
+    source.surfaces = {scalp.path};
+    auto width = [](char const* path, SdfPath input, float factor) {
+        UsdGenNodeDesc node;
+        node.path = SdfPath(path);
+        node.type = TfToken("UsdGenWidth");
+        node.inputs = {input};
+        node.params = {{TfToken("width"), VtValue(factor), false},
+                       {TfToken("replace"), VtValue(true), false}};
+        return node;
+    };
+    auto wl1 = width("/BlendOverlap/LeftWidth1", source.path, 2.f);
+    auto wr1 = width("/BlendOverlap/RightWidth1", source.path, 3.f);
+    auto wl2 = width("/BlendOverlap/LeftWidth2", source.path, 4.f);
+    auto wr2 = width("/BlendOverlap/RightWidth2", source.path, 5.f);
+    UsdGenNodeDesc b1, b2;
+    b1.path = SdfPath("/BlendOverlap/Blend1");
+    b1.type = TfToken("UsdGenWidthBlend");
+    b1.inputs = {wl1.path, wr1.path};
+    b1.blend = .25f;
+    b2.path = SdfPath("/BlendOverlap/Blend2");
+    b2.type = TfToken("UsdGenWidthBlend");
+    b2.inputs = {wl2.path, wr2.path};
+    b2.blend = .5f;
+    desc.nodes = {source, wl1, wr1, wl2, wr2, b1, b2};
+    desc.terminal = terminal;
+    return desc;
+}
+
+static int BlendOverlapWitness() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    UsdGenDiagnostics diagnostics;
+    // Absolute values first: blend arithmetic is exact for these factors.
+    auto descB1 = BlendOverlapDesc(SdfPath("/BlendOverlap/Blend1"));
+    auto planB1 = CompileCudaGraph(descB1, &diagnostics);
+    CHECK(planB1 && !diagnostics.HasErrors());
+    auto descB2 = BlendOverlapDesc(SdfPath("/BlendOverlap/Blend2"));
+    auto planB2 = CompileCudaGraph(descB2, &diagnostics);
+    CHECK(planB2 && !diagnostics.HasErrors());
+    auto referenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(referenceWorkspace);
+    auto expectedB1 = ExecuteCudaGraph(*planB1, *referenceWorkspace, 1, 1, &diagnostics);
+    auto expectedB2 = ExecuteCudaGraph(*planB2, *referenceWorkspace, 1, 2, &diagnostics);
+    if ((!expectedB1 || !expectedB2) || diagnostics.HasErrors())
+        for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "blend ref: %s\n", error.c_str());
+    CHECK(expectedB1 && expectedB2 && !diagnostics.HasErrors());
+    {
+        std::vector<float> widths;
+        CHECK(ReadWidths(expectedB1, &widths) && widths.size() == 5 &&
+              std::all_of(widths.begin(), widths.end(),
+                  [](float value) { return std::fabs(value - 2.25f) < 1e-6f; }));
+        CHECK(ReadWidths(expectedB2, &widths) && widths.size() == 5 &&
+              std::all_of(widths.begin(), widths.end(),
+                  [](float value) { return std::fabs(value - 4.5f) < 1e-6f; }));
+    }
+    {
+        // Witness run: source plus four Widths complete first; the two
+        // blends rendezvous on the branch gate, then their device probes
+        // must overlap where the device allows concurrent kernels.
+        auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncWorkspace);
+        auto job = CreateCudaExecutionJob(planB1, *asyncWorkspace, 2, 3,
+                                          &diagnostics, nullptr);
+        CHECK(job);
+        std::vector<size_t> blends;
+        for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i) {
+            if (CudaExecutionJobOperatorType(*job, i) == TfToken("UsdGenWidthBlend"))
+                blends.push_back(i);
+        }
+        CHECK(blends.size() == 2);
+        auto runStage = [](auto launch) {
+            auto promise = std::make_shared<std::promise<bool>>();
+            auto future = promise->get_future();
+            if (!launch([promise](bool success) { promise->set_value(success); }))
+                return false;
+            return future.get();
+        };
+        CHECK(runStage([&](auto done) {
+            return ExecuteCudaJobSourceAsync(job, done);
+        }));
+        for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i) {
+            if (i == blends[0] || i == blends[1]) continue;
+            CHECK(runStage([&](auto done) {
+                return ExecuteCudaJobOperatorAsync(job, i, done);
+            }));
+        }
+        drainRetirement();
+        armCudaOperatorAsyncWidthBranchGateForTesting(2);
+        ReleaseWidthBranchGate releaseGate;
+        armCudaOperatorAsyncWidthDeviceOverlapWitnessForTesting(2, 200000000);
+        struct LaunchResult { bool launched = false; bool ok = false; };
+        auto launchBlend = [&](size_t index) {
+            LaunchResult result;
+            auto promise = std::make_shared<std::promise<bool>>();
+            auto future = promise->get_future();
+            result.launched = ExecuteCudaJobOperatorAsync(job, index,
+                [promise](bool success) { promise->set_value(success); });
+            if (result.launched) result.ok = future.get();
+            return result;
+        };
+        LaunchResult results[2];
+        std::thread first([&] { results[0] = launchBlend(blends[0]); });
+        std::thread second([&] { results[1] = launchBlend(blends[1]); });
+        bool rendezvous = false;
+        try {
+            waitCudaOperatorAsyncWidthBranchGateForTesting();
+            rendezvous = true;
+        } catch (std::exception const& error) {
+            std::fprintf(stderr, "blend rendezvous failed: %s\n", error.what());
+        }
+        releaseGate.Release();
+        first.join();
+        second.join();
+        CHECK(rendezvous && results[0].launched && results[0].ok &&
+              results[1].launched && results[1].ok);
+        auto promise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+        auto future = promise->get_future();
+        CHECK(FinalizeCudaExecutionJobAsync(job, [promise](auto result) {
+            promise->set_value(std::move(result));
+        }));
+        auto accepted = future.get();
+        waitForCudaNativeRelayRetirementForTesting();
+        CHECK(accepted && SameGeneration(expectedB1, accepted));
+        auto const overlap = cudaOperatorAsyncWidthDeviceOverlapWitnessSnapshotForTesting();
+        CHECK(overlap.expected == 2 && overlap.claims == 2 && overlap.arrivals == 2 &&
+              overlap.status != UsdGenExecutionOverlapWitnessStatus::Error &&
+              overlap.taskIds[0] != overlap.taskIds[1] &&
+              overlap.laneIds[0] != overlap.laneIds[1]);
+        int currentDevice = -1;
+        cudaDeviceProp properties{};
+        bool const canOverlap =
+            cudaGetDevice(&currentDevice) == cudaSuccess &&
+            cudaGetDeviceProperties(&properties, currentDevice) == cudaSuccess &&
+            properties.concurrentKernels != 0;
+        if (canOverlap)
+            CHECK(overlap.status == UsdGenExecutionOverlapWitnessStatus::Observed &&
+                  overlap.maxActive >= 2);
+        else
+            CHECK(overlap.maxActive <= 2);
+        CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+              ResourceKindBytes(outerBaseline, UsdGenExecutionResourceKind::Pending));
+        disarmCudaOperatorAsyncWidthDeviceOverlapWitnessForTesting();
+    }
+    // Reference generations and their workspace (including its blend graph
+    // cache) hold pool permits until released; drop them before recovery.
+    expectedB1.reset();
+    expectedB2.reset();
+    referenceWorkspace.reset();
+    drainRetirement();
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
+static UsdGenGraphDesc RbfDagDesc(bool unequalRight = false) {
+    auto desc = RbfDesc();
+    // A non-affine bump: approximations with different sample budgets must
+    // differ, so the unequal sibling variant observes a real join mismatch.
+    // A pure translation lives in the RBF polynomial term and solves exactly
+    // at every budget, which cannot discriminate the join.
+    desc.surfaces.front().points[2][1] += .5f;
+    auto& curves = desc.curveSets.front();
+    curves.curveVertexCounts = {2, 3}; curves.curveId = {42, 7};
+    curves.points = {{.2f,.2f,0},{.2f,.4f,0},
+                     {.3f,.2f,0},{.3f,.7f,0},{.3f,1.2f,0}};
+    curves.rest = curves.points; curves.skinPrim = {0,0};
+    curves.skinPrimUv = {{.2f,.2f},{.3f,.2f}};
+    UsdGenAuthoredPlaneDesc point;
+    point.name = TfToken("pointTag"); point.arity = 4;
+    point.floatValues.resize(20);
+    for (size_t i = 0; i != point.floatValues.size(); ++i)
+        point.floatValues[i] = float(i) + .25f;
+    curves.authoredPlanes = {point};
+    auto source = desc.nodes.front();
+    auto deform = desc.nodes.back();
+    auto left = deform; left.path = SdfPath("/RbfAtomic/LeftDeform");
+    auto right = deform; right.path = SdfPath("/RbfAtomic/RightDeform");
+    if (unequalRight) {
+        // A different sample budget solves different weights, so the right
+        // branch animates different points from the same rest snapshot. The
+        // join must observe unequal non-width input and fail closed.
+        right.params.front().value = VtValue(4);
+    }
+    auto width = [](char const* path, SdfPath input, float factor) {
+        UsdGenNodeDesc node;
+        node.path = SdfPath(path); node.type = TfToken("UsdGenWidth");
+        node.inputs = {input};
+        node.params = {{TfToken("width"), VtValue(factor), false},
+                       {TfToken("replace"), VtValue(false), false}};
+        return node;
+    };
+    auto wl = width("/RbfAtomic/LeftWidth", left.path, 2.f);
+    auto wr = width("/RbfAtomic/RightWidth", right.path, 3.f);
+    UsdGenNodeDesc blend;
+    blend.path = SdfPath("/RbfAtomic/Blend"); blend.type = TfToken("UsdGenWidthBlend");
+    blend.inputs = {wl.path, wr.path}; blend.blend = .25f;
+    desc.nodes = {source, left, right, wl, wr, blend};
+    desc.terminal = blend.path;
+    return desc;
+}
+
+static UsdGenGraphDesc RbfRefDagDesc() {
+    auto desc = RbfDagDesc();
+    auto& curves = desc.curveSets.front();
+    curves.role = UsdGenRole::Reference;
+    curves.curveRole = TfToken("guide");
+    curves.authoredPlanes.clear();
+    UsdGenNodeDesc source;
+    source.path = SdfPath("/RbfAtomic/ReferenceSource");
+    source.type = TfToken("UsdGenReferenceSource");
+    source.references = {curves.path};
+    desc.nodes[0] = source;
+    for (size_t i = 1; i != desc.nodes.size(); ++i)
+        if (!desc.nodes[i].inputs.empty() && desc.nodes[i].inputs.front() == SdfPath("/RbfAtomic/Source"))
+            desc.nodes[i].inputs.front() = source.path;
+    return desc;
+}
+
+static UsdGenGraphDesc RbfScatterDagDesc(bool unequalRight = false) {
+    UsdGenGraphDesc desc;
+    desc.description = SdfPath("/ScatterRbf");
+    desc.executionBackend = UsdGenExecutionBackend::Cuda;
+    desc.defaultWidth = .025f;
+    UsdGenSurfaceDesc scalp;
+    scalp.path = SdfPath("/ScatterRbf/Scalp");
+    scalp.restPoints = {{0,0,0},{1,0,0},{0,1,0},{0,0,1},{1,1,1}};
+    scalp.points = scalp.restPoints;
+    for (auto& point : scalp.points) point[0] += .25f;
+    // A non-affine posed delta: approximations with different sample budgets
+    // must differ, so the unequal sibling variant observes a real mismatch.
+    // Vertex UVs stay tri-barycentric (x+y<=1): capture interpolates this
+    // attribute and the binder validates the result per face.
+    scalp.points[2][1] += .5f;
+    scalp.faceVertexCounts = {3,3,3};
+    scalp.faceVertexIndices = {0,1,2, 0,1,3, 1,2,4};
+    scalp.uv = {{0,0},{1,0},{0,1},{0,0},{1,0}};
+    desc.surfaces = {scalp};
+    UsdGenNodeDesc scatter;
+    scatter.path = SdfPath("/ScatterRbf/Scatter");
+    scatter.type = TfToken("UsdGenScatter");
+    scatter.seed = 41;
+    scatter.surfaces = {scalp.path};
+    scatter.params = {{TfToken("density"), VtValue(80.f), false}};
+    UsdGenNodeDesc grow;
+    grow.path = SdfPath("/ScatterRbf/Grow");
+    grow.type = TfToken("UsdGenGrow");
+    grow.inputs = {scatter.path};
+    grow.seed = 19;
+    grow.params = {{TfToken("segments"), VtValue(5), false},
+                   {TfToken("length"), VtValue(2.f), false},
+                   {TfToken("lengthRandom"), VtValue(GfVec2f(.5f,1.5f)), false}};
+    auto deform = [&](char const* path, SdfPath input, int samples) {
+        UsdGenNodeDesc node;
+        node.path = SdfPath(path);
+        node.type = TfToken("UsdGenDeform");
+        node.inputs = {input};
+        node.surfaces = {scalp.path};
+        node.mode = TfToken("rbf");
+        node.readPhase = TfToken("final");
+        node.params = {{TfToken("rbfSamples"), VtValue(samples), false}};
+        return node;
+    };
+    auto width = [](char const* path, SdfPath input, float factor) {
+        UsdGenNodeDesc node;
+        node.path = SdfPath(path);
+        node.type = TfToken("UsdGenWidth");
+        node.inputs = {input};
+        node.params = {{TfToken("width"), VtValue(factor), false},
+                       {TfToken("replace"), VtValue(false), false}};
+        return node;
+    };
+    auto left = deform("/ScatterRbf/LeftDeform", grow.path, 5);
+    auto right = deform("/ScatterRbf/RightDeform", grow.path, unequalRight ? 4 : 5);
+    auto wl = width("/ScatterRbf/LeftWidth", left.path, 2.f);
+    auto wr = width("/ScatterRbf/RightWidth", right.path, 3.f);
+    UsdGenNodeDesc blend;
+    blend.path = SdfPath("/ScatterRbf/Blend");
+    blend.type = TfToken("UsdGenWidthBlend");
+    blend.inputs = {wl.path, wr.path};
+    blend.blend = .25f;
+    desc.nodes = {scatter, grow, left, right, wl, wr, blend};
+    desc.terminal = blend.path;
+    return desc;
+}
+
+static int LiteralRbfScatterDagAdmission() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    UsdGenDiagnostics diagnostics;
+    auto desc = RbfScatterDagDesc();
+    auto plan = CompileCudaGraph(desc, &diagnostics);
+    if (!plan || diagnostics.HasErrors())
+        for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "scatter dag: %s\n", error.c_str());
+    CHECK(plan && !diagnostics.HasErrors());
+    auto metadata = GetCudaExecutionPlanMetadata(*plan);
+    CHECK(metadata && metadata->Shape() == UsdGenExecutionPlanShape::SourceRootedValueDag &&
+          metadata->MemoryEstimate().runtimeRefinementAvailable &&
+          !metadata->MemoryEstimate().memoryAvailable &&
+          !metadata->MemoryEstimate().conservativeUpperBound);
+    // Workspaces, jobs and generations below are scoped: Grow output, blend
+    // graph cache and published owners hold pool permits until their owners
+    // die, so the outer recovery check runs only after every scope closes.
+    {
+    auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    auto referenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(workspace && referenceWorkspace);
+    auto expected = ExecuteCudaGraph(*plan, *referenceWorkspace, 1, 3, &diagnostics);
+    if (!expected) for (auto const& error : diagnostics.errors)
+        std::fprintf(stderr, "scatter dag reference: %s\n", error.c_str());
+    CHECK(expected && !diagnostics.HasErrors());
+    CHECK(expected->Geometry().curveCount != 0 && expected->Geometry().pointCount != 0);
+    uint64_t peak = 0;
+    {
+        drainRetirement();
+        auto const baseline = resources->Snapshot();
+        auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const saturated = resources->Snapshot();
+        auto const beforeAttempts = GetAttempts();
+        UsdGenDiagnostics rejectDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 1, 1, &rejectDiagnostics));
+        auto const afterAttempts = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(rejectDiagnostics, &peak) &&
+              afterAttempts.rbfAccept == beforeAttempts.rbfAccept &&
+              afterAttempts.rbfRollback == beforeAttempts.rbfRollback &&
+              afterAttempts.surfaceAccept == beforeAttempts.surfaceAccept &&
+              afterAttempts.surfaceRollback == beforeAttempts.surfaceRollback &&
+              GetCudaBindingStats(*workspace).empty() &&
+              resources->Snapshot().byKind == saturated.byKind);
+        filler->Release();
+        CHECK(resources->Snapshot().byKind == baseline.byKind);
+    }
+    std::shared_ptr<const UsdGenDeviceGeneration> first;
+    for (int warm = 0; warm != 2; ++warm) {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const full = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        UsdGenDiagnostics belowDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 2 + warm, 4 + warm,
+                                &belowDiagnostics, first));
+        uint64_t belowPeak = 0;
+        auto const rejected = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+              resources->Snapshot().byKind == full.byKind &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              attempts.rbfAccept == rejected.rbfAccept &&
+              attempts.rbfRollback == rejected.rbfRollback &&
+              attempts.surfaceAccept == rejected.surfaceAccept &&
+              attempts.surfaceRollback == rejected.surfaceRollback);
+        filler->Release();
+        filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto result = ExecuteCudaGraph(*plan, *workspace, 2 + warm, 6 + warm,
+                                       &diagnostics, first);
+        if (!result) for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "scatter dag exact-budget direct: %s\n", error.c_str());
+        CHECK(result && !diagnostics.HasErrors() && SameGeneration(expected, result));
+        CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+              ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+        if (first) CHECK(first->Owner() != result->Owner() && SameGeneration(expected, first));
+        else first = result;
+        filler->Release();
+    }
+    {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        CHECK(stats.size() == 2 && before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const filled = resources->Snapshot();
+        failNextCudaSynchronousFinalizationForTesting();
+        UsdGenDiagnostics rollbackDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 3.5, 8, &rollbackDiagnostics, first));
+        drainRetirement();
+        auto const rejected = GetAttempts();
+        auto const rolledBack = resources->Snapshot();
+        for (size_t kind = 0; kind != filled.byKind.size(); ++kind)
+            CHECK(rolledBack.byKind[kind] <= filled.byKind[kind]);
+        CHECK(rollbackDiagnostics.HasErrors() &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              SameGeneration(expected, first) &&
+              rejected.rbfAccept == attempts.rbfAccept &&
+              rejected.surfaceAccept == attempts.surfaceAccept &&
+              rejected.rbfRollback == attempts.rbfRollback + 2 &&
+              rejected.surfaceRollback == attempts.surfaceRollback + 2);
+        filler->Release();
+        auto const retryBaseline = resources->Snapshot();
+        CHECK(retryBaseline.usableBytes - retryBaseline.usedBytes >= peak);
+        filler = resources->TryReserve(retryBaseline.usableBytes - retryBaseline.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto retry = ExecuteCudaGraph(*plan, *workspace, 3.5, 9, &diagnostics, first);
+        CHECK(retry && SameGeneration(expected, retry) && SameGeneration(expected, first));
+        filler->Release();
+    }
+    {
+        auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncWorkspace);
+        auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 4, 12,
+                                          &diagnostics, first);
+        CHECK(job);
+        auto sourcePromise = std::make_shared<std::promise<bool>>();
+        auto sourceFuture = sourcePromise->get_future();
+        CHECK(ExecuteCudaJobSourceAsync(job, [sourcePromise](bool ok) {
+            sourcePromise->set_value(ok);
+        }) && sourceFuture.get());
+        for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i) {
+            auto opPromise = std::make_shared<std::promise<bool>>();
+            auto opFuture = opPromise->get_future();
+            bool const launched = ExecuteCudaJobOperatorAsync(job, i, [opPromise](bool ok) {
+                opPromise->set_value(ok);
+            });
+            bool const ok = launched && opFuture.get();
+            if (!ok) std::fprintf(stderr, "scatter dag async operator %zu/%zu launched=%d\n",
+                i, CudaExecutionJobOperatorCount(*job), launched);
+            CHECK(ok);
+        }
+        auto finalPromise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+        auto finalFuture = finalPromise->get_future();
+        CHECK(FinalizeCudaExecutionJobAsync(job, [finalPromise](auto result) {
+            finalPromise->set_value(result);
+        }));
+        auto accepted = finalFuture.get();
+        waitForCudaNativeRelayRetirementForTesting();
+        CHECK(accepted && accepted != first && SameGeneration(expected, accepted));
+    }
+    } // end scoped scatter battery: workspaces, jobs and generations released
+    {
+        drainRetirement();
+        auto unequalDesc = RbfScatterDagDesc(true);
+        auto unequalPlan = CompileCudaGraph(unequalDesc, &diagnostics);
+        CHECK(unequalPlan && !diagnostics.HasErrors());
+        auto unequalWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(unequalWorkspace);
+        auto const before = resources->Snapshot();
+        auto const attempts = GetAttempts();
+        auto const stats = GetCudaBindingStats(*unequalWorkspace);
+        UsdGenDiagnostics unequalDiagnostics;
+        auto unequal = ExecuteCudaGraph(*unequalPlan, *unequalWorkspace, 5, 20,
+                                        &unequalDiagnostics, nullptr);
+        auto const after = GetAttempts();
+        CHECK(!unequal && unequalDiagnostics.HasErrors() &&
+              DiagnosticContains(unequalDiagnostics, "differ outside Width") &&
+              SameStats(stats, GetCudaBindingStats(*unequalWorkspace)) &&
+              after.rbfAccept == attempts.rbfAccept &&
+              after.surfaceAccept == attempts.surfaceAccept);
+        drainRetirement();
+        auto const settled = resources->Snapshot();
+        for (size_t kind = 0; kind != before.byKind.size(); ++kind)
+            CHECK(settled.byKind[kind] <= before.byKind[kind]);
+    }
+    drainRetirement();
+    {
+        auto now = resources->Snapshot();
+        if (now.byKind != outerBaseline.byKind)
+            for (size_t kind = 0; kind != now.byKind.size(); ++kind)
+                std::fprintf(stderr, "scatter outer kind %zu: %zu -> %zu\n",
+                    kind, outerBaseline.byKind[kind], now.byKind[kind]);
+    }
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
+// Aggregate admission extended beyond linear chains: the fixed-cardinality
+// source-rooted Deform/Width/WidthBlend value DAG above must reserve one
+// exact peak (source/named/publication once, each Deform cache/candidate and
+// evaluator separately, every Width/WidthBlend output plus proof status) and
+// prove exact-budget admit, below-budget reject, atomic multi-branch
+// rollback, equal/unequal sibling joins and cold/warm direct/async parity.
+static int LiteralRbfDagAdmission() {
+    int device = -1;
+    CHECK(cudaGetDevice(&device) == cudaSuccess);
+    auto initializePool = gpu::TryReserveCudaExecutionBytes(0, UsdGenExecutionResourceKind::Active);
+    CHECK(initializePool);
+    auto resources = FindUsdGenExecutionResourcePool(
+        {UsdGenExecutionResourceBackend::Cuda, device});
+    CHECK(resources);
+    auto drainRetirement = [device] {
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, device})) service->Drain();
+    };
+    auto const outerBaseline = resources->Snapshot();
+    // A second rest-to-animated Deform along one lineage is not a branch and
+    // must stay rejected; the DAG extension must not relax that check.
+    {
+        auto chained = RbfDagDesc();
+        chained.nodes[2].inputs = {chained.nodes[1].path};
+        UsdGenDiagnostics chainDiagnostics;
+        CHECK(!CompileCudaGraph(chained, &chainDiagnostics) &&
+              DiagnosticContains(chainDiagnostics, "apply surface motion twice"));
+    }
+    // Expression-driven and mapped Widths refine through the aggregate
+    // recipe with full proofs (see LiteralRbfParamMapDagAdmission). A
+    // non-rbfSamples Deform expression remains a supported literal shape.
+    {
+        auto deformExpressed = RbfDagDesc();
+        UsdGenExpressionDesc blendExpression;
+        blendExpression.path = SdfPath("/RbfAtomic/Expressions/dagBlend");
+        blendExpression.source = "$value";
+        blendExpression.outputs.push_back({TfToken("result"), TfToken("float"),
+                                           {expr::ScalarType::Float32, 1, 1, 1, 1, false}});
+        deformExpressed.expressions.push_back(blendExpression);
+        UsdGenExpressionBinding blendBinding;
+        blendBinding.expression = blendExpression.path;
+        blendBinding.destination = TfToken("blend");
+        blendBinding.domain = expr::Domain::Groom;
+        blendBinding.nativeType = TfToken("float");
+        blendBinding.destinationShape = {expr::ScalarType::Float32, 1, 1, 1, 1, false};
+        blendBinding.literal = VtValue(1.f);
+        deformExpressed.nodes[1].expressionBindings.push_back(blendBinding);
+        UsdGenDiagnostics deformExpressedDiagnostics;
+        auto deformExpressedPlan = CompileCudaGraph(deformExpressed, &deformExpressedDiagnostics);
+        CHECK(deformExpressedPlan && !deformExpressedDiagnostics.HasErrors());
+        auto deformExpressedMetadata = GetCudaExecutionPlanMetadata(*deformExpressedPlan);
+        CHECK(deformExpressedMetadata &&
+              deformExpressedMetadata->MemoryEstimate().runtimeRefinementAvailable);
+    }
+    // Workspaces, jobs and generations below are scoped: the blend graph
+    // cache and published owners hold pool permits until their owners die,
+    // so the outer recovery check runs only after every scope has closed.
+    {
+    UsdGenDiagnostics diagnostics;
+    auto desc = RbfDagDesc();
+    auto plan = CompileCudaGraph(desc, &diagnostics);
+    CHECK(plan && !diagnostics.HasErrors());
+    auto metadata = GetCudaExecutionPlanMetadata(*plan);
+    CHECK(metadata && metadata->Shape() == UsdGenExecutionPlanShape::SourceRootedValueDag &&
+          metadata->MemoryEstimate().runtimeRefinementAvailable &&
+          !metadata->MemoryEstimate().memoryAvailable &&
+          !metadata->MemoryEstimate().conservativeUpperBound);
+    auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(workspace);
+    // Independent reference proves retained COW channels, not self-equality.
+    auto referenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+    CHECK(referenceWorkspace);
+    auto referenceDesc = RbfDesc();
+    referenceDesc.surfaces.front().points[2][1] += .5f;
+    {
+        auto& curves = referenceDesc.curveSets.front();
+        curves.curveVertexCounts = {2, 3}; curves.curveId = {42, 7};
+        curves.points = {{.2f,.2f,0},{.2f,.4f,0},
+                         {.3f,.2f,0},{.3f,.7f,0},{.3f,1.2f,0}};
+        curves.rest = curves.points; curves.skinPrim = {0,0};
+        curves.skinPrimUv = {{.2f,.2f},{.3f,.2f}};
+        UsdGenAuthoredPlaneDesc point;
+        point.name = TfToken("pointTag"); point.arity = 4;
+        point.floatValues.resize(20);
+        for (size_t i = 0; i != point.floatValues.size(); ++i)
+            point.floatValues[i] = float(i) + .25f;
+        curves.authoredPlanes = {point};
+    }
+    auto referenceSource = referenceDesc.nodes.front();
+    auto referenceLeft = referenceDesc.nodes.back();
+    referenceLeft.path = SdfPath("/RbfAtomic/LeftDeform");
+    UsdGenNodeDesc expectedWidth;
+    expectedWidth.path = SdfPath("/RbfAtomic/ExpectedWidth");
+    expectedWidth.type = TfToken("UsdGenWidth");
+    expectedWidth.inputs = {referenceLeft.path};
+    expectedWidth.params = {{TfToken("width"), VtValue(2.25f), false},
+                            {TfToken("replace"), VtValue(false), false}};
+    referenceDesc.nodes = {referenceSource, referenceLeft, expectedWidth};
+    referenceDesc.terminal = expectedWidth.path;
+    auto referencePlan = CompileCudaGraph(referenceDesc, &diagnostics);
+    CHECK(referencePlan && !diagnostics.HasErrors());
+    auto expected = ExecuteCudaGraph(*referencePlan, *referenceWorkspace, 1, 3, &diagnostics);
+    CHECK(expected && !diagnostics.HasErrors());
+    uint64_t peak = 0;
+    {
+        auto const baseline = resources->Snapshot();
+        auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const saturated = resources->Snapshot();
+        auto const beforeAttempts = GetAttempts();
+        UsdGenDiagnostics rejectDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 1, 1, &rejectDiagnostics));
+        auto const afterAttempts = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(rejectDiagnostics, &peak) &&
+              afterAttempts.rbfAccept == beforeAttempts.rbfAccept &&
+              afterAttempts.rbfRollback == beforeAttempts.rbfRollback &&
+              afterAttempts.surfaceAccept == beforeAttempts.surfaceAccept &&
+              afterAttempts.surfaceRollback == beforeAttempts.surfaceRollback &&
+              GetCudaBindingStats(*workspace).empty() &&
+              resources->Snapshot().byKind == saturated.byKind);
+        filler->Release();
+        CHECK(resources->Snapshot().byKind == baseline.byKind);
+    }
+    std::shared_ptr<const UsdGenDeviceGeneration> first;
+    for (int warm = 0; warm != 2; ++warm) {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        CHECK(before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const full = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        UsdGenDiagnostics belowDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 2 + warm, 4 + warm,
+                                &belowDiagnostics, first));
+        uint64_t belowPeak = 0;
+        auto const rejected = GetAttempts();
+        CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+              resources->Snapshot().byKind == full.byKind &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              attempts.rbfAccept == rejected.rbfAccept &&
+              attempts.rbfRollback == rejected.rbfRollback &&
+              attempts.surfaceAccept == rejected.surfaceAccept &&
+              attempts.surfaceRollback == rejected.surfaceRollback);
+        filler->Release();
+        filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto result = ExecuteCudaGraph(*plan, *workspace, 2 + warm, 6 + warm,
+                                       &diagnostics, first);
+        if (!result) for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "dag exact-budget direct: %s\n", error.c_str());
+        CHECK(result && !diagnostics.HasErrors() && SameGeneration(expected, result));
+        CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+              ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+        if (first) CHECK(first->Owner() != result->Owner() && SameGeneration(expected, first));
+        else first = result;
+        filler->Release();
+    }
+    // Both sibling caches must roll back atomically when finalization fails.
+    {
+        drainRetirement();
+        auto const before = resources->Snapshot();
+        auto const stats = GetCudaBindingStats(*workspace);
+        auto const attempts = GetAttempts();
+        CHECK(stats.size() == 2 && before.usableBytes - before.usedBytes >= peak);
+        auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                            UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto const filled = resources->Snapshot();
+        failNextCudaSynchronousFinalizationForTesting();
+        UsdGenDiagnostics rollbackDiagnostics;
+        CHECK(!ExecuteCudaGraph(*plan, *workspace, 3.5, 8, &rollbackDiagnostics, first));
+        drainRetirement();
+        auto const rejected = GetAttempts();
+        auto const rolledBack = resources->Snapshot();
+        for (size_t kind = 0; kind != filled.byKind.size(); ++kind)
+            CHECK(rolledBack.byKind[kind] <= filled.byKind[kind]);
+        CHECK(rollbackDiagnostics.HasErrors() &&
+              SameStats(stats, GetCudaBindingStats(*workspace)) &&
+              SameGeneration(expected, first) &&
+              rejected.rbfAccept == attempts.rbfAccept &&
+              rejected.surfaceAccept == attempts.surfaceAccept &&
+              rejected.rbfRollback == attempts.rbfRollback + 2 &&
+              rejected.surfaceRollback == attempts.surfaceRollback + 2);
+        filler->Release();
+        auto const retryBaseline = resources->Snapshot();
+        CHECK(retryBaseline.usableBytes - retryBaseline.usedBytes >= peak);
+        filler = resources->TryReserve(retryBaseline.usableBytes - retryBaseline.usedBytes - peak,
+                                       UsdGenExecutionResourceKind::Active);
+        CHECK(filler);
+        auto retry = ExecuteCudaGraph(*plan, *workspace, 3.5, 9, &diagnostics, first);
+        CHECK(retry && SameGeneration(expected, retry) && SameGeneration(expected, first));
+        filler->Release();
+    }
+    // Native async path: same peak, same parity, same rollback contract.
+    {
+        auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(asyncWorkspace);
+        std::vector<std::shared_ptr<UsdGenCudaExecutionJob>> retainedJobs;
+        std::vector<std::shared_ptr<const UsdGenDeviceGeneration>> retainedGenerations;
+        auto runStage = [](auto launch) {
+            auto promise = std::make_shared<std::promise<bool>>();
+            auto future = promise->get_future();
+            if (!launch([promise](bool success) { promise->set_value(success); })) return false;
+            bool const success = future.get();
+            waitForCudaNativeRelayRetirementForTesting();
+            return success;
+        };
+        auto finalize = [](auto job) {
+            auto promise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+            auto future = promise->get_future();
+            if (!FinalizeCudaExecutionJobAsync(job, [promise](auto result) { promise->set_value(result); }))
+                return std::shared_ptr<const UsdGenDeviceGeneration>{};
+            auto result = future.get();
+            waitForCudaNativeRelayRetirementForTesting();
+            return result;
+        };
+        for (int warm = 0; warm != 2; ++warm) {
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            CHECK(before.usableBytes - before.usedBytes >= peak);
+            auto lastGood = retainedGenerations.empty() ? first : retainedGenerations.back();
+            auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak + 1,
+                                                UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const saturatedAsync = resources->Snapshot();
+            auto const attempts = GetAttempts();
+            UsdGenDiagnostics belowDiagnostics;
+            CHECK(!CreateCudaExecutionJob(plan, *asyncWorkspace, 4 + warm, 10 + warm,
+                                          &belowDiagnostics, lastGood));
+            uint64_t belowPeak = 0;
+            auto const rejectedAttempts = GetAttempts();
+            CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == peak &&
+                  resources->Snapshot().byKind == saturatedAsync.byKind &&
+                  attempts.rbfAccept == rejectedAttempts.rbfAccept &&
+                  attempts.rbfRollback == rejectedAttempts.rbfRollback &&
+                  attempts.surfaceAccept == rejectedAttempts.surfaceAccept &&
+                  attempts.surfaceRollback == rejectedAttempts.surfaceRollback);
+            filler->Release();
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 4 + warm, 12 + warm,
+                                              &diagnostics, lastGood);
+            CHECK(job);
+            retainedJobs.push_back(job);
+            CHECK(runStage([&](auto done) { return ExecuteCudaJobSourceAsync(job, done); }));
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i)
+                CHECK(runStage([&](auto done) { return ExecuteCudaJobOperatorAsync(job, i, done); }));
+            auto accepted = finalize(job);
+            CHECK(accepted && accepted != lastGood &&
+                  SameGeneration(expected, accepted) && SameGeneration(expected, first) &&
+                  SameGeneration(expected, lastGood));
+            retainedGenerations.push_back(accepted);
+            CHECK(ResourceKindBytes(resources->Snapshot(), UsdGenExecutionResourceKind::Pending) ==
+                  ResourceKindBytes(before, UsdGenExecutionResourceKind::Pending));
+            filler->Release();
+        }
+        {
+            auto lastGood = retainedGenerations.back();
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            auto const attempts = GetAttempts();
+            CHECK(lastGood && before.usableBytes - before.usedBytes >= peak);
+            auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - peak,
+                                                UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const stats = GetCudaBindingStats(*asyncWorkspace);
+            auto job = CreateCudaExecutionJob(plan, *asyncWorkspace, 6, 14, &diagnostics, lastGood);
+            CHECK(job);
+            retainedJobs.push_back(job);
+            CHECK(runStage([&](auto done) { return ExecuteCudaJobSourceAsync(job, done); }));
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i)
+                CHECK(runStage([&](auto done) { return ExecuteCudaJobOperatorAsync(job, i, done); }));
+            failNextCudaFinalizationRelayAllocationForTesting();
+            CHECK(!finalize(job));
+            auto const rejected = GetAttempts();
+            CHECK(SameStats(stats, GetCudaBindingStats(*asyncWorkspace)) &&
+                  SameGeneration(expected, lastGood) && SameGeneration(expected, first) &&
+                  rejected.rbfAccept == attempts.rbfAccept &&
+                  rejected.surfaceAccept == attempts.surfaceAccept &&
+                  rejected.rbfRollback == attempts.rbfRollback + 2 &&
+                  rejected.surfaceRollback == attempts.surfaceRollback + 2);
+            filler->Release();
+            auto retry = CreateCudaExecutionJob(plan, *asyncWorkspace, 6, 15, &diagnostics, lastGood);
+            CHECK(retry);
+            retainedJobs.push_back(retry);
+            CHECK(runStage([&](auto done) { return ExecuteCudaJobSourceAsync(retry, done); }));
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*retry); ++i)
+                CHECK(runStage([&](auto done) { return ExecuteCudaJobOperatorAsync(retry, i, done); }));
+            auto accepted = finalize(retry);
+            CHECK(accepted && SameGeneration(expected, accepted) && SameGeneration(expected, lastGood));
+            retainedGenerations.push_back(accepted);
+        }
+    }
+    } // end scoped V0 battery: workspaces, jobs and generations released here
+    // Unequal siblings must fail closed at the join, accept nothing, leak nothing.
+    {
+        UsdGenDiagnostics diagnostics;
+        drainRetirement();
+        auto unequalDesc = RbfDagDesc(true);
+        auto unequalPlan = CompileCudaGraph(unequalDesc, &diagnostics);
+        if (!unequalPlan || diagnostics.HasErrors())
+            for (auto const& error : diagnostics.errors)
+                std::fprintf(stderr, "unequal dag: %s\n", error.c_str());
+        CHECK(unequalPlan && !diagnostics.HasErrors());
+        auto unequalWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(unequalWorkspace);
+        auto const before = resources->Snapshot();
+        auto const attempts = GetAttempts();
+        auto const stats = GetCudaBindingStats(*unequalWorkspace);
+        UsdGenDiagnostics unequalDiagnostics;
+        auto unequal = ExecuteCudaGraph(*unequalPlan, *unequalWorkspace, 5, 20,
+                                        &unequalDiagnostics, nullptr);
+        auto const after = GetAttempts();
+        if (unequal) std::fprintf(stderr, "unequal dag: unexpectedly admitted\n");
+        for (auto const& error : unequalDiagnostics.errors)
+            std::fprintf(stderr, "unequal dag: %s\n", error.c_str());
+        std::fprintf(stderr, "unequal dag: stats %zu->%zu accept %llu->%llu\n",
+            stats.size(), GetCudaBindingStats(*unequalWorkspace).size(),
+            static_cast<unsigned long long>(attempts.rbfAccept),
+            static_cast<unsigned long long>(after.rbfAccept));
+        CHECK(!unequal && unequalDiagnostics.HasErrors() &&
+              DiagnosticContains(unequalDiagnostics, "differ outside Width") &&
+              SameStats(stats, GetCudaBindingStats(*unequalWorkspace)) &&
+              after.rbfAccept == attempts.rbfAccept &&
+              after.surfaceAccept == attempts.surfaceAccept);
+        drainRetirement();
+        auto const settled = resources->Snapshot();
+        for (size_t kind = 0; kind != before.byKind.size(); ++kind)
+            CHECK(settled.byKind[kind] <= before.byKind[kind]);
+    }
+    // Reference-rooted Deform DAGs lower as a third reference shape with the
+    // same literal rules as authored-source RBF DAGs.
+    {
+        UsdGenDiagnostics diagnostics;
+        auto refDesc = RbfRefDagDesc();
+        auto refPlan = CompileCudaGraph(refDesc, &diagnostics);
+        CHECK(refPlan && !diagnostics.HasErrors());
+        auto refMetadata = GetCudaExecutionPlanMetadata(*refPlan);
+        CHECK(refMetadata &&
+              refMetadata->Shape() == UsdGenExecutionPlanShape::SourceRootedValueDag &&
+              refMetadata->MemoryEstimate().runtimeRefinementAvailable &&
+              !refMetadata->MemoryEstimate().memoryAvailable &&
+              !refMetadata->MemoryEstimate().conservativeUpperBound);
+        auto refWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        auto refReferenceWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(refWorkspace && refReferenceWorkspace);
+        auto refExpected = ExecuteCudaGraph(*refPlan, *refReferenceWorkspace, 11, 30,
+                                            &diagnostics);
+        if (!refExpected) for (auto const& error : diagnostics.errors)
+            std::fprintf(stderr, "ref dag reference: %s\n", error.c_str());
+        CHECK(refExpected && !diagnostics.HasErrors());
+        uint64_t refPeak = 0;
+        {
+            drainRetirement();
+            auto const baseline = resources->Snapshot();
+            auto filler = resources->TryReserve(baseline.usableBytes - baseline.usedBytes,
+                                                UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const saturated = resources->Snapshot();
+            auto const beforeAttempts = GetAttempts();
+            UsdGenDiagnostics rejectDiagnostics;
+            CHECK(!ExecuteCudaGraph(*refPlan, *refWorkspace, 11, 31, &rejectDiagnostics));
+            auto const afterAttempts = GetAttempts();
+            CHECK(ParseLiteralRbfPeak(rejectDiagnostics, &refPeak) &&
+                  afterAttempts.rbfAccept == beforeAttempts.rbfAccept &&
+                  afterAttempts.rbfRollback == beforeAttempts.rbfRollback &&
+                  afterAttempts.surfaceAccept == beforeAttempts.surfaceAccept &&
+                  afterAttempts.surfaceRollback == beforeAttempts.surfaceRollback &&
+                  GetCudaBindingStats(*refWorkspace).empty() &&
+                  resources->Snapshot().byKind == saturated.byKind);
+            filler->Release();
+            CHECK(resources->Snapshot().byKind == baseline.byKind);
+        }
+        std::shared_ptr<const UsdGenDeviceGeneration> refFirst;
+        for (int warm = 0; warm != 2; ++warm) {
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            CHECK(before.usableBytes - before.usedBytes >= refPeak);
+            auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - refPeak + 1,
+                                                UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto const full = resources->Snapshot();
+            UsdGenDiagnostics belowDiagnostics;
+            CHECK(!ExecuteCudaGraph(*refPlan, *refWorkspace, 12 + warm, 32 + warm,
+                                    &belowDiagnostics, refFirst));
+            uint64_t belowPeak = 0;
+            CHECK(ParseLiteralRbfPeak(belowDiagnostics, &belowPeak) && belowPeak == refPeak &&
+                  resources->Snapshot().byKind == full.byKind);
+            filler->Release();
+            filler = resources->TryReserve(before.usableBytes - before.usedBytes - refPeak,
+                                           UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            auto result = ExecuteCudaGraph(*refPlan, *refWorkspace, 12 + warm, 34 + warm,
+                                           &diagnostics, refFirst);
+            if (!result) for (auto const& error : diagnostics.errors)
+                std::fprintf(stderr, "ref dag exact-budget direct: %s\n", error.c_str());
+            CHECK(result && !diagnostics.HasErrors() && SameGeneration(refExpected, result));
+            if (refFirst) CHECK(refFirst->Owner() != result->Owner());
+            else refFirst = result;
+            filler->Release();
+        }
+        {
+            drainRetirement();
+            auto const before = resources->Snapshot();
+            auto const stats = GetCudaBindingStats(*refWorkspace);
+            auto const attempts = GetAttempts();
+            CHECK(stats.size() == 2 && before.usableBytes - before.usedBytes >= refPeak);
+            auto filler = resources->TryReserve(before.usableBytes - before.usedBytes - refPeak,
+                                                UsdGenExecutionResourceKind::Active);
+            CHECK(filler);
+            failNextCudaSynchronousFinalizationForTesting();
+            UsdGenDiagnostics rollbackDiagnostics;
+            CHECK(!ExecuteCudaGraph(*refPlan, *refWorkspace, 13.5, 40, &rollbackDiagnostics,
+                                    refFirst));
+            drainRetirement();
+            auto const rejected = GetAttempts();
+            CHECK(rollbackDiagnostics.HasErrors() &&
+                  SameStats(stats, GetCudaBindingStats(*refWorkspace)) &&
+                  SameGeneration(refExpected, refFirst) &&
+                  rejected.rbfAccept == attempts.rbfAccept &&
+                  rejected.surfaceAccept == attempts.surfaceAccept &&
+                  rejected.rbfRollback == attempts.rbfRollback + 2 &&
+                  rejected.surfaceRollback == attempts.surfaceRollback + 2);
+            filler->Release();
+            auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+            CHECK(asyncWorkspace);
+            auto job = CreateCudaExecutionJob(refPlan, *asyncWorkspace, 14, 41,
+                                              &diagnostics, refFirst);
+            CHECK(job);
+            auto sourcePromise = std::make_shared<std::promise<bool>>();
+            auto sourceFuture = sourcePromise->get_future();
+            CHECK(ExecuteCudaJobSourceAsync(job, [sourcePromise](bool ok) {
+                sourcePromise->set_value(ok);
+            }) && sourceFuture.get());
+            for (size_t i = 0; i != CudaExecutionJobOperatorCount(*job); ++i) {
+                auto opPromise = std::make_shared<std::promise<bool>>();
+                auto opFuture = opPromise->get_future();
+                bool const launched = ExecuteCudaJobOperatorAsync(job, i, [opPromise](bool ok) {
+                    opPromise->set_value(ok);
+                });
+                bool const ok = launched && opFuture.get();
+                if (!ok) std::fprintf(stderr, "ref dag async operator %zu/%zu launched=%d\n",
+                    i, CudaExecutionJobOperatorCount(*job), launched);
+                CHECK(ok);
+            }
+            auto finalPromise = std::make_shared<std::promise<std::shared_ptr<const UsdGenDeviceGeneration>>>();
+            auto finalFuture = finalPromise->get_future();
+            CHECK(FinalizeCudaExecutionJobAsync(job, [finalPromise](auto result) {
+                finalPromise->set_value(result);
+            }));
+            auto accepted = finalFuture.get();
+            waitForCudaNativeRelayRetirementForTesting();
+            CHECK(accepted && accepted != refFirst && SameGeneration(refExpected, accepted));
+        }
+    } // end scoped reference block
+    drainRetirement();
+    {
+        auto now = resources->Snapshot();
+        if (now.byKind != outerBaseline.byKind)
+            for (size_t kind = 0; kind != now.byKind.size(); ++kind)
+                std::fprintf(stderr, "dag outer kind %zu: %zu -> %zu\n",
+                    kind, outerBaseline.byKind[kind], now.byKind[kind]);
+    }
+    CHECK(resources->Snapshot().byKind == outerBaseline.byKind);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--value-dag") return ValueDagTransactions();
+    if (argc == 2 && std::string(argv[1]) == "--aggregate-admission") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return LiteralRbfChainAdmission();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--aggregate-dag-admission") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return LiteralRbfDagAdmission();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--aggregate-scatter-dag-admission") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return LiteralRbfScatterDagAdmission();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--aggregate-topology-dag-admission") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return LiteralRbfTopologyDagAdmission();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--aggregate-param-map-admission") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return LiteralRbfParamMapDagAdmission();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--blend-overlap") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return BlendOverlapWitness();
+    }
+    if (argc == 2 && std::string(argv[1]) == "--multi-groom-admission") {
+        UsdGenDiagnostics diagnostics;
+        auto workspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(workspace);
+        return LiteralRbfMultiGroomAdmission();
+    }
     CHECK(argc == 1);
     UsdGenDiagnostics diagnostics;
     auto plan = CompileCudaGraph(RbfDesc(), &diagnostics);

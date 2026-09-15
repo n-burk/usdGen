@@ -1,6 +1,7 @@
 #include "usdGen/cudaExecution.h"
 #include "usdGen/cudaParameters.h"
 #include "usdGen/executionResources.h"
+#include "usdGen/executionRetirement.h"
 #include "usdGen/gpu/generation.h"
 
 #include <cmath>
@@ -1858,7 +1859,7 @@ int main() {
     // variant is isolated in a workspace, and the retained lease proves that
     // a cap rejection leaves the previous COW publication untouched.
     auto runAutoRootVariant = [&](UsdGenGraphDesc variant, uint64_t generation,
-                                  uint64_t* peakOut) {
+                                   uint64_t* peakOut) {
         diagnostics = {};
         auto variantPlan = CompileCudaGraph(variant, &diagnostics);
         if (!variantPlan || diagnostics.HasErrors()) return false;
@@ -1870,6 +1871,23 @@ int main() {
         if (!first || diagnostics.HasErrors() ||
             first->Geometry().curveCount != 2 ||
             first->Geometry().pointCount != 4 || !first->Owner()) return false;
+        // Terminal proof for the accepted stage: every producer behind this
+        // generation must be complete before any pressure snapshot. A merely
+        // delivered completion does not prove producer quiescence.
+        if (!first->Owner()->ProducerReady()) return false;
+        // ExecuteCudaGraph has reached its terminal synchronous boundary.  A
+        // relay/generation-retirement owner from an earlier variant may still
+        // be unwinding, so join before taking this pressure baseline; no
+        // native launcher is active at this point. The relay join alone is
+        // not enough: retired owner/consumer payloads from earlier variants
+        // (including SameGeneration/AcquireGeometry consumers) release their
+        // byte permits on the deferred retirement worker, so drain that
+        // service too. Otherwise a late 12-20 byte release lands between the
+        // saturated snapshot and the rejection assertion below.
+        waitForCudaNativeRelayRetirementForTesting();
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, literalDevice}))
+            service->Drain();
         auto const priorOwner = first->Owner();
         auto const baseline = literalResources->Snapshot();
         if (baseline.usableBytes < baseline.usedBytes) return false;
@@ -1958,6 +1976,19 @@ int main() {
             }) || !Wait(finalDone) || !asyncResult ||
             asyncResult->Geometry().curveCount != 2 ||
             asyncResult->Geometry().pointCount != 4) return false;
+
+        // The final callback is terminal and all source/operator launches
+        // above have completed.  Draining here releases relay-temporary
+        // generation owners before this variant returns and the next variant
+        // captures its exact pressure baseline. Drain the deferred
+        // retirement service as well so this variant's own retired consumers
+        // cannot surface as a ledger drop inside the next variant.
+        waitForCudaNativeRelayRetirementForTesting();
+        if (asyncResult && asyncResult->Owner() && !asyncResult->Owner()->ProducerReady())
+            return false;
+        if (auto service = FindUsdGenExecutionRetirementService(
+                {UsdGenExecutionResourceBackend::Cuda, literalDevice}))
+            service->Drain();
 
         cudaStream_t compareStream = nullptr;
         if (cudaStreamCreateWithFlags(&compareStream, cudaStreamNonBlocking) !=

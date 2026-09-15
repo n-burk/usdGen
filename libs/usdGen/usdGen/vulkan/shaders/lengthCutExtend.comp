@@ -1,0 +1,148 @@
+#version 450
+// keepParam length editing.  This is intentionally a separate pipeline from
+// scale/set: it preserves the CV layout and only samples/corrects the tip.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer P { float v[]; } points;
+layout(set = 0, binding = 1, std430) readonly buffer O { uint v[]; } offsets;
+layout(set = 0, binding = 2, std430) buffer R { float v[]; } outputPoints;
+layout(set = 0, binding = 3, std430) buffer S { uint error; } status;
+layout(push_constant) uniform C { uint curves; uint points; uint phase; float value; } c;
+
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite3(float x, float y, float z) { return finite(x) && finite(y) && finite(z); }
+void fail() { atomicOr(status.error, 1u); }
+
+void copyPoint(uint point) {
+    uint p = 3u * point;
+    outputPoints.v[p] = points.v[p];
+    outputPoints.v[p + 1u] = points.v[p + 1u];
+    outputPoints.v[p + 2u] = points.v[p + 2u];
+}
+
+void main() {
+    uint curve = gl_GlobalInvocationID.x;
+    if (c.phase == 0u) {
+        if (!finite(c.value) || c.value < 0.0) fail();
+        if (curve <= c.curves) {
+            uint o = offsets.v[curve];
+            if ((curve == 0u && o != 0u) ||
+                (curve == c.curves && o != c.points)) fail();
+            if (curve < c.curves && o >= offsets.v[curve + 1u]) fail();
+        }
+        if (curve < c.points) {
+            uint p = 3u * curve;
+            if (!finite3(points.v[p], points.v[p + 1u], points.v[p + 2u])) fail();
+        }
+        return;
+    }
+    if (atomicAdd(status.error, 0u) != 0u || curve >= c.curves) return;
+
+    uint begin = offsets.v[curve], end = offsets.v[curve + 1u];
+    precise float current = 0.0;
+    for (uint j = begin + 1u; j < end; ++j) {
+        uint a = 3u * (j - 1u), b = 3u * j;
+        precise float dx = points.v[b] - points.v[a];
+        precise float dy = points.v[b + 1u] - points.v[a + 1u];
+        precise float dz = points.v[b + 2u] - points.v[a + 2u];
+        precise float segment = sqrt(dx * dx + dy * dy + dz * dz);
+        if (!finite(segment)) { fail(); return; }
+        current += segment;
+    }
+    if (!finite(current)) { fail(); return; }
+
+    precise float target = c.phase == 1u ? current * c.value : c.value;
+    if (!finite(target) || target < 0.0) { fail(); return; }
+    // CUDA validates this quotient even when the keepParam implementation does
+    // not otherwise need it.  Preserve that semantic rejection here.
+    precise float factor = current > 0.0 ? target / current : 1.0;
+    if (!finite(factor) || factor < 0.0) { fail(); return; }
+    if (current == 0.0 && target > 0.0) { fail(); return; }
+
+    // Exact no-ops must not be reconstructed through arc arithmetic.
+    if (target == current) {
+        for (uint j = begin; j < end; ++j) copyPoint(j);
+        return;
+    }
+
+    if (target < current) {
+        // SampleArc semantics: for each CV, use its original prefix distance,
+        // clamped at the target.  Do the full walk for each sample rather than
+        // assuming the selected segment is this CV's preceding segment: that
+        // assumption is wrong once the target was reached by an earlier CV.
+        precise float prefix = 0.0;
+        copyPoint(begin);
+        for (uint j = begin + 1u; j < end; ++j) {
+            uint previous = 3u * (j - 1u), here = 3u * j;
+            precise float pdx = points.v[here] - points.v[previous];
+            precise float pdy = points.v[here + 1u] - points.v[previous + 1u];
+            precise float pdz = points.v[here + 2u] - points.v[previous + 2u];
+            precise float prefixSegment = sqrt(pdx * pdx + pdy * pdy + pdz * pdz);
+            if (!finite(prefixSegment)) { fail(); return; }
+            precise float remaining = min(prefix + prefixSegment, target);
+            precise float x = points.v[3u * (end - 1u)];
+            precise float y = points.v[3u * (end - 1u) + 1u];
+            precise float z = points.v[3u * (end - 1u) + 2u];
+            for (uint k = begin + 1u; k < end; ++k) {
+                uint a = 3u * (k - 1u), b = 3u * k;
+                precise float dx = points.v[b] - points.v[a];
+                precise float dy = points.v[b + 1u] - points.v[a + 1u];
+                precise float dz = points.v[b + 2u] - points.v[a + 2u];
+                precise float segment = sqrt(dx * dx + dy * dy + dz * dz);
+                if (!finite(segment)) { fail(); return; }
+                if (remaining <= segment || k + 1u == end) {
+                    precise float u = segment > 0.0 ? min(1.0, max(0.0, remaining / segment)) : 0.0;
+                    x = points.v[a] + dx * u;
+                    y = points.v[a + 1u] + dy * u;
+                    z = points.v[a + 2u] + dz * u;
+                    break;
+                }
+                remaining -= segment;
+                if (!finite(remaining)) { fail(); return; }
+            }
+            if (!finite3(x, y, z)) { fail(); return; }
+            outputPoints.v[here] = x; outputPoints.v[here + 1u] = y; outputPoints.v[here + 2u] = z;
+            prefix += prefixSegment;
+            if (!finite(prefix)) { fail(); return; }
+        }
+    } else {
+        // Extension retains every non-tip CV exactly.  Search backwards for a
+        // usable final tangent, as CUDA does, then move only the final tip.
+        for (uint j = begin; j + 1u < end; ++j) copyPoint(j);
+        uint tip = end - 1u;
+        bool found = false;
+        precise float dx = 0.0, dy = 0.0, dz = 0.0, norm = 0.0;
+        for (uint j = end - 1u; j > begin; --j) {
+            uint a = 3u * (j - 1u), b = 3u * j;
+            precise float tx = points.v[b] - points.v[a];
+            precise float ty = points.v[b + 1u] - points.v[a + 1u];
+            precise float tz = points.v[b + 2u] - points.v[a + 2u];
+            precise float tn = sqrt(tx * tx + ty * ty + tz * tz);
+            if (!finite(tn)) { fail(); return; }
+            if (tn > 1.0e-12) { dx = tx; dy = ty; dz = tz; norm = tn; found = true; break; }
+        }
+        if (!found) { copyPoint(tip); }
+        else {
+            uint p = 3u * tip;
+            precise float extra = target - current;
+            precise float x = points.v[p] + dx / norm * extra;
+            precise float y = points.v[p + 1u] + dy / norm * extra;
+            precise float z = points.v[p + 2u] + dz / norm * extra;
+            if (!finite3(x, y, z)) { fail(); return; }
+            outputPoints.v[p] = x; outputPoints.v[p + 1u] = y; outputPoints.v[p + 2u] = z;
+        }
+    }
+
+    // Match CUDA's post-edit finite arc validation before this fresh buffer is
+    // eligible for publication by the caller.
+    precise float resulting = 0.0;
+    for (uint j = begin + 1u; j < end; ++j) {
+        uint a = 3u * (j - 1u), b = 3u * j;
+        precise float dx = outputPoints.v[b] - outputPoints.v[a];
+        precise float dy = outputPoints.v[b + 1u] - outputPoints.v[a + 1u];
+        precise float dz = outputPoints.v[b + 2u] - outputPoints.v[a + 2u];
+        precise float segment = sqrt(dx * dx + dy * dy + dz * dz);
+        if (!finite(segment)) { fail(); return; }
+        resulting += segment;
+    }
+    if (!finite(resulting)) fail();
+}

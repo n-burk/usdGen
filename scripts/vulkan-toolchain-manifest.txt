@@ -1,0 +1,10 @@
+# Workspace-local Vulkan toolchain (downloaded 2026-09-13; no system install).
+# Architecture: arm64; Ubuntu noble.
+# Source: Canonical NVIDIA vulkan-packages-nv-desktop snapshot PPA.
+# Packages are extracted below .vulkan-toolchain/root.
+# package version architecture sha256
+libvulkan-dev 1.4.328.1-1~1 arm64 ad1170ca01e61f66d2d29cc705e08232097aa6ec9040ea84a3f29461b472431f
+glslang-tools 16.0.0-1~1 arm64 cbee4501ba90d9307ea6ef7deae853e0a892cd4074fd1939bd3fae7f116c70a6
+vulkan-tools 1.4.328.1+dfsg1-1~1 arm64 7be028e05f96b4e2c0f1d8083ae380b3b709b7dbb489bbc51a8d7c42836e2f7a
+spirv-tools 2025.4-1~ppa2 arm64 45defd68f509fce4853e371fea3e58702316b2922807b5e8b14570a046fe02f8
+vulkan-validationlayers 1.4.328.1-1~1 arm64 2fe2357004dad292c86ee326c408af616de2fddb352bc05002ce0aac3dd4b033

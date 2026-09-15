@@ -1,0 +1,44 @@
+#version 450
+
+// Initial scalar Width dispatch. The host admits only unit masks/blend,
+// flat profile, unit root/tip scales and no taper/maps/expressions here.
+// Broader Width controls require additional native lowering, not fallback.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputWidths {
+    float values[];
+} inputWidths;
+layout(set = 0, binding = 1, std430) writeonly buffer OutputWidths {
+    float values[];
+} outputWidths;
+layout(set = 0, binding = 2, std430) buffer Status {
+    uint error;
+} status;
+layout(push_constant) uniform Controls {
+    uint pointCount;
+    float width;
+    uint replace;
+} controls;
+
+bool finiteValue(float value) { return !isnan(value) && !isinf(value); }
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= controls.pointCount) return;
+    float inputWidth = inputWidths.values[index];
+    if (controls.replace > 1u || !finiteValue(controls.width) ||
+        controls.width < 0.0 || !finiteValue(inputWidth) || inputWidth < 0.0) {
+        atomicOr(status.error, 1u);
+        return;
+    }
+    // Match the CPU/CUDA unit-envelope expression, including operation order.
+    precise float result;
+    if (controls.replace != 0u)
+        result = inputWidth + (controls.width - inputWidth);
+    else
+        result = inputWidth * (1.0 + (controls.width - 1.0));
+    if (!finiteValue(result) || result < 0.0) {
+        atomicOr(status.error, 2u);
+        return;
+    }
+    outputWidths.values[index] = result;
+}

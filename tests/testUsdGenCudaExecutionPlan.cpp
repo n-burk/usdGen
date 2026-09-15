@@ -1114,5 +1114,75 @@ int main() {
     checked = std::numeric_limits<uint64_t>::max();
     CHECK(!UsdGenExecutionCheckedBytes::Add(&checked, 1) &&
           checked == std::numeric_limits<uint64_t>::max());
+
+    // A single RBF Deform may be preceded/followed by a literal fixed-cardinality
+    // Width prefix/tail while retaining complete roots/surface inputs. This is
+    // runtime-refinable, but static allocation remains unavailable.
+    {
+    auto aggregateRbf = MakeDesc();
+    aggregateRbf.nodes.erase(aggregateRbf.nodes.begin() + 2); // remove Length
+    auto prefix = aggregateRbf.nodes[1];
+    prefix.path = SdfPath("/Groom/Hair/Ops/PrefixWidth");
+    prefix.inputs = {aggregateRbf.nodes[0].path};
+    auto deform = aggregateRbf.nodes.back();
+    deform.path = SdfPath("/Groom/Hair/Ops/AggregateDeform");
+    deform.inputs = {prefix.path};
+    auto tail = prefix;
+    tail.path = SdfPath("/Groom/Hair/Ops/TailWidth");
+    tail.inputs = {deform.path};
+    auto tail2 = tail;
+    tail2.path = SdfPath("/Groom/Hair/Ops/TailWidth2");
+    tail2.inputs = {tail.path};
+    aggregateRbf.nodes = {aggregateRbf.nodes[0], prefix, deform, tail, tail2};
+    aggregateRbf.terminal = tail2.path;
+    diagnostics = {};
+    auto aggregateRbfPlan = CompileCudaGraph(aggregateRbf, &diagnostics);
+    CHECK(aggregateRbfPlan && !diagnostics.HasErrors());
+    auto aggregateRbfMetadata = GetCudaExecutionPlanMetadata(*aggregateRbfPlan);
+    CHECK(aggregateRbfMetadata && aggregateRbfMetadata->Shape() == UsdGenExecutionPlanShape::LinearAuthoredChain &&
+          !aggregateRbfMetadata->MemoryEstimate().memoryAvailable &&
+          !aggregateRbfMetadata->MemoryEstimate().conservativeUpperBound &&
+          aggregateRbfMetadata->MemoryEstimate().runtimeRefinementAvailable);
+    auto aggregateSecondDeform = aggregateRbf;
+    auto secondAggregate = deform;
+    secondAggregate.path = SdfPath("/Groom/Hair/Ops/SecondAggregateDeform");
+    secondAggregate.inputs = {deform.path};
+    aggregateSecondDeform.nodes.insert(aggregateSecondDeform.nodes.end() - 2, secondAggregate);
+    aggregateSecondDeform.nodes[4].inputs = {secondAggregate.path};
+    diagnostics = {};
+    auto secondAggregatePlan = CompileCudaGraph(aggregateSecondDeform, &diagnostics);
+    CHECK(!secondAggregatePlan && diagnostics.HasErrors());
+    auto expressionAggregate = aggregateRbf;
+    AddScalarExpression(&expressionAggregate, &expressionAggregate.nodes.back(),
+        "/Groom/Hair/Expressions/aggregateWidth", "$value", "width",
+        expr::Domain::Groom, TfToken("float"), expr::ScalarType::Float32,
+        VtValue(1.f));
+    diagnostics = {};
+    auto expressionAggregatePlan = CompileCudaGraph(expressionAggregate, &diagnostics);
+    CHECK(expressionAggregatePlan && !diagnostics.HasErrors());
+    auto expressionAggregateMetadata = GetCudaExecutionPlanMetadata(*expressionAggregatePlan);
+    CHECK(expressionAggregateMetadata && !expressionAggregateMetadata->MemoryEstimate().memoryAvailable &&
+          !expressionAggregateMetadata->MemoryEstimate().runtimeRefinementAvailable);
+    auto enabledExpressionAggregate = aggregateRbf;
+    AddScalarExpression(&enabledExpressionAggregate, &enabledExpressionAggregate.nodes.back(),
+        "/Groom/Hair/Expressions/aggregateEnabled", "$frame >= 0", "enabled",
+        expr::Domain::Groom, TfToken("bool"), expr::ScalarType::Bool,
+        VtValue(true));
+    diagnostics = {};
+    auto enabledExpressionPlan = CompileCudaGraph(enabledExpressionAggregate, &diagnostics);
+    CHECK(enabledExpressionPlan && !diagnostics.HasErrors());
+    auto enabledExpressionMetadata = GetCudaExecutionPlanMetadata(*enabledExpressionPlan);
+    CHECK(enabledExpressionMetadata && !enabledExpressionMetadata->MemoryEstimate().memoryAvailable &&
+          !enabledExpressionMetadata->MemoryEstimate().runtimeRefinementAvailable);
+    auto resampleAggregate = aggregateRbf;
+    resampleAggregate.nodes[0].params.push_back(
+        {TfToken("resampleTo"), VtValue(3), false});
+    diagnostics = {};
+    auto resampleAggregatePlan = CompileCudaGraph(resampleAggregate, &diagnostics);
+    CHECK(resampleAggregatePlan && !diagnostics.HasErrors());
+    auto resampleAggregateMetadata = GetCudaExecutionPlanMetadata(*resampleAggregatePlan);
+    CHECK(resampleAggregateMetadata && !resampleAggregateMetadata->MemoryEstimate().memoryAvailable &&
+          !resampleAggregateMetadata->MemoryEstimate().runtimeRefinementAvailable);
+    }
     return 0;
 }

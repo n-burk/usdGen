@@ -129,6 +129,9 @@ std::shared_ptr<UsdGenCudaExecutionJob> CreateCudaExecutionJob(
 // A job retains its plan and previous publication, but borrows the workspace
 // and diagnostics.  Drain all stage tasks before either borrowed object dies.
 size_t CudaExecutionJobOperatorCount(UsdGenCudaExecutionJob const&) noexcept;
+// Test-only operator introspection for launch-ordering proofs: the operator
+// type at a job operator index, or an empty token when out of range.
+TfToken CudaExecutionJobOperatorType(UsdGenCudaExecutionJob const&, size_t) noexcept;
 bool ExecuteCudaJobSource(UsdGenCudaExecutionJob&);
 // Shared asynchronous CurveSource stage. The completion is invoked exactly
 // once off the native CUDA callback after its retained source payload reaches
@@ -152,6 +155,11 @@ bool ExecuteCudaJobOperatorAsync(std::shared_ptr<UsdGenCudaExecutionJob>, size_t
 // retained.
 bool FinalizeCudaExecutionJobAsync(std::shared_ptr<UsdGenCudaExecutionJob>,
     std::function<void(std::shared_ptr<const UsdGenDeviceGeneration>)> completion);
+// Test-only retirement barrier. Call from an ordinary test thread only after
+// every accepted native stage has delivered its terminal completion and no
+// launcher can submit more work. Unlike a completion notification, this waits
+// for the relay worker call stacks (and their temporary owners) to return.
+void waitForCudaNativeRelayRetirementForTesting();
 void armCudaSourceAsyncCallbackGateForTesting();
 void waitCudaSourceAsyncCallbackGateForTesting();
 void releaseCudaSourceAsyncCallbackGateForTesting();
@@ -238,6 +246,9 @@ void armCudaOperatorAsyncWidthDeviceOverlapWitnessForTesting(
 // after the queue/job has drained. It is never invoked by a CUDA callback.
 UsdGenExecutionOverlapWitnessSnapshot
 cudaOperatorAsyncWidthDeviceOverlapWitnessSnapshotForTesting();
+// Releases the armed witness and its device allocations. Call it before
+// taking exact-byte baselines; an armed witness retains its counters.
+void disarmCudaOperatorAsyncWidthDeviceOverlapWitnessForTesting();
 void armCudaOperatorAsyncLengthCallbackGateForTesting();
 void waitCudaOperatorAsyncLengthCallbackGateForTesting();
 void releaseCudaOperatorAsyncLengthCallbackGateForTesting();

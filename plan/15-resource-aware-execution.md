@@ -8879,3 +8879,571 @@ to the real install and isolated checkout made both schema checks PASS (2/2,
 0.49s), without any code or schema-resource change. Thus all 177 runnable tests
 have passed on the exact published code snapshot; the one skip remains explicit.
 This validates the existing checkpoint, not completion of the larger goal.
+
+### Vulkan Length literal randomization V1 — implementation in progress
+
+After the CUDA-only main publication, local Vulkan work resumes with the
+remaining literal random range and authored node seed controls. The new module
+`lengthLiteralV1.comp` uses six storage bindings and a versioned 48-byte push
+block, leaving existing 16/20/32-byte shader interfaces untouched. Paired uint32
+arithmetic implements the pinned CUDA SplitMix64 draw without shaderInt64;
+stable IDs must be read from, and owner-proven against, the exact predecessor
+generation, including gathered Cull output. Missing IDs use ordinal fallback.
+The same proof includes optional hairT, and output points remain fresh COW.
+
+Randomization composes with Scale/Set, minimum, method/rebuild and downstream
+actual-output Cull. Neutral [1,1] ranges retain old routing. V1 explicitly
+preserves CUDA's staged multiplication and fmaxf NaN-to-finite-floor behavior.
+The GLSL module compiles and passes SPIR-V validation for Vulkan 1.2; this is
+not yet GPU semantic validation. Build/install shader discovery and native/
+Session test registration are wired; native API, routing, fixtures and installed
+consumer integration are still in progress. Required evidence includes exact
+hash draws for high-bit IDs and signed seeds, permutation/Cull lineage, full
+retained packet bytes, rejection before capture, and the broad regression.
+No additional commit or push is authorized by this continuation. The remaining
+graph/operator/platform work and Metal exclusion remain unchanged.
+
+Initial V1 integration evidence: the tests-OFF native runtime builds, installs
+all eleven shaders, and the installed consumer passes new factory linkage and
+typed reversed-range/negative-seed/minimum/Reparam/threshold lowering. SPIR-V
+inspection confirms only Shader capability (no Int64), stable-ID array stride 8,
+push offsets 0 through 44, and NoContraction decorations on staged arithmetic.
+Root fixed a worker capability-gate syntax error caught by the runtime build.
+
+CUDA's native Length fixture now checks 128 unit curves with high-bit IDs,
+five seeds including -1/INT_MIN/INT_MAX, and two ID permutations. Every tip draw
+must equal the pinned host hash bit-for-bit; other coordinates, keep flags and
+the original input are checked too. Rebuilt targeted CUDA Length test PASS
+(1/1, 0.45s). CUDA production behavior was already correct and is unchanged.
+Vulkan native GPU and Session V1 semantic validation remain pending; these
+initial checks do not establish cross-backend parity or completion.
+
+Old Vulkan Length Set/CutExtend/Reparam/Minimum modules were rebuilt against the
+extended native library and PASS under validation (4/4, 2.45s, no VUID/SYNC
+errors). CUDA Session additionally PASS (1/1, 0.71s). Root review caught new
+fixture defects before accepting them: duplicated inherited random parameters,
+an incorrect zero-current/zero-floor rejection expectation, and incomplete
+hash/ownership coverage. Those new V1 tests are being corrected; no V1 native
+GPU or Session pass is claimed yet.
+
+### V1 initial native/dispatch checkpoint (not complete)
+
+After correcting the fixtures, compiler metadata tests PASS (1/1, 0.02s).
+Native V1 core and actual missing-capability executor tests PASS together
+(2/2, 2.54s, no VUID/SYNC errors). Native hash checks compare every point byte
+on unit lines against the pinned hash for seven IDs (including high-bit/all-one
+IDs), five signed seeds, and rotated pair positions. Curved radial/KeepParam/
+Reparam geometry uses the established four-ULP computed-point comparator;
+hash draws and retained packet bytes remain exact. Native coverage also checks
+old-Minimum missing-V1 rejection, zero-current positive-floor failure, empty
+success, retained snapshots and final ledger recovery.
+
+Executor coverage uses an old-Minimum-capable pipeline with no V1 capability:
+actual Submit rejects Scale/Set × method/rebuild × zero/positive floor before
+callbacks, command credits or ledger changes. Neutral [1,1] with a negative
+seed and positive floor successfully reuses that executor. CUDA's targeted
+Length test additionally verifies overflow-times-zero raw NaN recovering the
+finite floor (PASS again, 1/1, 0.45s).
+
+Still pending for this slice: native ID-owner and absent-plane proofs, invalid
+range/buffer/resource-hook matrices, Vulkan NaN recovery, Session rooted/
+nonroot random and gathered Cull lineage, then full regression. The initial
+native pass does not satisfy those missing requirements. Session fixtures are
+in implementation; all root build/test handles at this checkpoint are terminal.
+
+### V1 complete ownership and Session validation
+
+Root expanded native coverage to equal-byte/different-owner stable IDs and hairT,
+omitted-plane publication rejection, exact raw ordinal draws, genuine absent
+hairT publication, reversed nonconstant-range equivalence, fresh-point and all
+nonpoint/frame owner retention, topology/chunk/tile metadata, invalid endpoint/
+ID extent/usage/context checks, shader hairT rejection, saturated resource pools,
+false/throw hooks, full ledger recovery, raw-NaN floor recovery and infinite-target
+rejection. These pass (1/1, 1.24s). Source capture requires stable IDs; the native
+optional-ID fallback is tested by raw output readback only and cannot publish
+over a source with IDs. The existing source contract was not weakened.
+
+Rooted and nonrooted Session V1 tests now PASS (2/2, 5.08s). They compose random
+with Scale/Set, radial/CutExtend, KeepParam/Reparam, floor and actual-output Cull;
+exercise leading nonempty/empty Cull, failed zero-current preservation, retry
+and retained snapshots. A low-ID short curve is dropped so the high-ID survivor
+moves from ordinal 1 to 0. Its unit-line output is checked byte-exact against
+the pinned hash, with all gathered retained fields and named/root channels.
+
+The initial CPU-reference-based Cull oracle retained unculled fields. The
+fixture now captures the neutral full CPU source packet, explicitly gathers the
+known survivor across all domains, and uses the pinned hash for expected points.
+Implicit uniform CPU offsets are canonicalized from the authored CV counts.
+No CPU operator parity claim or production CPU geometry readback is introduced.
+Full build is current; the 86-test Vulkan regression is running.
+
+### Vulkan literal randomization verified checkpoint
+
+Full Vulkan regression **84 passed, 2 unsupported SYNC_FD skips, 0 failures
+out of 86 registered tests (66.73s)**. The validation log contains no VUID,
+SYNC-HAZARD or validation errors. This includes final native equal-byte owner,
+metadata and invalid-hairT checks plus exact gathered-ID Session draws.
+The eleven-shader tests-OFF runtime/installed consumer and targeted expanded
+CUDA Length/Session checks recorded above remain valid. All root process
+handles are terminal; changes remain local, with no additional push.
+
+Literal Length random range and authored seed are now implemented and verified
+in Vulkan alongside the existing CUDA behavior. The broader execution-graph
+goal remains open: scalar envelopes, mask/profile/field controls, additional
+operators, native resource refinements, actual branch concurrency, renderer
+residency and additional platform/driver evidence are still required. Metal
+(excluded item 8) remains excluded. This checkpoint is not a claim that those
+remaining requirements have been met.
+
+### Length scalar envelope implementation in progress
+
+Next work admits authored node.blend and literal mask:amount, matching CUDA's
+actual authoring boundary. A literal parameter named blend remains rejected;
+CUDA's runtime field resolver does not imply that authoring spelling is valid.
+The new EnvelopeV1 module keeps six bindings and uses a versioned 56-byte push
+block. Native validation resolves the two valid controls once as float32, with
+an explicit zero flag shared by shader dispatch and effective Cull threshold.
+Old shader ABIs remain unchanged.
+
+Zero envelope must preserve points and retain all curves, but still validate
+inputs, hairT and current arc. Nonneutral pure Cull therefore needs an internal
+validation-copy stage (phase 3) before authored Cull, since the old compaction
+shader alone does not validate hairT. Positive authored thresholds continue
+to define topology stages; zero envelope changes only their effective threshold.
+Target/factor computation is bypassed for exact zero, allowing zero-current
+curves with a positive floor to remain unchanged.
+
+Root shader compilation and SPIR-V validation pass; shader install/discovery
+and test registration are wired. CUDA native tests now prove exact positive
+subnormal interpolation on a reversed unit line, and underflow-to-zero exact
+points/keep flags for Scale and pure Cull (1/1 PASS, 0.44s). Vulkan native,
+routing, fixtures, tiny-value behavior and full regression remain in progress.
+No new push is authorized or performed.
+
+CUDA envelope coverage also now asserts full output coordinates for partial
+Set application across radial, CutExtend KeepParam and Reparam on ragged bent
+curves, with blend .5 × amount .5 and exact keep flags. The expanded native
+Length test passes (1/1, 0.44s); no CUDA production fix was necessary.
+The installed consumer probe now includes scalar envelope lowering composed
+with random/minimum/Reparam, but has not yet been rebuilt against the pending
+Vulkan routing changes. Native and compiler/Session implementation continues.
+
+Initial native-envelope integration builds successfully in the tests-OFF
+runtime target, including generation ownership consumers and all twelve
+compiled/validated shaders. This proves the new native API/56-byte module
+integrates without changing old interfaces; no envelope GPU semantic or
+installed-consumer pass is claimed yet. The routing worker remains active.
+
+### Envelope routing and numeric correction checkpoint
+
+Envelope routing now implements internal validation-copy for nonneutral pure
+Cull, validates direct job/executor input lineage, and retains old neutral
+routes. Compiler and actual missing-Envelope executor tests PASS (2/2, 1.51s).
+The tests-OFF runtime, twelve-shader installation and installed consumer pass
+the new factory/link/discovery and envelope+random+minimum+Reparam lowering.
+
+Root's native envelope fixture exposed a real device discrepancy: the
+positive-subnormal expected tip 0x80400000 became zero. Both enumerated Vulkan
+devices report shaderDenormPreserveFloat32=false, so requiring the optional
+DenormPreserve execution mode would not solve this on the active hardware.
+The [Vulkan float-controls property contract](https://registry.khronos.org/vulkan/specs/latest/man/html/VkPhysicalDeviceFloatControlsPropertiesKHR.html)
+defines that capability gate.
+
+Root implemented shared GPU integer binary32 RN-even add/multiply operations
+for the final staged envelope interpolation in float32Envelope.glsl. It
+preserves subnormal/signed-zero behavior without shaderInt64, device float
+controls, CPU operator fallback or geometry readback. The native envelope
+fixture now PASS (1/1, 1.44s): exact tiny values, six partial method cases,
+pure-Cull validation copy, zero-target bypass, full inherited COW/provenance,
+invalid ranges/buffers/hairT, NaN recovery and resource rollback.
+
+Broader independent GPU arithmetic checks against host binary32 operations
+using the same helper are being added; Session fixtures and full regression
+also remain pending. This initial passing matrix does not yet establish the
+new arithmetic helper's full numeric contract. No further push was performed.
+
+### Envelope independent arithmetic and Session evidence
+
+Root rejected and replaced a delegated placeholder arithmetic test and an
+incorrect test shader; neither was counted as evidence. The real test uses raw
+charged buffers, the production native dispatch/proof path, and the exact shared
+float32Envelope.glsl helper. It checks addition, multiplication and staged blend
+against volatile host float32 operations under round-to-nearest/even, with
+contraction disabled. A targeted edge matrix plus 20,000 deterministic random
+triples gives **21,805 cases / 65,415 comparisons**: every non-NaN result is
+bit-exact, including signed zero, infinities and subnormals; NaNs match by class.
+The GPU arithmetic test passes.
+
+Rooted and nonrooted Envelope Session fixtures also pass. They cover partial
+Scale/Set and radial/KeepParam/Reparam, zero envelope retaining all curves
+despite positive thresholds, pure-Cull validation-copy routing, exact unchanged
+packets, and zero-current positive-floor retry/last-good preservation. Together
+with arithmetic, **3/3 tests PASS (6.49s), no VUID/SYNC errors**.
+The complete 90-test Vulkan regression is now building/running; broad
+execution-graph completion remains unproven and the goal stays active.
+
+### Vulkan scalar envelope verified checkpoint
+
+Full current Vulkan build and regression: **88 passed, 2 unsupported SYNC_FD
+skips, 0 failures out of 90 registered tests (73.71s)**. The final validation
+log has no VUID, SYNC-HAZARD or validation errors. This includes the shared
+integer-arithmetic matrix, partial/zero envelope native and rooted/plain
+Session checks, capability admission, old shader paths, resource accounting,
+lifecycle and cancellation tests. The twelve-shader tests-OFF runtime was
+rebuilt/reinstalled after helper extraction, and its installed consumer passes.
+
+Authored Length node.blend and literal mask:amount are now implemented and
+verified in the local Vulkan path alongside the already-correct CUDA behavior.
+No full CUDA/CPU rerun is claimed for this Vulkan-production/CUDA-test slice;
+the expanded targeted CUDA Length evidence above remains current. All root
+process handles are terminal. No additional commit or push was made.
+
+The broader goal remains active: disabled controls, profiles/fields/maps,
+additional Vulkan operators, native resource refinements, actual GPU branch
+concurrency, renderer residency and other platform/driver evidence are still
+open. Metal (excluded item 8) remains out of scope. This checkpoint does not
+redefine completion around the controls already implemented.
+
+### CUDA publication and aggregate RBF admission follow-up
+
+The requested CUDA-only publication is complete: `origin/main` was verified at
+`0e51d173ae659db12a2c9c65942e86e943e38a25`. The core CUDA/shared implementation
+was already published; this commit adds the remaining CUDA Length numeric and
+envelope regressions. The targeted CUDA Length test passed again (1/1, 0.46s).
+Vulkan implementation, build integration and these ongoing plan notes remain
+local. This does not authorize another publication of subsequent work.
+
+The next implementation addresses selected-device aggregate RBF admission.
+Both compiler metadata and runtime refinement currently require exactly one
+Deform operator, although fixed-cardinality linear Deform/Width chains already
+execute. Those chains therefore fall back to per-allocation admission and can
+begin source/RBF work before a later Width allocation fails. The implementation
+will share descriptor eligibility between metadata and runtime refinement and
+account for each retained Width output, private staging, LUTs and proof scalars.
+
+Root's independent allocation audit also found that the existing single-RBF
+formula omits authored named-channel uploads: `EstimateGeometryBytes` does not
+include them, while `UploadAuthoredPlanes` consumes the parent reservation.
+The shared recipe must include point, primitive and groom planes and agree with
+the source root-binding shape. New tests must exercise cold and warm admission
+with exactly the reported available bytes, reject at one byte below that bound
+before native work, and preserve retained COW channels/cache state on rollback.
+These are implementation requirements, not yet verified completion claims.
+
+This first aggregate recipe covers one Deform with literal Width prefix/tail
+stages; generated sources, topology-changing mixed graphs, multiple Deforms
+and value-DAG aggregate RBF admission remain required follow-on work. Static
+estimates must remain explicitly partial when selected-device refinement is
+needed, and unsupported shapes must not advertise refinement availability.
+
+### Aggregate RBF implementation and first native evidence
+
+Implemented the shared `FindLiteralRbfShape` compiler/runtime recipe for one
+Deform plus literal Width prefix/tail stages. It resolves complete source root
+bindings, no resampling, a prepared surface and literal bounded sample count;
+expression-driven Width, maps, other operators and DAG shapes remain excluded.
+Root validation caught and corrected an initial eligibility bug: parameter
+compilation creates a non-null program even with no expression bindings, so
+the recipe must inspect `Bindings().empty()`, not reject every program pointer.
+
+The selected-device LU bound now includes authored point/primitive/groom
+planes once, and each Width adds `8P + 2*kUsdGenRampLutSize*4 + 8` bytes for
+retained output, private staging, LUTs and status scalars. Root-binding sizing
+uses the common source shape predicate. Static metadata remains partial while
+runtime refinement becomes available for the covered chains.
+
+The new isolated `testUsdGenCudaRbfAggregateAdmission` exercises four accepted
+shapes: single RBF, Width prefix, two Width tails, and prefix plus two tails.
+It proves the exact named-plane byte delta, per-Width byte delta, cold/warm
+direct and native asynchronous admission at the reported bound, rejection one
+byte below it without RBF accept/rollback attempts, finalization rollback and
+exact-budget retry. Independent reference generations retain ragged points,
+rest, widths, IDs, offsets, hairT, roots and named planes across these changes.
+The initial native matrix passed **10 consecutive runs (9.07s total)**; compiler
+metadata also passed. Broader regression and strengthened public metadata/tile
+comparisons are pending at this checkpoint.
+
+The pressure fixture exposed two retirement boundaries that must not be
+confused with admission failures. A successful/failed completion can precede
+return of relay worker call stacks retaining private candidates. Published
+generation/consumer owners also use the separate deferred retirement service.
+The fixture explicitly retains native jobs, joins terminal relay worker graphs
+through a narrowly documented test-only barrier, and drains the existing
+generation retirement service before taking exact-byte baselines. The barrier
+is valid only after all accepted stages have delivered terminal callbacks and
+no concurrent launcher remains; it is not a general GPU drain. Every fixture
+requires exact per-resource-kind recovery at teardown. Clean rollback may
+discard existing scratch (observed 384 bytes); the test rejects charge growth
+and refills pressure to the exact bound before retrying.
+
+`Queue::Drain` retirement semantics were not changed by this slice and remain a
+separate lifecycle follow-up if a stronger production quiescence contract is
+required. A proposed source-without-surface case was not counted as native
+coverage: the existing compiler rejects that authoring. No production fallback,
+geometry readback or additional publication was introduced.
+
+### 2026-09-14 checkpoint: ExecutionStages retirement repair + RBF DAG admission
+
+`testUsdGenCudaExecutionStages` `runAutoRootVariant` failed intermittently at
+the partial-root variant: correct 6102-byte literal-Length rejection, but
+`usedBytes` fell 12-20 bytes between the saturated snapshot and the rejection
+assertion. Root cause: `SourceOwner`/consumer destructors retire into the
+deferred generation/consumer retirement service, which frees byte permits on
+its worker; the test joined only the relay arenas. Fix (test-only):
+`FindUsdGenExecutionRetirementService({Cuda, device})->Drain()` after each
+relay join plus `ProducerReady()` terminal proof before pressure snapshots.
+No budget/identity assertion was weakened. Evidence: RED reproduced with
+`--repeat until-fail:10` (`FAIL 2000`, `peak=6102 used=...105/...125`); GREEN
+10 consecutive passes; full suite **179/179, 0 failures, serial, no
+exclusions**.
+
+`FindLiteralRbfShape`/`ReserveLiteralRbfExecution` now cover fixed-cardinality
+source-rooted value DAGs of literal Deform/Width/WidthBlend nodes. Source,
+named channels, source parameters and publication are charged once; each
+Width/WidthBlend output owns the established per-Width bound; each proof step
+owns 16 bytes of comparator device/pinned status; each distinct Deform owns
+its surface/sample/matrix/solver/order terms plus parameter candidates
+separately (identical descriptors never deduped; selected-device LU queries
+reused by sample count). Left-lineage double-Deform is re-verified
+structurally; the layout remains the semantic gate. New
+`testUsdGenCudaRbfDagAdmission` proves exact-budget admit, one-byte-below
+reject, atomic two-branch rollback (+2/+2 accept/rollback deltas), equal and
+unequal sibling joins (unequal fails closed with `differ outside Width`, zero
+accepts), retained COW channels against an independent reference, and
+cold/warm direct/async parity. Boundary locks: double-Deform lineage,
+expression-driven Width exclusion, non-`rbfSamples` Deform preservation, and
+reference-rooted Deform DAG layout rejection (reference sources lower only to
+Width DAGs or a single direct Length trunk; that extension belongs to the
+composition item). Full suite **180/180, 0 failures**. Remaining in this item:
+Scatter/Grow sources, topology-changing Length/Grow descendants, and
+remaining parameter/map shapes.
+
+### 2026-09-15 validation: ExecutionStages retirement repair (TODO item 1 done)
+
+Revalidated the 2026-09-14 repair against current sources with no new code
+changes: `testUsdGenCudaExecutionStages` 10/10 `--repeat until-fail:10`,
+`testUsdGenCudaRbfAggregateAdmission` 10/10, full suite **189/189, 0
+failures, serial (`-j 1`), no exclusions** (100.92s; suite grew from 179 to
+189 registered tests since the handoff; the single non-run is the expected
+`testUsdGenStormSurgery` skip). Test binary (build-codex,
+2026-09-15 07:07) is newer than every touched source, so `ninja: no work to
+do` is a current build, not a stale one. No budget/identity assertion was
+touched. TODO item 1 is closed; the broader composition/concurrency work
+(items 2-8) remains as scoped in `plans/TODO.md`.
+
+### 2026-09-15 validation: aggregate RBF DAG admission (TODO item 2 done)
+
+Audited every item-2 bullet against code + batteries with no new code
+changes: shape detection (`FindLiteralRbfDagShape`/`FindLiteralRbfScatterDagShape`),
+reserve dispatch (`ReserveLiteralRbfExecution` -> DAG `:2244` / scatter `:2513`),
+structural double-Deform lineage gate, per-Width/proof/Deform charging with
+per-kind ledger assertions. Proof, all `--repeat until-fail:5` green:
+`RbfDagAdmission`, `RbfScatterDagAdmission`, `RbfTopologyDagAdmission`,
+`RbfParamMapAdmission`, plus `RbfAggregateAdmission`, `RbfValueDag`,
+`ScatterGrowRbfDag`, `CompositionMatrix`, `ControlEval`. Reference-rooted Deform
+DAG battery covers exact/below-budget, cold/warm, ledger recovery. Full suite
+**189/189, 0 failures, serial**. TODO item 2 is closed; residual open-ended
+parameter/map shapes are bounded by the item-3 composition matrix.
+
+### 2026-09-14 checkpoint: reference-rooted RBF DAG lowering (composition)
+
+Reference sources lower as a third shape: a literal Deform/Width/WidthBlend
+value DAG with the same literal rules as authored-source RBF DAGs, including
+linear-ordered reference chains (never legacy). The Deform target must name
+one resolved surface and the reference must carry complete transported root
+bindings. Admission resolves the transported curve set and charges it like an
+authored source (named planes are validation-rejected for references, so the
+authored-plane term is empty). One executor divergence was found and fixed:
+the async source commit marked reference values deformed (generic
+`!useRest`), while the direct path marks them lineage roots; async Deform
+then rejected a legal graph. `ExecutionState` now carries the transport flag
+and the commit reproduces the direct marker. `testUsdGenCudaRbfDagAdmission`
+covers the reference battery (exact/below-budget, two-branch rollback,
+async parity); the composition probe locks the shape and refinability.
+
+### 2026-09-14 checkpoint: Scatter/Grow-rooted RBF DAG admission (Item 2 tail)
+
+Scatter→Grow plans lower Deform/Width/WidthBlend descendants through the
+capture route with their own metadata site: `runtimeRefinementAvailable`
+was unconditionally false for Deform plans and is now set from the literal
+scatter-DAG shape test. Admission charges the compiled Grow requirements
+peak (capture upload, generated output, status, map scratch) once, with
+per-Deform/Width/proof terms at the generated cardinality
+(`requirements.pointCount`, captured curve count); generated curves own no
+authored planes. Length/Noise/Grow descendants keep their existing routes.
+`testUsdGenCudaRbfTransaction --aggregate-scatter-dag-admission` proves
+exact-budget admit, one-byte-below reject, atomic two-branch rollback,
+unequal sibling fail-closed join, cold/warm direct/async parity and ledger
+recovery. Two executor observations are recorded as follow-ups, not
+encoded as rules: a single-quad V=4 surface fails fresh rest binding
+while tri V=5 binds (floor unisolated), and capture rootUVs interpolate
+the surface `uv` attribute while the binder validates barycentric-in-face
+(fixtures must satisfy both).
+
+### 2026-09-14 checkpoint: Length/Grow-descendant RBF DAG admission (Item 2 tail)
+
+`FindLiteralRbfShape` accepts Length and C3-Grow steps in authored-source
+RBF DAGs (Noise and resampling stay excluded; Grow requires literal
+segments in [2,64] for cardinality; linear-ordered Grow chains keep their
+pre-existing Noise/Length/Width-suffix rule). Admission charges the
+full-input worst case: grown cardinality uplifts Width/Deform/named terms,
+Length compactor/scratch/survivor terms mirror the Length recipe with an
+exact selected-device CUB query (the stream is now threaded through the RBF
+reserve), Grow frames/maps/status mirror it, and every step's parameter
+candidates are charged (literal programs contribute nothing, as the Length
+route proves). `testUsdGenCudaRbfTransaction
+--aggregate-topology-dag-admission` proves Length-trunk and C3-Grow Deform
+DAGs (exact/below-budget, two-branch rollback, async parity); the
+composition probe locks the shapes and the linear-Grow-Deform rejection.
+Scatter+Length+Deform stays on the fallback route (execution unproven;
+zero regression risk by construction).
+
+### 2026-09-14 checkpoint: parameter/map shapes in RBF DAG admission (Item 2 tail)
+
+Width steps in Deform-bearing RBF DAGs (authored and capture routes) now
+admit expression bindings and image maps: bindings ride the per-step
+candidate charging already in place, and each mapped Width adds its image
+upload plus root-domain sample plane. Width-only DAGs stay on the
+task-estimate route (no solver/cache shape to refine) and linear chains
+stay literal-only. `testUsdGenCudaRbfTransaction
+--aggregate-param-map-admission` proves an expression-driven plus
+image-mapped Width DAG (exact/below-budget, two-branch rollback, async
+parity); the composition probe locks DAG refinability. With this slice,
+every compiled RBF shape carries an aggregate charging proof: linear,
+value-DAG, reference-rooted, capture-route, Length/Grow-descendant, and
+parameter/map variants.
+
+### 2026-09-14 checkpoint: consuming-input control evaluation proofs (Item 3)
+
+`testUsdGenCudaControlEval` proves runtime evaluation of consuming-input
+controls with device values: primitive-domain float (`$value * $u` gives
+per-curve widths .3/.3/.3/.2/.2 in stable id order), point-domain float
+(`$value * $t` gives 0/.5/1/0/1), primitive-to-point inheritance (rootUV
+consumed per point), exact muted-operator no-op (a disabled Width aliases
+its input: identical counts and widths to the operator-free reference),
+and primitive-domain cull (`$value * $u` thresholds keep only curve 7).
+No implementation gap was found on these paths; kernels broadcast
+groom→all, primitive→curve, point→exact with bounds checks, and bool
+fields accept groom/primitive only, matching validation.
+
+### 2026-09-14 checkpoint: Vulkan muted Width/Length passthrough (Item 4)
+
+Muted topology-preserving operators now alias instead of rejecting on
+Vulkan, matching CUDA and plan/04 R14: `VulkanSourceWidthStage.disabled`
+is plan data, validation keeps full strictness, job admission skips
+control/capability checks for muted stages (structural ordering kept),
+and `BeginStage` forwards the input generation with no dispatch and no
+new value version. Length-cull muted skips identically (keep-all).
+WidthBlend and sources keep their enabled requirements, as on CUDA.
+Proofs: plan locks for muted Width/Length stages plus a job-level
+disabled-Width test (Ready without WidthPending, readback {1,2} against
+a factor-9 replace, source version preserved, ledger clean).
+
+Build-configuration incident and rule: reconfiguring build-vulkan with
+`-DCMAKE_BUILD_TYPE=Release` broke four exact-value tests (1-2 ULP FMA
+diffs between fused CPU oracles and unfused GPU evaluation). The tree was
+built without an explicit type (unfused oracles); restoring the empty
+type returns the suite to green. NEVER pass `-DCMAKE_BUILD_TYPE` for
+build-vulkan; build-codex stays Release. `-ffp-contract=off` pins were
+added to the Source/Session oracle test targets as defense in depth,
+following the existing EnvelopeArithmetic/Width precedent.
+
+### 2026-09-14 checkpoint: WidthBlend-join overlap witness (Item 5)
+
+Independent WidthBlends already take branch streams through the shared
+`widthBranch` gate/witness path, so the overlap extension needed no
+scheduler change: `testUsdGenCudaRbfTransaction --blend-overlap` arms
+gate and witness after four Widths complete, launches both blends on
+threads, and asserts rendezvous, distinct task/lane identities, absolute
+blend values (2.25/4.5), parity, and ledger recovery, with `maxActive >=
+2` observed where the device reports concurrent kernels. A witness
+disarm hook releases probe allocations for exact baselines.
+
+### 2026-09-14 checkpoint: bridge lifecycle proofs (Item 6 slice 1)
+
+`testUsdGenCudaGlInterop --lifecycle` (new `testUsdGenCudaGlLifecycle`)
+proves version acceptance, last-good visibility and renderer retirement
+through the CUDA-GL bridge end to end with traces: version 1 publishes,
+version 2 supersedes into fresh ranges, destroying version 1 cannot
+disturb the displayed version 2, a failed version 3 admission never
+becomes displayable (last-good version 2 keeps displaying), and an
+explicit GL fence retires each displayed version before destruction,
+with owner release and clean diagnostics. The plugin handoff
+(`devicePublication` gating, tile computation attachment) and the tool
+consumer loop remain the next slices; gates stay closed until those are
+demonstrated.
+
+### 2026-09-14 checkpoint: tile-scoped bridge transfers (Item 6 slice 2)
+
+`testUsdGenCudaGlInterop --tiles` (new `testUsdGenCudaGlTiles`) proves
+the per-tile publication primitive: a session device generation with two
+tiles transfers tile-1 points and widths whose bytes match the
+whole-generation slice exactly (528/528 and 176/176 green pixels in a
+GPU-side comparison shader, no host crossing), an out-of-range tile id
+fails closed with an error, and a render fence proves retirement.
+
+### 2026-09-14 checkpoint: multi-groom admission contention (Item 7 slice 1)
+
+`testUsdGenCudaRbfTransaction --multi-groom-admission` (new
+`testUsdGenCudaMultiGroomAdmission`) proves two independent grooms sharing
+one device pool: identical descriptions admit identical peaks through
+independent workspaces with distinct owners; an async job holding groom
+A's exact peak makes groom B's creation fail one byte below budget with
+no ledger movement and no attempt-counter advance; after release, groom B
+admits exactly. Full ledger recovery at teardown.
+
+### 2026-09-14 checkpoint: native allocation audit (Item 7 slice 1)
+
+Device memory flows through one choke point (`DeviceBuffer::reset`,
+always permit-tracked with conservative abandon/quarantine); every
+pinned host allocation is permit-paired; Vulkan `ChargedBuffer::Create`
+takes a kind; workspace streams and cuSOLVER handles are created with
+their owners and destroyed with them. The single exception is the CPU
+Noise GPU fast path (`ops/noise_gpu.cu`): process-lifetime static
+stream, device scratch and pinned staging grown to high water without
+ledger permits, failing over to the CPU loop. It is recorded as explicit
+headroom (bounded per workload, sequential commit thread, graceful
+fallback), not tracked peak. The single `cudaDeviceSynchronize`
+(`gpu/pointOverride.cu` destructor) is a rare-path conservative cover
+for unknown consumer streams with quarantine fallback. No waits were
+found on CUDA callback threads; scalar-readback D2H waits and
+failure-path/lifecycle drains are necessary.
+
+### 2026-09-14 checkpoint: Item 8 packaging verification and requirement reconciliation
+
+Builds after the shared-interface changes (`cudaExecution.h` stays
+CUDA-free; reserves are file-local): CUDA-on 189/189 serial, CPU-only
+85/85, Vulkan opt-in 91/91 (empty build type; never pass
+`-DCMAKE_BUILD_TYPE` for build-vulkan or FP contraction breaks
+exact-value oracles). Tests-OFF configure+build+install succeeds;
+all three installs validate (layout, comment-tolerant plugInfo with
+resolved libraries). `testUsdGenInstallTree`/`testUsdGenConsumer` pass
+per variant with `USDGEN_INSTALL_PREFIX` set. Two packaging bugs fixed:
+the exported config hard-required a Vulkan SDK for all consumers
+(now quiet-probed; Vulkan targets fail at generate time only when
+linked), and the install-tree test expected private archives/headers
+that N-7 deliberately never installs (flipped to absence locks,
+matching the B-1 no-third-party gate). Backend audit:
+CPU/CUDA-available (CUDA only when enabled), Metal/Vulkan explicitly
+unavailable with fail-closed validation and no implicit fallback;
+production Vulkan selection stays closed (injected-provider success is
+not renderer readiness). Other-driver/platform evidence: none (single
+NVIDIA Linux workstation); portability unestablished by construction.
+No commits were made (not requested); all Vulkan work remains local.
+
+Requirement status by TODO item: Item 1 done (retirement repair,
+179/179 then 189/189). Item 2 done in full (linear, value-DAG,
+reference-rooted, capture-route, Length/Grow-descendant and
+parameter/map admission with aggregate proofs). Item 3: matrix,
+runtime-eval proofs and reference-Deform done; remaining valid
+combinations (e.g. Scatter+Length+Deform execution), Noise paths and
+missing operators stay open. Item 4: muted Width/Length done; Vulkan
+operator breadth, field/expression/map inputs, oracle discrepancies,
+provenance checks and old-shader rejection stay open. Item 5: audit
+and blend-join witness done; lane expansion, Vulkan per-task state and
+Graph extension stay open. Item 6: bridge lifecycle and tile transfers
+done; plugin handoff wiring and the tool-loop commit driver stay open
+(gates closed). Item 7: multi-groom contention and allocation audit
+done; fairness/aging/eviction/device-loss/soak evidence stays open.
+Item 8: per-variant builds/installs/consumers/backend audit done;
+other drivers and release readiness stay open.
