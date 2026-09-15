@@ -1,0 +1,117 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Scatter/Grow on a unit plane with the strand width driven root-to-tip by a SeExpr expression."
+)
+
+# Expression-driven width. The Width operator's usdGen:width is connected to
+# a UsdGenExpression output; the expression is evaluated per point (the
+# customData evaluation granularity on the consuming attribute) and receives
+# the literal as $value and the root->tip parameter as $t.
+#
+# Expressions are evaluated by the execution-time SeExpr lane, which today
+# exists only on the CUDA backend: the CPU reference engine refuses connected
+# parameters. This scene therefore keeps the UsdGenGroom parent, whose schema
+# fallback usdGen:execution:backend = "cuda" selects that lane. It compiles
+# and cooks there, but the stock-Storm device-resident handoff is not
+# implemented yet, so usdview shows the plane without strands until it lands;
+# the session reports "CUDA publication requires a device-aware consumer".
+#
+# Editing: usdview -> menu "usdGen" -> "SeExpr Expression Editor" opens a
+# dock that follows the prim selection. Select /World/Groom/Fur/Expressions/
+# rootTipWidth (or the Width operator that consumes it) and edit the source.
+#
+# Execution order is the reverse of namespace order under Ops (bottom sibling
+# first): scatter -> grow -> width. No usdGen:input relationships are needed.
+#
+# View it:   .\bin\launch_usdview.ps1 plan\examples\expression-width-plane.usda
+
+def Xform "World"
+{
+    # Eye (1.9, 1.3, 2.1) looking at (0.5, 0.12, 0.5), Y up.
+    def Camera "Cam"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = ( (0.752577, 0, -0.658505, 0), (-0.319565, 0.874354, -0.365217, 0), (0.575766, 0.485289, 0.658018, 0), (1.9, 1.3, 2.1, 1) )
+        float2 clippingRange = (0.05, 50)
+        float focalLength = 35
+        float horizontalAperture = 24
+        float verticalAperture = 18
+    }
+
+    def Mesh "Plane" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        color3f[] primvars:displayColor = [(0.25, 0.25, 0.28)]
+    }
+
+    def UsdGenGroom "Groom"
+    {
+        uniform int usdGen:schemaVersion = 1
+        string usdGen:label = "Expression-driven width"
+
+        def UsdGenDescription "Fur"
+        {
+            rel usdGen:surface = </World/Plane>
+            uniform token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.004
+
+            def Scope "Ops"
+            {
+                # Terminal. The base width is the literal the expression
+                # receives as $value; the connection replaces it per point.
+                def UsdGenWidth "width"
+                {
+                    float usdGen:width = 0.012 (
+                        customData = { dictionary usdGen = { string evaluation = "point" } }
+                    )
+                    float usdGen:width.connect = </World/Groom/Fur/Expressions/rootTipWidth.outputs:result>
+                    bool usdGen:replace = true
+                }
+
+                def UsdGenGrow "grow"
+                {
+                    int usdGen:seed = 19
+                    int usdGen:segments = 8
+                    float usdGen:length = 0.3
+                    float2 usdGen:lengthRandom = (0.8, 1.2)
+                    uniform token usdGen:direction = "vector"
+                    vector3f usdGen:directionVector = (0.35, 1, 0.2)
+                }
+
+                def UsdGenScatter "scatter"
+                {
+                    uniform token usdGen:mode = "random"
+                    int usdGen:seed = 41
+                    float usdGen:density = 800
+                }
+            }
+
+            # Providers, never chain nodes. The output type is declared by the
+            # typed custom outputs:* attribute and must match the consumer.
+            def Scope "Expressions"
+            {
+                # Quadratic taper: full width at the root, 15% at the tip.
+                # $t is 0 at the root and 1 at the tip of every strand.
+                def UsdGenExpression "rootTipWidth"
+                {
+                    string usdGen:expr:source = "$value * (0.15 + 0.85 * (1 - $t) * (1 - $t))"
+                    custom float outputs:result
+                }
+            }
+        }
+    }
+}

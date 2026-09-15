@@ -30,6 +30,7 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenSchema\resources"),
     (Join-Path $Build "usd\usdGenImaging\resources"),
     (Join-Path $Build "usd\usdGenShaders\resources"),
+    (Join-Path $Build "usd\usdGenTools\resources"),
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")
 ) | Where-Object { Test-Path $_ }

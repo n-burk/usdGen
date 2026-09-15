@@ -13,8 +13,8 @@
 #   * Operators live under the child Scope named "Ops". Execution order is the
 #     reverse of namespace order (bottom sibling first), and the FIRST child is
 #     the terminal whose result is published. So Grow is authored above Scatter.
-#   * usdGen:input on Grow is optional here (the compiler derives it from the
-#     order) but makes the data flow explicit.
+#   * No usdGen:input relationships: the compiler derives every edge from
+#     that composed order, so each operator consumes the one below it.
 #   * UsdGenRestAPI + primvars:rest give the engine a rest pose to bind to;
 #     without it the first pulled points are used as rest.
 #
@@ -84,7 +84,6 @@ def Xform "World"
                 # randomised between 0.7x and 1.3x of 0.25.
                 def UsdGenGrow "grow"
                 {
-                    rel usdGen:input = </World/Groom/Fur/Ops/scatter>
                     int usdGen:seed = 19
                     int usdGen:segments = 5
                     float usdGen:length = 0.25

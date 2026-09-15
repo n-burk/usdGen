@@ -128,9 +128,12 @@ class UsdGenGuideSet "UsdGenGuideSet" (
 # Operator base and abstract groups (02-schema.md §1, §2.5)
 # ---------------------------------------------------------------------------
 
-# UsdGenOperator (abstract) — everything with usdGen:input. UsdGenMaskAPI
-# (§2.13) is auto-applied to this type (plugInfo AutoApplyAPISchemas), so
-# every operator carries the mask block without hand application.
+# UsdGenOperator (abstract) — every chain node. Operators are ordered by the
+# composed hierarchy under a Description's Ops scope (reverse sibling
+# post-order, bottom sibling first); there is no authored input edge.
+# UsdGenMaskAPI (§2.13) is auto-applied to this type (plugInfo
+# AutoApplyAPISchemas), so every operator carries the mask block without
+# hand application.
 class "UsdGenOperator" (
     inherits = </Typed>
     customData = {
@@ -138,7 +141,6 @@ class "UsdGenOperator" (
     }
 )
 {
-    rel usdGen:input
     bool usdGen:enabled = true (
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )

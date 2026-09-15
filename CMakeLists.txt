@@ -422,6 +422,26 @@ file(COPY
     DESTINATION "${_usdgen_shader_resources}")
 
 # ---------------------------------------------------------------------------
+# usdGenTools: usdview plugin (SeExpr expression editor). Pure Python. The
+# resources dir carries the Type "python" plugInfo that usdview discovers on
+# PXR_PLUGINPATH_NAME; the package itself is staged into build/python, which
+# the launchers put on PYTHONPATH (plan/08 §5).
+# ---------------------------------------------------------------------------
+set(_usdgen_tools_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenTools/resources")
+file(GLOB_RECURSE _usdgen_tools_python
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/python/*.py")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
+    ${_usdgen_tools_python})
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
+    DESTINATION "${_usdgen_tools_resources}")
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/python/usdGenTools"
+    DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/python"
+    FILES_MATCHING PATTERN "*.py")
+
+# ---------------------------------------------------------------------------
 # CUDA foundations and legacy optional GPU noise
 # ---------------------------------------------------------------------------
 # SeExpr2::FBM<3,1,false,float> (noise.cpp:181-277) gains a CUDA kernel
@@ -1559,6 +1579,45 @@ endif()
 set_tests_properties(testUsdGenSchemaUpToDate PROPERTIES
     LABELS "T1" ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" ${_usdgen_schema_uptodate_props})
 
+# usdGenTools SeExpr editor: drives usdview through testusdview against the
+# expression example. Needs the prefix's usdview (a Python script) and a
+# python that imports its pxr, so it registers only where both exist, and it
+# opens a window, so it is T2 (not part of the T0|T1 run).
+# The interpreter must be the one that imports the prefix's pxr: PY in the
+# environment (the usdRig convention), else the shebang testusdview itself
+# carries, else whatever is on PATH. On Windows a plain find_program would
+# pick the Store's python3.exe alias, which cannot load these modules.
+set(_usdgen_test_python "$ENV{PY}")
+if(NOT _usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
+    file(STRINGS "${USD_INSTALL_DIR}/bin/testusdview" _usdgen_testusdview_shebang LIMIT_COUNT 1)
+    string(REGEX REPLACE "^#![ \t]*" "" _usdgen_shebang_python "${_usdgen_testusdview_shebang}")
+    if(EXISTS "${_usdgen_shebang_python}")
+        set(_usdgen_test_python "${_usdgen_shebang_python}")
+    endif()
+endif()
+if(NOT _usdgen_test_python)
+    find_program(_usdgen_test_python NAMES python3 python NO_CACHE)
+endif()
+if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
+    add_test(NAME testUsdGenToolsExprEditor
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+    usdgen_test_pluginpath_ops(_usdgen_tools_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    # Both python package layouts OpenUSD installs on Windows/POSIX, plus
+    # build/python where the usdGenTools package is staged.
+    usdgen_test_path_list_ops(_usdgen_tools_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+    set_tests_properties(testUsdGenToolsExprEditor PROPERTIES
+        LABELS "T2;tools;usdview" TIMEOUT 180
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
+endif()
+
 # M1 T2 Storm tests (EGL harness; the S-8/S-9/L-1 PW decisions get confirmed
 # on shipped code here, 11 §2.2 exit-gate table).
 if(NOT WIN32)
@@ -1751,6 +1810,15 @@ install(FILES
 # zero shaders in the install tree).
 install(DIRECTORY usdGenShaders/resources/shaders/
     DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenShaders/resources/shaders")
+
+# usdGenTools usdview plugin: plugInfo beside the other plugin resources,
+# the package where the install tree's python path already points.
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTools/resources")
+install(DIRECTORY plugin/usdGenTools/python/usdGenTools
+    DESTINATION "${USDGEN_INSTALL_PYTHONDIR}"
+    FILES_MATCHING PATTERN "*.py")
 
 # Export targets so the package config's include(usdGenTargets.cmake) resolves.
 install(EXPORT usdGenTargets
