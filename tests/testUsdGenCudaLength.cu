@@ -171,13 +171,15 @@ int main() {
             {tinyOffsets.data(),2}, {tinyIds.data(),1}, 1, 2};
         LengthParameters tiny;
         tiny.value = ScalarField::Literal(2.f);
-        tiny.blend = ScalarField::Literal(std::numeric_limits<float>::min());
-        tiny.maskAmount = ScalarField::Literal(.5f);
+        // A subnormal envelope must survive as a subnormal, not flush to zero.
+        tiny.mask = ScalarField::Literal(std::numeric_limits<float>::min() * .5f);
         CHECK(op.Apply(tinyGeometry, {}, tiny, tinyOutput.view(), tinyKeep.view(), producer) == StyleStatus::Ok &&
               op.Finish(consumer) == StyleStatus::Ok && Download(tinyOutput, tinyGot, consumer));
         float const subnormal = -std::numeric_limits<float>::min()*.5f;
         CHECK(std::memcmp(&tinyGot[1].x, &subnormal, sizeof(float)) == 0);
-        tiny.blend = ScalarField::Literal(std::numeric_limits<float>::denorm_min());
+        // An exact zero envelope is a bitwise pass-through of both geometry
+        // and topology, whatever the length bounds say.
+        tiny.mask = ScalarField::Literal(0.f);
         tiny.minRemainingLength = ScalarField::Literal(100.f);
         tiny.cullThreshold = ScalarField::Literal(1000.f);
         CHECK(op.Apply(tinyGeometry, {}, tiny, tinyOutput.view(), tinyKeep.view(), producer) == StyleStatus::Ok &&
@@ -215,7 +217,7 @@ int main() {
           cudaStreamSynchronize(producer) == cudaSuccess);
     p = LengthParameters{};
     p.value = ScalarField::Literal(2.0f);
-    p.blend = ScalarField::Device(Const(pointBlend), expr::Domain::Point);
+    p.mask = ScalarField::Device(Const(pointBlend), expr::Domain::Point);
     CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
           op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer) &&
           Download(keep, gotKeep, consumer));
@@ -238,10 +240,9 @@ int main() {
     CHECK(std::memcmp(got.data(), source.data(), sizeof(source[0])*source.size()) == 0 &&
           gotKeep[0] == 1 && gotKeep[1] == 1);
 
-    DeviceBuffer<float> pointValue, zeroProfile;
-    CHECK(pointValue.reset(5) == cudaSuccess && zeroProfile.reset(257) == cudaSuccess);
-    CHECK(Upload(pointValue, {0,1,2,0,1}, producer) &&
-          Upload(zeroProfile, std::vector<float>(257,0), producer));
+    DeviceBuffer<float> pointValue;
+    CHECK(pointValue.reset(5) == cudaSuccess);
+    CHECK(Upload(pointValue, {0,1,2,0,1}, producer));
     p = LengthParameters{}; p.mode = LengthMode::Set;
     p.value = ScalarField::Device(Const(pointValue), expr::Domain::Point);
     CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
@@ -271,8 +272,7 @@ int main() {
         LengthParameters envelope;
         envelope.mode = LengthMode::Set;
         envelope.value = ScalarField::Literal(4.f);
-        envelope.blend = ScalarField::Literal(.5f);
-        envelope.maskAmount = ScalarField::Literal(.5f);
+        envelope.mask = ScalarField::Literal(.25f);
         envelope.method = method ? LengthMethod::CutExtend : LengthMethod::Scale;
         envelope.rebuild = method == 2 ? LengthRebuild::Reparam : LengthRebuild::KeepParam;
         CHECK(op.Apply(geometry, {}, envelope, output.view(), keep.view(), producer) == StyleStatus::Ok &&
@@ -368,7 +368,7 @@ int main() {
           std::memcmp(minimumSourceAgain.data(), source.data(), source.size()*sizeof(float3)) == 0);
     p = LengthParameters{}; p.mode = LengthMode::Cull;
     p.cullThreshold = ScalarField::Literal(100);
-    p.maskProfile = Const(zeroProfile);
+    p.mask = ScalarField::Literal(0.f);
     CHECK(op.Apply(geometry, {}, p, output.view(), keep.view(), producer) == StyleStatus::Ok &&
           op.Finish(consumer) == StyleStatus::Ok && Download(keep, gotKeep, consumer));
     CHECK(gotKeep == std::vector<uint8_t>({1,1}));
@@ -439,11 +439,12 @@ int main() {
     // point field are all semantic failures: neither candidate channel leaks.
     CHECK(Upload(offsets,{0u,3u,9u},producer) && freshSemanticFailure(LengthParameters{}));
     CHECK(Upload(offsets,{0u,3u,5u},producer));
-    DeviceBuffer<float> badProfile, badExpression;
-    CHECK(badProfile.reset(257)==cudaSuccess && badExpression.reset(5)==cudaSuccess &&
-          Upload(badProfile,std::vector<float>(257,NAN),producer) &&
+    DeviceBuffer<float> badMask, badExpression;
+    CHECK(badMask.reset(5)==cudaSuccess && badExpression.reset(5)==cudaSuccess &&
+          Upload(badMask,{1.f,NAN,1.f,1.f,1.f},producer) &&
           Upload(badExpression,{1.f,-1.f,1.f,1.f,1.f},producer));
-    p=LengthParameters{}; p.maskProfile=Const(badProfile); CHECK(freshSemanticFailure(p));
+    p=LengthParameters{}; p.mask=ScalarField::Device(Const(badMask),expr::Domain::Point);
+    CHECK(freshSemanticFailure(p));
     p=LengthParameters{}; p.value=ScalarField::Device(Const(badExpression),expr::Domain::Point);
     CHECK(freshSemanticFailure(p));
     // A proven semantic rejection leaves this instance reusable.

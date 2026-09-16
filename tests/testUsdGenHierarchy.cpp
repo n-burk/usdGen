@@ -98,7 +98,6 @@ main()
     if (!layer->ImportFromString(R"(#usda 1.0
 def UsdGenDescription "hair"
 {
-    rel usdGen:terminal = </hair/Ops/deform>
     def Scope "Ops"
     {
         def UsdGenDeform "deform"

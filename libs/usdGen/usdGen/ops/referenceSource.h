@@ -15,7 +15,6 @@ public:
     ~UsdGenReferenceSourceOp() override = default;
 
     TfToken Type() const override { return TfToken("UsdGenReferenceSource"); }
-    UsdGenSpace Space() const override { return UsdGenSpace::Rest; }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CurveCount; }
     UsdGenRole Role() const override { return UsdGenRole::Reference; }
     bool IsGenerator() const override { return true; }

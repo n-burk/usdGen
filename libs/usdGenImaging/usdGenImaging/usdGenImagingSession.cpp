@@ -29,9 +29,19 @@ namespace usdGenImaging {
 
 namespace {
 using Pipeline = usdGen::UsdGenExecutionPipeline;
+// Process-lifetime objects that own TBB arenas or flow graphs are leaked on
+// purpose throughout this file (runtime, retirement queue, session store). A
+// static destructor in this library runs at DLL_PROCESS_DETACH on Windows,
+// which is after ExitProcess has terminated every other thread: a graph wait
+// or arena teardown issued there can never be serviced by a worker, so it
+// spins for as long as the process is allowed to live (observed for the store
+// destructor's close Await and for ~Retirements). On Linux the same
+// destructors ran during exit() with the workers alive, so the leak changes
+// nothing that was observable there beyond the mapping's release, which the OS
+// performs anyway.
 usdGen::UsdGenExecutionRuntime& ImagingRuntime() {
-    static usdGen::UsdGenExecutionRuntime runtime(8);
-    return runtime;
+    static auto* runtime = new usdGen::UsdGenExecutionRuntime(8);
+    return *runtime;
 }
 
 // Public TfRefPtr handles may disappear during a notice callback. Retirement
@@ -50,7 +60,7 @@ public:
         graph.wait_for_all();
     }
 };
-Retirements& RetirementQueue() { static Retirements queue; return queue; }
+Retirements& RetirementQueue() { static auto* queue = new Retirements; return *queue; }
 }
 
 struct UsdGenImagingSession::State {
@@ -524,10 +534,12 @@ UsdGenSessionStore::~UsdGenSessionStore() = default;
 UsdGenSessionStore &UsdGenSessionStore::GetInstance()
 {
     // The store can own the last public handles until process teardown.
-    // Construct retirement first so its graph outlives the store destructor.
+    // Construct retirement first so its graph outlives the store. Both are
+    // leaked (see ImagingRuntime): the store destructor's close Await cannot
+    // complete during DLL_PROCESS_DETACH, where no worker thread remains.
     (void)RetirementQueue();
-    static UsdGenSessionStore instance;
-    return instance;
+    static auto* instance = new UsdGenSessionStore;
+    return *instance;
 }
 
 UsdGenSessionHandle UsdGenSessionStore::Attach(UsdGenSessionKey const &key)

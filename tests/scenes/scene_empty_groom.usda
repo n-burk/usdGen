@@ -11,7 +11,6 @@
 
 def UsdGenGroom "Groom"
 {
-    int usdGen:schemaVersion = 1
     uniform token usdGen:sessionId = "default"
 
     def UsdGeomMesh "Surface"

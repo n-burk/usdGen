@@ -1,4 +1,5 @@
 #include "nonWidthCompare.h"
+#include "cudaCompat.h"
 
 #include <cuda_runtime.h>
 
@@ -89,9 +90,9 @@ cudaError_t Validate(CurveFullNonWidthInput const& x, int d) {
         g.points.size != g.pointCount || (g.restPoints.size && g.restPoints.size != g.pointCount)) return cudaErrorInvalidValue;
     cudaError_t s = Pointer(g.curveOffsets,d); if(s==cudaSuccess)s=Pointer(g.stableIds,d); if(s==cudaSuccess)s=Pointer(g.points,d); if(s==cudaSuccess)s=Pointer(g.restPoints,d); if(s!=cudaSuccess)return s;
     if ((x.hairT.size && x.hairT.size != g.pointCount) || (x.rootPrim.size && x.rootPrim.size != g.curveCount) ||
-        (x.rootUV.size && x.rootUV.size != g.curveCount) || (x.curveMask.size && x.curveMask.size != g.curveCount)) return cudaErrorInvalidValue;
+        (x.rootUV.size && x.rootUV.size != g.curveCount)) return cudaErrorInvalidValue;
     if ((s=Pointer(x.hairT,d))!=cudaSuccess || (s=Pointer(x.rootPrim,d))!=cudaSuccess || (s=Pointer(x.rootUV,d))!=cudaSuccess ||
-        (s=Pointer(x.curveMask,d))!=cudaSuccess || (s=Frames(x.frames,g.curveCount,d))!=cudaSuccess) return s;
+        (s=Frames(x.frames,g.curveCount,d))!=cudaSuccess) return s;
     for (auto const& chunk : x.chunks) {
         if (chunk.firstCurve > g.curveCount ||
             chunk.curveCount > g.curveCount - chunk.firstCurve ||
@@ -120,7 +121,7 @@ bool SameMeta(UsdGenDeviceChannelMetadata const&a,UsdGenDeviceChannelMetadata co
 bool SameDesc(CurveFullNonWidthInput const& a, CurveFullNonWidthInput const& b) {
     if (a.geometry.restPoints.size != b.geometry.restPoints.size || a.hairT.size != b.hairT.size ||
         a.rootPrim.size != b.rootPrim.size || a.rootUV.size != b.rootUV.size ||
-        a.curveMask.size != b.curveMask.size || a.frames.tangent.size != b.frames.tangent.size ||
+        a.frames.tangent.size != b.frames.tangent.size ||
         a.frames.binormal.size != b.frames.binormal.size || a.frames.normal.size != b.frames.normal.size ||
         a.chunks.size() != b.chunks.size() || a.named.size() != b.named.size()) return false;
     for (size_t i = 0; i < a.chunks.size(); ++i) { auto const& x = a.chunks[i]; auto const& y = b.chunks[i]; if (x.firstCurve != y.firstCurve || x.curveCount != y.curveCount || x.liveCount != y.liveCount || x.firstCv != y.firstCv || x.cvCount != y.cvCount || x.tile != y.tile || x.surface != y.surface) return false; }
@@ -227,9 +228,6 @@ cudaError_t CudaCurveFullNonWidthCompare::BeginFresh(
         return failed(status);
     if (a.rootUV.size == b.rootUV.size &&
         (status = Run2(stream, a.rootUV, b.rootUV, a.rootUV.size, &result->equal)) != cudaSuccess)
-        return failed(status);
-    if (a.curveMask.size == b.curveMask.size &&
-        (status = Run(stream, a.curveMask, b.curveMask, a.curveMask.size, &result->equal)) != cudaSuccess)
         return failed(status);
     if (a.frames.tangent.size == b.frames.tangent.size &&
         (status = Run3(stream, a.frames.tangent, b.frames.tangent,

@@ -157,7 +157,7 @@ int main()
     for (auto& thread : coldStarts) thread.join();
     Check(coldSuccess.load() == 8, "simultaneous cold sessions read complete built-in registry");
     usdGenRegisterM1Operators();
-    UsdGenOpRegistry::Get().Register(TfToken("UsdGenAsyncHold"), 0,
+    UsdGenOpRegistry::Get().Register(TfToken("UsdGenAsyncHold"),
                                       [] { return std::make_unique<HoldCaptureOp>(); });
 
     // Seed an actual good publication before exercising supersession and

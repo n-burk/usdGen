@@ -2,7 +2,7 @@
 """Generate PointInstancer-based fur USD scenes (pure text; no pxr needed).
 
 Usage: fur_gen.py <count> <out.usda>
-Scene: scalp sphere (r=1) + N instanced tapered cones (strands) oriented along
+Scene: scalp sphere (r=1) + N instanced tapered BasisCurves oriented along
 perturbed surface normals, per-strand length scale and brown color variation,
 plus a 4:3 lookAt render camera and dome/distant lighting.
 """
@@ -64,22 +64,9 @@ def uv_sphere_body(rings=24, sectors=48, radius=1.0):
             "        point3f[] points = " + vecs(verts) + "\n")
 
 
-def cone_strand_body(segs=6, radius=0.02, base_y=-0.05, tip_y=1.0):
-    verts = [(radius * math.cos(2.0 * math.pi * i / segs), base_y,
-              radius * math.sin(2.0 * math.pi * i / segs)) for i in range(segs)]
-    verts.append((0.0, tip_y, 0.0))
-    tip = len(verts) - 1
-    counts, idx = [], []
-    for i in range(segs):
-        counts.append(3)
-        idx += [tip, i, (i + 1) % segs]
-    return ("        int[] faceVertexCounts = " + ints(counts) + "\n"
-            "        int[] faceVertexIndices = " + ints(idx) + "\n"
-            '        uniform token subdivisionScheme = "none"\n'
-            "        point3f[] points = " + vecs(verts) + "\n")
-
-
 def generate(count, out_path):
+    if count <= 0:
+        raise ValueError("strand count must be positive")
     rng = random.Random(14 + count)
     pts, orients, scales, cols = [], [], [], []
     golden = math.pi * (3.0 - math.sqrt(5.0))
@@ -88,23 +75,29 @@ def generate(count, out_path):
         r = math.sqrt(max(0.0, 1.0 - y * y))
         th = golden * i
         nx, ny, nz = math.cos(th) * r, y, math.sin(th) * r
-        j = 0.18
-        dx, dy, dz = nx + rng.gauss(0, j), ny + rng.gauss(0, j), nz + rng.gauss(0, j)
+        # Lay the coat along the sphere toward -Y, leaving a normal component
+        # so strands clear the scalp. A radial-only groom looks like needles.
+        tx, ty, tz = nx * ny, ny * ny - 1.0, nz * ny
+        tm = max(1e-6, math.sqrt(tx * tx + ty * ty + tz * tz))
+        j = 0.08
+        dx = 0.65 * nx + 0.75 * tx / tm + rng.gauss(0, j)
+        dy = 0.65 * ny + 0.75 * ty / tm + rng.gauss(0, j)
+        dz = 0.65 * nz + 0.75 * tz / tm + rng.gauss(0, j)
         m = math.sqrt(dx * dx + dy * dy + dz * dz)
         pts.append((nx, ny, nz))
         orients.append(q_from_to(dx / m, dy / m, dz / m))
         length = rng.uniform(0.12, 0.30)
         w = rng.uniform(0.7, 1.4)
         scales.append((w, length, w))
-        base = rng.uniform(0.30, 0.66)
+        base = rng.uniform(0.11, 0.22)
         cols.append((base, base * 0.62, base * 0.40))
 
     out = []
     out.append('#usda 1.0\n(\n    defaultPrim = "World"\n    metersPerUnit = 1\n    upAxis = "Y"\n)\n\n')
     out.append('def Xform "World" (\n    kind = "Assembly"\n)\n{\n')
     out.append('    def Camera "RenderCam"\n    {\n'
-               '        uniform token[] xformOpOrder = ["xformOp:lookAt"]\n'
-               "        lookAtf xformOp:lookAt = ((4.6, 1.8, 4.6), (0, 0, 0), (0, 1, 0))\n"
+               '        uniform token[] xformOpOrder = ["xformOp:translate"]\n'
+               "        double3 xformOp:translate = (0, 0, 7.2)\n"
                "        float2 clippingRange = (0.1, 60)\n"
                "        float focalLength = 42\n"
                "        uniform token projection = \"perspective\"\n"
@@ -117,22 +110,51 @@ def generate(count, out_path):
                '        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]\n'
                "    }\n\n")
     out.append('    def DomeLight "Ambient"\n    {\n'
-               "        float inputs:intensity = 800\n"
+               "        float inputs:intensity = 0.3\n"
                "        color3f inputs:color = (0.85, 0.9, 1.0)\n"
                "    }\n\n")
-    out.append('    def Scope "Prototypes"\n    {\n'
-               '        def Mesh "Strand"\n        {\n' + cone_strand_body() + "        }\n    }\n\n")
-    out.append('    def Mesh "Scalp"\n    {\n' + uv_sphere_body() + "    }\n\n")
+    out.append('''    def Material "FurLook"
+    {
+        token outputs:glslfx:surface.connect = </World/FurLook/Surface.outputs:surface>
+        def Shader "Surface"
+        {
+            uniform token info:id = "UsdGenHairPreview"
+            color3f inputs:tipColor = (0.48, 0.25, 0.09)
+            float inputs:colorRamp = 1.4
+            float inputs:selfOcclusion = 0.5
+            float inputs:specular1Gain = 0.18
+            token outputs:surface
+        }
+    }
+''')
+    out.append('    def Mesh "Scalp"\n    {\n' + uv_sphere_body() +
+               '        color3f[] primvars:displayColor = [(0.08, 0.035, 0.012)] (interpolation = "constant")\n' + "    }\n\n")
     out.append('    def PointInstancer "Fur"\n    {\n'
-               "        rel prototypes = </World/Prototypes/Strand>\n"
-               '        uniform token visibility = "ids"\n'
-               "        int[] ids = " + ints([0] * count) + "\n"
-               "        point3f[] points = " + vecs(pts) + "\n"
-               "        quatf[] orientations = " + quats(orients) + "\n"
+               "        rel prototypes = </World/Fur/Strand>\n"
+               "        int[] protoIndices = " + ints([0] * count) + "\n"
+               "        int64[] ids = " + ints(range(count)) + "\n"
+               "        point3f[] positions = " + vecs(pts) + "\n"
+               "        quath[] orientations = " + quats(orients) + "\n"
                "        vector3f[] scales = " + vecs(scales) + "\n"
-               "        float[] primvars:colors = [" + ", ".join(f(v) for c in cols for v in c) + "]" +
-               ' (custom data type = "color3f", interpolation = "constant", role = "color")\n'
-               "    }\n}\n")
+               "        color3f[] primvars:displayColor = " + vecs(cols) +
+               ' (interpolation = "varying")\n'
+               "        float[] primvars:hairId = [" + ", ".join(f(rng.random()) for _ in range(count)) +
+               '] (interpolation = "varying")\n')
+    out.append('''        def BasisCurves "Strand" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            rel material:binding = </World/FurLook>
+            uniform token type = "cubic"
+            uniform token basis = "bspline"
+            uniform token wrap = "pinned"
+            int[] curveVertexCounts = [8]
+            point3f[] points = [(0,0,0), (0,0.14,0), (0.01,0.28,0), (0.02,0.43,0), (0.03,0.57,0), (0.05,0.71,0), (0.07,0.86,0), (0.09,1,0)]
+            float[] widths = [0.006,0.0057,0.0052,0.0046,0.0038,0.0028,0.0016,0.0003] (interpolation = "vertex")
+            float[] primvars:hairT = [0,0.14,0.28,0.43,0.57,0.71,0.86,1] (interpolation = "vertex")
+            float primvars:minScreenSpaceWidths = 1 (interpolation = "constant")
+        }
+    }
+}
+''')
 
     with open(out_path, "w") as fh:
         fh.write("".join(out))

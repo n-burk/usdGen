@@ -24,7 +24,7 @@ bool SameKey(CudaSurfaceBindingKey const& a, CudaSurfaceBindingKey const& b) {
         a.restNormals == b.restNormals && a.restNormalDomain == b.restNormalDomain &&
         a.faceVertexCounts == b.faceVertexCounts &&
         a.faceVertexIndices == b.faceVertexIndices &&
-        a.sampleBudget == b.sampleBudget && a.algorithmVersion == b.algorithmVersion;
+        a.sampleBudget == b.sampleBudget;
 }
 bool ValidNormalShape(UsdGenSurfaceDesc const& source) {
     const size_t faceCount = source.faceVertexCounts.size();
@@ -43,7 +43,7 @@ bool ValidNormalShape(UsdGenSurfaceDesc const& source) {
 } // namespace
 
 CudaSurfacePreparationStatus PrepareCudaSurface(
-    UsdGenSurfaceDesc const& source, uint32_t sampleBudget, int algorithmVersion,
+    UsdGenSurfaceDesc const& source, uint32_t sampleBudget,
     CudaSurfacePrepared* output, std::vector<std::string>* diagnostics) {
     if (!output) { Diag(diagnostics, "null CUDA surface output"); return CudaSurfacePreparationStatus::InvalidArgument; }
     auto fail = [&](CudaSurfacePreparationStatus status, char const* message) {
@@ -99,9 +99,8 @@ CudaSurfacePreparationStatus PrepareCudaSurface(
         }
         candidate.key = {source.path, source.restPoints, source.restNormals, source.restNormalDomain,
                          source.faceVertexCounts,
-                         source.faceVertexIndices, sampleBudget, algorithmVersion};
+                         source.faceVertexIndices, sampleBudget};
         candidate.sampleBudget = sampleBudget;
-        candidate.algorithmVersion = algorithmVersion;
         *output = std::move(candidate);
         return CudaSurfacePreparationStatus::Ok;
     } catch (std::bad_alloc const&) {

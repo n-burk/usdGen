@@ -69,8 +69,6 @@ def Xform "Character"
 
     def UsdGenGroom "Groom"
     {
-        uniform int usdGen:schemaVersion = 1
-        string usdGen:label = "Example groom"
         # Proposed groom-wide requirement, inherited by every description/op.
         # "cuda" includes GPU-resident tools/rendering, with no CPU fallback.
         # Device selection and allocation are session state, not asset settings.
@@ -80,8 +78,6 @@ def Xform "Character"
         {
             # Operators inherit this surface unless they author an override.
             rel usdGen:surface = </Character/Scalp>
-            float usdGen:densityScale = 0.25
-            float usdGen:renderDensityScale = 1.0
             uniform token usdGen:curve:basis = "bspline"
 
             # Bottom sibling first; descendants before their operator parent.
@@ -93,8 +89,6 @@ def Xform "Character"
                     # Required animation path: rest-bound RBF surface deformation.
                     # The mode/sample-count properties already exist in the schema;
                     # a working CUDA RBF implementation is new required work.
-                    uniform token usdGen:mode = "rbf"
-                    uniform token usdGen:space = "deformed"
                     rel usdGen:surface = </Character/Scalp>
                     # Toy fixture: all five vertices. Production budget starts
                     # around 100, then is tuned to the actual deformation domain.
@@ -131,13 +125,9 @@ def Xform "Character"
                             customData = { dictionary usdGen = { string evaluation = "groom" } }
                         )
                         bool usdGen:enabled.connect = </Character/Groom/hair/Expressions/enableFrizz.outputs:result>
-                        float usdGen:blend = 1 (
-                            customData = { dictionary usdGen = { string evaluation = "point" } }
-                        )
                         uniform int usdGen:seed = 37 (
                             customData = { dictionary usdGen = { string evaluation = "groom" } }
                         )
-                        uniform token usdGen:space = "rest"
                         float usdGen:noise:magnitude = 0.12 (
                             customData = { dictionary usdGen = { string evaluation = "point" } }
                         )
@@ -146,15 +136,13 @@ def Xform "Character"
                             customData = { dictionary usdGen = { string evaluation = "primitive" } }
                         )
 
-                        # Same field, different local envelope: protect the roots.
-                        float usdGen:mask:amount = 1 (
+                        # Same field, different local envelope: protect the
+                        # roots.  The connection names the expression PRIM,
+                        # which resolves to its outputs:result.
+                        float usdGen:mask = 1 (
                             customData = { dictionary usdGen = { string evaluation = "primitive" } }
                         )
-                        float usdGen:mask:amount.connect = </Character/Groom/hair/Expressions/styleMask.outputs:result>
-                        float2[] usdGen:mask:ramp:knots = [(0, 0), (0.3, 0.2), (1, 1)] (
-                            customData = { dictionary usdGen = { string evaluation = "groom" } }
-                        )
-                        uniform token usdGen:mask:ramp:interpolation = "linear"
+                        float usdGen:mask.connect = </Character/Groom/hair/Expressions/styleMask>
                     }
 
                     def UsdGenClump "clump"
@@ -175,11 +163,12 @@ def Xform "Character"
                         )
                         uniform token usdGen:clump:profile:interpolation = "linear"
 
-                        # UsdGenMaskAPI is auto-applied to every operator type.
-                        float usdGen:mask:amount = 0.8 (
+                        # usdGen:mask is declared on UsdGenStyler, so every
+                        # styler carries the operator envelope.
+                        float usdGen:mask = 0.8 (
                             customData = { dictionary usdGen = { string evaluation = "primitive" } }
                         )
-                        float usdGen:mask:amount.connect = </Character/Groom/hair/Expressions/styleMask.outputs:result>
+                        float usdGen:mask.connect = </Character/Groom/hair/Expressions/styleMask.outputs:result>
                     }
                 }
 
@@ -199,7 +188,6 @@ def Xform "Character"
                     # Child source executes before this interpolation operator.
                     def UsdGenScatter "scatter"
                     {
-                        uniform token usdGen:mode = "random"
                         uniform int usdGen:seed = 11 (
                             customData = { dictionary usdGen = { string evaluation = "groom" } }
                         )

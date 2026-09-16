@@ -1,4 +1,5 @@
 #include "noise.h"
+#include "cudaCompat.h"
 
 #include "seexprNoise.cuh"
 
@@ -212,7 +213,6 @@ __global__ void ValidateInputs(DeviceCurveGeometryView geometry,
                                DeviceView<const float> hairT,
                                RestRootFrames frames,
                                DeviceView<const float> magnitudeProfile,
-                               DeviceView<const float> maskProfile,
                                int* error) {
     const size_t first = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     const size_t stride = size_t(blockDim.x) * gridDim.x;
@@ -274,11 +274,6 @@ __global__ void ValidateInputs(DeviceCurveGeometryView geometry,
         if (!Finite(value) || value < 0.0f)
             SetError(error, Finite(value) ? kBadValue : kNonFinite);
     }
-    for (size_t i = first; i < maskProfile.size; i += stride) {
-        const float value = maskProfile.data[i];
-        if (!Finite(value) || value < 0.0f || value > 1.0f)
-            SetError(error, Finite(value) ? kBadValue : kNonFinite);
-    }
 }
 
 __global__ void NoiseKernel(DeviceCurveGeometryView geometry,
@@ -317,7 +312,7 @@ __global__ void NoiseKernel(DeviceCurveGeometryView geometry,
         for (uint32_t point = begin; point < end; ++point) {
             float magnitude = 0.0f, frequency = 0.0f, correlation = 0.0f;
             float lacunarity = 0.0f, gain = 0.0f, preserve = 0.0f;
-            float blend = 0.0f, maskAmount = 0.0f;
+            float mask = 0.0f;
             int32_t octaves = 0;
             if (!ReadScalar(parameters.magnitude, curve, point, &magnitude, error) ||
                 !ReadScalar(parameters.frequency, curve, point, &frequency, error) ||
@@ -326,23 +321,20 @@ __global__ void NoiseKernel(DeviceCurveGeometryView geometry,
                 !ReadScalar(parameters.lacunarity, curve, point, &lacunarity, error) ||
                 !ReadScalar(parameters.gain, curve, point, &gain, error) ||
                 !ReadScalar(parameters.preserveLength, curve, point, &preserve, error) ||
-                !ReadScalar(parameters.blend, curve, point, &blend, error) ||
-                !ReadScalar(parameters.maskAmount, curve, point, &maskAmount, error))
+                !ReadScalar(parameters.mask, curve, point, &mask, error))
                 continue;
             if (magnitude < 0.0f || frequency <= 0.0f || correlation < 0.0f ||
                 correlation > 1.0f || lacunarity <= 1.0f || gain < 0.0f || gain > 1.0f ||
-                preserve < 0.0f || preserve > 1.0f || blend < 0.0f || blend > 1.0f ||
-                maskAmount < 0.0f || maskAmount > 1.0f) {
+                preserve < 0.0f || preserve > 1.0f ||
+                mask < 0.0f || mask > 1.0f) {
                 SetError(error, kBadValue); continue;
             }
             const float t = HairT(hairT, point, begin, end, error);
             const float magnitudeRamp = Sample257(parameters.magnitudeProfile, t);
-            const float maskRamp = Sample257(parameters.maskProfile, t);
-            const float envelope = blend * maskAmount * maskRamp;
-            if (!Finite(magnitudeRamp) || !Finite(maskRamp) || !Finite(envelope) ||
-                envelope < 0.0f || envelope > 1.0f) {
-                SetError(error, !Finite(magnitudeRamp) || !Finite(maskRamp) || !Finite(envelope)
-                              ? kNonFinite : kBadValue);
+            // usdGen:mask IS the operator envelope (02 §2.13).
+            const float envelope = mask;
+            if (!Finite(magnitudeRamp) || envelope < 0.0f || envelope > 1.0f) {
+                SetError(error, !Finite(magnitudeRamp) ? kNonFinite : kBadValue);
                 continue;
             }
             const float3 input = geometry.points.data[point];
@@ -370,7 +362,7 @@ __global__ void NoiseKernel(DeviceCurveGeometryView geometry,
             // §0.5 requires a bitwise input write for a zero resolved
             // envelope.  Keep this after accumulation so a zero-ramp/root
             // CV still contributes field state for a later cumulative CV,
-            // but before displacement/restoration so blend==0 or mask==0
+            // but before displacement/restoration so mask==0
             // cannot alter an already-styled segment (including signed zero).
             if (magnitude == 0.0f || magnitudeRamp == 0.0f || envelope == 0.0f) {
                 output[point] = input;
@@ -616,13 +608,11 @@ StyleStatus CudaNoise::Apply(DeviceCurveGeometryView geometry,
             (geometry.curveOffsets.size == 1u && !geometry.curveOffsets.data) ||
             geometry.stableIds.size || frames.tangent.size ||
             frames.binormal.size || frames.normal.size)) ||
-        !parameters.magnitudeProfile.data || parameters.magnitudeProfile.size != kProfileSize ||
-        (parameters.maskProfile.data && parameters.maskProfile.size != kProfileSize) ||
-        (!parameters.maskProfile.data && parameters.maskProfile.size != 0))
+        !parameters.magnitudeProfile.data || parameters.magnitudeProfile.size != kProfileSize)
         return StyleStatus::InvalidArgument;
     for (ScalarField field : {parameters.magnitude, parameters.frequency, parameters.correlation,
                               parameters.lacunarity, parameters.gain, parameters.preserveLength,
-                              parameters.blend, parameters.maskAmount}) {
+                              parameters.mask}) {
         const StyleStatus status = validateScalar(field, geometry);
         if (status != StyleStatus::Ok) return status;
     }
@@ -641,8 +631,7 @@ StyleStatus CudaNoise::Apply(DeviceCurveGeometryView geometry,
         {parameters.lacunarity, 1.0f, std::numeric_limits<float>::max(), true},
         {parameters.gain, 0.0f, 1.0f, false},
         {parameters.preserveLength, 0.0f, 1.0f, false},
-        {parameters.blend, 0.0f, 1.0f, false},
-        {parameters.maskAmount, 0.0f, 1.0f, false}};
+        {parameters.mask, 0.0f, 1.0f, false}};
     for (auto const& entry : ranges) {
         status = validateLiteralRange(entry.field, entry.minimum, entry.maximum, entry.strict);
         if (status != StyleStatus::Ok) return status;
@@ -667,10 +656,10 @@ StyleStatus CudaNoise::Apply(DeviceCurveGeometryView geometry,
         output_ = {};
         return StyleStatus::CudaError;
     };
-    const size_t work = std::max(geometry.curveCount, std::max(geometry.pointCount,
-        std::max(parameters.magnitudeProfile.size, parameters.maskProfile.size)));
+    const size_t work = std::max(geometry.curveCount,
+        std::max(geometry.pointCount, parameters.magnitudeProfile.size));
     ValidateInputs<<<Blocks(work), 256, 0, stream>>>(geometry, hairT, frames,
-        parameters.magnitudeProfile, parameters.maskProfile, error_.data());
+        parameters.magnitudeProfile, error_.data());
     if (cudaGetLastError() != cudaSuccess) return abortSubmission();
     if (geometry.curveCount) {
         NoiseKernel<<<Blocks(geometry.curveCount), 256, 0, stream>>>(

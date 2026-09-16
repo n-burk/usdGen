@@ -16,7 +16,6 @@ public:
    ~UsdGenDeformOp() override = default;
 
    TfToken Type() const override { return TfToken("UsdGenDeform"); }
-   UsdGenSpace Space() const override { return UsdGenSpace::Deformed; }
    UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::None; }
    UsdGenRole Role() const override { return UsdGenRole::Curves; }
    bool IsGenerator() const override { return false; }

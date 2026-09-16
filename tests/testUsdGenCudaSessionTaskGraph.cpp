@@ -80,9 +80,9 @@ static bool WaitForUsage(std::shared_ptr<UsdGenExecutionTaskGraph> const& graph,
         auto const usage = graph->GetAdmissionUsage();
         if (usage.jobs == jobs && usage.tasks == tasks && usage.dependencyEdges == edges) return true;
         if (std::chrono::steady_clock::now() >= deadline) {
-            auto const usage = graph->GetAdmissionUsage();
+            auto const finalUsage = graph->GetAdmissionUsage();
             std::fprintf(stderr, "usage wanted %u/%u/%u, got %u/%u/%u\n",
-                jobs, tasks, edges, usage.jobs, usage.tasks, usage.dependencyEdges);
+                jobs, tasks, edges, finalUsage.jobs, finalUsage.tasks, finalUsage.dependencyEdges);
             return false;
         }
         std::this_thread::yield();

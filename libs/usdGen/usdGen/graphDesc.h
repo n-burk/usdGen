@@ -29,7 +29,7 @@ class UsdGenImagePayload;
 /// the `usdGen:` prefix stripped (C1 registry, docs/freezes/C1.md).
 struct UsdGenParamValue
 {
-    TfToken name;                // "clump:size", "mask:ramp:knots", "surface"
+    TfToken name;                // "clump:size", "width:knots", "surface"
     VtValue value;               // scalar, token, array, or resolved asset path
     bool    animated = false;    // authored with a .spline / time samples
 };
@@ -52,10 +52,31 @@ enum class UsdGenExecutionBackend : uint8_t {
 struct UsdGenExpressionOutputDesc { TfToken name{"result"}; TfToken nativeType{"float"}; expr::ValueShape shape; };
 struct UsdGenExpressionDesc { SdfPath path; std::string source; std::vector<UsdGenExpressionOutputDesc> outputs; };
 struct UsdGenExpressionBinding {
+    // `output` empty means the connection named the expression PRIM rather
+    // than one of its outputs; UsdGenFindExpressionOutput resolves it.
     SdfPath expression; TfToken output{"result"}; TfToken nativeType{"float"}; TfToken destination;
     expr::ValueShape destinationShape; expr::Domain domain = expr::Domain::Groom;
     VtValue literal;
 };
+
+/// The output a binding names on `expression`.  A named output must exist.
+/// An EMPTY name is a prim-path connection: it resolves to "result" when the
+/// expression declares it, otherwise to its single declared output.  Returns
+/// nullptr when nothing matches, or when a prim-path connection is ambiguous
+/// because the expression declares several non-`result` outputs.
+inline UsdGenExpressionOutputDesc const *
+UsdGenFindExpressionOutput(UsdGenExpressionDesc const &expression,
+                           TfToken const &output)
+{
+    if (!output.IsEmpty()) {
+        for (UsdGenExpressionOutputDesc const &o : expression.outputs)
+            if (o.name == output) return &o;
+        return nullptr;
+    }
+    for (UsdGenExpressionOutputDesc const &o : expression.outputs)
+        if (o.name == TfToken("result")) return &o;
+    return expression.outputs.size() == 1 ? &expression.outputs.front() : nullptr;
+}
 
 /// S11 ramp encodings, already resolved by the adapter (02-schema.md §2.17).
 struct UsdGenRampDesc
@@ -66,32 +87,15 @@ struct UsdGenRampDesc
     TfToken      interpolation; // linear | catmullRom | bspline | constant (default catmullRom, R11)
 };
 
-/// The authored relationship slot which consumes a map.  A path alone is not
-/// sufficient: mask:source and length:source can intentionally name the same
-/// map while retaining different evaluation semantics.  Generic is the
-/// compatibility spelling for the historical usdGen:map relationship and
-/// direct descriptor clients which only populate UsdGenNodeDesc::maps.
-enum class UsdGenMapBindingPurpose : uint8_t {
-    Generic,
-    MaskSource,
-    LengthSource
-};
-
+/// The authored relationship slot which consumes a map.  usdGen:map is the
+/// only map relationship; the binding retains its exact authored name so a
+/// diagnostic can quote it.  Empty is valid for direct descriptor clients
+/// which only populate UsdGenNodeDesc::maps.
 struct UsdGenMapBindingDesc
 {
-    SdfPath                  map;
-    UsdGenMapBindingPurpose  purpose = UsdGenMapBindingPurpose::Generic;
-    // Exact authored relationship name, retained for diagnostics. Empty is
-    // valid only for direct/legacy descriptors; consumers which require a
-    // semantic role must reject Generic rather than guessing from the path.
-    TfToken                  relationship;
+    SdfPath  map;
+    TfToken  relationship;
 };
-
-inline bool
-UsdGenMapBindingHasSemanticPurpose(UsdGenMapBindingDesc const &binding)
-{
-    return binding.purpose != UsdGenMapBindingPurpose::Generic;
-}
 
 /// A named plane authored on a C3 curve set. Descriptor-only transport keeps
 /// the source path backend-neutral: Point becomes vertex, Primitive uniform,
@@ -114,17 +118,13 @@ struct UsdGenNodeDesc
     SdfPath                      path;         // the operator prim's scene path (identity + Kahn tie-break)
     TfToken                      type;         // "UsdGenClump", "UsdGenScatter", ...
     TfToken                      mode;         // usdGen:mode, when the type has one
-    int                          algorithmVersion = 0;   // 0 == "track the newest kernel" (R17)
     bool                         enabled = true;
     int                          seed = 0;
-    float                        blend = 1.0f;
-    TfToken                      space;        // auto | rest | deformed (auto == the type's Space(), R9)
-    TfToken                      readPhase;    // base | preceding | final | @<absolute prim path>
     SdfPathVector                inputs;       // compiler-owned hierarchy dependency edges
     SdfPathVector                references;   // guide sets, clump centres, card roots
     SdfPathVector                curves;       // usdGen:guides / usdGen:curves / usdGen:frozen:curves
                                                //   -> indices into UsdGenGraphDesc::curveSets
-    SdfPathVector                surfaces;     // usdGen:surface targets (Mesh or GeomSubset, ADR R15)
+    SdfPathVector                surfaces;     // the Description's usdGen:surface targets (ADR R15)
     // Legacy untyped map paths.  Keep this populated by builders and accept
     // it from old direct clients; mapBindings is the canonical typed form.
     SdfPathVector                maps;
@@ -157,7 +157,6 @@ struct UsdGenCurveSetDesc
     VtVec2fArray    skinPrimUv;        // primvars:skinprimuv (uniform texCoord2f, not "st")
     VtMatrix4dArray rootFrame;         // primvars:usdGen:rootFrame; may be empty
     std::string     frozenEpoch;       // constant string primvar, "usdgen1:sha1:..." (S42)
-    VtFloatArray    guideBlend;        // per-guide usdGen:blend on UsdGenGuideSet
     std::vector<UsdGenAuthoredPlaneDesc> authoredPlanes;
     uint64_t        curveGeneration = 0;   // bumped by any points/topology/id change on the prim
 };
@@ -255,15 +254,9 @@ struct UsdGenGraphDesc
     TfToken                        purpose;        // inherited by hand to every tile (C2)
     TfToken                        visibility;     // inherited by hand to every tile (C2)
     SdfPath                        materialPath;   // the description's bound Material (C2)
-    TfToken                        pickTarget{"description"};  // usdGen:pickTarget (C2 primOrigin)
-    float    densityScale = 1.0f, renderDensityScale = 1.0f;
     float    defaultWidth = 0.01f;                 // usdGen:width:default
     int      tileTarget = 64;                      // uniform int usdGen:tileTarget
     TfToken  curveBasis{"bspline"};                // usdGen:curve:basis (C2)
-    TfToken  motionMode;                           // single | velocities | samples
-    int      motionSampleCount = 3;                // clamped [2,16]
-    bool     forwardSurfaceSamples = false;
-    int      schemaVersion = 1;
     double   time = 0.0;
     double   timeCodesPerSecond = 24.0; // USD default; expressions expose seconds
     UsdGenExecutionBackend executionBackend = UsdGenExecutionBackend::CpuReference;

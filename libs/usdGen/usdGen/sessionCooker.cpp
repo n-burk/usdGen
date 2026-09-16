@@ -3,6 +3,7 @@
 // Private serial work-owner implementation. The command owner supplies a
 // copied request and alone decides whether this candidate may publish.
 #include "usdGen/sessionCooker.h"
+#include "usdGen/furOcclusion.h"
 #include "usdGen/cudaExecution.h"
 #include "usdGen/executionBackend.h"
 #include "usdGen/executionTaskGraph.h"
@@ -143,7 +144,6 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         UsdGenCompiledNode const &node = graph.Node(id);
         _CacheMixText(&h0, node.type.GetString());
         _CacheMixText(&h1, node.desc ? node.desc->path.GetString() : std::string());
-        _CacheMix(&h0, static_cast<uint64_t>(node.algorithmVersion));
         _CacheMix(&h1, node.structuralDigest[0]);
         _CacheMix(&h0, node.structuralDigest[1]);
         // structuralDigest intentionally excludes value/capture-class
@@ -155,12 +155,7 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
             UsdGenNodeDesc const &nd = *node.desc;
             _CacheMix(&h0, static_cast<uint64_t>(nd.enabled));
             _CacheMix(&h1, static_cast<uint64_t>(nd.seed));
-            uint32_t blendBits = 0;
-            std::memcpy(&blendBits, &nd.blend, sizeof(blendBits));
-            _CacheMix(&h0, blendBits);
             _CacheMixText(&h1, nd.mode.GetString());
-            _CacheMixText(&h0, nd.space.GetString());
-            _CacheMixText(&h1, nd.readPhase.GetString());
             _CacheMixPaths(&h1, nd.inputs);
             _CacheMixPaths(&h0, nd.references);
             _CacheMixPaths(&h1, nd.curves);
@@ -169,7 +164,6 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
             _CacheMix(&h0, static_cast<uint64_t>(nd.mapBindings.size()));
             for (UsdGenMapBindingDesc const &binding : nd.mapBindings) {
                 _CacheMixText(&h0, binding.map.GetString());
-                _CacheMix(&h1, static_cast<uint64_t>(binding.purpose));
                 _CacheMixText(&h0, binding.relationship.GetString());
             }
             _CacheMix(&h0, static_cast<uint64_t>(nd.params.size()));
@@ -191,17 +185,9 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
     // Descriptor-wide terms can affect evaluation or presentation while a
     // compiled node remains incrementally reusable.
     _CacheMixText(&h0, desc.curveBasis.GetString());
-    _CacheMixText(&h1, desc.motionMode.GetString());
-    _CacheMix(&h0, static_cast<uint64_t>(desc.motionSampleCount));
-    _CacheMix(&h1, static_cast<uint64_t>(desc.forwardSurfaceSamples));
-    _CacheMix(&h0, static_cast<uint64_t>(desc.schemaVersion));
-    uint32_t widthBits = 0, densityBits = 0, renderDensityBits = 0;
+    uint32_t widthBits = 0;
     std::memcpy(&widthBits, &desc.defaultWidth, sizeof(widthBits));
-    std::memcpy(&densityBits, &desc.densityScale, sizeof(densityBits));
-    std::memcpy(&renderDensityBits, &desc.renderDensityScale, sizeof(renderDensityBits));
     _CacheMix(&h1, widthBits);
-    _CacheMix(&h0, densityBits);
-    _CacheMix(&h1, renderDensityBits);
     _CacheMixText(&h0, desc.look.bakeMode.GetString());
     _CacheMixText(&h1, desc.look.bakeTarget.GetString());
     _CacheMixText(&h0, desc.look.bakePrimvar.GetString());
@@ -222,7 +208,6 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
     _CacheMixText(&h0, desc.purpose.GetString());
     _CacheMixText(&h1, desc.visibility.GetString());
     _CacheMixText(&h0, desc.materialPath.GetString());
-    _CacheMixText(&h1, desc.pickTarget.GetString());
     uint64_t timeBits = 0, cpsBits = 0;
     std::memcpy(&timeBits, &desc.time, sizeof(timeBits));
     std::memcpy(&cpsBits, &desc.timeCodesPerSecond, sizeof(cpsBits));
@@ -281,7 +266,6 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixArray(&h0, curve.curveId);
         _CacheMixArray(&h1, curve.skinPrimUv);
         _CacheMixArray(&h0, curve.rootFrame);
-        _CacheMixArray(&h1, curve.guideBlend);
         _CacheMixText(&h0, curve.frozenEpoch);
         _CacheMix(&h1, curve.curveGeneration);
         _CacheMix(&h1, static_cast<uint64_t>(curve.authoredPlanes.size()));
@@ -480,8 +464,7 @@ _PresentationScalars _BuildPresentationScalars(
     result.purpose = desc.purpose;
     result.visibility = desc.visibility;
     result.materialPath = desc.materialPath;
-    result.primOrigin = desc.pickTarget == TfToken("description")
-        ? desc.description : SdfPath();
+    result.primOrigin = desc.description;
     result.dependencySurface = dependencySurface;
     return result;
 }
@@ -909,12 +892,12 @@ void UsdGenSessionCooker::CookCudaAsync(UsdGenExecutionRuntime& runtime,
         if (device && device->Owner() && device->Owner()->ProducerReady() &&
             device->Identity().backend == UsdGenDeviceBackend::Cuda &&
             device->Identity().deviceIndex == _cudaWorkspace->DeviceIndex()) {
-            std::string reason;
+            std::string republishReason;
             uint64_t const publicationGeneration =
                 cacheDomain->AllocatePublicationGeneration(
                     static_cast<uint64_t>(_store.NextId()));
             auto republished = publicationGeneration
-                ? device->Republish(publicationGeneration, &reason)
+                ? device->Republish(publicationGeneration, &republishReason)
                 : std::shared_ptr<const UsdGenDeviceGeneration>{};
             if (republished) {
                 UsdGenGeneration hit = cached;
@@ -1586,12 +1569,12 @@ UsdGenStats publishedStats, bool invalidateValues,
                 cachedDevice->Owner()->ProducerReady() &&
                 cachedDevice->Identity().backend == UsdGenDeviceBackend::Cuda &&
                 cachedDevice->Identity().deviceIndex == _cudaWorkspace->DeviceIndex()) {
-                std::string reason;
+                std::string republishReason;
                 uint64_t const publicationGeneration =
                     cacheDomain->AllocatePublicationGeneration(
                         static_cast<uint64_t>(_store.NextId()));
                 auto republished = publicationGeneration
-                    ? cachedDevice->Republish(publicationGeneration, &reason)
+                    ? cachedDevice->Republish(publicationGeneration, &republishReason)
                     : std::shared_ptr<const UsdGenDeviceGeneration>{};
                 if (republished) {
                     UsdGenGeneration hit = cached;
@@ -1617,10 +1600,10 @@ UsdGenStats publishedStats, bool invalidateValues,
                 }
             }
         }
-        auto previous = _store.Get();
+        auto priorGeneration = _store.Get();
         auto device = ExecuteCudaGraph(*_graph.CudaPlan(), *_cudaWorkspace, frame,
             static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics,
-            previous && !newWorkspace ? previous->device : nullptr);
+            priorGeneration && !newWorkspace ? priorGeneration->device : nullptr);
         if (!device || _lastDiagnostics.HasErrors()) {
             _InvalidatePoisonedCudaWorkspace();
             return reject();
@@ -1708,6 +1691,10 @@ UsdGenStats publishedStats, bool invalidateValues,
               [](UsdGenTilePublication const &a, UsdGenTilePublication const &b) {
                   return a.tile < b.tile;
               });
+
+    // Whole-groom optical depth includes neighboring tiles. Unchanged
+    // geometry reuses the immutable planes, including on look-only edits.
+    UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr);
 
     // Signature: the prim-set identity step 7 diffs structurally (03 §6.1).
     gen.signature.tileCount = static_cast<uint32_t>(gen.tiles.size());

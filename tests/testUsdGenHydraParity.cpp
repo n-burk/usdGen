@@ -89,12 +89,8 @@ void CheckNode(UsdGenNodeDesc const &a, UsdGenNodeDesc const &b, size_t i)
     CheckEq(a.path, b.path, ctx + " path");
     CheckEq(a.type, b.type, ctx + " type");
     CheckEq(a.mode, b.mode, ctx + " mode");
-    CheckEq(a.algorithmVersion, b.algorithmVersion, ctx + " algorithmVersion");
     CheckEq(a.enabled, b.enabled, ctx + " enabled");
     CheckEq(a.seed, b.seed, ctx + " seed");
-    CheckEq(a.blend, b.blend, ctx + " blend");
-    CheckEq(a.space, b.space, ctx + " space");
-    CheckEq(a.readPhase, b.readPhase, ctx + " readPhase");
     CheckEq(a.inputs, b.inputs, ctx + " inputs");
     CheckEq(a.references, b.references, ctx + " references");
     CheckEq(a.curves, b.curves, ctx + " curves");
@@ -107,9 +103,6 @@ void CheckNode(UsdGenNodeDesc const &a, UsdGenNodeDesc const &b, size_t i)
          ++binding) {
         CheckEq(a.mapBindings[binding].map, b.mapBindings[binding].map,
                 ctx + " map binding target");
-        CheckEq(a.mapBindings[binding].purpose,
-                b.mapBindings[binding].purpose,
-                ctx + " map binding purpose");
         CheckEq(a.mapBindings[binding].relationship,
                 b.mapBindings[binding].relationship,
                 ctx + " map binding relationship");
@@ -140,7 +133,6 @@ void CheckCurveSet(UsdGenCurveSetDesc const &a, UsdGenCurveSetDesc const &b,
     CheckEq(a.skinPrimUv, b.skinPrimUv, ctx + " skinPrimUv");
     CheckEq(a.rootFrame, b.rootFrame, ctx + " rootFrame");
     CheckEq(a.frozenEpoch, b.frozenEpoch, ctx + " frozenEpoch");
-    CheckEq(a.guideBlend, b.guideBlend, ctx + " guideBlend");
     CheckEq(a.curveGeneration, b.curveGeneration, ctx + " curveGeneration");
 }
 
@@ -233,51 +225,14 @@ int CheckDesc(UsdGenGraphDesc const &a, UsdGenGraphDesc const &b,
     CheckEq(a.look.hueJitter, b.look.hueJitter, ctx + "look.hueJitter");
     CheckEq(a.look.valueJitter, b.look.valueJitter, ctx + "look.valueJitter");
     CheckEq(a.look.jitterSeed, b.look.jitterSeed, ctx + "look.jitterSeed");
-    CheckEq(a.densityScale, b.densityScale, ctx + "densityScale");
     CheckEq(a.defaultWidth, b.defaultWidth, ctx + "defaultWidth");
-    CheckEq(a.renderDensityScale, b.renderDensityScale,
-            ctx + "renderDensityScale");
     CheckEq(a.tileTarget, b.tileTarget, ctx + "tileTarget");
     CheckEq(a.curveBasis, b.curveBasis, ctx + "curveBasis");
-    CheckEq(a.motionMode, b.motionMode, ctx + "motionMode");
-    CheckEq(a.motionSampleCount, b.motionSampleCount,
-            ctx + "motionSampleCount");
-    CheckEq(a.pickTarget, b.pickTarget, ctx + "pickTarget");
     CheckEq(a.purpose, b.purpose, ctx + "purpose");
     CheckEq(a.visibility, b.visibility, ctx + "visibility");
     CheckEq(a.materialPath, b.materialPath, ctx + "materialPath");
     CheckEq(a.xformMatrix, b.xformMatrix, ctx + "xformMatrix");
-    CheckEq(a.schemaVersion, b.schemaVersion, ctx + "schemaVersion");
     return g_failures - before;
-}
-
-void CheckMapTransport(UsdGenGraphDesc const &desc, std::string const &fixture)
-{
-    if (fixture != "map_bindings.usda") return;
-    Check(desc.maps.size() == 1, "map fixture has one pooled descriptor");
-    if (!desc.maps.empty()) {
-        Check(desc.maps[0].resolvedAssetPath.find("mask.exr") != std::string::npos,
-              "map fixture transports resolved usdGen:map:file");
-    }
-    Check(desc.nodes.size() == 1 && desc.nodes[0].mapBindings.size() == 2,
-          "map fixture retains all authored map relationship slots");
-    if (desc.nodes.size() == 1 && desc.nodes[0].mapBindings.size() == 2) {
-        auto const &bindings = desc.nodes[0].mapBindings;
-        auto const hasBinding = [&](UsdGenMapBindingPurpose purpose,
-                                    TfToken const &relationship) {
-            return std::find_if(bindings.begin(), bindings.end(),
-                [&](UsdGenMapBindingDesc const &binding) {
-                    return binding.purpose == purpose &&
-                        binding.relationship == relationship;
-                }) != bindings.end();
-        };
-        Check(hasBinding(UsdGenMapBindingPurpose::MaskSource,
-                         TfToken("usdGen:mask:source")),
-              "map fixture retains mask relationship purpose");
-        Check(hasBinding(UsdGenMapBindingPurpose::LengthSource,
-                         TfToken("usdGen:length:source")),
-              "map fixture retains length relationship purpose");
-    }
 }
 
 }  // namespace
@@ -292,7 +247,6 @@ main(int argc, char **argv)
         "g2_brow40k.usda",
         "g3_head100k.usda",
         "g4_fur200k.usda",
-        "map_bindings.usda",
     };
     int totalNew = 0;
     for (char const *name : kFixtures) {
@@ -335,8 +289,6 @@ main(int argc, char **argv)
         UsdGenGraphDesc const fromHydra =
             BuildGraphDescFromHydra(*sis.finalSceneIndex, descPath, opts);
         int const n = CheckDesc(fromStage, fromHydra, name);
-        CheckMapTransport(fromStage, name);
-        CheckMapTransport(fromHydra, name);
         totalNew += n;
         std::printf("%s: %s (%d new diffs)\n", name,
                     n == 0 ? "PARITY" : "MISMATCH", n);

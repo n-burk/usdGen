@@ -79,13 +79,18 @@ _WarnUnknownRoute(SdfPath const &path, TfToken const &leaf)
     struct Warnings {
         usdGen::UsdGenExecutionRuntime runtime{8};
         std::unordered_map<SdfPath, std::set<TfToken>, SdfPathHash> seen;
-        usdGen::UsdGenExecutionPipeline owner{runtime}; // drains before seen
-        ~Warnings() { owner.Drain(); }
+        usdGen::UsdGenExecutionPipeline owner{runtime};
     };
-    static Warnings warnings;
+    // Leaked on purpose, like every process-lifetime arena owner in this
+    // library (see ImagingRuntime in usdGenImagingSession.cpp): a static
+    // destructor here runs at DLL_PROCESS_DETACH on Windows, after ExitProcess
+    // has killed the TBB workers, so a drain could never complete. A warning
+    // still queued when the process exits is the only thing lost.
+    static auto* warningsOwner = new Warnings;
+    Warnings& warnings = *warningsOwner;
     // Diagnostics do not make notice routing await the warning registry.
     // The owner deduplicates immutable keys and emits each warning once.
-    warnings.owner.PostCommand([path, leaf] {
+    warnings.owner.PostCommand([path, leaf, &warnings] {
         if (warnings.seen[path].insert(leaf).second)
             TF_WARN("usdGen: dirty locator '%s' on %s matches no routed property "
                     "(compiled graph may be stale, or the property is not part "

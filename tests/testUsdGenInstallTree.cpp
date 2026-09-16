@@ -64,6 +64,7 @@ int CheckNotInstalled(const std::string &path) {
         std::printf("  unexpected: %s (should not be installed)\n", path.c_str());
         return 1;
     }
+    std::printf("  absent:   %s\n", path.c_str());
     return 0;
 }
 
@@ -89,7 +90,10 @@ int RunLayoutChecks(const std::string &prefix,
     std::printf("== layout checks against %s ==\n", prefix.c_str());
     int rc = 0;
 
-    // Libraries / archives
+    // Libraries / archives. N-7 (plan §1.2/§1.6): usdGenMath, usdGen_seexpr
+    // and nanoflann are private hidden archives and must not appear in the
+    // install prefix (installing them would also export their unprefixed
+    // INTERFACE include roots via usdGenTargets).
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGen.so");
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGenImaging.so");
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGenSchema.so");

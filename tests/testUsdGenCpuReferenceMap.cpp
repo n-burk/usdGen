@@ -70,9 +70,9 @@ public:
     {
         if (ctx.referenceCount != 2 || !ctx.references || !ctx.resolvedReferences ||
             !ctx.references[0] || !ctx.references[1] || !ctx.resolvedReferences[0] ||
-            !ctx.resolvedReferences[1] || ctx.mapCount != 3 ||
-            !ctx.maps || !ctx.maps[0] || !ctx.maps[1] || !ctx.maps[2] ||
-            ctx.mapBindingCount != 3 || !ctx.mapBindings) {
+            !ctx.resolvedReferences[1] || ctx.mapCount != 2 ||
+            !ctx.maps || !ctx.maps[0] || !ctx.maps[1] ||
+            ctx.mapBindingCount != 2 || !ctx.mapBindings) {
             if (diag) diag->Error("reference probe did not receive compiled external values");
             return false;
         }
@@ -89,12 +89,8 @@ public:
             ctx.references[0]->buffer.totalCurves == 2 &&
             ctx.references[0]->buffer.totalCvs == 4 &&
             RestFallbackMatchesPoints(ctx.references[0]->buffer) &&
-            ctx.mapBindings[0].purpose == UsdGenMapBindingPurpose::MaskSource &&
-            ctx.mapBindings[0].relationship == TfToken("usdGen:mask:source") &&
-            ctx.mapBindings[1].purpose == UsdGenMapBindingPurpose::LengthSource &&
-            ctx.mapBindings[1].relationship == TfToken("usdGen:length:source") &&
-            ctx.mapBindings[2].purpose == UsdGenMapBindingPurpose::Generic &&
-            ctx.mapBindings[2].relationship == TfToken("usdGen:map");
+            ctx.mapBindings[0].relationship == TfToken("usdGen:map") &&
+            ctx.mapBindings[1].relationship == TfToken("usdGen:map");
     }
     void Evaluate(UsdGenEvalContext const &, UsdGenCapture const &, UsdGenChunkView *) const override {}
 private:
@@ -147,29 +143,29 @@ int gContractConstructions = 0;
 void ValidateRegistryContractReuse()
 {
     auto& registry=UsdGenOpRegistry::Get();
-    TfToken const type("UsdGenTestVersionedContract");
-    Check(registry.Register(type,1,[]{++gContractConstructions;return std::make_unique<ContractProbe>(false);}) &&
-          registry.Register(type,2,[]{++gContractConstructions;return std::make_unique<ContractProbe>(true);}),
-          "registers version-specific static input contracts");
+    TfToken const type("UsdGenTestSourceContract");
+    TfToken const referenceType("UsdGenTestReferenceContract");
+    Check(registry.Register(type,[]{++gContractConstructions;return std::make_unique<ContractProbe>(false);}) &&
+          registry.Register(referenceType,[]{++gContractConstructions;return std::make_unique<ContractProbe>(true);}),
+          "registers one static input contract per type");
     int const probed=gContractConstructions;
     Check(probed==2,"registration probes each factory exactly once");
-    size_t geometry=99,references=99;UsdGenRole role=UsdGenRole::Curves;
-    Check(registry.GetOperatorContract(type,1,&geometry,&references,&role)&&
+    Check(!registry.Register(type,[]{++gContractConstructions;return std::make_unique<ContractProbe>(true);}),
+          "a type has exactly one kernel: re-registration is refused");
+    Check(gContractConstructions==probed,"a refused registration constructs nothing");
+    size_t geometry=99,references=99;UsdGenRole role=UsdGenRole::Reference;
+    Check(registry.GetOperatorContract(type,&geometry,&references,&role)&&
           geometry==0&&references==0&&role==UsdGenRole::Curves,
-          "exact version 1 retains its geometry/reference/role contract");
-    Check(registry.GetOperatorContract(type,2,&geometry,&references,&role)&&
+          "the source type retains its geometry/reference/role contract");
+    Check(registry.GetOperatorContract(referenceType,&geometry,&references,&role)&&
           geometry==1&&references==2&&role==UsdGenRole::Reference,
-          "exact version 2 has its distinct reference contract");
-    Check(registry.GetOperatorContract(type,0,&geometry,&references,&role)&&
-          geometry==1&&references==2&&role==UsdGenRole::Reference,
-          "version zero selects the newest registered contract");
-    Check(!registry.GetOperatorContract(type,3,&geometry,&references,&role)&&
-          !registry.GetOperatorContract(TfToken("UsdGenMissingContract"),0,&geometry,&references,&role),
-          "missing type or exact version does not borrow a different contract");
+          "the reference type has its distinct reference contract");
+    Check(!registry.GetOperatorContract(TfToken("UsdGenMissingContract"),&geometry,&references,&role),
+          "a missing type does not borrow a different contract");
     Check(gContractConstructions==probed,"contract queries do not construct operators");
 
     UsdGenGraphDesc desc;desc.description=SdfPath("/contract");desc.terminal=SdfPath("/contract/source");
-    UsdGenNodeDesc source;source.path=desc.terminal;source.type=type;source.algorithmVersion=1;
+    UsdGenNodeDesc source;source.path=desc.terminal;source.type=type;
     desc.nodes={source};
     UsdGenCompiler compiler;UsdGenGraph graph;
     Check(compiler.Compile(desc,&graph).ok,"contract probe source compiles");
@@ -181,7 +177,7 @@ void ValidateRegistryContractReuse()
           "unchanged recompile retains operator/digest without preflight factory calls");
 
     auto invalid=desc;UsdGenNodeDesc reference;
-    reference.path=SdfPath("/contract/reference");reference.type=type;reference.algorithmVersion=2;
+    reference.path=SdfPath("/contract/reference");reference.type=referenceType;
     reference.inputs={source.path};invalid.nodes.push_back(reference);invalid.terminal=reference.path;
     auto result=compiler.Recompile(invalid,&graph);
     Check(!result.ok&&!result.errors.empty()&&
@@ -213,8 +209,7 @@ void ValidateRegistryContractReuse()
     Check(compiler.Recompile(mapped,&mapGraph).ok&&
           mapGraph.Node(0).mapValues.empty()&&mapGraph.Node(0).referenceValues.empty(),
           "removing the last external binding clears compiled handles");
-    mapped.nodes[0].mapBindings={{map.path,UsdGenMapBindingPurpose::MaskSource,
-                                 TfToken("usdGen:mask:source")}};
+    mapped.nodes[0].mapBindings={{map.path, TfToken("usdGen:map")}};
     Check(compiler.Recompile(mapped,&mapGraph).ok&&mapGraph.Node(0).mapValues.size()==1,
           "typed-only map still takes the nonempty external binding path");
     mapped.nodes[0].mapBindings.clear();
@@ -235,7 +230,6 @@ UsdGenGraphDesc Fixture()
     guide.curveVertexCounts = VtIntArray{2, 2};
     guide.points = VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 1, 0),
                                 GfVec3f(1, 0, 0), GfVec3f(1, 1, 0)};
-    guide.guideBlend = VtFloatArray{0.25f, 0.75f};
     guide.curveGeneration = 17;
     desc.curveSets.push_back(std::move(guide));
     UsdGenCurveSetDesc guideB = desc.curveSets.front();
@@ -251,6 +245,13 @@ UsdGenGraphDesc Fixture()
     map.params.push_back({TfToken("gain"), VtValue(0.5f), false});
     desc.maps.push_back(std::move(map));
 
+    UsdGenMapDesc secondMap;
+    secondMap.path = SdfPath("/referenceMap/tint");
+    secondMap.type = TfToken("UsdGenImageMap");
+    secondMap.resolvedAssetPath = "/resolved/tint.exr";
+    secondMap.textureGeneration = 11;
+    desc.maps.push_back(std::move(secondMap));
+
     // Namespace order would normally place curve before reference.  The CPU
     // lane must nevertheless run the reference capture first.
     UsdGenNodeDesc curve;
@@ -262,15 +263,10 @@ UsdGenGraphDesc Fixture()
     reference.references = {SdfPath("/referenceMap/guidesA"),
                             SdfPath("/referenceMap/guidesB")};
     reference.maps = {SdfPath("/referenceMap/mask"),
-                      SdfPath("/referenceMap/mask"),
-                      SdfPath("/referenceMap/mask")};
+                      SdfPath("/referenceMap/tint")};
     reference.mapBindings = {
-        {SdfPath("/referenceMap/mask"), UsdGenMapBindingPurpose::MaskSource,
-         TfToken("usdGen:mask:source")},
-        {SdfPath("/referenceMap/mask"), UsdGenMapBindingPurpose::LengthSource,
-         TfToken("usdGen:length:source")},
-        {SdfPath("/referenceMap/mask"), UsdGenMapBindingPurpose::Generic,
-         TfToken("usdGen:map")}};
+        {SdfPath("/referenceMap/mask"), TfToken("usdGen:map")},
+        {SdfPath("/referenceMap/tint"), TfToken("usdGen:map")}};
     desc.nodes = {curve, reference};
     return desc;
 }
@@ -285,7 +281,7 @@ void RunReferenceMapLowering()
     UsdGenCompiler compiler;
     UsdGenGraph graph;
     Check(compiler.Compile(desc, &graph).ok, "reference/map CPU fixture compiles");
-    Check(graph.ReferenceValues().size() == 2 && graph.MapValues().size() == 1 &&
+    Check(graph.ReferenceValues().size() == 2 && graph.MapValues().size() == 2 &&
               graph.ReferenceValues()[0].value &&
               graph.ReferenceValues()[0].curveGeneration == 17 &&
               graph.ReferenceValues()[1].curveGeneration == 23 &&
@@ -299,11 +295,10 @@ void RunReferenceMapLowering()
             break;
         }
     }
-    Check(referenceNode && referenceNode->mapBindingRefs.size() == 3 &&
-              referenceNode->mapBindingRefs[0].purpose == UsdGenMapBindingPurpose::MaskSource &&
-              referenceNode->mapBindingRefs[1].purpose == UsdGenMapBindingPurpose::LengthSource &&
-              referenceNode->mapBindingRefs[2].purpose == UsdGenMapBindingPurpose::Generic,
-          "compiler preserves distinct map purposes for one shared map value");
+    Check(referenceNode && referenceNode->mapBindingRefs.size() == 2 &&
+              referenceNode->mapBindingRefs[0].map == SdfPath("/referenceMap/mask") &&
+              referenceNode->mapBindingRefs[1].map == SdfPath("/referenceMap/tint"),
+          "compiler preserves every typed map binding in authored order");
 
     UsdGenGraphDesc legacy = Fixture();
     legacy.nodes[1].mapBindings.clear();
@@ -321,11 +316,8 @@ void RunReferenceMapLowering()
         }
     }
     Check(legacyReferenceNode && legacyReferenceNode->mapBindingRefs.size() == 1 &&
-              legacyReferenceNode->mapBindingRefs[0].purpose ==
-                  UsdGenMapBindingPurpose::Generic &&
-              !UsdGenMapBindingHasSemanticPurpose(
-                  legacyReferenceNode->mapBindingRefs[0]),
-          "legacy maps-only input remains compatibility-generic, never semantic");
+              legacyReferenceNode->mapBindingRefs[0].relationship.IsEmpty(),
+          "legacy maps-only input carries no authored relationship token");
 
     UsdGenScheduler scheduler(1);
     UsdGenEvalContext context;
@@ -428,11 +420,11 @@ void ValidateFailures()
 
     UsdGenGraphDesc malformedRelationship = Fixture();
     malformedRelationship.nodes[1].mapBindings[0].relationship =
-        TfToken("usdGen:length:source");
+        TfToken("usdGen:guides");
     result = compiler.Compile(malformedRelationship, &graph);
     Check(!result.ok && !result.errors.empty() &&
-              result.errors.front().find("does not match") != std::string::npos,
-          "relationship diagnostics must agree with typed map purpose");
+              result.errors.front().find("is not a map relationship") != std::string::npos,
+          "a non-map relationship token on a map binding fails closed");
 
     UsdGenGraphDesc cuda = Fixture();
     cuda.executionBackend = UsdGenExecutionBackend::Cuda;
@@ -482,7 +474,7 @@ void ValidateMapIdentityAndRecompileTransaction()
     Check(graph.Desc().terminal == savedTerminal &&
               graph.ReferenceValues().size() == 2 &&
               graph.ReferenceValues()[0].identity == savedReferenceIdentity &&
-              graph.MapValues().size() == 1 &&
+              graph.MapValues().size() == 2 &&
               graph.MapValues()[0].identity == savedMapIdentity,
           "failed external recompile preserves prior graph values");
     context.desc = &graph.Desc();
@@ -623,132 +615,20 @@ void ValidateReferenceProducerChain()
           "reference source requires exactly one resolved input");
 }
 
-void ValidateWidthImageMask()
-{
-    UsdGenGraphDesc desc;
-    desc.description = SdfPath("/widthImage");
-    UsdGenMapDesc map;
-    map.path = SdfPath("/widthImage/Mask");
-    map.type = TfToken("UsdGenImageMap");
-    map.imagePayload = ImagePayload::Create(
-        2, 2, 1, std::vector<float>{0.25f, 0.5f, 0.75f, 1.0f},
-        UsdGenImageRowOrientation::BottomUp);
-    map.params = {
-        {TfToken("map:domain"), VtValue(TfToken("root")), false},
-        {TfToken("map:uvSet"), VtValue(TfToken("st")), false},
-        {TfToken("map:channel"), VtValue(TfToken("r")), false},
-        {TfToken("map:filter"), VtValue(TfToken("nearest")), false},
-        {TfToken("map:wrap"), VtValue(TfToken("clamp")), false},
-        {TfToken("map:colorSpace"), VtValue(TfToken("raw")), false},
-    };
-    desc.maps.push_back(map);
-
-    UsdGenNodeDesc node;
-    node.path = desc.terminal = SdfPath("/widthImage/Width");
-    node.type = TfToken("UsdGenWidth");
-    node.params.push_back({TfToken("width"), VtValue(2.0f), false});
-    node.mapBindings.push_back({map.path, UsdGenMapBindingPurpose::MaskSource,
-                                TfToken("usdGen:mask:source")});
-    desc.nodes.push_back(node);
-
-    std::unique_ptr<UsdGenOp> op = UsdGenOpRegistry::Get().Create(
-        TfToken("UsdGenWidth"), 0);
-    UsdGenParamView params;
-    params.desc = &desc;
-    params.node = &desc.nodes[0];
-    UsdGenDiagnostics diagnostics;
-    Check(op && op->Bind(params, &diagnostics),
-          "Width accepts typed ImageMap mask binding");
-
-    UsdGenResolvedMapValue resolved;
-    resolved.path = map.path;
-    resolved.type = map.type;
-    UsdGenResolvedMapValue const *resolvedPtr = &resolved;
-    UsdGenCurveBuffer upstream;
-    upstream.totalCurves = 2;
-    upstream.totalCvs = 4;
-    upstream.curveId = VtArray<uint64_t>{11, 22};
-    upstream.rootUV = VtVec2fArray{GfVec2f(0, 0), GfVec2f(1, 1)};
-    upstream.hairT = VtFloatArray{0, 1, 0, 1};
-    upstream.px = VtFloatArray(4, 0.0f);
-    UsdGenCaptureContext captureContext;
-    captureContext.desc = &desc;
-    captureContext.params = &params;
-    captureContext.maps = &resolvedPtr;
-    captureContext.mapCount = 1;
-    captureContext.mapBindings = node.mapBindings.data();
-    captureContext.mapBindingCount = 1;
-    std::unique_ptr<UsdGenCapture> capture = op->CreateCapture();
-    Check(op->Capture(captureContext, upstream, capture.get(), &diagnostics),
-          "Width captures one root ImageMap sample per curve");
-
-    VtFloatArray output(4, -1.0f);
-    VtFloatArray inputWidths(4, 0.5f);
-    UsdGenChunkView view{};
-    view.curveCount = 2;
-    view.cvCount = 2;
-    view.hairT = upstream.hairT.data();
-    view.curveMask = dynamic_cast<UsdGenCapturePayload *>(capture.get())->curveMask.data();
-    view.width = output.data();
-    view.inWidth = inputWidths.cdata();
-    UsdGenEvalContext evalContext;
-    evalContext.params = &params;
-    op->Evaluate(evalContext, *capture, &view);
-    Check(output == VtFloatArray{0.875f, 0.875f, 2.0f, 2.0f},
-          "Width interpolates incoming width toward target by captured root ImageMap mask");
-
-    node.mapBindings[0].relationship = TfToken();
-    capture = op->CreateCapture();
-    diagnostics = {};
-    Check(op->Capture(captureContext, upstream, capture.get(), &diagnostics),
-          "Width accepts purpose-typed direct map bindings without an authored relationship token");
-    node.mapBindings[0].relationship = TfToken("usdGen:mask:source");
-
-    upstream.rootUV.push_back(GfVec2f(.5f, .5f));
-    capture = op->CreateCapture();
-    diagnostics = {};
-    Check(!op->Capture(captureContext, upstream, capture.get(), &diagnostics) &&
-              !diagnostics.errors.empty() &&
-              diagnostics.errors.back().find("one root st UV per curve") != std::string::npos,
-          "Width rejects surplus root ImageMap coordinates");
-    upstream.rootUV.pop_back();
-
-    desc.nodes[0].params.push_back(
-        {TfToken("mask:amount"), VtValue(.5f), false});
-    capture = op->CreateCapture();
-    diagnostics = {};
-    Check(op->Capture(captureContext, upstream, capture.get(), &diagnostics),
-          "Width applies mask amount to the sampled ImageMap source");
-    view.curveMask = dynamic_cast<UsdGenCapturePayload *>(capture.get())->curveMask.data();
-    op->Evaluate(evalContext, *capture, &view);
-    Check(output == VtFloatArray{0.6875f, 0.6875f, 1.25f, 1.25f},
-          "Width clamps and scales the sampled ImageMap mask before evaluation");
-
-    map.params[0].value = VtValue(TfToken("cv"));
-    desc.maps[0] = map;
-    diagnostics = {};
-    capture = op->CreateCapture();
-    Check(!op->Capture(captureContext, upstream, capture.get(), &diagnostics) &&
-              !diagnostics.errors.empty() &&
-              diagnostics.errors.back().find("domain") != std::string::npos,
-          "Width rejects non-root ImageMap mask domains");
-}
-
 }  // namespace
 
 int main()
 {
     usdGenRegisterM1Operators();
-    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestReferenceProbe"), 0,
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestReferenceProbe"),
           [] { return std::make_unique<ReferenceProbe>(); }),
           "registers reference-lane probe");
-    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestCurveProbe"), 0,
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestCurveProbe"),
           [] { return std::make_unique<CurveProbe>(); }),
           "registers curve-lane probe");
     ValidateRegistryContractReuse();
     RunReferenceMapLowering();
     ValidateReferenceProducerChain();
-    ValidateWidthImageMask();
     ValidateFailures();
     ValidateMapIdentityAndRecompileTransaction();
     std::printf(gFailures ? "testUsdGenCpuReferenceMap: FAILED (%d)\n"

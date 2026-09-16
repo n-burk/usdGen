@@ -297,27 +297,27 @@ TEST(ExpressionConnectionsTest, UndoRemovesOnlyCommandCreatedAttributeOverride) 
   // Both inputs are schema-defined and inherited by UsdGenWidth, hence they
   // have no local attribute specs until a connection command authors one.
   UsdAttribute builtin = scene.operatorPrim.GetAttribute(TfToken("usdGen:width"));
-  UsdAttribute taper = scene.operatorPrim.GetAttribute(TfToken("usdGen:taper"));
+  UsdAttribute maskAmount = scene.operatorPrim.GetAttribute(TfToken("usdGen:mask"));
   ASSERT_TRUE(builtin);
-  ASSERT_TRUE(taper);
+  ASSERT_TRUE(maskAmount);
   EXPECT_FALSE(scene.stage->GetEditTarget().GetAttributeSpecForScenePath(
       builtin.GetPath()));
   EXPECT_FALSE(scene.stage->GetEditTarget().GetAttributeSpecForScenePath(
-      taper.GetPath()));
+      maskAmount.GetPath()));
   UsdAttribute output = scene.expression.CreateAttribute(
       TfToken("outputs:width"), SdfValueTypeNames->Float, true);
   output.Set(0.5f);
-  AttributeConnectionRequest request = Request(output, taper);
+  AttributeConnectionRequest request = Request(output, maskAmount);
   ASSERT_TRUE(ValidateExpressionConnection(weak, request));
   CommandPtr command = MakeExpressionConnectionCommand(
       weak, request, ExpressionEvaluationDomain::Point);
   ASSERT_TRUE(command);
   command->execute();
   ASSERT_TRUE(scene.stage->GetEditTarget().GetAttributeSpecForScenePath(
-      taper.GetPath()));
+      maskAmount.GetPath()));
   command->undo();
   EXPECT_FALSE(scene.stage->GetEditTarget().GetAttributeSpecForScenePath(
-      taper.GetPath()));
+      maskAmount.GetPath()));
 
   // A later unrelated field makes the command-created override non-inert;
   // undo must retain it rather than deleting someone else's opinion.

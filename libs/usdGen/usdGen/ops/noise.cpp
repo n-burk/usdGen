@@ -4,19 +4,18 @@
 // 04 §2.9's evaluate pseudocode re-samples the fBm every frame, but its
 // sample position — rootRest[c]*correlation + h_c + (0,0, hairT[i]*frequency)
 // — depends only on rest data, the per-curve capture hash, hairT and the
-// capture-class parameters. usdGen:space resolves to "rest" for this type, so
+// capture-class parameters. Noise reads the rest plane, so
 // "the field is evaluated at the rest root and frizz does not swim when the
 // surface animates". We therefore pin the field values into the capture
 // payload (SeExpr2::FBM, S38 — the single noise implementation) and let
-// Evaluate apply only the value-class scale (magnitude * magLUT * mask
+// Evaluate apply only the value-class scale (magnitude * magLUT * usdGen:mask
 // envelope). The per-frame cost is an add-scale, not a noise sample, which is
 // what keeps gate E-1 (full 5-op run <= 1.5 ms at 100 k x 8 CV) honest: a
 // per-frame SeExpr FBM over 800 k CVs measures ~100 ms single-thread /
 // ~12.5 ms at 8 threads on this host (MEASURED, fbmbench, M1 integration).
 #include "usdGen/ops/noise.h"
 
-#include "usdGen/mask.h"
-#include "usdGen/maskParams.h"
+#include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 #include "usdGenMath/usdGenMath/ramp.h"
@@ -105,10 +104,7 @@ bool UsdGenNoiseCaptureGPU(const float *base,
 #endif
 
 static TfTokenVector _topoParams = [] {
-    TfTokenVector v = UsdGenBaseTopologyParams();
-    auto m = UsdGenMaskTopologyParams();
-    v.insert(v.end(), m.begin(), m.end());
-    return v;
+    return UsdGenBaseTopologyParams();
 }();
 
 static TfTokenVector _valueParams = [] {
@@ -116,6 +112,7 @@ static TfTokenVector _valueParams = [] {
     v.push_back(TfToken("enabled"));      // toggle: value-class (02 §6.3)
     v.push_back(TfToken("noise:magnitude"));
     v.push_back(TfToken("noise:magnitude:knots"));
+    v.push_back(TfToken("noise:magnitude:interpolation"));
     v.push_back(TfToken("noise:frequency"));
     v.push_back(TfToken("noise:correlation"));
     v.push_back(TfToken("noise:octaves"));
@@ -123,8 +120,7 @@ static TfTokenVector _valueParams = [] {
     v.push_back(TfToken("noise:gain"));
     v.push_back(TfToken("cumulative"));
     v.push_back(TfToken("preserveLength"));
-    auto m = UsdGenMaskValueParams();
-    v.insert(v.end(), m.begin(), m.end());
+    v.push_back(TfToken("mask"));        // operator envelope (02 §2.13)
     return v;
 }();
 
@@ -168,7 +164,7 @@ bool UsdGenNoiseOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
 UsdGenEpoch UsdGenNoiseOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
 {
     // The pinned field is a function of: frequency, correlation, octaves,
-    // lacunarity, gain, the mask capture block, seed, and the upstream
+    // lacunarity, gain, seed, and the upstream
     // topology (rest roots + hairT). Value-class parameters (magnitude, its
     // knots, cumulative, preserveLength) are applied at evaluate and are
     // deliberately NOT terms here — that is what keeps a magnitude edit out
@@ -207,12 +203,22 @@ bool UsdGenNoiseOp::Capture(
     cap.upstreamTopologyVersion = upstream.topologyVersion;
     cap.upstreamCvs = upstream.totalCvs;
 
-    float frequency = p ? static_cast<float>(p->GetDouble(TfToken("noise:frequency"), 3.0)) : 3.0f;
-    float correlation = p ? static_cast<float>(p->GetDouble(TfToken("noise:correlation"), 0.5)) : 0.5f;
-    correlation = std::clamp(correlation, 0.0f, 1.0f);
-    int octaves = p ? p->GetInt(TfToken("noise:octaves"), 1) : 1;
-    float lacunarity = p ? static_cast<float>(p->GetDouble(TfToken("noise:lacunarity"), 2.0)) : 2.0f;
-    float gain = p ? static_cast<float>(p->GetDouble(TfToken("noise:gain"), 0.5)) : 0.5f;
+    // The fBm field is pinned here, so these controls are capture-class. They
+    // are still connectable: their evaluated values are part of this node's
+    // capture identity (scheduler WithExternalValueIdentity), so editing one
+    // re-captures. Per-curve controls sample the curve's ROOT CV; the
+    // frequency is sampled at each CV, which is where the CUDA kernel reads it.
+    UsdGenParamField const frequencyField =
+        p ? p->GetScalarField(sFrequency, 3.0) : UsdGenParamField{3.0};
+    UsdGenParamField const correlationField =
+        p ? p->GetScalarField(sCorrelation, 0.5) : UsdGenParamField{0.5};
+    UsdGenParamField const lacunarityField =
+        p ? p->GetScalarField(sLacunarity, 2.0) : UsdGenParamField{2.0};
+    UsdGenParamField const gainField =
+        p ? p->GetScalarField(sGain, 0.5) : UsdGenParamField{0.5};
+    UsdGenParamField const octavesField =
+        p ? p->GetScalarField(sOctaves, double(p->GetInt(sOctaves, 1)))
+          : UsdGenParamField{1.0};
 
     // `noise:magnitude` and its knots are value-class (02-schema.md :638-639),
     // so the magnitude ramp is NOT baked into the capture payload: Evaluate()
@@ -221,14 +227,6 @@ bool UsdGenNoiseOp::Capture(
     // (02 :598). Baking it here would freeze a value-class edit out of the
     // frame response (review M-5); the CaptureDigest above deliberately
     // excludes the knots for the same reason (gate SI-2).
-
-    // Mask block (02 §2.13) — resolved once per capture epoch (I4).
-    if (p) {
-        UsdGenMaskSettings m = UsdGenMaskSettingsFromParams(*p);
-        auto const mask = EvaluateMask(m, upstream.curveId, upstream.px, {}, 0.0);
-        cap.curveMask = mask.curveMask;
-        cap.maskRampLut = mask.rampLut;
-    }
 
     if (upstream.px.empty()) {
         cap.perCv.clear();
@@ -264,7 +262,14 @@ bool UsdGenNoiseOp::Capture(
     // with a fixed stride, so ragged buffers take the CPU fill below.
     // Without the !ragged test a ragged buffer passed the old gate with
     // the bogus mean cvCount = nCv/nCurve — false positive, wrong field.
-    if (cvCount > 0 && !ragged) {
+    if (cvCount > 0 && !ragged && frequencyField.Uniform() && correlationField.Uniform() &&
+        lacunarityField.Uniform() && gainField.Uniform() && octavesField.Uniform()) {
+        const float frequency = static_cast<float>(frequencyField.Value(0, 0));
+        const float correlation = std::clamp(
+            static_cast<float>(correlationField.Value(0, 0)), 0.0f, 1.0f);
+        const int octaves = static_cast<int>(octavesField.Value(0, 0));
+        const float lacunarity = static_cast<float>(lacunarityField.Value(0, 0));
+        const float gain = static_cast<float>(gainField.Value(0, 0));
         std::vector<float> base(nCurve * 3u);
         std::vector<float> cvT(nCv);
         for (size_t c = 0; c < nCurve; ++c) {
@@ -300,6 +305,11 @@ bool UsdGenNoiseOp::Capture(
         float hvec[3];
         HashVec3(ctx.seed, ids ? ids[c] : 0, hvec);
         const size_t g = ragged ? size_t(offs[c]) : c * size_t(cvCount);
+        const float correlation = std::clamp(
+            static_cast<float>(correlationField.Value(c, g)), 0.0f, 1.0f);
+        const int octaves = static_cast<int>(octavesField.Value(c, g));
+        const float lacunarity = static_cast<float>(lacunarityField.Value(c, g));
+        const float gain = static_cast<float>(gainField.Value(c, g));
         const GfVec3f root = ragged
             ? GfVec3f(px[g], py[g], pz[g])
             : (cvCount > 0 ? GfVec3f(px[g], py[g], pz[g])
@@ -307,8 +317,6 @@ bool UsdGenNoiseOp::Capture(
         const float baseX = root[0] * correlation + (1.0f - correlation) * hvec[0];
         const float baseY = root[1] * correlation + (1.0f - correlation) * hvec[1];
         const float baseZ = root[2] * correlation + (1.0f - correlation) * hvec[2];
-
-        const float captureFrequency = frequency;
 
         float rootOut = 0.0f;
         {
@@ -325,6 +333,8 @@ bool UsdGenNoiseOp::Capture(
             const float t = hairT
                 ? hairT[g + i]
                 : (n > 1 ? float(i) / float(n - 1) : 0.0f);
+            const float captureFrequency =
+                static_cast<float>(frequencyField.Value(c, g + size_t(i)));
             const float in3[3] = {baseX, baseY, baseZ + t * captureFrequency};
             float out1 = 0.0f;
             SeExpr2::FBM<3, 1, false, float>(in3, &out1,
@@ -345,14 +355,23 @@ void UsdGenNoiseOp::Evaluate(
     if (cap.perCv.empty()) return;
 
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
-    const float magnitude = p ? static_cast<float>(p->GetDouble(sMagnitude, 0.05)) : 0.05f;
-    const bool cumulative = p ? p->GetBool(sCumulative, false) : false;
-    const float preserveLength = p ? static_cast<float>(p->GetDouble(sPreserveLength, 1.0f)) : 1.0f;
+    // usdGen:noise:magnitude, usdGen:preserveLength, usdGen:cumulative and
+    // usdGen:mask are CONNECTABLE value-class controls; an authored literal is
+    // a uniform field and the arithmetic below is unchanged.
+    UsdGenParamField const magnitudeField =
+        p ? p->GetScalarField(sMagnitude, 0.05) : UsdGenParamField{0.05};
+    UsdGenParamField const preserveField =
+        p ? p->GetScalarField(sPreserveLength, 1.0) : UsdGenParamField{1.0};
+    UsdGenParamField const cumulativeField =
+        p ? p->GetScalarField(sCumulative, p->GetBool(sCumulative, false) ? 1.0 : 0.0)
+          : UsdGenParamField{0.0};
+    UsdGenParamField const maskField =
+        p ? p->GetScalarField(sMask, 1.0) : UsdGenParamField{1.0};
     float *px = view->px, *py = view->py, *pz = view->pz;
     auto const *inPx = view->inPx, *inPy = view->inPy, *inPz = view->inPz;
     auto const *hairT = view->hairT;
-    auto const *mask = view->curveMask;
     auto const *rootN = view->rootN;
+    const size_t curveBase = view->desc ? size_t(view->desc->firstCurve) : 0;
     auto const *perCv = cap.perCv.data();
     // Worker-local storage avoids per-chunk allocations. Empty knots use
     // scalar 1.0 below; there is no shared table with static exit lifetime.
@@ -365,7 +384,6 @@ void UsdGenNoiseOp::Evaluate(
         UsdGenBuildRampLut(magKnots, p ? p->GetToken(sMagInterp, sCatmullRom) : sCatmullRom, tLut.data(), kUsdGenRampLutSize);
         lutPtr = tLut.data();
     }
-    auto const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.data();
     const size_t cv = size_t(view->cvCount);
     // Ragged chunk (03 §1.3): cvCount == 0 and view->cvOffsets is ALREADY
     // shifted by desc->firstCurve (scheduler SweepChunk, scheduler.cpp:213),
@@ -378,29 +396,32 @@ void UsdGenNoiseOp::Evaluate(
     const size_t firstCv = view->desc ? size_t(view->desc->firstCv) : 0;
 
     for (uint32_t c = 0; c < view->curveCount; ++c) {
-        const float w = magnitude * (mask ? mask[c] : 1.0f);
         const size_t nCVs = ragged ? size_t(cvOff[c + 1] - cvOff[c]) : cv;
         const size_t g = ragged ? size_t(cvOff[c] - cvOff[0])
                                 : view->Cv(c, 0);
-        if (w == 0.0f) {
-            // Early-out: bitwise copy of the input (02 §2.13).
-            for (size_t i = 0; i < nCVs; ++i) {
-                const size_t o = g + i;
-                px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
-            }
-            continue;
-        }
+        const size_t curve = curveBase + c;
+        const bool cumulative = cumulativeField.Value(curve, firstCv + g) != 0.0;
         const GfVec3f n = rootN ? rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
         float runSum = 0.0f;
         for (size_t i = 0; i < nCVs; ++i) {
             const size_t o = g + i;
+            const float magnitude =
+                static_cast<float>(magnitudeField.Value(curve, firstCv + o));
+            const float mask = std::clamp(
+                static_cast<float>(maskField.Value(curve, firstCv + o)), 0.0f, 1.0f);
+            const float w = magnitude * mask;
+            if (w == 0.0f) {
+                // Early-out: bitwise copy of the input (02 §2.13).
+                px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
+                continue;
+            }
+            const float preserveLength =
+                static_cast<float>(preserveField.Value(curve, firstCv + o));
             const float t = hairT ? hairT[o]
                                    : (nCVs > 1 ? float(i) / float(nCVs - 1) : 0.0f);
             // Flat magnitude ramp (no knots) evaluates to exactly 1.0, so
             // skip the out-of-line LUT call: bitwise-identical, fewer CV costs.
-            const float magScale = magFlat ? 1.0f
-                : UsdGenEvalLut257(lutPtr, t)
-                    * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
+            const float magScale = magFlat ? 1.0f : UsdGenEvalLut257(lutPtr, t);
             float disp = w * magScale * perCv[firstCv + o];
             if (cumulative) {
                 runSum += disp;

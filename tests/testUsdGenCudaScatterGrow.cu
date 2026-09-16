@@ -56,40 +56,6 @@ int main() {
     CHECK(offsets[0]==0&&offsets[1]==3&&offsets[2]==6&&ids[0]==17&&ids[1]==29&&prim[0]==4&&prim[1]==8);
     CHECK(Near(uv[1].x,.3f)&&Near(uv[1].y,.4f)&&Near(t[0],V(1,0,0))&&Near(b[1],V(-1,0,0))&&Near(n[0],V(0,0,2)));
     for(unsigned c=0;c<2;++c) for(unsigned i=0;i<3;++i) { float q=float(i)/2; float3 root=c?V(-2,0,1):V(1,2,3); float3 dir=c?V(0,1,0):V(0,0,1); uint64_t id=c?29:17; float target=static_cast<float>(controls.length*(controls.randomLo+double(UsdGenDraw01(controls.seed,id,kSaltGrow))*(controls.randomHi-controls.randomLo))); float3 expected=V(root.x+dir.x*(target*q),root.y+dir.y*(target*q),root.z+dir.z*(target*q)); CHECK(Near(p[c*3+i],expected)&&Near(rest[c*3+i],expected)&&Near(hair[c*3+i],q)&&Near(widths[c*3+i],.125f)); }
-    {
-    auto mapImage = UsdGenImagePayload::Create(1, 1, 1, std::vector<float>{.5f});
-    CHECK(mapImage);
-    std::weak_ptr<const UsdGenImagePayload> weakMap = mapImage;
-    GrowLengthMap lengthMap; lengthMap.image = mapImage;
-    lengthMap.options.filter = UsdGenImageFilter::Nearest;
-    lengthMap.options.clampOutput = false;
-    ScatterGrowRequirements mappedRequirements;
-    CHECK(GetScatterGrowRequirements(2, 3, &mappedRequirements, mapImage->TexelCount()) ==
-          ScatterGrowStatus::Ok && mappedRequirements.mapScratchBytes == 3 * sizeof(float));
-    ScatterGrowControls mapped = controls; mapped.length = 2.0; mapped.randomLo = 1.0; mapped.randomHi = 1.0;
-    auto mapRoots = std::make_shared<ScatterGrowRoots>();
-    mapRoots->positions = {V(1,2,3), V(-2,0,1)};
-    mapRoots->stableIds = {17,29}; mapRoots->rootPrim = {4,8};
-    mapRoots->rootUV = {make_float2(.1f,.2f),make_float2(.3f,.4f)};
-    mapRoots->rootT = {V(1,0,0),V(0,1,0)};
-    mapRoots->rootB = {V(0,1,0),V(-1,0,0)};
-    mapRoots->rootN = {V(0,0,2),V(0,3,0)};
-    CudaScatterGrow mappedGrow; Relay mappedRelay;
-    auto const beforeMapped = resources->Snapshot();
-    CHECK(mappedGrow.BeginFresh(mapRoots, mapped, stream, nullptr, &lengthMap)==ScatterGrowStatus::Ok);
-    CHECK(resources->Snapshot().usedBytes - beforeMapped.usedBytes == mappedRequirements.peakBytes);
-    lengthMap.image.reset(); mapImage.reset(); CHECK(!weakMap.expired());
-    CHECK(mappedGrow.FinishFreshAsync(stream,Done,&mappedRelay)==ScatterGrowStatus::Ok &&
-          cudaStreamSynchronize(stream)==cudaSuccess &&
-          mappedRelay.status.load()==int(cudaSuccess) &&
-          mappedGrow.CommitFreshFinish()==ScatterGrowStatus::Ok);
-    CHECK(resources->Snapshot().usedBytes - beforeMapped.usedBytes ==
-          mappedRequirements.outputBytes + mappedRequirements.statusBytes);
-    std::vector<float3> mappedPoints(6);
-    CHECK(Get(mappedGrow.view().points,mappedPoints,stream) &&
-          Near(mappedPoints[2],V(1,2,4)));
-    lengthMap.image.reset(); CHECK(weakMap.expired());
-    }
     ScatterGrowControls bad=controls; bad.direction=static_cast<ScatterGrowDirection>(99); auto invalid=std::make_shared<ScatterGrowRoots>(); *invalid=ScatterGrowRoots{}; CHECK(grow.BeginFresh(invalid,bad,stream)==ScatterGrowStatus::InvalidArgument);
     grow.ReclassifyPublishedGeneration();
     auto pinned=resources->Snapshot();
@@ -132,31 +98,6 @@ int main() {
         CHECK(Near(points[0], V(0, 0, 0)) && Near(points[1], V(0, expectedY * .5f, 0)) &&
                   Near(points[2], V(0, expectedY, 0)));
         }
-
-        auto runBlend = [&](float blend, float3 tangent, float3 expected, float lift = 90.0f) {
-            roots->rootT[0] = tangent;
-            ScatterGrowControls blendControls = controls;
-            blendControls.lift = lift; blendControls.uvBlend = blend;
-            CudaScatterGrow blended; Relay relay;
-            if (!(blended.BeginFresh(roots, blendControls, stream) == ScatterGrowStatus::Ok &&
-                  blended.FinishFreshAsync(stream, Done, &relay) == ScatterGrowStatus::Ok &&
-                  cudaStreamSynchronize(stream) == cudaSuccess &&
-                  relay.status.load() == int(cudaSuccess) &&
-                  blended.CommitFreshFinish() == ScatterGrowStatus::Ok)) return false;
-            std::vector<float3> got(3);
-            return Get(blended.view().points, got, stream) && Near(got[2], expected);
-        };
-        constexpr float kDiag = 0.7071067811865475f;
-        CHECK(runBlend(0.0f, V(1,0,0), V(0,2,0)) &&
-              runBlend(1.0f, V(1,0,0), V(2,0,0)) &&
-              runBlend(0.5f, V(1,0,0), V(2*kDiag,2*kDiag,0)) &&
-              runBlend(0.5f, V(-1,0,0), V(2,0,0), 0.0f) &&
-              runBlend(1.0f, V(0,0,0), V(0,2,0)));
-        ScatterGrowControls badBlend = controls; badBlend.uvBlend = 1.01f;
-        CudaScatterGrow rejectedBlend;
-        CHECK(rejectedBlend.BeginFresh(roots, badBlend, stream) == ScatterGrowStatus::InvalidArgument);
-        badBlend.uvBlend = std::numeric_limits<float>::quiet_NaN();
-        CHECK(rejectedBlend.BeginFresh(roots, badBlend, stream) == ScatterGrowStatus::InvalidArgument);
 
         // Both target narrowing overflow and endpoint arithmetic overflow are
         // rejected before any device allocation or stream submission.

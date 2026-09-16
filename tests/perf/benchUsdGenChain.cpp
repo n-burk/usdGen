@@ -97,7 +97,6 @@ UsdGenGraphDesc MakeG3()
         n.path = SdfPath("/groom/" + name);
         n.type = type;
         n.enabled = true;
-        n.blend = 1.0f;
         n.seed = seed;
         if (!input.empty()) n.inputs.push_back(SdfPath("/groom/" + input));
         if (type == TfToken("UsdGenScatter"))
@@ -145,7 +144,6 @@ UsdGenGraphDesc MakeChain(int n)
         nd.path = SdfPath("/chain/n" + std::to_string(i));
         nd.type = i == 0 ? TfToken("UsdGenScatter") : TfToken("UsdGenGrow");
         nd.enabled = true;
-        nd.blend = 1.0f;
         nd.seed = 2000 + i;
         if (i == 0) nd.surfaces.push_back(SdfPath("/chain/surface"));
         else nd.inputs.push_back(SdfPath("/chain/n" + std::to_string(i - 1)));
@@ -254,7 +252,6 @@ int main(int argc, char **argv)
             nd.path = SdfPath("/chain/n200");
             nd.type = TfToken("UsdGenScatter");   // Clone() is scatter-only in M1
             nd.enabled = true;
-            nd.blend = 1.0f;
             nd.seed = 2200;
             nd.surfaces.push_back(base.surfaces[0].path);
             grown.nodes.push_back(std::move(nd));

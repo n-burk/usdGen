@@ -2,7 +2,6 @@
 #define USDGEN_GPU_SCATTER_GROW_H
 
 #include "curveGeometry.h"
-#include "growLengthMap.h"
 #include "imageSampler.h"
 
 #include <cstdint>
@@ -40,7 +39,6 @@ struct ScatterGrowControls {
     float3 literalDirection = {0.0f, 1.0f, 0.0f};
     // Blend the lifted direction toward the captured root tangent after the
     // angular lift. Appended to preserve aggregate initialization order.
-    float uvBlend = 0.0f;
 };
 
 enum class ScatterGrowStatus {
@@ -56,7 +54,6 @@ struct ScatterGrowRequirements {
     // transaction and remain retained until its terminal proof.
     size_t statusBytes = 0;
     // Optional length-map texels plus one sampled scalar per captured root.
-    size_t mapScratchBytes = 0;
     size_t peakBytes = 0;
 };
 
@@ -64,8 +61,7 @@ struct ScatterGrowRequirements {
 // statusBytes field includes one device word and one pinned host relay word;
 // native events and other driver allocations are outside this ledger.
 ScatterGrowStatus GetScatterGrowRequirements(size_t curveCount, uint32_t cvCount,
-                                            ScatterGrowRequirements* result,
-                                            size_t mapTexelCount = 0);
+                                            ScatterGrowRequirements* result);
 
 // A fresh, immutable Grow topology owner.  BeginFresh never mutates a
 // published generation.  A caller must commit only from the relay which saw
@@ -80,8 +76,7 @@ public:
 
     ScatterGrowStatus BeginFresh(std::shared_ptr<const ScatterGrowRoots> roots,
         ScatterGrowControls controls, cudaStream_t stream,
-        UsdGenExecutionMemoryReservation* reservation = nullptr,
-        GrowLengthMap const* lengthMap = nullptr);
+        UsdGenExecutionMemoryReservation* reservation = nullptr);
     ScatterGrowStatus FinishFreshAsync(cudaStream_t stream,
         void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata);
     ScatterGrowStatus CommitFreshFinish();
@@ -126,18 +121,14 @@ private:
     Storage pendingInput_;
 
     ScatterGrowStatus validate(std::shared_ptr<const ScatterGrowRoots> const&,
-                               ScatterGrowControls const&, GrowLengthMap const*,
-                               size_t mapTexelCount, size_t* total) const;
+                               ScatterGrowControls const&, size_t* total) const;
     ScatterGrowStatus validateStream(cudaStream_t) const;
     void discardPending() noexcept;
-    void discardLengthMap() noexcept;
     std::shared_ptr<const ScatterGrowRoots> rootsOwner_;
     // Preallocated before submission so unproved H2D retirement can retain
     // its immutable host source without allocating in a noexcept destructor.
     std::unique_ptr<std::shared_ptr<const ScatterGrowRoots>> rootsQuarantineOwner_;
     DeviceBuffer<int> error_;
-    std::unique_ptr<CudaImage> lengthImage_;
-    DeviceBuffer<float> lengthSamples_;
     int* hostError_ = nullptr;
     UsdGenExecutionResourcePermit hostErrorPermit_;
     cudaEvent_t ready_ = nullptr;

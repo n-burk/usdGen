@@ -2,7 +2,7 @@
 // For every registered prim-adapter type (the five plugInfo entries), every
 // declared usdGen:* property in UsdPrimDefinition::GetPropertyNames() appears
 // under its expected nested locator in the `usdGen` container AND dirties
-// exactly that locator when edited. Also asserts usdGen:input carries ALL
+// exactly that locator when edited. Also asserts usdGen:guides carries ALL
 // its targets (array factory, 06 §2.3) and the uniform-edit precision rule:
 // a uniform edit must NOT emit invalidate-for-precision failures (no bare
 // `primvars` sentinel, no widths/points cross-dirty).
@@ -106,18 +106,15 @@ int main()
     stage->DefinePrim(opB, TfToken("UsdGenGrow"));
     stage->DefinePrim(map, TfToken("UsdGenImageMap"));
     stage->DefinePrim(guides, TfToken("UsdGenGuideSet"));
-    // Bind Description.terminal so the relationship leaf is served
-    // (an unbound rel has no targets → no leaf; SI-7 needs the leaf).
-    stage->GetPrimAtPath(desc)
-        .CreateRelationship(TfToken("usdGen:terminal"))
-        .SetTargets(SdfPathVector{opA});
-
-    // usdGen:input multi-target: the array factory must carry ALL targets.
+    // Multi-target relationship: the array factory must carry ALL targets.
+    // usdGen:guides is the multi-target relationship UsdGenDescription
+    // declares (operators are ordered by the composed hierarchy; there is no
+    // usdGen:input in the schema).
     {
-        UsdPrim a = stage->GetPrimAtPath(opA);
-        UsdRelationship input = a.CreateRelationship(TfToken("usdGen:input"));
+        UsdPrim d = stage->GetPrimAtPath(desc);
+        UsdRelationship guidesRel = d.CreateRelationship(TfToken("usdGen:guides"));
         SdfPathVector targets{opB, map};
-        input.SetTargets(targets);
+        guidesRel.SetTargets(targets);
     }
 
     UsdImagingCreateSceneIndicesInfo info;
@@ -215,17 +212,13 @@ int main()
                 prop, isRel, sibs));
     };
     {
-        // Grow: float usdGen:length (ancestor) vs rel usdGen:length:source.
-        TfTokenVector growSibs{TfToken("usdGen:length"),
-                               TfToken("usdGen:length:source")};
-        Check(expectAbs(TfToken("usdGen:length"), false, growSibs) ==
-                  HdDataSourceLocator(
-                      TfToken("usdGen"), TfToken("length-value")),
-              "pin: Grow usdGen:length -> usdGen/length-value");
-        Check(expectAbs(TfToken("usdGen:length:source"), true, growSibs) ==
+        // Length: float usdGen:length:value (ancestor) vs usdGen:length:mode.
+        TfTokenVector growSibs{TfToken("usdGen:length:value"),
+                               TfToken("usdGen:length:mode")};
+        Check(expectAbs(TfToken("usdGen:length:value"), false, growSibs) ==
                   HdDataSourceLocator(TfToken("usdGen"),
-                                      TfToken("length"), TfToken("source")),
-              "pin: Grow usdGen:length:source keeps usdGen/length/source");
+                                      TfToken("length"), TfToken("value")),
+              "pin: usdGen:length:value -> usdGen/length/value");
         // Width: float usdGen:width vs float2[] usdGen:width:knots.
         TfTokenVector widthSibs{TfToken("usdGen:width"),
                                 TfToken("usdGen:width:knots")};
@@ -273,19 +266,19 @@ int main()
     Check(present == propsChecked, "every declared property appears at terminal");
     Check(dirtied == propsChecked, "every declared property dirties exactly");
 
-    // usdGen:input carries ALL targets, not just the first (06 §2.3).
+    // usdGen:guides carries ALL targets, not just the first (06 §2.3).
     {
-        UsdPrim a = stage->GetPrimAtPath(opA);
+        UsdPrim d = stage->GetPrimAtPath(desc);
         HdContainerDataSourceHandle data =
             UsdImagingDataSourceMapped::New(
-                a, opA,
-                UsdGenPrimAdapterBase::Mappings(TfToken("UsdGenScatter")),
+                d, desc,
+                UsdGenPrimAdapterBase::Mappings(TfToken("UsdGenDescription")),
                 globals);
         // The mapped source IS the usdGen container (Mappings prefix
-        // applied inside): the leaf sits at relative `input`.
+        // applied inside): the leaf sits at relative `guides`.
         HdDataSourceBaseHandle leaf =
             GetAt(data, UsdGenPrimAdapterBase::LocatorForProperty(
-                              TfToken("usdGen:input")));
+                              TfToken("usdGen:guides")));
         HdVectorDataSourceHandle vec = HdVectorDataSource::Cast(leaf);
         size_t n = 0;
         if (vec) {
@@ -302,7 +295,7 @@ int main()
                     hasMap = hasMap || p == map;
                 }
             }
-            Check(hasB && hasMap, "usdGen:input carries both targets");
+            Check(hasB && hasMap, "usdGen:guides carries both targets");
         } else {
             // Path-array sources expose a sampled VtArray<SdfPath> leaf.
             HdSampledDataSourceHandle s = HdSampledDataSource::Cast(leaf);
@@ -316,7 +309,7 @@ int main()
                     }
                 }
             }
-            Check(hasB && hasMap, "usdGen:input carries both targets (array leaf)");
+            Check(hasB && hasMap, "usdGen:guides carries both targets (array leaf)");
         }
     }
 
@@ -375,8 +368,8 @@ int main()
                               unknown[worker] == unknown[0];
         Check(addressesStable, "parallel mapping lookups publish canonical addresses");
 
-        TfTokenVector probes{TfToken("usdGen:seed"), TfToken("usdGen:input"),
-                             TfToken("usdGen:terminal")};
+        TfTokenVector probes{TfToken("usdGen:seed"), TfToken("usdGen:guides"),
+                             TfToken("usdGen:curves")};
         auto equivalent = [&](const Mapping &a, const Mapping &b) {
             HdDataSourceLocatorSet lhs =
                 UsdImagingDataSourceMapped::Invalidate(probes, a);

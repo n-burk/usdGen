@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <exception>
 #include <initializer_list>
@@ -56,8 +57,6 @@ UsdGenNodeDesc RbfDeform(char const* path, char const* input) {
     node.type = TfToken("UsdGenDeform");
     node.inputs = {SdfPath(input)};
     node.surfaces = {SdfPath("/Dag/Scalp")};
-    node.mode = TfToken("rbf");
-    node.readPhase = TfToken("final");
     node.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
     return node;
 }
@@ -157,7 +156,7 @@ UsdGenGraphDesc WidthBlendDesc(float blend = .25f) {
     merge.path = SdfPath("/Dag/Blend");
     merge.type = TfToken("UsdGenWidthBlend");
     merge.inputs = {left.path, right.path};
-    merge.blend = blend;
+    merge.params.push_back({TfToken("widthBlend:weight"), VtValue(blend), false});
     // Deliberately non-topological: lowering must retain the authored input
     // order, not storage order, while both Width predecessors remain COW.
     desc.nodes = {merge, right, Source(), left};
@@ -185,26 +184,10 @@ UsdGenGraphDesc CrossOriginWidthBlendDesc(float rightScale = 1.0f) {
     UsdGenNodeDesc merge;
     merge.path = SdfPath("/Dag/CrossOriginBlend");
     merge.type = TfToken("UsdGenWidthBlend");
-    merge.inputs = {left.path, right.path}; merge.blend = .25f;
+    merge.inputs = {left.path, right.path};
+    merge.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
     desc.nodes = {merge, right, rightLength, left, leftLength, Source()};
     desc.terminal = merge.path;
-    return desc;
-}
-
-UsdGenGraphDesc ImageMapWidthDesc() {
-    auto desc = BaseDesc();
-    UsdGenMapDesc map;
-    map.path = SdfPath("/Dag/Mask");
-    map.type = TfToken("UsdGenImageMap");
-    map.textureGeneration = 1;
-    map.imagePayload = ImagePayload::Create(1, 1, 1, std::vector<float>{.5f},
-        UsdGenImageRowOrientation::BottomUp);
-    desc.maps.push_back(std::move(map));
-    auto width = Width("/Dag/ImageWidth", "/Dag/Source", .8f);
-    width.mapBindings = {{SdfPath("/Dag/Mask"),
-        UsdGenMapBindingPurpose::MaskSource, TfToken("usdGen:mask:source")}};
-    desc.nodes = {Source(), width};
-    desc.terminal = width.path;
     return desc;
 }
 
@@ -252,7 +235,7 @@ UsdGenGraphDesc TopologyWidthBlendDesc(float blend = .25f,
     merge.path = SdfPath("/Dag/TopologyBlend");
     merge.type = TfToken("UsdGenWidthBlend");
     merge.inputs = {left.path, right.path};
-    merge.blend = blend;
+    merge.params.push_back({TfToken("widthBlend:weight"), VtValue(blend), false});
     // Keep authored storage deliberately non-topological: both the topology
     // trunk and the WidthBlend's left/right operand order are semantic.
     desc.nodes = {merge, right, Source(), left, length};
@@ -275,7 +258,6 @@ UsdGenGraphDesc TopologyLengthWidthBlendDesc() {
     // Keep Length on the ordered right-hand input: this is the dominance
     // case that is easiest to accidentally skip when validating fan-in.
     merge.inputs = {right.path, length.path};
-    merge.blend = .25f;
     desc.nodes = {merge, right, Source(), length};
     desc.terminal = merge.path;
     return desc;
@@ -378,7 +360,8 @@ bool LengthTopologyReference(UsdGenGraphDesc desc, UsdGenCurveBuffer* output) {
         result.curveId.push_back(input.curveId[c]);
         result.cvOffsets.push_back(static_cast<int>(result.px.size()));
     }
-    result.totalCurves = result.curveId.size(); result.totalCvs = result.px.size();
+    result.totalCurves = static_cast<uint32_t>(result.curveId.size());
+    result.totalCvs = static_cast<uint32_t>(result.px.size());
     *output = std::move(result);
     return true;
 }
@@ -592,55 +575,92 @@ void AddRuntimeFailure(UsdGenGraphDesc* desc, SdfPath const& nodePath) {
     found->expressionBindings.push_back(std::move(binding));
 }
 
+// Three roots spread along u so a primitive-domain expression on
+// usdGen:mask produces three different envelopes in one execution.
+UsdGenGraphDesc MaskExpressionDesc(bool connected) {
+    auto desc = BaseDesc();
+    auto& curves = desc.curveSets.front();
+    curves.curveVertexCounts = {2, 2, 2};
+    curves.points = {{0,0,0}, {0,.1f,0},
+                     {.5f,0,0}, {.5f,.1f,0},
+                     {1,0,0}, {1,.1f,0}};
+    curves.rest = curves.points;
+    curves.curveId = {7, 8, 9};
+    curves.skinPrim = {0, 0, 0};
+    curves.skinPrimUv = {{0,0}, {.5f,0}, {1,0}};
+    auto width = Width("/Dag/MaskWidth", "/Dag/Source", .5f);
+    if (connected) {
+        UsdGenExpressionDesc expression;
+        expression.path = SdfPath("/Dag/Expressions/rootMask");
+        expression.source = "$value * $u";
+        expr::ValueShape const shape{expr::ScalarType::Float32, 1, 1, 1, 1, false};
+        expression.outputs.push_back({TfToken("result"), TfToken("float"), shape});
+        desc.expressions.push_back(expression);
+        UsdGenExpressionBinding binding;
+        binding.expression = expression.path;
+        // An empty output is the prim-path spelling of the same connection.
+        binding.output = TfToken();
+        binding.destination = TfToken("usdGen:mask");
+        binding.domain = expr::Domain::Primitive;
+        binding.nativeType = TfToken("float");
+        binding.destinationShape = shape;
+        binding.literal = VtValue(1.0f);
+        width.expressionBindings.push_back(std::move(binding));
+    } else {
+        width.params.push_back({TfToken("mask"), VtValue(0.0f), false});
+    }
+    desc.nodes = {Source(), width};
+    desc.terminal = width.path;
+    return desc;
+}
+
 } // namespace
 
 int main() {
     UsdGenDiagnostics diagnostics;
-    // A typed MaskSource is sampled at each root st and remains distinct from
-    // Width's authored maskAmount. The map is an immutable external plan
-    // input while its device upload/sample buffer is private to this Width.
-    auto imageDesc = ImageMapWidthDesc();
-    auto imagePlan = CompileCudaGraph(imageDesc, &diagnostics);
-    CHECK(imagePlan && !diagnostics.HasErrors());
-    auto imageMetadata = GetCudaExecutionPlanMetadata(*imagePlan);
-    auto const* imageTask = imageMetadata
-        ? TaskByPath(*imageMetadata, "/Dag/ImageWidth") : nullptr;
-    CHECK(imageTask && Use(*imageTask, UsdGenExecutionDataKind::ImageMaps) &&
-          imageTask->estimate.scratchPeakBytes ==
-              ExpectedPrivateWidthBytes(imageDesc) + 2 * 257 * sizeof(float) +
-              2 * sizeof(int) + sizeof(float) + sizeof(float));
-    auto imageWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
-    CHECK(imageWorkspace);
-    auto imageGeneration = ExecuteCudaGraph(*imagePlan, *imageWorkspace, 1.0,
-                                            99, &diagnostics);
-    CHECK(imageGeneration && !diagnostics.HasErrors() &&
-          AllWidthsAre(imageGeneration, .405f));
 
-    // Compiled plans share immutable decoded texels. Replacing the graph's
-    // payload publishes a new generation without mutating or invalidating a
-    // plan that still owns the old COW value.
-    auto const oldImagePayload = imageDesc.maps.front().imagePayload;
-    imageDesc.maps.front().textureGeneration++;
-    imageDesc.maps.front().imagePayload = ImagePayload::Create(
-        1, 1, 1, std::vector<float>{.25f},
-        UsdGenImageRowOrientation::BottomUp);
+    // usdGen:mask IS the operator envelope and accepts an expression
+    // connection: the per-curve result varies with $u, and an exact-zero
+    // literal leaves the incoming widths bit-identical.
+    {
+        auto connectedDesc = MaskExpressionDesc(true);
+        auto connectedPlan = CompileCudaGraph(connectedDesc, &diagnostics);
+        for (auto const& e : diagnostics.errors) std::fprintf(stderr, "%s\n", e.c_str());
+        CHECK(connectedPlan && !diagnostics.HasErrors());
+        auto maskWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
+        CHECK(maskWorkspace);
+        auto connectedGeneration = ExecuteCudaGraph(*connectedPlan, *maskWorkspace,
+                                                    1.0, 4201, &diagnostics);
+        CHECK(connectedGeneration && !diagnostics.HasErrors());
+        std::vector<float> connectedWidths;
+        CHECK(ReadWidths(connectedGeneration, &connectedWidths) &&
+              connectedWidths.size() == 6);
+        // envelope = 1 * u = {0, .5, 1}; replace lerps the source width
+        // (the description default) toward the authored .5f target.
+        float const input = connectedDesc.defaultWidth;
+        float const expected[3] = {input, input + (.5f - input) * .5f, .5f};
+        for (size_t curve = 0; curve < 3; ++curve)
+            for (size_t cv = 0; cv < 2; ++cv)
+                CHECK(std::fabs(connectedWidths[curve * 2 + cv] - expected[curve]) < 1e-6f);
+        CHECK(connectedWidths[0] != connectedWidths[2] &&
+              connectedWidths[2] != connectedWidths[4]);
+        // The zero-envelope curve is the input bit pattern, not arithmetic.
+        CHECK(std::memcmp(&connectedWidths[0], &input, sizeof(float)) == 0);
+
+        auto zeroDesc = MaskExpressionDesc(false);
+        diagnostics = {};
+        auto zeroPlan = CompileCudaGraph(zeroDesc, &diagnostics);
+        CHECK(zeroPlan && !diagnostics.HasErrors());
+        auto zeroGeneration = ExecuteCudaGraph(*zeroPlan, *maskWorkspace, 1.0,
+                                               4202, &diagnostics);
+        CHECK(zeroGeneration && !diagnostics.HasErrors());
+        std::vector<float> zeroWidths;
+        CHECK(ReadWidths(zeroGeneration, &zeroWidths) && zeroWidths.size() == 6);
+        for (float value : zeroWidths)
+            CHECK(std::memcmp(&value, &input, sizeof(float)) == 0);
+    }
+
     diagnostics = {};
-    auto replacementImagePlan = CompileCudaGraph(imageDesc, &diagnostics);
-    CHECK(replacementImagePlan && !diagnostics.HasErrors() &&
-          oldImagePayload && oldImagePayload->Data()[0] == .5f);
-    auto oldImageGeneration = ExecuteCudaGraph(*imagePlan, *imageWorkspace, 1.0,
-                                               100, &diagnostics);
-    auto replacementImageGeneration = ExecuteCudaGraph(
-        *replacementImagePlan, *imageWorkspace, 1.0, 101, &diagnostics);
-    CHECK(oldImageGeneration && replacementImageGeneration &&
-          !diagnostics.HasErrors() && AllWidthsAre(oldImageGeneration, .405f) &&
-          AllWidthsAre(replacementImageGeneration, .2075f));
-
-    auto badImageDesc = ImageMapWidthDesc();
-    badImageDesc.maps.front().imagePayload.reset();
-    diagnostics = {};
-    CHECK(!CompileCudaGraph(badImageDesc, &diagnostics));
-
     auto desc = FanoutDesc();
     diagnostics = {};
     auto plan = CompileCudaGraph(desc, &diagnostics);
@@ -1044,7 +1064,7 @@ int main() {
     diagnostics = {};
     CHECK(!CompileCudaGraph(referenceRootFrames, &diagnostics));
     CHECK(DiagnosticIs(diagnostics,
-        "CUDA: UsdGenReferenceSource rootFrame and guideBlend bindings are not supported by CUDA at /Dag/ReferenceSource"));
+        "CUDA: UsdGenReferenceSource rootFrame bindings are not supported by CUDA at /Dag/ReferenceSource"));
 
     auto const* sourceWidths = Use(*source, UsdGenExecutionDataKind::Widths);
     auto const* terminalWidths = Use(*terminal, UsdGenExecutionDataKind::Widths);
@@ -1075,7 +1095,7 @@ int main() {
               graphEstimate.immutableSharedInputBytes == sourcePayload &&
               graphEstimate.concurrentPeakBytes ==
                   sourcePayload +
-                  2 * (privateWidth + privateWidth + 2 * 257 * sizeof(float) +
+                  2 * (privateWidth + privateWidth + 257 * sizeof(float) +
                        2 * sizeof(int)));
         CHECK(source->estimate.memoryAvailable &&
               terminal->estimate.memoryAvailable &&
@@ -1088,9 +1108,9 @@ int main() {
               terminal->estimate.producerRetentionBytes == sourcePayload &&
               sibling->estimate.producerRetentionBytes == sourcePayload);
         CHECK(terminal->estimate.scratchPeakBytes ==
-                  privateWidth + 2 * 257 * sizeof(float) + 2 * sizeof(int) &&
+                  privateWidth + 257 * sizeof(float) + 2 * sizeof(int) &&
               sibling->estimate.scratchPeakBytes ==
-                  privateWidth + 2 * 257 * sizeof(float) + 2 * sizeof(int));
+                  privateWidth + 257 * sizeof(float) + 2 * sizeof(int));
         CHECK(publication->estimate.memoryAvailable &&
               publication->estimate.retainedOutputBytes == 0 &&
               publication->estimate.producerRetentionBytes == 0 &&
@@ -1837,100 +1857,6 @@ int main() {
           CheckGeneration(topologyPredecessorGeneration,
               topologyPredecessorReference, topologyBlendReader));
 
-    // An image-masked branch below Length retains the decoded image until the
-    // terminal proof.  A 128x128 payload prevents admission from accidentally
-    // treating this topology path as a literal-only Width graph; replacement
-    // publishes fresh COW output while the old image and generation remain
-    // independently readable.
-    auto mappedTopologyBlendDesc = TopologyWidthBlendDesc();
-    UsdGenMapDesc topologyMask;
-    topologyMask.path = SdfPath("/Dag/TopologyMask");
-    topologyMask.type = TfToken("UsdGenImageMap");
-    topologyMask.textureGeneration = 1;
-    topologyMask.imagePayload = ImagePayload::Create(128, 128, 1,
-        std::vector<float>(128u * 128u, .5f),
-        UsdGenImageRowOrientation::BottomUp);
-    CHECK(topologyMask.imagePayload);
-    mappedTopologyBlendDesc.maps.push_back(topologyMask);
-    auto mappedLeft = std::find_if(mappedTopologyBlendDesc.nodes.begin(),
-        mappedTopologyBlendDesc.nodes.end(), [](auto const& node) {
-            return node.path == SdfPath("/Dag/TopologyBlendLeft");
-        });
-    CHECK(mappedLeft != mappedTopologyBlendDesc.nodes.end());
-    mappedLeft->mapBindings = {{topologyMask.path,
-        UsdGenMapBindingPurpose::MaskSource, TfToken("usdGen:mask:source")}};
-    UsdGenCurveBuffer mappedTopologyReference;
-    CHECK(LengthTopologyReference(mappedTopologyBlendDesc, &mappedTopologyReference));
-    diagnostics = {};
-    auto mappedTopologyPlan = CompileCudaGraph(mappedTopologyBlendDesc,
-                                                &diagnostics);
-    CHECK(mappedTopologyPlan && !diagnostics.HasErrors());
-    // Job creation reserves the complete native transaction before any source
-    // upload.  The only authored difference here is one root-sampled image:
-    // decoded texels plus one source-curve sample float are therefore an exact
-    // reservation delta, not an execution-time best effort.
-    auto const mapReservationBaseline = resourcePool->Snapshot();
-    diagnostics = {};
-    auto unmappedTopologyJob = CreateCudaExecutionJob(topologyBlendPlan,
-        *topologyBlendWorkspace, 1.0, 33, &diagnostics);
-    auto const unmappedTopologyReserved = resourcePool->Snapshot();
-    CHECK(unmappedTopologyJob && !diagnostics.HasErrors() &&
-          ResourceKindBytes(unmappedTopologyReserved,
-              UsdGenExecutionResourceKind::Pending) >
-              ResourceKindBytes(mapReservationBaseline,
-                  UsdGenExecutionResourceKind::Pending));
-    unmappedTopologyJob.reset();
-    CHECK(resourcePool->Snapshot().byKind == mapReservationBaseline.byKind);
-    diagnostics = {};
-    auto mappedTopologyJob = CreateCudaExecutionJob(mappedTopologyPlan,
-        *topologyBlendWorkspace, 1.0, 34, &diagnostics);
-    auto const mappedTopologyReserved = resourcePool->Snapshot();
-    uint64_t const expectedMapReservationDelta =
-        128u * 128u * sizeof(float) +
-        mappedTopologyBlendDesc.curveSets.front().curveVertexCounts.size() *
-            sizeof(float);
-    CHECK(mappedTopologyJob && !diagnostics.HasErrors() &&
-          ResourceKindBytes(mappedTopologyReserved,
-              UsdGenExecutionResourceKind::Pending) ==
-              ResourceKindBytes(unmappedTopologyReserved,
-                  UsdGenExecutionResourceKind::Pending) +
-                  expectedMapReservationDelta);
-    mappedTopologyJob.reset();
-    CHECK(resourcePool->Snapshot().byKind == mapReservationBaseline.byKind);
-    auto mappedTopologyDirect = ExecuteCudaGraph(*mappedTopologyPlan,
-        *topologyBlendWorkspace, 1.0, 33, &diagnostics,
-        topologyPredecessorGeneration);
-    CHECK(mappedTopologyDirect && !diagnostics.HasErrors() &&
-          CheckGeneration(mappedTopologyDirect, mappedTopologyReference,
-              topologyBlendReader));
-    UsdGenSession mappedTopologySession;
-    mappedTopologySession.SetDevicePublicationEnabled(true);
-    mappedTopologySession.SetGraphDesc(mappedTopologyBlendDesc);
-    auto mappedTopologyFirst = mappedTopologySession.Commit(
-        1.0, UsdGenCommitReason::SetTime);
-    CHECK(mappedTopologyFirst && mappedTopologyFirst->device &&
-          !mappedTopologySession.LastDiagnostics().HasErrors() &&
-          CheckGeneration(mappedTopologyFirst->device, mappedTopologyReference,
-              topologyBlendReader));
-    auto const retainedTopologyMask = mappedTopologyBlendDesc.maps.front().imagePayload;
-    mappedTopologyBlendDesc.maps.front().textureGeneration++;
-    mappedTopologyBlendDesc.maps.front().imagePayload = ImagePayload::Create(
-        128, 128, 1, std::vector<float>(128u * 128u, .25f),
-        UsdGenImageRowOrientation::BottomUp);
-    UsdGenCurveBuffer remappedTopologyReference;
-    CHECK(mappedTopologyBlendDesc.maps.front().imagePayload && retainedTopologyMask &&
-          LengthTopologyReference(mappedTopologyBlendDesc, &remappedTopologyReference));
-    mappedTopologySession.SetGraphDesc(mappedTopologyBlendDesc);
-    auto mappedTopologySecond = mappedTopologySession.Commit(
-        2.0, UsdGenCommitReason::SetTime);
-    CHECK(mappedTopologySecond && mappedTopologySecond->device &&
-          mappedTopologySecond != mappedTopologyFirst &&
-          !mappedTopologySession.LastDiagnostics().HasErrors() &&
-          CheckGeneration(mappedTopologySecond->device,
-              remappedTopologyReference, topologyBlendReader) &&
-          CheckGeneration(mappedTopologyFirst->device, mappedTopologyReference,
-              topologyBlendReader));
-
     CHECK(cudaStreamSynchronize(topologyBlendReader) == cudaSuccess &&
           cudaStreamDestroy(topologyBlendReader) == cudaSuccess);
 
@@ -1945,30 +1871,30 @@ int main() {
         std::shared_ptr<const UsdGenDeviceGeneration> retained;
         UsdGenCurveBuffer retainedReference;
         for (int variant = 0; variant < 4; ++variant) {
-            auto desc = TopologyWidthBlendDesc(.25f, variant == 0,
+            auto sourceDesc = TopologyWidthBlendDesc(.25f, variant == 0,
                 variant == 2 ? .8f : .45f);
-            desc.terminal = SdfPath("/Dag/Source");
+            sourceDesc.terminal = SdfPath("/Dag/Source");
             UsdGenAuthoredPlaneDesc named;
             named.name = TfToken("selectedSourceValue");
             named.type = UsdGenAuthoredPlaneType::Float32;
             named.domain = UsdGenAuthoredPlaneDomain::Point;
             named.arity = 1; named.floatValues = {0,1,2,3,4,5,6,7,8};
-            desc.curveSets.front().authoredPlanes.push_back(named);
-            if (variant == 3) for (auto& node : desc.nodes)
+            sourceDesc.curveSets.front().authoredPlanes.push_back(named);
+            if (variant == 3) for (auto& node : sourceDesc.nodes)
                 if (node.type == TfToken("UsdGenCurveSource"))
                     node.params.push_back({TfToken("resampleTo"), VtValue(2), false});
             UsdGenCurveBuffer expected;
-            CHECK(CpuReference(desc, &expected));
-            CHECK(expected.totalCurves == 3 && expected.totalCvs == (variant == 3 ? 6 : 9));
+            CHECK(CpuReference(sourceDesc, &expected));
+            CHECK(expected.totalCurves == 3 && expected.totalCvs == (variant == 3 ? 6u : 9u));
             diagnostics = {};
-            auto plan = CompileCudaGraph(desc, &diagnostics);
-            CHECK(plan && !diagnostics.HasErrors());
-            auto direct = ExecuteCudaGraph(*plan, *sourceWorkspace, 1, 50 + variant,
+            auto sourcePlan = CompileCudaGraph(sourceDesc, &diagnostics);
+            CHECK(sourcePlan && !diagnostics.HasErrors());
+            auto direct = ExecuteCudaGraph(*sourcePlan, *sourceWorkspace, 1, 50 + variant,
                 &diagnostics, retained);
             for (auto const& error : diagnostics.errors) std::fprintf(stderr, "%s\n", error.c_str());
             CHECK(direct && !diagnostics.HasErrors() && CheckSourcePayload(direct, expected, reader));
             UsdGenSession session;
-            session.SetDevicePublicationEnabled(true); session.SetGraphDesc(desc);
+            session.SetDevicePublicationEnabled(true); session.SetGraphDesc(sourceDesc);
             auto published = session.Commit(1, UsdGenCommitReason::SetTime);
             for (auto const& error : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", error.c_str());
             CHECK(published && published->device && !session.LastDiagnostics().HasErrors() &&
@@ -1977,7 +1903,7 @@ int main() {
                 // Selection happens before relay admission. A rejected
                 // finalization must leave the selected named owners intact
                 // for a second selection by the synchronous finalizer.
-                auto job = CreateCudaExecutionJob(plan, *sourceWorkspace, 1, 60, &diagnostics);
+                auto job = CreateCudaExecutionJob(sourcePlan, *sourceWorkspace, 1, 60, &diagnostics);
                 CHECK(job && ExecuteCudaJobSource(*job));
                 for (size_t i=0; i<CudaExecutionJobOperatorCount(*job); ++i)
                     CHECK(ExecuteCudaJobOperator(*job, i));
@@ -2113,7 +2039,8 @@ int main() {
     auto rbfRight = RbfDeform("/Dag/RbfAfterLength", "/Dag/RbfLength");
     UsdGenNodeDesc rbfBlend;
     rbfBlend.path = SdfPath("/Dag/RbfBlend"); rbfBlend.type = TfToken("UsdGenWidthBlend");
-    rbfBlend.inputs = {rbfLeft.path, rbfRight.path}; rbfBlend.blend = .5f;
+    rbfBlend.inputs = {rbfLeft.path, rbfRight.path};
+    rbfBlend.params.push_back({TfToken("widthBlend:weight"), VtValue(.5f), false});
     rbfDag.nodes = {rbfBlend, rbfRight, rbfLength, Source(), rbfLeft, rbfWidth};
     rbfDag.terminal = rbfBlend.path;
     diagnostics = {};
@@ -2205,7 +2132,7 @@ int main() {
     diagnostics = {};
     CHECK(!CompileCudaGraph(invalidBlendWeight, &diagnostics));
     CHECK(DiagnosticIs(diagnostics,
-        "CUDA: WidthBlend requires version 0, finite blend in [0,1], and no auxiliary inputs"));
+        "CUDA: WidthBlend requires a finite usdGen:widthBlend:weight in [0,1] and no auxiliary inputs"));
 
     // Execute through the task graph, which exercises cross-stream event
     // waits for both immutable predecessors and retains their owners until
@@ -2345,13 +2272,13 @@ int main() {
         auto equalDesc = CrossOriginWidthBlendDesc();
         UsdGenCurveBuffer equalReference;
         CHECK(CpuReference(equalDesc, &equalReference) &&
-              equalReference.curveMask.empty() && equalReference.chunks.empty());
+              equalReference.chunks.empty());
         diagnostics = {};
         auto equalPlan = CompileCudaGraph(equalDesc, &diagnostics);
         CHECK(equalPlan && !diagnostics.HasErrors());
-        auto metadata=GetCudaExecutionPlanMetadata(*equalPlan);CHECK(metadata);
-        auto mergeTask=TaskByPath(*metadata,"/Dag/CrossOriginBlend");
-        auto rightTask=TaskByPath(*metadata,"/Dag/EqualRightLength");
+        auto equalMetadata=GetCudaExecutionPlanMetadata(*equalPlan);CHECK(equalMetadata);
+        auto mergeTask=TaskByPath(*equalMetadata,"/Dag/CrossOriginBlend");
+        auto rightTask=TaskByPath(*equalMetadata,"/Dag/EqualRightLength");
         CHECK(mergeTask && rightTask && mergeTask->estimate.scratchPeakBytes==16);
         for(auto kind:{UsdGenExecutionDataKind::CurveGeometry,UsdGenExecutionDataKind::CurveTopology,
                       UsdGenExecutionDataKind::StableIds,UsdGenExecutionDataKind::RootBindings,
@@ -2404,34 +2331,34 @@ int main() {
     // Exercise source-vs-transformed frame provenance, a frame-absent authored
     // ReferenceSource, and independently materialized Grow frame selections.
     for(unsigned variant=0;variant<3;++variant) {
-        auto desc=CrossOriginWidthBlendDesc();
+        auto provenanceDesc=CrossOriginWidthBlendDesc();
         if(variant==0) {
-            desc.nodes.erase(std::remove_if(desc.nodes.begin(),desc.nodes.end(),
-                [](auto const& node){return node.path==SdfPath("/Dag/EqualRightLength");}),desc.nodes.end());
-            for(auto& node:desc.nodes) if(node.path==SdfPath("/Dag/EqualRightWidth"))
+            provenanceDesc.nodes.erase(std::remove_if(provenanceDesc.nodes.begin(),provenanceDesc.nodes.end(),
+                [](auto const& node){return node.path==SdfPath("/Dag/EqualRightLength");}),provenanceDesc.nodes.end());
+            for(auto& node:provenanceDesc.nodes) if(node.path==SdfPath("/Dag/EqualRightWidth"))
                 node.inputs={SdfPath("/Dag/Source")};
         } else if(variant==1) {
-            auto& curves=desc.curveSets.front();
+            auto& curves=provenanceDesc.curveSets.front();
             curves.role=UsdGenRole::Reference;curves.curveRole=TfToken("guide");
             curves.authoredPlanes.clear();
-            for(auto& node:desc.nodes) if(node.path==SdfPath("/Dag/Source")) {
+            for(auto& node:provenanceDesc.nodes) if(node.path==SdfPath("/Dag/Source")) {
                 node.type=TfToken("UsdGenReferenceSource");node.curves.clear();node.surfaces.clear();
                 node.references={curves.path};
             }
         } else {
-            for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenLength")) {
+            for(auto& node:provenanceDesc.nodes) if(node.type==TfToken("UsdGenLength")) {
                 node.type=TfToken("UsdGenGrow");
                 node.params={{TfToken("segments"),VtValue(4),false},
                              {TfToken("length"),VtValue(.2f),false}};
             }
         }
         UsdGenCurveBuffer expected;
-        CHECK(CpuReference(desc,&expected) && expected.curveMask.empty() && expected.chunks.empty());
-        diagnostics={};auto plan=CompileCudaGraph(desc,&diagnostics);CHECK(plan && !diagnostics.HasErrors());
+        CHECK(CpuReference(provenanceDesc,&expected) && expected.chunks.empty());
+        diagnostics={};auto provenancePlan=CompileCudaGraph(provenanceDesc,&diagnostics);CHECK(provenancePlan && !diagnostics.HasErrors());
         auto localWorkspace=CreateCudaExecutionWorkspace(-1,&diagnostics);CHECK(localWorkspace);
-        auto result=ExecuteCudaGraph(*plan,*localWorkspace,1,930+variant,&diagnostics);
+        auto result=ExecuteCudaGraph(*provenancePlan,*localWorkspace,1,930+variant,&diagnostics);
         CHECK(result && !diagnostics.HasErrors() && CheckSourcePayload(result,expected,crossOriginReader));
-        UsdGenSession session;session.SetDevicePublicationEnabled(true);session.SetGraphDesc(desc);
+        UsdGenSession session;session.SetDevicePublicationEnabled(true);session.SetGraphDesc(provenanceDesc);
         auto published=session.Commit(1,UsdGenCommitReason::SetTime);
         CHECK(published && published->device && !session.LastDiagnostics().HasErrors() &&
               CheckSourcePayload(published->device,expected,crossOriginReader));
@@ -2442,13 +2369,13 @@ int main() {
     // while Session continues to expose its already-proved COW publication.
     for (auto inject : {failNextCudaOperatorRelayNonWidthCallbackInstallForTesting,
                         failNextCudaOperatorRelayNonWidthNativeCallbackForTesting}) {
-        auto desc=CrossOriginWidthBlendDesc();
-        UsdGenCurveBuffer reference; CHECK(CpuReference(desc,&reference));
+        auto quarantineDesc=CrossOriginWidthBlendDesc();
+        UsdGenCurveBuffer reference; CHECK(CpuReference(quarantineDesc,&reference));
         UsdGenSession session; session.SetDevicePublicationEnabled(true);
-        session.SetGraphDesc(desc);
+        session.SetGraphDesc(quarantineDesc);
         auto prior=session.Commit(1,UsdGenCommitReason::SetTime);
         CHECK(prior && prior->device && !session.LastDiagnostics().HasErrors());
-        auto changed=desc;
+        auto changed=quarantineDesc;
         for(auto& node:changed.nodes) if(node.path==SdfPath("/Dag/EqualRightWidth"))
             node.params[0].value=VtValue(.9f);
         auto const quarantined=cudaOperatorRelayQuarantinedCountForTesting();

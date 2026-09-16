@@ -20,33 +20,19 @@ class UsdGenGroom "UsdGenGroom"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    float usdGen:densityScale = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
     custom uniform token usdGen:execution:backend = "cuda" (
         allowedTokens = ["cuda"]
-    )
-    string usdGen:label = ""
-    float usdGen:renderDensityScale = 1 (
         customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
+            string userDocBrief = "Execution backend for every description under this groom."
         }
+        doc = 'Execution backend for every description under this groom. "cuda" is the only accepted token; an absent or unreadable opinion fails closed rather than silently selecting the CPU reference engine. Expression evaluation: groom (once per operator).'
     )
-    uniform int usdGen:schemaVersion = 1 (
+    uniform string usdGen:sessionId = "" (
         customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
+            string userDocBrief = "Optional session-registry key."
         }
+        doc = "Optional session-registry key. A non-empty id lets several renderers share one cooked session for this groom; empty keeps the session stage-local. Expression evaluation: groom (once per operator)."
     )
-    uniform string usdGen:sessionId = ""
-    rel usdGen:surface
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
@@ -81,58 +67,40 @@ class UsdGenDescription "UsdGenDescription"
     )
     uniform token usdGen:curve:basis = "bspline" (
         allowedTokens = ["bspline", "catmullRom"]
-    )
-    float usdGen:densityScale = 1 (
         customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
+            string userDocBrief = 'Basis token copied onto every published BasisCurves prim: "bspline" or "catmullRom".'
         }
+        doc = 'Basis token copied onto every published BasisCurves prim: "bspline" or "catmullRom". Publication only; no kernel evaluates the basis. Expression evaluation: groom (once per operator).'
     )
-    rel usdGen:guides
-    string usdGen:label = ""
-    uniform bool usdGen:motion:forwardSurfaceSamples = 0 (
+    rel usdGen:guides (
         customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
+            string userDocBrief = "Guide sets available to this description."
         }
+        doc = "Guide sets available to this description. Reserved for guide-driven generators; the M1 kernels do not consume it. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:motion:mode = "single" (
-        allowedTokens = ["single", "velocities", "samples"]
-    )
-    uniform int usdGen:motion:sampleCount = 3 (
+    rel usdGen:surface (
         customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
+            string userDocBrief = "The Mesh or GeomSubset this description grows from (ADR R15)."
         }
+        doc = "The Mesh or GeomSubset this description grows from (ADR R15). Every operator in the chain uses this one target set; there is no per-operator override. Only the first target is bound. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:pickTarget = "description" (
-        allowedTokens = ["description", "terminal"]
-    )
-    float usdGen:renderDensityScale = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
-    rel usdGen:surface
-    rel usdGen:terminal
     uniform int usdGen:tileTarget = 64 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Target number of chunks per published tile."
         }
+        doc = "Target number of chunks per published tile. Clamped to [32, 256]; an edit re-allocates the tile set without recompiling the graph. Expression evaluation: groom (once per operator)."
     )
     float usdGen:width:default = 0.01 (
         customData = {
             dictionary usdGen = {
-                string evaluation = "point"
+                string evaluation = "groom"
             }
+            string userDocBrief = "Fallback strand width in scene units used wherever no upstream width plane exists."
         }
+        doc = "Fallback strand width in scene units used wherever no upstream width plane exists. Must be finite and >= 0. One value per description. Expression evaluation: groom (once per operator)."
     )
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
@@ -168,15 +136,6 @@ class UsdGenGuideSet "UsdGenGuideSet"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    float[] usdGen:blend = [] (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    string usdGen:label = ""
-    rel usdGen:surface
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
@@ -188,2149 +147,3128 @@ class UsdGenGuideSet "UsdGenGuideSet"
 
 class "UsdGenOperator"
 {
-    uniform int usdGen:algorithmVersion = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:blend = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
     bool usdGen:enabled = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Mute for this operator."
         }
-    )
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     uniform int usdGen:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Randomisation seed for this operator."
         }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class "UsdGenGenerator"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
-    )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
-}
-
-class "UsdGenStyler"
-{
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
-    )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
-}
-
-class "UsdGenDeformer"
-{
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
-    )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
-}
-
-class UsdGenExpression "UsdGenExpression"
-{
-    custom string usdGen:expr:source = ""
-}
-
-class UsdGenScatter "UsdGenScatter"
-{
-    uniform int usdGen:algorithmVersion = 0
-    bool usdGen:areaCompensation = 1 (
+    bool usdGen:enabled = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Mute for this operator."
         }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
-    float usdGen:blend = 1
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
+    )
+}
+
+class "UsdGenStyler"
+{
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
+    )
+}
+
+class "UsdGenDeformer"
+{
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
+    )
+}
+
+class UsdGenExpression "UsdGenExpression"
+{
+    custom string usdGen:expr:source = "" (
+        customData = {
+            string userDocBrief = "SeExpr program text evaluated at execution time."
+        }
+        doc = "SeExpr program text evaluated at execution time. Its typed outputs:* attributes are the connection targets; the sandbox rejects assignments, string literals and unknown variables. Expression evaluation: groom (once per operator)."
+    )
+}
+
+class UsdGenScatter "UsdGenScatter"
+{
     float usdGen:density = 100 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Expected roots per unit of rest-surface area."
         }
+        doc = "Expected roots per unit of rest-surface area. Must be finite and >= 0; the per-face count is density * restArea * mask, rounded stochastically. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:enabled = 1
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     bool usdGen:flip = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Negates the tangent and binormal of every root frame, mirroring the handedness the downstream operators grow and twist along."
         }
+        doc = "Negates the tangent and binormal of every root frame, mirroring the handedness the downstream operators grow and twist along. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:guides
-    rel usdGen:input
-    float usdGen:jitter = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
-    string usdGen:label = ""
-    uniform token usdGen:mode = "random" (
-        allowedTokens = ["random", "uniform", "points", "atGuides"]
-    )
-    int usdGen:perGuide = 1 (
+    uniform int usdGen:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Randomisation seed for this operator."
         }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
-    )
-    int usdGen:relaxIterations = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    int[] usdGen:rootPrims = [] (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    texCoord2f[] usdGen:rootUVs = [] (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    float usdGen:spacingU = 0.02 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:spacingV = 0.02 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    rel usdGen:surface
 }
 
 class UsdGenGrow "UsdGenGrow"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     uniform token usdGen:direction = "surfaceNormal" (
-        allowedTokens = ["surfaceNormal", "attribute", "vector"]
+        allowedTokens = ["surfaceNormal", "vector"]
+        customData = {
+            string userDocBrief = 'Growth direction mode: "surfaceNormal" uses the root frame normal, "vector" uses usdGen:directionVector verbatim.'
+        }
+        doc = 'Growth direction mode: "surfaceNormal" uses the root frame normal, "vector" uses usdGen:directionVector verbatim. Expression evaluation: groom (once per operator).'
     )
-    token usdGen:directionPrimvar = ""
     vector3f usdGen:directionVector = (0, 1, 0) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Explicit growth direction in description space, used when usdGen:direction is "vector".'
         }
+        doc = 'Explicit growth direction in description space, used when usdGen:direction is "vector". Normalised before use; every component must be finite. Expression evaluation: primitive (once per curve root).'
     )
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:length = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Base strand length in scene units."
         }
+        doc = "Base strand length in scene units. Must be finite and >= 0; the per-curve target is length * lengthRandom draw. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:length:source
     float2 usdGen:lengthRandom = (1, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Per-curve multiplier range (lo, hi) applied to usdGen:length."
         }
+        doc = "Per-curve multiplier range (lo, hi) applied to usdGen:length. A reversed pair is swapped; both components must be finite and >= 0. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:lift = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Rotation of the growth direction around the root binormal, in degrees, in [-90, 90]."
         }
+        doc = "Rotation of the growth direction around the root binormal, in degrees, in [-90, 90]. Expression evaluation: primitive (once per curve root)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
     int usdGen:segments = 8 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "CVs per generated strand, in [2, 64]."
         }
-    )
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
-    float usdGen:uvBlend = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
+        doc = "CVs per generated strand, in [2, 64]. This is the operator that fixes the CV topology of the chain. Expression evaluation: groom (once per operator)."
     )
 }
 
 class UsdGenGuideInterpolate "UsdGenGuideInterpolate"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     float usdGen:blendInSkinSpace = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "blendInSkinSpace".'
         }
+        doc = 'Authored GuideInterpolate control "blendInSkinSpace". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     uniform token usdGen:blendMethod = "linearBlend" (
         allowedTokens = ["linearBlend", "extrudeAndBlend"]
+        customData = {
+            string userDocBrief = 'Authored GuideInterpolate control "blendMethod".'
+        }
+        doc = 'Authored GuideInterpolate control "blendMethod". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clumpCrossover = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "clumpCrossover".'
         }
+        doc = 'Authored GuideInterpolate control "clumpCrossover". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     int usdGen:cvCount = 8 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "cvCount".'
         }
+        doc = 'Authored GuideInterpolate control "cvCount". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    bool usdGen:enabled = 1
-    rel usdGen:guides
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    rel usdGen:guides (
+        customData = {
+            string userDocBrief = "Relationship consumed by GuideInterpolate."
+        }
+        doc = "Relationship consumed by GuideInterpolate. Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:influenceDecay = 2 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "influenceDecay".'
         }
+        doc = 'Authored GuideInterpolate control "influenceDecay". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:influenceRadius = 4 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "influenceRadius".'
         }
+        doc = 'Authored GuideInterpolate control "influenceRadius". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    rel usdGen:input
-    string usdGen:label = ""
-    rel usdGen:length:source
     float usdGen:maxGuideAngle = 90 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "maxGuideAngle".'
         }
+        doc = 'Authored GuideInterpolate control "maxGuideAngle". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     int usdGen:maxGuides = 3 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "maxGuides".'
         }
+        doc = 'Authored GuideInterpolate control "maxGuides". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:randomizeGuide = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "randomizeGuide".'
         }
+        doc = 'Authored GuideInterpolate control "randomizeGuide". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
     bool usdGen:useUniqueGuide = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored GuideInterpolate control "useUniqueGuide".'
         }
+        doc = 'Authored GuideInterpolate control "useUniqueGuide". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideInterpolate yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
 }
 
 class UsdGenCurveSource "UsdGenCurveSource"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    rel usdGen:curves
-    bool usdGen:enabled = 1
-    uniform string usdGen:expectEpoch = ""
+    rel usdGen:curves (
+        customData = {
+            string userDocBrief = "The authored BasisCurves prim this source reads (contract C3)."
+        }
+        doc = "The authored BasisCurves prim this source reads (contract C3). Exactly one target is required; it is the only way curve data enters the engine. Expression evaluation: groom (once per operator)."
+    )
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    uniform string usdGen:expectEpoch = "" (
+        customData = {
+            string userDocBrief = "Expected frozen-curve epoch string."
+        }
+        doc = "Expected frozen-curve epoch string. Empty disables the check; otherwise a mismatch is reported through usdGen:staleAction. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:idSource = "primvar" (
         allowedTokens = ["primvar", "index"]
-    )
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:lane = "hair" (
-        allowedTokens = ["hair", "reference"]
-    )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+        customData = {
+            string userDocBrief = 'Where stable curve ids come from: "primvar" uses the authored curveId primvar, "index" synthesizes them from the source ordering.'
+        }
+        doc = 'Where stable curve ids come from: "primvar" uses the authored curveId primvar, "index" synthesizes them from the source ordering. Expression evaluation: groom (once per operator).'
     )
     uniform token usdGen:rebind = "onError" (
         allowedTokens = ["never", "onError", "always"]
+        customData = {
+            string userDocBrief = 'When to re-derive root bindings and frames from the bound surface: "never", "onError", or "always".'
+        }
+        doc = 'When to re-derive root bindings and frames from the bound surface: "never", "onError", or "always". Expression evaluation: groom (once per operator).'
     )
     uniform int usdGen:resampleTo = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Resample every source curve to this CV count."
         }
+        doc = "Resample every source curve to this CV count. 0 keeps the authored topology; any other value must be >= 2. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:staleAction = "warn" (
         allowedTokens = ["warn", "ignore", "block"]
+        customData = {
+            string userDocBrief = 'What to do when the source epoch does not match usdGen:expectEpoch: "warn", "ignore", or "block" (a hard error).'
+        }
+        doc = 'What to do when the source epoch does not match usdGen:expectEpoch: "warn", "ignore", or "block" (a hard error). Expression evaluation: groom (once per operator).'
     )
-    rel usdGen:surface
     bool usdGen:useRest = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "True reads the source as rest-space geometry and requires an authored rest snapshot; false accepts already-posed points."
         }
+        doc = "True reads the source as rest-space geometry and requires an authored rest snapshot; false accepts already-posed points. Expression evaluation: groom (once per operator)."
     )
 }
 
 class UsdGenClump "UsdGenClump"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     float usdGen:clump:amount = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Strength for Clump."
         }
+        doc = "Strength for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
-    rel usdGen:clump:centers
+    rel usdGen:clump:centers (
+        customData = {
+            string userDocBrief = "Relationship consumed by Clump."
+        }
+        doc = "Relationship consumed by Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:clump:copy = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "copy".'
         }
+        doc = 'Authored Clump control "copy". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:copyVariance = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "copyVariance".'
         }
+        doc = 'Authored Clump control "copyVariance". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:crossover = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Clump control "crossover".'
         }
+        doc = 'Authored Clump control "crossover". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:clump:curl:amplitude = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Clump control "amplitude".'
         }
+        doc = 'Authored Clump control "amplitude". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     float usdGen:clump:curl:frequency = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Frequency for Clump."
         }
+        doc = "Frequency for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     float usdGen:clump:cut = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "cut".'
         }
+        doc = 'Authored Clump control "cut". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:density = 4 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "density".'
         }
+        doc = 'Authored Clump control "density". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:flatness = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "flatness".'
         }
+        doc = 'Authored Clump control "flatness". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:goalFeedback = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Clump control "goalFeedback".'
         }
+        doc = 'Authored Clump control "goalFeedback". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     uniform int usdGen:clump:level = -1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "level".'
         }
+        doc = 'Authored Clump control "level". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     int usdGen:clump:levels = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "levels".'
         }
+        doc = 'Authored Clump control "levels". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     uniform token usdGen:clump:method = "linearBlend" (
         allowedTokens = ["linearBlend", "extrudeAndBlend"]
+        customData = {
+            string userDocBrief = 'Authored Clump control "method".'
+        }
+        doc = 'Authored Clump control "method". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:noise:amount = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Strength for Clump."
         }
+        doc = "Strength for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     float usdGen:clump:noise:correlation = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Clump control "correlation".'
         }
+        doc = 'Authored Clump control "correlation". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     float usdGen:clump:noise:frequency = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Frequency for Clump."
         }
+        doc = "Frequency for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     float usdGen:clump:offset = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Offset for Clump."
         }
+        doc = "Offset for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     uniform token usdGen:clump:profile:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Clump."
+        }
+        doc = "Interpolation token for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:clump:profile:knots = [(0, 0), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Clump."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     uniform int usdGen:clump:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Seed for Clump."
         }
+        doc = "Seed for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float usdGen:clump:size = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "size".'
         }
+        doc = 'Authored Clump control "size". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:sizeReduction = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "sizeReduction".'
         }
+        doc = 'Authored Clump control "sizeReduction". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:stray:amount = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Strength for Clump."
         }
+        doc = "Strength for Clump. Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:clump:stray:falloff = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Clump control "falloff".'
         }
+        doc = 'Authored Clump control "falloff". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:clump:stray:rate = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Clump control "rate".'
         }
+        doc = 'Authored Clump control "rate". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:clump:tightnessReduction = 0.8 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Clump control "tightnessReduction".'
         }
+        doc = 'Authored Clump control "tightnessReduction". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:clump:volumize = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Clump control "volumize".'
         }
+        doc = 'Authored Clump control "volumize". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     float usdGen:preserveLength = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Clump control "preserveLength".'
         }
+        doc = 'Authored Clump control "preserveLength". Declared for the frozen v1-v3 vocabulary; no kernel implements Clump yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class UsdGenNoise "UsdGenNoise"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     bool usdGen:cumulative = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "True accumulates the displacement along the strand so the tip carries the sum; false displaces every CV independently."
         }
+        doc = "True accumulates the displacement along the strand so the tip carries the sum; false displaces every CV independently. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     float usdGen:noise:correlation = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "How strongly neighbouring strands share one noise draw, clamped to [0, 1]."
         }
+        doc = "How strongly neighbouring strands share one noise draw, clamped to [0, 1]. 0 is fully independent per curve. Expression evaluation: point (once per CV)."
     )
     float usdGen:noise:frequency = 3 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Spatial frequency of the fBm field, in cycles per scene unit."
         }
+        doc = "Spatial frequency of the fBm field, in cycles per scene unit. Expression evaluation: point (once per CV)."
     )
     float usdGen:noise:gain = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Amplitude multiplier between successive fBm octaves, in [0, 1]."
         }
+        doc = "Amplitude multiplier between successive fBm octaves, in [0, 1]. Expression evaluation: point (once per CV)."
     )
     float usdGen:noise:lacunarity = 2 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Frequency multiplier between successive fBm octaves; must be > 1."
         }
+        doc = "Frequency multiplier between successive fBm octaves; must be > 1. Expression evaluation: point (once per CV)."
     )
     float usdGen:noise:magnitude = 0.05 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Peak displacement of the frizz field in scene units, before the magnitude ramp and the mask envelope."
         }
+        doc = "Peak displacement of the frizz field in scene units, before the magnitude ramp and the mask envelope. Expression evaluation: point (once per CV)."
     )
     uniform token usdGen:noise:magnitude:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = 'Interpolation of usdGen:noise:magnitude:knots: "linear", "catmullRom", "bspline" or "constant".'
+        }
+        doc = 'Interpolation of usdGen:noise:magnitude:knots: "linear", "catmullRom", "bspline" or "constant". Expression evaluation: groom (once per operator).'
     )
     float2[] usdGen:noise:magnitude:knots = [(0, 0), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Root-to-tip ramp on the displacement magnitude as (position, value) pairs with position in [0, 1]."
         }
+        doc = "Root-to-tip ramp on the displacement magnitude as (position, value) pairs with position in [0, 1]. Empty is a flat ramp of 1. Expression evaluation: groom (once per operator)."
     )
     int usdGen:noise:octaves = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Number of fBm octaves, in [1, 6]."
         }
+        doc = "Number of fBm octaves, in [1, 6]. Expression evaluation: point (once per CV)."
     )
     float usdGen:preserveLength = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Arc-length restoration after displacement, in [0, 1]."
         }
+        doc = "Arc-length restoration after displacement, in [0, 1]. Values at or above 0.999 restore every segment length exactly; lower values leave the strand stretched. Expression evaluation: primitive (once per curve root)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class UsdGenLength "UsdGenLength"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     float usdGen:cullThreshold = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Strands whose resolved length is below this value are zero-lengthened."
         }
+        doc = "Strands whose resolved length is below this value are zero-lengthened. Scene units, >= 0. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:length:method = "scale" (
         allowedTokens = ["scale", "cutExtend"]
+        customData = {
+            string userDocBrief = 'How CVs are redistributed: "scale" scales every segment, "cutExtend" keeps segment lengths and cuts or extends the tip.'
+        }
+        doc = 'How CVs are redistributed: "scale" scales every segment, "cutExtend" keeps segment lengths and cuts or extends the tip. Expression evaluation: groom (once per operator).'
     )
     uniform token usdGen:length:mode = "scale" (
         allowedTokens = ["set", "scale", "cull"]
+        customData = {
+            string userDocBrief = 'How usdGen:length:value is interpreted: "set" is an absolute target length, "scale" a multiplier, "cull" removes strands below the threshold.'
+        }
+        doc = 'How usdGen:length:value is interpreted: "set" is an absolute target length, "scale" a multiplier, "cull" removes strands below the threshold. Expression evaluation: groom (once per operator).'
     )
     float2 usdGen:length:random = (1, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Per-curve multiplier range (lo, hi) on the resolved length."
         }
+        doc = "Per-curve multiplier range (lo, hi) on the resolved length. A reversed pair is swapped; both components must be finite and >= 0. Expression evaluation: primitive (once per curve root)."
     )
-    rel usdGen:length:source
     float usdGen:length:value = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Target length in scene units ("set") or multiplier ("scale").'
         }
+        doc = 'Target length in scene units ("set") or multiplier ("scale"). Must be >= 0. Expression evaluation: primitive (once per curve root).'
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     float usdGen:minRemainingLength = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Strands shorter than this after the length change are zero-lengthened rather than left as slivers."
         }
-    )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+        doc = "Strands shorter than this after the length change are zero-lengthened rather than left as slivers. Scene units, >= 0. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:rebuild = "keepParam" (
         allowedTokens = ["keepParam", "reparam"]
+        customData = {
+            string userDocBrief = 'CV parameterisation after the length change: "keepParam" retains the authored parameter positions, "reparam" redistributes them evenly.'
+        }
+        doc = 'CV parameterisation after the length change: "keepParam" retains the authored parameter positions, "reparam" redistributes them evenly. Expression evaluation: groom (once per operator).'
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class UsdGenWidth "UsdGenWidth"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     bool usdGen:replace = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "True sets the width plane from this operator's profile; false multiplies the incoming widths by it."
         }
+        doc = "True sets the width plane from this operator's profile; false multiplies the incoming widths by it. Expression evaluation: groom (once per operator)."
     )
-    float usdGen:rootScale = 1 (
+    uniform int usdGen:seed = 0 (
         customData = {
             dictionary usdGen = {
-                string evaluation = "primitive"
+                string evaluation = "groom"
             }
+            string userDocBrief = "Randomisation seed for this operator."
         }
-    )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
-    float usdGen:taper = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    float usdGen:taperStart = 0.5 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    float usdGen:tipScale = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
     float usdGen:width = 0.01 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Base strand width in scene units before the ramp and the mask envelope."
         }
+        doc = "Base strand width in scene units before the ramp and the mask envelope. Must be >= 0. Expression evaluation: point (once per CV)."
     )
     uniform token usdGen:width:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = 'Interpolation of usdGen:width:knots: "linear", "catmullRom", "bspline" or "constant".'
+        }
+        doc = 'Interpolation of usdGen:width:knots: "linear", "catmullRom", "bspline" or "constant". Expression evaluation: groom (once per operator).'
     )
     float2[] usdGen:width:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Root-to-tip width ramp as (position, multiplier) pairs with position in [0, 1]."
         }
+        doc = "Root-to-tip width ramp as (position, multiplier) pairs with position in [0, 1]. Empty is a flat ramp of 1. Expression evaluation: groom (once per operator)."
     )
 }
 
 class UsdGenDirection "UsdGenDirection"
 {
-    uniform int usdGen:algorithmVersion = 0
     float usdGen:amount = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Strength for Direction."
         }
+        doc = "Strength for Direction. Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:aroundN = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Direction control "aroundN".'
         }
+        doc = 'Authored Direction control "aroundN". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:blend = 1
     vector3f usdGen:direction = (0, 1, 0) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Direction control "direction".'
         }
+        doc = 'Authored Direction control "direction". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     uniform token usdGen:direction:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Direction."
+        }
+        doc = "Interpolation token for Direction. Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:direction:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Direction."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Direction. Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:direction:source
-    bool usdGen:enabled = 1
+    rel usdGen:direction:source (
+        customData = {
+            string userDocBrief = "Relationship consumed by Direction."
+        }
+        doc = "Relationship consumed by Direction. Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:followSkinContour = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Direction control "followSkinContour".'
         }
+        doc = 'Authored Direction control "followSkinContour". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    rel usdGen:input
-    string usdGen:label = ""
     float usdGen:lift = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Direction control "lift".'
         }
+        doc = 'Authored Direction control "lift". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     uniform token usdGen:mode = "rigid" (
         allowedTokens = ["rigid", "perSegment"]
+        customData = {
+            string userDocBrief = "Mode token for Direction."
+        }
+        doc = "Mode token for Direction. Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
     float usdGen:tiltN = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Direction control "tiltN".'
         }
+        doc = 'Authored Direction control "tiltN". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:tiltU = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Direction control "tiltU".'
         }
+        doc = 'Authored Direction control "tiltU". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:tiltV = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Direction control "tiltV".'
         }
+        doc = 'Authored Direction control "tiltV". Declared for the frozen v1-v3 vocabulary; no kernel implements Direction yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
 }
 
 class UsdGenSmooth "UsdGenSmooth"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     int usdGen:iterations = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Iteration count for Smooth."
         }
+        doc = "Iteration count for Smooth. Declared for the frozen v1-v3 vocabulary; no kernel implements Smooth yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    string usdGen:label = ""
     bool usdGen:lockRoot = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Smooth control "lockRoot".'
         }
+        doc = 'Authored Smooth control "lockRoot". Declared for the frozen v1-v3 vocabulary; no kernel implements Smooth yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     uniform token usdGen:mode = "alongCurve" (
         allowedTokens = ["alongCurve", "neighbours"]
+        customData = {
+            string userDocBrief = "Mode token for Smooth."
+        }
+        doc = "Mode token for Smooth. Declared for the frozen v1-v3 vocabulary; no kernel implements Smooth yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     int usdGen:numNeighbors = 4 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Smooth control "numNeighbors".'
         }
-    )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+        doc = 'Authored Smooth control "numNeighbors". Declared for the frozen v1-v3 vocabulary; no kernel implements Smooth yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:searchRadius = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Smooth control "searchRadius".'
         }
+        doc = 'Authored Smooth control "searchRadius". Declared for the frozen v1-v3 vocabulary; no kernel implements Smooth yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
     float usdGen:strength = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Smooth control "strength".'
         }
+        doc = 'Authored Smooth control "strength". Declared for the frozen v1-v3 vocabulary; no kernel implements Smooth yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    rel usdGen:surface
 }
 
 class UsdGenResample "UsdGenResample"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     int usdGen:cvCount = 8 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Resample control "cvCount".'
         }
+        doc = 'Authored Resample control "cvCount". Declared for the frozen v1-v3 vocabulary; no kernel implements Resample yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     uniform token usdGen:distribution = "uniform" (
         allowedTokens = ["uniform", "keepParam"]
+        customData = {
+            string userDocBrief = 'Authored Resample control "distribution".'
+        }
+        doc = 'Authored Resample control "distribution". Declared for the frozen v1-v3 vocabulary; no kernel implements Resample yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     bool usdGen:restoreSegmentLengths = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Resample control "restoreSegmentLengths".'
         }
+        doc = 'Authored Resample control "restoreSegmentLengths". Declared for the frozen v1-v3 vocabulary; no kernel implements Resample yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class UsdGenScale "UsdGenScale"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     float usdGen:scale = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Scale for Scale."
         }
+        doc = "Scale for Scale. Declared for the frozen v1-v3 vocabulary; no kernel implements Scale yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     uniform token usdGen:scale:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Scale."
+        }
+        doc = "Interpolation token for Scale. Declared for the frozen v1-v3 vocabulary; no kernel implements Scale yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:scale:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Scale."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Scale. Declared for the frozen v1-v3 vocabulary; no kernel implements Scale yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2 usdGen:scaleRandom = (1, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Scale control "scaleRandom".'
         }
+        doc = 'Authored Scale control "scaleRandom". Declared for the frozen v1-v3 vocabulary; no kernel implements Scale yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
     bool usdGen:widthToo = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Scale control "widthToo".'
         }
+        doc = 'Authored Scale control "widthToo". Declared for the frozen v1-v3 vocabulary; no kernel implements Scale yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
 }
 
 class UsdGenCurl "UsdGenCurl"
 {
-    uniform int usdGen:algorithmVersion = 0
     uniform token usdGen:axisMode = "curveTangent" (
         allowedTokens = ["curveTangent", "guide"]
+        customData = {
+            string userDocBrief = 'Authored Curl control "axisMode".'
+        }
+        doc = 'Authored Curl control "axisMode". Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:blend = 1
     bool usdGen:clockwise = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Curl control "clockwise".'
         }
+        doc = 'Authored Curl control "clockwise". Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    bool usdGen:enabled = 1
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:frequency = 2 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Frequency for Curl."
         }
+        doc = "Frequency for Curl. Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
-    rel usdGen:input
-    string usdGen:label = ""
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     float usdGen:phase = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Curl control "phase".'
         }
+        doc = 'Authored Curl control "phase". Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     float usdGen:phaseRandom = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Curl control "phaseRandom".'
         }
+        doc = 'Authored Curl control "phaseRandom". Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     float usdGen:radius = 0.02 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Radius for Curl."
         }
+        doc = "Radius for Curl. Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     uniform token usdGen:radius:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Curl."
+        }
+        doc = "Interpolation token for Curl. Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:radius:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Curl."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Curl. Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
     bool usdGen:taper = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Curl control "taper".'
         }
+        doc = 'Authored Curl control "taper". Declared for the frozen v1-v3 vocabulary; no kernel implements Curl yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
 }
 
 class UsdGenBend "UsdGenBend"
 {
-    uniform int usdGen:algorithmVersion = 0
     float usdGen:angle = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Angle in degrees for Bend."
         }
+        doc = "Angle in degrees for Bend. Declared for the frozen v1-v3 vocabulary; no kernel implements Bend yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     uniform token usdGen:angle:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Bend."
+        }
+        doc = "Interpolation token for Bend. Declared for the frozen v1-v3 vocabulary; no kernel implements Bend yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:angle:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Bend."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Bend. Declared for the frozen v1-v3 vocabulary; no kernel implements Bend yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2 usdGen:angleRandom = (1, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Bend control "angleRandom".'
         }
+        doc = 'Authored Bend control "angleRandom". Declared for the frozen v1-v3 vocabulary; no kernel implements Bend yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     vector3f usdGen:axis = (1, 0, 0) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Axis for Bend."
         }
+        doc = "Axis for Bend. Declared for the frozen v1-v3 vocabulary; no kernel implements Bend yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     uniform token usdGen:axisMode = "rootDirection" (
         allowedTokens = ["rootDirection", "uniform", "attribute"]
+        customData = {
+            string userDocBrief = 'Authored Bend control "axisMode".'
+        }
+        doc = 'Authored Bend control "axisMode". Declared for the frozen v1-v3 vocabulary; no kernel implements Bend yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
-    rel usdGen:surface
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
+    )
 }
 
 class UsdGenStraighten "UsdGenStraighten"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     float usdGen:normalStraightness = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Straighten control "normalStraightness".'
         }
+        doc = 'Authored Straighten control "normalStraightness". Declared for the frozen v1-v3 vocabulary; no kernel implements Straighten yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
     float usdGen:tangentStraightness = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Straighten control "tangentStraightness".'
         }
+        doc = 'Authored Straighten control "tangentStraightness". Declared for the frozen v1-v3 vocabulary; no kernel implements Straighten yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
 }
 
 class UsdGenDisplace "UsdGenDisplace"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     float usdGen:displace:amount = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Strength for Displace."
         }
+        doc = "Strength for Displace. Declared for the frozen v1-v3 vocabulary; no kernel implements Displace yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     float usdGen:displace:base = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Displace control "base".'
         }
+        doc = 'Authored Displace control "base". Declared for the frozen v1-v3 vocabulary; no kernel implements Displace yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
-    rel usdGen:displace:map
+    rel usdGen:displace:map (
+        customData = {
+            string userDocBrief = "Relationship consumed by Displace."
+        }
+        doc = "Relationship consumed by Displace. Declared for the frozen v1-v3 vocabulary; no kernel implements Displace yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:displace:offset = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Offset for Displace."
         }
+        doc = "Offset for Displace. Declared for the frozen v1-v3 vocabulary; no kernel implements Displace yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     float usdGen:displace:scale = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Scale for Displace."
         }
+        doc = "Scale for Displace. Declared for the frozen v1-v3 vocabulary; no kernel implements Displace yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     uniform token usdGen:mode = "height" (
         allowedTokens = ["height", "vector"]
+        customData = {
+            string userDocBrief = "Mode token for Displace."
+        }
+        doc = "Mode token for Displace. Declared for the frozen v1-v3 vocabulary; no kernel implements Displace yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class UsdGenWave "UsdGenWave"
 {
-    uniform int usdGen:algorithmVersion = 0
     float usdGen:amplitudeN = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Wave control "amplitudeN".'
         }
+        doc = 'Authored Wave control "amplitudeN". Declared for the frozen v1-v3 vocabulary; no kernel implements Wave yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:amplitudeU = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Wave control "amplitudeU".'
         }
+        doc = 'Authored Wave control "amplitudeU". Declared for the frozen v1-v3 vocabulary; no kernel implements Wave yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:frequencyN = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Wave control "frequencyN".'
         }
+        doc = 'Authored Wave control "frequencyN". Declared for the frozen v1-v3 vocabulary; no kernel implements Wave yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:frequencyU = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Wave control "frequencyU".'
         }
+        doc = 'Authored Wave control "frequencyU". Declared for the frozen v1-v3 vocabulary; no kernel implements Wave yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class UsdGenPart "UsdGenPart"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    rel usdGen:part:curves
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
+    rel usdGen:part:curves (
+        customData = {
+            string userDocBrief = "Relationship consumed by Part."
+        }
+        doc = "Relationship consumed by Part. Declared for the frozen v1-v3 vocabulary; no kernel implements Part yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:part:radius = 0.05 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Radius for Part."
         }
+        doc = "Radius for Part. Declared for the frozen v1-v3 vocabulary; no kernel implements Part yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:part:strength = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Part control "strength".'
         }
+        doc = 'Authored Part control "strength". Declared for the frozen v1-v3 vocabulary; no kernel implements Part yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class UsdGenExprOp "UsdGenExprOp"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:expr:maps
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    rel usdGen:expr:maps (
+        customData = {
+            string userDocBrief = "Relationship consumed by ExprOp."
+        }
+        doc = "Relationship consumed by ExprOp. Declared for the frozen v1-v3 vocabulary; no kernel implements ExprOp yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:expr:returnType = "displacement" (
         allowedTokens = ["displacement", "width", "color"]
+        customData = {
+            string userDocBrief = 'Authored ExprOp control "returnType".'
+        }
+        doc = 'Authored ExprOp control "returnType". Declared for the frozen v1-v3 vocabulary; no kernel implements ExprOp yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    string usdGen:expr:source = ""
-    rel usdGen:input
-    string usdGen:label = ""
+    string usdGen:expr:source = "" (
+        customData = {
+            string userDocBrief = 'Authored ExprOp control "source".'
+        }
+        doc = 'Authored ExprOp control "source". Declared for the frozen v1-v3 vocabulary; no kernel implements ExprOp yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     uniform token usdGen:mode = "cv" (
         allowedTokens = ["cv", "curve"]
+        customData = {
+            string userDocBrief = "Mode token for ExprOp."
+        }
+        doc = "Mode token for ExprOp. Declared for the frozen v1-v3 vocabulary; no kernel implements ExprOp yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class UsdGenSculptLayer "UsdGenSculptLayer"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     uint64[] usdGen:sculpt:curveIds = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored SculptLayer control "curveIds".'
         }
+        doc = 'Authored SculptLayer control "curveIds". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     int[] usdGen:sculpt:cvOffsets = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored SculptLayer control "cvOffsets".'
         }
+        doc = 'Authored SculptLayer control "cvOffsets". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     vector3f[] usdGen:sculpt:deltas = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored SculptLayer control "deltas".'
         }
+        doc = 'Authored SculptLayer control "deltas". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    uniform string usdGen:sculpt:epoch = ""
+    uniform string usdGen:sculpt:epoch = "" (
+        customData = {
+            string userDocBrief = 'Authored SculptLayer control "epoch".'
+        }
+        doc = 'Authored SculptLayer control "epoch". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
     uint64[] usdGen:sculpt:lockedCurves = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored SculptLayer control "lockedCurves".'
         }
+        doc = 'Authored SculptLayer control "lockedCurves". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     int[] usdGen:sculpt:rootPrims = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored SculptLayer control "rootPrims".'
         }
+        doc = 'Authored SculptLayer control "rootPrims". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     texCoord2f[] usdGen:sculpt:rootUVs = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored SculptLayer control "rootUVs".'
         }
+        doc = 'Authored SculptLayer control "rootUVs". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     uniform token usdGen:sculpt:space = "rootFrame" (
         allowedTokens = ["rootFrame", "object"]
+        customData = {
+            string userDocBrief = 'Authored SculptLayer control "space".'
+        }
+        doc = 'Authored SculptLayer control "space". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:sculpt:weight = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored SculptLayer control "weight".'
         }
+        doc = 'Authored SculptLayer control "weight". Declared for the frozen v1-v3 vocabulary; no kernel implements SculptLayer yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class UsdGenDeform "UsdGenDeform"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
-    string usdGen:label = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     bool usdGen:lockRoots = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "True pins every root to its bound surface position so the deformation only corrects the strand above the root."
         }
+        doc = "True pins every root to its bound surface position so the deformation only corrects the strand above the root. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:mode = "rigidFrame" (
-        allowedTokens = ["rigidFrame", "rbf", "pointDeform"]
-    )
-    float usdGen:preserveShape = 0 (
+    float usdGen:mask = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
         }
-    )
-    int usdGen:preserveShape:iterations = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
     int usdGen:rbfSamples = 100 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Number of RBF sample points taken on the bound surface."
         }
+        doc = "Number of RBF sample points taken on the bound surface. Higher values track the pose more closely at a higher per-frame cost. Expression evaluation: groom (once per operator)."
     )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
-    )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
-    bool usdGen:twistAware = 1 (
+    uniform int usdGen:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Randomisation seed for this operator."
         }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
 }
 
 class UsdGenCollide "UsdGenCollide"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    rel usdGen:colliders
-    bool usdGen:enabled = 1
-    rel usdGen:input
+    rel usdGen:colliders (
+        customData = {
+            string userDocBrief = "Relationship consumed by Collide."
+        }
+        doc = "Relationship consumed by Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     int usdGen:iterations = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Iteration count for Collide."
         }
+        doc = "Iteration count for Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    string usdGen:label = ""
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
+    )
     float usdGen:offset = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Offset for Collide."
         }
+        doc = "Offset for Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:pushAmount = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Collide control "pushAmount".'
         }
-    )
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+        doc = 'Authored Collide control "pushAmount". Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     uniform token usdGen:resolveType = "flexible" (
         allowedTokens = ["flexible", "stiff"]
+        customData = {
+            string userDocBrief = 'Authored Collide control "resolveType".'
+        }
+        doc = 'Authored Collide control "resolveType". Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class UsdGenWind "UsdGenWind"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
     float usdGen:constStrength = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Wind control "constStrength".'
         }
+        doc = 'Authored Wind control "constStrength". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     vector3f usdGen:direction = (0, 0, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Wind control "direction".'
         }
+        doc = 'Authored Wind control "direction". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    bool usdGen:enabled = 1
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:gustStrength = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Wind control "gustStrength".'
         }
+        doc = 'Authored Wind control "gustStrength". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    float usdGen:mask = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-operator effect weight in [0, 1]."
+        }
+        doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
     float usdGen:stiffness = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Wind control "stiffness".'
         }
+        doc = 'Authored Wind control "stiffness". Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     uniform token usdGen:stiffness:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Wind."
+        }
+        doc = "Interpolation token for Wind. Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:stiffness:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Wind."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Wind. Declared for the frozen v1-v3 vocabulary; no kernel implements Wind yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class UsdGenFreeze "UsdGenFreeze"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:frozen:curves
-    uniform string usdGen:frozen:epoch = ""
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    rel usdGen:frozen:curves (
+        customData = {
+            string userDocBrief = "Relationship consumed by Freeze."
+        }
+        doc = "Relationship consumed by Freeze. Declared for the frozen v1-v3 vocabulary; no kernel implements Freeze yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
+    uniform string usdGen:frozen:epoch = "" (
+        customData = {
+            string userDocBrief = 'Authored Freeze control "epoch".'
+        }
+        doc = 'Authored Freeze control "epoch". Declared for the frozen v1-v3 vocabulary; no kernel implements Freeze yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
     uniform token usdGen:frozen:mode = "frozen" (
         allowedTokens = ["frozen", "live"]
+        customData = {
+            string userDocBrief = "Mode token for Freeze."
+        }
+        doc = "Mode token for Freeze. Declared for the frozen v1-v3 vocabulary; no kernel implements Freeze yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:frozen:tier = "session" (
         allowedTokens = ["session", "sublayer", "payload"]
+        customData = {
+            string userDocBrief = 'Authored Freeze control "tier".'
+        }
+        doc = 'Authored Freeze control "tier". Declared for the frozen v1-v3 vocabulary; no kernel implements Freeze yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    rel usdGen:input
-    string usdGen:label = ""
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
-    )
-    rel usdGen:surface
 }
 
 class UsdGenInstance "UsdGenInstance"
 {
-    uniform int usdGen:algorithmVersion = 0
-    float usdGen:blend = 1
-    bool usdGen:enabled = 1
-    rel usdGen:input
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
     float usdGen:instance:length = 0.09 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Instance control "length".'
         }
+        doc = 'Authored Instance control "length". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:instance:normalOffset = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Instance control "normalOffset".'
         }
+        doc = 'Authored Instance control "normalOffset". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     uniform token usdGen:instance:orient = "surfaceFrame" (
         allowedTokens = ["surfaceFrame", "curveTangent", "camera", "world"]
+        customData = {
+            string userDocBrief = 'Authored Instance control "orient".'
+        }
+        doc = 'Authored Instance control "orient". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:instance:scale = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Scale for Instance."
         }
+        doc = "Scale for Instance. Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
     float2 usdGen:instance:scaleRandom = (1, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Instance control "scaleRandom".'
         }
+        doc = 'Authored Instance control "scaleRandom". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
     float usdGen:instance:twist = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Instance control "twist".'
         }
+        doc = 'Authored Instance control "twist". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:instance:twistRandom = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = 'Authored Instance control "twistRandom".'
         }
+        doc = 'Authored Instance control "twistRandom". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
     )
-    token[] usdGen:instance:variationPrimvars = ["displayColor"]
+    token[] usdGen:instance:variationPrimvars = ["displayColor"] (
+        customData = {
+            string userDocBrief = 'Authored Instance control "variationPrimvars".'
+        }
+        doc = 'Authored Instance control "variationPrimvars". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
     float[] usdGen:instance:weights = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored Instance control "weights".'
         }
+        doc = 'Authored Instance control "weights". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:instance:width = 0.02 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored Instance control "width".'
         }
+        doc = 'Authored Instance control "width". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     uniform token usdGen:instance:width:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation token for Instance."
+        }
+        doc = "Interpolation token for Instance. Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
     float2[] usdGen:instance:width:knots = [(0, 1), (1, 1)] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "(position, value) ramp knots with position in [0, 1] for Instance."
         }
+        doc = "(position, value) ramp knots with position in [0, 1] for Instance. Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    string usdGen:label = ""
     uniform token usdGen:primitive = "cards" (
         allowedTokens = ["cards", "archives", "spheres"]
+        customData = {
+            string userDocBrief = 'Authored Instance control "primitive".'
+        }
+        doc = 'Authored Instance control "primitive". Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    rel usdGen:prototypes
-    uniform token usdGen:readPhase = "final" (
-        allowedTokens = ["base", "final", "preceding"]
+    rel usdGen:prototypes (
+        customData = {
+            string userDocBrief = "Relationship consumed by Instance."
+        }
+        doc = "Relationship consumed by Instance. Declared for the frozen v1-v3 vocabulary; no kernel implements Instance yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    uniform int usdGen:seed = 0
-    uniform token usdGen:space = "auto" (
-        allowedTokens = ["auto", "rest", "deformed"]
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:surface
 }
 
 class "UsdGenMap"
 {
-    string usdGen:label = ""
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
     float2 usdGen:map:clamp = (0, 1) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Output interval the final sample is clamped to."
         }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
     )
     float usdGen:map:default = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
         }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
     float usdGen:map:offset = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Constant added to the scaled sample."
         }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:map:scale = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
         }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
     )
 }
 
 class UsdGenImageMap "UsdGenImageMap"
 {
-    string usdGen:label = ""
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
-    float2 usdGen:map:clamp = (0, 1)
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
     token usdGen:map:colorSpace = "raw" (
         allowedTokens = ["auto", "raw", "sRGB"]
+        customData = {
+            string userDocBrief = 'Colour space of the texture: "raw" or "sRGB".'
+        }
+        doc = 'Colour space of the texture: "raw" or "sRGB". Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:default = 0
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    asset usdGen:map:file
+    asset usdGen:map:file (
+        customData = {
+            string userDocBrief = "Asset path of the texture this map samples."
+        }
+        doc = "Asset path of the texture this map samples. Expression evaluation: groom (once per operator)."
+    )
     token usdGen:map:filter = "bilinear" (
         allowedTokens = ["nearest", "bilinear"]
+        customData = {
+            string userDocBrief = 'Texture filter: "nearest" or "bilinear".'
+        }
+        doc = 'Texture filter: "nearest" or "bilinear". Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
-    token usdGen:map:uvSet = "st"
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
+    token usdGen:map:uvSet = "st" (
+        customData = {
+            string userDocBrief = "Name of the UV set used to sample the texture."
+        }
+        doc = "Name of the UV set used to sample the texture. Expression evaluation: groom (once per operator)."
+    )
     token usdGen:map:wrap = "clamp" (
         allowedTokens = ["clamp", "repeat", "mirror", "black"]
+        customData = {
+            string userDocBrief = 'Out-of-range UV behaviour: "black", "clamp", "repeat" or "mirror".'
+        }
+        doc = 'Out-of-range UV behaviour: "black", "clamp", "repeat" or "mirror". Expression evaluation: groom (once per operator).'
     )
 }
 
 class UsdGenPtexMap "UsdGenPtexMap"
 {
-    string usdGen:label = ""
     float usdGen:map:blur = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Ptex filter blur radius."
         }
+        doc = "Ptex filter blur radius. Expression evaluation: groom (once per operator)."
     )
     token usdGen:map:borderMode = "clamp" (
         allowedTokens = ["clamp", "black", "periodic"]
+        customData = {
+            string userDocBrief = "Ptex border behaviour at mesh edges."
+        }
+        doc = "Ptex border behaviour at mesh edges. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
     int usdGen:map:channelCount = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Number of Ptex channels read by this map."
         }
+        doc = "Number of Ptex channels read by this map. Expression evaluation: groom (once per operator)."
     )
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    asset usdGen:map:file
+    asset usdGen:map:file (
+        customData = {
+            string userDocBrief = "Asset path of the texture this map samples."
+        }
+        doc = "Asset path of the texture this map samples. Expression evaluation: groom (once per operator)."
+    )
     token usdGen:map:filter = "bilinear" (
         allowedTokens = ["nearest", "bilinear", "box", "gaussian", "bicubic", "bspline", "catmullrom", "mitchell"]
+        customData = {
+            string userDocBrief = 'Texture filter: "nearest" or "bilinear".'
+        }
+        doc = 'Texture filter: "nearest" or "bilinear". Expression evaluation: groom (once per operator).'
     )
     int usdGen:map:firstChannel = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "First Ptex channel read by this map."
         }
+        doc = "First Ptex channel read by this map. Expression evaluation: groom (once per operator)."
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
 }
 
 class UsdGenExprMap "UsdGenExprMap"
 {
-    rel usdGen:expr:maps
+    rel usdGen:expr:maps (
+        customData = {
+            string userDocBrief = "Relationship consumed by ExprMap."
+        }
+        doc = "Relationship consumed by ExprMap. Declared for the frozen v1-v3 vocabulary; no kernel implements ExprMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:expr:returnType = "float" (
         allowedTokens = ["float", "color"]
+        customData = {
+            string userDocBrief = 'Authored ExprMap control "returnType".'
+        }
+        doc = 'Authored ExprMap control "returnType". Declared for the frozen v1-v3 vocabulary; no kernel implements ExprMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     uniform int usdGen:expr:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Seed for ExprMap."
         }
+        doc = "Seed for ExprMap. Declared for the frozen v1-v3 vocabulary; no kernel implements ExprMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    string usdGen:expr:source = ""
-    string usdGen:label = ""
+    string usdGen:expr:source = "" (
+        customData = {
+            string userDocBrief = 'Authored ExprMap control "source".'
+        }
+        doc = 'Authored ExprMap control "source". Declared for the frozen v1-v3 vocabulary; no kernel implements ExprMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
 }
 
 class UsdGenPaintMap "UsdGenPaintMap"
 {
-    string usdGen:label = ""
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
-    asset usdGen:paint:bakedFile
-    token usdGen:paint:interpolation = "faceVarying"
-    token usdGen:paint:primvar = "usdGen:paint:density"
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
+    asset usdGen:paint:bakedFile (
+        customData = {
+            string userDocBrief = 'Authored PaintMap control "bakedFile".'
+        }
+        doc = 'Authored PaintMap control "bakedFile". Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
+    token usdGen:paint:interpolation = "faceVarying" (
+        customData = {
+            string userDocBrief = "Interpolation token for PaintMap."
+        }
+        doc = "Interpolation token for PaintMap. Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
+    token usdGen:paint:primvar = "usdGen:paint:density" (
+        customData = {
+            string userDocBrief = 'Authored PaintMap control "primvar".'
+        }
+        doc = 'Authored PaintMap control "primvar". Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+    )
     int usdGen:paint:resolution = 256 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored PaintMap control "resolution".'
         }
+        doc = 'Authored PaintMap control "resolution". Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     token usdGen:paint:storage = "primvar" (
         allowedTokens = ["primvar", "file"]
+        customData = {
+            string userDocBrief = 'Authored PaintMap control "storage".'
+        }
+        doc = 'Authored PaintMap control "storage". Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
-    rel usdGen:paint:surface
+    rel usdGen:paint:surface (
+        customData = {
+            string userDocBrief = "Relationship consumed by PaintMap."
+        }
+        doc = "Relationship consumed by PaintMap. Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
 }
 
 class UsdGenNoiseMap "UsdGenNoiseMap"
 {
-    string usdGen:label = ""
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
     float usdGen:noise:frequency = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Frequency for NoiseMap."
         }
+        doc = "Frequency for NoiseMap. Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     float usdGen:noise:gain = 0.5 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored NoiseMap control "gain".'
         }
+        doc = 'Authored NoiseMap control "gain". Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     float usdGen:noise:lacunarity = 2 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored NoiseMap control "lacunarity".'
         }
+        doc = 'Authored NoiseMap control "lacunarity". Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     int usdGen:noise:octaves = 3 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = 'Authored NoiseMap control "octaves".'
         }
+        doc = 'Authored NoiseMap control "octaves". Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV).'
     )
     uniform int usdGen:noise:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "point"
             }
+            string userDocBrief = "Seed for NoiseMap."
         }
+        doc = "Seed for NoiseMap. Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: point (once per CV)."
     )
     token usdGen:noise:space = "rest" (
         allowedTokens = ["rest", "deformed"]
+        customData = {
+            string userDocBrief = 'Authored NoiseMap control "space".'
+        }
+        doc = 'Authored NoiseMap control "space". Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     token usdGen:noise:type = "fbm" (
         allowedTokens = ["perlin", "snoise", "fbm", "turbulence", "cellnoise", "voronoi"]
+        customData = {
+            string userDocBrief = 'Authored NoiseMap control "type".'
+        }
+        doc = 'Authored NoiseMap control "type". Declared for the frozen v1-v3 vocabulary; no kernel implements NoiseMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
 }
 
 class UsdGenCombineMap "UsdGenCombineMap"
 {
-    rel usdGen:combine:inputs
+    rel usdGen:combine:inputs (
+        customData = {
+            string userDocBrief = "Relationship consumed by CombineMap."
+        }
+        doc = "Relationship consumed by CombineMap. Declared for the frozen v1-v3 vocabulary; no kernel implements CombineMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     token usdGen:combine:mode = "multiply" (
         allowedTokens = ["multiply", "add", "subtract", "max", "min", "average", "overlay"]
+        customData = {
+            string userDocBrief = "Mode token for CombineMap."
+        }
+        doc = "Mode token for CombineMap. Declared for the frozen v1-v3 vocabulary; no kernel implements CombineMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
     )
-    string usdGen:label = ""
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
 }
 
 class UsdGenGuideProximityMap "UsdGenGuideProximityMap"
 {
-    rel usdGen:guides
-    string usdGen:label = ""
+    rel usdGen:guides (
+        customData = {
+            string userDocBrief = "Relationship consumed by GuideProximityMap."
+        }
+        doc = "Relationship consumed by GuideProximityMap. Declared for the frozen v1-v3 vocabulary; no kernel implements GuideProximityMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:channel = "r" (
         allowedTokens = ["r", "g", "b", "a", "rgb", "luminance"]
+        customData = {
+            string userDocBrief = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a".'
+        }
+        doc = 'Which channel of the map supplies the scalar: "r", "g", "b" or "a". Expression evaluation: groom (once per operator).'
     )
-    float2 usdGen:map:clamp = (0, 1)
-    float usdGen:map:default = 0
+    float2 usdGen:map:clamp = (0, 1) (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Output interval the final sample is clamped to."
+        }
+        doc = "Output interval the final sample is clamped to. Equal components disable the clamp. Expression evaluation: groom (once per operator)."
+    )
+    float usdGen:map:default = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Value substituted wherever the map cannot be sampled."
+        }
+        doc = "Value substituted wherever the map cannot be sampled. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:map:domain = "root" (
         allowedTokens = ["root", "cv"]
+        customData = {
+            string userDocBrief = 'Where the map is sampled: "root" samples once per root, "cv" once per CV.'
+        }
+        doc = 'Where the map is sampled: "root" samples once per root, "cv" once per CV. Expression evaluation: groom (once per operator).'
     )
-    float usdGen:map:offset = 0
-    float usdGen:map:scale = 1
+    float usdGen:map:offset = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Constant added to the scaled sample."
+        }
+        doc = "Constant added to the scaled sample. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:map:scale = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
+        }
+        doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
     float usdGen:proximity:decay = 2 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = 'Authored GuideProximityMap control "decay".'
         }
+        doc = 'Authored GuideProximityMap control "decay". Declared for the frozen v1-v3 vocabulary; no kernel implements GuideProximityMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
     )
     float usdGen:proximity:radius = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Radius for GuideProximityMap."
         }
+        doc = "Radius for GuideProximityMap. Declared for the frozen v1-v3 vocabulary; no kernel implements GuideProximityMap yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
     )
-}
-
-class "UsdGenMaskAPI"
-{
-    float usdGen:mask:amount = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
-    uniform token usdGen:mask:combine = "multiply" (
-        allowedTokens = ["multiply", "add", "subtract", "max", "min", "average", "replace"]
-    )
-    float usdGen:mask:effectPosition = 0.5 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:mask:falloff = 0.5 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
-    float usdGen:mask:influenceWidth = 0.5 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    bool usdGen:mask:invert = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:mask:noise:amount = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    float usdGen:mask:noise:bias = 0.5 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    float usdGen:mask:noise:frequency = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    float usdGen:mask:noise:gain = 0.5 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    uniform int usdGen:mask:noise:seed = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "point"
-            }
-        }
-    )
-    uniform token usdGen:mask:ramp:interpolation = "catmullRom" (
-        allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
-    )
-    float2[] usdGen:mask:ramp:knots = [(0, 1), (1, 1)] (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:mask:ramp:spline (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:mask:random = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
-    uniform int usdGen:mask:randomSeed = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-        }
-    )
-    float2 usdGen:mask:range = (0, 1) (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:mask:rangeMax = 1 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    float usdGen:mask:rangeMin = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "groom"
-            }
-        }
-    )
-    uniform token usdGen:mask:rangeMode = "normalized" (
-        allowedTokens = ["normalized", "absoluteLength"]
-    )
-    rel usdGen:mask:region
-    rel usdGen:mask:source
 }
 
 class "UsdGenLookAPI"
 {
     uniform token usdGen:look:bakeMode = "perCurve" (
         allowedTokens = ["perCurve", "perCV"]
+        customData = {
+            string userDocBrief = "Whether and how the resolved colour is baked into a primvar."
+        }
+        doc = "Whether and how the resolved colour is baked into a primvar. Expression evaluation: groom (once per operator)."
     )
-    token usdGen:look:bakePrimvar = "usdGen:albedo"
+    token usdGen:look:bakePrimvar = "usdGen:albedo" (
+        customData = {
+            string userDocBrief = "Name of the primvar the baked colour is written to."
+        }
+        doc = "Name of the primvar the baked colour is written to. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:look:bakeTarget = "displayColor" (
         allowedTokens = ["displayColor", "primvar", "none"]
+        customData = {
+            string userDocBrief = "Which published prim set receives the baked colour."
+        }
+        doc = "Which published prim set receives the baked colour. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:look:colorMap
+    rel usdGen:look:colorMap (
+        customData = {
+            string userDocBrief = "Map supplying a per-root colour."
+        }
+        doc = "Map supplying a per-root colour. Expression evaluation: groom (once per operator)."
+    )
     uniform token usdGen:look:colorMapMode = "bake" (
         allowedTokens = ["bake", "shader"]
+        customData = {
+            string userDocBrief = "How usdGen:look:colorMap combines with the ramp colour."
+        }
+        doc = "How usdGen:look:colorMap combines with the ramp colour. Expression evaluation: groom (once per operator)."
     )
     color3f[] usdGen:look:colorRamp:colors = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Colours at the usdGen:look:colorRamp:positions stops."
         }
+        doc = "Colours at the usdGen:look:colorRamp:positions stops. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:look:colorRamp:interpolation = "catmullRom" (
         allowedTokens = ["linear", "catmullRom", "bspline", "constant"]
+        customData = {
+            string userDocBrief = "Interpolation between colour ramp stops."
+        }
+        doc = "Interpolation between colour ramp stops. Expression evaluation: groom (once per operator)."
     )
     float[] usdGen:look:colorRamp:positions = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Root-to-tip positions, in [0, 1], of the colour ramp stops."
         }
+        doc = "Root-to-tip positions, in [0, 1], of the colour ramp stops. Expression evaluation: groom (once per operator)."
     )
     float usdGen:look:hueJitter = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Per-curve hue variation, in [0, 1]."
         }
+        doc = "Per-curve hue variation, in [0, 1]. Expression evaluation: primitive (once per curve root)."
     )
     uniform int usdGen:look:jitterSeed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Seed for the per-curve hue/value jitter draws."
         }
+        doc = "Seed for the per-curve hue/value jitter draws. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:look:rampExponent = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
+            string userDocBrief = "Exponent applied to the ramp parameter before lookup."
         }
+        doc = "Exponent applied to the ramp parameter before lookup. Expression evaluation: groom (once per operator)."
     )
     color3f usdGen:look:rootColor = (0.035, 0.018, 0.008) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Display colour at the strand root."
         }
+        doc = "Display colour at the strand root. Expression evaluation: primitive (once per curve root)."
     )
     color3f usdGen:look:tipColor = (0.21, 0.115, 0.045) (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Display colour at the strand tip."
         }
+        doc = "Display colour at the strand tip. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:look:valueJitter = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
+            string userDocBrief = "Per-curve value variation, in [0, 1]."
         }
+        doc = "Per-curve value variation, in [0, 1]. Expression evaluation: primitive (once per curve root)."
     )
 }
 
 class "UsdGenRestAPI"
 {
-    asset usdGen:rest:file = @@
-    token usdGen:rest:primvar = "rest"
+    asset usdGen:rest:file = @@ (
+        customData = {
+            string userDocBrief = 'Asset holding rest positions when usdGen:rest:source is "file".'
+        }
+        doc = 'Asset holding rest positions when usdGen:rest:source is "file". Expression evaluation: groom (once per operator).'
+    )
+    token usdGen:rest:primvar = "rest" (
+        customData = {
+            string userDocBrief = 'Name of the primvar holding rest positions when usdGen:rest:source is "primvar".'
+        }
+        doc = 'Name of the primvar holding rest positions when usdGen:rest:source is "primvar". Expression evaluation: groom (once per operator).'
+    )
     uniform token usdGen:rest:source = "default" (
         allowedTokens = ["default", "primvar", "asset"]
+        customData = {
+            string userDocBrief = 'Where rest positions come from: "default" uses the default time sample, "primvar" the named primvar, "file" the referenced asset.'
+        }
+        doc = 'Where rest positions come from: "default" uses the default time sample, "primvar" the named primvar, "file" the referenced asset. Expression evaluation: groom (once per operator).'
     )
 }
 

@@ -99,7 +99,6 @@ UsdGenGraphDesc MakeChain(int nodeCount)
         n.path = SdfPath("/g200/n" + std::to_string(i));
         n.type = CycleType(i);
         n.enabled = true;
-        n.blend = 1.0f;
         n.seed = 1000 + i;
         if (i > 0) n.inputs.push_back(SdfPath("/g200/n" + std::to_string(i - 1)));
         if (n.type == TfToken("UsdGenScatter"))
@@ -107,26 +106,6 @@ UsdGenGraphDesc MakeChain(int nodeCount)
         AddTypeParams(n, n.type);
         d.nodes.push_back(std::move(n));
     }
-    return d;
-}
-
-UsdGenGraphDesc MakeC3SourceSpaceDesc(bool useRest, TfToken space = TfToken())
-{
-    UsdGenGraphDesc d;
-    d.description = SdfPath("/c3Space");
-    d.terminal = SdfPath("/c3Space/source");
-    UsdGenCurveSetDesc curves;
-    curves.path = SdfPath("/c3Space/hair");
-    curves.role = UsdGenRole::Curves;
-    curves.curveRole = TfToken("hair");
-    d.curveSets.push_back(std::move(curves));
-    UsdGenNodeDesc source;
-    source.path = d.terminal;
-    source.type = TfToken("UsdGenCurveSource");
-    source.curves = {SdfPath("/c3Space/hair")};
-    source.params.push_back({TfToken("useRest"), VtValue(useRest), false});
-    source.space = std::move(space);
-    d.nodes.push_back(std::move(source));
     return d;
 }
 
@@ -168,7 +147,6 @@ int main()
     extra.path = SdfPath("/g200/n200");
     extra.type = CycleType(200);            // == UsdGenWidth
     extra.enabled = true;
-    extra.blend = 1.0f;
     extra.seed = 1301;
     extra.inputs.push_back(SdfPath("/g200/n199"));
     if (extra.type == TfToken("UsdGenScatter"))
@@ -300,34 +278,6 @@ int main()
             "UsdGenCompiler: operator '/g200/n0' (type 'UsdGenScatter') requires exactly 0 geometry inputs; found 1",
             "source operator input has an exact diagnostic");
     }
-    {
-        UsdGenGraphDesc posed = MakeC3SourceSpaceDesc(false);
-        UsdGenCompiler compiler;
-        UsdGenGraph graph;
-        UsdGenCompileResult const compiled = compiler.Compile(posed, &graph);
-        Check(compiled.ok && graph.Node(graph.NodeIdForPath(posed.terminal)).space ==
-                  UsdGenSpace::Deformed,
-              "C3 CurveSource useRest=false resolves auto space to deformed");
-
-        UsdGenGraphDesc rest = posed;
-        rest.nodes[0].params[0].value = VtValue(true);
-        UsdGenCompileResult const recompiled = compiler.Recompile(rest, &graph);
-        Check(recompiled.ok &&
-                  graph.Node(graph.NodeIdForPath(rest.terminal)).space ==
-                      UsdGenSpace::Inherit &&
-                  recompiled.rebuilt.size() == 1,
-              "C3 CurveSource useRest edit changes resolved space and rebuilds node");
-
-        UsdGenGraphDesc contradictory = MakeC3SourceSpaceDesc(
-            false, TfToken("rest"));
-        UsdGenCompileResult const rejected = compiler.Compile(contradictory, &graph);
-        Check(!rejected.ok && rejected.errors.size() == 1 &&
-                  rejected.errors.front() ==
-                      "UsdGenCompiler: CurveSource '/c3Space/source' with useRest=false "
-                      "cannot use space=rest; use space=auto or deformed",
-              "C3 CurveSource rejects explicit rest space for posed points");
-    }
-
     std::printf(g_failures ? "testUsdGenGraph: FAILED (%d)\n"
                            : "testUsdGenGraph: PASS (E-6)\n",
                 g_failures);

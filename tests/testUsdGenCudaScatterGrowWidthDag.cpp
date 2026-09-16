@@ -56,7 +56,8 @@ static UsdGenGraphDesc Fixture(bool branching) {
     auto right = Width("/Ops/Right", "/Ops/Grow", .8f);
     UsdGenNodeDesc blend;
     blend.path = SdfPath("/Ops/Blend"); blend.type = TfToken("UsdGenWidthBlend");
-    blend.inputs = {left.path, right.path}; blend.blend = .25f;
+    blend.inputs = {left.path, right.path};
+    blend.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
     d.nodes = {blend, right, scatter, left, grow}; d.terminal = blend.path;
     return d;
 }
@@ -92,21 +93,6 @@ int main() {
         // Execute the descendant branches but publish their predecessor.
         // Any in-place Width write would corrupt this selected source value.
         if(variant==3) desc.terminal=SdfPath("/Ops/Grow");
-        if(variant==2) {
-            UsdGenMapDesc map;
-            map.path=SdfPath("/Maps/Mask"); map.type=TfToken("UsdGenImageMap");
-            map.textureGeneration=1;
-            map.imagePayload=ImagePayload::Create(1,1,1,std::vector<float>{.5f},
-                UsdGenImageRowOrientation::BottomUp);
-            CHECK(map.imagePayload);
-            desc.maps.push_back(std::move(map));
-            auto left=std::find_if(desc.nodes.begin(),desc.nodes.end(),[](auto const& n) {
-                return n.path==SdfPath("/Ops/Left");
-            });
-            CHECK(left!=desc.nodes.end());
-            left->mapBindings={{SdfPath("/Maps/Mask"),UsdGenMapBindingPurpose::MaskSource,
-                TfToken("usdGen:mask:source")}};
-        }
         CHECK(desc.curveSets.empty());
         UsdGenCurveBuffer reference;
         CHECK(Reference(desc,&reference));

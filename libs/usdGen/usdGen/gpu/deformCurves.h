@@ -5,21 +5,15 @@
 #include "width.h"
 namespace usdGen { namespace gpu {
 
-// Runtime controls for the C3 deformation. Blend and maskAmount may be
-// Groom-, Primitive-, or Point-domain fields. enabled is Groom-only; lockRoots
-// is Groom- or Primitive-domain (a point-domain root lock is ambiguous for a
-// whole-strand correction and is rejected). maskProfile is optional and, when
-// present, must contain the 257-entry [0,1] LUT used at canonical curve t.
+// Runtime controls for the C3 deformation. `mask` IS the operator envelope
+// (usdGen:mask) and may be a Groom-, Primitive-, or Point-domain field in
+// [0,1]; exactly 0 is a bitwise pass-through. enabled is Groom-only;
+// lockRoots is Groom- or Primitive-domain (a point-domain root lock is
+// ambiguous for a whole-strand correction and is rejected).
 struct DeformParameters {
- ScalarField blend = ScalarField::Literal(1.0f);
- ScalarField maskAmount = ScalarField::Literal(1.0f);
+ ScalarField mask = ScalarField::Literal(1.0f);
  BoolField enabled = BoolField::Literal(true);
  BoolField lockRoots = BoolField::Literal(true);
- DeviceView<const float> maskProfile{};
- // Optional authored per-CV parameter-space coordinate.  When present it
- // must contain pointCount values in [0,1] and is used for maskProfile
- // sampling; canonical CV index interpolation is only the fallback.
- DeviceView<const float> hairT{};
 };
 
 class CudaRbfCurveDeformer {

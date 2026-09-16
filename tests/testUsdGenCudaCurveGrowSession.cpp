@@ -68,7 +68,7 @@ bool GrowNoiseReference(UsdGenGraphDesc desc, UsdGenCurveBuffer* output,
         {TfToken("noise:magnitude"), VtValue(0.0f), false});
     if (!noise->expressionBindings.empty() || !noise->ramps.empty()) return false;
     for (auto const& parameter : noise->params) {
-        if (parameter.name != TfToken("enabled") && parameter.name != TfToken("blend") &&
+        if (parameter.name != TfToken("enabled") &&
             parameter.name != TfToken("noise:magnitude") &&
             parameter.name != TfToken("noise:frequency") &&
             parameter.name != TfToken("noise:correlation") &&
@@ -84,10 +84,9 @@ bool GrowNoiseReference(UsdGenGraphDesc desc, UsdGenCurveBuffer* output,
     float const magnitude = float(values.GetDouble(TfToken("noise:magnitude"), .05));
     float const frequency = float(values.GetDouble(TfToken("noise:frequency"), 3.0));
     float const correlation = float(values.GetDouble(TfToken("noise:correlation"), .5));
-    float const blend = float(values.GetDouble(TfToken("blend"), 1.0));
     int const seed = values.GetInt(TfToken("noise:seed"), 0);
     int const octaves = values.GetInt(TfToken("noise:octaves"), 1);
-    float const amplitude = magnitude * blend;
+    float const amplitude = magnitude;
     for (size_t curve = 0; curve != output->totalCurves; ++curve) {
         uint32_t begin = output->cvOffsets.empty()
             ? uint32_t(curve * output->totalCvs / output->totalCurves)
@@ -181,9 +180,8 @@ UsdGenGraphDesc Desc(bool resampleAndLift = false, bool namedPlanes = true,
     noise.path=SdfPath("/Ops/Noise"); noise.type=TfToken("UsdGenNoise");
     noise.inputs={grow.path};
     noise.params={{TfToken("enabled"),VtValue(true),false},
-                 {TfToken("blend"),VtValue(.65f),false},
                  {TfToken("noise:frequency"),VtValue(1.3f),false},
-                 {TfToken("noise:magnitude"),VtValue(.08f),false},
+                 {TfToken("noise:magnitude"),VtValue(.052f),false},
                  {TfToken("noise:correlation"),VtValue(.5f),false},
                  {TfToken("noise:seed"),VtValue(23),false},
                  {TfToken("noise:octaves"),VtValue(2),false},
@@ -193,7 +191,8 @@ UsdGenGraphDesc Desc(bool resampleAndLift = false, bool namedPlanes = true,
     }
     UsdGenNodeDesc blend;
     blend.path=SdfPath("/Ops/Blend"); blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={left.path,right.path}; blend.blend=.25f;
+    blend.inputs={left.path,right.path};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.25f),false});
     // Deliberately not execution order: C3 canonicalization and value DAG
     // lowering must not depend on descriptor ordinal.
     // Noise is currently exercised in the linear native suffix.  Keep the
@@ -382,10 +381,11 @@ UsdGenGraphDesc NoiseDagDesc() {
     auto right=Width("/Dag/Right",noise.path.GetText(),.9f);
     auto other=noise;other.path=SdfPath("/Dag/Other");other.inputs={source.path};
     auto tail=noise;tail.path=SdfPath("/Dag/Tail");tail.inputs={left.path};
-    for(auto& p:other.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.16f);
-    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.04f);
+    for(auto& p:other.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.104f);
+    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.026f);
     UsdGenNodeDesc blend;blend.path=SdfPath("/Dag/Blend");blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={left.path,right.path};blend.blend=.25f;
+    blend.inputs={left.path,right.path};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.25f),false});
     desc.nodes={blend,other,right,tail,source,noise,left,pre};desc.terminal=blend.path;
     return desc;
 }
@@ -411,12 +411,13 @@ UsdGenGraphDesc SourceBranchNoiseDagDesc(bool grow, TfToken mode=TfToken("scale"
     auto other=std::find_if(desc.nodes.begin(),desc.nodes.end(),[](auto const& n){return n.path==SdfPath("/Dag/Other");});
     other->inputs={SdfPath("/Ops/Source")};
     auto tail=*other;tail.path=SdfPath("/Dag/SideTail");tail.inputs={SdfPath("/Dag/SideLeft")};
-    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.09f);
+    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.0585f);
     desc.nodes.push_back(Width("/Dag/SideLeft","/Dag/Other",.4f));
     desc.nodes.push_back(Width("/Dag/SideRight","/Dag/Other",.8f));
     desc.nodes.push_back(Width("/Dag/SideRawWidth","/Ops/Source",.6f));
     UsdGenNodeDesc blend;blend.path=SdfPath("/Dag/SideBlend");blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={SdfPath("/Dag/SideLeft"),SdfPath("/Dag/SideRight")};blend.blend=.6f;
+    blend.inputs={SdfPath("/Dag/SideLeft"),SdfPath("/Dag/SideRight")};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.6f),false});
     desc.nodes.push_back(blend);desc.nodes.push_back(tail);desc.terminal=blend.path;
     return desc;
 }
@@ -488,7 +489,8 @@ UsdGenGraphDesc RegrowNoiseDagDesc(bool grownInput,char const* input,
     desc.nodes.push_back(Width("/Dag/RegrowLeft","/Dag/Regrow",.2f));
     desc.nodes.push_back(Width("/Dag/RegrowRight","/Dag/Regrow",.6f));
     UsdGenNodeDesc blend;blend.path=SdfPath("/Dag/RegrowBlend");blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={SdfPath("/Dag/RegrowLeft"),SdfPath("/Dag/RegrowRight")};blend.blend=.4f;
+    blend.inputs={SdfPath("/Dag/RegrowLeft"),SdfPath("/Dag/RegrowRight")};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.4f),false});
     desc.nodes.push_back(blend);desc.nodes.push_back(tail);desc.terminal=tail.path;
     return desc;
 }
@@ -614,8 +616,10 @@ bool NoiseDagReference(UsdGenGraphDesc const& desc,UsdGenCurveBuffer* output) {
             if(node->inputs.size()!=2||!evaluate(node->inputs[1],depth+1)) return false;
             auto const& right=values.at(node->inputs[1]);
             if(value.px!=right.px||value.py!=right.py||value.pz!=right.pz||value.width.size()!=right.width.size()) return false;
+            UsdGenParamView const wb{&desc,&*node};
+            float const weight=float(wb.GetDouble(TfToken("widthBlend:weight"),1.0));
             for(size_t i=0;i<value.width.size();++i)
-                value.width[i]=value.width[i]+(right.width[i]-value.width[i])*node->blend;
+                value.width[i]=value.width[i]+(right.width[i]-value.width[i])*weight;
         } else return false;
         values[path]=std::move(value);return true;
     };
@@ -1086,12 +1090,12 @@ int main() {
     {
         UsdGenCurveBuffer expected;
         CHECK(NoiseDagReference(noiseBeforeGrow,&expected));
-        UsdGenDiagnostics diagnostics;
-        auto plan=CompileCudaGraph(noiseBeforeGrow,&diagnostics);
-        auto workspace=CreateCudaExecutionWorkspace(-1,&diagnostics);
-        CHECK(plan&&workspace&&!diagnostics.HasErrors());
-        auto generation=ExecuteCudaGraph(*plan,*workspace,1,169,&diagnostics);
-        CHECK(generation&&!diagnostics.HasErrors()&&
+        UsdGenDiagnostics reorderDiagnostics;
+        auto reorderPlan=CompileCudaGraph(noiseBeforeGrow,&reorderDiagnostics);
+        auto reorderWorkspace=CreateCudaExecutionWorkspace(-1,&reorderDiagnostics);
+        CHECK(reorderPlan&&reorderWorkspace&&!reorderDiagnostics.HasErrors());
+        auto generation=ExecuteCudaGraph(*reorderPlan,*reorderWorkspace,1,169,&reorderDiagnostics);
+        CHECK(generation&&!reorderDiagnostics.HasErrors()&&
               CheckGeneration(generation,expected,stream));
     }
     auto growLength=growNoise;
@@ -1240,20 +1244,20 @@ int main() {
         // A second Length reads survivor-owned frames and keeps the previous
         // compactor alive until its own proof; exercise that admission peak.
         auto repeated=positiveLength;
-        auto second=repeated.nodes[2]; second.path=SdfPath("/Ops/SecondLength");
-        second.inputs={repeated.nodes[2].path};
-        auto terminal=repeated.nodes.back();terminal.inputs={second.path};
-        repeated.nodes.pop_back();repeated.nodes.push_back(second);repeated.nodes.push_back(terminal);
+        auto secondLength=repeated.nodes[2]; secondLength.path=SdfPath("/Ops/SecondLength");
+        secondLength.inputs={repeated.nodes[2].path};
+        auto terminal=repeated.nodes.back();terminal.inputs={secondLength.path};
+        repeated.nodes.pop_back();repeated.nodes.push_back(secondLength);repeated.nodes.push_back(terminal);
         auto quarter=GrowLengthDesc(TfToken("scale"),.25f);
         UsdGenCurveBuffer expected;
         CHECK(GrowLengthScaleReference(quarter,.25f,&expected));
-        UsdGenDiagnostics diagnostics;
-        auto plan=CompileCudaGraph(repeated,&diagnostics);CHECK(plan&&!diagnostics.HasErrors());
-        auto direct=ExecuteCudaGraph(*plan,*positiveLengthWorkspace,1,180,&diagnostics);
-        CHECK(direct&&!diagnostics.HasErrors()&&CheckGeneration(direct,expected,stream));
-        UsdGenSession session;session.SetDevicePublicationEnabled(true);session.SetGraphDesc(repeated);
-        auto published=session.Commit(1,UsdGenCommitReason::SetTime);
-        CHECK(published&&published->device&&!session.LastDiagnostics().HasErrors()&&
+        UsdGenDiagnostics repeatDiagnostics;
+        auto repeatPlan=CompileCudaGraph(repeated,&repeatDiagnostics);CHECK(repeatPlan&&!repeatDiagnostics.HasErrors());
+        auto repeatDirect=ExecuteCudaGraph(*repeatPlan,*positiveLengthWorkspace,1,180,&repeatDiagnostics);
+        CHECK(repeatDirect&&!repeatDiagnostics.HasErrors()&&CheckGeneration(repeatDirect,expected,stream));
+        UsdGenSession repeatSession;repeatSession.SetDevicePublicationEnabled(true);repeatSession.SetGraphDesc(repeated);
+        auto published=repeatSession.Commit(1,UsdGenCommitReason::SetTime);
+        CHECK(published&&published->device&&!repeatSession.LastDiagnostics().HasErrors()&&
               CheckGeneration(published->device,expected,stream));
     }
     for (int resampleTo : {3, 2}) {
@@ -1318,59 +1322,59 @@ int main() {
         secondNoise.inputs={repeatedNoise.nodes[2].path};repeatedNoise.nodes[3].inputs={secondNoise.path};
         repeatedNoise.nodes.insert(repeatedNoise.nodes.begin()+3,secondNoise);
         cases.push_back(repeatedNoise);
-        UsdGenSession session;session.SetDevicePublicationEnabled(true);
+        UsdGenSession mixedCaseSession;mixedCaseSession.SetDevicePublicationEnabled(true);
         std::shared_ptr<const UsdGenDeviceGeneration> held;
         UsdGenCurveBuffer heldReference;
-        std::vector<float3> oldPoints,oldRest;
-        std::vector<float> oldWidths;
+        std::vector<float3> mixedCaseOldPoints,mixedCaseOldRest;
+        std::vector<float> mixedCaseOldWidths;
         for(size_t variant=0;variant<cases.size();++variant) {
-            auto const& desc=cases[variant];UsdGenCurveBuffer expected;
-            CHECK(MixedGrowReference(desc,&expected));
+            auto const& mixedCaseDesc=cases[variant];UsdGenCurveBuffer expected;
+            CHECK(MixedGrowReference(mixedCaseDesc,&expected));
             if(variant==2) CHECK(expected.totalCurves==1);
             if(variant==3||variant==4||variant==6) CHECK(expected.totalCurves==0);
-            UsdGenDiagnostics diagnostics;
-            auto plan=CompileCudaGraph(desc,&diagnostics);
-            for(auto const& error:diagnostics.errors) std::fprintf(stderr,"mixed compile: %s\n",error.c_str());
-            CHECK(plan&&!diagnostics.HasErrors());
-            auto workspace=CreateCudaExecutionWorkspace(-1,&diagnostics);CHECK(workspace);
-            auto direct=ExecuteCudaGraph(*plan,*workspace,1,300+variant,&diagnostics);
-            for(auto const& error:diagnostics.errors) std::fprintf(stderr,"mixed execute: %s\n",error.c_str());
-            CHECK(direct&&!diagnostics.HasErrors()&&CheckGeneration(direct,expected,stream));
-            session.SetGraphDesc(desc);
-            auto published=session.Commit(1+variant,UsdGenCommitReason::SetTime);
-            CHECK(published&&published->device&&!session.LastDiagnostics().HasErrors()&&
+            UsdGenDiagnostics mixedCaseDiagnostics;
+            auto mixedCasePlan=CompileCudaGraph(mixedCaseDesc,&mixedCaseDiagnostics);
+            for(auto const& error:mixedCaseDiagnostics.errors) std::fprintf(stderr,"mixed compile: %s\n",error.c_str());
+            CHECK(mixedCasePlan&&!mixedCaseDiagnostics.HasErrors());
+            auto mixedCaseWorkspace=CreateCudaExecutionWorkspace(-1,&mixedCaseDiagnostics);CHECK(mixedCaseWorkspace);
+            auto mixedCaseDirect=ExecuteCudaGraph(*mixedCasePlan,*mixedCaseWorkspace,1,300+variant,&mixedCaseDiagnostics);
+            for(auto const& error:mixedCaseDiagnostics.errors) std::fprintf(stderr,"mixed execute: %s\n",error.c_str());
+            CHECK(mixedCaseDirect&&!mixedCaseDiagnostics.HasErrors()&&CheckGeneration(mixedCaseDirect,expected,stream));
+            mixedCaseSession.SetGraphDesc(mixedCaseDesc);
+            auto published=mixedCaseSession.Commit(static_cast<double>(1+variant),UsdGenCommitReason::SetTime);
+            CHECK(published&&published->device&&!mixedCaseSession.LastDiagnostics().HasErrors()&&
                   CheckGeneration(published->device,expected,stream));
             if(variant==2||variant==4) {
-                auto job=CreateCudaExecutionJob(plan,*workspace,1,350+variant,&diagnostics);CHECK(job);
+                auto mixedCaseJob=CreateCudaExecutionJob(mixedCasePlan,*mixedCaseWorkspace,1,350+variant,&mixedCaseDiagnostics);CHECK(mixedCaseJob);
                 std::promise<bool> sourceDone;auto ready=sourceDone.get_future();
-                CHECK(ExecuteCudaJobSourceAsync(job,[&](bool ok){sourceDone.set_value(ok);})&&
+                CHECK(ExecuteCudaJobSourceAsync(mixedCaseJob,[&](bool ok){sourceDone.set_value(ok);})&&
                       ready.wait_for(std::chrono::seconds(10))==std::future_status::ready&&ready.get());
-                for(size_t i=0;i<CudaExecutionJobOperatorCount(*job);++i) {
+                for(size_t i=0;i<CudaExecutionJobOperatorCount(*mixedCaseJob);++i) {
                     std::promise<bool> done;auto completed=done.get_future();
-                    CHECK(ExecuteCudaJobOperatorAsync(job,i,[&](bool ok){done.set_value(ok);})&&
+                    CHECK(ExecuteCudaJobOperatorAsync(mixedCaseJob,i,[&](bool ok){done.set_value(ok);})&&
                           completed.wait_for(std::chrono::seconds(10))==std::future_status::ready&&completed.get());
                 }
                 std::promise<std::shared_ptr<const UsdGenDeviceGeneration>> finalDone;
                 auto finalReady=finalDone.get_future();
-                CHECK(FinalizeCudaExecutionJobAsync(job,[&](auto result){finalDone.set_value(std::move(result));})&&
+                CHECK(FinalizeCudaExecutionJobAsync(mixedCaseJob,[&](auto result){finalDone.set_value(std::move(result));})&&
                       finalReady.wait_for(std::chrono::seconds(10))==std::future_status::ready);
                 auto result=finalReady.get();
-                CHECK(result&&!diagnostics.HasErrors()&&CheckGeneration(result,expected,stream));
+                CHECK(result&&!mixedCaseDiagnostics.HasErrors()&&CheckGeneration(result,expected,stream));
             }
             if(!held) {
                 held=published->device;heldReference=expected;
                 auto lease=gpu::AcquireGeometry(held,stream);CHECK(lease);
-                CHECK(Read(lease.Geometry().points,&oldPoints,stream)&&Read(lease.Geometry().restPoints,&oldRest,stream)&&
-                      Read(lease.Geometry().widths,&oldWidths,stream));
+                CHECK(Read(lease.Geometry().points,&mixedCaseOldPoints,stream)&&Read(lease.Geometry().restPoints,&mixedCaseOldRest,stream)&&
+                      Read(lease.Geometry().widths,&mixedCaseOldWidths,stream));
             }
             CHECK(CheckGeneration(held,heldReference,stream));
             auto lease=gpu::AcquireGeometry(held,stream);CHECK(lease);
-            std::vector<float3> points,rest;std::vector<float> widths;
-            CHECK(Read(lease.Geometry().points,&points,stream)&&Read(lease.Geometry().restPoints,&rest,stream)&&
-                  Read(lease.Geometry().widths,&widths,stream)&&points.size()==oldPoints.size()&&rest.size()==oldRest.size()&&
-                  widths.size()==oldWidths.size()&&std::memcmp(points.data(),oldPoints.data(),points.size()*sizeof(float3))==0&&
-                  std::memcmp(rest.data(),oldRest.data(),rest.size()*sizeof(float3))==0&&
-                  std::memcmp(widths.data(),oldWidths.data(),widths.size()*sizeof(float))==0);
+            std::vector<float3> heldPoints,heldRest;std::vector<float> heldWidths;
+            CHECK(Read(lease.Geometry().points,&heldPoints,stream)&&Read(lease.Geometry().restPoints,&heldRest,stream)&&
+                  Read(lease.Geometry().widths,&heldWidths,stream)&&heldPoints.size()==mixedCaseOldPoints.size()&&heldRest.size()==mixedCaseOldRest.size()&&
+                  heldWidths.size()==mixedCaseOldWidths.size()&&std::memcmp(heldPoints.data(),mixedCaseOldPoints.data(),heldPoints.size()*sizeof(float3))==0&&
+                  std::memcmp(heldRest.data(),mixedCaseOldRest.data(),heldRest.size()*sizeof(float3))==0&&
+                  std::memcmp(heldWidths.data(),mixedCaseOldWidths.data(),heldWidths.size()*sizeof(float))==0);
         }
     }
 
@@ -1380,16 +1384,16 @@ int main() {
         std::vector<UsdGenGraphDesc> cases;
         for(auto const* terminal:{"/Dag/Blend","/Dag/Noise","/Dag/Left",
                                   "/Dag/Tail","/Dag/Other","/Ops/Source"}) {
-            auto desc=NoiseDagDesc();desc.terminal=SdfPath(terminal);cases.push_back(desc);
+            auto terminalDesc=NoiseDagDesc();terminalDesc.terminal=SdfPath(terminal);cases.push_back(terminalDesc);
         }
         auto reversed=cases.front();
         std::swap(reversed.nodes.front().inputs[0],reversed.nodes.front().inputs[1]);
         cases.push_back(reversed);
-        for(int count:{3,2}) {
-            auto desc=cases[3];
-            for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
-                node.params.push_back({TfToken("resampleTo"),VtValue(count),false});
-            cases.push_back(desc);
+        for(int resampleCount:{3,2}) {
+            auto resampledDesc=cases[3];
+            for(auto& node:resampledDesc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
+                node.params.push_back({TfToken("resampleTo"),VtValue(resampleCount),false});
+            cases.push_back(resampledDesc);
         }
         auto empty=cases.front();empty.curveSets=Desc(false,false,true).curveSets;cases.push_back(empty);
         auto inherited=cases.front();inherited.nodes.front().inputs[0]=SdfPath("/Dag/Noise");
@@ -1404,20 +1408,20 @@ int main() {
         for(bool grow:{true,false}) {
             for(auto const* terminal:{"/Dag/Blend","/Dag/Noise","/Dag/Left",
                                       "/Dag/Tail","/Dag/Other","/Dag/Topology","/Ops/Source"}) {
-                auto desc=TopologyNoiseDagDesc(grow);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto topologyDesc=TopologyNoiseDagDesc(grow);topologyDesc.terminal=SdfPath(terminal);cases.push_back(topologyDesc);
             }
-            for(int count:{3,2}) {
-                auto desc=TopologyNoiseDagDesc(grow);desc.terminal=SdfPath("/Dag/Tail");
-                for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
-                    node.params.push_back({TfToken("resampleTo"),VtValue(count),false});
-                cases.push_back(desc);
+            for(int resampleCount:{3,2}) {
+                auto resampledTopologyDesc=TopologyNoiseDagDesc(grow);resampledTopologyDesc.terminal=SdfPath("/Dag/Tail");
+                for(auto& node:resampledTopologyDesc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
+                    node.params.push_back({TfToken("resampleTo"),VtValue(resampleCount),false});
+                cases.push_back(resampledTopologyDesc);
             }
-            auto empty=TopologyNoiseDagDesc(grow);empty.curveSets=Desc(false,false,true).curveSets;
-            cases.push_back(empty);
+            auto emptyTopology=TopologyNoiseDagDesc(grow);emptyTopology.curveSets=Desc(false,false,true).curveSets;
+            cases.push_back(emptyTopology);
         }
         for(float threshold:{1.5f,100.f}) {
-            auto desc=TopologyNoiseDagDesc(false,TfToken("cull"),threshold);
-            desc.terminal=SdfPath("/Dag/Tail");cases.push_back(desc);
+            auto culledTopologyDesc=TopologyNoiseDagDesc(false,TfToken("cull"),threshold);
+            culledTopologyDesc.terminal=SdfPath("/Dag/Tail");cases.push_back(culledTopologyDesc);
         }
         cases.push_back(TopologyNoiseDagDesc(false,TfToken("scale"),.5f,true));
         auto manyNoise=TopologyNoiseDagDesc(false);
@@ -1433,20 +1437,20 @@ int main() {
         for(bool grow:{true,false}) {
             for(auto const* terminal:{"/Dag/Other","/Dag/SideLeft","/Dag/SideBlend","/Dag/SideTail",
                                       "/Dag/SideRawWidth","/Dag/Blend","/Dag/Topology","/Ops/Source"}) {
-                auto desc=SourceBranchNoiseDagDesc(grow);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto branchDesc=SourceBranchNoiseDagDesc(grow);branchDesc.terminal=SdfPath(terminal);cases.push_back(branchDesc);
             }
-            for(int count:{3,2}) {
-                auto desc=SourceBranchNoiseDagDesc(grow);
-                for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
-                    node.params.push_back({TfToken("resampleTo"),VtValue(count),false});
-                cases.push_back(desc);
+            for(int resampleCount:{3,2}) {
+                auto resampledBranchDesc=SourceBranchNoiseDagDesc(grow);
+                for(auto& node:resampledBranchDesc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
+                    node.params.push_back({TfToken("resampleTo"),VtValue(resampleCount),false});
+                cases.push_back(resampledBranchDesc);
             }
-            auto empty=SourceBranchNoiseDagDesc(grow);empty.curveSets=Desc(false,false,true).curveSets;
-            cases.push_back(empty);
+            auto emptyBranch=SourceBranchNoiseDagDesc(grow);emptyBranch.curveSets=Desc(false,false,true).curveSets;
+            cases.push_back(emptyBranch);
         }
         for(float threshold:{1.5f,100.f}) {
-            auto desc=SourceBranchNoiseDagDesc(false,TfToken("cull"),threshold);
-            cases.push_back(desc);desc.terminal=SdfPath("/Dag/Blend");cases.push_back(desc);
+            auto culledBranchDesc=SourceBranchNoiseDagDesc(false,TfToken("cull"),threshold);
+            cases.push_back(culledBranchDesc);culledBranchDesc.terminal=SdfPath("/Dag/Blend");cases.push_back(culledBranchDesc);
         }
         auto removeNoise=[](UsdGenGraphDesc desc) {
             std::map<SdfPath,SdfPath> inputs;
@@ -1461,26 +1465,26 @@ int main() {
             return desc;
         };
         for(bool grow:{true,false}) for(auto const* terminal:{"/Dag/SideBlend","/Dag/Blend","/Dag/SideRawWidth"}) {
-            auto desc=removeNoise(SourceBranchNoiseDagDesc(grow));desc.terminal=SdfPath(terminal);cases.push_back(desc);
+            auto noiselessDesc=removeNoise(SourceBranchNoiseDagDesc(grow));noiselessDesc.terminal=SdfPath(terminal);cases.push_back(noiselessDesc);
         }
         cases.push_back(removeNoise(SourceBranchNoiseDagDesc(false,TfToken("cull"),100.f)));
         for(bool nested:{false,true}) {
             for(auto const* terminal:{"/Dag/SideTopology","/Dag/SideBlend","/Dag/SideTail",
                                       "/Dag/Blend","/Dag/Topology","/Dag/SideRawWidth","/Ops/Source"}) {
-                auto desc=MultipleLengthNoiseDagDesc(nested);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto multiLengthDesc=MultipleLengthNoiseDagDesc(nested);multiLengthDesc.terminal=SdfPath(terminal);cases.push_back(multiLengthDesc);
             }
-            for(int count:{3,2}) {
-                auto desc=MultipleLengthNoiseDagDesc(nested);
-                for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
-                    node.params.push_back({TfToken("resampleTo"),VtValue(count),false});
-                cases.push_back(desc);
+            for(int resampleCount:{3,2}) {
+                auto resampledMultiLengthDesc=MultipleLengthNoiseDagDesc(nested);
+                for(auto& node:resampledMultiLengthDesc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
+                    node.params.push_back({TfToken("resampleTo"),VtValue(resampleCount),false});
+                cases.push_back(resampledMultiLengthDesc);
             }
-            auto empty=MultipleLengthNoiseDagDesc(nested);empty.curveSets=Desc(false,false,true).curveSets;
-            cases.push_back(empty);
+            auto emptyMultiLength=MultipleLengthNoiseDagDesc(nested);emptyMultiLength.curveSets=Desc(false,false,true).curveSets;
+            cases.push_back(emptyMultiLength);
             cases.push_back(removeNoise(MultipleLengthNoiseDagDesc(nested)));
             for(float threshold:{1.5f,100.f}) {
-                auto desc=MultipleLengthNoiseDagDesc(nested,TfToken("cull"),threshold);
-                cases.push_back(desc);desc.terminal=SdfPath("/Dag/Blend");cases.push_back(desc);
+                auto culledMultiLengthDesc=MultipleLengthNoiseDagDesc(nested,TfToken("cull"),threshold);
+                cases.push_back(culledMultiLengthDesc);culledMultiLengthDesc.terminal=SdfPath("/Dag/Blend");cases.push_back(culledMultiLengthDesc);
             }
         }
         // A Length consumes a source-side Width snapshot, while another
@@ -1498,36 +1502,36 @@ int main() {
         }
         manyLengths.terminal=previousLength;cases.push_back(manyLengths);
         for(bool noiseInput:{false,true}) {
-            auto desc=SourceBranchNoiseDagDesc(false);
-            for(auto& node:desc.nodes) if(node.path==SdfPath("/Dag/Topology"))
+            auto topologyInputDesc=SourceBranchNoiseDagDesc(false);
+            for(auto& node:topologyInputDesc.nodes) if(node.path==SdfPath("/Dag/Topology"))
                 node.inputs={SdfPath(noiseInput?"/Dag/SideTail":"/Dag/SideRawWidth")};
-            desc.terminal=SdfPath("/Dag/Blend");cases.push_back(desc);
-            if(!noiseInput) cases.push_back(removeNoise(desc));
-            desc.terminal=SdfPath("/Dag/SideBlend");cases.push_back(desc);
-            if(!noiseInput) cases.push_back(removeNoise(desc));
+            topologyInputDesc.terminal=SdfPath("/Dag/Blend");cases.push_back(topologyInputDesc);
+            if(!noiseInput) cases.push_back(removeNoise(topologyInputDesc));
+            topologyInputDesc.terminal=SdfPath("/Dag/SideBlend");cases.push_back(topologyInputDesc);
+            if(!noiseInput) cases.push_back(removeNoise(topologyInputDesc));
         }
         for(bool withLengths:{false,true}) {
             for(auto const* terminal:{"/Dag/Topology","/Dag/SideTopology","/Dag/Blend",
                                       "/Dag/SideBlend","/Dag/Tail","/Dag/SideTail",
                                       "/Dag/SideRawWidth","/Ops/Source"}) {
-                auto desc=MultipleGrowNoiseDagDesc(withLengths);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto multiGrowDesc=MultipleGrowNoiseDagDesc(withLengths);multiGrowDesc.terminal=SdfPath(terminal);cases.push_back(multiGrowDesc);
             }
             if(withLengths) for(auto const* terminal:{"/Dag/MainLength","/Dag/SideLength"}) {
-                auto desc=MultipleGrowNoiseDagDesc(true);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto lengthTerminalDesc=MultipleGrowNoiseDagDesc(true);lengthTerminalDesc.terminal=SdfPath(terminal);cases.push_back(lengthTerminalDesc);
             }
-            for(int count:{3,2}) {
-                auto desc=MultipleGrowNoiseDagDesc(withLengths);
-                for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
-                    node.params.push_back({TfToken("resampleTo"),VtValue(count),false});
-                cases.push_back(desc);
+            for(int resampleCount:{3,2}) {
+                auto resampledMultiGrowDesc=MultipleGrowNoiseDagDesc(withLengths);
+                for(auto& node:resampledMultiGrowDesc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
+                    node.params.push_back({TfToken("resampleTo"),VtValue(resampleCount),false});
+                cases.push_back(resampledMultiGrowDesc);
             }
-            auto empty=MultipleGrowNoiseDagDesc(withLengths);empty.curveSets=Desc(false,false,true).curveSets;
-            cases.push_back(empty);
+            auto emptyMultiGrow=MultipleGrowNoiseDagDesc(withLengths);emptyMultiGrow.curveSets=Desc(false,false,true).curveSets;
+            cases.push_back(emptyMultiGrow);
             cases.push_back(removeNoise(MultipleGrowNoiseDagDesc(withLengths)));
         }
         for(float threshold:{1.5f,100.f}) for(auto const* terminal:{"/Dag/MainLength","/Dag/SideLength","/Dag/SideBlend"}) {
-            auto desc=MultipleGrowNoiseDagDesc(true,TfToken("cull"),threshold);
-            desc.terminal=SdfPath(terminal);cases.push_back(desc);
+            auto culledMultiGrowDesc=MultipleGrowNoiseDagDesc(true,TfToken("cull"),threshold);
+            culledMultiGrowDesc.terminal=SdfPath(terminal);cases.push_back(culledMultiGrowDesc);
         }
         auto manyGrow=MultipleGrowNoiseDagDesc(true);
         auto extraGrow=manyGrow.nodes.front();
@@ -1544,66 +1548,66 @@ int main() {
         cases.push_back(manyGrowStatic);
         for(auto const* input:{"/Dag/SideRawWidth","/Dag/Other","/Dag/Topology","/Dag/Pre","/Dag/Noise","/Dag/Tail"})
             for(auto const* terminal:{"/Dag/Regrow","/Dag/RegrowNoise","/Dag/SideBlend"}) {
-                auto desc=RegrowNoiseDagDesc(false,input);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto regrowDesc=RegrowNoiseDagDesc(false,input);regrowDesc.terminal=SdfPath(terminal);cases.push_back(regrowDesc);
             }
         for(float threshold:{1.5f,100.f}) for(auto const* input:{"/Dag/Topology","/Dag/Tail"})
             for(auto const* terminal:{"/Dag/RegrowNoise","/Dag/SideBlend"}) {
-                auto desc=RegrowNoiseDagDesc(false,input,TfToken("cull"),threshold);
-                desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto culledRegrowDesc=RegrowNoiseDagDesc(false,input,TfToken("cull"),threshold);
+                culledRegrowDesc.terminal=SdfPath(terminal);cases.push_back(culledRegrowDesc);
             }
         for(bool grownInput:{false,true}) {
-            for(int count:{3,2}) {
-                auto desc=RegrowNoiseDagDesc(grownInput,grownInput?"/Dag/SideLength":"/Dag/Tail");
-                for(auto& node:desc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
-                    node.params.push_back({TfToken("resampleTo"),VtValue(count),false});
-                cases.push_back(desc);
+            for(int resampleCount:{3,2}) {
+                auto resampledRegrowDesc=RegrowNoiseDagDesc(grownInput,grownInput?"/Dag/SideLength":"/Dag/Tail");
+                for(auto& node:resampledRegrowDesc.nodes) if(node.type==TfToken("UsdGenCurveSource"))
+                    node.params.push_back({TfToken("resampleTo"),VtValue(resampleCount),false});
+                cases.push_back(resampledRegrowDesc);
             }
-            auto empty=RegrowNoiseDagDesc(grownInput,grownInput?"/Dag/SideLength":"/Dag/Tail");
-            empty.curveSets=Desc(false,false,true).curveSets;cases.push_back(empty);
+            auto emptyRegrow=RegrowNoiseDagDesc(grownInput,grownInput?"/Dag/SideLength":"/Dag/Tail");
+            emptyRegrow.curveSets=Desc(false,false,true).curveSets;cases.push_back(emptyRegrow);
         }
         cases.push_back(removeNoise(RegrowNoiseDagDesc(false,"/Dag/Pre")));
         for(auto const* input:{"/Dag/Topology","/Dag/SideTopology","/Dag/MainLength","/Dag/SideLength","/Dag/SideTail"})
             for(auto const* terminal:{"/Dag/Regrow","/Dag/RegrowNoise"}) {
-                auto desc=RegrowNoiseDagDesc(true,input);desc.terminal=SdfPath(terminal);cases.push_back(desc);
+                auto grownRegrowDesc=RegrowNoiseDagDesc(true,input);grownRegrowDesc.terminal=SdfPath(terminal);cases.push_back(grownRegrowDesc);
             }
         for(float threshold:{1.5f,100.f}) cases.push_back(RegrowNoiseDagDesc(true,"/Dag/SideLength",TfToken("cull"),threshold));
         std::fprintf(stderr,"Grow DAG matrix variants: %zu\n",cases.size());
         UsdGenSession dagSession;dagSession.SetDevicePublicationEnabled(true);
-        UsdGenDiagnostics diagnostics;
-        auto workspace=CreateCudaExecutionWorkspace(-1,&diagnostics);CHECK(workspace);
+        UsdGenDiagnostics dagDiagnostics;
+        auto dagWorkspace=CreateCudaExecutionWorkspace(-1,&dagDiagnostics);CHECK(dagWorkspace);
         std::shared_ptr<const UsdGenDeviceGeneration> held;
         UsdGenCurveBuffer heldReference;
-        std::vector<float3> oldPoints,oldRest;std::vector<float> oldWidths;
+        std::vector<float3> dagOldPoints,dagOldRest;std::vector<float> dagOldWidths;
         for(size_t variant=0;variant<cases.size();++variant) {
-            auto const& desc=cases[variant];UsdGenCurveBuffer expected;
-            bool const oracleOk=NoiseDagReference(desc,&expected);
+            auto const& dagDesc=cases[variant];UsdGenCurveBuffer expected;
+            bool const oracleOk=NoiseDagReference(dagDesc,&expected);
             if(!oracleOk) {
-                std::fprintf(stderr,"oracle failed variant %zu terminal %s\n",variant,desc.terminal.GetText());
-                for(auto const& node:desc.nodes) {
+                std::fprintf(stderr,"oracle failed variant %zu terminal %s\n",variant,dagDesc.terminal.GetText());
+                for(auto const& node:dagDesc.nodes) {
                     std::fprintf(stderr,"  %s %s",node.path.GetText(),node.type.GetText());
                     for(auto const& input:node.inputs) std::fprintf(stderr," <- %s",input.GetText());
                     std::fprintf(stderr,"\n");
                 }
             }
-            CHECK(oracleOk);diagnostics={};
-            auto const lengthNodes=std::count_if(desc.nodes.begin(),desc.nodes.end(),[](auto const& node) {
+            CHECK(oracleOk);dagDiagnostics={};
+            auto const lengthNodes=std::count_if(dagDesc.nodes.begin(),dagDesc.nodes.end(),[](auto const& node) {
                 return node.type==TfToken("UsdGenLength");
             });
-            for(auto const& node:desc.nodes) if(lengthNodes==1&&node.type==TfToken("UsdGenLength")) {
-                UsdGenParamView parameters{&desc,&node};
+            for(auto const& node:dagDesc.nodes) if(lengthNodes==1&&node.type==TfToken("UsdGenLength")) {
+                UsdGenParamView parameters{&dagDesc,&node};
                 if(parameters.GetToken(TfToken("length:mode"),TfToken("scale"))==TfToken("cull")&&
-                   TerminalUsesOperator(desc,TfToken("UsdGenLength")))
+                   TerminalUsesOperator(dagDesc,TfToken("UsdGenLength")))
                     CHECK(expected.totalCurves==(parameters.GetDouble(TfToken("cullThreshold"),0)==1.5?1u:0u));
             }
-            bool const sourceRootContract=!TerminalUsesOperator(desc,TfToken("UsdGenGrow"));
-            auto const expectedBasis=sourceRootContract&&desc.curveSets.front().basis==TfToken("catmullRom")
+            bool const sourceRootContract=!TerminalUsesOperator(dagDesc,TfToken("UsdGenGrow"));
+            auto const expectedBasis=sourceRootContract&&dagDesc.curveSets.front().basis==TfToken("catmullRom")
                 ? UsdGenDeviceCurveBasis::CatmullRom : UsdGenDeviceCurveBasis::BSpline;
-            auto plan=CompileCudaGraph(desc,&diagnostics);
-            for(auto const& error:diagnostics.errors) std::fprintf(stderr,"Noise DAG compile: %s\n",error.c_str());
-            CHECK(plan&&!diagnostics.HasErrors());
-            auto metadata=GetCudaExecutionPlanMetadata(*plan);CHECK(metadata);
-            CHECK(metadata->Shape()==UsdGenExecutionPlanShape::SourceRootedValueDag);
-            auto const& tasks=metadata->Tasks();
+            auto dagPlan=CompileCudaGraph(dagDesc,&dagDiagnostics);
+            for(auto const& error:dagDiagnostics.errors) std::fprintf(stderr,"Noise DAG compile: %s\n",error.c_str());
+            CHECK(dagPlan&&!dagDiagnostics.HasErrors());
+            auto dagMetadata=GetCudaExecutionPlanMetadata(*dagPlan);CHECK(dagMetadata);
+            CHECK(dagMetadata->Shape()==UsdGenExecutionPlanShape::SourceRootedValueDag);
+            auto const& tasks=dagMetadata->Tasks();
             auto pre=std::find_if(tasks.begin(),tasks.end(),[](auto const& task){return task.path==SdfPath("/Dag/Pre");});
             auto noise=std::find_if(tasks.begin(),tasks.end(),[](auto const& task){return task.path==SdfPath("/Dag/Noise");});
             CHECK(pre!=tasks.end());
@@ -1614,14 +1618,14 @@ int main() {
                        use.access==UsdGenExecutionResourceAccess::Read&&use.producerTask==pre->id;
             }));
             }
-            auto direct=ExecuteCudaGraph(*plan,*workspace,1,400+variant,&diagnostics,held);
-            for(auto const& error:diagnostics.errors) std::fprintf(stderr,"Noise DAG execute variant=%zu terminal=%s: %s\n",variant,desc.terminal.GetText(),error.c_str());
-            CHECK(direct&&!diagnostics.HasErrors()&&CheckGeneration(direct,expected,stream,sourceRootContract));
-            CHECK(direct->Geometry().curveTopology.basis==expectedBasis);
-            dagSession.SetGraphDesc(desc);
-            auto published=dagSession.Commit(1+variant,UsdGenCommitReason::SetTime);
+            auto dagDirect=ExecuteCudaGraph(*dagPlan,*dagWorkspace,1,400+variant,&dagDiagnostics,held);
+            for(auto const& error:dagDiagnostics.errors) std::fprintf(stderr,"Noise DAG execute variant=%zu terminal=%s: %s\n",variant,dagDesc.terminal.GetText(),error.c_str());
+            CHECK(dagDirect&&!dagDiagnostics.HasErrors()&&CheckGeneration(dagDirect,expected,stream,sourceRootContract));
+            CHECK(dagDirect->Geometry().curveTopology.basis==expectedBasis);
+            dagSession.SetGraphDesc(dagDesc);
+            auto published=dagSession.Commit(static_cast<double>(1+variant),UsdGenCommitReason::SetTime);
             if(!published||!published->device||dagSession.LastDiagnostics().HasErrors()) {
-                std::fprintf(stderr,"Noise DAG Session variant=%zu terminal=%s\n",variant,desc.terminal.GetText());
+                std::fprintf(stderr,"Noise DAG Session variant=%zu terminal=%s\n",variant,dagDesc.terminal.GetText());
                 for(auto const& error:dagSession.LastDiagnostics().errors)
                     std::fprintf(stderr,"Noise DAG Session: %s\n",error.c_str());
             }
@@ -1629,22 +1633,22 @@ int main() {
                   CheckGeneration(published->device,expected,stream,sourceRootContract));
             CHECK(published->device->Geometry().curveTopology.basis==expectedBasis);
             if(variant==1||variant==3||variant==8||variant==9||variant>=topologyCasesBegin) {
-                auto job=CreateCudaExecutionJob(plan,*workspace,1,450+variant,&diagnostics);CHECK(job);
+                auto dagJob=CreateCudaExecutionJob(dagPlan,*dagWorkspace,1,450+variant,&dagDiagnostics);CHECK(dagJob);
                 std::promise<bool> sourceDone;auto sourceReady=sourceDone.get_future();
-                CHECK(ExecuteCudaJobSourceAsync(job,[&](bool ok){sourceDone.set_value(ok);})&&
+                CHECK(ExecuteCudaJobSourceAsync(dagJob,[&](bool ok){sourceDone.set_value(ok);})&&
                       sourceReady.wait_for(std::chrono::seconds(10))==std::future_status::ready&&sourceReady.get());
-                for(size_t i=0;i<CudaExecutionJobOperatorCount(*job);++i) {
+                for(size_t i=0;i<CudaExecutionJobOperatorCount(*dagJob);++i) {
                     std::promise<bool> done;auto ready=done.get_future();
-                    CHECK(ExecuteCudaJobOperatorAsync(job,i,[&](bool ok){done.set_value(ok);})&&
+                    CHECK(ExecuteCudaJobOperatorAsync(dagJob,i,[&](bool ok){done.set_value(ok);})&&
                           ready.wait_for(std::chrono::seconds(10))==std::future_status::ready&&ready.get());
                 }
                 bool unexpectedCallback=false;
                 setCudaFinalizationRelayCapacityForTesting(0);
-                bool admitted=FinalizeCudaExecutionJobAsync(job,[&](auto){unexpectedCallback=true;});
+                bool admitted=FinalizeCudaExecutionJobAsync(dagJob,[&](auto){unexpectedCallback=true;});
                 setCudaFinalizationRelayCapacityForTesting(1024);
                 CHECK(!admitted&&!unexpectedCallback);
                 std::promise<std::shared_ptr<const UsdGenDeviceGeneration>> done;auto ready=done.get_future();
-                CHECK(FinalizeCudaExecutionJobAsync(job,[&](auto result){done.set_value(std::move(result));})&&
+                CHECK(FinalizeCudaExecutionJobAsync(dagJob,[&](auto result){done.set_value(std::move(result));})&&
                       ready.wait_for(std::chrono::seconds(10))==std::future_status::ready);
                 auto result=ready.get();CHECK(result&&CheckGeneration(result,expected,stream,sourceRootContract));
                 CHECK(result->Geometry().curveTopology.basis==expectedBasis);
@@ -1652,17 +1656,17 @@ int main() {
             if(!held) {
                 held=published->device;heldReference=expected;
                 auto lease=gpu::AcquireGeometry(held,stream);CHECK(lease);
-                CHECK(Read(lease.Geometry().points,&oldPoints,stream)&&Read(lease.Geometry().restPoints,&oldRest,stream)&&
-                      Read(lease.Geometry().widths,&oldWidths,stream));
+                CHECK(Read(lease.Geometry().points,&dagOldPoints,stream)&&Read(lease.Geometry().restPoints,&dagOldRest,stream)&&
+                      Read(lease.Geometry().widths,&dagOldWidths,stream));
             }
             CHECK(CheckGeneration(held,heldReference,stream,true));
             auto lease=gpu::AcquireGeometry(held,stream);CHECK(lease);
-            std::vector<float3> points,rest;std::vector<float> widths;
-            CHECK(Read(lease.Geometry().points,&points,stream)&&Read(lease.Geometry().restPoints,&rest,stream)&&
-                  Read(lease.Geometry().widths,&widths,stream)&&points.size()==oldPoints.size()&&rest.size()==oldRest.size()&&
-                  widths.size()==oldWidths.size()&&std::memcmp(points.data(),oldPoints.data(),points.size()*sizeof(float3))==0&&
-                  std::memcmp(rest.data(),oldRest.data(),rest.size()*sizeof(float3))==0&&
-                  std::memcmp(widths.data(),oldWidths.data(),widths.size()*sizeof(float))==0);
+            std::vector<float3> heldPoints,heldRest;std::vector<float> heldWidths;
+            CHECK(Read(lease.Geometry().points,&heldPoints,stream)&&Read(lease.Geometry().restPoints,&heldRest,stream)&&
+                  Read(lease.Geometry().widths,&heldWidths,stream)&&heldPoints.size()==dagOldPoints.size()&&heldRest.size()==dagOldRest.size()&&
+                  heldWidths.size()==dagOldWidths.size()&&std::memcmp(heldPoints.data(),dagOldPoints.data(),heldPoints.size()*sizeof(float3))==0&&
+                  std::memcmp(heldRest.data(),dagOldRest.data(),heldRest.size()*sizeof(float3))==0&&
+                  std::memcmp(heldWidths.data(),dagOldWidths.data(),heldWidths.size()*sizeof(float))==0);
         }
         {
             // Hold a Grow-origin terminal (including TBN/named planes) while
@@ -1744,27 +1748,27 @@ int main() {
         // Previously ordered Noise-to-Length chains now use value snapshots;
         // their selected payload and cull semantics must remain unchanged.
         for(int variant=0;variant<4;++variant) {
-            auto desc=TopologyNoiseDagDesc(false,variant==1||variant==2?TfToken("cull"):TfToken("scale"),
+            auto chainDesc=TopologyNoiseDagDesc(false,variant==1||variant==2?TfToken("cull"):TfToken("scale"),
                 variant==1?1.5f:variant==2?100.f:.5f);
             auto findNode=[&](TfToken type) {
-                return *std::find_if(desc.nodes.begin(),desc.nodes.end(),[&](auto const& node){return node.type==type;});
+                return *std::find_if(chainDesc.nodes.begin(),chainDesc.nodes.end(),[&](auto const& node){return node.type==type;});
             };
             auto source=findNode(TfToken("UsdGenCurveSource"));
             auto noise=findNode(TfToken("UsdGenNoise"));
             auto length=findNode(TfToken("UsdGenLength"));
             auto width=Width("/Dag/LinearWidth",length.path.GetText(),.2f);
             noise.inputs={source.path};length.inputs={noise.path};
-            desc.nodes={source,noise,length,width};desc.terminal=width.path;
+            chainDesc.nodes={source,noise,length,width};chainDesc.terminal=width.path;
             if(variant==3) {
                 auto pre=Width("/Dag/LinearPre",source.path.GetText(),.4f);
-                desc.nodes[1].inputs={pre.path};desc.nodes.insert(desc.nodes.begin()+1,pre);
+                chainDesc.nodes[1].inputs={pre.path};chainDesc.nodes.insert(chainDesc.nodes.begin()+1,pre);
             }
-            UsdGenCurveBuffer expected;CHECK(NoiseDagReference(desc,&expected));
-            diagnostics={};auto plan=CompileCudaGraph(desc,&diagnostics);CHECK(plan&&!diagnostics.HasErrors());
-            CHECK(GetCudaExecutionPlanMetadata(*plan)->Shape()==UsdGenExecutionPlanShape::SourceRootedUnaryDag);
-            auto direct=ExecuteCudaGraph(*plan,*workspace,1,550+variant,&diagnostics);
-            CHECK(direct&&!diagnostics.HasErrors()&&CheckGeneration(direct,expected,stream,true));
-            dagSession.SetGraphDesc(desc);auto result=dagSession.Commit(100+variant,UsdGenCommitReason::SetTime);
+            UsdGenCurveBuffer expected;CHECK(NoiseDagReference(chainDesc,&expected));
+            dagDiagnostics={};auto chainPlan=CompileCudaGraph(chainDesc,&dagDiagnostics);CHECK(chainPlan&&!dagDiagnostics.HasErrors());
+            CHECK(GetCudaExecutionPlanMetadata(*chainPlan)->Shape()==UsdGenExecutionPlanShape::SourceRootedUnaryDag);
+            auto chainDirect=ExecuteCudaGraph(*chainPlan,*dagWorkspace,1,550+variant,&dagDiagnostics);
+            CHECK(chainDirect&&!dagDiagnostics.HasErrors()&&CheckGeneration(chainDirect,expected,stream,true));
+            dagSession.SetGraphDesc(chainDesc);auto result=dagSession.Commit(100+variant,UsdGenCommitReason::SetTime);
             CHECK(result&&result->device&&!dagSession.LastDiagnostics().HasErrors()&&
                   CheckGeneration(result->device,expected,stream,true));
         }
@@ -1788,149 +1792,6 @@ int main() {
     auto liftedWorkspace=CreateCudaExecutionWorkspace(-1,&liftedDiagnostics); CHECK(liftedWorkspace);
     auto liftedDirect=ExecuteCudaGraph(*liftedPlan,*liftedWorkspace,3,103,&liftedDiagnostics);
     CHECK(liftedDirect&&!liftedDiagnostics.HasErrors()&&CheckGeneration(liftedDirect,liftedReference,stream));
-
-    // uvBlend is a normalized value blend after the local root-B lift, from
-    // the lifted direction toward root T.  This C3 fixture deliberately has
-    // posed points distinct from rest, so CPU/direct/Session checks exercise
-    // both generated position channels as well as their preserved length.
-    auto growNode=[](UsdGenGraphDesc* candidate) {
-        return std::find_if(candidate->nodes.begin(),candidate->nodes.end(),[](auto const& node) {
-            return node.path==SdfPath("/Ops/Grow");
-        });
-    };
-    std::array<float,4> const uvBlends{{0.f,.25f,.5f,1.f}};
-    UsdGenSession uvSession; uvSession.SetDevicePublicationEnabled(true);
-    gpu::CudaGeometryLease uvOld;
-    std::vector<float3> uvOldPoints;
-    UsdGenGenerationConstPtr uvLast;
-    for(size_t variant=0;variant!=uvBlends.size();++variant) {
-        auto uv=Desc(); auto grow=growNode(&uv); CHECK(grow!=uv.nodes.end());
-        grow->params.push_back({TfToken("lift"),VtValue(30.0f),false});
-        grow->params.push_back({TfToken("uvBlend"),VtValue(uvBlends[variant]),false});
-        UsdGenCurveBuffer uvReference; CHECK(CpuReference(uv,&uvReference));
-        // The fixture frame is T=+X, B=+Y, N=+Z.  At u=0 the +30-degree
-        // lift leaves a positive Z component; at u=1 blend-after-lift is
-        // exactly T, so it removes Z. This makes the ordering observable,
-        // rather than merely comparing two implementations of the same bug.
-        for(uint32_t curve=0;curve!=uvReference.totalCurves;++curve) {
-            uint32_t const first=curve*4, last=first+3;
-            if(uvBlends[variant]==0.f)
-                CHECK(std::fabs(uvReference.pz[last]-uvReference.pz[first])>.1f);
-            if(uvBlends[variant]==1.f)
-                CHECK(Near(uvReference.py[last],uvReference.py[first])&&
-                      Near(uvReference.pz[last],uvReference.pz[first])&&
-                      std::fabs(uvReference.px[last]-uvReference.px[first])>.1f);
-        }
-        UsdGenDiagnostics uvDiagnostics;
-        auto uvPlan=CompileCudaGraph(uv,&uvDiagnostics);
-        CHECK(uvPlan&&!uvDiagnostics.HasErrors());
-        auto uvWorkspace=CreateCudaExecutionWorkspace(-1,&uvDiagnostics); CHECK(uvWorkspace);
-        auto uvDirect=ExecuteCudaGraph(*uvPlan,*uvWorkspace,10+variant,110+variant,&uvDiagnostics);
-        if(!uvDirect||uvDiagnostics.HasErrors()) {
-            std::fprintf(stderr,"UV Grow direct failure variant=%zu generation=%zu\n",variant,110+variant);
-            for(auto const& error:uvDiagnostics.errors) std::fprintf(stderr,"  %s\n",error.c_str());
-        }
-        CHECK(uvDirect&&!uvDiagnostics.HasErrors()&&
-              CheckGeneration(uvDirect,uvReference,stream)&&
-              CheckEndpointLengths(uvDirect,uvReference,stream));
-        uvSession.SetGraphDesc(uv);
-        auto uvPublished=uvSession.Commit(10+variant,UsdGenCommitReason::SetTime);
-        CHECK(uvPublished&&uvPublished->device&&!uvSession.LastDiagnostics().HasErrors()&&
-              CheckGeneration(uvPublished->device,uvReference,stream)&&
-              CheckEndpointLengths(uvPublished->device,uvReference,stream));
-        uvLast=uvPublished;
-        if(!variant) {
-            uvOld=gpu::AcquireGeometry(uvPublished->device,stream);
-            CHECK(uvOld&&Read(uvOld.Geometry().points,&uvOldPoints,stream));
-        } else if(variant==1) {
-            auto uvCurrent=gpu::AcquireGeometry(uvPublished->device,stream);
-            CHECK(uvCurrent&&uvCurrent.Geometry().points.data!=uvOld.Geometry().points.data);
-            std::vector<float3> held;
-            CHECK(Read(uvOld.Geometry().points,&held,stream)&&held.size()==uvOldPoints.size()&&
-                  std::memcmp(held.data(),uvOldPoints.data(),held.size()*sizeof(float3))==0);
-        }
-    }
-    for(float invalidUv : {-0.01f,1.01f,std::numeric_limits<float>::quiet_NaN()}) {
-        auto invalid=Desc(); auto grow=growNode(&invalid); CHECK(grow!=invalid.nodes.end());
-        grow->params.push_back({TfToken("uvBlend"),VtValue(invalidUv),false});
-        UsdGenCurveBuffer invalidReference;
-        CHECK(!CpuReference(invalid,&invalidReference));
-        CHECK(CudaRejected(invalid));
-        if(invalidUv==1.01f) {
-            uvSession.SetGraphDesc(invalid);
-            CHECK(uvSession.Commit(99,UsdGenCommitReason::SetTime)==uvLast&&
-                  uvSession.LastDiagnostics().HasErrors());
-        }
-    }
-
-    // Typed root ImageMaps multiply Grow length on the native stream. Map
-    // payload replacement must not change an already-published COW lease.
-    {
-        auto mapped = Desc();
-        UsdGenMapDesc map; map.path=SdfPath("/Maps/Length");
-        map.type=TfToken("UsdGenImageMap"); map.textureGeneration=1;
-        map.imagePayload=UsdGenImagePayload::Create(2,2,1,{.25f,.5f,.75f,1.f},
-            UsdGenImageRowOrientation::BottomUp);
-        CHECK(map.imagePayload);
-        mapped.maps.push_back(map);
-        auto grow=growNode(&mapped); CHECK(grow!=mapped.nodes.end());
-        grow->mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,
-            TfToken("usdGen:length:source")}};
-        UsdGenSession mappedSession; mappedSession.SetDevicePublicationEnabled(true);
-        gpu::CudaGeometryLease held;
-        std::vector<float3> heldPoints;
-        UsdGenGenerationConstPtr last;
-        for (int variant=0;variant!=2;++variant) {
-            mapped.maps[0].params={{TfToken("map:filter"),
-                VtValue(TfToken(variant ? "nearest" : "bilinear")),false}};
-            if (variant) {
-                mapped.maps[0].textureGeneration++;
-                mapped.maps[0].imagePayload=UsdGenImagePayload::Create(2,2,1,
-                    {.8f,.6f,.4f,.2f},UsdGenImageRowOrientation::BottomUp);
-            }
-            UsdGenCurveBuffer expected; CHECK(CpuReference(mapped,&expected));
-            UsdGenDiagnostics errors;
-            auto mappedPlan=CompileCudaGraph(mapped,&errors);
-            for(auto const& error:errors.errors) std::fprintf(stderr,"%s\n",error.c_str());
-            CHECK(mappedPlan&&!errors.HasErrors());
-            auto mappedMetadata=GetCudaExecutionPlanMetadata(*mappedPlan);
-            CHECK(mappedMetadata&&mappedMetadata->MemoryEstimate().memoryAvailable);
-            auto growTask=std::find_if(mappedMetadata->Tasks().begin(),mappedMetadata->Tasks().end(),
-                [](auto const& task){return task.type==TfToken("UsdGenGrow");});
-            CHECK(growTask!=mappedMetadata->Tasks().end()&&
-                growTask->estimate.scratchPeakBytes >= 4*sizeof(float)+2*sizeof(float));
-            auto mappedWorkspace=CreateCudaExecutionWorkspace(-1,&errors); CHECK(mappedWorkspace);
-            auto direct=ExecuteCudaGraph(*mappedPlan,*mappedWorkspace,120+variant,220+variant,&errors);
-            CHECK(direct&&!errors.HasErrors()&&CheckGeneration(direct,expected,stream));
-            mappedSession.SetGraphDesc(mapped);
-            auto published=mappedSession.Commit(120+variant,UsdGenCommitReason::SetTime);
-            CHECK(published&&published->device&&!mappedSession.LastDiagnostics().HasErrors()&&
-                CheckGeneration(published->device,expected,stream));
-            last=published;
-            auto lease=gpu::AcquireGeometry(published->device,stream); CHECK(lease);
-            if(!variant) {held=std::move(lease);CHECK(Read(held.Geometry().points,&heldPoints,stream));}
-            else {
-                CHECK(held.Geometry().points.data!=lease.Geometry().points.data);
-                std::vector<float3> old;CHECK(Read(held.Geometry().points,&old,stream)&&
-                    old.size()==heldPoints.size()&&std::memcmp(old.data(),heldPoints.data(),old.size()*sizeof(float3))==0);
-            }
-        }
-        mapped.maps[0].textureGeneration++;
-        mapped.maps[0].imagePayload=UsdGenImagePayload::Create(1,1,1,{-1.f});
-        mapped.maps[0].params={{TfToken("map:clamp"),VtValue(GfVec2f(-2,2)),false}};
-        mappedSession.SetGraphDesc(mapped);
-        CHECK(mappedSession.Commit(122,UsdGenCommitReason::SetTime)==last&&
-            mappedSession.LastDiagnostics().HasErrors());
-        auto emptyMapped=Desc(false,true,true);
-        emptyMapped.maps=mapped.maps;
-        growNode(&emptyMapped)->mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,
-            TfToken("usdGen:length:source")}};
-        UsdGenCurveBuffer emptyExpected;CHECK(CpuReference(emptyMapped,&emptyExpected));
-        mappedSession.SetGraphDesc(emptyMapped);
-        auto emptyPublished=mappedSession.Commit(123,UsdGenCommitReason::SetTime);
-        CHECK(emptyPublished&&emptyPublished->device&&!mappedSession.LastDiagnostics().HasErrors()&&
-            CheckGeneration(emptyPublished->device,emptyExpected,stream));
-    }
 
     // No authored rest is valid for a deformed/current C3 source.  The
     // loader must materialize its current-points fallback, retain the
@@ -1991,8 +1852,8 @@ int main() {
     bypassRight->inputs={SdfPath("/Ops/Source")};
     CHECK(CudaNonWidthRejected(bypass));
     {
-        UsdGenDiagnostics diagnostics;
-        auto sourceWorkspace=CreateCudaExecutionWorkspace(-1,&diagnostics); CHECK(sourceWorkspace);
+        UsdGenDiagnostics sourceDiagnostics;
+        auto sourceWorkspace=CreateCudaExecutionWorkspace(-1,&sourceDiagnostics); CHECK(sourceWorkspace);
         std::shared_ptr<const UsdGenDeviceGeneration> retainedSource;
         std::shared_ptr<const UsdGenDeviceGeneration> retainedSessionSource;
         UsdGenCurveBuffer retainedReference;
@@ -2006,13 +1867,13 @@ int main() {
                 if(node.type==TfToken("UsdGenCurveSource")) for(auto& param:node.params)
                     if(param.name==TfToken("resampleTo")) param.value=VtValue(2);
             UsdGenCurveBuffer expected; CHECK(CpuReference(terminalSource,&expected));
-            diagnostics={};
-            auto plan=CompileCudaGraph(terminalSource,&diagnostics);
-            CHECK(plan&&!diagnostics.HasErrors());
-            auto direct=ExecuteCudaGraph(*plan,*sourceWorkspace,1,200+variant,&diagnostics,retainedSource);
-            for(auto const& error:diagnostics.errors) std::fprintf(stderr,"%s\n",error.c_str());
-            CHECK(direct&&!diagnostics.HasErrors()&&CheckGeneration(direct,expected,stream,true));
-            CHECK(direct->Geometry().curveTopology.basis==UsdGenDeviceCurveBasis::CatmullRom);
+            sourceDiagnostics={};
+            auto sourcePlan=CompileCudaGraph(terminalSource,&sourceDiagnostics);
+            CHECK(sourcePlan&&!sourceDiagnostics.HasErrors());
+            auto sourceDirect=ExecuteCudaGraph(*sourcePlan,*sourceWorkspace,1,200+variant,&sourceDiagnostics,retainedSource);
+            for(auto const& error:sourceDiagnostics.errors) std::fprintf(stderr,"%s\n",error.c_str());
+            CHECK(sourceDirect&&!sourceDiagnostics.HasErrors()&&CheckGeneration(sourceDirect,expected,stream,true));
+            CHECK(sourceDirect->Geometry().curveTopology.basis==UsdGenDeviceCurveBasis::CatmullRom);
             sourceSession.SetGraphDesc(terminalSource);
             auto published=sourceSession.Commit(1,UsdGenCommitReason::SetTime);
             for(auto const& error:sourceSession.LastDiagnostics().errors) std::fprintf(stderr,"%s\n",error.c_str());
@@ -2020,29 +1881,29 @@ int main() {
                 CheckGeneration(published->device,expected,stream,true)&&
                 published->device->Geometry().curveTopology.basis==UsdGenDeviceCurveBasis::CatmullRom);
             if(variant==2) {
-                auto job=CreateCudaExecutionJob(plan,*sourceWorkspace,1,210,&diagnostics);
-                CHECK(job);
+                auto sourceJob=CreateCudaExecutionJob(sourcePlan,*sourceWorkspace,1,210,&sourceDiagnostics);
+                CHECK(sourceJob);
                 std::promise<bool> sourceDone; auto sourceReady=sourceDone.get_future();
-                CHECK(ExecuteCudaJobSourceAsync(job,[&](bool ok){sourceDone.set_value(ok);}));
+                CHECK(ExecuteCudaJobSourceAsync(sourceJob,[&](bool ok){sourceDone.set_value(ok);}));
                 CHECK(sourceReady.wait_for(std::chrono::seconds(10))==std::future_status::ready&&sourceReady.get());
-                for(size_t i=0;i<CudaExecutionJobOperatorCount(*job);++i) {
+                for(size_t i=0;i<CudaExecutionJobOperatorCount(*sourceJob);++i) {
                     std::promise<bool> done;auto ready=done.get_future();
-                    CHECK(ExecuteCudaJobOperatorAsync(job,i,[&](bool ok){done.set_value(ok);}));
+                    CHECK(ExecuteCudaJobOperatorAsync(sourceJob,i,[&](bool ok){done.set_value(ok);}));
                     CHECK(ready.wait_for(std::chrono::seconds(10))==std::future_status::ready&&ready.get());
                 }
                 bool unexpectedCallback=false;
                 setCudaFinalizationRelayCapacityForTesting(0);
-                bool const admitted=FinalizeCudaExecutionJobAsync(job,[&](auto){unexpectedCallback=true;});
+                bool const admitted=FinalizeCudaExecutionJobAsync(sourceJob,[&](auto){unexpectedCallback=true;});
                 setCudaFinalizationRelayCapacityForTesting(1024);
                 CHECK(!admitted&&!unexpectedCallback);
                 std::promise<std::shared_ptr<const UsdGenDeviceGeneration>> done;
                 auto ready=done.get_future();
-                CHECK(FinalizeCudaExecutionJobAsync(job,[&](auto result){done.set_value(std::move(result));}));
+                CHECK(FinalizeCudaExecutionJobAsync(sourceJob,[&](auto result){done.set_value(std::move(result));}));
                 CHECK(ready.wait_for(std::chrono::seconds(10))==std::future_status::ready);
                 auto retried=ready.get();
-                CHECK(retried&&!diagnostics.HasErrors()&&CheckGeneration(retried,expected,stream,true));
+                CHECK(retried&&!sourceDiagnostics.HasErrors()&&CheckGeneration(retried,expected,stream,true));
             }
-            if(!retainedSource) {retainedSource=direct;retainedSessionSource=published->device;retainedReference=expected;}
+            if(!retainedSource) {retainedSource=sourceDirect;retainedSessionSource=published->device;retainedReference=expected;}
             CHECK(CheckGeneration(retainedSource,retainedReference,stream,true)&&
                 CheckGeneration(retainedSessionSource,retainedReference,stream,true));
         }
@@ -2050,7 +1911,7 @@ int main() {
 
     // Geometry leases enqueue their retirement event on the caller's stream.
     // They must complete before that external stream is destroyed.
-    old={}; current={}; uvOld={};
+    old={}; current={};
     retainedGrowNoiseLease={};
     editedGrowNoiseLease={};
     CHECK(cudaStreamDestroy(stream)==cudaSuccess);

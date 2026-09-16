@@ -2,7 +2,6 @@
 #define USDGEN_GPU_CURVE_GROW_H
 
 #include "curveGeometry.h"
-#include "growLengthMap.h"
 #include "imageSampler.h"
 
 #include <cstdint>
@@ -55,7 +54,6 @@ struct CurveGrowControls {
     float3 literalDirection = {0.0f, 1.0f, 0.0f};
     // Blend the lifted direction toward the captured root tangent after the
     // angular lift. Appended to preserve aggregate initialization order.
-    float uvBlend = 0.0f;
 };
 
 enum class CurveGrowStatus {
@@ -67,13 +65,11 @@ struct CurveGrowRequirements {
     size_t outputBytes = 0;
     size_t statusBytes = 0;
     // Optional length-map texels plus one sampled scalar per input curve.
-    size_t mapScratchBytes = 0;
     size_t peakBytes = 0;
 };
 
 CurveGrowStatus GetCurveGrowRequirements(size_t curveCount, uint32_t cvCount,
-                                         CurveGrowRequirements* result,
-                                         size_t mapTexelCount = 0);
+                                         CurveGrowRequirements* result);
 
 // Fresh C3 topology producer.  It borrows already-uploaded C3 source planes,
 // but writes every output topology/value plane into private storage.  The
@@ -88,8 +84,7 @@ public:
 
     CurveGrowStatus BeginFresh(CurveGrowInput input,
         std::shared_ptr<const void> inputLifetime, CurveGrowControls controls,
-        cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation = nullptr,
-        GrowLengthMap const* lengthMap = nullptr);
+        cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation = nullptr);
     CurveGrowStatus FinishFreshAsync(cudaStream_t stream,
         void (*callback)(cudaStream_t, cudaError_t, void*) noexcept, void* userdata);
     // Call only after FinishFreshAsync returned Ok *and* its exact native
@@ -133,17 +128,13 @@ private:
         CurveGrowStatus synchronizeUse() const;
     } active_, pending_;
     CurveGrowStatus validate(CurveGrowInput const&, std::shared_ptr<const void> const&,
-                             CurveGrowControls const&, GrowLengthMap const*,
-                             size_t mapTexelCount, size_t*) const;
+                             CurveGrowControls const&, size_t*) const;
     CurveGrowStatus validateStream(cudaStream_t) const;
     void discardPending() noexcept;
-    void discardLengthMap() noexcept;
     std::shared_ptr<const void> inputOwner_;
     std::unique_ptr<std::shared_ptr<const void>> inputQuarantineOwner_;
     CurveGrowInput input_{};
     DeviceBuffer<int> error_;
-    std::unique_ptr<CudaImage> lengthImage_;
-    DeviceBuffer<float> lengthSamples_;
     int* hostError_ = nullptr;
     UsdGenExecutionResourcePermit hostErrorPermit_;
     cudaEvent_t ready_ = nullptr;

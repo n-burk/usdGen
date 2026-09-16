@@ -7,9 +7,7 @@
 // (M1: root frame T), vector (usdGen:directionVector).
 #include "usdGen/ops/grow.h"
 
-#include "usdGen/growLengthMap.h"
-#include "usdGen/mask.h"
-#include "usdGen/maskParams.h"
+#include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 #include "pxr/base/gf/vec2f.h"
@@ -94,27 +92,11 @@ inline GfVec3f RotateGrowDirection(GfVec3f direction, GfVec3f axis,
 
 // Blend after lift toward the retained U tangent. Preserve length and keep
 // the lifted direction when no usable local tangent/blend direction exists.
-inline GfVec3f BlendGrowDirection(GfVec3f direction, GfVec3f tangent, float u)
-{
-    if (u == 0.0f) return direction;
-    float const tangentLength = std::sqrt(tangent[0] * tangent[0] +
-        tangent[1] * tangent[1] + tangent[2] * tangent[2]);
-    if (!(tangentLength > 1.0e-12f) || !std::isfinite(tangentLength))
-        return direction;
-    tangent /= tangentLength;
-    if (u == 1.0f) return tangent;
-    GfVec3f const mixed = direction * (1.0f - u) + tangent * u;
-    float const length = std::sqrt(mixed[0] * mixed[0] +
-        mixed[1] * mixed[1] + mixed[2] * mixed[2]);
-    return length > 1.0e-12f && std::isfinite(length) ? mixed / length : direction;
-}
-
 struct UsdGenGrowCapture final : public UsdGenCapturePayload
 {
     // perCurve[c] = target length of curve c (kSaltGrow draw applied).
     int cvCount = 0;
     float lift = 0.0f;
-    float uvBlend = 0.0f;
     TfToken direction = TfToken("surfaceNormal");
     GfVec3f directionVector{0.0f, 1.0f, 0.0f};
     uint64_t upstreamTopologyVersion = 0;
@@ -141,12 +123,8 @@ static TfTokenVector _topoParams = [] {
     v.push_back(TfToken("enabled"));
     v.push_back(TfToken("segments"));
     v.push_back(TfToken("direction"));
-    v.push_back(TfToken("length:source"));
     v.push_back(TfToken("length"));
     v.push_back(TfToken("lengthRandom"));
-    v.push_back(TfToken("directionPrimvar"));
-    auto m = UsdGenMaskTopologyParams();
-    v.insert(v.end(), m.begin(), m.end());
     return v;
 }();
 
@@ -154,9 +132,7 @@ static TfTokenVector _valueParams = [] {
     TfTokenVector v = UsdGenBaseValueParams();
     v.push_back(TfToken("directionVector"));
     v.push_back(TfToken("lift"));
-    v.push_back(TfToken("uvBlend"));
-    auto m = UsdGenMaskValueParams();
-    v.insert(v.end(), m.begin(), m.end());
+    // Grow is a generator: no upstream curves to leave untouched, no mask.
     return v;
 }();
 
@@ -189,8 +165,7 @@ bool UsdGenGrowOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
         return false;
     }
     TfToken dir = params.GetToken(TfToken("direction"), TfToken("surfaceNormal"));
-    if (dir != TfToken("surfaceNormal") && dir != TfToken("attribute") &&
-        dir != TfToken("vector")) {
+    if (dir != TfToken("surfaceNormal") && dir != TfToken("vector")) {
         if (diag)
             diag->Error("UsdGenGrow: unknown usdGen:direction token '" +
                         dir.GetString() + "'");
@@ -200,16 +175,6 @@ bool UsdGenGrowOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
     if (!std::isfinite(lift) || lift < -90.0 || lift > 90.0) {
         if (diag)
             diag->Error("UsdGenGrow: usdGen:lift must be finite and in [-90, 90] degrees");
-        return false;
-    }
-    VtValue const uvValue = params.GetVtValue(TfToken("uvBlend"), VtValue());
-    if (!uvValue.IsEmpty() && !uvValue.IsHolding<float>() && !uvValue.IsHolding<double>()) {
-        if (diag) diag->Error("UsdGenGrow: usdGen:uvBlend must be a floating-point scalar");
-        return false;
-    }
-    double const uvBlend = params.GetDouble(TfToken("uvBlend"), 0.0);
-    if (!std::isfinite(uvBlend) || uvBlend < 0.0 || uvBlend > 1.0) {
-        if (diag) diag->Error("UsdGenGrow: usdGen:uvBlend must be finite and in [0, 1]");
         return false;
     }
     VtValue const directionValue = params.GetVtValue(
@@ -251,12 +216,6 @@ UsdGenEpoch UsdGenGrowOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
         feed("direction",
              uint64_t(p->GetToken(TfToken("direction"), TfToken("surfaceNormal")).Hash()));
         feed("lift", doubleAsBits(p->GetDouble(TfToken("lift"), 0.0)));
-        feed("uvBlend", doubleAsBits(p->GetDouble(TfToken("uvBlend"), 0.0)));
-        // ParamView substitutes defaults for malformed authored values.
-        // Retain the native type in the key so a malformed edit cannot reuse
-        // a valid zero-blend capture and bypass Capture's type validation.
-        feed("uvBlendType", TfToken(p->GetVtValue(TfToken("uvBlend"),
-            VtValue()).GetTypeName()).Hash());
         GfVec3f directionVector(0.0f, 1.0f, 0.0f);
         if (VtValue const v = p->GetVtValue(TfToken("directionVector"), VtValue());
             v.IsHolding<GfVec3f>())
@@ -292,16 +251,6 @@ bool UsdGenGrowOp::Capture(
         if (diag) diag->Error("UsdGenGrow: usdGen:lift must be finite and in [-90, 90] degrees");
         return false;
     }
-    VtValue const uvValue = p ? p->GetVtValue(TfToken("uvBlend"), VtValue()) : VtValue();
-    if (!uvValue.IsEmpty() && !uvValue.IsHolding<float>() && !uvValue.IsHolding<double>()) {
-        if (diag) diag->Error("UsdGenGrow: usdGen:uvBlend must be a floating-point scalar");
-        return false;
-    }
-    double const uvBlend = p ? p->GetDouble(TfToken("uvBlend"), 0.0) : 0.0;
-    if (!std::isfinite(uvBlend) || uvBlend < 0.0 || uvBlend > 1.0) {
-        if (diag) diag->Error("UsdGenGrow: usdGen:uvBlend must be finite and in [0, 1]");
-        return false;
-    }
     GfVec3f directionVector(0.0f, 1.0f, 0.0f);
     if (p) {
         VtValue const v = p->GetVtValue(TfToken("directionVector"), VtValue());
@@ -327,7 +276,6 @@ bool UsdGenGrowOp::Capture(
     }
     cap.cvCount = segments;
     cap.lift = static_cast<float>(lift);
-    cap.uvBlend = static_cast<float>(uvBlend);
     cap.direction = p ? p->GetToken(TfToken("direction"), TfToken("surfaceNormal"))
                       : TfToken("surfaceNormal");
     cap.directionVector = directionVector;
@@ -342,27 +290,6 @@ bool UsdGenGrowOp::Capture(
     }
 
     uint32_t const R = upstream.totalCurves;
-    std::shared_ptr<const UsdGenImagePayload> lengthImage;
-    UsdGenImageSampleOptions lengthImageOptions;
-    if (!ctx.desc || !p || !p->node) {
-        if (ctx.mapBindingCount || ctx.mapCount) {
-            if (diag) diag->Error("UsdGenGrow: length map binding has no graph descriptor");
-            return false;
-        }
-    } else {
-        std::string mapReason;
-        if (!ResolveUsdGenGrowLengthImageMap(*ctx.desc, *p->node, &lengthImage,
-                                             &lengthImageOptions, &mapReason)) {
-            if (diag) diag->Error(mapReason);
-            return false;
-        }
-    }
-    if (lengthImage && upstream.rootUV.size() != R) {
-        if (diag) diag->Error("UsdGenGrow: LengthSource ImageMap requires one root st UV per curve (got " +
-                              std::to_string(upstream.rootUV.size()) + " for " +
-                              std::to_string(R) + " curves)");
-        return false;
-    }
 
     cap.upstreamTopologyVersion = upstream.topologyVersion;
     cap.upstreamValueVersion = upstream.valueVersion;
@@ -460,10 +387,7 @@ bool UsdGenGrowOp::Capture(
         return false;
     }
 
-    // Per-curve target lengths: len = length * (lo + (hi-lo) * Draw01) *
-    // LengthSource(root-st).  The image multiplier is intentionally not
-    // clamped: authored map options are applied by the sampler, then Grow
-    // rejects a negative/non-finite multiplier or final target.
+    // Per-curve target lengths: len = length * (lo + (hi-lo) * Draw01).
     cap.perCurve.clear();
     if (R) {
         cap.perCurve.resize(R);
@@ -472,16 +396,8 @@ bool UsdGenGrowOp::Capture(
         for (uint32_t c = 0; c < R; ++c) {
             float const r = UsdGenDraw01(int(ctx.seed), ids ? ids[c] : 0,
                                          kSaltGrow);
-            float const sampled = lengthImage
-                ? UsdGenImageSampler::Sample(*lengthImage, upstream.rootUV[c][0],
-                                              upstream.rootUV[c][1], lengthImageOptions)
-                : 1.0f;
-            if (!std::isfinite(sampled) || sampled < 0.0f) {
-                if (diag) diag->Error("UsdGenGrow: LengthSource ImageMap produced a negative or non-finite multiplier");
-                return false;
-            }
             double const random = lo + static_cast<double>(r) * (hi - lo);
-            double const target = length * random * static_cast<double>(sampled);
+            double const target = length * random;
             float const targetFloat = static_cast<float>(target);
             if (!std::isfinite(target) || target < 0.0 ||
                 !std::isfinite(targetFloat) || targetFloat < 0.0f) {
@@ -492,17 +408,8 @@ bool UsdGenGrowOp::Capture(
         }
     }
 
-    // Mask block (02 §2.13) — resolved once per capture epoch (I4).
-    cap.curveMask.clear();
-    cap.maskRampLut.clear();
-    if (p) {
-        UsdGenMaskSettings m = UsdGenMaskSettingsFromParams(*p);
-        auto const mask = EvaluateMask(m, upstream.curveId, upstream.px, {}, 0.0);
-        cap.curveMask = mask.curveMask;
-        cap.maskRampLut = mask.rampLut;
-    }
     // Grow owns a new CV topology, so it also owns a new rest channel.  Use
-    // the same direction/length/mask formula as Evaluate, rooted at the C3
+    // the same direction/length formula as Evaluate, rooted at the C3
     // rest position when present (or at current roots for Scatter).  No
     // worker writes rest and no old-cardinality VtArray can leak through.
     if (upstream.rest.size() && upstream.rest.size() != upstream.totalCvs) {
@@ -560,25 +467,19 @@ bool UsdGenGrowOp::Capture(
         }
     }
     VtVec3fArray grownRest(buf.totalCvs);
-    float const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.cdata();
     for (uint32_t c = 0; c != R; ++c) {
         uint32_t const rootIndex = rootSpans[c];
         GfVec3f root = upstream.rest.empty() ? GfVec3f(upstream.px[rootIndex], upstream.py[rootIndex], upstream.pz[rootIndex])
                                               : upstream.rest[rootIndex];
         GfVec3f dir = cap.direction == sVector ? cap.directionVector
-            : cap.direction == sAttr ? (upstream.rootT.empty() ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootT[c])
             : (upstream.rootN.empty() ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootN[c]);
         dir = NormalizeGrowDirection(dir);
         GfVec3f const axis = upstream.rootB.empty()
             ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootB[c];
         dir = RotateGrowDirection(dir, axis, cap.lift);
-        dir = BlendGrowDirection(dir, upstream.rootT.empty() ? GfVec3f(0.0f)
-            : upstream.rootT[c], cap.uvBlend);
-        float const mask = cap.curveMask.empty() ? 1.0f : cap.curveMask[c];
         for (uint32_t i = 0; i != static_cast<uint32_t>(cap.cvCount); ++i) {
             float const t = cap.cvCount > 1 ? float(i) / float(cap.cvCount - 1) : 0.0f;
-            float const weight = mask * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
-            float const distance = cap.perCurve[c] * t * weight;
+            float const distance = cap.perCurve[c] * t;
             grownRest[size_t(c) * cap.cvCount + i] = root + dir * distance;
         }
     }
@@ -603,11 +504,6 @@ void UsdGenGrowOp::Evaluate(
     auto const *inPy = view->inPy;
     auto const *inPz = view->inPz;
 
-    // Mask envelope (04 §5.2): w(c,i) = curveMask(c) * rampLUT(hairT), the
-    // weight every §2 kernel writes. maskRampLut lives in the capture payload
-    // (like noise); curveMask reaches the chunk via the scheduler's
-    // per-chunk view pointer (scheduler.cpp:259-260).
-    auto const *maskLut = cap.maskRampLut.empty() ? nullptr : cap.maskRampLut.data();
     for (uint32_t c = 0; c < view->curveCount; ++c) {
         // Input chunks may be ragged C3 curves.  Their plane ports are
         // already sliced at inFirstCv, so rebase the absolute upstream
@@ -624,8 +520,6 @@ void UsdGenGrowOp::Evaluate(
         GfVec3f dir;
         if (cap.direction == sVector) {
             dir = cap.directionVector;
-        } else if (cap.direction == sAttr) {
-            dir = view->rootT ? view->rootT[c] : GfVec3f(0.0f, 1.0f, 0.0f);
         } else {  // surfaceNormal
             dir = view->rootN ? view->rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
         }
@@ -633,21 +527,15 @@ void UsdGenGrowOp::Evaluate(
         GfVec3f const axis = view->rootB ? view->rootB[c]
             : GfVec3f(0.0f, 1.0f, 0.0f);
         d = RotateGrowDirection(d, axis, cap.lift);
-        d = BlendGrowDirection(d, view->rootT ? view->rootT[c] : GfVec3f(0.0f),
-                               cap.uvBlend);
         // perCurve is a whole-buffer capture payload: chunk views pre-offset
         // the plane/per-curve arrays only, so index by absolute curve.
         const float targetLen = cap.perCurve.empty()
             ? 0.0f
             : cap.perCurve[view->desc->firstCurve + c];
-        // Per-curve mask weight (04 §5.2); 1.0 when the mask block is inert.
-        const float mWeight = view->curveMask ? view->curveMask[c] : 1.0f;
-
         for (uint32_t i = 0; i < view->cvCount; ++i) {
             const float t = i * invSpan;
-            const float w = mWeight * (maskLut ? UsdGenEvalLut257(maskLut, t) : 1.0f);
-            const float s = targetLen * t * w;
-            uint32_t const o = view->Cv(c, i);
+            const float s = targetLen * t;
+            uint32_t const o = static_cast<uint32_t>(view->Cv(c, i));
             px[o] = rx + d[0] * s;
             py[o] = ry + d[1] * s;
             pz[o] = rz + d[2] * s;

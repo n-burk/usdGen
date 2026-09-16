@@ -1,4 +1,5 @@
 #include "pointOverride.h"
+#include "cudaCompat.h"
 
 #include <cub/device/device_radix_sort.cuh>
 

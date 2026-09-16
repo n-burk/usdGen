@@ -77,16 +77,12 @@ bool
 _isDedicated(TfToken const &name)
 {
     static std::unordered_set<std::string> const dedicated{
-        "usdGen:type", "usdGen:mode", "usdGen:algorithmVersion",
-        "usdGen:enabled", "usdGen:seed", "usdGen:blend", "usdGen:space",
-        "usdGen:readPhase", "usdGen:input", "usdGen:terminal",
+        "usdGen:type", "usdGen:mode",
+        "usdGen:enabled", "usdGen:seed",
         "usdGen:references", "usdGen:guides", "usdGen:curves",
-        "usdGen:frozen:curves", "usdGen:surface", "usdGen:mask:source",
-        "usdGen:map",
+        "usdGen:frozen:curves", "usdGen:surface",
         // description-level dedicated fields
-        "usdGen:densityScale", "usdGen:renderDensityScale",
-        "usdGen:tileTarget", "usdGen:pickTarget", "usdGen:curve:basis",
-        "usdGen:motion:mode", "usdGen:motion:sampleCount",
+        "usdGen:tileTarget", "usdGen:curve:basis",
     };
     // usdGen:look:* lives in UsdGenLookDesc, not params.
     return dedicated.count(name.GetString()) != 0 ||
@@ -99,7 +95,7 @@ _isDedicated(TfToken const &name)
 // Mirror of the stage helpers above, reading UsdImaging data sources instead
 // of Usd prims. Locator contract: the adapter overlays its mapped source at
 // the prim root, so adapter-published usdGen:* properties are served FLAT
-// with 02 §0.7 relative elements (usdGen:mask:source -> mask/source); an
+// with 02 §0.7 relative elements (usdGen:width:knots -> width/knots); an
 // ancestor in a name-collision pair takes a "-value" (attribute) / "-rel"
 // (relationship) suffix on its final element (primAdapter.cpp
 // LocatorForProperty), which _HLocate retries transparently. Stock geometry
@@ -146,8 +142,8 @@ _HUsdGen(HdContainerDataSourceHandle const &primDs)
 {
     // The adapter overlays its mapped source at the prim root
     // (OverlayedContainerDataSources(usdGen, base)), so mapped usdGen:*
-    // properties are served FLAT: usdGen:terminal -> `terminal`,
-    // usdGen:motion:mode -> motion/mode. There is no `usdGen` container in
+    // properties are served FLAT: usdGen:tileTarget -> `tileTarget`,
+    // usdGen:curve:basis -> curve/basis. There is no `usdGen` container in
     // the served tree (the `usdGen` prefix lives only on invalidation
     // locators). The mapped root IS the prim data source; stock subtrees
     // sharing it are pruned by _HIsStock during the S14 sweep.
@@ -470,29 +466,6 @@ _HPullUsdGen(HdContainerDataSourceHandle const &usdGen, _HdTime t,
                     bucket = &node->references;
                 } else if (leaf == "guides" || leaf == "curves") {
                     bucket = &node->curves;
-                } else if (leaf == "surface") {
-                    bucket = &node->surfaces;
-                } else if (leaf == "source" || leaf == "map") {
-                    usdGen::UsdGenMapBindingPurpose purpose;
-                    if (full == "usdGen:mask:source" ||
-                        full == "usdGen:map" ||
-                        full == "usdGen:length:source") {
-                        bucket = &node->maps;
-                        purpose = full == "usdGen:mask:source"
-                            ? usdGen::UsdGenMapBindingPurpose::MaskSource
-                            : (full == "usdGen:length:source"
-                                ? usdGen::UsdGenMapBindingPurpose::LengthSource
-                                : usdGen::UsdGenMapBindingPurpose::Generic);
-                    } else {
-                        continue;
-                    }
-                    SdfPathVector targets;
-                    _HAppendPaths(v, &targets);
-                    bucket->insert(bucket->end(), targets.begin(), targets.end());
-                    for (SdfPath const &target : targets) {
-                        node->mapBindings.push_back({target, purpose, TfToken(full)});
-                    }
-                    continue;
                 } else {
                     continue;  // not a graph edge (base-name match only)
                 }
@@ -781,8 +754,6 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
         }
     }
 
-    // guideBlend: usdGen:blend on UsdGenGuideSet prims, per guide.
-    _HPrimvarTyped(primDs, "usdGen:blend", t, &out->guideBlend);
 }
 
 // Read precisely the operator-owned portion.  Inputs and inherited surfaces
@@ -810,18 +781,12 @@ _HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
     if (type.IsEmpty()) type = primType.IsEmpty() ? _HUsdTypeName(primDs) : primType;
     node.type = type;
     _HGetToken(ug, t, &node.mode, {"mode"});
-    _HGetToken(ug, t, &node.space, {"space"});
-    _HGetToken(ug, t, &node.readPhase, {"readPhase"});
-    _HGetDedicated(ug, t, &node.algorithmVersion, &captured.validationErrors,
-        node.path, "algorithmVersion", {"algorithmVersion"});
     bool enabled = true;
     _HGetDedicated(ug, t, &enabled, &captured.validationErrors,
         node.path, "enabled", {"enabled"});
     node.enabled = enabled;
     _HGetDedicated(ug, t, &node.seed, &captured.validationErrors,
         node.path, "seed", {"seed"});
-    _HGetDedicated(ug, t, &node.blend, &captured.validationErrors,
-        node.path, "blend", {"blend"});
     _HPullUsdGen(ug, t, &node, &node.params, "usdGen");
     // Legacy authored inputs are observed for S14 but never become graph
     // topology.  Keep the cached payload pre-derived.
@@ -991,9 +956,7 @@ CaptureGraphDescFromHydra(
         _HGetPathArray(descUg, &descSurfaces, {"surface"});
         if (!descSurfaces.empty()) {
             for (UsdGenNodeDesc &node : desc.nodes) {
-                if (node.surfaces.empty()) {
-                    node.surfaces = descSurfaces;
-                }
+                node.surfaces = descSurfaces;
             }
         }
     }
@@ -1098,17 +1061,11 @@ CaptureGraphDescFromHydra(
     }
 
     // ---- description-level fields (02 §2.3/§2.12/§2.14) -------------------
-    _HGetTyped(descUg, t, &desc.densityScale, {"densityScale"});
-    _HGetTyped(descUg, t, &desc.renderDensityScale, {"renderDensityScale"});
     _HGetDedicated(descUg, t, &desc.defaultWidth, &desc.validationErrors,
                    desc.description, "width:default", {"width", "default"});
     _HGetDedicated(descUg, t, &desc.tileTarget, &desc.validationErrors,
                    desc.description, "tileTarget", {"tileTarget"});
-    _HGetTyped(descUg, t, &desc.motionSampleCount, {"motion", "sampleCount"});
-    desc.motionSampleCount = std::max(2, std::min(16, desc.motionSampleCount));
-    _HGetToken(descUg, t, &desc.motionMode, {"motion", "mode"});
     _HGetToken(descUg, t, &desc.curveBasis, {"curve", "basis"});
-    _HGetToken(descUg, t, &desc.pickTarget, {"pickTarget"});
 
     HdContainerDataSourceHandle groomDs;
     if (_HPrim(input, descriptionPath.GetParentPath(), &groomDs, nullptr)) {

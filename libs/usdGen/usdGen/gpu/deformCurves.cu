@@ -1,4 +1,5 @@
 #include "deformCurves.h"
+#include "cudaCompat.h"
 
 #include <cmath>
 #include <cstdint>
@@ -57,22 +58,6 @@ __device__ bool ReadBool(BoolField field, size_t curve, size_t point,
     return true;
 }
 
-__device__ float Sample257(const float *lut, float t) {
-    float coordinate = t * 256.0f;
-    int lower = int(floorf(coordinate));
-    if (lower >= 256) return lut[256];
-    float fraction = coordinate - float(lower);
-    return lut[lower] + (lut[lower + 1] - lut[lower]) * fraction;
-}
-
-__global__ void ValidateProfile(const float *profile, int *error) {
-    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= 257) return;
-    float value = profile[i];
-    if (!Finite(value)) SetError(error, kNonFinite);
-    else if (value < 0.0f || value > 1.0f) SetError(error, kBadValue);
-}
-
 __global__ void ValidateShape(const uint32_t *offsets, int curves, int points,
                               const float3 *roots, int *error) {
     if (blockIdx.x == 0 && threadIdx.x == 0 &&
@@ -90,8 +75,8 @@ __global__ void ApplyDeformation(
     const float3 *input, const float3 *warped, const uint32_t *offsets,
     const float3 *targets, int curves, float legacyGroom,
     const float *legacyPrimitive, const float *legacyPoint,
-    ScalarField blend, ScalarField maskAmount, BoolField enabled,
-    BoolField lockRoots, const float *maskProfile, const float *hairT,
+    ScalarField mask, BoolField enabled,
+    BoolField lockRoots,
     float3 *output, int *error) {
     int curve = int(blockIdx.x) * blockDim.x + threadIdx.x;
     if (curve >= curves) return;
@@ -119,26 +104,15 @@ __global__ void ApplyDeformation(
         if (!Finite(source.x) || !Finite(source.y) || !Finite(source.z) ||
             !Finite(evaluated.x) || !Finite(evaluated.y) ||
             !Finite(evaluated.z)) { SetError(error, kNonFinite); continue; }
-        float blendValue = 1.0f, maskValue = 1.0f;
-        if (!ReadScalar(blend, size_t(curve), point, &blendValue, error) ||
-            !ReadScalar(maskAmount, size_t(curve), point, &maskValue, error)) continue;
+        float maskValue = 1.0f;
+        if (!ReadScalar(mask, size_t(curve), point, &maskValue, error)) continue;
         float pointEnvelope = 1.0f;
         if (legacyPoint) {
             pointEnvelope = legacyPoint[point];
             if (!Finite(pointEnvelope)) { SetError(error, kNonFinite); continue; }
         }
-        float t = end - begin <= 1 ? 0.0f :
-            float(point - begin) / float(end - begin - 1);
-        if (hairT) t = hairT[point];
-        if (!Finite(t)) { SetError(error, kNonFinite); continue; }
-        if (t < 0.0f || t > 1.0f) { SetError(error, kBadValue); continue; }
-        float profile = maskProfile ? Sample257(maskProfile, t) : 1.0f;
-        if (!Finite(profile)) { SetError(error, kNonFinite); continue; }
-        if (profile < 0.0f || profile > 1.0f) {
-            SetError(error, kBadValue); continue;
-        }
-        float envelope = legacyGroom * primitive * pointEnvelope * blendValue *
-                         maskValue * profile;
+        // usdGen:mask IS the operator envelope (02 §2.13).
+        float envelope = legacyGroom * primitive * pointEnvelope * maskValue;
         if (!Finite(envelope)) { SetError(error, kNonFinite); continue; }
         envelope = fminf(1.0f, fmaxf(0.0f, envelope));
         float3 result = source;
@@ -222,9 +196,7 @@ bool FreshProvenance(DeviceCurveGeometryView geometry, DeviceView<const float3> 
     return DevicePointer(geometry.points.data, geometry.points.size, device) &&
         DevicePointer(geometry.curveOffsets.data, geometry.curveOffsets.size, device) &&
         DevicePointer(roots.data, roots.size, device) && DevicePointer(output.data, output.size, device) &&
-        (!parameters.maskProfile.data || DevicePointer(parameters.maskProfile.data, parameters.maskProfile.size, device)) &&
-        (!parameters.hairT.data || DevicePointer(parameters.hairT.data, parameters.hairT.size, device)) &&
-        scalar(parameters.blend) && scalar(parameters.maskAmount) && boolean(parameters.enabled) && boolean(parameters.lockRoots);
+        scalar(parameters.mask) && boolean(parameters.enabled) && boolean(parameters.lockRoots);
 }
 
 } // namespace anonymous
@@ -330,19 +302,13 @@ RbfStatus CudaRbfCurveDeformer::deformImpl(
         output.size != geometry.pointCount ||
         (geometry.pointCount && !output.data) ||
         (!geometry.pointCount && output.size != 0) ||
-        (!parameters.maskProfile.data && parameters.maskProfile.size != 0) ||
-        (parameters.maskProfile.data && parameters.maskProfile.size != 257) ||
-        (!parameters.hairT.data && parameters.hairT.size != 0) ||
-        (parameters.hairT.data && parameters.hairT.size != geometry.pointCount) ||
         (!primitiveEnvelope.data && primitiveEnvelope.size != 0) ||
         (primitiveEnvelope.data && primitiveEnvelope.size != geometry.curveCount) ||
         (!pointEnvelope.data && pointEnvelope.size != 0) ||
         (pointEnvelope.data && pointEnvelope.size != geometry.pointCount) ||
         !std::isfinite(groomEnvelope))
         return RbfStatus::InvalidArgument;
-    status = ValidateScalar(parameters.blend, geometry);
-    if (status != RbfStatus::Ok) return status;
-    status = ValidateScalar(parameters.maskAmount, geometry);
+    status = ValidateScalar(parameters.mask, geometry);
     if (status != RbfStatus::Ok) return status;
     status = ValidateBool(parameters.enabled, geometry, false);
     if (status != RbfStatus::Ok) return status;
@@ -354,11 +320,6 @@ RbfStatus CudaRbfCurveDeformer::deformImpl(
         staged_.reset(geometry.pointCount) != cudaSuccess ||
         cudaMemsetAsync(flags_.data(), 0, sizeof(int), stream) != cudaSuccess)
         return RbfStatus::CudaError;
-    if (parameters.maskProfile.data) {
-        ValidateProfile<<<2, 256, 0, stream>>>(parameters.maskProfile.data,
-                                                flags_.data());
-        if (cudaGetLastError() != cudaSuccess) return RbfStatus::CudaError;
-    }
     if (geometry.curveCount || geometry.curveOffsets.data) {
         const size_t blocks = geometry.curveCount
             ? (geometry.curveCount + 255) / 256 : 1;
@@ -381,8 +342,7 @@ RbfStatus CudaRbfCurveDeformer::deformImpl(
         geometry.points.data, warped_.data(), geometry.curveOffsets.data,
         rootTargets.data, int(geometry.curveCount), groomEnvelope,
         primitiveEnvelope.data, pointEnvelope.data,
-        parameters.blend, parameters.maskAmount, parameters.enabled,
-        parameters.lockRoots, parameters.maskProfile.data, parameters.hairT.data,
+        parameters.mask, parameters.enabled, parameters.lockRoots,
         staged_.data(), flags_.data());
     if (cudaGetLastError() != cudaSuccess || cudaEventRecord(ready_, stream) != cudaSuccess)
         return RbfStatus::CudaError;
@@ -455,15 +415,9 @@ RbfStatus CudaRbfCurveDeformer::BeginFreshShape(
         (!geometry.curveCount && rootTargets.size != 0) ||
         output.size != geometry.pointCount ||
         (geometry.pointCount && !output.data) ||
-        (!geometry.pointCount && output.size != 0) ||
-        (!parameters.maskProfile.data && parameters.maskProfile.size != 0) ||
-        (parameters.maskProfile.data && parameters.maskProfile.size != 257) ||
-        (!parameters.hairT.data && parameters.hairT.size != 0) ||
-        (parameters.hairT.data && parameters.hairT.size != geometry.pointCount))
+        (!geometry.pointCount && output.size != 0))
         return RbfStatus::InvalidArgument;
-    status = ValidateScalar(parameters.blend, geometry);
-    if (status != RbfStatus::Ok) return status;
-    status = ValidateScalar(parameters.maskAmount, geometry);
+    status = ValidateScalar(parameters.mask, geometry);
     if (status != RbfStatus::Ok) return status;
     status = ValidateBool(parameters.enabled, geometry, false);
     if (status != RbfStatus::Ok) return status;
@@ -499,13 +453,6 @@ RbfStatus CudaRbfCurveDeformer::BeginFreshShape(
     if (cudaMemsetAsync(flags_.data(), 0, sizeof(int), stream) != cudaSuccess) {
         freshFailed_ = true;
         return RbfStatus::CudaError;
-    }
-    if (parameters.maskProfile.data) {
-        ValidateProfile<<<2, 256, 0, stream>>>(parameters.maskProfile.data, flags_.data());
-        if (cudaGetLastError() != cudaSuccess) {
-            freshFailed_ = true;
-            return RbfStatus::CudaError;
-        }
     }
     if (geometry.curveCount || geometry.curveOffsets.data) {
         size_t const blocks = geometry.curveCount ? (geometry.curveCount + 255) / 256 : 1;
@@ -604,9 +551,9 @@ RbfStatus CudaRbfCurveDeformer::BeginFreshApply(cudaStream_t stream) {
     if (geometry.curveCount)
         ApplyDeformation<<<(geometry.curveCount + 255) / 256, 256, 0, stream>>>(
             geometry.points.data, warped_.data(), geometry.curveOffsets.data, freshRoots_.data,
-            int(geometry.curveCount), 1.0f, nullptr, nullptr, freshParameters_.blend,
-            freshParameters_.maskAmount, freshParameters_.enabled, freshParameters_.lockRoots,
-            freshParameters_.maskProfile.data, freshParameters_.hairT.data, staged_.data(), flags_.data());
+            int(geometry.curveCount), 1.0f, nullptr, nullptr,
+            freshParameters_.mask, freshParameters_.enabled, freshParameters_.lockRoots,
+            staged_.data(), flags_.data());
     if (cudaGetLastError() != cudaSuccess ||
         cudaMemcpyAsync(freshHostError_, flags_.data(), sizeof(int), cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
         freshFailed_ = true;

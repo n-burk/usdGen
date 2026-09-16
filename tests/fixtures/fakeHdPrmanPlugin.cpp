@@ -51,19 +51,19 @@ protected:
     {}
 
     void _PrimsAdded(
-            const HdSceneIndexBase &sender,
+            const HdSceneIndexBase & /*sender*/,
             const HdSceneIndexObserver::AddedPrimEntries &entries) override
     {
         _SendPrimsAdded(entries);
     }
     void _PrimsRemoved(
-            const HdSceneIndexBase &sender,
+            const HdSceneIndexBase & /*sender*/,
             const HdSceneIndexObserver::RemovedPrimEntries &entries) override
     {
         _SendPrimsRemoved(entries);
     }
     void _PrimsDirtied(
-            const HdSceneIndexBase &sender,
+            const HdSceneIndexBase & /*sender*/,
             const HdSceneIndexObserver::DirtiedPrimEntries &entries) override
     {
         _SendPrimsDirtied(entries);

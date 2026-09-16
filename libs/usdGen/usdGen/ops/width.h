@@ -1,6 +1,7 @@
 // usdGen — UsdGenWidthOp (M1). 02-schema.md §2.7.1, 04-operators.md §2.11.
-// Authors `widths` from a base width, a root->tip ramp (usdGen:width:knots,
-// S11) and taper; usdGen:replace selects set (true) vs multiply (false).
+// Authors `widths` from a base width and a root->tip ramp
+// (usdGen:width:knots, S11); usdGen:replace selects set (true) vs
+// multiply (false).
 // TopologyEffect = None.
 #ifndef USDGEN_OP_WIDTH_H
 #define USDGEN_OP_WIDTH_H
@@ -18,7 +19,6 @@ public:
     ~UsdGenWidthOp() override = default;
 
     TfToken Type() const override { return TfToken("UsdGenWidth"); }
-    UsdGenSpace Space() const override { return UsdGenSpace::Rest; }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::None; }
 
     TfSpan<const TfToken> TopologyParameters() const override;
@@ -37,8 +37,7 @@ public:
     uint32_t PlanesTouched() const override;
 private:
     // Intern once per operator, with the same lifetime as its scheduled work.
-    const TfToken sWidth{"width"}, sTaper{"taper"}, sTaperStart{"taperStart"};
-    const TfToken sRootScale{"rootScale"}, sTipScale{"tipScale"}, sReplace{"replace"};
+    const TfToken sWidth{"width"}, sReplace{"replace"}, sMask{"mask"};
     const TfToken sKnots{"width:knots"}, sKnotsInterp{"width:interpolation"};
     const TfToken sCatmullRom{"catmullRom"};
 };

@@ -37,7 +37,6 @@ struct UsdGenGraphRoutingNode
     UsdGenNodeId id = kUsdGenInvalidNode;
     SdfPath path;
     TfToken type;
-    int algorithmVersion = 0;
     std::vector<TfToken> topologyParameters;
     std::vector<TfToken> valueParameters;
     std::vector<std::pair<TfToken, uint32_t>> paramRouting;
@@ -65,14 +64,11 @@ struct UsdGenCompiledNode
 
     UsdGenNodeId           id = kUsdGenInvalidNode;
     TfToken                type;
-    int                    algorithmVersion = 0;
     std::unique_ptr<UsdGenOp> op;
 
     UsdGenNodeId           input = kUsdGenInvalidNode;   // primary usdGen:input (dense range test)
     std::vector<UsdGenNodeId> inputs;                   // all usdGen:input targets
 
-    UsdGenSpace            space = UsdGenSpace::Inherit;       // resolved
-    UsdGenReadPhase        readPhase = UsdGenReadPhase::Final; // Preceding -> Final (R9)
     UsdGenTopoFx           topoFx = UsdGenTopoFx::None;
     UsdGenRole             role = UsdGenRole::Curves;
     bool                   enabled = true;
@@ -90,6 +86,10 @@ struct UsdGenCompiledNode
 
     // --- compile-time routing data (03 §5.1; filled by UsdGenCompiler) ----
     UsdGenParamView        paramView;            // points into the graph's desc copy
+    // Connected (expression) parameters evaluated for this node, once per
+    // cook, over its INPUT geometry. paramView.expressions points here.
+    UsdGenCpuParameters    expressions;
+    uint64_t               lastExpressionDigest = 0;  // the digest last evaluated
     std::vector<std::pair<TfToken, uint32_t>> paramRouting;  // param name -> UsdGenDirtyBits
     std::vector<UsdGenNodeId> descendants;       // strict descendants, topological order
     // Slot order is the operator declaration order.  The scheduler resolves

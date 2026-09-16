@@ -1,6 +1,7 @@
 #ifndef USDGEN_EXPRESSIONS_CONTEXT_H
 #define USDGEN_EXPRESSIONS_CONTEXT_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -40,11 +41,16 @@ struct ValueShape {
     bool isArray = false;
 };
 
+// $patchId, $Cs and $As were declared here through M1 but no field builder ever
+// wrote them, so every expression that named one poisoned. usdGen has no patch
+// table and the engine's curve buffer carries no surface colour/opacity at
+// evaluation time, so they are gone rather than silently unavailable; see
+// plan/07-look-maps-expressions.md.
 enum class Variable : uint16_t {
     Invalid, Value, Frame, Time, Index, Count, Seed, DescId,
-    PrimIndex, PrimCount, IdLo, IdHi, Id, U, V, FaceId, PatchId,
+    PrimIndex, PrimCount, IdLo, IdHi, Id, U, V, FaceId,
     P, PRef, RootP, RootPRef, N, NRef, DPdu, DPdv, DPduRef, DPdvRef,
-    T, PointIndex, PointCount, CLength, CWidth, Cs, As, CountVariables
+    T, PointIndex, PointCount, CLength, CWidth, CountVariables
 };
 
 struct VariableInfo {
@@ -53,6 +59,10 @@ struct VariableInfo {
     ScalarType scalar;
     uint32_t components;
     Domain domains;
+    // One line of prose. Every entry carries one; the editor's variable browser
+    // and plan/07's table are generated from this field, so the language has a
+    // single description of itself.
+    const char *doc;
 };
 
 class Registry {
@@ -61,7 +71,20 @@ public:
     const VariableInfo *Find(const char *name) const noexcept;
     const VariableInfo *Find(Variable id) const noexcept;
     bool Validate(const char *name, Domain domain, std::string *diagnostic = nullptr) const;
+    // Enumeration, for authoring tools that present the variable table to a
+    // user (the usdview SeExpr editor's variable browser). At() returns
+    // nullptr past the end so a caller can walk without a second call.
+    size_t Count() const noexcept;
+    const VariableInfo *At(size_t index) const noexcept;
 };
+
+// Spellings shared by the tool surfaces. ScalarTypeName returns the lowercase
+// C-ish name ("float32", "int32", ...) and "invalid" for ScalarType::Invalid,
+// which is how the polymorphic $value is recorded. DomainName takes ONE domain
+// bit and returns "groom" | "primitive" | "point" (or "" for anything else) --
+// the spellings used by the usdGen:evaluation customData.
+const char *ScalarTypeName(ScalarType type) noexcept;
+const char *DomainName(Domain domain) noexcept;
 
 struct Context {
     double frame = 0.0;

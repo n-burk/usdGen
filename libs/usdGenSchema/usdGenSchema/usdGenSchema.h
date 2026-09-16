@@ -8,9 +8,20 @@
 #define USDGEN_SCHEMA_H
 
 #include "pxr/pxr.h"
-#include "pxr/base/tf/api.h"
 
 #include "pxr/usd/usd/timeCode.h"
+
+// TF_API would import these from libtf; they live in usdGenSchema, so the
+// DSO needs its own export control (CMake defines usdGenSchema_EXPORTS).
+#if defined(_WIN32)
+#  if defined(usdGenSchema_EXPORTS)
+#    define USDGEN_SCHEMA_API __declspec(dllexport)
+#  else
+#    define USDGEN_SCHEMA_API __declspec(dllimport)
+#  endif
+#else
+#  define USDGEN_SCHEMA_API __attribute__((visibility("default")))
+#endif
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -21,8 +32,8 @@ typedef bool (*UsdGenSchemaExtentFn)(
     const UsdTimeCode &time,
     GfVec3f *outExtent /*[2]*/);
 
-TF_API void UsdGenSchema_SetExtentProvider(UsdGenSchemaExtentFn fn);
-TF_API UsdGenSchemaExtentFn UsdGenSchema_GetExtentProvider();
+USDGEN_SCHEMA_API void UsdGenSchema_SetExtentProvider(UsdGenSchemaExtentFn fn);
+USDGEN_SCHEMA_API UsdGenSchemaExtentFn UsdGenSchema_GetExtentProvider();
 
 PXR_NAMESPACE_CLOSE_SCOPE
 

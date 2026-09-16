@@ -1,0 +1,7 @@
+# domain: primitive
+# Scatters strand length around the authored value. $spread is the fraction
+# either side of it, and the operator's own $seed moves the whole pattern
+# without changing its character.
+$spread = 0.35; # 0, 1
+$hash = sin($primIndex * 12.9898 + $seed * 78.233) * 43758.5453;
+$value * (1.0 + $spread * (2.0 * ($hash - floor($hash)) - 1.0))

@@ -29,7 +29,6 @@ struct CurveFullNonWidthInput {
     DeviceView<const int32_t> rootPrim;
     DeviceView<const float2> rootUV;
     RestRootFrames frames;
-    DeviceView<const float> curveMask;
     std::vector<NonWidthChunkDesc> chunks;
     std::vector<NonWidthNamedPlaneView> named;
 };

@@ -25,6 +25,8 @@
 // rule 2).
 #include "usdGenImaging/primAdapter.h"
 
+#include "usdGenImaging/expressionConnection.h"
+
 #include "usdGen/expressions/valueShape.h"
 
 #include "pxr/base/ts/spline.h"
@@ -58,8 +60,7 @@ public:
     VtStringArray GetTypedValue(Time) override {
         VtStringArray errors;
         const std::pair<char const*, char const*> fields[] = {
-            {"usdGen:enabled", "bool"}, {"usdGen:blend", "float"},
-            {"usdGen:seed", "int"}, {"usdGen:algorithmVersion", "int"},
+            {"usdGen:enabled", "bool"}, {"usdGen:seed", "int"},
             {"usdGen:width:default", "float"}, {"usdGen:tileTarget", "int"}};
         for (auto const& field : fields) {
             auto attr = _prim.GetAttribute(TfToken(field.first));
@@ -207,11 +208,14 @@ _ExpressionBindingsDataSource(UsdPrim const &prim)
         attr.GetConnections(&connections);
         for (SdfPath const &connection : connections) {
             SdfPath const exprPath = connection.GetPrimPath();
-            TfToken const property = connection.GetNameToken();
-            // Preserve malformed connections too.  The compiler owns the
-            // fail-closed diagnostic; dropping one here would silently turn
-            // a connected parameter back into its literal.
-            bool const isOutput = property.GetString().rfind("outputs:", 0) == 0;
+            // A connection may name the expression prim instead of one of its
+            // outputs; resolve both spellings to the same binding.  Preserve
+            // malformed connections too: the compiler owns the fail-closed
+            // diagnostic, and dropping one here would silently turn a
+            // connected parameter back into its literal.
+            TfToken const output =
+                ::usdGenImaging::UsdGenResolveExpressionConnectionOutput(
+                    prim, connection);
             TfToken domain("groom");
             VtValue cd = attr.GetCustomDataByKey(TfToken("usdGen:evaluation"));
             if (cd.IsHolding<std::string>()) domain = TfToken(cd.UncheckedGet<std::string>());
@@ -220,7 +224,7 @@ _ExpressionBindingsDataSource(UsdPrim const &prim)
                 TfToken("destination"), TfToken("nativeType"), TfToken("shape"),
                 TfToken("domain"), TfToken("literal")};
             std::vector<HdDataSourceBaseHandle> fieldValues{
-                _Value(VtValue(exprPath)), _Value(VtValue(isOutput ? TfToken(property.GetString().substr(8)) : TfToken())),
+                _Value(VtValue(exprPath)), _Value(VtValue(output)),
                 _Value(VtValue(attr.GetName())), _Value(VtValue(attr.GetTypeName().GetAsToken())),
                 _Value(VtValue(attr.GetTypeName().GetAsToken())), _Value(VtValue(domain)), _Value(literal)};
             names.push_back(TfToken(std::to_string(index++)));
@@ -426,8 +430,7 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
         UsdImagingDataSourcePrim::Invalidate(
             prim, subprim, properties, invalidationType));
     for (auto const& property : properties) {
-        if (property == TfToken("usdGen:enabled") || property == TfToken("usdGen:blend") ||
-            property == TfToken("usdGen:seed") || property == TfToken("usdGen:algorithmVersion") ||
+        if (property == TfToken("usdGen:enabled") || property == TfToken("usdGen:seed") ||
             property == TfToken("usdGen:width:default") || property == TfToken("usdGen:tileTarget")) {
             result.insert(HdDataSourceLocator(TfToken("__usdGenValidationErrors")));
             break;
@@ -562,7 +565,7 @@ UsdGenPrimAdapterBase::LocatorForProperty(TfToken const &property,
     // property's base locator is a STRICT ancestor of any sibling's base
     // locator on the same prim type, the ancestor's FINAL element takes
     // "-value" (attribute) / "-rel" (relationship). Without it, an
-    // ancestor/descendant pair (usdGen:length vs usdGen:length:source)
+    // ancestor/descendant pair (usdGen:length:value vs usdGen:length:mode)
     // registers a leaf over a container node and UsdImagingDataSourceMapped
     // TF_CODING_ERRORs (dataSourceMapped.cpp:272 "already an ascendant
     // locator") and drops the container. Descendants NEVER move (R25
@@ -604,8 +607,7 @@ UsdGenPrimAdapterBase::IsSingleTarget(TfToken const &property)
 {
     // 06 §2.3: exactly one target. Every other relationship keeps the array
     // factory — an empty array is how the evaluator sees "not bound".
-    return property == TfToken("usdGen:terminal") ||
-           property == TfToken("usdGen:frozen:curves");
+    return property == TfToken("usdGen:frozen:curves");
 }
 
 #define USDGEN_DEFINE_PRIM_ADAPTER(AdapterType)                              \

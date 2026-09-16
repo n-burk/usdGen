@@ -87,7 +87,6 @@ UsdGenGraphDesc MakeRaggedDesc()
     src.path    = SdfPath("/ragged/src");
     src.type    = TfToken("UsdGenCurveSource");
     src.enabled = true;
-    src.blend   = 1.0f;
     src.surfaces.push_back(SdfPath("/ragged/sourceCurves"));
     d.nodes.push_back(std::move(src));
 
@@ -97,7 +96,6 @@ UsdGenGraphDesc MakeRaggedDesc()
     def.path    = SdfPath("/ragged/deform");
     def.type    = TfToken("UsdGenDeform");
     def.enabled = true;
-    def.blend   = 1.0f;
     def.inputs.push_back(SdfPath("/ragged/src"));
     d.nodes.push_back(std::move(def));
     return d;

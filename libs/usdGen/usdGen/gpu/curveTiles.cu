@@ -1,4 +1,5 @@
 #include "curveTiles.h"
+#include "cudaCompat.h"
 
 #include <algorithm>
 #include <limits>

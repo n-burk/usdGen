@@ -114,7 +114,6 @@ struct Options {
     TfToken idSource{"primvar"};
     TfToken staleAction{"warn"};
     TfToken rebind{"onError"};
-    TfToken lane{"hair"};
     std::string expectedEpoch;
 };
 
@@ -127,7 +126,6 @@ bool ReadOptions(UsdGenCaptureContext const &ctx, Options *out,
         !ReadToken(params, TfToken("idSource"), TfToken("primvar"), &out->idSource, diag) ||
         !ReadToken(params, TfToken("staleAction"), TfToken("warn"), &out->staleAction, diag) ||
         !ReadToken(params, TfToken("rebind"), TfToken("onError"), &out->rebind, diag) ||
-        !ReadToken(params, TfToken("lane"), TfToken("hair"), &out->lane, diag) ||
         !ReadString(params, TfToken("expectEpoch"), &out->expectedEpoch, diag))
         return false;
     // Pure-value builders normally map usdGen:useRest to `useRest`, but
@@ -146,8 +144,6 @@ bool ReadOptions(UsdGenCaptureContext const &ctx, Options *out,
     if (out->rebind != TfToken("never") && out->rebind != TfToken("onError") &&
         out->rebind != TfToken("always"))
         return Fail(diag, "rebind must be 'never', 'onError', or 'always'");
-    if (out->lane != TfToken("hair"))
-        return Fail(diag, "CurveSource supports only lane='hair'; use ReferenceSource for guide/reference data");
     return true;
 }
 
@@ -325,9 +321,9 @@ void PutFrame(GfMatrix4d const &frame, UsdGenCurveBuffer *out, size_t index)
     GfVec3d const t = frame.GetRow3(0);
     GfVec3d const b = frame.GetRow3(1);
     GfVec3d const n = frame.GetRow3(2);
-    out->rootT[index] = GfVec3f(t[0], t[1], t[2]);
-    out->rootB[index] = GfVec3f(b[0], b[1], b[2]);
-    out->rootN[index] = GfVec3f(n[0], n[1], n[2]);
+    out->rootT[index] = GfVec3f(t);
+    out->rootB[index] = GfVec3f(b);
+    out->rootN[index] = GfVec3f(n);
 }
 
 } // namespace

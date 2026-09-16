@@ -3,7 +3,7 @@
 //
 //   constant width; root->tip ramp over hairT (`width:knots`); the
 //   `width:interpolation` token is honoured (linear vs default catmullRom);
-//   taper fall-off; root/tip linear scale; replace (set) vs multiply.
+//   replace (set) vs multiply; the mask envelope.
 //
 // Tier T0: op kernel directly (no scheduler, no Hydra, no stage — gate B-1).
 // SeExpr-driven width is NOT covered here: expressions evaluate at capture
@@ -45,12 +45,12 @@ bool Near(float a, float b) { return std::fabs(a - b) <= kEps; }
 
 /// Drive one Width evaluate over 2 curves x 4 CVs with hairT = i/3.
 /// `params` are (prefix-stripped) UsdGenParamValues; `inWidth` null means
-/// no upstream widths (set path). `curveMask`, when present, supplies the
-/// capture-resolved per-curve portion of Width's local mask envelope.
+/// no upstream widths (set path). The CPU reference lane reads the LITERAL
+/// usdGen:mask as the whole operator envelope, so callers pass it as an
+/// ordinary parameter here.
 /// Returns the 8 output widths.
 std::vector<float> RunWidth(std::vector<UsdGenParamValue> const &params,
                             float const *inWidth,
-                            float const *curveMask = nullptr,
                             bool ragged = false)
 {
     std::unique_ptr<UsdGenOp> op = CreateWidthOp();
@@ -71,7 +71,7 @@ std::vector<float> RunWidth(std::vector<UsdGenParamValue> const &params,
 
     UsdGenCaptureContext cctx;
     cctx.params = &view;
-    UsdGenCurveBuffer upstream;  // empty: default (constant) mask
+    UsdGenCurveBuffer upstream;  // empty: Width's capture reads no geometry
     std::unique_ptr<UsdGenCapture> cap = op->CreateCapture();
     if (!op->Capture(cctx, upstream, cap.get(), &diag)) {
         std::printf("FAIL: Capture failed\n");
@@ -91,7 +91,6 @@ std::vector<float> RunWidth(std::vector<UsdGenParamValue> const &params,
     chunk.hairT = hairT.data();
     chunk.inWidth = inWidth;
     chunk.width = out.data();
-    chunk.curveMask = curveMask;  // null == 1.0
     UsdGenChunkDesc chunkDesc{};
     int const offsets[] = {101, 104, 109};
     if (ragged) {
@@ -177,34 +176,6 @@ int main()
         Check(okCr, "default (catmullRom) V ramp differs from linear at t=1/3");
     }
 
-    // 4. Taper: taper=1 from taperStart=0 -> w *= (1-t); tip pinches to 0.
-    {
-        auto out = RunWidth({P("width", VtValue(0.02)),
-                             P("taper", VtValue(1.0)),
-                             P("taperStart", VtValue(0.0))}, nullptr);
-        bool ok = out.size() == 8;
-        if (ok)
-            for (size_t k = 0; k < 8; ++k) {
-                float const t = float(k % 4) / 3.0f;
-                if (!Near(out[k], 0.02f * (1.0f - t))) { ok = false; break; }
-            }
-        Check(ok, "taper=1 from root: widths == 0.02*(1-t), tip == 0");
-    }
-
-    // 5. Root/tip scale: 0 at root, 2x at tip, linear in hairT.
-    {
-        auto out = RunWidth({P("width", VtValue(0.02)),
-                             P("rootScale", VtValue(0.0)),
-                             P("tipScale", VtValue(2.0))}, nullptr);
-        bool ok = out.size() == 8;
-        if (ok)
-            for (size_t k = 0; k < 8; ++k) {
-                float const t = float(k % 4) / 3.0f;
-                if (!Near(out[k], 0.04f * t)) { ok = false; break; }
-            }
-        Check(ok, "rootScale=0 tipScale=2: widths == 0.04*t");
-    }
-
     // 6. replace=false multiplies upstream widths instead of setting.
     {
         float const in[8] = {3, 3, 3, 3, 3, 3, 3, 3};
@@ -219,11 +190,12 @@ int main()
     {
         float const in[8] = {4, 4, 4, 4, 4, 4, 4, 4};
         for (float const maskValue : {0.0f, 0.5f, 1.0f}) {
-            float const mask[2] = {maskValue, maskValue};
             auto replace = RunWidth({P("width", VtValue(2.0)),
-                                     P("replace", VtValue(true))}, in, mask);
+                                     P("mask", VtValue(double(maskValue))),
+                                     P("replace", VtValue(true))}, in);
             auto multiply = RunWidth({P("width", VtValue(2.0)),
-                                      P("replace", VtValue(false))}, in, mask);
+                                      P("mask", VtValue(double(maskValue))),
+                                      P("replace", VtValue(false))}, in);
             float const expectedReplace = 4.0f + (2.0f - 4.0f) * maskValue;
             float const expectedMultiply =
                 4.0f * (1.0f + (2.0f - 1.0f) * maskValue);
@@ -234,12 +206,22 @@ int main()
         }
     }
 
+    // 7b. A zero mask is a BITWISE pass-through of the incoming widths.
+    {
+        float const in[8] = {4.25f, 0.5f, 3.f, 1.f, 9.f, 0.125f, 7.f, 2.f};
+        auto out = RunWidth({P("width", VtValue(2.0)),
+                             P("mask", VtValue(0.0)),
+                             P("replace", VtValue(true))}, in);
+        Check(out == std::vector<float>(in, in + 8),
+              "mask == 0 leaves every incoming width bit-identical");
+    }
+
     // 8. A generic source without a width plane uses the documented .01
     // fallback in this direct-kernel fixture; masks still envelope it.
     {
-        float const halfMask[2] = {0.5f, 0.5f};
         auto out = RunWidth({P("width", VtValue(2.0)),
-                             P("replace", VtValue(true))}, nullptr, halfMask);
+                             P("mask", VtValue(0.5)),
+                             P("replace", VtValue(true))}, nullptr);
         AllNear(out, 1.005f,
                 "missing input width uses the default baseline under a mask");
     }
@@ -248,11 +230,13 @@ int main()
     // Unequal spans and a nonzero first CV catch both uniform-only loops and
     // accidental absolute indexing into the eight-element output.
     {
-        float const in[8] = {4, 4, 4, 4, 4, 4, 4, 4};
-        float const masks[2] = {0.0f, 0.5f};
-        auto out = RunWidth({P("width", VtValue(2.0))}, in, masks, true);
-        Check(out == std::vector<float>({4, 4, 4, 3, 3, 3, 3, 3}),
-              "ragged Width rebases absolute offsets and applies each curve mask");
+        // Distinct per-curve input widths: an output slot written from the
+        // wrong absolute index would show the other curve's value.
+        float const in[8] = {4, 4, 4, 8, 8, 8, 8, 8};
+        auto out = RunWidth({P("width", VtValue(2.0)),
+                             P("mask", VtValue(0.5))}, in, true);
+        Check(out == std::vector<float>({3, 3, 3, 5, 5, 5, 5, 5}),
+              "ragged Width rebases absolute offsets under the mask envelope");
     }
 
     std::printf(g_allOk ? "testUsdGenWidth: PASS\n" : "testUsdGenWidth: FAILED\n");

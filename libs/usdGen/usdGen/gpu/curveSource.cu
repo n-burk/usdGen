@@ -1,4 +1,5 @@
 #include "curveSource.h"
+#include "cudaCompat.h"
 
 #include <cmath>
 #include <limits>

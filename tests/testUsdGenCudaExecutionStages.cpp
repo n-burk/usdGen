@@ -45,7 +45,6 @@ static UsdGenGraphDesc Desc() {
     width.params.push_back({TfToken("width"), VtValue(.03f), false});
     UsdGenNodeDesc deform; deform.path=SdfPath("/Stages/Hair/Deform");
     deform.type=TfToken("UsdGenDeform"); deform.inputs={width.path}; deform.surfaces={s.path};
-    deform.mode=TfToken("rbf"); deform.readPhase=TfToken("final");
     deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
     d.nodes={source,length,width,deform}; d.terminal=deform.path;
     return d;
@@ -68,7 +67,7 @@ static UsdGenGraphDesc SourceControlDesc(bool empty = false, bool withRbf = fals
     if (empty) {
         curves.curveVertexCounts.clear(); curves.points.clear(); curves.rest.clear();
         curves.widths.clear(); curves.skinPrim.clear(); curves.curveId.clear();
-        curves.skinPrimUv.clear(); curves.rootFrame.clear(); curves.guideBlend.clear();
+        curves.skinPrimUv.clear(); curves.rootFrame.clear();
     }
     auto& source = d.nodes.front();
     source.params.push_back({TfToken("useRest"), VtValue(false), false});
@@ -107,8 +106,9 @@ static UsdGenGraphDesc WidthExpressionDesc(bool invalid = false) {
     };
     add("/WidthPoint", invalid ? "$frame / 0" : "$value * (0.5 + 0.5 * $t)",
         "width", expr::Domain::Point, TfToken("float"), expr::ScalarType::Float32, VtValue(.03f));
-    add("/WidthPrimitive", "$value + $primIndex", "rootScale", expr::Domain::Primitive,
-        TfToken("float"), expr::ScalarType::Float32, VtValue(1.f));
+    add("/WidthPrimitive", "$value * (1 - 0.5 * $primIndex)", "mask",
+        expr::Domain::Primitive, TfToken("float"), expr::ScalarType::Float32,
+        VtValue(1.f));
     add("/WidthEnabled", "$frame >= 0", "enabled", expr::Domain::Groom,
         TfToken("bool"), expr::ScalarType::Bool, VtValue(true));
     add("/WidthReplace", "$primIndex == 0", "replace", expr::Domain::Primitive,
@@ -157,7 +157,7 @@ static UsdGenGraphDesc LengthExpressionDesc(bool cull = false, bool invalid = fa
     add("/LengthPrimitive",cull ? "$value + $primIndex" : "$value + 0.01 * $primIndex",
         "cullThreshold",expr::Domain::Primitive,TfToken("float"),expr::ScalarType::Float32,
         VtValue(cull ? 1.f : 0.f));
-    add("/LengthBlend","$value","blend",expr::Domain::Primitive,
+    add("/LengthMask","$value","mask",expr::Domain::Primitive,
         TfToken("float"),expr::ScalarType::Float32,VtValue(1.f));
     add("/LengthEnabled","$frame >= 0","enabled",expr::Domain::Groom,
         TfToken("bool"),expr::ScalarType::Bool,VtValue(true));
@@ -1670,7 +1670,7 @@ int main() {
         auto blocked=prepareFinal(lengthPlan,blockedWorkspace,104,lengthAsyncGeneration); CHECK(blocked);
         std::shared_ptr<const UsdGenDeviceGeneration> result;
         std::atomic<int> calls{0}, blockedCalls{0};
-        gate.arm(); ReleaseFinalizationGate releaseGate{gate.release};
+        gate.arm(); ReleaseFinalizationGate releaseFinalGate{gate.release};
         CHECK(FinalizeCudaExecutionJobAsync(held,[&](auto generation) {
             result=std::move(generation); ++calls;
         }));
@@ -1679,7 +1679,7 @@ int main() {
               !FinalizeCudaExecutionJobAsync(blocked,[&](auto) { ++blockedCalls; }) && blockedCalls==0 &&
               !FinalizeCudaExecutionJobAsync(held,[](auto) {}) &&
               !FinalizeCudaExecutionJob(*held) && !ExecuteCudaJobOperator(*held,0));
-        gate.release(); releaseGate.release=nullptr;
+        gate.release(); releaseFinalGate.release=nullptr;
         auto const deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
         while (calls.load(std::memory_order_acquire)==0 && std::chrono::steady_clock::now()<deadline) std::this_thread::yield();
         CHECK(calls==1 && result && cudaFinalizationRelayOccupiedCountForTesting()==0);

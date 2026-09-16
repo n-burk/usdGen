@@ -4,6 +4,7 @@
 // separate from the production Hydra builder so the production object has no
 // UsdStage dependencies (B-2/V2-11).
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
+#include "usdGenImaging/expressionConnection.h"
 #include "usdGenImaging/imageMapCache.h"
 
 #include "usdGen/expressions/valueShape.h"
@@ -54,16 +55,12 @@ bool
 _isDedicated(TfToken const &name)
 {
     static std::unordered_set<std::string> const dedicated{
-        "usdGen:type", "usdGen:mode", "usdGen:algorithmVersion",
-        "usdGen:enabled", "usdGen:seed", "usdGen:blend", "usdGen:space",
-        "usdGen:readPhase", "usdGen:input", "usdGen:terminal",
+        "usdGen:type", "usdGen:mode",
+        "usdGen:enabled", "usdGen:seed",
         "usdGen:references", "usdGen:guides", "usdGen:curves",
-        "usdGen:frozen:curves", "usdGen:surface", "usdGen:mask:source",
-        "usdGen:map",
+        "usdGen:frozen:curves", "usdGen:surface",
         // description-level dedicated fields
-        "usdGen:densityScale", "usdGen:renderDensityScale",
-        "usdGen:tileTarget", "usdGen:pickTarget", "usdGen:curve:basis",
-        "usdGen:motion:mode", "usdGen:motion:sampleCount",
+        "usdGen:tileTarget", "usdGen:curve:basis",
     };
     // usdGen:look:* lives in UsdGenLookDesc, not params.
     return dedicated.count(name.GetString()) != 0 ||
@@ -452,9 +449,6 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
         out->frozenEpoch = epoch.UncheckedGet<TfToken>().GetString();
     }
 
-    // guideBlend: usdGen:blend on UsdGenGuideSet prims, per guide.
-    _GetPrimvarTyped(prim, TfToken("usdGen:blend"), UsdTimeCode(time),
-                     &out->guideBlend);
 }
 
 
@@ -553,18 +547,12 @@ BuildGraphDescFromStage(
         _GetToken(prim, "usdGen:type", &type);
         node.type = type.IsEmpty() ? prim.GetPrimTypeInfo().GetTypeName() : type;
         _GetToken(prim, "usdGen:mode", &node.mode);
-        _GetToken(prim, "usdGen:space", &node.space);
-        _GetToken(prim, "usdGen:readPhase", &node.readPhase);
-        _GetDedicated(prim.GetAttribute(TfToken("usdGen:algorithmVersion")),
-                  UsdTimeCode::Default(), &node.algorithmVersion, &desc.validationErrors, node.path, "usdGen:algorithmVersion");
         bool enabled = true;
         _GetDedicated(prim.GetAttribute(TfToken("usdGen:enabled")),
                   UsdTimeCode::Default(), &enabled, &desc.validationErrors, node.path, "usdGen:enabled");
         node.enabled = enabled;
         _GetDedicated(prim.GetAttribute(TfToken("usdGen:seed")),
                   UsdTimeCode::Default(), &node.seed, &desc.validationErrors, node.path, "usdGen:seed");
-        _GetDedicated(prim.GetAttribute(TfToken("usdGen:blend")),
-                  UsdTimeCode::Default(), &node.blend, &desc.validationErrors, node.path, "usdGen:blend");
 
         for (UsdRelationship const &rel : prim.GetRelationships()) {
             std::string const name = rel.GetBaseName().GetString();
@@ -576,31 +564,6 @@ BuildGraphDescFromStage(
             } else if (name == "guides" || name == "curves" ||
                        name == "frozen:curves") {
                 bucket = &node.curves;
-            } else if (name == "surface") {
-                bucket = &node.surfaces;
-            } else if (name == "source" || name == "map") {
-                // Base names collide ("mask:source" vs "length:source" both
-                // → "source"): disambiguate by full relationship name.
-                std::string const full = rel.GetName().GetString();
-                usdGen::UsdGenMapBindingPurpose purpose;
-                if (full == "usdGen:mask:source" || full == "usdGen:map" ||
-                    full == "usdGen:length:source") {
-                    bucket = &node.maps;
-                    purpose = full == "usdGen:mask:source"
-                        ? usdGen::UsdGenMapBindingPurpose::MaskSource
-                        : (full == "usdGen:length:source"
-                            ? usdGen::UsdGenMapBindingPurpose::LengthSource
-                            : usdGen::UsdGenMapBindingPurpose::Generic);
-                } else {
-                    continue;
-                }
-                SdfPathVector relTargets;
-                rel.GetTargets(&relTargets);
-                for (SdfPath const &t : relTargets) {
-                    bucket->push_back(t); // legacy flat transport
-                    node.mapBindings.push_back({t, purpose, TfToken(full)});
-                }
-                continue;
             } else {
                 continue;  // not a graph edge (base-name match only)
             }
@@ -624,12 +587,12 @@ BuildGraphDescFromStage(
             SdfPathVector connections;
             a.GetConnections(&connections);
             for (SdfPath const &c : connections) {
-                TfToken const prop = c.GetNameToken();
-                std::string const output = prop.GetString();
                 usdGen::UsdGenExpressionBinding binding;
                 binding.expression = c.GetPrimPath();
-                binding.output = output.rfind("outputs:", 0) == 0
-                    ? TfToken(output.substr(8)) : TfToken();
+                // A connection may name the expression prim instead of one of
+                // its outputs; resolve both spellings to the same binding.
+                binding.output =
+                    UsdGenResolveExpressionConnectionOutput(prim, c);
                 binding.destination = a.GetName();
                 binding.nativeType = a.GetTypeName().GetAsToken();
                 binding.domain = _ExpressionDomain(a);
@@ -644,9 +607,8 @@ BuildGraphDescFromStage(
         desc.nodes.push_back(std::move(node));
     }
 
-    // Surface inheritance (02 §2): an operator with no usdGen:surface of its
-    // own inherits the description's bound surface. The walker collects only
-    // operator prims, so read the description prim's relationship directly.
+    // 02 §2: the bound surface is the Description's. There is no per-operator
+    // override, so every node sees the same target set.
     {
         SdfPathVector descSurfaces;
         if (UsdRelationship rel = descPrim.GetRelationship(
@@ -655,9 +617,7 @@ BuildGraphDescFromStage(
         }
         if (!descSurfaces.empty()) {
             for (UsdGenNodeDesc &node : desc.nodes) {
-                if (node.surfaces.empty()) {
-                    node.surfaces = descSurfaces;
-                }
+                node.surfaces = descSurfaces;
             }
         }
     }
@@ -756,20 +716,11 @@ BuildGraphDescFromStage(
     }
 
     // ---- description-level fields (02 §2.3/§2.12/§2.14) -------------------
-    _GetTyped(descPrim.GetAttribute(TfToken("usdGen:densityScale")),
-              UsdTimeCode::Default(), &desc.densityScale);
-    _GetTyped(descPrim.GetAttribute(TfToken("usdGen:renderDensityScale")),
-              UsdTimeCode::Default(), &desc.renderDensityScale);
     _GetDedicated(descPrim.GetAttribute(TfToken("usdGen:width:default")),
               UsdTimeCode(options.time), &desc.defaultWidth, &desc.validationErrors, desc.description, "usdGen:width:default");
     _GetDedicated(descPrim.GetAttribute(TfToken("usdGen:tileTarget")),
               UsdTimeCode::Default(), &desc.tileTarget, &desc.validationErrors, desc.description, "usdGen:tileTarget");
-    _GetTyped(descPrim.GetAttribute(TfToken("usdGen:motion:sampleCount")),
-              UsdTimeCode::Default(), &desc.motionSampleCount);
-    desc.motionSampleCount = std::max(2, std::min(16, desc.motionSampleCount));
-    _GetToken(descPrim, "usdGen:motion:mode", &desc.motionMode);
     _GetToken(descPrim, "usdGen:curve:basis", &desc.curveBasis);
-    _GetToken(descPrim, "usdGen:pickTarget", &desc.pickTarget);
 
     UsdGenLookDesc &look = desc.look;
     _GetTyped(descPrim.GetAttribute(TfToken("usdGen:look:rootColor")),

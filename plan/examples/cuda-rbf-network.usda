@@ -36,7 +36,6 @@ def UsdGenGroom "Groom"
             }
             def UsdGenDeform "deform"
             {
-                uniform token usdGen:mode = "rbf"
                 int usdGen:rbfSamples = 5
                 bool usdGen:lockRoots = true
             }

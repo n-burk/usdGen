@@ -36,7 +36,7 @@ struct USDGEN_EXECUTION_RESOURCES_API UsdGenExecutionResourceSnapshot {
 
 class UsdGenExecutionResourcePool;
 class UsdGenExecutionMemoryReservation;
-class UsdGenExecutionMemoryReservationState;
+struct UsdGenExecutionMemoryReservationState;
 
 // Move-only allocation charge. It must be retained by the allocation itself,
 // not by the operation which happened to allocate it.  A quarantined CUDA
@@ -80,7 +80,7 @@ private:
                                   std::shared_ptr<UsdGenExecutionMemoryReservationState> = {}) noexcept;
     friend class UsdGenExecutionResourcePool;
     friend class UsdGenExecutionMemoryReservation;
-    friend class UsdGenExecutionMemoryReservationState;
+    friend struct UsdGenExecutionMemoryReservationState;
 };
 
 // Move-only precharged memory balance. Its bytes are already included in the

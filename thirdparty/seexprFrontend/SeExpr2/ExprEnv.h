@@ -53,7 +53,7 @@ class ExprLocalVar {
     virtual void setPhi(ExprLocalVar* phi) { _phi = phi; }
 
     //! LLVM value that has been allocated
-    virtual LLVM_VALUE codegen(LLVM_BUILDER, const std::string& name, LLVM_VALUE referenceType) LLVM_BODY;
+    virtual LLVM_VALUE codegen(LLVM_BUILDER, const std::string& /*name*/, LLVM_VALUE /*referenceType*/) LLVM_BODY;
 
     //! LLVM value that has been pre-done
     virtual LLVM_VALUE varPtr() { return _varPtr; }
@@ -137,7 +137,7 @@ class ExprVarEnv {
     // static bool branchesMatch(const ExprVarEnv & env1, const ExprVarEnv & env2);
     size_t mergeBranches(const ExprType& type, ExprVarEnv& env1, ExprVarEnv& env2);
     // Code generate merges.
-    LLVM_VALUE codegenMerges(LLVM_BUILDER builder, int mergeIndex) LLVM_BODY;
+    LLVM_VALUE codegenMerges(LLVM_BUILDER /*builder*/, int /*mergeIndex*/) LLVM_BODY;
     // Query merges
     std::vector<std::pair<std::string, ExprLocalVarPhi*>>& merge(size_t index) { return _mergedVariables[index]; }
 };

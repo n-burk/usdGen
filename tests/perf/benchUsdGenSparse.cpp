@@ -75,7 +75,6 @@ UsdGenGraphDesc MakeG3(){
        n.path = SdfPath("/groom/" + name);
        n.type = type;
        n.enabled = true;
-       n.blend = 1.0f;
        n.seed = seed;
        if (!input.empty()) n.inputs.push_back(SdfPath("/groom/" + input));
        if (type == TfToken("UsdGenScatter"))
@@ -151,9 +150,9 @@ int main(int argc, char **argv)
        return 1;
    }
    UsdGenNodeId const noise = graph.NodeIdForPath(SdfPath("/groom/noise"));
-   uint32_t const nChunks = graph.Chunks(noise).size();
+   uint32_t const nChunks = static_cast<uint32_t>(graph.Chunks(noise).size());
    UsdGenChunkId const cA = nChunks / 2;
-   UsdGenChunkId const cB = cA + 1;
+   UsdGenChunkId const dirtyChunks[2] = {cA, cA + 1};
 
    // Context: clean steady-state commit.
    {
@@ -170,7 +169,7 @@ int main(int argc, char **argv)
    std::vector<double> samples;
    samples.reserve(9);
    for (int i = 0; i < 9; ++i) {
-       graph.DirtyChunks(noise, TfSpan<const UsdGenChunkId>(&cA, 2));
+       graph.DirtyChunks(noise, TfSpan<const UsdGenChunkId>(dirtyChunks, 2));
        auto const t0 = std::chrono::steady_clock::now();
        UsdGenRunResult const res = scheduler.Run(graph, ctx, 3 + i);
        auto const t1 = std::chrono::steady_clock::now();

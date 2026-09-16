@@ -32,6 +32,14 @@ struct UsdGenExecutionRetirementConfig { size_t capacity = 1024; };
 class UsdGenExecutionRetirementService;
 class UsdGenExecutionRetirementTicket;
 
+// Declare the exported factory before the service's friend declaration. MSVC
+// diagnoses a later dllimport declaration as a different-linkage redeclaration
+// when the unannotated friend is seen first.
+USDGEN_EXECUTION_RESOURCES_API std::shared_ptr<UsdGenExecutionRetirementService>
+GetOrCreateUsdGenExecutionRetirementService(
+    UsdGenExecutionResourceDevice, UsdGenExecutionRetirementConfig,
+    bool requireMatchingConfig = true) noexcept;
+
 // Copy this while the ticket is live, then give it to the native completion
 // mechanism. Signal may occur before or after Retire. The first success or
 // failure wins; duplicate/opposite/late signals are ignored. A slot generation
@@ -104,16 +112,12 @@ private:
     std::shared_ptr<Impl> impl_;
     explicit UsdGenExecutionRetirementService(size_t capacity,
                                               UsdGenExecutionResourceBackend);
-    friend std::shared_ptr<UsdGenExecutionRetirementService>
+    friend USDGEN_EXECUTION_RESOURCES_API std::shared_ptr<UsdGenExecutionRetirementService>
     GetOrCreateUsdGenExecutionRetirementService(UsdGenExecutionResourceDevice,
                                                 UsdGenExecutionRetirementConfig,
                                                 bool) noexcept;
 };
 
-USDGEN_EXECUTION_RESOURCES_API std::shared_ptr<UsdGenExecutionRetirementService>
-GetOrCreateUsdGenExecutionRetirementService(
-    UsdGenExecutionResourceDevice, UsdGenExecutionRetirementConfig,
-    bool requireMatchingConfig = true) noexcept;
 USDGEN_EXECUTION_RESOURCES_API std::shared_ptr<UsdGenExecutionRetirementService>
 FindUsdGenExecutionRetirementService(UsdGenExecutionResourceDevice) noexcept;
 

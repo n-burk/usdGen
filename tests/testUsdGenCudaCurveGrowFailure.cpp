@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
         curves.curveVertexCounts = {2,2,2};
         // Middle curve is deliberately below the cull threshold; source
         // IDs, frames, and named values make survivor/frame lookup visible.
-        curves.points = {{1,2,3},{1,2,4}, {3,2,3},{3,2,3.1}, {5,2,3},{5,2,5}};
+        curves.points = {{1,2,3},{1,2,4}, {3,2,3},{3,2,3.1f}, {5,2,3},{5,2,5}};
         curves.rest = curves.points;
         curves.curveId = {7,11,19}; curves.skinPrim = {0,1,2};
         curves.skinPrimUv = {{0,0},{.25f,.5f},{.75f,.25f}};
@@ -59,11 +59,6 @@ int main(int argc, char** argv) {
     UsdGenNodeDesc grow;
     grow.path = SdfPath("/Grow"); grow.type = TfToken("UsdGenGrow");
     grow.inputs = {source.path}; grow.params = {{TfToken("segments"), VtValue(4), false}};
-    UsdGenMapDesc map;map.path=SdfPath("/Maps/Length");map.type=TfToken("UsdGenImageMap");
-    map.textureGeneration=1;
-    map.imagePayload=UsdGenImagePayload::Create(1,1,1,{.5f});CHECK(map.imagePayload);
-    desc.maps={map};
-    grow.mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,TfToken("usdGen:length:source")}};
     desc.nodes = {source, grow}; desc.terminal = sourceTerminal ? source.path : grow.path;
     if (predecessorGrow) {
         UsdGenNodeDesc noise;

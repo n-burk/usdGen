@@ -1,9 +1,9 @@
 // usdGen engine — compiler (03-execution-engine.md §3).
 //
-// Compile() walks UsdGenGraphDesc::nodes and: edges from usdGen:input only
-// (S26); Kahn sort with namespace tie-break; cycle detection (compile error
-// naming the offending pair); dense node ids in topological order; space /
-// readPhase resolution (§1.6); reference-lane ordering (§1.5); OutputPrimvars
+// Compile() walks UsdGenGraphDesc::nodes and: edges from the composed
+// hierarchy order; Kahn sort with namespace tie-break; cycle detection
+// (compile error naming the offending pair); dense node ids in topological
+// order; reference-lane ordering (§1.5); OutputPrimvars
 // slot binding (§1.2); Merkle structural digests (§3.3); tile arithmetic
 // (R21); dirty routing table rebuild data (§5.1).
 #ifndef USDGEN_COMPILER_H
@@ -32,7 +32,7 @@ struct UsdGenCompileResult
     std::vector<UsdGenNodeId> rebuilt;       // nodes whose UsdGenOp was recreated
     std::vector<UsdGenNodeId> reordered;     // nodes whose topological index moved
     std::vector<std::string>  errors;        // cycle, terminal ambiguity, unknown op, ...
-    std::vector<std::string>  warnings;      // e.g. readPhase "preceding" alias (R9)
+    std::vector<std::string>  warnings;      // non-fatal authoring diagnostics
 };
 
 class UsdGenCompiler

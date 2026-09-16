@@ -9,7 +9,12 @@
 #include "usdGen/executionSequenceWindow.h"
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
 #include "pxr/imaging/hd/sceneGlobalsSchema.h"
+#include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
+#include "pxr/imaging/hd/materialBindingSchema.h"
+#include "pxr/imaging/hd/materialBindingsSchema.h"
+#include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/selectionsSchema.h"
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
@@ -48,7 +53,10 @@ bool UsdGenGroomSceneIndexPlugin::_IsEnabled(HdContainerDataSourceHandle const&)
 namespace {
 using Pipeline = usdGen::UsdGenExecutionPipeline;
 using Session = ::usdGenImaging::UsdGenImagingSession;
-using Handle = ::usdGenImaging::UsdGenSessionHandle;
+// OpenUSD 26.08 introduces pxr::Handle, so a short Handle alias inside the
+// PXR namespace becomes ambiguous under MSVC and Clang. Keep this session
+// type explicit at the boundary.
+using SessionHandle = ::usdGenImaging::UsdGenSessionHandle;
 using Key = ::usdGenImaging::UsdGenSessionKey;
 using Desc = usdGen::UsdGenGraphDesc;
 using CaptureCache = ::usdGenImaging::UsdGenGraphDescCaptureCache;
@@ -73,6 +81,108 @@ bool IsGroom(TfToken const& type) {
 
 HdContainerDataSourceHandle RenderDataSource() {
     return HdRetainedContainerDataSource::New();
+}
+
+SdfPath MaterialPath(SdfPath const& description) {
+    return ::usdGenImaging::UsdGenTilePublisher::MaterialPath(description);
+}
+
+// The prim-level containers a synthetic tile must inherit from (or have
+// masked by) its owning UsdGenDescription, because the scene indices that
+// author them sit UPSTREAM of this one and never see the tiles (06 §4.1
+// displayStyle row; hdx/selectionTracker.cpp:38-49 reads selections off the
+// TERMINAL index, which is downstream of us, so republishing here is enough).
+// materialBindings is in the set because the tile's binding is a FUNCTION of
+// the inherited displayStyle (see DescriptionOverlay): moving the usdview
+// complexity slider has to rebind the tile, not just re-repr it, or the hair
+// material stays bound at the wire level and Storm fails to compile it.
+HdDataSourceLocatorSet const& InheritedFromDescriptionLocators() {
+    static HdDataSourceLocatorSet const locators{
+        HdLegacyDisplayStyleSchema::GetDefaultLocator(),
+        HdSelectionsSchema::GetDefaultLocator(),
+        HdMaterialBindingsSchema::GetDefaultLocator()};
+    return locators;
+}
+
+// refineLevel of a prim-level container, or -1 when it states no opinion.
+int RefineLevelOf(HdContainerDataSourceHandle const& container) {
+    if (!container) return -1;
+    if (HdIntDataSourceHandle const level =
+            HdLegacyDisplayStyleSchema::GetFromParent(container).GetRefineLevel())
+        return level->GetTypedValue(0);
+    return -1;
+}
+
+// The all-purpose material the tile publisher bound, or an empty path.
+SdfPath BoundMaterialPath(HdContainerDataSourceHandle const& tile) {
+    HdMaterialBindingsSchema const bindings =
+        HdMaterialBindingsSchema::GetFromParent(tile);
+    if (!bindings.IsDefined()) return SdfPath();
+    if (HdPathDataSourceHandle const path =
+            bindings.GetMaterialBinding().GetPath())
+        return path->GetTypedValue(0);
+    return SdfPath();
+}
+
+// Null when the description states no opinion the tile has to inherit and the
+// tile's own binding stands, so the common case allocates nothing and the tile
+// data source is returned unwrapped.
+HdContainerDataSourceHandle DescriptionOverlay(
+    HdSceneIndexBaseRefPtr const& input, SdfPath const& description,
+    SdfPath const& tilePath, HdContainerDataSourceHandle const& tile) {
+    if (!input) return nullptr;
+    HdContainerDataSourceHandle const desc = input->GetPrim(description).dataSource;
+    if (!desc) return nullptr;
+    TfToken names[3];
+    HdDataSourceBaseHandle values[3];
+    size_t count = 0;
+    for (TfToken const& name : {HdLegacyDisplayStyleSchema::GetSchemaToken(),
+                                HdSelectionsSchema::GetSchemaToken()}) {
+        if (HdDataSourceBaseHandle value = desc->Get(name)) {
+            names[count] = name;
+            values[count] = std::move(value);
+            ++count;
+        }
+    }
+
+    // Complexity parity with an unbound native UsdGeomBasisCurves. The
+    // displayStyle above passes through UNCLAMPED, so Storm picks exactly the
+    // repr the slider asks for (hdSt/basisCurves.cpp:320-343: 0 = WIRE lines,
+    // 1 = RIBBON + HAIR normal, 2 = RIBBON + ROUND, 3 = HALFTUBE + ROUND).
+    // The binding is what moves instead:
+    //
+    //   refineLevel 0  no materialBindings at all. The default hair shader
+    //                  reads the ribbon orientation vector inData.Neye, which
+    //                  the WIRE repr's curve vertex block does not declare
+    //                  (basisCurves.glslfx:1212-1218) -> the material fails to
+    //                  COMPILE, not just to shade. An AUTHORED binding is
+    //                  hidden here too, because usdGen cannot know that
+    //                  someone else's shader survives the wire repr either.
+    //   refineLevel 1  the synthetic default binding is hidden, so the tile
+    //                  falls back to Storm's flat displayColor shading exactly
+    //                  like a native curve at Medium. An AUTHORED binding
+    //                  wins from here up: the artist asked for it.
+    //   refineLevel 2+ bound, as published.
+    //
+    // Upstream first: the slider's opinion, else the publication's fallback
+    // (2, so a host with no opinion still gets shaded ribbons).
+    int effective = RefineLevelOf(desc);
+    if (effective < 0) effective = RefineLevelOf(tile);
+    bool const authored =
+        BoundMaterialPath(tile) !=
+        ::usdGenImaging::UsdGenTilePublisher::DefaultMaterialPath(tilePath);
+    if (effective == 0 || (effective == 1 && !authored)) {
+        // A block, not an empty container: HdOverlayContainerDataSource MERGES
+        // two containers of the same name, so an empty one would leave the
+        // publisher's binding visible underneath. A block resolves to null
+        // (hd/overlayContainerDataSource.cpp:94-97).
+        names[count] = HdMaterialBindingsSchema::GetSchemaToken();
+        values[count] = HdBlockDataSource::New();
+        ++count;
+    }
+
+    if (count == 0) return nullptr;
+    return HdRetainedContainerDataSource::New(count, names, values);
 }
 
 // Records actual builder reads, including missing targets and GeomSubset
@@ -243,8 +353,29 @@ std::atomic<uint64_t> UsdGenSceneService::RetirementRecord::liveCount{0};
 namespace {
 UsdGenSceneService& SceneService() {
     (void)::usdGenImaging::UsdGenSessionStore::GetInstance();
-    static UsdGenSceneService service;
-    return service;
+    // Intentionally leaked, like the process-lifetime registries in
+    // executionRetirement.cpp, so that ~UsdGenSceneService does not run during
+    // static destruction.
+    //
+    // That destructor quiesces through the scheduled actors and through each
+    // scene's pipeline. Every one of those steps needs some other thread to
+    // execute a posted task, and by the time atexit handlers run on Windows
+    // the TBB worker threads are gone: the posted task is never executed (a
+    // task put to the registry node and given two seconds with no help was
+    // still unexecuted) and the wait for it spins at 100% CPU for as long as
+    // the process is allowed to live. A flow graph's wait_for_all only runs
+    // the tasks belonging to that graph, so a reply-graph wait -- Snapshot's,
+    // and UsdGenExecutionPipeline::Await's -- cannot rescue itself by running
+    // the work it is waiting for.
+    //
+    // Leaking removes the need for that quiesce instead of papering over it:
+    // the service now outlives every handle rather than racing them, so the
+    // deleter's "service already gone" path is simply never taken, and the OS
+    // reclaims the mapping at process death. Scenes torn down while the
+    // process is live are unaffected -- they retire through the actors as
+    // before, with the workers running.
+    static UsdGenSceneService* service = new UsdGenSceneService;
+    return *service;
 }
 }
 
@@ -274,7 +405,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         bool alive = true, authoredRender = false;
         SdfPath root, description;
         Key key;
-        Handle session;
+        SessionHandle session;
         int callback = -1, device = -2;
         // A subscription can publish indefinitely.  Its command mailbox owns
         // one durable owner-ingress credit and replaces an undelivered payload
@@ -453,7 +584,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto it = members.find(g->root);
         return g->alive && it != members.end() && it->second == g;
     }
-    void RememberSession(Handle const& session) {
+    void RememberSession(SessionHandle const& session) {
         TfWeakPtr<Session> candidate = TfCreateWeakPtr(session.operator->());
         bool found = false;
         for (auto it = usedSessions.begin(); it != usedSessions.end();) {
@@ -480,7 +611,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // negotiated asyncPoll boundary.
         QueuePublication(added, removed, dirtied);
     }
-    void Detach(Handle session, Key key, uint64_t seq,
+    void Detach(SessionHandle session, Key key, uint64_t seq,
                 Pipeline::CommandTicket&& sourceTicket,
                 Pipeline::CommandTicket&& replyTicket) {
         if (!session) return;
@@ -510,7 +641,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // session yet.  It deliberately does not clear last-good display.
         AdvanceAttachmentEpoch(*g);
         if (g->session) {
-            Handle const session = g->session;
+            SessionHandle const session = g->session;
             Key const key = g->key;
             int const callback = g->callback;
             g->session = {};
@@ -564,7 +695,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             closeProcessed = true;
         }
     }
-    void Publish(std::shared_ptr<Groom> const& g, Handle const& sourceSession,
+    void Publish(std::shared_ptr<Groom> const& g, SessionHandle const& sourceSession,
                  uint64_t attachmentEpoch,
                  Session::CommitPayload const& payload) {
         if (closing.load() || !Current(g) || !payload.published || !payload.generation ||
@@ -636,7 +767,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         Hold(seq);
         bool accepted = false;
         try {
-            Handle const sourceSession = g->session;
+            SessionHandle const sourceSession = g->session;
             accepted = sourceSession->CommitAsync(std::move(request),
                 [self, g, sourceSession, attachmentEpoch, seq, ticket](
                     Session::CommitPayload const& payload, Pipeline::Outcome) {
@@ -674,7 +805,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         try {
             accepted = ::usdGenImaging::UsdGenSessionStore::GetInstance().AttachAsync(
                 std::move(replies->sourceAttach), requestedKey,
-                [self, g, requestedKey, attachmentEpoch, seq, replies](Handle session) {
+                [self, g, requestedKey, attachmentEpoch, seq, replies](SessionHandle session) {
                     (void)self->Post(std::move(replies->attachAck), [self, g, requestedKey, attachmentEpoch, seq, session, replies] {
                         try {
                             if (!session) { self->Release(seq); return; }
@@ -711,7 +842,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                                     Session::CommitPayload const& payload) {
                                     auto state = weak.lock();
                                     auto member = groom.lock();
-                                    Handle sourceSession =
+                                    SessionHandle sourceSession =
                                         TfCreateRefPtrFromProtectedWeakPtr(weakSession);
                                     if (!state || !member || !sourceSession ||
                                         state->closing.load()) return;
@@ -981,7 +1112,7 @@ UsdGenSceneService::~UsdGenSceneService() {
     ::usdGenImaging::UsdGenSessionStore::GetInstance().Drain();
     // Process shutdown only: finish source callback frames before destroying
     // the retirement service captured by a scene state's final deleter.
-    std::vector<Handle> sessions;
+    std::vector<SessionHandle> sessions;
     for (auto const& state : live) state->owner->InvokeOwner([&] {
         for (auto const& weak : state->usedSessions)
             if (auto session = TfCreateRefPtrFromProtectedWeakPtr(weak))
@@ -1113,6 +1244,17 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     uint64_t rootId = 0;
                     int64_t generation = -1;
                     std::shared_ptr<const TileMap> tiles;
+                    // Stamp of the owning UsdGenDescription in the source
+                    // map.  GetPrim overlays that prim's upstream
+                    // displayStyle and selections onto every tile, and the
+                    // indices that author them
+                    // (HdsiLegacyDisplayStyleOverrideSceneIndex for the
+                    // usdview complexity slider,
+                    // UsdImagingSelectionSceneIndex for the highlight) sit
+                    // upstream of this one and dirty only stage prims. A
+                    // change of this stamp is therefore what invalidates the
+                    // inherited containers on the tiles.
+                    uint64_t descriptionStamp = 0;
                 };
                 std::map<SdfPath, TfToken> beforeNames, targetNames;
                 std::map<SdfPath, Synthetic> beforeSynthetic, targetSynthetic;
@@ -1124,15 +1266,28 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     for (auto const& g : snapshot->members) {
                         // The source map is authoritative for collisions.
                         SdfPath const render = RenderPath(g.description);
+                        auto const source = snapshot->source->find(g.description);
+                        uint64_t const descStamp =
+                            source == snapshot->source->end() ? 0 : source->second.stamp;
                         if (!names.count(render)) {
                             names.emplace(render, TfToken("scope"));
                             synthetic.emplace(render, Synthetic{TfToken("scope"),
-                                g.id, g.generation, g.tiles});
+                                g.id, g.generation, g.tiles, descStamp});
+                        }
+                        // The synthetic default material every tile binds
+                        // when the description authors none (06 §4.4). It is
+                        // an Sprim, so Hydra only ever learns about it from
+                        // this diff.
+                        SdfPath const material = MaterialPath(g.description);
+                        if (!names.count(material)) {
+                            names.emplace(material, TfToken("material"));
+                            synthetic.emplace(material, Synthetic{TfToken("material"),
+                                g.id, g.generation, g.tiles, descStamp});
                         }
                         for (auto const& tile : *g.tiles) if (!names.count(tile.first)) {
                             names.emplace(tile.first, TfToken("basisCurves"));
                             synthetic.emplace(tile.first, Synthetic{TfToken("basisCurves"),
-                                g.id, g.generation, g.tiles});
+                                g.id, g.generation, g.tiles, descStamp});
                         }
                     }
                 };
@@ -1177,6 +1332,18 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         auto const& b = targetSynthetic[now.first];
                         if (a.rootId != b.rootId || a.generation != b.generation || a.tiles != b.tiles)
                             dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
+                        else if (a.descriptionStamp != b.descriptionStamp &&
+                                 b.type == TfToken("basisCurves"))
+                            // The owning Description changed upstream: the
+                            // displayStyle, selections and materialBindings
+                            // GetPrim overlays on the tile may have moved with
+                            // it. The stamp is a scalar, so dirty all three
+                            // inherited containers rather than guess; each is
+                            // a cheap state flag (DirtyDisplayStyle /
+                            // DirtyMaterialId / the selection tracker) and
+                            // never re-uploads geometry.
+                            dirtied.emplace_back(now.first,
+                                                 InheritedFromDescriptionLocators());
                     }
                 }
                 // Root is never structural, but a root value notice remains
@@ -1463,8 +1630,31 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
         if (path == g.root) return {TfToken("UsdGenGroom"), {}};
         if (path == RenderPath(g.description))
             return {TfToken("scope"), RenderDataSource()};
+        if (path == MaterialPath(g.description))
+            return {TfToken("material"),
+                    ::usdGenImaging::UsdGenTilePublisher::
+                        BuildDefaultMaterialDataSource()};
         auto tile = g.tiles->find(path);
-        if (tile != g.tiles->end()) return {TfToken("basisCurves"), tile->second};
+        if (tile == g.tiles->end()) continue;
+        // The synthetic tiles are not in the input scene, so the filters that
+        // sit UPSTREAM of this index never reach them:
+        //   * HdsiLegacyDisplayStyleOverrideSceneIndex (the usdview
+        //     complexity slider, pushed as SetRefineLevelFallback) and
+        //   * UsdImagingSelectionSceneIndex (the viewport selection
+        //     highlight, stamped as a `selections` vector)
+        // both only touch prims of the stage.  Both DO reach the owning
+        // UsdGenDescription, which is a real stage prim, so republish its
+        // opinion onto every tile of that groom.  Upstream goes FIRST: the
+        // slider wins, and the publication's own refineLevel stays as the
+        // underlay fallback for a host that offers no opinion at all.  The
+        // same overlay masks the tile's material binding at the two lowest
+        // complexity levels, so Low and Medium look like an unbound native
+        // UsdGeomBasisCurves.
+        if (auto upstream = DescriptionOverlay(input, g.description, path,
+                                               tile->second))
+            return {TfToken("basisCurves"),
+                    HdOverlayContainerDataSource::New(upstream, tile->second)};
+        return {TfToken("basisCurves"), tile->second};
     }
     return {};
 }
@@ -1477,8 +1667,12 @@ SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) cons
     };
     for (auto const& g : snapshot->members) {
         if (path == g.description) append(RenderPath(g.description));
-        if (path == RenderPath(g.description))
+        if (path == RenderPath(g.description)) {
+            // Tiles first: callers index the render scope's children
+            // positionally to reach "a tile".
             for (auto const& tile : *g.tiles) append(tile.first);
+            append(MaterialPath(g.description));
+        }
     }
     return result;
 }

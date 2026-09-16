@@ -1,6 +1,7 @@
 #include "usdGen/cudaExecution.h"
+
+#include "usdGen/expressionTargets.h"
 #include "usdGen/opRegistry.h"
-#include "usdGen/growLengthMap.h"
 
 #include <algorithm>
 #include <cmath>
@@ -48,23 +49,6 @@ constexpr size_t kCudaWidthBranchStreamCount = 8;
 
 namespace usdGen {
 namespace {
-[[maybe_unused]] std::map<std::string, VtValue> const& IdentityMask() {
-    static const std::map<std::string, VtValue> identityMask{
-        {"mask:amount", VtValue(1.0f)}, {"mask:invert", VtValue(false)},
-        {"mask:range", VtValue(GfVec2f(0,1))},
-        {"mask:rangeMode", VtValue(TfToken("normalized"))},
-        {"mask:combine", VtValue(TfToken("multiply"))},
-        {"mask:random", VtValue(0.0f)}, {"mask:randomSeed", VtValue(0)},
-        {"mask:ramp:knots", VtValue(VtVec2fArray{GfVec2f(0,1),GfVec2f(1,1)})},
-        {"mask:ramp:interpolation", VtValue(TfToken("catmullRom"))},
-        {"mask:rangeMin", VtValue(0.0f)}, {"mask:rangeMax", VtValue(1.0f)},
-        {"mask:effectPosition", VtValue(.5f)}, {"mask:falloff", VtValue(.5f)},
-        {"mask:influenceWidth", VtValue(.5f)}, {"mask:noise:amount", VtValue(0.0f)},
-        {"mask:noise:frequency", VtValue(1.0f)}, {"mask:noise:gain", VtValue(.5f)},
-        {"mask:noise:bias", VtValue(.5f)}, {"mask:noise:seed", VtValue(0)}
-    };
-    return identityMask;
-}
 bool Fail(UsdGenDiagnostics* diagnostics, std::string message) {
     if (diagnostics) diagnostics->Error("CUDA: " + std::move(message));
     return false;
@@ -77,16 +61,31 @@ bool Fail(UsdGenDiagnostics* diagnostics, std::string message) {
 bool IsCudaWidthValueNode(TfToken const& type) {
     return type == TfToken("UsdGenWidth") || type == TfToken("UsdGenWidthBlend");
 }
+// UsdGenWidthBlend carries its own interpolation weight as an operator
+// parameter; it is clamped to exact endpoints exactly as the CPU kernel does.
+float CudaWidthBlendWeight(UsdGenGraphDesc const& desc, UsdGenNodeDesc const& node) {
+    UsdGenParamView const view{&desc, &node};
+    double const weight = view.GetDouble(TfToken("widthBlend:weight"), 1.0);
+    if (!(weight > 0.0)) return 0.0f;
+    return weight >= 1.0 ? 1.0f : static_cast<float>(weight);
+}
 #ifdef USDGEN_ENABLE_CUDA
+// The per-operator expression allowlist is shared with the CPU lane and the
+// compiler (expressionTargets.cpp). Keeping a second copy here is exactly how
+// the two lanes would drift.
+bool ValidateExpressionTargets(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
+    std::vector<std::string> errors;
+    if (UsdGenValidateExpressionTargets(node, &errors)) return true;
+    for (auto const& error : errors) Fail(diagnostics, error);
+    return false;
+}
 bool ValidateLength(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
-    if (node.algorithmVersion < 0 || node.algorithmVersion > 1 || !node.mode.IsEmpty() ||
+    if (!node.mode.IsEmpty() ||
         !node.references.empty() || !node.curves.empty() || !node.maps.empty() ||
         !node.mapBindings.empty())
-        return Fail(diagnostics, "unsupported Length version/mode/reference/map configuration");
-    if (!std::isfinite(node.blend) || node.blend < 0 || node.blend > 1)
-        return Fail(diagnostics, "Length blend must be finite in [0,1]");
+        return Fail(diagnostics, "unsupported Length mode/reference/map configuration");
     static const std::set<std::string> floats{
-        "length:value", "minRemainingLength", "cullThreshold", "mask:amount"};
+        "length:value", "minRemainingLength", "cullThreshold", "mask"};
     std::set<std::string> seen;
     for (auto const& param : node.params) {
         auto name = param.name.GetString();
@@ -95,7 +94,7 @@ bool ValidateLength(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
         if (floats.count(name))
             valid = param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>()) &&
                 param.value.UncheckedGet<float>() >= 0 &&
-                (name != "mask:amount" || param.value.UncheckedGet<float>() <= 1);
+                (name != "mask" || param.value.UncheckedGet<float>() <= 1);
         else if (name == "length:random") {
             valid = param.value.IsHolding<GfVec2f>();
             if (valid) for (int component = 0; component < 2; ++component) {
@@ -109,53 +108,22 @@ bool ValidateLength(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
             valid = param.value == VtValue(TfToken("scale")) || param.value == VtValue(TfToken("cutExtend"));
         else if (name == "rebuild")
             valid = param.value == VtValue(TfToken("keepParam")) || param.value == VtValue(TfToken("reparam"));
-        else if (name == "label") valid = param.value.IsHolding<std::string>();
-        else if (name == "mask:ramp:interpolation") valid = param.value.IsHolding<TfToken>();
-        else if (name == "mask:ramp:knots") {
-            valid = param.value.IsHolding<VtVec2fArray>();
-            float previous = -1;
-            if (valid) for (auto const& knot : param.value.UncheckedGet<VtVec2fArray>()) {
-                valid &= std::isfinite(knot[0]) && std::isfinite(knot[1]) &&
-                    knot[0] >= 0 && knot[0] <= 1 && knot[0] >= previous;
-                previous = knot[0];
-            }
-        } else {
-            auto found = IdentityMask().find(name);
-            valid = found != IdentityMask().end() && param.value == found->second;
-        }
         if (!valid) return Fail(diagnostics, "unsupported or malformed Length parameter " + name);
     }
     for (auto const& ramp : node.ramps)
         if (!ramp.knots.empty() || !ramp.colors.empty() || !ramp.positions.empty())
             return Fail(diagnostics, "Length ramps require named parameters");
-    seen.clear();
-    for (auto const& binding : node.expressionBindings) {
-        auto name = LocalName(binding.destination);
-        bool boolean = name == "enabled", vector = name == "length:random";
-        auto const& shape = binding.destinationShape;
-        if ((!boolean && !vector && !floats.count(name) && name != "blend") ||
-            !seen.insert(name).second || shape.isArray || shape.elementCount != 1 ||
-            shape.components != (vector ? 2u : 1u) || shape.rows != 1 || shape.columns != 1 ||
-            shape.scalar != (boolean ? expr::ScalarType::Bool : expr::ScalarType::Float32) ||
-            binding.nativeType != TfToken(boolean ? "bool" : vector ? "float2" : "float"))
-            return Fail(diagnostics, "unsupported or incorrectly typed Length expression " + name);
-        if ((boolean && binding.domain != expr::Domain::Groom) ||
-            ((name == "cullThreshold" || vector) && binding.domain == expr::Domain::Point))
-            return Fail(diagnostics, "Length enabled requires groom; cullThreshold/random require groom/primitive");
-    }
-    return true;
+    return ValidateExpressionTargets(node, diagnostics);
 }
 bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
-    if (node.type != TfToken("UsdGenWidth") || node.algorithmVersion < 0 || node.algorithmVersion > 1)
+    if (node.type != TfToken("UsdGenWidth"))
         return Fail(diagnostics, "only Width operators may follow CurveSource in this CUDA executor");
     // Surface inheritance is metadata on Width; this operator does not sample
     // it. Do not reject the Description's ordinary inherited scalp target.
     if (!node.references.empty() || !node.curves.empty() || !node.mode.IsEmpty())
         return Fail(diagnostics, "Width references/curves/mode are not supported");
-    if (!std::isfinite(node.blend) || node.blend < 0 || node.blend > 1)
-        return Fail(diagnostics, "Width blend must be in [0,1]");
     static const std::set<std::string> floats{
-        "width", "rootScale", "tipScale", "taper", "taperStart", "mask:amount"};
+        "width", "mask"};
     std::set<std::string> seen;
     for (auto const& param : node.params) {
         auto const& name = param.name.GetString();
@@ -163,9 +131,8 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
         bool valid = false;
         if (floats.count(name)) valid = param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>());
         else if (name == "replace") valid = param.value.IsHolding<bool>();
-        else if (name == "label") valid = param.value.IsHolding<std::string>();
-        else if (name == "width:interpolation" || name == "mask:ramp:interpolation") valid = param.value.IsHolding<TfToken>();
-        else if (name == "width:knots" || name == "mask:ramp:knots") {
+        else if (name == "width:interpolation") valid = param.value.IsHolding<TfToken>();
+        else if (name == "width:knots") {
             valid = param.value.IsHolding<VtVec2fArray>();
             float previous = -1;
             if (valid) for (auto const& knot : param.value.UncheckedGet<VtVec2fArray>()) {
@@ -173,9 +140,6 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
                     valid = false;
                 previous = knot[0];
             }
-        } else {
-            auto it = IdentityMask().find(name);
-            valid = it != IdentityMask().end() && param.value == it->second;
         }
         if (!valid) return Fail(diagnostics, "unsupported or malformed Width parameter " + name);
     }
@@ -184,21 +148,7 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
     for (auto const& ramp : node.ramps)
         if (!ramp.knots.empty() || !ramp.positions.empty() || !ramp.colors.empty())
             return Fail(diagnostics, "anonymous Width ramps require a named parameter");
-    seen.clear();
-    for (auto const& binding : node.expressionBindings) {
-        auto name = LocalName(binding.destination);
-        bool boolean = name == "replace" || name == "enabled";
-        auto const& shape = binding.destinationShape;
-        if ((!boolean && !floats.count(name) && name != "blend") ||
-            !seen.insert(name).second || shape.isArray || shape.elementCount != 1 ||
-            shape.components != 1 || shape.rows != 1 || shape.columns != 1 ||
-            shape.scalar != (boolean ? expr::ScalarType::Bool : expr::ScalarType::Float32) ||
-            binding.nativeType != TfToken(boolean ? "bool" : "float"))
-            return Fail(diagnostics, "unsupported/incorrectly typed Width expression target " + name);
-        if (name == "enabled" && binding.domain != expr::Domain::Groom)
-            return Fail(diagnostics, "Width enabled must evaluate at groom granularity");
-    }
-    return true;
+    return ValidateExpressionTargets(node, diagnostics);
 }
 
 // WidthBlend is intentionally not a second configurable Width.  It consumes
@@ -207,33 +157,35 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
 // small prevents a generic multi-input operator from silently entering the
 // CUDA COW DAG.
 bool ValidateWidthBlend(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
-    if (node.type != TfToken("UsdGenWidthBlend") || node.algorithmVersion != 0 ||
-        !std::isfinite(node.blend) || node.blend < 0.0f || node.blend > 1.0f ||
-        !node.params.empty() || !node.ramps.empty() ||
+    bool paramsOk = true;
+    for (UsdGenParamValue const& param : node.params)
+        paramsOk = paramsOk && param.name == TfToken("widthBlend:weight") &&
+            param.value.IsHolding<float>() &&
+            std::isfinite(param.value.UncheckedGet<float>()) &&
+            param.value.UncheckedGet<float>() >= 0.0f &&
+            param.value.UncheckedGet<float>() <= 1.0f;
+    if (node.type != TfToken("UsdGenWidthBlend") ||
+        !paramsOk || !node.ramps.empty() ||
         !node.expressionBindings.empty() || !node.references.empty() ||
         !node.curves.empty() || !node.surfaces.empty() || !node.maps.empty() ||
         !node.mapBindings.empty() || !node.mode.IsEmpty() || !node.enabled)
         return Fail(diagnostics,
-            "WidthBlend requires version 0, finite blend in [0,1], and no auxiliary inputs");
+            "WidthBlend requires a finite usdGen:widthBlend:weight in [0,1] and no auxiliary inputs");
     return true;
 }
 
 bool ValidateNoise(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
-    if (node.type != TfToken("UsdGenNoise") || node.algorithmVersion < 0 ||
-        node.algorithmVersion > 1 || !node.references.empty() ||
+    // The imaging builders copy the Description's usdGen:surface onto every
+    // node, so a stage-authored Noise always carries the scalp target. Noise
+    // does not sample it; rejecting it would make Noise unusable from a stage
+    // (the same reason ValidateWidth accepts the inherited target).
+    if (node.type != TfToken("UsdGenNoise") || !node.references.empty() ||
         !node.curves.empty() || !node.maps.empty() || !node.mapBindings.empty() ||
-        !node.surfaces.empty() || !node.mode.IsEmpty())
-        return Fail(diagnostics, "Noise does not accept references, curves, maps, surfaces, or mode");
-    if ((!node.space.IsEmpty() && node.space != TfToken("auto") &&
-         node.space != TfToken("rest")) ||
-        (!node.readPhase.IsEmpty() && node.readPhase != TfToken("final")))
-        return Fail(diagnostics,
-            "CUDA Noise currently requires rest/auto space and final sampling");
-    if (!std::isfinite(node.blend) || node.blend < 0 || node.blend > 1)
-        return Fail(diagnostics, "Noise blend must be finite in [0,1]");
+        !node.mode.IsEmpty())
+        return Fail(diagnostics, "Noise does not accept references, curves, maps, or mode");
     static const std::set<std::string> floats{
-        "blend", "noise:magnitude", "noise:frequency", "noise:correlation",
-        "noise:lacunarity", "noise:gain", "preserveLength", "mask:amount"};
+        "noise:magnitude", "noise:frequency", "noise:correlation",
+        "noise:lacunarity", "noise:gain", "preserveLength", "mask"};
     std::set<std::string> seen;
     for (auto const& param : node.params) {
         auto const name = LocalName(param.name);
@@ -244,14 +196,14 @@ bool ValidateNoise(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
                 std::isfinite(param.value.UncheckedGet<float>());
             if (valid && (name == "noise:magnitude" || name == "noise:frequency" ||
                           name == "noise:lacunarity" || name == "preserveLength" ||
-                          name == "mask:amount"))
+                          name == "mask"))
                 valid = param.value.UncheckedGet<float>() >= 0;
             if (valid && name == "noise:frequency")
                 valid = param.value.UncheckedGet<float>() > 0;
             if (valid && name == "noise:lacunarity")
                 valid = param.value.UncheckedGet<float>() > 1;
             if (valid && (name == "noise:correlation" || name == "noise:gain" ||
-                          name == "preserveLength" || name == "mask:amount"))
+                          name == "preserveLength" || name == "mask"))
                 valid = param.value.UncheckedGet<float>() <= 1;
         } else if (name == "noise:octaves" || name == "noise:seed") {
             valid = param.value.IsHolding<int>();
@@ -260,10 +212,9 @@ bool ValidateNoise(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
                     param.value.UncheckedGet<int>() <= 6;
         } else if (name == "enabled" || name == "cumulative") {
             valid = param.value.IsHolding<bool>();
-        } else if (name == "noise:magnitude:interpolation" ||
-                   name == "mask:ramp:interpolation") {
+        } else if (name == "noise:magnitude:interpolation") {
             valid = param.value.IsHolding<TfToken>();
-        } else if (name == "noise:magnitude:knots" || name == "mask:ramp:knots") {
+        } else if (name == "noise:magnitude:knots") {
             valid = param.value.IsHolding<VtVec2fArray>();
             float previous = -1;
             if (valid) for (auto const& knot : param.value.UncheckedGet<VtVec2fArray>()) {
@@ -273,166 +224,21 @@ bool ValidateNoise(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
             }
         } else if (name == "label") {
             valid = param.value.IsHolding<std::string>();
-        } else {
-            auto found = IdentityMask().find(name);
-            valid = found != IdentityMask().end() && param.value == found->second;
         }
         if (!valid) return Fail(diagnostics, "unsupported or malformed Noise parameter " + name);
     }
     for (auto const& ramp : node.ramps)
         if (!ramp.knots.empty() || !ramp.colors.empty() || !ramp.positions.empty())
             return Fail(diagnostics, "Noise ramps require named parameters");
-    seen.clear();
-    for (auto const& binding : node.expressionBindings) {
-        auto name = LocalName(binding.destination);
-        bool boolean = name == "enabled" || name == "cumulative";
-        bool integer = name == "noise:octaves" || name == "noise:seed";
-        bool validName = boolean || integer || floats.count(name) ||
-            name == "noise:frequency" || name == "noise:correlation";
-        auto const& shape = binding.destinationShape;
-        if (!validName || !seen.insert(name).second || shape.isArray ||
-            shape.elementCount != 1 || shape.components != 1 || shape.rows != 1 ||
-            shape.columns != 1 ||
-            shape.scalar != (boolean ? expr::ScalarType::Bool :
-                             integer ? expr::ScalarType::Int32 :
-                             expr::ScalarType::Float32) ||
-            binding.nativeType != TfToken(boolean ? "bool" :
-                                          integer ? "int" : "float"))
-            return Fail(diagnostics, "unsupported or incorrectly typed Noise expression " + name);
-        if ((name == "enabled" && binding.domain != expr::Domain::Groom) ||
-            (name == "cumulative" && binding.domain == expr::Domain::Point) ||
-            (name == "noise:seed" && binding.domain == expr::Domain::Point))
-            return Fail(diagnostics, "Noise expression domain is unsupported for " + name);
-    }
-    return true;
+    return ValidateExpressionTargets(node, diagnostics);
 }
 
-// The first typed CUDA image-map path is deliberately narrow.  ImagePayload
-// has no color-space tag or per-CV UV transport, so accepting broader schema
-// values here would silently claim semantics the executor cannot provide.
-bool ResolveCudaWidthImageMap(UsdGenGraphDesc const& desc,
-                              UsdGenNodeDesc const& node,
-                              std::shared_ptr<const UsdGenImagePayload>* payload,
-                              UsdGenImageSampleOptions* options,
-                              UsdGenDiagnostics* diagnostics) {
-    if (!payload || !options) return false;
-    *payload = {};
-    *options = {};
-    std::vector<UsdGenMapBindingDesc> bindings;
-    if (node.mapBindings.empty()) {
-        if (!node.maps.empty())
-            return Fail(diagnostics, "Width ImageMap requires typed usdGen:mask:source binding at " +
-                        node.path.GetString());
-        return true;
-    }
-    if (!node.maps.empty() && node.maps.size() != node.mapBindings.size())
-        return Fail(diagnostics, "Width legacy/typed map bindings disagree at " +
-                    node.path.GetString());
-    for (size_t i = 0; i != node.mapBindings.size(); ++i) {
-        auto const& binding = node.mapBindings[i];
-        if (!node.maps.empty() && node.maps[i] != binding.map)
-            return Fail(diagnostics, "Width legacy/typed map bindings disagree at " +
-                        node.path.GetString());
-        bindings.push_back(binding);
-    }
-    if (bindings.size() != 1 ||
-        bindings.front().purpose != UsdGenMapBindingPurpose::MaskSource ||
-        (!bindings.front().relationship.IsEmpty() &&
-         bindings.front().relationship != TfToken("usdGen:mask:source")))
-        return Fail(diagnostics, "Width accepts exactly one typed usdGen:mask:source ImageMap at " +
-                    node.path.GetString());
-    auto found = std::find_if(desc.maps.begin(), desc.maps.end(), [&](auto const& map) {
-        return map.path == bindings.front().map;
-    });
-    if (found == desc.maps.end() || found->type != TfToken("UsdGenImageMap") ||
-        !found->imagePayload || !found->imagePayload->IsValid())
-        return Fail(diagnostics, "Width MaskSource ImageMap has no valid decoded payload at " +
-                    node.path.GetString());
-
-    auto token = [&](char const* name, TfToken fallback, TfToken* result) {
-        bool seen = false;
-        for (auto const& param : found->params) if (param.name == TfToken(name)) {
-            if (seen) return false;
-            if (param.value.IsHolding<TfToken>())
-                *result = param.value.UncheckedGet<TfToken>();
-            else if (param.value.IsHolding<std::string>())
-                *result = TfToken(param.value.UncheckedGet<std::string>());
-            else return false;
-            seen = true;
-        }
-        if (!seen) *result = fallback;
-        return true;
-    };
-    auto scalar = [&](char const* name, float fallback, float* result) {
-        bool seen = false;
-        for (auto const& param : found->params) if (param.name == TfToken(name)) {
-            if (seen) return false;
-            if (param.value.IsHolding<float>())
-                *result = param.value.UncheckedGet<float>();
-            else if (param.value.IsHolding<double>())
-                *result = static_cast<float>(param.value.UncheckedGet<double>());
-            else return false;
-            seen = true;
-        }
-        if (!seen) *result = fallback;
-        return true;
-    };
-    TfToken domain, uvSet, filter, wrap, channel, colorSpace;
-    GfVec2f clamp(0, 1);
-    bool clampSeen = false;
-    for (auto const& param : found->params) if (param.name == TfToken("map:clamp")) {
-        if (clampSeen || !param.value.IsHolding<GfVec2f>())
-            return Fail(diagnostics, "Width ImageMap clamp must be a float2 at " + node.path.GetString());
-        clamp = param.value.UncheckedGet<GfVec2f>(); clampSeen = true;
-    }
-    float scale = 1, offset = 0, defaultValue = 0;
-    if (!token("map:domain", TfToken("root"), &domain) ||
-        !token("map:uvSet", TfToken("st"), &uvSet) ||
-        !token("map:filter", TfToken("bilinear"), &filter) ||
-        !token("map:wrap", TfToken("clamp"), &wrap) ||
-        !token("map:channel", TfToken("r"), &channel) ||
-        !token("map:colorSpace", TfToken("raw"), &colorSpace) ||
-        !scalar("map:scale", 1, &scale) || !scalar("map:offset", 0, &offset) ||
-        !scalar("map:default", 0, &defaultValue))
-        return Fail(diagnostics, "Width ImageMap has duplicate or malformed parameters at " +
-                    node.path.GetString());
-    if (domain != TfToken("root") || uvSet != TfToken("st") || colorSpace != TfToken("raw"))
-        return Fail(diagnostics, "Width ImageMap requires root domain, st UVs, and raw color space at " +
-                    node.path.GetString());
-    if (filter == TfToken("nearest")) options->filter = UsdGenImageFilter::Nearest;
-    else if (filter == TfToken("bilinear")) options->filter = UsdGenImageFilter::Bilinear;
-    else return Fail(diagnostics, "Width ImageMap has unsupported filter at " + node.path.GetString());
-    if (wrap == TfToken("clamp")) options->wrap = UsdGenImageWrap::Clamp;
-    else if (wrap == TfToken("repeat")) options->wrap = UsdGenImageWrap::Repeat;
-    else if (wrap == TfToken("mirror")) options->wrap = UsdGenImageWrap::Mirror;
-    else if (wrap == TfToken("black")) options->wrap = UsdGenImageWrap::Black;
-    else return Fail(diagnostics, "Width ImageMap has unsupported wrap at " + node.path.GetString());
-    if (channel == TfToken("r")) options->channel = UsdGenImageChannel::R;
-    else if (channel == TfToken("g")) options->channel = UsdGenImageChannel::G;
-    else if (channel == TfToken("b")) options->channel = UsdGenImageChannel::B;
-    else if (channel == TfToken("a")) options->channel = UsdGenImageChannel::A;
-    else if (channel == TfToken("luminance")) options->channel = UsdGenImageChannel::Luminance;
-    else return Fail(diagnostics, "Width ImageMap requires a scalar channel at " + node.path.GetString());
-    options->scale = scale; options->offset = offset; options->defaultValue = defaultValue;
-    options->clampOutput = clamp[0] != clamp[1];
-    options->outputMin = clamp[0]; options->outputMax = clamp[1];
-    std::string reason;
-    if (!ValidateUsdGenImageSampleOptions(*found->imagePayload, *options, &reason))
-        return Fail(diagnostics, "Width ImageMap options are invalid at " + node.path.GetString() + ": " + reason);
-    *payload = found->imagePayload;
-    return true;
-}
 bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
-    if (node.mode != TfToken("rbf") || node.algorithmVersion < 0 || node.algorithmVersion > 1)
-        return Fail(diagnostics, "Deform requires the supported rbf mode/version");
+    if (!node.mode.IsEmpty())
+        return Fail(diagnostics, "Deform has no mode property; it is always RBF");
     if (node.surfaces.size() != 1 || !node.references.empty() || !node.curves.empty() ||
         !node.maps.empty() || !node.mapBindings.empty())
         return Fail(diagnostics, "RBF Deform requires exactly one surface and no guide/map inputs");
-    if ((!node.space.IsEmpty() && node.space != TfToken("auto") && node.space != TfToken("deformed")) ||
-        (!node.readPhase.IsEmpty() && node.readPhase != TfToken("final")))
-        return Fail(diagnostics, "RBF Deform requires deformed space and final driver sampling");
-    if (!std::isfinite(node.blend) || node.blend < 0 || node.blend > 1)
-        return Fail(diagnostics, "Deform blend must be in [0,1]");
     std::set<std::string> seen;
     for (auto const& param : node.params) {
         auto name = param.name.GetString();
@@ -440,48 +246,16 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
         if (name == "rbfSamples")
             valid &= param.value.IsHolding<int>() && param.value.UncheckedGet<int>() >= 4 && param.value.UncheckedGet<int>() <= 46336;
         else if (name == "lockRoots") valid &= param.value.IsHolding<bool>();
-        else if (name == "twistAware") valid &= param.value == VtValue(true);
-        else if (name == "preserveShape") valid &= param.value == VtValue(0.0f);
-        else if (name == "preserveShape:iterations") valid &= param.value == VtValue(0);
-        else if (name == "label") valid &= param.value.IsHolding<std::string>();
-        else if (name == "mask:amount")
+        else if (name == "mask")
             valid &= param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>()) &&
                 param.value.UncheckedGet<float>() >= 0 && param.value.UncheckedGet<float>() <= 1;
-        else if (name == "mask:ramp:interpolation") valid &= param.value.IsHolding<TfToken>();
-        else if (name == "mask:ramp:knots") {
-            valid &= param.value.IsHolding<VtVec2fArray>();
-            float previous = -1;
-            if (valid) for (auto const& knot : param.value.UncheckedGet<VtVec2fArray>()) {
-                valid &= std::isfinite(knot[0]) && std::isfinite(knot[1]) &&
-                    knot[0] >= 0 && knot[0] <= 1 && knot[0] >= previous;
-                previous = knot[0];
-            }
-        } else {
-            auto found = IdentityMask().find(name);
-            valid &= found != IdentityMask().end() && param.value == found->second;
-        }
+        else valid = false;
         if (!valid) return Fail(diagnostics, "unsupported or malformed RBF parameter " + name);
     }
     for (auto const& ramp : node.ramps)
         if (!ramp.knots.empty() || !ramp.colors.empty() || !ramp.positions.empty())
             return Fail(diagnostics, "RBF ramps require named parameters");
-    seen.clear();
-    for (auto const& binding : node.expressionBindings) {
-        auto name = LocalName(binding.destination);
-        bool boolean = name == "enabled" || name == "lockRoots";
-        bool integer = name == "rbfSamples";
-        auto const& shape = binding.destinationShape;
-        if ((!boolean && !integer && name != "blend" && name != "mask:amount") ||
-            !seen.insert(name).second || shape.isArray || shape.elementCount != 1 ||
-            shape.components != 1 || shape.rows != 1 || shape.columns != 1 ||
-            shape.scalar != (boolean ? expr::ScalarType::Bool : integer ? expr::ScalarType::Int32 : expr::ScalarType::Float32) ||
-            binding.nativeType != TfToken(boolean ? "bool" : integer ? "int" : "float"))
-            return Fail(diagnostics, "unsupported or incorrectly typed RBF expression " + name);
-        if (((name == "enabled" || integer) && binding.domain != expr::Domain::Groom) ||
-            (name == "lockRoots" && binding.domain == expr::Domain::Point))
-            return Fail(diagnostics, "RBF structural/enabled controls require groom; root locking requires groom/primitive");
-    }
-    return true;
+    return ValidateExpressionTargets(node, diagnostics);
 }
 
 bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t terminal,
@@ -490,41 +264,34 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
     auto const& grow = desc.nodes[terminal];
     if (!grow.mode.IsEmpty())
         return Fail(diagnostics, "Scatter->Grow has no Grow mode property");
-    if ((!c3 && (scatter.algorithmVersion != 0 || !scatter.enabled || scatter.blend != 1.0f)) ||
-        grow.algorithmVersion != 0 || !grow.enabled || grow.blend != 1.0f)
-        return Fail(diagnostics, "Scatter->Grow requires enabled version-0 literal nodes");
     if (!std::isfinite(desc.defaultWidth) || desc.defaultWidth < 0)
         return Fail(diagnostics, "description default width must be finite and non-negative");
+    // The imaging builders copy the description's usdGen:surface onto every
+    // operator that authors none of its own, so a Grow reaching this slice
+    // normally carries the same surface as its Scatter. That is the surface
+    // the kernel grows from anyway; only a different one is unsupported.
     if (!grow.references.empty() || !grow.curves.empty() ||
         !grow.expressionBindings.empty() || !grow.ramps.empty() ||
-        !grow.surfaces.empty())
+        (!grow.surfaces.empty() && grow.surfaces != scatter.surfaces))
         return Fail(diagnostics, "Scatter->Grow does not support Grow references/maps/expressions/ramps");
-    std::shared_ptr<const UsdGenImagePayload> lengthImage;
-    UsdGenImageSampleOptions lengthOptions;
-    std::string lengthReason;
-    if (!ResolveUsdGenGrowLengthImageMap(desc, grow, &lengthImage, &lengthOptions, &lengthReason))
-        return Fail(diagnostics, lengthReason);
-    if ((!grow.space.IsEmpty() && grow.space != TfToken("auto") && grow.space != TfToken("rest") &&
-         (!c3 || grow.space != TfToken("deformed"))) ||
-        (!grow.readPhase.IsEmpty() && grow.readPhase != TfToken("final")))
-        return Fail(diagnostics, "Scatter->Grow requires Grow rest space and final read phase");
     // Do not use ParamView for admission here: its convenience conversions
     // deliberately substitute defaults for malformed native values.  This
     // compact GPU slice has no alternate interpretation for an authored
     // control, so every authored value must be both unique and native-typed.
     static std::set<TfToken> const allowed{
         TfToken("segments"), TfToken("length"), TfToken("lengthRandom"),
-        TfToken("lift"), TfToken("uvBlend"), TfToken("direction"),
-        TfToken("directionVector")};
+        TfToken("lift"), TfToken("direction"), TfToken("directionVector")};
     std::set<TfToken> seen;
     for (auto const& value : grow.params) {
-        if (value.animated || !allowed.count(value.name) || !seen.insert(value.name).second)
-            return Fail(diagnostics, "Scatter->Grow has unsupported, animated, or duplicate Grow control " +
+        if (value.animated || !seen.insert(value.name).second)
+            return Fail(diagnostics, "Scatter->Grow has animated or duplicate Grow control " +
+                value.name.GetString());
+        if (!allowed.count(value.name))
+            return Fail(diagnostics, "Scatter->Grow has unsupported Grow control " +
                 value.name.GetString());
         bool valid = false;
         if (value.name == TfToken("segments")) valid = value.value.IsHolding<int>();
-        else if (value.name == TfToken("length") || value.name == TfToken("lift") ||
-                 value.name == TfToken("uvBlend"))
+        else if (value.name == TfToken("length") || value.name == TfToken("lift"))
             valid = value.value.IsHolding<float>() || value.value.IsHolding<double>();
         else if (value.name == TfToken("lengthRandom")) valid = value.value.IsHolding<GfVec2f>();
         else if (value.name == TfToken("direction"))
@@ -546,14 +313,11 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
     if (!std::isfinite(r[0])||!std::isfinite(r[1])||r[0]<0||r[1]<0)
         return Fail(diagnostics,"Scatter->Grow lengthRandom must be finite and non-negative");
     double const lift=p.GetDouble(TfToken("lift"),0.0);
-    double const uvBlend=p.GetDouble(TfToken("uvBlend"),0.0);
-    if (!std::isfinite(lift) || !std::isfinite(uvBlend) ||
-        lift < -90.0 || lift > 90.0 || uvBlend < 0.0 || uvBlend > 1.0)
-        return Fail(diagnostics,"Grow requires lift in [-90,90] degrees and uvBlend in [0,1]");
+    if (!std::isfinite(lift) || lift < -90.0 || lift > 90.0)
+        return Fail(diagnostics,"Grow requires lift in [-90,90] degrees");
     TfToken direction=p.GetToken(TfToken("direction"),TfToken("surfaceNormal"));
-    if (direction!=TfToken("surfaceNormal") && direction!=TfToken("vector") &&
-        direction!=TfToken("attribute"))
-        return Fail(diagnostics,"Grow requires surfaceNormal, attribute/root-tangent, or literal vector direction");
+    if (direction!=TfToken("surfaceNormal") && direction!=TfToken("vector"))
+        return Fail(diagnostics,"Grow requires surfaceNormal or literal vector direction");
     auto v=p.GetVtValue(TfToken("directionVector"),VtValue(GfVec3f(0,1,0)));
     if (!v.IsHolding<GfVec3f>()) return Fail(diagnostics,"Scatter->Grow directionVector must be float3");
     auto const d=v.UncheckedGet<GfVec3f>();
@@ -570,9 +334,8 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
 bool ValidateCudaResolvedInputs(UsdGenGraphDesc const& desc,
                                 UsdGenDiagnostics* diagnostics) {
     for (auto const& node : desc.nodes) {
-        // Typed Width MaskSource maps are lowered directly to the current
-        // CUDA image sampler below. Every other unresolved map remains a
-        // hard failure.
+        // Width and Grow declare no map inputs of their own; every other
+        // unresolved map remains a hard failure.
         if ((node.type == TfToken("UsdGenWidth") || node.type == TfToken("UsdGenGrow")) &&
             node.references.empty()) continue;
         auto const references = node.references.size();
@@ -585,15 +348,14 @@ bool ValidateCudaResolvedInputs(UsdGenGraphDesc const& desc,
             auto const found = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
                 [&](auto const& curves) { return curves.path == node.references.front(); });
             if (found != desc.curveSets.end() && found->role == UsdGenRole::Reference) {
-                if (found->authoredPlanes.empty() && found->rootFrame.empty() &&
-                    found->guideBlend.empty())
+                if (found->authoredPlanes.empty() && found->rootFrame.empty())
                     continue;
                 if (!found->authoredPlanes.empty())
                     return Fail(diagnostics,
                         "UsdGenReferenceSource requires one authored reference curve set without named planes at " +
                         node.path.GetString());
                 return Fail(diagnostics,
-                    "UsdGenReferenceSource rootFrame and guideBlend bindings are not supported by CUDA at " +
+                    "UsdGenReferenceSource rootFrame bindings are not supported by CUDA at " +
                     node.path.GetString());
             }
             return Fail(diagnostics,
@@ -638,7 +400,6 @@ public:
     uint32_t scatterGrowOutputNode = UINT32_MAX;
     std::shared_ptr<const gpu::ScatterGrowRoots> scatterRoots;
     gpu::ScatterGrowControls scatterGrowControls;
-    gpu::GrowLengthMap scatterGrowLengthMap;
     gpu::ScatterGrowRequirements scatterGrowRequirements;
     struct Step {
         SdfPath path;
@@ -650,12 +411,9 @@ public:
         uint32_t rightInputNode = UINT32_MAX;
         bool requiresNonWidthProof = false;
         std::shared_ptr<const CudaParameterProgram> parameters;
-        std::array<float, kUsdGenRampLutSize> profile{}, mask{};
-        std::shared_ptr<const UsdGenImagePayload> maskImage;
-        UsdGenImageSampleOptions maskImageOptions;
+        std::array<float, kUsdGenRampLutSize> profile{};
         CudaSurfacePrepared surface;
         gpu::CurveGrowControls grow;
-        gpu::GrowLengthMap growLengthMap;
     };
     std::vector<std::unique_ptr<const Step>> steps;
 #endif
@@ -734,13 +492,11 @@ struct CudaWidthBlendGraphCache {
         uint32_t blendBits = 0;
         // Captured launch geometry is part of the executable contract even
         // though the current kernel derives its grid solely from count.
-        int algorithmVersion = 0;
         uint32_t blockThreads = 256;
         uint64_t gridBlocks = 0;
         bool operator==(Key const& rhs) const noexcept {
             return path == rhs.path && left == rhs.left && right == rhs.right &&
                 count == rhs.count && blendBits == rhs.blendBits &&
-                algorithmVersion == rhs.algorithmVersion &&
                 blockThreads == rhs.blockThreads && gridBlocks == rhs.gridBlocks;
         }
     };
@@ -956,8 +712,8 @@ CudaWidthBlendGraphCache::Key MakeWidthBlendGraphKey(
     key.left = node.inputs.empty() ? SdfPath{} : node.inputs.front();
     key.right = node.inputs.size() < 2 ? SdfPath{} : node.inputs[1];
     key.count = count;
-    std::memcpy(&key.blendBits, &node.blend, sizeof(key.blendBits));
-    key.algorithmVersion = node.algorithmVersion;
+    float const weight = CudaWidthBlendWeight(plan.desc, node);
+    std::memcpy(&key.blendBits, &weight, sizeof(key.blendBits));
     key.gridBlocks = count ? 1 + (count - 1) / key.blockThreads : 0;
     return key;
 }
@@ -1053,6 +809,39 @@ struct OperatorGrowCandidate {
     std::unique_ptr<gpu::CudaNamedChannelTopologyCandidate> namedTopology;
     bool unsafeInput = false;
 };
+// The optional per-curve channels an expression context reads on top of the
+// geometry: hairT and the root UVs as before, plus the rest root frame
+// ($N/$Nref <- rootN, $dPdu/$dPduref <- rootT, $dPdv/$dPdvref <- rootB) and the
+// surface face index ($faceId <- rootPrim).
+//
+// Those last four are attached only when they are already addressed by the
+// current curve index: the plane must be curveCount long, and a frame set that
+// carries its own stable-ID key must key on the geometry's own IDs.  A frame
+// set from another curve domain would need a gather the context has no
+// machinery for, so it stays null and the variable keeps poisoning rather than
+// reading another curve's frame.
+gpu::ExpressionGeometryChannels ExpressionChannels(
+    gpu::DeviceCurveGeometryView const& geometry,
+    gpu::DeviceView<const float> hairT,
+    gpu::DeviceView<const float2> rootUV,
+    gpu::DeviceView<const int32_t> rootPrim,
+    gpu::RestRootFrames const& frames) {
+    gpu::ExpressionGeometryChannels channels;
+    channels.hairT = hairT;
+    channels.rootUV = rootUV;
+    if (rootPrim.data && rootPrim.size == geometry.curveCount)
+        channels.rootPrim = rootPrim;
+    if (frames.tangent.data && frames.binormal.data && frames.normal.data &&
+        frames.tangent.size == geometry.curveCount &&
+        frames.binormal.size == geometry.curveCount &&
+        frames.normal.size == geometry.curveCount &&
+        (!frames.stableIds.data || frames.stableIds.data == geometry.stableIds.data)) {
+        channels.rootT = frames.tangent;
+        channels.rootB = frames.binormal;
+        channels.rootN = frames.normal;
+    }
+    return channels;
+}
 // Candidate-owned producer state.  Source/resample stay alive even after a
 // later Length compaction: captureStableIds deliberately refers to that
 // original ordered producer during terminal tile construction.
@@ -1257,13 +1046,13 @@ struct ExecutionState {
             for (auto const& plane : owners->planes) if (plane.bytes) plane.bytes->quarantine();
         namedChannelsUnproven = true;
     }
-    bool BeginCurveGrow(gpu::CurveGrowControls const&, gpu::GrowLengthMap const&,
+    bool BeginCurveGrow(gpu::CurveGrowControls const&,
                         cudaStream_t, UsdGenDiagnostics*);
     bool BeginGrowNamed(cudaStream_t, std::shared_ptr<const void>,
                         std::shared_ptr<NamedOwners>, UsdGenDiagnostics*);
     bool AcceptCurveGrow(UsdGenCudaExecutionPlan const&, uint32_t, cudaError_t,
                          std::shared_ptr<NamedOwners>, UsdGenDiagnostics*);
-    bool BeginCurveGrowValue(gpu::CurveGrowControls const&, gpu::GrowLengthMap const&,
+    bool BeginCurveGrowValue(gpu::CurveGrowControls const&,
                              gpu::DeviceCurveGeometryView,
                              gpu::DeviceView<const int32_t>,
                              gpu::DeviceView<const float2>,
@@ -1392,8 +1181,7 @@ bool ValidateCudaNamedPlaneBindings(UsdGenGraphDesc const& desc,
     for (auto const& curves : desc.curveSets)
         hasAuthoredPlanes = hasAuthoredPlanes || !curves.authoredPlanes.empty();
     for (auto const& node : desc.nodes) {
-        std::unique_ptr<UsdGenOp> op = UsdGenOpRegistry::Get().Create(
-            node.type, node.algorithmVersion);
+        std::unique_ptr<UsdGenOp> op = UsdGenOpRegistry::Get().Create(node.type);
         if (!op) continue;
         if (!op->InputPrimvars().empty() || !op->OutputPrimvars().empty()) {
             if (op->TopologyEffect() == UsdGenTopoFx::None)
@@ -1619,8 +1407,7 @@ bool SameRest(CudaSurfaceBindingKey const& a, CudaSurfaceBindingKey const& b) {
     // this cache must not depend on a frame's evaluated count or posed points.
     return a.path == b.path && a.restPoints == b.restPoints &&
         a.restNormals == b.restNormals && a.restNormalDomain == b.restNormalDomain &&
-        a.faceVertexCounts == b.faceVertexCounts && a.faceVertexIndices == b.faceVertexIndices &&
-        a.algorithmVersion == b.algorithmVersion;
+        a.faceVertexCounts == b.faceVertexCounts && a.faceVertexIndices == b.faceVertexIndices;
 }
 
 // Synchronous transaction seam: it fires only after the fresh pose is fully
@@ -2764,7 +2551,7 @@ LiteralLengthAdmission ReserveLiteralLengthExecution(
         widthEstimateOk =
             EstimateMultiply(inputPoints, sizeof(float), &oneWidthPeak) &&
             EstimateMultiply(oneWidthPeak, 3, &oneWidthPeak) &&
-            EstimateAdd(&oneWidthPeak, 2 * 257 * sizeof(float) + 2 * sizeof(int));
+            EstimateAdd(&oneWidthPeak, 257 * sizeof(float) + 2 * sizeof(int));
         // DAG Width outputs are immutable sibling values retained through the
         // publication join. Charge each branch's private COW plane and a
         // conservative simultaneous scratch packet. WidthBlend is charged
@@ -2775,18 +2562,6 @@ LiteralLengthAdmission ReserveLiteralLengthExecution(
             widthEstimateOk = EstimateMultiply(oneWidthPeak,
                 plan.taskDag ? static_cast<uint64_t>(widthCount) : 1,
                 &widthPeak);
-        // Every mapped Width owns its image upload and root-domain sample
-        // plane. On a DAG those candidates can coexist, so sum their peaks
-        // instead of assuming one mutable sampler shared by the branches.
-        for (auto const& step : plan.steps) {
-            if (!widthEstimateOk || !step->maskImage) continue;
-            uint64_t imageBytes = 0, sampleBytes = 0;
-            widthEstimateOk =
-                EstimateMultiply(step->maskImage->TexelCount(), sizeof(float), &imageBytes) &&
-                EstimateMultiply(curves, sizeof(float), &sampleBytes) &&
-                EstimateAdd(&widthPeak, imageBytes) &&
-                EstimateAdd(&widthPeak, sampleBytes);
-        }
         // Every retained WidthBlend candidate owns its device+pinned
         // non-width comparison status packet until the owner commits it.
         for (auto const& step : plan.steps) if (step->requiresNonWidthProof)
@@ -2803,9 +2578,9 @@ LiteralLengthAdmission ReserveLiteralLengthExecution(
         !EstimateSum({sizeof(int), 2 * sizeof(uint32_t), prefixBytes,
                       scanBytes, sizeof(int) + 2 * sizeof(uint32_t)},
                      &perCompaction) ||
-        // External mask/changed/keep plus CudaLength staging/error and its
-        // async pinned diagnostic scalar.  Direct execution uses a subset.
-        !EstimateSum({257 * sizeof(float), twoPointBytes, twoCurveBytes,
+        // External changed/keep plus CudaLength staging/error and its async
+        // pinned diagnostic scalar.  Direct execution uses a subset.
+        !EstimateSum({twoPointBytes, twoCurveBytes,
                       2 * sizeof(int)}, &lengthScratch) ||
         !widthEstimateOk) {
         Fail(diagnostics, "CUDA literal-Length runtime memory estimate overflows");
@@ -2845,16 +2620,6 @@ LiteralLengthAdmission ReserveLiteralLengthExecution(
             Fail(diagnostics, "CUDA literal-Length Grow frame estimate overflows");
             return LiteralLengthAdmission::Failed;
         }
-        for (auto const& step : plan.steps) if (step->type == TfToken("UsdGenGrow") &&
-            step->growLengthMap.image) {
-            uint64_t image = 0, samples = 0;
-            if (!EstimateMultiply(step->growLengthMap.image->TexelCount(), sizeof(float), &image) ||
-                !EstimateMultiply(curves, sizeof(float), &samples) ||
-                !EstimateAdd(&growMapBytes, image) || !EstimateAdd(&growMapBytes, samples)) {
-                Fail(diagnostics, "CUDA literal-Length Grow map estimate overflows");
-                return LiteralLengthAdmission::Failed;
-            }
-        }
     }
     if (hasNoise) {
         uint64_t noisePoints = 0, noiseFrames = 0;
@@ -2866,7 +2631,7 @@ LiteralLengthAdmission ReserveLiteralLengthExecution(
         if (!EstimateMultiply(retainedNoisePlanes, sizeof(float3), &retainedNoiseBytes) ||
             !EstimateMultiply(inputPoints, retainedNoiseBytes, &noisePoints) ||
             !EstimateMultiply(curves, 3 * sizeof(float3), &noiseFrames) ||
-            !EstimateSum({noisePoints, noiseFrames, 2 * 257 * sizeof(float),
+            !EstimateSum({noisePoints, noiseFrames, 257 * sizeof(float),
                           2 * sizeof(int)}, &noisePeak)) {
             Fail(diagnostics, "CUDA literal-Length Noise estimate overflows");
             return LiteralLengthAdmission::Failed;
@@ -3410,11 +3175,7 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         for (uint32_t nodeIndex : layout.operators) {
             auto const& node = desc.nodes[nodeIndex];
             if (node.type == TfToken("UsdGenWidth")) {
-                std::shared_ptr<const UsdGenImagePayload> image;
-                UsdGenImageSampleOptions options;
-                if (!ValidateWidth(node, diagnostics) ||
-                    !ResolveCudaWidthImageMap(desc, node, &image, &options, diagnostics))
-                    return false;
+                if (!ValidateWidth(node, diagnostics)) return false;
             } else if (node.type == TfToken("UsdGenWidthBlend")) {
                 if (!ValidateWidthBlend(node, diagnostics)) return false;
             } else if (node.type == TfToken("UsdGenLength")) {
@@ -3453,8 +3214,7 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
     }
     if (!std::isfinite(desc.timeCodesPerSecond) || desc.timeCodesPerSecond <= 0)
         return Fail(diagnostics, "timeCodesPerSecond must be finite and positive");
-    bool sawDeform = false, needsRootImageUv = false,
-         sawC3Grow = false;
+    bool sawDeform = false, sawC3Grow = false;
     for (auto nodeIndex : layout.operators) {
         auto const& next = desc.nodes[nodeIndex];
         if (!GetCudaExecutionCapabilityMatrix().Find(next.type))
@@ -3496,18 +3256,12 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
                 !ValidateScatterGrow(desc, layout.source, nodeIndex, diagnostics, true))
                 return Fail(diagnostics, "CUDA C3 Grow requires a supported CurveSource value predecessor");
             sawC3Grow = true;
-            needsRootImageUv = needsRootImageUv || !next.mapBindings.empty();
         } else if (next.type == TfToken("UsdGenLength")) {
             if (!ValidateLength(next, diagnostics)) return false;
         } else if (next.type == TfToken("UsdGenNoise")) {
             if (!ValidateNoise(next, diagnostics)) return false;
         } else if (next.type == TfToken("UsdGenWidth")) {
             if (!ValidateWidth(next, diagnostics)) return false;
-            std::shared_ptr<const UsdGenImagePayload> image;
-            UsdGenImageSampleOptions imageOptions;
-            if (!ResolveCudaWidthImageMap(desc, next, &image, &imageOptions, diagnostics))
-                return false;
-            needsRootImageUv = needsRootImageUv || static_cast<bool>(image);
         } else if (next.type == TfToken("UsdGenWidthBlend")) {
             if (!ValidateWidthBlend(next, diagnostics)) return false;
         } else {
@@ -3546,57 +3300,31 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
             [&](auto const& curves) { return curves.path == node.references.front(); });
         if (reference == desc.curveSets.end() || reference->role != UsdGenRole::Reference)
             return Fail(diagnostics, "UsdGenReferenceSource requires a resolved reference curve set");
-        if (needsRootImageUv &&
-            reference->skinPrimUv.size() != reference->curveVertexCounts.size())
-            return Fail(diagnostics,
-                "Width ImageMap requires one root st UV per source curve");
         if (!reference->authoredPlanes.empty())
             return Fail(diagnostics,
                 "UsdGenReferenceSource named planes are not supported by CUDA");
-        if (!reference->rootFrame.empty() || !reference->guideBlend.empty())
+        if (!reference->rootFrame.empty())
             return Fail(diagnostics,
-                "UsdGenReferenceSource rootFrame and guideBlend bindings are not supported by CUDA");
+                "UsdGenReferenceSource rootFrame bindings are not supported by CUDA");
         if (!node.params.empty() || !node.ramps.empty() ||
-            !node.expressionBindings.empty() || !node.enabled || node.blend != 1.0f)
+            !node.expressionBindings.empty())
             return Fail(diagnostics,
-                "UsdGenReferenceSource accepts no parameters, ramps, expressions, or blend");
+                "UsdGenReferenceSource accepts no parameters, ramps, or expressions");
         if (!std::isfinite(desc.defaultWidth) || desc.defaultWidth < 0)
             return Fail(diagnostics, "description default width must be finite and non-negative");
         return true;
     }
-    for (auto const& binding : node.expressionBindings) {
-        auto const& shape = binding.destinationShape;
-        auto const name = LocalName(binding.destination);
-        const bool resample = name == "resampleTo" && binding.nativeType == TfToken("int") &&
-            shape.scalar == expr::ScalarType::Int32;
-        const bool useRest = name == "useRest" && binding.nativeType == TfToken("bool") &&
-            shape.scalar == expr::ScalarType::Bool;
-        if ((!resample && !useRest) || binding.domain != expr::Domain::Groom ||
-            shape.isArray || shape.elementCount != 1 ||
-            shape.components != 1 || shape.rows != 1 || shape.columns != 1)
-            return Fail(diagnostics, "CurveSource only supports groom native resampleTo/useRest expressions");
-    }
-    if (!referenceSource && (!node.enabled || node.blend != 1 ||
-                             node.algorithmVersion < 0 || node.algorithmVersion > 1))
-        return Fail(diagnostics, "unsupported CurveSource enabled/blend/algorithmVersion configuration");
+    if (!ValidateExpressionTargets(node, diagnostics)) return false;
     if (!referenceSource && (!node.inputs.empty() || !node.references.empty() ||
                              !node.maps.empty() || !node.mapBindings.empty()))
         return Fail(diagnostics, "CurveSource cannot consume an upstream/reference/map in the current executor");
     for (auto const& ramp : node.ramps) {
         if (!ramp.positions.empty() || !ramp.colors.empty() ||
             std::any_of(ramp.knots.begin(), ramp.knots.end(), [](auto const& k) { return k[1] != 1.0f || !std::isfinite(k[0]); }))
-            return Fail(diagnostics, "non-identity source ramps require CUDA mask integration");
+            return Fail(diagnostics, "non-identity source ramps are not supported");
     }
     if (node.curves.size() != 1)
         return Fail(diagnostics, "CurveSource requires exactly one C3 curve target");
-    if (needsRootImageUv) {
-        auto source = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
-            [&](auto const& curves) { return curves.path == node.curves.front(); });
-        if (source == desc.curveSets.end() ||
-            source->skinPrimUv.size() != source->curveVertexCounts.size())
-            return Fail(diagnostics,
-                "Width ImageMap requires one root st UV per source curve");
-    }
     if (node.surfaces.size() > 1)
         return Fail(diagnostics, "CurveSource binding requires one resolved parent surface");
     if (!std::isfinite(desc.defaultWidth) || desc.defaultWidth < 0)
@@ -3614,29 +3342,20 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
             source->worldMatrix != GfMatrix4d(1.0))
             return Fail(diagnostics, "RBF currently requires identity Description and CurveSource transforms");
     }
-    if (params.GetToken(TfToken("lane"), TfToken("hair")) != TfToken("hair"))
-        return Fail(diagnostics, "reference-lane CurveSource is not yet integrated");
     // Never silently ignore an authored effect just because this is a source.
     static const std::set<std::string> supported{
-        "useRest", "idSource", "lane", "expectEpoch", "staleAction",
-        "resampleTo", "rebind", "label"};
-    auto const& identityMask = IdentityMask();
+        "useRest", "idSource", "expectEpoch", "staleAction",
+        "resampleTo", "rebind"};
     std::set<TfToken> seen;
     for (auto const& param : node.params) {
         if (!seen.insert(param.name).second)
             return Fail(diagnostics, "duplicate source parameter " + param.name.GetString());
         auto const& name = param.name.GetString();
-        auto mask = identityMask.find(name);
-        if (mask != identityMask.end()) {
-            if (param.value != mask->second)
-                return Fail(diagnostics, "non-identity mask requires CUDA mask integration: " + name);
-            continue;
-        }
         if (!supported.count(name))
             return Fail(diagnostics, "unsupported CurveSource parameter " + param.name.GetString());
         const bool validType = name == "useRest" ? param.value.IsHolding<bool>() :
             name == "resampleTo" ? param.value.IsHolding<int>() :
-            (name == "label" || name == "expectEpoch") ? param.value.IsHolding<std::string>() :
+            (name == "expectEpoch") ? param.value.IsHolding<std::string>() :
             param.value.IsHolding<TfToken>();
         if (!validType) return Fail(diagnostics, "wrong native type for source parameter " + name);
     }
@@ -3707,15 +3426,10 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             return {};
         }
         UsdGenParamView grow{&desc, &desc.nodes[layout.scatterGrowOutput]};
-        if (!ResolveUsdGenGrowLengthImageMap(desc, desc.nodes[layout.scatterGrowOutput],
-                &plan->scatterGrowLengthMap.image, &plan->scatterGrowLengthMap.options, &reason)) {
-            Fail(diagnostics, reason); return {};
-        }
         plan->scatterGrowControls.cvCount = uint32_t(grow.GetInt(TfToken("segments"), 8));
         plan->scatterGrowControls.seed = desc.nodes[layout.scatterGrowOutput].seed;
         plan->scatterGrowControls.length = grow.GetDouble(TfToken("length"), 1.0);
         plan->scatterGrowControls.lift = float(grow.GetDouble(TfToken("lift"), 0.0));
-        plan->scatterGrowControls.uvBlend = float(grow.GetDouble(TfToken("uvBlend"), 0.0));
         plan->scatterGrowControls.fallbackWidth = desc.defaultWidth;
         auto random = grow.GetVtValue(TfToken("lengthRandom"), VtValue(GfVec2f(1,1))).UncheckedGet<GfVec2f>();
         plan->scatterGrowControls.randomLo = random[0];
@@ -3731,8 +3445,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             plan->scatterGrowControls.literalDirection=make_float3(v[0],v[1],v[2]);
         }
         if (gpu::GetScatterGrowRequirements(plan->scatterRoots->positions.size(),
-                plan->scatterGrowControls.cvCount, &plan->scatterGrowRequirements,
-                plan->scatterGrowLengthMap.image ? plan->scatterGrowLengthMap.image->TexelCount() : 0)
+                plan->scatterGrowControls.cvCount, &plan->scatterGrowRequirements)
                 != gpu::ScatterGrowStatus::Ok) {
             Fail(diagnostics, "Scatter->Grow topology requirements are invalid"); return {};
         }
@@ -3778,12 +3491,9 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             };
             if (step->type == TfToken("UsdGenWidth")) {
                 lut("width:knots", "width:interpolation", step->profile);
-                if (!ResolveCudaWidthImageMap(desc, desc.nodes[nodeIndex], &step->maskImage,
-                                              &step->maskImageOptions, diagnostics)) return {};
             } else if (step->type == TfToken("UsdGenNoise")) {
                 lut("noise:magnitude:knots", "noise:magnitude:interpolation", step->profile);
             }
-            lut("mask:ramp:knots", "mask:ramp:interpolation", step->mask);
             if (step->type == TfToken("UsdGenDeform")) {
                 auto const& node = desc.nodes[nodeIndex];
                 auto surface = std::find_if(desc.surfaces.begin(), desc.surfaces.end(),
@@ -3792,7 +3502,6 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                     Fail(diagnostics, "Scatter->Grow Deform surface is unavailable"); return {};
                 }
                 if (PrepareCudaSurface(*surface, params.GetInt(TfToken("rbfSamples"), 100),
-                        node.algorithmVersion == 0 ? 1 : node.algorithmVersion,
                         &step->surface, &errors) != CudaSurfacePreparationStatus::Ok) {
                     for (auto const& error : errors) Fail(diagnostics, error);
                     return {};
@@ -3814,8 +3523,10 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         uint32_t const parameterExternal=static_cast<uint32_t>(values.size());
         values.push_back({parameterExternal,UsdGenExecutionDataKind::ParameterValues,
             UINT32_MAX,0,UsdGenExecutionValueStorage::ExternalImmutable});
-        uint32_t const imageExternal=static_cast<uint32_t>(values.size());
-        values.push_back({imageExternal,UsdGenExecutionDataKind::ImageMaps,
+        // The ImageMaps external value keeps its slot: maps still reach the
+        // descriptor even though no CUDA operator samples one today.
+        values.push_back({static_cast<uint32_t>(values.size()),
+            UsdGenExecutionDataKind::ImageMaps,
             UINT32_MAX,0,UsdGenExecutionValueStorage::ExternalImmutable});
         uint32_t const surfaceExternal=static_cast<uint32_t>(values.size());
         values.push_back({surfaceExternal,UsdGenExecutionDataKind::SurfaceGeometry,
@@ -3830,11 +3541,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         producer.exclusiveWorkspace=true;
         producer.resourceHazards.push_back({UsdGenExecutionDataKind::ExecutionWorkspace,
             0, UsdGenExecutionResourceHazardAccess::ReadWrite});
-        if (plan->scatterGrowLengthMap.image)
-            producer.resources.push_back({UsdGenExecutionDataKind::ImageMaps,
-                UsdGenExecutionResourceAccess::Read, UINT32_MAX, imageExternal, UINT32_MAX});
-        uint64_t const producerScratch = plan->scatterGrowRequirements.inputBytes +
-            plan->scatterGrowRequirements.mapScratchBytes;
+        uint64_t const producerScratch = plan->scatterGrowRequirements.inputBytes;
         SetTaskEstimate(&producer.estimate, plan->scatterGrowRequirements.statusBytes,
             plan->scatterGrowRequirements.outputBytes,
             0, producerScratch, true);
@@ -3922,13 +3629,8 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                         values[input].producerTask, input, UINT32_MAX});
                 }
             }
-            if (step.maskImage) task.resources.push_back({UsdGenExecutionDataKind::ImageMaps,UsdGenExecutionResourceAccess::Read,UINT32_MAX,imageExternal,UINT32_MAX});
             nodeValues[step.semanticNode] = outputBundle;
             uint64_t scratch=0,imageBytes=0;
-            if (step.maskImage && (!EstimateMultiply(step.maskImage->TexelCount(),sizeof(float),&imageBytes) ||
-                !EstimateAdd(&imageBytes,plan->scatterRoots->positions.size()*sizeof(float)))) {
-                Fail(diagnostics,"Scatter->Grow Width image memory estimate overflow"); return {};
-            }
             uint64_t evaluatorBytes=0;
             uint64_t outputBytes = pointWidthBytes;
             if ((noise || deform) && !EstimateMultiply(pointWidthBytes, 3, &outputBytes)) {
@@ -3938,7 +3640,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             if (!EstimateParameterCandidateBytes(step.parameters,
                     plan->scatterGrowRequirements.pointCount,
                     plan->scatterRoots->positions.size(), true, &evaluatorBytes) ||
-                !EstimateSum({outputBytes,2*257*sizeof(float),2*sizeof(int),imageBytes},&scratch)) {
+                !EstimateSum({outputBytes,257*sizeof(float),2*sizeof(int),imageBytes},&scratch)) {
                 Fail(diagnostics,"Scatter->Grow operator memory estimate overflow"); return {};
             }
             if (length) {
@@ -4067,11 +3769,6 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         }
         UsdGenParamView params; params.desc = &desc; params.node = &desc.nodes[nodeIndex];
         if (width->type == TfToken("UsdGenGrow")) {
-            std::string reason;
-            if (!ResolveUsdGenGrowLengthImageMap(desc, desc.nodes[nodeIndex],
-                    &width->growLengthMap.image, &width->growLengthMap.options, &reason)) {
-                Fail(diagnostics, reason); return {};
-            }
             auto& controls = width->grow;
             controls.cvCount = uint32_t(params.GetInt(TfToken("segments"), 8));
             controls.seed = desc.nodes[nodeIndex].seed;
@@ -4079,7 +3776,6 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             auto const random = params.GetVtValue(TfToken("lengthRandom"), VtValue(GfVec2f(1,1))).UncheckedGet<GfVec2f>();
             controls.randomLo = random[0]; controls.randomHi = random[1];
             controls.lift = float(params.GetDouble(TfToken("lift"), 0.0));
-            controls.uvBlend = float(params.GetDouble(TfToken("uvBlend"), 0.0));
             controls.fallbackWidth = desc.defaultWidth;
             auto const direction = params.GetToken(TfToken("direction"), TfToken("surfaceNormal"));
             controls.direction = direction == TfToken("vector") ? gpu::CurveGrowDirection::Literal :
@@ -4096,18 +3792,11 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             lut("width:knots", "width:interpolation", width->profile);
         else if (width->type == TfToken("UsdGenNoise"))
             lut("noise:magnitude:knots", "noise:magnitude:interpolation", width->profile);
-        lut("mask:ramp:knots", "mask:ramp:interpolation", width->mask);
-        if (width->type == TfToken("UsdGenWidth") &&
-            !ResolveCudaWidthImageMap(desc, desc.nodes[nodeIndex],
-                                      &width->maskImage,
-                                      &width->maskImageOptions, diagnostics))
-            return {};
         if (width->type == TfToken("UsdGenDeform")) {
             auto found = std::find_if(desc.surfaces.begin(), desc.surfaces.end(),
                 [&](auto const& surface) { return surface.path == desc.nodes[nodeIndex].surfaces.front(); });
             if (found == desc.surfaces.end()) { Fail(diagnostics, "missing RBF surface"); return {}; }
             if (PrepareCudaSurface(*found, params.GetInt(TfToken("rbfSamples"), 100),
-                    desc.nodes[nodeIndex].algorithmVersion == 0 ? 1 : desc.nodes[nodeIndex].algorithmVersion,
                     &width->surface, &errors) != CudaSurfacePreparationStatus::Ok) {
                 for (auto const& error : errors) Fail(diagnostics, error);
                 return {};
@@ -4140,11 +3829,11 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         static_cast<uint64_t>(sourceIt->curveVertexCounts.size());
     uint64_t sourceNamedChannelBytes = 0;
     for (UsdGenAuthoredPlaneDesc const& plane : sourceIt->authoredPlanes) {
-        uint64_t values = plane.type == UsdGenAuthoredPlaneType::Float32
+        uint64_t planeValues = plane.type == UsdGenAuthoredPlaneType::Float32
             ? static_cast<uint64_t>(plane.floatValues.size())
             : static_cast<uint64_t>(plane.intValues.size());
         uint64_t bytes = 0;
-        if (!EstimateMultiply(values, sizeof(uint32_t), &bytes) ||
+        if (!EstimateMultiply(planeValues, sizeof(uint32_t), &bytes) ||
             !EstimateAdd(&sourceNamedChannelBytes, bytes)) {
             Fail(diagnostics, "CUDA memory estimate overflow for authored named channels");
             return {};
@@ -4195,10 +3884,10 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                 ? finalPoints
                 : plane.domain == UsdGenAuthoredPlaneDomain::Primitive
                 ? sourceCurves : 1;
-            uint64_t values = 0, bytes = 0;
+            uint64_t planeValues = 0, bytes = 0;
             if (!EstimateMultiply(elements, static_cast<uint64_t>(plane.arity),
-                                  &values) ||
-                !EstimateMultiply(values, sizeof(uint32_t), &bytes) ||
+                                  &planeValues) ||
+                !EstimateMultiply(planeValues, sizeof(uint32_t), &bytes) ||
                 !EstimateAdd(&finalNamedChannelBytes, bytes)) {
                 Fail(diagnostics,
                     "CUDA memory estimate overflow for resampled named channels");
@@ -4302,7 +3991,6 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                 node.type.GetString() + " point payload");
         }
         uint64_t evaluatorBytes = 0;
-        uint64_t mapImageBytes = 0, mapSampleBytes = 0;
 #ifdef USDGEN_ENABLE_CUDA
         std::shared_ptr<const CudaParameterProgram> parameterProgram;
         if (task->kind == UsdGenExecutionTaskKind::Source) {
@@ -4312,16 +4000,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                 [&](auto const& step) {
                     return step->semanticNode == task->semanticNode;
                 });
-            if (found != plan->steps.end()) {
-                parameterProgram = (*found)->parameters;
-                if ((*found)->maskImage &&
-                    (!EstimateMultiply((*found)->maskImage->TexelCount(),
-                                       sizeof(float), &mapImageBytes) ||
-                     !EstimateMultiply(sourceCurves, sizeof(float),
-                                       &mapSampleBytes)))
-                    return Fail(diagnostics,
-                        "CUDA memory estimate overflow for Width ImageMap payload");
-            }
+            if (found != plan->steps.end()) parameterProgram = (*found)->parameters;
         }
         if (finalCardinalityKnown &&
             !EstimateParameterCandidateBytes(parameterProgram, finalPoints,
@@ -4374,13 +4053,10 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                 !EstimateAdd(&retention, pointFloatBytes)) {
                 return Fail(diagnostics, "CUDA memory estimate overflow for Width producer retention");
             }
-            // CudaWidth allocates output staging plus two 257-float LUTs and
-            // device/pinned error scalars. A typed ImageMap additionally has
-            // a private candidate-owned device upload and one root sample per
-            // curve, so concurrent Width branches never share a mutable
-            // CudaImage last-use event.
-            if (!EstimateSum({pointFloatBytes, 2 * 257 * sizeof(float),
-                              2 * sizeof(int), mapImageBytes, mapSampleBytes}, &scratch)) {
+            // CudaWidth allocates output staging plus one 257-float LUT and
+            // device/pinned error scalars.
+            if (!EstimateSum({pointFloatBytes, 257 * sizeof(float),
+                              2 * sizeof(int)}, &scratch)) {
                 return Fail(diagnostics, "CUDA memory estimate overflow for Width scratch");
             }
             SetTaskEstimate(&task->estimate, evaluatorBytes, pointFloatBytes,
@@ -4419,7 +4095,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             if (!EstimateMultiply(pointFloatBytes, 3, &pointFloat3Bytes) ||
                 !EstimateMultiply(sourceCurves, 9 * sizeof(float), &frameBytes) ||
                 !EstimateAdd(&retention, frameBytes) ||
-                !EstimateSum({pointFloat3Bytes, 2 * 257 * sizeof(float),
+                !EstimateSum({pointFloat3Bytes, 257 * sizeof(float),
                               2 * sizeof(int), sizeof(int)}, &scratch))
                 return Fail(diagnostics, "CUDA memory estimate overflow for Noise");
             SetTaskEstimate(&task->estimate, evaluatorBytes, pointFloat3Bytes,
@@ -4429,18 +4105,6 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         if (node.type == TfToken("UsdGenGrow")) {
             uint64_t frames = 0, output = finalGeometryBytes, steady = evaluatorBytes;
             uint64_t scratch = sourceIt->authoredPlanes.empty() ? 0 : 2 * sizeof(int);
-            std::shared_ptr<const UsdGenImagePayload> image;
-            UsdGenImageSampleOptions imageOptions;
-            std::string imageReason;
-            if (!ResolveUsdGenGrowLengthImageMap(desc, node, &image, &imageOptions, &imageReason))
-                return Fail(diagnostics, imageReason);
-            if (image) {
-                uint64_t imageBytes = 0, sampleBytes = 0;
-                if (!EstimateMultiply(image->TexelCount(), sizeof(float), &imageBytes) ||
-                    !EstimateMultiply(sourceCurves, sizeof(float), &sampleBytes) ||
-                    !EstimateAdd(&scratch, imageBytes) || !EstimateAdd(&scratch, sampleBytes))
-                    return Fail(diagnostics, "CUDA Grow map estimate overflow");
-            }
             if (!EstimateMultiply(sourceCurves, 9 * sizeof(float), &frames) ||
                 !EstimateAdd(&output, frames) || !EstimateAdd(&steady, 2 * sizeof(int)))
                 return Fail(diagnostics, "CUDA Grow output estimate overflow");
@@ -4452,12 +4116,12 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             uint64_t changedPoints = 0, curveScratch = 0, scratch = 0;
             if (!EstimateMultiply(finalPoints, 6 * sizeof(float), &changedPoints) ||
                 !EstimateMultiply(sourceCurves, 18, &curveScratch) ||
-                !EstimateSum({257 * sizeof(float), changedPoints,
+                !EstimateSum({changedPoints,
                               curveScratch, 10 * sizeof(int)}, &scratch)) {
                 return Fail(diagnostics, "CUDA memory estimate overflow for Length scratch");
             }
             // These are the known external, Length and compaction bytes for
-            // the async path: mask, point/keep staging, four prefix arrays,
+            // the async path: point/keep staging, four prefix arrays,
             // device status/counts and pinned status/counts, including the
             // named-topology device/pinned validation pair. CUB workspace
             // and survivor storage are selected-device/runtime data, so this
@@ -4474,8 +4138,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         uint64_t pointFloat3Bytes = 0;
         if (!EstimateMultiply(finalPoints, 6 * sizeof(float), &deformScratch) ||
             !EstimateMultiply(pointFloatBytes, 3, &pointFloat3Bytes) ||
-            !EstimateAdd(&deformScratch, sizeof(int)) ||
-            !EstimateAdd(&deformScratch, 257 * sizeof(float))) {
+            !EstimateAdd(&deformScratch, sizeof(int))) {
             return Fail(diagnostics, "CUDA memory estimate overflow for Deform scratch");
         }
         SetTaskEstimate(&task->estimate, evaluatorBytes, pointFloat3Bytes,
@@ -4938,8 +4601,7 @@ bool ExecuteCudaJobSource(UsdGenCudaExecutionJob& job) {
         // not leak host state or clear an already-poisoned workspace.
         auto done=std::make_unique<CudaInlineCompletion>();
         auto status=owner->BeginFresh(job.plan->scatterRoots, job.plan->scatterGrowControls,
-            stream, job.memoryReservation.get(), job.plan->scatterGrowLengthMap.image
-                ? &job.plan->scatterGrowLengthMap : nullptr);
+            stream, job.memoryReservation.get());
         if (status == gpu::ScatterGrowStatus::Ok &&
             !job.state.PrepareScatterGrowFrames(*job.plan, *job.workspace, stream,
                                                 job.diagnostics))
@@ -5563,8 +5225,7 @@ bool ExecuteCudaJobSourceAsync(std::shared_ptr<UsdGenCudaExecutionJob> job,
             job->state.memoryReservation=job->memoryReservation.get();
             auto const stream=job->workspace->impl_->stream;
             auto status=job->scatterGrow->BeginFresh(job->plan->scatterRoots,
-                job->plan->scatterGrowControls,stream,job->memoryReservation.get(),
-                job->plan->scatterGrowLengthMap.image ? &job->plan->scatterGrowLengthMap : nullptr);
+                job->plan->scatterGrowControls,stream,job->memoryReservation.get());
             if (status == gpu::ScatterGrowStatus::Ok &&
                 !job->state.PrepareScatterGrowFrames(*job->plan, *job->workspace, stream,
                                                      job->diagnostics))
@@ -5874,9 +5535,7 @@ struct WidthOverlapWitness {
 };
 std::shared_ptr<WidthOverlapWitness> s_operatorAsyncWidthOverlapWitness;
 struct OperatorWidthCandidate {
-    std::unique_ptr<gpu::DeviceBuffer<float>> profile, mask, widths;
-    std::unique_ptr<gpu::CudaImage> image;
-    std::unique_ptr<gpu::DeviceBuffer<float>> imageMask;
+    std::unique_ptr<gpu::DeviceBuffer<float>> profile, widths;
     std::unique_ptr<gpu::DeviceBuffer<float>> priorWidths;
     std::unique_ptr<gpu::CudaWidth> width;
     std::unique_ptr<gpu::CudaCurveFullNonWidthCompare> nonWidthCompare;
@@ -5888,7 +5547,6 @@ struct OperatorWidthCandidate {
     bool semanticRejected = false;
 };
 struct OperatorLengthCandidate {
-    std::unique_ptr<gpu::DeviceBuffer<float>> mask;
     std::unique_ptr<gpu::DeviceBuffer<float3>> changedPoints;
     std::unique_ptr<gpu::DeviceBuffer<uint8_t>> keep;
     std::unique_ptr<gpu::CudaLength> length;
@@ -5902,7 +5560,7 @@ struct OperatorLengthCandidate {
     bool semanticRejected = false;
 };
 struct OperatorNoiseCandidate {
-    std::unique_ptr<gpu::DeviceBuffer<float>> profile, mask;
+    std::unique_ptr<gpu::DeviceBuffer<float>> profile;
     std::unique_ptr<gpu::DeviceBuffer<float3>> points;
     std::unique_ptr<gpu::DeviceBuffer<float3>> priorPoints;
     std::unique_ptr<gpu::CudaNoise> noise;
@@ -5919,7 +5577,6 @@ struct OperatorRbfCandidate {
     std::unique_ptr<CudaGroomScalarReadback> budgetPacket;
     std::unique_ptr<gpu::DeviceBuffer<float3>> rest, current, points;
     std::unique_ptr<gpu::DeviceBuffer<uint32_t>> offsets, indices;
-    std::unique_ptr<gpu::DeviceBuffer<float>> mask;
     std::unique_ptr<gpu::CudaRbfCurveDeformer> deformer;
     gpu::DeformParameters parameters;
     uint32_t budget = 0;
@@ -6246,13 +5903,13 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
         relay->candidate->nonWidthLifetime.reset();
         relay->candidate->nonWidthCompare.reset();
         if (!equal) { selected.Restore(); Finish(slotIndex, false, false); return; }
-        auto const& step = *job->plan->steps[relay->index];
+        auto const& blendStep = *job->plan->steps[relay->index];
         relay->candidate->submitted = true;
         bool launched = false;
         if (execution.widthBlendGraph) {
             CudaWidthBlendGraphCache::Lease lease;
             if (execution.widthBlendGraph->Acquire(MakeWidthBlendGraphKey(
-                    *job->plan, step, relay->geometry.pointCount), &lease)) {
+                    *job->plan, blendStep, relay->geometry.pointCount), &lease)) {
                 relay->candidate->widthBlendGraphLease = std::move(lease);
                 launched = execution.widthBlendGraph->CopyLaunchCopy(relay->geometry.widths,
                     relay->rightWidths, relay->candidate->widths->view(), stream);
@@ -6279,7 +5936,7 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
                 }
                 auto const& input = job->state.geometryValues[inputNode];
                 relay->grow = std::make_unique<OperatorGrowCandidate>();
-                if (!job->state.BeginCurveGrowValue(step.grow, step.growLengthMap,
+                if (!job->state.BeginCurveGrowValue(step.grow,
                         relay->geometry, relay->rootPrim, relay->rootUV,
                         input.topologyOwners, job->state.sourceTopologyOwners,
                         job->state.captureStableIds, relay->namedOwners, job,
@@ -6288,7 +5945,7 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
                         (relay->grow->grow && relay->grow->grow->HasUnprovenWork());
                     selected.Restore(); Finish(slotIndex, false, unsafe); return;
                 }
-            } else if (!job->state.BeginCurveGrow(step.grow, step.growLengthMap, stream,
+            } else if (!job->state.BeginCurveGrow(step.grow, stream,
                                                     job->diagnostics)) {
                 selected.Restore(); Finish(slotIndex, false, job->state.HasUnprovenAsyncWork()); return;
             }
@@ -6330,16 +5987,13 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
         }
         if (step.type == TfToken("UsdGenLength")) {
             auto candidate = std::make_unique<OperatorLengthCandidate>();
-            candidate->mask = std::make_unique<gpu::DeviceBuffer<float>>();
             candidate->changedPoints = std::make_unique<gpu::DeviceBuffer<float3>>();
             candidate->keep = std::make_unique<gpu::DeviceBuffer<uint8_t>>();
             candidate->length = std::make_unique<gpu::CudaLength>();
             candidate->compaction = std::make_unique<gpu::CudaCurveCompaction>();
             relay->length = std::move(candidate);
             auto* const reservation = job->memoryReservation.get();
-            if (relay->length->mask->reset(step.mask.size(), reservation,
-                    UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-                relay->length->changedPoints->reset(relay->geometry.pointCount,
+            if (relay->length->changedPoints->reset(relay->geometry.pointCount,
                     reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
                 relay->length->keep->reset(relay->geometry.curveCount,
                     reservation, UsdGenExecutionResourceKind::Scratch) != cudaSuccess) {
@@ -6352,10 +6006,9 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
             p.mode = mode == TfToken("set") ? gpu::LengthMode::Set : mode == TfToken("cull") ? gpu::LengthMode::Cull : gpu::LengthMode::Scale;
             p.method = values.GetToken(TfToken("length:method"), TfToken("scale")) == TfToken("cutExtend") ? gpu::LengthMethod::CutExtend : gpu::LengthMethod::Scale;
             p.rebuild = values.GetToken(TfToken("rebuild"), TfToken("keepParam")) == TfToken("reparam") ? gpu::LengthRebuild::Reparam : gpu::LengthRebuild::KeepParam;
-            p.value = field("length:value", 1); p.blend = field("blend", values.node->blend); p.maskAmount = field("mask:amount", 1); p.minRemainingLength = field("minRemainingLength", 0); p.cullThreshold = field("cullThreshold", 0); p.enabled = boolean("enabled", values.node->enabled); p.seed = values.node->seed;
+            p.value = field("length:value", 1); p.mask = field("mask", 1); p.minRemainingLength = field("minRemainingLength", 0); p.cullThreshold = field("cullThreshold", 0); p.enabled = boolean("enabled", values.node->enabled); p.seed = values.node->seed;
             if (auto e = runtime.parameters.Find(TfToken("length:random"))) p.random = gpu::Vec2Field::Device({static_cast<float2 const*>(e->data), e->count}, e->domain); else { auto v = values.GetVtValue(TfToken("length:random"), VtValue(GfVec2f(1,1))).UncheckedGet<GfVec2f>(); p.random = gpu::Vec2Field::Literal(make_float2(v[0],v[1])); }
-            p.maskProfile = {relay->length->mask->data(), relay->length->mask->size()}; relay->length->submitted = true;
-            if (cudaMemcpyAsync(relay->length->mask->data(), step.mask.data(), sizeof(step.mask), cudaMemcpyHostToDevice, stream) != cudaSuccess) { selected.Restore(); Finish(slotIndex, false, true); return; }
+            relay->length->submitted = true;
             if (relay->length->length->ApplyFresh(relay->geometry, relay->hairT, p, relay->length->changedPoints->view(), relay->length->keep->view(), stream, reservation) != gpu::StyleStatus::Ok) {
                 if (relay->length->length->HasUnprovenWork() || !InstallGate(slots[slotIndex], 2, stream) || failInstall[2].exchange(false, std::memory_order_acq_rel) || cudaStreamAddCallback(stream, OperatorCallback, &slots[slotIndex].callback[2], 0) != cudaSuccess) { selected.Restore(); Finish(slotIndex, false, true); return; }
                 relay->length->semanticRejected = true; selected.Restore(); slots[slotIndex].Return(2); return;
@@ -6366,7 +6019,8 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
         if (step.type == TfToken("UsdGenWidthBlend")) {
             auto candidate = std::make_unique<OperatorWidthCandidate>();
             candidate->widthBlend = true;
-            candidate->blend = job->plan->desc.nodes[step.semanticNode].blend;
+            candidate->blend = CudaWidthBlendWeight(job->plan->desc,
+                job->plan->desc.nodes[step.semanticNode]);
             candidate->widths = std::make_unique<gpu::DeviceBuffer<float>>();
             relay->candidate = std::move(candidate);
             auto* const reservation = job->memoryReservation.get();
@@ -6431,7 +6085,6 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
         if (step.type == TfToken("UsdGenNoise")) {
             auto candidate = std::make_unique<OperatorNoiseCandidate>();
             candidate->profile = std::make_unique<gpu::DeviceBuffer<float>>();
-            candidate->mask = std::make_unique<gpu::DeviceBuffer<float>>();
             candidate->points = std::make_unique<gpu::DeviceBuffer<float3>>();
             candidate->noise = std::make_unique<gpu::CudaNoise>();
             auto* const reservation = job->memoryReservation.get();
@@ -6443,23 +6096,15 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
             }
             if (candidate->profile->reset(step.profile.size(), reservation,
                     UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-                candidate->mask->reset(step.mask.size(), reservation,
-                    UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
                 candidate->points->reset(relay->geometry.pointCount, reservation,
                     UsdGenExecutionResourceKind::Active) != cudaSuccess) {
                 selected.Restore(); Finish(slotIndex, false, false); return;
             }
             relay->noise = std::move(candidate);
             auto& noise = *relay->noise;
-            bool uploaded = false;
             cudaError_t upload = cudaMemcpyAsync(noise.profile->data(), step.profile.data(),
                 sizeof(step.profile), cudaMemcpyHostToDevice, stream);
-            uploaded = upload == cudaSuccess;
-            if (upload == cudaSuccess) {
-                upload = cudaMemcpyAsync(noise.mask->data(), step.mask.data(),
-                    sizeof(step.mask), cudaMemcpyHostToDevice, stream);
-                uploaded = uploaded || upload == cudaSuccess;
-            }
+            bool const uploaded = upload == cudaSuccess;
             if (upload != cudaSuccess) {
                 bool const unsafe = uploaded && cudaStreamSynchronize(stream) != cudaSuccess;
                 selected.Restore(); Finish(slotIndex, false, unsafe); return;
@@ -6493,14 +6138,12 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
             parameters.lacunarity = field("noise:lacunarity", 2.0f);
             parameters.gain = field("noise:gain", .5f);
             parameters.preserveLength = field("preserveLength", 1.0f);
-            parameters.blend = field("blend", values.node->blend);
-            parameters.maskAmount = field("mask:amount", 1.0f);
+            parameters.mask = field("mask", 1.0f);
             parameters.enabled = boolean("enabled", values.node->enabled);
             parameters.cumulative = boolean("cumulative", false);
             parameters.seed = integer("noise:seed", values.node->seed);
             parameters.magnitudeProfile = {
                 noise.profile->data(), noise.profile->size()};
-            parameters.maskProfile = {noise.mask->data(), noise.mask->size()};
             noise.submitted = true;
             gpu::RestRootFrames const frames = relay->geometry.curveCount ? gpu::RestRootFrames{
                 {tangent->data(), tangent->size()},
@@ -6521,8 +6164,7 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
             if (tangent->recordUse(stream) != cudaSuccess ||
                 binormal->recordUse(stream) != cudaSuccess ||
                 normal->recordUse(stream) != cudaSuccess ||
-                noise.profile->recordUse(stream) != cudaSuccess ||
-                noise.mask->recordUse(stream) != cudaSuccess) {
+                noise.profile->recordUse(stream) != cudaSuccess) {
                 bool const unsafe = cudaStreamSynchronize(stream) != cudaSuccess;
                 selected.Restore(); Finish(slotIndex, false, unsafe); return;
             }
@@ -6536,12 +6178,7 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
         }
         auto candidate = std::make_unique<OperatorWidthCandidate>();
         candidate->profile = std::make_unique<gpu::DeviceBuffer<float>>();
-        candidate->mask = std::make_unique<gpu::DeviceBuffer<float>>();
         candidate->widths = std::make_unique<gpu::DeviceBuffer<float>>();
-        if (step.maskImage) {
-            candidate->image = std::make_unique<gpu::CudaImage>();
-            candidate->imageMask = std::make_unique<gpu::DeviceBuffer<float>>();
-        }
         candidate->width = std::make_unique<gpu::CudaWidth>();
         UsdGenParamView values; values.desc = &job->plan->desc; values.node = &job->plan->desc.nodes[step.semanticNode];
         auto field = [&](char const* name, float fallback) {
@@ -6555,48 +6192,26 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
             return gpu::BoolField::Literal(values.GetBool(TfToken(name), fallback));
         };
         gpu::WidthParameters parameters;
-        parameters.width = field("width", .01f); parameters.rootScale = field("rootScale", 1);
-        parameters.tipScale = field("tipScale", 1); parameters.taper = field("taper", 0);
-        parameters.taperStart = field("taperStart", .5f); parameters.blend = field("blend", values.node->blend);
-        parameters.maskAmount = field("mask:amount", 1); parameters.enabled = boolean("enabled", values.node->enabled);
+        parameters.width = field("width", .01f);
+        parameters.mask = field("mask", 1); parameters.enabled = boolean("enabled", values.node->enabled);
         parameters.replace = boolean("replace", true);
         relay->candidate = std::move(candidate);
         auto* const reservation = job->memoryReservation.get();
         if (relay->candidate->profile->reset(step.profile.size(), reservation,
                 UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-            relay->candidate->mask->reset(step.mask.size(), reservation,
-                UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
             relay->candidate->widths->reset(relay->geometry.pointCount, reservation,
                 UsdGenExecutionResourceKind::Active) != cudaSuccess) {
             selected.Restore(); Finish(slotIndex, false, false); return;
         }
-        if (relay->candidate->imageMask &&
-            relay->candidate->imageMask->reset(relay->geometry.curveCount, reservation,
-                UsdGenExecutionResourceKind::Scratch) != cudaSuccess) {
-            selected.Restore(); Finish(slotIndex, false, false); return;
-        }
         parameters.widthProfile = {relay->candidate->profile->data(), relay->candidate->profile->size()};
-        parameters.maskProfile = {relay->candidate->mask->data(), relay->candidate->mask->size()};
         relay->candidate->submitted = true;
-        if (cudaMemcpyAsync(relay->candidate->profile->data(), step.profile.data(), sizeof(step.profile), cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-            cudaMemcpyAsync(relay->candidate->mask->data(), step.mask.data(), sizeof(step.mask), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+        if (cudaMemcpyAsync(relay->candidate->profile->data(), step.profile.data(), sizeof(step.profile), cudaMemcpyHostToDevice, stream) != cudaSuccess) {
             selected.Restore(); Finish(slotIndex, false, true); return;
         }
-        if (relay->candidate->image &&
-            (relay->candidate->image->Upload(step.maskImage, stream, reservation,
-                                              UsdGenExecutionResourceKind::Active) != cudaSuccess ||
-             relay->candidate->image->Sample(relay->rootUV,
-                relay->candidate->imageMask->view(), step.maskImageOptions, stream) != cudaSuccess)) {
-            selected.Restore(); Finish(slotIndex, false, true); return;
-        }
-        if (relay->candidate->imageMask)
-            parameters.mapMask = gpu::ScalarField::Device(
-                {relay->candidate->imageMask->data(),
-                 relay->candidate->imageMask->size()}, expr::Domain::Primitive);
         if (relay->candidate->width->ApplyFresh(relay->geometry, relay->hairT, parameters,
                 relay->candidate->widths->view(), stream,
                 reservation) != gpu::StyleStatus::Ok) {
-            // Profile/mask DMA already precedes this semantic rejection.  A
+            // The profile DMA already precedes this semantic rejection.  A
             // plain terminal callback proves that prefix without treating a
             // bad authored Width value as an unsafe workspace poison.
             if (relay->candidate->width->HasUnprovenWork()) {
@@ -6704,17 +6319,12 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
                 candidate.cache->state->sampleBudget != candidate.budget;
             candidate.current = std::make_unique<gpu::DeviceBuffer<float3>>();
             candidate.points = std::make_unique<gpu::DeviceBuffer<float3>>();
-            candidate.mask = std::make_unique<gpu::DeviceBuffer<float>>();
             candidate.deformer = std::make_unique<gpu::CudaRbfCurveDeformer>();
             if (candidate.current->reset(step.surface.currentPoints.size(), reservation,
                     UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-                candidate.points->reset(relay->geometry.pointCount, reservation) != cudaSuccess ||
-                candidate.mask->reset(step.mask.size(), reservation,
-                    UsdGenExecutionResourceKind::Scratch) != cudaSuccess) {
+                candidate.points->reset(relay->geometry.pointCount, reservation) != cudaSuccess) {
                 failRbf(false); return;
             }
-            if (cudaMemcpyAsync(candidate.mask->data(), step.mask.data(), sizeof(step.mask),
-                    cudaMemcpyHostToDevice, stream) != cudaSuccess) { failRbf(true); return; }
             UsdGenParamView values; values.desc = &job->plan->desc;
             values.node = &job->plan->desc.nodes[step.semanticNode];
             auto field = [&](char const* name, float fallback) {
@@ -6727,12 +6337,9 @@ void OperatorRelayService::Complete(size_t slotIndex, unsigned phase) {
                     return gpu::BoolField::Device({static_cast<uint8_t const*>(e->data), e->count}, e->domain);
                 return gpu::BoolField::Literal(values.GetBool(TfToken(name), fallback));
             };
-            candidate.parameters.blend = field("blend", values.node->blend);
-            candidate.parameters.maskAmount = field("mask:amount", 1);
+            candidate.parameters.mask = field("mask", 1);
             candidate.parameters.enabled = boolean("enabled", values.node->enabled);
             candidate.parameters.lockRoots = boolean("lockRoots", true);
-            candidate.parameters.hairT = relay->hairT;
-            candidate.parameters.maskProfile = {candidate.mask->data(), candidate.mask->size()};
             if (candidate.rebind) {
                 candidate.freshState = std::make_unique<CudaRbfCache::State>();
                 candidate.freshState->device = execution.device;
@@ -7331,7 +6938,9 @@ bool ExecuteCudaJobOperatorAsync(std::shared_ptr<UsdGenCudaExecutionJob> job, si
     auto const& op = job->plan->desc.nodes[step.semanticNode]; context.seed = op.seed;
     context.descId = expr::DescriptionId(job->plan->desc.description.GetText());
     if (runtime.parameters.BeginFreshContexts(step.parameters, relay->geometry,
-            {relay->hairT, relay->rootUV}, context, stream, nullptr,
+            ExpressionChannels(relay->geometry, relay->hairT, relay->rootUV,
+                               relay->rootPrim, relay->frames),
+            context, stream, nullptr,
             job->memoryReservation.get(),
             UsdGenExecutionResourceKind::Cache) != CudaParameterStatus::Ok ||
         runtime.parameters.EnqueueFreshContextStatus(stream) != CudaParameterStatus::Ok) {
@@ -8009,8 +7618,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecuteCudaGraph(
         auto owner=std::make_unique<gpu::CudaScatterGrow>();
         auto done=std::make_unique<CudaInlineCompletion>();
         auto status=owner->BeginFresh(plan.scatterRoots, plan.scatterGrowControls,
-            workspace.impl_->stream, reservation, plan.scatterGrowLengthMap.image
-                ? &plan.scatterGrowLengthMap : nullptr);
+            workspace.impl_->stream, reservation);
         if (status == gpu::ScatterGrowStatus::Ok &&
             !state.PrepareScatterGrowFrames(plan, workspace, workspace.impl_->stream,
                                             diagnostics))
@@ -8123,17 +7731,17 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecutionState::Finalize(
     if (!selected.selected) { Fail(diagnostics, "cannot select CUDA workspace device for final stage"); failed = true; return {}; }
     if (!SelectTerminal(plan, execution.stream, diagnostics)) return {};
     auto const stream = execution.stream;
-    auto& geometry = this->geometry;
+    auto& geometryRef = this->geometry;
     auto const& desc = plan.desc;
-    auto const captureStableIds = this->captureStableIds;
-    auto const captureCurveCount = this->captureCurveCount;
-    auto const& curveTopology = this->curveTopology;
+    auto const capturedStableIds = this->captureStableIds;
+    auto const capturedCurveCount = this->captureCurveCount;
+    auto const& topologyRef = this->curveTopology;
     gpu::CurveTileRequirements tileRequirements;
     gpu::CurveTileOptions tileOptions;
     tileOptions.tileTarget = static_cast<uint32_t>(std::clamp(
         desc.tileTarget, 32, 256));
-    if (gpu::GetCurveTileRequirements(tileOptions, captureCurveCount,
-            geometry.curveCount, geometry.pointCount, &tileRequirements, stream) != cudaSuccess) {
+    if (gpu::GetCurveTileRequirements(tileOptions, capturedCurveCount,
+            geometryRef.curveCount, geometryRef.pointCount, &tileRequirements, stream) != cudaSuccess) {
         Fail(diagnostics, "CUDA tile metadata requirements failed; previous generation retained"); return {};
     }
     gpu::DeviceBuffer<gpu::CurveTileSpan> deviceTiles;
@@ -8152,9 +7760,9 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecutionState::Finalize(
         frameOwners->frameCaptureOrdinals->waitOn(stream) != cudaSuccess)) {
         Fail(diagnostics, "CUDA Scatter->Grow tile frame ownership is unavailable"); return {};
     }
-    gpu::CurveTileInput tileInput{captureStableIds, geometry.stableIds,
-        geometry.curveOffsets, captureCurveCount, geometry.curveCount,
-        geometry.pointCount,
+    gpu::CurveTileInput tileInput{capturedStableIds, geometryRef.stableIds,
+        geometryRef.curveOffsets, capturedCurveCount, geometryRef.curveCount,
+        geometryRef.pointCount,
         fusedSubset ? gpu::CurveTileOrder::CaptureOrderSurvivorSubset :
         plan.scatterGrow ? gpu::CurveTileOrder::IdentityCaptureOrder :
         gpu::CurveTileOrder::SortedSurvivorSubset,
@@ -8191,11 +7799,11 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecutionState::Finalize(
         Fail(diagnostics, "CUDA tile bounds allocation failed; previous generation retained"); return {};
     }
     gpu::CurveTileBoundsOptions boundsOptions;
-    boundsOptions.basis = curveTopology.basis == UsdGenDeviceCurveBasis::CatmullRom
+    boundsOptions.basis = topologyRef.basis == UsdGenDeviceCurveBasis::CatmullRom
         ? gpu::CurveTileBoundsBasis::CatmullRom
         : gpu::CurveTileBoundsBasis::BSpline;
     gpu::CurveTileBoundsInput boundsInput{
-        geometry.points, geometry.widths,
+        geometryRef.points, geometryRef.widths,
         static_cast<gpu::DeviceBuffer<gpu::CurveTileSpan> const&>(deviceTiles).view()};
     gpu::CurveTileBoundsWorkspace boundsWorkspace{tileBoundsScratch.view()};
     gpu::CurveTileBoundsOutput boundsOutput{
@@ -8249,7 +7857,7 @@ std::shared_ptr<const UsdGenDeviceGeneration> ExecutionState::Finalize(
     bool sameTopology = false;
     if (previous) {
         auto lease = gpu::AcquireGeometry(previous, stream);
-        if (!lease || gpu::CompareCurveTopology(lease.Geometry(), geometry,
+        if (!lease || gpu::CompareCurveTopology(lease.Geometry(), geometryRef,
                 stream, &sameTopology, memoryReservation) != cudaSuccess) {
             Fail(diagnostics, "cannot compare GPU topology against the previous publication"); return {};
         }
@@ -8827,7 +8435,7 @@ void failNextCudaSourceRelayNamedNativeCallbackForTesting() {
 
 #ifdef USDGEN_ENABLE_CUDA
 bool ExecutionState::UploadAuthoredPlanes(
-    UsdGenCurveSetDesc const& curves, CudaSourcePrepared const& prepared,
+    UsdGenCurveSetDesc const& curves, CudaSourcePrepared const& preparedSource,
     CudaSourcePreparationOptions const& options,
     cudaStream_t stream,
     UsdGenDiagnostics* diagnostics)
@@ -8851,9 +8459,9 @@ bool ExecutionState::UploadAuthoredPlanes(
                 static_cast<size_t>(curves.curveVertexCounts[curve]);
         for (UsdGenAuthoredPlaneDesc const& authored : curves.authoredPlanes) {
             uint64_t elements = authored.domain == UsdGenAuthoredPlaneDomain::Point
-                ? static_cast<uint64_t>(prepared.points.size())
+                ? static_cast<uint64_t>(preparedSource.points.size())
                 : authored.domain == UsdGenAuthoredPlaneDomain::Primitive
-                ? static_cast<uint64_t>(prepared.curveVertexCounts.size()) : 1;
+                ? static_cast<uint64_t>(preparedSource.curveVertexCounts.size()) : 1;
             if (elements > std::numeric_limits<size_t>::max() / authored.arity ||
                 elements * authored.arity >
                     std::numeric_limits<size_t>::max() / sizeof(uint32_t))
@@ -8894,7 +8502,7 @@ bool ExecutionState::UploadAuthoredPlanes(
             if (authored.domain == UsdGenAuthoredPlaneDomain::Groom) {
                 for (size_t lane = 0; lane != authored.arity; ++lane) append(lane);
             } else {
-                for (uint64_t id : prepared.curveId) {
+                for (uint64_t id : preparedSource.curveId) {
                     auto const found = sourceCurveById.find(id);
                     if (found == sourceCurveById.end())
                         return Fail(diagnostics,
@@ -8932,11 +8540,11 @@ bool ExecutionState::UploadAuthoredPlanes(
     return true;
 }
 
-bool ExecutionState::PrepareNoiseFrames(CudaSourcePrepared const& prepared,
+bool ExecutionState::PrepareNoiseFrames(CudaSourcePrepared const& preparedSource,
                                          UsdGenCudaExecutionWorkspace& workspace,
                                          cudaStream_t stream,
                                          UsdGenDiagnostics* diagnostics) {
-    if (prepared.rootFrames.size() != prepared.curveVertexCounts.size())
+    if (preparedSource.rootFrames.size() != preparedSource.curveVertexCounts.size())
         return Fail(diagnostics,
             "CUDA Noise requires one authored rest root frame per source curve");
     try {
@@ -8944,10 +8552,10 @@ bool ExecutionState::PrepareNoiseFrames(CudaSourcePrepared const& prepared,
         auto binormal = std::make_unique<gpu::DeviceBuffer<float3>>();
         auto normal = std::make_unique<gpu::DeviceBuffer<float3>>();
         std::vector<float3> t, b, n;
-        t.reserve(prepared.rootFrames.size());
-        b.reserve(prepared.rootFrames.size());
-        n.reserve(prepared.rootFrames.size());
-        for (auto const& frame : prepared.rootFrames) {
+        t.reserve(preparedSource.rootFrames.size());
+        b.reserve(preparedSource.rootFrames.size());
+        n.reserve(preparedSource.rootFrames.size());
+        for (auto const& frame : preparedSource.rootFrames) {
             t.push_back(make_float3(float(frame[0]), float(frame[1]), float(frame[2])));
             b.push_back(make_float3(float(frame[4]), float(frame[5]), float(frame[6])));
             n.push_back(make_float3(float(frame[8]), float(frame[9]), float(frame[10])));
@@ -9147,7 +8755,24 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
     if (found == desc.curveSets.end()) {
         Fail(diagnostics, "missing C3 input " + sourcePath.GetString()); this->failed = true; return false;
     }
-    auto const& curves = *found;
+    // 02 §6.3: a disabled generator publishes an EMPTY curve set. Substitute
+    // an empty C3 input, keeping the authored topology metadata so the rest of
+    // this preparation validates the same shape it always did; every step
+    // downstream then runs over zero curves, as it does on the CPU lane.
+    UsdGenCurveSetDesc emptySource;
+    if (!node.enabled) {
+        emptySource.path = found->path;
+        emptySource.role = found->role;
+        emptySource.curveRole = found->curveRole;
+        emptySource.type = found->type;
+        emptySource.basis = found->basis;
+        emptySource.wrap = found->wrap;
+        emptySource.widthsInterpolation = found->widthsInterpolation;
+        emptySource.worldMatrix = found->worldMatrix;
+        emptySource.frozenEpoch = found->frozenEpoch;
+        emptySource.curveGeneration = found->curveGeneration;
+    }
+    auto const& curves = node.enabled ? *found : emptySource;
     if (curves.type != TfToken("cubic") ||
         (curves.basis != TfToken("bspline") && curves.basis != TfToken("catmullRom")) ||
         (curves.wrap != TfToken("pinned") && curves.wrap != TfToken("nonperiodic"))) {
@@ -9209,9 +8834,9 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
             for (auto const& uv : curves.skinPrimUv)
                 input.rootUV.push_back(make_float2(uv[0], uv[1]));
         }
-        CudaSourcePrepared prepared;
+        CudaSourcePrepared preparedSource;
         std::vector<std::string> messages;
-        if (PrepareCudaSource(input, options, &prepared, &messages) !=
+        if (PrepareCudaSource(input, options, &preparedSource, &messages) !=
                 CudaSourcePreparationStatus::Ok) {
             for (auto const& message : messages) Fail(diagnostics, message);
             if (messages.empty()) Fail(diagnostics,
@@ -9221,8 +8846,8 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
         }
         if (diagnostics) for (auto const& message : messages)
             diagnostics->Warn(message);
-        if (!PrepareCudaJobSource(*this, prepared, options, stream, diagnostics,
-                                   finishSource)) {
+        if (!PrepareCudaJobSource(*this, preparedSource, options, stream, diagnostics,
+                                  finishSource)) {
             this->failed = true;
             return false;
         }
@@ -9380,32 +9005,32 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
     input.rootPrim.assign(capturedRoots.rootPrim.begin(), capturedRoots.rootPrim.end());
     for (auto const& uv : capturedRoots.rootUV)
         input.rootUV.push_back(make_float2(uv[0],uv[1]));
-    CudaSourcePrepared prepared;
+    CudaSourcePrepared preparedSource;
     std::vector<std::string> messages;
-    if (PrepareCudaSource(input, options, &prepared, &messages) != CudaSourcePreparationStatus::Ok) {
+    if (PrepareCudaSource(input, options, &preparedSource, &messages) != CudaSourcePreparationStatus::Ok) {
         for (auto const& message : messages) Fail(diagnostics, message);
         if (messages.empty()) Fail(diagnostics, "C3 source validation failed");
         this->failed = true; return false;
     }
     if (diagnostics) for (auto const& message : messages) diagnostics->Warn(message);
     if (helperFrames &&
-        !CompactCudaSource(&prepared, retainedStableIds)) {
+        !CompactCudaSource(&preparedSource, retainedStableIds)) {
         this->failed = true;
         return Fail(diagnostics,
             "CUDA source root-frame compaction failed while retaining valid stable IDs");
     }
-    if (!PrepareCudaJobSource(*this, prepared, options, stream, diagnostics, finishSource)) {
+    if (!PrepareCudaJobSource(*this, preparedSource, options, stream, diagnostics, finishSource)) {
         this->failed = true;
         return false;
     }
-    if (!UploadAuthoredPlanes(curves, prepared, options, stream, diagnostics)) {
+    if (!UploadAuthoredPlanes(curves, preparedSource, options, stream, diagnostics)) {
         this->failed = true;
         return false;
     }
     if (std::any_of(plan.steps.begin(), plan.steps.end(),
             [](auto const& step) { return step->type == TfToken("UsdGenNoise") ||
                                         step->type == TfToken("UsdGenGrow"); }) &&
-        !PrepareNoiseFrames(prepared, workspace, stream, diagnostics)) {
+        !PrepareNoiseFrames(preparedSource, workspace, stream, diagnostics)) {
         this->failed = true;
         return false;
     }
@@ -9492,14 +9117,14 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
         sourceUploadPending = true;
         return true;
     }
-    auto& source = this->source;
-    auto& resampled = this->resampled;
+    auto& sourceRef = this->source;
+    auto& resampledRef = this->resampled;
     // PrepareCudaSource establishes this strictly ordered capture identity.
     // Keep the borrowed view alive through tile assignment even if a later
     // Length pass compacts the survivor geometry.
-    this->hairT = resampled ? resampled->hairT() : source->hairT();
-    this->rootPrim = resampled ? resampled->rootPrim() : source->rootPrim();
-    this->rootUV = resampled ? resampled->rootUV() : source->rootUV();
+    this->hairT = resampledRef ? resampledRef->hairT() : sourceRef->hairT();
+    this->rootPrim = resampledRef ? resampledRef->rootPrim() : sourceRef->rootPrim();
+    this->rootUV = resampledRef ? resampledRef->rootUV() : sourceRef->rootUV();
     this->deformed = !options.useRest;
     this->prepared = true;
     return true;
@@ -9629,7 +9254,7 @@ bool ExecutionState::CompleteSourceNamedTopology(
     return true;
 }
 bool ExecutionState::BeginCurveGrow(gpu::CurveGrowControls const& controls,
-    gpu::GrowLengthMap const& lengthMap, cudaStream_t stream, UsdGenDiagnostics* diagnostics) {
+    cudaStream_t stream, UsdGenDiagnostics* diagnostics) {
     std::shared_ptr<TopologyOwners> sourceOwners;
     sourceOwners = sourceTopologyOwners;
     if (curveGrow) return Fail(diagnostics, "C3 Grow is already active");
@@ -9647,8 +9272,8 @@ bool ExecutionState::BeginCurveGrow(gpu::CurveGrowControls const& controls,
         gpu::CurveGrowInput input{geometry, rootPrim, rootUV,
             {inputs->t->data(), inputs->t->size()}, {inputs->b->data(), inputs->b->size()},
             {inputs->n->data(), inputs->n->size()}, {}};
-        if (curveGrow->BeginFresh(input, inputs, controls, stream, memoryReservation,
-                lengthMap.image ? &lengthMap : nullptr) != gpu::CurveGrowStatus::Ok)
+        if (curveGrow->BeginFresh(input, inputs, controls, stream,
+                memoryReservation) != gpu::CurveGrowStatus::Ok)
             return Fail(diagnostics, "CUDA C3 Grow launch failed");
         return true;
     }
@@ -9664,7 +9289,7 @@ bool ExecutionState::BeginCurveGrow(gpu::CurveGrowControls const& controls,
         {sourceOwners->b->data(), sourceOwners->b->size()},
         {sourceOwners->n->data(), sourceOwners->n->size()}, {}};
     if (curveGrow->BeginFresh(input, sourceOwners, controls, stream,
-            memoryReservation, lengthMap.image ? &lengthMap : nullptr) != gpu::CurveGrowStatus::Ok)
+            memoryReservation) != gpu::CurveGrowStatus::Ok)
         return Fail(diagnostics, "CUDA C3 Grow launch failed");
     return true;
 }
@@ -9763,11 +9388,11 @@ bool ExecutionState::AcceptCurveGrow(UsdGenCudaExecutionPlan const& plan, uint32
 }
 
 bool ExecutionState::BeginCurveGrowValue(gpu::CurveGrowControls const& controls,
-    gpu::GrowLengthMap const& lengthMap, gpu::DeviceCurveGeometryView inputGeometry,
+    gpu::DeviceCurveGeometryView inputGeometry,
     gpu::DeviceView<const int32_t> inputRootPrim, gpu::DeviceView<const float2> inputRootUV,
     std::shared_ptr<TopologyOwners> inputOwners,
     std::shared_ptr<TopologyOwners> sourceFrameOwners,
-    gpu::DeviceView<const uint64_t> frameStableIds, std::shared_ptr<NamedOwners> inputNames,
+    gpu::DeviceView<const uint64_t> sourceFrameIds, std::shared_ptr<NamedOwners> inputNames,
     std::shared_ptr<const void> jobLifetime, OperatorGrowCandidate* candidate,
     cudaStream_t stream, UsdGenDiagnostics* diagnostics) {
     if (!candidate || candidate->grow || !inputOwners || !sourceFrameOwners ||
@@ -9801,12 +9426,12 @@ bool ExecutionState::BeginCurveGrowValue(gpu::CurveGrowControls const& controls,
         ? gpu::DeviceView<const float3>{candidate->inputLifetime->sourceFrames->n->data(),
                                         candidate->inputLifetime->sourceFrames->n->size()}
         : gpu::DeviceView<const float3>{};
-    if (!inputGeometry.curveCount) frameStableIds = {};
+    if (!inputGeometry.curveCount) sourceFrameIds = {};
     gpu::CurveGrowInput input{inputGeometry, inputRootPrim, inputRootUV,
         frameT, frameB, frameN,
-        frameStableIds};
+        sourceFrameIds};
     if (candidate->grow->BeginFresh(input, candidate->inputLifetime, controls, stream,
-            memoryReservation, lengthMap.image ? &lengthMap : nullptr) != gpu::CurveGrowStatus::Ok)
+            memoryReservation) != gpu::CurveGrowStatus::Ok)
         return Fail(diagnostics, "CUDA Grow value launch failed");
     return true;
 }
@@ -9950,7 +9575,7 @@ void ExecutionState::PreserveSourceNamedChannels(UsdGenCudaExecutionPlan const& 
 }
 // Geometry-value DAGs are admitted only for the C3 CurveSource/
 // ReferenceSource or fused ScatterGrow -> Grow/Length/Noise/Width family. Those producers do not
-// transport CurveBuffer::curveMask or CurveBuffer::chunks (scheduler chunks
+// transport CurveBuffer::chunks (scheduler chunks
 // are unrelated), so their persistent values are canonically and provably
 // empty.  ScatterGrow enters only through its explicit fused owner path, not
 // as a generic empty fallback.
@@ -10484,28 +10109,28 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
     }
     auto const stream = execution.stream;
     auto const& desc = plan.desc;
-    auto& geometry = this->geometry;
-    auto& hairT = this->hairT;
-    auto& rootPrim = this->rootPrim;
-    auto& rootUV = this->rootUV;
-    auto& compacted = this->compacted;
-    auto& finalWidths = this->finalWidths;
-    auto& finalPoints = this->finalPoints;
-    auto& deformed = this->deformed;
+    auto& geometryRef = this->geometry;
+    auto& hairTRef = this->hairT;
+    auto& rootPrimRef = this->rootPrim;
+    auto& rootUVRef = this->rootUV;
+    auto& compactedRef = this->compacted;
+    auto& finalWidthsRef = this->finalWidths;
+    auto& finalPointsRef = this->finalPoints;
+    auto& deformedRef = this->deformed;
     if (i >= plan.steps.size()) return false;
     auto const& width = *plan.steps[i];
     gpu::DeviceCurveGeometryView operatorGeometry;
     gpu::DeviceView<const float> rightInput;
     if (!GetOperatorInput(plan, i, stream, &operatorGeometry, &rightInput, diagnostics)) return false;
-    geometry = operatorGeometry;
+    geometryRef = operatorGeometry;
     if (plan.geometryValueDag) {
         auto const& inputSnapshot = geometryValues[width.inputNode];
-        hairT = inputSnapshot.hairT;
-        rootPrim = inputSnapshot.rootPrim;
-        rootUV = inputSnapshot.rootUV;
+        hairTRef = inputSnapshot.hairT;
+        rootPrimRef = inputSnapshot.rootPrim;
+        rootUVRef = inputSnapshot.rootUV;
         curveTopology = inputSnapshot.curveTopology;
-        deformed = inputSnapshot.deformed;
-        if (width.type == TfToken("UsdGenDeform") && deformed) {
+        deformedRef = inputSnapshot.deformed;
+        if (width.type == TfToken("UsdGenDeform") && deformedRef) {
             Fail(diagnostics,
                 "unsupported composition: a second rest-to-animated deformation would apply surface motion twice");
             return false;
@@ -10521,8 +10146,8 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 QuarantineGeometryBundles();
                 execution.poisoned.store(true, std::memory_order_release);
             };
-            if (!BeginCurveGrowValue(width.grow, width.growLengthMap, geometry, rootPrim,
-                    rootUV, inputValue.topologyOwners, sourceTopologyOwners,
+            if (!BeginCurveGrowValue(width.grow, geometryRef, rootPrimRef,
+                    rootUVRef, inputValue.topologyOwners, sourceTopologyOwners,
                     captureStableIds, inputValue.namedOwners, {}, candidate.get(), stream,
                     diagnostics)) {
                 if (candidate->unsafeInput ||
@@ -10541,7 +10166,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 if (candidate->grow->HasUnprovenWork()) preserveValue();
                 return Fail(diagnostics, "CUDA Grow value rejected device input");
             }
-            if (!BeginGrowNamedValue(geometry, candidate.get(), stream, {},
+            if (!BeginGrowNamedValue(geometryRef, candidate.get(), stream, {},
                     inputValue.namedOwners, diagnostics)) {
                 if ((candidate->namedTopology && candidate->namedTopology->HasUnprovenWork()) ||
                     cudaStreamSynchronize(stream) != cudaSuccess) preserveValue();
@@ -10581,7 +10206,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             if (growNamedTopology) growNamedTopology->Quarantine();
             execution.poisoned.store(true, std::memory_order_release);
         };
-        if (!BeginCurveGrow(width.grow, width.growLengthMap, stream, diagnostics)) return false;
+        if (!BeginCurveGrow(width.grow, stream, diagnostics)) return false;
         auto status = curveGrow->FinishFreshAsync(stream, CudaInlineCompletionCallback, completion.get());
         if (status != gpu::CurveGrowStatus::Ok || cudaStreamSynchronize(stream) != cudaSuccess ||
             completion->status.load(std::memory_order_acquire) != int(cudaSuccess)) {
@@ -10611,7 +10236,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         if (!plan.geometryValueDag && width.rightInputNode >= widthValues.size())
             return Fail(diagnostics, "CUDA WidthBlend right predecessor value is unavailable");
         auto const right = plan.geometryValueDag ? rightInput : widthValues[width.rightInputNode].view;
-        if (right.size != geometry.pointCount || (right.size && !right.data) ||
+        if (right.size != geometryRef.pointCount || (right.size && !right.data) ||
             (!plan.geometryValueDag && widthValues[width.rightInputNode].owner &&
              widthValues[width.rightInputNode].owner->waitOn(stream) != cudaSuccess))
             return Fail(diagnostics, "CUDA WidthBlend right predecessor stream wait failed");
@@ -10624,9 +10249,9 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             if (sourceTopologyOwners && sourceTopologyOwners->resampled) sourceTopologyOwners->resampled->MarkUnprovenUpload();
             if (resampled) resampled->MarkUnprovenUpload();
             if (curveGrow) curveGrow->MarkUnprovenWork();
-            if (compacted) compacted->MarkUnprovenWork();
-            if (finalPoints) finalPoints->quarantine();
-            if (finalWidths) finalWidths->quarantine();
+            if (compactedRef) compactedRef->MarkUnprovenWork();
+            if (finalPointsRef) finalPointsRef->quarantine();
+            if (finalWidthsRef) finalWidthsRef->quarantine();
             if (growInputs) {
                 if (growInputs->source) growInputs->source->MarkUnprovenUpload();
                 if (growInputs->resampled) growInputs->resampled->MarkUnprovenUpload();
@@ -10636,12 +10261,12 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             auto const& leftValue = geometryValues[width.inputNode];
             auto const& rightValue = geometryValues[width.rightInputNode];
             if (width.requiresNonWidthProof) {
-                gpu::CurveFullNonWidthInput leftInput, rightInput;
+                gpu::CurveFullNonWidthInput leftInput, rightFullInput;
                 // The C3 geometry-value invariant is deliberately explicit:
-                // CurveBuffer mask/chunks are persistent empty values here,
+                // CurveBuffer chunks are persistent empty values here,
                 // not scheduler tiles and not a ScatterGrow fallback.
                 if (!BuildFullNonWidthInput(leftValue, &leftInput) ||
-                    !BuildFullNonWidthInput(rightValue, &rightInput) ||
+                    !BuildFullNonWidthInput(rightValue, &rightFullInput) ||
                     !leftValue.sourceFrameDomain || !rightValue.sourceFrameDomain ||
                     leftValue.sourceFramesPresent != rightValue.sourceFramesPresent ||
                     leftValue.sourceFrameDomain != rightValue.sourceFrameDomain ||
@@ -10659,7 +10284,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                     leftValue.namedOwners, rightValue.namedOwners});
                 gpu::CudaCurveFullNonWidthCompare compare;
                 bool equal = false;
-                auto compareStatus = compare.BeginFresh(leftInput, rightInput, life, stream,
+                auto compareStatus = compare.BeginFresh(leftInput, rightFullInput, life, stream,
                                                         memoryReservation);
                 if (compareStatus != cudaSuccess) {
                     if (compare.HasUnprovenWork()) {
@@ -10681,19 +10306,20 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             }
         }
         auto next = std::make_unique<gpu::DeviceBuffer<float>>();
-        if (next->reset(geometry.pointCount, memoryReservation,
+        if (next->reset(geometryRef.pointCount, memoryReservation,
                 UsdGenExecutionResourceKind::Active) != cudaSuccess)
             return Fail(diagnostics, "CUDA WidthBlend output allocation failed at " +
                 desc.nodes[width.semanticNode].path.GetString());
         CudaWidthBlendGraphCache::Lease graphLease;
         bool launched = false;
         if (execution.widthBlendGraph && execution.widthBlendGraph->Acquire(
-                MakeWidthBlendGraphKey(plan, width, geometry.pointCount), &graphLease)) {
+                MakeWidthBlendGraphKey(plan, width, geometryRef.pointCount), &graphLease)) {
             launched = execution.widthBlendGraph->CopyLaunchCopy(
-                geometry.widths, right, next->view(), stream);
+                geometryRef.widths, right, next->view(), stream);
         } else {
-            launched = gpu::LaunchWidthBlend(geometry.widths, right,
-                desc.nodes[width.semanticNode].blend, next->view(), stream);
+            launched = gpu::LaunchWidthBlend(geometryRef.widths, right,
+                CudaWidthBlendWeight(desc, desc.nodes[width.semanticNode]),
+                next->view(), stream);
         }
         if (!launched) {
             preserveDirectValueOwners();
@@ -10746,10 +10372,10 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 geometryValue.widthOwnerNode = width.semanticNode;
                 geometryValue.ready = true;
             }
-            geometry.widths = value.view;
+            geometryRef.widths = value.view;
         } else {
-            finalWidths = std::move(next);
-            geometry.widths = {finalWidths->data(), finalWidths->size()};
+            finalWidthsRef = std::move(next);
+            geometryRef.widths = {finalWidthsRef->data(), finalWidthsRef->size()};
         }
         return true;
     }
@@ -10760,8 +10386,31 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
     context.time = frame / desc.timeCodesPerSecond;
     context.seed = op.seed;
     context.descId = expr::DescriptionId(desc.description.GetText());
+    // The rest root frame feeding $N/$Nref, $dPdu/$dPduref and $dPdv/$dPdvref,
+    // resolved exactly as the Length compaction below resolves it.
+    gpu::RestRootFrames expressionFrames = CompactionFrames();
+    if (plan.geometryValueDag) {
+        auto const& inputValue = geometryValues[width.inputNode];
+        if (inputValue.topologyOwners) {
+            if (inputValue.topologyOwners->compaction)
+                expressionFrames = inputValue.topologyOwners->compaction->frames();
+            else if (inputValue.topologyOwners->grow)
+                expressionFrames = {inputValue.topologyOwners->grow->rootT(),
+                                    inputValue.topologyOwners->grow->rootB(),
+                                    inputValue.topologyOwners->grow->rootN(),
+                                    geometryRef.stableIds};
+            else if (inputValue.topologyOwners->scatterGrow)
+                expressionFrames = {inputValue.topologyOwners->scatterGrow->rootT(),
+                                    inputValue.topologyOwners->scatterGrow->rootB(),
+                                    inputValue.topologyOwners->scatterGrow->rootN(),
+                                    geometryRef.stableIds};
+        }
+    }
     std::vector<std::string> errors;
-    if (runtime.parameters.Evaluate(*width.parameters, geometry, {hairT, rootUV}, context,
+    if (runtime.parameters.Evaluate(*width.parameters, geometryRef,
+            ExpressionChannels(geometryRef, hairTRef, rootUVRef, rootPrimRef,
+                               expressionFrames),
+            context,
             stream, &errors, memoryReservation,
             UsdGenExecutionResourceKind::Cache) != CudaParameterStatus::Ok) {
         for (auto const& error : errors) Fail(diagnostics, error);
@@ -10807,9 +10456,9 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 if (resampled) resampled->MarkUnprovenUpload();
             }
             if (curveGrow) curveGrow->MarkUnprovenWork();
-            if (compacted) compacted->MarkUnprovenWork();
-            if (finalPoints) finalPoints->quarantine();
-            if (finalWidths) finalWidths->quarantine();
+            if (compactedRef) compactedRef->MarkUnprovenWork();
+            if (finalPointsRef) finalPointsRef->quarantine();
+            if (finalWidthsRef) finalWidthsRef->quarantine();
             for (auto& value : geometryValues)
                 if (value.points) value.points->quarantine();
             for (auto& value : widthValues)
@@ -10823,27 +10472,18 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             return Fail(diagnostics, "CUDA Noise frame wait failed");
         }
         auto profile = std::make_unique<gpu::DeviceBuffer<float>>();
-        auto mask = std::make_unique<gpu::DeviceBuffer<float>>();
         auto next = std::make_unique<gpu::DeviceBuffer<float3>>();
         if (profile->reset(width.profile.size(), memoryReservation,
                            UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-            mask->reset(width.mask.size(), memoryReservation,
-                        UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-            next->reset(geometry.pointCount, memoryReservation,
+            next->reset(geometryRef.pointCount, memoryReservation,
                         UsdGenExecutionResourceKind::Active) != cudaSuccess)
             return Fail(diagnostics, "CUDA Noise output/profile allocation failed");
-        bool uploaded = false;
         cudaError_t upload = cudaMemcpyAsync(profile->data(), width.profile.data(),
             sizeof(width.profile), cudaMemcpyHostToDevice, stream);
-        uploaded = upload == cudaSuccess;
-        if (upload == cudaSuccess) {
-            upload = cudaMemcpyAsync(mask->data(), width.mask.data(), sizeof(width.mask),
-                cudaMemcpyHostToDevice, stream);
-            uploaded = uploaded || upload == cudaSuccess;
-        }
+        bool const uploaded = upload == cudaSuccess;
         if (upload != cudaSuccess) {
             if (uploaded && cudaStreamSynchronize(stream) != cudaSuccess) {
-                profile->quarantine(); mask->quarantine(); next->quarantine();
+                profile->quarantine(); next->quarantine();
                 preserveNoiseProofLoss();
                 execution.poisoned.store(true, std::memory_order_release);
             }
@@ -10857,25 +10497,23 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         parameters.lacunarity = field("noise:lacunarity", 2.0f);
         parameters.gain = field("noise:gain", .5f);
         parameters.preserveLength = field("preserveLength", 1.0f);
-        parameters.blend = field("blend", values.node->blend);
-        parameters.maskAmount = field("mask:amount", 1.0f);
+        parameters.mask = field("mask", 1.0f);
         parameters.enabled = boolean("enabled", values.node->enabled);
         parameters.cumulative = boolean("cumulative", false);
         parameters.seed = integer("noise:seed", values.node->seed);
         parameters.magnitudeProfile = {profile->data(), profile->size()};
-        parameters.maskProfile = {mask->data(), mask->size()};
         auto noise = std::make_unique<gpu::CudaNoise>();
-        gpu::RestRootFrames const frames = geometry.curveCount ? gpu::RestRootFrames{
+        gpu::RestRootFrames const frames = geometryRef.curveCount ? gpu::RestRootFrames{
             {tangent->data(), tangent->size()},
             {binormal->data(), binormal->size()},
             {normal->data(), normal->size()},
             frameIds} : gpu::RestRootFrames{};
-        if (noise->ApplyFresh(geometry, hairT, frames,
+        if (noise->ApplyFresh(geometryRef, hairTRef, frames,
                 parameters, next->view(), stream, memoryReservation) != gpu::StyleStatus::Ok) {
             bool unsafe = noise->HasUnprovenWork();
             if (!unsafe && cudaStreamSynchronize(stream) != cudaSuccess) unsafe = true;
             if (unsafe) {
-                profile->quarantine(); mask->quarantine(); next->quarantine();
+                profile->quarantine(); next->quarantine();
                 preserveNoiseProofLoss();
             }
             if (unsafe) execution.poisoned.store(true, std::memory_order_release);
@@ -10885,7 +10523,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             binormal->recordUse(stream) != cudaSuccess ||
             normal->recordUse(stream) != cudaSuccess) {
             if (cudaStreamSynchronize(stream) != cudaSuccess) {
-                profile->quarantine(); mask->quarantine(); next->quarantine();
+                profile->quarantine(); next->quarantine();
                 preserveNoiseProofLoss();
                 execution.poisoned.store(true, std::memory_order_release);
             }
@@ -10898,7 +10536,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             if (!unsafe) unsafe = cudaStreamSynchronize(stream) != cudaSuccess;
             if (unsafe) {
                 completion.release();
-                profile->quarantine(); mask->quarantine(); next->quarantine();
+                profile->quarantine(); next->quarantine();
                 preserveNoiseProofLoss();
                 execution.poisoned.store(true, std::memory_order_release);
             }
@@ -10907,7 +10545,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         if (cudaStreamSynchronize(stream) != cudaSuccess ||
             completion->status.load(std::memory_order_acquire) != int(cudaSuccess)) {
             completion.release();
-            profile->quarantine(); mask->quarantine(); next->quarantine();
+            profile->quarantine(); next->quarantine();
             preserveNoiseProofLoss();
             execution.poisoned.store(true, std::memory_order_release);
             return Fail(diagnostics, "CUDA Noise completion proof failed");
@@ -10935,13 +10573,13 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             value.sourceFramesPresent = inputValue.sourceFramesPresent;
             value.points = std::move(next);
             value.pointOrigin = {value.points->data(), value.points->size()};
-            value.widthOrigin = geometry.widths;
+            value.widthOrigin = geometryRef.widths;
             value.pointOwnerNode = width.semanticNode;
             value.widthOwnerNode = geometryValues[width.inputNode].widthOwnerNode;
             value.ready = true;
         } else {
-            finalPoints = std::move(next);
-            geometry.points = {finalPoints->data(), finalPoints->size()};
+            finalPointsRef = std::move(next);
+            geometryRef.points = {finalPointsRef->data(), finalPointsRef->size()};
         }
         return true;
     }
@@ -10955,16 +10593,15 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         parameters.rebuild = values.GetToken(TfToken("rebuild"), TfToken("keepParam")) ==
             TfToken("reparam") ? gpu::LengthRebuild::Reparam : gpu::LengthRebuild::KeepParam;
         parameters.value = field("length:value", 1);
-        parameters.blend = field("blend", op.blend);
-        parameters.maskAmount = field("mask:amount", 1);
+        parameters.mask = field("mask", 1);
         parameters.minRemainingLength = field("minRemainingLength", 0);
         parameters.cullThreshold = field("cullThreshold", 0);
         parameters.enabled = boolean("enabled", op.enabled);
         parameters.seed = op.seed;
         if (auto expression = runtime.parameters.Find(TfToken("length:random"))) parameters.random = gpu::Vec2Field::Device({static_cast<float2 const*>(expression->data), expression->count}, expression->domain);
         else { auto random = values.GetVtValue(TfToken("length:random"), VtValue(GfVec2f(1,1))).UncheckedGet<GfVec2f>(); parameters.random = gpu::Vec2Field::Literal(make_float2(random[0], random[1])); }
-        gpu::DeviceBuffer<float> mask; gpu::DeviceBuffer<float3> changedPoints; gpu::DeviceBuffer<uint8_t> keep;
-        // These three buffers are borrowed by Length and then by the
+        gpu::DeviceBuffer<float3> changedPoints; gpu::DeviceBuffer<uint8_t> keep;
+        // These two buffers are borrowed by Length and then by the
         // compaction pass.  A failed asynchronous upload/operator launch must
         // not let their scope destructors free storage still referenced by
         // the primary stream.
@@ -10975,11 +10612,10 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             // permits.  Only an unsuccessful proof requires quarantine.
             if (cudaStreamSynchronize(stream) == cudaSuccess) return;
             QuarantineGeometryBundles();
-            mask.quarantine();
             changedPoints.quarantine();
             keep.quarantine();
             if (curveGrow) curveGrow->MarkUnprovenWork();
-            if (compacted) compacted->MarkUnprovenWork();
+            if (compactedRef) compactedRef->MarkUnprovenWork();
             if (growInputs) {
                 if (growInputs->source) growInputs->source->MarkUnprovenUpload();
                 if (growInputs->resampled) growInputs->resampled->MarkUnprovenUpload();
@@ -10991,28 +10627,20 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             if (sourceTopologyOwners && sourceTopologyOwners->source) sourceTopologyOwners->source->MarkUnprovenUpload();
             if (sourceTopologyOwners && sourceTopologyOwners->resampled) sourceTopologyOwners->resampled->MarkUnprovenUpload();
             if (resampled) resampled->MarkUnprovenUpload();
-            if (finalPoints) finalPoints->quarantine();
-            if (finalWidths) finalWidths->quarantine();
+            if (finalPointsRef) finalPointsRef->quarantine();
+            if (finalWidthsRef) finalWidthsRef->quarantine();
             execution.poisoned.store(true, std::memory_order_release);
         };
-        if (mask.reset(width.mask.size(), memoryReservation,
+        if (changedPoints.reset(geometryRef.pointCount, memoryReservation,
                 UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-            changedPoints.reset(geometry.pointCount, memoryReservation,
-                UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-            keep.reset(geometry.curveCount, memoryReservation,
+            keep.reset(geometryRef.curveCount, memoryReservation,
                 UsdGenExecutionResourceKind::Scratch) != cudaSuccess) {
             abandonLengthWork(false);
             Fail(diagnostics, "Length allocation failed");
             return false;
         }
-        if (cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask),
-                cudaMemcpyHostToDevice, stream) != cudaSuccess) {
-            abandonLengthWork(false);
-            Fail(diagnostics, "Length mask upload failed");
-            return false;
-        }
-        parameters.maskProfile = {mask.data(), mask.size()}; gpu::CudaLength kernel;
-        auto const applyStatus = kernel.Apply(geometry, hairT, parameters,
+        gpu::CudaLength kernel;
+        auto const applyStatus = kernel.Apply(geometryRef, hairTRef, parameters,
             changedPoints.view(), keep.view(), stream, memoryReservation);
         if (applyStatus != gpu::StyleStatus::Ok) {
             abandonLengthWork(true);
@@ -11028,7 +10656,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             Fail(diagnostics, "Length execution failed at " + op.path.GetString());
             return false;
         }
-        auto changed = geometry; changed.points = {changedPoints.data(), changedPoints.size()};
+        auto changed = geometryRef; changed.points = {changedPoints.data(), changedPoints.size()};
         auto next = std::make_unique<gpu::CudaCurveCompaction>();
         gpu::RestRootFrames frames = CompactionFrames();
         if (plan.geometryValueDag) {
@@ -11040,15 +10668,15 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                     frames = {inputValue.topologyOwners->grow->rootT(),
                               inputValue.topologyOwners->grow->rootB(),
                               inputValue.topologyOwners->grow->rootN(),
-                              geometry.stableIds};
+                              geometryRef.stableIds};
                 else if (inputValue.topologyOwners->scatterGrow)
                     frames = {inputValue.topologyOwners->scatterGrow->rootT(),
                               inputValue.topologyOwners->scatterGrow->rootB(),
                               inputValue.topologyOwners->scatterGrow->rootN(),
-                              geometry.stableIds};
+                              geometryRef.stableIds};
             }
         }
-        auto const compactApply = next->Apply(changed, hairT, rootPrim, rootUV,
+        auto const compactApply = next->Apply(changed, hairTRef, rootPrimRef, rootUVRef,
             {keep.data(), keep.size()}, stream, memoryReservation, frames);
         if (compactApply != gpu::CurveCompactionStatus::Ok) {
             if (next->HasUnprovenWork()) abandonLengthWork(true);
@@ -11078,7 +10706,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             if (sourceTopologyOwners && sourceTopologyOwners->source) sourceTopologyOwners->source->MarkUnprovenUpload();
             if (sourceTopologyOwners && sourceTopologyOwners->resampled) sourceTopologyOwners->resampled->MarkUnprovenUpload();
                 if (resampled) resampled->MarkUnprovenUpload();
-                if (compacted) compacted->MarkUnprovenWork();
+                if (compactedRef) compactedRef->MarkUnprovenWork();
                 if (curveGrow) curveGrow->MarkUnprovenWork();
                 if (growInputs) {
                     if (growInputs->source) growInputs->source->MarkUnprovenUpload();
@@ -11087,8 +10715,8 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                     if (growInputs->b) growInputs->b->quarantine();
                     if (growInputs->n) growInputs->n->quarantine();
                 }
-                if (finalPoints) finalPoints->quarantine();
-                if (finalWidths) finalWidths->quarantine();
+                if (finalPointsRef) finalPointsRef->quarantine();
+                if (finalWidthsRef) finalWidthsRef->quarantine();
                 next->MarkUnprovenWork();
                 for (auto const& value : widthValues)
                     if (value.owner) value.owner->quarantine();
@@ -11115,7 +10743,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             }
             gpu::CudaNamedChannelTopologyCandidate namedTopology;
             std::string reason;
-            if (namedTopology.BeginRaw(geometry, next->view(), std::move(inputs),
+            if (namedTopology.BeginRaw(geometryRef, next->view(), std::move(inputs),
                     stream, gpu::CudaNamedChannelTopologyMode::Compaction, {},
                     &reason, memoryReservation) != cudaSuccess) {
                 namedTopology.Quarantine();
@@ -11148,9 +10776,9 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             }
         }
         if (!plan.geometryValueDag) {
-            compacted = std::move(next); finalPoints.reset(); finalWidths.reset();
-            geometry = compacted->view(); hairT = compacted->hairT();
-            rootPrim = compacted->rootPrim(); rootUV = compacted->rootUV();
+            compactedRef = std::move(next); finalPointsRef.reset(); finalWidthsRef.reset();
+            geometryRef = compactedRef->view(); hairTRef = compactedRef->hairT();
+            rootPrimRef = compactedRef->rootPrim(); rootUVRef = compactedRef->rootUV();
         }
         if (plan.geometryValueDag) {
             if (topologyOwners.size() != plan.desc.nodes.size() ||
@@ -11166,16 +10794,16 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         if (plan.taskDag) {
             auto& value = geometryValues[width.semanticNode];
             auto const outputGeometry = plan.geometryValueDag
-                ? topologyOwners[width.semanticNode]->compaction->view() : geometry;
+                ? topologyOwners[width.semanticNode]->compaction->view() : geometryRef;
             auto const outputHairT = plan.geometryValueDag
-                ? topologyOwners[width.semanticNode]->compaction->hairT() : hairT;
+                ? topologyOwners[width.semanticNode]->compaction->hairT() : hairTRef;
             auto const outputRootPrim = plan.geometryValueDag
-                ? topologyOwners[width.semanticNode]->compaction->rootPrim() : rootPrim;
+                ? topologyOwners[width.semanticNode]->compaction->rootPrim() : rootPrimRef;
             auto const outputRootUV = plan.geometryValueDag
-                ? topologyOwners[width.semanticNode]->compaction->rootUV() : rootUV;
+                ? topologyOwners[width.semanticNode]->compaction->rootUV() : rootUVRef;
             value.geometry = outputGeometry; value.hairT = outputHairT; value.rootPrim = outputRootPrim;
             value.rootUV = outputRootUV; value.curveTopology = curveTopology;
-            value.deformed = deformed; value.pointOrigin = outputGeometry.points;
+            value.deformed = deformedRef; value.pointOrigin = outputGeometry.points;
             value.widthOrigin = outputGeometry.widths; value.pointOwnerNode = width.semanticNode;
             value.widthOwnerNode = width.semanticNode; value.topologyOwnerNode = width.semanticNode;
             value.namedOwnerNode = width.semanticNode;
@@ -11205,9 +10833,9 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         if (auto const* expression = runtime.parameters.Find(TfToken("rbfSamples"))) if (cudaMemcpyAsync(&budget, expression->data, sizeof(budget), cudaMemcpyDeviceToHost, stream) != cudaSuccess || cudaStreamSynchronize(stream) != cudaSuccess) { cudaStreamSynchronize(stream); Fail(diagnostics, "cannot read expression-driven RBF sample count"); return false; }
         if (budget < 4 || budget > 46336) { Fail(diagnostics, "RBF sample count exceeds the supported solver range [4,46336]"); return false; }
         auto nextPoints = std::make_unique<gpu::DeviceBuffer<float3>>();
-        if (nextPoints->reset(geometry.pointCount, memoryReservation) != cudaSuccess) { Fail(diagnostics, "RBF point allocation failed"); return false; }
-        if (geometry.pointCount) {
-            if (rootPrim.size != geometry.curveCount || rootUV.size != geometry.curveCount) { Fail(diagnostics, "RBF deformation requires persistent C3 root bindings"); return false; }
+        if (nextPoints->reset(geometryRef.pointCount, memoryReservation) != cudaSuccess) { Fail(diagnostics, "RBF point allocation failed"); return false; }
+        if (geometryRef.pointCount) {
+            if (rootPrimRef.size != geometryRef.curveCount || rootUVRef.size != geometryRef.curveCount) { Fail(diagnostics, "RBF deformation requires persistent C3 root bindings"); return false; }
             auto& cache = *runtime.rbf;
             cache.retiredState.reset();
             bool const resetCounters = cache.state && !SameRest(cache.key, width.surface.key);
@@ -11216,7 +10844,6 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             auto freshState = std::unique_ptr<CudaRbfCache::State>();
             CudaRbfCache::State* rbfState = cache.state.get();
             auto current = std::make_unique<gpu::DeviceBuffer<float3>>();
-            auto mask = std::make_unique<gpu::DeviceBuffer<float>>();
             auto deformer = std::make_unique<gpu::CudaRbfCurveDeformer>();
             auto rest = std::unique_ptr<gpu::DeviceBuffer<float3>>();
             auto offsets = std::unique_ptr<gpu::DeviceBuffer<uint32_t>>();
@@ -11257,7 +10884,6 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 offsets.release();
                 indices.release();
                 current.release();
-                mask.release();
                 deformer.release();
                 nextPoints.release();
                 freshState.release();
@@ -11329,14 +10955,9 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 offsets = std::make_unique<gpu::DeviceBuffer<uint32_t>>();
                 indices = std::make_unique<gpu::DeviceBuffer<uint32_t>>();
             }
-            if (!current || !mask || !deformer || current->reset(width.surface.currentPoints.size(), memoryReservation,
-                    UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-                mask->reset(width.mask.size(), memoryReservation,
+            if (!current || !deformer || current->reset(width.surface.currentPoints.size(), memoryReservation,
                     UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
-                return failFresh("RBF allocation/mask upload failed");
-            if (cudaMemcpyAsync(mask->data(), width.mask.data(), sizeof(width.mask),
-                    cudaMemcpyHostToDevice, stream) != cudaSuccess)
-                return failFresh("RBF mask upload failed");
+                return failFresh("RBF allocation failed");
             freshUploadSubmitted = true;
             if (rebind) {
                 if (!rest || !offsets || !indices || !upload(*rest, width.surface.restPoints) ||
@@ -11358,7 +10979,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                     return failFresh("RBF fresh rest binding failed; previous generation retained");
             }
             if (!rbfState || !upload(*current, width.surface.currentPoints) ||
-                (freshWorkStarted = true, rbfState->resources->surface.BeginFreshUpdate({current->data(), current->size()}, rootPrim, rootUV, stream,
+                (freshWorkStarted = true, rbfState->resources->surface.BeginFreshUpdate({current->data(), current->size()}, rootPrimRef, rootUVRef, stream,
                     memoryReservation) != gpu::SurfaceBindingStatus::Ok) ||
                 !synchronizeProof() || rbfState->resources->surface.CommitFreshUpdate() != gpu::SurfaceBindingStatus::Ok)
                 return failFresh("RBF fresh surface update failed; previous generation retained");
@@ -11371,8 +10992,8 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 !synchronizeProof() || rbfState->resources->field.CommitFreshSolve() != gpu::RbfStatus::Ok)
                 return failFresh("RBF fresh solve failed; previous generation retained");
             solveCommitted = true;
-            gpu::DeformParameters parameters; parameters.blend = field("blend", op.blend); parameters.maskAmount = field("mask:amount", 1); parameters.enabled = boolean("enabled", op.enabled); parameters.lockRoots = boolean("lockRoots", true); parameters.hairT = hairT; parameters.maskProfile = {mask->data(), mask->size()};
-            if (deformer->BeginFreshShape(geometry, rbfState->resources->surface.rootTargets(), parameters, nextPoints->view(), stream,
+            gpu::DeformParameters parameters; parameters.mask = field("mask", 1); parameters.enabled = boolean("enabled", op.enabled); parameters.lockRoots = boolean("lockRoots", true);
+            if (deformer->BeginFreshShape(geometryRef, rbfState->resources->surface.rootTargets(), parameters, nextPoints->view(), stream,
                     memoryReservation) != gpu::RbfStatus::Ok ||
                 !synchronizeProof() || deformer->CommitFreshShape() != gpu::RbfStatus::Ok ||
                 deformer->BeginFreshEvaluate(rbfState->resources->field, stream, memoryReservation) != gpu::RbfStatus::Ok ||
@@ -11403,7 +11024,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
                 return failFresh("RBF publication allocation failed; previous generation retained");
             }
         }
-        if (!geometry.pointCount && nextPoints->recordUse(stream) != cudaSuccess) {
+        if (!geometryRef.pointCount && nextPoints->recordUse(stream) != cudaSuccess) {
             Fail(diagnostics, "RBF publication event failed"); return false;
         }
         if (plan.geometryValueDag) {
@@ -11429,18 +11050,16 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             value.widthOwnerNode = inputValue.widthOwnerNode;
             value.ready = true;
         } else {
-            finalPoints = std::move(nextPoints);
-            geometry.points = {finalPoints->data(), finalPoints->size()};
-            deformed = true;
+            finalPointsRef = std::move(nextPoints);
+            geometryRef.points = {finalPointsRef->data(), finalPointsRef->size()};
+            deformedRef = true;
         }
         return true;
     }
-    gpu::WidthParameters parameters; parameters.width = field("width", .01f); parameters.rootScale = field("rootScale", 1); parameters.tipScale = field("tipScale", 1); parameters.taper = field("taper", 0); parameters.taperStart = field("taperStart", .5f); parameters.blend = field("blend", op.blend); parameters.maskAmount = field("mask:amount", 1); parameters.enabled = boolean("enabled", op.enabled); parameters.replace = boolean("replace", true);
-    gpu::DeviceBuffer<float> profile, mask, imageMask;
-    std::unique_ptr<gpu::CudaImage> image;
-    if (width.maskImage) image = std::make_unique<gpu::CudaImage>();
+    gpu::WidthParameters parameters; parameters.width = field("width", .01f); parameters.mask = field("mask", 1); parameters.enabled = boolean("enabled", op.enabled); parameters.replace = boolean("replace", true);
+    gpu::DeviceBuffer<float> profile;
     auto nextWidths = std::make_unique<gpu::DeviceBuffer<float>>();
-    // Profile/mask uploads and the Width kernels share the primary stream.
+    // The profile upload and the Width kernels share the primary stream.
     // Once one upload has succeeded, every failure below must detach all
     // local buffers: their destructors cannot infer that the stream may still
     // reference them from a failed asynchronous operation.
@@ -11453,7 +11072,6 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         if (cudaStreamSynchronize(stream) == cudaSuccess) return;
         QuarantineGeometryBundles();
         profile.quarantine();
-        mask.quarantine();
         for (auto& value : geometryValues) if (value.points) value.points->quarantine();
         for (auto& value : widthValues) if (value.owner) value.owner->quarantine();
         if (source) source->MarkUnprovenUpload();
@@ -11461,26 +11079,20 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             if (sourceTopologyOwners && sourceTopologyOwners->resampled) sourceTopologyOwners->resampled->MarkUnprovenUpload();
         if (resampled) resampled->MarkUnprovenUpload();
         if (curveGrow) curveGrow->MarkUnprovenWork();
-        if (compacted) compacted->MarkUnprovenWork();
-        if (finalPoints) finalPoints->quarantine();
-        if (finalWidths) finalWidths->quarantine();
+        if (compactedRef) compactedRef->MarkUnprovenWork();
+        if (finalPointsRef) finalPointsRef->quarantine();
+        if (finalWidthsRef) finalWidthsRef->quarantine();
         if (growInputs) {
             if (growInputs->source) growInputs->source->MarkUnprovenUpload();
             if (growInputs->resampled) growInputs->resampled->MarkUnprovenUpload();
         }
-        imageMask.quarantine();
-        if (image) image->Quarantine();
         if (nextWidths) nextWidths->quarantine();
         execution.poisoned.store(true, std::memory_order_release);
     };
     if (profile.reset(width.profile.size(), memoryReservation,
             UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-        mask.reset(width.mask.size(), memoryReservation,
-            UsdGenExecutionResourceKind::Scratch) != cudaSuccess ||
-        nextWidths->reset(geometry.pointCount, memoryReservation,
-            UsdGenExecutionResourceKind::Active) != cudaSuccess ||
-        (width.maskImage && imageMask.reset(geometry.curveCount, memoryReservation,
-            UsdGenExecutionResourceKind::Scratch) != cudaSuccess)) {
+        nextWidths->reset(geometryRef.pointCount, memoryReservation,
+            UsdGenExecutionResourceKind::Active) != cudaSuccess) {
         abandonWidthWork(false);
         Fail(diagnostics, "Width device allocation failed");
         return false;
@@ -11492,29 +11104,12 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
         return false;
     }
     widthWorkSubmitted = true;
-    if (cudaMemcpyAsync(mask.data(), width.mask.data(), sizeof(width.mask),
-            cudaMemcpyHostToDevice, stream) != cudaSuccess) {
-        abandonWidthWork(true);
-        Fail(diagnostics, "Width mask upload failed");
-        return false;
-    }
-    if (image &&
-        (image->Upload(width.maskImage, stream, memoryReservation,
-                       UsdGenExecutionResourceKind::Active) != cudaSuccess ||
-         image->Sample(rootUV, imageMask.view(), width.maskImageOptions, stream) != cudaSuccess)) {
-        abandonWidthWork(true);
-        Fail(diagnostics, "Width ImageMap upload/sample failed at " + op.path.GetString());
-        return false;
-    }
-    if (image)
-        parameters.mapMask = gpu::ScalarField::Device(
-            {imageMask.data(), imageMask.size()}, expr::Domain::Primitive);
-    parameters.widthProfile = {profile.data(), profile.size()}; parameters.maskProfile = {mask.data(), mask.size()}; gpu::CudaWidth kernel;
-    auto const applyStatus = kernel.Apply(geometry, hairT, parameters,
+    parameters.widthProfile = {profile.data(), profile.size()}; gpu::CudaWidth kernel;
+    auto const applyStatus = kernel.Apply(geometryRef, hairTRef, parameters,
         nextWidths->view(), stream, memoryReservation);
     if (applyStatus != gpu::StyleStatus::Ok) {
         // Even a host-side Apply failure follows a successful profile upload,
-        // so profile/mask remain unproven until the stream is known idle.
+        // so the profile remains unproven until the stream is known idle.
         if (widthWorkSubmitted || kernel.HasUnprovenWork())
             abandonWidthWork(true);
         Fail(diagnostics, "Width execution failed at " + op.path.GetString() + "; previous generation retained");
@@ -11523,7 +11118,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
     auto const finishStatus = kernel.Finish(stream);
     if (finishStatus != gpu::StyleStatus::Ok) {
         // CudaWidth marks its own storage unproven on a failed completion.
-        // The shared profile/mask uploads need a proof only when Width could
+        // The shared profile upload needs a proof only when Width could
         // not establish one; a semantic status is already fully synchronized.
         if (kernel.HasUnprovenWork()) abandonWidthWork(true);
         Fail(diagnostics, "Width execution failed at " + op.path.GetString() + "; previous generation retained");
@@ -11531,7 +11126,7 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
     }
     if (nextWidths->recordUse(stream) != cudaSuccess) {
         // Finish synchronizes the primary stream, so no Width kernel can be
-        // using profile/mask here.  If recordUse fails, ordinary destruction
+        // using the profile here.  If recordUse fails, ordinary destruction
         // is safe and preserves the normal resource-release behavior.
         Fail(diagnostics, "Width publication event failed at " + op.path.GetString() + "; previous generation retained");
         return false;
@@ -11561,10 +11156,10 @@ bool ExecutionState::RunOperator(UsdGenCudaExecutionPlan const& plan,
             geometryValue.widthOwnerNode = width.semanticNode;
             geometryValue.ready = true;
         }
-        geometry.widths = value.view;
+        geometryRef.widths = value.view;
     } else {
-        finalWidths = std::move(nextWidths);
-        geometry.widths = {finalWidths->data(), finalWidths->size()};
+        finalWidthsRef = std::move(nextWidths);
+        geometryRef.widths = {finalWidthsRef->data(), finalWidthsRef->size()};
     }
     return true;
 }

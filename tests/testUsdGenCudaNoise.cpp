@@ -134,7 +134,7 @@ int main() {
     DeviceBuffer<float3> devicePoints, deviceRest, deviceTangent, deviceNormal, deviceBinormal, output;
     DeviceBuffer<uint32_t> deviceOffsets;
     DeviceBuffer<uint64_t> deviceIds;
-    DeviceBuffer<float> deviceHairT, profile, maskProfile, pointMagnitude;
+    DeviceBuffer<float> deviceHairT, profile, pointMask, pointMagnitude;
     const std::vector<float> profileValues(257, 1.0f);
     CHECK(Upload(devicePoints, points, producer) && Upload(deviceRest, rest, producer) &&
           Upload(deviceOffsets, offsets, producer) && Upload(deviceIds, ids, producer) &&
@@ -223,23 +223,22 @@ int main() {
     DeviceBuffer<int32_t> pointOctaves, primitiveSeed;
     DeviceBuffer<unsigned char> cumulative;
     std::vector<float> magnitudeRamp(257, 1.0f);
-    std::vector<float> maskRamp(257, 1.0f);
     magnitudeRamp[0] = 0.0f;
     magnitudeRamp[128] = .5f;
-    maskRamp[0] = 0.0f;
-    maskRamp[128] = .75f;
-    maskRamp[256] = .5f;
+    // usdGen:mask is the whole envelope and may be a point-domain field: the
+    // former along-strand mask ramp is now just an expression over $t.
+    const std::vector<float> pointMasks{0.0f,.75f,.5f,1.0f,.25f,.5f,1.0f};
     const std::vector<float> pointMagnitudes{.1f,.2f,.3f,.35f,.25f,.15f,.05f};
     CHECK(Upload(pointOctaves, std::vector<int32_t>{3,3,3,3,3,3,3}, producer) &&
           Upload(primitiveSeed, std::vector<int32_t>{17, 18}, producer) &&
           Upload(cumulative, std::vector<unsigned char>{1u,0u}, producer) &&
           Upload(pointMagnitude, pointMagnitudes, producer) &&
-          Upload(maskProfile, maskRamp, producer) && Upload(profile, magnitudeRamp, producer));
+          Upload(pointMask, pointMasks, producer) && Upload(profile, magnitudeRamp, producer));
     parameters = Parameters(View(profile));
     parameters.magnitude = ScalarField::Device(View(pointMagnitude), expr::Domain::Point);
     parameters.octaves = IntField::Device(View(pointOctaves), expr::Domain::Point);
     parameters.seed = IntField::Device(View(primitiveSeed), expr::Domain::Primitive);
-    parameters.maskProfile = View(maskProfile);
+    parameters.mask = ScalarField::Device(View(pointMask), expr::Domain::Point);
     parameters.cumulative = BoolField::Device(
         {reinterpret_cast<uint8_t const*>(cumulative.data()), cumulative.size()}, expr::Domain::Primitive);
     CHECK(noise.Apply(geometry, View(deviceHairT), frames, parameters,
@@ -257,7 +256,7 @@ int main() {
                                          1.7f, .4f, 3, 2, .5f);
             if (isCumulative) running = Add(running, field);
             const float scale = pointMagnitudes[point] * Sample257(magnitudeRamp, hairT[point]) *
-                Sample257(maskRamp, hairT[point]);
+                pointMasks[point];
             const float3 expected = Add(points[point], FrameVector(
                 tangent[c], binormal[c], normal[c], Mul(isCumulative ? running : field, scale)));
             CHECK(Near(raw[point], expected));
@@ -318,7 +317,7 @@ int main() {
     styledInput[2] = V(7.0f, 0.0f, 0.0f);
     CHECK(Upload(devicePoints, styledInput, producer));
     parameters = Parameters(View(profile));
-    parameters.blend = ScalarField::Literal(0.0f);
+    parameters.mask = ScalarField::Literal(0.0f);
     parameters.preserveLength = ScalarField::Literal(1.0f);
     CHECK(noise.Apply(geometry, View(deviceHairT), frames, parameters,
                       {output.data(), output.size()}, producer) == StyleStatus::Ok);
@@ -392,8 +391,7 @@ int main() {
     emptyParameters.lacunarity = ScalarField::Device(DeviceView<const float>{}, expr::Domain::Primitive);
     emptyParameters.gain = ScalarField::Device(DeviceView<const float>{}, expr::Domain::Point);
     emptyParameters.preserveLength = ScalarField::Device(DeviceView<const float>{}, expr::Domain::Primitive);
-    emptyParameters.blend = ScalarField::Device(DeviceView<const float>{}, expr::Domain::Point);
-    emptyParameters.maskAmount = ScalarField::Device(DeviceView<const float>{}, expr::Domain::Primitive);
+    emptyParameters.mask = ScalarField::Device(DeviceView<const float>{}, expr::Domain::Primitive);
     emptyParameters.octaves = IntField::Device(DeviceView<const int32_t>{}, expr::Domain::Point);
     emptyParameters.seed = IntField::Device(DeviceView<const int32_t>{}, expr::Domain::Primitive);
     emptyParameters.cumulative = BoolField::Device(DeviceView<const uint8_t>{}, expr::Domain::Primitive);

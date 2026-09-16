@@ -29,7 +29,7 @@ static UsdGenGraphDesc MakeDesc() {
     length.params.push_back({TfToken("length:mode"), VtValue(TfToken("cull")), false});
     length.params.push_back({TfToken("cullThreshold"), VtValue(.45f), false});
     UsdGenNodeDesc deform; deform.path = SdfPath("/Ops/Deform"); deform.type = TfToken("UsdGenDeform");
-    deform.inputs = {length.path}; deform.surfaces = {surface.path}; deform.mode = TfToken("rbf"); deform.space = TfToken("auto"); deform.readPhase = TfToken("final");
+    deform.inputs = {length.path}; deform.surfaces = {surface.path};
     deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false}); deform.params.push_back({TfToken("lockRoots"), VtValue(true), false});
     UsdGenNodeDesc width; width.path = SdfPath("/Ops/Width"); width.type = TfToken("UsdGenWidth"); width.inputs = {deform.path};
     width.params.push_back({TfToken("width"), VtValue(.2f), false});

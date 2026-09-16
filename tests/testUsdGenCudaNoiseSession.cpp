@@ -69,7 +69,7 @@ static UsdGenGraphDesc MakeDesc(bool withNoise) {
             frame[1][0] = 0; frame[1][1] = 0; frame[1][2] = 1;
             frame[2][0] = 1; frame[2][1] = 0; frame[2][2] = 0;
         }
-        frame[3][0] = curves.curveId[i];
+        frame[3][0] = static_cast<double>(curves.curveId[i]);
         curves.rootFrame.push_back(frame);
     }
     desc.curveSets.push_back(curves);
@@ -92,7 +92,7 @@ static UsdGenGraphDesc MakeDesc(bool withNoise) {
 
     UsdGenNodeDesc noise;
     noise.path = SdfPath("/Ops/Noise"); noise.type = TfToken("UsdGenNoise"); noise.inputs = {length.path};
-    noise.params = {{TfToken("enabled"), VtValue(true), false}, {TfToken("blend"), VtValue(1.0f), false},
+    noise.params = {{TfToken("enabled"), VtValue(true), false},
                     {TfToken("noise:frequency"), VtValue(1.0f), false}, {TfToken("noise:magnitude"), VtValue(.1f), false},
                     {TfToken("noise:seed"), VtValue(7), false}, {TfToken("noise:octaves"), VtValue(2), false}};
     width.inputs = {noise.path}; desc.nodes = {source, length, noise, width}; desc.terminal = width.path;
@@ -604,7 +604,7 @@ int main() {
           cudaStreamSynchronize(stream) == cudaSuccess &&
           std::memcmp(identityPoints.data(), loaded.data(), loaded.size()*sizeof(float3)) == 0);
     auto blendZero = noise;
-    blendZero.nodes[2].params[1].value = VtValue(0.0f);
+    blendZero.nodes[2].params.push_back({TfToken("mask"), VtValue(0.0f), false});
     session.SetGraphDesc(blendZero);
     auto identityGeneration = session.Commit(4, UsdGenCommitReason::SetTime);
     CHECK(identityGeneration && !session.LastDiagnostics().HasErrors());
@@ -614,12 +614,6 @@ int main() {
                           identityPoints.size()*sizeof(float3), cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
           cudaStreamSynchronize(stream) == cudaSuccess &&
           std::memcmp(identityPoints.data(), loaded.data(), loaded.size()*sizeof(float3)) == 0);
-
-    auto deformed = noise;
-    deformed.nodes[2].space = TfToken("deformed");
-    session.SetGraphDesc(deformed);
-    CHECK(session.Commit(4, UsdGenCommitReason::SetTime) == identityGeneration &&
-          session.LastDiagnostics().HasErrors());
 
     auto badType = noise;
     badType.nodes[2].expressionBindings[1].nativeType = TfToken("float");

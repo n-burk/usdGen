@@ -6,7 +6,10 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/imaging/hd/basisCurvesSchema.h"
+#include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/dataSource.h"
+#include "pxr/imaging/hd/tokens.h"
 
 #include <cstdio>
 
@@ -77,6 +80,34 @@ main()
     okay &= Check(SampleEquals(topology, TfToken("curveVertexCounts"),
                                tile.curveVertexCounts),
                   "standard curveVertexCounts preserve ragged topology");
+
+    // type/basis/wrap are read from INSIDE the topology container
+    // (pxr/imaging/hd/basisCurvesTopologySchema.h:35-42). Anything authored
+    // as a direct child of `basisCurves` is invisible to stock Hydra, which
+    // then falls back to type = linear / basis = bezier / wrap = nonperiodic.
+    HdBasisCurvesTopologySchema const topologySchema =
+        HdBasisCurvesSchema::GetFromParent(root).GetTopology();
+    okay &= Check(topologySchema.IsDefined(),
+                  "HdBasisCurvesSchema::GetTopology() resolves on the tile");
+    okay &= Check(topologySchema.GetType() &&
+                      topologySchema.GetType()->GetTypedValue(0) ==
+                          HdTokens->cubic,
+                  "topology/type == cubic through the public schema");
+    okay &= Check(topologySchema.GetBasis() &&
+                      topologySchema.GetBasis()->GetTypedValue(0) ==
+                          HdTokens->bspline,
+                  "topology/basis == bspline through the public schema");
+    okay &= Check(topologySchema.GetWrap() &&
+                      topologySchema.GetWrap()->GetTypedValue(0) ==
+                          HdTokens->pinned,
+                  "topology/wrap == pinned through the public schema");
+    okay &= Check(bool(topologySchema.GetCurveVertexCounts()),
+                  "topology/curveVertexCounts through the public schema");
+    okay &= Check(!basis->Get(TfToken("type")) &&
+                      !basis->Get(TfToken("basis")) &&
+                      !basis->Get(TfToken("wrap")),
+                  "no type/basis/wrap directly under basisCurves "
+                  "(stock Hydra never reads them there)");
     okay &= Check(SampleEquals(points, TfToken("primvarValue"), tile.points),
                   "standard points primvar preserves every CV");
     okay &= Check(SampleEquals(widths, TfToken("primvarValue"), tile.widths),

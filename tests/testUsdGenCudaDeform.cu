@@ -44,7 +44,7 @@ int main() {
         const std::vector<uint32_t> offsets = {0,2,5}; // variable 2/3 CVs
         DeviceBuffer<float3> drivers, posed, points, targets, output, warp;
         DeviceBuffer<uint32_t> deviceOffsets;
-        DeviceBuffer<float> primitive, pointMask, blend, mask, profile, hairT;
+        DeviceBuffer<float> primitive, pointMask, blend, mask;
         DeviceBuffer<float3> incoming;
         DeviceBuffer<uint8_t> enabled, lockRoots;
         CHECK(Upload(drivers, samples) && Upload(points, rest) &&
@@ -119,30 +119,25 @@ int main() {
         }
 
         // The typed path consumes incoming styled points, not canonical
-        // restPoints.  Exercise all supported field domains and authored hairT
-        // profile sampling, including a primitive-domain whole-strand lock.
+        // restPoints.  Exercise all supported field domains, including a
+        // primitive-domain whole-strand lock.  usdGen:mask is the whole
+        // envelope: the former along-strand profile is now just an expression.
         const std::vector<float3> styled = {
             P(3,.2f,-1), P(4,.3f,-2), P(5,.4f,-3), P(6,.5f,-4), P(7,.6f,-5)};
         const std::vector<float> blendValues = {.5f, 1.f};
-        const std::vector<float> maskValues = {1.f,.5f,1.f,.5f,1.f};
-        std::vector<float> profileValues(257);
-        for (unsigned i = 0; i < profileValues.size(); ++i)
-            profileValues[i] = float(i) / 256.f;
-        const std::vector<float> authoredHairT = {0.f,.5f,1.f,0.f,.25f};
+        // Point-domain envelope; the zero entry keeps a locked-root CV an
+        // exact pass-through, as the old zero ramp sample did.
+        const std::vector<float> maskValues = {1.f,.5f,1.f,0.f,1.f};
         CHECK(Upload(incoming, styled) && Upload(blend, blendValues) &&
-              Upload(mask, maskValues) && Upload(profile, profileValues) &&
-              Upload(hairT, authoredHairT) &&
+              Upload(mask, maskValues) &&
               Upload(enabled, std::vector<uint8_t>{1u}) &&
               Upload(lockRoots, std::vector<uint8_t>{0u,1u}));
         DeviceCurveGeometryView styledGeometry = geometry;
         styledGeometry.points = {incoming.data(), 5};
         DeformParameters parameters;
-        parameters.blend = ScalarField::Device({blend.data(),2}, usdGen::expr::Domain::Primitive);
-        parameters.maskAmount = ScalarField::Device({mask.data(),5}, usdGen::expr::Domain::Point);
+        parameters.mask = ScalarField::Device({mask.data(),5}, usdGen::expr::Domain::Point);
         parameters.enabled = BoolField::Device({enabled.data(),1}, usdGen::expr::Domain::Groom);
         parameters.lockRoots = BoolField::Device({lockRoots.data(),2}, usdGen::expr::Domain::Primitive);
-        parameters.maskProfile = {profile.data(), profile.size()};
-        parameters.hairT = {hairT.data(), hairT.size()};
         CHECK(binding.Evaluate({incoming.data(),5}, warp.view(), producer) == RbfStatus::Ok);
         CHECK(binding.Finish(consumer) == RbfStatus::Ok);
         const auto typedWarped = Read(warp);
@@ -155,9 +150,7 @@ int main() {
         for (unsigned i = 0; i < actual.size(); ++i) {
             const unsigned curve = i < 2 ? 0 : 1;
             const unsigned root = curve == 0 ? 0 : 2;
-            const float t = authoredHairT[i];
-            const float profileAtT = t; // the test LUT is linear 0..1
-            const float e = blendValues[curve] * maskValues[i] * profileAtT;
+            const float e = maskValues[i];
             const float3 destination = curve == 1
                 ? P(typedWarped[i].x + rest[root].x - typedWarped[root].x,
                     typedWarped[i].y + rest[root].y - typedWarped[root].y,
@@ -167,9 +160,9 @@ int main() {
                 styled[i].y + (destination.y-styled[i].y)*e,
                 styled[i].z + (destination.z-styled[i].z)*e)));
         }
-        // Blend zero is also a strict incoming-geometry pass-through; this
+        // A zero mask is also a strict incoming-geometry pass-through; this
         // catches accidentally using canonical restPoints as the source.
-        parameters.blend = ScalarField::Literal(0.f);
+        parameters.mask = ScalarField::Literal(0.f);
         parameters.enabled = BoolField::Literal(true);
         CHECK(deform.Deform(binding, styledGeometry, {targets.data(),2}, parameters,
                             output.view(), producer) == RbfStatus::Ok);
@@ -194,8 +187,8 @@ int main() {
         CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshBinding.CommitFreshBindRank()==RbfStatus::Ok);
         CHECK(freshBinding.BeginFreshBindLu(producer)==RbfStatus::Ok);
         CHECK(cudaStreamSynchronize(producer)==cudaSuccess && freshBinding.CommitFreshBindLu()==RbfStatus::Ok);
-        parameters.blend=ScalarField::Device({blend.data(),2},usdGen::expr::Domain::Primitive);
         parameters.enabled=BoolField::Device({enabled.data(),1},usdGen::expr::Domain::Groom);
+        parameters.mask=ScalarField::Device({mask.data(),5},usdGen::expr::Domain::Point);
         const auto freshSentinel=Read(output); CudaRbfCurveDeformer fresh;
         CHECK(fresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::Ok);
         CHECK(fresh.HasUnprovenWork());
@@ -237,7 +230,7 @@ int main() {
         // Device-field NaN is an Apply semantic rejection and never copies
         // staging into the caller's sentinel destination.
         const auto beforeFreshNaN=Read(output);
-        CHECK(Upload(blend,std::vector<float>{NAN,1.f}));
+        CHECK(Upload(mask,std::vector<float>{NAN,.5f,1.f,.5f,1.f}));
         CHECK(fresh.BeginFreshShape(styledGeometry,{targets.data(),2},parameters,output.view(),producer)==RbfStatus::Ok);
         CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshShape()==RbfStatus::Ok);
         CHECK(fresh.BeginFreshEvaluate(freshBinding,producer)==RbfStatus::Ok);
@@ -245,7 +238,7 @@ int main() {
         CHECK(fresh.BeginFreshApply(producer)==RbfStatus::Ok);
         CHECK(cudaStreamSynchronize(producer)==cudaSuccess && fresh.CommitFreshApply()==RbfStatus::NonFiniteInput);
         actual=Read(output); for(unsigned i=0;i<actual.size();++i) CHECK(Near(actual[i],beforeFreshNaN[i]));
-        CHECK(Upload(blend,blendValues));
+        CHECK(Upload(mask,maskValues));
         DeviceBuffer<uint32_t> emptyOffsets;
         CHECK(Upload(emptyOffsets, std::vector<uint32_t>{0}));
         DeviceCurveGeometryView emptyGeometry{};

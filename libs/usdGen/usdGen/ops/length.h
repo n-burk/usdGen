@@ -18,7 +18,6 @@ public:
     ~UsdGenLengthOp() override = default;
 
     TfToken Type() const override { return TfToken("UsdGenLength"); }
-    UsdGenSpace Space() const override { return UsdGenSpace::Rest; }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CurveCount; }
 
     TfSpan<const TfToken> TopologyParameters() const override;
@@ -36,7 +35,9 @@ public:
     std::unique_ptr<UsdGenCapture> CreateCapture() const override;
     uint32_t PlanesTouched() const override;
 private:
-    const TfToken sSet{"set"};
+    const TfToken sSet{"set"}, sMask{"mask"};
+    const TfToken sValue{"length:value"}, sCull{"cullThreshold"};
+    const TfToken sMinRemaining{"minRemainingLength"};
 };
 
 }  // namespace usdGen

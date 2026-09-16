@@ -9,11 +9,18 @@
 #include "usdGenImaging/usdGenTokens.h"
 
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/imaging/hd/basisCurvesSchema.h"
+#include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/dependencySchema.h"
 #include "pxr/imaging/hd/materialBindingSchema.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
+#include "pxr/imaging/hd/materialConnectionSchema.h"
+#include "pxr/imaging/hd/materialNetworkSchema.h"
+#include "pxr/imaging/hd/materialNodeSchema.h"
+#include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 
@@ -100,24 +107,28 @@ HdContainerDataSourceHandle
 _Topology(usdGen::UsdGenTilePublication const &tile)
 {
     // C2 (docs/freezes/C2.md:20-23; 06 §4.1): the Hydra BasisCurves schema
-    // nests topology ONE level down — basisCurves/topology/curveVertexCounts
-    // with type/basis/wrap as SIBLINGS of the topology container
-    // (pxr/imaging/hd/basisCurvesSchema.h:38 — the schema token IS
-    // "topology"). A flat layout serves no topology to Storm, which drops
-    // the prim silently (2026-09-12: 49 published tiles, itemsDrawn == 1).
+    // nests EVERYTHING one level down — curveVertexCounts, type, basis and
+    // wrap are all children of basisCurves/topology
+    // (pxr/imaging/hd/basisCurvesTopologySchema.h:35-42; the consumer reads
+    // them from that container in
+    // hd/sceneIndexAdapterSceneDelegate.cpp:865-911). Anything authored as a
+    // direct child of `basisCurves` is invisible to Hydra, which then falls
+    // back to type = linear / basis = bezier / wrap = nonperiodic and the
+    // tile can never render as a smooth cubic curve at any refineLevel.
+    // Build through the schema builders so the token names cannot drift.
     // NOTE: basis carries the open/closed semantics; open is Hydra-exact.
-    return HdRetainedContainerDataSource::New(
-        /*name1*/ TfToken("topology"),
-        /*value1*/ HdRetainedContainerDataSource::New(
-            /*tname1*/ TfToken("curveVertexCounts"),
-            /*tvalue1*/ _Samp(tile.curveVertexCounts)),
-        /*name2*/ TfToken("type"),
-        /*value2*/ _Tok(TfToken("cubic")),
-        /*name3*/ TfToken("basis"),
-        /*value3*/ _Tok(tile.basis.empty() ? TfToken("bezier")
-                                           : TfToken(tile.basis)),
-        /*name4*/ TfToken("wrap"),
-        /*value4*/ _Tok(TfToken("pinned")));
+    return HdBasisCurvesSchema::Builder()
+        .SetTopology(
+            HdBasisCurvesTopologySchema::Builder()
+                .SetCurveVertexCounts(
+                    HdRetainedTypedSampledDataSource<VtIntArray>::New(
+                        tile.curveVertexCounts))
+                .SetType(_Tok(HdTokens->cubic))
+                .SetBasis(_Tok(tile.basis.empty() ? HdTokens->bezier
+                                                  : TfToken(tile.basis)))
+                .SetWrap(_Tok(HdTokens->pinned))
+                .Build())
+        .Build();
 }
 
 // size-derived interpolation for per-curve / per-CV colour arrays (06 §4.1
@@ -178,6 +189,14 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
                                               : TfToken("vertex")));
     }
 
+    // C2 (docs/freezes/C2.md:35): constant 1.0. Storm claims
+    // minScreenSpaceWidths as a builtin primvar name so it survives primvar
+    // filtering (hdSt/basisCurves.cpp:1371-1385) and clamps the rasterized
+    // strand to at least one pixel (hdSt/shaders/basisCurves.glslfx:781-784),
+    // which is what stops thin hair aliasing away at distance.
+    _Add(&pvNames, &pvValues, TfToken("minScreenSpaceWidths"),
+         _Primvar(_Samp(1.0f), TfToken("constant")));
+
     if (!tile.hairT.empty()) {
         _Add(&pvNames, &pvValues, TfToken("hairT"),
              _Primvar(_Samp(tile.hairT), TfToken("vertex")));
@@ -211,7 +230,22 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
     // Engine-internal uniform planes (clumpId_<level>, guideIndex/guideWeight
     // with elementSize = arity 3, minScreenSpaceWidths constant 1.0).
     for (usdGen::UsdGenPlane const &plane : tile.extraUniform) {
+        if (plane.name == TfToken("minScreenSpaceWidths")) {
+            // Published unconditionally above; never publish it twice.
+            continue;
+        }
         HdSampledDataSourceHandle values;
+        if ((plane.name == "furTauP" || plane.name == "furTauN") &&
+            plane.arity == 3 && plane.f.size() == totalCvs * 3) {
+            // Pack optical depth into two vec3 buffers. Separate scalars
+            // exhaust GL's per-stage SSBO slots on instanced curve draws.
+            VtVec3fArray packed(totalCvs);
+            for (size_t i = 0; i < totalCvs; ++i)
+                packed[i] = GfVec3f(plane.f[3*i], plane.f[3*i+1], plane.f[3*i+2]);
+            _Add(&pvNames, &pvValues, plane.name,
+                 _Primvar(_Samp(packed), plane.interpolation));
+            continue;
+        }
         if (plane.type == "int") {
             values = _Samp(plane.i);
         } else {
@@ -297,15 +331,24 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
                  tile.visibility != TfToken("invisible")))
              .Build());
 
-    if (!tile.materialPath.IsEmpty()) {
+    {
+        // An AUTHORED binding always wins. With nothing authored the tile
+        // used to carry no materialBindings at all, so Storm fell back to
+        // flat displayColor shading and the hair lobes never ran; bind the
+        // synthetic <description>/__usdGenRender/material_storm instead
+        // (C2 06 §4.4 slot, synthesized by UsdGenGroomSceneIndex::GetPrim).
+        bool const authored = !tile.materialPath.IsEmpty();
+        SdfPath const path = authored
+            ? tile.materialPath
+            : UsdGenTilePublisher::DefaultMaterialPath(tile.primPath);
         // The app-facing allPurpose spelling maps to Hydra's empty-token
         // default binding child; the value is a MaterialBindingSchema.
         HdDataSourceBaseHandle binding = HdMaterialBindingSchema::Builder()
-            .SetPath(HdRetainedTypedSampledDataSource<SdfPath>::New(
-                tile.materialPath))
+            .SetPath(HdRetainedTypedSampledDataSource<SdfPath>::New(path))
             .Build();
         _Add(&names, &values, TfToken("materialBindings"),
-             _Container({_HydraMaterialPurpose(tile.materialPurpose)},
+             _Container({_HydraMaterialPurpose(
+                             authored ? tile.materialPurpose : TfToken())},
                         {binding}));
     }
     if (!tile.primOrigin.IsEmpty()) {
@@ -434,6 +477,56 @@ UsdGenTilePublisher::GuidePath(
     return descriptionPath.AppendChild(RenderNamespace())
         .AppendChild(TfToken("guides"))
         .AppendChild(setName);
+}
+
+/*static*/
+SdfPath
+UsdGenTilePublisher::MaterialPath(SdfPath const &descriptionPath)
+{
+    return descriptionPath.AppendChild(RenderNamespace())
+        .AppendChild(MaterialName());
+}
+
+/*static*/
+SdfPath
+UsdGenTilePublisher::DefaultMaterialPath(SdfPath const &tilePath)
+{
+    // tilePath is <description>/__usdGenRender/tile_NNNN; the material is its
+    // sibling.
+    return tilePath.GetParentPath().AppendChild(MaterialName());
+}
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildDefaultMaterialDataSource()
+{
+    static TfToken const surface("surface");
+    HdContainerDataSourceHandle const node =
+        HdMaterialNodeSchema::Builder()
+            .SetNodeIdentifier(_Tok(TfToken("UsdGenHairPreview")))
+            .SetParameters(HdRetainedContainerDataSource::New())
+            .SetInputConnections(HdRetainedContainerDataSource::New())
+            .Build();
+    HdContainerDataSourceHandle const terminal =
+        HdMaterialConnectionSchema::Builder()
+            .SetUpstreamNodePath(_Tok(surface))
+            .SetUpstreamNodeOutputName(_Tok(surface))
+            .Build();
+    HdContainerDataSourceHandle const network =
+        HdMaterialNetworkSchema::Builder()
+            .SetNodes(HdRetainedContainerDataSource::New(surface, node))
+            .SetTerminals(
+                HdRetainedContainerDataSource::New(surface, terminal))
+            .Build();
+    // The universal render context ("") applies to every renderer; Storm's
+    // render-context filter falls back to it when no `glslfx` context exists
+    // (hdsi/materialRenderContextFilteringSceneIndex.h:20-45).
+    TfToken const contextName =
+        HdMaterialSchemaTokens->universalRenderContext;
+    HdDataSourceBaseHandle const contextValue = network;
+    return HdRetainedContainerDataSource::New(
+        HdMaterialSchemaTokens->material,
+        HdMaterialSchema::BuildRetained(1, &contextName, &contextValue));
 }
 
 }  // namespace usdGenImaging

@@ -28,7 +28,6 @@ static UsdGenGraphDesc MakeDesc()
     desc.purpose = TfToken("render");
     desc.visibility = TfToken("invisible");
     desc.materialPath = SdfPath("/Looks/HairA");
-    desc.pickTarget = TfToken("description");
 
     UsdGenSurfaceDesc surface;
     surface.path = SdfPath("/Scalp");
@@ -115,7 +114,6 @@ int main()
     changed.purpose = TfToken("proxy");
     changed.visibility = TfToken("inherited");
     changed.materialPath = SdfPath("/Looks/HairB");
-    changed.pickTarget = TfToken("none");
     session.SetGraphDesc(changed);
     auto second = session.Commit(2.0, UsdGenCommitReason::SetTime);
     CHECK(second && second != first && second->device && second->devicePresentation &&
@@ -128,7 +126,8 @@ int main()
           changedPresentation.visibility == changed.visibility &&
           changedPresentation.materialPath == changed.materialPath &&
           changedPresentation.materialPurpose == TfToken("allPurpose") &&
-          changedPresentation.refineLevel == 2 && changedPresentation.primOrigin.IsEmpty() &&
+          changedPresentation.refineLevel == 2 &&
+          changedPresentation.primOrigin == changed.description &&
           changedPresentation.dependencySurface == SdfPath("/Scalp"));
     // Retained immutable generations must retain their own descriptor epoch.
     CHECK(SamePresentation(*first->devicePresentation, initial));

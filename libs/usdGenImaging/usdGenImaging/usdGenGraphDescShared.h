@@ -20,16 +20,12 @@ inline bool
 _isDedicated(TfToken const &name)
 {
     static std::unordered_set<std::string> const dedicated{
-        "usdGen:type", "usdGen:mode", "usdGen:algorithmVersion",
-        "usdGen:enabled", "usdGen:seed", "usdGen:blend", "usdGen:space",
-        "usdGen:readPhase", "usdGen:input", "usdGen:terminal",
+        "usdGen:type", "usdGen:mode",
+        "usdGen:enabled", "usdGen:seed",
         "usdGen:references", "usdGen:guides", "usdGen:curves",
-        "usdGen:frozen:curves", "usdGen:surface", "usdGen:mask:source",
-        "usdGen:map",
+        "usdGen:frozen:curves", "usdGen:surface",
         // description-level dedicated fields
-        "usdGen:densityScale", "usdGen:renderDensityScale",
-        "usdGen:tileTarget", "usdGen:pickTarget", "usdGen:curve:basis",
-        "usdGen:motion:mode", "usdGen:motion:sampleCount",
+        "usdGen:tileTarget", "usdGen:curve:basis",
     };
     // usdGen:look:* lives in UsdGenLookDesc, not params.
     return dedicated.count(name.GetString()) != 0 ||

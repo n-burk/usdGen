@@ -33,12 +33,11 @@ static UsdGenGraphDesc Desc(float translation = 1.f) {
     source.type = TfToken("UsdGenCurveSource"); source.curves = {c.path}; source.surfaces = {s.path};
     UsdGenNodeDesc deform; deform.path = SdfPath("/Groom/Hair/Ops/Deform");
     deform.type = TfToken("UsdGenDeform"); deform.inputs = {source.path}; deform.surfaces = {s.path};
-    deform.mode = TfToken("rbf"); deform.readPhase = TfToken("final");
     deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
     UsdGenExpressionDesc e; e.path = SdfPath("/Blend"); e.source = "$frame == 1 ? 0.25 : 1";
     const expr::ValueShape shape{expr::ScalarType::Float32,1,1,1,1,false};
     e.outputs.push_back({TfToken("result"), TfToken("float"), shape}); d.expressions.push_back(e);
-    UsdGenExpressionBinding b; b.expression = e.path; b.destination = TfToken("blend");
+    UsdGenExpressionBinding b; b.expression = e.path; b.destination = TfToken("mask");
     b.domain = expr::Domain::Point; b.nativeType = TfToken("float"); b.destinationShape = shape;
     b.literal = VtValue(1.f); deform.expressionBindings.push_back(b);
     d.nodes = {source,deform}; d.terminal = deform.path;
@@ -1045,11 +1044,11 @@ int main() {
                     }
                 });
             for (auto& producer : producerThreads) producer.join();
-            auto const latest = producerQueue.Submit(posed,20,producerCompletion);
-            CHECK(latest != 0 && latest > producerMax.load(std::memory_order_relaxed));
+            auto const producerLatest = producerQueue.Submit(posed,20,producerCompletion);
+            CHECK(producerLatest != 0 && producerLatest > producerMax.load(std::memory_order_relaxed));
             producerQueue.Drain();
             auto const latestSnapshot = producerQueue.Snapshot();
-            CHECK(latestSnapshot && latestSnapshot->epoch == latest &&
+            CHECK(latestSnapshot && latestSnapshot->epoch == producerLatest &&
                   Root(latestSnapshot->generation,2.2f,reader) &&
                   failures == 0 && reports == accepted + 1);
         }

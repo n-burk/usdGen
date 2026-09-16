@@ -81,7 +81,6 @@ UsdGenGraphDesc MakeRaggedCurveDesc(int resampleTo, float defaultWidth = 0.01f)
     src.path    = SdfPath("/curveRagged/src");
     src.type    = TfToken("UsdGenCurveSource");
     src.enabled = true;
-    src.blend   = 1.0f;
     src.surfaces.push_back(SdfPath("/curveRagged/sourceCurves"));
     if (resampleTo > 0) {
         UsdGenParamValue p;
@@ -97,7 +96,6 @@ UsdGenGraphDesc MakeRaggedCurveDesc(int resampleTo, float defaultWidth = 0.01f)
     def.params = {{TfToken("width"), VtValue(1.0f), false},
                   {TfToken("replace"), VtValue(false), false}};
     def.enabled = true;
-    def.blend   = 1.0f;
     def.inputs.push_back(SdfPath("/curveRagged/src"));
     d.nodes.push_back(std::move(def));
     return d;

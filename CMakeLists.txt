@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.26)
 project(usdGen VERSION 0.1.0 LANGUAGES C CXX)
 
+# Keep the Windows SDK's min/max macros out of C++ standard-library and
+# OpenUSD headers. The definition is a no-op on other platforms.
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 include(CMakePackageConfigHelpers)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -25,22 +31,112 @@ if(NOT TARGET usd)
     # OpenUSD's pxrTargets reference OpenGL::GL (via garch's interface). Find
     # it first so the imported target exists before pxrConfig resolves.
     find_package(OpenGL REQUIRED)
+    # build_usd.py co-installs OpenSubdiv (and, on Unix, OpenSubdivConfig.cmake)
+    # into the same prefix as OpenUSD. find_package(pxr PATHS ...) does not put
+    # that prefix on CMAKE_PREFIX_PATH, so pxrConfig's find_dependency(OpenSubdiv
+    # CONFIG) cannot see the package unless we point at it. Prepending the
+    # prefix is the relocatable equivalent of how OpenUSD itself was configured.
+    list(PREPEND CMAKE_PREFIX_PATH "${USD_INSTALL_DIR}")
+    if(NOT OpenSubdiv_DIR)
+        foreach(_usdgen_osd_cmake
+                "${USD_INSTALL_DIR}/lib/cmake/OpenSubdiv"
+                "${USD_INSTALL_DIR}/lib64/cmake/OpenSubdiv")
+            if(EXISTS "${_usdgen_osd_cmake}/OpenSubdivConfig.cmake")
+                set(OpenSubdiv_DIR "${_usdgen_osd_cmake}")
+                break()
+            endif()
+        endforeach()
+        unset(_usdgen_osd_cmake)
+    endif()
+    # Windows (and any other prefix that ships OSD binaries without a CMake
+    # package): skip pxrConfig's rediscovery and reconstruct the imported
+    # targets that pxrTargets names. Linux pxrTargets use OpenSubdiv::osdCPU;
+    # Windows uses OpenSubdiv::osdCPU_static.
+    if(NOT OpenSubdiv_DIR)
+        if(NOT DEFINED PXR_FIND_OPENSUBDIV_IN_CONFIG)
+            set(PXR_FIND_OPENSUBDIV_IN_CONFIG OFF)
+        endif()
+        foreach(_usdgen_osd_name osdCPU osdGPU)
+            if(NOT TARGET OpenSubdiv::${_usdgen_osd_name}_static AND
+               EXISTS "${USD_INSTALL_DIR}/lib/${_usdgen_osd_name}.lib")
+                add_library(OpenSubdiv::${_usdgen_osd_name}_static STATIC IMPORTED)
+                set_target_properties(OpenSubdiv::${_usdgen_osd_name}_static
+                    PROPERTIES
+                        IMPORTED_LOCATION "${USD_INSTALL_DIR}/lib/${_usdgen_osd_name}.lib"
+                        INTERFACE_INCLUDE_DIRECTORIES "${USD_INSTALL_DIR}/include"
+                        INTERFACE_COMPILE_DEFINITIONS
+                            "OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL")
+            endif()
+            if(NOT TARGET OpenSubdiv::${_usdgen_osd_name})
+                foreach(_usdgen_osd_file
+                        "lib${_usdgen_osd_name}${CMAKE_SHARED_LIBRARY_SUFFIX}"
+                        "lib${_usdgen_osd_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+                    if(EXISTS "${USD_INSTALL_DIR}/lib/${_usdgen_osd_file}")
+                        if(_usdgen_osd_file STREQUAL
+                           "lib${_usdgen_osd_name}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+                            add_library(OpenSubdiv::${_usdgen_osd_name} SHARED IMPORTED)
+                        else()
+                            add_library(OpenSubdiv::${_usdgen_osd_name} STATIC IMPORTED)
+                        endif()
+                        set_target_properties(OpenSubdiv::${_usdgen_osd_name}
+                            PROPERTIES
+                                IMPORTED_LOCATION
+                                    "${USD_INSTALL_DIR}/lib/${_usdgen_osd_file}"
+                                INTERFACE_INCLUDE_DIRECTORIES
+                                    "${USD_INSTALL_DIR}/include")
+                        break()
+                    endif()
+                endforeach()
+            endif()
+        endforeach()
+        unset(_usdgen_osd_name)
+        unset(_usdgen_osd_file)
+    endif()
     find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)
 endif()
 
-# ZLIB + Threads are needed by usdGen_ptex (M4) but we find them now so the
-# cache is complete.
-find_package(ZLIB REQUIRED)
+# Threads are used by the expression frontend. Zlib is not linked by any
+# usdGen target; requiring it made a standard Windows build_usd.py OpenUSD
+# prefix unusable because that prefix intentionally omits zlib when no USD
+# feature needs it.
 find_package(Threads REQUIRED)
+# tbb/task.h, reached through the OpenUSD headers, prints a deprecation
+# banner on every translation unit unless told not to.
+add_compile_definitions(TBB_SUPPRESS_DEPRECATED_MESSAGES=1)
 
 # ---------------------------------------------------------------------------
 # Compile hardening
 # ---------------------------------------------------------------------------
+# Vendored sources (thirdparty/) are compiled as-is and carry the
+# USDGEN_VENDORED target property, which keeps the warning level off them;
+# the generator expressions below read that property on the consuming target.
+set(_usdgen_first_party "$<NOT:$<BOOL:$<TARGET_PROPERTY:USDGEN_VENDORED>>>")
 if(MSVC)
-    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/W4>)
+    # C4251 fires for every std:: member of an exported class; the DSOs here
+    # are built and consumed with one toolchain, which is the case the warning
+    # is not about. /external:W0 keeps third-party (SYSTEM) headers quiet.
+    add_compile_options(
+        "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,${_usdgen_first_party}>:/W4;/wd4251;/external:W0>"
+        "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:${_usdgen_first_party}>>:/W0>")
+    # The tests use getenv/fopen; the "_s" variants are not portable.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
-    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wno-cpp>")
+    add_compile_options(
+        "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,${_usdgen_first_party}>:-Wall;-Wextra;-Wno-cpp>")
 endif()
+
+# Release adds NDEBUG through the per-config flag strings. The CUDA oracle
+# tests rely on assert, and undefining it again (-UNDEBUG) makes cl warn D9025
+# on each of their translation units. Strip it from the flag strings instead
+# and re-add it per target, except where USDGEN_KEEP_ASSERTS is set.
+foreach(_config RELEASE RELWITHDEBINFO MINSIZEREL)
+    foreach(_lang C CXX)
+        string(REGEX REPLACE "[/-]DNDEBUG" "" CMAKE_${_lang}_FLAGS_${_config}
+            "${CMAKE_${_lang}_FLAGS_${_config}}")
+    endforeach()
+endforeach()
+add_compile_definitions(
+    "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<NOT:$<BOOL:$<TARGET_PROPERTY:USDGEN_KEEP_ASSERTS>>>>:NDEBUG>")
 
 # $ORIGIN is ELF-only.  Use the native loader spelling where applicable and
 # leave Windows without an RPATH.
@@ -50,6 +146,20 @@ if(UNIX AND NOT APPLE)
 elseif(APPLE)
     set(CMAKE_INSTALL_RPATH "@loader_path")
     set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+endif()
+
+# The host's dynamic-loader variable, which the test registrations extend.
+# The three hosts disagree on the name, and on Windows it is PATH itself.
+# No companion path-list separator is defined on purpose: test environments
+# are built with CTest's ENVIRONMENT_MODIFICATION path_list_* operations,
+# which join using the host's native separator, so nothing in this build
+# hard-codes ';' or ':' (see the helpers in the USDGEN_BUILD_TESTS block).
+if(WIN32)
+    set(USDGEN_RUNTIME_LIBRARY_PATH_ENV "PATH")
+elseif(APPLE)
+    set(USDGEN_RUNTIME_LIBRARY_PATH_ENV "DYLD_LIBRARY_PATH")
+else()
+    set(USDGEN_RUNTIME_LIBRARY_PATH_ENV "LD_LIBRARY_PATH")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -68,7 +178,7 @@ set(USDGEN_INSTALL_CMAKEDIR   "lib/cmake/usdGen" CACHE PATH "cmake config dir")
 # Third-party: nanoflann (header-only, INTERFACE target)
 # ---------------------------------------------------------------------------
 add_library(nanoflann INTERFACE)
-target_include_directories(nanoflann INTERFACE
+target_include_directories(nanoflann SYSTEM INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/nanoflann>
     $<INSTALL_INTERFACE:include>)
 # N-7 (plan §1.2/§2.3): nanoflann's header is never installed. It is a
@@ -89,6 +199,7 @@ target_include_directories(usdGen_seexpr PUBLIC
     $<INSTALL_INTERFACE:include/seexpr>)
 target_link_libraries(usdGen_seexpr PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 set_target_properties(usdGen_seexpr PROPERTIES
+    USDGEN_VENDORED ON
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
@@ -112,8 +223,16 @@ target_include_directories(usdGenExprFrontend PRIVATE
 target_compile_definitions(usdGenExprFrontend PRIVATE
     SeExpr2=UsdGenSeExprFrontend SeExprInternal2=UsdGenSeExprFrontendInternal
     USDGEN_SEEXPR_SANDBOX)
+# The vendored SeExpr frontend uses its own platform switch rather than the
+# compiler's _WIN32 macro in a few generated and plugin-loader sources.  In
+# particular, without this definition MSVC tries to include dlfcn.h and
+# unistd.h. Keep this target-local so its public API remains platform-neutral.
+if(WIN32)
+    target_compile_definitions(usdGenExprFrontend PRIVATE SEEXPR_WIN32)
+endif()
 target_link_libraries(usdGenExprFrontend PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 set_target_properties(usdGenExprFrontend PROPERTIES
+    USDGEN_VENDORED ON
     POSITION_INDEPENDENT_CODE ON CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 
@@ -154,13 +273,11 @@ file(GLOB_RECURSE USDGEN_CORE_SOURCES libs/usdGen/*.cpp)
 # Native Vulkan owners are opt-in and must not leak SDK headers/runtime
 # dependencies into CUDA-only or CPU-only core builds.
 list(FILTER USDGEN_CORE_SOURCES EXCLUDE REGEX "/usdGen/vulkan/.*\\.cpp$")
-# D4 (`13-codebase-alignment.md` §5): exprEval.cpp is M4 expression-lane WIP
-# whose SeExpr2 engine headers are not vendored yet (see its BUILD NOTE) —
-# the glob above would otherwise break the whole lib build. Excluded until
-# the engine lands; its only consumer is the likewise-unwired
-# tests/testUsdGenExpr.cpp. Revert this exclusion when wiring M4.
+# exprEval.{h,cpp} (a stale SeExpr2-engine evaluator design) and its unwired
+# tests/testUsdGenExpr.cpp are deleted: the IR interpreter in
+# expressions/irExec.h is the design, shared by the CUDA kernel and by
+# expressions/cpuEvaluator.cpp.
 list(REMOVE_ITEM USDGEN_CORE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/exprEval.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionResources.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionRetirement.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionBackendCudaProvider.cpp"
@@ -207,7 +324,11 @@ target_link_libraries(usdGen
 # CXX_VISIBILITY_PRESET hidden, and --exclude-libs,ALL keeps their symbols
 # out of libusdGen.so's export table (gate B-1 NoThirdPartyExports).
 set_target_properties(usdGen PROPERTIES
-    VISIBILITY_INLINES_HIDDEN ON)
+    VISIBILITY_INLINES_HIDDEN ON
+    # The Linux build keeps its C++ API visible by default. Windows requires
+    # an explicit export table for the same API so usdGenImaging can link
+    # against the core DLL; CMake ignores this property elsewhere.
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT WIN32)
     target_link_options(usdGen PRIVATE "LINKER:--exclude-libs,ALL")
 endif()
@@ -239,7 +360,10 @@ target_link_libraries(usdGenImaging
     PRIVATE hio
     PRIVATE usdGenSchema)
 set_target_properties(usdGenImaging PROPERTIES
-    CXX_VISIBILITY_PRESET default)  # plugins need exported symbols
+    CXX_VISIBILITY_PRESET default
+    # Produce the import library that downstream Windows consumers need.
+    # This is ignored by non-Windows generators.
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)  # plugins need exported symbols
 
 # M1: the usdGenShaders SdrDiscoveryPlugin compiles into usdGenImaging; its
 # resource dir is resolved at runtime by name (PlugRegistry lookup of
@@ -316,6 +440,11 @@ file(GENERATE OUTPUT "${_usdgen_imaging_pluginfo}"
 add_library(usdGenShaders INTERFACE)
 add_library(usdGen::usdGenShaders ALIAS usdGenShaders)
 
+# Offline authoring utility; leaves PointInstancer geometry instanced.
+add_executable(usdGenBakeFur tools/bakeFur.cpp)
+target_link_libraries(usdGenBakeFur PRIVATE usdGen usdGeom usd)
+install(TARGETS usdGenBakeFur RUNTIME DESTINATION bin)
+
 set(_usdgen_shader_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenShaders/resources")
 set(_usdgen_shader_pluginfo "${_usdgen_shader_resources}/plugInfo.json")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -331,6 +460,37 @@ file(COPY
 file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/resources/hairLook.usda"
     DESTINATION "${_usdgen_shader_resources}")
+
+# ---------------------------------------------------------------------------
+# usdGenTools: usdview plugin (SeExpr expression editor). Pure Python. The
+# resources dir carries the Type "python" plugInfo that usdview discovers on
+# PXR_PLUGINPATH_NAME; the package itself is staged into build/python, which
+# the launchers put on PYTHONPATH (plan/08 §5).
+# ---------------------------------------------------------------------------
+set(_usdgen_tools_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenTools/resources")
+file(GLOB_RECURSE _usdgen_tools_python
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/python/*.py")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
+    ${_usdgen_tools_python})
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
+    DESTINATION "${_usdgen_tools_resources}")
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/python/usdGenTools"
+    DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/python"
+    FILES_MATCHING PATTERN "*.py")
+# The shipped expression presets the editor's library browser reads. They sit
+# beside plugInfo.json so exprLibrary finds them by walking up from the staged
+# package, in the build tree and in the install tree alike.
+file(GLOB _usdgen_tools_expressions
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/expressions/*.se")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_usdgen_tools_expressions})
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/expressions"
+    DESTINATION "${_usdgen_tools_resources}"
+    FILES_MATCHING PATTERN "*.se")
 
 # ---------------------------------------------------------------------------
 # CUDA foundations and legacy optional GPU noise
@@ -355,14 +515,46 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     # Exact float op order vs the CPU FBM path (04 §2.9): no fused FMA.
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --fmad=false")
-    # Configure-time arch probe: the GB10 dev host is sm_121; try sm_121
-    # first, fall back to sm_120. A trivial kernel is compiled directly
-    # with nvcc per arch (-gencode); first success wins.
+    # 1394-D is nvcc's spelling of C4251 (see the MSVC warning block above).
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --fmad=false -diag-suppress 1394")
+    foreach(_config RELEASE RELWITHDEBINFO MINSIZEREL)
+        string(REGEX REPLACE "[/-]DNDEBUG" "" CMAKE_CUDA_FLAGS_${_config}
+            "${CMAKE_CUDA_FLAGS_${_config}}")
+    endforeach()
+    # Configure-time arch probe. The GPU in this host decides: nvidia-smi
+    # reports its compute capability (12.1 on the GB10 dev host, 8.9 on an
+    # Ada workstation), and that arch is tried first, so a checkout builds
+    # kernels the local card can actually run. The GB10 pair stays on as the
+    # fallback for a host with the toolkit but no queryable GPU. A trivial
+    # kernel is compiled directly with nvcc per arch (-gencode); first
+    # success wins, which also rejects an arch this toolkit is too old for.
+    set(_usdgen_cuda_archs "")
+    find_program(USDGEN_NVIDIA_SMI nvidia-smi)
+    if(USDGEN_NVIDIA_SMI)
+        execute_process(
+            COMMAND "${USDGEN_NVIDIA_SMI}" --query-gpu=compute_cap
+                    --format=csv,noheader
+            OUTPUT_VARIABLE _usdgen_compute_caps
+            RESULT_VARIABLE _usdgen_smi_rc
+            OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_usdgen_smi_rc EQUAL 0)
+            string(REPLACE "\n" ";" _usdgen_compute_caps "${_usdgen_compute_caps}")
+            foreach(_cap IN LISTS _usdgen_compute_caps)
+                # "8.9" -> 89. A driver too old to answer prints "[N/A]";
+                # anything that is not major.minor is dropped, not fed to nvcc.
+                if(_cap MATCHES "([0-9]+)\\.([0-9]+)")
+                    list(APPEND _usdgen_cuda_archs
+                        "${CMAKE_MATCH_1}${CMAKE_MATCH_2}")
+                endif()
+            endforeach()
+        endif()
+    endif()
+    list(APPEND _usdgen_cuda_archs 121 120)
+    list(REMOVE_DUPLICATES _usdgen_cuda_archs)
     file(WRITE "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.cu"
         "__global__ void usdgen_cuda_arch_probe() {}\n")
     set(USDGEN_CUDA_ARCH "")
-    foreach(_arch 121 120)
+    foreach(_arch IN LISTS _usdgen_cuda_archs)
         execute_process(
             COMMAND "${CMAKE_CUDA_COMPILER}" -c
                     "-gencode=arch=compute_${_arch},code=sm_${_arch}"
@@ -376,15 +568,19 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
         endif()
     endforeach()
     if(NOT USDGEN_CUDA_ARCH)
-        message(FATAL_ERROR "USE_GPU_NOISE=ON: no CUDA architecture in "
-            "(sm_121, sm_120) compiles with ${CMAKE_CUDA_COMPILER}")
+        string(REPLACE ";" ", sm_" _usdgen_cuda_archs_tried "${_usdgen_cuda_archs}")
+        message(FATAL_ERROR "usdGen CUDA requested but no architecture in "
+            "(sm_${_usdgen_cuda_archs_tried}) compiles with "
+            "${CMAKE_CUDA_COMPILER} (CUDA ${CUDAToolkit_VERSION}); install a "
+            "toolkit new enough for this host's GPU, or set "
+            "CMAKE_CUDA_COMPILER at the one that is.")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}" CACHE STRING
         "CUDA arch for the noise kernel (probed at configure time)" FORCE)
     # usdGen (line 117) predates the variable, so its empty default was
     # frozen at creation: pin the property explicitly.
     set_target_properties(usdGen PROPERTIES CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}")
-    message(STATUS "usdGen GPU noise: CUDA ${CUDAToolkit_VERSION}, arch sm_${USDGEN_CUDA_ARCH}")
+    message(STATUS "usdGen CUDA: ${CUDAToolkit_VERSION} (${CMAKE_CUDA_COMPILER}), arch sm_${USDGEN_CUDA_ARCH}")
     # The kernel lands at libs/usdGen/usdGen/ops/noise_gpu.cu (CUDA1b); wire
     # it into usdGen the moment the file exists (hook stays inert until then).
     if(USE_GPU_NOISE)
@@ -429,7 +625,9 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
         target_include_directories(usdGenGpu PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>)
-        target_link_libraries(usdGenGpu PUBLIC CUDA::cudart CUDA::cusolver usdGenExecutionResources)
+        # cuda_driver backs the cudaStreamGetDevice shim in gpu/cudaCompat.h
+        # on toolkits older than 12.8.
+        target_link_libraries(usdGenGpu PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::cusolver usdGenExecutionResources)
         target_compile_definitions(usdGen PRIVATE USDGEN_ENABLE_CUDA)
         target_link_libraries(usdGen PRIVATE usdGenGpu)
         target_compile_definitions(usdGenImaging PUBLIC USDGEN_HAS_CUDA_GL_INTEROP)
@@ -1084,6 +1282,83 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         testUsdGenVulkanResources testUsdGenVulkanResourcesQuarantine testUsdGenVulkanWidth
         PROPERTIES FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
 endif()
+
+# Some harnesses are inherently Unix-only: the POSIX process/loader/ELF tests
+# (execv/setenv/LD_LIBRARY_PATH, ELF symbol inspection) and the EGL/Storm GPU
+# tests (dlopen + a headless EGL device) include unistd.h/dlfcn.h, so MSVC
+# cannot compile them, and the bash-script checks need a POSIX shell. Define
+# the executable only where those APIs exist; on other hosts register an honest
+# ctest skip so the test-name and gate-label set stays identical across
+# platforms instead of breaking the build. Portable targets keep calling
+# add_test() directly.
+function(usdgen_add_unix_only_test name)
+    if(WIN32)
+        add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -E echo
+            "SKIP ${name} (Unix-only harness: POSIX process/loader, shell, or EGL/Storm)")
+        set_tests_properties(${name} PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP")
+    else()
+        add_test(NAME ${name} COMMAND ${ARGN})
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# Test environment plumbing (cross-platform)
+#
+# CTest's ENVIRONMENT property is the wrong tool for path lists, and on
+# Windows it is actively wrong twice over:
+#
+#   * ENVIRONMENT *replaces* a variable. The host loader variable there is
+#     PATH itself, so "PATH=<usd>/lib" strips the inherited system PATH from
+#     the test process instead of extending it.
+#   * ENVIRONMENT is a CMake list, i.e. ';'-separated, and ';' is also the
+#     native path-list separator on Windows. A multi-directory value silently
+#     splits into extra list entries, so the variable is truncated after its
+#     first directory and the remaining directories become junk entries.
+#
+# ENVIRONMENT_MODIFICATION (CMake >= 3.22) avoids both: it edits the
+# inherited value rather than replacing it, and path_list_* joins with the
+# host's native separator, so each operation carries exactly one directory
+# and no value ever embeds a ';'.
+# ---------------------------------------------------------------------------
+
+# Emit one ENVIRONMENT_MODIFICATION operation per directory.
+function(usdgen_test_path_list_ops out_var name op)
+    set(_ops "")
+    foreach(_dir IN LISTS ARGN)
+        list(APPEND _ops "${name}=${op}:${_dir}")
+    endforeach()
+    set(${out_var} "${_ops}" PARENT_SCOPE)
+endfunction()
+
+# PXR_PLUGINPATH_NAME is rebuilt from scratch ("set:" on the first directory)
+# so a value already exported in the developer's shell cannot take precedence
+# over the build-tree plugin resources. The rest append in declaration order,
+# which is the order the plugInfo ordering contract (gate SI-5) asserts.
+function(usdgen_test_pluginpath_ops out_var)
+    set(_ops "")
+    foreach(_dir IN LISTS ARGN)
+        if(_ops STREQUAL "")
+            list(APPEND _ops "PXR_PLUGINPATH_NAME=set:${_dir}")
+        else()
+            list(APPEND _ops "PXR_PLUGINPATH_NAME=path_list_append:${_dir}")
+        endif()
+    endforeach()
+    set(${out_var} "${_ops}" PARENT_SCOPE)
+endfunction()
+
+# Directories a test binary must be able to load shared libraries from.
+# Windows has no RPATH, so PATH is the only mechanism there; ELF/Mach-O builds
+# already resolve the build tree through CMake's build RPATH, but naming the
+# OpenUSD prefix is required on every host, so one list serves all three.
+# OpenUSD's Windows install splits its runtime in two: the usd_*.dll core
+# lands in lib/ while the bundled third-party DLLs (tbb, embree, ...) land in
+# bin/, so both directories are needed there.
+set(USDGEN_TEST_RUNTIME_DIRS "${USD_INSTALL_DIR}/lib")
+if(WIN32)
+    list(APPEND USDGEN_TEST_RUNTIME_DIRS "${USD_INSTALL_DIR}/bin")
+endif()
+list(APPEND USDGEN_TEST_RUNTIME_DIRS "$<TARGET_FILE_DIR:usdGen>")
+
 add_executable(testUsdGenExecutionPipeline tests/testUsdGenExecutionPipeline.cpp)
 target_link_libraries(testUsdGenExecutionPipeline PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionPipeline COMMAND testUsdGenExecutionPipeline)
@@ -1400,11 +1675,13 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaDevicePresentation COMMAND testUsdGenCudaDevicePresentation)
     set_tests_properties(testUsdGenCudaDevicePresentation PROPERTIES
         LABELS "T1;cuda;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
-    add_executable(testUsdGenCudaGlInterop tests/testUsdGenCudaGlInterop.cpp)
-    target_compile_definitions(testUsdGenCudaGlInterop PRIVATE USDGEN_ENABLE_CUDA)
-    target_include_directories(testUsdGenCudaGlInterop PRIVATE ${PROJECT_SOURCE_DIR}/usdGenShaders/test)
-    target_link_libraries(testUsdGenCudaGlInterop PRIVATE usdGenImaging usdGenGpu hdSt hgiGL garch ${CMAKE_DL_LIBS})
-    add_test(NAME testUsdGenCudaGlInterop COMMAND testUsdGenCudaGlInterop)
+    if(NOT WIN32)
+        add_executable(testUsdGenCudaGlInterop tests/testUsdGenCudaGlInterop.cpp)
+        target_compile_definitions(testUsdGenCudaGlInterop PRIVATE USDGEN_ENABLE_CUDA)
+        target_include_directories(testUsdGenCudaGlInterop PRIVATE ${PROJECT_SOURCE_DIR}/usdGenShaders/test)
+        target_link_libraries(testUsdGenCudaGlInterop PRIVATE usdGenImaging usdGenGpu hdSt hgiGL garch ${CMAKE_DL_LIBS})
+    endif()
+    usdgen_add_unix_only_test(testUsdGenCudaGlInterop testUsdGenCudaGlInterop)
     set_tests_properties(testUsdGenCudaGlInterop PROPERTIES LABELS "T2;cuda;interop" RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 60)
     add_test(NAME testUsdGenCudaGlLifecycle COMMAND testUsdGenCudaGlInterop --lifecycle)
     set_tests_properties(testUsdGenCudaGlLifecycle PROPERTIES LABELS "T2;cuda;interop;lifecycle" RUN_SERIAL TRUE SKIP_RETURN_CODE 77 TIMEOUT 60)
@@ -1490,7 +1767,7 @@ if(USDGEN_ENABLE_CUDA)
     set_tests_properties(testUsdGenCudaTools PROPERTIES LABELS "T1;cuda;tools;sessions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     add_executable(testUsdGenCudaParameters tests/testUsdGenCudaParameters.cpp)
     target_compile_definitions(testUsdGenCudaParameters PRIVATE USDGEN_ENABLE_CUDA)
-    target_compile_options(testUsdGenCudaParameters PRIVATE -UNDEBUG)
+    set_target_properties(testUsdGenCudaParameters PROPERTIES USDGEN_KEEP_ASSERTS ON)
     target_link_libraries(testUsdGenCudaParameters PRIVATE usdGen usdGenGpu)
     add_test(NAME testUsdGenCudaParameters COMMAND testUsdGenCudaParameters)
     set_tests_properties(testUsdGenCudaParameters PROPERTIES LABELS "T1;cuda;expressions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
@@ -1522,14 +1799,14 @@ if(USDGEN_ENABLE_CUDA)
     foreach(_cuda_test CurveSource ExpressionContext Width SurfaceBinding Length CurveCompaction Picking PointOverride Topology)
         add_executable(testUsdGenCuda${_cuda_test} tests/testUsdGenCuda${_cuda_test}.cu)
         target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu usdGen)
-        target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)
+        set_target_properties(testUsdGenCuda${_cuda_test} PROPERTIES USDGEN_KEEP_ASSERTS ON)
         add_test(NAME testUsdGenCuda${_cuda_test} COMMAND testUsdGenCuda${_cuda_test})
         set_tests_properties(testUsdGenCuda${_cuda_test} PROPERTIES
             LABELS "T1;cuda" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
     endforeach()
     add_executable(testUsdGenCudaNonWidthCompare tests/testUsdGenCudaNonWidthCompare.cu)
     target_link_libraries(testUsdGenCudaNonWidthCompare PRIVATE usdGenGpu usdGen)
-    target_compile_options(testUsdGenCudaNonWidthCompare PRIVATE -UNDEBUG)
+    set_target_properties(testUsdGenCudaNonWidthCompare PROPERTIES USDGEN_KEEP_ASSERTS ON)
     add_test(NAME testUsdGenCudaNonWidthCompare COMMAND testUsdGenCudaNonWidthCompare)
     set_tests_properties(testUsdGenCudaNonWidthCompare PROPERTIES
         LABELS "T1;cuda;dag;cow;topology" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
@@ -1539,7 +1816,7 @@ if(USDGEN_ENABLE_CUDA)
         target_link_libraries(testUsdGenCuda${_cuda_test} PRIVATE usdGenGpu)
         # These CUDA oracles use assert for both execution and checks.
         # Release's -DNDEBUG must never turn them into false-green no-ops.
-        target_compile_options(testUsdGenCuda${_cuda_test} PRIVATE -UNDEBUG)
+        set_target_properties(testUsdGenCuda${_cuda_test} PROPERTIES USDGEN_KEEP_ASSERTS ON)
         add_test(NAME testUsdGenCuda${_cuda_test} COMMAND testUsdGenCuda${_cuda_test})
         set_tests_properties(testUsdGenCuda${_cuda_test} PROPERTIES
             LABELS "T1;cuda;rbf" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
@@ -1581,6 +1858,13 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaExpression COMMAND testUsdGenCudaExpression)
     set_tests_properties(testUsdGenCudaExpression PROPERTIES
         LABELS "T1;cuda;expressions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    # Bit-for-bit CPU/CUDA parity over the shared IR interpreter.
+    add_executable(testUsdGenCudaExpressionParity tests/testUsdGenCudaExpressionParity.cpp)
+    target_link_libraries(testUsdGenCudaExpressionParity PRIVATE usdGenGpu usdGen usdGenExprFrontend)
+    add_test(NAME testUsdGenCudaExpressionParity COMMAND testUsdGenCudaExpressionParity)
+    set_tests_properties(testUsdGenCudaExpressionParity PROPERTIES
+        LABELS "T1;cuda;expressions;parity" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endif()
 
 # M0: build-rule tests (gate B-1) — see cmake/CheckNoStage*.cmake
@@ -1591,8 +1875,9 @@ set(USDGEN_FORBIDDEN_INC_REGEX
 find_program(USDGEN_CXXFILT c++filt)
 
 foreach(_t usdGen usdGenMath usdGenTestUtils)
-    add_test(NAME testUsdGenLinkRule_${_t}
-        COMMAND ${CMAKE_COMMAND}
+    # Gate B-1 link rule inspects ELF magic and runs objdump/nm; Unix-only.
+    usdgen_add_unix_only_test(testUsdGenLinkRule_${_t}
+        ${CMAKE_COMMAND}
             -DTARGET_FILE=$<TARGET_FILE:${_t}>
             -DOBJDUMP=${CMAKE_OBJDUMP}
             -DCXXFILT=${USDGEN_CXXFILT}
@@ -1615,8 +1900,9 @@ add_test(NAME testUsdGenIncludeRule
 set_tests_properties(testUsdGenIncludeRule
     PROPERTIES LABELS "T0;build;gate:B-1")
 
-add_test(NAME testUsdGenNoThirdPartyExports
-    COMMAND ${CMAKE_COMMAND}
+# ELF symbol-table inspection (nm); Unix-only.
+usdgen_add_unix_only_test(testUsdGenNoThirdPartyExports
+    ${CMAKE_COMMAND}
         -DTARGET_FILE=$<TARGET_FILE:usdGen>
         -DCXXFILT=${USDGEN_CXXFILT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckNoThirdPartyExports.cmake)
@@ -1627,16 +1913,16 @@ set_tests_properties(testUsdGenNoThirdPartyExports
 
 # sol S-1/S-2: negative/positive fixtures proving the B-1 gates actually fail
 # on forbidden input and pass on clean input (no silent false passes).
-add_test(NAME testUsdGenLinkRuleNegativeFixture
-    COMMAND ${CMAKE_COMMAND}
+usdgen_add_unix_only_test(testUsdGenLinkRuleNegativeFixture
+    ${CMAKE_COMMAND}
         -DTARGET_FILE=${USD_INSTALL_DIR}/lib/libusd_hd.so
         -DOBJDUMP=${CMAKE_OBJDUMP}
         -DCXXFILT=${USDGEN_CXXFILT}
         -DFORBIDDEN=^libusd_tf
         -DEXPECT=fail
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/gateLinkDriver.cmake)
-add_test(NAME testUsdGenLinkRulePositiveFixture
-    COMMAND ${CMAKE_COMMAND}
+usdgen_add_unix_only_test(testUsdGenLinkRulePositiveFixture
+    ${CMAKE_COMMAND}
         -DTARGET_FILE=$<TARGET_FILE:usdGen>
         -DOBJDUMP=${CMAKE_OBJDUMP}
         -DCXXFILT=${USDGEN_CXXFILT}
@@ -1682,8 +1968,8 @@ set(_usdgen_staging_tus
     "libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilder.h|libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilder.cpp|libs/usdGenImaging/usdGenImaging/groomSceneIndexPlugin.h|libs/usdGenImaging/usdGenImaging/groomSceneIndexPlugin.cpp")
 set(_usdgen_staging_objs
     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/usdGenImaging.dir/libs/usdGenImaging/usdGenImaging/usdGenGraphDescBuilder.cpp.o|${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/usdGenImaging.dir/libs/usdGenImaging/usdGenImaging/groomSceneIndexPlugin.cpp.o")
-add_test(NAME testUsdGenStagingRule
-    COMMAND ${CMAKE_COMMAND}
+usdgen_add_unix_only_test(testUsdGenStagingRule
+    ${CMAKE_COMMAND}
         -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -DSTAGING_TUS=${_usdgen_staging_tus}
         -DOBJECTS=${_usdgen_staging_objs}
@@ -1753,9 +2039,15 @@ target_link_libraries(testUsdGenChainOrder PRIVATE usdImaging hdsi hd usd tf arc
 add_test(NAME testUsdGenChainOrder COMMAND testUsdGenChainOrder)
 # N-4: this is the plugInfo load-order check, i.e. gate SI-5 (09 §5.2);
 # the gate label belongs on the registration.
+usdgen_test_pluginpath_ops(_usdgen_chain_order_env
+    "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+    "${_fake_prman_resources}"
+    "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+# The loader path is applied to every test by the sweep at the end of this
+# block, so only the plugin search path is per-test here.
 set_tests_properties(testUsdGenChainOrder PROPERTIES
     LABELS "T1;gate:SI-5"
-    ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_imaging_resources}:${_fake_prman_resources}:${USD_INSTALL_DIR}/plugin/usd:${USD_INSTALL_DIR}/lib/usd;LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
+    ENVIRONMENT_MODIFICATION "${_usdgen_chain_order_env}")
 
 add_executable(testUsdGenPluginDiscovery tests/testUsdGenPluginDiscovery.cpp)
 target_link_libraries(testUsdGenPluginDiscovery PRIVATE usdGenImaging usdGenTestUtilsHd)
@@ -1764,9 +2056,12 @@ add_test(NAME testUsdGenPluginDiscovery
         ${_usdgen_schema_resources}
         ${_usdgen_imaging_resources}
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/scenes/scene_empty_groom.usda)
+usdgen_test_pluginpath_ops(_usdgen_plugin_discovery_env
+    "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+    "${USD_INSTALL_DIR}/plugin/usd")
 set_tests_properties(testUsdGenPluginDiscovery PROPERTIES
     LABELS "T1"
-    ENVIRONMENT "PXR_PLUGINPATH_NAME=${_usdgen_schema_resources}:${_usdgen_imaging_resources}:${USD_INSTALL_DIR}/plugin/usd;LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
+    ENVIRONMENT_MODIFICATION "${_usdgen_plugin_discovery_env}")
 
 # ---------------------------------------------------------------------------
 # M1 tests (plan 11 §2.2; names/labels from 10-build-dependencies-testing.md
@@ -1779,16 +2074,17 @@ set_tests_properties(testUsdGenPluginDiscovery PROPERTIES
 # ---------------------------------------------------------------------------
 # M1 plugin search path: M0 schema + imaging resources plus the usdGenShaders
 # resources (Sdr discovery plugin lands in usdGenImaging; 10 §4.4).
-# M-13: join the dirs with ':' explicitly. The old literal mixed CMake's ';'
-# list separator into the value, so _usdgen_m1_env ("PXR_PLUGINPATH_NAME=a;b;
-# c=d") cut the plugin path after the first dir and mis-split the USD dirs.
+# M-13: the dirs must not be joined into one ENVIRONMENT value. Doing so put
+# CMake's ';' list separator inside the value ("PXR_PLUGINPATH_NAME=a;b;c=d"),
+# which cut the plugin path after the first dir and mis-split the USD dirs.
+# Joining with an explicit ':' only moved the bug to Windows, where the native
+# separator *is* ';'. One ENVIRONMENT_MODIFICATION op per dir is separator-free
+# and therefore correct on every host.
 set(_usdgen_m1_pluginpath_dirs
     "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
     "${_usdgen_shader_resources}"
     "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
-string(JOIN ":" _usdgen_m1_pluginpath ${_usdgen_m1_pluginpath_dirs})
-set(_usdgen_m1_env
-    "PXR_PLUGINPATH_NAME=${_usdgen_m1_pluginpath};LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib:$<TARGET_FILE_DIR:usdGen>")
+usdgen_test_pluginpath_ops(_usdgen_m1_env ${_usdgen_m1_pluginpath_dirs})
 
 # M1 T0 engine tests (no Hydra, no stage — gate B-1 keeps them clean).
 foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
@@ -1834,16 +2130,18 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
-           testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenAutoApply testUsdGenContracts)
+           testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
+           testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
     set_tests_properties(${_t} PROPERTIES
-        ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+        ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endforeach()
 set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
 set_tests_properties(testUsdGenStockStormContract PROPERTIES
     LABELS "T1;stock-hydra;unpatched-openusd")
+set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
@@ -1909,24 +2207,31 @@ add_test(NAME testUsdGenHydraParity
 )
 set_tests_properties(testUsdGenHydraParity
     PROPERTIES
-    ENVIRONMENT "${_usdgen_m1_env}"
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
     LABELS "T1;gate:SI-12"
     TIMEOUT 300
 )
-
-add_executable(testUsdGenImageMapStage tests/testUsdGenImageMapStage.cpp)
-target_link_libraries(testUsdGenImageMapStage PRIVATE usdGenTestUtilsHd)
-target_compile_definitions(testUsdGenImageMapStage PRIVATE
-    USDGEN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-add_test(NAME testUsdGenImageMapStage COMMAND testUsdGenImageMapStage)
-set_tests_properties(testUsdGenImageMapStage PROPERTIES
-    ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;imaging;map")
 
 add_executable(testUsdGenHierarchy tests/testUsdGenHierarchy.cpp)
 target_link_libraries(testUsdGenHierarchy PRIVATE usdGenTestUtilsHd)
 add_test(NAME testUsdGenHierarchy COMMAND testUsdGenHierarchy)
 set_tests_properties(testUsdGenHierarchy PROPERTIES
-    ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;hierarchy" TIMEOUT 120)
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;hierarchy" TIMEOUT 120)
+
+add_executable(testUsdGenEnabledToggle tests/testUsdGenEnabledToggle.cpp)
+target_link_libraries(testUsdGenEnabledToggle PRIVATE usdGenTestUtilsHd)
+add_test(NAME testUsdGenEnabledToggle COMMAND testUsdGenEnabledToggle)
+set_tests_properties(testUsdGenEnabledToggle PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;imaging;scheduling" TIMEOUT 120)
+
+# The shipped root-to-tip width example, cooked on the CPU reference lane.
+add_executable(testUsdGenExpressionWidthExample tests/testUsdGenExpressionWidthExample.cpp)
+target_link_libraries(testUsdGenExpressionWidthExample PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenExpressionWidthExample PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenExpressionWidthExample COMMAND testUsdGenExpressionWidthExample)
+set_tests_properties(testUsdGenExpressionWidthExample PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples" TIMEOUT 120)
 
 add_executable(testUsdGenExpressionTransport tests/testUsdGenExpressionTransport.cpp)
 target_link_libraries(testUsdGenExpressionTransport PRIVATE usdGenTestUtilsHd)
@@ -1934,7 +2239,7 @@ target_compile_definitions(testUsdGenExpressionTransport PRIVATE
     USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME testUsdGenExpressionTransport COMMAND testUsdGenExpressionTransport)
 set_tests_properties(testUsdGenExpressionTransport PROPERTIES
-    ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;expressions" TIMEOUT 120)
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions" TIMEOUT 120)
 
 add_executable(testUsdGenSessionIsolation tests/testUsdGenSessionIsolation.cpp)
 target_link_libraries(testUsdGenSessionIsolation PRIVATE usdGenImaging)
@@ -1942,15 +2247,37 @@ add_test(NAME testUsdGenSessionIsolation COMMAND testUsdGenSessionIsolation)
 set_tests_properties(testUsdGenSessionIsolation PROPERTIES
     LABELS "T1;sessions" TIMEOUT 120)
 
-foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend ExpressionIr)
+foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend ExpressionIr ExpressionCpuEval)
     add_executable(testUsdGen${_expr_test} tests/testUsdGen${_expr_test}.cpp)
     target_link_libraries(testUsdGen${_expr_test} PRIVATE usdGen)
     add_test(NAME testUsdGen${_expr_test} COMMAND testUsdGen${_expr_test})
     set_tests_properties(testUsdGen${_expr_test} PROPERTIES
         LABELS "T0;expressions" TIMEOUT 120)
 endforeach()
-add_test(NAME testUsdGenExpressionSchema
-    COMMAND ${CMAKE_COMMAND} -E env "GENBUILD=${CMAKE_CURRENT_BINARY_DIR}"
+# The function library against Disney's own SeExpr2. This is the only test that
+# links the vendored frontend archive directly: expressions/exprMath.h claims to
+# reproduce SeExpr2's builtins for the device, and the claim is only worth
+# something if it is checked against the original. The include directory is
+# SYSTEM so the vendored headers keep their own warning level, and the SeExpr2
+# namespace rename must match the one usdGenExprFrontend was compiled with.
+add_executable(testUsdGenSeExprOracle tests/testUsdGenSeExprOracle.cpp)
+target_link_libraries(testUsdGenSeExprOracle PRIVATE usdGen usdGenExprFrontend)
+target_include_directories(testUsdGenSeExprOracle SYSTEM PRIVATE "${_usdgen_frontend_dir}")
+target_compile_definitions(testUsdGenSeExprOracle PRIVATE
+    SeExpr2=UsdGenSeExprFrontend SeExprInternal2=UsdGenSeExprFrontendInternal
+    USDGEN_SEEXPR_SANDBOX)
+if(WIN32)
+    target_compile_definitions(testUsdGenSeExprOracle PRIVATE SEEXPR_WIN32)
+endif()
+add_test(NAME testUsdGenSeExprOracle COMMAND testUsdGenSeExprOracle)
+set_tests_properties(testUsdGenSeExprOracle PROPERTIES
+    LABELS "T0;expressions;parity" TIMEOUT 120)
+# Unix-only: the harness is a bash script that sources bin/_env.sh, which is
+# POSIX shell and resolves a Linux interpreter path. Registered unconditionally
+# this invoked WSL's bash on Windows and failed on a 120 s timeout rather than
+# reporting anything about the schema.
+usdgen_add_unix_only_test(testUsdGenExpressionSchema
+    ${CMAKE_COMMAND} -E env "GENBUILD=${CMAKE_CURRENT_BINARY_DIR}"
         bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/run_expression_schema.sh")
 set_tests_properties(testUsdGenExpressionSchema PROPERTIES
     LABELS "T1;expressions;schema" TIMEOUT 120)
@@ -1970,9 +2297,11 @@ if(USDGEN_ENABLE_CUDA)
     target_compile_definitions(testUsdGenCudaHierarchy PRIVATE USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME testUsdGenCudaHierarchy COMMAND testUsdGenCudaHierarchy)
     set_tests_properties(testUsdGenCudaHierarchy PROPERTIES
-        ENVIRONMENT "${_usdgen_m1_env}" LABELS "T1;cuda;hierarchy" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+        ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;cuda;hierarchy" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
 endif()
-set_tests_properties(testUsdGenAutoApply PROPERTIES LABELS "T1;gate:SI-8")
+# testUsdGenAutoApply (gate:SI-8) tested UsdGenMaskAPI auto-apply; the mask
+# feature (mask.cpp/h, maskParams.h) and its test were removed together, so
+# there is no longer a target here to attach a LABELS override to.
 set_tests_properties(testUsdGenContracts PROPERTIES LABELS "T1")
 
 # N-5 (09 §5.2, 10 §5.6): schema regeneration-drift guard — the checked-in
@@ -1981,7 +2310,12 @@ set_tests_properties(testUsdGenContracts PROPERTIES LABELS "T1")
 # the reference recipe; the N-2 plugInfo post-processing drift is what this
 # catches in CI). The source has landed (plan/13 §1); the else() echo-stub
 # branch below is retained only for missing sources (never a fake pass).
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/testUsdGenSchemaUpToDate.cpp")
+if(WIN32)
+    # The drift guard runs bin/gen_schema.sh (a POSIX set -eu/mktemp/cmp recipe)
+    # through popen, so it is Unix-only.
+    usdgen_add_unix_only_test(testUsdGenSchemaUpToDate testUsdGenSchemaUpToDate)
+    set(_usdgen_schema_uptodate_props SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/testUsdGenSchemaUpToDate.cpp")
     add_executable(testUsdGenSchemaUpToDate tests/testUsdGenSchemaUpToDate.cpp)
     target_link_libraries(testUsdGenSchemaUpToDate PRIVATE usdGenSchema usd tf arch)
     target_compile_definitions(testUsdGenSchemaUpToDate PRIVATE
@@ -1997,25 +2331,98 @@ else()
     set(_usdgen_schema_uptodate_props SKIP_REGULAR_EXPRESSION "M1-STUB")
 endif()
 set_tests_properties(testUsdGenSchemaUpToDate PROPERTIES
-    LABELS "T1" ENVIRONMENT "${_usdgen_m1_env}" ${_usdgen_schema_uptodate_props})
+    LABELS "T1" ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" ${_usdgen_schema_uptodate_props})
+
+# usdGenTools C ABI (usdGenImaging/usdGenToolsApi.h): the compile/list entry
+# points the usdview expression editor calls through ctypes. Pure C ABI over
+# the engine frontend, so it is an ordinary T1 with no stage and no Hydra.
+add_executable(testUsdGenToolsApi tests/testUsdGenToolsApi.cpp)
+target_link_libraries(testUsdGenToolsApi PRIVATE usdGenImaging)
+add_test(NAME testUsdGenToolsApi COMMAND testUsdGenToolsApi)
+set_tests_properties(testUsdGenToolsApi PROPERTIES
+    LABELS "T1;tools;expressions" TIMEOUT 60)
+
+# usdGenTools SeExpr editor: drives usdview through testusdview against the
+# expression example. Needs the prefix's usdview (a Python script) and a
+# python that imports its pxr, so it registers only where both exist, and it
+# opens a window, so it is T2 (not part of the T0|T1 run).
+# The interpreter must be the one that imports the prefix's pxr: PY in the
+# environment (the usdRig convention), else the shebang testusdview itself
+# carries, else whatever is on PATH. On Windows a plain find_program would
+# pick the Store's python3.exe alias, which cannot load these modules.
+set(_usdgen_test_python "$ENV{PY}")
+if(NOT _usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
+    file(STRINGS "${USD_INSTALL_DIR}/bin/testusdview" _usdgen_testusdview_shebang LIMIT_COUNT 1)
+    string(REGEX REPLACE "^#![ \t]*" "" _usdgen_shebang_python "${_usdgen_testusdview_shebang}")
+    if(EXISTS "${_usdgen_shebang_python}")
+        set(_usdgen_test_python "${_usdgen_shebang_python}")
+    endif()
+endif()
+if(NOT _usdgen_test_python)
+    find_program(_usdgen_test_python NAMES python3 python NO_CACHE)
+endif()
+if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
+    add_test(NAME testUsdGenToolsExprEditor
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+    usdgen_test_pluginpath_ops(_usdgen_tools_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    # Both python package layouts OpenUSD installs on Windows/POSIX, plus
+    # build/python where the usdGenTools package is staged.
+    usdgen_test_path_list_ops(_usdgen_tools_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+    set_tests_properties(testUsdGenToolsExprEditor PROPERTIES
+        LABELS "T2;tools;usdview" TIMEOUT 180
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
+endif()
+
+# The Qt-free half of the same plugin -- the ctypes binding, the text helpers
+# behind the literal controls, and the connection authoring -- runs in a plain
+# python process, so it is a T1 and needs no usdview. It shares the editor
+# test's interpreter and environment, minus the window.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenToolsExprApi
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprApi.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+    usdgen_test_pluginpath_ops(_usdgen_toolsapi_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    usdgen_test_path_list_ops(_usdgen_toolsapi_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+    set_tests_properties(testUsdGenToolsExprApi PROPERTIES
+        LABELS "T1;tools;expressions" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+endif()
 
 # M1 T2 Storm tests (EGL harness; the S-8/S-9/L-1 PW decisions get confirmed
 # on shipped code here, 11 §2.2 exit-gate table).
-add_executable(testUsdGenStormLook tests/testUsdGenStormLook.cpp)
-target_link_libraries(testUsdGenStormLook PRIVATE usdGenTestUtilsHd)
-target_include_directories(testUsdGenStormLook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
-add_test(NAME testUsdGenStormLook COMMAND testUsdGenStormLook ${PROJECT_SOURCE_DIR})
+if(NOT WIN32)
+    add_executable(testUsdGenStormLook tests/testUsdGenStormLook.cpp)
+    target_link_libraries(testUsdGenStormLook PRIVATE usdGenTestUtilsHd)
+    target_include_directories(testUsdGenStormLook PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
+endif()
+usdgen_add_unix_only_test(testUsdGenStormLook testUsdGenStormLook ${PROJECT_SOURCE_DIR})
 set_tests_properties(testUsdGenStormLook PROPERTIES
-    LABELS "T2;gate:L-2" ENVIRONMENT "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    LABELS "T2;gate:L-2" ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
-add_executable(benchUsdGenStorm tests/perf/benchUsdGenStorm.cpp)
-target_link_libraries(benchUsdGenStorm PRIVATE usdGenTestUtilsHd)
-target_include_directories(benchUsdGenStorm PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
-add_test(NAME benchUsdGenStorm
-    COMMAND benchUsdGenStorm
-        --scene ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda
-        --static --refine 2)
+if(NOT WIN32)
+    add_executable(benchUsdGenStorm tests/perf/benchUsdGenStorm.cpp)
+    target_link_libraries(benchUsdGenStorm PRIVATE usdGenTestUtilsHd)
+    target_include_directories(benchUsdGenStorm PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
+endif()
+usdgen_add_unix_only_test(benchUsdGenStorm benchUsdGenStorm
+    --scene ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda
+    --static --refine 2)
 # --scene is required (bare bench exits 2): the S-1 scene is the G3
 # canonical groom at refineLevel 2 (the S-1 gate condition, 09 §5.3).
 # The fixture is generated (usdGenFixtures below; gitignored build
@@ -2024,21 +2431,23 @@ add_test(NAME benchUsdGenStorm
 # itemsDrawn counters the S-5/S-6/S-12 assertions read.
 set_tests_properties(benchUsdGenStorm PROPERTIES
     LABELS "T2;perf;gate:S-1;gate:S-5;gate:S-6;gate:S-12"
-    ENVIRONMENT "${_usdgen_m1_env};HD_ENABLE_PERFLOG=1" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" ENVIRONMENT "HD_ENABLE_PERFLOG=1" SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
 # Groom fixtures G1-G5 (S-1/S-5/S-6/S-12/E-5 scenes): pure-text output of
 # usd/fixtures/make_fixtures.py (stdlib only, no pxr), so T2 stays
 # self-contained wherever python3 exists. Regeneration is byte-identical
 # (short decimals, fixed emission order); the files stay gitignored.
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_fixtures.py
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_fixtures.py
-    COMMENT "Generating usdGen groom fixtures G1-G5 (gitignored)"
-    VERBATIM)
-add_custom_target(usdGenFixtures ALL
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda)
-add_dependencies(benchUsdGenStorm usdGenFixtures)
+if(NOT WIN32)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_fixtures.py
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/make_fixtures.py
+        COMMENT "Generating usdGen groom fixtures G1-G5 (gitignored)"
+        VERBATIM)
+    add_custom_target(usdGenFixtures ALL
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/usd/fixtures/g3_head100k.usda)
+    add_dependencies(benchUsdGenStorm usdGenFixtures)
+endif()
 
 # N-4 (09 §5.3/§5.4, 10 §5.6 + §6.5): the remaining M1 Storm decision gates.
 # S-8 (tangent strategy PW decision) needs both the variant A/B timing
@@ -2057,12 +2466,16 @@ set(_usdgen_storm_labels_testUsdGenStormSurgery  "T2")
 foreach(_t testUsdGenStormTangent testUsdGenStormHgiResource
            testUsdGenStormRefine  testUsdGenStormMaterial
            testUsdGenStormSurgery)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_t}.cpp")
+    if(NOT WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${_t}.cpp")
         add_executable(${_t} tests/${_t}.cpp)
         target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
         target_include_directories(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test)
         set(_usdgen_storm_cmd ${_t} ${PROJECT_SOURCE_DIR})
         set(_usdgen_storm_props SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    elseif(WIN32)
+        set(_usdgen_storm_cmd
+            ${CMAKE_COMMAND} -E echo "SKIP ${_t} (Unix-only EGL/Storm harness)")
+        set(_usdgen_storm_props SKIP_REGULAR_EXPRESSION "SKIP")
     else()
         set(_usdgen_storm_cmd
             ${CMAKE_COMMAND} -E echo "M1-STUB ${_t} (pending wave-3 source)")
@@ -2072,7 +2485,7 @@ foreach(_t testUsdGenStormTangent testUsdGenStormHgiResource
     set_tests_properties(${_t} PROPERTIES
         LABELS "${_usdgen_storm_labels_${_t}}"
         RUN_SERIAL TRUE
-        ENVIRONMENT "${_usdgen_m1_env}"
+        ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
         ${_usdgen_storm_props})
 endforeach()
 
@@ -2084,27 +2497,51 @@ endforeach()
 # When unset they print a note and return 0 (clean skip). CI sets
 # USDGEN_INSTALL_PREFIX to the scratch prefix after running cmake --install.
 # ---------------------------------------------------------------------------
-add_executable(testUsdGenInstallTree tests/testUsdGenInstallTree.cpp)
-target_link_libraries(testUsdGenInstallTree PRIVATE
-    usd usdGeom tf arch gf vt sdf trace)
-target_compile_definitions(testUsdGenInstallTree PRIVATE
-    USDGEN_TEST_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/scenes/scene_empty_groom.usda"
-    USDGEN_TEST_PLUGIN_DIR="${USDGEN_INSTALL_PLUGINDIR}"
-    USDGEN_TEST_LIB_DIR="${USDGEN_INSTALL_LIBDIR}"
-    USDGEN_TEST_CMAKE_DIR="${USDGEN_INSTALL_CMAKEDIR}"
-    USDGEN_TEST_USD_INSTALL_DIR="${USD_INSTALL_DIR}")
-add_test(NAME testUsdGenInstallTree COMMAND testUsdGenInstallTree)
+if(NOT WIN32)
+    add_executable(testUsdGenInstallTree tests/testUsdGenInstallTree.cpp)
+    target_link_libraries(testUsdGenInstallTree PRIVATE
+        usd usdGeom tf arch gf vt sdf trace)
+    target_compile_definitions(testUsdGenInstallTree PRIVATE
+        USDGEN_TEST_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/scenes/scene_empty_groom.usda"
+        USDGEN_TEST_PLUGIN_DIR="${USDGEN_INSTALL_PLUGINDIR}"
+        USDGEN_TEST_LIB_DIR="${USDGEN_INSTALL_LIBDIR}"
+        USDGEN_TEST_CMAKE_DIR="${USDGEN_INSTALL_CMAKEDIR}"
+        USDGEN_TEST_USD_INSTALL_DIR="${USD_INSTALL_DIR}")
+
+    add_executable(testUsdGenConsumer tests/testUsdGenConsumer.cpp)
+    target_compile_definitions(testUsdGenConsumer PRIVATE
+        USDGEN_TEST_CONSUMER_SRC="${CMAKE_CURRENT_SOURCE_DIR}/tests/consumer"
+        USDGEN_TEST_USD_INSTALL_DIR="${USD_INSTALL_DIR}"
+        USDGEN_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}")
+endif()
+# Both assert the .so/.a install layout and drive POSIX execv/setenv or a
+# POSIX shell, so they cannot be built for Windows.
+usdgen_add_unix_only_test(testUsdGenInstallTree testUsdGenInstallTree)
 set_tests_properties(testUsdGenInstallTree PROPERTIES
     LABELS "T0;install")
-
-add_executable(testUsdGenConsumer tests/testUsdGenConsumer.cpp)
-target_compile_definitions(testUsdGenConsumer PRIVATE
-    USDGEN_TEST_CONSUMER_SRC="${CMAKE_CURRENT_SOURCE_DIR}/tests/consumer"
-    USDGEN_TEST_USD_INSTALL_DIR="${USD_INSTALL_DIR}"
-    USDGEN_TEST_CMAKE_COMMAND="${CMAKE_COMMAND}")
-add_test(NAME testUsdGenConsumer COMMAND testUsdGenConsumer)
+usdgen_add_unix_only_test(testUsdGenConsumer testUsdGenConsumer)
 set_tests_properties(testUsdGenConsumer PROPERTIES
     LABELS "T0;install")
+
+# ---------------------------------------------------------------------------
+# Loader search path for every registered test.
+#
+# This is a sweep rather than a per-registration property because *all* tests
+# need it, including the T0 engine tests that carry no other environment: they
+# link usdGen, which is a shared library, and OpenUSD's libraries come along
+# with it. On Windows, where there is no RPATH, omitting this is what made the
+# whole suite abort with STATUS_DLL_NOT_FOUND (0xc0000135) before the test body
+# ever ran. Sweeping the registered list also keeps tests added later correct
+# without every registration having to remember.
+# ---------------------------------------------------------------------------
+usdgen_test_path_list_ops(_usdgen_runtime_ops
+    "${USDGEN_RUNTIME_LIBRARY_PATH_ENV}" path_list_prepend
+    ${USDGEN_TEST_RUNTIME_DIRS})
+get_property(_usdgen_registered_tests DIRECTORY PROPERTY TESTS)
+foreach(_t IN LISTS _usdgen_registered_tests)
+    set_property(TEST ${_t} APPEND PROPERTY
+        ENVIRONMENT_MODIFICATION "${_usdgen_runtime_ops}")
+endforeach()
 
 endif() # USDGEN_BUILD_TESTS
 
@@ -2166,6 +2603,18 @@ install(FILES
 # zero shaders in the install tree).
 install(DIRECTORY usdGenShaders/resources/shaders/
     DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenShaders/resources/shaders")
+
+# usdGenTools usdview plugin: plugInfo beside the other plugin resources,
+# the package where the install tree's python path already points.
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTools/resources")
+install(DIRECTORY plugin/usdGenTools/python/usdGenTools
+    DESTINATION "${USDGEN_INSTALL_PYTHONDIR}"
+    FILES_MATCHING PATTERN "*.py")
+install(DIRECTORY plugin/usdGenTools/resources/expressions
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTools/resources"
+    FILES_MATCHING PATTERN "*.se")
 
 # Export targets so the package config's include(usdGenTargets.cmake) resolves.
 install(EXPORT usdGenTargets
