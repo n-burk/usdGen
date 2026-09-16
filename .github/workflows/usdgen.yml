@@ -326,11 +326,9 @@ jobs:
       - name: Run T0 + T1 (canonical label run)
         # --timeout 180 is a backstop so a test without its own TIMEOUT cannot
         # stall the 30-minute job the way testUsdGenPopulation did on main.
-        # PXR_WORK_THREAD_LIMIT keeps OpenUSD's work library from shrinking
-        # the TBB market to 1 worker, which deadlocks pipeline wait_for_all.
-        env:
-          PXR_WORK_THREAD_LIMIT: "4"
-        run: ctest --test-dir build -L '^T[01]$' -j8 --output-on-failure --timeout 180
+        # -j$(nproc) matches the 4-vCPU runner; -j8 oversubscribed it and
+        # produced E-6 timing flakes plus a SessionStoreOwner segfault.
+        run: ctest --test-dir build -L '^T[01]$' -j"$(nproc)" --output-on-failure --timeout 180
 
   # --------------------------------------------------------------------------
   # Install tree: cmake --install into a scratch prefix, then verify the
