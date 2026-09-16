@@ -31,32 +31,66 @@ if(NOT TARGET usd)
     # OpenUSD's pxrTargets reference OpenGL::GL (via garch's interface). Find
     # it first so the imported target exists before pxrConfig resolves.
     find_package(OpenGL REQUIRED)
-    # build_usd.py's Windows prefix contains the OpenSubdiv binaries and
-    # headers but does not install OpenSubdivConfig.cmake. pxrConfig defaults
-    # to rediscovering that absent config, despite its own imported pxOsd
-    # target already carrying the required link information. Avoid that broken
-    # rediscovery unless an integrator explicitly opts into it.
-    if(NOT DEFINED PXR_FIND_OPENSUBDIV_IN_CONFIG)
-        set(PXR_FIND_OPENSUBDIV_IN_CONFIG OFF)
-    endif()
-    # pxrTargets still names OpenSubdiv's static libraries. Reconstruct the
-    # two imported targets from the artifacts build_usd.py installs on Windows
-    # when the upstream OpenSubdiv CMake package is absent. This mirrors the
-    # exported OpenSubdiv target properties and is intentionally conditional:
-    # normal Linux/macOS package discovery remains untouched.
-    if(WIN32 AND NOT TARGET OpenSubdiv::osdCPU_static AND
-       EXISTS "${USD_INSTALL_DIR}/lib/osdCPU.lib" AND
-       EXISTS "${USD_INSTALL_DIR}/lib/osdGPU.lib")
-        foreach(_usdgen_osd_target osdCPU osdGPU)
-            add_library(OpenSubdiv::${_usdgen_osd_target}_static STATIC IMPORTED)
-            set_target_properties(OpenSubdiv::${_usdgen_osd_target}_static
-                PROPERTIES
-                    IMPORTED_LOCATION "${USD_INSTALL_DIR}/lib/${_usdgen_osd_target}.lib"
-                    INTERFACE_INCLUDE_DIRECTORIES "${USD_INSTALL_DIR}/include"
-                    INTERFACE_COMPILE_DEFINITIONS
-                        "OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL")
+    # build_usd.py co-installs OpenSubdiv (and, on Unix, OpenSubdivConfig.cmake)
+    # into the same prefix as OpenUSD. find_package(pxr PATHS ...) does not put
+    # that prefix on CMAKE_PREFIX_PATH, so pxrConfig's find_dependency(OpenSubdiv
+    # CONFIG) cannot see the package unless we point at it. Prepending the
+    # prefix is the relocatable equivalent of how OpenUSD itself was configured.
+    list(PREPEND CMAKE_PREFIX_PATH "${USD_INSTALL_DIR}")
+    if(NOT OpenSubdiv_DIR)
+        foreach(_usdgen_osd_cmake
+                "${USD_INSTALL_DIR}/lib/cmake/OpenSubdiv"
+                "${USD_INSTALL_DIR}/lib64/cmake/OpenSubdiv")
+            if(EXISTS "${_usdgen_osd_cmake}/OpenSubdivConfig.cmake")
+                set(OpenSubdiv_DIR "${_usdgen_osd_cmake}")
+                break()
+            endif()
         endforeach()
-        unset(_usdgen_osd_target)
+        unset(_usdgen_osd_cmake)
+    endif()
+    # Windows (and any other prefix that ships OSD binaries without a CMake
+    # package): skip pxrConfig's rediscovery and reconstruct the imported
+    # targets that pxrTargets names. Linux pxrTargets use OpenSubdiv::osdCPU;
+    # Windows uses OpenSubdiv::osdCPU_static.
+    if(NOT OpenSubdiv_DIR)
+        if(NOT DEFINED PXR_FIND_OPENSUBDIV_IN_CONFIG)
+            set(PXR_FIND_OPENSUBDIV_IN_CONFIG OFF)
+        endif()
+        foreach(_usdgen_osd_name osdCPU osdGPU)
+            if(NOT TARGET OpenSubdiv::${_usdgen_osd_name}_static AND
+               EXISTS "${USD_INSTALL_DIR}/lib/${_usdgen_osd_name}.lib")
+                add_library(OpenSubdiv::${_usdgen_osd_name}_static STATIC IMPORTED)
+                set_target_properties(OpenSubdiv::${_usdgen_osd_name}_static
+                    PROPERTIES
+                        IMPORTED_LOCATION "${USD_INSTALL_DIR}/lib/${_usdgen_osd_name}.lib"
+                        INTERFACE_INCLUDE_DIRECTORIES "${USD_INSTALL_DIR}/include"
+                        INTERFACE_COMPILE_DEFINITIONS
+                            "OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL")
+            endif()
+            if(NOT TARGET OpenSubdiv::${_usdgen_osd_name})
+                foreach(_usdgen_osd_file
+                        "lib${_usdgen_osd_name}${CMAKE_SHARED_LIBRARY_SUFFIX}"
+                        "lib${_usdgen_osd_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+                    if(EXISTS "${USD_INSTALL_DIR}/lib/${_usdgen_osd_file}")
+                        if(_usdgen_osd_file STREQUAL
+                           "lib${_usdgen_osd_name}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+                            add_library(OpenSubdiv::${_usdgen_osd_name} SHARED IMPORTED)
+                        else()
+                            add_library(OpenSubdiv::${_usdgen_osd_name} STATIC IMPORTED)
+                        endif()
+                        set_target_properties(OpenSubdiv::${_usdgen_osd_name}
+                            PROPERTIES
+                                IMPORTED_LOCATION
+                                    "${USD_INSTALL_DIR}/lib/${_usdgen_osd_file}"
+                                INTERFACE_INCLUDE_DIRECTORIES
+                                    "${USD_INSTALL_DIR}/include")
+                        break()
+                    endif()
+                endforeach()
+            endif()
+        endforeach()
+        unset(_usdgen_osd_name)
+        unset(_usdgen_osd_file)
     endif()
     find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)
 endif()

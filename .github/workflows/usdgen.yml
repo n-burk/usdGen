@@ -13,7 +13,7 @@
 #   configure-offline  prove that configuration succeeds with
 #                      FETCHCONTENT_FULLY_DISCONNECTED=ON (no network at
 #                      configure time).
-#   build-release      configure + ninja -j16 (Release) + usdcat smoke;
+#   build-release      configure + ninja -j$(nproc) (Release) + usdcat smoke;
 #                      uploads the build tree so t0-t1 does not rebuild.
 #   t0-t1              ctest -L '^T[01]$' -j8 against the build-release tree.
 #   install-check      cmake --install into a scratch prefix; verify the
@@ -190,6 +190,16 @@ jobs:
       - name: Checkout usdGen
         uses: actions/checkout@v4
 
+      - name: Install configure dependencies
+        # Same GL/X11 headers the other configure jobs need: pxrTargets
+        # reference OpenGL::GL, and find_package(OpenGL REQUIRED) fails on a
+        # stock ubuntu-24.04 runner without libgl1-mesa-dev. ninja-build is
+        # required because this job still selects -G Ninja.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libgl1-mesa-dev xorg-dev
+
       - name: Download OpenUSD prefix
         uses: actions/download-artifact@v4
         with:
@@ -245,7 +255,10 @@ jobs:
             -DUSDGEN_WITH_RIGEXEC=OFF
 
       - name: Build
-        run: ninja -C build -j16
+        # ubuntu-24.04 runners are 4 vCPU / 16GB. ninja -j16 oversubscribes
+        # that box compiling OpenUSD-heavy TUs and the runner SIGTERMs the
+        # step (exit 143, "interrupted by user") around 80/252.
+        run: ninja -C build -j"$(nproc)"
 
       - name: usdcat smoke (M0 exit criterion)
         # usdcat --flatten on the M0 fixture must run and show the codeless
@@ -359,7 +372,7 @@ jobs:
             -DUSDGEN_WITH_RIGEXEC=OFF
 
       - name: Build
-        run: ninja -C build -j16
+        run: ninja -C build -j"$(nproc)"
 
       - name: Install into scratch prefix
         run: cmake --install build --prefix "${GITHUB_WORKSPACE}/usdgen-install"
@@ -517,5 +530,5 @@ jobs:
             -DUSDGEN_FP_CONTRACT=fast
 
       - name: Build
-        run: ninja -C build-fpfast -j16
+        run: ninja -C build-fpfast -j"$(nproc)"
         # No ctest: the fpfast tolerance suite lands in M1 (plan section 5.5).

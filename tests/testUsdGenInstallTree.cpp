@@ -64,6 +64,7 @@ int CheckNotInstalled(const std::string &path) {
         std::printf("  unexpected: %s (should not be installed)\n", path.c_str());
         return 1;
     }
+    std::printf("  absent:   %s\n", path.c_str());
     return 0;
 }
 
@@ -89,22 +90,24 @@ int RunLayoutChecks(const std::string &prefix,
     std::printf("== layout checks against %s ==\n", prefix.c_str());
     int rc = 0;
 
-    // Libraries / archives
+    // Libraries / archives. N-7 (plan §1.2/§1.6): usdGenMath, usdGen_seexpr
+    // and nanoflann are private hidden archives and must not appear in the
+    // install prefix (installing them would also export their unprefixed
+    // INTERFACE include roots via usdGenTargets).
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGen.so");
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGenImaging.so");
     rc |= CheckFile(prefix + "/" + libDir + "/libusdGenSchema.so");
-    rc |= CheckFile(prefix + "/" + libDir + "/libusdGenMath.a");
-    rc |= CheckFile(prefix + "/" + libDir + "/libusdGen_seexpr.a");
+    rc |= CheckNotInstalled(prefix + "/" + libDir + "/libusdGenMath.a");
+    rc |= CheckNotInstalled(prefix + "/" + libDir + "/libusdGen_seexpr.a");
 
     // Headers: advertised layout <prefix>/include/<api>/...
     rc |= CheckFile(prefix + "/include/usdGen/usdGen.h");
     rc |= CheckFile(prefix + "/include/usdGen/export.h");
-    rc |= CheckFile(prefix + "/include/usdGenMath/usdGenMath.h");
+    rc |= CheckNotInstalled(prefix + "/include/usdGenMath/usdGenMath.h");
     rc |= CheckFile(prefix + "/include/usdGenSchema/usdGenSchema.h");
     rc |= CheckFile(prefix + "/include/usdGenImaging/api.h");
-    // Third-party roots must match the exported INTERFACE include dirs.
-    rc |= CheckFile(prefix + "/include/nanoflann.hpp");
-    rc |= CheckFile(prefix + "/include/seexpr/SeExpr2/Noise.h");
+    rc |= CheckNotInstalled(prefix + "/include/nanoflann.hpp");
+    rc |= CheckNotInstalled(prefix + "/include/seexpr/SeExpr2/Noise.h");
 
     // Negative layout checks (sol S-6): no double-nesting, no .cpp installed.
     rc |= CheckNotInstalled(prefix + "/include/usdGen/usdGen/usdGen.h");
