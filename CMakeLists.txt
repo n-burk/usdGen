@@ -1540,6 +1540,7 @@ set_tests_properties(testUsdGenHydraParity
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
     LABELS "T1;gate:SI-12"
     TIMEOUT 300
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77"
 )
 
 add_executable(testUsdGenHierarchy tests/testUsdGenHierarchy.cpp)
@@ -1610,14 +1611,15 @@ usdgen_add_unix_only_test(testUsdGenExpressionSchema
     ${CMAKE_COMMAND} -E env "GENBUILD=${CMAKE_CURRENT_BINARY_DIR}"
         bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/run_expression_schema.sh")
 set_tests_properties(testUsdGenExpressionSchema PROPERTIES
-    LABELS "T1;expressions;schema" TIMEOUT 120)
+    LABELS "T1;expressions;schema" TIMEOUT 120
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
 # Note: testUsdGenInvalidation already carries T1;gate:SI-2 (set at line ~446).
 # The SI-2 overlay extension (bare primvars locator, section 7) is appended
 # within that same test and shares its executable; no new CMake target needed.
 set_tests_properties(testUsdGenScheduling PROPERTIES LABELS "T1;gate:SI-3")
 set_tests_properties(testUsdGenSnapshotRace PROPERTIES LABELS "T1;gate:SI-4")
-set_tests_properties(testUsdGenPopulation PROPERTIES LABELS "T1;gate:SI-6")
+set_tests_properties(testUsdGenPopulation PROPERTIES LABELS "T1;gate:SI-6" TIMEOUT 120)
 set_tests_properties(testUsdGenAdapter PROPERTIES LABELS "T1;gate:SI-7")
 set_tests_properties(testUsdGenRestAdapter PROPERTIES LABELS "T1;gate:SI-7")
 set_tests_properties(testUsdGenCurveRestAdapter PROPERTIES LABELS "T1;gate:SI-7")

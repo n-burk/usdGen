@@ -10,6 +10,8 @@
 namespace usdGen {
 thread_local bool usdGenExecutionGraphActive = false;
 namespace {
+[[maybe_unused]] const bool kUsdGenTbbMarket = (EnsureUsdGenTbbMarket(), true);
+
 thread_local bool executingPipeline = false;
 thread_local void const* executingOwner = nullptr;
 struct ExecutionScope {
@@ -590,6 +592,7 @@ uint64_t UsdGenExecutionPipeline::CommandCapacity() const noexcept {
 }
 void UsdGenExecutionPipeline::Drain() {
     if (usdGenExecutionGraphActive) throw std::logic_error("graph work must not synchronously drain a pipeline");
+    if (UsdGenProcessShutdownInProgress()) return;
     impl_->graph.wait_for_all();
 }
 
@@ -604,6 +607,7 @@ void UsdGenExecutionPipeline::Shutdown(std::function<void()> const& admissionClo
         try { admissionClosed(); }
         catch (...) { impl_->callbackFailures.fetch_add(1, std::memory_order_relaxed); }
     }
+    if (UsdGenProcessShutdownInProgress()) return;
     impl_->graph.wait_for_all();
 }
 

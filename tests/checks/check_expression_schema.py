@@ -13,8 +13,8 @@ os.environ["PXR_PLUGINPATH_NAME"] = os.pathsep.join([RES] + entries)
 try:
     from pxr import Sdf, Usd
 except ImportError as exc:
-    print("FAIL [setup] cannot import pxr: %s" % exc)
-    raise SystemExit(2)
+    print("SKIP [setup] cannot import pxr (OpenUSD python bindings unavailable): %s" % exc)
+    raise SystemExit(77)
 
 registry = Usd.SchemaRegistry()
 expr = registry.FindConcretePrimDefinition("UsdGenExpression")
