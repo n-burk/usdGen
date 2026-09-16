@@ -781,7 +781,7 @@ set_tests_properties(testUsdGenAsyncImagingSession PROPERTIES LABELS "T1;schedul
 add_executable(testUsdGenSessionStoreOwner tests/testUsdGenSessionStoreOwner.cpp)
 target_link_libraries(testUsdGenSessionStoreOwner PRIVATE usdGenImaging usdGen)
 add_test(NAME testUsdGenSessionStoreOwner COMMAND testUsdGenSessionStoreOwner)
-set_tests_properties(testUsdGenSessionStoreOwner PROPERTIES LABELS "T1;scheduling;sessions;imaging" TIMEOUT 60)
+set_tests_properties(testUsdGenSessionStoreOwner PROPERTIES LABELS "T1;scheduling;sessions;imaging" TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME testUsdGenSessionStoreExit COMMAND testUsdGenSessionStoreOwner --pending-exit)
 set_tests_properties(testUsdGenSessionStoreExit PROPERTIES LABELS "T1;scheduling;sessions;imaging" TIMEOUT 60)
 add_executable(testUsdGenRegistryOwners tests/testUsdGenRegistryOwners.cpp)
