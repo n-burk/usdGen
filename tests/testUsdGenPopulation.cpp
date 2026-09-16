@@ -204,6 +204,9 @@ int main()
     // ---- Soft half: population traversal budget (gate only) --------------
     // >= 11005 prims on the stage; first query on a fresh groom index
     // triggers the population walk -- plan/06-imaging.md §3.6: <= 5 ms.
+    // Building a UsdImaging chain over 11k prims is a workstation gate, not
+    // GitHub CI: without USDGEN_GATE it hung the T0/T1 job past 30 minutes.
+    if (std::getenv("USDGEN_GATE") != nullptr)
     {
         UsdStageRefPtr stageT = UsdStage::CreateInMemory("popT");
         DefineFixture(stageT);
@@ -238,11 +241,9 @@ int main()
                               .count();
         std::printf("  [info] population of %d-prim stage: %.3f ms\n",
                     count, ms);
-        if (std::getenv("USDGEN_GATE") != nullptr) {
-            Check(ms <= 5.0,
-                  "population traversal <= 5 ms on 11k prim stage (actual " +
-                      std::to_string(ms) + " ms)");
-        }
+        Check(ms <= 5.0,
+              "population traversal <= 5 ms on 11k prim stage (actual " +
+                  std::to_string(ms) + " ms)");
     }
 
 

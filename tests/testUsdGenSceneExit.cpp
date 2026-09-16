@@ -1,6 +1,6 @@
 // Process-exit lifetime regression.  The holder is constructed before the
-// scene service singleton and intentionally keeps the index alive through
-// return from main, exercising reverse static-destruction ordering.
+// scene service singleton and takes the index after Synchronize, then drops
+// it before return so pipeline Shutdown still runs with TBB workers alive.
 #include "usdGenImaging/groomSceneIndexPlugin.h"
 
 #include "pxr/imaging/hd/retainedDataSource.h"
@@ -41,10 +41,15 @@ int main()
         return 3;
     }
 
-    // Deliberately do not reset either reference.  g_exitHolder's destructor
-    // runs after function-local static services and must still retire safely.
+    // Hold the index past the last local, then drop it while the TBB worker
+    // market is still alive. A static destructor after TBB's governor has
+    // stopped workers waits forever in pipeline Shutdown (the Linux twin of
+    // the Windows RtlDllShutdownInProgress hang).
     g_exitHolder.input = input;
     g_exitHolder.index = index;
     std::printf("testUsdGenSceneExit: PASS (retained index through exit)\n");
+    std::fflush(stdout);
+    g_exitHolder.index.Reset();
+    g_exitHolder.input.Reset();
     return 0;
 }
