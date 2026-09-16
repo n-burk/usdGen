@@ -406,24 +406,6 @@ UsdGenExecutionRetirementService::TryReserve() noexcept {
     }
     return {};
 }
-// On Windows a std::atexit handler or static destructor that lives in a DLL
-// runs from the loader's process shutdown, after ExitProcess has terminated
-// every other thread. The cleanup arena's worker is gone by then, so a drain
-// wait issued there can never be serviced and spins for as long as the process
-// is allowed to live (observed under ctest as a 100% CPU timeout after the
-// test body had finished). ntdll exposes that loader state; when it is set
-// the wait is skipped. Linux has no equivalent flag; EnsureUsdGenTbbMarket
-// keeps the worker market large enough that live Drain/Shutdown can finish.
-bool UsdGenProcessShutdownInProgress() noexcept {
-#if defined(_WIN32)
-    using Fn = BOOLEAN(NTAPI*)();
-    static Fn const fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
-        ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
-    return fn && fn();
-#else
-    return false;
-#endif
-}
 
 void UsdGenExecutionRetirementService::Shutdown() noexcept {
     if (impl_) impl_->accepting.store(false, std::memory_order_release);

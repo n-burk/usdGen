@@ -6,6 +6,13 @@
 #include <tbb/task_arena.h>
 #include <thread>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace usdGen {
 // Shared callback-scope guard across pipeline and ready-task graphs.  It is
 // intentionally internal: synchronous waits from either framework are invalid.
@@ -32,7 +39,19 @@ inline void EnsureUsdGenTbbMarket() {
     (void)market;
 }
 
-bool UsdGenProcessShutdownInProgress() noexcept;
+// Inline so both libusdGen (default visibility) and usdGenExecutionResources
+// (hidden) get a copy; a single out-of-line definition cannot be referenced
+// across that DSO boundary.
+inline bool UsdGenProcessShutdownInProgress() noexcept {
+#if defined(_WIN32)
+    using Fn = BOOLEAN(NTAPI*)();
+    static Fn const fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+        ::GetProcAddress(::GetModuleHandleW(L"ntdll.dll"), "RtlDllShutdownInProgress")));
+    return fn && fn();
+#else
+    return false;
+#endif
+}
 
 // Private shared definition: both pipeline and task dispatchers must attach
 // their flow graphs to the same arena and retain it past wrapper destruction.
