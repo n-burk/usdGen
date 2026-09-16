@@ -67,6 +67,19 @@ __global__ void Validate(DeviceCurveGeometryView g,
     if (i < g.curveCount && channels.rootUV.data &&
         (i >= channels.rootUV.size || !Finite(channels.rootUV.data[i])))
         Fail(error, kBadChannel);
+    // The rest root frame planes. rootPrim is an integer face index and is
+    // deliberately not checked for finiteness.
+    if (i < g.curveCount) {
+        if (channels.rootN.data &&
+            (i >= channels.rootN.size || !Finite(channels.rootN.data[i])))
+            Fail(error, kBadChannel);
+        if (channels.rootT.data &&
+            (i >= channels.rootT.size || !Finite(channels.rootT.data[i])))
+            Fail(error, kBadChannel);
+        if (channels.rootB.data &&
+            (i >= channels.rootB.size || !Finite(channels.rootB.data[i])))
+            Fail(error, kBadChannel);
+    }
 }
 
 __global__ void BuildOwnersAndArc(DeviceCurveGeometryView g,
@@ -122,6 +135,12 @@ __global__ void BuildFields(DeviceCurveGeometryView g,
         Set1(out, Variable::IdHi, i, double(uint32_t(id >> 32)));
         Set1(out, Variable::Id, i, double(id));
         if (ch.rootUV.data) { Set1(out, Variable::U, i, ch.rootUV.data[i].x); Set1(out, Variable::V, i, ch.rootUV.data[i].y); }
+        if (ch.rootPrim.data) Set1(out, Variable::FaceId, i, double(ch.rootPrim.data[i]));
+        // usdGen keeps ONE rest root frame: the animated and the rest spelling
+        // of each variable read the same plane.
+        if (ch.rootN.data) { Set3(out, Variable::N, i, ch.rootN.data[i]); Set3(out, Variable::NRef, i, ch.rootN.data[i]); }
+        if (ch.rootT.data) { Set3(out, Variable::DPdu, i, ch.rootT.data[i]); Set3(out, Variable::DPduRef, i, ch.rootT.data[i]); }
+        if (ch.rootB.data) { Set3(out, Variable::DPdv, i, ch.rootB.data[i]); Set3(out, Variable::DPdvRef, i, ch.rootB.data[i]); }
     } else if (domain == Domain::Point) {
         if (i >= g.pointCount) return;
         uint32_t c = out.pointToPrimitive.data[i];
@@ -136,6 +155,12 @@ __global__ void BuildFields(DeviceCurveGeometryView g,
         Set1(out, Variable::PointIndex, i, double(i - root));
         Set1(out, Variable::PointCount, i, double(g.curveOffsets.data[c + 1] - root));
         if (ch.rootUV.data) { Set1(out, Variable::U, i, ch.rootUV.data[c].x); Set1(out, Variable::V, i, ch.rootUV.data[c].y); }
+        if (ch.rootPrim.data) Set1(out, Variable::FaceId, i, double(ch.rootPrim.data[c]));
+        // Per-curve root data at point rate reads the CV's owning curve, the
+        // same addressing $rootP and $u/$v already use.
+        if (ch.rootN.data) { Set3(out, Variable::N, i, ch.rootN.data[c]); Set3(out, Variable::NRef, i, ch.rootN.data[c]); }
+        if (ch.rootT.data) { Set3(out, Variable::DPdu, i, ch.rootT.data[c]); Set3(out, Variable::DPduRef, i, ch.rootT.data[c]); }
+        if (ch.rootB.data) { Set3(out, Variable::DPdv, i, ch.rootB.data[c]); Set3(out, Variable::DPdvRef, i, ch.rootB.data[c]); }
         uint64_t id = g.stableIds.data[c];
         Set1(out, Variable::IdLo, i, double(uint32_t(id)));
         Set1(out, Variable::IdHi, i, double(uint32_t(id >> 32)));
@@ -230,7 +255,9 @@ ExpressionContextStatus CudaExpressionContext::BuildImpl(
     auto validView = [](auto view) { return view.data || view.size == 0; };
     if (!validView(geometry.points) || !validView(geometry.restPoints) || !validView(geometry.widths) ||
         !validView(geometry.curveOffsets) || !validView(geometry.stableIds) ||
-        !validView(channels.hairT) || !validView(channels.rootUV))
+        !validView(channels.hairT) || !validView(channels.rootUV) ||
+        !validView(channels.rootN) || !validView(channels.rootT) ||
+        !validView(channels.rootB) || !validView(channels.rootPrim))
         return ExpressionContextStatus::InvalidArgument;
     if (!std::isfinite(context.frame) || !std::isfinite(context.time))
         return ExpressionContextStatus::InvalidArgument;
@@ -289,17 +316,29 @@ ExpressionContextStatus CudaExpressionContext::BuildImpl(
         return ExpressionContextStatus::InvalidChannel;
     if (channels.rootUV.data && channels.rootUV.size != geometry.curveCount)
         return ExpressionContextStatus::InvalidChannel;
+    if ((channels.rootN.data && channels.rootN.size != geometry.curveCount) ||
+        (channels.rootT.data && channels.rootT.size != geometry.curveCount) ||
+        (channels.rootB.data && channels.rootB.size != geometry.curveCount) ||
+        (channels.rootPrim.data && channels.rootPrim.size != geometry.curveCount))
+        return ExpressionContextStatus::InvalidChannel;
     size_t n = context.domain == Domain::Groom ? 1 :
                context.domain == Domain::Primitive ? geometry.curveCount : geometry.pointCount;
     pendingInputs_.count = n; pendingInputs_.primitiveCount = geometry.curveCount;
     pendingInputs_.context.count = static_cast<uint32_t>(n);
     const unsigned u = static_cast<unsigned>(expr::Variable::CountVariables);
     for (unsigned v = 0; v < u; ++v) {
-        bool vec = v == unsigned(Variable::P) || v == unsigned(Variable::PRef) || v == unsigned(Variable::RootP) || v == unsigned(Variable::RootPRef);
-        if (vec || v == unsigned(Variable::T) || v == unsigned(Variable::CWidth) || v == unsigned(Variable::PointIndex) || v == unsigned(Variable::PointCount) || v == unsigned(Variable::PrimIndex) || v == unsigned(Variable::PrimCount) || v == unsigned(Variable::CLength) || v == unsigned(Variable::U) || v == unsigned(Variable::V) || v == unsigned(Variable::IdLo) || v == unsigned(Variable::IdHi) || v == unsigned(Variable::Id)) {
+        bool vec = v == unsigned(Variable::P) || v == unsigned(Variable::PRef) || v == unsigned(Variable::RootP) || v == unsigned(Variable::RootPRef) ||
+            v == unsigned(Variable::N) || v == unsigned(Variable::NRef) ||
+            v == unsigned(Variable::DPdu) || v == unsigned(Variable::DPduRef) ||
+            v == unsigned(Variable::DPdv) || v == unsigned(Variable::DPdvRef);
+        if (vec || v == unsigned(Variable::T) || v == unsigned(Variable::CWidth) || v == unsigned(Variable::PointIndex) || v == unsigned(Variable::PointCount) || v == unsigned(Variable::PrimIndex) || v == unsigned(Variable::PrimCount) || v == unsigned(Variable::CLength) || v == unsigned(Variable::U) || v == unsigned(Variable::V) || v == unsigned(Variable::FaceId) || v == unsigned(Variable::IdLo) || v == unsigned(Variable::IdHi) || v == unsigned(Variable::Id)) {
             if (v == unsigned(Variable::PRef) || v == unsigned(Variable::RootPRef)) { if (!geometry.restPoints.data) continue; }
             if (v == unsigned(Variable::CWidth) && !geometry.widths.data) continue;
             if ((v == unsigned(Variable::U) || v == unsigned(Variable::V)) && !channels.rootUV.data) continue;
+            if ((v == unsigned(Variable::N) || v == unsigned(Variable::NRef)) && !channels.rootN.data) continue;
+            if ((v == unsigned(Variable::DPdu) || v == unsigned(Variable::DPduRef)) && !channels.rootT.data) continue;
+            if ((v == unsigned(Variable::DPdv) || v == unsigned(Variable::DPdvRef)) && !channels.rootB.data) continue;
+            if (v == unsigned(Variable::FaceId) && !channels.rootPrim.data) continue;
         if (vec && n > std::numeric_limits<size_t>::max() / 3) return ExpressionContextStatus::InvalidArgument;
             if (context.domain == Domain::Primitive && (v == unsigned(Variable::PointIndex) || v == unsigned(Variable::PointCount))) continue;
             if (fields_[v].reset(n * (vec ? 3 : 1), reservation, kind) != cudaSuccess) return ExpressionContextStatus::CudaError;

@@ -4,7 +4,20 @@ param(
     [string] $Camera = "",
     [int] $Width = 1024,
     [string] $Renderer = "GL",
-    [double] $Frame = -1
+    [double] $Frame = -1,
+    # usdrecord's UsdAppUtils complexity preset (complexityArgs.py:40-43:
+    # low 1.0, medium 1.1, high 1.2, veryhigh 1.3). It drives
+    # UsdImagingGLEngine's refineLevel 0/1/2/3, which usdGen tiles now follow
+    # like any native BasisCurves. Empty leaves usdrecord's own default.
+    [ValidateSet("", "low", "medium", "high", "veryhigh")]
+    [string] $Complexity = "",
+    # Drop usdrecord's default headlight so only the stage's own lights (a
+    # DomeLight, say) illuminate the frame -- the usdview state where the
+    # camera light is off and "Enable Default Dome Light" is on.
+    [switch] $NoCameraLight,
+    # Draw the dome light's environment texture into the background instead of
+    # using it for lighting only.
+    [switch] $ShowDomeLight
 )
 
 # Headless render of a usdGen scene with the plugins from this build tree:
@@ -69,6 +82,9 @@ if (-not $python) { throw "Python is not on PATH. Set PY to the interpreter that
 $args = @("--renderer", $Renderer, "--imageWidth", $Width)
 if ($Frame -lt 0) { $args += "--defaultTime" } else { $args += @("--frames", $Frame) }
 if ($Camera) { $args += @("--camera", $Camera) }
+if ($Complexity) { $args += @("--complexity", $Complexity) }
+if ($NoCameraLight) { $args += "--disableCameraLight" }
+if ($ShowDomeLight) { $args += "--enableDomeLightVisibility" }
 $args += @((Resolve-Path $Scene).Path, $Output)
 & $python $usdrecord @args
 exit $LASTEXITCODE

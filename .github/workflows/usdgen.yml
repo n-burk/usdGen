@@ -452,11 +452,8 @@ jobs:
               desc = s.get("Info", {}).get("Types", {}).get("UsdGenDescription", {})
               check(desc.get("implementsComputeExtent") is True,
                     "schema plugInfo: implementsComputeExtent true on UsdGenDescription")
-              check("AutoApplyAPISchemas" in s.get("Info", {}),
-                    "schema plugInfo: AutoApplyAPISchemas INSIDE 'Info'")
-              aa = s.get("Info", {}).get("AutoApplyAPISchemas", {})
-              check(aa.get("UsdGenMaskAPI", {}).get("apiSchemaAutoApplyTo") == ["UsdGenOperator"],
-                    "schema plugInfo: UsdGenMaskAPI auto-applies to UsdGenOperator")
+              check("AutoApplyAPISchemas" not in s.get("Info", {}),
+                    "schema plugInfo: no auto-applied API schemas (UsdGenMaskAPI is gone)")
               check("UsdGenScatter" in s.get("Info", {}).get("Types", {}),
                     "schema plugInfo: codeless type UsdGenScatter present")
 

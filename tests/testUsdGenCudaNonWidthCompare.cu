@@ -29,7 +29,7 @@ template <class T> static std::vector<unsigned char> Bytes(std::vector<T> const&
 
 struct Owner {
     DeviceBuffer<float3> points, rest, tangent, binormal, normal;
-    DeviceBuffer<float> widths, hairT, mask;
+    DeviceBuffer<float> widths, hairT;
     DeviceBuffer<uint32_t> offsets;
     DeviceBuffer<uint64_t> ids;
     DeviceBuffer<int32_t> prim;
@@ -41,7 +41,6 @@ struct Owner {
         x.geometry = {points.view(), rest.view(), widths.view(), offsets.view(), ids.view(), curves, pointsCount};
         x.hairT = hairT.view(); x.rootPrim = prim.view(); x.rootUV = uv.view();
         x.frames = {tangent.view(), binormal.view(), normal.view(), {}};
-        x.curveMask = mask.view();
         x.chunks = {{0, curves, curves, 0, pointsCount, 0, 0}};
         if (!namedFloat.size() && !namedInt.size()) return x;
         UsdGenDeviceChannelMetadata fm; fm.name="testFloat"; fm.type=UsdGenDeviceValueType::Float32;
@@ -90,7 +89,6 @@ int main() {
     CHECK(Upload(a->tangent, {{1,0,0}}, stream) && Upload(b->tangent, {{1,0,0}}, stream));
     CHECK(Upload(a->binormal, {{0,1,0}}, stream) && Upload(b->binormal, {{0,1,0}}, stream));
     CHECK(Upload(a->normal, {{0,0,1}}, stream) && Upload(b->normal, {{0,0,1}}, stream));
-    CHECK(Upload(a->mask, {1.f}, stream) && Upload(b->mask, {1.f}, stream));
     CHECK(Upload(a->namedFloat, Bytes(std::vector<float>{0.f,1.f,2.f}), stream) &&
           Upload(b->namedFloat, Bytes(std::vector<float>{0.f,1.f,2.f}), stream));
     CHECK(Upload(a->namedInt, Bytes(std::vector<int32_t>{1,2,3}), stream) &&
@@ -148,9 +146,9 @@ int main() {
     CHECK(Upload(b->binormal,{{1,0,0}},stream));
     CHECK(Compare(base,b->input(1,3),lifetime,stream,false));
     CHECK(Upload(b->binormal,{{0,1,0}},stream));
-    CHECK(Upload(b->mask,{.5f},stream));
+    CHECK(Upload(b->hairT,{0.f,.25f,1.f},stream));
     CHECK(Compare(base,b->input(1,3),lifetime,stream,false));
-    CHECK(Upload(b->mask,{1.f},stream));
+    CHECK(Upload(b->hairT,{0.f,.5f,1.f},stream));
     auto absentRest=b->input(1,3); absentRest.geometry.restPoints={};
     CHECK(Compare(base,absentRest,lifetime,stream,false));
     auto absentFrames=b->input(1,3); absentFrames.frames={};

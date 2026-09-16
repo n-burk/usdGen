@@ -1,9 +1,8 @@
 // usdGen engine — internal operator registry (03 §8.2; ADR §3: internal in v1/v2).
 //
-// Maps (type name, algorithmVersion) to a factory. M1 registers five types:
-// UsdGenScatter, UsdGenGrow, UsdGenNoise, UsdGenLength, UsdGenWidth.
-// algorithmVersion 0 means "track the newest kernel" (R17); the registry
-// resolves 0 to the newest known version at compile time.
+// Maps a type name to a factory. There is exactly one kernel per type: the
+// schema carries no algorithm-version knob, so nothing selects between
+// alternative implementations of the same operator.
 #ifndef USDGEN_OP_REGISTRY_H
 #define USDGEN_OP_REGISTRY_H
 
@@ -24,34 +23,27 @@ public:
 
     static UsdGenOpRegistry &Get();
 
-    /// Register a kernel for (type, version). The registry owns the factory,
-    /// not the instances. Returns false on duplicate (type, version).
+    /// Register the kernel for `type`. The registry owns the factory, not the
+    /// instances. Returns false on a duplicate type.
     /// Extension registration is startup-only: finish before launching any
     /// compiler/readers. Runtime graph compilation never mutates the registry.
-    bool Register(TfToken const &type, int algorithmVersion, Factory factory);
+    bool Register(TfToken const &type, Factory factory);
 
-    /// Create an operator instance. *outVersion receives the resolved version.
-    /// nullptr when the type is unknown or has no kernel (published types with
-    /// unimplemented kernels: one TF_WARN naming the prim, 02 §8.2).
-    std::unique_ptr<UsdGenOp> Create(TfToken const &type, int algorithmVersion,
-                                     int *outVersion = nullptr) const;
+    /// Create an operator instance. nullptr when the type has no kernel
+    /// (published types with unimplemented kernels: 02 §8.2).
+    std::unique_ptr<UsdGenOp> Create(TfToken const &type) const;
 
-    /// Highest registered version for a type; -1 when the type is unknown.
-    int NewestVersion(TfToken const &type) const;
-    bool HasKernel(TfToken const &type, int algorithmVersion) const;
-    /// Read the complete version-resolved static operator contract without
-    /// allocating an operator during graph compilation.  The metadata is
-    /// captured from the registration-time probe, so it is valid only for
-    /// the selected (type, version) entry; version 0 resolves to newest.
-    bool GetOperatorContract(TfToken const &type, int algorithmVersion,
+    bool HasKernel(TfToken const &type) const;
+    /// Read the complete static operator contract without allocating an
+    /// operator during graph compilation. The metadata is captured from the
+    /// registration-time probe.
+    bool GetOperatorContract(TfToken const &type,
                              size_t *outGeometryInputArity,
                              size_t *outReferenceInputArity,
                              UsdGenRole *outRole) const;
-    /// Read the version-resolved geometry-input contract without allocating
-    /// an operator during graph compilation. Returns false for an unknown
-    /// type/version.
-    bool GetGeometryInputArity(TfToken const &type, int algorithmVersion,
-                               size_t *outArity) const;
+    /// Read the geometry-input contract without allocating an operator during
+    /// graph compilation. Returns false for an unknown type.
+    bool GetGeometryInputArity(TfToken const &type, size_t *outArity) const;
 
     /// All registered type names (sorted); used by diagnostics.
     std::vector<TfToken> KnownTypes() const;
@@ -60,7 +52,6 @@ private:
     UsdGenOpRegistry();
     struct Entry {
         TfToken type;
-        int version;
         Factory factory;
         size_t geometryInputArity;
         size_t referenceInputArity;

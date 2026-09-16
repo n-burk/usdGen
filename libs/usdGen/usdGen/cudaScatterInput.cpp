@@ -21,103 +21,16 @@ bool Finite(GfVec3f const& v) {
 }
 bool Finite(GfVec2f const& v) { return std::isfinite(v[0]) && std::isfinite(v[1]); }
 
+// Scatter is a generator: it declares only density and flip.
 bool AllowedScatterParam(TfToken const& name) {
-    static std::set<TfToken> const allowed{
-        TfToken("mode"), TfToken("density"), TfToken("flip"),
-        TfToken("mask:amount"), TfToken("mask:invert"),
-        TfToken("mask:combine"), TfToken("mask:random"),
-        TfToken("mask:randomSeed"), TfToken("mask:rangeMin"),
-        TfToken("mask:rangeMax"), TfToken("mask:effectPosition"),
-        TfToken("mask:falloff"), TfToken("mask:influenceWidth"),
-        TfToken("mask:ramp:knots"), TfToken("mask:ramp:interpolation")};
-    return allowed.count(name) != 0;
+    return name == TfToken("density") || name == TfToken("flip");
 }
 
-bool IsToken(VtValue const& v) { return v.IsHolding<TfToken>() || v.IsHolding<std::string>(); }
 bool IsFloat(VtValue const& v) { return v.IsHolding<float>() || v.IsHolding<double>(); }
-bool IsInt(VtValue const& v) { return v.IsHolding<int>() || v.IsHolding<uint32_t>(); }
-bool IntEquals(VtValue const& v, int expected) {
-    return IsInt(v) && (v.IsHolding<int>() ? v.UncheckedGet<int>() == expected
-                                           : v.UncheckedGet<uint32_t>() == uint32_t(expected));
-}
-bool FloatEquals(VtValue const& v, double expected) {
-    return IsFloat(v) && (v.IsHolding<float>() ? double(v.UncheckedGet<float>()) == expected
-                                               : v.UncheckedGet<double>() == expected);
-}
-bool FiniteFloat(VtValue const& v) {
-    return IsFloat(v) && std::isfinite(v.IsHolding<float>() ? double(v.UncheckedGet<float>())
-                                                            : v.UncheckedGet<double>());
-}
-// Controls this slice does not implement are admitted only at their neutral
-// schema fallback. The imaging adapter serves every schema property, so a
-// stage-authored Scatter always carries all of them; the random kernel reads
-// none of the uniform/points/atGuides controls, and a neutral mask is a no-op.
-bool IdentityControl(UsdGenParamValue const& param) {
-    TfToken const& n = param.name; VtValue const& v = param.value;
-    if (n == TfToken("relaxIterations")) return IntEquals(v, 0);
-    if (n == TfToken("jitter")) return FloatEquals(v, 0.0);
-    if (n == TfToken("areaCompensation")) return v == VtValue(true);
-    if (n == TfToken("perGuide")) return IntEquals(v, 1);
-    if (n == TfToken("spacingU") || n == TfToken("spacingV")) return FiniteFloat(v);
-    if (n == TfToken("rootPrims")) return v.IsHolding<VtIntArray>() && v.UncheckedGet<VtIntArray>().empty();
-    if (n == TfToken("rootUVs")) return v.IsHolding<VtVec2fArray>() && v.UncheckedGet<VtVec2fArray>().empty();
-    if (n == TfToken("label")) return v.IsHolding<std::string>();
-    if (n == TfToken("mask:range")) return v == VtValue(GfVec2f(0, 1));
-    if (n == TfToken("mask:rangeMode")) return IsToken(v) && (v.IsHolding<TfToken>()
-        ? v.UncheckedGet<TfToken>() == TfToken("normalized") : v.UncheckedGet<std::string>() == "normalized");
-    if (n == TfToken("mask:noise:amount")) return FloatEquals(v, 0.0);
-    if (n == TfToken("mask:noise:frequency")) return FloatEquals(v, 1.0);
-    if (n == TfToken("mask:noise:gain") || n == TfToken("mask:noise:bias")) return FloatEquals(v, 0.5);
-    if (n == TfToken("mask:noise:seed")) return IntEquals(v, 0);
-    return false;
-}
-bool ValidScatterParam(UsdGenParamValue const& param) {
-    TfToken const& n = param.name; VtValue const& v = param.value;
-    if (n == TfToken("mode") || n == TfToken("mask:combine") ||
-        n == TfToken("mask:ramp:interpolation")) return IsToken(v);
-    if (n == TfToken("density") || n == TfToken("mask:amount") ||
-        n == TfToken("mask:random") || n == TfToken("mask:rangeMin") ||
-        n == TfToken("mask:rangeMax") || n == TfToken("mask:effectPosition") ||
-        n == TfToken("mask:falloff") || n == TfToken("mask:influenceWidth")) return IsFloat(v);
-    if (n == TfToken("flip") || n == TfToken("mask:invert")) return v.IsHolding<bool>();
-    if (n == TfToken("mask:randomSeed")) return IsInt(v);
-    return n == TfToken("mask:ramp:knots") && v.IsHolding<VtVec2fArray>();
-}
 
-// The authoritative M1 mask currently evaluates only its random term.
-// Its diagnostic vector is not propagated by Scatter::Capture, so accepting
-// non-neutral remaining controls here would silently ignore authored intent.
-bool SupportedMaskValue(UsdGenParamValue const& param) {
-    auto const& name = param.name.GetString();
-    if (name.compare(0, 5, "mask:") != 0) return true;
-    auto const& value = param.value;
-    auto number = [&] { return value.IsHolding<float>()
-        ? double(value.UncheckedGet<float>()) : value.UncheckedGet<double>(); };
-    auto token = [&] { return value.IsHolding<TfToken>()
-        ? value.UncheckedGet<TfToken>().GetString() : value.UncheckedGet<std::string>(); };
-    if (name == "mask:randomSeed") return true;
-    if (name == "mask:random") {
-        double const random = number();
-        return std::isfinite(random) && random >= 0 && random <= 1;
-    }
-    if (name == "mask:invert") return !value.UncheckedGet<bool>();
-    if (name == "mask:combine") return token() == "multiply";
-    if (name == "mask:ramp:interpolation") {
-        auto const t = token();
-        return t == "constant" || t == "linear" || t == "catmullRom" || t == "bspline";
-    }
-    if (name == "mask:ramp:knots") {
-        float previous = -1;
-        for (auto const& knot : value.UncheckedGet<VtVec2fArray>()) {
-            if (!Finite(knot) || knot[0] < 0 || knot[0] > 1 ||
-                knot[0] < previous || knot[1] != 1) return false;
-            previous = knot[0];
-        }
-        return true;
-    }
-    double const neutral = name == "mask:amount" || name == "mask:rangeMax"
-        ? 1.0 : name == "mask:rangeMin" ? 0.0 : 0.5;
-    return number() == neutral;
+bool ValidScatterParam(UsdGenParamValue const& param) {
+    if (param.name == TfToken("density")) return IsFloat(param.value);
+    return param.name == TfToken("flip") && param.value.IsHolding<bool>();
 }
 
 CudaScatterInputStatus ValidateSurface(UsdGenSurfaceDesc const& surface,
@@ -189,28 +102,41 @@ CudaScatterInputStatus PrepareCudaScatterInput(
         return Fail(CudaScatterInputStatus::InvalidArgument,
                     "Scatter input path does not resolve to a Scatter node", reason);
     UsdGenNodeDesc const& node = *nodeIt;
-    if (node.algorithmVersion != 0 || !node.enabled || node.blend != 1.0f ||
-        (!node.mode.IsEmpty() && node.mode != TfToken("random")))
+    // 02 §6.3: a disabled generator publishes an EMPTY curve set, so the
+    // description publishes no curves. Every operator downstream of the empty
+    // root set is a no-op, which is exactly the CPU lane's behaviour. Any
+    // disabled generator in the description empties this root set: Grow and
+    // CurveSource are fused into the same native slice and have no separate
+    // producer to empty.
+    {
+        usdGenRegisterM1Operators();
+        bool generatorDisabled = false;
+        for (UsdGenNodeDesc const& candidate : desc.nodes) {
+            if (candidate.enabled) continue;
+            std::unique_ptr<UsdGenOp> probe =
+                UsdGenOpRegistry::Get().Create(candidate.type);
+            generatorDisabled = generatorDisabled || (probe && probe->IsGenerator());
+        }
+        if (generatorDisabled) {
+            *out = std::make_shared<gpu::ScatterGrowRoots>();
+            return CudaScatterInputStatus::Ok;
+        }
+    }
+    if (!node.mode.IsEmpty())
         return Fail(CudaScatterInputStatus::Unsupported,
-                    "Scatter input supports enabled random algorithm version 0 only", reason);
+                    "Scatter has no usdGen:mode property; it is always random", reason);
     if (!node.inputs.empty() || !node.references.empty() || !node.curves.empty() ||
         !node.maps.empty() || !node.mapBindings.empty() || !node.expressionBindings.empty() ||
         !node.ramps.empty())
         return Fail(CudaScatterInputStatus::Unsupported,
                     "Scatter input does not support geometry/reference/map/expression/ramp controls", reason);
-    if ((!node.space.IsEmpty() && node.space != TfToken("auto") && node.space != TfToken("rest")) ||
-        (!node.readPhase.IsEmpty() && node.readPhase != TfToken("final")))
-        return Fail(CudaScatterInputStatus::Unsupported,
-                    "Scatter input supports rest/auto space and final read phase only", reason);
     if (node.surfaces.size() != 1)
         return Fail(CudaScatterInputStatus::InvalidArgument,
                     "Scatter input requires exactly one surface path", reason);
     std::set<TfToken> seen;
     for (UsdGenParamValue const& param : node.params) {
-        bool const allowed = AllowedScatterParam(param.name);
         if (param.animated || !seen.insert(param.name).second ||
-            (!allowed && !IdentityControl(param)) ||
-            (allowed && (!ValidScatterParam(param) || !SupportedMaskValue(param))))
+            !AllowedScatterParam(param.name) || !ValidScatterParam(param))
             return Fail(CudaScatterInputStatus::Unsupported,
                         "Scatter input has unsupported, duplicate, or animated parameter '" +
                         param.name.GetString() + "'", reason);
@@ -227,16 +153,11 @@ CudaScatterInputStatus PrepareCudaScatterInput(
                     "Scatter input requires authored rest points, not current points", reason);
 
     UsdGenParamView params{&desc, &node};
-    if (params.GetToken(TfToken("mode"), TfToken("random")) != TfToken("random"))
-        return Fail(CudaScatterInputStatus::Unsupported,
-                    "Scatter input supports mode=random only", reason);
     if (params.GetBool(TfToken("flip"), false))
         return Fail(CudaScatterInputStatus::Unsupported,
                     "Scatter input does not yet support flip frame handedness", reason);
-    int version = -1;
-    std::unique_ptr<UsdGenOp> op = UsdGenOpRegistry::Get().Create(
-        TfToken("UsdGenScatter"), node.algorithmVersion, &version);
-    if (!op || version != 0 || op->GeometryInputArity() != 0)
+    std::unique_ptr<UsdGenOp> op = UsdGenOpRegistry::Get().Create(TfToken("UsdGenScatter"));
+    if (!op || op->GeometryInputArity() != 0)
         return Fail(CudaScatterInputStatus::Unsupported,
                     "Scatter input cannot resolve the authoritative random Scatter kernel", reason);
     UsdGenDiagnostics diagnostics;

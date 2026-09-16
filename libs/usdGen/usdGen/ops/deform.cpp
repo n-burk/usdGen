@@ -2,7 +2,7 @@
 // The operator registry supplies metadata; no synthetic CPU displacement is
 // a valid substitute for rest-bound animation.
 #include "usdGen/ops/deform.h"
-#include "usdGen/maskParams.h"
+#include "usdGen/opParams.h"
 
 namespace usdGen {
 
@@ -11,16 +11,9 @@ UsdGenDeformOp::UsdGenDeformOp()
       valueParameters_(UsdGenBaseValueParams())
 {
     topologyParameters_.push_back(TfToken("rbfSamples"));
-    topologyParameters_.push_back(TfToken("twistAware"));
-    auto topologyMask = UsdGenMaskTopologyParams();
-    topologyParameters_.insert(topologyParameters_.end(),
-                               topologyMask.begin(), topologyMask.end());
     valueParameters_.push_back(TfToken("enabled"));
     valueParameters_.push_back(TfToken("lockRoots"));
-    valueParameters_.push_back(TfToken("preserveShape"));
-    valueParameters_.push_back(TfToken("preserveShape:iterations"));
-    auto valueMask = UsdGenMaskValueParams();
-    valueParameters_.insert(valueParameters_.end(), valueMask.begin(), valueMask.end());
+    valueParameters_.push_back(TfToken("mask"));   // operator envelope (02 §2.13)
 }
 
 bool UsdGenDeformOp::Bind(UsdGenParamView const& params, UsdGenDiagnostics* diagnostics) {
@@ -28,8 +21,8 @@ bool UsdGenDeformOp::Bind(UsdGenParamView const& params, UsdGenDiagnostics* diag
         if (diagnostics) diagnostics->Error("UsdGenDeform requires the CUDA RBF executor; CPU reference deformation is unavailable");
         return false;
     }
-    if (!params.node || params.node->mode != TfToken("rbf")) {
-        if (diagnostics) diagnostics->Error("UsdGenDeform currently requires mode=rbf");
+    if (!params.node || !params.node->mode.IsEmpty()) {
+        if (diagnostics) diagnostics->Error("UsdGenDeform has no mode property; it is always RBF");
         return false;
     }
     return true;

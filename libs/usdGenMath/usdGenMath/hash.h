@@ -2,7 +2,7 @@
 //
 // Header-only, no dependencies: the engine core and usdGenMath both include
 // it; changing the function or any salt is a look change for every existing
-// asset and bumps usdGen:schemaVersion. Determinism (E-8) requires the exact
+// asset. Determinism (E-8) requires the exact
 // SplitMix64 finalizer below.
 #ifndef USDGEN_MATH_HASH_H
 #define USDGEN_MATH_HASH_H

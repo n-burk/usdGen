@@ -140,7 +140,8 @@ UsdGenGraphDesc Descendants(UsdGenGraphDesc d, int variant) {
         auto right=length; right.path=SdfPath("/Ops/RightLength");
         if(variant==6) right.params[1].value=VtValue(.7f);
         auto rw=width; rw.path=SdfPath("/Ops/RightWidth"); rw.inputs={right.path}; rw.params[0].value=VtValue(.8f);
-        auto blend=Node("/Ops/Blend","UsdGenWidthBlend",width.path); blend.inputs.push_back(rw.path); blend.blend=.25f;
+        auto blend=Node("/Ops/Blend","UsdGenWidthBlend",width.path); blend.inputs.push_back(rw.path);
+        blend.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
         d.nodes.push_back(right); d.nodes.push_back(rw); d.nodes.push_back(blend); d.terminal=blend.path;
     }
     std::reverse(d.nodes.begin(),d.nodes.end()); return d;
@@ -174,7 +175,7 @@ static int RbfCases(cudaStream_t stream) {
             input=predecessor.path; d.nodes.push_back(predecessor);
         }
         auto deform=Node("/Ops/Deform","UsdGenDeform",input);
-        deform.surfaces={d.surfaces.front().path}; deform.mode=TfToken("rbf"); deform.readPhase=TfToken("final");
+        deform.surfaces={d.surfaces.front().path};
         deform.params={{TfToken("rbfSamples"),VtValue(5),false}};
         d.nodes.push_back(deform);
         auto width=Node("/Ops/Width","UsdGenWidth",deform.path);
@@ -189,7 +190,8 @@ static int RbfCases(cudaStream_t stream) {
             }
             if(variant==7) right.inputs={deform.path};
             auto rw=width; rw.path=SdfPath("/Ops/RightWidth"); rw.inputs={right.path}; rw.params[0].value=VtValue(.8f);
-            auto blend=Node("/Ops/Blend","UsdGenWidthBlend",width.path); blend.inputs.push_back(rw.path); blend.blend=.25f;
+            auto blend=Node("/Ops/Blend","UsdGenWidthBlend",width.path); blend.inputs.push_back(rw.path);
+        blend.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
             d.nodes.push_back(right); d.nodes.push_back(rw); d.nodes.push_back(blend); d.terminal=blend.path;
         }
         std::reverse(d.nodes.begin(),d.nodes.end()); return d;

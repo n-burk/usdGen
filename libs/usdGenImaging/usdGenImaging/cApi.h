@@ -4,8 +4,9 @@
    never throws across the boundary (ADR §9.4 R31).
    UsdGenImaging_GetLastError() returns the message for the calling thread.
 
-   Contract C4 — declaration source of truth: plan/08-tools.md §C4 listing (19 entry
-   points: the eighteen ADR §9.4 R31 names plus GetLastError). Signatures here
+   Contract C4 — declaration source of truth: plan/08-tools.md §C4 listing (18 entry
+   points: the seventeen implemented-scope ADR §9.4 R31 names plus GetLastError;
+   SetMaskVisualisation went with UsdGenMaskAPI). Signatures here
    are copied verbatim from that listing; if this header and 06-imaging.md §3.8
    ever diverge, 08-tools.md governs.
    IMPLEMENTATION STATUS (plan/13 D3): declared, NOT implemented — no cApi.cpp
@@ -63,7 +64,6 @@ int         USDGENIMAGING_API UsdGenImaging_ClosestSurfacePoint(const char *surf
 int         USDGENIMAGING_API UsdGenImaging_BuildMirrorMap(const char *descriptionPath, int axis);
 
 int         USDGENIMAGING_API UsdGenImaging_SetInteractiveLOD(const char *descriptionPath, int maxCurves);
-int         USDGENIMAGING_API UsdGenImaging_SetMaskVisualisation(const char *opPath);  /* "" clears (5.5) */
 int         USDGENIMAGING_API UsdGenImaging_ReloadMaps(void);
 const char *USDGENIMAGING_API UsdGenImaging_GetStatsJson(void);
 const char *USDGENIMAGING_API UsdGenImaging_GetLastError(void);

@@ -22,7 +22,7 @@ inline bool AuthoredNamedChannelFail(std::string const& message, std::string* re
 
 inline bool IsReservedAuthoredNamedChannel(TfToken const& name) {
     static std::set<std::string> const names{"points", "curveOffsets", "stableIds", "rest",
-        "width", "widths", "restPoints", "hairT", "rootPrim", "rootUV", "curveMask",
+        "width", "widths", "restPoints", "hairT", "rootPrim", "rootUV",
         "sourceRootT", "sourceRootB", "sourceRootN", "sourceChunks"};
     return names.count(name.GetString()) != 0;
 }

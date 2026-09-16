@@ -105,6 +105,24 @@ def Xform "World"
                     float usdGen:noise:gain = 0.5
                     bool usdGen:cumulative = false
                     float usdGen:preserveLength = 1
+
+                    # usdGen:mask is the operator envelope: 1 applies the
+                    # frizz fully, 0 leaves the upstream curves bit-for-bit
+                    # untouched. Set it to 0 to mute just this operator's
+                    # effect without changing the topology it publishes.
+                    #
+                    # The envelope can also be driven per curve by connecting
+                    # it to a UsdGenExpression, naming either the prim or its
+                    # output:
+                    #
+                    #   float usdGen:mask.connect = </.../Expressions/frizzMask>
+                    #
+                    # Connected parameters work on BOTH lanes, including the
+                    # CPU reference lane this description cooks on. Left as a
+                    # literal here to keep this example about the styling
+                    # operators; expression-width-plane.usda is the worked
+                    # expression example, and it displays in usdview.
+                    float usdGen:mask = 1
                 }
 
                 # More segments than the minimal example so the noise has
@@ -122,7 +140,6 @@ def Xform "World"
                 # Runs first: random roots over the plane's area.
                 def UsdGenScatter "scatter"
                 {
-                    uniform token usdGen:mode = "random"
                     int usdGen:seed = 41
                     float usdGen:density = 800
                 }

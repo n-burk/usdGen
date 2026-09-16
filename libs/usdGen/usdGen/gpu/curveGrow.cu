@@ -53,22 +53,6 @@ __device__ float3 RotateAroundB(float3 direction, float3 axis, float degrees) {
         direction.y * c + cross.y * s + axis.y * dot * oneMinusC,
         direction.z * c + cross.z * s + axis.z * dot * oneMinusC);
 }
-__device__ float3 BlendUvDirection(float3 lifted, float3 tangent, float blend) {
-    if (blend == 0.0f) return lifted;
-    float const l2 = tangent.x*tangent.x + tangent.y*tangent.y + tangent.z*tangent.z;
-    float const length = sqrtf(l2);
-    if (!(length > 1.0e-12f) || !isfinite(length)) return lifted;
-    tangent = make_float3(tangent.x/length, tangent.y/length, tangent.z/length);
-    if (blend == 1.0f) return tangent;
-    float3 const mixed = make_float3(
-        (1.0f-blend)*lifted.x + blend*tangent.x,
-        (1.0f-blend)*lifted.y + blend*tangent.y,
-        (1.0f-blend)*lifted.z + blend*tangent.z);
-    float const mixedL2 = mixed.x*mixed.x + mixed.y*mixed.y + mixed.z*mixed.z;
-    float const mixedLength = sqrtf(mixedL2);
-    if (!(mixedLength > 1.0e-12f) || !isfinite(mixedLength)) return lifted;
-    return make_float3(mixed.x/mixedLength, mixed.y/mixedLength, mixed.z/mixedLength);
-}
 __device__ bool FiniteDevice(float x) { return isfinite(x); }
 __device__ bool FiniteDevice(float2 v) { return isfinite(v.x) && isfinite(v.y); }
 __device__ bool FiniteDevice(float3 v) { return isfinite(v.x) && isfinite(v.y) && isfinite(v.z); }
@@ -92,7 +76,7 @@ __global__ void GrowKernel(CurveGrowInput input, uint32_t curves, uint32_t cvCou
     CurveGrowControls controls, float3* points, float3* rest, float* widths,
     float* hairT, uint32_t* offsets, uint64_t* ids, int32_t* rootPrim,
     float2* rootUV, float3* rootT, float3* rootB, float3* rootN,
-    float const* lengthSamples, int* error) {
+    int* error) {
     uint32_t c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= curves) return;
     uint32_t first = input.geometry.curveOffsets.data[c];
@@ -129,16 +113,10 @@ __global__ void GrowKernel(CurveGrowInput input, uint32_t curves, uint32_t cvCou
         controls.direction == CurveGrowDirection::RootTangent ? t : controls.literalDirection;
     direction = Normalize(direction);
     direction = RotateAroundB(direction, b, controls.lift);
-    direction = BlendUvDirection(direction, input.rootT.data[frame], controls.uvBlend);
     // Match CPU Capture: authored length/random math happens in double and
     // the captured per-curve target is then narrowed to float.
     double targetDouble = controls.length * (controls.randomLo +
         double(DrawGrow(controls.seed, id)) * (controls.randomHi - controls.randomLo));
-    if (lengthSamples) {
-        float const sample = lengthSamples[c];
-        if (!isfinite(sample) || sample < 0.0f) { atomicCAS(error, 0, kNonFinite); return; }
-        targetDouble *= double(sample);
-    }
     float target = float(targetDouble);
     if (!isfinite(target)) { atomicCAS(error, 0, kNonFinite); return; }
     uint32_t outputFirst = c * cvCount;
@@ -188,8 +166,7 @@ __global__ void ValidateFrameStableIds(uint64_t const* ids, size_t count, int* e
 }
 
 CurveGrowStatus GetCurveGrowRequirements(size_t curves, uint32_t cvs,
-                                         CurveGrowRequirements* result,
-                                         size_t mapTexelCount) {
+                                         CurveGrowRequirements* result) {
     if (!result || cvs < 2 || cvs > 64 || curves > uint64_t(UINT32_MAX) / cvs)
         return CurveGrowStatus::InvalidArgument;
     CurveGrowRequirements r; r.pointCount = curves * size_t(cvs);
@@ -199,17 +176,9 @@ CurveGrowStatus GetCurveGrowRequirements(size_t curves, uint32_t cvs,
     if (!mul(r.pointCount, 2*sizeof(float3)+2*sizeof(float), &b) || !add(&r.outputBytes,b) ||
         !mul(curves, 3*sizeof(float3)+sizeof(uint64_t)+sizeof(int32_t)+sizeof(float2)+sizeof(uint32_t),&b) ||
         !add(&r.outputBytes,b) || !add(&r.outputBytes,sizeof(uint32_t))) return CurveGrowStatus::InvalidArgument;
-    if (mapTexelCount) {
-        size_t texelBytes = 0, sampleBytes = 0;
-        if (!mul(mapTexelCount, sizeof(float), &texelBytes) ||
-            !mul(curves, sizeof(float), &sampleBytes) ||
-            !add(&r.mapScratchBytes, texelBytes) ||
-            !add(&r.mapScratchBytes, sampleBytes)) return CurveGrowStatus::InvalidArgument;
-    }
     // One device status plus the pinned host status read by Commit.  Both are
     // retained by a published owner, so requirements include both explicitly.
     r.statusBytes = 2 * sizeof(int); r.peakBytes = r.outputBytes + r.statusBytes;
-    if (!add(&r.peakBytes, r.mapScratchBytes)) return CurveGrowStatus::InvalidArgument;
     *result = r; return CurveGrowStatus::Ok;
 }
 
@@ -254,27 +223,23 @@ CurveGrowStatus CudaCurveGrow::Storage::synchronizeUse() const {
 
 CudaCurveGrow::~CudaCurveGrow() {
     if (unprovenWork_) {
-        active_.quarantine(); pending_.quarantine(); error_.quarantine(); lengthSamples_.quarantine();
-        if (lengthImage_) lengthImage_->Quarantine();
+        active_.quarantine(); pending_.quarantine(); error_.quarantine();
         (void)inputQuarantineOwner_.release(); hostError_=nullptr;
         hostErrorPermit_.Abandon(); ready_=nullptr; return;
     }
     int prior=-1;
     bool owns=active_.offsets.size()||pending_.offsets.size()||error_.size()||
-              lengthSamples_.size()||lengthImage_||ready_||hostError_;
+              ready_||hostError_;
     bool selected=!owns || (cudaGetDevice(&prior)==cudaSuccess&&deviceIndex_>=0&&
                             cudaSetDevice(deviceIndex_)==cudaSuccess);
     bool proved=!owns || (selected&&(!ready_||cudaEventSynchronize(ready_)==cudaSuccess)&&
-                          active_.synchronizeUse()==CurveGrowStatus::Ok &&
-                          lengthSamples_.synchronizeUse()==cudaSuccess);
+                          active_.synchronizeUse()==CurveGrowStatus::Ok);
     if (!proved) {
-        active_.quarantine(); pending_.quarantine(); error_.quarantine(); lengthSamples_.quarantine();
-        if (lengthImage_) lengthImage_->Quarantine();
+        active_.quarantine(); pending_.quarantine(); error_.quarantine();
         (void)inputQuarantineOwner_.release(); hostError_=nullptr;
         hostErrorPermit_.Abandon(); ready_=nullptr;
     } else {
         if(ready_) cudaEventDestroy(ready_);
-        discardLengthMap();
         if(hostError_) {
             if(cudaFreeHost(hostError_)==cudaSuccess) hostErrorPermit_.Release();
             else hostErrorPermit_.Abandon();
@@ -300,20 +265,15 @@ CurveGrowStatus CudaCurveGrow::validateStream(cudaStream_t stream) const {
 }
 CurveGrowStatus CudaCurveGrow::validate(CurveGrowInput const& in,
     std::shared_ptr<const void> const& owner, CurveGrowControls const& c,
-    GrowLengthMap const* lengthMap, size_t mapTexelCount, size_t* total) const {
+    size_t* total) const {
     // Plan lift is an angular root-B rotation, not a translation.  Reject
     // angles outside the schema range before any device allocation.
     if(!owner||!total||c.cvCount<2||c.cvCount>64||!Finite(c.length)||
        !Finite(c.randomLo)||!Finite(c.randomHi)||!Finite(c.lift)||
        !Finite(c.fallbackWidth)||c.length<0||c.randomLo<0||c.randomHi<0||
        c.fallbackWidth<0||c.lift < -90.0f||c.lift > 90.0f||
-       !Finite(c.uvBlend)||c.uvBlend < 0.0f||c.uvBlend > 1.0f||
        c.direction>CurveGrowDirection::Literal||
        (c.direction==CurveGrowDirection::Literal&&!Finite(c.literalDirection)))
-        return CurveGrowStatus::InvalidArgument;
-    if (lengthMap && (!lengthMap->image || !lengthMap->image->IsValid() ||
-                      !ValidateUsdGenImageSampleOptions(*lengthMap->image,
-                          lengthMap->options, nullptr)))
         return CurveGrowStatus::InvalidArgument;
     auto const& g=in.geometry;
     bool const mappedFrames = in.frameStableIds.data != nullptr;
@@ -338,33 +298,25 @@ CurveGrowStatus CudaCurveGrow::validate(CurveGrowInput const& in,
                in.rootB.size != g.curveCount || in.rootN.size != g.curveCount)))
         return CurveGrowStatus::InvalidTopology;
     CurveGrowRequirements r;
-    auto s=GetCurveGrowRequirements(g.curveCount,c.cvCount,&r,mapTexelCount);
+    auto s=GetCurveGrowRequirements(g.curveCount,c.cvCount,&r);
     if(s!=CurveGrowStatus::Ok) return s;
     *total=r.pointCount;
     return CurveGrowStatus::Ok;
 }
 void CudaCurveGrow::discardPending() noexcept {
-    pending_=Storage{}; error_.reset(0); discardLengthMap(); inputOwner_.reset();
+    pending_=Storage{}; error_.reset(0); inputOwner_.reset();
     inputQuarantineOwner_.reset(); input_={}; pendingWork_=finishScheduled_=false;
     pendingCurves_=pendingPoints_=0;
 }
-void CudaCurveGrow::discardLengthMap() noexcept {
-    lengthSamples_.reset(0);
-    lengthImage_.reset();
-}
-
 CurveGrowStatus CudaCurveGrow::BeginFresh(CurveGrowInput input,
     std::shared_ptr<const void> owner, CurveGrowControls controls,
-    cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation,
-    GrowLengthMap const* lengthMap) {
+    cudaStream_t stream, UsdGenExecutionMemoryReservation* reservation) {
     if(pendingWork_||generation_) return CurveGrowStatus::InvalidArgument;
     auto s=validateStream(stream);
     if(s!=CurveGrowStatus::Ok) return s;
     if(controls.randomLo>controls.randomHi) std::swap(controls.randomLo,controls.randomHi);
-    size_t const mapTexelCount = lengthMap && lengthMap->image
-        ? lengthMap->image->TexelCount() : 0;
     size_t total=0;
-    s=validate(input,owner,controls,lengthMap,mapTexelCount,&total);
+    s=validate(input,owner,controls,&total);
     if(s!=CurveGrowStatus::Ok) return s;
     int d=-1;
     if(cudaGetDevice(&d)!=cudaSuccess) return CurveGrowStatus::CudaError;
@@ -382,14 +334,7 @@ CurveGrowStatus CudaCurveGrow::BeginFresh(CurveGrowInput input,
     if(e==cudaSuccess)e=pending_.rootB.reset(input.geometry.curveCount,reservation,active);
     if(e==cudaSuccess)e=pending_.rootN.reset(input.geometry.curveCount,reservation,active);
     if(e==cudaSuccess)e=error_.reset(1,reservation,UsdGenExecutionResourceKind::Scratch);
-    if(e==cudaSuccess && mapTexelCount)
-        e=lengthSamples_.reset(input.geometry.curveCount,reservation,
-                               UsdGenExecutionResourceKind::Scratch);
     if(e!=cudaSuccess) { discardPending(); return Status(e); }
-    if (mapTexelCount) {
-        try { lengthImage_ = std::make_unique<CudaImage>(); }
-        catch (...) { discardPending(); return CurveGrowStatus::CudaError; }
-    }
     if(!hostError_) {
         auto permit=TryReserveCudaExecutionBytes(sizeof(int),UsdGenExecutionResourceKind::Scratch,reservation);
         if(!permit||cudaHostAlloc(reinterpret_cast<void**>(&hostError_),sizeof(int),cudaHostAllocDefault)!=cudaSuccess) {
@@ -408,16 +353,6 @@ CurveGrowStatus CudaCurveGrow::BeginFresh(CurveGrowInput input,
             input_.frameStableIds.data, input_.frameStableIds.size, error_.data());
         if(cudaGetLastError()!=cudaSuccess) return CurveGrowStatus::CudaError;
     }
-    if (lengthMap) {
-        if (lengthImage_->Upload(lengthMap->image, stream, reservation,
-                                 UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
-            return CurveGrowStatus::CudaError;
-        if (lengthImage_->Sample(input_.rootUV, lengthSamples_.view(),
-                                 lengthMap->options, stream) != cudaSuccess)
-            return CurveGrowStatus::CudaError;
-        if (lengthSamples_.recordUse(stream) != cudaSuccess)
-            return CurveGrowStatus::CudaError;
-    }
     if(!pendingCurves_) {
         ValidateEmptyOffset<<<1,1,0,stream>>>(input_.geometry.curveOffsets.data,
             pending_.offsets.data(),error_.data());
@@ -427,7 +362,7 @@ CurveGrowStatus CudaCurveGrow::BeginFresh(CurveGrowInput input,
             pending_.restPoints.data(),pending_.widths.data(),pending_.hairT.data(),
             pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),
             pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),
-            pending_.rootN.data(),lengthSamples_.data(),error_.data());
+            pending_.rootN.data(),error_.data());
     }
     if(cudaGetLastError()!=cudaSuccess) return CurveGrowStatus::CudaError;
     return CurveGrowStatus::Ok;
@@ -441,7 +376,6 @@ CurveGrowStatus CudaCurveGrow::FinishFreshAsync(cudaStream_t stream,
     if(!ready_&&cudaEventCreateWithFlags(&ready_,cudaEventDisableTiming)!=cudaSuccess)
         return CurveGrowStatus::CudaError;
     if(pending_.recordUse(stream)!=CurveGrowStatus::Ok ||
-       (lengthSamples_.size() && lengthSamples_.recordUse(stream)!=cudaSuccess) ||
        Status(error_.recordUse(stream))!=CurveGrowStatus::Ok ||
        cudaEventRecord(ready_,stream)!=cudaSuccess ||
        cudaMemcpyAsync(hostError_,error_.data(),sizeof(int),cudaMemcpyDeviceToHost,stream)!=cudaSuccess)
@@ -461,7 +395,6 @@ CurveGrowStatus CudaCurveGrow::CommitFreshFinish() {
         discardPending();
         return status;
     }
-    discardLengthMap();
     active_=std::move(pending_); curves_=pendingCurves_; points_=pendingPoints_;
     input_={}; inputOwner_.reset(); inputQuarantineOwner_.reset();
     pendingCurves_=pendingPoints_=0; pendingWork_=finishScheduled_=false;

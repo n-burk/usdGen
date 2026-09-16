@@ -94,13 +94,6 @@ __device__ float HairT(const float *hairT, uint32_t point,
     return t;
 }
 
-__device__ float Profile(const float *profile, float t) {
-    if (!profile) return 1.0f;
-    const float x = t * 256.0f;
-    const int i = min(255, max(0, int(x)));
-    return profile[i] + (profile[i + 1] - profile[i]) * (x - float(i));
-}
-
 __device__ float3 SampleArc(const float3 *points, uint32_t begin,
                             uint32_t end, float distance) {
     if (end <= begin + 1u) return points[begin];
@@ -123,8 +116,7 @@ __device__ float3 SampleArc(const float3 *points, uint32_t begin,
 // reads an offset-derived point index until endpoint and monotonicity checks
 // have completed on the preceding launch.
 __global__ void ValidateKernel(DeviceCurveGeometryView g,
-                               DeviceView<const float> hairT,
-                               DeviceView<const float> profile, int *error) {
+                               DeviceView<const float> hairT, int *error) {
     const size_t first = size_t(blockIdx.x)*blockDim.x + threadIdx.x;
     const size_t stride = size_t(gridDim.x)*blockDim.x;
     for (size_t i = first; i <= g.curveCount; i += stride) {
@@ -141,11 +133,6 @@ __global__ void ValidateKernel(DeviceCurveGeometryView g,
         if (hairT.data && (!isfinite(hairT.data[i]) || hairT.data[i] < 0 ||
                            hairT.data[i] > 1))
             SetError(error, isfinite(hairT.data[i]) ? kBadValue : kNonFinite);
-    }
-    for (size_t i = first; i < profile.size; i += stride) {
-        const float v = profile.data[i];
-        if (!isfinite(v) || v < 0 || v > 1)
-            SetError(error, isfinite(v) ? kBadValue : kNonFinite);
     }
 }
 
@@ -193,17 +180,14 @@ __global__ void LengthKernel(DeviceCurveGeometryView g,
         if (p.mode == LengthMode::Cull) {
             bool allZeroEnvelope = true;
             for (uint32_t i = b; i < e; ++i) {
-                float blend = 0.0f, amount = 0.0f;
-                if (!ReadScalar(p.blend, c, i, &blend, error) ||
-                    !ReadScalar(p.maskAmount, c, i, &amount, error) ||
-                    blend < 0.0f || blend > 1.0f || amount < 0.0f || amount > 1.0f) {
+                float amount = 0.0f;
+                if (!ReadScalar(p.mask, c, i, &amount, error) ||
+                    amount < 0.0f || amount > 1.0f) {
                     SetError(error, kBadValue);
                     allZeroEnvelope = false;
                     break;
                 }
-                const float t = HairT(hairT.data, i, b, e, error);
-                if (blend * amount * Profile(p.maskProfile.data, t) != 0.0f)
-                    allZeroEnvelope = false;
+                if (amount != 0.0f) allZeroEnvelope = false;
             }
             for (uint32_t i = b; i < e; ++i) output.data[i] = g.points.data[i];
             // Disabled controls are an exact no-op, including topology.
@@ -220,17 +204,17 @@ __global__ void LengthKernel(DeviceCurveGeometryView g,
         bool valid = true;
         bool allZeroEnvelope = true;
         for (uint32_t i = b; i < e; ++i) {
-            float value = 0, blend = 0, amount = 0, minLength = 0;
+            float value = 0, amount = 0, minLength = 0;
             if (!ReadScalar(p.value, c, i, &value, error) ||
-                !ReadScalar(p.blend, c, i, &blend, error) ||
-                !ReadScalar(p.maskAmount, c, i, &amount, error) ||
+                !ReadScalar(p.mask, c, i, &amount, error) ||
                 !ReadScalar(p.minRemainingLength, c, i, &minLength, error)) {
                 valid = false; break;
             }
-            if (value < 0 || blend < 0 || blend > 1 || amount < 0 || amount > 1 ||
+            if (value < 0 || amount < 0 || amount > 1 ||
                 minLength < 0) { SetError(error, kBadValue); valid = false; break; }
             const float t = HairT(hairT.data, i, b, e, error);
-            const float envelope = blend * amount * Profile(p.maskProfile.data, t);
+            // usdGen:mask IS the operator envelope (02 §2.13).
+            const float envelope = amount;
             if (!isfinite(envelope) || envelope < 0 || envelope > 1) {
                 SetError(error, kBadValue); valid = false; break;
             }
@@ -434,11 +418,9 @@ StyleStatus CudaLength::Apply(DeviceCurveGeometryView g, DeviceView<const float>
         (g.stableIds.data && g.stableIds.size != g.curveCount) ||
         (!g.stableIds.data && g.stableIds.size != 0) ||
         (!hairT.data && hairT.size != 0) ||
-        (hairT.data && hairT.size != g.pointCount) ||
-        (!p.maskProfile.data && p.maskProfile.size != 0) ||
-        (p.maskProfile.data && p.maskProfile.size != 257u))
+        (hairT.data && hairT.size != g.pointCount))
         return fail(StyleStatus::InvalidArgument, "invalid Length geometry or views");
-    const ScalarField fields[] = {p.value, p.blend, p.maskAmount,
+    const ScalarField fields[] = {p.value, p.mask,
                                   p.minRemainingLength, p.cullThreshold};
     for (ScalarField f : fields) {
         const StyleStatus s = validateField(f, g);
@@ -494,7 +476,7 @@ StyleStatus CudaLength::Apply(DeviceCurveGeometryView g, DeviceView<const float>
         return fail(StyleStatus::CudaError, "Length error reset failed");
     }
     ValidateKernel<<<Blocks(std::max(g.curveCount, g.pointCount)), 256, 0, stream>>>(
-        g, hairT, p.maskProfile, error_.data());
+        g, hairT, error_.data());
     if (cudaGetLastError() != cudaSuccess) {
         unprovenWork_ = true;
         return fail(StyleStatus::CudaError, "Length validation launch failed");

@@ -44,13 +44,13 @@ def Xform "Char"
             float inputs:colorRamp = 1.6
             float inputs:diffuseGain = 0.55
             float inputs:diffuseWrap = 0.35
-            float inputs:specular1Gain = 0.3
+            float inputs:specular1Gain = 0.09
             color3f inputs:specular1Color = (1, 1, 1)
-            float inputs:specular1Width = 0.075
+            float inputs:specular1Width = 0.12
             float inputs:specular1Shift = -0.045
-            float inputs:specular2Gain = 0.16
+            float inputs:specular2Gain = 0.05
             color3f inputs:specular2Color = (1, 1, 1)
-            float inputs:specular2Width = 0.22
+            float inputs:specular2Width = 0.3
             float inputs:specular2Shift = 0.09
             float inputs:transmissionGain = 0.25
             color3f inputs:transmissionColor = (1, 0.62, 0.38)
@@ -58,6 +58,7 @@ def Xform "Char"
             float inputs:widthFalloff = 0
             float inputs:randomHue = 0.06
             float inputs:randomValue = 0.12
+            float inputs:selfOcclusion = 0.5
             color3f inputs:rootColorMap = (1, 1, 1)
             token outputs:surface
         }

@@ -198,7 +198,7 @@ out: it never sees a `UsdStage`, a scene index or an `SdfLayer` (S8).
 - `UsdGenCurveBuffer` — per-CV planar SoA (`px/py/pz`, `width` (empty ==
   inherit), `hairT`, `extraCv`), per-curve AoS (`curveId` u64[], `rootPrim`,
   `rootUV` (== "st"), `rootT/rootN/rootB`, `cvOffsets` (present iff any
-  chunk ragged), `curveMask`, `extraCurve`), `chunks`, `totalCurves`,
+  chunk ragged), `extraCurve`), `chunks`, `totalCurves`,
   `totalCvs`, `topologyVersion`, `valueVersion`. Handoff to imaging is by
   value (VtArray COW refcount bump, R20).
 - `UsdGenChunkView` — what a kernel may touch: chunk-local bases, writable
@@ -245,11 +245,9 @@ out: it never sees a `UsdStage`, a scene index or an `SdfLayer` (S8).
   `ValidForTopology(buffer)`, `Buffer()`, `OwnsBuffer()`, `MutableBuffer()`,
   `Clone()` (type-erased copy for the E-6 incremental recompile path).
 - `UsdGenCapturePayload : UsdGenCapture` — M1 shared base: `perCurve`,
-  `perCv`, `curveMask` (empty == all 1.0), `rampLut` (257 entries),
-  `maskRampLut`; **every concrete payload must override `Clone()` with a
-  full-type copy** (base-level clone would slice — the E-6 defect).
-- `UsdGenMaskSettingsFromParams(params)` — resolves this node's mask
-  settings (02 §2.13 + §2.6 mask rows).
+  `perCv`, `rampLut` (257 entries); **every concrete payload must override
+  `Clone()` with a full-type copy** (base-level clone would slice — the E-6
+  defect).
 - `UsdGenCaptureContext { desc, params, references, surface, readPhase,
   seed, upstreamGeneration, dispatcher, diag }`.
 - `UsdGenEvalContext { time, shutterOffset (0 in P0/P1), desc, params,
@@ -353,9 +351,11 @@ out: it never sees a `UsdStage`, a scene index or an `SdfLayer` (S8).
 - `generationStore.h` — `UsdGenGeneration` / `UsdGenGenerationConstPtr`:
   immutable published generation payload; the imaging side `atomic_load`s
   it (I7). See header.
-- `mask.h` / `maskParams.h` — `UsdGenMaskSettings` + `EvaluateMask()`:
-  per-curve mask resolution, computed once per capture epoch (I4; 02 §2.13).
-  See headers.
+- `opParams.h` — `UsdGenBaseTopologyParams()` / `UsdGenBaseValueParams()`,
+  the shared halves of every operator's parameter partition. The mask is no
+  longer a block: `usdGen:mask` is one value-class parameter declared by each
+  styler and deformer, and a connection to a `UsdGenExpression` drives it.
+  See header.
 - `stats.h` — `UsdGenStats` + per-commit timing ring (03 §7) drained by the
   imaging bridge; `UsdGenNodeStats`. See header.
 - `usdGen.h` — umbrella header: `USDGEN_CORE_API std::string

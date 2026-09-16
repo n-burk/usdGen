@@ -33,8 +33,8 @@ static UsdGenGraphDesc MakeDesc() {
     UsdGenNodeDesc first; first.path = SdfPath("/Ops/WidthBefore"); first.type = TfToken("UsdGenWidth");
     first.inputs = {source.path}; first.params.push_back({TfToken("width"), VtValue(.2f), false});
     UsdGenNodeDesc deform; deform.path = SdfPath("/Ops/Deform"); deform.type = TfToken("UsdGenDeform");
-    deform.inputs = {first.path}; deform.surfaces = {s.path}; deform.mode = TfToken("rbf"); deform.space = TfToken("auto");
-    deform.readPhase = TfToken("final"); deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
+    deform.inputs = {first.path}; deform.surfaces = {s.path};
+    deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
     deform.params.push_back({TfToken("lockRoots"), VtValue(true), false});
     UsdGenNodeDesc last; last.path = SdfPath("/Ops/WidthAfter"); last.type = TfToken("UsdGenWidth");
     last.inputs = {deform.path}; last.params.push_back({TfToken("width"), VtValue(.5f), false});
@@ -188,7 +188,7 @@ int main() {
     lockExpr.outputs.push_back({TfToken("result"), TfToken("bool"), Scalar(expr::ScalarType::Bool)});
     controlled.expressions.push_back(lockExpr);
     UsdGenExpressionDesc blendExpr;
-    blendExpr.path = SdfPath("/PointBlendExpr"); blendExpr.source = "$P[0] * 0 + 0.5";
+    blendExpr.path = SdfPath("/PointMaskExpr"); blendExpr.source = "$P[0] * 0 + 0.5";
     blendExpr.outputs.push_back({TfToken("result"), TfToken("float"), Scalar(expr::ScalarType::Float32)});
     controlled.expressions.push_back(blendExpr);
     auto bindScalar = [](char const* path, char const* name, expr::Domain domain,
@@ -202,7 +202,7 @@ int main() {
     controlled.nodes[2].expressionBindings.push_back(bindScalar(
         "/LockRootsExpr", "lockRoots", expr::Domain::Primitive, expr::ScalarType::Bool, "bool", VtValue(false)));
     controlled.nodes[2].expressionBindings.push_back(bindScalar(
-        "/PointBlendExpr", "blend", expr::Domain::Point, expr::ScalarType::Float32, "float", VtValue(.5f)));
+        "/PointMaskExpr", "mask", expr::Domain::Point, expr::ScalarType::Float32, "float", VtValue(.5f)));
     session.SetGraphDesc(controlled); auto controlledFirst = session.Commit(1, UsdGenCommitReason::SetTime);
     CHECK(controlledFirst && controlledFirst != third && !session.LastDiagnostics().HasErrors());
     auto controlledStats1 = session.CudaBindingStats();

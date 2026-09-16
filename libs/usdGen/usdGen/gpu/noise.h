@@ -31,8 +31,10 @@ struct IntField {
 // groom-, primitive-, or point-domain fields. `enabled` is groom-only (the
 // inherited operator toggle), while cumulative is groom/primitive so one
 // strand has one well-defined accumulation policy. `octaves` is typed int;
-// no float-to-int conversion is permitted.  The two named LUTs contain 257
-// samples at canonical hairT. `maskProfile` is optional identity when empty.
+// no float-to-int conversion is permitted.  `magnitudeProfile` contains 257
+// samples at canonical hairT.  `mask` IS the operator envelope (usdGen:mask):
+// a groom-, primitive- or point-domain field in [0,1]; exactly 0 is a bitwise
+// pass-through.
 struct NoiseParameters {
     ScalarField magnitude = ScalarField::Literal(.05f);
     ScalarField frequency = ScalarField::Literal(3.0f);
@@ -41,15 +43,13 @@ struct NoiseParameters {
     ScalarField lacunarity = ScalarField::Literal(2.0f);
     ScalarField gain = ScalarField::Literal(.5f);
     ScalarField preserveLength = ScalarField::Literal(1.0f);
-    ScalarField blend = ScalarField::Literal(1.0f);
-    ScalarField maskAmount = ScalarField::Literal(1.0f);
+    ScalarField mask = ScalarField::Literal(1.0f);
     BoolField enabled = BoolField::Literal(true);
     BoolField cumulative = BoolField::Literal(false);
     // One stable-id hash is drawn per curve, so seed may be groom or
     // primitive but is deliberately never point-domain.
     IntField seed = IntField::Literal(0);
     DeviceView<const float> magnitudeProfile; // exactly 257 entries
-    DeviceView<const float> maskProfile;      // empty or 257 entries (identity seam)
 };
 
 // Device-only rest-frame SeExpr vfbm Noise.  Apply stages all points privately

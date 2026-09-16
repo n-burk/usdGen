@@ -10,7 +10,24 @@ namespace usdGen {
 namespace {
 
 TfTokenVector const kTopologyParameters{};
-TfTokenVector const kValueParameters{TfToken("enabled")};
+TfTokenVector const kValueParameters{TfToken("enabled"),
+                                     TfToken("widthBlend:weight")};
+
+TfToken const kWeight{"widthBlend:weight"};
+
+/// The ordered interpolation weight, clamped to exact endpoints.
+bool ReadWeight(UsdGenParamView const *params, float *out,
+                UsdGenDiagnostics *diag)
+{
+    double const weight = params ? params->GetDouble(kWeight, 1.0) : 1.0;
+    if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
+        if (diag) diag->Error(
+            "UsdGenWidthBlend: usdGen:widthBlend:weight must be finite and in [0, 1]");
+        return false;
+    }
+    *out = static_cast<float>(weight);
+    return true;
+}
 
 bool SamePlane(UsdGenPlane const &a, UsdGenPlane const &b)
 {
@@ -40,7 +57,6 @@ bool SameNonWidthData(UsdGenCurveBuffer const &left,
         left.rootPrim != right.rootPrim || left.rootUV != right.rootUV ||
         left.rootT != right.rootT || left.rootN != right.rootN ||
         left.rootB != right.rootB || left.cvOffsets != right.cvOffsets ||
-        left.curveMask != right.curveMask ||
         !SamePlaneList(left.extraCv, right.extraCv) ||
         !SamePlaneList(left.extraCurve, right.extraCurve) ||
         left.chunks.size() != right.chunks.size())
@@ -90,20 +106,20 @@ bool UsdGenWidthBlendOp::Bind(UsdGenParamView const &params,
                               UsdGenDiagnostics *diag)
 {
     UsdGenNodeDesc const *node = params.node;
-    float const blend = node ? node->blend : 1.0f;
-    if (!std::isfinite(blend) || blend < 0.0f || blend > 1.0f) {
-        if (diag) diag->Error(
-            "UsdGenWidthBlend: usdGen:blend must be finite and in [0, 1]");
-        return false;
-    }
-    if (!node || node->algorithmVersion != 0 || !node->enabled ||
-        !node->mode.IsEmpty() || !node->params.empty() ||
+    float weight = 1.0f;
+    if (!ReadWeight(&params, &weight, diag)) return false;
+    bool paramsOk = true;
+    if (node)
+        for (UsdGenParamValue const &param : node->params)
+            paramsOk = paramsOk && param.name == kWeight;
+    if (!node || !node->enabled ||
+        !node->mode.IsEmpty() || !paramsOk ||
         !node->ramps.empty() || !node->expressionBindings.empty() ||
         !node->references.empty() || !node->curves.empty() ||
         !node->surfaces.empty() || !node->maps.empty() ||
         !node->mapBindings.empty()) {
         if (diag) diag->Error(
-            "UsdGenWidthBlend: requires version 0, enabled=true, and no auxiliary inputs");
+            "UsdGenWidthBlend: requires enabled=true and no auxiliary inputs");
         return false;
     }
     if (node->inputs.size() != 2 || node->inputs[0] == node->inputs[1]) {
@@ -139,13 +155,8 @@ bool UsdGenWidthBlendOp::Capture(
     UsdGenDiagnostics *diag)
 {
     TF_UNUSED(out);
-    float const blend = ctx.params && ctx.params->node
-        ? ctx.params->node->blend : 1.0f;
-    if (!std::isfinite(blend) || blend < 0.0f || blend > 1.0f) {
-        if (diag) diag->Error(
-            "UsdGenWidthBlend: usdGen:blend must be finite and in [0, 1]");
-        return false;
-    }
+    float weight = 1.0f;
+    if (!ReadWeight(ctx.params, &weight, diag)) return false;
     if (ctx.upstreamCount != 2 || !ctx.upstreams || !ctx.upstreams[0] ||
         !ctx.upstreams[1]) {
         if (diag) diag->Error(
@@ -182,8 +193,9 @@ void UsdGenWidthBlendOp::Evaluate(
 {
     TF_UNUSED(capture);
     if (!view || !view->width || !view->inWidth || !view->inWidth2) return;
-    float weight = (ctx.params && ctx.params->node) ? ctx.params->node->blend : 1.0f;
-    if (weight <= 0.0f) weight = 0.0f;
+    float weight = ctx.params
+        ? static_cast<float>(ctx.params->GetDouble(kWeight, 1.0)) : 1.0f;
+    if (!(weight > 0.0f)) weight = 0.0f;
     else if (weight >= 1.0f) weight = 1.0f;
     for (uint32_t c = 0; c != view->curveCount; ++c) {
         uint32_t const count = view->cvCount != 0 ? view->cvCount

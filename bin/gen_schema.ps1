@@ -48,10 +48,10 @@ try {
 }
 
 # Post-process plugInfo.json into the checked-in resource form: drop the
-# LibraryPath placeholder, root the resource dir at ".", and inject the
-# AutoApplyAPISchemas block inside "Info" (plan §7.4).
+# LibraryPath placeholder and root the resource dir at ".".  Nothing is
+# auto-applied: usdGen declares no auto-apply API schemas.
 $post = @'
-import io, re, sys
+import io, sys
 p = sys.argv[1]
 # The Windows usdGenSchema emits trailing spaces after commas in plugInfo.json
 # and, in generatedSchema.usda, writes the carriage returns of the doc strings
@@ -67,20 +67,6 @@ s = s.replace('"LibraryPath": "@PLUG_INFO_LIBRARY_PATH@"', '')
 s = s.replace('"@PLUG_INFO_RESOURCE_PATH@"', '"."')
 s = s.replace('"@PLUG_INFO_ROOT@"', '"."')
 lines = [line.rstrip() for line in s.splitlines()]
-for i, l in enumerate(lines):
-    if not re.match(r'^\s*"Types": \{$', l):
-        continue
-    ind = l[:len(l) - len(l.lstrip())]
-    for j in range(i + 1, len(lines)):
-        if lines[j] == ind + '}':
-            lines[j] = ind + '},'
-            lines[j + 1:j + 1] = [
-                ind + '"AutoApplyAPISchemas": {',
-                ind + '    "UsdGenMaskAPI": { "apiSchemaAutoApplyTo": ["UsdGenOperator"] }',
-                ind + '}',
-            ]
-            break
-    break
 io.open(p, 'w', encoding='utf-8', newline='\n').write('\n'.join(line.rstrip() for line in lines) + '\n')
 print("post-processed", p)
 '@

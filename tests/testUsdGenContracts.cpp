@@ -20,6 +20,8 @@
 #include "pxr/base/tf/token.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/primDefinition.h"
+#include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3f.h"
 #include "pxr/usd/usd/schemaRegistry.h"
 
 #include "usdGen/compiler.h"
@@ -83,6 +85,19 @@ std::string FallbackToString(UsdPrimDefinition::Attribute const &attr,
     }
     if (attr.GetFallbackValue(&s)) { *ok = true; return s; }
     if (attr.GetFallbackValue(&t)) { *ok = true; return t.GetString(); }
+    GfVec2f v2;
+    if (attr.GetFallbackValue(&v2)) {
+        std::snprintf(buf, sizeof buf, "(%g, %g)",
+                      static_cast<double>(v2[0]), static_cast<double>(v2[1]));
+        *ok = true; return buf;
+    }
+    GfVec3f v3;
+    if (attr.GetFallbackValue(&v3)) {
+        std::snprintf(buf, sizeof buf, "(%g, %g, %g)",
+                      static_cast<double>(v3[0]), static_cast<double>(v3[1]),
+                      static_cast<double>(v3[2]));
+        *ok = true; return buf;
+    }
     *ok = false;
     return std::string();
 }
@@ -178,19 +193,16 @@ int main()
            "UsdGenDeformer", "UsdGenMap" })
         CheckAbstract(name);
 
-    for (const char *name : { "UsdGenMaskAPI", "UsdGenLookAPI",
+    for (const char *name : { "UsdGenLookAPI",
                               "UsdGenRestAPI", "UsdGenCurveAPI" })
         CheckSingleApplyAPI(name);
 
     // C1 §2 — UsdGenGroom property rows.
     if (UsdPrimDefinition const *groom = UsdSchemaRegistry::GetInstance()
             .FindConcretePrimDefinition(TfToken("UsdGenGroom"))) {
-        CheckRel(groom, "usdGen:surface");
-        CheckAttr(groom, "usdGen:densityScale", "float", "1");
-        CheckAttr(groom, "usdGen:renderDensityScale", "float", "1");
-        CheckAttr(groom, "usdGen:schemaVersion", "int", "1", /*uniform*/ true);
+        CheckAttr(groom, "usdGen:execution:backend", "token", "cuda",
+                  /*uniform*/ true);
         CheckAttr(groom, "usdGen:sessionId", "string", "", /*uniform*/ true);
-        CheckAttr(groom, "usdGen:label", "string", "");
     } else {
         Check(false, "UsdGenGroom: no concrete prim definition (schema not loaded?)");
     }
@@ -199,20 +211,114 @@ int main()
     if (UsdPrimDefinition const *desc = UsdSchemaRegistry::GetInstance()
             .FindConcretePrimDefinition(TfToken("UsdGenDescription"))) {
         CheckRel(desc, "usdGen:surface");
-        CheckRel(desc, "usdGen:terminal");
         CheckRel(desc, "usdGen:guides");
         CheckAttr(desc, "usdGen:tileTarget", "int", "64", /*uniform*/ true);
-        CheckAttr(desc, "usdGen:densityScale", "float", "1");
-        CheckAttr(desc, "usdGen:renderDensityScale", "float", "1");
         CheckAttr(desc, "usdGen:curve:basis", "token", "bspline", /*uniform*/ true);
         CheckAttr(desc, "usdGen:width:default", "float", "0.01");
-        CheckAttr(desc, "usdGen:motion:mode", "token", "single", /*uniform*/ true);
-        CheckAttr(desc, "usdGen:motion:sampleCount", "int", "3", /*uniform*/ true);
-        CheckAttr(desc, "usdGen:motion:forwardSurfaceSamples", "bool", "0", /*uniform*/ true);
-        CheckAttr(desc, "usdGen:pickTarget", "token", "description", /*uniform*/ true);
-        CheckAttr(desc, "usdGen:label", "string", "");
     } else {
         Check(false, "UsdGenDescription: no concrete prim definition (schema not loaded?)");
+    }
+
+    // C1 §2 — UsdGenOperator (abstract) property rows. Every operator type
+    // inherits exactly these two.
+    if (UsdPrimDefinition const *op = UsdSchemaRegistry::GetInstance()
+            .FindAbstractPrimDefinition(TfToken("UsdGenOperator"))) {
+        CheckAttr(op, "usdGen:enabled", "bool", "1");
+        CheckAttr(op, "usdGen:seed", "int", "0", /*uniform*/ true);
+    } else {
+        Check(false, "UsdGenOperator: no abstract prim definition (schema not loaded?)");
+    }
+
+    // C1 §2 — the operator envelope. usdGen:mask replaced UsdGenMaskAPI and
+    // is declared on the two abstract groups that have upstream curves; a
+    // generator must NOT inherit it.
+    for (char const *group : { "UsdGenStyler", "UsdGenDeformer" }) {
+        if (UsdPrimDefinition const *abstractDef = UsdSchemaRegistry::GetInstance()
+                .FindAbstractPrimDefinition(TfToken(group))) {
+            CheckAttr(abstractDef, "usdGen:mask", "float", "1");
+        } else {
+            Check(false, std::string(group) + ": no abstract prim definition");
+        }
+    }
+    if (UsdPrimDefinition const *generator = UsdSchemaRegistry::GetInstance()
+            .FindAbstractPrimDefinition(TfToken("UsdGenGenerator"))) {
+        Check(!static_cast<bool>(
+                  generator->GetAttributeDefinition(TfToken("usdGen:mask"))),
+              "UsdGenGenerator: generators declare no usdGen:mask");
+    } else {
+        Check(false, "UsdGenGenerator: no abstract prim definition");
+    }
+    if (UsdPrimDefinition const *noise = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenNoise"))) {
+        CheckAttr(noise, "usdGen:mask", "float", "1");
+    } else {
+        Check(false, "UsdGenNoise: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *scatterDef = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenScatter"))) {
+        Check(!static_cast<bool>(
+                  scatterDef->GetAttributeDefinition(TfToken("usdGen:mask"))),
+              "UsdGenScatter: a generator inherits no usdGen:mask");
+    }
+
+    // C1 §2 — property rows of the operator types that have kernels.
+    if (UsdPrimDefinition const *scatter = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenScatter"))) {
+        CheckAttr(scatter, "usdGen:density", "float", "100");
+        CheckAttr(scatter, "usdGen:flip", "bool", "0");
+    } else {
+        Check(false, "UsdGenScatter: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *grow = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenGrow"))) {
+        CheckAttr(grow, "usdGen:segments", "int", "8");
+        CheckAttr(grow, "usdGen:length", "float", "1");
+        CheckAttr(grow, "usdGen:lengthRandom", "float2", "(1, 1)");
+        CheckAttr(grow, "usdGen:direction", "token", "surfaceNormal", /*uniform*/ true);
+        CheckAttr(grow, "usdGen:directionVector", "vector3f", "(0, 1, 0)");
+        CheckAttr(grow, "usdGen:lift", "float", "0");
+    } else {
+        Check(false, "UsdGenGrow: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *source = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenCurveSource"))) {
+        CheckRel(source, "usdGen:curves");
+        CheckAttr(source, "usdGen:useRest", "bool", "1");
+        CheckAttr(source, "usdGen:idSource", "token", "primvar", /*uniform*/ true);
+        CheckAttr(source, "usdGen:expectEpoch", "string", "", /*uniform*/ true);
+        CheckAttr(source, "usdGen:staleAction", "token", "warn", /*uniform*/ true);
+        CheckAttr(source, "usdGen:resampleTo", "int", "0", /*uniform*/ true);
+        CheckAttr(source, "usdGen:rebind", "token", "onError", /*uniform*/ true);
+    } else {
+        Check(false, "UsdGenCurveSource: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *width = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenWidth"))) {
+        CheckAttr(width, "usdGen:width", "float", "0.01");
+        CheckAttr(width, "usdGen:width:interpolation", "token", "catmullRom",
+                  /*uniform*/ true);
+        CheckAttr(width, "usdGen:replace", "bool", "1");
+    } else {
+        Check(false, "UsdGenWidth: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *length = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenLength"))) {
+        CheckAttr(length, "usdGen:length:mode", "token", "scale", /*uniform*/ true);
+        CheckAttr(length, "usdGen:length:value", "float", "1");
+        CheckAttr(length, "usdGen:length:random", "float2", "(1, 1)");
+        CheckAttr(length, "usdGen:length:method", "token", "scale", /*uniform*/ true);
+        CheckAttr(length, "usdGen:rebuild", "token", "keepParam", /*uniform*/ true);
+        CheckAttr(length, "usdGen:minRemainingLength", "float", "0");
+        CheckAttr(length, "usdGen:cullThreshold", "float", "0");
+    } else {
+        Check(false, "UsdGenLength: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *deform = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenDeform"))) {
+        CheckAttr(deform, "usdGen:lockRoots", "bool", "1");
+        CheckAttr(deform, "usdGen:rbfSamples", "int", "100");
+    } else {
+        Check(false, "UsdGenDeform: no concrete prim definition");
     }
 
     // The imaging router must be able to retain its pure routing input while
@@ -262,11 +368,12 @@ int main()
               "router rebuild from retained snapshot survives graph destruction");
         usdGen::UsdGenPendingDirty routed;
         router.Route({{SdfPath("/routing/source"), HdDataSourceLocatorSet(
-            HdDataSourceLocator(TfToken("usdGen")).Append(TfToken("blend")))}}, &routed);
+            HdDataSourceLocator(TfToken("usdGen")).Append(TfToken("resampleTo")))}},
+            &routed);
         Check(!routed.structural && routed.nodeBits.size() == 1 &&
                   routed.nodeBits.begin()->first == retained->nodes.front().id &&
-                  routed.nodeBits.begin()->second == usdGen::UsdGenDirtyParameter,
-              "retained router still routes the original source path and value class");
+                  routed.nodeBits.begin()->second == usdGen::UsdGenDirtyCapture,
+              "retained router still routes the original source path and dirty class");
     }
 
     // Default-time rest normal data is a live authored binding input, not a
@@ -278,7 +385,7 @@ int main()
     surfaceRouting.terminal = 37;
     surfaceRouting.surfacePaths = {SdfPath("/routing/surface")};
     surfaceRouting.nodes.push_back(usdGen::UsdGenGraphRoutingNode{
-        37, SdfPath("/routing/source"), TfToken("UsdGenCurveSource"), 1,
+        37, SdfPath("/routing/source"), TfToken("UsdGenCurveSource"),
         {}, {}, {}, 0, true, {}, {}});
     router.Rebuild(surfaceRouting);
     auto const checkRestNormalRoute = [&](TfToken const &leaf,

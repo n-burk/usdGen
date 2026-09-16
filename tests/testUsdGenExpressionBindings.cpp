@@ -49,9 +49,14 @@ int main()
     UsdGenNodeDesc source; source.path=SdfPath("/groom/source"); source.type=TfToken("UsdGenCurveSource");
     valid.nodes.push_back(source);
     valid.terminal = node.path;
-    auto first = compiler.Compile(valid,&graph);
-    Check(!first.ok && !first.errors.empty(), "connected binding fails closed without evaluator");
-    Check(preservesGraph(), "unsupported expression leaves existing graph contents intact");
+    // The CPU reference lane now carries an expression evaluator of its own
+    // (expressions/cpuEvaluator.cpp), so a well-formed connected parameter
+    // compiles on EVERY backend. It is compiled into its own graph so the
+    // preservesGraph() invariant below still describes the seeded graph.
+    UsdGenGraph cpuGraph;
+    auto first = compiler.Compile(valid, &cpuGraph);
+    Check(first.ok, "connected binding compiles on the CPU reference backend");
+    Check(preservesGraph(), "a separate compilation leaves the existing graph intact");
     auto unknown = baseline;
     unknown.nodes[0].type = TfToken("UsdGenUnregisteredTestOperator");
     Check(!compiler.Compile(unknown,&graph).ok && preservesGraph(),
@@ -86,7 +91,7 @@ int main()
     expectFail(cuda,"CUDA backend fails closed without runtime evaluator", "CUDA");
     auto badDomain = valid; badDomain.nodes[0].expressionBindings[0].domain=expr::Domain::All;
     expectFail(badDomain,"invalid combined domain fails closed", "invalid expression evaluation domain");
-    for (char const *control : {"enabled", "seed", "segments", "cvCount", "algorithmVersion"}) {
+    for (char const *control : {"enabled", "seed", "segments", "cvCount"}) {
         for (char const *prefix : {"", "usdGen:"}) {
             auto topology = valid;
             topology.nodes[0].expressionBindings[0].destination = TfToken(std::string(prefix) + control);
@@ -94,6 +99,28 @@ int main()
                        "topology/control expression must evaluate at groom domain");
         }
     }
+    // The per-operator allowlist is one shared table (expressionTargets.cpp)
+    // that the compiler applies on every backend and the CUDA admission calls
+    // instead of keeping a copy, so these rejections are lane-independent.
+    auto foreignTarget = valid;
+    foreignTarget.nodes[0].expressionBindings[0].destination = TfToken("noise:magnitude");
+    expectFail(foreignTarget, "a destination another operator owns fails closed",
+               "unsupported/incorrectly typed Width expression target");
+    auto wrongType = valid;
+    wrongType.nodes[0].expressionBindings[0].nativeType = TfToken("double");
+    wrongType.expressions[0].outputs[0].nativeType = TfToken("double");
+    expectFail(wrongType, "a non-native destination type fails closed",
+               "unsupported/incorrectly typed Width expression target");
+    auto generator = valid;
+    generator.nodes[0].type = TfToken("UsdGenGrow");
+    expectFail(generator, "a generator refuses connected parameters",
+               "does not accept connected (expression) parameters");
+    auto maskPrimitive = valid;
+    maskPrimitive.nodes[0].expressionBindings[0].destination = TfToken("usdGen:mask");
+    maskPrimitive.nodes[0].expressionBindings[0].domain = expr::Domain::Primitive;
+    Check(compiler.Compile(maskPrimitive, &cpuGraph).ok,
+          "a primitive-domain usdGen:mask connection compiles");
+
     std::printf("testUsdGenExpressionBindings: %s\n", failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;
 }

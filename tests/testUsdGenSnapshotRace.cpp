@@ -113,7 +113,6 @@ UsdGenGraphDesc MakeG3(int NX = 250, int NY = 10)
         n.path = SdfPath("/groom/" + name);
         n.type = type;
         n.enabled = true;
-        n.blend = 1.0f;
         n.seed = seed;
         if (!input.empty()) n.inputs.push_back(SdfPath("/groom/" + input));
         if (type == TfToken("UsdGenScatter"))

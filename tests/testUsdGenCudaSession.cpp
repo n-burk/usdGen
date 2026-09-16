@@ -149,8 +149,7 @@ static UsdGenGraphDesc ImageWidthDesc() {
     width.inputs = {desc.nodes.front().path};
     width.params.push_back({TfToken("width"), VtValue(.8f), false});
     width.mapBindings.push_back({desc.maps.front().path,
-        UsdGenMapBindingPurpose::MaskSource,
-        TfToken("usdGen:mask:source")});
+        TfToken("usdGen:map")});
     desc.nodes.push_back(std::move(width));
     desc.terminal = desc.nodes.back().path;
     return desc;
@@ -1138,8 +1137,12 @@ int main() {
                               oldWidths.size() * sizeof(float),
                               cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
               cudaStreamSynchronize(consumer) == cudaSuccess);
+        // No CUDA operator samples a map today, so Width's envelope is the
+        // authored usdGen:mask (1) and every width is the plain target.  The
+        // map still participates in the plan's identity, which is what the
+        // COW-payload replacement below exercises.
         for (float value : oldWidths)
-            CHECK(std::fabs(value - .4125f) < 2e-5f);
+            CHECK(std::fabs(value - .8f) < 2e-5f);
 
         auto const oldPayload = desc.maps.front().imagePayload;
         desc.maps.front().textureGeneration++;
@@ -1164,13 +1167,13 @@ int main() {
                               cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
               cudaStreamSynchronize(consumer) == cudaSuccess);
         for (float value : newWidths)
-            CHECK(std::fabs(value - .21875f) < 2e-5f);
+            CHECK(std::fabs(value - .8f) < 2e-5f);
         CHECK(cudaMemcpyAsync(oldWidths.data(), oldLease.Geometry().widths.data,
                               oldWidths.size() * sizeof(float),
                               cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
               cudaStreamSynchronize(consumer) == cudaSuccess);
         for (float value : oldWidths)
-            CHECK(std::fabs(value - .4125f) < 2e-5f);
+            CHECK(std::fabs(value - .8f) < 2e-5f);
     }
 
     // A compiled Source -> Width -> Width chain is reusable across frames.

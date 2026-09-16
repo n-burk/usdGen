@@ -114,19 +114,12 @@ __global__ void ValidateOffsets(const uint32_t *offsets, size_t curves,
     if (begin >= end || end > points) SetError(error, kBadOffsets);
 }
 
-__global__ void ValidateProfile(const float *widthProfile,
-                                const float *maskProfile, int *error) {
+__global__ void ValidateProfile(const float *widthProfile, int *error) {
     size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= kProfileSize) return;
     float widthValue = widthProfile[i];
     if (!Finite(widthValue)) SetError(error, kNonFinite);
     else if (widthValue < 0.0f) SetError(error, kBadValue);
-    if (maskProfile) {
-        float maskValue = maskProfile[i];
-        if (!Finite(maskValue)) SetError(error, kNonFinite);
-        else if (maskValue < 0.0f || maskValue > 1.0f)
-            SetError(error, kBadValue);
-    }
 }
 
 __global__ void WidthKernel(DeviceCurveGeometryView geometry,
@@ -142,9 +135,7 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
         float fallback = denominator > 0.0f
             ? float(point - begin) / denominator : 0.0f;
         float t = 0.0f, base = 0.0f, width = 0.0f;
-        float rootScale = 0.0f, tipScale = 0.0f;
-        float taper = 0.0f, taperStart = 0.0f, blend = 0.0f;
-        float maskAmount = 0.0f, mapMask = 0.0f;
+        float mask = 0.0f;
         bool enabled = true, replace = true;
         float input = geometry.widths.data[point];
         if (!Finite(input)) {
@@ -158,38 +149,16 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
         if (!ReadHairT(hairT, point, fallback, &t, error) ||
             !ReadScalar(parameters.base, curve, point, &base, error) ||
             !ReadScalar(parameters.width, curve, point, &width, error) ||
-            !ReadScalar(parameters.rootScale, curve, point, &rootScale, error) ||
-            !ReadScalar(parameters.tipScale, curve, point, &tipScale, error) ||
-            !ReadScalar(parameters.taper, curve, point, &taper, error) ||
-            !ReadScalar(parameters.taperStart, curve, point, &taperStart, error) ||
-            !ReadScalar(parameters.blend, curve, point, &blend, error) ||
-            !ReadScalar(parameters.maskAmount, curve, point, &maskAmount, error) ||
-            !ReadScalar(parameters.mapMask, curve, point, &mapMask, error) ||
+            !ReadScalar(parameters.mask, curve, point, &mask, error) ||
             !ReadBool(parameters.enabled, curve, point, &enabled, error) ||
             !ReadBool(parameters.replace, curve, point, &replace, error))
             continue;
-        if (base < 0.0f || width < 0.0f || rootScale < 0.0f ||
-            tipScale < 0.0f || taper < 0.0f || taper > 1.0f ||
-            taperStart < 0.0f || taperStart > 1.0f || blend < 0.0f ||
-            blend > 1.0f || maskAmount < 0.0f || maskAmount > 1.0f) {
+        if (base < 0.0f || width < 0.0f || mask < 0.0f || mask > 1.0f) {
             SetError(error, kBadValue);
             continue;
         }
-        // The canonical default mask range remap clamps the sampled source
-        // before mask:amount is applied. This remains required when equal
-        // map:clamp components intentionally disable the map-level clamp.
-        mapMask = fminf(1.0f, fmaxf(0.0f, mapMask));
-        float maskRamp = parameters.maskProfile.data
-            ? Sample257(parameters.maskProfile.data, t) : 1.0f;
-        if (!Finite(maskRamp)) {
-            SetError(error, kNonFinite);
-            continue;
-        }
-        float envelope = blend * maskAmount * mapMask * maskRamp;
-        if (!Finite(envelope) || envelope < 0.0f || envelope > 1.0f) {
-            SetError(error, kBadValue);
-            continue;
-        }
+        // usdGen:mask IS the operator envelope (02 §2.13).
+        float envelope = mask;
         // Preserve the source bit pattern without doing any arithmetic at an
         // exact zero envelope, including when enabled is false.
         if (!enabled || envelope == 0.0f) {
@@ -197,14 +166,7 @@ __global__ void WidthKernel(DeviceCurveGeometryView geometry,
             continue;
         }
         float profile = Sample257(parameters.widthProfile.data, t);
-        float taperTerm = 1.0f;
-        if (taper > 0.0f && t > taperStart) {
-            float span = 1.0f - taperStart;
-            taperTerm = 1.0f - taper * (t - taperStart) /
-                        (span > 0.0f ? span : 1.0f);
-        }
-        float target = base * width * profile *
-            (rootScale + (tipScale - rootScale) * t) * taperTerm;
+        float target = base * width * profile;
         float result = replace ? input + (target - input) * envelope
                                : input * (1.0f + (target - 1.0f) * envelope);
         if (!Finite(target) || !Finite(result) || target < 0.0f ||
@@ -392,10 +354,7 @@ StyleStatus CudaWidth::Apply(DeviceCurveGeometryView geometry,
     if (!geometry.pointCount && geometry.widths.size != 0)
         return StyleStatus::InvalidArgument;
     if (parameters.widthProfile.size != kProfileSize ||
-        !parameters.widthProfile.data ||
-        (parameters.maskProfile.data &&
-         parameters.maskProfile.size != kProfileSize) ||
-        (!parameters.maskProfile.data && parameters.maskProfile.size != 0))
+        !parameters.widthProfile.data)
         return StyleStatus::InvalidArgument;
 
     auto validateControl = [&](ScalarField field, float minimum,
@@ -411,19 +370,7 @@ StyleStatus CudaWidth::Apply(DeviceCurveGeometryView geometry,
     status = validateControl(parameters.width, 0.0f,
                              std::numeric_limits<float>::max());
     if (status != StyleStatus::Ok) return status;
-    status = validateControl(parameters.rootScale, 0.0f,
-                             std::numeric_limits<float>::max());
-    if (status != StyleStatus::Ok) return status;
-    status = validateControl(parameters.tipScale, 0.0f,
-                             std::numeric_limits<float>::max());
-    if (status != StyleStatus::Ok) return status;
-    status = validateControl(parameters.taper, 0.0f, 1.0f);
-    if (status != StyleStatus::Ok) return status;
-    status = validateControl(parameters.taperStart, 0.0f, 1.0f);
-    if (status != StyleStatus::Ok) return status;
-    status = validateControl(parameters.blend, 0.0f, 1.0f);
-    if (status != StyleStatus::Ok) return status;
-    status = validateControl(parameters.maskAmount, 0.0f, 1.0f);
+    status = validateControl(parameters.mask, 0.0f, 1.0f);
     if (status != StyleStatus::Ok) return status;
     status = validateBoolField(parameters.enabled, geometry, true);
     if (status != StyleStatus::Ok) return status;
@@ -444,7 +391,6 @@ StyleStatus CudaWidth::Apply(DeviceCurveGeometryView geometry,
             return StyleStatus::CudaError;
         }
         ValidateProfile<<<2, 256, 0, stream>>>(parameters.widthProfile.data,
-                                                parameters.maskProfile.data,
                                                 error_.data());
         if (cudaGetLastError() != cudaSuccess) {
             unprovenWork_ = true;
@@ -458,7 +404,6 @@ StyleStatus CudaWidth::Apply(DeviceCurveGeometryView geometry,
         }
     } else {
         ValidateProfile<<<2, 256, 0, stream>>>(parameters.widthProfile.data,
-                                                parameters.maskProfile.data,
                                                 error_.data());
         if (cudaGetLastError() != cudaSuccess) {
             unprovenWork_ = true;

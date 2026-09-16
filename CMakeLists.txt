@@ -236,13 +236,11 @@ endif()
 # usdGen (SHARED — the engine core, no usd/usdImaging/hd linkage)
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE USDGEN_CORE_SOURCES libs/usdGen/*.cpp)
-# D4 (`13-codebase-alignment.md` §5): exprEval.cpp is M4 expression-lane WIP
-# whose SeExpr2 engine headers are not vendored yet (see its BUILD NOTE) —
-# the glob above would otherwise break the whole lib build. Excluded until
-# the engine lands; its only consumer is the likewise-unwired
-# tests/testUsdGenExpr.cpp. Revert this exclusion when wiring M4.
+# exprEval.{h,cpp} (a stale SeExpr2-engine evaluator design) and its unwired
+# tests/testUsdGenExpr.cpp are deleted: the IR interpreter in
+# expressions/irExec.h is the design, shared by the CUDA kernel and by
+# expressions/cpuEvaluator.cpp.
 list(REMOVE_ITEM USDGEN_CORE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/exprEval.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionResources.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionRetirement.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionBackendCudaProvider.cpp"
@@ -405,6 +403,11 @@ file(GENERATE OUTPUT "${_usdgen_imaging_pluginfo}"
 add_library(usdGenShaders INTERFACE)
 add_library(usdGen::usdGenShaders ALIAS usdGenShaders)
 
+# Offline authoring utility; leaves PointInstancer geometry instanced.
+add_executable(usdGenBakeFur tools/bakeFur.cpp)
+target_link_libraries(usdGenBakeFur PRIVATE usdGen usdGeom usd)
+install(TARGETS usdGenBakeFur RUNTIME DESTINATION bin)
+
 set(_usdgen_shader_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenShaders/resources")
 set(_usdgen_shader_pluginfo "${_usdgen_shader_resources}/plugInfo.json")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -440,6 +443,17 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/python/usdGenTools"
     DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/python"
     FILES_MATCHING PATTERN "*.py")
+# The shipped expression presets the editor's library browser reads. They sit
+# beside plugInfo.json so exprLibrary finds them by walking up from the staged
+# package, in the build tree and in the install tree alike.
+file(GLOB _usdgen_tools_expressions
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/expressions/*.se")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_usdgen_tools_expressions})
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/expressions"
+    DESTINATION "${_usdgen_tools_resources}"
+    FILES_MATCHING PATTERN "*.se")
 
 # ---------------------------------------------------------------------------
 # CUDA foundations and legacy optional GPU noise
@@ -1140,6 +1154,13 @@ if(USDGEN_ENABLE_CUDA)
     add_test(NAME testUsdGenCudaExpression COMMAND testUsdGenCudaExpression)
     set_tests_properties(testUsdGenCudaExpression PROPERTIES
         LABELS "T1;cuda;expressions" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
+    # Bit-for-bit CPU/CUDA parity over the shared IR interpreter.
+    add_executable(testUsdGenCudaExpressionParity tests/testUsdGenCudaExpressionParity.cpp)
+    target_link_libraries(testUsdGenCudaExpressionParity PRIVATE usdGenGpu usdGen usdGenExprFrontend)
+    add_test(NAME testUsdGenCudaExpressionParity COMMAND testUsdGenCudaExpressionParity)
+    set_tests_properties(testUsdGenCudaExpressionParity PROPERTIES
+        LABELS "T1;cuda;expressions;parity" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endif()
 
 # M0: build-rule tests (gate B-1) — see cmake/CheckNoStage*.cmake
@@ -1405,7 +1426,8 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
-           testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenAutoApply testUsdGenContracts)
+           testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
+           testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -1415,6 +1437,7 @@ endforeach()
 set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
 set_tests_properties(testUsdGenStockStormContract PROPERTIES
     LABELS "T1;stock-hydra;unpatched-openusd")
+set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
@@ -1485,19 +1508,26 @@ set_tests_properties(testUsdGenHydraParity
     TIMEOUT 300
 )
 
-add_executable(testUsdGenImageMapStage tests/testUsdGenImageMapStage.cpp)
-target_link_libraries(testUsdGenImageMapStage PRIVATE usdGenTestUtilsHd)
-target_compile_definitions(testUsdGenImageMapStage PRIVATE
-    USDGEN_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-add_test(NAME testUsdGenImageMapStage COMMAND testUsdGenImageMapStage)
-set_tests_properties(testUsdGenImageMapStage PROPERTIES
-    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;imaging;map")
-
 add_executable(testUsdGenHierarchy tests/testUsdGenHierarchy.cpp)
 target_link_libraries(testUsdGenHierarchy PRIVATE usdGenTestUtilsHd)
 add_test(NAME testUsdGenHierarchy COMMAND testUsdGenHierarchy)
 set_tests_properties(testUsdGenHierarchy PROPERTIES
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;hierarchy" TIMEOUT 120)
+
+add_executable(testUsdGenEnabledToggle tests/testUsdGenEnabledToggle.cpp)
+target_link_libraries(testUsdGenEnabledToggle PRIVATE usdGenTestUtilsHd)
+add_test(NAME testUsdGenEnabledToggle COMMAND testUsdGenEnabledToggle)
+set_tests_properties(testUsdGenEnabledToggle PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;imaging;scheduling" TIMEOUT 120)
+
+# The shipped root-to-tip width example, cooked on the CPU reference lane.
+add_executable(testUsdGenExpressionWidthExample tests/testUsdGenExpressionWidthExample.cpp)
+target_link_libraries(testUsdGenExpressionWidthExample PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenExpressionWidthExample PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenExpressionWidthExample COMMAND testUsdGenExpressionWidthExample)
+set_tests_properties(testUsdGenExpressionWidthExample PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples" TIMEOUT 120)
 
 add_executable(testUsdGenExpressionTransport tests/testUsdGenExpressionTransport.cpp)
 target_link_libraries(testUsdGenExpressionTransport PRIVATE usdGenTestUtilsHd)
@@ -1513,13 +1543,31 @@ add_test(NAME testUsdGenSessionIsolation COMMAND testUsdGenSessionIsolation)
 set_tests_properties(testUsdGenSessionIsolation PROPERTIES
     LABELS "T1;sessions" TIMEOUT 120)
 
-foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend ExpressionIr)
+foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend ExpressionIr ExpressionCpuEval)
     add_executable(testUsdGen${_expr_test} tests/testUsdGen${_expr_test}.cpp)
     target_link_libraries(testUsdGen${_expr_test} PRIVATE usdGen)
     add_test(NAME testUsdGen${_expr_test} COMMAND testUsdGen${_expr_test})
     set_tests_properties(testUsdGen${_expr_test} PROPERTIES
         LABELS "T0;expressions" TIMEOUT 120)
 endforeach()
+# The function library against Disney's own SeExpr2. This is the only test that
+# links the vendored frontend archive directly: expressions/exprMath.h claims to
+# reproduce SeExpr2's builtins for the device, and the claim is only worth
+# something if it is checked against the original. The include directory is
+# SYSTEM so the vendored headers keep their own warning level, and the SeExpr2
+# namespace rename must match the one usdGenExprFrontend was compiled with.
+add_executable(testUsdGenSeExprOracle tests/testUsdGenSeExprOracle.cpp)
+target_link_libraries(testUsdGenSeExprOracle PRIVATE usdGen usdGenExprFrontend)
+target_include_directories(testUsdGenSeExprOracle SYSTEM PRIVATE "${_usdgen_frontend_dir}")
+target_compile_definitions(testUsdGenSeExprOracle PRIVATE
+    SeExpr2=UsdGenSeExprFrontend SeExprInternal2=UsdGenSeExprFrontendInternal
+    USDGEN_SEEXPR_SANDBOX)
+if(WIN32)
+    target_compile_definitions(testUsdGenSeExprOracle PRIVATE SEEXPR_WIN32)
+endif()
+add_test(NAME testUsdGenSeExprOracle COMMAND testUsdGenSeExprOracle)
+set_tests_properties(testUsdGenSeExprOracle PROPERTIES
+    LABELS "T0;expressions;parity" TIMEOUT 120)
 # Unix-only: the harness is a bash script that sources bin/_env.sh, which is
 # POSIX shell and resolves a Linux interpreter path. Registered unconditionally
 # this invoked WSL's bash on Windows and failed on a 120 s timeout rather than
@@ -1547,7 +1595,9 @@ if(USDGEN_ENABLE_CUDA)
     set_tests_properties(testUsdGenCudaHierarchy PROPERTIES
         ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;cuda;hierarchy" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu)
 endif()
-set_tests_properties(testUsdGenAutoApply PROPERTIES LABELS "T1;gate:SI-8")
+# testUsdGenAutoApply (gate:SI-8) tested UsdGenMaskAPI auto-apply; the mask
+# feature (mask.cpp/h, maskParams.h) and its test were removed together, so
+# there is no longer a target here to attach a LABELS override to.
 set_tests_properties(testUsdGenContracts PROPERTIES LABELS "T1")
 
 # N-5 (09 §5.2, 10 §5.6): schema regeneration-drift guard — the checked-in
@@ -1578,6 +1628,15 @@ else()
 endif()
 set_tests_properties(testUsdGenSchemaUpToDate PROPERTIES
     LABELS "T1" ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" ${_usdgen_schema_uptodate_props})
+
+# usdGenTools C ABI (usdGenImaging/usdGenToolsApi.h): the compile/list entry
+# points the usdview expression editor calls through ctypes. Pure C ABI over
+# the engine frontend, so it is an ordinary T1 with no stage and no Hydra.
+add_executable(testUsdGenToolsApi tests/testUsdGenToolsApi.cpp)
+target_link_libraries(testUsdGenToolsApi PRIVATE usdGenImaging)
+add_test(NAME testUsdGenToolsApi COMMAND testUsdGenToolsApi)
+set_tests_properties(testUsdGenToolsApi PROPERTIES
+    LABELS "T1;tools;expressions" TIMEOUT 60)
 
 # usdGenTools SeExpr editor: drives usdview through testusdview against the
 # expression example. Needs the prefix's usdview (a Python script) and a
@@ -1616,6 +1675,28 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         LABELS "T2;tools;usdview" TIMEOUT 180
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
+endif()
+
+# The Qt-free half of the same plugin -- the ctypes binding, the text helpers
+# behind the literal controls, and the connection authoring -- runs in a plain
+# python process, so it is a T1 and needs no usdview. It shares the editor
+# test's interpreter and environment, minus the window.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenToolsExprApi
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprApi.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+    usdgen_test_pluginpath_ops(_usdgen_toolsapi_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    usdgen_test_path_list_ops(_usdgen_toolsapi_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+    set_tests_properties(testUsdGenToolsExprApi PROPERTIES
+        LABELS "T1;tools;expressions" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
 endif()
 
 # M1 T2 Storm tests (EGL harness; the S-8/S-9/L-1 PW decisions get confirmed
@@ -1819,6 +1900,9 @@ install(FILES
 install(DIRECTORY plugin/usdGenTools/python/usdGenTools
     DESTINATION "${USDGEN_INSTALL_PYTHONDIR}"
     FILES_MATCHING PATTERN "*.py")
+install(DIRECTORY plugin/usdGenTools/resources/expressions
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTools/resources"
+    FILES_MATCHING PATTERN "*.se")
 
 # Export targets so the package config's include(usdGenTargets.cmake) resolves.
 install(EXPORT usdGenTargets

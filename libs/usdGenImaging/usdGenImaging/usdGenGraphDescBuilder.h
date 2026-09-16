@@ -78,7 +78,7 @@ UsdGenGraphDescCapture CaptureGraphDescFromHydra(
 /// Hydra-sourced staging: operator discovery consumes the Description's
 /// composed hierarchy order; parameters are read from flat relative-locator sampled
 /// data sources (the adapter overlays its mapped source at the prim root,
-/// so usdGen:motion:mode -> motion/mode)
+/// so usdGen:curve:basis -> curve/basis)
 /// with S14 pull-all preserved (every mapped locator pulled at least once
 /// per topology generation so dependencies register; stock subtrees sharing
 /// the overlaid root are pruned from the sweep). Sibling of

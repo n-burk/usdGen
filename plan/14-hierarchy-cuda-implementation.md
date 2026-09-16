@@ -21,6 +21,22 @@ the historical checkpoints in this document intact and starts OPEN.
    values evaluate **during execution** with the consuming operator's inputs.
    The shared variable registry, broadcasting and type rules are detailed in
    [examples/operator-expressions.md](examples/operator-expressions.md).
+   Expressions evaluate on **both** lanes. The IR interpreter is one shared
+   `__host__ __device__` source (`libs/usdGen/usdGen/expressions/irExec.h`)
+   that `gpu/expression.cu` compiles for the device and
+   `expressions/cpuEvaluator.cpp` compiles for the host, and the per-operator
+   table of connectable destinations and domains
+   (`libs/usdGen/usdGen/expressionTargets.cpp`) is likewise shared by the
+   compiler and by the CUDA admission, so neither can drift. The SeExpr2
+   builtin library the language exposes is shared the same way
+   (`expressions/exprMath.h`, over the gradient tables
+   `expressions/exprNoiseTables.h` emits once for both lanes), so the whole
+   noise, hash, cellnoise, voronoi, curve and spline family is bit-identical
+   between the lanes rather than merely close. That is what makes a connected
+   parameter visible in usdview today: only the CPU lane reaches stock Storm.
+   The language, the function set by category and the deliberate differences
+   from stock SeExpr2 are in
+   [07-look-maps-expressions.md](07-look-maps-expressions.md) §7.2-§7.3.
 3. Operators and expression evaluation run on CUDA. Geometry and intermediate
    parameter fields stay in GPU buffers through operators, tools and rendering.
    Explicit bake/export may read back data; small control/diagnostic reads are

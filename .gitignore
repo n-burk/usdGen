@@ -66,4 +66,3 @@ tests/scenes/*.usda
 
 # Generated G1-G5 fixtures (regenerate with usd/fixtures/make_fixtures.py)
 usd/fixtures/*.usda
-!usd/fixtures/map_bindings.usda

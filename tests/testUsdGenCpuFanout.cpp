@@ -1254,14 +1254,14 @@ void TestOrderedWidthBlend()
     merge.path = desc.terminal;
     merge.type = TfToken("UsdGenWidthBlend");
     merge.inputs = {left.path, right.path};
-    merge.blend = 0.25f;
+    merge.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
     // Deliberately authored in a non-topological order.  The compiler must
     // retain merge.inputs' left/right correspondence after Kahn sorting.
     desc.nodes = {merge, right, source, left};
 
     size_t arity = 0;
     Check(UsdGenOpRegistry::Get().GetGeometryInputArity(
-              TfToken("UsdGenWidthBlend"), 0, &arity) && arity == 2,
+              TfToken("UsdGenWidthBlend"), &arity) && arity == 2,
           "registry exposes WidthBlend ordered binary contract");
 
     UsdGenCompiler compiler;
@@ -1347,9 +1347,10 @@ void TestOrderedWidthBlend()
     auxiliary.nodes[0].params.push_back(
         {TfToken("unexpected"), VtValue(1.0f), false});
     expectRejected(std::move(auxiliary), "WidthBlend rejects auxiliary parameters");
-    UsdGenGraphDesc invalidBlend = desc;
-    invalidBlend.nodes[0].blend = 1.25f;
-    expectRejected(std::move(invalidBlend), "WidthBlend rejects out-of-range blend");
+    UsdGenGraphDesc invalidWeight = desc;
+    invalidWeight.nodes[0].params[0].value = VtValue(1.25f);
+    expectRejected(std::move(invalidWeight),
+                   "WidthBlend rejects an out-of-range widthBlend:weight");
 }
 
 void TestDependencyReadyHeldFanout()
@@ -1422,24 +1423,24 @@ int main()
     usdGenRegisterM1Operators();
     size_t arity = 99;
     Check(UsdGenOpRegistry::Get().GetGeometryInputArity(
-              TfToken("UsdGenCurveSource"), 0, &arity) && arity == 0,
+              TfToken("UsdGenCurveSource"), &arity) && arity == 0,
           "registry exposes CurveSource zero-input contract");
     Check(UsdGenOpRegistry::Get().GetGeometryInputArity(
-              TfToken("UsdGenWidth"), 0, &arity) && arity == 1,
+              TfToken("UsdGenWidth"), &arity) && arity == 1,
           "registry exposes Width unary contract");
     Check(UsdGenOpRegistry::Get().GetGeometryInputArity(
-              TfToken("UsdGenGrow"), 0, &arity) && arity == 1,
+              TfToken("UsdGenGrow"), &arity) && arity == 1,
           "topology-owning Grow remains a unary geometry consumer");
     Check(!UsdGenOpRegistry::Get().GetGeometryInputArity(
-              TfToken("UsdGenMissingInputContract"), 0, &arity),
+              TfToken("UsdGenMissingInputContract"), &arity),
           "registry rejects an unknown input contract");
-    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestExtraCvWriter"), 0,
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestExtraCvWriter"),
           [] { return std::make_unique<ExtraCvWriter>(); }),
           "registers the extra-CV slot writer");
-    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestExtraCurveWriter"), 0,
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestExtraCurveWriter"),
           [] { return std::make_unique<ExtraCurveWriter>(); }),
           "registers the extra-curve slot writer");
-    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestHeldWidthWriter"), 0,
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestHeldWidthWriter"),
           [] { return std::make_unique<HeldWidthWriter>(); }),
           "registers the held-width scheduler test writer");
     TestFanoutDeterminism();

@@ -6,12 +6,12 @@
    byte-identical and match docs/freezes/C5.md verbatim. Also pin each
    file's single materialTag to its plan/07 §2.1 value (gate S-5 static half).
 2. Load each .glslfx through Sdr (Sdr.Registry().GetShaderNodeFromAsset,
-   sourceType "glslfx") and assert it parses, reports exactly the 20
+   sourceType "glslfx") and assert it parses, reports exactly the 21
    C5-frozen input names with the C5 defaults, and declares the primvars
    metadata of its variant; then assert the three shader DEFS
    (usdGenShaders/resources/shaders/shaderDefs.usda, discovered via the
    UsdGenShadersDiscoveryPlugin) are registered in the Sdr Registry with
-   the same 20 inputs, the `surface` terminal output, and the variant's
+   the same 21 inputs, the `surface` terminal output, and the variant's
    primvar metadata (M-12).
 
 Part 2 needs the plugin search path: run from a shell with
@@ -51,6 +51,8 @@ PRIMVARS = {
     "usdGenHairPreviewTranslucent.glslfx": {"hairId", "hairT", "st"},
     "usdGenHairPreviewPrimvar.glslfx": {"hairId", "hairT", "hairTangent", "st"},
 }
+for _primvars in PRIMVARS.values():
+    _primvars.update({"furTauP", "furTauN", "furTipTauP", "furTipTauN"})
 
 # plan/07 §2.1 + C5.md table pin one materialTag per file; §2.7 rule 1 (one
 # tag per description) is what keeps gate S-5 (drawBatches == 1) intact — a
@@ -165,7 +167,7 @@ def sdr_check(names, defaults):
     ok = True
 
     # (a) Each shipped .glslfx parses directly through SdrGlslfxParserPlugin
-    # (sourceType "glslfx"): the 20 C5 inputs with the C5 defaults, plus the
+    # (sourceType "glslfx"): the 21 C5 inputs with the C5 defaults, plus the
     # primvars of its variant. This path reports no outputs — the parser
     # surfaces parameters+textures as inputs and attributes as primvars
     # metadata only (parserPlugin.cpp ParseShaderNode); the terminal output
@@ -195,7 +197,7 @@ def sdr_check(names, defaults):
 
     # (b) The three shader DEFS registered via the UsdGenShadersDiscoveryPlugin
     # (plugin/usdGenShaders plugInfo + resources/shaders/shaderDefs.usda):
-    # each present in the Registry with the same 20 inputs, the same
+    # each present in the Registry with the same 21 inputs, the same
     # defaults authored in USD notation, the 1 `surface` terminal output, and
     # the variant's primvar metadata (M-12: without it HdSt never requests
     # hairT/hairId/st from the mesh — materialNetwork.cpp:1136).
@@ -251,9 +253,9 @@ def main():
     # file, with the value the table pins for that file.
     ok = ok and tag_check()
 
-    n_params = ref.count('"documentation"')  # one per entry: 19 params + 1 texture
-    print("C5 entries (doc'd):", n_params, "(expect 20: 19 parameters + 1 texture)")
-    ok = ok and n_params == 20
+    n_params = ref.count('"documentation"')  # one per entry: 20 params + 1 texture
+    print("C5 entries (doc'd):", n_params, "(expect 21: 20 parameters + 1 texture)")
+    ok = ok and n_params == 21
 
     # Cross-check against the frozen block in docs/freezes/C5.md.
     with open(FREEZE) as f:
@@ -279,8 +281,8 @@ def main():
     if ok:
         names, defaults = c5_entries(frozen)
         print("C5 frozen names (%d):" % len(names), " ".join(names))
-        if len(names) != 20:
-            print("FAIL: freeze block names %d != 20" % len(names))
+        if len(names) != 21:
+            print("FAIL: freeze block names %d != 21" % len(names))
             ok = False
         else:
             res = sdr_check(names, defaults)

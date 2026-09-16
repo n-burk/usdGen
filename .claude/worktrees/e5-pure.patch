@@ -1,0 +1,2616 @@
+diff --git a/plan/08-tools.md b/plan/08-tools.md
+index e24f068..06e7816 100644
+--- a/plan/08-tools.md
++++ b/plan/08-tools.md
+@@ -980,19 +980,56 @@ C ABI over `usdGen::expr::Frontend` and the variable registry, loaded with `ctyp
+ |---|---|
+ | `UsdGenTools_CompileExpression(source, domain, components, errBuf, errLen)` | `0` compiles, `1` diagnostics as `<line>\t<column>\t<message>` records, `2` bad arguments |
+ | `UsdGenTools_ListVariables(domain, buf, len)` | `<name>\t<scalarType>\t<components>\t<domains>\t<valid>\t<doc>` per variable |
+-| `UsdGenTools_ListFunctions(buf, len)` | `<name>\t<signature>\t<doc>\t<insert>` per function and operator |
++| `UsdGenTools_ListFunctions(buf, len)` | `<name>\t<signature>\t<doc>\t<insert>\t<category>` per function and operator |
+ 
+ Both list calls use one size-then-read protocol: they return the bytes required including the NUL,
+ so a caller sizes with `(NULL, 0)` and reads with a buffer that fits. This ABI is **separate from
+ `cApi.h`**, which stays the frozen C4 session contract (§C4): these calls carry no session state,
+ touch no stage and no GPU, and are safe from any thread.
+ 
+-The function table currently lives in `usdGenToolsApi.cpp` and mirrors exactly what
+-`frontend.cpp`'s `Lower()` emits IR for (`abs sin cos pow min max clamp`, the arithmetic and
+-comparison operators, the ternary, the vector literal) — not the wider set the parser accepts but
+-lowering refuses, which would advertise expressions that fail to compile. It is marked to be replaced
+-by `Frontend::SupportedFunctions()` when the engine track lands it; because the Python side reads the
+-ABI and never carries a list of its own, that is a one-file change.
++The pure functions come from `Frontend::SupportedFunctions()`, the engine's own table, so the
++browser can never advertise a function `Lower()` refuses. `usdGenToolsApi.cpp` adds only what that
++table has no entry for: the operators, the ternary and the vector literal, which `Walk()`/`Lower()`
++accept as AST node kinds rather than named functions.
++
++`<category>` is the group the browser files a function under. It is `usdGen::expr::FunctionInfo`'s
++own `category` when that field exists and a name-based classification otherwise, detected at compile
++time with a `std::void_t` trait rather than a version macro — the field either exists in that
++translation unit or it does not, so the ABI's record shape does not depend on which engine it was
++built against. The ABI version is **2**; a Python plugin from a different build refuses to parse
++rather than misparsing.
++
++**The control grammar.** SeExpr2's editor drives its controls from the expression text, and so does
++this one. `exprApi.ScanControls()` reads every TOP-LEVEL statement of the form
++
++    $name = <value>;            # <annotation>
++
++— a statement running to the next `;` that is not inside brackets, a string or a comment — and gives
++each one a control, keeping the exact source offsets of `<value>` so an edit rewrites that span and
++nothing else:
++
++| Value | Annotation | Control |
++|---|---|---|
++| `0.5` | `# 0, 1` | float: slider + spinbox over that range |
++| `4` (no decimal point) | `# 1, 10` | integer: integral slider + spinbox |
++| `[1, 0.5, 0.2]` | `# color` | colour: swatch (`QColorDialog`) + three component sliders |
++| `[0, 1, 0]` | — | vector: three component sliders |
++| `curve($t, p, v, i, …)` | `# curve` | editable curve: draggable knots, add on click, delete on right-click or **Delete**, per-knot interpolation `none/linear/smooth/spline/monotone` = 0–4 |
++| `ccurve($t, p, [r,g,b], i, …)` | `# ccurve` | the same widget with colour knots |
++| `"text"` | `# string` | line edit (the engine rejects strings; validation says so) |
++
++Without an annotation a number keeps SeExpr's `[0, 1]`, widened only far enough to contain the value
++— a slider that cannot reach the number it shows would be worse than a wider one. Editing the range
++boxes rewrites the `# min, max` comment, because in this grammar the comment is where a range lives.
++A value the parser cannot drive (a computed right-hand side, a `curve()` with a non-literal knot)
++yields **no** control and the text keeps it untouched. Numbers no `$variable` holds fall back to the
++plain literal sliders, under **Loose numbers**; a number a control already drives is never offered
++twice.
++
++An interpolation code stored with a knot governs the segment that **ends** at it, which is
++`Curve::getValue`'s behaviour, not a choice made here. `exprApi.EvaluateCurve()` implements the five
++codes (Catmull-Rom for `spline`, Fritsch-Carlson for `monotone`) for drawing only; the engine does
++the real evaluation.
+ 
+ **The widgetry.**
+ 
+@@ -1001,11 +1038,16 @@ ABI and never carries a list of its own, that is a one-file change.
+ | Syntax highlighting | `$variables`, functions, numbers, operators, `#` comments and string literals (highlighted *and* wave-underlined, since the engine rejects them). A `$variable` or function the engine does not know is marked wrong while it is typed, from the ABI's own lists. |
+ | Bracket matching | The pair around the cursor is boxed; an unmatched bracket is boxed in red. |
+ | Live validation | 300 ms after the text settles, the source is compiled for the current domain and output width. Green "OK" or `line L, col C: message` in a status strip, with the offending line marked in the text. Character offsets from the frontend's AST walk and the vendored parser's `at line N` are both mapped to line and column in the C ABI. |
+-| Function and variable browsers | Side by side in the Reference tab. Variables show type, components and the domains they are valid in, greyed out where the current domain does not define them. Double-click or **Insert** puts the text at the cursor; a `\|` in the ABI's `insert` field says where the caret lands. |
+-| Literal controls | One slider, value spinbox and editable `[min, max]` per numeric literal, labelled with the call it sits in (`clamp(..., ..., 0.15)`) or its bracketed surroundings. Dragging rewrites that literal in place, keeping the caret and coalescing a drag into one undo step. Ranges default to `[0, 1]` for a literal already in `[0, 1]`, else `[0, 2x]`. |
++| Line numbers | A gutter beside the text, with the caret's own line picked out. A multi-statement expression is the normal shape once controls are declared, and a diagnostic that says `line 3` is otherwise a number with nothing to point at. |
++| Completion | A popup while typing (`Ctrl+Space` forces it): `$variables` after one character, function names after two, each row carrying the name, the signature or type, and the doc, all from the ABI. Enter/Tab accept, Escape dismisses; a function completes to its whole call with the caret inside the parentheses. |
++| Function and variable browsers | Side by side in the Reference tab. Functions are grouped by the ABI's `category`. Variables show type, components and the domains they are valid in, greyed out where the current domain does not define them. Double-click or **Insert** puts the text at the cursor; a `\|` in the ABI's `insert` field says where the caret lands. |
++| Controls | One widget per declared `$variable`, per the control grammar above, in the Controls tab with **Add Widget…**. A control rewrites exactly its own value through a `QTextCursor`, carrying the caret across the edit and coalescing a drag into one undo step. |
++| Add Widget | SeExpr's `ExprAddDialog`: a name, a type (Integer, Float, Vector, Color, Curve, Color Curve, String) and the initial value, range, colour, text or curve lookup that type needs, previewed as the line it will write. The declaration is inserted at the TOP of the expression, because a SeExpr variable must be assigned before the body that reads it. A name already declared is refused. |
++| Loose numbers | The literal sliders, for numeric literals no `$variable` holds: one slider, value spinbox and editable `[min, max]`, labelled with the call it sits in (`clamp(..., ..., 0.15)`). Ranges default to `[0, 1]` for a literal already in `[0, 1]`, else `[0, 2x]`. |
++| Library | A tree of saved `.se` files by library, with a search box and a filter on the evaluation domain a file declares in a leading `# domain: point` comment (a file with no marker suits any domain). **Load** replaces the text as an unapplied edit; **Save** / **Save As…** write into the user library, which is `~/.usdGenExpressions` or the first entry of `USDGEN_EXPRESSION_PATH`. The read-only `usdGen` library ships `rootTipTaper`, `randomLength`, `clumpMask` and `widthProfile` from `plugin/usdGenTools/resources/expressions`. |
+ | Domain and output type | A combo reads and writes the destination attribute's `customData usdGen:evaluation`, beside a read-only display of the expression's `outputs:result` type. Changing it revalidates, so a `$t` that is legal per curve and illegal per groom is refused immediately. |
+ | Connections | For a selected operator: its `float`/`int`/`bool` attributes with their current connection. **Connect to expression** makes (or reuses) a `UsdGenExpression` under `<Description>/Expressions` with a typed `outputs:result` and `$value` as its source, authors the `.connect` by PRIM path, and carries the schema's own evaluation domain onto the destination. **Disconnect** removes it. |
+-| Apply / Revert | `Ctrl+Return` applies; the dock title carries a `*` while there are unapplied edits; **Live apply** writes every slider change straight to the stage so the viewport follows a drag. An external edit to `usdGen:expr:source` reloads the text unless the user has unapplied changes. |
++| Apply / Preview / Revert / Clear | `Ctrl+Return` applies to the current edit target. **Preview** writes to the stage's SESSION layer instead, so the viewport shows the text without touching the layer being authored; Apply then commits it and drops the override, Revert drops it and reloads. **Clear** empties the text and writes nothing. The dock title carries a `*` while there are unapplied edits; **Live apply** writes every control change straight to the stage so the viewport follows a drag. An external edit to `usdGen:expr:source` reloads the text unless the user has unapplied changes. |
+ 
+ **Authoring.** Every action goes through the stage's current edit target with the Sdf API inside one
+ `Sdf.ChangeBlock`, so a connect is one stage notice rather than four and the groom scene index recooks
+@@ -1015,12 +1057,23 @@ proxy writes *nothing* for an empty explicit list, so blocking a connection auth
+ `UsdAttribute.SetConnections([])` instead.
+ 
+ **Tests.** `testUsdGenToolsApi` (T1, C++) covers the ABI: compile success and failure, the line and
+-column mapping, the domain check, the size-then-read protocol, and that every function the list
+-advertises actually compiles. `testUsdGenToolsExprApi` (T1, python, no Qt) covers the `ctypes`
+-binding, the literal scanner and label builder, and the connection authoring against both a root-layer
+-and a session-layer edit target. `testUsdGenToolsExprEditor` (T2, `testusdview`) drives the dock
+-itself. `plugin/usdGenTools/testenv/shotUsdGenToolsExprEditor.py` is not a test: it photographs each
+-tab through `testusdview` for review without an interactive session.
++column mapping, the domain check, the size-then-read protocol, that every function the list
++advertises actually compiles, and that every record carries a category. `testUsdGenToolsExprApi`
++(T1, python, no Qt) covers the `ctypes` binding, the literal scanner and label builder, the control
++grammar and its rewriting, the declaration builder, the curve evaluator, the library paths and file
++format, and the connection authoring against both a root-layer and a session-layer edit target.
++`testUsdGenToolsExprEditor` (T2, `testusdview`) drives the dock itself, including each control kind
++rewriting the text, the Add Widget dialog, the completion model and popup, a library save/load round
++trip with the domain filter, diagnostic positions across a four-line expression, and Preview /
++Apply / Revert against the session layer. `plugin/usdGenTools/testenv/shotUsdGenToolsExprEditor.py`
++is not a test: it photographs each panel through `testusdview` for review without an interactive
++session.
++
++**Not done.** The controls grammar is written for the multi-statement frontend the engine track is
++landing: `$name = …;` statements do not compile today, so the shipped presets that use them (all but
++`clumpMask`) validate red until that change arrives. The panel itself is pure text work and is
++correct either way. A `String` control exists so the control model is complete, but the engine
++rejects string literals and validation says so.
+ 
+ ---
+ 
+diff --git a/plugin/usdGenTools/python/usdGenTools/exprControls.py b/plugin/usdGenTools/python/usdGenTools/exprControls.py
+new file mode 100644
+index 0000000..02d739c
+--- /dev/null
++++ b/plugin/usdGenTools/python/usdGenTools/exprControls.py
+@@ -0,0 +1,1068 @@
++# The controls panel: one widget per `$name = <value>; # <annotation>`
++# statement in the expression, the way SeExpr2's editor builds them.
++#
++# The parsing lives in exprApi (no Qt, so the tests share it); everything here
++# is presentation. A control never touches the text: it reports a new value and
++# the dock rewrites exactly that value's span, which is what keeps an edit to
++# one control from disturbing anything else in the expression.
++#
++# Callbacks rather than signals, to match the rest of this package: the dock
++# owns every decision about what an edit means.
++
++from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
++
++from . import exprApi
++
++# The kinds the Add Widget dialog offers, in the order SeExpr's own dialog
++# lists them, with the label shown and the initial value each starts from.
++WIDGET_KINDS = (
++    ("Integer", "int", 0),
++    ("Float", "float", 0.5),
++    ("Vector", "vector", (0.0, 0.0, 0.0)),
++    ("Color", "color", (1.0, 1.0, 1.0)),
++    ("Curve", "curve", [(0.0, 0.0, exprApi.INTERP_MONOTONE),
++                        (1.0, 1.0, exprApi.INTERP_MONOTONE)]),
++    ("Color Curve", "ccurve", [(0.0, (0.0, 0.0, 0.0), exprApi.INTERP_MONOTONE),
++                               (1.0, (1.0, 1.0, 1.0), exprApi.INTERP_MONOTONE)]),
++    ("String", "string", ""),
++)
++
++NAME_WIDTH = 92
++# Wide enough for a four-decimal value AND the spin buttons beside it: at 96
++# the arrows sat on top of the last digit.
++VALUE_WIDTH = 116
++
++
++def _fixedFont():
++    return QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
++
++
++def _swatch(color):
++    """A small pixmap of `color`, for a button that opens a colour picker."""
++    pixmap = QtGui.QPixmap(28, 14)
++    pixmap.fill(color)
++    painter = QtGui.QPainter(pixmap)
++    painter.setPen(QtGui.QColor(30, 30, 30))
++    painter.drawRect(0, 0, 27, 13)
++    painter.end()
++    return pixmap
++
++
++def _toColor(values):
++    return QtGui.QColor.fromRgbF(*[max(0.0, min(1.0, float(v)))
++                                   for v in values[:3]])
++
++
++def _fromColor(color):
++    return (color.redF(), color.greenF(), color.blueF())
++
++
++class _Control(QtWidgets.QWidget):
++    """Shared shell: the `$name` on a fixed column, then the body."""
++
++    def __init__(self, index, control, onChanged, onDragChanged, parent=None):
++        super(_Control, self).__init__(parent)
++        self.index = index
++        self.control = control
++        self._onChanged = onChanged
++        self._onDragChanged = onDragChanged
++        self._updating = False
++
++        self._outer = QtWidgets.QHBoxLayout(self)
++        self._outer.setContentsMargins(0, 0, 0, 0)
++        self._outer.setSpacing(4)
++        self.nameLabel = QtWidgets.QLabel(control.name)
++        self.nameLabel.setFixedWidth(NAME_WIDTH)
++        self.nameLabel.setFont(_fixedFont())
++        self.nameLabel.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
++        self.nameLabel.setToolTip("%s  (%s)" % (control.name, control.kind))
++        self._outer.addWidget(self.nameLabel)
++
++    def report(self, value):
++        """Hand a new value to the dock, unless we are only displaying one."""
++        if not self._updating:
++            self._onChanged(self.index, value)
++
++    def setControl(self, control):
++        """Take a re-scanned record for the same control; the widget state is
++        already right, only the offsets moved."""
++        self.control = control
++
++
++class _Scale(object):
++    """The mapping between a value and an integral slider position.
++
++    Kept as a plain object so the number and vector controls share it without
++    inheriting from each other."""
++
++    STEPS = 1000
++
++    def __init__(self, low, high):
++        self.set(low, high)
++
++    def set(self, low, high):
++        if high <= low:
++            high = low + 1.0
++        self.low, self.high = float(low), float(high)
++
++    def toSlider(self, value):
++        span = self.high - self.low
++        t = 0.0 if span <= 0 else (value - self.low) / span
++        return int(round(max(0.0, min(1.0, t)) * self.STEPS))
++
++    def toValue(self, position):
++        return self.low + (self.high - self.low) * (float(position) / self.STEPS)
++
++
++class NumberControl(_Control):
++    """`$x = 0.5; # 0, 1` -- a slider and a spinbox over the annotated range.
++
++    The range boxes rewrite the ANNOTATION rather than the value, because in
++    this grammar the comment is where a range is stored; widening a slider is
++    therefore an edit to the expression like any other."""
++
++    def __init__(self, index, control, onChanged, onDragChanged,
++                 onRangeChanged, parent=None):
++        super(NumberControl, self).__init__(index, control, onChanged,
++                                            onDragChanged, parent)
++        self._onRangeChanged = onRangeChanged
++        self.isInt = control.kind == "int"
++        low = control.data["minimum"]
++        high = control.data["maximum"]
++        self._scale = _Scale(low, high)
++
++        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
++        self.slider.setMinimumWidth(60)
++        self._outer.addWidget(self.slider, 1)
++
++        if self.isInt:
++            self.valueBox = QtWidgets.QSpinBox()
++            self.valueBox.setRange(-2 ** 31, 2 ** 31 - 1)
++        else:
++            self.valueBox = QtWidgets.QDoubleSpinBox()
++            self.valueBox.setDecimals(4)
++            self.valueBox.setRange(-1e9, 1e9)
++        self.valueBox.setFixedWidth(VALUE_WIDTH)
++        self.valueBox.setKeyboardTracking(False)
++        self._outer.addWidget(self.valueBox)
++
++        self.minimumBox = self._rangeBox(low)
++        self.maximumBox = self._rangeBox(high)
++        self._outer.addWidget(self.minimumBox)
++        self._outer.addWidget(self.maximumBox)
++
++        self._applyRange(low, high)
++        self.setValue(control.data["value"])
++
++        self.slider.valueChanged.connect(self._onSlider)
++        self.slider.sliderPressed.connect(lambda: self._onDragChanged(True))
++        self.slider.sliderReleased.connect(lambda: self._onDragChanged(False))
++        self.valueBox.valueChanged.connect(self._onSpin)
++        self.minimumBox.valueChanged.connect(self._onRangeEdited)
++        self.maximumBox.valueChanged.connect(self._onRangeEdited)
++
++    def _rangeBox(self, value):
++        box = QtWidgets.QDoubleSpinBox()
++        box.setDecimals(0 if self.isInt else 2)
++        box.setRange(-1e9, 1e9)
++        box.setFixedWidth(64)
++        box.setKeyboardTracking(False)
++        box.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
++        box.setValue(value)
++        box.setToolTip("Slider range. Editing it rewrites the `# min, max` "
++                       "comment on this line.")
++        return box
++
++    def _applyRange(self, low, high):
++        self._scale.set(low, high)
++        if self.isInt:
++            self.slider.setRange(int(round(self._scale.low)),
++                                 int(round(self._scale.high)))
++        else:
++            self.slider.setRange(0, _Scale.STEPS)
++            self.valueBox.setSingleStep(
++                max(1e-4, (self._scale.high - self._scale.low) / 100.0))
++
++    def value(self):
++        return self.valueBox.value()
++
++    def range(self):
++        return self.minimumBox.value(), self.maximumBox.value()
++
++    def setValue(self, value):
++        self._updating = True
++        try:
++            self.valueBox.setValue(value)
++            self.slider.setValue(int(round(value)) if self.isInt
++                                 else self._scale.toSlider(value))
++        finally:
++            self._updating = False
++
++    def _onSlider(self, position):
++        if self._updating:
++            return
++        value = float(position) if self.isInt else self._scale.toValue(position)
++        self._updating = True
++        try:
++            self.valueBox.setValue(value)
++        finally:
++            self._updating = False
++        self.report(value)
++
++    def _onSpin(self, value):
++        if self._updating:
++            return
++        self._updating = True
++        try:
++            self.slider.setValue(int(round(value)) if self.isInt
++                                 else self._scale.toSlider(value))
++        finally:
++            self._updating = False
++        self.report(value)
++
++    def _onRangeEdited(self, _value):
++        if self._updating:
++            return
++        low, high = self.range()
++        self._applyRange(low, high)
++        self.setValue(self.valueBox.value())
++        self._onRangeChanged(self.index, low, high)
++
++
++class VectorControl(_Control):
++    """`$c = [1, 0.5, 0.2]; # color` -- a swatch and three component sliders,
++    or the same three sliders alone when the annotation does not say colour."""
++
++    LABELS = ("x", "y", "z", "w")
++    COLOR_LABELS = ("r", "g", "b", "a")
++
++    def __init__(self, index, control, onChanged, onDragChanged, parent=None):
++        super(VectorControl, self).__init__(index, control, onChanged,
++                                            onDragChanged, parent)
++        self.isColor = control.kind == "color"
++        values = list(control.data["values"])
++        self._scale = _Scale(control.data["minimum"], control.data["maximum"])
++
++        body = QtWidgets.QVBoxLayout()
++        body.setContentsMargins(0, 0, 0, 0)
++        body.setSpacing(1)
++        self._outer.addLayout(body, 1)
++
++        self.swatch = None
++        if self.isColor:
++            self.swatch = QtWidgets.QPushButton()
++            self.swatch.setFixedSize(34, 18)
++            self.swatch.setToolTip("Pick a colour")
++            self.swatch.clicked.connect(self._pickColor)
++            self._outer.insertWidget(1, self.swatch)
++            self._outer.setAlignment(self.swatch, QtCore.Qt.AlignTop)
++
++        labels = self.COLOR_LABELS if self.isColor else self.LABELS
++        self.sliders = []
++        self.boxes = []
++        for component in range(len(values)):
++            row = QtWidgets.QHBoxLayout()
++            row.setContentsMargins(0, 0, 0, 0)
++            row.setSpacing(4)
++            tag = QtWidgets.QLabel(labels[component] if component < len(labels)
++                                   else str(component))
++            tag.setFixedWidth(10)
++            tag.setFont(_fixedFont())
++            row.addWidget(tag)
++            slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
++            slider.setRange(0, _Scale.STEPS)
++            slider.setMinimumWidth(50)
++            row.addWidget(slider, 1)
++            box = QtWidgets.QDoubleSpinBox()
++            box.setDecimals(4)
++            box.setRange(-1e9, 1e9)
++            box.setFixedWidth(VALUE_WIDTH)
++            box.setKeyboardTracking(False)
++            box.setSingleStep(max(1e-4, (self._scale.high - self._scale.low) / 100.0))
++            row.addWidget(box)
++            body.addLayout(row)
++            self.sliders.append(slider)
++            self.boxes.append(box)
++            slider.valueChanged.connect(
++                lambda position, c=component: self._onSlider(c, position))
++            slider.sliderPressed.connect(lambda: self._onDragChanged(True))
++            slider.sliderReleased.connect(lambda: self._onDragChanged(False))
++            box.valueChanged.connect(
++                lambda value, c=component: self._onSpin(c, value))
++
++        self.setValue(values)
++
++    def value(self):
++        return tuple(box.value() for box in self.boxes)
++
++    def setValue(self, values):
++        self._updating = True
++        try:
++            for box, slider, value in zip(self.boxes, self.sliders, values):
++                box.setValue(value)
++                slider.setValue(self._scale.toSlider(value))
++            self._refreshSwatch()
++        finally:
++            self._updating = False
++
++    def _refreshSwatch(self):
++        if self.swatch is not None:
++            self.swatch.setIcon(QtGui.QIcon(_swatch(_toColor(self.value()))))
++            self.swatch.setIconSize(QtCore.QSize(28, 14))
++
++    def _onSlider(self, component, position):
++        if self._updating:
++            return
++        value = self._scale.toValue(position)
++        self._updating = True
++        try:
++            self.boxes[component].setValue(value)
++            self._refreshSwatch()
++        finally:
++            self._updating = False
++        self.report(self.value())
++
++    def _onSpin(self, component, value):
++        if self._updating:
++            return
++        self._updating = True
++        try:
++            self.sliders[component].setValue(self._scale.toSlider(value))
++            self._refreshSwatch()
++        finally:
++            self._updating = False
++        self.report(self.value())
++
++    def _pickColor(self):
++        chosen = QtWidgets.QColorDialog.getColor(
++            _toColor(self.value()), self, "Pick a colour")
++        if not chosen.isValid():
++            return
++        self.setValue(_fromColor(chosen) + self.value()[3:])
++        self.report(self.value())
++
++
++class CurveWidget(QtWidgets.QWidget):
++    """The editable knot list of a `curve(...)` or `ccurve(...)` value.
++
++    Left-click a knot to select and drag it, left-click empty space to add
++    one, right-click or Delete to remove one. A colour curve's knots carry no
++    height, so they ride a rail along the bottom and only their position
++    moves; double-clicking one opens the colour picker."""
++
++    MINIMUM_HEIGHT = 108
++    MARGIN = 7
++    RADIUS = 4
++    PICK_DISTANCE = 8
++
++    def __init__(self, isColor, onChanged, onDragChanged, onSelected,
++                 parent=None):
++        super(CurveWidget, self).__init__(parent)
++        self.isColor = isColor
++        self._onChanged = onChanged
++        self._onDragChanged = onDragChanged
++        self._onSelected = onSelected
++        self._knots = []
++        self._selected = -1
++        self._dragging = False
++        self.setMinimumHeight(self.MINIMUM_HEIGHT)
++        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
++                           QtWidgets.QSizePolicy.Fixed)
++        self.setFocusPolicy(QtCore.Qt.StrongFocus)
++        self.setCursor(QtCore.Qt.CrossCursor)
++
++    # ---- state ---------------------------------------------------------
++
++    def knots(self):
++        return list(self._knots)
++
++    def setKnots(self, knots, selected=None):
++        self._knots = sorted(knots, key=lambda k: k[0])
++        if selected is not None:
++            self._selected = selected
++        self._selected = max(-1, min(self._selected, len(self._knots) - 1))
++        self.update()
++
++    def selectedIndex(self):
++        return self._selected
++
++    def selectKnot(self, index):
++        self._selected = max(-1, min(index, len(self._knots) - 1))
++        self.update()
++        self._onSelected(self._selected)
++
++    def setSelectedKnot(self, position=None, value=None, interp=None):
++        """Change the selected knot from the row of boxes below the canvas."""
++        if self._selected < 0:
++            return
++        p, v, i = self._knots[self._selected]
++        knot = (p if position is None else position,
++                v if value is None else value,
++                i if interp is None else interp)
++        knots = list(self._knots)
++        knots[self._selected] = knot
++        order = sorted(range(len(knots)), key=lambda n: knots[n][0])
++        self._selected = order.index(self._selected)
++        self.setKnots(knots)
++        self._onChanged(self.knots())
++
++    def removeSelected(self):
++        # One knot is the least a curve can be built from; refusing the last
++        # deletion keeps the value a curve rather than an empty call.
++        if self._selected < 0 or len(self._knots) <= 1:
++            return False
++        del self._knots[self._selected]
++        self._selected = min(self._selected, len(self._knots) - 1)
++        self.update()
++        self._onSelected(self._selected)
++        self._onChanged(self.knots())
++        return True
++
++    # ---- geometry ------------------------------------------------------
++
++    def _valueRange(self):
++        """The vertical extent, always containing [0, 1] so a curve that only
++        moves inside the unit range does not jump scale as it is dragged."""
++        if self.isColor or not self._knots:
++            return 0.0, 1.0
++        values = [k[1] for k in self._knots]
++        return min(0.0, min(values)), max(1.0, max(values))
++
++    def _plotRect(self):
++        return self.rect().adjusted(self.MARGIN, self.MARGIN,
++                                    -self.MARGIN, -self.MARGIN)
++
++    def _toPixel(self, position, value):
++        rect = self._plotRect()
++        low, high = self._valueRange()
++        span = high - low or 1.0
++        x = rect.left() + rect.width() * max(0.0, min(1.0, position))
++        if self.isColor:
++            return QtCore.QPointF(x, rect.bottom() - self.RADIUS - 1)
++        y = rect.bottom() - rect.height() * ((value - low) / span)
++        return QtCore.QPointF(x, y)
++
++    def _fromPixel(self, point):
++        rect = self._plotRect()
++        low, high = self._valueRange()
++        position = 0.0 if rect.width() <= 0 else \
++            (point.x() - rect.left()) / float(rect.width())
++        value = 0.0 if rect.height() <= 0 else \
++            (rect.bottom() - point.y()) / float(rect.height())
++        return (max(0.0, min(1.0, position)), low + (high - low) * value)
++
++    def _knotAt(self, point):
++        for index, (position, value, _interp) in enumerate(self._knots):
++            pixel = self._toPixel(position, value if not self.isColor else 0.0)
++            if (pixel - QtCore.QPointF(point)).manhattanLength() \
++                    <= self.PICK_DISTANCE * 1.5:
++                return index
++        return -1
++
++    # ---- painting ------------------------------------------------------
++
++    def paintEvent(self, _event):
++        painter = QtGui.QPainter(self)
++        painter.setRenderHint(QtGui.QPainter.Antialiasing)
++        rect = self._plotRect()
++        painter.fillRect(self.rect(), self.palette().base())
++        painter.setPen(QtGui.QPen(QtGui.QColor(90, 90, 90)))
++        painter.drawRect(rect)
++
++        if not self._knots:
++            return
++        if self.isColor:
++            self._paintColorBand(painter, rect)
++        else:
++            self._paintCurve(painter, rect)
++
++        for index, (position, value, _interp) in enumerate(self._knots):
++            pixel = self._toPixel(position, value)
++            selected = index == self._selected
++            painter.setPen(QtGui.QPen(
++                QtGui.QColor(255, 255, 255) if selected
++                else QtGui.QColor(40, 40, 40), 1.5))
++            if self.isColor:
++                painter.setBrush(QtGui.QBrush(_toColor(value)))
++                painter.drawRect(QtCore.QRectF(
++                    pixel.x() - self.RADIUS, pixel.y() - self.RADIUS,
++                    self.RADIUS * 2, self.RADIUS * 2))
++            else:
++                painter.setBrush(QtGui.QBrush(
++                    QtGui.QColor(255, 196, 92) if selected
++                    else QtGui.QColor(120, 170, 230)))
++                painter.drawEllipse(pixel, self.RADIUS, self.RADIUS)
++
++    def _paintCurve(self, painter, rect):
++        low, high = self._valueRange()
++        # The unit gridlines, so a value of 1 is readable without a ruler.
++        painter.setPen(QtGui.QPen(QtGui.QColor(70, 70, 70), 1,
++                                  QtCore.Qt.DotLine))
++        for mark in (0.0, 1.0):
++            if low <= mark <= high:
++                y = self._toPixel(0.0, mark).y()
++                painter.drawLine(QtCore.QPointF(rect.left(), y),
++                                 QtCore.QPointF(rect.right(), y))
++        path = QtGui.QPainterPath()
++        steps = max(2, rect.width())
++        for step in range(int(steps) + 1):
++            x = step / float(steps)
++            point = self._toPixel(x, exprApi.EvaluateCurve(self._knots, x))
++            if step == 0:
++                path.moveTo(point)
++            else:
++                path.lineTo(point)
++        painter.setPen(QtGui.QPen(QtGui.QColor(150, 210, 150), 1.6))
++        painter.setBrush(QtCore.Qt.NoBrush)
++        painter.drawPath(path)
++
++    def _paintColorBand(self, painter, rect):
++        # A gradient rather than a column of one-pixel fills: those landed on
++        # fractional x and banded the ramp with a moire stripe.
++        band = QtCore.QRectF(rect.left() + 1, rect.top() + 1,
++                             rect.width() - 2, rect.height() - 14)
++        gradient = QtGui.QLinearGradient(band.topLeft(), band.topRight())
++        steps = 48
++        for step in range(steps + 1):
++            x = step / float(steps)
++            gradient.setColorAt(x, _toColor(exprApi.EvaluateCurve(self._knots, x)))
++        painter.fillRect(band, QtGui.QBrush(gradient))
++        painter.setPen(QtGui.QPen(QtGui.QColor(90, 90, 90)))
++        painter.setBrush(QtCore.Qt.NoBrush)
++        painter.drawRect(band)
++
++    # ---- input ---------------------------------------------------------
++
++    def mousePressEvent(self, event):
++        index = self._knotAt(event.position() if hasattr(event, "position")
++                             else event.pos())
++        if event.button() == QtCore.Qt.RightButton:
++            if index >= 0:
++                self.selectKnot(index)
++                self.removeSelected()
++            return
++        if event.button() != QtCore.Qt.LeftButton:
++            return
++        if index >= 0:
++            self.selectKnot(index)
++            self._dragging = True
++            self._onDragChanged(True)
++            return
++        position, value = self._fromPixel(
++            event.position() if hasattr(event, "position") else event.pos())
++        interp = self._knots[0][2] if self._knots else exprApi.INTERP_MONOTONE
++        knot = (position,
++                exprApi.EvaluateCurve(self._knots, position) if self.isColor
++                else value,
++                interp)
++        knots = self._knots + [knot]
++        knots.sort(key=lambda k: k[0])
++        self._knots = knots
++        self.selectKnot(knots.index(knot))
++        self._onChanged(self.knots())
++
++    def mouseMoveEvent(self, event):
++        if not self._dragging or self._selected < 0:
++            return
++        position, value = self._fromPixel(
++            event.position() if hasattr(event, "position") else event.pos())
++        self.setSelectedKnot(position=position,
++                             value=None if self.isColor else value)
++        self._onSelected(self._selected)
++
++    def mouseReleaseEvent(self, _event):
++        if self._dragging:
++            self._dragging = False
++            self._onDragChanged(False)
++
++    def mouseDoubleClickEvent(self, event):
++        if not self.isColor:
++            return
++        index = self._knotAt(event.position() if hasattr(event, "position")
++                             else event.pos())
++        if index < 0:
++            return
++        self.selectKnot(index)
++        chosen = QtWidgets.QColorDialog.getColor(
++            _toColor(self._knots[index][1]), self, "Pick a knot colour")
++        if chosen.isValid():
++            self.setSelectedKnot(value=_fromColor(chosen))
++
++    def keyPressEvent(self, event):
++        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
++            self.removeSelected()
++            return
++        super(CurveWidget, self).keyPressEvent(event)
++
++
++class CurveControl(_Control):
++    """A curve widget plus the selected knot's position, value and
++    interpolation, so a knot can be typed as well as dragged."""
++
++    def __init__(self, index, control, onChanged, onDragChanged, parent=None):
++        super(CurveControl, self).__init__(index, control, onChanged,
++                                           onDragChanged, parent)
++        self.isColor = control.kind == "ccurve"
++
++        body = QtWidgets.QVBoxLayout()
++        body.setContentsMargins(0, 0, 0, 0)
++        body.setSpacing(2)
++        self._outer.addLayout(body, 1)
++
++        self.curve = CurveWidget(self.isColor, self._onKnotsChanged,
++                                 onDragChanged, self._onKnotSelected)
++        body.addWidget(self.curve)
++
++        row = QtWidgets.QHBoxLayout()
++        row.setContentsMargins(0, 0, 0, 0)
++        row.setSpacing(4)
++        row.addWidget(QtWidgets.QLabel("at"))
++        self.positionBox = QtWidgets.QDoubleSpinBox()
++        self.positionBox.setDecimals(3)
++        self.positionBox.setRange(0.0, 1.0)
++        self.positionBox.setSingleStep(0.05)
++        self.positionBox.setFixedWidth(88)
++        self.positionBox.setKeyboardTracking(False)
++        self.positionBox.valueChanged.connect(self._onPositionTyped)
++        row.addWidget(self.positionBox)
++
++        if self.isColor:
++            self.valueButton = QtWidgets.QPushButton()
++            self.valueButton.setFixedSize(34, 18)
++            self.valueButton.setToolTip("Colour of the selected knot")
++            self.valueButton.clicked.connect(self._pickKnotColor)
++            row.addWidget(self.valueButton)
++            self.valueBox = None
++        else:
++            self.valueBox = QtWidgets.QDoubleSpinBox()
++            self.valueBox.setDecimals(4)
++            self.valueBox.setRange(-1e9, 1e9)
++            self.valueBox.setSingleStep(0.05)
++            self.valueBox.setFixedWidth(VALUE_WIDTH)
++            self.valueBox.setKeyboardTracking(False)
++            self.valueBox.valueChanged.connect(self._onValueTyped)
++            row.addWidget(self.valueBox)
++            self.valueButton = None
++
++        self.interpCombo = QtWidgets.QComboBox()
++        for code, name in enumerate(exprApi.INTERP_NAMES):
++            self.interpCombo.addItem(name, code)
++        self.interpCombo.setToolTip(
++            "How the segment ENDING at this knot is interpolated, which is "
++            "the sense SeExpr's curve() gives the code.")
++        self.interpCombo.currentIndexChanged.connect(self._onInterpChanged)
++        row.addWidget(self.interpCombo)
++
++        self.deleteButton = QtWidgets.QPushButton("Delete knot")
++        self.deleteButton.clicked.connect(self.curve.removeSelected)
++        row.addWidget(self.deleteButton)
++        row.addStretch(1)
++        body.addLayout(row)
++
++        self.curve.setKnots(control.data["knots"], selected=0)
++        self._onKnotSelected(0)
++
++    def knots(self):
++        return self.curve.knots()
++
++    def setValue(self, knots):
++        self._updating = True
++        try:
++            self.curve.setKnots(knots)
++            self._onKnotSelected(self.curve.selectedIndex())
++        finally:
++            self._updating = False
++
++    def _onKnotsChanged(self, knots):
++        self.report(knots)
++
++    def _onKnotSelected(self, index):
++        knots = self.curve.knots()
++        enabled = 0 <= index < len(knots)
++        for widget in (self.positionBox, self.interpCombo, self.deleteButton):
++            widget.setEnabled(enabled)
++        if self.valueBox is not None:
++            self.valueBox.setEnabled(enabled)
++        if self.valueButton is not None:
++            self.valueButton.setEnabled(enabled)
++        if not enabled:
++            return
++        position, value, interp = knots[index]
++        wasUpdating = self._updating
++        self._updating = True
++        try:
++            self.positionBox.setValue(position)
++            if self.valueBox is not None:
++                self.valueBox.setValue(value)
++            else:
++                self.valueButton.setIcon(QtGui.QIcon(_swatch(_toColor(value))))
++                self.valueButton.setIconSize(QtCore.QSize(28, 14))
++            self.interpCombo.setCurrentIndex(
++                max(0, min(int(interp), len(exprApi.INTERP_NAMES) - 1)))
++        finally:
++            self._updating = wasUpdating
++
++    def _onPositionTyped(self, value):
++        if self._updating:
++            return
++        self.curve.setSelectedKnot(position=value)
++
++    def _onValueTyped(self, value):
++        if self._updating:
++            return
++        self.curve.setSelectedKnot(value=value)
++
++    def _onInterpChanged(self, index):
++        if self._updating or index < 0:
++            return
++        self.curve.setSelectedKnot(interp=self.interpCombo.itemData(index))
++
++    def _pickKnotColor(self):
++        index = self.curve.selectedIndex()
++        knots = self.curve.knots()
++        if not 0 <= index < len(knots):
++            return
++        chosen = QtWidgets.QColorDialog.getColor(
++            _toColor(knots[index][1]), self, "Pick a knot colour")
++        if chosen.isValid():
++            self.curve.setSelectedKnot(value=_fromColor(chosen))
++
++
++class StringControl(_Control):
++    """`$s = "..."; # string`.
++
++    The engine rejects string literals today, so this control exists to make
++    the model complete and the rejection legible: validation flags the text,
++    and the control still shows what the text says."""
++
++    def __init__(self, index, control, onChanged, onDragChanged, parent=None):
++        super(StringControl, self).__init__(index, control, onChanged,
++                                            onDragChanged, parent)
++        self.edit = QtWidgets.QLineEdit(control.data["value"])
++        self.edit.setToolTip(
++            "String literals are not part of the expression language the "
++            "engine accepts; validation will say so.")
++        self.edit.editingFinished.connect(
++            lambda: self.report(self.edit.text()))
++        self._outer.addWidget(self.edit, 1)
++
++    def value(self):
++        return self.edit.text()
++
++    def setValue(self, value):
++        self._updating = True
++        try:
++            self.edit.setText(value)
++        finally:
++            self._updating = False
++
++
++def _signature(control):
++    """What must change before a control's WIDGET has to be rebuilt.
++
++    A value alone never does: rebuilding mid-drag would pull the knot or the
++    slider out from under the pointer."""
++    if control.kind in ("curve", "ccurve"):
++        return (control.name, control.kind, len(control.data["knots"]),
++                control.data["lookup"])
++    if control.kind in ("vector", "color"):
++        return (control.name, control.kind, len(control.data["values"]),
++                control.data["minimum"], control.data["maximum"])
++    if control.kind in ("int", "float"):
++        return (control.name, control.kind, control.data["minimum"],
++                control.data["maximum"])
++    return (control.name, control.kind)
++
++
++def BuildControl(index, control, onChanged, onDragChanged, onRangeChanged):
++    if control.kind in ("int", "float"):
++        return NumberControl(index, control, onChanged, onDragChanged,
++                             onRangeChanged)
++    if control.kind in ("vector", "color"):
++        return VectorControl(index, control, onChanged, onDragChanged)
++    if control.kind in ("curve", "ccurve"):
++        return CurveControl(index, control, onChanged, onDragChanged)
++    return StringControl(index, control, onChanged, onDragChanged)
++
++
++class ControlPanel(QtWidgets.QWidget):
++    """Every control the expression declares, over the plain-literal fallback.
++
++    Rebuilt only when the set of controls actually changes shape, so an edit
++    made through a control does not destroy the widget that made it."""
++
++    def __init__(self, onChanged, onRangeChanged, onDragChanged, onAddWidget,
++                 literalPanel, parent=None):
++        super(ControlPanel, self).__init__(parent)
++        self._onChanged = onChanged
++        self._onRangeChanged = onRangeChanged
++        self._onDragChanged = onDragChanged
++        self.controls = []
++        self.rows = []
++        self._signatures = ()
++        self.literalPanel = literalPanel
++
++        outer = QtWidgets.QVBoxLayout(self)
++        outer.setContentsMargins(0, 0, 0, 0)
++        outer.setSpacing(4)
++
++        top = QtWidgets.QHBoxLayout()
++        self.addButton = QtWidgets.QPushButton("Add Widget...")
++        self.addButton.setToolTip(
++            "Declare a new $variable at the top of the expression and give it "
++            "a control.")
++        self.addButton.clicked.connect(onAddWidget)
++        top.addWidget(self.addButton)
++        top.addStretch(1)
++        outer.addLayout(top)
++
++        self.empty = QtWidgets.QLabel(
++            "No controls. A top-level `$name = 0.5; # 0, 1` gives this panel a "
++            "slider; `# color`, curve(...) and ccurve(...) give the other "
++            "control kinds. Use Add Widget to write one.")
++        self.empty.setWordWrap(True)
++        self.empty.setAlignment(QtCore.Qt.AlignTop)
++        outer.addWidget(self.empty)
++
++        self._area = QtWidgets.QScrollArea()
++        self._area.setWidgetResizable(True)
++        self._area.setFrameShape(QtWidgets.QFrame.NoFrame)
++        self._body = QtWidgets.QWidget()
++        self._layout = QtWidgets.QVBoxLayout(self._body)
++        self._layout.setContentsMargins(2, 2, 2, 2)
++        self._layout.setSpacing(4)
++        self._layout.addStretch(1)
++        self._area.setWidget(self._body)
++        outer.addWidget(self._area, 1)
++        self._area.hide()
++
++        self.literalHeading = QtWidgets.QLabel("Loose numbers")
++        self.literalHeading.setToolTip(
++            "Numeric literals that no $variable holds. Assign one to a "
++            "variable to give it a proper control.")
++        outer.addWidget(self.literalHeading)
++        outer.addWidget(literalPanel, 1)
++
++    # ---- content -------------------------------------------------------
++
++    def setSource(self, text):
++        """Rescan `text`, rebuilding only what changed shape."""
++        controls = exprApi.ScanControls(text)
++        signatures = tuple(_signature(c) for c in controls)
++        self.controls = controls
++        if signatures != self._signatures:
++            self._signatures = signatures
++            self._rebuild()
++        else:
++            for row, control in zip(self.rows, controls):
++                row.setControl(control)
++        self._refreshLiterals(text)
++
++    def refreshOffsets(self, text):
++        """After a rewrite this panel made: take the new offsets and leave
++        every widget exactly as the user left it."""
++        controls = exprApi.ScanControls(text)
++        if tuple(_signature(c) for c in controls) != self._signatures:
++            self.setSource(text)
++            return
++        self.controls = controls
++        for row, control in zip(self.rows, controls):
++            row.setControl(control)
++        self._refreshLiterals(text, offsetsOnly=True)
++
++    def _refreshLiterals(self, text, offsetsOnly=False):
++        # After an edit the panel itself made, only the offsets moved: a
++        # rebuild here would take the slider away from the pointer dragging it.
++        exclude = exprApi.ControlSpans(self.controls)
++        if offsetsOnly:
++            self.literalPanel.refreshOffsets(text, exclude=exclude)
++        else:
++            self.literalPanel.setSource(text, exclude=exclude)
++        visible = bool(self.literalPanel.rows)
++        self.literalHeading.setVisible(visible)
++        self.literalPanel.setVisible(visible)
++
++    def _rebuild(self):
++        for row in self.rows:
++            self._layout.removeWidget(row)
++            row.setParent(None)
++            row.deleteLater()
++        self.rows = []
++        for index, control in enumerate(self.controls):
++            row = BuildControl(index, control, self._onChanged,
++                               self._onDragChanged, self._onRangeChanged)
++            self._layout.insertWidget(self._layout.count() - 1, row)
++            self.rows.append(row)
++        self.empty.setVisible(not self.rows)
++        self._area.setVisible(bool(self.rows))
++
++
++class AddWidgetDialog(QtWidgets.QDialog):
++    """SeExpr's ExprAddDialog: a name, a type, and the initial value or range
++    that type needs. Accepting it inserts one declaration line."""
++
++    def __init__(self, parent, existingNames=()):
++        super(AddWidgetDialog, self).__init__(parent)
++        self.setWindowTitle("Add Widget")
++        self._existing = set(existingNames)
++
++        layout = QtWidgets.QFormLayout(self)
++        self.nameEdit = QtWidgets.QLineEdit(self._suggestName())
++        layout.addRow("Name:", self.nameEdit)
++
++        self.kindCombo = QtWidgets.QComboBox()
++        for label, kind, _initial in WIDGET_KINDS:
++            self.kindCombo.addItem(label, kind)
++        self.kindCombo.setCurrentIndex(1)  # Float, the common case
++        self.kindCombo.currentIndexChanged.connect(self._onKindChanged)
++        layout.addRow("Type:", self.kindCombo)
++
++        self.valueBox = QtWidgets.QDoubleSpinBox()
++        self.valueBox.setDecimals(4)
++        self.valueBox.setRange(-1e9, 1e9)
++        self.valueBox.setValue(0.5)
++        layout.addRow("Value:", self.valueBox)
++        self.valueLabel = layout.labelForField(self.valueBox)
++
++        self.minimumBox = QtWidgets.QDoubleSpinBox()
++        self.minimumBox.setDecimals(4)
++        self.minimumBox.setRange(-1e9, 1e9)
++        self.minimumBox.setValue(0.0)
++        self.maximumBox = QtWidgets.QDoubleSpinBox()
++        self.maximumBox.setDecimals(4)
++        self.maximumBox.setRange(-1e9, 1e9)
++        self.maximumBox.setValue(1.0)
++        rangeRow = QtWidgets.QHBoxLayout()
++        rangeRow.addWidget(self.minimumBox)
++        rangeRow.addWidget(self.maximumBox)
++        self.rangeWidget = QtWidgets.QWidget()
++        self.rangeWidget.setLayout(rangeRow)
++        layout.addRow("Range:", self.rangeWidget)
++        self.rangeLabel = layout.labelForField(self.rangeWidget)
++
++        self.colorButton = QtWidgets.QPushButton()
++        self.colorButton.setFixedSize(40, 20)
++        self._color = QtGui.QColor(255, 255, 255)
++        self.colorButton.clicked.connect(self._pickColor)
++        layout.addRow("Colour:", self.colorButton)
++        self.colorLabel = layout.labelForField(self.colorButton)
++
++        self.textEdit = QtWidgets.QLineEdit()
++        layout.addRow("Text:", self.textEdit)
++        self.textLabel = layout.labelForField(self.textEdit)
++
++        self.lookupEdit = QtWidgets.QLineEdit("$t")
++        self.lookupEdit.setToolTip(
++            "The expression the curve is looked up by, curve()'s first "
++            "argument.")
++        layout.addRow("Lookup:", self.lookupEdit)
++        self.lookupLabel = layout.labelForField(self.lookupEdit)
++
++        self.note = QtWidgets.QLabel()
++        self.note.setWordWrap(True)
++        layout.addRow(self.note)
++
++        self.buttons = QtWidgets.QDialogButtonBox(
++            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
++        self.buttons.accepted.connect(self._onAccept)
++        self.buttons.rejected.connect(self.reject)
++        layout.addRow(self.buttons)
++
++        # Every input feeds the preview line, or it would show a declaration
++        # the dialog is no longer describing.
++        self.nameEdit.textChanged.connect(self._refreshNote)
++        self.valueBox.valueChanged.connect(self._refreshNote)
++        self.minimumBox.valueChanged.connect(self._refreshNote)
++        self.maximumBox.valueChanged.connect(self._refreshNote)
++        self.textEdit.textChanged.connect(self._refreshNote)
++        self.lookupEdit.textChanged.connect(self._refreshNote)
++        self._refreshSwatch()
++        self._onKindChanged(self.kindCombo.currentIndex())
++
++    def _suggestName(self):
++        for n in range(1, 100):
++            candidate = "$var%d" % n
++            if candidate not in self._existing:
++                return candidate
++        return "$var"
++
++    def kind(self):
++        return self.kindCombo.currentData()
++
++    def name(self):
++        text = self.nameEdit.text().strip()
++        if text and not text.startswith("$"):
++            text = "$" + text
++        return text
++
++    def _onKindChanged(self, _index):
++        kind = self.kind()
++        isNumber = kind in ("int", "float")
++        isVector = kind in ("vector", "color")
++        isCurve = kind in ("curve", "ccurve")
++        for widget, label, shown in (
++                (self.valueBox, self.valueLabel, isNumber),
++                (self.rangeWidget, self.rangeLabel, isNumber),
++                (self.colorButton, self.colorLabel, isVector),
++                (self.textEdit, self.textLabel, kind == "string"),
++                (self.lookupEdit, self.lookupLabel, isCurve)):
++            widget.setVisible(shown)
++            if label is not None:
++                label.setVisible(shown)
++        self.valueBox.setDecimals(0 if kind == "int" else 4)
++        self.minimumBox.setDecimals(0 if kind == "int" else 4)
++        self.maximumBox.setDecimals(0 if kind == "int" else 4)
++        if kind == "int":
++            self.valueBox.setValue(round(self.valueBox.value()))
++            self.maximumBox.setValue(max(1.0, round(self.maximumBox.value())))
++        self._refreshNote()
++
++    def _pickColor(self):
++        chosen = QtWidgets.QColorDialog.getColor(self._color, self,
++                                                 "Pick a colour")
++        if chosen.isValid():
++            self._color = chosen
++            self._refreshSwatch()
++            self._refreshNote()
++
++    def _refreshSwatch(self):
++        self.colorButton.setIcon(QtGui.QIcon(_swatch(self._color)))
++        self.colorButton.setIconSize(QtCore.QSize(28, 14))
++
++    def value(self):
++        kind = self.kind()
++        if kind in ("int", "float"):
++            return self.valueBox.value()
++        if kind in ("vector", "color"):
++            return _fromColor(self._color)
++        if kind == "string":
++            return self.textEdit.text()
++        for label, candidate, initial in WIDGET_KINDS:
++            if candidate == kind:
++                return initial
++        return 0.0
++
++    def declaration(self):
++        """The `$name = ...; # ...` line this dialog describes."""
++        return exprApi.DeclarationFor(
++            self.name(), self.kind(), self.value(),
++            minimum=self.minimumBox.value(), maximum=self.maximumBox.value(),
++            lookup=self.lookupEdit.text().strip() or "$t")
++
++    def _refreshNote(self):
++        name = self.name()
++        if not name:
++            self.note.setText("A name is needed.")
++        elif name in self._existing:
++            self.note.setText("%s is already declared." % name)
++        else:
++            self.note.setText(self.declaration())
++        ok = self.buttons.button(QtWidgets.QDialogButtonBox.Ok)
++        if ok is not None:
++            ok.setEnabled(bool(name) and name not in self._existing)
++
++    def _onAccept(self):
++        name = self.name()
++        if not name or name in self._existing:
++            return
++        self.accept()
+diff --git a/plugin/usdGenTools/python/usdGenTools/exprEdit.py b/plugin/usdGenTools/python/usdGenTools/exprEdit.py
+new file mode 100644
+index 0000000..76efc5d
+--- /dev/null
++++ b/plugin/usdGenTools/python/usdGenTools/exprEdit.py
+@@ -0,0 +1,276 @@
++# The text pane itself: a QPlainTextEdit with a line-number gutter and the
++# completion popup SeExpr's editor pops while you type.
++#
++# The vocabulary is whatever the C ABI reported -- functions with their
++# signatures and docs, variables with their types and docs -- so the popup can
++# never offer a name the engine does not know.
++
++from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
++
++from . import exprApi
++
++# How many characters must be typed before the popup appears. One is enough
++# after a '$', because the sigil already says what is being named; a bare
++# identifier needs two, or every '(' would drag a popup along with it.
++MINIMUM_VARIABLE_PREFIX = 1
++MINIMUM_NAME_PREFIX = 2
++
++
++class CompletionModel(QtGui.QStandardItemModel):
++    """SeExpr's ExprCompletionModel: the names in scope, each with the
++    signature or type it completes to and a line of documentation.
++
++    Three columns, because the popup is a tree view: the name the completer
++    matches on, the signature, and the doc."""
++
++    NAME, SIGNATURE, DOC = range(3)
++
++    def __init__(self, parent=None):
++        super(CompletionModel, self).__init__(0, 3, parent)
++        self.functions = []
++        self.variables = []
++
++    def setVocabulary(self, functions, variables):
++        self.functions = list(functions)
++        self.variables = list(variables)
++        self.clear()
++        self.setColumnCount(3)
++        for variable in self.variables:
++            self._append(variable.name, variable.scalarType, variable.doc,
++                         variable.name)
++        for function in self.functions:
++            self._append(function.name, function.signature, function.doc,
++                         function.insert)
++
++    def _append(self, name, signature, doc, insert):
++        row = [QtGui.QStandardItem(name), QtGui.QStandardItem(signature),
++               QtGui.QStandardItem(doc)]
++        for item in row:
++            item.setEditable(False)
++            item.setToolTip("%s\n%s" % (signature, doc))
++            item.setData(insert, QtCore.Qt.UserRole + 1)
++        self.appendRow(row)
++
++    def names(self):
++        return [self.item(row, self.NAME).text()
++                for row in range(self.rowCount())]
++
++    def insertTextFor(self, name):
++        """The text to put in the document for `name`; a '|' in it marks where
++        the caret lands, exactly as the browsers' insert text does."""
++        for row in range(self.rowCount()):
++            item = self.item(row, self.NAME)
++            if item.text() == name:
++                return item.data(QtCore.Qt.UserRole + 1) or name
++        return name
++
++    def matches(self, prefix):
++        """Every name starting with `prefix`, case-insensitively.
++
++        A '$' prefix asks for variables and a bare prefix for functions: the
++        two namespaces do not overlap in this language, and mixing them would
++        offer `$t` where only a function can go."""
++        if not prefix:
++            return []
++        wantVariables = prefix.startswith("$")
++        lowered = prefix.lower()
++        found = []
++        for row in range(self.rowCount()):
++            name = self.item(row, self.NAME).text()
++            if name.startswith("$") != wantVariables:
++                continue
++            if name.lower().startswith(lowered):
++                found.append(name)
++        return found
++
++
++class _LineNumberArea(QtWidgets.QWidget):
++    """The gutter. It has no state: it asks the editor to paint it."""
++
++    def __init__(self, editor):
++        super(_LineNumberArea, self).__init__(editor)
++        self._editor = editor
++
++    def sizeHint(self):
++        return QtCore.QSize(self._editor.lineNumberAreaWidth(), 0)
++
++    def paintEvent(self, event):
++        self._editor.paintLineNumbers(event)
++
++
++class SourceEdit(QtWidgets.QPlainTextEdit):
++    """The expression text, with line numbers and completion.
++
++    Line numbers earn their width as soon as an expression is more than one
++    statement, which is what the controls grammar makes normal; a diagnostic
++    that says `line 3` is otherwise a number with nothing to point at."""
++
++    def __init__(self, parent=None):
++        super(SourceEdit, self).__init__(parent)
++        self._lineNumbers = _LineNumberArea(self)
++        self.blockCountChanged.connect(self._updateViewportMargins)
++        self.updateRequest.connect(self._onUpdateRequest)
++        self._updateViewportMargins()
++
++        self.completionModel = CompletionModel(self)
++        self.completer = QtWidgets.QCompleter(self.completionModel, self)
++        self.completer.setWidget(self)
++        self.completer.setCompletionColumn(CompletionModel.NAME)
++        self.completer.setCompletionRole(QtCore.Qt.DisplayRole)
++        self.completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
++        self.completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
++        popup = QtWidgets.QTreeView()
++        popup.setRootIsDecorated(False)
++        popup.header().hide()
++        popup.setAllColumnsShowFocus(True)
++        popup.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
++        popup.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
++        self.completer.setPopup(popup)
++        self.completer.activated[str].connect(self.insertCompletion)
++        self._completionEnabled = True
++
++    # ---- vocabulary ----------------------------------------------------
++
++    # Popup column widths. Fixed rather than content-derived: the completer
++    # filters the model down to a row or two, so asking the view for a size
++    # hint sizes the popup to whichever name happens to match.
++    POPUP_COLUMNS = (120, 190, 300)
++
++    def setVocabulary(self, functions, variables):
++        self.completionModel.setVocabulary(functions, variables)
++        popup = self.completer.popup()
++        for column, width in enumerate(self.POPUP_COLUMNS):
++            popup.setColumnWidth(column, width)
++        popup.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
++
++    def setCompletionEnabled(self, enabled):
++        self._completionEnabled = bool(enabled)
++        if not enabled:
++            self.completer.popup().hide()
++
++    # ---- line numbers --------------------------------------------------
++
++    def lineNumberAreaWidth(self):
++        digits = len(str(max(1, self.blockCount())))
++        return 8 + self.fontMetrics().horizontalAdvance("9") * max(2, digits)
++
++    def _updateViewportMargins(self, _count=0):
++        self.setViewportMargins(self.lineNumberAreaWidth(), 0, 0, 0)
++
++    def _onUpdateRequest(self, rect, dy):
++        if dy:
++            self._lineNumbers.scroll(0, dy)
++        else:
++            self._lineNumbers.update(0, rect.y(),
++                                     self._lineNumbers.width(), rect.height())
++        if rect.contains(self.viewport().rect()):
++            self._updateViewportMargins()
++
++    def resizeEvent(self, event):
++        super(SourceEdit, self).resizeEvent(event)
++        contents = self.contentsRect()
++        self._lineNumbers.setGeometry(QtCore.QRect(
++            contents.left(), contents.top(), self.lineNumberAreaWidth(),
++            contents.height()))
++
++    def paintLineNumbers(self, event):
++        painter = QtGui.QPainter(self._lineNumbers)
++        painter.fillRect(event.rect(), self.palette().window())
++        block = self.firstVisibleBlock()
++        number = block.blockNumber()
++        top = self.blockBoundingGeometry(block).translated(
++            self.contentOffset()).top()
++        bottom = top + self.blockBoundingRect(block).height()
++        current = self.textCursor().blockNumber()
++        while block.isValid() and top <= event.rect().bottom():
++            if block.isVisible() and bottom >= event.rect().top():
++                painter.setPen(QtGui.QColor(190, 190, 190) if number == current
++                               else QtGui.QColor(120, 120, 120))
++                painter.drawText(0, int(top), self._lineNumbers.width() - 4,
++                                 self.fontMetrics().height(),
++                                 QtCore.Qt.AlignRight, str(number + 1))
++            block = block.next()
++            top = bottom
++            bottom = top + self.blockBoundingRect(block).height()
++            number += 1
++
++    # ---- completion ----------------------------------------------------
++
++    def completionPrefix(self):
++        """The `$variable` or identifier the caret is sitting at the end of."""
++        text = self.toPlainText()
++        end = self.textCursor().position()
++        start = end
++        while start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
++            start -= 1
++        if start > 0 and text[start - 1] == "$":
++            start -= 1
++        prefix = text[start:end]
++        if prefix.startswith("$") or (prefix[:1].isalpha() or prefix[:1] == "_"):
++            return prefix
++        return ""
++
++    def completionCandidates(self, prefix=None):
++        """The names that would be offered for `prefix`, or for the caret."""
++        if prefix is None:
++            prefix = self.completionPrefix()
++        return self.completionModel.matches(prefix)
++
++    def insertCompletion(self, name):
++        """Replace the prefix under the caret with `name`'s insert text."""
++        prefix = self.completionPrefix()
++        cursor = self.textCursor()
++        cursor.setPosition(cursor.position() - len(prefix),
++                           QtGui.QTextCursor.KeepAnchor)
++        body = self.completionModel.insertTextFor(name)
++        caret = body.find("|")
++        body = body.replace("|", "")
++        cursor.insertText(body)
++        if caret >= 0:
++            cursor.setPosition(cursor.position() - (len(body) - caret))
++        self.setTextCursor(cursor)
++
++    def _shouldComplete(self, prefix):
++        if not prefix or not self._completionEnabled or self.isReadOnly():
++            return False
++        minimum = (MINIMUM_VARIABLE_PREFIX if prefix.startswith("$")
++                   else MINIMUM_NAME_PREFIX)
++        return len(prefix) >= minimum
++
++    def maybeComplete(self):
++        """Show, update or hide the popup for whatever the caret is on."""
++        popup = self.completer.popup()
++        prefix = self.completionPrefix()
++        if not self._shouldComplete(prefix) or not self.completionCandidates(prefix):
++            popup.hide()
++            return False
++        if prefix != self.completer.completionPrefix():
++            self.completer.setCompletionPrefix(prefix)
++            popup.setCurrentIndex(
++                self.completer.completionModel().index(0, 0))
++        rect = self.cursorRect()
++        rect.setWidth(sum(self.POPUP_COLUMNS)
++                      + popup.verticalScrollBar().sizeHint().width()
++                      + 2 * popup.frameWidth() + 4)
++        self.completer.complete(rect)
++        return True
++
++    def keyPressEvent(self, event):
++        popup = self.completer.popup()
++        if popup.isVisible():
++            # The popup owns these keys while it is up; letting the editor see
++            # them would insert a newline instead of accepting a completion.
++            if event.key() in (QtCore.Qt.Key_Enter, QtCore.Qt.Key_Return,
++                               QtCore.Qt.Key_Tab, QtCore.Qt.Key_Escape,
++                               QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
++                event.ignore()
++                return
++        if (event.key() == QtCore.Qt.Key_Space
++                and event.modifiers() & QtCore.Qt.ControlModifier):
++            self.maybeComplete()
++            return
++        super(SourceEdit, self).keyPressEvent(event)
++        if event.text():
++            self.maybeComplete()
++        elif popup.isVisible():
++            popup.hide()
+diff --git a/plugin/usdGenTools/python/usdGenTools/exprEditor.py b/plugin/usdGenTools/python/usdGenTools/exprEditor.py
+index 40674ee..da54f4a 100644
+--- a/plugin/usdGenTools/python/usdGenTools/exprEditor.py
++++ b/plugin/usdGenTools/python/usdGenTools/exprEditor.py
+@@ -22,7 +22,8 @@
+ from pxr import Sdf, Tf, Usd
+ from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
+ 
+-from . import exprApi, exprAuthor, exprHighlight, exprWidgets
++from . import (exprApi, exprAuthor, exprControls, exprEdit, exprHighlight,
++               exprLibrary, exprWidgets)
+ 
+ EXPRESSION_TYPE = exprAuthor.EXPRESSION_TYPE
+ SOURCE_ATTR = exprAuthor.SOURCE_ATTR
+@@ -81,6 +82,9 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         self._rewriting = False
+         self._dragging = False
+         self._coalescing = False
++        self._previewing = False
++        self._authoring = False
++        self._appliedSource = ""
+         self.diagnostics = []
+         self._buildUi()
+         self._api.qMainWindow.addDockWidget(
+@@ -140,7 +144,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         self.outputsLabel.hide()
+         layout.addWidget(self.outputsLabel)
+ 
+-        self.sourceEdit = QtWidgets.QPlainTextEdit()
++        self.sourceEdit = exprEdit.SourceEdit()
+         self.sourceEdit.setFont(font)
+         self.sourceEdit.setTabStopDistance(
+             4 * QtGui.QFontMetricsF(font).horizontalAdvance(" "))
+@@ -167,17 +171,31 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         buttons = QtWidgets.QHBoxLayout()
+         self.applyButton = QtWidgets.QPushButton("Apply (Ctrl+Return)")
+         self.applyButton.clicked.connect(self.apply)
++        self.previewButton = QtWidgets.QPushButton("Preview")
++        self.previewButton.setToolTip(
++            "Write the text to the stage's SESSION layer so the viewport "
++            "shows it, without touching the layer being authored. Apply "
++            "commits it to the edit target; Revert drops it.")
++        self.previewButton.clicked.connect(self.preview)
+         self.revertButton = QtWidgets.QPushButton("Revert")
+         self.revertButton.clicked.connect(self.revert)
+-        buttons.addWidget(self.applyButton)
+-        buttons.addWidget(self.revertButton)
++        self.clearButton = QtWidgets.QPushButton("Clear")
++        self.clearButton.setToolTip(
++            "Empty the text. Nothing is written until Apply.")
++        self.clearButton.clicked.connect(self.clear)
++        for button in (self.applyButton, self.previewButton, self.revertButton,
++                       self.clearButton):
++            buttons.addWidget(button)
+         buttons.addStretch(1)
+         layout.addLayout(buttons)
+ 
+         self.tabs = QtWidgets.QTabWidget()
+         self.literalPanel = exprWidgets.LiteralPanel(
+             self._onLiteralChanged, self._onLiteralDrag)
+-        self.tabs.addTab(self.literalPanel, "Literals")
++        self.controlPanel = exprControls.ControlPanel(
++            self._onControlChanged, self._onControlRangeChanged,
++            self._onLiteralDrag, self.addWidget, self.literalPanel)
++        self.tabs.addTab(self.controlPanel, "Controls")
+ 
+         self.functionBrowser = exprWidgets.FunctionBrowser(self.insertAtCursor)
+         self.variableBrowser = exprWidgets.VariableBrowser(self.insertAtCursor)
+@@ -188,8 +206,12 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         reference.setStretchFactor(1, 3)
+         self.tabs.addTab(reference, "Reference")
+ 
++        self.libraryBrowser = exprWidgets.LibraryBrowser(
++            self._onLibraryLoad, self._onLibrarySave)
++        self.tabs.addTab(self.libraryBrowser, "Library")
++
+         self.tabs.addTab(self._buildConnectionsTab(), "Connections")
+-        self.tabs.setMinimumHeight(240)
++        self.tabs.setMinimumHeight(260)
+         layout.addWidget(self.tabs, 3)
+ 
+         shortcut = QtGui.QShortcut(
+@@ -252,6 +274,9 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         self.highlighter.setVocabulary(
+             [v.name for v in self._allVariables],
+             [f.name for f in self._functions])
++        # The completion popup offers exactly what the browsers list: one
++        # vocabulary, from the engine, however the user reaches for it.
++        self.sourceEdit.setVocabulary(self._functions, self._allVariables)
+         if not api.available:
+             self._setStatus(
+                 "Validation and the reference lists are unavailable: %s"
+@@ -356,19 +381,21 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         self._loading = True
+         try:
+             if not self._prim:
++                self._appliedSource = ""
+                 self.sourceEdit.setPlainText("")
+                 self.outputsLabel.setText("")
+                 self.outputTypeLabel.setText("")
+                 self._setEditable(False)
+                 self._setStatus("", "neutral")
+                 self.diagnostics = []
+-                self.literalPanel.setSource("")
++                self.controlPanel.setSource("")
+                 self._refreshSelections()
+                 self._markDirty(False)
+                 return
+             attr = self._prim.GetAttribute(SOURCE_ATTR)
+             source = attr.Get() if attr else None
+-            self.sourceEdit.setPlainText(source or "")
++            self._appliedSource = source or ""
++            self.sourceEdit.setPlainText(self._appliedSource)
+             outputs = []
+             resultType = ""
+             for a in self._prim.GetAttributes():
+@@ -387,7 +414,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+             self.outputsLabel.setVisible(
+                 len(outputs) != 1 or not resultType)
+             self._setEditable(True)
+-            self.literalPanel.setSource(self.sourceEdit.toPlainText())
++            self.controlPanel.setSource(self.sourceEdit.toPlainText())
+             self._loadDomainFromBinding()
+         finally:
+             self._loading = False
+@@ -411,13 +438,18 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+ 
+     def _setEditable(self, editable):
+         self.sourceEdit.setReadOnly(not editable)
++        self.sourceEdit.setCompletionEnabled(editable)
+         self.applyButton.setEnabled(False)
+         self.revertButton.setEnabled(False)
++        self.previewButton.setEnabled(editable)
++        self.clearButton.setEnabled(editable)
++        self.controlPanel.addButton.setEnabled(editable)
+ 
+     def _markDirty(self, dirty):
+         enabled = bool(self._prim) and dirty
+         self.applyButton.setEnabled(enabled)
+-        self.revertButton.setEnabled(enabled)
++        # Revert also drops a preview, so it stays live while one is showing.
++        self.revertButton.setEnabled(enabled or self._previewing)
+         self.setWindowTitle(TITLE + (" *" if enabled else ""))
+ 
+     def _onTextChanged(self):
+@@ -425,21 +457,24 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+             return
+         self._markDirty(self.sourceEdit.toPlainText() != self._currentSource())
+         if not self._rewriting:
+-            self.literalPanel.setSource(self.sourceEdit.toPlainText())
++            self.controlPanel.setSource(self.sourceEdit.toPlainText())
+         self._validateTimer.start(VALIDATE_DELAY_MS)
+ 
+     def _currentSource(self):
+-        attr = self._prim.GetAttribute(SOURCE_ATTR) if self._prim else None
+-        value = attr.Get() if attr else None
+-        return value or ""
++        """The text as last loaded from or committed to the stage.
++
++        Remembered rather than re-read, because a Preview puts the editor's
++        own text in the session layer: composing the attribute back would then
++        report every unapplied edit as already applied."""
++        return self._appliedSource
+ 
+     def isDirty(self):
+         return self.applyButton.isEnabled()
+ 
+-    def apply(self):
+-        if not self._prim:
+-            return False
+-        text = self.sourceEdit.toPlainText()
++    def _writeSource(self, text):
++        """Author `text` as usdGen:expr:source through the current edit
++        target. False, with the reason in the status strip, when it will not
++        take."""
+         attr = self._prim.GetAttribute(SOURCE_ATTR)
+         if not attr:
+             attr = self._prim.CreateAttribute(
+@@ -448,17 +483,96 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+             self._setStatus("Could not author %s on %s" % (
+                 SOURCE_ATTR, self._prim.GetPath()), "error")
+             return False
++        return True
++
++    def apply(self):
++        if not self._prim:
++            return False
++        text = self.sourceEdit.toPlainText()
++        self._authoring = True
++        try:
++            if not self._writeSource(text):
++                return False
++        finally:
++            self._authoring = False
++        self._appliedSource = text
++        # A preview lives in the session layer and would otherwise go on
++        # shadowing what was just committed.
++        self._dropPreview()
+         layer = self._prim.GetStage().GetEditTarget().GetLayer()
+         self._markDirty(False)
+         if not self.diagnostics:
+             self._setStatus("Applied to %s" % layer.GetDisplayName(), "ok")
+         return True
+ 
++    def preview(self):
++        """Show the text in the viewport without committing it.
++
++        The override goes in the stage's session layer, which is the USD way
++        to say "for this session only": the layer being authored is untouched,
++        the scene index recooks from the composed result all the same, and
++        Apply or Revert decides what happens to it."""
++        if not self._prim:
++            return False
++        stage = self._prim.GetStage()
++        session = stage.GetSessionLayer()
++        if not session:
++            self._setStatus("This stage has no session layer to preview in.",
++                            "warning")
++            return False
++        self._authoring = True
++        try:
++            with Usd.EditContext(stage, session):
++                if not self._writeSource(self.sourceEdit.toPlainText()):
++                    return False
++        finally:
++            self._authoring = False
++        self._previewing = True
++        self._markDirty(self.sourceEdit.toPlainText() != self._currentSource())
++        self._setStatus(
++            "Previewing in the session layer. Apply commits it to %s; Revert "
++            "drops it." % stage.GetEditTarget().GetLayer().GetDisplayName(),
++            "warning")
++        return True
++
++    def _dropPreview(self):
++        """Remove the session-layer override a preview left, if any."""
++        if not self._previewing:
++            return
++        self._previewing = False
++        if not self._prim or not self._prim.IsValid():
++            return
++        stage = self._prim.GetStage()
++        session = stage.GetSessionLayer()
++        attr = self._prim.GetAttribute(SOURCE_ATTR)
++        if not session or not attr:
++            return
++        # Clear() drops what THIS edit target authored and nothing else, so
++        # the opinion in the layer being authored survives untouched.
++        self._authoring = True
++        try:
++            with Usd.EditContext(stage, session):
++                attr.Clear()
++        finally:
++            self._authoring = False
++
++    def isPreviewing(self):
++        return self._previewing
++
+     def revert(self):
+         if not self._prim:
+             return
++        self._dropPreview()
+         self._load()
+ 
++    def clear(self):
++        """Empty the text. Nothing reaches the stage until Apply."""
++        if self.sourceEdit.isReadOnly():
++            return
++        self.sourceEdit.selectAll()
++        self.sourceEdit.textCursor().removeSelectedText()
++        self.sourceEdit.setPlainText("")
++
+     def insertAtCursor(self, text):
+         """Insert `text` at the cursor. A '|' in it marks where the cursor
+         should end up, which is how the browsers put the caret inside a call's
+@@ -550,18 +664,17 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         this; a test can call it directly."""
+         self._onLiteralChanged(index, value)
+ 
+-    def _onLiteralChanged(self, index, value):
+-        literals = self.literalPanel.literals
+-        if index >= len(literals) or self.sourceEdit.isReadOnly():
+-            return
+-        literal = literals[index]
+-        replacement = exprApi.FormatLiteral(value, literal.text)
+-        if replacement == literal.text:
+-            return
++    def _rewriteSpan(self, start, end, replacement):
++        """Replace exactly text[start:end] with `replacement`.
+ 
++        Through a QTextCursor rather than by rebuilding the text: every other
++        character is left alone, the caret is carried across the edit, and a
++        drag coalesces into ONE undo step."""
++        if self.sourceEdit.isReadOnly():
++            return False
+         visible = self.sourceEdit.textCursor()
+         caret = visible.position()
+-        delta = len(replacement) - (literal.end - literal.start)
++        delta = len(replacement) - (end - start)
+ 
+         self._rewriting = True
+         try:
+@@ -571,26 +684,167 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+             else:
+                 cursor.beginEditBlock()
+                 self._coalescing = self._dragging
+-            cursor.setPosition(literal.start)
+-            cursor.setPosition(literal.end, QtGui.QTextCursor.KeepAnchor)
++            cursor.setPosition(start)
++            cursor.setPosition(end, QtGui.QTextCursor.KeepAnchor)
+             cursor.insertText(replacement)
+             cursor.endEditBlock()
+         finally:
+             self._rewriting = False
+ 
+-        if caret >= literal.end:
++        if caret >= end:
+             caret += delta
+-        elif caret > literal.start:
+-            caret = literal.start + len(replacement)
++        elif caret > start:
++            caret = start + len(replacement)
+         visible.setPosition(max(0, min(caret, len(self.sourceEdit.toPlainText()))))
+         self.sourceEdit.setTextCursor(visible)
++        return True
+ 
+-        self.literalPanel.refreshOffsets(self.sourceEdit.toPlainText())
+-        self._markDirty(self.sourceEdit.toPlainText() != self._currentSource())
++    def _afterRewrite(self):
++        """Common tail of every edit a panel makes to the text."""
++        text = self.sourceEdit.toPlainText()
++        self.controlPanel.refreshOffsets(text)
++        self._markDirty(text != self._currentSource())
+         self._validateTimer.start(VALIDATE_DELAY_MS)
+         if self.liveApplyCheck.isChecked():
+             self.apply()
+ 
++    def _onLiteralChanged(self, index, value):
++        literals = self.literalPanel.literals
++        if index >= len(literals):
++            return
++        literal = literals[index]
++        replacement = exprApi.FormatLiteral(value, literal.text)
++        if replacement == literal.text:
++            return
++        if self._rewriteSpan(literal.start, literal.end, replacement):
++            self._afterRewrite()
++
++    # ---- the controls panel ---------------------------------------------
++
++    def setControlValue(self, index, value):
++        """Drive control `index` from outside the widget, as a test does."""
++        self._onControlChanged(index, value)
++
++    def _onControlChanged(self, index, value):
++        controls = self.controlPanel.controls
++        if index >= len(controls):
++            return
++        control = controls[index]
++        replacement = exprApi.FormatControlValue(control, value)
++        if replacement == control.valueText:
++            return
++        if self._rewriteSpan(control.valueStart, control.valueEnd, replacement):
++            self._afterRewrite()
++
++    def _onControlRangeChanged(self, index, low, high):
++        """A number control's range lives in its `# min, max` comment, so
++        widening the slider is an edit to the expression text like any other.
++
++        When the statement carries no comment yet, one is appended at the end
++        of its line rather than beside the value: a comment runs to the end of
++        the line, so anywhere else would swallow the rest of the statement."""
++        controls = self.controlPanel.controls
++        if index >= len(controls):
++            return
++        control = controls[index]
++        isInt = control.kind == "int"
++        annotation = "# %s, %s" % (exprApi.FormatNumber(low, isInt),
++                                   exprApi.FormatNumber(high, isInt))
++        if control.commentStart >= 0:
++            start, end = control.commentStart, control.commentEnd
++        else:
++            text = self.sourceEdit.toPlainText()
++            stop = text.find("\n", control.valueEnd)
++            start = end = len(text) if stop < 0 else stop
++            annotation = " " + annotation
++        if self._rewriteSpan(start, end, annotation):
++            self._afterRewrite()
++
++    def addWidget(self):
++        """SeExpr's Add Widget: declare a new $variable and give it a control.
++
++        Returns the inserted declaration, or None when the dialog was
++        cancelled."""
++        if self.sourceEdit.isReadOnly():
++            return None
++        taken = [c.name for c in self.controlPanel.controls]
++        taken += [v.name for v in getattr(self, "_allVariables", [])]
++        dialog = exprControls.AddWidgetDialog(self, existingNames=taken)
++        if dialog.exec() != QtWidgets.QDialog.Accepted:
++            return None
++        return self.insertDeclaration(dialog.declaration())
++
++    def insertDeclaration(self, line):
++        """Put `line` at the very top of the expression, on its own line.
++
++        The top, because a SeExpr variable has to be assigned before it is
++        read and the body that reads it is what is already there."""
++        if self.sourceEdit.isReadOnly():
++            return None
++        if not self._rewriteSpan(0, 0, line + "\n"):
++            return None
++        self.controlPanel.setSource(self.sourceEdit.toPlainText())
++        self._markDirty(self.sourceEdit.toPlainText() != self._currentSource())
++        self._validateTimer.start(VALIDATE_DELAY_MS)
++        return line
++
++    # ---- the expression library -----------------------------------------
++
++    def _onLibraryLoad(self, entry):
++        text = exprLibrary.Load(entry.path)
++        if not text:
++            self._setStatus("Could not read %s" % entry.path, "error")
++            return
++        if self.sourceEdit.isReadOnly():
++            self._setStatus(
++                "Select an expression prim before loading %s." % entry.name,
++                "warning")
++            return
++        self._rewriteSpan(0, len(self.sourceEdit.toPlainText()), text.rstrip("\n"))
++        self.controlPanel.setSource(self.sourceEdit.toPlainText())
++        domain = exprLibrary.DomainOf(text)
++        note = ""
++        if domain and domain != self.domainName():
++            note = ("  It was written for the %s domain; this binding "
++                    "evaluates per %s." % (domain, self.domainName()))
++        self._markDirty(self.sourceEdit.toPlainText() != self._currentSource())
++        self._setStatus("Loaded %s. Apply to write it to the stage.%s"
++                        % (entry.name, note), "warning")
++        self.validateNow()
++
++    def loadFromLibrary(self, name):
++        """Load the library entry called `name`. True when there was one."""
++        if not self.libraryBrowser.selectEntry(name):
++            return False
++        return self.libraryBrowser.loadSelected()
++
++    def _onLibrarySave(self, askForName):
++        name = self.libraryBrowser.selectedName()
++        if askForName or not name:
++            name, accepted = QtWidgets.QInputDialog.getText(
++                self, "Save expression", "Name:",
++                QtWidgets.QLineEdit.Normal,
++                name or (self._prim.GetName() if self._prim else "expression"))
++            if not accepted or not name.strip():
++                return None
++        return self.saveToLibrary(name)
++
++    def saveToLibrary(self, name):
++        """Write the current text to the user library as `name`.se.
++
++        The evaluation domain goes in with it, so the browser can filter on it
++        the next time round. Returns the path, or None when the write failed."""
++        try:
++            path = exprLibrary.Save(name, self.sourceEdit.toPlainText(),
++                                    domain=self.domainName())
++        except (IOError, OSError) as exc:
++            self._setStatus("Could not save %s: %s" % (name, exc), "error")
++            return None
++        self.libraryBrowser.refresh()
++        self.libraryBrowser.selectEntry(exprLibrary.SanitiseName(name))
++        self._setStatus("Saved %s" % path, "ok")
++        return path
++
+     # ---- connections ---------------------------------------------------
+ 
+     def _refreshConnections(self):
+@@ -711,6 +965,10 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
+         self.refreshFromSelection()
+ 
+     def _onObjectsChanged(self, notice, sender):
++        # Our own Apply and Preview come back through here; treating them as
++        # someone else's edit would reload the text out from under the user.
++        if self._authoring:
++            return
+         if not self._prim or not self._prim.IsValid():
+             if self._prim is not None:
+                 self.refreshFromSelection()
+diff --git a/plugin/usdGenTools/python/usdGenTools/exprLibrary.py b/plugin/usdGenTools/python/usdGenTools/exprLibrary.py
+new file mode 100644
+index 0000000..d359ee1
+--- /dev/null
++++ b/plugin/usdGenTools/python/usdGenTools/exprLibrary.py
+@@ -0,0 +1,161 @@
++# The expression library: saved `.se` files the editor can load and save.
++#
++# SeExpr's ExprBrowser reads a set of library paths and shows their expression
++# files in a tree. The same idea here: a read-only "usdGen" library of shipped
++# presets, and a writable user library, with `USDGEN_EXPRESSION_PATH` able to
++# name others.
++#
++# No Qt: the paths, the file format and the domain marker are all testable in a
++# plain python process, and the browser widget in exprWidgets only presents
++# them.
++
++import os
++import re
++from collections import namedtuple
++
++SUFFIX = ".se"
++
++# Where a user's own expressions go when nothing else says otherwise.
++USER_DIRECTORY_NAME = ".usdGenExpressions"
++
++# A path list, the platform's own separator, most-preferred first. Its FIRST
++# entry becomes the writable user library, which is what makes the variable
++# useful for a studio that keeps its expressions somewhere shared.
++PATH_ENVIRONMENT = "USDGEN_EXPRESSION_PATH"
++
++# The evaluation domain a saved expression was written for, so the browser can
++# hide the ones that cannot apply where the editor is pointed. A plain comment,
++# because a `.se` file is expression source and nothing else.
++_DOMAIN_RE = re.compile(r"^[ \t]*#[ \t]*domain[ \t]*:[ \t]*"
++                        r"(groom|primitive|point)\b", re.MULTILINE | re.I)
++
++Entry = namedtuple("Entry", "name path library domain")
++Library = namedtuple("Library", "label path writable")
++
++
++def DomainOf(text):
++    """The `# domain: point` marker in `text`, or "" when it carries none."""
++    match = _DOMAIN_RE.search(text or "")
++    return match.group(1).lower() if match else ""
++
++
++def SetDomain(text, domain):
++    """`text` with its domain marker set to `domain` (or removed when empty).
++
++    The marker stays on its own first line, so saving never disturbs the
++    expression itself."""
++    body = _DOMAIN_RE.sub("", text or "", count=1).lstrip("\n")
++    if not domain:
++        return body
++    return "# domain: %s\n%s" % (domain, body)
++
++
++def UserDirectory():
++    """The library saves go to. It need not exist yet."""
++    explicit = os.environ.get(PATH_ENVIRONMENT, "")
++    for candidate in explicit.split(os.pathsep):
++        if candidate.strip():
++            return os.path.abspath(candidate.strip())
++    return os.path.join(os.path.expanduser("~"), USER_DIRECTORY_NAME)
++
++
++def _shippedDirectories():
++    """Where the presets that ship with the plugin may sit.
++
++    The package is staged into <build>/python/usdGenTools and the resources
++    beside it into <build>/usd/usdGenTools/resources, so one walk up from this
++    file finds both that layout and the source tree it was copied from."""
++    here = os.path.dirname(os.path.abspath(__file__))
++    up = os.path.dirname(os.path.dirname(here))
++    return [
++        os.path.join(here, "expressions"),
++        os.path.join(up, "usd", "usdGenTools", "resources", "expressions"),
++        os.path.join(up, "resources", "expressions"),
++        os.path.join(os.path.dirname(up), "usdGenTools", "resources",
++                     "expressions"),
++    ]
++
++
++def Libraries():
++    """Every library to show, most specific first.
++
++    The user library is always offered even when it does not exist yet: it is
++    where Save puts things, so naming it is more useful than hiding it."""
++    found = []
++    seen = set()
++
++    def add(label, path, writable):
++        path = os.path.abspath(path)
++        key = os.path.normcase(path)
++        if key in seen:
++            return
++        seen.add(key)
++        found.append(Library(label, path, writable))
++
++    user = UserDirectory()
++    add("user", user, True)
++    for extra in os.environ.get(PATH_ENVIRONMENT, "").split(os.pathsep)[1:]:
++        if extra.strip():
++            add(os.path.basename(extra.strip().rstrip("/\\")) or "path",
++                extra.strip(), False)
++    for directory in _shippedDirectories():
++        if os.path.isdir(directory):
++            add("usdGen", directory, False)
++            break
++    return found
++
++
++def ListExpressions(libraries=None):
++    """Every `.se` file in the libraries, sorted by library then name."""
++    found = []
++    for library in (libraries if libraries is not None else Libraries()):
++        if not os.path.isdir(library.path):
++            continue
++        for name in sorted(os.listdir(library.path)):
++            if not name.endswith(SUFFIX):
++                continue
++            path = os.path.join(library.path, name)
++            if not os.path.isfile(path):
++                continue
++            found.append(Entry(name[:-len(SUFFIX)], path, library.label,
++                               DomainOf(Load(path))))
++    return found
++
++
++def Load(path):
++    """The text of a saved expression. "" when it cannot be read."""
++    try:
++        with open(path, "r", encoding="utf-8") as handle:
++            return handle.read()
++    except (IOError, OSError, UnicodeDecodeError):
++        return ""
++
++
++def SanitiseName(name):
++    """`name` reduced to something that is safe as a file name.
++
++    Whitespace and separators become underscores rather than being dropped, so
++    two different names cannot collapse onto one file."""
++    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", (name or "").strip())
++    cleaned = cleaned.strip("._") or "expression"
++    if cleaned.endswith(SUFFIX):
++        cleaned = cleaned[:-len(SUFFIX)]
++    return cleaned
++
++
++def Save(name, text, domain="", directory=None):
++    """Write `text` as <directory>/<name>.se and return the path.
++
++    `directory` defaults to the user library, which is created when it is
++    missing. Raises OSError when the write fails; the caller says so in the
++    status strip rather than this deciding what that means."""
++    directory = directory or UserDirectory()
++    if not os.path.isdir(directory):
++        os.makedirs(directory)
++    path = os.path.join(directory, SanitiseName(name) + SUFFIX)
++    body = SetDomain(text, domain)
++    if not body.endswith("\n"):
++        body += "\n"
++    with open(path, "w", encoding="utf-8") as handle:
++        handle.write(body)
++    return path
+diff --git a/plugin/usdGenTools/resources/expressions/clumpMask.se b/plugin/usdGenTools/resources/expressions/clumpMask.se
+new file mode 100644
+index 0000000..58ed387
+--- /dev/null
++++ b/plugin/usdGenTools/resources/expressions/clumpMask.se
+@@ -0,0 +1,5 @@
++# domain: primitive
++# A mask that falls off from the middle of the surface outwards, for driving a
++# clump or any other per-strand weight. Single statement on purpose: it is the
++# one preset that compiles against the frontend as it stands today.
++clamp(1.0 - 2.0 * smoothstep(abs($v - 0.5), 0.1, 0.45), 0.0, 1.0)
+diff --git a/plugin/usdGenTools/resources/expressions/randomLength.se b/plugin/usdGenTools/resources/expressions/randomLength.se
+new file mode 100644
+index 0000000..8a86930
+--- /dev/null
++++ b/plugin/usdGenTools/resources/expressions/randomLength.se
+@@ -0,0 +1,7 @@
++# domain: primitive
++# Scatters strand length around the authored value. $spread is the fraction
++# either side of it, and the operator's own $seed moves the whole pattern
++# without changing its character.
++$spread = 0.35; # 0, 1
++$hash = sin($primIndex * 12.9898 + $seed * 78.233) * 43758.5453;
++$value * (1.0 + $spread * (2.0 * ($hash - floor($hash)) - 1.0))
+diff --git a/plugin/usdGenTools/resources/expressions/rootTipTaper.se b/plugin/usdGenTools/resources/expressions/rootTipTaper.se
+new file mode 100644
+index 0000000..44c1c87
+--- /dev/null
++++ b/plugin/usdGenTools/resources/expressions/rootTipTaper.se
+@@ -0,0 +1,5 @@
++# domain: point
++# Narrows a strand from root to tip. $tip is the fraction of the root width
++# the tip keeps, so 1 is a cylinder and 0 a needle.
++$tip = 0.15; # 0, 1
++$value * fit(smoothstep($t, 0.0, 1.0), 0, 1, 1.0, $tip)
+diff --git a/plugin/usdGenTools/resources/expressions/widthProfile.se b/plugin/usdGenTools/resources/expressions/widthProfile.se
+new file mode 100644
+index 0000000..b13ae43
+--- /dev/null
++++ b/plugin/usdGenTools/resources/expressions/widthProfile.se
+@@ -0,0 +1,5 @@
++# domain: point
++# A hand-shaped root-to-tip width profile. Drag the knots in the Controls
++# panel rather than editing the numbers: the text below is what they write.
++$profile = curve($t, 0, 0.6, 4, 0.25, 1.0, 4, 1, 0.05, 4); # curve
++$value * $profile
+diff --git a/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py b/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py
+index 4e89ab2..1914603 100644
+--- a/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py
++++ b/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py
+@@ -85,6 +85,13 @@ def testUsdviewInputFunction(appController):
+           "clearing the selection empties the editor")
+ 
+     testWidgetry(appController, dock, app)
++    testControls(dock, app)
++    testAddWidget(dock, app)
++    testCompletion(dock, app)
++    testLibraryBrowser(dock, app)
++    testDiagnosticPositions(dock, app)
++    testFunctionCategories(dock)
++    testPreviewAndClear(appController, dock, app)
+     print("PASS: usdGenTools expression editor")
+ 
+ 
+@@ -248,3 +255,422 @@ def testWidgetry(appController, dock, app):
+     dock.validateNow()
+     check(dock.diagnostics == [],
+           "the same text validates again in the point domain")
++
++
++CONTROLS = ("$tip = 0.15; # 0, 1\n"
++            "$tint = [1, 0.5, 0.2]; # color\n"
++            "$profile = curve($t, 0, 1, 4, 0.5, 0.7, 4, 1, 0, 4); # curve\n"
++            "$value * $tip * $profile")
++
++
++def testControls(dock, app):
++    """The Controls panel: one widget per top-level `$name = ...` statement,
++    each rewriting exactly its own value in the text."""
++    from usdGenTools import exprApi
++
++    check(dock.tabs.tabText(0) == "Controls",
++          "the Literals tab has become the Controls panel")
++
++    dock.sourceEdit.setPlainText(CONTROLS)
++    app.processEvents()
++    panel = dock.controlPanel
++    check([c.name for c in panel.controls] == ["$tip", "$tint", "$profile"],
++          "a control per top-level assignment, in source order")
++    check([c.kind for c in panel.controls] == ["float", "color", "curve"],
++          "each control is typed by its value and its comment")
++    check(len(panel.rows) == 3, "a widget per control")
++
++    # --- the number control ------------------------------------------------
++    number = panel.rows[0]
++    check((number.minimumBox.value(), number.maximumBox.value()) == (0.0, 1.0),
++          "the `# 0, 1` comment sets the slider range")
++    check(number.value() == 0.15, "the number control shows the value")
++    dock.setControlValue(0, 0.5)
++    app.processEvents()
++    check(dock.sourceEdit.toPlainText().startswith("$tip = 0.5; # 0, 1"),
++          "the number control rewrites its own value and nothing else")
++    check(dock.sourceEdit.toPlainText().endswith("$value * $tip * $profile"),
++          "the body of the expression is untouched")
++    check(dock.isDirty(), "a control edit marks the editor dirty")
++    dock.sourceEdit.undo()
++    check(dock.sourceEdit.toPlainText().startswith("$tip = 0.15;"),
++          "one undo step takes a control edit back")
++
++    # The range lives in the comment, so widening the slider edits the text.
++    dock.sourceEdit.setPlainText(CONTROLS)
++    app.processEvents()
++    dock.controlPanel.rows[0].maximumBox.setValue(2.0)
++    app.processEvents()
++    check(dock.sourceEdit.toPlainText().splitlines()[0] == "$tip = 0.15; # 0.0, 2.0",
++          "editing the range rewrites the `# min, max` comment")
++    check(dock.controlPanel.controls[0].data["maximum"] == 2.0,
++          "and the control takes the new range back from the text")
++
++    # A statement with no comment grows one rather than losing the range.
++    dock.sourceEdit.setPlainText("$gain = 0.25;\n$value * $gain")
++    app.processEvents()
++    check((dock.controlPanel.rows[0].minimumBox.value(),
++           dock.controlPanel.rows[0].maximumBox.value()) == (0.0, 1.0),
++          "a number with no annotation gets the default [0, 1] range")
++    dock.controlPanel.rows[0].maximumBox.setValue(4.0)
++    app.processEvents()
++    check(dock.sourceEdit.toPlainText().splitlines()[0]
++          == "$gain = 0.25; # 0.0, 4.0",
++          "a statement with no annotation gets one at the end of its line")
++
++    # --- the colour control ------------------------------------------------
++    dock.sourceEdit.setPlainText(CONTROLS)
++    app.processEvents()
++    colour = dock.controlPanel.rows[1]
++    check(colour.isColor and colour.swatch is not None,
++          "`# color` gives the vector a swatch as well as sliders")
++    check(len(colour.sliders) == 3, "a slider per component")
++    check(colour.value() == (1.0, 0.5, 0.2), "the swatch shows the components")
++    dock.setControlValue(1, (0.2, 0.3, 0.4))
++    app.processEvents()
++    check("$tint = [0.2, 0.3, 0.4]; # color" in dock.sourceEdit.toPlainText(),
++          "the colour control rewrites the vector literal in place")
++    check(dock.sourceEdit.toPlainText().startswith("$tip = 0.15; # 0, 1"),
++          "the control above it is untouched")
++
++    plain = "$offset = [0, 1, 0];\n$value"
++    dock.sourceEdit.setPlainText(plain)
++    app.processEvents()
++    check(not dock.controlPanel.rows[0].isColor,
++          "a vector without `# color` gets no swatch")
++
++    # --- the curve control -------------------------------------------------
++    dock.sourceEdit.setPlainText(CONTROLS)
++    app.processEvents()
++    curveRow = dock.controlPanel.rows[2]
++    check(curveRow.curve.knots() == [(0.0, 1.0, 4), (0.5, 0.7, 4), (1.0, 0.0, 4)],
++          "the curve widget is built from the knot list in the text")
++    curveRow.curve.selectKnot(1)
++    check(curveRow.curve.selectedIndex() == 1, "a knot can be selected")
++    curveRow.curve.setSelectedKnot(value=0.25)
++    app.processEvents()
++    check("curve($t, 0.0, 1.0, 4, 0.5, 0.25, 4, 1.0, 0.0, 4)"
++          in dock.sourceEdit.toPlainText(),
++          "moving a knot rewrites the knot list")
++    curveRow.interpCombo.setCurrentIndex(exprApi.INTERP_SMOOTH)
++    app.processEvents()
++    check("0.5, 0.25, 2," in dock.sourceEdit.toPlainText(),
++          "the interpolation combo writes the knot's interpolation code")
++    check(curveRow.curve.removeSelected(), "a knot can be deleted")
++    app.processEvents()
++    check("curve($t, 0.0, 1.0, 4, 1.0, 0.0, 4)" in dock.sourceEdit.toPlainText(),
++          "deleting a knot takes its triple out of the call")
++
++    ramp = '$ramp = ccurve($t, 0, [1, 0, 0], 4, 1, [0, 0, 1], 4); # ccurve\n$value'
++    dock.sourceEdit.setPlainText(ramp)
++    app.processEvents()
++    colourCurve = dock.controlPanel.rows[0]
++    check(colourCurve.isColor and colourCurve.valueButton is not None,
++          "a colour curve offers a swatch per knot instead of a value box")
++    colourCurve.curve.selectKnot(0)
++    colourCurve.curve.setSelectedKnot(value=(0.0, 1.0, 0.0))
++    app.processEvents()
++    check("ccurve($t, 0.0, [0.0, 1.0, 0.0], 4," in dock.sourceEdit.toPlainText(),
++          "a colour knot rewrites as a vector literal")
++
++    # --- the loose-number fallback -----------------------------------------
++    dock.sourceEdit.setPlainText("$value * 0.8")
++    app.processEvents()
++    check(dock.controlPanel.controls == [], "a bare expression declares nothing")
++    check(len(dock.literalPanel.rows) == 1,
++          "a number no variable holds still gets a slider")
++    dock.setLiteralValue(0, 0.5)
++    app.processEvents()
++    check(dock.sourceEdit.toPlainText() == "$value * 0.5",
++          "the loose-number slider still rewrites its literal")
++
++    dock.sourceEdit.setPlainText("$tip = 0.15; # 0, 1\n$value * $tip * 0.8")
++    app.processEvents()
++    check([l.text for l in dock.literalPanel.literals] == ["0.8"],
++          "a number a control already drives is not offered twice")
++
++
++def testAddWidget(dock, app):
++    """SeExpr's Add Widget dialog, and the line it inserts."""
++    from pxr.Usdviewq.qt import QtWidgets
++
++    from usdGenTools import exprControls
++
++    dock.sourceEdit.setPlainText("$value * 2")
++    app.processEvents()
++    dialog = exprControls.AddWidgetDialog(dock, existingNames=["$tip"])
++    dialog.nameEdit.setText("$blend")
++    dialog.kindCombo.setCurrentIndex(dialog.kindCombo.findData("color"))
++    app.processEvents()
++    check(dialog.declaration() == "$blend = [1.0, 1.0, 1.0]; # color",
++          "the dialog describes the declaration it would insert")
++    check(not dialog.lookupEdit.isVisible(),
++          "a colour widget does not ask for a curve lookup")
++    dialog.kindCombo.setCurrentIndex(dialog.kindCombo.findData("int"))
++    dialog.valueBox.setValue(3)
++    dialog.minimumBox.setValue(1)
++    dialog.maximumBox.setValue(10)
++    app.processEvents()
++    check(dialog.declaration() == "$blend = 3; # 1, 10",
++          "an integer widget keeps its value and range integral")
++    okButton = dialog.buttons.button(QtWidgets.QDialogButtonBox.Ok)
++    dialog.nameEdit.setText("$tip")
++    app.processEvents()
++    check(not okButton.isEnabled(), "a name already in use is refused")
++    dialog.nameEdit.setText("$blend")
++    app.processEvents()
++    check(okButton.isEnabled(), "a free name is accepted")
++    line = dialog.declaration()
++    dialog.deleteLater()
++
++    check(dock.insertDeclaration(line) == line, "the declaration is inserted")
++    app.processEvents()
++    check(dock.sourceEdit.toPlainText() == line + "\n$value * 2",
++          "Add Widget puts the declaration at the top of the expression")
++    check([c.name for c in dock.controlPanel.controls] == ["$blend"],
++          "and the panel grows the control it declared")
++    check(dock.controlPanel.rows[0].isInt,
++          "an integer declaration builds an integer control")
++
++
++def testCompletion(dock, app):
++    """The completion popup: the engine's own functions and variables."""
++    from pxr.Usdviewq.qt import QtGui
++
++    model = dock.sourceEdit.completionModel
++    names = model.names()
++    check("clamp" in names, "the completion model carries the functions")
++    check("$t" in names, "the completion model carries the variables")
++    check(model.rowCount() >= len(dock.functionBrowser.functions),
++          "it carries at least everything the function browser lists")
++
++    dock.sourceEdit.setPlainText("$value * cla")
++    dock.sourceEdit.moveCursor(QtGui.QTextCursor.End)
++    app.processEvents()
++    check(dock.sourceEdit.completionPrefix() == "cla",
++          "the prefix under the caret is the word being typed")
++    check(dock.sourceEdit.completionCandidates() == ["clamp"],
++          "a function prefix offers functions")
++    check(dock.sourceEdit.maybeComplete(), "the popup comes up for it")
++    check(dock.sourceEdit.completer.completionCount() >= 1,
++          "the completer has something to offer")
++    dock.sourceEdit.insertCompletion("clamp")
++    app.processEvents()
++    check(dock.sourceEdit.toPlainText() == "$value * clamp(, , )",
++          "accepting a completion inserts the call, not just the name")
++    check(dock.sourceEdit.textCursor().position() == len("$value * clamp("),
++          "and leaves the caret inside the parentheses")
++
++    dock.sourceEdit.setPlainText("$value * $se")
++    dock.sourceEdit.moveCursor(QtGui.QTextCursor.End)
++    app.processEvents()
++    check(dock.sourceEdit.completionPrefix() == "$se",
++          "a '$' is part of the prefix it starts")
++    candidates = dock.sourceEdit.completionCandidates()
++    check(candidates == ["$seed"], "a '$' prefix offers variables")
++    check(all(n.startswith("$") for n in candidates),
++          "and offers no functions, where only a variable can go")
++    dock.sourceEdit.insertCompletion("$seed")
++    check(dock.sourceEdit.toPlainText() == "$value * $seed",
++          "a variable completes to its own name")
++
++    dock.sourceEdit.setPlainText("$value * ")
++    dock.sourceEdit.moveCursor(QtGui.QTextCursor.End)
++    check(dock.sourceEdit.completionPrefix() == "",
++          "there is no prefix where nothing is being typed")
++    check(not dock.sourceEdit.maybeComplete(),
++          "and no popup either")
++
++    signature = model.item(0, model.SIGNATURE).text()
++    check(bool(signature),
++          "each completion carries the signature or type shown beside it")
++
++
++def testLibraryBrowser(dock, app):
++    """The saved-expression library: shipped presets, save, load, filter."""
++    import os
++    import shutil
++    import tempfile
++
++    from usdGenTools import exprLibrary
++
++    directory = tempfile.mkdtemp(prefix="usdGenExprEditor")
++    previous = os.environ.get(exprLibrary.PATH_ENVIRONMENT)
++    try:
++        os.environ[exprLibrary.PATH_ENVIRONMENT] = directory
++        browser = dock.libraryBrowser
++        browser.refresh()
++        app.processEvents()
++        names = [e.name for e in browser.entries]
++        check("rootTipTaper" in names,
++              "the shipped presets are in the library browser")
++        check("widthProfile" in names, "including a curve preset")
++
++        dock.sourceEdit.setPlainText("$tip = 0.2; # 0, 1\n$value * $tip")
++        app.processEvents()
++        path = dock.saveToLibrary("editor round trip")
++        check(path is not None and os.path.exists(path),
++              "Save writes the expression into the user library")
++        check(os.path.dirname(path) == os.path.abspath(directory),
++              "and puts it where USDGEN_EXPRESSION_PATH says")
++
++        dock.sourceEdit.setPlainText("$value")
++        app.processEvents()
++        check(dock.loadFromLibrary("editor_round_trip"),
++              "the saved expression is there to load")
++        app.processEvents()
++        check("$tip = 0.2" in dock.sourceEdit.toPlainText(),
++              "loading brings the text back")
++        check([c.name for c in dock.controlPanel.controls] == ["$tip"],
++              "and rebuilds the controls it declares")
++        check(dock.isDirty(),
++              "a loaded expression is an unapplied edit until Apply")
++
++        check(dock.loadFromLibrary("widthProfile"),
++              "a shipped preset loads too")
++        app.processEvents()
++        check(dock.controlPanel.controls[0].kind == "curve",
++              "and the curve preset builds a curve control")
++
++        # The domain filter hides what cannot apply here, and keeps what says
++        # nothing about where it belongs.
++        saved = dict((e.name, e) for e in browser.entries)
++        check(saved["rootTipTaper"].domain == "point",
++              "a preset carries the domain it was written for")
++        check(saved["editor_round_trip"].domain == dock.domainName(),
++              "Save records the editor's own evaluation domain")
++        index = browser.domainCombo.findData("groom")
++        browser.domainCombo.setCurrentIndex(index)
++        app.processEvents()
++        check(not browser.selectEntry("rootTipTaper"),
++              "a point-domain preset is filtered out of the groom domain")
++        browser.domainCombo.setCurrentIndex(0)
++        app.processEvents()
++        check(browser.selectEntry("rootTipTaper"),
++              "and comes back when the filter is cleared")
++
++        browser.searchEdit.setText("clump")
++        app.processEvents()
++        check(not browser.selectEntry("rootTipTaper") and
++              browser.selectEntry("clumpMask"),
++              "the search box narrows the tree to matching names")
++        browser.searchEdit.setText("")
++        app.processEvents()
++    finally:
++        if previous is None:
++            os.environ.pop(exprLibrary.PATH_ENVIRONMENT, None)
++        else:
++            os.environ[exprLibrary.PATH_ENVIRONMENT] = previous
++        shutil.rmtree(directory, ignore_errors=True)
++        dock.libraryBrowser.refresh()
++
++
++def testDiagnosticPositions(dock, app):
++    """Positions across a multi-statement expression, and the marker."""
++    dock.sourceEdit.setPlainText("$value\n  * 2\n  * nosuchfunction($t)\n  * 3")
++    dock.validateNow()
++    app.processEvents()
++    check(bool(dock.diagnostics), "an unsupported function is still rejected")
++    first = dock.diagnostics[0]
++    check(first.line == 3,
++          "a diagnostic on the third line of four reports line 3 (got %d)"
++          % first.line)
++    check(first.column >= 5,
++          "and the column the offending name starts at (got %d)" % first.column)
++    selections = dock.sourceEdit.extraSelections()
++    check(bool(selections), "the offending line is marked in the text")
++    check(any(s.cursor.blockNumber() == 2 for s in selections),
++          "the marker is on the block the diagnostic named")
++
++    # A string literal is refused by the frontend today and will still be
++    # refused once it grows multi-statement support, so this check does not
++    # depend on which engine it runs against.
++    dock.sourceEdit.setPlainText('$value * "text"')
++    dock.validateNow()
++    check(bool(dock.diagnostics), "a string literal is rejected")
++    check(dock.diagnostics[0].line >= 1,
++          "with a line to point at (got %d)" % dock.diagnostics[0].line)
++
++    dock.sourceEdit.setPlainText("$value * (1 - $t)")
++    dock.validateNow()
++    check(dock.diagnostics == [], "and a good expression is clean again")
++    check(not dock.sourceEdit.extraSelections() or
++          all(s.cursor.blockNumber() == 0 for s in dock.sourceEdit.extraSelections()),
++          "the error marker is gone")
++
++    check(dock.sourceEdit.lineNumberAreaWidth() > 0,
++          "the editor carries a line-number gutter")
++
++
++def testFunctionCategories(dock):
++    categories = dock.functionBrowser.categories()
++    check("Trigonometry" in categories,
++          "the function browser groups by the engine's categories")
++    check("Operators" in categories,
++          "the operators are a group of their own")
++    check("Other" not in categories or categories[-1] == "Other",
++          "the leftovers bin, if there is one, sorts last")
++    total = sum(dock.functionBrowser.tree.topLevelItem(i).childCount()
++                for i in range(dock.functionBrowser.tree.topLevelItemCount()))
++    check(total == len(dock.functionBrowser.functions),
++          "every function the ABI reported is under exactly one group")
++
++
++def testPreviewAndClear(appController, dock, app):
++    """Preview writes to the session layer; Apply commits; Revert drops it."""
++    stage = appController._dataModel.stage
++    prim = dock.prim
++    check(prim is not None, "there is an expression to preview")
++    attr = prim.GetAttribute("usdGen:expr:source")
++    path = attr.GetPath()
++
++    previous = stage.GetEditTarget()
++    stage.SetEditTarget(stage.GetRootLayer())
++    try:
++        dock.sourceEdit.setPlainText("$value * 0.25")
++        app.processEvents()
++        check(dock.preview(), "Preview succeeds")
++        app.processEvents()
++        check(dock.isPreviewing(), "the editor says it is previewing")
++        check(attr.Get() == "$value * 0.25",
++              "the previewed text composes onto the stage")
++        check(stage.GetSessionLayer().GetAttributeAtPath(path) is not None,
++              "the override lives in the session layer")
++        check(stage.GetRootLayer().GetAttributeAtPath(path) is None or
++              stage.GetRootLayer().GetAttributeAtPath(path).default
++              != "$value * 0.25",
++              "and the layer being authored is untouched")
++        check(dock.isDirty(), "a preview is still an unapplied edit")
++
++        dock.revert()
++        app.processEvents()
++        check(not dock.isPreviewing(), "Revert ends the preview")
++        check(stage.GetSessionLayer().GetAttributeAtPath(path) is None or
++              stage.GetSessionLayer().GetAttributeAtPath(path).default is None,
++              "and takes the session-layer override away")
++        check(attr.Get() != "$value * 0.25",
++              "so the stage is back to what was authored")
++
++        # Apply after a preview must commit to the edit target AND clear the
++        # session override, or the commit would stay invisible behind it.
++        dock.sourceEdit.setPlainText("$value * 0.75")
++        app.processEvents()
++        dock.preview()
++        check(dock.apply(), "Apply succeeds after a preview")
++        app.processEvents()
++        check(not dock.isPreviewing(), "Apply ends the preview")
++        check(stage.GetRootLayer().GetAttributeAtPath(path).default
++              == "$value * 0.75",
++              "the text is committed to the edit target")
++        check(not dock.isDirty(), "and the editor is clean")
++
++        dock.clear()
++        app.processEvents()
++        check(dock.sourceEdit.toPlainText() == "", "Clear empties the text")
++        check(dock.isDirty(), "Clear is an edit like any other")
++        check(attr.Get() == "$value * 0.75",
++              "and writes nothing until Apply")
++        dock.revert()
++        app.processEvents()
++    finally:
++        stage.SetEditTarget(previous)

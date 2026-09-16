@@ -171,14 +171,13 @@ inherits its primitive's root context; names do not change between operators.
 | `$primIndex`, `$primCount` | Strand index/count | Owning strand index/count |
 | `$idLo`, `$idHi` | Exact 32-bit halves of stable curve ID | Same owning curve ID |
 | `$id` | Legacy `double(curveId)` convenience, not exact above 2^53 | Same owning curve ID |
-| `$u`, `$v`, `$faceId`, `$patchId` | Root UV, parent face index, surface index | Same root binding |
+| `$u`, `$v`, `$faceId` | Root UV and parent face index | Same root binding |
 | `$P`, `$Pref` | Root position in current/rest input geometry | CV position in current/rest input geometry |
 | `$rootP`, `$rootPref` | Current/rest root position | Same root positions |
-| `$N`, `$Nref`, `$dPdu`, `$dPdv`, `$dPduref`, `$dPdvref` | Current/rest surface frame at the root | Same root surface frame |
+| `$N`, `$Nref`, `$dPdu`, `$dPdv`, `$dPduref`, `$dPdvref` | The strand's **rest** root frame: normal, tangent, bitangent. usdGen keeps one root frame, so the `ref` spellings are the same vectors | Same root frame |
 | `$t` | 0 at the root | Normalized arc length, root 0 to tip 1 |
 | `$pointIndex`, `$pointCount` | Unavailable | CV index within strand and that strand's CV count |
 | `$cLength`, `$cWidth` | Incoming strand length and root width | Incoming strand length and current CV width |
-| `$Cs`, `$As` | Root-sampled surface color/opacity | Same root-sampled values |
 
 All geometry reads are from the consuming operator's **input**, never its output.
 Current/rest positions follow the operator's resolved space and available input
@@ -191,8 +190,14 @@ unavailable before curve creation. The compiler checks actual referenced variabl
 against the consumer's domain and available channels. It reports unavailable
 variables instead of binding them to zero. Thus the core vocabulary is common
 everywhere, while geometric data keeps its meaning. Geometry-wide reductions, if
-needed, must be explicit upstream computations. Root surface color/opacity retain
-the existing white/one defaults when the surface does not author those channels.
+needed, must be explicit upstream computations.
+
+`$patchId`, `$Cs` and `$As` were listed here through M1 and are gone: usdGen has
+no patch table, and the engine's curve buffer carries no surface colour or
+opacity at evaluation time, so nothing could ever fill them. They are removed
+rather than left declared-but-unwritten, which is what made an expression naming
+one fail with a poison value instead of a message. `expr::Frontend::VariableDocs()`
+is the single source of truth for this table.
 
 ## Compilation and evaluation timing
 

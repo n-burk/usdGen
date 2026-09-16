@@ -17,7 +17,6 @@ struct CudaSurfaceBindingKey {
     VtIntArray faceVertexCounts;
     VtIntArray faceVertexIndices;
     uint32_t sampleBudget = 0;
-    int algorithmVersion = 0;
 };
 
 struct CudaSurfacePrepared {
@@ -27,7 +26,6 @@ struct CudaSurfacePrepared {
     std::vector<uint32_t> faceOffsets, faceVertexIndices;
     CudaSurfaceBindingKey key;
     uint32_t sampleBudget = 0;
-    int algorithmVersion = 0;
 };
 
 enum class CudaSurfacePreparationStatus {
@@ -36,7 +34,7 @@ enum class CudaSurfacePreparationStatus {
 };
 
 CudaSurfacePreparationStatus PrepareCudaSurface(
-    UsdGenSurfaceDesc const&, uint32_t sampleBudget, int algorithmVersion,
+    UsdGenSurfaceDesc const&, uint32_t sampleBudget,
     CudaSurfacePrepared*, std::vector<std::string>* diagnostics = nullptr);
 
 bool RestBindingMatches(CudaSurfacePrepared const&, CudaSurfacePrepared const&);

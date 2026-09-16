@@ -325,8 +325,6 @@ def Scope "Groom"
                 # must preserve each type error instead of using defaults.
                 string usdGen:enabled = "bad"
                 string usdGen:seed = "bad"
-                string usdGen:blend = "bad"
-                string usdGen:algorithmVersion = "bad"
             }
         }
     }
@@ -347,8 +345,8 @@ def Scope "Groom"
         noBackendHydraDesc.executionBackend !=
             usdGen::UsdGenExecutionBackend::CpuReference)
         return Fail("undeclared backend did not retain CPU baseline");
-    if (noBackendStageDesc.validationErrors.size() < 6 ||
-        noBackendHydraDesc.validationErrors.size() < 6) {
+    if (noBackendStageDesc.validationErrors.size() < 4 ||
+        noBackendHydraDesc.validationErrors.size() < 4) {
         for (auto const& e : noBackendStageDesc.validationErrors) std::fprintf(stderr, "Stage: %s\n", e.c_str());
         for (auto const& e : noBackendHydraDesc.validationErrors) std::fprintf(stderr, "Hydra: %s\n", e.c_str());
         std::fprintf(stderr, "Hydra nodes: %zu\n", noBackendHydraDesc.nodes.size());
@@ -360,9 +358,7 @@ def Scope "Groom"
     auto widthPrim = noBackendStage->GetPrimAtPath(SdfPath("/Groom/hair/Ops/width"));
     auto descriptionPrim = noBackendStage->GetPrimAtPath(SdfPath("/Groom/hair"));
     if (!widthPrim.GetAttribute(TfToken("usdGen:enabled")).Set(true) ||
-        !widthPrim.GetAttribute(TfToken("usdGen:blend")).Set(1.0f) ||
         !widthPrim.GetAttribute(TfToken("usdGen:seed")).Set(0) ||
-        !widthPrim.GetAttribute(TfToken("usdGen:algorithmVersion")).Set(0) ||
         !descriptionPrim.GetAttribute(TfToken("usdGen:width:default")).Set(.01f) ||
         !descriptionPrim.GetAttribute(TfToken("usdGen:tileTarget")).Set(64))
         return Fail("repair malformed dedicated values");

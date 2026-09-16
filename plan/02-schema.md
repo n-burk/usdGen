@@ -2,6 +2,28 @@
 
 Date: 2026-09-04. Status: plan v1 (draft, pending review).
 
+> **Superseded in part, 2026-09-15.** `libs/usdGenSchema/schema.usda` is the
+> source of truth for the property registry, and `docs/freezes/C1.md` is its
+> frozen mirror; where this document and the schema disagree, the schema wins.
+> At the user's direction the registry was cut back to the properties the
+> engine actually reads. The following were removed on 2026-09-15 together
+> with the code behind them, and the sections below that still describe them
+> are stale: on `UsdGenGroom` `usdGen:surface`, `densityScale`,
+> `renderDensityScale`, `schemaVersion`, `label`; on `UsdGenDescription`
+> `terminal`, `densityScale`, `renderDensityScale`, `motion:mode`,
+> `motion:sampleCount`, `motion:forwardSurfaceSamples`, `pickTarget`, `label`;
+> on `UsdGenGuideSet` `surface`, `blend`, `label`; on `UsdGenOperator`
+> `blend`, `space`, `readPhase`, `surface`, `algorithmVersion`, `label`; on
+> `UsdGenMap` `label`; on `UsdGenScatter` `mode`, `spacingU`, `spacingV`,
+> `jitter`, `rootPrims`, `rootUVs`, `relaxIterations`, `areaCompensation`,
+> `guides`, `perGuide`; on `UsdGenGrow` `directionPrimvar`, `uvBlend`,
+> `length:source` (and the `attribute` direction token); on
+> `UsdGenGuideInterpolate` and `UsdGenLength` `length:source`; on
+> `UsdGenCurveSource` `lane`; on `UsdGenWidth` `taper`, `taperStart`,
+> `rootScale`, `tipScale`; on `UsdGenDeform` `mode`, `twistAware`,
+> `preserveShape`, `preserveShape:iterations`. See `docs/freezes/C1.md` §9.
+
+
 This document specifies the USD object model of usdGen: every prim type, every property with its
 type and default, the reserved namespace layout, the curve contract shared by guides/freezes/
 imports/sim caches, the dirty class of every property, and how the codeless schema is generated,
@@ -75,18 +97,24 @@ The rule generalises: a `usdGen:mode` token is preferred over sibling types when
 share their whole property set and differ only in the kernel branch. It is *not* used where the
 property sets genuinely differ (a `UsdGenClump` is not a `UsdGenNoise` with a token).
 
-### 0.3 Explicit `usdGen:input` only
+### 0.3 Chain order is the composed hierarchy
 
-Chain order is the **explicit** `rel usdGen:input` relationship, resolved by a Kahn topological
-sort with namespace order as the only tie-break (S26; ADR §2.1). There is no implicit
-preceding-sibling fallback. `HdSceneIndexObserver` has no reorder notice at all — its four virtuals
+**Corrected 2026-09-15.** Chain order is the composed hierarchy under the Description's `Ops`
+scope, walked in reverse sibling post-order (bottom sibling first), exactly as
+`plan/14-hierarchy-cuda-implementation.md` §1 and `plan/15-resource-aware-execution.md` describe
+and as `schema.usda` states. There is no `rel usdGen:input` in the schema and there never was one
+in the implementation: both graph-desc builders derive every edge from composed sibling order. The
+Kahn topological sort with namespace-order tie-break (S26) still runs, but over that derived linear
+chain. `usdGen:terminal` is likewise gone: the terminal is the last node of the derived order.
+
+`HdSceneIndexObserver` has no reorder notice at all — its four virtuals
 are `PrimsAdded`, `PrimsRemoved`, `PrimsDirtied`, `PrimsRenamed`
 (`pxr/imaging/hd/sceneIndexObserver.h:125-153`, verified) — and whether a `reorder nameChildren`
 edit produces *any* Hydra invalidation is **UNMEASURED**; the M0 pre-work notice check closes the
 question (ADR §7). Nothing here depends on the answer, because the adapter maps *properties*, not
-sibling order. The stack editor's drag gesture
-rewrites `usdGen:input` — one attribute edit per moved node — and never `reorder nameChildren`
-(`08-tools.md`).
+sibling order. The stack editor's drag gesture therefore has to
+`reorder nameChildren` (`08-tools.md`); the pre-2026-09-15 text here described a
+`usdGen:input` rewrite that no code ever performed.
 
 ### 0.4 `usdGen:enabled`, and why it is never a digest term
 
@@ -857,6 +885,12 @@ diff and hand-edit. A separate "Bake maps" action turns it into a `.ptx`/EXR whe
 the session; no image file is written during interaction (`research/A3-usdrig-tools.md` §7.2).
 
 ### 2.13 `UsdGenMaskAPI` — the universal mask block
+
+> **SUPERSEDED 2026-09-15.** `UsdGenMaskAPI` was deleted; nothing is auto-applied any more.
+> The mask is now one connectable attribute, `float usdGen:mask = 1.0`, declared on the abstract
+> `UsdGenStyler` and `UsdGenDeformer` (generators declare none), and a mask is an ordinary
+> attribute connection to a `UsdGenExpression` — to the prim or to its `outputs:result`.
+> Everything below is history; `docs/freezes/C1.md` §9 is the live account.
 
 Single-apply API schema, **auto-applied to `UsdGenOperator`** and therefore present on every
 derived operator type (§7.4). Auto-apply is mandatory rather than a convention: an *unapplied* API

@@ -111,7 +111,7 @@ int main(int argc, char **argv)
     Check(TypeKnown("UsdGenDescription"), "UsdGenDescription type known");
     Check(TypeKnown("UsdGenOperator"), "UsdGenOperator type known");
     Check(TypeKnown("UsdGenScatter"), "UsdGenScatter type known");
-    Check(TypeKnown("UsdGenMaskAPI"), "UsdGenMaskAPI type known");
+    Check(TypeKnown("UsdGenLookAPI"), "UsdGenLookAPI type known");
 
     // UsdSchemaRegistry view.
     Check(UsdSchemaRegistry::IsConcrete(TfToken("UsdGenScatter")),

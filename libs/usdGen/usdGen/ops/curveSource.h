@@ -18,7 +18,6 @@ public:
    ~UsdGenCurveSourceOp() override = default;
 
    TfToken Type() const override { return TfToken("UsdGenCurveSource"); }
-   UsdGenSpace Space() const override { return UsdGenSpace::Rest; }
    UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CurveCount; }
    UsdGenRole Role() const override { return UsdGenRole::Curves; }
    bool IsGenerator() const override { return true; }

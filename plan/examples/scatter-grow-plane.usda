@@ -94,7 +94,6 @@ def Xform "World"
                 # Runs first: random roots over the plane's area.
                 def UsdGenScatter "scatter"
                 {
-                    uniform token usdGen:mode = "random"
                     int usdGen:seed = 41
                     float usdGen:density = 600
                 }

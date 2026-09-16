@@ -68,7 +68,7 @@ bool GrowNoiseReference(UsdGenGraphDesc desc, UsdGenCurveBuffer* output,
         {TfToken("noise:magnitude"), VtValue(0.0f), false});
     if (!noise->expressionBindings.empty() || !noise->ramps.empty()) return false;
     for (auto const& parameter : noise->params) {
-        if (parameter.name != TfToken("enabled") && parameter.name != TfToken("blend") &&
+        if (parameter.name != TfToken("enabled") &&
             parameter.name != TfToken("noise:magnitude") &&
             parameter.name != TfToken("noise:frequency") &&
             parameter.name != TfToken("noise:correlation") &&
@@ -84,10 +84,9 @@ bool GrowNoiseReference(UsdGenGraphDesc desc, UsdGenCurveBuffer* output,
     float const magnitude = float(values.GetDouble(TfToken("noise:magnitude"), .05));
     float const frequency = float(values.GetDouble(TfToken("noise:frequency"), 3.0));
     float const correlation = float(values.GetDouble(TfToken("noise:correlation"), .5));
-    float const blend = float(values.GetDouble(TfToken("blend"), 1.0));
     int const seed = values.GetInt(TfToken("noise:seed"), 0);
     int const octaves = values.GetInt(TfToken("noise:octaves"), 1);
-    float const amplitude = magnitude * blend;
+    float const amplitude = magnitude;
     for (size_t curve = 0; curve != output->totalCurves; ++curve) {
         uint32_t begin = output->cvOffsets.empty()
             ? uint32_t(curve * output->totalCvs / output->totalCurves)
@@ -181,9 +180,8 @@ UsdGenGraphDesc Desc(bool resampleAndLift = false, bool namedPlanes = true,
     noise.path=SdfPath("/Ops/Noise"); noise.type=TfToken("UsdGenNoise");
     noise.inputs={grow.path};
     noise.params={{TfToken("enabled"),VtValue(true),false},
-                 {TfToken("blend"),VtValue(.65f),false},
                  {TfToken("noise:frequency"),VtValue(1.3f),false},
-                 {TfToken("noise:magnitude"),VtValue(.08f),false},
+                 {TfToken("noise:magnitude"),VtValue(.052f),false},
                  {TfToken("noise:correlation"),VtValue(.5f),false},
                  {TfToken("noise:seed"),VtValue(23),false},
                  {TfToken("noise:octaves"),VtValue(2),false},
@@ -193,7 +191,8 @@ UsdGenGraphDesc Desc(bool resampleAndLift = false, bool namedPlanes = true,
     }
     UsdGenNodeDesc blend;
     blend.path=SdfPath("/Ops/Blend"); blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={left.path,right.path}; blend.blend=.25f;
+    blend.inputs={left.path,right.path};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.25f),false});
     // Deliberately not execution order: C3 canonicalization and value DAG
     // lowering must not depend on descriptor ordinal.
     // Noise is currently exercised in the linear native suffix.  Keep the
@@ -382,10 +381,11 @@ UsdGenGraphDesc NoiseDagDesc() {
     auto right=Width("/Dag/Right",noise.path.GetText(),.9f);
     auto other=noise;other.path=SdfPath("/Dag/Other");other.inputs={source.path};
     auto tail=noise;tail.path=SdfPath("/Dag/Tail");tail.inputs={left.path};
-    for(auto& p:other.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.16f);
-    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.04f);
+    for(auto& p:other.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.104f);
+    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.026f);
     UsdGenNodeDesc blend;blend.path=SdfPath("/Dag/Blend");blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={left.path,right.path};blend.blend=.25f;
+    blend.inputs={left.path,right.path};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.25f),false});
     desc.nodes={blend,other,right,tail,source,noise,left,pre};desc.terminal=blend.path;
     return desc;
 }
@@ -411,12 +411,13 @@ UsdGenGraphDesc SourceBranchNoiseDagDesc(bool grow, TfToken mode=TfToken("scale"
     auto other=std::find_if(desc.nodes.begin(),desc.nodes.end(),[](auto const& n){return n.path==SdfPath("/Dag/Other");});
     other->inputs={SdfPath("/Ops/Source")};
     auto tail=*other;tail.path=SdfPath("/Dag/SideTail");tail.inputs={SdfPath("/Dag/SideLeft")};
-    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.09f);
+    for(auto& p:tail.params) if(p.name==TfToken("noise:magnitude")) p.value=VtValue(.0585f);
     desc.nodes.push_back(Width("/Dag/SideLeft","/Dag/Other",.4f));
     desc.nodes.push_back(Width("/Dag/SideRight","/Dag/Other",.8f));
     desc.nodes.push_back(Width("/Dag/SideRawWidth","/Ops/Source",.6f));
     UsdGenNodeDesc blend;blend.path=SdfPath("/Dag/SideBlend");blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={SdfPath("/Dag/SideLeft"),SdfPath("/Dag/SideRight")};blend.blend=.6f;
+    blend.inputs={SdfPath("/Dag/SideLeft"),SdfPath("/Dag/SideRight")};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.6f),false});
     desc.nodes.push_back(blend);desc.nodes.push_back(tail);desc.terminal=blend.path;
     return desc;
 }
@@ -488,7 +489,8 @@ UsdGenGraphDesc RegrowNoiseDagDesc(bool grownInput,char const* input,
     desc.nodes.push_back(Width("/Dag/RegrowLeft","/Dag/Regrow",.2f));
     desc.nodes.push_back(Width("/Dag/RegrowRight","/Dag/Regrow",.6f));
     UsdGenNodeDesc blend;blend.path=SdfPath("/Dag/RegrowBlend");blend.type=TfToken("UsdGenWidthBlend");
-    blend.inputs={SdfPath("/Dag/RegrowLeft"),SdfPath("/Dag/RegrowRight")};blend.blend=.4f;
+    blend.inputs={SdfPath("/Dag/RegrowLeft"),SdfPath("/Dag/RegrowRight")};
+    blend.params.push_back({TfToken("widthBlend:weight"),VtValue(.4f),false});
     desc.nodes.push_back(blend);desc.nodes.push_back(tail);desc.terminal=tail.path;
     return desc;
 }
@@ -614,8 +616,10 @@ bool NoiseDagReference(UsdGenGraphDesc const& desc,UsdGenCurveBuffer* output) {
             if(node->inputs.size()!=2||!evaluate(node->inputs[1],depth+1)) return false;
             auto const& right=values.at(node->inputs[1]);
             if(value.px!=right.px||value.py!=right.py||value.pz!=right.pz||value.width.size()!=right.width.size()) return false;
+            UsdGenParamView const wb{&desc,&*node};
+            float const weight=float(wb.GetDouble(TfToken("widthBlend:weight"),1.0));
             for(size_t i=0;i<value.width.size();++i)
-                value.width[i]=value.width[i]+(right.width[i]-value.width[i])*node->blend;
+                value.width[i]=value.width[i]+(right.width[i]-value.width[i])*weight;
         } else return false;
         values[path]=std::move(value);return true;
     };
@@ -1789,149 +1793,6 @@ int main() {
     auto liftedDirect=ExecuteCudaGraph(*liftedPlan,*liftedWorkspace,3,103,&liftedDiagnostics);
     CHECK(liftedDirect&&!liftedDiagnostics.HasErrors()&&CheckGeneration(liftedDirect,liftedReference,stream));
 
-    // uvBlend is a normalized value blend after the local root-B lift, from
-    // the lifted direction toward root T.  This C3 fixture deliberately has
-    // posed points distinct from rest, so CPU/direct/Session checks exercise
-    // both generated position channels as well as their preserved length.
-    auto growNode=[](UsdGenGraphDesc* candidate) {
-        return std::find_if(candidate->nodes.begin(),candidate->nodes.end(),[](auto const& node) {
-            return node.path==SdfPath("/Ops/Grow");
-        });
-    };
-    std::array<float,4> const uvBlends{{0.f,.25f,.5f,1.f}};
-    UsdGenSession uvSession; uvSession.SetDevicePublicationEnabled(true);
-    gpu::CudaGeometryLease uvOld;
-    std::vector<float3> uvOldPoints;
-    UsdGenGenerationConstPtr uvLast;
-    for(size_t variant=0;variant!=uvBlends.size();++variant) {
-        auto uv=Desc(); auto grow=growNode(&uv); CHECK(grow!=uv.nodes.end());
-        grow->params.push_back({TfToken("lift"),VtValue(30.0f),false});
-        grow->params.push_back({TfToken("uvBlend"),VtValue(uvBlends[variant]),false});
-        UsdGenCurveBuffer uvReference; CHECK(CpuReference(uv,&uvReference));
-        // The fixture frame is T=+X, B=+Y, N=+Z.  At u=0 the +30-degree
-        // lift leaves a positive Z component; at u=1 blend-after-lift is
-        // exactly T, so it removes Z. This makes the ordering observable,
-        // rather than merely comparing two implementations of the same bug.
-        for(uint32_t curve=0;curve!=uvReference.totalCurves;++curve) {
-            uint32_t const firstCv=curve*4, lastCv=firstCv+3;
-            if(uvBlends[variant]==0.f)
-                CHECK(std::fabs(uvReference.pz[lastCv]-uvReference.pz[firstCv])>.1f);
-            if(uvBlends[variant]==1.f)
-                CHECK(Near(uvReference.py[lastCv],uvReference.py[firstCv])&&
-                      Near(uvReference.pz[lastCv],uvReference.pz[firstCv])&&
-                      std::fabs(uvReference.px[lastCv]-uvReference.px[firstCv])>.1f);
-        }
-        UsdGenDiagnostics uvDiagnostics;
-        auto uvPlan=CompileCudaGraph(uv,&uvDiagnostics);
-        CHECK(uvPlan&&!uvDiagnostics.HasErrors());
-        auto uvWorkspace=CreateCudaExecutionWorkspace(-1,&uvDiagnostics); CHECK(uvWorkspace);
-        auto uvDirect=ExecuteCudaGraph(*uvPlan,*uvWorkspace,static_cast<double>(10+variant),110+variant,&uvDiagnostics);
-        if(!uvDirect||uvDiagnostics.HasErrors()) {
-            std::fprintf(stderr,"UV Grow direct failure variant=%zu generation=%zu\n",variant,110+variant);
-            for(auto const& error:uvDiagnostics.errors) std::fprintf(stderr,"  %s\n",error.c_str());
-        }
-        CHECK(uvDirect&&!uvDiagnostics.HasErrors()&&
-              CheckGeneration(uvDirect,uvReference,stream)&&
-              CheckEndpointLengths(uvDirect,uvReference,stream));
-        uvSession.SetGraphDesc(uv);
-        auto uvPublished=uvSession.Commit(static_cast<double>(10+variant),UsdGenCommitReason::SetTime);
-        CHECK(uvPublished&&uvPublished->device&&!uvSession.LastDiagnostics().HasErrors()&&
-              CheckGeneration(uvPublished->device,uvReference,stream)&&
-              CheckEndpointLengths(uvPublished->device,uvReference,stream));
-        uvLast=uvPublished;
-        if(!variant) {
-            uvOld=gpu::AcquireGeometry(uvPublished->device,stream);
-            CHECK(uvOld&&Read(uvOld.Geometry().points,&uvOldPoints,stream));
-        } else if(variant==1) {
-            auto uvCurrent=gpu::AcquireGeometry(uvPublished->device,stream);
-            CHECK(uvCurrent&&uvCurrent.Geometry().points.data!=uvOld.Geometry().points.data);
-            std::vector<float3> held;
-            CHECK(Read(uvOld.Geometry().points,&held,stream)&&held.size()==uvOldPoints.size()&&
-                  std::memcmp(held.data(),uvOldPoints.data(),held.size()*sizeof(float3))==0);
-        }
-    }
-    for(float invalidUv : {-0.01f,1.01f,std::numeric_limits<float>::quiet_NaN()}) {
-        auto invalid=Desc(); auto grow=growNode(&invalid); CHECK(grow!=invalid.nodes.end());
-        grow->params.push_back({TfToken("uvBlend"),VtValue(invalidUv),false});
-        UsdGenCurveBuffer invalidReference;
-        CHECK(!CpuReference(invalid,&invalidReference));
-        CHECK(CudaRejected(invalid));
-        if(invalidUv==1.01f) {
-            uvSession.SetGraphDesc(invalid);
-            CHECK(uvSession.Commit(99,UsdGenCommitReason::SetTime)==uvLast&&
-                  uvSession.LastDiagnostics().HasErrors());
-        }
-    }
-
-    // Typed root ImageMaps multiply Grow length on the native stream. Map
-    // payload replacement must not change an already-published COW lease.
-    {
-        auto mapped = Desc();
-        UsdGenMapDesc map; map.path=SdfPath("/Maps/Length");
-        map.type=TfToken("UsdGenImageMap"); map.textureGeneration=1;
-        map.imagePayload=UsdGenImagePayload::Create(2,2,1,{.25f,.5f,.75f,1.f},
-            UsdGenImageRowOrientation::BottomUp);
-        CHECK(map.imagePayload);
-        mapped.maps.push_back(map);
-        auto grow=growNode(&mapped); CHECK(grow!=mapped.nodes.end());
-        grow->mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,
-            TfToken("usdGen:length:source")}};
-        UsdGenSession mappedSession; mappedSession.SetDevicePublicationEnabled(true);
-        gpu::CudaGeometryLease held;
-        std::vector<float3> heldPoints;
-        UsdGenGenerationConstPtr last;
-        for (int variant=0;variant!=2;++variant) {
-            mapped.maps[0].params={{TfToken("map:filter"),
-                VtValue(TfToken(variant ? "nearest" : "bilinear")),false}};
-            if (variant) {
-                mapped.maps[0].textureGeneration++;
-                mapped.maps[0].imagePayload=UsdGenImagePayload::Create(2,2,1,
-                    {.8f,.6f,.4f,.2f},UsdGenImageRowOrientation::BottomUp);
-            }
-            UsdGenCurveBuffer expected; CHECK(CpuReference(mapped,&expected));
-            UsdGenDiagnostics errors;
-            auto mappedPlan=CompileCudaGraph(mapped,&errors);
-            for(auto const& error:errors.errors) std::fprintf(stderr,"%s\n",error.c_str());
-            CHECK(mappedPlan&&!errors.HasErrors());
-            auto mappedMetadata=GetCudaExecutionPlanMetadata(*mappedPlan);
-            CHECK(mappedMetadata&&mappedMetadata->MemoryEstimate().memoryAvailable);
-            auto growTask=std::find_if(mappedMetadata->Tasks().begin(),mappedMetadata->Tasks().end(),
-                [](auto const& task){return task.type==TfToken("UsdGenGrow");});
-            CHECK(growTask!=mappedMetadata->Tasks().end()&&
-                growTask->estimate.scratchPeakBytes >= 4*sizeof(float)+2*sizeof(float));
-            auto mappedWorkspace=CreateCudaExecutionWorkspace(-1,&errors); CHECK(mappedWorkspace);
-            auto mappedDirect=ExecuteCudaGraph(*mappedPlan,*mappedWorkspace,120+variant,220+variant,&errors);
-            CHECK(mappedDirect&&!errors.HasErrors()&&CheckGeneration(mappedDirect,expected,stream));
-            mappedSession.SetGraphDesc(mapped);
-            auto published=mappedSession.Commit(120+variant,UsdGenCommitReason::SetTime);
-            CHECK(published&&published->device&&!mappedSession.LastDiagnostics().HasErrors()&&
-                CheckGeneration(published->device,expected,stream));
-            last=published;
-            auto lease=gpu::AcquireGeometry(published->device,stream); CHECK(lease);
-            if(!variant) {held=std::move(lease);CHECK(Read(held.Geometry().points,&heldPoints,stream));}
-            else {
-                CHECK(held.Geometry().points.data!=lease.Geometry().points.data);
-                std::vector<float3> rereadPoints;CHECK(Read(held.Geometry().points,&rereadPoints,stream)&&
-                    rereadPoints.size()==heldPoints.size()&&std::memcmp(rereadPoints.data(),heldPoints.data(),rereadPoints.size()*sizeof(float3))==0);
-            }
-        }
-        mapped.maps[0].textureGeneration++;
-        mapped.maps[0].imagePayload=UsdGenImagePayload::Create(1,1,1,{-1.f});
-        mapped.maps[0].params={{TfToken("map:clamp"),VtValue(GfVec2f(-2,2)),false}};
-        mappedSession.SetGraphDesc(mapped);
-        CHECK(mappedSession.Commit(122,UsdGenCommitReason::SetTime)==last&&
-            mappedSession.LastDiagnostics().HasErrors());
-        auto emptyMapped=Desc(false,true,true);
-        emptyMapped.maps=mapped.maps;
-        growNode(&emptyMapped)->mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,
-            TfToken("usdGen:length:source")}};
-        UsdGenCurveBuffer emptyExpected;CHECK(CpuReference(emptyMapped,&emptyExpected));
-        mappedSession.SetGraphDesc(emptyMapped);
-        auto emptyPublished=mappedSession.Commit(123,UsdGenCommitReason::SetTime);
-        CHECK(emptyPublished&&emptyPublished->device&&!mappedSession.LastDiagnostics().HasErrors()&&
-            CheckGeneration(emptyPublished->device,emptyExpected,stream));
-    }
-
     // No authored rest is valid for a deformed/current C3 source.  The
     // loader must materialize its current-points fallback, retain the
     // authored root frame for native Grow, and skip named-plane phase 3
@@ -2050,7 +1911,7 @@ int main() {
 
     // Geometry leases enqueue their retirement event on the caller's stream.
     // They must complete before that external stream is destroyed.
-    old={}; current={}; uvOld={};
+    old={}; current={};
     retainedGrowNoiseLease={};
     editedGrowNoiseLease={};
     CHECK(cudaStreamDestroy(stream)==cudaSuccess);

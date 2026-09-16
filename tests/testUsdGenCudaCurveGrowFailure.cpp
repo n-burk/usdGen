@@ -59,11 +59,6 @@ int main(int argc, char** argv) {
     UsdGenNodeDesc grow;
     grow.path = SdfPath("/Grow"); grow.type = TfToken("UsdGenGrow");
     grow.inputs = {source.path}; grow.params = {{TfToken("segments"), VtValue(4), false}};
-    UsdGenMapDesc map;map.path=SdfPath("/Maps/Length");map.type=TfToken("UsdGenImageMap");
-    map.textureGeneration=1;
-    map.imagePayload=UsdGenImagePayload::Create(1,1,1,{.5f});CHECK(map.imagePayload);
-    desc.maps={map};
-    grow.mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,TfToken("usdGen:length:source")}};
     desc.nodes = {source, grow}; desc.terminal = sourceTerminal ? source.path : grow.path;
     if (predecessorGrow) {
         UsdGenNodeDesc noise;

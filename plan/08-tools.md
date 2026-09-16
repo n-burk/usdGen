@@ -961,6 +961,120 @@ stage prims, so a comb in guide mode writes their `points` at release and no scu
 Adding a guide is the Place-guide brush (§3.1 row 9); deleting one goes through `SetActive(false)`
 (§7.4).
 
+### 5.7 The SeExpr expression editor — shipped
+
+The one panel of this document that exists today. `plugin/usdGenTools` is a `Type "python"` usdview
+plugin (`UsdGenToolsPluginContainer`) that adds a **usdGen** menu with **SeExpr Expression Editor**
+(`Ctrl+Shift+E`), opening a dock that edits the `usdGen:expr:source` of a `UsdGenExpression` prim.
+It is independent of the M5 tool loop: no session, no C4 ABI, no brush state.
+
+**Selection.** The dock follows usdview's prim selection from either end of a connection: a selected
+`UsdGenExpression` is edited directly, and a selected operator offers every expression its attributes
+connect to, by prim path or by `outputs:result` — the two spellings both graph-desc builders resolve.
+
+**Everything it knows about the language comes from the engine.** Nothing about SeExpr is written
+down in the Python package. `libs/usdGenImaging/usdGenImaging/usdGenToolsApi.h` declares a three-call
+C ABI over `usdGen::expr::Frontend` and the variable registry, loaded with `ctypes`:
+
+| Entry point | Returns |
+|---|---|
+| `UsdGenTools_CompileExpression(source, domain, components, errBuf, errLen)` | `0` compiles, `1` diagnostics as `<line>\t<column>\t<message>` records, `2` bad arguments |
+| `UsdGenTools_ListVariables(domain, buf, len)` | `<name>\t<scalarType>\t<components>\t<domains>\t<valid>\t<doc>` per variable |
+| `UsdGenTools_ListFunctions(buf, len)` | `<name>\t<signature>\t<doc>\t<insert>\t<category>` per function and operator |
+
+Both list calls use one size-then-read protocol: they return the bytes required including the NUL,
+so a caller sizes with `(NULL, 0)` and reads with a buffer that fits. This ABI is **separate from
+`cApi.h`**, which stays the frozen C4 session contract (§C4): these calls carry no session state,
+touch no stage and no GPU, and are safe from any thread.
+
+The pure functions come from `Frontend::SupportedFunctions()`, the engine's own table, so the
+browser can never advertise a function `Lower()` refuses. `usdGenToolsApi.cpp` adds only what that
+table has no entry for: the operators, the ternary and the vector literal, which `Walk()`/`Lower()`
+accept as AST node kinds rather than named functions.
+
+`<category>` is the group the browser files a function under. It is `usdGen::expr::FunctionInfo`'s
+own `category` when that field exists and a name-based classification otherwise, detected at compile
+time with a `std::void_t` trait rather than a version macro — the field either exists in that
+translation unit or it does not, so the ABI's record shape does not depend on which engine it was
+built against. The ABI version is **2**; a Python plugin from a different build refuses to parse
+rather than misparsing.
+
+**The control grammar.** SeExpr2's editor drives its controls from the expression text, and so does
+this one. `exprApi.ScanControls()` reads every TOP-LEVEL statement of the form
+
+    $name = <value>;            # <annotation>
+
+— a statement running to the next `;` that is not inside brackets, a string or a comment — and gives
+each one a control, keeping the exact source offsets of `<value>` so an edit rewrites that span and
+nothing else:
+
+| Value | Annotation | Control |
+|---|---|---|
+| `0.5` | `# 0, 1` | float: slider + spinbox over that range |
+| `4` (no decimal point) | `# 1, 10` | integer: integral slider + spinbox |
+| `[1, 0.5, 0.2]` | `# color` | colour: swatch (`QColorDialog`) + three component sliders |
+| `[0, 1, 0]` | — | vector: three component sliders |
+| `curve($t, p, v, i, …)` | `# curve` | editable curve: draggable knots, add on click, delete on right-click or **Delete**, per-knot interpolation `none/linear/smooth/spline/monotone` = 0–4 |
+| `ccurve($t, p, [r,g,b], i, …)` | `# ccurve` | the same widget with colour knots |
+| `"text"` | `# string` | line edit (the engine rejects strings; validation says so) |
+
+Without an annotation a number keeps SeExpr's `[0, 1]`, widened only far enough to contain the value
+— a slider that cannot reach the number it shows would be worse than a wider one. Editing the range
+boxes rewrites the `# min, max` comment, because in this grammar the comment is where a range lives.
+A value the parser cannot drive (a computed right-hand side, a `curve()` with a non-literal knot)
+yields **no** control and the text keeps it untouched. Numbers no `$variable` holds fall back to the
+plain literal sliders, under **Loose numbers**; a number a control already drives is never offered
+twice.
+
+An interpolation code stored with a knot governs the segment that **ends** at it, which is
+`Curve::getValue`'s behaviour, not a choice made here. `exprApi.EvaluateCurve()` implements the five
+codes (Catmull-Rom for `spline`, Fritsch-Carlson for `monotone`) for drawing only; the engine does
+the real evaluation.
+
+**The widgetry.**
+
+| Widget | Behaviour |
+|---|---|
+| Syntax highlighting | `$variables`, functions, numbers, operators, `#` comments and string literals (highlighted *and* wave-underlined, since the engine rejects them). A `$variable` or function the engine does not know is marked wrong while it is typed, from the ABI's own lists. |
+| Bracket matching | The pair around the cursor is boxed; an unmatched bracket is boxed in red. |
+| Live validation | 300 ms after the text settles, the source is compiled for the current domain and output width. Green "OK" or `line L, col C: message` in a status strip, with the offending line marked in the text. Character offsets from the frontend's AST walk and the vendored parser's `at line N` are both mapped to line and column in the C ABI. |
+| Line numbers | A gutter beside the text, with the caret's own line picked out. A multi-statement expression is the normal shape once controls are declared, and a diagnostic that says `line 3` is otherwise a number with nothing to point at. |
+| Completion | A popup while typing (`Ctrl+Space` forces it): `$variables` after one character, function names after two, each row carrying the name, the signature or type, and the doc, all from the ABI. Enter/Tab accept, Escape dismisses; a function completes to its whole call with the caret inside the parentheses. |
+| Function and variable browsers | Side by side in the Reference tab. Functions are grouped by the ABI's `category`. Variables show type, components and the domains they are valid in, greyed out where the current domain does not define them. Double-click or **Insert** puts the text at the cursor; a `\|` in the ABI's `insert` field says where the caret lands. |
+| Controls | One widget per declared `$variable`, per the control grammar above, in the Controls tab with **Add Widget…**. A control rewrites exactly its own value through a `QTextCursor`, carrying the caret across the edit and coalescing a drag into one undo step. |
+| Add Widget | SeExpr's `ExprAddDialog`: a name, a type (Integer, Float, Vector, Color, Curve, Color Curve, String) and the initial value, range, colour, text or curve lookup that type needs, previewed as the line it will write. The declaration is inserted at the TOP of the expression, because a SeExpr variable must be assigned before the body that reads it. A name already declared is refused. |
+| Loose numbers | The literal sliders, for numeric literals no `$variable` holds: one slider, value spinbox and editable `[min, max]`, labelled with the call it sits in (`clamp(..., ..., 0.15)`). Ranges default to `[0, 1]` for a literal already in `[0, 1]`, else `[0, 2x]`. |
+| Library | A tree of saved `.se` files by library, with a search box and a filter on the evaluation domain a file declares in a leading `# domain: point` comment (a file with no marker suits any domain). **Load** replaces the text as an unapplied edit; **Save** / **Save As…** write into the user library, which is `~/.usdGenExpressions` or the first entry of `USDGEN_EXPRESSION_PATH`. The read-only `usdGen` library ships `rootTipTaper`, `randomLength`, `clumpMask` and `widthProfile` from `plugin/usdGenTools/resources/expressions`. |
+| Domain and output type | A combo reads and writes the destination attribute's `customData usdGen:evaluation`, beside a read-only display of the expression's `outputs:result` type. Changing it revalidates, so a `$t` that is legal per curve and illegal per groom is refused immediately. |
+| Connections | For a selected operator: its `float`/`int`/`bool` attributes with their current connection. **Connect to expression** makes (or reuses) a `UsdGenExpression` under `<Description>/Expressions` with a typed `outputs:result` and `$value` as its source, authors the `.connect` by PRIM path, and carries the schema's own evaluation domain onto the destination. **Disconnect** removes it. |
+| Apply / Preview / Revert / Clear | `Ctrl+Return` applies to the current edit target. **Preview** writes to the stage's SESSION layer instead, so the viewport shows the text without touching the layer being authored; Apply then commits it and drops the override, Revert drops it and reloads. **Clear** empties the text and writes nothing. The dock title carries a `*` while there are unapplied edits; **Live apply** writes every control change straight to the stage so the viewport follows a drag. An external edit to `usdGen:expr:source` reloads the text unless the user has unapplied changes. |
+
+**Authoring.** Every action goes through the stage's current edit target with the Sdf API inside one
+`Sdf.ChangeBlock`, so a connect is one stage notice rather than four and the groom scene index recooks
+once. One exception is documented in `exprAuthor.DisconnectExpression`: `Sdf`'s `connectionPathList`
+proxy writes *nothing* for an empty explicit list, so blocking a connection authored in a weaker layer
+— which is the normal case in usdview, whose edit target is the session layer — goes through
+`UsdAttribute.SetConnections([])` instead.
+
+**Tests.** `testUsdGenToolsApi` (T1, C++) covers the ABI: compile success and failure, the line and
+column mapping, the domain check, the size-then-read protocol, that every function the list
+advertises actually compiles, and that every record carries a category. `testUsdGenToolsExprApi`
+(T1, python, no Qt) covers the `ctypes` binding, the literal scanner and label builder, the control
+grammar and its rewriting, the declaration builder, the curve evaluator, the library paths and file
+format, and the connection authoring against both a root-layer and a session-layer edit target.
+`testUsdGenToolsExprEditor` (T2, `testusdview`) drives the dock itself, including each control kind
+rewriting the text, the Add Widget dialog, the completion model and popup, a library save/load round
+trip with the domain filter, diagnostic positions across a four-line expression, and Preview /
+Apply / Revert against the session layer. `plugin/usdGenTools/testenv/shotUsdGenToolsExprEditor.py`
+is not a test: it photographs each panel through `testusdview` for review without an interactive
+session.
+
+**Not done.** The controls grammar is written for the multi-statement frontend the engine track is
+landing: `$name = …;` statements do not compile today, so the shipped presets that use them (all but
+`clumpMask`) validate red until that change arrives. The panel itself is pure text work and is
+correct either way. A `String` control exists so the control model is complete, but the engine
+rejects string literals and validation says so.
+
 ---
 
 ## 6. Picking and selection

@@ -14,13 +14,13 @@
 // work, and R14 already routes usdGen:cullThreshold as topology).
 #include "usdGen/ops/length.h"
 
-#include "usdGen/mask.h"
 
-#include "usdGen/maskParams.h"
+#include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 #include "pxr/base/tf/diagnostic.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -100,20 +100,16 @@ static TfTokenVector _topoParams = [] {
     v.push_back(TfToken("length:mode"));
     v.push_back(TfToken("length:method"));
     v.push_back(TfToken("rebuild"));
-    v.push_back(TfToken("length:source"));
     v.push_back(TfToken("length:value"));
     v.push_back(TfToken("length:random"));
     v.push_back(TfToken("minRemainingLength"));
     v.push_back(TfToken("cullThreshold"));
-    auto m = UsdGenMaskTopologyParams();
-    v.insert(v.end(), m.begin(), m.end());
     return v;
 }();
 
 static TfTokenVector _valueParams = [] {
     TfTokenVector v = UsdGenBaseValueParams();
-    auto m = UsdGenMaskValueParams();
-    v.insert(v.end(), m.begin(), m.end());
+    v.push_back(TfToken("mask"));        // operator envelope (02 §2.13)
     return v;
 }();
 
@@ -218,16 +214,30 @@ void UsdGenLengthOp::Evaluate(
     UsdGenChunkView *view) const
 
 {
-    TF_UNUSED(ctx);
     UsdGenLengthCapture const &cap =
         static_cast<UsdGenLengthCapture const &>(captureIn);
+    UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
+    // usdGen:length:value, usdGen:cullThreshold, usdGen:minRemainingLength and
+    // usdGen:mask are CONNECTABLE. The first three shape ONE per-curve scale
+    // factor, so they are sampled at the curve's root CV; the mask is a true
+    // per-CV envelope. Nothing connected leaves these as uniform literals and
+    // the arithmetic below bit-identical to the pre-expression kernel.
+    UsdGenParamField const valueField =
+        p ? p->GetScalarField(sValue, cap.value) : UsdGenParamField{cap.value};
+    UsdGenParamField const cullField =
+        p ? p->GetScalarField(sCull, cap.cullThreshold) : UsdGenParamField{cap.cullThreshold};
+    UsdGenParamField const minField =
+        p ? p->GetScalarField(sMinRemaining, cap.minRemaining)
+          : UsdGenParamField{cap.minRemaining};
+    UsdGenParamField const maskField =
+        p ? p->GetScalarField(sMask, 1.0) : UsdGenParamField{1.0};
     float *px = view->px, *py = view->py, *pz = view->pz;
     auto const *inPx = view->inPx, *inPy = view->inPy, *inPz = view->inPz;
     // perCurve is a whole-buffer capture payload (the scheduler pre-offsets
-    // only buffer planes and curveMask) — index it absolutely, grow.cpp pattern.
+    // only buffer planes) — index it absolutely, grow.cpp pattern.
     auto const *mult = cap.perCurve.empty() ? nullptr : cap.perCurve.cdata();
     const size_t curveBase = view->desc ? view->desc->firstCurve : 0;
-    const bool thresholded = cap.cullThreshold > 0.0 || cap.minRemaining > 0.0;
+    const size_t cvBase = view->desc ? size_t(view->desc->firstCv) : 0;
     // sSet is operator-owned: no per-curve token interning and no lazy
     // static destruction while an asynchronous evaluation is still running.
 
@@ -240,39 +250,43 @@ void UsdGenLengthOp::Evaluate(
         if (!cv) continue;
         const float rx = inPx[base], ry = inPy[base], rz = inPz[base];
         const double m = mult ? double(mult[curveBase + c]) : 1.0;
+        // The per-curve controls sample the curve's root CV: one curve gets
+        // one length factor, whatever granularity the expression declares.
+        const size_t curve = curveBase + c;
+        const size_t root = cvBase + base;
+        const double value = valueField.Value(curve, root);
+        const double cullThreshold = cullField.Value(curve, root);
+        const double minRemaining = minField.Value(curve, root);
         float f;
         if (cap.mode == sSet) {
             // target = value * mult, absolute; scale it in over the runtime
             // rest length of THIS (possibly deformed) curve — plan/04 §2.10.
             const float restLen = UsdGenPolylineRestLength(inPx, inPy, inPz, base, cv);
-            f = restLen > 1e-9f ? float(cap.value * m / double(restLen)) : 0.0f;
+            f = restLen > 1e-9f ? float(value * m / double(restLen)) : 0.0f;
         } else {  // "scale" and "cull": the ratio restLen cancels — plan/04 §2.10.
-            f = float(cap.value * m);
+            f = float(value * m);
         }
-        if (thresholded) {
+        if (cullThreshold > 0.0 || minRemaining > 0.0) {
             const float restLen = UsdGenPolylineRestLength(inPx, inPy, inPz, base, cv);
-            const double target = cap.mode == TfToken("set")
-                                    ? cap.value * m
-                                    : double(restLen) * cap.value * m;
-            if (target < cap.cullThreshold || target < cap.minRemaining) f = 0.0f;
-        }
-        if (view->curveMask) {
-            // Mask block blend (§2.13): scale factor eases toward identity
-            // (1.0) as the mask weight falls off.
-            f = 1.0f + (f - 1.0f) * view->curveMask[c];
-        }
-        if (f == 1.0f) {
-            for (size_t i = 0; i < cv; ++i) {
-                const size_t o = base + i;
-                px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
-            }
-            continue;
+            const double target = cap.mode == sSet
+                                    ? value * m
+                                    : double(restLen) * value * m;
+            if (target < cullThreshold || target < minRemaining) f = 0.0f;
         }
         for (size_t i = 0; i < cv; ++i) {
             const size_t o = base + i;
-            px[o] = rx + (inPx[o] - rx) * f;
-            py[o] = ry + (inPy[o] - ry) * f;
-            pz[o] = rz + (inPz[o] - rz) * f;
+            // usdGen:mask is the envelope (§2.13): the scale factor eases
+            // toward identity (1.0), so mask == 0 is a bitwise pass-through.
+            const float mask = std::clamp(
+                static_cast<float>(maskField.Value(curve, cvBase + o)), 0.0f, 1.0f);
+            const float fe = 1.0f + (f - 1.0f) * mask;
+            if (fe == 1.0f) {
+                px[o] = inPx[o]; py[o] = inPy[o]; pz[o] = inPz[o];
+                continue;
+            }
+            px[o] = rx + (inPx[o] - rx) * fe;
+            py[o] = ry + (inPy[o] - ry) * fe;
+            pz[o] = rz + (inPz[o] - rz) * fe;
         }
     }
 }

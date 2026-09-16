@@ -3,11 +3,9 @@
 // 02-schema.md §2.6, 04-operators.md :620-676. Area-weighted scatter:
 //   n_f = floor(expected) + (Hash01(Hash64(seed, f, kSaltScatter),
 //                                    kSaltScatter) < frac(expected))
-//   expected = density * areaRest(f) * meanMask(f)          (plan/04 :634-635)
+//   expected = density * areaRest(f)                        (plan/04 :634-635)
 // Curve ids are UsdGenCurveId(seed, faceIndex, k) (plan/04 :637) so they stay
-// stable across density edits (plan/04 :663); densityScale is NOT applied
-// here — it decimates the captured root set by stable id at publish time
-// (KeepCurve), so a density scrub never re-runs Capture (ADR §9 R13).
+// stable across density edits (plan/04 :663).
 // Each root position is drawn from three curveId-keyed draws (area-weighted
 // fan-triangle pick + uniform in-triangle point): the M1 realization of the
 // "low-discrepancy sample seeded by curveId" (plan/04 :638) — being purely
@@ -16,8 +14,7 @@
 // chunk placement is surface-major (plan/04 :641).
 #include "usdGen/ops/scatter.h"
 
-#include "usdGen/mask.h"
-#include "usdGen/maskParams.h"
+#include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 
@@ -67,30 +64,16 @@ inline uint64_t double_as_bits(double d)
 static TfTokenVector _topoParams = [] {
     TfTokenVector v = UsdGenBaseTopologyParams();
     v.push_back(TfToken("enabled"));      // generator: topology-class (02 §6.2)
-    v.push_back(TfToken("mode"));        // structural (02 §6.1)
     v.push_back(TfToken("density"));     // capture (02 §6.4)
-    v.push_back(TfToken("spacingU"));
-    v.push_back(TfToken("spacingV"));
-    v.push_back(TfToken("jitter"));
-    v.push_back(TfToken("rootPrims"));
-    v.push_back(TfToken("rootUVs"));
-    v.push_back(TfToken("relaxIterations"));
-    v.push_back(TfToken("areaCompensation"));
     v.push_back(TfToken("flip"));
-    v.push_back(TfToken("perGuide"));
-    auto m = UsdGenMaskTopologyParams();
-    v.insert(v.end(), m.begin(), m.end());
     return v;
 }();
 
+// Scatter is a generator: it has no upstream curves to leave untouched, so it
+// declares no usdGen:mask.
 static TfTokenVector _valueParams = [] {
-    TfTokenVector v = UsdGenBaseValueParams();
-    auto m = UsdGenMaskValueParams();
-    v.insert(v.end(), m.begin(), m.end());
-    return v;
+    return UsdGenBaseValueParams();
 }();
-
-static TfTokenVector _refInputs = { TfToken("guides") };
 
 TfSpan<const TfToken> UsdGenScatterOp::TopologyParameters() const
 {
@@ -99,10 +82,6 @@ TfSpan<const TfToken> UsdGenScatterOp::TopologyParameters() const
 TfSpan<const TfToken> UsdGenScatterOp::ValueParameters() const
 {
     return TfSpan<const TfToken>(_valueParams.data(), _valueParams.size());
-}
-TfSpan<const TfToken> UsdGenScatterOp::ReferenceInputs() const
-{
-    return TfSpan<const TfToken>(_refInputs.data(), _refInputs.size());
 }
 std::unique_ptr<UsdGenCapture> UsdGenScatterOp::CreateCapture() const
 {
@@ -115,18 +94,6 @@ uint32_t UsdGenScatterOp::PlanesTouched() const
 
 bool UsdGenScatterOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
 {
-    TfToken mode = params.GetToken(TfToken("mode"), TfToken("random"));
-    if (mode != TfToken("random")) {
-        if (diag) {
-            diag->Error("UsdGenScatter: M1 implements usdGen:mode=\"random\" only "
-                        "(got \"" + mode.GetString() + "\")");
-        }
-        return false;
-    }
-    if (params.GetDouble(TfToken("jitter"), 0.0) < 0.0) {
-        if (diag) diag->Error("UsdGenScatter: jitter must be >= 0");
-        return false;
-    }
     double const density = params.GetDouble(TfToken("density"), 100.0);
     if (!std::isfinite(density) || density < 0.0) {
         if (diag) diag->Error("UsdGenScatter: density must be finite and >= 0");
@@ -137,8 +104,8 @@ bool UsdGenScatterOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *dia
 
 UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
 {
-    // Capture-class inputs: mode/density/spacing/jitter/flip/perGuide + the
-    // mask capture block + seed, pinned to the surface's topology generation
+    // Capture-class inputs: density/flip + seed, pinned to the surface's
+    // topology generation
     // (03 §3.4). The surfaceGeneration term is bumped by the imaging layer on
     // any rest/topology change, so no point-level re-hashing is needed here.
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
@@ -147,8 +114,8 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
         h ^= v; h *= 0x100000001b3ULL;
         h ^= k.size(); h *= 0x100000001b3ULL;
     };
-    feed("mode", p ? static_cast<uint64_t>(p->GetToken(TfToken("mode"), TfToken("random")).Hash()) : 0);
     feed("density", p ? double_as_bits(p->GetDouble(TfToken("density"), 100.0)) : 0);
+    feed("flip", p && p->GetBool(TfToken("flip"), false) ? 1u : 0u);
     feed("seed", ctx.seed);
     UsdGenGraphDesc const *desc = ctx.desc;
     if (desc && ctx.surface < desc->surfaces.size()) {
@@ -156,32 +123,6 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
         feed("subset", uint64_t(desc->surfaces[ctx.surface].subsetFaces.size()));
     }
 
-    // The mask block changes Capture OUTPUT through meanMask in the expected
-    // root count (plan/04 :634, :676), so its inputs belong in the capture
-    // digest (review M-5). Same key spellings as the capture block below.
-    if (p) {
-        feed("mask:amount", double_as_bits(p->GetDouble(TfToken("mask:amount"), 1.0)));
-        feed("mask:invert", p->GetBool(TfToken("mask:invert"), false) ? 1u : 0u);
-        feed("mask:combine",
-             static_cast<uint64_t>(p->GetToken(TfToken("mask:combine"), TfToken("multiply")).Hash()));
-        feed("mask:random", double_as_bits(p->GetDouble(TfToken("mask:random"), 0.0)));
-        feed("mask:randomSeed", static_cast<uint64_t>(p->GetInt(TfToken("mask:randomSeed"), 0)));
-        feed("mask:rangeMin", double_as_bits(p->GetDouble(TfToken("mask:rangeMin"), 0.0)));
-        feed("mask:rangeMax", double_as_bits(p->GetDouble(TfToken("mask:rangeMax"), 1.0)));
-        feed("mask:ramp:interp",
-             static_cast<uint64_t>(p->GetToken(TfToken("mask:ramp:interpolation"),
-                                               TfToken("catmullRom")).Hash()));
-        auto kn = p->GetVtValue(TfToken("mask:ramp:knots"),
-                                VtValue(VtVec2fArray{GfVec2f(0, 1), GfVec2f(1, 1)}));
-        if (kn.IsHolding<VtVec2fArray>()) {
-            auto const &knots = kn.UncheckedGet<VtVec2fArray>();
-            feed("mask:ramp:n", knots.size());
-            for (auto const &g : knots) {
-                feed("mask:ramp.x", double_as_bits(double(g[0])));
-                feed("mask:ramp.y", double_as_bits(double(g[1])));
-            }
-        }
-    }
     return {h, h ^ 0x9E3779B97F4A7C15ull};
 }
 
@@ -243,38 +184,6 @@ bool UsdGenScatterOp::Capture(
     }
     const bool flip = p ? p->GetBool(TfToken("flip"), false) : false;
 
-    // Mask settings (02 §2.13; same key spellings as ops/mask.cpp) and the
-    // per-face meanMask of plan/04 :634. meanMask is undefined in the plan
-    // beyond its name (review M-5): the M1 realization is the mask evaluated
-    // at the face-level probe id curveId(seed, f, 0). amount / invert /
-    // random still scale it, so mask:amount == 0 ⇒ zero roots holds
-    // (plan/04 :676) via the expected <= 0 skip below.
-    UsdGenMaskSettings m;
-    if (p) {
-        m.random = static_cast<float>(p->GetDouble(TfToken("mask:random"), 0.0));
-        m.randomSeed = p->GetInt(TfToken("mask:randomSeed"), 0);
-        m.combine = p->GetToken(TfToken("mask:combine"), TfToken("multiply"));
-        m.amount = static_cast<float>(p->GetDouble(TfToken("mask:amount"), 1.0));
-        m.invert = p->GetBool(TfToken("mask:invert"), false);
-        m.rangeX = static_cast<float>(p->GetDouble(TfToken("mask:rangeMin"), 0.0));
-        m.rangeY = static_cast<float>(p->GetDouble(TfToken("mask:rangeMax"), 1.0));
-        m.effectPosition = static_cast<float>(p->GetDouble(TfToken("mask:effectPosition"), 0.5));
-        m.falloff = static_cast<float>(p->GetDouble(TfToken("mask:falloff"), 0.5));
-        m.influenceWidth = static_cast<float>(p->GetDouble(TfToken("mask:influenceWidth"), 0.5));
-        auto knots = p->GetVtValue(TfToken("mask:ramp:knots"),
-                                   VtValue(VtVec2fArray{GfVec2f(0, 1), GfVec2f(1, 1)}));
-        if (knots.IsHolding<VtVec2fArray>()) m.rampKnots = knots.UncheckedGet<VtVec2fArray>();
-        m.rampInterpolation = p->GetToken(TfToken("mask:ramp:interpolation"),
-                                          TfToken("catmullRom"));
-    }
-    VtFloatArray faceMask;
-    if (p) {
-        VtArray<uint64_t> probeIds(faces.size());
-        for (size_t i = 0; i < faces.size(); ++i)
-            probeIds[i] = UsdGenCurveId(ctx.seed, uint32_t(faces[i]), 0u);
-        faceMask = EvaluateMask(m, probeIds, {}, {}, 0.0).curveMask;
-    }
-
     // Per-face area-weighted emission (plan/04 :634-635).
     std::vector<float> ax, ay, az;
     std::vector<uint64_t> aids;
@@ -320,15 +229,13 @@ bool UsdGenScatterOp::Capture(
         }
         GfVec3f const Nrest = Normalize3(nAcc);
 
-        double const maskVal = fi < faceMask.size() ? double(faceMask[fi]) : 1.0;
-        double const expected = density * areaRest * maskVal;
-        if (!std::isfinite(areaRest) || !std::isfinite(maskVal) ||
-            !std::isfinite(expected)) {
+        double const expected = density * areaRest;
+        if (!std::isfinite(areaRest) || !std::isfinite(expected)) {
             if (diag) diag->Error("UsdGenScatter::Capture: non-finite root count on face " +
                                   std::to_string(f));
             return false;
         }
-        if (!(expected > 0.0)) continue;  // includes mask:amount == 0 (:676)
+        if (!(expected > 0.0)) continue;
         double const whole = std::floor(expected);
         double const frac = expected - whole;
         if (whole > double(std::numeric_limits<uint32_t>::max())) {
@@ -430,13 +337,6 @@ bool UsdGenScatterOp::Capture(
         buf.rootUV[i] = aUv[s];
         buf.rootT[i] = aT[s]; buf.rootN[i] = aN[s]; buf.rootB[i] = aB[s];
     }
-
-    // Per-root mask resolved at capture (I4: never per frame; 02 §2.13) —
-    // downstream ops read it via the curveMask plane.
-    if (p) {
-        buf.curveMask = EvaluateMask(m, buf.curveId, buf.px, {}, 0.0).curveMask;
-    }
-    else buf.curveMask = VtFloatArray();
     return true;
 }
 

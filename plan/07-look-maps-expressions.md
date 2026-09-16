@@ -432,13 +432,13 @@ plus one texture = the 20 inputs Sdr reports (MEASURED, `research/G-storm-hair-l
 | `colorRamp` | `float` | `1.0` | Exponent applied to `hairT` before the root/tip lerp. Authored from `usdGen:look:rampExponent` (§1.1); the two names differ on purpose and only the glslfx one is under C5. |
 | `diffuseGain` | `float` | `0.55` | Weight of the Kajiya-Kay `sin(T,L)` diffuse lobe. |
 | `diffuseWrap` | `float` | `0.35` | 0 = hard terminator, 1 = fully wrapped; fakes multiple scattering in dense fur. |
-| `specular1Gain` | `float` | `0.30` | Weight of the primary (R) highlight. |
+| `specular1Gain` | `float` | `0.09` | PEAK reflectance of the primary (R) highlight; the lobe is a unit-peak Gaussian. |
 | `specular1Color` | `color3f` | `(1, 1, 1)` | Tint of the R lobe. |
-| `specular1Width` | `float` | `0.075` | Angular width of the R lobe. |
+| `specular1Width` | `float` | `0.120` | Angular width of the R lobe. |
 | `specular1Shift` | `float` | `-0.045` | Longitudinal shift of the R lobe (Marschner `alpha_R`). |
-| `specular2Gain` | `float` | `0.16` | Weight of the secondary (TRT) highlight. |
+| `specular2Gain` | `float` | `0.05` | PEAK reflectance of the secondary (TRT) highlight. |
 | `specular2Color` | `color3f` | `(1, 1, 1)` | Extra tint on TRT; multiplied by the strand albedo. |
-| `specular2Width` | `float` | `0.22` | Angular width of TRT; should exceed `specular1Width`. |
+| `specular2Width` | `float` | `0.300` | Angular width of TRT; should exceed `specular1Width`. |
 | `specular2Shift` | `float` | `0.090` | Longitudinal shift of TRT (Marschner `alpha_TRT`). |
 | `transmissionGain` | `float` | `0.25` | Weight of the cheap forward-scattering (TT) rim term. |
 | `transmissionColor` | `color3f` | `(1.0, 0.62, 0.38)` | Tint of the forward-scattering term. |
@@ -446,7 +446,13 @@ plus one texture = the 20 inputs Sdr reports (MEASURED, `research/G-storm-hair-l
 | `widthFalloff` | `float` | `0.0` | 0 = flat across the strip; 1 = alpha falls to 0 at the strand silhouette. |
 | `randomHue` | `float` | `0.0` | Per-curve hue jitter driven by `hairId`. |
 | `randomValue` | `float` | `0.0` | Per-curve brightness jitter driven by `hairId`. |
+| `selfOcclusion` | `float` | `0.5` | Canopy self-shadow driven by `hairT`; scales the direct lobes and the dome irradiance alike. |
 | `rootColorMap` | texture (`color3f`) | `(1, 1, 1)` | Multiplied into the strand albedo. Wire to a `UsdUVTexture` whose `st` comes from a `UsdPrimvarReader_float2` on the per-curve root UV. Unconnected ⇒ the declared white fallback. |
+
+The four specular defaults above were retuned in M1 against the shipped
+viewport (the lobe is now a **unit-peak** Gaussian, so a gain IS a peak
+reflectance); `docs/freezes/C5.md` §"Default retune" records the old values and
+why. C5 freezes the names and their order, not the defaults.
 
 The white fallback is not incidental: `HioGlslfxConfig` honours a `"default"` key in the `textures`
 block (`pxr/imaging/hio/glslfxConfig.cpp:34` maps `defVal → "default"`, read at `:548-549`), so an
@@ -1284,6 +1290,34 @@ XGen's world-space aliases (`$Pw`, `$Prefw`) are deliberately absent: usdGen rea
 so deformed space already carries the world transform and ADR §9.2 R9 recognises no separate world
 space (S4). A porting note covers it; a second name for the same vector would not.
 
+> **What ships today.** The table above is the M4 capture-time *map* language.
+> The **runtime parameter** lane (`usdGen:width.connect` and friends) declares
+> its own variables in `libs/usdGen/usdGen/expressions/context.cpp`, and
+> `expr::Frontend::VariableDocs()` is the single source of truth for them —
+> the usdview editor's variable browser and this table are both generated from
+> it, so they cannot disagree. Differences from the table above:
+>
+> * `$N` and `$Nref` are the same vector, and so are `$dPdu`/`$dPduref` and
+>   `$dPdv`/`$dPdvref`: usdGen keeps ONE root frame per strand, the **rest**
+>   frame the generator bound (`UsdGenCurveBuffer::rootN/rootT/rootB`). There
+>   is no deformed root frame to report, so reporting one would be a lie.
+>   `$dPdu` is the frame's tangent and `$dPdv` its bitangent.
+> * `$faceId` is the strand's `rootPrim`, the parent-mesh face index.
+> * `$patchId`, `$Cs` and `$As` are **gone**. They were declared through M1 but
+>   no field builder ever wrote them, so an expression naming one evaluated to
+>   a poison value and the whole cook was refused with an unhelpful message.
+>   usdGen has no patch table, and the engine's curve buffer carries no surface
+>   colour or opacity at evaluation time. They are removed rather than left
+>   silently unavailable; when a surface-colour channel exists they can come
+>   back with an implementation behind them.
+> * `$idLo`/`$idHi` are added, because `$id` is a double and exact only to
+>   2^53 while `curveId` is 64-bit.
+> * `$cDepth` is absent: usdGen has no depth channel.
+>
+> Every entry carries a one-line doc and its domain list (`groom`,
+> `primitive`, `point`), and a variable used outside its domain is a compile
+> error naming the variable and the domain, not a zero.
+
 This is otherwise the XGen dialect artists expect (`research/A7-prior-art-grooming.md` §1.3,
 `research/A8-seexpr-ptex-libs.md` §1.8). Variables an expression does not reference cost nothing:
 they are registered on the creator but never filled.
@@ -1292,6 +1326,92 @@ Every one of these values is something the groom evaluator already holds per roo
 is the whole reason expressions are capture-time.
 
 ### 7.3 The function set
+
+> **What ships today.** The rest of §7 describes the M4 capture-time *map*
+> expression language, which runs SeExpr's own interpreter. The **runtime
+> parameter** lane that ships now (`usdGen:width.connect` and friends,
+> `14-hierarchy-cuda-implementation.md`) is a different evaluator: the vendored
+> SeExpr frontend parses and type-checks, then the program is lowered to a
+> small IR that both the CUDA kernel and the CPU reference lane interpret from
+> one shared source (`libs/usdGen/usdGen/expressions/irExec.h`), over one
+> shared builtin library (`expressions/exprMath.h`).
+> `expr::Frontend::SupportedFunctions()` is the single source of truth for what
+> it accepts, with a name, arity range, signature, one-line doc, result width
+> and category for each entry. The set is the SeExpr2 builtin library, which is
+> what XGen expressions are written against:
+>
+> | Category | Functions |
+> |---|---|
+> | `math` | `abs acos acosd asin asind atan atan2 atan2d atand bias boxstep cbrt ceil clamp compress contrast cos cosd cosh cycle deg exp expand fit floor fmod gamma gaussstep hypot invert linearstep log log10 max min mix pow rad remap round sin sind sinh smoothstep sqrt tan tand tanh trunc` |
+> | `noise` | `ccellnoise cellnoise cfbm cnoise cturbulence cvoronoi fbm hash noise pnoise pvoronoi rand snoise turbulence vfbm vnoise voronoi vturbulence` |
+> | `vector` | `angle cross dist dot length norm ortho rotate up` |
+> | `color` | `hsi hsltorgb midhsi rgbtohsl saturate` |
+> | `curve` | `ccurve curve spline` |
+> | `control` | `choose pick wchoose` |
+>
+> **Omitted, each with its own diagnostic rather than the generic list:**
+> `printf`/`sprintf` (no output from a cooked groom); `map`/`ptex`/`texture`
+> (image maps are not yet available in a runtime expression — this is the §7
+> map language's job and it is not wired to the runtime lane yet);
+> `file`/`system`/`exec`; `def` user functions; `swatch` (an alias for
+> `choose`); and the 4D noise spellings `noise(x,y)`, `snoise4`, `vnoise4`,
+> `cnoise4`, `fbm4`, `vfbm4`, `cfbm4` — usdGen vendors the 3D gradient table
+> only, and a 2D or 4D lattice would need its own table emitted for both lanes.
+>
+> **Deliberate differences from stock SeExpr2**, each asserted in
+> `tests/testUsdGenSeExprOracle.cpp` so they stay deliberate:
+>
+> * `dist` is bound as `dist(vector, vector)`, which is what its own docstring,
+>   XGen's reference and every other vector builtin say. `ExprBuiltins.cpp`
+>   binds it as six scalars.
+> * `clamp` with `hi < lo` refuses the whole evaluation instead of answering
+>   with a bound. An inverted range is an authoring mistake and a silent answer
+>   hides it.
+> * `rand` is XGen's, not SeExpr2's, which has no `rand` at all. It is
+>   `hash($seed, $id, <call site index> [, seeds...])`, so it is stable per
+>   strand, identical on both lanes, and two `rand()` calls in one expression
+>   are independent. `rand(min, max, seed)` scales into the range.
+> * `cbrt` and `trunc` are declared by usdGen because `ExprBuiltins.cpp` omits
+>   them on Windows; the language must not depend on the platform it was built
+>   for. All four names are declared through the per-expression `resolveFunc`
+>   hook, never through the process-wide `ExprFunc::define` table (§7.3 below).
+>
+> **Parity.** `tests/testUsdGenSeExprOracle.cpp` links the vendored SeExpr2
+> archive and asserts exact double equality between `exprMath.h` and Disney's
+> own `Noise.cpp`/`ExprBuiltins.cpp`/`Curve.cpp`, for the lattices themselves
+> and for compiled expressions run through the real interpreter.
+> `tests/testUsdGenCudaExpressionParity.cpp` then asserts the two execution
+> lanes agree BIT FOR BIT, including the whole noise/hash/cellnoise/voronoi
+> and curve/spline/choose/pick family: SeExpr2's lattices are pure `+ - * /`
+> over a gradient table that `expressions/exprNoiseTables.h` emits once for
+> both lanes, and every double-to-integer conversion goes through
+> `ExprInt`/`ExprUInt32Wrap` rather than a bare cast (x86 wraps where PTX
+> saturates, which would otherwise break `cellnoise` and `voronoi` on the
+> device only). The libm-quality transcendentals — `sin cos tan asin acos atan
+> sinh cosh tanh exp log log10 pow cbrt`, and the builtins that reach one
+> (`angle rotate up gamma bias contrast gaussstep`) — are each correctly
+> rounded on both lanes but not necessarily to the same bits, so they are
+> compared to a tolerance instead.
+>
+> **The language.** An expression may be several statements separated by `;`,
+> with `#` comments anywhere; the last expression is the value. Local variables
+> (`$a = ...;`) may be reassigned and may hold vectors; `if (cond) { ... } else
+> { ... }` blocks assign locals and lower to a `Select` over what each branch
+> assigned. Both arms are evaluated and the result selected, which is safe
+> because every function is pure, but it is not a way to skip work. A local may
+> not shadow a registry variable; that is a compile error naming it. No
+> strings, no `def`, no `printf`.
+>
+> **Limits.** A program may use at most 256 values (one per emitted
+> instruction) and 4096 instructions; the frontend common-subexpression
+> eliminates, so the ceiling is generous in practice — roughly a `curve()` of
+> 30 knots or a `ccurve()` of 8. The limit is deliberately modest because the
+> CUDA kernel spends that many doubles of thread-local memory on every launch
+> whether the program needs them or not; exceeding it is a diagnostic, not a
+> slower groom for everybody. `curve`/`ccurve` knots must be constants: they
+> are sorted, given SeExpr's sentinels, given centred-difference derivatives
+> and monotone-clamped at COMPILE time and lowered into the instruction stream
+> as immediates, so dragging a point in the UI rewrites numbers only.
 
 The full SeExpr2 builtin set is available: math and trigonometry, `clamp round max min invert
 compress expand fit gamma bias contrast boxstep linearstep smoothstep gaussstep mix`, colour
@@ -1306,7 +1426,12 @@ global `ExprFunc::define` table, which is process-wide, shared with any other Se
 process, and documented as not thread-safe at the call site (`ExprFunc.cpp:139-147`, "NOT THREAD
 SAFE, it assumes you have a mutex from callee"; the table's own mutex is at `:110-134`;
 `research/A8-seexpr-ptex-libs.md` §1.3, §1.5). The `resolveFunc` pattern is verified in
-`prototypes/thirdparty-bench/seexpr_bench.cpp`:
+`prototypes/thirdparty-bench/seexpr_bench.cpp`, and the shipping runtime lane follows the same rule:
+`expressions/frontend.cpp`'s `CheckedExpression::resolveFunc` declares `rand`, `dist`, `cbrt` and
+`trunc` as type-check stubs, and `ExprFuncNode::prep` consults it *before* the global table
+(`ExprNode.cpp`), so a name the stock table binds differently can be corrected without touching it.
+The stubs are never evaluated: the program is lowered to usdGen's IR and SeExpr2's evaluator never
+runs on the runtime lane.
 
 | Function | Signature | Implementation |
 |---|---|---|

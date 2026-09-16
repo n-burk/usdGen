@@ -15,9 +15,9 @@
 #ifndef USDGEN_OP_H
 #define USDGEN_OP_H
 
+#include "usdGen/cpuParameters.h"
 #include "usdGen/curveBuffer.h"
 #include "usdGen/graphDesc.h"
-#include "usdGen/mask.h"
 
 #include "pxr/pxr.h"
 #include "pxr/base/tf/token.h"
@@ -50,10 +50,42 @@ struct UsdGenDiagnostics
 ///
 /// 26.08 VtValue note: there is no GetAsSafe/SafeGet; the getters below use
 /// IsHolding<T>() + UncheckedGet<T>() with the C1 default as fallback.
+/// A parameter that may be a literal or a connected expression. `Value` is the
+/// ONE indexing rule, and it is the rule gpu::ReadScalar/ReadBool/ReadInt
+/// implement: a groom-domain result broadcasts, a primitive-domain result
+/// indexes by ABSOLUTE curve index, a point-domain result by ABSOLUTE CV
+/// index. Operators pass `view->desc->firstCurve + c` and
+/// `view->desc->firstCv + o`, exactly as they already do for whole-buffer
+/// capture payloads.
+struct UsdGenParamField
+{
+    double literal = 0.0;
+    double const *values = nullptr;
+    size_t count = 0;
+    uint32_t components = 1;
+    expr::Domain domain = expr::Domain::Groom;
+    bool connected = false;
+
+    double Value(size_t curve, size_t point, uint32_t component = 0) const
+    {
+        if (!connected || !values || component >= components) return literal;
+        const size_t index = domain == expr::Domain::Primitive ? curve
+            : domain == expr::Domain::Point ? point : size_t(0);
+        if (index >= count) return literal;
+        return values[index * components + component];
+    }
+    /// True when every element carries the same value, so a kernel may hoist
+    /// the read out of its inner loop.
+    bool Uniform() const { return !connected || domain == expr::Domain::Groom; }
+};
+
 struct UsdGenParamView
 {
     UsdGenGraphDesc const *desc = nullptr;
     UsdGenNodeDesc const  *node = nullptr;
+    /// This node's evaluated connected parameters, or null when the node has
+    /// none (or when the caller is a validator that never evaluates them).
+    UsdGenCpuParameters const *expressions = nullptr;
 
     /// nullptr when the property is not authored and carries no C1 default in
     /// the node description (the builder materializes C1 defaults).
@@ -62,6 +94,41 @@ struct UsdGenParamView
         if (!node) return nullptr;
         for (auto const &p : node->params) if (p.name == name) return &p;
         return nullptr;
+    }
+
+    /// The evaluated connected values for `name`, or nullptr.
+    UsdGenExpressionValue const *FindExpression(TfToken const &name) const
+    {
+        return expressions ? expressions->Find(name) : nullptr;
+    }
+
+    /// The groom-domain (single-value) result of a connected parameter, when
+    /// it has one. Scalars read through GetDouble/GetInt/GetBool pick this up
+    /// automatically, so a groom-granularity expression drives every operator
+    /// control without the operator knowing that expressions exist.
+    bool GroomExpressionValue(TfToken const &name, double *out) const
+    {
+        UsdGenExpressionValue const *value = FindExpression(name);
+        if (!value || value->domain != expr::Domain::Groom || value->values.empty())
+            return false;
+        *out = value->values.front();
+        return true;
+    }
+
+    /// A connectable scalar parameter as a field. Falls back to the authored
+    /// literal at every element when nothing is connected.
+    UsdGenParamField GetScalarField(TfToken const &name, double fallback) const
+    {
+        UsdGenParamField field;
+        field.literal = GetDoubleLiteral(name, fallback);
+        UsdGenExpressionValue const *value = FindExpression(name);
+        if (!value || value->values.empty()) return field;
+        field.connected = true;
+        field.values = value->values.data();
+        field.count = value->count;
+        field.components = value->components;
+        field.domain = value->domain;
+        return field;
     }
     TfToken GetToken(TfToken const &name, TfToken fallback) const
     {
@@ -73,7 +140,10 @@ struct UsdGenParamView
         }
         return fallback;
     }
-    double GetDouble(TfToken const &name, double fallback) const
+    /// The authored value only, never an expression result. Kernels that read
+    /// a connectable parameter per element use GetScalarField instead; this is
+    /// the literal that expression gets as $value.
+    double GetDoubleLiteral(TfToken const &name, double fallback) const
     {
         if (UsdGenParamValue const *p = FindParam(name)) {
             if (p->value.IsHolding<double>()) return p->value.UncheckedGet<double>();
@@ -81,12 +151,20 @@ struct UsdGenParamView
         }
         return fallback;
     }
+    double GetDouble(TfToken const &name, double fallback) const
+    {
+        double expression = 0.0;
+        if (GroomExpressionValue(name, &expression)) return expression;
+        return GetDoubleLiteral(name, fallback);
+    }
     int GetInt(TfToken const &name, int fallback) const
     {
+        double expression = 0.0;
+        if (GroomExpressionValue(name, &expression)) return static_cast<int>(expression);
         if (UsdGenParamValue const *p = FindParam(name)) {
             if (p->value.IsHolding<int>()) return p->value.UncheckedGet<int>();
             // Integer-valued authored VtValues are tolerated (schema declares
-            // e.g. mask:randomSeed as `uniform int`; callers may author the
+            // e.g. usdGen:seed as `uniform int`; callers may author the
             // unsigned spelling of the same value).
             if (p->value.IsHolding<uint32_t>())
                 return static_cast<int>(p->value.UncheckedGet<uint32_t>());
@@ -95,6 +173,8 @@ struct UsdGenParamView
     }
     bool GetBool(TfToken const &name, bool fallback) const
     {
+        double expression = 0.0;
+        if (GroomExpressionValue(name, &expression)) return expression != 0.0;
         if (UsdGenParamValue const *p = FindParam(name)) {
             if (p->value.IsHolding<bool>()) return p->value.UncheckedGet<bool>();
         }
@@ -131,7 +211,7 @@ protected:
 };
 
 /// M1 shared capture payload base: op-specific per-curve / per-CV scalars
-/// plus the mask resolution (02 §2.13, I4: computed once per capture epoch).
+/// resolved once per capture epoch (I4).
 /// Copyable (VtArray CoW); every CONCRETE payload must override Clone() with
 /// a full copy of its own derived type — a base-level clone would silently
 /// slice the op-specific fields (the E-6 reuse defect this closes).
@@ -139,19 +219,12 @@ struct UsdGenCapturePayload : public UsdGenCapture
 {
     VtFloatArray perCurve;      // op-specific meaning (target length, ...)
     VtFloatArray perCv;         // op-specific meaning (noise displacement field, ...)
-    VtFloatArray curveMask;     // resolved per-curve mask; empty == all 1.0
     VtFloatArray rampLut;       // 257-entry op-specific LUT over hairT; empty == unused
-    VtFloatArray maskRampLut;   // 257-entry mask ramp LUT over hairT; empty == unused
 
     /// Abstract: every concrete payload overrides this with a full-type copy
     /// (`return std::make_unique<Self>(*this);` — see ops/*.cpp).
     std::unique_ptr<UsdGenCapture> Clone() const override = 0;
 };
-
-/// Resolve this node's UsdGenMaskAPI settings from its mapped parameters
-/// (02 §2.13 + §2.6 mask rows). The caller then runs UsdGenMaskSettings +
-/// EvaluateMask() with the curve ids (the random term is per-curve).
-UsdGenMaskSettings UsdGenMaskSettingsFromParams(UsdGenParamView const &params);
 
 struct UsdGenCaptureContext
 {
@@ -168,7 +241,6 @@ struct UsdGenCaptureContext
     UsdGenMapBindingDesc const *mapBindings = nullptr;
     uint32_t              mapBindingCount = 0;
     UsdGenSurfaceId        surface = 0;
-    UsdGenReadPhase        readPhase = UsdGenReadPhase::Final;
     uint32_t               seed = 0;
     uint64_t               upstreamGeneration = 0; // upstream buffer topologyVersion
     // Complete ordered input list for a multi-input operator.  Unary kernels
@@ -206,10 +278,6 @@ public:
     // ---- static description, read at compile -------------------------------
     /// C1 type name, e.g. "UsdGenScatter".
     virtual TfToken Type() const = 0;
-    /// What usdGen:space="auto" resolves to for this type (S25).
-    virtual UsdGenSpace Space() const { return UsdGenSpace::Rest; }
-    /// Type-level fallback when no usdGen:readPhase is authored (R9, default Final).
-    virtual UsdGenReadPhase ReadPhase() const { return UsdGenReadPhase::Final; }
     /// Static TopologyEffect (R14): e.g. UsdGenLengthOp is always CurveCount
     /// because cull mode exists.
     virtual UsdGenTopoFx TopologyEffect() const { return UsdGenTopoFx::None; }
@@ -237,11 +305,6 @@ public:
     /// Whether the authored order of geometry inputs is semantic.  Unary
     /// operators retain the historical canonicalized digest behavior.
     virtual bool GeometryInputsOrdered() const { return false; }
-    /// Most stylers receive the framework's final input/result envelope.  A
-    /// combiner using UsdGenNodeDesc::blend as its interpolation weight opts
-    /// out so the weight is applied exactly once.
-    virtual bool UsesFrameworkBlendEnvelope() const { return true; }
-
     // ---- binding -------------------------------------------------------------
     virtual bool Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag) = 0;
 
@@ -281,12 +344,6 @@ public:
     virtual uint32_t PlanesTouched() const { return 0; }
 };
 
-/// The blend envelope, applied by the framework, not by kernels (03 §8.5).
-/// Exact endpoints at 0 and 1 (usdRig's RigExecBlendEnvelope contract):
-/// w <= 0 aliases the input; w >= 1 runs no blend pass.
-void UsdGenBlendEnvelope(float const *in, float *out, float w, size_t n);
-void UsdGenBlendEnvelopeVec3(float const *inPx, float const *inPy, float const *inPz,
-                             float *outPx, float *outPy, float *outPz, float w, size_t n);
 
 }  // namespace usdGen
 

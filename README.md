@@ -69,7 +69,15 @@ CMake cannot retarget a configured tree's CUDA compiler, so after installing
 a new toolkit delete the build directory; the script detects the mismatch and
 says so rather than building against the stale one.
 
+## Storm fur shading
+
+The hair materials now use shared R/TT/TRT scattering and geometry-derived
+directional self-shadowing. Procedural CPU grooms cache optical depth across
+their tiles; native PointInstancer fur can be baked with `usdGenBakeFur` while
+remaining instanced in Storm. See [usage, measurements, and rendering limits](docs/storm-fur.md).
+
 ## Test
+
 
 At M0 all seven registered ctest tests are T0/T1, so a bare `ctest` is the
 complete M0 suite. The tier labels:
@@ -111,6 +119,46 @@ shebangs name the build machine's venv — launch them as
 `UsdGenDescription` (proven by Plug dlopen'ing `libusdGenSchema.so`) is
 asserted by `testUsdGenPluginDiscovery` (T1), with the full negative/positive
 control evidence in `docs/prework/m0-usdcat-extent-evidence.md`.
+
+## SeExpr expression editor (usdview plugin)
+
+`plugin/usdGenTools` adds a **usdGen** menu to usdview with a **SeExpr
+Expression Editor** dock (`Ctrl+Shift+E`) for the `usdGen:expr:source` of a
+`UsdGenExpression` prim. Select the expression, or the operator whose
+attribute is connected to it, and the dock follows:
+
+    .\bin\launch_usdview.ps1 plan\examples\expression-width-plane.usda
+
+It follows SeExpr2's own Qt editor: syntax highlighting, line numbers, bracket
+matching, a completion popup for `$variables` and functions, validation
+against the real engine frontend (errors reported as line and column),
+browsable function and variable references grouped by category, the evaluation
+domain of the binding, and connect/disconnect for the selected operator's
+attributes.
+
+The **Controls** panel is driven by the expression TEXT, not by scanning for
+numbers. A top-level statement declares a widget:
+
+    $tip     = 0.15;                                  # 0, 1      slider
+    $segs    = 4;                                     # 1, 10     integer slider
+    $tint    = [1, 0.5, 0.2];                         # color     swatch + sliders
+    $profile = curve($t, 0, 1, 4, 0.5, 0.7, 4, 1, 0, 4);  # curve  editable knots
+    $value * $tip * $profile
+
+Editing a control rewrites exactly that value in the text, and editing the
+text rebuilds the controls. **Add Widget…** writes one of those lines for you.
+Numbers no variable holds still get a plain slider, under *Loose numbers*.
+
+**Apply** writes to the current edit target, **Preview** to the session layer
+so the viewport shows the text without touching the layer being authored, and
+**Revert** drops either. The **Library** tab loads and saves `.se` expressions:
+shipped presets under `plugin/usdGenTools/resources/expressions`, and your own
+in `~/.usdGenExpressions` or wherever `USDGEN_EXPRESSION_PATH` points.
+
+Everything it knows about the language comes from the engine through the
+`UsdGenTools_*` C ABI in `libs/usdGenImaging/usdGenImaging/usdGenToolsApi.h`,
+which is separate from the frozen C4 session ABI in `cApi.h`. The panel is
+documented in `plan/08-tools.md` §5.7.
 
 ## Kill switch
 

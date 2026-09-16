@@ -37,12 +37,11 @@ struct LengthParameters {
     LengthRebuild rebuild = LengthRebuild::KeepParam;
     ScalarField value = ScalarField::Literal(1.0f);
     Vec2Field random = Vec2Field::Literal(make_float2(1, 1));
-    ScalarField blend = ScalarField::Literal(1.0f);
-    ScalarField maskAmount = ScalarField::Literal(1.0f);
+    // usdGen:mask IS the operator envelope; exactly 0 is a pass-through.
+    ScalarField mask = ScalarField::Literal(1.0f);
     ScalarField minRemainingLength = ScalarField::Literal(0.0f);
     ScalarField cullThreshold = ScalarField::Literal(0.0f);
     BoolField enabled = BoolField::Literal(true);
-    DeviceView<const float> maskProfile{}; // empty or 257 entries
     int seed = 0;
 };
 

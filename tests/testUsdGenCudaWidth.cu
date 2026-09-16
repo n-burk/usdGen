@@ -205,31 +205,26 @@ int main() {
     CHECK(cudaStreamCreate(&producer) == cudaSuccess);
     CHECK(cudaStreamCreate(&consumer) == cudaSuccess);
 
-    DeviceBuffer<float> widths, output, profile, maskProfile, pointField;
+    DeviceBuffer<float> widths, output, profile, maskField, pointField;
     DeviceBuffer<uint32_t> offsets;
     CHECK(widths.reset(5) == cudaSuccess && output.reset(5) == cudaSuccess &&
           offsets.reset(3) == cudaSuccess && profile.reset(257) == cudaSuccess &&
-          maskProfile.reset(257) == cudaSuccess && pointField.reset(5) == cudaSuccess);
+          maskField.reset(5) == cudaSuccess && pointField.reset(5) == cudaSuccess);
     CHECK(Upload(widths, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, producer));
     CHECK(Upload(offsets, {0u, 2u, 5u}, producer));
     CHECK(Upload(profile, std::vector<float>(257, 1.0f), producer));
-    CHECK(Upload(maskProfile, std::vector<float>(257, 1.0f), producer));
     CHECK(cudaStreamSynchronize(producer) == cudaSuccess);
     DeviceCurveGeometryView geometry = Geometry(widths, offsets);
 
     // Variable 2/3-CV curves, supplied hairT, target profile arithmetic, and
-    // cross-stream Finish. The profile is flat here, so the result is easy to
-    // compare with the root/tip and taper equations.
+    // cross-stream Finish. The profile is flat here, so every CV takes the
+    // authored base width.
     std::vector<float> hairTHost{0.0f, 1.0f, 0.0f, .5f, 1.0f};
     DeviceBuffer<float> hairT;
     CHECK(hairT.reset(5) == cudaSuccess && Upload(hairT, hairTHost, producer));
     CHECK(cudaStreamSynchronize(producer) == cudaSuccess);
     WidthParameters p = Defaults({profile.data(), profile.size()});
     p.width = ScalarField::Literal(2.0f);
-    p.rootScale = ScalarField::Literal(1.0f);
-    p.tipScale = ScalarField::Literal(3.0f);
-    p.taper = ScalarField::Literal(.5f);
-    p.taperStart = ScalarField::Literal(.5f);
     CHECK(CudaWidth{}.pending() == false);
     CudaWidth op;
     CHECK(op.Apply(geometry, {hairT.data(), hairT.size()}, p,
@@ -237,8 +232,8 @@ int main() {
     CHECK(op.Finish(consumer) == StyleStatus::Ok);
     std::vector<float> got(5);
     CHECK(Download(output, got, consumer));
-    CHECK(Near(got[0], 2.0f) && Near(got[1], 3.0f) &&
-          Near(got[2], 2.0f) && Near(got[3], 4.0f) && Near(got[4], 3.0f));
+    CHECK(Near(got[0], 2.0f) && Near(got[1], 2.0f) &&
+          Near(got[2], 2.0f) && Near(got[3], 2.0f) && Near(got[4], 2.0f));
 
     // Primitive-domain broadcasting and replace=false multiplication.
     DeviceBuffer<float> primitive;
@@ -252,23 +247,21 @@ int main() {
     CHECK(Near(got[0], 2.0f) && Near(got[1], 4.0f) &&
           Near(got[2], 12.0f) && Near(got[3], 16.0f) && Near(got[4], 20.0f));
 
-    // Point-domain controls, a non-flat width profile, and mask profile.
-    std::vector<float> profileHost(257), maskHost(257);
-    for (size_t i = 0; i < 257; ++i) {
-        profileHost[i] = 1.0f + float(i) / 256.0f;
-        maskHost[i] = .5f + .5f * float(i) / 256.0f;
-    }
+    // Point-domain controls, a non-flat width profile, and a POINT-domain
+    // usdGen:mask envelope (the former mask ramp is now just an expression
+    // evaluated per CV).  The canonical t per point is {0, 1, 0, .5, 1}.
+    std::vector<float> profileHost(257);
+    for (size_t i = 0; i < 257; ++i) profileHost[i] = 1.0f + float(i) / 256.0f;
     CHECK(Upload(profile, profileHost, producer) &&
-          Upload(maskProfile, maskHost, producer) &&
+          Upload(maskField, {.5f, 1.0f, .5f, .75f, 1.0f}, producer) &&
           Upload(pointField, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f}, producer));
     p = Defaults({profile.data(), profile.size()});
-    p.maskProfile = {maskProfile.data(), maskProfile.size()};
     p.width = ScalarField::Device({pointField.data(), 5}, expr::Domain::Point);
-    p.maskAmount = ScalarField::Literal(1.0f);
+    p.mask = ScalarField::Device({maskField.data(), 5}, expr::Domain::Point);
     CHECK(op.Apply(geometry, {}, p, {output.data(), 5}, producer) == StyleStatus::Ok);
     CHECK(op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer));
     // At each canonical t, target = pointWidth * widthProfile[t], then the
-    // mask profile is the envelope. The first and last values are exact.
+    // per-CV mask is the envelope. The first and last values are exact.
     CHECK(Near(got[0], 1.0f) && Near(got[1], 4.0f) &&
           Near(got[2], 3.0f) && Near(got[3], 5.5f) &&
           Near(got[4], 10.0f));
@@ -277,11 +270,11 @@ int main() {
     std::vector<float> sentinel{1.0f, -0.0f, 3.0f, 4.0f, 5.0f};
     CHECK(Upload(widths, sentinel, producer));
     p = Defaults({profile.data(), profile.size()});
-    p.blend = ScalarField::Literal(0.0f);
+    p.mask = ScalarField::Literal(0.0f);
     CHECK(op.Apply(geometry, {}, p, {output.data(), 5}, producer) == StyleStatus::Ok);
     CHECK(op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer));
     CHECK(std::memcmp(got.data(), sentinel.data(), got.size() * sizeof(float)) == 0);
-    p.blend = ScalarField::Literal(1.0f);
+    p.mask = ScalarField::Literal(1.0f);
     p.enabled = BoolField::Literal(false);
     CHECK(op.Apply(geometry, {}, p, {output.data(), 5}, producer) == StyleStatus::Ok);
     CHECK(op.Finish(consumer) == StyleStatus::Ok && Download(output, got, consumer));

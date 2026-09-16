@@ -28,26 +28,17 @@ struct BoolField {
 
 // Controls for the Width primitive. `base * width` is the target's scalar
 // width, allowing a caller to supply a groom-level base multiplier while
-// retaining the schema's `width` value. Width and mask profiles are sampled
-// by interpolating the 257-entry device LUT at hairT (or canonical CV t).
-// maskProfile may be empty, meaning an all-one envelope ramp.
+// retaining the schema's `width` value. The width profile is sampled by
+// interpolating the 257-entry device LUT at hairT (or canonical CV t).
+// `mask` IS the operator envelope (usdGen:mask): a groom-, primitive- or
+// point-domain field in [0,1]; exactly 0 is a bitwise pass-through.
 struct WidthParameters {
     ScalarField base = ScalarField::Literal(1.0f);
     ScalarField width = ScalarField::Literal(0.01f);
-    ScalarField rootScale = ScalarField::Literal(1.0f);
-    ScalarField tipScale = ScalarField::Literal(1.0f);
-    ScalarField taper = ScalarField::Literal(0.0f);
-    ScalarField taperStart = ScalarField::Literal(0.5f);
-    ScalarField blend = ScalarField::Literal(1.0f);
-    ScalarField maskAmount = ScalarField::Literal(1.0f);
-    // Per-domain map scalar sampled from a typed ImageMap MaskSource. This
-    // remains separate from maskAmount so authored and mapped envelopes
-    // multiply rather than one overwriting the other.
-    ScalarField mapMask = ScalarField::Literal(1.0f);
+    ScalarField mask = ScalarField::Literal(1.0f);
     BoolField enabled = BoolField::Literal(true);
     BoolField replace = BoolField::Literal(true);
     DeviceView<const float> widthProfile{}; // exactly 257 entries
-    DeviceView<const float> maskProfile{};  // empty or exactly 257 entries
 };
 
 // Device-only, topology-preserving Width primitive. All inputs and output

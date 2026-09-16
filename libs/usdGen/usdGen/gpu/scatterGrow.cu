@@ -55,22 +55,6 @@ __device__ bool FiniteDevice(float x) { return isfinite(x); }
 __device__ bool FiniteDevice(float3 v) {
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
 }
-__device__ float3 BlendUvDirection(float3 lifted, float3 tangent, float blend) {
-    if (blend == 0.0f) return lifted;
-    float const l2 = tangent.x*tangent.x + tangent.y*tangent.y + tangent.z*tangent.z;
-    float const length = sqrtf(l2);
-    if (!(length > 1.0e-12f) || !isfinite(length)) return lifted;
-    tangent = make_float3(tangent.x/length, tangent.y/length, tangent.z/length);
-    if (blend == 1.0f) return tangent;
-    float3 const mixed = make_float3(
-        (1.0f-blend)*lifted.x + blend*tangent.x,
-        (1.0f-blend)*lifted.y + blend*tangent.y,
-        (1.0f-blend)*lifted.z + blend*tangent.z);
-    float const mixedL2 = mixed.x*mixed.x + mixed.y*mixed.y + mixed.z*mixed.z;
-    float const mixedLength = sqrtf(mixedL2);
-    if (!(mixedLength > 1.0e-12f) || !isfinite(mixedLength)) return lifted;
-    return make_float3(mixed.x/mixedLength, mixed.y/mixedLength, mixed.z/mixedLength);
-}
 uint64_t Hash64Host(uint64_t key, uint32_t salt) {
     uint64_t z = (key ^ (uint64_t(salt) * 0x9E3779B97F4A7C15ull)) + 0x9E3779B97F4A7C15ull;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
@@ -105,28 +89,11 @@ float3 RotateAroundBHost(float3 direction, float3 axis, float degrees) {
         direction.y * c + cross.y * s + axis.y * dot * oneMinusC,
         direction.z * c + cross.z * s + axis.z * dot * oneMinusC);
 }
-float3 BlendUvDirectionHost(float3 lifted, float3 tangent, float blend) {
-    if (blend == 0.0f) return lifted;
-    float const l2 = tangent.x*tangent.x + tangent.y*tangent.y + tangent.z*tangent.z;
-    float const length = std::sqrt(l2);
-    if (!(length > 1.0e-12f) || !Finite(length)) return lifted;
-    tangent = make_float3(tangent.x/length, tangent.y/length, tangent.z/length);
-    if (blend == 1.0f) return tangent;
-    float3 const mixed = make_float3(
-        (1.0f-blend)*lifted.x + blend*tangent.x,
-        (1.0f-blend)*lifted.y + blend*tangent.y,
-        (1.0f-blend)*lifted.z + blend*tangent.z);
-    float const mixedL2 = mixed.x*mixed.x + mixed.y*mixed.y + mixed.z*mixed.z;
-    float const mixedLength = std::sqrt(mixedL2);
-    if (!(mixedLength > 1.0e-12f) || !Finite(mixedLength)) return lifted;
-    return make_float3(mixed.x/mixedLength, mixed.y/mixedLength, mixed.z/mixedLength);
-}
 __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
     int32_t const* rootPrimIn, float2 const* rootUVIn, float3 const* rootTIn,
     float3 const* rootBIn, float3 const* rootNIn, uint32_t curves, uint32_t cvCount,
     int seed, double length, double lo, double hi, float lift, float width,
-    float uvBlend, ScatterGrowDirection direction, float3 literal,
-    float const* lengthSamples,
+    ScatterGrowDirection direction, float3 literal,
     float3* points, float3* rest, float* widths, float* hairT, uint32_t* offsets,
     uint64_t* outIds, int32_t* rootPrim, float2* rootUV, float3* rootT,
     float3* rootB, float3* rootN, int* error) {
@@ -138,15 +105,9 @@ __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
         direction == ScatterGrowDirection::RootTangent ? rootTIn[c] : literal;
     dir = Normalize(dir);
     dir = RotateAroundB(dir, rootBIn[c], lift);
-    dir = BlendUvDirection(dir, rootTIn[c], uvBlend);
     // Match CPU Grow: random/length arithmetic is double, then the captured
     // per-curve target is narrowed to float.
     double targetDouble = length * (lo + double(DrawGrow(seed, ids[c])) * (hi - lo));
-    if (lengthSamples) {
-        float const sample = lengthSamples[c];
-        if (!FiniteDevice(sample) || sample < 0.0f) { atomicCAS(error, 0, kNonFinite); return; }
-        targetDouble *= double(sample);
-    }
     float target = float(targetDouble);
     if (!FiniteDevice(target)) { atomicCAS(error, 0, kNonFinite); return; }
     uint32_t first = c * cvCount;
@@ -170,8 +131,7 @@ template <class T> cudaError_t Copy(DeviceBuffer<T>& dst, std::vector<T> const& 
 } // namespace
 
 ScatterGrowStatus GetScatterGrowRequirements(size_t curves, uint32_t cvs,
-                                             ScatterGrowRequirements* result,
-                                             size_t mapTexelCount) {
+                                             ScatterGrowRequirements* result) {
     if (!result || cvs < 2 || cvs > 64) return ScatterGrowStatus::InvalidArgument;
     if (curves > std::numeric_limits<uint32_t>::max() / cvs)
         return ScatterGrowStatus::InvalidTopology;
@@ -206,15 +166,6 @@ ScatterGrowStatus GetScatterGrowRequirements(size_t curves, uint32_t cvs,
     candidate.statusBytes = 2 * sizeof(int); // device status + pinned relay status
     if (!add(&candidate.peakBytes, candidate.statusBytes))
         return ScatterGrowStatus::InvalidTopology;
-    if (mapTexelCount) {
-        size_t texelBytes = 0, sampleBytes = 0;
-        if (!multiply(mapTexelCount, sizeof(float), &texelBytes) ||
-            !multiply(curves, sizeof(float), &sampleBytes) ||
-            !add(&candidate.mapScratchBytes, texelBytes) ||
-            !add(&candidate.mapScratchBytes, sampleBytes) ||
-            !add(&candidate.peakBytes, candidate.mapScratchBytes))
-            return ScatterGrowStatus::InvalidTopology;
-    }
     *result = candidate;
     return ScatterGrowStatus::Ok;
 }
@@ -228,8 +179,7 @@ ScatterGrowStatus CudaScatterGrow::Storage::synchronizeUse() const { cudaError_t
 
 CudaScatterGrow::~CudaScatterGrow() {
     if (unprovenWork_) {
-        active_.quarantine(); pending_.quarantine(); pendingInput_.quarantine(); error_.quarantine(); lengthSamples_.quarantine();
-        if (lengthImage_) lengthImage_->Quarantine();
+        active_.quarantine(); pending_.quarantine(); pendingInput_.quarantine(); error_.quarantine();
         // The device destination and immutable host source belong to the
         // same unproved transfer. Neither may be freed on this path.
         (void)rootsQuarantineOwner_.release();
@@ -238,21 +188,18 @@ CudaScatterGrow::~CudaScatterGrow() {
         ready_ = nullptr; return;
     }
     int prior=-1; bool owns=active_.points.size()||pending_.points.size()||error_.size()||
-        lengthSamples_.size()||lengthImage_||ready_||hostError_;
+        ready_||hostError_;
     bool selected=!owns || (cudaGetDevice(&prior)==cudaSuccess && deviceIndex_>=0 && cudaSetDevice(deviceIndex_)==cudaSuccess);
     bool proved=!owns || (selected && (!ready_ || cudaEventSynchronize(ready_)==cudaSuccess) &&
-        active_.synchronizeUse()==ScatterGrowStatus::Ok && error_.synchronizeUse()==cudaSuccess &&
-        lengthSamples_.synchronizeUse()==cudaSuccess);
+        active_.synchronizeUse()==ScatterGrowStatus::Ok && error_.synchronizeUse()==cudaSuccess);
     if (!proved) {
-        active_.quarantine(); pending_.quarantine(); pendingInput_.quarantine(); error_.quarantine(); lengthSamples_.quarantine();
-        if (lengthImage_) lengthImage_->Quarantine();
+        active_.quarantine(); pending_.quarantine(); pendingInput_.quarantine(); error_.quarantine();
         (void)rootsQuarantineOwner_.release();
         hostError_ = nullptr;
         hostErrorPermit_.Abandon();
         ready_=nullptr;
     } else {
         if (ready_) cudaEventDestroy(ready_);
-        discardLengthMap();
         if (hostError_) {
             if (cudaFreeHost(hostError_) == cudaSuccess) hostErrorPermit_.Release();
             else hostErrorPermit_.Abandon();
@@ -276,25 +223,19 @@ ScatterGrowStatus CudaScatterGrow::validateStream(cudaStream_t stream) const {
 }
 ScatterGrowStatus CudaScatterGrow::validate(
     std::shared_ptr<const ScatterGrowRoots> const& r, ScatterGrowControls const& c,
-    GrowLengthMap const* lengthMap, size_t mapTexelCount, size_t* total) const {
+    size_t* total) const {
     if(!r || c.cvCount<2 || c.cvCount>64 || !Finite(c.length)||!Finite(c.randomLo)||
        !Finite(c.randomHi)||!Finite(c.lift)||!Finite(c.fallbackWidth)||c.length<0||
        c.randomLo<0||c.randomHi<0||c.fallbackWidth<0 || c.lift < -90.0f ||
-       c.lift > 90.0f || !Finite(c.uvBlend) || c.uvBlend < 0.0f ||
-       c.uvBlend > 1.0f || c.direction>ScatterGrowDirection::Literal ||
+       c.lift > 90.0f || c.direction>ScatterGrowDirection::Literal ||
        (c.direction==ScatterGrowDirection::Literal&&!Finite(c.literalDirection)))
-        return ScatterGrowStatus::InvalidArgument;
-    if (lengthMap && (!lengthMap->image || !lengthMap->image->IsValid() ||
-                      !ValidateUsdGenImageSampleOptions(*lengthMap->image,
-                          lengthMap->options, nullptr)))
         return ScatterGrowStatus::InvalidArgument;
     size_t n=r->positions.size();
     if(r->stableIds.size()!=n||r->rootPrim.size()!=n||r->rootUV.size()!=n||
        r->rootT.size()!=n||r->rootB.size()!=n||r->rootN.size()!=n)
         return ScatterGrowStatus::InvalidTopology;
     ScatterGrowRequirements requirements;
-    auto requirementStatus = GetScatterGrowRequirements(n, c.cvCount, &requirements,
-                                                        mapTexelCount);
+    auto requirementStatus = GetScatterGrowRequirements(n, c.cvCount, &requirements);
     if (requirementStatus != ScatterGrowStatus::Ok) return requirementStatus;
     *total = requirements.pointCount;
     std::unordered_set<uint64_t> seen;
@@ -312,7 +253,6 @@ ScatterGrowStatus CudaScatterGrow::validate(
         float3 direction = c.direction == ScatterGrowDirection::RootNormal ? r->rootN[i] :
             c.direction == ScatterGrowDirection::RootTangent ? r->rootT[i] : c.literalDirection;
         direction = RotateAroundBHost(NormalizeHost(direction), r->rootB[i], c.lift);
-        direction = BlendUvDirectionHost(direction, r->rootT[i], c.uvBlend);
         if (!Finite(direction)) return ScatterGrowStatus::NonFiniteInput;
         double const targetDouble = c.length *
             (c.randomLo + double(DrawGrowHost(c.seed, r->stableIds[i])) *
@@ -336,7 +276,6 @@ void CudaScatterGrow::discardPending() noexcept {
     pending_=Storage{};
     pendingInput_=Storage{};
     error_.reset(0);
-    discardLengthMap();
     if (hostError_) {
         if (cudaFreeHost(hostError_) == cudaSuccess) hostErrorPermit_.Release();
         else hostErrorPermit_.Abandon();
@@ -345,25 +284,15 @@ void CudaScatterGrow::discardPending() noexcept {
     rootsOwner_.reset(); rootsQuarantineOwner_.reset();
     pendingWork_=finishScheduled_=false; pendingCurves_=pendingPoints_=0;
 }
-void CudaScatterGrow::discardLengthMap() noexcept {
-    lengthSamples_.reset(0);
-    lengthImage_.reset();
-}
-
 ScatterGrowStatus CudaScatterGrow::BeginFresh(
     std::shared_ptr<const ScatterGrowRoots> roots, ScatterGrowControls controls,
-    cudaStream_t stream, UsdGenExecutionMemoryReservation* reserve,
-    GrowLengthMap const* lengthMap) {
-    if(pendingWork_||generation_)return ScatterGrowStatus::InvalidArgument; auto s=validateStream(stream); if(s!=ScatterGrowStatus::Ok)return s; if(controls.randomLo>controls.randomHi)std::swap(controls.randomLo,controls.randomHi); size_t const mapTexelCount = lengthMap && lengthMap->image ? lengthMap->image->TexelCount() : 0; size_t total=0; s=validate(roots,controls,lengthMap,mapTexelCount,&total); if(s!=ScatterGrowStatus::Ok)return s;
+    cudaStream_t stream, UsdGenExecutionMemoryReservation* reserve) {
+    if(pendingWork_||generation_)return ScatterGrowStatus::InvalidArgument; auto s=validateStream(stream); if(s!=ScatterGrowStatus::Ok)return s; if(controls.randomLo>controls.randomHi)std::swap(controls.randomLo,controls.randomHi); size_t total=0; s=validate(roots,controls,&total); if(s!=ScatterGrowStatus::Ok)return s;
     int d=-1; if(cudaGetDevice(&d)!=cudaSuccess)return ScatterGrowStatus::CudaError; if(deviceIndex_<0)deviceIndex_=d;
     Storage in; // temporary input storage, kept alive through terminal proof
     cudaError_t e=Allocate(in.points,roots->positions,reserve); if(e==cudaSuccess)e=Allocate(in.stableIds,roots->stableIds,reserve); if(e==cudaSuccess)e=Allocate(in.rootPrim,roots->rootPrim,reserve); if(e==cudaSuccess)e=Allocate(in.rootUV,roots->rootUV,reserve); if(e==cudaSuccess)e=Allocate(in.rootT,roots->rootT,reserve); if(e==cudaSuccess)e=Allocate(in.rootB,roots->rootB,reserve); if(e==cudaSuccess)e=Allocate(in.rootN,roots->rootN,reserve);
     if(e!=cudaSuccess)return Status(e);
-    e=pending_.points.reset(total,reserve); if(e==cudaSuccess)e=pending_.restPoints.reset(total,reserve); if(e==cudaSuccess)e=pending_.widths.reset(total,reserve); if(e==cudaSuccess)e=pending_.hairT.reset(total,reserve); if(e==cudaSuccess)e=pending_.offsets.reset(roots->positions.size()+1,reserve); if(e==cudaSuccess)e=pending_.stableIds.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootPrim.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootUV.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootT.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootB.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootN.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=error_.reset(1,reserve,UsdGenExecutionResourceKind::Scratch); if(e==cudaSuccess && mapTexelCount)e=lengthSamples_.reset(roots->positions.size(),reserve,UsdGenExecutionResourceKind::Scratch); if(e!=cudaSuccess){discardPending(); return Status(e);}
-    if (mapTexelCount) {
-        try { lengthImage_ = std::make_unique<CudaImage>(); }
-        catch (...) { discardPending(); return ScatterGrowStatus::CudaError; }
-    }
+    e=pending_.points.reset(total,reserve); if(e==cudaSuccess)e=pending_.restPoints.reset(total,reserve); if(e==cudaSuccess)e=pending_.widths.reset(total,reserve); if(e==cudaSuccess)e=pending_.hairT.reset(total,reserve); if(e==cudaSuccess)e=pending_.offsets.reset(roots->positions.size()+1,reserve); if(e==cudaSuccess)e=pending_.stableIds.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootPrim.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootUV.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootT.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootB.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=pending_.rootN.reset(roots->positions.size(),reserve); if(e==cudaSuccess)e=error_.reset(1,reserve,UsdGenExecutionResourceKind::Scratch); if(e!=cudaSuccess){discardPending(); return Status(e);}
     if (!hostError_) {
         auto permit = TryReserveCudaExecutionBytes(sizeof(int),
             UsdGenExecutionResourceKind::Scratch, reserve);
@@ -390,22 +319,12 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
     if (e != cudaSuccess) return Status(e);
     e=Copy(pendingInput_.points,rootsOwner_->positions,stream); if(e==cudaSuccess)e=Copy(pendingInput_.stableIds,rootsOwner_->stableIds,stream); if(e==cudaSuccess)e=Copy(pendingInput_.rootPrim,rootsOwner_->rootPrim,stream); if(e==cudaSuccess)e=Copy(pendingInput_.rootUV,rootsOwner_->rootUV,stream); if(e==cudaSuccess)e=Copy(pendingInput_.rootT,rootsOwner_->rootT,stream); if(e==cudaSuccess)e=Copy(pendingInput_.rootB,rootsOwner_->rootB,stream); if(e==cudaSuccess)e=Copy(pendingInput_.rootN,rootsOwner_->rootN,stream);
     if(e!=cudaSuccess) return Status(e);
-    if (lengthMap) {
-        if (lengthImage_->Upload(lengthMap->image, stream, reserve,
-                                 UsdGenExecutionResourceKind::Scratch) != cudaSuccess)
-            return ScatterGrowStatus::CudaError;
-        if (lengthImage_->Sample(pendingInput_.rootUV.view(), lengthSamples_.view(),
-                                 lengthMap->options, stream) != cudaSuccess)
-            return ScatterGrowStatus::CudaError;
-        if (lengthSamples_.recordUse(stream) != cudaSuccess)
-            return ScatterGrowStatus::CudaError;
-    }
     if (!pendingCurves_) {
         e = cudaMemsetAsync(pending_.offsets.data(), 0, sizeof(uint32_t), stream);
         if (e != cudaSuccess) return Status(e);
         return ScatterGrowStatus::Ok;
     }
-    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pendingInput_.stableIds.data(),pendingInput_.rootPrim.data(),pendingInput_.rootUV.data(),pendingInput_.rootT.data(),pendingInput_.rootB.data(),pendingInput_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.fallbackWidth,controls.uvBlend,controls.direction,controls.literalDirection,lengthSamples_.data(),pending_.points.data(),pending_.restPoints.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),error_.data());
+    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pendingInput_.stableIds.data(),pendingInput_.rootPrim.data(),pendingInput_.rootUV.data(),pendingInput_.rootT.data(),pendingInput_.rootB.data(),pendingInput_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.restPoints.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),error_.data());
     e=cudaGetLastError(); if(e!=cudaSuccess)return Status(e); return ScatterGrowStatus::Ok;
 }
 
@@ -421,8 +340,6 @@ ScatterGrowStatus CudaScatterGrow::FinishFreshAsync(
         return ScatterGrowStatus::CudaError;
     status = pending_.recordUse(stream);
     if (status == ScatterGrowStatus::Ok) status = pendingInput_.recordUse(stream);
-    if (status == ScatterGrowStatus::Ok && lengthSamples_.size())
-        status = Status(lengthSamples_.recordUse(stream));
     if (status == ScatterGrowStatus::Ok) status = Status(error_.recordUse(stream));
     if (status != ScatterGrowStatus::Ok) return status;
     auto error = cudaEventRecord(ready_, stream);
@@ -447,7 +364,6 @@ ScatterGrowStatus CudaScatterGrow::CommitFreshFinish() {
         discardPending();
         return status;
     }
-    discardLengthMap();
     active_=std::move(pending_); pendingInput_=Storage{};
     rootsOwner_.reset(); rootsQuarantineOwner_.reset();
     curves_=pendingCurves_; points_=pendingPoints_;

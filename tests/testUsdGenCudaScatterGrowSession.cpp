@@ -142,13 +142,6 @@ int main(int argc, char** argv) {
     CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess);
     {
         auto desc = Desc();
-        if(argc==2) {
-            UsdGenMapDesc map;map.path=SdfPath("/Maps/Length");map.type=TfToken("UsdGenImageMap");
-            map.textureGeneration=1;map.imagePayload=UsdGenImagePayload::Create(1,1,1,{.5f});
-            CHECK(map.imagePayload);desc.maps={map};
-            desc.nodes[1].mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,
-                TfToken("usdGen:length:source")}};
-        }
         UsdGenCurveBuffer reference;
         CHECK(CpuReference(desc, &reference));
         CHECK(reference.totalCurves == 300 && reference.totalCvs == 1500);
@@ -238,15 +231,6 @@ int main(int argc, char** argv) {
             malformed.nodes[1].params.push_back({TfToken("lift"), VtValue(lift), false});
             CHECK(rejects(malformed));
         }
-        for (float uvBlend : {-0.01f, 1.01f,
-                              std::numeric_limits<float>::quiet_NaN()}) {
-            malformed = desc;
-            malformed.nodes[1].params.push_back({TfToken("uvBlend"), VtValue(uvBlend), false});
-            UsdGenCurveBuffer rejectedReference;
-            CHECK(!CpuReference(malformed, &rejectedReference));
-            CHECK(rejects(malformed));
-        }
-
         UsdGenSession session;
         session.SetDevicePublicationEnabled(true);
         session.SetGraphDesc(desc);
@@ -370,136 +354,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        // This XZ patch has a non-Y binormal.  Attribute direction selects
-        // root T (not surface N); adding lift makes both direction selection
-        // and local-B Rodrigues rotation visible in one native graph.
-        auto attribute=Desc(true);
-        attribute.nodes[1].params.push_back({TfToken("direction"),VtValue(TfToken("attribute")),false});
-        attribute.nodes[1].params.push_back({TfToken("lift"),VtValue(30.0f),false});
-        UsdGenCurveBuffer attributeReference;
-        CHECK(CpuReference(attribute,&attributeReference));
-        UsdGenDiagnostics attributeDiagnostics;
-        auto attributePlan=CompileCudaGraph(attribute,&attributeDiagnostics);
-        CHECK(attributePlan&&!attributeDiagnostics.HasErrors());
-        auto attributeWorkspace=CreateCudaExecutionWorkspace(-1,&attributeDiagnostics);
-        CHECK(attributeWorkspace);
-        auto attributeDirect=ExecuteCudaGraph(*attributePlan,*attributeWorkspace,20,220,&attributeDiagnostics);
-        CHECK(attributeDirect&&!attributeDiagnostics.HasErrors()&&
-              CheckGrowParity(attributeDirect,attributeReference,stream,nullptr,true));
-        UsdGenSession attributeSession;
-        attributeSession.SetDevicePublicationEnabled(true); attributeSession.SetGraphDesc(attribute);
-        auto attributePublished=attributeSession.Commit(20,UsdGenCommitReason::SetTime);
-        CHECK(attributePublished&&attributePublished->device&&
-              !attributeSession.LastDiagnostics().HasErrors()&&
-              CheckGrowParity(attributePublished->device,attributeReference,stream,nullptr,true));
-
-        // uvBlend happens after the root-B lift: normalized blend from the
-        // lifted base direction toward root T.  All values preserve the
-        // authored random strand length; both current/rest payloads must
-        // match the CPU oracle. Retaining u=0 through the u=.25 publication
-        // proves this value-only edit gets a fresh COW generation.
-        UsdGenSession uvSession;
-        uvSession.SetDevicePublicationEnabled(true);
-        std::array<float,4> const uvBlends{{0.f,.25f,.5f,1.f}};
-        std::vector<float> uvLengths;
-        gpu::CudaGeometryLease uvRetained;
-        std::vector<float3> uvRetainedPoints;
-        for (size_t variant=0; variant!=uvBlends.size(); ++variant) {
-            auto uv=Desc();
-            uv.nodes[1].params.push_back({TfToken("lift"),VtValue(30.f),false});
-            uv.nodes[1].params.push_back({TfToken("uvBlend"),VtValue(uvBlends[variant]),false});
-            UsdGenCurveBuffer uvReference;
-            CHECK(CpuReference(uv,&uvReference));
-            UsdGenDiagnostics uvDiagnostics;
-            auto uvPlan=CompileCudaGraph(uv,&uvDiagnostics);
-            CHECK(uvPlan&&!uvDiagnostics.HasErrors());
-            auto uvWorkspace=CreateCudaExecutionWorkspace(-1,&uvDiagnostics);
-            CHECK(uvWorkspace);
-            auto uvDirect=ExecuteCudaGraph(*uvPlan,*uvWorkspace,static_cast<double>(30+variant),230+variant,&uvDiagnostics);
-            std::vector<float> lengths;
-            CHECK(uvDirect&&!uvDiagnostics.HasErrors()&&
-                  CheckGrowParity(uvDirect,uvReference,stream,&lengths));
-            if (!variant) uvLengths=lengths;
-            else {
-                CHECK(lengths.size()==uvLengths.size());
-                for(size_t curve=0; curve!=lengths.size(); ++curve)
-                    CHECK(Near(lengths[curve],uvLengths[curve]));
-            }
-            uvSession.SetGraphDesc(uv);
-            auto uvPublished=uvSession.Commit(static_cast<double>(30+variant),UsdGenCommitReason::SetTime);
-            CHECK(uvPublished&&uvPublished->device&&!uvSession.LastDiagnostics().HasErrors()&&
-                  CheckGrowParity(uvPublished->device,uvReference,stream));
-            if (!variant) {
-                uvRetained=gpu::AcquireGeometry(uvPublished->device,stream);
-                CHECK(uvRetained&&Read(uvRetained.Geometry().points,&uvRetainedPoints,stream));
-            } else if (variant==1) {
-                auto uvCurrent=gpu::AcquireGeometry(uvPublished->device,stream);
-                CHECK(uvCurrent&&uvCurrent.Geometry().points.data!=uvRetained.Geometry().points.data);
-                CHECK(Read(uvRetained.Geometry().points,&directPoints,stream));
-                CHECK(directPoints.size()==uvRetainedPoints.size()&&
-                      std::memcmp(directPoints.data(),uvRetainedPoints.data(),
-                          directPoints.size()*sizeof(float3))==0);
-            }
-        }
-
-        {
-            auto mapped=Desc();
-            UsdGenMapDesc map;map.path=SdfPath("/Maps/Length");
-            map.type=TfToken("UsdGenImageMap");map.textureGeneration=1;
-            map.imagePayload=UsdGenImagePayload::Create(2,2,1,{.2f,.4f,.6f,.8f},
-                UsdGenImageRowOrientation::BottomUp);CHECK(map.imagePayload);
-            mapped.maps.push_back(map);
-            mapped.nodes[1].mapBindings={{map.path,UsdGenMapBindingPurpose::LengthSource,
-                TfToken("usdGen:length:source")}};
-            UsdGenSession mapSession;mapSession.SetDevicePublicationEnabled(true);
-            gpu::CudaGeometryLease held;std::vector<float3> heldPoints;
-            UsdGenGenerationConstPtr last;
-            for(int variant=0;variant!=2;++variant) {
-                mapped.maps[0].params={{TfToken("map:filter"),
-                    VtValue(TfToken(variant ? "nearest" : "bilinear")),false}};
-                if(variant) {
-                    mapped.maps[0].textureGeneration++;
-                    mapped.maps[0].imagePayload=UsdGenImagePayload::Create(2,2,1,
-                        {.8f,.6f,.4f,.2f},UsdGenImageRowOrientation::BottomUp);
-                }
-                UsdGenCurveBuffer expected;CHECK(CpuReference(mapped,&expected));
-                UsdGenDiagnostics errors;auto mappedPlan=CompileCudaGraph(mapped,&errors);
-                for(auto const& error:errors.errors) std::fprintf(stderr,"%s\n",error.c_str());
-                CHECK(mappedPlan&&!errors.HasErrors());
-                auto meta=GetCudaExecutionPlanMetadata(*mappedPlan);CHECK(meta);
-                CHECK(meta->Tasks()[0].estimate.scratchPeakBytes >=
-                    expected.totalCurves*sizeof(float)+4*sizeof(float));
-                auto work=CreateCudaExecutionWorkspace(-1,&errors);CHECK(work);
-                auto mappedDirect=ExecuteCudaGraph(*mappedPlan,*work,120+variant,220+variant,&errors);
-                CHECK(mappedDirect&&!errors.HasErrors()&&CheckGrowParity(mappedDirect,expected,stream));
-                mapSession.SetGraphDesc(mapped);
-                auto published=mapSession.Commit(120+variant,UsdGenCommitReason::SetTime);
-                CHECK(published&&published->device&&!mapSession.LastDiagnostics().HasErrors()&&
-                    CheckGrowParity(published->device,expected,stream));
-                last=published;
-                auto lease=gpu::AcquireGeometry(published->device,stream);CHECK(lease);
-                if(!variant){held=std::move(lease);CHECK(Read(held.Geometry().points,&heldPoints,stream));}
-                else {
-                    std::vector<float3> old;
-                    CHECK(held.Geometry().points.data!=lease.Geometry().points.data&&
-                        Read(held.Geometry().points,&old,stream)&&old.size()==heldPoints.size()&&
-                        std::memcmp(old.data(),heldPoints.data(),old.size()*sizeof(float3))==0);
-                }
-            }
-            mapped.maps[0].textureGeneration++;
-            mapped.maps[0].imagePayload=UsdGenImagePayload::Create(1,1,1,{-1.f});
-            mapped.maps[0].params={{TfToken("map:clamp"),VtValue(GfVec2f(-2,2)),false}};
-            mapSession.SetGraphDesc(mapped);
-            CHECK(mapSession.Commit(122,UsdGenCommitReason::SetTime)==last&&
-                mapSession.LastDiagnostics().HasErrors());
-            mapped.nodes[0].params[0].value=VtValue(0.f);
-            mapSession.SetGraphDesc(mapped);
-            auto emptyMap=mapSession.Commit(123,UsdGenCommitReason::SetTime);
-            CHECK(emptyMap&&emptyMap->device&&!mapSession.LastDiagnostics().HasErrors());
-            auto emptyLease=gpu::AcquireGeometry(emptyMap->device,stream);
-            CHECK(emptyLease&&emptyLease.Geometry().curveCount==0&&emptyLease.Geometry().pointCount==0);
-        }
-
         // A held native callback cannot authorize publication. Both entry
         // points must return while proof is held, retaining their own state.
         auto asyncWorkspace = CreateCudaExecutionWorkspace(-1, &diagnostics);
@@ -537,26 +391,6 @@ int main(int argc, char** argv) {
         CHECK(asyncResult && asyncResult->Geometry().topologyVersion == first->device->Geometry().topologyVersion);
         CHECK(Read(retained.Geometry().points, &directPoints, stream));
         CHECK(std::memcmp(directPoints.data(), points.data(), points.size() * sizeof(float3)) == 0);
-        // Scatter mask affects authoritative capture; Grow's own identity
-        // mask replaces the inherited per-root mask during CPU evaluation.
-        // Applying Scatter's mask a second time on CUDA would shrink strands.
-        auto masked = desc;
-        masked.nodes[0].params.push_back({TfToken("mask:random"), VtValue(.75f), false});
-        masked.nodes[0].params.push_back({TfToken("mask:randomSeed"), VtValue(27), false});
-        UsdGenCurveBuffer maskedReference;
-        CHECK(CpuReference(masked, &maskedReference));
-        auto maskedPlan = CompileCudaGraph(masked, &diagnostics);
-        CHECK(maskedPlan && !diagnostics.HasErrors());
-        auto maskedGeneration = ExecuteCudaGraph(*maskedPlan, *workspace, 1, 103, &diagnostics);
-        CHECK(maskedGeneration && !diagnostics.HasErrors());
-        auto maskedLease = gpu::AcquireGeometry(maskedGeneration, stream);
-        CHECK(maskedLease);
-        CHECK(Read(maskedLease.Geometry().points, &directPoints, stream));
-        CHECK(directPoints.size() == maskedReference.totalCvs);
-        for (size_t i = 0; i < directPoints.size(); ++i)
-            CHECK(Near(directPoints[i].x, maskedReference.px[i]) &&
-                  Near(directPoints[i].y, maskedReference.py[i]) &&
-                  Near(directPoints[i].z, maskedReference.pz[i]));
         auto oldPoints = points;
         auto oldTopology = first->device->Geometry().topologyVersion;
         desc.nodes[1].params[1].value = VtValue(4.0f);
@@ -571,7 +405,7 @@ int main(int argc, char** argv) {
 
         // Rejected authored controls must preserve the accepted generation.
         auto invalid = desc;
-        invalid.nodes[1].params.push_back({TfToken("uvBlend"), VtValue(1.01f), false});
+        invalid.nodes[1].params.push_back({TfToken("lift"), VtValue(91.0f), false});
         session.SetGraphDesc(invalid);
         CHECK(session.Commit(3, UsdGenCommitReason::SetTime) == second);
         CHECK(session.LastDiagnostics().HasErrors());

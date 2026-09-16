@@ -72,7 +72,6 @@ UsdGenGraph::RoutingSnapshot() const
         UsdGenGraphRoutingNode copy;
         copy.id = node.id;
         copy.type = node.type;
-        copy.algorithmVersion = node.algorithmVersion;
         copy.hasSurface = node.hasSurface;
         copy.surface = node.surface;
         copy.paramRouting = node.paramRouting;

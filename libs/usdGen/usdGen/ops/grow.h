@@ -18,7 +18,6 @@ public:
     ~UsdGenGrowOp() override = default;
 
     TfToken Type() const override { return TfToken("UsdGenGrow"); }
-    UsdGenSpace Space() const override { return UsdGenSpace::Rest; }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::CvCount; }
     bool IsGenerator() const override { return true; }
 
@@ -37,7 +36,7 @@ public:
     std::unique_ptr<UsdGenCapture> CreateCapture() const override;
     uint32_t PlanesTouched() const override;
 private:
-    const TfToken sVector{"vector"}, sAttr{"attribute"};
+    const TfToken sVector{"vector"};
 };
 
 }  // namespace usdGen

@@ -114,7 +114,6 @@ struct Options {
     TfToken idSource{"primvar"};
     TfToken staleAction{"warn"};
     TfToken rebind{"onError"};
-    TfToken lane{"hair"};
     std::string expectedEpoch;
 };
 
@@ -127,7 +126,6 @@ bool ReadOptions(UsdGenCaptureContext const &ctx, Options *out,
         !ReadToken(params, TfToken("idSource"), TfToken("primvar"), &out->idSource, diag) ||
         !ReadToken(params, TfToken("staleAction"), TfToken("warn"), &out->staleAction, diag) ||
         !ReadToken(params, TfToken("rebind"), TfToken("onError"), &out->rebind, diag) ||
-        !ReadToken(params, TfToken("lane"), TfToken("hair"), &out->lane, diag) ||
         !ReadString(params, TfToken("expectEpoch"), &out->expectedEpoch, diag))
         return false;
     // Pure-value builders normally map usdGen:useRest to `useRest`, but
@@ -146,8 +144,6 @@ bool ReadOptions(UsdGenCaptureContext const &ctx, Options *out,
     if (out->rebind != TfToken("never") && out->rebind != TfToken("onError") &&
         out->rebind != TfToken("always"))
         return Fail(diag, "rebind must be 'never', 'onError', or 'always'");
-    if (out->lane != TfToken("hair"))
-        return Fail(diag, "CurveSource supports only lane='hair'; use ReferenceSource for guide/reference data");
     return true;
 }
 

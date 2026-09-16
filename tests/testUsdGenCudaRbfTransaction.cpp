@@ -79,8 +79,6 @@ UsdGenGraphDesc RbfDesc() {
     deform.type = TfToken("UsdGenDeform");
     deform.inputs = {source.path};
     deform.surfaces = {surface.path};
-    deform.mode = TfToken("rbf");
-    deform.readPhase = TfToken("final");
     deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
     desc.nodes = {source, deform};
     desc.terminal = deform.path;
@@ -681,7 +679,8 @@ static int ValueDagTransactions() {
             auto wr = width("/RbfAtomic/RightWidth", right.path, 3.f);
             UsdGenNodeDesc blend;
             blend.path = SdfPath("/RbfAtomic/Blend"); blend.type = TfToken("UsdGenWidthBlend");
-            blend.inputs = {wl.path, wr.path}; blend.blend = .25f;
+            blend.inputs = {wl.path, wr.path};
+            blend.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
             dag.nodes = {source, left, right, wl, wr, blend}; dag.terminal = blend.path;
             auto expectedWidth = width("/RbfAtomic/ExpectedWidth", left.path, 2.25f);
             reference.nodes = {source, left, expectedWidth}; reference.terminal = expectedWidth.path;

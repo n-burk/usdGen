@@ -98,8 +98,6 @@ static UsdGenGraphDesc MakeDesc() {
     deform.type = TfToken("UsdGenDeform");
     deform.inputs = {length.path};
     deform.surfaces = {surface.path};
-    deform.mode = TfToken("rbf");
-    deform.readPhase = TfToken("final");
     deform.params.push_back({TfToken("rbfSamples"), VtValue(5), false});
 
     desc.nodes = {source, width, length, deform};
@@ -147,7 +145,8 @@ static UsdGenGraphDesc MakeScatterGrowValueDagDesc() {
     right.inputs = {noise.path}; right.params = {{TfToken("width"), VtValue(.8f), false}};
     UsdGenNodeDesc blend;
     blend.path = SdfPath("/Ops/Blend"); blend.type = TfToken("UsdGenWidthBlend");
-    blend.inputs = {left.path, right.path}; blend.blend = .25f;
+    blend.inputs = {left.path, right.path};
+    blend.params.push_back({TfToken("widthBlend:weight"), VtValue(.25f), false});
     desc.nodes = {blend, right, noise, scatter, left, grow, length};
     desc.terminal = blend.path;
     return desc;
@@ -319,13 +318,13 @@ int main() {
                   ExpectedSourcePayloadBytes(noiseDesc) + expectedFrameBytes &&
               noiseTask.estimate.steadyBytes == 0 &&
               noiseTask.estimate.scratchPeakBytes == expectedFloat3Bytes +
-                  2 * 257 * sizeof(float) + 2 * sizeof(int) + sizeof(int));
+                  257 * sizeof(float) + 2 * sizeof(int) + sizeof(int));
     }
     CHECK(UsdGenOpRegistry::Get().Register(
-        TfToken("UsdGenTestTopologyNamedPlane"), 0,
+        TfToken("UsdGenTestTopologyNamedPlane"),
         [] { return std::make_unique<TopologyNamedPlaneProbe>(); }));
     CHECK(UsdGenOpRegistry::Get().Register(
-        TfToken("UsdGenTestValueNamedPlane"), 0,
+        TfToken("UsdGenTestValueNamedPlane"),
         [] { return std::make_unique<ValueNamedPlaneProbe>(); }));
     auto const& matrix = GetCudaExecutionCapabilityMatrix();
     CHECK(matrix.Backend() == "cuda" && matrix.Version() == 35 && matrix.Available());
@@ -433,21 +432,19 @@ int main() {
           widthEstimate.retainedOutputBytes == 2 * sizeof(float) &&
           widthEstimate.producerRetentionBytes == sourcePayload &&
           widthEstimate.scratchPeakBytes ==
-              2 * sizeof(float) + 2 * 257 * sizeof(float) + 2 * sizeof(int));
+              2 * sizeof(float) + 257 * sizeof(float) + 2 * sizeof(int));
     auto const& lengthEstimate = metadata->Tasks()[2].estimate;
     CHECK(!lengthEstimate.memoryAvailable &&
           lengthEstimate.retainedOutputBytes == sourcePayload &&
           lengthEstimate.producerRetentionBytes == sourcePayload &&
           lengthEstimate.scratchPeakBytes ==
-              257 * sizeof(float) + 2 * 3 * sizeof(float) * 2 +
-              18 + 10 * sizeof(int));
+              2 * 3 * sizeof(float) * 2 + 18 + 10 * sizeof(int));
     auto const& deformEstimate = metadata->Tasks()[3].estimate;
     CHECK(!deformEstimate.memoryAvailable &&
           deformEstimate.retainedOutputBytes == 2 * 3 * sizeof(float) &&
           deformEstimate.producerRetentionBytes == sourcePayload &&
           deformEstimate.scratchPeakBytes ==
-              2 * 3 * sizeof(float) * 2 + sizeof(int) +
-              257 * sizeof(float));
+              2 * 3 * sizeof(float) * 2 + sizeof(int));
     auto const& publicationEstimate = metadata->Tasks()[4].estimate;
     CHECK(publicationEstimate.memoryAvailable &&
           publicationEstimate.retainedOutputBytes == 0 &&
@@ -657,7 +654,6 @@ int main() {
     UsdGenNodeDesc fusedDeform;
     fusedDeform.path = SdfPath("/Ops/Deform"); fusedDeform.type = TfToken("UsdGenDeform");
     fusedDeform.inputs = {SdfPath("/Ops/Length")}; fusedDeform.surfaces = {SdfPath("/Scalp")};
-    fusedDeform.mode = TfToken("rbf"); fusedDeform.readPhase = TfToken("final");
     fusedDeform.params = {{TfToken("rbfSamples"), VtValue(5), false}};
     scatterDeform.nodes.push_back(fusedDeform); scatterDeform.terminal = fusedDeform.path;
     diagnostics = {};
@@ -735,10 +731,12 @@ int main() {
         "CUDA: unsupported operator: CUDA capability matrix has no implementation for UsdGenUnknownOperator"));
 
     auto unsupportedConfiguration = MakeDesc();
-    unsupportedConfiguration.nodes[1].blend = 2.0f;
+    unsupportedConfiguration.nodes[2].params.push_back(
+        {TfToken("mask"), VtValue(2.0f), false});
     diagnostics = {};
     CHECK(!CompileCudaGraph(unsupportedConfiguration,&diagnostics));
-    CHECK(DiagnosticIs(diagnostics,"CUDA: Width blend must be in [0,1]"));
+    CHECK(DiagnosticIs(diagnostics,
+        "CUDA: unsupported or malformed Length parameter mask"));
 
     // RBF consumes the exact immutable value on its authored predecessor
     // lineage. Independent Width/Length -> RBF branches are legal; the
@@ -1050,7 +1048,7 @@ int main() {
     boundedRbf.nodes[1].inputs = {boundedRbf.nodes[0].path};
     boundedRbf.terminal = boundedRbf.nodes[1].path;
     AddScalarExpression(&boundedRbf, &boundedRbf.nodes[1],
-        "/Groom/Hair/Expressions/blend", "$value", "blend",
+        "/Groom/Hair/Expressions/maskAmount", "$value", "mask",
         expr::Domain::Groom, TfToken("float"), expr::ScalarType::Float32,
         VtValue(1.f));
     diagnostics = {};

@@ -163,17 +163,21 @@ CudaParameterStatus CudaParameterProgram::Compile(
             return status;
         };
         if (binding.destination.IsEmpty() || binding.expression.IsEmpty() ||
-            binding.output.IsEmpty() ||
             !destinations.insert(CanonicalName(binding.destination)).second)
             return fail(CudaParameterStatus::InvalidArgument, "empty or duplicate expression destination/path");
         auto expression = std::find_if(graph.expressions.begin(), graph.expressions.end(),
             [&](auto const& candidate) { return candidate.path == binding.expression; });
         if (expression == graph.expressions.end())
             return fail(CudaParameterStatus::CompileError, "missing expression");
-        auto result = std::find_if(expression->outputs.begin(), expression->outputs.end(),
-            [&](auto const& candidate) { return candidate.name == binding.output; });
-        if (result == expression->outputs.end())
-            return fail(CudaParameterStatus::CompileError, "missing expression output");
+        // An empty output is a connection to the expression PRIM; it resolves
+        // to outputs:result, or to a single declared output.
+        UsdGenExpressionOutputDesc const* result =
+            UsdGenFindExpressionOutput(*expression, binding.output);
+        if (!result)
+            return fail(CudaParameterStatus::CompileError, binding.output.IsEmpty()
+                ? "connection to prim " + binding.expression.GetString() +
+                      " declaring no outputs:result and no single outputs:* attribute"
+                : "missing expression output");
         if (binding.domain != Domain::Groom && binding.domain != Domain::Primitive &&
             binding.domain != Domain::Point)
             return fail(CudaParameterStatus::InvalidArgument, "invalid evaluation domain");
@@ -231,6 +235,14 @@ bool CudaParameterProgram::EstimateFreshCandidateBytes(
         fieldDoubles += domain == Domain::Primitive ? 7 : 9;
         if (shape.hasWidths) ++fieldDoubles;
         if (shape.hasRootUV) fieldDoubles += 2;
+        // $N/$Nref, $dPdu/$dPduref and $dPdv/$dPdvref are three doubles each,
+        // plus the scalar $faceId. They ride on the same C3 root binding that
+        // publishes the root UVs (rootT/rootB/rootN and rootPrim are produced
+        // with rootUV by scatter/grow), and CudaParameterGeometryMemoryShape
+        // carries no separate frame flag, so hasRootUV is the flag that covers
+        // them. A path that has the UVs but not the frames over-reserves here,
+        // which is the safe direction; under-reserving is not.
+        if (shape.hasRootUV) fieldDoubles += 6 * 3 + 1;
         return EstimateMultiply(n, fieldDoubles * sizeof(double), &value) &&
             EstimateAdd(&bytes, value) &&
             // owners + arc are allocated for each non-groom context.

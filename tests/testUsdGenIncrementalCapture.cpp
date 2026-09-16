@@ -123,12 +123,14 @@ int main()
     const SdfPath a("/groomA"), b("/groomB");
     const SdfPath opA("/groomA/op"), surfaceSubset("/externalMesh/subset");
     const SdfPath externalCurves("/externalCurves"), newCurves("/newCurves");
+    // usdGen:surface is a description-level binding; operators have no
+    // per-node override, so the external mesh dependency is authored here.
     auto groomAData = UsdGenFields({
         {TfToken("operatorOrder"),
-         HdRetainedTypedSampledDataSource<SdfPathVector>::New({opA})}});
-    auto opData = UsdGenFields({
+         HdRetainedTypedSampledDataSource<SdfPathVector>::New({opA})},
         {TfToken("surface"),
-         HdRetainedTypedSampledDataSource<SdfPathVector>::New({surfaceSubset})},
+         HdRetainedTypedSampledDataSource<SdfPathVector>::New({surfaceSubset})}});
+    auto opData = UsdGenFields({
         {TfToken("curves"),
          HdRetainedTypedSampledDataSource<SdfPathVector>::New({externalCurves})}});
     input->retained->AddPrims({

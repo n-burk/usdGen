@@ -9,6 +9,15 @@ namespace usdGen::gpu {
 struct ExpressionGeometryChannels {
     DeviceView<const float> hairT;      // one value per CV, optional
     DeviceView<const float2> rootUV;    // one value per primitive, optional
+    // Rest root frame and surface face index, one value per primitive, all
+    // optional. usdGen keeps ONE rest root frame, so both spellings of each
+    // variable read the same plane: $N/$Nref <- rootN, $dPdu/$dPduref <- rootT,
+    // $dPdv/$dPdvref <- rootB, $faceId <- rootPrim. A null view materializes no
+    // field, so the variable stays unavailable exactly as it is today.
+    DeviceView<const float3> rootN;
+    DeviceView<const float3> rootT;
+    DeviceView<const float3> rootB;
+    DeviceView<const int32_t> rootPrim;
 };
 
 enum class ExpressionContextStatus { Ok, InvalidArgument, InvalidGeometry,

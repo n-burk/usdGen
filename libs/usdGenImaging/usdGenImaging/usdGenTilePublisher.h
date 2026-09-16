@@ -82,6 +82,33 @@ public:
     /// Guides: <description>/__usdGenRender/guides/<setName> (+ /cvs child).
     static SdfPath GuidePath(SdfPath const &descriptionPath, TfToken const &setName);
 
+    /// The synthetic default-material prim (06 §4.4 `material_storm` slot):
+    /// <description>/__usdGenRender/material_storm. Tiles bind it whenever
+    /// the description authors no material of its own, so Storm shades hair
+    /// with the UsdGenHairPreview glslfx instead of falling back to flat
+    /// displayColor. UsdGenGroomSceneIndex synthesizes the prim.
+    static SdfPath MaterialPath(SdfPath const &descriptionPath);
+
+    /// The same prim derived from a published tile path
+    /// (<description>/__usdGenRender/tile_NNNN) — the publisher only ever
+    /// sees the tile path.
+    static SdfPath DefaultMaterialPath(SdfPath const &tilePath);
+
+    /// The `material` prim data source for MaterialPath(): one node named
+    /// `surface` whose nodeIdentifier is the Sdr id `UsdGenHairPreview`
+    /// (bind by identifier, never an asset path — see
+    /// usdGenShaders/resources/hairLook.usda), wired to the universal
+    /// render context's `surface` terminal. Parameters are left unset so the
+    /// C5-frozen Sdr defaults apply.
+    static HdContainerDataSourceHandle BuildDefaultMaterialDataSource();
+
+    /// The reserved name of the synthetic default material prim.
+    static TfToken const &MaterialName()
+    {
+        static TfToken const token("material_storm");
+        return token;
+    }
+
     /// The reserved Hydra-only render-namespace child of a description
     /// (06 §4, 02 §0.6).
     static TfToken const &RenderNamespace()

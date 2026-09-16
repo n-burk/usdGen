@@ -1,0 +1,186 @@
+-- glslfx version 0.1
+
+-- glsl UsdGenHair.Lobes
+
+// Shared by all three Storm terminals. R / TT / TRT longitudinal scattering
+// with Schlick Fresnel and absorption, filtered at pixel footprint. This is
+// a real-time approximation, not the full Marschner/Chiang path integral.
+vec3 FurSafeNormalize(vec3 v, vec3 fallback)
+{
+    return dot(v,v) > 1e-12 ? v * inversesqrt(dot(v,v)) : fallback;
+}
+
+float FurGaussian(float angle, float shift, float width, float footprint)
+{
+    float w = max(abs(width), 0.015);
+    float variance = w*w + min(footprint*footprint, 0.25);
+    // Preserve integrated highlight energy while widening subpixel lobes.
+    return w * inversesqrt(variance) * exp(-0.5*(angle-shift)*(angle-shift)/variance);
+}
+
+vec3 FurScattering(vec3 T, vec3 L, vec3 E, vec3 albedo, float footprint)
+{
+    float sl = clamp(dot(T,L), -1.0, 1.0);
+    float sv = clamp(dot(T,E), -1.0, 1.0);
+    float cl = sqrt(max(1e-5, 1.0-sl*sl));
+    float cv = sqrt(max(1e-5, 1.0-sv*sv));
+    float cosPhi = clamp(dot(L-T*sl,E-T*sv)/(cl*cv), -1.0, 1.0);
+    float cosHalfPhi = sqrt(max(0.0, 0.5+0.5*cosPhi));
+    float theta = 0.5*(asin(sl)+asin(sv));
+    float cosThetaD = cos(0.5*(asin(sl)-asin(sv)));
+    float fresnel = 0.0465 + 0.9535*pow(1.0-clamp(cosThetaD*cosHalfPhi,0.0,1.0),5.0);
+    // Colored paths through the fiber (Beer-Lambert); clamp for stable log.
+    vec3 absorption = -log(clamp(albedo,vec3(0.001),vec3(1.0)));
+    vec3 tt = exp(-absorption/max(0.25,cosThetaD));
+    vec3 trt = tt*tt;
+    float rLobe = FurGaussian(theta,HdGet_specular1Shift(),HdGet_specular1Width(),footprint);
+    float trtLobe = FurGaussian(theta,HdGet_specular2Shift(),HdGet_specular2Width(),footprint);
+    float ttLobe = FurGaussian(theta,-0.5*HdGet_specular1Shift(),
+                              0.5*HdGet_specular2Width(),footprint);
+    float back = pow(max(0.0,0.5-0.5*cosPhi),3.0);
+    // Gains retain the legacy peak-reflectance convention. The surface
+    // normalizes the combined artist budget (diffuse + R + TT + TRT).
+    return max(vec3(0),HdGet_specular1Color().rgb)*max(0.0,HdGet_specular1Gain())*
+               rLobe*cosHalfPhi*(0.25+0.75*fresnel)
+         + max(vec3(0),HdGet_specular2Color().rgb)*max(0.0,HdGet_specular2Gain())*
+               trt*trtLobe*(0.5+0.5*cosHalfPhi)*(1.0-fresnel)
+         + max(vec3(0),HdGet_transmissionColor().rgb)*max(0.0,HdGet_transmissionGain())*
+               tt*ttLobe*back*(1.0-fresnel)*(1.0-fresnel);
+}
+
+float UsdGenHairDiffuse(vec3 T, vec3 L, float wrap)
+{
+    float c = clamp(dot(T,L),-1.0,1.0);
+    float w = clamp(wrap,0.0,1.0);
+    return (sqrt(max(0.0,1.0-c*c))+w)/(1.0+w);
+}
+
+// Optical depths are expressed in world axes. Using the view inverse here
+// keeps the lighting fixed to the groom when the camera moves. Moving lights
+// needs no bake. Squared directional weights are continuous at axis seams.
+vec3 FurTauPositive()
+{
+#if defined(HD_HAS_furTauP) && defined(HD_HAS_furTauN)
+    return max(vec3(0),HdGet_furTauP());
+#else
+    return vec3(0);
+#endif
+}
+vec3 FurTauNegative()
+{
+#if defined(HD_HAS_furTauP) && defined(HD_HAS_furTauN)
+    return max(vec3(0),HdGet_furTauN());
+#else
+    return vec3(0);
+#endif
+}
+float FurVisibility(vec3 L, vec3 positive, vec3 negative, float t)
+{
+#if defined(HD_HAS_furTauP) && defined(HD_HAS_furTauN)
+    vec3 worldL = FurSafeNormalize(mat3(GetWorldToViewInverseMatrix())*L,vec3(0,1,0));
+    vec3 depth = mix(negative,positive,step(vec3(0),worldL));
+    return exp(-min(32.0,dot(worldL*worldL,depth)*2.0*clamp(HdGet_selfOcclusion(),0.0,1.0)));
+#else
+    // Imported curves without a density bake retain the legacy fallback.
+    return mix(1.0,smoothstep(0.0,1.0,t),clamp(HdGet_selfOcclusion(),0.0,1.0));
+#endif
+}
+float FurAmbientVisibility(vec3 positive, vec3 negative, float t)
+{
+#if defined(HD_HAS_furTauP) && defined(HD_HAS_furTauN)
+    vec3 v = exp(-positive*2.0*clamp(HdGet_selfOcclusion(),0.0,1.0))
+           + exp(-negative*2.0*clamp(HdGet_selfOcclusion(),0.0,1.0));
+    return dot(v,vec3(1.0/6.0));
+#else
+    return mix(1.0,smoothstep(0.0,1.0,t),clamp(HdGet_selfOcclusion(),0.0,1.0));
+#endif
+}
+
+vec3 UsdGenHairDomeIrradiance(vec3 N, mat4 worldToLightTransform)
+{
+#ifdef HD_HAS_domeLightIrradiance
+    mat4 domeXf = worldToLightTransform * mat4(GetWorldToViewInverseMatrix());
+    return HdGet_domeLightIrradiance(FurSafeNormalize((domeXf*vec4(N,0)).xyz,N)).rgb;
+#else
+    return vec3(1.0);
+#endif
+}
+
+vec3 UsdGenHairHueShift(vec3 c, float amount)
+{
+    const vec3 k = vec3(0.57735);
+    float ca = cos(amount*6.2831853), sa = sin(amount*6.2831853);
+    return c*ca+cross(k,c)*sa+k*dot(k,c)*(1.0-ca);
+}
+
+-- glsl UsdGenHair.Surface
+
+vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
+{
+    vec3 P=Peye.xyz/(abs(Peye.w)>1e-8?Peye.w:1.0);
+    vec3 N=FurSafeNormalize(Neye,vec3(0,0,1));
+    vec3 E=FurSafeNormalize(-P,vec3(0,0,1));
+    float t=UsdGenHair_GetHairT();
+    vec3 T=FurSafeNormalize(UsdGenHairTangent(P,N,patchCoord.y),vec3(0,1,0));
+    vec3 axis=abs(T.z)<0.9?vec3(0,0,1):vec3(1,0,0);
+    N=FurSafeNormalize(N-T*dot(N,T),normalize(cross(T,axis)));
+    float footprint=min(0.5,length(fwidth(T)));
+
+    vec3 root=HdGet_rootColor().rgb;
+#ifdef HD_HAS_displayColor
+    root=color.rgb;
+#endif
+    vec3 albedo=mix(root,HdGet_tipColor().rgb,pow(t,max(HdGet_colorRamp(),0.001)));
+    albedo*=HdGet_rootColorMap().rgb;
+    float seed=UsdGenHair_GetHairId();
+    albedo=UsdGenHairHueShift(albedo,(fract(seed*17.0)-0.5)*HdGet_randomHue());
+    albedo*=max(0.0,1.0+(fract(seed*41.0)-0.5)*2.0*HdGet_randomValue());
+    albedo=clamp(albedo,vec3(0),vec3(1));
+    vec3 positive=FurTauPositive(), negative=FurTauNegative();
+#if defined(HD_HAS_furTipTauP) && defined(HD_HAS_furTipTauN)
+    // Native PointInstancer stores root/tip depth per instance. Interpolate
+    // along the prototype's hairT without expanding the viewport geometry.
+    positive=mix(positive,max(vec3(0),HdGet_furTipTauP()),t);
+    negative=mix(negative,max(vec3(0),HdGet_furTipTauN()),t);
+#endif
+    float ao=FurAmbientVisibility(positive,negative,t);
+    float diffuse=max(0.0,HdGet_diffuseGain());
+    float budget=max(1.0,diffuse+max(0.0,HdGet_specular1Gain())+
+        max(0.0,HdGet_specular2Gain())+max(0.0,HdGet_transmissionGain()));
+    vec3 result=vec3(0);
+#if NUM_LIGHTS > 0
+    for(int i=0;i<GetLightCount();++i) {
+        LightSource light=GetLightSource(i);
+        if(light.isIndirectLight) {
+            // Integrate both sides of the fiber; avoids camera-facing ribbon
+            // normals turning a dome highlight on/off during orbit.
+            vec3 irradiance=0.5*(UsdGenHairDomeIrradiance(N,light.worldToLightTransform)+
+                                 UsdGenHairDomeIrradiance(-N,light.worldToLightTransform));
+            vec3 multi=albedo*(1.0-ao)*0.35;
+            result+=albedo*diffuse*(vec3(ao)+multi)*irradiance*light.diffuse.rgb/budget;
+            continue;
+        }
+        vec3 L=FurSafeNormalize(light.position.xyz-P*light.position.w,vec3(0,1,0));
+        float attenuation=lightDistanceAttenuation(Peye,i)*lightSpotAttenuation(L,i);
+        float sceneShadow=1.0;
+#if USE_SHADOWS
+        if(light.hasShadow) sceneShadow=shadowing(i,Peye);
+#endif
+        float visibility=FurVisibility(L,positive,negative,t);
+        // Bounded two-event scattering approximation. Bright coats retain
+        // colored fill; absorption makes dark coats suppress this contribution.
+        vec3 multi=albedo*(1.0-visibility)*0.35;
+        vec3 diffuseResponse=albedo*diffuse*UsdGenHairDiffuse(T,L,HdGet_diffuseWrap())*
+                             (vec3(visibility)+multi)*light.diffuse.rgb;
+        vec3 specularResponse=FurScattering(T,L,E,albedo,footprint)*visibility*light.specular.rgb;
+        result+=(diffuseResponse+specularResponse)*attenuation*sceneShadow/budget;
+    }
+#endif
+    float alpha=clamp(HdGet_opacity(),0.0,1.0);
+#ifdef HD_HAS_displayOpacity
+    alpha*=color.a;
+#endif
+    float edge=clamp((1.0-abs(patchCoord.y*2.0-1.0))*2.0,0.0,1.0);
+    alpha*=mix(1.0,edge,clamp(HdGet_widthFalloff(),0.0,1.0));
+    return vec4(max(result,vec3(0)),clamp(alpha,0.0,1.0));
+}

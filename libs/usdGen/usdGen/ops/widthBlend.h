@@ -2,8 +2,9 @@
 //
 // WidthBlend consumes two geometry inputs with identical topology and
 // immutable non-width planes.  It writes a fresh width plane containing the
-// ordered lerp of the left and right widths; every other plane is inherited
-// from the left input by the scheduler's normal CoW preparation.
+// ordered lerp of the left and right widths, weighted by its own
+// usdGen:widthBlend:weight parameter; every other plane is inherited from the
+// left input by the scheduler's normal CoW preparation.
 #ifndef USDGEN_OP_WIDTH_BLEND_H
 #define USDGEN_OP_WIDTH_BLEND_H
 
@@ -20,11 +21,9 @@ public:
     ~UsdGenWidthBlendOp() override = default;
 
     TfToken Type() const override { return TfToken("UsdGenWidthBlend"); }
-    UsdGenSpace Space() const override { return UsdGenSpace::Rest; }
     UsdGenTopoFx TopologyEffect() const override { return UsdGenTopoFx::None; }
     size_t GeometryInputArity() const override { return 2; }
     bool GeometryInputsOrdered() const override { return true; }
-    bool UsesFrameworkBlendEnvelope() const override { return false; }
 
     TfSpan<const TfToken> TopologyParameters() const override;
     TfSpan<const TfToken> ValueParameters() const override;

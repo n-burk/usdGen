@@ -36,6 +36,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -76,7 +77,6 @@ void InheritPerCurve(UsdGenCurveBuffer &dst, UsdGenCurveBuffer const &src)
     if (dst.rootT.empty() && !src.rootT.empty()) dst.rootT = src.rootT;
     if (dst.rootN.empty() && !src.rootN.empty()) dst.rootN = src.rootN;
     if (dst.rootB.empty() && !src.rootB.empty()) dst.rootB = src.rootB;
-    if (dst.curveMask.empty() && !src.curveMask.empty()) dst.curveMask = src.curveMask;
 }
 
 /// A non-owning styler's per-curve channels are immutable aliases of its
@@ -91,7 +91,6 @@ void AliasPerCurve(UsdGenCurveBuffer &dst, UsdGenCurveBuffer const &src)
     dst.rootT = src.rootT;
     dst.rootN = src.rootN;
     dst.rootB = src.rootB;
-    dst.curveMask = src.curveMask;
 }
 
 void AliasExtraPlanes(UsdGenCurveBuffer &dst, UsdGenCurveBuffer const &src)
@@ -353,6 +352,11 @@ UsdGenEpoch WithExternalValueIdentity(UsdGenEpoch digest,
         mix(maps[index].identity);
         mix(maps[index].textureGeneration);
     }
+    // Connected parameters are a capture input on this lane exactly as they
+    // are on the CUDA lane: editing usdGen:expr:source, re-pointing a
+    // connection or moving the geometry the expression samples changes this
+    // digest, which re-captures the node and dirties its chunks.
+    mix(node.expressions.Digest());
     return digest;
 }
 struct NodeSweepPayload
@@ -364,8 +368,6 @@ struct NodeSweepPayload
     UsdGenCompiledNode const *up;  // null when the node has no input
     UsdGenCompiledNode const *up2; // ordered second input for binary kernels
     bool evalAll;
-    float blend;
-    bool blendable;                // styler with an input: capture !OwnsBuffer() && topoFx None (03 §8.5)
     uint32_t planes;
     std::vector<uint8_t> didEval;  // one byte per chunk: a bit-packed
                                    // vector<bool> makes 64 workers share one
@@ -386,6 +388,7 @@ struct NodeExecution
     std::vector<UsdGenResolvedMapValue const *> resolvedMaps;
     NodeSweepPayload sweep{};
     bool reCaptured = false;
+    bool expressionsChanged = false;
     bool shouldSweep = false;
     bool evalAll = false;
     bool anyChunkDirty = false;
@@ -572,68 +575,15 @@ void SweepChunk(size_t index, void *payload)
         : const_cast<GfVec3f *>(buf.rootN.cdata()) + baseCurve;
     view.rootB = buf.rootB.empty() ? nullptr
         : const_cast<GfVec3f *>(buf.rootB.cdata()) + baseCurve;
-    view.curveMask = buf.curveMask.empty() ? nullptr
-        : const_cast<float *>(buf.curveMask.cdata()) + baseCurve;
 
-    // Capture-payload views: the resolved mask is the node's own; the
-    // magnitude LUT comes from the node's capture.
+    // Capture-payload views: the magnitude LUT comes from the node's capture.
     view.rampLut = nullptr;
     if (node.capture) {
-        if (auto p = dynamic_cast<UsdGenCapturePayload const *>(node.capture.get())) {
+        if (auto p = dynamic_cast<UsdGenCapturePayload const *>(node.capture.get()))
             view.rampLut = p->rampLut.empty() ? nullptr : p->rampLut.cdata();
-            if (!p->curveMask.empty())
-                view.curveMask = const_cast<float *>(p->curveMask.cdata()) + baseCurve;
-        }
     }
 
-    // ---- envelope (03 §8.5), applied by the framework, not by kernels ----
-    // Generators (captures that OwnsBuffer) are exempt — their output is
-    // created, not styled, and blend on a TopologyEffect node is ignored
-    // with a diagnostic (emitted once per run in Run(), not per chunk).
-    // w <= 0 skips Evaluate entirely and aliases the input; 0 < w < 1 lerps
-    // every touched plane; w >= 1 runs no blend pass. Untouched planes are
-    // already CoW aliases of the input from PrepareNodeForEval.
-    bool const blendable = pl.blendable;
-    bool const muted = blendable && pl.blend <= 0.0f;
-    if (!muted) {
-        pl.op->Evaluate(pl.ctx, *node.capture, &view);
-    }
-
-    float const *inPx = inPlane(upBuf.px);
-    float const *inPy = inPlane(upBuf.py);
-    float const *inPz = inPlane(upBuf.pz);
-    float const *inW = view.inWidth;
-    float const *inT = inPlane(upBuf.hairT);
-    if (muted) {
-        // w <= 0: out := in on every plane this node would have touched.
-        if (pl.planes & UsdGenOp::kPlanePoints) {
-            if (view.px && inPx) std::copy_n(inPx, nCvs, view.px);
-            if (view.py && inPy) std::copy_n(inPy, nCvs, view.py);
-            if (view.pz && inPz) std::copy_n(inPz, nCvs, view.pz);
-        }
-        if ((pl.planes & UsdGenOp::kPlaneWidths) && view.width && inW)
-            std::copy_n(inW, nCvs, view.width);
-        if ((pl.planes & UsdGenOp::kPlaneHairT) && view.hairT && inT)
-            std::copy_n(inT, nCvs, view.hairT);
-        for (uint32_t s = 0; s < view.outCount; ++s) {
-            if (outF[s] && outputInF[s])
-                std::copy_n(outputInF[s], outputValues[s], outF[s]);
-            if (outI[s] && outputInI[s])
-                std::copy_n(outputInI[s], outputValues[s], outI[s]);
-        }
-    } else if (blendable && pl.blend > 0.0f && pl.blend < 1.0f) {
-        if ((pl.planes & UsdGenOp::kPlanePoints) && view.px && inPx && inPy && inPz)
-            UsdGenBlendEnvelopeVec3(inPx, inPy, inPz, view.px, view.py, view.pz,
-                                    pl.blend, nCvs);
-        if ((pl.planes & UsdGenOp::kPlaneWidths) && view.width && inW)
-            UsdGenBlendEnvelope(inW, view.width, pl.blend, nCvs);
-        if ((pl.planes & UsdGenOp::kPlaneHairT) && view.hairT && inT)
-            UsdGenBlendEnvelope(inT, view.hairT, pl.blend, nCvs);
-        for (uint32_t s = 0; s < view.outCount; ++s)
-            if (outF[s] && outputInF[s])
-                UsdGenBlendEnvelope(outputInF[s], outF[s], pl.blend,
-                                    outputValues[s]);
-    }
+    pl.op->Evaluate(pl.ctx, *node.capture, &view);
 
     pl.didEval[index] = 1;
 }
@@ -837,7 +787,6 @@ UsdGenRunResult UsdGenScheduler::Run(
             : node.mapBindingRefs.data();
         cctx.mapBindingCount = static_cast<uint32_t>(node.mapBindingRefs.size());
         cctx.surface = node.hasSurface ? node.surface : 0;
-        cctx.readPhase = node.readPhase;
         cctx.seed = node.desc ? static_cast<uint32_t>(node.desc->seed) : 0;
         cctx.upstreamGeneration = hasUp ? upBuf.topologyVersion : 0;
         cctx.upstreams = job->upstreamInputs.empty() ? nullptr
@@ -845,6 +794,49 @@ UsdGenRunResult UsdGenScheduler::Run(
         cctx.upstreamCount = static_cast<uint32_t>(job->upstreamInputs.size());
         cctx.dispatcher = &dispatcher;
         cctx.diag = &nodeDiag;
+
+        // Connected parameters are evaluated ONCE per cook, here, over this
+        // node's INPUT geometry and before its capture identity is taken --
+        // the same ordering CudaParameterEvaluator has on the device lane.
+        {
+            double const rate = graph.Desc().timeCodesPerSecond;
+            double const seconds = std::isfinite(rate) && rate > 0.0
+                ? evalCtx.time / rate : evalCtx.time;
+            std::vector<std::string> expressionErrors;
+            if (!node.expressions.Evaluate(graph.Desc(), *node.desc, upBuf,
+                                           evalCtx.time, seconds, cctx.seed,
+                                           &job->expressionsChanged,
+                                           &expressionErrors))
+                for (auto const &message : expressionErrors)
+                    nodeDiag.Error("UsdGen: " + message);
+            // A groom-domain usdGen:enabled drives the node's own gate. With
+            // nothing connected the authored value stands.
+            double enabled = 0.0;
+            node.enabled = node.paramView.GroomExpressionValue(TfToken("enabled"), &enabled)
+                ? enabled != 0.0 : node.desc->enabled;
+        }
+
+        // 02 §6.3: a disabled operator contributes nothing of its own. A
+        // disabled GENERATOR publishes an empty curve set, so the description
+        // publishes no curves; every other disabled operator passes its
+        // upstream through as a CoW alias in prepareEvaluation below.
+        if (!node.enabled) {
+            job->reCaptured = false;
+            node.captureNeeded = false;
+            if (op.IsGenerator() &&
+                (node.buffer.totalCurves != 0 || node.buffer.totalCvs != 0)) {
+                node.buffer = UsdGenCurveBuffer();
+                node.buffer.topologyVersion = ++node.topologySeq;
+                node.capture.reset();
+                if (graph.Repartition(0, 0)) result.topologyChanged = true;
+            }
+            for (auto const &e : nodeDiag.errors) aggregated.Error(e);
+            for (auto const &w : nodeDiag.warnings) aggregated.Warn(w);
+            if (aggregated.HasErrors()) return false;
+            job->captureEnd = std::chrono::steady_clock::now();
+            job->evalAll = false;
+            return true;
+        }
 
         UsdGenEpoch const captureIdentity =
             WithExternalValueIdentity(op.CaptureDigest(cctx), node, graph);
@@ -902,8 +894,10 @@ UsdGenRunResult UsdGenScheduler::Run(
             }
         }
         job->captureEnd = std::chrono::steady_clock::now();
-        job->evalAll = node.paramValueDigest != node.lastParamDigest;
+        job->evalAll = node.paramValueDigest != node.lastParamDigest ||
+                       job->expressionsChanged;
         node.lastParamDigest = node.paramValueDigest;
+        node.lastExpressionDigest = node.expressions.Digest();
         for (uint8_t b : node.chunkDirty)
             job->anyChunkDirty |= (b & UsdGenDirtyParameter) != 0;
 
@@ -921,7 +915,12 @@ UsdGenRunResult UsdGenScheduler::Run(
         UsdGenCurveBuffer const &upBuf = hasUp
             ? graph.Node(node.inputs.front()).buffer : emptyBuf;
 
-        if (!node.enabled && node.topoFx == UsdGenTopoFx::None && hasUp) {
+        if (!node.enabled && op.IsGenerator()) {
+            std::fill(node.chunkDirty.begin(), node.chunkDirty.end(),
+                      UsdGenDirtyNone);
+            return true;
+        }
+        if (!node.enabled && hasUp) {
             UsdGenCurveBuffer &buf = node.buffer;
             buf.px = upBuf.px; buf.py = upBuf.py; buf.pz = upBuf.pz;
             buf.rest = upBuf.rest;
@@ -964,13 +963,6 @@ UsdGenRunResult UsdGenScheduler::Run(
         pl.up = hasUp ? &graph.Node(node.input) : nullptr;
         pl.up2 = node.inputs.size() > 1 ? &graph.Node(node.inputs[1]) : nullptr;
         pl.evalAll = job->evalAll;
-        pl.blend = node.desc ? static_cast<float>(node.desc->blend) : 1.0f;
-        pl.blendable = hasUp && op.UsesFrameworkBlendEnvelope() &&
-                       !(node.capture && node.capture->OwnsBuffer()) &&
-                       node.topoFx == UsdGenTopoFx::None;
-        if (node.topoFx != UsdGenTopoFx::None && pl.blend != 1.0f && hasUp)
-            aggregated.Warn("usdGen:blend is ignored on the topology-changing operator '" +
-                            node.desc->path.GetString() + "' (03 §8.5)");
         pl.planes = op.PlanesTouched();
         pl.didEval.assign(node.chunks.size(), 0);
         job->shouldSweep = true;

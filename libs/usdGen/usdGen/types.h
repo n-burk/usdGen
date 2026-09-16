@@ -48,9 +48,6 @@ inline bool operator!=(UsdGenEpoch const &a, UsdGenEpoch const &b)
 // Enumerations
 // ---------------------------------------------------------------------------
 
-/// S25 rest/tail classification. `Inherit` <=> authored token `usdGen:space = "auto"`
-/// (R9); it resolves to the operator type's own `UsdGenOp::Space()`.
-enum class UsdGenSpace : uint8_t { Inherit, Rest, Deformed };
 
 /// R14 static topology effect. `CurveCount` is the plan's `MayChangeCurveCount`.
 enum class UsdGenTopoFx : uint8_t { None, CurveCount, CvCount, Both };
@@ -58,8 +55,6 @@ enum class UsdGenTopoFx : uint8_t { None, CurveCount, CvCount, Both };
 /// I3 reference lane: un-chunked buffers evaluated to completion before consumers.
 enum class UsdGenRole : uint8_t { Curves, Reference };
 
-/// S26 read phase. `Preceding` is a v1 alias for `Final` (R9).
-enum class UsdGenReadPhase : uint8_t { Base, Preceding, Final, Explicit };
 
 /// UsdGenDirtyBits — unscoped integer constants (ADR §9 R3: never written
 /// `UsdGenDirtyBits::X`). Mapping from 02-schema.md §2.1 dirty classes:
@@ -143,9 +138,6 @@ inline int ComputeNumTiles(int nChunks, int tileTarget = kUsdGenTileTargetDefaul
     return std::min(nChunks, n);
 }
 
-/// Density decimation predicate (R12/R13, 02 §2.3.1). kSaltDensity != 0 so the
-/// surviving set is never {hairId < keepFraction}.
-bool KeepCurve(uint64_t curveId, float keepFraction);
 
 }  // namespace usdGen
 

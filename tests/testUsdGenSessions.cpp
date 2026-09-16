@@ -120,7 +120,6 @@ UsdGenGraphDesc MakeDoubleGraph(int NX = 50, int NY = 5)
         n.path = SdfPath("/groom/" + name);
         n.type = type;
         n.enabled = true;
-        n.blend = 1.0f;
         n.seed = seed;
         if (!input.empty()) n.inputs.push_back(SdfPath("/groom/" + input));
         if (type == TfToken("UsdGenScatter"))
@@ -271,7 +270,7 @@ int main()
     Check(failureSession.Commit(3, UsdGenCommitReason::SetTime) == previous,
           "rejected descriptor stays structural-dirty on retry");
 
-    UsdGenOpRegistry::Get().Register(TfToken("UsdGenFailingCaptureTest"), 0,
+    UsdGenOpRegistry::Get().Register(TfToken("UsdGenFailingCaptureTest"),
         [] { return std::make_unique<FailingCaptureOp>(); });
     rejected = desc;
     UsdGenNodeDesc failing;

@@ -80,7 +80,6 @@ struct UsdGenCurveBuffer
     VtVec2fArray rootUV;              // == primvars:skinprimuv, and the "st" primvar
     VtVec3fArray rootT, rootN, rootB; // rest root frame, 36 B/curve
     VtIntArray   cvOffsets;           // size totalCurves+1; present iff any chunk is ragged
-    VtFloatArray curveMask;           // resolved per-curve mask for the owning node
     std::vector<UsdGenPlane> extraCurve;  // clumpId_<level>, guideIndex, guideWeight
 
     // ---- geometry ------------------------------------------------------------------
@@ -412,7 +411,6 @@ struct UsdGenChunkView
     const int   *cvOffsets;                  // null on the uniform fast path
     const GfVec2f *rootUV;
     const GfVec3f *rootT, *rootN, *rootB;
-    const float *curveMask;                  // resolved once at capture; may be null == 1.0
     const float *rampLut;                    // 257 entries over hairT, or null
     // Extra planes this node declared in OutputPrimvars(), bound by slot at compile.
     // Per-curve slots have curveCount * arity entries; per-CV slots curveCount * cvCount.
@@ -454,7 +452,6 @@ struct UsdGenReferenceSet
 {
     UsdGenCurveBuffer buffer;                 // evaluated in full, never chunk-dirty
     VtFloatArray      localX, localY, localZ; // root-local offsets, refreshed per frame
-    VtFloatArray      guideBlend;             // per-guide usdGen:blend, XGen range of influence
     uint64_t          generation = 0;
 };
 
@@ -499,7 +496,7 @@ struct UsdGenTilePublication
     // name predates publication of per-CV extra planes.
     std::vector<UsdGenPlane> extraUniform;
 
-    // Motion profile P1 only (usdGen:motion:mode = "velocities"); empty otherwise,
+    // Motion profile P1 only (post-M1); empty otherwise,
     // and the primvar is BLOCKED (HdBlockDataSource) in P0/P2.
     VtVec3fArray  velocities;
 
@@ -513,7 +510,7 @@ struct UsdGenTilePublication
     TfToken       visibility;                 // inherited by hand from the description
     SdfPath       materialPath;               // description's Material
     TfToken       materialPurpose = TfToken("allPurpose"); // the empty-token container child
-    SdfPath       primOrigin;                 // pickTarget-dependent; absolute outside prototypes
+    SdfPath       primOrigin;                 // the description prim; absolute outside prototypes
     SdfPath       dependencySurface;          // __dependencies: dependedOnPrimPath
 };
 

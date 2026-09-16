@@ -77,6 +77,8 @@
 //     HdxOitRenderTask, taskController.cpp:331-336).
 //
 
+#import ./usdGenFurScattering.glslfx
+
 -- configuration
 {
     "techniques": {
@@ -93,7 +95,7 @@
     "parameters": {
         "rootColor": {
             "default": [0.035, 0.018, 0.008],
-            "documentation": "Linear albedo at the root of the strand."
+            "documentation": "Linear albedo at the root of the strand. Used only when the prim carries no displayColor primvar; on a usdGen tile the baked per-curve displayColor takes this slot."
         },
         "tipColor": {
             "default": [0.210, 0.115, 0.045],
@@ -105,22 +107,22 @@
         },
         "diffuseGain": {
             "default": 0.55,
-            "documentation": "Weight of the Kajiya-Kay diffuse (sin(T,L)) lobe."
+            "documentation": "Reflectance of the Kajiya-Kay diffuse (sin(T,L)) lobe, as a fraction of the strand albedo. Also scales the dome-light irradiance, so the coat responds to a key light and an environment by the same amount."
         },
         "diffuseWrap": {
             "default": 0.35,
             "documentation": "0 = hard terminator, 1 = fully wrapped diffuse. Fakes multiple scattering in dense fur."
         },
         "specular1Gain": {
-            "default": 0.30,
-            "documentation": "Weight of the primary (R) highlight. White/uncoloured."
+            "default": 0.09,
+            "documentation": "PEAK reflectance of the primary (R) highlight, white/uncoloured. The lobe is a unit-peak Gaussian, so this value is the highlight's brightness against the light colour; keep the two specular gains plus diffuseGain at or below 1."
         },
         "specular1Color": {
             "default": [1.0, 1.0, 1.0],
             "documentation": "Tint of the primary (R) highlight."
         },
         "specular1Width": {
-            "default": 0.075,
+            "default": 0.120,
             "documentation": "Angular width of the R lobe, in longitudinal-angle units. Smaller = tighter."
         },
         "specular1Shift": {
@@ -128,15 +130,15 @@
             "documentation": "Longitudinal shift of the R lobe towards the root (radians-ish). Marschner alpha_R."
         },
         "specular2Gain": {
-            "default": 0.16,
-            "documentation": "Weight of the secondary (TRT) highlight, tinted by the strand colour."
+            "default": 0.05,
+            "documentation": "PEAK reflectance of the secondary (TRT) highlight, tinted by the strand albedo. Same unit-peak convention as specular1Gain."
         },
         "specular2Color": {
             "default": [1.0, 1.0, 1.0],
             "documentation": "Extra tint on the TRT lobe. Multiplied by the strand albedo."
         },
         "specular2Width": {
-            "default": 0.22,
+            "default": 0.300,
             "documentation": "Angular width of the TRT lobe. Should be wider than specular1Width."
         },
         "specular2Shift": {
@@ -166,6 +168,10 @@
         "randomValue": {
             "default": 0.0,
             "documentation": "Per-curve brightness jitter amount, driven by the hairId primvar."
+        },
+        "selfOcclusion": {
+            "default": 0.5,
+            "documentation": "Optical-depth multiplier for geometry-derived fur self-shadowing: 0 disables, 0.5 uses the baked density, 1 doubles extinction. furTauP/furTauN hold world-axis depths; optional furTipTauP/furTipTauN enable instanced root/tip interpolation. Without density primvars, use the legacy hairT canopy approximation."
         }
     },
 
@@ -177,6 +183,10 @@
     },
 
     "attributes": {
+        "furTauP": {"type": "vec3", "default": [0.0, 0.0, 0.0]},
+        "furTauN": {"type": "vec3", "default": [0.0, 0.0, 0.0]},
+        "furTipTauP": {"type": "vec3", "default": [0.0, 0.0, 0.0]},
+        "furTipTauN": {"type": "vec3", "default": [0.0, 0.0, 0.0]},
         "hairT": {
             "type": "float",
             "default": 0.0,
@@ -210,9 +220,10 @@
 // We deliberately do NOT "#import $TOOLS/hdSt/shaders/surfaceHelpers.glslfx"
 // (which is how previewSurface.glslfx gets PI); the import is resolved through
 // HioGlslfx's plugin resource registry (pxr/imaging/hio/glslfx.cpp:120-149,
-// 157-160) and adds a failure mode for no benefit here. We use our own
-// prefixed constant instead so we can never collide with hdSt's `#define PI`
-// (surfaceHelpers.glslfx:15) or domeLight.glslfx's `const float PI`.
+// 157-160) and adds a failure mode for no benefit here.
+// Nothing below needs a PI constant, so nothing is imported and nothing can
+// collide with hdSt's `#define PI` (surfaceHelpers.glslfx:15) or
+// domeLight.glslfx's `const float PI`.
 //
 // LightSource, GetLightCount(), GetLightSource(i), lightDistanceAttenuation(),
 // lightSpotAttenuation() and shadowing() come from
@@ -223,8 +234,6 @@
 // and the material network shader is appended last
 // (HdSt_DrawBatch::GetComposedShaders, pxr/imaging/hdSt/drawBatch.cpp:446);
 // codeGen concatenates them in that order into _genFS (codeGen.cpp:2513-2538).
-
-#define UGH_PI 3.14159265358979
 
 struct HairSample
 {
@@ -267,6 +276,13 @@ struct HairSample
 
 vec3 UsdGenHairTangent(vec3 P, vec3 N, float v)
 {
+#ifdef HD_HAS_hairT
+    // The gradient of root-to-tip coordinates follows transformed instances.
+    // Unlike an object-space tangent, this is valid on rotated prototypes.
+    float tx = dFdx(HdGet_hairT()), ty = dFdy(HdGet_hairT());
+    vec3 dt = dFdx(P)*tx + dFdy(P)*ty;
+    if (dot(dt,dt) > 1e-12) return normalize(dt);
+#endif
 #ifdef HD_HAS_hairTangent
     // HdGet_transform() is a CONSTANT primvar accessor; codeGen emits constant
     // primvar accessors into _genAccessors (codeGen.cpp:5243-5300, written to
@@ -312,186 +328,4 @@ vec3 UsdGenHairTangent(vec3 P, vec3 N, float v)
     // Last resort: any direction perpendicular to N.
     vec3 up = (abs(N.z) > 0.99) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
     return normalize(cross(N, up));
-}
-
---- --------------------------------------------------------------------------
--- glsl UsdGenHair.Lobes
-
-// Kajiya-Kay diffuse: the strand integrates the cosine lobe around its
-// circumference, which reduces to sin(angle(T,L)) = sqrt(1 - dot(T,L)^2).
-// "wrap" pushes energy past the terminator, faking the multiple scattering
-// that dominates the look of dense light fur.
-float UsdGenHairDiffuse(vec3 T, vec3 L, float wrap)
-{
-    float TdotL = clamp(dot(T, L), -1.0, 1.0);
-    float s = sqrt(max(0.0, 1.0 - TdotL * TdotL));
-    // Wrap on the cosine-with-the-tube-normal sense, cheaply approximated by
-    // remapping sin() which is already >= 0.
-    return clamp((s + wrap) / (1.0 + wrap), 0.0, 1.0);
-}
-
-// Marschner-lite longitudinal lobe. theta_h is the half-angle between the
-// light and eye longitudinal angles measured from the normal plane of the
-// strand; the lobe is a normalized Gaussian in theta_h shifted by `shift`.
-// (Cheaper and better behaved than Kajiya-Kay's pow(sin,e); it is the same
-// approximation used by Scheuermann-style real-time hair.)
-float UsdGenHairSpecular(vec3 T, vec3 L, vec3 E, float shift, float width)
-{
-    float sinThetaL = clamp(dot(T, L), -1.0, 1.0);
-    float sinThetaE = clamp(dot(T, E), -1.0, 1.0);
-    float thetaH = 0.5 * (asin(sinThetaL) + asin(sinThetaE)) - shift;
-    float w = max(width, 1e-3);
-    float g = exp(-(thetaH * thetaH) / (2.0 * w * w));
-    // Azimuthal falloff so the lobe wraps the tube instead of ringing the
-    // whole strand; cheap cosine of the azimuthal half-angle.
-    vec3 Lp = normalize(L - T * sinThetaL);
-    vec3 Ep = normalize(E - T * sinThetaE);
-    float phi = max(0.0, dot(Lp, Ep));
-    return g * mix(1.0, phi, 0.5) / (sqrt(2.0 * UGH_PI) * w);
-}
-
-// Cheap forward scattering (TT): strongest when the light is directly behind
-// the strand relative to the eye.
-float UsdGenHairTransmission(vec3 T, vec3 L, vec3 E)
-{
-    vec3 Lp = normalize(L - T * dot(T, L));
-    vec3 Ep = normalize(E - T * dot(T, E));
-    float back = max(0.0, -dot(Lp, Ep));
-    return back * back * back;
-}
-
-vec3 UsdGenHairHueShift(vec3 c, float amount)
-{
-    // Cheap YIQ-free hue rotation around the luminance axis.
-    const vec3 k = vec3(0.57735);
-    float ca = cos(amount * 6.2831853);
-    float sa = sin(amount * 6.2831853);
-    return c * ca + cross(k, c) * sa + k * dot(k, c) * (1.0 - ca);
-}
-
---- --------------------------------------------------------------------------
--- glsl UsdGenHair.Surface
-
-vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
-{
-    // ---------------------------------------------------------------- geometry
-    vec3 P = Peye.xyz / Peye.w;
-    vec3 N = normalize(Neye);
-    vec3 E = normalize(-P);
-    float v = patchCoord.y;          // ACROSS the strand width, see header note
-    float t = UsdGenHair_GetHairT();  // root(0) -> tip(1)
-
-    vec3 T = UsdGenHairTangent(P, N, v);
-    // Keep N perpendicular to T so the lobes stay orthonormal.
-    N = normalize(N - T * dot(N, T));
-
-    // ---------------------------------------------------------------- albedo
-    float ramp = pow(clamp(t, 0.0, 1.0), max(HdGet_colorRamp(), 1e-3));
-    vec3 albedo = mix(HdGet_rootColor().rgb, HdGet_tipColor().rgb, ramp);
-
-    // Per-curve colour: `color` already carries displayColor/displayOpacity
-    // when those primvars exist (basisCurves.glslfx:1282-1288 for the patch
-    // repr, :1231-1236 for wire). We tint by it rather than replace, so a
-    // uniform displayColor authored per curve modulates the ramp.
-#ifdef HD_HAS_displayColor
-    albedo *= color.rgb;
-#endif
-
-    // Scalp colour map (unconnected -> the white fallback declared above).
-    albedo *= HdGet_rootColorMap().rgb;
-
-    // Per-curve jitter.
-    float seed = UsdGenHair_GetHairId();
-    if (HdGet_randomHue() > 0.0) {
-        albedo = UsdGenHairHueShift(
-            albedo, (fract(seed * 17.0) - 0.5) * HdGet_randomHue());
-    }
-    albedo *= 1.0 + (fract(seed * 41.0) - 0.5) * 2.0 * HdGet_randomValue();
-    albedo = max(albedo, vec3(0.0));
-
-    // ---------------------------------------------------------------- shading
-    vec3 direct = vec3(0.0);
-    vec3 spec1Tint = HdGet_specular1Color().rgb * HdGet_specular1Gain();
-    vec3 spec2Tint = HdGet_specular2Color().rgb * HdGet_specular2Gain() * albedo;
-    vec3 ttTint    = HdGet_transmissionColor().rgb * HdGet_transmissionGain()
-                     * albedo;
-
-#if NUM_LIGHTS > 0
-    for (int i = 0; i < GetLightCount(); ++i) {
-        LightSource light = GetLightSource(i);
-
-        vec4 Plight = light.isIndirectLight ? vec4(0.0, 0.0, 0.0, 1.0)
-                                            : light.position;
-        vec3 L = (Plight.w == 0.0) ? normalize(Plight.xyz)
-                                   : normalize(Plight - Peye).xyz;
-
-        float atten  = lightDistanceAttenuation(Peye, i);
-        float spot   = lightSpotAttenuation(L, i);
-        float shadow = 1.0;
-#if USE_SHADOWS
-        // shadowing(lightIndex, Peye) -- glf/shaders/simpleLighting.glslfx:273.
-        // USE_SHADOWS is #defined to 1 by that same file (:379-381), which is
-        // emitted into the fragment translation unit before this material.
-        shadow = (light.hasShadow && !light.isIndirectLight)
-                    ? shadowing(i, Peye)
-                    : 1.0;
-#endif
-        float intensity = atten * spot * shadow;
-        if (intensity <= 0.0) {
-            continue;
-        }
-
-        vec3 Ldiff = light.diffuse.rgb  * intensity;
-        vec3 Lspec = light.specular.rgb * intensity;
-
-        direct += albedo * HdGet_diffuseGain() *
-                  UsdGenHairDiffuse(T, L, HdGet_diffuseWrap()) * Ldiff;
-
-        direct += spec1Tint * Lspec *
-                  UsdGenHairSpecular(T, L, E,
-                                     HdGet_specular1Shift(),
-                                     HdGet_specular1Width());
-
-        direct += spec2Tint * Lspec *
-                  UsdGenHairSpecular(T, L, E,
-                                     HdGet_specular2Shift(),
-                                     HdGet_specular2Width());
-
-        direct += ttTint * Ldiff * UsdGenHairTransmission(T, L, E);
-    }
-#endif
-
-    // Ambient / dome-light approximation. The dome-light irradiance texture is
-    // only bound when a simple dome light is present; guard it exactly the way
-    // previewSurface.glslfx does (usdShaders/shaders/previewSurface.glslfx:347).
-    vec3 ambient = vec3(0.0);
-#if defined(HD_HAS_domeLightIrradiance) && NUM_LIGHTS > 0
-    // GetDomeLightTransform() is private to previewSurface.glslfx
-    // (usdShaders/shaders/previewSurface.glslfx:297-303) so we inline it:
-    // worldToLightTransform is a member of LightSource
-    // (glf/shaders/simpleLighting.glslfx:110, filled at :173-174).
-    for (int i = 0; i < GetLightCount(); ++i) {
-        LightSource dl = GetLightSource(i);
-        if (!dl.isIndirectLight) {
-            continue;
-        }
-        mat4 domeXf = mat4(dl.worldToLightTransform *
-                           GetWorldToViewInverseMatrix());
-        // Hair scatters roughly isotropically around the strand; sampling the
-        // irradiance map along the tube normal is a reasonable cheap stand-in.
-        vec3 dir = normalize((domeXf * vec4(N, 0.0)).xyz);
-        ambient += albedo * HdGet_domeLightIrradiance(dir).rgb;
-    }
-#endif
-
-    // ---------------------------------------------------------------- alpha
-    float alpha = HdGet_opacity();
-#ifdef HD_HAS_displayOpacity
-    alpha *= color.a;
-#endif
-    // Soft round edge across the strip: 1 in the middle, 0 at the silhouette.
-    float edge = 1.0 - abs(v * 2.0 - 1.0);
-    alpha *= mix(1.0, clamp(edge * 2.0, 0.0, 1.0), HdGet_widthFalloff());
-
-    return vec4(direct + ambient, clamp(alpha, 0.0, 1.0));
 }

@@ -680,14 +680,12 @@ void TestImageMapReloadStagesNewCowGeneration()
     auto session = NewSession();
     auto desc = MakeDesc(.08f);
     UsdGenMapDesc map;
-    map.path = SdfPath("/asyncImaging/imageMask");
+    map.path = SdfPath("/asyncImaging/imageMap");
     map.type = TfToken("UsdGenImageMap");
     map.resolvedAssetPath = std::string(USDGEN_TEST_SOURCE_DIR) +
         "/tests/golden/stormLook_A.png";
     desc.maps.push_back(map);
-    desc.nodes.back().mapBindings.push_back({map.path,
-        UsdGenMapBindingPurpose::MaskSource,
-        TfToken("usdGen:mask:source")});
+    desc.nodes.back().mapBindings.push_back({map.path, TfToken("usdGen:map")});
 
     std::atomic<bool> firstDone{false};
     std::atomic<bool> firstPublished{false};
@@ -747,7 +745,7 @@ void TestImageMapReloadStagesNewCowGeneration()
 
 int main()
 {
-    UsdGenOpRegistry::Get().Register(TfToken("UsdGenImagingBatchHold"), 0,
+    UsdGenOpRegistry::Get().Register(TfToken("UsdGenImagingBatchHold"),
         [] { return std::make_unique<BatchHoldOp>(); });
     TestPairedConcurrentRequests();
     TestDevicePublicationRequestRelay();

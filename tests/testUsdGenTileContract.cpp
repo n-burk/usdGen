@@ -38,6 +38,8 @@
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceTypeDefs.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
+#include "pxr/imaging/hd/basisCurvesSchema.h"
+#include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
@@ -119,7 +121,6 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
     d.purpose = TfToken("render");
     d.visibility = TfToken("invisible");
     d.materialPath = descPath.AppendChild(TfToken("look")).AppendChild(TfToken("material"));
-    d.pickTarget = TfToken("description");
     d.time = 0.0;
 
     UsdGenCurveSetDesc guides;
@@ -163,7 +164,6 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
     scatter.path = descPath.AppendChild(TfToken("scatter"));
     scatter.type = TfToken("UsdGenScatter");
     scatter.enabled = true;
-    scatter.blend = 1.0f;
     scatter.seed = 11;
     scatter.surfaces.push_back(surf.path);
     scatter.params.push_back(UsdGenParamValue{TfToken("flip"), VtValue(false), false});
@@ -173,7 +173,6 @@ UsdGenGraphDesc MakeGroomDesc(SdfPath const &descPath, float width = 0.02f)
     grow.path = descPath.AppendChild(TfToken("grow"));
     grow.type = TfToken("UsdGenGrow");
     grow.enabled = true;
-    grow.blend = 1.0f;
     grow.seed = 7;
     grow.inputs = { descPath.AppendChild(TfToken("scatter")) };   // scatter's roots
     grow.params.push_back(UsdGenParamValue{TfToken("segments"), VtValue(8), false});
@@ -318,7 +317,7 @@ void CheckPartitionBoundaries()
 int main()
 {
     usdGenRegisterM1Operators();
-    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestGuideIndexWriter"), 0,
+    Check(UsdGenOpRegistry::Get().Register(TfToken("UsdGenTestGuideIndexWriter"),
               [] { return std::make_unique<GuideIndexWriter>(); }),
           "registers typed extra-plane publication writer");
     CheckPartitionBoundaries();
@@ -410,7 +409,8 @@ int main()
     Check(vertexSizes, "vertex primvars sized points on every tile");
     Check(typedExtras, "typed extra-plane publication preserves int arity-3 metadata and payload");
     Check(bases, "curve basis == usdGen:curve:basis (bspline) on every tile");
-    Check(refines, "refineLevel == 2 (S-9 tier table) on every tile");
+    Check(refines, "published refineLevel == 2 on every tile (the FALLBACK "
+                   "underlay; an upstream displayStyle opinion wins, C2)");
     Check(extents, "extent/min|max == min|max over tile points (exact per frame)");
     Check(paths, "tile primPaths == <desc>/__usdGenRender/tile_NNNN (4-digit)");
     Check(xforms, "identity xform matrix (rest-only graph)");
@@ -436,33 +436,41 @@ int main()
                 Check(names.count(req) != 0,
                       std::string("C2 child '") + req + "' published");
             }
-            if (HdContainerDataSourceHandle topo = HdContainerDataSource::Cast(
-                    c->Get(TfToken("basisCurves")))) {
-                // C2 (docs/freezes/C2.md:20-23): Hydra nests topology ONE
-                // level down — basisCurves/topology/curveVertexCounts, with
-                // type/basis/wrap as SIBLINGS of the topology container
-                // (hd/basisCurvesSchema.h:38). A flat layout serves Storm no
-                // topology and the prim is silently dropped (2026-09-12:
-                // 49 published tiles, itemsDrawn == 1).
-                std::set<std::string> tn = ChildNames(topo);
-                for (char const *req : { "topology", "type", "basis", "wrap" }) {
-                    Check(tn.count(req) != 0,
-                          std::string("basisCurves child '") + req + "' published");
+            if (HdContainerDataSourceHandle basisCurves =
+                    HdContainerDataSource::Cast(c->Get(TfToken("basisCurves")))) {
+                // C2 (docs/freezes/C2.md:20-23): Hydra reads curveVertexCounts
+                // AND type/basis/wrap from inside basisCurves/topology
+                // (hd/basisCurvesTopologySchema.h:35-42). Authoring any of
+                // them as a direct child of `basisCurves` is invisible to
+                // Hydra, which then falls back to type = linear / basis =
+                // bezier / wrap = nonperiodic
+                // (hd/sceneIndexAdapterSceneDelegate.cpp:865-911) and the
+                // tile can never render as a smooth cubic curve.
+                std::set<std::string> bcn = ChildNames(basisCurves);
+                Check(bcn.count("topology") != 0,
+                      "basisCurves/topology container published (Hd nesting, C2)");
+                for (char const *forbidden : { "type", "basis", "wrap" }) {
+                    Check(bcn.count(forbidden) == 0,
+                          std::string("'") + forbidden + "' is NOT a direct "
+                          "child of basisCurves (Hydra never reads it there)");
                 }
-                Check(LeafIsToken(LeafValue(topo->Get(TfToken("type"))), "cubic"),
-                      "basisCurves type == cubic (contract constant, C2)");
-                Check(LeafIsToken(LeafValue(topo->Get(TfToken("wrap"))), "pinned"),
-                      "basisCurves wrap == pinned (contract constant, C2)");
-                Check(LeafIsToken(LeafValue(topo->Get(TfToken("basis"))), "bspline"),
-                      "basisCurves basis == usdGen:curve:basis (bspline)");
-                if (HdContainerDataSourceHandle inner =
-                        HdContainerDataSource::Cast(topo->Get(TfToken("topology")))) {
-                    Check(ChildNames(inner).count("curveVertexCounts") != 0,
-                          "basisCurves/topology/curveVertexCounts published");
-                } else {
-                    Check(false,
-                          "basisCurves/topology container published (Hd nesting, C2)");
-                }
+                HdBasisCurvesTopologySchema topo =
+                    HdBasisCurvesSchema::GetFromParent(c).GetTopology();
+                Check(topo.IsDefined(),
+                      "HdBasisCurvesSchema::GetTopology() resolves");
+                Check(topo.GetType() &&
+                          topo.GetType()->GetTypedValue(0) == HdTokens->cubic,
+                      "basisCurves/topology/type == cubic (contract constant, C2)");
+                Check(topo.GetWrap() &&
+                          topo.GetWrap()->GetTypedValue(0) == HdTokens->pinned,
+                      "basisCurves/topology/wrap == pinned (contract constant, C2)");
+                Check(topo.GetBasis() &&
+                          topo.GetBasis()->GetTypedValue(0) == HdTokens->bspline,
+                      "basisCurves/topology/basis == usdGen:curve:basis (bspline)");
+                Check(bool(topo.GetCurveVertexCounts()),
+                      "basisCurves/topology/curveVertexCounts published");
+                Check(!topo.GetCurveIndices(),
+                      "basisCurves/topology/curveIndices NEVER published (C2)");
             } else {
                 Check(false, "basisCurves container published");
             }
@@ -485,8 +493,16 @@ int main()
             }
             if (HdContainerDataSourceHandle style = HdContainerDataSource::Cast(
                     c->Get(TfToken("displayStyle")))) {
+                // C2: the publisher's refineLevel is the UNDERLAY only.
+                // UsdGenGroomSceneIndex::GetPrim overlays the owning
+                // Description's upstream displayStyle on top of it, so the
+                // usdview complexity slider (pushed as
+                // SetRefineLevelFallback -> every stage prim) wins 0..3
+                // exactly as it does for a native BasisCurves. What the
+                // publisher alone emits is the no-opinion fallback.
                 Check(LeafIsInt(LeafValue(style->Get(TfToken("refineLevel"))), 2),
-                      "displayStyle/refineLevel == 2 (C2, no M1 tumble tier)");
+                      "displayStyle/refineLevel == 2 when no host opinion "
+                      "exists (published fallback, C2)");
             }
             // The app-facing literal "allPurpose" is normalized to Hydra's
             // empty-token default child, whose value is a binding schema.
@@ -496,6 +512,40 @@ int main()
             Check(bindings.IsDefined() && materialPath &&
                       materialPath->GetTypedValue(0) == pub.materialPath,
                   "materialBindings default empty-token child carries path");
+            {
+                // Previously untested branch: with NO authored material the
+                // tile used to carry no materialBindings at all, so Storm
+                // fell back to flat displayColor shading and the hair lobes
+                // never ran. It now binds the synthetic default material in
+                // the 06 §4.4 material_storm slot.
+                UsdGenTilePublication unbound = pub;
+                unbound.materialPath = SdfPath();
+                unbound.materialPurpose = TfToken();
+                HdContainerDataSourceHandle cu =
+                    UsdGenTilePublisher::BuildTileDataSource(unbound);
+                HdMaterialBindingsSchema unboundBindings =
+                    HdMaterialBindingsSchema::GetFromParent(cu);
+                auto unboundPath = unboundBindings.GetMaterialBinding().GetPath();
+                SdfPath const expected =
+                    UsdGenTilePublisher::MaterialPath(descPath);
+                Check(unboundBindings.IsDefined() && unboundPath &&
+                          unboundPath->GetTypedValue(0) == expected,
+                      "unbound tile binds <desc>/__usdGenRender/material_storm");
+                Check(UsdGenTilePublisher::DefaultMaterialPath(unbound.primPath)
+                          == expected,
+                      "DefaultMaterialPath(tile) == MaterialPath(description)");
+                Check(bool(UsdGenTilePublisher::BuildDefaultMaterialDataSource()),
+                      "synthetic default material data source builds");
+            }
+            if (HdContainerDataSourceHandle primvars = HdContainerDataSource::Cast(
+                    c->Get(TfToken("primvars")))) {
+                HdContainerDataSourceHandle msw = HdContainerDataSource::Cast(
+                    primvars->Get(TfToken("minScreenSpaceWidths")));
+                Check(bool(msw) &&
+                          LeafIsToken(LeafValue(msw->Get(TfToken("interpolation"))),
+                                      "constant"),
+                      "primvars/minScreenSpaceWidths is constant (C2:35)");
+            }
             HdVisibilitySchema visibility = HdVisibilitySchema::GetFromParent(c);
             Check(visibility.IsDefined() && visibility.GetVisibility() &&
                       visibility.GetVisibility()->GetTypedValue(0) ==

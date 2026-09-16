@@ -4,7 +4,7 @@
 #include "usdGen/opRegistry.h"
 #include "usdGen/curveBuffer.h"
 #include "usdGenMath/usdGenMath/kernels.h"
-#include "usdGen/maskParams.h"
+#include "usdGen/opParams.h"
 
 #include "pxr/pxr.h"
 #include "pxr/base/tf/diagnostic.h"
@@ -150,12 +150,7 @@ UsdGenCurveSourceOp::UsdGenCurveSourceOp()
    topologyParameters_.push_back(TfToken("staleAction"));
    topologyParameters_.push_back(TfToken("expectEpoch"));
    topologyParameters_.push_back(TfToken("rebind"));
-   topologyParameters_.push_back(TfToken("lane"));
-   auto topologyMask = UsdGenMaskTopologyParams();
-   topologyParameters_.insert(topologyParameters_.end(),
-                              topologyMask.begin(), topologyMask.end());
-   auto valueMask = UsdGenMaskValueParams();
-   valueParameters_.insert(valueParameters_.end(), valueMask.begin(), valueMask.end());
+   // CurveSource is a generator: no upstream curves to leave untouched, no mask.
 }
 
 UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
@@ -250,8 +245,6 @@ UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) 
          feed("rootFrame", found->rootFrame.size());
          for (GfMatrix4d const &frame : found->rootFrame)
             bytes(&frame[0][0], 16 * sizeof(double));
-         feed("guideBlend", found->guideBlend.size());
-         if (!found->guideBlend.empty()) bytes(found->guideBlend.cdata(), found->guideBlend.size() * sizeof(float));
          feed("authoredPlanes", found->authoredPlanes.size());
          for (UsdGenAuthoredPlaneDesc const &plane : found->authoredPlanes) {
             std::string const name = plane.name.GetString();
