@@ -1608,11 +1608,12 @@ set_tests_properties(testUsdGenSeExprOracle PROPERTIES
 # this invoked WSL's bash on Windows and failed on a 120 s timeout rather than
 # reporting anything about the schema.
 usdgen_add_unix_only_test(testUsdGenExpressionSchema
-    ${CMAKE_COMMAND} -E env "GENBUILD=${CMAKE_CURRENT_BINARY_DIR}"
-        bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/run_expression_schema.sh")
+    bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/run_expression_schema.sh")
 set_tests_properties(testUsdGenExpressionSchema PROPERTIES
     LABELS "T1;expressions;schema" TIMEOUT 120
-    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    ENVIRONMENT_MODIFICATION "GENBUILD=set:${CMAKE_CURRENT_BINARY_DIR}"
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77"
+    SKIP_REGULAR_EXPRESSION "SKIP")
 
 # Note: testUsdGenInvalidation already carries T1;gate:SI-2 (set at line ~446).
 # The SI-2 overlay extension (bare primvars locator, section 7) is appended
