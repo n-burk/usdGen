@@ -54,38 +54,21 @@ bool ReadFloat(UsdGenParamValue const &param, float *value) {
     return IsFinite(*value);
 }
 
+// C1 rework: mask survives as one scalar `usdGen:mask` attribute per operator.
+// Vulkan admits only the neutral value; a muted operator would alias its
+// input, which the shader lanes express as their own envelope path instead.
 bool IsIdentityMask(UsdGenParamValue const &param) {
-    auto const &name = param.name.GetString();
-    if (name == "mask:amount") return param.value == VtValue(1.0f);
-    if (name == "mask:invert") return param.value == VtValue(false);
-    if (name == "mask:range") return param.value == VtValue(GfVec2f(0, 1));
-    if (name == "mask:rangeMode") return param.value == VtValue(TfToken("normalized"));
-    if (name == "mask:combine") return param.value == VtValue(TfToken("multiply"));
-    if (name == "mask:random") return param.value == VtValue(0.0f);
-    if (name == "mask:randomSeed") return param.value == VtValue(0);
-    if (name == "mask:ramp:knots")
-        return param.value == VtValue(VtVec2fArray{GfVec2f(0, 1), GfVec2f(1, 1)});
-    if (name == "mask:ramp:interpolation") return param.value == VtValue(TfToken("catmullRom"));
-    if (name == "mask:rangeMin") return param.value == VtValue(0.0f);
-    if (name == "mask:rangeMax") return param.value == VtValue(1.0f);
-    if (name == "mask:effectPosition" || name == "mask:falloff" ||
-        name == "mask:influenceWidth" || name == "mask:noise:gain" ||
-        name == "mask:noise:bias") return param.value == VtValue(.5f);
-    if (name == "mask:noise:amount") return param.value == VtValue(0.0f);
-    if (name == "mask:noise:frequency") return param.value == VtValue(1.0f);
-    if (name == "mask:noise:seed") return param.value == VtValue(0);
-    return false;
+    return param.name == TfToken("mask") && param.value == VtValue(1.0f);
 }
 
 bool ValidateSource(UsdGenGraphDesc const &desc, UsdGenNodeDesc const &node,
                     UsdGenCurveSetDesc const **source, VulkanSourceControls *controls,
                     UsdGenDiagnostics *diagnostics) {
-    if (!node.enabled || node.blend != 1.0f || node.algorithmVersion != 0 ||
-        !node.mode.IsEmpty() || !node.space.IsEmpty() || !node.readPhase.IsEmpty() ||
+    if (!node.enabled || !node.mode.IsEmpty() ||
         !node.inputs.empty() || !node.references.empty() ||
         !node.maps.empty() || !node.mapBindings.empty() ||
         !node.expressionBindings.empty() || !node.ramps.empty())
-        return Fail(diagnostics, "CurveSource has unsupported enabled/blend/version/input configuration");
+        return Fail(diagnostics, "CurveSource has unsupported enabled/input configuration");
     if (node.curves.size() != 1) return Fail(diagnostics, "CurveSource requires exactly one C3 curve target");
     auto found = std::find_if(desc.curveSets.begin(), desc.curveSets.end(), [&](auto const &item) {
         return item.path == node.curves.front();
@@ -123,8 +106,7 @@ bool ValidateSource(UsdGenGraphDesc const &desc, UsdGenNodeDesc const &node,
         return Fail(diagnostics, "C3 source must be cubic bspline pinned vertex-width data");
     if ((found->curveVertexCounts.empty() != found->points.empty()) ||
         (!found->rest.empty() && found->rest.size() != found->points.size()) ||
-        (!found->widths.empty() && found->widths.size() != found->points.size()) ||
-        !found->guideBlend.empty())
+        (!found->widths.empty() && found->widths.size() != found->points.size()))
         return Fail(diagnostics, "C3 source has unsupported topology or binding data");
     uint64_t points = 0;
     std::set<uint64_t> ids;
@@ -206,14 +188,13 @@ bool ValidateSource(UsdGenGraphDesc const &desc, UsdGenNodeDesc const &node,
 
 bool ValidateWidth(UsdGenNodeDesc const &node, VulkanLiteralWidthControls *controls,
                    UsdGenDiagnostics *diagnostics) {
-    // A muted Width aliases its input at execution; parameters still
-    // validate exactly like the enabled form.
-    if (node.blend != 1.0f || node.algorithmVersion != 0 ||
-        !node.mode.IsEmpty() || !node.space.IsEmpty() || !node.readPhase.IsEmpty() ||
+    // Every parameter of an enabled Width validates as the authored literal;
+    // only the neutral `mask` value is admissible on this lane.
+    if (!node.mode.IsEmpty() ||
         !node.references.empty() || !node.curves.empty() ||
         !node.surfaces.empty() || !node.maps.empty() || !node.mapBindings.empty() ||
         !node.expressionBindings.empty() || !node.ramps.empty())
-        return Fail(diagnostics, "Width has unsupported enabled/blend/version/input configuration");
+        return Fail(diagnostics, "Width has unsupported mode/input configuration");
     std::set<TfToken> seen;
     for (auto const &param : node.params) {
         if (!seen.insert(param.name).second) return Fail(diagnostics, "duplicate Width parameter " + param.name.GetString());
@@ -224,39 +205,23 @@ bool ValidateWidth(UsdGenNodeDesc const &node, VulkanLiteralWidthControls *contr
         } else if (name == "replace") {
             if (!param.value.IsHolding<bool>()) return Fail(diagnostics, "Width parameter replace must be bool");
             controls->replace = param.value.UncheckedGet<bool>();
-        } else if (name == "taper") {
-            if (!ReadFloat(param, &controls->profile.taper) || controls->profile.taper < 0 || controls->profile.taper > 1)
-                return Fail(diagnostics, "Width taper must be a finite [0,1] literal");
-        } else if (name == "taperStart") {
-            if (!ReadFloat(param, &controls->profile.taperStart) || controls->profile.taperStart < 0 || controls->profile.taperStart > 1)
-                return Fail(diagnostics, "Width taperStart must be a finite [0,1] literal");
-        } else if (name == "rootScale" || name == "tipScale") {
-            float value; if (!ReadFloat(param, &value) || value < 0)
-                return Fail(diagnostics, "Width rootScale/tipScale must be finite non-negative literals");
-            if (name == "rootScale") controls->profile.rootScale = value;
-            else controls->profile.tipScale = value;
         } else if (name == "width:knots") {
             if (!param.value.IsHolding<VtVec2fArray>() || !param.value.UncheckedGet<VtVec2fArray>().empty())
                 return Fail(diagnostics, "Width ramps are not supported");
         } else if (name == "width:interpolation") {
             if (param.value != VtValue(TfToken("catmullRom"))) return Fail(diagnostics, "Width interpolation must be neutral catmullRom");
-        } else if (name == "label") {
-            if (!param.value.IsHolding<std::string>()) return Fail(diagnostics, "Width label must be string");
         } else if (!IsIdentityMask(param)) return Fail(diagnostics, "unsupported or non-neutral Width parameter " + name);
     }
     return true;
 }
 
 bool ValidateLength(UsdGenNodeDesc const& node, VulkanSourceWidthStage* stage, UsdGenDiagnostics* diagnostics) {
-    // A muted Length aliases its input at execution; parameters still
-    // validate exactly like the enabled form.
-    if (!std::isfinite(node.blend) || node.blend < 0 || node.blend > 1 ||
-        node.algorithmVersion != 0 ||
-        !node.mode.IsEmpty() || !node.space.IsEmpty() || !node.readPhase.IsEmpty() ||
+    // C1 rework removed the node-level mute: `usdGen:mask` is the one
+    // envelope control and it feeds the stage envelope directly.
+    if (!node.mode.IsEmpty() ||
         !node.references.empty() || !node.curves.empty() || !node.surfaces.empty() ||
         !node.maps.empty() || !node.mapBindings.empty() || !node.expressionBindings.empty() || !node.ramps.empty())
         return Fail(diagnostics, "Length requires literal identity-envelope scale, set or cull configuration");
-    stage->lengthBlend = node.blend;
     bool cull = false, set = false;
     for (auto const& param : node.params)
         if (param.name == TfToken("length:mode") && param.value == VtValue(TfToken("cull"))) cull = true;
@@ -292,7 +257,7 @@ bool ValidateLength(UsdGenNodeDesc const& node, VulkanSourceWidthStage* stage, U
             if (!std::isfinite(stage->randomLo) || !std::isfinite(stage->randomHi) ||
                 stage->randomLo < 0 || stage->randomHi < 0)
                 return Fail(diagnostics, "Length random requires finite nonnegative endpoints");
-        } else if (name == "mask:amount") {
+        } else if (name == "mask") {
             if (!ReadFloat(param, &stage->lengthMaskAmount) || stage->lengthMaskAmount < 0 ||
                 stage->lengthMaskAmount > 1)
                 return Fail(diagnostics, "Length mask amount must be a finite [0,1] literal");
@@ -367,9 +332,7 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
         !IsFinite(desc.defaultWidth) || desc.defaultWidth < 0) {
         Fail(diagnostics, "requires a bounded single-source literal Vulkan graph"); return {};
     }
-    if ((!desc.motionMode.IsEmpty() && desc.motionMode != TfToken("single")) ||
-        desc.forwardSurfaceSamples || desc.densityScale != 1.0f ||
-        desc.renderDensityScale != 1.0f || desc.curveBasis != TfToken("bspline")) {
+    if (desc.curveBasis != TfToken("bspline")) {
         Fail(diagnostics, "unsupported motion, density or basis"); return {};
     }
     size_t sourceIndex = desc.nodes.size(), terminalIndex = desc.nodes.size();
@@ -472,15 +435,24 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
             stage.disabled = !node.enabled;
         } else if (node.type == TfToken("UsdGenWidthBlend")) {
             stage.kind = VulkanSourceWidthStage::Kind::WidthBlend;
+            bool paramsOk = true;
+            float weight = 1.0f;
+            for (auto const& param : node.params) {
+                bool const ok = param.name == TfToken("widthBlend:weight") && !param.animated &&
+                    param.value.IsHolding<float>() &&
+                    std::isfinite(param.value.UncheckedGet<float>()) &&
+                    param.value.UncheckedGet<float>() >= 0.0f &&
+                    param.value.UncheckedGet<float>() <= 1.0f;
+                paramsOk = paramsOk && ok;
+                if (ok) weight = param.value.UncheckedGet<float>();
+            }
             if (inputs[ready].size() != 2 || inputs[ready][0] == inputs[ready][1] ||
-                !node.enabled || !std::isfinite(node.blend) || node.blend < 0 || node.blend > 1 ||
-                node.algorithmVersion != 0 || !node.mode.IsEmpty() || !node.space.IsEmpty() ||
-                !node.readPhase.IsEmpty() || !node.params.empty() || !node.ramps.empty() ||
+                !node.enabled || !paramsOk || !node.mode.IsEmpty() || !node.ramps.empty() ||
                 !node.expressionBindings.empty() || !node.references.empty() || !node.curves.empty() ||
                 !node.surfaces.empty() || !node.maps.empty() || !node.mapBindings.empty()) {
                 Fail(diagnostics, "WidthBlend requires two ordered inputs and literal blend"); return {};
             }
-            stage.rightInput = nodeValue[inputs[ready][1]]; stage.blend = node.blend; hasBlend = true;
+            stage.rightInput = nodeValue[inputs[ready][1]]; stage.blend = weight; hasBlend = true;
         } else { Fail(diagnostics, "unsupported Vulkan operator"); return {}; }
         if (stage.kind == VulkanSourceWidthStage::Kind::LengthScale &&
             stage.cullThreshold > 0.0f) {
@@ -508,7 +480,7 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
                 Fail(diagnostics, "expanded Vulkan stage count exceeds 64"); return {};
             }
         } else if (stage.kind == VulkanSourceWidthStage::Kind::LengthCull &&
-                   (stage.lengthBlend != 1.0f || stage.lengthMaskAmount != 1.0f)) {
+                   stage.lengthMaskAmount != 1.0f) {
             // Envelope phase 3 validates/preserves the fixed-topology
             // lineage before the authored topology owner performs culling.
             VulkanSourceWidthStage cull = stage;

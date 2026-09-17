@@ -101,14 +101,14 @@ static VulkanSourceGenerationCreateInfo Fixture(std::shared_ptr<DeviceContext> c
     source.rootT = {{1,0,0},{0,1,0},{0,0,1},{1,1,0}};
     source.rootB = {{0,1,0},{0,0,1},{1,0,0},{0,1,1}};
     source.rootN = {{0,0,1},{1,0,0},{0,1,0},{1,0,1}};
-    source.curveMask = {.1f,.2f,.3f,.4f};
+    UsdGenPlane maskPlane; maskPlane.name = TfToken("curveMask"); maskPlane.interpolation = TfToken("uniform"); maskPlane.type = TfToken("float"); maskPlane.f = {{.1f,.2f,.3f,.4f}};
     UsdGenPlane point; point.name = TfToken("pointExtra"); point.interpolation = TfToken("vertex");
     point.type = TfToken("float"); point.arity = 2;
     for (uint32_t i = 0; i != 22; ++i) point.f.push_back(float(i) + .125f);
     source.extraCv = {point};
     UsdGenPlane primitive; primitive.name = TfToken("primitiveExtra"); primitive.interpolation = TfToken("uniform");
     primitive.type = TfToken("int"); primitive.arity = 1; primitive.i = {30,31,32,33};
-    source.extraCurve = {primitive};
+    source.extraCurve = {maskPlane, primitive};
     source.chunks.resize(2);
     source.chunks[0].firstCurve = 0; source.chunks[0].curveCount = 2; source.chunks[0].liveCount = 2;
     source.chunks[0].firstCv = 0; source.chunks[0].cvCount = 0; source.chunks[0].tile = 7; source.chunks[0].surface = 1;

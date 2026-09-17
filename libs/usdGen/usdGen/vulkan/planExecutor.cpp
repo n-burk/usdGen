@@ -134,7 +134,6 @@ struct Relay final : std::enable_shared_from_this<Relay> {
             jobInfo.nativeJob.widthPipeline = executor->createInfo().widthPipeline;
             jobInfo.nativeJob.width = plan->Width().width;
             jobInfo.nativeJob.replace = plan->Width().replace ? 1u : 0u;
-            jobInfo.nativeJob.profile = plan->Width().profile;
             jobInfo.nativeJob.stages = plan->Steps();
             if (request.authoritativeRevisions)
                 jobInfo.nativeJob.stageValueVersions = request.authoritativeRevisions->intermediateValueVersions;
@@ -277,8 +276,6 @@ bool VulkanPlanExecutor::Submit(std::shared_ptr<const VulkanSourceWidthPlan> pla
         }
         if (stage.requiresNonWidthProof && (!info_.nonWidthComparePipeline ||
             info_.nonWidthComparePipeline->context() != request.context)) return false;
-        if (stage.kind == VulkanSourceWidthStage::Kind::Width &&
-            !stage.width.profile.IsNeutral() && !info_.widthPipeline->HasProfile()) return false;
         if (stage.kind == VulkanSourceWidthStage::Kind::WidthBlend &&
             (!info_.widthBlendPipeline || info_.widthBlendPipeline->context() != request.context)) return false;
     }

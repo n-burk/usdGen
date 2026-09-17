@@ -70,6 +70,22 @@ void Same(double mine, double theirs, std::string const &what)
     }
 }
 
+/// SeExpr2's CellNoise (and its hash builtin) cast a possibly-negative or
+/// out-of-range floor() result straight to uint32_t. That conversion is UB in
+/// C++ and the ISA answers differ (x86 truncates through a 64-bit register and
+/// wraps; aarch64 fcvtzu and PTX cvt saturate). Bit-parity on those inputs is
+/// therefore not a portable contract to assert. usdGen pins an explicit
+/// wrap-everywhere answer (exprMath.h ExprUInt32Wrap); the oracle comparison
+/// is restricted to the domain where SeExpr2's cast is defined.
+bool DefinedUint32Cast(double const *v)
+{
+    for (int k = 0; k < 3; ++k) {
+        const double f = std::floor(v[k]);
+        if (!(f >= 0.0) || !(f < 4294967296.0)) return false;
+    }
+    return true;
+}
+
 /// Compiles `source` at groom rate into a float64 destination and runs it
 /// through the production interpreter. `literal` is what $value reads.
 double Evaluate(char const *source, double literal = 0.0)
@@ -122,6 +138,7 @@ void CheckLattices()
     const double samples[][3] = {
         {0, 0, 0}, {0.5, 0.25, 0.125}, {-1.75, 3.25, 0.5}, {12.3, -4.7, 8.9},
         {1e-4, 1e4, -1e4}, {0.9999999, 1.0000001, -0.0000001},
+        {3.5, 7.25, 11.125}, {1000.5, 2000.25, 3000.125},
     };
     for (auto const &p : samples) {
         const std::string where = " at " + Triple(SE::Vec3d(p[0], p[1], p[2]));
@@ -136,16 +153,18 @@ void CheckLattices()
         for (int k = 0; k < 3; ++k)
             Same(mine3[k], theirs3[k], "Noise<3,3>[" + std::to_string(k) + "]" + where);
 
-        double mineCell1 = 0, theirsCell1 = 0;
-        ExprCellNoise3(p, 1, &mineCell1);
-        SE::CellNoise<3, 1>(p, &theirsCell1);
-        Same(mineCell1, theirsCell1, "CellNoise<3,1>" + where);
+        if (DefinedUint32Cast(p)) {
+            double mineCell1 = 0, theirsCell1 = 0;
+            ExprCellNoise3(p, 1, &mineCell1);
+            SE::CellNoise<3, 1>(p, &theirsCell1);
+            Same(mineCell1, theirsCell1, "CellNoise<3,1>" + where);
 
-        double mineCell3[3] = {0, 0, 0}, theirsCell3[3] = {0, 0, 0};
-        ExprCellNoise3(p, 3, mineCell3);
-        SE::CellNoise<3, 3>(p, theirsCell3);
-        for (int k = 0; k < 3; ++k)
-            Same(mineCell3[k], theirsCell3[k], "CellNoise<3,3>[" + std::to_string(k) + "]" + where);
+            double mineCell3[3] = {0, 0, 0}, theirsCell3[3] = {0, 0, 0};
+            ExprCellNoise3(p, 3, mineCell3);
+            SE::CellNoise<3, 3>(p, theirsCell3);
+            for (int k = 0; k < 3; ++k)
+                Same(mineCell3[k], theirsCell3[k], "CellNoise<3,3>[" + std::to_string(k) + "]" + where);
+        }
 
         const int period[3] = {4, 5, 6};
         const double periodArgs[3] = {4, 5, 6};
@@ -186,7 +205,9 @@ void CheckLattices()
     }
     // hash() is SeExpr2's own standalone hash, not the lattice hash.
     for (int n = 1; n <= 4; ++n) {
-        double args[4] = {1.0, -2.5, 1e6, 0.0009765625};
+        // All seeds positive: hash()'s (uint32_t)(frac * UINT32_MAX) cast is UB for
+        // negative fracs (see DefinedUint32Cast), so negatives are not comparable here.
+        double args[4] = {1.0, 2.5, 1e6, 0.0009765625};
         Same(ExprHash(args, n), SE::hash(n, args), "hash of " + std::to_string(n) + " seeds");
     }
 }
@@ -277,10 +298,12 @@ void CheckCompiledScalars()
     {
         // SeExpr2 spells the scalar noises over Vec3d argument arrays.
         const SE::Vec3d p(0.375, -2.125, 4.0);
+        // cellnoise's floor->uint32 cast is only comparable on non-negative inputs.
+        const SE::Vec3d cellP(0.375, 2.125, 4.0);
         SE::Vec3d one[1] = {p};
         add("noise(" + Triple(p) + ")", SE::noise(1, one), "noise");
         add("snoise(" + Triple(p) + ")", SE::snoise(p), "snoise");
-        add("cellnoise(" + Triple(p) + ")", SE::cellnoise(p), "cellnoise");
+        add("cellnoise(" + Triple(cellP) + ")", SE::cellnoise(cellP), "cellnoise");
         const SE::Vec3d period(4, 5, 6);
         add("pnoise(" + Triple(p) + ", " + Triple(period) + ")", SE::pnoise(p, period), "pnoise");
         // Defaults first, then every optional argument spelled out.
@@ -305,6 +328,10 @@ void CheckCompiledVectors()
     };
     const SE::Vec3d a(0.25, -1.5, 2.0), b(3.0, 0.5, -0.75);
     const SE::Vec3d p(0.375, -2.125, 4.0);
+    // ccellnoise is the only CellNoise-bound vector builtin here (cnoise/cfbm/
+    // cturbulence are remapped Perlin vnoise/vfbm/vturbulence); comparable only
+    // where its floor->uint32 cast is defined.
+    const SE::Vec3d cellP(0.375, 2.125, 4.0);
     const SE::Vec3d rgb(0.2, 0.6, 0.45), grey(0.5, 0.5, 0.5), hsl(0.125, 0.8, 0.4);
 
     add("cross(" + Triple(a) + ", " + Triple(b) + ")", SE::cross(a, b), "cross");
@@ -344,7 +371,7 @@ void CheckCompiledVectors()
         SE::Vec3d one[1] = {p};
         add("vnoise(" + Triple(p) + ")", SE::vnoise(p), "vnoise");
         add("cnoise(" + Triple(p) + ")", SE::cnoise(p), "cnoise");
-        add("ccellnoise(" + Triple(p) + ")", SE::ccellnoise(p), "ccellnoise");
+        add("ccellnoise(" + Triple(cellP) + ")", SE::ccellnoise(cellP), "ccellnoise");
         add("vfbm(" + Triple(p) + ")", SE::vfbm(1, one), "vfbm with SeExpr defaults");
         add("cfbm(" + Triple(p) + ")", SE::cfbm(1, one), "cfbm with SeExpr defaults");
         add("vturbulence(" + Triple(p) + ")", SE::vturbulence(1, one), "vturbulence");

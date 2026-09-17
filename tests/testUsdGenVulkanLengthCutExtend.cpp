@@ -57,7 +57,7 @@ static VulkanSourceGenerationCreateInfo Source(std::shared_ptr<DeviceContext> c,
     s.totalCurves = 2; s.totalCvs = 7; s.topologyVersion = 92; s.valueVersion = 17;
     s.cvOffsets = {0, 3, 7}; s.curveId = {401, 907}; s.rootPrim = {12, 44};
     s.rootUV = {{.2f,.3f},{.7f,.8f}}; s.rootT = {{1,0,0},{0,1,0}};
-    s.rootB = {{0,1,0},{0,0,1}}; s.rootN = {{0,0,1},{1,0,0}}; s.curveMask = {.25f,.75f};
+    s.rootB = {{0,1,0},{0,0,1}}; s.rootN = {{0,0,1},{1,0,0}}; UsdGenPlane maskPlane; maskPlane.name = TfToken("curveMask"); maskPlane.interpolation = TfToken("uniform"); maskPlane.type = TfToken("float"); maskPlane.f = {{.25f,.75f}};
     s.px = zero ? VtFloatArray(7, 0.f) : VtFloatArray{0,2,2, 10,10,13,13};
     s.py = zero ? VtFloatArray(7, 0.f) : VtFloatArray{0,0,2, 10,12,12,12};
     s.pz = VtFloatArray(7, 0.f);
@@ -69,7 +69,7 @@ static VulkanSourceGenerationCreateInfo Source(std::shared_ptr<DeviceContext> c,
     UsdGenPlane p; p.name = TfToken("privateVertex"); p.interpolation = TfToken("vertex");
     p.type = TfToken("float"); p.arity = 1; p.f = {3,4,5,6,7,8,9}; s.extraCv = {p};
     UsdGenPlane q; q.name = TfToken("privateUniform"); q.interpolation = TfToken("uniform");
-    q.type = TfToken("int"); q.i = {18,19}; s.extraCurve = {q};
+    q.type = TfToken("int"); q.i = {18,19}; s.extraCurve = {maskPlane, q};
     i.geometry.alreadyDeformed = true;
     i.geometry.curveTopology = {UsdGenDeviceCurveType::Cubic, UsdGenDeviceCurveBasis::BSpline,
                                 UsdGenDeviceCurveWrap::Pinned};

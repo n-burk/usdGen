@@ -84,7 +84,8 @@ UsdGenGraphDesc MakeFanoutDescriptor() {
     right.params[0].value = VtValue(1.5f);
     auto blend = UsdGenNodeDesc{};
     blend.path = SdfPath("/Executor/Ops/blend"); blend.type = TfToken("UsdGenWidthBlend");
-    blend.inputs = {left.path, right.path}; blend.blend = .25f;
+    blend.inputs = {left.path, right.path};
+    blend.params = {{TfToken("widthBlend:weight"), VtValue(.25f), false}};
     desc.nodes = {source, blend, right, left}; desc.terminal = blend.path;
     return desc;
 }
@@ -156,7 +157,8 @@ UsdGenGraphDesc MakeLengthBlendDescriptor() {
     auto blend = UsdGenNodeDesc{};
     blend.path = SdfPath("/Executor/Ops/lengthBlend");
     blend.type = TfToken("UsdGenWidthBlend");
-    blend.inputs = {left.path, length.path}; blend.blend = .5f;
+    blend.inputs = {left.path, length.path};
+    blend.params = {{TfToken("widthBlend:weight"), VtValue(.5f), false}};
     desc.nodes = {source, left, length, blend}; desc.terminal = blend.path;
     return desc;
 }
@@ -486,48 +488,43 @@ void CheckPlanes(std::shared_ptr<NativeOwner> const& native,
 } // namespace
 
 int main(int argc, char** argv) {
-    CHECK(argc == 10);
+    CHECK(argc == 9);
     std::ifstream shader(argv[1], std::ios::binary); CHECK(shader);
     std::vector<char> raw((std::istreambuf_iterator<char>(shader)), {});
     CHECK(!raw.empty() && raw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> spirv(raw.size() / sizeof(uint32_t));
     std::memcpy(spirv.data(), raw.data(), raw.size());
-    std::ifstream profileShader(argv[2], std::ios::binary); CHECK(profileShader);
-    std::vector<char> profileRaw((std::istreambuf_iterator<char>(profileShader)), {});
-    CHECK(!profileRaw.empty() && profileRaw.size() % sizeof(uint32_t) == 0);
-    std::vector<uint32_t> profileSpirv(profileRaw.size() / sizeof(uint32_t));
-    std::memcpy(profileSpirv.data(), profileRaw.data(), profileRaw.size());
-    std::ifstream lengthShader(argv[3], std::ios::binary); CHECK(lengthShader);
+    std::ifstream lengthShader(argv[2], std::ios::binary); CHECK(lengthShader);
     std::vector<char> lengthRaw((std::istreambuf_iterator<char>(lengthShader)), {});
     CHECK(!lengthRaw.empty() && lengthRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> lengthSpirv(lengthRaw.size() / sizeof(uint32_t));
     std::memcpy(lengthSpirv.data(), lengthRaw.data(), lengthRaw.size());
-    std::ifstream blendShader(argv[4], std::ios::binary); CHECK(blendShader);
+    std::ifstream blendShader(argv[3], std::ios::binary); CHECK(blendShader);
     std::vector<char> blendRaw((std::istreambuf_iterator<char>(blendShader)), {});
     CHECK(!blendRaw.empty() && blendRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> blendSpirv(blendRaw.size() / sizeof(uint32_t));
     std::memcpy(blendSpirv.data(), blendRaw.data(), blendRaw.size());
-    std::ifstream setShader(argv[5], std::ios::binary); CHECK(setShader);
+    std::ifstream setShader(argv[4], std::ios::binary); CHECK(setShader);
     std::vector<char> setRaw((std::istreambuf_iterator<char>(setShader)), {});
     CHECK(!setRaw.empty() && setRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> setSpirv(setRaw.size() / sizeof(uint32_t));
     std::memcpy(setSpirv.data(), setRaw.data(), setRaw.size());
-    std::ifstream cutShader(argv[6], std::ios::binary); CHECK(cutShader);
+    std::ifstream cutShader(argv[5], std::ios::binary); CHECK(cutShader);
     std::vector<char> cutRaw((std::istreambuf_iterator<char>(cutShader)), {});
     CHECK(!cutRaw.empty() && cutRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> cutSpirv(cutRaw.size() / sizeof(uint32_t));
     std::memcpy(cutSpirv.data(), cutRaw.data(), cutRaw.size());
-    std::ifstream reparamShader(argv[7]); CHECK(reparamShader);
+    std::ifstream reparamShader(argv[6]); CHECK(reparamShader);
     std::vector<char> reparamRaw((std::istreambuf_iterator<char>(reparamShader)), {});
     CHECK(!reparamRaw.empty() && reparamRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> reparamSpirv(reparamRaw.size() / sizeof(uint32_t));
     std::memcpy(reparamSpirv.data(), reparamRaw.data(), reparamRaw.size());
-    std::ifstream minimumShader(argv[8], std::ios::binary); CHECK(minimumShader);
+    std::ifstream minimumShader(argv[7], std::ios::binary); CHECK(minimumShader);
     std::vector<char> minimumRaw((std::istreambuf_iterator<char>(minimumShader)), {});
     CHECK(!minimumRaw.empty() && minimumRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> minimumSpirv(minimumRaw.size() / sizeof(uint32_t));
     std::memcpy(minimumSpirv.data(), minimumRaw.data(), minimumRaw.size());
-    std::ifstream literalShader(argv[9], std::ios::binary); CHECK(literalShader);
+    std::ifstream literalShader(argv[8], std::ios::binary); CHECK(literalShader);
     std::vector<char> literalRaw((std::istreambuf_iterator<char>(literalShader)), {});
     CHECK(!literalRaw.empty() && literalRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> literalSpirv(literalRaw.size() / sizeof(uint32_t));
@@ -549,8 +546,7 @@ int main(int argc, char** argv) {
     auto service = VulkanCompletionService::Create({context, owner.get(), 8}); CHECK(service);
     std::string reason;
     auto domain = VulkanGenerationAdapterDomain::Create({owner, service}, &reason); CHECK(domain);
-    auto pipeline = WidthPipeline::CreateWithProfile(context, spirv, profileSpirv); CHECK(pipeline);
-    CHECK(pipeline->HasProfile());
+    auto pipeline = WidthPipeline::Create(context, spirv); CHECK(pipeline);
     auto lengthPipeline = LengthScalePipeline::Create(context, lengthSpirv); CHECK(lengthPipeline);
     auto oldCutPipeline = LengthScalePipeline::CreateWithCutExtend(
         context, lengthSpirv, setSpirv, cutSpirv); CHECK(oldCutPipeline);
@@ -703,7 +699,6 @@ int main(int argc, char** argv) {
         for (float blend : {0.f, .5f}) for (auto mode : {TfToken("scale"), TfToken("set")}) {
             for (unsigned method = 0; method != 3; ++method) {
                 auto desc = minimumPlanDesc;
-                desc.nodes[1].blend = blend;
                 desc.nodes[1].seed = -17;
                 desc.nodes[1].params = {
                     {TfToken("length:value"), VtValue(1.f), false},
@@ -712,7 +707,7 @@ int main(int argc, char** argv) {
                     {TfToken("rebuild"), VtValue(TfToken(method == 2 ? "reparam" : "keepParam")), false},
                     {TfToken("minRemainingLength"), VtValue(3.f), false},
                     {TfToken("length:random"), VtValue(GfVec2f(.5f, 1.5f)), false},
-                    {TfToken("mask:amount"), VtValue(.5f), false}};
+                    {TfToken("mask"), VtValue(blend), false}};
                 auto handle = CompileVulkanSourceWidthPlan(desc); CHECK(handle);
                 auto plan = std::static_pointer_cast<const VulkanSourceWidthPlan>(handle->Payload());
                 CHECK(plan && plan->Steps().size() == 2 &&
@@ -748,7 +743,7 @@ int main(int argc, char** argv) {
         auto neutral = minimumPlanDesc;
         neutral.nodes[1].params.push_back(
             {TfToken("length:random"), VtValue(GfVec2f(.5f, 1.5f)), false});
-        neutral.nodes[1].params.push_back({TfToken("mask:amount"), VtValue(1.f), false});
+        neutral.nodes[1].params.push_back({TfToken("mask"), VtValue(1.f), false});
         auto neutralHandle = CompileVulkanSourceWidthPlan(neutral); CHECK(neutralHandle);
         auto neutralPlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(neutralHandle->Payload());
         auto reuse = SubmitAndWait(*owner, noEnvelope, neutralPlan, context, 148,
@@ -796,7 +791,7 @@ int main(int argc, char** argv) {
 
     // A literal Length `set` is a valid fixed-topology compiled plan, but
     // this production executor was deliberately constructed with only the
-    // existing scale module (argv[3]).  Admission must reject it before the
+    // existing scale module (argv[2]).  Admission must reject it before the
     // source preparer, native allocation, or queue-owner return credit.
     auto lengthSetDesc = lengthDesc;
     lengthSetDesc.nodes[1].params.push_back(
@@ -1254,7 +1249,8 @@ int main(int argc, char** argv) {
     boundRight.params[0].value = VtValue(1.5f);
     UsdGenNodeDesc boundBlend;
     boundBlend.path = SdfPath("/Executor/Ops/rootBlend"); boundBlend.type = TfToken("UsdGenWidthBlend");
-    boundBlend.inputs = {boundLeft.path, boundRight.path}; boundBlend.blend = .25f;
+    boundBlend.inputs = {boundLeft.path, boundRight.path};
+    boundBlend.params = {{TfToken("widthBlend:weight"), VtValue(.25f), false}};
     boundBlendDesc.nodes = {boundSource, boundBlend, boundRight, boundLeft};
     boundBlendDesc.terminal = boundBlend.path;
     auto boundBlendHandle = CompileVulkanSourceWidthPlan(boundBlendDesc, nullptr); CHECK(boundBlendHandle);
@@ -1314,47 +1310,6 @@ int main(int argc, char** argv) {
     CheckPlanes(native, context, service, *owner, firstResult.generation, firstExpected);
     CheckPlanes(native, context, service, *owner, secondResult.generation, secondExpected);
 
-    // Non-neutral profile path: the profile module must consume the authored
-    // hairT plane and match the CPU operator's taper/scale ordering.
-    auto profileDesc = MakeDescriptor(true, true, .75f, true, 21);
-    profileDesc.nodes[1].params.push_back({TfToken("taper"), VtValue(.25f), false});
-    profileDesc.nodes[1].params.push_back({TfToken("taperStart"), VtValue(.25f), false});
-    profileDesc.nodes[1].params.push_back({TfToken("rootScale"), VtValue(2.0f), false});
-    profileDesc.nodes[1].params.push_back({TfToken("tipScale"), VtValue(.5f), false});
-    auto profileHandle = CompileVulkanSourceWidthPlan(profileDesc, nullptr); CHECK(profileHandle);
-    auto profilePlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(profileHandle->Payload()); CHECK(profilePlan);
-    auto legacyPipeline = WidthPipeline::Create(context, spirv); CHECK(legacyPipeline);
-    auto legacyExecutor = VulkanPlanExecutor::Create({domain, legacyPipeline, preparer}, &reason); CHECK(legacyExecutor);
-    auto const beforeUnsupported = context->resources()->Snapshot().usedBytes;
-    bool unsupportedCallback = false;
-    owner->InvokeOwner([&] {
-        VulkanPlanExecutor::Request request;
-        request.context = context; request.generation = 107;
-        CHECK(!legacyExecutor->Submit(profilePlan, std::move(request),
-            [&](auto, auto) { unsupportedCallback = true; }));
-    });
-    preparer->Drain(); owner->Drain();
-    CHECK(!unsupportedCallback && context->resources()->Snapshot().usedBytes == beforeUnsupported);
-    legacyExecutor->Shutdown();
-    auto profileResult = SubmitAndWait(*owner, executor, profilePlan, context, 107, std::make_shared<unsigned>(13));
-    Oracle profileExpected; CHECK(CpuReference(profileDesc, &profileExpected));
-    CheckPlanes(native, context, service, *owner, profileResult.generation, profileExpected);
-    for (unsigned boundary = 0; boundary != 2; ++boundary) {
-        auto boundaryDesc = profileDesc;
-        for (auto& parameter : boundaryDesc.nodes[1].params) {
-            if (parameter.name == TfToken("taper")) parameter.value = VtValue(1.f);
-            if (parameter.name == TfToken("taperStart")) parameter.value = VtValue(float(boundary));
-            if (parameter.name == TfToken("rootScale")) parameter.value = VtValue(boundary ? 0.f : 1.f);
-            if (parameter.name == TfToken("tipScale")) parameter.value = VtValue(boundary ? 2.f : 1.f);
-        }
-        auto handle = CompileVulkanSourceWidthPlan(boundaryDesc, nullptr); CHECK(handle);
-        auto plan = std::static_pointer_cast<const VulkanSourceWidthPlan>(handle->Payload());
-        auto result = SubmitAndWait(*owner, executor, plan, context, 108 + boundary,
-                                    std::make_shared<unsigned>(14 + boundary));
-        Oracle expected; CHECK(CpuReference(boundaryDesc, &expected));
-        CheckPlanes(native, context, service, *owner, result.generation, expected);
-        owner->InvokeOwner([&] { result.generation.reset(); });
-    }
 
     // `idSource=index` is authoritative: malformed authored primvar IDs are
     // deliberately ignored, rather than becoming a hidden validation path.
@@ -1389,7 +1344,7 @@ int main(int argc, char** argv) {
     auto emptyRestResult = SubmitAndWait(*owner, executor, emptyRest, context, 104, std::make_shared<unsigned>(10));
     CHECK(emptyRestResult.generation->Geometry().curveCount == 0 && emptyRestResult.generation->Geometry().pointCount == 0);
 
-    owner->InvokeOwner([&] { firstResult.generation.reset(); secondResult.generation.reset(); profileResult.generation.reset(); lengthResult.generation.reset(); fanoutResult.generation.reset(); boundResult.generation.reset(); rootedRetry.generation.reset(); reboundResult.generation.reset(); droppedResult.generation.reset(); boundLengthResult.generation.reset(); boundBlendResult.generation.reset(); affineResult.generation.reset(); affineRetry.generation.reset(); shortIndexResult.generation.reset(); duplicateIndexResult.generation.reset(); emptyResult.generation.reset(); emptyRestResult.generation.reset(); });
+    owner->InvokeOwner([&] { firstResult.generation.reset(); secondResult.generation.reset(); lengthResult.generation.reset(); fanoutResult.generation.reset(); boundResult.generation.reset(); rootedRetry.generation.reset(); reboundResult.generation.reset(); droppedResult.generation.reset(); boundLengthResult.generation.reset(); boundBlendResult.generation.reset(); affineResult.generation.reset(); affineRetry.generation.reset(); shortIndexResult.generation.reset(); duplicateIndexResult.generation.reset(); emptyResult.generation.reset(); emptyRestResult.generation.reset(); });
     oldCutExecutor->Shutdown(); CHECK(oldCutExecutor->IsShutdown());
     executor->Shutdown(); CHECK(executor->IsShutdown());
     owner->InvokeOwner([&] { CHECK(!executor->Submit(first, {}, {})); });

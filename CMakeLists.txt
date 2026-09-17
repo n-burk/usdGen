@@ -254,7 +254,10 @@ set_target_properties(usdGenMath PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 
-# GPU parity: noise.cpp computes the Capture field the kernel replicates bit-exactly; no contraction (mirrors usdGenMath).
+# Bit-level parity lanes must share one FP contraction mode: usdGen core and usdGenMath
+# build with USDGEN_FP_CONTRACT, so usdGen_seexpr, the vendored SeExpr oracle library
+# (usdGenExprFrontend) and noise.cpp must too (default aarch64/x86 -ffp-contract=fast
+# would fuse mul+add in the oracle but not in usdGen -> 1-ulp divergence).
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-ffp-contract=${USDGEN_FP_CONTRACT}" USDGEN_FP_CONTRACT_OK)
 if(USDGEN_FP_CONTRACT_OK)
@@ -262,7 +265,16 @@ if(USDGEN_FP_CONTRACT_OK)
         "-ffp-contract=${USDGEN_FP_CONTRACT}")
     target_compile_options(usdGenMath PRIVATE
         "-ffp-contract=${USDGEN_FP_CONTRACT}")
+    target_compile_options(usdGenExprFrontend PRIVATE
+        "-ffp-contract=${USDGEN_FP_CONTRACT}")
     set_source_files_properties(libs/usdGen/usdGen/ops/noise.cpp PROPERTIES
+        COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
+    # Production CPU expression evaluator inlines exprMath.h (bit-parity lane);
+    # it must contract like the oracle, not like the rest of the core.
+    set_source_files_properties(
+        libs/usdGen/usdGen/expressions/cpuEvaluator.cpp
+        libs/usdGen/usdGen/expressions/frontend.cpp
+        libs/usdGen/usdGen/cpuParameters.cpp PROPERTIES
         COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
 endif()
 
@@ -691,14 +703,6 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
             "${_usdgen_vulkan_width_shader}" -o "${_usdgen_vulkan_width_spv}"
         COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_width_spv}"
         DEPENDS "${_usdgen_vulkan_width_shader}" VERBATIM)
-    set(_usdgen_vulkan_width_profile_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/widthProfile.comp")
-    set(_usdgen_vulkan_width_profile_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/widthProfile.spv")
-    add_custom_command(OUTPUT "${_usdgen_vulkan_width_profile_spv}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
-        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
-            "${_usdgen_vulkan_width_profile_shader}" -o "${_usdgen_vulkan_width_profile_spv}"
-        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_width_profile_spv}"
-        DEPENDS "${_usdgen_vulkan_width_profile_shader}" VERBATIM)
     set(_usdgen_vulkan_length_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/lengthScale.comp")
     set(_usdgen_vulkan_length_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/lengthScale.spv")
     add_custom_command(OUTPUT "${_usdgen_vulkan_length_spv}"
@@ -780,7 +784,7 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
         COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_envelope_v1_spv}"
         DEPENDS "${_usdgen_vulkan_envelope_v1_shader}"
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/float32Envelope.glsl" VERBATIM)
-    add_custom_target(usdGenVulkanShaders ALL DEPENDS "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_width_profile_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_compare_spv}" "${_usdgen_vulkan_compaction_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}" "${_usdgen_vulkan_envelope_v1_spv}")
+    add_custom_target(usdGenVulkanShaders ALL DEPENDS "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_compare_spv}" "${_usdgen_vulkan_compaction_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}" "${_usdgen_vulkan_envelope_v1_spv}")
 endif()
 
 if(USDGEN_BUILD_TESTS)
@@ -990,12 +994,11 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         LABELS "T1;vulkan;cow;root-frames;retirement" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     target_sources(testUsdGenVulkanSource PRIVATE "${_usdgen_vulkan_width_spv}")
-    target_sources(testUsdGenVulkanSource PRIVATE "${_usdgen_vulkan_width_profile_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}")
+    target_sources(testUsdGenVulkanSource PRIVATE "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}")
     add_test(NAME testUsdGenVulkanSourceWidthCow COMMAND testUsdGenVulkanSource --cow "${_usdgen_vulkan_width_spv}")
-    add_test(NAME testUsdGenVulkanSourceWidthProfile COMMAND testUsdGenVulkanSource --profile "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_width_profile_spv}")
     add_test(NAME testUsdGenVulkanSourceLengthCow COMMAND testUsdGenVulkanSource "${_usdgen_vulkan_width_spv}" --length "${_usdgen_vulkan_length_spv}")
     add_test(NAME testUsdGenVulkanSourceWidthBlendCow COMMAND testUsdGenVulkanSource --blend "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_blend_spv}")
-    set_tests_properties(testUsdGenVulkanSourceWidthProfile testUsdGenVulkanSourceLengthCow testUsdGenVulkanSourceWidthBlendCow PROPERTIES
+    set_tests_properties(testUsdGenVulkanSourceLengthCow testUsdGenVulkanSourceWidthBlendCow PROPERTIES
         LABELS "T1;vulkan;cow;operators;retirement" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanSourceAccounting tests/testUsdGenVulkanSourceAccounting.cpp "${_usdgen_vulkan_width_spv}")
@@ -1008,7 +1011,7 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     add_executable(testUsdGenVulkanSourceWidthJob tests/testUsdGenVulkanSourceWidthJob.cpp "${_usdgen_vulkan_width_spv}")
     add_executable(testUsdGenVulkanSessionProvider tests/testUsdGenVulkanSessionProvider.cpp "${_usdgen_vulkan_width_spv}")
     add_executable(testUsdGenVulkanSession tests/testUsdGenVulkanSession.cpp "${_usdgen_vulkan_width_spv}")
-    target_sources(testUsdGenVulkanSession PRIVATE "${_usdgen_vulkan_width_profile_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}")
+    target_sources(testUsdGenVulkanSession PRIVATE "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}")
     add_executable(testUsdGenVulkanSessionCoalescing tests/testUsdGenVulkanSessionCoalescing.cpp "${_usdgen_vulkan_width_spv}")
     add_executable(testUsdGenVulkanSessionContextLoss tests/testUsdGenVulkanSessionContextLoss.cpp "${_usdgen_vulkan_width_spv}")
     target_link_libraries(testUsdGenVulkanSessionContextLoss PRIVATE usdGenVulkanNative)
@@ -1028,14 +1031,12 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     add_test(NAME testUsdGenVulkanSession COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}")
     add_test(NAME testUsdGenVulkanSessionLostReturn COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --lost-return)
     add_test(NAME testUsdGenVulkanSessionAdmissionRollback COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --admission-rollback)
-    add_test(NAME testUsdGenVulkanSessionProfile COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --profile "${_usdgen_vulkan_width_profile_spv}")
     add_test(NAME testUsdGenVulkanSessionLength COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --length "${_usdgen_vulkan_length_spv}")
-    add_test(NAME testUsdGenVulkanSessionLengthProfile COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --profile "${_usdgen_vulkan_width_profile_spv}" --length "${_usdgen_vulkan_length_spv}")
     add_test(NAME testUsdGenVulkanSessionWidthDag COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}")
-    add_test(NAME testUsdGenVulkanSessionLengthWidthDag COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}" --length "${_usdgen_vulkan_length_spv}" --profile "${_usdgen_vulkan_width_profile_spv}")
+    add_test(NAME testUsdGenVulkanSessionLengthWidthDag COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}" --length "${_usdgen_vulkan_length_spv}")
     target_sources(testUsdGenVulkanSession PRIVATE "${_usdgen_vulkan_compare_spv}")
-    add_test(NAME testUsdGenVulkanSessionCrossOriginDag COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}" --length "${_usdgen_vulkan_length_spv}" --profile "${_usdgen_vulkan_width_profile_spv}" --compare "${_usdgen_vulkan_compare_spv}")
-    add_test(NAME testUsdGenVulkanSessionNamedChannels COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}" --length "${_usdgen_vulkan_length_spv}" --profile "${_usdgen_vulkan_width_profile_spv}" --compare "${_usdgen_vulkan_compare_spv}" --named)
+    add_test(NAME testUsdGenVulkanSessionCrossOriginDag COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}" --length "${_usdgen_vulkan_length_spv}" --compare "${_usdgen_vulkan_compare_spv}")
+    add_test(NAME testUsdGenVulkanSessionNamedChannels COMMAND testUsdGenVulkanSession "${_usdgen_vulkan_width_spv}" --dag "${_usdgen_vulkan_blend_spv}" --length "${_usdgen_vulkan_length_spv}" --compare "${_usdgen_vulkan_compare_spv}" --named)
     set_tests_properties(testUsdGenVulkanSessionNamedChannels PROPERTIES
         LABELS "T1;vulkan;cow;operators;retirement;named" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
@@ -1176,7 +1177,7 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     set_tests_properties(testUsdGenVulkanSessionCrossOriginDag PROPERTIES
         LABELS "T1;vulkan;cow;operators;retirement" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
-    set_tests_properties(testUsdGenVulkanSession testUsdGenVulkanSessionLostReturn testUsdGenVulkanSessionAdmissionRollback testUsdGenVulkanSessionProfile testUsdGenVulkanSessionLength testUsdGenVulkanSessionLengthProfile testUsdGenVulkanSessionWidthDag testUsdGenVulkanSessionLengthWidthDag PROPERTIES
+    set_tests_properties(testUsdGenVulkanSession testUsdGenVulkanSessionLostReturn testUsdGenVulkanSessionAdmissionRollback testUsdGenVulkanSessionLength testUsdGenVulkanSessionWidthDag testUsdGenVulkanSessionLengthWidthDag PROPERTIES
         LABELS "T1;vulkan;session;generation;cow;retirement" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     target_link_libraries(testUsdGenVulkanSessionProvider PRIVATE usdGenVulkanNative)
@@ -1186,9 +1187,9 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanPublicationJob tests/testUsdGenVulkanPublicationJob.cpp "${_usdgen_vulkan_width_spv}")
     add_executable(testUsdGenVulkanPlanExecutor tests/testUsdGenVulkanPlanExecutor.cpp "${_usdgen_vulkan_width_spv}")
-    target_sources(testUsdGenVulkanPlanExecutor PRIVATE "${_usdgen_vulkan_width_profile_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}")
+    target_sources(testUsdGenVulkanPlanExecutor PRIVATE "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}")
     target_link_libraries(testUsdGenVulkanPlanExecutor PRIVATE usdGenVulkanNative)
-    add_test(NAME testUsdGenVulkanPlanExecutor COMMAND testUsdGenVulkanPlanExecutor "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_width_profile_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}")
+    add_test(NAME testUsdGenVulkanPlanExecutor COMMAND testUsdGenVulkanPlanExecutor "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}")
     set_tests_properties(testUsdGenVulkanPlanExecutor PROPERTIES
         LABELS "T1;vulkan;sources;operators;generation;retirement" TIMEOUT 60 RESOURCE_LOCK usdgen_gpu
         SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
@@ -2267,6 +2268,14 @@ target_include_directories(testUsdGenSeExprOracle SYSTEM PRIVATE "${_usdgen_fron
 target_compile_definitions(testUsdGenSeExprOracle PRIVATE
     SeExpr2=UsdGenSeExprFrontend SeExprInternal2=UsdGenSeExprFrontendInternal
     USDGEN_SEEXPR_SANDBOX)
+
+# The oracle test inlines exprMath.h, so its FP contraction mode must match
+# usdGenExprFrontend's (above); a fast/off split across the comparison boundary
+# is itself a 1-ulp divergence.
+if(USDGEN_FP_CONTRACT_OK)
+    target_compile_options(testUsdGenSeExprOracle PRIVATE
+        "-ffp-contract=${USDGEN_FP_CONTRACT}")
+endif()
 if(WIN32)
     target_compile_definitions(testUsdGenSeExprOracle PRIVATE SEEXPR_WIN32)
 endif()
@@ -2569,7 +2578,7 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME)
         RUNTIME DESTINATION "${USDGEN_INSTALL_LIBDIR}"
         LIBRARY DESTINATION "${USDGEN_INSTALL_LIBDIR}"
         ARCHIVE DESTINATION "${USDGEN_INSTALL_LIBDIR}")
-    install(FILES "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_width_profile_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_compare_spv}" "${_usdgen_vulkan_compaction_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}" "${_usdgen_vulkan_envelope_v1_spv}" DESTINATION "share/usdGen/vulkan")
+    install(FILES "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_compare_spv}" "${_usdgen_vulkan_compaction_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}" "${_usdgen_vulkan_envelope_v1_spv}" DESTINATION "share/usdGen/vulkan")
 endif()
 
 # Schema + imaging plugin resources.

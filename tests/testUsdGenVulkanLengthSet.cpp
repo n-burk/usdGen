@@ -53,7 +53,7 @@ static VulkanSourceGenerationCreateInfo Source(std::shared_ptr<DeviceContext> c,
     s.totalCurves = 2; s.totalCvs = 7; s.topologyVersion = 91; s.valueVersion = 17;
     s.cvOffsets = {0, 3, 7}; s.curveId = {401, 907}; s.rootPrim = {12, 44};
     s.rootUV = {{.2f,.3f},{.7f,.8f}}; s.rootT = {{1,0,0},{0,1,0}};
-    s.rootB = {{0,1,0},{0,0,1}}; s.rootN = {{0,0,1},{1,0,0}}; s.curveMask = {.25f,.75f};
+    s.rootB = {{0,1,0},{0,0,1}}; s.rootN = {{0,0,1},{1,0,0}}; UsdGenPlane maskPlane; maskPlane.name = TfToken("curveMask"); maskPlane.interpolation = TfToken("uniform"); maskPlane.type = TfToken("float"); maskPlane.f = {{.25f,.75f}};
     s.px = zero ? VtFloatArray(7, 0.f) : VtFloatArray{0, 1, 2, 0, 0, 0, 0};
     s.py = VtFloatArray(7, 0.f); s.pz = zero ? VtFloatArray(7, 0.f) : VtFloatArray{0,0,0, 0,1,2,3};
     // Rest lengths differ by 10x, so using the rest plane for normalization
@@ -62,7 +62,7 @@ static VulkanSourceGenerationCreateInfo Source(std::shared_ptr<DeviceContext> c,
     s.width = VtFloatArray(7, 1.f); s.hairT = {0,.5f,1,0,.333f,.667f,1};
     UsdGenChunkDesc chunk; chunk.firstCurve = 0; chunk.curveCount = 2; chunk.liveCount = 2; chunk.firstCv = 0; chunk.cvCount = 0; chunk.tile = 3; chunk.surface = 1; s.chunks = {chunk};
     UsdGenPlane p; p.name = TfToken("privateVertex"); p.interpolation = TfToken("vertex"); p.type = TfToken("float"); p.arity = 1; p.f = {3,4,5,6,7,8,9}; s.extraCv = {p};
-    UsdGenPlane q; q.name = TfToken("privateUniform"); q.interpolation = TfToken("uniform"); q.type = TfToken("int"); q.i = {18,19}; s.extraCurve = {q};
+    UsdGenPlane q; q.name = TfToken("privateUniform"); q.interpolation = TfToken("uniform"); q.type = TfToken("int"); q.i = {18,19}; s.extraCurve = {maskPlane, q};
     i.geometry.alreadyDeformed = true; i.geometry.curveTopology = {UsdGenDeviceCurveType::Cubic, UsdGenDeviceCurveBasis::BSpline, UsdGenDeviceCurveWrap::Pinned};
     i.geometry.tiles = {{3,0,2,0,7}};
     uint32_t named[] = {73, 81}; i.additionalNamed.push_back({{"namedCurve", UsdGenDeviceValueType::UInt32, UsdGenDeviceDomain::Primitive, 2, 1, 4, true}, Bytes(named,2)});

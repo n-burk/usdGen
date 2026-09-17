@@ -1,6 +1,6 @@
 #include "widthPipeline.h"
 
-#include <algorithm>
+#include <memory>
 #include <cmath>
 #include <cstring>
 #include <new>
@@ -12,11 +12,6 @@ struct WidthPipeline::Native {
     VkDescriptorSetLayout descriptors = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    VkShaderModule profileShader = VK_NULL_HANDLE;
-    VkDescriptorSetLayout profileDescriptors = VK_NULL_HANDLE;
-    VkPipelineLayout profileLayout = VK_NULL_HANDLE;
-    VkPipeline profilePipeline = VK_NULL_HANDLE;
-    bool hasProfile = false;
     ~Native() {
         if (!context) return;
         auto d = context->device();
@@ -24,24 +19,18 @@ struct WidthPipeline::Native {
         if (layout) vkDestroyPipelineLayout(d, layout, nullptr);
         if (descriptors) vkDestroyDescriptorSetLayout(d, descriptors, nullptr);
         if (shader) vkDestroyShaderModule(d, shader, nullptr);
-        if (profilePipeline) vkDestroyPipeline(d, profilePipeline, nullptr);
-        if (profileLayout) vkDestroyPipelineLayout(d, profileLayout, nullptr);
-        if (profileDescriptors) vkDestroyDescriptorSetLayout(d, profileDescriptors, nullptr);
-        if (profileShader) vkDestroyShaderModule(d, profileShader, nullptr);
     }
 };
 
 struct WidthPipeline::Candidate::State {
     std::shared_ptr<Native> native;
     std::shared_ptr<const ChargedBuffer> input;
-    std::shared_ptr<const ChargedBuffer> hairT;
     std::shared_ptr<ChargedBuffer> output, status;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     VkCommandPool commands = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     bool pending = false, lost = false, proved = false;
     uint32_t count = 0;
-    bool useHairT = false;
     uint32_t semantic = UINT32_MAX;
     // Allocated before any submission; releasing this holder intentionally
     // retains the entire native graph and every charged allocation on loss.
@@ -104,43 +93,6 @@ std::shared_ptr<WidthPipeline> WidthPipeline::Create(
     } catch (std::bad_alloc const&) { finish(VK_ERROR_OUT_OF_HOST_MEMORY); return {}; }
 }
 
-std::shared_ptr<WidthPipeline> WidthPipeline::CreateWithProfile(
-    std::shared_ptr<DeviceContext> context, std::vector<uint32_t> const& flat,
-    std::vector<uint32_t> const& profile, VkResult* result) {
-    // Profile module construction is deliberately distinct from legacy Create;
-    // do not silently run profile controls through the flat shader.
-    auto pipeline = Create(std::move(context), flat, result);
-    if (!pipeline) return {};
-    if (profile.size() < 5 || profile.front() != 0x07230203u) {
-        if (result) *result = VK_ERROR_INITIALIZATION_FAILED;
-        return {};
-    }
-    auto& n = *pipeline->native_; auto d = n.context->device();
-    VkShaderModuleCreateInfo sm{}; sm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    sm.codeSize = profile.size() * sizeof(uint32_t); sm.pCode = profile.data();
-    VkResult r = vkCreateShaderModule(d, &sm, nullptr, &n.profileShader);
-    if (r != VK_SUCCESS) { if (result) *result = r; return {}; }
-    VkDescriptorSetLayoutBinding bindings[4]{};
-    for (uint32_t i = 0; i != 4; ++i) { bindings[i].binding=i; bindings[i].descriptorCount=1;
-        bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT; }
-    VkDescriptorSetLayoutCreateInfo ds{}; ds.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    ds.bindingCount=4; ds.pBindings=bindings;
-    r=vkCreateDescriptorSetLayout(d,&ds,nullptr,&n.profileDescriptors); if(r!=VK_SUCCESS){if(result)*result=r;return {};}
-    VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT,0,32};
-    VkPipelineLayoutCreateInfo pl{}; pl.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pl.setLayoutCount=1; pl.pSetLayouts=&n.profileDescriptors; pl.pushConstantRangeCount=1; pl.pPushConstantRanges=&push;
-    r=vkCreatePipelineLayout(d,&pl,nullptr,&n.profileLayout); if(r!=VK_SUCCESS){if(result)*result=r;return {};}
-    VkComputePipelineCreateInfo cp{}; cp.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; cp.layout=n.profileLayout;
-    cp.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; cp.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;
-    cp.stage.module=n.profileShader; cp.stage.pName="main";
-    r=vkCreateComputePipelines(d,VK_NULL_HANDLE,1,&cp,nullptr,&n.profilePipeline);
-    if(r!=VK_SUCCESS){if(result)*result=r;return {};}
-    n.hasProfile = true;
-    if (result) *result = VK_SUCCESS;
-    return pipeline;
-}
-
-bool WidthPipeline::HasProfile() const noexcept { return native_ && native_->hasProfile; }
 
 WidthPipeline::Candidate::Candidate(std::shared_ptr<State> s) : state_(std::move(s)) {}
 WidthPipeline::Candidate::~Candidate() { if (state_->pending) Quarantine(); }
@@ -159,10 +111,6 @@ bool WidthPipeline::Candidate::succeeded() const noexcept {
 std::shared_ptr<const ChargedBuffer> WidthPipeline::Candidate::inputOwner() const noexcept {
     return state_ ? state_->input : nullptr;
 }
-std::shared_ptr<const ChargedBuffer> WidthPipeline::Candidate::hairTOwner() const noexcept {
-    return state_ ? state_->hairT : nullptr;
-}
-bool WidthPipeline::Candidate::usesHairT() const noexcept { return state_ && state_->useHairT; }
 uint32_t WidthPipeline::Candidate::count() const noexcept {
     return state_ ? state_->count : 0;
 }
@@ -170,8 +118,8 @@ uint32_t WidthPipeline::Candidate::count() const noexcept {
 std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::Begin(
     std::shared_ptr<const ChargedBuffer> input, uint32_t count, float width,
     uint32_t replace, VkResult* result, BeforeSubmit beforeSubmit) {
-    return BeginInternal(std::move(input), {}, count, width, replace, nullptr,
-                         result, std::move(beforeSubmit));
+    return BeginInternal(std::move(input), count, width, replace, result,
+                         std::move(beforeSubmit));
 }
 std::shared_ptr<DeviceContext> WidthPipeline::Candidate::context() const noexcept {
     return state_ && state_->native ? state_->native->context : nullptr;
@@ -196,26 +144,16 @@ VkResult WidthPipeline::Candidate::Poll(uint32_t* semanticStatus) {
 }
 
 std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::BeginInternal(
-    std::shared_ptr<const ChargedBuffer> input, std::shared_ptr<const ChargedBuffer> hairT,
-    uint32_t count, float width, uint32_t replace, VulkanWidthProfileControls const* profile,
-    VkResult* result, BeforeSubmit beforeSubmit) {
+    std::shared_ptr<const ChargedBuffer> input, uint32_t count, float width,
+    uint32_t replace, VkResult* result, BeforeSubmit beforeSubmit) {
     auto finish = [&](VkResult r) { if (result) *result = r; };
     finish(VK_ERROR_INITIALIZATION_FAILED);
     VkDeviceSize bytes = VkDeviceSize(count) * sizeof(float);
     auto context = native_->context;
-    bool const useProfile = profile && !profile->IsNeutral();
-    if (!std::isfinite(width) || width < 0 || replace > 1 ||
-        (profile && (!std::isfinite(profile->rootScale) || profile->rootScale < 0 ||
-                     !std::isfinite(profile->tipScale) || profile->tipScale < 0 ||
-                     !std::isfinite(profile->taper) || profile->taper < 0 || profile->taper > 1 ||
-                     !std::isfinite(profile->taperStart) || profile->taperStart < 0 || profile->taperStart > 1)) ||
-        (useProfile && !native_->hasProfile) || (count && !input) ||
-        (useProfile && count && !hairT) ||
+    if (!std::isfinite(width) || width < 0 || replace > 1 || (count && !input) ||
         (input && (input->context() != context || input->unproven() ||
             !input->buffer() || !(input->usage() & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
-            input->sizeBytes() < bytes)) ||
-        (hairT && (hairT->context() != context || hairT->unproven() || !hairT->buffer() ||
-            !(hairT->usage() & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) || hairT->sizeBytes() != bytes))) return {};
+            input->sizeBytes() < bytes))) return {};
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(context->physicalDevice(), &properties);
     uint64_t groups = (uint64_t(count) + 255) / 256;
@@ -223,7 +161,7 @@ std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::BeginInternal(
         bytes > properties.limits.maxStorageBufferRange) return {};
     try {
         auto s = std::make_shared<Candidate::State>(); s->native = native_; s->input = std::move(input);
-        s->hairT = std::move(hairT); s->useHairT = useProfile && count != 0; s->count = count;
+        s->count = count;
         s->quarantine = std::make_unique<std::shared_ptr<Candidate::State>>();
         auto candidate = std::unique_ptr<Candidate>(new Candidate(s));
         if (!count) { s->proved = true; s->semantic = 0; finish(VK_SUCCESS); return candidate; }
@@ -244,29 +182,28 @@ std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::BeginInternal(
         r = vkMapMemory(d, s->status->memory(), 0, 4, 0, &data);
         if (r != VK_SUCCESS) { finish(r); return {}; }
         std::memset(data, 0, 4); vkUnmapMemory(d, s->status->memory());
-        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, useProfile ? 4u : 3u};
+        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3u};
         VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dp.maxSets = 1; dp.poolSizeCount = 1; dp.pPoolSizes = &size;
         r = vkCreateDescriptorPool(d, &dp, nullptr, &s->descriptors);
         if (r != VK_SUCCESS) { finish(r); return {}; }
         VkDescriptorSetAllocateInfo da{}; da.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        auto descriptorLayout = useProfile ? native_->profileDescriptors : native_->descriptors;
-        auto pipelineLayout = useProfile ? native_->profileLayout : native_->layout;
-        auto pipeline = useProfile ? native_->profilePipeline : native_->pipeline;
+        auto descriptorLayout = native_->descriptors;
+        auto pipelineLayout = native_->layout;
+        auto pipeline = native_->pipeline;
         da.descriptorPool = s->descriptors; da.descriptorSetCount = 1; da.pSetLayouts = &descriptorLayout;
         VkDescriptorSet set;
         r = vkAllocateDescriptorSets(d, &da, &set);
         if (r != VK_SUCCESS) { finish(r); return {}; }
-        VkDescriptorBufferInfo infos[4] = {{s->input->buffer(), 0, bytes},
-            {s->output->buffer(), 0, bytes}, {s->status->buffer(), 0, 4},
-            {useProfile ? s->hairT->buffer() : s->input->buffer(), 0, bytes}};
-        VkWriteDescriptorSet writes[4]{};
-        for (uint32_t i = 0; i != (useProfile ? 4u : 3u); ++i) {
+        VkDescriptorBufferInfo infos[3] = {{s->input->buffer(), 0, bytes},
+            {s->output->buffer(), 0, bytes}, {s->status->buffer(), 0, 4}};
+        VkWriteDescriptorSet writes[3]{};
+        for (uint32_t i = 0; i != 3u; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = set; writes[i].dstBinding = i; writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[i].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(d, useProfile ? 4 : 3, writes, 0, nullptr);
+        vkUpdateDescriptorSets(d, 3, writes, 0, nullptr);
         VkCommandPoolCreateInfo pc{}; pc.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         pc.queueFamilyIndex = context->computeQueueFamily();
         r = vkCreateCommandPool(d, &pc, nullptr, &s->commands);
@@ -286,11 +223,9 @@ std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::BeginInternal(
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &set, 0, nullptr);
-        struct Controls { uint32_t count; float width; uint32_t replace; float root, tip, taper, start; uint32_t useHairT; } controls{
-            count, width, replace, profile ? profile->rootScale : 1.0f, profile ? profile->tipScale : 1.0f,
-            profile ? profile->taper : 0.0f, profile ? profile->taperStart : .5f, useProfile ? 1u : 0u};
-        static_assert(sizeof(Controls) == 32, "Shader ABI");
-        vkCmdPushConstants(command, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, useProfile ? 32 : 12, &controls);
+        struct Controls { uint32_t count; float width; uint32_t replace; } controls{count, width, replace};
+        static_assert(sizeof(Controls) == 12, "Shader ABI");
+        vkCmdPushConstants(command, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 12, &controls);
         vkCmdDispatch(command, uint32_t(groups), 1, 1);
         VkMemoryBarrier after{}; after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -320,28 +255,4 @@ std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::BeginInternal(
     } catch (std::bad_alloc const&) { finish(VK_ERROR_OUT_OF_HOST_MEMORY); return {}; }
 }
 
-std::unique_ptr<WidthPipeline::Candidate> WidthPipeline::BeginProfile(
-    std::shared_ptr<const ChargedBuffer> input, std::shared_ptr<const ChargedBuffer> hairT,
-    uint32_t count, float width, uint32_t replace, VulkanWidthProfileControls const& controls,
-    VkResult* result, BeforeSubmit beforeSubmit) {
-    auto finish = [&](VkResult r) { if (result) *result = r; };
-    finish(VK_ERROR_INITIALIZATION_FAILED);
-    // Validate even when the profile is neutral: taperStart is still an
-    // authored scalar and must not permit NaN/out-of-range values to slip
-    // through the legacy delegation path.
-    if (!std::isfinite(width) || width < 0 || replace > 1 ||
-        !std::isfinite(controls.rootScale) || controls.rootScale < 0 ||
-        !std::isfinite(controls.tipScale) || controls.tipScale < 0 ||
-        !std::isfinite(controls.taper) || controls.taper < 0 || controls.taper > 1 ||
-        !std::isfinite(controls.taperStart) || controls.taperStart < 0 ||
-        controls.taperStart > 1)
-        return {};
-    // A neutral profile is exactly the legacy flat operation.  In particular,
-    // it neither requires nor retains hairT.
-    if (controls.IsNeutral())
-        return Begin(std::move(input), count, width, replace, result,
-                     std::move(beforeSubmit));
-    return BeginInternal(std::move(input), std::move(hairT), count, width, replace,
-                         &controls, result, std::move(beforeSubmit));
-}
 } // namespace usdGen::vulkan

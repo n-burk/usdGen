@@ -3,18 +3,16 @@
 #define USDGEN_VULKAN_EXECUTION_PLAN_H
 
 #include "usdGen/executionBackend.h"
-#include "widthProfileControls.h"
 
 #include <memory>
 
 namespace usdGen::vulkan {
 
-// Literal scalar controls. Non-neutral profiles require the separately trusted
-// profile shader; ramps, maps and expression-driven controls remain excluded.
+// Literal scalar controls accepted by the flat Width shader. Ramps, maps,
+// profiles and expression-driven controls remain excluded from this lane.
 struct VulkanLiteralWidthControls {
     float width = 0.01f;
     bool replace = true;
-    VulkanWidthProfileControls profile;
 };
 
 struct VulkanSourceWidthStage {

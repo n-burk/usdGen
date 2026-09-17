@@ -23,7 +23,7 @@ inline bool PackSource(VulkanSourcePrepareInfo const& in,
     auto optionalSize = [](size_t actual, size_t expected) { return !actual || actual == expected; };
     if (!optionalSize(b.rest.size(), p) || !optionalSize(b.width.size(), p) ||
         !optionalSize(b.hairT.size(), p) || !optionalSize(b.rootPrim.size(), c) ||
-        !optionalSize(b.rootUV.size(), c) || !optionalSize(b.curveMask.size(), c))
+        !optionalSize(b.rootUV.size(), c))
         return fail("source optional channel cardinality mismatch");
     bool frames = !b.rootT.empty() || !b.rootB.empty() || !b.rootN.empty();
     if (frames && (b.rootT.size() != c || b.rootB.size() != c || b.rootN.size() != c))
@@ -42,7 +42,7 @@ inline bool PackSource(VulkanSourcePrepareInfo const& in,
     }
     for (size_t i = 0; i != c; ++i) {
         if (!b.rootUV.empty() && (!finite(b.rootUV[i][0]) || !finite(b.rootUV[i][1]))) return fail("nonfinite root UV");
-        if (!b.curveMask.empty() && !finite(b.curveMask[i])) return fail("nonfinite curve mask");
+
         if (frames) for (int a = 0; a != 3; ++a)
             if (!finite(b.rootT[i][a]) || !finite(b.rootB[i][a]) || !finite(b.rootN[i][a]))
                 return fail("nonfinite source frame");
@@ -97,11 +97,11 @@ inline bool PackSource(VulkanSourcePrepareInfo const& in,
     optional("hairT",T::Float32,D::Point,p,1,S::HairT,b.hairT);
     optional("rootPrim",T::Int32,D::Primitive,c,1,S::RootPrim,b.rootPrim);
     optional("rootUV",T::Float32x2,D::Primitive,c,2,S::RootUV,b.rootUV);
-    optional("curveMask",T::Float32,D::Primitive,c,1,S::Generic,b.curveMask);
+
     optional("sourceRootT",T::Float32x3,D::Primitive,c,3,S::Generic,b.rootT,true);
     optional("sourceRootB",T::Float32x3,D::Primitive,c,3,S::Generic,b.rootB,true);
     optional("sourceRootN",T::Float32x3,D::Primitive,c,3,S::Generic,b.rootN,true);
-    std::set<std::string> names{"points","curveOffsets","stableIds","rest","width","widths","restPoints","hairT","rootPrim","rootUV","curveMask","sourceRootT","sourceRootB","sourceRootN","sourceChunks"};
+    std::set<std::string> names{"points","curveOffsets","stableIds","rest","width","widths","restPoints","hairT","rootPrim","rootUV","sourceRootT","sourceRootB","sourceRootN","sourceChunks"};
     auto named = [&](VulkanSourceNamedChannel const& channel) {
         if (channel.metadata.semantic != S::Generic || !names.insert(channel.metadata.name).second)
             return fail("source named channel collides with a reserved or authored field");

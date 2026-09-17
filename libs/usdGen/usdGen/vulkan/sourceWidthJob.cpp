@@ -64,11 +64,6 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
         (info.nonWidthComparePipeline && info.nonWidthComparePipeline->context() != info.source.context) ||
         info.valueVersion<=info.source.source.valueVersion || !std::isfinite(info.width) ||
         info.width<0 || info.replace>1 ||
-        !std::isfinite(info.profile.rootScale) || info.profile.rootScale < 0 ||
-        !std::isfinite(info.profile.tipScale) || info.profile.tipScale < 0 ||
-        !std::isfinite(info.profile.taper) || info.profile.taper < 0 || info.profile.taper > 1 ||
-        !std::isfinite(info.profile.taperStart) || info.profile.taperStart < 0 || info.profile.taperStart > 1 ||
-        (!info.profile.IsNeutral() && !info.widthPipeline->HasProfile()) ||
         (info.stages.empty() && info.lengthPipeline && (!std::isfinite(info.lengthFactor) || info.lengthFactor < 0 ||
             info.lengthValueVersion <= info.source.source.valueVersion ||
             info.valueVersion <= info.lengthValueVersion))) {
@@ -84,7 +79,7 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
             }
             VulkanSourceWidthStage width; width.input = uint32_t(info.stages.size());
             width.width.width = info.width; width.width.replace = info.replace != 0;
-            width.width.profile = info.profile; info.stages.push_back(width);
+            info.stages.push_back(width);
             info.stageValueVersions.push_back(info.valueVersion);
         }
         if (info.stages.size() > 64 || info.stageValueVersions.size() != info.stages.size() ||
@@ -128,12 +123,7 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
                 (invalidLengthMethod || invalidLengthMode || invalidLengthRebuild || invalidMinimum || invalidRandom ||
                  invalidEnvelope)) return {};
             if (stage.kind == VulkanSourceWidthStage::Kind::Width) {
-                auto const& p = stage.width.profile;
-                if (!std::isfinite(stage.width.width) || stage.width.width < 0 ||
-                    !std::isfinite(p.rootScale) || p.rootScale < 0 || !std::isfinite(p.tipScale) || p.tipScale < 0 ||
-                    !std::isfinite(p.taper) || p.taper < 0 || p.taper > 1 ||
-                    !std::isfinite(p.taperStart) || p.taperStart < 0 || p.taperStart > 1 ||
-                    (!p.IsNeutral() && !info.widthPipeline->HasProfile())) return {};
+                if (!std::isfinite(stage.width.width) || stage.width.width < 0) return {};
             } else if (stage.kind == VulkanSourceWidthStage::Kind::LengthScale) {
                 if (!info.lengthPipeline) return {};
                 bool const literalV1 = stage.randomLo != 1.0f || stage.randomHi != 1.0f;
@@ -735,14 +725,8 @@ void VulkanSourceWidthJob::BeginWidth() {
                 phaseMarked = watch_ && watch_->MarkPhaseSubmitted();
                 return phaseMarked;
             };
-            if (controls.profile.IsNeutral()) {
-                width_=info_.widthPipeline->Begin(base_->PlaneOwner("width"),base_->pointCount(),
-                    controls.width,controls.replace ? 1u : 0u,&status,std::move(beforeSubmit));
-            } else {
-                width_=info_.widthPipeline->BeginProfile(base_->PlaneOwner("width"),
-                    base_->PlaneOwner("hairT"),base_->pointCount(),controls.width,controls.replace ? 1u : 0u,
-                    controls.profile,&status,std::move(beforeSubmit));
-            }
+            width_=info_.widthPipeline->Begin(base_->PlaneOwner("width"),base_->pointCount(),
+                controls.width,controls.replace ? 1u : 0u,&status,std::move(beforeSubmit));
             if (!width_) {
                 if (watch_) {
                     if (!phaseMarked) {

@@ -31,7 +31,6 @@ public:
         // owner. Null preserves the explicit synchronous-preparation probe
         // path, not the intended production scheduling policy.
         std::shared_ptr<UsdGenExecutionTaskGraph> preparer;
-        VulkanWidthProfileControls profile;
         std::shared_ptr<LengthScalePipeline> lengthPipeline = {};
         float lengthFactor = 1.0f;
         uint64_t lengthValueVersion = 0;

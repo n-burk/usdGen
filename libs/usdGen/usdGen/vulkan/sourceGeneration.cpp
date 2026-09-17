@@ -348,8 +348,7 @@ std::shared_ptr<const VulkanSourceGeneration> VulkanSourceGeneration::WithWidth(
     WidthPipeline::Candidate const& candidate, uint64_t value, std::string* why) {
     if (!base || value <= base->valueVersion() || !candidate.succeeded() ||
         candidate.count() != base->pointCount() || candidate.context() != base->context() ||
-        candidate.inputOwner() != base->PlaneOwner("width") ||
-        (candidate.usesHairT() && candidate.hairTOwner() != base->PlaneOwner("hairT"))) {
+        candidate.inputOwner() != base->PlaneOwner("width")) {
         if (why) *why = "invalid width COW proof";
         return {};
     }

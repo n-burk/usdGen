@@ -21,10 +21,6 @@ int main() {
     uint32_t magic = 0;
     shader.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     if (!shader || magic != 0x07230203u) return 1;
-    std::ifstream profile(USDGEN_VULKAN_PROFILE_SHADER, std::ios::binary);
-    magic = 0;
-    profile.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    if (!profile || magic != 0x07230203u) return 5;
     std::ifstream length(USDGEN_VULKAN_LENGTH_SHADER, std::ios::binary);
     magic = 0;
     length.read(reinterpret_cast<char*>(&magic), sizeof(magic));
@@ -69,8 +65,6 @@ int main() {
     if (usdGen::vulkan::VulkanSessionProvider::Create({})) return 2;
     if (usdGen::vulkan::DeviceFactory::CreateContext({}, {})) return 3;
     if (usdGen::CreateUsdGenDeviceSession(1, 8, {}, {})) return 4;
-    if (!usdGen::vulkan::VulkanWidthProfileControls{}.IsNeutral()) return 6;
-    if (usdGen::vulkan::WidthPipeline::CreateWithProfile({}, {}, {})) return 7;
     if (usdGen::vulkan::LengthScalePipeline::Create({}, {})) return 9;
     if (usdGen::vulkan::LengthScalePipeline::CreateWithSet({}, {}, {})) return 35;
     if (usdGen::vulkan::LengthScalePipeline::CreateWithCutExtend({}, {}, {}, {})) return 42;
@@ -282,19 +276,37 @@ int main() {
         return 58;
 
     auto envelopeDesc = randomDesc;
-    envelopeDesc.nodes[1].blend = .5f;
     envelopeDesc.nodes[1].params.push_back(
-        {TfToken("mask:amount"), VtValue(.5f), false});
+        {TfToken("mask"), VtValue(.5f), false});
     auto envelopeHandle = usdGen::vulkan::CompileVulkanSourceWidthPlan(envelopeDesc);
     if (!envelopeHandle) return 61;
     auto envelopePlan = std::static_pointer_cast<const usdGen::vulkan::VulkanSourceWidthPlan>(
         envelopeHandle->Payload());
     if (!envelopePlan || envelopePlan->Steps().size() != 3 ||
-        envelopePlan->Steps()[0].lengthBlend != .5f ||
+        envelopePlan->Steps()[0].lengthBlend != 1.f ||
         envelopePlan->Steps()[0].lengthMaskAmount != .5f ||
         envelopePlan->Steps()[0].randomSeed != -12345 ||
         envelopePlan->Steps()[0].minRemainingLength != 2.5f)
         return 62;
+
+    // WidthBlend must lower the authored literal weight into its stage.
+    usdGen::UsdGenNodeDesc rightW = width; rightW.path = SdfPath("/Groom/Ops/widthR");
+    rightW.params = {{TfToken("width"), VtValue(.5f), false}};
+    usdGen::UsdGenNodeDesc join;
+    join.path = SdfPath("/Groom/Ops/join"); join.type = TfToken("UsdGenWidthBlend");
+    join.inputs = {width.path, rightW.path};
+    join.params = {{TfToken("widthBlend:weight"), VtValue(.25f), false}};
+    auto joinDesc = rooted;
+    joinDesc.nodes = {source, rightW, width, join}; joinDesc.terminal = join.path;
+    auto joinHandle = usdGen::vulkan::CompileVulkanSourceWidthPlan(joinDesc);
+    if (!joinHandle) return 63;
+    auto joinPlan = std::static_pointer_cast<const usdGen::vulkan::VulkanSourceWidthPlan>(
+        joinHandle->Payload());
+    if (!joinPlan || joinPlan->Steps().size() != 3 ||
+        joinPlan->Steps()[2].kind != usdGen::vulkan::VulkanSourceWidthStage::Kind::WidthBlend ||
+        joinPlan->Steps()[2].blend != .25f ||
+        joinPlan->Steps()[2].rightInput == joinPlan->Steps()[2].input)
+        return 64;
 
     // A positive threshold on a fixed-topology Scale/Set is lowered to an
     // internal transform followed by an authored Cull.  Exercise both

@@ -64,7 +64,7 @@ UsdGenGraphDesc MakeFanoutDesc() {
     right.params[0].value = VtValue(1.5f);
     auto blend = UsdGenNodeDesc{};
     blend.path = SdfPath("/Groom/Ops/blend"); blend.type = TfToken("UsdGenWidthBlend");
-    blend.inputs = {left.path, right.path}; blend.blend = .25f;
+    blend.inputs = {left.path, right.path}; blend.params = {{TfToken("widthBlend:weight"), VtValue(.25f), false}};
     // Deliberately authored out of dependency order: the compiler must topo-sort.
     desc.nodes = {source, blend, right, left}; desc.terminal = blend.path;
     return desc;
@@ -506,7 +506,8 @@ int main() {
     rightWidth.inputs = {cull.path};
     UsdGenNodeDesc branchBlend; branchBlend.path = SdfPath("/Groom/Ops/cullBlend");
     branchBlend.type = TfToken("UsdGenWidthBlend");
-    branchBlend.inputs = {branchEqual.nodes[2].path, rightWidth.path}; branchBlend.blend = .5f;
+    branchBlend.inputs = {branchEqual.nodes[2].path, rightWidth.path};
+    branchBlend.params = {{TfToken("widthBlend:weight"), VtValue(.5f), false}};
     branchEqual.nodes = {branchEqual.nodes[0], cull, branchEqual.nodes[2], rightWidth, branchBlend};
     branchEqual.terminal = branchBlend.path;
     diagnostics = {};
@@ -888,16 +889,16 @@ int main() {
         auto envelopeDesc = MakeDesc();
         UsdGenNodeDesc envelope;
         envelope.path = SdfPath("/Groom/Ops/envelope"); envelope.type = TfToken("UsdGenLength");
-        envelope.inputs = {envelopeDesc.nodes[0].path}; envelope.blend = .5f;
+        envelope.inputs = {envelopeDesc.nodes[0].path};
         envelope.params = {{TfToken("length:value"), VtValue(2.f), false},
-                           {TfToken("mask:amount"), VtValue(.5f), false}};
+                           {TfToken("mask"), VtValue(.5f), false}};
         envelopeDesc.nodes[1].inputs = {envelope.path};
         envelopeDesc.nodes.insert(envelopeDesc.nodes.begin() + 1, envelope);
         auto envelopeHandle = CompileVulkanSourceWidthPlan(envelopeDesc);
         CHECK(envelopeHandle);
         auto envelopePlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(envelopeHandle->Payload());
         CHECK(envelopePlan && envelopePlan->Steps().size() == 2 &&
-              envelopePlan->Steps()[0].lengthBlend == .5f &&
+              envelopePlan->Steps()[0].lengthBlend == 1.f &&
               envelopePlan->Steps()[0].lengthMaskAmount == .5f &&
               !envelopePlan->Steps()[0].lengthCullOnly);
         auto envelopeThreshold = envelopeDesc;
@@ -908,7 +909,7 @@ int main() {
         CHECK(envelopeThresholdPlan && envelopeThresholdPlan->Steps().size() == 3 &&
               envelopeThresholdPlan->Steps()[1].cullThreshold == 3.f);
         auto zeroEnvelopeThreshold = envelopeDesc;
-        zeroEnvelopeThreshold.nodes[1].blend = 0.f;
+
         zeroEnvelopeThreshold.nodes[1].params[1].value = VtValue(0.f);
         zeroEnvelopeThreshold.nodes[1].params.push_back({TfToken("cullThreshold"), VtValue(3.f), false});
         auto zeroEnvelopeThresholdHandle = CompileVulkanSourceWidthPlan(zeroEnvelopeThreshold);
@@ -919,7 +920,7 @@ int main() {
               zeroEnvelopeThresholdPlan->Steps()[1].cullThreshold == 3.f);
         auto envelopeCull = envelopeDesc;
         envelopeCull.nodes[1].params = {{TfToken("length:mode"), VtValue(TfToken("cull")), false},
-                                        {TfToken("mask:amount"), VtValue(.5f), false}};
+                                        {TfToken("mask"), VtValue(.5f), false}};
         auto envelopeCullHandle = CompileVulkanSourceWidthPlan(envelopeCull);
         CHECK(envelopeCullHandle);
         auto envelopeCullMetadata = envelopeCullHandle->Metadata();
@@ -935,8 +936,7 @@ int main() {
               envelopeCullMetadata->Tasks()[2].semanticNode == 1 &&
               envelopeCullMetadata->Tasks()[2].topologyBarrier);
         auto neutralCull = envelopeCull;
-        neutralCull.nodes[1].blend = 1.f;
-        neutralCull.nodes[1].params[1] = {TfToken("mask:amount"), VtValue(1.f), false};
+        neutralCull.nodes[1].params[1] = {TfToken("mask"), VtValue(1.f), false};
         auto neutralCullHandle = CompileVulkanSourceWidthPlan(neutralCull);
         CHECK(neutralCullHandle);
         auto neutralCullPlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(neutralCullHandle->Payload());
@@ -946,17 +946,14 @@ int main() {
             auto rejected = envelopeDesc; rejected.nodes[1] = std::move(node);
             return Rejects(rejected);
         };
-        for (float value : {-1.f, std::numeric_limits<float>::quiet_NaN(),
-                            std::numeric_limits<float>::infinity(), 2.f}) {
-            auto badBlend = envelope; badBlend.blend = value; badBlend.params[1].value = VtValue(0.f);
-            CHECK(rejectEnvelope(badBlend));
-        }
+        // The removed node-level mute leaves `mask` as the single envelope
+        // control: out-of-range values must reject regardless of `length:value`.
         for (VtValue value : {VtValue(-1.f), VtValue(std::numeric_limits<float>::quiet_NaN()),
                               VtValue(std::numeric_limits<float>::infinity()), VtValue(2.f)}) {
-            auto badMask = envelope; badMask.blend = 0.f; badMask.params[1].value = value; CHECK(rejectEnvelope(badMask));
+            auto badMask = envelope; badMask.params[1].value = value; CHECK(rejectEnvelope(badMask));
         }
-        auto wrongMask = envelope; wrongMask.blend = 0.f; wrongMask.params[1].value = VtValue(TfToken("bad")); CHECK(rejectEnvelope(wrongMask));
-        auto animatedMask = envelope; animatedMask.blend = 0.f; animatedMask.params[1].animated = true; CHECK(rejectEnvelope(animatedMask));
+        auto wrongMask = envelope; wrongMask.params[1].value = VtValue(TfToken("bad")); CHECK(rejectEnvelope(wrongMask));
+        auto animatedMask = envelope; animatedMask.params[1].animated = true; CHECK(rejectEnvelope(animatedMask));
         auto literalBlend = envelope; literalBlend.params.push_back({TfToken("blend"), VtValue(.5f), false}); CHECK(rejectEnvelope(literalBlend));
     }
     auto reversed = MakeDesc();
@@ -970,19 +967,27 @@ int main() {
           !source.estimate.memoryAvailable && !source.estimate.memoryConservativeUpperBound &&
           source.estimate.retainedOutputBytes > 0 && width.estimate.retainedOutputBytes > 0);
 
+    // Profile controls are no longer admissible on the flat Width lane; the
+    // pass-through whitelist admits only empty knots and neutral interpolation.
     auto profileDesc = MakeDesc();
-    profileDesc.nodes[1].params.push_back({TfToken("taper"), VtValue(.25f), false});
-    profileDesc.nodes[1].params.push_back({TfToken("taperStart"), VtValue(.75f), false});
-    profileDesc.nodes[1].params.push_back({TfToken("rootScale"), VtValue(.5f), false});
-    profileDesc.nodes[1].params.push_back({TfToken("tipScale"), VtValue(2.0f), false});
+    profileDesc.nodes[1].params.push_back({TfToken("width:knots"), VtValue(VtVec2fArray{}), false});
+    profileDesc.nodes[1].params.push_back({TfToken("width:interpolation"), VtValue(TfToken("catmullRom")), false});
     auto profileHandle = CompileVulkanSourceWidthPlan(profileDesc);
     CHECK(profileHandle);
-    auto profilePlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(profileHandle->Payload());
-    CHECK(profilePlan->Width().profile.taper == .25f &&
-          profilePlan->Width().profile.taperStart == .75f &&
-          profilePlan->Width().profile.rootScale == .5f &&
-          profilePlan->Width().profile.tipScale == 2.0f &&
-          !profilePlan->Width().profile.IsNeutral());
+    CHECK(std::static_pointer_cast<const VulkanSourceWidthPlan>(profileHandle->Payload())->Steps().size() == 1);
+    for (auto token : {TfToken("taper"), TfToken("taperStart"), TfToken("rootScale"), TfToken("tipScale"), TfToken("label")}) {
+        auto bad = MakeDesc();
+        bad.nodes[1].params.push_back({token, VtValue(.5f), false});
+        CHECK(!CompileVulkanSourceWidthPlan(bad));
+    }
+    {
+        auto bad = MakeDesc();
+        bad.nodes[1].params.push_back({TfToken("width:interpolation"), VtValue(TfToken("linear")), false});
+        CHECK(!CompileVulkanSourceWidthPlan(bad));
+        auto knots = MakeDesc();
+        knots.nodes[1].params.push_back({TfToken("width:knots"), VtValue(VtVec2fArray{{0.f, 1.f}}), false});
+        CHECK(!CompileVulkanSourceWidthPlan(knots));
+    }
 
     auto fanout = MakeFanoutDesc();
     auto fanoutHandle = CompileVulkanSourceWidthPlan(fanout);

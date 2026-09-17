@@ -45,7 +45,7 @@ static VulkanSourceGenerationCreateInfo Fixture(std::shared_ptr<DeviceContext> c
     b.hairT = {0,.25f,.75f,1,0,.25f,.75f,1}; b.curveId = {7,19}; b.cvOffsets = {0,4,8};
     b.rootPrim = {3,7}; b.rootUV = {GfVec2f(.2f,.4f), GfVec2f(.7f,.8f)};
     b.rootT = VtVec3fArray(2, GfVec3f(0,1,0)); b.rootB = VtVec3fArray(2, GfVec3f(0,0,1));
-    b.rootN = VtVec3fArray(2, GfVec3f(1,0,0)); b.curveMask = {.25f,1.f};
+    b.rootN = VtVec3fArray(2, GfVec3f(1,0,0)); UsdGenPlane maskPlane; maskPlane.name = TfToken("curveMask"); maskPlane.interpolation = TfToken("uniform"); maskPlane.type = TfToken("float"); maskPlane.f = {{.25f,1.f}};
     UsdGenChunkDesc chunk; chunk.curveCount = 2; chunk.liveCount = 2; chunk.cvCount = 4;
     chunk.tile = 9; chunk.surface = 2; chunk.boundsRest = GfRange3f(GfVec3f(0), GfVec3f(8));
     b.chunks = {chunk};
@@ -59,7 +59,7 @@ static VulkanSourceGenerationCreateInfo Fixture(std::shared_ptr<DeviceContext> c
     gi.type = TfToken("int"); gi.arity = 3; gi.i = {3,2,1,7,8,9};
     UsdGenPlane gf; gf.name = TfToken("guideWeight"); gf.interpolation = TfToken("uniform");
     gf.type = TfToken("float"); gf.arity = 3; gf.f = {.2f,.3f,.5f,.1f,.2f,.7f};
-    b.extraCurve = {cf,gi,gf};
+    b.extraCurve = {cf,maskPlane,gi,gf};
     info.geometry.curveTopology = {UsdGenDeviceCurveType::Cubic, UsdGenDeviceCurveBasis::CatmullRom, UsdGenDeviceCurveWrap::Pinned};
     info.geometry.alreadyDeformed = true;
     UsdGenDeviceTileMetadata tile{9,0,2,0,8}; tile.extentMin = {0,0,0}; tile.extentMax = {8,8,8}; tile.boundsValid = true;
@@ -73,10 +73,9 @@ static VulkanSourceGenerationCreateInfo Fixture(std::shared_ptr<DeviceContext> c
 int main(int argc, char** argv) {
     bool quarantine = argc == 2 && std::string(argv[1]) == "--quarantine";
     bool cow = argc == 3 && std::string(argv[1]) == "--cow";
-    bool profile = argc == 4 && std::string(argv[1]) == "--profile";
     bool length = argc == 4 && std::string(argv[2]) == "--length";
     bool blend = argc == 4 && std::string(argv[1]) == "--blend";
-    CHECK(argc == 1 || quarantine || cow || profile || length || blend);
+    CHECK(argc == 1 || quarantine || cow || length || blend);
     bool unavailable = false; auto native = CreateNative(&unavailable);
     if (unavailable) return 77;
     CHECK(native); std::weak_ptr<NativeOwner> weakNative = native;
@@ -149,7 +148,7 @@ int main(int argc, char** argv) {
     CHECK(original.at("curveOffsets") == Bytes(offsets.data(),offsets.size()));
     CHECK(original.at("rootPrim") == Bytes(info.source.rootPrim.cdata(),2));
     CHECK(original.at("rootUV") == Bytes(info.source.rootUV.cdata(),2));
-    CHECK(original.at("curveMask") == Bytes(info.source.curveMask.cdata(),2));
+    CHECK(original.at("curveMask") == Bytes(info.source.extraCurve[1].f.cdata(),2));
     for (auto const& p:info.source.extraCv) CHECK(original.at(p.name.GetString()) ==
         (p.type == TfToken("int") ? Bytes(p.i.cdata(),p.i.size()) : Bytes(p.f.cdata(),p.f.size())));
     for (auto const& p:info.source.extraCurve) CHECK(original.at(p.name.GetString()) ==
@@ -181,7 +180,7 @@ int main(int argc, char** argv) {
     CHECK(observed.at("stableIds") == Bytes(permuted.source.curveId.cdata(),2));
     auto absent = info; absent.source.rest.clear(); absent.source.hairT.clear(); absent.source.rootPrim.clear();
     absent.source.rootUV.clear(); absent.source.rootT.clear(); absent.source.rootB.clear(); absent.source.rootN.clear();
-    absent.source.curveMask.clear();
+    absent.source.extraCurve.erase(absent.source.extraCurve.begin() + 1);
     auto c = publish(absent); CHECK(c); CHECK(Capture(native,context,c,&observed));
     CHECK(c->sourceFrames().empty());
     CHECK(!observed.count("rest") && !observed.count("hairT") && !observed.count("rootPrim") && !observed.count("rootUV") && !observed.count("curveMask"));
@@ -262,98 +261,6 @@ int main(int argc, char** argv) {
         CHECK(!weakBase.expired());
         CHECK(Capture(native,context,grandchild,&observed) && observed==expected);
         a=weakBase.lock(); CHECK(a);
-    }
-    if (profile) {
-        auto loadCode = [](char const* path) {
-            std::ifstream file(path, std::ios::binary);
-            std::vector<char> bytes((std::istreambuf_iterator<char>(file)), {});
-            std::vector<uint32_t> code(bytes.size() / sizeof(uint32_t));
-            if (!bytes.empty() && bytes.size() % sizeof(uint32_t) == 0)
-                std::memcpy(code.data(), bytes.data(), bytes.size());
-            return code;
-        };
-        auto flat = WidthPipeline::Create(context, loadCode(argv[2]), &status);
-        auto pipeline = WidthPipeline::CreateWithProfile(context, loadCode(argv[2]), loadCode(argv[3]), &status);
-        CHECK(flat && !flat->HasProfile() && pipeline && pipeline->HasProfile());
-        CHECK(!WidthPipeline::CreateWithProfile(context, loadCode(argv[2]), {}, &status));
-        CHECK(status == VK_ERROR_INITIALIZATION_FAILED);
-        VulkanWidthProfileControls controls;
-        controls.rootScale=.35f; controls.tipScale=1.7f; controls.taper=.65f; controls.taperStart=.2f;
-        auto const before = pool->Snapshot().usedBytes;
-        int hooks=0;
-        CHECK(!flat->BeginProfile(a->PlaneOwner("width"),a->PlaneOwner("hairT"),8,1.25f,0,controls,&status,[&]{ ++hooks; return true; }));
-        CHECK(!pipeline->BeginProfile(a->PlaneOwner("width"),{},8,1.25f,0,controls,&status));
-        auto invalid=controls; invalid.taperStart=std::numeric_limits<float>::quiet_NaN();
-        CHECK(!pipeline->BeginProfile({}, {},0,1.f,0,invalid,&status));
-        CHECK(!pipeline->BeginProfile(a->PlaneOwner("width"),a->PlaneOwner("hairT"),8,1.25f,0,controls,&status,[&]{ ++hooks; return false; }));
-        CHECK(hooks==1 && pool->Snapshot().usedBytes==before);
-        VulkanWidthProfileControls neutral; neutral.taperStart=1.f;
-        auto empty=flat->BeginProfile({}, {},0,1.f,0,neutral,&status,[&]{ ++hooks; return true; });
-        CHECK(empty && empty->succeeded() && !empty->usesHairT() && hooks==1);
-        auto profileEmpty=pipeline->BeginProfile({}, {},0,1.f,0,controls,&status,[&]{ ++hooks; return true; });
-        CHECK(profileEmpty && profileEmpty->succeeded() && hooks==1);
-        CHECK(VulkanSourceGeneration::WithWidth(e,*profileEmpty,2,&reason));
-        // Correct width provenance alone is insufficient: a second source's
-        // separately owned hairT must not authorize publication on `a`.
-        auto foreign=pipeline->BeginProfile(a->PlaneOwner("width"),b->PlaneOwner("hairT"),8,1.25f,0,controls,&status);
-        CHECK(foreign && Prove(native)); uint32_t semantic=UINT32_MAX;
-        CHECK(foreign->Poll(&semantic)==VK_SUCCESS && semantic==0 && foreign->usesHairT());
-        CHECK(!VulkanSourceGeneration::WithWidth(a,*foreign,9,&reason));
-        foreign.reset();
-        // Content validation is performed on GPU; the host only validates
-        // this immutable input's context, size, usage and completion state.
-        for (float badT : {-0.1f, 1.1f, std::numeric_limits<float>::quiet_NaN()}) {
-            VkBufferCreateInfo bufferInfo{}; bufferInfo.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bufferInfo.size=8*sizeof(float); bufferInfo.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            bufferInfo.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
-            auto malformed=ChargedBuffer::Create(context,bufferInfo,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Active,&status); CHECK(malformed);
-            std::vector<float> values(8,0.5f); values[3]=badT;
-            void* mapped=nullptr;
-            CHECK(vkMapMemory(native->device,malformed->memory(),0,bufferInfo.size,0,&mapped)==VK_SUCCESS);
-            std::memcpy(mapped,values.data(),bufferInfo.size);
-            vkUnmapMemory(native->device,malformed->memory());
-            auto candidate=pipeline->BeginProfile(a->PlaneOwner("width"),malformed,8,1.25f,0,controls,&status);
-            CHECK(candidate && Prove(native));
-            CHECK(candidate->Poll(&semantic)==VK_SUCCESS && semantic==1 && !candidate->succeeded());
-            CHECK(!candidate->output() && !VulkanSourceGeneration::WithWidth(a,*candidate,9,&reason));
-        }
-        auto overflowControls=controls;
-        overflowControls.rootScale=overflowControls.tipScale=std::numeric_limits<float>::max();
-        auto overflow=pipeline->BeginProfile(a->PlaneOwner("width"),a->PlaneOwner("hairT"),8,
-            std::numeric_limits<float>::max(),0,overflowControls,&status);
-        CHECK(overflow && Prove(native));
-        CHECK(overflow->Poll(&semantic)==VK_SUCCESS && semantic==2 && !overflow->output());
-        CHECK(!VulkanSourceGeneration::WithWidth(a,*overflow,9,&reason));
-        overflow.reset();
-        for (uint32_t replace : {0u,1u}) {
-            auto candidate=pipeline->BeginProfile(a->PlaneOwner("width"),a->PlaneOwner("hairT"),8,1.25f,replace,controls,&status);
-            CHECK(candidate && candidate->hairTOwner()==a->PlaneOwner("hairT") && Prove(native));
-            CHECK(candidate->Poll(&semantic)==VK_SUCCESS && semantic==0);
-            auto child=VulkanSourceGeneration::WithWidth(a,*candidate,10+replace,&reason); CHECK(child);
-            for (auto const& plane:a->planes()) {
-                auto owner=child->PlaneOwner(plane.metadata.name);
-                if (plane.metadata.semantic==UsdGenDeviceChannelSemantic::Widths)
-                    CHECK(owner==candidate->output() && owner!=a->PlaneOwner(plane.metadata.name));
-                else CHECK(owner==a->PlaneOwner(plane.metadata.name));
-            }
-            CHECK(child->ExclusiveRetainedBytes()==candidate->output()->allocationBytes());
-            CHECK(child->InclusiveRetainedBytes()==a->InclusiveRetainedBytes()+child->ExclusiveRetainedBytes());
-            CHECK(&child->chunks()==&a->chunks() && &child->sourceFrames()==&a->sourceFrames());
-            std::vector<float> widths(8);
-            for (size_t i=0;i<widths.size();++i) {
-                float t=info.source.hairT[i], target=1.25f;
-                if (controls.taper>0 && t>controls.taperStart)
-                    target*=1.f-controls.taper*(t-controls.taperStart)/(1.f-controls.taperStart);
-                target*=controls.rootScale+(controls.tipScale-controls.rootScale)*t;
-                float input=info.source.width[i];
-                widths[i]=replace ? input+(target-input) : input*(1.f+(target-1.f));
-            }
-            auto expected=original; expected["width"]=Bytes(widths.data(),widths.size());
-            CHECK(Capture(native,context,child,&observed) && observed==expected);
-            CHECK(Capture(native,context,a,&observed) && observed==original);
-        }
     }
     if (length) {
         auto loadCode = [](char const* path) {

@@ -47,7 +47,7 @@ static VulkanSourceGenerationCreateInfo Fixture(std::shared_ptr<DeviceContext> c
     s.rootT = {{1,0,0},{1,0,0},{1,0,0},{1,0,0}};
     s.rootB = {{0,1,0},{0,1,0},{0,1,0},{0,1,0}};
     s.rootN = {{0,0,1},{0,0,1},{0,0,1},{0,0,1}};
-    s.curveMask = {1,1,1,1};
+    UsdGenPlane maskPlane; maskPlane.name = TfToken("curveMask"); maskPlane.interpolation = TfToken("uniform"); maskPlane.type = TfToken("float"); maskPlane.f = {{1.f,1.f,1.f,1.f}}; s.extraCurve = {maskPlane};
     s.chunks = {{0,2,2,0,0,3,1,{}}, {2,2,2,4,0,4,1,{}}};
     info.geometry.alreadyDeformed = true;
     info.geometry.tiles = {{3,0,2,0,4}, {4,2,2,4,4}};

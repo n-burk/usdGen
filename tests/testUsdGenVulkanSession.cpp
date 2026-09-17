@@ -76,6 +76,7 @@ struct BatchRead final {
     std::vector<std::shared_ptr<ChargedBuffer>> staging;
     std::vector<std::vector<uint8_t>> expected;
     std::vector<uint32_t> ulps;
+    std::vector<char const*> names;
     std::unique_ptr<VulkanCompletionService::Watch> watch;
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -147,7 +148,16 @@ void CheckPlanes(std::shared_ptr<NativeOwner> const& native,
                     CHECK(FloatBytesWithinUlps(mapped, reads->expected[i].data(),
                                               reads->expected[i].size(), reads->ulps[i]));
                 else
-                    CHECK(std::memcmp(mapped, reads->expected[i].data(), reads->expected[i].size()) == 0);
+                if (std::memcmp(mapped, reads->expected[i].data(), reads->expected[i].size()) != 0) {
+                    auto const* first = static_cast<unsigned char const*>(mapped);
+                    for (size_t b = 0; b != reads->expected[i].size(); ++b)
+                        if (first[b] != reads->expected[i][b]) {
+                            std::fprintf(stderr, "plane mismatch %s at byte %zu (got %u want %u)\n",
+                                         reads->names[i], b, first[b], reads->expected[i][b]);
+                            break;
+                        }
+                    CHECK(false);
+                }
                 vkUnmapMemory(reads->native->device, reads->staging[i]->memory());
             }
             CHECK(reads->watch->Retire()); reads->watch.reset(); reads->proved = true;
@@ -196,6 +206,7 @@ void CheckPlanes(std::shared_ptr<NativeOwner> const& native,
             VkBufferCopy copy{0, 0, plane->bytes}; vkCmdCopyBuffer(reads->command, plane->buffer, staging->buffer(), 1, &copy);
             reads->staging.push_back(std::move(staging)); reads->expected.push_back(item.second);
             reads->ulps.push_back(std::strcmp(item.first, "points") == 0 ? expected.computedPointUlps : 0);
+            reads->names.push_back(item.first);
         }
         VkMemoryBarrier after{}; after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -327,7 +338,7 @@ static UsdGenGraphDesc MakeProviderDagDescriptor(bool withLength) {
     blend.path = SdfPath("/SessionProvider/blend");
     blend.type = TfToken("UsdGenWidthBlend");
     blend.inputs = {desc.nodes[desc.nodes.size() - 2].path, right.path};
-    blend.blend = 0.25f;
+    blend.params = {{TfToken("widthBlend:weight"), VtValue(0.25f), false}};
     desc.nodes.push_back(blend);
     desc.terminal = blend.path;
     return desc;
@@ -403,7 +414,8 @@ static UsdGenGraphDesc MakeProviderRootDagDescriptor(bool withLength, bool affin
     desc.nodes.push_back(right);
     UsdGenNodeDesc blend;
     blend.path = SdfPath("/SessionProvider/blend"); blend.type = TfToken("UsdGenWidthBlend");
-    blend.inputs = {desc.nodes[desc.nodes.size() - 2].path, right.path}; blend.blend = .25f;
+    blend.inputs = {desc.nodes[desc.nodes.size() - 2].path, right.path};
+    blend.params = {{TfToken("widthBlend:weight"), VtValue(.25f), false}};
     desc.nodes.push_back(blend); desc.terminal = blend.path;
     return desc;
 }
@@ -567,13 +579,12 @@ int main(int argc, char** argv) {
     // CMake supplies a flat Width shader first. Optional shader variants use
     // explicit flags so the standalone return/admission modes keep their
     // original two-argument form:
-    //   width.spv [--profile width-profile.spv] [--roots [--affine]]
+    //   width.spv [--roots [--affine]]
     //            [--named] [--length length-scale.spv] [--dag blend.spv]
     //            [--compare compare.spv] [--cut cut-extend.spv] [--reparam reparam.spv]
     //            [--minimum minimum-length.spv] [--literal-v1 literal-v1.spv] [--envelope-v1 envelope-v1.spv]
     if (argc < 2) { std::puts("Vulkan Session provider shader unavailable"); return 77; }
-    bool profileMode = false, lengthMode = false, dagMode = false, lostReturnMode = false, admissionRollbackMode = false;
-    char const* profileShaderPath = nullptr;
+    bool lengthMode = false, dagMode = false, lostReturnMode = false, admissionRollbackMode = false;
     char const* lengthShaderPath = nullptr;
     char const* cullShaderPath = nullptr;
     char const* setShaderPath = nullptr;
@@ -587,9 +598,7 @@ int main(int argc, char** argv) {
     bool namedMode = false, rootsMode = false, affineMode = false;
     for (int argument = 2; argument < argc; ++argument) {
         std::string const option(argv[argument]);
-        if (option == "--profile" && !profileMode && argument + 1 < argc) {
-            profileMode = true; profileShaderPath = argv[++argument];
-        } else if (option == "--length" && !lengthMode && argument + 1 < argc) {
+        if (option == "--length" && !lengthMode && argument + 1 < argc) {
             lengthMode = true; lengthShaderPath = argv[++argument];
         } else if (option == "--cull" && !cullShaderPath && argument + 1 < argc) {
             cullShaderPath = argv[++argument];
@@ -626,7 +635,7 @@ int main(int argc, char** argv) {
     if (compareShaderPath && (!dagMode || (!lengthMode && !cullShaderPath))) return 1;
     if (namedMode && !dagMode) return 1;
     if (affineMode && !rootsMode) return 1;
-    if (cullShaderPath && (profileMode || (lengthMode && !setShaderPath) || lostReturnMode ||
+    if (cullShaderPath && ((lengthMode && !setShaderPath) || lostReturnMode ||
                           admissionRollbackMode || affineMode || namedMode)) return 1;
     if (cullShaderPath && dagMode && !compareShaderPath) return 1;
     if (setShaderPath && !lengthMode) return 1;
@@ -637,8 +646,8 @@ int main(int argc, char** argv) {
                                 !minimumShaderPath)) return 1;
     if (envelopeV1ShaderPath && (!lengthMode || !setShaderPath || !cutShaderPath || !reparamShaderPath ||
                                  !minimumShaderPath || !literalV1ShaderPath)) return 1;
-    if ((lostReturnMode && (admissionRollbackMode || profileMode || lengthMode || dagMode || rootsMode)) ||
-        (admissionRollbackMode && (lostReturnMode || profileMode || lengthMode || dagMode || rootsMode))) {
+    if ((lostReturnMode && (admissionRollbackMode || lengthMode || dagMode || rootsMode)) ||
+        (admissionRollbackMode && (lostReturnMode || lengthMode || dagMode || rootsMode))) {
         std::fprintf(stderr, "standalone Vulkan Session modes cannot select shader variants\n"); return 1;
     }
     std::ifstream shader(argv[1], std::ios::binary);
@@ -674,15 +683,6 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> spirv(raw.size() / sizeof(uint32_t));
     std::memcpy(spirv.data(), raw.data(), raw.size());
     auto pipeline = WidthPipeline::Create(fixture.context, spirv);
-    if (profileMode) {
-        std::ifstream profileShader(profileShaderPath, std::ios::binary);
-        std::vector<char> profileRaw((std::istreambuf_iterator<char>(profileShader)), {});
-        CHECK(!profileRaw.empty() && profileRaw.size() % sizeof(uint32_t) == 0);
-        std::vector<uint32_t> profileCode(profileRaw.size() / sizeof(uint32_t));
-        std::memcpy(profileCode.data(), profileRaw.data(), profileRaw.size());
-        pipeline = WidthPipeline::CreateWithProfile(fixture.context, spirv, profileCode);
-        CHECK(pipeline && pipeline->HasProfile());
-    }
     if (!pipeline) return 77;
     std::shared_ptr<LengthScalePipeline> lengthPipeline;
     if (lengthMode) {
@@ -1004,7 +1004,8 @@ int main(int argc, char** argv) {
             rightWidth.params[0].value = VtValue(2.f);
             UsdGenNodeDesc join;
             join.path = SdfPath("/SessionProvider/cullJoin");
-            join.type = TfToken("UsdGenWidthBlend"); join.blend = .5f;
+            join.type = TfToken("UsdGenWidthBlend");
+            join.params = {{TfToken("widthBlend:weight"), VtValue(.5f), false}};
             join.inputs = {descriptor.nodes.back().path, rightWidth.path};
             branch.nodes.push_back(rightCull); branch.nodes.push_back(rightWidth);
             branch.nodes.push_back(join); branch.terminal = join.path;
@@ -1169,7 +1170,8 @@ int main(int argc, char** argv) {
                     sharedCull.params.back().value = VtValue(.25f);
                     UsdGenNodeDesc cutJoin;
                     cutJoin.path = SdfPath("/SessionProvider/boundedCutJoin");
-                    cutJoin.type = TfToken("UsdGenWidthBlend"); cutJoin.blend = .5f;
+                    cutJoin.type = TfToken("UsdGenWidthBlend");
+                    cutJoin.params = {{TfToken("widthBlend:weight"), VtValue(.5f), false}};
                     cutJoin.inputs = {leftWidth.path, rightWidth.path};
                     cutDag.nodes = {cutDesc.nodes[0], sharedCull, leftCut, leftWidth,
                                     rightCut, rightWidth, cutJoin};
@@ -1664,16 +1666,16 @@ int main(int argc, char** argv) {
                 if (rootsMode) { envelopeCurves.skinPrim = {0}; envelopeCurves.skinPrimUv = {{.25f,.25f}};
                                  envelopeCurves.rootFrame = {GfMatrix4d(1.0)};
                                  envelopeCurves.authoredPlanes.clear(); AddRootAuthoredPlanes(&envelopeCurves); }
-                auto& envelopeNode = envelopeDesc.nodes[1]; envelopeNode.seed = -17; envelopeNode.blend = .5f;
+                auto& envelopeNode = envelopeDesc.nodes[1]; envelopeNode.seed = -17;
                 envelopeNode.params = {{TfToken("length:value"), VtValue(1.f), false},
                                        {TfToken("length:mode"), VtValue(TfToken("scale")), false},
                                        {TfToken("length:method"), VtValue(TfToken("scale")), false},
                                        {TfToken("rebuild"), VtValue(TfToken("keepParam")), false},
                                        {TfToken("minRemainingLength"), VtValue(0.f), false},
                                        {TfToken("length:random"), VtValue(GfVec2f(.75f,.75f)), false},
-                                       {TfToken("mask:amount"), VtValue(1.f), false},
+                                       {TfToken("mask"), VtValue(.5f), false},
                                        {TfToken("cullThreshold"), VtValue(.25f), false}};
-                auto neutralEnvelope = envelopeDesc; neutralEnvelope.nodes[1].blend = 1.f;
+                auto neutralEnvelope = envelopeDesc; neutralEnvelope.nodes[1].params[6].value = VtValue(1.f);
                 neutralEnvelope.nodes[1].params[5].value = VtValue(GfVec2f(1.f,1.f));
                 neutralEnvelope.nodes[1].params[7].value = VtValue(0.f);
                 SixPlaneOracle envelopeRadial; CHECK(BuildCpuReference(neutralEnvelope, &envelopeRadial));
@@ -1728,8 +1730,8 @@ int main(int argc, char** argv) {
                 envelopeCull.nodes[1].params[7].value = VtValue(3.4f);
                 cullProvider->topologyOrdinal = 1;
                 auto envelopeCulls = commitChecked(envelopeCull, envelopeEmpty);
-                // blend=1 and mask=.5 resolves to the same .5 envelope.
-                auto composedEnvelope = envelopeDesc; composedEnvelope.nodes[1].blend = 1.f;
+                // mask=.5 resolves to the same .5 envelope.
+                auto composedEnvelope = envelopeDesc;
                 composedEnvelope.nodes[1].params[6].value = VtValue(.5f);
                 cullProvider->topologyOrdinal = 1;
                 auto composedSnapshot = commitChecked(composedEnvelope, envelopeRadial);
@@ -1740,11 +1742,11 @@ int main(int argc, char** argv) {
                 pureEnvelopeCull.nodes[1].params[1].value = VtValue(TfToken("cull"));
                 pureEnvelopeCull.nodes[1].params[4].value = VtValue(100.f);
                 pureEnvelopeCull.nodes[1].params[7].value = VtValue(100.f);
-                pureEnvelopeCull.nodes[1].blend = 0.f;
+                pureEnvelopeCull.nodes[1].params[6].value = VtValue(0.f);
                 cullProvider->topologyOrdinal = 1;
                 auto pureEnvelopeKeeps = commitChecked(pureEnvelopeCull, envelopeSource);
                 auto partialEnvelopeCull = pureEnvelopeCull;
-                partialEnvelopeCull.nodes[1].blend = .5f;
+                partialEnvelopeCull.nodes[1].params[6].value = VtValue(.5f);
                 cullProvider->topologyOrdinal = 1;
                 auto partialEnvelopeEmpty = commitChecked(partialEnvelopeCull, envelopeEmpty);
                 auto restoreEnvelope = commitChecked(envelopeReparamDesc, envelopeReparamExpected);
@@ -1759,7 +1761,7 @@ int main(int argc, char** argv) {
                       failedEnvelope->generation == restoreEnvelope->generation && session->NeedsCommit());
                 auto zeroEnvelopeRetry = zeroEnvelope;
                 zeroEnvelopeRetry.nodes[1].params[7].value = VtValue(100.f);
-                zeroEnvelopeRetry.nodes[1].blend = 0.f;
+                zeroEnvelopeRetry.nodes[1].params[6].value = VtValue(0.f);
                 SixPlaneOracle zeroEnvelopeExpected = envelopeReparamExpected;
                 zeroEnvelopeExpected.points = {{0,0,0},{0,0,0},{0,0,0}};
                 zeroEnvelopeExpected.rest = zeroEnvelopeExpected.points;
@@ -1848,7 +1850,8 @@ int main(int argc, char** argv) {
                 rightWidth.inputs = {rightLength.path};
                 UsdGenNodeDesc join;
                 join.path = SdfPath("/SessionProvider/compoundJoin");
-                join.type = TfToken("UsdGenWidthBlend"); join.blend = .5f;
+                join.type = TfToken("UsdGenWidthBlend");
+            join.params = {{TfToken("widthBlend:weight"), VtValue(.5f), false}};
                 join.inputs = {compoundScale.nodes.back().path, rightWidth.path};
                 compoundDag.nodes.push_back(rightLength); compoundDag.nodes.push_back(rightWidth);
                 compoundDag.nodes.push_back(join); compoundDag.terminal = join.path;
@@ -1956,13 +1959,6 @@ int main(int argc, char** argv) {
         channels.push_back(groom);
     }
     size_t const widthIndex = dagMode ? descriptor.nodes.size() - 3 : descriptor.nodes.size() - 1;
-    if (profileMode) {
-        auto& controls = descriptor.nodes[widthIndex].params;
-        controls.push_back({TfToken("rootScale"), VtValue(0.35f), false});
-        controls.push_back({TfToken("tipScale"), VtValue(1.7f), false});
-        controls.push_back({TfToken("taper"), VtValue(0.65f), false});
-        controls.push_back({TfToken("taperStart"), VtValue(0.2f), false});
-    }
     if (!BuildCpuReference(descriptor, &oracle) || oracle.points.empty() ||
         oracle.rest.size() != oracle.points.size() ||
         oracle.hairT.size() != oracle.points.size() ||
@@ -2048,12 +2044,6 @@ int main(int argc, char** argv) {
     auto& changedControl = lengthMode ? changed.nodes[1].params[0]
                                       : changed.nodes[widthIndex].params[0];
     changedControl.value = VtValue(lengthMode ? 0.75f : 0.5f);
-    if (profileMode) {
-        // Profile-only edits must participate in cache identity even when
-        // the source generation and scalar width remain unchanged.
-        changed.nodes[widthIndex].params[0].value = descriptor.nodes[widthIndex].params[0].value;
-        changed.nodes[widthIndex].params[2].value = VtValue(0.8f);
-    }
     CHECK(changed.curveSets[0].curveGeneration == descriptor.curveSets[0].curveGeneration);
     SixPlaneOracle changedOracle;
     CHECK(BuildCpuReference(changed, &changedOracle));
@@ -2163,7 +2153,7 @@ int main(int argc, char** argv) {
         // branch through the real Session, not a hard-coded fork fixture.
         for (int variant = 0; variant != (namedMode ? 8 : 6); ++variant) {
             auto dag = descriptor;
-            if (variant < 2) dag.nodes.back().blend = float(variant);
+            if (variant < 2) dag.nodes.back().params[0].value = VtValue(float(variant));
             else if (variant == 2) std::swap(dag.nodes.back().inputs[0], dag.nodes.back().inputs[1]);
             else if (variant == 3) std::reverse(dag.nodes.begin(), dag.nodes.end());
             else if (variant == 4) {
@@ -2178,7 +2168,7 @@ int main(int argc, char** argv) {
                 auto second = dag.nodes.back();
                 second.path = SdfPath("/SessionProvider/secondBlend");
                 second.inputs = {dag.terminal, dag.nodes[widthIndex].path};
-                second.blend = 0.6f;
+                second.params[0].value = VtValue(0.6f);
                 dag.nodes.push_back(second);
                 dag.terminal = second.path;
             } else if (variant == 6) {

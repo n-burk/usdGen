@@ -2,7 +2,6 @@
 #define USDGEN_VULKAN_WIDTH_PIPELINE_H
 
 #include "chargedBuffer.h"
-#include "widthProfileControls.h"
 #include <functional>
 #include <vector>
 
@@ -23,29 +22,17 @@ public:
     static std::shared_ptr<WidthPipeline> Create(
         std::shared_ptr<DeviceContext>, std::vector<uint32_t> const& spirv,
         VkResult* result = nullptr);
-    // Both modules are trusted, externally spirv-val-validated modules with
-    // their respective documented ABIs; this API only performs the Vulkan
-    // module/pipeline construction checks, not SPIR-V ABI introspection.
-    static std::shared_ptr<WidthPipeline> CreateWithProfile(
-        std::shared_ptr<DeviceContext>, std::vector<uint32_t> const& flat,
-        std::vector<uint32_t> const& profile, VkResult* result = nullptr);
-    bool HasProfile() const noexcept;
     ~WidthPipeline();
     // Exact native identity is available before candidate allocation/submit.
     std::shared_ptr<DeviceContext> const& context() const noexcept;
     std::unique_ptr<Candidate> Begin(std::shared_ptr<const ChargedBuffer> input,
         uint32_t count, float width, uint32_t replace, VkResult* result = nullptr,
         BeforeSubmit beforeSubmit = {});
-    std::unique_ptr<Candidate> BeginProfile(std::shared_ptr<const ChargedBuffer> input,
-        std::shared_ptr<const ChargedBuffer> hairT, uint32_t count, float width,
-        uint32_t replace, VulkanWidthProfileControls const&, VkResult* result = nullptr,
-        BeforeSubmit beforeSubmit = {});
 private:
     struct Native;
     explicit WidthPipeline(std::shared_ptr<Native>);
     std::unique_ptr<Candidate> BeginInternal(std::shared_ptr<const ChargedBuffer>,
-        std::shared_ptr<const ChargedBuffer>, uint32_t, float, uint32_t,
-        VulkanWidthProfileControls const*, VkResult*, BeforeSubmit);
+        uint32_t, float, uint32_t, VkResult*, BeforeSubmit);
     std::shared_ptr<Native> native_;
 };
 
@@ -62,8 +49,6 @@ public:
     std::shared_ptr<const ChargedBuffer> output() const noexcept;
     bool succeeded() const noexcept;
     std::shared_ptr<const ChargedBuffer> inputOwner() const noexcept;
-    std::shared_ptr<const ChargedBuffer> hairTOwner() const noexcept;
-    bool usesHairT() const noexcept;
     uint32_t count() const noexcept;
     std::shared_ptr<DeviceContext> context() const noexcept;
     void Quarantine() noexcept;

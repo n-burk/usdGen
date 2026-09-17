@@ -59,14 +59,14 @@ static VulkanSourceGenerationCreateInfo Source(std::shared_ptr<DeviceContext> co
     source.totalCurves = 2; source.totalCvs = 7; source.topologyVersion = 94; source.valueVersion = 17;
     source.cvOffsets = {0, 3, 7}; source.curveId = {401, 907}; source.rootPrim = {12, 44};
     source.rootUV = {{.2f,.3f},{.7f,.8f}}; source.rootT = {{1,0,0},{0,1,0}};
-    source.rootB = {{0,1,0},{0,0,1}}; source.rootN = {{0,0,1},{1,0,0}}; source.curveMask = {.25f,.75f};
+    source.rootB = {{0,1,0},{0,0,1}}; source.rootN = {{0,0,1},{1,0,0}}; UsdGenPlane maskPlane; maskPlane.name = TfToken("curveMask"); maskPlane.interpolation = TfToken("uniform"); maskPlane.type = TfToken("float"); maskPlane.f = {{.25f,.75f}};
     source.px = zero ? VtFloatArray(7, 0.f) : VtFloatArray{0,1,1,10,11,12,14};
     source.py = zero ? VtFloatArray(7, 0.f) : VtFloatArray{0,0,3,0,0,0,0}; source.pz = VtFloatArray(7, 0.f);
     source.rest = {GfVec3f(0,0,0),GfVec3f(0,10,0),GfVec3f(0,30,0),GfVec3f(9,9,9),GfVec3f(19,9,9),GfVec3f(29,9,9),GfVec3f(49,9,9)};
     source.width = VtFloatArray(7, 1.f); source.hairT = {0,.75f,1,.5f,0,.75f,.25f};
     UsdGenChunkDesc chunk; chunk.firstCurve=0; chunk.curveCount=2; chunk.liveCount=2; chunk.firstCv=0; chunk.cvCount=0; chunk.tile=3; chunk.surface=1; source.chunks={chunk};
     UsdGenPlane vertex; vertex.name=TfToken("privateVertex"); vertex.interpolation=TfToken("vertex"); vertex.type=TfToken("float"); vertex.arity=1; vertex.f={3,4,5,6,7,8,9}; source.extraCv={vertex};
-    UsdGenPlane uniform; uniform.name=TfToken("privateUniform"); uniform.interpolation=TfToken("uniform"); uniform.type=TfToken("int"); uniform.i={18,19}; source.extraCurve={uniform};
+    UsdGenPlane uniform; uniform.name=TfToken("privateUniform"); uniform.interpolation=TfToken("uniform"); uniform.type=TfToken("int"); uniform.i={18,19}; source.extraCurve={maskPlane, uniform};
     info.geometry.alreadyDeformed=true; info.geometry.curveTopology={UsdGenDeviceCurveType::Cubic,UsdGenDeviceCurveBasis::BSpline,UsdGenDeviceCurveWrap::Pinned}; info.geometry.tiles={{3,0,2,0,7}};
     uint32_t named[] = {73,81}; info.additionalNamed.push_back({{"namedCurve",UsdGenDeviceValueType::UInt32,UsdGenDeviceDomain::Primitive,2,1,4,true},Bytes(named,2)});
     return info;
