@@ -112,9 +112,25 @@ int main()
     expectFail(wrongType, "a non-native destination type fails closed",
                "unsupported/incorrectly typed Width expression target");
     auto generator = valid;
-    generator.nodes[0].type = TfToken("UsdGenGrow");
-    expectFail(generator, "a generator refuses connected parameters",
+    generator.nodes[0].type = TfToken("UsdGenScatter");
+    expectFail(generator, "a source generator refuses connected parameters",
                "does not accept connected (expression) parameters");
+    // Grow bakes per-strand length/lift at capture, so it accepts
+    // groom/primitive connections but fails closed on anything else.
+    auto grow = valid;
+    grow.nodes[0].type = TfToken("UsdGenGrow");
+    grow.nodes[0].expressionBindings[0].destination = TfToken("lift");
+    grow.nodes[0].expressionBindings[0].domain = expr::Domain::Primitive;
+    Check(compiler.Compile(grow, &cpuGraph).ok,
+          "a primitive-domain usdGen:lift connection compiles on Grow");
+    auto growForeign = grow;
+    growForeign.nodes[0].expressionBindings[0].destination = TfToken("width");
+    expectFail(growForeign, "a destination Grow does not own fails closed",
+               "unsupported or incorrectly typed Grow expression");
+    auto growPoint = grow;
+    growPoint.nodes[0].expressionBindings[0].domain = expr::Domain::Point;
+    expectFail(growPoint, "a point-domain Grow lift fails closed",
+               "requires groom/primitive evaluation");
     auto maskPrimitive = valid;
     maskPrimitive.nodes[0].expressionBindings[0].destination = TfToken("usdGen:mask");
     maskPrimitive.nodes[0].expressionBindings[0].domain = expr::Domain::Primitive;

@@ -16,7 +16,9 @@
 #
 # Same constraints as the smaller example: description under a plain Xform
 # (a UsdGenGroom selects the CUDA lane, which cannot be displayed by stock
-# Storm yet), usdGen:rest:source left at "default", no scene lights.
+# Storm yet), usdGen:rest:source left at "default". Key + Sky lights (below)
+# are needed now: the default hair material is physically based and reads
+# near-black under only usdrecord's camera headlight.
 #
 # Noise displaces CVs along the root normal. Strands grown straight along
 # that normal would only slide along themselves (and preserveLength would
@@ -38,6 +40,28 @@ def Xform "World"
         float focalLength = 35
         float horizontalAperture = 24
         float verticalAperture = 18
+    }
+
+    # Key + a DomeLight fill so the physically based default hair material
+    # (a UE port) doesn't render near-black under only usdrecord's camera
+    # headlight. inputs:normalize = 1 is required on the DistantLight: HdSt
+    # otherwise multiplies intensity by its (tiny, 0.53deg-default) solid
+    # angle, so an un-normalized "intensity 3" comes out around 2e-4 and the
+    # light is effectively invisible next to the headlight.
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 10
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-10, 40, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 1, 1)
     }
 
     def Mesh "Plane" (

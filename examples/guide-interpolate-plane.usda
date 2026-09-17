@@ -59,6 +59,22 @@ def Xform "World"
         float verticalAperture = 18
     }
 
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 10
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-10, 40, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 1, 1)
+    }
+
     def Mesh "Skin" (
         prepend apiSchemas = ["UsdGenRestAPI"]
     )

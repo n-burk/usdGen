@@ -12,6 +12,8 @@ TF_REGISTRY_FUNCTION(TfDebug)
         "usdGen: one line per operator per cook (re-captured or reused, chunks)");
     TF_DEBUG_ENVIRONMENT_SYMBOL(USDGEN_INGRESS,
         "usdGen: groom scene index notices and description captures");
+    TF_DEBUG_ENVIRONMENT_SYMBOL(USDGEN_FUR,
+        "usdGen: one line per fur optical-depth bake (grid, voxel size, CVs)");
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

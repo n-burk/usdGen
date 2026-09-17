@@ -145,7 +145,8 @@ UsdGenPlane DefaultOutputPlane(TfToken const &name)
     plane.name = name;
     plane.interpolation = TfToken("uniform");
     plane.type = TfToken("float");
-    if (name == TfToken("guideIndex") || name.GetString().rfind("clumpId_", 0) == 0)
+    if (name == TfToken("guideIndex") || name == TfToken("partId") ||
+        name.GetString().rfind("clumpId_", 0) == 0)
         plane.type = TfToken("int");
     if (name == TfToken("guideIndex") || name == TfToken("guideWeight"))
         plane.arity = 3;
@@ -270,9 +271,15 @@ void PrepareNodeForEval(
         // Rest is an immutable C3 transport channel, separate from current
         // points.  Every topology-preserving operator aliases it on each
         // preparation so a reused node cannot retain a prior generation's
-        // owner.  Grow is the one current topology producer that explicitly
-        // materializes a new rest layout during Capture.
-        if (!(ownsBuffer && op.Type() == TfToken("UsdGenGrow")))
+        // owner.  Topology producers that repartition CVs (Grow, Resample)
+        // explicitly materialize a new rest layout during Capture instead.
+        bool const captureAuthorsRest = ownsBuffer &&
+            (op.Type() == TfToken("UsdGenGrow") ||
+             op.Type() == TfToken("UsdGenResample") ||
+             // Frozen Freeze owns its buffer (OwnsBuffer()==!live) and keeps
+             // the snapshotted rest; live Freeze re-aliases like a styler.
+             op.Type() == TfToken("UsdGenFreeze"));
+        if (!captureAuthorsRest)
             buf.rest = upBuf.rest;
     }
 
@@ -313,12 +320,17 @@ void PrepareNodeForEval(
     prep(planes & UsdGenOp::kPlanePoints, buf.pz, upBuf.pz);
     prep(planes & UsdGenOp::kPlaneWidths, buf.width, upBuf.width);
     prep(planes & UsdGenOp::kPlaneHairT, buf.hairT, upBuf.hairT);
-    // Grow's capture has already transformed every inherited named plane for
-    // its new CV cardinality. Do not replace those private owners with the
-    // old upstream descriptors during generic pass-through preparation.
-    bool const growOwnsTransformedPlanes = hasUp && ownsBuffer &&
-        op.Type() == TfToken("UsdGenGrow");
-    if (!growOwnsTransformedPlanes)
+    // A CV-repartitioning capture has already transformed every inherited
+    // named plane for its new CV cardinality (UsdGenResampleExtraPlanes).
+    // Do not replace those private owners with the old upstream descriptors
+    // during generic pass-through preparation.
+    bool const captureOwnsTransformedPlanes = hasUp && ownsBuffer &&
+        (op.Type() == TfToken("UsdGenGrow") ||
+         op.Type() == TfToken("UsdGenResample") ||
+         // Frozen Freeze: the snapshot owns the transformed extras (same
+         // ownsBuffer gate as above); live Freeze prepares pass-through.
+         op.Type() == TfToken("UsdGenFreeze"));
+    if (!captureOwnsTransformedPlanes)
         PrepareExtraPlanes(node, upBuf, hasUp);
 }
 
@@ -877,7 +889,12 @@ UsdGenRunResult UsdGenScheduler::Run(
             node.captureEpoch = captureIdentity;
             node.captureNeeded = false;
 
-            if (node.op->IsGenerator() && node.buffer.totalCurves > 0) {
+            // Generators and CV-repartitioning stylers (Resample) publish a new
+            // CV layout from Capture; the chunk plan must follow it. CurveCount
+            // stylers (Length) do not own a buffer and keep the upstream plan.
+            if ((node.op->IsGenerator() ||
+                 node.topoFx == UsdGenTopoFx::CvCount) &&
+                node.buffer.totalCurves > 0) {
                 int const total = static_cast<int>(node.buffer.totalCurves);
                 int const cvp = int(node.buffer.totalCvs /
                                     std::max<uint32_t>(1, node.buffer.totalCurves));

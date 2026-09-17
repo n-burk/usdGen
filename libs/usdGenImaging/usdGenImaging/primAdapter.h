@@ -55,8 +55,26 @@ public:
     /// The shared mapping table for one schema type name, built once from
     /// UsdPrimDefinition (06 §2.2). Owned by a static cache; safe to call
     /// from any thread (internal lock, released before use).
+    ///
+    /// CONCRETE TYPE ONLY: properties carried by an applied API schema are
+    /// absent. Serving a prim needs the overload below, because a
+    /// single-apply API is applied per prim and not by the type.
     static const UsdImagingDataSourceMapped::PropertyMappings &
         Mappings(TfToken const &schemaTypeName);
+
+    /// The mapping table for a prim's FULL definition: its concrete type plus
+    /// every applied API schema. `usdGen:look:*` lives on UsdGenLookAPI, which
+    /// a scene applies per description, so a concrete-type-only table serves
+    /// no `look` container at all and every look field silently reaches the
+    /// engine as its schema default.
+    static const UsdImagingDataSourceMapped::PropertyMappings &
+        Mappings(UsdPrimTypeInfo const &typeInfo);
+
+private:
+    static const UsdImagingDataSourceMapped::PropertyMappings &
+        _Mappings(TfToken const &key, UsdPrimDefinition const *definition);
+
+public:
 
     /// `usdGen:clump:size` -> `clump/size` (the RELATIVE locator; Mappings
     /// makes it absolute under the `usdGen` prefix). Non-usdGen names are

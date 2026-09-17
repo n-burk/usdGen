@@ -1,0 +1,169 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    subLayers = [
+        @../plan/examples/metahuman-hair/male_hair_01/hair.usda@
+    ]
+)
+
+# Routes plan/examples/metahuman-hair/male_hair_01/hair.usda's converted
+# strands through usdGen instead of the flat UsdPreviewSurface preview that
+# asset ships with, so they get the default UsdGenHairStrands material, the
+# furTauP/N density bake and the synthetic scalp shadow. Nothing under
+# plan/examples/ is modified -- this sublayers it and overrides in place.
+#
+# /World/Hair (the original BasisCurves) is kept ACTIVE (usdGen:curves reads
+# it live) but set invisible and stripped of its HairPreviewSurface binding,
+# so it is not drawn twice; the new Groom (outside /World, at the stage root,
+# so it is not double-transformed by /World's 100x Y-up-to-Z-up-cm matrix)
+# publishes the actual visible strands.
+#
+# View it:   .\bin\launch_usdview.ps1 examples\metahuman-hair-parity.usda
+# Record it: .\bin\render_ue_parity.ps1 -Label current
+
+over "World"
+{
+    over "Scalp" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+    }
+
+    over "Hair"
+    {
+        uniform token visibility = "invisible"
+        rel material:binding = None
+    }
+
+    over "Looks"
+    {
+        over "SkinPreview"
+        {
+            over "Surface"
+            {
+                color3f inputs:diffuseColor = (0.80, 0.62, 0.52)
+            }
+        }
+    }
+
+    # Nested inside World (not a stage-root sibling): UsdGenCurveSource reads
+    # /World/Hair's points verbatim, in /World/Hair's own LOCAL space (it does
+    # not resolve them to world space first), and the Description publishes in
+    # its own local space, which Storm then carries through its ancestors' own
+    # transforms same as any other prim. A Description outside /World would
+    # publish untransformed -- pre-/World's-100x-Y-up-to-Z-up-cm-matrix -- and
+    # render effectively invisible (confirmed: that was tried first and gave a
+    # a bald head with no visible strands even though the cook itself succeeded,
+    # 40/40 chunks published, per TF_DEBUG USDGEN_COMMIT).
+    def Xform "Groom"
+    {
+        def UsdGenDescription "Hair" (
+            prepend apiSchemas = ["UsdGenLookAPI", "MaterialBindingAPI"]
+        )
+        {
+            rel usdGen:surface = </World/Scalp>
+            uniform token usdGen:curve:basis = "bspline"
+
+            # The look drives the whole coat colour, and there is
+            # deliberately NO material bound here: the publisher builds the
+            # synthetic default UsdGenHairStrands material from this look, so
+            # it carries BOTH ends of the ramp. An explicitly bound material
+            # replaces that synthetic one, and since only rootColor reaches
+            # the shader as a primvar (baked into displayColor) while tipColor
+            # is a material input, binding one silently pins every strand's
+            # tip half to the Sdr default tipColor (0.21, 0.115, 0.045), a
+            # light blond. On a groom viewed down the strands that tip colour
+            # is most of what you see, so the look appeared to have almost no
+            # authority -- measured: halving rootColor moved the coat 7.5%,
+            # and the shader albedo read a max of exactly 0.2086 with the look
+            # set to pure black.
+            #
+            # Both colours are melanin colours, so the choice stays a
+            # physical one: rootColor is UE GetHairColorFromMelanin at
+            # melanin 0.19 / redness 0.15, tipColor the same at melanin
+            # 0.10 -- tips carry less pigment and read as the lighter
+            # flyaways in the target photograph.
+            color3f usdGen:look:rootColor = (0.153, 0.086, 0.030)
+            color3f usdGen:look:tipColor = (0.266, 0.176, 0.083)
+
+            def Scope "Ops"
+            {
+                # The only Op: reads /World/Hair's native BasisCurves verbatim.
+                # usdGen:rebind = "always" because the source curves carry
+                # primvars:rest and primvars:usdGen:curveId but no
+                # primvars:usdGen:rootFrame -- root frames must be re-derived
+                # from the bound Scalp surface, not read from the source.
+                def UsdGenCurveSource "source"
+                {
+                    rel usdGen:curves = </World/Hair>
+                    uniform token usdGen:idSource = "primvar"
+                    uniform token usdGen:rebind = "always"
+                }
+            }
+        }
+
+        # No Material prim: see the note on the look above. Everything the
+        # synthetic default material cannot carry is left at its Sdr default,
+        # which for this groom is the right call anyway -- roughness 0.35 is
+        # inside UE's own 0.3-0.5 hair range and within 4% of the measured
+        # peak of the R lobe for this key/view pair (lit R of 0.089 at 0.30
+        # against 0.085 at 0.35, scratch bsdf_check.py, an independent
+        # transcription of HairBsdf.ush), and useMelanin defaults to 0 so the
+        # melanin colour never overrides the look.
+    }
+}
+
+def Camera "TempleCam"
+{
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+    matrix4d xformOp:transform = ( (0.84689, 0.531768, 0, 0), (-0.168833, 0.268882, 0.94826, 0), (0.504255, -0.803072, 0.317494, 0), (36, -48, 168, 1) )
+    float2 clippingRange = (1, 2000)
+    float focalLength = 62
+    float horizontalAperture = 24
+    float verticalAperture = 18
+}
+
+def Camera "HeadCam"
+{
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 0.0412021, 0.999151, 0), (0, -0.999151, 0.0412021, 0), (0, -95, 152, 1) )
+    float2 clippingRange = (1, 2000)
+    float focalLength = 55
+    float horizontalAperture = 24
+    float verticalAperture = 18
+}
+
+# Same recipe as head-hair-closeup.usda (inputs:normalize = 1 -- HdSt
+# otherwise multiplies intensity by the DistantLight's tiny default solid
+# angle -- key from upper front-side of TempleCam, weak rim, DomeLight fill).
+def DistantLight "Key"
+{
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+    matrix4d xformOp:transform = ( (0.909519, -0.415663, 0, 0), (0.292694, 0.640448, 0.71004, 0), (-0.295138, -0.645794, 0.704162, 0), (-10, -70, 210, 1) )
+    # Exposure: 0.465x the values this rig was first written with. At the
+    # original 3.8 / 0.9 / 1.0 the lit forehead came out at 0.86 linear with
+    # 70% of its red channel clipped, so every gap in the coat read as glare
+    # and the hair could not be judged against it. The response is linear in
+    # the light scale -- there is no tonemap anywhere in this path -- so the
+    # scale was solved directly from a 0.25x render: 0.40 linear, sRGB 0.67.
+    # The key : rim : sky ratio is unchanged.
+    float inputs:intensity = 1.77
+    bool inputs:normalize = 1
+    color3f inputs:color = (1, 0.98, 0.94)
+}
+
+def DistantLight "Rim"
+{
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+    matrix4d xformOp:transform = ( (-0.99415, 0.108012, 0, 0), (-0.00693309, -0.0638124, 0.997938, 0), (0.10779, 0.992099, 0.064188, 0), (30, 40, 130, 1) )
+    float inputs:intensity = 0.42
+    bool inputs:normalize = 1
+    color3f inputs:color = (0.85, 0.9, 1)
+}
+
+def DomeLight "Sky"
+{
+    asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+    float inputs:intensity = 0.47
+    color3f inputs:color = (1, 1, 1)
+}

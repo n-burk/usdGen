@@ -130,6 +130,25 @@ void CheckCurveSet(UsdGenCurveSetDesc const &a, UsdGenCurveSetDesc const &b,
             ctx + " widthsInterpolation");
     CheckEq(a.skinPrim, b.skinPrim, ctx + " skinPrim");
     CheckEq(a.curveId, b.curveId, ctx + " curveId");
+    // Authored planes are captured twice, once per builder -- the source
+    // curves' own displayColor rides here -- so they are exactly the kind of
+    // field that can drift between the two paths.
+    Check(a.authoredPlanes.size() == b.authoredPlanes.size(),
+          ctx + " authoredPlane count");
+    for (size_t p = 0; p < std::min(a.authoredPlanes.size(),
+                                    b.authoredPlanes.size()); ++p) {
+        std::string const at = ctx + " authoredPlane[" +
+            a.authoredPlanes[p].name.GetString() + "]";
+        CheckEq(a.authoredPlanes[p].name, b.authoredPlanes[p].name, at + " name");
+        Check(a.authoredPlanes[p].domain == b.authoredPlanes[p].domain,
+              at + " domain");
+        Check(a.authoredPlanes[p].type == b.authoredPlanes[p].type, at + " type");
+        Check(a.authoredPlanes[p].arity == b.authoredPlanes[p].arity, at + " arity");
+        CheckEq(a.authoredPlanes[p].floatValues, b.authoredPlanes[p].floatValues,
+                at + " floatValues");
+        CheckEq(a.authoredPlanes[p].intValues, b.authoredPlanes[p].intValues,
+                at + " intValues");
+    }
     CheckEq(a.skinPrimUv, b.skinPrimUv, ctx + " skinPrimUv");
     CheckEq(a.rootFrame, b.rootFrame, ctx + " rootFrame");
     CheckEq(a.frozenEpoch, b.frozenEpoch, ctx + " frozenEpoch");

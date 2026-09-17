@@ -402,7 +402,7 @@ UsdGenPrimAdapterBase::GetImagingSubprimData(
     HdContainerDataSourceHandle usdGen =
         UsdImagingDataSourceMapped::New(
             prim, prim.GetPath(),
-            Mappings(prim.GetPrimTypeInfo().GetSchemaTypeName()),
+            Mappings(prim.GetPrimTypeInfo()),
             stageGlobals);
     if (!usdGen) {
         return base;
@@ -447,7 +447,7 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
     HdDataSourceLocatorSet result =
         UsdImagingDataSourceMapped::Invalidate(
             properties,
-            Mappings(prim.GetPrimTypeInfo().GetSchemaTypeName()));
+            Mappings(prim.GetPrimTypeInfo()));
     result.insert(
         UsdImagingDataSourcePrim::Invalidate(
             prim, subprim, properties, invalidationType));
@@ -492,7 +492,34 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
 }
 
 const UsdImagingDataSourceMapped::PropertyMappings &
+UsdGenPrimAdapterBase::Mappings(UsdPrimTypeInfo const &typeInfo)
+{
+    // Applied API schemas are applied per PRIM, so the table has to be keyed
+    // by the prim's whole definition, not by its type name. Without the
+    // applied set in the key, two descriptions of the same type -- one with
+    // UsdGenLookAPI, one without -- would share the first table built.
+    std::string key = typeInfo.GetSchemaTypeName().GetString();
+    for (TfToken const &api : typeInfo.GetAppliedAPISchemas()) {
+        key += '|';
+        key += api.GetString();
+    }
+    return _Mappings(TfToken(key), &typeInfo.GetPrimDefinition());
+}
+
+const UsdImagingDataSourceMapped::PropertyMappings &
 UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
+{
+    // FindConcretePrimDefinition returns nullptr for abstract types and for
+    // names with no registered schema — such a prim has no declared
+    // usdGen:* properties, so the cached (empty) table is correct (06 §2.2
+    // rule 2's null branch).
+    return _Mappings(schemaTypeName,
+                     UsdSchemaRegistry::GetInstance()
+                         .FindConcretePrimDefinition(schemaTypeName));
+}
+
+const UsdImagingDataSourceMapped::PropertyMappings &
+UsdGenPrimAdapterBase::_Mappings(TfToken const &key, UsdPrimDefinition const *def)
 {
     using Mapping = UsdImagingDataSourceMapped::PropertyMappings;
     // Entries are append-only and values are immutable after publication.
@@ -500,19 +527,14 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
     // duplicate loses insertion; the map itself is never cleared/erased.
     static tbb::concurrent_unordered_map<
         TfToken, std::shared_ptr<const Mapping>, TfHash> cache;
-    if (auto it = cache.find(schemaTypeName); it != cache.end()) {
+    if (auto it = cache.find(key); it != cache.end()) {
         return *it->second;
     }
     std::vector<UsdImagingDataSourceMapped::PropertyMapping> mappings;
-    // FindConcretePrimDefinition returns nullptr for abstract types and for
-    // names with no registered schema — such a prim has no declared
-    // usdGen:* properties, so the cached (empty) table is correct (06 §2.2
-    // rule 2's null branch).
-    if (UsdPrimDefinition const *def =
-            UsdSchemaRegistry::GetInstance().FindConcretePrimDefinition(schemaTypeName)) {
-            // Sibling set for the ancestor pass (contract S3.1): the mapping
-            // is built per schema type name, so the full property set is in
-            // hand — no new USD calls.
+    if (def) {
+            // Sibling set for the ancestor pass (contract S3.1): the whole
+            // definition is in hand, so the full property set is too — no new
+            // USD calls.
             TfTokenVector const &siblings = def->GetPropertyNames();
             for (TfToken const &name : siblings) {
                 if (_IsPrimBuiltin(name)) {
@@ -556,7 +578,7 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
     // Concurrent builders may construct equivalent candidates.  Only the
     // canonical inserted value is returned, so all callers retain a stable
     // reference and no mutable published object is ever replaced.
-    auto res = cache.emplace(schemaTypeName, std::move(slot));
+    auto res = cache.emplace(key, std::move(slot));
     return *res.first->second;
 }
 

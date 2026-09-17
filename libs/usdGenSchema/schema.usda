@@ -963,22 +963,22 @@ class UsdGenCollide "UsdGenCollide" (
 )
 {
     rel usdGen:colliders (
-        doc = """Relationship consumed by Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """Collider meshes for the push-out solve, appended after the bound surface, which always collides too. Each of the iterations sweeps moves penetrating CVs out along the closest-point direction, keeping an offset gap and scaling the correction by pushAmount. Expression evaluation: groom (once per operator)."""
     )
     float usdGen:offset = 0.0 (
-        doc = """Offset for Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."""
+        doc = """Rest gap kept between CVs and collider surfaces after the push-out solve. Expression evaluation: primitive (once per curve root)."""
         customData = { dictionary usdGen = { string evaluation = "primitive" } }
     )
     float usdGen:pushAmount = 0.0 (
-        doc = """Authored Collide control "pushAmount". Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."""
+        doc = """Fraction of the push-out correction applied per sweep; 1 applies the full separation. Expression evaluation: primitive (once per curve root)."""
         customData = { dictionary usdGen = { string evaluation = "primitive" } }
     )
     int usdGen:iterations = 1 (
-        doc = """Iteration count for Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """Number of push-out sweeps over each strand. At least 1. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
     uniform token usdGen:resolveType = "flexible" (
-        doc = """Authored Collide control "resolveType". Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """How the push-out moves the strand: "flexible" corrects each CV independently, "stiff" hinges the strand about the last clean CV. Expression evaluation: groom (once per operator)."""
         allowedTokens = ["flexible", "stiff"]
     )
 }

@@ -11,6 +11,7 @@
 #include "usdGenImaging/usdGenGraphDescShared.h"
 #include "usdGenImaging/usdGenTokens.h"
 
+#include "usdGen/debugCodes.h"
 #include "usdGen/expressions/valueShape.h"
 
 #include "pxr/base/trace/trace.h"
@@ -53,6 +54,7 @@ public:
         usdGen::UsdGenNodeDesc node;       // no inherited surfaces / inputs
         std::vector<std::string> validationErrors;
         SdfPathVector guides;
+        SdfPathVector colliders;           // usdGen:colliders (UsdGenCollide only)
         bool exists = false;
     };
 
@@ -343,6 +345,48 @@ _HPrimvarValue(HdContainerDataSourceHandle const &primDs, char const *name,
     return !out->IsEmpty();
 }
 
+// The source curves' own displayColor, forwarded so a groom that styles
+// nothing shows the colour its asset already carries. Any interpolation is
+// accepted: constant/uniform/vertex map onto the three authored-plane domains.
+void
+_HForwardSourceColor(HdContainerDataSourceHandle const &primDs, _HdTime t,
+                     usdGen::UsdGenCurveSetDesc *out)
+{
+    HdPrimvarSchema const primvar =
+        HdPrimvarsSchema::GetFromParent(primDs).GetPrimvar(TfToken("displayColor"));
+    HdSampledDataSourceHandle const values = primvar.GetPrimvarValue();
+    if (!values) return;
+    VtValue const value = values->GetValue(t);
+    if (!value.IsHolding<VtVec3fArray>()) return;
+    VtVec3fArray const &colors = value.UncheckedGet<VtVec3fArray>();
+    if (colors.empty()) return;
+
+    TfToken interpolation;
+    if (HdTokenDataSourceHandle const i = primvar.GetInterpolation()) {
+        interpolation = i->GetTypedValue(t);
+    }
+    usdGen::UsdGenAuthoredPlaneDesc plane;
+    plane.name = usdGen::UsdGenSourceColorPlane();
+    plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+    plane.arity = 3;
+    if (interpolation == TfToken("constant") || colors.size() == 1) {
+        plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Groom;
+    } else if (interpolation == TfToken("uniform")) {
+        plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
+    } else {
+        plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Point;
+    }
+    size_t const elements =
+        plane.domain == usdGen::UsdGenAuthoredPlaneDomain::Groom ? 1 : colors.size();
+    plane.floatValues.reserve(elements * 3);
+    for (size_t i = 0; i < elements; ++i) {
+        plane.floatValues.push_back(colors[i][0]);
+        plane.floatValues.push_back(colors[i][1]);
+        plane.floatValues.push_back(colors[i][2]);
+    }
+    out->authoredPlanes.push_back(std::move(plane));
+}
+
 template <class T>
 bool
 _HPrimvarTyped(HdContainerDataSourceHandle const &primDs, char const *name,
@@ -450,7 +494,10 @@ _HPullUsdGen(HdContainerDataSourceHandle const &usdGen, _HdTime t,
                     bucket = &node->inputs;
                 } else if (leaf == "references") {
                     bucket = &node->references;
-                } else if (leaf == "guides" || leaf == "curves") {
+                } else if (leaf == "guides" || leaf == "curves" ||
+                           full == "usdGen:direction:source") {
+                    // node.curves, not node.references: operator sources only
+                    // resolve through curveRefs (guides rule).
                     bucket = &node->curves;
                 } else {
                     continue;  // not a graph edge (base-name match only)
@@ -716,6 +763,8 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
     _HPrimvarTyped(primDs, "skinprimuv", t, &out->skinPrimUv);
     _HPrimvarTyped(primDs, "usdGen:rootFrame", t, &out->rootFrame);
 
+    _HForwardSourceColor(primDs, t, out);
+
     TfToken curveRole;
     _HPrimvarTyped(primDs, "usdGen:role", t, &curveRole);
     if (curveRole.IsEmpty()) {
@@ -863,6 +912,29 @@ _HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
         }
     }
     _HGetPathArray(ug, &captured.guides, {"guides"});
+    // usdGen:part:curves nests as usdGen/part/curves; its targets join the
+    // Reference lane (I3) exactly like guides.
+    SdfPathVector partCurves;
+    if (_HGetPathArray(ug, &partCurves, {"part", "curves"}))
+        captured.guides.insert(captured.guides.end(),
+                               partCurves.begin(), partCurves.end());
+    // usdGen:direction:source nests as usdGen/direction/source; same lane.
+    SdfPathVector directionSource;
+    if (_HGetPathArray(ug, &directionSource, {"direction", "source"}))
+        captured.guides.insert(captured.guides.end(),
+                               directionSource.begin(), directionSource.end());
+    // usdGen:frozen:curves nests as usdGen/frozen/curves; its targets join
+    // the Reference lane (I3) exactly like part:curves, so Freeze can
+    // snapshot an explicit curve set instead of the chain input.
+    SdfPathVector frozenCurves;
+    if (_HGetPathArray(ug, &frozenCurves, {"frozen", "curves"}))
+        captured.guides.insert(captured.guides.end(),
+                               frozenCurves.begin(), frozenCurves.end());
+    // usdGen:colliders is flat (usdGen/colliders), like usdGen:guides. Only
+    // UsdGenCollide declares it; the targets append to that node's surfaces
+    // after surface inheritance below.
+    if (node.type == TfToken("UsdGenCollide"))
+        _HGetPathArray(ug, &captured.colliders, {"colliders"});
     return captured;
 }
 
@@ -972,6 +1044,9 @@ CaptureGraphDescFromHydra(
     }
 
     // ---- nodes, supplied composed reverse-sibling post-order -------------
+    // Collider targets ride along keyed by node path; they append to the
+    // Collide nodes' surfaces after surface inheritance below.
+    std::map<std::string, SdfPathVector> colliderTargets;
     {
         TRACE_SCOPE("usdGen capture operators");
         auto const previous = options.reuseNodes ? options.previousCache : nullptr;
@@ -1005,6 +1080,8 @@ CaptureGraphDescFromHydra(
             if (!desc.nodes.empty()) {
                 node.inputs.push_back(desc.nodes.back().path);
             }
+            if (!captured.colliders.empty())
+                colliderTargets[captured.path.GetString()] = captured.colliders;
             desc.nodes.push_back(std::move(node));
         }
         result.cache = std::move(cache);
@@ -1017,6 +1094,23 @@ CaptureGraphDescFromHydra(
         if (!descSurfaces.empty()) {
             for (UsdGenNodeDesc &node : desc.nodes) {
                 node.surfaces = descSurfaces;
+            }
+        }
+    }
+
+    // UsdGenCollide (02 §2.8): usdGen:colliders targets ride the shared
+    // surface path. They append AFTER the inherited bound surface, so
+    // surfaces.front() — the root surface every consumer resolves — is
+    // unchanged, and the pool loop below builds their descs like any other.
+    // A collider equal to the bound surface is already present, not doubled.
+    if (!colliderTargets.empty()) {
+        for (UsdGenNodeDesc &node : desc.nodes) {
+            auto const it = colliderTargets.find(node.path.GetString());
+            if (it == colliderTargets.end()) continue;
+            for (SdfPath const &c : it->second) {
+                if (std::find(node.surfaces.begin(), node.surfaces.end(), c) ==
+                    node.surfaces.end())
+                    node.surfaces.push_back(c);
             }
         }
     }
@@ -1160,8 +1254,26 @@ CaptureGraphDescFromHydra(
 
     UsdGenLookDesc &look = desc.look;
     HdContainerDataSourceHandle const lookDs = _HChild(descUg, "look");
-    _HGetTyped(lookDs, t, &look.rootColor, {"rootColor"});
+    bool const gotRoot = _HGetTyped(lookDs, t, &look.rootColor, {"rootColor"});
     _HGetTyped(lookDs, t, &look.tipColor, {"tipColor"});
+    // usdGen:look:* lives on UsdGenLookAPI, which a scene applies per
+    // description. A mapping table built from the concrete type alone serves
+    // no `look` container and every field here silently takes its schema
+    // default, which renders as a slightly different dark brown -- invisible
+    // unless you read the values back. Say which happened.
+    // "Authored" is the predicate the session cooker uses to decide whether
+    // the look beats the source curves' own displayColor: an opinion that
+    // DIFFERS from the schema fallback. Applying UsdGenLookAPI without setting
+    // anything leaves a full set of fallbacks, which must not count.
+    TF_DEBUG(USDGEN_INGRESS).Msg(
+        "usdGen capture look on %s: %s, rootColor %.4f %.4f %.4f\n",
+        desc.description.GetText(),
+        !lookDs ? "NO look container (is UsdGenLookAPI mapped?)"
+                : (gotRoot && look.rootColor != UsdGenLookDesc().rootColor)
+                      ? "authored"
+                      : "schema fallback",
+        double(look.rootColor[0]), double(look.rootColor[1]),
+        double(look.rootColor[2]));
     _HGetTyped(lookDs, t, &look.rampColors, {"colorRamp", "colors"});
     _HGetTyped(lookDs, t, &look.rampPositions, {"colorRamp", "positions"});
     _HGetToken(lookDs, t, &look.rampInterpolation,

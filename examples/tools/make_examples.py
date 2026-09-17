@@ -15,6 +15,40 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES = os.path.dirname(HERE)
 
+# Key + a DomeLight fill so the physically based default hair material (a UE
+# port) doesn't render near-black under only usdrecord's camera headlight.
+# inputs:normalize = 1 is required on the DistantLight: HdSt otherwise
+# multiplies intensity by its (tiny, 0.53deg-default) solid angle, so an
+# un-normalized "intensity 3" comes out around 2e-4 and the light is
+# effectively invisible next to the headlight. The HDRI is copied into
+# examples/maps/ (not referenced by its original absolute usd-install path)
+# so the scene resolves for anyone who clones this repo alone.
+#
+# Angle matters as much as magnitude here: these strands grow mostly straight
+# up (usdGen:direction "surfaceNormal"/a near-vertical directionVector), and
+# a hair BSDF's R/TT/TRT lobes are weakest when light travels ALONG the fibre
+# axis -- a steep overhead key (tried first: rotateXYZ (-35, 25, 0), travel
+# direction ~55% down the Y axis) stayed near-black even at intensity 10-50.
+# Flattening the key to mostly-horizontal/grazing (rotateXYZ (-10, 40, 0),
+# travel direction ~17% down Y) lights the same strands as warm brown at
+# intensity 6 -- confirmed by an A/B render, not guessed.
+LIGHTS = '''    def DistantLight "Key"
+    {
+        float inputs:intensity = 10
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-10, 40, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 1, 1)
+    }
+'''
+
 
 def fmt(v):
     s = "%.6g" % v
@@ -203,6 +237,7 @@ def Xform "World"
         float verticalAperture = 18
     }}
 
+{LIGHTS}
 {mesh}
     def BasisCurves "Guides" (
         prepend apiSchemas = ["UsdGenCurveAPI"]
@@ -401,6 +436,7 @@ def Xform "World"
         float verticalAperture = 18
     }}
 
+{LIGHTS}
 {mesh}
     def Xform "Groom"
     {{
@@ -618,6 +654,7 @@ def Xform "World"
         float verticalAperture = 18
     }}
 
+{LIGHTS}
 {mesh}
     def BasisCurves "Drivers" (
         prepend apiSchemas = ["UsdGenCurveAPI"]

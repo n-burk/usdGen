@@ -5,6 +5,7 @@
 // testUsdGenSeExprOracle (agreement with Disney's SeExpr2). This file is about
 // compilation only: every source below either must compile or must be refused
 // with a diagnostic a user can act on.
+#include "usdGen/expressions/cpuEvaluator.h"
 #include "usdGen/expressions/frontend.h"
 
 #include <cstdio>
@@ -221,6 +222,67 @@ void CheckVariables()
         Check(!Compile(gone).ok, std::string("a removed variable is refused: ") + gone);
 }
 
+/// Evaluates a variable-free groom program with hand-built inputs: no geometry
+/// is needed because the program reads no fields.
+bool EvaluateScalar(IRProgram const &program, float *out)
+{
+    CpuExpressionInputs inputs;
+    inputs.context.domain = Domain::Groom;
+    inputs.count = 1;
+    CpuExpressionOutput output;
+    output.data = out;
+    output.count = 1;
+    output.type = ScalarType::Float32;
+    output.components = 1;
+    return EvaluateProgram(program, inputs, output) == CpuExpressionStatus::Ok;
+}
+
+bool SameIR(IRProgram const &a, IRProgram const &b)
+{
+    if (a.instructions.size() != b.instructions.size() || a.result != b.result ||
+        a.outputCount != b.outputCount || a.valueComponents != b.valueComponents ||
+        a.registerCount != b.registerCount || a.hasLazyBranches != b.hasLazyBranches ||
+        a.samplers.size() != b.samplers.size())
+        return false;
+    for (size_t i = 0; i < 4; ++i)
+        if (a.output[i] != b.output[i]) return false;
+    for (size_t i = 0; i < a.instructions.size(); ++i) {
+        IRInstruction const &x = a.instructions[i], &y = b.instructions[i];
+        if (x.op != y.op || x.dst != y.dst || x.a != y.a || x.b != y.b || x.c != y.c ||
+            x.variable != y.variable || x.immediate != y.immediate ||
+            x.compare != y.compare || x.component != y.component)
+            return false;
+    }
+    return true;
+}
+
+/// Line endings must not change compilation. A USD-authored source keeps its
+/// checkout's line endings, so on Windows the multi-line sources of
+/// examples/expression-width-plane.usda reach the compiler with CR characters.
+/// All three spellings below must compile to identical IR and evaluate alike.
+void CheckLineEndings()
+{
+    const std::string lf = "$a = 2;  # root\n$a * 3";
+    const std::string crlf = "$a = 2;  # root\r\n$a * 3";
+    const std::string cr = "$a = 2;  # root\r$a * 3";
+    auto base = Compile(lf, Domain::Groom);
+    auto windows = Compile(crlf, Domain::Groom);
+    auto classic = Compile(cr, Domain::Groom);
+    Check(base.ok && windows.ok && classic.ok, "CRLF and lone CR sources compile");
+    if (!base.ok || !windows.ok || !classic.ok) return;
+    Check(SameIR(base.program.IR(), windows.program.IR()) &&
+          SameIR(base.program.IR(), classic.program.IR()),
+          "CRLF and lone CR sources lower to identical IR");
+    Check(windows.program.Source() == lf && classic.program.Source() == lf,
+          "the stored source is the normalized text");
+    float expected = 0.0f, fromCrlf = 0.0f, fromCr = 0.0f;
+    const bool ran = EvaluateScalar(base.program.IR(), &expected) &&
+                     EvaluateScalar(windows.program.IR(), &fromCrlf) &&
+                     EvaluateScalar(classic.program.IR(), &fromCr);
+    Check(ran && expected == 6.0f && fromCrlf == expected && fromCr == expected,
+          "CRLF and lone CR sources evaluate the same as the LF form");
+}
+
 } // namespace
 
 int main()
@@ -231,6 +293,7 @@ int main()
     CheckCurves();
     CheckLimits();
     CheckVariables();
+    CheckLineEndings();
     std::printf("testUsdGenExpressionFrontend: %s\n", g_failures ? "FAILED" : "PASS");
     return g_failures ? 1 : 0;
 }

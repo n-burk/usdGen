@@ -617,7 +617,18 @@ const TfToken t{"input"},
     lengthMode{"length:mode"}, cullThreshold{"cullThreshold"},
     grow{"UsdGenGrow"}, length{"UsdGenLength"},
     width{"UsdGenWidth"}, clump{"UsdGenClump"},
-    clumpLevel{"clump:level"}, clumpLevels{"clump:levels"};
+    clumpLevel{"clump:level"}, clumpLevels{"clump:levels"},
+    curl{"UsdGenCurl"}, bend{"UsdGenBend"}, part{"UsdGenPart"},
+    axisMode{"axisMode"}, partCurves{"part:curves"},
+    directionOp{"UsdGenDirection"}, smooth{"UsdGenSmooth"},
+    resample{"UsdGenResample"}, displace{"UsdGenDisplace"},
+    mode{"mode"}, directionSource{"direction:source"},
+    displaceMap{"displace:map"}, distribution{"distribution"},
+    sculpt{"UsdGenSculptLayer"}, sculptSpace{"sculpt:space"},
+    exprOp{"UsdGenExprOp"}, exprMaps{"expr:maps"},
+    exprReturnType{"expr:returnType"},
+    freeze{"UsdGenFreeze"}, frozenMode{"frozen:mode"},
+    frozenCurves{"frozen:curves"};
 }
 const TfToken &T() { return t; }
 const TfToken &Guides() { return guides; }
@@ -638,6 +649,27 @@ const TfToken &Width() { return width; }
 const TfToken &Clump() { return clump; }
 const TfToken &ClumpLevel() { return clumpLevel; }
 const TfToken &ClumpLevels() { return clumpLevels; }
+const TfToken &Curl() { return curl; }
+const TfToken &Bend() { return bend; }
+const TfToken &Part() { return part; }
+const TfToken &AxisMode() { return axisMode; }
+const TfToken &PartCurves() { return partCurves; }
+const TfToken &DirectionOp() { return directionOp; }
+const TfToken &Smooth() { return smooth; }
+const TfToken &Resample() { return resample; }
+const TfToken &Displace() { return displace; }
+const TfToken &Mode() { return mode; }
+const TfToken &DirectionSource() { return directionSource; }
+const TfToken &DisplaceMap() { return displaceMap; }
+const TfToken &Distribution() { return distribution; }
+const TfToken &Sculpt() { return sculpt; }
+const TfToken &SculptSpace() { return sculptSpace; }
+const TfToken &ExprOp() { return exprOp; }
+const TfToken &ExprMaps() { return exprMaps; }
+const TfToken &ExprReturnType() { return exprReturnType; }
+const TfToken &Freeze() { return freeze; }
+const TfToken &FrozenMode() { return frozenMode; }
+const TfToken &FrozenCurves() { return frozenCurves; }
 }  // namespace tok
 
 /// §6.1: this parameter is a term of the node's Merkle structural digest
@@ -653,6 +685,36 @@ bool IsDigestParam(TfToken const &type, TfToken const &param)
     // Clump's emitted plane names (clumpId_<level>...) follow these two.
     if (type == tok::Clump())
         return param == tok::ClumpLevel() || param == tok::ClumpLevels();
+    // Curl/Bend select their kernel frame via axisMode; Part's parting set is
+    // a graph edge (02 §2.7.2 structural rows).
+    if (type == tok::Curl() || type == tok::Bend())
+        return param == tok::AxisMode();
+    if (type == tok::Part())
+        return param == tok::PartCurves();
+    // Direction/Smooth/Displace select kernel branches via mode; the
+    // direction:source graph edge and the displace:map dependency are
+    // structural like part:curves; Resample's distribution reselects the
+    // resampling kernel (cvCount stays capture-class: same recompile-free
+    // recapture as Grow's segments).
+    if (type == tok::DirectionOp())
+        return param == tok::Mode() || param == tok::DirectionSource();
+    if (type == tok::Smooth())
+        return param == tok::Mode();
+    if (type == tok::Displace())
+        return param == tok::Mode() || param == tok::DisplaceMap();
+    if (type == tok::Resample())
+        return param == tok::Distribution();
+    // SculptLayer's delta frame, ExprOp's program identity (mode, the maps
+    // edge and the write target) and Freeze's snapshot identity (mode plus
+    // the frozen:curves edge, a part:curves-style graph edge) reselect the
+    // kernel branch or the captured source: structural like the rows above.
+    if (type == tok::Sculpt())
+        return param == tok::SculptSpace();
+    if (type == tok::ExprOp())
+        return param == tok::Mode() || param == tok::ExprMaps() ||
+            param == tok::ExprReturnType();
+    if (type == tok::Freeze())
+        return param == tok::FrozenMode() || param == tok::FrozenCurves();
     return false;
 }
 

@@ -175,6 +175,9 @@ private:
     std::string _traceCompile;
     // A cook failed part-way: the next compile starts from scratch.
     bool _graphUntrusted = false;
+    // Identity of the fur density volume's non-tile inputs (occluder meshes,
+    // grid parameters): the tile COW check alone cannot see them change.
+    uint64_t _furVolumeKey = 0;
     // The published baseline is not this graph's last run: rebuild every tile.
     bool _rebuildAllTiles = false;
     UsdGenGenerationStore _store;

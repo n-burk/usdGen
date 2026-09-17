@@ -318,6 +318,10 @@ std::vector<GfVec3f> PublishedPoints(HdSceneIndexBaseRefPtr const &groom)
     SdfPathVector tiles = groom->GetChildPrimPaths(render);
     std::sort(tiles.begin(), tiles.end());
     for (SdfPath const &tile : tiles) {
+        // Tiles only. The render scope also carries the scalp-shadow cap,
+        // whose points are a tessellation of the emitting surface and whose
+        // count changes with the hair over it.
+        if (tile.GetName().rfind("tile_", 0) != 0) continue;
         auto sampled = HdSampledDataSource::Cast(HdContainerDataSource::Get(
             groom->GetPrim(tile).dataSource,
             HdDataSourceLocator(TfToken("primvars"), TfToken("points"), TfToken("primvarValue"))));
@@ -443,7 +447,10 @@ void CheckPlaybackNotices()
 
     TfToken const primvars("primvars");
     HdDataSourceLocator const points(primvars, TfToken("points"));
-    std::vector<TfToken> const moving = {TfToken("points"), TfToken("furTauP"), TfToken("furTauN")};
+    // `normals` is the scalp cap's: it follows the emitting surface, which the
+    // RBF drivers deform, so it moves whenever the cap's points do.
+    std::vector<TfToken> const moving = {TfToken("points"), TfToken("furTauP"),
+                                         TfToken("furTauN"), TfToken("normals")};
     std::string universal, unexpected;
     size_t tilesWithPoints = 0;
     bool driverPoints = false, driverUniversal = false;
@@ -456,12 +463,16 @@ void CheckPlaybackNotices()
             continue;
         }
         bool const tile = std::find(tiles.begin(), tiles.end(), entry.primPath) != tiles.end();
-        if (!tile) {
+        // The scalp-shadow cap is rebaked with the groom, so it moves every
+        // frame too. It is held to the same discipline as a tile: precise
+        // locators over the primvars that actually change, never universal.
+        bool const cap = entry.primPath.GetName() == "scalpShadow";
+        if (!tile && !cap) {
             if (entry.primPath.HasPrefix(render))
                 unexpected += " " + entry.primPath.GetString() + ":" + Describe(locators);
             continue;
         }
-        if (locators.Intersects(points)) ++tilesWithPoints;
+        if (tile && locators.Intersects(points)) ++tilesWithPoints;
         for (HdDataSourceLocator const &locator : locators) {
             if (!locator.HasPrefix(HdDataSourceLocator(primvars))) continue;
             bool const allowed = locator.GetElementCount() >= 2 &&

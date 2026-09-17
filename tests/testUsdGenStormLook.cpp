@@ -280,7 +280,7 @@ int main(int argc, char **argv)
     check(std::filesystem::exists(sceneA), "sceneA_asset.usda exists");
     check(std::filesystem::exists(sceneAId), "sceneA_id.usda exists");
 
-    // --- (a) Sdr registration of the three shipped defs ---
+    // --- (a) Sdr registration of the three C5 defs ---
     SdrRegistry &sdr = SdrRegistry::GetInstance();
     for (const char *id :
          {"UsdGenHairPreview", "UsdGenHairPreviewPrimvar",
@@ -291,6 +291,24 @@ int main(int argc, char **argv)
               (std::string("Sdr def registered with >=20 inputs: ") + id +
                " (" + std::to_string(nInputs) + ")")
                   .c_str());
+    }
+    // ... and of the two UE-parity strand defs (plan/16 WS1), which carry
+    // their own 19-input contract. usdGenShaders/test/check_hair_strands_defs.py
+    // checks their names, defaults and primvars in full; this only proves that
+    // adding them did not break discovery in the same process as the C5 three.
+    for (const char *id : {"UsdGenHairStrands", "UsdGenHairStrandsTranslucent"}) {
+        SdrShaderNodeConstPtr node = sdr.GetShaderNodeByIdentifier(TfToken(id));
+        size_t nInputs = node ? node->GetShaderInputNames().size() : 0;
+        check(nInputs == 19,
+              (std::string("Sdr def registered with 19 inputs: ") + id + " (" +
+               std::to_string(nInputs) + ")")
+                  .c_str());
+        // 7 geometry primvars plus the 4 the look travels on (hairTipColor,
+        // hairColorRamp, hairRandomHue, hairRandomValue). HdSt only asks the
+        // prim for primvars the def names, so a missing one silently reverts
+        // that half of the look to the material's Sdr default.
+        check(node && node->GetPrimvars().size() == 11,
+              (std::string("Sdr def declares its 11 primvars: ") + id).c_str());
     }
 
     // --- (b) Storm renders clean ---

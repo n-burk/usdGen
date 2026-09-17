@@ -2,8 +2,9 @@
 #
 # usdGen hair preview shader definitions (contract C5: docs/freezes/C5.md).
 #
-# One Shader prim per shipped glslfx file: the three hair looks, then the
-# value preview (not a look; see the end of the file). The Sdr identifier IS the
+# One Shader prim per shipped glslfx file: the three C5-frozen hair looks, then
+# the value preview, then the two UE-parity strand looks (neither of the last
+# three is part of the C5 freeze; see the end of the file). The Sdr identifier IS the
 # prim name (pxr/usd/usdShade/shaderDefUtils.cpp:51-52) — UpperCamel, no
 # underscores (SdrFsHelpersSplitShaderIdentifier tokenises on '_'). Only the
 # FILE names are lowerCamel. The glslfx files are siblings of this layer, so
@@ -129,6 +130,102 @@ def Shader "UsdGenValuePreview" (
     uniform asset info:glslfx:sourceAsset = @./usdGenValuePreview.glslfx@
     float inputs:shading = 1
     color3f inputs:fallbackColor = (0.02, 0.02, 0.02)
+    token outputs:surface (
+        sdrMetadata = { string renderType = "terminal surface" }
+    )
+}
+
+# The UE-parity strand looks (plan/16-ue-hair-parity.md WS1). A port of Unreal's
+# HairStrands shading -- Karis' R/TT/TRT lobes, Zinke dual scattering driven by
+# the baked hair count, UE coverage compensation -- with UE's own parameter
+# names and defaults. NOT part of the C5 freeze, which covers the `inputs:`
+# block of the three UsdGenHairPreview* defs above and nothing else: these two
+# are a separate contract and may change independently.
+#
+# UsdGenHairStrands is what UsdGenTilePublisher::BuildDefaultMaterialDataSource
+# binds on a usdGen tile, with the description's usdGen:look:* carried into the
+# parameters, so an authored look reaches Storm instead of these defaults.
+# The two defs share every input; only the glslfx materialTag differs.
+
+def Shader "UsdGenHairStrands" (
+    doc = "usdGen UE-parity strand hair: Karis R/TT/TRT, dual scattering from the baked hair count, coverage compensation; opaque + alpha-to-coverage. The usdGen tile default."
+    sdrMetadata = { string primvars = "hairId|hairT|st|furTauP|furTauN|furTipTauP|furTipTauN|hairTipColor|hairColorRamp|hairRandomHue|hairRandomValue" }
+)
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:glslfx:sourceAsset = @./usdGenHairStrands.glslfx@
+    color3f inputs:baseColor = (0.035, 0.018, 0.008)
+    color3f inputs:tipColor = (0.21, 0.115, 0.045)
+    float inputs:colorRamp = 1
+    float inputs:useMelanin = 0
+    float inputs:melanin = 0.5
+    float inputs:redness = 0
+    color3f inputs:dyeColor = (1, 1, 1)
+    float inputs:roughness = 0.35
+    float inputs:specular = 0.5
+    float inputs:scatter = 0
+    float inputs:backlit = 1
+    float inputs:opacity = 1
+    float inputs:randomHue = 0
+    float inputs:randomValue = 0
+    float inputs:randomRoughness = 0
+    float inputs:selfShadow = 1
+    float inputs:hairCoverageScale = 1
+    float inputs:minPixelWidth = 1
+    color3f inputs:baseColorMap = (1, 1, 1)
+    token outputs:surface (
+        sdrMetadata = { string renderType = "terminal surface" }
+    )
+}
+
+# Hair shadowing the skin it grows out of (plan/16-ue-hair-parity.md WS3). Not
+# a hair look and not part of the C5 freeze. The groom scene index binds it on
+# one synthetic Mesh per description, <description>/__usdGenRender/scalpShadow,
+# whose furTauP/furTauN are HAIR-ONLY optical depth over the emitting surface.
+# It writes black with the alpha the hair above absorbs, so the translucent
+# pass multiplies whatever skin material the user authored underneath.
+def Shader "UsdGenScalpShadow" (
+    doc = "usdGen scalp shadow: darkens the groom's emitting surface by the light the hair above it absorbs. Stock Storm casts no shadow from any UsdLux light, so this synthetic cap is the only route to hair-on-skin shadowing."
+    sdrMetadata = { string primvars = "furTauP|furTauN" }
+)
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:glslfx:sourceAsset = @./usdGenScalpShadow.glslfx@
+    color3f inputs:baseColor = (0.035, 0.018, 0.008)
+    float inputs:roughness = 0.35
+    float inputs:strength = 1
+    float inputs:ambient = 0.35
+    token outputs:surface (
+        sdrMetadata = { string renderType = "terminal surface" }
+    )
+}
+
+def Shader "UsdGenHairStrandsTranslucent" (
+    doc = "usdGen UE-parity strand hair + translucent materialTag (OIT); for hero shots and very fine hair where alpha-to-coverage banding shows."
+    sdrMetadata = { string primvars = "hairId|hairT|st|furTauP|furTauN|furTipTauP|furTipTauN|hairTipColor|hairColorRamp|hairRandomHue|hairRandomValue" }
+)
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:glslfx:sourceAsset = @./usdGenHairStrandsTranslucent.glslfx@
+    color3f inputs:baseColor = (0.035, 0.018, 0.008)
+    color3f inputs:tipColor = (0.21, 0.115, 0.045)
+    float inputs:colorRamp = 1
+    float inputs:useMelanin = 0
+    float inputs:melanin = 0.5
+    float inputs:redness = 0
+    color3f inputs:dyeColor = (1, 1, 1)
+    float inputs:roughness = 0.35
+    float inputs:specular = 0.5
+    float inputs:scatter = 0
+    float inputs:backlit = 1
+    float inputs:opacity = 1
+    float inputs:randomHue = 0
+    float inputs:randomValue = 0
+    float inputs:randomRoughness = 0
+    float inputs:selfShadow = 1
+    float inputs:hairCoverageScale = 1
+    float inputs:minPixelWidth = 1
+    color3f inputs:baseColorMap = (1, 1, 1)
     token outputs:surface (
         sdrMetadata = { string renderType = "terminal surface" }
     )

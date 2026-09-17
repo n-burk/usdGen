@@ -4,6 +4,7 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usdGeom/basisCurves.h"
+#include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/pointInstancer.h"
 #include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/xformCache.h"
@@ -12,7 +13,8 @@
 #include <stdexcept>
 PXR_NAMESPACE_USING_DIRECTIVE
 int main(int argc,char** argv) try {
-    if(argc<3) {std::fprintf(stderr,"Usage: usdGenBakeFur input.usd output.usda [resolution=48]\n");return 2;}
+    if(argc<3) {std::fprintf(stderr,"Usage: usdGenBakeFur input.usd output.usda [resolution]\n"
+        "  resolution: voxels per axis; omit to derive an anisotropic grid at ~0.3 world units\n");return 2;}
     auto stage=UsdStage::Open(argv[1]);
     if(!stage) throw std::runtime_error("cannot open input stage");
     auto start=std::chrono::steady_clock::now();
@@ -55,10 +57,30 @@ int main(int argc,char** argv) try {
         tiles.push_back(std::move(tile));groups.push_back(std::move(group));
     }
     if(tiles.empty()) throw std::runtime_error("no PointInstancer found");
-    usdGen::UsdGenBuildFurOcclusion(&tiles,nullptr,argc>3?std::stoi(argv[3]):48);
+    // Every Mesh in the stage is an opaque blocker, the way the procedural
+    // lane treats the groom's emitting surfaces.
+    usdGen::UsdGenFurOcclusionParams occlusion;
+    if(argc>3) occlusion.resolution=std::stoi(argv[3]);
+    for(auto const& prim:stage->Traverse()) {
+        UsdGeomMesh mesh(prim);if(!mesh) continue;
+        usdGen::UsdGenFurOccluder occluder;
+        if(!mesh.GetPointsAttr().Get(&occluder.points) ||
+           !mesh.GetFaceVertexCountsAttr().Get(&occluder.faceVertexCounts) ||
+           !mesh.GetFaceVertexIndicesAttr().Get(&occluder.faceVertexIndices) ||
+           occluder.points.empty() || occluder.faceVertexIndices.empty()) continue;
+        occluder.worldMatrix=cache.GetLocalToWorldTransform(prim);
+        occlusion.occluders.push_back(std::move(occluder));
+    }
+    usdGen::UsdGenBuildFurOcclusion(&tiles,nullptr,occlusion);
     for(size_t g=0;g<groups.size();++g) {
         UsdGeomPrimvarsAPI pv(groups[g].prim);
         for(auto const& plane:tiles[g].extraUniform) {
+            // Only the per-CV vec3 optical-depth planes are instanced here:
+            // this loop indexes f[cv*3..+2] directly, and the cooker also
+            // publishes constant look planes (hairTipColor and friends) that
+            // would read off the end of a 1- or 3-element buffer.
+            if(plane.arity!=3||plane.interpolation!=TfToken("vertex")||
+               plane.f.size()<tiles[g].points.size()*3) continue;
             VtVec3fArray root,tip;root.reserve(groups[g].instances.size());tip.reserve(root.capacity());
             for(auto const& i:groups[g].instances){
                 root.push_back(GfVec3f(plane.f[i.root*3],plane.f[i.root*3+1],plane.f[i.root*3+2]));

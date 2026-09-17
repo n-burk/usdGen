@@ -113,8 +113,38 @@ properties can be authored by hand:
         uniform token usdGen:preview:shading = "flat"
     }
 
+## UE-parity hair scenes
+
+Two scenes exist to compare `UsdGenHairStrands` against Unreal's strand
+shading (plan/16, `docs/storm-fur.md`):
+
+* `head-hair-closeup.usda` — a procedural head groom, generator
+  `tools/make_head_hair.py`. `TempleCam` is the dense-coat view, `HeadCam` the
+  wider one.
+* `metahuman-hair-parity.usda` — the real converted MetaHuman groom under
+  `plan/examples/metahuman-hair/male_hair_01/`, routed through a
+  `UsdGenCurveSource` so it picks up the density bake, the scalp shadow and the
+  default strand material. Nothing under `plan/examples/` is modified; the
+  scene sublayers it and overrides in place. Generator
+  `tools/make_metahuman_parity.py`.
+
+Each has a `*-render.usda` companion that adds a backdrop sphere for offline
+renders only — a 260-unit backdrop in the viewable scene blows out usdview's
+bbox-derived near/far and clips the hair on zoom.
+
+The colour of the MetaHuman groom is authored as `usdGen:look:rootColor` and
+`tipColor` on the description, with **no material bound**, because only the
+publisher's synthetic default material carries the look's tip colour. See
+"Binding your own material loses half the look" in `docs/storm-fur.md` before
+adding one.
+
+    .\bin\render_ue_parity.ps1 -Label <name>              # renders\ue-parity\<name>_*
+    .\bin\render_ue_parity.ps1 -Label ref -Supersample 4  # converged reference, offline only
+
 ## Regenerating
 
     python examples\tools\make_examples.py       # the two procedural scenes
+    python examples\tools\make_head_hair.py      # head-hair-closeup{,-render}.usda
+    python examples\tools\make_metahuman_parity.py   # metahuman-hair-parity{,-render}.usda
     .\examples\tools\bake_maps.ps1                # examples\maps\*.ptx (usdGenBakePtex)
     .\examples\tools\render_examples.ps1          # renders\examples\*.png

@@ -1,4 +1,13 @@
+# Only named parameters bind by name; everything else (the scene path and any
+# usdview flags) falls through to $UsdviewArgs.
+[CmdletBinding(PositionalBinding = $false)]
 param(
+    # Render the viewport at N x the window and box-downsample it in linear
+    # light on present (usdGenTools; see docs/storm-fur.md). Cost goes as N^2,
+    # so this is a look-dev switch: 2 is the useful one, 4 is a hero still.
+    # It can also be changed in the usdGen > Viewport Supersampling menu.
+    [ValidateRange(1, 8)]
+    [int] $Supersample = 0,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $UsdviewArgs
 )
@@ -35,6 +44,20 @@ $pluginDirs = @(
     (Join-Path $UsdInstallDir "lib\usd")
 ) | Where-Object { Test-Path $_ }
 $env:PXR_PLUGINPATH_NAME = ($pluginDirs -join ';')
+
+# Storm's MSAA sample count. The default is 4, which gives a sub-pixel strand
+# only 5 coverage levels to spend and leaves the coat speckled; 8 removes most
+# of that for about 13% of frame time, where 16 costs 65% for almost nothing
+# more (head-hair-closeup at 1280: 14.84 / 16.71 / 24.52 ms, isolated-pixel
+# spike score 0.00631 / 0.00536 / 0.00530 against 0.00176 for a 4x
+# supersampled reference). This is launcher configuration, not an OpenUSD
+# patch -- HdxTaskController reads it -- so set it only if the caller has not.
+if (-not $env:HDX_MSAA_SAMPLE_COUNT) { $env:HDX_MSAA_SAMPLE_COUNT = "8" }
+
+# Viewport supersampling, read by the usdGenTools usdview plugin. -Supersample
+# wins over the environment; without either, the viewport renders 1:1.
+if ($Supersample -gt 0) { $env:USDGEN_USDVIEW_SUPERSAMPLE = "$Supersample" }
+
 
 # A CUDA-enabled usdGen.dll imports cudart/cusolver from the bin directory of
 # the toolkit it was compiled against. That is not necessarily the toolkit on

@@ -110,6 +110,28 @@ def Xform "World"
         float verticalAperture = 18
     }
 
+    # Key + a DomeLight fill so the physically based default hair material
+    # (a UE port) doesn't render near-black under only usdrecord's camera
+    # headlight. inputs:normalize = 1 is required on the DistantLight: HdSt
+    # otherwise multiplies intensity by its (tiny, 0.53deg-default) solid
+    # angle, so an un-normalized "intensity 3" comes out around 2e-4 and the
+    # light is effectively invisible next to the headlight.
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 10
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-10, 40, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 1, 1)
+    }
+
     def Mesh "Plane" (
         prepend apiSchemas = ["UsdGenRestAPI"]
     )

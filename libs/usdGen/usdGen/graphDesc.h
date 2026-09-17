@@ -154,6 +154,18 @@ struct UsdGenAuthoredPlaneDesc
     VtIntArray intValues;              // populated only for Int32
 };
 
+/// The source curves' own `primvars:displayColor`, forwarded as an authored
+/// plane under this reserved name. It rides the ordinary named-plane machinery
+/// so resampling and compaction carry it correctly, but the session cooker
+/// consumes it into the tile's displayColor instead of publishing it, so it
+/// never appears as a stray primvar. `displayColor` itself cannot be used: the
+/// compiler reserves that name for authored planes.
+inline TfToken const &UsdGenSourceColorPlane()
+{
+    static TfToken const name("usdGenSourceColor");
+    return name;
+}
+
 struct UsdGenNodeDesc
 {
     SdfPath                      path;         // the operator prim's scene path (identity + Kahn tie-break)

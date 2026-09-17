@@ -410,6 +410,38 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
     _GetPrimvarTyped(prim, TfToken("usdGen:rootFrame"), UsdTimeCode(time),
                      &out->rootFrame);
 
+    // The source curves' own displayColor, forwarded so a groom that styles
+    // nothing shows the colour its asset already carries. Any interpolation is
+    // accepted: constant/uniform/vertex map onto the three plane domains.
+    if (UsdGeomPrimvar pv =
+            UsdGeomPrimvarsAPI(prim).GetPrimvar(TfToken("displayColor"))) {
+        VtVec3fArray colors;
+        if (pv.Get(&colors, UsdTimeCode(time)) && !colors.empty()) {
+            usdGen::UsdGenAuthoredPlaneDesc plane;
+            plane.name = usdGen::UsdGenSourceColorPlane();
+            plane.type = usdGen::UsdGenAuthoredPlaneType::Float32;
+            plane.arity = 3;
+            TfToken const interpolation = pv.GetInterpolation();
+            if (interpolation == UsdGeomTokens->constant || colors.size() == 1) {
+                plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Groom;
+            } else if (interpolation == UsdGeomTokens->uniform) {
+                plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
+            } else {
+                plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Point;
+            }
+            size_t const elements =
+                plane.domain == usdGen::UsdGenAuthoredPlaneDomain::Groom
+                    ? 1 : colors.size();
+            plane.floatValues.reserve(elements * 3);
+            for (size_t i = 0; i < elements; ++i) {
+                plane.floatValues.push_back(colors[i][0]);
+                plane.floatValues.push_back(colors[i][1]);
+                plane.floatValues.push_back(colors[i][2]);
+            }
+            out->authoredPlanes.push_back(std::move(plane));
+        }
+    }
+
     TfToken curveRole;
     _GetPrimvarTyped(prim, TfToken("usdGen:role"), UsdTimeCode::Default(),
                      &curveRole);
@@ -595,6 +627,9 @@ BuildGraphDescFromStage(
     }
 
     // ---- nodes, composed reverse-sibling post-order ----------------------
+    // Collider targets ride along keyed by node path; they append to the
+    // Collide nodes' surfaces after surface inheritance below.
+    std::map<std::string, SdfPathVector> colliderTargets;
     for (SdfPath const &operatorPath : operatorOrder) {
         UsdPrim const prim = stage->GetPrimAtPath(operatorPath);
         UsdGenNodeDesc node;
@@ -610,16 +645,41 @@ BuildGraphDescFromStage(
         _GetDedicated(prim.GetAttribute(TfToken("usdGen:seed")),
                   UsdTimeCode::Default(), &node.seed, &desc.validationErrors, node.path, "usdGen:seed");
 
+        // usdGen:colliders (UsdGenCollide only) collects to a sidecar:
+        // node.surfaces is overwritten by the description inheritance
+        // below, so colliders append after it instead of bucketing here.
+        SdfPathVector nodeColliders;
+        bool const isCollide = node.type == TfToken("UsdGenCollide");
         for (UsdRelationship const &rel : prim.GetRelationships()) {
             std::string const name = rel.GetBaseName().GetString();
+            // usdGen:part:curves nests one level deeper; match it by full
+            // name so its bucketing cannot depend on how GetBaseName
+            // strips a nested namespace.
+            bool const isPartCurves =
+                rel.GetName().GetString() == "usdGen:part:curves";
+            bool const isDirectionSource =
+                rel.GetName().GetString() == "usdGen:direction:source";
+            // usdGen:frozen:curves nests like part:curves; match it by full
+            // name for the same reason, and mark its targets Reference so
+            // the compiler resolves them into Freeze's reference slot.
+            bool const isFrozenCurves =
+                rel.GetName().GetString() == "usdGen:frozen:curves";
+            bool const isColliders =
+                isCollide && rel.GetName().GetString() == "usdGen:colliders";
             SdfPathVector *bucket = &node.references;
             if (name == "input") {
                 bucket = &node.inputs;
             } else if (name == "references") {
                 bucket = &node.references;
             } else if (name == "guides" || name == "curves" ||
-                       name == "frozen:curves") {
+                       name == "frozen:curves" || isPartCurves ||
+                       isDirectionSource) {
+                // node.curves, not node.references: the compiler resolves
+                // every node.references path as a curve set, while curveRefs
+                // also admit reference-lane operator sources (guides rule).
                 bucket = &node.curves;
+            } else if (isColliders) {
+                bucket = &nodeColliders;
             } else {
                 continue;  // not a graph edge (base-name match only)
             }
@@ -627,7 +687,7 @@ BuildGraphDescFromStage(
             rel.GetTargets(&relTargets);
             for (SdfPath const &t : relTargets) {
                 bucket->push_back(t);
-                if (name == "guides") {
+                if (name == "guides" || isPartCurves || isDirectionSource || isFrozenCurves) {
                     curveRoles[t.GetString()] = UsdGenRole::Reference;
                 }
             }
@@ -660,6 +720,8 @@ BuildGraphDescFromStage(
                 node.expressionBindings.push_back(std::move(binding));
             }
         }
+        if (!nodeColliders.empty())
+            colliderTargets[operatorPath.GetString()] = nodeColliders;
         desc.nodes.push_back(std::move(node));
     }
 
@@ -674,6 +736,23 @@ BuildGraphDescFromStage(
         if (!descSurfaces.empty()) {
             for (UsdGenNodeDesc &node : desc.nodes) {
                 node.surfaces = descSurfaces;
+            }
+        }
+    }
+
+    // UsdGenCollide (02 §2.8): usdGen:colliders targets ride the shared
+    // surface path. They append AFTER the inherited bound surface, so
+    // surfaces.front() — the root surface every consumer resolves — is
+    // unchanged, and the pool loop below builds their descs like any other.
+    // A collider equal to the bound surface is already present, not doubled.
+    if (!colliderTargets.empty()) {
+        for (UsdGenNodeDesc &node : desc.nodes) {
+            auto const it = colliderTargets.find(node.path.GetString());
+            if (it == colliderTargets.end()) continue;
+            for (SdfPath const &c : it->second) {
+                if (std::find(node.surfaces.begin(), node.surfaces.end(), c) ==
+                    node.surfaces.end())
+                    node.surfaces.push_back(c);
             }
         }
     }

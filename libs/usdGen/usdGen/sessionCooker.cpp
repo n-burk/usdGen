@@ -12,6 +12,7 @@
 #include "usdGenMath/usdGenMath/hash.h"
 
 #include "pxr/pxr.h"
+#include "pxr/base/tf/envSetting.h"
 #include "pxr/base/trace/trace.h"
 
 #include <algorithm>
@@ -19,12 +20,20 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <limits>
 #include <string>
 #include <utility>
 
 PXR_NAMESPACE_USING_DIRECTIVE
+
+// Hair shadowing the scalp is on by default and costs one extra sweep of the
+// density volume plus a small translucent mesh. Set USDGEN_SCALP_SHADOW=0 to
+// publish no cap at all: nothing else in the groom changes.
+TF_DEFINE_ENV_SETTING(USDGEN_SCALP_SHADOW, true,
+                      "Publish the usdGen scalp-shadow cap (hair shadowing the "
+                      "groom's emitting surface).");
 
 namespace usdGen {
 
@@ -1824,6 +1833,38 @@ UsdGenStats publishedStats, bool invalidateValues,
         for (std::string const &warning : previewWarnings) _lastDiagnostics.Warn(warning);
     }
     gen.colorDigest = _previewColors.digest;
+    // ...and so does usdGen:look, which is baked into every tile's
+    // displayColor and (since the look travels as constant primvars too)
+    // into its extra planes. A look-only edit touches no point and no
+    // topology, so without this it would reach the synthetic material and
+    // nothing else -- the strands would keep the previous root colour.
+    {
+        auto mix = [](uint64_t *h, uint64_t v) {
+            *h ^= v + 0x9e3779b97f4a7c15ull + (*h << 6) + (*h >> 2);
+            *h ^= *h >> 30; *h *= 0xbf58476d1ce4e5b9ull;
+            *h ^= *h >> 27; *h *= 0x94d049bb133111ebull;
+            *h ^= *h >> 31;
+        };
+        auto mixF = [&](uint64_t *h, float v) {
+            uint32_t bits = 0; std::memcpy(&bits, &v, sizeof(bits));
+            mix(h, bits);
+        };
+        UsdGenLookDesc const &lk = _desc.look;
+        uint64_t h = gen.colorDigest;
+        for (int i = 0; i < 3; ++i) { mixF(&h, lk.rootColor[i]); mixF(&h, lk.tipColor[i]); }
+        for (GfVec3f const &c : lk.rampColors)
+            for (int i = 0; i < 3; ++i) mixF(&h, c[i]);
+        for (float p : lk.rampPositions) mixF(&h, p);
+        mixF(&h, lk.rampExponent);
+        mixF(&h, lk.hueJitter);
+        mixF(&h, lk.valueJitter);
+        mix(&h, static_cast<uint64_t>(static_cast<uint32_t>(lk.jitterSeed)));
+        mix(&h, lk.rampInterpolation.Hash());
+        mix(&h, lk.bakeMode.Hash());
+        mix(&h, lk.bakeTarget.Hash());
+        mix(&h, lk.bakePrimvar.Hash());
+        gen.colorDigest = h;
+    }
     const bool recolour = prev && prev->colorDigest != gen.colorDigest;
     phases.Phase("preview");
 
@@ -1861,13 +1902,67 @@ UsdGenStats publishedStats, bool invalidateValues,
     // geometry reuses the immutable planes, including on look-only edits.
     {
         UsdGenWorkDispatcher dispatcher = _scheduler.MakeWorkDispatcher();
-        UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr, 48, &dispatcher);
+        UsdGenFurOcclusionParams occlusion;
+        occlusion.dispatcher = &dispatcher;
+        // The emitting surfaces are opaque: without them light reaches hair
+        // through the scalp (Unreal injects the opaque depth for the same
+        // reason). Deformed points at this frame, in the same world space the
+        // tiles were transformed into.
+        occlusion.occluders.reserve(_desc.surfaces.size());
+        for (UsdGenSurfaceDesc const &surface : _desc.surfaces) {
+            if (surface.points.empty() || surface.faceVertexIndices.empty())
+                continue;
+            UsdGenFurOccluder occluder;
+            occluder.points = surface.points;
+            occluder.faceVertexCounts = surface.faceVertexCounts;
+            occluder.faceVertexIndices = surface.faceVertexIndices;
+            occluder.worldMatrix = surface.worldMatrix;
+            occlusion.occluders.push_back(std::move(occluder));
+        }
+        // Hair shadowing the scalp. Stock Storm casts no shadow from any
+        // UsdLux light, so a synthetic cap over the emitting surface is the
+        // only route; it is built from the same volume, at no extra sweep
+        // beyond the hair-only one it needs.
+        occlusion.scalpShadow = !occlusion.occluders.empty() &&
+                                TfGetEnvSetting(USDGEN_SCALP_SHADOW);
+        // The reuse path leaves the cap untouched, so seed it: unchanged
+        // geometry shares the previous immutable arrays.
+        if (prev) gen.scalpShadow = prev->scalpShadow;
+        UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr,
+                                occlusion, &_furVolumeKey, &gen.scalpShadow);
+        if (!gen.scalpShadow.IsEmpty()) {
+            _PresentationScalars const scalars = _BuildPresentationScalars(
+                _desc, SdfPath());
+            gen.scalpShadow.primPath =
+                _RenderNamespace(_desc.description).AppendChild(
+                    TfToken("scalpShadow"));
+            gen.scalpShadow.purpose = scalars.purpose;
+            gen.scalpShadow.visibility = scalars.visibility;
+            gen.scalpShadow.materialPath =
+                _RenderNamespace(_desc.description).AppendChild(
+                    TfToken("material_scalpShadow"));
+        }
     }
     phases.Phase("occlusion");
 
     // Signature: the prim-set identity step 7 diffs structurally (03 §6.1).
     gen.signature.tileCount = static_cast<uint32_t>(gen.tiles.size());
     gen.signature.instancerCount = 0;
+    // The end of the look's path into Storm: the colour a tile actually
+    // publishes. It is baked from _desc.look, so this and the INGRESS capture
+    // line together say whether an authored look survived the whole trip --
+    // the failure mode is silent, because a defaulted look is still a
+    // plausible dark brown.
+    if (TfDebug::IsEnabled(USDGEN_INGRESS) && !gen.tiles.empty() &&
+        !gen.tiles.front().displayColor.empty()) {
+        GfVec3f const &c = gen.tiles.front().displayColor.front();
+        TF_DEBUG(USDGEN_INGRESS).Msg(
+            "usdGen tile displayColor[0] = %.4f %.4f %.4f (look rootColor "
+            "%.4f %.4f %.4f)\n",
+            double(c[0]), double(c[1]), double(c[2]),
+            double(_desc.look.rootColor[0]), double(_desc.look.rootColor[1]),
+            double(_desc.look.rootColor[2]));
+    }
     gen.signature.primPaths.reserve(gen.tiles.size());
     gen.signature.primTypes.assign(gen.tiles.size(), "basisCurves");
     gen.signature.primvarNames.reserve(gen.tiles.size());
@@ -1960,8 +2055,16 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
         UsdGenPlane output;
     };
     std::vector<ExtraPlanePublication> extraPlanes;
+    // The forwarded source colour is consumed into the tile's displayColor
+    // below, never published: it is an input to the colour decision, not a
+    // primvar of its own.
+    UsdGenPlane const *sourceColor = _FindPlane(term.extraCurve,
+                                                UsdGenSourceColorPlane());
+    if (!sourceColor) sourceColor = _FindPlane(term.extraCv,
+                                               UsdGenSourceColorPlane());
     auto addExtraPlane = [&](UsdGenPlane const& plane, TfToken expectedInterpolation) {
-        if (plane.name == TfToken("displayColor")) return;
+        if (plane.name == TfToken("displayColor") ||
+            plane.name == UsdGenSourceColorPlane()) return;
         size_t const elements = expectedInterpolation == TfToken("constant") ? 1 :
             expectedInterpolation == TfToken("vertex") ? term.totalCvs : term.totalCurves;
         size_t const values = elements * plane.arity;
@@ -1999,6 +2102,67 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     }
     for (UsdGenPlane const& p : term.extraCv)
         addExtraPlane(p, TfToken("vertex"));
+
+    // Precedence (02 §2.14): an AUTHORED look on the description wins;
+    // otherwise the source curves' own displayColor, which is what a
+    // MetaHuman-style asset already carries; otherwise the look's schema
+    // defaults. "Authored" has to mean an opinion that differs from the
+    // fallback -- a description that merely applies UsdGenLookAPI has a full
+    // set of schema-default look values, and treating those as authored would
+    // silently discard every asset's own colour.
+    static UsdGenLookDesc const lookFallback;
+    bool const authoredLook =
+        _desc.look.rootColor != lookFallback.rootColor ||
+        _desc.look.tipColor != lookFallback.tipColor ||
+        !_desc.look.rampColors.empty();
+
+    // The rest of the look as CONSTANT primvars, so the shading of a groom
+    // does not depend on the tile keeping the synthetic material: a user who
+    // binds their own UsdGenHairStrands material gets the Sdr defaults for
+    // everything the tile does not carry, which used to mean blond tips on a
+    // black-haired groom. rootColor already travels as the baked per-curve
+    // displayColor, so it is deliberately NOT repeated here -- a second
+    // channel for it would only be a way for the two to disagree.
+    //
+    // Each one is published only where the look RESOLVES it to something
+    // other than its schema fallback. An unauthored look publishes none of
+    // them, the shader's `#ifdef HD_HAS_*` is false, and the material input
+    // applies exactly as before: the default-material path is unchanged by
+    // construction, and a forwarded asset colour (one flat colour per curve)
+    // never acquires an invented tip.
+    auto addLookConstant = [&](char const* name, std::initializer_list<float> v) {
+        // An authored plane of the same name wins: the user asked for it by
+        // hand, and two planes with one name is not a publishable tile.
+        if (std::any_of(extraPlanes.begin(), extraPlanes.end(),
+                        [&](auto const& e) { return e.output.name == name; }))
+            return;
+        UsdGenPlane plane;
+        plane.name = TfToken(name);
+        plane.interpolation = TfToken("constant");
+        plane.type = TfToken("float");
+        plane.arity = static_cast<decltype(plane.arity)>(v.size());
+        plane.f.assign(v.begin(), v.end());
+        ExtraPlanePublication entry;
+        entry.source = nullptr;   // synthesized; the uniform gather never runs
+        entry.output = std::move(plane);
+        extraPlanes.push_back(std::move(entry));
+    };
+    if (authoredLook) {
+        // Ramp-aware, matching UsdGenTilePublisher::_LookColors: the shader
+        // has one lerp, so a multi-stop ramp presents as its last stop.
+        GfVec3f const tip = _desc.look.rampColors.size() >= 2
+            ? _desc.look.rampColors[_desc.look.rampColors.size() - 1]
+            : _desc.look.tipColor;
+        addLookConstant("hairTipColor", {tip[0], tip[1], tip[2]});
+    }
+    if (_desc.look.rampExponent != lookFallback.rampExponent)
+        addLookConstant("hairColorRamp",
+                        {std::max(_desc.look.rampExponent, 0.001f)});
+    if (_desc.look.hueJitter != lookFallback.hueJitter)
+        addLookConstant("hairRandomHue", {std::max(_desc.look.hueJitter, 0.0f)});
+    if (_desc.look.valueJitter != lookFallback.valueJitter)
+        addLookConstant("hairRandomValue",
+                        {std::max(_desc.look.valueJitter, 0.0f)});
 
     GfRange3f bounds;
     uint32_t depSurface = 0;
@@ -2058,8 +2222,13 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                 }
             } else if (displayColor)
                 _GatherColor(*displayColor, g, p0, &pub.displayColor);
-            else if (_desc.look.bakeTarget != TfToken("none"))
-                pub.displayColor.push_back(_desc.look.rootColor);
+            else if (_desc.look.bakeTarget != TfToken("none")) {
+                // `authoredLook` above carries the 02 §2.14 precedence rule.
+                if (!authoredLook && sourceColor)
+                    _GatherColor(*sourceColor, g, p0, &pub.displayColor);
+                else
+                    pub.displayColor.push_back(_desc.look.rootColor);
+            }
             for (auto& extra : extraPlanes)
                 if (extra.output.interpolation == TfToken("uniform"))
                     _GatherPlaneElement(*extra.source, g, &extra.output);

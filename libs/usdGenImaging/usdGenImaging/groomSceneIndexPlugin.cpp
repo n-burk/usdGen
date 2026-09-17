@@ -92,6 +92,14 @@ SdfPath MaterialPath(SdfPath const& description) {
     return ::usdGenImaging::UsdGenTilePublisher::MaterialPath(description);
 }
 
+SdfPath ScalpShadowPath(SdfPath const& description) {
+    return ::usdGenImaging::UsdGenTilePublisher::ScalpShadowPath(description);
+}
+
+SdfPath ScalpShadowMaterialPath(SdfPath const& description) {
+    return ::usdGenImaging::UsdGenTilePublisher::ScalpShadowMaterialPath(description);
+}
+
 // The prim-level containers a synthetic tile must inherit from (or have
 // masked by) its owning UsdGenDescription, because the scene indices that
 // author them sit UPSTREAM of this one and never see the tiles (06 §4.1
@@ -495,6 +503,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         std::shared_ptr<const CaptureCache> cache;
         std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter> router;
         std::shared_ptr<const TileMap> tiles = std::make_shared<const TileMap>();
+        // The scalp-shadow cap, built once per publication beside the tiles.
+        // Null when the generation carries none.
+        HdContainerDataSourceHandle scalpShadow;
+        uint64_t scalpDigest = 0;
         // sessionGeneration is reset when an isolated CUDA session replaces a
         // shared CPU session.  Keeping it separate retains last-good ordinary
         // BasisCurves tiles while unimplemented device publication is rejected.
@@ -512,6 +524,15 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // The description's expressions read $frame or $time, so a change of
         // the scene globals' current frame alone changes its result.
         bool readsTime = true;
+        // usdGen:look:* carried to the synthetic default material. The tile
+        // bakes only rootColor (into displayColor); the tip colour, ramp
+        // exponent and jitter reach Storm through the material's parameters,
+        // so the View has to carry them to GetPrim().
+        usdGen::UsdGenLookDesc look;
+        // The scalp-shadow cap and the identity of its contents: the prim is
+        // served from here, and nothing else would tell Hydra it changed.
+        HdContainerDataSourceHandle scalpShadow;
+        uint64_t scalpDigest = 0;
     };
     struct Snapshot {
         std::vector<View> members;
@@ -616,7 +637,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             auto const& g = *item.second;
             next->members.push_back({g.id, g.root, g.description, g.tiles, g.generation,
                                      g.dependencies, g.cache, g.frame,
-                                     !g.desc || DescReadsTime(*g.desc)});
+                                     !g.desc || DescReadsTime(*g.desc),
+                                     g.desc ? g.desc->look : usdGen::UsdGenLookDesc(),
+                                     g.scalpShadow, g.scalpDigest});
         }
         auto result = std::shared_ptr<const Snapshot>(std::move(next));
         std::atomic_store(&catalog, result);
@@ -824,6 +847,17 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             fresh->emplace(tile.primPath,
                 ::usdGenImaging::UsdGenTilePublisher::BuildTileDataSource(tile, generation.id));
         }
+        // The scalp-shadow cap lives beside the tiles, not in the TileMap:
+        // it is a mesh, and the notice diff treats the two prim types
+        // differently.
+        HdContainerDataSourceHandle freshScalp;
+        uint64_t freshScalpDigest = 0;
+        if (!generation.scalpShadow.IsEmpty() &&
+            generation.scalpShadow.primPath.HasPrefix(render)) {
+            freshScalp = ::usdGenImaging::UsdGenTilePublisher::
+                BuildScalpShadowDataSource(generation.scalpShadow, generation.id);
+            freshScalpDigest = generation.scalpShadow.digest;
+        }
         Added added;
         Removed removed;
         Dirtied dirtied;
@@ -850,6 +884,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->sessionGeneration = generation.id;
         g->generation = generation.id;
         g->tiles = std::move(fresh);
+        g->scalpShadow = std::move(freshScalp);
+        g->scalpDigest = freshScalpDigest;
         Notify(added, removed, dirtied);
     }
     void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
@@ -1378,6 +1414,24 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     // change of this stamp is therefore what invalidates the
                     // inherited containers on the tiles.
                     uint64_t descriptionStamp = 0;
+                    // Digest of the usdGen:look:* fields the synthetic default
+                    // material carries. GetPrim builds that material from the
+                    // path plus this look, so a look edit that changes nothing
+                    // else would otherwise never be announced: the material is
+                    // an Sprim Hydra only learns about from this diff, and the
+                    // branch below deliberately leaves path-built prims alone
+                    // across a new generation.
+                    uint64_t lookDigest = 0;
+                    // Digest of the scalp-shadow cap's geometry and depths.
+                    // The cap is a mesh built from the View, not from its
+                    // path, so like the material it needs its own identity
+                    // here or a rebaked cap would never reach Hydra.
+                    uint64_t scalpDigest = 0;
+                    // ... and the cap itself, so the diff can name exactly
+                    // what moved instead of dirtying the prim universally: a
+                    // deforming groom rebakes it every frame, and a universal
+                    // dirty there costs a full re-sync per frame.
+                    HdContainerDataSourceHandle scalp;
                 };
                 std::map<SdfPath, TfToken> beforeNames, targetNames;
                 std::map<SdfPath, Synthetic> beforeSynthetic, targetSynthetic;
@@ -1405,7 +1459,9 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         if (!names.count(material)) {
                             names.emplace(material, TfToken("material"));
                             synthetic.emplace(material, Synthetic{TfToken("material"),
-                                g.id, g.generation, g.tiles, descStamp});
+                                g.id, g.generation, g.tiles, descStamp,
+                                ::usdGenImaging::UsdGenTilePublisher::
+                                    DefaultMaterialLookDigest(g.look)});
                         }
                         // The value-preview material, while the tiles bind it.
                         SdfPath const preview = BoundPreviewMaterial(g.description, *g.tiles);
@@ -1413,6 +1469,27 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                             names.emplace(preview, TfToken("material"));
                             synthetic.emplace(preview, Synthetic{TfToken("material"),
                                 g.id, g.generation, g.tiles, descStamp});
+                        }
+                        // The scalp-shadow cap and the material it binds, both
+                        // present only while the groom has one.
+                        if (g.scalpShadow) {
+                            SdfPath const cap = ScalpShadowPath(g.description);
+                            if (!names.count(cap)) {
+                                names.emplace(cap, TfToken("mesh"));
+                                synthetic.emplace(cap, Synthetic{TfToken("mesh"),
+                                    g.id, g.generation, g.tiles, descStamp, 0,
+                                    g.scalpDigest, g.scalpShadow});
+                            }
+                            SdfPath const capMaterial =
+                                ScalpShadowMaterialPath(g.description);
+                            if (!names.count(capMaterial)) {
+                                names.emplace(capMaterial, TfToken("material"));
+                                synthetic.emplace(capMaterial, Synthetic{
+                                    TfToken("material"), g.id, g.generation,
+                                    g.tiles, descStamp,
+                                    ::usdGenImaging::UsdGenTilePublisher::
+                                        DefaultMaterialLookDigest(g.look)});
+                            }
                         }
                         for (auto const& tile : *g.tiles) if (!names.count(tile.first)) {
                             names.emplace(tile.first, TfToken("basisCurves"));
@@ -1489,12 +1566,27 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                                 dirtied.emplace_back(now.first,
                                                      InheritedFromDescriptionLocators());
                         } else if (b.type != TfToken("basisCurves")) {
-                            // The render scope and the synthetic materials
+                            // The render scope and the value-preview material
                             // are built from their path alone (GetPrim), so a
                             // new generation leaves them as they were; only a
-                            // replaced groom announces them again.
-                            if (!sameRoot)
+                            // replaced groom announces them again. The default
+                            // hair material also carries the description's
+                            // look, so a look edit has to announce it too.
+                            if (!sameRoot || a.lookDigest != b.lookDigest) {
                                 dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
+                            } else if (b.type == TfToken("mesh") &&
+                                       a.scalpDigest != b.scalpDigest) {
+                                // The scalp-shadow cap is rebaked whenever the
+                                // groom deforms, so it is diffed like a tile
+                                // rather than dirtied universally: a universal
+                                // dirty here would cost a full mesh re-sync
+                                // every frame of playback.
+                                HdDataSourceLocatorSet changed;
+                                DiffTileDataSources(a.scalp, b.scalp,
+                                                    HdDataSourceLocator(), &changed);
+                                if (!changed.IsEmpty())
+                                    dirtied.emplace_back(now.first, changed);
+                            }
                         } else if (!sameRoot || a.generation != b.generation || a.tiles != b.tiles) {
                             dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
                             // HdSceneIndexAdapterSceneDelegate keeps a prim's
@@ -1854,7 +1946,7 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
         if (path == MaterialPath(g.description))
             return {TfToken("material"),
                     ::usdGenImaging::UsdGenTilePublisher::
-                        BuildDefaultMaterialDataSource()};
+                        BuildDefaultMaterialDataSource(g.look)};
         bool flat = false;
         if (::usdGenImaging::UsdGenTilePublisher::IsPreviewMaterialPath(
                 g.description, path, &flat) &&
@@ -1862,6 +1954,15 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
             return {TfToken("material"),
                     ::usdGenImaging::UsdGenTilePublisher::
                         BuildPreviewMaterialDataSource(flat)};
+        // The scalp-shadow cap. It carries no primOrigin and takes no
+        // DescriptionOverlay: picking passes straight through it to whatever
+        // the user authored underneath, and it never highlights.
+        if (g.scalpShadow && path == ScalpShadowPath(g.description))
+            return {TfToken("mesh"), g.scalpShadow};
+        if (g.scalpShadow && path == ScalpShadowMaterialPath(g.description))
+            return {TfToken("material"),
+                    ::usdGenImaging::UsdGenTilePublisher::
+                        BuildScalpShadowMaterialDataSource(g.look)};
         auto tile = g.tiles->find(path);
         if (tile == g.tiles->end()) continue;
         // The synthetic tiles are not in the input scene, so the filters that
@@ -1902,6 +2003,10 @@ SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) cons
             append(MaterialPath(g.description));
             SdfPath const preview = BoundPreviewMaterial(g.description, *g.tiles);
             if (!preview.IsEmpty()) append(preview);
+            if (g.scalpShadow) {
+                append(ScalpShadowPath(g.description));
+                append(ScalpShadowMaterialPath(g.description));
+            }
         }
     }
     return result;

@@ -46,6 +46,9 @@ struct UsdGenGeneration
     std::vector<UsdGenTilePublication> tiles;        // C2 payload, sorted by tile id
     std::vector<UsdGenTilePublication> guides;       // guides/<setName> prims (§4.2)
     std::vector<UsdGenInstancerPublication> instancers; // M6
+    // The scalp-shadow cap: hair shadowing the emitting surface. Empty when
+    // the description has no occluder, no hair over it, or the bake is off.
+    UsdGenScalpShadowPublication scalpShadow;
     UsdGenPrimSetSignature signature;
     // Identity of the usdGen:preview colours the tiles carry (0 == none), so a
     // preview edit rebuilds tiles whose geometry did not move.

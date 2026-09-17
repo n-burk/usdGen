@@ -1,0 +1,806 @@
+// usdGen imaging — UsdGenInstance bake + Hydra assembly (02 §2.11, 06 §4.3).
+//
+// Self-containment (N-7): usdGenImaging does not link usdGenMath, so the
+// pinned draws and the R11 ramp below are local implementations citing
+// their canonical sources (usdGenMath/usdGenMath/hash.h, .../ramp.cpp).
+// The float op order matches ramp.cpp's EvalOne exactly.
+#include "usdGenImaging/usdGenInstancer.h"
+
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/quatd.h"
+#include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/vec4d.h"
+#include "pxr/base/vt/value.h"
+#include "pxr/imaging/hd/instancedBySchema.h"
+#include "pxr/imaging/hd/instancerTopologySchema.h"
+#include "pxr/imaging/hd/primvarSchema.h"
+#include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/hd/visibilitySchema.h"
+#include "pxr/imaging/hd/xformSchema.h"
+
+#include <algorithm>
+#include <cmath>
+
+PXR_NAMESPACE_USING_DIRECTIVE
+
+namespace usdGenImaging {
+
+namespace {
+
+// -- pinned draws (canonical: usdGenMath/usdGenMath/hash.h) -------------------
+// Bit-exact copies of the SplitMix64 finalizer and the per-curve draw
+// spelling; the salts are instancer-local and distinct from every kSalt*
+// in hash.h.
+constexpr uint32_t kSaltInstanceProto = 0x494E5350u;  // "INSP"
+constexpr uint32_t kSaltInstanceScale = 0x494E5353u;  // "INSS"
+constexpr uint32_t kSaltInstanceTwist = 0x494E5457u;  // "INTW"
+
+uint64_t
+_Hash64(uint64_t key, uint32_t salt)
+{
+    uint64_t z = (key ^ (uint64_t(salt) * 0x9E3779B97F4A7C15ull)) + 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+float
+_Draw01(int seed, uint64_t curveId, uint32_t salt)
+{
+    const uint64_t key = _Hash64(uint64_t(uint32_t(seed)), salt) ^ curveId;
+    const uint32_t h = uint32_t(_Hash64(key, salt) >> 32);
+    return float(h >> 8) * 0x1.0p-24f;
+}
+
+// -- R11 scalar ramp (canonical: usdGenMath/usdGenMath/ramp.cpp EvalOne) ------
+// Same segment search, same clamped ends, same basis weights, same unknown-
+// token linear fallback. Empty / single-knot input is the flat 1.0 ramp.
+float
+_RampClampU(float u) { return std::min(std::max(u, 0.0f), 1.0f); }
+
+size_t
+_RampSegmentAt(VtVec2fArray const &knots, float u)
+{
+    size_t lo = 0, hi = knots.size() - 1;
+    while (lo < hi) {
+        size_t const mid = (lo + hi + 1) / 2;
+        if (float(knots[mid][0]) <= u) lo = mid;
+        else hi = mid - 1;
+    }
+    return std::min(lo, knots.size() - 2);
+}
+
+float
+_RampKnotY(VtVec2fArray const &knots, int i)
+{
+    int const n = int(knots.size());
+    i = std::max(0, std::min(i, n - 1));
+    return knots[size_t(i)][1];
+}
+
+float
+_RampEvalOne(VtVec2fArray const &knots, TfToken const &interpolation, float u)
+{
+    u = _RampClampU(u);
+    static const TfToken sConstant{"constant"};
+    static const TfToken sLinear{"linear"};
+    static const TfToken sCatmullRom{"catmullRom"};
+    static const TfToken sBspline{"bspline"};
+    if (knots.size() < 2) return 1.0f;
+    if (u <= float(knots.front()[0])) return float(knots.front()[1]);
+    if (u >= float(knots.back()[0]))  return float(knots.back()[1]);
+
+    size_t const i = _RampSegmentAt(knots, u);
+    float const xa = float(knots[i][0]),     xb = float(knots[i + 1][0]);
+    float const ya = float(knots[i][1]),     yb = float(knots[i + 1][1]);
+    float const t = (xb - xa > 1e-9f) ? (u - xa) / (xb - xa) : 0.0f;
+    const float tc = std::min(std::max(t, 0.0f), 1.0f);
+
+    if (interpolation == sConstant) {
+        return ya;
+    }
+    if (interpolation == sLinear) {
+        return ya + (yb - ya) * tc;
+    }
+    if (interpolation == sCatmullRom) {
+        float const p0 = _RampKnotY(knots, int(i) - 1);
+        float const p1 = ya;
+        float const p2 = yb;
+        float const p3 = _RampKnotY(knots, int(i) + 2);
+        float const t2 = tc * tc, t3 = t2 * tc;
+        return 0.5f * ((2.0f * p1) +
+                       (-p0 + p2) * tc +
+                       (p0 - 2.0f * p1 + p2) * t2 +
+                       (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+    }
+    if (interpolation == sBspline) {
+        float const p0 = _RampKnotY(knots, int(i));
+        float const p1 = _RampKnotY(knots, int(i) + 1);
+        float const p2 = _RampKnotY(knots, int(i) + 2);
+        float const p3 = _RampKnotY(knots, int(i) + 3);
+        float const t2 = tc * tc, t3 = t2 * tc;
+        return (1.0f / 6.0f) *
+               ((p0 * (3.0f - 6.0f * t2 + 3.0f * t3)) +
+                (p1 * (4.0f - 6.0f * tc + 3.0f * t2)) +
+                (p2 * (1.0f + 3.0f * tc + 3.0f * t2 - 3.0f * t3)) +
+                (p3 * t3));
+    }
+    return ya + (yb - ya) * tc;  // unknown token: linear fallback
+}
+
+// -- small helpers ------------------------------------------------------------
+
+bool
+_Fail(std::string const &message, std::string *error)
+{
+    if (error) *error = message;
+    return false;
+}
+
+bool
+_Finite(float v) { return std::isfinite(v); }
+
+// Curve spans: uniform (totalCvs divisible by totalCurves) or ragged
+// cvOffsets. Mirrors the engine's span validation (curveBuffer.h detail).
+bool
+_Spans(usdGen::UsdGenCurveBuffer const &curves, std::vector<uint32_t> *spans,
+       std::string *error)
+{
+    uint32_t const n = curves.totalCurves;
+    spans->assign(size_t(n) + 1, 0);
+    if (curves.cvOffsets.empty()) {
+        if (n == 0) {
+            if (curves.totalCvs != 0)
+                return _Fail("instance: uniform topology has CVs but no curves",
+                             error);
+            return true;
+        }
+        if (curves.totalCvs % n != 0)
+            return _Fail("instance: uniform topology has non-integral CV count",
+                         error);
+        uint32_t const per = curves.totalCvs / n;
+        for (uint32_t c = 0; c != n; ++c)
+            (*spans)[c + 1] = (*spans)[c] + per;
+        return true;
+    }
+    if (curves.cvOffsets.size() != size_t(n) + 1 || curves.cvOffsets.front() != 0)
+        return _Fail("instance: ragged topology has invalid offsets", error);
+    for (uint32_t c = 0; c != n; ++c) {
+        int const first = curves.cvOffsets[c];
+        int const last = curves.cvOffsets[c + 1];
+        if (first < 0 || last < first)
+            return _Fail("instance: ragged topology has decreasing offsets",
+                         error);
+        (*spans)[c] = uint32_t(first);
+        (*spans)[c + 1] = uint32_t(last);
+    }
+    if (spans->back() != curves.totalCvs)
+        return _Fail("instance: ragged offsets disagree with CV count", error);
+    return true;
+}
+
+GfVec3d
+_Normalized(GfVec3d const &v, bool *ok)
+{
+    double const len = v.GetLength();
+    if (!(len > 1e-12)) {
+        *ok = false;
+        return GfVec3d(0.0);
+    }
+    *ok = true;
+    return v / len;
+}
+
+HdTokenDataSourceHandle
+_Tok(TfToken const &t)
+{
+    return HdRetainedTypedSampledDataSource<TfToken>::New(t);
+}
+
+template <class T>
+HdSampledDataSourceHandle
+_Samp(T const &v)
+{
+    return HdRetainedTypedSampledDataSource<T>::New(v);
+}
+
+void
+_Add(std::vector<TfToken> *names, std::vector<HdDataSourceBaseHandle> *values,
+     TfToken const &name, HdDataSourceBaseHandle const &ds)
+{
+    if (ds) {
+        names->push_back(name);
+        values->push_back(ds);
+    }
+}
+
+HdContainerDataSourceHandle
+_Container(std::vector<TfToken> &&names,
+           std::vector<HdDataSourceBaseHandle> &&values)
+{
+    return HdRetainedContainerDataSource::New(
+        names.size(), names.data(), values.data());
+}
+
+// One primvars/<name> entry at `instance` interpolation (06 §4.3). No role:
+// displayColor carries none on tiles either (tile publisher), and Storm
+// applies no filtering to instance-rate primvars (02 §2.11).
+HdContainerDataSourceHandle
+_InstancePrimvar(HdSampledDataSourceHandle const &values, int elementSize = 0)
+{
+    HdPrimvarSchema::Builder b;
+    b.SetPrimvarValue(values);
+    b.SetInterpolation(_Tok(TfToken("instance")));
+    if (elementSize > 0) {
+        b.SetElementSize(HdRetainedTypedSampledDataSource<int>::New(elementSize));
+    }
+    return b.Build();
+}
+
+}  // namespace
+
+// -- vocabulary ---------------------------------------------------------------
+
+/*static*/ TfToken const &
+UsdGenInstancer::PrimitiveCards()
+{
+    static TfToken const token("cards");
+    return token;
+}
+
+/*static*/ TfToken const &
+UsdGenInstancer::PrimitiveSpheres()
+{
+    static TfToken const token("spheres");
+    return token;
+}
+
+/*static*/ TfToken const &
+UsdGenInstancer::PrimitiveArchives()
+{
+    static TfToken const token("archives");
+    return token;
+}
+
+/*static*/ TfToken const &
+UsdGenInstancer::OrientSurfaceFrame()
+{
+    static TfToken const token("surfaceFrame");
+    return token;
+}
+
+/*static*/ TfToken const &
+UsdGenInstancer::OrientCurveTangent()
+{
+    static TfToken const token("curveTangent");
+    return token;
+}
+
+/*static*/ TfToken const &
+UsdGenInstancer::OrientWorld()
+{
+    static TfToken const token("world");
+    return token;
+}
+
+// -- paths --------------------------------------------------------------------
+
+/*static*/ SdfPath
+UsdGenInstancer::InstancerPath(SdfPath const &descriptionPath,
+                               std::string const &opName)
+{
+    if (opName.empty()) return SdfPath::EmptyPath();
+    return descriptionPath
+        .AppendChild(TfToken("__usdGenRender"))
+        .AppendChild(TfToken("inst_" + opName));
+}
+
+/*static*/ SdfPath
+UsdGenInstancer::PrototypePath(SdfPath const &instancerPath,
+                               std::string const &protoName)
+{
+    if (protoName.empty()) return SdfPath::EmptyPath();
+    return instancerPath
+        .AppendChild(TfToken("Prototypes"))
+        .AppendChild(TfToken(protoName));
+}
+
+// -- bake ---------------------------------------------------------------------
+
+/*static*/ bool
+UsdGenInstancer::Validate(UsdGenInstanceParams const &params,
+                          size_t prototypeCount,
+                          std::string *error)
+{
+    if (params.primitive != PrimitiveCards() &&
+        params.primitive != PrimitiveSpheres()) {
+        if (params.primitive == PrimitiveArchives())
+            return _Fail("instance: primitive \"archives\" is not fitted here; "
+                         "subtree re-root mirroring is plugin work", error);
+        return _Fail("instance: unknown primitive \"" +
+                     params.primitive.GetString() + "\"", error);
+    }
+    if (params.orient != OrientSurfaceFrame() &&
+        params.orient != OrientCurveTangent() &&
+        params.orient != OrientWorld()) {
+        if (params.orient == TfToken("camera"))
+            return _Fail("instance: orient \"camera\" needs live camera state, "
+                         "unavailable at publish time", error);
+        return _Fail("instance: unknown orient \"" +
+                     params.orient.GetString() + "\"", error);
+    }
+    if (prototypeCount == 0)
+        return _Fail("instance: no prototypes bound", error);
+    if (!params.weights.empty() && params.weights.size() != prototypeCount)
+        return _Fail("instance: weights size does not match prototype count",
+                     error);
+    double total = 0.0;
+    for (float w : params.weights) {
+        if (!_Finite(w) || w < 0.0f)
+            return _Fail("instance: weights must be finite and non-negative",
+                         error);
+        total += double(w);
+    }
+    if (!params.weights.empty() && !(total > 0.0))
+        return _Fail("instance: weights sum to zero", error);
+    if (!_Finite(params.scale) || !_Finite(params.twist) ||
+        !_Finite(params.twistRandom) || !_Finite(params.normalOffset) ||
+        !_Finite(params.scaleRandom[0]) || !_Finite(params.scaleRandom[1]))
+        return _Fail("instance: non-finite scale/twist/offset parameter",
+                     error);
+    if (!_Finite(params.width) || params.width < 0.0f ||
+        !_Finite(params.length) || params.length < 0.0f)
+        return _Fail("instance: width/length must be finite and non-negative",
+                     error);
+    return true;
+}
+
+/*static*/ bool
+UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
+                      UsdGenInstanceCurves const &input,
+                      SdfPath const &instancerPath,
+                      UsdGenInstanceResult *result,
+                      std::string *error)
+{
+    if (!result)
+        return _Fail("instance: no result output", error);
+    if (!Validate(params, params.prototypes.size(), error))
+        return false;
+    if (instancerPath.IsEmpty())
+        return _Fail("instance: empty instancer path", error);
+    if (!input.curves)
+        return _Fail("instance: no evaluated curves", error);
+    usdGen::UsdGenCurveBuffer const &curves = *input.curves;
+    uint32_t const n = curves.totalCurves;
+    if (n == 0)
+        return _Fail("instance: no curves to instance", error);
+    if (curves.px.size() != curves.totalCvs ||
+        curves.py.size() != curves.totalCvs ||
+        curves.pz.size() != curves.totalCvs)
+        return _Fail("instance: point planes disagree with CV count", error);
+    if (curves.curveId.size() != n)
+        return _Fail("instance: curveId is not per-curve", error);
+
+    // Root frames are required exactly when consumed: every frame-relative
+    // orient, plus any nonzero normalOffset (which pushes along rootN).
+    bool const needFrames =
+        params.orient != OrientWorld() || params.normalOffset != 0.0f;
+    // Spheres ignore orientation, but a frame-relative orient still selects
+    // its (discarded) frame path only for cards; spheres skip frames unless
+    // the offset needs them.
+    bool const wantFrames =
+        params.primitive != PrimitiveSpheres() ? needFrames
+                                              : params.normalOffset != 0.0f;
+    if (wantFrames && (curves.rootT.size() != n ||
+                       curves.rootN.size() != n ||
+                       curves.rootB.size() != n))
+        return _Fail("instance: root frames are not per-curve", error);
+
+    std::vector<uint32_t> spans;
+    if (!_Spans(curves, &spans, error))
+        return false;
+
+    // Re-rooted prototype paths: the authored leaf re-homed under
+    // <instancer>/Prototypes (06 §4.3). Leaves must be unique: two
+    // targets with one leaf would collide as namespace children.
+    size_t const nProtos = params.prototypes.size();
+    std::vector<SdfPath> protoPaths;
+    protoPaths.reserve(nProtos);
+    for (SdfPath const &target : params.prototypes) {
+        if (target.IsEmpty())
+            return _Fail("instance: empty prototype target", error);
+        std::string const leaf = target.GetName();
+        if (leaf.empty())
+            return _Fail("instance: prototype target has no name: " +
+                         target.GetString(), error);
+        SdfPath const rehomed = PrototypePath(instancerPath, leaf);
+        if (std::find(protoPaths.begin(), protoPaths.end(), rehomed) !=
+            protoPaths.end())
+            return _Fail("instance: duplicate re-rooted prototype name: " +
+                         leaf, error);
+        protoPaths.push_back(rehomed);
+    }
+
+    // displayColor source: per-curve as-is, per-CV sampled at the root CV.
+    bool const wantColorPerCv =
+        !input.displayColor.empty() && input.displayColor.size() != size_t(n);
+    if (wantColorPerCv && input.displayColor.size() != curves.totalCvs)
+        return _Fail("instance: displayColor is neither per-curve nor per-CV",
+                     error);
+
+    bool const isCards = params.primitive == PrimitiveCards();
+    float const cardProfile = isCards
+        ? _RampEvalOne(params.widthKnots, params.widthInterpolation, 0.5f)
+        : 1.0f;
+    float const lo = std::min(params.scaleRandom[0], params.scaleRandom[1]);
+    float const hi = std::max(params.scaleRandom[0], params.scaleRandom[1]);
+
+    double weightTotal = 0.0;
+    for (float w : params.weights) weightTotal += double(w);
+
+    UsdGenInstanceResult out;
+    out.instancerPath = instancerPath;
+    out.prototypePaths = protoPaths;
+    out.instanceIndices.assign(nProtos, VtIntArray());
+    out.translations.resize(n);
+    out.rotations.resize(n);
+    out.scales.resize(n);
+    out.prototypeIndex.resize(n);
+
+    for (uint32_t c = 0; c != n; ++c) {
+        uint64_t const curveId = curves.curveId[c];
+        uint32_t const first = spans[c];
+        GfVec3f const root(curves.px[first], curves.py[first], curves.pz[first]);
+
+        GfVec3d N(0.0, 0.0, 1.0);
+        if (params.normalOffset != 0.0f || wantFrames)
+            N = GfVec3d(curves.rootN[c]);
+        out.translations[c] =
+            root + GfVec3f(N * double(params.normalOffset));
+
+        // Prototype choice: hashed weights, or a uniform hashed slot.
+        uint32_t proto = 0;
+        if (params.weights.empty()) {
+            float const d =
+                _Draw01(params.seed, curveId, kSaltInstanceProto);
+            proto = std::min(uint32_t(d * float(nProtos)), uint32_t(nProtos - 1));
+        } else {
+            float const d =
+                _Draw01(params.seed, curveId, kSaltInstanceProto);
+            double const x = double(d) * weightTotal;
+            double accum = 0.0;
+            proto = uint32_t(nProtos - 1);
+            for (size_t p = 0; p != nProtos; ++p) {
+                accum += double(params.weights[p]);
+                if (x < accum) {
+                    proto = uint32_t(p);
+                    break;
+                }
+            }
+        }
+        out.prototypeIndex[c] = int(proto);
+        out.instanceIndices[proto].push_back(int(c));
+
+        float const sDraw =
+            _Draw01(params.seed, curveId, kSaltInstanceScale);
+        float const s = params.scale * (lo + (hi - lo) * sDraw);
+
+        if (!isCards) {
+            // Spheres: identity rotation (twist is a no-op); the width is
+            // the sphere diameter over a unit-diameter prototype.
+            out.rotations[c] = GfQuatf::GetIdentity();
+            out.scales[c] = GfVec3f(params.width * s);
+            continue;
+        }
+
+        // Cards: orientation frame + twist about the length axis.
+        GfVec3d xAxis(1.0, 0.0, 0.0), yAxis(0.0, 1.0, 0.0),
+            zAxis(0.0, 0.0, 1.0);
+        if (params.orient == OrientWorld()) {
+            // Identity basis: nothing to derive.
+        } else if (params.orient == OrientSurfaceFrame()) {
+            bool ok = false;
+            yAxis = _Normalized(GfVec3d(curves.rootB[c]), &ok);
+            if (!ok)
+                return _Fail("instance: degenerate rootB frame", error);
+            GfVec3d z = GfVec3d(curves.rootN[c]) - yAxis * GfDot(
+                GfVec3d(curves.rootN[c]), yAxis);
+            zAxis = _Normalized(z, &ok);
+            if (!ok)
+                return _Fail("instance: rootN parallel to rootB", error);
+            xAxis = GfCross(yAxis, zAxis);
+        } else {
+            // curveTangent: y follows the root segment; z is the surface
+            // normal with the tangent projected out.
+            GfVec3d t(0.0);
+            bool tok = false;
+            if (spans[c + 1] > first + 1) {
+                uint32_t const next = first + 1;
+                t = GfVec3d(double(curves.px[next]) - double(curves.px[first]),
+                            double(curves.py[next]) - double(curves.py[first]),
+                            double(curves.pz[next]) - double(curves.pz[first]));
+                yAxis = _Normalized(t, &tok);
+            }
+            if (!tok) {
+                // Single-CV span or a zero-length root segment: legal
+                // topology, so fall back to the growth axis, not failure.
+                yAxis = _Normalized(GfVec3d(curves.rootB[c]), &tok);
+                if (!tok)
+                    return _Fail("instance: degenerate tangent fallback",
+                                 error);
+            }
+            GfVec3d ref = GfVec3d(curves.rootN[c]);
+            bool rok = false;
+            GfVec3d const rn = _Normalized(ref, &rok);
+            if (!rok || std::abs(GfDot(rn, yAxis)) > 0.999)
+                ref = GfVec3d(curves.rootT[c]);
+            GfVec3d z = ref - yAxis * GfDot(ref, yAxis);
+            zAxis = _Normalized(z, &tok);
+            if (!tok)
+                return _Fail("instance: tangent parallel to frame", error);
+            xAxis = GfCross(yAxis, zAxis);
+        }
+
+        float const tDraw =
+            _Draw01(params.seed, curveId, kSaltInstanceTwist);
+        float const twDeg =
+            params.twist + params.twistRandom * (tDraw * 2.0f - 1.0f);
+        if (params.orient != OrientWorld() && twDeg != 0.0f) {
+            // Local-space post-rotation by R_y(+tw): newX = M*(ca,0,-sa),
+            // newZ = M*(sa,0,ca). twist = +90 about Y sends local X to -Z.
+            double const a = double(twDeg) * (3.141592653589793 / 180.0);
+            double const ca = std::cos(a), sa = std::sin(a);
+            GfVec3d const x = xAxis * ca - zAxis * sa;
+            GfVec3d const z = xAxis * sa + zAxis * ca;
+            xAxis = x;
+            zAxis = z;
+        }
+        GfMatrix4d basis(1.0);
+        // Row-vector frame: GfMatrix4d rotates v as v*M, so the frame axes
+        // are ROWS (row i = image of basis vector i), matching the
+        // root-frame row convention every consumer uses. Columns would bake
+        // the transposed rotation.
+        basis.SetRow(0, GfVec4d(xAxis[0], xAxis[1], xAxis[2], 0.0));
+        basis.SetRow(1, GfVec4d(yAxis[0], yAxis[1], yAxis[2], 0.0));
+        basis.SetRow(2, GfVec4d(zAxis[0], zAxis[1], zAxis[2], 0.0));
+        out.rotations[c] = GfQuatf(basis.ExtractRotationQuat());
+        out.scales[c] = GfVec3f(
+            params.width * cardProfile * s, params.length * s, s);
+    }
+
+    // Variation primvars: default {"displayColor"} when nothing is authored.
+    VtArray<TfToken> names = params.variationPrimvars;
+    if (names.empty())
+        names = VtArray<TfToken>{TfToken("displayColor")};
+    std::vector<TfToken> seen;
+    for (TfToken const &name : names) {
+        if (name.IsEmpty() ||
+            std::find(seen.begin(), seen.end(), name) != seen.end())
+            continue;
+        seen.push_back(name);
+        if (name == TfToken("displayColor")) {
+            if (input.displayColor.empty()) {
+                out.unresolvedPrimvars.push_back(name);
+                continue;
+            }
+            usdGen::UsdGenPlane plane;
+            plane.name = name;
+            plane.interpolation = TfToken("instance");
+            plane.type = TfToken("float");
+            plane.arity = 3;
+            plane.f.resize(size_t(n) * 3);
+            for (uint32_t c = 0; c != n; ++c) {
+                GfVec3f const v = wantColorPerCv
+                    ? input.displayColor[spans[c]]
+                    : input.displayColor[c];
+                plane.f[size_t(c) * 3 + 0] = v[0];
+                plane.f[size_t(c) * 3 + 1] = v[1];
+                plane.f[size_t(c) * 3 + 2] = v[2];
+            }
+            out.varyings.push_back(plane);
+            continue;
+        }
+        usdGen::UsdGenPlane const *found = nullptr;
+        for (usdGen::UsdGenPlane const &plane : curves.extraCurve) {
+            if (plane.name == name) {
+                found = &plane;
+                break;
+            }
+        }
+        if (!found || (found->type != TfToken("float") &&
+                       found->type != TfToken("int")) ||
+            found->arity == 0) {
+            out.unresolvedPrimvars.push_back(name);
+            continue;
+        }
+        size_t const expect = size_t(n) * found->arity;
+        usdGen::UsdGenPlane plane;
+        plane.name = name;
+        plane.interpolation = TfToken("instance");
+        plane.type = found->type;
+        plane.arity = found->arity;
+        if (found->interpolation == TfToken("constant")) {
+            // One value shared by every instance: broadcast it.
+            if ((found->type == TfToken("float") &&
+                 found->f.size() != found->arity) ||
+                (found->type == TfToken("int") &&
+                 found->i.size() != found->arity)) {
+                out.unresolvedPrimvars.push_back(name);
+                continue;
+            }
+            if (found->type == TfToken("float")) {
+                plane.f.resize(expect);
+                for (uint32_t c = 0; c != n; ++c)
+                    for (uint32_t k = 0; k != found->arity; ++k)
+                        plane.f[size_t(c) * found->arity + k] = found->f[k];
+            } else {
+                plane.i.resize(expect);
+                for (uint32_t c = 0; c != n; ++c)
+                    for (uint32_t k = 0; k != found->arity; ++k)
+                        plane.i[size_t(c) * found->arity + k] = found->i[k];
+            }
+        } else if (found->interpolation == TfToken("uniform")) {
+            if ((found->type == TfToken("float") &&
+                 found->f.size() != expect) ||
+                (found->type == TfToken("int") &&
+                 found->i.size() != expect)) {
+                out.unresolvedPrimvars.push_back(name);
+                continue;
+            }
+            plane.f = found->f;
+            plane.i = found->i;
+        } else {
+            out.unresolvedPrimvars.push_back(name);
+            continue;
+        }
+        out.varyings.push_back(plane);
+    }
+
+    *result = out;
+    return true;
+}
+
+// -- Hydra assembly -----------------------------------------------------------
+
+/*static*/ HdContainerDataSourceHandle
+UsdGenInstancer::BuildInstancerDataSource(
+    UsdGenInstanceResult const &result,
+    SdfPath const &primOrigin)
+{
+    std::vector<TfToken> names;
+    std::vector<HdDataSourceBaseHandle> values;
+
+    {
+        // 06 §4.3: prototypes are namespace children of the instancer;
+        // instanceIndices is HdIntArrayVectorSchema (a vector of VtIntArray,
+        // one per prototype). instanceLocations stays null: this is explicit
+        // instancing. Mask stays absent: Bake writes all-true.
+        HdInstancerTopologySchema::Builder tb;
+        if (!result.prototypePaths.empty()) {
+            VtArray<SdfPath> paths(result.prototypePaths.size());
+            for (size_t i = 0; i != result.prototypePaths.size(); ++i)
+                paths[i] = result.prototypePaths[i];
+            tb.SetPrototypes(
+                HdRetainedTypedSampledDataSource<VtArray<SdfPath>>::New(paths));
+        }
+        if (!result.instanceIndices.empty()) {
+            std::vector<HdDataSourceBaseHandle> elems;
+            elems.reserve(result.instanceIndices.size());
+            for (VtIntArray const &arr : result.instanceIndices) {
+                elems.push_back(HdDataSourceBaseHandle(
+                    HdRetainedTypedSampledDataSource<VtIntArray>::New(arr)));
+            }
+            tb.SetInstanceIndices(HdRetainedSmallVectorDataSource::New(
+                elems.size(), elems.data()));
+        }
+        if (!result.mask.empty()) {
+            tb.SetMask(HdRetainedTypedSampledDataSource<VtBoolArray>::New(
+                result.mask));
+        }
+        _Add(&names, &values, TfToken("instancerTopology"), tb.Build());
+    }
+
+    {
+        std::vector<TfToken> pvNames;
+        std::vector<HdDataSourceBaseHandle> pvValues;
+        _Add(&pvNames, &pvValues, HdInstancerTokens->instanceTranslations,
+             _InstancePrimvar(_Samp(result.translations)));
+        _Add(&pvNames, &pvValues, HdInstancerTokens->instanceRotations,
+             _InstancePrimvar(_Samp(result.rotations)));
+        _Add(&pvNames, &pvValues, HdInstancerTokens->instanceScales,
+             _InstancePrimvar(_Samp(result.scales)));
+        for (usdGen::UsdGenPlane const &plane : result.varyings) {
+            HdSampledDataSourceHandle sampled;
+            if (plane.type == TfToken("int")) {
+                sampled = _Samp(plane.i);
+            } else {
+                sampled = _Samp(plane.f);
+            }
+            _Add(&pvNames, &pvValues, plane.name,
+                 _InstancePrimvar(sampled, plane.arity));
+        }
+        _Add(&names, &values, TfToken("primvars"),
+             _Container(std::move(pvNames), std::move(pvValues)));
+    }
+
+    // Instance translations are final (as tile points are): identity xform
+    // with resetXformStack, replacing any inherited surface chain.
+    _Add(&names, &values, TfToken("xform"),
+         HdXformSchema::Builder()
+             .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                 GfMatrix4d(1.0)))
+             .SetResetXformStack(
+                 HdRetainedTypedSampledDataSource<bool>::New(true))
+             .Build());
+
+    // Purpose/visibility exactly as tiles inherit them (see the publisher):
+    // purpose only when authored ("default" is fatal); visibility always.
+    if (!result.purpose.IsEmpty()) {
+        _Add(&names, &values, TfToken("purpose"),
+             _Container({TfToken("purpose")},
+                        {HdDataSourceBaseHandle(_Tok(result.purpose))}));
+    }
+    _Add(&names, &values, TfToken("visibility"),
+         HdVisibilitySchema::Builder()
+             .SetVisibility(HdRetainedTypedSampledDataSource<bool>::New(
+                 result.visibility != TfToken("invisible")))
+             .Build());
+
+    if (!primOrigin.IsEmpty()) {
+        _Add(&names, &values, TfToken("primOrigin"),
+             _Container({TfToken("scenePath")},
+                        {HdDataSourceBaseHandle(_Samp(primOrigin))}));
+    }
+    return _Container(std::move(names), std::move(values));
+}
+
+/*static*/ HdContainerDataSourceHandle
+UsdGenInstancer::BuildInstancedByDataSource(
+    SdfPath const &instancerPath,
+    SdfPath const &prototypeRoot)
+{
+    VtArray<SdfPath> paths(1, instancerPath);
+    VtArray<SdfPath> roots(1, prototypeRoot);
+    return HdInstancedBySchema::Builder()
+        .SetPaths(HdRetainedTypedSampledDataSource<VtArray<SdfPath>>::New(paths))
+        .SetPrototypeRoots(
+            HdRetainedTypedSampledDataSource<VtArray<SdfPath>>::New(roots))
+        .Build();
+}
+
+// -- notices ------------------------------------------------------------------
+
+/*static*/ UsdGenInstancer::InstanceNotices
+UsdGenInstancer::NoticesFor(bool topologyChanged,
+                            bool transformsChanged,
+                            std::vector<TfToken> const &varyingNames)
+{
+    InstanceNotices n;
+    n.topologyDirty = topologyChanged;
+    n.transformsDirty = transformsChanged;
+    n.dirtyVaryings = varyingNames;
+    return n;
+}
+
+/*static*/ std::vector<HdDataSourceLocator>
+UsdGenInstancer::InstanceNotices::all() const
+{
+    std::vector<HdDataSourceLocator> out;
+    if (topologyDirty) {
+        out.emplace_back(TfToken("instancerTopology"));
+    }
+    if (transformsDirty) {
+        // One BAR re-upload; never the topology (06 §4.3).
+        out.emplace_back(TfToken("primvars"),
+                         HdInstancerTokens->instanceTranslations,
+                         TfToken("primvarValue"));
+    }
+    for (TfToken const &name : dirtyVaryings) {
+        out.emplace_back(TfToken("primvars"), name, TfToken("primvarValue"));
+    }
+    return out;
+}
+
+}  // namespace usdGenImaging

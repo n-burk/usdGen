@@ -19,7 +19,8 @@
 //     carry no materialBindings at all, so Storm fell back to flat
 //     displayColor shading. A tile now binds the synthetic
 //     <description>/__usdGenRender/material_storm, which must be a reachable
-//     `material` prim whose surface terminal is the Sdr id UsdGenHairPreview.
+//     `material` prim whose surface terminal is the Sdr id
+//     UsdGenTilePublisher::DefaultMaterialIdentifier() (UE-parity WS1: UsdGenHairStrandsTranslucent).
 //   * materialBindings — the binding is a FUNCTION of the inherited
 //     displayStyle, which is what buys complexity parity with a native
 //     UsdGeomBasisCurves. refineLevel 0 carries NO binding at all (the hair
@@ -334,10 +335,12 @@ int main()
               "material_storm carries a universal-render-context network");
         HdMaterialNodeSchema node =
             network.GetNodes().Get(TfToken("surface"));
+        TfToken const &expected =
+            ::usdGenImaging::UsdGenTilePublisher::DefaultMaterialIdentifier();
         Check(node.IsDefined() && node.GetNodeIdentifier() &&
-                  node.GetNodeIdentifier()->GetTypedValue(0) ==
-                      TfToken("UsdGenHairPreview"),
-              "surface node binds the Sdr identifier UsdGenHairPreview");
+                  node.GetNodeIdentifier()->GetTypedValue(0) == expected,
+              ("surface node binds the Sdr identifier " +
+               expected.GetString()).c_str());
         HdMaterialConnectionSchema terminal =
             network.GetTerminals().Get(TfToken("surface"));
         Check(terminal.IsDefined() && terminal.GetUpstreamNodePath() &&

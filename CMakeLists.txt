@@ -335,6 +335,10 @@ if(USDGEN_FP_CONTRACT_OK)
         "-ffp-contract=${USDGEN_FP_CONTRACT}")
     set_source_files_properties(libs/usdGen/usdGen/ops/noise.cpp PROPERTIES
         COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
+    # Wind evaluates the same SeExpr FBM gust field; keep its contraction
+    # contract identical to noise.cpp so CPU results match across TUs.
+    set_source_files_properties(libs/usdGen/usdGen/ops/wind.cpp PROPERTIES
+        COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1545,7 +1549,9 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
-           testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion)
+           testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
+           testUsdGenSourceColor testUsdGenLookPrimvars
+           testUsdGenInstance)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -1556,6 +1562,8 @@ set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
 set_tests_properties(testUsdGenStockStormContract PROPERTIES
     LABELS "T1;stock-hydra;unpatched-openusd")
 set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
+set_tests_properties(testUsdGenSourceColor PROPERTIES LABELS "T1;look;sources")
+set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
@@ -1704,6 +1712,28 @@ target_link_libraries(testUsdGenExpressionSamplers PRIVATE usdGen usdGen_ptex)
 add_test(NAME testUsdGenExpressionSamplers COMMAND testUsdGenExpressionSamplers)
 set_tests_properties(testUsdGenExpressionSamplers PROPERTIES
     LABELS "T0;expressions;maps" TIMEOUT 120)
+# Curl/Bend/Wave/Part stylers plus the primitive-domain Grow lift: registry
+# contracts, expression-target validation and deterministic CPU cooks.
+add_executable(testUsdGenCurlBendWavePart tests/testUsdGenCurlBendWavePart.cpp)
+target_link_libraries(testUsdGenCurlBendWavePart PRIVATE usdGen)
+add_test(NAME testUsdGenCurlBendWavePart COMMAND testUsdGenCurlBendWavePart)
+set_tests_properties(testUsdGenCurlBendWavePart PROPERTIES
+    LABELS "T0;operators;expressions" TIMEOUT 120)
+# Direction/Smooth/Resample/Scale/Straighten/Displace stylers: same shape,
+# one target per operator.
+# SculptLayer/Wind/ExprOp/Freeze/Collide stylers: same shape, appended to
+# the operator foreach above.
+foreach(_styler_test Direction Smooth Resample Scale Straighten Displace SculptLayer Wind ExprOp Freeze Collide)
+    add_executable(testUsdGen${_styler_test} tests/testUsdGen${_styler_test}.cpp)
+    target_link_libraries(testUsdGen${_styler_test} PRIVATE usdGen)
+    add_test(NAME testUsdGen${_styler_test} COMMAND testUsdGen${_styler_test})
+    set_tests_properties(testUsdGen${_styler_test} PROPERTIES
+        LABELS "T0;operators;expressions" TIMEOUT 120)
+endforeach()
+# testUsdGenScale recomputes UsdGenDraw01 expectations; usdGenMath is PRIVATE
+# to usdGen (N-7), so the test links it explicitly (CudaCurveGrowSession
+# precedent).
+target_link_libraries(testUsdGenScale PRIVATE usdGenMath)
 # Ptex face ids/coordinates and the sampler. Links usdGen_ptex itself so the
 # test can author its fixture .ptx with PtexWriter.
 add_executable(testUsdGenPtexMap tests/testUsdGenPtexMap.cpp)
@@ -1859,6 +1889,85 @@ if(_usdgen_test_python)
         LABELS "T1;tools;expressions" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+endif()
+
+# ---------------------------------------------------------------------------
+# UE-parity strand hair (plan/16-ue-hair-parity.md WS1). Three python checks,
+# all cross-platform, all sharing the interpreter the expression tests found.
+#
+#   testUsdGenHairEnergy        integrates the ported BSDF over the sphere on
+#                               the CPU and asserts it creates no energy. No
+#                               pxr, no GL -- numpy only.
+#   testUsdGenHairStrandsDefs   Sdr parse + registry discovery of the two new
+#                               defs, and that the three C5 defs survive. The
+#                               counterpart of usdGenShaders/test/checkC5.py,
+#                               kept separate so C5 keeps asserting exactly
+#                               three files with exactly 21 inputs.
+#   testUsdGenHairStrandsRender a real Storm draw: differential checks that
+#                               the glslfx COMPILED (a failed compile falls
+#                               back silently) and that lights, the baked hair
+#                               count and coverage all reach the pixels.
+#
+# Each exits 77 when its prerequisites are missing, which ctest reports as a
+# skip rather than a failure.
+# ---------------------------------------------------------------------------
+if(_usdgen_test_python)
+    usdgen_test_pluginpath_ops(_usdgen_hair_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    usdgen_test_path_list_ops(_usdgen_hair_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+
+    add_test(NAME testUsdGenHairEnergy
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_hair_energy.py")
+    set_tests_properties(testUsdGenHairEnergy PROPERTIES
+        LABELS "T1;shaders;gate:L-2" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    add_test(NAME testUsdGenHairStrandsDefs
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_hair_strands_defs.py")
+    set_tests_properties(testUsdGenHairStrandsDefs PROPERTIES
+        LABELS "T1;shaders;gate:L-2" TIMEOUT 180
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    add_test(NAME testUsdGenScalpShadowDef
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_scalp_shadow.py"
+            --no-render)
+    set_tests_properties(testUsdGenScalpShadowDef PROPERTIES
+        LABELS "T1;shaders;shadows" TIMEOUT 180
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    # GPU-bound, so T2 and RUN_SERIAL like the other Storm tests.
+    add_test(NAME testUsdGenScalpShadowRender
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_scalp_shadow.py"
+            --usdrecord "${USD_INSTALL_DIR}/bin/usdrecord")
+    set_tests_properties(testUsdGenScalpShadowRender PROPERTIES
+        LABELS "T2;shaders;shadows" TIMEOUT 600 RUN_SERIAL TRUE
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    # GPU-bound, so T2 and RUN_SERIAL like the other Storm tests.
+    add_test(NAME testUsdGenHairStrandsRender
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_hair_strands_render.py"
+            --usdrecord "${USD_INSTALL_DIR}/bin/usdrecord")
+    set_tests_properties(testUsdGenHairStrandsRender PROPERTIES
+        LABELS "T2;shaders;gate:L-2" TIMEOUT 600 RUN_SERIAL TRUE
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endif()
 
 # M1 T2 Storm tests (EGL harness; the S-8/S-9/L-1 PW decisions get confirmed

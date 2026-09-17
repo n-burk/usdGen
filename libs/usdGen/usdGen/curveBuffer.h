@@ -514,6 +514,35 @@ struct UsdGenTilePublication
     SdfPath       dependencySurface;          // __dependencies: dependedOnPrimPath
 };
 
+/// The scalp-shadow cap: one synthetic Mesh per description,
+/// <description>/__usdGenRender/scalpShadow. It is the haired part of the
+/// groom's emitting surface, offset a hair's breadth along its own normal and
+/// carrying the same furTauP/furTauN a strand carries, so a translucent
+/// material can darken whatever skin shader the user bound underneath by the
+/// fraction of light the hair above it absorbs. Points and normals are WORLD
+/// space and the prim's xform is identity with resetXformStack, exactly as a
+/// tile's is. Empty when the description has no occluder or no hair over it.
+struct UsdGenScalpShadowPublication
+{
+    SdfPath       primPath;
+    VtVec3fArray  points;                     // mesh/points, world space
+    VtVec3fArray  normals;                    // primvars/normals, vertex
+    VtIntArray    faceVertexCounts;           // all 3
+    VtIntArray    faceVertexIndices;
+    // furTauP / furTauN, vertex, arity 3 -- the same planes a tile publishes,
+    // so the publisher packs them through the same path.
+    std::vector<UsdGenPlane> extraUniform;
+    GfVec3d       extentMin{0.0}, extentMax{0.0};
+    TfToken       purpose;
+    TfToken       visibility;
+    SdfPath       materialPath;               // the synthetic scalp-shadow material
+    // Content identity: the scene index dirties the prim when this changes and
+    // shares the previous immutable arrays when it does not.
+    uint64_t      digest = 0;
+
+    bool IsEmpty() const { return points.empty() || faceVertexIndices.empty(); }
+};
+
 /// M6-only; empty in M1 (UsdGenInstance publishes instancers instead of tiles).
 struct UsdGenInstancerPublication
 {

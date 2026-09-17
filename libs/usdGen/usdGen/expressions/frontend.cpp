@@ -83,9 +83,29 @@ public:
     void eval(double *out) override { for (int i=0;i<type().dim();++i) out[i]=0.0; }
     void eval(const char **) override {}
 };
+/// Folds CRLF and lone CR to LF. A USD-authored source keeps its checkout's
+/// line endings, so on Windows a multi-line expression reaches the SeExpr
+/// lexer containing CR characters, which it rejects ("Syntax error ... near
+/// CR"). Normalizing here -- the one place source text enters the SeExpr
+/// compiler -- makes every checkout compile identically.
+std::string NormalizeLineEndings(std::string const &source)
+{
+    if (source.find('\r') == std::string::npos) return source;
+    std::string out;
+    out.reserve(source.size());
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (source[i] == '\r') {
+            out.push_back('\n');
+            if (i + 1 < source.size() && source[i + 1] == '\n') ++i;
+        } else {
+            out.push_back(source[i]);
+        }
+    }
+    return out;
+}
 class CheckedExpression final : public SE::Expression {
 public:
-    CheckedExpression(std::string const &s, int dim, Domain domain, bool samplerElement = false) : Expression(s, SE::ExprType().FP(dim), Expression::UseInterpreter), _domain(domain), _valueDim(dim), _samplerElement(samplerElement) {}
+    CheckedExpression(std::string const &s, int dim, Domain domain, bool samplerElement = false) : Expression(NormalizeLineEndings(s), SE::ExprType().FP(dim), Expression::UseInterpreter), _domain(domain), _valueDim(dim), _samplerElement(samplerElement) {}
     SE::ExprFunc *resolveFunc(const std::string &name) const override {
         // Function-local statics: initialised once, read-only afterwards, and
         // never reachable from another SeExpr consumer.
@@ -1360,7 +1380,7 @@ IRProgram const &Program::IR() const noexcept { static IRProgram empty; return _
 CompileResult Frontend::Compile(std::string const &source, FrontendOptions const &opt)
 {
     CompileResult out; out.program = Program(std::unique_ptr<Program::Impl>(new Program::Impl));
-    out.program._impl->source = source;
+    out.program._impl->source = NormalizeLineEndings(source);
     if (opt.domain != Domain::Groom && opt.domain != Domain::Primitive && opt.domain != Domain::Point) { out.diagnostics.push_back("invalid evaluation domain"); return out; }
     switch (opt.destination) {
     case ScalarType::Bool: case ScalarType::Int32: case ScalarType::UInt32:
