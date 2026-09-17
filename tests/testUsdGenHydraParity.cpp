@@ -225,6 +225,11 @@ int CheckDesc(UsdGenGraphDesc const &a, UsdGenGraphDesc const &b,
     CheckEq(a.look.hueJitter, b.look.hueJitter, ctx + "look.hueJitter");
     CheckEq(a.look.valueJitter, b.look.valueJitter, ctx + "look.valueJitter");
     CheckEq(a.look.jitterSeed, b.look.jitterSeed, ctx + "look.jitterSeed");
+    CheckEq(a.preview.source, b.preview.source, ctx + "preview.source");
+    CheckEq(a.preview.colorMap, b.preview.colorMap, ctx + "preview.colorMap");
+    CheckEq(a.preview.range, b.preview.range, ctx + "preview.range");
+    CheckEq(a.preview.evaluation, b.preview.evaluation, ctx + "preview.evaluation");
+    CheckEq(a.preview.shading, b.preview.shading, ctx + "preview.shading");
     CheckEq(a.defaultWidth, b.defaultWidth, ctx + "defaultWidth");
     CheckEq(a.tileTarget, b.tileTarget, ctx + "tileTarget");
     CheckEq(a.curveBasis, b.curveBasis, ctx + "curveBasis");

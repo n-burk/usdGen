@@ -181,6 +181,33 @@ parting, frame scrubbing, motion samples, tool edits and zero geometry readbacks
 Compare to a CPU mathematical oracle for validation only. The CUDA executor now
 routes supported `UsdGenDeform` nodes to the persistent RBF library; the old
 CPU placeholder is removed and host execution rejects this operator. The small
-[executable example](cuda-rbf-network.usda) exercises this route for a device
+[executable example](../../examples/cuda-rbf-network.usda) exercises this route for a device
 consumer. It does not establish full operator coverage or a working renderer;
 the original discussion network remains a design artifact.
+
+## CPU lane: animated curves as drivers (2026-09-16)
+
+The CPU lane now runs `UsdGenDeform` with a different driver: the animated
+curves `usdGen:guides` targets, rather than surface samples. It uses the
+formulation above unchanged (`libs/usdGen/usdGen/ops/rbfField.{h,cpp}`, a
+host mirror of the CUDA binding: extent normalisation, the same affine-rank
+test, partial-pivoting LU). Every driver CV, up to `usdGen:rbfSamples` by
+farthest-point sampling, is bound at its rest position (primvars:rest, else
+the Default-time points, as `UsdGenCurveAPI` publishes them) and solved at its
+current position. Each incoming CV `x` moves to `x + D(x)`; with
+`usdGen:lockRoots` the strand is also shifted by `-D(root)`, the whole-strand
+correction described above. The factorization is kept while the rest samples
+do not change, and the capture digest carries the driver content, so an
+animated driver re-captures every frame it moves.
+
+This is the "guide motion" role of the table above implemented with the
+surface-animation math, not HiPhy's mapper: there is no per-strand guide
+binding, parting or frame transport, and a transform animation on the driver
+prim moves rest and pose together (animate the points). A driver set without
+a rest pose (no `UsdGenCurveAPI` on the Hydra path), or one that does not span
+3D, is a diagnostic. The CUDA lane refuses `usdGen:guides`; the CPU lane
+refuses a surface-driven node. Example: `examples/rbf-guides-plane.usda`
+(16 driver curves curled by a travelling wave); checks:
+`tests/testUsdGenRbfDeform.cpp` (rest identity, interpolation, affine
+reproduction, refusals, root locking, rigid translation, mask, frame
+scrubbing through the groom scene index).

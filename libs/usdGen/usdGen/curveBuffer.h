@@ -548,7 +548,7 @@ struct UsdGenTileDirty
     bool         pointsDirty = false;        // -> primvars/points/primvarValue + extent/min|max
     bool         widthsDirty = false;        // -> primvars/widths/primvarValue
     bool         xformDirty  = false;        // -> xform/matrix
-    std::vector<TfToken> newPrimvars;        // first appearance -> primvars/<name> once
+    std::vector<TfToken> newPrimvars;        // first appearance or new interpolation -> primvars/<name> once
     std::vector<TfToken> dirtyPrimvars;      // -> primvars/<name>/primvarValue (never with points)
 };
 

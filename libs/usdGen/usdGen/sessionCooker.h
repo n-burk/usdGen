@@ -6,11 +6,13 @@
 #include "usdGen/executionCache.h"
 #include "usdGen/sessionDeviceProvider.h"
 #include "usdGen/scheduler.h"
+#include "usdGen/valuePreview.h"
 
 #include <memory>
 #include <functional>
 #include <cstddef>
 #include <optional>
+#include <string>
 
 namespace usdGen {
 
@@ -165,6 +167,16 @@ private:
     std::shared_ptr<const std::vector<UsdGenCudaBindingStats>> _cudaBindingStats =
         std::make_shared<const std::vector<UsdGenCudaBindingStats>>();
     UsdGenScheduler _scheduler;
+    // usdGen:preview:* colours of the cook in progress (CPU lane only).
+    UsdGenValuePreview _preview;
+    UsdGenPreviewColors _previewColors;
+    bool _cudaPreviewWarned = false;
+    // USDGEN_COMMIT: why and how long the current cook compiled ("" = no compile).
+    std::string _traceCompile;
+    // A cook failed part-way: the next compile starts from scratch.
+    bool _graphUntrusted = false;
+    // The published baseline is not this graph's last run: rebuild every tile.
+    bool _rebuildAllTiles = false;
     UsdGenGenerationStore _store;
     size_t _executionCacheBytes = kDefaultExecutionCacheBytes;
     bool _cacheDomainExplicit = false;

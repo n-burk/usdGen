@@ -68,6 +68,8 @@ std::unique_ptr<UsdGenOp> CreateLengthOp();
 std::unique_ptr<UsdGenOp> CreateWidthOp();
 std::unique_ptr<UsdGenOp> CreateWidthBlendOp();
 std::unique_ptr<UsdGenOp> CreateReferenceSourceOp();
+std::unique_ptr<UsdGenOp> CreateClumpOp();
+std::unique_ptr<UsdGenOp> CreateGuideInterpolateOp();
 
 /// Compatibility initializer. Built-ins are installed by registry construction;
 /// concurrent compiler calls only obtain that completed immutable initial state.

@@ -1,7 +1,7 @@
 # testusdview script for the usdGenTools SeExpr expression editor.
 #
-# Drives usdview headlessly against plan/examples/expression-width-plane.usda:
-#   testusdview --testScript <this file> plan/examples/expression-width-plane.usda
+# Drives usdview headlessly against examples/expression-width-plane.usda:
+#   testusdview --testScript <this file> examples/expression-width-plane.usda
 # with PXR_PLUGINPATH_NAME naming the build-tree resources (schema, imaging,
 # shaders, tools) and PYTHONPATH naming build/python and the OpenUSD python
 # package. CMake registers it as testUsdGenToolsExprEditor (label T2) when
@@ -10,6 +10,7 @@ import sys
 
 EXPR = "/World/Groom/Fur/Expressions/rootTipWidth"
 WIDTH = "/World/Groom/Fur/Ops/width"
+DESCRIPTION = "/World/Groom/Fur"
 SOURCE = ("$rootWidth = 1.0;      # 0, 2\n"
           "$tipWidth = 0.15;      # 0, 1\n"
           "$profile = curve($t, 0, 1, 4, 0.5, 0.7, 4, 1, 0, 4);\n"
@@ -95,6 +96,7 @@ def testUsdviewInputFunction(appController):
     testDiagnosticPositions(dock, app)
     testFunctionCategories(dock)
     testPreviewAndClear(appController, dock, app)
+    testHairPreview(appController, dock, app)
     print("PASS: usdGenTools expression editor")
 
 
@@ -619,6 +621,123 @@ def testFunctionCategories(dock):
           "every function the ABI reported is under exactly one group")
 
 
+def _previewSpecs(layer, path):
+    spec = layer.GetPrimAtPath(path)
+    if spec is None:
+        return []
+    return [n for n in spec.properties.keys() if n.startswith("usdGen:preview:")]
+
+
+def testHairPreview(appController, dock, app):
+    """Colour hair by value: the group authors usdGen:preview:* in the session
+    layer, follows the edited expression, the attribute it drives and the
+    Connections tab, reflects a preview already on the stage, and unchecking
+    it restores the look."""
+    from usdGenTools import exprAuthor, exprPreview
+
+    stage = appController._dataModel.stage
+    selection = appController._dataModel.selection
+    root = stage.GetRootLayer()
+    session = stage.GetSessionLayer()
+    description = stage.GetPrimAtPath(DESCRIPTION)
+    widthOp = stage.GetPrimAtPath(WIDTH)
+
+    selection.setPrim(widthOp)
+    app.processEvents()
+    expression = dock.prim
+    check(expression is not None, "the width operator's expression is edited")
+    check(dock.hairPreviewGroup is not None and not dock.hairPreviewEnabled(),
+          "the hair colour group is there and starts unchecked")
+    check(dock.hairSource() is not None and
+          dock.hairSource().kind == exprPreview.EXPRESSION and
+          dock.hairSource().path == expression.GetPath(),
+          "the edited expression is the default hair source")
+    check(dock.hairEvaluationCombo.currentData() ==
+          exprAuthor.EvaluationOf(dock.binding),
+          "the expression is previewed where its binding evaluates it")
+
+    check(dock.setHairPreview(True), "checking the group previews the hair")
+    app.processEvents()
+    state = exprPreview.PreviewState(description)
+    check(state["source"] == expression.GetPath(),
+          "usdGen:preview:source names the edited expression")
+    check(_previewSpecs(root, description.GetPath()) == [] and
+          len(_previewSpecs(session, description.GetPath())) == 5,
+          "the preview is authored in the session layer only")
+
+    dock.setHairColors(colorMap="ids", valueRange=(0.0, 2.0), flat=True)
+    app.processEvents()
+    state = exprPreview.PreviewState(description)
+    check((state["colorMap"], state["range"], state["shading"]) ==
+          ("ids", (0.0, 2.0), "flat"),
+          "the colour controls are written as they change")
+
+    check(dock.selectHairSource(exprPreview.ATTRIBUTE),
+          "the attribute the expression drives is offered")
+    app.processEvents()
+    check(exprPreview.PreviewState(description)["source"] ==
+          widthOp.GetAttribute("usdGen:width").GetPath(),
+          "choosing it previews the width the operator was cooked with")
+    check(not dock.hairEvaluationCombo.isEnabled(),
+          "an attribute keeps its binding's domain")
+
+    # While the hair shows the expression, a compiling edit is previewed.
+    check(dock.selectHairSource(exprPreview.EXPRESSION),
+          "the expression can be chosen again")
+    dock.sourceEdit.setPlainText("$value * 0.5")
+    dock.validateNow()
+    app.processEvents()
+    check(dock.isPreviewing() and
+          expression.GetAttribute("usdGen:expr:source").Get() == "$value * 0.5",
+          "a compiling edit is previewed so the colours follow the text")
+    dock.revert()
+    app.processEvents()
+
+    # Show on hair: an authored value the Connections tab selects.
+    check(dock.selectConnectionRow("usdGen:mask"),
+          "usdGen:mask has a row in the Connections tab")
+    check(dock.showOnHairButton.isEnabled(), "Show on hair is offered")
+    check(dock.previewAttributeOnHair(),
+          "Show on hair previews the selected attribute")
+    app.processEvents()
+    check(exprPreview.PreviewState(description)["source"] ==
+          widthOp.GetAttribute("usdGen:mask").GetPath(),
+          "the preview names usdGen:mask")
+    check(dock.hairSource().kind == exprPreview.ATTRIBUTE and
+          "authored value" in dock.hairSource().label,
+          "the source says it shows an authored value")
+
+    # A selection with nothing to show leaves the colouring alone.
+    selection.setPrim(stage.GetPrimAtPath("/World"))
+    app.processEvents()
+    check(exprPreview.PreviewState(description)["source"] ==
+          widthOp.GetAttribute("usdGen:mask").GetPath() and
+          dock.hairPreviewEnabled(),
+          "selecting a prim with nothing to show keeps the colouring")
+
+    # Someone else clears it: the group follows.
+    exprPreview.ClearPreview(description)
+    app.processEvents()
+    check(not dock.hairPreviewEnabled(),
+          "clearing the preview on the stage unchecks the group")
+
+    # A preview already on the stage is shown when its expression is edited.
+    exprPreview.SetPreview(description, expression.GetPath(), "gray",
+                           (0.0, 1.0), "point", "lit")
+    selection.setPrim(widthOp)
+    app.processEvents()
+    check(dock.hairPreviewEnabled() and
+          dock.hairMapCombo.currentData() == "gray" and
+          dock.hairSource().path == expression.GetPath(),
+          "an existing preview is reflected in the controls")
+
+    check(dock.setHairPreview(False), "unchecking the group clears the preview")
+    app.processEvents()
+    check(not exprPreview.IsPreviewing(description) and
+          _previewSpecs(session, description.GetPath()) == [],
+          "and leaves no preview opinion in the session layer")
+
+
 def testPreviewAndClear(appController, dock, app):
     """Preview writes to the session layer; Apply commits; Revert drops it."""
     stage = appController._dataModel.stage
@@ -629,6 +748,8 @@ def testPreviewAndClear(appController, dock, app):
 
     previous = stage.GetEditTarget()
     stage.SetEditTarget(stage.GetRootLayer())
+    sessionSpec = stage.GetSessionLayer().GetAttributeAtPath(path)
+    sessionBefore = sessionSpec.default if sessionSpec is not None else None
     try:
         dock.sourceEdit.setPlainText("$value * 0.25")
         app.processEvents()
@@ -648,9 +769,10 @@ def testPreviewAndClear(appController, dock, app):
         dock.revert()
         app.processEvents()
         check(not dock.isPreviewing(), "Revert ends the preview")
-        check(stage.GetSessionLayer().GetAttributeAtPath(path) is None or
-              stage.GetSessionLayer().GetAttributeAtPath(path).default is None,
-              "and takes the session-layer override away")
+        sessionSpec = stage.GetSessionLayer().GetAttributeAtPath(path)
+        check((sessionSpec.default if sessionSpec is not None else None)
+              == sessionBefore,
+              "and gives the session layer back what it held before")
         check(attr.Get() != "$value * 0.25",
               "so the stage is back to what was authored")
 
@@ -675,5 +797,30 @@ def testPreviewAndClear(appController, dock, app):
               "and writes nothing until Apply")
         dock.revert()
         app.processEvents()
+    finally:
+        stage.SetEditTarget(previous)
+
+    # usdview's own edit target is the session layer, where Apply and Preview
+    # both write: Revert must give back the applied text, and Apply after a
+    # preview must keep what it committed.
+    stage.SetEditTarget(stage.GetSessionLayer())
+    try:
+        dock.sourceEdit.setPlainText("$value * 0.6")
+        check(dock.apply(), "Apply succeeds into the session layer")
+        dock.sourceEdit.setPlainText("$value * 0.3")
+        check(dock.preview(), "Preview succeeds over a session-layer opinion")
+        check(attr.Get() == "$value * 0.3", "the preview shows")
+        dock.revert()
+        app.processEvents()
+        check(attr.Get() == "$value * 0.6",
+              "Revert gives the session layer back the applied text")
+        check(dock.sourceEdit.toPlainText() == "$value * 0.6",
+              "and the editor shows it")
+        dock.sourceEdit.setPlainText("$value * 0.4")
+        dock.preview()
+        check(dock.apply(), "Apply succeeds after a session-layer preview")
+        app.processEvents()
+        check(attr.Get() == "$value * 0.4",
+              "Apply into the session layer keeps the committed text")
     finally:
         stage.SetEditTarget(previous)

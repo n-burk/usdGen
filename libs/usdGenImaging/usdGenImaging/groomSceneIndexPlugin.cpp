@@ -6,13 +6,17 @@
 #include "usdGenImaging/usdGenGraphDescBuilder.h"
 #include "usdGenImaging/usdGenEnable.h"
 #include "usdGenImaging/testHook.h"
+#include "usdGen/debugCodes.h"
 #include "usdGen/executionSequenceWindow.h"
+#include "pxr/base/trace/trace.h"
 #include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
 #include "pxr/imaging/hd/sceneGlobalsSchema.h"
 #include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
 #include "pxr/imaging/hd/materialBindingSchema.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
+#include "pxr/imaging/hd/primvarSchema.h"
+#include "pxr/imaging/hd/primvarsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/selectionsSchema.h"
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
@@ -21,6 +25,7 @@
 #include "pxr/imaging/hd/systemMessages.h"
 #include <tbb/flow_graph.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <map>
@@ -124,6 +129,16 @@ SdfPath BoundMaterialPath(HdContainerDataSourceHandle const& tile) {
     return SdfPath();
 }
 
+// The value-preview material (usdGen:preview:*) a groom's tiles bind, or an
+// empty path. Every tile of a description binds the same one, so the first
+// answers for all; the prim exists exactly while it is bound.
+SdfPath BoundPreviewMaterial(SdfPath const& description, TileMap const& tiles) {
+    if (tiles.empty()) return SdfPath();
+    SdfPath const bound = BoundMaterialPath(tiles.begin()->second);
+    return ::usdGenImaging::UsdGenTilePublisher::IsPreviewMaterialPath(description, bound)
+        ? bound : SdfPath();
+}
+
 // Null when the description states no opinion the tile has to inherit and the
 // tile's own binding stands, so the common case allocates nothing and the tile
 // data source is returned unwrapped.
@@ -185,6 +200,58 @@ HdContainerDataSourceHandle DescriptionOverlay(
     return HdRetainedContainerDataSource::New(count, names, values);
 }
 
+// The locators under which two publications of one tile differ. Containers
+// are compared child by child and sampled values by content (VtArray equality
+// short-cuts on shared storage), so an unchanged widths or colour array is not
+// dirtied even when the publication rebuilt it. Under `primvars`, a primvar
+// whose value alone changed dirties primvars/<name>/primvarValue (Hydra keeps
+// its cached descriptor); any other change to it, such as its interpolation,
+// dirties the whole primvar so the descriptor is read again.
+void DiffTileDataSources(HdDataSourceBaseHandle const& a, HdDataSourceBaseHandle const& b,
+                         HdDataSourceLocator const& at, HdDataSourceLocatorSet* out) {
+    if (a == b) return;
+    HdContainerDataSourceHandle const ca = HdContainerDataSource::Cast(a);
+    HdContainerDataSourceHandle const cb = HdContainerDataSource::Cast(b);
+    if (ca && cb) {
+        TfTokenVector names = ca->GetNames();
+        for (TfToken const& name : cb->GetNames())
+            if (std::find(names.begin(), names.end(), name) == names.end())
+                names.push_back(name);
+        for (TfToken const& name : names)
+            DiffTileDataSources(ca->Get(name), cb->Get(name), at.Append(name), out);
+        return;
+    }
+    HdSampledDataSourceHandle const sa = HdSampledDataSource::Cast(a);
+    HdSampledDataSourceHandle const sb = HdSampledDataSource::Cast(b);
+    if (sa && sb && sa->GetValue(0.0f) == sb->GetValue(0.0f)) return;
+    // Each publication blocks the absent motion primvars with a new block.
+    if (HdBlockDataSource::Cast(a) && HdBlockDataSource::Cast(b)) return;
+    TfToken const& primvars = HdPrimvarsSchema::GetSchemaToken();
+    if (at.GetElementCount() >= 3 && at.GetFirstElement() == primvars &&
+        at.GetLastElement() != HdPrimvarSchemaTokens->primvarValue)
+        out->insert(HdDataSourceLocator(primvars, at.GetElement(1)));
+    else
+        out->insert(at);
+}
+
+// True when every dirtied locator lies in the scene globals container.
+bool OnlySceneGlobals(HdDataSourceLocatorSet const& locators) {
+    if (locators.IsEmpty()) return false;
+    for (HdDataSourceLocator const& locator : locators)
+        if (!locator.HasPrefix(HdSceneGlobalsSchema::GetDefaultLocator())) return false;
+    return true;
+}
+
+// Whether any expression of the description reads the frame or the time
+// (SeExpr $frame / $time, sampler element expressions included).
+bool DescReadsTime(Desc const& desc) {
+    for (auto const& expression : desc.expressions)
+        if (expression.source.find("$frame") != std::string::npos ||
+            expression.source.find("$time") != std::string::npos)
+            return true;
+    return false;
+}
+
 // Records actual builder reads, including missing targets and GeomSubset
 // parent meshes. No live data-source handle enters the owner catalog.
 class RecordingInput final : public HdSceneIndexBase {
@@ -201,11 +268,22 @@ public:
     std::shared_ptr<const SdfPathVector> Dependencies(Desc const& desc) const {
         // Some adapter aggregates transport referenced values directly,
         // without a separate GetPrim through this recording facade.
-        for (auto const& expression : desc.expressions) paths.insert(expression.path);
+        for (auto const& expression : desc.expressions) {
+            paths.insert(expression.path);
+            // geoSampler()/ptex() inputs: an edit of any target (or of a gprim
+            // found beneath one) re-captures and recooks this groom.
+            for (auto const& sampled : expression.inputs) {
+                for (auto const& path : sampled.targets) paths.insert(path.GetPrimPath());
+                for (auto const& path : sampled.geometries) paths.insert(path);
+                for (auto const& path : sampled.maps) paths.insert(path);
+            }
+        }
         for (auto const& node : desc.nodes) {
             for (auto const& binding : node.expressionBindings) paths.insert(binding.expression.GetPrimPath());
             for (auto const& path : node.references) paths.insert(path.GetPrimPath());
         }
+        // The previewed expression, map or operator recolours the strands.
+        paths.insert(desc.preview.source.GetPrimPath());
         paths.erase(SdfPath());
         return std::make_shared<const SdfPathVector>(paths.begin(), paths.end());
     }
@@ -431,6 +509,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         std::shared_ptr<const SdfPathVector> dependencies;
         std::shared_ptr<const CaptureCache> cache;
         double frame = 0;
+        // The description's expressions read $frame or $time, so a change of
+        // the scene globals' current frame alone changes its result.
+        bool readsTime = true;
     };
     struct Snapshot {
         std::vector<View> members;
@@ -439,9 +520,32 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         struct SourceValue {
             TfToken type;
             uint64_t stamp = 0;
+            // Everything dirtied after stamp `since`, up to `stamp`. A
+            // frontend showing a value stamped `since` or later forwards just
+            // these; an older one, or a value re-announced by discovery
+            // (universal here), dirties the whole prim.
+            uint64_t since = 0;
+            HdDataSourceLocatorSet locators = HdDataSourceLocatorSet::UniversalSet();
+
+            // Records the input dirty `dirtied` at `seq`. `shown` is the
+            // stamp of this value in the snapshot the frontend displays.
+            void Dirty(uint64_t seq, HdDataSourceLocatorSet const& dirtied, uint64_t shown) {
+                if (stamp <= shown) {
+                    since = stamp;
+                    locators = dirtied;
+                } else {
+                    locators.insert(dirtied);
+                }
+                stamp = seq;
+            }
+            // What a frontend showing `shown` must dirty to reach this value.
+            HdDataSourceLocatorSet const& DirtySince(uint64_t shown) const {
+                static HdDataSourceLocatorSet const all = HdDataSourceLocatorSet::UniversalSet();
+                return shown >= since ? locators : all;
+            }
         };
         std::shared_ptr<const std::map<SdfPath, SourceValue>> source;
-        uint64_t rootStamp = 0;
+        SourceValue rootValue;
         Snapshot()
             : source(std::make_shared<const std::map<SdfPath, SourceValue>>()) {}
     };
@@ -480,7 +584,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         std::make_shared<const std::map<SdfPath, Snapshot::SourceValue>>();
     bool sourceKnown = false;
     uint64_t sourceThrough = 0;
-    uint64_t rootStamp = 0;
+    Snapshot::SourceValue rootValue;
     std::atomic<uint64_t> captureCount{0};
     std::atomic<uint64_t> cookCount{0};
     uint64_t captureTrustSequence = 0;
@@ -507,11 +611,12 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         next->capturedThrough = completedPrefix;
         next->captureTrusted = captureTrusted;
         next->source = source;
-        next->rootStamp = rootStamp;
+        next->rootValue = rootValue;
         for (auto const& item : members) {
             auto const& g = *item.second;
             next->members.push_back({g.id, g.root, g.description, g.tiles, g.generation,
-                                     g.dependencies, g.cache, g.frame});
+                                     g.dependencies, g.cache, g.frame,
+                                     !g.desc || DescReadsTime(*g.desc)});
         }
         auto result = std::shared_ptr<const Snapshot>(std::move(next));
         std::atomic_store(&catalog, result);
@@ -702,6 +807,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             !sourceSession || g->session != sourceSession ||
             g->attachmentEpoch != attachmentEpoch ||
             payload.generation->id <= g->sessionGeneration) return;
+        TRACE_SCOPE("usdGen publish tiles to the scene index");
         auto const& generation = *payload.generation;
         if (generation.device) {
             // usdGen has not implemented a stock-Storm GPU-resident
@@ -909,9 +1015,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                     // that may have been dropped while ingress was full.  Give
                     // every surviving value a new stamp; ordinary full
                     // discovery preserves stable values.
-                    current.emplace(entry.path, Snapshot::SourceValue{
-                        entry.type, unchanged && !packet.recoverSourceNamespace ?
-                            old->second.stamp : seq});
+                    current.emplace(entry.path,
+                        unchanged && !packet.recoverSourceNamespace ?
+                            old->second : Snapshot::SourceValue{entry.type, seq});
                 }
                 if (packet.recoverSourceNamespace && sourceKnown) {
                     for (auto const& old : *source) {
@@ -943,7 +1049,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                 // Root is an implicit namespace value and can never appear
                 // as Added/Removed.  A full authoritative capture therefore
                 // carries its own root dirty stamp, including initial state.
-                rootStamp = seq;
+                rootValue = Snapshot::SourceValue{TfToken(), seq};
             }
         } else if (!forwardAdded.empty() || !forwardRemoved.empty()) {
             if (sourceKnown) {
@@ -966,7 +1072,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             bool changed = false;
             for (auto const& added : forwardAdded) {
                 auto it = next->find(added.primPath);
-                if (it != next->end()) { it->second.stamp = seq; changed = true; }
+                if (it != next->end()) {
+                    it->second = Snapshot::SourceValue{it->second.type, seq};
+                    changed = true;
+                }
             }
             if (changed)
                 source = std::static_pointer_cast<const std::map<SdfPath, Snapshot::SourceValue>>(next);
@@ -974,13 +1083,23 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         if (sourceKnown && !forwardDirtied.empty()) {
             auto next = std::make_shared<std::map<SdfPath, Snapshot::SourceValue>>(*source);
             bool changed = false;
+            // The frontend diffs against the snapshot it displays, so keep
+            // the input's own locators for it rather than a universal dirty
+            // (an animated mesh would otherwise re-sync its topology and
+            // every primvar each frame). A stale read of `shown` only makes
+            // the locators accumulate longer.
+            auto const shown = VisibleSnapshot();
             for (auto const& dirty : forwardDirtied) {
                 if (dirty.primPath == SdfPath::AbsoluteRootPath()) {
-                    rootStamp = seq;
+                    rootValue.Dirty(seq, dirty.dirtyLocators, shown->rootValue.stamp);
                     continue;
                 }
                 auto it = next->find(dirty.primPath);
-                if (it != next->end()) { it->second.stamp = seq; changed = true; }
+                if (it == next->end()) continue;
+                auto const was = shown->source->find(dirty.primPath);
+                it->second.Dirty(seq, dirty.dirtyLocators,
+                                 was == shown->source->end() ? 0 : was->second.stamp);
+                changed = true;
             }
             if (changed)
                 source = std::static_pointer_cast<const std::map<SdfPath, Snapshot::SourceValue>>(next);
@@ -1230,7 +1349,10 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
     _dispatching = true;
     try {
         do {
-            if (waitForIngress) _state->Synchronize();
+            if (waitForIngress) {
+                TRACE_SCOPE("usdGen wait for capture, cook and publish");
+                _state->Synchronize();
+            }
             _deferredSynchronousFlush = false;
             // A poll consumes precisely one newest target.  Snapshot diffing
             // here (rather than retaining owner-side notice history) keeps
@@ -1238,6 +1360,7 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
             auto target = std::atomic_exchange(&_state->pending,
                 std::shared_ptr<const _State::Snapshot>());
             if (target) {
+                TRACE_SCOPE("usdGen diff snapshot and notify Hydra");
                 auto before = _state->VisibleSnapshot();
                 struct Synthetic {
                     TfToken type;
@@ -1284,6 +1407,13 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                             synthetic.emplace(material, Synthetic{TfToken("material"),
                                 g.id, g.generation, g.tiles, descStamp});
                         }
+                        // The value-preview material, while the tiles bind it.
+                        SdfPath const preview = BoundPreviewMaterial(g.description, *g.tiles);
+                        if (!preview.IsEmpty() && !names.count(preview)) {
+                            names.emplace(preview, TfToken("material"));
+                            synthetic.emplace(preview, Synthetic{TfToken("material"),
+                                g.id, g.generation, g.tiles, descStamp});
+                        }
                         for (auto const& tile : *g.tiles) if (!names.count(tile.first)) {
                             names.emplace(tile.first, TfToken("basisCurves"));
                             synthetic.emplace(tile.first, Synthetic{TfToken("basisCurves"),
@@ -1325,13 +1455,61 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     auto targetSource = target->source->find(now.first);
                     auto beforeSource = before->source->find(now.first);
                     if (targetSource != target->source->end() && beforeSource != before->source->end()) {
-                        if (targetSource->second.stamp != beforeSource->second.stamp)
-                            dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
+                        if (targetSource->second.stamp != beforeSource->second.stamp) {
+                            HdDataSourceLocatorSet const& locators =
+                                targetSource->second.DirtySince(beforeSource->second.stamp);
+                            if (!locators.IsEmpty()) dirtied.emplace_back(now.first, locators);
+                        }
                     } else {
                         auto const& a = beforeSynthetic[now.first];
                         auto const& b = targetSynthetic[now.first];
-                        if (a.rootId != b.rootId || a.generation != b.generation || a.tiles != b.tiles)
+                        bool const sameRoot = a.rootId == b.rootId;
+                        HdContainerDataSourceHandle beforeTile, targetTile;
+                        if (sameRoot && b.type == TfToken("basisCurves") && a.tiles && b.tiles) {
+                            auto ia = a.tiles->find(now.first);
+                            auto ib = b.tiles->find(now.first);
+                            if (ia != a.tiles->end() && ib != b.tiles->end()) {
+                                beforeTile = ia->second;
+                                targetTile = ib->second;
+                            }
+                        }
+                        if (beforeTile && targetTile) {
+                            // A republished tile dirties only what differs, so
+                            // a renderer re-syncs (and, for pinned cubic
+                            // curves, re-interpolates) just the primvars that
+                            // moved, not widths/hairT/colours that did not.
+                            if (beforeTile != targetTile) {
+                                HdDataSourceLocatorSet changed;
+                                DiffTileDataSources(beforeTile, targetTile,
+                                                    HdDataSourceLocator(), &changed);
+                                if (!changed.IsEmpty())
+                                    dirtied.emplace_back(now.first, changed);
+                            }
+                            if (a.descriptionStamp != b.descriptionStamp)
+                                dirtied.emplace_back(now.first,
+                                                     InheritedFromDescriptionLocators());
+                        } else if (b.type != TfToken("basisCurves")) {
+                            // The render scope and the synthetic materials
+                            // are built from their path alone (GetPrim), so a
+                            // new generation leaves them as they were; only a
+                            // replaced groom announces them again.
+                            if (!sameRoot)
+                                dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
+                        } else if (!sameRoot || a.generation != b.generation || a.tiles != b.tiles) {
                             dirtied.emplace_back(now.first, HdDataSourceLocatorSet::UniversalSet());
+                            // HdSceneIndexAdapterSceneDelegate keeps a prim's
+                            // cached primvar descriptors across a universal
+                            // dirty and drops them only for an explicit
+                            // primvars locator (sceneIndexAdapterSceneDelegate
+                            // .cpp PrimsDirtied). Without this a primvar that
+                            // appears, or changes interpolation (displayColor
+                            // per curve <-> per CV under usdGen:preview or the
+                            // look's bakeMode), is read with its old
+                            // descriptor.
+                            if (b.type == TfToken("basisCurves"))
+                                dirtied.emplace_back(now.first, HdDataSourceLocatorSet{
+                                    HdPrimvarsSchema::GetDefaultLocator()});
+                        }
                         else if (a.descriptionStamp != b.descriptionStamp &&
                                  b.type == TfToken("basisCurves"))
                             // The owning Description changed upstream: the
@@ -1347,9 +1525,14 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     }
                 }
                 // Root is never structural, but a root value notice remains
-                // observable as a universal dirty.
-                if (before->rootStamp != target->rootStamp)
-                    dirtied.emplace_back(SdfPath::AbsoluteRootPath(), HdDataSourceLocatorSet::UniversalSet());
+                // observable, with the input's locators when the displayed
+                // snapshot allows it (the scene globals' current frame).
+                if (before->rootValue.stamp != target->rootValue.stamp) {
+                    HdDataSourceLocatorSet const& locators =
+                        target->rootValue.DirtySince(before->rootValue.stamp);
+                    if (!locators.IsEmpty())
+                        dirtied.emplace_back(SdfPath::AbsoluteRootPath(), locators);
+                }
                 // A removed ancestor already removes its descendants.  Keep
                 // the complete set above solely to identify the descendants
                 // that must be re-added from the target snapshot.
@@ -1405,6 +1588,7 @@ void UsdGenGroomSceneIndex::Synchronize() {
 void UsdGenGroomSceneIndex::DrainRetired() { SceneService().DrainRetired(); }
 
 void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
+    TRACE_FUNCTION();
     // A synchronous default-mode drain below can re-enter arbitrary client
     // code. Pin the public index for the entire caller-boundary operation.
     auto live = TfCreateRefPtrFromProtectedWeakPtr(_state->recipient);
@@ -1453,6 +1637,17 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                 bool affected = !member.dependencies;
                 for (auto const& dirty : packet.dirtied) {
                     auto const& path = dirty.primPath;
+                    // The scene globals on the root carry the current frame.
+                    // During playback they change after the stage time has
+                    // already dirtied every animated input, so a frame change
+                    // on its own only matters to a description that reads
+                    // $frame or $time.
+                    if (path.IsAbsoluteRootPath() &&
+                        OnlySceneGlobals(dirty.dirtyLocators)) {
+                        if (member.readsTime) affected = true;
+                        if (affected) break;
+                        continue;
+                    }
                     if (path.HasPrefix(member.root) || member.root.HasPrefix(path)) affected = true;
                     if (member.dependencies) for (auto const& dependency : *member.dependencies)
                         // A dirty on an ancestor can change a resolved input.
@@ -1464,7 +1659,22 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                 if (affected) stack.push_back(member.root);
             }
             packet.captureRoots = stack;
-        } else stack.push_back(SdfPath::AbsoluteRootPath());
+            TF_DEBUG(USDGEN_INGRESS).Msg(
+                "usdGen ingress   %zu dirty entries (first %s): %zu of %zu grooms affected\n",
+                packet.dirtied.size(),
+                packet.dirtied.empty() ? "-" : packet.dirtied.front().primPath.GetText(),
+                stack.size(), catalog->members.size());
+        } else {
+            stack.push_back(SdfPath::AbsoluteRootPath());
+            TF_DEBUG(USDGEN_INGRESS).Msg(
+                "usdGen ingress   %zu dirty/%zu added/%zu removed entries: full discovery (%s)\n",
+                packet.dirtied.size(), packet.added.size(), packet.removed.size(),
+                packet.initial ? "initial" :
+                packet.forceFullDiscovery ? "forced" :
+                !packet.added.empty() || !packet.removed.empty() ? "namespace change" :
+                !catalog->captureTrusted ? "catalog untrusted" :
+                "an earlier ingress is not applied yet");
+        }
 
         auto input = _GetInputSceneIndex();
         // GetPrim projects empty primType groom records through __usdPrimInfo.
@@ -1539,8 +1749,19 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                         for (auto const& dirty : packet.dirtied)
                             options.dirtyPrimPaths.push_back(dirty.primPath);
                     }
+                    auto const captureStart = std::chrono::steady_clock::now();
                     auto result = ::usdGenImaging::CaptureGraphDescFromHydra(
                         recorder, captured.description, options);
+                    TF_DEBUG(USDGEN_INGRESS).Msg(
+                        "usdGen ingress   capture %s at frame %g: %.2f ms (%s, operator reuse %s)\n",
+                        captured.description.GetText(), packet.frame,
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - captureStart).count(),
+                        packet.fullPopulation ? "full population" : "dirty notice",
+                        options.reuseNodes ? "on" :
+                        known == catalog->members.end() ? "off: new groom" :
+                        packet.fullPopulation ? "off: full population" :
+                        "off: the frame changed");
                     captured.desc = std::make_shared<const Desc>(std::move(result.desc));
                     // A CUDA graph always has renderer-local session identity,
                     // even though this plugin does not yet hand its device
@@ -1634,6 +1855,13 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
             return {TfToken("material"),
                     ::usdGenImaging::UsdGenTilePublisher::
                         BuildDefaultMaterialDataSource()};
+        bool flat = false;
+        if (::usdGenImaging::UsdGenTilePublisher::IsPreviewMaterialPath(
+                g.description, path, &flat) &&
+            BoundPreviewMaterial(g.description, *g.tiles) == path)
+            return {TfToken("material"),
+                    ::usdGenImaging::UsdGenTilePublisher::
+                        BuildPreviewMaterialDataSource(flat)};
         auto tile = g.tiles->find(path);
         if (tile == g.tiles->end()) continue;
         // The synthetic tiles are not in the input scene, so the filters that
@@ -1672,6 +1900,8 @@ SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) cons
             // positionally to reach "a tile".
             for (auto const& tile : *g.tiles) append(tile.first);
             append(MaterialPath(g.description));
+            SdfPath const preview = BoundPreviewMaterial(g.description, *g.tiles);
+            if (!preview.IsEmpty()) append(preview);
         }
     }
     return result;

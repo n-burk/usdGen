@@ -2,7 +2,8 @@
 #
 # usdGen hair preview shader definitions (contract C5: docs/freezes/C5.md).
 #
-# Three Shader prims, one per shipped glslfx file. The Sdr identifier IS the
+# One Shader prim per shipped glslfx file: the three hair looks, then the
+# value preview (not a look; see the end of the file). The Sdr identifier IS the
 # prim name (pxr/usd/usdShade/shaderDefUtils.cpp:51-52) — UpperCamel, no
 # underscores (SdrFsHelpersSplitShaderIdentifier tokenises on '_'). Only the
 # FILE names are lowerCamel. The glslfx files are siblings of this layer, so
@@ -112,6 +113,22 @@ def Shader "UsdGenHairPreviewPrimvar" (
     float inputs:randomValue = 0
     float inputs:selfOcclusion = 0.5
     color3f inputs:rootColorMap = (1, 1, 1)
+    token outputs:surface (
+        sdrMetadata = { string renderType = "terminal surface" }
+    )
+}
+
+# The usdGen value preview (usdGen:preview:* on a UsdGenDescription): not a
+# hair look and not part of the C5 freeze. The groom scene index binds it on
+# the tiles of a previewing description; it shows the baked displayColor.
+def Shader "UsdGenValuePreview" (
+    doc = "usdGen value preview: shows the tiles' displayColor as baked by usdGen:preview, flat or view-shaded."
+)
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:glslfx:sourceAsset = @./usdGenValuePreview.glslfx@
+    float inputs:shading = 1
+    color3f inputs:fallbackColor = (0.02, 0.02, 0.02)
     token outputs:surface (
         sdrMetadata = { string renderType = "terminal surface" }
     )

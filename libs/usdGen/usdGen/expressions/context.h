@@ -46,11 +46,14 @@ struct ValueShape {
 // table and the engine's curve buffer carries no surface colour/opacity at
 // evaluation time, so they are gone rather than silently unavailable; see
 // plan/07-look-maps-expressions.md.
+// Q and QDist exist only inside a geoSampler() element expression (the query
+// position and its distance to the element); their registry entries carry no
+// domain, so an ordinary expression cannot name them.
 enum class Variable : uint16_t {
     Invalid, Value, Frame, Time, Index, Count, Seed, DescId,
     PrimIndex, PrimCount, IdLo, IdHi, Id, U, V, FaceId,
     P, PRef, RootP, RootPRef, N, NRef, DPdu, DPdv, DPduRef, DPdvRef,
-    T, PointIndex, PointCount, CLength, CWidth, CountVariables
+    T, PointIndex, PointCount, CLength, CWidth, Q, QDist, CountVariables
 };
 
 struct VariableInfo {
@@ -70,7 +73,15 @@ public:
     static const Registry &Get();
     const VariableInfo *Find(const char *name) const noexcept;
     const VariableInfo *Find(Variable id) const noexcept;
-    bool Validate(const char *name, Domain domain, std::string *diagnostic = nullptr) const;
+    /// `samplerElement` admits the variables that exist only inside a
+    /// geoSampler() element expression ($Q, $Qdist).
+    bool Validate(const char *name, Domain domain, std::string *diagnostic = nullptr,
+                  bool samplerElement = false) const;
+    /// True for the variables only a geoSampler() element expression may read.
+    static bool IsSamplerVariable(Variable id) noexcept
+    {
+        return id == Variable::Q || id == Variable::QDist;
+    }
     // Enumeration, for authoring tools that present the variable table to a
     // user (the usdview SeExpr editor's variable browser). At() returns
     // nullptr past the end so a caller can walk without a second call.

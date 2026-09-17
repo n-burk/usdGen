@@ -141,16 +141,17 @@ void CheckFunctionTable()
     for (size_t i = 1; i < functions.size(); ++i)
         Check(functions[i - 1].name < functions[i].name,
               "the function table is sorted: " + functions[i].name);
-    for (char const *category : {"math", "noise", "vector", "color", "curve", "control"})
+    for (char const *category : {"math", "noise", "vector", "color", "curve", "control",
+                                 "sampling"})
         Check(categories.count(category) == 1,
               std::string("the table has a ") + category + " category");
-    Check(categories.size() == 6, "the table has no category outside the documented six");
+    Check(categories.size() == 7, "the table has no category outside the documented seven");
     // Names a user coming from XGen or SeExpr will try, each with its own
     // reason rather than the generic list.
     Refuses("printf(\"%f\", $t)", "printf");
     Refuses("sprintf(\"%f\", $t)", "printf");
     Refuses("map(0.5)", "image maps are not yet available");
-    Refuses("ptex(0.5)", "image maps are not yet available");
+    Refuses("ptex(0.5)", "must be a string literal");
     Refuses("file(0.5)", "filesystem");
     Refuses("system(0.5)", "run a command");
     Refuses("exec(0.5)", "run a command");

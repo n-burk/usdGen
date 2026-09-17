@@ -95,10 +95,11 @@ if(NOT TARGET usd)
     find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)
 endif()
 
-# Threads are used by the expression frontend. Zlib is not linked by any
-# usdGen target; requiring it made a standard Windows build_usd.py OpenUSD
-# prefix unusable because that prefix intentionally omits zlib when no USD
-# feature needs it.
+# Threads are used by the expression frontend. No system zlib is required:
+# requiring one made a standard Windows build_usd.py OpenUSD prefix unusable
+# because that prefix intentionally omits zlib when no USD feature needs it.
+# The only zlib consumer, the vendored Ptex, links the private vendored copy
+# (usdGen_zlib, thirdparty/zlib).
 find_package(Threads REQUIRED)
 # tbb/task.h, reached through the OpenUSD headers, prints a deprecation
 # banner on every translation unit unless told not to.
@@ -209,6 +210,76 @@ set_target_properties(usdGen_seexpr PROPERTIES
 # or exported, so no header rule is emitted (supersedes the sol S-6
 # double-nesting fix; the INSTALL_INTERFACE root above is unused by design).
 
+# --- BEGIN vendored ptex (usdGen_ptex) ---
+# ---------------------------------------------------------------------------
+# Third-party: Ptex 2.4.3 + zlib 1.3.1 (plan/07-look-maps-expressions.md §6)
+# ---------------------------------------------------------------------------
+# The OpenUSD prefix has no Ptex, and Storm's Ptex path is mesh-only, so
+# usdGen samples .ptx files itself (usdGen/maps/ptexMap.h). Both archives are
+# private: linked into the usdGen DLL only, compiled hidden, never installed
+# or exported, and their headers are build-tree includes only. zlib exists
+# solely for Ptex, so only usdGen_ptex sees its include directory.
+set(_usdgen_zlib_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/zlib")
+add_library(usdGen_zlib STATIC
+    "${_usdgen_zlib_dir}/adler32.c" "${_usdgen_zlib_dir}/compress.c"
+    "${_usdgen_zlib_dir}/crc32.c" "${_usdgen_zlib_dir}/deflate.c"
+    "${_usdgen_zlib_dir}/gzclose.c" "${_usdgen_zlib_dir}/gzlib.c"
+    "${_usdgen_zlib_dir}/gzread.c" "${_usdgen_zlib_dir}/gzwrite.c"
+    "${_usdgen_zlib_dir}/infback.c" "${_usdgen_zlib_dir}/inffast.c"
+    "${_usdgen_zlib_dir}/inflate.c" "${_usdgen_zlib_dir}/inftrees.c"
+    "${_usdgen_zlib_dir}/trees.c" "${_usdgen_zlib_dir}/uncompr.c"
+    "${_usdgen_zlib_dir}/zutil.c")
+target_include_directories(usdGen_zlib PRIVATE "${_usdgen_zlib_dir}")
+# zconf.h is vendored as shipped; HAVE_UNISTD_H is what upstream's configure
+# step would have written into it on POSIX hosts (gzlib.c needs lseek/read).
+if(MSVC)
+    target_compile_definitions(usdGen_zlib PRIVATE
+        _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
+elseif(NOT WIN32)
+    target_compile_definitions(usdGen_zlib PRIVATE HAVE_UNISTD_H)
+endif()
+set_target_properties(usdGen_zlib PROPERTIES
+    USDGEN_VENDORED ON
+    POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden)
+
+set(_usdgen_ptex_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ptex/ptex")
+add_library(usdGen_ptex STATIC
+    "${_usdgen_ptex_dir}/PtexCache.cpp"
+    "${_usdgen_ptex_dir}/PtexFilters.cpp"
+    "${_usdgen_ptex_dir}/PtexHalf.cpp"
+    "${_usdgen_ptex_dir}/PtexReader.cpp"
+    "${_usdgen_ptex_dir}/PtexSeparableFilter.cpp"
+    "${_usdgen_ptex_dir}/PtexSeparableKernel.cpp"
+    "${_usdgen_ptex_dir}/PtexTriangleFilter.cpp"
+    "${_usdgen_ptex_dir}/PtexTriangleKernel.cpp"
+    "${_usdgen_ptex_dir}/PtexUtils.cpp"
+    "${_usdgen_ptex_dir}/PtexWriter.cpp")
+# SYSTEM keeps Ptexture.h (which pulls in <Windows.h>) at the consumer's
+# external warning level; BUILD_INTERFACE only, because nothing installs it.
+target_include_directories(usdGen_ptex SYSTEM PUBLIC
+    "$<BUILD_INTERFACE:${_usdgen_ptex_dir}>")
+target_include_directories(usdGen_ptex PRIVATE "${_usdgen_zlib_dir}")
+# PTEX_STATIC drops the dllimport/visibility attributes from PTEXAPI; it and
+# PTEX_VENDOR (namespace Ptex::v2_4_usdGen, so a site's own Ptex in the same
+# process cannot collide) must match in every TU that includes Ptexture.h.
+target_compile_definitions(usdGen_ptex PUBLIC PTEX_STATIC PTEX_VENDOR=usdGen)
+if(MSVC)
+    target_compile_definitions(usdGen_ptex PRIVATE
+        _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
+elseif(NOT WIN32)
+    target_compile_definitions(usdGen_ptex PRIVATE HAVE_UNISTD_H)
+endif()
+target_link_libraries(usdGen_ptex
+    PUBLIC Threads::Threads
+    PRIVATE usdGen_zlib)
+set_target_properties(usdGen_ptex PROPERTIES
+    USDGEN_VENDORED ON
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+# --- END vendored ptex (usdGen_ptex) ---
+
 # ---------------------------------------------------------------------------
 # usdGenMath (STATIC, -ffp-contract=off)
 # ---------------------------------------------------------------------------
@@ -314,6 +385,8 @@ target_link_libraries(usdGen
     PUBLIC tf gf vt sdf TBB::tbb usdGenExecutionResources
     PRIVATE usdGenMath arch js plug ts ar work trace hio pxOsd
             usdGen_seexpr usdGenExprFrontend)
+# Vendored Ptex (usdGen/maps/ptexMap.cpp); private like the other archives.
+target_link_libraries(usdGen PRIVATE usdGen_ptex)
 # usdGen is a SHARED plugin-host library: its public API (UsdGenSession,
 # graph/tile types, ...) is consumed across the shared boundary by
 # libusdGenImaging.so, so it must keep default visibility. Third-party code
@@ -441,6 +514,17 @@ add_library(usdGen::usdGenShaders ALIAS usdGenShaders)
 add_executable(usdGenBakeFur tools/bakeFur.cpp)
 target_link_libraries(usdGenBakeFur PRIVATE usdGen usdGeom usd)
 install(TARGETS usdGenBakeFur RUNTIME DESTINATION bin)
+# Profiling utility: plays a scene through the groom scene index frame by
+# frame and reports per-frame cost, per-operator work and a Chrome trace
+# (bin/trace_playback.ps1).
+add_executable(usdGenTracePlayback tools/tracePlayback.cpp)
+target_link_libraries(usdGenTracePlayback PRIVATE
+    usdGen usdGenImaging usdImaging hd trace tf usd sdf)
+install(TARGETS usdGenTracePlayback RUNTIME DESTINATION bin)
+# Offline authoring utility; writes procedural region/clump Ptex maps for a mesh.
+add_executable(usdGenBakePtex tools/bakePtex.cpp)
+target_link_libraries(usdGenBakePtex PRIVATE usdGen usdGen_ptex usdGeom usd)
+install(TARGETS usdGenBakePtex RUNTIME DESTINATION bin)
 
 set(_usdgen_shader_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenShaders/resources")
 set(_usdgen_shader_pluginfo "${_usdgen_shader_resources}/plugInfo.json")
@@ -1564,6 +1648,35 @@ add_test(NAME testUsdGenExpressionWidthExample COMMAND testUsdGenExpressionWidth
 set_tests_properties(testUsdGenExpressionWidthExample PROPERTIES
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples" TIMEOUT 120)
 
+# The guide-interpolation and Ptex clump examples, including dirty
+# propagation from sampled geometry and map prims through the scene index.
+# Reads the baked examples/maps/*.ptx.
+add_executable(testUsdGenGroomExamples tests/testUsdGenGroomExamples.cpp)
+target_link_libraries(testUsdGenGroomExamples PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenGroomExamples PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenGroomExamples COMMAND testUsdGenGroomExamples)
+set_tests_properties(testUsdGenGroomExamples PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples;maps" TIMEOUT 300)
+
+# UsdGenDeform on the CPU lane: hair deformed by animated curves (RBF).
+add_executable(testUsdGenRbfDeform tests/testUsdGenRbfDeform.cpp)
+target_link_libraries(testUsdGenRbfDeform PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenRbfDeform PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenRbfDeform COMMAND testUsdGenRbfDeform)
+set_tests_properties(testUsdGenRbfDeform PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;examples;deform" TIMEOUT 300)
+
+# usdGen:preview:* — the viewport value preview through the groom scene index.
+add_executable(testUsdGenValuePreview tests/testUsdGenValuePreview.cpp)
+target_link_libraries(testUsdGenValuePreview PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenValuePreview PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenValuePreview COMMAND testUsdGenValuePreview)
+set_tests_properties(testUsdGenValuePreview PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples;preview" TIMEOUT 300)
+
 add_executable(testUsdGenExpressionTransport tests/testUsdGenExpressionTransport.cpp)
 target_link_libraries(testUsdGenExpressionTransport PRIVATE usdGenTestUtilsHd)
 target_compile_definitions(testUsdGenExpressionTransport PRIVATE
@@ -1585,6 +1698,18 @@ foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend Expre
     set_tests_properties(testUsdGen${_expr_test} PROPERTIES
         LABELS "T0;expressions" TIMEOUT 120)
 endforeach()
+# geoSampler()/ptex(): links usdGen_ptex itself to author its fixture .ptx.
+add_executable(testUsdGenExpressionSamplers tests/testUsdGenExpressionSamplers.cpp)
+target_link_libraries(testUsdGenExpressionSamplers PRIVATE usdGen usdGen_ptex)
+add_test(NAME testUsdGenExpressionSamplers COMMAND testUsdGenExpressionSamplers)
+set_tests_properties(testUsdGenExpressionSamplers PROPERTIES
+    LABELS "T0;expressions;maps" TIMEOUT 120)
+# Ptex face ids/coordinates and the sampler. Links usdGen_ptex itself so the
+# test can author its fixture .ptx with PtexWriter.
+add_executable(testUsdGenPtexMap tests/testUsdGenPtexMap.cpp)
+target_link_libraries(testUsdGenPtexMap PRIVATE usdGen usdGen_ptex)
+add_test(NAME testUsdGenPtexMap COMMAND testUsdGenPtexMap)
+set_tests_properties(testUsdGenPtexMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
 # The function library against Disney's own SeExpr2. This is the only test that
 # links the vendored frontend archive directly: expressions/exprMath.h claims to
 # reproduce SeExpr2's builtins for the device, and the claim is only worth
@@ -1698,7 +1823,7 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
     add_test(NAME testUsdGenToolsExprEditor
         COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
             --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/expression-width-plane.usda")
     usdgen_test_pluginpath_ops(_usdgen_tools_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
@@ -1722,7 +1847,7 @@ if(_usdgen_test_python)
     add_test(NAME testUsdGenToolsExprApi
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprApi.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/expression-width-plane.usda")
     usdgen_test_pluginpath_ops(_usdgen_toolsapi_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"

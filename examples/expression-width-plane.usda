@@ -35,8 +35,12 @@
 #
 #   SeExpr argument orders are kept as SeExpr spells them, so an expression
 #   pastes in and out of other SeExpr tools: smoothstep(x, a, b), not
-#   smoothstep(a, b, x). Image maps (map/ptex), printf and user-defined
-#   functions (def) are refused by name, each with its own reason.
+#   smoothstep(a, b, x). External data is read through relationships on the
+#   expression prim: geoSampler("<name>", ...) samples the geometry
+#   input:<name> targets and ptex("<name>") the UsdGenPtexMap it targets (see
+#   guide-interpolate-plane.usda and clump-ptex-plane.usda). printf,
+#   map()/texture() and user-defined functions (def) are refused by name,
+#   each with its own reason.
 #
 # THE LANGUAGE
 #   An expression may be several statements separated by ";", with "#" comments
@@ -89,8 +93,8 @@
 # first): scatter -> grow -> frizz -> width. No usdGen:input relationships
 # are needed.
 #
-# View it:   .\bin\launch_usdview.ps1 plan\examples\expression-width-plane.usda
-# Record it: .\bin\record_usd.ps1 -Scene plan\examples\expression-width-plane.usda `
+# View it:   .\bin\launch_usdview.ps1 examples\expression-width-plane.usda
+# Record it: .\bin\record_usd.ps1 -Scene examples\expression-width-plane.usda `
 #                -Output out.png -Camera /World/Cam -Complexity veryhigh
 
 def Xform "World"

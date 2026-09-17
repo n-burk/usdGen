@@ -11,6 +11,8 @@
 # once. (Usd API calls are deliberately not made inside the block: the stage is
 # not resynced until it closes, so only layer-level editing is safe there.)
 
+import re
+
 from pxr import Sdf, Usd
 
 EXPRESSION_TYPE = "UsdGenExpression"
@@ -45,6 +47,11 @@ _EVALUATION_FALLBACK = {
     "usdGen:mask": "primitive",
 }
 DEFAULT_EVALUATION = "groom"
+
+# External data an expression reads is named by a relationship on its prim:
+# geoSampler("guideCurves", ...) and ptex("guideCurves") read input:guideCurves.
+INPUT_PREFIX = "input:"
+_INPUT_CALL_RE = re.compile(r"""\b(?:geoSampler|ptex)\s*\(\s*(["'])([^"']+)\1""")
 
 # Components an expression must produce to fill an attribute of each type.
 _COMPONENTS = {
@@ -276,6 +283,46 @@ def DisconnectExpression(attr):
         return True
     attr.SetConnections([])
     return not attr.GetConnections()
+
+
+def InputNames(source):
+    """The input names `source` samples, in first-use order."""
+    names = []
+    for match in _INPUT_CALL_RE.finditer(source or ""):
+        name = match.group(2)
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def EnsureInputRelationships(prim, source):
+    """Create an (empty) input:<name> relationship for every geoSampler()/
+    ptex() input `source` names and `prim` does not have yet, so the user has
+    a relationship to target. Returns the names it created."""
+    if not prim or not prim.IsValid():
+        return []
+    created = []
+    for name in InputNames(source):
+        relName = INPUT_PREFIX + name
+        if not Sdf.Path.IsValidNamespacedIdentifier(relName):
+            continue
+        if prim.GetRelationship(relName):
+            continue
+        if prim.CreateRelationship(relName, custom=True):
+            created.append(name)
+    return created
+
+
+def InputRelationships(prim):
+    """{name: [targets]} for every input:<name> relationship on `prim`."""
+    result = {}
+    if not prim or not prim.IsValid():
+        return result
+    for rel in prim.GetRelationships():
+        relName = rel.GetName()
+        if relName.startswith(INPUT_PREFIX):
+            result[relName[len(INPUT_PREFIX):]] = rel.GetForwardedTargets()
+    return result
 
 
 def SetEvaluation(attr, evaluation):

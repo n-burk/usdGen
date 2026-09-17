@@ -102,6 +102,23 @@ public:
     /// C5-frozen Sdr defaults apply.
     static HdContainerDataSourceHandle BuildDefaultMaterialDataSource();
 
+    /// The synthetic value-preview materials (usdGen:preview:*):
+    /// <description>/__usdGenRender/material_preview (lit) and
+    /// material_preview_flat. The engine binds one of them
+    /// (usdGen::UsdGenPreviewMaterialPath) on every tile of a previewing
+    /// description; UsdGenGroomSceneIndex serves whichever the tiles bind.
+    static SdfPath PreviewMaterialPath(SdfPath const &descriptionPath, bool flat);
+
+    /// True when `path` is one of the two preview materials of
+    /// `descriptionPath`; `flat` says which.
+    static bool IsPreviewMaterialPath(SdfPath const &descriptionPath,
+                                      SdfPath const &path, bool *flat = nullptr);
+
+    /// The `material` prim data source of a preview material: the
+    /// `UsdGenValuePreview` glslfx, which shows displayColor as it is
+    /// (`shading` 0) or darkened where strands turn away (`shading` 1).
+    static HdContainerDataSourceHandle BuildPreviewMaterialDataSource(bool flat);
+
     /// The reserved name of the synthetic default material prim.
     static TfToken const &MaterialName()
     {

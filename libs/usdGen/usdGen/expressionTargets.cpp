@@ -115,6 +115,51 @@ bool ValidateDeform(UsdGenNodeDesc const &node, std::vector<std::string> *errors
     return ok;
 }
 
+/// Clump resolves at capture; its amount may vary per CV, its membership map
+/// is per strand.
+bool ValidateClump(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
+{
+    static const std::set<std::string> floats{
+        "clump:amount", "clump:map", "preserveLength", "mask"};
+    std::set<std::string> seen;
+    bool ok = true;
+    for (auto const &binding : node.expressionBindings) {
+        const auto name = UsdGenCanonicalParamName(binding.destination).GetString();
+        const bool boolean = name == "enabled";
+        if ((!boolean && !floats.count(name)) || !seen.insert(name).second ||
+            !ShapeOk(binding, boolean ? Type::Bool : Type::Float32,
+                     boolean ? "bool" : "float", 1u)) {
+            ok = Reject(errors, "unsupported or incorrectly typed Clump expression " + name);
+            continue;
+        }
+        if ((boolean && binding.domain != Domain::Groom) ||
+            (name == "clump:map" && binding.domain == Domain::Point))
+            ok = Reject(errors, "Clump enabled requires groom; clump:map requires groom/primitive");
+    }
+    return ok;
+}
+
+/// GuideInterpolate reads its region per strand root.
+bool ValidateGuideInterpolate(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
+{
+    std::set<std::string> seen;
+    bool ok = true;
+    for (auto const &binding : node.expressionBindings) {
+        const auto name = UsdGenCanonicalParamName(binding.destination).GetString();
+        const bool boolean = name == "enabled";
+        if ((!boolean && name != "region") || !seen.insert(name).second ||
+            !ShapeOk(binding, boolean ? Type::Bool : Type::Float32,
+                     boolean ? "bool" : "float", 1u)) {
+            ok = Reject(errors, "unsupported or incorrectly typed GuideInterpolate expression " + name);
+            continue;
+        }
+        if ((boolean && binding.domain != Domain::Groom) ||
+            (name == "region" && binding.domain == Domain::Point))
+            ok = Reject(errors, "GuideInterpolate enabled requires groom; region requires groom/primitive");
+    }
+    return ok;
+}
+
 bool ValidateCurveSource(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
 {
     std::set<std::string> seen;
@@ -148,6 +193,9 @@ bool UsdGenValidateExpressionTargets(UsdGenNodeDesc const &node,
     if (node.type == TfToken("UsdGenNoise")) return ValidateNoise(node, errors);
     if (node.type == TfToken("UsdGenDeform")) return ValidateDeform(node, errors);
     if (node.type == TfToken("UsdGenCurveSource")) return ValidateCurveSource(node, errors);
+    if (node.type == TfToken("UsdGenClump")) return ValidateClump(node, errors);
+    if (node.type == TfToken("UsdGenGuideInterpolate"))
+        return ValidateGuideInterpolate(node, errors);
     // Generators own their topology and consume no connected control: Scatter
     // and Grow would silently ignore one on both lanes, which is worse than a
     // diagnostic. WidthBlend blends two proved widths and owns no parameter

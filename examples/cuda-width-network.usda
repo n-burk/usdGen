@@ -4,7 +4,7 @@
     timeCodesPerSecond = 24
 )
 
-# Executable CUDA tool-consumer subset of operator-network.usda.
+# Executable CUDA tool-consumer subset of plan/examples/operator-network.usda.
 # Reverse sibling order gives source -> width. No authored graph edges.
 # Rendering still requires the unfinished device-aware renderer integration.
 def UsdGenGroom "Groom"

@@ -1428,6 +1428,46 @@ one authored `Material` with three terminals (S36). If it fails,
 and binds tiles to it. The hedge is a deletable code path with a one-afternoon gate, not a permanent
 fork. Details in `07-look-maps-expressions.md` §3.3.
 
+> **Value-preview materials (2026-09-16).** While a description has a `usdGen:preview:source`, its
+> tiles bind `<Description>/__usdGenRender/material_preview` (or `material_preview_flat`) instead,
+> a one-node `UsdGenValuePreview` network built by
+> `UsdGenTilePublisher::BuildPreviewMaterialDataSource`. `UsdGenGroomSceneIndex` serves that prim,
+> lists it under the render scope and adds or removes it in the synthetic diff exactly while the
+> tiles bind it. It counts as an authored binding for the complexity mask (kept at refineLevel 1,
+> dropped at 0, where Storm's unbound shading shows the same `displayColor`). Every synthetic tile
+> dirtied universally also gets a `primvars` dirty: `HdSceneIndexAdapterSceneDelegate` keeps its
+> cached primvar descriptors across a universal dirty, so `displayColor` switching between
+> per-curve and per-CV would otherwise be read with the old interpolation.
+
+> **Playback dirties (2026-09-16).** `examples/rbf-guides-plane.usda` played in usdview cooked the
+> whole stack twice a frame, with a full compile each time, and dirtied every prim universally
+> (about 105 ms/frame in the engine alone). What the frontend now does:
+> * **Tiles.** A republished tile is diffed against the one Hydra shows, data source against data
+>   source (`DiffTileDataSources` in `groomSceneIndexPlugin.cpp`), and dirties only what differs, per
+>   §5.1. A primvar whose value moved dirties `primvars/<name>/primvarValue`; any other change dirties
+>   `primvars/<name>`; unchanged widths, `hairT` and colours stay clean. The universal dirty (plus
+>   `primvars`) remains only for a tile whose groom was replaced.
+> * **The render scope and the synthetic materials** are built from their path alone, so a new
+>   generation leaves them clean.
+> * **Input dirties.** Each value in the source map keeps the locators dirtied since a stamp the
+>   frontend has shown (`SourceValue::Dirty` / `DirtySince`). The frontend forwards the input's own
+>   locators, for example `primvars/points/primvarValue` on an animated driver or skin, and
+>   `sceneGlobals/currentFrame` on `/`. It falls back to a universal dirty only when it has not yet
+>   shown that baseline.
+> * **The scene globals.** A `/` dirty that touches only `sceneGlobals` re-captures a groom only if
+>   one of its expressions reads `$frame` or `$time`. usdview sets the stage time before the current
+>   frame, so the geometry's own dirty has already cooked the frame.
+> * **The session cooker** recompiles a new description incrementally (`UsdGenCompiler::Recompile`,
+>   gate E-6). Capture/curve/surface generations are content hashes
+>   (`UsdGenFinalizeInputGenerations`), so an unchanged operator keeps its capture and evaluates no
+>   chunk. After a failed or superseded cook the graph is rebuilt in full.
+>
+> Result: one cook a frame, in which only the deform re-runs; about 15 ms/frame in the engine. In
+> Storm a frame re-syncs `points`, `furTauP` and `furTauN`. `HdChangeTracker::IsPrimvarDirty` still
+> re-reads every custom primvar under `DirtyPrimvar`, which the occlusion planes raise.
+> `testUsdGenRbfDeform` asserts all of this. `bin/trace_playback.ps1` traces it, with a tally of the
+> notices sent to Hydra, through the engine harness or through usdview (`examples/README.md`).
+
 ---
 
 ## 5. Invalidation discipline (ADR §5.2)

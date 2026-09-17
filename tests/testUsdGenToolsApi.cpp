@@ -207,12 +207,21 @@ int main()
             while (!inside.empty() &&
                    (inside.back() == ' ' || inside.back() == ','))
                 inside.pop_back();
-            const size_t arguments =
-                inside.empty() ? 0
-                                : size_t(std::count(inside.begin(),
-                                                    inside.end(), ',')) + 1;
+            // String parameters (the sampling functions) take a string
+            // literal, and an optional one is left out: its default is the
+            // only spelling the function is guaranteed to accept.
+            std::vector<std::string> parameters;
+            if (!inside.empty()) parameters = Split(inside, ',');
             std::string probe = fields[1].substr(0, open) + "(";
-            for (size_t i = 0; i < arguments; ++i) probe += (i ? ", 1" : "1");
+            size_t written = 0;
+            for (std::string parameter : parameters) {
+                while (!parameter.empty() && parameter.front() == ' ')
+                    parameter.erase(parameter.begin());
+                const bool isString = parameter.rfind("string ", 0) == 0;
+                if (isString && parameter.find('=') != std::string::npos) break;
+                probe += written++ ? ", " : "";
+                probe += isString ? "\"1\"" : "1";
+            }
             probe += ")";
             const int probeStatus = UsdGenTools_CompileExpression(
                 probe.c_str(), USDGEN_TOOLS_DOMAIN_POINT, 1, errors,

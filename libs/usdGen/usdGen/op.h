@@ -305,6 +305,12 @@ public:
     /// Whether the authored order of geometry inputs is semantic.  Unary
     /// operators retain the historical canonicalized digest behavior.
     virtual bool GeometryInputsOrdered() const { return false; }
+    /// Called by the compiler once per fresh node, before OutputPrimvars() is
+    /// read, for an operator whose emitted plane NAMES depend on authored
+    /// values (UsdGenClump's clumpId_<level>). The parameters that feed it must
+    /// be structural (digest) parameters, so an edit rebuilds the node.
+    virtual void Configure(UsdGenParamView const &) {}
+
     // ---- binding -------------------------------------------------------------
     virtual bool Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag) = 0;
 

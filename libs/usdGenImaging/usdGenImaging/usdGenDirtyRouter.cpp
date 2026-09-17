@@ -184,6 +184,13 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
                 HdDataSourceLocator(UsdGenContainerToken()),
                 Entry{node.id, usdGen::UsdGenDirtyMap});
         }
+        // Geometry and maps a connected expression samples: any edit of the
+        // prim re-captures the consumer, whose expression values then move.
+        for (SdfPath const &geometryRef : node.geometryRefs) {
+            table[geometryRef].prefixes.emplace_back(
+                HdDataSourceLocator(),
+                Entry{node.id, usdGen::UsdGenDirtyCapture});
+        }
     }
 
     // usdGen:tileTarget / usdGen:curve:basis on the description (R21): the

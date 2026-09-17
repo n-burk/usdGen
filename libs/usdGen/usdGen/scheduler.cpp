@@ -19,6 +19,7 @@
 // _arena.execute, never pxr work::.
 #include "usdGen/scheduler.h"
 
+#include "usdGen/debugCodes.h"
 #include "usdGen/graph.h"
 #include "usdGen/op.h"
 #include "usdGen/types.h"
@@ -27,6 +28,7 @@
 #include "pxr/base/gf/range3f.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/trace/trace.h"
 #include "pxr/base/vt/array.h"
 
 #include "tbb/parallel_for.h"
@@ -380,6 +382,11 @@ struct NodeSweepPayload
 // A prepared node job owns the small vectors whose addresses are published in
 // its EvalContext.  Preparation happens on the commit thread; arena workers
 // only consume the immutable context and write this node's disjoint chunks.
+std::string NodeLabel(UsdGenCompiledNode const &node)
+{
+    return node.desc ? node.desc->path.GetName() : std::string("?");
+}
+
 struct NodeExecution
 {
     std::vector<UsdGenCurveBuffer const *> upstreamInputs;
@@ -387,6 +394,7 @@ struct NodeExecution
     std::vector<UsdGenResolvedReferenceValue const *> resolvedReferences;
     std::vector<UsdGenResolvedMapValue const *> resolvedMaps;
     NodeSweepPayload sweep{};
+    char const *recaptureReason = nullptr;   // why reCaptured, for USDGEN_SCHEDULE
     bool reCaptured = false;
     bool expressionsChanged = false;
     bool shouldSweep = false;
@@ -716,6 +724,7 @@ UsdGenRunResult UsdGenScheduler::Run(
     uint64_t generationRequested)
 {
     TF_UNUSED(generationRequested);  // supersession is checked by the session
+    TRACE_FUNCTION();
 
     UsdGenRunResult result;
     if (graph.NodeCount() == 0) return result;
@@ -734,6 +743,7 @@ UsdGenRunResult UsdGenScheduler::Run(
     auto prepareNode = [&](int pos, NodeExecution *job) -> bool {
         UsdGenCompiledNode &node = graph.Node(pos);
         UsdGenOp &op = *node.op;
+        TRACE_SCOPE_DYNAMIC("usdGen prepare " + NodeLabel(node));
         UsdGenDiagnostics nodeDiag;
         bool const hasUp = !node.inputs.empty();
         UsdGenCurveBuffer const &upBuf = hasUp
@@ -809,6 +819,8 @@ UsdGenRunResult UsdGenScheduler::Run(
                                            &expressionErrors))
                 for (auto const &message : expressionErrors)
                     nodeDiag.Error("UsdGen: " + message);
+            for (auto const &message : node.expressions.TakeWarnings())
+                nodeDiag.Warn("UsdGen: " + node.desc->path.GetString() + ": " + message);
             // A groom-domain usdGen:enabled drives the node's own gate. With
             // nothing connected the authored value stands.
             double enabled = 0.0;
@@ -840,10 +852,16 @@ UsdGenRunResult UsdGenScheduler::Run(
 
         UsdGenEpoch const captureIdentity =
             WithExternalValueIdentity(op.CaptureDigest(cctx), node, graph);
-        job->reCaptured = node.captureNeeded || !node.capture ||
-            captureIdentity != node.captureEpoch ||
-            !node.capture->ValidForTopology(upBuf);
+        // First reason wins; the trace reports it.
+        job->recaptureReason =
+            !node.capture ? "no capture yet" :
+            node.captureNeeded ? "compiler requested" :
+            captureIdentity != node.captureEpoch ? "capture digest moved" :
+            !node.capture->ValidForTopology(upBuf) ? "input changed" : nullptr;
+        job->reCaptured = job->recaptureReason != nullptr;
         if (job->reCaptured) {
+            TRACE_SCOPE_DYNAMIC("usdGen capture " + NodeLabel(node));
+            TRACE_COUNTER_DELTA("usdGen nodes captured", 1);
             auto cap = op.CreateCapture();
             if (cap && op.Capture(cctx, upBuf, cap.get(), &nodeDiag)) {
                 if (cap->OwnsBuffer()) {
@@ -1031,6 +1049,8 @@ UsdGenRunResult UsdGenScheduler::Run(
                 }
             }
             if (!work.empty()) {
+                TRACE_SCOPE("usdGen chunk sweep");
+                TRACE_COUNTER_DELTA("usdGen chunks evaluated", double(work.size()));
                 for (auto const &job : jobs)
                     if (job->shouldSweep)
                         job->evaluationStart = std::chrono::steady_clock::now();
@@ -1073,6 +1093,24 @@ UsdGenRunResult UsdGenScheduler::Run(
                     for (uint8_t b : job.sweep.didEval) if (b) ++st.chunksEvaluated;
                     result.nodeStats.push_back(st);
                 }
+                if (TfDebug::IsEnabled(USDGEN_SCHEDULE)) {
+                    size_t evaluated = 0;
+                    for (uint8_t b : job.sweep.didEval) evaluated += b != 0;
+                    double const captureMs = std::chrono::duration<double, std::milli>(
+                        job.captureEnd - job.captureStart).count();
+                    double const evalMs = job.shouldSweep && evaluated
+                        ? std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - job.evaluationStart).count()
+                        : 0.0;
+                    TfDebug::Helper().Msg(
+                        "usdGen schedule  %-12s %-18s %-22s prepare %8.2f ms  eval %4zu/%-4zu chunks %8.2f ms%s\n",
+                        NodeLabel(node).c_str(),
+                        node.desc ? node.desc->type.GetText() : "?",
+                        job.reCaptured ? job.recaptureReason
+                            : node.enabled ? "capture reused" : "disabled",
+                        captureMs, evaluated, node.chunks.size(), evalMs,
+                        job.evalAll ? "  (all chunks: values moved)" : "");
+                }
                 completed[size_t(frontier[j])] = 1;
                 --remaining;
             }
@@ -1085,6 +1123,7 @@ UsdGenRunResult UsdGenScheduler::Run(
     if (result.topologyChanged)
         std::fill(tileTouched.begin(), tileTouched.end(), 1);
     if (nTiles > 0) {
+        TRACE_SCOPE("usdGen interleave tiles");
         InterleavePayload ip;
         ip.graph = &graph;
         ip.tn = &tn;

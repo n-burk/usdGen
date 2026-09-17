@@ -127,7 +127,7 @@ Expression Editor** dock (`Ctrl+Shift+E`) for the `usdGen:expr:source` of a
 `UsdGenExpression` prim. Select the expression, or the operator whose
 attribute is connected to it, and the dock follows:
 
-    .\bin\launch_usdview.ps1 plan\examples\expression-width-plane.usda
+    .\bin\launch_usdview.ps1 examples\expression-width-plane.usda
 
 It follows SeExpr2's own Qt editor: syntax highlighting, line numbers, bracket
 matching, a completion popup for `$variables` and functions, validation

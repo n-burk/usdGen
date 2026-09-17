@@ -190,6 +190,28 @@ _ExpressionsDataSource(UsdPrim const &description)
         fields.push_back(TfToken("outputs"));
         fieldValues.push_back(HdRetainedContainerDataSource::New(
             outputNames.size(), outputNames.data(), outputValues.data()));
+        // input:<name> relationships: the data geoSampler("<name>") and
+        // ptex("<name>") read. Forwarded targets, so a relationship that
+        // targets another relationship resolves like a connection would.
+        TfTokenVector inputNames;
+        std::vector<HdDataSourceBaseHandle> inputValues;
+        size_t inputIndex = 0;
+        for (UsdRelationship const &rel : expr.GetRelationships()) {
+            std::string const n = rel.GetName().GetString();
+            if (n.rfind("input:", 0) != 0 || n.size() <= 6) continue;
+            SdfPathVector targets;
+            rel.GetForwardedTargets(&targets);
+            TfTokenVector inFields{TfToken("name"), TfToken("targets")};
+            std::vector<HdDataSourceBaseHandle> inValues{
+                _Value(VtValue(TfToken(n.substr(6)))),
+                _Value(VtValue(VtArray<SdfPath>(targets.begin(), targets.end())))};
+            inputNames.push_back(TfToken(std::to_string(inputIndex++)));
+            inputValues.push_back(HdRetainedContainerDataSource::New(
+                inFields.size(), inFields.data(), inValues.data()));
+        }
+        fields.push_back(TfToken("inputs"));
+        fieldValues.push_back(HdRetainedContainerDataSource::New(
+            inputNames.size(), inputNames.data(), inputValues.data()));
         names.push_back(TfToken(std::to_string(index++)));
         values.push_back(HdRetainedContainerDataSource::New(
             fields.size(), fields.data(), fieldValues.data()));
@@ -451,6 +473,20 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
         result.insert(HdDataSourceLocator(
             PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
                 TfToken("expressionBindings")));
+    } else if (prim.GetPrimTypeInfo().GetTypeName() == TfToken("UsdGenExpression")) {
+        // input:<name> relationships and outputs:* are dynamic, so the mapped
+        // table knows nothing of them. Dirty the expression prim for them all
+        // the same: the owning description re-reads its live expression
+        // aggregate on the resulting notice.
+        for (auto const& property : properties) {
+            std::string const n = property.GetString();
+            if (n.rfind("input:", 0) == 0 || n.rfind("outputs:", 0) == 0) {
+                result.insert(HdDataSourceLocator(
+                    PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
+                        TfToken("inputs")));
+                break;
+            }
+        }
     }
     return result;
 }

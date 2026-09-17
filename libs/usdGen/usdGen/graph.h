@@ -45,6 +45,7 @@ struct UsdGenGraphRoutingNode
     std::vector<SdfPath> curveRefs;
     std::vector<SdfPath> mapRefs;
     std::vector<UsdGenMapBindingDesc> mapBindingRefs;
+    std::vector<SdfPath> geometryRefs;
 };
 
 struct UsdGenGraphRoutingSnapshot
@@ -102,6 +103,9 @@ struct UsdGenCompiledNode
     std::vector<SdfPath>   curveRefs;            // usdGen:curves/guides/frozen:curves targets
     std::vector<SdfPath>   mapRefs;              // legacy flat map targets
     std::vector<UsdGenMapBindingDesc> mapBindingRefs; // typed authored map slots
+    // Prims a connected expression reads through its input:<name>
+    // relationships (targets, the gprims and maps they resolve to).
+    std::vector<SdfPath>   geometryRefs;
     std::vector<uint32_t>  referenceValues;       // indices into graph immutable reference values
     std::vector<uint32_t>  mapValues;             // indices into graph immutable map values
     bool                   captureNeeded = false; // set by the session, cleared by the capture step
@@ -144,6 +148,9 @@ public:
     /// (a C3 BasisCurves changed: guide edit, re-freeze, re-import). §3.6, §4.5.
     void DirtyCurves(SdfPath const &curvePrim,
                      uint64_t generation = UINT64_MAX);
+    /// Re-captures every node whose connected expressions sample this prim
+    /// (geoSampler()/ptex() inputs), or a descendant of it.
+    void DirtyGeometry(SdfPath const &prim);
 
     /// Immutable-after-publication input generations captured by the last
     /// compiled descriptor. Dirty routing updates this tuple before marking

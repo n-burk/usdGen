@@ -25,8 +25,8 @@
 #     displayed. Without the attribute the description runs on the CPU
 #     reference engine and publishes BasisCurves tiles that Storm draws.
 #
-# View it:   .\bin\launch_usdview.ps1 plan\examples\scatter-grow-plane.usda
-# Record it: .\bin\record_usd.ps1 -Scene plan\examples\scatter-grow-plane.usda `
+# View it:   .\bin\launch_usdview.ps1 examples\scatter-grow-plane.usda
+# Record it: .\bin\record_usd.ps1 -Scene examples\scatter-grow-plane.usda `
 #                -Output out.png -Camera /World/Cam
 
 def Xform "World"

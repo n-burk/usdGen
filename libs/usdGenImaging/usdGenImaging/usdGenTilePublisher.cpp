@@ -9,6 +9,7 @@
 #include "usdGenImaging/usdGenTokens.h"
 
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/trace/trace.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/dependencySchema.h"
@@ -16,6 +17,7 @@
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/materialConnectionSchema.h"
 #include "pxr/imaging/hd/materialNetworkSchema.h"
+#include "pxr/imaging/hd/materialNodeParameterSchema.h"
 #include "pxr/imaging/hd/materialNodeSchema.h"
 #include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
@@ -396,6 +398,7 @@ HdContainerDataSourceHandle
 UsdGenTilePublisher::BuildTileDataSource(
     usdGen::UsdGenTilePublication const &tile, int64_t generation)
 {
+    TRACE_FUNCTION();
     return _Assemble(tile, /*isGuide=*/false, TfToken(), generation);
 }
 
@@ -497,14 +500,39 @@ UsdGenTilePublisher::DefaultMaterialPath(SdfPath const &tilePath)
 }
 
 /*static*/
+SdfPath
+UsdGenTilePublisher::PreviewMaterialPath(SdfPath const &descriptionPath, bool flat)
+{
+    static TfToken const lit("material_preview"), flatName("material_preview_flat");
+    return descriptionPath.AppendChild(RenderNamespace())
+        .AppendChild(flat ? flatName : lit);
+}
+
+/*static*/
+bool
+UsdGenTilePublisher::IsPreviewMaterialPath(SdfPath const &descriptionPath,
+                                           SdfPath const &path, bool *flat)
+{
+    for (bool const candidate : {false, true}) {
+        if (path == PreviewMaterialPath(descriptionPath, candidate)) {
+            if (flat) *flat = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+
+// A material whose universal-render-context network is one `surface` node.
 HdContainerDataSourceHandle
-UsdGenTilePublisher::BuildDefaultMaterialDataSource()
+_SurfaceMaterial(TfToken const &identifier, HdContainerDataSourceHandle const &parameters)
 {
     static TfToken const surface("surface");
     HdContainerDataSourceHandle const node =
         HdMaterialNodeSchema::Builder()
-            .SetNodeIdentifier(_Tok(TfToken("UsdGenHairPreview")))
-            .SetParameters(HdRetainedContainerDataSource::New())
+            .SetNodeIdentifier(_Tok(identifier))
+            .SetParameters(parameters)
             .SetInputConnections(HdRetainedContainerDataSource::New())
             .Build();
     HdContainerDataSourceHandle const terminal =
@@ -527,6 +555,29 @@ UsdGenTilePublisher::BuildDefaultMaterialDataSource()
     return HdRetainedContainerDataSource::New(
         HdMaterialSchemaTokens->material,
         HdMaterialSchema::BuildRetained(1, &contextName, &contextValue));
+}
+
+}  // namespace
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildDefaultMaterialDataSource()
+{
+    // Parameters are left unset so the C5-frozen Sdr defaults apply.
+    return _SurfaceMaterial(TfToken("UsdGenHairPreview"),
+                            HdRetainedContainerDataSource::New());
+}
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildPreviewMaterialDataSource(bool flat)
+{
+    static TfToken const shading("shading");
+    HdDataSourceBaseHandle const value = HdMaterialNodeParameterSchema::Builder()
+        .SetValue(HdRetainedTypedSampledDataSource<float>::New(flat ? 0.0f : 1.0f))
+        .Build();
+    return _SurfaceMaterial(TfToken("UsdGenValuePreview"),
+                            HdRetainedContainerDataSource::New(shading, value));
 }
 
 }  // namespace usdGenImaging

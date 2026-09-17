@@ -6,6 +6,7 @@
 #include "usdGenImaging/usdGenGraphDescBuilderStage.h"
 #include "usdGenImaging/expressionConnection.h"
 #include "usdGenImaging/imageMapCache.h"
+#include "usdGenImaging/usdGenGraphDescShared.h"
 
 #include "usdGen/expressions/valueShape.h"
 #include "usdGen/executionBackend.h"
@@ -20,6 +21,7 @@
 #include "pxr/usd/usdGeom/basisCurves.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/mesh.h"
+#include "pxr/usd/usdGeom/points.h"
 #include "pxr/usd/usdGeom/primvar.h"
 #include "pxr/usd/usdGeom/primvarsAPI.h"
 #include "pxr/usd/usdGeom/subset.h"
@@ -50,22 +52,6 @@ using usdGen::UsdGenLookDesc;
 using usdGen::UsdGenSurfaceDesc;
 using usdGen::UsdGenSurfaceSample;
 using usdGen::UsdGenSurfaceNormalDomain;
-
-bool
-_isDedicated(TfToken const &name)
-{
-    static std::unordered_set<std::string> const dedicated{
-        "usdGen:type", "usdGen:mode",
-        "usdGen:enabled", "usdGen:seed",
-        "usdGen:references", "usdGen:guides", "usdGen:curves",
-        "usdGen:frozen:curves", "usdGen:surface",
-        // description-level dedicated fields
-        "usdGen:tileTarget", "usdGen:curve:basis",
-    };
-    // usdGen:look:* lives in UsdGenLookDesc, not params.
-    return dedicated.count(name.GetString()) != 0 ||
-           name.GetString().rfind("usdGen:look:", 0) == 0;
-}
 
 
 template <class T>
@@ -453,6 +439,68 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
 
 
 
+// Oracle twin of the Hydra builder's _HCollectInputTarget.
+void
+_CollectInputTarget(UsdStageRefPtr const &stage, SdfPath const &path, int depth,
+                    SdfPathVector *geometries, SdfPathVector *maps)
+{
+    UsdPrim const prim = stage->GetPrimAtPath(path);
+    if (!prim) return;
+    if (UsdGenIsMapTypeName(prim.GetPrimTypeInfo().GetTypeName())) {
+        maps->push_back(path);
+        return;
+    }
+    if (prim.IsA<UsdGeomMesh>() || prim.IsA<UsdGeomBasisCurves>() ||
+        prim.IsA<UsdGeomPoints>()) {
+        geometries->push_back(path);
+        return;
+    }
+    if (depth > 64) return;
+    for (UsdPrim const &child : prim.GetChildren())
+        _CollectInputTarget(stage, child.GetPath(), depth + 1, geometries, maps);
+}
+
+// Oracle twin of _HBuildGeometry: rest is what the RestAPI/CurveAPI adapters
+// publish when applied (authored primvars:rest, else Default-time points),
+// otherwise an authored primvars:rest, otherwise empty.
+void
+_BuildGeometry(UsdStageRefPtr const &stage, SdfPath const &path, double time,
+               usdGen::UsdGenGeometryDesc *out)
+{
+    out->path = path;
+    UsdPrim const prim = stage->GetPrimAtPath(path);
+    if (!prim) return;
+    out->worldMatrix =
+        UsdGeomImageable(prim).ComputeLocalToWorldTransform(UsdTimeCode(time));
+    UsdGeomPointBased const pointBased(prim);
+    if (pointBased) _GetVec3fArray(pointBased.GetPointsAttr(), UsdTimeCode(time), &out->points);
+    UsdGeomPrimvar const rest = UsdGeomPrimvarsAPI(prim).GetPrimvar(TfToken("rest"));
+    bool const authoredRest = rest && rest.GetAttr().GetResolveInfo().HasAuthoredValueOpinion();
+    auto readRest = [&](bool adapterApplied) {
+        if (authoredRest) {
+            _GetPrimvarTyped(prim, TfToken("rest"), UsdTimeCode::Default(), &out->rest);
+        } else if (adapterApplied && pointBased) {
+            _GetVec3fArray(pointBased.GetPointsAttr(), UsdTimeCode::Default(), &out->rest);
+        }
+    };
+    if (UsdGeomMesh const mesh{prim}) {
+        out->kind = usdGen::UsdGenGeometryKind::Mesh;
+        _GetTyped(mesh.GetFaceVertexCountsAttr(), UsdTimeCode(time), &out->counts);
+        _GetTyped(mesh.GetFaceVertexIndicesAttr(), UsdTimeCode(time), &out->indices);
+        readRest(prim.HasAPI(TfToken("UsdGenRestAPI")));
+    } else if (UsdGeomBasisCurves const curves{prim}) {
+        out->kind = usdGen::UsdGenGeometryKind::Curves;
+        _GetTyped(curves.GetCurveVertexCountsAttr(), UsdTimeCode(time), &out->counts);
+        readRest(prim.HasAPI(TfToken("UsdGenCurveAPI")));
+        _GetPrimvarTyped(prim, TfToken("usdGen:curveId"), UsdTimeCode(time), &out->ids);
+    } else {
+        out->kind = usdGen::UsdGenGeometryKind::Points;
+        readRest(false);
+        _GetPrimvarTyped(prim, TfToken("normals"), UsdTimeCode(time), &out->normals);
+    }
+    out->generation = UsdGenGeometryContentHash(*out);
+}
+
 }  // namespace
 
 usdGen::UsdGenGraphDesc
@@ -533,6 +581,14 @@ BuildGraphDescFromStage(
                     a.GetTypeName(), a.Get(&declaration, UsdTimeCode::Default())
                         ? &declaration : nullptr);
                 e.outputs.push_back(std::move(output));
+            }
+            for (UsdRelationship const &rel : prim.GetRelationships()) {
+                std::string const n = rel.GetName().GetString();
+                if (n.rfind("input:", 0) != 0 || n.size() <= 6) continue;
+                usdGen::UsdGenExpressionInputDesc input;
+                input.name = TfToken(n.substr(6));
+                rel.GetForwardedTargets(&input.targets);
+                e.inputs.push_back(std::move(input));
             }
             desc.expressions.push_back(std::move(e));
         }
@@ -691,6 +747,28 @@ BuildGraphDescFromStage(
         desc.maps.push_back(std::move(map));
     };
 
+    std::map<std::string, size_t> geometryIndex;
+    for (usdGen::UsdGenExpressionDesc &expression : desc.expressions) {
+        for (usdGen::UsdGenExpressionInputDesc &in : expression.inputs) {
+            for (SdfPath const &target : in.targets) {
+                size_t const before = in.geometries.size() + in.maps.size();
+                _CollectInputTarget(stage, target, 0, &in.geometries, &in.maps);
+                if (in.geometries.size() + in.maps.size() == before)
+                    desc.validationErrors.push_back(expression.path.GetString() + ": input:" +
+                        in.name.GetString() + " target " + target.GetString() +
+                        " is not a mesh, curves, points or map prim, and contains none");
+            }
+            for (SdfPath const &g : in.geometries) {
+                if (geometryIndex.count(g.GetString())) continue;
+                usdGen::UsdGenGeometryDesc geometry;
+                _BuildGeometry(stage, g, time, &geometry);
+                geometryIndex.emplace(g.GetString(), desc.geometries.size());
+                desc.geometries.push_back(std::move(geometry));
+            }
+            for (SdfPath const &m : in.maps) mapFor(m);
+        }
+    }
+
     for (UsdGenNodeDesc &node : desc.nodes) {
         for (SdfPath const &s : node.surfaces) {
             surfaceFor(s);
@@ -745,6 +823,26 @@ BuildGraphDescFromStage(
     _GetTyped(descPrim.GetAttribute(TfToken("usdGen:look:jitterSeed")),
               UsdTimeCode::Default(), &look.jitterSeed);
 
+    // usdGen:preview:* (viewport value preview). The source stays unresolved
+    // except that a map target joins the map pool, so the cooker can read it.
+    usdGen::UsdGenPreviewDesc &preview = desc.preview;
+    if (UsdRelationship const rel =
+            descPrim.GetRelationship(TfToken("usdGen:preview:source"))) {
+        SdfPathVector targets;
+        rel.GetForwardedTargets(&targets);
+        if (!targets.empty()) preview.source = targets.front();
+    }
+    _GetToken(descPrim, "usdGen:preview:colorMap", &preview.colorMap);
+    _GetTyped(descPrim.GetAttribute(TfToken("usdGen:preview:range")),
+              UsdTimeCode::Default(), &preview.range);
+    _GetToken(descPrim, "usdGen:preview:evaluation", &preview.evaluation);
+    _GetToken(descPrim, "usdGen:preview:shading", &preview.shading);
+    if (preview.source.IsPrimPath()) {
+        UsdPrim const target = stage->GetPrimAtPath(preview.source);
+        if (target && UsdGenIsMapTypeName(target.GetPrimTypeInfo().GetTypeName()))
+            mapFor(preview.source);
+    }
+
     // purpose / visibility inherited by hand to every tile (C2): read the
     // description's own opinions; the engine copies them onto publications.
     // NOTE (2026-09-12): this read "usdGeom:purpose", which is not a USD
@@ -783,6 +881,7 @@ BuildGraphDescFromStage(
     desc.executionBackend = _ResolveExecutionBackend(descPrim.GetParent());
 
     ResolveUsdGenImageMaps(&desc);
+    UsdGenFinalizeInputGenerations(&desc);
     return desc;
 }
 

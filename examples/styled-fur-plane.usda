@@ -23,8 +23,8 @@
 # undo even that), so Grow leans them with a literal direction vector; the
 # lean is what makes the noise show as waviness.
 #
-# View it:   .\bin\launch_usdview.ps1 plan\examples\styled-fur-plane.usda
-# Record it: .\bin\record_usd.ps1 -Scene plan\examples\styled-fur-plane.usda `
+# View it:   .\bin\launch_usdview.ps1 examples\styled-fur-plane.usda
+# Record it: .\bin\record_usd.ps1 -Scene examples\styled-fur-plane.usda `
 #                -Output out.png -Camera /World/Cam
 
 def Xform "World"

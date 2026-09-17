@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <memory>
@@ -42,10 +43,15 @@ struct HoldCaptureState {
     static std::atomic<bool> hold;
     static std::atomic<bool> entered;
     static std::atomic<bool> release;
+    // The operator's capture digest. A new descriptor recompiles
+    // incrementally and keeps the capture of an operator it did not change,
+    // so a test that wants this one held again moves its digest.
+    static std::atomic<uint64_t> epoch;
 };
 std::atomic<bool> HoldCaptureState::hold{false};
 std::atomic<bool> HoldCaptureState::entered{false};
 std::atomic<bool> HoldCaptureState::release{true};
+std::atomic<uint64_t> HoldCaptureState::epoch{1};
 
 class HoldCaptureOp final : public UsdGenOp {
 public:
@@ -54,7 +60,7 @@ public:
     TfSpan<const TfToken> ValueParameters() const override { return {}; }
     bool Bind(UsdGenParamView const &, UsdGenDiagnostics *) override { return true; }
     UsdGenEpoch CaptureDigest(UsdGenCaptureContext const &) const override {
-        return {1, 1};
+        return {1, HoldCaptureState::epoch.load(std::memory_order_acquire)};
     }
     bool Capture(UsdGenCaptureContext const &, UsdGenCurveBuffer const &,
                  UsdGenCapture *, UsdGenDiagnostics *diagnostics) override {
@@ -192,6 +198,7 @@ int main()
     HoldCaptureState::hold.store(true, std::memory_order_release);
     HoldCaptureState::entered.store(false, std::memory_order_release);
     HoldCaptureState::release.store(false, std::memory_order_release);
+    HoldCaptureState::epoch.fetch_add(1, std::memory_order_acq_rel);
     UsdGenGraphDesc firstEdit = MakeDesc(0.03f);
     UsdGenGraphDesc latestEdit = MakeDesc(0.07f);
     session.SetGraphDesc(firstEdit);

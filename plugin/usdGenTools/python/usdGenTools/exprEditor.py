@@ -18,12 +18,17 @@
 # Writes go through the stage's current edit target, so they are undoable in
 # the same way as any other usdview edit and the groom scene index recooks from
 # the resulting stage notice.
+#
+# "Colour hair by value" overrides the hair material to show a value on every
+# strand: the edited expression, a Ptex map it reads, or an operator attribute
+# (usdGen:preview:* on the description, always in the session layer; see
+# exprPreview.py).
 
 from pxr import Sdf, Tf, Usd
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 from . import (exprApi, exprAuthor, exprControls, exprEdit, exprHighlight,
-               exprLibrary, exprWidgets)
+               exprLibrary, exprPreview, exprWidgets)
 
 EXPRESSION_TYPE = exprAuthor.EXPRESSION_TYPE
 SOURCE_ATTR = exprAuthor.SOURCE_ATTR
@@ -83,9 +88,21 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         self._dragging = False
         self._coalescing = False
         self._previewing = False
+        # The session layer's own usdGen:expr:source opinion from before a
+        # preview replaced it: usdview's edit target IS the session layer, so
+        # that opinion is often the applied text itself.
+        self._previewBackup = None
         self._authoring = False
         self._appliedSource = ""
         self.diagnostics = []
+        # Hair colour preview state: what the source combo lists, an operator
+        # attribute the Connections tab asked for, and the description this
+        # editor has authored a preview on.
+        self._hairSources = []
+        self._pinnedHairSource = None
+        self._previewDescription = None
+        self._hairExpression = None
+        self._loadingHair = False
         self._buildUi()
         self._api.qMainWindow.addDockWidget(
             QtCore.Qt.RightDockWidgetArea, self)
@@ -189,6 +206,8 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         buttons.addStretch(1)
         layout.addLayout(buttons)
 
+        layout.addWidget(self._buildHairPreviewGroup())
+
         self.tabs = QtWidgets.QTabWidget()
         self.literalPanel = exprWidgets.LiteralPanel(
             self._onLiteralChanged, self._onLiteralDrag)
@@ -226,6 +245,93 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         self.setWidget(body)
         self._setEditable(False)
 
+    def _buildHairPreviewGroup(self):
+        group = QtWidgets.QGroupBox("Colour hair by value")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setToolTip(
+            "Override the hair material and colour every strand by the chosen "
+            "expression, Ptex map or operator attribute. Written to the "
+            "session layer only (usdGen:preview:* on the description); "
+            "unchecking restores the look.")
+        group.toggled.connect(self._onHairPreviewToggled)
+        grid = QtWidgets.QGridLayout(group)
+        grid.setContentsMargins(6, 4, 6, 4)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(3)
+
+        self.hairSourceCombo = QtWidgets.QComboBox()
+        self.hairSourceCombo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.hairSourceCombo.setMinimumContentsLength(24)
+        self.hairSourceCombo.setToolTip(
+            "Expression: evaluated over the published strands.\n"
+            "Ptex map: read at every strand root, as ptex() reads it.\n"
+            "Attribute: the values its operator was cooked with, or its "
+            "authored value when nothing drives it.")
+        grid.addWidget(QtWidgets.QLabel("Source:"), 0, 0)
+        grid.addWidget(self.hairSourceCombo, 0, 1, 1, 4)
+
+        self.hairMapCombo = QtWidgets.QComboBox()
+        for label, token in exprPreview.COLOR_MAPS:
+            self.hairMapCombo.addItem(label, token)
+        self.hairMapCombo.setToolTip(
+            "Distinct ids gives every distinct value its own colour (clump "
+            "and region maps) and ignores the range. RGB shows the first "
+            "three components as a colour.")
+        grid.addWidget(QtWidgets.QLabel("Colours:"), 1, 0)
+        grid.addWidget(self.hairMapCombo, 1, 1)
+
+        self.hairMinSpin = QtWidgets.QDoubleSpinBox()
+        self.hairMaxSpin = QtWidgets.QDoubleSpinBox()
+        for spin, value in ((self.hairMinSpin, exprPreview.DEFAULT_RANGE[0]),
+                            (self.hairMaxSpin, exprPreview.DEFAULT_RANGE[1])):
+            spin.setRange(-1e6, 1e6)
+            spin.setDecimals(4)
+            spin.setSingleStep(0.05)
+            spin.setValue(value)
+            spin.setKeyboardTracking(False)
+            spin.setToolTip("The values mapped to the two ends of the colours.")
+        grid.addWidget(QtWidgets.QLabel("Range:"), 1, 2)
+        grid.addWidget(self.hairMinSpin, 1, 3)
+        grid.addWidget(self.hairMaxSpin, 1, 4)
+
+        self.hairEvaluationCombo = QtWidgets.QComboBox()
+        for label, token in exprPreview.EVALUATIONS:
+            self.hairEvaluationCombo.addItem(label, token)
+        self.hairEvaluationCombo.setToolTip(
+            "Where a previewed expression is evaluated. An attribute keeps "
+            "its binding's domain and a map is read per strand.")
+        grid.addWidget(QtWidgets.QLabel("Evaluate:"), 2, 0)
+        grid.addWidget(self.hairEvaluationCombo, 2, 1)
+
+        self.hairFlatCheck = QtWidgets.QCheckBox("Flat")
+        self.hairFlatCheck.setToolTip(
+            "Show the mapped colour exactly, without view shading, so a value "
+            "can be read off the screen.")
+        grid.addWidget(self.hairFlatCheck, 2, 2, 1, 2)
+        self.hairFollowCheck = QtWidgets.QCheckBox("Follow edits")
+        self.hairFollowCheck.setChecked(True)
+        self.hairFollowCheck.setToolTip(
+            "While colouring by this expression, preview every edit that "
+            "compiles in the session layer, so the colours follow the text.")
+        grid.addWidget(self.hairFollowCheck, 2, 4)
+
+        self.hairStatusLabel = QtWidgets.QLabel()
+        self.hairStatusLabel.setWordWrap(True)
+        grid.addWidget(self.hairStatusLabel, 3, 0, 1, 5)
+        grid.setColumnStretch(1, 1)
+
+        self.hairSourceCombo.currentIndexChanged.connect(self._onHairSourceChanged)
+        self.hairMapCombo.currentIndexChanged.connect(self._onHairPreviewChanged)
+        self.hairEvaluationCombo.currentIndexChanged.connect(
+            self._onHairPreviewChanged)
+        self.hairMinSpin.valueChanged.connect(self._onHairPreviewChanged)
+        self.hairMaxSpin.valueChanged.connect(self._onHairPreviewChanged)
+        self.hairFlatCheck.toggled.connect(self._onHairPreviewChanged)
+        self.hairPreviewGroup = group
+        return group
+
     def _buildConnectionsTab(self):
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
@@ -251,8 +357,15 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         self.connectButton.clicked.connect(self._onConnectClicked)
         self.disconnectButton = QtWidgets.QPushButton("Disconnect")
         self.disconnectButton.clicked.connect(self.disconnectSelectedAttribute)
+        self.showOnHairButton = QtWidgets.QPushButton("Show on hair")
+        self.showOnHairButton.setToolTip(
+            "Colour the hair by the selected attribute: the values its "
+            "operator was cooked with, or its authored value.")
+        self.showOnHairButton.clicked.connect(
+            lambda: self.previewAttributeOnHair())
         row.addWidget(self.connectButton)
         row.addWidget(self.disconnectButton)
+        row.addWidget(self.showOnHairButton)
         row.addStretch(1)
         layout.addLayout(row)
         return page
@@ -324,8 +437,13 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         focus = None
         if self._api.stage:
             focus = self._api.dataModel.selection.getFocusPrim()
-        self._operator = (focus if focus and focus.IsValid()
-                          and focus.GetTypeName() != EXPRESSION_TYPE else None)
+        operator = (focus if focus and focus.IsValid()
+                    and focus.GetTypeName() != EXPRESSION_TYPE else None)
+        if (self._pinnedHairSource is not None and
+                (operator is None or self._pinnedHairSource.path.GetPrimPath()
+                 != operator.GetPath())):
+            self._pinnedHairSource = None
+        self._operator = operator
         candidates = ExpressionCandidates(focus)
         current = self._prim.GetPath() if self._prim else None
         self._loading = True
@@ -360,6 +478,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         self._prim = prim if prim and prim.IsValid() else None
         self._binding = self._findBinding()
         self._load()
+        self._refreshHairSources()
 
     def _findBinding(self):
         """The destination attribute whose usdGen:evaluation customData picks
@@ -483,6 +602,9 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
             self._setStatus("Could not author %s on %s" % (
                 SOURCE_ATTR, self._prim.GetPath()), "error")
             return False
+        # geoSampler("name")/ptex("name") read input:name; give the user the
+        # relationship to target.
+        exprAuthor.EnsureInputRelationships(self._prim, text)
         return True
 
     def apply(self):
@@ -498,7 +620,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         self._appliedSource = text
         # A preview lives in the session layer and would otherwise go on
         # shadowing what was just committed.
-        self._dropPreview()
+        self._dropPreview(committed=True)
         layer = self._prim.GetStage().GetEditTarget().GetLayer()
         self._markDirty(False)
         if not self.diagnostics:
@@ -520,6 +642,11 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
             self._setStatus("This stage has no session layer to preview in.",
                             "warning")
             return False
+        if not self._previewing:
+            spec = session.GetAttributeAtPath(
+                self._prim.GetPath().AppendProperty(SOURCE_ATTR))
+            self._previewBackup = (spec.default if spec is not None
+                                   and spec.HasDefaultValue() else None)
         self._authoring = True
         try:
             with Usd.EditContext(stage, session):
@@ -535,11 +662,19 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
             "warning")
         return True
 
-    def _dropPreview(self):
-        """Remove the session-layer override a preview left, if any."""
+    def _dropPreview(self, committed=False):
+        """Remove the session-layer override a preview left, if any.
+
+        `committed` is Apply's call: the text was just written to the edit
+        target, and when that target is the session layer itself the preview
+        opinion has already been replaced by the committed one. Otherwise the
+        session layer gets back what it held before the preview, or loses the
+        opinion when it held none; after an Apply to another layer the session
+        opinion always goes, or it would shadow the commit."""
         if not self._previewing:
             return
         self._previewing = False
+        backup, self._previewBackup = self._previewBackup, None
         if not self._prim or not self._prim.IsValid():
             return
         stage = self._prim.GetStage()
@@ -547,12 +682,18 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         attr = self._prim.GetAttribute(SOURCE_ATTR)
         if not session or not attr:
             return
-        # Clear() drops what THIS edit target authored and nothing else, so
-        # the opinion in the layer being authored survives untouched.
+        if committed and stage.GetEditTarget().GetLayer() == session:
+            return
         self._authoring = True
         try:
             with Usd.EditContext(stage, session):
-                attr.Clear()
+                if backup is not None and not committed:
+                    attr.Set(backup)
+                else:
+                    # Clear() drops what THIS edit target authored and nothing
+                    # else, so the opinion in the layer being authored
+                    # survives untouched.
+                    attr.Clear()
         finally:
             self._authoring = False
 
@@ -613,6 +754,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         if not self.diagnostics:
             self._setStatus("OK - compiles for the %s domain, %d component(s)."
                             % (self.domainName(), self.outputComponents()), "ok")
+            self._followEditOnHair()
         else:
             first = self.diagnostics[0]
             where = ("line %d, col %d: " % (first.line, first.column)
@@ -856,6 +998,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
                 "expressions.")
             self.connectButton.setEnabled(False)
             self.disconnectButton.setEnabled(False)
+            self.showOnHairButton.setEnabled(False)
             return
         self.connectionLabel.setText(prim.GetPath().pathString)
         font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
@@ -896,6 +1039,8 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         self.connectButton.setEnabled(attr is not None)
         self.disconnectButton.setEnabled(
             attr is not None and exprAuthor.ExpressionTarget(attr) is not None)
+        self.showOnHairButton.setEnabled(
+            attr is not None and exprAuthor.DescriptionOf(attr.GetPrim()) is not None)
 
     def _onConnectClicked(self):
         attr = self.selectedAttribute()
@@ -948,6 +1093,288 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
             "ok" if removed else "error")
         return removed
 
+    # ---- hair colour preview -------------------------------------------
+
+    def hairPreviewEnabled(self):
+        return self.hairPreviewGroup.isChecked()
+
+    def setHairPreview(self, enabled):
+        """Turn the hair colour preview on or off, as the group's checkbox
+        does. True when the stage agrees afterwards."""
+        self.hairPreviewGroup.setChecked(bool(enabled))
+        description = self._hairDescription()
+        previewing = bool(description) and exprPreview.IsPreviewing(description)
+        return previewing == bool(enabled)
+
+    def hairSource(self):
+        """The PreviewSource the combo has selected, or None."""
+        index = self.hairSourceCombo.currentIndex()
+        if 0 <= index < len(self._hairSources):
+            return self._hairSources[index]
+        return None
+
+    def selectHairSource(self, kind, path=None):
+        """Select the first listed source of `kind` (and `path`, when given).
+        True when there was one."""
+        for index, source in enumerate(self._hairSources):
+            if source.kind == kind and (path is None or
+                                        source.path == Sdf.Path(str(path))):
+                self.hairSourceCombo.setCurrentIndex(index)
+                return True
+        return False
+
+    def setHairColors(self, colorMap=None, valueRange=None, evaluation=None,
+                      flat=None):
+        """Set the preview controls; the preview follows when it is on."""
+        self._loadingHair = True
+        try:
+            if colorMap is not None:
+                self.hairMapCombo.setCurrentIndex(
+                    max(0, self.hairMapCombo.findData(colorMap)))
+            if valueRange is not None:
+                self.hairMinSpin.setValue(valueRange[0])
+                self.hairMaxSpin.setValue(valueRange[1])
+            if evaluation is not None:
+                self.hairEvaluationCombo.setCurrentIndex(
+                    max(0, self.hairEvaluationCombo.findData(evaluation)))
+            if flat is not None:
+                self.hairFlatCheck.setChecked(bool(flat))
+        finally:
+            self._loadingHair = False
+        self._onHairPreviewChanged()
+
+    def previewAttributeOnHair(self, attr=None):
+        """Colour the hair by `attr`, by default the Connections tab's
+        selection. True when the preview took."""
+        attr = attr if attr is not None else self.selectedAttribute()
+        source = exprPreview.AttributeSource(attr) if attr is not None else None
+        if source is None:
+            return False
+        self._pinnedHairSource = source
+        self._refreshHairSources(prefer=source)
+        self._setHairChecked(True)
+        return self._applyHairPreview()
+
+    def _setHairChecked(self, checked):
+        """Check or uncheck the group without authoring anything."""
+        self._loadingHair = True
+        try:
+            self.hairPreviewGroup.setChecked(bool(checked))
+        finally:
+            self._loadingHair = False
+
+    def _hairDescription(self, source=None):
+        """The description prim a preview of `source` is authored on."""
+        source = source if source is not None else self.hairSource()
+        stage = self._api.stage
+        if source is None or source.description is None or not stage:
+            return None
+        prim = stage.GetPrimAtPath(source.description)
+        return prim if prim and prim.IsValid() else None
+
+    def _refreshHairSources(self, prefer=None):
+        """List what the hair can be coloured by for the current expression
+        and operator.
+
+        While this editor previews, the preview follows the editor: the same
+        kind of source is kept for the new target and re-authored, and a
+        selection with nothing to offer leaves the colouring as it is.
+        Otherwise the controls show whatever the stage already previews, so
+        reopening the editor finds the colouring it left."""
+        previous = self.hairSource()
+        owning = self.hairPreviewEnabled()
+        sources = exprPreview.SourcesFor(self._prim, self._binding)
+        if (self._pinnedHairSource is not None and
+                self._pinnedHairSource not in sources):
+            sources.append(self._pinnedHairSource)
+        keep = owning and not sources and previous is not None
+        if keep:
+            sources = [previous]
+
+        # A newly edited expression is previewed where its binding
+        # evaluates it.
+        expressionPath = self._prim.GetPath() if self._prim else None
+        if expressionPath != self._hairExpression:
+            self._hairExpression = expressionPath
+            if self._binding is not None:
+                self._setHairControl(
+                    self.hairEvaluationCombo,
+                    exprPreview.DefaultEvaluation(self._binding))
+
+        state = None
+        if not owning and sources:
+            description = self._hairDescription(sources[0])
+            state = exprPreview.PreviewState(description)
+            if state["source"] is None:
+                state = None
+            else:
+                state["description"] = description
+                authored = next((s for s in sources
+                                 if s.path == state["source"]), None)
+                if authored is None:
+                    authored = exprPreview.SourceForPath(
+                        description.GetStage(), state["source"],
+                        description.GetPath())
+                    sources.append(authored)
+                if prefer is None:
+                    prefer = authored
+
+        if prefer is None and previous is not None:
+            if previous in sources:
+                prefer = previous
+            else:
+                prefer = next((s for s in sources if s.kind == previous.kind),
+                              None)
+
+        self._loadingHair = True
+        try:
+            self._hairSources = sources
+            self.hairSourceCombo.clear()
+            for source in sources:
+                self.hairSourceCombo.addItem(source.label, str(source.path))
+            if sources:
+                index = sources.index(prefer) if prefer in sources else 0
+                self.hairSourceCombo.setCurrentIndex(index)
+        finally:
+            self._loadingHair = False
+        self._syncHairControls()
+
+        if state is not None:
+            self._previewDescription = state["description"].GetPath()
+            self._setHairControl(self.hairMapCombo, state["colorMap"])
+            self._setHairControl(self.hairEvaluationCombo, state["evaluation"])
+            self._loadingHair = True
+            try:
+                self.hairMinSpin.setValue(state["range"][0])
+                self.hairMaxSpin.setValue(state["range"][1])
+                self.hairFlatCheck.setChecked(state["shading"] == "flat")
+            finally:
+                self._loadingHair = False
+            self._setHairChecked(True)
+            self._setHairStatus("%s is coloured by %s." % (
+                self._previewDescription, state["source"]), "ok")
+        elif owning and not keep:
+            self._applyHairPreview()
+
+    def _setHairControl(self, combo, token):
+        """Select `token` in `combo` without authoring anything."""
+        index = combo.findData(token)
+        if index < 0:
+            return
+        self._loadingHair = True
+        try:
+            combo.setCurrentIndex(index)
+        finally:
+            self._loadingHair = False
+
+    def _syncHairControls(self):
+        source = self.hairSource()
+        self.hairEvaluationCombo.setEnabled(
+            source is not None and source.kind == exprPreview.EXPRESSION)
+        self.hairFollowCheck.setEnabled(
+            source is not None and source.kind == exprPreview.EXPRESSION)
+
+    def _onHairPreviewToggled(self, enabled):
+        if self._loadingHair:
+            return
+        if enabled:
+            self._applyHairPreview()
+        else:
+            self._clearHairPreview()
+
+    def _onHairSourceChanged(self, _index):
+        if self._loadingHair:
+            return
+        self._syncHairControls()
+        if self.hairPreviewEnabled():
+            self._applyHairPreview()
+
+    def _onHairPreviewChanged(self, *_args):
+        if self._loadingHair:
+            return
+        if self.hairPreviewEnabled():
+            self._applyHairPreview()
+
+    def _setHairStatus(self, text, kind):
+        colors = {"ok": "", "error": "#ff6b6b", "warning": "#e0b050",
+                  "neutral": ""}
+        self.hairStatusLabel.setText(text)
+        color = colors.get(kind, "")
+        self.hairStatusLabel.setStyleSheet("color: %s;" % color if color else "")
+
+    def _applyHairPreview(self):
+        """Author the controls' preview. True when the stage took it."""
+        source = self.hairSource()
+        description = self._hairDescription(source)
+        if source is None or description is None:
+            self._clearHairPreview()
+            self._setHairStatus(
+                "Nothing to colour by: select an expression, or an operator "
+                "under a UsdGenDescription.", "warning")
+            return False
+        if (self._previewDescription is not None and
+                self._previewDescription != description.GetPath()):
+            self._clearHairPreview()
+        shading = "flat" if self.hairFlatCheck.isChecked() else "lit"
+        self._authoring = True
+        try:
+            ok = exprPreview.SetPreview(
+                description, source.path,
+                colorMap=self.hairMapCombo.currentData(),
+                valueRange=(self.hairMinSpin.value(), self.hairMaxSpin.value()),
+                evaluation=self.hairEvaluationCombo.currentData(),
+                shading=shading)
+        finally:
+            self._authoring = False
+        if not ok:
+            self._setHairStatus("Could not author usdGen:preview on %s."
+                                % description.GetPath(), "error")
+            return False
+        self._previewDescription = description.GetPath()
+        self._setHairStatus("%s is coloured by %s (session layer)."
+                            % (description.GetPath(), source.label), "ok")
+        return True
+
+    def _clearHairPreview(self):
+        path = self._previewDescription
+        self._previewDescription = None
+        stage = self._api.stage
+        if path is None or not stage:
+            self._setHairStatus("", "neutral")
+            return True
+        self._authoring = True
+        try:
+            ok = exprPreview.ClearPreview(stage.GetPrimAtPath(path))
+        finally:
+            self._authoring = False
+        self._setHairStatus(
+            "" if ok else "Could not clear usdGen:preview on %s." % path,
+            "neutral" if ok else "error")
+        return ok
+
+    def _followEditOnHair(self):
+        """Preview a compiling edit when the hair shows this expression."""
+        source = self.hairSource()
+        if (self._loading or not self._prim or not self.hairPreviewEnabled()
+                or not self.hairFollowCheck.isChecked() or source is None
+                or source.kind != exprPreview.EXPRESSION
+                or source.path != self._prim.GetPath() or not self.isDirty()):
+            return
+        self.preview()
+
+    def _syncHairFromStage(self, notice):
+        """Someone else cleared the preview this editor authored: show it."""
+        path = self._previewDescription
+        stage = self._api.stage
+        if path is None or not stage or not self.hairPreviewEnabled():
+            return
+        description = stage.GetPrimAtPath(path)
+        if description and exprPreview.IsPreviewing(description):
+            return
+        self._previewDescription = None
+        self._setHairChecked(False)
+        self._setHairStatus("The preview was cleared on the stage.", "neutral")
+
     # ---- stage notices -------------------------------------------------
 
     def _listenToStage(self):
@@ -961,6 +1388,10 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
 
     def _onStageReplaced(self):
         self._listenToStage()
+        # The old stage's session layer went with it.
+        self._previewDescription = None
+        self._pinnedHairSource = None
+        self._setHairChecked(False)
         self._setPrim(None)
         self.refreshFromSelection()
 
@@ -969,6 +1400,7 @@ class ExpressionEditorDock(QtWidgets.QDockWidget):
         # someone else's edit would reload the text out from under the user.
         if self._authoring:
             return
+        self._syncHairFromStage(notice)
         if not self._prim or not self._prim.IsValid():
             if self._prim is not None:
                 self.refreshFromSelection()

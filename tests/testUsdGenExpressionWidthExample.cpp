@@ -1,6 +1,6 @@
 // The shipped root-to-tip width example, cooked on the CPU reference lane.
 //
-// plan/examples/expression-width-plane.usda authors a POINT-domain expression
+// examples/expression-width-plane.usda authors a POINT-domain expression
 // on usdGen:width and a PRIMITIVE-domain expression on the Noise operator's
 // usdGen:mask. This test opens that file, builds the graph description from
 // the stage, cooks it on the CPU lane and asserts the published widths:
@@ -38,7 +38,7 @@ void Check(bool ok, std::string const &what)
 }
 
 constexpr char const *kScene =
-    USDGEN_TEST_SOURCE_DIR "/plan/examples/expression-width-plane.usda";
+    USDGEN_TEST_SOURCE_DIR "/examples/expression-width-plane.usda";
 constexpr char const *kDescription = "/World/Groom/Fur";
 constexpr char const *kWidthExpression = "/World/Groom/Fur/Expressions/rootTipWidth";
 

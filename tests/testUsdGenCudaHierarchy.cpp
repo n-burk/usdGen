@@ -44,7 +44,7 @@ public:
 
 int main() {
     auto stage = UsdStage::Open(std::string(USDGEN_TEST_SOURCE_DIR) +
-        "/plan/examples/cuda-width-network.usda");
+        "/examples/cuda-width-network.usda");
     CHECK(stage);
     UsdImagingCreateSceneIndicesInfo info; info.stage = stage;
     auto indices = UsdImagingCreateSceneIndices(info);
@@ -100,7 +100,7 @@ int main() {
     CHECK(currentGeneration && currentGeneration != generation && currentGeneration->device &&
           currentGeneration->device->Geometry().alreadyDeformed);
     auto rbfStage = UsdStage::Open(std::string(USDGEN_TEST_SOURCE_DIR) +
-        "/plan/examples/cuda-rbf-network.usda");
+        "/examples/cuda-rbf-network.usda");
     CHECK(rbfStage);
     UsdImagingCreateSceneIndicesInfo rbfInfo; rbfInfo.stage = rbfStage;
     auto rbfIndices = UsdImagingCreateSceneIndices(rbfInfo);
@@ -199,7 +199,7 @@ int main() {
     CHECK(session.LastDiagnostics().HasErrors());
     rbfIndices.finalSceneIndex->RemoveObserver(observer);
     auto lengthStage = UsdStage::Open(std::string(USDGEN_TEST_SOURCE_DIR) +
-        "/plan/examples/cuda-length-network.usda");
+        "/examples/cuda-length-network.usda");
     CHECK(lengthStage);
     UsdImagingCreateSceneIndicesInfo lengthInfo; lengthInfo.stage = lengthStage;
     auto lengthIndices = UsdImagingCreateSceneIndices(lengthInfo);

@@ -2,6 +2,8 @@
 #define USDGEN_EXPRESSIONS_IR_H
 #include "usdGen/expressions/context.h"
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 namespace usdGen::expr {
 // Appended only: the numeric values are the uploaded device instruction
@@ -16,9 +18,17 @@ namespace usdGen::expr {
 //                   b = number of registers in that block
 //                   c = the IRFunc to run
 //                   component = which component of a vector-valued builtin
+//   Sample          a/b = the argument block, exactly as for Call
+//                   c = the slot in IRProgram::samplers
+//                   component = which component of the sampled value
+//                   Host lane only: it reads external data (geometry, maps)
+//                   through the evaluator's sampler table. The device has no
+//                   such table, so CUDA admission refuses any program that
+//                   contains one (IRProgram::samplers is non-empty).
 enum class IROp : uint8_t { Const, LoadVariable, Add, Sub, Mul, Div, Neg, Compare, Select, Min, Max, Clamp, Abs, Sin, Cos, Pow,
                             Sqrt, Exp, Log, Floor, Ceil, Fmod, Tan, Atan2,
-                            Move, Asin, Acos, Atan, Sinh, Cosh, Tanh, Log10, Cbrt, Round, Trunc, Hypot, Call };
+                            Move, Asin, Acos, Atan, Sinh, Cosh, Tanh, Log10, Cbrt, Round, Trunc, Hypot, Call,
+                            Sample };
 
 /// The SeExpr2 builtins that IROp::Call dispatches to. Every one of them has a
 /// single `__host__ __device__` implementation in expressions/exprMath.h, so
@@ -168,6 +178,71 @@ inline const char *IRFuncName(IRFunc func) noexcept
 }
 
 struct IRInstruction { IROp op=IROp::Const; uint16_t dst=0,a=0,b=0,c=0; Variable variable=Variable::Invalid; double immediate=0; char compare=0; uint8_t component=0; };
-struct IRProgram { std::vector<IRInstruction> instructions; uint16_t result=0; uint16_t output[4]{}; uint8_t outputCount=0; uint8_t valueComponents=1; uint16_t registerCount=0; bool hasLazyBranches=false; };
+
+struct IRProgram;
+
+/// What an IROp::Sample reads. Every string is a compile-time constant of the
+/// call site; the evaluator resolves `input` against the expression prim's
+/// `input:<name>` relationships.
+enum class SamplerKind : uint8_t {
+    Geometry,   // geoSampler(input, expression [, iterate [, reduce [, query]]])
+    Ptex        // ptex(input): a UsdGenPtexMap read at the strand root
+};
+/// Which elements of the input geometry a geoSampler() visits.
+enum class SampleIterate : uint8_t { Point, Prim, Geometry };
+/// How a geoSampler() folds the per-element values into one.
+enum class SampleReduce : uint8_t {
+    Nearest,    // the element nearest the query position
+    Nearest2,   // the second-nearest element (voronoi borders: f2 - f1)
+    Min, Max, Sum, Mean
+};
+struct IRSampler {
+    SamplerKind kind = SamplerKind::Geometry;
+    std::string input;                     // name of the input:<name> relationship
+    std::string source;                    // geometry: the per-element expression
+    SampleIterate iterate = SampleIterate::Prim;
+    SampleReduce reduce = SampleReduce::Nearest;
+    uint8_t components = 1;                // width of the sampled value (1 or 3)
+    // Geometry: the element expression, compiled at point rate with $Q/$Qdist
+    // admitted. Shared, immutable.
+    std::shared_ptr<const IRProgram> element;
+};
+const char *SampleIterateName(SampleIterate iterate) noexcept;
+const char *SampleReduceName(SampleReduce reduce) noexcept;
+
+struct IRProgram {
+    std::vector<IRInstruction> instructions;
+    uint16_t result=0;
+    uint16_t output[4]{};
+    uint8_t outputCount=0;
+    uint8_t valueComponents=1;
+    uint16_t registerCount=0;
+    bool hasLazyBranches=false;
+    // One entry per distinct sampler call site (IROp::Sample's c). Empty for
+    // every program the device lane can run.
+    std::vector<IRSampler> samplers;
+};
+
+inline const char *SampleIterateName(SampleIterate iterate) noexcept
+{
+    switch (iterate) {
+    case SampleIterate::Point: return "point";
+    case SampleIterate::Prim: return "prim";
+    case SampleIterate::Geometry: return "geometry";
+    }
+    return "";
+}
+inline const char *SampleReduceName(SampleReduce reduce) noexcept
+{
+    switch (reduce) {
+    case SampleReduce::Nearest: return "nearest";
+    case SampleReduce::Nearest2: return "nearest2";
+    case SampleReduce::Min: return "min";
+    case SampleReduce::Max: return "max";
+    case SampleReduce::Sum: return "sum";
+    case SampleReduce::Mean: return "mean";
+    }
+    return "";
+}
 }
 #endif

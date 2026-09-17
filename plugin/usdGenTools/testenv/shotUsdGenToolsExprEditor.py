@@ -2,12 +2,12 @@
 #
 # Not a ctest: it exists so the dock can be looked at without an interactive
 # session, which `bin/launch_usdview.ps1` needs and CI cannot give. It opens
-# the dock against plan/examples/expression-width-plane.usda, connects the
+# the dock against examples/expression-width-plane.usda, connects the
 # Width operator's usdGen:width to a new expression, and writes a PNG of each
 # panel.
 #
 #   testusdview --testScript plugin/usdGenTools/testenv/shotUsdGenToolsExprEditor.py \
-#               plan/examples/expression-width-plane.usda
+#               examples/expression-width-plane.usda
 #
 # with the same PXR_PLUGINPATH_NAME / PYTHONPATH the T2 test uses. The output
 # directory comes from USDGEN_SHOT_DIR, defaulting to the working directory.

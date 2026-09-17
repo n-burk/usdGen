@@ -1348,11 +1348,48 @@ is the whole reason expressions are capture-time.
 > | `color` | `hsi hsltorgb midhsi rgbtohsl saturate` |
 > | `curve` | `ccurve curve spline` |
 > | `control` | `choose pick wchoose` |
+> | `sampling` | `geoSampler ptex` (CPU lane only) |
+>
+> **Sampling (2026-09-16).** An expression reads data outside its own strand
+> only through a relationship on its `UsdGenExpression` prim named
+> `input:<name>`, and names it by that string:
+> `geoSampler("<name>", "<element expression>" [, iterate [, reduce [, query]]])`
+> iterates the `point`/`prim`/`geometry` elements of the meshes, curves and
+> points the relationship targets (a group prim contributes the gprims below
+> it), evaluates the one-line element expression with the element's own
+> variables plus `$Q`/`$Qdist`, and reduces with `nearest`, `nearest2`, `min`,
+> `max`, `sum` or `mean` about the query (default `$P`); `ptex("<name>")`
+> reads the `UsdGenPtexMap` it targets at the strand root, applying
+> `usdGen:map:channel/scale/offset/clamp/default`. The frontend lowers each
+> call site to `IROp::Sample` with its constant strings in
+> `IRProgram::samplers`; `UsdGenCpuParameters` resolves the slots against the
+> descriptor's `UsdGenExpressionInputDesc` / `UsdGenGeometryDesc` pools
+> (`libs/usdGen/usdGen/expressions/samplers.{h,cpp}`); CUDA admission refuses
+> any program with a sampler. The targets are recorded as scene-index
+> dependencies of the description and as `geometryRefs` in the routing table,
+> so an edit of a sampled prim, or a retarget of the relationship, recooks the
+> consumer. Examples: `examples/guide-interpolate-plane.usda`,
+> `examples/clump-ptex-plane.usda`.
+>
+> **Value preview (2026-09-16).** `usdGen:preview:source` on a
+> `UsdGenDescription` (with `colorMap`, `range`, `evaluation`, `shading`)
+> replaces the published `displayColor` with a colour-mapped value and binds
+> the synthetic `__usdGenRender/material_preview[_flat]` (the
+> `UsdGenValuePreview` glslfx, which shows `displayColor` unmodified) over any
+> authored material. The source is a `UsdGenExpression` (evaluated over the
+> terminal strands), a `UsdGenPtexMap` (a private `ptex("map")` expression; the
+> builders add the map to `maps`), or an operator attribute (the node's
+> `UsdGenCpuParameters` values over its input strands, matched to the terminal
+> by curve id, else its authored literal). `libs/usdGen/usdGen/valuePreview.
+> {h,cpp}`; the session cooker folds a colour digest into the generation so a
+> preview edit rebuilds tiles whose geometry did not move. CPU lane only;
+> never fails a cook (problems are warnings, strands show the no-value
+> colour). The SeExpr editor authors it in the session layer
+> (`plugin/usdGenTools/python/usdGenTools/exprPreview.py`).
 >
 > **Omitted, each with its own diagnostic rather than the generic list:**
-> `printf`/`sprintf` (no output from a cooked groom); `map`/`ptex`/`texture`
-> (image maps are not yet available in a runtime expression — this is the §7
-> map language's job and it is not wired to the runtime lane yet);
+> `printf`/`sprintf` (no output from a cooked groom); `map`/`texture`
+> (image maps other than Ptex are not yet available in a runtime expression);
 > `file`/`system`/`exec`; `def` user functions; `swatch` (an alias for
 > `choose`); and the 4D noise spellings `noise(x,y)`, `snoise4`, `vnoise4`,
 > `cnoise4`, `fbm4`, `vfbm4`, `cfbm4` — usdGen vendors the 3D gradient table

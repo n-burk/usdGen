@@ -16,6 +16,8 @@
 #include "usdGen/ops/curveSource.h"
 #include "usdGen/ops/deform.h"
 #include "usdGen/ops/referenceSource.h"
+#include "usdGen/ops/clump.h"
+#include "usdGen/ops/guideInterpolate.h"
 
 #include "pxr/pxr.h"
 
@@ -99,10 +101,12 @@ std::unique_ptr<UsdGenOp> CreateWidthBlendOp() { return std::make_unique<UsdGenW
 std::unique_ptr<UsdGenOp> CreateCurveSourceOp() { return std::make_unique<UsdGenCurveSourceOp>(); }
 std::unique_ptr<UsdGenOp> CreateDeformOp()    { return std::make_unique<UsdGenDeformOp>(); }
 std::unique_ptr<UsdGenOp> CreateReferenceSourceOp() { return std::make_unique<UsdGenReferenceSourceOp>(); }
+std::unique_ptr<UsdGenOp> CreateClumpOp() { return std::make_unique<UsdGenClumpOp>(); }
+std::unique_ptr<UsdGenOp> CreateGuideInterpolateOp() { return std::make_unique<UsdGenGuideInterpolateOp>(); }
 
 UsdGenOpRegistry::UsdGenOpRegistry()
 {
-    _entries.reserve(9);
+    _entries.reserve(11);
     Register(TfToken("UsdGenScatter"), &CreateScatterOp);
     Register(TfToken("UsdGenGrow"), &CreateGrowOp);
     Register(TfToken("UsdGenNoise"), &CreateNoiseOp);
@@ -112,6 +116,9 @@ UsdGenOpRegistry::UsdGenOpRegistry()
     Register(TfToken("UsdGenCurveSource"), &CreateCurveSourceOp);
     Register(TfToken("UsdGenDeform"), &CreateDeformOp);
     Register(TfToken("UsdGenReferenceSource"), &CreateReferenceSourceOp);
+    // CPU reference lane only; CUDA admission refuses both by type.
+    Register(TfToken("UsdGenClump"), &CreateClumpOp);
+    Register(TfToken("UsdGenGuideInterpolate"), &CreateGuideInterpolateOp);
 }
 
 void usdGenRegisterM1Operators() { (void)UsdGenOpRegistry::Get(); }
