@@ -60,7 +60,7 @@ Render $headHair "head-hair-closeup" "/World/HeadCam" "head" -NoCameraLight
 Render (Join-Path $examples "styled-fur-plane.usda") "styled-fur-plane" "/World/Cam" "cam"
 
 # metahuman-hair-parity-render.usda sublayers metahuman-hair-parity.usda
-# (which in turn sublayers plan/examples/metahuman-hair/male_hair_01/hair.usda
+# (which in turn sublayers examples/production/metahuman-hair/male_hair_01/hair.usda
 # without modifying it) and adds the backdrop sphere, same reasoning as
 # head-hair-closeup-render.usda. Its Groom/cameras/lights are NOT under
 # /World (see make_metahuman_parity.py), so the camera paths here are at the

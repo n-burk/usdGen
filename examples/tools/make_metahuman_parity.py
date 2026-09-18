@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Writes examples/metahuman-hair-parity.usda: routes the real, converted
-MetaHuman groom in plan/examples/metahuman-hair/male_hair_01/ through usdGen
+MetaHuman groom in examples/production/metahuman-hair/male_hair_01/ through usdGen
 (UsdGenCurveSource reading its native BasisCurves) so the strands get the
 default UsdGenHairStrands material, the furTauP/N density bake and the
 synthetic scalp shadow, instead of the flat UsdPreviewSurface preview that
-asset ships with. Does not modify anything under plan/examples/.
+asset ships with. Does not modify anything under examples/production/.
 
     python examples/tools/make_metahuman_parity.py
 
@@ -19,7 +19,7 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES = os.path.dirname(HERE)
-SOURCE_ASSET = "../plan/examples/metahuman-hair/male_hair_01/hair.usda"
+SOURCE_ASSET = "./production/metahuman-hair/male_hair_01/hair.usda"
 
 
 def fmt(v):
@@ -117,7 +117,7 @@ def arr(values, per_line=6, indent="        "):
 
 
 # World-space (post /World transform: Z-up, cm) bounding boxes, measured with
-# UsdGeom.BBoxCache against plan/examples/metahuman-hair/male_hair_01/hair.usda:
+# UsdGeom.BBoxCache against examples/production/metahuman-hair/male_hair_01/hair.usda:
 #   Scalp X [-14.94, 14.94]  Y [-12.69, 8.32]  Z [124.26, 159.73]
 #   Hair  X [-8.45, 8.38]    Y [-9.60, 8.90]   Z [136.68, 160.51]
 # Face/front is toward -Y (the existing preview Cam sits at y=-110 looking
@@ -182,11 +182,11 @@ scene.append('        @%s@' % SOURCE_ASSET)
 scene.append('    ]')
 scene.append(')')
 scene.append('')
-scene.append('# Routes plan/examples/metahuman-hair/male_hair_01/hair.usda\'s converted')
+scene.append('# Routes examples/production/metahuman-hair/male_hair_01/hair.usda\'s converted')
 scene.append('# strands through usdGen instead of the flat UsdPreviewSurface preview that')
 scene.append('# asset ships with, so they get the default UsdGenHairStrands material, the')
 scene.append('# furTauP/N density bake and the synthetic scalp shadow. Nothing under')
-scene.append('# plan/examples/ is modified -- this sublayers it and overrides in place.')
+scene.append('# examples/production/ is modified -- this sublayers it and overrides in place.')
 scene.append('#')
 scene.append('# /World/Hair (the original BasisCurves) is kept ACTIVE (usdGen:curves reads')
 scene.append('# it live) but set invisible and stripped of its HairPreviewSurface binding,')
