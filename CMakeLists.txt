@@ -684,6 +684,7 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
         libs/usdGen/usdGen/vulkan/topologyPipeline.cpp
         libs/usdGen/usdGen/vulkan/pointOverridePipeline.cpp
         libs/usdGen/usdGen/vulkan/curveGrowPipeline.cpp
+        libs/usdGen/usdGen/vulkan/scatterGrowPipeline.cpp
         libs/usdGen/usdGen/vulkan/rootFramesPipeline.cpp
         libs/usdGen/usdGen/vulkan/rootFrameGatherPipeline.cpp
         libs/usdGen/usdGen/vulkan/noisePipeline.cpp
@@ -774,6 +775,14 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
             "${_usdgen_vulkan_grow_shader}" -o "${_usdgen_vulkan_grow_spv}"
         COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_grow_spv}"
         DEPENDS "${_usdgen_vulkan_grow_shader}" VERBATIM)
+    set(_usdgen_vulkan_scatter_grow_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/scatterGrow.comp")
+    set(_usdgen_vulkan_scatter_grow_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/scatterGrow.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_scatter_grow_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_scatter_grow_shader}" -o "${_usdgen_vulkan_scatter_grow_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_scatter_grow_spv}"
+        DEPENDS "${_usdgen_vulkan_scatter_grow_shader}" VERBATIM)
     set(_usdgen_vulkan_rfval_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/rootFramesValidate.comp")
     set(_usdgen_vulkan_rfval_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/rootFramesValidate.spv")
     add_custom_command(OUTPUT "${_usdgen_vulkan_rfval_spv}"
@@ -995,6 +1004,12 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     add_test(NAME testUsdGenVulkanCurveGrowPipelineQuarantine COMMAND testUsdGenVulkanCurveGrowPipeline "${_usdgen_vulkan_grow_spv}" --quarantine)
     set_tests_properties(testUsdGenVulkanCurveGrowPipelineQuarantine PROPERTIES
         LABELS "T1;vulkan;operators;grow;quarantine" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanScatterGrowPipeline tests/testUsdGenVulkanScatterGrowPipeline.cpp "${_usdgen_vulkan_scatter_grow_spv}")
+    target_link_libraries(testUsdGenVulkanScatterGrowPipeline PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanScatterGrowPipeline COMMAND testUsdGenVulkanScatterGrowPipeline "${_usdgen_vulkan_scatter_grow_spv}")
+    set_tests_properties(testUsdGenVulkanScatterGrowPipeline PROPERTIES
+        LABELS "T1;vulkan;operators;scatterGrow" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanRootFrames tests/testUsdGenVulkanRootFrames.cpp
         "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}")

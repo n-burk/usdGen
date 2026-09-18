@@ -1,0 +1,141 @@
+#version 450
+// ScatterGrow: roots-only geometry producer, one thread per curve,
+// mirroring gpu/scatterGrow.cu GrowKernel.  The per-curve target length is
+// precomputed host-side (ScatterGrowPipeline::BuildTargets) because the device
+// was created without shaderFloat64; the shader reads that float32 target
+// plane and reproduces CUDA's arithmetic in float32 only.
+//
+// Descriptor set 0 (std430, geometry planes are flat float[] with 3*i
+// indexing to match packed CUDA float3; uvec2[] matches packed uint64 ids):
+//   read:  0 root positions   1 rootT   2 rootB   3 rootN
+//          4 stableIds (uvec2[])   5 rootPrim (int[])   6 rootUV (float[2*c])
+//          7 precomputedTargets (float[c])
+//   write: 8 output points   9 output rest   10 output widths   11 hairT
+//         12 output offsets (uint[])  13 output ids (uvec2[])  14 output rootPrim
+//         15 output rootUV  16 output rootT  17 output rootB  18 output rootN
+//         19 status (atomic uint, single first-writer atomicCAS per branch)
+//
+// Push constants (9 words, 36 bytes; std430 alignment is 4-byte here):
+//   curveCount u32 pointCount u32 cvCount u32 direction u32
+//   lift f32 fallbackWidth f32 litDirX f32 litDirY f32 litDirZ f32
+// Workgroup size 256.
+layout(local_size_x = 256) in;
+
+layout(set=0,binding=0,std430) readonly buffer IPoints  { float v[]; } inPoints;
+layout(set=0,binding=1,std430) readonly buffer IT       { float v[]; } inT;
+layout(set=0,binding=2,std430) readonly buffer IB       { float v[]; } inB;
+layout(set=0,binding=3,std430) readonly buffer IN       { float v[]; } inN;
+layout(set=0,binding=4,std430) readonly buffer IIds     { uvec2 v[]; } inIds;
+layout(set=0,binding=5,std430) readonly buffer IPrim    { int v[]; } inPrim;
+layout(set=0,binding=6,std430) readonly buffer IUV      { float v[]; } inUV;
+layout(set=0,binding=7,std430) readonly buffer ITarget  { float v[]; } inTarget;
+layout(set=0,binding=8,std430) buffer OPoints  { float v[]; } outPoints;
+layout(set=0,binding=9,std430) buffer ORest    { float v[]; } outRest;
+layout(set=0,binding=10,std430) buffer OWidths  { float v[]; } outWidths;
+layout(set=0,binding=11,std430) buffer OHairT   { float v[]; } outHairT;
+layout(set=0,binding=12,std430) buffer OOffsets { uint v[]; } outOffsets;
+layout(set=0,binding=13,std430) buffer OIds     { uvec2 v[]; } outIds;
+layout(set=0,binding=14,std430) buffer OPrim    { int v[]; } outPrim;
+layout(set=0,binding=15,std430) buffer OUV      { float v[]; } outUV;
+layout(set=0,binding=16,std430) buffer OT       { float v[]; } outT;
+layout(set=0,binding=17,std430) buffer OB       { float v[]; } outB;
+layout(set=0,binding=18,std430) buffer ON       { float v[]; } outN;
+layout(set=0,binding=19,std430) buffer Status   { uint err; } status;
+
+layout(push_constant) uniform C {
+    uint curveCount; uint pointCount; uint cvCount; uint direction;
+    float lift; float fallbackWidth;
+    float litDirX; float litDirY; float litDirZ;
+} c;
+
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite3(float x, float y, float z) { return finite(x) && finite(y) && finite(z); }
+
+void fail(uint code) { atomicCompSwap(status.err, 0u, code); }
+
+// CUDA SplitMix64-derived Normalize: dot, then sqrt and per-component
+// division (never rsqrt/reciprocal-multiply, which changes oracle bits).
+void normalize3(float x, float y, float z, out float ox, out float oy, out float oz) {
+    float l2 = x*x + y*y + z*z;
+    if (!(l2 > 1.0e-24f) || !finite(l2)) { ox = 0.0; oy = 1.0; oz = 0.0; return; }
+    float length = sqrt(l2);
+    ox = x/length; oy = y/length; oz = z/length;
+}
+
+// CUDA RotateAroundB: axis normalized internally, then Rodrigues.
+void rotateAroundB(float dx, float dy, float dz,
+                   float ax, float ay, float az, float degrees,
+                   out float ox, out float oy, out float oz) {
+    if (degrees == 0.0f) { ox = dx; oy = dy; oz = dz; return; }
+    float nx, ny, nz; normalize3(ax, ay, az, nx, ny, nz);
+    const float pi = 3.14159265358979323846f;
+    float radians = degrees * (pi / 180.0f);
+    float ccos = cos(radians), ssin = sin(radians);
+    float dot = nx*dx + ny*dy + nz*dz;
+    float cx = ny*dz - nz*dy;
+    float cy = nz*dx - nx*dz;
+    float cz = nx*dy - ny*dx;
+    float oneMinusC = 1.0f - ccos;
+    ox = dx*ccos + cx*ssin + nx*dot*oneMinusC;
+    oy = dy*ccos + cy*ssin + ny*dot*oneMinusC;
+    oz = dz*ccos + cz*ssin + nz*dot*oneMinusC;
+}
+
+void grow(uint cid) {
+    uint r = 3u * cid;
+    // Input finite scan (CUDA validate + kernel pre-checks).
+    if (!finite3(inPoints.v[r], inPoints.v[r+1u], inPoints.v[r+2u])) { fail(2u); return; }
+    float tx = inT.v[r], ty = inT.v[r+1u], tz = inT.v[r+2u];
+    float bx = inB.v[r], by = inB.v[r+1u], bz = inB.v[r+2u];
+    float nx = inN.v[r], ny = inN.v[r+1u], nz = inN.v[r+2u];
+    if (!finite3(tx, ty, tz) || !finite3(bx, by, bz) || !finite3(nx, ny, nz)) {
+        fail(2u); return;
+    }
+    // Direction selection: RootNormal(0), RootTangent(1), Literal(2).
+    float dx = c.direction == 1u ? tx : (c.direction == 2u ? c.litDirX : nx);
+    float dy = c.direction == 1u ? ty : (c.direction == 2u ? c.litDirY : ny);
+    float dz = c.direction == 1u ? tz : (c.direction == 2u ? c.litDirZ : nz);
+    float vx, vy, vz, wx, wy, wz;
+    normalize3(dx, dy, dz, vx, vy, vz);
+    rotateAroundB(vx, vy, vz, bx, by, bz, c.lift, wx, wy, wz);
+    if (!finite3(wx, wy, wz)) { fail(2u); return; }
+    // Target is host-precomputed (CUDA double math lives in BuildTargets).
+    float target = inTarget.v[cid];
+    if (!finite(target)) { fail(2u); return; }
+    // Offsets (CUDA: offsets[c] = c*cvCount; last entry set by last curve).
+    outOffsets.v[cid] = cid * c.cvCount;
+    if (cid == c.curveCount - 1u) outOffsets.v[c.curveCount] = c.curveCount * c.cvCount;
+    uint first = cid * c.cvCount;
+    for (uint i = 0u; i < c.cvCount; ++i) {
+        float t = float(i) / float(c.cvCount - 1u);
+        float d = target * t;
+        if (!finite(d)) { fail(2u); return; }
+        uint o = 3u * (first + i);
+        float opx = inPoints.v[r]   + wx * d;
+        float opy = inPoints.v[r+1u] + wy * d;
+        float opz = inPoints.v[r+2u] + wz * d;
+        if (!finite3(opx, opy, opz)) { fail(2u); return; }
+        // points and rest are identical (new straight curve, no existing
+        // rest shape to interpolate toward).
+        outPoints.v[o] = opx; outPoints.v[o+1u] = opy; outPoints.v[o+2u] = opz;
+        outRest.v[o]   = opx; outRest.v[o+1u]   = opy; outRest.v[o+2u]   = opz;
+        outWidths.v[first + i] = c.fallbackWidth;
+        outHairT.v[first + i]  = t;
+    }
+    // Copy-through (CUDA L122-123).
+    outIds.v[cid] = inIds.v[cid];
+    outPrim.v[cid] = inPrim.v[cid];
+    uint uv = 2u * cid;
+    outUV.v[uv]     = inUV.v[uv];
+    outUV.v[uv + 1u] = inUV.v[uv + 1u];
+    outT.v[r]     = tx; outT.v[r+1u] = ty; outT.v[r+2u] = tz;
+    outB.v[r]     = bx; outB.v[r+1u] = by; outB.v[r+2u] = bz;
+    outN.v[r]     = nx; outN.v[r+1u] = ny; outN.v[r+2u] = nz;
+}
+
+void main() {
+    uint cid = gl_GlobalInvocationID.x;
+    if (cid >= c.curveCount) return;
+    if (status.err != 0u) return;
+    grow(cid);
+}
