@@ -39,9 +39,8 @@ class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
     """SeExpr highlighting: $variables, functions, numbers, operators,
     # comments and string literals.
 
-    String literals are highlighted and marked as rejected rather than left
-    plain: the engine refuses them, and seeing that at the point of typing is
-    more useful than seeing nothing."""
+    String literals are legal only as the names and element expression of
+    geoSampler()/ptex(); anywhere else the compile diagnostic says so."""
 
     def __init__(self, document):
         super(ExpressionHighlighter, self).__init__(document)
@@ -56,7 +55,7 @@ class ExpressionHighlighter(QtGui.QSyntaxHighlighter):
             "number": _format(COLOR_NUMBER),
             "operator": _format(COLOR_OPERATOR),
             "comment": _format(COLOR_COMMENT, italic=True),
-            "string": _format(COLOR_STRING, italic=True, underline=wavy),
+            "string": _format(COLOR_STRING, italic=True),
         }
 
     def setVocabulary(self, variableNames, functionNames):

@@ -23,6 +23,7 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/trace/trace.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -214,9 +215,37 @@ bool ValidateExpressionBindings(UsdGenGraphDesc const &desc,
         }
     }
     std::set<SdfPath> expressionPaths;
+    std::set<SdfPath> geometryPaths, mapPaths;
+    for (auto const &g : desc.geometries) {
+        if (g.path.IsEmpty() || !geometryPaths.insert(g.path).second) {
+            result.errors.push_back("invalid or duplicate expression geometry " + g.path.GetString());
+            ok = false;
+        }
+    }
+    for (auto const &m : desc.maps) mapPaths.insert(m.path);
     for (auto const &e : desc.expressions) {
         if (e.path.IsEmpty() || e.source.empty() || !expressionPaths.insert(e.path).second) {
             result.errors.push_back("expression has missing path or source"); ok = false;
+        }
+        std::set<TfToken> inputNames;
+        for (auto const &input : e.inputs) {
+            if (input.name.IsEmpty() || !inputNames.insert(input.name).second) {
+                result.errors.push_back("expression " + e.path.GetString() +
+                    " has an empty or duplicate input:" + input.name.GetString());
+                ok = false;
+            }
+            for (SdfPath const &g : input.geometries)
+                if (!geometryPaths.count(g)) {
+                    result.errors.push_back("expression " + e.path.GetString() + " input:" +
+                        input.name.GetString() + " names unresolved geometry " + g.GetString());
+                    ok = false;
+                }
+            for (SdfPath const &m : input.maps)
+                if (!mapPaths.count(m)) {
+                    result.errors.push_back("expression " + e.path.GetString() + " input:" +
+                        input.name.GetString() + " names unresolved map " + m.GetString());
+                    ok = false;
+                }
         }
         std::set<TfToken> seen;
         for (auto const &o : e.outputs)
@@ -587,7 +616,19 @@ const TfToken t{"input"},
     lengthMethod{"length:method"}, rebuild{"rebuild"}, replace{"replace"},
     lengthMode{"length:mode"}, cullThreshold{"cullThreshold"},
     grow{"UsdGenGrow"}, length{"UsdGenLength"},
-    width{"UsdGenWidth"};
+    width{"UsdGenWidth"}, clump{"UsdGenClump"},
+    clumpLevel{"clump:level"}, clumpLevels{"clump:levels"},
+    curl{"UsdGenCurl"}, bend{"UsdGenBend"}, part{"UsdGenPart"},
+    axisMode{"axisMode"}, partCurves{"part:curves"},
+    directionOp{"UsdGenDirection"}, smooth{"UsdGenSmooth"},
+    resample{"UsdGenResample"}, displace{"UsdGenDisplace"},
+    mode{"mode"}, directionSource{"direction:source"},
+    displaceMap{"displace:map"}, distribution{"distribution"},
+    sculpt{"UsdGenSculptLayer"}, sculptSpace{"sculpt:space"},
+    exprOp{"UsdGenExprOp"}, exprMaps{"expr:maps"},
+    exprReturnType{"expr:returnType"},
+    freeze{"UsdGenFreeze"}, frozenMode{"frozen:mode"},
+    frozenCurves{"frozen:curves"};
 }
 const TfToken &T() { return t; }
 const TfToken &Guides() { return guides; }
@@ -605,6 +646,30 @@ const TfToken &CullThreshold() { return cullThreshold; }
 const TfToken &Grow() { return grow; }
 const TfToken &Length() { return length; }
 const TfToken &Width() { return width; }
+const TfToken &Clump() { return clump; }
+const TfToken &ClumpLevel() { return clumpLevel; }
+const TfToken &ClumpLevels() { return clumpLevels; }
+const TfToken &Curl() { return curl; }
+const TfToken &Bend() { return bend; }
+const TfToken &Part() { return part; }
+const TfToken &AxisMode() { return axisMode; }
+const TfToken &PartCurves() { return partCurves; }
+const TfToken &DirectionOp() { return directionOp; }
+const TfToken &Smooth() { return smooth; }
+const TfToken &Resample() { return resample; }
+const TfToken &Displace() { return displace; }
+const TfToken &Mode() { return mode; }
+const TfToken &DirectionSource() { return directionSource; }
+const TfToken &DisplaceMap() { return displaceMap; }
+const TfToken &Distribution() { return distribution; }
+const TfToken &Sculpt() { return sculpt; }
+const TfToken &SculptSpace() { return sculptSpace; }
+const TfToken &ExprOp() { return exprOp; }
+const TfToken &ExprMaps() { return exprMaps; }
+const TfToken &ExprReturnType() { return exprReturnType; }
+const TfToken &Freeze() { return freeze; }
+const TfToken &FrozenMode() { return frozenMode; }
+const TfToken &FrozenCurves() { return frozenCurves; }
 }  // namespace tok
 
 /// §6.1: this parameter is a term of the node's Merkle structural digest
@@ -617,6 +682,39 @@ bool IsDigestParam(TfToken const &type, TfToken const &param)
         return param == tok::LengthMethod() || param == tok::Rebuild();
     if (type == tok::Width())
         return param == tok::Replace();
+    // Clump's emitted plane names (clumpId_<level>...) follow these two.
+    if (type == tok::Clump())
+        return param == tok::ClumpLevel() || param == tok::ClumpLevels();
+    // Curl/Bend select their kernel frame via axisMode; Part's parting set is
+    // a graph edge (02 §2.7.2 structural rows).
+    if (type == tok::Curl() || type == tok::Bend())
+        return param == tok::AxisMode();
+    if (type == tok::Part())
+        return param == tok::PartCurves();
+    // Direction/Smooth/Displace select kernel branches via mode; the
+    // direction:source graph edge and the displace:map dependency are
+    // structural like part:curves; Resample's distribution reselects the
+    // resampling kernel (cvCount stays capture-class: same recompile-free
+    // recapture as Grow's segments).
+    if (type == tok::DirectionOp())
+        return param == tok::Mode() || param == tok::DirectionSource();
+    if (type == tok::Smooth())
+        return param == tok::Mode();
+    if (type == tok::Displace())
+        return param == tok::Mode() || param == tok::DisplaceMap();
+    if (type == tok::Resample())
+        return param == tok::Distribution();
+    // SculptLayer's delta frame, ExprOp's program identity (mode, the maps
+    // edge and the write target) and Freeze's snapshot identity (mode plus
+    // the frozen:curves edge, a part:curves-style graph edge) reselect the
+    // kernel branch or the captured source: structural like the rows above.
+    if (type == tok::Sculpt())
+        return param == tok::SculptSpace();
+    if (type == tok::ExprOp())
+        return param == tok::Mode() || param == tok::ExprMaps() ||
+            param == tok::ExprReturnType();
+    if (type == tok::Freeze())
+        return param == tok::FrozenMode() || param == tok::FrozenCurves();
     return false;
 }
 
@@ -711,6 +809,7 @@ TypeClassTable const &TypeClassification(UsdGenOp const &op)
 
 UsdGenCompileResult UsdGenCompiler::Compile(UsdGenGraphDesc const &desc, UsdGenGraph *out)
 {
+    TRACE_FUNCTION();
     UsdGenCompileResult result;
     if (!ValidateExpressionBindings(desc, result)) return result;
     UsdGenGraph candidate;
@@ -1232,7 +1331,8 @@ void UsdGenCompiler::_Build(
     std::vector<int> oldNodeForNewDesc(desc.nodes.size(), -1);
     // entries copy from the input. Entry ORDER follows the input (S26).
     // Identity is positional (nodeByDesc) with a linear-scan fallback.
-    static_assert(sizeof(UsdGenGraphDesc) == 512,
+    static_assert(sizeof(UsdGenGraphDesc) ==
+                      512 + sizeof(std::vector<UsdGenGeometryDesc>) + sizeof(UsdGenPreviewDesc),
         "UsdGenGraphDesc changed size: update the Recompile shell merge below");
     {
         auto fresh = std::make_unique<UsdGenGraphDesc>();
@@ -1242,9 +1342,11 @@ void UsdGenCompiler::_Build(
         fresh->surfaces = desc.surfaces;
         fresh->maps = desc.maps;
         fresh->expressions = desc.expressions;
+        fresh->geometries = desc.geometries;
         fresh->validationErrors = desc.validationErrors;
         fresh->executionBackend = desc.executionBackend;
         fresh->look = desc.look;
+        fresh->preview = desc.preview;
         fresh->xformMatrix = desc.xformMatrix;
         fresh->purpose = desc.purpose;
         fresh->visibility = desc.visibility;
@@ -1442,6 +1544,12 @@ void UsdGenCompiler::_Build(
             return;
         }
         node->op = std::move(op);
+        // Parameter view over the graph's desc copy. Set before the slots
+        // are bound: an operator may name its planes from its parameters.
+        node->paramView.desc = out->_desc.get();
+        node->paramView.node = &out->_desc->nodes[di];
+        node->paramView.expressions = &node->expressions;
+        node->op->Configure(node->paramView);
         if (!BindExtraPlaneSlots(*node->op, node.get(), &result)) return;
 
         node->topoFx = node->op->TopologyEffect();
@@ -1457,11 +1565,6 @@ void UsdGenCompiler::_Build(
         // Keep dense IDs in the same authored order as UsdGenNodeDesc::inputs;
         // WidthBlend's ordered operands depend on this correspondence.
         node->input = node->inputs.empty() ? kUsdGenInvalidNode : node->inputs.front();
-
-        // Parameter view over the graph's desc copy.
-        node->paramView.desc = out->_desc.get();
-        node->paramView.node = &out->_desc->nodes[di];
-        node->paramView.expressions = &node->expressions;
 
         // Relationship targets.
         node->curveRefs = nd.curves;
@@ -1595,6 +1698,24 @@ void UsdGenCompiler::_Build(
         UsdGenCompiledNode &node = *nodePtr;
         node.referenceValues.clear();
         node.mapValues.clear();
+        // Everything a connected expression samples (geoSampler/ptex inputs):
+        // an edit there re-evaluates this node, like a curve or map edit.
+        node.geometryRefs.clear();
+        for (UsdGenExpressionBinding const &binding : node.desc->expressionBindings) {
+            for (UsdGenExpressionDesc const &expression : out->_desc->expressions) {
+                if (expression.path != binding.expression) continue;
+                for (UsdGenExpressionInputDesc const &input : expression.inputs) {
+                    auto add = [&node](SdfPath const &path) {
+                        if (std::find(node.geometryRefs.begin(), node.geometryRefs.end(), path) ==
+                            node.geometryRefs.end())
+                            node.geometryRefs.push_back(path);
+                    };
+                    for (SdfPath const &path : input.targets) add(path);
+                    for (SdfPath const &path : input.geometries) add(path);
+                    for (SdfPath const &path : input.maps) add(path);
+                }
+            }
+        }
         if (node.desc->references.empty() && node.curveRefs.empty() &&
             node.mapBindingRefs.empty()) {
             // Static empty-slot validation completed before any old runtime

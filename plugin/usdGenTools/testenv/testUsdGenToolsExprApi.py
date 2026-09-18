@@ -13,7 +13,7 @@ import tempfile
 
 from pxr import Sdf, Usd
 
-from usdGenTools import exprApi, exprAuthor, exprLibrary
+from usdGenTools import exprApi, exprAuthor, exprLibrary, exprPreview
 
 FAILURES = []
 
@@ -238,6 +238,22 @@ def testAuthoring(stagePath):
     check(widthAttr.GetConnections() == [],
           "the outputs:result connection is gone")
 
+    # --- sampler inputs ---------------------------------------------------
+    check(exprAuthor.InputNames(
+              'geoSampler("guideCurves", "$index") + ptex(\'clumps\') + '
+              'geoSampler("guideCurves", "$Qdist")') == ["guideCurves", "clumps"],
+          "the sampled input names are found in first-use order")
+    created = exprAuthor.EnsureInputRelationships(
+        target, 'geoSampler("guideCurves", "$index")')
+    check(created == ["guideCurves"], "a missing input relationship is created")
+    check(bool(target.GetRelationship("input:guideCurves")),
+          "input:guideCurves exists on the expression prim")
+    check(exprAuthor.EnsureInputRelationships(
+              target, 'geoSampler("guideCurves", "$index")') == [],
+          "an existing input relationship is left alone")
+    check(exprAuthor.InputRelationships(target) == {"guideCurves": []},
+          "the input relationships are listed with their targets")
+
     # --- components -------------------------------------------------------
     check(exprAuthor.OutputComponents(Sdf.ValueTypeNames.Float) == 1,
           "a float destination needs one component")
@@ -275,6 +291,106 @@ def testSessionLayerEditTarget(stagePath):
 
 
 
+
+
+def _previewSpecs(layer, path):
+    spec = layer.GetPrimAtPath(path)
+    if spec is None:
+        return []
+    return sorted(name for name in spec.properties.keys()
+                  if name.startswith("usdGen:preview:"))
+
+
+def testPreviewAuthoring(stagePath):
+    """The hair colour preview is authored in the session layer whatever the
+    edit target is, and only there."""
+    stage = Usd.Stage.Open(stagePath)
+    root = stage.GetRootLayer()
+    session = stage.GetSessionLayer()
+    description = stage.GetPrimAtPath("/World/Groom/Fur")
+    expression = stage.GetPrimAtPath("/World/Groom/Fur/Expressions/rootTipWidth")
+    width = stage.GetPrimAtPath("/World/Groom/Fur/Ops/width").GetAttribute(
+        "usdGen:width")
+    frequency = stage.GetPrimAtPath("/World/Groom/Fur/Ops/frizz").GetAttribute(
+        "usdGen:noise:frequency")
+
+    check(not exprPreview.IsPreviewing(description),
+          "the example previews nothing")
+    state = exprPreview.PreviewState(description)
+    check((state["colorMap"], state["range"], state["evaluation"],
+           state["shading"]) == ("heat", (0.0, 1.0), "primitive", "lit"),
+          "the unauthored preview reads the schema fallbacks")
+
+    sources = exprPreview.SourcesFor(expression, width)
+    check([s.kind for s in sources] ==
+          [exprPreview.EXPRESSION, exprPreview.ATTRIBUTE],
+          "an expression offers itself and the attribute it drives")
+    check(sources[0].path == expression.GetPath() and
+          sources[1].path == width.GetPath() and
+          all(s.description == description.GetPath() for s in sources),
+          "each source names its path and the description it colours")
+    check("evaluated" in sources[1].label and
+          "authored value" in exprPreview.AttributeSource(frequency).label,
+          "an attribute source says whether it shows cooked or authored values")
+    check(exprPreview.DefaultEvaluation(width) == "point" and
+          exprPreview.DefaultEvaluation(None) == "primitive",
+          "a previewed expression is evaluated where its binding evaluates it")
+
+    # usdview's edit target is the session layer; a tool's may be the root.
+    stage.SetEditTarget(Usd.EditTarget(root))
+    check(exprPreview.SetPreview(description, expression.GetPath(), "viridis",
+                                 (0.0, 2.0), "point", "flat"),
+          "the preview is authored")
+    state = exprPreview.PreviewState(description)
+    check(state["source"] == expression.GetPath() and
+          state["colorMap"] == "viridis" and state["range"] == (0.0, 2.0) and
+          state["evaluation"] == "point" and state["shading"] == "flat",
+          "the composed preview is what was authored")
+    check(_previewSpecs(root, description.GetPath()) == [],
+          "the preview never reaches the edit target's layer")
+    check(len(_previewSpecs(session, description.GetPath())) == 5,
+          "all five preview properties are in the session layer")
+
+    check(exprPreview.SetPreview(description, width.GetPath(), "gray"),
+          "the preview can be switched to an operator attribute")
+    check(exprPreview.PreviewState(description)["source"] == width.GetPath(),
+          "an attribute path is a valid preview source")
+
+    check(exprPreview.ClearPreview(description), "the preview can be cleared")
+    check(not exprPreview.IsPreviewing(description) and
+          _previewSpecs(session, description.GetPath()) == [],
+          "clearing removes the session layer's preview opinions")
+
+    # A preview authored in a weaker layer is blocked, not deleted.
+    description.GetRelationship(exprPreview.SOURCE_REL).SetTargets(
+        [expression.GetPath()])
+    check(exprPreview.IsPreviewing(description), "a root-layer preview composes")
+    check(exprPreview.ClearPreview(description),
+          "a weaker layer's preview is cleared from the session layer")
+    check(len(root.GetRelationshipAtPath(description.GetPath().AppendProperty(
+        exprPreview.SOURCE_REL)).targetPathList.explicitItems) == 1,
+          "the root layer's preview opinion is left in place")
+
+    # Ptex maps an expression reads are offered by name.
+    stage.SetEditTarget(Usd.EditTarget(session))
+    probe = stage.DefinePrim("/World/Groom/Fur/Expressions/probe",
+                             "UsdGenExpression")
+    stage.DefinePrim("/World/Groom/Fur/Maps/regions", "UsdGenPtexMap")
+    stage.DefinePrim("/World/Groom/Fur/Maps/notAMap", "Scope")
+    probe.CreateRelationship("input:regions", custom=True).SetTargets(
+        ["/World/Groom/Fur/Maps/regions", "/World/Groom/Fur/Maps/notAMap"])
+    maps = exprPreview.MapSources(probe)
+    check([(m.kind, str(m.path)) for m in maps] ==
+          [(exprPreview.MAP, "/World/Groom/Fur/Maps/regions")],
+          "a Ptex map an input targets is a preview source; other targets are not")
+    check('"regions"' in maps[0].label, "a map source is labelled by its input")
+    kinds = [exprPreview.SourceForPath(stage, path, description.GetPath()).kind
+             for path in ("/World/Groom/Fur/Maps/regions",
+                          "/World/Groom/Fur/Expressions/probe",
+                          "/World/Groom/Fur/Ops/width.usdGen:width")]
+    check(kinds == [exprPreview.MAP, exprPreview.EXPRESSION,
+                    exprPreview.ATTRIBUTE],
+          "an authored source path is classified by what it names")
 
 
 CONTROL_SOURCE = (
@@ -543,6 +659,7 @@ def main():
     testMissingLibrary()
     testAuthoring(sys.argv[1])
     testSessionLayerEditTarget(sys.argv[1])
+    testPreviewAuthoring(sys.argv[1])
     if FAILURES:
         print("FAIL: %d check(s) failed" % len(FAILURES))
         return 1

@@ -20,18 +20,22 @@
 #include "usdGen/curveBuffer.h"
 #include "usdGen/expressions/cpuEvaluator.h"
 #include "usdGen/expressions/ir.h"
+#include "usdGen/expressions/samplers.h"
 #include "usdGen/expressionTargets.h"
 #include "usdGen/graphDesc.h"
 
 #include "pxr/base/tf/token.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
+
+class UsdGenPtexTexture;
 
 /// One connected destination's evaluated values, decoded from the typed
 /// destination buffer into doubles. `count` is 1 for the groom domain, the
@@ -74,13 +78,43 @@ public:
     /// capture identity so a source edit re-captures.
     uint64_t Digest() const noexcept { return digest_; }
 
+    /// Non-fatal diagnostics of the last evaluation (a map that could not be
+    /// read and fell back to its usdGen:map:default). Cleared by the call.
+    std::vector<std::string> TakeWarnings();
+
 private:
+    /// The resolved data behind one IROp::Sample slot of one binding.
+    struct SamplerState {
+        expr::IRSampler spec;
+        SdfPath expression;
+        // Geometry
+        std::vector<SdfPath> geometries;
+        std::unique_ptr<expr::GeometrySampler> geometry;
+        bool readsTime = false;          // the element expression reads $frame/$time
+        double builtFrame = 0.0, builtTime = 0.0;
+        bool built = false;
+        // Ptex
+        SdfPath map;
+        std::shared_ptr<const UsdGenPtexTexture> texture;
+        int channel = 0;                 // index into the sampled window; -1 = luminance
+        double scale = 1.0, offset = 0.0, fallback = 0.0;
+        double clampLo = 0.0, clampHi = 1.0;
+        std::vector<double> values;      // one per strand of the last evaluation
+        size_t reportedMisses = 0;       // roots off the map, as last reported
+    };
     struct Item {
         UsdGenExpressionBinding binding;
         TfToken canonical;
         expr::IRProgram ir;
         std::vector<double> literal;
+        std::vector<std::unique_ptr<SamplerState>> samplers;
+        expr::CpuExpressionSamplers table;
     };
+    bool ResolveSamplers(UsdGenGraphDesc const &desc, UsdGenExpressionDesc const &expression,
+                         Item *item, std::vector<std::string> *diagnostics);
+    bool PrepareSamplers(UsdGenGraphDesc const &desc, UsdGenNodeDesc const &node,
+                         UsdGenCurveBuffer const &geometry, expr::Context const &controls,
+                         Item *item, std::vector<std::string> *diagnostics);
     bool Compile(UsdGenGraphDesc const &desc, UsdGenNodeDesc const &node,
                  std::vector<std::string> *diagnostics);
 
@@ -92,6 +126,7 @@ private:
     // evaluation allocates nothing after the first cook of a given topology.
     std::vector<uint32_t> offsets_;
     std::vector<uint64_t> ids_;
+    std::vector<std::string> warnings_;
     uint64_t digest_ = 0;
 };
 

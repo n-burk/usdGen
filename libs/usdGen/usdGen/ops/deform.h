@@ -2,13 +2,24 @@
 #define USDGEN_OP_DEFORM_H
 
 #include "usdGen/op.h"
+#include "usdGen/ops/rbfField.h"
+
+#include "pxr/base/gf/vec3d.h"
+
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 
-/// Metadata for the topology-preserving persistent CUDA RBF deformation.
-/// Host execution is unavailable; it must never synthesize displacement.
+/// UsdGenDeform: topology-preserving cubic RBF deformation.
+///
+/// CUDA lane: driven by samples of the bound surface (the persistent RBF
+/// library in cudaExecution.cpp); this class supplies its metadata only.
+/// CPU lane: driven by the animated curves usdGen:guides targets. Every
+/// driver CV (up to usdGen:rbfSamples of them, farthest-point sampled) is an
+/// RBF sample bound at its rest position and moved to its current one, and
+/// every incoming CV moves by the resulting field.
 class UsdGenDeformOp final : public UsdGenOp
 {
 public:
@@ -22,7 +33,7 @@ public:
 
    TfSpan<const TfToken> TopologyParameters() const override;
    TfSpan<const TfToken> ValueParameters() const override;
-   TfSpan<const TfToken> ReferenceInputs() const override { return {}; }
+   TfSpan<const TfToken> ReferenceInputs() const override;
    bool Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag) override;
    UsdGenEpoch CaptureDigest(UsdGenCaptureContext const &ctx) const override;
    bool Capture(UsdGenCaptureContext const &ctx,
@@ -38,6 +49,9 @@ public:
 private:
    TfTokenVector topologyParameters_;
    TfTokenVector valueParameters_;
+   // The factored system survives poses that keep the same rest samples.
+   rbf::CubicField field_;
+   std::vector<GfVec3d> boundRest_;
 };
 
 }  // namespace usdGen

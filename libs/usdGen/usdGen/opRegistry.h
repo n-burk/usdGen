@@ -68,6 +68,23 @@ std::unique_ptr<UsdGenOp> CreateLengthOp();
 std::unique_ptr<UsdGenOp> CreateWidthOp();
 std::unique_ptr<UsdGenOp> CreateWidthBlendOp();
 std::unique_ptr<UsdGenOp> CreateReferenceSourceOp();
+std::unique_ptr<UsdGenOp> CreateClumpOp();
+std::unique_ptr<UsdGenOp> CreateGuideInterpolateOp();
+std::unique_ptr<UsdGenOp> CreateCurlOp();
+std::unique_ptr<UsdGenOp> CreateBendOp();
+std::unique_ptr<UsdGenOp> CreateWaveOp();
+std::unique_ptr<UsdGenOp> CreatePartOp();
+std::unique_ptr<UsdGenOp> CreateDirectionOp();
+std::unique_ptr<UsdGenOp> CreateSmoothOp();
+std::unique_ptr<UsdGenOp> CreateResampleOp();
+std::unique_ptr<UsdGenOp> CreateScaleOp();
+std::unique_ptr<UsdGenOp> CreateStraightenOp();
+std::unique_ptr<UsdGenOp> CreateDisplaceOp();
+std::unique_ptr<UsdGenOp> CreateSculptLayerOp();
+std::unique_ptr<UsdGenOp> CreateWindOp();
+std::unique_ptr<UsdGenOp> CreateExprOp();
+std::unique_ptr<UsdGenOp> CreateFreezeOp();
+std::unique_ptr<UsdGenOp> CreateCollideOp();
 
 /// Compatibility initializer. Built-ins are installed by registry construction;
 /// concurrent compiler calls only obtain that completed immutable initial state.

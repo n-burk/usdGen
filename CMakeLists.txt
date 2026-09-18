@@ -95,10 +95,11 @@ if(NOT TARGET usd)
     find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)
 endif()
 
-# Threads are used by the expression frontend. Zlib is not linked by any
-# usdGen target; requiring it made a standard Windows build_usd.py OpenUSD
-# prefix unusable because that prefix intentionally omits zlib when no USD
-# feature needs it.
+# Threads are used by the expression frontend. No system zlib is required:
+# requiring one made a standard Windows build_usd.py OpenUSD prefix unusable
+# because that prefix intentionally omits zlib when no USD feature needs it.
+# The only zlib consumer, the vendored Ptex, links the private vendored copy
+# (usdGen_zlib, thirdparty/zlib).
 find_package(Threads REQUIRED)
 # tbb/task.h, reached through the OpenUSD headers, prints a deprecation
 # banner on every translation unit unless told not to.
@@ -209,6 +210,76 @@ set_target_properties(usdGen_seexpr PROPERTIES
 # or exported, so no header rule is emitted (supersedes the sol S-6
 # double-nesting fix; the INSTALL_INTERFACE root above is unused by design).
 
+# --- BEGIN vendored ptex (usdGen_ptex) ---
+# ---------------------------------------------------------------------------
+# Third-party: Ptex 2.4.3 + zlib 1.3.1 (plan/07-look-maps-expressions.md §6)
+# ---------------------------------------------------------------------------
+# The OpenUSD prefix has no Ptex, and Storm's Ptex path is mesh-only, so
+# usdGen samples .ptx files itself (usdGen/maps/ptexMap.h). Both archives are
+# private: linked into the usdGen DLL only, compiled hidden, never installed
+# or exported, and their headers are build-tree includes only. zlib exists
+# solely for Ptex, so only usdGen_ptex sees its include directory.
+set(_usdgen_zlib_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/zlib")
+add_library(usdGen_zlib STATIC
+    "${_usdgen_zlib_dir}/adler32.c" "${_usdgen_zlib_dir}/compress.c"
+    "${_usdgen_zlib_dir}/crc32.c" "${_usdgen_zlib_dir}/deflate.c"
+    "${_usdgen_zlib_dir}/gzclose.c" "${_usdgen_zlib_dir}/gzlib.c"
+    "${_usdgen_zlib_dir}/gzread.c" "${_usdgen_zlib_dir}/gzwrite.c"
+    "${_usdgen_zlib_dir}/infback.c" "${_usdgen_zlib_dir}/inffast.c"
+    "${_usdgen_zlib_dir}/inflate.c" "${_usdgen_zlib_dir}/inftrees.c"
+    "${_usdgen_zlib_dir}/trees.c" "${_usdgen_zlib_dir}/uncompr.c"
+    "${_usdgen_zlib_dir}/zutil.c")
+target_include_directories(usdGen_zlib PRIVATE "${_usdgen_zlib_dir}")
+# zconf.h is vendored as shipped; HAVE_UNISTD_H is what upstream's configure
+# step would have written into it on POSIX hosts (gzlib.c needs lseek/read).
+if(MSVC)
+    target_compile_definitions(usdGen_zlib PRIVATE
+        _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
+elseif(NOT WIN32)
+    target_compile_definitions(usdGen_zlib PRIVATE HAVE_UNISTD_H)
+endif()
+set_target_properties(usdGen_zlib PROPERTIES
+    USDGEN_VENDORED ON
+    POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden)
+
+set(_usdgen_ptex_dir "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ptex/ptex")
+add_library(usdGen_ptex STATIC
+    "${_usdgen_ptex_dir}/PtexCache.cpp"
+    "${_usdgen_ptex_dir}/PtexFilters.cpp"
+    "${_usdgen_ptex_dir}/PtexHalf.cpp"
+    "${_usdgen_ptex_dir}/PtexReader.cpp"
+    "${_usdgen_ptex_dir}/PtexSeparableFilter.cpp"
+    "${_usdgen_ptex_dir}/PtexSeparableKernel.cpp"
+    "${_usdgen_ptex_dir}/PtexTriangleFilter.cpp"
+    "${_usdgen_ptex_dir}/PtexTriangleKernel.cpp"
+    "${_usdgen_ptex_dir}/PtexUtils.cpp"
+    "${_usdgen_ptex_dir}/PtexWriter.cpp")
+# SYSTEM keeps Ptexture.h (which pulls in <Windows.h>) at the consumer's
+# external warning level; BUILD_INTERFACE only, because nothing installs it.
+target_include_directories(usdGen_ptex SYSTEM PUBLIC
+    "$<BUILD_INTERFACE:${_usdgen_ptex_dir}>")
+target_include_directories(usdGen_ptex PRIVATE "${_usdgen_zlib_dir}")
+# PTEX_STATIC drops the dllimport/visibility attributes from PTEXAPI; it and
+# PTEX_VENDOR (namespace Ptex::v2_4_usdGen, so a site's own Ptex in the same
+# process cannot collide) must match in every TU that includes Ptexture.h.
+target_compile_definitions(usdGen_ptex PUBLIC PTEX_STATIC PTEX_VENDOR=usdGen)
+if(MSVC)
+    target_compile_definitions(usdGen_ptex PRIVATE
+        _CRT_SECURE_NO_DEPRECATE _CRT_NONSTDC_NO_DEPRECATE)
+elseif(NOT WIN32)
+    target_compile_definitions(usdGen_ptex PRIVATE HAVE_UNISTD_H)
+endif()
+target_link_libraries(usdGen_ptex
+    PUBLIC Threads::Threads
+    PRIVATE usdGen_zlib)
+set_target_properties(usdGen_ptex PROPERTIES
+    USDGEN_VENDORED ON
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+# --- END vendored ptex (usdGen_ptex) ---
+
 # ---------------------------------------------------------------------------
 # usdGenMath (STATIC, -ffp-contract=off)
 # ---------------------------------------------------------------------------
@@ -271,10 +342,13 @@ if(USDGEN_FP_CONTRACT_OK)
         COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
     # Production CPU expression evaluator inlines exprMath.h (bit-parity lane);
     # it must contract like the oracle, not like the rest of the core.
+    # Wind evaluates the same SeExpr FBM gust field; keep its contraction
+    # contract identical to noise.cpp so CPU results match across TUs.
     set_source_files_properties(
         libs/usdGen/usdGen/expressions/cpuEvaluator.cpp
         libs/usdGen/usdGen/expressions/frontend.cpp
-        libs/usdGen/usdGen/cpuParameters.cpp PROPERTIES
+        libs/usdGen/usdGen/cpuParameters.cpp
+        libs/usdGen/usdGen/ops/wind.cpp PROPERTIES
         COMPILE_OPTIONS "-ffp-contract=${USDGEN_FP_CONTRACT}")
 endif()
 
@@ -329,6 +403,8 @@ target_link_libraries(usdGen
     PUBLIC tf gf vt sdf TBB::tbb usdGenExecutionResources
     PRIVATE usdGenMath arch js plug ts ar work trace hio pxOsd
             usdGen_seexpr usdGenExprFrontend)
+# Vendored Ptex (usdGen/maps/ptexMap.cpp); private like the other archives.
+target_link_libraries(usdGen PRIVATE usdGen_ptex)
 # usdGen is a SHARED plugin-host library: its public API (UsdGenSession,
 # graph/tile types, ...) is consumed across the shared boundary by
 # libusdGenImaging.so, so it must keep default visibility. Third-party code
@@ -456,6 +532,17 @@ add_library(usdGen::usdGenShaders ALIAS usdGenShaders)
 add_executable(usdGenBakeFur tools/bakeFur.cpp)
 target_link_libraries(usdGenBakeFur PRIVATE usdGen usdGeom usd)
 install(TARGETS usdGenBakeFur RUNTIME DESTINATION bin)
+# Profiling utility: plays a scene through the groom scene index frame by
+# frame and reports per-frame cost, per-operator work and a Chrome trace
+# (bin/trace_playback.ps1).
+add_executable(usdGenTracePlayback tools/tracePlayback.cpp)
+target_link_libraries(usdGenTracePlayback PRIVATE
+    usdGen usdGenImaging usdImaging hd trace tf usd sdf)
+install(TARGETS usdGenTracePlayback RUNTIME DESTINATION bin)
+# Offline authoring utility; writes procedural region/clump Ptex maps for a mesh.
+add_executable(usdGenBakePtex tools/bakePtex.cpp)
+target_link_libraries(usdGenBakePtex PRIVATE usdGen usdGen_ptex usdGeom usd)
+install(TARGETS usdGenBakePtex RUNTIME DESTINATION bin)
 
 set(_usdgen_shader_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenShaders/resources")
 set(_usdgen_shader_pluginfo "${_usdgen_shader_resources}/plugInfo.json")
@@ -2298,7 +2385,9 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
-           testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion)
+           testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
+           testUsdGenSourceColor testUsdGenLookPrimvars
+           testUsdGenInstance)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2309,6 +2398,8 @@ set_tests_properties(testUsdGenTileContract PROPERTIES LABELS "T1;gate:SI-1")
 set_tests_properties(testUsdGenStockStormContract PROPERTIES
     LABELS "T1;stock-hydra;unpatched-openusd")
 set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
+set_tests_properties(testUsdGenSourceColor PROPERTIES LABELS "T1;look;sources")
+set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
@@ -2401,6 +2492,35 @@ add_test(NAME testUsdGenExpressionWidthExample COMMAND testUsdGenExpressionWidth
 set_tests_properties(testUsdGenExpressionWidthExample PROPERTIES
     ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples" TIMEOUT 120)
 
+# The guide-interpolation and Ptex clump examples, including dirty
+# propagation from sampled geometry and map prims through the scene index.
+# Reads the baked examples/maps/*.ptx.
+add_executable(testUsdGenGroomExamples tests/testUsdGenGroomExamples.cpp)
+target_link_libraries(testUsdGenGroomExamples PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenGroomExamples PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenGroomExamples COMMAND testUsdGenGroomExamples)
+set_tests_properties(testUsdGenGroomExamples PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples;maps" TIMEOUT 300)
+
+# UsdGenDeform on the CPU lane: hair deformed by animated curves (RBF).
+add_executable(testUsdGenRbfDeform tests/testUsdGenRbfDeform.cpp)
+target_link_libraries(testUsdGenRbfDeform PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenRbfDeform PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenRbfDeform COMMAND testUsdGenRbfDeform)
+set_tests_properties(testUsdGenRbfDeform PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;examples;deform" TIMEOUT 300)
+
+# usdGen:preview:* — the viewport value preview through the groom scene index.
+add_executable(testUsdGenValuePreview tests/testUsdGenValuePreview.cpp)
+target_link_libraries(testUsdGenValuePreview PRIVATE usdGenTestUtilsHd)
+target_compile_definitions(testUsdGenValuePreview PRIVATE
+    USDGEN_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME testUsdGenValuePreview COMMAND testUsdGenValuePreview)
+set_tests_properties(testUsdGenValuePreview PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;expressions;examples;preview" TIMEOUT 300)
+
 add_executable(testUsdGenExpressionTransport tests/testUsdGenExpressionTransport.cpp)
 target_link_libraries(testUsdGenExpressionTransport PRIVATE usdGenTestUtilsHd)
 target_compile_definitions(testUsdGenExpressionTransport PRIVATE
@@ -2422,6 +2542,40 @@ foreach(_expr_test ExpressionContext ExpressionBindings ExpressionFrontend Expre
     set_tests_properties(testUsdGen${_expr_test} PROPERTIES
         LABELS "T0;expressions" TIMEOUT 120)
 endforeach()
+# geoSampler()/ptex(): links usdGen_ptex itself to author its fixture .ptx.
+add_executable(testUsdGenExpressionSamplers tests/testUsdGenExpressionSamplers.cpp)
+target_link_libraries(testUsdGenExpressionSamplers PRIVATE usdGen usdGen_ptex)
+add_test(NAME testUsdGenExpressionSamplers COMMAND testUsdGenExpressionSamplers)
+set_tests_properties(testUsdGenExpressionSamplers PROPERTIES
+    LABELS "T0;expressions;maps" TIMEOUT 120)
+# Curl/Bend/Wave/Part stylers plus the primitive-domain Grow lift: registry
+# contracts, expression-target validation and deterministic CPU cooks.
+add_executable(testUsdGenCurlBendWavePart tests/testUsdGenCurlBendWavePart.cpp)
+target_link_libraries(testUsdGenCurlBendWavePart PRIVATE usdGen)
+add_test(NAME testUsdGenCurlBendWavePart COMMAND testUsdGenCurlBendWavePart)
+set_tests_properties(testUsdGenCurlBendWavePart PROPERTIES
+    LABELS "T0;operators;expressions" TIMEOUT 120)
+# Direction/Smooth/Resample/Scale/Straighten/Displace stylers: same shape,
+# one target per operator.
+# SculptLayer/Wind/ExprOp/Freeze/Collide stylers: same shape, appended to
+# the operator foreach above.
+foreach(_styler_test Direction Smooth Resample Scale Straighten Displace SculptLayer Wind ExprOp Freeze Collide)
+    add_executable(testUsdGen${_styler_test} tests/testUsdGen${_styler_test}.cpp)
+    target_link_libraries(testUsdGen${_styler_test} PRIVATE usdGen)
+    add_test(NAME testUsdGen${_styler_test} COMMAND testUsdGen${_styler_test})
+    set_tests_properties(testUsdGen${_styler_test} PROPERTIES
+        LABELS "T0;operators;expressions" TIMEOUT 120)
+endforeach()
+# testUsdGenScale recomputes UsdGenDraw01 expectations; usdGenMath is PRIVATE
+# to usdGen (N-7), so the test links it explicitly (CudaCurveGrowSession
+# precedent).
+target_link_libraries(testUsdGenScale PRIVATE usdGenMath)
+# Ptex face ids/coordinates and the sampler. Links usdGen_ptex itself so the
+# test can author its fixture .ptx with PtexWriter.
+add_executable(testUsdGenPtexMap tests/testUsdGenPtexMap.cpp)
+target_link_libraries(testUsdGenPtexMap PRIVATE usdGen usdGen_ptex)
+add_test(NAME testUsdGenPtexMap COMMAND testUsdGenPtexMap)
+set_tests_properties(testUsdGenPtexMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
 # The function library against Disney's own SeExpr2. This is the only test that
 # links the vendored frontend archive directly: expressions/exprMath.h claims to
 # reproduce SeExpr2's builtins for the device, and the claim is only worth
@@ -2543,7 +2697,7 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
     add_test(NAME testUsdGenToolsExprEditor
         COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
             --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprEditor.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/expression-width-plane.usda")
     usdgen_test_pluginpath_ops(_usdgen_tools_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
@@ -2567,7 +2721,7 @@ if(_usdgen_test_python)
     add_test(NAME testUsdGenToolsExprApi
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsExprApi.py"
-            "${CMAKE_CURRENT_SOURCE_DIR}/plan/examples/expression-width-plane.usda")
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/expression-width-plane.usda")
     usdgen_test_pluginpath_ops(_usdgen_toolsapi_plugin_env
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
@@ -2579,6 +2733,85 @@ if(_usdgen_test_python)
         LABELS "T1;tools;expressions" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+endif()
+
+# ---------------------------------------------------------------------------
+# UE-parity strand hair (plan/16-ue-hair-parity.md WS1). Three python checks,
+# all cross-platform, all sharing the interpreter the expression tests found.
+#
+#   testUsdGenHairEnergy        integrates the ported BSDF over the sphere on
+#                               the CPU and asserts it creates no energy. No
+#                               pxr, no GL -- numpy only.
+#   testUsdGenHairStrandsDefs   Sdr parse + registry discovery of the two new
+#                               defs, and that the three C5 defs survive. The
+#                               counterpart of usdGenShaders/test/checkC5.py,
+#                               kept separate so C5 keeps asserting exactly
+#                               three files with exactly 21 inputs.
+#   testUsdGenHairStrandsRender a real Storm draw: differential checks that
+#                               the glslfx COMPILED (a failed compile falls
+#                               back silently) and that lights, the baked hair
+#                               count and coverage all reach the pixels.
+#
+# Each exits 77 when its prerequisites are missing, which ctest reports as a
+# skip rather than a failure.
+# ---------------------------------------------------------------------------
+if(_usdgen_test_python)
+    usdgen_test_pluginpath_ops(_usdgen_hair_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    usdgen_test_path_list_ops(_usdgen_hair_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+
+    add_test(NAME testUsdGenHairEnergy
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_hair_energy.py")
+    set_tests_properties(testUsdGenHairEnergy PROPERTIES
+        LABELS "T1;shaders;gate:L-2" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    add_test(NAME testUsdGenHairStrandsDefs
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_hair_strands_defs.py")
+    set_tests_properties(testUsdGenHairStrandsDefs PROPERTIES
+        LABELS "T1;shaders;gate:L-2" TIMEOUT 180
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    add_test(NAME testUsdGenScalpShadowDef
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_scalp_shadow.py"
+            --no-render)
+    set_tests_properties(testUsdGenScalpShadowDef PROPERTIES
+        LABELS "T1;shaders;shadows" TIMEOUT 180
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    # GPU-bound, so T2 and RUN_SERIAL like the other Storm tests.
+    add_test(NAME testUsdGenScalpShadowRender
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_scalp_shadow.py"
+            --usdrecord "${USD_INSTALL_DIR}/bin/usdrecord")
+    set_tests_properties(testUsdGenScalpShadowRender PROPERTIES
+        LABELS "T2;shaders;shadows" TIMEOUT 600 RUN_SERIAL TRUE
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    # GPU-bound, so T2 and RUN_SERIAL like the other Storm tests.
+    add_test(NAME testUsdGenHairStrandsRender
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/usdGenShaders/test/check_hair_strands_render.py"
+            --usdrecord "${USD_INSTALL_DIR}/bin/usdrecord")
+    set_tests_properties(testUsdGenHairStrandsRender PROPERTIES
+        LABELS "T2;shaders;gate:L-2" TIMEOUT 600 RUN_SERIAL TRUE
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_hair_plugin_env};${_usdgen_hair_python_env}"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endif()
 
 # M1 T2 Storm tests (EGL harness; the S-8/S-9/L-1 PW decisions get confirmed

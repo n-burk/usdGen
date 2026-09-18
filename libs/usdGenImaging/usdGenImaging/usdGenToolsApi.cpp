@@ -181,6 +181,10 @@ constexpr FunctionInfo kOperators[] = {
 // after the first, matching the hand-written entries above (e.g. "pow(|, )").
 std::string InsertFor(usdGen::expr::FunctionInfo const &fn)
 {
+    // The sampling functions take string literals, so the insertion carries
+    // the quotes and places the caret inside the first.
+    if (fn.name == "geoSampler") return "geoSampler(\"|\", \"$index\")";
+    if (fn.name == "ptex") return "ptex(\"|\")";
     std::string insert = fn.name + "(|";
     for (uint32_t i = 1; i < fn.arity; ++i) insert += ", ";
     insert += ")";
@@ -249,6 +253,8 @@ constexpr CategoryRow kCategories[] = {
     {"choose", "Control"}, {"pick", "Control"}, {"wchoose", "Control"},
 
     {"printf", "Strings"},
+
+    {"geoSampler", "Sampling"}, {"ptex", "Sampling"},
 };
 
 std::string CategoryByName(std::string const &name)
@@ -401,8 +407,11 @@ int UsdGenTools_ListVariables(int domain, char *buf, int len)
         for (size_t i = 0; i < registry.Count(); ++i) {
             const auto *info = registry.At(i);
             if (!info) break;
-            const bool valid = requested == Domain::None ||
-                               usdGen::expr::HasDomain(info->domains, requested);
+            // $Q/$Qdist exist only inside a geoSampler() element expression.
+            const bool sampler = Registry::IsSamplerVariable(info->id);
+            const bool valid = !sampler &&
+                (requested == Domain::None ||
+                 usdGen::expr::HasDomain(info->domains, requested));
             if (!text.empty()) text.push_back('\n');
             text += info->name;
             text.push_back('\t');
@@ -410,11 +419,14 @@ int UsdGenTools_ListVariables(int domain, char *buf, int len)
             text.push_back('\t');
             text += std::to_string(info->components);
             text.push_back('\t');
-            text += DomainList(info->domains);
+            text += sampler ? std::string("sampler") : DomainList(info->domains);
             text.push_back('\t');
             text += valid ? "1" : "0";
             text.push_back('\t');
-            text += DocFor(info->name);
+            // The local table words the editor's prose; the registry's own
+            // line covers anything it does not know yet.
+            const char *doc = DocFor(info->name);
+            text += *doc ? doc : (info->doc ? info->doc : "");
         }
         return Emit(text, buf, len);
     } catch (...) {

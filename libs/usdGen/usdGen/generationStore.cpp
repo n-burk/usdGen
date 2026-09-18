@@ -7,6 +7,7 @@
 #include "usdGen/generationStore.h"
 
 #include "pxr/pxr.h"
+#include "pxr/base/trace/trace.h"
 #include "pxr/base/vt/array.h"
 #include <algorithm>
 
@@ -107,6 +108,7 @@ bool _changed(VtArray<T> const &a, VtArray<T> const &b)
 UsdGenDirtyReport UsdGenGenerationStore::Diff(
     UsdGenGeneration const &prev, UsdGenGeneration const &next) const
 {
+    TRACE_FUNCTION();
     // Both tile vectors are sorted by tile id (UsdGenGeneration invariant),
     // so a single merge walk classifies every prim.
     UsdGenDirtyReport report;
@@ -146,7 +148,19 @@ UsdGenDirtyReport UsdGenGenerationStore::Diff(
             mark(TfToken("hairT"),  _changed(a.hairT,  b.hairT));
             mark(TfToken("hairId"), _changed(a.hairId, b.hairId));
             mark(TfToken("st"),     _changed(a.st,     b.st));
-            mark(TfToken("displayColor"), _changed(a.displayColor, b.displayColor));
+            // A colour that moves between one-per-curve and one-per-CV (the
+            // look's bakeMode, or a usdGen:preview) changes the primvar's
+            // interpolation. Hydra keeps its primvar descriptors across a
+            // value-only dirty, so that is a container-level dirty.
+            auto colorRate = [](UsdGenTilePublication const &t) {
+                if (t.displayColor.empty()) return 0;
+                if (t.displayColor.size() == t.curveVertexCounts.size()) return 1;
+                return t.displayColor.size() == t.points.size() ? 2 : 3;
+            };
+            if (colorRate(a) != colorRate(b))
+                td.newPrimvars.push_back(TfToken("displayColor"));
+            else
+                mark(TfToken("displayColor"), _changed(a.displayColor, b.displayColor));
             mark(TfToken("bakeColor"),    _changed(a.bakeColor,    b.bakeColor));
             mark(TfToken("velocities"),   _changed(a.velocities,   b.velocities));
             // Named uniform planes (both vectors sorted by name): common names
@@ -156,7 +170,11 @@ UsdGenDirtyReport UsdGenGenerationStore::Diff(
                 for (UsdGenPlane const &pa : a.extraUniform) {
                     if (pa.name != pb.name) continue;
                     paired = true;
-                    mark(pb.name, pa.f != pb.f || pa.i != pb.i);
+                    if (pa.interpolation != pb.interpolation || pa.arity != pb.arity ||
+                        pa.type != pb.type)
+                        td.newPrimvars.push_back(pb.name);
+                    else
+                        mark(pb.name, pa.f != pb.f || pa.i != pb.i);
                     break;
                 }
                 if (!paired) td.newPrimvars.push_back(pb.name);

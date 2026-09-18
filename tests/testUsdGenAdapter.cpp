@@ -15,9 +15,11 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/tf/errorMark.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
+#include "pxr/base/gf/vec3f.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primDefinition.h"
@@ -106,6 +108,17 @@ int main()
     stage->DefinePrim(opB, TfToken("UsdGenGrow"));
     stage->DefinePrim(map, TfToken("UsdGenImageMap"));
     stage->DefinePrim(guides, TfToken("UsdGenGuideSet"));
+    // usdGen:look:* is carried by UsdGenLookAPI, applied per prim rather than
+    // declared by the type. Built before the chain so the pull below needs no
+    // update plumbing.
+    SdfPath const looked("/looked");
+    GfVec3f const authoredLook(0.4f, 0.2f, 0.1f);
+    {
+        UsdPrim l = stage->DefinePrim(looked, TfToken("UsdGenDescription"));
+        l.ApplyAPI(TfToken("UsdGenLookAPI"));
+        l.CreateAttribute(TfToken("usdGen:look:rootColor"),
+                          SdfValueTypeNames->Color3f).Set(authoredLook);
+    }
     // Multi-target relationship: the array factory must carry ALL targets.
     // usdGen:guides is the multi-target relationship UsdGenDescription
     // declares (operators are ordered by the composed hierarchy; there is no
@@ -387,6 +400,52 @@ int main()
         Check(UsdImagingDataSourceMapped::Invalidate(probes, *abstract[0]).IsEmpty() &&
                   UsdImagingDataSourceMapped::Invalidate(probes, *unknown[0]).IsEmpty(),
               "abstract and unknown mapping tables are stably empty");
+    }
+
+    // An APPLIED API schema's properties must be served too. usdGen:look:* is
+    // carried by UsdGenLookAPI, which a scene applies per description rather
+    // than the type declaring it, so a mapping table built from the concrete
+    // type alone serves no `look` container at all -- and every look field
+    // reaches the engine as its schema default while the render looks merely
+    // "a bit dark" rather than broken.
+    {
+        // Spelled literally, as ExpectLocator above does.
+        HdDataSourceLocator const rootColor(
+            TfToken("usdGen"), TfToken("look"), TfToken("rootColor"));
+        TfTokenVector const probe{TfToken("usdGen:look:rootColor")};
+        UsdPrim const plain = stage->GetPrimAtPath(desc);
+        UsdPrim const applied = stage->GetPrimAtPath(looked);
+
+        Check(UsdImagingDataSourceMapped::Invalidate(
+                  probe, UsdGenPrimAdapterBase::Mappings(plain.GetPrimTypeInfo()))
+                  .IsEmpty(),
+              "an unapplied API schema's properties are not mapped");
+        Check(UsdImagingDataSourceMapped::Invalidate(
+                  probe,
+                  UsdGenPrimAdapterBase::Mappings(applied.GetPrimTypeInfo()))
+                  .Intersects(rootColor),
+              "an applied API schema's properties map to usdGen/look/rootColor");
+        // The two tables must not be the same cached object: applying an API
+        // to one prim of a type cannot be allowed to change another's.
+        Check(&UsdGenPrimAdapterBase::Mappings(applied.GetPrimTypeInfo()) !=
+                  &UsdGenPrimAdapterBase::Mappings(plain.GetPrimTypeInfo()),
+              "applied API schemas are part of the mapping table's identity");
+
+        // End to end: the value the chain serves is the authored one. The
+        // adapter overlays the mapped source AT THE PRIM ROOT, so the served
+        // path carries no `usdGen` prefix -- that prefix lives only on the
+        // invalidation locators above.
+        HdSceneIndexPrim const served = terminal->GetPrim(looked);
+        auto sampled = HdSampledDataSource::Cast(
+            GetAt(served.dataSource,
+                  HdDataSourceLocator(TfToken("look"), TfToken("rootColor"))));
+        VtValue const got = sampled ? sampled->GetValue(0.0f) : VtValue();
+        Check(sampled && got == VtValue(authoredLook),
+              std::string("the authored look colour reaches Hydra (") +
+                  (served.dataSource ? "prim served" : "NO PRIM") + ", " +
+                  (sampled ? "leaf found, " + got.GetTypeName() + " " +
+                                 TfStringify(got)
+                           : "NO LEAF") + ")");
     }
 
     Check(errorMark.IsClean(), "no Tf coding errors");

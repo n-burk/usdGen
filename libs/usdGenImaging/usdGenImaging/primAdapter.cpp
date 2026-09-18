@@ -190,6 +190,28 @@ _ExpressionsDataSource(UsdPrim const &description)
         fields.push_back(TfToken("outputs"));
         fieldValues.push_back(HdRetainedContainerDataSource::New(
             outputNames.size(), outputNames.data(), outputValues.data()));
+        // input:<name> relationships: the data geoSampler("<name>") and
+        // ptex("<name>") read. Forwarded targets, so a relationship that
+        // targets another relationship resolves like a connection would.
+        TfTokenVector inputNames;
+        std::vector<HdDataSourceBaseHandle> inputValues;
+        size_t inputIndex = 0;
+        for (UsdRelationship const &rel : expr.GetRelationships()) {
+            std::string const n = rel.GetName().GetString();
+            if (n.rfind("input:", 0) != 0 || n.size() <= 6) continue;
+            SdfPathVector targets;
+            rel.GetForwardedTargets(&targets);
+            TfTokenVector inFields{TfToken("name"), TfToken("targets")};
+            std::vector<HdDataSourceBaseHandle> inValues{
+                _Value(VtValue(TfToken(n.substr(6)))),
+                _Value(VtValue(VtArray<SdfPath>(targets.begin(), targets.end())))};
+            inputNames.push_back(TfToken(std::to_string(inputIndex++)));
+            inputValues.push_back(HdRetainedContainerDataSource::New(
+                inFields.size(), inFields.data(), inValues.data()));
+        }
+        fields.push_back(TfToken("inputs"));
+        fieldValues.push_back(HdRetainedContainerDataSource::New(
+            inputNames.size(), inputNames.data(), inputValues.data()));
         names.push_back(TfToken(std::to_string(index++)));
         values.push_back(HdRetainedContainerDataSource::New(
             fields.size(), fields.data(), fieldValues.data()));
@@ -380,7 +402,7 @@ UsdGenPrimAdapterBase::GetImagingSubprimData(
     HdContainerDataSourceHandle usdGen =
         UsdImagingDataSourceMapped::New(
             prim, prim.GetPath(),
-            Mappings(prim.GetPrimTypeInfo().GetSchemaTypeName()),
+            Mappings(prim.GetPrimTypeInfo()),
             stageGlobals);
     if (!usdGen) {
         return base;
@@ -425,7 +447,7 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
     HdDataSourceLocatorSet result =
         UsdImagingDataSourceMapped::Invalidate(
             properties,
-            Mappings(prim.GetPrimTypeInfo().GetSchemaTypeName()));
+            Mappings(prim.GetPrimTypeInfo()));
     result.insert(
         UsdImagingDataSourcePrim::Invalidate(
             prim, subprim, properties, invalidationType));
@@ -451,12 +473,53 @@ UsdGenPrimAdapterBase::InvalidateImagingSubprim(
         result.insert(HdDataSourceLocator(
             PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
                 TfToken("expressionBindings")));
+    } else if (prim.GetPrimTypeInfo().GetTypeName() == TfToken("UsdGenExpression")) {
+        // input:<name> relationships and outputs:* are dynamic, so the mapped
+        // table knows nothing of them. Dirty the expression prim for them all
+        // the same: the owning description re-reads its live expression
+        // aggregate on the resulting notice.
+        for (auto const& property : properties) {
+            std::string const n = property.GetString();
+            if (n.rfind("input:", 0) == 0 || n.rfind("outputs:", 0) == 0) {
+                result.insert(HdDataSourceLocator(
+                    PXR_NS::usdGenImaging::UsdGenContainerToken()).Append(
+                        TfToken("inputs")));
+                break;
+            }
+        }
     }
     return result;
 }
 
 const UsdImagingDataSourceMapped::PropertyMappings &
+UsdGenPrimAdapterBase::Mappings(UsdPrimTypeInfo const &typeInfo)
+{
+    // Applied API schemas are applied per PRIM, so the table has to be keyed
+    // by the prim's whole definition, not by its type name. Without the
+    // applied set in the key, two descriptions of the same type -- one with
+    // UsdGenLookAPI, one without -- would share the first table built.
+    std::string key = typeInfo.GetSchemaTypeName().GetString();
+    for (TfToken const &api : typeInfo.GetAppliedAPISchemas()) {
+        key += '|';
+        key += api.GetString();
+    }
+    return _Mappings(TfToken(key), &typeInfo.GetPrimDefinition());
+}
+
+const UsdImagingDataSourceMapped::PropertyMappings &
 UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
+{
+    // FindConcretePrimDefinition returns nullptr for abstract types and for
+    // names with no registered schema — such a prim has no declared
+    // usdGen:* properties, so the cached (empty) table is correct (06 §2.2
+    // rule 2's null branch).
+    return _Mappings(schemaTypeName,
+                     UsdSchemaRegistry::GetInstance()
+                         .FindConcretePrimDefinition(schemaTypeName));
+}
+
+const UsdImagingDataSourceMapped::PropertyMappings &
+UsdGenPrimAdapterBase::_Mappings(TfToken const &key, UsdPrimDefinition const *def)
 {
     using Mapping = UsdImagingDataSourceMapped::PropertyMappings;
     // Entries are append-only and values are immutable after publication.
@@ -464,19 +527,14 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
     // duplicate loses insertion; the map itself is never cleared/erased.
     static tbb::concurrent_unordered_map<
         TfToken, std::shared_ptr<const Mapping>, TfHash> cache;
-    if (auto it = cache.find(schemaTypeName); it != cache.end()) {
+    if (auto it = cache.find(key); it != cache.end()) {
         return *it->second;
     }
     std::vector<UsdImagingDataSourceMapped::PropertyMapping> mappings;
-    // FindConcretePrimDefinition returns nullptr for abstract types and for
-    // names with no registered schema — such a prim has no declared
-    // usdGen:* properties, so the cached (empty) table is correct (06 §2.2
-    // rule 2's null branch).
-    if (UsdPrimDefinition const *def =
-            UsdSchemaRegistry::GetInstance().FindConcretePrimDefinition(schemaTypeName)) {
-            // Sibling set for the ancestor pass (contract S3.1): the mapping
-            // is built per schema type name, so the full property set is in
-            // hand — no new USD calls.
+    if (def) {
+            // Sibling set for the ancestor pass (contract S3.1): the whole
+            // definition is in hand, so the full property set is too — no new
+            // USD calls.
             TfTokenVector const &siblings = def->GetPropertyNames();
             for (TfToken const &name : siblings) {
                 if (_IsPrimBuiltin(name)) {
@@ -520,7 +578,7 @@ UsdGenPrimAdapterBase::Mappings(TfToken const &schemaTypeName)
     // Concurrent builders may construct equivalent candidates.  Only the
     // canonical inserted value is returned, so all callers retain a stable
     // reference and no mutable published object is ever replaced.
-    auto res = cache.emplace(schemaTypeName, std::move(slot));
+    auto res = cache.emplace(key, std::move(slot));
     return *res.first->second;
 }
 

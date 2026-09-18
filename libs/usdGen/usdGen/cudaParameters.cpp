@@ -198,6 +198,11 @@ CudaParameterStatus CudaParameterProgram::Compile(
                 Error(diagnostics, binding.destination.GetString() + ": " + message);
             return fail(CudaParameterStatus::CompileError, "SeExpr compilation failed");
         }
+        // geoSampler()/ptex() read host data through the CPU evaluator's
+        // sampler table; the device has none (expressions/irExec.h).
+        if (!compiled.program.IR().samplers.empty())
+            return fail(CudaParameterStatus::UnsupportedType,
+                "geoSampler() and ptex() are only available on the CPU lane");
         item.ir = compiled.program.IR();
         bindings.push_back(binding);
         items.push_back(std::move(item));

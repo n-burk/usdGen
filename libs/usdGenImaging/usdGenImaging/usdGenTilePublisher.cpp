@@ -9,6 +9,7 @@
 #include "usdGenImaging/usdGenTokens.h"
 
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/trace/trace.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/dependencySchema.h"
@@ -16,6 +17,7 @@
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/materialConnectionSchema.h"
 #include "pxr/imaging/hd/materialNetworkSchema.h"
+#include "pxr/imaging/hd/materialNodeParameterSchema.h"
 #include "pxr/imaging/hd/materialNodeSchema.h"
 #include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
@@ -24,7 +26,10 @@
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -235,6 +240,18 @@ _Assemble(usdGen::UsdGenTilePublication const &tile, bool isGuide,
             continue;
         }
         HdSampledDataSourceHandle values;
+        if (plane.name == "hairTipColor" && plane.arity == 3 &&
+            plane.interpolation == "constant" && plane.f.size() == 3) {
+            // The look's tip colour as a real color3f, not a float[3]: the
+            // shader declares it `vec3` and Storm's codegen types the primvar
+            // from the value, not from elementSize. See the cooker for why it
+            // is published at all (a user-bound material otherwise gets the
+            // Sdr default tips).
+            VtVec3fArray packed(1, GfVec3f(plane.f[0], plane.f[1], plane.f[2]));
+            _Add(&pvNames, &pvValues, plane.name,
+                 _Primvar(_Samp(packed), plane.interpolation, TfToken("color")));
+            continue;
+        }
         if ((plane.name == "furTauP" || plane.name == "furTauN") &&
             plane.arity == 3 && plane.f.size() == totalCvs * 3) {
             // Pack optical depth into two vec3 buffers. Separate scalars
@@ -396,6 +413,7 @@ HdContainerDataSourceHandle
 UsdGenTilePublisher::BuildTileDataSource(
     usdGen::UsdGenTilePublication const &tile, int64_t generation)
 {
+    TRACE_FUNCTION();
     return _Assemble(tile, /*isGuide=*/false, TfToken(), generation);
 }
 
@@ -497,14 +515,39 @@ UsdGenTilePublisher::DefaultMaterialPath(SdfPath const &tilePath)
 }
 
 /*static*/
+SdfPath
+UsdGenTilePublisher::PreviewMaterialPath(SdfPath const &descriptionPath, bool flat)
+{
+    static TfToken const lit("material_preview"), flatName("material_preview_flat");
+    return descriptionPath.AppendChild(RenderNamespace())
+        .AppendChild(flat ? flatName : lit);
+}
+
+/*static*/
+bool
+UsdGenTilePublisher::IsPreviewMaterialPath(SdfPath const &descriptionPath,
+                                           SdfPath const &path, bool *flat)
+{
+    for (bool const candidate : {false, true}) {
+        if (path == PreviewMaterialPath(descriptionPath, candidate)) {
+            if (flat) *flat = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+
+// A material whose universal-render-context network is one `surface` node.
 HdContainerDataSourceHandle
-UsdGenTilePublisher::BuildDefaultMaterialDataSource()
+_SurfaceMaterial(TfToken const &identifier, HdContainerDataSourceHandle const &parameters)
 {
     static TfToken const surface("surface");
     HdContainerDataSourceHandle const node =
         HdMaterialNodeSchema::Builder()
-            .SetNodeIdentifier(_Tok(TfToken("UsdGenHairPreview")))
-            .SetParameters(HdRetainedContainerDataSource::New())
+            .SetNodeIdentifier(_Tok(identifier))
+            .SetParameters(parameters)
             .SetInputConnections(HdRetainedContainerDataSource::New())
             .Build();
     HdContainerDataSourceHandle const terminal =
@@ -527,6 +570,275 @@ UsdGenTilePublisher::BuildDefaultMaterialDataSource()
     return HdRetainedContainerDataSource::New(
         HdMaterialSchemaTokens->material,
         HdMaterialSchema::BuildRetained(1, &contextName, &contextValue));
+}
+
+HdDataSourceBaseHandle
+_Param(float value)
+{
+    return HdMaterialNodeParameterSchema::Builder()
+        .SetValue(HdRetainedTypedSampledDataSource<float>::New(value))
+        .Build();
+}
+
+HdDataSourceBaseHandle
+_Param(GfVec3f const &value)
+{
+    return HdMaterialNodeParameterSchema::Builder()
+        .SetValue(HdRetainedTypedSampledDataSource<GfVec3f>::New(value))
+        .Build();
+}
+
+// A two-colour approximation of the look's ramp: the authored root/tip pair,
+// or the first and last stop when a multi-stop usdGen:look:colorRamp exists
+// (the shader has one lerp, not a ramp). Stop ORDER is the authored order;
+// usdGen:look:colorRamp:positions is required to be ascending (C1 §2.12).
+void
+_LookColors(usdGen::UsdGenLookDesc const &look, GfVec3f *root, GfVec3f *tip)
+{
+    *root = look.rootColor;
+    *tip = look.tipColor;
+    if (look.rampColors.size() >= 2) {
+        *root = look.rampColors[0];
+        *tip = look.rampColors[look.rampColors.size() - 1];
+    }
+}
+
+void
+_MixBits(uint64_t *h, uint64_t v)
+{
+    // splitmix64's finalizer: cheap, and every input bit reaches every output
+    // bit, which is what a change-detection digest needs.
+    *h ^= v + 0x9e3779b97f4a7c15ull + (*h << 6) + (*h >> 2);
+    *h ^= *h >> 30; *h *= 0xbf58476d1ce4e5b9ull;
+    *h ^= *h >> 27; *h *= 0x94d049bb133111ebull;
+    *h ^= *h >> 31;
+}
+
+void
+_MixFloat(uint64_t *h, float v)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    _MixBits(h, bits);
+}
+
+}  // namespace
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildDefaultMaterialDataSource()
+{
+    // Parameters are left unset so the shader def's Sdr defaults apply. This
+    // overload exists for callers with no description in hand (the C2 contract
+    // test); the groom scene index always uses the look-carrying one.
+    return _SurfaceMaterial(DefaultMaterialIdentifier(),
+                            HdRetainedContainerDataSource::New());
+}
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildDefaultMaterialDataSource(
+    usdGen::UsdGenLookDesc const &look)
+{
+    GfVec3f root, tip;
+    _LookColors(look, &root, &tip);
+
+    // baseColor is only consulted where the prim carries no displayColor
+    // (usdGen:look:bakeTarget "none"); the tile otherwise bakes rootColor into
+    // displayColor per curve and the shader reads that as the root albedo.
+    // Authoring it anyway keeps the two routes agreeing.
+    TfToken const names[] = {
+        TfToken("baseColor"), TfToken("tipColor"), TfToken("colorRamp"),
+        TfToken("randomHue"), TfToken("randomValue"),
+    };
+    HdDataSourceBaseHandle const values[] = {
+        _Param(root), _Param(tip), _Param(std::max(look.rampExponent, 0.001f)),
+        _Param(std::max(look.hueJitter, 0.0f)),
+        _Param(std::max(look.valueJitter, 0.0f)),
+    };
+    return _SurfaceMaterial(
+        DefaultMaterialIdentifier(),
+        HdRetainedContainerDataSource::New(
+            sizeof(names) / sizeof(names[0]), names, values));
+}
+
+/*static*/
+TfToken const &
+UsdGenTilePublisher::DefaultMaterialIdentifier()
+{
+    // The OPAQUE variant. The two differ only in materialTag, and the choice
+    // is between two failure modes of stock Storm, both measured on
+    // examples/head-hair-closeup.usda at 1280x960 (docs/storm-fur.md):
+    //   * translucent/OIT composites the UE coverage exactly, but Storm's OIT
+    //     pool is 8 * width * height fragments for the WHOLE frame, handed out
+    //     by one atomic counter, and a fragment past the end is silently
+    //     dropped (hdx/shaders/renderPass.glslfx RenderOutputImpl). This groom
+    //     exhausts it and loses the crown; at a quarter of the density it does
+    //     not. Whole regions of hair disappear, in draw order. It also costs
+    //     18.8 ms against 12.7 ms.
+    //   * defaultMaterialTag's alpha-to-coverage has no such cliff. Plain
+    //     alpha-to-coverage cannot composite sub-pixel hair either, because
+    //     its sample mask comes from the alpha value and the pixel position
+    //     alone, so the glslfx snaps alpha against a per-strand hash instead
+    //     and recovers 1-(1-a)^N in expectation.
+    // A groom is exactly the case the OIT budget cannot take, so the default
+    // is the opaque one. Bind UsdGenHairStrandsTranslucent by hand for a hero
+    // shot of a groom that fits the budget: it is smoother, with no dither.
+    static TfToken const identifier("UsdGenHairStrands");
+    return identifier;
+}
+
+/*static*/
+uint64_t
+UsdGenTilePublisher::DefaultMaterialLookDigest(
+    usdGen::UsdGenLookDesc const &look)
+{
+    GfVec3f root, tip;
+    _LookColors(look, &root, &tip);
+    uint64_t h = 0x9e3779b97f4a7c15ull;
+    for (int i = 0; i < 3; ++i) { _MixFloat(&h, root[i]); _MixFloat(&h, tip[i]); }
+    _MixFloat(&h, look.rampExponent);
+    _MixFloat(&h, look.hueJitter);
+    _MixFloat(&h, look.valueJitter);
+    return h;
+}
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildPreviewMaterialDataSource(bool flat)
+{
+    static TfToken const shading("shading");
+    HdDataSourceBaseHandle const value = HdMaterialNodeParameterSchema::Builder()
+        .SetValue(HdRetainedTypedSampledDataSource<float>::New(flat ? 0.0f : 1.0f))
+        .Build();
+    return _SurfaceMaterial(TfToken("UsdGenValuePreview"),
+                            HdRetainedContainerDataSource::New(shading, value));
+}
+
+/*static*/
+SdfPath
+UsdGenTilePublisher::ScalpShadowPath(SdfPath const &descriptionPath)
+{
+    static TfToken const name("scalpShadow");
+    return descriptionPath.AppendChild(RenderNamespace()).AppendChild(name);
+}
+
+/*static*/
+SdfPath
+UsdGenTilePublisher::ScalpShadowMaterialPath(SdfPath const &descriptionPath)
+{
+    static TfToken const name("material_scalpShadow");
+    return descriptionPath.AppendChild(RenderNamespace()).AppendChild(name);
+}
+
+/*static*/
+TfToken const &
+UsdGenTilePublisher::ScalpShadowIdentifier()
+{
+    static TfToken const identifier("UsdGenScalpShadow");
+    return identifier;
+}
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildScalpShadowDataSource(
+    usdGen::UsdGenScalpShadowPublication const &cap, int64_t generation)
+{
+    TRACE_FUNCTION();
+    if (cap.IsEmpty()) return nullptr;
+    size_t const points = cap.points.size();
+
+    std::vector<TfToken> names;
+    std::vector<HdDataSourceBaseHandle> values;
+
+    // Hydra's Mesh schema nests topology the way BasisCurves does. The cap is
+    // doubleSided so a left-handed emitter cannot cull it away: nothing about
+    // it depends on which way it faces.
+    _Add(&names, &values, TfToken("mesh"),
+         _Container(
+             {TfToken("topology"), TfToken("doubleSided")},
+             {HdDataSourceBaseHandle(_Container(
+                  {TfToken("faceVertexCounts"), TfToken("faceVertexIndices"),
+                   TfToken("orientation")},
+                  {HdDataSourceBaseHandle(_Samp(cap.faceVertexCounts)),
+                   HdDataSourceBaseHandle(_Samp(cap.faceVertexIndices)),
+                   HdDataSourceBaseHandle(_Tok(TfToken("rightHanded")))})),
+              HdDataSourceBaseHandle(
+                  HdRetainedTypedSampledDataSource<bool>::New(true))}));
+
+    std::vector<TfToken> pvNames;
+    std::vector<HdDataSourceBaseHandle> pvValues;
+    _Add(&pvNames, &pvValues, TfToken("points"),
+         _Primvar(_Samp(cap.points), TfToken("vertex"), TfToken("point")));
+    if (cap.normals.size() == points) {
+        _Add(&pvNames, &pvValues, TfToken("normals"),
+             _Primvar(_Samp(cap.normals), TfToken("vertex"), TfToken("normal")));
+    }
+    for (usdGen::UsdGenPlane const &plane : cap.extraUniform) {
+        if (plane.arity != 3 || plane.f.size() != points * 3) continue;
+        // The same vec3 packing a tile's depths get: separate scalar buffers
+        // exhaust GL's per-stage SSBO slots.
+        VtVec3fArray packed(points);
+        for (size_t i = 0; i < points; ++i) {
+            packed[i] = GfVec3f(plane.f[3*i], plane.f[3*i+1], plane.f[3*i+2]);
+        }
+        _Add(&pvNames, &pvValues, plane.name,
+             _Primvar(_Samp(packed), plane.interpolation));
+    }
+    _Add(&names, &values, TfToken("primvars"),
+         _Container(std::move(pvNames), std::move(pvValues)));
+
+    _Add(&names, &values, TfToken("extent"),
+         _Container({TfToken("min"), TfToken("max")},
+                    {HdDataSourceBaseHandle(_Samp(cap.extentMin)),
+                     HdDataSourceBaseHandle(_Samp(cap.extentMax))}));
+
+    // Points are already world space, so the inherited surface chain must not
+    // apply again — the same reason a tile resets the stack.
+    _Add(&names, &values, TfToken("xform"),
+         HdXformSchema::Builder()
+             .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                 GfMatrix4d(1.0)))
+             .SetResetXformStack(
+                 HdRetainedTypedSampledDataSource<bool>::New(true))
+             .Build());
+
+    if (!cap.purpose.IsEmpty()) {
+        _Add(&names, &values, TfToken("purpose"),
+             _Container({TfToken("purpose")},
+                        {HdDataSourceBaseHandle(_Tok(cap.purpose))}));
+    }
+    _Add(&names, &values, TfToken("visibility"),
+         HdVisibilitySchema::Builder()
+             .SetVisibility(HdRetainedTypedSampledDataSource<bool>::New(
+                 cap.visibility != TfToken("invisible")))
+             .Build());
+
+    HdDataSourceBaseHandle binding = HdMaterialBindingSchema::Builder()
+        .SetPath(HdRetainedTypedSampledDataSource<SdfPath>::New(cap.materialPath))
+        .Build();
+    _Add(&names, &values, TfToken("materialBindings"),
+         _Container({_HydraMaterialPurpose(TfToken())}, {binding}));
+
+    _Add(&names, &values, TfToken("generation"), _Samp(generation));
+    return _Container(std::move(names), std::move(values));
+}
+
+/*static*/
+HdContainerDataSourceHandle
+UsdGenTilePublisher::BuildScalpShadowMaterialDataSource(
+    usdGen::UsdGenLookDesc const &look)
+{
+    static TfToken const baseColor("baseColor");
+    // The transmitted light is tinted by what the hair absorbs, so the cap
+    // needs the same root albedo the strands use.
+    GfVec3f root = look.rootColor;
+    if (!look.rampColors.empty()) root = look.rampColors.front();
+    TfToken const names[] = {baseColor};
+    HdDataSourceBaseHandle const values[] = {_Param(root)};
+    return _SurfaceMaterial(
+        ScalpShadowIdentifier(),
+        HdRetainedContainerDataSource::New(1, names, values));
 }
 
 }  // namespace usdGenImaging

@@ -95,10 +95,15 @@ inline GfVec3f RotateGrowDirection(GfVec3f direction, GfVec3f axis,
 struct UsdGenGrowCapture final : public UsdGenCapturePayload
 {
     // perCurve[c] = target length of curve c (kSaltGrow draw applied).
+    // liftPerCurve/dirPerCurve hold the connected per-strand lift (degrees)
+    // and directionVector; empty when those controls are plain literals, in
+    // which case the scalar lift/directionVector below apply to every curve.
     int cvCount = 0;
     float lift = 0.0f;
     TfToken direction = TfToken("surfaceNormal");
     GfVec3f directionVector{0.0f, 1.0f, 0.0f};
+    VtFloatArray liftPerCurve;
+    VtVec3fArray dirPerCurve;
     uint64_t upstreamTopologyVersion = 0;
     uint64_t upstreamValueVersion = 0;
     uint32_t upstreamCurves = 0;
@@ -288,6 +293,24 @@ bool UsdGenGrowOp::Capture(
         if (diag) diag->Error("UsdGenGrow: usdGen:length and lengthRandom must be finite");
         return false;
     }
+    // Connected per-strand controls sample each curve's root below; the
+    // literals above remain the $value fallback. GetDouble already folds a
+    // groom-domain expression into `length`/`lift`, so the fields below agree
+    // with the literals unless a primitive-domain expression is connected.
+    UsdGenParamField const lengthField =
+        p ? p->GetScalarField(TfToken("length"), length) : UsdGenParamField{length};
+    UsdGenParamField const liftField =
+        p ? p->GetScalarField(TfToken("lift"), lift) : UsdGenParamField{lift};
+    UsdGenParamField const randomField =
+        p ? p->GetScalarField(TfToken("lengthRandom"), 1.0) : UsdGenParamField{1.0};
+    UsdGenParamField const dirField =
+        p ? p->GetScalarField(TfToken("directionVector"), 0.0) : UsdGenParamField{0.0};
+    if ((randomField.connected && randomField.components != 2) ||
+        (dirField.connected && dirField.components != 3)) {
+        if (diag) diag->Error("UsdGenGrow: connected lengthRandom must be float2 and "
+                              "directionVector must be vector3f");
+        return false;
+    }
 
     uint32_t const R = upstream.totalCurves;
 
@@ -387,17 +410,71 @@ bool UsdGenGrowOp::Capture(
         return false;
     }
 
-    // Per-curve target lengths: len = length * (lo + (hi-lo) * Draw01).
+    // The per-curve loop samples connected controls at each curve's root CV,
+    // so the upstream point topology is established here, before it.
+    if (upstream.px.size() != upstream.totalCvs || upstream.py.size() != upstream.totalCvs ||
+        upstream.pz.size() != upstream.totalCvs) {
+        if (diag) diag->Error("UsdGenGrow: upstream point plane cardinality does not match its CV topology");
+        return false;
+    }
+    std::vector<uint32_t> rootSpans(size_t(R) + 1, 0);
+    if (upstream.cvOffsets.empty()) {
+        if (R && upstream.totalCvs % R != 0) {
+            if (diag) diag->Error("UsdGenGrow: upstream CV topology is non-uniform without offsets");
+            return false;
+        }
+        uint32_t const perCurve = R ? upstream.totalCvs / R : 0;
+        for (uint32_t c = 0; c != R; ++c) rootSpans[c + 1] = rootSpans[c] + perCurve;
+    } else {
+        if (upstream.cvOffsets.size() != size_t(R) + 1 || upstream.cvOffsets.front() != 0 ||
+            upstream.cvOffsets.back() != static_cast<int>(upstream.totalCvs)) {
+            if (diag) diag->Error("UsdGenGrow: upstream CV topology has invalid ragged offsets");
+            return false;
+        }
+        for (uint32_t c = 0; c != R; ++c) {
+            int const first = upstream.cvOffsets[c], last = upstream.cvOffsets[c + 1];
+            if (first < 0 || last <= first) {
+                if (diag) diag->Error("UsdGenGrow: upstream CV topology has an empty/decreasing curve");
+                return false;
+            }
+            rootSpans[c] = static_cast<uint32_t>(first);
+            rootSpans[c + 1] = static_cast<uint32_t>(last);
+        }
+    }
+
+    // Per-curve target lengths: len = length_c * (lo_c + (hi_c-lo_c) * Draw01),
+    // where the _c values are the connected per-strand controls sampled at the
+    // curve's root, or the literals when nothing is connected. Lift and the
+    // direction vector bake the same way so the rest channel below and
+    // Evaluate agree without re-reading expressions per frame.
     cap.perCurve.clear();
+    cap.liftPerCurve.clear();
+    cap.dirPerCurve.clear();
     if (R) {
         cap.perCurve.resize(R);
+        if (liftField.connected) cap.liftPerCurve.resize(R);
+        if (dirField.connected) cap.dirPerCurve.resize(R);
         auto const *ids = upstream.curveId.empty() ? nullptr : upstream.curveId.data();
         auto *len = cap.perCurve.data();
         for (uint32_t c = 0; c < R; ++c) {
+            uint32_t const root = rootSpans[c];
+            double const lengthC = lengthField.Value(c, root);
+            double loC = lo, hiC = hi;
+            if (randomField.connected) {
+                loC = randomField.Value(c, root, 0);
+                hiC = randomField.Value(c, root, 1);
+                if (loC > hiC) std::swap(loC, hiC);
+            }
+            if (!std::isfinite(lengthC) || lengthC < 0.0 ||
+                !std::isfinite(loC) || loC < 0.0 || !std::isfinite(hiC) || hiC < 0.0) {
+                if (diag) diag->Error("UsdGenGrow: per-strand length and lengthRandom "
+                                      "must be finite and >= 0");
+                return false;
+            }
             float const r = UsdGenDraw01(int(ctx.seed), ids ? ids[c] : 0,
                                          kSaltGrow);
-            double const random = lo + static_cast<double>(r) * (hi - lo);
-            double const target = length * random;
+            double const random = loC + static_cast<double>(r) * (hiC - loC);
+            double const target = lengthC * random;
             float const targetFloat = static_cast<float>(target);
             if (!std::isfinite(target) || target < 0.0 ||
                 !std::isfinite(targetFloat) || targetFloat < 0.0f) {
@@ -405,6 +482,28 @@ bool UsdGenGrowOp::Capture(
                 return false;
             }
             len[c] = targetFloat;
+            if (liftField.connected) {
+                double const liftC = liftField.Value(c, root);
+                if (!std::isfinite(liftC) || liftC < -90.0 || liftC > 90.0) {
+                    if (diag) diag->Error("UsdGenGrow: per-strand lift must be finite "
+                                          "and in [-90, 90] degrees");
+                    return false;
+                }
+                cap.liftPerCurve[c] = static_cast<float>(liftC);
+            }
+            if (dirField.connected) {
+                GfVec3f const dirC(
+                    static_cast<float>(dirField.Value(c, root, 0)),
+                    static_cast<float>(dirField.Value(c, root, 1)),
+                    static_cast<float>(dirField.Value(c, root, 2)));
+                if (!std::isfinite(dirC[0]) || !std::isfinite(dirC[1]) ||
+                    !std::isfinite(dirC[2])) {
+                    if (diag) diag->Error("UsdGenGrow: per-strand directionVector "
+                                          "must be finite");
+                    return false;
+                }
+                cap.dirPerCurve[c] = dirC;
+            }
         }
     }
 
@@ -437,46 +536,22 @@ bool UsdGenGrowOp::Capture(
         if (diag) diag->Error("UsdGenGrow: upstream root-frame plane contains non-finite values");
         return false;
     }
-    if (upstream.px.size() != upstream.totalCvs || upstream.py.size() != upstream.totalCvs ||
-        upstream.pz.size() != upstream.totalCvs) {
-        if (diag) diag->Error("UsdGenGrow: upstream point plane cardinality does not match its CV topology");
-        return false;
-    }
-    std::vector<uint32_t> rootSpans(size_t(R) + 1, 0);
-    if (upstream.cvOffsets.empty()) {
-        if (R && upstream.totalCvs % R != 0) {
-            if (diag) diag->Error("UsdGenGrow: upstream CV topology is non-uniform without offsets");
-            return false;
-        }
-        uint32_t const perCurve = R ? upstream.totalCvs / R : 0;
-        for (uint32_t c = 0; c != R; ++c) rootSpans[c + 1] = rootSpans[c] + perCurve;
-    } else {
-        if (upstream.cvOffsets.size() != size_t(R) + 1 || upstream.cvOffsets.front() != 0 ||
-            upstream.cvOffsets.back() != static_cast<int>(upstream.totalCvs)) {
-            if (diag) diag->Error("UsdGenGrow: upstream CV topology has invalid ragged offsets");
-            return false;
-        }
-        for (uint32_t c = 0; c != R; ++c) {
-            int const first = upstream.cvOffsets[c], last = upstream.cvOffsets[c + 1];
-            if (first < 0 || last <= first) {
-                if (diag) diag->Error("UsdGenGrow: upstream CV topology has an empty/decreasing curve");
-                return false;
-            }
-            rootSpans[c] = static_cast<uint32_t>(first);
-            rootSpans[c + 1] = static_cast<uint32_t>(last);
-        }
-    }
+    // Point cardinality and rootSpans were established before the per-curve
+    // loop so connected controls sample each curve's root.
     VtVec3fArray grownRest(buf.totalCvs);
     for (uint32_t c = 0; c != R; ++c) {
         uint32_t const rootIndex = rootSpans[c];
         GfVec3f root = upstream.rest.empty() ? GfVec3f(upstream.px[rootIndex], upstream.py[rootIndex], upstream.pz[rootIndex])
                                               : upstream.rest[rootIndex];
-        GfVec3f dir = cap.direction == sVector ? cap.directionVector
+        GfVec3f const dirLiteral = cap.dirPerCurve.size() == R
+            ? cap.dirPerCurve[c] : cap.directionVector;
+        GfVec3f dir = cap.direction == sVector ? dirLiteral
             : (upstream.rootN.empty() ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootN[c]);
         dir = NormalizeGrowDirection(dir);
         GfVec3f const axis = upstream.rootB.empty()
             ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootB[c];
-        dir = RotateGrowDirection(dir, axis, cap.lift);
+        float const liftC = cap.liftPerCurve.size() == R ? cap.liftPerCurve[c] : cap.lift;
+        dir = RotateGrowDirection(dir, axis, liftC);
         for (uint32_t i = 0; i != static_cast<uint32_t>(cap.cvCount); ++i) {
             float const t = cap.cvCount > 1 ? float(i) / float(cap.cvCount - 1) : 0.0f;
             float const distance = cap.perCurve[c] * t;
@@ -517,21 +592,29 @@ void UsdGenGrowOp::Evaluate(
         // TfToken("literal") per curve re-hashes + re-probes the global
         // token table 100k times per run (measured: most of the 7 ms
         // single-thread grow sweep).
+        // liftPerCurve/dirPerCurve are whole-buffer capture payloads like
+        // perCurve: chunk views pre-offset the plane arrays only, so index by
+        // absolute curve.
+        size_t const absolute = view->desc->firstCurve + c;
         GfVec3f dir;
         if (cap.direction == sVector) {
-            dir = cap.directionVector;
+            dir = !cap.dirPerCurve.empty() && absolute < cap.dirPerCurve.size()
+                ? cap.dirPerCurve[absolute] : cap.directionVector;
         } else {  // surfaceNormal
             dir = view->rootN ? view->rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
         }
         GfVec3f d = NormalizeGrowDirection(dir);
         GfVec3f const axis = view->rootB ? view->rootB[c]
             : GfVec3f(0.0f, 1.0f, 0.0f);
-        d = RotateGrowDirection(d, axis, cap.lift);
+        float const liftC = !cap.liftPerCurve.empty() &&
+            absolute < cap.liftPerCurve.size()
+            ? cap.liftPerCurve[absolute] : cap.lift;
+        d = RotateGrowDirection(d, axis, liftC);
         // perCurve is a whole-buffer capture payload: chunk views pre-offset
         // the plane/per-curve arrays only, so index by absolute curve.
         const float targetLen = cap.perCurve.empty()
             ? 0.0f
-            : cap.perCurve[view->desc->firstCurve + c];
+            : cap.perCurve[absolute];
         for (uint32_t i = 0; i < view->cvCount; ++i) {
             const float t = i * invSpan;
             const float s = targetLen * t;

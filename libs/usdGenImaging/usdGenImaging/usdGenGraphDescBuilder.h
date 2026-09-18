@@ -69,7 +69,10 @@ UsdGenGraphDescCapture CaptureGraphDescFromHydra(
 ///    indices (02 §2.20 rules 1-2);
 ///  - usdGen:guides / usdGen:curves / usdGen:frozen:curves yield
 ///    UsdGenCurveSetDesc entries (rest points at UsdTimeCode::Default(),
-///    via the UsdGenCurveAPI adapter where applied).
+///    via the UsdGenCurveAPI adapter where applied);
+///  - usdGen:colliders on UsdGenCollide appends Mesh/GeomSubset targets to
+///    that node's surfaces AFTER the inherited bound surface (front/root
+///    semantics unchanged); their descs join the shared surface pool.
 ///
 /// Fill-in policy: C1 schema defaults (docs/freezes/C1.md) are materialized
 /// for missing properties so the engine's param partition (S14 union rule)

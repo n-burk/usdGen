@@ -8,7 +8,14 @@
 namespace usdGen::expr {
 // SeExpr2 performs numeric math in FP; destination integer/bool conversion is
 // deferred to the GPU boundary. int64/uint64 results are exact only through 2^53.
-struct FrontendOptions { Domain domain = Domain::Groom; ScalarType destination = ScalarType::Float32; uint32_t components = 1; };
+struct FrontendOptions {
+    Domain domain = Domain::Groom;
+    ScalarType destination = ScalarType::Float32;
+    uint32_t components = 1;
+    /// Compiles a geoSampler() element expression: $Q/$Qdist are admitted and
+    /// sampler calls (geoSampler, ptex) are not.
+    bool samplerElement = false;
+};
 class Program {
 public:
     Program(); ~Program(); Program(Program&&) noexcept; Program& operator=(Program&&) noexcept;
@@ -35,8 +42,8 @@ struct FunctionInfo {
     bool variadic = false;
     std::string signature;   // e.g. "clamp(x, lo, hi)"
     std::string doc;         // one line
-    /// math | noise | vector | color | curve | control. The editor's function
-    /// browser groups on this.
+    /// math | noise | vector | color | curve | control | sampling. The editor's
+    /// function browser groups on this.
     std::string category;
     /// 1 for a scalar result, 3 for a vector/colour result.
     uint32_t components = 1;

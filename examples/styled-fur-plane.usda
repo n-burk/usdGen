@@ -1,0 +1,173 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Scatter/Grow on a unit plane followed by the three styling operators with CPU kernels: Noise, Length and Width."
+)
+
+# Styling on top of scatter-grow-plane.usda. Same plane, same generator pair,
+# then the stylers that have kernels today (README: Noise/Length/Width).
+#
+# Execution order is the reverse of namespace order under Ops, so read the
+# chain bottom-up:  scatter -> grow -> noise -> length -> width (terminal).
+# No usdGen:input relationships are authored: the compiler derives every edge
+# from that composed order, so each operator consumes the one below it.
+#
+# Same constraints as the smaller example: description under a plain Xform
+# (a UsdGenGroom selects the CUDA lane, which cannot be displayed by stock
+# Storm yet), usdGen:rest:source left at "default". Key + Sky lights (below)
+# are needed now: the default hair material is physically based and reads
+# near-black under only usdrecord's camera headlight.
+#
+# Noise displaces CVs along the root normal. Strands grown straight along
+# that normal would only slide along themselves (and preserveLength would
+# undo even that), so Grow leans them with a literal direction vector; the
+# lean is what makes the noise show as waviness.
+#
+# View it:   .\bin\launch_usdview.ps1 examples\styled-fur-plane.usda
+# Record it: .\bin\record_usd.ps1 -Scene examples\styled-fur-plane.usda `
+#                -Output out.png -Camera /World/Cam
+
+def Xform "World"
+{
+    # Eye (1.9, 1.3, 2.1) looking at (0.5, 0.12, 0.5), Y up.
+    def Camera "Cam"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = ( (0.752577, 0, -0.658505, 0), (-0.319565, 0.874354, -0.365217, 0), (0.575766, 0.485289, 0.658018, 0), (1.9, 1.3, 2.1, 1) )
+        float2 clippingRange = (0.05, 50)
+        float focalLength = 35
+        float horizontalAperture = 24
+        float verticalAperture = 18
+    }
+
+    # Key + a DomeLight fill so the physically based default hair material
+    # (a UE port) doesn't render near-black under only usdrecord's camera
+    # headlight. inputs:normalize = 1 is required on the DistantLight: HdSt
+    # otherwise multiplies intensity by its (tiny, 0.53deg-default) solid
+    # angle, so an un-normalized "intensity 3" comes out around 2e-4 and the
+    # light is effectively invisible next to the headlight.
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 10
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-10, 40, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 1, 1)
+    }
+
+    def Mesh "Plane" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        color3f[] primvars:displayColor = [(0.25, 0.25, 0.28)]
+    }
+
+    def Xform "Groom"
+    {
+        def UsdGenDescription "Fur"
+        {
+            rel usdGen:surface = </World/Plane>
+            uniform token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.004
+
+            def Scope "Ops"
+            {
+                # Terminal. Sets the strand profile: base width with a
+                # root->tip ramp that thins the tip to 20%.
+                def UsdGenWidth "width"
+                {
+                    float usdGen:width = 0.006
+                    float2[] usdGen:width:knots = [(0, 1), (0.6, 0.8), (1, 0.2)]
+                    uniform token usdGen:width:interpolation = "catmullRom"
+                    bool usdGen:replace = true
+                }
+
+                # Scales every strand by 1.2, then by a per-strand random
+                # factor in [0.6, 1.0]; keeps the CV parametrisation.
+                def UsdGenLength "length"
+                {
+                    uniform token usdGen:length:mode = "scale"
+                    float usdGen:length:value = 1.2
+                    float2 usdGen:length:random = (0.6, 1.0)
+                    uniform token usdGen:length:method = "scale"
+                    uniform token usdGen:rebuild = "keepParam"
+                }
+
+                # Displaces CVs along the root normal with 2-octave noise.
+                # The magnitude ramp starts at 0 so roots stay on the surface
+                # and the tips move the most; preserveLength keeps segment
+                # lengths so the strands bend rather than stretch.
+                def UsdGenNoise "noise"
+                {
+                    int usdGen:seed = 7
+                    float usdGen:noise:magnitude = 0.03
+                    float2[] usdGen:noise:magnitude:knots = [(0, 0), (0.5, 0.4), (1, 1)]
+                    uniform token usdGen:noise:magnitude:interpolation = "catmullRom"
+                    float usdGen:noise:frequency = 2.5
+                    float usdGen:noise:correlation = 0.5
+                    int usdGen:noise:octaves = 2
+                    float usdGen:noise:lacunarity = 2
+                    float usdGen:noise:gain = 0.5
+                    bool usdGen:cumulative = false
+                    float usdGen:preserveLength = 1
+
+                    # usdGen:mask is the operator envelope: 1 applies the
+                    # frizz fully, 0 leaves the upstream curves bit-for-bit
+                    # untouched. Set it to 0 to mute just this operator's
+                    # effect without changing the topology it publishes.
+                    #
+                    # The envelope can also be driven per curve by connecting
+                    # it to a UsdGenExpression, naming either the prim or its
+                    # output:
+                    #
+                    #   float usdGen:mask.connect = </.../Expressions/frizzMask>
+                    #
+                    # Connected parameters work on BOTH lanes, including the
+                    # CPU reference lane this description cooks on. Left as a
+                    # literal here to keep this example about the styling
+                    # operators; expression-width-plane.usda is the worked
+                    # expression example, and it displays in usdview.
+                    float usdGen:mask = 1
+                }
+
+                # More segments than the minimal example so the noise has
+                # CVs to bend, and a leaning direction (see the header note).
+                def UsdGenGrow "grow"
+                {
+                    int usdGen:seed = 19
+                    int usdGen:segments = 12
+                    float usdGen:length = 0.3
+                    float2 usdGen:lengthRandom = (0.8, 1.2)
+                    uniform token usdGen:direction = "vector"
+                    vector3f usdGen:directionVector = (0.35, 1, 0.2)
+                }
+
+                # Runs first: random roots over the plane's area.
+                def UsdGenScatter "scatter"
+                {
+                    int usdGen:seed = 41
+                    float usdGen:density = 800
+                }
+            }
+        }
+    }
+}

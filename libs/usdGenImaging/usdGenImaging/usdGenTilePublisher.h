@@ -28,12 +28,14 @@
 
 #include "usdGenImaging/api.h"
 #include "usdGen/curveBuffer.h"
+#include "usdGen/graphDesc.h"
 
 #include "pxr/pxr.h"
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/usd/sdf/path.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -85,7 +87,7 @@ public:
     /// The synthetic default-material prim (06 §4.4 `material_storm` slot):
     /// <description>/__usdGenRender/material_storm. Tiles bind it whenever
     /// the description authors no material of its own, so Storm shades hair
-    /// with the UsdGenHairPreview glslfx instead of falling back to flat
+    /// with the UsdGenHairStrands glslfx instead of falling back to flat
     /// displayColor. UsdGenGroomSceneIndex synthesizes the prim.
     static SdfPath MaterialPath(SdfPath const &descriptionPath);
 
@@ -94,13 +96,80 @@ public:
     /// sees the tile path.
     static SdfPath DefaultMaterialPath(SdfPath const &tilePath);
 
+    /// The Sdr identifier the synthetic default material binds:
+    /// `UsdGenHairStrands`. See the .cpp for why the opaque variant and not
+    /// the translucent one.
+    static TfToken const &DefaultMaterialIdentifier();
+
     /// The `material` prim data source for MaterialPath(): one node named
-    /// `surface` whose nodeIdentifier is the Sdr id `UsdGenHairPreview`
+    /// `surface` whose nodeIdentifier is DefaultMaterialIdentifier()
     /// (bind by identifier, never an asset path — see
     /// usdGenShaders/resources/hairLook.usda), wired to the universal
     /// render context's `surface` terminal. Parameters are left unset so the
-    /// C5-frozen Sdr defaults apply.
+    /// shader def's Sdr defaults apply.
     static HdContainerDataSourceHandle BuildDefaultMaterialDataSource();
+
+    /// The same material carrying the description's `usdGen:look:*`.
+    ///
+    /// Without this the default-bound material only ever showed the shader's
+    /// own defaults: the tile bakes `look.rootColor` into displayColor (which
+    /// the shader reads as the root albedo), but the TIP colour, the ramp
+    /// exponent and the hue/value jitter live only on the description and had
+    /// no route to Storm — so an authored dark-brown look rendered with the
+    /// shader's light-brown tip.
+    ///
+    /// A multi-stop `usdGen:look:colorRamp` cannot be expressed in the
+    /// shader's two-colour ramp; its first and last stops are used.
+    static HdContainerDataSourceHandle BuildDefaultMaterialDataSource(
+        usdGen::UsdGenLookDesc const &look);
+
+    /// Digest of exactly the look fields BuildDefaultMaterialDataSource()
+    /// reads. UsdGenGroomSceneIndex dirties the synthetic material prim when
+    /// it changes: the material is built from its path alone in GetPrim(), so
+    /// nothing else would announce a look edit to Hydra.
+    static uint64_t DefaultMaterialLookDigest(usdGen::UsdGenLookDesc const &look);
+
+    /// The synthetic value-preview materials (usdGen:preview:*):
+    /// <description>/__usdGenRender/material_preview (lit) and
+    /// material_preview_flat. The engine binds one of them
+    /// (usdGen::UsdGenPreviewMaterialPath) on every tile of a previewing
+    /// description; UsdGenGroomSceneIndex serves whichever the tiles bind.
+    static SdfPath PreviewMaterialPath(SdfPath const &descriptionPath, bool flat);
+
+    /// True when `path` is one of the two preview materials of
+    /// `descriptionPath`; `flat` says which.
+    static bool IsPreviewMaterialPath(SdfPath const &descriptionPath,
+                                      SdfPath const &path, bool *flat = nullptr);
+
+    /// The `material` prim data source of a preview material: the
+    /// `UsdGenValuePreview` glslfx, which shows displayColor as it is
+    /// (`shading` 0) or darkened where strands turn away (`shading` 1).
+    static HdContainerDataSourceHandle BuildPreviewMaterialDataSource(bool flat);
+
+    /// The scalp-shadow cap: <description>/__usdGenRender/scalpShadow, a
+    /// synthetic Mesh over the haired part of the groom's emitting surface
+    /// that darkens whatever skin shader is underneath by the fraction of
+    /// light the hair above it absorbs. Stock Storm casts no shadows from any
+    /// UsdLux light, so this is the only route to hair-on-scalp shadowing, and
+    /// it works under usdview's headlight + dome default lighting.
+    static SdfPath ScalpShadowPath(SdfPath const &descriptionPath);
+
+    /// Its material, <description>/__usdGenRender/material_scalpShadow,
+    /// binding the `UsdGenScalpShadow` glslfx.
+    static SdfPath ScalpShadowMaterialPath(SdfPath const &descriptionPath);
+    static TfToken const &ScalpShadowIdentifier();
+
+    /// The `mesh` data source for ScalpShadowPath(): topology, points,
+    /// normals and the same furTauP/furTauN vertex primvars a tile carries.
+    /// The cap is deliberately given no primOrigin, so picking passes through
+    /// it to whatever the user authored underneath.
+    static HdContainerDataSourceHandle BuildScalpShadowDataSource(
+        usdGen::UsdGenScalpShadowPublication const &cap, int64_t generation);
+
+    /// The `material` data source for ScalpShadowMaterialPath(), carrying the
+    /// look's hair colour so light hair leaves a tinted shadow.
+    static HdContainerDataSourceHandle BuildScalpShadowMaterialDataSource(
+        usdGen::UsdGenLookDesc const &look);
 
     /// The reserved name of the synthetic default material prim.
     static TfToken const &MaterialName()

@@ -734,6 +734,16 @@ interpolated shape, and the stack editor flags it "replaces upstream shape".
 
 ### 2.3 `UsdGenGuideInterpolate` — hair from guides (A7 §9.1 G6)
 
+> **Implemented 2026-09-16, CPU lane** (`libs/usdGen/usdGen/ops/guideInterpolate.cpp`).
+> What shipped differs from the table below: capture resolves the whole
+> result; the region is a connectable `float usdGen:region` (a `ptex()` region
+> map or a `geoSampler()` voronoi over the guide roots) read at each strand
+> root and, for a guide, at the strand rooted nearest it, replacing
+> `usdGen:mask:region`; `usdGen:clumpCrossover` is `usdGen:regionCrossover`;
+> a guide's root normal is its authored `usdGen:rootFrame`, else the nearest
+> strand's; `blendInSkinSpace` turns guide shapes by the minimal rotation
+> between root normals; no `length:source`. `schema.usda` is normative.
+
 **Purpose.** The production "curve generator": fill a root set with curves interpolated from a sparse
 guide set, in the guides' root frames, with region and parting constraints.
 
@@ -840,6 +850,17 @@ row in `appendix-A-evidence-ledger.md` yet and should get one).
 **Purpose.** Transport rest-space curves onto the deformed surface, whoever deformed it — usdRig,
 UsdSkel, or any other modifier upstream in the scene index (R5, S1, S3).
 
+> **Shipped (2026-09-16): an RBF operator on two lanes.** `schema.usda` is normative; `usdGen:mode`,
+> `twistAware` and `preserveShape*` were removed (C1.md §9). The CUDA lane samples the bound
+> surface (`cudaExecution.cpp`). The CPU lane (`libs/usdGen/usdGen/ops/deform.cpp`,
+> `ops/rbfField.{h,cpp}`) is driven by animated curves: `rel usdGen:guides` names one BasisCurves
+> prim with `UsdGenCurveAPI`; up to `usdGen:rbfSamples` of its CVs (farthest-point sampled) are
+> bound at rest and solved at their current positions, and every incoming CV moves by the cubic
+> RBF + affine field. `usdGen:lockRoots` shifts each strand back by the field at its root. Each lane
+> refuses the other's driver. Capture resolves the result and its digest carries the driver
+> content, so animated drivers re-capture per frame. Example: `examples/rbf-guides-plane.usda`;
+> test: `tests/testUsdGenRbfDeform.cpp`.
+
 | Property | Type | Default | Doc |
 |---|---|---|---|
 | `usdGen:mode` | `uniform token` | `"rigidFrame"` | `rigidFrame` (v1, per-root frame transport) \| `rbf` (v2, an Unreal-style displacement field from ≤ `rbfSamples` surface samples) \| `pointDeform` (v2, per-CV weights over the nearest surface points). An unimplemented mode is a compile error naming the prim and the mode, never a silent downgrade (`05-static-curves-and-deformation.md` §4.1) |
@@ -925,6 +946,17 @@ multiplies into its resolved mask. A `sculpt:epoch` mismatch is a badge plus one
 "Rebase sculpt" action that re-matches by nearest root UV (ADR §2.3; rebase itself is v2).
 
 ### 2.8 `UsdGenClump` — the operator the request is really about (A7 §9.2 S1)
+
+> **Implemented 2026-09-16, CPU lane** (`libs/usdGen/usdGen/ops/clump.cpp`).
+> What shipped is a subset of the table below: amount (connectable, per CV),
+> profile ramp, a connectable `usdGen:clump:map` (strands with equal map
+> values form one clump — a Ptex clump map or a voronoi), density-scattered
+> centres otherwise, size (reach), levels / sizeReduction /
+> tightnessReduction (goal feedback always on), method, stray, preserveLength
+> and `clumpId_<level>`. Capture resolves the whole result and the envelope is
+> `usdGen:mask`. `centers`, `clump:seed`, `goalFeedback`, `crossover`,
+> `volumize`, `copy*`, `cut`, `flatness`, `offset`, `curl:*` and `noise:*` were
+> removed rather than left as dead knobs (docs/freezes/C1.md §9).
 
 **Purpose.** Pull hairs toward clump centres, with the full XGen parameter set and Houdini's fractal
 multi-level scheme. Two `UsdGenClump` prims in one chain at different sizes are the canonical groom.

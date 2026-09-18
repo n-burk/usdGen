@@ -178,8 +178,9 @@ std::string ShortestCall(std::string const &signature)
             parameter.find('=') != std::string::npos || parameter.front() == '[') break;
         const bool isVector = parameter.rfind("vector ", 0) == 0 ||
                               parameter.rfind("color ", 0) == 0;
+        const bool isString = parameter.rfind("string ", 0) == 0;
         if (written++) call += ", ";
-        call += isVector ? "[1, 1, 1]" : "0.5";
+        call += isString ? "\"0.5\"" : isVector ? "[1, 1, 1]" : "0.5";
     }
     return call + ")";
 }
@@ -218,7 +219,9 @@ void CheckUnsupportedFunctions()
     // and must be documented and categorised.
     for (auto const &info : Frontend::SupportedFunctions()) {
         const std::string call = ShortestCall(info.signature);
-        auto result = Frontend::Compile(call, {Domain::Groom, ScalarType::Float32, 1});
+        // The sampling functions read at the element, never at groom rate.
+        const Domain domain = info.category == "sampling" ? Domain::Primitive : Domain::Groom;
+        auto result = Frontend::Compile(call, {domain, ScalarType::Float32, 1});
         if (!result.ok) {
             ++g_failures;
             std::printf("FAIL: SupportedFunctions entry does not lower as '%s': %s\n",
@@ -229,7 +232,8 @@ void CheckUnsupportedFunctions()
               "SupportedFunctions entry is documented: " + info.name);
         Check(info.category == "math" || info.category == "noise" ||
               info.category == "vector" || info.category == "color" ||
-              info.category == "curve" || info.category == "control",
+              info.category == "curve" || info.category == "control" ||
+              info.category == "sampling",
               "SupportedFunctions entry is categorised: " + info.name);
         Check(info.components == 1 || info.components == 3,
               "SupportedFunctions entry declares a result width: " + info.name);
@@ -238,7 +242,7 @@ void CheckUnsupportedFunctions()
         std::string tooFew = info.name + "(";
         for (uint32_t i = 0; i + 1 < info.minArity; ++i) tooFew += (i ? ", 1" : "1");
         tooFew += ")";
-        Check(!Frontend::Compile(tooFew, {Domain::Groom, ScalarType::Float32, 1}).ok,
+        Check(!Frontend::Compile(tooFew, {domain, ScalarType::Float32, 1}).ok,
               "too few arguments is rejected: " + tooFew);
     }
 }

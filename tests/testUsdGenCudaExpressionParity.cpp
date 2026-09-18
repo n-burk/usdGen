@@ -1,6 +1,6 @@
 // CPU-vs-CUDA expression parity, bit for bit.
 //
-// The scene is the shape the rewritten plan/examples/expression-width-plane.usda
+// The scene is the shape the rewritten examples/expression-width-plane.usda
 // authors on a Width DAG: a POINT-domain expression on usdGen:width
 //
 //     $value * fit(smoothstep($t, 0.0, 1.0), 0, 1, 1.0, 0.15)

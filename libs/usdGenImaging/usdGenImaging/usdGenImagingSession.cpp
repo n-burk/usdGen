@@ -9,6 +9,7 @@
 #include "usdGenImaging/imageMapCache.h"
 
 #include "usdGen/generationStore.h"
+#include "usdGen/maps/ptexMap.h"
 #include "usdGen/session.h"
 
 #include "pxr/pxr.h"
@@ -727,6 +728,9 @@ bool UsdGenSessionStore::ReloadMaps()
     auto sessions = LiveSessions();
     return state->owner.PostCommand([sessions=std::move(sessions)] {
         (void)InvalidateUsdGenImageMapCache();
+        // Ptex files are read through their own process cache; a reload must
+        // re-read them too (the new textureGeneration reopens every map).
+        usdGen::UsdGenPtexTexture::PurgeCache();
         for (auto const& session : sessions) {
             if (!session->ReloadMaps()) session->MarkNeedsDesc();
         }

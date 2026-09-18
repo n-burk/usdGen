@@ -78,6 +78,7 @@ UsdGenGraph::RoutingSnapshot() const
         copy.curveRefs = node.curveRefs;
         copy.mapRefs = node.mapRefs;
         copy.mapBindingRefs = node.mapBindingRefs;
+        copy.geometryRefs = node.geometryRefs;
         if (node.desc) {
             copy.path = node.desc->path;
         }
@@ -262,6 +263,18 @@ void UsdGenGraph::DirtyCurves(SdfPath const &curvePrim, uint64_t generation)
         for (SdfPath const &c : n.curveRefs)
             if (c == curvePrim) {
                 MarkNode(n.id, UsdGenDirtyCapture);
+                break;
+            }
+    }
+}
+
+void UsdGenGraph::DirtyGeometry(SdfPath const &prim)
+{
+    for (auto &nPtr : _nodes) {
+        if (!nPtr) continue;
+        for (SdfPath const &ref : nPtr->geometryRefs)
+            if (ref.HasPrefix(prim)) {
+                MarkNode(nPtr->id, UsdGenDirtyCapture);
                 break;
             }
     }

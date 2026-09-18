@@ -23,6 +23,8 @@ namespace usdGenImaging {
 
 /// Stage-sourced staging, fenced to T0/offline/tests (unit tests, fixture
 /// authoring) per V2-11; the production path is BuildGraphDescFromHydra.
+/// UsdGenCollide's usdGen:colliders targets append to that node's surfaces
+/// after the inherited bound surface (same rule as the Hydra builder).
 /// Carries the V2-9a absence semantics by hand: Hydra data sources carry
 /// only authored opinions, so stage reads whose fallback differs from the
 /// desired absent-value must gate on HasAuthoredValueOpinion() (notably

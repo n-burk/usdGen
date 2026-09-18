@@ -1,0 +1,203 @@
+-- glslfx version 0.1
+
+//
+// usdGenScalpShadow.glslfx   (hair shadowing the skin it grows out of)
+//
+// Stock Storm casts no shadow from any UsdLux light: `inputs:shadow:enable` is
+// never read (HdStLight::_PrepareSimpleLight asks for `hasShadow`, which no
+// UsdLux prim authors), nothing in usdImaging ever supplies an
+// HdxShadowMatrixComputation, and HdxTaskController::SetEnableShadows has no
+// callers, so HdxShadowTask is dropped from the task list outright. Hair
+// therefore cannot shadow the scalp through the renderer, and the gaps between
+// clumps show fully lit skin -- the single largest remaining difference from
+// the Unreal reference, where the scalp under hair is dark.
+//
+// So the engine publishes the shadow as geometry. UsdGenGroomSceneIndex adds
+// one synthetic Mesh, <description>/__usdGenRender/scalpShadow: the haired part
+// of the groom's emitting surface, lifted a hair's breadth along its own
+// normal, carrying the same furTauP/furTauN world-axis optical depths a strand
+// carries (libs/usdGen/usdGen/furOcclusion.cpp). This shader turns those into
+// the fraction of the incident light the hair above absorbs, and writes it as
+// black with that alpha -- so the translucent pass MULTIPLIES whatever skin
+// shader the user bound underneath, rather than replacing it.
+//
+// Because the shadow comes from the volume and not from a light, it works
+// under usdview's default lighting (camera headlight + default dome), which is
+// where a shadow map would have nothing to offer at all.
+//
+// NOT part of the C5 freeze (docs/freezes/C5.md), which covers the `inputs:`
+// block of the three usdGenHairPreview* files only.
+//
+// Two deliberate differences from the strand shader:
+//
+//   * NO self shift. UsdGenStrandsHairCount's result goes in as it stands,
+//     without Unreal's `max(0, HairCount - 1)`. That shift removes the
+//     shading strand's own crossing; the receiver here is skin, not a fibre,
+//     and every crossing between it and the light is real.
+//
+//   * The darkening is a SCALAR. Physically the light that survives a blonde
+//     coat is warm, so the transmittance is a colour, but `over` blending
+//     gives one alpha and stock Storm has no multiply blend mode, so
+//     `dst * T` is only reachable per channel by reading dst. The luminance of
+//     T is used, which keeps the brightness exact and loses only the hue
+//     shift -- nothing at all for dark hair, where T is near zero anyway.
+//
+
+#import ./usdGenHairStrandsBsdf.glslfx
+
+-- configuration
+{
+    "techniques": {
+        "default": {
+            "surfaceShader": {
+                "source": [ "UsdGenStrands.Common",
+                            "UsdGenStrands.Bsdf",
+                            "UsdGenStrands.DualScattering",
+                            "UsdGenScalp.Surface" ]
+            }
+        }
+    },
+
+    "parameters": {
+        "baseColor": {
+            "default": [0.035, 0.018, 0.008],
+            "documentation": "The hair's linear albedo at the root, i.e. the absorption the transmitted light is attenuated by. The groom scene index fills this from the description's usdGen:look:*, so the shadow matches the coat above it."
+        },
+        "roughness": {
+            "default": 0.35,
+            "documentation": "The hair's roughness, used only to pick the average forward-scattering attenuation a_f. Matches the strand material's default."
+        },
+        "strength": {
+            "default": 1.0,
+            "documentation": "Scales the shadow: 0 leaves the skin exactly as its own material shaded it, 1 applies the transmittance the bake measured, above 1 deepens it. The bake itself is switched off with the USDGEN_SCALP_SHADOW environment setting, which publishes no cap at all."
+        },
+        "ambient": {
+            "default": 0.35,
+            "documentation": "The share of the hair's own albedo that bounces back down onto the skin, standing in for the hair-to-skin inter-reflection a single transmittance cannot carry. It is a FRACTION OF baseColor, not an absolute floor: a dark coat bounces almost nothing (0.35 of a 0.02-luminance coat floors the skin at 0.007, i.e. effectively not at all) while a blonde one bounces a lot. A constant floor here was measured clamping more than half the cap fragments of a dense dark coat, so the scalp could not go below 0.15 of the skin's own shading however much hair was above it. 0 removes the bounce entirely."
+        }
+    },
+
+    "attributes": {
+        "furTauP": {"type": "vec3", "default": [0.0, 0.0, 0.0]},
+        "furTauN": {"type": "vec3", "default": [0.0, 0.0, 0.0]}
+    },
+
+    "metadata": {
+        "materialTag": "translucent"
+    }
+}
+
+--- --------------------------------------------------------------------------
+-- glsl UsdGenScalp.Surface
+
+// Cosine-weighted taps for the dome: the normal plus a ring at 60 degrees off
+// it. Three axis depths alone would sample only the normal direction, and the
+// light a scalp point actually loses to hair arrives mostly off-axis, along
+// the coat.
+#define USDGEN_SCALP_RING 4
+#define USDGEN_SCALP_RING_COS 0.5
+
+// The average forward attenuation one crossing costs, from the same 39-term
+// fit of Unreal's scattering LUT the strand shader uses. The hair near a scalp
+// lies in its tangent plane rather than along its normal, so the light's angle
+// to the fibre is the tangential part of L, averaged over an isotropic comb
+// direction: E[|dot(T, L)|] = (2/pi) * sin(angle to the normal).
+vec3 UsdGenScalpTransmittance(vec3 albedo, float roughness, float cosNL,
+                              float hairCount)
+{
+    float sinThetaL = 0.63662 * sqrt(max(0.0, 1.0 - cosNL * cosNL));
+    vec3 af = min(vec3(0.99),
+                  UsdGenStrandsAvg3(
+                      UsdGenStrandsAvgForwardRT(roughness, sinThetaL), albedo));
+    return pow(max(af, vec3(1e-4)), vec3(max(hairCount, 0.0)));
+}
+
+vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
+{
+    vec3 P = Peye.xyz / (abs(Peye.w) > 1e-8 ? Peye.w : 1.0);
+    vec3 V = UsdGenStrandsSafeNormalize(-P, vec3(0.0, 0.0, 1.0));
+    vec3 N = UsdGenStrandsSafeNormalize(Neye, vec3(0.0, 0.0, 1.0));
+    // The cap is doubleSided and Storm does not flip a back face's normal, so
+    // a scalp seen from inside the head would weight every light by a negative
+    // cosine and never shadow anything.
+    if (dot(N, V) < 0.0) N = -N;
+
+    vec3 tauP = max(vec3(0.0), HdGet_furTauP());
+    vec3 tauN = max(vec3(0.0), HdGet_furTauN());
+    vec3 albedo = clamp(HdGet_baseColor().rgb, vec3(0.0), vec3(1.0));
+    float roughness = clamp(HdGet_roughness(), 1.0 / 255.0, 1.0);
+
+    vec3 survived = vec3(0.0);
+    float total = 0.0;
+
+#if NUM_LIGHTS > 0
+    for (int i = 0; i < GetLightCount(); ++i) {
+        LightSource light = GetLightSource(i);
+        float radiance = UsdGenStrandsLuminance(max(light.diffuse.rgb, vec3(0.0)));
+        if (radiance <= 0.0) continue;
+
+        if (light.isIndirectLight) {
+            // A cosine-weighted hemisphere about N, resolved through the same
+            // reconstruction a strand uses, so the dome loses light to hair
+            // the way a directional light does.
+            vec3 tangent = UsdGenStrandsSafeNormalize(
+                V - N * dot(V, N), vec3(1.0, 0.0, 0.0));
+            vec3 bitangent = UsdGenStrandsSafeNormalize(
+                cross(N, tangent), vec3(0.0, 1.0, 0.0));
+            float sinRing = sqrt(max(0.0, 1.0 - USDGEN_SCALP_RING_COS *
+                                                USDGEN_SCALP_RING_COS));
+            for (int tap = 0; tap <= USDGEN_SCALP_RING; ++tap) {
+                vec3 L = N;
+                float cosNL = 1.0;
+                if (tap > 0) {
+                    float phi = float(tap - 1) * (6.2831853 / float(USDGEN_SCALP_RING));
+                    L = N * USDGEN_SCALP_RING_COS +
+                        sinRing * (cos(phi) * tangent + sin(phi) * bitangent);
+                    cosNL = USDGEN_SCALP_RING_COS;
+                }
+                float weight = radiance * cosNL;
+                survived += weight * UsdGenScalpTransmittance(
+                    albedo, roughness, cosNL,
+                    UsdGenStrandsHairCount(L, tauP, tauN, 1.0));
+                total += weight;
+            }
+            continue;
+        }
+
+        vec3 L = UsdGenStrandsSafeNormalize(
+            light.position.xyz - P * light.position.w, vec3(0.0, 1.0, 0.0));
+        float cosNL = max(0.0, dot(N, L));
+        if (cosNL <= 0.0) continue;    // this light never reached the skin
+        float weight = radiance * cosNL *
+                       lightDistanceAttenuation(Peye, i) *
+                       lightSpotAttenuation(L, i);
+        if (weight <= 0.0) continue;
+        survived += weight * UsdGenScalpTransmittance(
+            albedo, roughness, cosNL,
+            UsdGenStrandsHairCount(L, tauP, tauN, 1.0));
+        total += weight;
+    }
+#endif
+
+    // Weighting each light by what it contributes to the skin is what makes one
+    // scalar multiply stand for a per-light shadow: it is the fraction of the
+    // incident light, not of any one source, that survived the coat.
+    vec3 transmittance = total > 0.0 ? survived / total : vec3(1.0);
+    // The bounce floor is a share of what the coat can actually return: light
+    // that reaches the skin after scattering off hair is bounded by the hair's
+    // own albedo, so a black coat has nothing to give back and must be allowed
+    // to go black.
+    vec3 bounce = clamp(HdGet_ambient(), 0.0, 1.0) * albedo;
+    transmittance = max(transmittance, bounce);
+    float survivedLuminance =
+        clamp(UsdGenStrandsLuminance(transmittance), 0.0, 1.0);
+    float alpha = clamp((1.0 - survivedLuminance) * max(HdGet_strength(), 0.0),
+                        0.0, 1.0);
+    // The cap is lifted off the skin along its normal, so at the silhouette it
+    // reaches a little past the skin's own outline and would paint a dark rim
+    // on the background. Fading it as the surface turns away removes that, and
+    // costs nothing real: at grazing angles what the camera sees is hair, not
+    // scalp.
+    alpha *= smoothstep(0.05, 0.35, dot(N, V));
+    return vec4(0.0, 0.0, 0.0, alpha);
+}

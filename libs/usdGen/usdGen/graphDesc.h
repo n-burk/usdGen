@@ -50,7 +50,48 @@ enum class UsdGenExecutionBackend : uint8_t {
 };
 
 struct UsdGenExpressionOutputDesc { TfToken name{"result"}; TfToken nativeType{"float"}; expr::ValueShape shape; };
-struct UsdGenExpressionDesc { SdfPath path; std::string source; std::vector<UsdGenExpressionOutputDesc> outputs; };
+
+/// One `input:<name>` relationship of a UsdGenExpression prim: the external
+/// data geoSampler("<name>", ...) and ptex("<name>") read. `targets` is the
+/// authored (forwarded) target list; the builder resolves it into gprims in
+/// UsdGenGraphDesc::geometries (a non-gprim target contributes its descendant
+/// gprims, in namespace order) and map prims in UsdGenGraphDesc::maps.
+struct UsdGenExpressionInputDesc
+{
+    TfToken       name;         // "guideCurves" for input:guideCurves
+    SdfPathVector targets;
+    SdfPathVector geometries;   // resolved gprim paths, in order
+    SdfPathVector maps;         // resolved UsdGenMap prim paths, in order
+};
+
+struct UsdGenExpressionDesc
+{
+    SdfPath path;
+    std::string source;
+    std::vector<UsdGenExpressionOutputDesc> outputs;
+    std::vector<UsdGenExpressionInputDesc> inputs;
+};
+
+/// A gprim an expression samples (geoSampler), by value. Points are in the
+/// prim's object space; worldMatrix places them.
+enum class UsdGenGeometryKind : uint8_t { Mesh, Curves, Points };
+
+struct UsdGenGeometryDesc
+{
+    SdfPath            path;
+    UsdGenGeometryKind kind = UsdGenGeometryKind::Points;
+    VtIntArray         counts;       // faceVertexCounts | curveVertexCounts | empty
+    VtIntArray         indices;      // faceVertexIndices (mesh)
+    VtVec3fArray       points;       // at UsdGenGraphDesc::time
+    VtVec3fArray       rest;         // Default-time rest when the prim has one, else empty
+    VtVec3fArray       normals;      // points: optional per-point normals
+    VtArray<uint64_t>  ids;          // curves: usdGen:curveId; points: ids (optional)
+    GfMatrix4d         worldMatrix{1.0};
+    /// Content identity of everything above, computed by the builder. Any
+    /// edit of the prim's data changes it, so a consumer's capture identity
+    /// can fold it instead of rehashing arrays.
+    uint64_t           generation = 0;
+};
 struct UsdGenExpressionBinding {
     // `output` empty means the connection named the expression PRIM rather
     // than one of its outputs; UsdGenFindExpressionOutput resolves it.
@@ -112,6 +153,18 @@ struct UsdGenAuthoredPlaneDesc
     VtFloatArray floatValues;          // populated only for Float32
     VtIntArray intValues;              // populated only for Int32
 };
+
+/// The source curves' own `primvars:displayColor`, forwarded as an authored
+/// plane under this reserved name. It rides the ordinary named-plane machinery
+/// so resampling and compaction carry it correctly, but the session cooker
+/// consumes it into the tile's displayColor instead of publishing it, so it
+/// never appears as a stray primvar. `displayColor` itself cannot be used: the
+/// compiler reserves that name for authored planes.
+inline TfToken const &UsdGenSourceColorPlane()
+{
+    static TfToken const name("usdGenSourceColor");
+    return name;
+}
 
 struct UsdGenNodeDesc
 {
@@ -240,6 +293,22 @@ struct UsdGenLookDesc
     int      jitterSeed = 0;
 };
 
+/// usdGen:preview:* on the description: a viewport-only colour override that
+/// shows a value on the strands (07 §7.3 "value preview"). `source` is the
+/// first authored target, unresolved: a UsdGenExpression prim, a
+/// UsdGenPtexMap prim (the builders add it to `maps`) or an operator
+/// attribute path. The session cooker resolves it against the compiled graph.
+struct UsdGenPreviewDesc
+{
+    SdfPath  source;                    // empty == no preview
+    TfToken  colorMap{"heat"};          // heat | viridis | gray | ids | rgb
+    GfVec2f  range{0.0f, 1.0f};
+    TfToken  evaluation{"primitive"};   // for an expression prim source
+    TfToken  shading{"lit"};            // lit | flat
+
+    bool Active() const { return !source.IsEmpty(); }
+};
+
 struct UsdGenGraphDesc
 {
     SdfPath                        description;   // the UsdGenDescription prim
@@ -249,7 +318,9 @@ struct UsdGenGraphDesc
     std::vector<UsdGenSurfaceDesc> surfaces;
     std::vector<UsdGenMapDesc>     maps;
     std::vector<UsdGenExpressionDesc> expressions;
+    std::vector<UsdGenGeometryDesc> geometries;   // every gprim an expression input names
     UsdGenLookDesc                 look;
+    UsdGenPreviewDesc              preview;
     GfMatrix4d                     xformMatrix{1.0}; // description world matrix (post-flattening, S4)
     TfToken                        purpose;        // inherited by hand to every tile (C2)
     TfToken                        visibility;     // inherited by hand to every tile (C2)

@@ -74,6 +74,9 @@ constexpr uint32_t kSaltClump        = 0x43174D50u;  // "CLMP"; per level use kS
 constexpr uint32_t kSaltSculpt       = 0x53C17150u;  // "SCUL"
 constexpr uint32_t kSaltScatterBary    = 0x52C4A11Fu;  // scatter barycentric draws (kSaltScatter + 1)
 constexpr uint32_t kSaltScaleRandom  = 0x5343414Cu;  // "SCAL"
+constexpr uint32_t kSaltCurl         = 0x4375726Cu;  // "Curl": per-curve phase draws
+constexpr uint32_t kSaltBend         = 0x42656E64u;  // "Bend": per-curve angle draws
+constexpr uint32_t kSaltScale        = 0x5363616Cu;  // "Scal": per-curve scale draws
 constexpr uint32_t kSaltClumpLevel(int level) { return kSaltClump + uint32_t(level); }
 /// Scatter curve id (02-schema.md §2.19.1):
 /// `CurveId(seed, faceIndex, k) = Hash64(uint64_t(uint32_t(seed)),

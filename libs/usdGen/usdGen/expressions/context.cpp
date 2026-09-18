@@ -58,6 +58,11 @@ constexpr VariableInfo kVars[] = {
   "CV count of the strand."},
  {"$cLength",Variable::CLength,ScalarType::Float32,1,kCurve,"Strand arc length."},
  {"$cWidth",Variable::CWidth,ScalarType::Float32,1,kCurve,"Strand width at this sample."},
+ // No domain: only a geoSampler() element expression reads these.
+ {"$Q",Variable::Q,ScalarType::Float64,3,Domain::None,
+  "geoSampler() element expressions only: the position the sampler was queried at."},
+ {"$Qdist",Variable::QDist,ScalarType::Float64,1,Domain::None,
+  "geoSampler() element expressions only: distance from the element's $P to $Q."},
 };
 constexpr size_t kVarCount = sizeof(kVars) / sizeof(kVars[0]);
 uint32_t Bytes(ScalarType t) { switch(t) { case ScalarType::Bool: return 1; case ScalarType::Int32: case ScalarType::UInt32: case ScalarType::Float32: return 4; case ScalarType::Int64: case ScalarType::UInt64: case ScalarType::Float64: return 8; case ScalarType::Float16: return 2; default: return 0; } }
@@ -70,9 +75,14 @@ const VariableInfo *Registry::Find(const char *name) const noexcept {
 const VariableInfo *Registry::Find(Variable id) const noexcept {
     for (auto const &v : kVars) if (v.id==id) return &v; return nullptr;
 }
-bool Registry::Validate(const char *name, Domain domain, std::string *d) const {
+bool Registry::Validate(const char *name, Domain domain, std::string *d, bool samplerElement) const {
     auto v=Find(name); if (!v) { if(d)*d=std::string("unknown expression variable ")+ (name?name:"<null>"); return false; }
     if (domain != Domain::Groom && domain != Domain::Primitive && domain != Domain::Point) { if(d)*d="invalid expression evaluation domain"; return false; }
+    if (IsSamplerVariable(v->id)) {
+        if (samplerElement) return true;
+        if(d)*d=std::string("variable ")+v->name+" is only available inside a geoSampler() element expression";
+        return false;
+    }
     if (!HasDomain(v->domains,domain)) { if(d)*d=std::string("variable ")+v->name+" unavailable at requested evaluation domain"; return false; } return true;
 }
 size_t Registry::Count() const noexcept { return kVarCount; }

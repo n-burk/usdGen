@@ -238,7 +238,8 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
         return Fail(diagnostics, "Deform has no mode property; it is always RBF");
     if (node.surfaces.size() != 1 || !node.references.empty() || !node.curves.empty() ||
         !node.maps.empty() || !node.mapBindings.empty())
-        return Fail(diagnostics, "RBF Deform requires exactly one surface and no guide/map inputs");
+        return Fail(diagnostics, "RBF Deform requires exactly one surface and no guide/map inputs "
+                                 "(guide-driven RBF, usdGen:guides, runs on the CPU lane)");
     std::set<std::string> seen;
     for (auto const& param : node.params) {
         auto name = param.name.GetString();

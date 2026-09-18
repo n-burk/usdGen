@@ -30,12 +30,37 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
+#include <utility>
 
 #if defined(__CUDACC__)
 #include <cuda_fp16.h>
 #endif
 
 namespace usdGen::expr {
+
+namespace detail {
+/// IROp::Sample dispatch. Only an input type that carries a `samplers` table
+/// (the host's CpuExpressionInputs) can sample; everything else, the device
+/// inputs in particular, reads NaN, which poisons the result. CUDA admission
+/// refuses sampler programs before they get that far.
+template <class Inputs, class = void>
+struct ExprSamplerHook {
+    USDGEN_EXPR_HD static double Sample(Inputs const &, unsigned, double const *, unsigned,
+                                        size_t, unsigned)
+    {
+        return NAN;
+    }
+};
+template <class Inputs>
+struct ExprSamplerHook<Inputs, std::void_t<decltype(std::declval<Inputs const &>().samplers)>> {
+    static double Sample(Inputs const &in, unsigned slot, double const *args, unsigned n,
+                         size_t index, unsigned component)
+    {
+        return in.samplers ? SampleSlot(*in.samplers, in, slot, args, n, index, component) : NAN;
+    }
+};
+} // namespace detail
 
 /// Register file size. The frontend allocates one register per instruction, so
 /// this also bounds IRProgram::registerCount, and it is deliberately modest:
@@ -176,6 +201,21 @@ inline bool ValidProgram(IRProgram const &program)
             if (op.b < spec.minArgs || (spec.maxArgs != 0xFFFFu && op.b > spec.maxArgs))
                 return false;
             if (op.component >= spec.outComponents) return false;
+            if (unsigned(op.a) + unsigned(op.b) > program.registerCount) return false;
+            for (unsigned i = 0; i < op.b; ++i)
+                if (!written[op.a + i]) return false;
+            break;
+        }
+        case IROp::Sample: {
+            if (op.c >= program.samplers.size()) return false;
+            IRSampler const &sampler = program.samplers[op.c];
+            if (sampler.components == 0 || op.component >= sampler.components) return false;
+            const unsigned expected = sampler.kind == SamplerKind::Geometry ? 3u : 0u;
+            if (op.b != expected) return false;
+            if (sampler.kind == SamplerKind::Geometry &&
+                (!sampler.element || !ValidProgram(*sampler.element) ||
+                 !sampler.element->samplers.empty()))
+                return false;
             if (unsigned(op.a) + unsigned(op.b) > program.registerCount) return false;
             for (unsigned i = 0; i < op.b; ++i)
                 if (!written[op.a + i]) return false;
@@ -366,6 +406,10 @@ USDGEN_EXPR_HD void ExecuteElement(IRInstruction const *code, size_t count,
         case IROp::Hypot: value = ExprHypot(r[a], r[b]); break;
         case IROp::Call:
             value = ExprCall(static_cast<IRFunc>(c), r + a, int(b), instruction.component);
+            break;
+        case IROp::Sample:
+            value = detail::ExprSamplerHook<Inputs>::Sample(in, c, r + a, b, index,
+                                                            instruction.component);
             break;
         }
         r[instruction.dst] = value;

@@ -3,6 +3,7 @@
 // Private serial work-owner implementation. The command owner supplies a
 // copied request and alone decides whether this candidate may publish.
 #include "usdGen/sessionCooker.h"
+#include "usdGen/debugCodes.h"
 #include "usdGen/furOcclusion.h"
 #include "usdGen/cudaExecution.h"
 #include "usdGen/executionBackend.h"
@@ -11,20 +12,74 @@
 #include "usdGenMath/usdGenMath/hash.h"
 
 #include "pxr/pxr.h"
+#include "pxr/base/tf/envSetting.h"
+#include "pxr/base/trace/trace.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <limits>
 #include <string>
+#include <utility>
 
 PXR_NAMESPACE_USING_DIRECTIVE
+
+// Hair shadowing the scalp is on by default and costs one extra sweep of the
+// density volume plus a small translucent mesh. Set USDGEN_SCALP_SHADOW=0 to
+// publish no cap at all: nothing else in the groom changes.
+TF_DEFINE_ENV_SETTING(USDGEN_SCALP_SHADOW, true,
+                      "Publish the usdGen scalp-shadow cap (hair shadowing the "
+                      "groom's emitting surface).");
 
 namespace usdGen {
 
 namespace {
+
+// USDGEN_COMMIT: where one cook's time went, printed as a single line.
+class _CommitPhases
+{
+public:
+    _CommitPhases()
+        : _enabled(TfDebug::IsEnabled(USDGEN_COMMIT)),
+          _start(std::chrono::steady_clock::now()), _mark(_start) {}
+
+    void Phase(char const *name, size_t rebuilt = SIZE_MAX, size_t total = 0)
+    {
+        if (!_enabled) return;
+        auto const now = std::chrono::steady_clock::now();
+        double const ms = std::chrono::duration<double, std::milli>(now - _mark).count();
+        char buffer[160];
+        if (rebuilt == SIZE_MAX)
+            std::snprintf(buffer, sizeof(buffer), "%s%s %.2f",
+                          _text.empty() ? "" : ", ", name, ms);
+        else
+            std::snprintf(buffer, sizeof(buffer), "%s%s %.2f (%zu/%zu rebuilt)",
+                          _text.empty() ? "" : ", ", name, ms, rebuilt, total);
+        _text += buffer;
+        _mark = now;
+    }
+
+    void Print(double frame, std::string const &compile, char const *outcome,
+               SdfPath const &description) const
+    {
+        if (!_enabled) return;
+        double const total = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - _start).count();
+        TfDebug::Helper().Msg("usdGen commit    %s frame %g: %s; %s; total %.2f ms [ms: %s]\n",
+                              description.GetText(), frame, outcome,
+                              compile.empty() ? "no compile" : compile.c_str(), total,
+                              _text.c_str());
+    }
+
+private:
+    bool _enabled;
+    std::chrono::steady_clock::time_point _start, _mark;
+    std::string _text;
+};
 
 // Device revisions are allocated in the immutable plan's topological operator
 // order. Derive terminal topology from its actual value producer, never from
@@ -204,6 +259,15 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
     _CacheMix(&h0, hueJitterBits);
     _CacheMix(&h1, valueJitterBits);
     _CacheMix(&h0, static_cast<uint64_t>(desc.look.jitterSeed));
+    _CacheMixText(&h1, desc.preview.source.GetString());
+    _CacheMixText(&h0, desc.preview.colorMap.GetString());
+    _CacheMixText(&h1, desc.preview.evaluation.GetString());
+    _CacheMixText(&h0, desc.preview.shading.GetString());
+    uint32_t previewLoBits = 0, previewHiBits = 0;
+    std::memcpy(&previewLoBits, &desc.preview.range[0], sizeof(previewLoBits));
+    std::memcpy(&previewHiBits, &desc.preview.range[1], sizeof(previewHiBits));
+    _CacheMix(&h1, previewLoBits);
+    _CacheMix(&h0, previewHiBits);
     _CacheMixMatrix(&h1, desc.xformMatrix);
     _CacheMixText(&h0, desc.purpose.GetString());
     _CacheMixText(&h1, desc.visibility.GetString());
@@ -223,6 +287,28 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
             _CacheMixText(&h0, output.nativeType.GetString());
             _CacheMixShape(&h1, output.shape);
         }
+        _CacheMix(&h0, static_cast<uint64_t>(expression.inputs.size()));
+        for (UsdGenExpressionInputDesc const &input : expression.inputs) {
+            _CacheMixText(&h1, input.name.GetString());
+            for (SdfPath const &path : input.targets) _CacheMixText(&h0, path.GetString());
+            for (SdfPath const &path : input.geometries) _CacheMixText(&h1, path.GetString());
+            for (SdfPath const &path : input.maps) _CacheMixText(&h0, path.GetString());
+        }
+    }
+    // Geometry an expression samples is an execution input exactly like a
+    // curve set: its content moves the key.
+    _CacheMix(&h1, static_cast<uint64_t>(desc.geometries.size()));
+    for (UsdGenGeometryDesc const &geometry : desc.geometries) {
+        _CacheMixText(&h0, geometry.path.GetString());
+        _CacheMix(&h1, static_cast<uint64_t>(geometry.kind));
+        _CacheMixArray(&h0, geometry.counts);
+        _CacheMixArray(&h1, geometry.indices);
+        _CacheMixArray(&h0, geometry.points);
+        _CacheMixArray(&h1, geometry.rest);
+        _CacheMixArray(&h0, geometry.normals);
+        _CacheMixArray(&h1, geometry.ids);
+        _CacheMixMatrix(&h0, geometry.worldMatrix);
+        _CacheMix(&h1, geometry.generation);
     }
     for (UsdGenNodeDesc const &node : desc.nodes) {
         _CacheMix(&h0, static_cast<uint64_t>(node.expressionBindings.size()));
@@ -680,15 +766,56 @@ bool UsdGenSessionCooker::_Prepare(std::shared_ptr<const UsdGenGraphDesc> desc,
     if (newDesc || staleBaseline || _graphBaselineDetached)
         pending.structural = true;
     _lastDiagnostics = UsdGenDiagnostics{};
+    _traceCompile.clear();
+    // The published tiles may not come from this graph's last run: a cache
+    // hit published another result, or another worker published. The graph
+    // itself stays valid (every capture is re-validated against its inputs),
+    // but no tile may be carried over from that baseline.
+    _rebuildAllTiles = staleBaseline || _graphBaselineDetached;
     if (pending.structural || _graph.NodeCount() == 0 || deviceCompiler) {
         // Device plans capture the exact immutable request. Keep all common
         // reset, baseline and dirty handling above; only compilation is
         // supplied by the explicitly injected provider.
+        TRACE_SCOPE("usdGen compile");
+        auto const compileStart = std::chrono::steady_clock::now();
+        bool const firstCompile = _graph.NodeCount() == 0;
+        // A new descriptor recompiles incrementally (gate E-6): an operator
+        // whose structural digest is unchanged keeps its op, capture and
+        // buffer, and re-captures only when its capture digest or its input
+        // moved. A graph a failed cook left behind is not trusted and is
+        // rebuilt from scratch.
+        bool const incremental = !deviceCompiler && !firstCompile && !_graphUntrusted;
         UsdGenCompileResult cr = deviceCompiler
             ? _compiler.CompileInjectedDevice(_desc, &_graph, deviceCompiler, devicePlan)
-            : _compiler.Compile(_desc, &_graph);
+            : incremental ? _compiler.Recompile(_desc, &_graph)
+                          : _compiler.Compile(_desc, &_graph);
         ++_stats.recompiles;
-        if (!cr.ok) { _lastDiagnostics.errors = std::move(cr.errors); return false; }
+        if (TfDebug::IsEnabled(USDGEN_COMMIT)) {
+            char buffer[256];
+            std::snprintf(buffer, sizeof(buffer),
+                "%s compile (%s) %.2f ms, %zu of %d nodes rebuilt%s",
+                incremental ? "incremental" : "full",
+                firstCompile ? "first" :
+                _graphUntrusted ? "after a failed cook" :
+                newDesc ? "new description" :
+                staleBaseline ? "stale baseline" :
+                _graphBaselineDetached ? "after a cache hit" : "structural dirt",
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - compileStart).count(),
+                cr.rebuilt.size(), _graph.NodeCount(),
+                _rebuildAllTiles ? ", every tile rebuilt" : "");
+            _traceCompile = buffer;
+        }
+        if (!cr.ok) {
+            // A CPU recompile edits the graph in place and can fail halfway;
+            // never reuse what it left. (A CUDA recompile is transactional
+            // and keeps the last usable plan.)
+            if (incremental && _desc.executionBackend != UsdGenExecutionBackend::Cuda)
+                _graph = UsdGenGraph();
+            _lastDiagnostics.errors = std::move(cr.errors);
+            return false;
+        }
+        _graphUntrusted = false;
         _stats.cookedNodes = static_cast<uint64_t>(_graph.NodeCount());
     } else {
         for (auto const& kv : pending.nodeBits)
@@ -1383,12 +1510,15 @@ bool UsdGenSessionCooker::CommitCacheCandidate(
     // cooker. The command owner calls this only from the current publication
     // action, after publishing its snapshot; a superseded/cancelled action
     // never reaches here.
-    auto reject = [this] {
+    auto rejectBecause = [this, &candidate](char const *why) {
         ++_stats.executionCacheAdmissionFailures;
+        TF_DEBUG(USDGEN_COMMIT).Msg("usdGen cache     key %016llx not admitted: %s\n",
+                                    (unsigned long long)candidate.key.Hash(), why);
         return false;
     };
+    auto reject = [&rejectBecause] { return rejectBecause("backend identity"); };
     if (!candidate.generation || candidate.generation != _store.Get() ||
-        !candidate.key.IsValid()) return reject();
+        !candidate.key.IsValid()) return rejectBecause("stale or invalid candidate");
     double frame = 0.0;
     std::memcpy(&frame, &candidate.key.frameBits, sizeof(frame));
     UsdGenExecutionContext context = _ExecutionCacheContext(
@@ -1426,10 +1556,11 @@ bool UsdGenSessionCooker::CommitCacheCandidate(
     }
     UsdGenExecutionCacheKey current = _MakeExecutionCacheKey(
         _graph, _desc, context, frame);
-    if (current != candidate.key) return reject();
+    if (current != candidate.key)
+        return rejectBecause("the key moved between cook and publication");
     size_t exactBytes = 0;
     if (!_GenerationBytes(*candidate.generation, &exactBytes) ||
-        exactBytes != candidate.bytes) return reject();
+        exactBytes != candidate.bytes) return rejectBecause("size changed");
     std::string reason;
     bool admitted = false;
     if (_coalescedRegistration && _coalescedRegistration->leader &&
@@ -1445,8 +1576,13 @@ bool UsdGenSessionCooker::CommitCacheCandidate(
         admitted = _executionCacheDomain && _executionCacheDomain->Insert(
             candidate.key, candidate.generation, candidate.bytes, &reason);
     }
-    if (!admitted) return reject();
+    if (!admitted) return rejectBecause(reason.empty() ? "store refused" : reason.c_str());
     ++_stats.executionCacheAdmissions;
+    TF_DEBUG(USDGEN_COMMIT).Msg("usdGen cache     key %016llx admitted, %.1f MB (domain %.1f of %.1f MB, %zu entries)\n",
+        (unsigned long long)candidate.key.Hash(), candidate.bytes / 1048576.0,
+        _executionCacheDomain ? _executionCacheDomain->Bytes() / 1048576.0 : 0.0,
+        _executionCacheDomain ? _executionCacheDomain->MaxBytes() / 1048576.0 : 0.0,
+        _executionCacheDomain ? _executionCacheDomain->Size() : size_t(0));
     return true;
 }
 
@@ -1462,10 +1598,13 @@ UsdGenStats publishedStats, bool invalidateValues,
     struct LastCooked { uint64_t& out; uint64_t epoch; ~LastCooked() { out = epoch; } }
         lastCooked{_lastCookedEpoch, workEpoch};
     const auto t0 = std::chrono::steady_clock::now();
+    TRACE_FUNCTION();
+    _CommitPhases phases;
     TF_UNUSED(reason);
     if (!_Prepare(std::move(desc), context, devicePublicationEnabled, pending,
                   std::move(previous), std::move(publishedStats), invalidateValues,
                   previousPublishedWorkerEpoch)) return _store.Get();
+    phases.Phase("prepare");
 
     const uint64_t myReq = workEpoch;
     if (_desc.executionBackend != UsdGenExecutionBackend::Cuda &&
@@ -1477,10 +1616,15 @@ UsdGenStats publishedStats, bool invalidateValues,
     // Keep the exact domain alive for every publication in this cook.  CUDA
     // may select its device-specific domain below; CPU keeps this one.
     auto cacheDomain = _executionCacheDomain;
-    UsdGenExecutionCacheKey cacheKey =
-        _MakeExecutionCacheKey(_graph, _desc,
+    UsdGenExecutionCacheKey cacheKey = [&] {
+        TRACE_SCOPE("usdGen execution cache key");
+        return _MakeExecutionCacheKey(_graph, _desc,
             _ExecutionCacheContext(_desc, _context, -1,
                 cacheDomain ? cacheDomain->Epoch() : 0), frame);
+    }();
+    phases.Phase("cache key");
+    TF_DEBUG(USDGEN_COMMIT).Msg("usdGen cache     frame %g looks up key %016llx\n",
+                                frame, (unsigned long long)cacheKey.Hash());
 
     // Cache lookup occurs after preparation so the key contains the compiled
     // graph's exact input tuple and current layout contract. A hit is copied
@@ -1509,9 +1653,14 @@ UsdGenStats publishedStats, bool invalidateValues,
                 _stats.publishedTiles = static_cast<uint64_t>(next->tiles.size());
                 _lastNodeStats.clear();
                 _graphBaselineDetached = true;
+                phases.Phase("cache hit publish");
+                phases.Print(frame, _traceCompile,
+                             "cache hit (operators not run; next cook recompiles)",
+                             _desc.description);
                 return next;
             }
         }
+        phases.Phase("cache lookup");
         _BeginCoalesced(cacheDomain, cacheKey, hooks);
         if (_coalescedRole == CoalescedRole::Follower ||
             _coalescedRole == CoalescedRole::Resident)
@@ -1600,6 +1749,12 @@ UsdGenStats publishedStats, bool invalidateValues,
                 }
             }
         }
+        if (!_desc.preview.Active())
+            _cudaPreviewWarned = false;
+        else if (!std::exchange(_cudaPreviewWarned, true))
+            _lastDiagnostics.Warn("usdGen:preview: " + _desc.description.GetString() +
+                                  " runs on the CUDA lane, which cannot preview values; "
+                                  "the look is shown");
         auto priorGeneration = _store.Get();
         auto device = ExecuteCudaGraph(*_graph.CudaPlan(), *_cudaWorkspace, frame,
             static_cast<uint64_t>(_store.NextId()), &_lastDiagnostics,
@@ -1645,11 +1800,13 @@ UsdGenStats publishedStats, bool invalidateValues,
     evalCtx.desc = &_desc;
     UsdGenRunResult result = _scheduler.Run(_graph, evalCtx, myReq);
     _lastDiagnostics = result.diagnostics;
+    phases.Phase("run operators");
 
     if (result.diagnostics.HasErrors()) {
         // A partially executed graph is never a publishable generation.
         // Rebuild capture/evaluation state on retry; retain the last completed
         // generation for readers, tools and renderers.
+        _graphUntrusted = true;
         return _store.Get();
     }
 
@@ -1657,6 +1814,7 @@ UsdGenStats publishedStats, bool invalidateValues,
         // Newer request: publish nothing, return the PREVIOUS generation,
         // The command owner retains its pending inputs for the retry.
         ++_stats.supersessions;
+        _graphUntrusted = true;
         return _store.Get();
     }
 
@@ -1666,12 +1824,58 @@ UsdGenStats publishedStats, bool invalidateValues,
     gen.frame = frame;
     gen.tiles.reserve(result.tiles.size());
 
+    // usdGen:preview recolours every tile, including those whose geometry
+    // this cook did not touch.
+    {
+        std::vector<std::string> previewWarnings;
+        _previewColors = _preview.Build(_desc, _graph, *result.terminalOutput, frame,
+                                        &previewWarnings);
+        for (std::string const &warning : previewWarnings) _lastDiagnostics.Warn(warning);
+    }
+    gen.colorDigest = _previewColors.digest;
+    // ...and so does usdGen:look, which is baked into every tile's
+    // displayColor and (since the look travels as constant primvars too)
+    // into its extra planes. A look-only edit touches no point and no
+    // topology, so without this it would reach the synthetic material and
+    // nothing else -- the strands would keep the previous root colour.
+    {
+        auto mix = [](uint64_t *h, uint64_t v) {
+            *h ^= v + 0x9e3779b97f4a7c15ull + (*h << 6) + (*h >> 2);
+            *h ^= *h >> 30; *h *= 0xbf58476d1ce4e5b9ull;
+            *h ^= *h >> 27; *h *= 0x94d049bb133111ebull;
+            *h ^= *h >> 31;
+        };
+        auto mixF = [&](uint64_t *h, float v) {
+            uint32_t bits = 0; std::memcpy(&bits, &v, sizeof(bits));
+            mix(h, bits);
+        };
+        UsdGenLookDesc const &lk = _desc.look;
+        uint64_t h = gen.colorDigest;
+        for (int i = 0; i < 3; ++i) { mixF(&h, lk.rootColor[i]); mixF(&h, lk.tipColor[i]); }
+        for (GfVec3f const &c : lk.rampColors)
+            for (int i = 0; i < 3; ++i) mixF(&h, c[i]);
+        for (float p : lk.rampPositions) mixF(&h, p);
+        mixF(&h, lk.rampExponent);
+        mixF(&h, lk.hueJitter);
+        mixF(&h, lk.valueJitter);
+        mix(&h, static_cast<uint64_t>(static_cast<uint32_t>(lk.jitterSeed)));
+        mix(&h, lk.rampInterpolation.Hash());
+        mix(&h, lk.bakeMode.Hash());
+        mix(&h, lk.bakeTarget.Hash());
+        mix(&h, lk.bakePrimvar.Hash());
+        gen.colorDigest = h;
+    }
+    const bool recolour = prev && prev->colorDigest != gen.colorDigest;
+    phases.Phase("preview");
 
+    TRACE_SCOPE("usdGen build tile publications");
+    size_t rebuiltTiles = 0;
     for (UsdGenTileView const &tv : result.tiles) {
         // E-4: untouched tiles carry over their publication wholesale (the
         // VtArray copies share buffers, so step 7 sees IsIdentical == true).
         const bool rebuild =
-            result.topologyChanged || tv.pointsDirty || tv.widthsDirty;
+            result.topologyChanged || tv.pointsDirty || tv.widthsDirty || recolour ||
+            _rebuildAllTiles;
         const UsdGenTilePublication *carry = nullptr;
         if (!rebuild && prev) {
             auto it = std::lower_bound(
@@ -1685,20 +1889,80 @@ UsdGenStats publishedStats, bool invalidateValues,
             gen.tiles.push_back(*carry);
             continue;
         }
+        ++rebuiltTiles;
         gen.tiles.push_back(_BuildTilePublication(tv, result, prev));
     }
     std::sort(gen.tiles.begin(), gen.tiles.end(),
               [](UsdGenTilePublication const &a, UsdGenTilePublication const &b) {
                   return a.tile < b.tile;
               });
+    phases.Phase("tiles", rebuiltTiles, gen.tiles.size());
 
     // Whole-groom optical depth includes neighboring tiles. Unchanged
     // geometry reuses the immutable planes, including on look-only edits.
-    UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr);
+    {
+        UsdGenWorkDispatcher dispatcher = _scheduler.MakeWorkDispatcher();
+        UsdGenFurOcclusionParams occlusion;
+        occlusion.dispatcher = &dispatcher;
+        // The emitting surfaces are opaque: without them light reaches hair
+        // through the scalp (Unreal injects the opaque depth for the same
+        // reason). Deformed points at this frame, in the same world space the
+        // tiles were transformed into.
+        occlusion.occluders.reserve(_desc.surfaces.size());
+        for (UsdGenSurfaceDesc const &surface : _desc.surfaces) {
+            if (surface.points.empty() || surface.faceVertexIndices.empty())
+                continue;
+            UsdGenFurOccluder occluder;
+            occluder.points = surface.points;
+            occluder.faceVertexCounts = surface.faceVertexCounts;
+            occluder.faceVertexIndices = surface.faceVertexIndices;
+            occluder.worldMatrix = surface.worldMatrix;
+            occlusion.occluders.push_back(std::move(occluder));
+        }
+        // Hair shadowing the scalp. Stock Storm casts no shadow from any
+        // UsdLux light, so a synthetic cap over the emitting surface is the
+        // only route; it is built from the same volume, at no extra sweep
+        // beyond the hair-only one it needs.
+        occlusion.scalpShadow = !occlusion.occluders.empty() &&
+                                TfGetEnvSetting(USDGEN_SCALP_SHADOW);
+        // The reuse path leaves the cap untouched, so seed it: unchanged
+        // geometry shares the previous immutable arrays.
+        if (prev) gen.scalpShadow = prev->scalpShadow;
+        UsdGenBuildFurOcclusion(&gen.tiles, prev ? &prev->tiles : nullptr,
+                                occlusion, &_furVolumeKey, &gen.scalpShadow);
+        if (!gen.scalpShadow.IsEmpty()) {
+            _PresentationScalars const scalars = _BuildPresentationScalars(
+                _desc, SdfPath());
+            gen.scalpShadow.primPath =
+                _RenderNamespace(_desc.description).AppendChild(
+                    TfToken("scalpShadow"));
+            gen.scalpShadow.purpose = scalars.purpose;
+            gen.scalpShadow.visibility = scalars.visibility;
+            gen.scalpShadow.materialPath =
+                _RenderNamespace(_desc.description).AppendChild(
+                    TfToken("material_scalpShadow"));
+        }
+    }
+    phases.Phase("occlusion");
 
     // Signature: the prim-set identity step 7 diffs structurally (03 §6.1).
     gen.signature.tileCount = static_cast<uint32_t>(gen.tiles.size());
     gen.signature.instancerCount = 0;
+    // The end of the look's path into Storm: the colour a tile actually
+    // publishes. It is baked from _desc.look, so this and the INGRESS capture
+    // line together say whether an authored look survived the whole trip --
+    // the failure mode is silent, because a defaulted look is still a
+    // plausible dark brown.
+    if (TfDebug::IsEnabled(USDGEN_INGRESS) && !gen.tiles.empty() &&
+        !gen.tiles.front().displayColor.empty()) {
+        GfVec3f const &c = gen.tiles.front().displayColor.front();
+        TF_DEBUG(USDGEN_INGRESS).Msg(
+            "usdGen tile displayColor[0] = %.4f %.4f %.4f (look rootColor "
+            "%.4f %.4f %.4f)\n",
+            double(c[0]), double(c[1]), double(c[2]),
+            double(_desc.look.rootColor[0]), double(_desc.look.rootColor[1]),
+            double(_desc.look.rootColor[2]));
+    }
     gen.signature.primPaths.reserve(gen.tiles.size());
     gen.signature.primTypes.assign(gen.tiles.size(), "basisCurves");
     gen.signature.primvarNames.reserve(gen.tiles.size());
@@ -1723,10 +1987,12 @@ UsdGenStats publishedStats, bool invalidateValues,
         })) return _store.Get();
     _publicationFence = ExecutionPublicationFence{cacheDomain, *fence};
     _graphBaselineDetached = false;
+    phases.Phase("publish");
 
     // -- step 7: diff vs the previous generation (06 §5.1) -----------------
     UsdGenGenerationConstPtr next = _store.Get();
     _lastReport = _store.Diff(prev ? *prev : UsdGenGeneration{}, *next);
+    phases.Phase("diff");
 
     // -- stats (03 §9.2) ----------------------------------------------------
     ++_stats.commits;
@@ -1753,6 +2019,9 @@ UsdGenStats publishedStats, bool invalidateValues,
         _cacheCandidate = ExecutionCacheCandidate{
             std::move(cacheKey), next, cacheBytes};
     }
+
+    phases.Phase("cache bytes");
+    phases.Print(frame, _traceCompile, "cache miss, cooked", _desc.description);
 
     // Remaining chunk dirt (skipped no-op nodes are clean; anything the
     // scheduler could not run stays dirty; 03 §5.4).
@@ -1786,8 +2055,16 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
         UsdGenPlane output;
     };
     std::vector<ExtraPlanePublication> extraPlanes;
+    // The forwarded source colour is consumed into the tile's displayColor
+    // below, never published: it is an input to the colour decision, not a
+    // primvar of its own.
+    UsdGenPlane const *sourceColor = _FindPlane(term.extraCurve,
+                                                UsdGenSourceColorPlane());
+    if (!sourceColor) sourceColor = _FindPlane(term.extraCv,
+                                               UsdGenSourceColorPlane());
     auto addExtraPlane = [&](UsdGenPlane const& plane, TfToken expectedInterpolation) {
-        if (plane.name == TfToken("displayColor")) return;
+        if (plane.name == TfToken("displayColor") ||
+            plane.name == UsdGenSourceColorPlane()) return;
         size_t const elements = expectedInterpolation == TfToken("constant") ? 1 :
             expectedInterpolation == TfToken("vertex") ? term.totalCvs : term.totalCurves;
         size_t const values = elements * plane.arity;
@@ -1825,6 +2102,67 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     }
     for (UsdGenPlane const& p : term.extraCv)
         addExtraPlane(p, TfToken("vertex"));
+
+    // Precedence (02 §2.14): an AUTHORED look on the description wins;
+    // otherwise the source curves' own displayColor, which is what a
+    // MetaHuman-style asset already carries; otherwise the look's schema
+    // defaults. "Authored" has to mean an opinion that differs from the
+    // fallback -- a description that merely applies UsdGenLookAPI has a full
+    // set of schema-default look values, and treating those as authored would
+    // silently discard every asset's own colour.
+    static UsdGenLookDesc const lookFallback;
+    bool const authoredLook =
+        _desc.look.rootColor != lookFallback.rootColor ||
+        _desc.look.tipColor != lookFallback.tipColor ||
+        !_desc.look.rampColors.empty();
+
+    // The rest of the look as CONSTANT primvars, so the shading of a groom
+    // does not depend on the tile keeping the synthetic material: a user who
+    // binds their own UsdGenHairStrands material gets the Sdr defaults for
+    // everything the tile does not carry, which used to mean blond tips on a
+    // black-haired groom. rootColor already travels as the baked per-curve
+    // displayColor, so it is deliberately NOT repeated here -- a second
+    // channel for it would only be a way for the two to disagree.
+    //
+    // Each one is published only where the look RESOLVES it to something
+    // other than its schema fallback. An unauthored look publishes none of
+    // them, the shader's `#ifdef HD_HAS_*` is false, and the material input
+    // applies exactly as before: the default-material path is unchanged by
+    // construction, and a forwarded asset colour (one flat colour per curve)
+    // never acquires an invented tip.
+    auto addLookConstant = [&](char const* name, std::initializer_list<float> v) {
+        // An authored plane of the same name wins: the user asked for it by
+        // hand, and two planes with one name is not a publishable tile.
+        if (std::any_of(extraPlanes.begin(), extraPlanes.end(),
+                        [&](auto const& e) { return e.output.name == name; }))
+            return;
+        UsdGenPlane plane;
+        plane.name = TfToken(name);
+        plane.interpolation = TfToken("constant");
+        plane.type = TfToken("float");
+        plane.arity = static_cast<decltype(plane.arity)>(v.size());
+        plane.f.assign(v.begin(), v.end());
+        ExtraPlanePublication entry;
+        entry.source = nullptr;   // synthesized; the uniform gather never runs
+        entry.output = std::move(plane);
+        extraPlanes.push_back(std::move(entry));
+    };
+    if (authoredLook) {
+        // Ramp-aware, matching UsdGenTilePublisher::_LookColors: the shader
+        // has one lerp, so a multi-stop ramp presents as its last stop.
+        GfVec3f const tip = _desc.look.rampColors.size() >= 2
+            ? _desc.look.rampColors[_desc.look.rampColors.size() - 1]
+            : _desc.look.tipColor;
+        addLookConstant("hairTipColor", {tip[0], tip[1], tip[2]});
+    }
+    if (_desc.look.rampExponent != lookFallback.rampExponent)
+        addLookConstant("hairColorRamp",
+                        {std::max(_desc.look.rampExponent, 0.001f)});
+    if (_desc.look.hueJitter != lookFallback.hueJitter)
+        addLookConstant("hairRandomHue", {std::max(_desc.look.hueJitter, 0.0f)});
+    if (_desc.look.valueJitter != lookFallback.valueJitter)
+        addLookConstant("hairRandomValue",
+                        {std::max(_desc.look.valueJitter, 0.0f)});
 
     GfRange3f bounds;
     uint32_t depSurface = 0;
@@ -1872,10 +2210,25 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
                 ? UsdGenHairId(term.curveId[g]) : 0.0f);
             if (!term.rootUV.empty() && g < term.rootUV.size())
                 pub.st.push_back(term.rootUV[g]);
-            if (displayColor)
+            if (_previewColors.active) {
+                std::vector<GfVec3f> const &colors = _previewColors.colors;
+                if (_previewColors.perCv) {
+                    for (uint32_t v = 0; v < len; ++v)
+                        pub.displayColor.push_back(size_t(p0) + v < colors.size()
+                            ? colors[size_t(p0) + v] : UsdGenPreviewMissingColor());
+                } else {
+                    pub.displayColor.push_back(g < colors.size()
+                        ? colors[g] : UsdGenPreviewMissingColor());
+                }
+            } else if (displayColor)
                 _GatherColor(*displayColor, g, p0, &pub.displayColor);
-            else if (_desc.look.bakeTarget != TfToken("none"))
-                pub.displayColor.push_back(_desc.look.rootColor);
+            else if (_desc.look.bakeTarget != TfToken("none")) {
+                // `authoredLook` above carries the 02 §2.14 precedence rule.
+                if (!authoredLook && sourceColor)
+                    _GatherColor(*sourceColor, g, p0, &pub.displayColor);
+                else
+                    pub.displayColor.push_back(_desc.look.rootColor);
+            }
             for (auto& extra : extraPlanes)
                 if (extra.output.interpolation == TfToken("uniform"))
                     _GatherPlaneElement(*extra.source, g, &extra.output);
@@ -1911,6 +2264,12 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
     pub.visibility = scalars.visibility;
     pub.materialPath = scalars.materialPath;
     pub.materialPurpose = scalars.materialPurpose;
+    if (_previewColors.active) {
+        // The look's shader blends toward the tip colour; the preview shows
+        // exactly the published displayColor, over any authored material.
+        pub.materialPath = UsdGenPreviewMaterialPath(_desc.description, _desc.preview.shading);
+        pub.materialPurpose = TfToken("allPurpose");
+    }
     pub.refineLevel = scalars.refineLevel;
     pub.primOrigin = scalars.primOrigin;
     pub.dependencySurface = scalars.dependencySurface;

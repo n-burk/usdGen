@@ -39,6 +39,8 @@ struct CpuExpressionField {
     unsigned components = 1;
 };
 
+class CpuExpressionSamplers;
+
 /// Host twin of gpu::ExpressionInputs.
 struct CpuExpressionInputs {
     Context context;
@@ -46,7 +48,17 @@ struct CpuExpressionInputs {
     size_t primitiveCount = 0;
     CpuPointOwnerView pointToPrimitive;
     CpuExpressionField fields[static_cast<unsigned>(Variable::CountVariables)]{};
+    // Resolved IROp::Sample slots for the program being run; null when it has
+    // none. Host only: the device inputs have no such member, which is what
+    // keeps the device interpreter from ever sampling (irExec.h).
+    CpuExpressionSamplers const *samplers = nullptr;
 };
+
+/// One IROp::Sample evaluation (expressions/samplers.cpp). `index` is the
+/// element being evaluated in `inputs`' domain.
+double SampleSlot(CpuExpressionSamplers const &samplers, CpuExpressionInputs const &inputs,
+                  unsigned slot, double const *args, unsigned argCount, size_t index,
+                  unsigned component);
 
 /// Host twin of gpu::ExpressionOutput.
 struct CpuExpressionOutput {

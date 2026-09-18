@@ -959,7 +959,7 @@ can proceed without claiming those criteria passed.
 ### CUDA Width execution checkpoint
 
 The source-only checkpoint above is now extended to `CurveSource -> Width`
-chains. [cuda-width-network.usda](examples/cuda-width-network.usda) is a small
+chains. [cuda-width-network.usda](../examples/cuda-width-network.usda) is a small
 executable schema example for an explicitly device-aware tool consumer. The
 larger discussion network remains unsupported as a complete cook/render.
 
@@ -1003,7 +1003,7 @@ larger discussion network remains unsupported as a complete cook/render.
 
 ### CUDA RBF execution checkpoint
 
-[cuda-rbf-network.usda](examples/cuda-rbf-network.usda) is now an executable
+[cuda-rbf-network.usda](../examples/cuda-rbf-network.usda) is now an executable
 small `CurveSource -> Deform(rbf) -> Width` hierarchy for an explicitly
 device-aware consumer. The larger schema discussion network is still not a
 fully supported cook/render. Width operators can precede or follow the one
@@ -1072,7 +1072,7 @@ rest-to-animated Deform step; a second deformation is rejected.
 
 ### CUDA Length and topology revision checkpoint
 
-[cuda-length-network.usda](examples/cuda-length-network.usda) exercises a real
+[cuda-length-network.usda](../examples/cuda-length-network.usda) exercises a real
 hierarchy-derived `CurveSource -> Length(cull) -> Width` device cook. Length can
 also precede RBF or another Length; downstream expression contexts and root
 bindings consume the surviving, reordered GPU channels.
