@@ -2051,9 +2051,9 @@ class UsdGenCollide "UsdGenCollide"
 {
     rel usdGen:colliders (
         customData = {
-            string userDocBrief = "Relationship consumed by Collide."
+            string userDocBrief = "Collider meshes for the push-out solve, appended after the bound surface, which always collides too."
         }
-        doc = "Relationship consumed by Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+        doc = "Collider meshes for the push-out solve, appended after the bound surface, which always collides too. Each of the iterations sweeps moves penetrating CVs out along the closest-point direction, keeping an offset gap and scaling the correction by pushAmount. Expression evaluation: groom (once per operator)."
     )
     bool usdGen:enabled = 1 (
         customData = {
@@ -2069,9 +2069,9 @@ class UsdGenCollide "UsdGenCollide"
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = "Iteration count for Collide."
+            string userDocBrief = "Number of push-out sweeps over each strand."
         }
-        doc = "Iteration count for Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."
+        doc = "Number of push-out sweeps over each strand. At least 1. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -2087,25 +2087,25 @@ class UsdGenCollide "UsdGenCollide"
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
-            string userDocBrief = "Offset for Collide."
+            string userDocBrief = "Rest gap kept between CVs and collider surfaces after the push-out solve."
         }
-        doc = "Offset for Collide. Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root)."
+        doc = "Rest gap kept between CVs and collider surfaces after the push-out solve. Expression evaluation: primitive (once per curve root)."
     )
     float usdGen:pushAmount = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "primitive"
             }
-            string userDocBrief = 'Authored Collide control "pushAmount".'
+            string userDocBrief = "Fraction of the push-out correction applied per sweep; 1 applies the full separation."
         }
-        doc = 'Authored Collide control "pushAmount". Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: primitive (once per curve root).'
+        doc = "Fraction of the push-out correction applied per sweep; 1 applies the full separation. Expression evaluation: primitive (once per curve root)."
     )
     uniform token usdGen:resolveType = "flexible" (
         allowedTokens = ["flexible", "stiff"]
         customData = {
-            string userDocBrief = 'Authored Collide control "resolveType".'
+            string userDocBrief = 'How the push-out moves the strand: "flexible" corrects each CV independently, "stiff" hinges the strand about the last clean CV.'
         }
-        doc = 'Authored Collide control "resolveType". Declared for the frozen v1-v3 vocabulary; no kernel implements Collide yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator).'
+        doc = 'How the push-out moves the strand: "flexible" corrects each CV independently, "stiff" hinges the strand about the last clean CV. Expression evaluation: groom (once per operator).'
     )
     uniform int usdGen:seed = 0 (
         customData = {
