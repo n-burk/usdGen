@@ -122,9 +122,9 @@ shading (plan/16, `docs/storm-fur.md`):
   `tools/make_head_hair.py`. `TempleCam` is the dense-coat view, `HeadCam` the
   wider one.
 * `metahuman-hair-parity.usda` — the real converted MetaHuman groom under
-  `plan/examples/metahuman-hair/male_hair_01/`, routed through a
+  `examples/production/metahuman-hair/male_hair_01/`, routed through a
   `UsdGenCurveSource` so it picks up the density bake, the scalp shadow and the
-  default strand material. Nothing under `plan/examples/` is modified; the
+  default strand material. Nothing under `examples/production/` is modified; the
   scene sublayers it and overrides in place. Generator
   `tools/make_metahuman_parity.py`.
 

@@ -45,9 +45,9 @@ With a Python-enabled OpenUSD installation and `usdview` on PATH, run from the
 repository root:
 
 ```sh
-usdview plan/examples/metahuman-hair/female_hair_01/hair.usda
-usdview plan/examples/metahuman-hair/male_hair_01/hair.usda
-usdview plan/examples/metahuman-hair/male_hair_02/hair.usda
+usdview examples/production/metahuman-hair/female_hair_01/hair.usda
+usdview examples/production/metahuman-hair/male_hair_01/hair.usda
+usdview examples/production/metahuman-hair/male_hair_02/hair.usda
 ```
 
 These are standard `Mesh` and `BasisCurves` previews: viewing the imported hair
@@ -62,7 +62,7 @@ build and launch from the repository root:
 $env:USD = 'C:\path\to\OpenUSD-install'
 $env:PY = 'C:\path\to\python.exe'
 .\bin\build_usdgen.ps1 -UsdInstallDir $env:USD -NoCuda
-.\bin\launch_usdview.ps1 plan\examples\metahuman-hair\female_hair_01\hair.usda
+.\bin\launch_usdview.ps1 examples\production\metahuman-hair\female_hair_01\hair.usda
 ```
 
 Substitute `male_hair_01` or `male_hair_02` to view the other styles. In usdview,

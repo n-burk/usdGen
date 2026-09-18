@@ -2,15 +2,15 @@
 (
     defaultPrim = "World"
     subLayers = [
-        @../plan/examples/metahuman-hair/male_hair_01/hair.usda@
+        @./production/metahuman-hair/male_hair_01/hair.usda@
     ]
 )
 
-# Routes plan/examples/metahuman-hair/male_hair_01/hair.usda's converted
+# Routes examples/production/metahuman-hair/male_hair_01/hair.usda's converted
 # strands through usdGen instead of the flat UsdPreviewSurface preview that
 # asset ships with, so they get the default UsdGenHairStrands material, the
 # furTauP/N density bake and the synthetic scalp shadow. Nothing under
-# plan/examples/ is modified -- this sublayers it and overrides in place.
+# examples/production/ is modified -- this sublayers it and overrides in place.
 #
 # /World/Hair (the original BasisCurves) is kept ACTIVE (usdGen:curves reads
 # it live) but set invisible and stripped of its HairPreviewSurface binding,

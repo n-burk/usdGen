@@ -31,7 +31,7 @@ def Xform "World"
                 color3f inputs:diffuseColor = (0.12, 0.055, 0.022)
                 float inputs:roughness = 0.4
                 token outputs:surface
-            }>
+            }
         }
         def Material "ScalpPreview"
         {
