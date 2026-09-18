@@ -390,6 +390,30 @@ std::shared_ptr<const VulkanSourceGeneration> VulkanSourceGeneration::WithPoints
     catch (std::bad_alloc const&) { if (why) *why = "points COW allocation failed"; return {}; }
 }
 
+std::shared_ptr<const VulkanSourceGeneration> VulkanSourceGeneration::WithNoise(
+    std::shared_ptr<const VulkanSourceGeneration> const& base,
+    NoisePipeline::Candidate const& candidate, uint64_t value, std::string* why) {
+    // Noise preserves topology: only point count and context must match.
+    if (!base || value <= base->valueVersion() || !candidate.succeeded() ||
+        candidate.pointCount() != base->pointCount() ||
+        candidate.context() != base->context()) {
+        if (why) *why = "invalid noise COW proof";
+        return {};
+    }
+    auto points = candidate.output().points;
+    if (base->pointCount()) {
+        if (!points || points->context() != base->context() ||
+            points->sizeBytes() != VkDeviceSize(base->pointCount()) * 3 * sizeof(float) ||
+            !(points->usage() & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+            !(points->usage() & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+            if (why) *why = "invalid noise COW output";
+            return {};
+        }
+    } else if (points) { if (why) *why = "empty noise COW has output"; return {}; }
+    try { return std::shared_ptr<const VulkanSourceGeneration>(new VulkanSourceGeneration(base, std::move(points), value, true)); }
+    catch (std::bad_alloc const&) { if (why) *why = "noise COW allocation failed"; return {}; }
+}
+
 VulkanSourceGeneration::VulkanSourceGeneration(
     std::shared_ptr<const VulkanSourceGeneration> const& base,
     LengthCompactionPipeline::Candidate const& candidate, uint64_t value)

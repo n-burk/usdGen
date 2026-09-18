@@ -3,6 +3,7 @@
 #include <cmath>
 #include <new>
 #include <stdexcept>
+#include <cstring>
 namespace usdGen::vulkan {
 struct VulkanSourceWidthJob::Control {
     UsdGenExecutionPipeline::CommandMailbox mailbox;
@@ -97,7 +98,8 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
                 // Structural ordering above still applies.
                 if (stage.kind != VulkanSourceWidthStage::Kind::Width &&
                     stage.kind != VulkanSourceWidthStage::Kind::LengthScale &&
-                    stage.kind != VulkanSourceWidthStage::Kind::LengthCull) return {};
+                    stage.kind != VulkanSourceWidthStage::Kind::LengthCull &&
+                    stage.kind != VulkanSourceWidthStage::Kind::Noise) return {};
                 continue;
             }
             // These values may originate from a typed plan, but Create is
@@ -169,6 +171,16 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
             } else if (stage.kind == VulkanSourceWidthStage::Kind::WidthBlend) {
                 if (!info.widthBlendPipeline || info.widthBlendPipeline->context() != info.source.context ||
                     stage.rightInput > i || !std::isfinite(stage.blend) || stage.blend < 0 || stage.blend > 1) return {};
+            } else if (stage.kind == VulkanSourceWidthStage::Kind::Noise) {
+                if (!info.noisePipeline || info.noisePipeline->context() != info.source.context) return {};
+                if (!std::isfinite(stage.noise.magnitude) || stage.noise.magnitude < 0 ||
+                    !std::isfinite(stage.noise.frequency) || stage.noise.frequency <= 0 ||
+                    !std::isfinite(stage.noise.correlation) || stage.noise.correlation < 0 || stage.noise.correlation > 1 ||
+                    stage.noise.octaves < 1 || stage.noise.octaves > 6 ||
+                    !std::isfinite(stage.noise.lacunarity) || stage.noise.lacunarity <= 1 ||
+                    !std::isfinite(stage.noise.gain) || stage.noise.gain < 0 || stage.noise.gain > 1 ||
+                    !std::isfinite(stage.noise.preserveLength) || stage.noise.preserveLength < 0 || stage.noise.preserveLength > 1 ||
+                    !std::isfinite(stage.noise.mask) || stage.noise.mask < 0 || stage.noise.mask > 1) return {};
             } else return {};
         }
         auto job = std::shared_ptr<VulkanSourceWidthJob>(new VulkanSourceWidthJob(std::move(info)));
@@ -384,6 +396,7 @@ void VulkanSourceWidthJob::Advance() {
         case State::WidthPending: FinishWidth();return;
         case State::BlendPending: FinishBlend(); return;
         case State::ComparePending: FinishCompare(); return;
+        case State::NoisePending: FinishNoise(); return;
         default:return;
         }
     } catch (...) {FailOnOwner();}
@@ -404,11 +417,13 @@ void VulkanSourceWidthJob::BeginStage() {
         auto previous = info_.stages[stageIndex_ - 1].kind;
         stageFrom_ = previous == VulkanSourceWidthStage::Kind::Width ? State::WidthPending :
             previous == VulkanSourceWidthStage::Kind::LengthScale ? State::LengthPending :
-            previous == VulkanSourceWidthStage::Kind::LengthCull ? State::CullScatterPending : State::BlendPending;
+            previous == VulkanSourceWidthStage::Kind::LengthCull ? State::CullScatterPending :
+            previous == VulkanSourceWidthStage::Kind::Noise ? State::NoisePending : State::BlendPending;
     }
     if (stage.kind == VulkanSourceWidthStage::Kind::Width) BeginWidth();
     else if (stage.kind == VulkanSourceWidthStage::Kind::LengthScale) BeginLength();
     else if (stage.kind == VulkanSourceWidthStage::Kind::LengthCull) BeginCull();
+    else if (stage.kind == VulkanSourceWidthStage::Kind::Noise) BeginNoise();
     else BeginBlend();
 }
 void VulkanSourceWidthJob::FinishStage(std::shared_ptr<const VulkanSourceGeneration> value) {
@@ -699,6 +714,110 @@ void VulkanSourceWidthJob::FinishLength() {
     if (Suppressed()) { Terminal({}, State::Superseded, VK_SUCCESS); return; }
     if (semantic) { Terminal({}, State::Failed, VK_ERROR_VALIDATION_FAILED_EXT); return; }
     auto child = VulkanSourceGeneration::WithPoints(base_, *length_, info_.stageValueVersions[stageIndex_]);
+    if (!child) { Terminal({}, State::Failed, VK_ERROR_INITIALIZATION_FAILED); return; }
+    FinishStage(std::move(child));
+}
+void VulkanSourceWidthJob::BeginNoise() {
+    VkResult status = VK_ERROR_INITIALIZATION_FAILED;
+    if (info_.completionService && base_->pointCount()) {
+        auto self = shared_from_this();
+        watch_ = info_.completionService->Reserve(self,
+            [self](VkResult proof) -> VulkanCompletionService::DeliveryResult {
+                if (proof == VK_SUCCESS) {
+                    self->watchProofReady_ = true;
+                    return self->NotifyCompletion() ? VulkanCompletionService::DeliveryResult::Posted
+                                                   : VulkanCompletionService::DeliveryResult::Stale;
+                }
+                self->NotifyFailure(proof); return VulkanCompletionService::DeliveryResult::LostProof;
+            }, [self](VkResult proof) { self->NotifyFailure(proof); });
+        if (!watch_) { RouteFailure(); return; }
+    }
+    bool phaseMarked = false;
+    NoisePipeline::BeforeSubmit beforeSubmit;
+    if (watch_) beforeSubmit = [this, &phaseMarked] {
+        phaseMarked = watch_ && watch_->MarkPhaseSubmitted(); return phaseMarked;
+    };
+    auto const& stage = info_.stages[stageIndex_];
+    // The literal lane has no magnitude knots: a flat 257-entry profile of 1.0.
+    float profile[257];
+    for (int i = 0; i < 257; ++i) profile[i] = 1.0f;
+    auto const& ctx = base_->context();
+    VkBufferCreateInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = 257u * sizeof(float);
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    auto magnitudeProfile = ChargedBuffer::Create(ctx, bi,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        UsdGenExecutionResourceKind::Scratch);
+    if (!magnitudeProfile) {
+        status = VK_ERROR_OUT_OF_HOST_MEMORY;
+        if (watch_) { if (!phaseMarked) info_.completionService->CancelBeforeSubmit(*watch_); watch_.reset(); }
+        Terminal({}, phaseMarked ? State::LostProof : State::Failed, status); return;
+    }
+    {
+        void* p = nullptr;
+        if (vkMapMemory(ctx->device(), magnitudeProfile->memory(), 0, bi.size, 0, &p) != VK_SUCCESS) {
+            status = VK_ERROR_OUT_OF_HOST_MEMORY;
+            if (watch_) { if (!phaseMarked) info_.completionService->CancelBeforeSubmit(*watch_); watch_.reset(); }
+            Terminal({}, phaseMarked ? State::LostProof : State::Failed, status); return;
+        }
+        std::memcpy(p, profile, bi.size);
+        vkUnmapMemory(ctx->device(), magnitudeProfile->memory());
+    }
+    NoisePipeline::BeginInfo info;
+    info.points = base_->PlaneOwner("points");
+    info.restPoints = base_->PlaneOwner("rest");
+    info.curveOffsets = base_->PlaneOwner("curveOffsets");
+    info.stableIds = base_->PlaneOwner("stableIds");
+    info.curveCount = base_->curveCount();
+    info.pointCount = base_->pointCount();
+    info.hairT = base_->PlaneOwner("hairT");
+    info.frameTangent = base_->SourceFrameOwner("sourceRootT");
+    info.frameBinormal = base_->SourceFrameOwner("sourceRootB");
+    info.frameNormal = base_->SourceFrameOwner("sourceRootN");
+    info.frameStableIds = nullptr;
+    info.frameCount = base_->curveCount();
+    info.magnitudeProfile = std::move(magnitudeProfile);
+    info.magnitude = {stage.noise.magnitude, 1, nullptr, 0};
+    info.frequency = {stage.noise.frequency, 1, nullptr, 0};
+    info.correlation = {stage.noise.correlation, 1, nullptr, 0};
+    info.lacunarity = {stage.noise.lacunarity, 1, nullptr, 0};
+    info.gain = {stage.noise.gain, 1, nullptr, 0};
+    info.preserveLength = {stage.noise.preserveLength, 1, nullptr, 0};
+    info.mask = {stage.noise.mask, 1, nullptr, 0};
+    info.octaves = {stage.noise.octaves, 1, nullptr, 0};
+    info.seed = {stage.noise.seed, 1, nullptr, 0};
+    info.enabled = {1, 1, nullptr, 0};
+    info.cumulative = {stage.noise.cumulative ? 1u : 0u, 1, nullptr, 0};
+    NoiseSemantic beginSemantic = NoiseSemantic::Ok;
+    noise_ = info_.noisePipeline->Begin(std::move(info), &status, &beginSemantic, std::move(beforeSubmit));
+    if (!noise_) {
+        if (watch_) {
+            if (!phaseMarked) info_.completionService->CancelBeforeSubmit(*watch_);
+            watch_.reset();
+        }
+        Terminal({}, phaseMarked ? State::LostProof : State::Failed, status); return;
+    }
+    if (watch_ && (!phaseMarked || !info_.completionService->Arm(*watch_, uint64_t(State::NoisePending)))) {
+        watch_.reset(); RouteFailure(); return;
+    }
+    auto expected = stageFrom_;
+    state_.compare_exchange_strong(expected, State::NoisePending, std::memory_order_acq_rel);
+    if (!base_->pointCount()) FinishNoise();
+}
+void VulkanSourceWidthJob::FinishNoise() {
+    if (watch_) {
+        if (!watchProofReady_) return;
+        if (!watch_->Retire()) { watch_.reset(); Terminal({}, State::LostProof, VK_ERROR_DEVICE_LOST); return; }
+        watch_.reset(); watchProofReady_ = false;
+    }
+    NoiseSemantic semantic = NoiseSemantic::Ok;
+    auto proof = noise_->Poll(&semantic);
+    if (proof == VK_NOT_READY) { if (info_.completionService) FailOnOwner(); return; }
+    if (proof != VK_SUCCESS) { Terminal({}, State::LostProof, proof); return; }
+    if (Suppressed()) { Terminal({}, State::Superseded, VK_SUCCESS); return; }
+    if (!noise_->succeeded() || semantic != NoiseSemantic::Ok) { Terminal({}, State::Failed, VK_ERROR_VALIDATION_FAILED_EXT); return; }
+    auto child = VulkanSourceGeneration::WithNoise(base_, *noise_, info_.stageValueVersions[stageIndex_]);
     if (!child) { Terminal({}, State::Failed, VK_ERROR_INITIALIZATION_FAILED); return; }
     FinishStage(std::move(child));
 }

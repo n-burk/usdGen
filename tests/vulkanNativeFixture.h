@@ -27,7 +27,8 @@ struct NativeOwner {
 };
 
 static std::shared_ptr<NativeOwner> CreateNative(bool* unavailable,
-    std::vector<char const*> const& extensions = {}, void const* enabledFeatures = nullptr) {
+    std::vector<char const*> const& extensions = {}, void const* enabledFeatures = nullptr,
+    VkPhysicalDeviceFeatures const* coreFeatures = nullptr) {
     *unavailable = false;
     auto native = std::make_shared<NativeOwner>();
     VkApplicationInfo app{}; app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -62,6 +63,7 @@ static std::shared_ptr<NativeOwner> CreateNative(bool* unavailable,
     queue.queueFamilyIndex = native->family; queue.queueCount = 1; queue.pQueuePriorities = &priority;
     VkDeviceCreateInfo device{}; device.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device.pNext = enabledFeatures;
+    device.pEnabledFeatures = coreFeatures;
     device.queueCreateInfoCount = 1; device.pQueueCreateInfos = &queue;
     device.enabledExtensionCount = uint32_t(extensions.size());
     device.ppEnabledExtensionNames = extensions.data();

@@ -140,6 +140,7 @@ struct Relay final : std::enable_shared_from_this<Relay> {
             jobInfo.nativeJob.stageValueVersions.push_back(FinalValueVersion());
             jobInfo.nativeJob.widthBlendPipeline = executor->createInfo().widthBlendPipeline;
             jobInfo.nativeJob.nonWidthComparePipeline = executor->createInfo().nonWidthComparePipeline;
+            jobInfo.nativeJob.noisePipeline = executor->createInfo().noisePipeline;
             if (plan->HasLength()) {
                 jobInfo.nativeJob.lengthPipeline = executor->createInfo().lengthPipeline;
                 jobInfo.nativeJob.lengthCompactionPipeline = executor->createInfo().lengthCompactionPipeline;
@@ -278,6 +279,16 @@ bool VulkanPlanExecutor::Submit(std::shared_ptr<const VulkanSourceWidthPlan> pla
             info_.nonWidthComparePipeline->context() != request.context)) return false;
         if (stage.kind == VulkanSourceWidthStage::Kind::WidthBlend &&
             (!info_.widthBlendPipeline || info_.widthBlendPipeline->context() != request.context)) return false;
+        if (stage.kind == VulkanSourceWidthStage::Kind::Noise &&
+            (!info_.noisePipeline || info_.noisePipeline->context() != request.context ||
+             !std::isfinite(stage.noise.magnitude) || stage.noise.magnitude < 0 ||
+             !std::isfinite(stage.noise.frequency) || stage.noise.frequency <= 0 ||
+             !std::isfinite(stage.noise.correlation) || stage.noise.correlation < 0 || stage.noise.correlation > 1 ||
+             stage.noise.octaves < 1 || stage.noise.octaves > 6 ||
+             !std::isfinite(stage.noise.lacunarity) || stage.noise.lacunarity <= 1 ||
+             !std::isfinite(stage.noise.gain) || stage.noise.gain < 0 || stage.noise.gain > 1 ||
+             !std::isfinite(stage.noise.preserveLength) || stage.noise.preserveLength < 0 || stage.noise.preserveLength > 1 ||
+             !std::isfinite(stage.noise.mask) || stage.noise.mask < 0 || stage.noise.mask > 1)) return false;
     }
     // Admission is owner-only, as OperationLease is the domain's explicit
     // proof that Close cannot detach the queue while a return is outstanding.

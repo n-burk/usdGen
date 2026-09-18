@@ -485,10 +485,95 @@ void CheckPlanes(std::shared_ptr<NativeOwner> const& native,
     owner.Drain(); // Retire callback owns the final watcher/local references.
     CHECK(reads->proved);
 }
+// Read back the byte contents of one named plane from a published generation.
+// Mirrors the owner/watch/fence plumbing of CheckPlanes but captures a single
+// plane into host memory so a caller can compare it against another generation.
+std::vector<uint8_t> ReadPlaneBytes(
+    std::shared_ptr<NativeOwner> const& native,
+    std::shared_ptr<DeviceContext> const& context,
+    std::shared_ptr<VulkanCompletionService> const& service,
+    UsdGenExecutionPipeline& owner,
+    std::shared_ptr<const UsdGenDeviceGeneration> const& generation,
+    char const* planeName) {
+    struct OneRead final {
+        std::shared_ptr<NativeOwner> native;
+        std::shared_ptr<ChargedBuffer> staging;
+        std::vector<uint8_t> bytes;
+        std::unique_ptr<VulkanCompletionService::Watch> watch;
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool got = false;
+        ~OneRead() {
+            if (command) vkFreeCommandBuffers(native->device, native->commands, 1, &command);
+            if (fence) vkDestroyFence(native->device, fence, nullptr);
+        }
+    };
+    VulkanGenerationLease lease;
+    auto const stream = reinterpret_cast<UsdGenDeviceStream>(context->computeQueue());
+    auto reads = std::make_shared<OneRead>(); reads->native = native;
+    auto completed = std::make_shared<std::promise<void>>(); auto done = completed->get_future();
+    owner.InvokeOwner([&] {
+        lease = AcquireVulkanGeneration(generation, stream);
+        CHECK(lease && lease.WaitUntilReady() == UsdGenDeviceStatus::Ok);
+        auto const& planes = lease.Planes();
+        auto plane = std::find_if(planes.begin(), planes.end(), [&](auto const& p) {
+            return p.metadata.name == planeName;
+        });
+        CHECK(plane != planes.end());
+        uint32_t const size = plane->bytes;
+        reads->watch = service->Reserve(reads, [reads, completed, &owner](VkResult proof) {
+            CHECK(owner.IsExecutingOwner() && proof == VK_SUCCESS);
+            CHECK(reads->staging->PollComplete() == VK_SUCCESS);
+            void* mapped = nullptr;
+            CHECK(vkMapMemory(reads->native->device, reads->staging->memory(), 0,
+                reads->bytes.size(), 0, &mapped) == VK_SUCCESS);
+            std::memcpy(reads->bytes.data(), mapped, reads->bytes.size());
+            vkUnmapMemory(reads->native->device, reads->staging->memory());
+            CHECK(reads->watch->Retire()); reads->watch.reset(); reads->got = true;
+            completed->set_value(); return VulkanCompletionService::DeliveryResult::Posted;
+        }, [](VkResult) { CHECK(false); });
+        CHECK(reads->watch);
+        VkFenceCreateInfo fi{}; fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        CHECK(vkCreateFence(native->device, &fi, nullptr, &reads->fence) == VK_SUCCESS);
+        VkCommandBufferAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        ai.commandPool = native->commands; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+        CHECK(vkAllocateCommandBuffers(native->device, &ai, &reads->command) == VK_SUCCESS);
+        VkCommandBufferBeginInfo begin{}; begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        CHECK(vkBeginCommandBuffer(reads->command, &begin) == VK_SUCCESS);
+        VkMemoryBarrier before{}; before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(reads->command, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &before, 0, nullptr, 0, nullptr);
+        reads->bytes.resize(size);
+        VkBufferCreateInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO; bi.size = size;
+        bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        reads->staging = ChargedBuffer::Create(context, bi,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            UsdGenExecutionResourceKind::Scratch); CHECK(reads->staging);
+        CHECK(reads->staging->MarkSubmitted(reads->fence, reads) == VK_SUCCESS);
+        VkBufferCopy copy{0, 0, size}; vkCmdCopyBuffer(reads->command, plane->buffer, reads->staging->buffer(), 1, &copy);
+        VkMemoryBarrier after{}; after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(reads->command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+            0, 1, &after, 0, nullptr, 0, nullptr);
+        CHECK(vkEndCommandBuffer(reads->command) == VK_SUCCESS);
+        VkSubmitInfo submit{}; submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1; submit.pCommandBuffers = &reads->command;
+        CHECK(reads->watch->MarkPhaseSubmitted());
+        CHECK(vkQueueSubmit(native->queue, 1, &submit, reads->fence) == VK_SUCCESS);
+    });
+    lease.Complete();
+    owner.InvokeOwner([&] { CHECK(service->Arm(*reads->watch, 1)); });
+    CHECK(done.wait_for(std::chrono::seconds(20)) == std::future_status::ready);
+    owner.Drain();
+    CHECK(reads->got);
+    return reads->bytes;
+}
 } // namespace
 
 int main(int argc, char** argv) {
-    CHECK(argc == 9);
+    CHECK(argc == 11);
     std::ifstream shader(argv[1], std::ios::binary); CHECK(shader);
     std::vector<char> raw((std::istreambuf_iterator<char>(shader)), {});
     CHECK(!raw.empty() && raw.size() % sizeof(uint32_t) == 0);
@@ -529,18 +614,37 @@ int main(int argc, char** argv) {
     CHECK(!literalRaw.empty() && literalRaw.size() % sizeof(uint32_t) == 0);
     std::vector<uint32_t> literalSpirv(literalRaw.size() / sizeof(uint32_t));
     std::memcpy(literalSpirv.data(), literalRaw.data(), literalRaw.size());
+    std::ifstream noiseValShader(argv[9], std::ios::binary); CHECK(noiseValShader);
+    std::vector<char> noiseValRaw((std::istreambuf_iterator<char>(noiseValShader)), {});
+    CHECK(!noiseValRaw.empty() && noiseValRaw.size() % sizeof(uint32_t) == 0);
+    std::vector<uint32_t> noiseValidateSpirv(noiseValRaw.size() / sizeof(uint32_t));
+    std::memcpy(noiseValidateSpirv.data(), noiseValRaw.data(), noiseValRaw.size());
+    std::ifstream noiseGenShader(argv[10], std::ios::binary); CHECK(noiseGenShader);
+    std::vector<char> noiseGenRaw((std::istreambuf_iterator<char>(noiseGenShader)), {});
+    CHECK(!noiseGenRaw.empty() && noiseGenRaw.size() % sizeof(uint32_t) == 0);
+    std::vector<uint32_t> noiseGenerateSpirv(noiseGenRaw.size() / sizeof(uint32_t));
+    std::memcpy(noiseGenerateSpirv.data(), noiseGenRaw.data(), noiseGenRaw.size());
     bool unavailable = false; auto probe = CreateNative(&unavailable); if (unavailable) return 77;
     CHECK(probe);
     VkPhysicalDeviceTimelineSemaphoreFeatures supported{};
     supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     VkPhysicalDeviceFeatures2 features{}; features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2; features.pNext = &supported;
     vkGetPhysicalDeviceFeatures2(probe->physical, &features); if (!supported.timelineSemaphore) return 77;
+    // FP64 is required only by the noise pipeline; enable it on the logical
+    // device solely when the physical device supports it, keeping this test
+    // portable on GPUs without shaderFloat64 (the noise case then skips).
+    VkPhysicalDeviceFeatures physicalFeatures{};
+    vkGetPhysicalDeviceFeatures(probe->physical, &physicalFeatures);
+    bool const hasFp64 = physicalFeatures.shaderFloat64;
     probe.reset(); supported.timelineSemaphore = VK_TRUE;
-    auto native = CreateNative(&unavailable, {}, &supported); CHECK(native);
+    VkPhysicalDeviceFeatures core{};
+    core.shaderFloat64 = hasFp64 ? VK_TRUE : VK_FALSE;
+    auto native = CreateNative(&unavailable, {}, &supported, hasFp64 ? &core : nullptr); CHECK(native);
     DeviceContext::CreateInfo info; info.instance = native->instance; info.physicalDevice = native->physical;
     info.device = native->device; info.computeQueue = native->queue; info.computeQueueFamily = native->family;
     info.physicalIndex = native->physicalIndex; info.resourceDeviceId = 7044; info.nativeLifetime = native;
     info.timelineSemaphoreEnabled = true; info.resources = {size_t{16} << 20, 0};
+    info.shaderFloat64Enabled = hasFp64;
     auto context = DeviceContext::Create(info); CHECK(context);
     UsdGenExecutionRuntime runtime{3}; auto owner = std::make_shared<UsdGenExecutionPipeline>(runtime);
     auto service = VulkanCompletionService::Create({context, owner.get(), 8}); CHECK(service);
@@ -557,7 +661,25 @@ int main(int argc, char** argv) {
           !reparamPipeline->HasMinimum());
     auto blendPipeline = WidthBlendPipeline::Create(context, blendSpirv); CHECK(blendPipeline);
     auto preparer = UsdGenExecutionTaskGraph::GetOrCreate(runtime, "vulkan-plan-executor", 7044);
+    VkResult noiseStatus = VK_SUCCESS;
+    std::shared_ptr<NoisePipeline> noisePipeline;
+    if (hasFp64) {
+        noisePipeline = NoisePipeline::Create(context, noiseValidateSpirv, noiseGenerateSpirv, &noiseStatus);
+        CHECK(noisePipeline && noiseStatus == VK_SUCCESS);
+    }
     auto executor = VulkanPlanExecutor::Create({domain, pipeline, preparer, lengthPipeline, blendPipeline}, &reason); CHECK(executor);
+    std::shared_ptr<VulkanPlanExecutor> noiseExecutor;
+    if (noisePipeline) {
+        VulkanPlanExecutor::CreateInfo noiseCI;
+        noiseCI.domain = domain;
+        noiseCI.widthPipeline = pipeline;
+        noiseCI.preparer = preparer;
+        noiseCI.lengthPipeline = lengthPipeline;
+        noiseCI.widthBlendPipeline = blendPipeline;
+        noiseCI.noisePipeline = noisePipeline;
+        noiseExecutor = VulkanPlanExecutor::Create(noiseCI, &reason);
+        CHECK(noiseExecutor);
+    }
     auto oldCutExecutor = VulkanPlanExecutor::Create(
         {domain, pipeline, preparer, oldCutPipeline, blendPipeline}, &reason); CHECK(oldCutExecutor);
     auto reparamExecutor = VulkanPlanExecutor::Create(
@@ -1296,6 +1418,58 @@ int main(int argc, char** argv) {
                                      std::make_shared<unsigned>(38));
     CheckPlanes(native, context, service, *owner, affineRetry.generation, affineExpected);
     CheckPlanes(native, context, service, *owner, affineResult.generation, affineExpected);
+    // Noise is topology-preserving vector frizz (root T/B/N) with no CPU
+    // oracle in this suite: prove the executor wiring by submitting the same
+    // root-bound source with and without the noise op and requiring the GPU
+    // points to differ while point count and the width plane are preserved.
+    Result noiseResult, plainResult;
+    if (noiseExecutor) {
+    auto noiseDesc = MakeRootBoundDescriptor(true, TfToken("never"));
+    UsdGenNodeDesc noiseNode;
+    noiseNode.path = SdfPath("/Executor/Ops/noise");
+    noiseNode.type = TfToken("UsdGenNoise");
+    noiseNode.inputs = {noiseDesc.nodes[0].path};
+    noiseNode.params = {
+        {TfToken("noise:magnitude"), VtValue(0.1f), false},
+        {TfToken("noise:frequency"), VtValue(1.7f), false},
+        {TfToken("noise:correlation"), VtValue(0.4f), false},
+        {TfToken("noise:octaves"), VtValue(3), false},
+        {TfToken("noise:lacunarity"), VtValue(2.0f), false},
+        {TfToken("noise:gain"), VtValue(0.5f), false},
+        {TfToken("mask"), VtValue(1.0f), false},
+        {TfToken("preserveLength"), VtValue(0.0f), false},
+        {TfToken("cumulative"), VtValue(false), false},
+        {TfToken("noise:seed"), VtValue(12345), false}};
+    noiseDesc.nodes[1].inputs = {noiseNode.path};
+    noiseDesc.nodes.insert(noiseDesc.nodes.begin() + 1, noiseNode);
+    auto noiseHandle = CompileVulkanSourceWidthPlan(noiseDesc, nullptr); CHECK(noiseHandle);
+    auto noisePlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(noiseHandle->Payload());
+    CHECK(noisePlan && noisePlan->HasRootBindings());
+    noiseResult = SubmitAndWait(*owner, noiseExecutor, noisePlan, context, 141,
+                                     std::make_shared<unsigned>(41));
+    CHECK(noiseResult.generation);
+    // Baseline: the identical source with no noise op, published through the
+    // main executor.  The points planes must differ once noise is admitted.
+    auto plainDesc = MakeRootBoundDescriptor(true, TfToken("never"));
+    auto plainHandle = CompileVulkanSourceWidthPlan(plainDesc, nullptr); CHECK(plainHandle);
+    auto plainPlan = std::static_pointer_cast<const VulkanSourceWidthPlan>(plainHandle->Payload());
+    CHECK(plainPlan && plainPlan->HasRootBindings());
+    plainResult = SubmitAndWait(*owner, executor, plainPlan, context, 140,
+                                     std::make_shared<unsigned>(40));
+    CHECK(plainResult.generation);
+    CHECK(noiseResult.generation->Geometry().pointCount ==
+          plainResult.generation->Geometry().pointCount);
+    auto plainPoints = ReadPlaneBytes(native, context, service, *owner,
+                                     plainResult.generation, "points");
+    auto noisePoints = ReadPlaneBytes(native, context, service, *owner,
+                                     noiseResult.generation, "points");
+    CHECK(!plainPoints.empty() && plainPoints.size() == noisePoints.size());
+    CHECK(std::memcmp(plainPoints.data(), noisePoints.data(), plainPoints.size()) != 0);
+    auto noiseWidth = ReadPlaneBytes(native, context, service, *owner,
+                                     noiseResult.generation, "width");
+    CHECK(!noiseWidth.empty());
+    std::printf("Noise executor wiring: points moved, width present\n");
+    } // if (noiseExecutor)
 
     // A second plan uses the default-width path and useRest=false.  The prior
     // published immutable result must stay readable while this job publishes.
@@ -1344,9 +1518,10 @@ int main(int argc, char** argv) {
     auto emptyRestResult = SubmitAndWait(*owner, executor, emptyRest, context, 104, std::make_shared<unsigned>(10));
     CHECK(emptyRestResult.generation->Geometry().curveCount == 0 && emptyRestResult.generation->Geometry().pointCount == 0);
 
-    owner->InvokeOwner([&] { firstResult.generation.reset(); secondResult.generation.reset(); lengthResult.generation.reset(); fanoutResult.generation.reset(); boundResult.generation.reset(); rootedRetry.generation.reset(); reboundResult.generation.reset(); droppedResult.generation.reset(); boundLengthResult.generation.reset(); boundBlendResult.generation.reset(); affineResult.generation.reset(); affineRetry.generation.reset(); shortIndexResult.generation.reset(); duplicateIndexResult.generation.reset(); emptyResult.generation.reset(); emptyRestResult.generation.reset(); });
+    owner->InvokeOwner([&] { firstResult.generation.reset(); secondResult.generation.reset(); lengthResult.generation.reset(); fanoutResult.generation.reset(); boundResult.generation.reset(); rootedRetry.generation.reset(); reboundResult.generation.reset(); droppedResult.generation.reset(); boundLengthResult.generation.reset(); boundBlendResult.generation.reset(); affineResult.generation.reset(); affineRetry.generation.reset(); shortIndexResult.generation.reset(); duplicateIndexResult.generation.reset(); emptyResult.generation.reset(); emptyRestResult.generation.reset(); plainResult.generation.reset(); noiseResult.generation.reset(); });
     oldCutExecutor->Shutdown(); CHECK(oldCutExecutor->IsShutdown());
     executor->Shutdown(); CHECK(executor->IsShutdown());
+    noiseExecutor->Shutdown(); CHECK(noiseExecutor->IsShutdown());
     owner->InvokeOwner([&] { CHECK(!executor->Submit(first, {}, {})); });
     CHECK(domain->Close()); service->CloseAndJoin(); owner->Drain(); preparer->Drain();
     CHECK(owner->CallbackFailures() == 0 && context->resources()->Snapshot().usedBytes == 0);

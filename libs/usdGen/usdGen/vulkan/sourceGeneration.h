@@ -7,6 +7,7 @@
 #include "nonWidthComparePipeline.h"
 #include "lengthScalePipeline.h"
 #include "lengthCompactionPipeline.h"
+#include "noisePipeline.h"
 #include "usdGen/curveBuffer.h"
 #include "usdGen/deviceGeneration.h"
 
@@ -131,6 +132,10 @@ public:
     static std::shared_ptr<const VulkanSourceGeneration> WithPoints(
         std::shared_ptr<const VulkanSourceGeneration> const&, LengthScalePipeline::Candidate const&,
         uint64_t newValueVersion, std::string* reason = nullptr);
+    static std::shared_ptr<const VulkanSourceGeneration> WithNoise(
+        std::shared_ptr<const VulkanSourceGeneration> const&,
+        NoisePipeline::Candidate const&, uint64_t newValueVersion,
+        std::string* reason = nullptr);
     static std::shared_ptr<const VulkanSourceGeneration> WithCompacted(
         std::shared_ptr<const VulkanSourceGeneration> const&,
         LengthCompactionPipeline::Candidate const&, uint64_t newValueVersion,

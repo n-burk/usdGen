@@ -14,9 +14,21 @@ struct VulkanLiteralWidthControls {
     float width = 0.01f;
     bool replace = true;
 };
+struct VulkanLiteralNoiseControls {
+    float magnitude = 0.05f;
+    float frequency = 3.0f;
+    float correlation = 0.5f;
+    int32_t octaves = 1;
+    float lacunarity = 2.0f;
+    float gain = 0.5f;
+    float preserveLength = 1.0f;
+    float mask = 1.0f;
+    int32_t seed = 0;
+    bool cumulative = false;
+};
 
 struct VulkanSourceWidthStage {
-    enum class Kind { Width, LengthScale, WidthBlend, LengthCull };
+    enum class Kind { Width, LengthScale, WidthBlend, LengthCull, Noise };
     enum class LengthMode : uint32_t { Scale = 0, Set = 1 };
     enum class LengthMethod : uint32_t { Scale = 0, CutExtend = 1 };
     enum class LengthRebuild : uint32_t { KeepParam = 0, Reparam = 1 };
@@ -42,6 +54,7 @@ struct VulkanSourceWidthStage {
     bool lengthCullOnly = false;
     bool requiresNonWidthProof = false;
     float cullThreshold = 0.0f;
+    VulkanLiteralNoiseControls noise;
 };
 
 // All source options admitted by this compiler.  These are copied out for a

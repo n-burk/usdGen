@@ -4,6 +4,7 @@
 
 #include "executionPlan.h"
 #include "publicationJob.h"
+#include "noisePipeline.h"
 #include "usdGen/executionValueRevisions.h"
 
 #include <atomic>
@@ -32,6 +33,7 @@ public:
         std::shared_ptr<WidthBlendPipeline> widthBlendPipeline = {};
         std::shared_ptr<NonWidthComparePipeline> nonWidthComparePipeline = {};
         std::shared_ptr<LengthCompactionPipeline> lengthCompactionPipeline = {};
+        std::shared_ptr<NoisePipeline> noisePipeline = {};
     };
     struct Request {
         // When present, these are the Session's authoritative publication

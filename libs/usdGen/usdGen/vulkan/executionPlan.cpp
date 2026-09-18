@@ -290,6 +290,70 @@ bool ValidateLength(UsdGenNodeDesc const& node, VulkanSourceWidthStage* stage, U
     return true;
 }
 
+bool ValidateNoise(UsdGenNodeDesc const& node, VulkanLiteralNoiseControls* out, UsdGenDiagnostics* diagnostics) {
+    // Literal-only lane: no references/curves/surfaces/maps/expressions/ramps.
+    // Magnitude ramps are excluded (the pipeline uses a flat 257-entry profile).
+    if (!node.mode.IsEmpty() ||
+        !node.references.empty() || !node.curves.empty() || !node.surfaces.empty() ||
+        !node.maps.empty() || !node.mapBindings.empty() ||
+        !node.expressionBindings.empty() || !node.ramps.empty())
+        return Fail(diagnostics, "Noise requires literal configuration");
+    std::set<TfToken> seen;
+    for (auto const& param : node.params) {
+        if (param.animated) return Fail(diagnostics, "Noise requires non-animated literal controls");
+        if (!seen.insert(param.name).second) return Fail(diagnostics, "duplicate Noise parameter");
+        auto const& name = param.name.GetString();
+        if (name == "noise:magnitude") {
+            if (!ReadFloat(param, &out->magnitude) || out->magnitude < 0)
+                return Fail(diagnostics, "Noise magnitude must be a finite nonnegative literal");
+        } else if (name == "noise:frequency") {
+            if (!ReadFloat(param, &out->frequency) || out->frequency <= 0)
+                return Fail(diagnostics, "Noise frequency must be a finite positive literal");
+        } else if (name == "noise:correlation") {
+            if (!ReadFloat(param, &out->correlation) || out->correlation < 0 || out->correlation > 1)
+                return Fail(diagnostics, "Noise correlation must be a finite [0,1] literal");
+        } else if (name == "noise:octaves") {
+            if (!param.value.IsHolding<int>())
+                return Fail(diagnostics, "Noise octaves must be an int literal");
+            out->octaves = param.value.UncheckedGet<int>();
+            if (out->octaves < 1 || out->octaves > 6)
+                return Fail(diagnostics, "Noise octaves must be in [1,6]");
+        } else if (name == "noise:lacunarity") {
+            if (!ReadFloat(param, &out->lacunarity) || out->lacunarity <= 1)
+                return Fail(diagnostics, "Noise lacunarity must be a finite >1 literal");
+        } else if (name == "noise:gain") {
+            if (!ReadFloat(param, &out->gain) || out->gain < 0 || out->gain > 1)
+                return Fail(diagnostics, "Noise gain must be a finite [0,1] literal");
+        } else if (name == "preserveLength") {
+            if (!ReadFloat(param, &out->preserveLength) || out->preserveLength < 0 || out->preserveLength > 1)
+                return Fail(diagnostics, "Noise preserveLength must be a finite [0,1] literal");
+        } else if (name == "mask") {
+            if (!ReadFloat(param, &out->mask) || out->mask < 0 || out->mask > 1)
+                return Fail(diagnostics, "Noise mask must be a finite [0,1] literal");
+        } else if (name == "noise:seed") {
+            if (!param.value.IsHolding<int>())
+                return Fail(diagnostics, "Noise seed must be an int literal");
+            out->seed = param.value.UncheckedGet<int>();
+        } else if (name == "cumulative") {
+            if (!param.value.IsHolding<bool>())
+                return Fail(diagnostics, "Noise cumulative must be a bool literal");
+            out->cumulative = param.value.UncheckedGet<bool>();
+        } else if (name == "noise:magnitude:knots") {
+            if (!param.value.IsHolding<VtVec2fArray>() || !param.value.UncheckedGet<VtVec2fArray>().empty())
+                return Fail(diagnostics, "Noise magnitude ramps are not supported");
+        } else if (name == "noise:magnitude:interpolation") {
+            if (param.value != VtValue(TfToken("catmullRom")))
+                return Fail(diagnostics, "Noise magnitude interpolation must be neutral catmullRom");
+        } else if (name == "enabled") {
+            if (!param.value.IsHolding<bool>())
+                return Fail(diagnostics, "Noise enabled must be a bool literal");
+        } else {
+            return Fail(diagnostics, "unsupported Noise parameter " + name);
+        }
+    }
+    return true;
+}
+
 bool Estimate(UsdGenCurveSetDesc const &source, bool rootBindings,
               uint64_t *bytes, uint64_t *widthBytes) {
     uint64_t points = source.points.size(), curves = source.curveVertexCounts.size(), total = 0, value = 0;
@@ -453,6 +517,12 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
                 Fail(diagnostics, "WidthBlend requires two ordered inputs and literal blend"); return {};
             }
             stage.rightInput = nodeValue[inputs[ready][1]]; stage.blend = weight; hasBlend = true;
+        } else if (node.type == TfToken("UsdGenNoise")) {
+            stage.kind = VulkanSourceWidthStage::Kind::Noise;
+            stage.noise.seed = node.seed;
+            if (inputs[ready].size() != 1 || !ValidateNoise(node, &stage.noise, diagnostics)) return {};
+            if (!hasRootBindings) { Fail(diagnostics, "Noise requires a root-bound source"); return {}; }
+            stage.disabled = !node.enabled;
         } else { Fail(diagnostics, "unsupported Vulkan operator"); return {}; }
         if (stage.kind == VulkanSourceWidthStage::Kind::LengthScale &&
             stage.cullThreshold > 0.0f) {
@@ -501,7 +571,8 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
         ++processedAuthored;
     }
     if (authoredIndices.back() != terminalIndex || steps.back().kind == VulkanSourceWidthStage::Kind::LengthScale ||
-        steps.back().kind == VulkanSourceWidthStage::Kind::LengthCull) {
+        steps.back().kind == VulkanSourceWidthStage::Kind::LengthCull ||
+        steps.back().kind == VulkanSourceWidthStage::Kind::Noise) {
         Fail(diagnostics, "terminal must be Width or WidthBlend"); return {};
     }
     uint64_t bytes = 0, widthBytes = 0, pointBytes = 0, peak = 0;
