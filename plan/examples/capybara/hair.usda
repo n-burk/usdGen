@@ -1,0 +1,89 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    endTimeCode = 48
+    framesPerSecond = 24
+    metersPerUnit = 0.01
+    startTimeCode = 1
+    subLayers = [
+        @guides.usdc@,
+        @strands.usdc@,
+        @skin.usdc@
+    ]
+    timeCodesPerSecond = 24
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    matrix4d xformOp:transform = ( (100, 0, 0, 0), (0, -2.220446049250313e-14, 100.00000000000003, 0), (0, -100.00000000000003, -2.220446049250313e-14, 0), (0, 0, 0, 1) )
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+
+    def "Looks"
+    {
+        def Material "HairPreview"
+        {
+            token outputs:surface.connect = </World/Looks/HairPreview/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.12, 0.055, 0.022)
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }>
+        }
+        def Material "ScalpPreview"
+        {
+            token outputs:surface.connect = </World/Looks/ScalpPreview/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.18, 0.1, 0.07)
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    over "Hair" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/HairPreview>
+    }
+
+    over "Scalp" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/ScalpPreview>
+    }
+
+    def "Lights"
+    {
+        def DistantLight "Key"
+        {
+            float inputs:intensity = 3
+            float3 xformOp:rotateXYZ = (-35, 25, 0)
+            uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+        }
+
+        def DistantLight "Rim"
+        {
+            float inputs:intensity = 4
+            float3 xformOp:rotateXYZ = (-10, 200, 0)
+            uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+        }
+    }
+
+    def Camera "Cam"
+    {
+        float2 clippingRange = (1, 10000)
+        float focalLength = 35
+        matrix4d xformOp:transform = ( (0.7071067811865475, 0, -0.7071067811865475, 0), (-0.16222142113076257, 0.9733285267845754, -0.16222142113076257, 0), (0.6882472016116854, 0.22941573387056186, 0.6882472016116854, -0), (3, 1.8, 3, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+}
+
