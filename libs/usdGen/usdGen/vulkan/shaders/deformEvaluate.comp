@@ -1,0 +1,82 @@
+// deformEvaluate.comp — Vulkan port of the CUDA RBF evalKernel (rbf.cu:93-102).
+// One thread per control vertex (CV). Reads the CV, computes its RBF-warped
+// position using double-precision math, and writes it to `warped`. Records a
+// non-finite flag via atomicOr if the CV or its result is not finite.
+//
+// Submitted synchronously (proof) inside Begin; Begin reads evalFlag back and
+// rejects NonFinite before the apply dispatch is recorded.
+//
+// ABI — descriptors:
+//   0 cvs      float[3*pointCount] RO  (input CVs)
+//   1 warped   float[3*pointCount]     OUT
+//   2 samples  float[3*n]      RO     (rest RBF samples)
+//   3 coef     double[3*m]    RO     (column-major m x 3 coefficients)
+//   4 UBO      Params (std140, 64 bytes)
+//   5 evalFlag int[1]         OUT     (atomicOr, 0 == clean)
+//
+// Dispatch: local_size_x=256, groups=ceil(pointCount/256).
+
+#version 460
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Cvs     { float cvs[]; };
+layout(std430, binding = 1) buffer Warped            { float warped[]; };
+layout(std430, binding = 2) readonly buffer Samples  { float samples[]; };
+layout(std430, binding = 3) readonly buffer Coef     { double coef[]; };
+layout(std430, binding = 5) buffer EvalFlag          { int evalFlag; };
+
+layout(std140, binding = 4) uniform Params {
+    ivec2  n_m;       // x = n (samples), y = m (n+4)
+    ivec2  counts;    // x = pointCount
+    double cx;
+    double cy;
+    double cz;
+    double invScale;
+    double scale;
+    double _pad2;
+} params;
+
+#define P3(a, i) vec3((a)[3u*(i)], (a)[3u*(i)+1u], (a)[3u*(i)+2u])
+
+bool Finite(float v)   { return !(isinf(v) || isnan(v)); }
+bool FiniteD(double v) { return !(isinf(v) || isnan(v)); }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(params.counts.x)) return;
+    int n = params.n_m.x;
+    int m = params.n_m.y;
+
+    vec3 p = P3(cvs, i);
+    if (!Finite(p.x) || !Finite(p.y) || !Finite(p.z)) { atomicOr(evalFlag, 1); return; }
+
+    double x = (double(p.x) - params.cx) * params.invScale;
+    double y = (double(p.y) - params.cy) * params.invScale;
+    double z = (double(p.z) - params.cz) * params.invScale;
+
+    // Polynomial part (last 4 coefficients of each column; coef[n..n+3] for x).
+    double ox = x + coef[n]     + coef[n+1]*x + coef[n+2]*y + coef[n+3]*z;
+    double oy = y + coef[m+n]   + coef[m+n+1]*x + coef[m+n+2]*y + coef[m+n+3]*z;
+    double oz = z + coef[2*m+n] + coef[2*m+n+1]*x + coef[2*m+n+2]*y + coef[2*m+n+3]*z;
+
+    for (int j = 0; j < n; ++j) {
+        vec3 s = P3(samples, j);
+        double dx = x - (double(s.x) - params.cx) * params.invScale;
+        double dy = y - (double(s.y) - params.cy) * params.invScale;
+        double dz = z - (double(s.z) - params.cz) * params.invScale;
+        double r  = sqrt(dx*dx + dy*dy + dz*dz);
+        r = r * r * r;
+        ox += coef[j] * r;
+        oy += coef[m + j] * r;
+        oz += coef[2*m + j] * r;
+    }
+
+    double oxw = ox * params.scale + params.cx;
+    double oyw = oy * params.scale + params.cy;
+    double ozw = oz * params.scale + params.cz;
+    if (!FiniteD(oxw) || !FiniteD(oyw) || !FiniteD(ozw)) { atomicOr(evalFlag, 1); return; }
+
+    warped[3u*i]     = float(oxw);
+    warped[3u*i + 1u] = float(oyw);
+    warped[3u*i + 2u] = float(ozw);
+}

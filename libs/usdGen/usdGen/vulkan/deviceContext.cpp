@@ -10,7 +10,8 @@ DeviceContext::DeviceContext(CreateInfo const& info, std::shared_ptr<UsdGenExecu
       computeQueue_(info.computeQueue), computeQueueFamily_(info.computeQueueFamily),
       physicalIndex_(info.physicalIndex), resourceDeviceId_(info.resourceDeviceId),
       gpuLabel_(info.gpuLabel), nativeLifetime_(info.nativeLifetime), resources_(std::move(pool)),
-      timelineSemaphoreEnabled_(info.timelineSemaphoreEnabled) {
+      timelineSemaphoreEnabled_(info.timelineSemaphoreEnabled),
+      shaderFloat64Enabled_(info.shaderFloat64Enabled) {
     VkPhysicalDeviceIDProperties ids{};
     ids.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
     VkPhysicalDeviceProperties2 properties{};
@@ -34,6 +35,18 @@ std::shared_ptr<DeviceContext> DeviceContext::Create(CreateInfo const& info, VkR
             features.pNext = &timeline;
             vkGetPhysicalDeviceFeatures2(info.physicalDevice, &features);
             if (!timeline.timelineSemaphore) {
+                if (result) *result = VK_ERROR_FEATURE_NOT_PRESENT;
+                return {};
+            }
+        }
+        if (info.shaderFloat64Enabled) {
+            // Mirror of the timeline gate: the flag asserts the VkDevice was
+            // created with shaderFloat64 enabled (factory contract); physical
+            // support is re-verified so a lying producer fails at Create.
+            VkPhysicalDeviceFeatures2 fp64{};
+            fp64.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            vkGetPhysicalDeviceFeatures2(info.physicalDevice, &fp64);
+            if (!fp64.features.shaderFloat64) {
                 if (result) *result = VK_ERROR_FEATURE_NOT_PRESENT;
                 return {};
             }

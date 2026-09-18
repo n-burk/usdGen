@@ -1,0 +1,138 @@
+// noiseValidate.comp — device-side exhaustive validation for the noise
+// operator, mirroring CUDA noise.cu ValidateInputs. Submitted synchronously
+// before the generate dispatch; on any infraction it records the FIRST error
+// code via a first-writer atomicCompSwap so Begin can read it back before the
+// generate dispatch is recorded.
+//
+// Error codes (match CUDA noise.cu exactly):
+//   1 = kBadOffsets   (curve-offset structure / empty-topology terminal)
+//   2 = kNonFinite    (non-finite points / hairT / profile / frame vector)
+//   3 = kBadValue     (bad frame orthonormality, hairT range, profile range)
+//
+// ABI — push constants (std430, 20 bytes):
+//   uint curveCount, pointCount, frameCount, offsetsCount, flags
+//   flags bit0 = hasHairT, bit1 = hasFrameStableIds
+// Descriptor bindings (packed float3 planes = scalar float[] 12-byte stride;
+// u64 id planes = uint[] with 2*i / 2*i+1 little-endian lo/hi):
+//   0 points            float[3*pointCount]
+//   1 restPoints        float[3*pointCount]
+//   2 curveOffsets      uint[curveCount+1]
+//   3 stableIds         uint[2*curveCount]
+//   4 hairT             float[pointCount]        (optional)
+//   5 frameTangent      float[3*frameCount]
+//   6 frameBinormal     float[3*frameCount]
+//   7 frameNormal       float[3*frameCount]
+//   8 frameStableIds    uint[2*frameCount]       (optional)
+//   9 magnitudeProfile  float[257]
+//  10 status            uint OUT (first-writer; 0 == clean)
+//
+// Buffer-size contracts (offsets size, profile==257, frame plane sizes,
+// field data sizes) are enforced host-side in Begin — a compute shader cannot
+// query std430 unsized-array lengths. This shader validates reachable values.
+
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Points   { float points[]; };
+layout(std430, binding = 1) readonly buffer Rest     { float rest[]; };
+layout(std430, binding = 2) readonly buffer Offsets  { uint curveOffsets[]; };
+layout(std430, binding = 3) readonly buffer StableIds{ uint ids[]; };
+layout(std430, binding = 4) readonly buffer HairT    { float hairT[]; };
+layout(std430, binding = 5) readonly buffer FrameTan { float frameTangent[]; };
+layout(std430, binding = 6) readonly buffer FrameBin { float frameBinormal[]; };
+layout(std430, binding = 7) readonly buffer FrameNrm { float frameNormal[]; };
+layout(std430, binding = 8) readonly buffer FrameIds { uint frameIds[]; };
+layout(std430, binding = 9) readonly buffer Profile  { float magnitudeProfile[]; };
+layout(std430, binding = 10) buffer Status { uint status; };
+
+layout(push_constant) uniform Push {
+    uint curveCount;
+    uint pointCount;
+    uint frameCount;
+    uint offsetsCount;
+    uint flags;
+} push;
+
+const uint FLAG_HAIR_T       = 1u;
+const uint FLAG_FRAME_IDS    = 2u;
+
+uint GridStride() { return uint(gl_WorkGroupSize.x) * uint(gl_NumWorkGroups.x); }
+void StatusErr(uint code) { atomicCompSwap(status, 0u, code); }
+bool Finite(float v) { return !(isinf(v) || isnan(v)); }
+#define P3(a, i) vec3((a)[3u*(i)], (a)[3u*(i)+1u], (a)[3u*(i)+2u])
+
+// Binary search ascending u64 id (lo/hi pair, hi primary) — the same ordering
+// rootFrameGather uses for its base id list.
+bool IdLt(uint lo, uint hi, uint tlo, uint thi) {
+    return hi < thi || (hi == thi && lo < tlo);
+}
+uint FindFrame(uint n, uint tlo, uint thi) {
+    uint lo = 0u, hi = n;
+    while (lo < hi) {
+        uint mid = lo + (hi - lo) / 2u;
+        if (IdLt(ids[2u*mid], ids[2u*mid+1u], tlo, thi)) lo = mid + 1u;
+        else hi = mid;
+    }
+    if (lo < n && ids[2u*lo] == tlo && ids[2u*lo+1u] == thi) return lo;
+    return n;
+}
+
+void main() {
+    uint stride = GridStride();
+    if (push.curveCount > 0u) {
+        for (uint c = gl_GlobalInvocationID.x; c < push.curveCount; c += stride) {
+            uint begin = curveOffsets[c];
+            uint end   = curveOffsets[c+1u];
+            // Every pair, including the terminal one: [0,3,3] would otherwise
+            // pass a last-only check and let the kernel dereference rest[3].
+            if ((c == 0u && begin != 0u) || begin >= end ||
+                end > push.pointCount ||
+                (c + 1u == push.curveCount && end != push.pointCount))
+                StatusErr(1u);
+            uint frameCurve = c;
+            if ((push.flags & FLAG_FRAME_IDS) != 0u) {
+                frameCurve = FindFrame(push.frameCount, ids[2u*c], ids[2u*c+1u]);
+                if (frameCurve == push.frameCount) { StatusErr(3u); continue; }
+            }
+            vec3 t = P3(frameTangent, frameCurve);
+            vec3 b = P3(frameBinormal, frameCurve);
+            vec3 n = P3(frameNormal, frameCurve);
+            if (!Finite(t.x) || !Finite(t.y) || !Finite(t.z) ||
+                !Finite(n.x) || !Finite(n.y) || !Finite(n.z) ||
+                !Finite(b.x) || !Finite(b.y) || !Finite(b.z))
+                StatusErr(2u);
+            else {
+                float tl = length(t), bl = length(b), nl = length(n);
+                if (abs(tl - 1.0) > 2.0e-4 || abs(bl - 1.0) > 2.0e-4 ||
+                    abs(nl - 1.0) > 2.0e-4 ||
+                    abs(dot(t, b)) > 2.0e-4 || abs(dot(t, n)) > 2.0e-4 ||
+                    abs(dot(b, n)) > 2.0e-4 ||
+                    dot(cross(t, b), n) < 0.999)
+                    StatusErr(3u);
+            }
+        }
+    } else if (push.offsetsCount == 1u) {
+        // Empty C3 topology owns one terminal offset; a non-zero value is
+        // malformed even though nothing downstream can consume it.
+        if (curveOffsets[0] != 0u) StatusErr(1u);
+    }
+
+    for (uint p = gl_GlobalInvocationID.x; p < push.pointCount; p += stride) {
+        vec3 pv = P3(points, p);
+        vec3 rv = P3(rest, p);
+        if (!Finite(pv.x) || !Finite(pv.y) || !Finite(pv.z) ||
+            !Finite(rv.x) || !Finite(rv.y) || !Finite(rv.z))
+            StatusErr(2u);
+        if ((push.flags & FLAG_HAIR_T) != 0u) {
+            float ht = hairT[p];
+            if (!Finite(ht)) StatusErr(2u);
+            else if (ht < 0.0 || ht > 1.0) StatusErr(3u);
+        }
+    }
+
+    for (uint i = gl_GlobalInvocationID.x; i < 257u; i += stride) {
+        float v = magnitudeProfile[i];
+        if (!Finite(v)) StatusErr(2u);
+        else if (v < 0.0) StatusErr(3u);
+    }
+}

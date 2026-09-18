@@ -681,6 +681,13 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
         libs/usdGen/usdGen/vulkan/lengthCompactionPipeline.cpp
         libs/usdGen/usdGen/vulkan/widthBlendPipeline.cpp
         libs/usdGen/usdGen/vulkan/nonWidthComparePipeline.cpp
+        libs/usdGen/usdGen/vulkan/topologyPipeline.cpp
+        libs/usdGen/usdGen/vulkan/pointOverridePipeline.cpp
+        libs/usdGen/usdGen/vulkan/curveGrowPipeline.cpp
+        libs/usdGen/usdGen/vulkan/rootFramesPipeline.cpp
+        libs/usdGen/usdGen/vulkan/rootFrameGatherPipeline.cpp
+        libs/usdGen/usdGen/vulkan/noisePipeline.cpp
+        libs/usdGen/usdGen/vulkan/deformPipeline.cpp
         libs/usdGen/usdGen/vulkan/widthPipeline.cpp)
     target_link_libraries(usdGenVulkanNative PUBLIC Vulkan::Vulkan usdGenExecutionResources usdGen Threads::Threads)
     target_include_directories(usdGenVulkanNative PUBLIC
@@ -743,6 +750,86 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
             "${_usdgen_vulkan_set_shader}" -o "${_usdgen_vulkan_set_spv}"
         COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_set_spv}"
         DEPENDS "${_usdgen_vulkan_set_shader}" VERBATIM)
+    set(_usdgen_vulkan_topo_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/topologyCompare.comp")
+    set(_usdgen_vulkan_topo_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/topologyCompare.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_topo_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_topo_shader}" -o "${_usdgen_vulkan_topo_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_topo_spv}"
+        DEPENDS "${_usdgen_vulkan_topo_shader}" VERBATIM)
+    set(_usdgen_vulkan_po_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/pointOverride.comp")
+    set(_usdgen_vulkan_po_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/pointOverride.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_po_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_po_shader}" -o "${_usdgen_vulkan_po_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_po_spv}"
+        DEPENDS "${_usdgen_vulkan_po_shader}" VERBATIM)
+    set(_usdgen_vulkan_grow_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/curveGrow.comp")
+    set(_usdgen_vulkan_grow_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/curveGrow.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_grow_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_grow_shader}" -o "${_usdgen_vulkan_grow_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_grow_spv}"
+        DEPENDS "${_usdgen_vulkan_grow_shader}" VERBATIM)
+    set(_usdgen_vulkan_rfval_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/rootFramesValidate.comp")
+    set(_usdgen_vulkan_rfval_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/rootFramesValidate.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_rfval_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_rfval_shader}" -o "${_usdgen_vulkan_rfval_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_rfval_spv}"
+        DEPENDS "${_usdgen_vulkan_rfval_shader}" VERBATIM)
+    set(_usdgen_vulkan_rfbuild_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/rootFrames.comp")
+    set(_usdgen_vulkan_rfbuild_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/rootFrames.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_rfbuild_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_rfbuild_shader}" -o "${_usdgen_vulkan_rfbuild_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_rfbuild_spv}"
+        DEPENDS "${_usdgen_vulkan_rfbuild_shader}" VERBATIM)
+    set(_usdgen_vulkan_rfgather_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/rootFrameGather.comp")
+    set(_usdgen_vulkan_rfgather_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/rootFrameGather.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_rfgather_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_rfgather_shader}" -o "${_usdgen_vulkan_rfgather_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_rfgather_spv}"
+        DEPENDS "${_usdgen_vulkan_rfgather_shader}" VERBATIM)
+    set(_usdgen_vulkan_noise_validate_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/noiseValidate.comp")
+    set(_usdgen_vulkan_noise_validate_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/noiseValidate.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_noise_validate_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_noise_validate_shader}" -o "${_usdgen_vulkan_noise_validate_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_noise_validate_spv}"
+        DEPENDS "${_usdgen_vulkan_noise_validate_shader}" VERBATIM)
+    set(_usdgen_vulkan_noise_generate_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/noiseGenerate.comp")
+    set(_usdgen_vulkan_noise_generate_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/noiseGenerate.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_noise_generate_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_noise_generate_shader}" -o "${_usdgen_vulkan_noise_generate_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_noise_generate_spv}"
+        DEPENDS "${_usdgen_vulkan_noise_generate_shader}" VERBATIM)
+    set(_usdgen_vulkan_deform_evaluate_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/deformEvaluate.comp")
+    set(_usdgen_vulkan_deform_evaluate_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/deformEvaluate.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_deform_evaluate_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_deform_evaluate_shader}" -o "${_usdgen_vulkan_deform_evaluate_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_deform_evaluate_spv}"
+        DEPENDS "${_usdgen_vulkan_deform_evaluate_shader}" VERBATIM)
+    set(_usdgen_vulkan_deform_apply_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/deformApply.comp")
+    set(_usdgen_vulkan_deform_apply_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/deformApply.spv")
+    add_custom_command(OUTPUT "${_usdgen_vulkan_deform_apply_spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/vulkan"
+        COMMAND "${USDGEN_GLSLANG_EXECUTABLE}" -V --target-env vulkan1.2
+            "${_usdgen_vulkan_deform_apply_shader}" -o "${_usdgen_vulkan_deform_apply_spv}"
+        COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_deform_apply_spv}"
+        DEPENDS "${_usdgen_vulkan_deform_apply_shader}" VERBATIM)
     set(_usdgen_vulkan_cut_extend_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/lengthCutExtend.comp")
     set(_usdgen_vulkan_cut_extend_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/lengthCutExtend.spv")
     add_custom_command(OUTPUT "${_usdgen_vulkan_cut_extend_spv}"
@@ -784,7 +871,7 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
         COMMAND "${USDGEN_SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${_usdgen_vulkan_envelope_v1_spv}"
         DEPENDS "${_usdgen_vulkan_envelope_v1_shader}"
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/float32Envelope.glsl" VERBATIM)
-    add_custom_target(usdGenVulkanShaders ALL DEPENDS "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_compare_spv}" "${_usdgen_vulkan_compaction_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}" "${_usdgen_vulkan_envelope_v1_spv}")
+    add_custom_target(usdGenVulkanShaders ALL DEPENDS "${_usdgen_vulkan_width_spv}" "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_blend_spv}" "${_usdgen_vulkan_compare_spv}" "${_usdgen_vulkan_compaction_spv}" "${_usdgen_vulkan_set_spv}" "${_usdgen_vulkan_cut_extend_spv}" "${_usdgen_vulkan_reparam_spv}" "${_usdgen_vulkan_minimum_spv}" "${_usdgen_vulkan_literal_v1_spv}" "${_usdgen_vulkan_envelope_v1_spv}" "${_usdgen_vulkan_topo_spv}" "${_usdgen_vulkan_po_spv}" "${_usdgen_vulkan_grow_spv}" "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}" "${_usdgen_vulkan_rfgather_spv}" "${_usdgen_vulkan_noise_validate_spv}" "${_usdgen_vulkan_noise_generate_spv}" "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
 endif()
 
 if(USDGEN_BUILD_TESTS)
@@ -887,6 +974,70 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         "${_usdgen_vulkan_compaction_spv}")
     add_executable(testUsdGenVulkanCullAdmission tests/testUsdGenVulkanCullAdmission.cpp
         "${_usdgen_vulkan_compaction_spv}")
+    add_executable(testUsdGenVulkanTopologyPipeline tests/testUsdGenVulkanTopologyPipeline.cpp "${_usdgen_vulkan_topo_spv}")
+    target_link_libraries(testUsdGenVulkanTopologyPipeline PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanTopologyPipeline COMMAND testUsdGenVulkanTopologyPipeline "${_usdgen_vulkan_topo_spv}")
+    set_tests_properties(testUsdGenVulkanTopologyPipeline PROPERTIES
+        LABELS "T1;vulkan;operators;topology" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanPointOverridePipeline tests/testUsdGenVulkanPointOverridePipeline.cpp "${_usdgen_vulkan_po_spv}")
+    target_link_libraries(testUsdGenVulkanPointOverridePipeline PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanPointOverridePipeline COMMAND testUsdGenVulkanPointOverridePipeline "${_usdgen_vulkan_po_spv}")
+    set_tests_properties(testUsdGenVulkanPointOverridePipeline PROPERTIES
+        LABELS "T1;vulkan;operators;pointOverride" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanCurveGrowPipeline tests/testUsdGenVulkanCurveGrowPipeline.cpp "${_usdgen_vulkan_grow_spv}")
+    target_link_libraries(testUsdGenVulkanCurveGrowPipeline PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanCurveGrowPipeline COMMAND testUsdGenVulkanCurveGrowPipeline "${_usdgen_vulkan_grow_spv}")
+    set_tests_properties(testUsdGenVulkanCurveGrowPipeline PROPERTIES
+        LABELS "T1;vulkan;operators;grow" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_test(NAME testUsdGenVulkanCurveGrowPipelineQuarantine COMMAND testUsdGenVulkanCurveGrowPipeline "${_usdgen_vulkan_grow_spv}" --quarantine)
+    set_tests_properties(testUsdGenVulkanCurveGrowPipelineQuarantine PROPERTIES
+        LABELS "T1;vulkan;operators;grow;quarantine" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanRootFrames tests/testUsdGenVulkanRootFrames.cpp
+        "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}")
+    target_link_libraries(testUsdGenVulkanRootFrames PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanRootFrames COMMAND testUsdGenVulkanRootFrames
+        "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}")
+    set_tests_properties(testUsdGenVulkanRootFrames PROPERTIES
+        LABELS "T1;vulkan;operators;rootFrames" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_test(NAME testUsdGenVulkanRootFramesQuarantine COMMAND testUsdGenVulkanRootFrames
+        "${_usdgen_vulkan_rfval_spv}" "${_usdgen_vulkan_rfbuild_spv}" --quarantine)
+    set_tests_properties(testUsdGenVulkanRootFramesQuarantine PROPERTIES
+        LABELS "T1;vulkan;operators;rootFrames;quarantine" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanRootFrameGather tests/testUsdGenVulkanRootFrameGatherPipeline.cpp
+        "${_usdgen_vulkan_rfgather_spv}")
+    target_link_libraries(testUsdGenVulkanRootFrameGather PRIVATE usdGenVulkanNative)
+    add_test(NAME testUsdGenVulkanRootFrameGather COMMAND testUsdGenVulkanRootFrameGather
+        "${_usdgen_vulkan_rfgather_spv}")
+    set_tests_properties(testUsdGenVulkanRootFrameGather PROPERTIES
+        LABELS "T1;vulkan;operators;rootFrameGather" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_test(NAME testUsdGenVulkanRootFrameGatherQuarantine COMMAND testUsdGenVulkanRootFrameGather
+        "${_usdgen_vulkan_rfgather_spv}" --quarantine)
+    set_tests_properties(testUsdGenVulkanRootFrameGatherQuarantine PROPERTIES
+        LABELS "T1;vulkan;operators;rootFrameGather;quarantine" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanNoise tests/testUsdGenVulkanNoise.cpp
+        "${_usdgen_vulkan_noise_validate_spv}" "${_usdgen_vulkan_noise_generate_spv}")
+    target_link_libraries(testUsdGenVulkanNoise PRIVATE usdGenVulkanNative usdGen_seexpr usdGenMath)
+    add_test(NAME testUsdGenVulkanNoise COMMAND testUsdGenVulkanNoise
+        "${_usdgen_vulkan_noise_validate_spv}" "${_usdgen_vulkan_noise_generate_spv}")
+    set_tests_properties(testUsdGenVulkanNoise PROPERTIES
+        LABELS "T1;vulkan;operators;noise" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+    add_executable(testUsdGenVulkanDeform tests/testUsdGenVulkanDeform.cpp
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
+    target_link_libraries(testUsdGenVulkanDeform PRIVATE usdGenVulkanNative usdGenMath)
+    add_test(NAME testUsdGenVulkanDeform COMMAND testUsdGenVulkanDeform
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
+    set_tests_properties(testUsdGenVulkanDeform PROPERTIES
+        LABELS "T1;vulkan;operators;deform" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanLengthSet tests/testUsdGenVulkanLengthSet.cpp
         "${_usdgen_vulkan_length_spv}" "${_usdgen_vulkan_set_spv}")
     target_link_libraries(testUsdGenVulkanLengthSet PRIVATE usdGenVulkanNative)

@@ -1,0 +1,20 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "UsdGenShadersDiscoveryPlugin": {
+                        "bases": ["SdrDiscoveryPlugin"],
+                        "displayName": "usdGen hair preview shader defs"
+                    }
+                },
+                "ShaderResources": "shaders"
+            },
+            "LibraryPath": "../../libusdGenImaging.so",
+            "Name": "usdGenShaders",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

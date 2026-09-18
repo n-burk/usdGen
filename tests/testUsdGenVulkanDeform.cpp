@@ -1,0 +1,516 @@
+#include "usdGen/vulkan/deviceContext.h"
+#include "usdGen/vulkan/chargedBuffer.h"
+#include "usdGen/vulkan/deformPipeline.h"
+#include "usdGen/vulkan/deformRbfHost.h"
+
+#include "vulkanNativeFixture.h"
+#include "vulkanReadbackFixture.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <memory>
+#include <vector>
+
+using namespace usdGen;
+using namespace usdGen::vulkan;
+
+#define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL %d: %s\n", __LINE__, #c); return 1; } } while (false)
+
+namespace {
+
+inline float3 V(float x, float y, float z) { return {x, y, z}; }
+inline bool Near(float3 a, float3 b, float tol) {
+    return std::fabs(a.x - b.x) <= tol && std::fabs(a.y - b.y) <= tol &&
+           std::fabs(a.z - b.z) <= tol;
+}
+
+inline std::vector<uint32_t> Code(char const* p) {
+    std::ifstream f(p, std::ios::binary);
+    std::vector<char> b((std::istreambuf_iterator<char>(f)), {});
+    if (b.empty() || b.size() % 4) return {};
+    std::vector<uint32_t> r(b.size() / 4);
+    std::memcpy(r.data(), b.data(), b.size());
+    return r;
+}
+
+inline bool Prove(std::shared_ptr<NativeOwner> const& native) {
+    if (vkResetFences(native->device, 1, &native->fence) != VK_SUCCESS) return false;
+    VkSubmitInfo submit{}; submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    return vkQueueSubmit(native->queue, 1, &submit, native->fence) == VK_SUCCESS &&
+        vkWaitForFences(native->device, 1, &native->fence, VK_TRUE, 10000000000ull) == VK_SUCCESS;
+}
+
+inline std::shared_ptr<const ChargedBuffer> Upload(
+    std::shared_ptr<DeviceContext> const& c, void const* data, VkDeviceSize bytes) {
+    VkBufferCreateInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = bytes ? bytes : 4;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    auto b = ChargedBuffer::Create(c, bi,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        UsdGenExecutionResourceKind::Scratch);
+    if (!b) return {};
+    if (bytes) {
+        void* p = nullptr;
+        if (vkMapMemory(c->device(), b->memory(), 0, bytes, 0, &p) != VK_SUCCESS) return {};
+        std::memcpy(p, data, bytes);
+        vkUnmapMemory(c->device(), b->memory());
+    }
+    return b;
+}
+
+// Read back the candidate's output points.
+inline bool ReadOutput(std::shared_ptr<NativeOwner> const& native,
+                       std::shared_ptr<DeviceContext> const& context,
+                       std::unique_ptr<DeformPipeline::Candidate> const& c,
+                       std::vector<float>* out) {
+    auto o = c->output();
+    std::vector<uint8_t> bytes;
+    if (!ReadVulkanBytes(native, context, o.points->buffer(),
+                         o.points->sizeBytes(), o.points, &bytes)) return false;
+    out->resize(bytes.size() / sizeof(float));
+    std::memcpy(out->data(), bytes.data(), bytes.size());
+    return true;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc != 3) {
+        std::fprintf(stderr, "usage: %s deformEvaluate.spv deformApply.spv\n", argv[0]);
+        return 1;
+    }
+    auto evalSpv = Code(argv[1]);
+    auto applySpv = Code(argv[2]);
+    CHECK(!evalSpv.empty() && !applySpv.empty());
+
+    bool unavailable = false;
+    VkPhysicalDeviceFeatures fp64 = {};
+    fp64.shaderFloat64 = VK_TRUE;
+    auto native = CreateNative(&unavailable, {}, &fp64);
+    if (unavailable) return 77;
+    CHECK(native);
+
+    VkPhysicalDeviceFeatures feats{};
+    vkGetPhysicalDeviceFeatures(native->physical, &feats);
+    if (!feats.shaderFloat64) return 77;
+
+    DeviceContext::CreateInfo ci;
+    ci.instance = native->instance;
+    ci.physicalDevice = native->physical;
+    ci.device = native->device;
+    ci.computeQueue = native->queue;
+    ci.computeQueueFamily = native->family;
+    ci.physicalIndex = native->physicalIndex;
+    ci.resourceDeviceId = 8020;
+    ci.nativeLifetime = native;
+    ci.resources = {size_t{32} << 20, 0};
+    ci.shaderFloat64Enabled = true;
+    auto context = DeviceContext::Create(ci);
+    CHECK(context);
+
+    VkResult status = VK_SUCCESS;
+    auto pipe = DeformPipeline::Create(context, evalSpv, applySpv, &status);
+    CHECK(pipe && status == VK_SUCCESS);
+
+    // ---- Base geometry: 2 curves, 6 CVs ----
+    // Curve 0: 3 points along +x near origin
+    // Curve 1: 3 points along +x at x=1
+    const std::vector<float> points{
+        0.0f, 0.0f, 0.0f,   // curve 0, point 0
+        0.1f, 0.0f, 0.1f,   // curve 0, point 1
+        0.2f, 0.0f, 0.2f,   // curve 0, point 2
+        1.0f, 0.0f, 0.0f,   // curve 1, point 0
+        1.1f, 0.0f, 0.1f,   // curve 1, point 1
+        1.2f, 0.0f, 0.2f,   // curve 1, point 2
+    };
+    const std::vector<uint32_t> offsets{0, 3, 6};
+    const std::vector<float> rootTargets{
+        0.0f, 0.0f, 0.0f,   // curve 0 root
+        1.0f, 0.0f, 0.0f,   // curve 1 root
+    };
+
+    // 5 non-coplanar rest samples.
+    const std::vector<float> restSamples{
+        0.0f, 0.0f, 0.0f,   // sample 0
+        1.0f, 0.0f, 0.0f,   // sample 1
+        0.0f, 1.0f, 0.0f,   // sample 2
+        0.0f, 0.0f, 1.0f,   // sample 3
+        0.5f, 0.5f, 0.5f,   // sample 4
+    };
+
+    auto pointsBuf = Upload(context, points.data(), points.size() * sizeof(float));
+    auto offsetsBuf = Upload(context, offsets.data(), offsets.size() * sizeof(uint32_t));
+    auto targetsBuf = Upload(context, rootTargets.data(), rootTargets.size() * sizeof(float));
+    CHECK(pointsBuf && offsetsBuf && targetsBuf);
+
+    auto makeParams = [](uint32_t lockLiteral = 0, float maskLiteral = 1.0f,
+                         uint32_t enabledLiteral = 1, float groomEnvelope = 1.0f) {
+        DeformApplyParams p;
+        p.groomEnvelope = groomEnvelope;
+        p.maskLiteral = maskLiteral; p.maskHasData = false; p.maskDomain = 1;
+        p.enabledLiteral = enabledLiteral; p.enabledHasData = false; p.enabledDomain = 1;
+        p.lockLiteral = lockLiteral; p.lockHasData = false; p.lockDomain = 1;
+        return p;
+    };
+
+    // ---- Case 1: Empty topology ----
+    {
+        DeformPipeline::BeginInfo info;
+        info.curveCount = 0;
+        info.pointCount = 0;
+        info.sampleCount = 5;
+        info.restSamples = restSamples;
+        info.posedSamples = restSamples;  // identity
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+        CHECK(c->pointCount() == 0);
+        std::puts("Case 1 (empty topology): PASS");
+    }
+
+    // ---- Case 2: Identity pose (posed == rest) → output == input ----
+    {
+        std::vector<float> posed = restSamples;
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+        for (int i = 0; i < 6; ++i) {
+            float3 got = V(out[i*3], out[i*3+1], out[i*3+2]);
+            float3 exp = V(points[i*3], points[i*3+1], points[i*3+2]);
+            CHECK(Near(got, exp, 1e-4f));
+        }
+        std::puts("Case 2 (identity pose): PASS");
+    }
+
+    // ---- Case 3: Rigid translation → output = input + d ----
+    {
+        const float d[3] = {0.3f, -0.2f, 0.5f};
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i)
+            for (int ax = 0; ax < 3; ++ax)
+                posed[i*3+ax] = restSamples[i*3+ax] + d[ax];
+
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+        // Print all points first to diagnose.
+        for (int i = 0; i < 6; ++i) {
+            float3 got = V(out[i*3], out[i*3+1], out[i*3+2]);
+            float3 exp = V(points[i*3]+d[0], points[i*3+1]+d[1], points[i*3+2]+d[2]);
+            std::fprintf(stderr, "  case3 p%d got(%.6f,%.6f,%.6f) exp(%.6f,%.6f,%.6f)\n", i,
+                got.x, got.y, got.z, exp.x, exp.y, exp.z);
+        }
+        for (int i = 0; i < 6; ++i) {
+            float3 got = V(out[i*3], out[i*3+1], out[i*3+2]);
+            float3 exp = V(points[i*3]+d[0], points[i*3+1]+d[1], points[i*3+2]+d[2]);
+            CHECK(Near(got, exp, 1e-3f));
+        }
+        std::puts("Case 3 (rigid translation): PASS");
+    }
+
+    // ---- Case 4: General non-rigid pose vs CPU oracle ----
+    {
+        // Non-rigid: each sample displaced by a different amount.
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i) {
+            posed[i*3+0] = restSamples[i*3+0] + 0.1f * i;
+            posed[i*3+1] = restSamples[i*3+1] + 0.05f * (i * i);
+            posed[i*3+2] = restSamples[i*3+2] + 0.02f * i * (i + 1);
+        }
+
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+
+        // CPU oracle.
+        auto params = makeParams();
+        DeformApplyParams p = params;
+        RbfState rstate;
+        SolveRbf(reinterpret_cast<float3 const*>(restSamples.data()),
+                 reinterpret_cast<float3 const*>(posed.data()),
+                 5, 0.0, rstate);
+        CHECK(rstate.status == RbfStatus::Code::Ok);
+        std::vector<float3> warped(6);
+        for (int i = 0; i < 6; ++i) {
+            float3 pt = V(points[i*3], points[i*3+1], points[i*3+2]);
+            warped[i] = RbfEvaluate(rstate, reinterpret_cast<float3 const*>(restSamples.data()), pt);
+        }
+        p.offsets = offsets.data();
+        p.targets = reinterpret_cast<float3 const*>(rootTargets.data());
+        p.curveCount = 2; p.pointCount = 6;
+        std::vector<float3> expected;
+        CHECK(RbfApply(p, reinterpret_cast<float3 const*>(points.data()),
+                       warped.data(), &expected));
+        for (int i = 0; i < 6; ++i) {
+            float3 got = V(out[i*3], out[i*3+1], out[i*3+2]);
+            CHECK(Near(got, expected[i], 2e-3f));
+        }
+        std::puts("Case 4 (non-rigid vs oracle): PASS");
+    }
+
+    // ---- Case 5: lockRoots = 1 → oracle with correction ----
+    {
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i) {
+            posed[i*3+0] = restSamples[i*3+0] + 0.05f * i;
+            posed[i*3+1] = restSamples[i*3+1] + 0.03f * (i * i);
+            posed[i*3+2] = restSamples[i*3+2] + 0.01f * i;
+        }
+
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {1, 1, nullptr, 0};  // lock enabled
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+
+        // CPU oracle with lock.
+        DeformApplyParams p = makeParams(1);  // lockLiteral=1
+        RbfState rstate;
+        SolveRbf(reinterpret_cast<float3 const*>(restSamples.data()),
+                 reinterpret_cast<float3 const*>(posed.data()),
+                 5, 0.0, rstate);
+        CHECK(rstate.status == RbfStatus::Code::Ok);
+        std::vector<float3> warped(6);
+        for (int i = 0; i < 6; ++i) {
+            float3 pt = V(points[i*3], points[i*3+1], points[i*3+2]);
+            warped[i] = RbfEvaluate(rstate, reinterpret_cast<float3 const*>(restSamples.data()), pt);
+        }
+        p.offsets = offsets.data();
+        p.targets = reinterpret_cast<float3 const*>(rootTargets.data());
+        p.curveCount = 2; p.pointCount = 6;
+        std::vector<float3> expected;
+        CHECK(RbfApply(p, reinterpret_cast<float3 const*>(points.data()),
+                       warped.data(), &expected));
+        for (int i = 0; i < 6; ++i) {
+            float3 got = V(out[i*3], out[i*3+1], out[i*3+2]);
+            CHECK(Near(got, expected[i], 2e-3f));
+        }
+        std::puts("Case 5 (lockRoots): PASS");
+    }
+
+    // ---- Case 6: mask literal 0.0 → bitwise input passthrough ----
+    {
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i)
+            for (int ax = 0; ax < 3; ++ax)
+                posed[i*3+ax] = restSamples[i*3+ax] + 0.1f * i;
+
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {0.0f, 1, nullptr, 0};  // mask = 0
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+        CHECK(std::memcmp(out.data(), points.data(), points.size() * sizeof(float)) == 0);
+        std::puts("Case 6 (mask=0 passthrough): PASS");
+    }
+
+    // ---- Case 7: enabled literal 0 → bitwise input passthrough ----
+    {
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i)
+            for (int ax = 0; ax < 3; ++ax)
+                posed[i*3+ax] = restSamples[i*3+ax] + 0.1f * i;
+
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {0, 1, nullptr, 0};  // disabled
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+        CHECK(std::memcmp(out.data(), points.data(), points.size() * sizeof(float)) == 0);
+        std::puts("Case 7 (enabled=0 passthrough): PASS");
+    }
+
+    // ---- Case 8: Host rejects ----
+    // 8a: Bad offsets (non-increasing)
+    {
+        const std::vector<uint32_t> badOffsets{0, 3, 3};
+        auto badOffBuf = Upload(context, badOffsets.data(), badOffsets.size() * sizeof(uint32_t));
+        CHECK(badOffBuf);
+
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = badOffBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = restSamples;
+        info.sampleCount = 5;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(!c && status == VK_ERROR_INITIALIZATION_FAILED);
+        CHECK(sem == DeformSemantic::BadOffsets);
+        std::puts("Case 8a (reject bad offsets): PASS");
+    }
+    // 8b: NaN in restSamples → NonFinite
+    {
+        std::vector<float> nanSamples = restSamples;
+        nanSamples[0] = std::nanf("");
+        DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = 2;
+        info.pointCount = 6;
+        info.restSamples = nanSamples;
+        info.posedSamples = restSamples;
+        info.sampleCount = 5;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(!c && status == VK_ERROR_INITIALIZATION_FAILED);
+        CHECK(sem == DeformSemantic::NonFinite);
+        std::puts("Case 8b (reject NaN samples): PASS");
+    }
+
+    std::puts("Vulkan deform pipeline: PASS");
+    return 0;
+}

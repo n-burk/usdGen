@@ -34,6 +34,11 @@ public:
         // Trusted creation contract: the factory enabled this feature on this
         // actual VkDevice. Physical support alone is not sufficient evidence.
         bool timelineSemaphoreEnabled = false;
+        // Trusted creation contract (FP64 parity): the factory enabled
+        // VkPhysicalDeviceFeatures::shaderFloat64 on this actual VkDevice.
+        // Physical support alone is not sufficient evidence; pipelines that
+        // emit Float64 SPIR-V must reject contexts without this flag.
+        bool shaderFloat64Enabled = false;
     };
 
     static std::shared_ptr<DeviceContext> Create(CreateInfo const&, VkResult* result = nullptr);
@@ -52,6 +57,7 @@ public:
     std::string const& gpuLabel() const noexcept { return gpuLabel_; }
     std::shared_ptr<UsdGenExecutionResourcePool> const& resources() const noexcept { return resources_; }
     bool timelineSemaphoreEnabled() const noexcept { return timelineSemaphoreEnabled_; }
+    bool shaderFloat64Enabled() const noexcept { return shaderFloat64Enabled_; }
 
 private:
     explicit DeviceContext(CreateInfo const&, std::shared_ptr<UsdGenExecutionResourcePool>);
@@ -67,6 +73,7 @@ private:
     std::shared_ptr<const void> nativeLifetime_;
     std::shared_ptr<UsdGenExecutionResourcePool> resources_;
     bool timelineSemaphoreEnabled_ = false;
+    bool shaderFloat64Enabled_ = false;
 };
 } // namespace usdGen::vulkan
 #endif

@@ -1,0 +1,19 @@
+{
+    "Plugins": [
+        {
+            "Type": "python",
+            "Name": "usdGenTools",
+            "ResourcePath": ".",
+            "Info": {
+                "Types": {
+                    "usdGenTools.UsdGenToolsPluginContainer": {
+                        "bases": [
+                            "pxr.Usdviewq.plugin.PluginContainer"
+                        ],
+                        "displayName": "usdGen Tools"
+                    }
+                }
+            }
+        }
+    ]
+}

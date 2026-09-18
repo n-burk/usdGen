@@ -1,0 +1,83 @@
+// rootFrameGather.comp — Vulkan port of the CUDA rootFrameGather kernel.
+// Re-sorts base per-root frames by survivor stable-ids: for each survivor id
+// it binary-searches the (ascending) base id list and copies all six gather
+// planes (origin/tangent/binormal/normal/valid/drop), or fails the whole
+// dispatch with status 1 (missing id) for any survivor not present.
+//
+// ABI — push constants (8 bytes):
+//   u32 survivorCount  number of gather outputs
+//   u32 baseCount      number of base frames (length of baseIds)
+// Descriptor bindings (packed float3 planes = scalar float[] with 3*i
+// indexing — 12-byte stride; std430 vec3[] would stride 16):
+//   0  baseOrigin    float[3*baseCount]
+//   1  baseTangent   float[3*baseCount]
+//   2  baseBinormal  float[3*baseCount]
+//   3  baseNormal    float[3*baseCount]
+//   4  baseValid     u32[baseCount]
+//   5  baseDrop      u32[baseCount]
+//   6  baseIds       uvec2[baseCount]   (ascending, high-then-low compare)
+//   7  survivorIds   uvec2[survivorCount]
+//   8  outOrigin     float[3*survivorCount] OUT
+//   9  outTangent    float[...] OUT
+//  10  outBinormal   OUT
+//  11  outNormal     OUT
+//  12  outValid      u32[] OUT
+//  13  outDrop       u32[] OUT
+//  14  status        u32 OUT (first-writer; 1 == missing survivor id)
+//
+// Status codes mirror CUDA: 0 Ok, 1 MissingId.
+
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer BaseOrigin { float baseOrigin[]; };
+layout(std430, binding = 1) readonly buffer BaseTangent { float baseTangent[]; };
+layout(std430, binding = 2) readonly buffer BaseBinormal { float baseBinormal[]; };
+layout(std430, binding = 3) readonly buffer BaseNormal { float baseNormal[]; };
+layout(std430, binding = 4) readonly buffer BaseValid { uint baseValid[]; };
+layout(std430, binding = 5) readonly buffer BaseDrop { uint baseDrop[]; };
+layout(std430, binding = 6) readonly buffer BaseIds { uvec2 baseIds[]; };
+layout(std430, binding = 7) readonly buffer SurvivorIds { uvec2 survivorIds[]; };
+layout(std430, binding = 8) buffer OutOrigin { float outOrigin[]; };
+layout(std430, binding = 9) buffer OutTangent { float outTangent[]; };
+layout(std430, binding = 10) buffer OutBinormal { float outBinormal[]; };
+layout(std430, binding = 11) buffer OutNormal { float outNormal[]; };
+layout(std430, binding = 12) buffer OutValid { uint outValid[]; };
+layout(std430, binding = 13) buffer OutDrop { uint outDrop[]; };
+layout(std430, binding = 14) buffer StatusBuf { uint status; };
+
+layout(push_constant) uniform Push {
+    uint survivorCount;
+    uint baseCount;
+} push;
+
+// (a.y > b.y) || (a.y == b.y && a.x >= b.x) style lower_bound per the CUDA
+// FrameIndex ordering (high lane is the primary key, low lane secondary).
+bool Less(uvec2 a, uvec2 b) { return a.y < b.y || (a.y == b.y && a.x < b.x); }
+bool Equal(uvec2 a, uvec2 b) { return a.x == b.x && a.y == b.y; }
+
+void StatusErr(uint code) { atomicCompSwap(status, 0u, code); }
+
+void main() {
+    uint s = gl_GlobalInvocationID.x;
+    if (s >= push.survivorCount) return;
+    uvec2 key = survivorIds[s];
+    // lower_bound over baseIds.
+    uint lo = 0u;
+    uint hi = push.baseCount;
+    while (lo < hi) {
+        uint mid = lo + (hi - lo) / 2u;
+        if (Less(baseIds[mid], key)) { lo = mid + 1u; } else { hi = mid; }
+    }
+    if (lo >= push.baseCount || !Equal(baseIds[lo], key)) {
+        StatusErr(1u);   // missing id
+        return;
+    }
+    outOrigin[3u*s] = baseOrigin[3u*lo]; outOrigin[3u*s+1u] = baseOrigin[3u*lo+1u]; outOrigin[3u*s+2u] = baseOrigin[3u*lo+2u];
+    outTangent[3u*s] = baseTangent[3u*lo]; outTangent[3u*s+1u] = baseTangent[3u*lo+1u]; outTangent[3u*s+2u] = baseTangent[3u*lo+2u];
+    outBinormal[3u*s] = baseBinormal[3u*lo]; outBinormal[3u*s+1u] = baseBinormal[3u*lo+1u]; outBinormal[3u*s+2u] = baseBinormal[3u*lo+2u];
+    outNormal[3u*s] = baseNormal[3u*lo]; outNormal[3u*s+1u] = baseNormal[3u*lo+1u]; outNormal[3u*s+2u] = baseNormal[3u*lo+2u];
+    outValid[s]     = baseValid[lo];
+    outDrop[s]      = baseDrop[lo];
+}

@@ -1,0 +1,65 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "UsdGenGroomSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "usdGen groom resolution",
+                        "loadWithRenderer": "",
+                        "priority": 0,
+                        "tags": ["usdGen:groom"],
+                        "ordering": {
+                            "after": ["hd:sceneGlobals"],
+                            "before": ["hdGp:proceduralResolution",
+                                       "hdPrman:motionBlur"]
+                        }
+                    },
+                    "UsdGenMetadataSceneIndexPlugin": {
+                        "bases": ["UsdImagingSceneIndexPlugin"],
+                        "displayName": "usdGen instancing metadata"
+                    },
+                    "UsdGenOperatorAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenOperator",
+                        "includeDerivedPrimTypes": true
+                    },
+                    "UsdGenMapAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenMap",
+                        "includeDerivedPrimTypes": true
+                    },
+                    "UsdGenGroomAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenGroom"
+                    },
+                    "UsdGenDescriptionAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenDescription"
+                    },
+                    "UsdGenGuideSetAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenGuideSet"
+                    },
+                    "UsdGenExpressionAdapter": {
+                        "bases": ["UsdImagingSceneIndexPrimAdapter"],
+                        "primTypeName": "UsdGenExpression"
+                    },
+                    "UsdGenRestAPIAdapter": {
+                        "bases": ["UsdImagingAPISchemaAdapter"],
+                        "apiSchemaName": "UsdGenRestAPI"
+                    },
+                    "UsdGenCurveAPIAdapter": {
+                        "bases": ["UsdImagingAPISchemaAdapter"],
+                        "apiSchemaName": "UsdGenCurveAPI"
+                    }
+                }
+            },
+            "LibraryPath": "../../libusdGenImaging.so",
+            "Name": "usdGenImaging",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

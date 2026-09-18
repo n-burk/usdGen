@@ -1,0 +1,101 @@
+#version 450
+// PointOverride: sparse, indexed absolute point edit applied to a borrowed
+// device base.  Port of usdGen::gpu::CudaPointOverride (gpu/pointOverride.cu)
+// under the strict-ORDER contract: phase 0 (validate) and phase 1 (duplicate
+// detection) both synchronously gate the record of phase 2 (copy + scatter).
+// No partial writes are ever recorded: the scatter phase is not recorded until
+// every prior error check has passed, so an erroring edit leaves the output
+// buffer untouched.
+//
+// Geometry planes are FLAT SCALAR float arrays indexed as 3*i (repo-wide
+// convention; std430 vec3[] stride 16 would break the packed CUDA float3
+// planes).  Status is a uint first-writer via ONE atomicCompSwap per error
+// branch (busy-code 0 -> code), never an unconditional store.
+//
+// Repo convention (see widthBlend.comp): this toolchain has no isfinite;
+// finiteness uses !isnan && !isinf.
+//
+// ABI:
+//   push constant (12B, std430): {u32 baseN; u32 slotN; u32 phase}
+//     phase 0 = validate, 1 = duplicate detection, 2 = scatter
+//   set 0:
+//     b0 base         float[3*baseN]               borrowed base (read-only)
+//     b1 indices      int32[slotN]                 target point indices
+//     b2 replacements float[3*slotN]               absolute positions
+//     b3 outputPlane  float[3*baseN]               private write target (phase 2)
+//     b4 error        uint                         first-writer status
+//     b5 occupancy    uint[baseN]                  dup-detect scratch (phase 1)
+//
+// Phase 0 initializes nothing; error must be 0 (host fill) before it.  Phase 1
+// requires occupancy pre-filled with 0xFFFFFFFF (host fill).  Phase 2 requires
+// outputPlane to already hold a copy of base (vkCmdCopyBuffer before the
+// dispatch).
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint baseN;
+    uint slotN;
+    uint phase;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer BaseBlock { float base[]; };
+layout(std430, set = 0, binding = 1) readonly buffer IndexBlock { int indices[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ReplBlock { float replacements[]; };
+layout(std430, set = 0, binding = 3) buffer OutBlock { float outputPlane[]; };
+layout(std430, set = 0, binding = 4) buffer ErrorBlock { uint error; };
+layout(std430, set = 0, binding = 5) buffer OccBlock { uint occ[]; };
+
+const uint kBadIndex  = 1u;
+const uint kNonFinite = 2u;
+const uint kDuplicate = 3u;
+const uint kSentinel  = 0xFFFFFFFFu;
+
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite3(float a, float b, float c) { return finite(a) && finite(b) && finite(c); }
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+
+    if (pc.phase == 0u) {
+        // Exhaustive device-side validation (all elements, including unused).
+        // Mirrors CudaPointOverride::ValidateInput.
+        for (uint i = idx; i < pc.baseN; i += stride) {
+            if (!finite3(base[3u * i], base[3u * i + 1u], base[3u * i + 2u]))
+                atomicCompSwap(error, 0u, kNonFinite);
+        }
+        for (uint i = idx; i < pc.slotN; i += stride) {
+            const int ix = indices[i];
+            if (ix < 0 || uint(ix) >= pc.baseN)
+                atomicCompSwap(error, 0u, kBadIndex);
+            if (!finite3(replacements[3u * i], replacements[3u * i + 1u],
+                         replacements[3u * i + 2u]))
+                atomicCompSwap(error, 0u, kNonFinite);
+        }
+    } else if (pc.phase == 1u) {
+        // Duplicate detection via an occupancy array.  Runs only after phase 0
+        // is clean, so indices are known in [0, baseN); each slot claims its
+        // index with an atomicCompSwap against the sentinel.  A second
+        // claimant (old != sentinel) flags kDuplicate.  This replaces
+        // cub::DeviceRadixSort SortPairs, whose only role in the CUDA code was
+        // to make duplicates adjacent; the occupancy array detects them
+        // directly and deterministically.
+        for (uint i = idx; i < pc.slotN; i += stride) {
+            const int ix = indices[i];
+            const uint old = atomicCompSwap(occ[uint(ix)], kSentinel, i);
+            if (old != kSentinel) atomicCompSwap(error, 0u, kDuplicate);
+        }
+    } else {
+        // Conflict-free scatter.  Runs only after phases 0+1 are clean, so
+        // every target index is unique and in range; each slot writes its
+        // replacement.  outputPlane holds a copy of base performed by
+        // vkCmdCopyBuffer immediately before this dispatch.
+        for (uint i = idx; i < pc.slotN; i += stride) {
+            const int ix = indices[i];
+            outputPlane[3u * uint(ix)] = replacements[3u * i];
+            outputPlane[3u * uint(ix) + 1u] = replacements[3u * i + 1u];
+            outputPlane[3u * uint(ix) + 2u] = replacements[3u * i + 2u];
+        }
+    }
+}

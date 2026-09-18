@@ -1,0 +1,119 @@
+// rootFramesValidate.comp — device-side exhaustive frame-input validation,
+// mirroring CUDA rootFrames ValidateInput over all device contents. Ported
+// as a separate compute dispatch submitted BEFORE the build kernel; the build
+// kernel is gated on status == 0.
+//
+// Runs a grid-stride loop over a combined element universe
+//   W = max(vertexCount, indexCount, faceCount, normalsCount, curves)
+// plus a thread-0 structural check. Each infraction records the FIRST
+// matching error via a single first-writer atomicCompSwap on status (no
+// kMissing; codes match CUDA exactly: kBadShape=1, kNonFinite=2,
+// kBadTopology=3, kBadRoot=4, kBadAuthoredFrame=5 host-only).
+//
+// Buffer-size contracts (offsets.size==faceCount+1, indices.size==indexCount,
+// normals size per domain, authoredFrames.size) are enforced host-side in
+// Begin — a compute shader cannot query std430 unsized-array lengths. This
+// shader validates values reachable on device.
+//
+// ==== Push constants (std430) ====
+//   uint curves; uint faceCount; uint vertexCount;
+//   uint indexCount; uint normalsCount; uint normalDomain;
+//
+// ==== Bindings (flat scalar/plain — matches rootFrames.comp) ====
+//   0 restVerts    float[3*vertexCount]   readonly
+//   1 faceOffsets  uint[faceCount+1]      readonly
+//   2 faceIndices  uint[indexCount]       readonly
+//   3 rootPrim     int[curves]            readonly
+//   4 rootUV       float[2*curves]        readonly
+//   5 normals      float[3*normalsCount]  readonly (empty allowed)
+//   6 status       uint                   write (atomic first-writer)
+//
+// ==== Per-index checks (grid-stride, index i in [0,W)) ====
+//   i < vertexCount  : restVerts[3i..3i+2] finite        -> kNonFinite
+//   i < normalsCount : normals[3i..3i+2] finite          -> kNonFinite
+//   i < indexCount   : faceIndices[i] < vertexCount      -> kBadTopology
+//   i < faceCount    : faceOffsets[i]<=faceOffsets[i+1]
+//                      && faceOffsets[i+1]<=indexCount
+//                      && count==3||4                     -> kBadTopology
+//   i < curves       : rootUV[2i],rootUV[2i+1] finite
+//                      && 0<=rootPrim[i]<faceCount       -> kBadRoot
+//
+// Authored-frames finiteness/orthonormality is host-side (needs the host
+// double matrix); the CUDA universe's exclusion of the authored tail is
+// therefore replicated as host-side logic in Begin.
+
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    uint curves;
+    uint faceCount;
+    uint vertexCount;
+    uint indexCount;
+    uint normalsCount;
+    uint normalDomain;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer RestVertsBuf { float restVerts[]; };
+layout(std430, set = 0, binding = 1) readonly buffer FaceOffsetsBuf { uint faceOffsets[]; };
+layout(std430, set = 0, binding = 2) readonly buffer FaceIndicesBuf { uint faceIndices[]; };
+layout(std430, set = 0, binding = 3) readonly buffer RootPrimBuf { int rootPrim[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RootUVBuf { float rootUV[]; };
+layout(std430, set = 0, binding = 5) readonly buffer NormalsBuf { float normals[]; };
+layout(std430, set = 0, binding = 6) buffer StatusBuf { uint status; };
+
+void statusErr(uint code) { atomicCompSwap(status, 0u, code); }
+
+// Repo convention: no isfinite in this toolchain (see widthBlend.comp).
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite3(float a, float b, float c) { return finite(a) && finite(b) && finite(c); }
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    uint W = pc.vertexCount;
+    W = max(W, pc.indexCount);
+    W = max(W, pc.faceCount);
+    W = max(W, pc.normalsCount);
+    W = max(W, pc.curves);
+
+    // Thread-0 structural checks (mirror CUDA ValidateInput thread-0 portion:
+    // offsets[0]==0 and offsets[faceCount]==indices.size). These are
+    // kBadTopology on CUDA; size-contract checks are host-side (kBadShape).
+    if (g == 0u) {
+        if (pc.faceCount > 0u) {
+            if (faceOffsets[0u] != 0u) { statusErr(3u); /* kBadTopology */ }
+            if (faceOffsets[pc.faceCount] != pc.indexCount) { statusErr(3u); }
+        }
+    }
+
+    // Grid-stride over the combined universe.
+    for (uint i = g; i < W; i += gl_NumWorkGroups.x * gl_WorkGroupSize.x) {
+        if (i < pc.vertexCount) {
+            if (!finite3(restVerts[3u*i], restVerts[3u*i+1u], restVerts[3u*i+2u]))
+                statusErr(2u); // kNonFinite
+        }
+        if (i < pc.normalsCount) {
+            if (!finite3(normals[3u*i], normals[3u*i+1u], normals[3u*i+2u]))
+                statusErr(2u); // kNonFinite
+        }
+        if (i < pc.indexCount) {
+            if (faceIndices[i] >= pc.vertexCount)
+                statusErr(3u); // kBadTopology
+        }
+        if (i < pc.faceCount) {
+            uint b = faceOffsets[i];
+            uint e = faceOffsets[i + 1u];
+            uint cnt = e - b;
+            if (b > e || e > pc.indexCount || (cnt != 3u && cnt != 4u))
+                statusErr(3u); // kBadTopology
+        }
+        if (i < pc.curves) {
+            float u = rootUV[2u*i];
+            float v = rootUV[2u*i + 1u];
+            int rp = rootPrim[i];
+            if (!finite(u) || !finite(v) || rp < 0 || uint(rp) >= pc.faceCount)
+                statusErr(4u); // kBadRoot
+        }
+    }
+}
