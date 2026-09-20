@@ -14,6 +14,7 @@
 // per-frame SeExpr FBM over 800 k CVs measures ~100 ms single-thread /
 // ~12.5 ms at 8 threads on this host (MEASURED, fbmbench, M1 integration).
 #include "usdGen/ops/noise.h"
+#include "usdGen/scheduler.h"
 
 #include "usdGen/opParams.h"
 #include "usdGenMath/usdGenMath/hash.h"
@@ -85,6 +86,21 @@ void HashVec3(uint32_t seed, uint64_t curveId, float out[3])
     out[2] = UsdGenDraw01(int(seed), curveId, kSaltNoise + 2u);
 }
 
+/// Run `body(i)` for i in [0, count) across the capture work dispatcher's
+/// arena when beneficial; otherwise serial. Each i is independent, so the
+/// per-curve fBm fill below stays bit-identical to the serial path.
+template <class F>
+void NoiseParallelFor(UsdGenWorkDispatcher *dispatcher, size_t count, F const &body)
+{
+    if (!dispatcher || count < 256) {
+        for (size_t i = 0; i < count; ++i) body(i);
+        return;
+    }
+    struct Payload { F const *body; } payload{&body};
+    dispatcher->ParallelFor(count, [](size_t i, void *p) {
+        (*static_cast<Payload *>(p)->body)(i);
+    }, &payload);
+}
 }  // namespace
 
 #ifdef USDGEN_USE_GPU_NOISE
@@ -301,7 +317,12 @@ bool UsdGenNoiseOp::Capture(
     // spatial field, hence "correlated"); correlation = 0 is fully
     // decorrelated per curve by the hash offset.
     auto *field = cap.perCv.data();
-    for (size_t c = 0; c < nCurve; ++c) {
+    // Per-curve fBm fill is embarrassingly parallel: each curve reads only
+    // its own upstream CVs/ids and writes disjoint perCurve[c] /
+    // field[g..g+n) slots. Running it in the capture arena keeps the result
+    // bit-identical to the serial loop while overlapping the SeExpr fBm work.
+    NoiseParallelFor(ctx.dispatcher, nCurve, [&](size_t ci) {
+        const size_t c = ci;
         float hvec[3];
         HashVec3(ctx.seed, ids ? ids[c] : 0, hvec);
         const size_t g = ragged ? size_t(offs[c]) : c * size_t(cvCount);
@@ -341,7 +362,7 @@ bool UsdGenNoiseOp::Capture(
                                              octaves, lacunarity, gain);
             field[g + i] = 2.0f * out1 - 1.0f;
         }
-    }
+    });
     return true;
 }
 

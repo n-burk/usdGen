@@ -539,19 +539,38 @@ bool UsdGenGrowOp::Capture(
     // Point cardinality and rootSpans were established before the per-curve
     // loop so connected controls sample each curve's root.
     VtVec3fArray grownRest(buf.totalCvs);
+    // When no per-curve frames, per-curve controls, or per-strand direction
+    // are present, the normalized/rotated growth direction is identical for
+    // every curve; hoist the sqrt/rotation out of the hot loop. This is
+    // bit-safe: the hoisted value is computed from exactly the inputs the
+    // per-curve path would use.
+    const bool dirUniform = cap.dirPerCurve.empty()
+        && cap.liftPerCurve.empty()
+        && upstream.rootN.empty()
+        && upstream.rootB.empty();
+    GfVec3f uniformDir(0.0f, 0.0f, 0.0f);
+    if (dirUniform) {
+        GfVec3f dir = cap.direction == sVector
+            ? cap.directionVector : GfVec3f(0.0f, 1.0f, 0.0f);
+        dir = NormalizeGrowDirection(dir);
+        uniformDir = RotateGrowDirection(dir, GfVec3f(0.0f, 1.0f, 0.0f), cap.lift);
+    }
     for (uint32_t c = 0; c != R; ++c) {
         uint32_t const rootIndex = rootSpans[c];
         GfVec3f root = upstream.rest.empty() ? GfVec3f(upstream.px[rootIndex], upstream.py[rootIndex], upstream.pz[rootIndex])
                                               : upstream.rest[rootIndex];
-        GfVec3f const dirLiteral = cap.dirPerCurve.size() == R
-            ? cap.dirPerCurve[c] : cap.directionVector;
-        GfVec3f dir = cap.direction == sVector ? dirLiteral
-            : (upstream.rootN.empty() ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootN[c]);
-        dir = NormalizeGrowDirection(dir);
-        GfVec3f const axis = upstream.rootB.empty()
-            ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootB[c];
-        float const liftC = cap.liftPerCurve.size() == R ? cap.liftPerCurve[c] : cap.lift;
-        dir = RotateGrowDirection(dir, axis, liftC);
+        GfVec3f dir = uniformDir;
+        if (!dirUniform) {
+            GfVec3f const dirLiteral = cap.dirPerCurve.size() == R
+                ? cap.dirPerCurve[c] : cap.directionVector;
+            dir = cap.direction == sVector ? dirLiteral
+                : (upstream.rootN.empty() ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootN[c]);
+            dir = NormalizeGrowDirection(dir);
+            GfVec3f const axis = upstream.rootB.empty()
+                ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootB[c];
+            float const liftC = cap.liftPerCurve.size() == R ? cap.liftPerCurve[c] : cap.lift;
+            dir = RotateGrowDirection(dir, axis, liftC);
+        }
         for (uint32_t i = 0; i != static_cast<uint32_t>(cap.cvCount); ++i) {
             float const t = cap.cvCount > 1 ? float(i) / float(cap.cvCount - 1) : 0.0f;
             float const distance = cap.perCurve[c] * t;
@@ -579,6 +598,21 @@ void UsdGenGrowOp::Evaluate(
     auto const *inPy = view->inPy;
     auto const *inPz = view->inPz;
 
+    // Hoist per-curve direction/rotation when this chunk has no per-curve
+    // frames or connected per-strand controls: identical for every curve,
+    // so the sqrt/rotation is computed once per chunk instead of per curve.
+    const bool dirUniform = cap.dirPerCurve.empty()
+        && cap.liftPerCurve.empty()
+        && view->rootN == nullptr
+        && view->rootB == nullptr;
+    GfVec3f uniformDir;
+    if (dirUniform) {
+        GfVec3f dir = cap.direction == sVector
+            ? cap.directionVector : GfVec3f(0.0f, 1.0f, 0.0f);
+        dir = NormalizeGrowDirection(dir);
+        uniformDir = RotateGrowDirection(dir, GfVec3f(0.0f, 1.0f, 0.0f),
+                                        cap.lift);
+    }
     for (uint32_t c = 0; c < view->curveCount; ++c) {
         // Input chunks may be ragged C3 curves.  Their plane ports are
         // already sliced at inFirstCv, so rebase the absolute upstream
@@ -596,20 +630,25 @@ void UsdGenGrowOp::Evaluate(
         // perCurve: chunk views pre-offset the plane arrays only, so index by
         // absolute curve.
         size_t const absolute = view->desc->firstCurve + c;
-        GfVec3f dir;
-        if (cap.direction == sVector) {
-            dir = !cap.dirPerCurve.empty() && absolute < cap.dirPerCurve.size()
-                ? cap.dirPerCurve[absolute] : cap.directionVector;
-        } else {  // surfaceNormal
-            dir = view->rootN ? view->rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
+        GfVec3f d;
+        if (dirUniform) {
+            d = uniformDir;
+        } else {
+            GfVec3f dir;
+            if (cap.direction == sVector) {
+                dir = !cap.dirPerCurve.empty() && absolute < cap.dirPerCurve.size()
+                    ? cap.dirPerCurve[absolute] : cap.directionVector;
+            } else {  // surfaceNormal
+                dir = view->rootN ? view->rootN[c] : GfVec3f(0.0f, 1.0f, 0.0f);
+            }
+            d = NormalizeGrowDirection(dir);
+            GfVec3f const axis = view->rootB ? view->rootB[c]
+                : GfVec3f(0.0f, 1.0f, 0.0f);
+            float const liftC = !cap.liftPerCurve.empty() &&
+                absolute < cap.liftPerCurve.size()
+                ? cap.liftPerCurve[absolute] : cap.lift;
+            d = RotateGrowDirection(d, axis, liftC);
         }
-        GfVec3f d = NormalizeGrowDirection(dir);
-        GfVec3f const axis = view->rootB ? view->rootB[c]
-            : GfVec3f(0.0f, 1.0f, 0.0f);
-        float const liftC = !cap.liftPerCurve.empty() &&
-            absolute < cap.liftPerCurve.size()
-            ? cap.liftPerCurve[absolute] : cap.lift;
-        d = RotateGrowDirection(d, axis, liftC);
         // perCurve is a whole-buffer capture payload: chunk views pre-offset
         // the plane/per-curve arrays only, so index by absolute curve.
         const float targetLen = cap.perCurve.empty()
