@@ -146,10 +146,38 @@ void PinAllProcessThreads()
 }
 #endif
 
+#if defined(__linux__)
+int CountProcessThreads() noexcept
+{
+    DIR* dir = opendir("/proc/self/task");
+    if (!dir) return -1;
+    int n = 0;
+    while (readdir(dir) != nullptr) ++n;
+    closedir(dir);
+    return n;
+}
+#endif
+
 void ApplyPerformanceCoreAffinity()
 {
 #if defined(__linux__)
-    PinAllProcessThreads();
+    // Pin only while the process is still gaining threads (the arena's
+    // workers spawn during the first frames). In steady state the thread
+    // set is stable, so we pay just a cheap /proc/self/task count instead
+    // of re-running per-thread sched_getaffinity/sched_setaffinity on every
+    // commit. Any new thread bumps the count and forces a full re-pin.
+    static int lastCount = -1;
+    static int steadyStreak = 0;
+    const int count = CountProcessThreads();
+    if (count < 0) { PinAllProcessThreads(); return; }
+    if (count > lastCount) {
+        lastCount = count;
+        steadyStreak = 0;
+        PinAllProcessThreads();
+    }
+    else if (++steadyStreak <= 2) {
+        PinAllProcessThreads();  // a few extra passes to catch mid-frame spawns
+    }
 #endif
 }
 
