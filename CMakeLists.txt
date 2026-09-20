@@ -2508,6 +2508,26 @@ set_tests_properties(benchUsdGenSurfaceBindings PROPERTIES
     LABELS "T0;perf;sources;root-bindings;cache"
     TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
+# M5 T1 benchmark: graph-execution compile + operator timing across
+# CPU / CUDA / Vulkan backends (see plan/03-execution-engine.md §3.3).
+add_executable(benchUsdGenExecCompileOp tests/perf/benchUsdGenExecCompileOp.cpp)
+target_link_libraries(benchUsdGenExecCompileOp PRIVATE usdGenTestUtils)
+set(_usdgen_bench_eco_args "")
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_link_libraries(benchUsdGenExecCompileOp PRIVATE usdGenVulkanNative)
+    target_sources(benchUsdGenExecCompileOp PRIVATE "${_usdgen_vulkan_width_spv}")
+    target_compile_definitions(benchUsdGenExecCompileOp PRIVATE USDGEN_BENCH_VULKAN)
+    set(_usdgen_bench_eco_args ${_usdgen_bench_eco_args} "${CMAKE_CURRENT_BINARY_DIR}/vulkan/width.spv")
+endif()
+if(USDGEN_ENABLE_CUDA)
+    target_link_libraries(benchUsdGenExecCompileOp PRIVATE usdGenGpu)
+    target_compile_definitions(benchUsdGenExecCompileOp PRIVATE USDGEN_BENCH_CUDA)
+endif()
+add_test(NAME benchUsdGenExecCompileOp COMMAND benchUsdGenExecCompileOp ${_usdgen_bench_eco_args})
+set_tests_properties(benchUsdGenExecCompileOp PROPERTIES
+    LABELS "M5;T1;perf;compile;exec"
+    TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
 # M1 T1 imaging tests (scene index over the real UsdImaging chain).
 foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalidation testUsdGenScheduling
            testUsdGenSnapshotRace testUsdGenPopulation testUsdGenAdapter testUsdGenScenePublication
