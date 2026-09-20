@@ -41,6 +41,13 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#if defined(__linux__)
+#include <fstream>
+#include <bitset>
+#include <dirent.h>
+#include <pthread.h>
+#include <sched.h>
+#endif
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -48,8 +55,109 @@ namespace usdGen {
 
 namespace {
 
+#if defined(__linux__)
+// On a heterogeneous big.LITTLE SoC (e.g. GB10: 10x Cortex-X925 @ 3.9 GHz +
+// 10x Cortex-A725 @ 2.8 GHz) the commit's compute-bound FBM sweep is ~2x
+// faster on the performance cluster. The private arena otherwise free-
+// schedules its 8 workers across all online cores and lands partially on the
+// efficiency cluster — the dominant source of commit-time variance (03 §5.3
+// already notes this host is heterogeneous).
+//
+// Derive the highest-frequency core subset once from cpufreq, then pin EVERY
+// thread in the process (commit thread + the private arena's workers) to that
+// subset — the in-process equivalent of `taskset -c <perf-cores>`. Pinning
+// the commit thread alone does not reach the arena's workers, so the
+// /proc/self/task enumeration is required. No-op on homogeneous systems (no
+// distinct faster subset) or detection failure.
+bool ComputePerformanceCoreMask(cpu_set_t *mask)
+{
+    static bool resolved = false;
+    static bool valid = false;
+    static cpu_set_t cached;
+    if (resolved) { *mask = cached; return valid; }
+    resolved = true;
+    valid = false;
+
+    constexpr int kMaxCores = 128;
+    std::bitset<kMaxCores> online;
+    {
+        std::ifstream f("/sys/devices/system/cpu/online");
+        std::string token;
+        if (!std::getline(f, token)) return false;
+        size_t pos = 0;
+        while (pos != std::string::npos) {
+            auto const comma = token.find(',', pos);
+            std::string part = token.substr(pos, comma - pos);
+            auto const dash = part.find('-');
+            if (dash == std::string::npos) {
+                if (!part.empty()) online.set((size_t)std::stoul(part));
+            } else {
+                unsigned long lo = std::stoul(part.substr(0, dash));
+                unsigned long hi = std::stoul(part.substr(dash + 1));
+                for (unsigned long c = lo; c <= hi; ++c) online.set(c);
+            }
+            pos = comma;
+        }
+    }
+
+    std::vector<std::pair<int, long>> cores;
+    for (int c = 0; c < kMaxCores; ++c)
+        if (online.test((size_t)c)) {
+            std::ifstream f("/sys/devices/system/cpu/cpu" +
+                            std::to_string(c) +
+                            "/cpufreq/cpuinfo_max_freq");
+            long fr = -1;
+            if (f) f >> fr;
+            cores.emplace_back(c, fr);
+        }
+    int const nCores = (int)cores.size();
+    if (nCores < 2) return false;
+    long peak = -1;
+    for (auto const &kv : cores) peak = std::max(peak, kv.second);
+    if (peak <= 0) return false;
+    int fastCount = 0;
+    for (auto const &kv : cores) if (kv.second == peak) ++fastCount;
+    // Homogeneous: every online core shares the peak, so there is no faster
+    // subset to favour — leave the default free-scheduling untouched.
+    if (fastCount == nCores) return false;
+
+    CPU_ZERO(mask);
+    for (auto const &kv : cores)
+        if (kv.second == peak) CPU_SET(kv.first, mask);
+    cached = *mask;
+    valid = true;
+    return true;
+}
+
+void PinAllProcessThreads()
+{
+    cpu_set_t mask;
+    if (!ComputePerformanceCoreMask(&mask)) return;
+    DIR *dir = opendir("/proc/self/task");
+    if (!dir) return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] < '1' || ent->d_name[0] > '9') continue;  // skip "."/".."
+        pid_t const tid = (pid_t)std::strtol(ent->d_name, nullptr, 10);
+        if (tid > 0)
+            sched_setaffinity(tid, sizeof(mask), &mask);
+    }
+    closedir(dir);
+}
+#endif
+
+void ApplyPerformanceCoreAffinity()
+{
+#if defined(__linux__)
+    PinAllProcessThreads();
+#endif
+}
+
 int ResolveThreadLimit(int requested)
 {
+    // One-time, before the arena member is constructed: the pinning must
+    // precede the worker spawn so the arena's threads inherit the mask.
+    ApplyPerformanceCoreAffinity();
     if (requested > 0) return requested;
     const std::string env = TfGetenv("USDGEN_THREAD_LIMIT");  // 26.08: std::string
     if (!env.empty()) {
@@ -737,6 +845,11 @@ UsdGenRunResult UsdGenScheduler::Run(
 {
     TF_UNUSED(generationRequested);  // supersession is checked by the session
     TRACE_FUNCTION();
+    // 03 §5.3: pin commit + arena workers to the performance cores (one-time
+    // detection; /proc enumeration is ~tens of µs). A no-op on homogeneous
+    // hosts. Must precede this Run's parallel regions so the workers that
+    // persist from prior Runs run on the fast cluster.
+    ApplyPerformanceCoreAffinity();
 
     UsdGenRunResult result;
     if (graph.NodeCount() == 0) return result;
