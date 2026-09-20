@@ -414,6 +414,30 @@ std::shared_ptr<const VulkanSourceGeneration> VulkanSourceGeneration::WithNoise(
     catch (std::bad_alloc const&) { if (why) *why = "noise COW allocation failed"; return {}; }
 }
 
+std::shared_ptr<const VulkanSourceGeneration> VulkanSourceGeneration::WithDeform(
+    std::shared_ptr<const VulkanSourceGeneration> const& base,
+    DeformPipeline::Candidate const& candidate, uint64_t value, std::string* why) {
+    // Deform preserves topology: only point count and context must match.
+    if (!base || value <= base->valueVersion() || !candidate.succeeded() ||
+        candidate.pointCount() != base->pointCount() ||
+        candidate.context() != base->context()) {
+        if (why) *why = "invalid deform COW proof";
+        return {};
+    }
+    auto points = candidate.output().points;
+    if (base->pointCount()) {
+        if (!points || points->context() != base->context() ||
+            points->sizeBytes() != VkDeviceSize(base->pointCount()) * 3 * sizeof(float) ||
+            !(points->usage() & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+            !(points->usage() & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+            if (why) *why = "invalid deform COW output";
+            return {};
+        }
+    } else if (points) { if (why) *why = "empty deform COW has output"; return {}; }
+    try { return std::shared_ptr<const VulkanSourceGeneration>(new VulkanSourceGeneration(base, std::move(points), value, true)); }
+    catch (std::bad_alloc const&) { if (why) *why = "deform COW allocation failed"; return {}; }
+}
+
 VulkanSourceGeneration::VulkanSourceGeneration(
     std::shared_ptr<const VulkanSourceGeneration> const& base,
     LengthCompactionPipeline::Candidate const& candidate, uint64_t value)

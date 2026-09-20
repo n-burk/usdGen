@@ -30,10 +30,11 @@ enum class UsdGenExecutionBackendAvailability : uint8_t {
 
 /// Stable description of one selectable execution backend.  `available`
 /// describes an executable path for the backend, not whether a particular
-/// device is currently present.  CPU and CUDA currently expose this through
-/// legacy Session-owned paths while their adapter registrations are migrated;
-/// Metal and Vulkan are explicit unavailable entries until native adapters are
-/// linked.
+/// device is currently present.  CPU, CUDA and Vulkan currently expose this
+/// through legacy Session-owned paths while their adapter registrations are
+/// migrated; Metal is an explicit unavailable entry until a native adapter
+/// is linked. A missing GPU still fails closed at cook time with a precise
+/// no-device diagnostic, never a CPU fallback.
 struct UsdGenExecutionBackendContract {
     UsdGenExecutionBackend backend = UsdGenExecutionBackend::Invalid;
     UsdGenDeviceBackend deviceBackend = UsdGenDeviceBackend::Unknown;
@@ -149,9 +150,9 @@ UsdGenExecutionBackend ParseUsdGenExecutionBackend(TfToken const&) noexcept;
 
 /// Return the backend-neutral factory/capability contract. This function does
 /// not load a native runtime and never claims that an unavailable backend can
-/// execute. CPU and CUDA retain their legacy built-in contracts while their
-/// current Session paths are being migrated; therefore Available does not
-/// imply FindUsdGenExecutionBackendAdapter() is non-null for those two
+/// execute. CPU, CUDA and Vulkan retain their legacy built-in contracts while
+/// their current Session paths are being migrated; therefore Available does
+/// not imply FindUsdGenExecutionBackendAdapter() is non-null for those three
 /// transitional backends.
 UsdGenExecutionBackendContract GetUsdGenExecutionBackendContract(
     UsdGenExecutionBackend) noexcept;

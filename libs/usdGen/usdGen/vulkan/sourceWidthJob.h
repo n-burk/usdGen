@@ -7,6 +7,7 @@
 #include "widthBlendPipeline.h"
 #include "nonWidthComparePipeline.h"
 #include "noisePipeline.h"
+#include "deformPipeline.h"
 #include "executionPlan.h"
 #include "usdGen/executionPipeline.h"
 #include "usdGen/executionTaskGraph.h"
@@ -18,7 +19,7 @@ namespace usdGen::vulkan {
 // ordered inputs. This does not claim concurrent GPU branch execution.
 class VulkanSourceWidthJob final : public std::enable_shared_from_this<VulkanSourceWidthJob> {
 public:
-    enum class State { Created, Preparing, UploadPending, WidthPending, Ready, Superseded, Failed, LostProof, LengthPending, BlendPending, ComparePending, CullCountsPending, CullScatterPending, NoisePending };
+    enum class State { Created, Preparing, UploadPending, WidthPending, Ready, Superseded, Failed, LostProof, LengthPending, BlendPending, ComparePending, CullCountsPending, CullScatterPending, NoisePending, DeformPending };
     struct CreateInfo {
         VulkanSourceGenerationCreateInfo source;
         std::shared_ptr<WidthPipeline> widthPipeline;
@@ -43,6 +44,7 @@ public:
         std::shared_ptr<NonWidthComparePipeline> nonWidthComparePipeline = {};
         std::shared_ptr<LengthCompactionPipeline> lengthCompactionPipeline = {};
         std::shared_ptr<NoisePipeline> noisePipeline = {};
+        std::shared_ptr<DeformPipeline> deformPipeline = {};
     };
     using Completion = std::function<void(std::shared_ptr<const VulkanSourceGeneration>, State, VkResult)>;
     static std::shared_ptr<VulkanSourceWidthJob> Create(CreateInfo, std::string* reason=nullptr);
@@ -76,6 +78,8 @@ private:
     void FinishLength();
     void BeginNoise();
     void FinishNoise();
+    void BeginDeform();
+    void FinishDeform();
     void BeginCull(bool scatter = false);
     void FinishCull(bool scatter);
     void BeginStage();
@@ -97,6 +101,7 @@ private:
     std::unique_ptr<WidthBlendPipeline::Candidate> blend_;
     std::unique_ptr<NonWidthComparePipeline::Candidate> compare_;
     std::unique_ptr<NoisePipeline::Candidate> noise_;
+    std::unique_ptr<DeformPipeline::Candidate> deform_;
     std::vector<std::shared_ptr<const VulkanSourceGeneration>> values_;
     size_t stageIndex_ = 0;
     State stageFrom_ = State::UploadPending;

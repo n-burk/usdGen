@@ -1,5 +1,6 @@
 #include "sourceWidthJob.h"
 #include "lengthEnvelope.h"
+#include <algorithm>
 #include <cmath>
 #include <new>
 #include <stdexcept>
@@ -99,7 +100,8 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
                 if (stage.kind != VulkanSourceWidthStage::Kind::Width &&
                     stage.kind != VulkanSourceWidthStage::Kind::LengthScale &&
                     stage.kind != VulkanSourceWidthStage::Kind::LengthCull &&
-                    stage.kind != VulkanSourceWidthStage::Kind::Noise) return {};
+                    stage.kind != VulkanSourceWidthStage::Kind::Noise &&
+                    stage.kind != VulkanSourceWidthStage::Kind::Deform) return {};
                 continue;
             }
             // These values may originate from a typed plan, but Create is
@@ -181,6 +183,13 @@ std::shared_ptr<VulkanSourceWidthJob> VulkanSourceWidthJob::Create(CreateInfo in
                     !std::isfinite(stage.noise.gain) || stage.noise.gain < 0 || stage.noise.gain > 1 ||
                     !std::isfinite(stage.noise.preserveLength) || stage.noise.preserveLength < 0 || stage.noise.preserveLength > 1 ||
                     !std::isfinite(stage.noise.mask) || stage.noise.mask < 0 || stage.noise.mask > 1) return {};
+            } else if (stage.kind == VulkanSourceWidthStage::Kind::Deform) {
+                if (!info.deformPipeline || info.deformPipeline->context() != info.source.context) return {};
+                if (stage.deform.sampleCount < 4 || stage.deform.sampleCount > 100) return {};
+                if (stage.deform.restSamples.size() != size_t(stage.deform.sampleCount) * 3 ||
+                    stage.deform.posedSamples.size() != size_t(stage.deform.sampleCount) * 3) return {};
+                if (!std::isfinite(stage.deform.mask) || stage.deform.mask < 0 || stage.deform.mask > 1 ||
+                    !std::isfinite(stage.deform.groomEnvelope) || stage.deform.groomEnvelope < 0 || stage.deform.groomEnvelope > 1) return {};
             } else return {};
         }
         auto job = std::shared_ptr<VulkanSourceWidthJob>(new VulkanSourceWidthJob(std::move(info)));
@@ -397,6 +406,7 @@ void VulkanSourceWidthJob::Advance() {
         case State::BlendPending: FinishBlend(); return;
         case State::ComparePending: FinishCompare(); return;
         case State::NoisePending: FinishNoise(); return;
+        case State::DeformPending: FinishDeform(); return;
         default:return;
         }
     } catch (...) {FailOnOwner();}
@@ -418,12 +428,14 @@ void VulkanSourceWidthJob::BeginStage() {
         stageFrom_ = previous == VulkanSourceWidthStage::Kind::Width ? State::WidthPending :
             previous == VulkanSourceWidthStage::Kind::LengthScale ? State::LengthPending :
             previous == VulkanSourceWidthStage::Kind::LengthCull ? State::CullScatterPending :
-            previous == VulkanSourceWidthStage::Kind::Noise ? State::NoisePending : State::BlendPending;
+            previous == VulkanSourceWidthStage::Kind::Noise ? State::NoisePending :
+            previous == VulkanSourceWidthStage::Kind::Deform ? State::DeformPending : State::BlendPending;
     }
     if (stage.kind == VulkanSourceWidthStage::Kind::Width) BeginWidth();
     else if (stage.kind == VulkanSourceWidthStage::Kind::LengthScale) BeginLength();
     else if (stage.kind == VulkanSourceWidthStage::Kind::LengthCull) BeginCull();
     else if (stage.kind == VulkanSourceWidthStage::Kind::Noise) BeginNoise();
+    else if (stage.kind == VulkanSourceWidthStage::Kind::Deform) BeginDeform();
     else BeginBlend();
 }
 void VulkanSourceWidthJob::FinishStage(std::shared_ptr<const VulkanSourceGeneration> value) {
@@ -818,6 +830,102 @@ void VulkanSourceWidthJob::FinishNoise() {
     if (Suppressed()) { Terminal({}, State::Superseded, VK_SUCCESS); return; }
     if (!noise_->succeeded() || semantic != NoiseSemantic::Ok) { Terminal({}, State::Failed, VK_ERROR_VALIDATION_FAILED_EXT); return; }
     auto child = VulkanSourceGeneration::WithNoise(base_, *noise_, info_.stageValueVersions[stageIndex_]);
+    if (!child) { Terminal({}, State::Failed, VK_ERROR_INITIALIZATION_FAILED); return; }
+    FinishStage(std::move(child));
+}
+void VulkanSourceWidthJob::BeginDeform() {
+    VkResult status = VK_ERROR_INITIALIZATION_FAILED;
+    if (info_.completionService && base_->pointCount()) {
+        auto self = shared_from_this();
+        watch_ = info_.completionService->Reserve(self,
+            [self](VkResult proof) -> VulkanCompletionService::DeliveryResult {
+                if (proof == VK_SUCCESS) {
+                    self->watchProofReady_ = true;
+                    return self->NotifyCompletion() ? VulkanCompletionService::DeliveryResult::Posted
+                                                   : VulkanCompletionService::DeliveryResult::Stale;
+                }
+                self->NotifyFailure(proof); return VulkanCompletionService::DeliveryResult::LostProof;
+            }, [self](VkResult proof) { self->NotifyFailure(proof); });
+        if (!watch_) { RouteFailure(); return; }
+    }
+    bool phaseMarked = false;
+    DeformPipeline::BeforeSubmit beforeSubmit;
+    if (watch_) beforeSubmit = [this, &phaseMarked] {
+        phaseMarked = watch_ && watch_->MarkPhaseSubmitted(); return phaseMarked;
+    };
+    auto const& stage = info_.stages[stageIndex_];
+    auto const& ctx = base_->context();
+    // rootTargets: upload host vector to a scratch host-visible buffer.
+    // Vulkan forbids zero-size buffers; clamp to 4 bytes minimum.
+    uint32_t const curves = base_->curveCount();
+    VkDeviceSize rtBytes = std::max<VkDeviceSize>(VkDeviceSize(curves) * 12, 4u);
+    VkBufferCreateInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = rtBytes;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    auto rootTargetsBuf = ChargedBuffer::Create(ctx, bi,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        UsdGenExecutionResourceKind::Scratch);
+    if (!rootTargetsBuf) {
+        status = VK_ERROR_OUT_OF_HOST_MEMORY;
+        if (watch_) { if (!phaseMarked) info_.completionService->CancelBeforeSubmit(*watch_); watch_.reset(); }
+        Terminal({}, phaseMarked ? State::LostProof : State::Failed, status); return;
+    }
+    {
+        void* p = nullptr;
+        if (vkMapMemory(ctx->device(), rootTargetsBuf->memory(), 0,
+                std::min(rtBytes, VkDeviceSize(stage.deform.rootTargets.size() * 4)), 0, &p) != VK_SUCCESS) {
+            status = VK_ERROR_OUT_OF_HOST_MEMORY;
+            if (watch_) { if (!phaseMarked) info_.completionService->CancelBeforeSubmit(*watch_); watch_.reset(); }
+            Terminal({}, phaseMarked ? State::LostProof : State::Failed, status); return;
+        }
+        if (!stage.deform.rootTargets.empty())
+            std::memcpy(p, stage.deform.rootTargets.data(), stage.deform.rootTargets.size() * 4);
+        vkUnmapMemory(ctx->device(), rootTargetsBuf->memory());
+    }
+    DeformPipeline::BeginInfo info;
+    info.points = base_->PlaneOwner("points");
+    info.curveOffsets = base_->PlaneOwner("curveOffsets");
+    info.rootTargets = std::move(rootTargetsBuf);
+    info.curveCount = base_->curveCount();
+    info.pointCount = base_->pointCount();
+    info.restSamples = stage.deform.restSamples;
+    info.posedSamples = stage.deform.posedSamples;
+    info.sampleCount = stage.deform.sampleCount;
+    info.smoothing = 0.0;
+    info.mask = {stage.deform.mask, 1, nullptr, 0};
+    info.enabled = {1, 1, nullptr, 0};
+    info.lockRoots = {stage.deform.lockRoots ? 1u : 0u, 1, nullptr, 0};
+    info.groomEnvelope = stage.deform.groomEnvelope;
+    DeformSemantic beginSemantic = DeformSemantic::Ok;
+    deform_ = info_.deformPipeline->Begin(std::move(info), &status, &beginSemantic, std::move(beforeSubmit));
+    if (!deform_) {
+        if (watch_) {
+            if (!phaseMarked) info_.completionService->CancelBeforeSubmit(*watch_);
+            watch_.reset();
+        }
+        Terminal({}, phaseMarked ? State::LostProof : State::Failed, status); return;
+    }
+    if (watch_ && (!phaseMarked || !info_.completionService->Arm(*watch_, uint64_t(State::DeformPending)))) {
+        watch_.reset(); RouteFailure(); return;
+    }
+    auto expected = stageFrom_;
+    state_.compare_exchange_strong(expected, State::DeformPending, std::memory_order_acq_rel);
+    if (!base_->pointCount()) FinishDeform();
+}
+void VulkanSourceWidthJob::FinishDeform() {
+    if (watch_) {
+        if (!watchProofReady_) return;
+        if (!watch_->Retire()) { watch_.reset(); Terminal({}, State::LostProof, VK_ERROR_DEVICE_LOST); return; }
+        watch_.reset(); watchProofReady_ = false;
+    }
+    DeformSemantic semantic = DeformSemantic::Ok;
+    auto proof = deform_->Poll(&semantic);
+    if (proof == VK_NOT_READY) { if (info_.completionService) FailOnOwner(); return; }
+    if (proof != VK_SUCCESS) { Terminal({}, State::LostProof, proof); return; }
+    if (Suppressed()) { Terminal({}, State::Superseded, VK_SUCCESS); return; }
+    if (!deform_->succeeded() || semantic != DeformSemantic::Ok) { Terminal({}, State::Failed, VK_ERROR_VALIDATION_FAILED_EXT); return; }
+    auto child = VulkanSourceGeneration::WithDeform(base_, *deform_, info_.stageValueVersions[stageIndex_]);
     if (!child) { Terminal({}, State::Failed, VK_ERROR_INITIALIZATION_FAILED); return; }
     FinishStage(std::move(child));
 }

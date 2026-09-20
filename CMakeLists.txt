@@ -367,6 +367,7 @@ list(REMOVE_ITEM USDGEN_CORE_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionResources.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionRetirement.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionBackendCudaProvider.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/executionBackendVulkanProvider.cpp"
     # CUDA-only helper exposes CUDA vector types; do not compile it in the
     # CPU-only core build selected by ordinary consumers.
     "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/cudaScatterInput.cpp")
@@ -385,7 +386,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT WIN32)
 endif()
 add_library(usdGen SHARED ${USDGEN_CORE_SOURCES})
 target_sources(usdGen PRIVATE
-    libs/usdGen/usdGen/executionBackendCudaProvider.cpp)
+    libs/usdGen/usdGen/executionBackendCudaProvider.cpp
+    libs/usdGen/usdGen/executionBackendVulkanProvider.cpp)
 set_source_files_properties(libs/usdGen/usdGen/expressions/frontend.cpp PROPERTIES
     COMPILE_DEFINITIONS "SeExpr2=UsdGenSeExprFrontend;SeExprInternal2=UsdGenSeExprFrontendInternal;USDGEN_SEEXPR_SANDBOX"
     INCLUDE_DIRECTORIES "${_usdgen_frontend_dir}")
@@ -748,48 +750,142 @@ else()
     option(USDGEN_BUILD_TESTS "Build the usdGen test and benchmark targets" ON)
 endif()
 
-option(USDGEN_ENABLE_VULKAN_RUNTIME "Build the explicitly injected Vulkan runtime (no global backend registration)" OFF)
+# Vulkan runtime auto-detection: default ON when a toolchain (headers +
+# glslang + spirv-val) is present, OFF otherwise. An explicit
+# -DUSDGEN_ENABLE_VULKAN_RUNTIME=ON/OFF is always respected; the probe runs
+# only when the variable is undefined. When VULKAN_SDK is unset, the vendored
+# .vulkan-toolchain/root/usr tree is used as a fallback hint.
+#
+# Loader hint: hosts often carry only the runtime libvulkan.so.1 (no dev
+# symlink), which FindVulkan's name search misses. A versioned runtime file
+# still links fine by explicit path (build-vulkan proves it), so probe both
+# the vendored SDK and well-known host runtime paths before giving up.
+function(_usdgen_hint_vulkan_loader)
+    if(DEFINED Vulkan_LIBRARY)
+        return()
+    endif()
+    set(_candidates
+        "/lib/aarch64-linux-gnu/libvulkan.so.1"
+        "/usr/lib/aarch64-linux-gnu/libvulkan.so.1"
+        "/lib/x86_64-linux-gnu/libvulkan.so.1"
+        "/usr/lib/x86_64-linux-gnu/libvulkan.so.1"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vklocal/sdk/lib/libvulkan.so")
+    foreach(_lib IN LISTS _candidates)
+        if(EXISTS "${_lib}")
+            set(Vulkan_LIBRARY "${_lib}" CACHE FILEPATH
+                "Vulkan loader (host runtime fallback hint)")
+            break()
+        endif()
+    endforeach()
+endfunction()
+set(_usdgen_vulkan_runtime_default OFF)
+if(NOT DEFINED USDGEN_ENABLE_VULKAN_RUNTIME)
+    set(_usdgen_vulkan_sdk_hint "$ENV{VULKAN_SDK}")
+    if(_usdgen_vulkan_sdk_hint STREQUAL "" OR NOT EXISTS "${_usdgen_vulkan_sdk_hint}")
+        set(_usdgen_vulkan_sdk_hint "${CMAKE_CURRENT_SOURCE_DIR}/.vulkan-toolchain/root/usr")
+    endif()
+    # Vendored headers as a FindVulkan cache hint (never ENV: the vendored
+    # tree carries no runtime loader, and pointing VULKAN_SDK at it would
+    # hide the host loader from library search). An explicit user
+    # -DVulkan_INCLUDE_DIR always wins.
+    if(EXISTS "${_usdgen_vulkan_sdk_hint}/include/vulkan/vulkan_core.h" AND
+       NOT DEFINED Vulkan_INCLUDE_DIR)
+        set(Vulkan_INCLUDE_DIR "${_usdgen_vulkan_sdk_hint}/include"
+            CACHE PATH "Vulkan headers (vendored fallback hint)")
+    endif()
+    _usdgen_hint_vulkan_loader()
+    find_package(Vulkan 1.2 QUIET)
+    find_program(_usdgen_vulkan_probe_glslang NAMES glslangValidator glslang
+        HINTS "$ENV{VULKAN_SDK}/bin" "${_usdgen_vulkan_sdk_hint}/bin")
+    find_program(_usdgen_vulkan_probe_spirv NAMES spirv-val
+        HINTS "$ENV{VULKAN_SDK}/bin" "${_usdgen_vulkan_sdk_hint}/bin")
+    if(Vulkan_FOUND AND _usdgen_vulkan_probe_glslang AND _usdgen_vulkan_probe_spirv)
+        set(_usdgen_vulkan_runtime_default ON)
+        message(STATUS "usdGen Vulkan: auto-enabled (toolchain at ${_usdgen_vulkan_sdk_hint})")
+    else()
+        message(STATUS "usdGen Vulkan: no toolchain; runtime stays OFF (set VULKAN_SDK or -DUSDGEN_ENABLE_VULKAN_RUNTIME=ON)")
+    endif()
+    unset(_usdgen_vulkan_probe_glslang CACHE)
+    unset(_usdgen_vulkan_probe_spirv CACHE)
+    unset(_usdgen_vulkan_sdk_hint)
+endif()
+option(USDGEN_ENABLE_VULKAN_RUNTIME "Build the Vulkan execution runtime (production backend route plus injected test provider)" ${_usdgen_vulkan_runtime_default})
 option(USDGEN_BUILD_VULKAN_TESTS "Build native Vulkan compute and injected-provider tests" OFF)
+# Shared Vulkan source list: production (RUNTIME ON) compiles these into
+# libusdGen.so so Sessions route without injection; test-only builds
+# (RUNTIME OFF + VULKAN_TESTS ON) keep them in the static native lib.
+set(_usdgen_vulkan_sources
+    libs/usdGen/usdGen/vulkan/deviceContext.cpp
+    libs/usdGen/usdGen/vulkan/chargedBuffer.cpp
+    libs/usdGen/usdGen/vulkan/completionService.cpp
+    libs/usdGen/usdGen/vulkan/sourceGeneration.cpp
+    libs/usdGen/usdGen/vulkan/deviceGenerationAdapter.cpp
+    libs/usdGen/usdGen/vulkan/publicationJob.cpp
+    libs/usdGen/usdGen/vulkan/executionPlan.cpp
+    libs/usdGen/usdGen/vulkan/planExecutor.cpp
+    libs/usdGen/usdGen/vulkan/sessionProvider.cpp
+    libs/usdGen/usdGen/vulkan/defaultProvider.cpp
+    libs/usdGen/usdGen/vulkan/sourceWidthJob.cpp
+    libs/usdGen/usdGen/vulkan/lengthScalePipeline.cpp
+    libs/usdGen/usdGen/vulkan/lengthCompactionPipeline.cpp
+    libs/usdGen/usdGen/vulkan/widthBlendPipeline.cpp
+    libs/usdGen/usdGen/vulkan/nonWidthComparePipeline.cpp
+    libs/usdGen/usdGen/vulkan/topologyPipeline.cpp
+    libs/usdGen/usdGen/vulkan/pointOverridePipeline.cpp
+    libs/usdGen/usdGen/vulkan/curveGrowPipeline.cpp
+    libs/usdGen/usdGen/vulkan/scatterGrowPipeline.cpp
+    libs/usdGen/usdGen/vulkan/rootFramesPipeline.cpp
+    libs/usdGen/usdGen/vulkan/rootFrameGatherPipeline.cpp
+    libs/usdGen/usdGen/vulkan/noisePipeline.cpp
+    libs/usdGen/usdGen/vulkan/deformPipeline.cpp
+    libs/usdGen/usdGen/vulkan/widthPipeline.cpp)
 if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_TESTS))
+    # Vendored header fallback when VULKAN_SDK is unset (mirrors the
+    # auto-probe; cache hint, never ENV, so the host loader stays visible).
+    if("$ENV{VULKAN_SDK}" STREQUAL "")
+        set(_usdgen_vulkan_fallback_sdk "${CMAKE_CURRENT_SOURCE_DIR}/.vulkan-toolchain/root/usr")
+        if(EXISTS "${_usdgen_vulkan_fallback_sdk}/include/vulkan/vulkan_core.h"
+           AND NOT DEFINED Vulkan_INCLUDE_DIR)
+            set(Vulkan_INCLUDE_DIR "${_usdgen_vulkan_fallback_sdk}/include"
+                CACHE PATH "Vulkan headers (vendored fallback hint)")
+        endif()
+        unset(_usdgen_vulkan_fallback_sdk)
+    endif()
+    _usdgen_hint_vulkan_loader()
     find_package(Vulkan 1.2 REQUIRED)
-    # Native ownership foundation only; no Session backend registration yet.
-    add_library(usdGenVulkanNative STATIC
-        libs/usdGen/usdGen/vulkan/deviceContext.cpp
-        libs/usdGen/usdGen/vulkan/chargedBuffer.cpp
-        libs/usdGen/usdGen/vulkan/completionService.cpp
-        libs/usdGen/usdGen/vulkan/sourceGeneration.cpp
-        libs/usdGen/usdGen/vulkan/deviceGenerationAdapter.cpp
-        libs/usdGen/usdGen/vulkan/publicationJob.cpp
-        libs/usdGen/usdGen/vulkan/executionPlan.cpp
-        libs/usdGen/usdGen/vulkan/planExecutor.cpp
-        libs/usdGen/usdGen/vulkan/sessionProvider.cpp
-        libs/usdGen/usdGen/vulkan/sourceWidthJob.cpp
-        libs/usdGen/usdGen/vulkan/lengthScalePipeline.cpp
-        libs/usdGen/usdGen/vulkan/lengthCompactionPipeline.cpp
-        libs/usdGen/usdGen/vulkan/widthBlendPipeline.cpp
-        libs/usdGen/usdGen/vulkan/nonWidthComparePipeline.cpp
-        libs/usdGen/usdGen/vulkan/topologyPipeline.cpp
-        libs/usdGen/usdGen/vulkan/pointOverridePipeline.cpp
-        libs/usdGen/usdGen/vulkan/curveGrowPipeline.cpp
-        libs/usdGen/usdGen/vulkan/scatterGrowPipeline.cpp
-        libs/usdGen/usdGen/vulkan/rootFramesPipeline.cpp
-        libs/usdGen/usdGen/vulkan/rootFrameGatherPipeline.cpp
-        libs/usdGen/usdGen/vulkan/noisePipeline.cpp
-        libs/usdGen/usdGen/vulkan/deformPipeline.cpp
-        libs/usdGen/usdGen/vulkan/widthPipeline.cpp)
-    target_link_libraries(usdGenVulkanNative PUBLIC Vulkan::Vulkan usdGenExecutionResources usdGen Threads::Threads)
-    target_include_directories(usdGenVulkanNative PUBLIC
-        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>"
-        "$<INSTALL_INTERFACE:include>")
-    set_target_properties(usdGenVulkanNative PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    if(USDGEN_ENABLE_VULKAN_RUNTIME)
+        # Production: Vulkan objects live in libusdGen.so (mirrors the CUDA
+        # usdGenGpu pattern) so Sessions route without test-only injection.
+        # USDGEN_ENABLE_VULKAN_RUNTIME drives CanRoute/contract like
+        # USDGEN_ENABLE_CUDA. The native lib stays as an INTERFACE alias so
+        # existing test links keep working without duplicate symbols.
+        target_sources(usdGen PRIVATE ${_usdgen_vulkan_sources})
+        target_compile_definitions(usdGen PRIVATE USDGEN_ENABLE_VULKAN_RUNTIME)
+        target_link_libraries(usdGen PRIVATE Vulkan::Vulkan Threads::Threads)
+        add_library(usdGenVulkanNative INTERFACE)
+        target_link_libraries(usdGenVulkanNative INTERFACE
+            usdGen Vulkan::Vulkan usdGenExecutionResources Threads::Threads)
+        target_include_directories(usdGenVulkanNative INTERFACE
+            "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>"
+            "$<INSTALL_INTERFACE:include>")
+    else()
+        # Test-only: keep Vulkan out of the core (no SDK leakage into
+        # CPU/CUDA-only builds); tests link the static native lib directly.
+        add_library(usdGenVulkanNative STATIC ${_usdgen_vulkan_sources})
+        target_link_libraries(usdGenVulkanNative PUBLIC Vulkan::Vulkan usdGenExecutionResources usdGen Threads::Threads)
+        target_include_directories(usdGenVulkanNative PUBLIC
+            "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>"
+            "$<INSTALL_INTERFACE:include>")
+        set_target_properties(usdGenVulkanNative PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endif()
     # Canonical UUID registry must live in one DSO, never one static copy per consumer.
     add_library(usdGenVulkanFactory SHARED libs/usdGen/usdGen/vulkan/deviceFactory.cpp)
     target_link_libraries(usdGenVulkanFactory PUBLIC usdGenVulkanNative usdGen)
     set_target_properties(usdGenVulkanFactory PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     find_program(USDGEN_GLSLANG_EXECUTABLE NAMES glslangValidator glslang
-        HINTS "$ENV{VULKAN_SDK}/bin" REQUIRED)
+        HINTS "$ENV{VULKAN_SDK}/bin" "${CMAKE_CURRENT_SOURCE_DIR}/.vulkan-toolchain/root/usr/bin" REQUIRED)
     find_program(USDGEN_SPIRV_VAL_EXECUTABLE NAMES spirv-val
-        HINTS "$ENV{VULKAN_SDK}/bin" REQUIRED)
+        HINTS "$ENV{VULKAN_SDK}/bin" "${CMAKE_CURRENT_SOURCE_DIR}/.vulkan-toolchain/root/usr/bin" REQUIRED)
     set(_usdgen_vulkan_width_shader "${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen/usdGen/vulkan/shaders/width.comp")
     set(_usdgen_vulkan_width_spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan/width.spv")
     add_custom_command(OUTPUT "${_usdgen_vulkan_width_spv}"
@@ -993,6 +1089,9 @@ if(USDGEN_BUILD_VULKAN_TESTS)
     add_executable(testUsdGenVulkanSourcePreparation tests/testUsdGenVulkanSourcePreparation.cpp)
     add_executable(testUsdGenVulkanExecutionPlan tests/testUsdGenVulkanExecutionPlan.cpp)
     target_link_libraries(testUsdGenVulkanExecutionPlan PRIVATE usdGenVulkanNative)
+    if(USDGEN_ENABLE_VULKAN_RUNTIME)
+        target_compile_definitions(testUsdGenVulkanExecutionPlan PRIVATE USDGEN_ENABLE_VULKAN_RUNTIME)
+    endif()
     add_test(NAME testUsdGenVulkanExecutionPlan COMMAND testUsdGenVulkanExecutionPlan)
     set_tests_properties(testUsdGenVulkanExecutionPlan PROPERTIES LABELS "T1;vulkan;planning;metadata" TIMEOUT 60)
     add_executable(testUsdGenVulkanSourceCapture tests/testUsdGenVulkanSourceCapture.cpp)
@@ -1634,15 +1733,43 @@ target_link_libraries(testUsdGenExecutionBackend PRIVATE usdGen)
 if(USDGEN_ENABLE_CUDA)
     target_compile_definitions(testUsdGenExecutionBackend PRIVATE USDGEN_ENABLE_CUDA)
 endif()
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_compile_definitions(testUsdGenExecutionBackend PRIVATE USDGEN_ENABLE_VULKAN_RUNTIME)
+endif()
 add_test(NAME testUsdGenExecutionBackend COMMAND testUsdGenExecutionBackend)
 set_tests_properties(testUsdGenExecutionBackend PROPERTIES LABELS "T0;backend" TIMEOUT 30)
 add_executable(testUsdGenExecutionBackendNeutral
     tests/testUsdGenExecutionBackendNeutral.cpp)
 target_link_libraries(testUsdGenExecutionBackendNeutral PRIVATE usdGen)
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_compile_definitions(testUsdGenExecutionBackendNeutral PRIVATE USDGEN_ENABLE_VULKAN_RUNTIME)
+endif()
 add_test(NAME testUsdGenExecutionBackendNeutral
     COMMAND testUsdGenExecutionBackendNeutral)
 set_tests_properties(testUsdGenExecutionBackendNeutral
     PROPERTIES LABELS "T0;backend" TIMEOUT 30)
+# One Session switching cpu->vulkan->cuda->cpu via descriptor replacement,
+# plus unavailable-build diagnostics for backends compiled out.
+add_executable(testUsdGenExecutionBackendSwitching
+    tests/testUsdGenExecutionBackendSwitching.cpp)
+target_link_libraries(testUsdGenExecutionBackendSwitching PRIVATE usdGen)
+if(USDGEN_ENABLE_CUDA)
+    target_compile_definitions(testUsdGenExecutionBackendSwitching PRIVATE USDGEN_ENABLE_CUDA)
+endif()
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_compile_definitions(testUsdGenExecutionBackendSwitching PRIVATE USDGEN_ENABLE_VULKAN_RUNTIME)
+endif()
+add_test(NAME testUsdGenExecutionBackendSwitching COMMAND testUsdGenExecutionBackendSwitching)
+# Default Vulkan provider discovers SPIR-V via this dir (build tree here,
+# share/usdGen/vulkan once installed); without it a CWD outside the build
+# root would fail shader bring-up instead of exercising the device route.
+set_tests_properties(testUsdGenExecutionBackendSwitching PROPERTIES
+    LABELS "T0;backend;switching" TIMEOUT 120 RESOURCE_LOCK usdgen_gpu
+    SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_TESTS))
+    set_tests_properties(testUsdGenExecutionBackendSwitching PROPERTIES
+        ENVIRONMENT "USDGEN_VULKAN_SHADER_DIR=${CMAKE_CURRENT_BINARY_DIR}/vulkan")
+endif()
 add_executable(testUsdGenExecutionTaskGraphStress tests/testUsdGenExecutionTaskGraphStress.cpp)
 target_link_libraries(testUsdGenExecutionTaskGraphStress PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionTaskGraphStress COMMAND testUsdGenExecutionTaskGraphStress)
@@ -2972,7 +3099,10 @@ install(TARGETS usdGenExecutionResources usdGen usdGenImaging usdGenSchema usdGe
     ARCHIVE DESTINATION "${USDGEN_INSTALL_LIBDIR}")
 
 if(USDGEN_ENABLE_VULKAN_RUNTIME)
-    install(TARGETS usdGenVulkanNative usdGenVulkanFactory
+    # Production: Vulkan objects live in libusdGen.so; the native target is
+    # an INTERFACE alias (export only, no binaries), the factory stays a DSO.
+    install(TARGETS usdGenVulkanNative EXPORT usdGenTargets)
+    install(TARGETS usdGenVulkanFactory
         EXPORT usdGenTargets
         RUNTIME DESTINATION "${USDGEN_INSTALL_LIBDIR}"
         LIBRARY DESTINATION "${USDGEN_INSTALL_LIBDIR}"

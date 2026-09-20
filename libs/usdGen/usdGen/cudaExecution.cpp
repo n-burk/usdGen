@@ -79,6 +79,30 @@ bool ValidateExpressionTargets(UsdGenNodeDesc const& node, UsdGenDiagnostics* di
     for (auto const& error : errors) Fail(diagnostics, error);
     return false;
 }
+// Literal spellings shared with the CPU lane. UsdGenParamView reads every
+// scalar through GetDouble (float or double), every enum through GetToken
+// (TfToken or string), and every integer through GetInt (int or uint32_t),
+// and each CUDA launcher below consumes the same conversions. Admit those
+// spellings here; finiteness and range rules still apply to the widened
+// value, and UncheckedGet sites keep their exact native-type gates.
+bool CudaScalarDouble(VtValue const& value, double* out) {
+    if (value.IsHolding<float>()) { *out = value.UncheckedGet<float>(); return true; }
+    if (value.IsHolding<double>()) { *out = value.UncheckedGet<double>(); return true; }
+    return false;
+}
+bool CudaEnumToken(VtValue const& value, TfToken* out) {
+    if (value.IsHolding<TfToken>()) { *out = value.UncheckedGet<TfToken>(); return true; }
+    if (value.IsHolding<std::string>()) {
+        *out = TfToken(value.UncheckedGet<std::string>());
+        return true;
+    }
+    return false;
+}
+bool CudaIntValue(VtValue const& value, int64_t* out) {
+    if (value.IsHolding<int>()) { *out = value.UncheckedGet<int>(); return true; }
+    if (value.IsHolding<uint32_t>()) { *out = value.UncheckedGet<uint32_t>(); return true; }
+    return false;
+}
 bool ValidateLength(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
     if (!node.mode.IsEmpty() ||
         !node.references.empty() || !node.curves.empty() || !node.maps.empty() ||
@@ -91,23 +115,30 @@ bool ValidateLength(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
         auto name = param.name.GetString();
         if (!seen.insert(name).second) return Fail(diagnostics, "duplicate Length parameter " + name);
         bool valid = false;
-        if (floats.count(name))
-            valid = param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>()) &&
-                param.value.UncheckedGet<float>() >= 0 &&
-                (name != "mask" || param.value.UncheckedGet<float>() <= 1);
-        else if (name == "length:random") {
+        if (floats.count(name)) {
+            double value = 0;
+            valid = CudaScalarDouble(param.value, &value) && std::isfinite(value) &&
+                value >= 0 && (name != "mask" || value <= 1);
+        } else if (name == "length:random") {
             valid = param.value.IsHolding<GfVec2f>();
             if (valid) for (int component = 0; component < 2; ++component) {
                 auto value = param.value.UncheckedGet<GfVec2f>()[component];
                 valid &= std::isfinite(value) && value >= 0;
             }
-        } else if (name == "length:mode")
-            valid = param.value == VtValue(TfToken("scale")) || param.value == VtValue(TfToken("set")) ||
-                param.value == VtValue(TfToken("cull"));
-        else if (name == "length:method")
-            valid = param.value == VtValue(TfToken("scale")) || param.value == VtValue(TfToken("cutExtend"));
-        else if (name == "rebuild")
-            valid = param.value == VtValue(TfToken("keepParam")) || param.value == VtValue(TfToken("reparam"));
+        } else if (name == "length:mode") {
+            TfToken token;
+            valid = CudaEnumToken(param.value, &token) &&
+                (token == TfToken("scale") || token == TfToken("set") ||
+                 token == TfToken("cull"));
+        } else if (name == "length:method") {
+            TfToken token;
+            valid = CudaEnumToken(param.value, &token) &&
+                (token == TfToken("scale") || token == TfToken("cutExtend"));
+        } else if (name == "rebuild") {
+            TfToken token;
+            valid = CudaEnumToken(param.value, &token) &&
+                (token == TfToken("keepParam") || token == TfToken("reparam"));
+        }
         if (!valid) return Fail(diagnostics, "unsupported or malformed Length parameter " + name);
     }
     for (auto const& ramp : node.ramps)
@@ -129,9 +160,14 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
         auto const& name = param.name.GetString();
         if (!seen.insert(name).second) return Fail(diagnostics, "duplicate Width parameter " + name);
         bool valid = false;
-        if (floats.count(name)) valid = param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>());
-        else if (name == "replace") valid = param.value.IsHolding<bool>();
-        else if (name == "width:interpolation") valid = param.value.IsHolding<TfToken>();
+        if (floats.count(name)) {
+            double value = 0;
+            valid = CudaScalarDouble(param.value, &value) && std::isfinite(value);
+        } else if (name == "replace") valid = param.value.IsHolding<bool>();
+        else if (name == "width:interpolation") {
+            TfToken token;
+            valid = CudaEnumToken(param.value, &token);
+        }
         else if (name == "width:knots") {
             valid = param.value.IsHolding<VtVec2fArray>();
             float previous = -1;
@@ -158,12 +194,12 @@ bool ValidateWidth(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
 // CUDA COW DAG.
 bool ValidateWidthBlend(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
     bool paramsOk = true;
-    for (UsdGenParamValue const& param : node.params)
+    for (UsdGenParamValue const& param : node.params) {
+        double weight = 0;
         paramsOk = paramsOk && param.name == TfToken("widthBlend:weight") &&
-            param.value.IsHolding<float>() &&
-            std::isfinite(param.value.UncheckedGet<float>()) &&
-            param.value.UncheckedGet<float>() >= 0.0f &&
-            param.value.UncheckedGet<float>() <= 1.0f;
+            CudaScalarDouble(param.value, &weight) &&
+            std::isfinite(weight) && weight >= 0.0 && weight <= 1.0;
+    }
     if (node.type != TfToken("UsdGenWidthBlend") ||
         !paramsOk || !node.ramps.empty() ||
         !node.expressionBindings.empty() || !node.references.empty() ||
@@ -192,33 +228,34 @@ bool ValidateNoise(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
         if (!seen.insert(name).second) return Fail(diagnostics, "duplicate Noise parameter " + name);
         bool valid = false;
         if (floats.count(name)) {
-            valid = param.value.IsHolding<float>() &&
-                std::isfinite(param.value.UncheckedGet<float>());
+            double value = 0;
+            valid = CudaScalarDouble(param.value, &value) && std::isfinite(value);
             if (valid && (name == "noise:magnitude" || name == "noise:frequency" ||
                           name == "noise:lacunarity" || name == "preserveLength" ||
                           name == "mask"))
-                valid = param.value.UncheckedGet<float>() >= 0;
+                valid = value >= 0;
             if (valid && name == "noise:frequency")
-                valid = param.value.UncheckedGet<float>() > 0;
+                valid = value > 0;
             if (valid && name == "noise:lacunarity")
-                valid = param.value.UncheckedGet<float>() > 1;
+                valid = value > 1;
             if (valid && (name == "noise:correlation" || name == "noise:gain" ||
                           name == "preserveLength" || name == "mask"))
-                valid = param.value.UncheckedGet<float>() <= 1;
+                valid = value <= 1;
         } else if (name == "noise:octaves" || name == "noise:seed") {
-            valid = param.value.IsHolding<int>();
+            int64_t number = 0;
+            valid = CudaIntValue(param.value, &number);
             if (valid && name == "noise:octaves")
-                valid = param.value.UncheckedGet<int>() >= 1 &&
-                    param.value.UncheckedGet<int>() <= 6;
+                valid = number >= 1 && number <= 6;
         } else if (name == "enabled" || name == "cumulative") {
             valid = param.value.IsHolding<bool>();
         } else if (name == "noise:magnitude:interpolation") {
-            valid = param.value.IsHolding<TfToken>();
+            TfToken token;
+            valid = CudaEnumToken(param.value, &token);
         } else if (name == "noise:magnitude:knots") {
             valid = param.value.IsHolding<VtVec2fArray>();
             float previous = -1;
             if (valid) for (auto const& knot : param.value.UncheckedGet<VtVec2fArray>()) {
-                valid = std::isfinite(knot[0]) && std::isfinite(knot[1]) &&
+                valid = valid && std::isfinite(knot[0]) && std::isfinite(knot[1]) &&
                     knot[0] >= 0 && knot[0] <= 1 && knot[0] >= previous;
                 previous = knot[0];
             }
@@ -244,13 +281,15 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
     for (auto const& param : node.params) {
         auto name = param.name.GetString();
         bool valid = seen.insert(name).second;
-        if (name == "rbfSamples")
-            valid &= param.value.IsHolding<int>() && param.value.UncheckedGet<int>() >= 4 && param.value.UncheckedGet<int>() <= 46336;
-        else if (name == "lockRoots") valid &= param.value.IsHolding<bool>();
-        else if (name == "mask")
-            valid &= param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>()) &&
-                param.value.UncheckedGet<float>() >= 0 && param.value.UncheckedGet<float>() <= 1;
-        else valid = false;
+        if (name == "rbfSamples") {
+            int64_t number = 0;
+            valid &= CudaIntValue(param.value, &number) && number >= 4 && number <= 46336;
+        } else if (name == "lockRoots") valid &= param.value.IsHolding<bool>();
+        else if (name == "mask") {
+            double value = 0;
+            valid &= CudaScalarDouble(param.value, &value) && std::isfinite(value) &&
+                value >= 0 && value <= 1;
+        } else valid = false;
         if (!valid) return Fail(diagnostics, "unsupported or malformed RBF parameter " + name);
     }
     for (auto const& ramp : node.ramps)
@@ -291,7 +330,12 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
             return Fail(diagnostics, "Scatter->Grow has unsupported Grow control " +
                 value.name.GetString());
         bool valid = false;
-        if (value.name == TfToken("segments")) valid = value.value.IsHolding<int>();
+        if (value.name == TfToken("segments")) {
+            int64_t number = 0;
+            // Range checked below through GetInt once the default applies;
+            // every out-of-range uint32 still fails there, as before.
+            valid = CudaIntValue(value.value, &number);
+        }
         else if (value.name == TfToken("length") || value.name == TfToken("lift"))
             valid = value.value.IsHolding<float>() || value.value.IsHolding<double>();
         else if (value.name == TfToken("lengthRandom")) valid = value.value.IsHolding<GfVec2f>();
@@ -1861,10 +1905,10 @@ bool FindLiteralRbfShape(UsdGenCudaExecutionPlan const& plan,
             if (shape.deform || HasExpressionBinding(node, "rbfSamples")) return false;
             shape.deform = candidate.get();
         } else if (candidate->type == TfToken("UsdGenWidth")) {
-            // Active expressions or image maps change the allocation shape.
-            // An empty compiled program is normal for literal operators.
-            // Keep expression/map paths on per-allocation admission for now.
-            if ((candidate->parameters && !candidate->parameters->Bindings().empty()) || candidate->maskImage ||
+            // Active expressions change the allocation shape. An empty
+            // compiled program is normal for literal operators. Keep
+            // expression paths on per-allocation admission for now.
+            if ((candidate->parameters && !candidate->parameters->Bindings().empty()) ||
                 !node.expressionBindings.empty()) return false;
             ++shape.widthCount;
         } else return false;
@@ -2132,19 +2176,6 @@ LiteralRbfAdmission ReserveLiteralRbfDagExecution(
             return LiteralRbfAdmission::Failed;
         }
     }
-    // Every mapped Width owns its image upload and root-domain sample
-    // plane; on a DAG those candidates can coexist, so their peaks sum.
-    for (auto const& step : plan.steps) {
-        if (!step->maskImage) continue;
-        uint64_t imageBytes = 0, sampleBytes = 0;
-        if (!EstimateMultiply(step->maskImage->TexelCount(), sizeof(float), &imageBytes) ||
-            !EstimateMultiply(curves, sizeof(float), &sampleBytes) ||
-            !EstimateAdd(&widthBytes, imageBytes) ||
-            !EstimateAdd(&widthBytes, sampleBytes)) {
-            Fail(diagnostics, "CUDA literal-RBF Width map memory estimate overflows");
-            return LiteralRbfAdmission::Failed;
-        }
-    }
     // Selected-device LU workspace queries are reused across Deforms that
     // bind the same sample count; every other per-Deform term is charged
     // separately even for identical surface descriptors.
@@ -2201,17 +2232,6 @@ LiteralRbfAdmission ReserveLiteralRbfDagExecution(
             !EstimateMultiply(curves, frameBytesPerCurve, &growFrames)) {
             Fail(diagnostics, "CUDA literal-RBF Grow frame estimate overflows");
             return LiteralRbfAdmission::Failed;
-        }
-        for (auto const& step : plan.steps) if (step->type == TfToken("UsdGenGrow") &&
-            step->growLengthMap.image) {
-            uint64_t image = 0, samples = 0;
-            if (!EstimateMultiply(step->growLengthMap.image->TexelCount(), sizeof(float),
-                    &image) ||
-                !EstimateMultiply(curves, sizeof(float), &samples) ||
-                !EstimateAdd(&growMapBytes, image) || !EstimateAdd(&growMapBytes, samples)) {
-                Fail(diagnostics, "CUDA literal-RBF Grow map estimate overflows");
-                return LiteralRbfAdmission::Failed;
-            }
         }
         if (!EstimateMultiply(growCount, 2 * sizeof(int), &growStatusBytes)) {
             Fail(diagnostics, "CUDA literal-RBF Grow memory estimate overflows");
@@ -2329,17 +2349,6 @@ LiteralRbfAdmission ReserveLiteralRbfScatterDagExecution(
         !EstimateAdd(&widthBytes, proofBytes)) {
         Fail(diagnostics, "CUDA literal-RBF Width memory estimate overflows");
         return LiteralRbfAdmission::Failed;
-    }
-    for (auto const& step : plan.steps) {
-        if (!step->maskImage) continue;
-        uint64_t imageBytes = 0, sampleBytes = 0;
-        if (!EstimateMultiply(step->maskImage->TexelCount(), sizeof(float), &imageBytes) ||
-            !EstimateMultiply(curves, sizeof(float), &sampleBytes) ||
-            !EstimateAdd(&widthBytes, imageBytes) ||
-            !EstimateAdd(&widthBytes, sampleBytes)) {
-            Fail(diagnostics, "CUDA literal-RBF Width map memory estimate overflows");
-            return LiteralRbfAdmission::Failed;
-        }
     }
     CudaDeviceScope selected(device);
     if (!selected.selected) {

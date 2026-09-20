@@ -1855,12 +1855,14 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                         packet.fullPopulation ? "off: full population" :
                         "off: the frame changed");
                     captured.desc = std::make_shared<const Desc>(std::move(result.desc));
-                    // A CUDA graph always has renderer-local session identity,
-                    // even though this plugin does not yet hand its device
-                    // buffers to stock Storm.
+                    // A device-bound graph always has renderer-local session
+                    // identity, even though this plugin does not yet hand its
+                    // device buffers to stock Storm.
                     // CPU graphs retain existing explicit-session sharing.
-                    captured.key.rendererLocal = captured.desc->executionBackend ==
-                        usdGen::UsdGenExecutionBackend::Cuda;
+                    auto const keyBackend = captured.desc->executionBackend;
+                    captured.key.rendererLocal =
+                        keyBackend == usdGen::UsdGenExecutionBackend::Cuda ||
+                        keyBackend == usdGen::UsdGenExecutionBackend::Vulkan;
                     captured.cache = std::move(result.cache);
                     captured.dependencies = recorder.Dependencies(*captured.desc);
                     packet.inputs.push_back(std::move(captured));

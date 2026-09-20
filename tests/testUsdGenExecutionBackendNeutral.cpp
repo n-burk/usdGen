@@ -52,11 +52,19 @@ int main()
 
     auto const contract = GetUsdGenExecutionBackendContract(
         UsdGenExecutionBackend::Vulkan);
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    if (!contract.IsValid() || contract.deviceBackend != UsdGenDeviceBackend::Vulkan ||
+        !contract.Available() || contract.capabilityVersion != 1) {
+        std::fprintf(stderr, "neutral backend contract check failed\n");
+        return 1;
+    }
+#else
     if (!contract.IsValid() || contract.deviceBackend != UsdGenDeviceBackend::Vulkan ||
         contract.Available()) {
         std::fprintf(stderr, "neutral backend contract check failed\n");
         return 1;
     }
+#endif
     std::puts("testUsdGenExecutionBackendNeutral: PASS");
     return 0;
 }

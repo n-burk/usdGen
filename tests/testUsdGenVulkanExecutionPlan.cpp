@@ -169,7 +169,11 @@ int main() {
     auto handle = CompileVulkanSourceWidthPlan(desc, &diagnostics);
     CHECK(handle && !diagnostics.HasErrors());
     CHECK(handle->Backend() == UsdGenExecutionBackend::Vulkan);
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    CHECK(GetUsdGenExecutionBackendContract(UsdGenExecutionBackend::Vulkan).Available());
+#else
     CHECK(!GetUsdGenExecutionBackendContract(UsdGenExecutionBackend::Vulkan).Available());
+#endif
 
     auto plan = std::static_pointer_cast<const VulkanSourceWidthPlan>(handle->Payload());
     CHECK(plan && plan->Descriptor() && plan->Descriptor().get() != &desc);
@@ -1266,13 +1270,18 @@ int main() {
     }
     CHECK(!std::static_pointer_cast<const VulkanSourceWidthPlan>(handle->Payload())->HasRootBindings());
 
-    // Session injection builds the same routing graph without making the
-    // process-wide Vulkan route available and without evaluating geometry.
+    // Session injection builds the same routing graph without evaluating
+    // geometry. Without the runtime the process-wide Vulkan route stays
+    // unavailable; with it, direct compilation validates like CUDA.
     UsdGenCompiler compiler;
     UsdGenGraph graph;
     std::shared_ptr<const UsdGenExecutionPlanHandle> injected;
     auto input = MakeDesc();
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    CHECK(compiler.Compile(input, &graph).ok);
+#else
     CHECK(!compiler.Compile(input, &graph).ok);
+#endif
     unsigned calls = 0;
     auto compile = [&](UsdGenGraphDesc const& exact, UsdGenDiagnostics* messages) {
         ++calls;
@@ -1298,7 +1307,11 @@ int main() {
     rejected.executionBackend = UsdGenExecutionBackend::CpuReference;
     CHECK(!compiler.CompileInjectedDevice(rejected, &graph, compile, &injected).ok);
     CHECK(!compiler.CompileInjectedDevice(input, &graph, {}, &injected).ok);
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    CHECK(compiler.Compile(input, &graph).ok);
+#else
     CHECK(!compiler.Compile(input, &graph).ok);
+#endif
     CHECK(injected == retained && graph.NodeCount() == 2);
     return 0;
 }

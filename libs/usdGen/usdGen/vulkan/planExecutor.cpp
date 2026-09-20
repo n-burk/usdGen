@@ -141,6 +141,7 @@ struct Relay final : std::enable_shared_from_this<Relay> {
             jobInfo.nativeJob.widthBlendPipeline = executor->createInfo().widthBlendPipeline;
             jobInfo.nativeJob.nonWidthComparePipeline = executor->createInfo().nonWidthComparePipeline;
             jobInfo.nativeJob.noisePipeline = executor->createInfo().noisePipeline;
+            jobInfo.nativeJob.deformPipeline = executor->createInfo().deformPipeline;
             if (plan->HasLength()) {
                 jobInfo.nativeJob.lengthPipeline = executor->createInfo().lengthPipeline;
                 jobInfo.nativeJob.lengthCompactionPipeline = executor->createInfo().lengthCompactionPipeline;
@@ -289,6 +290,18 @@ bool VulkanPlanExecutor::Submit(std::shared_ptr<const VulkanSourceWidthPlan> pla
              !std::isfinite(stage.noise.gain) || stage.noise.gain < 0 || stage.noise.gain > 1 ||
              !std::isfinite(stage.noise.preserveLength) || stage.noise.preserveLength < 0 || stage.noise.preserveLength > 1 ||
              !std::isfinite(stage.noise.mask) || stage.noise.mask < 0 || stage.noise.mask > 1)) return false;
+        if (stage.kind == VulkanSourceWidthStage::Kind::Deform) {
+            if (!info_.deformPipeline || info_.deformPipeline->context() != request.context) return false;
+            if (stage.deform.sampleCount < 4 || stage.deform.sampleCount > 100) return false;
+            size_t const n = size_t(stage.deform.sampleCount) * 3;
+            if (stage.deform.restSamples.size() != n || stage.deform.posedSamples.size() != n) return false;
+            if (stage.deform.rootTargets.size() % 3 != 0) return false;
+            for (float v : stage.deform.restSamples) if (!std::isfinite(v)) return false;
+            for (float v : stage.deform.posedSamples) if (!std::isfinite(v)) return false;
+            for (float v : stage.deform.rootTargets) if (!std::isfinite(v)) return false;
+            if (!std::isfinite(stage.deform.mask) || stage.deform.mask < 0 || stage.deform.mask > 1) return false;
+            if (!std::isfinite(stage.deform.groomEnvelope) || stage.deform.groomEnvelope < 0 || stage.deform.groomEnvelope > 1) return false;
+        }
     }
     // Admission is owner-only, as OperationLease is the domain's explicit
     // proof that Close cannot detach the queue while a return is outstanding.

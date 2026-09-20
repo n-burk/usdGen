@@ -3,6 +3,10 @@
 #include "usdGen/surfaceRootFrames.h"
 
 #include "usdGen/op.h"
+#include "usdGen/ops/rbfField.h"
+#include "pxr/base/gf/range3d.h"
+#include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3d.h"
 
 #include <algorithm>
 #include <cmath>
@@ -354,6 +358,116 @@ bool ValidateNoise(UsdGenNodeDesc const& node, VulkanLiteralNoiseControls* out, 
     return true;
 }
 
+// Barycentric (triangle) / bilinear (quad) interpolation of a surface face at
+// a UV coordinate — mirrors the CUDA GatherRoots kernel exactly.
+GfVec3f RootPosition(UsdGenSurfaceDesc const& surface, std::vector<uint32_t> const& faceStart,
+                     int faceIdx, GfVec2f const& uv) {
+    auto const& indices = surface.faceVertexIndices;
+    auto const& pts = surface.points;
+    uint32_t const base = faceStart[faceIdx];
+    int const n = surface.faceVertexCounts[faceIdx];
+    auto P = [&](int j) { return GfVec3f(pts[indices[base + j]]); };
+    float const u = uv[0], v = uv[1];
+    if (n == 3) {
+        GfVec3f const a = P(0), b = P(1), c = P(2);
+        return a * (1.0f - u - v) + b * (u * (1.0f - v)) + c * (v);
+    }
+    GfVec3f const a = P(0), b = P(1), c = P(2), d = P(3);
+    float const u0 = 1.0f - u, v0 = 1.0f - v;
+    return a * (u0 * v0) + b * (u * v0) + c * (u * v) + d * (u0 * v);
+}
+
+bool ValidateDeform(UsdGenGraphDesc const& desc, UsdGenNodeDesc const& node,
+                    UsdGenCurveSetDesc const* source, VulkanDeformControls* out,
+                    UsdGenDiagnostics* diagnostics) {
+    if (!source || node.surfaces.size() != 1 ||
+        !node.references.empty() || !node.curves.empty() ||
+        !node.maps.empty() || !node.mapBindings.empty() ||
+        !node.expressionBindings.empty() || !node.ramps.empty())
+        return Fail(diagnostics, "Deform requires one pose surface and no references/maps/expressions");
+    std::set<TfToken> seen;
+    int budget = 100;
+    for (auto const& param : node.params) {
+        if (param.animated) return Fail(diagnostics, "Deform requires non-animated literal controls");
+        if (!seen.insert(param.name).second) return Fail(diagnostics, "duplicate Deform parameter " + param.name.GetString());
+        auto const& name = param.name.GetString();
+        if (name == "rbfSamples") {
+            if (!param.value.IsHolding<int>()) return Fail(diagnostics, "Deform rbfSamples must be an int literal");
+            budget = param.value.UncheckedGet<int>();
+        } else if (name == "lockRoots") {
+            if (!param.value.IsHolding<bool>()) return Fail(diagnostics, "Deform lockRoots must be a bool literal");
+            out->lockRoots = param.value.UncheckedGet<bool>();
+        } else if (name == "mask") {
+            if (!ReadFloat(param, &out->mask) || out->mask < 0 || out->mask > 1)
+                return Fail(diagnostics, "Deform mask must be a finite [0,1] literal");
+        } else if (name == "groomEnvelope") {
+            if (!ReadFloat(param, &out->groomEnvelope) || out->groomEnvelope < 0 || out->groomEnvelope > 1)
+                return Fail(diagnostics, "Deform groomEnvelope must be a finite [0,1] literal");
+        } else if (name == "enabled") {
+            if (!param.value.IsHolding<bool>()) return Fail(diagnostics, "Deform enabled must be a bool literal");
+        } else {
+            return Fail(diagnostics, "unsupported Deform parameter " + name);
+        }
+    }
+    if (budget < 4 || budget > 100)
+        return Fail(diagnostics, "Deform rbfSamples must be in [4,100]");
+
+    UsdGenSurfaceDesc const* surface = nullptr;
+    for (auto const& item : desc.surfaces)
+        if (item.path == node.surfaces.front()) surface = &item;
+    if (!surface || surface->restPoints.empty() ||
+        surface->points.size() != surface->restPoints.size() ||
+        surface->faceVertexCounts.empty())
+        return Fail(diagnostics, "Deform pose surface is invalid");
+    if (!IsIdentity(source->worldMatrix) || !IsIdentity(surface->worldMatrix))
+        return Fail(diagnostics, "Deform requires identity source and surface transforms");
+
+    uint32_t const curveCount = uint32_t(source->curveVertexCounts.size());
+    if (source->skinPrim.size() != curveCount || source->skinPrimUv.size() != curveCount)
+        return Fail(diagnostics, "Deform requires root bindings for every curve");
+
+    // FPF on rest pose → chosen indices; pair with current pose.
+    size_t const nPts = surface->restPoints.size();
+    std::vector<GfVec3d> driverRest(nPts), driverNow(nPts);
+    GfRange3d extent;
+    for (size_t i = 0; i < nPts; ++i) {
+        driverRest[i] = GfVec3d(surface->restPoints[i]);
+        driverNow[i] = GfVec3d(surface->points[i]);
+        extent.UnionWith(driverRest[i]);
+    }
+    double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
+    auto chosen = usdGen::rbf::SelectSamples(driverRest, size_t(budget), std::max(1e-12, size * 1e-7));
+    if (chosen.size() < 4)
+        return Fail(diagnostics, "Deform pose surface has fewer than four spanning-3D samples for the RBF fit");
+    out->sampleCount = int(chosen.size());
+    out->restSamples.assign(3 * chosen.size(), 0.0f);
+    out->posedSamples.assign(3 * chosen.size(), 0.0f);
+    for (size_t k = 0; k < chosen.size(); ++k) {
+        out->restSamples[3*k]   = float(driverRest[chosen[k]][0]);
+        out->restSamples[3*k+1] = float(driverRest[chosen[k]][1]);
+        out->restSamples[3*k+2] = float(driverRest[chosen[k]][2]);
+        out->posedSamples[3*k]   = float(driverNow[chosen[k]][0]);
+        out->posedSamples[3*k+1] = float(driverNow[chosen[k]][1]);
+        out->posedSamples[3*k+2] = float(driverNow[chosen[k]][2]);
+    }
+
+    // Root targets: per-curve face+UV gather from the pose surface's current points.
+    std::vector<uint32_t> faceStart(surface->faceVertexCounts.size() + 1, 0);
+    for (size_t f = 0; f < surface->faceVertexCounts.size(); ++f)
+        faceStart[f + 1] = faceStart[f] + uint32_t(surface->faceVertexCounts[f]);
+    out->rootTargets.assign(3 * curveCount, 0.0f);
+    for (uint32_t c = 0; c < curveCount; ++c) {
+        int const faceIdx = source->skinPrim[c];
+        if (faceIdx < 0 || faceIdx >= int(surface->faceVertexCounts.size()))
+            return Fail(diagnostics, "Deform root binding references an invalid face");
+        GfVec3f pos = RootPosition(*surface, faceStart, faceIdx, source->skinPrimUv[c]);
+        out->rootTargets[3*c]   = pos[0];
+        out->rootTargets[3*c+1] = pos[1];
+        out->rootTargets[3*c+2] = pos[2];
+    }
+    return true;
+}
+
 bool Estimate(UsdGenCurveSetDesc const &source, bool rootBindings,
               uint64_t *bytes, uint64_t *widthBytes) {
     uint64_t points = source.points.size(), curves = source.curveVertexCounts.size(), total = 0, value = 0;
@@ -455,6 +569,7 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
     std::vector<size_t> authoredIndices;
     std::vector<bool> internalStages;
     bool hasBlend = false;
+    std::vector<bool> nodeIsDeform(desc.nodes.size(), false);
     size_t processedAuthored = 1;
     uint32_t syntheticPathOrdinal = 0;
     auto appendStage = [&](VulkanSourceWidthStage value, size_t authored,
@@ -523,6 +638,17 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
             if (inputs[ready].size() != 1 || !ValidateNoise(node, &stage.noise, diagnostics)) return {};
             if (!hasRootBindings) { Fail(diagnostics, "Noise requires a root-bound source"); return {}; }
             stage.disabled = !node.enabled;
+        } else if (node.type == TfToken("UsdGenDeform")) {
+            // Deform is topology-preserving: it must feed Width/WidthBlend and
+            // must not chain behind another Deform (CUDA leftLineageDeformed
+            // parity — a second rest-to-animated fit would apply surface motion
+            // twice).
+            stage.kind = VulkanSourceWidthStage::Kind::Deform;
+            if (inputs[ready].size() != 1 || nodeIsDeform[inputs[ready][0]] ||
+                !ValidateDeform(desc, node, source, &stage.deform, diagnostics))
+                return {};
+            stage.disabled = !node.enabled;
+            nodeIsDeform[ready] = true;
         } else { Fail(diagnostics, "unsupported Vulkan operator"); return {}; }
         if (stage.kind == VulkanSourceWidthStage::Kind::LengthScale &&
             stage.cullThreshold > 0.0f) {
@@ -572,7 +698,8 @@ std::shared_ptr<const UsdGenExecutionPlanHandle> CompileVulkanSourceWidthPlan(
     }
     if (authoredIndices.back() != terminalIndex || steps.back().kind == VulkanSourceWidthStage::Kind::LengthScale ||
         steps.back().kind == VulkanSourceWidthStage::Kind::LengthCull ||
-        steps.back().kind == VulkanSourceWidthStage::Kind::Noise) {
+        steps.back().kind == VulkanSourceWidthStage::Kind::Noise ||
+        steps.back().kind == VulkanSourceWidthStage::Kind::Deform) {
         Fail(diagnostics, "terminal must be Width or WidthBlend"); return {};
     }
     uint64_t bytes = 0, widthBytes = 0, pointBytes = 0, peak = 0;

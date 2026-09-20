@@ -1,6 +1,11 @@
 #include "usdGen/sessionBackendExecutor.h"
 
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+#include "usdGen/vulkan/defaultProvider.h"
+#endif
+
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace usdGen {
@@ -17,7 +22,13 @@ public:
 
     bool CanRoute(UsdGenExecutionBackend backend) const noexcept override {
         if (backend == UsdGenExecutionBackend::CpuReference) return true;
-        if (backend == UsdGenExecutionBackend::Vulkan) return bool(_provider);
+        if (backend == UsdGenExecutionBackend::Vulkan) {
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+            return true;
+#else
+            return bool(_provider);
+#endif
+        }
 #ifdef USDGEN_ENABLE_CUDA
         if (backend == UsdGenExecutionBackend::Cuda) return true;
 #endif
@@ -62,7 +73,46 @@ public:
 
             if (backend == UsdGenExecutionBackend::Vulkan) {
                 if (!request.runtime || !request.deviceReturnBinder)
-                    throw std::runtime_error("injected device Session executor has no runtime/return route");
+                    throw std::runtime_error("device Session executor has no runtime/return route");
+                auto provider = _provider;
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+                // An explicitly injected provider still wins (test seam and
+                // multi-Session sharing); otherwise lazily create and cache
+                // the production default. Submit runs on this executor's
+                // serial work lane, so the lazy assignment cannot race.
+                if (!provider) {
+                    if (!_defaultProvider && !_defaultProviderFailed) {
+                        std::string reason;
+                        _defaultProvider =
+                            vulkan::CreateDefaultVulkanSessionProvider(&reason);
+                        if (!_defaultProvider) {
+                            _defaultProviderFailed = true;
+                            _defaultProviderReason = std::move(reason);
+                        } else {
+                            _cooker.SetDeviceProvider(_defaultProvider);
+                        }
+                    }
+                    provider = _defaultProvider;
+                }
+                if (!provider) {
+                    // Fail closed with the precise no-device/bring-up reason
+                    // and retained previous; never run the CPU lane for a
+                    // Vulkan descriptor.
+                    std::string what =
+                        _defaultProviderReason.empty()
+                            ? "Vulkan device provider is unavailable"
+                            : _defaultProviderReason;
+                    auto generation = _cooker.FailDeviceUnavailable(
+                        std::move(request.previous),
+                        std::move(request.publishedStats),
+                        request.cancellation.epoch,
+                        "Vulkan execution backend factory is unavailable: " +
+                            what);
+                    if (request.completion)
+                        request.completion(std::move(generation), {});
+                    return;
+                }
+#endif
                 auto completion = request.completion;
                 _cooker.CookDeviceAsync(*request.runtime, request.cancellation,
                     std::move(request.desc), request.context,
@@ -70,7 +120,7 @@ public:
                     request.frame, request.reason, std::move(request.previous),
                     std::move(request.publishedStats), request.invalidateValues,
                     request.previousPublishedWorkerEpoch, request.callerDevice,
-                    _provider, std::move(request.deviceReturnBinder),
+                    provider, std::move(request.deviceReturnBinder),
                     std::move(completion), std::move(request.coalescedHooks));
                 return;
             }
@@ -110,11 +160,19 @@ public:
     }
 
     void Shutdown() noexcept override {
-        // The owner guarantees that every async CUDA completion has returned
-        // before this object is destroyed.  Coalesced followers are cancelled
-        // by Session before pipeline shutdown; silence a leftover registration
-        // without allowing a callback to reenter a dying command owner.
+        // The owner guarantees that every async device completion has
+        // returned before this object is destroyed. Coalesced followers are
+        // cancelled by Session before pipeline shutdown; silence a leftover
+        // registration without allowing a callback to reenter a dying
+        // command owner. The injected provider stays caller-owned; only the
+        // lazily created default is shut down here.
         _cooker.AbandonCoalesced(false);
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+        try {
+            if (_defaultProvider) _defaultProvider->Shutdown();
+        } catch (...) {}
+        _defaultProvider.reset();
+#endif
     }
 
     UsdGenSessionCooker &Cooker() noexcept override { return _cooker; }
@@ -123,6 +181,11 @@ public:
 private:
     UsdGenSessionCooker _cooker;
     std::shared_ptr<UsdGenSessionDeviceProvider> _provider;
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    std::shared_ptr<UsdGenSessionDeviceProvider> _defaultProvider;
+    bool _defaultProviderFailed = false;
+    std::string _defaultProviderReason;
+#endif
 };
 
 } // namespace

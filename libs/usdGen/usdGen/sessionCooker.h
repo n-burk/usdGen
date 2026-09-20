@@ -84,6 +84,13 @@ public:
         UsdGenStats, bool, uint64_t, int,
         std::shared_ptr<UsdGenSessionDeviceProvider>, DeviceReturnBinder,
         CudaCompletion, CoalescedHooks hooks = {});
+    // Terminal device-unavailable failure without running any lane. Resets
+    // diagnostics/stats from the published baseline, retains previous, and
+    // records the precise reason so the snapshot never shows stale errors.
+    // Called solely by the serial work owner.
+    UsdGenGenerationConstPtr FailDeviceUnavailable(
+        UsdGenGenerationConstPtr previous, UsdGenStats publishedStats,
+        uint64_t workEpoch, std::string const& error);
     UsdGenDirtyReport Report() const { return _lastReport; }
     UsdGenDiagnostics Diagnostics() const { return _lastDiagnostics; }
     UsdGenStats Stats() const { return _stats; }
@@ -145,7 +152,8 @@ private:
         std::shared_ptr<const UsdGenDeviceGeneration>,
         std::shared_ptr<UsdGenExecutionCacheDomain> const&,
         UsdGenExecutionCacheKey const&, double frame);
-    bool _SelectExecutionCacheDomain(UsdGenDeviceBackend, int32_t);
+    bool _SelectExecutionCacheDomain(UsdGenDeviceBackend, int32_t,
+                                     uint64_t contextIdentity = 0);
     bool _ObserveExecutionCacheDomainEpoch();
     void _BeginCoalesced(std::shared_ptr<UsdGenExecutionCacheDomain> const&,
                          UsdGenExecutionCacheKey const&, CoalescedHooks const&);

@@ -664,16 +664,20 @@ UsdGenSessionCooker::UsdGenSessionCooker(int threadLimit,
 UsdGenSessionCooker::~UsdGenSessionCooker() = default;
 
 bool UsdGenSessionCooker::_SelectExecutionCacheDomain(
-    UsdGenDeviceBackend backend, int32_t deviceIndex)
+    UsdGenDeviceBackend backend, int32_t deviceIndex, uint64_t contextIdentity)
 {
-    UsdGenExecutionCacheDomainKey key{backend, deviceIndex, 0};
+    UsdGenExecutionCacheDomainKey key{backend, deviceIndex, contextIdentity};
     auto selectedDomain = std::atomic_load(&_executionCacheDomain);
     if (selectedDomain) {
         auto const& selected = selectedDomain->Key();
         // contextIdentity is the adapter-owned stable identity of this
-        // domain. The cooker selects only backend/device and must preserve a
-        // nonzero identity supplied by an explicit Metal/Vulkan/CUDA owner.
-        if (selected.backend == backend && selected.deviceIndex == deviceIndex)
+        // domain. An explicit owner (DeviceSession) supplies it at
+        // construction and it must be preserved; a default Vulkan provider
+        // passes its own identity so each logical context gets a distinct
+        // domain instead of aliasing on backend/device alone.
+        if (selected.backend == backend &&
+            selected.deviceIndex == deviceIndex &&
+            selected.contextIdentity == contextIdentity)
             return true;
     }
     if (_cacheDomainExplicit) {
@@ -1255,7 +1259,8 @@ void UsdGenSessionCooker::CookDeviceAsync(UsdGenExecutionRuntime& runtime,
         completion(_store.Get(), {}); return;
     }
     _activeDeviceIdentity = identity;
-    if (!_SelectExecutionCacheDomain(identity.backend, identity.deviceIndex) ||
+    if (!_SelectExecutionCacheDomain(identity.backend, identity.deviceIndex,
+                                     identity.logicalContextIdentity) ||
         !_ObserveExecutionCacheDomainEpoch()) { completion(_store.Get(), {}); return; }
     auto domain = _executionCacheDomain;
     if (!domain || domain->Key().contextIdentity != identity.logicalContextIdentity) {
@@ -1377,6 +1382,27 @@ void UsdGenSessionCooker::CookDeviceAsync(UsdGenExecutionRuntime& runtime,
         _lastDiagnostics.Error("Vulkan device provider rejected owner admission");
         completion(_store.Get(), {});
     }
+}
+
+UsdGenGenerationConstPtr UsdGenSessionCooker::FailDeviceUnavailable(
+    UsdGenGenerationConstPtr previous, UsdGenStats publishedStats,
+    uint64_t workEpoch, std::string const& error)
+{
+    _coalescedRole = CoalescedRole::None;
+    _coalescedDomain.reset();
+    _hasCoalescedKey = false;
+    _coalescedRegistration.reset();
+    _cacheCandidate.reset();
+    _publicationFence.reset();
+    _acceptedDeviceIdentity.reset();
+    _activeDeviceIdentity.reset();
+    _stats = std::move(publishedStats);
+    _lastReport = UsdGenDirtyReport{};
+    _store = UsdGenGenerationStore(std::move(previous));
+    _lastDiagnostics = UsdGenDiagnostics{};
+    _lastDiagnostics.Error(error);
+    _lastCookedEpoch = workEpoch;
+    return _store.Get();
 }
 
 std::vector<UsdGenCudaBindingStats> UsdGenSessionCooker::CudaBindingStats() const {
@@ -1604,6 +1630,14 @@ UsdGenStats publishedStats, bool invalidateValues,
     if (!_Prepare(std::move(desc), context, devicePublicationEnabled, pending,
                   std::move(previous), std::move(publishedStats), invalidateValues,
                   previousPublishedWorkerEpoch)) return _store.Get();
+    if (_desc.executionBackend == UsdGenExecutionBackend::Vulkan) {
+        // The synchronous CPU lane must never execute a Vulkan descriptor:
+        // Vulkan always cooks through CookDeviceAsync with an injected or
+        // default provider. Fail closed with the retained previous.
+        _lastDiagnostics.Error(
+            "Vulkan execution requires a Session device provider");
+        return _store.Get();
+    }
     phases.Phase("prepare");
 
     const uint64_t myReq = workEpoch;

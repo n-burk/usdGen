@@ -8,6 +8,7 @@
 #include "lengthScalePipeline.h"
 #include "lengthCompactionPipeline.h"
 #include "noisePipeline.h"
+#include "deformPipeline.h"
 #include "usdGen/curveBuffer.h"
 #include "usdGen/deviceGeneration.h"
 
@@ -135,6 +136,10 @@ public:
     static std::shared_ptr<const VulkanSourceGeneration> WithNoise(
         std::shared_ptr<const VulkanSourceGeneration> const&,
         NoisePipeline::Candidate const&, uint64_t newValueVersion,
+        std::string* reason = nullptr);
+    static std::shared_ptr<const VulkanSourceGeneration> WithDeform(
+        std::shared_ptr<const VulkanSourceGeneration> const&,
+        DeformPipeline::Candidate const&, uint64_t newValueVersion,
         std::string* reason = nullptr);
     static std::shared_ptr<const VulkanSourceGeneration> WithCompacted(
         std::shared_ptr<const VulkanSourceGeneration> const&,

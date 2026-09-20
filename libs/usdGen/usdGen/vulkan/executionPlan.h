@@ -5,6 +5,7 @@
 #include "usdGen/executionBackend.h"
 
 #include <memory>
+#include <vector>
 
 namespace usdGen::vulkan {
 
@@ -26,9 +27,21 @@ struct VulkanLiteralNoiseControls {
     int32_t seed = 0;
     bool cumulative = false;
 };
+// RBF Deform is a topology-preserving points rewrite. Samples (rest + posed)
+// are the host-side fixed-point fit (SelectSamples + CubicField::Bind/Solve)
+// frozen at plan compile; the pipeline only applies displacement at runtime.
+struct VulkanDeformControls {
+    std::vector<float> restSamples;  // 3*sampleCount, desc space
+    std::vector<float> posedSamples; // 3*sampleCount, desc space
+    std::vector<float> rootTargets;  // 3*curveCount, desc space
+    int sampleCount = 0;             // [4,100]
+    float mask = 1.0f;
+    float groomEnvelope = 1.0f;
+    bool lockRoots = true;
+};
 
 struct VulkanSourceWidthStage {
-    enum class Kind { Width, LengthScale, WidthBlend, LengthCull, Noise };
+    enum class Kind { Width, LengthScale, WidthBlend, LengthCull, Noise, Deform };
     enum class LengthMode : uint32_t { Scale = 0, Set = 1 };
     enum class LengthMethod : uint32_t { Scale = 0, CutExtend = 1 };
     enum class LengthRebuild : uint32_t { KeepParam = 0, Reparam = 1 };
@@ -55,6 +68,7 @@ struct VulkanSourceWidthStage {
     bool requiresNonWidthProof = false;
     float cullThreshold = 0.0f;
     VulkanLiteralNoiseControls noise;
+    VulkanDeformControls deform;
 };
 
 // All source options admitted by this compiler.  These are copied out for a

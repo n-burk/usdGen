@@ -4,7 +4,7 @@
 // Stage-free key (plan 13 §7): a nonempty usdGen:sessionId explicitly
 // shares a CPU groom session across renderer chains. Device/GL publication
 // sets rendererLocal, retaining the renderer instance in the key because its
-// CUDA/GL resources cannot be shared across registries. Without an id, every
+// CUDA/Vulkan/GL resources cannot be shared across registries. Without an id, every
 // groom is scoped to its render instance. No stage registry is consulted.
 //
 // The store holds the session alive (strong refs); scene indices hold weak
@@ -39,8 +39,8 @@ struct UsdGenSessionKey
     std::string     sessionId;  // explicit cross-renderer sharing identity
     SdfPath         groomRoot;  // the UsdGenGroom prim path this session serves
     uint64_t        renderInstanceId = 0; // used only without sessionId
-    // CUDA/GL device generations own renderer-registry resources and must
-    // never cross a renderer boundary, even when an authored sessionId would
+    // CUDA/Vulkan/GL device generations own renderer-registry resources and
+    // must never cross a renderer boundary, even when an authored sessionId would
     // otherwise request CPU session sharing. Appended for aggregate callers.
     bool            rendererLocal = false;
 
