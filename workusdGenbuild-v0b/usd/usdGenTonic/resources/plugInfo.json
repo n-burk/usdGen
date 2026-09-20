@@ -1,0 +1,27 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "UsdGenTonicSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "usdGen tonic authoring",
+                        "loadWithRenderer": "",
+                        "priority": 0,
+                        "tags": ["usdGen:tonic"],
+                        "ordering": {
+                            "after": ["usdGen:groom"],
+                            "before": ["hdGp:proceduralResolution",
+                                       "hdPrman:motionBlur"]
+                        }
+                    }
+                }
+            },
+            "LibraryPath": "../../usdGenTonic.dll",
+            "Name": "usdGenTonic",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

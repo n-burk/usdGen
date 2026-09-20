@@ -8,6 +8,12 @@ param(
     # It can also be changed in the usdGen > Viewport Supersampling menu.
     [ValidateRange(1, 8)]
     [int] $Supersample = 0,
+    # Run the prefix's testusdview on this script instead of opening
+    # usdview interactively. The environment is the same either way,
+    # which is the point: the T3 tonic scripts and the workspace
+    # screenshot need exactly the plugin, python and DLL paths this
+    # launcher already assembles.
+    [string] $TestScript = "",
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $UsdviewArgs
 )
@@ -40,6 +46,8 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenImaging\resources"),
     (Join-Path $Build "usd\usdGenShaders\resources"),
     (Join-Path $Build "usd\usdGenTools\resources"),
+    (Join-Path $Build "usd\usdGenTonic\resources"),
+    (Join-Path $Build "usd\usdGenTonicTools\resources"),
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")
 ) | Where-Object { Test-Path $_ }
@@ -94,24 +102,31 @@ $pythonDirs = @(
 $env:PYTHONPATH = ($pythonDirs -join ';') +
     $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })
 
-# The prefix's own usdview comes first in either form it ships: the
+# The prefix's own viewer comes first in either form it ships: the
 # extensionless python script (what usd-install has, and what the usdRig
 # launchers run through PY) or a native/wrapper executable.
+$viewer = if ($TestScript) { "testusdview" } else { "usdview" }
+if ($TestScript) {
+    if (-not (Test-Path $TestScript)) {
+        throw "No such test script: '$TestScript'."
+    }
+    $UsdviewArgs = @("--testScript", (Resolve-Path $TestScript).Path) + $UsdviewArgs
+}
 $candidates = @(
-    (Join-Path $UsdInstallDir "bin\usdview"),
-    (Join-Path $UsdInstallDir "bin\usdview.py"),
-    (Join-Path $UsdInstallDir "bin\usdview.exe"),
-    (Join-Path $UsdInstallDir "bin\usdview.cmd"),
-    (Join-Path $UsdInstallDir "bin\usdview.bat")
+    (Join-Path $UsdInstallDir "bin\$viewer"),
+    (Join-Path $UsdInstallDir "bin\$viewer.py"),
+    (Join-Path $UsdInstallDir "bin\$viewer.exe"),
+    (Join-Path $UsdInstallDir "bin\$viewer.cmd"),
+    (Join-Path $UsdInstallDir "bin\$viewer.bat")
 ) | Where-Object { Test-Path $_ }
 
-$command = Get-Command usdview -ErrorAction SilentlyContinue | Select-Object -First 1
+$command = Get-Command $viewer -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($candidates.Count -gt 0) {
     $usdview = $candidates[0]
 } elseif ($command) {
     $usdview = $command.Source
 } else {
-    throw "usdview is not installed in '$UsdInstallDir' and is not on PATH. That prefix was built without Python/usdview; point USD at an OpenUSD build that has it, then launch this shortcut again."
+    throw "$viewer is not installed in '$UsdInstallDir' and is not on PATH. That prefix was built without Python/usdview; point USD at an OpenUSD build that has it, then launch this shortcut again."
 }
 
 # A script has to be handed to an interpreter; only an .exe/.cmd/.bat runs on

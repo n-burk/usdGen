@@ -403,6 +403,73 @@ int main(int argc, char **argv)
     WaitOrAbort([&] { return commitDone.load(); },
                 "empty-registry CommitAsync completion runs");
 
+    // -- cook cancellation token (plan/17 §3.2 rule 2, plan/18 §7 G7) -----
+    //
+    // An authoring tool whose newer edit has invalidated a cook bumps the
+    // token; a request accepted before the bump is dropped as Superseded on
+    // the owner, without reaching the engine. A request accepted after it
+    // runs normally, so cancelling is not a latch.
+    {
+        UsdGenSessionKey const cookKey = Key(11);
+        auto cooking = store.Attach(cookKey);
+        Check(bool(cooking), "cook-token session attaches");
+        if (cooking) {
+            Check(cooking->CookToken() == 0, "the token starts at 0");
+            Check(cooking->CancelCooks() == 1, "CancelCooks returns the new token");
+            Check(cooking->CookToken() == 1, "and the session reports it");
+
+            // Stale: stamped under token 0, accepted after the bump above.
+            std::atomic<bool> staleDone{false};
+            std::atomic<int> staleOutcome{-1};
+            UsdGenImagingSession::CommitRequest stale;
+            stale.reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
+            stale.desc = std::make_shared<const usdGen::UsdGenGraphDesc>(
+                MakeFrameProbe());
+            stale.cookToken = 0;
+            Check(cooking->CommitAsync(stale,
+                      [&](UsdGenImagingSession::CommitPayload const &payload,
+                          usdGen::UsdGenExecutionPipeline::Outcome outcome) {
+                          staleOutcome = int(outcome);
+                          staleDone = !payload.published;
+                      }),
+                  "a stale-token commit is still accepted");
+            WaitOrAbort([&] { return staleDone.load(); },
+                        "the stale cook completes without publishing");
+            Check(staleOutcome ==
+                      int(usdGen::UsdGenExecutionPipeline::Outcome::Superseded),
+                  "the stale cook is abandoned as Superseded");
+
+            // Fresh: no stamp, so CommitAsync stamps the current token.
+            std::atomic<bool> freshDone{false};
+            std::atomic<bool> freshPublished{false};
+            UsdGenImagingSession::CommitRequest fresh;
+            fresh.reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
+            fresh.desc = std::make_shared<const usdGen::UsdGenGraphDesc>(
+                MakeFrameProbe());
+            Check(cooking->CommitAsync(fresh,
+                      [&](UsdGenImagingSession::CommitPayload const &payload,
+                          usdGen::UsdGenExecutionPipeline::Outcome) {
+                          freshPublished = payload.published;
+                          freshDone = true;
+                      }),
+                  "a fresh commit is accepted after the cancel");
+            WaitOrAbort([&] { return freshDone.load(); },
+                        "the fresh cook completes");
+            Check(freshPublished.load(),
+                  "cancelling does not latch: the next cook publishes");
+
+            // Store-level: only the sessions rooted at the named groom move.
+            uint64_t const before = cooking->CookToken();
+            Check(store.CancelCooks(SdfPath("/__someOtherGroom")) == 0 &&
+                      cooking->CookToken() == before,
+                  "the store cancels by groom root, not wholesale");
+            Check(store.CancelCooks(SdfPath("/__storeOwner")) >= 1 &&
+                      cooking->CookToken() == before + 1,
+                  "the store cancels every session under the groom root");
+        }
+        store.Detach(cookKey);
+    }
+
     std::printf("testUsdGenSessionStoreOwner: %s\n",
                 failures ? "FAILED" : "PASS");
     return failures ? 1 : 0;

@@ -230,3 +230,28 @@ def Shader "UsdGenHairStrandsTranslucent" (
         sdrMetadata = { string renderType = "terminal surface" }
     )
 }
+
+# The Tonic tube look (plan/17 section 4.4, P3). NOT part of the C5 freeze,
+# which covers the `inputs:` block of the three UsdGenHairPreview* defs
+# above and nothing else. UsdGenTonicSceneIndex binds it by identifier on
+# the tube meshes it publishes under /__usdGenTonic.
+def Shader "UsdGenTonicTube" (
+    doc = "Tonic tube surface: per-clump colour, eye-space key/fill shading, selection fresnel rim, x-ray for non-focused levels."
+    sdrMetadata = { string primvars = "clumpColor|selected|xray" }
+)
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:glslfx:sourceAsset = @./tonicTube.glslfx@
+    color3f inputs:selectedColor = (1, 0.85, 0.35)
+    float inputs:rimGain = 1
+    float inputs:specGain = 0.25
+    float inputs:specPower = 8
+    float inputs:ambient = 0.14
+    float inputs:keyGain = 0.8
+    float inputs:fillGain = 0.22
+    float inputs:opacity = 1
+    float inputs:unlit = 0
+    token outputs:surface (
+        sdrMetadata = { string renderType = "terminal surface" }
+    )
+}

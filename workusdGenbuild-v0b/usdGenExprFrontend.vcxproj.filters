@@ -1,0 +1,67 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\Context.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ContextUtils.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\Curve.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprBuiltins.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprEnv.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprFunc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprFuncStandard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprFuncX.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprMultiExpr.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprNode.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\ExprWalker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\Expression.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\Interpreter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\Noise.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\Platform.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\SeContext.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\generated\ExprParser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="D:\work\usdGen\thirdparty\seexprFrontend\SeExpr2\generated\ExprParserLex.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\work\usdGen\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{BF3C9E50-738A-36A9-9AB6-F9BDD2D0D7DD}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

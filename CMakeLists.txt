@@ -445,6 +445,31 @@ set_target_properties(usdGenImaging PROPERTIES
 # testing.md §4.4 alternative).
 
 # ---------------------------------------------------------------------------
+# usdGenTonic (SHARED — plan/17 Tonic authoring model + scene index, P0)
+#
+# TonicModel, the tonicApi C ABI, the host-staged transport, the selection
+# and overlay state (tonicSelection.cpp, tonicGizmo.cpp: plan/18 V1), the
+# UsdGenTonicSceneIndexPlugin/SceneIndex (libs/usdGenTonic/usdGenTonic/,
+# imaging under imaging/) and the P1 TonicCommitter (tonicCommit.cpp, the
+# only TU that touches usd, for hydrate and Save groom; gate B-1 stays true
+# for usdGen itself). Links usdGen only for the gpu/ primitives
+# (DeviceBuffer, execution resources). The CUDA kernel (tonicKernels.cu)
+# joins below in the USDGEN_ENABLE_CUDA branch, next to the usdGenGpu wiring.
+# ---------------------------------------------------------------------------
+file(GLOB_RECURSE USDGEN_TONIC_SOURCES libs/usdGenTonic/*.cpp)
+list(FILTER USDGEN_TONIC_SOURCES EXCLUDE REGEX "\\.cu$")
+add_library(usdGenTonic SHARED ${USDGEN_TONIC_SOURCES})
+target_include_directories(usdGenTonic PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGenTonic>
+    $<INSTALL_INTERFACE:include>)
+target_link_libraries(usdGenTonic
+    PUBLIC hd sdf tf gf vt
+    PRIVATE usd usdGeom hio usdGen usdGen_ptex usdGenImaging)
+set_target_properties(usdGenTonic PROPERTIES
+    CXX_VISIBILITY_PRESET default
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
+# ---------------------------------------------------------------------------
 # usdGenTestUtils (STATIC, T0 — no Hydra)
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE USDGEN_TESTUTILS_SOURCES testutils/usdGenTestUtils/*.cpp)
@@ -576,6 +601,41 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/expressions"
     DESTINATION "${_usdgen_tools_resources}"
     FILES_MATCHING PATTERN "*.se")
+
+# ---------------------------------------------------------------------------
+# usdGenTonic scene-index plugin resources + usdGenTonicTools usdview plugin
+# (plan/17 P0). The scene index registers through build-tree plugInfo like
+# the groom index; the Python shelf stages into build/python like usdGenTools.
+# ---------------------------------------------------------------------------
+set(_usdgen_tonic_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenTonic/resources")
+set(_usdgen_tonic_pluginfo "${_usdgen_tonic_resources}/plugInfo.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonic/resources/plugInfo.json.in")
+file(READ
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonic/resources/plugInfo.json.in"
+    _usdgen_tonic_pluginfo_content)
+file(GENERATE OUTPUT "${_usdgen_tonic_pluginfo}"
+    CONTENT "${_usdgen_tonic_pluginfo_content}")
+
+set(_usdgen_tonic_tools_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenTonicTools/resources")
+# CONFIGURE_DEPENDS: the package is staged by file(COPY) at CONFIGURE time,
+# and the CMAKE_CONFIGURE_DEPENDS list below is this glob's result from the
+# PREVIOUS configure -- so editing an existing module re-stages, but adding
+# a module never does, and the tests keep importing a package without it.
+# That cost V4 and V5 a false T3 failure each; the flag re-evaluates the
+# glob at build time and re-configures when the file set changes.
+file(GLOB_RECURSE _usdgen_tonic_tools_python CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/python/*.py")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/resources/plugInfo.json"
+    ${_usdgen_tonic_tools_python})
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/resources/plugInfo.json"
+    DESTINATION "${_usdgen_tonic_tools_resources}")
+file(COPY
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/python/usdGenTonicTools"
+    DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/python"
+    FILES_MATCHING PATTERN "*.py")
 
 # ---------------------------------------------------------------------------
 # CUDA foundations and legacy optional GPU noise
@@ -719,6 +779,14 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
         target_link_libraries(usdGenImaging PUBLIC hdSt PRIVATE usdGenGpu hgiGL)
         set_target_properties(usdGenGpu PROPERTIES
             POSITION_INDEPENDENT_CODE ON CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}")
+        # Tonic CUDA lane (plan/17 P0): the tessellation kernel joins
+        # usdGenTonic, and the model/transport compile their device mirrors.
+        target_sources(usdGenTonic PRIVATE
+            libs/usdGenTonic/usdGenTonic/tonicKernels.cu)
+        target_compile_definitions(usdGenTonic PUBLIC USDGEN_TONIC_HAS_CUDA)
+        target_link_libraries(usdGenTonic PRIVATE usdGenGpu CUDA::cudart)
+        set_target_properties(usdGenTonic PROPERTIES
+            CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}")
     endif()
 endif()
 
@@ -1459,7 +1527,7 @@ add_test(NAME testUsdGenChainOrder COMMAND testUsdGenChainOrder)
 # the gate label belongs on the registration.
 usdgen_test_pluginpath_ops(_usdgen_chain_order_env
     "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
-    "${_fake_prman_resources}"
+    "${_usdgen_tonic_resources}" "${_fake_prman_resources}"
     "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
 # The loader path is applied to every test by the sweep at the end of this
 # block, so only the plugin search path is per-test here.
@@ -1830,6 +1898,109 @@ add_test(NAME testUsdGenToolsApi COMMAND testUsdGenToolsApi)
 set_tests_properties(testUsdGenToolsApi PROPERTIES
     LABELS "T1;tools;expressions" TIMEOUT 60)
 
+# usdGenTonic scene-index publication + C ABI (plan/17 section 6, plan/18
+# section 2.6). Portable T1s (no stage, no renderer, no Unix-only APIs): the
+# index test drives UsdGenTonicSceneIndex over an empty retained scene index
+# and asserts the registry join, the per-level publication and leaf-exact
+# dirties; the API test drives tonicApi.h, including the V0 registry and
+# level-display entries with no index attached.
+add_executable(testUsdGenTonicIndex tests/testUsdGenTonicIndex.cpp)
+target_link_libraries(testUsdGenTonicIndex PRIVATE usdGenTonic hd)
+add_test(NAME testUsdGenTonicIndex COMMAND testUsdGenTonicIndex)
+set_tests_properties(testUsdGenTonicIndex PROPERTIES
+    LABELS "T1;tonic" TIMEOUT 120)
+# The gate record_usd.ps1 relies on: with USDGENTONIC_TEST_TUBE=0 the
+# index constructs empty (no scaffolding in headless frames) and still
+# publishes the model's levels on Tonic_Activate.
+add_test(NAME testUsdGenTonicIndexNoTestTube
+    COMMAND testUsdGenTonicIndex --no-test-tube)
+set_tests_properties(testUsdGenTonicIndexNoTestTube PROPERTIES
+    ENVIRONMENT "USDGENTONIC_TEST_TUBE=0"
+    LABELS "T1;tonic" TIMEOUT 120)
+add_executable(testUsdGenTonicApi tests/testUsdGenTonicApi.cpp)
+target_link_libraries(testUsdGenTonicApi PRIVATE usdGenTonic)
+add_test(NAME testUsdGenTonicApi COMMAND testUsdGenTonicApi)
+set_tests_properties(testUsdGenTonicApi PROPERTIES
+    LABELS "T1;tonic" TIMEOUT 60)
+
+# usdGenTonic P1 (plan/17 section 6): the asynchronous commit pipeline -
+# worker layer builds, idle swaps, coalescing, cancellation,
+# no-swap-during-gesture, the partial-transfer fallback, hydrate round-trip,
+# the GuideInterpolate fill-in, Save groom, and gate TN-4 (reference-scale
+# swap <= 5 ms). Needs the schema plugin for the typed groom prims, so it
+# carries the same environment as every adapter-dependent T1 test.
+add_executable(testUsdGenTonicCommit tests/testUsdGenTonicCommit.cpp)
+target_link_libraries(testUsdGenTonicCommit PRIVATE usdGenTonic usdGenImaging usd usdGeom sdf)
+add_test(NAME testUsdGenTonicCommit COMMAND testUsdGenTonicCommit)
+set_tests_properties(testUsdGenTonicCommit PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
+    LABELS "T1;tonic;gate:TN-4" TIMEOUT 300
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+# P2 scalp graph + region bake (plan/17). T0: K1/K2/K3 CPU twins, G1 graph
+# ops, the model graph layer and the P2 C ABI (TN-6 parity runs inside when
+# the build has CUDA and the host has a device).
+add_executable(testUsdGenTonicGraph tests/testUsdGenTonicGraph.cpp)
+target_link_libraries(testUsdGenTonicGraph PRIVATE usdGenTonic)
+if(USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenTonicGraph PRIVATE CUDA::cudart)
+endif()
+add_test(NAME testUsdGenTonicGraph COMMAND testUsdGenTonicGraph)
+set_tests_properties(testUsdGenTonicGraph PROPERTIES
+    LABELS "T0;tonic" TIMEOUT 300)
+
+# P3 tubes + fill (plan/17). T0: K4/K5/K8-K11 CPU twins, the model tube/fill
+# layers, auto-tube, the P3 C ABI (TN-6 parity runs inside when the build
+# has CUDA and the host has a device).
+add_executable(testUsdGenTonicTubes tests/testUsdGenTonicTubes.cpp)
+target_link_libraries(testUsdGenTonicTubes PRIVATE usdGenTonic)
+if(USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenTonicTubes PRIVATE CUDA::cudart)
+endif()
+add_test(NAME testUsdGenTonicTubes COMMAND testUsdGenTonicTubes)
+set_tests_properties(testUsdGenTonicTubes PROPERTIES
+    LABELS "T0;tonic" TIMEOUT 300)
+
+# Kernel registry + per-move chain smoke (plan/17 section 8). T0: the section
+# 4.2 move chain on the CPU twins, determinism, P4 param validation, the
+# K6/K7/K14 twins, and the TN-6 parity of every hierarchy device lane over
+# the section 7 reference fanout. A CUDA build with no device runs the CPU
+# half and then exits 77: TN-6 is what this test is for, so an unprovable
+# run reports SKIPPED rather than passing quietly. A CPU-only build makes no
+# parity claim and exits 0.
+add_executable(testUsdGenTonicKernels tests/testUsdGenTonicKernels.cpp)
+target_link_libraries(testUsdGenTonicKernels PRIVATE usdGenTonic)
+if(USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenTonicKernels PRIVATE CUDA::cudart)
+endif()
+add_test(NAME testUsdGenTonicKernels COMMAND testUsdGenTonicKernels)
+set_tests_properties(testUsdGenTonicKernels PROPERTIES
+    LABELS "T0;tonic" TIMEOUT 300
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+# P4 hierarchy core (plan/17 section 8). T0: K14 subdivide/merge (Hausdorff
+# union bar, bit-exact round-trip via the persistent-parent hint,
+# determinism, edge mode) + K7 averaging (idempotence, propagation).
+add_executable(testUsdGenTonicHierarchy tests/testUsdGenTonicHierarchy.cpp)
+target_link_libraries(testUsdGenTonicHierarchy PRIVATE usdGenTonic)
+if(USDGEN_ENABLE_CUDA)
+    target_link_libraries(testUsdGenTonicHierarchy PRIVATE CUDA::cudart)
+endif()
+add_test(NAME testUsdGenTonicHierarchy COMMAND testUsdGenTonicHierarchy)
+set_tests_properties(testUsdGenTonicHierarchy PROPERTIES
+    LABELS "T0;tonic" TIMEOUT 300)
+
+# T1: the versioned .ptx through the real ptex() expression (per-strand
+# equality with the live primvar), the bake worker, the swap, and the
+# graph/primvar/map commit round-trip.
+add_executable(testUsdGenTonicRegionBake tests/testUsdGenTonicRegionBake.cpp)
+target_link_libraries(testUsdGenTonicRegionBake PRIVATE
+    usdGenTonic usdGen usdGen_ptex usd sdf usdGeom)
+add_test(NAME testUsdGenTonicRegionBake COMMAND testUsdGenTonicRegionBake)
+set_tests_properties(testUsdGenTonicRegionBake PROPERTIES
+    LABELS "T1;tonic" TIMEOUT 600)
+
+
 # usdGenTools SeExpr editor: drives usdview through testusdview against the
 # expression example. Needs the prefix's usdview (a Python script) and a
 # python that imports its pxr, so it registers only where both exist, and it
@@ -1869,6 +2040,174 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
 endif()
 
+# Graph mode under testusdview. T3: opens a window, needs the staged
+# usdGenTonicTools package (same build/python) and the usdGenTonic DLL
+# (USDGENTONIC_DLL, defaulting to the build tree).
+#
+# testUsdviewTonicGraph drives REAL mouse and key events over the StageView
+# through the V2 viewport controller (plan/18 V2 exit). The ABI-level
+# scripts beside it -- testTonicAbi* -- call the C entry points directly and
+# never open the tool; they keep their coverage under an honest name
+# (plan/18 section 4 "T3"), and the modes whose loops land in V4/V5 have
+# only the ABI script until then.
+if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
+    add_test(NAME testUsdviewTonicGraph
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicGraph.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    usdgen_test_pluginpath_ops(_usdgen_tonic_plugin_env
+        "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
+        "${_usdgen_shader_resources}"
+        "${_usdgen_tonic_resources}" "${_usdgen_tonic_tools_resources}"
+        "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    usdgen_test_path_list_ops(_usdgen_tonic_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_BINARY_DIR}/python")
+    set_tests_properties(testUsdviewTonicGraph PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # The graph model through the C ABI: two adjoining regions, welded, with
+    # the shared boundary checked (plan/17 P2 exit). No viewport.
+    add_test(NAME testTonicAbiGraph
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicAbiGraph.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testTonicAbiGraph PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # P3 Tube+Fill modes through the C ABI (same stage + environment).
+    add_test(NAME testTonicAbiTube
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicAbiTube.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testTonicAbiTube PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # P4 Hierarchy walk L1 -> L3 and back (Part B self-skips until the P4 C
+    # entries land, then runs strict).
+    add_test(NAME testTonicAbiLevels
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicAbiLevels.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testTonicAbiLevels PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TN-1/TN-2 probes + TN-3/TN-4/TN-7 skip-harness (plan/17 section 7 stub).
+    add_test(NAME testUsdviewTonicPerf
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicPerf.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicPerf PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # V0 publication (plan/18 section 2.1/2.2 exit): one model created
+    # through the C ABI, edited, activated and published, then asserted
+    # against what Hydra ended up with -- the tubes/L1 and tubes/L2 prims
+    # exist with the face counts the model's census predicts, and a pick
+    # over the viewport hits them.
+    add_test(NAME testUsdviewTonicPublish
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicPublish.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicPublish PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # V5 Hierarchy mode through REAL mouse and key events (plan/18 V5
+    # exit): select, Shift+D, Ctrl+Down/Up, Shift+M, Ctrl+Z, asserted
+    # against what the scene index published per level.
+    add_test(NAME testUsdviewTonicLevels
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicLevels.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicLevels PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # V5 Sculpt mode: the brush ring under a real cursor, a real grab
+    # stroke that keeps its arc length, and Escape restoring bit-exactly.
+    add_test(NAME testUsdviewTonicSculpt
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicSculpt.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicSculpt PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # V4 Tube + Fill through the real controller (plan/18 V4 exit): a real
+    # stroke leaves a tube stub behind it (G14), a real click selects a
+    # center CV and a real drag moves the published centers, Ctrl+Z puts
+    # them back, the Fill panel's density reaches the guides, and TN-1 is
+    # re-measured over 50 real mouse moves.
+    add_test(NAME testUsdviewTonicTube
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicTube.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicTube PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TN-3 pick accuracy: K11 vs StageView.pick at 100 pixels (P6 exit).
+    add_test(NAME testUsdviewTonicPick
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicPick.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicPick PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TN-7 bake isolation (plan/17 section 7): the TN-1 drag re-measured
+    # with a full bake of the REFERENCE SCALP in flight, on the reference
+    # scene rather than the 4x4 test scalp -- the point of the gate is
+    # that a real bake's worker thread and lowest-priority CUDA stream
+    # take nothing from the gesture. The script proves the bake was still
+    # running when the drag ended, so a bake that finished early fails
+    # instead of passing vacuously.
+    add_test(NAME testUsdviewTonicBakeIsolation
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicBakeIsolation.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-reference.usda")
+    set_tests_properties(testUsdviewTonicBakeIsolation PROPERTIES
+        LABELS "T3;tonic;tools;usdview;gate:TN-7" TIMEOUT 600
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TN-5 through the REAL controller (plan/18 V7): 30 minutes of QtTest
+    # mouse and key gestures across every mode. T4 like its ABI sibling --
+    # a wall-clock test, run with `ctest -L T4`, never by the default
+    # suite (`ctest -R Tonic -LE T4`).
+    add_test(NAME testTonicSoakController
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicSoakController.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testTonicSoakController PROPERTIES
+        LABELS "T4;tonic;tools;usdview;gate:TN-5" TIMEOUT 2400
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT "USDGENTONIC_SOAK_MINUTES=30;USDGENTONIC_SOAK_SEED=7"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+endif()
+
+# Tonic render goldens (plan/18 section 4 "Image", G15). Headless like
+# testUsdGenStormLook -- bin/record_tonic.py makes its own offscreen GL
+# context -- but unlike usdrecord it hydrates the committed groom into a
+# live TonicModel first, so the tubes, level colours, center curves and
+# CV dots the scene index publishes are in the frame. Same plugin path
+# and PYTHONPATH as the T3 scripts, plus the DLL directory.
+if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
+    add_test(NAME testTonicGolden
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicGolden.py")
+    set_tests_properties(testTonicGolden PROPERTIES
+        LABELS "T2;tonic;tools;golden" TIMEOUT 900
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+endif()
+
 # The Qt-free half of the same plugin -- the ctypes binding, the text helpers
 # behind the literal controls, and the connection authoring -- runs in a plain
 # python process, so it is a T1 and needs no usdview. It shares the editor
@@ -1889,6 +2228,179 @@ if(_usdgen_test_python)
         LABELS "T1;tools;expressions" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+endif()
+
+# The Qt-free half of usdGenTonicTools -- modes, tool state, math kernels --
+# runs in a plain python process (numpy only), so it is a T1 and needs no
+# usdview. It shares the expression tests' interpreter.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsMath
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsMath.py")
+    set_tests_properties(testUsdGenTonicToolsMath PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free Graph-mode half -- stroke kernels, snap conversion, HUD text,
+# sub-modes -- runs in the same plain interpreter.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsGraph
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsGraph.py")
+    set_tests_properties(testUsdGenTonicToolsGraph PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free half of the V2 viewport controller -- camera projection, the
+# plan/18 section 3.4 key table, the gizmo state machine, and GraphLoop
+# driven over a fake session that records every C call. No pxr, no DLL, no
+# numpy, so it runs in the barest interpreter of the lot.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsLoops
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsLoops.py")
+    set_tests_properties(testUsdGenTonicToolsLoops PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free half of the V4 loops (plan/18 V4): TubeLoop and FillLoop over
+# a fake session -- the pick-once contract, one undo bracket per drag, the
+# world-delta-to-section-chart conversion, the soft-selection anchor rule,
+# and Fill's preview/full density contract. Same bare interpreter.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsLoopsTube
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsLoopsTube.py")
+    set_tests_properties(testUsdGenTonicToolsLoopsTube PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free half of the V5 loops (plan/18 V5): HierarchyLoop's actions and
+# their undo brackets, the drawn-edge subdivide, SculptLoop's one shaped
+# stroke per move, and the fallback ladder stepped on synthetic timings.
+# Same bare interpreter as its V2 sibling, whose recording fakes it reuses.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsLoopsHier
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsLoopsHier.py")
+    set_tests_properties(testUsdGenTonicToolsLoopsHier PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The TN-5 soak (plan/17 section 7): 30 minutes of scripted editing over a
+# reference-fanout model. Registered so it can be RUN -- `ctest -L T4` --
+# but never by the default suite: it is a wall-clock test, which is what
+# the T4 label means here (the audit's G15 row: "TN-5 soak not registered
+# in ctest"). --smoke cuts it to a minute for a spot check.
+if(_usdgen_test_python)
+    add_test(NAME testTonicSoak
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicSoak.py"
+            --minutes 30)
+    set_tests_properties(testTonicSoak PROPERTIES
+        LABELS "T4;tonic;tools;gate:TN-5" TIMEOUT 2400
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT "USDGENTONIC_DLL=$<TARGET_FILE:usdGenTonic>"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+    # The smoke is 60 seconds and DOES run in the default suite, so it is
+    # not T4: T4 here means "wall clock, excluded by -LE T4", and the two
+    # 30-minute soaks (testTonicSoak, testTonicSoakController) are the
+    # only tests that earn it.
+    add_test(NAME testTonicSoakSmoke
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicSoak.py"
+            --smoke)
+    set_tests_properties(testTonicSoakSmoke PROPERTIES
+        LABELS "T1;tonic;tools;gate:TN-5" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT "USDGENTONIC_DLL=$<TARGET_FILE:usdGenTonic>"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free Tube/Fill-mode half -- gizmo previews, fill counts, ramps,
+# sub-modes -- runs in the same plain interpreter.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsTube
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsTube.py")
+    set_tests_properties(testUsdGenTonicToolsTube PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free Hierarchy/Sculpt-mode half -- level focus, breadcrumb, locks,
+# visibility, subdivide/merge params, brush falloff -- same plain interpreter.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsHierarchy
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsHierarchy.py")
+    set_tests_properties(testUsdGenTonicToolsHierarchy PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The Qt-free workspace-dock half (plan/18 V3): tonicPanels' per-mode
+# parameter/action descriptors and tonicHud's status-strip/warnings
+# formatting, exercised against a fake session (no ctypes DLL, no Qt) --
+# same plain interpreter as its siblings above.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsPanels
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsPanels.py")
+    set_tests_properties(testUsdGenTonicToolsPanels PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# The P5 bridge half -- center-curve export, swept/curve L3 import, the
+# geodesic checks -- runs headless but needs pxr (an in-memory stage) and
+# the usdGenTonic DLL, so unlike its Qt-free siblings it takes the USD
+# python environment plus USDGENTONIC_DLL. Part B is strict here (the
+# variable's presence is what makes it strict) and a skip for direct
+# runs without them.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsBridge
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsBridge.py")
+    usdgen_test_path_list_ops(_usdgen_tonicbridge_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages")
+    set_tests_properties(testUsdGenTonicToolsBridge PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT "USDGENTONIC_DLL=$<TARGET_FILE:usdGenTonic>"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonicbridge_python_env}")
+endif()
+
+# The V0b stage-contract binding (plan/18 V0b): tonicLibStage.py over the
+# real DLL -- the per-tube operations, the per-tube fill params, and a
+# commit/hydrate round trip through the binding. Same environment as the
+# bridge test above (USD python + USDGENTONIC_DLL), same skip for direct
+# runs without them.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsStage
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsStage.py")
+    usdgen_test_path_list_ops(_usdgen_tonicstage_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages")
+    set_tests_properties(testUsdGenTonicToolsStage PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT "USDGENTONIC_DLL=$<TARGET_FILE:usdGenTonic>"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonicstage_python_env}"
+        SKIP_RETURN_CODE "77")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -2121,7 +2633,7 @@ endif() # USDGEN_BUILD_TESTS
 # shipped objects) — installing them would put libusdGenMath.a /
 # libusdGen_seexpr.a into lib/ and drag their unprefixed INTERFACE include
 # roots into the usdGenTargets export set.
-install(TARGETS usdGenExecutionResources usdGen usdGenImaging usdGenSchema usdGenShaders
+install(TARGETS usdGenExecutionResources usdGen usdGenImaging usdGenSchema usdGenShaders usdGenTonic
     EXPORT usdGenTargets
     RUNTIME DESTINATION "${USDGEN_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${USDGEN_INSTALL_LIBDIR}"
@@ -2175,6 +2687,16 @@ install(DIRECTORY plugin/usdGenTools/resources/expressions
     DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTools/resources"
     FILES_MATCHING PATTERN "*.se")
 
+# usdGenTonic scene index + usdGenTonicTools shelf (plan/17 P0).
+install(FILES "${_usdgen_tonic_pluginfo}"
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTonic/resources")
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/resources/plugInfo.json"
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTonicTools/resources")
+install(DIRECTORY plugin/usdGenTonicTools/python/usdGenTonicTools
+    DESTINATION "${USDGEN_INSTALL_PYTHONDIR}"
+    FILES_MATCHING PATTERN "*.py")
+
 # Export targets so the package config's include(usdGenTargets.cmake) resolves.
 install(EXPORT usdGenTargets
     FILE usdGenTargets.cmake
@@ -2205,6 +2727,7 @@ install(FILES
 #   usdGen        libs/usdGen          -> #include "usdGen/..."
 #   usdGenSchema  libs/usdGenSchema    -> #include "usdGenSchema/..."
 #   usdGenImaging libs/usdGenImaging   -> #include "usdGenImaging/..."
+#   usdGenTonic   libs/usdGenTonic     -> #include "usdGenTonic/..."
 # so the install mirrors the include spellings directly under
 # <prefix>/include. Trailing source slashes + FILES_MATCHING ship headers
 # only (sol S-6: the previous install(DIRECTORY) rules appended directory
@@ -2224,6 +2747,9 @@ install(DIRECTORY libs/usdGenSchema/usdGenSchema/
     FILES_MATCHING PATTERN "*.h")
 install(DIRECTORY libs/usdGenImaging/usdGenImaging/
     DESTINATION include/usdGenImaging
+    FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY libs/usdGenTonic/usdGenTonic/
+    DESTINATION include/usdGenTonic
     FILES_MATCHING PATTERN "*.h")
 
 # NOTICE

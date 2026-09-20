@@ -1,0 +1,369 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="MinSizeRel|x64">
+      <Configuration>MinSizeRel</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="RelWithDebInfo|x64">
+      <Configuration>RelWithDebInfo</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1AD4396-68A1-3088-AEEA-9BF1EAC6ACBA}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
+    <Platform>x64</Platform>
+    <ProjectName>usdGenTracePlayback</ProjectName>
+    <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\work\usdGen\workusdGenbuild-v0b\Debug\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">usdGenTracePlayback.dir\Debug\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">usdGenTracePlayback</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</GenerateManifest>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\work\usdGen\workusdGenbuild-v0b\Release\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">usdGenTracePlayback.dir\Release\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">usdGenTracePlayback</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</GenerateManifest>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\work\usdGen\workusdGenbuild-v0b\MinSizeRel\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">usdGenTracePlayback.dir\MinSizeRel\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">usdGenTracePlayback</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">true</GenerateManifest>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\work\usdGen\workusdGenbuild-v0b\RelWithDebInfo\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">usdGenTracePlayback.dir\RelWithDebInfo\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">usdGenTracePlayback</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">.exe</TargetExt>
+    <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">true</LinkIncremental>
+    <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">true</GenerateManifest>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/work/OpenUSD_26_08/include"</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>Disabled</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;TBB_USE_DEBUG=1;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;TBB_USE_DEBUG=1;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Link>
+      <AdditionalDependencies>Debug\usdGenImaging.lib;D:\work\OpenUSD_26_08\lib\usd_usdImaging.lib;Debug\usdGen.lib;Debug\usdGenExecutionResources.lib;D:\work\OpenUSD_26_08\lib\usd_hdar.lib;D:\work\OpenUSD_26_08\lib\usd_usdLux.lib;D:\work\OpenUSD_26_08\lib\usd_usdRender.lib;D:\work\OpenUSD_26_08\lib\usd_usdSkel.lib;D:\work\OpenUSD_26_08\lib\usd_hdsi.lib;D:\work\OpenUSD_26_08\lib\usd_hd.lib;D:\work\OpenUSD_26_08\lib\usd_geomUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdVol.lib;D:\work\OpenUSD_26_08\lib\usd_cameraUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdShade.lib;D:\work\OpenUSD_26_08\lib\usd_sdr.lib;D:\work\OpenUSD_26_08\lib\usd_pxOsd.lib;D:\work\OpenUSD_26_08\lib\osdCPU.lib;D:\work\OpenUSD_26_08\lib\usd_hio.lib;D:\work\OpenUSD_26_08\lib\usd_hf.lib;D:\work\OpenUSD_26_08\lib\usd_usdGeom.lib;D:\work\OpenUSD_26_08\lib\usd_usd.lib;D:\work\OpenUSD_26_08\lib\usd_kind.lib;D:\work\OpenUSD_26_08\lib\usd_pcp.lib;D:\work\OpenUSD_26_08\lib\usd_sdf.lib;D:\work\OpenUSD_26_08\lib\usd_ar.lib;D:\work\OpenUSD_26_08\lib\usd_ts.lib;D:\work\OpenUSD_26_08\lib\usd_pegtl.lib;D:\work\OpenUSD_26_08\lib\usd_vt.lib;D:\work\OpenUSD_26_08\lib\usd_gf.lib;D:\work\OpenUSD_26_08\lib\usd_plug.lib;D:\work\OpenUSD_26_08\lib\usd_work.lib;D:\work\OpenUSD_26_08\lib\usd_trace.lib;D:\work\OpenUSD_26_08\lib\usd_js.lib;D:\work\OpenUSD_26_08\lib\usd_tf.lib;D:\work\OpenUSD_26_08\lib\tbb.lib;D:\work\OpenUSD_26_08\lib\usd_arch.lib;Ws2_32.lib;Dbghelp.lib;Shlwapi.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>D:/work/OpenUSD_26_08/lib;D:/work/OpenUSD_26_08/lib/$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImportLibrary>D:/work/usdGen/workusdGenbuild-v0b/Debug/usdGenTracePlayback.lib</ImportLibrary>
+      <ProgramDataBaseFile>D:/work/usdGen/workusdGenbuild-v0b/Debug/usdGenTracePlayback.pdb</ProgramDataBaseFile>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/work/OpenUSD_26_08/include"</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <DisableSpecificWarnings>4251</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;NDEBUG;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;NDEBUG;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Link>
+      <AdditionalDependencies>Release\usdGenImaging.lib;D:\work\OpenUSD_26_08\lib\usd_usdImaging.lib;Release\usdGen.lib;Release\usdGenExecutionResources.lib;D:\work\OpenUSD_26_08\lib\usd_hdar.lib;D:\work\OpenUSD_26_08\lib\usd_usdLux.lib;D:\work\OpenUSD_26_08\lib\usd_usdRender.lib;D:\work\OpenUSD_26_08\lib\usd_usdSkel.lib;D:\work\OpenUSD_26_08\lib\usd_hdsi.lib;D:\work\OpenUSD_26_08\lib\usd_hd.lib;D:\work\OpenUSD_26_08\lib\usd_geomUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdVol.lib;D:\work\OpenUSD_26_08\lib\usd_cameraUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdShade.lib;D:\work\OpenUSD_26_08\lib\usd_sdr.lib;D:\work\OpenUSD_26_08\lib\usd_pxOsd.lib;D:\work\OpenUSD_26_08\lib\osdCPU.lib;D:\work\OpenUSD_26_08\lib\usd_hio.lib;D:\work\OpenUSD_26_08\lib\usd_hf.lib;D:\work\OpenUSD_26_08\lib\usd_usdGeom.lib;D:\work\OpenUSD_26_08\lib\usd_usd.lib;D:\work\OpenUSD_26_08\lib\usd_kind.lib;D:\work\OpenUSD_26_08\lib\usd_pcp.lib;D:\work\OpenUSD_26_08\lib\usd_sdf.lib;D:\work\OpenUSD_26_08\lib\usd_ar.lib;D:\work\OpenUSD_26_08\lib\usd_ts.lib;D:\work\OpenUSD_26_08\lib\usd_pegtl.lib;D:\work\OpenUSD_26_08\lib\usd_vt.lib;D:\work\OpenUSD_26_08\lib\usd_gf.lib;D:\work\OpenUSD_26_08\lib\usd_plug.lib;D:\work\OpenUSD_26_08\lib\usd_work.lib;D:\work\OpenUSD_26_08\lib\usd_trace.lib;D:\work\OpenUSD_26_08\lib\usd_js.lib;D:\work\OpenUSD_26_08\lib\usd_tf.lib;D:\work\OpenUSD_26_08\lib\tbb.lib;D:\work\OpenUSD_26_08\lib\usd_arch.lib;Ws2_32.lib;Dbghelp.lib;Shlwapi.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>D:/work/OpenUSD_26_08/lib;D:/work/OpenUSD_26_08/lib/$(Configuration);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImportLibrary>D:/work/usdGen/workusdGenbuild-v0b/Release/usdGenTracePlayback.lib</ImportLibrary>
+      <ProgramDataBaseFile>D:/work/usdGen/workusdGenbuild-v0b/Release/usdGenTracePlayback.pdb</ProgramDataBaseFile>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/work/OpenUSD_26_08/include"</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <DisableSpecificWarnings>4251</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MinSpace</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;NDEBUG;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;NDEBUG;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Link>
+      <AdditionalDependencies>MinSizeRel\usdGenImaging.lib;D:\work\OpenUSD_26_08\lib\usd_usdImaging.lib;MinSizeRel\usdGen.lib;MinSizeRel\usdGenExecutionResources.lib;D:\work\OpenUSD_26_08\lib\usd_hdar.lib;D:\work\OpenUSD_26_08\lib\usd_usdLux.lib;D:\work\OpenUSD_26_08\lib\usd_usdRender.lib;D:\work\OpenUSD_26_08\lib\usd_usdSkel.lib;D:\work\OpenUSD_26_08\lib\usd_hdsi.lib;D:\work\OpenUSD_26_08\lib\usd_hd.lib;D:\work\OpenUSD_26_08\lib\usd_geomUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdVol.lib;D:\work\OpenUSD_26_08\lib\usd_cameraUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdShade.lib;D:\work\OpenUSD_26_08\lib\usd_sdr.lib;D:\work\OpenUSD_26_08\lib\usd_pxOsd.lib;D:\work\OpenUSD_26_08\lib\osdCPU.lib;D:\work\OpenUSD_26_08\lib\usd_hio.lib;D:\work\OpenUSD_26_08\lib\usd_hf.lib;D:\work\OpenUSD_26_08\lib\usd_usdGeom.lib;D:\work\OpenUSD_26_08\lib\usd_usd.lib;D:\work\OpenUSD_26_08\lib\usd_kind.lib;D:\work\OpenUSD_26_08\lib\usd_pcp.lib;D:\work\OpenUSD_26_08\lib\usd_sdf.lib;D:\work\OpenUSD_26_08\lib\usd_ar.lib;D:\work\OpenUSD_26_08\lib\usd_ts.lib;D:\work\OpenUSD_26_08\lib\usd_pegtl.lib;D:\work\OpenUSD_26_08\lib\usd_vt.lib;D:\work\OpenUSD_26_08\lib\usd_gf.lib;D:\work\OpenUSD_26_08\lib\usd_plug.lib;D:\work\OpenUSD_26_08\lib\usd_work.lib;D:\work\OpenUSD_26_08\lib\usd_trace.lib;D:\work\OpenUSD_26_08\lib\usd_js.lib;D:\work\OpenUSD_26_08\lib\usd_tf.lib;D:\work\OpenUSD_26_08\lib\tbb.lib;D:\work\OpenUSD_26_08\lib\usd_arch.lib;Ws2_32.lib;Dbghelp.lib;Shlwapi.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImportLibrary>D:/work/usdGen/workusdGenbuild-v0b/MinSizeRel/usdGenTracePlayback.lib</ImportLibrary>
+      <ProgramDataBaseFile>D:/work/usdGen/workusdGenbuild-v0b/MinSizeRel/usdGenTracePlayback.pdb</ProgramDataBaseFile>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /external:I "D:/work/OpenUSD_26_08/include"</AdditionalOptions>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;NDEBUG;TBB_USE_DEBUG=1;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NOMINMAX;TBB_SUPPRESS_DEPRECATED_MESSAGES=1;_CRT_SECURE_NO_WARNINGS;NDEBUG;TBB_USE_DEBUG=1;OPENSUBDIV_HAS_PATCH_SHADER_SOURCE_GLSL;OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK;OPENSUBDIV_HAS_GLSL_COMPUTE;OPENSUBDIV_HAS_OPENGL;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>D:\work\usdGen\libs\usdGen;D:\work\usdGen\libs\usdGenImaging;D:\work\OpenUSD_26_08\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Link>
+      <AdditionalDependencies>RelWithDebInfo\usdGenImaging.lib;D:\work\OpenUSD_26_08\lib\usd_usdImaging.lib;RelWithDebInfo\usdGen.lib;RelWithDebInfo\usdGenExecutionResources.lib;D:\work\OpenUSD_26_08\lib\usd_hdar.lib;D:\work\OpenUSD_26_08\lib\usd_usdLux.lib;D:\work\OpenUSD_26_08\lib\usd_usdRender.lib;D:\work\OpenUSD_26_08\lib\usd_usdSkel.lib;D:\work\OpenUSD_26_08\lib\usd_hdsi.lib;D:\work\OpenUSD_26_08\lib\usd_hd.lib;D:\work\OpenUSD_26_08\lib\usd_geomUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdVol.lib;D:\work\OpenUSD_26_08\lib\usd_cameraUtil.lib;D:\work\OpenUSD_26_08\lib\usd_usdShade.lib;D:\work\OpenUSD_26_08\lib\usd_sdr.lib;D:\work\OpenUSD_26_08\lib\usd_pxOsd.lib;D:\work\OpenUSD_26_08\lib\osdCPU.lib;D:\work\OpenUSD_26_08\lib\usd_hio.lib;D:\work\OpenUSD_26_08\lib\usd_hf.lib;D:\work\OpenUSD_26_08\lib\usd_usdGeom.lib;D:\work\OpenUSD_26_08\lib\usd_usd.lib;D:\work\OpenUSD_26_08\lib\usd_kind.lib;D:\work\OpenUSD_26_08\lib\usd_pcp.lib;D:\work\OpenUSD_26_08\lib\usd_sdf.lib;D:\work\OpenUSD_26_08\lib\usd_ar.lib;D:\work\OpenUSD_26_08\lib\usd_ts.lib;D:\work\OpenUSD_26_08\lib\usd_pegtl.lib;D:\work\OpenUSD_26_08\lib\usd_vt.lib;D:\work\OpenUSD_26_08\lib\usd_gf.lib;D:\work\OpenUSD_26_08\lib\usd_plug.lib;D:\work\OpenUSD_26_08\lib\usd_work.lib;D:\work\OpenUSD_26_08\lib\usd_trace.lib;D:\work\OpenUSD_26_08\lib\usd_js.lib;D:\work\OpenUSD_26_08\lib\usd_tf.lib;D:\work\OpenUSD_26_08\lib\tbb.lib;D:\work\OpenUSD_26_08\lib\usd_arch.lib;Ws2_32.lib;Dbghelp.lib;Shlwapi.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;comdlg32.lib;advapi32.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
+      <ImportLibrary>D:/work/usdGen/workusdGenbuild-v0b/RelWithDebInfo/usdGenTracePlayback.lib</ImportLibrary>
+      <ProgramDataBaseFile>D:/work/usdGen/workusdGenbuild-v0b/RelWithDebInfo/usdGenTracePlayback.pdb</ProgramDataBaseFile>
+      <SubSystem>Console</SubSystem>
+    </Link>
+    <ProjectReference>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <CustomBuild Include="D:\work\usdGen\CMakeLists.txt">
+      <UseUtf8Encoding>Always</UseUtf8Encoding>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Building Custom Rule D:/work/usdGen/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\bin\cmake.exe -SD:/work/usdGen -BD:/work/usdGen/workusdGenbuild-v0b --check-stamp-file D:/work/usdGen/workusdGenbuild-v0b/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\BasicConfigVersion-SameMinorVersion.cmake.in;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCXXInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCheckCompilerFlagCommonPatterns.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCommonLanguageInclude.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeFindDependencyMacro.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeGenericSystem.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeInitializeConfigs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeLanguageInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakePackageConfigHelpers.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeRCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInitialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckIncludeFile.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckLibraryExists.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindOpenGL.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageHandleStandardArgs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageMessage.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindThreads.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckFlagCommonConfig.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-Initialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\WindowsPaths.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\WriteBasicConfigVersionFile.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets-release.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfig.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfigVersion.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets-release.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets.cmake;D:\work\OpenUSD_26_08\pxrConfig.cmake;D:\work\usdGen\cmake\usdGenConfig.cmake.in;D:\work\usdGen\plugin\usdGenSchema\resources\generatedSchema.usda;D:\work\usdGen\plugin\usdGenSchema\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTonic\resources\plugInfo.json.in;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\__init__.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicBridge.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicFill.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraph.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraphUI.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicHierarchy.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLib.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLibStage.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicMath.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicModes.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicSculpt.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicToolState.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicTube.py;D:\work\usdGen\plugin\usdGenTonicTools\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\__init__.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprApi.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprAuthor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprControls.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEdit.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEditor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprHighlight.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprLibrary.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprPreview.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprWidgets.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\supersample.py;D:\work\usdGen\plugin\usdGenTools\resources\expressions\clumpMask.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\randomLength.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\rootTipTaper.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\widthProfile.se;D:\work\usdGen\plugin\usdGenTools\resources\plugInfo.json;D:\work\usdGen\usdGenShaders\resources\plugInfo.json.in;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCXXCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeRCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Building Custom Rule D:/work/usdGen/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\bin\cmake.exe -SD:/work/usdGen -BD:/work/usdGen/workusdGenbuild-v0b --check-stamp-file D:/work/usdGen/workusdGenbuild-v0b/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\BasicConfigVersion-SameMinorVersion.cmake.in;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCXXInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCheckCompilerFlagCommonPatterns.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCommonLanguageInclude.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeFindDependencyMacro.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeGenericSystem.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeInitializeConfigs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeLanguageInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakePackageConfigHelpers.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeRCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInitialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckIncludeFile.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckLibraryExists.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindOpenGL.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageHandleStandardArgs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageMessage.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindThreads.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckFlagCommonConfig.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-Initialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\WindowsPaths.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\WriteBasicConfigVersionFile.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets-release.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfig.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfigVersion.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets-release.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets.cmake;D:\work\OpenUSD_26_08\pxrConfig.cmake;D:\work\usdGen\cmake\usdGenConfig.cmake.in;D:\work\usdGen\plugin\usdGenSchema\resources\generatedSchema.usda;D:\work\usdGen\plugin\usdGenSchema\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTonic\resources\plugInfo.json.in;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\__init__.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicBridge.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicFill.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraph.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraphUI.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicHierarchy.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLib.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLibStage.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicMath.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicModes.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicSculpt.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicToolState.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicTube.py;D:\work\usdGen\plugin\usdGenTonicTools\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\__init__.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprApi.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprAuthor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprControls.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEdit.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEditor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprHighlight.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprLibrary.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprPreview.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprWidgets.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\supersample.py;D:\work\usdGen\plugin\usdGenTools\resources\expressions\clumpMask.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\randomLength.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\rootTipTaper.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\widthProfile.se;D:\work\usdGen\plugin\usdGenTools\resources\plugInfo.json;D:\work\usdGen\usdGenShaders\resources\plugInfo.json.in;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCXXCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeRCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Building Custom Rule D:/work/usdGen/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\bin\cmake.exe -SD:/work/usdGen -BD:/work/usdGen/workusdGenbuild-v0b --check-stamp-file D:/work/usdGen/workusdGenbuild-v0b/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\BasicConfigVersion-SameMinorVersion.cmake.in;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCXXInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCheckCompilerFlagCommonPatterns.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCommonLanguageInclude.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeFindDependencyMacro.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeGenericSystem.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeInitializeConfigs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeLanguageInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakePackageConfigHelpers.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeRCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInitialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckIncludeFile.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckLibraryExists.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindOpenGL.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageHandleStandardArgs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageMessage.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindThreads.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckFlagCommonConfig.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-Initialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\WindowsPaths.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\WriteBasicConfigVersionFile.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets-release.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfig.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfigVersion.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets-release.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets.cmake;D:\work\OpenUSD_26_08\pxrConfig.cmake;D:\work\usdGen\cmake\usdGenConfig.cmake.in;D:\work\usdGen\plugin\usdGenSchema\resources\generatedSchema.usda;D:\work\usdGen\plugin\usdGenSchema\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTonic\resources\plugInfo.json.in;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\__init__.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicBridge.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicFill.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraph.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraphUI.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicHierarchy.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLib.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLibStage.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicMath.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicModes.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicSculpt.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicToolState.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicTube.py;D:\work\usdGen\plugin\usdGenTonicTools\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\__init__.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprApi.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprAuthor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprControls.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEdit.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEditor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprHighlight.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprLibrary.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprPreview.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprWidgets.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\supersample.py;D:\work\usdGen\plugin\usdGenTools\resources\expressions\clumpMask.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\randomLength.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\rootTipTaper.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\widthProfile.se;D:\work\usdGen\plugin\usdGenTools\resources\plugInfo.json;D:\work\usdGen\usdGenShaders\resources\plugInfo.json.in;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCXXCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeRCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Building Custom Rule D:/work/usdGen/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\bin\cmake.exe -SD:/work/usdGen -BD:/work/usdGen/workusdGenbuild-v0b --check-stamp-file D:/work/usdGen/workusdGenbuild-v0b/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\BasicConfigVersion-SameMinorVersion.cmake.in;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCXXInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCheckCompilerFlagCommonPatterns.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeCommonLanguageInclude.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeFindDependencyMacro.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeGenericSystem.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeInitializeConfigs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeLanguageInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakePackageConfigHelpers.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeRCInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CMakeSystemSpecificInitialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckCXXSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckIncludeFile.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\CheckLibraryExists.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Compiler\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindOpenGL.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageHandleStandardArgs.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindPackageMessage.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\FindThreads.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckCompilerFlag.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckFlagCommonConfig.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Internal\CheckSourceCompiles.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Linker\MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-Initialize.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-C.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows-MSVC.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\Windows.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\Platform\WindowsPaths.cmake;C:\Users\nburk\AppData\Local\Programs\Python\Python310\Lib\site-packages\cmake\data\share\cmake-4.0\Modules\WriteBasicConfigVersionFile.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets-release.cmake;D:\work\OpenUSD_26_08\cmake\pxrTargets.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfig.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivConfigVersion.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets-release.cmake;D:\work\OpenUSD_26_08\lib\cmake\OpenSubdiv\OpenSubdivTargets.cmake;D:\work\OpenUSD_26_08\pxrConfig.cmake;D:\work\usdGen\cmake\usdGenConfig.cmake.in;D:\work\usdGen\plugin\usdGenSchema\resources\generatedSchema.usda;D:\work\usdGen\plugin\usdGenSchema\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTonic\resources\plugInfo.json.in;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\__init__.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicBridge.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicFill.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraph.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicGraphUI.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicHierarchy.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLib.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicLibStage.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicMath.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicModes.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicSculpt.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicToolState.py;D:\work\usdGen\plugin\usdGenTonicTools\python\usdGenTonicTools\tonicTube.py;D:\work\usdGen\plugin\usdGenTonicTools\resources\plugInfo.json;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\__init__.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprApi.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprAuthor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprControls.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEdit.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprEditor.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprHighlight.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprLibrary.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprPreview.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\exprWidgets.py;D:\work\usdGen\plugin\usdGenTools\python\usdGenTools\supersample.py;D:\work\usdGen\plugin\usdGenTools\resources\expressions\clumpMask.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\randomLength.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\rootTipTaper.se;D:\work\usdGen\plugin\usdGenTools\resources\expressions\widthProfile.se;D:\work\usdGen\plugin\usdGenTools\resources\plugInfo.json;D:\work\usdGen\usdGenShaders\resources\plugInfo.json.in;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeCXXCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeRCCompiler.cmake;D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\4.0.2\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">D:\work\usdGen\workusdGenbuild-v0b\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="D:\work\usdGen\tools\tracePlayback.cpp" />
+  </ItemGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <ProjectReference Include="D:\work\usdGen\workusdGenbuild-v0b\ZERO_CHECK.vcxproj">
+      <Project>{9C281958-8BBB-3342-B647-78DC9904350B}</Project>
+      <Name>ZERO_CHECK</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+    <ProjectReference Include="D:\work\usdGen\workusdGenbuild-v0b\usdGen.vcxproj">
+      <Project>{7DFA1E3D-3367-30A3-B334-BB81E2156122}</Project>
+      <Name>usdGen</Name>
+    </ProjectReference>
+    <ProjectReference Include="D:\work\usdGen\workusdGenbuild-v0b\usdGenExecutionResources.vcxproj">
+      <Project>{DBE6635C-5DDF-3DA0-AD3E-EFC3772AE46F}</Project>
+      <Name>usdGenExecutionResources</Name>
+    </ProjectReference>
+    <ProjectReference Include="D:\work\usdGen\workusdGenbuild-v0b\usdGenImaging.vcxproj">
+      <Project>{A91F936C-CCCF-39DE-B5D7-363D9E1C3860}</Project>
+      <Name>usdGenImaging</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

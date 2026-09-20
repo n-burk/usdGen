@@ -21,6 +21,14 @@ if (-not (Test-Path $tool)) { throw "usdGenSchema is not installed in '$UsdInsta
 
 # pxr must be importable and its DLLs loadable, as in launch_usdview.ps1.
 $env:PATH = ((Join-Path $UsdInstallDir "bin") + ';' + (Join-Path $UsdInstallDir "lib") + ';' + $env:PATH)
+# usdGenSchema resolves @usdGeom/schema.usda@ through the plugin registry,
+# so the stock OpenUSD plugin roots must be discoverable (bin/_env.sh sets
+# the same two roots on Linux; without them the tool exits 1).
+$pluginDirs = @(
+    (Join-Path $UsdInstallDir "plugin\usd"),
+    (Join-Path $UsdInstallDir "lib\usd")
+) | Where-Object { Test-Path $_ }
+$env:PXR_PLUGINPATH_NAME = ($pluginDirs -join ';') + $(if ($env:PXR_PLUGINPATH_NAME) { ';' + $env:PXR_PLUGINPATH_NAME } else { '' })
 $pythonDirs = @(
     (Join-Path $Build "python"),
     (Join-Path $UsdInstallDir "Lib\site-packages"),
@@ -35,6 +43,11 @@ if (-not $python) { throw "Python is not on PATH. Set PY to the interpreter that
 
 $schemaDir = Join-Path $Root "libs\usdGenSchema"
 $resources = Join-Path $Root "plugin\usdGenSchema\resources"
+# usdGenSchema banners on stderr; with $ErrorActionPreference = "Stop" that
+# alone would throw, so tolerate stderr here — the LASTEXITCODE checks below
+# are the real gates.
+$oldEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 Push-Location $schemaDir
 try {
     & $python $tool schema.usda $resources
@@ -44,6 +57,7 @@ try {
     & $python restore_generated_metadata.py schema.usda (Join-Path $resources "generatedSchema.usda")
     if ($LASTEXITCODE -ne 0) { throw "restore_generated_metadata.py failed with exit code $LASTEXITCODE" }
 } finally {
+    $ErrorActionPreference = $oldEap
     Pop-Location
 }
 

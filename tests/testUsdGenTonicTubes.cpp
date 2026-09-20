@@ -1,0 +1,1680 @@
+// testUsdGenTonicTubes -- T0: P3 tubes + fill (plan/17 K4/K5/K8-K11, §5.2/§5.3).
+//
+// No Hydra, no stage, no files: fixtures are built in code (a straight
+// 3-CV tube with circle sections, a 4x4 quad grid scalp).
+// Proven here:
+//   * K4: straight tube frames (T=+Y, orthonormal), bent tube frames vary
+//     smoothly and stay orthonormal, coincident CVs keep the normal;
+//   * K5: section rings land on their circles, twist rotates, scale
+//     scales, Hermite mid-spans interpolate, ring counts follow the span
+//     rule, degenerate input fails loudly;
+//   * K8: disc counts are exact, roots sit in the unit disc, the stream
+//     is deterministic per (tubeId, seed), freeze keeps the prefix;
+//   * K9: root CVs sit on their roots, edgeBias pushes/pulls the radius,
+//     lengthProfile shortens guides, bias/profile validation fails;
+//   * K10: straight guides resample evenly, root frames carry the root
+//     dirs + root position, degenerate input fails;
+//   * K11: hits/misses/kind masks/depth tie-breaks on a known projection;
+//   * the model: the legacy test-tube positions survive untouched, center
+//     CV ops (move/soft/insert/delete/length/match), section ops
+//     (move/scale/twist/per-CV/add/remove/copy), soft selection,
+//     relax, root snap, display segments, region rooting;
+//   * Fill mode: param validation, preview/full refills, freeze roots,
+//     guide + root census reads;
+//   * auto-tube from a graph region (root fit + normal seeding);
+//   * the P3 C ABI drives the same tube (plus its error paths);
+//   * TN-6 parity (CUDA builds with a device only): all six device lanes
+//     match their CPU twins (bit-exact where arithmetic-only).
+// TN-1/TN-2 probes print measured move/pick times at scale (informational:
+// the gates run on the reference scene, not this fixture).
+
+#include "usdGenTonic/tonicApi.h"
+#include "usdGenTonic/tonicApiStage.h"
+#include "usdGenTonic/tonicModel.h"
+#include "usdGenTonic/tonicTube.h"
+
+#ifdef USDGEN_TONIC_HAS_CUDA
+#include "usdGenTonic/tonicKernels.h"
+#include <cuda_runtime.h>
+#endif
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+namespace {
+
+int g_failures = 0;
+void Check(bool ok, std::string const &what)
+{
+    if (!ok) {
+        ++g_failures;
+        std::printf("FAIL: %s\n", what.c_str());
+    } else {
+        std::printf("ok:   %s\n", what.c_str());
+    }
+    std::fflush(stdout);
+}
+
+bool Near(float a, float b, float eps = 1e-4f)
+{
+    return std::fabs(a - b) <= eps;
+}
+
+bool NearD(double a, double b, double eps = 1e-9)
+{
+    return std::fabs(a - b) <= eps;
+}
+
+using usdGenTonic::TonicFrame;
+using usdGenTonic::TonicTubeDesc;
+using usdGenTonic::TonicTubeSection;
+
+// A straight 3-CV tube along +Y (length 4) with two circle sections
+// (R = 0.5, 8 CVs) at t = 0 and t = 1.
+TonicTubeDesc MakeTube(int ringVerts = 8)
+{
+    TonicTubeDesc tube;
+    tube.centerX = {0.0f, 0.0f, 0.0f};
+    tube.centerY = {0.0f, 2.0f, 4.0f};
+    tube.centerZ = {0.0f, 0.0f, 0.0f};
+    tube.ringVerts = ringVerts;
+    float const twoPi = 6.28318530717958647692f;
+    for (int k = 0; k < 2; ++k) {
+        TonicTubeSection s;
+        s.t = float(k);
+        s.u.resize(size_t(ringVerts));
+        s.v.resize(size_t(ringVerts));
+        for (int i = 0; i < ringVerts; ++i) {
+            float const a = twoPi * float(i) / float(ringVerts);
+            s.u[size_t(i)] = 0.5f * std::cos(a);
+            s.v[size_t(i)] = 0.5f * std::sin(a);
+        }
+        tube.sections.push_back(std::move(s));
+    }
+    return tube;
+}
+
+std::vector<TonicFrame> FramesFor(TonicTubeDesc const &tube)
+{
+    using namespace usdGenTonic;
+    std::vector<TonicFrame> frames;
+    std::string err;
+    if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
+                              tube.centerZ.data(), int(tube.centerX.size()),
+                              &frames, &err)) {
+        Check(false, std::string("fixture frames: ") + err);
+    }
+    return frames;
+}
+
+bool Orthonormal(TonicFrame const &f, float eps = 1e-5f)
+{
+    float const lt =
+        std::sqrt(f.tx * f.tx + f.ty * f.ty + f.tz * f.tz);
+    float const ln =
+        std::sqrt(f.nx * f.nx + f.ny * f.ny + f.nz * f.nz);
+    float const lb =
+        std::sqrt(f.bx * f.bx + f.by * f.by + f.bz * f.bz);
+    float const tn = f.tx * f.nx + f.ty * f.ny + f.tz * f.nz;
+    float const tb = f.tx * f.bx + f.ty * f.by + f.tz * f.bz;
+    float const nb = f.nx * f.bx + f.ny * f.by + f.nz * f.bz;
+    return Near(lt, 1.0f, eps) && Near(ln, 1.0f, eps) &&
+           Near(lb, 1.0f, eps) && Near(tn, 0.0f, eps) &&
+           Near(tb, 0.0f, eps) && Near(nb, 0.0f, eps);
+}
+
+void CheckK4()
+{
+    using namespace usdGenTonic;
+    TonicTubeDesc const tube = MakeTube();
+    std::vector<TonicFrame> frames = FramesFor(tube);
+    Check(frames.size() == 3, "K4: one frame per center CV");
+    bool tangentY = true, ortho = true;
+    for (auto const &f : frames) {
+        tangentY = tangentY && Near(f.tx, 0.0f) && Near(f.ty, 1.0f) &&
+                   Near(f.tz, 0.0f);
+        ortho = ortho && Orthonormal(f);
+    }
+    Check(tangentY, "K4: straight-tube tangents are +Y");
+    Check(ortho, "K4: straight-tube frames are orthonormal");
+    // The RMF of a straight line is twist-free: all normals agree.
+    bool sameN = Near(frames[0].nx, frames[1].nx, 1e-6f) &&
+                 Near(frames[0].ny, frames[1].ny, 1e-6f) &&
+                 Near(frames[0].nz, frames[1].nz, 1e-6f) &&
+                 Near(frames[1].nx, frames[2].nx, 1e-6f);
+    Check(sameN, "K4: straight-tube normals do not twist");
+    // A bent tube: frames follow the bend, stay orthonormal.
+    TonicTubeDesc bent = tube;
+    bent.centerX[2] = 2.0f;
+    std::vector<TonicFrame> bf = FramesFor(bent);
+    bool bOrtho = bf.size() == 3;
+    for (auto const &f : bf) {
+        bOrtho = bOrtho && Orthonormal(f);
+    }
+    Check(bOrtho, "K4: bent-tube frames stay orthonormal");
+    Check(bf[2].tx > 0.2f, "K4: bent-tube tip tangent follows the bend");
+    // Catmull-Rom reproduces the straight line at any t.
+    float px = 0, py = 0, pz = 0;
+    TonicFrame fr;
+    std::string err;
+    bool ok = TonicSampleCenterCpu(tube, frames, 0.37f, &px, &py, &pz, &fr,
+                                   &err);
+    Check(ok && Near(px, 0.0f, 1e-5f) && Near(py, 0.37f * 4.0f, 1e-4f) &&
+              Near(pz, 0.0f, 1e-5f) && Orthonormal(fr),
+          "K4: center sampling reproduces the straight line");
+    // Coincident CVs keep the previous normal (no NaN).
+    TonicTubeDesc pinch = tube;
+    pinch.centerX[1] = pinch.centerX[0];
+    pinch.centerY[1] = pinch.centerY[0];
+    pinch.centerZ[1] = pinch.centerZ[0];
+    std::vector<TonicFrame> pf = FramesFor(pinch);
+    bool finite = pf.size() == 3;
+    for (auto const &f : pf) {
+        finite = finite && std::isfinite(f.nx + f.ny + f.nz) && Orthonormal(f);
+    }
+    Check(finite, "K4: coincident CVs keep a finite orthonormal frame");
+    Check(!TonicCenterFramesCpu(nullptr, nullptr, nullptr, 0, nullptr,
+                                nullptr),
+          "K4: null input fails");
+}
+
+void CheckK5()
+{
+    using namespace usdGenTonic;
+    TonicTubeDesc const tube = MakeTube();
+    std::vector<TonicFrame> frames = FramesFor(tube);
+    std::vector<float> pos, nrm, ringT;
+    std::string err;
+    bool ok = TonicTessellateCpu(tube, frames, 1, &pos, &nrm, &ringT, &err);
+    Check(ok, "K5: straight tube tessellates");
+    Check(pos.size() == 2 * 8 * 3 && nrm.size() == pos.size() &&
+              ringT.size() == 2,
+          "K5: (nSec-1)*seg+1 rings x ringVerts verts");
+    // Ring 0 sits in the y=0 plane on the R=0.5 circle; normals are radial.
+    bool ring = true, radial = true;
+    for (int s = 0; s < 8; ++s) {
+        float const x = pos[size_t(s) * 3 + 0];
+        float const y = pos[size_t(s) * 3 + 1];
+        float const z = pos[size_t(s) * 3 + 2];
+        ring = ring && Near(y, 0.0f, 1e-5f) &&
+               Near(std::sqrt(x * x + z * z), 0.5f, 1e-4f);
+        float const nx = nrm[size_t(s) * 3 + 0];
+        float const ny = nrm[size_t(s) * 3 + 1];
+        float const nz = nrm[size_t(s) * 3 + 2];
+        float const rl = std::sqrt(nx * nx + nz * nz);
+        radial = radial && Near(ny, 0.0f, 1e-4f) && Near(rl, 1.0f, 1e-4f) &&
+                 Near(nx / rl, x / 0.5f, 1e-4f);
+    }
+    Check(ring, "K5: root ring lands on the section circle");
+    Check(radial, "K5: normals are radial");
+    Check(Near(ringT[0], 0.0f) && Near(ringT[1], 1.0f),
+          "K5: ring parameters span the section range");
+    // Twist rotates the ring; scale scales it.
+    TonicTubeDesc twisted = tube;
+    twisted.sections[1].twist = 1.57079632679f;
+    twisted.sections[1].scale = 2.0f;
+    std::vector<float> p2, n2, t2;
+    Check(TonicTessellateCpu(twisted, frames, 1, &p2, &n2, &t2, &err),
+          "K5: twisted/scaled tip tessellates");
+    bool tipR = true;
+    for (int s = 0; s < 8; ++s) {
+        float const x = p2[(8 + size_t(s)) * 3 + 0];
+        float const z = p2[(8 + size_t(s)) * 3 + 2];
+        tipR = tipR && Near(std::sqrt(x * x + z * z), 1.0f, 1e-3f);
+    }
+    Check(tipR, "K5: scale doubles the tip radius");
+    // Slot 0 starts at (u, v) = (0.5, 0); a pi/2 twist moves it to the
+    // frame-B axis (x ~= 0, |z| ~= 1 after scaling).
+    float const tx = p2[8 * 3 + 0];
+    float const tz = p2[8 * 3 + 2];
+    Check(Near(tx, 0.0f, 1e-3f) && Near(std::fabs(tz), 1.0f, 1e-3f),
+          "K5: twist rotates the tip ring by pi/2");
+    // Mid-span Hermite between different radii interpolates.
+    TonicTubeDesc taper = tube;
+    taper.sections[1].scale = 0.5f;
+    std::vector<float> p3, n3, t3;
+    Check(TonicTessellateCpu(taper, frames, 2, &p3, &n3, &t3, &err),
+          "K5: two spans tessellate");
+    Check(p3.size() == 3 * 8 * 3, "K5: segments double the ring count");
+    float const mx = p3[8 * 3 + 0];
+    float const mz = p3[8 * 3 + 2];
+    float const mid = std::sqrt(mx * mx + mz * mz);
+    Check(mid > 0.25f && mid < 0.5f, "K5: mid-span radius interpolates");
+    // Degenerate input fails loudly.
+    TonicTubeDesc bad = tube;
+    bad.sections[0].u.pop_back();
+    Check(!TonicTessellateCpu(bad, frames, 1, &p3, &n3, &t3, &err),
+          "K5: ragged rings fail");
+}
+
+void CheckK8()
+{
+    using namespace usdGenTonic;
+    TonicTubeDesc const tube = MakeTube();
+    std::vector<TonicFrame> frames = FramesFor(tube);
+    float const center[3] = {0.0f, 0.0f, 0.0f};
+    std::string err;
+    std::vector<TonicGuideRoot> a, b;
+    Check(TonicRootSampleDiscCpu(0, 7, 0.5f, center, frames[0], 16, &a, 0,
+                                 &err),
+          "K8: disc sampling fills the count");
+    Check(a.size() == 16, "K8: disc count is exact");
+    Check(TonicRootSampleDiscCpu(0, 7, 0.5f, center, frames[0], 16, &b, 0,
+                                 &err),
+          "K8: disc sampling repeats");
+    bool same = a.size() == b.size();
+    for (size_t i = 0; same && i < a.size(); ++i) {
+        same = a[i].ru == b[i].ru && a[i].rv == b[i].rv &&
+               a[i].px == b[i].px && a[i].faceId == -1;
+    }
+    Check(same, "K8: disc stream is bit-deterministic per (tubeId, seed)");
+    bool inDisc = true;
+    for (auto const &r : a) {
+        inDisc = inDisc && r.ru * r.ru + r.rv * r.rv <= 1.0f + 1e-6f;
+    }
+    Check(inDisc, "K8: disc roots sit in the unit disc");
+    std::vector<TonicGuideRoot> c;
+    Check(TonicRootSampleDiscCpu(0, 8, 0.5f, center, frames[0], 16, &c, 0,
+                                 &err),
+          "K8: a second seed samples");
+    bool differs = false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        differs = differs || a[i].ru != c[i].ru || a[i].rv != c[i].rv;
+    }
+    Check(differs, "K8: seeds draw different roots");
+    // Freeze keeps the prefix bit-exactly and extends the tail.
+    std::vector<TonicGuideRoot> grown = a;
+    Check(TonicRootSampleDiscCpu(0, 7, 0.5f, center, frames[0], 24, &grown,
+                                 16, &err),
+          "K8: frozen refill extends the tail");
+    bool kept = grown.size() == 24;
+    for (size_t i = 0; kept && i < a.size(); ++i) {
+        kept = grown[i].ru == a[i].ru && grown[i].rv == a[i].rv;
+    }
+    Check(kept, "K8: frozen roots survive the refill bit-exactly");
+    // Blue-noise spacing: the closest pair is well above zero.
+    float minD2 = 1e30f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        for (size_t j = i + 1; j < a.size(); ++j) {
+            float const dx = a[i].ru - a[j].ru;
+            float const dy = a[i].rv - a[j].rv;
+            minD2 = std::min(minD2, dx * dx + dy * dy);
+        }
+    }
+    Check(minD2 > 1e-4f, "K8: dart throwing spaces the roots");
+    Check(!TonicRootSampleDiscCpu(0, 0, 0.0f, center, frames[0], 4, &a, 0,
+                                  &err),
+          "K8: zero radius fails");
+}
+
+void CheckK9()
+{
+    using namespace usdGenTonic;
+    TonicTubeDesc const tube = MakeTube();
+    std::vector<TonicFrame> frames = FramesFor(tube);
+    float const center[3] = {0.0f, 0.0f, 0.0f};
+    std::string err;
+    std::vector<TonicGuideRoot> roots;
+    Check(TonicRootSampleDiscCpu(0, 7, 0.5f, center, frames[0], 16, &roots,
+                                 0, &err),
+          "K9: fixture roots sample");
+    TonicFillDesc fill;
+    fill.density = 16.0f;
+    fill.cvCount = 8;
+    fill.seed = 7;
+    std::vector<float> points, scales;
+    Check(TonicGuideFillCpu(tube, frames, roots, fill, &points, &scales,
+                            &err),
+          "K9: fill runs");
+    Check(points.size() == 16 * 8 * 3 && scales.size() == 16,
+          "K9: guideCount x cvCount points + scales");
+    // Root CVs sit on their roots.
+    bool onRoot = true;
+    for (int g = 0; g < 16; ++g) {
+        onRoot = onRoot &&
+                 Near(points[size_t(g) * 24 + 0], roots[size_t(g)].px,
+                      1e-4f) &&
+                 Near(points[size_t(g) * 24 + 1], roots[size_t(g)].py,
+                      1e-4f) &&
+                 Near(points[size_t(g) * 24 + 2], roots[size_t(g)].pz, 1e-4f);
+    }
+    Check(onRoot, "K9: root CVs sit on their roots");
+    // Tips reach the tube tip on the uniform profile.
+    bool tipTop = true;
+    for (int g = 0; g < 16; ++g) {
+        tipTop = tipTop &&
+                 Near(points[size_t(g) * 24 + 7 * 3 + 1], 4.0f, 1e-3f);
+    }
+    Check(tipTop, "K9: uniform tips reach the tube tip");
+    // Edge bias pushes the mid-guide radius outward / inward.
+    auto meanMidR = [&](float bias) {
+        TonicFillDesc f = fill;
+        f.edgeBias = bias;
+        std::vector<float> p, s;
+        std::string e;
+        if (!TonicGuideFillCpu(tube, frames, roots, f, &p, &s, &e)) {
+            return -1.0f;
+        }
+        double acc = 0.0;
+        for (int g = 0; g < 16; ++g) {
+            float const x = p[size_t(g) * 24 + 3 * 3 + 0];
+            float const z = p[size_t(g) * 24 + 3 * 3 + 2];
+            acc += std::sqrt(double(x * x + z * z));
+        }
+        return float(acc / 16.0);
+    };
+    float const r0 = meanMidR(0.0f);
+    float const rPlus = meanMidR(1.0f);
+    float const rMinus = meanMidR(-1.0f);
+    Check(r0 > 0.0f && rPlus > r0 && rMinus < r0,
+          "K9: edgeBias pushes/pulls the mid-guide radius");
+    // The length profile shortens edge guides.
+    TonicFillDesc prof = fill;
+    prof.lengthProfile = {0.0f, 1.0f, 1.0f, 0.25f};
+    std::vector<float> pp, ps;
+    Check(TonicGuideFillCpu(tube, frames, roots, prof, &pp, &ps, &err),
+          "K9: profiled fill runs");
+    double tipY = 0.0;
+    for (int g = 0; g < 16; ++g) {
+        tipY += pp[size_t(g) * 24 + 7 * 3 + 1];
+    }
+    Check(tipY / 16.0 < 4.0, "K9: lengthProfile shortens the tips");
+    Check(!TonicGuideFillCpu(tube, frames, roots, fill, nullptr, nullptr,
+                             &err),
+          "K9: null outputs fail");
+    TonicFillDesc badBias = fill;
+    badBias.edgeBias = 2.0f;
+    Check(!TonicGuideFillCpu(tube, frames, roots, badBias, &pp, &ps, &err),
+          "K9: bias outside [-1, 1] fails");
+    TonicFillDesc badProf = fill;
+    badProf.lengthProfile = {0.0f};
+    Check(!TonicGuideFillCpu(tube, frames, roots, badProf, &pp, &ps, &err),
+          "K9: odd profile floats fail");
+}
+
+void CheckK10()
+{
+    using namespace usdGenTonic;
+    // Two straight guides of uneven CV spacing resample evenly.
+    float points[2 * 4 * 3] = {
+        0, 0, 0, 0, 1, 0, 0, 1.5f, 0, 0, 4, 0,
+        1, 0, 0, 1, 3, 0, 1, 3.5f, 0, 1, 4, 0,
+    };
+    int counts[2] = {4, 4};
+    float rootDirs[9] = {1, 0, 0, 0, 0, 1, 0, 1, 0};
+    std::vector<float> out;
+    std::vector<int> outCounts;
+    std::vector<double> outFrames;
+    std::string err;
+    Check(TonicGuideResampleCpu(points, counts, 2, 5, rootDirs, &out,
+                                &outCounts, &outFrames, &err),
+          "K10: resample runs");
+    Check(out.size() == 2 * 5 * 3 && outCounts == std::vector<int>({5, 5}) &&
+              outFrames.size() == 32,
+          "K10: fixed cvCount + one 16-double frame per guide");
+    bool even = true;
+    for (int g = 0; g < 2; ++g) {
+        for (int c = 0; c < 5; ++c) {
+            float const y =
+                out[(size_t(g) * 5 + size_t(c)) * 3 + 1];
+            even = even && Near(y, float(c), 1e-4f);
+        }
+    }
+    Check(even, "K10: straight guides resample arc-length evenly");
+    bool frame = NearD(outFrames[0], 1.0) && NearD(outFrames[5], 0.0) &&
+                 NearD(outFrames[6], 1.0) && NearD(outFrames[10], 0.0) &&
+                 NearD(outFrames[12], 0.0) && NearD(outFrames[15], 1.0);
+    Check(frame, "K10: root frames carry dirs + root position");
+    Check(!TonicGuideResampleCpu(nullptr, counts, 2, 5, rootDirs, &out,
+                                 &outCounts, &outFrames, &err),
+          "K10: null points fail");
+    int badCounts[1] = {1};
+    Check(!TonicGuideResampleCpu(points, badCounts, 1, 5, rootDirs, &out,
+                                 &outCounts, &outFrames, &err),
+          "K10: single-CV guides fail");
+}
+
+void CheckK11()
+{
+    using namespace usdGenTonic;
+    // Identity projection: NDC == world, w = 800x600.
+    float vp[16] = {0};
+    vp[0] = vp[5] = vp[10] = vp[15] = 1.0f;
+    float verts[9] = {
+        0.0f, 0.0f, 0.0f,  // center -> (400, 300)
+        0.5f, 0.5f, 0.0f,  // -> (600, 150)
+        -0.5f, -0.5f, 0.5f,  // -> (200, 450), nearer depth wins ties
+    };
+    TonicPickSets sets;
+    sets.tubeVerts = verts;
+    sets.tubeVertCount = 3;
+    TonicPickHit hit = TonicPickCpu(sets, TonicPick_TubeVert, vp, 800, 600,
+                                    400.0f, 300.0f, 5.0f);
+    Check(hit.hit && hit.kind == TonicPick_TubeVert && hit.index == 0 &&
+              Near(hit.distPx, 0.0f, 1e-3f),
+          "K11: the projected pixel hits its vertex");
+    hit = TonicPickCpu(sets, TonicPick_TubeVert, vp, 800, 600, 10.0f, 10.0f,
+                       5.0f);
+    Check(!hit.hit, "K11: empty pixels miss");
+    hit = TonicPickCpu(sets, TonicPick_CenterCV, vp, 800, 600, 400.0f,
+                       300.0f, 5.0f);
+    Check(!hit.hit, "K11: the kind mask excludes absent kinds");
+    // Depth breaks pixel ties toward the viewer.
+    float tie[6] = {0.0f, 0.0f, 0.9f, 0.0f, 0.0f, -0.9f};
+    TonicPickSets tieSets;
+    tieSets.tubeVerts = tie;
+    tieSets.tubeVertCount = 2;
+    hit = TonicPickCpu(tieSets, TonicPick_TubeVert, vp, 800, 600, 400.0f,
+                       300.0f, 5.0f);
+    Check(hit.hit && hit.index == 1 && Near(hit.depth, -0.9f, 1e-5f),
+          "K11: depth breaks pixel ties toward the viewer");
+    // Section CVs report (ring, slot); guides report (guide, cv).
+    float sections[12] = {0.0f, 0.0f, 0.0f, 0.25f, 0.0f, 0.0f,
+                          0.0f, 0.25f, 0.0f, 0.25f, 0.25f, 0.0f};
+    TonicPickSets secSets;
+    secSets.sectionCVs = sections;
+    secSets.sectionCVCount = 4;
+    secSets.sectionRingVerts = 2;
+    hit = TonicPickCpu(secSets, TonicPick_SectionCV, vp, 800, 600, 400.0f,
+                       300.0f, 5.0f);
+    Check(hit.hit && hit.index == 0 && hit.subIndex == 0,
+          "K11: section hits report (ring, slot)");
+    hit = TonicPickCpu(secSets, TonicPick_SectionCV, vp, 800, 600, 500.0f,
+                       300.0f, 5.0f);
+    Check(hit.hit && hit.index == 0 && hit.subIndex == 1,
+          "K11: section hits find the right slot");
+    TonicPickSets guideSets;
+    guideSets.guideCVs = sections;
+    guideSets.guideCount = 2;
+    guideSets.guideCvCount = 2;
+    hit = TonicPickCpu(guideSets, TonicPick_Guide, vp, 800, 600, 400.0f,
+                       225.0f, 5.0f);
+    Check(hit.hit && hit.index == 1 && hit.subIndex == 0,
+          "K11: guide hits report (guide, cv)");
+    // Behind the camera never hits (w <= 0).
+    float behind[16] = {0};
+    behind[0] = behind[5] = behind[10] = 1.0f;
+    behind[15] = -1.0f;  // w = -1 for every point
+    hit = TonicPickCpu(sets, TonicPick_TubeVert, behind, 800, 600, 400.0f,
+                       300.0f, 1000.0f);
+    Check(!hit.hit, "K11: points behind the camera miss");
+}
+
+void CheckModelTubeMode()
+{
+    using namespace usdGenTonic;
+    TonicModel model;
+    Check(model.BuildTestTube(), "tube: the test tube builds");
+    // The P0/P1 position contract survives P3 untouched.
+    TonicModel::HostTubeMesh const &mesh = model.GetHostMesh();
+    Check(Near(mesh.positions[0], 0.5f, 1e-6f) &&
+              Near(mesh.positions[1], 0.0f, 1e-6f) &&
+              Near(mesh.positions[2], 0.0f, 1e-6f),
+          "tube: ring-0 slot-0 is still (0.5, 0, 0)");
+    Check(model.GetSectionCount() == 5,
+          "tube: default sections match the ring count");
+    TonicTubeSection sec;
+    Check(model.GetSection(0, &sec) && sec.u.size() == 8 &&
+              Near(sec.u[0], 0.5f, 1e-6f) && Near(sec.v[0], 0.0f, 1e-6f),
+          "tube: default section 0 is the R=0.5 circle");
+    Check(model.GetTubeRegionId() == -1,
+          "tube: the test tube starts unrooted");
+    // Center CV ops.
+    Check(model.GetCenterCVCount() == 5, "tube: five center CVs");
+    Check(model.MoveCenterCV(2, 1.0f, 0.0f, 0.0f),
+          "tube: center CV moves");
+    float x = 0, y = 0, z = 0;
+    Check(model.GetCenterCV(2, &x, &y, &z) && Near(x, 1.0f) &&
+              Near(y, 2.0f),
+          "tube: the moved CV lands on (1, 2, 0)");
+    Check(!model.MoveCenterCV(9, 1.0f, 0.0f, 0.0f),
+          "tube: out-of-range CV moves fail");
+    Check(model.InsertCenterCV(2), "tube: center CV inserts");
+    Check(model.GetCenterCVCount() == 6, "tube: insert grows the census");
+    Check(model.DeleteCenterCV(2), "tube: center CV deletes");
+    Check(model.GetCenterCVCount() == 5, "tube: delete shrinks the census");
+    {
+        TonicModel floor;
+        floor.BuildTestTube();
+        floor.DeleteCenterCV(0);
+        floor.DeleteCenterCV(0);
+        floor.DeleteCenterCV(0);
+        Check(floor.GetCenterCVCount() == 2 &&
+                  !floor.DeleteCenterCV(0),
+              "tube: delete keeps >= 2 CVs");
+    }
+    // Soft selection spreads the move with the smoothstep falloff.
+    Check(model.SetSoftSelection(0.5f, 0.5f), "tube: soft selection sets");
+    float sc = 0, sr = 0;
+    model.GetSoftSelection(&sc, &sr);
+    Check(Near(sc, 0.5f) && Near(sr, 0.5f),
+          "tube: soft selection reads back");
+    Check(!model.SetSoftSelection(0.0f, -1.0f),
+          "tube: negative soft radius fails");
+    {
+        TonicModel soft;
+        soft.BuildTestTube();
+        soft.SetSoftSelection(0.5f, 0.5f);
+        soft.MoveCenterCV(2, 1.0f, 0.0f, 0.0f);
+        float xa = 0, xb = 0, xc = 0, ya = 0, yb = 0, yc = 0, za = 0, zb = 0,
+              zc = 0;
+        soft.GetCenterCV(2, &xb, &yb, &zb);
+        soft.GetCenterCV(1, &xa, &ya, &za);
+        soft.GetCenterCV(3, &xc, &yc, &zc);
+        Check(Near(xb, 1.0f) && xa > 0.0f && xa < 1.0f &&
+                  Near(xa, xc, 1e-5f),
+              "tube: soft moves peak at the CV and spread symmetrically");
+    }
+    {
+        // V6: soft selection is a property of the MOVE, not of tube 0.
+        // MoveTubeCenterCV on a subdivided child used to snap one CV while
+        // the same drag on the root feathered (plan/17 §5.2, the V0b note
+        // there says the per-tube spellings keep tube 0's behaviour "soft
+        // selection included" — before V6 they did not).
+        TonicModel child;
+        child.BuildTestTube();
+        std::vector<int> kids;
+        Check(child.SubdivideTube(0, 2, "kmeans", 3, &kids) &&
+                  kids.size() == 2,
+              "tube: the soft-selection child model subdivides");
+        if (kids.size() == 2) {
+            TonicTubeDesc before;
+            child.GetTubeDesc(kids[0], &before);
+            child.SetSoftSelection(0.5f, 0.5f);
+            Check(child.MoveTubeCenterCV(kids[0], 2, 1.0f, 0.0f, 0.0f),
+                  "tube: a child center CV moves with soft selection on");
+            TonicTubeDesc after;
+            child.GetTubeDesc(kids[0], &after);
+            bool shaped = after.centerX.size() == before.centerX.size() &&
+                          before.centerX.size() >= 5;
+            if (shaped) {
+                float const d1 = after.centerX[1] - before.centerX[1];
+                float const d2 = after.centerX[2] - before.centerX[2];
+                float const d3 = after.centerX[3] - before.centerX[3];
+                Check(Near(d2, 1.0f) && d1 > 0.0f && d1 < 1.0f &&
+                          Near(d1, d3, 1e-5f),
+                      "tube: a per-tube move feathers exactly as tube 0's "
+                      "does");
+            } else {
+                Check(false, "tube: the child has a comparable center");
+            }
+            child.SetSoftSelection(0.0f, 0.0f);
+        }
+    }
+    Check(model.SetSoftSelection(0.0f, 0.0f), "tube: soft selection clears");
+    // Length + sections.
+    Check(model.SetTubeLength(8.0f), "tube: length sets");
+    {
+        // On a straight tube the tip scales exactly with the length (the
+        // shared model above is bent, so lengthen a fresh one).
+        TonicModel straight;
+        straight.BuildTestTube();
+        straight.SetTubeLength(8.0f);
+        float tx = 0, ty = 0, tz = 0;
+        Check(straight.GetCenterCV(4, &tx, &ty, &tz) &&
+                  Near(tx, 0.0f, 1e-5f) && Near(ty, 8.0f, 1e-4f) &&
+                  Near(tz, 0.0f, 1e-5f),
+              "tube: the tip doubles with the length");
+    }
+    Check(!model.SetTubeLength(0.0f), "tube: zero length fails");
+    Check(model.MoveSectionRing(1, 0.25f, 0.0f), "tube: ring moves");
+    Check(model.GetSection(1, &sec) && Near(sec.u[0], 0.75f, 1e-5f),
+          "tube: the ring offset lands on its CVs");
+    Check(model.ScaleSectionRing(1, 2.0f), "tube: ring scales");
+    Check(model.GetSection(1, &sec) && Near(sec.scale, 2.0f, 1e-6f),
+          "tube: ring scale reads back");
+    Check(!model.ScaleSectionRing(1, 0.0f),
+          "tube: non-positive ring scale fails");
+    Check(model.TwistSectionRing(1, 0.5f), "tube: ring twists");
+    Check(model.GetSection(1, &sec) && Near(sec.twist, 0.5f, 1e-6f),
+          "tube: ring twist reads back");
+    Check(model.MoveSectionCV(1, 3, 0.1f, -0.1f), "tube: section CV drags");
+    Check(model.GetSection(1, &sec) &&
+              Near(sec.u[3], 0.25f + 0.5f * std::cos(3.0f * 0.78539816339f) +
+                                 0.1f,
+                   1e-4f),
+          "tube: the dragged CV lands on its offset");
+    Check(!model.MoveSectionCV(1, 99, 0.1f, 0.0f),
+          "tube: out-of-range slot drags fail");
+    Check(model.AddSectionRing(0.5f), "tube: rings insert at t");
+    Check(model.GetSectionCount() == 6, "tube: insert grows the rings");
+    Check(!model.AddSectionRing(0.0f) && !model.AddSectionRing(2.0f),
+          "tube: inserts outside the open range fail");
+    Check(model.CopySectionRing(1, 2), "tube: rings copy");
+    {
+        TonicTubeSection src, dst;
+        model.GetSection(1, &src);
+        model.GetSection(2, &dst);
+        Check(src.u == dst.u && src.v == dst.v &&
+                  Near(src.scale, dst.scale) && Near(src.twist, dst.twist) &&
+                  !Near(src.t, dst.t),
+              "tube: copies carry CVs/scale/twist, keep t");
+    }
+    Check(model.RemoveSectionRing(2), "tube: rings remove");
+    Check(model.GetSectionCount() == 5, "tube: remove shrinks the rings");
+    // Relax smooths the kink; root snap needs a scalp (fails cleanly).
+    {
+        TonicModel kink;
+        kink.BuildTestTube();
+        kink.MoveCenterCV(2, 2.0f, 0.0f, 0.0f);
+        Check(kink.RelaxCenter(1.0f, 1), "tube: relax runs");
+        kink.GetCenterCV(2, &x, &y, &z);
+        Check(Near(x, 0.0f, 1e-4f),
+              "tube: full relax pulls the kink onto the chord");
+        Check(!kink.RelaxCenter(2.0f, 1),
+              "tube: strength outside [0, 1] fails");
+    }
+    Check(!model.SnapRootToScalp() && !model.MatchSurface(),
+          "tube: scalp ops fail cleanly unbound");
+    // Display segments re-tessellate the sections path.
+    Check(model.SetDisplaySegments(2), "tube: display segments set");
+    Check(model.GetDisplaySegments() == 2, "tube: segments read back");
+    Check(!model.SetDisplaySegments(0), "tube: zero segments fail");
+    {
+        size_t const verts = model.GetHostMesh().positions.size() / 3;
+        Check(verts == size_t((5 - 1) * 2 + 1) * 8,
+              "tube: segments follow (nSec-1)*seg+1 x ringVerts");
+    }
+    // K4 frames are cached by Sync.
+    Check(model.GetFrames().size() == 5, "tube: K4 frames cache the center");
+    // Region rooting round-trips.
+    model.SetTubeRegionId(3);
+    Check(model.GetTubeRegionId() == 3, "tube: region id round-trips");
+    Check(model.Snapshot().sections.size() == 5,
+          "tube: snapshots carry the sections");
+}
+
+void CheckModelFillMode()
+{
+    using namespace usdGenTonic;
+    TonicModel model;
+    model.BuildTestTube();
+    TonicModel::FillParams params;
+    params.density = 16.0f;
+    params.cvCount = 8;
+    params.seed = 7;
+    params.edgeBias = 0.25f;
+    Check(model.SetFillParams(params), "fill: params validate");
+    params.edgeBias = 2.0f;
+    Check(!model.SetFillParams(params), "fill: bias outside [-1, 1] fails");
+    params.edgeBias = 0.25f;
+    params.lengthProfile = {0.0f};
+    Check(!model.SetFillParams(params), "fill: odd profile floats fail");
+    params.lengthProfile.clear();
+    Check(model.SetFillParams(params), "fill: params reset");
+    Check(model.GetPreviewFraction() == 0.25f,
+          "fill: preview defaults to 25%");
+    Check(!model.GetFreezeRoots(), "fill: roots start unfrozen");
+    Check(model.SetPreviewFraction(0.5f), "fill: preview fraction sets");
+    Check(!model.SetPreviewFraction(2.0f),
+          "fill: fractions outside [0, 1] fail");
+    Check(model.SetPreviewFraction(0.25f), "fill: preview resets to 25%");
+    // Full refill, then the 25% drag refill, then release.
+    Check(model.RefillGuides(1.0f), "fill: full refill runs");
+    Check(model.GetGuides().guideCount == 16 &&
+              model.GetGuides().cvCount == 8,
+          "fill: full refill holds round(density) x cvCount");
+    Check(model.GetRoots().size() == 16, "fill: roots census matches");
+    Check(model.RefillGuides(-1.0f), "fill: drag refill runs");
+    Check(model.GetGuides().guideCount == 4,
+          "fill: drag refill holds 25% of the guides");
+    {
+        TonicModel::GuidePreview preview = model.GetGuidePreview();
+        Check(preview.guideCount == 4 && preview.points.size() == 4 * 8 * 3,
+              "fill: the preview stages points + counts");
+    }
+    Check(model.RefillGuides(1.0f), "fill: release refill runs");
+    Check(model.GetGuides().guideCount == 16,
+          "fill: release restores full density");
+    // Freeze keeps the prefix bit-exactly across a density change.
+    model.SetFreezeRoots(true);
+    std::vector<float> before = model.GetGuides().points;
+    params.density = 20.0f;
+    Check(model.SetFillParams(params), "fill: density raises under freeze");
+    Check(model.RefillGuides(1.0f), "fill: frozen refill runs");
+    Check(model.GetGuides().guideCount == 20,
+          "fill: frozen refill grows the count");
+    std::vector<float> const &after = model.GetGuides().points;
+    bool kept = after.size() == 20 * 8 * 3;
+    for (size_t i = 0; kept && i < before.size(); ++i) {
+        kept = after[i] == before[i];
+    }
+    Check(kept, "fill: frozen guides survive bit-exactly");
+    model.SetFreezeRoots(false);
+    // Guide generation is a pure snapshot function (the commit/hydrate
+    // contract): same snapshot, same guides.
+    TonicModel::TubeSnapshot shot = model.Snapshot();
+    TonicGuideSet g1 = TonicGenerateGuides(shot);
+    TonicGuideSet g2 = TonicGenerateGuides(shot);
+    Check(g1.points == g2.points && g1.frames == g2.frames &&
+              g1.ids == g2.ids,
+          "fill: snapshot guides are bit-deterministic");
+    Check(g1.guideCount == 20, "fill: snapshot guides follow the density");
+}
+
+// The 4x4 quad grid in the XZ plane (y = 0), faces x-major: face
+// (ix, iz) = ix * 4 + iz, verts row-major over the 5x5 lattice.
+struct Grid {
+    std::vector<float> points;
+    std::vector<int> counts;
+    std::vector<int> indices;
+};
+
+Grid MakeGrid()
+{
+    Grid grid;
+    for (int iz = 0; iz < 5; ++iz) {
+        for (int ix = 0; ix < 5; ++ix) {
+            grid.points.push_back(float(ix));
+            grid.points.push_back(0.0f);
+            grid.points.push_back(float(iz));
+        }
+    }
+    for (int ix = 0; ix < 4; ++ix) {
+        for (int iz = 0; iz < 4; ++iz) {
+            grid.counts.push_back(4);
+            // +Y winding (the tonic-graph-scalp.usda convention).
+            int const v00 = iz * 5 + ix;
+            grid.indices.push_back(v00);
+            grid.indices.push_back(v00 + 5);
+            grid.indices.push_back(v00 + 6);
+            grid.indices.push_back(v00 + 1);
+        }
+    }
+    return grid;
+}
+
+void CheckAutoTube()
+{
+    using namespace usdGenTonic;
+    Grid grid = MakeGrid();
+    TonicModel model;
+    Check(!model.BuildTubeFromRegion(0, 4, 8, 3.0f),
+          "auto-tube: unbound scalp fails cleanly");
+    Check(model.BindScalp(grid.points, grid.counts, grid.indices),
+          "auto-tube: the grid scalp binds");
+    Check(!model.BuildTubeFromRegion(0, 4, 8, 3.0f),
+          "auto-tube: unknown regions fail cleanly");
+    // A square loop around the middle 2x2 faces via downward raycasts.
+    float down[3] = {0.0f, -1.0f, 0.0f};
+    int ids[4] = {-1, -1, -1, -1};
+    float corners[4][3] = {
+        {1.2f, 2.0f, 1.2f}, {2.8f, 2.0f, 1.2f},
+        {2.8f, 2.0f, 2.8f}, {1.2f, 2.0f, 2.8f},
+    };
+    for (int i = 0; i < 4; ++i) {
+        TonicHit hit = model.Raycast(corners[i], down);
+        if (hit.hit) {
+            ids[i] = model.GraphAddNode(hit);
+        }
+    }
+    bool nodes = ids[0] >= 0 && ids[1] >= 0 && ids[2] >= 0 && ids[3] >= 0;
+    Check(nodes, "auto-tube: four loop nodes place");
+    if (nodes) {
+        for (int i = 0; i < 4; ++i) {
+            model.GraphConnect(ids[i], ids[(i + 1) % 4]);
+        }
+        Check(model.Rasterise(), "auto-tube: K3 rasterises the loop");
+        std::vector<int> faces = model.TubeRegionFaces();
+        Check(faces.empty(), "auto-tube: no faces before rooting");
+        Check(model.BuildTubeFromRegion(0, 4, 8, 3.0f),
+              "auto-tube: the region seeds a tube");
+        Check(model.GetTubeRegionId() == 0,
+              "auto-tube: the tube roots in region 0");
+        Check(model.GetCenterCVCount() == 4,
+              "auto-tube: center count follows the request");
+        faces = model.TubeRegionFaces();
+        Check(!faces.empty(), "auto-tube: the tube claims region faces");
+        float x0 = 0, y0 = 0, z0 = 0, x3 = 0, y3 = 0, z3 = 0;
+        model.GetCenterCV(0, &x0, &y0, &z0);
+        model.GetCenterCV(3, &x3, &y3, &z3);
+        Check(Near(x0, 2.0f, 0.6f) && Near(z0, 2.0f, 0.6f),
+              "auto-tube: the root sits over the region centroid");
+        Check(y3 > y0 + 2.0f && Near(x3, x0, 1e-3f) &&
+                  Near(z3, z0, 1e-3f),
+              "auto-tube: the center rises along +Y (the grid normal)");
+        // Mesh fill roots on the claimed faces.
+        TonicModel::FillParams params;
+        params.density = 4.0f;
+        params.cvCount = 6;
+        params.seed = 11;
+        Check(model.SetFillParams(params), "auto-tube: fill params set");
+        Check(model.RefillGuides(1.0f), "auto-tube: mesh refill runs");
+        Check(model.GetGuides().guideCount > 0,
+              "auto-tube: mesh roots fill the region");
+        bool onFace = true;
+        for (auto const &r : model.GetRoots()) {
+            onFace = onFace && r.faceId >= 0;
+        }
+        Check(onFace, "auto-tube: every root names its scalp face");
+        // The pure scalp-bound twin agrees with the model refill.
+        TonicModel::TubeSnapshot shot = model.Snapshot();
+        TonicGuideSet guides = TonicGenerateGuidesOnScalp(
+            shot, *model.GetScalp(), faces.data(), int(faces.size()));
+        Check(guides.points == model.GetGuides().points,
+              "auto-tube: model + pure mesh fill agree bit-exactly");
+        // Root snap + match-surface run against the live scalp.
+        Check(model.SnapRootToScalp(), "auto-tube: root snap runs");
+        model.GetCenterCV(0, &x0, &y0, &z0);
+        Check(Near(y0, 0.0f, 1e-3f),
+              "auto-tube: root snap seats the root on the scalp");
+        Check(model.MatchSurface(), "auto-tube: match-surface runs");
+    }
+    Check(!model.BuildTubeFromRegion(0, 1, 8, 3.0f),
+          "auto-tube: centerCount < 2 fails");
+    Check(!model.BuildTubeFromRegion(0, 4, 2, 3.0f),
+          "auto-tube: ringVerts < 3 fails");
+}
+
+void CheckCApi()
+{
+    TonicModelContext *ctx = nullptr;
+    Check(Tonic_Create(&ctx) == TONIC_OK && ctx != nullptr,
+          "C ABI: context creates");
+    Check(Tonic_BuildTestTube(ctx, 5, 8, 0.5f, 4.0f) == TONIC_OK,
+          "C ABI: the test tube builds");
+    Check(Tonic_MoveCenterCV(ctx, 2, 1.0f, 0.0f, 0.0f) == TONIC_OK,
+          "C ABI: center CV moves");
+    float xyz[3] = {0, 0, 0};
+    Check(Tonic_GetCenterCV(ctx, 2, xyz) == TONIC_OK &&
+              Near(xyz[0], 1.0f) && Near(xyz[1], 2.0f),
+          "C ABI: center CV reads");
+    Check(Tonic_GetCenterCVCount(ctx) == 5, "C ABI: center census");
+    Check(Tonic_InsertCenterCV(ctx, 2) == TONIC_OK &&
+              Tonic_GetCenterCVCount(ctx) == 6,
+          "C ABI: center CV inserts");
+    Check(Tonic_DeleteCenterCV(ctx, 2) == TONIC_OK &&
+              Tonic_GetCenterCVCount(ctx) == 5,
+          "C ABI: center CV deletes");
+    Check(Tonic_SetTubeLength(ctx, 8.0f) == TONIC_OK,
+          "C ABI: tube length sets");
+    Check(Tonic_GetSectionCount(ctx) == 5, "C ABI: section census");
+    float uv[16] = {0};
+    float t = 0, sc = 0, tw = 0;
+    int count = 0;
+    Check(Tonic_GetSection(ctx, 0, &t, uv, 16, &count, &sc, &tw) ==
+                  TONIC_OK &&
+              count == 8 && Near(uv[0], 0.5f),
+          "C ABI: sections read");
+    Check(Tonic_GetSection(ctx, 0, nullptr, uv, 4, &count, nullptr,
+                           nullptr) == TONIC_ERROR,
+          "C ABI: short section outputs fail");
+    Check(Tonic_MoveSectionRing(ctx, 1, 0.25f, 0.0f) == TONIC_OK &&
+              Tonic_ScaleSectionRing(ctx, 1, 2.0f) == TONIC_OK &&
+              Tonic_TwistSectionRing(ctx, 1, 0.5f) == TONIC_OK &&
+              Tonic_MoveSectionCV(ctx, 1, 3, 0.1f, 0.0f) == TONIC_OK,
+          "C ABI: ring + CV gizmos run");
+    int rings = 0;
+    Check(Tonic_AddSectionRing(ctx, 0.5f, &rings) == TONIC_OK && rings == 6,
+          "C ABI: rings insert");
+    Check(Tonic_CopySectionRing(ctx, 1, 2) == TONIC_OK &&
+              Tonic_RemoveSectionRing(ctx, 2) == TONIC_OK &&
+              Tonic_GetSectionCount(ctx) == 5,
+          "C ABI: rings copy + remove");
+    Check(Tonic_SetSoftSelection(ctx, 0.5f, 0.5f) == TONIC_OK,
+          "C ABI: soft selection sets");
+    float c = 0, r = 0;
+    Check(Tonic_GetSoftSelection(ctx, &c, &r) == TONIC_OK &&
+              Near(c, 0.5f) && Near(r, 0.5f),
+          "C ABI: soft selection reads");
+    Check(Tonic_RelaxCenter(ctx, 0.5f, 2) == TONIC_OK,
+          "C ABI: relax runs");
+    Check(Tonic_SetDisplaySegments(ctx, 2) == TONIC_OK &&
+              Tonic_GetDisplaySegments(ctx) == 2,
+          "C ABI: display segments round-trip");
+    Check(Tonic_SetTubeRegionId(ctx, 3) == TONIC_OK &&
+              Tonic_GetTubeRegionId(ctx) == 3,
+          "C ABI: region id round-trips");
+    Check(Tonic_SetFillParams(ctx, 16.0f, 8, 7, 0.25f, nullptr, 0) ==
+              TONIC_OK,
+          "C ABI: fill params set");
+    Check(Tonic_SetFillParams(ctx, 16.0f, 8, 7, 2.0f, nullptr, 0) ==
+              TONIC_ERROR,
+          "C ABI: fill bias validates");
+    float density = 0, edgeBias = 0;
+    int cvCount = 0, seed = 0, floats = -1;
+    Check(Tonic_GetFillParams(ctx, &density, &cvCount, &seed, &edgeBias,
+                              nullptr, 0, &floats) == TONIC_OK &&
+              Near(density, 16.0f) && cvCount == 8 && seed == 7 &&
+              Near(edgeBias, 0.25f) && floats == 0,
+          "C ABI: fill params read");
+    Check(Tonic_GetPreviewFraction(ctx) == 0.25f, "C ABI: preview default");
+    Check(Tonic_SetPreviewFraction(ctx, 0.5f) == TONIC_OK &&
+              Tonic_GetPreviewFraction(ctx) == 0.5f,
+          "C ABI: preview fraction round-trips");
+    Check(Tonic_SetFreezeRoots(ctx, 1) == TONIC_OK &&
+              Tonic_GetFreezeRoots(ctx) == 1,
+          "C ABI: freeze roots round-trips");
+    Check(Tonic_SetFreezeRoots(ctx, 0) == TONIC_OK,
+          "C ABI: freeze clears");
+    Check(Tonic_RefillGuides(ctx, 1.0f) == TONIC_OK,
+          "C ABI: refill runs");
+    int guides = 0, cv = 0;
+    Check(Tonic_GetGuideCounts(ctx, &guides, &cv) == TONIC_OK &&
+              guides == 16 && cv == 8,
+          "C ABI: guide census reads");
+    float pts[16 * 8 * 3];
+    int counts[16];
+    int got = 0;
+    Check(Tonic_ReadGuidePreview(ctx, pts, 16 * 8 * 3, counts, 16, &got) ==
+                  TONIC_OK &&
+              got == 16,
+          "C ABI: guide preview reads");
+    Check(Tonic_ReadGuidePreview(ctx, pts, 8, counts, 16, &got) ==
+              TONIC_ERROR,
+          "C ABI: short preview outputs fail");
+    int faceIds[16];
+    float rpos[16 * 3], rru[16 * 2];
+    Check(Tonic_ReadGuideRoots(ctx, faceIds, rpos, rru, 16, &got) ==
+                  TONIC_OK &&
+              got == 16,
+          "C ABI: guide roots read");
+    float vp[16] = {0};
+    vp[0] = vp[5] = vp[10] = vp[15] = 1.0f;
+    int hit = 0, index = -1, sub = -1;
+    unsigned kind = 0;
+    float dist = 0, depth = 0;
+    Check(Tonic_Pick(ctx, vp, 800, 600, 400.0f, 300.0f, 5.0f, 0x1Fu, &hit,
+                     &kind, &index, &sub, &dist, &depth) == TONIC_OK,
+          "C ABI: pick runs");
+    Check(Tonic_Pick(nullptr, vp, 800, 600, 400.0f, 300.0f, 5.0f, 0x1Fu,
+                     &hit, &kind, &index, &sub, &dist, &depth) ==
+              TONIC_ERROR,
+          "C ABI: null pick fails");
+    Check(Tonic_Destroy(ctx) == TONIC_OK, "C ABI: context destroys");
+}
+
+void CheckProbes()
+{
+    using namespace usdGenTonic;
+    // TN-1 probe (informational): a center move + preview refill on a
+    // 200-section tube; the gate runs on the reference scene, not here.
+    {
+        TonicModel model;
+        model.BuildTestTube();
+        for (int i = 0; i < 195; ++i) {
+            model.InsertCenterCV(2);
+        }
+        TonicModel::FillParams params;
+        params.density = 4000.0f;
+        params.cvCount = 16;
+        Check(model.SetFillParams(params), "probe: scale params set");
+        auto t0 = std::chrono::steady_clock::now();
+        bool ok = model.MoveCenterCV(100, 0.1f, 0.0f, 0.0f);
+        ok = ok && model.RefillGuides(0.25f);
+        auto t1 = std::chrono::steady_clock::now();
+        double ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::printf("info: move + 25%% refill on 200 CVs / %d guides: "
+                    "%.2f ms\n",
+                    model.GetGuides().guideCount, ms);
+        Check(ok, "probe: the scaled move + refill completes");
+    }
+    // TN-2 probe (informational): CPU pick over 770K tube-vert
+    // candidates; the gate is the K11 device lane below (TN-2) plus the
+    // production wiring gate (pick-scale).
+    {
+        int const n = 770000;
+        std::vector<float> verts(size_t(n) * 3);
+        for (int i = 0; i < n; ++i) {
+            verts[size_t(i) * 3 + 0] = float(i % 1000) / 500.0f - 1.0f;
+            verts[size_t(i) * 3 + 1] = float((i / 1000) % 770) / 385.0f -
+                                       1.0f;
+            verts[size_t(i) * 3 + 2] = 0.0f;
+        }
+        float vp[16] = {0};
+        vp[0] = vp[5] = vp[10] = vp[15] = 1.0f;
+        TonicPickSets sets;
+        sets.tubeVerts = verts.data();
+        sets.tubeVertCount = n;
+        auto t0 = std::chrono::steady_clock::now();
+        TonicPickHit hit = TonicPickCpu(sets, TonicPick_TubeVert, vp, 800,
+                                        600, 400.0f, 300.0f, 5.0f);
+        auto t1 = std::chrono::steady_clock::now();
+        double ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::printf("info: CPU pick over %d candidates: %.2f ms (hit=%d)\n",
+                    n, ms, hit.hit ? 1 : 0);
+        Check(true, "probe: the scaled CPU pick completes");
+    }
+}
+
+#ifdef USDGEN_TONIC_HAS_CUDA
+bool HaveCudaDevice()
+{
+    int count = 0;
+    return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
+}
+
+void CheckCudaParity()
+{
+    using namespace usdGenTonic;
+    if (!HaveCudaDevice()) {
+        std::printf("skip: no CUDA device for the TN-6 parity checks\n");
+        return;
+    }
+    Check(sizeof(TonicDeviceRoot) == sizeof(int) + 7 * sizeof(float),
+          "TN-6: the device root is tightly packed");
+    char err[256] = {0};
+    TonicTubeDesc tube = MakeTube();
+    tube.sections[1].twist = 0.3f;
+    tube.sections[1].scale = 1.5f;
+    int const nCv = int(tube.centerX.size());
+    int const nSec = int(tube.sections.size());
+    int const rv = tube.ringVerts;
+    cudaStream_t stream = nullptr;
+    Check(cudaStreamCreate(&stream) == cudaSuccess,
+          "TN-6: a stream creates");
+    // Upload the center + sections once for K4/K5/K9.
+    float *dCx = nullptr, *dCy = nullptr, *dCz = nullptr;
+    TonicFrame *dFrames = nullptr;
+    float *dSecT = nullptr, *dSecU = nullptr, *dSecV = nullptr,
+          *dSecS = nullptr, *dSecTw = nullptr;
+    cudaMalloc(&dCx, sizeof(float) * size_t(nCv));
+    cudaMalloc(&dCy, sizeof(float) * size_t(nCv));
+    cudaMalloc(&dCz, sizeof(float) * size_t(nCv));
+    cudaMalloc(&dFrames, sizeof(TonicFrame) * size_t(nCv));
+    cudaMalloc(&dSecT, sizeof(float) * size_t(nSec));
+    cudaMalloc(&dSecU, sizeof(float) * size_t(nSec) * size_t(rv));
+    cudaMalloc(&dSecV, sizeof(float) * size_t(nSec) * size_t(rv));
+    cudaMalloc(&dSecS, sizeof(float) * size_t(nSec));
+    cudaMalloc(&dSecTw, sizeof(float) * size_t(nSec));
+    cudaMemcpy(dCx, tube.centerX.data(), sizeof(float) * size_t(nCv),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dCy, tube.centerY.data(), sizeof(float) * size_t(nCv),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dCz, tube.centerZ.data(), sizeof(float) * size_t(nCv),
+               cudaMemcpyHostToDevice);
+    // (Sized by assign throughout: `X(size_t(n))` parses as a function
+    // declaration — the most vexing parse.)
+    std::vector<float> secT, secU, secV, secS, secTw;
+    secT.assign(size_t(nSec), 0.0f);
+    secU.assign(size_t(nSec) * size_t(rv), 0.0f);
+    secV.assign(size_t(nSec) * size_t(rv), 0.0f);
+    secS.assign(size_t(nSec), 0.0f);
+    secTw.assign(size_t(nSec), 0.0f);
+    for (int i = 0; i < nSec; ++i) {
+        secT[size_t(i)] = tube.sections[size_t(i)].t;
+        secS[size_t(i)] = tube.sections[size_t(i)].scale;
+        secTw[size_t(i)] = tube.sections[size_t(i)].twist;
+        for (int k = 0; k < rv; ++k) {
+            secU[size_t(i) * size_t(rv) + size_t(k)] =
+                tube.sections[size_t(i)].u[size_t(k)];
+            secV[size_t(i) * size_t(rv) + size_t(k)] =
+                tube.sections[size_t(i)].v[size_t(k)];
+        }
+    }
+    cudaMemcpy(dSecT, secT.data(), sizeof(float) * size_t(nSec),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dSecU, secU.data(), sizeof(float) * secU.size(),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dSecV, secV.data(), sizeof(float) * secV.size(),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dSecS, secS.data(), sizeof(float) * size_t(nSec),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dSecTw, secTw.data(), sizeof(float) * size_t(nSec),
+               cudaMemcpyHostToDevice);
+    // K4: bit-exact (arithmetic only).
+    std::vector<TonicFrame> hFrames = FramesFor(tube);
+    Check(TonicLaunchCenterFrames(dCx, dCy, dCz, nCv, dFrames, stream, err,
+                                  sizeof(err)),
+          "TN-6: K4 launches");
+    std::vector<TonicFrame> dFramesOut;
+    dFramesOut.resize(size_t(nCv));
+    cudaMemcpy(dFramesOut.data(), dFrames, sizeof(TonicFrame) * size_t(nCv),
+               cudaMemcpyDeviceToHost);
+    bool k4 = true;
+    for (int i = 0; i < nCv && k4; ++i) {
+        float const *a = &hFrames[size_t(i)].tx;
+        float const *b = &dFramesOut[size_t(i)].tx;
+        for (int k = 0; k < 9; ++k) {
+            k4 = k4 && a[k] == b[k];
+        }
+    }
+    Check(k4, "TN-6: K4 frames match bit-exactly");
+    // K5: tolerance (twist trigonometry).
+    int const seg = 2;
+    int const nRings = (nSec - 1) * seg + 1;
+    float *dPos = nullptr, *dNrm = nullptr, *dRingT = nullptr;
+    cudaMalloc(&dPos, sizeof(float) * size_t(nRings) * size_t(rv) * 3);
+    cudaMalloc(&dNrm, sizeof(float) * size_t(nRings) * size_t(rv) * 3);
+    cudaMalloc(&dRingT, sizeof(float) * size_t(nRings));
+    Check(TonicLaunchTubeTessellate(
+              dCx, dCy, dCz, nCv, dFrames, dSecT, dSecU, dSecV, dSecS,
+              dSecTw, nSec, rv, seg, dPos, dNrm, dRingT, stream, err,
+              sizeof(err)),
+          "TN-6: K5 launches");
+    std::vector<float> hPos, hNrm, hRingT;
+    std::string herr;
+    Check(TonicTessellateCpu(tube, hFrames, seg, &hPos, &hNrm, &hRingT,
+                             &herr),
+          "TN-6: K5 CPU twin runs");
+    std::vector<float> dPosOut(hPos.size()), dNrmOut(hNrm.size());
+    std::vector<float> dRingTOut;
+    dRingTOut.resize(size_t(nRings));
+    cudaMemcpy(dPosOut.data(), dPos, sizeof(float) * hPos.size(),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(dNrmOut.data(), dNrm, sizeof(float) * hNrm.size(),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(dRingTOut.data(), dRingT, sizeof(float) * size_t(nRings),
+               cudaMemcpyDeviceToHost);
+    float worstP = 0, worstN = 0;
+    for (size_t i = 0; i < hPos.size(); ++i) {
+        worstP = std::max(worstP, std::fabs(hPos[i] - dPosOut[i]));
+        worstN = std::max(worstN, std::fabs(hNrm[i] - dNrmOut[i]));
+    }
+    std::printf("info: K5 worst |dp|=%.3g worst |dn|=%.3g\n", worstP,
+                worstN);
+    Check(worstP < 1e-4f && worstN < 1e-4f,
+          "TN-6: K5 tessellation matches within 1e-4");
+    // K8 disc: tolerance (sqrt/trigonometry in the draws; the rejection
+    // boundary is a float comparison, so borderline candidates could in
+    // principle diverge — with 32 roots the chance is ~1e-5 and the
+    // check below would name the seed).
+    int const roots = 32;
+    TonicDeviceRoot *dRoots = nullptr;
+    cudaMalloc(&dRoots, sizeof(TonicDeviceRoot) * size_t(roots));
+    float const rootRadius =
+        TonicSectionMeanRadius(tube.sections.front());
+    float const rc[3] = {tube.centerX[0], tube.centerY[0], tube.centerZ[0]};
+    Check(TonicLaunchRootSampleDisc(0, 7, rootRadius, rc[0], rc[1], rc[2],
+                                    hFrames[0], roots, dRoots, 0, stream,
+                                    err, sizeof(err)),
+          "TN-6: K8 launches");
+    std::vector<TonicGuideRoot> hRoots;
+    Check(TonicRootSampleDiscCpu(0, 7, rootRadius, rc, hFrames[0], roots,
+                                 &hRoots, 0, &herr),
+          "TN-6: K8 CPU twin runs");
+    std::vector<TonicDeviceRoot> dRootsOut;
+    dRootsOut.resize(size_t(roots));
+    cudaMemcpy(dRootsOut.data(), dRoots,
+               sizeof(TonicDeviceRoot) * size_t(roots),
+               cudaMemcpyDeviceToHost);
+    float worstR = 0;
+    for (int i = 0; i < roots; ++i) {
+        worstR = std::max(
+            worstR, std::fabs(hRoots[size_t(i)].ru - dRootsOut[size_t(i)].ru));
+        worstR = std::max(
+            worstR, std::fabs(hRoots[size_t(i)].rv - dRootsOut[size_t(i)].rv));
+    }
+    std::printf("info: K8 worst |dr|=%.3g\n", worstR);
+    Check(worstR < 1e-3f, "TN-6: K8 roots match within 1e-3");
+    // K9: tolerance (pow/atan2/trigonometry).
+    float *dSecMean = nullptr;
+    cudaMalloc(&dSecMean, sizeof(float) * size_t(nSec));
+    std::vector<float> secMean;
+    secMean.resize(size_t(nSec));
+    for (int i = 0; i < nSec; ++i) {
+        secMean[size_t(i)] = TonicSectionMeanRadius(tube.sections[size_t(i)]);
+    }
+    cudaMemcpy(dSecMean, secMean.data(), sizeof(float) * size_t(nSec),
+               cudaMemcpyHostToDevice);
+    int const cvCount = 8;
+    float *dGuides = nullptr, *dLens = nullptr;
+    cudaMalloc(&dGuides, sizeof(float) * size_t(roots) * size_t(cvCount) * 3);
+    cudaMalloc(&dLens, sizeof(float) * size_t(roots));
+    Check(TonicLaunchGuideFill(dCx, dCy, dCz, nCv, dFrames, dSecT, dSecMean,
+                               nSec, dRoots, roots, 0.25f, nullptr, 0,
+                               rootRadius, dGuides, dLens, cvCount, stream,
+                               err, sizeof(err)),
+          "TN-6: K9 launches");
+    TonicFillDesc fill;
+    fill.cvCount = cvCount;
+    fill.edgeBias = 0.25f;
+    std::vector<float> hGuides, hLens;
+    Check(TonicGuideFillCpu(tube, hFrames, hRoots, fill, &hGuides, &hLens,
+                            &herr),
+          "TN-6: K9 CPU twin runs");
+    std::vector<float> dGuidesOut(hGuides.size());
+    std::vector<float> dLensOut;
+    dLensOut.resize(size_t(roots));
+    cudaMemcpy(dGuidesOut.data(), dGuides, sizeof(float) * hGuides.size(),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(dLensOut.data(), dLens, sizeof(float) * size_t(roots),
+               cudaMemcpyDeviceToHost);
+    float worstG = 0;
+    for (size_t i = 0; i < hGuides.size(); ++i) {
+        worstG = std::max(worstG, std::fabs(hGuides[i] - dGuidesOut[i]));
+    }
+    std::printf("info: K9 worst |dg|=%.3g\n", worstG);
+    // NOTE: K9 parity rides on K8 parity (the device lane fills the
+    // device roots, the CPU twin the host roots); a K8 divergence would
+    // cascade here, so this check is only meaningful with K8 green.
+    Check(worstG < 1e-2f, "TN-6: K9 guides match within 1e-2");
+    // K10: tolerance (sqrt/division chains).
+    float *dIn = nullptr;
+    int *dOff = nullptr, *dCnt = nullptr, *dOutC = nullptr;
+    double *dOutF = nullptr;
+    float *dOut = nullptr;
+    int const k10Guides = 4;
+    cudaMalloc(&dIn, sizeof(float) * size_t(k10Guides) * size_t(cvCount) * 3);
+    cudaMalloc(&dOff, sizeof(int) * size_t(k10Guides));
+    cudaMalloc(&dCnt, sizeof(int) * size_t(k10Guides));
+    cudaMalloc(&dOut, sizeof(float) * size_t(k10Guides) * 5 * 3);
+    cudaMalloc(&dOutC, sizeof(int) * size_t(k10Guides));
+    cudaMalloc(&dOutF, sizeof(double) * size_t(k10Guides) * 16);
+    std::vector<float> k10In(size_t(k10Guides) * size_t(cvCount) * 3);
+    std::vector<int> k10Off, k10Cnt;
+    k10Off.resize(size_t(k10Guides));
+    k10Cnt.resize(size_t(k10Guides));
+    for (int g = 0; g < k10Guides; ++g) {
+        k10Off[size_t(g)] = g * cvCount;
+        k10Cnt[size_t(g)] = cvCount;
+        for (int c = 0; c < cvCount; ++c) {
+            k10In[(size_t(g) * size_t(cvCount) + size_t(c)) * 3 + 0] =
+                float(g);
+            k10In[(size_t(g) * size_t(cvCount) + size_t(c)) * 3 + 1] =
+                float(c) * float(c) / float(cvCount);
+            k10In[(size_t(g) * size_t(cvCount) + size_t(c)) * 3 + 2] = 0.0f;
+        }
+    }
+    cudaMemcpy(dIn, k10In.data(), sizeof(float) * k10In.size(),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dOff, k10Off.data(), sizeof(int) * size_t(k10Guides),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dCnt, k10Cnt.data(), sizeof(int) * size_t(k10Guides),
+               cudaMemcpyHostToDevice);
+    float rootDirs[9] = {1, 0, 0, 0, 0, 1, 0, 1, 0};
+    Check(TonicLaunchGuideResample(dIn, dOff, dCnt, k10Guides, 5, rootDirs,
+                                   dOut, dOutC, dOutF, stream, err,
+                                   sizeof(err)),
+          "TN-6: K10 launches");
+    std::vector<float> hOut;
+    std::vector<int> hOutC;
+    std::vector<double> hOutF;
+    Check(TonicGuideResampleCpu(k10In.data(), k10Cnt.data(), k10Guides, 5,
+                                rootDirs, &hOut, &hOutC, &hOutF, &herr),
+          "TN-6: K10 CPU twin runs");
+    std::vector<float> dOutOut(hOut.size());
+    cudaMemcpy(dOutOut.data(), dOut, sizeof(float) * hOut.size(),
+               cudaMemcpyDeviceToHost);
+    float worstRe = 0;
+    for (size_t i = 0; i < hOut.size(); ++i) {
+        worstRe = std::max(worstRe, std::fabs(hOut[i] - dOutOut[i]));
+    }
+    std::printf("info: K10 worst |dr|=%.3g\n", worstRe);
+    Check(worstRe < 1e-4f, "TN-6: K10 resample matches within 1e-4");
+    // K11: exact winner on a unique scene, exact distance on noise.
+    {
+        float vp[16] = {0};
+        vp[0] = vp[5] = vp[10] = vp[15] = 1.0f;
+        float cands[9] = {0.0f, 0.0f,  0.0f, 0.5f, 0.5f, 0.0f,
+                          -0.5f, -0.5f, 0.5f};
+        float *dCands = nullptr;
+        cudaMalloc(&dCands, sizeof(cands));
+        cudaMemcpy(dCands, cands, sizeof(cands), cudaMemcpyHostToDevice);
+        TonicDevicePickBest *dBest = nullptr, *dScratch = nullptr;
+        cudaMalloc(&dBest, sizeof(TonicDevicePickBest));
+        cudaMalloc(&dScratch, sizeof(TonicDevicePickBest));
+        Check(TonicLaunchPickReduce(dCands, 3, vp, 800, 600, 400.0f, 300.0f,
+                                    5.0f, dBest, dScratch, stream, err,
+                                    sizeof(err)),
+              "TN-6: K11 launches");
+        TonicDevicePickBest best;
+        cudaMemcpy(&best, dBest, sizeof(best), cudaMemcpyDeviceToHost);
+        TonicPickSets sets;
+        sets.tubeVerts = cands;
+        sets.tubeVertCount = 3;
+        TonicPickHit cpu = TonicPickCpu(sets, TonicPick_TubeVert, vp, 800,
+                                        600, 400.0f, 300.0f, 5.0f);
+        Check(best.hit == 1 && best.index == cpu.index &&
+                  best.distPx == cpu.distPx && best.depth == cpu.depth,
+              "TN-6: K11 winners agree bit-exactly");
+        // A 770K-candidate reduction times the TN-2 device lane.
+        int const n = 770000;
+        float *dBig = nullptr;
+        cudaMalloc(&dBig, sizeof(float) * size_t(n) * 3);
+        std::vector<float> big(size_t(256) * 3, 0.0f);
+        for (int i = 0; i < 256; ++i) {
+            big[size_t(i) * 3 + 0] = float(i % 16) / 8.0f - 1.0f;
+            big[size_t(i) * 3 + 1] = float(i / 16) / 8.0f - 1.0f;
+        }
+        for (int base = 0; base < n; base += 256) {
+            int const m = std::min(256, n - base);
+            cudaMemcpy(dBig + size_t(base) * 3, big.data(),
+                       sizeof(float) * size_t(m) * 3,
+                       cudaMemcpyHostToDevice);
+        }
+        int const blocks = (n + 255) / 256;
+        TonicDevicePickBest *dScratchBig = nullptr;
+        cudaMalloc(&dScratchBig,
+                   sizeof(TonicDevicePickBest) * size_t(blocks + 16));
+        cudaEvent_t ev0 = nullptr, ev1 = nullptr;
+        cudaEventCreate(&ev0);
+        cudaEventCreate(&ev1);
+        cudaEventRecord(ev0, stream);
+        bool pok = TonicLaunchPickReduce(dBig, n, vp, 800, 600, 400.0f,
+                                         300.0f, 5.0f, dBest, dScratchBig,
+                                         stream, err, sizeof(err));
+        cudaEventRecord(ev1, stream);
+        cudaEventSynchronize(ev1);
+        float pickMs = 0;
+        cudaEventElapsedTime(&pickMs, ev0, ev1);
+        std::printf("info: K11 device reduction over %d candidates: %.3f "
+                    "ms\n",
+                    n, pickMs);
+        Check(pok, "TN-6: K11 scales to 770K candidates");
+        Check(pok && pickMs < 0.5f,
+              "TN-2: the K11 lane beats 0.5 ms at 770K candidates");
+        cudaEventDestroy(ev0);
+        cudaEventDestroy(ev1);
+        cudaFree(dCands);
+        cudaFree(dBest);
+        cudaFree(dScratch);
+        cudaFree(dBig);
+        cudaFree(dScratchBig);
+    }
+    cudaFree(dCx);
+    cudaFree(dCy);
+    cudaFree(dCz);
+    cudaFree(dFrames);
+    cudaFree(dSecT);
+    cudaFree(dSecU);
+    cudaFree(dSecV);
+    cudaFree(dSecS);
+    cudaFree(dSecTw);
+    cudaFree(dPos);
+    cudaFree(dNrm);
+    cudaFree(dRingT);
+    cudaFree(dRoots);
+    cudaFree(dSecMean);
+    cudaFree(dGuides);
+    cudaFree(dLens);
+    cudaFree(dIn);
+    cudaFree(dOff);
+    cudaFree(dCnt);
+    cudaFree(dOut);
+    cudaFree(dOutC);
+    cudaFree(dOutF);
+    cudaStreamDestroy(stream);
+}
+
+void CheckProductionPickScale()
+{
+    using namespace usdGenTonic;
+    if (!HaveCudaDevice()) {
+        std::printf("skip: no CUDA device for the production pick gate\n");
+        return;
+    }
+    // TN-2 production wiring gate: model Pick over reference-count
+    // guide CVs (12K x 16) plus tube verts must take the K11 device
+    // lane. (770K tube verts are gated at lane level above; a single
+    // fat legacy tube would also inflate the CPU small-kind sets with
+    // 24K centers, which no reference-shaped scene does. CPU needs
+    // ~8 ms here; the gate at 1 ms proves the wiring.)
+    TonicModel model;
+    if (!model.HasCudaMirror()) {
+        std::printf("skip: no device mirror for the production pick gate\n");
+        return;
+    }
+    TonicTubeShape shape;
+    shape.rings = 200;  // 200 x 8 = 1600 tube verts, 200 centers
+    shape.ringVerts = 8;
+    Check(model.BuildTestTube(shape), "pick-scale: the tube builds");
+    TonicModel::FillParams params;
+    params.density = 12000.0f;
+    params.cvCount = 16;
+    Check(model.SetFillParams(params), "pick-scale: scale fill params set");
+    Check(model.RefillGuides(1.0f), "pick-scale: 12K x 16 refill runs");
+    Check(model.GetGuides().guideCount == 12000,
+          "pick-scale: 192K guide CVs present");
+    float vp[16] = {0};
+    vp[0] = vp[5] = vp[10] = vp[15] = 1.0f;
+    // Legacy vert 0 sits at (radius, 0, 0) = (0.5, 0, 0).
+    float const px = (0.5f * 0.5f + 0.5f) * 400.0f;
+    float const py = (1.0f - (0.0f * 0.5f + 0.5f)) * 400.0f;
+    TonicPickHit d0 =
+        model.Pick(vp, 400, 400, px, py, 5.0f, TonicPick_All);
+    Check(d0.hit, "pick-scale: the production pick hits");
+    TonicPickHit d1 =
+        model.Pick(vp, 400, 400, px, py, 5.0f, TonicPick_All);
+    Check(d1.hit == d0.hit && d1.kind == d0.kind && d1.index == d0.index &&
+              d1.subIndex == d0.subIndex && d1.distPx == d0.distPx &&
+              d1.depth == d0.depth,
+          "pick-scale: device picks are bit-deterministic");
+    int const reps = 50;
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < reps; ++i) {
+        model.Pick(vp, 400, 400, px, py, 5.0f, TonicPick_All);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    double ms =
+        std::chrono::duration<double, std::milli>(t1 - t0).count() / reps;
+    std::printf("info: production pick at 1600 + 192K: %.3f ms "
+                "(wiring gate 1 ms; TN-2 budget 0.5 ms)\n",
+                ms);
+    Check(ms < 1.0, "pick-scale: production pick under 1 ms (TN-2)");
+#ifdef _WIN32
+    _putenv("USDGEN_TONIC_FORCE_CPU_PICK=1");
+#else
+    setenv("USDGEN_TONIC_FORCE_CPU_PICK", "1", 1);
+#endif
+    TonicPickHit cpu =
+        model.Pick(vp, 400, 400, px, py, 5.0f, TonicPick_All);
+#ifdef _WIN32
+    _putenv("USDGEN_TONIC_FORCE_CPU_PICK=");
+#else
+    unsetenv("USDGEN_TONIC_FORCE_CPU_PICK");
+#endif
+    Check(cpu.hit && d0.hit, "pick-scale: forced CPU pick hits too");
+    std::printf("info: CPU winner kind=%u index=%d dist=%.4g; device "
+                "kind=%u index=%d dist=%.4g\n",
+                cpu.kind, cpu.index, cpu.distPx, d0.kind, d0.index,
+                d0.distPx);
+    Check(std::abs(cpu.distPx - d0.distPx) < 1e-3f &&
+              std::abs(cpu.depth - d0.depth) < 1e-5f,
+          "pick-scale: CPU/device agree within tessellation wobble");
+}
+#endif
+
+// V0b (plan/18 §7 G2): every §5.2/§5.3 operation takes a tube id, so a
+// child can be section-edited and filled on its own. The tube-0 spellings
+// stay exactly what they were.
+void CheckPerTubeOps()
+{
+    using namespace usdGenTonic;
+    TonicModel model;
+    Check(model.BuildTestTube(), "per-tube: the L1 tube builds");
+    std::vector<int> kids;
+    Check(model.SubdivideTube(0, 4, "kmeans", 2, &kids) && kids.size() == 4,
+          "per-tube: the tube subdivides into four children");
+    int const child = kids[0];
+
+    // Section ops on a child move that child and nothing else.
+    TonicTubeSection before;
+    Check(model.GetTubeSection(child, 1, &before),
+          "per-tube: a child section reads back");
+    TonicTubeSection siblingBefore;
+    Check(model.GetTubeSection(kids[1], 1, &siblingBefore),
+          "per-tube: a sibling section reads back");
+    uint64_t const v0 = model.GetVersion();
+    Check(model.MoveTubeSectionRing(child, 1, 0.05f, -0.02f),
+          "per-tube: MoveTubeSectionRing edits a child");
+    Check(model.GetVersion() > v0, "per-tube: the edit bumps the version");
+    TonicTubeSection after;
+    Check(model.GetTubeSection(child, 1, &after) &&
+              after.u[0] != before.u[0] && after.v[0] != before.v[0],
+          "per-tube: the child's ring moved");
+    TonicTubeSection siblingAfter;
+    Check(model.GetTubeSection(kids[1], 1, &siblingAfter) &&
+              siblingAfter.u == siblingBefore.u &&
+              siblingAfter.v == siblingBefore.v,
+          "per-tube: the sibling is untouched");
+
+    Check(model.ScaleTubeSectionRing(child, 1, 1.5f),
+          "per-tube: ScaleTubeSectionRing edits a child");
+    Check(model.TwistTubeSectionRing(child, 1, 0.1f),
+          "per-tube: TwistTubeSectionRing edits a child");
+    Check(model.MoveTubeSectionCV(child, 1, 0, 0.01f, 0.01f),
+          "per-tube: MoveTubeSectionCV edits a child");
+    Check(model.CopyTubeSectionRing(child, 0, 1),
+          "per-tube: CopyTubeSectionRing edits a child");
+    Check(model.RelaxTubeCenter(child, 0.5f, 2),
+          "per-tube: RelaxTubeCenter edits a child");
+    Check(model.SetTubeLengthFor(child, 3.5f),
+          "per-tube: SetTubeLengthFor rescales a child");
+    Check(!model.MoveTubeSectionRing(99, 1, 0.0f, 0.0f),
+          "per-tube: an unknown tube is refused");
+    Check(!model.MoveTubeSectionRing(child, 99, 0.0f, 0.0f),
+          "per-tube: an out-of-range ring is refused");
+
+    // A derived child's LAYOUT belongs to the parent's subdivision, so the
+    // two count-changing ops refuse rather than desync the deltas.
+    int const secBefore = model.GetTubeSectionCount(child);
+    Check(!model.AddTubeSectionRing(child, 0.5f),
+          "per-tube: adding a ring to a derived child is refused");
+    Check(!model.RemoveTubeSectionRing(child, 1),
+          "per-tube: removing a ring from a derived child is refused");
+    Check(!model.InsertTubeCenterCV(child, 1),
+          "per-tube: inserting a center CV in a derived child is refused");
+    Check(model.GetTubeSectionCount(child) == secBefore,
+          "per-tube: the refused ops left the layout alone");
+
+    // An edit on a child propagates: the parent refreshes bottom-up (K7).
+    {
+        float px = 0.0f, py = 0.0f, pz = 0.0f;
+        Check(model.GetTubeCenterCV(0, 2, &px, &py, &pz),
+              "per-tube: the parent center reads back");
+        Check(model.MoveTubeCenterCV(child, 2, 0.4f, 0.0f, 0.0f),
+              "per-tube: a child center CV moves");
+        float qx = 0.0f, qy = 0.0f, qz = 0.0f;
+        Check(model.GetTubeCenterCV(0, 2, &qx, &qy, &qz),
+              "per-tube: the parent center reads back again");
+        Check(qx != px, "per-tube: the parent followed its child (K7)");
+    }
+
+    // Tube 0 still goes through the single-tube spelling unchanged.
+    TonicTubeSection root0;
+    Check(model.GetSection(0, &root0), "per-tube: tube 0 sections read back");
+    Check(model.MoveTubeSectionRing(0, 0, 0.01f, 0.0f),
+          "per-tube: tubeId 0 routes to the tube-0 operation");
+    TonicTubeSection root1;
+    Check(model.GetSection(0, &root1) && root1.u[0] != root0.u[0],
+          "per-tube: tube 0's own ring moved");
+    Check(model.AddSectionRing(0.42f),
+          "per-tube: tube 0 still accepts a new ring (no derivation)");
+
+    // Fill params are per tube, and a subdivided parent's fill is suspended.
+    TonicModel::FillParams childFill;
+    childFill.density = 12.0f;
+    childFill.cvCount = 5;
+    childFill.seed = 21;
+    childFill.edgeBias = 0.25f;
+    Check(model.SetTubeFillParams(child, childFill),
+          "per-tube: a child takes its own fill params");
+    TonicModel::FillParams readBack;
+    Check(model.GetTubeFillParams(child, &readBack) &&
+              readBack.density == 12.0f && readBack.cvCount == 5 &&
+              readBack.seed == 21 && readBack.edgeBias == 0.25f,
+          "per-tube: the child's fill params read back");
+    TonicModel::FillParams siblingFill;
+    Check(model.GetTubeFillParams(kids[1], &siblingFill) &&
+              siblingFill.density != 12.0f,
+          "per-tube: a sibling keeps the inherited params");
+    Check(!model.SetTubeFillParams(child, [] {
+              TonicModel::FillParams bad;
+              bad.cvCount = 1;
+              return bad;
+          }()),
+          "per-tube: a bad cvCount is refused");
+    Check(model.IsTubeFillSuspended(0),
+          "per-tube: the subdivided parent's fill is suspended");
+    Check(!model.IsTubeFillSuspended(child),
+          "per-tube: a leaf child still fills");
+    Check(model.MergeChildren(0), "per-tube: the children merge back");
+    Check(!model.IsTubeFillSuspended(0),
+          "per-tube: the fill resumes once the children are gone");
+}
+
+// V0b: the per-tube C ABI (tonicApiStage.h) drives the same operations.
+void CheckPerTubeAbi()
+{
+    TonicModelContext *ctx = nullptr;
+    Check(Tonic_Create(&ctx) == TONIC_OK, "per-tube ABI: the model creates");
+    Check(Tonic_BuildTestTube(ctx, 0, 0, 0.0f, 0.0f) == TONIC_OK,
+          "per-tube ABI: the tube builds");
+    int kids[4] = {0, 0, 0, 0};
+    int count = 0;
+    Check(Tonic_SubdivideTube(ctx, 0, 4, "kmeans", 2, kids, 4, &count) ==
+                  TONIC_OK &&
+              count == 4,
+          "per-tube ABI: the tube subdivides");
+    int const child = kids[0];
+    Check(Tonic_MoveTubeSectionRing(ctx, child, 1, 0.05f, -0.02f) == TONIC_OK,
+          "per-tube ABI: MoveTubeSectionRing");
+    Check(Tonic_ScaleTubeSectionRing(ctx, child, 1, 1.25f) == TONIC_OK,
+          "per-tube ABI: ScaleTubeSectionRing");
+    Check(Tonic_TwistTubeSectionRing(ctx, child, 1, 0.05f) == TONIC_OK,
+          "per-tube ABI: TwistTubeSectionRing");
+    Check(Tonic_MoveTubeSectionCV(ctx, child, 1, 0, 0.01f, 0.0f) == TONIC_OK,
+          "per-tube ABI: MoveTubeSectionCV");
+    Check(Tonic_CopyTubeSectionRing(ctx, child, 0, 1) == TONIC_OK,
+          "per-tube ABI: CopyTubeSectionRing");
+    Check(Tonic_RelaxTubeCenter(ctx, child, 0.5f, 1) == TONIC_OK,
+          "per-tube ABI: RelaxTubeCenter");
+    Check(Tonic_SetTubeLengthFor(ctx, child, 3.0f) == TONIC_OK,
+          "per-tube ABI: SetTubeLengthFor");
+    Check(Tonic_AddTubeSectionRing(ctx, child, 0.5f) == TONIC_ERROR,
+          "per-tube ABI: a layout change on a derived child is refused");
+    Check(std::strlen(Tonic_StageGetLastError()) > 0,
+          "per-tube ABI: the refusal carries a message");
+    float const profile[4] = {0.0f, 1.0f, 1.0f, 0.5f};
+    Check(Tonic_SetTubeFillParams(ctx, child, 9.0f, 6, 3, 0.1f, profile, 4) ==
+              TONIC_OK,
+          "per-tube ABI: SetTubeFillParams");
+    float density = 0.0f, edgeBias = 0.0f;
+    int cvCount = 0, seed = 0, profileCount = 0;
+    Check(Tonic_GetTubeFillParams(ctx, child, &density, &cvCount, &seed,
+                                  &edgeBias, &profileCount) == TONIC_OK &&
+              density == 9.0f && cvCount == 6 && seed == 3 &&
+              profileCount == 4,
+          "per-tube ABI: GetTubeFillParams round-trips");
+    Check(Tonic_IsTubeFillSuspended(ctx, 0) == 1,
+          "per-tube ABI: the parent's fill is suspended");
+    Check(Tonic_IsTubeFillSuspended(ctx, child) == 0,
+          "per-tube ABI: the child's fill is live");
+    int parent = 99, childIndex = 99;
+    Check(Tonic_GetTubeParent(ctx, child, &parent, &childIndex) == TONIC_OK &&
+              parent == 0 && childIndex == 0,
+          "per-tube ABI: GetTubeParent reports the link");
+    Check(Tonic_IsTubePersistent(ctx, child) == 0,
+          "per-tube ABI: a subdivided child is not an on-the-fly parent");
+    Check(Tonic_MoveTubeSectionRing(nullptr, 0, 0, 0.0f, 0.0f) == TONIC_ERROR,
+          "per-tube ABI: a null context is refused");
+    Check(Tonic_Destroy(ctx) == TONIC_OK, "per-tube ABI: the model destroys");
+}
+
+}  // namespace
+
+int main()
+{
+    CheckK4();
+    CheckK5();
+    CheckK8();
+    CheckK9();
+    CheckK10();
+    CheckK11();
+    CheckModelTubeMode();
+    CheckModelFillMode();
+    CheckAutoTube();
+    CheckCApi();
+    CheckProbes();
+    CheckPerTubeOps();
+    CheckPerTubeAbi();
+#ifdef USDGEN_TONIC_HAS_CUDA
+    CheckCudaParity();
+    CheckProductionPickScale();
+#else
+    std::printf("skip: CUDA off, TN-6 parity checks compiled out\n");
+#endif
+    std::printf("%d failure(s)\n", g_failures);
+    return g_failures ? 1 : 0;
+}
+
+

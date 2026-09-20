@@ -101,6 +101,11 @@ struct UsdGenImagingSession::State {
             throw std::runtime_error("imaging lifecycle admission unavailable");
     }
 
+    // Monotonic cook cancellation token (plan/18 §7 G7). Atomic because
+    // CancelCooks is callable from the gesture thread while the owner frame
+    // reads it.
+    std::atomic<uint64_t> cookToken{0};
+
     void CompleteClose() {
         if (closing && outstanding == 0 && closeDone) {
             auto done = std::move(closeDone);
@@ -164,6 +169,14 @@ struct UsdGenImagingSession::State {
 
     void Start(CommitRequest request, int callerDevice, Completion done) {
         if (!accepting.load() || !engine) {
+            if (done) done({}, Pipeline::Outcome::Superseded);
+            return;
+        }
+        // Cook cancellation token (plan/17 §3.2 rule 2): a request stamped
+        // before the last CancelCooks() describes a state the caller has
+        // already replaced. Drop it here, on the owner, before the engine
+        // sees it — the cheapest possible abandonment.
+        if (request.cookToken && *request.cookToken < cookToken.load()) {
             if (done) done({}, Pipeline::Outcome::Superseded);
             return;
         }
@@ -254,9 +267,20 @@ bool UsdGenImagingSession::StageDesc(usdGen::UsdGenGraphDesc const& desc) {
     auto value = std::make_shared<const usdGen::UsdGenGraphDesc>(desc);
     return state->owner.PostCommand([state, value] { state->staged = value; });
 }
+uint64_t UsdGenImagingSession::CancelCooks() noexcept {
+    return _state->cookToken.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+uint64_t UsdGenImagingSession::CookToken() const noexcept {
+    return _state->cookToken.load(std::memory_order_acquire);
+}
 bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done) {
     auto* state = _state.get();
     if (!state->accepting.load()) return false;
+    // Stamp the request with the token it was accepted under, so a
+    // CancelCooks between here and the owner frame drops it (plan/18 G7).
+    if (!request.cookToken) {
+        request.cookToken = state->cookToken.load(std::memory_order_acquire);
+    }
     const int device = request.callerDevice ? *request.callerDevice :
         usdGen::UsdGenSession::CaptureCallerDevice();
     return state->owner.PostCommand([state, request=std::move(request), device, done] {
@@ -645,6 +669,21 @@ std::vector<UsdGenImagingSessionRefPtr> UsdGenSessionStore::LiveSessions() const
         out.push_back(entry.second);
     }
     return out;
+}
+
+size_t UsdGenSessionStore::CancelCooks(SdfPath const &groomRoot)
+{
+    // No owner command and no wait: a gesture's press handler calls this,
+    // and the token is an atomic the owner frame reads (plan/18 §7 G7).
+    size_t moved = 0;
+    for (auto const &session : LiveSessions()) {
+        if (!groomRoot.IsEmpty() && session->Key().groomRoot != groomRoot) {
+            continue;
+        }
+        (void)session->CancelCooks();
+        ++moved;
+    }
+    return moved;
 }
 
 void UsdGenSessionStore::SetTime(double frame)

@@ -1,0 +1,17 @@
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicSceneIndex.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicApi.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicApiStage.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicBake.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicCheck.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicCommit.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicGizmo.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicGraph.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicHierarchy.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicModel.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicPublish.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicRegion.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicRegistry.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicScalp.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicSelection.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicTransport.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/Release/tonicTube.obj

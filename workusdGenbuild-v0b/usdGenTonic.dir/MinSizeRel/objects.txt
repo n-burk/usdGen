@@ -1,0 +1,17 @@
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicSceneIndex.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicApi.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicApiStage.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicBake.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicCheck.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicCommit.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicGizmo.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicGraph.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicHierarchy.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicModel.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicPublish.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicRegion.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicRegistry.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicScalp.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicSelection.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicTransport.obj
+D:/work/usdGen/workusdGenbuild-v0b/usdGenTonic.dir/MinSizeRel/tonicTube.obj

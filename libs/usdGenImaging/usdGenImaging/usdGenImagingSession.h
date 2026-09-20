@@ -148,6 +148,12 @@ public:
         // Relayed atomically to the core commit owner.  Absent preserves the
         // core session's existing renderer-admission selection.
         std::optional<bool> devicePublication;
+        // Cook cancellation token (plan/17 §3.2 rule 2, plan/18 §7 G7).
+        // Stamped by CommitAsync from the session's token when absent; the
+        // owner frame drops the request as Superseded, without touching the
+        // engine, if CancelCooks() has moved the token since. This is how an
+        // authoring tool abandons a cook its own newer edit has invalidated.
+        std::optional<uint64_t> cookToken;
     };
     using Completion = std::function<void(CommitPayload const&,
         usdGen::UsdGenExecutionPipeline::Outcome)>;
@@ -173,6 +179,15 @@ public:
     int64_t Generation() const noexcept;
     /// Latest published engine generation (lock-free atomic load, I7).
     usdGen::UsdGenGenerationConstPtr LatestGeneration() const noexcept;
+
+    /// Invalidate every cook accepted before now (plan/17 §3.2 rule 2).
+    /// Requests already handed to the engine keep the engine's own
+    /// supersede behaviour; requests still queued on this session's owner
+    /// are dropped before they reach it. Returns the new token. Callable
+    /// from any thread, including a gesture's press handler.
+    uint64_t CancelCooks() noexcept;
+    /// The current token: a request stamped with a smaller one is stale.
+    uint64_t CookToken() const noexcept;
 
     int AttachedIndices() const noexcept;
     void NoteAttach();
@@ -263,6 +278,11 @@ public:
     void Detach(UsdGenSessionKey const &key);
     void Detach(UsdGenSessionKey const &key, UsdGenSessionHandle const &expected);
     UsdGenSessionHandle Find(UsdGenSessionKey const &key) const;
+
+    /// CancelCooks on every live session whose groomRoot is \p groomRoot,
+    /// or on all of them when it is empty (plan/17 §3.2 rule 2). Returns
+    /// the number of sessions whose token moved.
+    size_t CancelCooks(SdfPath const &groomRoot = SdfPath());
 
     /// Registry-level forwarding (06 §3.7): applied to every live session.
     /// SetTime additionally marks every session app-driven (06 §3.9 rule b)

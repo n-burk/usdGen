@@ -229,6 +229,7 @@ int main()
         PrintChain("default (Hybrid) policy", nodes);
 
         const int ours     = FindNode(nodes, "UsdGenGroomSceneIndex");
+        const int tonic    = FindNode(nodes, "UsdGenTonicSceneIndex");
         const int sg       = FindNode(nodes, "HdsiSceneGlobalsSceneIndex");
         const int fake     = FindNode(nodes, "FakeHdPrmanMotionBlurSceneIndex");
         const int usdStage = FindNode(nodes, "UsdImagingStageSceneIndex");
@@ -247,10 +248,17 @@ int main()
         Check(matbind > 0, "HdsiMaterialBindingResolvingSceneIndex present (hdsi renderer stack)");
         Check(storm >= 0, "an HdSt*/Storm renderer node present (renderer stack loaded)");
         Check(fake > 0, "FakeHdPrmanMotionBlurSceneIndex present (synthetic hdPrman fixture)");
+        Check(tonic > 0, "UsdGenTonicSceneIndex present in renderer chain (plan/17 P0)");
 
         if (ours > 0) {
             CheckCore(nodes, ours, sg, fake, usdStage);
             CheckAllRendererNodes(nodes, ours);
+            // Tonic phase 0, after the groom index (plugInfo ordering): in
+            // dataflow the tonic index is downstream of the groom index, i.e.
+            // terminal-side in walk order.
+            Check(tonic > 0 && tonic < ours,
+                  "UsdGenTonicSceneIndex sits strictly after (downstream of) "
+                  "UsdGenGroomSceneIndex");
         }
     }
 
@@ -263,15 +271,22 @@ int main()
         PrintChain("JsonMetadataOnly policy", nodes);
 
         const int ours     = FindNode(nodes, "UsdGenGroomSceneIndex");
+        const int tonic    = FindNode(nodes, "UsdGenTonicSceneIndex");
         const int sg       = FindNode(nodes, "HdsiSceneGlobalsSceneIndex");
         const int fake     = FindNode(nodes, "FakeHdPrmanMotionBlurSceneIndex");
         const int usdStage = FindNode(nodes, "UsdImagingStageSceneIndex");
 
         Check(ours > 0, "usdGen still present under JsonMetadataOnly");
+        Check(tonic > 0, "tonic still present under JsonMetadataOnly");
         Check(sg > 0, "HdsiSceneGlobalsSceneIndex still present under JsonMetadataOnly");
 
         if (ours > 0 && sg > 0) {
             CheckCore(nodes, ours, sg, fake, usdStage);
+            if (tonic > 0) {
+                Check(tonic < ours,
+                      "tonic still downstream of the groom index under "
+                      "JsonMetadataOnly (tag ordering)");
+            }
             // Under JsonMetadataOnly, hdsi node positions are governed by
             // their own JSON metadata, not by usdGen's C++ registration
             // order. The usdGen contract only promises: after sceneGlobals,

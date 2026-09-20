@@ -29,7 +29,23 @@ param(
     # HDX_MSAA_SAMPLE_COUNT; the default is 4). The strand material's sample
     # mask scales with whatever it actually gets, so raising this raises the
     # number of coverage levels a sub-pixel strand can spend.
-    [int] $Msaa = 0
+    [int] $Msaa = 0,
+    # Record with the Tonic TOOL LIVE instead of through usdrecord: hydrate
+    # the scene's committed groom into a model, focus a level, activate and
+    # publish, so the frame carries the tubes, level colours, center curves
+    # and CV dots the artist edits. usdrecord cannot do this -- it never
+    # creates a model, so the Tonic scene index publishes nothing (plan/18
+    # F1/F2). bin/record_tonic.py does the work; tests/golden/tonic-*.png
+    # are recorded through the same function.
+    [switch] $Tonic,
+    # With -Tonic: record the stage alone. For a groom the tool cannot
+    # open -- the example ponytail carries hand-posed guides and no scalp
+    # graph shell, so TonicHydrateModel refuses it by design.
+    [switch] $TonicOff,
+    # The level -Tonic focuses (thick center curves, large CV dots).
+    [int] $TonicLevel = 2,
+    # The groom prim -Tonic hydrates.
+    [string] $TonicGroom = "/TonicGroom"
 )
 
 # Headless render of a usdGen scene with the plugins from this build tree:
@@ -56,6 +72,8 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenImaging\resources"),
     (Join-Path $Build "usd\usdGenShaders\resources"),
     (Join-Path $Build "usd\usdGenTools\resources"),
+    (Join-Path $Build "usd\usdGenTonic\resources"),
+    (Join-Path $Build "usd\usdGenTonicTools\resources"),
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")
 ) | Where-Object { Test-Path $_ }
@@ -69,6 +87,12 @@ $env:PXR_PLUGINPATH_NAME = ($pluginDirs -join ';')
 # supersampled reference). This is launcher configuration, not an OpenUSD
 # patch -- HdxTaskController reads it -- so set it only if the caller has not.
 if (-not $env:HDX_MSAA_SAMPLE_COUNT) { $env:HDX_MSAA_SAMPLE_COUNT = "8" }
+
+# The Tonic tool's scene index publishes a static P0 test tube on
+# construction; no tool drives the model in a headless record, so the
+# scaffolding would land in every frame. Opt out (interactive usdview
+# keeps it: the tool hydrates the model on activation).
+$env:USDGENTONIC_TEST_TUBE = "0"
 
 
 $CudaBinDir = $null
@@ -108,6 +132,30 @@ if ($Supersample -gt 1) {
     $RenderTarget = [System.IO.Path]::ChangeExtension($Output, ".ss$Supersample.png")
 }
 
+# -Tonic replaces usdrecord entirely: the tool has to be live in the
+# recording process, which means creating and publishing a model, and
+# usdrecord has no hook for that. Everything above still applies -- the
+# same plugin path, the same DLL path, the same test-tube opt-out.
+if ($Tonic) {
+    if ($Supersample -gt 1) { throw "-Supersample is not supported with -Tonic." }
+    if ($Frame -ge 0) { throw "-Frame is not supported with -Tonic (default time only)." }
+    $tonicArgs = @((Join-Path $PSScriptRoot "record_tonic.py"),
+                   (Resolve-Path $Scene).Path, $Output,
+                   "--width", $RenderWidth, "--renderer", $Renderer,
+                   "--level", $TonicLevel, "--groom", $TonicGroom)
+    if ($Camera) { $tonicArgs += @("--camera", $Camera) }
+    if ($Complexity) { $tonicArgs += @("--complexity", $Complexity) }
+    if ($TonicOff) { $tonicArgs += "--no-tool" }
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $python @tonicArgs
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+    exit $LASTEXITCODE
+}
+
 # usdrecord wants a "###" placeholder in the output name when frames are
 # given; a negative -Frame renders the Default time into the plain name.
 $recordArgs = @("--renderer", $Renderer, "--imageWidth", $RenderWidth)
@@ -117,7 +165,15 @@ if ($Complexity) { $recordArgs += @("--complexity", $Complexity) }
 if ($NoCameraLight) { $recordArgs += "--disableCameraLight" }
 if ($ShowDomeLight) { $recordArgs += "--enableDomeLightVisibility" }
 $recordArgs += @((Resolve-Path $Scene).Path, $RenderTarget)
-& $python $usdrecord @recordArgs
+# usdrecord banners on stderr; with $ErrorActionPreference = "Stop" that
+# alone would throw, so tolerate stderr here - LASTEXITCODE is the gate.
+$oldEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $python $usdrecord @recordArgs
+} finally {
+    $ErrorActionPreference = $oldEap
+}
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if ($Supersample -gt 1) {

@@ -1,0 +1,17 @@
+{
+  "golden": "tonic-ponytail.png",
+  "scene": "tonic-ponytail.usda",
+  "git_sha": "727a125b546d23b2d6567529b08e13b1dd883d5b",
+  "host": "HIVEMIND",
+  "created_utc": "2026-09-20T05:06:53.610295+00:00",
+  "command": "USDGEN_REGEN_GOLDEN=1 ctest -R testTonicGolden (bin/record_tonic.py, width 512, complexity veryhigh, L2 focus)",
+  "model": {
+    "tubes": 0,
+    "guides": 0
+  },
+  "tolerance": {
+    "mean_abs_max": 0.00784313725490196,
+    "frac_gt_8_255_max": 0.005
+  },
+  "png_sha256": "b425e0fb9c7deb346ef8331bd0c560d34bd9be68337b782ca7cdf1425c917d2f"
+}
