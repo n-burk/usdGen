@@ -8,6 +8,7 @@
 #include "usdGen/ops/grow.h"
 
 #include "usdGen/opParams.h"
+#include "usdGen/scheduler.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 #include "pxr/base/gf/vec2f.h"
@@ -29,6 +30,19 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace usdGen {
 
 namespace {
+
+template <class F>
+void GrowParallelFor(UsdGenWorkDispatcher *dispatcher, size_t count, F const &body)
+{
+    if (!dispatcher || count < 256) {
+        for (size_t i = 0; i < count; ++i) body(i);
+        return;
+    }
+    struct Payload { F const *body; } payload{&body};
+    dispatcher->ParallelFor(count, [](size_t i, void *p) {
+        (*static_cast<Payload *>(p)->body)(i);
+    }, &payload);
+}
 
 // usdGen:lengthRandom is a float2 (lo, hi); the property is stored as a
 // GfVec2f or a len-2 VtFloatArray depending on the source (02 §2.6).
@@ -555,7 +569,11 @@ bool UsdGenGrowOp::Capture(
         dir = NormalizeGrowDirection(dir);
         uniformDir = RotateGrowDirection(dir, GfVec3f(0.0f, 1.0f, 0.0f), cap.lift);
     }
-    for (uint32_t c = 0; c != R; ++c) {
+    // Per-curve position generation: each curve writes the disjoint span
+    // grownRest[c*cvCount .. c*cvCount+cvCount), reads only, so the loop is
+    // embarrassingly parallel. Bit-identical to the serial order.
+    GrowParallelFor(ctx.dispatcher, R, [&](size_t ci) {
+        uint32_t const c = static_cast<uint32_t>(ci);
         uint32_t const rootIndex = rootSpans[c];
         GfVec3f root = upstream.rest.empty() ? GfVec3f(upstream.px[rootIndex], upstream.py[rootIndex], upstream.pz[rootIndex])
                                               : upstream.rest[rootIndex];
@@ -576,7 +594,7 @@ bool UsdGenGrowOp::Capture(
             float const distance = cap.perCurve[c] * t;
             grownRest[size_t(c) * cap.cvCount + i] = root + dir * distance;
         }
-    }
+    });
     buf.rest = std::move(grownRest);
     return true;
 }
