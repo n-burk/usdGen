@@ -191,14 +191,18 @@ CpuResults RunCpuBench() {
     usdGenRegisterM1Operators();
     CpuResults results;
 
-    // Compile (median of 5 fresh compiles of G3)
+    // Compile (median of 5 fresh compiles of G3).
+    // The G3 fixture (100k-point / 400k-index surface) is built once outside
+    // the timing window: cpu_compile_ms measures the compiler, not fixture
+    // construction.
     {
+        UsdGenGraphDesc desc = MakeG3();
         std::vector<double> times;
         for (int i = 0; i < 5; ++i) {
             UsdGenCompiler c;
             UsdGenGraph g;
             double t0 = NowMs();
-            UsdGenCompileResult r = c.Compile(MakeG3(), &g);
+            UsdGenCompileResult r = c.Compile(desc, &g);
             times.push_back(NowMs() - t0);
             if (!r.ok) {
                 std::fprintf(stderr, "CPU compile failed: ");
