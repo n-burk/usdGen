@@ -339,13 +339,11 @@ bool UsdGenNoiseOp::Capture(
         const float baseY = root[1] * correlation + (1.0f - correlation) * hvec[1];
         const float baseZ = root[2] * correlation + (1.0f - correlation) * hvec[2];
 
-        float rootOut = 0.0f;
-        {
-            const float in3[3] = {baseX, baseY, baseZ};
-            SeExpr2::FBM<3, 1, false, float>(in3, &rootOut,
-                                             octaves, lacunarity, gain);
-        }
-        cap.perCurve[c] = 2.0f * rootOut - 1.0f;
+        // The per-curve root sample (perCurve[c] = 2*fbm(base)-1) is recorded
+        // only by the CUDA kernel and never read by this op's Evaluate or by
+        // any downstream operator, so the CPU lane skips that extra FBM call
+        // (one per curve). perCv — the value the kernels actually consume — is
+        // unchanged, keeping every rendered px/py/pz bit-identical.
 
         const int n = ragged ? int(offs[c + 1] - offs[c]) : cvCount;
         // cap.perCv stays GLOBAL-indexed (length totalCvs, plan/05:497):
