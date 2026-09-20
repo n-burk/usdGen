@@ -552,7 +552,15 @@ bool UsdGenGrowOp::Capture(
     }
     // Point cardinality and rootSpans were established before the per-curve
     // loop so connected controls sample each curve's root.
-    VtVec3fArray grownRest(buf.totalCvs);
+    // Allocate the rest channel WITHOUT a serial value-init pass: the
+    // GrowParallelFor below writes every element of [0, totalCvs), so the
+    // C++ zero-fill would only single-threadedly first-touch every page
+    // (then the parallel loop re-touches them). Skipping it lets the first
+    // touches distribute across the worker threads. GfVec3f is trivially
+    // destructible and every slot is written before read, so this is safe.
+    VtVec3fArray grownRest;
+    if (buf.totalCvs > 0)
+        grownRest.resize(buf.totalCvs, [](GfVec3f *, GfVec3f *) {});
     // When no per-curve frames, per-curve controls, or per-strand direction
     // are present, the normalized/rotated growth direction is identical for
     // every curve; hoist the sqrt/rotation out of the hot loop. This is
