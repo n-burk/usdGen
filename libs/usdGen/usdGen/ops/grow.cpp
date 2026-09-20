@@ -347,7 +347,14 @@ bool UsdGenGrowOp::Capture(
     // resamples a valid vertex-width plane to the new span or creates the
     // description fallback.  This happens during capture, before workers
     // receive raw output pointers, and is deliberately private storage.
-    VtFloatArray grownWidths(buf.totalCvs, fallbackWidth);
+    // No value-init: when upstream.width is present (the common groom case)
+    // the resample loop below overwrites every element, so the fill would be
+    // pure waste (serial 2MB memset ahead of a parallel pass). Only fill the
+    // description default when there is no upstream width plane to resample.
+    VtFloatArray grownWidths;
+    grownWidths.resize(buf.totalCvs, [](float *, float *) {});
+    if (upstream.width.empty())
+        std::fill(grownWidths.begin(), grownWidths.end(), fallbackWidth);
     if (!upstream.width.empty()) {
         if (upstream.width.size() != upstream.totalCvs) {
             if (diag) diag->Error("UsdGenGrow: upstream width plane cardinality "
