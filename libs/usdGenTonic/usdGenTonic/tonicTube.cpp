@@ -1,11 +1,117 @@
 // usdGenTonic — P3 CPU twins (K4/K5/K8–K11). Same operation order as the
 // CUDA kernels in tonicKernels.cu; TN-6 parity is asserted in T0.
 #include "usdGenTonic/tonicTube.h"
+#include "usdGenTonic/tonicHierarchy.h"
+#include "usdGenTonic/tonicRegion.h"
+#include "usdGenTonic/tonicScalp.h"
+#include "usdGen/concaveMaterialRemap.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace usdGenTonic {
+
+namespace {
+
+bool _ProperRotation(float const *r)
+{
+    if (!r) {
+        return false;
+    }
+    for (int i = 0; i < 9; ++i) {
+        if (!std::isfinite(r[i])) {
+            return false;
+        }
+    }
+    // Rows must form a proper orthonormal basis.  The tolerance allows the
+    // single-precision support-plane fit but rejects scale, shear and mirror.
+    for (int row = 0; row < 3; ++row) {
+        float length2 = 0.0f;
+        for (int col = 0; col < 3; ++col) {
+            length2 += r[row * 3 + col] * r[row * 3 + col];
+        }
+        if (std::fabs(length2 - 1.0f) > 2e-4f) {
+            return false;
+        }
+        for (int other = row + 1; other < 3; ++other) {
+            float dot = 0.0f;
+            for (int col = 0; col < 3; ++col) {
+                dot += r[row * 3 + col] * r[other * 3 + col];
+            }
+            if (std::fabs(dot) > 2e-4f) {
+                return false;
+            }
+        }
+    }
+    float const determinant =
+        r[0] * (r[4] * r[8] - r[5] * r[7]) -
+        r[1] * (r[3] * r[8] - r[5] * r[6]) +
+        r[2] * (r[3] * r[7] - r[4] * r[6]);
+    return std::fabs(determinant - 1.0f) <= 3e-4f;
+}
+
+bool _RigidTransformValid(TonicRigidTransform const &transform)
+{
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(transform.translation[i])) {
+            return false;
+        }
+    }
+    return _ProperRotation(transform.rotation);
+}
+
+bool _ReferenceIsIdentity(std::array<float, 9> const &q)
+{
+    static float const identity[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f};
+    for (int i = 0; i < 9; ++i) {
+        if (q[size_t(i)] != identity[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void _RotateVector(float const *r, float const in[3], float out[3])
+{
+    float const x = in[0], y = in[1], z = in[2];
+    out[0] = r[0] * x + r[1] * y + r[2] * z;
+    out[1] = r[3] * x + r[4] * y + r[5] * z;
+    out[2] = r[6] * x + r[7] * y + r[8] * z;
+}
+
+void _TransformVector(TonicRigidTransform const &transform,
+                      float const in[3], float out[3])
+{
+    _RotateVector(transform.rotation, in, out);
+}
+
+void _TransformPoint(TonicRigidTransform const &transform,
+                     float const in[3], float out[3])
+{
+    _TransformVector(transform, in, out);
+    out[0] += transform.translation[0];
+    out[1] += transform.translation[1];
+    out[2] += transform.translation[2];
+}
+
+void _TransformFrame(TonicRigidTransform const &transform, TonicFrame *frame)
+{
+    float t[3] = {frame->tx, frame->ty, frame->tz};
+    float n[3] = {frame->nx, frame->ny, frame->nz};
+    float b[3] = {frame->bx, frame->by, frame->bz};
+    _TransformVector(transform, t, t);
+    _TransformVector(transform, n, n);
+    _TransformVector(transform, b, b);
+    frame->tx = t[0]; frame->ty = t[1]; frame->tz = t[2];
+    frame->nx = n[0]; frame->ny = n[1]; frame->nz = n[2];
+    frame->bx = b[0]; frame->by = b[1]; frame->bz = b[2];
+}
+
+}  // namespace
 
 bool TonicCenterFramesCpu(float const *cx, float const *cy, float const *cz,
                           int nCv, std::vector<TonicFrame> *frames,
@@ -53,6 +159,186 @@ bool TonicCenterFramesCpu(float const *cx, float const *cy, float const *cz,
     return true;
 }
 
+bool TonicTubeFramesCpu(TonicTubeDesc const &tube,
+                        std::vector<TonicFrame> *frames, std::string *err)
+{
+    int const nCv = int(tube.centerX.size());
+    if (nCv < 2 || tube.centerY.size() != size_t(nCv) ||
+        tube.centerZ.size() != size_t(nCv)) {
+        if (err) {
+            *err = "TonicTubeFramesCpu: malformed center column";
+        }
+        return false;
+    }
+    float const *q = tube.frameReference.data();
+    if (!_ProperRotation(q)) {
+        if (err) {
+            *err = "TonicTubeFramesCpu: frame reference is not a proper "
+                   "rotation";
+        }
+        return false;
+    }
+    if (_ReferenceIsIdentity(tube.frameReference)) {
+        // Keep legacy descriptors bit-for-bit on their historical K4 path.
+        if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
+                                  tube.centerZ.data(), nCv, frames, err)) {
+            return false;
+        }
+    } else {
+        // K4's initial perpendicular is chosen from a world axis. Evaluate
+        // the center in the descriptor's material frame instead, then map
+        // every resulting axis back to world.  Translation by center[0]
+        // makes the conversion well-conditioned without changing tangents.
+        std::vector<float> lx(static_cast<size_t>(nCv), 0.0f);
+        std::vector<float> ly(static_cast<size_t>(nCv), 0.0f);
+        std::vector<float> lz(static_cast<size_t>(nCv), 0.0f);
+        float const root[3] = {tube.centerX[0], tube.centerY[0],
+                               tube.centerZ[0]};
+        for (int i = 0; i < nCv; ++i) {
+            float const delta[3] = {tube.centerX[size_t(i)] - root[0],
+                                    tube.centerY[size_t(i)] - root[1],
+                                    tube.centerZ[size_t(i)] - root[2]};
+            // Q^-1 is Q^T because frameReference is a proper rotation.
+            lx[size_t(i)] = q[0] * delta[0] + q[3] * delta[1] +
+                            q[6] * delta[2];
+            ly[size_t(i)] = q[1] * delta[0] + q[4] * delta[1] +
+                            q[7] * delta[2];
+            lz[size_t(i)] = q[2] * delta[0] + q[5] * delta[1] +
+                            q[8] * delta[2];
+        }
+        if (!TonicCenterFramesCpu(lx.data(), ly.data(), lz.data(), nCv,
+                                  frames, err)) {
+            return false;
+        }
+        for (TonicFrame &frame : *frames) {
+            float t[3] = {frame.tx, frame.ty, frame.tz};
+            float n[3] = {frame.nx, frame.ny, frame.nz};
+            float b[3] = {frame.bx, frame.by, frame.bz};
+            _RotateVector(q, t, t);
+            _RotateVector(q, n, n);
+            _RotateVector(q, b, b);
+            frame.tx = t[0]; frame.ty = t[1]; frame.tz = t[2];
+            frame.nx = n[0]; frame.ny = n[1]; frame.nz = n[2];
+            frame.bx = b[0]; frame.by = b[1]; frame.bz = b[2];
+        }
+    }
+    if (frames->empty()) {
+        return false;
+    }
+    if (!tube.rootFramePinned || frames->empty()) {
+        return true;
+    }
+
+    // The stored frame comes from the region's fitted support plane.  Repair
+    // its in-plane axis defensively so deserialised data cannot make K5/K9
+    // non-orthonormal; its tangent remains the authored plane normal.
+    TonicFrame f = tube.rootFrame;
+    float t[3] = {f.tx, f.ty, f.tz};
+    float const tl = TonicLen3(t);
+    if (!(tl > 1e-12f)) {
+        if (err) {
+            *err = "TonicTubeFramesCpu: pinned root has no plane normal";
+        }
+        return false;
+    }
+    t[0] /= tl;
+    t[1] /= tl;
+    t[2] /= tl;
+    float n[3] = {f.nx, f.ny, f.nz};
+    float const ndot = TonicDot3(n, t);
+    n[0] -= ndot * t[0];
+    n[1] -= ndot * t[1];
+    n[2] -= ndot * t[2];
+    float const nl = TonicLen3(n);
+    if (!(nl > 1e-12f)) {
+        TonicPerp3(t, n);
+    } else {
+        n[0] /= nl;
+        n[1] /= nl;
+        n[2] /= nl;
+    }
+    float b[3];
+    TonicCross3(t, n, b);
+    f.tx = t[0];
+    f.ty = t[1];
+    f.tz = t[2];
+    f.nx = n[0];
+    f.ny = n[1];
+    f.nz = n[2];
+    f.bx = b[0];
+    f.by = b[1];
+    f.bz = b[2];
+    (*frames)[0] = f;
+    return true;
+}
+
+bool TonicRigidTransformTubeCpu(TonicTubeDesc const &source,
+                                TonicRigidTransform const &transform,
+                                TonicTubeDesc *out, std::string *err)
+{
+    auto fail = [&](char const *what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    if (!out || !_RigidTransformValid(transform)) {
+        return fail("TonicRigidTransformTubeCpu: expected a proper rigid "
+                    "transform and output");
+    }
+    int const nCv = int(source.centerX.size());
+    if (nCv < 2 || source.centerY.size() != size_t(nCv) ||
+        source.centerZ.size() != size_t(nCv)) {
+        return fail("TonicRigidTransformTubeCpu: malformed center column");
+    }
+    for (TonicTubeSection const &section : source.sections) {
+        if (section.u.size() != section.v.size() || section.u.empty() ||
+            !std::isfinite(section.t) || !std::isfinite(section.scale) ||
+            !std::isfinite(section.twist)) {
+            return fail("TonicRigidTransformTubeCpu: malformed section");
+        }
+    }
+
+    // Keep a local source copy so callers may transform a descriptor in
+    // place.  A frame evaluation also validates the stored material frame.
+    TonicTubeDesc const before = source;
+    std::vector<TonicFrame> beforeFrames;
+    std::string frameErr;
+    if (!TonicTubeFramesCpu(before, &beforeFrames, &frameErr)) {
+        return fail(frameErr.c_str());
+    }
+
+    TonicTubeDesc after = before;
+    for (int i = 0; i < nCv; ++i) {
+        float point[3] = {before.centerX[size_t(i)], before.centerY[size_t(i)],
+                          before.centerZ[size_t(i)]};
+        _TransformPoint(transform, point, point);
+        after.centerX[size_t(i)] = point[0];
+        after.centerY[size_t(i)] = point[1];
+        after.centerZ[size_t(i)] = point[2];
+    }
+    if (after.rootFramePinned) {
+        _TransformFrame(transform, &after.rootFrame);
+    }
+    // Q maps the K4 material frame to world.  Under a rigid pose change the
+    // local curve is unchanged: Q' = R*Q.  Leaving all chart controls alone
+    // preserves every interpolated K5 sample, rather than merely matching
+    // the sparse authored section knots.
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            after.frameReference[size_t(row * 3 + col)] =
+                transform.rotation[row * 3 + 0] *
+                    before.frameReference[size_t(0 * 3 + col)] +
+                transform.rotation[row * 3 + 1] *
+                    before.frameReference[size_t(1 * 3 + col)] +
+                transform.rotation[row * 3 + 2] *
+                    before.frameReference[size_t(2 * 3 + col)];
+        }
+    }
+    *out = std::move(after);
+    return true;
+}
+
 bool TonicSampleCenterCpu(TonicTubeDesc const &tube,
                           std::vector<TonicFrame> const &frames, float t,
                           float *px, float *py, float *pz, TonicFrame *frame,
@@ -78,6 +364,255 @@ bool TonicSampleCenterCpu(TonicTubeDesc const &tube,
     *pz = cp[2];
     TonicNlerpFrame(frames.data(), n, t, frame);
     return true;
+}
+
+bool TonicSampleTubeRingCpu(TonicTubeDesc const &tube,
+                            std::vector<TonicFrame> const &frames, float t,
+                            std::vector<float> *positions, std::string *err)
+{
+    auto fail = [&](char const *what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    int const nCv = int(tube.centerX.size());
+    int const nSec = int(tube.sections.size());
+    int const rv = tube.ringVerts;
+    if (!positions || !std::isfinite(t) || nCv < 2 || nSec < 2 || rv < 3 || rv > 32 ||
+        frames.size() != size_t(nCv) || tube.centerY.size() != size_t(nCv) ||
+        tube.centerZ.size() != size_t(nCv)) {
+        return fail("TonicSampleTubeRingCpu: malformed tube or frames");
+    }
+    float previousT = -std::numeric_limits<float>::infinity();
+    for (TonicTubeSection const &section : tube.sections) {
+        if (int(section.u.size()) != rv || int(section.v.size()) != rv) {
+            return fail("TonicSampleTubeRingCpu: section ring mismatch");
+        }
+        if (!std::isfinite(section.t) || section.t < previousT ||
+            !std::isfinite(section.scale) || !std::isfinite(section.twist)) {
+            return fail("TonicSampleTubeRingCpu: invalid section parameters");
+        }
+        previousT = section.t;
+        for (int slot = 0; slot < rv; ++slot) {
+            if (!std::isfinite(section.u[size_t(slot)]) ||
+                !std::isfinite(section.v[size_t(slot)])) {
+                return fail("TonicSampleTubeRingCpu: non-finite section CV");
+            }
+        }
+    }
+    float const domainStart = tube.sections.front().t;
+    float const domainEnd = tube.sections.back().t;
+    float const domainTolerance =
+        std::max(1e-6f, std::fabs(domainEnd - domainStart) * 1e-6f);
+    if (t < domainStart - domainTolerance ||
+        t > domainEnd + domainTolerance) {
+        return fail("TonicSampleTubeRingCpu: t outside section domain");
+    }
+    // Stations are often reconstructed as begin + span*i/(count-1). Clamp
+    // its one-ulp endpoint overshoot, but never accept a materially invalid
+    // parameter from an external caller.
+    t = t < domainStart ? domainStart : (t > domainEnd ? domainEnd : t);
+    int k = 0;
+    while (k + 1 < nSec - 1 && tube.sections[size_t(k + 1)].t < t) {
+        ++k;
+    }
+    TonicTubeSection const &s0 = tube.sections[size_t(k)];
+    TonicTubeSection const &s1 = tube.sections[size_t(k + 1)];
+    TonicTubeSection const &sP =
+        tube.sections[size_t(k > 0 ? k - 1 : k)];
+    TonicTubeSection const &sN =
+        tube.sections[size_t(k + 2 < nSec ? k + 2 : k + 1)];
+    float const dt = s1.t > s0.t ? s1.t - s0.t : 1.0f;
+    float f = (t - s0.t) / dt;
+    f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+    bool const first = (k == 0);
+    bool const last = (k + 1 == nSec - 1);
+    float const m0sc = first ? s1.scale - s0.scale
+                             : 0.5f * (s1.scale - sP.scale);
+    float const m1sc = last ? s1.scale - s0.scale
+                            : 0.5f * (sN.scale - s0.scale);
+    float const m0tw = first ? s1.twist - s0.twist
+                             : 0.5f * (s1.twist - sP.twist);
+    float const m1tw = last ? s1.twist - s0.twist
+                            : 0.5f * (sN.twist - s0.twist);
+    float scale = TonicHermite(s0.scale, s1.scale, m0sc, m1sc, f);
+    if (!(scale > 1e-6f)) {
+        scale = 1e-6f;
+    }
+    float const twist = TonicHermite(s0.twist, s1.twist, m0tw, m1tw, f);
+    float const ct = std::cos(twist), st = std::sin(twist);
+    float cp[3];
+    TonicFrame fr;
+    std::string sampleErr;
+    if (!TonicSampleCenterCpu(tube, frames, t, &cp[0], &cp[1], &cp[2], &fr,
+                              &sampleErr)) {
+        return fail(sampleErr.c_str());
+    }
+    positions->assign(size_t(rv) * 3, 0.0f);
+    for (int slot = 0; slot < rv; ++slot) {
+        float const m0u = first ? s1.u[size_t(slot)] - s0.u[size_t(slot)]
+                                : 0.5f * (s1.u[size_t(slot)] -
+                                          sP.u[size_t(slot)]);
+        float const m1u = last ? s1.u[size_t(slot)] - s0.u[size_t(slot)]
+                               : 0.5f * (sN.u[size_t(slot)] -
+                                         s0.u[size_t(slot)]);
+        float const m0v = first ? s1.v[size_t(slot)] - s0.v[size_t(slot)]
+                                : 0.5f * (s1.v[size_t(slot)] -
+                                          sP.v[size_t(slot)]);
+        float const m1v = last ? s1.v[size_t(slot)] - s0.v[size_t(slot)]
+                               : 0.5f * (sN.v[size_t(slot)] -
+                                         s0.v[size_t(slot)]);
+        float u = TonicHermite(s0.u[size_t(slot)], s1.u[size_t(slot)], m0u,
+                               m1u, f) * scale;
+        float v = TonicHermite(s0.v[size_t(slot)], s1.v[size_t(slot)], m0v,
+                               m1v, f) * scale;
+        float const ru = u * ct - v * st;
+        float const rvv = u * st + v * ct;
+        size_t const out = size_t(slot) * 3;
+        (*positions)[out + 0] = cp[0] + fr.nx * ru + fr.bx * rvv;
+        (*positions)[out + 1] = cp[1] + fr.ny * ru + fr.by * rvv;
+        (*positions)[out + 2] = cp[2] + fr.nz * ru + fr.bz * rvv;
+    }
+    for (float value : *positions) {
+        if (!std::isfinite(value)) {
+            return fail("TonicSampleTubeRingCpu: non-finite result");
+        }
+    }
+    return true;
+}
+
+bool
+TonicCenterHandlePointCpu(TonicTubeDesc const &tube, int centerCV, float *px,
+                          float *py, float *pz, std::string *err)
+{
+    auto fail = [&](char const *what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    int const nCv = int(tube.centerX.size());
+    int const nSec = int(tube.sections.size());
+    int const rv = tube.ringVerts;
+    if (!px || !py || !pz || centerCV < 0 || centerCV >= nCv || nCv < 2 ||
+        nSec < 2 || rv < 3 ||
+        tube.centerY.size() != size_t(nCv) ||
+        tube.centerZ.size() != size_t(nCv)) {
+        return fail("TonicCenterHandlePointCpu: malformed tube or CV");
+    }
+    for (TonicTubeSection const &section : tube.sections) {
+        if (int(section.u.size()) != rv || int(section.v.size()) != rv) {
+            return fail("TonicCenterHandlePointCpu: section ring mismatch");
+        }
+    }
+
+    std::vector<TonicFrame> frames;
+    std::string frameErr;
+    if (!TonicTubeFramesCpu(tube, &frames, &frameErr)) {
+        return fail(frameErr.c_str());
+    }
+    float const t = float(centerCV) / float(nCv - 1);
+    int k = 0;
+    while (k + 1 < nSec - 1 && tube.sections[size_t(k + 1)].t < t) {
+        ++k;
+    }
+    TonicTubeSection const &s0 = tube.sections[size_t(k)];
+    TonicTubeSection const &s1 = tube.sections[size_t(k + 1)];
+    TonicTubeSection const &sP =
+        tube.sections[size_t(k > 0 ? k - 1 : k)];
+    TonicTubeSection const &sN =
+        tube.sections[size_t(k + 2 < nSec ? k + 2 : k + 1)];
+    float const dt = s1.t > s0.t ? s1.t - s0.t : 1.0f;
+    float f = (t - s0.t) / dt;
+    f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+    bool const first = (k == 0);
+    bool const last = (k + 1 == nSec - 1);
+    float const m0sc = first ? s1.scale - s0.scale
+                             : 0.5f * (s1.scale - sP.scale);
+    float const m1sc = last ? s1.scale - s0.scale
+                            : 0.5f * (sN.scale - s0.scale);
+    float const m0tw = first ? s1.twist - s0.twist
+                             : 0.5f * (s1.twist - sP.twist);
+    float const m1tw = last ? s1.twist - s0.twist
+                            : 0.5f * (sN.twist - s0.twist);
+    float scale = TonicHermite(s0.scale, s1.scale, m0sc, m1sc, f);
+    if (!(scale > 1e-6f)) {
+        scale = 1e-6f;
+    }
+    float const twist = TonicHermite(s0.twist, s1.twist, m0tw, m1tw, f);
+    float const ct = std::cos(twist);
+    float const st = std::sin(twist);
+
+    // The signed shoelace centroid is affine-covariant, so calculate it in
+    // the evaluated (twisted and scaled) ring chart then map it through the
+    // same K4 frame used by the visible K5 section. It handles concavity and
+    // winding without treating a sparse clipped ring as a vertex average.
+    double twiceArea = 0.0;
+    double centroidU = 0.0;
+    double centroidV = 0.0;
+    double meanU = 0.0;
+    double meanV = 0.0;
+    auto point = [&](int slot, float *u, float *v) {
+        float const m0u = first ? s1.u[size_t(slot)] - s0.u[size_t(slot)]
+                                : 0.5f * (s1.u[size_t(slot)] -
+                                          sP.u[size_t(slot)]);
+        float const m1u = last ? s1.u[size_t(slot)] - s0.u[size_t(slot)]
+                               : 0.5f * (sN.u[size_t(slot)] -
+                                         s0.u[size_t(slot)]);
+        float const m0v = first ? s1.v[size_t(slot)] - s0.v[size_t(slot)]
+                                : 0.5f * (s1.v[size_t(slot)] -
+                                          sP.v[size_t(slot)]);
+        float const m1v = last ? s1.v[size_t(slot)] - s0.v[size_t(slot)]
+                               : 0.5f * (sN.v[size_t(slot)] -
+                                         s0.v[size_t(slot)]);
+        float const baseU = TonicHermite(s0.u[size_t(slot)],
+                                         s1.u[size_t(slot)], m0u, m1u, f) *
+                            scale;
+        float const baseV = TonicHermite(s0.v[size_t(slot)],
+                                         s1.v[size_t(slot)], m0v, m1v, f) *
+                            scale;
+        *u = baseU * ct - baseV * st;
+        *v = baseU * st + baseV * ct;
+    };
+    float previousU = 0.0f, previousV = 0.0f;
+    point(rv - 1, &previousU, &previousV);
+    for (int slot = 0; slot < rv; ++slot) {
+        float u = 0.0f, v = 0.0f;
+        point(slot, &u, &v);
+        double const cross = double(previousU) * double(v) -
+                             double(u) * double(previousV);
+        twiceArea += cross;
+        centroidU += (double(previousU) + double(u)) * cross;
+        centroidV += (double(previousV) + double(v)) * cross;
+        meanU += u;
+        meanV += v;
+        previousU = u;
+        previousV = v;
+    }
+
+    float cp[3];
+    TonicFrame frame;
+    std::string sampleErr;
+    if (!TonicSampleCenterCpu(tube, frames, t, &cp[0], &cp[1], &cp[2],
+                              &frame, &sampleErr)) {
+        return fail(sampleErr.c_str());
+    }
+    // A degenerate but offset section still has a visible core. Its vertex
+    // mean gives that handle a stable position; the raw center cage is only
+    // a fallback for malformed descriptors above.
+    float const u = std::fabs(twiceArea) <= 1e-12
+                        ? float(meanU / double(rv))
+                        : float(centroidU / (3.0 * twiceArea));
+    float const v = std::fabs(twiceArea) <= 1e-12
+                        ? float(meanV / double(rv))
+                        : float(centroidV / (3.0 * twiceArea));
+    *px = cp[0] + frame.nx * u + frame.bx * v;
+    *py = cp[1] + frame.ny * u + frame.by * v;
+    *pz = cp[2] + frame.nz * u + frame.bz * v;
+    return std::isfinite(*px) && std::isfinite(*py) && std::isfinite(*pz)
+               ? true
+               : fail("TonicCenterHandlePointCpu: non-finite handle");
 }
 
 float TonicSectionMeanRadius(TonicTubeSection const &section)
@@ -487,7 +1022,689 @@ bool TonicRootSampleMeshCpu(float const *points, int const *faceCounts,
     return true;
 }
 
-bool TonicGuideFillCpu(TonicTubeDesc const &tube,
+bool TonicRootSampleRegionMeshCpu(
+    TonicScalpMesh const &scalp, TonicRegionLoops const &loops,
+    int sourceRegionId, float density, int tubeId, int seed,
+    float const rootCenter[3], TonicFrame const &rootFrame, float rootRadius,
+    std::vector<TonicGuideRoot> *roots, int frozen, std::string *err)
+{
+    auto fail = [&](char const *what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    if (!scalp.finalized || !rootCenter || !roots || frozen < 0 ||
+        frozen > int(roots->size()) || !(density >= 0.0f) ||
+        !(rootRadius > 0.0f)) {
+        return fail("TonicRootSampleRegionMeshCpu: bad region or buffers");
+    }
+    int loop = -1;
+    for (size_t i = 0; i < loops.regionIds.size(); ++i) {
+        if (loops.regionIds[i] == sourceRegionId) {
+            loop = int(i);
+            break;
+        }
+    }
+    if (loop < 0 || size_t(loop) >= loops.loopCount.size() ||
+        loops.loopCount[size_t(loop)] < 3) {
+        return fail("TonicRootSampleRegionMeshCpu: unknown region loop");
+    }
+    // The graph loop is the support. Its projected area is a stable density
+    // estimate on a chart-local scalp; candidates below still have to pass
+    // the exact point-in-polygon test before a root can escape this function.
+    int const interp = loops.interpIds[size_t(loop)];
+    auto loopArea = [&](int loopIndex) {
+        float const *loopP = &loops.planeP[size_t(loopIndex) * 3];
+        float const *loopU = &loops.basisU[size_t(loopIndex) * 3];
+        float const *loopV = &loops.basisV[size_t(loopIndex) * 3];
+        int const loopBegin = loops.loopBegin[size_t(loopIndex)];
+        int const loopCount = loops.loopCount[size_t(loopIndex)];
+        double twiceArea = 0.0;
+        for (int i = 0; i < loopCount; ++i) {
+            auto project = [&](int k, float *x, float *y) {
+                float const *q =
+                    &loops.points[size_t(loopBegin + k) * 3];
+                float const dx = q[0] - loopP[0], dy = q[1] - loopP[1],
+                            dz = q[2] - loopP[2];
+                *x = dx * loopU[0] + dy * loopU[1] + dz * loopU[2];
+                *y = dx * loopV[0] + dy * loopV[1] + dz * loopV[2];
+            };
+            float ax, ay, bx, by;
+            project(i, &ax, &ay);
+            project((i + 1) % loopCount, &bx, &by);
+            twiceArea += double(ax) * by - double(ay) * bx;
+        }
+        return float(0.5 * std::fabs(twiceArea));
+    };
+    // Linked graph regions deliberately share one interpolation id and one
+    // fill support. Unlinked overlaps follow the classifier's lowest-id
+    // rule below, exactly as the Ptex map does.
+    float area = 0.0f;
+    std::vector<int> supportLoops;
+    for (size_t i = 0; i < loops.loopCount.size(); ++i) {
+        if (loops.interpIds[i] == interp) {
+            float const loopSupportArea = loopArea(int(i));
+            if (loopSupportArea > 0.0f) {
+                area += loopSupportArea;
+                supportLoops.push_back(int(i));
+            }
+        }
+    }
+    uint64_t const key =
+        (uint64_t(uint32_t(tubeId)) << 32) | uint64_t(uint32_t(seed));
+    float const expected = density * area;
+    int target = int(expected);
+    if (TonicHash01(key ^ uint64_t(uint32_t(sourceRegionId)),
+                    kTonicSaltRoot) < expected - float(target)) {
+        ++target;
+    }
+    int const keepCount = std::min(frozen, target);
+    if (target == 0) {
+        roots->clear();
+        return true;
+    }
+    // Draw within a linked member's chart box, chosen area-weighted, then project accepted candidates to
+    // the scalp. This has bounded work for a tiny graph polygon on one huge
+    // coarse face, where whole-scalp rejection could miss it entirely.
+    auto bounds = [&](int which, float *minX, float *maxX, float *minY,
+                      float *maxY) {
+        for (int i = 0; i < loops.loopCount[size_t(which)]; ++i) {
+            float const *q = &loops.points[size_t(loops.loopBegin[size_t(which)] + i) * 3];
+            float const dx = q[0] - loops.planeP[size_t(which) * 3 + 0];
+            float const dy = q[1] - loops.planeP[size_t(which) * 3 + 1];
+            float const dz = q[2] - loops.planeP[size_t(which) * 3 + 2];
+            float const x = dx * loops.basisU[size_t(which) * 3 + 0] +
+                            dy * loops.basisU[size_t(which) * 3 + 1] +
+                            dz * loops.basisU[size_t(which) * 3 + 2];
+            float const y = dx * loops.basisV[size_t(which) * 3 + 0] +
+                            dy * loops.basisV[size_t(which) * 3 + 1] +
+                            dz * loops.basisV[size_t(which) * 3 + 2];
+            if (i == 0) {
+                *minX = *maxX = x;
+                *minY = *maxY = y;
+            } else {
+                *minX = std::min(*minX, x); *maxX = std::max(*maxX, x);
+                *minY = std::min(*minY, y); *maxY = std::max(*maxY, y);
+            }
+        }
+    };
+    // Choose proposal charts by their bounding-box area. After the
+    // point-in-polygon rejection, accepted mass is proportional to polygon
+    // area instead of polygonArea^2 / boxArea for mixed linked shapes.
+    std::vector<float> supportMinX, supportMaxX, supportMinY, supportMaxY;
+    std::vector<float> proposalCumulative;
+    float proposalArea = 0.0f;
+    for (int support : supportLoops) {
+        float minX = 0, maxX = 0, minY = 0, maxY = 0;
+        bounds(support, &minX, &maxX, &minY, &maxY);
+        supportMinX.push_back(minX); supportMaxX.push_back(maxX);
+        supportMinY.push_back(minY); supportMaxY.push_back(maxY);
+        proposalArea += std::max((maxX - minX) * (maxY - minY), 1e-12f);
+        proposalCumulative.push_back(proposalArea);
+    }
+    std::vector<TonicGuideRoot> out;
+    out.reserve(size_t(target));
+    for (int i = 0; i < keepCount; ++i) {
+        // Frozen roots are accepted only while still inside this exact
+        // support. A moved graph boundary must never preserve an escaped
+        // root into the next fill.
+        float q[3] = {(*roots)[size_t(i)].px, (*roots)[size_t(i)].py,
+                      (*roots)[size_t(i)].pz};
+        if (TonicClassifyPointCpu(loops, q) == interp) {
+            out.push_back((*roots)[size_t(i)]);
+        }
+    }
+    size_t const frozenKept = out.size();
+    int const budget = std::max(512, target * 128);
+    for (int cand = 0; cand < budget && int(out.size()) < target; ++cand) {
+        uint64_t const ck = key ^ (uint64_t(cand) * 0x9E3779B185EBCA87ull);
+        float const choose = TonicHash01(ck ^ 0x27D4EB2Fu, kTonicSaltRoot) * proposalArea;
+        size_t selected = size_t(std::lower_bound(proposalCumulative.begin(),
+                                                   proposalCumulative.end(), choose) -
+                                 proposalCumulative.begin());
+        if (selected >= supportLoops.size()) selected = supportLoops.size() - 1;
+        int const sampleLoop = supportLoops[selected];
+        float const minX = supportMinX[selected], maxX = supportMaxX[selected];
+        float const minY = supportMinY[selected], maxY = supportMaxY[selected];
+        float const px = minX + (maxX - minX) * TonicHash01(ck, kTonicSaltRoot);
+        float const py = minY + (maxY - minY) *
+                                      TonicHash01(ck ^ 0xC2B2AE35u, kTonicSaltRoot);
+        float candidate[3] = {
+            loops.planeP[size_t(sampleLoop) * 3 + 0] +
+                loops.basisU[size_t(sampleLoop) * 3 + 0] * px +
+                loops.basisV[size_t(sampleLoop) * 3 + 0] * py,
+            loops.planeP[size_t(sampleLoop) * 3 + 1] +
+                loops.basisU[size_t(sampleLoop) * 3 + 1] * px +
+                loops.basisV[size_t(sampleLoop) * 3 + 1] * py,
+            loops.planeP[size_t(sampleLoop) * 3 + 2] +
+                loops.basisU[size_t(sampleLoop) * 3 + 2] * px +
+                loops.basisV[size_t(sampleLoop) * 3 + 2] * py};
+        if (!TonicPointInRegionCpu(loops, sampleLoop, candidate)) {
+            continue;
+        }
+        TonicHit const hit = TonicClosestPointCpu(scalp, candidate);
+        if (!hit.hit) {
+            continue;
+        }
+        float q[3] = {hit.px, hit.py, hit.pz};
+        if (TonicClassifyPointCpu(loops, q) != interp) {
+            continue;
+        }
+        TonicGuideRoot root;
+        root.faceId = hit.faceId;
+        root.px = q[0];
+        root.py = q[1];
+        root.pz = q[2];
+        root.u = hit.u;
+        root.v = hit.v;
+        float d[3] = {q[0] - rootCenter[0], q[1] - rootCenter[1],
+                      q[2] - rootCenter[2]};
+        float const nA[3] = {rootFrame.nx, rootFrame.ny, rootFrame.nz};
+        float const bA[3] = {rootFrame.bx, rootFrame.by, rootFrame.bz};
+        root.ru = TonicDot3(d, nA) / rootRadius;
+        root.rv = TonicDot3(d, bA) / rootRadius;
+        bool duplicate = false;
+        // The deterministic fresh stream has distinct hash candidates. Only
+        // compare the preserved prefix, which prevents a freeze/refill from
+        // replaying its old samples without turning ordinary preview fills
+        // into O(n^2) work.
+        for (size_t i = 0; i < frozenKept; ++i) {
+            TonicGuideRoot const &prior = out[i];
+            float const dx = prior.px - root.px, dy = prior.py - root.py,
+                        dz = prior.pz - root.pz;
+            if (dx * dx + dy * dy + dz * dz < 1e-12f) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            out.push_back(root);
+        }
+    }
+    *roots = std::move(out);
+    return true;
+}
+
+void TonicFilterGuideRootsByOwnershipCells(
+    std::vector<TonicRootOwnershipCell> const &cells,
+    std::vector<TonicGuideRoot> *roots)
+{
+    if (!roots || cells.empty()) {
+        return;
+    }
+    std::vector<TonicGuideRoot> kept;
+    kept.reserve(roots->size());
+    for (TonicGuideRoot const &root : *roots) {
+        float const p[3] = {root.px, root.py, root.pz};
+        bool owns = true;
+        for (TonicRootOwnershipCell const &cell : cells) {
+            int const count = int(cell.childCenters.size() / 3);
+            if (cell.childIndex < 0 || cell.childIndex >= count ||
+                TonicOwningChildCell(cell.rootCenter, cell.frame,
+                                     cell.childCenters.data(), count, p) !=
+                    cell.childIndex) {
+                owns = false;
+                break;
+            }
+        }
+        if (owns) {
+            kept.push_back(root);
+        }
+    }
+    *roots = std::move(kept);
+}
+
+namespace {
+
+struct _K9Point {
+    float u = 0.0f;
+    float v = 0.0f;
+};
+
+float _K9Cross(_K9Point const &a, _K9Point const &b, _K9Point const &c)
+{
+    return (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u);
+}
+
+bool _K9Bary(_K9Point const &p, _K9Point const &a, _K9Point const &b,
+             _K9Point const &c, float *w0, float *w1, float *w2)
+{
+    float const d = _K9Cross(a, b, c);
+    if (std::fabs(d) <= 1e-12f) {
+        return false;
+    }
+    *w0 = _K9Cross(p, b, c) / d;
+    *w1 = _K9Cross(p, c, a) / d;
+    *w2 = 1.0f - *w0 - *w1;
+    return true;
+}
+
+bool _K9Inside(float w0, float w1, float w2)
+{
+    constexpr float eps = 2e-5f;
+    return w0 >= -eps && w1 >= -eps && w2 >= -eps;
+}
+
+_K9Point _K9ClosestSegment(_K9Point const &p, _K9Point const &a,
+                            _K9Point const &b)
+{
+    float const du = b.u - a.u, dv = b.v - a.v;
+    float const d2 = du * du + dv * dv;
+    float f = d2 > 1e-20f ? ((p.u - a.u) * du + (p.v - a.v) * dv) / d2
+                           : 0.0f;
+    f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+    return {a.u + du * f, a.v + dv * f};
+}
+
+bool _K9Triangulate(std::vector<_K9Point> const &polygon,
+                    std::vector<std::array<int, 3>> *triangles)
+{
+    if (!triangles || polygon.size() < 3) {
+        return false;
+    }
+    std::vector<PXR_NS::GfVec2f> actual;
+    actual.reserve(polygon.size());
+    for (_K9Point const &point : polygon) {
+        actual.emplace_back(point.u, point.v);
+    }
+    return usdGen::UsdGenTriangulateConcaveMaterialSlots(actual, triangles);
+}
+
+bool _K9Bind(std::vector<_K9Point> const &polygon,
+             std::vector<std::array<int, 3>> const &triangles,
+             _K9Point const &p, TonicGuideMaterialBinding *out)
+{
+    if (!out) {
+        return false;
+    }
+    float best2 = std::numeric_limits<float>::infinity();
+    TonicGuideMaterialBinding best;
+    for (std::array<int, 3> const &tri : triangles) {
+        _K9Point const &a = polygon[size_t(tri[0])];
+        _K9Point const &b = polygon[size_t(tri[1])];
+        _K9Point const &c = polygon[size_t(tri[2])];
+        float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f;
+        if (!_K9Bary(p, a, b, c, &w0, &w1, &w2)) {
+            continue;
+        }
+        _K9Point q = p;
+        if (!_K9Inside(w0, w1, w2)) {
+            _K9Point const ab = _K9ClosestSegment(p, a, b);
+            _K9Point const bc = _K9ClosestSegment(p, b, c);
+            _K9Point const ca = _K9ClosestSegment(p, c, a);
+            q = ab;
+            auto nearer = [&]( _K9Point const &candidate) {
+                float const du = candidate.u - p.u;
+                float const dv = candidate.v - p.v;
+                float const cu = q.u - p.u;
+                float const cv = q.v - p.v;
+                if (du * du + dv * dv < cu * cu + cv * cv) {
+                    q = candidate;
+                }
+            };
+            nearer(bc);
+            nearer(ca);
+            if (!_K9Bary(q, a, b, c, &w0, &w1, &w2)) {
+                continue;
+            }
+        }
+        // _K9Inside deliberately accepts a small negative boundary residue.
+        // Canonical material lookup is stricter, so make that accepted root
+        // point an exact convex barycentric tuple before carrying it forward.
+        // A genuinely outside point still reaches this only through the
+        // closest triangle edge above.
+        if (!_K9Inside(w0, w1, w2) || !std::isfinite(w0) ||
+            !std::isfinite(w1) || !std::isfinite(w2)) {
+            continue;
+        }
+        w0 = std::max(0.0f, w0);
+        w1 = std::max(0.0f, w1);
+        w2 = std::max(0.0f, w2);
+        float const weightSum = w0 + w1 + w2;
+        if (!(weightSum > 0.0f) || !std::isfinite(weightSum)) {
+            continue;
+        }
+        w0 /= weightSum;
+        w1 /= weightSum;
+        w2 /= weightSum;
+        float const du = q.u - p.u, dv = q.v - p.v;
+        float const d2 = du * du + dv * dv;
+        if (d2 < best2) {
+            best2 = d2;
+            best.slot0 = tri[0]; best.slot1 = tri[1]; best.slot2 = tri[2];
+            best.w0 = w0; best.w1 = w1; best.w2 = w2;
+        }
+    }
+    if (!std::isfinite(best2)) {
+        return false;
+    }
+    *out = best;
+    return true;
+}
+
+bool _K9PolygonCenterRadius(std::vector<_K9Point> const &polygon,
+                            _K9Point *center, float *radius)
+{
+    if (!center || !radius || polygon.size() < 3) {
+        return false;
+    }
+    double area2 = 0.0, cu = 0.0, cv = 0.0;
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        _K9Point const &a = polygon[i];
+        _K9Point const &b = polygon[(i + 1) % polygon.size()];
+        double const cross = double(a.u) * b.v - double(b.u) * a.v;
+        area2 += cross;
+        cu += (double(a.u) + b.u) * cross;
+        cv += (double(a.v) + b.v) * cross;
+    }
+    if (std::fabs(area2) > 1e-12) {
+        center->u = float(cu / (3.0 * area2));
+        center->v = float(cv / (3.0 * area2));
+    } else {
+        center->u = center->v = 0.0f;
+        for (_K9Point const &p : polygon) {
+            center->u += p.u; center->v += p.v;
+        }
+        center->u /= float(polygon.size());
+        center->v /= float(polygon.size());
+    }
+    double sum = 0.0;
+    for (_K9Point const &p : polygon) {
+        float const du = p.u - center->u, dv = p.v - center->v;
+        sum += std::sqrt(double(du) * du + double(dv) * dv);
+    }
+    *radius = float(sum / double(polygon.size()));
+    return *radius > 1e-12f;
+}
+
+}  // namespace
+
+bool TonicTriangulateSectionSlotsCpu(
+    TonicTubeSection const &section,
+    std::vector<std::array<int, 3>> *triangles, std::string *err)
+{
+    if (!triangles || section.u.size() < 3 || section.u.size() != section.v.size()) {
+        if (err) {
+            *err = "TonicTriangulateSectionSlotsCpu: malformed section";
+        }
+        return false;
+    }
+    std::vector<_K9Point> polygon(section.u.size());
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        if (!std::isfinite(section.u[i]) || !std::isfinite(section.v[i])) {
+            if (err) {
+                *err = "TonicTriangulateSectionSlotsCpu: non-finite CV";
+            }
+            return false;
+        }
+        polygon[i] = {section.u[i], section.v[i]};
+    }
+    if (!_K9Triangulate(polygon, triangles)) {
+        if (err) {
+            *err = "TonicTriangulateSectionSlotsCpu: invalid polygon";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool TonicBuildGuideMaterialBindingsCpu(
+    TonicTubeDesc const &tube, std::vector<TonicFrame> const &frames,
+    std::vector<TonicGuideRoot> const &roots, TonicFillDesc const &fill,
+    std::vector<TonicGuideMaterialBinding> *bindings, std::string *err)
+{
+    auto fail = [&](char const *what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    int const rv = tube.ringVerts;
+    if (!bindings || tube.sections.size() < 2 || rv < 3 ||
+        fill.cvCount < 2 || frames.size() != tube.centerX.size()) {
+        return fail("TonicBuildGuideMaterialBindingsCpu: malformed input");
+    }
+    if (fill.edgeBias < -1.0f || fill.edgeBias > 1.0f ||
+        fill.lengthProfile.size() % 2 != 0) {
+        return fail("TonicBuildGuideMaterialBindingsCpu: invalid fill params");
+    }
+    TonicTubeSection const &rootSection = tube.sections.front();
+    if (int(rootSection.u.size()) != rv || int(rootSection.v.size()) != rv) {
+        return fail("TonicBuildGuideMaterialBindingsCpu: root ring mismatch");
+    }
+    float cp[3];
+    TonicFrame frame;
+    std::string sampleErr;
+    if (!TonicSampleCenterCpu(tube, frames, rootSection.t, &cp[0], &cp[1],
+                              &cp[2], &frame, &sampleErr)) {
+        return fail(sampleErr.c_str());
+    }
+    float const ct = std::cos(rootSection.twist);
+    float const st = std::sin(rootSection.twist);
+    std::vector<_K9Point> polygon(static_cast<size_t>(rv));
+    for (int i = 0; i < rv; ++i) {
+        float const u = rootSection.u[size_t(i)] * rootSection.scale;
+        float const v = rootSection.v[size_t(i)] * rootSection.scale;
+        polygon[size_t(i)] = {u * ct - v * st, u * st + v * ct};
+    }
+    std::vector<std::array<int, 3>> triangles;
+    std::string triangulateErr;
+    if (!TonicTriangulateSectionSlotsCpu(rootSection, &triangles,
+                                         &triangulateErr)) {
+        return fail(triangulateErr.c_str());
+    }
+    _K9Point polygonCenter;
+    float polygonRadius = 0.0f;
+    if (!_K9PolygonCenterRadius(polygon, &polygonCenter, &polygonRadius)) {
+        return fail("TonicBuildGuideMaterialBindingsCpu: degenerate root polygon");
+    }
+    bindings->assign(roots.size() * size_t(fill.cvCount), {});
+    float const t0 = tube.sections.front().t;
+    float const t1 = tube.sections.back().t;
+    float const span = t1 > t0 ? t1 - t0 : 1.0f;
+    // The usual full-length fill has identical stations for every root.
+    // Cache those evaluated charts: their K5 sampling is otherwise repeated
+    // for every guide before the same CPU/CUDA binding bytes are consumed.
+    std::vector<std::vector<PXR_NS::GfVec2f>> commonStationCharts;
+    std::vector<std::vector<std::array<int, 3>>> commonStationTriangles;
+    std::vector<bool> commonStationChartReady;
+    std::vector<bool> commonStationChartCollapsed;
+    if (fill.lengthProfile.empty()) {
+        commonStationCharts.resize(size_t(fill.cvCount));
+        commonStationTriangles.resize(size_t(fill.cvCount));
+        commonStationChartReady.assign(size_t(fill.cvCount), false);
+        commonStationChartCollapsed.assign(size_t(fill.cvCount), false);
+    }
+    auto evaluatedChart = [&](float t, int c, std::vector<PXR_NS::GfVec2f> *chart,
+                              std::vector<std::array<int, 3>> *chartTriangles,
+                              bool *collapsed, std::string *chartErr) {
+        if (!chart || !chartTriangles || !collapsed) {
+            if (chartErr) *chartErr = "missing evaluated chart output";
+            return false;
+        }
+        if (!commonStationCharts.empty() &&
+            commonStationChartReady[size_t(c)]) {
+            *chart = commonStationCharts[size_t(c)];
+            *chartTriangles = commonStationTriangles[size_t(c)];
+            *collapsed = commonStationChartCollapsed[size_t(c)];
+            return true;
+        }
+        std::vector<float> ring;
+        TonicFrame currentFrame;
+        float currentCenter[3] = {0.0f, 0.0f, 0.0f};
+        std::string sampleError;
+        if (!TonicSampleTubeRingCpu(tube, frames, t, &ring, &sampleError) ||
+            !TonicSampleCenterCpu(tube, frames, t, &currentCenter[0],
+                                  &currentCenter[1], &currentCenter[2],
+                                  &currentFrame, &sampleError) ||
+            ring.size() != size_t(rv) * 3) {
+            if (chartErr) *chartErr = sampleError;
+            return false;
+        }
+        chart->resize(size_t(rv));
+        float maxRadius2 = 0.0f;
+        float maxExtent2 = 0.0f;
+        for (int slot = 0; slot < rv; ++slot) {
+            size_t const at = size_t(slot) * 3;
+            float const dx = ring[at + 0] - currentCenter[0];
+            float const dy = ring[at + 1] - currentCenter[1];
+            float const dz = ring[at + 2] - currentCenter[2];
+            (*chart)[size_t(slot)] = PXR_NS::GfVec2f(
+                dx * currentFrame.nx + dy * currentFrame.ny +
+                    dz * currentFrame.nz,
+                dx * currentFrame.bx + dy * currentFrame.by +
+                    dz * currentFrame.bz);
+            float const u = (*chart)[size_t(slot)][0];
+            float const v = (*chart)[size_t(slot)][1];
+            maxRadius2 = std::max(maxRadius2, u * u + v * v);
+            float const du = u - (*chart)[0][0];
+            float const dv = v - (*chart)[0][1];
+            maxExtent2 = std::max(maxExtent2, du * du + dv * dv);
+        }
+        // A complete point taper is a valid terminal material ring. Its
+        // exact common point is emitted through slot 0; a merely collinear
+        // or self-intersecting nonzero ring remains an invalid material
+        // polygon and must not be hidden as a taper.
+        float const epsilon = std::numeric_limits<float>::epsilon();
+        *collapsed = maxExtent2 == 0.0f ||
+            (maxRadius2 > 0.0f &&
+             maxExtent2 <= 64.0f * epsilon * epsilon * maxRadius2);
+        chartTriangles->clear();
+        if (!*collapsed) {
+            std::string triangulateError;
+            if (!usdGen::UsdGenTriangulateConcaveMaterialSlots(
+                    *chart, chartTriangles, &triangulateError)) {
+                if (chartErr) *chartErr = triangulateError;
+                return false;
+            }
+        }
+        if (!commonStationCharts.empty()) {
+            commonStationCharts[size_t(c)] = *chart;
+            commonStationTriangles[size_t(c)] = *chartTriangles;
+            commonStationChartReady[size_t(c)] = true;
+            commonStationChartCollapsed[size_t(c)] = *collapsed;
+        }
+        return true;
+    };
+    float const biasExp = 1.0f - 0.5f * fill.edgeBias;
+    for (size_t g = 0; g < roots.size(); ++g) {
+        TonicGuideRoot const &root = roots[g];
+        _K9Point const source = {
+            (root.px - cp[0]) * frame.nx + (root.py - cp[1]) * frame.ny +
+                (root.pz - cp[2]) * frame.nz,
+            (root.px - cp[0]) * frame.bx + (root.py - cp[1]) * frame.by +
+                (root.pz - cp[2]) * frame.bz};
+        TonicGuideMaterialBinding base;
+        if (!_K9Bind(polygon, triangles, source, &base)) {
+            return fail("TonicBuildGuideMaterialBindingsCpu: root bind failed");
+        }
+        _K9Point const rail = {
+            polygon[size_t(base.slot0)].u * base.w0 +
+                polygon[size_t(base.slot1)].u * base.w1 +
+                polygon[size_t(base.slot2)].u * base.w2,
+            polygon[size_t(base.slot0)].v * base.w0 +
+                polygon[size_t(base.slot1)].v * base.w1 +
+                polygon[size_t(base.slot2)].v * base.w2};
+        float const railWorld[3] = {
+            cp[0] + frame.nx * rail.u + frame.bx * rail.v,
+            cp[1] + frame.ny * rail.u + frame.by * rail.v,
+            cp[2] + frame.nz * rail.u + frame.bz * rail.v};
+        float const distance = std::sqrt(
+            (source.u - polygonCenter.u) * (source.u - polygonCenter.u) +
+            (source.v - polygonCenter.v) * (source.v - polygonCenter.v));
+        float r = distance / polygonRadius;
+        r = r < 0.0f ? 0.0f : (r > 1.0f ? 1.0f : r);
+        float const rb = std::pow(r, biasExp);
+        float const minW = std::min(base.w0, std::min(base.w1, base.w2));
+        float const rho = std::max(0.0f, 1.0f - 3.0f * minW);
+        float const rhoB = std::pow(rho, biasExp);
+        float const factor = rho > 1e-8f ? rhoB / rho : 0.0f;
+        float const targetW0 = 1.0f / 3.0f + (base.w0 - 1.0f / 3.0f) * factor;
+        float const targetW1 = 1.0f / 3.0f + (base.w1 - 1.0f / 3.0f) * factor;
+        float const targetW2 = 1.0f / 3.0f + (base.w2 - 1.0f / 3.0f) * factor;
+        int const pairCount = int(fill.lengthProfile.size() / 2);
+        float length = TonicEvalLengthProfile(fill.lengthProfile.data(),
+                                              pairCount, rb);
+        length = length < 0.0f ? 0.0f : (length > 1.0f ? 1.0f : length);
+        for (int c = 0; c < fill.cvCount; ++c) {
+            float const s = float(c) / float(fill.cvCount - 1);
+            TonicGuideMaterialBinding binding = base;
+            // Guide length is evaluated by K9 after this bind.  Use the
+            // geometric progress here; an abbreviated guide simply stops at
+            // its sampled tube t, preserving a continuous material path.
+            float const progress = s * length;
+            binding.w0 += (targetW0 - base.w0) * progress;
+            binding.w1 += (targetW1 - base.w1) * progress;
+            binding.w2 += (targetW2 - base.w2) * progress;
+            // The root bind is expressed in its actual section-0 triangle.
+            // At later K5 stations, remap that biased material point through
+            // a canonical regular polygon into the evaluated section. This
+            // preserves slot identity without letting a concave ring turn a
+            // root-triangle affine interpolation outside its boundary.
+            if (c != 0) {
+                double const step = 2.0 * std::acos(-1.0) / double(rv);
+                auto canonicalSlot = [&](int slot) {
+                    double const angle = step * double(slot);
+                    return PXR_NS::GfVec2f(float(std::cos(angle)),
+                                           float(std::sin(angle)));
+                };
+                PXR_NS::GfVec2f const p0 = canonicalSlot(binding.slot0);
+                PXR_NS::GfVec2f const p1 = canonicalSlot(binding.slot1);
+                PXR_NS::GfVec2f const p2 = canonicalSlot(binding.slot2);
+                PXR_NS::GfVec2f const canonicalPoint =
+                    p0 * binding.w0 + p1 * binding.w1 + p2 * binding.w2;
+                float const t = t0 + span * progress;
+                std::vector<PXR_NS::GfVec2f> chart;
+                std::vector<std::array<int, 3>> chartTriangles;
+                bool collapsed = false;
+                std::string chartError;
+                if (!evaluatedChart(t, c, &chart, &chartTriangles, &collapsed,
+                                    &chartError)) {
+                    if (err) {
+                        *err = "TonicBuildGuideMaterialBindingsCpu: " +
+                            chartError;
+                    }
+                    return false;
+                }
+                if (collapsed) {
+                    binding.slot0 = binding.slot1 = binding.slot2 = 0;
+                    binding.w0 = 1.0f;
+                    binding.w1 = binding.w2 = 0.0f;
+                } else {
+                    std::array<int, 3> slots;
+                    PXR_NS::GfVec3f weights;
+                    std::string remapError;
+                    if (!usdGen::UsdGenLocateConcaveMaterialPoint(
+                            chart.size(), chartTriangles, canonicalPoint,
+                            &slots, &weights, &remapError)) {
+                        if (err) {
+                            *err = "TonicBuildGuideMaterialBindingsCpu: " +
+                                remapError;
+                        }
+                        return false;
+                    }
+                    binding.slot0 = slots[0];
+                    binding.slot1 = slots[1];
+                    binding.slot2 = slots[2];
+                    binding.w0 = weights[0];
+                    binding.w1 = weights[1];
+                    binding.w2 = weights[2];
+                }
+            }
+            binding.edgeRadius = rb;
+            binding.rootDx = root.px - railWorld[0];
+            binding.rootDy = root.py - railWorld[1];
+            binding.rootDz = root.pz - railWorld[2];
+            (*bindings)[g * size_t(fill.cvCount) + size_t(c)] = binding;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+bool _TonicGuideFillLegacyCpu(TonicTubeDesc const &tube,
                        std::vector<TonicFrame> const &frames,
                        std::vector<TonicGuideRoot> const &roots,
                        TonicFillDesc const &fill, std::vector<float> *points,
@@ -576,6 +1793,103 @@ bool TonicGuideFillCpu(TonicTubeDesc const &tube,
                 cp[1] + (fr.ny * ru + fr.by * rv) * rootRadius * rr;
             (*points)[o + 2] =
                 cp[2] + (fr.nz * ru + fr.bz * rv) * rootRadius * rr;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool TonicGuideFillCpu(TonicTubeDesc const &tube,
+                       std::vector<TonicFrame> const &frames,
+                       std::vector<TonicGuideRoot> const &roots,
+                       TonicFillDesc const &fill, std::vector<float> *points,
+                       std::vector<float> *lengthScales, std::string *err)
+{
+    if (fill.sampler == TonicGuideSampler::Legacy) {
+        return _TonicGuideFillLegacyCpu(tube, frames, roots, fill, points,
+                                        lengthScales, err);
+    }
+    auto fail = [&](char const *what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    int const nCv = int(tube.centerX.size());
+    int const nSec = int(tube.sections.size());
+    int const cvCount = fill.cvCount;
+    if (nCv < 2 || nSec < 2 || frames.size() != size_t(nCv) || !points ||
+        !lengthScales || cvCount < 2 || cvCount > 64) {
+        return fail("TonicGuideFillCpu: bad tube, frames or cvCount");
+    }
+    if (fill.edgeBias < -1.0f || fill.edgeBias > 1.0f) {
+        return fail("TonicGuideFillCpu: edgeBias must be in [-1, 1]");
+    }
+    if (fill.lengthProfile.size() % 2 != 0) {
+        return fail("TonicGuideFillCpu: lengthProfile must hold pairs");
+    }
+    int const guideCount = int(roots.size());
+    points->assign(size_t(guideCount) * size_t(cvCount) * 3, 0.0f);
+    lengthScales->assign(size_t(guideCount), 1.0f);
+    if (guideCount == 0) {
+        return true;
+    }
+    std::vector<TonicGuideMaterialBinding> bindings;
+    std::string bindErr;
+    if (!TonicBuildGuideMaterialBindingsCpu(tube, frames, roots, fill,
+                                            &bindings, &bindErr)) {
+        return fail(bindErr.c_str());
+    }
+    float const t0 = tube.sections.front().t;
+    float const t1 = tube.sections.back().t;
+    float const span = t1 > t0 ? t1 - t0 : 1.0f;
+    int const pairCount = int(fill.lengthProfile.size() / 2);
+    for (int g = 0; g < guideCount; ++g) {
+        float length = TonicEvalLengthProfile(
+            fill.lengthProfile.data(), pairCount,
+            bindings[size_t(g) * size_t(cvCount)].edgeRadius);
+        length = length < 0.0f ? 0.0f : (length > 1.0f ? 1.0f : length);
+        (*lengthScales)[size_t(g)] = length;
+        for (int c = 0; c < cvCount; ++c) {
+            size_t const out =
+                (size_t(g) * size_t(cvCount) + size_t(c)) * 3;
+            if (c == 0) {
+                // Root attachment is physical, never the clamped material
+                // binding used by later samples.
+                (*points)[out + 0] = roots[size_t(g)].px;
+                (*points)[out + 1] = roots[size_t(g)].py;
+                (*points)[out + 2] = roots[size_t(g)].pz;
+                continue;
+            }
+            float const s = float(c) / float(cvCount - 1);
+            float const t = t0 + span * s * length;
+            std::vector<float> ring;
+            std::string ringErr;
+            if (!TonicSampleTubeRingCpu(tube, frames, t, &ring, &ringErr)) {
+                return fail(ringErr.c_str());
+            }
+            TonicGuideMaterialBinding const &binding =
+                bindings[size_t(g) * size_t(cvCount) + size_t(c)];
+            if (binding.slot0 < 0 || binding.slot1 < 0 || binding.slot2 < 0 ||
+                binding.slot0 >= tube.ringVerts || binding.slot1 >= tube.ringVerts ||
+                binding.slot2 >= tube.ringVerts) {
+                return fail("TonicGuideFillCpu: invalid material binding");
+            }
+            size_t const a = size_t(binding.slot0) * 3;
+            size_t const b = size_t(binding.slot1) * 3;
+            size_t const d = size_t(binding.slot2) * 3;
+            for (int axis = 0; axis < 3; ++axis) {
+                (*points)[out + size_t(axis)] =
+                    ring[a + size_t(axis)] * binding.w0 +
+                    ring[b + size_t(axis)] * binding.w1 +
+                    ring[d + size_t(axis)] * binding.w2;
+            }
+            float const progress = s * length;
+            float const remain = 1.0f - progress;
+            (*points)[out + 0] += binding.rootDx * remain;
+            (*points)[out + 1] += binding.rootDy * remain;
+            (*points)[out + 2] += binding.rootDz * remain;
         }
     }
     return true;

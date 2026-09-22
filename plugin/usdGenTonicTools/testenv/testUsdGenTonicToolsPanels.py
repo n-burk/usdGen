@@ -370,6 +370,76 @@ class FakeBakeSession(object):
         self.rebakes += 1
 
 
+class FakeOutputSession(object):
+    def __init__(self):
+        self.enabled = False
+        self.densityMultiplier = 1.0
+        self.strandWidth = 0.01
+        self.buildCount = 0
+        self.setCalls = []
+
+    def outputSettings(self):
+        return (self.enabled, self.densityMultiplier, self.strandWidth)
+
+    def setOutputSettings(self, enabled=None, densityMultiplier=None,
+                          strandWidth=None):
+        if enabled is not None:
+            self.enabled = bool(enabled)
+        if densityMultiplier is not None:
+            self.densityMultiplier = float(densityMultiplier)
+        if strandWidth is not None:
+            self.strandWidth = float(strandWidth)
+        self.setCalls.append(self.outputSettings())
+        return True
+
+    def buildOutputDescription(self):
+        self.enabled = True
+        self.buildCount += 1
+        return True
+
+
+class FakeScaleStage(object):
+    def __init__(self, failAt=None):
+        self.calls = []
+        self.failAt = failAt
+
+    def scaleSectionRing(self, ctx, tubeId, ring, scale):
+        if self.failAt is not None and len(self.calls) == self.failAt:
+            raise RuntimeError("scale failed")
+        self.calls.append((tubeId, ring, scale))
+
+
+class FakeScaleSession(object):
+    def __init__(self, stage, begin=True):
+        self.model = 1
+        self.ctx = 2
+        self.dll = object()
+        self.stageLib = stage
+        self.begin = begin
+        self.selected = [(3, 0, -1), (3, 1, -1)]
+        self.beginCount = 0
+        self.endCount = 0
+        self.cancelCount = 0
+        self.published = []
+
+    def readSelection(self, kind):
+        return list(self.selected)
+
+    def beginGesture(self, label):
+        self.beginCount += 1
+        return self.begin
+
+    def endGesture(self):
+        self.endCount += 1
+
+    def cancelGesture(self):
+        self.cancelCount += 1
+        return 77
+
+    def publish(self, dirty=0):
+        self.published.append(dirty)
+
+
 class FakeContainer(object):
     def __init__(self, state, session=None, viewport=None):
         self.tonicState = state
@@ -472,9 +542,20 @@ def main():
     tubeDescs["displaySegments"].set(state, session, 3)
     check(dll.displaySegments == 3,
           "tube.displaySegments writes through Tonic_SetDisplaySegments")
-    tubeDescs["ringCvCount"].set(state, session, 12)
-    check(tubeDescs["ringCvCount"].get(state, session) == 12,
-          "tube.ringCvCount is state-only (no build-time ABI)")
+    ringCount = tubeDescs["ringCvCount"]
+    check(ringCount.kind == "enum" and ringCount.get(state, session) == 0
+          and ringCount.choices[0] == 0 and 1 not in ringCount.choices
+          and 2 not in ringCount.choices,
+          "tube ring columns default to Auto and offer only 0 or 3..32")
+    ringCount.set(state, session, 12)
+    check(ringCount.get(state, session) == 12,
+          "tube.ringCvCount retains an explicit next-build request")
+    ringCount.set(state, session, 1)
+    check(ringCount.get(state, session) == 3,
+          "an invalid explicit 1-column request cannot reach the builder")
+    ringCount.set(state, session, 0)
+    check(ringCount.get(state, session) == 0,
+          "tube.ringCvCount restores Auto/Match region CVs without an ABI call")
 
     fillDescs = {d.id: d for d in tonicPanels.descriptors("fill", state)}
     fillDescs["density"].set(state, session, 16.0)
@@ -504,6 +585,33 @@ def main():
     check(any(c[0] == "Tonic_SetLockParents" for c in dll.calls),
           "hierarchy.lockParents pushes to the tube selection")
     dll.selection = []
+
+    # -- Tube section scale: one gesture, atomic failure -----------------
+    class FakeBridge(object):
+        @staticmethod
+        def tubeSection(dll, model, tubeId, ring):
+            return (0.0, [], 1.0, 0.0)
+
+    previousBridge = sys.modules.get("tonicBridge")
+    sys.modules["tonicBridge"] = FakeBridge
+    try:
+        scaleStage = FakeScaleStage(failAt=1)
+        scaleSession = FakeScaleSession(scaleStage)
+        scaleState = tonicToolState.TonicToolState()
+        scaleDescriptor = next(
+            d for d in tonicPanels.descriptors("tube", scaleState)
+            if d.id == "uniformScale")
+        scaleDescriptor.set(scaleState, scaleSession, 2.0)
+        check(scaleSession.beginCount == 1 and scaleSession.endCount == 0
+              and scaleSession.cancelCount == 1,
+              "section scale validates and brackets the selected rings")
+        check(len(scaleStage.calls) == 1 and scaleSession.published == [77],
+              "a failed section scale cancels the atomic gesture")
+    finally:
+        if previousBridge is None:
+            sys.modules.pop("tonicBridge", None)
+        else:
+            sys.modules["tonicBridge"] = previousBridge
 
     # -- actions: every action calls its documented ABI and publishes ---
     dll = FakeDll()
@@ -558,9 +666,9 @@ def main():
 
     check(tonicPanels.actions("sculpt") == [],
           "sculpt has no one-shot actions")
-    check(tonicPanels.actions("output") == [],
-          "output's Save/Export/Import need a QFileDialog and live in "
-          "tonicWorkspace")
+    outputActions = tonicPanels.actions("output")
+    check([a.id for a in outputActions] == ["buildDescription"],
+          "Output exposes Build/update description beside file commands")
 
     # -- Output: the texel override reaches the bake (V7) ----------------
     # The descriptor's job is to hand the session a texel count and show
@@ -595,6 +703,23 @@ def main():
           texel.get(state, bakeSession) == "auto",
           "and auto asks for 0, which reads back as auto (%r)"
           % (bakeSession.requested[-1],))
+
+    outputSession = FakeOutputSession()
+    # The controls are shown for an already committed Output description;
+    # keep the fake native state aligned with the state mirror before testing
+    # density and width setters.
+    outputSession.enabled = True
+    state.outputEnabled = True
+    outputDescs = {d.id: d for d in tonicPanels.descriptors("output", state)}
+    density = outputDescs["outputDensityMultiplier"]
+    width = outputDescs["outputStrandWidth"]
+    density.set(state, outputSession, 2.5)
+    width.set(state, outputSession, 0.02)
+    check(outputSession.outputSettings() == (True, 2.5, 0.02),
+          "Output density and strand width reach the session")
+    outputActions[0].handler(FakeContainer(state, outputSession))
+    check(outputSession.buildCount == 1 and outputSession.enabled,
+          "Build/update description enables the committed Output")
 
     # -- no session: every action no-ops instead of raising --------------
     inertContainer = FakeContainer(tonicToolState.TonicToolState(), None)
@@ -639,8 +764,8 @@ def main():
     container = FakeContainer(state, session)
     dll.regionStats = (4, 2, 0)
     warns = tonicHud.warnings(state, session)
-    check(any("uncovered" in w.text for w in warns),
-          "an uncovered face count produces a coverage warning")
+    check(any("face center(s) outside regions" in w.text for w in warns),
+          "a coarse uncovered-face count produces a coverage warning")
 
     dll.intersectedTubes = [2, 5]
     warns = tonicHud.warnings(state, session)
@@ -669,6 +794,36 @@ def main():
 
     check(tonicHud.warnings(tonicToolState.TonicToolState(), None) == [],
           "warnings() with no session returns no ABI-backed rows")
+
+    # -- tonicHud.warningsKey (plan/18 V9-perf memoization) ----------------
+    # The dock refreshes on every publish, pump and 250 ms tick; the key
+    # lets it skip the warnings re-read when nothing it reads has moved.
+    keyDll = FakeDll()
+    keySession = FakeSession(keyDll)
+    keyState = tonicToolState.TonicToolState()
+    keyDll.regionStats = (4, 2, 0)
+    first = tonicHud.warningsKey(keyState, keySession)
+    check(first is not None,
+          "warningsKey() returns a key for a versioned session")
+    check(tonicHud.warningsKey(keyState, keySession) == first,
+          "warningsKey() is stable across identical inputs")
+    rowsFirst = [w.text for w in tonicHud.warnings(keyState, keySession)]
+    rowsAgain = [w.text for w in tonicHud.warnings(keyState, keySession)]
+    check(rowsFirst == rowsAgain,
+          "an unchanged key means unchanged warning rows")
+    keySession.modelVersion = 11
+    check(tonicHud.warningsKey(keyState, keySession) != first,
+          "warningsKey() moves with the model version")
+    keySession.modelVersion = 10
+    keySession.detached = True
+    check(tonicHud.warningsKey(keyState, keySession) != first,
+          "warningsKey() moves when the committer detaches")
+    keySession.detached = False
+    keyDll.fallbackReason = b"no CUDA device"
+    check(tonicHud.warningsKey(keyState, keySession) != first,
+          "warningsKey() moves on a device fallback")
+    check(tonicHud.warningsKey(keyState, None) is None,
+          "warningsKey() with no session is None (force a re-read)")
 
     print("testUsdGenTonicToolsPanels: %d failure(s)" % failures)
     return 1 if failures else 0

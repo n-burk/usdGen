@@ -104,15 +104,19 @@ def main():
     check(tonicGraph.REGION_UNCOVERED == -1, "uncovered is -1")
 
     # -- sub-modes + state ----------------------------------------------------
-    check(len(tonicModes.GRAPH_SUBMODES) == 7
+    check(len(tonicModes.GRAPH_SUBMODES) == 9
+          and tonicModes.GraphSubModeById("region") is not None
           and tonicModes.GraphSubModeById("draw") is not None
+          and tonicModes.GraphSubModeById("reposition") is not None
+          and next(mode.hotkey for mode in tonicModes.GRAPH_SUBMODES
+                   if mode.id == "reposition") == "M"
           and tonicModes.GraphSubModeById("bogus") is None,
-          "seven graph sub-modes resolve, unknown ids do not")
+          "nine graph sub-modes including Reposition/M resolve, unknown ids do not")
     state = tonicToolState.TonicToolState()
-    check(state.graphSubMode == "" and state.snapRadiusPx == 8.0
+    check(state.graphSubMode == "region" and state.snapRadiusPx == 8.0
           and state.mirrorX is False and state.mapVersion == 0
           and state.bakedVersion == 0,
-          "graph state defaults (draw-ready, mirror off)")
+          "graph state defaults to click-created regions (mirror off)")
     status = tonicModes.SetActiveGraphSubMode(state, "link")
     check(state.graphSubMode == "link" and "Link" in status,
           "selecting a sub-mode records it with a status line")

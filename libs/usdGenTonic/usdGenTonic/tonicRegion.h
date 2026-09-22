@@ -79,8 +79,9 @@ USDGENTONIC_API bool TonicRasteriseRegionsCpu(TonicScalpMesh const &mesh,
                                               std::string *err);
 
 // Per-face Ptex texel resolution (plan/17 §4.5): log2 of the face area over
-// the median, clamped to 2..6 (4..64 per side), artist-overridable; faces
-// fully inside one region collapse to 1x1 (resLog2 0). `resOverride >= 0`
+// the median, clamped to 2..6 (4..64 per side), artist-overridable.
+// Boundary-bearing faces use at least 64x64; only faces proven clear of all
+// region boundaries may collapse to 1x1 (resLog2 0). `resOverride >= 0`
 // forces one resolution for every face.
 USDGENTONIC_API std::vector<int> TonicFaceResLog2(
     TonicScalpMesh const &mesh, TonicRegionMaps const &maps,

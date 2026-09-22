@@ -1,5 +1,6 @@
 // usdGenTonic — the asynchronous commit pipeline (plan/17 section 3, P1).
 #include "usdGenTonic/tonicCommit.h"
+#include "usdGenTonic/tonicBake.h"
 
 // The cook the stage swap starts lives on the description's imaging
 // session; cancelling it is the plan/17 §3.2 rule 2 half of G7.
@@ -9,6 +10,7 @@
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec2i.h"
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -27,6 +29,7 @@
 #include "pxr/usd/usdGeom/mesh.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -34,6 +37,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -260,10 +264,7 @@ _OwningLeafTube(TonicModel const &model, float const p[3])
         }
         std::vector<TonicFrame> frames;
         std::string err;
-        if (!TonicCenterFramesCpu(parent.centerX.data(), parent.centerY.data(),
-                                  parent.centerZ.data(),
-                                  int(parent.centerX.size()), &frames, &err) ||
-            frames.empty()) {
+        if (!TonicTubeFramesCpu(parent, &frames, &err) || frames.empty()) {
             return current;
         }
         // Ascending id IS ascending childIndex (id = parent * 16 + 1 + k).
@@ -318,10 +319,7 @@ _PartitionRegionFaces(TonicSnapshot *snapshot)
         std::vector<TonicFrame> frames;
         std::string err;
         if (pd.centerX.size() < 2 ||
-            !TonicCenterFramesCpu(pd.centerX.data(), pd.centerY.data(),
-                                  pd.centerZ.data(), int(pd.centerX.size()),
-                                  &frames, &err) ||
-            frames.empty()) {
+            !TonicTubeFramesCpu(pd, &frames, &err) || frames.empty()) {
             continue;
         }
         float const rootCenter[3] = {pd.centerX[0], pd.centerY[0],
@@ -390,6 +388,7 @@ uint64_t _HashFillParams(uint64_t h, TonicModel::FillParams const &fill)
     h = _HashInt(h, fill.seed);
     h = _HashFloat(h, fill.edgeBias);
     h = _HashFloats(h, fill.lengthProfile);
+    h = _HashInt(h, int(fill.sampler));
     return h;
 }
 
@@ -412,11 +411,23 @@ uint64_t _HashSnapshotTube(TonicSnapshotTube const &entry)
     h = _HashFloats(h, entry.tube.centerX);
     h = _HashFloats(h, entry.tube.centerY);
     h = _HashFloats(h, entry.tube.centerZ);
+    h = _HashBytes(h, entry.tube.frameReference.data(),
+                   entry.tube.frameReference.size() * sizeof(float));
     h = _HashInt(h, int64_t(entry.tube.sections.size()));
     for (TonicTubeSection const &section : entry.tube.sections) {
         h = _HashFloat(h, section.t);
+        h = _HashFloat(h, section.scale);
+        h = _HashFloat(h, section.twist);
         h = _HashFloats(h, section.u);
         h = _HashFloats(h, section.v);
+    }
+    h = _HashFloats(h, entry.centerDeltas);
+    h = _HashFloats(h, entry.sectionDeltas);
+    h = _HashFloats(h, entry.sectionDeltaTransforms);
+    h = _HashInt(h, int64_t(entry.inheritedBoundaryBindings.size()));
+    if (!entry.inheritedBoundaryBindings.empty()) {
+        h = _HashBytes(h, entry.inheritedBoundaryBindings.data(),
+                       entry.inheritedBoundaryBindings.size() * sizeof(int));
     }
     h = _HashFillParams(h, entry.tube.fill);
     h = _HashInt(h, int64_t(entry.regionFaces.size()));
@@ -424,7 +435,129 @@ uint64_t _HashSnapshotTube(TonicSnapshotTube const &entry)
         h = _HashBytes(h, entry.regionFaces.data(),
                        entry.regionFaces.size() * sizeof(int));
     }
+    h = _HashFloats(h, entry.regionBoundary);
+    h = _HashInt(h, entry.tube.rootFramePinned ? 1 : 0);
+    h = _HashFloat(h, entry.tube.rootFrame.tx);
+    h = _HashFloat(h, entry.tube.rootFrame.ty);
+    h = _HashFloat(h, entry.tube.rootFrame.tz);
+    h = _HashFloat(h, entry.tube.rootFrame.nx);
+    h = _HashFloat(h, entry.tube.rootFrame.ny);
+    h = _HashFloat(h, entry.tube.rootFrame.nz);
+    h = _HashFloat(h, entry.tube.rootFrame.bx);
+    h = _HashFloat(h, entry.tube.rootFrame.by);
+    h = _HashFloat(h, entry.tube.rootFrame.bz);
     return h;
+}
+
+// Tonic Fill produces world-space points.  The owned Output source must not
+// inherit a transform from a groom container that would apply that transform
+// a second time.  This is the Sdf spelling of UsdGeomXformable's
+// SetResetXformStack(true); no local op leaves the reset local matrix at I.
+bool
+_SetResetXformStack(SdfPrimSpecHandle const &prim)
+{
+    return _SetAttr(prim, "xformOpOrder", SdfValueTypeNames->TokenArray,
+                    VtTokenArray{TfToken("!resetXformStack!")},
+                    SdfVariabilityUniform);
+}
+
+// K10 guides carry N/B/T rows as float-derived doubles.  Those are also the
+// physical C3 tangent/binormal/normal axes respectively: K4's radial N is
+// the scalp tangent, its B is the binormal, and its tube-axis T is the scalp
+// normal.  Re-orthonormalize only the owned output copy at double precision;
+// existing Guides retain their historical K10 bytes.
+bool
+_OutputRootFrameFromK10(double const *src, GfMatrix4d *out)
+{
+    if (!src || !out) {
+        return false;
+    }
+    for (int i = 0; i < 16; ++i) {
+        if (!std::isfinite(src[i])) {
+            return false;
+        }
+    }
+    double tx = src[0], ty = src[1], tz = src[2];        // K10 N / C3 T
+    double nx = src[8], ny = src[9], nz = src[10];       // K10 T / C3 N
+    auto normalize = [](double *x, double *y, double *z) {
+        double const length = std::sqrt(*x * *x + *y * *y + *z * *z);
+        if (!(length > 1.0e-12) || !std::isfinite(length)) {
+            return false;
+        }
+        *x /= length;
+        *y /= length;
+        *z /= length;
+        return true;
+    };
+    if (!normalize(&tx, &ty, &tz)) {
+        return false;
+    }
+    // Keep the physical normal, removing only K4 float round-off against T.
+    double const normalAlongT = nx * tx + ny * ty + nz * tz;
+    nx -= normalAlongT * tx;
+    ny -= normalAlongT * ty;
+    nz -= normalAlongT * tz;
+    if (!normalize(&nx, &ny, &nz)) {
+        return false;
+    }
+    // This restores K4's B: C3 needs T x B = N, so B is N x T.
+    double bx = ny * tz - nz * ty;
+    double by = nz * tx - nx * tz;
+    double bz = nx * ty - ny * tx;
+    if (!normalize(&bx, &by, &bz)) {
+        return false;
+    }
+    // Recompute N from the output pair to make the authored determinant and
+    // orthogonality meet C3's 1e-8 double validation tolerance.
+    nx = ty * bz - tz * by;
+    ny = tz * bx - tx * bz;
+    nz = tx * by - ty * bx;
+    if (!normalize(&nx, &ny, &nz)) {
+        return false;
+    }
+    out->Set(tx, ty, tz, 0.0, bx, by, bz, 0.0, nx, ny, nz, 0.0,
+             src[12], src[13], src[14], 1.0);
+    return true;
+}
+
+std::array<float, 9>
+_IdentityFrameReference()
+{
+    return {{1.0f, 0.0f, 0.0f,
+             0.0f, 1.0f, 0.0f,
+             0.0f, 0.0f, 1.0f}};
+}
+
+bool
+_IsProperFrameReference(std::array<float, 9> const &q)
+{
+    // Q is a row-major local-to-world rotation.  Keep the tolerance well
+    // below visible frame error while accepting the normal float round-trip
+    // through USD.  A reflection is not a frame reference: it reverses the
+    // section winding and changes the groom's handedness.
+    constexpr float eps = 2.0e-4f;
+    for (float value : q) {
+        if (!std::isfinite(value)) {
+            return false;
+        }
+    }
+    auto dot = [&](int a, int b) {
+        return q[size_t(a) * 3] * q[size_t(b) * 3] +
+               q[size_t(a) * 3 + 1] * q[size_t(b) * 3 + 1] +
+               q[size_t(a) * 3 + 2] * q[size_t(b) * 3 + 2];
+    };
+    if (std::abs(dot(0, 0) - 1.0f) > eps ||
+        std::abs(dot(1, 1) - 1.0f) > eps ||
+        std::abs(dot(2, 2) - 1.0f) > eps ||
+        std::abs(dot(0, 1)) > eps || std::abs(dot(0, 2)) > eps ||
+        std::abs(dot(1, 2)) > eps) {
+        return false;
+    }
+    float const determinant =
+        q[0] * (q[4] * q[8] - q[5] * q[7]) -
+        q[1] * (q[3] * q[8] - q[5] * q[6]) +
+        q[2] * (q[3] * q[7] - q[4] * q[6]);
+    return std::abs(determinant - 1.0f) <= eps;
 }
 
 // The shared fill input: the scalp copy the worker carries. One number for
@@ -444,7 +577,238 @@ uint64_t _HashScalp(TonicSnapshot const &snapshot)
         h = _HashBytes(h, snapshot.scalp.faceVertexIndices.data(),
                        snapshot.scalp.faceVertexIndices.size() * sizeof(int));
     }
+    // Exact polygon support and child-cell ownership are derived from this
+    // graph. Include it in the shared cache salt so an in-face graph drag,
+    // link edit, or a sibling-cell move cannot reuse roots from yesterday's
+    // classifier merely because the coarse scalp faces stayed unchanged.
+    h = _HashInt(h, int64_t(snapshot.graph.nodes.size()));
+    for (TonicGraphNode const &node : snapshot.graph.nodes) {
+        h = _HashInt(h, node.id);
+        h = _HashFloat(h, node.p[0]);
+        h = _HashFloat(h, node.p[1]);
+        h = _HashFloat(h, node.p[2]);
+    }
+    h = _HashInt(h, int64_t(snapshot.graph.edges.size()));
+    for (auto const &edge : snapshot.graph.edges) {
+        h = _HashInt(h, edge.first);
+        h = _HashInt(h, edge.second);
+    }
+    h = _HashInt(h, int64_t(snapshot.graph.linked.size()));
+    for (auto const &link : snapshot.graph.linked) {
+        h = _HashInt(h, link.first);
+        h = _HashInt(h, link.second);
+    }
     return h;
+}
+
+// The Output owner map is a generated asset, not a mutable live-map alias.
+// Name it from exactly the snapshot data that determines categorical root
+// ownership so a concurrent graph/hierarchy bake can never replace it under
+// an already-authored Output description.  Output density and width are
+// deliberately absent: they are runtime CurveSource/Width controls.
+uint64_t
+_OutputOwnerMapContentId(TonicSnapshot const &snapshot)
+{
+    uint64_t h = _HashScalp(snapshot);
+    h = _HashInt(h, int64_t(snapshot.graph.mapVersion));
+    h = _HashInt(h, snapshot.outputPtexResolution);
+    h = _HashInt(h, int64_t(snapshot.graph.nodes.size()));
+    for (TonicGraphNode const &node : snapshot.graph.nodes) {
+        h = _HashInt(h, node.id);
+        h = _HashInt(h, node.faceId);
+        h = _HashFloat(h, node.u);
+        h = _HashFloat(h, node.v);
+    }
+    h = _HashInt(h, int64_t(snapshot.graph.edges.size()));
+    for (std::pair<int, int> const &edge : snapshot.graph.edges) {
+        h = _HashInt(h, edge.first);
+        h = _HashInt(h, edge.second);
+    }
+    h = _HashInt(h, int64_t(snapshot.tubes.size()));
+    for (TonicSnapshotTube const &entry : snapshot.tubes) {
+        // Imported bridges are not K14 cells.  All other live tubes affect
+        // a descendant owner walk through id/link/root-frame data.
+        if (!entry.tube.hasTube || entry.imported || !entry.members.empty()) {
+            continue;
+        }
+        h = _HashInt(h, entry.tubeId);
+        h = _HashInt(h, entry.parentTubeId);
+        h = _HashInt(h, entry.childIndex);
+        h = _HashInt(h, entry.level);
+        h = _HashInt(h, entry.regionId);
+        h = _HashFloats(h, entry.tube.centerX);
+        h = _HashFloats(h, entry.tube.centerY);
+        h = _HashFloats(h, entry.tube.centerZ);
+        h = _HashInt(h, entry.tube.rootFramePinned ? 1 : 0);
+        h = _HashFloat(h, entry.tube.rootFrame.tx);
+        h = _HashFloat(h, entry.tube.rootFrame.ty);
+        h = _HashFloat(h, entry.tube.rootFrame.tz);
+        h = _HashFloat(h, entry.tube.rootFrame.nx);
+        h = _HashFloat(h, entry.tube.rootFrame.ny);
+        h = _HashFloat(h, entry.tube.rootFrame.nz);
+        h = _HashFloat(h, entry.tube.rootFrame.bx);
+        h = _HashFloat(h, entry.tube.rootFrame.by);
+        h = _HashFloat(h, entry.tube.rootFrame.bz);
+        h = _HashBytes(h, entry.tube.frameReference.data(),
+                       entry.tube.frameReference.size() * sizeof(float));
+    }
+    return h;
+}
+
+bool
+_BuildOutputOwnerBakeInput(TonicSnapshot const &snapshot,
+                           TonicBakeInput *out, std::string *err)
+{
+    if (!out || !snapshot.hasScalp || !snapshot.scalp.finalized) {
+        if (err) *err = "Output requires a bound, finalised scalp";
+        return false;
+    }
+    TonicBakeInput input;
+    input.scalp = std::make_shared<TonicScalpMesh>(snapshot.scalp);
+    if (!input.graph.Restore(*input.scalp, snapshot.graph.nodes,
+                             snapshot.graph.edges, snapshot.graph.linked,
+                             err)) {
+        return false;
+    }
+    input.levelCount = 1;
+    input.resOverride = snapshot.outputPtexResolution;
+    input.outputOwnerMap = true;
+    for (TonicSnapshotTube const &entry : snapshot.tubes) {
+        if (!entry.tube.hasTube || entry.imported || !entry.members.empty()) {
+            continue;
+        }
+        TonicTubeDesc const desc = TonicTubeDescFromSnapshot(entry.tube);
+        std::vector<TonicFrame> frames;
+        std::string frameErr;
+        if (desc.centerX.size() < 2 ||
+            !TonicTubeFramesCpu(desc, &frames, &frameErr) || frames.empty()) {
+            if (err) *err = "Output owner map: " + frameErr;
+            return false;
+        }
+        TonicBakeTube tube;
+        tube.tubeId = entry.tubeId;
+        tube.parentTubeId = entry.parentTubeId;
+        tube.level = entry.level;
+        tube.regionId = entry.regionId;
+        tube.childIndex = entry.childIndex;
+        tube.rootCenter[0] = desc.centerX[0];
+        tube.rootCenter[1] = desc.centerY[0];
+        tube.rootCenter[2] = desc.centerZ[0];
+        tube.rootFrame = frames[0];
+        input.tubes.push_back(tube);
+    }
+    *out = std::move(input);
+    return true;
+}
+
+bool
+_BakeOutputOwnerMap(TonicSnapshot const &snapshot, uint64_t contentId,
+                    std::string *outPath, std::string *err)
+{
+    if (!outPath) {
+        if (err) *err = "Output owner map has no result path";
+        return false;
+    }
+    TonicBakeInput input;
+    if (!_BuildOutputOwnerBakeInput(snapshot, &input, err)) {
+        return false;
+    }
+    namespace fs = std::filesystem;
+    fs::path directory;
+    if (!snapshot.graph.bakedMapFile.empty()) {
+        directory = fs::path(snapshot.graph.bakedMapFile).parent_path();
+    }
+    if (directory.empty()) {
+        directory = fs::temp_directory_path() / "usdGenTonicOutputMaps";
+    }
+    std::error_code ec;
+    fs::create_directories(directory, ec);
+    if (ec) {
+        if (err) *err = "cannot create Output map directory " + directory.string();
+        return false;
+    }
+    char name[96];
+    std::snprintf(name, sizeof(name), "outputRegionMap.%016llx.ptx",
+                  static_cast<unsigned long long>(contentId));
+    fs::path const path = directory / name;
+    if (!fs::is_regular_file(path, ec)) {
+        std::vector<std::vector<float>> cache;
+        std::string bakeErr;
+        if (!TonicBakePtex(input, path.string(), nullptr, &cache, nullptr,
+                           &bakeErr)) {
+            if (err) *err = bakeErr;
+            return false;
+        }
+    }
+    *outPath = path.string();
+    return true;
+}
+
+std::vector<TonicRootOwnershipCell>
+_OwnershipCells(TonicSnapshot const &snapshot, int tubeId)
+{
+    std::vector<TonicRootOwnershipCell> chain;
+    int childId = tubeId;
+    for (;;) {
+        TonicSnapshotTube const *child = nullptr;
+        for (TonicSnapshotTube const &entry : snapshot.tubes) {
+            if (entry.tubeId == childId) {
+                child = &entry;
+                break;
+            }
+        }
+        if (!child || child->parentTubeId < 0) {
+            break;
+        }
+        std::vector<TonicSnapshotTube const *> children;
+        TonicSnapshotTube const *parent = nullptr;
+        for (TonicSnapshotTube const &entry : snapshot.tubes) {
+            if (entry.tubeId == child->parentTubeId) {
+                parent = &entry;
+            }
+            if (entry.parentTubeId == child->parentTubeId && !entry.imported &&
+                !entry.tube.centerX.empty()) {
+                children.push_back(&entry);
+            }
+        }
+        if (!parent || children.empty()) {
+            break;
+        }
+        std::sort(children.begin(), children.end(),
+                  [](TonicSnapshotTube const *a, TonicSnapshotTube const *b) {
+                      return a->childIndex != b->childIndex
+                                 ? a->childIndex < b->childIndex
+                                 : a->tubeId < b->tubeId;
+                  });
+        TonicTubeDesc const parentDesc = TonicTubeDescFromSnapshot(parent->tube);
+        std::vector<TonicFrame> frames;
+        std::string err;
+        if (parentDesc.centerX.size() < 2 ||
+            !TonicTubeFramesCpu(parentDesc, &frames, &err) || frames.empty()) {
+            break;
+        }
+        TonicRootOwnershipCell cell;
+        cell.rootCenter[0] = parentDesc.centerX[0];
+        cell.rootCenter[1] = parentDesc.centerY[0];
+        cell.rootCenter[2] = parentDesc.centerZ[0];
+        cell.frame = frames[0];
+        for (size_t i = 0; i < children.size(); ++i) {
+            TonicTubeDesc const sibling =
+                TonicTubeDescFromSnapshot(children[i]->tube);
+            cell.childCenters.push_back(sibling.centerX[0]);
+            cell.childCenters.push_back(sibling.centerY[0]);
+            cell.childCenters.push_back(sibling.centerZ[0]);
+            if (children[i]->tubeId == childId) {
+                cell.childIndex = int(i);
+            }
+        }
+        if (cell.childIndex < 0) {
+            break;
+        }
+        chain.push_back(std::move(cell));
+        childId = child->parentTubeId;
+    }
+    return chain;
 }
 
 } // namespace
@@ -462,7 +826,32 @@ TonicHashSnapshot(TonicSnapshot *snapshot)
         return;
     }
     for (TonicSnapshotTube &entry : snapshot->tubes) {
-        entry.contentHash = _HashSnapshotTube(entry);
+        uint64_t h = _HashSnapshotTube(entry);
+        // A child root depends only on its own ancestor cell chain, not on
+        // every tube in the groom. Keeping this in the per-entry hash lets a
+        // one-tube edit retain unrelated cached guide slices.
+        std::vector<TonicRootOwnershipCell> const cells =
+            snapshot->hasScalp && entry.regionId >= 0
+                ? _OwnershipCells(*snapshot, entry.tubeId)
+                : std::vector<TonicRootOwnershipCell>();
+        h = _HashInt(h, int64_t(cells.size()));
+        for (TonicRootOwnershipCell const &cell : cells) {
+            h = _HashFloat(h, cell.rootCenter[0]);
+            h = _HashFloat(h, cell.rootCenter[1]);
+            h = _HashFloat(h, cell.rootCenter[2]);
+            h = _HashFloat(h, cell.frame.tx);
+            h = _HashFloat(h, cell.frame.ty);
+            h = _HashFloat(h, cell.frame.tz);
+            h = _HashFloat(h, cell.frame.nx);
+            h = _HashFloat(h, cell.frame.ny);
+            h = _HashFloat(h, cell.frame.nz);
+            h = _HashFloat(h, cell.frame.bx);
+            h = _HashFloat(h, cell.frame.by);
+            h = _HashFloat(h, cell.frame.bz);
+            h = _HashFloats(h, cell.childCenters);
+            h = _HashInt(h, cell.childIndex);
+        }
+        entry.contentHash = h;
     }
 }
 
@@ -523,8 +912,29 @@ TonicSnapshot
 TonicSnapshotFromModel(TonicModel const &model)
 {
     TonicSnapshot snapshot;
+    auto copyBoundaryBindings = [](TonicTubeDesc const &desc,
+                                   TonicSnapshotTube *entry) {
+        if (!entry) {
+            return;
+        }
+        entry->inheritedBoundaryBindings.clear();
+        entry->inheritedBoundaryBindings.reserve(
+            desc.inheritedBoundaryBindings.size() * 3);
+        for (TonicParentBoundaryBinding const &binding :
+             desc.inheritedBoundaryBindings) {
+            entry->inheritedBoundaryBindings.push_back(binding.section);
+            entry->inheritedBoundaryBindings.push_back(binding.parentSlot);
+            entry->inheritedBoundaryBindings.push_back(binding.childSlot);
+        }
+    };
     TonicModel::TubeSnapshot tube = model.Snapshot();
     snapshot.version = tube.version;
+    snapshot.generatedCurvesSuppressed = model.GeneratedCurvesSuppressed();
+    TonicModel::OutputSettings const output = model.GetOutputSettings();
+    snapshot.outputEnabled = output.enabled;
+    snapshot.outputDensityMultiplier = output.densityMultiplier;
+    snapshot.outputWidth = output.width;
+    snapshot.outputPtexResolution = output.ptexResolution;
     snapshot.tubeRegionId = model.GetTubeRegionId();
     if (tube.hasTube) {
         TonicSnapshotTube entry;
@@ -557,6 +967,7 @@ TonicSnapshotFromModel(TonicModel const &model)
         entry.parentTubeId = -1;
         entry.childIndex = -1;
         entry.tube = TonicSnapshotFromTubeRecord(record);
+        copyBoundaryBindings(record.actual, &entry);
         entry.tube.version = snapshot.version;
         snapshot.tubes.push_back(std::move(entry));
     }
@@ -613,6 +1024,7 @@ TonicSnapshotFromModel(TonicModel const &model)
                 entry.parentTubeId = record.actual.parentTubeId;
                 entry.childIndex = record.actual.childIndex;
                 entry.tube = TonicSnapshotFromTubeRecord(record);
+                copyBoundaryBindings(record.actual, &entry);
                 entry.tube.version = snapshot.version;
                 entry.transientParent = record.transientParent;
                 entry.persistent = record.persistent;
@@ -624,6 +1036,8 @@ TonicSnapshotFromModel(TonicModel const &model)
                     entry.centerDeltas.push_back(record.deltas.centerDw[i]);
                 }
                 for (auto const &sec : record.deltas.sections) {
+                    entry.sectionDeltaTransforms.push_back(sec.scale);
+                    entry.sectionDeltaTransforms.push_back(sec.twist);
                     for (size_t i = 0; i < sec.u.size(); ++i) {
                         entry.sectionDeltas.push_back(sec.u[i]);
                         entry.sectionDeltas.push_back(sec.v[i]);
@@ -641,6 +1055,7 @@ TonicSnapshotFromModel(TonicModel const &model)
             entry.parentTubeId = -1;
             entry.childIndex = -1;
             entry.tube = TonicSnapshotFromTubeRecord(record);
+            copyBoundaryBindings(record.actual, &entry);
             entry.tube.version = snapshot.version;
             entry.transientParent = record.transientParent;
             entry.persistent = record.persistent;
@@ -664,6 +1079,13 @@ TonicSnapshotFromModel(TonicModel const &model)
         }
     }
     snapshot.graph = model.SnapshotGraph();
+    for (TonicSnapshotTube &entry : snapshot.tubes) {
+        if (entry.regionId >= 0 &&
+            size_t(entry.regionId) < snapshot.graph.regionBoundaries.size()) {
+            entry.regionBoundary =
+                snapshot.graph.regionBoundaries[size_t(entry.regionId)];
+        }
+    }
     // One region map + expression per level the hierarchy actually reaches
     // (plan/17 §4.5: channel k selects level k + 1).
     for (TonicSnapshotTube const &entry : snapshot.tubes) {
@@ -768,9 +1190,27 @@ TonicSnapshotGuides
 TonicGuidesFromSnapshot(TonicSnapshot const &snapshot, TonicGuideCache *cache)
 {
     TonicSnapshotGuides out;
+    if (snapshot.generatedCurvesSuppressed) {
+        return out;
+    }
     uint64_t nextId = 1000;
     std::vector<int> live;
     size_t reused = 0, refilled = 0;
+    // Reconstruct the exact graph loops from the immutable snapshot once.
+    // `regionFaces` is intentionally only a fallback: two subface polygons
+    // can share that same coarse face while requiring different roots.
+    TonicRegionLoops regionLoops;
+    bool haveRegionLoops = false;
+    if (snapshot.hasScalp && !snapshot.graph.nodes.empty() &&
+        !snapshot.graph.edges.empty()) {
+        TonicScalpGraph graph;
+        std::string loopErr;
+        haveRegionLoops =
+            graph.Restore(snapshot.scalp, snapshot.graph.nodes,
+                          snapshot.graph.edges, snapshot.graph.linked,
+                          &loopErr) &&
+            TonicFlattenLoops(graph, &regionLoops, &loopErr);
+    }
     if (cache) {
         live.reserve(snapshot.tubes.size());
         // A changed scalp changes every mesh fill, so it is checked before
@@ -811,7 +1251,13 @@ TonicGuidesFromSnapshot(TonicSnapshot const &snapshot, TonicGuideCache *cache)
         // stream. The root hash stream is keyed by the tube id, so siblings
         // that inherited one set of fill params still differ.
         TonicGuideSet guides;
-        if (snapshot.hasScalp && !entry.regionFaces.empty()) {
+        if (haveRegionLoops && entry.regionId >= 0) {
+            std::vector<TonicRootOwnershipCell> const ownership =
+                _OwnershipCells(snapshot, entry.tubeId);
+            guides = TonicGenerateGuidesOnRegionForTube(
+                entry.tube, snapshot.scalp, regionLoops, entry.regionId,
+                entry.tubeId, &ownership);
+        } else if (snapshot.hasScalp && !entry.regionFaces.empty()) {
             guides = TonicGenerateGuidesOnScalpForTube(
                 entry.tube, snapshot.scalp, entry.regionFaces.data(),
                 int(entry.regionFaces.size()), entry.tubeId);
@@ -851,13 +1297,307 @@ TonicGuidesFromSnapshot(TonicSnapshot const &snapshot, TonicGuideCache *cache)
     return out;
 }
 
+struct _OutputCage
+{
+    std::vector<float> points;
+    std::vector<int> counts;
+    std::vector<uint64_t> ids;
+    std::vector<double> frames;
+    std::vector<float> normalizedT;
+    std::vector<int> curveTubeIds;
+    std::vector<int> curveLevels;
+    std::vector<int> curveRegionIds;
+    std::vector<int> ownerIds;
+    std::vector<float> ownerDensities;
+    std::vector<int> ownerSeeds;
+    std::vector<int> ownerCvCounts;
+    std::vector<float> ownerEdgeBias;
+    std::vector<GfVec2f> ownerChartCentroids;
+    std::vector<float> ownerChartMeanRadii;
+    std::vector<int> ownerProfileOffsets;
+    std::vector<GfVec2f> ownerProfile;
+    std::vector<GfVec3i> triangles;
+    std::vector<int> triangleOwnerIndices;
+    std::vector<GfVec2f> triangleRootCharts;
+};
+
+// surfaceCage roots are charted in the actual placed root section, rather
+// than raw authoring U/V.  Scale and twist are an affine chart transform, so
+// the shared slot triangulation remains valid while the runtime receives the
+// coordinates that match the raw K5 rails exactly.
+bool
+_OutputPlacedRootChart(TonicTubeSection const &section,
+                       std::vector<GfVec2f> *out, GfVec2f *centroid,
+                       float *meanRadius)
+{
+    if (!out || !centroid || !meanRadius || section.u.size() < 3 ||
+        section.u.size() != section.v.size() ||
+        !std::isfinite(section.scale) || !(section.scale > 0.0f) ||
+        !std::isfinite(section.twist)) {
+        return false;
+    }
+    float const ct = std::cos(section.twist);
+    float const st = std::sin(section.twist);
+    out->resize(section.u.size());
+    double twiceArea = 0.0;
+    double centroidU = 0.0;
+    double centroidV = 0.0;
+    for (size_t i = 0; i < section.u.size(); ++i) {
+        float const u = section.u[i] * section.scale;
+        float const v = section.v[i] * section.scale;
+        if (!std::isfinite(u) || !std::isfinite(v)) {
+            return false;
+        }
+        (*out)[i] = GfVec2f(u * ct - v * st, u * st + v * ct);
+    }
+    for (size_t i = 0; i < out->size(); ++i) {
+        GfVec2f const &a = (*out)[i];
+        GfVec2f const &b = (*out)[(i + 1) % out->size()];
+        double const cross = double(a[0]) * double(b[1]) -
+                             double(b[0]) * double(a[1]);
+        twiceArea += cross;
+        centroidU += (double(a[0]) + double(b[0])) * cross;
+        centroidV += (double(a[1]) + double(b[1])) * cross;
+    }
+    if (!std::isfinite(twiceArea) || std::fabs(twiceArea) <= 1e-12) {
+        return false;
+    }
+    *centroid = GfVec2f(float(centroidU / (3.0 * twiceArea)),
+                         float(centroidV / (3.0 * twiceArea)));
+    double radius = 0.0;
+    for (GfVec2f const &point : *out) {
+        double const du = double(point[0]) - double((*centroid)[0]);
+        double const dv = double(point[1]) - double((*centroid)[1]);
+        radius += std::sqrt(du * du + dv * dv);
+    }
+    *meanRadius = float(radius / double(out->size()));
+    return std::isfinite(*meanRadius) && *meanRadius > 0.0f;
+}
+
+// Raw K5 boundary rails for the runtime surface cage.  Unlike K9/K10
+// preview guides, rails never apply edgeBias or the owner length profile;
+// those are applied once by CurveSource when it scatters dense roots.
+bool
+_OutputCageFromSnapshot(TonicSnapshot const &snapshot, _OutputCage *out,
+                        std::string *err)
+{
+    if (!out) {
+        if (err) *err = "TonicBuildCommitLayer: null Output cage";
+        return false;
+    }
+    *out = _OutputCage();
+    if (!std::isfinite(snapshot.outputDensityMultiplier) ||
+        !(snapshot.outputDensityMultiplier > 0.0f) ||
+        !std::isfinite(snapshot.outputWidth) || snapshot.outputWidth < 0.0f ||
+        snapshot.outputPtexResolution < -1 ||
+        snapshot.outputPtexResolution > 12) {
+        if (err) *err = "TonicBuildCommitLayer: invalid Output settings";
+        return false;
+    }
+    out->ownerProfileOffsets.push_back(0);
+    for (TonicSnapshotTube const &entry : snapshot.tubes) {
+        if (!entry.tube.hasTube || entry.fillSuspended || entry.imported ||
+            !entry.members.empty()) {
+            continue;
+        }
+        TonicTubeDesc const tube = TonicTubeDescFromSnapshot(entry.tube);
+        std::vector<TonicFrame> tubeFrames;
+        std::string tubeErr;
+        // Every rail uses exactly the same normalized-t stations. Preserve
+        // every center knot and interval midpoint (up to 127 stations for
+        // the supported 64-CV tube) so a strongly sculpted center curve is
+        // faithfully represented between its section knots.  The authored
+        // section knots are included too; none of this depends on density.
+        std::vector<float> stationT;
+        if (tube.sections.size() >= 2) {
+            float const begin = tube.sections.front().t;
+            float const end = tube.sections.back().t;
+            int const centerCount = int(tube.centerX.size());
+            if (centerCount < 2) {
+                if (err) *err = "TonicBuildCommitLayer: Output cage lacks centers";
+                return false;
+            }
+            // Cubic pinned BasisCurves needs a useful minimum rail span even
+            // for a two-center tube; larger tubes retain every knot/midpoint.
+            int const uniformCount = std::max(5, 2 * (centerCount - 1) + 1);
+            for (int i = 0; i < uniformCount; ++i) {
+                stationT.push_back(begin + (end - begin) * float(i) /
+                                             float(uniformCount - 1));
+            }
+            for (TonicTubeSection const &section : tube.sections) {
+                stationT.push_back(section.t);
+            }
+            std::sort(stationT.begin(), stationT.end());
+            stationT.erase(std::unique(stationT.begin(), stationT.end()),
+                           stationT.end());
+        }
+        std::vector<float> mesh;
+        if (!TonicTubeFramesCpu(tube, &tubeFrames, &tubeErr) ||
+            stationT.size() < 2 || tube.ringVerts < 3) {
+            if (err) *err = "TonicBuildCommitLayer: Output cage: " + tubeErr;
+            return false;
+        }
+        mesh.reserve(stationT.size() * size_t(tube.ringVerts) * 3);
+        for (float station : stationT) {
+            std::vector<float> ring;
+            if (!TonicSampleTubeRingCpu(tube, tubeFrames, station, &ring,
+                                        &tubeErr) ||
+                ring.size() != size_t(tube.ringVerts) * 3) {
+                if (err) *err = "TonicBuildCommitLayer: Output cage: " + tubeErr;
+                return false;
+            }
+            mesh.insert(mesh.end(), ring.begin(), ring.end());
+        }
+        float const beginT = stationT.front();
+        float const endT = stationT.back();
+        float const spanT = endT > beginT ? endT - beginT : 1.0f;
+        int const owner = int(out->ownerIds.size());
+        std::vector<GfVec2f> rootChart;
+        GfVec2f rootCentroid;
+        float rootMeanRadius = 0.0f;
+        if (!_OutputPlacedRootChart(tube.sections.front(), &rootChart,
+                                    &rootCentroid, &rootMeanRadius)) {
+            if (err) *err = "TonicBuildCommitLayer: invalid Output root chart";
+            return false;
+        }
+        out->ownerIds.push_back(entry.tubeId);
+        out->ownerDensities.push_back(entry.tube.fill.density);
+        out->ownerSeeds.push_back(entry.tube.fill.seed);
+        out->ownerCvCounts.push_back(entry.tube.fill.cvCount);
+        out->ownerEdgeBias.push_back(entry.tube.fill.edgeBias);
+        out->ownerChartCentroids.push_back(rootCentroid);
+        out->ownerChartMeanRadii.push_back(rootMeanRadius);
+        if (entry.tube.fill.lengthProfile.empty()) {
+            out->ownerProfile.emplace_back(0.0f, 1.0f);
+            out->ownerProfile.emplace_back(1.0f, 1.0f);
+        } else if (entry.tube.fill.lengthProfile.size() % 2 == 0) {
+            for (size_t p = 0; p < entry.tube.fill.lengthProfile.size(); p += 2) {
+                out->ownerProfile.emplace_back(entry.tube.fill.lengthProfile[p],
+                                               entry.tube.fill.lengthProfile[p + 1]);
+            }
+        } else {
+            if (err) *err = "TonicBuildCommitLayer: malformed Output length profile";
+            return false;
+        }
+        out->ownerProfileOffsets.push_back(int(out->ownerProfile.size()));
+
+        size_t const railBase = out->counts.size();
+        for (int slot = 0; slot < tube.ringVerts; ++slot) {
+            double src[16] = {tubeFrames.front().nx, tubeFrames.front().ny,
+                              tubeFrames.front().nz, 0.0,
+                              tubeFrames.front().bx, tubeFrames.front().by,
+                              tubeFrames.front().bz, 0.0,
+                              tubeFrames.front().tx, tubeFrames.front().ty,
+                              tubeFrames.front().tz, 0.0,
+                              mesh[size_t(slot) * 3], mesh[size_t(slot) * 3 + 1],
+                              mesh[size_t(slot) * 3 + 2], 1.0};
+            GfMatrix4d frame;
+            if (!_OutputRootFrameFromK10(src, &frame)) {
+                if (err) *err = "TonicBuildCommitLayer: invalid Output cage frame";
+                return false;
+            }
+            out->counts.push_back(int(stationT.size()));
+            out->ids.push_back((uint64_t(uint32_t(entry.tubeId)) << 32) |
+                               uint64_t(uint32_t(slot)));
+            out->curveTubeIds.push_back(entry.tubeId);
+            out->curveLevels.push_back(entry.level);
+            out->curveRegionIds.push_back(entry.regionId);
+            for (int r = 0; r < int(stationT.size()); ++r) {
+                size_t const at = (size_t(r) * size_t(tube.ringVerts) +
+                                   size_t(slot)) * 3;
+                out->points.push_back(mesh[at]);
+                out->points.push_back(mesh[at + 1]);
+                out->points.push_back(mesh[at + 2]);
+                out->normalizedT.push_back((stationT[size_t(r)] - beginT) / spanT);
+            }
+            double const *values = frame.GetArray();
+            out->frames.insert(out->frames.end(), values, values + 16);
+        }
+        std::vector<std::array<int, 3>> topology;
+        if (!TonicTriangulateSectionSlotsCpu(tube.sections.front(), &topology,
+                                             &tubeErr)) {
+            if (err) *err = "TonicBuildCommitLayer: Output cage: " + tubeErr;
+            return false;
+        }
+        // This is K9's own deterministic terminal-slot topology.  It keeps
+        // collinear authored boundary slots incident to a nondegenerate cage
+        // triangle instead of silently dropping a sculpted rail.
+        for (std::array<int, 3> const &tri : topology) {
+            out->triangles.emplace_back(int(railBase + size_t(tri[0])),
+                                        int(railBase + size_t(tri[1])),
+                                        int(railBase + size_t(tri[2])));
+            out->triangleOwnerIndices.push_back(owner);
+            out->triangleRootCharts.push_back(rootChart[size_t(tri[0])]);
+            out->triangleRootCharts.push_back(rootChart[size_t(tri[1])]);
+            out->triangleRootCharts.push_back(rootChart[size_t(tri[2])]);
+        }
+    }
+    return true;
+}
+
+// Validation-only compatibility path for layers authored before subface
+// regions had their own root sampler.  Those layers stored the deterministic
+// face-list/disc fill, so accepting them requires reproducing that exact
+// stream; it must never be used to author a new layer.
+static TonicSnapshotGuides
+_LegacyGuidesFromSnapshot(TonicSnapshot const &snapshot)
+{
+    TonicSnapshotGuides out;
+    uint64_t nextId = 1000;
+    for (TonicSnapshotTube const &entry : snapshot.tubes) {
+        if (!entry.tube.hasTube || entry.fillSuspended || entry.imported ||
+            !entry.members.empty()) {
+            continue;
+        }
+        TonicGuideSet guides;
+        if (snapshot.hasScalp && !entry.regionFaces.empty()) {
+            guides = TonicGenerateGuidesOnScalpForTube(
+                entry.tube, snapshot.scalp, entry.regionFaces.data(),
+                int(entry.regionFaces.size()), entry.tubeId);
+        } else {
+            guides = TonicGenerateGuidesForTube(entry.tube, entry.tubeId);
+        }
+        out.points.insert(out.points.end(), guides.points.begin(),
+                          guides.points.end());
+        out.counts.insert(out.counts.end(), guides.counts.begin(),
+                          guides.counts.end());
+        out.frames.insert(out.frames.end(), guides.frames.begin(),
+                          guides.frames.end());
+        for (int g = 0; g < guides.guideCount; ++g) {
+            out.ids.push_back(nextId++);
+            out.tubeIds.push_back(entry.tubeId);
+            out.levels.push_back(entry.level);
+            out.regionIds.push_back(entry.regionId);
+        }
+    }
+    return out;
+}
+
+// region-v1 already used exact polygon support, but its root frames came
+// from raw K4.  Clear the later support-plane pin on a private copy so a v1
+// layer continues to authenticate byte-for-byte after v2 introduced it.
+static TonicSnapshotGuides
+_RegionV1GuidesFromSnapshot(TonicSnapshot const &snapshot)
+{
+    TonicSnapshot rawFrames = snapshot;
+    for (TonicSnapshotTube &entry : rawFrames.tubes) {
+        entry.tube.rootFramePinned = false;
+        entry.tube.rootFrame = TonicFrame();
+    }
+    return TonicGuidesFromSnapshot(rawFrames);
+}
+
 bool
 TonicBuildCommitLayer(TonicSnapshot const &snapshot,
                       TonicCommitPaths const &paths,
                       SdfLayerRefPtr *outLayer,
                       std::string *err,
-                      TonicGuideCache *cache)
+                      TonicGuideCache *cache,
+                      TonicGuideCache *outputCache)
 {
+    // Sparse Output is immutable snapshot data; it intentionally does not
+    // share the interactive Guide cache.
+    (void)outputCache;
     auto fail = [&](char const *what) {
         if (err) {
             *err = what;
@@ -884,6 +1624,28 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
     if (!_SetAttr(groom, "usdGen:tonic:version", SdfValueTypeNames->Token,
                   TfToken("1"))) {
         return fail("TonicBuildCommitLayer: cannot author the groom version");
+    }
+    // The root sampler changes the deterministic Guide bytes.  Keep that
+    // authoring version separate from the structural groom version so old
+    // layers can be verified by their legacy generator during hydrate.
+    if (!_SetAttr(groom, "usdGen:tonic:rootSampler",
+                  SdfValueTypeNames->Token, TfToken("region-v3"))) {
+        return fail("TonicBuildCommitLayer: cannot author the root sampler");
+    }
+    if (!_SetAttr(groom, "usdGen:tonic:generatedCurvesSuppressed",
+                  SdfValueTypeNames->Bool,
+                  snapshot.generatedCurvesSuppressed)) {
+        return fail("TonicBuildCommitLayer: cannot author generated-curve state");
+    }
+    if (!_SetAttr(groom, "usdGen:tonic:output:enabled",
+                  SdfValueTypeNames->Bool, snapshot.outputEnabled) ||
+        !_SetAttr(groom, "usdGen:tonic:output:densityMultiplier",
+                  SdfValueTypeNames->Float, snapshot.outputDensityMultiplier) ||
+        !_SetAttr(groom, "usdGen:tonic:output:width",
+                  SdfValueTypeNames->Float, snapshot.outputWidth) ||
+        !_SetAttr(groom, "usdGen:tonic:output:ptexResolution",
+                  SdfValueTypeNames->Int, snapshot.outputPtexResolution)) {
+        return fail("TonicBuildCommitLayer: cannot author Output settings");
     }
     if (!paths.descriptionPath.IsEmpty() &&
         !_SetRelTargets(groom, "usdGen:tonic:description",
@@ -936,14 +1698,23 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
         sectionT.resize(sections.size());
         VtVec2fArray sectionCvs;
         sectionCvs.resize(sections.size() * size_t(ringVerts));
+        // Keep the legacy baked plane pairs for old readers, and carry the
+        // authored representation separately so a hydrate can preserve its
+        // exact scale/twist interpolation and later K6 residuals.
+        VtVec2fArray sectionRawCvs;
+        sectionRawCvs.resize(sections.size() * size_t(ringVerts));
+        VtVec2fArray sectionTransforms;
+        sectionTransforms.resize(sections.size());
         for (size_t r = 0; r < sections.size(); ++r) {
             sectionT[r] = sections[r].t;
-            // The schema carries plane CVs only: scale and twist bake into
-            // the committed pairs (hydrate restores scale 1 / twist 0 with
-            // identical placement, so guides round-trip bit-exactly).
             float const ct = std::cos(sections[r].twist);
             float const st = std::sin(sections[r].twist);
+            sectionTransforms[r] =
+                GfVec2f(sections[r].scale, sections[r].twist);
             for (int s = 0; s < ringVerts; ++s) {
+                sectionRawCvs[r * size_t(ringVerts) + size_t(s)] =
+                    GfVec2f(sections[r].u[size_t(s)],
+                            sections[r].v[size_t(s)]);
                 float const uu =
                     sections[r].u[size_t(s)] * sections[r].scale;
                 float const vv =
@@ -957,8 +1728,23 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
         for (size_t i = 0; i < tube.fill.lengthProfile.size(); ++i) {
             lengthProfile[i] = tube.fill.lengthProfile[i];
         }
+        VtFloatArray rootFrame(9);
+        rootFrame[0] = tube.rootFrame.tx;
+        rootFrame[1] = tube.rootFrame.ty;
+        rootFrame[2] = tube.rootFrame.tz;
+        rootFrame[3] = tube.rootFrame.nx;
+        rootFrame[4] = tube.rootFrame.ny;
+        rootFrame[5] = tube.rootFrame.nz;
+        rootFrame[6] = tube.rootFrame.bx;
+        rootFrame[7] = tube.rootFrame.by;
+        rootFrame[8] = tube.rootFrame.bz;
+        VtFloatArray frameReference(9);
+        for (size_t i = 0; i < frameReference.size(); ++i) {
+            frameReference[i] = tube.frameReference[i];
+        }
         // Deltas ride the schema's own layout: 3 floats per center CV in
-        // the derived frames, 2 per section vertex in the section plane.
+        // the derived frames, 2 per section vertex in the section plane,
+        // and one scale/twist residual per section.
         VtVec3fArray centerDeltas;
         centerDeltas.resize(entry.centerDeltas.size() / 3);
         for (size_t i = 0; i < centerDeltas.size(); ++i) {
@@ -971,6 +1757,20 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
         for (size_t i = 0; i < sectionDeltas.size(); ++i) {
             sectionDeltas[i] = GfVec2f(entry.sectionDeltas[i * 2],
                                        entry.sectionDeltas[i * 2 + 1]);
+        }
+        VtVec2fArray sectionDeltaTransforms;
+        sectionDeltaTransforms.resize(entry.sectionDeltaTransforms.size() / 2);
+        for (size_t i = 0; i < sectionDeltaTransforms.size(); ++i) {
+            sectionDeltaTransforms[i] =
+                GfVec2f(entry.sectionDeltaTransforms[i * 2],
+                        entry.sectionDeltaTransforms[i * 2 + 1]);
+        }
+        VtIntArray inheritedBoundaryBindings;
+        inheritedBoundaryBindings.resize(
+            entry.inheritedBoundaryBindings.size());
+        for (size_t i = 0; i < inheritedBoundaryBindings.size(); ++i) {
+            inheritedBoundaryBindings[i] =
+                entry.inheritedBoundaryBindings[i];
         }
         bool attrsOk =
             _SetAttr(prim, "usdGen:tonic:regionId", SdfValueTypeNames->Int,
@@ -985,12 +1785,26 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
                      SdfValueTypeNames->Int, ringVerts) &&
             _SetAttr(prim, "usdGen:tonic:sectionCvs",
                      SdfValueTypeNames->Float2Array, sectionCvs) &&
+            _SetAttr(prim, "usdGen:tonic:sectionRawCvs",
+                     SdfValueTypeNames->Float2Array, sectionRawCvs) &&
+            _SetAttr(prim, "usdGen:tonic:sectionTransforms",
+                     SdfValueTypeNames->Float2Array, sectionTransforms) &&
+            _SetAttr(prim, "usdGen:tonic:rootFramePinned",
+                     SdfValueTypeNames->Bool, tube.rootFramePinned) &&
+            _SetAttr(prim, "usdGen:tonic:rootFrame",
+                     SdfValueTypeNames->FloatArray, rootFrame) &&
+            _SetAttr(prim, "usdGen:tonic:frameReference",
+                     SdfValueTypeNames->FloatArray, frameReference) &&
             _SetAttr(prim, "usdGen:tonic:childIndex", SdfValueTypeNames->Int,
                      entry.childIndex) &&
             _SetAttr(prim, "usdGen:tonic:centerDeltas",
                      SdfValueTypeNames->Point3fArray, centerDeltas) &&
             _SetAttr(prim, "usdGen:tonic:sectionDeltas",
                      SdfValueTypeNames->Float2Array, sectionDeltas) &&
+            _SetAttr(prim, "usdGen:tonic:sectionDeltaTransforms",
+                     SdfValueTypeNames->Float2Array, sectionDeltaTransforms) &&
+            _SetAttr(prim, "usdGen:tonic:inheritedBoundaryBindings",
+                     SdfValueTypeNames->IntArray, inheritedBoundaryBindings) &&
             _SetAttr(prim, "usdGen:tonic:subdivide:count",
                      SdfValueTypeNames->Int, tube.subdivide.count) &&
             _SetAttr(prim, "usdGen:tonic:subdivide:seed",
@@ -1124,23 +1938,37 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
     // -- live region primvar (P2: the preview map, every swap) -------------
     // A per-face int primvar on the scalp mesh. The Ptex is the contract;
     // this primvar is the live preview the HUD and the bake read from.
-    if (!snapshot.scalpPath.IsEmpty() &&
-        !snapshot.graph.faceRegions.empty()) {
+    SdfPath const boundScalpPath = snapshot.scalpPath.IsEmpty()
+        ? paths.scalpPath : snapshot.scalpPath;
+    bool const needOutputRest = snapshot.outputEnabled &&
+        !boundScalpPath.IsEmpty();
+    if (needOutputRest || (!snapshot.scalpPath.IsEmpty() &&
+                           !snapshot.graph.faceRegions.empty())) {
         SdfPrimSpecHandle scalp =
-            _EnsurePrim(layer, snapshot.scalpPath, SdfSpecifierOver, nullptr);
+            _EnsurePrim(layer, needOutputRest ? boundScalpPath
+                                              : snapshot.scalpPath,
+                        SdfSpecifierOver, nullptr);
         if (!scalp) {
             return fail("TonicBuildCommitLayer: cannot over the scalp mesh");
         }
-        VtIntArray regions;
-        regions.assign(snapshot.graph.faceRegions.begin(),
-                       snapshot.graph.faceRegions.end());
-        if (!_SetAttr(scalp, "primvars:usdGen:tonicRegion",
-                      SdfValueTypeNames->IntArray, regions,
-                      SdfVariabilityUniform, /*custom*/ true) ||
-            !_SetInterpolation(scalp, "primvars:usdGen:tonicRegion",
-                               "uniform")) {
-            return fail("TonicBuildCommitLayer: cannot author the live "
-                        "region primvar");
+        // CurveSource requires an immutable rest binding.  RestAPI exposes
+        // the bound mesh's Default-time points through the scene index, so it
+        // remains a valid rest pose without copying a posed current sample.
+        if (needOutputRest && !_PrependApiSchema(scalp, "UsdGenRestAPI")) {
+            return fail("TonicBuildCommitLayer: cannot apply RestAPI to Output scalp");
+        }
+        if (!snapshot.graph.faceRegions.empty()) {
+            VtIntArray regions;
+            regions.assign(snapshot.graph.faceRegions.begin(),
+                           snapshot.graph.faceRegions.end());
+            if (!_SetAttr(scalp, "primvars:usdGen:tonicRegion",
+                          SdfValueTypeNames->IntArray, regions,
+                          SdfVariabilityUniform, /*custom*/ true) ||
+                !_SetInterpolation(scalp, "primvars:usdGen:tonicRegion",
+                                   "uniform")) {
+                return fail("TonicBuildCommitLayer: cannot author the live "
+                            "region primvar");
+            }
         }
     }
 
@@ -1211,6 +2039,193 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
         _SetInterpolation(guidesPrim, "primvars:regionId", "uniform");
     if (!guidesOk) {
         return fail("TonicBuildCommitLayer: cannot author guide attributes");
+    }
+
+    // -- owned sparse Output cage + categorical owner map -----------------
+    //
+    // The USD source is intentionally compact. CurveSource creates dense
+    // hairs transiently from these raw K5 rails and the current immutable
+    // owner map; Clear Guides and preview visibility cannot affect it.
+    if (snapshot.outputEnabled) {
+        SdfPath const outputScalpPath = snapshot.scalpPath.IsEmpty()
+            ? paths.scalpPath : snapshot.scalpPath;
+        if (outputScalpPath.IsEmpty() || !snapshot.hasScalp) {
+            return fail("TonicBuildCommitLayer: Output requires bound scalp geometry");
+        }
+        _OutputCage cage;
+        std::string outputErr;
+        if (!_OutputCageFromSnapshot(snapshot, &cage, &outputErr)) {
+            return fail(outputErr.c_str());
+        }
+        uint64_t const mapGeneration = _OutputOwnerMapContentId(snapshot);
+        std::string outputMapFile;
+        if (!_BakeOutputOwnerMap(snapshot, mapGeneration, &outputMapFile,
+                                 &outputErr)) {
+            return fail(("TonicBuildCommitLayer: OutputRegionMap: " + outputErr).c_str());
+        }
+        VtVec3fArray outputPoints(cage.points.size() / 3);
+        for (size_t i = 0; i < outputPoints.size(); ++i) {
+            outputPoints[i] = GfVec3f(cage.points[i * 3], cage.points[i * 3 + 1],
+                                      cage.points[i * 3 + 2]);
+        }
+        VtMatrix4dArray outputFrames(cage.frames.size() / 16);
+        for (size_t i = 0; i < outputFrames.size(); ++i) {
+            for (int row = 0; row < 4; ++row) {
+                for (int column = 0; column < 4; ++column) {
+                    outputFrames[i][row][column] =
+                        cage.frames[i * 16 + size_t(row * 4 + column)];
+                }
+            }
+        }
+        VtIntArray const outputCounts(cage.counts.begin(), cage.counts.end());
+        VtUInt64Array const outputIds(cage.ids.begin(), cage.ids.end());
+        VtIntArray const outputTubeIds(cage.curveTubeIds.begin(), cage.curveTubeIds.end());
+        VtIntArray const outputLevels(cage.curveLevels.begin(), cage.curveLevels.end());
+        VtIntArray const outputRegionIds(cage.curveRegionIds.begin(),
+                                         cage.curveRegionIds.end());
+        VtFloatArray const normalizedT(cage.normalizedT.begin(), cage.normalizedT.end());
+        VtIntArray const ownerIds(cage.ownerIds.begin(), cage.ownerIds.end());
+        VtFloatArray const ownerDensities(cage.ownerDensities.begin(), cage.ownerDensities.end());
+        VtIntArray const ownerSeeds(cage.ownerSeeds.begin(), cage.ownerSeeds.end());
+        VtIntArray const ownerCvCounts(cage.ownerCvCounts.begin(), cage.ownerCvCounts.end());
+        VtFloatArray const ownerEdgeBias(cage.ownerEdgeBias.begin(), cage.ownerEdgeBias.end());
+        VtVec2fArray const ownerChartCentroids(cage.ownerChartCentroids.begin(),
+                                               cage.ownerChartCentroids.end());
+        VtFloatArray const ownerChartMeanRadii(cage.ownerChartMeanRadii.begin(),
+                                               cage.ownerChartMeanRadii.end());
+        VtIntArray const ownerProfileOffsets(cage.ownerProfileOffsets.begin(), cage.ownerProfileOffsets.end());
+        VtVec2fArray const ownerProfile(cage.ownerProfile.begin(), cage.ownerProfile.end());
+        VtVec3iArray const triangles(cage.triangles.begin(), cage.triangles.end());
+        VtIntArray const triangleOwners(cage.triangleOwnerIndices.begin(),
+                                        cage.triangleOwnerIndices.end());
+        VtVec2fArray const triangleRootCharts(cage.triangleRootCharts.begin(),
+                                               cage.triangleRootCharts.end());
+
+        SdfPrimSpecHandle outputCurves = _EnsurePrim(
+            layer, paths.OutputCurvesPath(), SdfSpecifierDef, "BasisCurves");
+        SdfPrimSpecHandle outputMap = _EnsurePrim(
+            layer, paths.OutputRegionMapPath(), SdfSpecifierDef, "UsdGenPtexMap");
+        if (!outputCurves || !outputMap) {
+            return fail("TonicBuildCommitLayer: cannot author Output source or map");
+        }
+        bool const outputCurvesOk =
+            _PrependApiSchema(outputCurves, "UsdGenCurveAPI") &&
+            _SetResetXformStack(outputCurves) &&
+            _SetAttr(outputCurves, "usdGen:tonic:outputOwned", SdfValueTypeNames->Bool,
+                     true, SdfVariabilityUniform, /*custom*/ true) &&
+            _SetAttr(outputCurves, "visibility", SdfValueTypeNames->Token,
+                     TfToken("invisible"), SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "type", SdfValueTypeNames->Token, TfToken("cubic"),
+                     SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "basis", SdfValueTypeNames->Token, TfToken("bspline"),
+                     SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "wrap", SdfValueTypeNames->Token, TfToken("pinned"),
+                     SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "curveVertexCounts", SdfValueTypeNames->IntArray,
+                     outputCounts) &&
+            _SetAttr(outputCurves, "points", SdfValueTypeNames->Point3fArray, outputPoints) &&
+            _SetAttr(outputCurves, "primvars:usdGen:role", SdfValueTypeNames->Token,
+                     TfToken("guide"), SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "primvars:usdGen:curveId", SdfValueTypeNames->UInt64Array,
+                     outputIds, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "primvars:usdGen:rootFrame", SdfValueTypeNames->Matrix4dArray,
+                     outputFrames, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "primvars:tubeId", SdfValueTypeNames->IntArray,
+                     outputTubeIds, SdfVariabilityUniform, /*custom*/ true) &&
+            _SetAttr(outputCurves, "primvars:hierarchyLevel",
+                     SdfValueTypeNames->IntArray, outputLevels,
+                     SdfVariabilityUniform, /*custom*/ true) &&
+            _SetAttr(outputCurves, "primvars:regionId",
+                     SdfValueTypeNames->IntArray, outputRegionIds,
+                     SdfVariabilityUniform, /*custom*/ true) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:normalizedT",
+                     SdfValueTypeNames->FloatArray, normalizedT, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerIds",
+                     SdfValueTypeNames->IntArray, ownerIds, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerDensities",
+                     SdfValueTypeNames->FloatArray, ownerDensities, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerSeeds",
+                     SdfValueTypeNames->IntArray, ownerSeeds, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerCvCounts",
+                     SdfValueTypeNames->IntArray, ownerCvCounts, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerEdgeBias",
+                     SdfValueTypeNames->FloatArray, ownerEdgeBias, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerChartCentroids",
+                     SdfValueTypeNames->Float2Array, ownerChartCentroids,
+                     SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerChartMeanRadii",
+                     SdfValueTypeNames->FloatArray, ownerChartMeanRadii,
+                     SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerLengthProfileOffsets",
+                     SdfValueTypeNames->IntArray, ownerProfileOffsets, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:ownerLengthProfile",
+                     SdfValueTypeNames->Float2Array, ownerProfile, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:triangles",
+                     SdfValueTypeNames->Int3Array, triangles, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:triangleOwnerIndices",
+                     SdfValueTypeNames->IntArray, triangleOwners, SdfVariabilityUniform) &&
+            _SetAttr(outputCurves, "usdGen:surfaceCage:triangleRootCharts",
+                     SdfValueTypeNames->Float2Array, triangleRootCharts,
+                     SdfVariabilityUniform) &&
+            _SetInterpolation(outputCurves, "primvars:usdGen:curveId", "uniform") &&
+            _SetInterpolation(outputCurves, "primvars:usdGen:rootFrame", "uniform") &&
+            _SetInterpolation(outputCurves, "primvars:tubeId", "uniform") &&
+            _SetInterpolation(outputCurves, "primvars:hierarchyLevel", "uniform") &&
+            _SetInterpolation(outputCurves, "primvars:regionId", "uniform");
+        bool const outputMapOk =
+            _SetAttr(outputMap, "usdGen:tonic:outputOwned", SdfValueTypeNames->Bool,
+                     true, SdfVariabilityUniform, /*custom*/ true) &&
+            _SetAttr(outputMap, "usdGen:map:file", SdfValueTypeNames->Asset,
+                     SdfAssetPath(outputMapFile)) &&
+            _SetAttr(outputMap, "usdGen:map:filter", SdfValueTypeNames->Token,
+                     TfToken("nearest")) &&
+            _SetAttr(outputMap, "usdGen:map:blur", SdfValueTypeNames->Float,
+                     0.0f) &&
+            _SetAttr(outputMap, "usdGen:map:firstChannel", SdfValueTypeNames->Int, 0) &&
+            _SetAttr(outputMap, "usdGen:map:channelCount", SdfValueTypeNames->Int, 1) &&
+            _SetAttr(outputMap, "usdGen:map:clamp", SdfValueTypeNames->Float2,
+                     GfVec2f(0.0f, 0.0f)) &&
+            _SetAttr(outputMap, "usdGen:map:textureGeneration",
+                     SdfValueTypeNames->UInt64, mapGeneration);
+        if (!outputCurvesOk || !outputMapOk) {
+            return fail("TonicBuildCommitLayer: cannot author Output cage fields");
+        }
+
+        SdfPrimSpecHandle output = _EnsurePrim(layer, paths.OutputPath(),
+                                                SdfSpecifierDef, "UsdGenDescription");
+        SdfPrimSpecHandle ops = _EnsurePrim(layer, paths.OutputPath().AppendChild(TfToken("Ops")),
+                                             SdfSpecifierDef, "Scope");
+        SdfPrimSpecHandle width = _EnsurePrim(layer, paths.OutputPath().AppendChild(TfToken("Ops"))
+                                               .AppendChild(TfToken("width")),
+                                               SdfSpecifierDef, "UsdGenWidth");
+        SdfPrimSpecHandle source = _EnsurePrim(layer, paths.OutputPath().AppendChild(TfToken("Ops"))
+                                                .AppendChild(TfToken("source")),
+                                                SdfSpecifierDef, "UsdGenCurveSource");
+        if (!output || !ops || !width || !source) {
+            return fail("TonicBuildCommitLayer: cannot author Output graph");
+        }
+        ops->SetNameChildrenOrder(TfTokenVector{TfToken("width"), TfToken("source")});
+        bool const outputGraphOk =
+            _SetResetXformStack(output) &&
+            _SetAttr(output, "usdGen:tonic:outputOwned", SdfValueTypeNames->Bool,
+                     true, SdfVariabilityUniform, /*custom*/ true) &&
+            _SetRelTargets(output, "usdGen:surface", SdfPathVector{outputScalpPath}) &&
+            _SetAttr(width, "usdGen:width", SdfValueTypeNames->Float, snapshot.outputWidth) &&
+            _SetAttr(width, "usdGen:replace", SdfValueTypeNames->Bool, true) &&
+            _SetRelTargets(source, "usdGen:curves", SdfPathVector{paths.OutputCurvesPath()}) &&
+            _SetAttr(source, "usdGen:interpolationMode", SdfValueTypeNames->Token,
+                     TfToken("surfaceCage")) &&
+            _SetAttr(source, "usdGen:densityMultiplier", SdfValueTypeNames->Float,
+                     snapshot.outputDensityMultiplier) &&
+            _SetRelTargets(source, "usdGen:regionMap", SdfPathVector{paths.OutputRegionMapPath()}) &&
+            _SetAttr(source, "usdGen:regionMapChannel", SdfValueTypeNames->Int, 0) &&
+            _SetAttr(source, "usdGen:expectMapGeneration", SdfValueTypeNames->UInt64,
+                     mapGeneration) &&
+            _SetAttr(source, "usdGen:useRest", SdfValueTypeNames->Bool, false) &&
+            _SetAttr(source, "usdGen:resampleTo", SdfValueTypeNames->Int, 0);
+        if (!outputGraphOk) {
+            return fail("TonicBuildCommitLayer: cannot author Output graph attributes");
+        }
     }
 
     // -- region maps + expressions (P2: one level; P4: per level) ---------
@@ -1381,6 +2396,57 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
     if (!groom.GetAttribute(TfToken("usdGen:tonic:version")).Get(&version) ||
         version != "1") {
         return fail("unsupported groom version (want \"1\")");
+    }
+    // Missing means the layer predates the subface root sampler. A known
+    // marker selects exactly the generator that wrote the guide bytes;
+    // unknown markers are not safe to hydrate.
+    enum class _RootSampler { LegacyFaceDisc, RegionV1, RegionV2, RegionV3 };
+    _RootSampler sampler = _RootSampler::LegacyFaceDisc;
+    UsdAttribute const rootSamplerAttr =
+        groom.GetAttribute(TfToken("usdGen:tonic:rootSampler"));
+    bool const legacyRootSampler = !rootSamplerAttr;
+    if (!legacyRootSampler) {
+        TfToken rootSampler;
+        if (!rootSamplerAttr.Get(&rootSampler)) {
+            return fail("unsupported root sampler");
+        }
+        if (rootSampler == "region-v1") {
+            sampler = _RootSampler::RegionV1;
+        } else if (rootSampler == "region-v2") {
+            sampler = _RootSampler::RegionV2;
+        } else if (rootSampler == "region-v3") {
+            sampler = _RootSampler::RegionV3;
+        } else {
+            return fail("unsupported root sampler (want \"region-v1\" or "
+                        "\"region-v2\" or \"region-v3\")");
+        }
+    }
+    bool generatedCurvesSuppressed = false;
+    UsdAttribute const generatedCurvesAttr =
+        groom.GetAttribute(TfToken("usdGen:tonic:generatedCurvesSuppressed"));
+    if (generatedCurvesAttr &&
+        !generatedCurvesAttr.Get(&generatedCurvesSuppressed)) {
+        return fail("cannot read generated-curve state");
+    }
+    TonicModel::OutputSettings outputSettings;
+    UsdAttribute const outputEnabledAttr =
+        groom.GetAttribute(TfToken("usdGen:tonic:output:enabled"));
+    UsdAttribute const outputDensityAttr = groom.GetAttribute(
+        TfToken("usdGen:tonic:output:densityMultiplier"));
+    UsdAttribute const outputWidthAttr =
+        groom.GetAttribute(TfToken("usdGen:tonic:output:width"));
+    UsdAttribute const outputPtexResolutionAttr = groom.GetAttribute(
+        TfToken("usdGen:tonic:output:ptexResolution"));
+    if ((outputEnabledAttr && !outputEnabledAttr.Get(&outputSettings.enabled)) ||
+        (outputDensityAttr &&
+         !outputDensityAttr.Get(&outputSettings.densityMultiplier)) ||
+        (outputWidthAttr && !outputWidthAttr.Get(&outputSettings.width)) ||
+        (outputPtexResolutionAttr &&
+         !outputPtexResolutionAttr.Get(&outputSettings.ptexResolution))) {
+        return fail("cannot read Output settings");
+    }
+    if (!model->SetOutputSettings(outputSettings)) {
+        return fail(model->GetDiagnostic());
     }
     UsdPrim const graph =
         stage->GetPrimAtPath(groomPath.AppendChild(TfToken("ScalpGraph")));
@@ -1574,12 +2640,16 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
         SdfPathVector members;
         TonicModel::TubeSnapshot shape;
         TonicShapeDeltas deltas;
+        std::vector<TonicParentBoundaryBinding> inheritedBoundaryBindings;
+        bool hasInheritedBoundaryBindings = false;
     };
     auto readTube = [&](UsdPrim const &prim, _StageTube *out) -> std::string {
         VtVec3fArray centers;
         VtFloatArray sectionT;
         int ringVerts = 0;
         VtVec2fArray sectionCvs;
+        VtVec2fArray sectionRawCvs;
+        VtVec2fArray sectionTransforms;
         if (!prim.GetAttribute(TfToken("usdGen:tonic:centerPoints"))
                  .Get(&centers) ||
             centers.empty() ||
@@ -1613,18 +2683,81 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
             snapshot.centerY[i] = centers[i][1];
             snapshot.centerZ[i] = centers[i][2];
         }
+        // Pre-frame-reference layers have no custom attribute. Preserve
+        // their old K4 interpretation exactly by making that identity, then
+        // reject malformed authored data before a child is re-derived or a
+        // stored delta is installed against the wrong frame.
+        snapshot.frameReference = _IdentityFrameReference();
+        UsdAttribute const frameReferenceAttr =
+            prim.GetAttribute(TfToken("usdGen:tonic:frameReference"));
+        if (frameReferenceAttr) {
+            VtFloatArray frameReference;
+            if (frameReferenceAttr.Get(&frameReference)) {
+                if (frameReference.size() != snapshot.frameReference.size()) {
+                    return "tube frameReference must contain 9 floats";
+                }
+            } else if (frameReferenceAttr.HasAuthoredValueOpinion()) {
+                return "tube frameReference must contain 9 floats";
+            } else {
+                // A property with no value is equivalent to the missing
+                // optional legacy attribute, so leave identity installed.
+                frameReference.clear();
+            }
+            for (size_t i = 0; i < frameReference.size(); ++i) {
+                snapshot.frameReference[i] = frameReference[i];
+            }
+            if (!frameReference.empty() &&
+                !_IsProperFrameReference(snapshot.frameReference)) {
+                return "tube frameReference is not a proper rotation";
+            }
+        }
+        if (sampler == _RootSampler::RegionV2 ||
+            sampler == _RootSampler::RegionV3) {
+            VtFloatArray rootFrame;
+            if (!prim.GetAttribute(TfToken("usdGen:tonic:rootFramePinned"))
+                     .Get(&snapshot.rootFramePinned) ||
+                !prim.GetAttribute(TfToken("usdGen:tonic:rootFrame"))
+                     .Get(&rootFrame) ||
+                rootFrame.size() != 9) {
+                return "tube is missing the region-v2 root frame";
+            }
+            snapshot.rootFrame.tx = rootFrame[0];
+            snapshot.rootFrame.ty = rootFrame[1];
+            snapshot.rootFrame.tz = rootFrame[2];
+            snapshot.rootFrame.nx = rootFrame[3];
+            snapshot.rootFrame.ny = rootFrame[4];
+            snapshot.rootFrame.nz = rootFrame[5];
+            snapshot.rootFrame.bx = rootFrame[6];
+            snapshot.rootFrame.by = rootFrame[7];
+            snapshot.rootFrame.bz = rootFrame[8];
+        }
         snapshot.shape.length = centers.back()[1] - centers.front()[1];
-        // Stored CVs carry baked scale/twist (see the layer builder), so
-        // hydrate restores scale 1 / twist 0 with identical placement.
+        UsdAttribute const rawCvsAttr =
+            prim.GetAttribute(TfToken("usdGen:tonic:sectionRawCvs"));
+        UsdAttribute const transformsAttr =
+            prim.GetAttribute(TfToken("usdGen:tonic:sectionTransforms"));
+        bool const hasRawRepresentation = rawCvsAttr && transformsAttr &&
+            rawCvsAttr.Get(&sectionRawCvs) &&
+            transformsAttr.Get(&sectionTransforms) &&
+            sectionRawCvs.size() == sectionCvs.size() &&
+            sectionTransforms.size() == sectionT.size();
+        // Pre-transform layers have only the baked pairs.  Keep that legacy
+        // interpretation rather than attempting a lossy inverse transform.
         snapshot.sections.resize(sectionT.size());
         for (size_t r = 0; r < sectionT.size(); ++r) {
             TonicTubeSection section;
             section.t = sectionT[r];
+            if (hasRawRepresentation) {
+                section.scale = sectionTransforms[r][0];
+                section.twist = sectionTransforms[r][1];
+            }
             section.u.resize(size_t(ringVerts));
             section.v.resize(size_t(ringVerts));
             for (int s = 0; s < ringVerts; ++s) {
                 GfVec2f const cv =
-                    sectionCvs[r * size_t(ringVerts) + size_t(s)];
+                    hasRawRepresentation
+                        ? sectionRawCvs[r * size_t(ringVerts) + size_t(s)]
+                        : sectionCvs[r * size_t(ringVerts) + size_t(s)];
                 section.u[size_t(s)] = cv[0];
                 section.v[size_t(s)] = cv[1];
             }
@@ -1648,6 +2781,12 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
             snapshot.fill.lengthProfile.assign(lengthProfile.begin(),
                                                lengthProfile.end());
         }
+        // The committed root sampler is groom-wide.  Old markerless and
+        // v1/v2 layers must keep their historical K9 stream for strict
+        // hydrate validation; v3 is the new material-aware sampler.
+        snapshot.fill.sampler = sampler == _RootSampler::RegionV3
+            ? TonicGuideSampler::RegionV3
+            : TonicGuideSampler::Legacy;
         prim.GetAttribute(TfToken("usdGen:tonic:subdivide:count"))
             .Get(&snapshot.subdivide.count);
         prim.GetAttribute(TfToken("usdGen:tonic:subdivide:seed"))
@@ -1669,10 +2808,39 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
             _Targets(prim.GetRelationship(TfToken("usdGen:tonic:members")));
         VtVec3fArray centerDeltas;
         VtVec2fArray sectionDeltas;
+        VtVec2fArray sectionDeltaTransforms;
+        VtIntArray inheritedBoundaryBindings;
         prim.GetAttribute(TfToken("usdGen:tonic:centerDeltas"))
             .Get(&centerDeltas);
         prim.GetAttribute(TfToken("usdGen:tonic:sectionDeltas"))
             .Get(&sectionDeltas);
+        prim.GetAttribute(TfToken("usdGen:tonic:sectionDeltaTransforms"))
+            .Get(&sectionDeltaTransforms);
+        UsdAttribute const boundaryBindingsAttr = prim.GetAttribute(
+            TfToken("usdGen:tonic:inheritedBoundaryBindings"));
+        out->hasInheritedBoundaryBindings = bool(boundaryBindingsAttr) &&
+            boundaryBindingsAttr.HasAuthoredValueOpinion();
+        if (boundaryBindingsAttr &&
+            !boundaryBindingsAttr.Get(&inheritedBoundaryBindings) &&
+            boundaryBindingsAttr.HasAuthoredValueOpinion()) {
+            return "tube inheritedBoundaryBindings must be an int array";
+        }
+        if (inheritedBoundaryBindings.size() % 3 != 0) {
+            return "tube inheritedBoundaryBindings must contain triples";
+        }
+        for (size_t i = 0; i < inheritedBoundaryBindings.size(); i += 3) {
+            TonicParentBoundaryBinding binding;
+            binding.section = inheritedBoundaryBindings[i + 0];
+            binding.parentSlot = inheritedBoundaryBindings[i + 1];
+            binding.childSlot = inheritedBoundaryBindings[i + 2];
+            if (binding.section < 0 ||
+                binding.section >= int(sectionT.size()) ||
+                binding.parentSlot < 0 || binding.childSlot < 0 ||
+                binding.childSlot >= ringVerts) {
+                return "tube inheritedBoundaryBindings has an invalid slot";
+            }
+            out->inheritedBoundaryBindings.push_back(binding);
+        }
         for (auto const &d : centerDeltas) {
             out->deltas.centerDu.push_back(d[0]);
             out->deltas.centerDv.push_back(d[1]);
@@ -1686,6 +2854,10 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
                 sec.t = sectionT[r];
                 sec.scale = 0.0f;
                 sec.twist = 0.0f;
+                if (sectionDeltaTransforms.size() == sectionT.size()) {
+                    sec.scale = sectionDeltaTransforms[r][0];
+                    sec.twist = sectionDeltaTransforms[r][1];
+                }
                 sec.u.resize(size_t(ringVerts));
                 sec.v.resize(size_t(ringVerts));
                 for (int s = 0; s < ringVerts; ++s) {
@@ -1888,6 +3060,10 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
                             "counterpart (foreign or hand-edited hierarchy)");
             }
             install.actual = TonicTubeDescFromSnapshot(record.shape);
+            install.actual.inheritedBoundaryBindings =
+                record.inheritedBoundaryBindings;
+            install.hasInheritedBoundaryBindings =
+                record.hasInheritedBoundaryBindings;
             // regionId is authored per tube, not carried by the shape.
             install.actual.regionId = record.regionId;
             install.deltas = record.deltas;
@@ -1948,6 +3124,7 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
     }
 
     // -- guides: regenerate, assert, then import what no tube claims -------
+    model->SetGeneratedCurvesSuppressed(generatedCurvesSuppressed);
     UsdPrim const guides =
         stage->GetPrimAtPath(groomPath.AppendChild(TfToken("Guides")));
     VtVec3fArray storedPoints;
@@ -1964,8 +3141,10 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
     }
     guides.GetAttribute(TfToken("primvars:tubeId")).Get(&storedTubeIds);
     TonicSnapshot const check = TonicSnapshotFromModel(*model);
-    TonicSnapshotGuides const regen = TonicGuidesFromSnapshot(check);
-    result.guideCount = regen.counts.size();
+    TonicSnapshotGuides const regen =
+        sampler == _RootSampler::RegionV1
+            ? _RegionV1GuidesFromSnapshot(check)
+            : TonicGuidesFromSnapshot(check);
     // Stored offsets per curve, and which curves a model tube claims.
     std::vector<size_t> storedOffset(storedCounts.size(), 0);
     size_t running = 0;
@@ -1990,23 +3169,75 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
                 knownTubes.end();
         (known ? claimed : foreign).push_back(i);
     }
-    bool equal = claimed.size() == regen.counts.size();
-    size_t regenOffset = 0;
-    for (size_t g = 0; equal && g < claimed.size(); ++g) {
-        size_t const s = claimed[g];
-        equal = storedCounts[s] == regen.counts[g] &&
-                storedIds[s] == regen.ids[g];
-        for (int c = 0; equal && c < regen.counts[g]; ++c) {
-            equal = std::memcmp(&storedPoints[storedOffset[s] + size_t(c)],
-                                &regen.points[(regenOffset + size_t(c)) * 3],
-                                sizeof(float) * 3) == 0;
+    auto guidesEqual = [&](TonicSnapshotGuides const &candidate) {
+        bool equal = claimed.size() == candidate.counts.size() &&
+                     candidate.ids.size() == candidate.counts.size() &&
+                     candidate.tubeIds.size() == candidate.counts.size();
+        size_t candidateOffset = 0;
+        for (size_t g = 0; equal && g < claimed.size(); ++g) {
+            size_t const s = claimed[g];
+            equal = s < storedIds.size() && s < storedTubeIds.size() &&
+                    storedCounts[s] == candidate.counts[g] &&
+                    storedIds[s] == candidate.ids[g] &&
+                    storedTubeIds[s] == candidate.tubeIds[g];
+            for (int c = 0; equal && c < candidate.counts[g]; ++c) {
+                equal = std::memcmp(
+                    &storedPoints[storedOffset[s] + size_t(c)],
+                    &candidate.points[(candidateOffset + size_t(c)) * 3],
+                    sizeof(float) * 3) == 0;
+            }
+            candidateOffset += size_t(candidate.counts[g]);
         }
-        regenOffset += size_t(regen.counts[g]);
+        return equal;
+    };
+    bool equal = guidesEqual(regen);
+    TonicSnapshotGuides legacyRegen;
+    TonicSnapshotGuides const *verified = &regen;
+    if (!equal && legacyRootSampler) {
+        // A markerless layer is admitted only when its guide bytes exactly
+        // match the old deterministic face-list/disc generator.  This keeps
+        // edited legacy guide data rejected just as strictly as new data.
+        legacyRegen = _LegacyGuidesFromSnapshot(check);
+        equal = guidesEqual(legacyRegen);
+        if (equal) {
+            verified = &legacyRegen;
+        }
     }
+    result.guideCount = verified->counts.size();
     result.guidesBitEqual = equal;
     if (!equal) {
         return fail("regenerated guides differ from the stored Guides "
                     "(foreign or hand-edited guide data)");
+    }
+    // region-v1 guide bytes were generated with raw K4 frames. Once those
+    // bytes have authenticated, migrate the live model's region roots to
+    // the deterministic support-plane pins used by all subsequent edits and
+    // v2 commits. This deliberately happens after the strict v1 comparison.
+    if (sampler == _RootSampler::RegionV1 &&
+        !model->PinRegionRootFrames()) {
+        return fail(model->GetDiagnostic());
+    }
+    if (sampler != _RootSampler::RegionV3) {
+        // Authentication above deliberately ran against the historical root
+        // stream.  Once it has succeeded, migrate the live model before any
+        // future commit: writing a v3 marker alongside legacy guide bytes
+        // would otherwise make the next hydrate reject its own save.
+        for (TonicSnapshotTube const &entry : check.tubes) {
+            TonicModel::FillParams fill;
+            if (!model->GetTubeFillParams(entry.tubeId, &fill)) {
+                return fail("a hydrated tube has no Fill parameters");
+            }
+            fill.sampler = TonicGuideSampler::RegionV3;
+            if (!model->SetTubeFillParams(entry.tubeId, std::move(fill))) {
+                return fail(model->GetDiagnostic());
+            }
+        }
+        // The guide cache key includes the sampler. Refill the displayed
+        // stream after the migration (unless it was explicitly cleared) so
+        // no caller observes legacy geometry under a v3 live model.
+        if (!model->RefillGuides(1.0f)) {
+            return fail(model->GetDiagnostic());
+        }
     }
     // Foreign guides (hand-authored, Houdini) are not fill output: they
     // become locked tubes one level under the tube whose region roots them
@@ -2184,9 +3415,6 @@ TonicSaveGroomAndMaps(UsdStagePtr const &stage, SdfLayerHandle const &live,
     if (!TonicSaveGroom(stage, live, filePath, err)) {
         return false;
     }
-    if (mapFile.empty()) {
-        return true;
-    }
     auto fail = [&](std::string const &what) {
         if (err) {
             *err = "TonicSaveGroomAndMaps: " + what;
@@ -2195,22 +3423,41 @@ TonicSaveGroomAndMaps(UsdStagePtr const &stage, SdfLayerHandle const &live,
     };
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path const dest =
-        fs::path(filePath).parent_path() / "regionMap.ptx";
-    fs::copy_file(mapFile, dest, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        return fail("cannot copy " + mapFile + " to " + dest.string());
+    std::string outputMapFile;
+    if (live) {
+        SdfAttributeSpecHandle const attr = live->GetAttributeAtPath(
+            paths.OutputRegionMapPath().AppendProperty(TfToken("usdGen:map:file")));
+        if (attr && attr->GetDefaultValue().IsHolding<SdfAssetPath>()) {
+            outputMapFile = attr->GetDefaultValue().UncheckedGet<SdfAssetPath>()
+                                .GetAssetPath();
+        }
+    }
+    if (mapFile.empty() && outputMapFile.empty()) {
+        return true;
     }
     SdfLayerRefPtr file = SdfLayer::FindOrOpen(filePath);
     if (!file) {
         return fail("cannot reopen " + filePath);
     }
-    {
-        SdfChangeBlock block;
-        SdfPrimSpecHandle map =
-            SdfCreatePrimInLayer(file, paths.RegionMapPath());
+    auto copyAndRepoint = [&](std::string const &source, std::string const &name,
+                              SdfPath const &mapPath) {
+        if (source.empty()) {
+            return true;
+        }
+        fs::path const dest = fs::path(filePath).parent_path() / name;
+        ec.clear();
+        bool const sameFile = fs::exists(dest, ec) && !ec &&
+            fs::equivalent(fs::path(source), dest, ec) && !ec;
+        ec.clear();
+        if (!sameFile) {
+            fs::copy_file(source, dest, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                return fail("cannot copy " + source + " to " + dest.string());
+            }
+        }
+        SdfPrimSpecHandle map = SdfCreatePrimInLayer(file, mapPath);
         if (!map) {
-            return fail("cannot over the RegionMap in the saved file");
+            return fail("cannot author map in the saved file");
         }
         SdfAttributeSpecHandle attr;
         for (SdfAttributeSpecHandle const &cand : map->GetAttributes()) {
@@ -2226,10 +3473,18 @@ TonicSaveGroomAndMaps(UsdStagePtr const &stage, SdfLayerHandle const &live,
         if (!attr) {
             return fail("cannot author usdGen:map:file in the saved file");
         }
-        // Relative to the saved layer: a groom that moves with its folder
-        // keeps resolving (an absolute path would pin it to this machine).
-        attr->SetDefaultValue(
-            VtValue(SdfAssetPath("./" + dest.filename().string())));
+        attr->SetDefaultValue(VtValue(SdfAssetPath("./" + dest.filename().string())));
+        return true;
+    };
+    {
+        SdfChangeBlock block;
+        if (!copyAndRepoint(mapFile, "regionMap.ptx", paths.RegionMapPath()) ||
+            !copyAndRepoint(outputMapFile,
+                            fs::path(filePath).stem().string() + ".output-" +
+                                fs::path(outputMapFile).filename().string(),
+                            paths.OutputRegionMapPath())) {
+            return false;
+        }
     }
     if (!file->Save()) {
         return fail("cannot save " + filePath);
@@ -2261,6 +3516,36 @@ TonicCommitter::Enqueue(UsdStagePtr const &stage)
 {
     TonicFillPlan plan;
     if (stage) {
+        // Output is a reserved generated path only when its owner marker is
+        // present on the sparse cage, categorical owner map, and description.
+        // Never let enabling Tonic output replace an artist-owned member of
+        // that atomic triple.
+        TonicModel::OutputSettings const output = _model->GetOutputSettings();
+        if (output.enabled) {
+            SdfPath const guarded[] = {_paths.OutputCurvesPath(),
+                                       _paths.OutputRegionMapPath(),
+                                       _paths.OutputPath()};
+            SdfPath blocked;
+            for (SdfPath const &path : guarded) {
+                UsdPrim const existing = stage->GetPrimAtPath(path);
+                if (!existing) {
+                    continue;
+                }
+                bool owned = false;
+                UsdAttribute const marker = existing.GetAttribute(
+                    TfToken("usdGen:tonic:outputOwned"));
+                if (!marker || !marker.Get(&owned) || !owned) {
+                    blocked = path;
+                    break;
+                }
+            }
+            if (!blocked.IsEmpty()) {
+                std::lock_guard<std::mutex> lock(_mutex);
+                _diagnostic = "TonicCommitter::Enqueue: refusing to overwrite "
+                              "artist-owned output at " + blocked.GetString();
+                return;
+            }
+        }
         plan = TonicPlanGuideInterpolateFill(stage, _paths);
     } else {
         plan.opPath = _paths.InterpOpPath();
@@ -2271,11 +3556,20 @@ TonicCommitter::Enqueue(UsdStagePtr const &stage)
 size_t
 TonicCommitter::CancelDescriptionCooks() const
 {
-    if (_paths.descriptionPath.IsEmpty()) {
-        return 0;
+    usdGenImaging::UsdGenSessionStore &sessions =
+        usdGenImaging::UsdGenSessionStore::GetInstance();
+    size_t cancelled = 0;
+    if (!_paths.descriptionPath.IsEmpty()) {
+        cancelled += sessions.CancelCooks(_paths.descriptionPath);
     }
-    return usdGenImaging::UsdGenSessionStore::GetInstance().CancelCooks(
-        _paths.descriptionPath);
+    // Output has its own description root and may cook independently of the
+    // legacy description path. Keep this cancellation separate so a groom
+    // with no legacy description still drops stale generated output cooks.
+    SdfPath const output = _paths.OutputPath();
+    if (!output.IsEmpty() && output != _paths.descriptionPath) {
+        cancelled += sessions.CancelCooks(output);
+    }
+    return cancelled;
 }
 
 void
@@ -2401,7 +3695,7 @@ TonicCommitter::_WorkerLoop()
             snapshot.interpOpPath = plan.opPath;
             builtVersion = snapshot.version;
             builtOk = TonicBuildCommitLayer(snapshot, paths, &built, &err,
-                                            &_guideCache);
+                                            &_guideCache, &_outputGuideCache);
         } catch (std::exception const &e) {
             _workerThrowCount.fetch_add(1);
             builtOk = false;
@@ -2597,7 +3891,19 @@ TonicCommitter::_BeginPartial(SdfLayerHandle const &built)
     SdfPath const tubesPath = _paths.TubesPath();
     if (SdfPrimSpecHandle const groom = built->GetPrimAtPath(_paths.groomPath)) {
         std::vector<SdfPath> children;
+        SdfPath const outputCurvesPath = _paths.OutputCurvesPath();
+        SdfPath const outputRegionMapPath = _paths.OutputRegionMapPath();
+        SdfPath const outputPath = _paths.OutputPath();
+        bool haveOutputTriple = false;
         for (SdfPrimSpecHandle const &child : groom->GetNameChildren()) {
+            if (child->GetPath() == outputPath ||
+                child->GetPath() == outputRegionMapPath) {
+                continue;  // paired with OutputCurves below
+            }
+            if (child->GetPath() == outputCurvesPath) {
+                haveOutputTriple = true;
+                continue;
+            }
             if (child->GetPath() != tubesPath) {
                 children.push_back(child->GetPath());
             }
@@ -2631,6 +3937,14 @@ TonicCommitter::_BeginPartial(SdfLayerHandle const &built)
                 _partialSlots.push_back(_PartialSlot{child, false});
             }
         }
+        if (haveOutputTriple && built->GetPrimAtPath(outputRegionMapPath) &&
+            built->GetPrimAtPath(outputPath)) {
+            // A CurveSource must never observe new counts against old points
+            // during a budgeted transfer. Keep both owned Output prims in the
+            // same ChangeBlock even when their source data is large.
+            _partialSlots.push_back(
+                _PartialSlot{outputCurvesPath, false, true});
+        }
     }
     if (built->GetPrimAtPath(tubesPath)) {
         _partialSlots.push_back(_PartialSlot{tubesPath, true});
@@ -2654,10 +3968,20 @@ TonicCommitter::SwapResult
 TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
                                  SdfLayerHandle const &built, uint64_t version)
 {
+    // Keep the optional TN-4 diagnosis out of the timed mutation itself.
+    // A reference groom has thousands of one-tube slots; when a platform
+    // budget regression appears, the path distinguishes a large Guide
+    // property from an unexpectedly costly ordinary tube copy without adding
+    // a public test/debug API.
+    _PartialSlot const &slot = _partialSlots[_partialNext];
+    SdfPath const slotPath = slot.path;
+    bool const slotSelfOnly = slot.selfOnly;
+    bool const slotOutputPair = slot.outputPair;
+    size_t const slotIndex = _partialNext;
+    size_t const slotCount = _partialSlots.size();
     auto t0 = std::chrono::steady_clock::now();
     {
         SdfChangeBlock block;
-        _PartialSlot const &slot = _partialSlots[_partialNext];
         if (_partialNext == 0) {
             // Groom self, plus stale-subtree cleanup so a partial swap
             // never leaves removed tubes/children behind: the live layer is
@@ -2678,6 +4002,13 @@ TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
                     }
                 }
             }
+        } else if (slot.outputPair) {
+            SdfCopySpec(built, _paths.OutputCurvesPath(), live,
+                        _paths.OutputCurvesPath());
+            SdfCopySpec(built, _paths.OutputRegionMapPath(), live,
+                        _paths.OutputRegionMapPath());
+            SdfCopySpec(built, _paths.OutputPath(), live,
+                        _paths.OutputPath());
         } else if (slot.selfOnly) {
             // The Guides self-slot carries the shell only; its properties
             // follow in per-property slots (TN-4).
@@ -2689,7 +4020,17 @@ TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
         ++_partialNext;
     }
     auto t1 = std::chrono::steady_clock::now();
-    _lastSwapMs.store(std::chrono::duration<double, std::milli>(t1 - t0).count());
+    double const elapsedMs =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    _lastSwapMs.store(elapsedMs);
+    if (std::getenv("USDGEN_TONIC_PARTIAL_SLOT_TIMING") &&
+        elapsedMs > 4.0) {
+        std::fprintf(stderr,
+                     "tonic: partial slot %zu/%zu %s%s%s %.3f ms\n",
+                     slotIndex + 1, slotCount, slotPath.GetText(),
+                     slotSelfOnly ? " [self]" : "",
+                     slotOutputPair ? " [output-pair]" : "", elapsedMs);
+    }
     if (_partialNext >= _partialSlots.size()) {
         _committedVersion.store(version);
         _partialSlots.clear();

@@ -7,6 +7,10 @@
 // paint pass, no separate overlay renderer, and — because it is a prim — the
 // gizmo is depth-sorted against the tubes it manipulates.
 //
+// An interactive usdview session clears this depth-sorted fallback and draws
+// the same handles in its transparent Qt viewport overlay, keeping the
+// manipulator unoccluded.  Headless sessions continue to use these curves.
+//
 // The records are set and cleared explicitly (Tonic_SetGizmo /
 // Tonic_SetBrushRing): the model never invents a gizmo from the selection,
 // because only the tool knows which handle the pointer is over and what the
@@ -15,8 +19,9 @@
 //
 // Geometry, in world units, from one record:
 //
-//   translate      3 axis lines from the origin, one per frame column,
-//                  red / green / blue, the active handle yellow
+//   translate      Maya-style RGB axis arrows, one planar square for each
+//                  two-axis move, and a cyan centre square for free
+//                  camera-plane moves.  The active handle is yellow.
 //   ringTRS        a circle in the frame's uv plane (handle 0) plus the
 //                  three axes (handles 1..3): the Ring sub-mode's scale
 //                  ring and twist handle
@@ -41,6 +46,8 @@ enum TonicGizmoKind : int {
     TonicGizmo_Translate = 1,
     TonicGizmo_RingTRS = 2,
     TonicGizmo_NodeTranslate = 3,
+    TonicGizmo_Rotate = 4,
+    TonicGizmo_Scale = 5,
 };
 
 struct USDGENTONIC_API TonicGizmoRecord {
@@ -88,12 +95,21 @@ struct USDGENTONIC_API TonicOverlayCurves {
 // Handle ids, stable across kinds so the Python hit-test and the published
 // `handleId` primvar agree: 0..2 are the u/v/w axes of a translate gizmo and
 // of a node gizmo; a ringTRS numbers its circle 3 and keeps 0..2 for the
-// axes, so "handle 0 is the u axis" holds for every kind.
+// axes, so "handle 0 is the u axis" holds for every kind.  The centre is 4;
+// planar handles name their normal axis, so Scale can constrain its two
+// affected axes.  Rotate reserves 8/9 for the camera-view ring and free
+// trackball ball.
 enum TonicGizmoHandle : int {
     TonicGizmoHandle_AxisU = 0,
     TonicGizmoHandle_AxisV = 1,
     TonicGizmoHandle_AxisW = 2,
     TonicGizmoHandle_Ring = 3,
+    TonicGizmoHandle_Center = 4,
+    TonicGizmoHandle_PlaneYZ = 5,
+    TonicGizmoHandle_PlaneXZ = 6,
+    TonicGizmoHandle_PlaneXY = 7,
+    TonicGizmoHandle_View = 8,
+    TonicGizmoHandle_Free = 9,
 };
 
 // Number of segments a gizmo/brush circle is drawn with. Fixed, so the

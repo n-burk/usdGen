@@ -371,8 +371,9 @@ void CheckWorker()
           "worker: an unchanged graph re-classifies zero faces");
     Check(worker.TakeCompleted(&done, &path) && done == vC,
           "worker: the repeat completion reports");
-    // A graph edit dirties a strict subset of the faces (the shared
-    // corner moves onto face (2, 1)'s centroid: that face flips regions).
+    // A graph edit can move a boundary within a face without changing that
+    // face's centroid label.  The cache therefore re-classifies every face
+    // whenever its classifier inputs change.
     Check(model.GraphMoveNode(1, Locate(*model.GetScalp(), 4, 2.5f, 1.5f)),
           "worker: the nudge moves the shared corner");
     uint64_t const vD = model.GetMapVersion();
@@ -386,9 +387,8 @@ void CheckWorker()
                     worker.TakeDiagnostic().c_str());
     }
     Check(landed, "worker: the edited bake lands");
-    Check(worker.LastBakedFaces() > 0 &&
-              worker.LastBakedFaces() < grid.counts.size(),
-          "worker: a nudge re-classifies a strict subset");
+    Check(worker.LastBakedFaces() == grid.counts.size(),
+          "worker: a graph edit invalidates every cached texel");
     // Supersede: a version enqueued during a long bake cancels it (or the
     // wake coalesces first — either way exactly one bake finishes and the
     // superseded version leaves no file).
@@ -447,6 +447,117 @@ void CheckWorker()
         }
     }
     Check(noTmp, "worker: no tmp file ever survives");
+    fs::remove_all(dir, ec);
+}
+
+// A closed region can sit entirely inside a coarse quad.  Its corners and
+// centroid then all classify as uncovered, so neither the old collapse rule
+// nor the old centroid-id cache key saw it.  Keep two disjoint loops here to
+// prove the texel map preserves both ids and a same-face boundary move
+// invalidates its cached texels.
+void CheckSubfaceRegionBake()
+{
+    using namespace usdGenTonic;
+    Grid const grid = MakeGrid(1);
+    TonicModel model;
+    Check(model.BindScalp(grid.points, grid.counts, grid.indices),
+          "subface: the single quad binds");
+    auto addLoop = [&](float x0, float z0, float x1, float z1) {
+        int const a = model.GraphAddNode(Locate(*model.GetScalp(), 1, x0, z0));
+        int const b = model.GraphAddNode(Locate(*model.GetScalp(), 1, x1, z0));
+        int const c = model.GraphAddNode(Locate(*model.GetScalp(), 1, x1, z1));
+        int const d = model.GraphAddNode(Locate(*model.GetScalp(), 1, x0, z1));
+        Check(a >= 0 && b >= 0 && c >= 0 && d >= 0 &&
+                  model.GraphConnect(a, b) >= 0 &&
+                  model.GraphConnect(b, c) >= 0 &&
+                  model.GraphConnect(c, d) >= 0 &&
+                  model.GraphConnect(d, a) >= 0,
+              "subface: a small closed loop connects");
+        return a;
+    };
+    int const moveNode = addLoop(0.08f, 0.08f, 0.30f, 0.30f);
+    addLoop(0.68f, 0.68f, 0.90f, 0.90f);
+    Check(model.GetGraph().RegionCount() == 2,
+          "subface: two disjoint loops extract");
+
+    TonicRegionLoops loops;
+    std::string err;
+    Check(TonicFlattenLoops(model.GetGraph(), &loops, &err),
+          "subface: loops flatten: " + err);
+    float const centroid[3] = {0.5f, 0.0f, 0.5f};
+    Check(TonicClassifyPointCpu(loops, centroid) == -1,
+          "subface: neither small region contains the face centroid");
+    TonicRegionMaps maps;
+    Check(TonicRasteriseRegionsCpu(*model.GetScalp(), model.GetGraph(), &maps,
+                                   &err),
+          "subface: coarse rasterise completes: " + err);
+    std::vector<int> const autoRes =
+        TonicFaceResLog2(*model.GetScalp(), maps, loops);
+    Check(autoRes.size() == 1 && autoRes[0] == 6,
+          "subface: auto bake keeps a 64x64 boundary face");
+
+    fs::path const dir =
+        fs::temp_directory_path() / "testUsdGenTonicSubfaceRegionBake";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    auto inputFor = [&] {
+        TonicBakeInput input;
+        input.scalp = model.GetScalp();
+        input.graph = model.GetGraph();
+        input.outDir = dir.string();
+        input.resOverride = 6;
+        return input;
+    };
+    auto readFace = [](std::string const &path, std::vector<float> *out) {
+        Ptex::String error;
+        PtexPtr<PtexTexture> tex(
+            PtexTexture::open(path.c_str(), error, /*premultiply=*/false));
+        if (!tex || tex->numFaces() != 1 || tex->numChannels() != 1) {
+            return false;
+        }
+        Ptex::Res const res = tex->getFaceInfo(0).res;
+        out->resize(size_t(res.size()));
+        tex->getData(0, out->data(), 0);
+        return true;
+    };
+    TonicBakeWorker worker;
+    uint64_t const first = model.GetMapVersion();
+    worker.Enqueue(first, inputFor());
+    std::string firstPath;
+    uint64_t done = 0;
+    Check(worker.WaitCompleted(first) &&
+              worker.TakeCompleted(&done, &firstPath) && done == first,
+          "subface: fixed-resolution first bake completes");
+    std::vector<float> before;
+    Check(readFace(firstPath, &before), "subface: the first face reads");
+    bool sawA = false, sawB = false, sawOutside = false;
+    for (float value : before) {
+        sawA = sawA || value == 0.0f;
+        sawB = sawB || value == 1.0f;
+        sawOutside = sawOutside || value == -1.0f;
+    }
+    Check(sawA && sawB && sawOutside,
+          "subface: two polygons retain distinct texel ids");
+
+    Check(model.GraphMoveNode(
+              moveNode, Locate(*model.GetScalp(), 1, 0.18f, 0.08f)),
+          "subface: a boundary moves within the same face");
+    uint64_t const second = model.GetMapVersion();
+    worker.Enqueue(second, inputFor());
+    std::string secondPath;
+    Check(worker.WaitCompleted(second) &&
+              worker.TakeCompleted(&done, &secondPath) && done == second,
+          "subface: fixed-resolution moved bake completes");
+    std::vector<float> after;
+    Check(readFace(secondPath, &after) && before.size() == after.size(),
+          "subface: the moved face reads");
+    bool changed = false;
+    for (size_t i = 0; i < before.size() && i < after.size(); ++i) {
+        changed = changed || before[i] != after[i];
+    }
+    Check(worker.LastBakedFaces() == 1 && changed,
+          "subface: a same-centroid boundary move refreshes cached texels");
     fs::remove_all(dir, ec);
 }
 
@@ -1007,6 +1118,7 @@ main()
 {
     CheckBakeAndExpression();
     CheckWorker();
+    CheckSubfaceRegionBake();
     CheckSwapAndCommit();
     CheckSaveAndClump();
     CheckLevelChannels();

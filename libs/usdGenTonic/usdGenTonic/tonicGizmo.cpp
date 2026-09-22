@@ -20,7 +20,16 @@ constexpr float kAxisColors[3][3] = {
 };
 constexpr float kActiveColor[3] = {1.0f, 0.85f, 0.10f};
 constexpr float kRingColor[3] = {0.85f, 0.85f, 0.90f};
+constexpr float kViewColor[3] = {0.40f, 0.75f, 1.00f};
 constexpr float kBrushColor[3] = {1.0f, 0.75f, 0.25f};
+
+// Kept in lockstep with the vendored viewport picker in tonicGizmo.py and
+// RigExec's gizmoScreen.py.  They are fractions of a screen-constant gizmo.
+constexpr float kPlaneOffset = 0.30f;
+constexpr float kPlaneSide = 0.15f;
+constexpr float kCentreSide = 0.12f;
+constexpr float kConeStart = 0.84f;
+constexpr float kConeRadius = 0.05f;
 
 bool _Finite(float v)
 {
@@ -61,6 +70,60 @@ void _AddAxis(TonicOverlayCurves *out, float const origin[3],
     _PushPoint(out, tip);
     _PushCurve(out, 2, active ? kActiveColor : kAxisColors[handleId % 3],
                width, handleId, active);
+}
+
+void _AddArrowHead(TonicOverlayCurves *out, float const origin[3],
+                   float const axis[3], int handleId, bool active,
+                   float width)
+{
+    float const length = TonicLen3(axis);
+    if (length < 1e-9f) {
+        return;
+    }
+    float unit[3] = {axis[0] / length, axis[1] / length, axis[2] / length};
+    float u[3], v[3];
+    TonicPerp3(unit, u);
+    TonicCross3(unit, u, v);
+    float const tip[3] = {origin[0] + axis[0], origin[1] + axis[1],
+                          origin[2] + axis[2]};
+    float const base[3] = {origin[0] + axis[0] * kConeStart,
+                           origin[1] + axis[1] * kConeStart,
+                           origin[2] + axis[2] * kConeStart};
+    float const radius = length * kConeRadius;
+    float const color[3] = {active ? kActiveColor[0] : kAxisColors[handleId % 3][0],
+                            active ? kActiveColor[1] : kAxisColors[handleId % 3][1],
+                            active ? kActiveColor[2] : kAxisColors[handleId % 3][2]};
+    // Four outline spokes read as an arrowhead without requiring a mesh
+    // overlay, keeping the gizmo in the basisCurves publication path.
+    for (int i = 0; i < 4; ++i) {
+        float const a = 6.2831853071795864f * float(i) / 4.0f;
+        float const p[3] = {base[0] + radius * (u[0] * std::cos(a) + v[0] * std::sin(a)),
+                            base[1] + radius * (u[1] * std::cos(a) + v[1] * std::sin(a)),
+                            base[2] + radius * (u[2] * std::cos(a) + v[2] * std::sin(a))};
+        _PushPoint(out, tip);
+        _PushPoint(out, p);
+        _PushCurve(out, 2, color, width, handleId, active);
+    }
+}
+
+void _AddSquare(TonicOverlayCurves *out, float const origin[3],
+                float const u[3], float const v[3], float offset,
+                float side, float const color[3], int handleId, bool active,
+                float width)
+{
+    float const centre[3] = {origin[0] + (u[0] + v[0]) * offset,
+                             origin[1] + (u[1] + v[1]) * offset,
+                             origin[2] + (u[2] + v[2]) * offset};
+    float const half = side * 0.5f;
+    for (int i = 0; i <= 4; ++i) {
+        float const su = (i == 0 || i == 3 || i == 4) ? -half : half;
+        float const sv = (i == 0 || i == 1 || i == 4) ? -half : half;
+        float const p[3] = {centre[0] + u[0] * su + v[0] * sv,
+                            centre[1] + u[1] * su + v[1] * sv,
+                            centre[2] + u[2] * su + v[2] * sv};
+        _PushPoint(out, p);
+    }
+    _PushCurve(out, 5, active ? kActiveColor : color, width, handleId, active);
 }
 
 // A closed circle of radius `r` around `center` in the (u, v) plane; the
@@ -183,9 +246,51 @@ TonicBuildGizmoCurves(TonicGizmoRecord const &record, TonicOverlayCurves *out)
                    TonicGizmoHandle_Ring,
                    record.activeHandle == TonicGizmoHandle_Ring, width);
     }
-    for (int a = 0; a < 3; ++a) {
-        _AddAxis(out, record.origin, axes[a], a, record.activeHandle == a,
-                 width);
+    if (record.kind == TonicGizmo_Rotate) {
+        // The transparent Qt viewport layer adds the camera-view and free
+        // rings.  This Hydra fallback has no camera, so it publishes the
+        // three owner-frame rings only.
+        for (int a = 0; a < 3; ++a) {
+            int const first = (a + 1) % 3;
+            int const second = (a + 2) % 3;
+            float const u[3] = {axes[first][0] / scale, axes[first][1] / scale,
+                                axes[first][2] / scale};
+            float const v[3] = {axes[second][0] / scale, axes[second][1] / scale,
+                                axes[second][2] / scale};
+            _AddCircle(out, record.origin, u, v, scale * 0.85f,
+                       kAxisColors[a], a, record.activeHandle == a, width);
+        }
+    } else {
+        for (int a = 0; a < 3; ++a) {
+            _AddAxis(out, record.origin, axes[a], a, record.activeHandle == a,
+                     width);
+            _AddArrowHead(out, record.origin, axes[a], a,
+                          record.activeHandle == a, width);
+        }
+    }
+    if (record.kind == TonicGizmo_Translate) {
+        // yz is red, xz green, xy blue: plane colours name their missing
+        // axis, exactly as in Maya and RigExec's viewport gizmo.
+        _AddSquare(out, record.origin, axes[1], axes[2], kPlaneOffset,
+                   kPlaneSide, kAxisColors[0], TonicGizmoHandle_PlaneYZ,
+                   record.activeHandle == TonicGizmoHandle_PlaneYZ, width);
+        _AddSquare(out, record.origin, axes[0], axes[2], kPlaneOffset,
+                   kPlaneSide, kAxisColors[1], TonicGizmoHandle_PlaneXZ,
+                   record.activeHandle == TonicGizmoHandle_PlaneXZ, width);
+        _AddSquare(out, record.origin, axes[0], axes[1], kPlaneOffset,
+                   kPlaneSide, kAxisColors[2], TonicGizmoHandle_PlaneXY,
+                   record.activeHandle == TonicGizmoHandle_PlaneXY, width);
+    } else if (record.kind == TonicGizmo_RingTRS) {
+        // A section chart is two dimensional: only its uv move square is
+        // drawn, never a tempting tangent-plane handle that cannot move it.
+        _AddSquare(out, record.origin, axes[0], axes[1], kPlaneOffset,
+                   kPlaneSide, kAxisColors[2], TonicGizmoHandle_PlaneXY,
+                   record.activeHandle == TonicGizmoHandle_PlaneXY, width);
+    }
+    if (record.kind != TonicGizmo_NodeTranslate) {
+        _AddSquare(out, record.origin, axes[0], axes[1], 0.0f,
+                   kCentreSide, kViewColor, TonicGizmoHandle_Center,
+                   record.activeHandle == TonicGizmoHandle_Center, width);
     }
     return true;
 }

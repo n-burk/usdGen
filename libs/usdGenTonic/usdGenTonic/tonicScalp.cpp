@@ -64,34 +64,67 @@ void _FaceFrame(TonicScalpMesh const &mesh, int face, float n[3], float c[3],
     }
 }
 
-// Möller–Trumbore; returns t or +inf on miss. No backface culling: picks hit
-// whichever side faces the camera, and strokes project from above.
+// Watertight dominant-axis shear test.  Möller–Trumbore's independently
+// rounded barycentrics can both fall just outside two fan triangles sharing
+// an edge, leaving an artist-visible crack.  Shared vertices below take the
+// same transformed coordinates and each determinant is separately rounded,
+// so a reversed shared edge is exactly sign-opposed.  There is deliberately
+// no broad epsilon: silhouette misses remain misses.
+double _EdgeDet(double ax, double ay, double bx, double by)
+{
+    volatile double const lhs = ax * by;
+    volatile double const rhs = ay * bx;
+    return lhs - rhs;
+}
+
 float _RayTriangle(float const origin[3], float const dir[3], float const v0[3],
                    float const v1[3], float const v2[3])
 {
     float const inf = std::numeric_limits<float>::infinity();
-    float e1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]};
-    float e2[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
-    float p[3];
-    _Cross3(dir, e2, p);
-    float const det = _Dot3(e1, p);
-    if (std::fabs(det) < 1e-20f) {
+    int kz = 0;
+    if (std::fabs(dir[1]) > std::fabs(dir[kz])) {
+        kz = 1;
+    }
+    if (std::fabs(dir[2]) > std::fabs(dir[kz])) {
+        kz = 2;
+    }
+    if (dir[kz] == 0.0f) {
         return inf;
     }
-    float const inv = 1.0f / det;
-    float tv[3] = {origin[0] - v0[0], origin[1] - v0[1], origin[2] - v0[2]};
-    float const u = _Dot3(tv, p) * inv;
-    if (u < 0.0f || u > 1.0f) {
+    int kx = (kz + 1) % 3;
+    int ky = (kx + 1) % 3;
+    if (dir[kz] < 0.0f) {
+        std::swap(kx, ky);
+    }
+    double const sx = double(dir[kx]) / double(dir[kz]);
+    double const sy = double(dir[ky]) / double(dir[kz]);
+    double const sz = 1.0 / double(dir[kz]);
+    double a[3], b[3], c[3];
+    auto shear = [&](float const p[3], double out[3]) {
+        double const x = double(p[kx]) - double(origin[kx]);
+        double const y = double(p[ky]) - double(origin[ky]);
+        double const z = double(p[kz]) - double(origin[kz]);
+        out[0] = x - sx * z;
+        out[1] = y - sy * z;
+        out[2] = z * sz;
+    };
+    shear(v0, a);
+    shear(v1, b);
+    shear(v2, c);
+    double const u = _EdgeDet(c[0], c[1], b[0], b[1]);
+    double const v = _EdgeDet(a[0], a[1], c[0], c[1]);
+    double const w = _EdgeDet(b[0], b[1], a[0], a[1]);
+    bool const anyNegative = u < 0.0 || v < 0.0 || w < 0.0;
+    bool const anyPositive = u > 0.0 || v > 0.0 || w > 0.0;
+    if (anyNegative && anyPositive) {
         return inf;
     }
-    float q[3];
-    _Cross3(tv, e1, q);
-    float const v = _Dot3(dir, q) * inv;
-    if (v < 0.0f || u + v > 1.0f) {
+    double const det = u + v + w;
+    if (det == 0.0) {
         return inf;
     }
-    float const t = _Dot3(e2, q) * inv;
-    return t >= 0.0f ? t : inf;
+    double const t = (u * a[2] + v * b[2] + w * c[2]) / det;
+    return std::isfinite(t) && t >= 0.0 ? float(t) : inf;
 }
 
 bool _RayAabb(float const origin[3], float const inv[3], float tMax,
@@ -242,6 +275,20 @@ bool TonicScalpFinalize(TonicScalpMesh *mesh, std::string *err)
     if (mesh->points.size() % 3 != 0 || pointCount == 0) {
         return fail("TonicScalpFinalize: points must be non-empty xyz triples");
     }
+    float minP[3] = {mesh->points[0], mesh->points[1], mesh->points[2]};
+    float maxP[3] = {minP[0], minP[1], minP[2]};
+    for (size_t i = 3; i < mesh->points.size(); i += 3) {
+        for (int axis = 0; axis != 3; ++axis) {
+            minP[axis] = std::min(minP[axis], mesh->points[i + axis]);
+            maxP[axis] = std::max(maxP[axis], mesh->points[i + axis]);
+        }
+    }
+    float const boundsDx = maxP[0] - minP[0];
+    float const boundsDy = maxP[1] - minP[1];
+    float const boundsDz = maxP[2] - minP[2];
+    mesh->boundsDiagonal = std::sqrt(boundsDx * boundsDx +
+                                     boundsDy * boundsDy +
+                                     boundsDz * boundsDz);
     size_t const faceCount = mesh->faceVertexCounts.size();
     if (faceCount == 0) {
         return fail("TonicScalpFinalize: the scalp needs at least one face");

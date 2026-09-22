@@ -31,6 +31,7 @@
 #include "usdGenTonic/tonicCommit.h"
 #include "usdGenTonic/tonicModel.h"
 #include "usdGenTonic/tonicScalp.h"
+#include "usdGenTonic/tonicTube.h"
 
 #include "usdGenImaging/usdGenImagingSession.h"
 
@@ -48,11 +49,13 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -150,9 +153,24 @@ bool SameSections(std::vector<usdGenTonic::TonicTubeSection> const &a,
 bool SameDesc(usdGenTonic::TonicTubeDesc const &a,
               usdGenTonic::TonicTubeDesc const &b)
 {
+    if (a.inheritedBoundaryBindings.size() !=
+        b.inheritedBoundaryBindings.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.inheritedBoundaryBindings.size(); ++i) {
+        usdGenTonic::TonicParentBoundaryBinding const &x =
+            a.inheritedBoundaryBindings[i];
+        usdGenTonic::TonicParentBoundaryBinding const &y =
+            b.inheritedBoundaryBindings[i];
+        if (x.section != y.section || x.parentSlot != y.parentSlot ||
+            x.childSlot != y.childSlot) {
+            return false;
+        }
+    }
     return a.centerX == b.centerX && a.centerY == b.centerY &&
            a.centerZ == b.centerZ && a.ringVerts == b.ringVerts &&
            a.tubeId == b.tubeId && a.regionId == b.regionId &&
+           a.frameReference == b.frameReference &&
            SameSections(a.sections, b.sections);
 }
 
@@ -161,6 +179,431 @@ bool SameDeltas(usdGenTonic::TonicShapeDeltas const &a,
 {
     return a.centerDu == b.centerDu && a.centerDv == b.centerDv &&
            a.centerDw == b.centerDw && SameSections(a.sections, b.sections);
+}
+
+bool SameTessellation(usdGenTonic::TonicTubeDesc const &a,
+                      usdGenTonic::TonicTubeDesc const &b)
+{
+    std::vector<usdGenTonic::TonicFrame> af, bf;
+    std::vector<float> ap, an, at, bp, bn, bt;
+    std::string err;
+    return usdGenTonic::TonicTubeFramesCpu(a, &af, &err) &&
+           usdGenTonic::TonicTubeFramesCpu(b, &bf, &err) &&
+           usdGenTonic::TonicTessellateCpu(a, af, 4, &ap, &an, &at, &err) &&
+           usdGenTonic::TonicTessellateCpu(b, bf, 4, &bp, &bn, &bt, &err) &&
+           ap == bp && an == bn && at == bt;
+}
+
+// Commit/hydrate must preserve enough attachment identity that a later graph
+// reposition can carry the whole root wall. Compare K5 samples instead of
+// only center CVs: a stale base ring can leave centers moving while the
+// visible footprint remains behind.
+struct TubeWorldGeometry {
+    usdGenTonic::TonicTubeDesc desc;
+    std::vector<float> positions;
+};
+
+bool CaptureTubeWorld(usdGenTonic::TonicModel const &model, int tubeId,
+                      TubeWorldGeometry *out)
+{
+    if (!out || !model.GetTubeDesc(tubeId, &out->desc)) return false;
+    std::vector<usdGenTonic::TonicFrame> frames;
+    std::vector<float> normals, ringT;
+    std::string error;
+    return usdGenTonic::TonicTubeFramesCpu(out->desc, &frames, &error) &&
+           usdGenTonic::TonicTessellateCpu(out->desc, frames, 4,
+                                           &out->positions, &normals, &ringT,
+                                           &error);
+}
+
+bool MovedWorld(TubeWorldGeometry const &before, TubeWorldGeometry const &after)
+{
+    if (before.positions.size() != after.positions.size()) return false;
+    for (size_t i = 0; i < before.positions.size(); ++i) {
+        if (std::abs(before.positions[i] - after.positions[i]) > 2e-4f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MovedBaseRing(TubeWorldGeometry const &before, TubeWorldGeometry const &after)
+{
+    if (before.desc.ringVerts < 3 ||
+        before.desc.ringVerts != after.desc.ringVerts) return false;
+    size_t const values = size_t(before.desc.ringVerts) * 3;
+    if (before.positions.size() < values || after.positions.size() < values) {
+        return false;
+    }
+    for (size_t i = 0; i < values; ++i) {
+        if (std::abs(before.positions[i] - after.positions[i]) > 2e-4f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SameSectionsAboveBase(usdGenTonic::TonicTubeDesc const &before,
+                           usdGenTonic::TonicTubeDesc const &after)
+{
+    if (before.sections.size() != after.sections.size()) return false;
+    for (size_t section = 1; section < before.sections.size(); ++section) {
+        usdGenTonic::TonicTubeSection const &a = before.sections[section];
+        usdGenTonic::TonicTubeSection const &b = after.sections[section];
+        if (a.t != b.t || a.scale != b.scale || a.twist != b.twist ||
+            a.u != b.u || a.v != b.v) return false;
+    }
+    return true;
+}
+
+bool SameSection(usdGenTonic::TonicTubeSection const &a,
+                 usdGenTonic::TonicTubeSection const &b)
+{
+    return a.t == b.t && a.scale == b.scale && a.twist == b.twist &&
+           a.u == b.u && a.v == b.v;
+}
+
+bool RootBaseWorld(usdGenTonic::TonicTubeDesc const &desc,
+                   std::vector<std::array<float, 3>> *out);
+
+bool RootBaseMatchesRegion(usdGenTonic::TonicModel const &model,
+                           usdGenTonic::TonicTubeDesc const &desc)
+{
+    using namespace usdGenTonic;
+    TonicGraphRegion const *region = nullptr;
+    for (TonicGraphRegion const &candidate : model.GetGraph().Regions()) {
+        if (!candidate.isOutside && candidate.id == desc.regionId) {
+            region = &candidate;
+            break;
+        }
+    }
+    if (!region || desc.ringVerts != int(region->loop.size()) ||
+        desc.sections.empty() || desc.sections.front().u.size() !=
+            size_t(desc.ringVerts) || desc.sections.front().v.size() !=
+            size_t(desc.ringVerts)) return false;
+    std::vector<TonicFrame> frames;
+    std::string error;
+    if (!TonicTubeFramesCpu(desc, &frames, &error) || frames.empty()) return false;
+    TonicTubeSection const &section = desc.sections.front();
+    float const c = std::cos(section.twist), s = std::sin(section.twist);
+    std::vector<std::array<float, 3>> actual;
+    std::vector<std::array<float, 3>> expected;
+    actual.reserve(size_t(desc.ringVerts));
+    expected.reserve(size_t(desc.ringVerts));
+    size_t seam = 0;
+    for (size_t i = 1; i < region->loop.size(); ++i)
+        if (region->loop[i] < region->loop[seam]) seam = i;
+    for (int slot = 0; slot < desc.ringVerts; ++slot) {
+        float const u = section.scale * section.u[size_t(slot)];
+        float const v = section.scale * section.v[size_t(slot)];
+        actual.push_back({{desc.centerX[0] + frames[0].nx * (u * c - v * s) +
+                                      frames[0].bx * (u * s + v * c),
+                           desc.centerY[0] + frames[0].ny * (u * c - v * s) +
+                                      frames[0].by * (u * s + v * c),
+                           desc.centerZ[0] + frames[0].nz * (u * c - v * s) +
+                                      frames[0].bz * (u * s + v * c)}});
+        int const nodeId = region->loop[(seam + size_t(slot)) % region->loop.size()];
+        TonicGraphNode const *node = model.GetGraph().FindNode(nodeId);
+        if (!node) return false;
+        expected.push_back({{node->p[0], node->p[1], node->p[2]}});
+    }
+    // Region fitting consistently uses the minimum stable id as its seam,
+    // while a valid reversed support orientation reverses the remaining slots.
+    bool forward = true, reverse = true;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        size_t const reversed = i == 0 ? 0 : actual.size() - i;
+        for (int axis = 0; axis < 3; ++axis) {
+            forward = forward && std::abs(actual[i][axis] - expected[i][axis]) <= 4e-4f;
+            reverse = reverse && std::abs(actual[i][axis] - expected[reversed][axis]) <= 4e-4f;
+        }
+    }
+    return forward || reverse;
+}
+
+bool RootBaseWorld(usdGenTonic::TonicTubeDesc const &desc,
+                   std::vector<std::array<float, 3>> *out)
+{
+    using namespace usdGenTonic;
+    if (!out || desc.ringVerts < 3 || desc.sections.empty() ||
+        desc.sections.front().u.size() != size_t(desc.ringVerts) ||
+        desc.sections.front().v.size() != size_t(desc.ringVerts)) return false;
+    std::vector<TonicFrame> frames;
+    std::string error;
+    if (!TonicTubeFramesCpu(desc, &frames, &error) || frames.empty()) return false;
+    TonicTubeSection const &section = desc.sections.front();
+    float const c = std::cos(section.twist), s = std::sin(section.twist);
+    out->clear();
+    out->reserve(size_t(desc.ringVerts));
+    for (int slot = 0; slot < desc.ringVerts; ++slot) {
+        float const u = section.scale * section.u[size_t(slot)];
+        float const v = section.scale * section.v[size_t(slot)];
+        out->push_back({{desc.centerX[0] + frames[0].nx * (u * c - v * s) +
+                                      frames[0].bx * (u * s + v * c),
+                         desc.centerY[0] + frames[0].ny * (u * c - v * s) +
+                                      frames[0].by * (u * s + v * c),
+                         desc.centerZ[0] + frames[0].nz * (u * c - v * s) +
+                                      frames[0].bz * (u * s + v * c)}});
+    }
+    return true;
+}
+
+bool SectionWorld(usdGenTonic::TonicTubeDesc const &desc, int sectionIndex,
+                  std::vector<std::array<float, 3>> *out)
+{
+    using namespace usdGenTonic;
+    if (!out || sectionIndex < 0 || size_t(sectionIndex) >= desc.sections.size() ||
+        desc.ringVerts < 3) return false;
+    TonicTubeSection const &section = desc.sections[size_t(sectionIndex)];
+    if (section.u.size() != size_t(desc.ringVerts) ||
+        section.v.size() != size_t(desc.ringVerts)) return false;
+    std::vector<TonicFrame> frames;
+    std::string error;
+    if (!TonicTubeFramesCpu(desc, &frames, &error) ||
+        size_t(sectionIndex) >= frames.size()) return false;
+    TonicFrame const &frame = frames[size_t(sectionIndex)];
+    float const c = std::cos(section.twist), s = std::sin(section.twist);
+    out->clear();
+    out->reserve(size_t(desc.ringVerts));
+    for (int slot = 0; slot < desc.ringVerts; ++slot) {
+        float const u = section.scale * section.u[size_t(slot)];
+        float const v = section.scale * section.v[size_t(slot)];
+        out->push_back({{desc.centerX[size_t(sectionIndex)] +
+                             frame.nx * (u * c - v * s) +
+                             frame.bx * (u * s + v * c),
+                         desc.centerY[size_t(sectionIndex)] +
+                             frame.ny * (u * c - v * s) +
+                             frame.by * (u * s + v * c),
+                         desc.centerZ[size_t(sectionIndex)] +
+                             frame.nz * (u * c - v * s) +
+                             frame.bz * (u * s + v * c)}});
+    }
+    return true;
+}
+
+// A planar support move must carry every upper wall sample by one common
+// rigid translation. Section zero is intentionally excluded: attachment
+// conformance is allowed to replace only that footprint.
+bool UpperSectionsShareTranslation(usdGenTonic::TonicTubeDesc const &before,
+                                   usdGenTonic::TonicTubeDesc const &after)
+{
+    if (before.sections.size() != after.sections.size() ||
+        before.sections.size() < 2) return false;
+    bool haveDelta = false;
+    float delta[3] = {};
+    for (size_t section = 1; section < before.sections.size(); ++section) {
+        std::vector<std::array<float, 3>> a, b;
+        if (!SectionWorld(before, int(section), &a) ||
+            !SectionWorld(after, int(section), &b) || a.size() != b.size()) {
+            return false;
+        }
+        for (size_t slot = 0; slot < a.size(); ++slot) {
+            float const d[3] = {b[slot][0] - a[slot][0],
+                                b[slot][1] - a[slot][1],
+                                b[slot][2] - a[slot][2]};
+            if (!haveDelta) {
+                delta[0] = d[0]; delta[1] = d[1]; delta[2] = d[2];
+                haveDelta = true;
+            } else if (std::abs(d[0] - delta[0]) > 3e-4f ||
+                       std::abs(d[1] - delta[1]) > 3e-4f ||
+                       std::abs(d[2] - delta[2]) > 3e-4f) {
+                return false;
+            }
+        }
+    }
+    return haveDelta;
+}
+
+bool SameCenterCageShape(usdGenTonic::TonicTubeDesc const &before,
+                          usdGenTonic::TonicTubeDesc const &after)
+{
+    if (before.centerX.size() != after.centerX.size() ||
+        before.centerY.size() != after.centerY.size() ||
+        before.centerZ.size() != after.centerZ.size() ||
+        before.centerX.size() < 2) return false;
+    for (size_t i = 1; i < before.centerX.size(); ++i) {
+        float const beforeDelta[3] = {before.centerX[i] - before.centerX[0],
+                                      before.centerY[i] - before.centerY[0],
+                                      before.centerZ[i] - before.centerZ[0]};
+        float const afterDelta[3] = {after.centerX[i] - after.centerX[0],
+                                     after.centerY[i] - after.centerY[0],
+                                     after.centerZ[i] - after.centerZ[0]};
+        for (int axis = 0; axis < 3; ++axis) {
+            if (std::abs(beforeDelta[axis] - afterDelta[axis]) > 3e-5f) {
+                return false;
+            }
+        }
+    }
+    return before.frameReference == after.frameReference;
+}
+
+struct RootEdgeBinding {
+    int a = -1;
+    int b = -1;
+    float t = 0.0f;
+};
+
+bool BindRootSlotsToRegionEdges(usdGenTonic::TonicModel const &model,
+                                usdGenTonic::TonicTubeDesc const &desc,
+                                std::vector<RootEdgeBinding> *out)
+{
+    using namespace usdGenTonic;
+    if (!out) return false;
+    TonicGraphRegion const *region = nullptr;
+    for (TonicGraphRegion const &candidate : model.GetGraph().Regions()) {
+        if (!candidate.isOutside && candidate.id == desc.regionId) {
+            region = &candidate;
+            break;
+        }
+    }
+    std::vector<std::array<float, 3>> points;
+    if (!region || !RootBaseWorld(desc, &points)) return false;
+    out->clear();
+    for (std::array<float, 3> const &point : points) {
+        RootEdgeBinding binding;
+        float best = std::numeric_limits<float>::infinity();
+        for (size_t edge = 0; edge < region->loop.size(); ++edge) {
+            int const a = region->loop[edge];
+            int const b = region->loop[(edge + 1) % region->loop.size()];
+            TonicGraphNode const *pa = model.GetGraph().FindNode(a);
+            TonicGraphNode const *pb = model.GetGraph().FindNode(b);
+            if (!pa || !pb) return false;
+            float const dx = pb->p[0] - pa->p[0];
+            float const dy = pb->p[1] - pa->p[1];
+            float const dz = pb->p[2] - pa->p[2];
+            float const length2 = dx * dx + dy * dy + dz * dz;
+            if (!(length2 > 1e-12f)) return false;
+            float t = ((point[0] - pa->p[0]) * dx +
+                       (point[1] - pa->p[1]) * dy +
+                       (point[2] - pa->p[2]) * dz) / length2;
+            t = std::max(0.0f, std::min(1.0f, t));
+            float const ex = point[0] - (pa->p[0] + dx * t);
+            float const ey = point[1] - (pa->p[1] + dy * t);
+            float const ez = point[2] - (pa->p[2] + dz * t);
+            float const distance2 = ex * ex + ey * ey + ez * ez;
+            if (distance2 < best) {
+                best = distance2;
+                binding = {a, b, t};
+            }
+        }
+        if (best > 2e-7f) return false;
+        out->push_back(binding);
+    }
+    return true;
+}
+
+bool RootSlotsFollowMaterialEdges(usdGenTonic::TonicModel const &model,
+                                  usdGenTonic::TonicTubeDesc const &desc,
+                                  std::vector<RootEdgeBinding> const &bindings)
+{
+    std::vector<std::array<float, 3>> actual;
+    if (!RootBaseWorld(desc, &actual) || actual.size() != bindings.size()) return false;
+    std::vector<bool> used(actual.size(), false);
+    for (RootEdgeBinding const &binding : bindings) {
+        usdGenTonic::TonicGraphNode const *a = model.GetGraph().FindNode(binding.a);
+        usdGenTonic::TonicGraphNode const *b = model.GetGraph().FindNode(binding.b);
+        if (!a || !b) return false;
+        float const expected[3] = {a->p[0] + (b->p[0] - a->p[0]) * binding.t,
+                                   a->p[1] + (b->p[1] - a->p[1]) * binding.t,
+                                   a->p[2] + (b->p[2] - a->p[2]) * binding.t};
+        bool found = false;
+        for (size_t slot = 0; slot < actual.size(); ++slot) {
+            if (used[slot]) continue;
+            float const dx = actual[slot][0] - expected[0];
+            float const dy = actual[slot][1] - expected[1];
+            float const dz = actual[slot][2] - expected[2];
+            if (dx * dx + dy * dy + dz * dz <= 2e-7f) {
+                used[slot] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+// Keep the explicit-count failure actionable.  The native recovery path uses
+// the frozen, pre-transport root ring, so these values distinguish a bad test
+// fixture from a lost edge/t mapping without making successful test output
+// noisy.
+void PrintRootSlotDiagnostics(usdGenTonic::TonicModel const &model,
+                              usdGenTonic::TonicTubeDesc const &desc,
+                              std::vector<RootEdgeBinding> const &bindings,
+                              char const *label)
+{
+    std::vector<std::array<float, 3>> actual;
+    if (!RootBaseWorld(desc, &actual)) {
+        std::printf("V6 explicit slots %s: cannot reconstruct root ring; model=%s\n",
+                    label, model.GetDiagnostic());
+        return;
+    }
+    std::printf("V6 explicit slots %s: tube=%d rv=%d bindings=%zu model=%s\n",
+                label, desc.tubeId, desc.ringVerts, bindings.size(),
+                model.GetDiagnostic());
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        RootEdgeBinding const &binding = bindings[i];
+        usdGenTonic::TonicGraphNode const *a = model.GetGraph().FindNode(binding.a);
+        usdGenTonic::TonicGraphNode const *b = model.GetGraph().FindNode(binding.b);
+        if (!a || !b) {
+            std::printf("  bind[%zu]=missing %d->%d t=%.8g\n", i, binding.a,
+                        binding.b, binding.t);
+            continue;
+        }
+        float const expected[3] = {a->p[0] + (b->p[0] - a->p[0]) * binding.t,
+                                   a->p[1] + (b->p[1] - a->p[1]) * binding.t,
+                                   a->p[2] + (b->p[2] - a->p[2]) * binding.t};
+        float best2 = std::numeric_limits<float>::infinity();
+        size_t best = 0;
+        for (size_t slot = 0; slot < actual.size(); ++slot) {
+            float const dx = actual[slot][0] - expected[0];
+            float const dy = actual[slot][1] - expected[1];
+            float const dz = actual[slot][2] - expected[2];
+            float const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < best2) { best2 = d2; best = slot; }
+        }
+        std::printf("  bind[%zu]=%d->%d t=%.8g nearestSlot=%zu d2=%.8g\n",
+                    i, binding.a, binding.b, binding.t, best, best2);
+    }
+}
+
+bool ChildRootRefreshesButUpperSculptRemains(usdGenTonic::TonicModel::TubeRecord const &record)
+{
+    if (record.actual.sections.empty() || record.derived.sections.empty() ||
+        record.actual.sections.size() != record.derived.sections.size() ||
+        record.actual.centerX.empty() || record.derived.centerX.empty()) return false;
+    bool upperDiffers = false;
+    for (size_t i = 1; i < record.actual.sections.size(); ++i) {
+        upperDiffers = upperDiffers || !SameSection(record.actual.sections[i],
+                                                    record.derived.sections[i]);
+    }
+    // Attachment reconciliation deliberately retains the transported child
+    // center/frame reference so it cannot shear the authored upper cage.
+    // The fresh K14 partition is therefore equivalent at the inherited root
+    // ring in world space, not necessarily as raw center/chart bytes.
+    std::vector<std::array<float, 3>> actualRoot, derivedRoot;
+    bool const rootMatches = RootBaseWorld(record.actual, &actualRoot) &&
+        RootBaseWorld(record.derived, &derivedRoot) &&
+        actualRoot.size() == derivedRoot.size();
+    if (!rootMatches) return false;
+    for (size_t i = 0; i < actualRoot.size(); ++i) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (std::abs(actualRoot[i][axis] - derivedRoot[i][axis]) >
+                4e-4f) return false;
+        }
+    }
+    return upperDiffers;
+}
+
+bool SameTranslation(TubeWorldGeometry const &before,
+                     TubeWorldGeometry const &after, float dx, float dy, float dz)
+{
+    if (before.positions.size() != after.positions.size()) return false;
+    float const delta[3] = {dx, dy, dz};
+    for (size_t i = 0; i < before.positions.size(); ++i) {
+        if (std::abs((after.positions[i] - before.positions[i]) -
+                     delta[i % 3]) > 4e-4f) return false;
+    }
+    return true;
 }
 
 // -- V6: a two-region scalp (plan/18 §7 G14) ------------------------------
@@ -246,6 +689,29 @@ void BuildTwoRegions(usdGenTonic::TonicModel *model,
     model->GraphConnect(a1, b1);
     model->GraphConnect(b1, b2);
     model->GraphConnect(b2, a2);
+}
+
+// A small disconnected triangle below the two adjoining V6 regions. It gives
+// the transport check both an unrelated L1 owner and the default three-column
+// region-CV fixture in the same graph/model.
+int AddIsolatedRegion(usdGenTonic::TonicModel *model,
+                      usdGenTonic::TonicScalpMesh const &mesh, int n,
+                      std::vector<int> *outNodes = nullptr)
+{
+    int const a = model->GraphAddNode(Locate(mesh, n, 0.20f, 0.15f));
+    int const b = model->GraphAddNode(Locate(mesh, n, 1.20f, 0.15f));
+    int const c = model->GraphAddNode(Locate(mesh, n, 0.70f, 0.75f));
+    if (a < 0 || b < 0 || c < 0 || model->GraphConnect(a, b) < 0 ||
+        model->GraphConnect(b, c) < 0 || model->GraphConnect(c, a) < 0 ||
+        !model->Rasterise()) return -1;
+    if (outNodes) *outNodes = {a, b, c};
+    for (usdGenTonic::TonicGraphRegion const &region : model->GetGraph().Regions()) {
+        if (!region.isOutside &&
+            std::find(region.loop.begin(), region.loop.end(), a) != region.loop.end()) {
+            return region.id;
+        }
+    }
+    return -1;
 }
 
 } // namespace
@@ -490,6 +956,15 @@ main()
     Check(hr.ok, "hydrate accepts the committed stage: " + hr.diagnostic);
     Check(hr.guidesBitEqual, "regenerated guides are bit-equal to stored");
     {
+        TfToken rootSampler;
+        bool const marked =
+            stage->GetPrimAtPath(SdfPath("/TonicGroom"))
+                .GetAttribute(TfToken("usdGen:tonic:rootSampler"))
+                .Get(&rootSampler);
+        Check(marked && rootSampler == "region-v3",
+              "new commits mark the exact region root sampler");
+    }
+    {
         TonicModel::TubeSnapshot a = model.Snapshot();
         TonicModel::TubeSnapshot b = hydrated.Snapshot();
         bool sameShape = a.shape.rings == b.shape.rings &&
@@ -526,7 +1001,146 @@ main()
                   a.size() == b.size() &&
                   std::memcmp(a.data(), b.data(),
                               a.size() * sizeof(GfVec3f)) == 0,
-              "re-commit emits bit-identical guides");
+                  "re-commit emits bit-identical guides");
+    }
+    // A region-v2 layer authenticated with its historical mean-radius K9
+    // bytes must be upgraded to the material sampler before it is saved
+    // again. The old bytes stay strict: changing one guide still fails.
+    {
+        TonicModel legacyAuthor;
+        Check(legacyAuthor.BuildTestTube(),
+              "v2 migration fixture builds a tube");
+        TonicModel::FillParams legacyFill = legacyAuthor.GetFillParams();
+        legacyFill.density = 16.0f;
+        legacyFill.cvCount = 8;
+        legacyFill.seed = 7;
+        legacyFill.edgeBias = 0.25f;
+        legacyFill.sampler = usdGenTonic::TonicGuideSampler::Legacy;
+        Check(legacyAuthor.SetFillParams(legacyFill),
+              "v2 migration fixture selects legacy fill");
+        SdfLayerRefPtr v2Live = SdfLayer::CreateAnonymous("tonic-v2-live");
+        UsdStageRefPtr v2Stage = MakeStage(v2Live);
+        TonicCommitter v2Committer(&legacyAuthor, paths);
+        v2Committer.Enqueue(v2Stage);
+        bool const v2Committed =
+            WaitCommitted(v2Committer, v2Live, legacyAuthor.GetVersion());
+        SdfLayerRefPtr v2Over = SdfLayer::CreateAnonymous("tonic-v2-over");
+        v2Stage->GetSessionLayer()->InsertSubLayerPath(v2Over->GetIdentifier(),
+                                                        0);
+        v2Stage->SetEditTarget(v2Over);
+        UsdPrim v2Groom = v2Stage->GetPrimAtPath(SdfPath("/TonicGroom"));
+        bool const markedV2 = bool(v2Groom) &&
+            v2Groom.GetAttribute(TfToken("usdGen:tonic:rootSampler"))
+                .Set(TfToken("region-v2"));
+        TonicModel migrated;
+        usdGenTonic::TonicHydrateResult const v2Hydrate =
+            usdGenTonic::TonicHydrateModel(v2Stage, SdfPath("/TonicGroom"),
+                                            &migrated);
+        Check(v2Committed && markedV2 && v2Hydrate.ok &&
+                  v2Hydrate.guidesBitEqual,
+              "region-v2 guides hydrate through the exact legacy sampler");
+        Check(migrated.GetFillParams().sampler ==
+                  usdGenTonic::TonicGuideSampler::RegionV3,
+              "authenticated region-v2 hydrate upgrades live fill sampling");
+
+        SdfLayerRefPtr migratedLive =
+            SdfLayer::CreateAnonymous("tonic-v3-migrated-live");
+        UsdStageRefPtr migratedStage = MakeStage(migratedLive);
+        TonicCommitter migratedCommitter(&migrated, paths);
+        migratedCommitter.Enqueue(migratedStage);
+        bool const migratedCommitted = WaitCommitted(
+            migratedCommitter, migratedLive, migrated.GetVersion());
+        TfToken migratedSampler;
+        bool const markedV3 = migratedCommitted &&
+            migratedStage->GetPrimAtPath(SdfPath("/TonicGroom"))
+                .GetAttribute(TfToken("usdGen:tonic:rootSampler"))
+                .Get(&migratedSampler) && migratedSampler == "region-v3";
+        TonicModel reopened;
+        usdGenTonic::TonicHydrateResult const reopenedResult =
+            usdGenTonic::TonicHydrateModel(migratedStage,
+                                            SdfPath("/TonicGroom"),
+                                            &reopened);
+        Check(markedV3 && reopenedResult.ok && reopenedResult.guidesBitEqual,
+              "migrated region-v3 commit reopens with material guides");
+
+        UsdPrim v2Guides =
+            v2Stage->GetPrimAtPath(SdfPath("/TonicGroom/Guides"));
+        VtVec3fArray v2Points;
+        bool const gotV2Points = bool(v2Guides) &&
+            v2Guides.GetAttribute(TfToken("points")).Get(&v2Points) &&
+            !v2Points.empty();
+        if (gotV2Points) {
+            v2Points[0] += GfVec3f(0.01f, 0.0f, 0.0f);
+            v2Guides.GetAttribute(TfToken("points")).Set(v2Points);
+        }
+        TonicModel corruptV2;
+        usdGenTonic::TonicHydrateResult const corruptV2Result =
+            usdGenTonic::TonicHydrateModel(v2Stage, SdfPath("/TonicGroom"),
+                                            &corruptV2);
+        Check(gotV2Points && !corruptV2Result.ok &&
+                  !corruptV2Result.guidesBitEqual,
+              "region-v2 migration still rejects corrupted legacy guides");
+    }
+    // The custom frame reference is optional for existing grooms. A missing
+    // payload means identity, preserving their pre-Q K4 geometry exactly.
+    {
+        SdfLayerRefPtr legacyQ = SdfLayer::CreateAnonymous("tonic-legacy-q");
+        legacyQ->TransferContent(live);
+        SdfPrimSpecHandle legacyTube =
+            legacyQ->GetPrimAtPath(SdfPath("/TonicGroom/Tubes/tube0"));
+        SdfPropertySpecHandle const qSpec = legacyQ->GetPropertyAtPath(
+            SdfPath("/TonicGroom/Tubes/tube0").AppendProperty(
+                TfToken("usdGen:tonic:frameReference")));
+        bool const removedQ = bool(legacyTube) && bool(qSpec);
+        if (removedQ) {
+            legacyTube->RemoveProperty(qSpec);
+        }
+        UsdStageRefPtr legacyQStage = MakeStage(legacyQ);
+        TonicModel legacyQModel;
+        usdGenTonic::TonicHydrateResult const legacyQResult =
+            usdGenTonic::TonicHydrateModel(legacyQStage,
+                                           SdfPath("/TonicGroom"),
+                                           &legacyQModel);
+        TonicModel::TubeSnapshot legacyQSnapshot = legacyQModel.Snapshot();
+        Check(removedQ && legacyQResult.ok && legacyQResult.guidesBitEqual &&
+                  legacyQSnapshot.frameReference ==
+                      std::array<float, 9>{{1.0f, 0.0f, 0.0f,
+                                            0.0f, 1.0f, 0.0f,
+                                            0.0f, 0.0f, 1.0f}},
+              "missing frameReference hydrates legacy geometry as identity");
+    }
+    // Reject a malformed authored matrix before it can re-derive children or
+    // apply deltas in a reflected/non-orthonormal frame.
+    {
+        SdfLayerRefPtr invalidQLayer =
+            SdfLayer::CreateAnonymous("tonic-invalid-q");
+        invalidQLayer->TransferContent(live);
+        UsdStageRefPtr invalidQStage = MakeStage(invalidQLayer);
+        SdfLayerRefPtr invalidQOver =
+            SdfLayer::CreateAnonymous("tonic-invalid-q-over");
+        invalidQStage->GetSessionLayer()->InsertSubLayerPath(
+            invalidQOver->GetIdentifier(), 0);
+        invalidQStage->SetEditTarget(invalidQOver);
+        VtFloatArray badQ(9);
+        std::fill(badQ.begin(), badQ.end(), 0.0f);
+        UsdPrim badTube =
+            invalidQStage->GetPrimAtPath(SdfPath("/TonicGroom/Tubes/tube0"));
+        bool const wroteBadQ = bool(badTube) &&
+            badTube.GetAttribute(TfToken("usdGen:tonic:frameReference"))
+                .Set(badQ);
+        VtFloatArray composedBad;
+        bool const hasComposedBadQ = wroteBadQ &&
+            badTube.GetAttribute(TfToken("usdGen:tonic:frameReference"))
+                .Get(&composedBad) && composedBad == badQ;
+        TonicModel invalidQModel;
+        usdGenTonic::TonicHydrateResult const invalidQResult =
+            usdGenTonic::TonicHydrateModel(invalidQStage,
+                                           SdfPath("/TonicGroom"),
+                                           &invalidQModel);
+        Check(hasComposedBadQ && !invalidQResult.ok &&
+                  invalidQResult.diagnostic.find("proper rotation") !=
+                      std::string::npos,
+              "hydrate rejects a non-orthonormal frameReference");
     }
     // Foreign guides fail closed, never silently.
     {
@@ -545,7 +1159,55 @@ main()
         usdGenTonic::TonicHydrateResult fr =
             usdGenTonic::TonicHydrateModel(fs, SdfPath("/TonicGroom"), &fm);
         Check(!fr.ok && !fr.guidesBitEqual,
-              "hand-edited guides fail the bit-equality assert");
+              "a marked current sampler rejects hand-edited guides");
+    }
+    // Old layers do not carry rootSampler.  They may use the legacy fill
+    // only when every guide byte validates; removing the marker must not let
+    // an edited legacy guide set through the compatibility branch.
+    {
+        SdfLayerRefPtr legacyLayer = SdfLayer::CreateAnonymous("tonic-legacy");
+        legacyLayer->TransferContent(live);
+        SdfPrimSpecHandle legacyGroom =
+            legacyLayer->GetPrimAtPath(SdfPath("/TonicGroom"));
+        SdfPropertySpecHandle const samplerSpec =
+            legacyLayer->GetPropertyAtPath(
+                SdfPath("/TonicGroom").AppendProperty(
+                    TfToken("usdGen:tonic:rootSampler")));
+        bool const removedSampler = bool(legacyGroom) && bool(samplerSpec);
+        if (removedSampler) {
+            legacyGroom->RemoveProperty(samplerSpec);
+        }
+        UsdStageRefPtr legacyStage = MakeStage(legacyLayer);
+        SdfLayerRefPtr legacyOver =
+            SdfLayer::CreateAnonymous("tonic-legacy-edited-over");
+        legacyStage->GetSessionLayer()->InsertSubLayerPath(
+            legacyOver->GetIdentifier(), 0);
+        legacyStage->SetEditTarget(legacyOver);
+        UsdPrim legacyGuides =
+            legacyStage->GetPrimAtPath(SdfPath("/TonicGroom/Guides"));
+        VtVec3fArray points;
+        bool const gotPoints =
+            bool(legacyGuides) &&
+            legacyGuides.GetAttribute(TfToken("points")).Get(&points) &&
+            !points.empty();
+        bool pointsEdited = false;
+        if (gotPoints) {
+            points[0] = GfVec3f(123.0f, 456.0f, 789.0f);
+            legacyGuides.GetAttribute(TfToken("points")).Set(points);
+            VtVec3fArray composedPoints;
+            pointsEdited =
+                legacyGuides.GetAttribute(TfToken("points"))
+                    .Get(&composedPoints) &&
+                !composedPoints.empty() && composedPoints[0] == points[0];
+        }
+        TonicModel legacyModel;
+        usdGenTonic::TonicHydrateResult const legacyResult =
+            usdGenTonic::TonicHydrateModel(legacyStage,
+                                           SdfPath("/TonicGroom"),
+                                           &legacyModel);
+        Check(removedSampler && gotPoints && pointsEdited && !legacyResult.ok &&
+                  !legacyResult.guidesBitEqual,
+              "a markerless legacy groom still rejects modified guides");
     }
 
     // -- GuideInterpolate fill-in only touches what is empty ---------------
@@ -984,6 +1646,23 @@ main()
     {
         TonicModel hm;
         Check(hm.BuildTestTube(), "V0b: hierarchy model builds its L1 tube");
+        TonicModel::TubeSnapshot rotatedRoot = hm.Snapshot();
+        // 90 degrees about +Z. This is deliberately non-identity before
+        // subdivision, so every derived child and its stored deltas are
+        // evaluated in the transported frame rather than in the old axes.
+        rotatedRoot.frameReference = {{0.0f, -1.0f, 0.0f,
+                                        1.0f,  0.0f, 0.0f,
+                                        0.0f,  0.0f, 1.0f}};
+        Check(hm.Restore(rotatedRoot),
+              "V0b: rotated frame reference restores on the L1 tube");
+        usdGenTonic::TonicSnapshot qHashSnapshot =
+            usdGenTonic::TonicSnapshotFromModel(hm);
+        usdGenTonic::TonicSnapshotTube qHashChanged =
+            qHashSnapshot.tubes.front();
+        qHashChanged.tube.frameReference[0] = 1.0f;
+        Check(usdGenTonic::TonicSnapshotTubeHash(qHashSnapshot.tubes.front()) !=
+                  usdGenTonic::TonicSnapshotTubeHash(qHashChanged),
+              "V0b: frameReference changes invalidate a tube guide hash");
         TonicModel::FillParams hf;
         hf.density = 8.0f;
         hf.cvCount = 6;
@@ -1000,6 +1679,9 @@ main()
               "V0b: a child center CV moves");
         Check(hm.MoveTubeSectionRing(kids[2], 1, 0.01f, 0.0f),
               "V0b: a child section ring moves (per-tube op)");
+        Check(hm.ScaleTubeSectionRing(kids[2], 1, 1.25f) &&
+                  hm.TwistTubeSectionRing(kids[2], 1, 0.19f),
+              "V0b: a child section scale and twist are authored");
         hm.SetTubeLockChildren(kids[3], true);
         hm.SetTubeLockParents(kids[3], true);
         TonicModel::FillParams cf;
@@ -1032,6 +1714,17 @@ main()
         ch.Enqueue(sh);
         Check(WaitCommitted(ch, liveH, hm.GetVersion()),
               "V0b: the hierarchy commits");
+
+        VtFloatArray storedFrameReference;
+        Check(sh->GetPrimAtPath(SdfPath("/TonicGroom/Tubes/tube0"))
+                      .GetAttribute(TfToken("usdGen:tonic:frameReference"))
+                      .Get(&storedFrameReference) &&
+                  storedFrameReference.size() == 9 &&
+                  storedFrameReference[0] == 0.0f &&
+                  storedFrameReference[1] == -1.0f &&
+                  storedFrameReference[3] == 1.0f &&
+                  storedFrameReference[8] == 1.0f,
+              "V0b: row-major frameReference persists on the root tube");
 
         // Nesting: children are namespace children of their parent.
         Check(bool(sh->GetPrimAtPath(SdfPath("/TonicGroom/Tubes/tube0"))),
@@ -1069,6 +1762,36 @@ main()
                 .Get(&sectionDeltas);
             Check(!sectionDeltas.empty(),
                   "V0b: section deltas commit alongside them");
+            VtVec2fArray sectionDeltaTransforms;
+            edited.GetAttribute(TfToken("usdGen:tonic:sectionDeltaTransforms"))
+                .Get(&sectionDeltaTransforms);
+            bool nonZeroTransform = false;
+            for (GfVec2f const &d : sectionDeltaTransforms) {
+                nonZeroTransform = nonZeroTransform || d[0] != 0.0f ||
+                                   d[1] != 0.0f;
+            }
+            Check(!sectionDeltaTransforms.empty() && nonZeroTransform,
+                  "V0b: section scale/twist residuals commit alongside UV deltas");
+            VtIntArray bindings;
+            TonicModel::TubeRecord editedRecord;
+            bool bindingsExact =
+                hm.GetTubeRecord(kids[2], &editedRecord) &&
+                edited.GetAttribute(
+                    TfToken("usdGen:tonic:inheritedBoundaryBindings"))
+                    .Get(&bindings) &&
+                bindings.size() ==
+                    editedRecord.actual.inheritedBoundaryBindings.size() * 3;
+            for (size_t i = 0; bindingsExact &&
+                 i < editedRecord.actual.inheritedBoundaryBindings.size();
+                 ++i) {
+                usdGenTonic::TonicParentBoundaryBinding const &binding =
+                    editedRecord.actual.inheritedBoundaryBindings[i];
+                bindingsExact = bindings[i * 3 + 0] == binding.section &&
+                                bindings[i * 3 + 1] == binding.parentSlot &&
+                                bindings[i * 3 + 2] == binding.childSlot;
+            }
+            Check(bindingsExact,
+                  "V0b: inherited parent-boundary bindings commit exactly");
         }
         UsdPrim const group =
             sh->GetPrimAtPath(SdfPath("/TonicGroom/Tubes/group1"));
@@ -1162,6 +1885,7 @@ main()
                             b.deltas.sections.size());
             }
             allEqual = allEqual && SameDesc(a.actual, b.actual) &&
+                       SameTessellation(a.actual, b.actual) &&
                        SameDeltas(a.deltas, b.deltas) &&
                        a.actual.level == b.actual.level &&
                        a.actual.childIndex == b.actual.childIndex &&
@@ -1182,8 +1906,40 @@ main()
             }
         }
         Check(allEqual,
-              "V0b: shape, deltas, links, fill, locks and persistent "
+              "V0b: rotated frame, shape, deltas, links, fill, locks and persistent "
               "round-trip bit-exactly");
+
+        // Older layers have no boundary-link attribute. Hydrate reconstructs
+        // those material identities from the freshly derived parent chart so
+        // their next K7 uses the same inherited outer corners.
+        {
+            SdfLayerRefPtr legacyBindings =
+                SdfLayer::CreateAnonymous("tonic-legacy-boundaries");
+            legacyBindings->TransferContent(liveH);
+            SdfPrimSpecHandle legacyChild = legacyBindings->GetPrimAtPath(
+                SdfPath("/TonicGroom/Tubes/tube0/tube3"));
+            SdfPropertySpecHandle boundarySpec =
+                legacyBindings->GetPropertyAtPath(
+                    SdfPath("/TonicGroom/Tubes/tube0/tube3")
+                        .AppendProperty(TfToken(
+                            "usdGen:tonic:inheritedBoundaryBindings")));
+            bool const removedBindings = bool(legacyChild) &&
+                bool(boundarySpec);
+            if (removedBindings) {
+                legacyChild->RemoveProperty(boundarySpec);
+            }
+            TonicModel legacyBindingModel;
+            usdGenTonic::TonicHydrateResult const legacyBindingResult =
+                usdGenTonic::TonicHydrateModel(MakeStage(legacyBindings),
+                                               SdfPath("/TonicGroom"),
+                                               &legacyBindingModel);
+            TonicModel::TubeRecord beforeLegacy, afterLegacy;
+            Check(removedBindings && legacyBindingResult.ok &&
+                      hm.GetTubeRecord(kids[2], &beforeLegacy) &&
+                      legacyBindingModel.GetTubeRecord(kids[2], &afterLegacy) &&
+                      SameDesc(beforeLegacy.actual, afterLegacy.actual),
+                  "V0b: missing boundary bindings reconstruct from the derived parent chart");
+        }
 
         // Re-commit the hydrated model: the same guide bytes.
         {
@@ -1199,8 +1955,38 @@ main()
                       a.size() == b.size() && !a.empty() &&
                       std::memcmp(a.data(), b.data(),
                                   a.size() * sizeof(GfVec3f)) == 0,
-                  "V0b: re-committed guides are byte-identical");
+                  "V0b: rotated hierarchy re-commits byte-identical world guides");
         }
+
+        // The optional raw section representation is needed for continued
+        // hierarchy editing, not merely equivalent first-frame rendering.
+        // Move the shared parent after hydrate and compare the full affected
+        // child record, including scalar and per-CV residuals.
+        // Keep the committed source model intact: the foreign-guide fixture
+        // below composes the already committed stage and must use positions
+        // from that same snapshot.  Continue hierarchy editing in two fresh
+        // clones instead.
+        TonicModel sourceEdit, hydratedEdit;
+        usdGenTonic::TonicHydrateResult const sourceEditHydrate =
+            usdGenTonic::TonicHydrateModel(sh, SdfPath("/TonicGroom"),
+                                           &sourceEdit);
+        usdGenTonic::TonicHydrateResult const hydratedEditHydrate =
+            usdGenTonic::TonicHydrateModel(sh, SdfPath("/TonicGroom"),
+                                           &hydratedEdit);
+        TonicModel::TubeRecord sourceAfterK6, hydratedAfterK6;
+        bool const continuedK6 = sourceEditHydrate.ok &&
+            hydratedEditHydrate.ok &&
+            sourceEdit.MoveTubeCenterCV(0, 1, 0.02f, -0.01f, 0.01f) &&
+            hydratedEdit.MoveTubeCenterCV(0, 1, 0.02f, -0.01f, 0.01f) &&
+            sourceEdit.GetTubeRecord(kids[2], &sourceAfterK6) &&
+            hydratedEdit.GetTubeRecord(kids[2], &hydratedAfterK6);
+        Check(continuedK6 && SameDesc(sourceAfterK6.actual,
+                                      hydratedAfterK6.actual) &&
+                  SameTessellation(sourceAfterK6.actual,
+                                   hydratedAfterK6.actual) &&
+                  SameDeltas(sourceAfterK6.deltas,
+                             hydratedAfterK6.deltas),
+              "V0b: hydrated scale/twist child remains exact through a later parent K6");
 
         // A hand-authored foreign guide becomes a locked L3 tube.
         {
@@ -1623,9 +2409,9 @@ main()
                   std::to_string(rm.GetRegionLoops().regionIds.size()) + ")");
         // One stub per region, exactly as TonicSession.ensureRegionTubes
         // does it after a graph gesture.
-        Check(rm.BuildTubeFromRegion(0, 5, 8, 2.0f),
+        Check(rm.BuildTubeFromRegion(0, 5, 0, 2.0f),
               "V6: region 0 gets its L1 stub: " + std::string(rm.GetDiagnostic()));
-        Check(rm.BuildTubeFromRegion(1, 5, 8, 2.0f),
+        Check(rm.BuildTubeFromRegion(1, 5, 0, 2.0f),
               "V6: region 1 gets its own L1 stub: " + std::string(rm.GetDiagnostic()));
         std::vector<int> const roots = rm.L1TubeIds();
         Check(roots.size() == 2 && roots[0] == 0,
@@ -1738,6 +2524,397 @@ main()
         Check(hydrated.TubeForRegion(d0.regionId) == 0 &&
                   hydrated.TubeForRegion(d1.regionId) == secondRoot,
               "V6: the region->tube map comes back with them");
+
+        // The first shared vertex belongs to both original regions. After a
+        // saved/hydrated groom, moving it must replace each affected L1 base
+        // with the new region-CV footprint; a rigidly moved old outline is
+        // specifically insufficient. A disconnected triangle supplies both
+        // an unrelated root and the auto three-column control case.
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const hydratedScalp =
+            hydrated.GetScalp();
+        std::vector<int> controlNodes;
+        int const isolatedRegion = hydratedScalp
+            ? AddIsolatedRegion(&hydrated, *hydratedScalp, n, &controlNodes) : -1;
+        int const isolatedRoot = isolatedRegion >= 0
+            ? hydrated.TubeForRegion(isolatedRegion) : -1;
+        bool const builtIsolated = isolatedRoot < 0 && isolatedRegion >= 0 &&
+            hydrated.BuildTubeFromRegion(isolatedRegion, 5, 0, 2.0f);
+        int const controlRoot = builtIsolated
+            ? hydrated.TubeForRegion(isolatedRegion) : isolatedRoot;
+        std::vector<int> children;
+        bool const builtChild = hydrated.SubdivideTube(0, 2, "kmeans", 41,
+                                                        &children) &&
+            children.size() == 2 &&
+            // A persisted artist offset on the old base must not become the
+            // next graph attachment footprint.
+            hydrated.MoveTubeSectionCV(0, 0, 0, 0.075f, -0.030f) &&
+            hydrated.MoveTubeSectionCV(children[0], 2, 1, 0.045f, -0.025f);
+        TubeWorldGeometry root0Before, root1Before, childBefore, controlBefore;
+        TonicModel::TubeRecord childRecordBefore, controlRecordBefore;
+        bool const capturedBefore = builtChild && controlRoot >= 0 &&
+            CaptureTubeWorld(hydrated, 0, &root0Before) &&
+            CaptureTubeWorld(hydrated, secondRoot, &root1Before) &&
+            CaptureTubeWorld(hydrated, children[0], &childBefore) &&
+            CaptureTubeWorld(hydrated, controlRoot, &controlBefore) &&
+            hydrated.GetTubeRecord(children[0], &childRecordBefore) &&
+            hydrated.GetTubeRecord(controlRoot, &controlRecordBefore);
+        bool const baseWasOffset = capturedBefore &&
+            !RootBaseMatchesRegion(hydrated, root0Before.desc) &&
+            RootBaseMatchesRegion(hydrated, root1Before.desc) &&
+            RootBaseMatchesRegion(hydrated, controlBefore.desc) &&
+            controlBefore.desc.ringVerts == 3;
+        usdGenTonic::TonicGraphNode const *sharedBeforeMove =
+            hydrated.GetGraph().FindNode(1);
+        TubeWorldGeometry noOpRoot;
+        bool const noOpPreservesLegacyBase = baseWasOffset && sharedBeforeMove &&
+            hydrated.GraphMoveNode(1, Locate(*hydratedScalp, n,
+                                              sharedBeforeMove->p[0],
+                                              sharedBeforeMove->p[2])) &&
+            CaptureTubeWorld(hydrated, 0, &noOpRoot) &&
+            SameDesc(root0Before.desc, noOpRoot.desc) &&
+            noOpRoot.positions == root0Before.positions &&
+            !RootBaseMatchesRegion(hydrated, noOpRoot.desc);
+        hydrated.ClearUndo();
+        bool const movedShared = noOpPreservesLegacyBase && hydratedScalp &&
+            hydrated.GraphMoveNode(1, Locate(*hydratedScalp, n, 2.25f, 1.0f));
+        TubeWorldGeometry root0After, root1After, childAfter, controlAfter;
+        TonicModel::TubeRecord childRecordAfter, controlRecordAfter;
+        bool const capturedAfter = movedShared &&
+            CaptureTubeWorld(hydrated, 0, &root0After) &&
+            CaptureTubeWorld(hydrated, secondRoot, &root1After) &&
+            CaptureTubeWorld(hydrated, children[0], &childAfter) &&
+            CaptureTubeWorld(hydrated, controlRoot, &controlAfter) &&
+            hydrated.GetTubeRecord(children[0], &childRecordAfter) &&
+            hydrated.GetTubeRecord(controlRoot, &controlRecordAfter);
+        Check(capturedAfter && noOpPreservesLegacyBase && MovedWorld(root0Before, root0After) &&
+                  MovedWorld(root1Before, root1After) &&
+                  MovedWorld(childBefore, childAfter) &&
+                  MovedBaseRing(root0Before, root0After) &&
+                  MovedBaseRing(root1Before, root1After) &&
+                  RootBaseMatchesRegion(hydrated, root0After.desc) &&
+                  RootBaseMatchesRegion(hydrated, root1After.desc) &&
+                  SameSectionsAboveBase(root0Before.desc, root0After.desc) &&
+                  SameSectionsAboveBase(root1Before.desc, root1After.desc) &&
+                  ChildRootRefreshesButUpperSculptRemains(childRecordAfter) &&
+                  SameDesc(controlRecordBefore.actual, controlRecordAfter.actual) &&
+                  controlBefore.positions == controlAfter.positions,
+              "V6: no-op leaves legacy base stale; asymmetric shared-CV move refits it");
+
+        // One graph move owns one undo step. Redo must reproduce the exact
+        // transported K5 walls and stored child residual, while a cancelled
+        // second move restores that same committed attachment pose.
+        TubeWorldGeometry undoRoot0, undoRoot1, undoChild, undoControl;
+        TonicModel::TubeRecord undoChildRecord;
+        uint32_t undoDirty = 0, redoDirty = 0, cancelDirty = 0;
+        bool const undone = capturedAfter && hydrated.Undo(&undoDirty) &&
+            CaptureTubeWorld(hydrated, 0, &undoRoot0) &&
+            CaptureTubeWorld(hydrated, secondRoot, &undoRoot1) &&
+            CaptureTubeWorld(hydrated, children[0], &undoChild) &&
+            CaptureTubeWorld(hydrated, controlRoot, &undoControl) &&
+            hydrated.GetTubeRecord(children[0], &undoChildRecord);
+        Check(undone && SameDesc(root0Before.desc, undoRoot0.desc) &&
+                  SameDesc(root1Before.desc, undoRoot1.desc) &&
+                  SameDesc(childBefore.desc, undoChild.desc) &&
+                  SameDesc(controlBefore.desc, undoControl.desc) &&
+                  undoRoot0.positions == root0Before.positions &&
+                  undoRoot1.positions == root1Before.positions &&
+                  undoChild.positions == childBefore.positions &&
+                  undoControl.positions == controlBefore.positions &&
+                  SameDeltas(undoChildRecord.deltas, childRecordBefore.deltas) &&
+                  undoDirty != usdGenTonic::TonicDirty_Clean,
+              "V6: undo restores both hydrated attachments, child sculpt and control root exactly");
+        TubeWorldGeometry redoRoot0, redoRoot1, redoChild, redoControl;
+        TonicModel::TubeRecord redoChildRecord;
+        bool const redone = undone && hydrated.Redo(&redoDirty) &&
+            CaptureTubeWorld(hydrated, 0, &redoRoot0) &&
+            CaptureTubeWorld(hydrated, secondRoot, &redoRoot1) &&
+            CaptureTubeWorld(hydrated, children[0], &redoChild) &&
+            CaptureTubeWorld(hydrated, controlRoot, &redoControl) &&
+            hydrated.GetTubeRecord(children[0], &redoChildRecord);
+        Check(redone && SameDesc(root0After.desc, redoRoot0.desc) &&
+                  SameDesc(root1After.desc, redoRoot1.desc) &&
+                  SameDesc(childAfter.desc, redoChild.desc) &&
+                  SameDesc(controlAfter.desc, redoControl.desc) &&
+                  redoRoot0.positions == root0After.positions &&
+                  redoRoot1.positions == root1After.positions &&
+                  redoChild.positions == childAfter.positions &&
+                  redoControl.positions == controlAfter.positions &&
+                  SameDeltas(redoChildRecord.deltas, childRecordAfter.deltas) &&
+                  redoDirty != usdGenTonic::TonicDirty_Clean,
+              "V6: redo restores the exact transported hydrated subtree");
+        TubeWorldGeometry cancelRoot0, cancelRoot1, cancelChild, cancelControl;
+        bool const cancelled = redone && hydrated.BeginGesture("legacy place") &&
+            hydrated.GraphMoveNode(1, Locate(*hydratedScalp, n, 2.35f, 1.0f)) &&
+            hydrated.CancelGesture(&cancelDirty) &&
+            CaptureTubeWorld(hydrated, 0, &cancelRoot0) &&
+            CaptureTubeWorld(hydrated, secondRoot, &cancelRoot1) &&
+            CaptureTubeWorld(hydrated, children[0], &cancelChild) &&
+            CaptureTubeWorld(hydrated, controlRoot, &cancelControl);
+        Check(cancelled && cancelRoot0.positions == root0After.positions &&
+                  cancelRoot1.positions == root1After.positions &&
+                  cancelChild.positions == childAfter.positions &&
+                  cancelControl.positions == controlAfter.positions &&
+                  cancelDirty != usdGenTonic::TonicDirty_Clean,
+              "V6: cancelled attached-node move restores the transported subtree exactly");
+
+        // Place changes graph topology first. Its newly split point has no
+        // compatible pre-split attachment baseline, so following it during
+        // the same gesture remains graph-only rather than trying to transport
+        // the established tube owners through a mismatched support chart.
+        int placeEdge = -1;
+        for (usdGenTonic::TonicGraphEdge const &edge : hydrated.GetGraph().Edges()) {
+            if (edge.alive) { placeEdge = edge.id; break; }
+        }
+        TubeWorldGeometry placeRoot0, placeRoot1, placeChild, placeControl;
+        uint32_t placeUndoDirty = 0;
+        int const placedNode = redone && placeEdge >= 0 &&
+            hydrated.BeginGesture("place split")
+            ? hydrated.GraphSplitEdge(placeEdge, Locate(*hydratedScalp, n, 1.0f, 1.0f))
+            : -1;
+        bool const placed = placedNode >= 0 &&
+            hydrated.GraphMoveNode(placedNode, Locate(*hydratedScalp, n, 1.20f, 1.0f)) &&
+            hydrated.EndGesture() &&
+            CaptureTubeWorld(hydrated, 0, &placeRoot0) &&
+            CaptureTubeWorld(hydrated, secondRoot, &placeRoot1) &&
+            CaptureTubeWorld(hydrated, children[0], &placeChild) &&
+            CaptureTubeWorld(hydrated, controlRoot, &placeControl);
+        Check(placed && placeRoot0.positions == root0After.positions &&
+                  placeRoot1.positions == root1After.positions &&
+                  placeChild.positions == childAfter.positions &&
+                  placeControl.positions == controlAfter.positions &&
+                  hydrated.Undo(&placeUndoDirty) &&
+                  placeUndoDirty != usdGenTonic::TonicDirty_Clean,
+              "V6: legacy split/place point remains graph-only and commits one cancellable gesture");
+
+        // Moving the two shared endpoints reshapes the common edge, rather
+        // than merely translating it. Both affected roots must refit their
+        // section-zero corners, while the disconnected triangle stays exact.
+        std::vector<int> const sharedEdgeNodes = {1, 2};
+        std::vector<usdGenTonic::TonicHit> const reshapedEdge = {
+            Locate(*hydratedScalp, n, 2.32f, 1.0f),
+            Locate(*hydratedScalp, n, 2.46f, 3.0f)};
+        bool const movedEdge = placed &&
+            hydrated.GraphMoveNodes(sharedEdgeNodes, reshapedEdge);
+        TubeWorldGeometry edgeRoot0, edgeRoot1, edgeChild, edgeControl;
+        TonicModel::TubeRecord edgeChildRecord, edgeControlRecord;
+        bool const capturedEdge = movedEdge &&
+            CaptureTubeWorld(hydrated, 0, &edgeRoot0) &&
+            CaptureTubeWorld(hydrated, secondRoot, &edgeRoot1) &&
+            CaptureTubeWorld(hydrated, children[0], &edgeChild) &&
+            CaptureTubeWorld(hydrated, controlRoot, &edgeControl) &&
+            hydrated.GetTubeRecord(children[0], &edgeChildRecord) &&
+            hydrated.GetTubeRecord(controlRoot, &edgeControlRecord);
+        Check(capturedEdge && RootBaseMatchesRegion(hydrated, edgeRoot0.desc) &&
+                  RootBaseMatchesRegion(hydrated, edgeRoot1.desc) &&
+                  MovedBaseRing(root0After, edgeRoot0) &&
+                  MovedBaseRing(root1After, edgeRoot1) &&
+                  SameSectionsAboveBase(root0After.desc, edgeRoot0.desc) &&
+                  SameSectionsAboveBase(root1After.desc, edgeRoot1.desc) &&
+                  ChildRootRefreshesButUpperSculptRemains(edgeChildRecord) &&
+                  SameDesc(controlRecordBefore.actual, edgeControlRecord.actual) &&
+                  edgeControl.positions == controlBefore.positions,
+              "V6: shared-edge reshape refits both region-root bases without moving the other root");
+
+        // A true whole-region translation is the fast path: there is no
+        // footprint residual to repair, so the auto triangle keeps an exact
+        // rigid translation through all of its K5 wall samples.
+        std::vector<usdGenTonic::TonicHit> translatedNodes;
+        bool controlTargets = controlNodes.size() == 3;
+        for (int nodeId : controlNodes) {
+            usdGenTonic::TonicGraphNode const *node = hydrated.GetGraph().FindNode(nodeId);
+            if (!node) { controlTargets = false; break; }
+            translatedNodes.push_back(
+                Locate(*hydratedScalp, n, node->p[0] + 0.12f, node->p[2] + 0.08f));
+        }
+        bool const translated = capturedEdge && controlTargets &&
+            hydrated.GraphMoveNodes(controlNodes, translatedNodes);
+        TubeWorldGeometry translatedControl;
+        bool const capturedTranslation = translated &&
+            CaptureTubeWorld(hydrated, controlRoot, &translatedControl);
+        Check(capturedTranslation && RootBaseMatchesRegion(hydrated, translatedControl.desc) &&
+                  SameTranslation(edgeControl, translatedControl, 0.12f, 0.0f, 0.08f),
+              "V6: pure region translation preserves exact rigid triangle geometry");
+
+        // Persist the reshaped roots and translated control, then hydrate a
+        // fresh model. Region ownership and the corrected base footprints
+        // must survive a real commit instead of only the live model state.
+        TonicCommitter persistedCommit(&hydrated, regionPaths);
+        persistedCommit.Enqueue(sr);
+        bool const persisted = capturedTranslation &&
+            WaitCommitted(persistedCommit, liveR, hydrated.GetVersion());
+        TonicModel persistedModel;
+        usdGenTonic::TonicHydrateResult const persistedHydrate = persisted
+            ? usdGenTonic::TonicHydrateModel(sr, SdfPath("/TonicGroom"),
+                                             &persistedModel)
+            : usdGenTonic::TonicHydrateResult{};
+        TubeWorldGeometry persistedRoot0, persistedRoot1, persistedChild,
+                          persistedControl;
+        TonicModel::TubeRecord persistedChildRecord;
+        bool const capturedPersisted = persistedHydrate.ok &&
+            CaptureTubeWorld(persistedModel, 0, &persistedRoot0) &&
+            CaptureTubeWorld(persistedModel, secondRoot, &persistedRoot1) &&
+            CaptureTubeWorld(persistedModel, children[0], &persistedChild) &&
+            CaptureTubeWorld(persistedModel, controlRoot, &persistedControl) &&
+            persistedModel.GetTubeRecord(children[0], &persistedChildRecord);
+        Check(capturedPersisted &&
+                  SameDesc(edgeRoot0.desc, persistedRoot0.desc) &&
+                  SameDesc(edgeRoot1.desc, persistedRoot1.desc) &&
+                  SameDesc(edgeChild.desc, persistedChild.desc) &&
+                  SameDesc(translatedControl.desc, persistedControl.desc) &&
+                  SameDeltas(edgeChildRecord.deltas, persistedChildRecord.deltas) &&
+                  RootBaseMatchesRegion(persistedModel, persistedRoot0.desc) &&
+                  RootBaseMatchesRegion(persistedModel, persistedRoot1.desc) &&
+                  RootBaseMatchesRegion(persistedModel, persistedControl.desc),
+              "V6: save/hydrate preserves reshaped bases, child sculpt and root ownership");
+
+        // Replacing a child's attachment root during the region refit must
+        // also rebuild its section-zero holding triples.  A later direct
+        // child-root edit must therefore drive the matching installed parent
+        // boundary slot, rather than the stale pre-refit parent slot.
+        usdGenTonic::TonicParentBoundaryBinding rootHolding;
+        bool haveRootHolding = false;
+        if (capturedPersisted) {
+            for (usdGenTonic::TonicParentBoundaryBinding const &binding :
+                 persistedChildRecord.actual.inheritedBoundaryBindings) {
+                if (binding.section == 0 && binding.parentSlot >= 0 &&
+                    binding.childSlot >= 0 &&
+                    binding.parentSlot < persistedRoot0.desc.ringVerts &&
+                    binding.childSlot < persistedChild.desc.ringVerts) {
+                    rootHolding = binding;
+                    haveRootHolding = true;
+                    break;
+                }
+            }
+        }
+        std::vector<std::array<float, 3>> holdingParentBefore, holdingChildBefore,
+                                         holdingParentAfter, holdingChildAfter;
+        usdGenTonic::TonicTubeDesc holdingParentDesc, holdingChildDesc,
+                                   holdingOtherRoot;
+        bool const childRootEdit = haveRootHolding &&
+            RootBaseWorld(persistedRoot0.desc, &holdingParentBefore) &&
+            RootBaseWorld(persistedChild.desc, &holdingChildBefore) &&
+            persistedModel.MoveTubeSectionCV(children[0], 0,
+                                              rootHolding.childSlot,
+                                              0.032f, -0.019f) &&
+            persistedModel.GetTubeDesc(0, &holdingParentDesc) &&
+            persistedModel.GetTubeDesc(children[0], &holdingChildDesc) &&
+            persistedModel.GetTubeDesc(secondRoot, &holdingOtherRoot) &&
+            RootBaseWorld(holdingParentDesc, &holdingParentAfter) &&
+            RootBaseWorld(holdingChildDesc, &holdingChildAfter) &&
+            holdingParentBefore.size() == holdingParentAfter.size() &&
+            holdingChildBefore.size() == holdingChildAfter.size();
+        bool holdingAligned = childRootEdit;
+        if (holdingAligned) {
+            std::array<float, 3> const &parentPoint =
+                holdingParentAfter[size_t(rootHolding.parentSlot)];
+            std::array<float, 3> const &childPoint =
+                holdingChildAfter[size_t(rootHolding.childSlot)];
+            float const dx = parentPoint[0] - childPoint[0];
+            float const dy = parentPoint[1] - childPoint[1];
+            float const dz = parentPoint[2] - childPoint[2];
+            holdingAligned = dx * dx + dy * dy + dz * dz <= 4e-8f;
+            float const px = parentPoint[0] -
+                holdingParentBefore[size_t(rootHolding.parentSlot)][0];
+            float const py = parentPoint[1] -
+                holdingParentBefore[size_t(rootHolding.parentSlot)][1];
+            float const pz = parentPoint[2] -
+                holdingParentBefore[size_t(rootHolding.parentSlot)][2];
+            holdingAligned = holdingAligned && px * px + py * py + pz * pz > 1e-8f;
+        }
+        Check(holdingAligned && SameDesc(persistedRoot1.desc, holdingOtherRoot),
+              "V6: post-refit child root edit drives its rebuilt parent holding edge");
+
+        // A stale authored whole-tube translation can put its complete cage
+        // above and beside the graph support. Reposition must repair the
+        // normal offset as one subtree transport and solve only section zero
+        // to the edited region; it must not drag CV0 to the graph centroid
+        // and bend the upper wall. The earlier disconnected control remains
+        // the independent-root check for this same conformance path.
+        TonicModel staleWhole;
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const staleScalp =
+            staleWhole.BindScalp(grid.points, grid.counts, grid.indices)
+                ? staleWhole.GetScalp() : nullptr;
+        std::vector<int> staleNodes;
+        int const staleRegion = staleScalp
+            ? AddIsolatedRegion(&staleWhole, *staleScalp, n, &staleNodes) : -1;
+        bool const builtStale = staleRegion >= 0 &&
+            staleWhole.BuildTubeFromRegion(staleRegion, 5, 0, 2.0f);
+        int const staleRoot = builtStale ? staleWhole.TubeForRegion(staleRegion) : -1;
+        bool const translatedStale = staleRoot >= 0 &&
+            staleWhole.TranslateTube(staleRoot, 0.14f, 0.08f, -0.06f);
+        TubeWorldGeometry staleBefore, staleAfter;
+        bool const capturedStale = translatedStale &&
+            CaptureTubeWorld(staleWhole, staleRoot, &staleBefore) &&
+            !RootBaseMatchesRegion(staleWhole, staleBefore.desc);
+        bool const refitStale = capturedStale && staleNodes.size() == 3 &&
+            staleWhole.GraphMoveNode(staleNodes[2],
+                                     Locate(*staleScalp, n, 0.92f, 1.55f)) &&
+            CaptureTubeWorld(staleWhole, staleRoot, &staleAfter);
+        Check(refitStale && RootBaseMatchesRegion(staleWhole, staleAfter.desc) &&
+                  MovedBaseRing(staleBefore, staleAfter) &&
+                  SameCenterCageShape(staleBefore.desc, staleAfter.desc) &&
+                  UpperSectionsShareTranslation(staleBefore.desc, staleAfter.desc),
+              "V6: stale whole-tube offset refits only the base and keeps its upper cage rigid");
+
+        // Explicit counts retain every corner and keep their existing extra
+        // controls on the same material edge/parameter.  These two reshapes
+        // deliberately change the triangle's longest edge, so a fresh
+        // longest-edge allocator would fail even if it still enclosed the
+        // new region.
+        TonicModel explicitSlots;
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const slotScalp =
+            explicitSlots.BindScalp(grid.points, grid.counts, grid.indices)
+                ? explicitSlots.GetScalp() : nullptr;
+        std::vector<int> slotNodes;
+        int const slotRegion = slotScalp
+            ? AddIsolatedRegion(&explicitSlots, *slotScalp, n, &slotNodes) : -1;
+        bool const builtSlots = slotRegion >= 0 &&
+            explicitSlots.BuildTubeFromRegion(slotRegion, 5, 6, 2.0f);
+        int const slotRoot = builtSlots ? explicitSlots.TubeForRegion(slotRegion) : -1;
+        usdGenTonic::TonicTubeDesc slotBefore, slotAfterFirst, slotAfterSecond;
+        std::vector<RootEdgeBinding> materialSlots;
+        bool const boundSlots = slotRoot >= 0 &&
+            explicitSlots.GetTubeDesc(slotRoot, &slotBefore) &&
+            slotBefore.ringVerts == 6 &&
+            BindRootSlotsToRegionEdges(explicitSlots, slotBefore, &materialSlots) &&
+            materialSlots.size() == 6;
+        bool const firstSlotReshape = boundSlots && slotNodes.size() == 3 &&
+            explicitSlots.GraphMoveNode(slotNodes[2],
+                                        Locate(*slotScalp, n, 0.70f, 1.75f)) &&
+            explicitSlots.GetTubeDesc(slotRoot, &slotAfterFirst);
+        // Evaluate against the same graph state that authored this root.
+        // The next reshape changes the material edges, so postponing this
+        // check would incorrectly compare the first descriptor to a future
+        // polygon.
+        bool const firstSlotsFollow = firstSlotReshape &&
+            RootSlotsFollowMaterialEdges(explicitSlots, slotAfterFirst,
+                                         materialSlots);
+        if (boundSlots && firstSlotReshape && !firstSlotsFollow) {
+            PrintRootSlotDiagnostics(explicitSlots, slotAfterFirst,
+                                     materialSlots, "after first reshape");
+        }
+        bool const secondSlotReshape = firstSlotReshape &&
+            explicitSlots.GraphMoveNode(slotNodes[1],
+                                        Locate(*slotScalp, n, 1.70f, 0.15f)) &&
+            explicitSlots.GetTubeDesc(slotRoot, &slotAfterSecond);
+        bool const secondSlotsFollow = secondSlotReshape &&
+            RootSlotsFollowMaterialEdges(explicitSlots, slotAfterSecond,
+                                         materialSlots);
+        if (!(builtSlots && boundSlots && firstSlotReshape && secondSlotReshape &&
+              firstSlotsFollow && secondSlotsFollow)) {
+            std::printf("V6 explicit slots state: built=%d bound=%d first=%d "
+                        "second=%d firstFollow=%d secondFollow=%d diag=%s\n",
+                        int(builtSlots), int(boundSlots), int(firstSlotReshape),
+                        int(secondSlotReshape), int(firstSlotsFollow),
+                        int(secondSlotsFollow), explicitSlots.GetDiagnostic());
+            if (boundSlots && secondSlotReshape) {
+                PrintRootSlotDiagnostics(explicitSlots, slotAfterSecond,
+                                         materialSlots, "after second reshape");
+            }
+        }
+        Check(builtSlots && boundSlots && firstSlotReshape && secondSlotReshape &&
+                  firstSlotsFollow && secondSlotsFollow,
+              "V6: explicit extra base slots retain old material edges through two reshapes");
     }
 
     std::printf("%d failure(s)\n", g_failures);

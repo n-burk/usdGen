@@ -22,6 +22,19 @@ from . import tonicModes
 
 # The pick radius floor, so a zero snap radius still catches something.
 MIN_PICK_RADIUS_PX = 2.0
+# Displayed component glyphs are direct-manipulation targets.  Their hit
+# target does not inherit the graph Snap preference: a deliberately tiny
+# weld radius must not make visible CVs effectively unclickable.
+COMPONENT_PICK_RADIUS_PX = 8.0
+# Region authoring selects published CV glyphs, rather than arbitrary graph
+# primitives below them.  Keep that screen target usable when Snap is tiny;
+# Snap still controls graph welding and the authoring radius in world space.
+REGION_NODE_PICK_RADIUS_PX = COMPONENT_PICK_RADIUS_PX
+# Reposition is direct manipulation, so its visible CV/edge affordances
+# remain comfortably reachable even when the graph snap preference is tiny.
+# Keep these fixed: snapping may intentionally be much larger or smaller.
+REPOSITION_NODE_PICK_RADIUS_PX = 8.0
+REPOSITION_EDGE_PICK_RADIUS_PX = 5.0
 
 
 class Sample:
@@ -117,12 +130,20 @@ class ToolLoop:
     def hover(self, sample):
         return False
 
+    def marqueeRect(self):
+        """The live selection band's physical-pixel origin, if any."""
+        return getattr(self, "_marquee", None)
+
     def deactivate(self):
         """The mode is being left: drop anything this loop put on screen.
 
         A gizmo or a brush ring is model state (plan/18 section 2.4), so
         it outlives the loop that set it unless the loop takes it away.
         """
+        return False
+
+    def activate(self):
+        """The mode became current after construction (optional hook)."""
         return False
 
     # -- keys --------------------------------------------------------------
@@ -156,7 +177,7 @@ class GraphLoop(ToolLoop):
                 tonicLib.TONIC_PICK_GRAPH_EDGE |
                 tonicLib.TONIC_PICK_REGION)
     subModes = tonicModes.GRAPH_SUBMODES
-    defaultSubMode = "draw"
+    defaultSubMode = "region"
 
     def __init__(self, session, state):
         super(GraphLoop, self).__init__(session, state)
@@ -165,11 +186,25 @@ class GraphLoop(ToolLoop):
         self._dropPoint = None
         self._clickNode = -1
         self._clickRegion = -1
+        # Region creation deliberately keeps these CVs out of the model
+        # until it closes.  Each record is a K1 hit plus the physical pixel
+        # at which it was placed; the latter is only for clicking the first
+        # draft CV to close and for the viewport's transient overlay.
+        self._regionDraft = []
+        self._regionHover = None
+        self._regionCloseRequested = False
         self._marquee = None       # (x0, y0) while a rubber band is live
         self._active = False
         self._bracketOpen = False  # an undo bracket is open on the model
         self._pendingEdit = False  # the gesture changed the model
         self._lastStatus = ""
+        # Reposition uses canonical scalp locations as a frozen press-time
+        # baseline.  The visible graph glyph may be lifted from that scalp;
+        # applying the cursor's surface delta to this baseline avoids a jump.
+        self._repositionIds = ()
+        self._repositionPoints = ()
+        self._repositionAnchor = None
+        self._repositionLastDelta = None
 
     # -- sub-modes ---------------------------------------------------------
 
@@ -177,11 +212,43 @@ class GraphLoop(ToolLoop):
         return self.state.graphSubMode or self.defaultSubMode
 
     def setSubMode(self, subId):
+        # A mode switch is allowed while the pointer is down.  Reposition
+        # owns an open native bracket in that state, so restore it before
+        # changing the mode that release() will inspect.
+        if self._active and self.subMode() == "reposition":
+            self.cancel()
+        if (self.subMode() in ("region", "reposition") and
+                subId != self.subMode()):
+            self._setGraphHover(None)
+        if subId != self.subMode():
+            self._clearRegionDraft()
         status = tonicModes.SetActiveGraphSubMode(self.state, subId)
         if status:
             self._clickNode = -1
             self._clickRegion = -1
         return status
+
+    def deactivate(self):
+        """Drop a non-model region draft when Graph loses focus."""
+        if self._active and self.subMode() == "reposition":
+            self.cancel()
+        if self.subMode() in ("region", "reposition"):
+            self._setGraphHover(None)
+        return self._clearRegionDraft()
+
+    def draftRegionPreview(self):
+        """The transient contour consumed by tonicViewport's Qt overlay."""
+        return {"points": [self._draftDisplayPoint(entry)
+                            for entry in self._regionDraft],
+                "hover": self._regionHover}
+
+    def _clearRegionDraft(self):
+        hadDraft = bool(self._regionDraft or self._regionHover or
+                        self._regionCloseRequested)
+        self._regionDraft = []
+        self._regionHover = None
+        self._regionCloseRequested = False
+        return hadDraft
 
     # -- status ------------------------------------------------------------
 
@@ -233,33 +300,101 @@ class GraphLoop(ToolLoop):
                            self.pickRadiusPx())
         return item["id"] if item else -1
 
+    def _graphNodeHit(self, nodeId):
+        """The exact scalp location of a stable graph node, or None.
+
+        K11 names the node even where the CV dot's visible silhouette is a
+        few pixels wider than the scalp hit below it.  Looking up that id
+        gives the draft overlay and GraphCreateRegion the node's actual
+        location instead of treating a nearby K1 hit as a new CV.
+        """
+        entry = getattr(self.session.dll, "Tonic_GraphGetNode", None)
+        if nodeId < 0 or entry is None:
+            return None
+        face = ctypes.c_int(-1)
+        uv = (ctypes.c_float * 2)()
+        point = (ctypes.c_float * 3)()
+        if entry(self.session.model, int(nodeId), ctypes.byref(face), uv,
+                 point) != tonicLib.TONIC_OK:
+            return None
+        canonical = (float(point[0]), float(point[1]), float(point[2]))
+        # The committed glyph is lifted off the scalp.  Keep its display
+        # position in the transient overlay too, while face/UV below remain
+        # the canonical coordinates passed to GraphCreateRegion.
+        return {"face": int(face.value), "u": float(uv[0]),
+                "v": float(uv[1]), "point": canonical}
+
+    def _graphNodeDisplayPoint(self, nodeId):
+        """The published (lifted) graph glyph position, if this ABI has it."""
+        entry = getattr(self.session.dll, "Tonic_GraphGetNodeDisplayPosition",
+                        None)
+        if nodeId < 0 or entry is None:
+            return None
+        point = (ctypes.c_float * 3)()
+        if entry(self.session.model, int(nodeId), point) != tonicLib.TONIC_OK:
+            return None
+        return (float(point[0]), float(point[1]), float(point[2]))
+
+    def _regionHitAt(self, sample):
+        """(stable node id, canonical hit) for one region click/hover."""
+        # K11 sees the lifted published glyph.  Use the same bounded target
+        # for hover and press so a click six pixels into a visible CV cannot
+        # fall through to an edge/region or mint a duplicate node.
+        item = sample.item(tonicLib.TONIC_PICK_GRAPH_NODE,
+                           REGION_NODE_PICK_RADIUS_PX)
+        nodeId = item["id"] if item else -1
+        if nodeId >= 0:
+            return nodeId, self._graphNodeHit(nodeId)
+        return -1, sample.surface()
+
+    def _draftDisplayPoint(self, entry):
+        """Published nodes use their lifted glyph; new draft CVs are raw."""
+        return self._graphNodeDisplayPoint(entry[6]) or entry[3]
+
     def _edgeAt(self, sample):
         item = sample.item(tonicLib.TONIC_PICK_GRAPH_EDGE,
                            self.pickRadiusPx())
         return item["id"] if item else -1
 
-    def _regionAt(self, sample):
-        """The region under the cursor, by K11 and then by face lookup."""
-        item = sample.item(tonicLib.TONIC_PICK_REGION, self.pickRadiusPx())
+    def _repositionTarget(self, sample):
+        """The direct-manipulation target under a Reposition cursor.
+
+        K11 picks each component class independently.  Testing nodes first
+        gives a CV within its usable screen handle priority over an edge that
+        happens to pass directly below it.  Regions are never targets here.
+        """
+        item = sample.item(tonicLib.TONIC_PICK_GRAPH_NODE,
+                           REPOSITION_NODE_PICK_RADIUS_PX)
         if item:
-            return item["id"]
+            return item
+        return sample.item(tonicLib.TONIC_PICK_GRAPH_EDGE,
+                           REPOSITION_EDGE_PICK_RADIUS_PX)
+
+    def _setGraphHover(self, item):
+        if item:
+            changed = self.session.setHover(item["kind"], item["id"],
+                                            item["subId"], item["subSubId"])
+        else:
+            changed = self.session.setHover(0, -1, -1, -1)
+        if changed:
+            self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        return changed
+
+    def _regionAt(self, sample):
+        """The exact sub-face region under the cursor, if any.
+
+        A face-region map is deliberately not a fallback: a single scalp
+        face may cross a contour, and its coarse id would select a region
+        outside the actual click point.  Tonic_RegionAtSurface performs the
+        polygon containment test from the K1 face/UV hit instead.
+        """
         hit = sample.surface()
-        if not hit:
+        entry = getattr(self.session.dll, "Tonic_RegionAtSurface", None)
+        if hit is None or entry is None:
             return -1
-        dll = self.session.dll
-        count = ctypes.c_int(0)
-        dll.Tonic_ReadFaceRegionIds(self.session.model, None, 0,
-                                    ctypes.byref(count))
-        n = max(int(count.value), 0)
-        if hit["face"] < 0 or hit["face"] >= n:
-            return -1
-        ids = (ctypes.c_int * n)()
-        got = ctypes.c_int(0)
-        if dll.Tonic_ReadFaceRegionIds(self.session.model, ids, n,
-                                       ctypes.byref(got)) \
-                != tonicLib.TONIC_OK:
-            return -1
-        return int(ids[hit["face"]])
+        return int(entry(self.session.model, int(hit["face"]),
+                         ctypes.c_float(hit["u"]),
+                         ctypes.c_float(hit["v"])))
 
     # -- gesture -----------------------------------------------------------
 
@@ -279,11 +414,15 @@ class GraphLoop(ToolLoop):
         if sub in ("draw", "place"):
             self.session.beginGesture("Graph %s" % sub)
             self._bracketOpen = True
+        if sub == "reposition":
+            return self._pressReposition(sample)
         if sub == "draw":
             hit = sample.surface()
             self._stroke = ([(hit["face"], hit["u"], hit["v"])] if hit
                             else [])
             return True
+        if sub == "region":
+            return self._pressRegion(sample)
         if sub == "place":
             return self._pressPlace(sample)
         if sub in ("connect", "weld"):
@@ -310,6 +449,12 @@ class GraphLoop(ToolLoop):
             if hit:
                 self._stroke.append((hit["face"], hit["u"], hit["v"]))
             return True
+        if sub == "region":
+            nodeId, hit = self._regionHitAt(sample)
+            self._regionHover = (None if hit is None else
+                                 (self._graphNodeDisplayPoint(nodeId) or
+                                  hit["point"]))
+            return True
         if sub == "place" and self._dragNode >= 0:
             hit = sample.surface()
             if not hit:
@@ -320,6 +465,8 @@ class GraphLoop(ToolLoop):
                 ctypes.c_float(hit["u"]), ctypes.c_float(hit["v"]))
             self.session.publish()
             return True
+        if sub == "reposition":
+            return self._moveReposition(sample)
         return False
 
     def release(self, sample):
@@ -335,19 +482,60 @@ class GraphLoop(ToolLoop):
             if hit:
                 self._stroke.append((hit["face"], hit["u"], hit["v"]))
             self._pendingEdit = self._commitStroke(self._snapRest(sample))
+        elif sub == "region":
+            self._regionHover = None
+            if self._regionCloseRequested:
+                self._regionCloseRequested = False
+                self._pendingEdit = self.completeRegionDraft()
         elif sub == "place" and self._dragNode >= 0:
             self._finishPlaceDrag(sample)
+        # K3 has to see the moved graph and its transported attachment
+        # subtrees while the single undo bracket is still live.  Reposition
+        # carries existing root/child shapes coherently; it is not a fresh
+        # tube fit from the contour.
+        repositionFinalized = False
+        repositionFinalizeFailed = False
+        if sub == "reposition" and self._repositionIds:
+            # Qt may coalesce motion events, so the release position is the
+            # final drag sample.  _moveReposition is safe for a no-op click
+            # and ignores an invalid last ray without losing prior edits.
+            self._moveReposition(sample)
+        if (sub == "reposition" and self._pendingEdit and
+                not self._repositionAtBase):
+            repositionFinalized = self._finalizeReposition()
+            repositionFinalizeFailed = not repositionFinalized
+        # An arming click, a rejected/missed drag, or a return to the press
+        # baseline is not an edit to put on the undo stack or bake.  Likewise
+        # a failed final K3 pass must restore the bracket snapshot rather
+        # than ending it with a moved graph and stale maps.
+        repositionRestore = (sub == "reposition" and
+                             (not self._pendingEdit or
+                              self._repositionAtBase or
+                              repositionFinalizeFailed))
         self._stroke = []
         self._dragNode = -1
         self._dropPoint = None
+        self._resetReposition()
         # Seal the undo bracket FIRST: the committer snapshots the model,
         # and a snapshot taken mid-bracket would carry half a gesture.
         if self._bracketOpen:
-            self.session.endGesture()
+            if repositionRestore:
+                dirty = self.session.cancelGesture()
+                self._pendingEdit = False
+                self.session.publish(dirty)
+            else:
+                self.session.endGesture()
             self._bracketOpen = False
         self._active = False
-        if self._pendingEdit:
-            self.endOfEdit()
+        if self._pendingEdit and sub != "region":
+            if sub == "reposition":
+                if repositionFinalized:
+                    self.session.enqueueCommit()
+                    self.session.rebake()
+                    self.session.publish()
+                    self._status(self.statusLine())
+            else:
+                self.endOfEdit()
         self._pendingEdit = False
         return True
 
@@ -357,10 +545,15 @@ class GraphLoop(ToolLoop):
             self._marquee = None
             return True
         if not self._active:
+            if self._clearRegionDraft():
+                self._status("Tonic Graph: region draft cancelled")
+                return True
             return False
         self._stroke = []
+        self._clearRegionDraft()
         self._dragNode = -1
         self._dropPoint = None
+        self._resetReposition()
         self._clickNode = -1
         self._clickRegion = -1
         self._pendingEdit = False
@@ -376,6 +569,26 @@ class GraphLoop(ToolLoop):
     def hover(self, sample):
         """Highlight whatever a click would act on."""
         if self.session.model is None:
+            return False
+        if self.subMode() == "region":
+            nodeId, hit = self._regionHitAt(sample)
+            if self._regionDraft:
+                point = (None if hit is None else
+                         (self._graphNodeDisplayPoint(nodeId) or hit["point"]))
+                if point != self._regionHover:
+                    self._regionHover = point
+            else:
+                self._regionHover = None
+            self._setGraphHover(
+                {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": nodeId,
+                 "subId": -1, "subSubId": -1} if nodeId >= 0 else None)
+            return False
+        if self.subMode() == "reposition":
+            # Press installs the active target highlight; cursor motion while
+            # a drag is live must not replace it with a nearby edge or CV.
+            if self._active:
+                return False
+            self._setGraphHover(self._repositionTarget(sample))
             return False
         item = sample.item(self.pickMask, self.pickRadiusPx())
         if item:
@@ -425,6 +638,125 @@ class GraphLoop(ToolLoop):
         return True
 
     # -- sub-mode actions --------------------------------------------------
+
+    def _pressRegion(self, sample):
+        """Arm a close, or retain one clicked scalp CV without authoring."""
+        nodeId, hit = self._regionHitAt(sample)
+        # A press can arrive before any hover event.  Refresh from this
+        # resolver result, including clearing a prior CV highlight for a new
+        # scalp point; never let an old hover choose the authored identity.
+        self._setGraphHover(
+            {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": nodeId,
+             "subId": -1, "subSubId": -1} if nodeId >= 0 else None)
+        # A K11 id without its canonical graph record is never converted to
+        # a fresh surface CV: that would silently create the duplicate this
+        # path is meant to prevent.
+        if nodeId >= 0 and hit is None:
+            self._status("Tonic Graph: selected graph node is unavailable")
+            return True
+        if self._regionDraft and self._regionFirstMatches(nodeId, sample):
+            if len(self._regionDraft) < 3:
+                self._status("Tonic Graph: region needs at least 3 CVs")
+            else:
+                self._regionCloseRequested = True
+            return True
+        if hit is None:
+            self._status("Tonic Graph: no scalp under cursor")
+            return True
+        # K11 supplies a stable graph node id.  Preserve it rather than
+        # inferring sharing later from the K1 point: a click inside a CV dot
+        # need not raycast to its mathematical centre, but it must still
+        # reuse that exact node in the closed contour.
+        self._regionDraft.append((hit["face"], hit["u"], hit["v"],
+                                  hit["point"], sample.x, sample.y, nodeId))
+        self._regionHover = None
+        self._status("Tonic Graph: region CV %d%s (Enter or first CV closes)"
+                     % (len(self._regionDraft),
+                        " shares node %d" % nodeId if nodeId >= 0 else ""))
+        return True
+
+    def _regionFirstAt(self, sample):
+        """True when `sample` falls in the first transient CV's pick ring."""
+        first = self._regionDraft[0]
+        x, y = first[4], first[5]
+        if sample.camera is not None:
+            projected = sample.camera.worldToPixels(
+                self._draftDisplayPoint(first))
+            if projected is not None:
+                x, y = projected[0], projected[1]
+        dx, dy = sample.x - x, sample.y - y
+        return dx * dx + dy * dy <= REGION_NODE_PICK_RADIUS_PX ** 2
+
+    def _regionFirstMatches(self, nodeId, sample):
+        """Close by identity for published CVs, proximity only for drafts."""
+        firstId = self._regionDraft[0][6]
+        if firstId >= 0:
+            return nodeId == firstId
+        # A published, distinct nearby node wins over the still-transient
+        # first dot.  Otherwise a draft CV has no model id to compare.
+        return nodeId < 0 and self._regionFirstAt(sample)
+
+    def completeRegionDraft(self):
+        """Commit the retained contour as one closed region undo step."""
+        if self.subMode() != "region" or len(self._regionDraft) < 3:
+            if self.subMode() == "region":
+                self._status("Tonic Graph: region needs at least 3 CVs")
+            return False
+        if not self.session.beginGesture("Graph region"):
+            return False
+        ok = False
+        try:
+            ok = self._commitRegionDraft()
+            if ok:
+                ok = bool(self.session.rasterise())
+            if ok:
+                self.session.ensureRegionTubes()
+        finally:
+            if ok:
+                self.session.endGesture()
+            else:
+                dirty = self.session.cancelGesture()
+                self.session.publish(dirty)
+        if not ok:
+            self._status("Tonic Graph: " + self.session.lastError())
+            return False
+        count = len(self._regionDraft)
+        self._clearRegionDraft()
+        self.session.enqueueCommit()
+        self.session.rebake()
+        self.session.publish()
+        self._status("Tonic Graph: closed region of %d CVs" % count)
+        return True
+
+    def discardRegionCV(self):
+        """Backspace removes only the most-recent uncommitted draft CV."""
+        if self.subMode() != "region" or not self._regionDraft:
+            return False
+        self._regionDraft.pop()
+        self._regionHover = None
+        self._regionCloseRequested = False
+        self._status("Tonic Graph: region CV removed (%d remaining)"
+                     % len(self._regionDraft))
+        return True
+
+    def _commitRegionDraft(self):
+        """Atomically author a closed chain with exact shared node ids."""
+        dll = self.session.dll
+        count = len(self._regionDraft)
+        nodes = (ctypes.c_int * count)(
+            *[entry[6] for entry in self._regionDraft])
+        faces = (ctypes.c_int * count)(
+            *[entry[0] for entry in self._regionDraft])
+        uvs = (ctypes.c_float * (2 * count))(
+            *[coordinate for entry in self._regionDraft
+              for coordinate in (entry[1], entry[2])])
+        region = ctypes.c_int(-1)
+        status = dll.Tonic_GraphCreateRegion(
+            self.session.model, nodes, faces, uvs, count,
+            ctypes.byref(region))
+        if status != tonicLib.TONIC_OK:
+            return False
+        return True
 
     def _commitStroke(self, snapRest):
         """Author the stroke; True when it reached the model."""
@@ -478,6 +810,146 @@ class GraphLoop(ToolLoop):
         self.session.publish()
         return True
 
+    # -- reposition -------------------------------------------------------
+
+    def _resetReposition(self):
+        self._repositionIds = ()
+        self._repositionPoints = ()
+        self._repositionAnchor = None
+        self._repositionAtBase = True
+        self._repositionLastDelta = None
+
+    def _pressReposition(self, sample):
+        """Freeze one CV, or both endpoints of one edge, for a drag.
+
+        This is intentionally separate from Place: Reposition never adds,
+        welds, or splits graph topology.  A node wins over an edge where
+        their visible pick shapes overlap.
+        """
+        self._resetReposition()
+        target = self._repositionTarget(sample)
+        nodeId = target["id"] if target and target["kind"] == \
+            tonicLib.TONIC_PICK_GRAPH_NODE else -1
+        ids = (nodeId,) if nodeId >= 0 else ()
+        pickedKind = target["kind"] if target else 0
+        pickedId = target["id"] if target else -1
+        if not ids:
+            edgeId = (target["id"] if target and
+                      target["kind"] == tonicLib.TONIC_PICK_GRAPH_EDGE
+                      else -1)
+            if edgeId < 0:
+                self._active = False
+                self._setGraphHover(None)
+                self._status("Tonic Graph reposition: no CV or edge here")
+                return True
+            endpoints = (ctypes.c_int * 2)()
+            entry = getattr(self.session.dll, "Tonic_GraphGetEdge", None)
+            if entry is None or entry(self.session.model, edgeId, endpoints) != tonicLib.TONIC_OK:
+                self._active = False
+                self._status("Tonic Graph reposition: edge is unavailable")
+                return True
+            ids = (int(endpoints[0]), int(endpoints[1]))
+            pickedKind = tonicLib.TONIC_PICK_GRAPH_EDGE
+            pickedId = edgeId
+        anchor = sample.surface()
+        if anchor is None:
+            self._active = False
+            self._status("Tonic Graph reposition: no scalp under cursor")
+            return True
+        records = [self._graphNodeHit(node) for node in ids]
+        if any(record is None for record in records):
+            self._active = False
+            self._status("Tonic Graph reposition: graph target is unavailable")
+            return True
+        if not self.session.beginGesture("Graph reposition"):
+            self._active = False
+            return True
+        self._bracketOpen = True
+        self._repositionIds = ids
+        self._repositionPoints = tuple(record["point"] for record in records)
+        self._repositionAnchor = anchor["point"]
+        self._repositionAtBase = True
+        self._setGraphHover(target)
+        self._status("Tonic Graph: repositioning %s (Esc cancels)" %
+                     ("CV" if pickedKind == tonicLib.TONIC_PICK_GRAPH_NODE
+                      else "edge"))
+        return True
+
+    def _closestScalp(self, point):
+        """K1 closest-point record for a target rest position, or None."""
+        query = (ctypes.c_float * 3)(*point)
+        hit = ctypes.c_int(0)
+        face = ctypes.c_int(-1)
+        uv = (ctypes.c_float * 2)()
+        outPoint = (ctypes.c_float * 3)()
+        normal = (ctypes.c_float * 3)()
+        if self.session.dll.Tonic_ClosestPoint(
+                self.session.model, query, ctypes.byref(hit),
+                ctypes.byref(face), uv, outPoint, normal) != tonicLib.TONIC_OK:
+            return None
+        if not hit.value:
+            return None
+        return {"face": int(face.value), "u": float(uv[0]),
+                "v": float(uv[1])}
+
+    def _moveReposition(self, sample):
+        if not self._repositionIds or self._repositionAnchor is None:
+            return True
+        hit = sample.surface()
+        if hit is None:
+            # Do not advance the frozen baseline or alter the last valid
+            # geometry when the cursor has no scalp ray.
+            return True
+        delta = tuple(float(hit["point"][axis]) -
+                      float(self._repositionAnchor[axis])
+                      for axis in range(3))
+        atBase = all(abs(component) <= 1e-8 for component in delta)
+        if atBase and not self._pendingEdit:
+            return True
+        if delta == self._repositionLastDelta:
+            return True
+        targets = [self._closestScalp(
+            tuple(point[axis] + delta[axis] for axis in range(3)))
+                   for point in self._repositionPoints]
+        if any(target is None for target in targets):
+            return True
+        count = len(self._repositionIds)
+        nodeIds = (ctypes.c_int * count)(*self._repositionIds)
+        faces = (ctypes.c_int * count)(*[target["face"] for target in targets])
+        uvs = (ctypes.c_float * (2 * count))(
+            *[coordinate for target in targets
+              for coordinate in (target["u"], target["v"])])
+        entry = getattr(self.session.dll, "Tonic_GraphMoveNodes", None)
+        if entry is None or entry(self.session.model, nodeIds, faces, uvs,
+                                  count) != tonicLib.TONIC_OK:
+            # A batch rejection (including a topology collapse) leaves the
+            # latest valid graph in place.  The next pointer sample still
+            # derives from the original press baseline and can recover.
+            self._status("Tonic Graph reposition: " + self.session.lastError())
+            return True
+        self._pendingEdit = True
+        self._repositionAtBase = atBase
+        self._repositionLastDelta = delta
+        # The graph move transports every attached tube subtree in native
+        # code. Publish its points, topology and guides with the contour so
+        # the live viewport never combines a new region with stale tubes.
+        self.session.publish(tonicLib.TONIC_DIRTY_POINTS |
+                             tonicLib.TONIC_DIRTY_TOPOLOGY |
+                             tonicLib.TONIC_DIRTY_GRAPH |
+                             tonicLib.TONIC_DIRTY_REGIONS |
+                             tonicLib.TONIC_DIRTY_GUIDES)
+        return True
+
+    def _finalizeReposition(self):
+        """Synchronize K3 while the reposition undo bracket remains open."""
+        if not self.session.rasterise():
+            self._status("Tonic Graph: " + self.session.lastError())
+            return False
+        # This only adds a missing root stub for a newly closed region; the
+        # accepted move has already transported existing root/child shapes.
+        self.session.ensureRegionTubes()
+        return True
+
     def _finishPlaceDrag(self, sample):
         """A drag that ends on another node or edge welds (plan/17 5.1)."""
         dll = self.session.dll
@@ -488,6 +960,18 @@ class GraphLoop(ToolLoop):
             return
         edge = self._edgeAt(sample)
         if edge < 0:
+            return
+        # The release pick can still see the edge under the node that was
+        # dragged.  Splitting that incident edge and welding its new midpoint
+        # back to the dragged node deletes/replaces the node during an
+        # ordinary move.  Only an edge that does not own the dragged node is
+        # a valid Place drop target.
+        endpoints = (ctypes.c_int * 2)()
+        getEdge = getattr(dll, "Tonic_GraphGetEdge", None)
+        if (getEdge is not None and
+                getEdge(self.session.model, edge, endpoints) ==
+                tonicLib.TONIC_OK and
+                self._dragNode in (int(endpoints[0]), int(endpoints[1]))):
             return
         hit = sample.surface()
         if hit is None:

@@ -22,11 +22,11 @@
 //   gizmo / brushRing                        the V1 manipulator overlays
 //   material_tube / material_hairPreview / material_overlay
 //
-// While no model is active the index publishes the static test tube at
-// /__usdGenTonic/testTube (unless USDGENTONIC_TEST_TUBE=0, which headless
-// records set). Activating a model removes it for good: it is a harness
-// convenience, not a fallback, and it must never share the frame with real
-// geometry.
+// While no model is active and USDGENTONIC_TEST_TUBE=1 the index publishes
+// the static test tube at /__usdGenTonic/testTube. It defaults off: an
+// empty stage opens clean. Activating a model removes it for good: it is a
+// harness convenience, not a fallback, and it must never share the frame
+// with real geometry.
 //
 // GetPrim NEVER cooks — it reads the last staged snapshot. Refresh() stages
 // a new one through the per-level publisher and emits leaf-exact dirties for

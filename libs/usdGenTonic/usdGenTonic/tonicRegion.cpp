@@ -293,13 +293,84 @@ std::vector<int> TonicFaceResLog2(TonicScalpMesh const &mesh,
         r = std::min(std::max(r, 2), 6);
         res[f] = r;
     }
-    // Faces fully inside one region collapse to 1x1: all four corners (quads)
-    // or all corners (n-gons) classify to the face's own id. Corner-exact
-    // classification is cheap here (one point test per corner).
+    // A loop can be wholly inside a coarse face, so corner/centroid tests do
+    // not prove that its texels are uniform.  First mark every face whose
+    // AABB overlaps a boundary segment's AABB.  This is deliberately
+    // conservative (it can retain resolution on a neighbouring face), but
+    // cannot collapse a face a boundary crosses or encloses.  Those faces
+    // need enough samples to retain sub-face region distinctions.
+    std::vector<char> hasBoundary(faceCount, 0);
+    if (loops.valid) {
+        constexpr float kEpsilon = 1e-5f;
+        for (size_t r = 0; r < loops.loopCount.size(); ++r) {
+            int const begin = loops.loopBegin[r];
+            int const count = loops.loopCount[r];
+            if (count < 2) {
+                continue;
+            }
+            float loopMin[3] = {loops.points[size_t(begin) * 3],
+                                loops.points[size_t(begin) * 3 + 1],
+                                loops.points[size_t(begin) * 3 + 2]};
+            float loopMax[3] = {loopMin[0], loopMin[1], loopMin[2]};
+            for (int i = 1; i < count; ++i) {
+                float const *p = &loops.points[size_t(begin + i) * 3];
+                for (int axis = 0; axis < 3; ++axis) {
+                    loopMin[axis] = std::min(loopMin[axis], p[axis]);
+                    loopMax[axis] = std::max(loopMax[axis], p[axis]);
+                }
+            }
+            for (size_t f = 0; f < faceCount; ++f) {
+                if (hasBoundary[f]) {
+                    continue;
+                }
+                bool overlapsLoop = true;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (loopMax[axis] < mesh.faceMin[f * 3 + axis] -
+                                            kEpsilon ||
+                        loopMin[axis] > mesh.faceMax[f * 3 + axis] +
+                                            kEpsilon) {
+                        overlapsLoop = false;
+                        break;
+                    }
+                }
+                if (!overlapsLoop) {
+                    continue;
+                }
+                for (int i = 0; i < count; ++i) {
+                    float const *a = &loops.points[size_t(begin + i) * 3];
+                    float const *b = &loops.points[
+                        size_t(begin + ((i + 1) % count)) * 3];
+                    bool overlap = true;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        float const lo = std::min(a[axis], b[axis]);
+                        float const hi = std::max(a[axis], b[axis]);
+                        if (hi < mesh.faceMin[f * 3 + axis] - kEpsilon ||
+                            lo > mesh.faceMax[f * 3 + axis] + kEpsilon) {
+                            overlap = false;
+                            break;
+                        }
+                    }
+                    if (overlap) {
+                        hasBoundary[f] = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for (size_t f = 0; f < faceCount; ++f) {
+        if (hasBoundary[f]) {
+            res[f] = std::max(res[f], 6);  // 64x64 on a boundary-bearing face
+        }
+    }
+    // Faces fully inside one region collapse to 1x1 only when no region
+    // boundary can affect them.  Corner-exact classification is cheap here
+    // (one point test per corner), but is insufficient by itself for a
+    // closed small region contained by the face.
     if (loops.valid && maps.faceRegion.size() == faceCount) {
         for (size_t f = 0; f < faceCount; ++f) {
             int const own = maps.faceRegion[f];
-            if (own < 0 || maps.intersected[f]) {
+            if (own < 0 || maps.intersected[f] || hasBoundary[f]) {
                 continue;
             }
             int const nv = mesh.faceVertexCounts[f];

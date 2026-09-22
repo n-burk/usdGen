@@ -50,6 +50,7 @@ namespace usdGenImaging {
 /// Root published by the adapter on an applied BasisCurves prim:
 ///   usdGenCurveRest/points          VtVec3fArray at UsdTimeCode::Default()
 ///   usdGenCurveRest/hasAuthoredRest bool provenance, queried live
+///   usdGenCurveRest/surfaceCage/*   authored sparse-cage arrays, when present
 HdContainerDataSourceHandle UsdGenCurveRestContainerFactory(
     UsdPrim const &prim,
     UsdImagingDataSourceStageGlobals const &stageGlobals);

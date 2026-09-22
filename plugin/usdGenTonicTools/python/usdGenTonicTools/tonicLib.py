@@ -41,6 +41,8 @@ TONIC_GIZMO_NONE = 0
 TONIC_GIZMO_TRANSLATE = 1
 TONIC_GIZMO_RING_TRS = 2
 TONIC_GIZMO_NODE_TRANSLATE = 3
+TONIC_GIZMO_ROTATE = 4
+TONIC_GIZMO_SCALE = 5
 
 # TonicDirty (tonicModel.h): what Tonic_Publish is asked to republish ON TOP
 # of the bits the model already reports pending. 0 -- TONIC_DIRTY_PENDING --
@@ -269,6 +271,18 @@ class Library:
                                           ctypes.c_float, ctypes.c_float, cip,
                                           ctypes.c_int, cip, cip, cip, cip]
         dll.Tonic_GraphStroke.restype = ctypes.c_int
+        dll.Tonic_GraphCreateRegion.argtypes = [cvp, cip, cip, cfp,
+                                                ctypes.c_int, cip]
+        dll.Tonic_GraphCreateRegion.restype = ctypes.c_int
+        dll.Tonic_GraphGetNode.argtypes = [cvp, ctypes.c_int, cip, cfp, cfp]
+        dll.Tonic_GraphGetNode.restype = ctypes.c_int
+        dll.Tonic_GraphGetEdge.argtypes = [cvp, ctypes.c_int, cip]
+        dll.Tonic_GraphGetEdge.restype = ctypes.c_int
+        dll.Tonic_GraphGetNodeDisplayPosition.argtypes = [cvp, ctypes.c_int,
+                                                           cfp]
+        dll.Tonic_GraphGetNodeDisplayPosition.restype = ctypes.c_int
+        dll.Tonic_GraphMoveNodes.argtypes = [cvp, cip, cip, cfp, ctypes.c_int]
+        dll.Tonic_GraphMoveNodes.restype = ctypes.c_int
         dll.Tonic_GraphMirrorX.argtypes = [cvp, cip, ctypes.c_int, cip]
         dll.Tonic_GraphMirrorX.restype = ctypes.c_int
         dll.Tonic_SetSnapRadius.argtypes = [cvp, ctypes.c_float]
@@ -281,6 +295,9 @@ class Library:
         dll.Tonic_GetMirrorX.restype = ctypes.c_int
         dll.Tonic_Rasterise.argtypes = [cvp]
         dll.Tonic_Rasterise.restype = ctypes.c_int
+        dll.Tonic_RegionAtSurface.argtypes = [cvp, ctypes.c_int,
+                                              ctypes.c_float, ctypes.c_float]
+        dll.Tonic_RegionAtSurface.restype = ctypes.c_int
         dll.Tonic_GetMapVersion.argtypes = [cvp]
         dll.Tonic_GetMapVersion.restype = ctypes.c_ulonglong
         dll.Tonic_GetGraphCounts.argtypes = [cvp, cip, cip, cip]
@@ -395,6 +412,14 @@ class Library:
         dll.Tonic_GetFreezeRoots.restype = ctypes.c_int
         dll.Tonic_RefillGuides.argtypes = [cvp, ctypes.c_float]
         dll.Tonic_RefillGuides.restype = ctypes.c_int
+        dll.Tonic_GenerateGuides.argtypes = [cvp, ctypes.c_float]
+        dll.Tonic_GenerateGuides.restype = ctypes.c_int
+        dll.Tonic_ClearGeneratedCurves.argtypes = [cvp]
+        dll.Tonic_ClearGeneratedCurves.restype = ctypes.c_int
+        dll.Tonic_SetGeneratedCurvesVisible.argtypes = [cvp, ctypes.c_int]
+        dll.Tonic_SetGeneratedCurvesVisible.restype = ctypes.c_int
+        dll.Tonic_GetGeneratedCurvesVisible.argtypes = [cvp, cip]
+        dll.Tonic_GetGeneratedCurvesVisible.restype = ctypes.c_int
         dll.Tonic_GetGuideCounts.argtypes = [cvp, cip, cip]
         dll.Tonic_GetGuideCounts.restype = ctypes.c_int
         dll.Tonic_ReadGuidePreview.argtypes = [
@@ -432,6 +457,19 @@ class Library:
         dll.Tonic_SetAmplifiedHair.restype = ctypes.c_int
         dll.Tonic_GetAmplifiedHair.argtypes = [cvp]
         dll.Tonic_GetAmplifiedHair.restype = ctypes.c_int
+        # Optional until the Output-description native extension is present;
+        # headless panel fakes and older plugin DLLs keep their old surface.
+        outputSet = getattr(dll, "Tonic_SetOutputSettings", None)
+        if outputSet is not None:
+            outputSet.argtypes = [cvp, ctypes.c_int, ctypes.c_float,
+                                  ctypes.c_float]
+            outputSet.restype = ctypes.c_int
+        outputGet = getattr(dll, "Tonic_GetOutputSettings", None)
+        if outputGet is not None:
+            outputGet.argtypes = [cvp, ctypes.POINTER(ctypes.c_int),
+                                  ctypes.POINTER(ctypes.c_float),
+                                  ctypes.POINTER(ctypes.c_float)]
+            outputGet.restype = ctypes.c_int
         dll.Tonic_SetRingDisplay.argtypes = [cvp, ctypes.c_int]
         dll.Tonic_SetRingDisplay.restype = ctypes.c_int
         dll.Tonic_GetRingDisplay.argtypes = [cvp]
@@ -445,6 +483,17 @@ class Library:
         dll.Tonic_SetFocusLevel.restype = ctypes.c_int
         dll.Tonic_GetFocusLevel.argtypes = [cvp]
         dll.Tonic_GetFocusLevel.restype = ctypes.c_int
+        dll.Tonic_SetActiveCutEnabled.argtypes = [cvp, ctypes.c_int]
+        dll.Tonic_SetActiveCutEnabled.restype = ctypes.c_int
+        dll.Tonic_GetActiveCutEnabled.argtypes = [cvp]
+        dll.Tonic_GetActiveCutEnabled.restype = ctypes.c_int
+        dll.Tonic_SetTubeExpanded.argtypes = [
+            cvp, ctypes.c_int, ctypes.c_int]
+        dll.Tonic_SetTubeExpanded.restype = ctypes.c_int
+        dll.Tonic_GetTubeExpanded.argtypes = [cvp, ctypes.c_int]
+        dll.Tonic_GetTubeExpanded.restype = ctypes.c_int
+        dll.Tonic_IsTubeVisible.argtypes = [cvp, ctypes.c_int]
+        dll.Tonic_IsTubeVisible.restype = ctypes.c_int
         dll.Tonic_SetDisplayScale.argtypes = [cvp, ctypes.c_float]
         dll.Tonic_SetDisplayScale.restype = ctypes.c_int
         dll.Tonic_GetDisplayScale.argtypes = [cvp, cfp]

@@ -39,12 +39,14 @@
 #include "usdGenTonic/tonicTube.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -81,6 +83,9 @@ struct USDGENTONIC_API TonicGuideSet {
     std::vector<int> counts;       // CVs per guide (uniform)
     std::vector<uint64_t> ids;     // stable curve ids, 1000 + guide
     std::vector<double> frames;    // 16 doubles per root frame (row-major)
+    std::vector<int> tubeIds;      // owning tube per guide (one entry per
+                                   // guide; the pure fills stamp their tube,
+                                   // the live refill stamps each producer)
     int guideCount = 0;
     int cvCount = 0;
 };
@@ -156,6 +161,21 @@ public:
         std::vector<float> lengthProfile;  // flattened (pos, value) pairs
                                            // over the root radial fraction;
                                            // empty = uniform (K9)
+        // Legacy committed layers retain their byte-identical K9 root stream;
+        // all new authoring uses the region-v3 material sampler.
+        TonicGuideSampler sampler = TonicGuideSampler::RegionV3;
+    };
+    // Commit-only output generation is deliberately separate from the live
+    // Fill preview. A multiplier of one means the authored leaf Fill density
+    // (never the transient preview fraction); width is the authored curve
+    // width in scene units.
+    struct OutputSettings {
+        bool enabled = false;
+        float densityMultiplier = 1.0f;
+        float width = 0.01f;
+        // Mirrors the selected Bake texel override so OutputRegionMap is
+        // built at the artist-selected resolution (-1 selects automatic).
+        int ptexResolution = -1;
     };
     struct SubdivideParams {
         int count = 4;  // in [2, 8]
@@ -169,6 +189,11 @@ public:
     };
     bool SetFillParams(FillParams params);
     FillParams GetFillParams() const;
+    // Atomic, undoable output settings. They change commit output only, not
+    // the interactive guide preview or tube mesh.
+    bool SetOutputSettings(OutputSettings settings);
+    OutputSettings GetOutputSettings() const;
+    bool SetOutputPtexResolution(int resOverride);
     bool SetSubdivideParams(SubdivideParams params);
     SubdivideParams GetSubdivideParams() const;
     void SetLockFlags(bool locked, bool lockParents, bool lockChildren);
@@ -188,6 +213,12 @@ public:
         std::vector<TonicTubeSection> sections;  // P3: authored rings; empty
                                                  // in pre-P3 snapshots means
                                                  // default circles (compat)
+        bool rootFramePinned = false;
+        TonicFrame rootFrame;
+        std::array<float, 9> frameReference = {{
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f}};
         FillParams fill;
         SubdivideParams subdivide;
         bool locked = false;
@@ -230,7 +261,14 @@ public:
     // marks graph + regions dirty. Mirror-X (when enabled) twins every
     // placed node across x = 0.
     int GraphAddNode(TonicHit const &hit);
+    // Atomically close one region. Stable non-negative ids reuse live graph
+    // nodes; -1 creates at the corresponding surface hit. Returns the
+    // extracted region id, or -1 with no graph/undo/version mutation.
+    int GraphCreateRegion(std::vector<int> const &nodeIds,
+                          std::vector<TonicHit> const &hits);
     bool GraphMoveNode(int nodeId, TonicHit const &hit);
+    bool GraphMoveNodes(std::vector<int> const &nodeIds,
+                        std::vector<TonicHit> const &hits);
     int GraphConnect(int a, int b);
     int GraphSplitEdge(int edgeId, TonicHit const &hit);
     bool GraphWeld(int keep, int drop);
@@ -240,6 +278,12 @@ public:
     bool GraphDeleteNode(int nodeId);
     int GraphSnapNode(float const p[3], float radius) const;
     int GraphSnapEdge(float const p[3], float radius) const;
+    bool GraphGetNode(int nodeId, TonicGraphNode *out) const;
+    bool GraphGetEdge(int edgeId, int outNodeIds[2]) const;
+    // Viewport-only graph-node position.  The graph stores canonical scalp
+    // coordinates; this applies the same small normal lift as the scene
+    // index so interaction can target the dot the artist sees.
+    bool GraphGetNodeDisplayPosition(int nodeId, float outP[3]) const;
     bool GraphLinkRegions(int r0, int r1);
     bool GraphUnlinkRegions(int r0, int r1);
     TonicStrokeResult GraphStroke(std::vector<TonicHit> const &samples,
@@ -255,6 +299,13 @@ public:
     // dirty. Returns false with a diagnostic when no scalp is bound.
     bool Rasterise();
 
+    // Exact graph-region hit at a face-local scalp coordinate.  The return
+    // value is the source graph region id (never its interpolation id), or
+    // -1 for an uncovered/off-surface point.  Unlike the coarse K3 face map,
+    // this tests the hit itself against each closed graph loop, so separate
+    // subface regions on one coarse face remain distinguishable.
+    int RegionAtSurface(int faceId, float u, float v) const;
+
     uint64_t GetMapVersion() const;
 
     // The bake swap records the file it pointed at, so §3.1 layer builds
@@ -266,6 +317,9 @@ public:
         std::vector<TonicGraphNode> nodes;  // alive only
         std::vector<std::pair<int, int>> edges;  // alive (a, b) pairs
         std::vector<std::vector<int>> regionLoops;  // node ids per region
+        // Exact on-surface boundary samples per region. The coarse
+        // faceRegions primvar cannot distinguish two subface polygons.
+        std::vector<std::vector<float>> regionBoundaries;
         std::vector<std::pair<int, int>> linked;
         float snapRadius = 0.05f;
         std::vector<int> faceRegions;  // live primvar (K3, interp ids)
@@ -300,9 +354,10 @@ public:
     // the first one built lands in the legacy tube-0 members, each further
     // region gets a store entry with parentTubeId -1 and level 1, and a
     // second call for a region that already has a tube refreshes that tube
-    // in place (its children re-derive). `ringVerts` is 8..32 here — the
-    // authored range of plan/17 §5.2; the bridge import path keeps 3..32
-    // because a swept mesh brings whatever ring it was modelled with.
+    // in place (its children re-derive). `ringVerts=0` matches the canonical
+    // graph-loop CV count; an explicit 3..32 resolves to at least that many
+    // slots, adding only edge samples so every drawn corner remains exact.
+    // A loop needing more than 32 slots is refused.
     // Pushes ONE undo step; it no longer clears the stack.
     bool BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                              float length);
@@ -329,6 +384,10 @@ public:
     // are optional.
     bool SyncRegionTubes(std::vector<int> *outRebuilt,
                          std::vector<int> *outRemoved);
+    // Rebuild only the stored support-plane frame for every region-rooted
+    // L1 tube.  Hydrate uses this after validating a legacy raw-K4 guide
+    // payload, so subsequent live edits gain the pinned-root invariant.
+    bool PinRegionRootFrames();
     bool MoveCenterCV(int cv, float dx, float dy, float dz);
     bool InsertCenterCV(int atIndex);
     bool DeleteCenterCV(int index);
@@ -421,10 +480,21 @@ public:
     int GetTubeCenterCount(int tubeId) const;  // -1 when missing
     bool GetTubeCenterCV(int tubeId, int cv, float *x, float *y,
                          float *z) const;
+    // World position of the visible/editable center-CV handle. This is the
+    // actual section polygon's area centroid at the CV parameter; it does
+    // not replace the raw authored center returned by GetTubeCenterCV.
+    bool GetTubeCenterHandle(int tubeId, int cv, float *x, float *y,
+                             float *z) const;
     // Move one center CV with K6-down / K7-up propagation (locks gate
     // each direction). Bumps the version once. Tube 0 delegates to the
     // live members (soft selection included), then propagates.
     bool MoveTubeCenterCV(int tubeId, int cv, float dx, float dy, float dz);
+    // Translate every center CV of one tube as one rigid center-cage edit.
+    // Unlike N calls to MoveTubeCenterCV this takes one hierarchy snapshot
+    // and runs K6/K7 once, so a parent whole-tube Move never derives its
+    // children through intermediate bent parent poses. Soft selection is
+    // intentionally not involved: whole-tube translation is exact.
+    bool TranslateTube(int tubeId, float dx, float dy, float dz);
     // Flattened center deltas (du, dv, dw per CV) of tubeId; zeros for
     // tube 0 and unedited tubes.
     std::vector<float> ReadTubeDeltas(int tubeId) const;
@@ -463,6 +533,9 @@ public:
     //
     //   `viewProj`/`w`/`h`/`x`/`y`/`radiusPx` give the screen falloff (the
     //   same row-major projection and top-left pixels Tonic_Pick takes);
+    //   an active gesture freezes Grab's footprint against its press-time
+    //   center curve while each supplied delta still applies incrementally
+    //   to the current curve; other brushes shape against the current curve;
     //   `tCenter`/`tRadius` the falloff by t along the curve (tRadius <= 0
     //   means no t bound); `deltaWorld` the drag (grab) or push direction
     //   (comb); `amount` the brush scalar -- comb push distance, smooth
@@ -538,6 +611,10 @@ public:
         bool transientParent = false;
         bool persistent = false;
         bool imported = false;
+        // False only while hydrating a legacy layer that did not author the
+        // inherited-boundary binding attribute. Current empty vectors are
+        // meaningful and remain authored.
+        bool hasInheritedBoundaryBindings = true;
         std::vector<int> members;   // group-parent members (empty otherwise)
         bool hasTube = false;
     };
@@ -600,10 +677,31 @@ public:
     float GetPreviewFraction() const;
     void SetFreezeRoots(bool freeze);
     bool GetFreezeRoots() const;
+    // Regenerate the live guide preview at `fraction` of full density
+    // (negative = the panel's preview fraction). Every PRODUCING tube
+    // fills from its own fill params -- a subdivided parent's fill is
+    // suspended (§2.3), imports and group parents never fill -- and the
+    // per-tube sets merge in ascending tube order with running curve ids
+    // from 1000, so a one-tube groom refills bit-exactly as it always
+    // has. Region faces partition from each L1 root down to the child
+    // cell that claims them, exactly as the committer partitions them,
+    // so the live preview and the committed Guides agree whenever the
+    // region maps are current. True when at least one tube filled; a
+    // degenerate tube is skipped, never fatal to its siblings.
     bool RefillGuides(float fraction);
+    // Explicit Fill after Clear: restores generation. Ordinary refills are
+    // auto-refreshes and respect a cleared cache.
+    bool GenerateGuides(float fraction);
+    bool ClearGeneratedCurves();
+    bool SetGeneratedCurvesVisible(bool visible);
+    bool GetGeneratedCurvesVisible() const;
+    bool GeneratedCurvesSuppressed() const;
+    // Hydrate installs this persisted authoring state without an undo step.
+    void SetGeneratedCurvesSuppressed(bool suppressed);
     struct GuidePreview {
         std::vector<float> points;  // 3 floats per CV, guide-major
         std::vector<int> counts;
+        std::vector<int> tubeIds;  // owning tube per guide, ascending merge
         int guideCount = 0;
         int cvCount = 0;
     };
@@ -623,8 +721,17 @@ public:
     // the CPU twin in photo-finishes (device tessellation carries
     // transcendental wobble vs the host mirror — and matches the
     // rendered pixels exactly, which is what the pick should hit).
+    // Raw K11 candidate pick. Its TubeVert result is always an actual
+    // tessellated vertex and `distPx` is that vertex's screen distance; the
+    // C ABI Tonic_Pick exposes this record verbatim for GPU/CPU parity.
     TonicPickHit Pick(float const viewProj[16], int w, int h, float x,
                       float y, float radiusPx, uint32_t kindMask) const;
+    // Selection/hover pick over the same candidates, with displayed-handle
+    // priority and a visible tube-face owner fallback. This deliberately
+    // does not share the raw Tonic_Pick distance/index contract.
+    TonicPickHit PickItem(float const viewProj[16], int w, int h, float x,
+                           float y, float radiusPx,
+                           uint32_t kindMask) const;
 
     // -- V0: what the viewport publishes (plan/18 §2.1, §2.2) -------------
     //
@@ -662,20 +769,21 @@ public:
         // ladder's fourth step (plan/18 §3.7) for every level outside the
         // edited subtree; never authored to USD.
         bool centersOnly = false;
-        // Whether the center curves and CV dots draw at all. Graph and
-        // Output mode show opaque tubes and nothing else (plan/18 §2.4a:
-        // the reference stills show EITHER solid tubes OR control curves
-        // through x-ray, never both), and the curves live inside the tube
-        // they belong to, so drawing them under an opaque surface only
-        // costs a draw call.
+        // Whether the center curves and CV dots draw at all. Graph hides
+        // authoring helpers behind the region surface; Output hides its
+        // authoring tubes and cage so committed amplified tiles remain
+        // visible. The editable modes choose opaque surfaces or x-rayed
+        // controls as their policy requires.
         bool centers = true;
-        // Whether the K9/K10 guide PREVIEW draws. plan/18 §2.4a puts the
-        // guides in the Fill and Output rows: the 2014 and 2018 stills
-        // show hair in the fill views and control geometry everywhere
-        // else, and a full-density preview over an x-rayed tube hides
-        // exactly the center curve the other modes exist to edit. This is
-        // ANDed with "show amplified hair", which is the artist's switch
-        // and is not overridden here.
+        // The visible point controls name one explicit Tube sub-mode. The
+        // center curve may remain as a guide while its inactive dot set is
+        // hidden; these flags never change the underlying pick domains.
+        bool centerCVDots = true;
+        bool ringCVDots = true;
+        // Whether the K9/K10 interactive guide preview draws. It appears
+        // in Fill; Output presents the committed amplified tile output and
+        // therefore hides this helper. This is ANDed with "show amplified
+        // hair", which is the artist's switch and is not overridden here.
         bool guides = true;
     };
     // The plan/18 §2.4a x-ray strengths: the focused level, and every
@@ -723,6 +831,16 @@ public:
     // §2.4a). 0 = no focus. Marks Display dirty and bumps the version.
     bool SetFocusLevel(int level);
     int GetFocusLevel() const;
+    // Per-branch hierarchy navigation is opt-in. While disabled, every
+    // live tube remains visible and the legacy focus-level policy applies.
+    // While enabled, the visible frontier contains each unexpanded tube
+    // whose ancestors are all expanded; expanding a parent replaces it with
+    // its direct children without affecting unrelated branches.
+    bool SetActiveCutEnabled(bool enabled);
+    bool GetActiveCutEnabled() const;
+    bool SetTubeExpanded(int tubeId, bool expanded);
+    bool GetTubeExpanded(int tubeId) const;
+    bool IsTubeVisibleInActiveCut(int tubeId) const;
     // World units per screen pixel at the focus point, as the viewport
     // controller measures it (tonicCamera.worldPerPixel). Storm sizes
     // points and curves in WORLD units, so this is the only way an overlay
@@ -874,6 +992,10 @@ private:
     bool _SubtreeCarriesDeltasLocked(int tubeId) const;
     // Remove `tubeId` and every descendant from the store (never tube 0).
     void _DropSubtreeLocked(int tubeId);
+    // True when `tubeId` has a non-imported child in the store: a bridge
+    // import is not a subdivision, so a parent that only carries imports
+    // keeps its own fill (the snapshot's rule, tonicCommit.cpp).
+    bool _FillSuspendedLocked(int tubeId) const;
     // Re-root an existing L1 tube on `regionId`, keeping its CV count,
     // ring CV count and length; children re-derive (K6 down, K7 up).
     bool _RerootTubeLocked(int tubeId, int regionId);
@@ -896,27 +1018,46 @@ private:
     bool _WriteDescToTube0Locked(TonicTubeDesc const &desc);
     // K6 re-derive of tubeId's whole subtree from its (new) actual;
     // K7 refresh of its ancestors. Caller holds _mutex; no version bump.
+    struct HierarchyRollback;
     bool _PropagateDownLocked(int tubeId);
-    bool _PropagateUpLocked(int tubeId);
+    // Attachment-only K6: after a graph region edit changes an L1 root's
+    // footprint, descendants retain their upper sculpt while their inherited
+    // base center/section reattach to the freshly derived parent boundary.
+    bool _PropagateAttachmentDownLocked(int tubeId);
+    bool _ConformRegionRootSectionLocked(int tubeId,
+                                         TonicScalpGraph const &oldGraph,
+                                         int oldRegionId, int newRegionId,
+                                         TonicTubeDesc const &oldActual,
+                                         bool *outChanged);
+    // `beforeEdit` is the immutable hierarchy at the start of a direct
+    // child edit.  K7 uses it only to tell a moved inherited boundary slot
+    // from an internal child edit; ordinary callers may omit it.
+    bool _PropagateUpLocked(int tubeId,
+                            HierarchyRollback const *beforeEdit = nullptr);
     // One sculpt stroke's mutation (deltas already shaped): apply, keep
     // the length, re-derive deltas, K6 down and K7 up. The CALLER holds
     // _mutex and owns the rollback snapshot, the undo push and the version
     // bump, which is how a mirrored stroke stays one undo step.
+    // `beforeEdit` is the hierarchy before the entire shaped stroke; K7
+    // needs it to distinguish an inherited boundary from an internal CV.
     bool _SculptApplyLocked(int tubeId, std::string const &brush,
                             int const *cvIds, float const *deltas,
-                            int cvCount, bool preserveLength, bool mirrorX);
+                            int cvCount, bool preserveLength, bool mirrorX,
+                            HierarchyRollback const *beforeEdit = nullptr);
     // V0b per-tube edits (caller holds _mutex). _ChildDescLocked hands out
     // the child's mutable record; _FinishChildEditLocked recomputes the
     // deltas against the derived shape (imports keep theirs at zero),
     // propagates K6 down and K7 up, and leaves the version bump to the
     // caller. `layoutChanged` is refused on a derived child.
     bool _FinishChildEditLocked(int tubeId, bool layoutChanged,
-                                uint32_t dirtyBits);
+                                uint32_t dirtyBits,
+                                HierarchyRollback const *beforeEdit = nullptr);
     // Take the lock, snapshot for rollback, run `edit` over the child's
     // authored shape, finish as above, seal one undo step and bump the
     // version once. Any failure restores the snapshot wholesale.
     bool _EditChildTube(int tubeId, bool layoutChanged, uint32_t dirtyBits,
                         std::function<bool(TonicTubeDesc &)> const &edit);
+    bool _RefillGuidesLocked(float fraction);
     // Import core (caller holds _mutex): validates + inserts, bumps
     // version + map. Shared by ImportLockedTube/ImportSweptMesh.
     bool _ImportLockedTubeLocked(int parentId, float const *cx,
@@ -944,7 +1085,10 @@ private:
         TonicTubeShape shape;
         bool useSections = false;
         std::vector<TonicGuideRoot> roots;
+        std::map<int, std::vector<TonicGuideRoot>> tubeRoots;
         TonicGuideSet guides;
+        bool generatedCurvesSuppressed = false;
+        OutputSettings output;
         std::shared_ptr<GraphUndoState const> graph;  // null = no scalp
         // Region ownership travels with the step (plan/18 §7 G14): undoing
         // a stub build has to put the region->tube map back, or the next
@@ -952,10 +1096,23 @@ private:
         std::map<int, int> regionTube;
         std::map<int, std::vector<int>> tubeRegionKey;
         int tube0Region = -1;
+        bool tube0RootFramePinned = false;
+        TonicFrame tube0RootFrame;
+        std::array<float, 9> tube0FrameReference = {{
+            1.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 1.0f}};
         std::string label;  // what the Edit strip calls this step
     };
     HierarchyRollback _SnapshotHierarchyLocked() const;
     void _RestoreHierarchyLocked(HierarchyRollback const &snap);
+    // Move every L1 tube whose stable region loop survives a geometry-only
+    // graph edit, along with its complete stored subtree. `reference` is the
+    // press-time state for a gesture (or the immediately preceding state for
+    // a one-shot edit), so successive samples never compound transport.
+    bool _TransportRegionAttachmentsLocked(
+        HierarchyRollback const &reference,
+        std::vector<int> const &movedNodeIds);
     // P6 undo: bounded stack of pre-mutation snapshots (tube +
     // hierarchy + guides state — the sculpt/move/subdivide/merge
     // surface; graph/region state and deterministic refills are not
@@ -987,11 +1144,27 @@ private:
     // Every tube id in the model, ascending (tube 0 when built, then the
     // store). The selection prunes against this on read.
     std::vector<int> _LiveTubeIdsLocked() const;
+    // Active-cut helpers. The caller holds _mutex. A collapsed tube owns the
+    // frontier and hides its descendants; an expanded tube hides itself.
+    bool _IsTubeVisibleInActiveCutLocked(int tubeId) const;
+    bool _IsDescendantOfLocked(int tubeId, int ancestorTubeId) const;
+    void _PruneActiveCutLocked();
     // V1 selection internals (caller holds _mutex). _BuildPickSetsLocked
     // fills `sets` from the scratch vectors it also fills, so the point
     // pick, the marquee and the selection bounds all read one candidate
     // layout. _nodeIds maps a graph-node candidate ordinal to its node id.
     struct _PickScratch {
+        // The displayed surface is a set of regular ring strips.  Point
+        // candidates use the flattened vertex stream below, while a body
+        // click walks these strips as quads so it can name a tube even when
+        // the cursor is far from every tessellated vertex.
+        struct SurfaceStrip {
+            int tubeId = -1;
+            int level = 0;
+            int firstVertex = 0;
+            int ringCount = 0;
+            int ringVerts = 0;
+        };
         std::vector<float> center;
         std::vector<float> section;
         std::vector<float> nodes;
@@ -1001,9 +1174,28 @@ private:
         std::vector<int> nodeIds;
         std::vector<int> edgeIds;
         std::vector<int> regionIds;
+        // Multi-tube pick maps: every center candidate names its
+        // (tubeId, cv); every surface candidate names its tube.
+        // tubeVertPositions is only built when children exist -- the
+        // single-tube path keeps pointing at the host mirror, which is
+        // what the device pick mirror stays in sync with.
+        std::vector<int> centerTubeIds;
+        std::vector<int> centerCvIds;
+        // Section candidates are a concatenated, variable-ring-vertex
+        // stream.  TonicPickSets preserves its compact (ring, slot) ABI;
+        // these maps recover the actual child owner from that stream.
+        std::vector<int> sectionTubeIds;
+        std::vector<int> sectionRingIds;
+        std::vector<int> sectionSlotIds;
+        std::vector<int> ringTubeIds;
+        std::vector<int> ringIds;
+        std::vector<float> tubeVertPositions;
+        std::vector<int> tubeVertTubeIds;
+        std::vector<SurfaceStrip> surfaceStrips;
         int ringVerts = 0;  // section CVs per ring (0 = no authored rings)
     };
-    TonicPickSets _BuildPickSetsLocked(_PickScratch *scratch) const;
+    TonicPickSets _BuildPickSetsLocked(
+        _PickScratch *scratch, uint32_t displayGraphKinds = 0) const;
     TonicSelectionItem _ItemFromCandidateLocked(
         _PickScratch const &scratch, uint32_t kind, int index,
         int subIndex) const;
@@ -1074,12 +1266,27 @@ private:
     float _softCenter = 0.0f;
     float _softRadius = 0.0f;
     // P3 guide cache: full-density roots + guides, refilled explicitly.
+    // _roots is the merged census in ascending tube order (what GetRoots
+    // and the root census report); each tube's freeze store lives in
+    // _tubeRoots keyed by tube id, so a frozen leaf keeps its own prefix
+    // while its siblings re-sample. A one-tube groom keeps its roots in
+    // _tubeRoots[0] and the merged copy in _roots, identical in content.
     std::vector<TonicGuideRoot> _roots;
+    std::map<int, std::vector<TonicGuideRoot>> _tubeRoots;
     TonicGuideSet _guides;
+    bool _generatedCurvesSuppressed = false;
+    bool _generatedCurvesVisible = true;
     float _previewFraction = 0.25f;
     bool _freezeRoots = false;
     int _tubeRegionId = -1;
+    bool _rootFramePinned = false;
+    TonicFrame _rootFrame;
+    std::array<float, 9> _frameReference = {{
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f}};
     FillParams _fill;
+    OutputSettings _output;
     SubdivideParams _subdivide;
     bool _locked = false;
     bool _lockParents = false;
@@ -1145,9 +1352,26 @@ private:
     // Sparse: a level with no entry reads the LevelDisplay default.
     std::map<int, LevelDisplay> _levelDisplay;
     int _focusLevel = 0;
+    // Viewport-only active cut. It is deliberately separate from authored
+    // hierarchy state and defaults off for ABI/persistence compatibility.
+    bool _activeCutEnabled = false;
+    std::set<int> _expandedTubeIds;
     float _displayScale = 0.0f;
     std::string _groomPath;
 };
+
+// Display-only graph placement shared by the scene index and interactive
+// picker.  It never changes TonicGraphNode::p, which remains the canonical
+// K11/scalp-authoring coordinate.
+float USDGENTONIC_API
+TonicGraphDisplayLift(TonicScalpMesh const *scalp);
+void USDGENTONIC_API
+TonicGraphDisplayPosition(TonicGraphNode const &node,
+                          TonicScalpMesh const *scalp, float outP[3]);
+void USDGENTONIC_API
+TonicGraphDisplaySurfacePosition(float const canonicalP[3],
+                                 TonicScalpMesh const *scalp,
+                                 float outP[3]);
 
 // -- P3 deterministic guide fill (K8/K9/K10) ----------------------------------
 //
@@ -1172,10 +1396,18 @@ TonicGuideSet USDGENTONIC_API TonicGenerateGuidesOnScalp(
 // The tube-id-free spellings above are these with tubeId 0.
 TonicGuideSet USDGENTONIC_API
 TonicGenerateGuidesForTube(TonicModel::TubeSnapshot const &snapshot,
-                           int tubeId);
+                           int tubeId, bool usePinnedRootFrame = true);
 TonicGuideSet USDGENTONIC_API TonicGenerateGuidesOnScalpForTube(
     TonicModel::TubeSnapshot const &snapshot, TonicScalpMesh const &scalp,
-    int const *regionFaces, int regionFaceCount, int tubeId);
+    int const *regionFaces, int regionFaceCount, int tubeId,
+    bool usePinnedRootFrame = true);
+// Exact closed-polygon mesh fill. `sourceRegionId` addresses the graph
+// region, so this remains distinct when several regions share one face.
+TonicGuideSet USDGENTONIC_API TonicGenerateGuidesOnRegionForTube(
+    TonicModel::TubeSnapshot const &snapshot, TonicScalpMesh const &scalp,
+    TonicRegionLoops const &loops, int sourceRegionId, int tubeId,
+    std::vector<TonicRootOwnershipCell> const *ownership = nullptr,
+    bool usePinnedRootFrame = true);
 // The snapshot form of one tube's authored shape: the committer and hydrate
 // both turn a TubeRecord into the TubeSnapshot the guide fills take.
 TonicModel::TubeSnapshot USDGENTONIC_API
@@ -1233,7 +1465,7 @@ TonicRgb USDGENTONIC_API TonicClumpColor(int regionId, int level,
 //   Hierarchy            x-ray 25 %, centers   x-ray 10 %          sel    off
 //   Sculpt               x-ray 25 %, centers   x-ray 10 %          sel    off
 //   Fill                 x-ray 25 %, centers   x-ray 25 %          sel    ON
-//   Output               opaque, no centers    opaque, no centers  off    ON
+//   Output               hidden                hidden              off    off
 //
 // Tube · Ring keeps the focused tube opaque on purpose: its rings lie ON the
 // surface, so they read against it, and an x-rayed tube would only make the
@@ -1257,12 +1489,14 @@ enum TonicDisplayMode {
     TonicDisplayMode_Hierarchy = 4,
     TonicDisplayMode_Sculpt = 5,
     TonicDisplayMode_Output = 6,
-    TonicDisplayMode_Count = 7,
+    // Append only: callers and recordings retain the established ids.
+    TonicDisplayMode_TubeObject = 7,
+    TonicDisplayMode_Count = 8,
 };
 
 // The mode ids are the ones tonicModes.MODES spells ("graph", "tube",
 // "fill", "hierarchy", "sculpt", "output") and the sub-mode ids the ones
-// TUBE_SUBMODES spells ("center", "ring", "section"). A null or unknown
+// TUBE_SUBMODES spells ("tube", "center", "ring", "section"). A null or unknown
 // sub-mode falls back to that mode's default row; an unknown mode answers
 // -1 and leaves the caller's display state alone.
 int USDGENTONIC_API TonicDisplayModeFromNames(char const *mode,

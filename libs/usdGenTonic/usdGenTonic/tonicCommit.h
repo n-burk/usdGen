@@ -51,6 +51,20 @@ struct USDGENTONIC_API TonicCommitPaths {
     {
         return groomPath.AppendChild(TfToken("Guides"));
     }
+    // Commit-owned sparse cage rails.  Output's CurveSource interpolates its
+    // dense hairs at cook time; it never writes dense output arrays to USD.
+    SdfPath OutputCurvesPath() const
+    {
+        return groomPath.AppendChild(TfToken("OutputCurves"));
+    }
+    SdfPath OutputRegionMapPath() const
+    {
+        return groomPath.AppendChild(TfToken("OutputRegionMap"));
+    }
+    SdfPath OutputPath() const
+    {
+        return groomPath.AppendChild(TfToken("Output"));
+    }
     SdfPath ScalpGraphPath() const
     {
         return groomPath.AppendChild(TfToken("ScalpGraph"));
@@ -81,9 +95,18 @@ struct USDGENTONIC_API TonicSnapshotTube {
     int level = 1;
     int parentTubeId = -1;  // -1 = L1 root or an on-the-fly group parent
     int childIndex = -1;    // index within the parent's subdivision
-    TonicModel::TubeSnapshot tube;  // shape + fill + subdivide + locks
+    // Shape + fill + subdivide + locks, including the row-major local-to-
+    // world frameReference rotation. It is authored per tube so the frame
+    // used to interpret hierarchical deltas survives reload.
+    TonicModel::TubeSnapshot tube;
     std::vector<float> centerDeltas;   // 3 per center CV, in the derived frames
     std::vector<float> sectionDeltas;  // 2 per section CV, in the section plane
+    // (scale, twist) residual per section.  Empty is the legacy spelling and
+    // means exact zero residuals.
+    std::vector<float> sectionDeltaTransforms;
+    // Flattened (section, parentSlot, childSlot) triples for the inherited
+    // L1 boundary corners K7 may align. Empty is the legacy spelling.
+    std::vector<int> inheritedBoundaryBindings;
     bool transientParent = false;  // on-the-fly parent, not committed
     bool persistent = false;       // UsdGenTubeHierarchyAPI:persistent
     bool imported = false;         // bridge import: explicit, locked shape
@@ -94,6 +117,9 @@ struct USDGENTONIC_API TonicSnapshotTube {
     // Mesh-fill roots for THIS tube: the scalp faces it owns after the
     // hierarchy partition (empty = the root-disc stream).
     std::vector<int> regionFaces;
+    // Exact graph support for an L1 tube. Moving this boundary inside a
+    // coarse face changes roots even when regionFaces is unchanged.
+    std::vector<float> regionBoundary;
     // Everything TonicGuidesFromSnapshot reads off this entry, hashed
     // (plan/18 §7 G6). Filled by TonicSnapshotFromModel after the faces are
     // partitioned, so it is the LAST thing computed about a tube. Two
@@ -108,6 +134,16 @@ struct USDGENTONIC_API TonicSnapshotTube {
 // the composed stage (the worker must not read the stage).
 struct USDGENTONIC_API TonicSnapshot {
     uint64_t version = 0;
+    // Clear Generated Curves is authored state, so a commit/hydrate round
+    // trip must not silently regenerate the cleared Guides prim.
+    bool generatedCurvesSuppressed = false;
+    // Commit-only hairs are independent of the interactive Guide visibility
+    // and Clear Generated Curves state. Missing legacy attributes hydrate to
+    // these defaults.
+    bool outputEnabled = false;
+    float outputDensityMultiplier = 1.0f;
+    float outputWidth = 0.01f;
+    int outputPtexResolution = -1;
     std::vector<TonicSnapshotTube> tubes;
     TonicModel::GraphSnapshot graph;  // scalp graph + live primvar + map file
     SdfPath scalpPath;  // empty = author no scalp opinion
@@ -234,7 +270,8 @@ bool USDGENTONIC_API TonicBuildCommitLayer(TonicSnapshot const &snapshot,
                                            TonicCommitPaths const &paths,
                                            SdfLayerRefPtr *outLayer,
                                            std::string *err,
-                                           TonicGuideCache *cache = nullptr);
+                                           TonicGuideCache *cache = nullptr,
+                                           TonicGuideCache *outputCache = nullptr);
 
 // Decide the GuideInterpolate fill-in against the COMPOSED stage (UI thread,
 // at enqueue time). The tool never rewrites an operator stack an artist has
@@ -392,8 +429,9 @@ public:
     // session rooted at the committer's description path, so a request
     // still queued on that session's owner is dropped before the engine
     // sees it. Requests the engine already holds keep its own supersede
-    // behaviour. Returns the number of sessions whose token moved (0 when
-    // no description is linked, or nothing is cooking).
+    // behaviour. The commit-owned Output description is cancelled separately
+    // from the legacy description path. Returns the number of sessions whose
+    // token moved (0 when neither path is linked or cooking).
     //
     // Callable from the gesture thread: the token is an atomic and this
     // takes no owner command and no lock.
@@ -439,6 +477,10 @@ private:
     struct _PartialSlot {
         SdfPath path;
         bool selfOnly = false;  // prim self (type + own props), no children
+        // OutputCurves, OutputRegionMap and Output are one active source
+        // graph: cage topology, categorical ownership and source relation
+        // land in one SdfChangeBlock.
+        bool outputPair = false;
     };
 
     TonicModel *_model;
@@ -447,6 +489,10 @@ private:
     // Worker-thread only: every read and write happens inside _WorkerLoop's
     // call to TonicBuildCommitLayer, so it needs no lock of its own.
     TonicGuideCache _guideCache;
+    // Output uses a density-scaled private snapshot. Keep it separate from
+    // interactive Guides so toggling Output cannot evict their cache; width
+    // is intentionally not part of this geometry key.
+    TonicGuideCache _outputGuideCache;
 
     std::thread _worker;
     mutable std::mutex _mutex;

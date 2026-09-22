@@ -50,6 +50,9 @@ bool ValidateTube(TonicTubeDesc const &tube, char const *who, std::string *err)
 
 struct Pt {
     float u = 0.0f, v = 0.0f;
+    // K14 provenance only: an original parent polygon corner.  Clip-created
+    // intersections and subdivided samples deliberately stay -1.
+    int parentSlot = -1;
 };
 
 // Placed ring coords: the K5 spelling (scale, then twist rotation).
@@ -488,11 +491,48 @@ bool FloatVecEqual(std::vector<float> const &a, std::vector<float> const &b)
     return std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
 }
 
+bool RootFrameEqual(TonicTubeDesc const &a, TonicTubeDesc const &b)
+{
+    if (a.frameReference != b.frameReference) {
+        return false;
+    }
+    if (a.rootFramePinned != b.rootFramePinned) {
+        return false;
+    }
+    if (!a.rootFramePinned) {
+        return true;
+    }
+    TonicFrame const &x = a.rootFrame;
+    TonicFrame const &y = b.rootFrame;
+    return x.tx == y.tx && x.ty == y.ty && x.tz == y.tz &&
+           x.nx == y.nx && x.ny == y.ny && x.nz == y.nz &&
+           x.bx == y.bx && x.by == y.by && x.bz == y.bz;
+}
+
+bool BoundaryBindingsEqual(std::vector<TonicParentBoundaryBinding> const &a,
+                           std::vector<TonicParentBoundaryBinding> const &b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].section != b[i].section ||
+            a[i].parentSlot != b[i].parentSlot ||
+            a[i].childSlot != b[i].childSlot) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool DescEqual(TonicTubeDesc const &a, TonicTubeDesc const &b)
 {
     if (a.ringVerts != b.ringVerts || a.tubeId != b.tubeId ||
+        !RootFrameEqual(a, b) ||
         a.regionId != b.regionId || a.level != b.level ||
         a.parentTubeId != b.parentTubeId || a.childIndex != b.childIndex ||
+        !BoundaryBindingsEqual(a.inheritedBoundaryBindings,
+                               b.inheritedBoundaryBindings) ||
         a.sections.size() != b.sections.size() ||
         !FloatVecEqual(a.centerX, b.centerX) ||
         !FloatVecEqual(a.centerY, b.centerY) ||
@@ -507,6 +547,195 @@ bool DescEqual(TonicTubeDesc const &a, TonicTubeDesc const &b)
             return false;
         }
     }
+    return true;
+}
+
+// K7 only conforms inherited outer material corners. K14 records the child
+// sample that physically retained each original parent corner; intersections
+// and inserted cut detail deliberately never participate here.
+struct BoundTarget {
+    float p[3] = {};
+    bool hasOwner = false;
+    int childOffset = -1;
+    int childIndex = std::numeric_limits<int>::max();
+    TonicParentBoundaryBinding binding;
+};
+
+bool SectionSlotWorld(TonicTubeDesc const &tube,
+                      std::vector<TonicFrame> const &frames,
+                      int sectionIndex, int slot, float out[3],
+                      std::string *err)
+{
+    if (sectionIndex < 0 || sectionIndex >= int(tube.sections.size()) ||
+        slot < 0 || slot >= int(tube.sections[size_t(sectionIndex)].u.size()) ||
+        slot >= int(tube.sections[size_t(sectionIndex)].v.size())) return false;
+    TonicTubeSection const &section = tube.sections[size_t(sectionIndex)];
+    float center[3] = {}; TonicFrame frame; std::string derr;
+    if (!TonicSampleCenterCpu(tube, frames, section.t, &center[0], &center[1],
+                              &center[2], &frame, &derr)) return fail(err, derr.c_str());
+    float const scale = section.scale > 1e-6f ? section.scale : 1e-6f;
+    float const ct = std::cos(section.twist), st = std::sin(section.twist);
+    float const ru = section.u[size_t(slot)] * scale;
+    float const rv = section.v[size_t(slot)] * scale;
+    float const u = ru * ct - rv * st, v = ru * st + rv * ct;
+    out[0] = center[0] + frame.nx * u + frame.bx * v;
+    out[1] = center[1] + frame.ny * u + frame.by * v;
+    out[2] = center[2] + frame.nz * u + frame.bz * v;
+    return true;
+}
+
+bool InterpBoundTarget(std::vector<TonicTubeSection> const &sections,
+                       std::vector<BoundTarget> const &targets, int slot,
+                       int ringVerts, float t, float out[3])
+{
+    int const n = int(sections.size());
+    int k = 0;
+    while (k + 1 < n - 1 && sections[size_t(k + 1)].t < t) ++k;
+    int const next = k + 1, prev = k > 0 ? k - 1 : k;
+    int const following = k + 2 < n ? k + 2 : next;
+    float const dt = sections[size_t(next)].t > sections[size_t(k)].t
+        ? sections[size_t(next)].t - sections[size_t(k)].t : 1.0f;
+    float f = std::max(0.0f, std::min(1.0f, (t - sections[size_t(k)].t) / dt));
+    for (int axis = 0; axis < 3; ++axis) {
+        float const a = targets[size_t(k * ringVerts + slot)].p[axis];
+        float const b = targets[size_t(next * ringVerts + slot)].p[axis];
+        float const p = targets[size_t(prev * ringVerts + slot)].p[axis];
+        float const q = targets[size_t(following * ringVerts + slot)].p[axis];
+        out[axis] = TonicHermite(a, b, k == 0 ? b - a : 0.5f * (b - p),
+                                 next == n - 1 ? b - a : 0.5f * (q - a), f);
+    }
+    return true;
+}
+
+bool TonicParentHoldingEdgesCpu(std::vector<TonicTubeDesc> const &children,
+                                std::vector<TonicTubeDesc> const *priorChildren,
+                                TonicTubeDesc const &hint,
+                                TonicTubeDesc *parentOut, std::string *err)
+{
+    if (!parentOut || hint.ringVerts < 3 || hint.centerX.size() < 2 ||
+        hint.sections.size() < 2) return fail(err, "TonicMergeTubesCpu: bad holding-edge layout");
+    int const nSec = int(hint.sections.size()), rv = hint.ringVerts;
+    std::vector<TonicFrame> hintFrames; std::string derr;
+    if (!TonicTubeFramesCpu(hint, &hintFrames, &derr)) return fail(err, derr.c_str());
+    // Seed a COMPLETE absolute target boundary from the current parent. This
+    // makes unbound/internal edits a bit-exact no-op and keeps every other
+    // L1 edge world-stable when a holding edge changes the center/frame.
+    std::vector<BoundTarget> targets(size_t(nSec * rv));
+    for (int s = 0; s < nSec; ++s) for (int slot = 0; slot < rv; ++slot) {
+        if (!SectionSlotWorld(hint, hintFrames, s, slot,
+                              targets[size_t(s * rv + slot)].p, err)) return false;
+    }
+    // Resolve frozen material ownership before inspecting edited coordinates.
+    for (size_t offset = 0; offset < children.size(); ++offset) {
+        TonicTubeDesc const &child = children[offset];
+        for (TonicParentBoundaryBinding const &binding : child.inheritedBoundaryBindings) {
+            if (binding.section < 0 || binding.section >= nSec ||
+                binding.parentSlot < 0 || binding.parentSlot >= rv ||
+                binding.section >= int(child.sections.size()) || binding.childSlot < 0 ||
+                binding.childSlot >= int(child.sections[size_t(binding.section)].u.size()) ||
+                binding.childSlot >= int(child.sections[size_t(binding.section)].v.size())) continue;
+            BoundTarget &target = targets[size_t(binding.section * rv + binding.parentSlot)];
+            if (!target.hasOwner || child.childIndex < target.childIndex) {
+                target.hasOwner = true; target.childOffset = int(offset);
+                target.childIndex = child.childIndex; target.binding = binding;
+            }
+        }
+    }
+    bool changed = false;
+    for (BoundTarget &target : targets) {
+        if (!target.hasOwner) continue;
+        TonicTubeDesc const &child = children[size_t(target.childOffset)];
+        std::vector<TonicFrame> childFrames;
+        if (!TonicTubeFramesCpu(child, &childFrames, &derr)) return fail(err, derr.c_str());
+        float actual[3] = {};
+        if (!SectionSlotWorld(child, childFrames, target.binding.section,
+                              target.binding.childSlot, actual, err)) continue;
+        float reference[3] = {target.p[0], target.p[1], target.p[2]};
+        if (priorChildren && target.childOffset < int(priorChildren->size())) {
+            TonicTubeDesc const &prior =
+                (*priorChildren)[size_t(target.childOffset)];
+            std::vector<TonicFrame> priorFrames;
+            if (!TonicTubeFramesCpu(prior, &priorFrames, &derr)) {
+                return fail(err, derr.c_str());
+            }
+            // Binding identity is frozen on actual material slots.  The
+            // gesture snapshot has the same identity, so this distinguishes
+            // an internal CV edit from a true holding-corner movement even
+            // when a curved child frame differs from fresh K14 geometry.
+            if (!SectionSlotWorld(prior, priorFrames, target.binding.section,
+                                  target.binding.childSlot, reference, err)) {
+                return false;
+            }
+        }
+        double const dx = double(actual[0]) - reference[0];
+        double const dy = double(actual[1]) - reference[1];
+        double const dz = double(actual[2]) - reference[2];
+        if (dx * dx + dy * dy + dz * dz > 2.5e-9) {
+            target.p[0] = actual[0]; target.p[1] = actual[1]; target.p[2] = actual[2];
+            changed = true;
+        }
+    }
+    if (!changed) { *parentOut = hint; return true; }
+    TonicTubeDesc result = hint;
+    // A holding edit that remains in every existing parent section plane is
+    // fully representable by UVs.  Do not unnecessarily recenter its cage:
+    // bending K4 would rotate those planes and turn exact planar targets into
+    // projection error.  Nonplanar targets retain the centroid-curve path.
+    bool planarTargets = true;
+    for (int s = 0; s < nSec && planarTargets; ++s) {
+        float center[3] = {}; TonicFrame frame;
+        if (!TonicSampleCenterCpu(hint, hintFrames, hint.sections[size_t(s)].t,
+                                  &center[0], &center[1], &center[2],
+                                  &frame, &derr)) return fail(err, derr.c_str());
+        for (int slot = 0; slot < rv; ++slot) {
+            BoundTarget const &target = targets[size_t(s * rv + slot)];
+            float const dx = target.p[0] - center[0];
+            float const dy = target.p[1] - center[1];
+            float const dz = target.p[2] - center[2];
+            float const axial = dx * frame.tx + dy * frame.ty + dz * frame.tz;
+            float const magnitude = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (std::fabs(axial) > 1e-5f * (1.0f + magnitude)) {
+                planarTargets = false;
+                break;
+            }
+        }
+    }
+    std::vector<TonicFrame> frames;
+    if (!planarTargets) {
+        for (int cv = 1; cv < int(result.centerX.size()); ++cv) {
+            float const t = float(cv) / float(result.centerX.size() - 1);
+            float sum[3] = {};
+            for (int slot = 0; slot < rv; ++slot) {
+                float p[3] = {};
+                InterpBoundTarget(hint.sections, targets, slot, rv, t, p);
+                sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2];
+            }
+            result.centerX[size_t(cv)] = sum[0] / float(rv);
+            result.centerY[size_t(cv)] = sum[1] / float(rv);
+            result.centerZ[size_t(cv)] = sum[2] / float(rv);
+        }
+        if (!TonicTubeFramesCpu(result, &frames, &derr)) return fail(err, derr.c_str());
+    } else {
+        frames = hintFrames;
+    }
+    for (int s = 0; s < nSec; ++s) {
+        TonicTubeSection &section = result.sections[size_t(s)];
+        float center[3] = {}; TonicFrame frame;
+        if (!TonicSampleCenterCpu(result, frames, section.t, &center[0], &center[1],
+                                  &center[2], &frame, &derr)) return fail(err, derr.c_str());
+        float const scale = section.scale > 1e-6f ? section.scale : 1e-6f;
+        float const ct = std::cos(section.twist), st = std::sin(section.twist);
+        for (int slot = 0; slot < rv; ++slot) {
+            float const dx = targets[size_t(s * rv + slot)].p[0] - center[0];
+            float const dy = targets[size_t(s * rv + slot)].p[1] - center[1];
+            float const dz = targets[size_t(s * rv + slot)].p[2] - center[2];
+            float const u = dx * frame.nx + dy * frame.ny + dz * frame.nz;
+            float const v = dx * frame.bx + dy * frame.by + dz * frame.bz;
+            section.u[size_t(slot)] = (u * ct + v * st) / scale;
+            section.v[size_t(slot)] = (-u * st + v * ct) / scale;
+        }
+    }
+    *parentOut = std::move(result);
     return true;
 }
 
@@ -570,11 +799,48 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
     // Root ring in placed coords + sub-region partition.
     std::vector<Pt> rootRing;
     PlaceRing(parent.sections.front(), &rootRing);
+    for (size_t slot = 0; slot < rootRing.size(); ++slot) {
+        rootRing[slot].parentSlot = int(slot);
+    }
     double rootMeanU = 0.0, rootMeanV = 0.0;
     RingMean(rootRing, &rootMeanU, &rootMeanV);
     float const rootRadius = MeanRadius(rootRing);
     if (!(rootRadius > 0.0f)) {
-        return fail(err, "TonicSubdivideTubeCpu: degenerate root ring");
+        // A K6 reject here is a malformed propagated root chart, not a
+        // partitioning failure. Preserve enough authored and placed detail
+        // to distinguish scalar collapse, float cancellation, and slot
+        // layout drift in a later-state replay.
+        TonicTubeSection const &rootSection = parent.sections.front();
+        float minU = std::numeric_limits<float>::infinity();
+        float maxU = -std::numeric_limits<float>::infinity();
+        float minV = std::numeric_limits<float>::infinity();
+        float maxV = -std::numeric_limits<float>::infinity();
+        std::string rawUv, placedUv;
+        for (size_t i = 0; i < rootRing.size(); ++i) {
+            Pt const &placed = rootRing[i];
+            minU = std::min(minU, placed.u);
+            maxU = std::max(maxU, placed.u);
+            minV = std::min(minV, placed.v);
+            maxV = std::max(maxV, placed.v);
+            rawUv += (i == 0 ? "" : ";") +
+                std::to_string(rootSection.u[i]) + "," +
+                std::to_string(rootSection.v[i]);
+            placedUv += (i == 0 ? "" : ";") +
+                std::to_string(placed.u) + "," +
+                std::to_string(placed.v);
+        }
+        std::string const text =
+            "TonicSubdivideTubeCpu: degenerate root ring tube=" +
+            std::to_string(parent.tubeId) + " rootRv=" +
+            std::to_string(parent.ringVerts) + " scale=" +
+            std::to_string(rootSection.scale) + " twist=" +
+            std::to_string(rootSection.twist) + " mean=(" +
+            std::to_string(rootMeanU) + "," + std::to_string(rootMeanV) +
+            ") radius=" + std::to_string(rootRadius) + " bounds=(" +
+            std::to_string(minU) + "," + std::to_string(maxU) + "," +
+            std::to_string(minV) + "," + std::to_string(maxV) +
+            ") rawUv=" + rawUv + " placedUv=" + placedUv;
+        return fail(err, text.c_str());
     }
     std::vector<int> assign(rootRing.size(), 0);
     auto centroids = std::vector<Pt>(size_t(params.count));
@@ -622,6 +888,214 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
     if (!(spacing > 0.0)) {
         return fail(err, "TonicSubdivideTubeCpu: degenerate root ring");
     }
+    // First retain the established similarity chart.  A strongly asymmetric
+    // asymmetric chart can make one of those carried Voronoi cells empty even though
+    // every root KMeans cluster has material.  In that case retry the whole
+    // KMeans split with per-section means of the fixed root assignments.  Do
+    // not mix the two charts: child centers and every section must use the
+    // same generators.
+    std::vector<std::vector<Pt>> cells(
+        size_t(nSec * params.count));
+    std::vector<std::vector<Pt>> sectionGenerators(
+        size_t(nSec), std::vector<Pt>(size_t(params.count)));
+    std::vector<std::vector<Pt>> sectionRings(static_cast<size_t>(nSec));
+    std::vector<bool> sameCharts(size_t(nSec), false);
+    for (int s = 0; s < nSec; ++s) {
+        std::vector<Pt> &ring = sectionRings[size_t(s)];
+        PlaceRing(parent.sections[size_t(s)], &ring);
+        for (size_t slot = 0; slot < ring.size(); ++slot) {
+            ring[slot].parentSlot = int(slot);
+        }
+        double secMeanU = 0.0, secMeanV = 0.0;
+        RingMean(ring, &secMeanU, &secMeanV);
+        float const secRadius = MeanRadius(ring);
+        sameCharts[size_t(s)] = secMeanU == rootMeanU &&
+                              secMeanV == rootMeanV &&
+                              secRadius == rootRadius;
+        if (params.splitMode == TonicSplit_KMeans) {
+            if (sameCharts[size_t(s)] || !(secRadius > 0.0f)) {
+                sectionGenerators[size_t(s)] = centroids;
+            } else {
+                double const q = double(secRadius) / double(rootRadius);
+                for (int c = 0; c < params.count; ++c) {
+                    sectionGenerators[size_t(s)][size_t(c)].u = float(
+                        secMeanU + (double(centroids[size_t(c)].u) -
+                                    rootMeanU) * q);
+                    sectionGenerators[size_t(s)][size_t(c)].v = float(
+                        secMeanV + (double(centroids[size_t(c)].v) -
+                                    rootMeanV) * q);
+                }
+            }
+        }
+    }
+    auto cellValid = [&](std::vector<Pt> const &poly) {
+        double const area = std::fabs(PolyArea(poly));
+        double const emptyTol =
+            1e-12 * double(rootRadius) * double(rootRadius);
+        return poly.size() >= 3 && area > emptyTol;
+    };
+    auto buildKMeansCells = [&](bool materialMeans) {
+        bool allValid = true;
+        for (int s = 0; s < nSec; ++s) {
+            std::vector<Pt> &generators = sectionGenerators[size_t(s)];
+            if (materialMeans) {
+                std::fill(generators.begin(), generators.end(), Pt{});
+                std::vector<int> counts(size_t(params.count), 0);
+                for (size_t i = 0; i < sectionRings[size_t(s)].size(); ++i) {
+                    int const c = assign[i];
+                    generators[size_t(c)].u += sectionRings[size_t(s)][i].u;
+                    generators[size_t(c)].v += sectionRings[size_t(s)][i].v;
+                    ++counts[size_t(c)];
+                }
+                for (int c = 0; c < params.count; ++c) {
+                    if (counts[size_t(c)] == 0) {
+                        return false;
+                    }
+                    generators[size_t(c)].u /= float(counts[size_t(c)]);
+                    generators[size_t(c)].v /= float(counts[size_t(c)]);
+                }
+            }
+            for (int c = 0; c < params.count; ++c) {
+                std::vector<Pt> &cell =
+                    cells[size_t(s * params.count + c)];
+                cell = ClipToCell(sectionRings[size_t(s)], generators, c);
+                allValid = cellValid(cell) && allValid;
+            }
+        }
+        return allValid;
+    };
+
+    bool materialFallback = false;
+    if (params.splitMode == TonicSplit_KMeans) {
+        if (!buildKMeansCells(/*materialMeans=*/false)) {
+            materialFallback = true;
+            if (!buildKMeansCells(/*materialMeans=*/true)) {
+                // Keep this exact failure actionable. A valid convex section
+                // contains each mean of its assigned root-material slots, so
+                // an empty material cell identifies either a collapsed
+                // generator pair or an invalid/reordered chart.
+                for (int s = 0; s < nSec; ++s) {
+                    std::vector<int> counts(size_t(params.count), 0);
+                    for (int a : assign) {
+                        ++counts[size_t(a)];
+                    }
+                    for (int c = 0; c < params.count; ++c) {
+                        std::vector<Pt> const &cell =
+                            cells[size_t(s * params.count + c)];
+                        if (cellValid(cell)) {
+                            continue;
+                        }
+                        Pt const &g =
+                            sectionGenerators[size_t(s)][size_t(c)];
+                        double nearestGenerator2 =
+                            std::numeric_limits<double>::infinity();
+                        for (int o = 0; o < params.count; ++o) {
+                            if (o == c) {
+                                continue;
+                            }
+                            Pt const &other = sectionGenerators[size_t(s)]
+                                                               [size_t(o)];
+                            double const du = double(g.u) - double(other.u);
+                            double const dv = double(g.v) - double(other.v);
+                            nearestGenerator2 = std::min(
+                                nearestGenerator2, du * du + dv * dv);
+                        }
+                        bool inside = false;
+                        std::vector<Pt> const &ring =
+                            sectionRings[size_t(s)];
+                        double const signedRingArea = PolyArea(ring);
+                        int winding = 0;
+                        bool convex = true;
+                        std::string ringUv;
+                        for (size_t i = 0, j = ring.size() - 1;
+                             i < ring.size(); j = i++) {
+                            Pt const &a = ring[i];
+                            Pt const &b = ring[j];
+                            bool const crosses =
+                                (a.v > g.v) != (b.v > g.v);
+                            if (crosses &&
+                                double(g.u) <
+                                    (double(b.u) - double(a.u)) *
+                                            (double(g.v) - double(a.v)) /
+                                            (double(b.v) - double(a.v)) +
+                                        double(a.u)) {
+                                inside = !inside;
+                            }
+                            ringUv += (i == 0 ? "" : ";") +
+                                std::to_string(a.u) + "," +
+                                std::to_string(a.v);
+                            Pt const &next = ring[(i + 1) % ring.size()];
+                            double const cross =
+                                (double(a.u) - double(b.u)) *
+                                    (double(next.v) - double(a.v)) -
+                                (double(a.v) - double(b.v)) *
+                                    (double(next.u) - double(a.u));
+                            if (std::fabs(cross) > 1e-10) {
+                                int const sign = cross > 0.0 ? 1 : -1;
+                                convex = convex &&
+                                    (winding == 0 || winding == sign);
+                                winding = sign;
+                            }
+                        }
+                        std::string const text =
+                            "TonicSubdivideTubeCpu: material partition "
+                            "empty c=" + std::to_string(c) +
+                            " s=" + std::to_string(s) +
+                            " verts=" + std::to_string(int(cell.size())) +
+                            " area=" +
+                            std::to_string(std::fabs(PolyArea(cell))) +
+                            " ringArea=" +
+                            std::to_string(std::fabs(PolyArea(ring))) +
+                            " signedRingArea=" +
+                            std::to_string(signedRingArea) +
+                            " convex=" + std::to_string(int(convex)) +
+                            " gen=(" + std::to_string(g.u) + "," +
+                            std::to_string(g.v) + ") assigned=" +
+                            std::to_string(counts[size_t(c)]) +
+                            " nearestGen=" +
+                            std::to_string(std::sqrt(nearestGenerator2)) +
+                            " inside=" + std::to_string(int(inside)) +
+                            " ringUv=" + ringUv;
+                        return fail(err, text.c_str());
+                    }
+                }
+                return fail(err,
+                    "TonicSubdivideTubeCpu: material partition leaves a "
+                    "sub-region empty");
+            }
+        }
+    } else {
+        for (int s = 0; s < nSec; ++s) {
+            double secMeanU = 0.0, secMeanV = 0.0;
+            RingMean(sectionRings[size_t(s)], &secMeanU, &secMeanV);
+            float const secRadius = MeanRadius(sectionRings[size_t(s)]);
+            double const a = double(params.edgeA);
+            double const b = double(params.edgeB);
+            double cut = double(params.edgeC);
+            if (!sameCharts[size_t(s)] && secRadius > 0.0f) {
+                double const q = double(secRadius) / double(rootRadius);
+                double const rootC =
+                    a * rootMeanU + b * rootMeanV + cut;
+                cut = q * rootC - (a * secMeanU + b * secMeanV);
+            }
+            for (int c = 0; c < params.count; ++c) {
+                std::vector<Pt> &cell =
+                    cells[size_t(s * params.count + c)];
+                cell = ClipHalfPlane(sectionRings[size_t(s)], a, b, cut,
+                                     c == 1);
+                if (!cellValid(cell)) {
+                    std::string const text =
+                        "TonicSubdivideTubeCpu: empty sub-region c=" +
+                        std::to_string(c) + " s=" + std::to_string(s) +
+                        " verts=" + std::to_string(int(cell.size())) +
+                        " area=" + std::to_string(std::fabs(PolyArea(cell))) +
+                        " (raise the ring density or change the seed)";
+                    return fail(err, text.c_str());
+                }
+            }
+        }
+    }
+
     children->resize(size_t(params.count));
     for (int c = 0; c < params.count; ++c) {
         TonicTubeDesc &child = (*children)[size_t(c)];
@@ -630,8 +1104,13 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
         child.level = parent.level + 1;
         child.parentTubeId = parent.tubeId;
         child.childIndex = c;
-        // Centers: parent center offset by the centroid, scaled by the
-        // local-to-root radius ratio (§2.3 step 2).
+        child.rootFramePinned = parent.rootFramePinned;
+        child.rootFrame = parent.rootFrame;
+        child.frameReference = parent.frameReference;
+        child.inheritedBoundaryBindings.clear();
+        // Centers follow the legacy similarity centroid unless this split
+        // needs the material-generator fallback, in which case they use the
+        // matching assigned-material mean at each center-CV station.
         child.centerX.resize(size_t(nCv));
         child.centerY.resize(size_t(nCv));
         child.centerZ.resize(size_t(nCv));
@@ -642,11 +1121,29 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
             float radiusAt = 0.0f;
             InterpSectionAt(parent.sections, parent.ringVerts, ti, &ringAt,
                             &radiusAt);
-            float const ratio =
-                rootRadius > 0.0f ? radiusAt / rootRadius : 1.0f;
             TonicFrame const &fr = parentFrames[size_t(i)];
-            float const ox = centroids[size_t(c)].u * ratio;
-            float const oy = centroids[size_t(c)].v * ratio;
+            float ox = 0.0f, oy = 0.0f;
+            if (materialFallback) {
+                int count = 0;
+                for (size_t slot = 0; slot < ringAt.size(); ++slot) {
+                    if (assign[slot] == c) {
+                        ox += ringAt[slot].u;
+                        oy += ringAt[slot].v;
+                        ++count;
+                    }
+                }
+                if (count == 0) {
+                    return fail(err,
+                        "TonicSubdivideTubeCpu: empty material cluster");
+                }
+                ox /= float(count);
+                oy /= float(count);
+            } else {
+                float const ratio =
+                    rootRadius > 0.0f ? radiusAt / rootRadius : 1.0f;
+                ox = centroids[size_t(c)].u * ratio;
+                oy = centroids[size_t(c)].v * ratio;
+            }
             child.centerX[size_t(i)] =
                 parent.centerX[size_t(i)] + fr.nx * ox + fr.bx * oy;
             child.centerY[size_t(i)] =
@@ -654,79 +1151,33 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
             child.centerZ[size_t(i)] =
                 parent.centerZ[size_t(i)] + fr.nz * ox + fr.bz * oy;
         }
-        // Sections: carry the root partition to every parent ring by the
-        // section's centroid/radius similarity, clip there, recenter on
-        // the child's own center (rings are child-relative, matching the
-        // center offsets above), subdivide long chords, pad all sections
-        // to one uniform count. An unchanged chart reuses the root cell
-        // bit-exactly.
+        // Sections were clipped as one consistent split above. Recenter on
+        // the same generator chart used by the child center offsets.
         auto clipped = std::vector<std::vector<Pt>>(size_t(nSec));
         int target = 0;
         for (int s = 0; s < nSec; ++s) {
-            std::vector<Pt> ring;
-            PlaceRing(parent.sections[size_t(s)], &ring);
-            double secMeanU = 0.0, secMeanV = 0.0;
-            RingMean(ring, &secMeanU, &secMeanV);
-            float const secRadius = MeanRadius(ring);
-            bool const sameChart = (secMeanU == rootMeanU &&
-                                    secMeanV == rootMeanV &&
-                                    secRadius == rootRadius);
-            if (params.splitMode == TonicSplit_KMeans) {
-                if (sameChart || !(secRadius > 0.0f)) {
-                    clipped[size_t(s)] = ClipToCell(ring, centroids, c);
-                } else {
-                    double const q = double(secRadius) / double(rootRadius);
-                    std::vector<Pt> carried(size_t(params.count));
-                    for (int o = 0; o < params.count; ++o) {
-                        carried[size_t(o)].u = float(
-                            secMeanU +
-                            (double(centroids[size_t(o)].u) - rootMeanU) * q);
-                        carried[size_t(o)].v = float(
-                            secMeanV +
-                            (double(centroids[size_t(o)].v) - rootMeanV) * q);
-                    }
-                    clipped[size_t(s)] = ClipToCell(ring, carried, c);
-                }
-            } else {
-                double const a = double(params.edgeA);
-                double const b = double(params.edgeB);
-                double cut = double(params.edgeC);
-                if (!sameChart && secRadius > 0.0f) {
-                    double const q = double(secRadius) / double(rootRadius);
-                    double const rootC =
-                        a * rootMeanU + b * rootMeanV + cut;
-                    cut = q * rootC - (a * secMeanU + b * secMeanV);
-                }
-                clipped[size_t(s)] = ClipHalfPlane(ring, a, b, cut, c == 1);
-            }
-            double const clippedArea =
-                std::fabs(PolyArea(clipped[size_t(s)]));
-            double const emptyTol =
-                1e-12 * double(rootRadius) * double(rootRadius);
-            if (clipped[size_t(s)].size() < 3 || clippedArea <= emptyTol) {
-                std::string const text =
-                    "TonicSubdivideTubeCpu: empty sub-region c=" +
-                    std::to_string(c) + " s=" + std::to_string(s) +
-                    " verts=" +
-                    std::to_string(int(clipped[size_t(s)].size())) +
-                    " area=" + std::to_string(clippedArea) +
-                    " (raise the ring density or change the seed)";
-                return fail(err, text.c_str());
-            }
+            clipped[size_t(s)] = cells[size_t(s * params.count + c)];
             SubdivideLongEdges(&clipped[size_t(s)], 2.0 * spacing,
                                kMaxRingVerts);
-            // Recenter on the child center: same scaled centroid the
-            // center CVs use (radius ratio at this section's t).
+            // Recenter with the same generator chart as the center CVs.
             {
-                std::vector<Pt> ringAt;
-                float radiusAt = 0.0f;
-                InterpSectionAt(parent.sections, parent.ringVerts,
-                                parent.sections[size_t(s)].t, &ringAt,
-                                &radiusAt);
-                float const ratio =
-                    rootRadius > 0.0f ? radiusAt / rootRadius : 1.0f;
-                float const ou = centroids[size_t(c)].u * ratio;
-                float const ov = centroids[size_t(c)].v * ratio;
+                float ou = 0.0f, ov = 0.0f;
+                if (materialFallback) {
+                    Pt const &generator =
+                        sectionGenerators[size_t(s)][size_t(c)];
+                    ou = generator.u;
+                    ov = generator.v;
+                } else {
+                    std::vector<Pt> ringAt;
+                    float radiusAt = 0.0f;
+                    InterpSectionAt(parent.sections, parent.ringVerts,
+                                    parent.sections[size_t(s)].t, &ringAt,
+                                    &radiusAt);
+                    float const ratio =
+                        rootRadius > 0.0f ? radiusAt / rootRadius : 1.0f;
+                    ou = centroids[size_t(c)].u * ratio;
+                    ov = centroids[size_t(c)].v * ratio;
+                }
                 for (auto &p : clipped[size_t(s)]) {
                     p.u -= ou;
                     p.v -= ov;
@@ -758,9 +1209,17 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
             cs.twist = 0.0f;
             cs.u.resize(size_t(target));
             cs.v.resize(size_t(target));
+            std::vector<bool> recorded(size_t(parent.ringVerts), false);
             for (int i = 0; i < target; ++i) {
                 cs.u[size_t(i)] = poly[size_t(i)].u;
                 cs.v[size_t(i)] = poly[size_t(i)].v;
+                int const parentSlot = poly[size_t(i)].parentSlot;
+                if (parentSlot >= 0 && parentSlot < parent.ringVerts &&
+                    !recorded[size_t(parentSlot)]) {
+                    child.inheritedBoundaryBindings.push_back(
+                        {s, parentSlot, i});
+                    recorded[size_t(parentSlot)] = true;
+                }
             }
         }
     }
@@ -784,6 +1243,24 @@ bool TonicParentAverageCpu(std::vector<TonicTubeDesc> const &children,
     int const nCv = int(children[0].centerX.size());
     int const nSec = int(children[0].sections.size());
     int const rv = children[0].ringVerts;
+    // Siblings retain their common scalp plane when averaged back into a
+    // parent. An aggregate of unrelated planes has no single pinned frame.
+    parentOut->rootFramePinned = children[0].rootFramePinned;
+    parentOut->rootFrame = children[0].rootFrame;
+    parentOut->frameReference = children[0].frameReference;
+    for (auto const &child : children) {
+        if (!RootFrameEqual(children[0], child)) {
+            parentOut->rootFramePinned = false;
+            // A K7 aggregate of differently oriented material charts has
+            // no common transported reference.  Its freshly fitted section
+            // data is expressed in the legacy world chart.
+            parentOut->frameReference = {{
+                1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f,
+                0.0f, 0.0f, 1.0f}};
+            break;
+        }
+    }
     // Centers: arc-length-resample every child to nCv, mean in double.
     std::vector<std::vector<float>> rx(children.size()), ry(children.size()),
         rz(children.size());
@@ -812,10 +1289,7 @@ bool TonicParentAverageCpu(std::vector<TonicTubeDesc> const &children,
     std::vector<TonicFrame> pframes;
     {
         std::string derr;
-        if (!TonicCenterFramesCpu(parentOut->centerX.data(),
-                                  parentOut->centerY.data(),
-                                  parentOut->centerZ.data(), nCv, &pframes,
-                                  &derr)) {
+        if (!TonicTubeFramesCpu(*parentOut, &pframes, &derr)) {
             return fail(err, derr.c_str());
         }
     }
@@ -825,11 +1299,7 @@ bool TonicParentAverageCpu(std::vector<TonicTubeDesc> const &children,
     std::vector<std::vector<TonicFrame>> cframes(children.size());
     for (size_t c = 0; c < children.size(); ++c) {
         std::string derr;
-        if (!TonicCenterFramesCpu(children[c].centerX.data(),
-                                  children[c].centerY.data(),
-                                  children[c].centerZ.data(),
-                                  int(children[c].centerX.size()),
-                                  &cframes[c], &derr)) {
+        if (!TonicTubeFramesCpu(children[c], &cframes[c], &derr)) {
             return fail(err, derr.c_str());
         }
     }
@@ -990,7 +1460,8 @@ bool TonicParentAverageCpu(std::vector<TonicTubeDesc> const &children,
 bool TonicMergeTubesCpu(std::vector<TonicTubeDesc> const &children,
                         TonicSubdivideDesc const &params,
                         TonicTubeDesc const *roundTripParent,
-                        TonicTubeDesc *parentOut, std::string *err)
+                        TonicTubeDesc *parentOut, std::string *err,
+                        std::vector<TonicTubeDesc> const *priorChildren)
 {
     if (!parentOut) {
         return fail(err, "TonicMergeTubesCpu: null output");
@@ -1006,13 +1477,9 @@ bool TonicMergeTubesCpu(std::vector<TonicTubeDesc> const &children,
         if (!ValidateTube(*roundTripParent, "hint", err)) {
             return false;
         }
-        int const nCv = int(roundTripParent->centerX.size());
         std::vector<TonicFrame> frames;
         std::string derr;
-        if (!TonicCenterFramesCpu(roundTripParent->centerX.data(),
-                                  roundTripParent->centerY.data(),
-                                  roundTripParent->centerZ.data(), nCv,
-                                  &frames, &derr)) {
+        if (!TonicTubeFramesCpu(*roundTripParent, &frames, &derr)) {
             return fail(err, derr.c_str());
         }
         std::vector<TonicTubeDesc> expect;
@@ -1028,7 +1495,11 @@ bool TonicMergeTubesCpu(std::vector<TonicTubeDesc> const &children,
             *parentOut = *roundTripParent;
             return true;
         }
-        // Else fall through to the K7 aggregate.
+        // Only original parent corners inherited by a child can drive K7.
+        // Internal K14 cut edges are child-local sculpt detail, not a reason
+        // to refit the whole L1 volume.
+        return TonicParentHoldingEdgesCpu(children, priorChildren,
+                                          *roundTripParent, parentOut, err);
     }
     return TonicParentAverageCpu(children, parentOut, err);
 }
@@ -1082,13 +1553,17 @@ bool TonicComputeDeltasCpu(TonicTubeDesc const &actual,
     for (size_t s = 0; s < derived.sections.size(); ++s) {
         TonicTubeSection const &sa = actual.sections[s];
         TonicTubeSection const &sd = derived.sections[s];
-        if (sa.t != sd.t || sa.u.size() != sd.u.size()) {
+        if (sa.t != sd.t || sa.u.size() != sd.u.size() ||
+            sa.v.size() != sd.v.size()) {
             return fail(err, "TonicComputeDeltasCpu: section mismatch");
         }
         TonicTubeSection &dd = deltas->sections[s];
         dd.t = sd.t;
-        dd.scale = 0.0f;
-        dd.twist = 0.0f;
+        // Section scale/twist are authored section-space residuals just like
+        // the ring coordinates.  Dropping them here made a K7 rebase erase a
+        // child Scale/Twist edit on the next parent K6.
+        dd.scale = sa.scale - sd.scale;
+        dd.twist = sa.twist - sd.twist;
         dd.u.resize(sd.u.size());
         dd.v.resize(sd.u.size());
         for (size_t i = 0; i < sd.u.size(); ++i) {
@@ -1195,6 +1670,18 @@ bool TonicHierarchicalSculptCpu(
         childIndex, &derivedNew, err)) {
         return false;
     }
+    // Keep the child's established ring layout when K14 repartitions a
+    // parent.  The stored residual is authored against that layout; applying
+    // a raw new child and then replacing its reference would otherwise turn a
+    // no-op K6 into an implicit resample of the actual sculpt.
+    if (derivedNew.ringVerts != oldActual.ringVerts) {
+        TonicTubeDesc matched;
+        if (!TonicResampleDescRingsCpu(derivedNew, oldActual.ringVerts,
+                                       &matched, err)) {
+            return false;
+        }
+        derivedNew = std::move(matched);
+    }
     return TonicHierarchicalSculptApplyCpu(derivedNew, oldActual,
         oldDerived, oldStored, lockChildren, preserveLength, outActual,
         outStored, err);
@@ -1226,10 +1713,25 @@ bool TonicHierarchicalSculptApplyCpu(
                         "(re-subdivide)");
         }
     }
+    if (derivedNew.ringVerts != oldActual.ringVerts &&
+        !oldActual.inheritedBoundaryBindings.empty()) {
+        return fail(err,
+                    "TonicHierarchicalSculptCpu: boundary material slots "
+                    "need an explicit topology remap");
+    }
     auto resampleDeltaRing = [&](std::vector<float> const &su,
                                  std::vector<float> const &sv,
                                  int newCount, std::vector<float> *ou,
                                  std::vector<float> *ov) {
+        // Equal layouts retain the authored slot identity exactly. Resampling
+        // a nonuniform delta polygon to its own count redistributes values by
+        // delta-vector arc length, so repeated no-op K6 passes otherwise
+        // shear a child even when neither parent nor layout changed.
+        if (int(su.size()) == newCount && int(sv.size()) == newCount) {
+            *ou = su;
+            *ov = sv;
+            return;
+        }
         std::vector<Pt> poly(su.size());
         for (size_t i = 0; i < su.size(); ++i) {
             poly[i].u = su[i];
@@ -1246,16 +1748,19 @@ bool TonicHierarchicalSculptApplyCpu(
     std::vector<TonicFrame> newFrames;
     {
         std::string derr;
-        if (!TonicCenterFramesCpu(derivedNew.centerX.data(),
-                                  derivedNew.centerY.data(),
-                                  derivedNew.centerZ.data(),
-                                  int(derivedNew.centerX.size()), &newFrames,
-                                  &derr)) {
+        if (!TonicTubeFramesCpu(derivedNew, &newFrames, &derr)) {
             return fail(err, derr.c_str());
         }
     }
     int const nCv = int(derivedNew.centerX.size());
     TonicTubeDesc actual = derivedNew;
+    // Derived slot order may be regenerated during K6. When the actual
+    // layout is unchanged, its inherited boundary triples remain the sole
+    // material identity for K7; never infer a replacement from fresh clips.
+    if (oldActual.ringVerts == derivedNew.ringVerts) {
+        actual.inheritedBoundaryBindings =
+            oldActual.inheritedBoundaryBindings;
+    }
     if (lockChildren) {
         // Rigid ride: world deltas frozen, stored deltas copied exactly.
         if (oldActual.centerX.size() != oldDerived.centerX.size() ||
@@ -1293,6 +1798,10 @@ bool TonicHierarchicalSculptApplyCpu(
                 actual.sections[s].u[i] += ru[i];
                 actual.sections[s].v[i] += rv[i];
             }
+            actual.sections[s].scale +=
+                oldActual.sections[s].scale - oldDerived.sections[s].scale;
+            actual.sections[s].twist +=
+                oldActual.sections[s].twist - oldDerived.sections[s].twist;
         }
         *outActual = actual;
         *outStored = oldStored;
@@ -1320,6 +1829,8 @@ bool TonicHierarchicalSculptApplyCpu(
             actual.sections[s].u[i] += ru[i];
             actual.sections[s].v[i] += rv[i];
         }
+        actual.sections[s].scale += oldStored.sections[s].scale;
+        actual.sections[s].twist += oldStored.sections[s].twist;
     }
     if (preserveLength) {
         float const oldLen =
@@ -1353,6 +1864,7 @@ bool TonicHierarchicalSculptApplyCpu(
         sculpted = sculpted || (v != 0.0f);
     }
     for (auto const &s : oldStored.sections) {
+        sculpted = sculpted || (s.scale != 0.0f) || (s.twist != 0.0f);
         for (float v : s.u) {
             sculpted = sculpted || (v != 0.0f);
         }

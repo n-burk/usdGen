@@ -147,6 +147,22 @@ std::vector<int> BuildAdjoining(Grid &grid, usdGenTonic::TonicScalpGraph *graph)
     return {a0, a1, a2, a3, b1, b2};
 }
 
+void RayTo(float const origin[3], float tx, float ty, float tz,
+           float outDir[3])
+{
+    outDir[0] = tx - origin[0];
+    outDir[1] = ty - origin[1];
+    outDir[2] = tz - origin[2];
+    float const length = std::sqrt(outDir[0] * outDir[0] +
+                                   outDir[1] * outDir[1] +
+                                   outDir[2] * outDir[2]);
+    if (length > 0.0f) {
+        outDir[0] /= length;
+        outDir[1] /= length;
+        outDir[2] /= length;
+    }
+}
+
 void CheckK1(Grid &grid)
 {
     using namespace usdGenTonic;
@@ -171,6 +187,43 @@ void CheckK1(Grid &grid)
               Near(hit.v, 0.5f) && Near(hit.px, 1.5f) && Near(hit.py, 0.0f) &&
               Near(hit.pz, 0.5f) && Near(hit.ny, 1.0f),
           "K1: the raycast hits the face under an interior point");
+
+    // A real StageView pixel can land exactly on a quad fan diagonal.  The
+    // pre-fix float Moller-Trumbore tests rejected both triangles for this
+    // captured Qt ray (one shared barycentric was -4.7e-8, the other -4.4e-8).
+    Grid const seam = MakeGrid(-1.0f);
+    float const seamOrigin[3] = {1.992840022f, 13.90000005f, 1.992939308f};
+    float const seamDir[3] = {-0.071235519f, -0.994912051f, -0.071242625f};
+    TonicHit const seamHit = TonicRaycastCpu(seam.mesh, seam.bvh, seamOrigin,
+                                              seamDir);
+    Check(seamHit.hit && seamHit.faceId == 4 && Near(seamHit.px, 0.9976f,
+                                                       2e-4f) &&
+              Near(seamHit.pz, 0.9976f, 2e-4f),
+          "K1: the captured StageView fan-diagonal ray cannot crack a quad");
+    bool seamSweep = true;
+    for (int step = -4; step <= 4; ++step) {
+        float const offset = float(step) * 2e-5f;
+        float sweepDir[3] = {0.0f, 0.0f, 0.0f};
+        RayTo(seamOrigin, 0.9976f + offset, 0.0f, 0.9976f - offset,
+              sweepDir);
+        seamSweep = seamSweep && TonicRaycastCpu(seam.mesh, seam.bvh,
+                                                  seamOrigin, sweepDir).hit;
+    }
+    Check(seamSweep, "K1: a sweep across both sides of a fan diagonal stays watertight");
+    float outsideDir[3] = {0.0f, 0.0f, 0.0f};
+    RayTo(seamOrigin, -1.0002f, 0.0f, 0.5f, outsideDir);
+    Check(!TonicRaycastCpu(seam.mesh, seam.bvh, seamOrigin, outsideDir).hit,
+          "K1: the watertight diagonal rule does not grow the outer silhouette");
+    float const nonUnitDir[3] = {seamDir[0] * 7.0f, seamDir[1] * 7.0f,
+                                  seamDir[2] * 7.0f};
+    float const awayDir[3] = {-seamDir[0], -seamDir[1], -seamDir[2]};
+    float const belowOrigin[3] = {seamHit.px, -1.0f, seamHit.pz};
+    float const upThroughSurface[3] = {0.0f, 1.0f, 0.0f};
+    Check(TonicRaycastCpu(seam.mesh, seam.bvh, seamOrigin, nonUnitDir).hit &&
+              !TonicRaycastCpu(seam.mesh, seam.bvh, seamOrigin, awayDir).hit &&
+              TonicRaycastCpu(seam.mesh, seam.bvh, belowOrigin,
+                              upThroughSurface).hit,
+          "K1: seam handling retains nonunit normalization and two-sided hits");
     float const up[3] = {0.0f, 1.0f, 0.0f};
     Check(!TonicRaycastCpu(grid.mesh, grid.bvh, origin, up).hit,
           "K1: an upward ray misses");
@@ -474,10 +527,8 @@ void CheckK3(Grid &grid)
     TonicRasteriseRegionsCpu(grid.mesh, graph, &maps, &err);
     std::vector<int> const res =
         TonicFaceResLog2(grid.mesh, maps, loops);
-    Check(res.size() == 16 && res[size_t(1 * 4 + 1)] == 0,
-          "K3: a uniform interior face collapses to 1x1");
-    Check(res[size_t(0 * 4 + 0)] == 5,
-          "K3: a boundary-adjacent face keeps median res (32x32)");
+    Check(res[size_t(0 * 4 + 0)] == 6,
+          "K3: a boundary-adjacent face keeps 64x64 detail");
     std::vector<int> const forced =
         TonicFaceResLog2(grid.mesh, maps, loops, 2);
     bool all2 = forced.size() == 16;
@@ -485,6 +536,30 @@ void CheckK3(Grid &grid)
         all2 = all2 && r == 2;
     }
     Check(all2, "K3: the artist res override forces every face");
+
+    // The adjoining two-by-two regions above have no face that is clear of
+    // every boundary: their shared and outer boundaries touch every face.
+    // A full-grid loop gives this four-by-four fixture a truly interior face
+    // and proves the conservative boundary rule still keeps 1x1 collapse.
+    TonicScalpGraph fullGrid;
+    int const f0 = fullGrid.AddNode(Locate(grid, 0.0f, 0.0f));
+    int const f1 = fullGrid.AddNode(Locate(grid, 4.0f, 0.0f));
+    int const f2 = fullGrid.AddNode(Locate(grid, 4.0f, 4.0f));
+    int const f3 = fullGrid.AddNode(Locate(grid, 0.0f, 4.0f));
+    fullGrid.Connect(grid.mesh, f0, f1);
+    fullGrid.Connect(grid.mesh, f1, f2);
+    fullGrid.Connect(grid.mesh, f2, f3);
+    fullGrid.Connect(grid.mesh, f3, f0);
+    TonicRegionLoops fullLoops;
+    TonicRegionMaps fullMaps;
+    bool const fullOk = TonicFlattenLoops(fullGrid, &fullLoops, &err) &&
+                        TonicRasteriseRegionsCpu(grid.mesh, fullGrid,
+                                                   &fullMaps, &err);
+    std::vector<int> const fullRes =
+        TonicFaceResLog2(grid.mesh, fullMaps, fullLoops);
+    Check(fullOk && fullRes.size() == 16 &&
+              fullRes[size_t(1 * 4 + 1)] == 0,
+          "K3: a truly interior face collapses to 1x1");
 }
 
 void CheckModel(Grid &grid)
@@ -675,30 +750,43 @@ void CheckCudaParity(Grid &grid)
                nNodes * sizeof(TonicDeviceBvhNode), cudaMemcpyHostToDevice);
     cudaMemcpy(dOrder, grid.bvh.order.data(), nCounts * sizeof(int),
                cudaMemcpyHostToDevice);
-    // K1: 6 rays (4 hits, a miss, a degenerate).
-    float const origins[18] = {1.5f, 5.0f, 0.5f, 0.5f, 5.0f, 3.5f,
-                               3.5f, 5.0f, 2.5f, 2.0f, 5.0f, 2.0f,
-                               1.5f, 5.0f, 0.5f, 1.5f, 5.0f, 0.5f};
-    float const dirs[18] = {0.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f,
-                            0.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f,
-                            0.0f, 1.0f,  0.0f, 0.0f, 0.0f,  0.0f};
+    // K1: ordinary hits/misses plus the captured StageView fan-diagonal
+    // sample, a nearby seam sample and an outer-silhouette miss.
+    int const rayCount = 9;
+    float origins[rayCount * 3] = {
+        1.5f, 5.0f, 0.5f, 0.5f, 5.0f, 3.5f,
+        3.5f, 5.0f, 2.5f, 2.0f, 5.0f, 2.0f,
+        1.5f, 5.0f, 0.5f, 1.5f, 5.0f, 0.5f,
+        1.992840022f, 13.90000005f, 1.992939308f,
+        1.992840022f, 13.90000005f, 1.992939308f,
+        1.992840022f, 13.90000005f, 1.992939308f};
+    float dirs[rayCount * 3] = {
+        0.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f,
+        0.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f,
+        0.0f, 1.0f,  0.0f, 0.0f, 0.0f,  0.0f,
+        -0.071235519f, -0.994912051f, -0.071242625f,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    RayTo(origins + 7 * 3, 0.99762f, 0.0f, 0.99758f,
+          dirs + 7 * 3);
+    RayTo(origins + 8 * 3, -0.0002f, 0.0f, -0.0002f,
+          dirs + 8 * 3);
     float *dOrg = nullptr, *dDir = nullptr;
     TonicDeviceHit *dHits = nullptr;
     cudaMalloc(&dOrg, sizeof(origins));
     cudaMalloc(&dDir, sizeof(dirs));
-    cudaMalloc(&dHits, 6 * sizeof(TonicDeviceHit));
+    cudaMalloc(&dHits, rayCount * sizeof(TonicDeviceHit));
     cudaMemcpy(dOrg, origins, sizeof(origins), cudaMemcpyHostToDevice);
     cudaMemcpy(dDir, dirs, sizeof(dirs), cudaMemcpyHostToDevice);
     bool launched = TonicLaunchRaycastBatch(
         dPts, dCounts, dIndices, dOffsets, dNormals, dNodes, dOrder,
-        int(nCounts), int(nNodes), grid.bvh.root, dOrg, dDir, dHits, 6,
+        int(nCounts), int(nNodes), grid.bvh.root, dOrg, dDir, dHits, rayCount,
         nullptr, err, sizeof(err));
     Check(launched, "TN-6: K1 launches");
     cudaDeviceSynchronize();
-    TonicDeviceHit hits[6];
+    TonicDeviceHit hits[rayCount];
     cudaMemcpy(hits, dHits, sizeof(hits), cudaMemcpyDeviceToHost);
     bool k1 = launched;
-    for (int r = 0; r < 6 && k1; ++r) {
+    for (int r = 0; r < rayCount && k1; ++r) {
         TonicHit const cpu = TonicRaycastCpu(grid.mesh, grid.bvh,
                                              origins + r * 3, dirs + r * 3);
         bool const cpuHit = cpu.hit;

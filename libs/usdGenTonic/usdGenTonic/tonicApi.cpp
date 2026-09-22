@@ -801,6 +801,48 @@ Tonic_GraphAddNode(TonicModelContext *ctx, int faceId, float u, float v,
 }
 
 int
+Tonic_GraphCreateRegion(TonicModelContext *ctx, int const *nodeIds,
+                        int const *faceIds, float const *uvs, int count,
+                        int *outRegionId)
+{
+    try {
+        if (!ctx || !nodeIds || !faceIds || !uvs || count < 3) {
+            _SetError("Tonic_GraphCreateRegion: invalid argument");
+            return TONIC_ERROR;
+        }
+        std::vector<int> ids(nodeIds, nodeIds + count);
+        std::vector<usdGenTonic::TonicHit> hits(
+            size_t(count), usdGenTonic::TonicHit{});
+        for (int i = 0; i < count; ++i) {
+            if (ids[size_t(i)] >= 0) {
+                continue;  // Exact stable id: its supplied (face, uv) is ignored.
+            }
+            if (ids[size_t(i)] != -1 ||
+                !_Locate(_Impl(ctx)->model, faceIds[i], uvs[i * 2 + 0],
+                         uvs[i * 2 + 1], &hits[size_t(i)])) {
+                _SetError("Tonic_GraphCreateRegion: (face, uv) is off the scalp");
+                return TONIC_ERROR;
+            }
+        }
+        int const regionId = _Impl(ctx)->model.GraphCreateRegion(ids, hits);
+        if (regionId < 0) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        if (outRegionId) {
+            *outRegionId = regionId;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GraphCreateRegion: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
 Tonic_GraphMoveNode(TonicModelContext *ctx, int nodeId, int faceId, float u,
                     float v)
 {
@@ -824,6 +866,38 @@ Tonic_GraphMoveNode(TonicModelContext *ctx, int nodeId, int faceId, float u,
         return TONIC_ERROR;
     } catch (...) {
         _SetError("Tonic_GraphMoveNode: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GraphMoveNodes(TonicModelContext *ctx, int const *nodeIds,
+                     int const *faceIds, float const *uvs, int count)
+{
+    try {
+        if (!ctx || !nodeIds || !faceIds || !uvs || count <= 0) {
+            _SetError("Tonic_GraphMoveNodes: invalid argument");
+            return TONIC_ERROR;
+        }
+        std::vector<int> ids(nodeIds, nodeIds + count);
+        std::vector<usdGenTonic::TonicHit> hits(static_cast<size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            if (!_Locate(_Impl(ctx)->model, faceIds[i], uvs[i * 2 + 0],
+                         uvs[i * 2 + 1], &hits[size_t(i)])) {
+                _SetError("Tonic_GraphMoveNodes: (face, uv) is off the scalp");
+                return TONIC_ERROR;
+            }
+        }
+        if (!_Impl(ctx)->model.GraphMoveNodes(ids, hits)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GraphMoveNodes: unknown exception");
         return TONIC_ERROR;
     }
 }
@@ -1028,6 +1102,82 @@ Tonic_GraphSnapEdge(TonicModelContext const *ctx, float const p[3],
 }
 
 int
+Tonic_GraphGetNode(TonicModelContext const *ctx, int nodeId,
+                   int *outFaceId, float outUV[2], float outP[3])
+{
+    try {
+        if (!ctx || !outFaceId || !outUV || !outP) {
+            _SetError("Tonic_GraphGetNode: null argument");
+            return TONIC_ERROR;
+        }
+        usdGenTonic::TonicGraphNode node;
+        if (!_Impl(ctx)->model.GraphGetNode(nodeId, &node)) {
+            _SetError("Tonic_GraphGetNode: unknown node id");
+            return TONIC_ERROR;
+        }
+        *outFaceId = node.faceId;
+        outUV[0] = node.u;
+        outUV[1] = node.v;
+        outP[0] = node.p[0];
+        outP[1] = node.p[1];
+        outP[2] = node.p[2];
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GraphGetNode: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GraphGetEdge(TonicModelContext const *ctx, int edgeId,
+                   int outNodeIds[2])
+{
+    try {
+        if (!ctx || !outNodeIds) {
+            _SetError("Tonic_GraphGetEdge: null argument");
+            return TONIC_ERROR;
+        }
+        if (!_Impl(ctx)->model.GraphGetEdge(edgeId, outNodeIds)) {
+            _SetError("Tonic_GraphGetEdge: unknown edge id");
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GraphGetEdge: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GraphGetNodeDisplayPosition(TonicModelContext const *ctx, int nodeId,
+                                  float outP[3])
+{
+    try {
+        if (!ctx || !outP) {
+            _SetError("Tonic_GraphGetNodeDisplayPosition: null argument");
+            return TONIC_ERROR;
+        }
+        if (!_Impl(ctx)->model.GraphGetNodeDisplayPosition(nodeId, outP)) {
+            _SetError("Tonic_GraphGetNodeDisplayPosition: unknown node id");
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GraphGetNodeDisplayPosition: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
 Tonic_GraphLinkRegions(TonicModelContext *ctx, int r0, int r1)
 {
     try {
@@ -1227,6 +1377,17 @@ Tonic_Rasterise(TonicModelContext *ctx)
     } catch (...) {
         _SetError("Tonic_Rasterise: unknown exception");
         return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_RegionAtSurface(TonicModelContext const *ctx, int faceId, float u,
+                      float v)
+{
+    try {
+        return ctx ? _Impl(ctx)->model.RegionAtSurface(faceId, u, v) : -1;
+    } catch (...) {
+        return -1;
     }
 }
 
@@ -2159,6 +2320,62 @@ Tonic_GetFillParams(TonicModelContext *ctx, float *outDensity, int *outCvCount,
 }
 
 int
+Tonic_SetOutputSettings(TonicModelContext *ctx, int enabled,
+                        float densityMultiplier, float width)
+{
+    try {
+        if (!ctx) {
+            _SetError("Tonic_SetOutputSettings: null context");
+            return TONIC_ERROR;
+        }
+        if (enabled != 0 && enabled != 1) {
+            _SetError("Tonic_SetOutputSettings: enabled must be 0 or 1");
+            return TONIC_ERROR;
+        }
+        usdGenTonic::TonicModel::OutputSettings settings =
+            _Impl(ctx)->model.GetOutputSettings();
+        settings.enabled = enabled != 0;
+        settings.densityMultiplier = densityMultiplier;
+        settings.width = width;
+        if (!_Impl(ctx)->model.SetOutputSettings(settings)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_SetOutputSettings: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GetOutputSettings(TonicModelContext const *ctx, int *outEnabled,
+                        float *outDensityMultiplier, float *outWidth)
+{
+    try {
+        if (!ctx || !outEnabled || !outDensityMultiplier || !outWidth) {
+            _SetError("Tonic_GetOutputSettings: null argument");
+            return TONIC_ERROR;
+        }
+        usdGenTonic::TonicModel::OutputSettings const settings =
+            _Impl(ctx)->model.GetOutputSettings();
+        *outEnabled = settings.enabled ? 1 : 0;
+        *outDensityMultiplier = settings.densityMultiplier;
+        *outWidth = settings.width;
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GetOutputSettings: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
 Tonic_SetPreviewFraction(TonicModelContext *ctx, float fraction)
 {
     try {
@@ -2239,6 +2456,64 @@ Tonic_RefillGuides(TonicModelContext *ctx, float fraction)
         _SetError("Tonic_RefillGuides: unknown exception");
         return TONIC_ERROR;
     }
+}
+
+int
+Tonic_GenerateGuides(TonicModelContext *ctx, float fraction)
+{
+    try {
+        if (!ctx) {
+            _SetError("Tonic_GenerateGuides: null context");
+            return TONIC_ERROR;
+        }
+        if (!_Impl(ctx)->model.GenerateGuides(fraction)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_ClearGeneratedCurves(TonicModelContext *ctx)
+{
+    try {
+        if (!ctx) {
+            _SetError("Tonic_ClearGeneratedCurves: null context");
+            return TONIC_ERROR;
+        }
+        return _Impl(ctx)->model.ClearGeneratedCurves() ? TONIC_OK
+                                                         : TONIC_ERROR;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_SetGeneratedCurvesVisible(TonicModelContext *ctx, int visible)
+{
+    if (!ctx) {
+        _SetError("Tonic_SetGeneratedCurvesVisible: null context");
+        return TONIC_ERROR;
+    }
+    return _Impl(ctx)->model.SetGeneratedCurvesVisible(visible != 0)
+               ? TONIC_OK
+               : TONIC_ERROR;
+}
+
+int
+Tonic_GetGeneratedCurvesVisible(TonicModelContext const *ctx, int *outVisible)
+{
+    if (!ctx || !outVisible) {
+        _SetError("Tonic_GetGeneratedCurvesVisible: null argument");
+        return TONIC_ERROR;
+    }
+    *outVisible = _Impl(ctx)->model.GetGeneratedCurvesVisible() ? 1 : 0;
+    return TONIC_OK;
 }
 
 int
@@ -2476,6 +2751,10 @@ Tonic_BakeSetOptions(TonicBakeContext *bake, int resOverride, int levelCount)
         }
         if (levelCount < 1) {
             _SetError("Tonic_BakeSetOptions: levelCount must be >= 1");
+            return TONIC_ERROR;
+        }
+        if (!_BImpl(bake)->model->SetOutputPtexResolution(resOverride)) {
+            _SetError(_BImpl(bake)->model->GetDiagnostic());
             return TONIC_ERROR;
         }
         _BImpl(bake)->resOverride = resOverride;
@@ -2786,6 +3065,34 @@ Tonic_GetTubeCenterCV(TonicModelContext const *ctx, int tubeId, int cv,
 }
 
 int
+Tonic_GetTubeCenterHandle(TonicModelContext const *ctx, int tubeId, int cv,
+                          float *outXYZ)
+{
+    try {
+        if (!ctx || !outXYZ) {
+            _SetError("Tonic_GetTubeCenterHandle: null context or output");
+            return TONIC_ERROR;
+        }
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        if (!_Impl(ctx)->model.GetTubeCenterHandle(tubeId, cv, &x, &y, &z)) {
+            _SetError("Tonic_GetTubeCenterHandle: unknown tube, CV or "
+                      "malformed section");
+            return TONIC_ERROR;
+        }
+        outXYZ[0] = x;
+        outXYZ[1] = y;
+        outXYZ[2] = z;
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GetTubeCenterHandle: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
 Tonic_MoveTubeCenterCV(TonicModelContext *ctx, int tubeId, int cv, float dx,
                        float dy, float dz)
 {
@@ -2804,6 +3111,29 @@ Tonic_MoveTubeCenterCV(TonicModelContext *ctx, int tubeId, int cv, float dx,
         return TONIC_ERROR;
     } catch (...) {
         _SetError("Tonic_MoveTubeCenterCV: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_TranslateTube(TonicModelContext *ctx, int tubeId, float dx, float dy,
+                    float dz)
+{
+    try {
+        if (!ctx) {
+            _SetError("Tonic_TranslateTube: null context");
+            return TONIC_ERROR;
+        }
+        if (!_Impl(ctx)->model.TranslateTube(tubeId, dx, dy, dz)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_TranslateTube: unknown exception");
         return TONIC_ERROR;
     }
 }
@@ -3470,6 +3800,82 @@ Tonic_GetFocusLevel(TonicModelContext const *ctx)
 }
 
 int
+Tonic_SetActiveCutEnabled(TonicModelContext *ctx, int enabled)
+{
+    try {
+        if (!ctx) {
+            _SetError("Tonic_SetActiveCutEnabled: null context");
+            return TONIC_ERROR;
+        }
+        if (!_Impl(ctx)->model.SetActiveCutEnabled(enabled != 0)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_SetActiveCutEnabled: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GetActiveCutEnabled(TonicModelContext const *ctx)
+{
+    try {
+        return ctx && _Impl(ctx)->model.GetActiveCutEnabled() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int
+Tonic_SetTubeExpanded(TonicModelContext *ctx, int tubeId, int expanded)
+{
+    try {
+        if (!ctx) {
+            _SetError("Tonic_SetTubeExpanded: null context");
+            return TONIC_ERROR;
+        }
+        if (!_Impl(ctx)->model.SetTubeExpanded(tubeId, expanded != 0)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_SetTubeExpanded: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GetTubeExpanded(TonicModelContext const *ctx, int tubeId)
+{
+    try {
+        return ctx && _Impl(ctx)->model.GetTubeExpanded(tubeId) ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int
+Tonic_IsTubeVisible(TonicModelContext const *ctx, int tubeId)
+{
+    try {
+        return ctx && _Impl(ctx)->model.IsTubeVisibleInActiveCut(tubeId)
+                   ? 1
+                   : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+int
 Tonic_SetDisplayScale(TonicModelContext *ctx, float worldPerPixel)
 {
     try {
@@ -3992,7 +4398,7 @@ Tonic_PickItem(TonicModelContext *ctx, const float *viewProj, int w, int h,
             _SetError("Tonic_PickItem: null argument");
             return TONIC_ERROR;
         }
-        usdGenTonic::TonicPickHit const hit = _Impl(ctx)->model.Pick(
+        usdGenTonic::TonicPickHit const hit = _Impl(ctx)->model.PickItem(
             viewProj, w, h, x, y, radiusPx, uint32_t(kindMask));
         usdGenTonic::TonicSelectionItem const item =
             _Impl(ctx)->model.SelectionItemFromHit(hit);

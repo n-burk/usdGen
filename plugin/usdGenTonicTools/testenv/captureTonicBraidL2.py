@@ -280,6 +280,17 @@ def run(appController):
     dll.Tonic_SetBrushRing(session.model, zero3, zero3, ctypes.c_float(0.0))
     session.publishAll()
 
+    # usdview draws unconditional RGB origin axes after every frame
+    # (stageView.DrawAxis: pure-green +Y, scaled by camera distance, with
+    # no toggle). Under opaque tubes they are occluded; through x-rayed
+    # tubes the Y axis reads as a bright green line through the groom —
+    # the V9 "green sliver", which bisected to this and nothing else
+    # (probeGreen.py). It is viewer chrome, not tool content, so the shot
+    # turns it off. T3 pixel tests keep it: they are green with it on and
+    # their measurements were taken that way.
+    if hasattr(view, "DrawAxis"):
+        view.DrawAxis = lambda *args, **kwargs: None
+
     view.update()
     view.repaint()
     view.updateGL()

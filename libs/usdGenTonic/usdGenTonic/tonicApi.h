@@ -118,8 +118,21 @@ int USDGENTONIC_API Tonic_ClosestPoint(TonicModelContext *ctx,
 /* Graph-mode edits. *outId receives the new node/edge id. */
 int USDGENTONIC_API Tonic_GraphAddNode(TonicModelContext *ctx, int faceId,
                                        float u, float v, int *outId);
+/* Atomically closes one graph region. `nodeIds[i] >= 0` reuses that exact
+ * live stable node id and ignores faceIds/uvs at i; `nodeIds[i] == -1`
+ * creates a node at faceIds[i], uvs[2*i..2*i+1]. Existing chain edges are
+ * reused. `outRegionId` may be NULL. */
+int USDGENTONIC_API Tonic_GraphCreateRegion(
+    TonicModelContext *ctx, int const *nodeIds, int const *faceIds,
+    float const *uvs, int count, int *outRegionId);
 int USDGENTONIC_API Tonic_GraphMoveNode(TonicModelContext *ctx, int nodeId,
                                         int faceId, float u, float v);
+/* Atomically moves existing graph nodes to K1 face/UV locations. Used by a
+ * whole-edge drag: all targets are checked before its endpoints move, K2
+ * retraces once, and any topology-changing target is rejected unchanged. */
+int USDGENTONIC_API Tonic_GraphMoveNodes(
+    TonicModelContext *ctx, int const *nodeIds, int const *faceIds,
+    float const *uvs, int count);
 int USDGENTONIC_API Tonic_GraphConnect(TonicModelContext *ctx, int a, int b,
                                        int *outEdge);
 int USDGENTONIC_API Tonic_GraphSplitEdge(TonicModelContext *ctx, int edgeId,
@@ -139,6 +152,19 @@ int USDGENTONIC_API Tonic_GraphSnapNode(TonicModelContext const *ctx,
                                         float const p[3], float radius);
 int USDGENTONIC_API Tonic_GraphSnapEdge(TonicModelContext const *ctx,
                                         float const p[3], float radius);
+/* Reads one exact stable graph node; returns TONIC_ERROR for dead/unknown
+ * ids. All output pointers are required. */
+int USDGENTONIC_API Tonic_GraphGetNode(TonicModelContext const *ctx,
+                                       int nodeId, int *outFaceId,
+                                       float outUV[2], float outP[3]);
+/* Reads the stable endpoint node ids of one live stable edge id. */
+int USDGENTONIC_API Tonic_GraphGetEdge(TonicModelContext const *ctx,
+                                       int edgeId, int outNodeIds[2]);
+/* Reads the viewport position of one stable graph node.  This is its
+ * canonical scalp point plus the display-only normal lift used by the
+ * scene index; GraphGetNode remains the authoring-coordinate getter. */
+int USDGENTONIC_API Tonic_GraphGetNodeDisplayPosition(
+    TonicModelContext const *ctx, int nodeId, float outP[3]);
 int USDGENTONIC_API Tonic_GraphLinkRegions(TonicModelContext *ctx, int r0,
                                            int r1);
 int USDGENTONIC_API Tonic_GraphUnlinkRegions(TonicModelContext *ctx, int r0,
@@ -160,6 +186,12 @@ int USDGENTONIC_API Tonic_SetMirrorX(TonicModelContext *ctx, int on);
 int USDGENTONIC_API Tonic_GetMirrorX(TonicModelContext const *ctx);
 
 int USDGENTONIC_API Tonic_Rasterise(TonicModelContext *ctx);
+/* Exact graph-region query at a K1 surface hit. Returns the source graph
+ * region id (not the linked interpolation id), or -1 when the coordinate is
+ * uncovered or invalid. This intentionally does not use the coarse per-face
+ * K3 map: multiple closed regions may occupy one scalp face. */
+int USDGENTONIC_API Tonic_RegionAtSurface(TonicModelContext const *ctx,
+                                          int faceId, float u, float v);
 unsigned long long USDGENTONIC_API Tonic_GetMapVersion(
     TonicModelContext const *ctx);
 
@@ -199,7 +231,10 @@ int USDGENTONIC_API Tonic_ReadRegionLoops(TonicModelContext *ctx,
                                           int *outRegionCount,
                                           int *outIndexCount);
 
-/* P3 Tube mode (plan/17 section 5.2, K4/K5). Center CVs, sections, soft
+/* P3 Tube mode (plan/17 section 5.2, K4/K5). `ringVerts=0` matches the
+ * canonical region-loop CV count. Explicit 3..32 retains every authored
+ * corner and adds only deterministic samples along region edges. Center CVs,
+ * sections, soft
  * selection and display density. Guides are NOT refilled here: the move
  * is an edit + Tonic_RefillGuides(preview), the release ends with
  * Tonic_RefillGuides(1.0). */
@@ -268,6 +303,17 @@ int USDGENTONIC_API Tonic_GetFillParams(TonicModelContext *ctx,
                                         int *outSeed, float *outEdgeBias,
                                         float *outProfile, int maxFloats,
                                         int *outFloats);
+/* Commit-only output. `densityMultiplier` scales the authored full Fill
+ * density (not the interactive preview fraction); width is in scene units.
+ * `enabled` is exactly 0 or 1. Get requires all three output pointers. */
+int USDGENTONIC_API Tonic_SetOutputSettings(TonicModelContext *ctx,
+                                            int enabled,
+                                            float densityMultiplier,
+                                            float width);
+int USDGENTONIC_API Tonic_GetOutputSettings(TonicModelContext const *ctx,
+                                            int *outEnabled,
+                                            float *outDensityMultiplier,
+                                            float *outWidth);
 int USDGENTONIC_API Tonic_SetPreviewFraction(TonicModelContext *ctx,
                                              float fraction);
 float USDGENTONIC_API Tonic_GetPreviewFraction(TonicModelContext const *ctx);
@@ -276,6 +322,14 @@ int USDGENTONIC_API Tonic_GetFreezeRoots(TonicModelContext const *ctx);
 /* Refill through K8/K9/K10; negative fraction selects the stored preview
  * fraction, 1.0 refills at full density. */
 int USDGENTONIC_API Tonic_RefillGuides(TonicModelContext *ctx, float fraction);
+/* Explicit Fill after Clear. Auto-refresh RefillGuides stays suppressed. */
+int USDGENTONIC_API Tonic_GenerateGuides(TonicModelContext *ctx,
+                                         float fraction);
+int USDGENTONIC_API Tonic_ClearGeneratedCurves(TonicModelContext *ctx);
+int USDGENTONIC_API Tonic_SetGeneratedCurvesVisible(TonicModelContext *ctx,
+                                                     int visible);
+int USDGENTONIC_API Tonic_GetGeneratedCurvesVisible(
+    TonicModelContext const *ctx, int *outVisible);
 /* Guide census. Any out-param may be NULL. */
 int USDGENTONIC_API Tonic_GetGuideCounts(TonicModelContext const *ctx,
                                          int *outGuides, int *outCv);
@@ -447,10 +501,19 @@ int USDGENTONIC_API Tonic_GetTubeCenterCount(TonicModelContext const *ctx,
 /* Center CV into outXYZ[3]. */
 int USDGENTONIC_API Tonic_GetTubeCenterCV(TonicModelContext const *ctx,
                                           int tubeId, int cv, float *outXYZ);
+/* Visible/editable center-CV handle into outXYZ[3]. This is the actual
+ * section polygon area centroid; Tonic_GetTubeCenterCV remains raw authored
+ * center-cage data. */
+int USDGENTONIC_API Tonic_GetTubeCenterHandle(TonicModelContext const *ctx,
+                                              int tubeId, int cv,
+                                              float *outXYZ);
 /* Move one center CV with K6-down / K7-up propagation. */
 int USDGENTONIC_API Tonic_MoveTubeCenterCV(TonicModelContext *ctx, int tubeId,
                                            int cv, float dx, float dy,
                                            float dz);
+/* Translate every center CV in one tube atomically, then run K6/K7 once. */
+int USDGENTONIC_API Tonic_TranslateTube(TonicModelContext *ctx, int tubeId,
+                                        float dx, float dy, float dz);
 /* Flattened center deltas (du, dv, dw per CV); two-call (NULL, 0) probe. */
 int USDGENTONIC_API Tonic_ReadTubeDeltas(TonicModelContext const *ctx,
                                          int tubeId, float *out, int outCap,
@@ -579,6 +642,19 @@ int USDGENTONIC_API Tonic_GetLevelDisplay(TonicModelContext const *ctx,
                                           int *outXray);
 int USDGENTONIC_API Tonic_SetFocusLevel(TonicModelContext *ctx, int level);
 int USDGENTONIC_API Tonic_GetFocusLevel(TonicModelContext const *ctx);
+/* Per-branch hierarchy display cut. Disabled is the legacy behavior: every
+ * live tube is visible and focus level controls the edit frontier. Enabled
+ * starts with L1 roots collapsed; expanding a non-leaf hides that tube and
+ * exposes its direct children without changing unrelated branches. */
+int USDGENTONIC_API Tonic_SetActiveCutEnabled(TonicModelContext *ctx,
+                                              int enabled);
+int USDGENTONIC_API Tonic_GetActiveCutEnabled(TonicModelContext const *ctx);
+int USDGENTONIC_API Tonic_SetTubeExpanded(TonicModelContext *ctx, int tubeId,
+                                          int expanded);
+int USDGENTONIC_API Tonic_GetTubeExpanded(TonicModelContext const *ctx,
+                                          int tubeId);
+int USDGENTONIC_API Tonic_IsTubeVisible(TonicModelContext const *ctx,
+                                        int tubeId);
 /* V8 (plan/18 section 2.4a): world units per screen pixel at the focus
  * point, so the overlay dots and curves can be a fixed number of pixels
  * across. Storm sizes points and curves in WORLD units, so without this
@@ -721,9 +797,10 @@ int USDGENTONIC_API Tonic_PickItem(TonicModelContext *ctx,
                                    int *outSubId, int *outSubSubId);
 
 /* The gizmo the viewport draws (plan/18 §2.4). `kind` is 0 none,
- * 1 translate, 2 ringTRS, 3 nodeTranslate; `frame` is the u, v, w axes,
- * 3 floats each; `activeHandle` is -1 or the handle under the drag
- * (0/1/2 = the u/v/w axis, 3 = the ring). Setting the same record twice
+ * 1 translate, 2 ringTRS, 3 nodeTranslate, 4 rotate, 5 scale; `frame` is
+ * the u, v, w axes, 3 floats each; `activeHandle` is -1 or a stable handle
+ * id (0/1/2 axis, 3 legacy ring, 4 centre, 5/6/7 planar, 8 view, 9 free).
+ * Setting the same record twice
  * dirties nothing. */
 int USDGENTONIC_API Tonic_SetGizmo(TonicModelContext *ctx, int kind,
                                    const float *origin, const float *frame,

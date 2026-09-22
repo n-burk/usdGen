@@ -24,6 +24,7 @@ import ctypes
 import math
 import os
 import sys
+import types
 
 failures = 0
 
@@ -60,6 +61,12 @@ class FakeDll:
         self.strokeNodes = 4
         self.strokeClosed = 1
         self.faceRegionIds = [0, 0, 1, 1]
+        self.surfaceRegionFn = lambda _face, _u, _v: -1
+        self.graphNodeHits = {}
+        self.graphNodeDisplayHits = {}
+        self.graphEdges = {}
+        self.closestMiss = False
+        self.batchReject = False
 
     # -- bookkeeping -------------------------------------------------------
 
@@ -97,6 +104,35 @@ class FakeDll:
         _deref(weldEnd).value = 0
         return 0
 
+    def Tonic_GraphCreateRegion(self, _model, nodeIds, faces, uvs, count,
+                                outRegion):
+        self._record("Tonic_GraphCreateRegion", (
+            [nodeIds[i] for i in range(count)],
+            [faces[i] for i in range(count)],
+            [uvs[i * 2 + axis] for i in range(count) for axis in (0, 1)]))
+        _deref(outRegion).value = 0
+        return 0
+
+    def Tonic_GraphGetNode(self, _model, nodeId, outFace, outUV, outP):
+        hit = self.graphNodeHits.get(int(nodeId))
+        if hit is None:
+            return 1
+        _deref(outFace).value = hit[0]
+        outUV[0], outUV[1] = hit[1], hit[2]
+        outP[0], outP[1], outP[2] = hit[3]
+        return 0
+
+    def Tonic_GraphGetNodeDisplayPosition(self, _model, nodeId, outP):
+        point = self.graphNodeDisplayHits.get(int(nodeId))
+        if point is None:
+            return 1
+        outP[0], outP[1], outP[2] = point
+        return 0
+
+    def Tonic_RegionAtSurface(self, _model, face, u, v):
+        self._record("Tonic_RegionAtSurface", (face, u.value, v.value))
+        return self.surfaceRegionFn(int(face), float(u.value), float(v.value))
+
     def Tonic_GraphAddNode(self, _model, face, u, v, outId):
         self.nextNodeId += 1
         self._record("Tonic_GraphAddNode", (face, u.value, v.value,
@@ -107,6 +143,41 @@ class FakeDll:
     def Tonic_GraphMoveNode(self, _model, nodeId, face, u, v):
         self._record("Tonic_GraphMoveNode", (nodeId, face, u.value, v.value))
         return 0
+
+    def Tonic_GraphGetEdge(self, _model, edgeId, outNodeIds):
+        endpoints = self.graphEdges.get(int(edgeId))
+        self._record("Tonic_GraphGetEdge", (int(edgeId),))
+        if endpoints is None:
+            return 1
+        outNodeIds[0], outNodeIds[1] = endpoints
+        return 0
+
+    def Tonic_ClosestPoint(self, _model, point, outHit, outFace, outUV,
+                           outP, outN):
+        query = tuple(float(point[i]) for i in range(3))
+        self._record("Tonic_ClosestPoint", query)
+        if self.closestMiss:
+            _deref(outHit).value = 0
+            return 0
+        # The test scalp is the y=0 plane.  Its face/UV convention mirrors
+        # FakeSession.raycast so the batch assertion can inspect no-jump UVs.
+        x, _y, z = query
+        ix = min(max(int(math.floor(x)), 0), 3)
+        iz = min(max(int(math.floor(z)), 0), 3)
+        _deref(outHit).value = 1
+        _deref(outFace).value = ix * 4 + iz
+        outUV[0], outUV[1] = z - iz, x - ix
+        outP[0], outP[1], outP[2] = x, 0.0, z
+        outN[0], outN[1], outN[2] = 0.0, 1.0, 0.0
+        return 0
+
+    def Tonic_GraphMoveNodes(self, _model, nodeIds, faces, uvs, count):
+        payload = ([int(nodeIds[i]) for i in range(count)],
+                   [int(faces[i]) for i in range(count)],
+                   [float(uvs[2 * i + axis])
+                    for i in range(count) for axis in (0, 1)])
+        self._record("Tonic_GraphMoveNodes", payload)
+        return 1 if self.batchReject else 0
 
     def Tonic_GraphWeld(self, _model, keep, drop):
         self._record("Tonic_GraphWeld", (keep, drop))
@@ -182,6 +253,7 @@ class FakeSession:
         self.pickFn = lambda mask, x, y: None
         self.selection = {}
         self.surfaceMisses = False
+        self.rasteriseOk = True
         # Where the controller measures the display scale (plan/18
         # section 2.4a); None stands for "no scalp bound yet".
         self.scalpCenter = (2.0, 0.0, 2.0)
@@ -241,7 +313,7 @@ class FakeSession:
 
     def rasterise(self):
         self.events.append(("rasterise", None))
-        return True
+        return self.rasteriseOk
 
     def ensureRegionTubes(self):
         self.events.append(("ensureRegionTubes", None))
@@ -436,7 +508,8 @@ def testHotkeys(tonicModes):
         ("m", frozenset(["shift"]), (tonicModes.ACTION_MERGE, None)),
         ("down", frozenset(["ctrl"]), (tonicModes.ACTION_ENTER_LEVEL, None)),
         ("up", frozenset(["ctrl"]), (tonicModes.ACTION_EXIT_LEVEL, None)),
-        ("backspace", frozenset(), (tonicModes.ACTION_EXIT_LEVEL, None)),
+        ("backspace", frozenset(), (tonicModes.ACTION_BACKSPACE, None)),
+        ("enter", frozenset(), (tonicModes.ACTION_COMPLETE, None)),
         ("w", frozenset(["shift"]), (tonicModes.ACTION_WELD, None)),
         ("u", frozenset(["shift"]), (tonicModes.ACTION_UNWELD, None)),
         ("s", frozenset(["ctrl", "shift"]), (tonicModes.ACTION_SAVE, None)),
@@ -493,7 +566,7 @@ def testModesShelf(tonicModes, tonicLoops):
     for modeId in sorted(panels):
         check(tonicLoops.makeLoop(modeId, None, None) is None,
               "%s is a panel mode, so it builds no loop" % modeId)
-    check(len(tonicLoops.subModesFor("graph")) == 7 and
+    check(len(tonicLoops.subModesFor("graph")) == 9 and
           tonicLoops.subModesFor("output") == (),
           "sub-mode shelves come from tonicModes, and Output has none")
 
@@ -533,8 +606,34 @@ def testGizmo(tonicCamera, tonicGizmo):
     # than it is tall here: 100 px right is 1.0, 100 px up is 4/3.
     check(near(delta[0], 1.0) and near(delta[1], 4.0 / 3.0),
           "a plane drag tracks the cursor in both axes (%r)" % (delta,))
-    check(gizmo.abiHandle() == -1,
-          "the plane handle is spelled 'none' to the ABI")
+    check(gizmo.abiHandle() == tonicGizmo.HANDLE_CENTER,
+          "the centre handle stays active in the ABI so its square highlights")
+    gizmo.end()
+
+    gizmo.place((0.0, 0.0, -5.0), 1.0, tonicGizmo.GIZMO_ROTATE)
+    check(gizmo.begin(tonicGizmo.HANDLE_U, cam, 285.0, 150.0),
+          "a rotate ring drag starts")
+    first = gizmo.rotationDrag(cam, 200.0, 65.0)
+    second = gizmo.rotationDrag(cam, 115.0, 150.0)
+    check(first is not None and second is not None and
+          abs(second[1]) > abs(first[1]) + 0.5,
+          "rotation accumulates through successive quarter turns")
+    gizmo.end()
+    check(gizmo.begin(tonicGizmo.HANDLE_FREE, cam, 200.0, 150.0),
+          "a free trackball drag starts")
+    first = gizmo.rotationDrag(cam, 250.0, 150.0)
+    second = gizmo.rotationDrag(cam, 250.0, 100.0)
+    check(first is not None and second is not None and
+          abs(second[0][0] - first[0][0]) > 0.1 and
+          abs(second[0][1] - first[0][1]) > 0.1,
+          "a curved trackball drag composes its prior turn")
+    gizmo.end()
+    check(gizmo.begin(tonicGizmo.HANDLE_FREE, cam, 200.0, 150.0),
+          "a reversible free trackball drag starts")
+    gizmo.rotationDrag(cam, 250.0, 150.0)
+    backtracked = gizmo.rotationDrag(cam, 200.0, 150.0)
+    check(backtracked is not None and near(backtracked[1], 0.0),
+          "an exact free-trackball backtrack restores the press transform")
     gizmo.end()
 
     frame = tonicGizmo.screenFrame(cam, (0.0, 0.0, -5.0))
@@ -554,6 +653,53 @@ def newLoop(tonicLoops, TonicToolState, subMode="draw"):
     loop = tonicLoops.GraphLoop(session, state)
     loop.setSubMode(subMode)
     return dll, session, state, loop
+
+
+def testSessionRegionTubeDefaults(tonicSession, TonicToolState):
+    """Automatic stubs pass Auto; existing roots are never rebuilt."""
+    print("-- TonicSession: region-root ring columns ----------------")
+
+    class BuildDll(object):
+        def __init__(self):
+            self.existing = {1: 19}
+            self.builds = []
+
+        def Tonic_TubeForRegion(self, _model, regionId):
+            return self.existing.get(int(regionId), -1)
+
+        def Tonic_BuildTubeFromRegion(self, _model, regionId, rings,
+                                      ringVerts, length):
+            self.builds.append((int(regionId), int(rings), int(ringVerts),
+                                float(length.value)))
+            return 0
+
+    class SessionShell(object):
+        def __init__(self, state, dll):
+            self._state = state
+            self._model = "model"
+            self.dll = dll
+            self.statuses = []
+
+        def regionStats(self):
+            return (3, 0, 0)
+
+        def _status(self, text):
+            self.statuses.append(text)
+
+    state = TonicToolState()
+    dll = BuildDll()
+    shell = SessionShell(state, dll)
+    built = tonicSession.TonicSession.ensureRegionTubes(shell)
+    check(built == 2 and [(item[0], item[2]) for item in dll.builds] ==
+          [(0, 0), (2, 0)],
+          "new Region stubs pass Auto while existing sculpted roots are skipped")
+
+    dll.existing = {}
+    dll.builds = []
+    state.panels["tube"] = {"ringCvCount": 12}
+    built = tonicSession.TonicSession.ensureRegionTubes(shell)
+    check(built == 3 and all(item[2] == 12 for item in dll.builds),
+          "an explicit 3..32 panel request is passed unchanged to new roots")
 
 
 def testGraphDraw(tonicCamera, tonicLoops, TonicToolState):
@@ -615,6 +761,385 @@ def testGraphDraw(tonicCamera, tonicLoops, TonicToolState):
           "the release after a cancel is not ours")
 
 
+def testGraphRegion(tonicCamera, tonicLoops, TonicToolState):
+    """Click-authored regions remain a Python draft until they close."""
+    print("-- GraphLoop: click-created region -----------------------")
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState, "region")
+    cam = topDownCamera(tonicCamera)
+
+    def sample(x, y):
+        return tonicLoops.Sample(session, cam, x, y)
+
+    check(state.graphSubMode == "region" and loop.subMode() == "region",
+          "Create region is Graph's default sub-mode")
+    corners = ((100.0, 100.0), (300.0, 100.0), (300.0, 300.0))
+    for x, y in corners:
+        check(loop.press(sample(x, y)) and loop.release(sample(x, y)),
+              "a region CV click is claimed")
+    check(len(loop.draftRegionPreview()["points"]) == 3 and
+          dll.count("Tonic_GraphCreateRegion") == 0 and
+          not session.gestureStack,
+          "three clicked CVs stay transient with no graph edit or undo step")
+
+    check(loop.discardRegionCV(), "Backspace removes the last draft CV")
+    check(len(loop.draftRegionPreview()["points"]) == 2 and
+          dll.count("Tonic_GraphCreateRegion") == 0,
+          "removing a draft CV still does not author the graph")
+    loop.press(sample(*corners[-1]))
+    loop.release(sample(*corners[-1]))
+    check(loop.cancel(), "Escape cancels an idle multi-click draft")
+    check(not loop.draftRegionPreview()["points"] and
+          dll.count("Tonic_GraphCreateRegion") == 0,
+          "Escape leaves no model edit behind")
+
+    for x, y in corners:
+        loop.press(sample(x, y))
+        loop.release(sample(x, y))
+    session.events = []
+    check(loop.completeRegionDraft(), "Enter closes a three-CV draft")
+    authored = dll.argsOf("Tonic_GraphCreateRegion")[-1]
+    check(authored[0] == [-1, -1, -1] and len(authored[1]) == 3,
+          "close sends three explicit new CVs to the atomic region ABI")
+    names = [name for name, _args in session.events]
+    check(names == ["begin", "rasterise", "ensureRegionTubes", "end",
+                    "enqueueCommit", "rebake"],
+          "region, rasterise and auto tube stub share one sealed undo step "
+          "before commit/bake (%r)" % names)
+    check(not loop.draftRegionPreview()["points"],
+          "Enter clears the transient overlay after its commit")
+
+    # Clicking the highlighted first CV is the mouse equivalent of Enter.
+    dll.reset()
+    session.events = []
+    for x, y in corners:
+        loop.press(sample(x, y))
+        loop.release(sample(x, y))
+    loop.press(sample(*corners[0]))
+    loop.release(sample(*corners[0]))
+    check(dll.count("Tonic_GraphCreateRegion") == 1 and
+          not loop.draftRegionPreview()["points"],
+          "clicking the first draft CV closes and commits the contour")
+
+    # K11's stable id is retained in the draft and reaches the atomic ABI;
+    # a ray landing anywhere in the visible dot cannot create a duplicate.
+    dll.reset()
+    dll.graphNodeHits[37] = (3, 0.25, 0.75, (1.25, 0.0, 2.75))
+    session.pickFn = (lambda mask, x, _y:
+                      {"kind": 8, "id": 37, "subId": -1, "subSubId": -1}
+                      if mask == 8 and x < 150.0 else None)
+    for x, y in corners:
+        loop.press(sample(x, y))
+        loop.release(sample(x, y))
+    check(loop.completeRegionDraft(), "a draft may include an existing CV")
+    shared = dll.argsOf("Tonic_GraphCreateRegion")[-1]
+    check(shared[0] == [37, -1, -1] and shared[1][0] == 3 and
+          near(shared[2][0], 0.25) and near(shared[2][1], 0.75),
+          "the clicked existing CV uses its exact stable id and canonical hit")
+
+    # Region's displayed CV target stays usable at a tiny authoring snap.
+    # Before the first click it must prehighlight only the published node
+    # (never an edge or region under the glyph), and the same off-centre
+    # press must retain that stable id.  A 2.5 px draft hover then crosses
+    # into B's handle: identity has to win over A's proximity-close fallback,
+    # or the second click is swallowed and a later surface click becomes an
+    # overlapping new node.
+    dll.reset()
+    state.snapRadiusPx = 2.0
+    dll.graphNodeHits[38] = (3, 0.35, 0.75, (1.35, 0.0, 2.75))
+    dll.graphNodeDisplayHits[37] = (1.25, 0.004, 2.75)
+    def adjacentNodePick(mask, x, _y):
+        if mask == 8 and x <= 101.0:
+            return {"kind": 8, "id": 37, "subId": -1, "subSubId": -1}
+        if mask == 8 and x <= 112.0:
+            return {"kind": 8, "id": 38, "subId": -1, "subSubId": -1}
+        # A generic pre-first-click hover would incorrectly favor this edge.
+        if mask != 8:
+            return {"kind": 16, "id": 91, "subId": -1, "subSubId": -1}
+        return None
+    session.pickFn = adjacentNodePick
+    # The two approaches are six pixels from their respective glyph centres;
+    # their 2.5 px separation is deliberately below the usual hover throttle.
+    adjacent = ((100.0, 100.0), (102.5, 100.0), (300.0, 300.0))
+    session.hovers = []
+    session.picks = []
+    loop.hover(sample(*adjacent[0]))
+    check(session.hovers[-1] == (8, 37) and not loop._regionDraft and
+          all(pick[0] == 8 and near(pick[3], 8.0) for pick in session.picks),
+          "tiny-snap Region hover targets only the 8px published CV before "
+          "the first click")
+    loop.press(sample(*adjacent[0]))
+    loop.release(sample(*adjacent[0]))
+    previewPoint = loop.draftRegionPreview()["points"][0]
+    check(loop._regionDraft[0][6] == 37 and
+          loop._regionDraft[0][3] == (1.25, 0.0, 2.75) and
+          all(near(previewPoint[i], (1.25, 0.004, 2.75)[i])
+              for i in range(3)),
+          "the off-centre first click retains canonical id/data and previews "
+          "its lifted glyph")
+    session.hovers = []
+    loop.hover(sample(*adjacent[1]))
+    check(session.hovers[-1] == (8, 38) and
+          all(near(loop._regionHover[i], (1.35, 0.0, 2.75)[i])
+              for i in range(3)),
+          "a sub-threshold draft hover highlights the second stable CV")
+    loop.press(sample(*adjacent[1]))
+    loop.release(sample(*adjacent[1]))
+    # A fresh click can arrive without a preceding miss hover; it must clear
+    # B's old native highlight rather than leave the cursor suggesting that
+    # the new third CV still acts on B.
+    loop.press(sample(*adjacent[2]))
+    loop.release(sample(*adjacent[2]))
+    check(session.hovers[-1] == (0, -1),
+          "a direct fresh-CV press clears a prior published-node highlight")
+    loop.hover(sample(*adjacent[2]))
+    check(session.hovers[-1] == (0, -1),
+          "moving between draft CVs clears the native graph-node hover")
+    ids = [entry[6] for entry in loop._regionDraft]
+    check(ids == [37, 38, -1] and
+          dll.count("Tonic_GraphCreateRegion") == 0,
+          "adjacent published CVs stay distinct stable draft ids %r" % ids)
+    loop.press(sample(*adjacent[0]))
+    loop.release(sample(*adjacent[0]))
+    reused = dll.argsOf("Tonic_GraphCreateRegion")[-1]
+    check(reused[0] == [37, 38, -1],
+          "the atomic second-region request reuses both published node ids")
+    session.pickFn = lambda _mask, _x, _y: None
+
+    for x, y in corners:
+        loop.press(sample(x, y))
+        loop.release(sample(x, y))
+    check(loop.setSubMode("draw") and not loop.draftRegionPreview()["points"],
+          "changing Graph sub-modes cancels the retained draft")
+    loop.setSubMode("region")
+    loop.press(sample(*corners[0]))
+    loop.release(sample(*corners[0]))
+    check(loop.deactivate() and not loop.draftRegionPreview()["points"],
+          "leaving Graph cancels the retained draft too")
+
+
+def testGraphReposition(tonicCamera, tonicLoops, TonicToolState):
+    print("-- GraphLoop: reposition -------------------------------")
+    import usdGenTonicTools.tonicLib as tonicLib
+    cam = topDownCamera(tonicCamera)
+
+    def makeSample(session):
+        return lambda x, y: tonicLoops.Sample(session, cam, x, y)
+
+    # A visible/lifted CV is pressed at scalp (1, 1), but its canonical
+    # position is (1.5, 1).  Reposition must apply the drag delta (+1, 0),
+    # giving v=.5 in face x=2 rather than jumping it to the cursor's v=0.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else None)
+    loop.press(sample(100.0, 100.0))
+    check(session.statuses[-1] == "Tonic Graph: repositioning CV (Esc cancels)",
+          "a valid reposition press replaces stale miss guidance")
+    loop.move(sample(200.0, 100.0))
+    loop.release(sample(200.0, 100.0))
+    batch = dll.argsOf("Tonic_GraphMoveNodes")
+    check(len(batch) == 1 and batch[0][0] == [10] and
+          batch[0][1] == [9] and near(batch[0][2][0], 0.0) and
+          near(batch[0][2][1], 0.5),
+          "CV reposition uses frozen canonical point plus cursor delta (%r)"
+          % (batch,))
+    check(dll.count("Tonic_GraphMoveNode") == 0 and
+          dll.count("Tonic_GraphAddNode") == 0 and
+          dll.count("Tonic_GraphWeld") == 0 and
+          dll.count("Tonic_GraphSplitEdge") == 0,
+          "Reposition never creates, welds, or splits topology")
+    events = [name for name, _args in session.events]
+    check(events == ["begin", "rasterise", "ensureRegionTubes", "end",
+                     "enqueueCommit", "rebake"],
+          "one accepted CV drag rasterises inside its one undo bracket (%r)"
+          % (events,))
+    liveDirty = (tonicLib.TONIC_DIRTY_POINTS |
+                 tonicLib.TONIC_DIRTY_TOPOLOGY |
+                 tonicLib.TONIC_DIRTY_GRAPH |
+                 tonicLib.TONIC_DIRTY_REGIONS |
+                 tonicLib.TONIC_DIRTY_GUIDES)
+    check(liveDirty in session.published,
+          "accepted CV samples publish points, topology, graph, regions and "
+          "guides live")
+    check(session.hovers[-1] == (tonicLib.TONIC_PICK_GRAPH_NODE, 10),
+          "press-time reposition highlights the picked CV without hover")
+
+    # Reposition accessibility has fixed physical-pixel handles, independent
+    # of the small graph snap preference.  Its hover and press resolver must
+    # agree: CV first, then edge, and never the region behind them.
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState,
+                                        "reposition")
+    sample = makeSample(session)
+    state.snapRadiusPx = 1.0
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    def repositionPick(mask, x, _y):
+        if mask == tonicLib.TONIC_PICK_GRAPH_NODE and x < 110.0:
+            return {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                    "subId": -1, "subSubId": -1}
+        if mask == tonicLib.TONIC_PICK_GRAPH_EDGE and 110.0 <= x < 130.0:
+            return {"kind": tonicLib.TONIC_PICK_GRAPH_EDGE, "id": 77,
+                    "subId": -1, "subSubId": -1}
+        # A broad graph-region candidate must never become a Reposition
+        # prehighlight or press target.
+        if mask == tonicLib.TONIC_PICK_REGION:
+            return {"kind": tonicLib.TONIC_PICK_REGION, "id": 3,
+                    "subId": -1, "subSubId": -1}
+        return None
+    session.pickFn = repositionPick
+    loop.hover(sample(106.0, 100.0))
+    loop.hover(sample(120.0, 100.0))
+    loop.hover(sample(150.0, 100.0))
+    masks = [mask for mask, _x, _y, _radius in session.picks]
+    radii = [radius for _mask, _x, _y, radius in session.picks]
+    check(session.hovers[-3:] == [(tonicLib.TONIC_PICK_GRAPH_NODE, 10),
+                                  (tonicLib.TONIC_PICK_GRAPH_EDGE, 77),
+                                  (0, -1)] and
+          tonicLib.TONIC_PICK_REGION not in masks and
+          8.0 in radii and 5.0 in radii,
+          "Reposition hover uses fixed CV-first 8px/edge 5px targets")
+    loop.press(sample(106.0, 100.0))
+    picksBeforeActiveHover = len(session.picks)
+    hoversBeforeActiveHover = len(session.hovers)
+    loop.hover(sample(120.0, 100.0))
+    check(len(session.picks) == picksBeforeActiveHover and
+          len(session.hovers) == hoversBeforeActiveHover,
+          "active reposition drag keeps its press target highlight")
+    loop.cancel()
+
+    # Releasing without travel is an arming click only: it never moves or
+    # cooks, even though the CV itself was successfully picked.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else None)
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(100.0, 100.0))
+    check(dll.count("Tonic_GraphMoveNodes") == 0 and
+          "rasterise" not in [name for name, _args in session.events] and
+          "enqueueCommit" not in [name for name, _args in session.events] and
+          [name for name, _args in session.events] == ["begin", "cancel"],
+          "a no-op reposition click has no movement, bake, commit, or undo")
+
+    # K3 failure rolls back the still-open gesture rather than ending an
+    # edited graph with stale maps and no committable snapshot.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else None)
+    session.rasteriseOk = False
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(200.0, 100.0))
+    check([name for name, _args in session.events] == ["begin", "rasterise",
+                                                        "cancel"] and
+          "enqueueCommit" not in [name for name, _args in session.events],
+          "failed reposition rasterisation restores the gesture snapshot")
+
+    # An edge hit resolves stable endpoint ids atomically.  The node branch
+    # runs first, so an overlapping node must never expand into an edge drag.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphEdges[77] = (20, 21)
+    dll.graphNodeHits[20] = (5, 0.0, 0.25, (1.25, 0.0, 1.0))
+    dll.graphNodeHits[21] = (9, 0.0, 0.25, (2.25, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_EDGE, "id": 77,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_EDGE else None)
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(200.0, 100.0))
+    batch = dll.argsOf("Tonic_GraphMoveNodes")
+    check(dll.argsOf("Tonic_GraphGetEdge") == [(77,)] and len(batch) == 1
+          and batch[0][0] == [20, 21],
+          "edge reposition gets stable endpoints and moves them as one batch")
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphEdges[77] = (20, 21)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else
+                      ({"kind": tonicLib.TONIC_PICK_GRAPH_EDGE, "id": 77,
+                        "subId": -1, "subSubId": -1}
+                       if mask == tonicLib.TONIC_PICK_GRAPH_EDGE else None))
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(200.0, 100.0))
+    check(dll.count("Tonic_GraphGetEdge") == 0 and
+          dll.argsOf("Tonic_GraphMoveNodes")[0][0] == [10],
+          "an overlapping CV has priority over the edge")
+
+    # A rejected batch keeps the press baseline and permits a later valid
+    # sample.  Returning from that valid position to the press point calls
+    # the batch with the original coordinates, then cancels the no-op undo.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else None)
+    loop.press(sample(100.0, 100.0))
+    dll.batchReject = True
+    loop.move(sample(200.0, 100.0))
+    dll.batchReject = False
+    loop.move(sample(200.0, 100.0))
+    loop.move(sample(100.0, 100.0))
+    loop.release(sample(100.0, 100.0))
+    batch = dll.argsOf("Tonic_GraphMoveNodes")
+    check(len(batch) == 3 and near(batch[1][2][1], 0.5) and
+          near(batch[2][2][1], 0.5) and
+          [name for name, _args in session.events] == ["begin", "cancel"],
+          "rejected moves recover from the frozen baseline; backtrack cancels")
+
+    # Escape restores the native gesture snapshot and never starts a cook.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else None)
+    loop.press(sample(100.0, 100.0))
+    loop.move(sample(200.0, 100.0))
+    loop.cancel()
+    check([name for name, _args in session.events] == ["begin", "cancel"]
+          and "enqueueCommit" not in [name for name, _args in session.events],
+          "Escape restores a reposition gesture without baking it")
+
+    # Switching tools mid-drag must not strand the native undo bracket under
+    # the new sub-mode's release implementation.
+    dll, session, _state, loop = newLoop(tonicLoops, TonicToolState,
+                                         "reposition")
+    sample = makeSample(session)
+    dll.graphNodeHits[10] = (5, 0.0, 0.5, (1.5, 0.0, 1.0))
+    session.pickFn = (lambda mask, _x, _y:
+                      {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 10,
+                       "subId": -1, "subSubId": -1}
+                      if mask == tonicLib.TONIC_PICK_GRAPH_NODE else None)
+    loop.press(sample(100.0, 100.0))
+    loop.move(sample(200.0, 100.0))
+    loop.setSubMode("region")
+    check([name for name, _args in session.events] == ["begin", "cancel"]
+          and not session.gestureStack and loop.subMode() == "region",
+          "switching sub-modes cancels an active reposition bracket")
+
+
 def testGraphPlaceAndClicks(tonicCamera, tonicLoops, TonicToolState):
     print("-- GraphLoop: place, connect, delete, link ---------------")
     import usdGenTonicTools.tonicLib as tonicLib
@@ -646,6 +1171,53 @@ def testGraphPlaceAndClicks(tonicCamera, tonicLoops, TonicToolState):
           % (session.picks,))
     check(all(near(r, 8.0) for _m, _x, _y, r in session.picks),
           "the pick radius is the panel's snap radius in pixels")
+
+    # Releasing back over an edge incident to the dragged node is still an
+    # ordinary move.  The edge reader must prevent Place from splitting and
+    # welding it back, which would replace the node's stable id.
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState, "place")
+    cam = topDownCamera(tonicCamera)
+    phase = ["press"]
+    dll.graphEdges[21] = (7, 9)
+    def incidentPick(mask, _x, _y):
+        if mask == tonicLib.TONIC_PICK_GRAPH_NODE and phase[0] == "press":
+            return {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 7,
+                    "subId": -1, "subSubId": -1}
+        if mask == tonicLib.TONIC_PICK_GRAPH_EDGE:
+            return {"kind": tonicLib.TONIC_PICK_GRAPH_EDGE, "id": 21,
+                    "subId": -1, "subSubId": -1}
+        return None
+    session.pickFn = incidentPick
+    loop.press(tonicLoops.Sample(session, cam, 100.0, 100.0))
+    loop.move(tonicLoops.Sample(session, cam, 150.0, 150.0))
+    phase[0] = "release"
+    loop.release(tonicLoops.Sample(session, cam, 150.0, 150.0))
+    check(dll.count("Tonic_GraphSplitEdge") == 0 and
+          dll.count("Tonic_GraphWeld") == 0,
+          "dropping on an edge incident to the dragged node preserves it")
+
+    # A genuinely non-incident edge remains a valid Place drop target.
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState, "place")
+    cam = topDownCamera(tonicCamera)
+    phase = ["press"]
+    dll.graphEdges[22] = (10, 11)
+    def separatePick(mask, _x, _y):
+        if mask == tonicLib.TONIC_PICK_GRAPH_NODE and phase[0] == "press":
+            return {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": 7,
+                    "subId": -1, "subSubId": -1}
+        if mask == tonicLib.TONIC_PICK_GRAPH_EDGE:
+            return {"kind": tonicLib.TONIC_PICK_GRAPH_EDGE, "id": 22,
+                    "subId": -1, "subSubId": -1}
+        return None
+    session.pickFn = separatePick
+    loop.press(tonicLoops.Sample(session, cam, 100.0, 100.0))
+    loop.move(tonicLoops.Sample(session, cam, 150.0, 150.0))
+    phase[0] = "release"
+    loop.release(tonicLoops.Sample(session, cam, 150.0, 150.0))
+    check(dll.count("Tonic_GraphSplitEdge") == 1 and
+          dll.argsOf("Tonic_GraphWeld") == [(55, 7)],
+          "dropping on a non-incident edge still splits and welds (%r)"
+          % (dll.argsOf("Tonic_GraphWeld"),))
 
     # Connect: two clicks, one edge.
     dll.reset()
@@ -698,11 +1270,9 @@ def testGraphPlaceAndClicks(tonicCamera, tonicLoops, TonicToolState):
     # Link: two regions.
     dll.reset()
     loop.setSubMode("link")
-    regions = iter([0, 1])
-    session.pickFn = (lambda mask, x, y:
-                      {"kind": tonicLib.TONIC_PICK_REGION,
-                       "id": next(regions), "subId": -1, "subSubId": -1}
-                      if mask == tonicLib.TONIC_PICK_REGION else None)
+    # Region linking is a K1 face/UV containment query, rather than K11's
+    # center-proximity pick or the lossy per-face map.
+    dll.surfaceRegionFn = lambda face, _u, _v: 0 if face == 5 else 1
     loop.press(sample(120.0, 120.0))
     loop.release(sample(120.0, 120.0))
     loop.press(sample(320.0, 120.0))
@@ -842,7 +1412,7 @@ def testRingDisplayFollowsMode(tonicViewport, TonicToolState):
                 for a in dll.argsOf("Tonic_SetDisplayPolicy")]
 
     controller.setMode("graph")
-    check(policyArgs()[-1:] == [("graph", "draw", 1)],
+    check(policyArgs()[-1:] == [("graph", "region", 1)],
           "Graph mode pushes its own id, sub-mode and level (%r)"
           % policyArgs())
     check(not dll.argsOf("Tonic_SetRingDisplay"),
@@ -954,6 +1524,162 @@ def testOutputModeSwitches(tonicLoops, tonicViewport, TonicToolState):
           % (getattr(state, "outputSubMode", ""),))
 
 
+def testViewportExceptionRecovery(tonicViewport, TonicToolState):
+    """The controller owns cleanup when a Qt callback raises mid-gesture.
+
+    This is deliberately Qt-stubbed rather than a loop-only test: the
+    exception handlers in `onPress` and `onRelease` are the boundary that
+    used to leave the next real click permanently captured.
+    """
+    print("-- viewport: callback exception recovery ------------------")
+
+    class _MouseButton(object):
+        LeftButton = 1
+        NoButton = 0
+
+    class _KeyboardModifier(object):
+        ShiftModifier = 1 << 0
+        ControlModifier = 1 << 1
+        AltModifier = 1 << 2
+        MetaModifier = 1 << 3
+
+    qtCore = types.SimpleNamespace(
+        Qt=types.SimpleNamespace(MouseButton=_MouseButton,
+                                 KeyboardModifier=_KeyboardModifier))
+    pxr = types.ModuleType("pxr")
+    usdviewq = types.ModuleType("pxr.Usdviewq")
+    qt = types.ModuleType("pxr.Usdviewq.qt")
+    qt.QtCore = qtCore
+    oldModules = {name: sys.modules.get(name) for name in
+                  ("pxr", "pxr.Usdviewq", "pxr.Usdviewq.qt")}
+    sys.modules["pxr"] = pxr
+    sys.modules["pxr.Usdviewq"] = usdviewq
+    sys.modules["pxr.Usdviewq.qt"] = qt
+
+    class _View(object):
+        def devicePixelRatioF(self):
+            return 1.0
+
+    class _Event(object):
+        def button(self):
+            return _MouseButton.LeftButton
+
+        def modifiers(self):
+            return 0
+
+        def x(self):
+            return 20.0
+
+        def y(self):
+            return 30.0
+
+    class _FailingLoop(object):
+        modeId = "tube"
+
+        def __init__(self, failure):
+            self.failure = failure
+            self.cancelCalls = 0
+
+        def press(self, _sample):
+            if self.failure == "press":
+                raise RuntimeError("press exploded")
+            return True
+
+        def release(self, _sample):
+            if self.failure == "release":
+                raise RuntimeError("release exploded")
+            return True
+
+        def cancel(self):
+            self.cancelCalls += 1
+            return True
+
+    oldResolve = tonicViewport.tonicCamera.resolve
+    try:
+        tonicViewport.tonicCamera.resolve = lambda _view: object()
+
+        dll = FakeDll()
+        session = FakeSession(dll)
+        controller = tonicViewport.ViewportController(TonicToolState(),
+                                                       session, None)
+        controller.syncDisplayScale = lambda _camera: False
+        pressLoop = _FailingLoop("press")
+        controller._loop = pressLoop
+        check(not controller.onPress(_View(), _Event()) and
+              pressLoop.cancelCalls == 1 and not controller.gestureActive,
+              "a press exception force-cancels its pre-gesture loop state")
+
+        idleDraftLoop = _FailingLoop("")
+        controller._loop = idleDraftLoop
+        check(controller.cancelGesture() and idleDraftLoop.cancelCalls == 1,
+              "Escape reaches an idle loop draft without mouse capture")
+
+        releaseLoop = _FailingLoop("release")
+        controller._loop = releaseLoop
+        controller._gesture = True
+        controller._lastXY = (20.0, 30.0)
+        check(not controller.onRelease(_View(), _Event()) and
+              releaseLoop.cancelCalls == 1 and not controller.gestureActive
+              and controller._lastXY is None,
+              "a release exception cancels and resets controller capture")
+        check(len(session.published) >= 2,
+              "both exception paths republish their recovered state %r" %
+              session.published)
+    finally:
+        tonicViewport.tonicCamera.resolve = oldResolve
+        for name, prior in oldModules.items():
+            if prior is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prior
+
+
+def testSculptBrushResizeKeyLifecycle(tonicViewport, TonicToolState):
+    """F remains owned throughout a held Sculpt brush-width gesture."""
+    print("-- viewport: Sculpt F brush-width key lifecycle ------------")
+
+    class _Loop(object):
+        modeId = "sculpt"
+
+    class _Event(object):
+        def __init__(self, repeating=False):
+            self._repeating = repeating
+
+        def isAutoRepeat(self):
+            return self._repeating
+
+    oldKeyName = tonicViewport.keyName
+    oldModifiers = tonicViewport.modifierSet
+    try:
+        tonicViewport.keyName = lambda _event: "f"
+        tonicViewport.modifierSet = lambda _event: frozenset()
+        state = TonicToolState(workspaceOpen=True, activeMode="sculpt")
+        controller = tonicViewport.ViewportController(state, FakeSession(FakeDll()),
+                                                       None)
+        controller._installed = True
+        controller._pointerInside = True
+        controller._loop = _Loop()
+        controller._textFocus = lambda: False
+
+        check(controller.onKey(_Event()) and controller._brushResizeArmed,
+              "F arms brush-width resize only in the active Sculpt viewport")
+        controller._gesture = True
+        controller._brushResizeActive = True
+        check(controller.onKey(_Event()),
+              "F key-repeat stays consumed during a live resize")
+        check(controller.onKeyRelease(_Event(True)) and
+              controller._brushResizeArmed,
+              "an auto-repeat F release cannot disarm an active resize")
+        controller._gesture = False
+        controller._brushResizeActive = False
+        check(controller.onKeyRelease(_Event()) and
+              not controller._brushResizeArmed,
+              "the physical F release clears the resize arm")
+    finally:
+        tonicViewport.keyName = oldKeyName
+        tonicViewport.modifierSet = oldModifiers
+
+
 def main():
     try:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -966,19 +1692,24 @@ def main():
     import tonicTestPackage
     tonicTestPackage.install()
     from usdGenTonicTools import (tonicCamera, tonicGizmo, tonicLoops,
-                                  tonicModes, tonicViewport)
+                                  tonicModes, tonicSession, tonicViewport)
     from usdGenTonicTools.tonicToolState import TonicToolState
     testCamera(tonicCamera)
     testHotkeys(tonicModes)
     testModesShelf(tonicModes, tonicLoops)
     testGizmo(tonicCamera, tonicGizmo)
+    testSessionRegionTubeDefaults(tonicSession, TonicToolState)
     testGraphDraw(tonicCamera, tonicLoops, TonicToolState)
+    testGraphRegion(tonicCamera, tonicLoops, TonicToolState)
+    testGraphReposition(tonicCamera, tonicLoops, TonicToolState)
     testGraphPlaceAndClicks(tonicCamera, tonicLoops, TonicToolState)
     testGraphHoverMarqueeKeys(tonicCamera, tonicLoops, TonicToolState)
     testSurfaceMiss(tonicCamera, tonicLoops, TonicToolState)
     testRingDisplayFollowsMode(tonicViewport, TonicToolState)
     testDisplayScaleHook(tonicCamera, tonicViewport, TonicToolState)
     testOutputModeSwitches(tonicLoops, tonicViewport, TonicToolState)
+    testViewportExceptionRecovery(tonicViewport, TonicToolState)
+    testSculptBrushResizeKeyLifecycle(tonicViewport, TonicToolState)
     print("testUsdGenTonicToolsLoops: %d failure(s)" % failures)
     return 1 if failures else 0
 

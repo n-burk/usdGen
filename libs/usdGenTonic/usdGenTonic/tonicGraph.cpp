@@ -348,7 +348,107 @@ bool TonicScalpGraph::MoveNode(TonicScalpMesh const &mesh, int nodeId,
     return ExtractRegions(mesh);
 }
 
-int TonicScalpGraph::Connect(TonicScalpMesh const &mesh, int a, int b)
+bool
+TonicScalpGraph::MoveNodes(TonicScalpMesh const &mesh,
+                           std::vector<int> const &nodeIds,
+                           std::vector<TonicHit> const &hits)
+{
+    if (nodeIds.empty() || nodeIds.size() != hits.size()) {
+        _diagnostic = "TonicScalpGraph::MoveNodes: mismatched targets";
+        return false;
+    }
+    std::set<int> moved;
+    for (size_t i = 0; i < nodeIds.size(); ++i) {
+        if (!hits[i].hit || !_MutableNode(nodeIds[i]) ||
+            !moved.insert(nodeIds[i]).second) {
+            _diagnostic = "TonicScalpGraph::MoveNodes: bad or duplicate node";
+            return false;
+        }
+    }
+    auto targetPoint = [&](int nodeId, float out[3]) {
+        for (size_t i = 0; i < nodeIds.size(); ++i) {
+            if (nodeIds[i] == nodeId) {
+                out[0] = hits[i].px;
+                out[1] = hits[i].py;
+                out[2] = hits[i].pz;
+                return true;
+            }
+        }
+        TonicGraphNode const *node = FindNode(nodeId);
+        if (!node) {
+            return false;
+        }
+        out[0] = node->p[0];
+        out[1] = node->p[1];
+        out[2] = node->p[2];
+        return true;
+    };
+    for (TonicGraphEdge const &edge : _edges) {
+        if (!edge.alive) {
+            continue;
+        }
+        float a[3], b[3];
+        if (!targetPoint(edge.a, a) || !targetPoint(edge.b, b)) {
+            _diagnostic = "TonicScalpGraph::MoveNodes: dead edge endpoint";
+            return false;
+        }
+        float const dx = a[0] - b[0];
+        float const dy = a[1] - b[1];
+        float const dz = a[2] - b[2];
+        if (dx * dx + dy * dy + dz * dz <= 1.0e-12f) {
+            _diagnostic = "TonicScalpGraph::MoveNodes: collapsed edge";
+            return false;
+        }
+    }
+    // Keep this low-level operation atomic too: callers at the model layer
+    // take an undo snapshot, while direct graph users must never observe one
+    // endpoint of an edge moving when its mate cannot be retraced.
+    TonicScalpGraph const before = *this;
+    auto rollback = [&](char const *reason) {
+        *this = before;
+        _diagnostic = reason;
+        return false;
+    };
+    for (size_t i = 0; i < nodeIds.size(); ++i) {
+        TonicGraphNode *node = _MutableNode(nodeIds[i]);
+        TonicHit const &hit = hits[i];
+        node->faceId = hit.faceId;
+        node->u = hit.u;
+        node->v = hit.v;
+        node->p[0] = hit.px;
+        node->p[1] = hit.py;
+        node->p[2] = hit.pz;
+        node->n[0] = hit.nx;
+        node->n[1] = hit.ny;
+        node->n[2] = hit.nz;
+    }
+    // Re-trace each affected edge once after every endpoint has reached its
+    // sample. This avoids a visible half-edge and an intermediate region
+    // extraction while dragging a whole edge.
+    for (TonicGraphEdge &edge : _edges) {
+        if (!edge.alive ||
+            (!moved.count(edge.a) && !moved.count(edge.b))) {
+            continue;
+        }
+        TonicGraphNode const *a = FindNode(edge.a);
+        TonicGraphNode const *b = FindNode(edge.b);
+        if (!a || !b) {
+            return rollback("TonicScalpGraph::MoveNodes: dead edge endpoint");
+        }
+        std::vector<float> poly = TonicTraceEdgeCpu(mesh, a->p, b->p);
+        if (poly.size() < 6) {
+            return rollback("TonicScalpGraph::MoveNodes: K2 trace failed");
+        }
+        edge.polyline = std::move(poly);
+    }
+    if (!ExtractRegions(mesh)) {
+        return rollback("TonicScalpGraph::MoveNodes: region extraction failed");
+    }
+    return true;
+}
+
+int TonicScalpGraph::Connect(TonicScalpMesh const &mesh, int a, int b,
+                             bool extract)
 {
     TonicGraphNode const *na = FindNode(a);
     TonicGraphNode const *nb = FindNode(b);
@@ -374,7 +474,7 @@ int TonicScalpGraph::Connect(TonicScalpMesh const &mesh, int a, int b)
     e.b = b;
     e.polyline = std::move(poly);
     _edges.push_back(e);
-    if (!ExtractRegions(mesh)) {
+    if (extract && !ExtractRegions(mesh)) {
         return -1;
     }
     return e.id;

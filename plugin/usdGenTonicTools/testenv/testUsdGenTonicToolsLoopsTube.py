@@ -8,8 +8,9 @@
 # session that records every C call, with a camera whose arithmetic anyone
 # can check by hand. What this proves that a T3 cannot:
 #
-#   * a press picks ONCE (K11) and a drag re-picks never: the whole gesture
-#     runs off the press-time selection, camera and ring frames;
+#   * a press resolves the precise component pass before the body fallback,
+#     and a drag never re-picks: the whole gesture runs off the press-time
+#     selection, camera and ring frames;
 #   * one gesture is one undo bracket -- Begin at press, End at release,
 #     Cancel on Escape -- and Escape puts the soft selection and the
 #     preview fraction back exactly as it found them;
@@ -89,8 +90,11 @@ class FakeDll:
                      "edgeBias": 0.0, "profile": []}
         self.sectionCount = 2
         self.regionId = 0
+        self.rejectCenterCVs = set()
+        self.centerHandles = {}
         for name in ("Tonic_GetTubeCenterCount", "Tonic_GetTubeCenterCV",
-                     "Tonic_MoveTubeCenterCV", "Tonic_GetTubeSection"):
+                     "Tonic_GetTubeCenterHandle", "Tonic_MoveTubeCenterCV", "Tonic_TranslateTube",
+                     "Tonic_GetTubeSection"):
             setattr(self, name, _plain(getattr(self, name)))
 
     # -- bookkeeping -------------------------------------------------------
@@ -130,12 +134,31 @@ class FakeDll:
             out3[i] = point[i]
         return 0
 
+    def Tonic_GetTubeCenterHandle(self, _model, tubeId, cv, out3):
+        # Symmetric fixtures default to the authored center; a targeted test
+        # can provide an off-centre displayed core without changing raw data.
+        point = self.centerHandles.get((int(tubeId), int(cv)),
+                                       self.centers[int(tubeId)][int(cv)])
+        for i in range(3):
+            out3[i] = point[i]
+        return 0
+
     def Tonic_MoveTubeCenterCV(self, _model, tubeId, cv, dx, dy, dz):
         self._record("Tonic_MoveTubeCenterCV",
                      (int(tubeId), int(cv), _f(dx), _f(dy), _f(dz)))
+        if int(cv) in self.rejectCenterCVs:
+            return 1
         point = self.centers[int(tubeId)][int(cv)]
         for i, d in enumerate((dx, dy, dz)):
             point[i] += _f(d)
+        return 0
+
+    def Tonic_TranslateTube(self, _model, tubeId, dx, dy, dz):
+        self._record("Tonic_TranslateTube",
+                     (int(tubeId), _f(dx), _f(dy), _f(dz)))
+        for point in self.centers[int(tubeId)]:
+            for i, d in enumerate((dx, dy, dz)):
+                point[i] += _f(d)
         return 0
 
     def Tonic_GetTubeSection(self, _model, tubeId, ring, t, uv, uvLen, count,
@@ -341,7 +364,9 @@ class FakeSession:
         self.statuses = []
         self.picks = []
         self.hovers = []
+        self.hoverItems = []
         self.rects = []
+        self.polygons = []
         self.published = []
         self.gestureStack = []
         self.pickFn = lambda mask, x, y: None
@@ -394,15 +419,22 @@ class FakeSession:
     # -- picking and selection ---------------------------------------------
 
     def pickItem(self, camera, x, y, radiusPx, kindMask):
-        self.picks.append((int(kindMask), float(x), float(y)))
+        self.picks.append((int(kindMask), float(x), float(y),
+                           float(radiusPx)))
         return self.pickFn(int(kindMask), float(x), float(y))
 
     def setHover(self, kind=0, ident=-1, subId=-1, subSubId=-1):
         self.hovers.append((int(kind), int(ident)))
+        self.hoverItems.append((int(kind), int(ident), int(subId),
+                                int(subSubId)))
         return True
 
     def selectRect(self, camera, x0, y0, x1, y1, kindMask, mode):
         self.rects.append((x0, y0, x1, y1, int(kindMask), int(mode)))
+        return True
+
+    def selectPolygon(self, camera, points, kindMask, mode):
+        self.polygons.append((tuple(points), int(kindMask), int(mode)))
         return True
 
     def select(self, kind, ids, subIds=None, subSubIds=None, mode=0):
@@ -495,7 +527,7 @@ def testShelf(mods):
     check("tube" not in tonicLoops.PANEL_ONLY_MODES and
           "fill" not in tonicLoops.PANEL_ONLY_MODES,
           "and neither is a panel-only mode")
-    check(len(tonicLoops.subModesFor("tube")) == 3 and
+    check(len(tonicLoops.subModesFor("tube")) == 4 and
           len(tonicLoops.subModesFor("fill")) == 2,
           "their sub-mode shelves come from tonicModes")
     dll, _session, state, loop = newTube(mods)
@@ -525,7 +557,8 @@ def testSelectAndGizmo(mods):
         "subSubId": -1}
     loop.press(sample(mods, session, cam, 200.0, 150.0))
     check(len(session.picks) == 1,
-          "the press picked once (%d)" % len(session.picks))
+          "an unselected component hit needs no body fallback (%d)" %
+          len(session.picks))
     check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
           [(0, 1, -1)], "center CV 1 of tube 0 is selected (%r)"
           % (session.readSelection(tonicLib.TONIC_PICK_CENTER_CV),))
@@ -551,11 +584,12 @@ def testSelectAndGizmo(mods):
         "kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 0, "subId": 2,
         "subSubId": -1}
     loop.press(sample(mods, session, cam, 200.0, 75.0, ("shift",)))
+    loop.release(sample(mods, session, cam, 200.0, 75.0, ("shift",)))
     check(len(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV)) == 2,
           "Shift adds the second CV")
     # Away from the gizmo's axes: within their tolerance Ctrl means the
     # normal constraint, not a toggle.
-    loop.press(sample(mods, session, cam, 260.0, 75.0, ("ctrl",)))
+    loop.press(sample(mods, session, cam, 360.0, 75.0, ("ctrl",)))
     check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
           [(0, 1, -1)], "Ctrl toggles it back off (%r)"
           % (session.readSelection(tonicLib.TONIC_PICK_CENTER_CV),))
@@ -568,8 +602,210 @@ def testSelectAndGizmo(mods):
     check(session.rects and session.rects[-1][:4] == (380.0, 40.0, 300.0,
                                                       100.0),
           "a press on nothing rubber-bands (%r)" % (session.rects[-1:],))
-    check(session.rects[-1][4] == loop.pickMask,
-          "over the sub-mode's kinds (%r)" % (session.rects[-1],))
+    check(session.rects[-1][4] == loop.componentMask,
+          "over the sub-mode's editable components (%r)" %
+          (session.rects[-1],))
+
+
+def testComponentPriorityAndBodyFallback(mods):
+    print("-- Tube components: priority and body fallback ------------")
+    tonicLib = mods["tonicLib"]
+    dll, session, state, loop = newTube(mods)
+    cam = orthoCamera(mods["tonicCamera"])
+    state.snapRadiusPx = 0.25
+    state.transformTool = "select"
+    cv0 = {"kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 0,
+           "subId": 0, "subSubId": -1}
+    cv2 = {"kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 0,
+           "subId": 2, "subSubId": -1}
+    body = {"kind": tonicLib.TONIC_PICK_TUBE_VERT, "id": 0,
+            "subId": -1, "subSubId": -1}
+
+    def picker(mask, x, _y):
+        # The exact component resolver owns the displayed dots.  The broad
+        # Tube mask stands in for a dense body directly underneath them.
+        if mask == tonicLib.TONIC_PICK_CENTER_CV:
+            return cv0 if x < 150.0 else cv2 if x < 250.0 else None
+        return body if mask & tonicLib.TONIC_PICK_TUBE_VERT else None
+
+    session.pickFn = picker
+    loop.hover(sample(mods, session, cam, 100.0, 150.0))
+    check(session.hoverItems[-1] ==
+          (tonicLib.TONIC_PICK_CENTER_CV, 0, 0, -1),
+          "a visible CV prehighlights its exact tube and CV identity %r" %
+          (session.hoverItems[-1],))
+    check(near(session.picks[-1][3], 8.0),
+          "component prehighlight keeps an 8px target when Snap is tiny %r" %
+          (session.picks[-1],))
+
+    loop.press(sample(mods, session, cam, 100.0, 150.0))
+    check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
+          [(0, 0, -1)] and
+          not session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT),
+          "the component press beats the body under it")
+    loop.press(sample(mods, session, cam, 200.0, 150.0))
+    check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
+          [(0, 2, -1)] and
+          not session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT),
+          "repeated plain CV clicks replace the exact component, never wedge a tube")
+    loop.press(sample(mods, session, cam, 100.0, 150.0, ("shift",)))
+    loop.release(sample(mods, session, cam, 100.0, 150.0, ("shift",)))
+    check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
+          [(0, 2, -1), (0, 0, -1)],
+          "Shift click adds the precise displayed CV")
+
+    # In component tools a drag which begins over the tube body is still a
+    # component area selection.  The body is considered only by a no-travel
+    # release, preserving the intentional whole-tube click fallback.
+    session.clearSelection()
+    loop.press(sample(mods, session, cam, 320.0, 150.0))
+    check(loop._marquee == (320.0, 150.0) and
+          not session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT),
+          "component box starts over body without selecting the whole tube")
+    loop.move(sample(mods, session, cam, 350.0, 180.0))
+    loop.release(sample(mods, session, cam, 350.0, 180.0))
+    check(session.rects[-1][4] == tonicLib.TONIC_PICK_CENTER_CV and
+          not session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT),
+          "component box never turns its body start into a tube selection")
+
+    loop.press(sample(mods, session, cam, 320.0, 150.0))
+    loop.release(sample(mods, session, cam, 320.0, 150.0))
+    check(session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) ==
+          [(0, -1, -1)],
+          "a no-travel body click remains the explicit whole-tube fallback")
+
+    session.clearSelection()
+    state.selectionShape = "lasso"
+    loop.press(sample(mods, session, cam, 320.0, 150.0))
+    loop.move(sample(mods, session, cam, 350.0, 150.0))
+    loop.move(sample(mods, session, cam, 350.0, 180.0))
+    loop.release(sample(mods, session, cam, 320.0, 150.0))
+    check(session.polygons and
+          session.polygons[-1][1] == tonicLib.TONIC_PICK_CENTER_CV and
+          not session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT),
+          "component lasso also ignores a tube body at its press point")
+    state.selectionShape = "box"
+
+    loop.setSubMode("tube")
+    session.clearSelection()
+    loop.press(sample(mods, session, cam, 320.0, 150.0))
+    check(session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) ==
+          [(0, -1, -1)] and loop._marquee is None,
+          "explicit Whole Tube mode keeps immediate body selection")
+
+    # The same resolver owns inner section CVs; they retain all three
+    # identity coordinates instead of degrading to the tube body.
+    section = {"kind": tonicLib.TONIC_PICK_SECTION_CV, "id": 0,
+               "subId": 1, "subSubId": 3}
+    loop.setSubMode("section")
+    session.clearSelection()
+    session.pickFn = lambda mask, _x, _y: (
+        section if mask == tonicLib.TONIC_PICK_SECTION_CV else
+        body if mask & tonicLib.TONIC_PICK_TUBE_VERT else None)
+    loop.hover(sample(mods, session, cam, 240.0, 150.0))
+    loop.press(sample(mods, session, cam, 240.0, 150.0))
+    check(session.hoverItems[-1] ==
+          (tonicLib.TONIC_PICK_SECTION_CV, 0, 1, 3) and
+          session.readSelection(tonicLib.TONIC_PICK_SECTION_CV) ==
+          [(0, 1, 3)] and
+          not session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT),
+          "an inner section CV has the same fixed-radius priority and identity")
+
+    # Ring mode renders the same vertices but owns a whole ring. K11's
+    # native ring candidate is its centroid, so the loop must normalize a
+    # displayed vertex hit and its box/lasso candidates to that owner.
+    loop.setSubMode("ring")
+    session.clearSelection()
+    def ringPicker(mask, x, _y):
+        if mask == tonicLib.TONIC_PICK_SECTION_RING:
+            return None                 # no centroid under this vertex
+        if mask == tonicLib.TONIC_PICK_SECTION_CV and x < 250.0:
+            return section
+        return body if mask & tonicLib.TONIC_PICK_TUBE_VERT else None
+    session.pickFn = ringPicker
+    loop.hover(sample(mods, session, cam, 240.0, 150.0))
+    loop.press(sample(mods, session, cam, 240.0, 150.0))
+    check(session.hoverItems[-1] ==
+          (tonicLib.TONIC_PICK_SECTION_RING, 0, 1, -1) and
+          session.readSelection(tonicLib.TONIC_PICK_SECTION_RING) ==
+          [(0, 1, -1)] and
+          not session.readSelection(tonicLib.TONIC_PICK_SECTION_CV),
+          "a displayed section vertex selects and prehighlights its owning ring")
+
+    def rectVertices(camera, x0, y0, x1, y1, mask, mode):
+        session.rects.append((x0, y0, x1, y1, int(mask), int(mode)))
+        session.select(tonicLib.TONIC_PICK_SECTION_CV, [0, 0, 0],
+                       [1, 1, 2], [0, 2, 1], mode)
+        return True
+    session.selectRect = rectVertices
+    session.clearSelection()
+    loop.press(sample(mods, session, cam, 320.0, 150.0))
+    loop.move(sample(mods, session, cam, 350.0, 180.0))
+    loop.release(sample(mods, session, cam, 350.0, 180.0))
+    check(session.rects[-1][4] == tonicLib.TONIC_PICK_SECTION_CV and
+          session.readSelection(tonicLib.TONIC_PICK_SECTION_RING) ==
+          [(0, 1, -1), (0, 2, -1)] and
+          not session.readSelection(tonicLib.TONIC_PICK_SECTION_CV),
+          "ring box maps displayed vertices to unique rings without CV residue")
+
+    def lassoVertices(camera, points, mask, mode):
+        session.polygons.append((tuple(points), int(mask), int(mode)))
+        session.select(tonicLib.TONIC_PICK_SECTION_CV, [0, 0], [2, 2],
+                       [0, 2], mode)
+        return True
+    session.selectPolygon = lassoVertices
+    session.clearSelection()
+    state.selectionShape = "lasso"
+    loop.press(sample(mods, session, cam, 320.0, 150.0))
+    loop.move(sample(mods, session, cam, 350.0, 150.0))
+    loop.move(sample(mods, session, cam, 350.0, 180.0))
+    loop.release(sample(mods, session, cam, 320.0, 150.0))
+    check(session.polygons[-1][1] == tonicLib.TONIC_PICK_SECTION_CV and
+          session.readSelection(tonicLib.TONIC_PICK_SECTION_RING) ==
+          [(0, 2, -1)] and
+          not session.readSelection(tonicLib.TONIC_PICK_SECTION_CV),
+          "ring lasso maps displayed vertices to their unique ring owner")
+    state.selectionShape = "box"
+
+
+def testPartialDragCleanup(mods):
+    print("-- Tube drag: partial bracket cleanup --------------------")
+    tonicLib = mods["tonicLib"]
+    dll, session, _state, loop = newTube(mods)
+    cam = orthoCamera(mods["tonicCamera"])
+    session.select(tonicLib.TONIC_PICK_CENTER_CV, [0], [1], [-1],
+                   tonicLib.TONIC_SELECT_SET)
+    loop._placeGizmo(cam)
+    session.pickFn = lambda _mask, _x, _y: None
+
+    def failFreeze():
+        raise RuntimeError("test press-time freeze failure")
+
+    loop._freezeTransformBaseline = failFreeze
+    loop.press(sample(mods, session, cam, 200.0, 150.0))
+    check(("begin", "Tube center") in session.events and
+          ("cancel", None) in session.events and not session.gestureStack and
+          not loop._bracketOpen and not loop._dragging,
+          "a press-time setup failure closes the native bracket before dragging")
+    cancelled = session.events.count(("cancel", None))
+    loop.deactivate()
+    check(session.events.count(("cancel", None)) == cancelled,
+          "deactivate is idempotent after partial drag cleanup")
+
+    # A live bracket is also cancelled before a component-domain change.
+    dll, session, _state, loop = newTube(mods)
+    session.select(tonicLib.TONIC_PICK_CENTER_CV, [0], [1], [-1],
+                   tonicLib.TONIC_SELECT_SET)
+    loop._placeGizmo(cam)
+    session.pickFn = lambda _mask, _x, _y: None
+    loop.press(sample(mods, session, cam, 200.0, 150.0))
+    check(loop._bracketOpen and loop._dragging,
+          "the normal handle press opens a live Tube bracket")
+    loop.setSubMode("section")
+    check(("cancel", None) in session.events and not session.gestureStack and
+          not loop._bracketOpen and not loop._dragging and
+          loop.subMode() == "section",
+          "a component-mode change cancels its active Tube drag first")
 
 
 def testCenterDrag(mods):
@@ -590,8 +826,8 @@ def testCenterDrag(mods):
     check(claimed and session.gestureStack == ["Tube center"],
           "the press on the handle opened one bracket (%r)"
           % (session.gestureStack,))
-    check(len(session.picks) == 1,
-          "and did NOT pick again (%d picks in the whole gesture)"
+    check(len(session.picks) == 2,
+          "the handle press performs one component-priority query (%d picks)"
           % len(session.picks))
     check(dll.argsOf("Tonic_SetPreviewFraction") == [(0.25,)],
           "the drag dropped the guides to the preview fraction (%r)"
@@ -599,6 +835,8 @@ def testCenterDrag(mods):
 
     loop.move(sample(mods, session, cam, 250.0, 150.0))
     loop.move(sample(mods, session, cam, 300.0, 150.0))
+    check(len(session.picks) == 2,
+          "drag moves do not re-pick after the press-time priority query")
     steps = dll.argsOf("Tonic_MoveTubeCenterCV")
     check(len(steps) == 2, "two moves, two ABI calls (%r)" % (steps,))
     check(steps[0][:2] == (0, 1) and near(steps[0][2], 0.5),
@@ -630,6 +868,64 @@ def testCenterDrag(mods):
     check(order[0] == "Tonic_SetPreviewFraction" and
           order[-1] == "Tonic_RefillGuides",
           "preview first, full refill last (%r)" % (order,))
+
+
+def testRefusedCenterDrag(mods):
+    print("-- Center: refused writes do not commit -------------------")
+    tonicLib = mods["tonicLib"]
+    cam = orthoCamera(mods["tonicCamera"])
+
+    # A native refusal is not a visual edit: the drag may have opened its
+    # bracket and lowered preview density, but it must not refill/commit an
+    # unchanged model when released.
+    dll, session, _state, loop = newTube(mods)
+    session.pickFn = lambda mask, x, y: {
+        "kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 0, "subId": 1,
+        "subSubId": -1}
+    loop.press(sample(mods, session, cam, 200.0, 150.0))
+    before = tuple(dll.centers[0][1])
+    dll.rejectCenterCVs = {1}
+    dll.reset()
+    session.events = []
+    loop.press(sample(mods, session, cam, 200.0, 150.0))
+    loop.move(sample(mods, session, cam, 250.0, 150.0))
+    check(tuple(dll.centers[0][1]) == before and not loop._pendingEdit,
+          "a refused center write leaves the geometry and edit flag alone")
+    check(not dll.argsOf("Tonic_RefillGuides"),
+          "a refused move does not refill a changed-looking preview")
+    check(session.statuses and "Tonic_MoveTubeCenterCV failed" in
+          session.statuses[-1],
+          "the native refusal remains visible in the status (%r)" %
+          session.statuses[-1:])
+    loop.release(sample(mods, session, cam, 250.0, 150.0))
+    check(("enqueueCommit", None) not in session.events and
+          not session.gestureStack,
+          "releasing a fully refused drag closes its bracket without a "
+          "commit (%r)" % (session.events,))
+
+    # One refused owner must not discard a valid sibling write from the same
+    # press-time selection.  That real change still previews and commits.
+    dll, session, _state, loop = newTube(mods)
+    session.select(tonicLib.TONIC_PICK_CENTER_CV, [0, 0], [0, 2], [-1, -1],
+                   tonicLib.TONIC_SELECT_SET)
+    loop._placeGizmo(cam)
+    before0 = tuple(dll.centers[0][0])
+    before2 = tuple(dll.centers[0][2])
+    dll.rejectCenterCVs = {0}
+    dll.reset()
+    session.events = []
+    loop.press(sample(mods, session, cam, 200.0, 150.0))
+    loop.move(sample(mods, session, cam, 250.0, 150.0))
+    check(tuple(dll.centers[0][0]) == before0 and
+          dll.centers[0][2][0] > before2[0] and loop._pendingEdit,
+          "a valid sibling write still marks the mixed batch as changed")
+    check(dll.argsOf("Tonic_RefillGuides") == [(0.25,)],
+          "the accepted sibling alone receives a preview refill (%r)" %
+          dll.argsOf("Tonic_RefillGuides"))
+    loop.release(sample(mods, session, cam, 250.0, 150.0))
+    check(("enqueueCommit", None) in session.events,
+          "the mixed batch commits its accepted write (%r)" %
+          session.events)
 
 
 def testConstraintsAndEscape(mods):
@@ -736,6 +1032,7 @@ def testSoftSpan(mods):
         "kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 0, "subId": 2,
         "subSubId": -1}
     loop.press(sample(mods, session, cam, 200.0, 75.0, ("shift",)))
+    loop.release(sample(mods, session, cam, 200.0, 75.0, ("shift",)))
     dll.reset()
     # The two CVs bracket the origin, so their gizmo is back at (200, 150).
     loop.press(sample(mods, session, cam, 200.0, 150.0))
@@ -766,11 +1063,15 @@ def testWholeTubeDrag(mods):
           "a whole-tube drag turns the falloff OFF: translating a curve "
           "must not bend it (%r)" % (dll.argsOf("Tonic_SetSoftSelection"),))
     loop.move(sample(mods, session, cam, 250.0, 150.0))
-    moved = dll.argsOf("Tonic_MoveTubeCenterCV")
-    check(sorted(m[1] for m in moved) == [0, 1, 2],
-          "every center CV of the tube moved (%r)" % (moved,))
-    check(all(near(m[2], 0.5) for m in moved),
-          "by the same delta (%r)" % (moved,))
+    moved = dll.argsOf("Tonic_TranslateTube")
+    check(moved == [(0, 0.5, 0.0, 0.0)] and
+          not dll.argsOf("Tonic_MoveTubeCenterCV"),
+          "a whole-tube Move uses one atomic center-cage translation (%r)"
+          % (moved,))
+    check(all(near(point[0], source[0] + 0.5)
+              for point, source in zip(dll.centers[0], CENTERS)),
+          "the atomic call translates every center by the same delta (%r)"
+          % (dll.centers[0],))
     loop.release(sample(mods, session, cam, 250.0, 150.0))
 
 
@@ -816,11 +1117,14 @@ def testRingPlane(mods):
 
 
 def testRingScaleTwist(mods):
-    print("-- Ring: scale and twist ----------------------------------")
+    print("-- Ring: Scale and Rotate tools ----------------------------")
     tonicLib = mods["tonicLib"]
+    # Tilt v toward the camera.  The displayed scale handle is consequently
+    # an ellipse; this guards against treating its visible contour as a
+    # screen-space circle.
     frame = {"origin": (0.0, 0.0, -5.0), "u": (1.0, 0.0, 0.0),
-             "v": (0.0, 0.0, 1.0), "w": (0.0, 1.0, 0.0), "scale": 1.0,
-             "twist": 0.0}
+             "v": (0.0, 0.8, 0.6), "w": (0.0, -0.6, 0.8),
+             "scale": 1.0, "twist": 0.0}
     stage = FakeStage({(0, 1): frame})
     dll, session, state, loop = newTube(mods, "ring", stage)
     cam = orthoCamera(mods["tonicCamera"])
@@ -828,37 +1132,53 @@ def testRingScaleTwist(mods):
         "kind": tonicLib.TONIC_PICK_SECTION_RING, "id": 0, "subId": 1,
         "subSubId": -1}
     loop.press(sample(mods, session, cam, 200.0, 150.0))
+    # An asymmetric chart makes the centroid pivot visible.  Ring selection
+    # owns every slot; Scale applies the frozen target positions through the
+    # section-CV ABI rather than the retired multiplicative ring operation.
+    loop._section = lambda _tube, _ring: (
+        0.5, [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)], 1.0, 0.0)
+    loop.setTransformTool("scale")
+    gizmo = mods["tonicGizmo"]
+    handles = {record["handle"] for record in loop._gizmo.screenHandles(cam)}
+    check(handles == {gizmo.HANDLE_U, gizmo.HANDLE_V, gizmo.HANDLE_CENTER,
+                      gizmo.HANDLE_PLANE_XY},
+          "Section Scale exposes only in-plane and uniform handles (%r)" %
+          handles)
+    centre = cam.worldToPixels(loop._gizmo.origin)
+    uTip = cam.worldToPixels(loop._gizmo.axisEndpoint(gizmo.HANDLE_U))
+    check(loop._gizmo.handleAt(cam, uTip[0], uTip[1]) == gizmo.HANDLE_U,
+          "the visible U scale handle is pickable")
+    loop.press(sample(mods, session, cam, uTip[0], uTip[1]))
+    twice = (centre[0] + 2.0 * (uTip[0] - centre[0]),
+             centre[1] + 2.0 * (uTip[1] - centre[1]))
+    loop.move(sample(mods, session, cam, twice[0], twice[1]))
+    scaled = stage.argsOf("moveSectionCV")
+    check(len(scaled) == 4 and all(row[:2] == (0, 1) for row in scaled),
+          "Scale writes every selected ring slot through the CV ABI (%r)" %
+          scaled)
+    check(any(abs(row[3]) > 1e-4 for row in scaled) and
+          all(near(row[4], 0.0) for row in scaled),
+          "the U scale stays in the section chart's U direction (%r)" %
+          scaled)
+    loop.release(sample(mods, session, cam, twice[0], twice[1]))
 
-    # The scale ring sits at RING_FRACTION of the gizmo's pixel length;
-    # press it off-axis so no axis handle claims the pixel first.
-    offset = (mods["tonicGizmo"].RING_FRACTION *
-              mods["tonicLoopsTube"].GIZMO_PIXELS) / math.sqrt(2.0)
-    loop.press(sample(mods, session, cam, 200.0 + offset, 150.0 + offset))
-    loop.move(sample(mods, session, cam, 200.0 + 2 * offset,
-                     150.0 + 2 * offset))
-    scaled = stage.argsOf("scaleSectionRing")
-    check(len(scaled) == 1 and near(scaled[0][2], 2.0),
-          "dragging the circle handle out doubles the ring (%r)"
-          % (scaled,))
-    loop.move(sample(mods, session, cam, 200.0 + 3 * offset,
-                     150.0 + 3 * offset))
-    scaled = stage.argsOf("scaleSectionRing")
-    check(len(scaled) == 2 and near(scaled[1][2], 1.5),
-          "the second sample sends the INCREMENT (3/2), not 3 (%r)"
-          % (scaled[1],))
-    loop.release(sample(mods, session, cam, 200.0 + 3 * offset,
-                        150.0 + 3 * offset))
-
-    # The w axis is the tangent, which a 2D chart cannot translate along,
-    # so it twists instead.
-    loop.press(sample(mods, session, cam, 200.0, 120.0))
-    loop.move(sample(mods, session, cam, 230.0, 150.0))
-    twisted = stage.argsOf("twistSectionRing")
-    check(len(twisted) == 1 and near(twisted[0][2], -math.pi / 2.0),
-          "the w handle twists by the swept screen angle (%r)" % (twisted,))
-    loop.release(sample(mods, session, cam, 230.0, 150.0))
-    check(stage.argsOf("moveSectionRing") == [],
-          "and never translated the ring while doing it")
+    # Rotate has only the section normal: view/free and U/V rings are both
+    # hidden and unpickable, so a chart can never be rotated out of plane.
+    loop.setTransformTool("rotate")
+    handles = {record["handle"] for record in loop._gizmo.screenHandles(cam)}
+    check(handles == {gizmo.HANDLE_W},
+          "Section Rotate exposes only the normal ring (%r)" % handles)
+    record = loop._gizmo.screenHandles(cam)[0]
+    turnStart = record["points"][6]
+    turnEnd = (centre[0] - (turnStart[1] - centre[1]),
+               centre[1] + (turnStart[0] - centre[0]))
+    loop.press(sample(mods, session, cam, turnStart[0], turnStart[1]))
+    loop.move(sample(mods, session, cam, turnEnd[0], turnEnd[1]))
+    rotated = stage.argsOf("moveSectionCV")
+    check(len(rotated) == 8,
+          "Rotate also updates the selected ring's frozen slots (%r)" %
+          rotated)
+    loop.release(sample(mods, session, cam, turnEnd[0], turnEnd[1]))
 
 
 def testSectionCV(mods):
@@ -882,6 +1202,9 @@ def testSectionCV(mods):
     moved = stage.argsOf("moveSectionCV")
     check(len(moved) == 1 and moved[0][:3] == (0, 1, 3),
           "the drag moved that CV through the per-tube ABI (%r)" % (moved,))
+    check(all(call[:3] == (0, 1, 3) for call in moved),
+          "the individual-CV drag did not move a section sibling (%r)"
+          % (moved,))
     check(near(moved[0][3], 1.0) and near(moved[0][4], 0.0),
           "the screen-vertical travel is dropped: the CV stays in its "
           "ring (%r)" % (moved[0],))
@@ -1036,6 +1359,103 @@ def testRampMaths(mods):
           "a new knot sorts into place (%r)" % (other,))
 
 
+def testFrozenTransformMaths(mods):
+    print("-- Tube transform: frozen pivots -------------------------")
+    transforms = mods["tonicTubeTransforms"]
+    frame = (1.0, 0.0, 0.0,
+             0.0, 1.0, 0.0,
+             0.0, 0.0, 1.0)
+    frozen = transforms.FrozenPoints(
+        {"root": (0.0, 0.0, 0.0), "tip": (0.0, 2.0, 0.0)},
+        (0.0, 0.0, 0.0), frame)
+    rotated = frozen.absolute(rotateAxis=(0.0, 0.0, 1.0),
+                              radians=math.pi / 2.0)
+    check(all(near(rotated["root"][axis], 0.0) for axis in range(3)) and
+          near(rotated["tip"][0], -2.0) and near(rotated["tip"][1], 0.0),
+          "rotation uses the frozen root pivot (%r)" % rotated)
+    scaled = frozen.absolute(scale=(2.0, 0.5, 1.0))
+    check(near(scaled["tip"][1], 1.0),
+          "frame-local nonuniform scale uses the frozen pivot (%r)" % scaled)
+    moved = frozen.absolute(translation=(3.0, 0.0, 0.0))
+    check(near(moved["root"][0], 3.0) and near(moved["tip"][0], 3.0),
+          "whole-tube move translates every frozen target (%r)" % moved)
+    first = frozen.absolute(translation=(1.0, 0.0, 0.0))
+    second = frozen.absolute(translation=(2.5, 0.0, 0.0))
+    steps = transforms.FrozenPoints.increments(first, second)
+    check(near(steps["root"][0], 1.5) and near(steps["tip"][0], 1.5),
+          "repeated samples are absolute-from-press increments (%r)" % steps)
+
+
+def testLoopRotateScaleBaselines(mods):
+    print("-- Tube transform: component application -----------------")
+    tonicLib = mods["tonicLib"]
+    gizmo = mods["tonicGizmo"]
+    # Rotation starts at the tube root, freezes every whole-tube center and
+    # applies the second sample from that baseline rather than re-rotating
+    # the already-edited curve.
+    dll, session, state, loop = newTube(mods)
+    state.transformTool = "rotate"
+    loop._centerDrag = {0: ([0, 1, 2], -1)}
+    dll.centerHandles[(0, 0)] = (0.4, -1.0, -5.0)
+    loop._gizmo.frame = mods["tonicTubeTransforms"].IDENTITY_FRAME
+    loop._freezeTransformBaseline()
+    pivot = loop._transformOwners[0]["frozen"].pivot
+    check(all(near(pivot[i], (0.4, -1.0, -5.0)[i]) for i in range(3)),
+          "whole-tube Rotate freezes at the displayed core root, not raw cage "
+          "(%r)" % (pivot,))
+    # Keep the pre-existing transform-math assertions symmetric; the check
+    # above isolated the off-centre pivot contract.
+    dll.centerHandles.clear()
+    loop._transformOwners = []
+    loop._freezeTransformBaseline()
+    loop._gizmo.rotationDrag = lambda _c, _x, _y: ((0.0, 0.0, 1.0),
+                                                   math.pi / 2.0)
+    dragSample = sample(mods, session, orthoCamera(mods["tonicCamera"]),
+                        200.0, 150.0)
+    check(loop._applyRotation(dragSample), "whole-tube Rotate accepts a live axis")
+    moved = dll.argsOf("Tonic_MoveTubeCenterCV")
+    check([row[1] for row in moved] == [1, 2],
+          "Rotate keeps the root CV pinned (%r)" % moved)
+    check(near(dll.centers[0][1][0], -1.0) and
+          near(dll.centers[0][2][0], -2.0),
+          "Rotate bends offsets around the frozen root (%r)" % dll.centers[0])
+    loop._gizmo.rotationDrag = lambda _c, _x, _y: ((0.0, 0.0, 1.0), math.pi)
+    loop._applyRotation(dragSample)
+    check(near(dll.centers[0][1][0], 0.0) and
+          near(dll.centers[0][1][1], -2.0),
+          "the next rotation is still absolute from press (%r)" %
+          dll.centers[0][1])
+
+    # A selected Section-CV gets only its chart-space U/V delta.  Scaling
+    # another slot or moving along W would violate component isolation.
+    frame = {"origin": (0.0, 0.0, -5.0), "u": (1.0, 0.0, 0.0),
+             "v": (0.0, 1.0, 0.0), "w": (0.0, 0.0, 1.0),
+             "scale": 1.0, "twist": 0.0}
+    stage = FakeStage({(0, 1): frame})
+    dll, session, state, loop = newTube(mods, "section", stage)
+    state.transformTool = "scale"
+    session.select(tonicLib.TONIC_PICK_SECTION_CV, [0], [1], [3],
+                   tonicLib.TONIC_SELECT_SET)
+    # An off-centre chart proves the transform pivots at the ring centroid,
+    # not raw UV zero.  Slot 3 lies +.5/+ .5 from that centroid.
+    loop._section = lambda _tube, _ring: (
+        0.5, [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)], 1.0, 0.0)
+    loop._gizmo.activeHandle = gizmo.HANDLE_U
+    loop._freezeTransformBaseline()
+    loop._gizmo.scaleFactor = lambda _c, _x, _y: 2.0
+    dragSample = sample(mods, session, orthoCamera(mods["tonicCamera"]),
+                        200.0, 150.0)
+    check(loop._applyScale(dragSample), "section U scale accepts a positive factor")
+    moves = stage.argsOf("moveSectionCV")
+    check(len(moves) == 1 and moves[0][:3] == (0, 1, 3) and
+          near(moves[0][3], 0.5) and near(moves[0][4], 0.0),
+          "Section scale moves only the selected slot in its plane (%r)" %
+          moves)
+    loop._gizmo.activeHandle = gizmo.HANDLE_W
+    check(not loop._applyScale(dragSample),
+          "section normal scale is rejected before a chart write")
+
+
 def main():
     try:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -1050,16 +1470,22 @@ def main():
     from usdGenTonicTools import (tonicCamera, tonicGizmo, tonicLib,
                                   tonicLibStage, tonicLoops,
                                   tonicLoopsFill, tonicLoopsTube,
+                                  tonicTubeTransforms,
                                   tonicPanels)
     from usdGenTonicTools.tonicToolState import TonicToolState
     mods = {"tonicCamera": tonicCamera, "tonicGizmo": tonicGizmo,
             "tonicLib": tonicLib, "tonicLibStage": tonicLibStage,
             "tonicLoops": tonicLoops, "tonicLoopsFill": tonicLoopsFill,
-            "tonicLoopsTube": tonicLoopsTube, "tonicPanels": tonicPanels,
+            "tonicLoopsTube": tonicLoopsTube,
+            "tonicTubeTransforms": tonicTubeTransforms,
+            "tonicPanels": tonicPanels,
             "TonicToolState": TonicToolState}
     testShelf(mods)
     testSelectAndGizmo(mods)
+    testComponentPriorityAndBodyFallback(mods)
+    testPartialDragCleanup(mods)
     testCenterDrag(mods)
+    testRefusedCenterDrag(mods)
     testConstraintsAndEscape(mods)
     testSoftSpan(mods)
     testWholeTubeDrag(mods)
@@ -1070,6 +1496,8 @@ def main():
     testFillSelection(mods)
     testFillRampDrag(mods)
     testRampMaths(mods)
+    testFrozenTransformMaths(mods)
+    testLoopRotateScaleBaselines(mods)
     print("testUsdGenTonicToolsLoopsTube: %d failure(s)" % failures)
     return 1 if failures else 0
 

@@ -14,10 +14,11 @@
 #     level below it;
 #   * Shift+D subdivides the selection and /__usdGenTonic/tubes/L2 appears
 #     in what the scene index published;
-#   * Ctrl+Down focuses L2 -- which is what draws its centers thick -- and
-#     leaves L1 x-ray;
+#   * Ctrl+Down expands only that root branch: its L2 children are visible
+#     while the L1 parent is removed from the active frontier;
 #   * an L2 CV edit survives a parent edit made after Ctrl+Up (K6);
-#   * Shift+M takes L2 away again and Ctrl+Z brings it back.
+#   * Shift+M takes L2 away again and Ctrl+Z restores topology; an explicit
+#     Enter returns the restored children to the visible frontier.
 #
 # Reading the published geometry: this USD build exposes no terminal scene
 # index to Python, so the level census comes from
@@ -101,6 +102,20 @@ def wait(ms=30):
     import importlib
     QtTest = importlib.import_module("%s.QtTest" % PySideModule)
     QtTest.QTest.qWait(int(ms))
+
+
+def clickAction(workspace, label):
+    """Click one visible dock action through Qt, as an artist does."""
+    from pxr.Usdviewq.qt import QtCore
+    from pxr.Usdviewq.qt import PySideModule
+    import importlib
+    QtTest = importlib.import_module("%s.QtTest" % PySideModule)
+    QtWidgets = importlib.import_module("%s.QtWidgets" % PySideModule)
+    for button in workspace.findChildren(QtWidgets.QPushButton):
+        if str(button.text()).startswith(label):
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +206,30 @@ def frameScalp(stage, view):
     return view.getActiveSceneCamera() is not None
 
 
+def frameTube(stage, view, target):
+    """A side camera with visible tube-strip quads, never an open top cap."""
+    from pxr import Gf, Sdf, UsdGeom
+    cam = UsdGeom.Camera.Define(stage, Sdf.Path("/TonicLevelsTubeCamera"))
+    cam.CreateFocalLengthAttr(35.0)
+    cam.CreateClippingRangeAttr(Gf.Vec2f(0.1, 1000.0))
+    target = Gf.Vec3d(*target)
+    eye = target + Gf.Vec3d(11.0, 0.0, 0.0)
+    zAxis = (eye - target).GetNormalized()
+    xAxis = Gf.Cross(Gf.Vec3d(0.0, 1.0, 0.0), zAxis).GetNormalized()
+    yAxis = Gf.Cross(zAxis, xAxis)
+    mat = Gf.Matrix4d(1.0)
+    mat.SetRow(0, Gf.Vec4d(xAxis[0], xAxis[1], xAxis[2], 0.0))
+    mat.SetRow(1, Gf.Vec4d(yAxis[0], yAxis[1], yAxis[2], 0.0))
+    mat.SetRow(2, Gf.Vec4d(zAxis[0], zAxis[1], zAxis[2], 0.0))
+    mat.SetRow(3, Gf.Vec4d(eye[0], eye[1], eye[2], 1.0))
+    xf = UsdGeom.Xformable(cam.GetPrim())
+    op = xf.AddTransformOp()
+    op.Set(mat)
+    view._dataModel.viewSettings.cameraPrim = stage.GetPrimAtPath(
+        "/TonicLevelsTubeCamera")
+    return view.getActiveSceneCamera() is not None
+
+
 # ---------------------------------------------------------------------------
 # The test
 # ---------------------------------------------------------------------------
@@ -204,7 +243,7 @@ def run(appController):
                                                          "python")))
     try:
         import usdGenTonicTools
-        from usdGenTonicTools import tonicCamera, tonicLib
+        from usdGenTonicTools import tonicCamera, tonicHierarchy, tonicLib
         from testUsdviewTonicGraph import Mouse
     except ImportError as exc:
         print("FAIL: cannot import usdGenTonicTools: %s" % exc)
@@ -260,6 +299,8 @@ def run(appController):
 
     # -- a real stroke, so there is a region to stand a tube in ------------
     mouse = Mouse(view)
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
     path = []
     for k in range(len(RECT)):
         x0, z0 = RECT[k]
@@ -293,13 +334,24 @@ def run(appController):
     # -- a click selects the tube ------------------------------------------
     tip = centerCV(session, 0, 4)
     check(tip is not None, "the tube has center CVs (%r)" % (tip,))
-    target = pixel(CENTRE[0], CENTRE[1], tip[1] * 0.5 if tip else 0.0)
-    # K11 is vertex-anchored (testUsdviewTonicPick): the pick radius has
-    # to reach a tube VERTEX, and from straight above the tube points at
-    # the camera, so its vertices ring the cursor at the tube radius --
-    # about 65 px here. A radius that reaches them is what the argument
-    # is for; there is one tube in the scene to hit.
-    state.snapRadiusPx = 200.0
+    root = centerCV(session, 0, 0)
+    check(root is not None and frameTube(
+        stage, view, (root[0], 0.5 * tip[1], root[2])),
+          "the side camera exposes a visible tube wall")
+    camera = tonicCamera.resolve(view)
+    if camera is None:
+        print("FAIL: the side camera did not resolve")
+        return 1
+    # Click the middle of a visible side wall, deliberately away from every
+    # tessellated vertex.  This is the ordinary artist selection path, not a
+    # test-only giant pick radius.
+    target = pixel(root[0], root[2] + 0.25, 0.5 * tip[1])
+    state.snapRadiusPx = 2.0
+    probe = session.pickItem(camera, target[0], target[1],
+                             state.snapRadiusPx,
+                             tonicLib.TONIC_PICK_TUBE_VERT)
+    check(probe is not None,
+          "the side-wall point resolves to a visible tube (%r)" % (probe,))
     mouse.click(target)
     selected = session.selectionCount(tonicLib.TONIC_PICK_TUBE_VERT)
     check(selected == 1, "clicking the tube selects it (%d selected)"
@@ -307,11 +359,12 @@ def run(appController):
     if selected != 1:
         info("status: %r" % (messages[-3:],))
 
-    # -- Shift+D subdivides ------------------------------------------------
+    # -- the dock's Subdivide button enters the child level ----------------
     state.subdivideCount = 4
     before = levelInfo(session, 2)
     check(before is None, "nothing is published at L2 yet (%r)" % (before,))
-    typeKey(view, "d", ("shift",))
+    check(clickAction(container.workspace, "Subdivide"),
+          "the visible Subdivide button was clicked")
     wait(20)
     after = levelInfo(session, 2)
     check(after is not None, "Shift+D publishes /__usdGenTonic/tubes/L2")
@@ -320,20 +373,40 @@ def run(appController):
     kids = childrenOf(session, 0)
     check(len(kids) == 4, "and the model holds four child tubes (%r)"
           % (kids,))
+    focus = int(session.dll.Tonic_GetFocusLevel(session.model))
+    check(focus == 2 and state.activeLevel == 2,
+          "Subdivide selects and focuses the new L2 children (focus %d)"
+          % focus)
+    selectedIds = [item[0] for item in
+                   session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)]
+    check(sorted(selectedIds) == sorted(kids),
+          "the created children are the active selection (%r)" % selectedIds)
 
-    # -- Ctrl+Down focuses L2 (thick centers) and x-rays L1 ----------------
+    # -- Ctrl+Up / Ctrl+Down navigate with the corresponding selection -----
+    typeKey(view, "up", ("ctrl",))
+    check(int(session.dll.Tonic_GetFocusLevel(session.model)) == 1,
+          "Ctrl+Up returns to the selected L1 parent")
+    check([item[0] for item in
+           session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)] == [0],
+          "and selects that parent")
     typeKey(view, "down", ("ctrl",))
     focus = int(session.dll.Tonic_GetFocusLevel(session.model))
-    check(focus == 2, "Ctrl+Down focuses L2, which draws its centers thick "
-                      "(focus %d)" % focus)
-    check(state.activeLevel == 2, "and the tool state agrees (%d)"
-          % state.activeLevel)
+    check(focus == 2 and state.activeLevel == 2,
+          "Ctrl+Down returns to L2 (focus %d)" % focus)
+    selectedIds = [item[0] for item in
+                   session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)]
+    check(sorted(selectedIds) == sorted(kids),
+          "and returns to its children (%r)" % selectedIds)
+    check(tonicHierarchy.isTubeVisible(session.dll, session.model, 0) is False
+          and all(tonicHierarchy.isTubeVisible(session.dll, session.model,
+                                                child)
+                  for child in kids),
+          "the active cut replaces the L1 parent with its visible L2 children")
     visible1, xray1 = levelDisplay(session, 1)
-    check(visible1 and xray1,
-          "L1 stays visible and goes x-ray (visible %s, xray %s)"
-          % (visible1, xray1))
     visible2, xray2 = levelDisplay(session, 2)
-    check(visible2 and not xray2, "while the focused L2 draws solid")
+    check(visible1 and not xray1 and visible2 and not xray2,
+          "frontier display levels stay solid unless the artist enables x-ray"
+          " (L1 %s/%s, L2 %s/%s)" % (visible1, xray1, visible2, xray2))
 
     # -- an L2 edit, then a parent edit after Ctrl+Up (K6) -----------------
     if not kids:
@@ -395,8 +468,19 @@ def run(appController):
     restored = childrenOf(session, 0)
     check(len(restored) == 4, "Ctrl+Z restores the four children (%r)"
           % (restored,))
-    check(levelInfo(session, 2) is not None,
-          "and L2 is published again (%r)" % (levelInfo(session, 2),))
+    check(levelInfo(session, 2) is None and
+          tonicHierarchy.isTubeVisible(session.dll, session.model, 0) is True,
+          "undo restores topology but keeps the merged parent collapsed")
+    check(clickAction(container.workspace, "Enter level"),
+          "an explicit Enter returns the restored branch to the frontier")
+    wait(20)
+    check(levelInfo(session, 2) is not None and
+          tonicHierarchy.isTubeVisible(session.dll, session.model, 0) is False
+          and all(tonicHierarchy.isTubeVisible(session.dll, session.model,
+                                                child)
+                  for child in restored),
+          "and explicitly entering publishes the restored L2 children"
+          " (%r)" % (levelInfo(session, 2),))
 
     status = session.status()
     info("model v%d committed v%d, last move %.2f ms, ladder step %d"

@@ -10,6 +10,7 @@
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec2f.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/path.h"
@@ -154,6 +155,28 @@ struct UsdGenAuthoredPlaneDesc
     VtIntArray intValues;              // populated only for Int32
 };
 
+/// Immutable surface-cage controls captured alongside a CurveSource's sparse
+/// C3 rails.  The arrays are deliberately stage-free and preserve the
+/// authored owner/triangle order used by the runtime interpolator.  Chart
+/// positions are captured independently of the surface map so a density or
+/// profile edit changes the capture identity without re-reading USD.
+struct UsdGenSurfaceCagePayload
+{
+    VtIntArray   ownerIds;
+    VtFloatArray ownerDensities;
+    VtIntArray   ownerSeeds;
+    VtIntArray   ownerCvCounts;
+    VtFloatArray ownerEdgeBias;
+    VtIntArray   ownerLengthProfileOffsets;
+    VtVec2fArray ownerLengthProfile;
+    VtFloatArray normalizedT;           // flattened per-point rail parameter
+    VtVec3iArray triangles;              // guide-curve indices
+    VtIntArray   triangleOwnerIndices;
+    VtVec2fArray triangleRootCharts;     // 3 entries per triangle
+    VtVec2fArray ownerChartCentroids;
+    VtFloatArray ownerChartMeanRadii;
+};
+
 /// The source curves' own `primvars:displayColor`, forwarded as an authored
 /// plane under this reserved name. It rides the ordinary named-plane machinery
 /// so resampling and compaction carry it correctly, but the session cooker
@@ -211,6 +234,7 @@ struct UsdGenCurveSetDesc
     VtMatrix4dArray rootFrame;         // primvars:usdGen:rootFrame; may be empty
     std::string     frozenEpoch;       // constant string primvar, "usdgen1:sha1:..." (S42)
     std::vector<UsdGenAuthoredPlaneDesc> authoredPlanes;
+    std::shared_ptr<const UsdGenSurfaceCagePayload> surfaceCage;
     uint64_t        curveGeneration = 0;   // bumped by any points/topology/id change on the prim
 };
 

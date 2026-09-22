@@ -148,6 +148,10 @@ struct USDGENTONIC_API TonicStagedLevel {
     // Whether the center curves and CV dots draw (plan/18 §2.4a: Graph and
     // Output show opaque tubes only).
     bool centers = true;
+    // The active Tube component's point glyphs. Curves remain available as
+    // orientation guides while inactive control dots are hidden.
+    bool centerCVDots = true;
+    bool ringCVDots = true;
     bool focused = false;
     // World units per screen pixel (TonicModel::SetDisplayScale), copied
     // in so the width arrays are a pure function of the staged level. 0

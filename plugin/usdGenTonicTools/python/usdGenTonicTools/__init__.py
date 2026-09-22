@@ -16,12 +16,54 @@
 # TonicSession (model, committer, bake) and the one ViewportController; the
 # workspace dock reads all three off it.
 
+import math
+
 from pxr import Tf
 from pxr.Usdviewq.plugin import PluginContainer
 
 from .tonicToolState import TonicToolState
 
 _CONTAINER = None
+
+
+def _validMeshPrim(prim):
+    """Validate the complete topology contract before model activation."""
+    try:
+        if not prim or str(prim.GetTypeName()) != "Mesh":
+            return False
+        points = list(prim.GetAttribute("points").Get() or [])
+        rawCounts = list(prim.GetAttribute("faceVertexCounts").Get() or [])
+        rawIndices = list(
+            prim.GetAttribute("faceVertexIndices").Get() or [])
+        counts = []
+        indices = []
+        for value in rawCounts:
+            converted = int(value)
+            if float(value) != converted:
+                return False
+            counts.append(converted)
+        for value in rawIndices:
+            converted = int(value)
+            if float(value) != converted:
+                return False
+            indices.append(converted)
+    except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):
+        return False
+    if not points or not counts or not indices:
+        return False
+    if any(count < 3 for count in counts):
+        return False
+    if sum(counts) != len(indices):
+        return False
+    pointCount = len(points)
+    for point in points:
+        try:
+            if len(point) < 3 or not all(
+                    math.isfinite(float(point[axis])) for axis in range(3)):
+                return False
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return False
+    return all(0 <= index < pointCount for index in indices)
 
 
 def container():
@@ -166,9 +208,6 @@ class UsdGenTonicToolsPluginContainer(PluginContainer):
         self._status(usdviewApi, "Tonic: workspace open")
 
     def _cmd_bindScalp(self, usdviewApi):
-        session = self.ensureSession(usdviewApi)
-        if session is None:
-            return
         # UsdviewApi.selectedPaths, not the selection model's own getter:
         # the P2 command asked for getSelectedPrimPaths, which no usdview
         # has (it is getPrimPaths), inside a try/except AttributeError, so
@@ -177,8 +216,59 @@ class UsdGenTonicToolsPluginContainer(PluginContainer):
         if not paths:
             self._status(usdviewApi, "Tonic: select the scalp mesh first")
             return
-        if not session.activate(str(paths[0])):
-            return
+        self.bindScalp(usdviewApi, str(paths[0]))
+
+    def bindScalp(self, usdviewApi, scalpPath, replace=False):
+        """Compatibility spelling for callers of the original menu action."""
+        return self.bindGeometry(usdviewApi, scalpPath, replace=replace)
+
+    def isValidGeometry(self, usdviewApi, scalpPath):
+        """Return whether a stage path satisfies the binding mesh contract."""
+        try:
+            prim = usdviewApi.stage.GetPrimAtPath(str(scalpPath))
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            return False
+        return _validMeshPrim(prim)
+
+    def bindGeometry(self, usdviewApi, scalpPath, replace=False):
+        """Validate and bind one stage mesh for the Tonic model.
+
+        This is the single binding entry point used by both the legacy
+        "Bind scalp" command and the workspace's geometry picker. The
+        validation is deliberately before TonicSession.activate: that
+        method tears down an existing model before it creates the next one,
+        so a bad path must never discard an edited groom. Replacement is
+        opt-in because binding a different mesh clears the graph and maps.
+        """
+        session = self.ensureSession(usdviewApi)
+        if session is None:
+            return False
+        try:
+            stage = usdviewApi.stage
+            path = str(scalpPath)
+            prim = stage.GetPrimAtPath(path)
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            self._status(usdviewApi, "Tonic: no stage mesh at %s" % scalpPath)
+            return False
+        # This complete topology check must happen before the old model can
+        # be deactivated: activate() tears down an existing model first.
+        if not _validMeshPrim(prim):
+            self._status(usdviewApi,
+                         "Tonic: %s is not a valid Mesh geometry" % path)
+            return False
+        current = str(getattr(session, "scalpPath", "") or "")
+        if getattr(session, "model", None) is not None:
+            if current == path:
+                self._status(usdviewApi, "Tonic: %s is already bound" % path)
+                return True
+            if not replace:
+                self._status(
+                    usdviewApi,
+                    "Tonic: %s is already editing %s; confirm replacement "
+                    "in the Tonic workspace" % (current or "a groom", path))
+                return False
+        if not session.activate(path, stage=stage):
+            return False
         viewport = self.ensureViewport(usdviewApi)
         if viewport is not None:
             viewport.setMode("graph")
@@ -187,7 +277,30 @@ class UsdGenTonicToolsPluginContainer(PluginContainer):
             # scalp: until a scalp is bound there is nothing to measure at,
             # so the first real reading is here (plan/18 section 2.4a).
             viewport.syncDisplayScale()
-        self._status(usdviewApi, "Tonic: bound %s as the scalp" % paths[0])
+        self._removeBoundMeshFromSelection(usdviewApi, path)
+        self._status(usdviewApi, "Tonic: bound %s as the scalp" % path)
+        self.refreshWorkspace()
+        return True
+
+    @staticmethod
+    def _removeBoundMeshFromSelection(usdviewApi, path):
+        """Remove only the bound mesh from usdview's selection, if exposed."""
+        dataModel = getattr(usdviewApi, "dataModel", None)
+        if dataModel is None:
+            dataModel = getattr(usdviewApi, "_dataModel", None)
+        selection = getattr(dataModel, "selection", None)
+        remove = getattr(selection, "removePrimPath", None)
+        if not callable(remove):
+            return
+        try:
+            remove(str(path))
+        except (TypeError, ValueError, RuntimeError):
+            # Older usdview builds may require an SdfPath object.
+            try:
+                from pxr import Sdf
+                remove(Sdf.Path(str(path)))
+            except (ImportError, TypeError, ValueError, RuntimeError):
+                pass
 
     def _cmd_saveGroom(self, usdviewApi):
         from . import tonicViewport

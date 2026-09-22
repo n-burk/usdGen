@@ -20,6 +20,7 @@ import ctypes
 import os
 import shutil
 import tempfile
+import time
 
 from . import tonicLib
 
@@ -89,7 +90,11 @@ class TonicSession:
         # today.
         self._bakeTexels = 0
         self._bakeLevels = 1
+        self._pendingOutputReveal = False
         self._publishHook = None
+        # The viewport owns the Qt timer; this callback is the Qt-free wake
+        # seam used whenever a worker item is queued from a dock action.
+        self._idleHook = None
         self._stageLib = None
         # Centre of the bound scalp's bounding box, in world units. The
         # viewport controller measures the display scale (world units per
@@ -226,6 +231,19 @@ class TonicSession:
         """
         self._publishHook = hook
 
+    def setIdleHook(self, hook):
+        """Wake the owning viewport after deferred work is queued.
+
+        The session stays Qt-free.  The viewport supplies ``scheduleIdle``
+        once its timer is ready and removes it before teardown.
+        """
+        self._idleHook = hook
+
+    def _wakeIdle(self):
+        hook = self._idleHook
+        if hook is not None:
+            hook()
+
     def _status(self, text):
         if self._statusFn is not None:
             self._statusFn(text)
@@ -337,6 +355,7 @@ class TonicSession:
             return False
         self._state.activated = True
         self._state.groomRoot = self._groomPath
+        self.outputSettings()
         self.publish(PUBLISH_ALL)
         return True
 
@@ -396,6 +415,9 @@ class TonicSession:
             return False
         self._state.activated = True
         self._state.groomRoot = self._groomPath
+        # Hydrate restores native Output settings from the committed groom;
+        # mirror them before the Output panel is rebuilt.
+        self.outputSettings()
         self.publish(PUBLISH_ALL)
         self._status("Tonic: hydrated %d tube(s), %d guide(s), %d imported"
                      % (tubes, guides, imported))
@@ -576,10 +598,198 @@ class TonicSession:
         self._state.generation = int(self.modelVersion)
         if self._publishHook is not None:
             self._publishHook()
+        # Dock buttons and viewport gestures share this publication path.
+        # Updating the view here keeps a successful model publish visible
+        # immediately instead of waiting for the idle pump or dock timer.
+        self.refreshViewport()
         return count
 
     def publishAll(self):
         return self.publish(PUBLISH_ALL)
+
+    def clearGeneratedCurves(self):
+        """Remove the live guide preview without changing authored tubes.
+
+        The model owns the clear/suppression state and its undo snapshot;
+        this wrapper only publishes the native operation and mirrors the
+        panel state.
+        """
+        if self._model is None:
+            return False
+        entry = getattr(self.dll, "Tonic_ClearGeneratedCurves", None)
+        if entry is None:
+            self._status("Tonic: clear generated curves is unavailable in "
+                         "this library")
+            return False
+        ok = int(entry(self._model)) == tonicLib.TONIC_OK
+        if not ok:
+            self._status("Tonic: " + self.lastError())
+            return False
+        self.enqueueCommit()
+        self.publish()
+        return True
+
+    def refillGeneratedCurves(self):
+        """Explicitly restore the generated guide preview at full density."""
+        if self._model is None:
+            return False
+        # GenerateGuides is the explicit user action: unlike RefillGuides,
+        # it clears the native post-Clear suppression latch.
+        ok = self.dll.Tonic_GenerateGuides(
+            self._model, ctypes.c_float(1.0)) == tonicLib.TONIC_OK
+        if not ok:
+            self._status("Tonic: " + self.lastError())
+            return False
+        # GenerateGuides re-enables generation, while visibility remains the
+        # separate native preference set by the Show checkbox.
+        self.generatedCurvesVisible()
+        self.enqueueCommit()
+        self.publish()
+        return True
+
+    def setGeneratedCurvesVisible(self, visible):
+        """Persist guide visibility, using the optional native display hook."""
+        visible = bool(visible)
+        if self._model is None:
+            self._state.showGeneratedCurves = visible
+            return True
+        entry = getattr(self.dll, "Tonic_SetGeneratedCurvesVisible", None)
+        if entry is None:
+            self._status("Tonic: generated-curve visibility is unavailable "
+                         "in this library")
+            return False
+        if int(entry(self._model, 1 if visible else 0)) != tonicLib.TONIC_OK:
+            self._status("Tonic: " + self.lastError())
+            return False
+        self._state.showGeneratedCurves = visible
+        self.publish()
+        return True
+
+    def generatedCurvesVisible(self):
+        """Return the native guide visibility, when the model exposes it."""
+        if self._model is None:
+            return bool(self._state.showGeneratedCurves)
+        entry = getattr(self.dll, "Tonic_GetGeneratedCurvesVisible", None)
+        if entry is None:
+            return bool(self._state.showGeneratedCurves)
+        visible = ctypes.c_int(0)
+        if int(entry(self._model, ctypes.byref(visible))) != tonicLib.TONIC_OK:
+            return bool(self._state.showGeneratedCurves)
+        self._state.showGeneratedCurves = bool(visible.value)
+        return bool(visible.value)
+
+    # -- Output description ----------------------------------------------
+
+    def outputSettingsAvailable(self):
+        """Whether this model library exposes committed Output settings."""
+        return (self._model is not None and
+                getattr(self.dll, "Tonic_GetOutputSettings", None) is not None
+                and getattr(self.dll, "Tonic_SetOutputSettings", None)
+                is not None)
+
+    def outputSettings(self):
+        """Return ``(enabled, densityMultiplier, strandWidth)``."""
+        enabled = bool(getattr(self._state, "outputEnabled", False))
+        multiplier = float(getattr(self._state,
+                                   "outputDensityMultiplier", 1.0))
+        width = float(getattr(self._state, "outputStrandWidth", 0.01))
+        if self._model is None:
+            return enabled, multiplier, width
+        entry = getattr(self.dll, "Tonic_GetOutputSettings", None)
+        if entry is None:
+            return enabled, multiplier, width
+        nativeEnabled = ctypes.c_int(0)
+        nativeMultiplier = ctypes.c_float(multiplier)
+        nativeWidth = ctypes.c_float(width)
+        if int(entry(self._model, ctypes.byref(nativeEnabled),
+                     ctypes.byref(nativeMultiplier),
+                     ctypes.byref(nativeWidth))) != tonicLib.TONIC_OK:
+            return enabled, multiplier, width
+        enabled = bool(nativeEnabled.value)
+        if self._pendingOutputReveal and enabled:
+            enabled = bool(getattr(self._state, "outputEnabled", False))
+        multiplier = max(float(nativeMultiplier.value), 0.0)
+        width = max(float(nativeWidth.value), 0.0)
+        self._state.outputEnabled = enabled
+        self._state.outputDensityMultiplier = multiplier
+        self._state.outputStrandWidth = width
+        return enabled, multiplier, width
+
+    def _outputCollision(self):
+        """Reject artist-owned Output prims before native output is enabled."""
+        stage = self._stage if self._stage is not None else self._apiStage()
+        if stage is None:
+            return True
+        markerName = "usdGen:tonic:outputOwned"
+        for suffix in ("Output", "OutputCurves", "OutputRegionMap"):
+            prim = stage.GetPrimAtPath(self._groomPath + "/" + suffix)
+            if not prim:
+                continue
+            marker = prim.GetAttribute(markerName)
+            if not marker or marker.Get() is not True:
+                self._status("Tonic: cannot build Output description; "
+                             "%s is not Tonic-owned (preserving it)"
+                             % prim.GetPath())
+                return False
+        return True
+
+    def setOutputSettings(self, enabled=None, densityMultiplier=None,
+                          strandWidth=None, publish=True, enqueue=True):
+        """Apply Output description settings and mirror native state."""
+        current = self.outputSettings()
+        enabled = current[0] if enabled is None else bool(enabled)
+        densityMultiplier = (current[1] if densityMultiplier is None else
+                             max(float(densityMultiplier), 1e-6))
+        strandWidth = (current[2] if strandWidth is None else
+                       max(float(strandWidth), 0.0))
+        if enabled and not self._outputCollision():
+            return False
+        entry = getattr(self.dll, "Tonic_SetOutputSettings", None) \
+            if self._model is not None else None
+        if self._model is not None and entry is None:
+            self._status("Tonic: Output description is unavailable in this "
+                         "library")
+            return False
+        if entry is not None and int(entry(
+                self._model, 1 if enabled else 0,
+                ctypes.c_float(densityMultiplier),
+                ctypes.c_float(strandWidth))) != tonicLib.TONIC_OK:
+            self._status("Tonic: " + self.lastError())
+            return False
+        if enabled and not current[0]:
+            self._pendingOutputReveal = True
+        elif not enabled:
+            self._pendingOutputReveal = False
+        self._state.outputEnabled = (False if self._pendingOutputReveal and
+                                     enabled else enabled)
+        self._state.outputDensityMultiplier = densityMultiplier
+        self._state.outputStrandWidth = strandWidth
+        if enqueue and self._committer is not None:
+            if not self.enqueueCommit():
+                return False
+        if publish and self._model is not None:
+            self.publish()
+        return True
+
+    def buildOutputDescription(self):
+        """Commit sparse guides, the region map, and their hair description."""
+        _enabled, multiplier, width = self.outputSettings()
+        if not self.setOutputSettings(True, multiplier, width,
+                                      enqueue=False):
+            return False
+        amplified = getattr(self.dll, "Tonic_SetAmplifiedHair", None) \
+            if self._model is not None else None
+        if amplified is not None:
+            if int(amplified(self._model, 1)) != tonicLib.TONIC_OK:
+                self._status("Tonic: " + self.lastError())
+                return False
+            self._state.showAmplifiedHair = True
+            self.publish()
+        if not self.enqueueCommit():
+            return False
+        self._status("Tonic: Sparse groom and PTex bake queued (%g density, %g width)"
+                     % (multiplier, width))
+        return True
 
     def refreshViewport(self):
         api = self._api
@@ -754,6 +964,18 @@ class TonicSession:
             ctypes.c_float(y1), ctypes.c_uint(int(kindMask)),
             int(mode)) == tonicLib.TONIC_OK
 
+    def selectPolygon(self, camera, points, kindMask,
+                      mode=tonicLib.TONIC_SELECT_SET):
+        """Select against physical-pixel (x, y) lasso points."""
+        if self._model is None or camera is None or len(points) < 3:
+            return False
+        flat = [float(value) for point in points for value in point]
+        xy = (ctypes.c_float * len(flat))(*flat)
+        return self.dll.Tonic_SelectPolygon(
+            self._model, camera.viewProjArray(), camera.width, camera.height,
+            xy, int(len(points)), ctypes.c_uint(int(kindMask)),
+            int(mode)) == tonicLib.TONIC_OK
+
     def select(self, kind, ids, subIds=None, subSubIds=None,
                mode=tonicLib.TONIC_SELECT_SET):
         if self._model is None:
@@ -818,6 +1040,7 @@ class TonicSession:
                                            None) != tonicLib.TONIC_OK:
             self._status("Tonic: " + self.lastError())
             return False
+        self._wakeIdle()
         return True
 
     def rasterise(self):
@@ -848,8 +1071,13 @@ class TonicSession:
         if regions <= 0:
             return 0
         from . import tonicTube
-        ringVerts = int(self._state.panels.get("tube", {}).get(
-            "ringCvCount", tonicTube.DEFAULT_RING_VERTS))
+        # Zero is the BuildTubeFromRegion Auto sentinel: it makes one
+        # column per authored region CV instead of averaging a radial default.
+        # Existing roots are skipped below, so changing this preference never
+        # regenerates or reshapes a sculpted tube.
+        ringVerts = tonicTube.regionRingVerts(
+            self._state.panels.get("tube", {}).get(
+                "ringCvCount", tonicTube.DEFAULT_REGION_RING_VERTS))
         built = 0
         for regionId in range(regions):
             if int(self.dll.Tonic_TubeForRegion(self._model, regionId)) >= 0:
@@ -905,8 +1133,12 @@ class TonicSession:
             log2 = max(self.MIN_BAKE_RES_LOG2,
                        min(log2, self.MAX_BAKE_RES_LOG2))
             applied = 1 << log2
+        changed = self._bakeTexels != applied
         self._bakeTexels = applied
-        self._applyBakeOptions()
+        pushed = self._applyBakeOptions()
+        if (changed and pushed and self._committer is not None and
+                self.outputSettings()[0]):
+            self.enqueueCommit()
         return applied
 
     def _applyBakeOptions(self):
@@ -940,6 +1172,7 @@ class TonicSession:
             return False
         self._state.mapVersion = int(self.dll.Tonic_GetMapVersion(self._model))
         self._bakeInFlight = True
+        self._wakeIdle()
         return True
 
     def pump(self):
@@ -958,6 +1191,9 @@ class TonicSession:
                 1 if self.gestureActive else 0)
             self._lastSwapCode = int(code)
             swapped = code == tonicLib.TONIC_COMMITTER_SWAPPED
+            if swapped and self._pendingOutputReveal:
+                self._pendingOutputReveal = False
+                self.outputSettings()
         if self._bake is not None:
             version = ctypes.c_ulonglong(0)
             path = ctypes.create_string_buffer(4096)
@@ -1079,6 +1315,23 @@ class TonicSession:
 
     # -- file commands -----------------------------------------------------
 
+    def flushLatest(self, timeout=10.0):
+        """Swap the newest model layer before a file save can copy it."""
+        if self._committer is None:
+            return True
+        if not self.enqueueCommit():
+            return False
+        deadline = time.monotonic() + max(float(timeout), 0.1)
+        while self.hasPendingWork() and time.monotonic() < deadline:
+            self.pump()
+            if self.hasPendingWork():
+                time.sleep(0.01)
+        if self.hasPendingWork():
+            self._status("Tonic: timed out waiting for the latest groom "
+                         "commit")
+            return False
+        return True
+
     def saveGroom(self, filePath, stage=None):
         """Write the live layer to a `.usdc` and re-parent it under the live
         sublayer, then drop the latest baked map beside it.
@@ -1093,6 +1346,8 @@ class TonicSession:
                                                  or self._apiStage())
         if stage is None or self._liveLayer is None:
             self._status("Tonic: nothing to save (no live layer)")
+            return False
+        if not self.flushLatest():
             return False
         filePath = str(filePath)
         if not filePath.lower().endswith(".usdc"):

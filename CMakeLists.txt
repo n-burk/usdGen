@@ -1619,7 +1619,7 @@ foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalid
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
            testUsdGenSourceColor testUsdGenLookPrimvars
-           testUsdGenInstance)
+           testUsdGenInstance testUsdGenReferenceSource)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -1631,6 +1631,7 @@ set_tests_properties(testUsdGenStockStormContract PROPERTIES
     LABELS "T1;stock-hydra;unpatched-openusd")
 set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
 set_tests_properties(testUsdGenSourceColor PROPERTIES LABELS "T1;look;sources")
+set_tests_properties(testUsdGenReferenceSource PROPERTIES LABELS "T1;sources;reference")
 set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
@@ -1808,6 +1809,11 @@ add_executable(testUsdGenPtexMap tests/testUsdGenPtexMap.cpp)
 target_link_libraries(testUsdGenPtexMap PRIVATE usdGen usdGen_ptex)
 add_test(NAME testUsdGenPtexMap COMMAND testUsdGenPtexMap)
 set_tests_properties(testUsdGenPtexMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
+add_executable(testUsdGenSurfaceCageInterpolate tests/testUsdGenSurfaceCageInterpolate.cpp)
+target_link_libraries(testUsdGenSurfaceCageInterpolate PRIVATE usdGen usdGen_ptex)
+add_test(NAME testUsdGenSurfaceCageInterpolate COMMAND testUsdGenSurfaceCageInterpolate)
+set_tests_properties(testUsdGenSurfaceCageInterpolate PROPERTIES
+    LABELS "T0;maps;sources" TIMEOUT 120)
 # The function library against Disney's own SeExpr2. This is the only test that
 # links the vendored frontend archive directly: expressions/exprMath.h claims to
 # reproduce SeExpr2's builtins for the device, and the claim is only worth
@@ -1908,10 +1914,12 @@ add_executable(testUsdGenTonicIndex tests/testUsdGenTonicIndex.cpp)
 target_link_libraries(testUsdGenTonicIndex PRIVATE usdGenTonic hd)
 add_test(NAME testUsdGenTonicIndex COMMAND testUsdGenTonicIndex)
 set_tests_properties(testUsdGenTonicIndex PROPERTIES
+    ENVIRONMENT "USDGENTONIC_TEST_TUBE=1"
     LABELS "T1;tonic" TIMEOUT 120)
-# The gate record_usd.ps1 relies on: with USDGENTONIC_TEST_TUBE=0 the
-# index constructs empty (no scaffolding in headless frames) and still
-# publishes the model's levels on Tonic_Activate.
+# The opt-out the gate record_usd.ps1 relies on: with USDGENTONIC_TEST_TUBE=0
+# (and by default — the binary clears the ambient variable first, so this
+# pins the default itself) the index constructs empty (no scaffolding in
+# headless frames) and still publishes the model's levels on Tonic_Activate.
 add_test(NAME testUsdGenTonicIndexNoTestTube
     COMMAND testUsdGenTonicIndex --no-test-tube)
 set_tests_properties(testUsdGenTonicIndexNoTestTube PROPERTIES
@@ -1937,6 +1945,16 @@ set_tests_properties(testUsdGenTonicCommit PROPERTIES
     LABELS "T1;tonic;gate:TN-4" TIMEOUT 300
     SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
+# Sparse Output: cage guides and a PTex ownership map feed runtime
+# CurveSource interpolation -> Width, evaluated by the real engine.
+add_executable(testUsdGenTonicOutput tests/testUsdGenTonicOutput.cpp)
+target_link_libraries(testUsdGenTonicOutput PRIVATE usdGenTonic usdGenTestUtilsHd)
+add_test(NAME testUsdGenTonicOutput COMMAND testUsdGenTonicOutput)
+set_tests_properties(testUsdGenTonicOutput PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
+    LABELS "T1;tonic;output" TIMEOUT 300
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
 # P2 scalp graph + region bake (plan/17). T0: K1/K2/K3 CPU twins, G1 graph
 # ops, the model graph layer and the P2 C ABI (TN-6 parity runs inside when
 # the build has CUDA and the host has a device).
@@ -1959,6 +1977,23 @@ if(USDGEN_ENABLE_CUDA)
 endif()
 add_test(NAME testUsdGenTonicTubes COMMAND testUsdGenTonicTubes)
 set_tests_properties(testUsdGenTonicTubes PROPERTIES
+    LABELS "T0;tonic" TIMEOUT 300)
+
+# Exact sub-face graph regions: guide roots and final K9/K10 guide starts
+# must follow closed polygons rather than the coarse face map's centroid.
+add_executable(testUsdGenTonicSubface tests/testUsdGenTonicSubface.cpp)
+target_link_libraries(testUsdGenTonicSubface PRIVATE usdGenTonic)
+add_test(NAME testUsdGenTonicSubface COMMAND testUsdGenTonicSubface)
+set_tests_properties(testUsdGenTonicSubface PROPERTIES
+    LABELS "T0;tonic" TIMEOUT 300)
+
+# Region-rooted tubes retain their support-plane frame at section zero while
+# later center CV edits bend the shaft.  This verifies the final host mesh,
+# snapshot/hydrate, and the unpinned legacy K4 path.
+add_executable(testUsdGenTonicRootFrame tests/testUsdGenTonicRootFrame.cpp)
+target_link_libraries(testUsdGenTonicRootFrame PRIVATE usdGenTonic)
+add_test(NAME testUsdGenTonicRootFrame COMMAND testUsdGenTonicRootFrame)
+set_tests_properties(testUsdGenTonicRootFrame PROPERTIES
     LABELS "T0;tonic" TIMEOUT 300)
 
 # Kernel registry + per-move chain smoke (plan/17 section 8). T0: the section
@@ -2117,6 +2152,7 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
     set_tests_properties(testUsdviewTonicPublish PROPERTIES
         LABELS "T3;tonic;tools;usdview" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT "USDGENTONIC_TEST_TUBE=1"
         ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
     # V5 Hierarchy mode through REAL mouse and key events (plan/18 V5
     # exit): select, Shift+D, Ctrl+Down/Up, Shift+M, Ctrl+Z, asserted
@@ -2152,6 +2188,28 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         LABELS "T3;tonic;tools;usdview" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # Real Qt input acceptance for hover, click and Shift-marquee selection.
+    # This stays separate from the Tube workflow so selection routing and
+    # StageView rollover ownership have a focused failure report.
+    add_test(NAME testUsdviewTonicSelection
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicSelection.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicSelection PROPERTIES
+        LABELS "T3;tonic;tools;usdview;selection" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # An artist-level hierarchy edit: subdivide in the dock, select one
+    # displayed child component, drag its manipulator, and prove the other
+    # child descriptors and world points remain untouched through commit/undo.
+    add_test(NAME testUsdviewTonicIsolatedEditing
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicIsolatedEditing.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicIsolatedEditing PROPERTIES
+        LABELS "T3;tonic;tools;usdview;selection;hierarchy" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
     # TN-3 pick accuracy: K11 vs StageView.pick at 100 pixels (P6 exit).
     add_test(NAME testUsdviewTonicPick
         COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
@@ -2159,6 +2217,53 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
     set_tests_properties(testUsdviewTonicPick PROPERTIES
         LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # The full interactive workflow on the plane fixture, ending in 4
+    # connected tubes: a graph stroke grows the stub, Shift+D grows three
+    # children, double-click drills to them, a child tip CV takes the
+    # gizmo for a drag (undo/redo), a sculpt stroke moves the second
+    # child, the Fill panel feeds the guides, and the commit lands nested
+    # on the stage.
+    add_test(NAME testUsdviewTonicWorkflow
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicWorkflow.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicWorkflow PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # Commit-enabled Output through the real viewport controller.  The
+    # script owns the panel workflow; this mirrors Workflow's fixture and
+    # staged plugin/Python/DLL environment.
+    add_test(NAME testUsdviewTonicOutput
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicOutput.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicOutput PROPERTIES
+        LABELS "T3;tonic;tools;usdview;output" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # Click-by-click Graph regions on a single quad: Bind Geometry through
+    # the dock, shared Ptex density UI, CV drafts, both closure paths, and
+    # the one-step region+auto-tube undo/redo transaction.
+    add_test(NAME testUsdviewTonicCvRegions
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicCvRegions.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-single-quad.usda")
+    set_tests_properties(testUsdviewTonicCvRegions PROPERTIES
+        LABELS "T3;tonic;tools;usdview;cv-regions" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # Graph Reposition through actual StageView drags: shared CV and edge
+    # motion stays live in both incident regions, preserves stable topology
+    # and root descriptors, and owns one undo / Escape transaction.
+    add_test(NAME testUsdviewTonicReposition
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicReposition.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-single-quad.usda")
+    set_tests_properties(testUsdviewTonicReposition PROPERTIES
+        LABELS "T3;tonic;tools;usdview;graph;reposition" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
     # TN-7 bake isolation (plan/17 section 7): the TN-1 drag re-measured

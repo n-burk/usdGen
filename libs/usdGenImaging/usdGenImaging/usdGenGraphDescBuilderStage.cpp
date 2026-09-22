@@ -52,6 +52,7 @@ using usdGen::UsdGenLookDesc;
 using usdGen::UsdGenSurfaceDesc;
 using usdGen::UsdGenSurfaceSample;
 using usdGen::UsdGenSurfaceNormalDomain;
+using usdGen::UsdGenSurfaceCagePayload;
 
 
 template <class T>
@@ -366,6 +367,61 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
         UsdTimeCode(time));
 }
 
+bool
+_BuildSurfaceCagePayload(UsdPrim const &prim, UsdTimeCode time,
+                         std::shared_ptr<const UsdGenSurfaceCagePayload> *out)
+{
+    if (!prim || !out) return false;
+    static TfToken const names[] = {
+        TfToken("usdGen:surfaceCage:ownerIds"),
+        TfToken("usdGen:surfaceCage:ownerDensities"),
+        TfToken("usdGen:surfaceCage:ownerSeeds"),
+        TfToken("usdGen:surfaceCage:ownerCvCounts"),
+        TfToken("usdGen:surfaceCage:ownerEdgeBias"),
+        TfToken("usdGen:surfaceCage:ownerLengthProfileOffsets"),
+        TfToken("usdGen:surfaceCage:ownerLengthProfile"),
+        TfToken("usdGen:surfaceCage:normalizedT"),
+        TfToken("usdGen:surfaceCage:triangles"),
+        TfToken("usdGen:surfaceCage:triangleOwnerIndices"),
+        TfToken("usdGen:surfaceCage:triangleRootCharts"),
+        TfToken("usdGen:surfaceCage:ownerChartCentroids"),
+        TfToken("usdGen:surfaceCage:ownerChartMeanRadii")};
+    bool present = false;
+    for (TfToken const &name : names) {
+        if (prim.GetAttribute(name)) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) return false;
+
+    std::shared_ptr<UsdGenSurfaceCagePayload> cage =
+        std::make_shared<UsdGenSurfaceCagePayload>();
+    if (!_GetTyped(prim.GetAttribute(names[0]), time, &cage->ownerIds) ||
+        !_GetTyped(prim.GetAttribute(names[1]), time, &cage->ownerDensities) ||
+        !_GetTyped(prim.GetAttribute(names[2]), time, &cage->ownerSeeds) ||
+        !_GetTyped(prim.GetAttribute(names[3]), time, &cage->ownerCvCounts) ||
+        !_GetTyped(prim.GetAttribute(names[4]), time, &cage->ownerEdgeBias) ||
+        !_GetTyped(prim.GetAttribute(names[5]), time,
+                   &cage->ownerLengthProfileOffsets) ||
+        !_GetTyped(prim.GetAttribute(names[6]), time,
+                   &cage->ownerLengthProfile) ||
+        !_GetTyped(prim.GetAttribute(names[7]), time, &cage->normalizedT) ||
+        !_GetTyped(prim.GetAttribute(names[8]), time, &cage->triangles) ||
+        !_GetTyped(prim.GetAttribute(names[9]), time,
+                   &cage->triangleOwnerIndices) ||
+        !_GetTyped(prim.GetAttribute(names[10]), time,
+                   &cage->triangleRootCharts) ||
+        !_GetTyped(prim.GetAttribute(names[11]), time,
+                   &cage->ownerChartCentroids) ||
+        !_GetTyped(prim.GetAttribute(names[12]), time,
+                   &cage->ownerChartMeanRadii)) {
+        return false;
+    }
+    *out = std::move(cage);
+    return true;
+}
+
 void
 _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
                UsdGenRole role, double time, UsdGenCurveSetDesc *out)
@@ -401,6 +457,7 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
     } else {
         _GetTyped(curves.GetWidthsAttr(), UsdTimeCode(time), &out->widths);
     }
+    _BuildSurfaceCagePayload(prim, UsdTimeCode(time), &out->surfaceCage);
     _GetPrimvarTyped(prim, TfToken("skinprim"), UsdTimeCode(time),
                      &out->skinPrim);
     _GetPrimvarTyped(prim, TfToken("usdGen:curveId"), UsdTimeCode(time),
@@ -441,6 +498,29 @@ _BuildCurveSet(UsdStageRefPtr const &stage, SdfPath const &path,
             out->authoredPlanes.push_back(std::move(plane));
         }
     }
+
+    // OutputCurves ownership is carried by one uniform integer per source
+    // curve.  Do not reinterpret a malformed or differently interpolated
+    // primvar: the authored-plane contract requires a primitive-domain scalar.
+    auto forwardOwnership = [&](TfToken const &name) {
+        UsdGeomPrimvar const pv = UsdGeomPrimvarsAPI(prim).GetPrimvar(name);
+        if (!pv || pv.GetInterpolation() != UsdGeomTokens->uniform) return;
+        VtIntArray values;
+        if (!pv.Get(&values, UsdTimeCode(time)) ||
+            values.size() != out->curveVertexCounts.size()) {
+            return;
+        }
+        usdGen::UsdGenAuthoredPlaneDesc plane;
+        plane.name = name;
+        plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+        plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
+        plane.arity = 1;
+        plane.intValues = std::move(values);
+        out->authoredPlanes.push_back(std::move(plane));
+    };
+    forwardOwnership(TfToken("tubeId"));
+    forwardOwnership(TfToken("regionId"));
+    forwardOwnership(TfToken("hierarchyLevel"));
 
     TfToken curveRole;
     _GetPrimvarTyped(prim, TfToken("usdGen:role"), UsdTimeCode::Default(),
@@ -666,10 +746,13 @@ BuildGraphDescFromStage(
                 rel.GetName().GetString() == "usdGen:frozen:curves";
             bool const isColliders =
                 isCollide && rel.GetName().GetString() == "usdGen:colliders";
+            bool const isRegionMap =
+                node.type == TfToken("UsdGenCurveSource") &&
+                rel.GetName().GetString() == "usdGen:regionMap";
             SdfPathVector *bucket = &node.references;
             if (name == "input") {
                 bucket = &node.inputs;
-            } else if (name == "references") {
+            } else if (name == "references" || name == "reference") {
                 bucket = &node.references;
             } else if (name == "guides" || name == "curves" ||
                        name == "frozen:curves" || isPartCurves ||
@@ -680,6 +763,19 @@ BuildGraphDescFromStage(
                 bucket = &node.curves;
             } else if (isColliders) {
                 bucket = &nodeColliders;
+            } else if (isRegionMap) {
+                SdfPathVector targets;
+                rel.GetTargets(&targets);
+                if (targets.size() != 1) {
+                    desc.validationErrors.push_back(
+                        node.path.GetString() +
+                        ": usdGen:regionMap requires exactly one target");
+                } else {
+                    node.maps.push_back(targets.front());
+                    node.mapBindings.push_back(
+                        {targets.front(), TfToken("usdGen:regionMap")});
+                }
+                continue;
             } else {
                 continue;  // not a graph edge (base-name match only)
             }

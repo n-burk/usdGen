@@ -75,6 +75,7 @@ using usdGen::UsdGenLookDesc;
 using usdGen::UsdGenSurfaceDesc;
 using usdGen::UsdGenSurfaceSample;
 using usdGen::UsdGenSurfaceNormalDomain;
+using usdGen::UsdGenSurfaceCagePayload;
 
 
 
@@ -387,6 +388,36 @@ _HForwardSourceColor(HdContainerDataSourceHandle const &primDs, _HdTime t,
     out->authoredPlanes.push_back(std::move(plane));
 }
 
+// OutputCurves ownership is carried by one uniform integer per source curve.
+// Do not reinterpret a malformed or differently interpolated primvar: the
+// authored-plane contract requires a primitive-domain scalar.
+void
+_HForwardOwnershipPlane(HdContainerDataSourceHandle const &primDs,
+                        TfToken const &name, _HdTime t,
+                        usdGen::UsdGenCurveSetDesc *out)
+{
+    HdPrimvarSchema const primvar =
+        HdPrimvarsSchema::GetFromParent(primDs).GetPrimvar(name);
+    HdSampledDataSourceHandle const values = primvar.GetPrimvarValue();
+    if (!values) return;
+    HdTokenDataSourceHandle const interpolation = primvar.GetInterpolation();
+    if (!interpolation || interpolation->GetTypedValue(t) != TfToken("uniform")) {
+        return;
+    }
+    VtValue const value = values->GetValue(t);
+    if (!value.IsHolding<VtIntArray>()) return;
+    VtIntArray const &integers = value.UncheckedGet<VtIntArray>();
+    if (integers.size() != out->curveVertexCounts.size()) return;
+
+    usdGen::UsdGenAuthoredPlaneDesc plane;
+    plane.name = name;
+    plane.type = usdGen::UsdGenAuthoredPlaneType::Int32;
+    plane.domain = usdGen::UsdGenAuthoredPlaneDomain::Primitive;
+    plane.arity = 1;
+    plane.intValues = integers;
+    out->authoredPlanes.push_back(std::move(plane));
+}
+
 template <class T>
 bool
 _HPrimvarTyped(HdContainerDataSourceHandle const &primDs, char const *name,
@@ -492,7 +523,7 @@ _HPullUsdGen(HdContainerDataSourceHandle const &usdGen, _HdTime t,
                 SdfPathVector *bucket = nullptr;
                 if (leaf == "input") {
                     bucket = &node->inputs;
-                } else if (leaf == "references") {
+                } else if (leaf == "references" || leaf == "reference") {
                     bucket = &node->references;
                 } else if (leaf == "guides" || leaf == "curves" ||
                            full == "usdGen:direction:source") {
@@ -681,6 +712,71 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
     }
 }
 
+template <class T>
+bool
+_HSurfaceCageField(HdContainerDataSourceHandle const &root, _HdTime t,
+                   char const *leaf, T *out)
+{
+    if (_HGetTyped(root, t, out, {leaf})) return true;
+    if (_HGetTyped(root, t, out, {"surfaceCage", leaf})) return true;
+    std::string const flat = std::string("surfaceCage:") + leaf;
+    return _HGetTyped(root, t, out, {flat.c_str()});
+}
+
+bool
+_HBuildSurfaceCagePayload(HdContainerDataSourceHandle const &root,
+                          _HdTime t,
+                          std::shared_ptr<const UsdGenSurfaceCagePayload> *out)
+{
+    if (!root || !out) return false;
+    HdContainerDataSourceHandle source = _HChild(root, "surfaceCage");
+    if (!source) {
+        HdContainerDataSourceHandle const rest =
+            _HChild(root, "usdGenCurveRest");
+        source = _HChild(rest, "surfaceCage");
+    }
+    if (!source) source = root;
+    static char const *const names[] = {
+        "ownerIds", "ownerDensities", "ownerSeeds", "ownerCvCounts",
+        "ownerEdgeBias", "ownerLengthProfileOffsets", "ownerLengthProfile",
+        "normalizedT", "triangles", "triangleOwnerIndices", "triangleRootCharts",
+        "ownerChartCentroids", "ownerChartMeanRadii"};
+    bool present = false;
+    for (char const *leaf : names) {
+        std::string const flat = std::string("surfaceCage:") + leaf;
+        if (_HLocate(source, {leaf}) || _HLocate(source, {flat.c_str()})) {
+            present = true;
+            break;
+        }
+    }
+    if (!present) return false;
+    std::shared_ptr<UsdGenSurfaceCagePayload> cage =
+        std::make_shared<UsdGenSurfaceCagePayload>();
+    if (!_HSurfaceCageField(source, t, "ownerIds", &cage->ownerIds) ||
+        !_HSurfaceCageField(source, t, "ownerDensities", &cage->ownerDensities) ||
+        !_HSurfaceCageField(source, t, "ownerSeeds", &cage->ownerSeeds) ||
+        !_HSurfaceCageField(source, t, "ownerCvCounts", &cage->ownerCvCounts) ||
+        !_HSurfaceCageField(source, t, "ownerEdgeBias", &cage->ownerEdgeBias) ||
+        !_HSurfaceCageField(source, t, "ownerLengthProfileOffsets",
+                            &cage->ownerLengthProfileOffsets) ||
+        !_HSurfaceCageField(source, t, "ownerLengthProfile",
+                            &cage->ownerLengthProfile) ||
+        !_HSurfaceCageField(source, t, "normalizedT", &cage->normalizedT) ||
+        !_HSurfaceCageField(source, t, "triangles", &cage->triangles) ||
+        !_HSurfaceCageField(source, t, "triangleOwnerIndices",
+                            &cage->triangleOwnerIndices) ||
+        !_HSurfaceCageField(source, t, "triangleRootCharts",
+                            &cage->triangleRootCharts) ||
+        !_HSurfaceCageField(source, t, "ownerChartCentroids",
+                            &cage->ownerChartCentroids) ||
+        !_HSurfaceCageField(source, t, "ownerChartMeanRadii",
+                            &cage->ownerChartMeanRadii)) {
+        return false;
+    }
+    *out = std::move(cage);
+    return true;
+}
+
 void
 _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
                 UsdGenRole role, _HdTime t, UsdGenCurveSetDesc *out)
@@ -758,12 +854,16 @@ _HBuildCurveSet(HdSceneIndexBase &input, SdfPath const &path,
     if (!_HGetTyped(primDs, t, &out->widths, {"widths"})) {
         _HPrimvarTyped(primDs, "widths", t, &out->widths);
     }
+    _HBuildSurfaceCagePayload(ug, t, &out->surfaceCage);
     _HPrimvarTyped(primDs, "skinprim", t, &out->skinPrim);
     _HPrimvarTyped(primDs, "usdGen:curveId", t, &out->curveId);
     _HPrimvarTyped(primDs, "skinprimuv", t, &out->skinPrimUv);
     _HPrimvarTyped(primDs, "usdGen:rootFrame", t, &out->rootFrame);
 
     _HForwardSourceColor(primDs, t, out);
+    _HForwardOwnershipPlane(primDs, TfToken("tubeId"), t, out);
+    _HForwardOwnershipPlane(primDs, TfToken("regionId"), t, out);
+    _HForwardOwnershipPlane(primDs, TfToken("hierarchyLevel"), t, out);
 
     TfToken curveRole;
     _HPrimvarTyped(primDs, "usdGen:role", t, &curveRole);
@@ -935,6 +1035,20 @@ _HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
     // after surface inheritance below.
     if (node.type == TfToken("UsdGenCollide"))
         _HGetPathArray(ug, &captured.colliders, {"colliders"});
+    if (node.type == TfToken("UsdGenCurveSource")) {
+        SdfPathVector regionMap;
+        if (_HGetPathArray(ug, &regionMap, {"regionMap"})) {
+            if (regionMap.size() != 1) {
+                captured.validationErrors.push_back(
+                    node.path.GetString() +
+                    ": usdGen:regionMap requires exactly one target");
+            } else {
+                node.maps.push_back(regionMap.front());
+                node.mapBindings.push_back(
+                    {regionMap.front(), TfToken("usdGen:regionMap")});
+            }
+        }
+    }
     return captured;
 }
 

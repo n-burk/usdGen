@@ -25,6 +25,10 @@
 #     region's clump colour where the rectangle is, which is the scene
 #     index publishing graphRegions;
 #   * Escape during a live stroke cancels it and authors nothing;
+#   * the frame gains the graph itself, not just the tint: node dots
+#     read bright at the stroked corners, a fifth placed node reads bright
+#     too (the dot array grows across publishes), and hovering an edge
+#     paints it yellow;
 #   * a Weld click pair merges two nodes, and Ctrl+Z puts the node back;
 #   * after the idle pump the committed groom -- ScalpGraph and all -- is
 #     on the stage, having never been touched during a gesture.
@@ -83,6 +87,7 @@ class Mouse:
         except AttributeError:
             self._ratio = 1.0
         self.direct = False          # set when QtTest delivery does not land
+        self._leftHeld = False
 
     def _point(self, physical):
         return self._QtCore.QPoint(int(round(physical[0] / self._ratio)),
@@ -96,7 +101,7 @@ class Mouse:
             mods |= table[name]
         return mods
 
-    def _send(self, kind, physical, mods, button):
+    def _send(self, kind, physical, mods, button, buttons):
         """One synthetic event straight at the widget.
 
         The fallback path: on a window the test harness never showed,
@@ -113,7 +118,7 @@ class Mouse:
         local = self._QtCore.QPointF(point)
         globalPos = self._QtCore.QPointF(self._view.mapToGlobal(point))
         event = self._QtGui.QMouseEvent(kind, local, globalPos, button,
-                                        button, mods)
+                                        buttons, mods)
         self._QtWidgets.QApplication.sendEvent(self._view, event)
 
     def press(self, physical, modifiers=()):
@@ -123,18 +128,28 @@ class Mouse:
         mods = self._modifiers(modifiers)
         if self.direct:
             self._send(QtCore.QEvent.Type.MouseButtonPress, physical, mods,
-                       button)
+                       button, button)
         else:
             QtTest.QTest.mousePress(self._view, button, mods,
                                     self._point(physical))
+        self._leftHeld = True
 
     def move(self, physical, modifiers=()):
         from pxr.Usdviewq.qt import QtCore
         QtTest = _qtTest()
         mods = self._modifiers(modifiers)
-        if self.direct:
+        # QTest.mouseMove reports NoButton even after QTest.mousePress in
+        # this Qt build. A drag must carry NoButton as the changed button
+        # and LeftButton as the persistent button-state field, irrespective
+        # of how its press was delivered.
+        if self._leftHeld:
             self._send(QtCore.QEvent.Type.MouseMove, physical, mods,
+                       QtCore.Qt.MouseButton.NoButton,
                        QtCore.Qt.MouseButton.LeftButton)
+        elif self.direct:
+            self._send(QtCore.QEvent.Type.MouseMove, physical, mods,
+                       QtCore.Qt.MouseButton.NoButton,
+                       QtCore.Qt.MouseButton.NoButton)
         else:
             QtTest.QTest.mouseMove(self._view, self._point(physical))
 
@@ -145,14 +160,27 @@ class Mouse:
         mods = self._modifiers(modifiers)
         if self.direct:
             self._send(QtCore.QEvent.Type.MouseButtonRelease, physical, mods,
-                       button)
+                       button, QtCore.Qt.MouseButton.NoButton)
         else:
             QtTest.QTest.mouseRelease(self._view, button, mods,
                                       self._point(physical))
+        self._leftHeld = False
 
     def click(self, physical, modifiers=()):
         self.press(physical, modifiers)
         self.release(physical, modifiers)
+
+    def doubleClick(self, physical, modifiers=()):
+        from pxr.Usdviewq.qt import QtCore
+        QtTest = _qtTest()
+        button = QtCore.Qt.MouseButton.LeftButton
+        mods = self._modifiers(modifiers)
+        if self.direct:
+            self._send(QtCore.QEvent.Type.MouseButtonDblClick, physical,
+                       mods, button, button)
+        else:
+            QtTest.QTest.mouseDClick(self._view, button, mods,
+                                     self._point(physical))
 
     def drag(self, points, modifiers=()):
         self.press(points[0], modifiers)
@@ -266,6 +294,59 @@ def scalpFraction(view, x, z, half=0.25, steps=12):
     return float(blue) / float(total) if total else 0.0
 
 
+def dotFraction(view, camera, x, z, halfPx=6):
+    """Fraction of near-white pixels in a window over a graph node dot.
+
+    Unselected dots publish 0.8 grey, which reads back well clear of the
+    dark-red uncovered tint, the blue claimed tint and the grey backdrop,
+    so brightness alone identifies them.
+    """
+    view.update()
+    view.repaint()
+    view.updateGL()
+    image = view.grabFrameBuffer()
+    width, height = image.width(), image.height()
+    projected = camera.worldToPixels((x, 0.0, z))
+    cx, cy = int(round(projected[0])), int(round(projected[1]))
+    bright = 0
+    total = 0
+    for y in range(max(cy - halfPx, 0), min(cy + halfPx + 1, height)):
+        for xx in range(max(cx - halfPx, 0), min(cx + halfPx + 1, width)):
+            total += 1
+            px = image.pixel(xx, y) & 0x00FFFFFF
+            if ((px >> 16) & 255) >= 195 and ((px >> 8) & 255) >= 195 \
+                    and (px & 255) >= 195:
+                bright += 1
+    return float(bright) / float(total) if total else 0.0
+
+
+def yellowFraction(view, camera, x, z, halfPx=2):
+    """Fraction of hover-yellow pixels in a window over a graph edge.
+
+    The hovered edge paints uniform yellow over whatever tint is under
+    it; the window is tight so the reading is the edge's own pixels.
+    """
+    view.update()
+    view.repaint()
+    view.updateGL()
+    image = view.grabFrameBuffer()
+    width, height = image.width(), image.height()
+    projected = camera.worldToPixels((x, 0.0, z))
+    cx, cy = int(round(projected[0])), int(round(projected[1]))
+    yellow = 0
+    total = 0
+    for y in range(max(cy - halfPx, 0), min(cy + halfPx + 1, height)):
+        for xx in range(max(cx - halfPx, 0), min(cx + halfPx + 1, width)):
+            total += 1
+            px = image.pixel(xx, y) & 0x00FFFFFF
+            r = (px >> 16) & 255
+            g = (px >> 8) & 255
+            b = px & 255
+            if r > 180 and g > 100 and b < 120:
+                yellow += 1
+    return float(yellow) / float(total) if total else 0.0
+
+
 # ---------------------------------------------------------------------------
 # The test
 # ---------------------------------------------------------------------------
@@ -346,15 +427,23 @@ def run(appController):
           "Bind scalp created a live model (status: %r)" % (messages[-3:],))
     check(viewport is not None and viewport.installed,
           "the viewport controller installed itself on the StageView")
+    check(view.hasMouseTracking(),
+          "install took mouse tracking, which is what delivers hover")
     if session is None or viewport is None or session.model is None:
         return 1
     check(viewport.view is view,
           "and on the STAGE VIEW, not on some other widget")
     check(container.tonicState.activeMode == "graph" and
-          container.tonicState.graphSubMode == "draw",
-          "the tool opens in Graph/Draw (%r/%r)"
+          container.tonicState.graphSubMode == "region",
+          "the tool opens in Graph/Create region (%r/%r)"
           % (container.tonicState.activeMode,
              container.tonicState.graphSubMode))
+    # This legacy scenario exercises freehand drawing; it must select Draw
+    # explicitly now that interactive Graph starts in click-created Region.
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
+    check(container.tonicState.graphSubMode == "draw",
+          "D explicitly selects Draw for the legacy stroke")
     check(session.publish() >= 1,
           "the model publishes to at least one scene index")
 
@@ -440,6 +529,34 @@ def run(appController):
     info("region colour outside the square: %.2f" % outside)
     check(outside < 0.2, "and only inside it (%.2f)" % outside)
 
+    # -- the graph itself reaches the frame, not just the tint ------------
+    # The stroke's L1 tube is fitted wide enough to cover the corners, so
+    # it hides for these readings the way it did for the outside one.
+    session.dll.Tonic_SetLevelDisplay(session.model, 1, 0, 0)
+    session.publishAll()
+    for corner in (RECT[0], RECT[2]):
+        frac = dotFraction(view, camera, *corner)
+        check(frac > 0.03,
+              "the corner dot at %r reads bright in the frame (%.3f)"
+              % (corner, frac))
+    midX = (RECT[0][0] + RECT[1][0]) / 2.0
+    midZ = (RECT[0][1] + RECT[1][1]) / 2.0
+    # Hover moves go direct: a press-less move has no grab, so QtTest's
+    # global-coordinate round trip can miss the widget entirely.
+    wasDirect, mouse.direct = mouse.direct, True
+    mouse.move(pixel(0.5, 0.5))
+    wait(10)
+    mouse.move(pixel(midX, midZ))
+    wait(50)
+    yellow = yellowFraction(view, camera, midX, midZ)
+    check(yellow > 0.05,
+          "hovering the south edge paints it yellow (%.3f)" % yellow)
+    mouse.move(pixel(0.5, 0.5))
+    wait(10)
+    mouse.direct = wasDirect
+    session.dll.Tonic_SetLevelDisplay(session.model, 1, 1, 0)
+    session.publishAll()
+
     # -- Escape cancels a live stroke --------------------------------------
     mouse.press(pixel(0.3, 0.3))
     mouse.move(pixel(0.7, 0.3))
@@ -460,6 +577,18 @@ def run(appController):
     mouse.click(pixel(*CENTRE))
     nodes, edges, regions = graphCounts(session)
     check(nodes == 5, "Place added a fifth node (got %d)" % nodes)
+    # The dot array grows across publishes: the new dot reads bright and
+    # the old corners are still there.
+    session.dll.Tonic_SetLevelDisplay(session.model, 1, 0, 0)
+    session.publishAll()
+    frac = dotFraction(view, camera, *CENTRE)
+    check(frac > 0.03,
+          "the placed dot reads bright in the frame (%.3f)" % frac)
+    frac = dotFraction(view, camera, *RECT[0])
+    check(frac > 0.03,
+          "and the stroked corner survived the regrow (%.3f)" % frac)
+    session.dll.Tonic_SetLevelDisplay(session.model, 1, 1, 0)
+    session.publishAll()
 
     typeKey(view, "w")
     check(container.tonicState.graphSubMode == "weld",

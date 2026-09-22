@@ -43,8 +43,35 @@ PICK_KIND_NAMES = {
 # The default test-tube shape (mirrors tonicTessellate.h).
 DEFAULT_RINGS = 5
 DEFAULT_RING_VERTS = 8
+# Region-authored roots use the native auto sentinel: the backend resolves it
+# to the region loop's CV count, preserving the artist's contour corners.
+# Keep DEFAULT_RING_VERTS for generic test-tube math and legacy callers.
+DEFAULT_REGION_RING_VERTS = 0
+MIN_REGION_RING_VERTS = 3
+MAX_REGION_RING_VERTS = 32
+REGION_RING_VERT_CHOICES = ((DEFAULT_REGION_RING_VERTS,) +
+                            tuple(range(MIN_REGION_RING_VERTS,
+                                        MAX_REGION_RING_VERTS + 1)))
 DEFAULT_RADIUS = 0.5
 DEFAULT_LENGTH = 4.0
+
+
+def regionRingVerts(value):
+    """Sanitise a Region-root ring request for Tonic_BuildTubeFromRegion.
+
+    Zero is the native Auto value (match the authored region CVs). Explicit
+    requests are constrained to the build ABI's useful 3..32 range, so a
+    persisted or scripted 1/2 never reaches the backend as a degenerate
+    ring.
+    """
+    try:
+        requested = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_REGION_RING_VERTS
+    if requested <= DEFAULT_REGION_RING_VERTS:
+        return DEFAULT_REGION_RING_VERTS
+    return min(max(requested, MIN_REGION_RING_VERTS),
+               MAX_REGION_RING_VERTS)
 
 
 def softWeights(count, cv, radius):
@@ -166,6 +193,15 @@ def tubeStatus(centerCount, sectionCount, ringVerts, regionId):
             else "rooted in region %d" % int(regionId))
     return ("Tube: %d center CVs, %d sections x %d CVs, %s."
             % (int(centerCount), int(sectionCount), int(ringVerts), root))
+
+
+def tubeEditHint(subMode):
+    """One concise, mode-specific affordance for the Tube status/panel."""
+    if str(subMode) == "ring":
+        return "Scale selected sections: drag the outer ring handle."
+    if str(subMode) == "section":
+        return "Edit section CVs: select a CV, then drag in its ring plane."
+    return ""
 
 
 def pickStatus(kind, index, subIndex, distPx):

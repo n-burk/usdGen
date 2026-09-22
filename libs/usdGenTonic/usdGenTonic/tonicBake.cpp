@@ -31,6 +31,83 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// Cache entries contain classifier output, rather than just a coarse-face
+// label.  Hash every input that can change a texel so an edit which stays
+// within one face (and therefore preserves its centroid label) cannot reuse
+// stale texels.  Exact repeats retain the incremental no-work fast path.
+void _HashBytes(uint64_t *hash, void const *data, size_t size)
+{
+    unsigned char const *bytes = static_cast<unsigned char const *>(data);
+    for (size_t i = 0; i < size; ++i) {
+        *hash ^= uint64_t(bytes[i]);
+        *hash *= 1099511628211ull;
+    }
+}
+
+template <class T>
+void _HashValue(uint64_t *hash, T const &value)
+{
+    _HashBytes(hash, &value, sizeof(value));
+}
+
+template <class T>
+void _HashVector(uint64_t *hash, std::vector<T> const &values)
+{
+    size_t const size = values.size();
+    _HashValue(hash, size);
+    if (!values.empty()) {
+        _HashBytes(hash, values.data(), values.size() * sizeof(T));
+    }
+}
+
+uint64_t _ClassifierKey(TonicBakeInput const &input,
+                        TonicRegionLoops const &loops)
+{
+    uint64_t hash = 1469598103934665603ull;
+    TonicScalpMesh const &mesh = *input.scalp;
+    _HashVector(&hash, mesh.points);
+    _HashVector(&hash, mesh.faceVertexCounts);
+    _HashVector(&hash, mesh.faceVertexIndices);
+    _HashVector(&hash, loops.points);
+    _HashVector(&hash, loops.loopBegin);
+    _HashVector(&hash, loops.loopCount);
+    _HashVector(&hash, loops.planeN);
+    _HashVector(&hash, loops.planeP);
+    _HashVector(&hash, loops.basisU);
+    _HashVector(&hash, loops.basisV);
+    _HashVector(&hash, loops.interpIds);
+    _HashValue(&hash, input.levelCount);
+    _HashValue(&hash, input.resOverride);
+    _HashValue(&hash, input.outputOwnerMap);
+    size_t const tubeCount = input.tubes.size();
+    _HashValue(&hash, tubeCount);
+    for (TonicBakeTube const &tube : input.tubes) {
+        _HashValue(&hash, tube.tubeId);
+        _HashValue(&hash, tube.parentTubeId);
+        _HashValue(&hash, tube.level);
+        _HashValue(&hash, tube.regionId);
+        _HashValue(&hash, tube.childIndex);
+        _HashBytes(&hash, tube.rootCenter, sizeof(tube.rootCenter));
+        _HashValue(&hash, tube.rootFrame.tx);
+        _HashValue(&hash, tube.rootFrame.ty);
+        _HashValue(&hash, tube.rootFrame.tz);
+        _HashValue(&hash, tube.rootFrame.nx);
+        _HashValue(&hash, tube.rootFrame.ny);
+        _HashValue(&hash, tube.rootFrame.nz);
+        _HashValue(&hash, tube.rootFrame.bx);
+        _HashValue(&hash, tube.rootFrame.by);
+        _HashValue(&hash, tube.rootFrame.bz);
+    }
+    return hash;
+}
+
+std::string _CacheIdentity(std::string const &outDir, uint64_t classifierKey)
+{
+    // Kept in the existing worker cache-directory string so TonicBakeWorker
+    // remains ABI-stable for clients that construct it across the DLL.
+    return outDir + "\x1f" + std::to_string(classifierKey);
+}
+
 struct _BakeFace {
     int coarse = -1;
     int sub = 0;  // n-gon sub-face, else 0
@@ -43,6 +120,7 @@ struct _BakePlan {
     std::vector<_BakeFace> faces;  // ptex-face order
     std::vector<int> firstIds;  // per coarse face (UsdGenPtexFirstFaceIds)
     int channels = 1;
+    bool outputOwnerMap = false;
 };
 
 bool _PlanFaces(TonicBakeInput const &input, TonicRegionMaps const &maps,
@@ -60,7 +138,8 @@ bool _PlanFaces(TonicBakeInput const &input, TonicRegionMaps const &maps,
         }
         return false;
     }
-    plan->channels = std::max(input.levelCount, 1);
+    plan->channels = input.outputOwnerMap ? 1 : std::max(input.levelCount, 1);
+    plan->outputOwnerMap = input.outputOwnerMap;
     plan->faces.clear();
     plan->faces.reserve(size_t(total));
     for (size_t f = 0; f < faceCount; ++f) {
@@ -222,6 +301,19 @@ _LevelIndex _BuildLevelIndex(TonicBakeInput const &input,
     return index;
 }
 
+// The normal RegionMap stores linked interpolation ids in channel zero.  An
+// Output owner map instead needs the source graph-region identity: two
+// linked regions may interpolate together but still root distinct L1 tubes.
+// Keeping a private loop copy avoids changing the ordinary RegionMap path.
+TonicRegionLoops
+_OutputOwnerLoops(TonicRegionLoops loops)
+{
+    for (size_t i = 0; i < loops.interpIds.size(); ++i) {
+        loops.interpIds[i] = int(i);
+    }
+    return loops;
+}
+
 // Fill texels[1 .. channels-1] for one point. `region` is the channel-0 id.
 void _ClassifyLevels(_LevelIndex const &index, int region, float const p[3],
                      int channels, float *texels)
@@ -268,6 +360,51 @@ void _ClassifyLevels(_LevelIndex const &index, int region, float const p[3],
     }
 }
 
+// Output's categorical map names the deepest live tube which owns a scalp
+// point.  It walks precisely the same root-frame K14 cells as the hierarchy
+// channels, but stores tubeId + 1 so zero remains the unowned sentinel.
+int _ClassifyOutputOwner(_LevelIndex const &index, int region,
+                         float const p[3])
+{
+    if (index.empty()) {
+        return 0;
+    }
+    auto const l1 = index.l1OfRegion.find(region);
+    if (l1 == index.l1OfRegion.end()) {
+        return 0;
+    }
+    int current = l1->second;
+    for (;;) {
+        auto const kids = index.childrenOf.find(current);
+        if (kids == index.childrenOf.end() || kids->second.empty()) {
+            break;
+        }
+        auto const parent = index.byId.find(current);
+        if (parent == index.byId.end()) {
+            return 0;
+        }
+        std::vector<float> centers;
+        centers.reserve(kids->second.size() * 3);
+        for (int kid : kids->second) {
+            auto const child = index.byId.find(kid);
+            if (child == index.byId.end()) {
+                return 0;
+            }
+            centers.push_back(child->second.rootCenter[0]);
+            centers.push_back(child->second.rootCenter[1]);
+            centers.push_back(child->second.rootCenter[2]);
+        }
+        int const cell = TonicOwningChildCell(
+            parent->second.rootCenter, parent->second.rootFrame,
+            centers.data(), int(kids->second.size()), p);
+        if (cell < 0) {
+            break;
+        }
+        current = kids->second[size_t(cell)];
+    }
+    return current >= 0 ? current + 1 : 0;
+}
+
 // Classify every texel of the plan's dirty coarse faces on the CPU.
 void _ClassifyDirtyCpu(TonicRegionLoops const &loops, _BakePlan const &plan,
                        _LevelIndex const &levels,
@@ -289,9 +426,13 @@ void _ClassifyDirtyCpu(TonicRegionLoops const &loops, _BakePlan const &plan,
                 int const region = TonicClassifyPointCpu(loops, p);
                 size_t const o = (size_t(tv) * size_t(bf.resU) + size_t(tu)) *
                                  size_t(plan.channels);
-                texels[o] = float(region);
-                _ClassifyLevels(levels, region, p, plan.channels,
-                                &texels[o]);
+                if (plan.outputOwnerMap) {
+                    texels[o] = float(_ClassifyOutputOwner(levels, region, p));
+                } else {
+                    texels[o] = float(region);
+                    _ClassifyLevels(levels, region, p, plan.channels,
+                                    &texels[o]);
+                }
                 if (stats) {
                     ++stats->texelsClassified;
                 }
@@ -406,7 +547,8 @@ bool _ClassifyDirtyGpu(TonicRegionLoops const &loops, _BakePlan const &plan,
             std::vector<float> texels(size_t(bf.resU) * size_t(bf.resV) *
                                       size_t(plan.channels));
             for (size_t t = 0; t < size_t(bf.resU) * size_t(bf.resV); ++t) {
-                texels[t * size_t(plan.channels)] = -1.0f;
+                texels[t * size_t(plan.channels)] =
+                    plan.outputOwnerMap ? 0.0f : -1.0f;
             }
             // No regions means no L1 tube either, so every level channel
             // stays 0; nothing to classify.
@@ -486,8 +628,15 @@ bool _ClassifyDirtyGpu(TonicRegionLoops const &loops, _BakePlan const &plan,
         for (size_t t = 0; t < span.count; ++t) {
             int const region = ids.data[span.begin + t];
             float *texel = &texels[t * size_t(plan.channels)];
-            texel[0] = float(region);
-            if (plan.channels > 1) {
+            if (plan.outputOwnerMap) {
+                float p[3];
+                _TexelPosition(bf, int(t % size_t(bf.resU)),
+                               int(t / size_t(bf.resU)), p);
+                texel[0] = float(_ClassifyOutputOwner(levels, region, p));
+            } else {
+                texel[0] = float(region);
+            }
+            if (!plan.outputOwnerMap && plan.channels > 1) {
                 float p[3];
                 _TexelPosition(bf, int(t % size_t(bf.resU)),
                                int(t / size_t(bf.resU)), p);
@@ -524,9 +673,7 @@ void TonicCollectBakeTubes(TonicModel const &model,
         }
         std::vector<TonicFrame> frames;
         std::string err;
-        if (!TonicCenterFramesCpu(desc.centerX.data(), desc.centerY.data(),
-                                  desc.centerZ.data(),
-                                  int(desc.centerX.size()), &frames, &err) ||
+        if (!TonicTubeFramesCpu(desc, &frames, &err) ||
             frames.empty()) {
             continue;
         }
@@ -576,6 +723,10 @@ bool TonicBakePtex(TonicBakeInput const &input, std::string const &outPath,
     if (!TonicRasteriseRegionsCpu(mesh, input.graph, &maps, err)) {
         return false;
     }
+    TonicRegionLoops const ownerLoops = input.outputOwnerMap
+        ? _OutputOwnerLoops(loops) : TonicRegionLoops();
+    TonicRegionLoops const &classifierLoops = input.outputOwnerMap
+        ? ownerLoops : loops;
     std::vector<int> const resLog2 =
         TonicFaceResLog2(mesh, maps, loops, input.resOverride);
     _BakePlan plan;
@@ -602,8 +753,9 @@ bool TonicBakePtex(TonicBakeInput const &input, std::string const &outPath,
     // The synchronous entry classifies on the CPU (deterministic, no stream
     // plumbing); the worker's chunked path takes the GPU lane when one
     // exists. Both call the same inside-test and the same level walk.
-    _LevelIndex const levels = _BuildLevelIndex(input, loops);
-    _ClassifyDirtyCpu(loops, plan, levels, isDirty, texelCache, stats);
+    _LevelIndex const levels = _BuildLevelIndex(input, classifierLoops);
+    _ClassifyDirtyCpu(classifierLoops, plan, levels, isDirty, texelCache,
+                      stats);
     return _WritePtexFile(plan, *texelCache, outPath, err);
 }
 
@@ -875,17 +1027,25 @@ bool TonicBakeWorker::_Bake(uint64_t mapVersion, TonicBakeInput const &input,
     if (!TonicRasteriseRegionsCpu(mesh, input.graph, &maps, err)) {
         return false;
     }
-    // Incremental dirty set: faces whose interp id changed since the last
-    // finished bake. A new output dir, face count, level count or res
-    // override invalidates the whole cache.
+    TonicRegionLoops const ownerLoops = input.outputOwnerMap
+        ? _OutputOwnerLoops(loops) : TonicRegionLoops();
+    TonicRegionLoops const &classifierLoops = input.outputOwnerMap
+        ? ownerLoops : loops;
+    // Incremental dirty set: labels alone are not enough because a boundary
+    // can move within a face while its centroid classification stays fixed.
+    // A changed classifier key invalidates all faces; exact repeats reuse the
+    // texel cache without work.
     std::vector<int> const resLog2 =
         TonicFaceResLog2(mesh, maps, loops, input.resOverride);
     _BakePlan plan;
     if (!_PlanFaces(input, maps, resLog2, &plan, err)) {
         return false;
     }
+    uint64_t const classifierKey = _ClassifierKey(input, loops);
+    std::string const cacheIdentity =
+        _CacheIdentity(input.outDir, classifierKey);
     bool full = _cachedFaceRegion.size() != faceCount ||
-                _cacheDir != input.outDir ||
+                _cacheDir != cacheIdentity ||
                 _texelCache.size() != plan.faces.size();
     std::vector<char> isDirty(faceCount, full ? 1 : 0);
     if (!full) {
@@ -906,7 +1066,7 @@ bool TonicBakeWorker::_Bake(uint64_t mapVersion, TonicBakeInput const &input,
     }
     // Chunked classification at ~4K-face tile boundaries with a supersede
     // check between chunks (plan/17 §3.1a cancellation).
-    _LevelIndex const levels = _BuildLevelIndex(input, loops);
+    _LevelIndex const levels = _BuildLevelIndex(input, classifierLoops);
     size_t const kChunkFaces = 4096;
     TonicBakeStats stats;
     stats.ptexFaces = plan.faces.size();
@@ -928,15 +1088,15 @@ bool TonicBakeWorker::_Bake(uint64_t mapVersion, TonicBakeInput const &input,
             // failed bake: §3.4 owns the same fallback for interaction).
             std::string gpuErr;
             if (bakeStream == nullptr ||
-                !_ClassifyDirtyGpu(loops, plan, levels, chunkDirty,
+                !_ClassifyDirtyGpu(classifierLoops, plan, levels, chunkDirty,
                                    &_texelCache, (cudaStream_t)bakeStream,
                                    &stats, &gpuErr)) {
-                _ClassifyDirtyCpu(loops, plan, levels, chunkDirty,
+                _ClassifyDirtyCpu(classifierLoops, plan, levels, chunkDirty,
                                   &_texelCache, &stats);
             }
 #else
             (void)bakeStream;
-            _ClassifyDirtyCpu(loops, plan, levels, chunkDirty, &_texelCache,
+            _ClassifyDirtyCpu(classifierLoops, plan, levels, chunkDirty, &_texelCache,
                               &stats);
 #endif
         }
@@ -964,7 +1124,7 @@ bool TonicBakeWorker::_Bake(uint64_t mapVersion, TonicBakeInput const &input,
         return false;
     }
     _cachedFaceRegion = maps.faceRegion;
-    _cacheDir = input.outDir;
+    _cacheDir = cacheIdentity;
     _lastBakedFaces.store(stats.facesClassified);
     if (outPath) {
         *outPath = finalPath;

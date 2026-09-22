@@ -389,10 +389,12 @@ bool ValidateMapBinding(UsdGenMapBindingDesc const &binding,
         return false;
     }
     // Empty relationship is deliberately accepted for direct typed clients
-    // and maps-only compatibility descriptors.  A nonempty value is authored
-    // diagnostic data; usdGen:map is the only map relationship.
+    // and maps-only compatibility descriptors. `usdGen:regionMap` is the
+    // categorical Ptex owner-map slot of CurveSource surfaceCage; the
+    // operator admission layer enforces that it is used only there.
     if (binding.relationship.IsEmpty()) return true;
-    if (binding.relationship != TfToken("usdGen:map")) {
+    if (binding.relationship != TfToken("usdGen:map") &&
+        binding.relationship != TfToken("usdGen:regionMap")) {
         *error = "relationship '" + binding.relationship.GetString() +
             "' is not a map relationship";
         return false;

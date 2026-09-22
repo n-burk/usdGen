@@ -36,10 +36,15 @@ MODES = (
 # Graph-mode sub-modes (plan/17 section 5.1, P2): one click/drag behaviour
 # each, all driving the same C++ graph through tonicLib.
 GRAPH_SUBMODES = (
+    Mode("region",  "Create region", "R",
+         "Create region: click scalp CVs; click the first CV or Enter to close."),
     Mode("draw",    "Draw",    "D",
          "Draw: stroke regions onto the scalp (welds at snapped ends)."),
     Mode("place",   "Place",   "P",
          "Place: click adds a node, drag moves (welds onto nodes/edges)."),
+    Mode("reposition", "Reposition", "M",
+         "Reposition: drag an existing CV or whole edge along the scalp; "
+         "empty clicks do not create or weld."),
     Mode("connect", "Connect", "C",
          "Connect: click two nodes to join them with a geodesic edge."),
     Mode("weld",    "Weld",    "W",
@@ -54,6 +59,8 @@ GRAPH_SUBMODES = (
 
 # Tube-mode sub-modes (plan/17 section 5.2, P3): one gizmo family each.
 TUBE_SUBMODES = (
+    Mode("tube",    "Whole tube", "F8",
+         "Whole tube: select and transform visible tube bodies."),
     Mode("center",  "Center",  "C",
          "Center: translate gizmo, insert/delete CV, length, match surface."),
     Mode("ring",    "Ring",    "R",
@@ -256,6 +263,8 @@ ACTION_EXIT_LEVEL = "exitLevel"
 ACTION_WELD = "weld"
 ACTION_UNWELD = "unweld"
 ACTION_SAVE = "saveGroom"
+ACTION_COMPLETE = "complete"
+ACTION_BACKSPACE = "backspace"
 
 _LETTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
 
@@ -302,8 +311,10 @@ def HotkeyAction(key, modifiers=frozenset(), pointerInside=True,
         if key == "u":
             return (ACTION_UNWELD, None)
         return None
+    if key == "enter":
+        return (ACTION_COMPLETE, None)
     if key == "backspace":
-        return (ACTION_EXIT_LEVEL, None)
+        return (ACTION_BACKSPACE, None)
     if key == "delete":
         return (ACTION_DELETE, None)
     if key in MODE_KEYS:

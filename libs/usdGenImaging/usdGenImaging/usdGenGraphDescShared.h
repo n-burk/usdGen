@@ -113,6 +113,24 @@ UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
             h.Array(plane.floatValues);
             h.Array(plane.intValues);
         }
+        h.Word(curves.surfaceCage ? 1u : 0u);
+        if (curves.surfaceCage) {
+            usdGen::UsdGenSurfaceCagePayload const &cage =
+                *curves.surfaceCage;
+            h.Array(cage.ownerIds);
+            h.Array(cage.ownerDensities);
+            h.Array(cage.ownerSeeds);
+            h.Array(cage.ownerCvCounts);
+            h.Array(cage.ownerEdgeBias);
+            h.Array(cage.ownerLengthProfileOffsets);
+            h.Array(cage.ownerLengthProfile);
+            h.Array(cage.normalizedT);
+            h.Array(cage.triangles);
+            h.Array(cage.triangleOwnerIndices);
+            h.Array(cage.triangleRootCharts);
+            h.Array(cage.ownerChartCentroids);
+            h.Array(cage.ownerChartMeanRadii);
+        }
         curves.curveGeneration = h.Value();
     }
     for (usdGen::UsdGenSurfaceDesc &surface : desc->surfaces) {
@@ -159,7 +177,8 @@ _isDedicated(TfToken const &name)
     };
     // usdGen:look:* lives in UsdGenLookDesc, not params.
     return dedicated.count(name.GetString()) != 0 ||
-           name.GetString().rfind("usdGen:look:", 0) == 0;
+           name.GetString().rfind("usdGen:look:", 0) == 0 ||
+           name.GetString().rfind("usdGen:surfaceCage:", 0) == 0;
 }
 
 }  // namespace usdGenImaging

@@ -66,7 +66,7 @@ def typeKey(view, name):
     import importlib
     from pxr.Usdviewq.qt import QtCore, PySideModule
     QtTest = importlib.import_module("%s.QtTest" % PySideModule)
-    keys = {"2": QtCore.Qt.Key.Key_2}
+    keys = {"2": QtCore.Qt.Key.Key_2, "d": QtCore.Qt.Key.Key_D}
     QtTest.QTest.keyClick(view, keys[name],
                           QtCore.Qt.KeyboardModifier.NoModifier)
 
@@ -182,6 +182,8 @@ def run(appController):
 
     # A real stroke, so the shot shows a real region and a real tube.
     mouse = Mouse(view)
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
     path = []
     for k in range(len(RECT)):
         x0, z0 = RECT[k]
@@ -231,6 +233,15 @@ def run(appController):
          % (state.activeMode, session.readSelection(2),
             session.selectionCount(0)))
     wait(50)
+
+    # usdview draws unconditional RGB origin axes after every frame
+    # (stageView.DrawAxis: pure-green +Y, scaled by camera distance, with
+    # no toggle). Through x-rayed tubes the Y axis reads as a bright
+    # green line through the groom — the V9 "green sliver", which
+    # bisected to this and nothing else (probeGreen.py). Viewer chrome,
+    # not tool content, so the shot turns it off.
+    if hasattr(view, "DrawAxis"):
+        view.DrawAxis = lambda *args, **kwargs: None
 
     # The window grab carries the dock, the shelf and the status strip;
     # the StageView is an offscreen QOpenGLWidget under testusdview, so

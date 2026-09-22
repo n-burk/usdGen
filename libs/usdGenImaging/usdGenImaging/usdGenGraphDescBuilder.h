@@ -70,6 +70,8 @@ UsdGenGraphDescCapture CaptureGraphDescFromHydra(
 ///  - usdGen:guides / usdGen:curves / usdGen:frozen:curves yield
 ///    UsdGenCurveSetDesc entries (rest points at UsdTimeCode::Default(),
 ///    via the UsdGenCurveAPI adapter where applied);
+///    usdGen:reference / usdGen:references yield Reference-role entries
+///    consumed through the node's reference lane;
 ///  - usdGen:colliders on UsdGenCollide appends Mesh/GeomSubset targets to
 ///    that node's surfaces AFTER the inherited bound surface (front/root
 ///    semantics unchanged); their descs join the shared surface pool.

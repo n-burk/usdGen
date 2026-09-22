@@ -122,6 +122,28 @@ TonicSelection::Items(uint32_t kindMask) const
 }
 
 void
+TonicSelection::RemoveWholeTubeItems(std::vector<int> const &tubeIds)
+{
+    if (tubeIds.empty()) {
+        return;
+    }
+    bool changed = false;
+    for (auto it = _items.begin(); it != _items.end();) {
+        if (it->kind == TonicPick_TubeVert &&
+            std::find(tubeIds.begin(), tubeIds.end(), it->id) !=
+                tubeIds.end()) {
+            it = _items.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+    if (changed) {
+        _Bump();
+    }
+}
+
+void
 TonicSelection::SetHover(TonicSelectionItem const &item)
 {
     if (_hover == item) {
@@ -367,9 +389,59 @@ TonicPickExtraKindsCpu(TonicPickSets const &sets, uint32_t kindMask,
         }
     };
     if (sets.graphEdgeIds) {
-        for (int i = 0; i < sets.graphEdgeCVCount; ++i) {
-            consider(TonicPick_GraphEdge, sets.graphEdgeCVs + size_t(i) * 3,
-                     sets.graphEdgeIds[i], i);
+        // Edges pick by segment, not by vertex. The trace resamples each
+        // edge uniformly (ceil(dist / h) + 1 vertices), so an even vertex
+        // count parks every vertex away from the edge's midpoint and a
+        // vertex-only pick misses a click sitting exactly on the edge.
+        // Consecutive same-id vertices are one polyline: the build pushes
+        // each edge's run together.
+        auto considerSegment = [&](float const *a, float const *b, int edgeId,
+                                   int subIndex) {
+            if (!(kindMask & TonicPick_GraphEdge) || !a || !b) {
+                return;
+            }
+            float ax, ay, az;
+            float bx, by, bz;
+            if (!TonicProjectPoint(a, viewProj, w, h, &ax, &ay, &az) ||
+                !TonicProjectPoint(b, viewProj, w, h, &bx, &by, &bz)) {
+                return;
+            }
+            float const abx = bx - ax, aby = by - ay;
+            float const len2 = abx * abx + aby * aby;
+            float t = 0.0f;
+            if (len2 > 0.0f) {
+                t = ((x - ax) * abx + (y - ay) * aby) / len2;
+                t = std::min(std::max(t, 0.0f), 1.0f);
+            }
+            float const dx = ax + abx * t - x, dy = ay + aby * t - y;
+            float const d2 = dx * dx + dy * dy;
+            if (d2 > r2) {
+                return;
+            }
+            float const dist = std::sqrt(d2);
+            float const ndcZ = az + (bz - az) * t;
+            if (!best.hit || dist < best.distPx ||
+                (dist == best.distPx && ndcZ < best.depth)) {
+                best.hit = true;
+                best.kind = TonicPick_GraphEdge;
+                best.index = edgeId;
+                best.subIndex = subIndex;
+                best.distPx = dist;
+                best.depth = ndcZ;
+            }
+        };
+        int runStart = 0;
+        for (int i = 1; i <= sets.graphEdgeCVCount; ++i) {
+            if (i < sets.graphEdgeCVCount &&
+                sets.graphEdgeIds[i] == sets.graphEdgeIds[runStart]) {
+                continue;
+            }
+            for (int j = runStart; j + 1 < i; ++j) {
+                considerSegment(sets.graphEdgeCVs + size_t(j) * 3,
+                                sets.graphEdgeCVs + size_t(j + 1) * 3,
+                                sets.graphEdgeIds[j], j);
+            }
+            runStart = i;
         }
     }
     if (sets.regionIds) {

@@ -130,13 +130,47 @@ def frameScalp(stage, view):
     return view.getActiveSceneCamera() is not None
 
 
+def frameTube(stage, view):
+    """Look across the vertical tube so its center handles do not overlap."""
+    from pxr import Gf, Sdf, UsdGeom
+    cam = UsdGeom.Camera.Define(stage, Sdf.Path("/TonicBakeTubeCamera"))
+    cam.CreateFocalLengthAttr(35.0)
+    cam.CreateClippingRangeAttr(Gf.Vec2f(0.05, 500.0))
+    eye = Gf.Vec3d(8.0, 1.5, 8.0)
+    target = Gf.Vec3d(0.0, 1.5, 0.0)
+    zAxis = (eye - target).GetNormalized()
+    xAxis = Gf.Cross(Gf.Vec3d(0.0, 1.0, 0.0), zAxis).GetNormalized()
+    yAxis = Gf.Cross(zAxis, xAxis)
+    mat = Gf.Matrix4d(1.0)
+    mat.SetRow(0, Gf.Vec4d(xAxis[0], xAxis[1], xAxis[2], 0.0))
+    mat.SetRow(1, Gf.Vec4d(yAxis[0], yAxis[1], yAxis[2], 0.0))
+    mat.SetRow(2, Gf.Vec4d(zAxis[0], zAxis[1], zAxis[2], 0.0))
+    mat.SetRow(3, Gf.Vec4d(eye[0], eye[1], eye[2], 1.0))
+    xf = UsdGeom.Xformable(cam.GetPrim())
+    op = next((candidate for candidate in xf.GetOrderedXformOps()
+               if candidate.GetOpType() == UsdGeom.XformOp.TypeTransform),
+              None)
+    (op if op is not None else xf.AddTransformOp()).Set(mat)
+    view._dataModel.viewSettings.cameraPrim = stage.GetPrimAtPath(
+        "/TonicBakeTubeCamera")
+    return view.getActiveSceneCamera() is not None
+
+
 def typeKey(view, name):
     import importlib
     from pxr.Usdviewq.qt import QtCore, PySideModule
     QtTest = importlib.import_module("%s.QtTest" % PySideModule)
-    keys = {"1": QtCore.Qt.Key.Key_1, "2": QtCore.Qt.Key.Key_2}
+    keys = {"1": QtCore.Qt.Key.Key_1, "2": QtCore.Qt.Key.Key_2,
+            "d": QtCore.Qt.Key.Key_D}
     QtTest.QTest.keyClick(view, keys[name],
                           QtCore.Qt.KeyboardModifier.NoModifier)
+
+
+def wait(milliseconds=30):
+    import importlib
+    from pxr.Usdviewq.qt import PySideModule
+    QtTest = importlib.import_module("%s.QtTest" % PySideModule)
+    QtTest.QTest.qWait(int(milliseconds))
 
 
 def bakeVersions(session):
@@ -259,6 +293,8 @@ def run(appController):
     # middle square, which is where the tube stands.
     rect = ((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5))
     mouse = Mouse(view)
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
     path = []
     for k in range(len(rect)):
         x0, z0 = rect[k]
@@ -284,26 +320,68 @@ def run(appController):
         return 1
 
     # -- Tube mode, and a CV under the cursor ------------------------------
+    check(frameTube(stage, view),
+          "the Tube gesture camera separates the vertical center handles")
     typeKey(view, "2")
+    wait(30)
     check(state.activeMode == "tube", "the 2 hotkey selects Tube mode (%r)"
           % state.activeMode)
-    tipOut = (ctypes.c_float * 3)()
-    check(session.dll.Tonic_GetCenterCV(session.model, cvCount - 1,
-                                        tipOut) == 0,
-          "the tube's tip CV reads back")
-    tip = (float(tipOut[0]), float(tipOut[1]), float(tipOut[2]))
-    tipPixel = pixel(tip[0], tip[2], tip[1])
+
+    def rawTip():
+        """Authored cage state, retained as the edit witness."""
+        out = (ctypes.c_float * 3)()
+        if session.dll.Tonic_GetCenterCV(session.model, cvCount - 1, out) != 0:
+            return None
+        return (float(out[0]), float(out[1]), float(out[2]))
+
+    def displayedTip():
+        """The centered core handle shown to and picked by the artist."""
+        out = (ctypes.c_float * 3)()
+        if session.dll.Tonic_GetTubeCenterHandle(session.model, 0,
+                                                 cvCount - 1, out) != 0:
+            return None
+        return (float(out[0]), float(out[1]), float(out[2]))
+
+    def displayedTipPixel(handle):
+        """Project against the live Tube-mode viewport, not Graph's layout."""
+        liveCamera = tonicCamera.resolve(view)
+        if liveCamera is None or handle is None:
+            return None
+        projected = liveCamera.worldToPixels(handle)
+        return ((projected[0], projected[1]) if projected is not None
+                else None)
+
+    tip = rawTip()
+    tipHandle = displayedTip()
+    check(tip is not None, "the tube's authored tip CV reads back")
+    check(tipHandle is not None, "the tube's displayed tip core reads back")
+    if tip is None or tipHandle is None:
+        return 1
+    # Opening Tube's dock changes the StageView rectangle.  The controller
+    # resolves this camera on press, so stale Graph-mode pixels can land on
+    # the adjacent CV rather than the displayed tip.
+    tipPixel = displayedTipPixel(tipHandle)
+    check(tipPixel is not None, "the Tube-mode viewport projects the tip")
+    if tipPixel is None:
+        return 1
     mouse.click(tipPixel)
     selected = session.readSelection(2)              # TonicPick_CenterCV
-    check(bool(selected), "one click selected the tip center CV (%r)"
+    check(selected == [(0, cvCount - 1, -1)],
+          "one displayed-core click selected the tip center CV (%r)"
           % (selected,))
 
     # -- 1: the TN-1 baseline, nothing baking ------------------------------
     check(not bakeInFlight(session), "no bake is running for the baseline")
+    baselineBefore = rawTip()
     baseline, _ = dragSamples(mouse, state, tipPixel)
+    baselineAfter = rawTip()
     check(len(baseline) == MOVES,
           "the controller timed all %d baseline moves (%d)"
           % (MOVES, len(baseline)))
+    check(baselineBefore is not None and baselineAfter is not None and
+          any(abs(after - before) > 1e-5
+              for before, after in zip(baselineBefore, baselineAfter)),
+          "the baseline drag actually moved its selected authored CV")
     if not baseline:
         return 1
     baseMedian = median(baseline)
@@ -323,7 +401,16 @@ def run(appController):
     # the work: it has to be a map the model has not baked yet. Drawing
     # another region is also what an artist does right before the rebake
     # they then keep working through, and it makes the bake bigger.
+    # Graph remains a surface-space gesture, so restore its top-down camera
+    # before projecting the second region.
+    check(frameScalp(stage, view),
+          "the second Graph stroke restores the scalp camera")
     typeKey(view, "1")
+    wait(30)
+    camera = tonicCamera.resolve(view)
+    check(camera is not None, "the restored Graph camera resolves")
+    if camera is None:
+        return 1
     second = ((-0.9, 0.6), (-0.1, 0.6), (-0.1, 0.9), (-0.9, 0.9))
     secondPath = []
     for k in range(len(second)):
@@ -346,13 +433,36 @@ def run(appController):
     check(bakeInFlight(session),
           "the release enqueued it and the worker took it "
           "(pending %d > completed %d)" % bakeVersions(session))
+    check(frameTube(stage, view),
+          "the loaded Tube gesture camera separates the center handles")
     typeKey(view, "2")
+    wait(30)
+    # The baseline drag changed the authored cage, so refresh the visual
+    # handle before the loaded gesture rather than reusing a stale cursor.
+    tipHandle = displayedTip()
+    if tipHandle is None:
+        check(False, "the moved tip retains a displayed core handle")
+        return 1
+    tipPixel = displayedTipPixel(tipHandle)
+    check(tipPixel is not None,
+          "the refreshed Tube-mode viewport projects the moved tip")
+    if tipPixel is None:
+        return 1
     mouse.click(tipPixel)
+    selected = session.readSelection(2)
+    check(selected == [(0, cvCount - 1, -1)],
+          "the refreshed core click selected the same tip before loaded timing")
+    loadedBefore = rawTip()
     loaded, running = dragSamples(mouse, state, tipPixel,
                                   witness=lambda: bakeInFlight(session))
+    loadedAfter = rawTip()
     check(len(loaded) == MOVES,
           "the controller timed all %d loaded moves (%d)"
           % (MOVES, len(loaded)))
+    check(loadedBefore is not None and loadedAfter is not None and
+          any(abs(after - before) > 1e-5
+              for before, after in zip(loadedBefore, loadedAfter)),
+          "the loaded drag actually moved its selected authored CV")
     # Only the moves that COINCIDED with the bake are evidence about the
     # bake. At BAKE_TEXELS the bake outlasts the whole drag on this box,
     # so this is normally every move; keeping the filter means a faster

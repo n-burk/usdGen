@@ -1,9 +1,9 @@
 {
   "golden": "tonic-braid-hierarchy.png",
   "scene": "tonic-braid-hierarchy.usda",
-  "git_sha": "727a125b546d23b2d6567529b08e13b1dd883d5b",
+  "git_sha": "2cee7e8a29331eaed530a6f842b42441b3eb05b2",
   "host": "HIVEMIND",
-  "created_utc": "2026-09-20T05:06:53.395162+00:00",
+  "created_utc": "2026-09-21T05:35:55.042872+00:00",
   "command": "USDGEN_REGEN_GOLDEN=1 ctest -R testTonicGolden (bin/record_tonic.py, width 512, complexity veryhigh, L2 focus)",
   "model": {
     "tubes": 6,
@@ -13,5 +13,5 @@
     "mean_abs_max": 0.00784313725490196,
     "frac_gt_8_255_max": 0.005
   },
-  "png_sha256": "36c1faaad2acdc5fca7038590d40b1ea896f1b45ee03f5c929d40230c1cb6ac0"
+  "png_sha256": "57d23d7888a3106edc1d78ba74b86c6e2b0a849f9824ab20c5cf4f8fd483d152"
 }

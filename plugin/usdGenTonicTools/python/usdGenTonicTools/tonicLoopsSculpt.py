@@ -31,6 +31,7 @@ import math
 from . import tonicHierarchy
 from . import tonicLib
 from . import tonicLibStage
+from . import tonicLoopsTube
 from . import tonicModes
 from . import tonicSculpt
 from .tonicLoops import ToolLoop
@@ -42,6 +43,12 @@ DRAG_SPAN_PX = 200.0
 # The brush ring is drawn this many times the brush radius off the surface
 # normal is unavailable; purely cosmetic.
 RING_NORMAL = (0.0, 1.0, 0.0)
+# F-drag changes the *radius* shown by the panel and used by the brush, not
+# a diameter masquerading as width.  Half a radius pixel per mouse pixel is
+# responsive without making a short drag jump across the useful range.
+BRUSH_RADIUS_MIN_PX = 2.0
+BRUSH_RADIUS_MAX_PX = 512.0
+BRUSH_RESIZE_RADIUS_PER_PX = 0.5
 
 
 class SculptLoop(ToolLoop):
@@ -61,9 +68,21 @@ class SculptLoop(ToolLoop):
         self._cv = -1
         self._tCenter = 0.5
         self._depth = 0.0
+        self._camera = None
+        self._planeNormal = RING_NORMAL
+        self._planePerPixel = 0.0
         self._lastXY = None
+        self._pressXY = None
+        self._pressStampXY = None
+        self._strokeAnchorXY = None
         self._touched = 0
+        self._storedPreview = None
         self._lastStatus = ""
+        self._resizingRadius = False
+        self._resizeStartXY = None
+        self._resizeStartRadius = 0.0
+        self._resizeRadius = 0.0
+        self._resizeLastSample = None
 
     # -- sub-modes ---------------------------------------------------------
 
@@ -91,31 +110,103 @@ class SculptLoop(ToolLoop):
     # -- the brush ring ------------------------------------------------------
 
     def brushRadiusPx(self):
-        return max(float(self.state.brushRadiusPx), 2.0)
+        value = (self._resizeRadius if self._resizingRadius
+                 else float(self.state.brushRadiusPx))
+        return max(float(value), BRUSH_RADIUS_MIN_PX)
 
     def _ringAt(self, sample):
-        """Where the ring sits: the K1 surface hit, else the nearest CV."""
-        hit = sample.surface()
-        if hit is not None:
-            return hit["point"], hit["normal"]
-        item = sample.item(self.pickMask, self.brushRadiusPx())
+        """Where the ring sits: the tube under the brush, else the scalp.
+
+        A sculpt brush operates on centre curves.  Prefer its owning tube to
+        the scalp ray behind it, otherwise the overlay promises a brush on a
+        tube while the press below cannot start a stroke there.
+        """
+        item = self._brushItem(sample)
         if item is None:
-            return None, None
-        point = self._cvPoint(int(item["id"]), int(item["subId"]))
+            hit = sample.surface()
+            return ((hit["point"], hit["normal"]) if hit is not None
+                    else (None, None))
+        cv, _xy = self._centerAnchor(int(item["id"]), sample.camera,
+                                     sample.x, sample.y,
+                                     int(item["subId"]))
+        point = self._cvPoint(int(item["id"]), cv)
         return point, RING_NORMAL
+
+    def _centerAnchor(self, tubeId, camera, x, y, preferred=-1):
+        """Nearest projected center CV, preserving an exact component hit.
+
+        A body pick carries only its owning tube.  Convert it to a center
+        anchor locally so the shaped brush has a real footprint even when a
+        side-wall press is farther than its radius from the center line.
+        """
+        try:
+            count = tonicHierarchy.tubeCenterCount(self.session.dll,
+                                                   self.session.model,
+                                                   tubeId)
+        except (RuntimeError, NotImplementedError):
+            return max(int(preferred), 0), None
+        if count <= 0:
+            return 0, None
+        if 0 <= int(preferred) < count:
+            point = self._cvPoint(tubeId, int(preferred))
+            projected = (camera.worldToPixels(point)
+                         if point is not None and camera is not None else None)
+            return int(preferred), projected
+        # A side-wall click must anchor an editable CV.  Roots are pinned by
+        # sculpt, so choosing CV0 on a short tube makes an otherwise valid
+        # body stroke a no-op.
+        first = 1 if int(preferred) < 0 and count > 1 else 0
+        best = (float("inf"), first, None)
+        for cv in range(first, count):
+            point = self._cvPoint(tubeId, cv)
+            projected = (camera.worldToPixels(point)
+                         if point is not None and camera is not None else None)
+            if projected is None:
+                continue
+            d2 = ((float(projected[0]) - float(x)) ** 2 +
+                  (float(projected[1]) - float(y)) ** 2)
+            if d2 < best[0]:
+                best = (d2, cv, projected)
+        return best[1], best[2]
+
+    def _brushItem(self, sample):
+        """The precise CV first, then the body owner of a visible tube.
+
+        The body fallback is deliberately second.  A center-CV click keeps
+        its exact component identity; a broad side-wall click becomes the
+        backend's nearest centre-curve anchor instead of failing outright.
+        """
+        item = sample.item(self.pickMask, self.brushRadiusPx())
+        if item is not None:
+            return item
+        return sample.item(tonicLib.TONIC_PICK_TUBE_VERT,
+                           self.brushRadiusPx())
+
+    def _viewPlanePoint(self, sample):
+        """Cursor point on the press-time camera plane, never a ray hit."""
+        camera = self._camera if self._active else sample.camera
+        if camera is None:
+            return None
+        return camera.pixelsToWorld(sample.x, sample.y, self._depth)
 
     def _setRing(self, sample):
         """Tonic_SetBrushRing under the cursor; False when it is nowhere."""
         session = self.session
         if session.model is None:
             return False
-        point, normal = self._ringAt(sample)
+        if self._active:
+            # A drag owns its press-time camera plane.  Do not raycast, pick,
+            # or look at the changing tube while it is live: the overlay and
+            # the brush must carry through empty background together.
+            point, normal = self._viewPlanePoint(sample), self._planeNormal
+        else:
+            point, normal = self._ringAt(sample)
         if point is None:
             session.dll.Tonic_SetBrushRing(session.model, None, None,
                                            ctypes.c_float(0.0))
             return False
-        perPixel = (sample.camera.worldPerPixel(point)
-                    if sample.camera is not None else 0.0)
+        camera = self._camera if self._active else sample.camera
+        perPixel = (camera.worldPerPixel(point) if camera is not None else 0.0)
         radius = max(perPixel * self.brushRadiusPx(), 1e-6)
         centre = (ctypes.c_float * 3)(*[float(v) for v in point])
         nrm = (ctypes.c_float * 3)(*[float(v) for v in
@@ -125,12 +216,55 @@ class SculptLoop(ToolLoop):
         return True
 
     def _cvPoint(self, tubeId, cv):
+        """Return the displayed core handle used for sculpt UI anchoring.
+
+        The authored center CV can sit away from an asymmetric section's
+        visible core.  Keep raw centers in the native deformation path, but
+        anchor the cursor footprint, ring and frozen view depth to the same
+        handle position the artist sees.
+        """
         session = self.session
         try:
-            return tonicHierarchy.tubeCenterCV(session.dll, session.model,
-                                               tubeId, max(cv, 0))
+            return tonicHierarchy.tubeCenterHandle(session.dll, session.model,
+                                                   tubeId, max(cv, 0))
         except (RuntimeError, NotImplementedError):
             return None
+
+    def _selectedAnchor(self, sample):
+        """A selected owner under this screen footprint, if one exists.
+
+        Empty space never guesses a tube.  It can continue an intentional
+        selection only when that selection's projected editable center lies
+        under the brush, which is useful while center display is hidden by a
+        Sculpt draw mode or an occluding scalp is in front of the curve.
+        """
+        read = getattr(self.session, "readSelection", None)
+        if not callable(read) or sample.camera is None:
+            return None
+        owners = set()
+        for kind in (tonicLib.TONIC_PICK_TUBE_VERT,
+                     tonicLib.TONIC_PICK_CENTER_CV,
+                     tonicLib.TONIC_PICK_SECTION_CV,
+                     tonicLib.TONIC_PICK_SECTION_RING):
+            try:
+                owners.update(int(entry[0]) for entry in (read(kind) or ()))
+            except (IndexError, TypeError, ValueError, RuntimeError):
+                continue
+        radius2 = self.brushRadiusPx() ** 2
+        best = None
+        for tubeId in sorted(owners):
+            cv, projected = self._centerAnchor(tubeId, sample.camera,
+                                                sample.x, sample.y)
+            if projected is None:
+                continue
+            d2 = ((float(projected[0]) - float(sample.x)) ** 2 +
+                  (float(projected[1]) - float(sample.y)) ** 2)
+            if d2 <= radius2 and (best is None or d2 < best[0]):
+                best = (d2, tubeId, cv)
+        if best is None:
+            return None
+        return {"kind": tonicLib.TONIC_PICK_CENTER_CV,
+                "id": best[1], "subId": best[2], "subSubId": -1}
 
     # -- gesture --------------------------------------------------------------
 
@@ -139,24 +273,56 @@ class SculptLoop(ToolLoop):
         if session.model is None:
             return False
         self._bind()
-        item = sample.item(self.pickMask, self.brushRadiusPx())
+        item = self._brushItem(sample)
+        if item is None:
+            item = self._selectedAnchor(sample)
         if item is None:
             self._setRing(sample)
             session.publish(tonicLib.TONIC_DIRTY_BRUSH)
             self._status("Tonic Sculpt: no center CV under the brush")
             return False
         self._tube = int(item["id"])
-        self._cv = max(int(item["subId"]), 0)
+        self._cv, anchorXY = self._centerAnchor(
+            self._tube, sample.camera, sample.x, sample.y,
+            int(item["subId"]))
+        self._strokeAnchorXY = (anchorXY if
+                                int(item["kind"]) ==
+                                tonicLib.TONIC_PICK_TUBE_VERT else None)
         self._tCenter = self._tOf(self._tube, self._cv)
         point = self._cvPoint(self._tube, self._cv)
         projected = (sample.camera.worldToPixels(point)
                      if point is not None and sample.camera is not None
                      else None)
         self._depth = float(projected[2]) if projected is not None else 0.0
+        self._camera = sample.camera
+        planePoint = self._viewPlanePoint(sample)
+        # A view plane has one camera-forward normal.  A perspective ray at
+        # the cursor tilts toward the edge of the frame, so using it would
+        # turn the brush ring as the cursor travels.
+        ray = (sample.camera.rayThrough(sample.camera.width * 0.5,
+                                        sample.camera.height * 0.5)
+               if sample.camera is not None else None)
+        if ray is not None:
+            self._planeNormal = tuple(float(v) for v in ray[1])
+        else:
+            self._planeNormal = RING_NORMAL
+        self._planePerPixel = (sample.camera.worldPerPixel(planePoint)
+                               if planePoint is not None and
+                               sample.camera is not None else 0.0)
         self._lastXY = (sample.x, sample.y)
+        self._pressXY = self._lastXY
+        self._pressStampXY = ((anchorXY[0], anchorXY[1])
+                              if anchorXY is not None else self._pressXY)
         self._touched = 0
+        if not session.beginGesture("Sculpt %s" % self.brush()):
+            self._pressXY = None
+            self._pressStampXY = None
+            self._strokeAnchorXY = None
+            self._camera = None
+            return False
         self._active = True
-        session.beginGesture("Sculpt %s" % self.brush())
+        self._storedPreview = tonicLoopsTube.previewGuides(session,
+                                                            self.state)
         self._setRing(sample)
         session.publish(tonicLib.TONIC_DIRTY_BRUSH)
         return True
@@ -177,9 +343,17 @@ class SculptLoop(ToolLoop):
             return False
         self._active = False
         self._lastXY = None
+        self._pressXY = None
+        self._pressStampXY = None
+        self._strokeAnchorXY = None
+        self._camera = None
         self.session.endGesture()
+        tonicLoopsTube.restoreGuides(self.session, self._storedPreview,
+                                     refill=bool(self._touched))
+        self._storedPreview = None
         self.session.publish()
-        self.session.enqueueCommit()
+        if self._touched:
+            self.session.enqueueCommit()
         self._status("Tonic Sculpt: %s over tube %d (%d CV move(s))"
                      % (tonicSculpt.brushLabel(self.brush()), self._tube,
                         self._touched))
@@ -191,7 +365,17 @@ class SculptLoop(ToolLoop):
             return False
         self._active = False
         self._lastXY = None
+        self._pressXY = None
+        self._pressStampXY = None
+        self._strokeAnchorXY = None
+        self._camera = None
         dirty = self.session.cancelGesture()
+        # The gesture snapshot restored the model, including its guide cache.
+        # Only put the preview-fraction control back; a refill here would
+        # invent a preview on a previously empty/frozen groom.
+        tonicLoopsTube.restoreGuides(self.session, self._storedPreview,
+                                     refill=False)
+        self._storedPreview = None
         self.session.publish(dirty)
         self._status("Tonic Sculpt: cancelled")
         return True
@@ -205,6 +389,8 @@ class SculptLoop(ToolLoop):
 
     def deactivate(self):
         """Leaving Sculpt takes the ring with it (plan/18 section 2.4)."""
+        if self._resizingRadius:
+            self.cancelRadiusResize()
         session = self.session
         if session.model is None:
             return False
@@ -212,6 +398,74 @@ class SculptLoop(ToolLoop):
                                        ctypes.c_float(0.0))
         session.publish(tonicLib.TONIC_DIRTY_BRUSH)
         return True
+
+    # -- F + LMB brush width -------------------------------------------------
+
+    @property
+    def resizingRadius(self):
+        return self._resizingRadius
+
+    def beginRadiusResize(self, sample):
+        """Start a UI-only brush-radius drag; never opens a sculpt bracket."""
+        if self._active or self._resizingRadius or self.session.model is None:
+            return False
+        self._resizeStartXY = (float(sample.x), float(sample.y))
+        self._resizeStartRadius = max(float(self.state.brushRadiusPx),
+                                      BRUSH_RADIUS_MIN_PX)
+        self._resizeRadius = self._resizeStartRadius
+        self._resizingRadius = True
+        self._resizeLastSample = sample
+        self._setRing(sample)
+        self.session.publish(tonicLib.TONIC_DIRTY_BRUSH)
+        return True
+
+    def resizeRadius(self, sample):
+        """Apply the absolute horizontal F-drag distance to brush radius."""
+        if not self._resizingRadius:
+            return False
+        start = self._resizeStartXY
+        if start is None:
+            return False
+        value = self._resizeStartRadius + (
+            float(sample.x) - start[0]) * BRUSH_RESIZE_RADIUS_PER_PX
+        value = max(BRUSH_RADIUS_MIN_PX, min(BRUSH_RADIUS_MAX_PX, value))
+        self._resizeRadius = value
+        self._resizeLastSample = sample
+        self._setRing(sample)
+        return True
+
+    def _finishRadiusResize(self, sample=None, cancelled=False):
+        if not self._resizingRadius:
+            return False
+        if sample is not None and not cancelled:
+            self.resizeRadius(sample)
+        if not cancelled:
+            # The panel/state sees one complete user width change per drag;
+            # the transient value above exists solely for the live ring.
+            self.state.brushRadiusPx = self._resizeRadius
+        last = sample or self._resizeLastSample
+        self._resizingRadius = False
+        self._resizeStartXY = None
+        self._resizeRadius = 0.0
+        self._resizeLastSample = None
+        # Draw only after dropping the transient mode.  Escape/capture
+        # cancellation must put the ring back at the committed start radius,
+        # not leave the last preview radius until the next hover.
+        if last is not None:
+            self._setRing(last)
+        self.session.publish(tonicLib.TONIC_DIRTY_BRUSH)
+        if cancelled:
+            self._status("Tonic Sculpt: brush resize cancelled")
+        else:
+            self._status("Tonic Sculpt: brush radius %.0f px" %
+                         self.brushRadiusPx())
+        return True
+
+    def endRadiusResize(self, sample):
+        return self._finishRadiusResize(sample, cancelled=False)
+
+    def cancelRadiusResize(self):
+        return self._finishRadiusResize(cancelled=True)
 
     # -- the stroke ------------------------------------------------------------
 
@@ -246,13 +500,12 @@ class SculptLoop(ToolLoop):
         brush = self.brush()
         strength = max(float(getattr(self.state, "sculptStrength", 1.0)),
                        0.0)
+        camera = self._camera if self._active and self._camera is not None else camera
         delta = self._worldDelta(camera, fromXY, toXY)
         if brush == "grab":
-            return delta, 0.0
+            return tuple(v * strength for v in delta), 0.0
         if brush == "comb":
-            point = self._cvPoint(self._tube, self._cv)
-            perPixel = (camera.worldPerPixel(point)
-                        if camera is not None and point is not None else 0.0)
+            perPixel = self._planePerPixel
             push = max(perPixel, 0.0) * COMB_PUSH_PX * strength
             return delta, push
         if brush == "smooth":
@@ -272,10 +525,23 @@ class SculptLoop(ToolLoop):
                                           (sample.x, sample.y))
         if delta == (0.0, 0.0, 0.0) and amount == 0.0:
             return False
+        # Stamp at the preceding sample.  On the first move that is the
+        # press footprint, so a body hit gets one valid center-curve stamp
+        # before a fast cursor leaves its small radius.  Subsequent samples
+        # retain the usual contiguous brush trail.
+        x, y = lastXY
+        if self.brush() == "grab" and self._pressStampXY is not None:
+            # Native Grab shapes against the press-time gesture base.  Keep
+            # its screen footprint fixed while incremental plane deltas carry
+            # the result across empty background.
+            x, y = self._pressStampXY
+        elif self._strokeAnchorXY is not None and self._pressXY is not None:
+            x = self._strokeAnchorXY[0] + lastXY[0] - self._pressXY[0]
+            y = self._strokeAnchorXY[1] + lastXY[1] - self._pressXY[1]
         try:
             moved = tonicLibStage.sculptStrokeShaped(
                 session.dll, session.model, self._tube, self.brush(),
-                sample.camera, sample.x, sample.y, self.brushRadiusPx(),
+                self._camera or sample.camera, x, y, self.brushRadiusPx(),
                 delta, amount, self._tCenter,
                 float(self.state.brushTRadius),
                 bool(self.state.sculptPreserveLength),
@@ -284,13 +550,16 @@ class SculptLoop(ToolLoop):
             self._status("Tonic Sculpt: " + session.lastError())
             return False
         self._touched += int(moved)
+        if moved:
+            tonicLoopsTube.refillPreview(session, self.state)
         return True
 
     # -- keys ------------------------------------------------------------------
 
     def adjustRadius(self, delta):
         """`[` / `]`: the brush radius in pixels."""
-        value = max(2.0, min(512.0, float(self.state.brushRadiusPx) +
+        value = max(BRUSH_RADIUS_MIN_PX,
+                    min(BRUSH_RADIUS_MAX_PX, float(self.state.brushRadiusPx) +
                              float(delta)))
         self.state.brushRadiusPx = value
         return self._status("Tonic Sculpt: brush radius %.0f px" % value)

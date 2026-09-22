@@ -47,6 +47,9 @@ struct USDGENTONIC_API TonicScalpMesh {
     std::vector<std::vector<int>> faceNeighbours;  // dual graph, via verts
     float meanEdgeLength = 0.0f;
     float medianFaceArea = 0.0f;
+    // Immutable rest-space extent, cached at finalization for display-only
+    // overlay offsets without rescanning every vertex per graph CV.
+    float boundsDiagonal = 0.0f;
     bool finalized = false;
 };
 

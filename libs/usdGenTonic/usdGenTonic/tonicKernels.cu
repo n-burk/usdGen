@@ -43,40 +43,66 @@ __device__ float _Dot3(float const a[3], float const b[3])
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
-__device__ void _Cross3(float const a[3], float const b[3], float out[3])
+// Same watertight dominant-axis shear test as the CPU twin.  Rounded double
+// products stay separate: FMA contraction would break the exact sign reversal
+// on a shared fan edge and reintroduce the seam crack.
+__device__ double _EdgeDet(double ax, double ay, double bx, double by)
 {
-    out[0] = a[1] * b[2] - a[2] * b[1];
-    out[1] = a[2] * b[0] - a[0] * b[2];
-    out[2] = a[0] * b[1] - a[1] * b[0];
+    return __dsub_rn(__dmul_rn(ax, by), __dmul_rn(ay, bx));
 }
 
-// Same Möller–Trumbore as the CPU twin (no backface culling).
 __device__ float _RayTriangle(float const origin[3], float const dir[3],
                               float const v0[3], float const v1[3],
                               float const v2[3])
 {
-    float e1[3] = {v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]};
-    float e2[3] = {v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]};
-    float p[3];
-    _Cross3(dir, e2, p);
-    float const det = _Dot3(e1, p);
-    if (fabsf(det) < 1e-20f) {
+    int kz = 0;
+    if (fabsf(dir[1]) > fabsf(dir[kz])) {
+        kz = 1;
+    }
+    if (fabsf(dir[2]) > fabsf(dir[kz])) {
+        kz = 2;
+    }
+    if (dir[kz] == 0.0f) {
         return CUDART_INF_F;
     }
-    float const inv = 1.0f / det;
-    float tv[3] = {origin[0] - v0[0], origin[1] - v0[1], origin[2] - v0[2]};
-    float const u = _Dot3(tv, p) * inv;
-    if (u < 0.0f || u > 1.0f) {
+    int kx = (kz + 1) % 3;
+    int ky = (kx + 1) % 3;
+    if (dir[kz] < 0.0f) {
+        int const swap = kx;
+        kx = ky;
+        ky = swap;
+    }
+    double const sx = __ddiv_rn(double(dir[kx]), double(dir[kz]));
+    double const sy = __ddiv_rn(double(dir[ky]), double(dir[kz]));
+    double const sz = __ddiv_rn(1.0, double(dir[kz]));
+    double a[3], b[3], c[3];
+    auto shear = [&](float const p[3], double out[3]) {
+        double const x = __dsub_rn(double(p[kx]), double(origin[kx]));
+        double const y = __dsub_rn(double(p[ky]), double(origin[ky]));
+        double const z = __dsub_rn(double(p[kz]), double(origin[kz]));
+        out[0] = __dsub_rn(x, __dmul_rn(sx, z));
+        out[1] = __dsub_rn(y, __dmul_rn(sy, z));
+        out[2] = __dmul_rn(z, sz);
+    };
+    shear(v0, a);
+    shear(v1, b);
+    shear(v2, c);
+    double const u = _EdgeDet(c[0], c[1], b[0], b[1]);
+    double const v = _EdgeDet(a[0], a[1], c[0], c[1]);
+    double const w = _EdgeDet(b[0], b[1], a[0], a[1]);
+    bool const anyNegative = u < 0.0 || v < 0.0 || w < 0.0;
+    bool const anyPositive = u > 0.0 || v > 0.0 || w > 0.0;
+    if (anyNegative && anyPositive) {
         return CUDART_INF_F;
     }
-    float q[3];
-    _Cross3(tv, e1, q);
-    float const v = _Dot3(dir, q) * inv;
-    if (v < 0.0f || u + v > 1.0f) {
+    double const det = __dadd_rn(__dadd_rn(u, v), w);
+    if (det == 0.0) {
         return CUDART_INF_F;
     }
-    float const t = _Dot3(e2, q) * inv;
-    return t >= 0.0f ? t : CUDART_INF_F;
+    double const t = __ddiv_rn(
+        __dadd_rn(__dadd_rn(__dmul_rn(u, a[2]), __dmul_rn(v, b[2])),
+                  __dmul_rn(w, c[2])), det);
+    return isfinite(t) && t >= 0.0 ? float(t) : CUDART_INF_F;
 }
 
 __device__ bool _RayAabb(float const origin[3], float const inv[3], float tMax,
@@ -1002,9 +1028,11 @@ __global__ void _RootSampleMeshKernel(
 
 __global__ void _GuideFillKernel(
     float const *cx, float const *cy, float const *cz, int nCv,
-    TonicFrame const *frames, float const *secT, float const *secMeanR,
-    int nSec, TonicDeviceRoot const *roots, int guideCount, float edgeBias,
-    float const *profilePairs, int profilePairCount, float rootRadius,
+    TonicFrame const *frames, float const *secT, float const *secU,
+    float const *secV, float const *secScale, float const *secTwist,
+    int nSec, int ringVerts, TonicDeviceRoot const *roots,
+    TonicGuideMaterialBinding const *bindings, int guideCount,
+    float edgeBias, float const *profilePairs, int profilePairCount,
     float t0, float span, float *out, float *lengths, int cvCount)
 {
     int const g = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1012,15 +1040,9 @@ __global__ void _GuideFillKernel(
         return;
     }
     TonicDeviceRoot const root = roots[g];
-    float r = sqrtf(root.ru * root.ru + root.rv * root.rv);
-    float const th = atan2f(root.rv, root.ru);
-    if (r > 1.0f) {
-        r = 1.0f;
-    }
-    float const biasExp = 1.0f - 0.5f * edgeBias;
-    float const rb = powf(r, biasExp);
-    float const ru = rb * cosf(th), rv = rb * sinf(th);
-    float length = TonicEvalLengthProfile(profilePairs, profilePairCount, rb);
+    float const rootRadius = bindings[size_t(g) * size_t(cvCount)].edgeRadius;
+    float length = TonicEvalLengthProfile(profilePairs, profilePairCount,
+                                          rootRadius);
     if (!(length > 0.0f)) {
         length = 0.0f;
     }
@@ -1031,6 +1053,13 @@ __global__ void _GuideFillKernel(
     for (int c = 0; c < cvCount; ++c) {
         float const s = float(c) / float(cvCount - 1);
         float const t = t0 + span * s * length;
+        size_t const o = (size_t(g) * size_t(cvCount) + size_t(c)) * 3;
+        if (c == 0) {
+            out[o + 0] = root.px;
+            out[o + 1] = root.py;
+            out[o + 2] = root.pz;
+            continue;
+        }
         float cp[3];
         TonicEvalCenter(cx, cy, cz, nCv, t, cp);
         TonicFrame fr;
@@ -1043,12 +1072,56 @@ __global__ void _GuideFillKernel(
                                                 (secT[k + 1] - secT[k])
                                           : 0.0f;
         f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-        float const rr =
-            (secMeanR[k] + (secMeanR[k + 1] - secMeanR[k]) * f) / rootRadius;
-        size_t const o = (size_t(g) * size_t(cvCount) + size_t(c)) * 3;
-        out[o + 0] = cp[0] + (fr.nx * ru + fr.bx * rv) * rootRadius * rr;
-        out[o + 1] = cp[1] + (fr.ny * ru + fr.by * rv) * rootRadius * rr;
-        out[o + 2] = cp[2] + (fr.nz * ru + fr.bz * rv) * rootRadius * rr;
+        int const kp = k > 0 ? k - 1 : k;
+        int const kn = k + 2 < nSec ? k + 2 : k + 1;
+        bool const first = k == 0;
+        bool const last = k + 1 == nSec - 1;
+        float const m0sc = first ? secScale[k + 1] - secScale[k]
+                                 : 0.5f * (secScale[k + 1] - secScale[kp]);
+        float const m1sc = last ? secScale[k + 1] - secScale[k]
+                                : 0.5f * (secScale[kn] - secScale[k]);
+        float const m0tw = first ? secTwist[k + 1] - secTwist[k]
+                                 : 0.5f * (secTwist[k + 1] - secTwist[kp]);
+        float const m1tw = last ? secTwist[k + 1] - secTwist[k]
+                                : 0.5f * (secTwist[kn] - secTwist[k]);
+        float sc = TonicHermite(secScale[k], secScale[k + 1], m0sc, m1sc, f);
+        if (!(sc > 1e-6f)) sc = 1e-6f;
+        float const tw = TonicHermite(secTwist[k], secTwist[k + 1], m0tw,
+                                      m1tw, f);
+        float const ct = cosf(tw), st = sinf(tw);
+        TonicGuideMaterialBinding const binding =
+            bindings[size_t(g) * size_t(cvCount) + size_t(c)];
+        int const slots[3] = {binding.slot0, binding.slot1, binding.slot2};
+        float const weights[3] = {binding.w0, binding.w1, binding.w2};
+        float u = 0.0f, v = 0.0f;
+        for (int q = 0; q < 3; ++q) {
+            int const slot = slots[q];
+            if (slot < 0 || slot >= ringVerts) return;
+            int const a = k * ringVerts + slot;
+            int const b = (k + 1) * ringVerts + slot;
+            int const p = kp * ringVerts + slot;
+            int const n = kn * ringVerts + slot;
+            float const m0u = first ? secU[b] - secU[a]
+                                    : 0.5f * (secU[b] - secU[p]);
+            float const m1u = last ? secU[b] - secU[a]
+                                   : 0.5f * (secU[n] - secU[a]);
+            float const m0v = first ? secV[b] - secV[a]
+                                    : 0.5f * (secV[b] - secV[p]);
+            float const m1v = last ? secV[b] - secV[a]
+                                   : 0.5f * (secV[n] - secV[a]);
+            u += weights[q] * TonicHermite(secU[a], secU[b], m0u, m1u, f);
+            v += weights[q] * TonicHermite(secV[a], secV[b], m0v, m1v, f);
+        }
+        u *= sc; v *= sc;
+        float const ru = u * ct - v * st;
+        float const rv = u * st + v * ct;
+        out[o + 0] = cp[0] + fr.nx * ru + fr.bx * rv;
+        out[o + 1] = cp[1] + fr.ny * ru + fr.by * rv;
+        out[o + 2] = cp[2] + fr.nz * ru + fr.bz * rv;
+        float const remain = 1.0f - s * length;
+        out[o + 0] += binding.rootDx * remain;
+        out[o + 1] += binding.rootDy * remain;
+        out[o + 2] += binding.rootDz * remain;
     }
 }
 
@@ -1380,18 +1453,22 @@ bool TonicLaunchRootSampleMesh(
 bool TonicLaunchGuideFill(
     float const *deviceCenterX, float const *deviceCenterY,
     float const *deviceCenterZ, int nCv, TonicFrame const *deviceFrames,
-    float const *deviceSectionT, float const *deviceSectionMeanR, int nSec,
-    TonicDeviceRoot const *deviceRoots, int guideCount, float edgeBias,
-    float const *deviceProfilePairs, int profilePairCount, float rootRadius,
+    float const *deviceSectionT, float const *deviceSectionU,
+    float const *deviceSectionV, float const *deviceSectionScale,
+    float const *deviceSectionTwist, int nSec, int ringVerts,
+    TonicDeviceRoot const *deviceRoots,
+    TonicGuideMaterialBinding const *deviceBindings, int guideCount,
+    float edgeBias, float const *deviceProfilePairs, int profilePairCount,
     float *deviceOut, float *deviceLengths, int cvCount, cudaStream_t stream,
     char *errBuf, size_t errBufLen)
 {
     if (!deviceCenterX || !deviceCenterY || !deviceCenterZ || !deviceFrames ||
-        !deviceSectionT || !deviceSectionMeanR || !deviceRoots || !deviceOut ||
-        !deviceLengths || nCv < 2 || nSec < 2 || guideCount < 0 ||
+        !deviceSectionT || !deviceSectionU || !deviceSectionV ||
+        !deviceSectionScale || !deviceSectionTwist || !deviceRoots ||
+        !deviceBindings || !deviceOut || !deviceLengths || nCv < 2 ||
+        nSec < 2 || ringVerts < 3 || ringVerts > 32 || guideCount < 0 ||
         cvCount < 2 || cvCount > 64 || edgeBias < -1.0f || edgeBias > 1.0f ||
-        profilePairCount < 0 || (profilePairCount > 0 && !deviceProfilePairs) ||
-        !(rootRadius > 0.0f)) {
+        profilePairCount < 0 || (profilePairCount > 0 && !deviceProfilePairs)) {
         if (errBuf && errBufLen > 0) {
             std::snprintf(errBuf, errBufLen, "null device pointer or range");
         }
@@ -1416,8 +1493,9 @@ bool TonicLaunchGuideFill(
     int const grid = (guideCount + block - 1) / block;
     _GuideFillKernel<<<grid, block, 0, stream>>>(
         deviceCenterX, deviceCenterY, deviceCenterZ, nCv, deviceFrames,
-        deviceSectionT, deviceSectionMeanR, nSec, deviceRoots, guideCount,
-        edgeBias, deviceProfilePairs, profilePairCount, rootRadius, t0, span,
+        deviceSectionT, deviceSectionU, deviceSectionV, deviceSectionScale,
+        deviceSectionTwist, nSec, ringVerts, deviceRoots, deviceBindings,
+        guideCount, edgeBias, deviceProfilePairs, profilePairCount, t0, span,
         deviceOut, deviceLengths, cvCount);
     cudaError_t const launch = cudaGetLastError();
     if (launch != cudaSuccess) {
@@ -2795,11 +2873,23 @@ __global__ void _HSculptApplyKernel(
                 poly[k].v = aIn.ringV[A.ringBegin + s * arv + k] -
                             oIn.ringV[O.ringBegin + s * arv + k];
             }
-            _HResamplePoly(poly, arv, drv, rs);
+            if (arv == drv) {
+                for (int k = 0; k < drv; ++k) {
+                    rs[k] = poly[k];
+                }
+            } else {
+                _HResamplePoly(poly, arv, drv, rs);
+            }
             for (int k = 0; k < drv; ++k) {
                 out.ringU[ringBase + size_t(s * drv + k)] += rs[k].u;
                 out.ringV[ringBase + size_t(s * drv + k)] += rs[k].v;
             }
+            out.secScale[secBase + size_t(s)] +=
+                aIn.secScale[A.sectionBegin + s] -
+                oIn.secScale[O.sectionBegin + s];
+            out.secTwist[secBase + size_t(s)] +=
+                aIn.secTwist[A.sectionBegin + s] -
+                oIn.secTwist[O.sectionBegin + s];
         }
         status[i] = kTonicHOk;
         return;
@@ -2828,11 +2918,21 @@ __global__ void _HSculptApplyKernel(
             poly[k].u = sIn.ringU[S.ringBegin + s * srv + k];
             poly[k].v = sIn.ringV[S.ringBegin + s * srv + k];
         }
-        _HResamplePoly(poly, srv, drv, rs);
+        if (srv == drv) {
+            for (int k = 0; k < drv; ++k) {
+                rs[k] = poly[k];
+            }
+        } else {
+            _HResamplePoly(poly, srv, drv, rs);
+        }
         for (int k = 0; k < drv; ++k) {
             out.ringU[ringBase + size_t(s * drv + k)] += rs[k].u;
             out.ringV[ringBase + size_t(s * drv + k)] += rs[k].v;
         }
+        out.secScale[secBase + size_t(s)] +=
+            sIn.secScale[S.sectionBegin + s];
+        out.secTwist[secBase + size_t(s)] +=
+            sIn.secTwist[S.sectionBegin + s];
     }
     if (preserveLength) {
         float const oldLen = _HCenterArcLength(aIn.cx + A.centerBegin,
@@ -2862,6 +2962,12 @@ __global__ void _HSculptApplyKernel(
         }
     }
     for (int s = 0; s < nSec; ++s) {
+        outDelta.secScale[secBase + size_t(s)] =
+            out.secScale[secBase + size_t(s)] -
+            dIn.secScale[D.sectionBegin + s];
+        outDelta.secTwist[secBase + size_t(s)] =
+            out.secTwist[secBase + size_t(s)] -
+            dIn.secTwist[D.sectionBegin + s];
         for (int k = 0; k < drv; ++k) {
             outDelta.ringU[ringBase + size_t(s * drv + k)] =
                 out.ringU[ringBase + size_t(s * drv + k)] -
@@ -2890,6 +2996,20 @@ struct TonicHPack {
     std::vector<float> secT, secScale, secTwist;
     std::vector<float> ringU, ringV;
 };
+
+bool _HasNonIdentityFrameReference(TonicTubeDesc const &tube)
+{
+    static float const identity[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f};
+    for (int i = 0; i < 9; ++i) {
+        if (tube.frameReference[size_t(i)] != identity[i]) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // ValidateTube from tonicHierarchy.cpp (same messages) plus the device caps.
 bool _HValidate(TonicTubeDesc const &t, std::string *err)
@@ -3271,6 +3391,9 @@ bool TonicSubdivideTubesDevice(
             child.level = parents[i].level + 1;
             child.parentTubeId = parents[i].tubeId;
             child.childIndex = c;
+            child.rootFramePinned = parents[i].rootFramePinned;
+            child.rootFrame = parents[i].rootFrame;
+            child.frameReference = parents[i].frameReference;
         }
     }
     return true;
@@ -3286,6 +3409,28 @@ bool TonicParentAverageDevice(std::vector<TonicTubeDesc> const *groups,
     }
     parentsOut->clear();
     if (groupCount <= 0) {
+        return true;
+    }
+    // K7's packed device frame walk predates authored root planes and the
+    // descriptor material-frame reference. Keep either on the
+    // descriptor-aware twin until the pack carries both charts.
+    bool pinned = false;
+    bool materialFrame = false;
+    for (int g = 0; g < groupCount; ++g) {
+        for (auto const &child : groups[g]) {
+            pinned = pinned || child.rootFramePinned;
+            materialFrame = materialFrame ||
+                            _HasNonIdentityFrameReference(child);
+        }
+    }
+    if (pinned || materialFrame) {
+        std::vector<TonicTubeDesc> result(size_t(groupCount), TonicTubeDesc{});
+        for (int g = 0; g < groupCount; ++g) {
+            if (!TonicParentAverageCpu(groups[g], &result[size_t(g)], err)) {
+                return false;
+            }
+        }
+        parentsOut->swap(result);
         return true;
     }
     TonicHPack pack;
@@ -3444,6 +3589,40 @@ bool TonicHierarchicalSculptApplyDevice(
     if (itemCount <= 0) {
         return true;
     }
+    bool pinned = false;
+    bool materialFrame = false;
+    for (int i = 0; i < itemCount; ++i) {
+        TonicSculptApplyItem const &item = items[i];
+        if (!item.derivedNew || !item.oldActual || !item.oldDerived ||
+            !item.oldStored) {
+            return _HFail(err, "TonicHierarchicalSculptApplyDevice: null item");
+        }
+        pinned = pinned || item.derivedNew->rootFramePinned ||
+                 item.oldActual->rootFramePinned ||
+                 item.oldDerived->rootFramePinned;
+        materialFrame = materialFrame ||
+            _HasNonIdentityFrameReference(*item.derivedNew) ||
+            _HasNonIdentityFrameReference(*item.oldActual) ||
+            _HasNonIdentityFrameReference(*item.oldDerived);
+    }
+    // The old GPU sculpt pack has neither authored root-frame nor material
+    // reference data. The host twin consumes the descriptor-aware chart.
+    if (pinned || materialFrame) {
+        std::vector<TonicTubeDesc> actual(size_t(itemCount), TonicTubeDesc{});
+        std::vector<TonicShapeDeltas> stored(size_t(itemCount), TonicShapeDeltas{});
+        for (int i = 0; i < itemCount; ++i) {
+            TonicSculptApplyItem const &item = items[i];
+            if (!TonicHierarchicalSculptApplyCpu(
+                    *item.derivedNew, *item.oldActual, *item.oldDerived,
+                    *item.oldStored, item.lockChildren, item.preserveLength,
+                    &actual[size_t(i)], &stored[size_t(i)], err)) {
+                return false;
+            }
+        }
+        outActual->swap(actual);
+        outStored->swap(stored);
+        return true;
+    }
     TonicHPack dPack, aPack, oPack, sPack;
     std::vector<unsigned char> flags;
     int maxCv = 0, maxSec = 0;
@@ -3472,6 +3651,12 @@ bool TonicHierarchicalSculptApplyDevice(
                               "TonicHierarchicalSculptCpu: section t drifted "
                               "(re-subdivide)");
             }
+        }
+        if (it.derivedNew->ringVerts != it.oldActual->ringVerts &&
+            !it.oldActual->inheritedBoundaryBindings.empty()) {
+            return _HFail(err,
+                          "TonicHierarchicalSculptCpu: boundary material "
+                          "slots need an explicit topology remap");
         }
         if (it.lockChildren) {
             if (it.oldActual->centerX.size() !=
@@ -3557,7 +3742,7 @@ bool TonicHierarchicalSculptApplyDevice(
     }
     std::vector<int> hStatus;
     std::vector<float> hcx, hcy, hcz, hsT, hsS, hsW, hrU, hrV;
-    std::vector<float> hdu, hdv, hdw, hdrU, hdrV;
+    std::vector<float> hdu, hdv, hdw, hds, hdt, hdrU, hdrV;
     bool ok = _HDownload(&hStatus, dStatus, size_t(itemCount), stream) &&
               _HDownload(&hcx, out.cx, cvTotal, stream) &&
               _HDownload(&hcy, out.cy, cvTotal, stream) &&
@@ -3570,6 +3755,8 @@ bool TonicHierarchicalSculptApplyDevice(
               _HDownload(&hdu, outDelta.cx, cvTotal, stream) &&
               _HDownload(&hdv, outDelta.cy, cvTotal, stream) &&
               _HDownload(&hdw, outDelta.cz, cvTotal, stream) &&
+              _HDownload(&hds, outDelta.secScale, secTotal, stream) &&
+              _HDownload(&hdt, outDelta.secTwist, secTotal, stream) &&
               _HDownload(&hdrU, outDelta.ringU, ringTotal, stream) &&
               _HDownload(&hdrV, outDelta.ringV, ringTotal, stream);
     if (!ok || cudaStreamSynchronize(stream) != cudaSuccess) {
@@ -3597,6 +3784,13 @@ bool TonicHierarchicalSculptApplyDevice(
         act.level = D.level;
         act.parentTubeId = D.parentTubeId;
         act.childIndex = D.childIndex;
+        act.rootFramePinned = D.rootFramePinned;
+        act.rootFrame = D.rootFrame;
+        act.frameReference = D.frameReference;
+        if (D.ringVerts == items[i].oldActual->ringVerts) {
+            act.inheritedBoundaryBindings =
+                items[i].oldActual->inheritedBoundaryBindings;
+        }
         TonicShapeDeltas &st = (*outStored)[size_t(i)];
         if (items[i].lockChildren) {
             st = *items[i].oldStored;
@@ -3616,6 +3810,7 @@ bool TonicHierarchicalSculptApplyDevice(
             sculpted = sculpted || (v != 0.0f);
         }
         for (auto const &s : old.sections) {
+            sculpted = sculpted || (s.scale != 0.0f) || (s.twist != 0.0f);
             for (float v : s.u) {
                 sculpted = sculpted || (v != 0.0f);
             }
@@ -3637,8 +3832,8 @@ bool TonicHierarchicalSculptApplyDevice(
         for (size_t s = 0; s < D.sections.size(); ++s) {
             TonicTubeSection &ds = st.sections[s];
             ds.t = D.sections[s].t;
-            ds.scale = 0.0f;
-            ds.twist = 0.0f;
+            ds.scale = hds[size_t(i) * size_t(outSecStride) + s];
+            ds.twist = hdt[size_t(i) * size_t(outSecStride) + s];
             size_t const rb = ringBase + s * size_t(D.ringVerts);
             ds.u.assign(hdrU.begin() + rb, hdrU.begin() + rb + D.ringVerts);
             ds.v.assign(hdrV.begin() + rb, hdrV.begin() + rb + D.ringVerts);
@@ -3661,9 +3856,8 @@ bool TonicHierarchicalSculptApplyDevice(
 // tonicTube.h and tonicCheck.h hide their host twins behind
 // #ifndef __CUDA_ARCH__, and nvcc parses host code in the device pass as
 // well, so the two the K12 wrapper needs are re-declared here.
-bool TonicCenterFramesCpu(float const *cx, float const *cy, float const *cz,
-                          int nCv, std::vector<TonicFrame> *frames,
-                          std::string *err);
+bool TonicTubeFramesCpu(TonicTubeDesc const &tube,
+                        std::vector<TonicFrame> *frames, std::string *err);
 bool TonicRootChartCpu(TonicTubeDesc const &tube,
                        std::vector<TonicFrame> const &frames, float center[3],
                        float nrm[3], float bin[3],
@@ -3733,9 +3927,7 @@ bool TonicTubeIntersectDevice(TonicTubeDesc const *tubes, int tubeCount,
         std::vector<TonicFrame> frames;
         std::vector<float> ring;
         TonicDeviceRootChart &chart = charts[size_t(i)];
-        if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
-                                  tube.centerZ.data(),
-                                  int(tube.centerX.size()), &frames, err) ||
+        if (!TonicTubeFramesCpu(tube, &frames, err) ||
             !TonicRootChartCpu(tube, frames, chart.center, chart.nrm,
                                chart.bin, &ring, err)) {
             return false;

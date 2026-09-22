@@ -10,6 +10,7 @@ CTestTestfile.cmake
 .omp/
 .omo/
 .omc/
+notes/
 
 # CMake generated
 CMakeUserPresets.json

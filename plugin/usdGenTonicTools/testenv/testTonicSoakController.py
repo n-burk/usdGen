@@ -615,6 +615,8 @@ def run(appController):
 
     # -- a real stroke, so there is a region and a tube to edit ------------
     mouse = Mouse(view)
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
     for _method in ("press", "move", "release"):
         setattr(mouse, _method, pace(getattr(mouse, _method)))
     path = []

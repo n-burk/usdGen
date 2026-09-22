@@ -190,6 +190,19 @@ int main() {
     CHECK(out.extraCurve.size() == 1 && out.extraCurve[0].i == VtIntArray({7,40}));
     CHECK(d.curveSets[0].curveId == VtArray<uint64_t>({40,7}));
     CHECK(d.curveSets[0].widths == VtFloatArray({.1f,.2f,.3f,.4f,.5f}));
+    // Ordinary C3 CurveSource remains the default path.  surfaceCage is an
+    // explicit expansion mode and must not require cage payload, a bound map,
+    // or a bound surface when absent (or when authored explicitly as none).
+    {
+        auto ordinary = d;
+        ordinary.nodes[0].params.push_back(
+            {TfToken("interpolationMode"), VtValue(TfToken("none")), false});
+        UsdGenCurveBuffer ordinaryOut;
+        CHECK(Run(ordinary, &ordinaryOut));
+        CHECK(ordinaryOut.px == out.px && ordinaryOut.rest == out.rest &&
+              ordinaryOut.width == out.width && ordinaryOut.curveId == out.curveId &&
+              ordinaryOut.rootPrim == out.rootPrim && ordinaryOut.rootUV == out.rootUV);
+    }
     {
         auto unbound = d;
         unbound.curveSets[0].rootFrame.clear();

@@ -2,12 +2,15 @@
 #include "usdGenImaging/curveApiSchemaAdapter.h"
 
 #include "pxr/base/tf/type.h"
+#include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/timeCode.h"
 #include "pxr/usd/usdGeom/basisCurves.h"
 #include "pxr/usd/usdGeom/primvar.h"
 #include "pxr/usd/usdGeom/primvarsAPI.h"
+
+#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -68,6 +71,39 @@ private:
     bool _provenance;
 };
 
+// Surface-cage controls are authored ordinary USD attributes on the sparse
+// BasisCurves source. Keep the source live, like CurveRest, so a session does
+// not retain a first-frame copy when an author edits a cage array.
+class _CurveSurfaceCageValueDataSource final : public HdSampledDataSource
+{
+public:
+    HD_DECLARE_DATASOURCE(_CurveSurfaceCageValueDataSource);
+
+    _CurveSurfaceCageValueDataSource(UsdPrim const &prim, TfToken const &name)
+        : _prim(prim), _name(name) {}
+
+    VtValue GetValue(Time) override
+    {
+        VtValue value;
+        UsdAttribute const attr = _prim.GetAttribute(_name);
+        if (attr && attr.Get(&value, UsdTimeCode::Default()) &&
+            !value.IsEmpty()) {
+            return value;
+        }
+        return VtValue();
+    }
+
+    bool GetContributingSampleTimesForInterval(
+        Time, Time, std::vector<Time> *) override
+    {
+        return false;
+    }
+
+private:
+    UsdPrim _prim;
+    TfToken _name;
+};
+
 }  // namespace
 
 TF_REGISTRY_FUNCTION(TfType)
@@ -93,8 +129,50 @@ usdGenImaging::UsdGenCurveRestContainerFactory(
         _CurveRestValueDataSource::New(prim, true)};
     TfToken const names[2] = {
         TfToken("points"), TfToken("hasAuthoredRest")};
-    HdContainerDataSourceHandle const leaves =
+    HdContainerDataSourceHandle leaves =
         HdRetainedContainerDataSource::New(2, names, values);
+    static TfToken const cageNames[] = {
+        TfToken("ownerIds"), TfToken("ownerDensities"),
+        TfToken("ownerSeeds"), TfToken("ownerCvCounts"),
+        TfToken("ownerEdgeBias"), TfToken("ownerLengthProfileOffsets"),
+        TfToken("ownerLengthProfile"), TfToken("normalizedT"),
+        TfToken("triangles"), TfToken("triangleOwnerIndices"),
+        TfToken("triangleRootCharts"), TfToken("ownerChartCentroids"),
+        TfToken("ownerChartMeanRadii")};
+    static TfToken const cageAttrs[] = {
+        TfToken("usdGen:surfaceCage:ownerIds"),
+        TfToken("usdGen:surfaceCage:ownerDensities"),
+        TfToken("usdGen:surfaceCage:ownerSeeds"),
+        TfToken("usdGen:surfaceCage:ownerCvCounts"),
+        TfToken("usdGen:surfaceCage:ownerEdgeBias"),
+        TfToken("usdGen:surfaceCage:ownerLengthProfileOffsets"),
+        TfToken("usdGen:surfaceCage:ownerLengthProfile"),
+        TfToken("usdGen:surfaceCage:normalizedT"),
+        TfToken("usdGen:surfaceCage:triangles"),
+        TfToken("usdGen:surfaceCage:triangleOwnerIndices"),
+        TfToken("usdGen:surfaceCage:triangleRootCharts"),
+        TfToken("usdGen:surfaceCage:ownerChartCentroids"),
+        TfToken("usdGen:surfaceCage:ownerChartMeanRadii")};
+    std::vector<TfToken> presentNames;
+    std::vector<HdDataSourceBaseHandle> presentValues;
+    for (size_t i = 0; i != sizeof(cageAttrs) / sizeof(cageAttrs[0]); ++i) {
+        if (!prim.GetAttribute(cageAttrs[i])) continue;
+        presentNames.push_back(cageNames[i]);
+        presentValues.push_back(
+            _CurveSurfaceCageValueDataSource::New(prim, cageAttrs[i]));
+    }
+    if (!presentNames.empty()) {
+        HdContainerDataSourceHandle const cage =
+            HdRetainedContainerDataSource::New(
+                presentNames.size(), presentNames.data(), presentValues.data());
+        TfToken const cageRootName("surfaceCage");
+        HdDataSourceBaseHandle const cageRoot = cage;
+        HdContainerDataSourceHandle const merged =
+            HdRetainedContainerDataSource::New(
+                1, &cageRootName, &cageRoot);
+        leaves = HdOverlayContainerDataSource::OverlayedContainerDataSources(
+            merged, leaves);
+    }
     TfToken const rootName("usdGenCurveRest");
     HdDataSourceBaseHandle const rootValue = leaves;
     return HdRetainedContainerDataSource::New(
@@ -111,13 +189,18 @@ usdGenImaging::UsdGenCurveRestInvalidateMapping(
     TF_UNUSED(invalidationType);
     HdDataSourceLocatorSet result;
     HdDataSourceLocator const root(TfToken("usdGenCurveRest"));
+    bool cageDirty = false;
     for (TfToken const &property : properties) {
         std::string const name = property.GetString();
         if (name == "points" || name == "primvars:rest" ||
             name == "rest" || name.rfind("primvars:rest:", 0) == 0) {
             result.insert(root);
         }
+        if (name.rfind("usdGen:surfaceCage:", 0) == 0) {
+            cageDirty = true;
+        }
     }
+    if (cageDirty) result.insert(root);
     return result;
 }
 

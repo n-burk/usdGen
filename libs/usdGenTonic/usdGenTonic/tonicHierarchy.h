@@ -28,16 +28,18 @@
 //     vertex sets. Child ring counts vary per child (parent arcs + cut
 //     samples); uniformize-on-demand is an authoring op, not done here.
 //   * Edge mode supports count == 2 only (one drawn edge, two halves).
-//   * K7 averages arc-length-resampled child centers in double precision
-//     and re-fits sections to the union of the child rings projected into
-//     the parent section planes. Idempotence is bit-exact: a second pass
-//     over identical copies re-runs a pure function on identical inputs,
-//     and the double-precision mean of identical floats is exact.
+//   * Hint-less K7 averages arc-length-resampled child centers in double
+//     precision. A merge with a persistent parent hint keeps that parent's
+//     center cage/material frame/layout, extends only its terminal cage CV
+//     when descendants outgrow it, and writes a conservative support-plane
+//     envelope around every child section sample at every supported K5 density.
+//     Hint-less on-the-fly parents retain the historical union refit.
 //   * Merge takes the persistent parent as an optional hint (the model
 //     always has it: parents persist per §2.3). When every child matches
 //     its re-derived shape bit-wise (zero deltas), merge returns the hint
 //     copy, which is how subdivide -> merge round-trips bit-exactly.
-//     Otherwise merge is the K7 average (the aggregate shape).
+//     Otherwise a hinted merge is the K7 envelope; a hint-less merge is the
+//     historical K7 average.
 #ifndef USDGEN_TONIC_HIERARCHY_H
 #define USDGEN_TONIC_HIERARCHY_H
 
@@ -90,13 +92,16 @@ bool TonicParentAverageCpu(std::vector<TonicTubeDesc> const &children,
 
 // K14 merge: children -> parent. When `roundTripParent` is non-null and
 // every child matches its re-derived shape from that parent bit-wise
-// (untouched children), the output is an exact copy of the hint. Otherwise
-// (edited children, or no hint) the output is the K7 average. Merging a
-// selected sibling subset works the same way over the subset.
+// (untouched children), the output is an exact copy of the hint. An edited
+// hinted child updates only the original parent corners K14 recorded as its
+// inherited holding boundary; internal K14 cuts stay child-local. Without a
+// hint it uses the K7 average.
+// Merging a selected sibling subset works the same way over the subset.
 bool TonicMergeTubesCpu(std::vector<TonicTubeDesc> const &children,
                         TonicSubdivideDesc const &params,
                         TonicTubeDesc const *roundTripParent,
-                        TonicTubeDesc *parentOut, std::string *err);
+                        TonicTubeDesc *parentOut, std::string *err,
+                        std::vector<TonicTubeDesc> const *priorChildren = nullptr);
 
 // Polyline arc length of center CVs (double accumulation, float result).
 float TonicCenterArcLength(float const *cx, float const *cy, float const *cz,

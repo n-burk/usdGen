@@ -9,14 +9,17 @@
 // bracket (one undo step per drag, bit-exact cancel), redo, undo labels
 // and graph edits on the same undo stack.
 #include "usdGenTonic/tonicApi.h"
+#include "usdGenTonic/tonicApiStage.h"
 #include "usdGenTonic/tonicGizmo.h"
 #include "usdGenTonic/tonicModel.h"
 #include "usdGenTonic/tonicSelection.h"
 #include "usdGenTonic/tonicRegistry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -75,6 +78,54 @@ main()
     Check(Tonic_TakeDirty(ctx) == int(usdGenTonic::TonicDirty_Points),
           "sculpt marks exactly points dirty");
 
+    // Output settings are authored commit policy, deliberately independent
+    // of both the mesh and Fill's transient preview fraction.
+    {
+        int outputEnabled = -1;
+        float outputMultiplier = -1.0f, outputWidth = -1.0f;
+        Check(Tonic_GetOutputSettings(ctx, &outputEnabled, &outputMultiplier,
+                                      &outputWidth) == TONIC_OK &&
+                  outputEnabled == 0 && outputMultiplier == 1.0f &&
+                  outputWidth == 0.01f,
+              "output defaults are disabled, full density and .01 width");
+        unsigned long long const outputVersion = Tonic_GetVersion(ctx);
+        Check(Tonic_SetOutputSettings(ctx, 1, 2.5f, 0.04f) == TONIC_OK &&
+                  Tonic_GetVersion(ctx) == outputVersion + 1 &&
+                  Tonic_GetOutputSettings(ctx, &outputEnabled,
+                                          &outputMultiplier, &outputWidth) ==
+                      TONIC_OK &&
+                  outputEnabled == 1 && outputMultiplier == 2.5f &&
+                  outputWidth == 0.04f,
+              "output settings update atomically and version the commit state");
+        Check(Tonic_SetOutputSettings(ctx, 2, 1.0f, 0.01f) == TONIC_ERROR &&
+                  Tonic_SetOutputSettings(
+                      ctx, 1, std::numeric_limits<float>::quiet_NaN(),
+                      0.01f) == TONIC_ERROR &&
+                  Tonic_SetOutputSettings(ctx, 1, 1.0f, -0.01f) ==
+                      TONIC_ERROR &&
+                  Tonic_GetVersion(ctx) == outputVersion + 1 &&
+                  Tonic_GetOutputSettings(ctx, &outputEnabled,
+                                          &outputMultiplier, &outputWidth) ==
+                      TONIC_OK &&
+                  outputEnabled == 1 && outputMultiplier == 2.5f &&
+                  outputWidth == 0.04f,
+              "invalid output settings leave the prior state exact");
+        unsigned int outputUndoDirty = 0;
+        Check(Tonic_Undo(ctx, &outputUndoDirty) == TONIC_OK &&
+                  Tonic_GetOutputSettings(ctx, &outputEnabled,
+                                          &outputMultiplier, &outputWidth) ==
+                      TONIC_OK &&
+                  outputEnabled == 0 && outputMultiplier == 1.0f &&
+                  outputWidth == 0.01f &&
+                  Tonic_Redo(ctx, &outputUndoDirty) == TONIC_OK &&
+                  Tonic_GetOutputSettings(ctx, &outputEnabled,
+                                          &outputMultiplier, &outputWidth) ==
+                      TONIC_OK &&
+                  outputEnabled == 1 && outputMultiplier == 2.5f &&
+                  outputWidth == 0.04f,
+              "output settings survive one undo and redo atomically");
+    }
+
     std::vector<float> xyz(size_t(Tonic_GetVertexCount(ctx)) * 3);
     Check(Tonic_ReadTubePoints(ctx, nullptr, 0) == TONIC_ERROR,
           "ReadTubePoints rejects null output");
@@ -92,9 +143,11 @@ main()
           "GetLastError returns a string");
 
     // A 1-ring build is rejected; the model keeps the previous tube.
+    unsigned long long const versionBeforeFailedBuild = Tonic_GetVersion(ctx);
     Check(Tonic_BuildTestTube(ctx, 1, 8, 0.5f, 4.0f) == TONIC_ERROR,
           "BuildTestTube rejects rings < 2");
-    Check(Tonic_GetVersion(ctx) == 2, "failed build keeps the version");
+    Check(Tonic_GetVersion(ctx) == versionBeforeFailedBuild,
+          "failed build keeps the version");
     Check(Tonic_GetVertexCount(ctx) == 40, "failed build keeps the tube");
 
     Check(Tonic_Destroy(ctx) == TONIC_OK, "Tonic_Destroy succeeds");
@@ -193,19 +246,53 @@ main()
                   "undo: rebuild succeeds");
             Check(Tonic_GetUndoDepth(uc) == 0,
                   "undo: rebuild clears the stack");
-            // Topology undo: subdivide then undo removes the children.
-            std::vector<int> kids;
-            kids.resize(4);
-            int kidCount = 0;
+            // Topology undo keeps the active-cut frontier usable. Expansion
+            // is viewport state, so undoing a subdivision prunes only ids
+            // that became leaves and retains an independent expanded branch.
+            std::vector<int> kids(4);
+            std::vector<int> grandA(3), grandB(2);
+            int kidCount = 0, grandACount = 0, grandBCount = 0;
             Check(Tonic_SubdivideTube(uc, 0, 4, "kmeans", 7, kids.data(),
-                                      int(kids.size()),
-                                      &kidCount) == TONIC_OK &&
-                      kidCount == 4,
-                  "undo: subdivide runs");
-            Check(Tonic_GetTubeCount(uc) == 5, "undo: five tubes present");
-            Check(Tonic_Undo(uc, nullptr) == TONIC_OK, "undo: topology undo runs");
-            Check(Tonic_GetTubeCount(uc) == 1,
-                  "undo: undo removes the children");
+                                      int(kids.size()), &kidCount) == TONIC_OK &&
+                      kidCount == 4 &&
+                      Tonic_SubdivideTube(uc, kids[0], 3, "kmeans", 3,
+                                          grandA.data(), int(grandA.size()),
+                                          &grandACount) == TONIC_OK &&
+                      grandACount == 3 &&
+                      Tonic_SubdivideTube(uc, kids[1], 2, "kmeans", 5,
+                                          grandB.data(), int(grandB.size()),
+                                          &grandBCount) == TONIC_OK &&
+                      grandBCount == 2 &&
+                      Tonic_SetActiveCutEnabled(uc, 1) == TONIC_OK &&
+                      Tonic_SetTubeExpanded(uc, 0, 1) == TONIC_OK &&
+                      Tonic_SetTubeExpanded(uc, kids[0], 1) == TONIC_OK &&
+                      Tonic_SetTubeExpanded(uc, kids[1], 1) == TONIC_OK &&
+                      Tonic_IsTubeVisible(uc, grandA[0]) == 1 &&
+                      Tonic_IsTubeVisible(uc, grandB[0]) == 1,
+                  "undo: expanded sibling branches build a mixed-depth cut");
+            Check(Tonic_Undo(uc, nullptr) == TONIC_OK &&
+                      Tonic_GetTubeCount(uc) == 8 &&
+                      Tonic_GetTubeExpanded(uc, 0) == 1 &&
+                      Tonic_GetTubeExpanded(uc, kids[0]) == 1 &&
+                      Tonic_GetTubeExpanded(uc, kids[1]) == 0 &&
+                      Tonic_IsTubeVisible(uc, grandA[0]) == 1 &&
+                      Tonic_IsTubeVisible(uc, kids[1]) == 1,
+                  "undo: stale expanded leaf prunes while sibling cut stays live");
+            Check(Tonic_Redo(uc, nullptr) == TONIC_OK &&
+                      Tonic_GetTubeCount(uc) == 10 &&
+                      Tonic_GetTubeExpanded(uc, 0) == 1 &&
+                      Tonic_GetTubeExpanded(uc, kids[0]) == 1 &&
+                      Tonic_GetTubeExpanded(uc, kids[1]) == 0 &&
+                      Tonic_IsTubeVisible(uc, grandA[0]) == 1 &&
+                      Tonic_IsTubeVisible(uc, kids[1]) == 1 &&
+                      Tonic_IsTubeVisible(uc, grandB[0]) == 0,
+                  "redo: restored branch is collapsed and frontier remains visible");
+            Check(Tonic_Undo(uc, nullptr) == TONIC_OK &&
+                      Tonic_Undo(uc, nullptr) == TONIC_OK &&
+                      Tonic_Undo(uc, nullptr) == TONIC_OK &&
+                      Tonic_GetTubeCount(uc) == 1 &&
+                      Tonic_IsTubeVisible(uc, 0) == 1,
+                  "undo: restoring the root cannot leave it hidden");
             Check(Tonic_Destroy(uc) == TONIC_OK, "undo: model destroys");
         }
     }
@@ -413,6 +500,93 @@ main()
         Check(Tonic_BuildTestTube(sc, 0, 0, 0.0f, 0.0f) == TONIC_OK,
               "V1: test tube builds");
 
+        // A whole-tube press is a surface pick, not a proximity test against
+        // its tessellation vertices.  Pick the centroid of a visible quad
+        // triangle: it is deliberately many pixels from every vertex while
+        // still inside the rendered wall.
+        {
+            int const pickW = 800, pickH = 600;
+            float faceView[16] = {0.0f};
+            faceView[0] = 1.0f;   // screen x <- world x
+            faceView[5] = 0.5f;   // world y [0,4] -> NDC [-1,1]
+            faceView[10] = 1.0f;  // depth <- world z
+            faceView[13] = -1.0f;
+            faceView[15] = 1.0f;
+            std::vector<float> points(
+                size_t(Tonic_GetVertexCount(sc)) * 3);
+            bool const read = Tonic_ReadTubePoints(
+                sc, points.data(), int(points.size())) == TONIC_OK;
+            bool broadFace = false;
+            bool rawVertexMiss = false;
+            if (read) {
+                // Ring 0, slots 0/1 and ring 1, slot 1 form a large,
+                // non-degenerate side triangle on the default 5x8 tube.
+                float sx[3] = {0.0f}, sy[3] = {0.0f}, depth = 0.0f;
+                bool projected = true;
+                int const tri[3] = {0, 1, 9};
+                for (int i = 0; i < 3; ++i) {
+                    projected = projected && usdGenTonic::TonicProjectPoint(
+                        points.data() + size_t(tri[i]) * 3, faceView, pickW,
+                        pickH, &sx[i], &sy[i], &depth);
+                }
+                float const px = (sx[0] + sx[1] + sx[2]) / 3.0f;
+                float const py = (sy[0] + sy[1] + sy[2]) / 3.0f;
+                float nearest = 1e30f;
+                for (size_t i = 0; projected && i < points.size() / 3; ++i) {
+                    float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+                    if (!usdGenTonic::TonicProjectPoint(
+                            points.data() + i * 3, faceView, pickW, pickH,
+                            &vx, &vy, &vz)) {
+                        projected = false;
+                        break;
+                    }
+                    float const dx = vx - px, dy = vy - py;
+                    nearest = std::min(nearest, std::sqrt(dx * dx + dy * dy));
+                }
+                int hit = 0, id = -1, sub = -1, subSub = -1;
+                unsigned int kind = 0;
+                broadFace = projected && nearest > 4.0f &&
+                    Tonic_PickItem(sc, faceView, pickW, pickH, px, py, 4.0f,
+                                   usdGenTonic::TonicPick_TubeVert, &hit,
+                                   &kind, &id, &sub, &subSub) == TONIC_OK &&
+                    hit == 1 && kind == usdGenTonic::TonicPick_TubeVert &&
+                    id == 0 && sub == -1 && subSub == -1;
+                float dist = -1.0f, rawDepth = -1.0f;
+                rawVertexMiss = projected && nearest > 4.0f &&
+                    Tonic_Pick(sc, faceView, pickW, pickH, px, py, 4.0f,
+                               usdGenTonic::TonicPick_TubeVert, &hit, &kind,
+                               &id, &sub, &dist, &rawDepth) == TONIC_OK &&
+                    hit == 0;
+            }
+            Check(broadFace,
+                  "V1: a large quad interior picks its tube beyond vertex snap radius");
+            Check(rawVertexMiss,
+                  "V1: raw K11 remains a vertex-distance pick at quad interior");
+
+            // A component handle keeps priority even when it lies exactly on
+            // a surface vertex, so sculpt can select one center CV.
+            float center[3] = {0.0f, 0.0f, 0.0f};
+            float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+            int hit = 0, id = -1, sub = -1, subSub = -1;
+            unsigned int kind = 0;
+            Check(Tonic_GetTubeCenterHandle(sc, 0, 2, center) == TONIC_OK &&
+                      usdGenTonic::TonicProjectPoint(center, faceView, pickW,
+                                                      pickH, &cx, &cy, &cz) &&
+                      Tonic_PickItem(sc, faceView, pickW, pickH, cx, cy, 4.0f,
+                                     usdGenTonic::TonicPick_CenterCV |
+                                         usdGenTonic::TonicPick_TubeVert,
+                                     &hit, &kind, &id, &sub, &subSub) ==
+                          TONIC_OK &&
+                      hit == 1 && kind == usdGenTonic::TonicPick_CenterCV &&
+                      id == 0 && sub == 2,
+                  "V1: a center CV beats an overlapping tube surface");
+            Check(Tonic_PickItem(sc, faceView, pickW, pickH, 10.0f, 10.0f,
+                                 4.0f, usdGenTonic::TonicPick_TubeVert, &hit,
+                                 &kind, &id, &sub, &subSub) == TONIC_OK &&
+                      hit == 0,
+                  "V1: empty screen space remains a tube-surface miss");
+        }
+
         // -- round trips, one kind at a time ------------------------------
         int ids[4] = {0, 0, 0, 0};
         int subIds[4] = {1, 3, -1, -1};
@@ -526,8 +700,8 @@ main()
             float mn[3] = {9.0f, 9.0f, 9.0f};
             float mx[3] = {-9.0f, -9.0f, -9.0f};
             float cv[3] = {0.0f, 0.0f, 0.0f};
-            Check(Tonic_GetCenterCV(sc, 1, cv) == TONIC_OK,
-                  "V1: center CV 1 reads");
+            Check(Tonic_GetTubeCenterHandle(sc, 0, 1, cv) == TONIC_OK,
+                  "V1: center CV 1 display handle reads");
             Check(Tonic_GetSelectionBounds(sc, mn, mx) == TONIC_OK &&
                       std::abs(mn[1] - cv[1]) < 1e-6f &&
                       std::abs(mx[1] - cv[1]) < 1e-6f,
@@ -539,10 +713,13 @@ main()
 
         // -- marquee and lasso agree with the point pick ------------------
         //
-        // The model is subdivided first, exactly as the plan asks: the
-        // children are real tubes in the hierarchy, and the candidate sets
-        // stay tube 0's (the audit's G2 limitation), so what this proves is
-        // that the rubber band and the click read the SAME candidates.
+        // The model is subdivided first: the children are real tubes in
+        // the hierarchy, and the candidate sets span every live tube
+        // (centers and surface; sections stay tube 0's per the V0b G2
+        // note, since section edits on derived children are refused by
+        // design). What this proves is that the rubber band and the
+        // click read the SAME candidates -- and name the tube each one
+        // belongs to.
         {
             int kids[4] = {0};
             int kidCount = 0;
@@ -559,6 +736,165 @@ main()
             viewProj[10] = 1.0f;
             viewProj[13] = -1.0f;
             viewProj[15] = 1.0f;
+
+            // Section candidates are flattened while being picked, but must
+            // recover their owning child tube, ring and slot.  Derive a
+            // child's actual world-space section CV through the public
+            // section/frame contract, then require point pick, marquee and
+            // selection bounds to agree on that same child item.  Trying
+            // every slot keeps this independent of the deterministic split
+            // polygon's vertex ordering while still requiring one isolated
+            // child CV to survive all three paths.
+            bool childSectionRoundTrip = false;
+            bool childSectionPointPick = false;
+            bool childSectionRect = false;
+            bool childSectionBounds = false;
+            int childLastHit = -1, childLastId = -1, childLastRing = -1,
+                childLastSlot = -1;
+            // Use an oblique view for this test: the earlier side view is
+            // ideal for center CV spacing, but collapses a section ring's
+            // z coordinate. Looking down the tube instead collapses its
+            // ring heights. This projection keeps both dimensions apart.
+            float sectionViewProj[16] = {0.0f};
+            sectionViewProj[0] = 0.75f;
+            sectionViewProj[8] = 0.25f;  // screen x <- x + z
+            sectionViewProj[1] = 0.20f;
+            sectionViewProj[5] = 0.40f;
+            sectionViewProj[9] = 0.30f;  // screen y <- x + y + z
+            sectionViewProj[6] = 0.10f;  // depth <- world y
+            sectionViewProj[15] = 1.0f;
+            int const childId = kids[0];
+            int const childRing = 1;
+            int childSlots = 0;
+            float childT = 0.0f, childScale = 1.0f, childTwist = 0.0f;
+            if (Tonic_GetTubeSection(sc, childId, childRing, &childT,
+                                     nullptr, 0, &childSlots, &childScale,
+                                     &childTwist) == TONIC_OK &&
+                childSlots > 0) {
+                std::vector<float> childUv(size_t(childSlots) * 2);
+                float childOrigin[3] = {0.0f, 0.0f, 0.0f};
+                float childFrame[9] = {0.0f};
+                bool const readChild =
+                    Tonic_GetTubeSection(sc, childId, childRing, nullptr,
+                                         childUv.data(), int(childUv.size()),
+                                         &childSlots, &childScale,
+                                         &childTwist) == TONIC_OK &&
+                    Tonic_GetTubeSectionFrame(sc, childId, childRing,
+                                              childOrigin, childFrame,
+                                              &childScale, &childTwist) ==
+                        TONIC_OK;
+                if (readChild) {
+                    float meanU = 0.0f, meanV = 0.0f;
+                    float const ct = std::cos(childTwist);
+                    float const st = std::sin(childTwist);
+                    for (int slot = 0; slot < childSlots; ++slot) {
+                        float const u = childUv[size_t(slot) * 2] * childScale;
+                        float const v = childUv[size_t(slot) * 2 + 1] * childScale;
+                        meanU += u * ct - v * st;
+                        meanV += u * st + v * ct;
+                    }
+                    meanU /= float(childSlots);
+                    meanV /= float(childSlots);
+                    for (int slot = 0; slot < childSlots &&
+                                       !childSectionRoundTrip; ++slot) {
+                        float const u = childUv[size_t(slot) * 2] * childScale;
+                        float const v = childUv[size_t(slot) * 2 + 1] * childScale;
+                        float const ru = u * ct - v * st;
+                        float const rv = u * st + v * ct;
+                        float point[3] = {
+                            childOrigin[0] + childFrame[0] * (ru - meanU) +
+                                childFrame[3] * (rv - meanV),
+                            childOrigin[1] + childFrame[1] * (ru - meanU) +
+                                childFrame[4] * (rv - meanV),
+                            childOrigin[2] + childFrame[2] * (ru - meanU) +
+                                childFrame[5] * (rv - meanV)};
+                        float sx = 0.0f, sy = 0.0f, depth = 0.0f;
+                        int childHit = 0, childPickId = -1,
+                            childPickRing = -1, childPickSlot = -1;
+                        unsigned int childKind = 0;
+                        if (!usdGenTonic::TonicProjectPoint(point, sectionViewProj,
+                                                            w, h, &sx, &sy,
+                                                            &depth) ||
+                            Tonic_PickItem(sc, sectionViewProj, w, h, sx, sy, 0.25f,
+                                           usdGenTonic::TonicPick_SectionCV,
+                                           &childHit, &childKind, &childPickId,
+                                           &childPickRing, &childPickSlot) !=
+                                TONIC_OK) {
+                            continue;
+                        }
+                        childLastHit = childHit;
+                        childLastId = childPickId;
+                        childLastRing = childPickRing;
+                        childLastSlot = childPickSlot;
+                        if (
+                            childHit != 1 ||
+                            childKind != usdGenTonic::TonicPick_SectionCV ||
+                            childPickId != childId ||
+                            childPickRing != childRing ||
+                            childPickSlot != slot) {
+                            continue;
+                        }
+                        childSectionPointPick = true;
+                        int pickedCount = 0;
+                        float mn[3] = {0.0f}, mx[3] = {0.0f};
+                        childSectionRect =
+                            Tonic_SelectRect(sc, sectionViewProj, w, h,
+                                             sx - 0.25f, sy - 0.25f,
+                                             sx + 0.25f, sy + 0.25f,
+                                             usdGenTonic::TonicPick_SectionCV,
+                                             TONIC_SELECT_SET) == TONIC_OK &&
+                            Tonic_ReadSelection(sc,
+                                                usdGenTonic::TonicPick_SectionCV,
+                                                nullptr, nullptr, nullptr, 0,
+                                                &pickedCount) == TONIC_OK &&
+                            pickedCount > 0;
+                        if (childSectionRect) {
+                            std::vector<int> pickedIds(size_t(pickedCount), 0);
+                            std::vector<int> pickedRings(size_t(pickedCount), 0);
+                            std::vector<int> pickedSlots(size_t(pickedCount), 0);
+                            childSectionRect =
+                                Tonic_ReadSelection(
+                                    sc, usdGenTonic::TonicPick_SectionCV,
+                                    pickedIds.data(), pickedRings.data(),
+                                    pickedSlots.data(), pickedCount,
+                                    &pickedCount) == TONIC_OK;
+                            bool found = false;
+                            for (int i = 0; i < pickedCount; ++i) {
+                                found = found ||
+                                    (pickedIds[size_t(i)] == childId &&
+                                     pickedRings[size_t(i)] == childRing &&
+                                     pickedSlots[size_t(i)] == slot);
+                            }
+                            childSectionRect = childSectionRect && found;
+                        }
+                        if (!childSectionRect) {
+                            continue;
+                        }
+                        int const selectedId = childId;
+                        int const selectedRing = childRing;
+                        int const selectedSlot = slot;
+                        childSectionBounds =
+                            Tonic_SelectSet(sc,
+                                            usdGenTonic::TonicPick_SectionCV,
+                                            &selectedId, &selectedRing,
+                                            &selectedSlot, 1) == TONIC_OK &&
+                            Tonic_GetSelectionBounds(sc, mn, mx) == TONIC_OK &&
+                            std::abs(mn[0] - point[0]) < 1e-4f &&
+                            std::abs(mn[1] - point[1]) < 1e-4f &&
+                            std::abs(mn[2] - point[2]) < 1e-4f &&
+                            std::abs(mx[0] - point[0]) < 1e-4f &&
+                            std::abs(mx[1] - point[1]) < 1e-4f &&
+                            std::abs(mx[2] - point[2]) < 1e-4f;
+                        childSectionRoundTrip = childSectionBounds;
+                    }
+                }
+            }
+            std::printf("info: child section point=%d rect=%d bounds=%d last=(%d,%d,%d,%d)\n",
+                        childSectionPointPick, childSectionRect,
+                        childSectionBounds, childLastHit, childLastId,
+                        childLastRing, childLastSlot);
+            Check(childSectionRoundTrip,
+                  "V1: child section CV point pick, marquee and bounds agree");
             float px[8] = {0.0f}, py[8] = {0.0f};
             int const cvCount = Tonic_GetCenterCVCount(sc);
             Check(cvCount == 5, "V1: the test tube has five center CVs");
@@ -566,8 +902,8 @@ main()
             for (int i = 0; i < cvCount && i < 8; ++i) {
                 float cv[3] = {0.0f, 0.0f, 0.0f};
                 float z = 0.0f;
-                projected = projected && Tonic_GetCenterCV(sc, i, cv) ==
-                                             TONIC_OK &&
+                projected = projected &&
+                            Tonic_GetTubeCenterHandle(sc, 0, i, cv) == TONIC_OK &&
                             usdGenTonic::TonicProjectPoint(
                                 cv, viewProj, w, h, &px[i], &py[i], &z);
             }
@@ -609,34 +945,57 @@ main()
                                       usdGenTonic::TonicPick_CenterCV,
                                       TONIC_SELECT_SET) == TONIC_ERROR,
                   "V1: a two-point lasso is rejected");
-            // A band over the whole frame catches every CV, and each one
-            // picks back to an item that is in the selection.
+            // A band over the whole frame catches every CV of every
+            // tube, and each one picks back to an item that names its
+            // own tube.
+            int allTubes[8] = {0, kids[0], kids[1], kids[2], kids[3],
+                               -1, -1, -1};
+            int allCount = 0;
+            for (int t = 0; t < 5; ++t) {
+                allCount += Tonic_GetTubeCenterCount(sc, allTubes[t]);
+            }
             Check(Tonic_SelectRect(sc, viewProj, w, h, -1e4f, -1e4f, 1e4f,
                                    1e4f, usdGenTonic::TonicPick_CenterCV,
                                    TONIC_SELECT_SET) == TONIC_OK &&
                       Tonic_ReadSelection(sc, usdGenTonic::TonicPick_CenterCV, oid, osub,
                                           nullptr, 64, &count) == TONIC_OK &&
-                      count == cvCount,
+                      count == allCount,
                   "V1: a full-frame marquee catches every center CV");
             bool agree = true;
-            for (int i = 0; i < cvCount; ++i) {
-                hit = 0;
-                pid = -1;
-                psub = -1;
-                agree = agree &&
-                        Tonic_PickItem(sc, viewProj, w, h, px[i], py[i], 4.0f,
-                                       usdGenTonic::TonicPick_CenterCV, &hit, &pkind, &pid,
-                                       &psub, &pss) == TONIC_OK &&
-                        hit == 1 && pid == 0 && psub == i;
+            for (int t = 0; t < 5 && agree; ++t) {
+                int const nCv = Tonic_GetTubeCenterCount(sc, allTubes[t]);
+                for (int i = 0; i < nCv && agree; ++i) {
+                    float ccv[3] = {0.0f, 0.0f, 0.0f};
+                    float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+                    agree = agree &&
+                            Tonic_GetTubeCenterHandle(sc, allTubes[t], i, ccv) ==
+                                TONIC_OK &&
+                            usdGenTonic::TonicProjectPoint(
+                                ccv, viewProj, w, h, &cx, &cy, &cz);
+                    hit = 0;
+                    pid = -1;
+                    psub = -1;
+                    agree = agree &&
+                            Tonic_PickItem(sc, viewProj, w, h, cx, cy, 4.0f,
+                                           usdGenTonic::TonicPick_CenterCV, &hit, &pkind, &pid,
+                                           &psub, &pss) == TONIC_OK &&
+                            hit == 1 && pid == allTubes[t] && psub == i;
+                }
             }
             Check(agree,
                   "V1: every marqueed CV is what a click there would pick");
-            // Many surface candidates collapse into one tube item.
+            // Many surface candidates collapse into one item per tube.
+            int surfIds[8] = {0};
             Check(Tonic_SelectRect(sc, viewProj, w, h, -1e4f, -1e4f, 1e4f,
                                    1e4f, usdGenTonic::TonicPick_TubeVert,
                                    TONIC_SELECT_SET) == TONIC_OK &&
-                      Tonic_GetSelectionCount(sc, usdGenTonic::TonicPick_TubeVert) == 1,
-                  "V1: a band over the surface selects one tube, not 40");
+                      Tonic_ReadSelection(sc, usdGenTonic::TonicPick_TubeVert, surfIds,
+                                          nullptr, nullptr, 8,
+                                          &count) == TONIC_OK &&
+                      count == 5 && surfIds[0] == 0 &&
+                      surfIds[1] == kids[0] && surfIds[2] == kids[1] &&
+                      surfIds[3] == kids[2] && surfIds[4] == kids[3],
+                  "V1: a band over the surface selects every tube once");
             // An empty band in SET mode deselects.
             Check(Tonic_SelectRect(sc, viewProj, w, h, 1e4f, 1e4f, 1e4f + 1.0f,
                                    1e4f + 1.0f, usdGenTonic::TonicPick_CenterCV,
@@ -651,10 +1010,74 @@ main()
             int grandKids[4] = {0};
             int grandCount = 0;
             Check(Tonic_SubdivideTube(sc, kids[0], 3, "kmeans", 3, grandKids,
-                                      4, &grandCount) == TONIC_OK,
+                                      4, &grandCount) == TONIC_OK &&
+                      grandCount == 3,
                   "V1: subdivide a child (the parent stays selected)");
             Check(Tonic_GetSelectionCount(sc, usdGenTonic::TonicPick_TubeVert) == 1,
                   "V1: subdividing another tube leaves the selection alone");
+
+            // The per-branch active cut is opt-in: old callers still see
+            // every live descriptor, while hierarchy navigation replaces an
+            // expanded parent by its direct children and leaves sibling
+            // branches alone. It must ignore the legacy numeric focus level
+            // because this frontier intentionally mixes L2 and L3 tubes.
+            float hiddenChild[3] = {0.0f, 0.0f, 0.0f};
+            float hiddenX = 0.0f, hiddenY = 0.0f, hiddenDepth = 0.0f;
+            int activeHit = 0, activeId = -1, activeSub = -1,
+                activeSubSub = -1;
+            unsigned int activeKind = 0;
+            bool const activeCut =
+                Tonic_GetActiveCutEnabled(sc) == 0 &&
+                Tonic_IsTubeVisible(sc, 0) == 1 &&
+                Tonic_IsTubeVisible(sc, kids[0]) == 1 &&
+                Tonic_GetTubeCenterHandle(sc, kids[0], 0, hiddenChild) == TONIC_OK &&
+                usdGenTonic::TonicProjectPoint(hiddenChild, viewProj, w, h,
+                                                &hiddenX, &hiddenY,
+                                                &hiddenDepth) &&
+                Tonic_SetActiveCutEnabled(sc, 1) == TONIC_OK &&
+                Tonic_GetActiveCutEnabled(sc) == 1 &&
+                Tonic_IsTubeVisible(sc, 0) == 1 &&
+                Tonic_IsTubeVisible(sc, kids[0]) == 0 &&
+                Tonic_IsTubeVisible(sc, kids[1]) == 0 &&
+                Tonic_PickItem(sc, viewProj, w, h, hiddenX, hiddenY, 4.0f,
+                               usdGenTonic::TonicPick_CenterCV, &activeHit,
+                               &activeKind, &activeId, &activeSub,
+                               &activeSubSub) == TONIC_OK &&
+                !(activeHit == 1 && activeKind ==
+                                         usdGenTonic::TonicPick_CenterCV &&
+                  activeId == kids[0]) &&
+                Tonic_SetTubeExpanded(sc, 0, 1) == TONIC_OK &&
+                Tonic_GetTubeExpanded(sc, 0) == 1 &&
+                Tonic_IsTubeVisible(sc, 0) == 0 &&
+                Tonic_IsTubeVisible(sc, kids[0]) == 1 &&
+                Tonic_IsTubeVisible(sc, kids[1]) == 1 &&
+                Tonic_PickItem(sc, viewProj, w, h, hiddenX, hiddenY, 4.0f,
+                               usdGenTonic::TonicPick_CenterCV, &activeHit,
+                               &activeKind, &activeId, &activeSub,
+                               &activeSubSub) == TONIC_OK &&
+                activeHit == 1 &&
+                activeKind == usdGenTonic::TonicPick_CenterCV &&
+                activeId == kids[0] &&
+                Tonic_SetFocusLevel(sc, 2) == TONIC_OK &&
+                Tonic_SetTubeExpanded(sc, kids[0], 1) == TONIC_OK &&
+                Tonic_IsTubeVisible(sc, kids[0]) == 0 &&
+                Tonic_IsTubeVisible(sc, kids[1]) == 1 &&
+                Tonic_IsTubeVisible(sc, grandKids[0]) == 1 &&
+                Tonic_SetTubeExpanded(sc, 0, 0) == TONIC_OK &&
+                Tonic_GetTubeExpanded(sc, 0) == 0 &&
+                Tonic_GetTubeExpanded(sc, kids[0]) == 0 &&
+                Tonic_IsTubeVisible(sc, 0) == 1 &&
+                Tonic_IsTubeVisible(sc, kids[0]) == 0 &&
+                Tonic_IsTubeVisible(sc, grandKids[0]) == 0 &&
+                Tonic_SetTubeExpanded(sc, grandKids[0], 1) == TONIC_ERROR &&
+                Tonic_SetActiveCutEnabled(sc, 0) == TONIC_OK &&
+                Tonic_GetActiveCutEnabled(sc) == 0 &&
+                Tonic_IsTubeVisible(sc, 0) == 1 &&
+                Tonic_IsTubeVisible(sc, kids[0]) == 1 &&
+                Tonic_IsTubeVisible(sc, grandKids[0]) == 1 &&
+                Tonic_SetFocusLevel(sc, 0) == TONIC_OK;
+            Check(activeCut,
+                  "V1: active cut isolates one expanded branch and filters picks");
             int selKids[8] = {0};
             Check(Tonic_SelectSet(sc, usdGenTonic::TonicPick_TubeVert, &kids[1], nullptr,
                                   nullptr, 1) == TONIC_OK,
@@ -739,17 +1162,24 @@ main()
             record.activeHandle = 2;
             usdGenTonic::TonicOverlayCurves curves;
             Check(usdGenTonic::TonicBuildGizmoCurves(record, &curves) &&
-                      curves.CurveCount() == 3 &&
-                      curves.points.size() == 3 * 2 * 3,
-                  "V1: a translate gizmo is three two-point axes");
-            Check(curves.handleIds[0] == 0 && curves.handleIds[2] == 2 &&
-                      curves.active[2] == 1 && curves.active[0] == 0,
-                  "V1: the active handle is the one that was asked for");
+                      curves.CurveCount() == 19 &&
+                      curves.points.size() == 50 * 3,
+                  "V1: a translate gizmo has Maya axes, arrows and move squares");
+            bool activeMatches = true;
+            bool foundActive = false;
+            for (size_t i = 0; i < curves.handleIds.size(); ++i) {
+                bool const want = curves.handleIds[i] == record.activeHandle;
+                activeMatches = activeMatches &&
+                    (curves.active[i] == (want ? 1 : 0));
+                foundActive = foundActive || want;
+            }
+            Check(foundActive && activeMatches,
+                  "V1: every curve of the requested handle is active");
             Check(curves.colors[0] > 0.8f && curves.colors[1] < 0.2f,
                   "V1: the u axis is red");
             record.kind = usdGenTonic::TonicGizmo_RingTRS;
             Check(usdGenTonic::TonicBuildGizmoCurves(record, &curves) &&
-                      curves.CurveCount() == 4 &&
+                      curves.CurveCount() == 18 &&
                       curves.vertexCounts[0] ==
                           usdGenTonic::TonicGizmoCircleSegments() + 1,
                   "V1: a ring gizmo is a closed circle plus three axes");
@@ -815,9 +1245,9 @@ main()
                       TONIC_ERROR,
                   "V1: there is no step at depth 7");
         }
-        unsigned int dirty = 0;
-        Check(Tonic_Undo(bc, &dirty) == TONIC_OK &&
-                  (dirty & usdGenTonic::TonicDirty_Points) != 0,
+        unsigned int coreDirty = 0;
+        Check(Tonic_Undo(bc, &coreDirty) == TONIC_OK &&
+                  (coreDirty & usdGenTonic::TonicDirty_Points) != 0,
               "V1: undo reports the dirty bits to publish");
         Check(Tonic_ReadTubePoints(bc, probe.data(), int(floats)) ==
                   TONIC_OK && probe == base,
@@ -829,9 +1259,9 @@ main()
                       TONIC_OK && std::string(label) == "sculpt",
                   "V1: a negative depth reads the redo label");
         }
-        dirty = 0;
-        Check(Tonic_Redo(bc, &dirty) == TONIC_OK &&
-                  (dirty & usdGenTonic::TonicDirty_Points) != 0,
+        coreDirty = 0;
+        Check(Tonic_Redo(bc, &coreDirty) == TONIC_OK &&
+                  (coreDirty & usdGenTonic::TonicDirty_Points) != 0,
               "V1: redo reports its dirty bits too");
         Check(Tonic_ReadTubePoints(bc, probe.data(), int(floats)) ==
                   TONIC_OK && probe == dragged,
@@ -862,9 +1292,9 @@ main()
         Check(Tonic_ReadTubePoints(bc, probe.data(), int(floats)) ==
                   TONIC_OK && probe != base,
               "V1: the cancelled drag did move the tube first");
-        dirty = 0;
-        Check(Tonic_CancelGesture(bc, &dirty) == TONIC_OK &&
-                  (dirty & usdGenTonic::TonicDirty_Points) != 0,
+        coreDirty = 0;
+        Check(Tonic_CancelGesture(bc, &coreDirty) == TONIC_OK &&
+                  (coreDirty & usdGenTonic::TonicDirty_Points) != 0,
               "V1: Cancel reports what to publish");
         Check(Tonic_ReadTubePoints(bc, probe.data(), int(floats)) ==
                   TONIC_OK && probe == base,
@@ -875,6 +1305,94 @@ main()
         Check(Tonic_GetVersion(bc) > versionBefore,
               "V1: the moves bumped the version; Cancel does not bump again");
         Check(Tonic_Destroy(bc) == TONIC_OK, "V1: gesture model destroys");
+    }
+
+    // Grab keeps its press-time screen footprint for the whole gesture. A
+    // second positive increment must still select the CV after the first
+    // increment has moved it farther than the brush radius from the anchor.
+    {
+        TonicModelContext *sc = nullptr;
+        Check(Tonic_Create(&sc) == TONIC_OK && sc != nullptr,
+              "V1: frozen-grab model creates");
+        if (sc) {
+            Check(Tonic_BuildTestTube(sc, 0, 0, 0.0f, 0.0f) == TONIC_OK,
+                  "V1: frozen-grab tube builds");
+            auto readCenters = [&](std::vector<float> *out) {
+                int const count = Tonic_GetTubeCenterCount(sc, 0);
+                if (count < 2 || !out) {
+                    return false;
+                }
+                out->assign(size_t(count) * 3, 0.0f);
+                for (int i = 0; i < count; ++i) {
+                    if (Tonic_GetTubeCenterCV(sc, 0, i,
+                                               out->data() + size_t(i) * 3) !=
+                        TONIC_OK) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            // y=2 projects to (500, 250); adjacent straight-spine CVs are
+            // 125 pixels apart, so a 30-pixel brush isolates CV 2.
+            float const viewProj[16] = {
+                0.25f, 0.0f,  0.0f, 0.0f,
+                0.0f,  0.25f, 0.0f, 0.0f,
+                0.0f,  0.0f,  1.0f, 0.0f,
+                0.0f,  0.0f,  0.0f, 1.0f};
+            float const delta[3] = {0.4f, 0.0f, 0.0f};
+            std::vector<float> base, afterFirst, afterDrag, restored;
+            int firstTouched = 0, secondTouched = 0;
+            bool const setup = readCenters(&base) &&
+                Tonic_BeginGesture(sc, "frozen grab") == TONIC_OK &&
+                Tonic_SculptStrokeShaped(sc, 0, "grab", viewProj, 1000,
+                                         1000, 500.0f, 250.0f, 30.0f, delta,
+                                         0.0f, 0.5f, 0.0f, 0, 0,
+                                         &firstTouched) == TONIC_OK &&
+                readCenters(&afterFirst) &&
+                Tonic_SculptStrokeShaped(sc, 0, "grab", viewProj, 1000,
+                                         1000, 500.0f, 250.0f, 30.0f, delta,
+                                         0.0f, 0.5f, 0.0f, 0, 0,
+                                         &secondTouched) == TONIC_OK &&
+                readCenters(&afterDrag) && Tonic_EndGesture(sc) == TONIC_OK;
+            bool firstOnly = setup && firstTouched == 1 &&
+                std::fabs(afterFirst[2 * 3] - (base[2 * 3] + 0.4f)) < 1e-6f;
+            for (int i = 0; firstOnly && i < 5; ++i) {
+                if (i != 2) {
+                    firstOnly = afterFirst[size_t(i) * 3] ==
+                                    base[size_t(i) * 3] &&
+                                afterFirst[size_t(i) * 3 + 1] ==
+                                    base[size_t(i) * 3 + 1] &&
+                                afterFirst[size_t(i) * 3 + 2] ==
+                                    base[size_t(i) * 3 + 2];
+                }
+            }
+            Check(firstOnly,
+                  "V1: frozen grab keeps the initial one-CV footprint");
+            Check(setup && secondTouched == 1 &&
+                      std::fabs(afterDrag[2 * 3] -
+                                (base[2 * 3] + 0.8f)) < 1e-6f,
+                  "V1: a long frozen grab keeps applying incremental deltas");
+            Check(Tonic_Undo(sc, nullptr) == TONIC_OK &&
+                      readCenters(&restored) && restored == base,
+                  "V1: frozen grab remains one undoable gesture");
+            Check(Tonic_Redo(sc, nullptr) == TONIC_OK &&
+                      readCenters(&restored) && restored == afterDrag,
+                  "V1: frozen-grab redo restores the full drag");
+            int cancelTouched = 0;
+            Check(Tonic_BeginGesture(sc, "frozen cancel") == TONIC_OK &&
+                      Tonic_SculptStrokeShaped(
+                          // Redo left CV 2 at x=.8, which projects to x=600.
+                          // A new gesture captures that current press point;
+                          // 500 is its original pre-drag point and must miss.
+                          sc, 0, "grab", viewProj, 1000, 1000, 600.0f,
+                          250.0f, 30.0f, delta, 0.0f, 0.5f, 0.0f, 0, 1,
+                          &cancelTouched) == TONIC_OK && cancelTouched == 1 &&
+                      Tonic_CancelGesture(sc, nullptr) == TONIC_OK &&
+                      readCenters(&restored) && restored == afterDrag,
+                  "V1: mirrored frozen grab cancels to its gesture base");
+            Check(Tonic_Destroy(sc) == TONIC_OK,
+                  "V1: frozen-grab model destroys");
+        }
     }
 
     // -- the marquee's device lane agrees with its CPU twin ---------------
@@ -1152,6 +1670,261 @@ main()
                   "V1: no edge is within 30 px of the region centre");
         }
         Check(Tonic_Destroy(kc) == TONIC_OK, "V1: kinds model destroys");
+    }
+
+    // -- exact surface region query --------------------------------------
+    // A single coarse quad can hold several graph loops.  Its K3 face map
+    // has one winning id, so region picking must classify the actual K1
+    // (face, uv) hit instead of approximating from a region centre or the
+    // face id.
+    {
+        TonicModelContext *rc = nullptr;
+        Check(Tonic_Create(&rc) == TONIC_OK && rc != nullptr,
+              "surface region: model creates");
+        float const points[] = {0.0f, 0.0f, 0.0f,
+                                1.0f, 0.0f, 0.0f,
+                                1.0f, 0.0f, 1.0f,
+                                0.0f, 0.0f, 1.0f};
+        int const counts[] = {4};
+        int const indices[] = {0, 1, 2, 3};
+        Check(rc && Tonic_BindScalp(rc, points, 12, counts, 1, indices, 4) ==
+                        TONIC_OK,
+              "surface region: one-quad scalp binds");
+        auto addLoop = [&](float u0, float v0, float u1, float v1) {
+            int node[4] = {-1, -1, -1, -1};
+            float const uv[4][2] = {{u0, v0}, {u1, v0},
+                                    {u1, v1}, {u0, v1}};
+            for (int i = 0; i < 4; ++i) {
+                if (Tonic_GraphAddNode(rc, 0, uv[i][0], uv[i][1],
+                                       &node[i]) != TONIC_OK) {
+                    return false;
+                }
+            }
+            for (int i = 0; i < 4; ++i) {
+                int edge = -1;
+                if (Tonic_GraphConnect(rc, node[i], node[(i + 1) % 4],
+                                       &edge) != TONIC_OK) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        Check(rc && addLoop(0.10f, 0.15f, 0.35f, 0.85f) &&
+                        addLoop(0.65f, 0.15f, 0.90f, 0.85f),
+              "surface region: two disjoint subface loops author");
+        Check(Tonic_Rasterise(rc) == TONIC_OK,
+              "surface region: coarse map rasterises");
+        int const left = Tonic_RegionAtSurface(rc, 0, 0.20f, 0.50f);
+        int const right = Tonic_RegionAtSurface(rc, 0, 0.80f, 0.50f);
+        Check(left >= 0 && right >= 0 && left != right,
+              "surface region: same face picks its distinct subface regions");
+        Check(Tonic_RegionAtSurface(rc, 0, 0.50f, 0.50f) == -1,
+              "surface region: same-face gap is not assigned a region");
+        Check(Tonic_RegionAtSurface(rc, 99, 0.20f, 0.50f) == -1 &&
+                  Tonic_RegionAtSurface(nullptr, 0, 0.20f, 0.50f) == -1,
+              "surface region: invalid surface hits miss");
+        Check(Tonic_Destroy(rc) == TONIC_OK,
+              "surface region: model destroys");
+    }
+
+    // -- atomic shared-CV region creation ---------------------------------
+    {
+        TonicModelContext *cc = nullptr;
+        Check(Tonic_Create(&cc) == TONIC_OK && cc != nullptr,
+              "shared CV: model creates");
+        float const points[] = {0.0f, 0.0f, 0.0f,
+                                1.0f, 0.0f, 0.0f,
+                                1.0f, 0.0f, 1.0f,
+                                0.0f, 0.0f, 1.0f};
+        int const counts[] = {4};
+        int const indices[] = {0, 1, 2, 3};
+        Check(cc && Tonic_BindScalp(cc, points, 12, counts, 1, indices, 4) ==
+                        TONIC_OK,
+              "shared CV: one-quad scalp binds");
+        int const newNodes[] = {-1, -1, -1, -1};
+        int const faces[] = {0, 0, 0, 0};
+        float const leftUV[] = {0.10f, 0.20f, 0.45f, 0.20f,
+                                0.45f, 0.80f, 0.10f, 0.80f};
+        int leftRegion = -1;
+        Check(Tonic_GraphCreateRegion(cc, newNodes, faces, leftUV, 4,
+                                      &leftRegion) == TONIC_OK &&
+                  leftRegion >= 0,
+              "shared CV: atomically creates the first region");
+        int nodeCount = 0, edgeCount = 0, regionCount = 0;
+        Check(Tonic_GetGraphCounts(cc, &nodeCount, &edgeCount, &regionCount) ==
+                        TONIC_OK &&
+                  nodeCount == 4 && edgeCount == 4 && regionCount == 1,
+              "shared CV: first closed chain has one region");
+        // Leave a dead-id gap. The next call must reuse ids 1 and 2, never
+        // their compact draw-order positions.
+        int loose = -1;
+        Check(Tonic_GraphAddNode(cc, 0, 0.70f, 0.10f, &loose) == TONIC_OK &&
+                  loose == 4 && Tonic_GraphDeleteNode(cc, loose) == TONIC_OK,
+              "shared CV: a deleted-node gap exists");
+        int face = -1;
+        float uv[2] = {}, p[3] = {};
+        Check(Tonic_GraphGetNode(cc, 1, &face, uv, p) == TONIC_OK &&
+                  face == 0 && uv[0] == 0.45f && uv[1] == 0.20f &&
+                  Tonic_GraphGetNode(cc, loose, &face, uv, p) == TONIC_ERROR,
+              "shared CV: stable node getter rejects the dead gap");
+        // Reposition moves a whole edge as one graph sample: both stable
+        // endpoint ids move together, regions re-extract once, and the
+        // existing gesture bracket owns undo, redo and Escape cancellation.
+        int edgeNodes[2] = {-1, -1};
+        int const edgeFaces[2] = {0, 0};
+        float const movedEdgeUV[4] = {0.50f, 0.20f, 0.50f, 0.80f};
+        float const cancelledEdgeUV[4] = {0.55f, 0.20f, 0.55f, 0.80f};
+        float const collapsedEdgeUV[4] = {0.50f, 0.50f, 0.50f, 0.50f};
+        float p1[3] = {}, p2[3] = {};
+        float uv1[2] = {}, uv2[2] = {};
+        uint32_t cancelDirty = 0;
+        uint64_t const mapBeforeMove = Tonic_GetMapVersion(cc);
+        Check(Tonic_GraphGetEdge(cc, 1, edgeNodes) == TONIC_OK &&
+                  edgeNodes[0] == 1 && edgeNodes[1] == 2 &&
+                  Tonic_BeginGesture(cc, "move edge") == TONIC_OK &&
+                  Tonic_GraphMoveNodes(cc, edgeNodes, edgeFaces, movedEdgeUV,
+                                       2) == TONIC_OK &&
+                  Tonic_GraphGetNode(cc, 1, &face, uv1, p1) == TONIC_OK &&
+                  Tonic_GraphGetNode(cc, 2, &face, uv2, p2) == TONIC_OK &&
+                  uv1[0] == 0.50f && uv1[1] == 0.20f &&
+                  uv2[0] == 0.50f && uv2[1] == 0.80f &&
+                  Tonic_GetMapVersion(cc) > mapBeforeMove &&
+                  Tonic_EndGesture(cc) == TONIC_OK &&
+                  Tonic_Undo(cc, nullptr) == TONIC_OK &&
+                  Tonic_GraphGetNode(cc, 1, &face, uv1, p1) == TONIC_OK &&
+                  Tonic_GraphGetNode(cc, 2, &face, uv2, p2) == TONIC_OK &&
+                  uv1[0] == 0.45f && uv2[0] == 0.45f &&
+                  Tonic_Redo(cc, nullptr) == TONIC_OK &&
+                  Tonic_BeginGesture(cc, "cancel edge") == TONIC_OK &&
+                  Tonic_GraphMoveNodes(cc, edgeNodes, edgeFaces,
+                                       cancelledEdgeUV, 2) == TONIC_OK &&
+                  Tonic_CancelGesture(cc, &cancelDirty) == TONIC_OK &&
+                  cancelDirty != usdGenTonic::TonicDirty_Clean &&
+                  Tonic_GraphGetNode(cc, 1, &face, uv1, p1) == TONIC_OK &&
+                  Tonic_GraphGetNode(cc, 2, &face, uv2, p2) == TONIC_OK &&
+                  uv1[0] == 0.50f && uv2[0] == 0.50f &&
+                  Tonic_GraphMoveNodes(cc, edgeNodes, edgeFaces,
+                                       collapsedEdgeUV, 2) == TONIC_ERROR &&
+                  Tonic_GraphGetNode(cc, 1, &face, uv1, p1) == TONIC_OK &&
+                  Tonic_GraphGetNode(cc, 2, &face, uv2, p2) == TONIC_OK &&
+                  uv1[0] == 0.50f && uv1[1] == 0.20f &&
+                  uv2[0] == 0.50f && uv2[1] == 0.80f &&
+                  Tonic_GraphGetEdge(cc, 1, edgeNodes) == TONIC_OK &&
+                  edgeNodes[0] == 1 && edgeNodes[1] == 2,
+              "shared CV: atomic edge reposition preserves ids and cancels safely");
+        // The graph draws a node above the scalp tint. At an oblique,
+        // high-zoom view that normal lift is many pixels, so K11 selection
+        // must use the displayed point while raw Tonic_Pick keeps its
+        // canonical candidate contract. This is the exact existing endpoint
+        // the adjacent region reuses below.
+        Check(Tonic_GraphGetNode(cc, 1, &face, uv, p) == TONIC_OK,
+              "shared CV: the moved endpoint remains a canonical graph node");
+        float rawNode[3] = {p[0], p[1], p[2]};
+        float displayNode[3] = {};
+        float oblique[16] = {};
+        oblique[0] = 1.0f;
+        oblique[1] = 0.10f;
+        oblique[5] = 20.0f;  // high zoom makes the normal lift observable
+        oblique[9] = 0.50f;
+        oblique[10] = 1.0f;
+        oblique[13] = -0.20f;
+        oblique[15] = 1.0f;
+        float rawX = 0.0f, rawY = 0.0f, displayX = 0.0f, displayY = 0.0f,
+              depth = 0.0f, rawDistance = 0.0f, rawDepth = 0.0f;
+        int hit = 0, pickId = -1, sub = -1, subSub = -1;
+        unsigned int kind = 0;
+        Check(Tonic_GraphGetNodeDisplayPosition(cc, 1, displayNode) ==
+                      TONIC_OK &&
+                  Tonic_GraphGetNodeDisplayPosition(cc, loose, displayNode) ==
+                      TONIC_ERROR &&
+                  usdGenTonic::TonicProjectPoint(rawNode, oblique, 1024, 1024,
+                                                  &rawX, &rawY, &depth) &&
+                  usdGenTonic::TonicProjectPoint(displayNode, oblique, 1024,
+                                                  1024, &displayX, &displayY,
+                                                  &depth) &&
+                  std::hypot(displayX - rawX, displayY - rawY) > 4.0f &&
+                  Tonic_Pick(cc, oblique, 1024, 1024, displayX, displayY,
+                             2.0f, usdGenTonic::TonicPick_GraphNode, &hit,
+                             &kind, &pickId, &sub, &rawDistance, &rawDepth) ==
+                      TONIC_OK &&
+                  hit == 0 &&
+                  Tonic_PickItem(cc, oblique, 1024, 1024, displayX, displayY,
+                                 2.0f, usdGenTonic::TonicPick_GraphNode, &hit,
+                                 &kind, &pickId, &sub, &subSub) == TONIC_OK &&
+                  hit == 1 && kind == usdGenTonic::TonicPick_GraphNode &&
+                  pickId == 1 &&
+                  Tonic_SelectRect(cc, oblique, 1024, 1024, displayX - 1.0f,
+                                   displayY - 1.0f, displayX + 1.0f,
+                                   displayY + 1.0f,
+                                   usdGenTonic::TonicPick_GraphNode,
+                                   usdGenTonic::TonicSelect_Set) == TONIC_OK &&
+                  Tonic_GetSelectionCount(cc,
+                                          usdGenTonic::TonicPick_GraphNode) == 1,
+              "shared CV: rendered endpoint picks and boxes independently of raw K11");
+        // That first oblique camera moves the normal lift along this
+        // vertical edge's projected line. Turn the camera so the lift is
+        // perpendicular to the line; raw K11 must then miss the rendered
+        // edge while the display-aware item picker finds its stable id.
+        float edgeView[16] = {};
+        edgeView[0] = 1.0f;
+        edgeView[4] = 20.0f;  // screen x <- x + lifted normal
+        edgeView[9] = 1.0f;   // screen y <- z (the raw edge direction)
+        edgeView[10] = 1.0f;
+        edgeView[13] = -0.50f;
+        edgeView[15] = 1.0f;
+        float rawNode2[3] = {}, displayNode2[3] = {}, edgeDisplay[3] = {};
+        Check(Tonic_GraphGetNode(cc, 2, &face, uv2, rawNode2) == TONIC_OK &&
+                  Tonic_GraphGetNodeDisplayPosition(cc, 2, displayNode2) ==
+                      TONIC_OK,
+              "shared CV: the second endpoint supplies the edge midpoint");
+        for (int axis = 0; axis != 3; ++axis) {
+            edgeDisplay[axis] = 0.5f *
+                (displayNode[axis] + displayNode2[axis]);
+        }
+        float edgeX = 0.0f, edgeY = 0.0f;
+        hit = 0;
+        Check(usdGenTonic::TonicProjectPoint(edgeDisplay, edgeView, 1024,
+                                              1024, &edgeX, &edgeY, &depth) &&
+                  Tonic_Pick(cc, edgeView, 1024, 1024, edgeX, edgeY, 2.0f,
+                         usdGenTonic::TonicPick_GraphEdge, &hit, &kind,
+                         &pickId, &sub, &rawDistance, &rawDepth) == TONIC_OK &&
+                  hit == 0 &&
+                  Tonic_PickItem(cc, edgeView, 1024, 1024, edgeX, edgeY,
+                                 2.0f, usdGenTonic::TonicPick_GraphEdge, &hit,
+                                 &kind, &pickId, &sub, &subSub) == TONIC_OK &&
+                  hit == 1 && kind == usdGenTonic::TonicPick_GraphEdge &&
+                  pickId == 1,
+              "shared CV: rendered edge candidates align without changing raw K11");
+        int const shared[] = {1, -1, -1, 2};
+        float const rightUV[] = {0.0f, 0.0f, 0.85f, 0.20f,
+                                 0.85f, 0.80f, 0.0f, 0.0f};
+        int sharedRegion = -1;
+        int const undoBefore = Tonic_GetUndoDepth(cc);
+        Check(Tonic_GraphCreateRegion(cc, shared, faces, rightUV, 4,
+                                      &sharedRegion) == TONIC_OK &&
+                  sharedRegion >= 0 && sharedRegion != leftRegion &&
+                  Tonic_GetUndoDepth(cc) == undoBefore + 1,
+              "shared CV: one atomic undo step creates the adjacent region");
+        Check(Tonic_GetGraphCounts(cc, &nodeCount, &edgeCount, &regionCount) ==
+                        TONIC_OK &&
+                  nodeCount == 6 && edgeCount == 7 && regionCount == 2,
+              "shared CV: the existing boundary edge is reused once");
+        int const invalid[] = {1, -1, 999, 2};
+        int invalidRegion = -1;
+        Check(Tonic_GraphCreateRegion(cc, invalid, faces, rightUV, 4,
+                                      &invalidRegion) == TONIC_ERROR &&
+                  Tonic_GetGraphCounts(cc, &nodeCount, &edgeCount, &regionCount) ==
+                      TONIC_OK &&
+                  nodeCount == 6 && edgeCount == 7 && regionCount == 2 &&
+                  Tonic_GetUndoDepth(cc) == undoBefore + 1,
+              "shared CV: an invalid stable id rolls back without an undo step");
+        Check(Tonic_Undo(cc, nullptr) == TONIC_OK &&
+                  Tonic_GetGraphCounts(cc, &nodeCount, &edgeCount, &regionCount) ==
+                      TONIC_OK &&
+                  nodeCount == 4 && edgeCount == 4 && regionCount == 1 &&
+                  Tonic_Redo(cc, nullptr) == TONIC_OK,
+              "shared CV: undo and redo preserve the whole shared chain");
+        Check(Tonic_Destroy(cc) == TONIC_OK, "shared CV: model destroys");
     }
 
     // -- graph edits are on the same undo stack (plan/18 §2.5) -------------

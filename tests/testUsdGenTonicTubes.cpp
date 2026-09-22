@@ -21,6 +21,9 @@
 //     relax, root snap, display segments, region rooting;
 //   * Fill mode: param validation, preview/full refills, freeze roots,
 //     guide + root census reads;
+//   * Per-tube fill: subdivided parents suspend, leaves fill from their
+//     own params into an ascending merged set with per-guide tube
+//     attribution, freeze is per tube, merge resumes the parent;
 //   * auto-tube from a graph region (root fit + normal seeding);
 //   * the P3 C ABI drives the same tube (plus its error paths);
 //   * TN-6 parity (CUDA builds with a device only): all six device lanes
@@ -72,6 +75,7 @@ bool NearD(double a, double b, double eps = 1e-9)
 }
 
 using usdGenTonic::TonicFrame;
+using usdGenTonic::TonicRigidTransform;
 using usdGenTonic::TonicTubeDesc;
 using usdGenTonic::TonicTubeSection;
 
@@ -111,6 +115,53 @@ std::vector<TonicFrame> FramesFor(TonicTubeDesc const &tube)
         Check(false, std::string("fixture frames: ") + err);
     }
     return frames;
+}
+
+bool SectionSlotWorld(TonicTubeDesc const &tube, int section, int slot,
+                      float out[3])
+{
+    using namespace usdGenTonic;
+    if (!out || section < 0 || section >= int(tube.sections.size())) {
+        return false;
+    }
+    TonicTubeSection const &ring = tube.sections[size_t(section)];
+    if (slot < 0 || slot >= int(ring.u.size()) ||
+        ring.u.size() != ring.v.size()) {
+        return false;
+    }
+    std::vector<TonicFrame> frames;
+    std::string error;
+    float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+    TonicFrame frame;
+    if (!TonicTubeFramesCpu(tube, &frames, &error) ||
+        !TonicSampleCenterCpu(tube, frames, ring.t, &cx, &cy, &cz, &frame,
+                              &error)) {
+        return false;
+    }
+    float const u = ring.u[size_t(slot)] * ring.scale;
+    float const v = ring.v[size_t(slot)] * ring.scale;
+    float const ct = std::cos(ring.twist), st = std::sin(ring.twist);
+    float const ru = u * ct - v * st;
+    float const rv = u * st + v * ct;
+    out[0] = cx + frame.nx * ru + frame.bx * rv;
+    out[1] = cy + frame.ny * ru + frame.by * rv;
+    out[2] = cz + frame.nz * ru + frame.bz * rv;
+    return true;
+}
+
+bool SameSections(std::vector<TonicTubeSection> const &a,
+                  std::vector<TonicTubeSection> const &b)
+{
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].t != b[i].t || a[i].u != b[i].u || a[i].v != b[i].v ||
+            a[i].scale != b[i].scale || a[i].twist != b[i].twist) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool Orthonormal(TonicFrame const &f, float eps = 1e-5f)
@@ -253,6 +304,151 @@ void CheckK5()
           "K5: ragged rings fail");
 }
 
+void CheckCenterCoreHandle()
+{
+    using namespace usdGenTonic;
+    // An off-centre cross section models the clipped/asymmetric child case:
+    // the authored K4 center stays on the cage, while the artist's handle
+    // must be at the area-centred visible core.
+    TonicTubeDesc tube = MakeTube();
+    for (TonicTubeSection &section : tube.sections) {
+        for (size_t slot = 0; slot < section.u.size(); ++slot) {
+            section.u[slot] += 0.37f;
+            section.v[slot] -= 0.19f;
+        }
+    }
+    std::vector<TonicFrame> frames = FramesFor(tube);
+    float raw[3] = {0.0f, 0.0f, 0.0f};
+    TonicFrame frame;
+    std::string err;
+    Check(TonicSampleCenterCpu(tube, frames, 0.5f, &raw[0], &raw[1],
+                               &raw[2], &frame, &err),
+          "core handle: sample the authored midpoint");
+    float handle[3] = {0.0f, 0.0f, 0.0f};
+    Check(TonicCenterHandlePointCpu(tube, 1, &handle[0], &handle[1],
+                                    &handle[2], &err),
+          "core handle: off-centre section resolves");
+    float const expected[3] = {
+        raw[0] + frame.nx * 0.37f + frame.bx * -0.19f,
+        raw[1] + frame.ny * 0.37f + frame.by * -0.19f,
+        raw[2] + frame.nz * 0.37f + frame.bz * -0.19f};
+    Check(Near(handle[0], expected[0]) && Near(handle[1], expected[1]) &&
+              Near(handle[2], expected[2]) &&
+              (!Near(handle[0], raw[0]) || !Near(handle[1], raw[1]) ||
+               !Near(handle[2], raw[2])),
+          "core handle: polygon area centroid is inside the shifted tube, "
+          "not its raw center cage");
+
+    // A zero-area but offset ring is still visible as a line; use its mean
+    // rather than snapping the handle back to an unrelated raw center.
+    TonicTubeDesc collapsed = tube;
+    for (TonicTubeSection &section : collapsed.sections) {
+        for (size_t slot = 0; slot < section.u.size(); ++slot) {
+            section.u[slot] = 0.25f + 0.1f * float(slot);
+            section.v[slot] = -0.4f;
+        }
+    }
+    float degenerate[3] = {0.0f, 0.0f, 0.0f};
+    Check(TonicCenterHandlePointCpu(collapsed, 1, &degenerate[0],
+                                    &degenerate[1], &degenerate[2], &err) &&
+              (!Near(degenerate[0], raw[0]) || !Near(degenerate[1], raw[1]) ||
+               !Near(degenerate[2], raw[2])),
+          "core handle: a collapsed offset section keeps an offset handle");
+}
+
+void CheckRigidTubeTransport()
+{
+    using namespace usdGenTonic;
+    // A bent, asymmetric and pinned groom exercises the exact failure mode
+    // from a region move: the K4 world-axis bootstrap would otherwise roll
+    // its unpinned frames while its root support frame rotates correctly.
+    TonicTubeDesc source = MakeTube();
+    source.centerX = {0.0f, 0.35f, 1.10f};
+    source.centerY = {0.0f, 1.55f, 3.20f};
+    source.centerZ = {0.0f, -0.20f, 0.45f};
+    source.sections.resize(3);
+    source.sections[0].t = 0.0f;
+    source.sections[1] = source.sections[0];
+    source.sections[1].t = 0.5f;
+    source.sections[1].scale = 1.35f;
+    source.sections[1].twist = 0.41f;
+    source.sections[2] = source.sections[0];
+    source.sections[2].t = 1.0f;
+    source.sections[2].scale = 0.72f;
+    source.sections[2].twist = -0.27f;
+    for (size_t i = 0; i < source.sections[1].u.size(); ++i) {
+        source.sections[1].u[i] += 0.07f * float(i % 3);
+        source.sections[1].v[i] -= 0.03f * float(i % 2);
+        source.sections[2].u[i] -= 0.04f * float(i % 2);
+    }
+    source.rootFramePinned = true;
+    source.rootFrame.tx = 0.0f; source.rootFrame.ty = 0.0f;
+    source.rootFrame.tz = 1.0f;
+    source.rootFrame.nx = 1.0f; source.rootFrame.ny = 0.0f;
+    source.rootFrame.nz = 0.0f;
+    source.rootFrame.bx = 0.0f; source.rootFrame.by = 1.0f;
+    source.rootFrame.bz = 0.0f;
+
+    std::vector<TonicFrame> beforeFrames;
+    std::vector<float> before, normals, ringT;
+    std::string err;
+    Check(TonicTubeFramesCpu(source, &beforeFrames, &err) &&
+              TonicTessellateCpu(source, beforeFrames, 9, &before, &normals,
+                                 &ringT, &err),
+          "transport: bent pinned source tessellates");
+
+    TonicRigidTransform rigid;
+    // +90 degrees about Y, then translate.  This moves the curve across the
+    // K4 Perp3 world-axis choice and catches a frame roll at interior K5 t.
+    rigid.rotation[0] = 0.0f;  rigid.rotation[1] = 0.0f;
+    rigid.rotation[2] = 1.0f;
+    rigid.rotation[3] = 0.0f;  rigid.rotation[4] = 1.0f;
+    rigid.rotation[5] = 0.0f;
+    rigid.rotation[6] = -1.0f; rigid.rotation[7] = 0.0f;
+    rigid.rotation[8] = 0.0f;
+    rigid.translation[0] = 3.0f;
+    rigid.translation[1] = -2.0f;
+    rigid.translation[2] = 5.0f;
+    TonicTubeDesc moved;
+    Check(TonicRigidTransformTubeCpu(source, rigid, &moved, &err),
+          "transport: rigid tube descriptor succeeds");
+    bool authored = moved.sections.size() == source.sections.size() &&
+                    moved.ringVerts == source.ringVerts;
+    for (size_t i = 0; authored && i < source.sections.size(); ++i) {
+        TonicTubeSection const &a = source.sections[i];
+        TonicTubeSection const &b = moved.sections[i];
+        authored = a.t == b.t && a.scale == b.scale && a.twist == b.twist &&
+                   a.u == b.u && a.v == b.v;
+    }
+    Check(authored, "transport: counts, UV, scale and twist stay authored");
+    Check(moved.frameReference != source.frameReference,
+          "transport: material K4 reference composes the rotation");
+
+    std::vector<TonicFrame> movedFrames;
+    std::vector<float> after, afterNormals, afterT;
+    Check(TonicTubeFramesCpu(moved, &movedFrames, &err) &&
+              TonicTessellateCpu(moved, movedFrames, 9, &after, &afterNormals,
+                                 &afterT, &err),
+          "transport: moved tube tessellates");
+    bool rigidMesh = before.size() == after.size();
+    for (size_t i = 0; rigidMesh && i < before.size(); i += 3) {
+        float const x = before[i + 0], y = before[i + 1], z = before[i + 2];
+        float const want[3] = {z + rigid.translation[0],
+                               y + rigid.translation[1],
+                               -x + rigid.translation[2]};
+        rigidMesh = Near(after[i + 0], want[0], 3e-4f) &&
+                    Near(after[i + 1], want[1], 3e-4f) &&
+                    Near(after[i + 2], want[2], 3e-4f);
+    }
+    Check(rigidMesh,
+          "transport: every interpolated K5 section remains a rigid pose");
+
+    TonicRigidTransform reflected = rigid;
+    reflected.rotation[0] = -1.0f;
+    Check(!TonicRigidTransformTubeCpu(source, reflected, &moved, &err),
+          "transport: reflection is refused instead of flipping a groom");
+}
+
 void CheckK8()
 {
     using namespace usdGenTonic;
@@ -345,6 +541,13 @@ void CheckK9()
                  Near(points[size_t(g) * 24 + 2], roots[size_t(g)].pz, 1e-4f);
     }
     Check(onRoot, "K9: root CVs sit on their roots");
+    std::vector<float> endpointRing;
+    err.clear();
+    Check(TonicSampleTubeRingCpu(
+              tube, frames, std::nextafter(tube.sections.back().t, 2.0f),
+              &endpointRing, &err) &&
+              endpointRing.size() == size_t(tube.ringVerts) * 3,
+          "K5: one-ULP generated endpoint station clamps to the last ring");
     // Tips reach the tube tip on the uniform profile.
     bool tipTop = true;
     for (int g = 0; g < 16; ++g) {
@@ -385,6 +588,269 @@ void CheckK9()
         tipY += pp[size_t(g) * 24 + 7 * 3 + 1];
     }
     Check(tipY / 16.0 < 4.0, "K9: lengthProfile shortens the tips");
+
+    // K9 material sampling follows the actual K5 polygon, not its mean
+    // radius. Keep a collinear edge split and a concave root so the binding
+    // must retain the authored slot all the way to a scaled/twisted tip.
+    TonicTubeDesc shaped = MakeTube(6);
+    shaped.sections[0].u = {0.0f, 1.0f, 2.0f, 2.0f, 0.0f, 0.6f};
+    shaped.sections[0].v = {0.0f, 0.0f, 0.0f, 2.0f, 2.0f, 1.0f};
+    shaped.sections[1] = shaped.sections[0];
+    shaped.sections[1].t = 1.0f;
+    shaped.sections[1].scale = 1.35f;
+    shaped.sections[1].twist = 0.37f;
+    shaped.sections[1].u[1] = 3.25f;
+    shaped.sections[1].v[1] = -0.55f;
+    std::vector<TonicFrame> shapedFrames = FramesFor(shaped);
+    std::vector<std::array<int, 3>> shapedTriangles;
+    Check(TonicTriangulateSectionSlotsCpu(shaped.sections[0],
+                                          &shapedTriangles, &err),
+          "K9: concave root triangulates");
+    bool allSlotsIncident = shapedTriangles.size() == 4;
+    for (int slotIndex = 0; allSlotsIncident && slotIndex < shaped.ringVerts;
+         ++slotIndex) {
+        bool found = false;
+        for (std::array<int, 3> const &tri : shapedTriangles) {
+            found = found || tri[0] == slotIndex || tri[1] == slotIndex ||
+                    tri[2] == slotIndex;
+        }
+        allSlotsIncident = found;
+    }
+    Check(allSlotsIncident,
+          "K9: root triangulation retains every boundary slot");
+    bool nondegenerateTriangles = !shapedTriangles.empty();
+    for (std::array<int, 3> const &tri : shapedTriangles) {
+        float const ax = shaped.sections[0].u[size_t(tri[0])];
+        float const ay = shaped.sections[0].v[size_t(tri[0])];
+        float const bx = shaped.sections[0].u[size_t(tri[1])];
+        float const by = shaped.sections[0].v[size_t(tri[1])];
+        float const cx = shaped.sections[0].u[size_t(tri[2])];
+        float const cy = shaped.sections[0].v[size_t(tri[2])];
+        nondegenerateTriangles = nondegenerateTriangles &&
+            std::fabs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) >
+                1e-8f;
+    }
+    Check(nondegenerateTriangles,
+          "K9: root triangulation emits no degenerate rail triangle");
+    float shapedRootP[3] = {0.0f, 0.0f, 0.0f};
+    Check(SectionSlotWorld(shaped, 0, 1, shapedRootP),
+          "K9: asymmetric fixture root slot resolves");
+    TonicGuideRoot shapedRoot;
+    shapedRoot.px = shapedRootP[0];
+    shapedRoot.py = shapedRootP[1];
+    shapedRoot.pz = shapedRootP[2];
+    TonicFillDesc shapedFill;
+    shapedFill.cvCount = 3;
+    std::vector<float> shapedPoints, shapedScales, midRing, tipRing;
+    err.clear();
+    bool const shapedFillOk = TonicGuideFillCpu(
+        shaped, shapedFrames, {shapedRoot}, shapedFill, &shapedPoints,
+        &shapedScales, &err);
+    std::string const shapedFillErr = err;
+    err.clear();
+    bool const midRingOk = TonicSampleTubeRingCpu(
+        shaped, shapedFrames, 0.5f, &midRing, &err);
+    std::string const midRingErr = err;
+    err.clear();
+    bool const tipRingOk = TonicSampleTubeRingCpu(
+        shaped, shapedFrames, 1.0f, &tipRing, &err);
+    Check(shapedFillOk && midRingOk && tipRingOk,
+          "K9: asymmetric full-polygon fill evaluates: fill=" +
+              shapedFillErr + " mid=" + midRingErr + " tip=" + err);
+    size_t const mid = 3;
+    size_t const tip = 6;
+    size_t const slot = 3;
+    bool const fullShape = shapedPoints.size() >= 9 && midRing.size() >= 6 &&
+                           tipRing.size() >= 6 &&
+          Near(shapedPoints[mid + 0], midRing[slot + 0], 2e-4f) &&
+              Near(shapedPoints[mid + 1], midRing[slot + 1], 2e-4f) &&
+              Near(shapedPoints[mid + 2], midRing[slot + 2], 2e-4f) &&
+              Near(shapedPoints[tip + 0], tipRing[slot + 0], 2e-4f) &&
+              Near(shapedPoints[tip + 1], tipRing[slot + 1], 2e-4f) &&
+              Near(shapedPoints[tip + 2], tipRing[slot + 2], 2e-4f);
+    Check(fullShape,
+          "K9: interior and terminal guides retain full asymmetric slot");
+
+    // A material point inside the concave root must remain inside an
+    // independently deformed concave terminal section. The old root-triangle
+    // affine weights can cross the terminal re-entrant edge here; K9 now
+    // transfers the biased point through the canonical slot polygon.
+    std::vector<TonicGuideRoot> concaveRoots;
+    std::vector<float> rootRing;
+    float rootCenter[3] = {0.0f, 0.0f, 0.0f};
+    TonicFrame rootFrame;
+    err.clear();
+    bool const concaveRootFixture =
+        TonicSampleTubeRingCpu(shaped, shapedFrames, 0.0f, &rootRing, &err) &&
+        TonicSampleCenterCpu(shaped, shapedFrames, 0.0f, &rootCenter[0],
+                             &rootCenter[1], &rootCenter[2], &rootFrame,
+                             &err);
+    if (concaveRootFixture) {
+        for (std::array<int, 3> const &tri : shapedTriangles) {
+            TonicGuideRoot root;
+            root.px = (rootRing[size_t(tri[0]) * 3 + 0] +
+                       rootRing[size_t(tri[1]) * 3 + 0] +
+                       rootRing[size_t(tri[2]) * 3 + 0]) / 3.0f;
+            root.py = (rootRing[size_t(tri[0]) * 3 + 1] +
+                       rootRing[size_t(tri[1]) * 3 + 1] +
+                       rootRing[size_t(tri[2]) * 3 + 1]) / 3.0f;
+            root.pz = (rootRing[size_t(tri[0]) * 3 + 2] +
+                       rootRing[size_t(tri[1]) * 3 + 2] +
+                       rootRing[size_t(tri[2]) * 3 + 2]) / 3.0f;
+            concaveRoots.push_back(root);
+        }
+    }
+    TonicFillDesc concaveFill = shapedFill;
+    concaveFill.cvCount = 5;
+    concaveFill.edgeBias = 1.0f;
+    std::vector<float> concavePoints, concaveScales;
+    err.clear();
+    bool const concaveFillOk = concaveRootFixture && TonicGuideFillCpu(
+        shaped, shapedFrames, concaveRoots, concaveFill, &concavePoints,
+        &concaveScales, &err);
+    float tipCenter[3] = {0.0f, 0.0f, 0.0f};
+    TonicFrame tipFrame;
+    bool const concaveTipFrame = TonicSampleCenterCpu(
+        shaped, shapedFrames, 1.0f, &tipCenter[0], &tipCenter[1],
+        &tipCenter[2], &tipFrame, &err);
+    auto insideTip = [&](float px, float py, float pz) {
+        std::vector<std::array<float, 2>> polygon;
+        polygon.reserve(size_t(shaped.ringVerts));
+        for (int slotIndex = 0; slotIndex < shaped.ringVerts; ++slotIndex) {
+            size_t const at = size_t(slotIndex) * 3;
+            float const dx = tipRing[at + 0] - tipCenter[0];
+            float const dy = tipRing[at + 1] - tipCenter[1];
+            float const dz = tipRing[at + 2] - tipCenter[2];
+            polygon.push_back({{dx * tipFrame.nx + dy * tipFrame.ny +
+                                     dz * tipFrame.nz,
+                                 dx * tipFrame.bx + dy * tipFrame.by +
+                                     dz * tipFrame.bz}});
+        }
+        float const dx = px - tipCenter[0];
+        float const dy = py - tipCenter[1];
+        float const dz = pz - tipCenter[2];
+        float const u = dx * tipFrame.nx + dy * tipFrame.ny + dz * tipFrame.nz;
+        float const v = dx * tipFrame.bx + dy * tipFrame.by + dz * tipFrame.bz;
+        bool inside = false;
+        for (size_t a = 0, b = polygon.size() - 1; a < polygon.size(); b = a++) {
+            float const ax = polygon[a][0], ay = polygon[a][1];
+            float const bx = polygon[b][0], by = polygon[b][1];
+            float const cross = (bx - ax) * (v - ay) - (by - ay) * (u - ax);
+            float const dot = (u - ax) * (u - bx) + (v - ay) * (v - by);
+            if (std::fabs(cross) <= 1e-4f && dot <= 1e-4f) return true;
+            bool const crosses = (ay > v) != (by > v);
+            if (crosses && u < (bx - ax) * (v - ay) / (by - ay) + ax)
+                inside = !inside;
+        }
+        return inside;
+    };
+    bool concaveTipsInside = concaveFillOk && concaveTipFrame &&
+                             tipRing.size() == size_t(shaped.ringVerts) * 3;
+    for (size_t g = 0; concaveTipsInside && g < concaveRoots.size(); ++g) {
+        size_t const at = (g * size_t(concaveFill.cvCount) +
+                           size_t(concaveFill.cvCount - 1)) * 3;
+        concaveTipsInside = insideTip(concavePoints[at + 0],
+                                      concavePoints[at + 1],
+                                      concavePoints[at + 2]);
+    }
+    Check(concaveTipsInside,
+          "K9: biased concave material points remain inside terminal ring");
+
+    // With the same concave section at both ends, canonical transfer is an
+    // identity for every non-boundary material sample. This catches a root
+    // bind/target ear-order mismatch, including the retained collinear slot.
+    TonicTubeDesc identityConcave = shaped;
+    identityConcave.sections[1] = identityConcave.sections[0];
+    identityConcave.sections[1].t = 1.0f;
+    std::vector<TonicFrame> identityFrames = FramesFor(identityConcave);
+    TonicFillDesc identityFill;
+    identityFill.cvCount = 5;
+    std::vector<float> identityPoints, identityScales;
+    err.clear();
+    bool const identityFillOk = concaveRootFixture && TonicGuideFillCpu(
+        identityConcave, identityFrames, concaveRoots, identityFill,
+        &identityPoints, &identityScales, &err);
+    bool identityMaterial = identityFillOk;
+    for (size_t g = 0; identityMaterial && g < concaveRoots.size(); ++g) {
+        float const rootDx = concaveRoots[g].px - rootCenter[0];
+        float const rootDy = concaveRoots[g].py - rootCenter[1];
+        float const rootDz = concaveRoots[g].pz - rootCenter[2];
+        float const rootU = rootDx * rootFrame.nx + rootDy * rootFrame.ny +
+                            rootDz * rootFrame.nz;
+        float const rootV = rootDx * rootFrame.bx + rootDy * rootFrame.by +
+                            rootDz * rootFrame.bz;
+        for (int c = 1; identityMaterial && c < identityFill.cvCount; ++c) {
+            float centerAt[3] = {0.0f, 0.0f, 0.0f};
+            TonicFrame frameAt;
+            float const t = float(c) / float(identityFill.cvCount - 1);
+            identityMaterial = TonicSampleCenterCpu(
+                identityConcave, identityFrames, t, &centerAt[0],
+                &centerAt[1], &centerAt[2], &frameAt, &err);
+            size_t const at =
+                (g * size_t(identityFill.cvCount) + size_t(c)) * 3;
+            float const dx = identityPoints[at + 0] - centerAt[0];
+            float const dy = identityPoints[at + 1] - centerAt[1];
+            float const dz = identityPoints[at + 2] - centerAt[2];
+            identityMaterial = identityMaterial &&
+                Near(dx * frameAt.nx + dy * frameAt.ny + dz * frameAt.nz,
+                     rootU, 2e-4f) &&
+                Near(dx * frameAt.bx + dy * frameAt.by + dz * frameAt.bz,
+                     rootV, 2e-4f);
+        }
+    }
+    Check(identityMaterial,
+          "K9: unchanged concave and collinear material stays exact");
+
+    // A complete point taper is valid material geometry. It bypasses only
+    // polygon remapping at that station; a nonzero collinear terminal still
+    // fails rather than being mistaken for a taper.
+    TonicTubeDesc pointTaper = shaped;
+    for (int slotIndex = 0; slotIndex < pointTaper.ringVerts; ++slotIndex) {
+        pointTaper.sections.back().u[size_t(slotIndex)] = 0.37f;
+        pointTaper.sections.back().v[size_t(slotIndex)] = -0.21f;
+    }
+    std::vector<TonicFrame> pointTaperFrames = FramesFor(pointTaper);
+    std::vector<float> pointTaperPoints, pointTaperScales, pointTaperRing;
+    err.clear();
+    bool const pointTaperFill = TonicGuideFillCpu(
+        pointTaper, pointTaperFrames, {shapedRoot}, shapedFill,
+        &pointTaperPoints, &pointTaperScales, &err) &&
+        TonicSampleTubeRingCpu(pointTaper, pointTaperFrames, 1.0f,
+                               &pointTaperRing, &err);
+    size_t const pointTip = size_t(shapedFill.cvCount - 1) * 3;
+    bool const pointTaperExact = pointTaperFill && pointTaperRing.size() >= 3 &&
+        Near(pointTaperPoints[pointTip + 0], pointTaperRing[0], 2e-4f) &&
+        Near(pointTaperPoints[pointTip + 1], pointTaperRing[1], 2e-4f) &&
+        Near(pointTaperPoints[pointTip + 2], pointTaperRing[2], 2e-4f);
+    Check(pointTaperExact, "K9: point taper emits its common terminal point");
+    TonicTubeDesc lineTaper = pointTaper;
+    for (int slotIndex = 0; slotIndex < lineTaper.ringVerts; ++slotIndex) {
+        lineTaper.sections.back().u[size_t(slotIndex)] = float(slotIndex);
+        lineTaper.sections.back().v[size_t(slotIndex)] = 0.0f;
+    }
+    std::vector<float> lineTaperPoints, lineTaperScales;
+    Check(!TonicGuideFillCpu(lineTaper, FramesFor(lineTaper), {shapedRoot},
+                             shapedFill, &lineTaperPoints, &lineTaperScales,
+                             &err),
+          "K9: nonzero collinear taper remains invalid material geometry");
+
+    TonicGuideRoot detachedRoot = shapedRoot;
+    detachedRoot.px += 0.17f;
+    TonicFillDesc stoppedFill = shapedFill;
+    stoppedFill.lengthProfile = {0.0f, 0.0f, 1.0f, 0.0f};
+    std::vector<float> stoppedPoints, stoppedScales;
+    Check(TonicGuideFillCpu(shaped, shapedFrames, {detachedRoot}, stoppedFill,
+                            &stoppedPoints, &stoppedScales, &err),
+          "K9: detached zero-length fill evaluates");
+    bool staysAttached = stoppedPoints.size() == 9;
+    for (int c = 0; staysAttached && c < 3; ++c) {
+        size_t const at = size_t(c) * 3;
+        staysAttached = Near(stoppedPoints[at + 0], detachedRoot.px, 2e-4f) &&
+                        Near(stoppedPoints[at + 1], detachedRoot.py, 2e-4f) &&
+                        Near(stoppedPoints[at + 2], detachedRoot.pz, 2e-4f);
+    }
+    Check(staysAttached,
+          "K9: zero-length detached guide remains physically attached");
     Check(!TonicGuideFillCpu(tube, frames, roots, fill, nullptr, nullptr,
                              &err),
           "K9: null outputs fail");
@@ -758,6 +1224,132 @@ void CheckModelFillMode()
     Check(g1.guideCount == 20, "fill: snapshot guides follow the density");
 }
 
+void CheckModelPerTubeFill()
+{
+    using namespace usdGenTonic;
+    TonicModel model;
+    Check(model.BuildTestTube(), "per-tube fill: the tube builds");
+    TonicModel::FillParams params;
+    params.density = 16.0f;
+    params.cvCount = 8;
+    Check(model.SetFillParams(params), "per-tube fill: global params set");
+    Check(model.RefillGuides(1.0f), "per-tube fill: one tube refills");
+    Check(model.GetGuides().guideCount == 16,
+          "per-tube fill: one tube holds round(density)");
+    // Subdivide: the parent suspends, the leaves produce from the params
+    // they inherited.
+    std::vector<int> kids;
+    Check(model.SubdivideTube(0, 3, "kmeans", 2, &kids) && kids.size() == 3,
+          "per-tube fill: the tube subdivides into three");
+    Check(model.IsTubeFillSuspended(0),
+          "per-tube fill: the subdivided parent suspends");
+    Check(model.RefillGuides(1.0f), "per-tube fill: the leaves refill");
+    Check(model.GetGuides().guideCount == 48,
+          "per-tube fill: three leaves x round(density), parent silent");
+    Check(model.GetRoots().size() == 48,
+          "per-tube fill: the merged roots census matches");
+    std::vector<int> order = kids;
+    std::sort(order.begin(), order.end());
+    // One leaf's density moves the merged total by exactly its delta.
+    TonicModel::FillParams leaf;
+    Check(model.GetTubeFillParams(order[0], &leaf),
+          "per-tube fill: the leaf params read");
+    leaf.density = 32.0f;
+    Check(model.SetTubeFillParams(order[0], leaf),
+          "per-tube fill: one leaf takes density 32");
+    Check(model.RefillGuides(1.0f), "per-tube fill: refill after the edit");
+    Check(model.GetGuides().guideCount == 64,
+          "per-tube fill: the merged total follows one leaf (48 + 16)");
+    // The suspended parent's own density is irrelevant.
+    params.density = 200.0f;
+    Check(model.SetFillParams(params),
+          "per-tube fill: the parent density raises");
+    Check(model.RefillGuides(1.0f), "per-tube fill: refill after the raise");
+    Check(model.GetGuides().guideCount == 64,
+          "per-tube fill: the suspended parent contributes nothing");
+    // Attribution: the merge runs ascending, each guide naming its tube.
+    {
+        TonicModel::GuidePreview preview = model.GetGuidePreview();
+        Check(preview.tubeIds.size() == preview.counts.size(),
+              "per-tube fill: every guide names its tube");
+        bool ascending = true;
+        for (size_t i = 1; i < preview.tubeIds.size(); ++i) {
+            ascending = ascending &&
+                        preview.tubeIds[i] >= preview.tubeIds[i - 1];
+        }
+        Check(ascending, "per-tube fill: the merge runs ascending");
+        size_t n0 = 0, n1 = 0, n2 = 0;
+        for (size_t i = 0; i < preview.tubeIds.size(); ++i) {
+            n0 += (preview.tubeIds[i] == order[0]);
+            n1 += (preview.tubeIds[i] == order[1]);
+            n2 += (preview.tubeIds[i] == order[2]);
+        }
+        Check(n0 == 32 && n1 == 16 && n2 == 16,
+              "per-tube fill: each leaf's share follows its own density");
+    }
+    // Siblings that share fill params still draw distinct root patterns:
+    // the disc stream is keyed by (tubeId, seed).
+    {
+        std::vector<TonicGuideRoot> const &roots = model.GetRoots();
+        // order[1] and order[2] both hold 16 guides at density 16; their
+        // blocks start after order[0]'s 32.
+        bool differ = false;
+        for (int i = 0; i < 16; ++i) {
+            TonicGuideRoot const &a = roots[size_t(32 + i)];
+            TonicGuideRoot const &b = roots[size_t(48 + i)];
+            if (a.px != b.px || a.py != b.py || a.pz != b.pz) {
+                differ = true;
+                break;
+            }
+        }
+        Check(differ, "per-tube fill: sibling root patterns differ");
+    }
+    // Freeze is per tube: raising one leaf grows its own tail while the
+    // siblings' guides survive bit-exactly.
+    model.SetFreezeRoots(true);
+    std::vector<float> before = model.GetGuides().points;
+    Check(model.GetTubeFillParams(order[1], &leaf),
+          "per-tube fill: the middle leaf params read");
+    leaf.density = 20.0f;
+    Check(model.SetTubeFillParams(order[1], leaf),
+          "per-tube fill: the middle leaf takes density 20");
+    Check(model.RefillGuides(1.0f), "per-tube fill: frozen refill runs");
+    Check(model.GetGuides().guideCount == 68,
+          "per-tube fill: the frozen refill grows the edited leaf");
+    {
+        std::vector<float> const &after = model.GetGuides().points;
+        // order[0]: 32 guides kept at the head; order[2]: 16 guides kept
+        // after order[1]'s grown block of 20.
+        size_t const cv = 8, head = size_t(32) * cv * 3;
+        size_t const midBefore = size_t(16) * cv * 3;
+        size_t const midAfter = size_t(20) * cv * 3;
+        bool kept = after.size() == size_t(68) * cv * 3 &&
+                    before.size() == size_t(64) * cv * 3;
+        for (size_t i = 0; kept && i < head; ++i) {
+            kept = after[i] == before[i];
+        }
+        for (size_t i = 0; kept && i < size_t(16) * cv * 3; ++i) {
+            kept = after[head + midAfter + i] == before[head + midBefore + i];
+        }
+        Check(kept, "per-tube fill: frozen siblings survive bit-exactly");
+    }
+    model.SetFreezeRoots(false);
+    // Merge back: tube 0 resumes its own fill, and undo restores the
+    // leaves with their per-tube root stores.
+    Check(model.MergeChildren(0), "per-tube fill: the children merge back");
+    Check(!model.IsTubeFillSuspended(0),
+          "per-tube fill: the fill resumes once the children are gone");
+    Check(model.RefillGuides(1.0f), "per-tube fill: refill after the merge");
+    Check(model.GetGuides().guideCount == 200,
+          "per-tube fill: the parent resumes at its own density");
+    Check(model.Undo(), "per-tube fill: undo restores the leaves");
+    Check(model.IsTubeFillSuspended(0),
+          "per-tube fill: undo re-suspends the parent");
+    Check(model.RefillGuides(1.0f), "per-tube fill: refill after undo");
+    Check(model.GetGuides().guideCount == 68,
+          "per-tube fill: the leaves refill from their restored stores");
+}
+
 // The 4x4 quad grid in the XZ plane (y = 0), faces x-major: face
 // (ix, iz) = ix * 4 + iz, verts row-major over the 5x5 lattice.
 struct Grid {
@@ -853,12 +1445,24 @@ void CheckAutoTube()
             onFace = onFace && r.faceId >= 0;
         }
         Check(onFace, "auto-tube: every root names its scalp face");
-        // The pure scalp-bound twin agrees with the model refill.
+        // The pure exact-region twin agrees with the model refill. The
+        // legacy face-list stream is deliberately too coarse for two small
+        // polygons on the same quad.
         TonicModel::TubeSnapshot shot = model.Snapshot();
-        TonicGuideSet guides = TonicGenerateGuidesOnScalp(
-            shot, *model.GetScalp(), faces.data(), int(faces.size()));
+        TonicModel::GraphSnapshot graphShot = model.SnapshotGraph();
+        TonicScalpGraph graph;
+        TonicRegionLoops loops;
+        std::string loopErr;
+        bool const loopsOk = graph.Restore(*model.GetScalp(), graphShot.nodes,
+                                           graphShot.edges, graphShot.linked,
+                                           &loopErr) &&
+                             TonicFlattenLoops(graph, &loops, &loopErr);
+        TonicGuideSet guides = loopsOk
+                                   ? TonicGenerateGuidesOnRegionForTube(
+                                         shot, *model.GetScalp(), loops, 0, 0)
+                                   : TonicGuideSet();
         Check(guides.points == model.GetGuides().points,
-              "auto-tube: model + pure mesh fill agree bit-exactly");
+              "auto-tube: model + pure exact-region fill agree bit-exactly");
         // Root snap + match-surface run against the live scalp.
         Check(model.SnapRootToScalp(), "auto-tube: root snap runs");
         model.GetCenterCV(0, &x0, &y0, &z0);
@@ -879,6 +1483,14 @@ void CheckCApi()
           "C ABI: context creates");
     Check(Tonic_BuildTestTube(ctx, 5, 8, 0.5f, 4.0f) == TONIC_OK,
           "C ABI: the test tube builds");
+    float rawCenter[3] = {0, 0, 0};
+    float handleCenter[3] = {0, 0, 0};
+    Check(Tonic_GetTubeCenterCV(ctx, 0, 2, rawCenter) == TONIC_OK &&
+              Tonic_GetTubeCenterHandle(ctx, 0, 2, handleCenter) == TONIC_OK &&
+              Near(rawCenter[0], handleCenter[0]) &&
+              Near(rawCenter[1], handleCenter[1]) &&
+              Near(rawCenter[2], handleCenter[2]),
+          "C ABI: symmetric center core reads without changing raw data");
     Check(Tonic_MoveCenterCV(ctx, 2, 1.0f, 0.0f, 0.0f) == TONIC_OK,
           "C ABI: center CV moves");
     float xyz[3] = {0, 0, 0};
@@ -1205,28 +1817,29 @@ void CheckCudaParity()
     }
     std::printf("info: K8 worst |dr|=%.3g\n", worstR);
     Check(worstR < 1e-3f, "TN-6: K8 roots match within 1e-3");
-    // K9: tolerance (pow/atan2/trigonometry).
-    float *dSecMean = nullptr;
-    cudaMalloc(&dSecMean, sizeof(float) * size_t(nSec));
-    std::vector<float> secMean;
-    secMean.resize(size_t(nSec));
-    for (int i = 0; i < nSec; ++i) {
-        secMean[size_t(i)] = TonicSectionMeanRadius(tube.sections[size_t(i)]);
-    }
-    cudaMemcpy(dSecMean, secMean.data(), sizeof(float) * size_t(nSec),
-               cudaMemcpyHostToDevice);
+    // K9: full K5 material bindings, including U/V, scale and twist.
     int const cvCount = 8;
-    float *dGuides = nullptr, *dLens = nullptr;
-    cudaMalloc(&dGuides, sizeof(float) * size_t(roots) * size_t(cvCount) * 3);
-    cudaMalloc(&dLens, sizeof(float) * size_t(roots));
-    Check(TonicLaunchGuideFill(dCx, dCy, dCz, nCv, dFrames, dSecT, dSecMean,
-                               nSec, dRoots, roots, 0.25f, nullptr, 0,
-                               rootRadius, dGuides, dLens, cvCount, stream,
-                               err, sizeof(err)),
-          "TN-6: K9 launches");
     TonicFillDesc fill;
     fill.cvCount = cvCount;
     fill.edgeBias = 0.25f;
+    std::vector<TonicGuideMaterialBinding> hBindings;
+    Check(TonicBuildGuideMaterialBindingsCpu(tube, hFrames, hRoots, fill,
+                                             &hBindings, &herr),
+          "TN-6: K9 material binds build");
+    TonicGuideMaterialBinding *dBindings = nullptr;
+    cudaMalloc(&dBindings,
+               sizeof(TonicGuideMaterialBinding) * hBindings.size());
+    cudaMemcpy(dBindings, hBindings.data(),
+               sizeof(TonicGuideMaterialBinding) * hBindings.size(),
+               cudaMemcpyHostToDevice);
+    float *dGuides = nullptr, *dLens = nullptr;
+    cudaMalloc(&dGuides, sizeof(float) * size_t(roots) * size_t(cvCount) * 3);
+    cudaMalloc(&dLens, sizeof(float) * size_t(roots));
+    Check(TonicLaunchGuideFill(
+              dCx, dCy, dCz, nCv, dFrames, dSecT, dSecU, dSecV, dSecS,
+              dSecTw, nSec, rv, dRoots, dBindings, roots, fill.edgeBias,
+              nullptr, 0, dGuides, dLens, cvCount, stream, err, sizeof(err)),
+          "TN-6: K9 launches");
     std::vector<float> hGuides, hLens;
     Check(TonicGuideFillCpu(tube, hFrames, hRoots, fill, &hGuides, &hLens,
                             &herr),
@@ -1383,7 +1996,7 @@ void CheckCudaParity()
     cudaFree(dNrm);
     cudaFree(dRingT);
     cudaFree(dRoots);
-    cudaFree(dSecMean);
+    cudaFree(dBindings);
     cudaFree(dGuides);
     cudaFree(dLens);
     cudaFree(dIn);
@@ -1421,7 +2034,10 @@ void CheckProductionPickScale()
     params.density = 12000.0f;
     params.cvCount = 16;
     Check(model.SetFillParams(params), "pick-scale: scale fill params set");
-    Check(model.RefillGuides(1.0f), "pick-scale: 12K x 16 refill runs");
+    bool const scaleRefill = model.RefillGuides(1.0f);
+    std::string const scaleRefillDiagnostic = model.GetDiagnostic();
+    Check(scaleRefill,
+          "pick-scale: 12K x 16 refill runs: " + scaleRefillDiagnostic);
     Check(model.GetGuides().guideCount == 12000,
           "pick-scale: 192K guide CVs present");
     float vp[16] = {0};
@@ -1536,17 +2152,160 @@ void CheckPerTubeOps()
     Check(model.GetTubeSectionCount(child) == secBefore,
           "per-tube: the refused ops left the layout alone");
 
-    // An edit on a child propagates: the parent refreshes bottom-up (K7).
+    // This intentionally accumulated workflow has bent/resized the child.
+    // Its K7 writeback can take the non-planar projection path, so retain a
+    // narrow assertion here: the selected child remains editable and its
+    // siblings remain authored state, without imposing a planar cage rule.
     {
-        float px = 0.0f, py = 0.0f, pz = 0.0f;
-        Check(model.GetTubeCenterCV(0, 2, &px, &py, &pz),
-              "per-tube: the parent center reads back");
+        TonicTubeDesc parentBefore, childBefore, inheritedSiblingBefore;
+        Check(model.GetTubeDesc(0, &parentBefore) &&
+                  model.GetTubeDesc(child, &childBefore) &&
+                  model.GetTubeDesc(kids[1], &inheritedSiblingBefore),
+              "per-tube: parent, edited child and sibling snapshot");
         Check(model.MoveTubeCenterCV(child, 2, 0.4f, 0.0f, 0.0f),
               "per-tube: a child center CV moves");
-        float qx = 0.0f, qy = 0.0f, qz = 0.0f;
-        Check(model.GetTubeCenterCV(0, 2, &qx, &qy, &qz),
-              "per-tube: the parent center reads back again");
-        Check(qx != px, "per-tube: the parent followed its child (K7)");
+        TonicTubeDesc parentAfter, childAfter, inheritedSiblingAfter;
+        Check(model.GetTubeDesc(0, &parentAfter) &&
+                  model.GetTubeDesc(child, &childAfter) &&
+                  model.GetTubeDesc(kids[1], &inheritedSiblingAfter),
+              "per-tube: K7 descriptors read back");
+        bool const childMoved = childAfter.centerX.size() > 2 &&
+                                childBefore.centerX.size() > 2 &&
+                                childAfter.centerX[2] != childBefore.centerX[2];
+        bool const siblingStable =
+            inheritedSiblingAfter.centerX == inheritedSiblingBefore.centerX &&
+            inheritedSiblingAfter.centerY == inheritedSiblingBefore.centerY &&
+            inheritedSiblingAfter.centerZ == inheritedSiblingBefore.centerZ &&
+            SameSections(inheritedSiblingAfter.sections,
+                         inheritedSiblingBefore.sections);
+        Check(childMoved && siblingStable,
+              "per-tube: complex child K7 edit remains local to its sibling family");
+    }
+
+    // This fresh straight parent isolates the planar K7 branch.  A direct
+    // move of one retained outer slot may update that parent UV target, but
+    // must not move its raw cage/Q frame or any outer corner owned by another
+    // child.  It also verifies a later parent K6 retains the child residual.
+    {
+        TonicModel holdingModel;
+        std::vector<int> holdingKids;
+        bool const holdingSetup = holdingModel.BuildTestTube() &&
+            holdingModel.SubdivideTube(0, 4, "kmeans", 83, &holdingKids) &&
+            holdingKids.size() == 4;
+        int holdingChild = -1;
+        TonicParentBoundaryBinding holdingBinding;
+        if (holdingSetup) {
+            for (int childId : holdingKids) {
+                TonicTubeDesc candidate;
+                if (!holdingModel.GetTubeDesc(childId, &candidate)) {
+                    continue;
+                }
+                for (TonicParentBoundaryBinding const &binding :
+                     candidate.inheritedBoundaryBindings) {
+                    if (binding.section > 0 &&
+                        binding.section + 1 < int(candidate.sections.size())) {
+                        holdingChild = childId;
+                        holdingBinding = binding;
+                        break;
+                    }
+                }
+                if (holdingChild >= 0) {
+                    break;
+                }
+            }
+        }
+        Check(holdingSetup && holdingChild >= 0,
+              "per-tube: planar fixture finds an inherited outer holding slot");
+        if (holdingChild >= 0) {
+        TonicTubeDesc holdingParentBefore;
+        Check(holdingModel.GetTubeDesc(0, &holdingParentBefore),
+              "per-tube: planar holding parent reads before K7");
+        bool const holdingEdit = holdingModel.MoveTubeSectionCV(
+            holdingChild, holdingBinding.section, holdingBinding.childSlot,
+            0.055f, -0.035f);
+        TonicTubeDesc holdingParentAfter, holdingChildAfter;
+        Check(holdingEdit && holdingModel.GetTubeDesc(0, &holdingParentAfter) &&
+                  holdingModel.GetTubeDesc(holdingChild, &holdingChildAfter),
+              "per-tube: planar holding-slot edit writes K7");
+        bool const rawCageExact =
+            holdingParentAfter.centerX == holdingParentBefore.centerX &&
+            holdingParentAfter.centerY == holdingParentBefore.centerY &&
+            holdingParentAfter.centerZ == holdingParentBefore.centerZ &&
+            holdingParentAfter.ringVerts == holdingParentBefore.ringVerts &&
+            holdingParentAfter.rootFramePinned ==
+                holdingParentBefore.rootFramePinned &&
+            holdingParentAfter.frameReference ==
+                holdingParentBefore.frameReference;
+        float editedChildPoint[3] = {}, editedParentPoint[3] = {};
+        bool const holdingTargetExact =
+            SectionSlotWorld(holdingChildAfter, holdingBinding.section,
+                             holdingBinding.childSlot, editedChildPoint) &&
+            SectionSlotWorld(holdingParentAfter, holdingBinding.section,
+                             holdingBinding.parentSlot, editedParentPoint) &&
+            Near(editedChildPoint[0], editedParentPoint[0], 3e-4f) &&
+            Near(editedChildPoint[1], editedParentPoint[1], 3e-4f) &&
+            Near(editedChildPoint[2], editedParentPoint[2], 3e-4f);
+        bool unrelatedOuterExact = true;
+        int unrelatedOuterCount = 0;
+        for (int siblingId : holdingKids) {
+            if (siblingId == holdingChild) {
+                continue;
+            }
+            TonicTubeDesc sibling;
+            if (!holdingModel.GetTubeDesc(siblingId, &sibling)) {
+                continue;
+            }
+            for (TonicParentBoundaryBinding const &binding :
+                 sibling.inheritedBoundaryBindings) {
+                if (binding.section != holdingBinding.section ||
+                    binding.parentSlot == holdingBinding.parentSlot) {
+                    continue;
+                }
+                float beforePoint[3] = {}, afterPoint[3] = {};
+                unrelatedOuterExact =
+                    SectionSlotWorld(holdingParentBefore, binding.section,
+                                     binding.parentSlot, beforePoint) &&
+                    SectionSlotWorld(holdingParentAfter, binding.section,
+                                     binding.parentSlot, afterPoint) &&
+                    Near(beforePoint[0], afterPoint[0], 3e-4f) &&
+                    Near(beforePoint[1], afterPoint[1], 3e-4f) &&
+                    Near(beforePoint[2], afterPoint[2], 3e-4f) &&
+                    unrelatedOuterExact;
+                ++unrelatedOuterCount;
+            }
+        }
+        Check(rawCageExact,
+              "per-tube: planar K7 keeps the parent cage and Q frame exact");
+        Check(holdingTargetExact,
+              "per-tube: planar K7 writes the edited inherited outer slot");
+        Check(unrelatedOuterCount > 0 && unrelatedOuterExact,
+              "per-tube: planar K7 keeps sibling-owned outer slots exact");
+
+        TonicModel::TubeRecord residualBefore, residualAfter;
+        bool const parentK6 = holdingModel.GetTubeRecord(holdingChild,
+                                                           &residualBefore) &&
+            holdingModel.MoveTubeSectionRing(0, holdingBinding.section,
+                                              0.012f, -0.007f) &&
+            holdingModel.GetTubeRecord(holdingChild, &residualAfter) &&
+            holdingBinding.section < int(residualBefore.deltas.sections.size()) &&
+            holdingBinding.section < int(residualAfter.deltas.sections.size()) &&
+            holdingBinding.childSlot <
+                int(residualBefore.deltas.sections[
+                    size_t(holdingBinding.section)].u.size()) &&
+            holdingBinding.childSlot <
+                int(residualAfter.deltas.sections[
+                    size_t(holdingBinding.section)].u.size()) &&
+            Near(residualBefore.deltas.sections[size_t(holdingBinding.section)].u[
+                     size_t(holdingBinding.childSlot)],
+                 residualAfter.deltas.sections[size_t(holdingBinding.section)].u[
+                     size_t(holdingBinding.childSlot)], 2e-5f) &&
+            Near(residualBefore.deltas.sections[size_t(holdingBinding.section)].v[
+                     size_t(holdingBinding.childSlot)],
+                 residualAfter.deltas.sections[size_t(holdingBinding.section)].v[
+                     size_t(holdingBinding.childSlot)], 2e-5f);
+        Check(parentK6,
+              "per-tube: a later parent K6 preserves the holding-slot sculpt residual");
+        }
     }
 
     // Tube 0 still goes through the single-tube spelling unchanged.
@@ -1656,12 +2415,15 @@ int main()
 {
     CheckK4();
     CheckK5();
+    CheckCenterCoreHandle();
+    CheckRigidTubeTransport();
     CheckK8();
     CheckK9();
     CheckK10();
     CheckK11();
     CheckModelTubeMode();
     CheckModelFillMode();
+    CheckModelPerTubeFill();
     CheckAutoTube();
     CheckCApi();
     CheckProbes();
@@ -1676,5 +2438,3 @@ int main()
     std::printf("%d failure(s)\n", g_failures);
     return g_failures ? 1 : 0;
 }
-
-

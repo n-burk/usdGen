@@ -1,6 +1,7 @@
 #include "usdGen/ops/curveSource.h"
 
 #include "usdGen/curveLoader.h"
+#include "usdGen/surfaceCageSource.h"
 #include "usdGen/opRegistry.h"
 #include "usdGen/curveBuffer.h"
 #include "usdGenMath/usdGenMath/kernels.h"
@@ -145,6 +146,10 @@ UsdGenCurveSourceOp::UsdGenCurveSourceOp()
    topologyParameters_.push_back(TfToken("mode"));
    topologyParameters_.push_back(TfToken("useRest"));
    topologyParameters_.push_back(TfToken("usdGen:useRest"));
+   topologyParameters_.push_back(TfToken("interpolationMode"));
+   topologyParameters_.push_back(TfToken("densityMultiplier"));
+   topologyParameters_.push_back(TfToken("regionMapChannel"));
+   topologyParameters_.push_back(TfToken("expectMapGeneration"));
    topologyParameters_.push_back(TfToken("resampleTo"));
    topologyParameters_.push_back(TfToken("idSource"));
    topologyParameters_.push_back(TfToken("staleAction"));
@@ -196,6 +201,43 @@ UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) 
       for (SdfPath const &path : p->node->surfaces) {
          std::string const text = path.GetString();
          bytes(text.data(), text.size());
+      }
+      feed("mapBindings", p->node->mapBindings.size());
+      for (UsdGenMapBindingDesc const &binding : p->node->mapBindings) {
+         std::string const map = binding.map.GetString();
+         std::string const relationship = binding.relationship.GetString();
+         bytes(map.data(), map.size());
+         bytes(relationship.data(), relationship.size());
+      }
+      // Legacy direct descriptors may still use maps without typed bindings.
+      feed("maps", p->node->maps.size());
+      for (SdfPath const &path : p->node->maps) {
+         std::string const text = path.GetString();
+         bytes(text.data(), text.size());
+      }
+      if (ctx.desc) {
+         auto digestMap = [&](SdfPath const &path) {
+            auto const map = std::find_if(ctx.desc->maps.begin(), ctx.desc->maps.end(),
+                [&](UsdGenMapDesc const &candidate) { return candidate.path == path; });
+            if (map == ctx.desc->maps.end()) { feed("missingMap", 1); return; }
+            std::string const type = map->type.GetString();
+            bytes(type.data(), type.size());
+            bytes(map->resolvedAssetPath.data(), map->resolvedAssetPath.size());
+            feed("textureGeneration", map->textureGeneration);
+            feed("mapParams", map->params.size());
+            for (UsdGenParamValue const &param : map->params) {
+               std::string const name = param.name.GetString();
+               bytes(name.data(), name.size());
+               feed("value", param.value.GetHash());
+               feed("animated", param.animated);
+            }
+         };
+         if (!p->node->mapBindings.empty()) {
+            for (UsdGenMapBindingDesc const &binding : p->node->mapBindings)
+               digestMap(binding.map);
+         } else for (SdfPath const &path : p->node->maps) {
+            digestMap(path);
+         }
       }
    }
    // C3 data is a captured external owner, not just optional named planes.
@@ -256,6 +298,41 @@ UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) 
             if (!plane.floatValues.empty()) bytes(plane.floatValues.cdata(), plane.floatValues.size() * sizeof(float));
             feed("intValues", plane.intValues.size());
             if (!plane.intValues.empty()) bytes(plane.intValues.cdata(), plane.intValues.size() * sizeof(int));
+         }
+         // surfaceCage is immutable source data, not a generic authored
+         // plane.  Hash every captured array so editing sparse rails, owner
+         // controls, profile/chart data, or triangle ownership always
+         // recaptures transient dense C3 without relying on a generation
+         // bump from a scene adapter.
+         feed("surfaceCage", found->surfaceCage ? 1 : 0);
+         if (found->surfaceCage) {
+            UsdGenSurfaceCagePayload const &cage = *found->surfaceCage;
+            auto ints = [&](char const *key, VtIntArray const &values) {
+               feed(key, values.size());
+               if (!values.empty()) bytes(values.cdata(), values.size() * sizeof(int));
+            };
+            auto floats = [&](char const *key, VtFloatArray const &values) {
+               feed(key, values.size());
+               if (!values.empty()) bytes(values.cdata(), values.size() * sizeof(float));
+            };
+            auto vec3i = [&](char const *key, VtVec3iArray const &values) {
+               feed(key, values.size());
+               for (GfVec3i const &value : values)
+                  bytes(&value[0], 3 * sizeof(int));
+            };
+            ints("cageOwnerIds", cage.ownerIds);
+            floats("cageOwnerDensities", cage.ownerDensities);
+            ints("cageOwnerSeeds", cage.ownerSeeds);
+            ints("cageOwnerCvCounts", cage.ownerCvCounts);
+            floats("cageOwnerEdgeBias", cage.ownerEdgeBias);
+            ints("cageProfileOffsets", cage.ownerLengthProfileOffsets);
+            vec2("cageProfile", cage.ownerLengthProfile);
+            floats("cageNormalizedT", cage.normalizedT);
+            vec3i("cageTriangles", cage.triangles);
+            ints("cageTriangleOwners", cage.triangleOwnerIndices);
+            vec2("cageTriangleCharts", cage.triangleRootCharts);
+            vec2("cageChartCentroids", cage.ownerChartCentroids);
+            floats("cageChartMeanRadii", cage.ownerChartMeanRadii);
          }
       }
    }
@@ -353,8 +430,27 @@ bool UsdGenCurveSourceOp::Capture(UsdGenCaptureContext const &ctx,
                                "' was not found");
          return false;
       }
+      TfToken const interpolationMode = ctx.params
+          ? ctx.params->GetToken(TfToken("interpolationMode"), TfToken("none"))
+          : TfToken("none");
+      if (interpolationMode != TfToken("none") &&
+          interpolationMode != TfToken("surfaceCage")) {
+         if (diag) diag->Error("UsdGenCurveSource::Capture: interpolationMode must be none or surfaceCage");
+         return false;
+      }
+      UsdGenCurveSetDesc transient;
+      UsdGenCurveSetDesc const *source = &*found;
+      if (interpolationMode == TfToken("surfaceCage")) {
+         std::string error;
+         if (!UsdGenBuildSurfaceCageCurveSet(*ctx.desc, *ctx.params->node,
+                                             *found, &transient, &error)) {
+            if (diag) diag->Error("UsdGenCurveSource::Capture: surfaceCage: " + error);
+            return false;
+         }
+         source = &transient;
+      }
       UsdGenCurveBuffer candidate;
-      if (!UsdGenCurveLoader::Load(ctx, *found, &candidate, diag, &bindingCache_)) return false;
+      if (!UsdGenCurveLoader::Load(ctx, *source, &candidate, diag, &bindingCache_)) return false;
       UsdGenCurveSourceCapture &cap = *static_cast<UsdGenCurveSourceCapture *>(out);
       candidate.topologyVersion = cap.MutableBuffer().topologyVersion + 1;
       cap.MutableBuffer() = std::move(candidate);

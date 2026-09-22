@@ -22,6 +22,9 @@ class TonicToolState:
     activeMode:     str = ""             # "" = no mode; one of tonicModes ids
     activeLevel:    int = 1              # hierarchy focus level (P4)
     showAmplifiedHair: bool = False      # run the usdGen cook on commits
+    outputEnabled: bool = False          # committed Output description exists
+    outputDensityMultiplier: float = 1.0
+    outputStrandWidth: float = 0.01
     context:        str = "interactive"  # "interactive" | "render"
     panels:         dict = dataclasses.field(default_factory=dict)
     viewportFailed: bool = False
@@ -33,16 +36,20 @@ class TonicToolState:
     lastMoveMs:     float = 0.0
     ladderStep:     int = 0              # 0 = full fidelity (V5 steps it)
     # Graph mode (P2, plan/17 section 5.1).
-    graphSubMode:   str = ""             # "" = none; one of GRAPH_SUBMODES
+    graphSubMode:   str = "region"       # one of GRAPH_SUBMODES
     snapRadiusPx:   float = 8.0          # on-screen weld/snap distance
     mirrorX:        bool = False         # symmetric node creation
     mapVersion:     int = 0              # last map version enqueued
     bakedVersion:   int = 0              # last map version swapped
     # Tube mode (P3, plan/17 section 5.2).
     tubeSubMode:    str = ""             # "" = none; one of TUBE_SUBMODES
+    selectionShape: str = "box"          # "box" | "lasso" in Tube edits
+    tubeSelectionKind: str = "tube"      # tube, center, ring or section
+    transformTool:  str = "move"         # select, move, rotate or scale
     softCenter:     float = 0.0          # soft-selection center in t
     softRadius:     float = 0.0          # 0 = exact CV only
     displaySegments: int = 1             # tessellation spans (ladder step 2)
+    showGeneratedCurves: bool = True     # persistent guide-curve visibility
     # Fill mode (P3, plan/17 section 5.3).
     fillSubMode:    str = ""             # "" = none; one of FILL_SUBMODES
     previewFraction: float = 0.25        # live drag density
@@ -52,6 +59,13 @@ class TonicToolState:
     subdivideCount: int = 4              # spinner 2..8
     splitMode:      str = "kmeans"       # "kmeans" | "edge"
     focusNames:     tuple = ()           # L1..focus tube names (breadcrumb)
+    # Active-cut navigation is a per-branch frontier, owned by the model.
+    # `activeLevel` remains a compatibility/display-style value; these ids
+    # identify the expanded parent that supplies the current editable
+    # frontier and its root-first ancestry for the breadcrumb.
+    activeCutEnabled: bool = False
+    focusParentId: int = -1
+    focusAncestorIds: tuple = ()
     lockParents:    bool = False         # child edits refresh ancestors
     lockChildren:   bool = False         # parent edits re-derive descendants
     tubeLocks:      dict = dataclasses.field(default_factory=dict)

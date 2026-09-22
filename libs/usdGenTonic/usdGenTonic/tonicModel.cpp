@@ -15,7 +15,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
+#include <queue>
+#include <set>
 
 namespace usdGenTonic {
 
@@ -140,6 +143,584 @@ bool _LaneTubeIntersect(bool device, TonicTubeDesc const *tubes,
     return TonicTubeIntersectCpu(tubes, tubeCount, outFlags, err);
 }
 
+struct _RegionSupport {
+    float origin[3] = {0.0f, 0.0f, 0.0f};
+    float normal[3] = {0.0f, 1.0f, 0.0f};
+};
+
+struct _RegionFootprint {
+    float origin[3] = {0.0f, 0.0f, 0.0f};
+    float normal[3] = {0.0f, 1.0f, 0.0f};
+    float uAxis[3] = {1.0f, 0.0f, 0.0f};
+    float vAxis[3] = {0.0f, 0.0f, 1.0f};
+    std::vector<std::array<float, 3>> corners;
+};
+
+bool _RegionCanonicalFootprint(TonicScalpMesh const &scalp,
+                               TonicScalpGraph const &graph, int regionId,
+                               _RegionFootprint *out, std::string *err)
+{
+    auto fail = [&](char const *why) {
+        if (err) {
+            *err = why;
+        }
+        return false;
+    };
+    if (!out || regionId < 0 || regionId >= graph.RegionCount()) {
+        return fail("invalid region footprint");
+    }
+    TonicGraphRegion const &region = graph.Regions()[size_t(regionId)];
+    size_t const boundaryCount = region.boundary.size() / 3;
+    if (boundaryCount < 3 || region.loop.size() < 3) {
+        return fail("region has no closed boundary");
+    }
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (size_t i = 0; i < boundaryCount; ++i) {
+        cx += region.boundary[i * 3 + 0];
+        cy += region.boundary[i * 3 + 1];
+        cz += region.boundary[i * 3 + 2];
+    }
+    float const centroid[3] = {float(cx / double(boundaryCount)),
+                               float(cy / double(boundaryCount)),
+                               float(cz / double(boundaryCount))};
+    TonicHit const support = TonicClosestPointCpu(scalp, centroid);
+    if (!support.hit) {
+        return fail("region centroid is off scalp");
+    }
+    out->origin[0] = support.px;
+    out->origin[1] = support.py;
+    out->origin[2] = support.pz;
+    float n[3] = {0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < boundaryCount; ++i) {
+        float const *a = &region.boundary[i * 3];
+        float const *b = &region.boundary[((i + 1) % boundaryCount) * 3];
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    float const nlen = TonicLen3(n);
+    if (!(nlen > 1e-12f)) {
+        return fail("region support plane is degenerate");
+    }
+    n[0] /= nlen;
+    n[1] /= nlen;
+    n[2] /= nlen;
+    if (n[0] * support.nx + n[1] * support.ny + n[2] * support.nz < 0.0f) {
+        n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
+    }
+    std::vector<TonicGraphNode const *> nodes;
+    nodes.reserve(region.loop.size());
+    for (int id : region.loop) {
+        TonicGraphNode const *node = graph.FindNode(id);
+        if (!node || !node->alive) {
+            return fail("region loop has a missing node");
+        }
+        nodes.push_back(node);
+    }
+    size_t anchor = 0;
+    for (size_t i = 1; i < nodes.size(); ++i) {
+        if (nodes[i]->id < nodes[anchor]->id) {
+            anchor = i;
+        }
+    }
+    std::rotate(nodes.begin(), nodes.begin() + anchor, nodes.end());
+    bool haveU = false;
+    for (TonicGraphNode const *node : nodes) {
+        float d[3] = {node->p[0] - out->origin[0],
+                      node->p[1] - out->origin[1],
+                      node->p[2] - out->origin[2]};
+        float const along = TonicDot3(d, n);
+        d[0] -= along * n[0]; d[1] -= along * n[1]; d[2] -= along * n[2];
+        float const dlen = TonicLen3(d);
+        if (dlen > 1e-6f) {
+            out->uAxis[0] = d[0] / dlen;
+            out->uAxis[1] = d[1] / dlen;
+            out->uAxis[2] = d[2] / dlen;
+            haveU = true;
+            break;
+        }
+    }
+    if (!haveU) {
+        return fail("region authored corners collapse in support plane");
+    }
+    TonicCross3(n, out->uAxis, out->vAxis);
+    out->normal[0] = n[0]; out->normal[1] = n[1]; out->normal[2] = n[2];
+    out->corners.clear();
+    out->corners.reserve(nodes.size());
+    double twiceArea = 0.0;
+    std::vector<std::array<float, 2>> chart;
+    chart.reserve(nodes.size());
+    for (TonicGraphNode const *node : nodes) {
+        float const d[3] = {node->p[0] - out->origin[0],
+                            node->p[1] - out->origin[1],
+                            node->p[2] - out->origin[2]};
+        float const u = TonicDot3(d, out->uAxis);
+        float const v = TonicDot3(d, out->vAxis);
+        chart.push_back({{u, v}});
+        out->corners.push_back({{out->origin[0] + out->uAxis[0] * u + out->vAxis[0] * v,
+                                 out->origin[1] + out->uAxis[1] * u + out->vAxis[1] * v,
+                                 out->origin[2] + out->uAxis[2] * u + out->vAxis[2] * v}});
+    }
+    for (size_t i = 0; i < chart.size(); ++i) {
+        std::array<float, 2> const &a = chart[i];
+        std::array<float, 2> const &b = chart[(i + 1) % chart.size()];
+        twiceArea += double(a[0]) * b[1] - double(a[1]) * b[0];
+    }
+    if (std::fabs(twiceArea) <= 1e-10) {
+        return fail("region footprint has zero area");
+    }
+    if (twiceArea < 0.0) {
+        std::reverse(out->corners.begin() + 1, out->corners.end());
+    }
+    return true;
+}
+
+bool _SameRegionFootprint(_RegionFootprint const &a,
+                          _RegionFootprint const &b)
+{
+    if (a.corners.size() != b.corners.size()) return false;
+    auto samePoint = [](float const *p, float const *q) {
+        float const dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+        return dx * dx + dy * dy + dz * dz <= 1e-12f;
+    };
+    if (!samePoint(a.origin, b.origin)) return false;
+    for (size_t i = 0; i < a.corners.size(); ++i) {
+        if (!samePoint(a.corners[i].data(), b.corners[i].data())) return false;
+    }
+    return true;
+}
+
+std::array<float, 3> _FootprintPoint(_RegionFootprint const &footprint,
+                                     float wrappedS)
+{
+    int const count = int(footprint.corners.size());
+    while (wrappedS < 0.0f) wrappedS += float(count);
+    while (wrappedS >= float(count)) wrappedS -= float(count);
+    int const edge = int(std::floor(wrappedS));
+    float const t = wrappedS - float(edge);
+    std::array<float, 3> const &a = footprint.corners[size_t(edge)];
+    std::array<float, 3> const &b =
+        footprint.corners[size_t((edge + 1) % count)];
+    return {{a[0] + (b[0] - a[0]) * t,
+             a[1] + (b[1] - a[1]) * t,
+             a[2] + (b[2] - a[2]) * t}};
+}
+
+std::vector<float> _TemplateFootprintSlots(_RegionFootprint const &footprint,
+                                           int ringVerts)
+{
+    std::vector<float> slots;
+    int const count = int(footprint.corners.size());
+    if (ringVerts < count) {
+        return slots;
+    }
+    for (int i = 0; i < count; ++i) slots.push_back(float(i));
+    while (int(slots.size()) < ringVerts) {
+        size_t best = 0;
+        float bestLength2 = -1.0f;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            std::array<float, 3> const a = _FootprintPoint(footprint, slots[i]);
+            float next = slots[(i + 1) % slots.size()];
+            if (i + 1 == slots.size()) next += float(count);
+            std::array<float, 3> const b = _FootprintPoint(footprint, next);
+            float const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+            float const length2 = dx * dx + dy * dy + dz * dz;
+            if (length2 > bestLength2) { bestLength2 = length2; best = i; }
+        }
+        float next = slots[(best + 1) % slots.size()];
+        if (best + 1 == slots.size()) next += float(count);
+        slots.insert(slots.begin() + static_cast<std::vector<float>::difference_type>(best + 1),
+                     0.5f * (slots[best] + next));
+    }
+    for (float &s : slots) while (s >= float(count)) s -= float(count);
+    return slots;
+}
+
+bool _SectionZeroWorld(TonicTubeDesc const &desc,
+                       std::vector<std::array<float, 3>> *out)
+{
+    if (!out || desc.centerX.empty() || desc.sections.empty()) return false;
+    TonicTubeSection const &section = desc.sections.front();
+    if (section.u.size() != section.v.size() || section.u.empty() ||
+        !(section.scale > 1e-6f) || !std::isfinite(section.twist)) return false;
+    std::vector<TonicFrame> frames;
+    std::string err;
+    if (!TonicTubeFramesCpu(desc, &frames, &err) || frames.empty()) return false;
+    float const ct = std::cos(section.twist), st = std::sin(section.twist);
+    TonicFrame const &frame = frames.front();
+    out->resize(section.u.size());
+    for (size_t i = 0; i < section.u.size(); ++i) {
+        float const u = section.u[i] * section.scale;
+        float const v = section.v[i] * section.scale;
+        float const ru = u * ct - v * st;
+        float const rv = u * st + v * ct;
+        (*out)[i] = {{desc.centerX[0] + frame.nx * ru + frame.bx * rv,
+                      desc.centerY[0] + frame.ny * ru + frame.by * rv,
+                      desc.centerZ[0] + frame.nz * ru + frame.bz * rv}};
+    }
+    return true;
+}
+
+// Attachment conformance owns the inherited boundary but must not regenerate
+// a child's sculpted upper cage from a new material partition.  Keep the
+// child's transported center/frame reference and express the freshly derived
+// root boundary in that chart. K4 therefore sees the same upper control
+// curve and every authored non-root ring remains in its transported world
+// pose. (The Hermite span adjacent to the changed root remains intentionally
+// influenced by the new attachment.)
+bool _FitSectionZeroWorld(TonicTubeDesc *desc,
+                          std::vector<std::array<float, 3>> const &points,
+                          std::string *err)
+{
+    auto fail = [&](char const *why) {
+        if (err) {
+            *err = why;
+        }
+        return false;
+    };
+    if (!desc || desc->centerX.empty() || desc->sections.empty()) {
+        return fail("attachment child has no root section");
+    }
+    TonicTubeSection &section = desc->sections.front();
+    if (points.size() != section.u.size() || section.u.size() != section.v.size() ||
+        !(std::fabs(section.scale) > 1e-6f) ||
+        !std::isfinite(section.scale) || !std::isfinite(section.twist)) {
+        return fail("attachment child root layout is invalid");
+    }
+    std::vector<TonicFrame> frames;
+    std::string frameErr;
+    if (!TonicTubeFramesCpu(*desc, &frames, &frameErr) || frames.empty()) {
+        return fail(frameErr.empty() ? "attachment child has no root frame"
+                                     : frameErr.c_str());
+    }
+    TonicFrame const &frame = frames.front();
+    float const ct = std::cos(section.twist);
+    float const st = std::sin(section.twist);
+    std::vector<float> u(points.size()), v(points.size());
+    for (size_t slot = 0; slot < points.size(); ++slot) {
+        float const dx = points[slot][0] - desc->centerX[0];
+        float const dy = points[slot][1] - desc->centerY[0];
+        float const dz = points[slot][2] - desc->centerZ[0];
+        float const ru = dx * frame.nx + dy * frame.ny + dz * frame.nz;
+        float const rv = dx * frame.bx + dy * frame.by + dz * frame.bz;
+        float const normal = dx * frame.tx + dy * frame.ty + dz * frame.tz;
+        // Both child and parent inherit the same transported support frame;
+        // anything materially off that plane is not a valid root attachment.
+        if (!std::isfinite(ru) || !std::isfinite(rv) ||
+            std::fabs(normal) > 1e-4f) {
+            return fail("attachment root does not lie in child chart plane");
+        }
+        u[slot] = (ru * ct + rv * st) / section.scale;
+        v[slot] = (-ru * st + rv * ct) / section.scale;
+    }
+    section.u = std::move(u);
+    section.v = std::move(v);
+    return true;
+}
+
+// K14 binds only physically retained parent boundary corners.  During an
+// attachment refresh, a child section-zero layout may have been resampled;
+// reconstruct its root triples from the *installed* world points and the
+// current parent root.  Exact coincidence is required -- an internal cut or
+// interpolated slot is deliberately not a holding edge.
+bool _InstalledRootBoundaryBindings(
+    TonicTubeDesc const &parent, TonicTubeDesc const &child,
+    std::vector<TonicParentBoundaryBinding> *out)
+{
+    if (!out) return false;
+    std::vector<std::array<float, 3>> parentPoints, childPoints;
+    if (!_SectionZeroWorld(parent, &parentPoints) ||
+        !_SectionZeroWorld(child, &childPoints)) {
+        return false;
+    }
+    float extent = 0.0f;
+    for (std::array<float, 3> const &p : parentPoints) {
+        float const dx = p[0] - parent.centerX[0];
+        float const dy = p[1] - parent.centerY[0];
+        float const dz = p[2] - parent.centerZ[0];
+        extent = std::max(extent, std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    float const tolerance = std::max(1e-5f, extent * 1e-5f);
+    std::vector<TonicParentBoundaryBinding> bindings;
+    std::vector<bool> used(parentPoints.size(), false);
+    for (size_t childSlot = 0; childSlot < childPoints.size(); ++childSlot) {
+        int owner = -1;
+        for (size_t parentSlot = 0; parentSlot < parentPoints.size(); ++parentSlot) {
+            float const dx = childPoints[childSlot][0] - parentPoints[parentSlot][0];
+            float const dy = childPoints[childSlot][1] - parentPoints[parentSlot][1];
+            float const dz = childPoints[childSlot][2] - parentPoints[parentSlot][2];
+            if (dx * dx + dy * dy + dz * dz > tolerance * tolerance) continue;
+            // Repeated polygon points have no unambiguous material owner.
+            if (owner >= 0 || used[parentSlot]) {
+                owner = -2;
+                break;
+            }
+            owner = int(parentSlot);
+        }
+        if (owner >= 0) {
+            used[size_t(owner)] = true;
+            bindings.push_back({0, owner, int(childSlot)});
+        }
+    }
+    *out = std::move(bindings);
+    return true;
+}
+
+std::vector<float> _RecoverFootprintSlots(
+    _RegionFootprint const &oldFootprint, TonicTubeDesc const &oldActual)
+{
+    int const count = int(oldFootprint.corners.size());
+    int const ringVerts = oldActual.ringVerts;
+    if (ringVerts == count) {
+        return _TemplateFootprintSlots(oldFootprint, ringVerts);
+    }
+    std::vector<std::array<float, 3>> points;
+    if (!_SectionZeroWorld(oldActual, &points) || int(points.size()) != ringVerts) {
+        return _TemplateFootprintSlots(oldFootprint, ringVerts);
+    }
+    float extent = 0.0f;
+    for (size_t i = 0; i < oldFootprint.corners.size(); ++i) {
+        std::array<float, 3> const &a = oldFootprint.corners[i];
+        std::array<float, 3> const &b =
+            oldFootprint.corners[(i + 1) % oldFootprint.corners.size()];
+        float const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+        extent = std::max(extent, std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    float const tolerance = std::max(1e-4f, extent * 1e-4f);
+    std::vector<float> slots;
+    slots.reserve(points.size());
+    bool valid = true;
+    float previous = -1.0f;
+    std::vector<bool> corners(size_t(count), false);
+    for (size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
+        std::array<float, 3> const &p = points[pointIndex];
+        float bestDistance2 = std::numeric_limits<float>::infinity();
+        float bestS = 0.0f;
+        for (int edge = 0; edge < count; ++edge) {
+            std::array<float, 3> const &a = oldFootprint.corners[size_t(edge)];
+            std::array<float, 3> const &b =
+                oldFootprint.corners[size_t((edge + 1) % count)];
+            float const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+            float const len2 = dx * dx + dy * dy + dz * dz;
+            if (!(len2 > 1e-12f)) { valid = false; continue; }
+            float t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy +
+                       (p[2] - a[2]) * dz) / len2;
+            t = std::max(0.0f, std::min(1.0f, t));
+            float const qx = a[0] + dx * t, qy = a[1] + dy * t,
+                        qz = a[2] + dz * t;
+            float const ex = p[0] - qx, ey = p[1] - qy, ez = p[2] - qz;
+            float const distance2 = ex * ex + ey * ey + ez * ez;
+            if (distance2 < bestDistance2) {
+                bestDistance2 = distance2;
+                bestS = float(edge) + t;
+            }
+        }
+        if (bestDistance2 > tolerance * tolerance) { valid = false; break; }
+        for (int corner = 0; corner < count; ++corner) {
+            std::array<float, 3> const &q = oldFootprint.corners[size_t(corner)];
+            float const dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+            if (dx * dx + dy * dy + dz * dz <= tolerance * tolerance) {
+                bestS = float(corner);
+                corners[size_t(corner)] = true;
+                break;
+            }
+        }
+        // A complete recovered map must retain the canonical min-id seam
+        // at slot zero and run once, strictly forward, around the old loop.
+        // Do not unwrap later samples: doing so can incorrectly accept a
+        // scrambled polygon after multiple wraps.
+        if ((pointIndex == 0 && std::fabs(bestS) > 1e-4f) ||
+            (previous >= 0.0f && bestS <= previous + 1e-4f)) {
+            valid = false;
+            break;
+        }
+        previous = bestS;
+        slots.push_back(bestS);
+    }
+    for (bool found : corners) valid = valid && found;
+    return valid ? slots : _TemplateFootprintSlots(oldFootprint, ringVerts);
+}
+
+std::vector<int> _StableRegionLoopKey(TonicGraphRegion const &region)
+{
+    std::vector<int> key = region.loop;
+    std::sort(key.begin(), key.end());
+    key.erase(std::unique(key.begin(), key.end()), key.end());
+    return key;
+}
+
+int _RegionForStableLoop(TonicScalpGraph const &graph,
+                         std::vector<int> const &key)
+{
+    for (TonicGraphRegion const &region : graph.Regions()) {
+        if (!region.isOutside && _StableRegionLoopKey(region) == key) {
+            return region.id;
+        }
+    }
+    return -1;
+}
+
+// A geometry-only graph move may transport attached tube subtrees.  Keep the
+// topology test independent of extracted dense region ids, which are allowed
+// to renumber while the same directed loop remains alive.
+std::vector<std::string> _GraphTopologySignature(TonicScalpGraph const &graph)
+{
+    std::vector<std::string> out;
+    for (TonicGraphNode const &node : graph.Nodes()) {
+        if (node.alive) {
+            out.push_back("N" + std::to_string(node.id));
+        }
+    }
+    for (TonicGraphEdge const &edge : graph.Edges()) {
+        if (edge.alive) {
+            out.push_back("E" + std::to_string(edge.id) + ":" +
+                          std::to_string(edge.a) + ":" +
+                          std::to_string(edge.b));
+        }
+    }
+    for (TonicGraphRegion const &region : graph.Regions()) {
+        std::vector<int> loop = region.loop;
+        if (loop.empty()) {
+            continue;
+        }
+        size_t best = 0;
+        for (size_t begin = 1; begin < loop.size(); ++begin) {
+            for (size_t i = 0; i < loop.size(); ++i) {
+                int const a = loop[(begin + i) % loop.size()];
+                int const b = loop[(best + i) % loop.size()];
+                if (a == b) {
+                    continue;
+                }
+                if (a < b) {
+                    best = begin;
+                }
+                break;
+            }
+        }
+        std::string key = "R" + std::to_string(region.isOutside) + ":";
+        for (size_t i = 0; i < loop.size(); ++i) {
+            key += std::to_string(loop[(best + i) % loop.size()]) + ",";
+        }
+        out.push_back(std::move(key));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool _RegionSupportFromGraph(TonicScalpMesh const &scalp,
+                             TonicGraphRegion const &region,
+                             _RegionSupport *out)
+{
+    if (!out || region.boundary.size() < 9) {
+        return false;
+    }
+    size_t const count = region.boundary.size() / 3;
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        cx += region.boundary[i * 3 + 0];
+        cy += region.boundary[i * 3 + 1];
+        cz += region.boundary[i * 3 + 2];
+    }
+    float const centroid[3] = {float(cx / double(count)),
+                               float(cy / double(count)),
+                               float(cz / double(count))};
+    TonicHit const surface = TonicClosestPointCpu(scalp, centroid);
+    if (!surface.hit) {
+        return false;
+    }
+    out->origin[0] = surface.px;
+    out->origin[1] = surface.py;
+    out->origin[2] = surface.pz;
+    float pn[3] = {0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < count; ++i) {
+        float const *a = &region.boundary[i * 3];
+        float const *b = &region.boundary[((i + 1) % count) * 3];
+        pn[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        pn[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        pn[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    float const len = TonicLen3(pn);
+    if (len > 1e-12f) {
+        pn[0] /= len;
+        pn[1] /= len;
+        pn[2] /= len;
+        if (TonicDot3(pn, &surface.nx) < 0.0f) {
+            pn[0] = -pn[0];
+            pn[1] = -pn[1];
+            pn[2] = -pn[2];
+        }
+    } else {
+        pn[0] = surface.nx;
+        pn[1] = surface.ny;
+        pn[2] = surface.nz;
+    }
+    float const nlen = TonicLen3(pn);
+    if (!(nlen > 1e-12f)) {
+        return false;
+    }
+    out->normal[0] = pn[0] / nlen;
+    out->normal[1] = pn[1] / nlen;
+    out->normal[2] = pn[2] / nlen;
+    return true;
+}
+
+bool _RigidBetweenRegionSupports(_RegionSupport const &from,
+                                 _RegionSupport const &to,
+                                 TonicRigidTransform *out)
+{
+    if (!out) {
+        return false;
+    }
+    float const dot = std::max(-1.0f,
+                               std::min(1.0f, TonicDot3(from.normal,
+                                                         to.normal)));
+    float axis[3];
+    TonicCross3(from.normal, to.normal, axis);
+    float const sinTheta = TonicLen3(axis);
+    float r[9] = {1.0f, 0.0f, 0.0f,
+                  0.0f, 1.0f, 0.0f,
+                  0.0f, 0.0f, 1.0f};
+    if (sinTheta > 1e-7f) {
+        axis[0] /= sinTheta;
+        axis[1] /= sinTheta;
+        axis[2] /= sinTheta;
+        float const x = axis[0], y = axis[1], z = axis[2];
+        float const oneMinus = 1.0f - dot;
+        r[0] = dot + x * x * oneMinus;
+        r[1] = x * y * oneMinus - z * sinTheta;
+        r[2] = x * z * oneMinus + y * sinTheta;
+        r[3] = y * x * oneMinus + z * sinTheta;
+        r[4] = dot + y * y * oneMinus;
+        r[5] = y * z * oneMinus - x * sinTheta;
+        r[6] = z * x * oneMinus - y * sinTheta;
+        r[7] = z * y * oneMinus + x * sinTheta;
+        r[8] = dot + z * z * oneMinus;
+    } else if (dot < 0.0f) {
+        // A half-turn has no unique minimal axis. Choose a deterministic
+        // in-plane axis; continuous scalp moves take the branch above.
+        TonicPerp3(from.normal, axis);
+        float const x = axis[0], y = axis[1], z = axis[2];
+        r[0] = 2.0f * x * x - 1.0f;
+        r[1] = 2.0f * x * y;
+        r[2] = 2.0f * x * z;
+        r[3] = 2.0f * y * x;
+        r[4] = 2.0f * y * y - 1.0f;
+        r[5] = 2.0f * y * z;
+        r[6] = 2.0f * z * x;
+        r[7] = 2.0f * z * y;
+        r[8] = 2.0f * z * z - 1.0f;
+    }
+    std::copy(r, r + 9, out->rotation);
+    float rotatedOrigin[3] = {
+        r[0] * from.origin[0] + r[1] * from.origin[1] + r[2] * from.origin[2],
+        r[3] * from.origin[0] + r[4] * from.origin[1] + r[5] * from.origin[2],
+        r[6] * from.origin[0] + r[7] * from.origin[1] + r[8] * from.origin[2]};
+    out->translation[0] = to.origin[0] - rotatedOrigin[0];
+    out->translation[1] = to.origin[1] - rotatedOrigin[1];
+    out->translation[2] = to.origin[2] - rotatedOrigin[2];
+    return true;
+}
+
 }  // namespace
 
 bool
@@ -173,7 +754,13 @@ TonicModel::BuildTestTube(TonicTubeShape shape)
     }
     _useSections = false;
     _tubeRegionId = -1;
+    _rootFramePinned = false;
+    _rootFrame = TonicFrame();
+    _frameReference = {{1.0f, 0.0f, 0.0f,
+                        0.0f, 1.0f, 0.0f,
+                        0.0f, 0.0f, 1.0f}};
     _roots.clear();
+    _tubeRoots.clear();
     _guides = TonicGuideSet();
     ++_guideVersion;
     if (!Sync()) {
@@ -367,6 +954,58 @@ TonicModel::GetFillParams() const
 }
 
 bool
+TonicModel::SetOutputSettings(OutputSettings settings)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!std::isfinite(settings.densityMultiplier) ||
+        !(settings.densityMultiplier > 0.0f) ||
+        !std::isfinite(settings.width) || !(settings.width >= 0.0f) ||
+        settings.ptexResolution < -1 || settings.ptexResolution > 12) {
+        _diagnostic = "TonicModel::SetOutputSettings: density multiplier must "
+                      "be finite and > 0; width must be finite and >= 0; "
+                      "ptex resolution must be -1 or in [0, 12]";
+        return false;
+    }
+    if (_output.enabled == settings.enabled &&
+        _output.densityMultiplier == settings.densityMultiplier &&
+        _output.width == settings.width &&
+        _output.ptexResolution == settings.ptexResolution) {
+        return true;
+    }
+    HierarchyRollback const before = _SnapshotHierarchyLocked();
+    _output = settings;
+    _PushUndoSnapshotLocked(before);
+    ++_version;
+    return true;
+}
+
+TonicModel::OutputSettings
+TonicModel::GetOutputSettings() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _output;
+}
+
+bool
+TonicModel::SetOutputPtexResolution(int resOverride)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (resOverride < -1 || resOverride > 12) {
+        _diagnostic = "TonicModel::SetOutputPtexResolution: resolution must "
+                      "be -1 or in [0, 12]";
+        return false;
+    }
+    if (_output.ptexResolution == resOverride) {
+        return true;
+    }
+    HierarchyRollback const before = _SnapshotHierarchyLocked();
+    _output.ptexResolution = resOverride;
+    _PushUndoSnapshotLocked(before);
+    ++_version;
+    return true;
+}
+
+bool
 TonicModel::SetSubdivideParams(SubdivideParams params)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -424,6 +1063,9 @@ TonicModel::Snapshot() const
     snapshot.centerY = _host.centerY;
     snapshot.centerZ = _host.centerZ;
     snapshot.sections = _sections;
+    snapshot.rootFramePinned = _rootFramePinned;
+    snapshot.rootFrame = _rootFrame;
+    snapshot.frameReference = _frameReference;
     snapshot.fill = _fill;
     snapshot.subdivide = _subdivide;
     snapshot.locked = _locked;
@@ -453,6 +1095,9 @@ TonicModel::Restore(TubeSnapshot const &snapshot)
     _host.centerX = snapshot.centerX;
     _host.centerY = snapshot.centerY;
     _host.centerZ = snapshot.centerZ;
+    _rootFramePinned = snapshot.rootFramePinned;
+    _rootFrame = snapshot.rootFrame;
+    _frameReference = snapshot.frameReference;
     // Committed sections are authoritative (hydrate installs them); an
     // empty ring list means a pre-P3 snapshot and rebuilds the default
     // circles on the legacy display path.
@@ -476,6 +1121,7 @@ TonicModel::Restore(TubeSnapshot const &snapshot)
         _useSections = true;
     }
     _roots.clear();
+    _tubeRoots.clear();
     _guides = TonicGuideSet();
     ++_guideVersion;
     _fill = snapshot.fill;
@@ -538,6 +1184,9 @@ TonicTubeDescFromSnapshot(TonicModel::TubeSnapshot const &snapshot)
     desc.centerY = snapshot.centerY;
     desc.centerZ = snapshot.centerZ;
     desc.ringVerts = snapshot.shape.ringVerts;
+    desc.rootFramePinned = snapshot.rootFramePinned;
+    desc.rootFrame = snapshot.rootFrame;
+    desc.frameReference = snapshot.frameReference;
     bool sectionsOk = snapshot.sections.size() >= 2;
     for (auto const &s : snapshot.sections) {
         if (int(s.u.size()) != desc.ringVerts ||
@@ -554,11 +1203,13 @@ TonicTubeDescFromSnapshot(TonicModel::TubeSnapshot const &snapshot)
 namespace {
 
 // Shared K9/K10 tail: fill `roots` through the tube and resample to the
-// fill CV count with root frames. Returns false on any kernel error.
+// fill CV count with root frames. Returns false on any kernel error,
+// carrying the kernel's message in `err` when it is not null.
 bool _FillAndResample(TonicTubeDesc const &tube,
                       std::vector<TonicFrame> const &frames,
                       std::vector<TonicGuideRoot> const &roots,
-                      TonicModel::FillParams const &fill, TonicGuideSet *guides)
+                      TonicModel::FillParams const &fill, TonicGuideSet *guides,
+                      std::string *err = nullptr)
 {
     TonicFillDesc fd;
     fd.density = fill.density;
@@ -566,11 +1217,15 @@ bool _FillAndResample(TonicTubeDesc const &tube,
     fd.seed = fill.seed;
     fd.edgeBias = fill.edgeBias;
     fd.lengthProfile = fill.lengthProfile;
+    fd.sampler = fill.sampler;
     std::vector<float> filled;
     std::vector<float> lengths;
-    std::string err;
+    std::string local;
     if (!TonicGuideFillCpu(tube, frames, roots, fd, &filled, &lengths,
-                           &err)) {
+                           &local)) {
+        if (err) {
+            *err = local;
+        }
         return false;
     }
     int const guideCount = int(roots.size());
@@ -583,7 +1238,10 @@ bool _FillAndResample(TonicTubeDesc const &tube,
     std::vector<double> outFrames;
     if (!TonicGuideResampleCpu(filled.data(), inCounts.data(), guideCount,
                                fill.cvCount, rootDirs, &resampled, &outCounts,
-                               &outFrames, &err)) {
+                               &outFrames, &local)) {
+        if (err) {
+            *err = local;
+        }
         return false;
     }
     guides->points = std::move(resampled);
@@ -596,6 +1254,33 @@ bool _FillAndResample(TonicTubeDesc const &tube,
     guides->guideCount = guideCount;
     guides->cvCount = fill.cvCount;
     return true;
+}
+
+void _AnchorGuideRoots(std::vector<TonicGuideRoot> const &roots,
+                       TonicGuideSet *guides)
+{
+    if (!guides || guides->cvCount <= 0 ||
+        guides->points.size() < roots.size() * size_t(guides->cvCount) * 3) {
+        return;
+    }
+    for (size_t g = 0; g < roots.size(); ++g) {
+        size_t const first = g * size_t(guides->cvCount) * 3;
+        float const dx = roots[g].px - guides->points[first];
+        float const dy = roots[g].py - guides->points[first + 1];
+        float const dz = roots[g].pz - guides->points[first + 2];
+        for (int cv = 0; cv < guides->cvCount; ++cv) {
+            size_t const at = first + size_t(cv) * 3;
+            guides->points[at] += dx;
+            guides->points[at + 1] += dy;
+            guides->points[at + 2] += dz;
+        }
+        size_t const frame = g * 16;
+        if (guides->frames.size() >= frame + 15) {
+            guides->frames[frame + 12] = roots[g].px;
+            guides->frames[frame + 13] = roots[g].py;
+            guides->frames[frame + 14] = roots[g].pz;
+        }
+    }
 }
 
 } // namespace
@@ -630,6 +1315,9 @@ TonicSnapshotFromTubeRecord(TonicModel::TubeRecord const &record)
     snapshot.centerY = desc.centerY;
     snapshot.centerZ = desc.centerZ;
     snapshot.sections = desc.sections;
+    snapshot.rootFramePinned = desc.rootFramePinned;
+    snapshot.rootFrame = desc.rootFrame;
+    snapshot.frameReference = desc.frameReference;
     // The legacy cylinder fields only feed TonicDefaultSections, which an
     // authored tube never reaches; keep them consistent anyway.
     snapshot.shape.radius = desc.sections.empty()
@@ -648,7 +1336,7 @@ TonicSnapshotFromTubeRecord(TonicModel::TubeRecord const &record)
 
 TonicGuideSet
 TonicGenerateGuidesForTube(TonicModel::TubeSnapshot const &snapshot,
-                           int tubeId)
+                           int tubeId, bool usePinnedRootFrame)
 {
     TonicGuideSet guides;
     if (!snapshot.hasTube) {
@@ -665,9 +1353,9 @@ TonicGenerateGuidesForTube(TonicModel::TubeSnapshot const &snapshot,
     }
     std::vector<TonicFrame> frames;
     std::string err;
-    if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
-                              tube.centerZ.data(), int(tube.centerX.size()),
-                              &frames, &err)) {
+    TonicTubeDesc frameTube = tube;
+    frameTube.rootFramePinned = usePinnedRootFrame && tube.rootFramePinned;
+    if (!TonicTubeFramesCpu(frameTube, &frames, &err)) {
         return guides;
     }
     float const rootRadius =
@@ -688,6 +1376,7 @@ TonicGenerateGuidesForTube(TonicModel::TubeSnapshot const &snapshot,
     if (!_FillAndResample(tube, frames, roots, snapshot.fill, &guides)) {
         return TonicGuideSet();
     }
+    guides.tubeIds.assign(size_t(guides.guideCount), tubeId);
     return guides;
 }
 
@@ -695,14 +1384,15 @@ TonicGuideSet
 TonicGenerateGuidesOnScalpForTube(TonicModel::TubeSnapshot const &snapshot,
                                   TonicScalpMesh const &scalp,
                                   int const *regionFaces, int regionFaceCount,
-                                  int tubeId)
+                                  int tubeId, bool usePinnedRootFrame)
 {
     TonicGuideSet guides;
     if (!snapshot.hasTube || !scalp.finalized) {
         return guides;
     }
     if (!regionFaces || regionFaceCount <= 0) {
-        return TonicGenerateGuidesForTube(snapshot, tubeId);
+        return TonicGenerateGuidesForTube(snapshot, tubeId,
+                                          usePinnedRootFrame);
     }
     TonicTubeDesc const tube = TonicTubeDescFromSnapshot(snapshot);
     if (tube.centerX.size() < 2 || tube.sections.size() < 2) {
@@ -710,9 +1400,9 @@ TonicGenerateGuidesOnScalpForTube(TonicModel::TubeSnapshot const &snapshot,
     }
     std::vector<TonicFrame> frames;
     std::string err;
-    if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
-                              tube.centerZ.data(), int(tube.centerX.size()),
-                              &frames, &err)) {
+    TonicTubeDesc frameTube = tube;
+    frameTube.rootFramePinned = usePinnedRootFrame && tube.rootFramePinned;
+    if (!TonicTubeFramesCpu(frameTube, &frames, &err)) {
         return guides;
     }
     float const rootRadius =
@@ -737,6 +1427,50 @@ TonicGenerateGuidesOnScalpForTube(TonicModel::TubeSnapshot const &snapshot,
     if (!_FillAndResample(tube, frames, roots, snapshot.fill, &guides)) {
         return TonicGuideSet();
     }
+    guides.tubeIds.assign(size_t(guides.guideCount), tubeId);
+    return guides;
+}
+
+TonicGuideSet
+TonicGenerateGuidesOnRegionForTube(TonicModel::TubeSnapshot const &snapshot,
+                                   TonicScalpMesh const &scalp,
+                                   TonicRegionLoops const &loops,
+                                   int sourceRegionId, int tubeId,
+                                   std::vector<TonicRootOwnershipCell> const *ownership,
+                                   bool usePinnedRootFrame)
+{
+    TonicGuideSet guides;
+    TonicTubeDesc const tube = TonicTubeDescFromSnapshot(snapshot);
+    if (!snapshot.hasTube || !scalp.finalized || tube.centerX.size() < 2 ||
+        tube.sections.size() < 2) {
+        return guides;
+    }
+    std::vector<TonicFrame> frames;
+    std::string err;
+    TonicTubeDesc frameTube = tube;
+    frameTube.rootFramePinned = usePinnedRootFrame && tube.rootFramePinned;
+    if (!TonicTubeFramesCpu(frameTube, &frames, &err)) {
+        return guides;
+    }
+    float const radius = TonicSectionMeanRadius(tube.sections.front());
+    float const root[3] = {tube.centerX[0], tube.centerY[0], tube.centerZ[0]};
+    std::vector<TonicGuideRoot> roots;
+    if (!(radius > 0.0f) || !TonicRootSampleRegionMeshCpu(
+                               scalp, loops, sourceRegionId,
+                               snapshot.fill.density, tubeId, snapshot.fill.seed,
+                               root, frames[0], radius, &roots, 0, &err) ||
+        roots.empty()) {
+        return TonicGuideSet();
+    }
+    if (ownership) {
+        TonicFilterGuideRootsByOwnershipCells(*ownership, &roots);
+    }
+    if (roots.empty() ||
+        !_FillAndResample(tube, frames, roots, snapshot.fill, &guides)) {
+        return TonicGuideSet();
+    }
+    _AnchorGuideRoots(roots, &guides);
+    guides.tubeIds.assign(size_t(guides.guideCount), tubeId);
     return guides;
 }
 
@@ -849,21 +1583,277 @@ TonicModel::GraphAddNode(TonicHit const &hit)
     return id;
 }
 
+int
+TonicModel::GraphCreateRegion(std::vector<int> const &nodeIds,
+                              std::vector<TonicHit> const &hits)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_scalp || !_scalp->finalized) {
+        _diagnostic = "TonicModel::GraphCreateRegion: no scalp bound";
+        return -1;
+    }
+    if (nodeIds.size() != hits.size() || nodeIds.size() < 3) {
+        _diagnostic = "TonicModel::GraphCreateRegion: need three or more nodes";
+        return -1;
+    }
+    // Validate the whole request before adding even a single node.  A
+    // non-negative id is a stable graph id, never the compact display index.
+    for (size_t i = 0; i < nodeIds.size(); ++i) {
+        if (nodeIds[i] >= 0) {
+            if (!_graph.FindNode(nodeIds[i])) {
+                _diagnostic = "TonicModel::GraphCreateRegion: unknown node id";
+                return -1;
+            }
+        } else if (nodeIds[i] != -1 || !hits[i].hit) {
+            _diagnostic = "TonicModel::GraphCreateRegion: invalid new node";
+            return -1;
+        }
+    }
+    auto const graphBefore = _GraphUndoStateLocked();
+    // Restore() rebuilds ids from live vectors, which is correct for undo but
+    // not for this all-or-nothing batch: a rejected chain must leave existing
+    // sparse edge ids and the graph's id counters exactly untouched.
+    TonicScalpGraph const graphBeforeExact = _graph;
+    auto rollback = [&](char const *reason) {
+        _graph = graphBeforeExact;
+        _diagnostic = reason;
+        return -1;
+    };
+
+    std::vector<int> chain = nodeIds;
+    for (size_t i = 0; i < chain.size(); ++i) {
+        if (chain[i] != -1) {
+            continue;
+        }
+        chain[i] = _graph.AddNode(hits[i]);  // AddNode itself does no K3.
+        if (chain[i] < 0) {
+            return rollback("TonicModel::GraphCreateRegion: add node failed");
+        }
+    }
+    std::set<std::pair<int, int>> connected;
+    for (TonicGraphEdge const &edge : _graph.Edges()) {
+        if (edge.alive) {
+            connected.insert(std::minmax(edge.a, edge.b));
+        }
+    }
+    for (size_t i = 0; i < chain.size(); ++i) {
+        int const a = chain[i];
+        int const b = chain[(i + 1) % chain.size()];
+        if (a == b) {
+            return rollback("TonicModel::GraphCreateRegion: repeated adjacent node");
+        }
+        std::pair<int, int> const key = std::minmax(a, b);
+        if (connected.insert(key).second &&
+            _graph.Connect(*_scalp, a, b, /*extract*/ false) < 0) {
+            return rollback("TonicModel::GraphCreateRegion: edge trace failed");
+        }
+    }
+    // The chain is deliberately the only batch in this mutation: extraction
+    // observes the complete shared-edge topology exactly once.
+    if (!_graph.ExtractRegions(*_scalp)) {
+        return rollback("TonicModel::GraphCreateRegion: region extraction failed");
+    }
+    auto sameCycle = [&chain](std::vector<int> const &loop) {
+        if (loop.size() != chain.size()) {
+            return false;
+        }
+        for (size_t begin = 0; begin < loop.size(); ++begin) {
+            bool forward = true, backward = true;
+            for (size_t i = 0; i < loop.size() && (forward || backward); ++i) {
+                forward = forward && loop[(begin + i) % loop.size()] == chain[i];
+                backward = backward &&
+                    loop[(begin + loop.size() - i) % loop.size()] == chain[i];
+            }
+            if (forward || backward) {
+                return true;
+            }
+        }
+        return false;
+    };
+    int regionId = -1;
+    for (TonicGraphRegion const &region : _graph.Regions()) {
+        if (sameCycle(region.loop)) {
+            regionId = region.id;
+            break;
+        }
+    }
+    if (regionId < 0) {
+        return rollback("TonicModel::GraphCreateRegion: chain encloses no region");
+    }
+    _dirty |= TonicDirty_Graph | TonicDirty_Regions;
+    _PushGraphUndoLocked(graphBefore, "create region");
+    ++_version;
+    ++_mapVersion;
+    return regionId;
+}
+
 bool
 TonicModel::GraphMoveNode(int nodeId, TonicHit const &hit)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    auto const graphBefore = _GraphUndoStateLocked();
+    // Place has historically allowed a single-node drag to change graph
+    // topology (for example a deliberate collapse before weld).  For the
+    // ordinary existing-region drag, however, the attached tube hierarchy
+    // must follow the same support transport as Reposition's batch path.
+    // Capture the complete state so transport failure cannot leave a moved
+    // graph paired with stale tube geometry.
+    HierarchyRollback const before = _SnapshotHierarchyLocked();
+    uint32_t const dirtyBefore = _dirty;
+    uint64_t const versionBefore = _version.load();
+    uint64_t const mapVersionBefore = _mapVersion;
     if (!_scalp) {
         _diagnostic = "TonicModel::GraphMoveNode: no scalp bound";
         return false;
+    }
+    std::vector<std::string> const topologyBefore =
+        _GraphTopologySignature(_graph);
+    // A Place gesture can create/split graph topology before its later drag
+    // samples move an existing or newly created point.  Those samples are
+    // locally geometry-only, but their press-time graph is not a compatible
+    // attachment baseline.  Keep the entire topology-edit gesture on the
+    // permissive legacy route rather than rejecting its later move.
+    bool gestureTopologyCompatible = true;
+    if (_gestureDepth > 0) {
+        TonicScalpGraph gestureGraph;
+        std::string restoreError;
+        if (!_gestureBase.graph ||
+            !gestureGraph.Restore(*_scalp, _gestureBase.graph->nodes,
+                                  _gestureBase.graph->edges,
+                                  _gestureBase.graph->linked,
+                                  &restoreError) ||
+            _GraphTopologySignature(gestureGraph) != topologyBefore) {
+            gestureTopologyCompatible = false;
+        }
     }
     if (!_graph.MoveNode(*_scalp, nodeId, hit)) {
         _diagnostic = _graph.GetDiagnostic();
         return false;
     }
+    if (gestureTopologyCompatible &&
+        _GraphTopologySignature(_graph) == topologyBefore) {
+        // Gesture samples are absolute from the press-time graph and tube
+        // state, not compounded from the previous sample.
+        HierarchyRollback const &transportSource =
+            _gestureDepth > 0 ? _gestureBase : before;
+        if (!_TransportRegionAttachmentsLocked(transportSource, {nodeId})) {
+            std::string const why = _diagnostic;
+            _RestoreHierarchyLocked(before);
+            _dirty = dirtyBefore;
+            _version.store(versionBefore);
+            _mapVersion = mapVersionBefore;
+            _diagnostic = why;
+            return false;
+        }
+        _dirty |= TonicDirty_Graph | TonicDirty_Regions;
+        if (_nextUndoLabel.empty()) {
+            _nextUndoLabel = "move node";
+        }
+        _PushUndoSnapshotLocked(before);
+        ++_version;
+        ++_mapVersion;
+        return true;
+    }
+    // Retain Place's permissive legacy topology-edit behavior.  It must not
+    // be forced through attachment transport, whose stable-loop contract
+    // intentionally rejects a collapse/rewire.
     _dirty |= TonicDirty_Graph | TonicDirty_Regions;
-    _PushGraphUndoLocked(graphBefore, "move node");
+    _PushGraphUndoLocked(before.graph, "move node");
+    ++_version;
+    ++_mapVersion;
+    return true;
+}
+
+bool
+TonicModel::GraphMoveNodes(std::vector<int> const &nodeIds,
+                           std::vector<TonicHit> const &hits)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    HierarchyRollback const before = _SnapshotHierarchyLocked();
+    uint32_t const dirtyBefore = _dirty;
+    uint64_t const versionBefore = _version.load();
+    uint64_t const mapVersionBefore = _mapVersion;
+    if (!_scalp || nodeIds.empty() || nodeIds.size() != hits.size()) {
+        _diagnostic = "TonicModel::GraphMoveNodes: invalid targets";
+        return false;
+    }
+    // Keep stable graph identity and every directed region boundary intact
+    // while a drag changes only geometry. A broad sample can otherwise
+    // collapse a loop or rewire extraction; reject it and keep the last
+    // valid sample rather than dropping a region-rooted groom mid-drag.
+    auto topology = [](TonicScalpGraph const &graph) {
+        std::vector<std::string> out;
+        for (TonicGraphNode const &node : graph.Nodes()) {
+            if (node.alive) {
+                out.push_back("N" + std::to_string(node.id));
+            }
+        }
+        for (TonicGraphEdge const &edge : graph.Edges()) {
+            if (edge.alive) {
+                out.push_back("E" + std::to_string(edge.id) + ":" +
+                              std::to_string(edge.a) + ":" +
+                              std::to_string(edge.b));
+            }
+        }
+        for (TonicGraphRegion const &region : graph.Regions()) {
+            std::vector<int> loop = region.loop;
+            if (!loop.empty()) {
+                size_t best = 0;
+                for (size_t begin = 1; begin < loop.size(); ++begin) {
+                    for (size_t i = 0; i < loop.size(); ++i) {
+                        int const a = loop[(begin + i) % loop.size()];
+                        int const b = loop[(best + i) % loop.size()];
+                        if (a == b) {
+                            continue;
+                        }
+                        if (a < b) {
+                            best = begin;
+                        }
+                        break;
+                    }
+                }
+                std::string key = "R" + std::to_string(region.isOutside) +
+                                  ":";
+                for (size_t i = 0; i < loop.size(); ++i) {
+                    key += std::to_string(loop[(best + i) % loop.size()]) +
+                           ",";
+                }
+                out.push_back(std::move(key));
+            }
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    TonicScalpGraph const graphBeforeExact = _graph;
+    std::vector<std::string> const topologyBefore = topology(_graph);
+    if (!_graph.MoveNodes(*_scalp, nodeIds, hits)) {
+        _diagnostic = _graph.GetDiagnostic();
+        return false;
+    }
+    if (topology(_graph) != topologyBefore) {
+        _graph = graphBeforeExact;
+        _diagnostic = "TonicModel::GraphMoveNodes: target changes graph topology";
+        return false;
+    }
+    // During a gesture the target hits are expressed from the press-time
+    // graph.  Use that same hierarchy source for the attached tube pose so
+    // consecutive samples are absolute rather than compounded. A one-shot
+    // move uses the immediately preceding state captured above.
+    HierarchyRollback const &transportSource =
+        _gestureDepth > 0 ? _gestureBase : before;
+    if (!_TransportRegionAttachmentsLocked(transportSource, nodeIds)) {
+        std::string const why = _diagnostic;
+        _RestoreHierarchyLocked(before);
+        _dirty = dirtyBefore;
+        _version.store(versionBefore);
+        _mapVersion = mapVersionBefore;
+        _diagnostic = why;
+        return false;
+    }
+    _dirty |= TonicDirty_Graph | TonicDirty_Regions;
+    if (_nextUndoLabel.empty()) {
+        _nextUndoLabel = nodeIds.size() == 1 ? "move node" : "move nodes";
+    }
+    _PushUndoSnapshotLocked(before);
     ++_version;
     ++_mapVersion;
     return true;
@@ -1028,6 +2018,100 @@ TonicModel::GraphSnapEdge(float const p[3], float radius) const
 }
 
 bool
+TonicModel::GraphGetNode(int nodeId, TonicGraphNode *out) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    TonicGraphNode const *node = _graph.FindNode(nodeId);
+    if (!node || !out) {
+        return false;
+    }
+    *out = *node;
+    return true;
+}
+
+bool
+TonicModel::GraphGetEdge(int edgeId, int outNodeIds[2]) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    TonicGraphEdge const *edge = _graph.FindEdge(edgeId);
+    if (!edge || !outNodeIds) {
+        return false;
+    }
+    outNodeIds[0] = edge->a;
+    outNodeIds[1] = edge->b;
+    return true;
+}
+
+float
+TonicGraphDisplayLift(TonicScalpMesh const *scalp)
+{
+    if (!scalp || !scalp->finalized) {
+        return 0.0f;
+    }
+    return 4.0e-3f * scalp->boundsDiagonal;
+}
+
+void
+TonicGraphDisplayPosition(TonicGraphNode const &node,
+                          TonicScalpMesh const *scalp, float outP[3])
+{
+    if (!outP) {
+        return;
+    }
+    outP[0] = node.p[0];
+    outP[1] = node.p[1];
+    outP[2] = node.p[2];
+    float const lift = TonicGraphDisplayLift(scalp);
+    float const n2 = node.n[0] * node.n[0] + node.n[1] * node.n[1] +
+                     node.n[2] * node.n[2];
+    if (!(lift > 0.0f) || !(n2 > 1.0e-20f)) {
+        return;
+    }
+    float const scale = lift / std::sqrt(n2);
+    outP[0] += node.n[0] * scale;
+    outP[1] += node.n[1] * scale;
+    outP[2] += node.n[2] * scale;
+}
+
+void
+TonicGraphDisplaySurfacePosition(float const canonicalP[3],
+                                 TonicScalpMesh const *scalp,
+                                 float outP[3])
+{
+    if (!canonicalP || !outP) {
+        return;
+    }
+    outP[0] = canonicalP[0];
+    outP[1] = canonicalP[1];
+    outP[2] = canonicalP[2];
+    float const lift = TonicGraphDisplayLift(scalp);
+    if (!(lift > 0.0f) || !scalp) {
+        return;
+    }
+    TonicHit const hit = TonicClosestPointCpu(*scalp, canonicalP);
+    float const n2 = hit.nx * hit.nx + hit.ny * hit.ny + hit.nz * hit.nz;
+    if (!hit.hit || !(n2 > 1.0e-20f)) {
+        return;
+    }
+    float const scale = lift / std::sqrt(n2);
+    outP[0] += hit.nx * scale;
+    outP[1] += hit.ny * scale;
+    outP[2] += hit.nz * scale;
+}
+
+bool
+TonicModel::GraphGetNodeDisplayPosition(int nodeId, float outP[3]) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    TonicGraphNode const *node = _graph.FindNode(nodeId);
+    if (!node || !outP) {
+        return false;
+    }
+    TonicGraphDisplayPosition(*node, _scalp.get(), outP);
+    return true;
+}
+
+bool
 TonicModel::GraphLinkRegions(int r0, int r1)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -1165,6 +2249,76 @@ TonicModel::Rasterise()
     return true;
 }
 
+int
+TonicModel::RegionAtSurface(int faceId, float u, float v) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_scalp || !_scalp->finalized) {
+        return -1;
+    }
+    float p[3] = {0.0f, 0.0f, 0.0f};
+    if (!TonicFacePosition(*_scalp, faceId, u, v, &p[0], &p[1], &p[2])) {
+        return -1;
+    }
+    // Graph edits deliberately defer K3, so do not consult the cached loop
+    // or face map here.  Flattening is small and makes a just-drawn closed
+    // loop pickable before the gesture's rasterise/publish pass.
+    TonicRegionLoops loops;
+    std::string err;
+    if (!TonicFlattenLoops(_graph, &loops, &err)) {
+        return -1;
+    }
+    int best = -1;
+    size_t const faceCount = _scalp->faceVertexCounts.size();
+    for (size_t r = 0; r < loops.loopCount.size(); ++r) {
+        if (!TonicPointInRegionCpu(loops, int(r), p)) {
+            continue;
+        }
+        int const regionId = loops.regionIds[r];
+        int seed = -1;
+        if (regionId >= 0 && size_t(regionId) < _graph.Regions().size()) {
+            seed = _graph.Regions()[size_t(regionId)].seedFace;
+        }
+        bool connected = (faceId == seed);
+        if (!connected && seed >= 0 && size_t(seed) < faceCount) {
+            // This is the same chart-local connectivity gate K3 applies to
+            // its face claims.  The queried endpoint is admitted from its
+            // exact polygon test above; intermediate faces use their
+            // centroids, exactly as TonicRasteriseRegionsCpu does.
+            std::vector<char> inside(faceCount, 0);
+            for (size_t f = 0; f < faceCount; ++f) {
+                float const *c = &_scalp->faceCentroids[f * 3];
+                inside[f] = TonicPointInRegionCpu(loops, int(r), c) ? 1 : 0;
+            }
+            inside[size_t(faceId)] = 1;
+            std::queue<int> work;
+            std::vector<char> seen(faceCount, 0);
+            if (inside[size_t(seed)]) {
+                work.push(seed);
+                seen[size_t(seed)] = 1;
+            }
+            while (!work.empty() && !connected) {
+                int const current = work.front();
+                work.pop();
+                if (current == faceId) {
+                    connected = true;
+                    break;
+                }
+                for (int neighbour : _scalp->faceNeighbours[size_t(current)]) {
+                    if (!seen[size_t(neighbour)] && inside[size_t(neighbour)]) {
+                        seen[size_t(neighbour)] = 1;
+                        work.push(neighbour);
+                    }
+                }
+            }
+        }
+        if (connected && (best < 0 || regionId < best)) {
+            best = regionId;
+        }
+    }
+    return best;
+}
+
 void
 TonicModel::NoteBakedMapFile(uint64_t mapVersion, std::string const &path)
 {
@@ -1200,6 +2354,7 @@ TonicModel::SnapshotGraph() const
     snapshot.linked = _graph.LinkedPairs();
     for (auto const &r : _graph.Regions()) {
         snapshot.regionLoops.push_back(r.loop);
+        snapshot.regionBoundaries.push_back(r.boundary);
         snapshot.regionColors.push_back(r.color[0]);
         snapshot.regionColors.push_back(r.color[1]);
         snapshot.regionColors.push_back(r.color[2]);
@@ -1255,9 +2410,7 @@ TonicModel::_TessellateHost()
     {
         std::string ferr;
         std::vector<TonicFrame> frames;
-        if (TonicCenterFramesCpu(_host.centerX.data(), _host.centerY.data(),
-                                 _host.centerZ.data(), _shape.rings, &frames,
-                                 &ferr)) {
+        if (TonicTubeFramesCpu(_BuildTubeDescLocked(), &frames, &ferr)) {
             _frames = std::move(frames);
         }
     }
@@ -1328,9 +2481,7 @@ TonicModel::_TessellateSectionsHost()
     }
     std::string err;
     std::vector<TonicFrame> frames;
-    if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
-                              tube.centerZ.data(), int(tube.centerX.size()),
-                              &frames, &err)) {
+    if (!TonicTubeFramesCpu(tube, &frames, &err)) {
         _diagnostic = err;
         return false;
     }
@@ -1547,6 +2698,25 @@ TonicModel::_SyncSectionsDevice()
         _DropDeviceLocked(why.c_str());
         return true;
     }
+    // K4 is still the CUDA source for legacy identity descriptors. A pinned
+    // root or material frame reference changes the CPU chart, so upload the
+    // complete matching frame stream before K5 consumes it.
+    static std::array<float, 9> const identity = {{
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f}};
+    if (tube.rootFramePinned || tube.frameReference != identity) {
+        std::vector<TonicFrame> hostFrames;
+        std::string frameErr;
+        if (!TonicTubeFramesCpu(tube, &hostFrames, &frameErr) ||
+            int(hostFrames.size()) != nCv ||
+            cudaMemcpyAsync(frames, hostFrames.data(),
+                            sizeof(TonicFrame) * size_t(nCv),
+                            cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+            _DropDeviceLocked("TonicModel: host frame upload failed");
+            return true;
+        }
+    }
     if (!TonicLaunchTubeTessellate(
             _device->centerX.data(), _device->centerY.data(),
             _device->centerZ.data(), nCv, frames,
@@ -1585,150 +2755,241 @@ TonicModel::_RegionTubeDescLocked(int regionId, int centerCount,
         return false;
     }
     if (regionId < 0 || regionId >= _graph.RegionCount() || centerCount < 2 ||
-        ringVerts < 3 || ringVerts > 32 || !(length > 0.0f)) {
+        (ringVerts != 0 && (ringVerts < 3 || ringVerts > 32)) ||
+        !(length > 0.0f)) {
         _diagnostic = "TonicModel::BuildTubeFromRegion: bad region, counts "
                       "or length";
         return false;
     }
-    // Region faces at the region's interpolation id (linked tubes share
-    // the fill set, §2.2); read from the last Rasterise.
-    int const interp = _graph.InterpId(regionId);
-    std::vector<int> faces;
-    for (size_t f = 0; f < _maps.faceRegion.size(); ++f) {
-        if (_maps.faceRegion[f] == interp) {
-            faces.push_back(int(f));
-        }
-    }
-    if (faces.empty()) {
-        _diagnostic = "TonicModel::BuildTubeFromRegion: region claims no "
-                      "faces (rasterise first)";
+    // The closed graph polygon, rather than a coarse face centroid, owns
+    // tube placement. A small region entirely inside one mesh face therefore
+    // remains a real root support even when that face's centroid lies outside
+    // every region.  Snap its polygon centroid back to the scalp so curved
+    // charts retain the same on-surface root contract.
+    TonicGraphRegion const &region = _graph.Regions()[size_t(regionId)];
+    if (region.boundary.size() < 9) {
+        _diagnostic = "TonicModel::BuildTubeFromRegion: region has no closed "
+                      "boundary";
         return false;
     }
-    double cx = 0, cy = 0, cz = 0, nx = 0, ny = 0, nz = 0, area = 0;
-    for (int f : faces) {
-        double const a = double(_scalp->faceAreas[size_t(f)]);
-        cx += double(_scalp->faceCentroids[size_t(f) * 3 + 0]) * a;
-        cy += double(_scalp->faceCentroids[size_t(f) * 3 + 1]) * a;
-        cz += double(_scalp->faceCentroids[size_t(f) * 3 + 2]) * a;
-        nx += double(_scalp->faceNormals[size_t(f) * 3 + 0]) * a;
-        ny += double(_scalp->faceNormals[size_t(f) * 3 + 1]) * a;
-        nz += double(_scalp->faceNormals[size_t(f) * 3 + 2]) * a;
-        area += a;
+    double cx = 0, cy = 0, cz = 0;
+    size_t const boundaryCount = region.boundary.size() / 3;
+    for (size_t i = 0; i < boundaryCount; ++i) {
+        cx += region.boundary[i * 3 + 0];
+        cy += region.boundary[i * 3 + 1];
+        cz += region.boundary[i * 3 + 2];
     }
-    cx /= area;
-    cy /= area;
-    cz /= area;
-    double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
-    if (!(nl > 1e-12)) {
-        nx = 0;
-        ny = 1;
-        nz = 0;
-        nl = 1;
+    cx /= double(boundaryCount);
+    cy /= double(boundaryCount);
+    cz /= double(boundaryCount);
+    float centroid[3] = {float(cx), float(cy), float(cz)};
+    TonicHit const surface = TonicClosestPointCpu(*_scalp, centroid);
+    if (!surface.hit) {
+        _diagnostic = "TonicModel::BuildTubeFromRegion: region centroid is "
+                      "off the scalp";
+        return false;
     }
-    nx /= nl;
-    ny /= nl;
-    nz /= nl;
-    // Fallback radius (used where the boundary gives no crossing): the
-    // farthest claimed centroid from the area centroid, in the root plane.
-    double fallback = 0;
-    for (int f : faces) {
-        double dx = double(_scalp->faceCentroids[size_t(f) * 3 + 0]) - cx;
-        double dy = double(_scalp->faceCentroids[size_t(f) * 3 + 1]) - cy;
-        double dz = double(_scalp->faceCentroids[size_t(f) * 3 + 2]) - cz;
-        double const along = dx * nx + dy * ny + dz * nz;
-        dx -= along * nx;
-        dy -= along * ny;
-        dz -= along * nz;
-        fallback = std::max(fallback, std::sqrt(dx * dx + dy * dy + dz * dz));
+    cx = surface.px;
+    cy = surface.py;
+    cz = surface.pz;
+    // The canonical graph nodes are the authored CVs. Trace samples in
+    // `boundary` serve region classification and support placement, but must
+    // never replace or angle-sort the polygon the artist drew. Rotate only
+    // to its lowest stable node id, preserving its cyclic winding.
+    std::vector<TonicGraphNode const *> corners;
+    corners.reserve(region.loop.size());
+    for (int nodeId : region.loop) {
+        TonicGraphNode const *node = _graph.FindNode(nodeId);
+        if (!node || !node->alive) {
+            _diagnostic = "TonicModel::BuildTubeFromRegion: region loop has "
+                          "a missing graph node";
+            return false;
+        }
+        corners.push_back(node);
     }
-    if (!(fallback > 1e-6)) {
-        fallback = 1e-6;
+    if (corners.size() < 3 || corners.size() > 32) {
+        _diagnostic = corners.size() > 32
+                          ? "TonicModel::BuildTubeFromRegion: region has "
+                            "more than 32 authored corners"
+                          : "TonicModel::BuildTubeFromRegion: region needs "
+                            "at least 3 authored corners";
+        return false;
     }
+    size_t anchor = 0;
+    for (size_t i = 1; i < corners.size(); ++i) {
+        if (corners[i]->id < corners[anchor]->id) {
+            anchor = i;
+        }
+    }
+    std::rotate(corners.begin(), corners.begin() + anchor, corners.end());
+
+    // Keep the support-plane construction shared with Reposition: its
+    // Newell fit uses the traced boundary, while the ring below keeps only
+    // canonical authored corners projected into that plane.
+    float pn[3] = {0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < boundaryCount; ++i) {
+        float const *p0 = &region.boundary[i * 3];
+        float const *p1 = &region.boundary[((i + 1) % boundaryCount) * 3];
+        pn[0] += (p0[1] - p1[1]) * (p0[2] + p1[2]);
+        pn[1] += (p0[2] - p1[2]) * (p0[0] + p1[0]);
+        pn[2] += (p0[0] - p1[0]) * (p0[1] + p1[1]);
+    }
+    float const pnl = std::sqrt(pn[0] * pn[0] + pn[1] * pn[1] +
+                                pn[2] * pn[2]);
+    if (pnl > 1e-12f) {
+        pn[0] /= pnl;
+        pn[1] /= pnl;
+        pn[2] /= pnl;
+        if (pn[0] * surface.nx + pn[1] * surface.ny +
+                pn[2] * surface.nz <
+            0.0f) {
+            pn[0] = -pn[0];
+            pn[1] = -pn[1];
+            pn[2] = -pn[2];
+        }
+    } else {
+        _diagnostic = "TonicModel::BuildTubeFromRegion: fitted support plane "
+                      "is degenerate";
+        return false;
+    }
+
+    // The first stable corner supplies the in-plane axis. This makes the
+    // authored seam deterministic without inventing a polar ordering.
+    float axisU[3] = {0.0f, 0.0f, 0.0f};
+    for (TonicGraphNode const *corner : corners) {
+        float d[3] = {corner->p[0] - float(cx), corner->p[1] - float(cy),
+                      corner->p[2] - float(cz)};
+        float const along = TonicDot3(d, pn);
+        d[0] -= along * pn[0];
+        d[1] -= along * pn[1];
+        d[2] -= along * pn[2];
+        float const len = TonicLen3(d);
+        if (len > 1e-6f) {
+            axisU[0] = d[0] / len;
+            axisU[1] = d[1] / len;
+            axisU[2] = d[2] / len;
+            break;
+        }
+    }
+    if (!(TonicLen3(axisU) > 1e-6f)) {
+        _diagnostic = "TonicModel::BuildTubeFromRegion: authored corners "
+                      "collapse in their fitted plane";
+        return false;
+    }
+    float axisV[3];
+    TonicCross3(pn, axisU, axisV);
+
+    struct _RingPoint { float u, v; };
+    std::vector<_RingPoint> ring;
+    ring.reserve(32);
+    for (TonicGraphNode const *corner : corners) {
+        float const d[3] = {corner->p[0] - float(cx),
+                            corner->p[1] - float(cy),
+                            corner->p[2] - float(cz)};
+        ring.push_back(_RingPoint{TonicDot3(d, axisU),
+                                  TonicDot3(d, axisV)});
+    }
+    double twiceArea = 0.0;
+    for (size_t i = 0; i < ring.size(); ++i) {
+        _RingPoint const &a = ring[i];
+        _RingPoint const &b = ring[(i + 1) % ring.size()];
+        float const du = b.u - a.u, dv = b.v - a.v;
+        if (du * du + dv * dv <= 1e-12f) {
+            _diagnostic = "TonicModel::BuildTubeFromRegion: adjacent "
+                          "authored corners collapse in the fitted plane";
+            return false;
+        }
+        twiceArea += double(a.u) * b.v - double(a.v) * b.u;
+    }
+    if (std::fabs(twiceArea) <= 1e-10) {
+        _diagnostic = "TonicModel::BuildTubeFromRegion: authored corner "
+                      "polygon has zero fitted-plane area";
+        return false;
+    }
+    if (twiceArea < 0.0) {
+        // Keep the min-id seam while orienting the K5 ring consistently with
+        // the support normal. Graph extraction normally already has this
+        // winding; this protects a legacy/reversed loop without angle sort.
+        std::reverse(ring.begin() + 1, ring.end());
+    }
+    int const resolvedRingVerts =
+        std::max(ringVerts == 0 ? int(corners.size()) : ringVerts,
+                 int(corners.size()));
+    if (resolvedRingVerts > 32) {
+        _diagnostic = "TonicModel::BuildTubeFromRegion: region needs more "
+                      "than 32 section CVs";
+        return false;
+    }
+    // Extra slots only split existing edges. The longest projected edge wins
+    // (lowest cyclic edge index breaks ties), so every authored corner stays
+    // verbatim and the interpolation is deterministic.
+    while (int(ring.size()) < resolvedRingVerts) {
+        size_t best = 0;
+        float bestLength2 = -1.0f;
+        for (size_t i = 0; i < ring.size(); ++i) {
+            _RingPoint const &a = ring[i];
+            _RingPoint const &b = ring[(i + 1) % ring.size()];
+            float const du = b.u - a.u, dv = b.v - a.v;
+            float const length2 = du * du + dv * dv;
+            if (length2 > bestLength2) {
+                bestLength2 = length2;
+                best = i;
+            }
+        }
+        _RingPoint const &a = ring[best];
+        _RingPoint const &b = ring[(best + 1) % ring.size()];
+        ring.insert(ring.begin() +
+                        static_cast<std::vector<_RingPoint>::difference_type>(
+                            best + 1),
+                    _RingPoint{0.5f * (a.u + b.u),
+                               0.5f * (a.v + b.v)});
+    }
+
     out->centerX.assign(size_t(centerCount), 0.0f);
     out->centerY.assign(size_t(centerCount), 0.0f);
     out->centerZ.assign(size_t(centerCount), 0.0f);
     for (int i = 0; i < centerCount; ++i) {
-        double const s = double(i) / double(centerCount - 1);
-        out->centerX[size_t(i)] = float(cx + nx * length * s);
-        out->centerY[size_t(i)] = float(cy + ny * length * s);
-        out->centerZ[size_t(i)] = float(cz + nz * length * s);
+        float const s = float(i) / float(centerCount - 1);
+        out->centerX[size_t(i)] = float(cx) + pn[0] * length * s;
+        out->centerY[size_t(i)] = float(cy) + pn[1] * length * s;
+        out->centerZ[size_t(i)] = float(cz) + pn[2] * length * s;
     }
-    // -- root section fitted to the region boundary (plan/18 §7 G12) -------
-    //
-    // The section CVs are read in the K4 root frame, so the fit runs in
-    // that frame's (n, b) basis: the boundary loop is projected into the
-    // root plane and each ring slot takes the distance from the centroid to
-    // the first boundary crossing along its own direction. A slot with no
-    // crossing (a non-star-shaped lobe, or a boundary that failed to trace)
-    // falls back to the extent radius, and every slot is clamped into
-    // [0.1, 4] x the fitted median so one bad crossing cannot invert a ring.
-    std::vector<TonicFrame> frames;
-    std::string ferr;
-    if (!TonicCenterFramesCpu(out->centerX.data(), out->centerY.data(),
-                              out->centerZ.data(), centerCount, &frames,
-                              &ferr) ||
-        frames.empty()) {
-        _diagnostic = ferr.empty() ? "TonicModel::BuildTubeFromRegion: root "
-                                     "frame failed"
-                                   : ferr;
-        return false;
+    // Build Q from a reference tangent with three distinct magnitudes. A
+    // local +Y spine would tie TonicPerp3's X/Z least-axis choice; after a
+    // float Q^T round-trip that can rotate K4 by 90 degrees above the pinned
+    // root. This stable material basis maps the exact K4 tuple (t,n,b) onto
+    // (plane normal, polygon U, polygon V), aligning every spine section.
+    float localT[3] = {1.0f, 2.0f, 3.0f};
+    float const localLength = TonicLen3(localT);
+    localT[0] /= localLength;
+    localT[1] /= localLength;
+    localT[2] /= localLength;
+    float localN[3];
+    TonicPerp3(localT, localN);
+    float localB[3];
+    TonicCross3(localT, localN, localB);
+    for (int row = 0; row < 3; ++row) {
+        float const worldT = pn[row];
+        float const worldN = axisU[row];
+        float const worldB = axisV[row];
+        out->frameReference[size_t(row * 3 + 0)] =
+            worldT * localT[0] + worldN * localN[0] + worldB * localB[0];
+        out->frameReference[size_t(row * 3 + 1)] =
+            worldT * localT[1] + worldN * localN[1] + worldB * localB[1];
+        out->frameReference[size_t(row * 3 + 2)] =
+            worldT * localT[2] + worldN * localN[2] + worldB * localB[2];
     }
-    TonicFrame const &f0 = frames.front();
-    std::vector<float> bu, bv;
-    if (regionId < int(_graph.Regions().size())) {
-        std::vector<float> const &loop = _graph.Regions()[size_t(regionId)]
-                                             .boundary;
-        for (size_t i = 0; i + 2 < loop.size(); i += 3) {
-            double const dx = double(loop[i + 0]) - cx;
-            double const dy = double(loop[i + 1]) - cy;
-            double const dz = double(loop[i + 2]) - cz;
-            bu.push_back(float(dx * f0.nx + dy * f0.ny + dz * f0.nz));
-            bv.push_back(float(dx * f0.bx + dy * f0.by + dz * f0.bz));
-        }
-    }
-    float const twoPi = 6.28318530717958647692f;
-    std::vector<float> radii;
-    radii.assign(size_t(ringVerts), float(fallback));
-    if (bu.size() >= 3) {
-        for (int s = 0; s < ringVerts; ++s) {
-            float const a = twoPi * float(s) / float(ringVerts);
-            double const dx = std::cos(a), dy = std::sin(a);
-            double best = -1.0;
-            for (size_t i = 0; i < bu.size(); ++i) {
-                size_t const j = (i + 1) % bu.size();
-                double const ax = bu[i], ay = bv[i];
-                double const ex = double(bu[j]) - ax;
-                double const ey = double(bv[j]) - ay;
-                double const den = dx * ey - dy * ex;
-                if (std::fabs(den) < 1e-12) {
-                    continue;
-                }
-                double const t = (ax * ey - ay * ex) / den;
-                double const w = (ax * dy - ay * dx) / den;
-                if (t > 1e-6 && w >= 0.0 && w <= 1.0 &&
-                    (best < 0.0 || t < best)) {
-                    best = t;
-                }
-            }
-            if (best > 0.0) {
-                radii[size_t(s)] = float(best);
-            }
-        }
-        std::vector<float> sorted = radii;
-        std::sort(sorted.begin(), sorted.end());
-        float const median = sorted[sorted.size() / 2];
-        if (median > 1e-6f) {
-            for (float &r : radii) {
-                r = std::min(std::max(r, 0.1f * median), 4.0f * median);
-            }
-        }
-    }
-    double mean = 0;
-    for (float r : radii) {
-        mean += double(r);
-    }
-    mean /= double(ringVerts);
-    out->ringVerts = ringVerts;
+    out->rootFramePinned = true;
+    out->rootFrame.tx = pn[0];
+    out->rootFrame.ty = pn[1];
+    out->rootFrame.tz = pn[2];
+    out->rootFrame.nx = axisU[0];
+    out->rootFrame.ny = axisU[1];
+    out->rootFrame.nz = axisU[2];
+    out->rootFrame.bx = axisV[0];
+    out->rootFrame.by = axisV[1];
+    out->rootFrame.bz = axisV[2];
+    out->ringVerts = resolvedRingVerts;
     out->regionId = regionId;
     out->level = 1;
     out->parentTubeId = -1;
@@ -1739,18 +3000,137 @@ TonicModel::_RegionTubeDescLocked(int regionId, int centerCount,
         section.t = float(r) / float(centerCount - 1);
         section.scale = 1.0f;
         section.twist = 0.0f;
-        section.u.resize(size_t(ringVerts));
-        section.v.resize(size_t(ringVerts));
-        for (int s = 0; s < ringVerts; ++s) {
-            float const a = twoPi * float(s) / float(ringVerts);
-            section.u[size_t(s)] = radii[size_t(s)] * std::cos(a);
-            section.v[size_t(s)] = radii[size_t(s)] * std::sin(a);
+        section.u.resize(ring.size());
+        section.v.resize(ring.size());
+        for (size_t s = 0; s < ring.size(); ++s) {
+            section.u[s] = ring[s].u;
+            section.v[s] = ring[s].v;
         }
     }
-    // The shape fields the display path still reads: `radius` is the mean
-    // fitted radius, which is what the overlay widths scale from.
+    double mean = 0.0;
+    for (_RingPoint const &point : ring) {
+        mean += std::sqrt(double(point.u) * point.u +
+                          double(point.v) * point.v);
+    }
+    mean /= double(ring.size());
     _diagnostic.clear();
     *outRadius = float(mean);
+    return true;
+}
+
+bool
+TonicModel::PinRegionRootFrames()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_scalp || !_scalp->finalized) {
+        _diagnostic = "TonicModel::PinRegionRootFrames: no scalp bound";
+        return false;
+    }
+    auto pin = [&](TonicTubeDesc *desc) {
+        if (!desc || desc->regionId < 0 ||
+            desc->regionId >= int(_graph.Regions().size()) ||
+            desc->centerX.size() < 2) {
+            return false;
+        }
+        TonicGraphRegion const &region =
+            _graph.Regions()[size_t(desc->regionId)];
+        size_t const count = region.boundary.size() / 3;
+        if (count < 3) {
+            return false;
+        }
+        float pn[3] = {0.0f, 0.0f, 0.0f};
+        for (size_t i = 0; i < count; ++i) {
+            float const *a = &region.boundary[i * 3];
+            float const *b = &region.boundary[((i + 1) % count) * 3];
+            pn[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            pn[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            pn[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        float const nl = std::sqrt(pn[0] * pn[0] + pn[1] * pn[1] +
+                                   pn[2] * pn[2]);
+        if (!(nl > 1e-12f)) {
+            return false;
+        }
+        pn[0] /= nl;
+        pn[1] /= nl;
+        pn[2] /= nl;
+        float root[3] = {desc->centerX[0], desc->centerY[0],
+                         desc->centerZ[0]};
+        TonicHit const support = TonicClosestPointCpu(*_scalp, root);
+        if (support.hit && pn[0] * support.nx + pn[1] * support.ny +
+                               pn[2] * support.nz <
+                               0.0f) {
+            pn[0] = -pn[0];
+            pn[1] = -pn[1];
+            pn[2] = -pn[2];
+        }
+        std::vector<TonicFrame> raw;
+        std::string err;
+        if (!TonicTubeFramesCpu(*desc, &raw, &err) ||
+            raw.empty()) {
+            return false;
+        }
+        TonicFrame frame = raw.front();
+        frame.tx = pn[0];
+        frame.ty = pn[1];
+        frame.tz = pn[2];
+        float const dot = frame.nx * pn[0] + frame.ny * pn[1] +
+                          frame.nz * pn[2];
+        frame.nx -= dot * pn[0];
+        frame.ny -= dot * pn[1];
+        frame.nz -= dot * pn[2];
+        float const il = std::sqrt(frame.nx * frame.nx +
+                                   frame.ny * frame.ny +
+                                   frame.nz * frame.nz);
+        if (il > 1e-12f) {
+            frame.nx /= il;
+            frame.ny /= il;
+            frame.nz /= il;
+        } else {
+            TonicPerp3(pn, &frame.nx);
+        }
+        TonicCross3(pn, &frame.nx, &frame.bx);
+        desc->rootFramePinned = true;
+        desc->rootFrame = frame;
+        return true;
+    };
+
+    bool any = false;
+    if (_host.centerX.size() >= 2 && _tubeRegionId >= 0) {
+        TonicTubeDesc tube0 = _BuildTubeDescLocked();
+        if (!pin(&tube0)) {
+            _diagnostic = "TonicModel::PinRegionRootFrames: bad tube-0 region";
+            return false;
+        }
+        _rootFramePinned = tube0.rootFramePinned;
+        _rootFrame = tube0.rootFrame;
+        std::string err;
+        if (!TonicTubeFramesCpu(tube0, &_frames, &err)) {
+            _diagnostic = err;
+            return false;
+        }
+        any = true;
+    }
+    for (auto &kv : _tubes) {
+        TonicTubeDesc &desc = kv.second.actual;
+        if (desc.parentTubeId >= 0 || desc.regionId < 0) {
+            continue;
+        }
+        if (!pin(&desc)) {
+            _diagnostic = "TonicModel::PinRegionRootFrames: bad L1 region";
+            return false;
+        }
+        // L1's derived copy is the live root baseline; descendants already
+        // carry their own parent-relative geometry and are not re-derived.
+        kv.second.derived.rootFramePinned = desc.rootFramePinned;
+        kv.second.derived.rootFrame = desc.rootFrame;
+        kv.second.derived.frameReference = desc.frameReference;
+        any = true;
+    }
+    _diagnostic.clear();
+    // A legacy groom may legitimately contain no region-rooted L1 tube.
+    // Treat that as a successful no-op so hydration remains compatible.
+    (void)any;
     return true;
 }
 
@@ -1765,7 +3145,11 @@ TonicModel::_InstallTube0DescLocked(TonicTubeDesc const &desc)
     _sections = desc.sections;
     _useSections = true;  // authored tubes always take the K5 path
     _tubeRegionId = desc.regionId;
+    _rootFramePinned = desc.rootFramePinned;
+    _rootFrame = desc.rootFrame;
+    _frameReference = desc.frameReference;
     _roots.clear();
+    _tubeRoots.clear();
     _guides = TonicGuideSet();
     ++_guideVersion;
     if (!Sync()) {
@@ -1790,10 +3174,9 @@ TonicModel::BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                                 float length)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    if (ringVerts < 8 || ringVerts > 32) {
+    if (ringVerts != 0 && (ringVerts < 3 || ringVerts > 32)) {
         _diagnostic = "TonicModel::BuildTubeFromRegion: ring CV count is "
-                      "8..32 (plan/17 §5.2); the bridge import path takes "
-                      "3..32";
+                      "0 (match authored region corners) or 3..32";
         return false;
     }
     TonicTubeDesc desc;
@@ -1979,6 +3362,7 @@ TonicModel::_DropSubtreeLocked(int tubeId)
     }
     _tubes.erase(tubeId);
     _tubeRegionKey.erase(tubeId);
+    _PruneActiveCutLocked();
 }
 
 bool
@@ -2108,11 +3492,27 @@ TonicModel::_SyncRegionTubesLocked(std::vector<int> *outRebuilt,
             removed.push_back(kv.first);
         }
     }
+    // A re-keyed tube keeps its shape (the loop matched exactly) but its
+    // stored region id would go stale: the committer reads the stored id,
+    // so it must follow the claim. Rebuilt tubes already carry the new id
+    // from their re-root; re-keying them again is a no-op.
+    auto rekey = [&](int tubeId, int region) {
+        if (tubeId == 0) {
+            _tubeRegionId = region;
+            return;
+        }
+        auto tubeIt = _tubes.find(tubeId);
+        if (tubeIt != _tubes.end()) {
+            tubeIt->second.actual.regionId = region;
+            tubeIt->second.derived.regionId = region;
+        }
+    };
     if (rebuilt.empty() && removed.empty()) {
         _regionTube.clear();
         for (auto const &kv : claim) {
             _regionTube[kv.first] = kv.second;
             _tubeRegionKey[kv.second] = current[size_t(kv.first)];
+            rekey(kv.second, kv.first);
         }
         return true;
     }
@@ -2148,6 +3548,7 @@ TonicModel::_SyncRegionTubesLocked(std::vector<int> *outRebuilt,
     for (auto const &kv : claim) {
         _regionTube[kv.first] = kv.second;
         _tubeRegionKey[kv.second] = current[size_t(kv.first)];
+        rekey(kv.second, kv.first);
     }
     _dirty |= TonicDirty_Topology | TonicDirty_Points;
     if (outRebuilt) {
@@ -2778,6 +4179,9 @@ TonicModel::_BuildTubeDescLocked() const
     desc.ringVerts = _shape.ringVerts;
     desc.regionId = _tubeRegionId;
     desc.level = 1;
+    desc.rootFramePinned = _rootFramePinned;
+    desc.rootFrame = _rootFrame;
+    desc.frameReference = _frameReference;
     return desc;
 }
 
@@ -2829,127 +4233,489 @@ bool
 TonicModel::RefillGuides(float fraction)
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    if (_generatedCurvesSuppressed) {
+        return true;
+    }
+    return _RefillGuidesLocked(fraction);
+}
+
+bool
+TonicModel::GenerateGuides(float fraction)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_generatedCurvesSuppressed) {
+        return _RefillGuidesLocked(fraction);
+    }
+    HierarchyRollback const snap = _SnapshotHierarchyLocked();
+    _generatedCurvesSuppressed = false;
+    if (!_RefillGuidesLocked(fraction)) {
+        _RestoreHierarchyLocked(snap);
+        return false;
+    }
+    _PushUndoSnapshotLocked(snap);
+    return true;
+}
+
+bool
+TonicModel::ClearGeneratedCurves()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_generatedCurvesSuppressed && _guides.guideCount == 0) {
+        return true;
+    }
+    HierarchyRollback const snap = _SnapshotHierarchyLocked();
+    _generatedCurvesSuppressed = true;
+    _roots.clear();
+    _tubeRoots.clear();
+    _guides = TonicGuideSet();
+    ++_guideVersion;
+    _dirty |= TonicDirty_Guides;
+    _PushUndoSnapshotLocked(snap);
+    ++_version;
+    return true;
+}
+
+bool
+TonicModel::SetGeneratedCurvesVisible(bool visible)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_generatedCurvesVisible == visible) {
+        return true;
+    }
+    _generatedCurvesVisible = visible;
+    _dirty |= TonicDirty_Display;
+    ++_version;
+    return true;
+}
+
+bool
+TonicModel::GetGeneratedCurvesVisible() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _generatedCurvesVisible;
+}
+
+bool
+TonicModel::GeneratedCurvesSuppressed() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _generatedCurvesSuppressed;
+}
+
+void
+TonicModel::SetGeneratedCurvesSuppressed(bool suppressed)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _generatedCurvesSuppressed = suppressed;
+    if (suppressed) {
+        _roots.clear();
+        _tubeRoots.clear();
+        _guides = TonicGuideSet();
+        ++_guideVersion;
+        _dirty |= TonicDirty_Guides;
+    }
+}
+
+bool
+TonicModel::_RefillGuidesLocked(float fraction)
+{
     if (fraction < 0.0f) {
         fraction = _previewFraction;
     }
     fraction = fraction < 0.0f ? 0.0f : (fraction > 1.0f ? 1.0f : fraction);
-    if (_host.centerX.size() < 2) {
+    // The producing tubes, ascending, tube 0 first: tube 0 fills unless
+    // a subdivision suspended it, and a store tube fills unless it is
+    // suspended, imported, or a group parent (the committer's skip rule,
+    // TonicGuidesFromSnapshot). A one-tube groom produces exactly tube 0.
+    std::vector<int> producing;
+    if (_host.centerX.size() >= 2 && !_FillSuspendedLocked(0)) {
+        producing.push_back(0);
+    }
+    for (auto const &kv : _tubes) {
+        if (kv.second.imported || !kv.second.members.empty() ||
+            _FillSuspendedLocked(kv.first)) {
+            continue;
+        }
+        producing.push_back(kv.first);
+    }
+    if (producing.empty()) {
         _diagnostic = "TonicModel::RefillGuides: no tube";
         return false;
     }
-    TonicTubeDesc tube;
-    tube.centerX = _host.centerX;
-    tube.centerY = _host.centerY;
-    tube.centerZ = _host.centerZ;
-    tube.sections = _sections;
-    tube.ringVerts = _shape.ringVerts;
-    tube.regionId = _tubeRegionId;
-    std::vector<TonicFrame> frames;
-    std::string err;
-    if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
-                              tube.centerZ.data(), int(tube.centerX.size()),
-                              &frames, &err)) {
-        _diagnostic = err;
-        return false;
-    }
-    _frames = frames;
-    float const rootRadius =
-        TonicSectionMeanRadius(tube.sections.front());
-    if (!(rootRadius > 0.0f)) {
-        _diagnostic = "TonicModel::RefillGuides: degenerate root section";
-        return false;
-    }
-    float const rootCenter[3] = {tube.centerX[0], tube.centerY[0],
-                                 tube.centerZ[0]};
-    // Mesh roots when the tube is region-rooted on a bound scalp with
-    // claimed faces; otherwise the root-disc stream.
-    std::vector<int> regionFaces;
-    bool const meshFill =
-        _scalp && _scalp->finalized && _tubeRegionId >= 0 &&
-        _tubeRegionId < _graph.RegionCount();
-    if (meshFill) {
-        int const interp = _graph.InterpId(_tubeRegionId);
-        for (size_t f = 0; f < _maps.faceRegion.size(); ++f) {
-            if (_maps.faceRegion[f] == interp) {
-                regionFaces.push_back(int(f));
+    bool const scalpBound = bool(_scalp) && _scalp->finalized;
+    // Region faces per tube: each L1 root collects the faces at its
+    // interpolation id; children receive their share from the partition
+    // below, never directly (the snapshot's collection gate).
+    std::map<int, std::vector<int>> facesByTube;
+    if (scalpBound) {
+        if (_host.centerX.size() >= 2 && _tubeRegionId >= 0 &&
+            _tubeRegionId < _graph.RegionCount()) {
+            int const interp = _graph.InterpId(_tubeRegionId);
+            std::vector<int> &faces = facesByTube[0];
+            for (size_t f = 0; f < _maps.faceRegion.size(); ++f) {
+                if (_maps.faceRegion[f] == interp) {
+                    faces.push_back(int(f));
+                }
+            }
+        }
+        for (auto const &kv : _tubes) {
+            int const regionId = kv.second.actual.regionId;
+            if (kv.second.actual.level != 1 || regionId < 0 ||
+                regionId >= _graph.RegionCount()) {
+                continue;
+            }
+            int const interp = _graph.InterpId(regionId);
+            std::vector<int> &faces = facesByTube[kv.first];
+            for (size_t f = 0; f < _maps.faceRegion.size(); ++f) {
+                if (_maps.faceRegion[f] == interp) {
+                    faces.push_back(int(f));
+                }
+            }
+        }
+        // The face partition, step for step the snapshot's
+        // _PartitionRegionFaces: every parent hands its faces down to the
+        // child cell that claims each face centroid, parents before
+        // children (breadth-first from the roots), children in childIndex
+        // order. A parent whose frames fail keeps its faces, exactly as
+        // the snapshot does (they go unused: a partitioned parent is
+        // suspended, and its children fall back to the disc stream).
+        std::vector<int> order;
+        order.push_back(0);
+        for (auto const &kv : _tubes) {
+            if (kv.second.actual.parentTubeId < 0) {
+                order.push_back(kv.first);
+            }
+        }
+        for (size_t head = 0; head < order.size(); ++head) {
+            int const parentId = order[head];
+            for (auto const &kv : _tubes) {
+                if (kv.second.actual.parentTubeId == parentId) {
+                    order.push_back(kv.first);
+                }
+            }
+            auto fit = facesByTube.find(parentId);
+            if (fit == facesByTube.end() || fit->second.empty()) {
+                continue;
+            }
+            std::vector<std::pair<int, int>> cells;  // (childIndex, tubeId)
+            for (auto const &kv : _tubes) {
+                if (kv.second.actual.parentTubeId == parentId &&
+                    !kv.second.imported &&
+                    !kv.second.actual.centerX.empty()) {
+                    cells.push_back(std::make_pair(
+                        kv.second.actual.childIndex, kv.first));
+                }
+            }
+            if (cells.empty()) {
+                continue;
+            }
+            std::sort(cells.begin(), cells.end());
+            std::vector<float> parentCenter;
+            if (parentId == 0) {
+                parentCenter = _host.centerX;
+            } else {
+                auto pit = _tubes.find(parentId);
+                if (pit == _tubes.end()) {
+                    continue;
+                }
+                parentCenter = pit->second.actual.centerX;
+            }
+            if (parentCenter.size() < 2) {
+                continue;
+            }
+            std::vector<float> parentY, parentZ;
+            if (parentId == 0) {
+                parentY = _host.centerY;
+                parentZ = _host.centerZ;
+            } else {
+                parentY = _tubes[parentId].actual.centerY;
+                parentZ = _tubes[parentId].actual.centerZ;
+            }
+            std::vector<TonicFrame> parentFrames;
+            std::string perr;
+            TonicTubeDesc parentDesc;
+            parentDesc.centerX = parentCenter;
+            parentDesc.centerY = parentY;
+            parentDesc.centerZ = parentZ;
+            if (parentId == 0) {
+                parentDesc = _BuildTubeDescLocked();
+            } else {
+                parentDesc = _tubes[parentId].actual;
+            }
+            if (!TonicTubeFramesCpu(parentDesc, &parentFrames, &perr) ||
+                parentFrames.empty()) {
+                continue;
+            }
+            float const parentRoot[3] = {parentCenter[0], parentY[0],
+                                         parentZ[0]};
+            std::vector<float> childCenters;
+            childCenters.reserve(cells.size() * 3);
+            for (auto const &cell : cells) {
+                TonicTubeDesc const &desc = _tubes[cell.second].actual;
+                childCenters.push_back(desc.centerX[0]);
+                childCenters.push_back(desc.centerY[0]);
+                childCenters.push_back(desc.centerZ[0]);
+            }
+            std::vector<int> faces = std::move(fit->second);
+            fit->second.clear();
+            for (int f : faces) {
+                if (size_t(f) * 3 + 2 >= _scalp->faceCentroids.size()) {
+                    continue;
+                }
+                int const cell = TonicOwningChildCell(
+                    parentRoot, parentFrames[0], childCenters.data(),
+                    int(cells.size()),
+                    &_scalp->faceCentroids[size_t(f) * 3]);
+                if (cell >= 0) {
+                    facesByTube[cells[size_t(cell)].second].push_back(f);
+                }
             }
         }
     }
-    bool const useMesh = meshFill && !regionFaces.empty();
-    if (!useMesh) {
-        int const full =
-            TonicGuideCountForDensity(_fill.density);
-        int const count = int(float(full) * fraction + 0.5f);
-        // Frozen roots keep their stored positions; only the tail is
-        // re-sampled, continuing the same dart stream.
-        int const frozen =
-            _freezeRoots ? std::min(int(_roots.size()), count) : 0;
-        std::vector<TonicGuideRoot> roots = _roots;
-        if (!TonicRootSampleDiscCpu(0, _fill.seed, rootRadius, rootCenter,
-                                    frames[0], count, &roots, frozen, &err)) {
-            _diagnostic = err;
-            return false;
+    // One tube's diagnostics keep their historical spelling; a store
+    // tube's name its id. Only the first survives to the caller, on a
+    // total failure: a degenerate tube is skipped, never fatal to its
+    // siblings.
+    std::string firstErr;
+    auto note = [&](int tubeId, std::string const &problem) {
+        if (!firstErr.empty()) {
+            return;
         }
-        _roots = std::move(roots);
-    } else {
-        // Area-weighted mesh stream at the preview-scaled density. Under
-        // freeze the kept prefix seeds the stream, so a frozen full set
-        // differs from a from-scratch one (per-face spacing depends on
-        // density); frozen roots are sacred by design. The committer and
-        // hydrate always run frozen=0, so they agree bit-exactly.
-        float const density = _fill.density * fraction;
-        int frozen = _freezeRoots ? int(_roots.size()) : 0;
-        std::vector<TonicGuideRoot> roots = _roots;
-        if (!TonicRootSampleMeshCpu(
-                _scalp->points.data(), _scalp->faceVertexCounts.data(),
-                _scalp->faceVertexIndices.data(), _scalp->faceOffsets.data(),
-                int(_scalp->faceVertexCounts.size()), regionFaces.data(),
-                int(regionFaces.size()), density, 0, _fill.seed, rootCenter,
-                frames[0], rootRadius, &roots, frozen, &err)) {
-            _diagnostic = err;
-            return false;
+        firstErr = (tubeId == 0)
+                       ? problem
+                       : "tube " + std::to_string(tubeId) + ": " + problem;
+    };
+    std::map<int, std::vector<TonicGuideRoot>> newStores;
+    std::vector<TonicGuideRoot> mergedRoots;
+    TonicGuideSet merged;
+    uint64_t nextId = 1000;
+    bool anyOk = false;
+    bool cvTaken = false;
+    std::vector<TonicFrame> tube0Frames;
+    bool tube0FramesOk = false;
+    std::string err;
+    auto ownershipCells = [&](int tubeId) {
+        std::vector<TonicRootOwnershipCell> chain;
+        int childId = tubeId;
+        for (;;) {
+            auto childIt = _tubes.find(childId);
+            if (childIt == _tubes.end() ||
+                childIt->second.actual.parentTubeId < 0) {
+                break;
+            }
+            int const parentId = childIt->second.actual.parentTubeId;
+            std::vector<std::pair<int, int>> children;
+            for (auto const &kv : _tubes) {
+                if (kv.second.actual.parentTubeId == parentId &&
+                    !kv.second.imported &&
+                    !kv.second.actual.centerX.empty()) {
+                    children.emplace_back(kv.second.actual.childIndex, kv.first);
+                }
+            }
+            std::sort(children.begin(), children.end());
+            if (children.empty()) {
+                break;
+            }
+            TonicTubeDesc parent;
+            if (parentId == 0) {
+                parent = _BuildTubeDescLocked();
+            } else {
+                auto parentIt = _tubes.find(parentId);
+                if (parentIt == _tubes.end()) {
+                    break;
+                }
+                parent = parentIt->second.actual;
+            }
+            std::vector<TonicFrame> parentFrames;
+            std::string frameErr;
+            if (parent.centerX.size() < 2 ||
+                !TonicTubeFramesCpu(parent, &parentFrames, &frameErr) ||
+                parentFrames.empty()) {
+                break;
+            }
+            TonicRootOwnershipCell cell;
+            cell.rootCenter[0] = parent.centerX[0];
+            cell.rootCenter[1] = parent.centerY[0];
+            cell.rootCenter[2] = parent.centerZ[0];
+            cell.frame = parentFrames[0];
+            for (size_t i = 0; i < children.size(); ++i) {
+                TonicTubeDesc const &sibling = _tubes[children[i].second].actual;
+                cell.childCenters.push_back(sibling.centerX[0]);
+                cell.childCenters.push_back(sibling.centerY[0]);
+                cell.childCenters.push_back(sibling.centerZ[0]);
+                if (children[i].second == childId) {
+                    cell.childIndex = int(i);
+                }
+            }
+            if (cell.childIndex < 0) {
+                break;
+            }
+            chain.push_back(std::move(cell));
+            childId = parentId;
         }
-        _roots = std::move(roots);
+        return chain;
+    };
+    for (int tubeId : producing) {
+        TonicTubeDesc tube;
+        FillParams fill;
+        if (tubeId == 0) {
+            tube = _BuildTubeDescLocked();
+            fill = _fill;
+        } else {
+            auto it = _tubes.find(tubeId);
+            tube = it->second.actual;
+            fill = it->second.fill;
+        }
+        if (tube.centerX.size() < 2 || tube.sections.size() < 2) {
+            note(tubeId, "TonicModel::RefillGuides: degenerate tube");
+            continue;
+        }
+        std::vector<TonicFrame> frames;
+        if (!TonicTubeFramesCpu(tube, &frames, &err)) {
+            note(tubeId, err);
+            continue;
+        }
+        if (tubeId == 0) {
+            tube0Frames = frames;
+            tube0FramesOk = true;
+        }
+        float const rootRadius =
+            TonicSectionMeanRadius(tube.sections.front());
+        if (!(rootRadius > 0.0f)) {
+            note(tubeId,
+                 "TonicModel::RefillGuides: degenerate root section");
+            continue;
+        }
+        float const rootCenter[3] = {tube.centerX[0], tube.centerY[0],
+                                     tube.centerZ[0]};
+        // Mesh roots when the tube is region-rooted on a bound scalp
+        // with claimed faces; otherwise the root-disc stream.
+        std::vector<int> regionFaces;
+        auto fit = facesByTube.find(tubeId);
+        if (fit != facesByTube.end()) {
+            regionFaces = fit->second;
+        }
+        int const regionId = (tubeId == 0) ? _tubeRegionId : tube.regionId;
+        bool const meshFill = scalpBound && regionId >= 0 &&
+                              regionId < _graph.RegionCount();
+        // Every descendant inherits its L1 graph region. Sampling that exact
+        // support first keeps a subface groom on the scalp even when coarse
+        // face partitioning has no centroid to hand down to the child.
+        bool const useExactRegion = meshFill && _loops.valid;
+        bool const useMesh = meshFill && !regionFaces.empty() &&
+                             !useExactRegion;
+        std::vector<TonicGuideRoot> roots;
+        // Keep the unpartitioned exact stream for freeze. A child filters a
+        // copy for K9; storing that filtered subset would feed it back as a
+        // prefix of the full stream on the next refill and grow its count.
+        std::vector<TonicGuideRoot> exactFreezeStore;
+        {
+            auto sit = _tubeRoots.find(tubeId);
+            if (sit != _tubeRoots.end()) {
+                roots = sit->second;
+            }
+        }
+        if (useExactRegion) {
+            float const density = fill.density * fraction;
+            int const frozen = _freezeRoots ? int(roots.size()) : 0;
+            if (!TonicRootSampleRegionMeshCpu(*_scalp, _loops, regionId,
+                                               density, tubeId, fill.seed,
+                                               rootCenter, frames[0],
+                                               rootRadius, &roots, frozen,
+                                               &err)) {
+                note(tubeId, err);
+                continue;
+            }
+            exactFreezeStore = roots;
+            TonicFilterGuideRootsByOwnershipCells(ownershipCells(tubeId),
+                                                   &roots);
+        } else if (!useMesh) {
+            int const full =
+                TonicGuideCountForDensity(fill.density);
+            int const count = int(float(full) * fraction + 0.5f);
+            // Frozen roots keep their stored positions; only the tail is
+            // re-sampled, continuing the same dart stream.
+            int const frozen =
+                _freezeRoots ? std::min(int(roots.size()), count) : 0;
+            if (!TonicRootSampleDiscCpu(tubeId, fill.seed, rootRadius,
+                                        rootCenter, frames[0], count, &roots,
+                                        frozen, &err)) {
+                note(tubeId, err);
+                continue;
+            }
+        } else {
+            // Area-weighted mesh stream at the preview-scaled density.
+            // Under freeze the kept prefix seeds the stream, so a frozen
+            // full set differs from a from-scratch one (per-face spacing
+            // depends on density); frozen roots are sacred by design. The
+            // committer and hydrate always run frozen=0, so they agree
+            // bit-exactly.
+            float const density = fill.density * fraction;
+            int frozen = _freezeRoots ? int(roots.size()) : 0;
+            if (!TonicRootSampleMeshCpu(
+                    _scalp->points.data(), _scalp->faceVertexCounts.data(),
+                    _scalp->faceVertexIndices.data(),
+                    _scalp->faceOffsets.data(),
+                    int(_scalp->faceVertexCounts.size()), regionFaces.data(),
+                    int(regionFaces.size()), density, tubeId, fill.seed,
+                    rootCenter, frames[0], rootRadius, &roots, frozen,
+                    &err)) {
+                note(tubeId, err);
+                continue;
+            }
+        }
+        TonicGuideSet perTube;
+        if (!roots.empty() &&
+            !_FillAndResample(tube, frames, roots, fill, &perTube, &err)) {
+            note(tubeId, err);
+            continue;
+        }
+        if (useExactRegion) {
+            _AnchorGuideRoots(roots, &perTube);
+        }
+        anyOk = true;
+        mergedRoots.insert(mergedRoots.end(), roots.begin(), roots.end());
+        newStores[tubeId] = useExactRegion ? std::move(exactFreezeStore)
+                                            : std::move(roots);
+        merged.points.insert(merged.points.end(), perTube.points.begin(),
+                             perTube.points.end());
+        merged.counts.insert(merged.counts.end(), perTube.counts.begin(),
+                             perTube.counts.end());
+        merged.frames.insert(merged.frames.end(), perTube.frames.begin(),
+                             perTube.frames.end());
+        for (int g = 0; g < perTube.guideCount; ++g) {
+            merged.ids.push_back(nextId++);
+            merged.tubeIds.push_back(tubeId);
+        }
+        if (!cvTaken && perTube.guideCount > 0) {
+            merged.cvCount = perTube.cvCount;
+            cvTaken = true;
+        }
     }
-    TonicGuideSet guides;
-    if (!_roots.empty()) {
-        TonicFillDesc fd;
-        fd.density = _fill.density;
-        fd.cvCount = _fill.cvCount;
-        fd.seed = _fill.seed;
-        fd.edgeBias = _fill.edgeBias;
-        fd.lengthProfile = _fill.lengthProfile;
-        std::vector<float> filled;
-        std::vector<float> lengths;
-        if (!TonicGuideFillCpu(tube, frames, _roots, fd, &filled, &lengths,
-                               &err)) {
-            _diagnostic = err;
-            return false;
-        }
-        std::vector<int> inCounts(_roots.size(), _fill.cvCount);
-        float rootDirs[9] = {frames[0].nx, frames[0].ny, frames[0].nz,
-                             frames[0].bx, frames[0].by, frames[0].bz,
-                             frames[0].tx, frames[0].ty, frames[0].tz};
-        std::vector<float> resampled;
-        std::vector<int> outCounts;
-        std::vector<double> outFrames;
-        if (!TonicGuideResampleCpu(filled.data(), inCounts.data(),
-                                   int(_roots.size()), _fill.cvCount, rootDirs,
-                                   &resampled, &outCounts, &outFrames, &err)) {
-            _diagnostic = err;
-            return false;
-        }
-        guides.points = std::move(resampled);
-        guides.counts = std::move(outCounts);
-        guides.frames = std::move(outFrames);
-        guides.ids.resize(_roots.size());
-        for (size_t g = 0; g < _roots.size(); ++g) {
-            guides.ids[g] = uint64_t(1000 + g);
-        }
-        guides.guideCount = int(_roots.size());
-        guides.cvCount = _fill.cvCount;
+    if (!anyOk) {
+        _diagnostic = firstErr.empty()
+                          ? "TonicModel::RefillGuides: no tube"
+                          : firstErr;
+        return false;
     }
-    _guides = std::move(guides);
+    // Dropped tubes leave no roots behind; living tubes keep their
+    // freeze stores (a suspended parent keeps its own for the merge).
+    for (auto it = _tubeRoots.begin(); it != _tubeRoots.end();) {
+        if (it->first != 0 && _tubes.find(it->first) == _tubes.end()) {
+            it = _tubeRoots.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto const &kv : newStores) {
+        _tubeRoots[kv.first] = kv.second;
+    }
+    _roots = std::move(mergedRoots);
+    merged.guideCount = int(merged.ids.size());
+    _guides = std::move(merged);
+    if (tube0FramesOk) {
+        _frames = tube0Frames;
+    }
     ++_guideVersion;
     _dirty |= TonicDirty_Guides;
     ++_version;
@@ -2965,8 +4731,12 @@ TonicModel::GetGuidePreview() const
     // §7). No second fraction applies here.
     std::lock_guard<std::mutex> lock(_mutex);
     GuidePreview preview;
+    if (!_generatedCurvesVisible) {
+        return preview;
+    }
     preview.points = _guides.points;
     preview.counts = _guides.counts;
+    preview.tubeIds = _guides.tubeIds;
     preview.guideCount = _guides.guideCount;
     preview.cvCount = _guides.cvCount;
     return preview;
@@ -3173,76 +4943,243 @@ TonicModel::_PickDeviceLocked(TonicPickSets const &sets, uint32_t kindMask,
 #endif  // USDGEN_TONIC_HAS_CUDA
 
 TonicPickSets
-TonicModel::_BuildPickSetsLocked(_PickScratch *scratch) const
+TonicModel::_BuildPickSetsLocked(_PickScratch *scratch,
+                                 uint32_t displayGraphKinds) const
 {
     TonicPickSets sets;
     if (!scratch) {
         return sets;
     }
-    if (!_host.positions.empty()) {
-        sets.tubeVerts = _host.positions.data();
-        sets.tubeVertCount = int(_host.positions.size() / 3);
-    }
-    if (!_host.centerX.empty()) {
-        scratch->center.resize(_host.centerX.size() * 3);
-        for (size_t i = 0; i < _host.centerX.size(); ++i) {
-            scratch->center[i * 3 + 0] = _host.centerX[i];
-            scratch->center[i * 3 + 1] = _host.centerY[i];
-            scratch->center[i * 3 + 2] = _host.centerZ[i];
+    // Tube-owned controls must agree with the surface the viewport exposes.
+    // The active cut is authoritative when enabled; otherwise the legacy
+    // focus level is the active target. Hidden levels, centers-only levels
+    // and suppressed center overlays are not click targets.
+    auto tubePickable = [&](TonicTubeDesc const &desc, bool mesh) {
+        auto const drawIt = _levelDisplay.find(desc.level);
+        LevelDisplay const draw = drawIt == _levelDisplay.end()
+                                      ? LevelDisplay()
+                                      : drawIt->second;
+        if (!draw.visible || !_IsTubeVisibleInActiveCutLocked(desc.tubeId) ||
+            (!_activeCutEnabled && _focusLevel > 0 &&
+             desc.level != _focusLevel)) {
+            return false;
         }
-        sets.centerCVs = scratch->center.data();
-        sets.centerCVCount = int(_host.centerX.size());
+        return mesh ? !draw.centersOnly : draw.centers;
+    };
+    if (!_host.positions.empty() && _tubes.empty()) {
+        // Single tube: point at the host mirror (no copy, and the
+        // device pick mirror stays applicable) when the active cut exposes
+        // it. A collapsed parent has no surface candidates at all.
+        TonicTubeDesc root;
+        if (_TubeDescLocked(0, &root) && tubePickable(root, /*mesh*/ true)) {
+            sets.tubeVerts = _host.positions.data();
+            sets.tubeVertCount = int(_host.positions.size() / 3);
+            _PickScratch::SurfaceStrip strip;
+            strip.tubeId = 0;
+            strip.level = root.level;
+            strip.firstVertex = 0;
+            strip.ringVerts = root.ringVerts;
+            strip.ringCount = strip.ringVerts > 0
+                                  ? sets.tubeVertCount / strip.ringVerts
+                                  : 0;
+            if (strip.ringCount >= 2 && strip.ringVerts >= 3) {
+                scratch->surfaceStrips.push_back(strip);
+            }
+        }
+    } else if (!_tubes.empty()) {
+        // With children, concatenate only the active-cut surface frontier.
+        // The map and strips use this same filtered stream, so raw K11,
+        // point selection and face picking cannot reach a hidden branch.
+        TonicTubeDesc root;
+        if (_TubeDescLocked(0, &root) && tubePickable(root, /*mesh*/ true)) {
+            scratch->tubeVertPositions = _host.positions;
+            scratch->tubeVertTubeIds.assign(_host.positions.size() / 3, 0);
+            _PickScratch::SurfaceStrip strip;
+            strip.tubeId = 0;
+            strip.level = root.level;
+            strip.firstVertex = 0;
+            strip.ringVerts = root.ringVerts;
+            strip.ringCount = strip.ringVerts > 0
+                                  ? int(_host.positions.size() / 3) /
+                                        strip.ringVerts
+                                  : 0;
+            if (strip.ringCount >= 2 && strip.ringVerts >= 3) {
+                scratch->surfaceStrips.push_back(strip);
+            }
+        }
+        int const segments = std::max(_segmentsPerSpan, 1);
+        for (int tubeId : _LiveTubeIdsLocked()) {
+            if (tubeId == 0) {
+                continue;
+            }
+            TonicTubeDesc desc;
+            if (!_TubeDescLocked(tubeId, &desc) ||
+                desc.centerX.size() < 2 || desc.sections.size() < 2 ||
+                !tubePickable(desc, /*mesh*/ true)) {
+                continue;
+            }
+            std::vector<TonicFrame> frames;
+            std::string err;
+            if (!TonicTubeFramesCpu(desc, &frames, &err)) {
+                continue;
+            }
+            std::vector<float> positions;
+            std::vector<float> normals;
+            std::vector<float> ringT;
+            if (!TonicTessellateCpu(desc, frames, segments, &positions,
+                                    &normals, &ringT, &err) ||
+                positions.empty()) {
+                continue;
+            }
+            _PickScratch::SurfaceStrip strip;
+            strip.tubeId = tubeId;
+            strip.level = desc.level;
+            strip.firstVertex =
+                int(scratch->tubeVertPositions.size() / 3);
+            strip.ringVerts = desc.ringVerts;
+            strip.ringCount = strip.ringVerts > 0
+                                  ? int(positions.size() / 3) /
+                                        strip.ringVerts
+                                  : 0;
+            scratch->tubeVertPositions.insert(
+                scratch->tubeVertPositions.end(), positions.begin(),
+                positions.end());
+            scratch->tubeVertTubeIds.insert(scratch->tubeVertTubeIds.end(),
+                                            positions.size() / 3, tubeId);
+            if (strip.ringCount >= 2 && strip.ringVerts >= 3) {
+                scratch->surfaceStrips.push_back(strip);
+            }
+        }
+        if (!scratch->tubeVertPositions.empty()) {
+            sets.tubeVerts = scratch->tubeVertPositions.data();
+            sets.tubeVertCount =
+                int(scratch->tubeVertPositions.size() / 3);
+        }
     }
-    if (!_sections.empty() && !_frames.empty() &&
-        _frames.size() == _host.centerX.size()) {
-        // Section CVs in world space (root ring placed through the K5
-        // interpolation at each section t; twist/scale applied).
-        scratch->section.reserve(_sections.size() *
-                                 _sections.front().u.size() * 3);
-        for (auto const &s : _sections) {
+    TonicTubeDesc rootDesc;
+    bool const rootPickable = _TubeDescLocked(0, &rootDesc) &&
+                              tubePickable(rootDesc, /*mesh*/ false);
+    if (!_host.centerX.empty() && rootPickable) {
+        scratch->center.reserve(_host.centerX.size() * 3);
+        scratch->centerTubeIds.reserve(_host.centerX.size());
+        scratch->centerCvIds.reserve(_host.centerX.size());
+        for (size_t i = 0; i < _host.centerX.size(); ++i) {
+            float x = _host.centerX[i], y = _host.centerY[i],
+                  z = _host.centerZ[i];
+            std::string err;
+            TonicCenterHandlePointCpu(rootDesc, int(i), &x, &y, &z, &err);
+            scratch->center.push_back(x);
+            scratch->center.push_back(y);
+            scratch->center.push_back(z);
+            scratch->centerTubeIds.push_back(0);
+            scratch->centerCvIds.push_back(int(i));
+        }
+    }
+    // Children read through their descs, in live-id order, so the layout
+    // is a pure function of the model.
+    for (int tubeId : _LiveTubeIdsLocked()) {
+        if (tubeId == 0) {
+            continue;
+        }
+        TonicTubeDesc desc;
+        if (!_TubeDescLocked(tubeId, &desc) ||
+            !tubePickable(desc, /*mesh*/ false)) {
+            continue;
+        }
+        for (size_t i = 0; i < desc.centerX.size(); ++i) {
+            float x = desc.centerX[i], y = desc.centerY[i],
+                  z = desc.centerZ[i];
+            std::string err;
+            TonicCenterHandlePointCpu(desc, int(i), &x, &y, &z, &err);
+            scratch->center.push_back(x);
+            scratch->center.push_back(y);
+            scratch->center.push_back(z);
+            scratch->centerTubeIds.push_back(tubeId);
+            scratch->centerCvIds.push_back(int(i));
+        }
+    }
+    if (!scratch->center.empty()) {
+        sets.centerCVs = scratch->center.data();
+        sets.centerCVCount = int(scratch->center.size() / 3);
+    }
+    // Section and ring handles share the draw/tessellation geometry for
+    // every live tube.  The scratch maps retain their real owners because
+    // children may have a different ring-vertex count from tube 0.
+    for (int tubeId : _LiveTubeIdsLocked()) {
+        TonicTubeDesc desc;
+        if (!_TubeDescLocked(tubeId, &desc) || desc.centerX.size() < 2 ||
+            desc.sections.empty() || !tubePickable(desc, /*mesh*/ true)) {
+            continue;
+        }
+        std::vector<TonicFrame> frames;
+        std::string err;
+        if (!TonicTubeFramesCpu(desc, &frames, &err)) {
+            continue;
+        }
+        for (size_t ring = 0; ring < desc.sections.size(); ++ring) {
+            TonicTubeSection const &s = desc.sections[ring];
+            if (s.u.empty() || s.u.size() != s.v.size()) {
+                continue;
+            }
             float cp[3];
             TonicFrame fr;
-            cp[0] = cp[1] = cp[2] = 0.0f;
-            TonicEvalCenter(_host.centerX.data(), _host.centerY.data(),
-                            _host.centerZ.data(), int(_host.centerX.size()),
-                            s.t, cp);
-            TonicNlerpFrame(_frames.data(), int(_frames.size()), s.t, &fr);
+            if (!TonicSampleCenterCpu(desc, frames, s.t, &cp[0], &cp[1],
+                                      &cp[2], &fr, &err)) {
+                continue;
+            }
             float const ct = std::cos(s.twist), st = std::sin(s.twist);
             double rx = 0.0, ry = 0.0, rz = 0.0;
-            for (size_t i = 0; i < s.u.size(); ++i) {
-                float const uu = s.u[i] * s.scale;
-                float const vv = s.v[i] * s.scale;
-                float const ru = uu * ct - vv * st;
-                float const rvv = uu * st + vv * ct;
-                float const px = cp[0] + fr.nx * ru + fr.bx * rvv;
-                float const py = cp[1] + fr.ny * ru + fr.by * rvv;
-                float const pz = cp[2] + fr.nz * ru + fr.bz * rvv;
+            for (size_t slot = 0; slot < s.u.size(); ++slot) {
+                float const u = s.u[slot] * s.scale;
+                float const v = s.v[slot] * s.scale;
+                float const ru = u * ct - v * st;
+                float const rv = u * st + v * ct;
+                float const px = cp[0] + fr.nx * ru + fr.bx * rv;
+                float const py = cp[1] + fr.ny * ru + fr.by * rv;
+                float const pz = cp[2] + fr.nz * ru + fr.bz * rv;
                 scratch->section.push_back(px);
                 scratch->section.push_back(py);
                 scratch->section.push_back(pz);
+                scratch->sectionTubeIds.push_back(tubeId);
+                scratch->sectionRingIds.push_back(int(ring));
+                scratch->sectionSlotIds.push_back(int(slot));
                 rx += px;
                 ry += py;
                 rz += pz;
             }
-            // The ring's own candidate is its centroid: a marquee should
-            // catch a ring when its centre is inside the band, not when
-            // one vertex clips a corner.
-            double const n = double(s.u.size() ? s.u.size() : 1);
+            // A ring candidate is its centroid, so marquee selection follows
+            // the visible handle rather than a CV grazing a box corner.
+            double const n = double(s.u.size());
             scratch->ringCenters.push_back(float(rx / n));
             scratch->ringCenters.push_back(float(ry / n));
             scratch->ringCenters.push_back(float(rz / n));
+            scratch->ringTubeIds.push_back(tubeId);
+            scratch->ringIds.push_back(int(ring));
         }
+    }
+    if (!scratch->section.empty()) {
         sets.sectionCVs = scratch->section.data();
         sets.sectionCVCount = int(scratch->section.size() / 3);
-        sets.sectionRingVerts = int(_sections.front().u.size());
+        // Keep the public pick payload unchanged: this only transports a
+        // reversible flat candidate ordinal. _ItemFromCandidateLocked uses
+        // the explicit maps above, so child ring sizes need not match it.
+        // The pick payload spells a flat candidate as (ordinal, 0).  Keep
+        // the scratch-side decoder in the same convention; a child can own
+        // a different number of section vertices than its parent.
+        scratch->ringVerts = 1;
+        sets.sectionRingVerts = scratch->ringVerts;
         sets.ringCenters = scratch->ringCenters.data();
         sets.ringCount = int(scratch->ringCenters.size() / 3);
     }
     for (auto const &nd : _graph.Nodes()) {
         if (nd.alive) {
-            scratch->nodes.push_back(nd.p[0]);
-            scratch->nodes.push_back(nd.p[1]);
-            scratch->nodes.push_back(nd.p[2]);
+            float p[3] = {nd.p[0], nd.p[1], nd.p[2]};
+            if (displayGraphKinds & TonicPick_GraphNode) {
+                TonicGraphDisplayPosition(nd, _scalp.get(), p);
+            }
+            scratch->nodes.push_back(p[0]);
+            scratch->nodes.push_back(p[1]);
+            scratch->nodes.push_back(p[2]);
             scratch->nodeIds.push_back(nd.id);
         }
     }
@@ -3256,9 +5193,15 @@ TonicModel::_BuildPickSetsLocked(_PickScratch *scratch) const
         }
         int const n = int(e.polyline.size() / 3);
         for (int i = 0; i < n; ++i) {
-            scratch->edgeCVs.push_back(e.polyline[size_t(i) * 3 + 0]);
-            scratch->edgeCVs.push_back(e.polyline[size_t(i) * 3 + 1]);
-            scratch->edgeCVs.push_back(e.polyline[size_t(i) * 3 + 2]);
+            float p[3] = {e.polyline[size_t(i) * 3 + 0],
+                          e.polyline[size_t(i) * 3 + 1],
+                          e.polyline[size_t(i) * 3 + 2]};
+            if (displayGraphKinds & TonicPick_GraphEdge) {
+                TonicGraphDisplaySurfacePosition(p, _scalp.get(), p);
+            }
+            scratch->edgeCVs.push_back(p[0]);
+            scratch->edgeCVs.push_back(p[1]);
+            scratch->edgeCVs.push_back(p[2]);
             scratch->edgeIds.push_back(e.id);
         }
     }
@@ -3300,12 +5243,13 @@ TonicPickHit
 TonicModel::Pick(float const viewProj[16], int w, int h, float x, float y,
                  float radiusPx, uint32_t kindMask) const
 {
+    // Raw K11 contract: candidate indices and distances always refer to the
+    // nearest projected candidate position.  Tonic_Pick is used to verify
+    // CPU/GPU projection parity, so it cannot synthesize a face hit with a
+    // representative vertex index and a zero distance.
     std::lock_guard<std::mutex> lock(_mutex);
     _PickScratch scratch;
     TonicPickSets const sets = _BuildPickSetsLocked(&scratch);
-    // The V1 kinds (edge, region, ring) fold in after the five the shared
-    // twin scans, with that twin's rule, so an exact dead heat still goes
-    // to the earlier kind.
     TonicPickHit const extra = TonicPickExtraKindsCpu(
         sets, kindMask, viewProj, w, h, x, y, radiusPx);
 #ifdef USDGEN_TONIC_HAS_CUDA
@@ -3325,8 +5269,6 @@ TonicModel::Pick(float const viewProj[16], int w, int h, float x, float y,
                                   radiusPx, &hit)) {
                 return PickHitBetter(extra, hit) ? extra : hit;
             }
-            // Any device failure falls through to the CPU twin (P6
-            // style, but non-sticky: the mirror itself is untouched).
         }
     }
 #else
@@ -3335,6 +5277,191 @@ TonicModel::Pick(float const viewProj[16], int w, int h, float x, float y,
     TonicPickHit const base =
         TonicPickCpu(sets, kindMask, viewProj, w, h, x, y, radiusPx);
     return PickHitBetter(extra, base) ? extra : base;
+}
+
+TonicPickHit
+TonicModel::PickItem(float const viewProj[16], int w, int h, float x,
+                     float y, float radiusPx, uint32_t kindMask) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _PickScratch scratch;
+    // Tonic_Pick remains a raw K11 projection query.  Selection acts on
+    // the visible graph dots, whose normal lift keeps them above the scalp.
+    TonicPickSets const sets = _BuildPickSetsLocked(
+        &scratch, kindMask & (TonicPick_GraphNode | TonicPick_GraphEdge));
+
+    // A tube mesh is the broad, whole-object target.  Its vertices were
+    // historically folded before the edit handles, which meant a surface
+    // vertex at the same pixel could make a center or section CV impossible
+    // to pick.  Resolve every requested component first; the mesh is only a
+    // fallback when no requested handle is under the cursor.
+    uint32_t const componentMask = kindMask & ~uint32_t(TonicPick_TubeVert);
+    auto pointPick = [&](uint32_t mask) {
+#ifdef USDGEN_TONIC_HAS_CUDA
+        if (_device && _device->streamOwned && _device->stream &&
+            !CpuPickForced()) {
+        size_t heavy = 0;
+        if (mask & TonicPick_TubeVert) {
+            heavy += size_t(std::max(sets.tubeVertCount, 0));
+        }
+        if (mask & TonicPick_Guide) {
+            heavy += size_t(std::max(sets.guideCount, 0)) *
+                     size_t(std::max(sets.guideCvCount, 0));
+        }
+        if (heavy > size_t(kPickDeviceThreshold)) {
+            TonicPickHit hit;
+            if (_PickDeviceLocked(sets, mask, viewProj, w, h, x, y,
+                                  radiusPx, &hit)) {
+                    return hit;
+            }
+            // Any device failure falls through to the CPU twin (P6
+            // style, but non-sticky: the mirror itself is untouched).
+        }
+        }
+#else
+        (void)0;
+#endif
+        return TonicPickCpu(sets, mask, viewProj, w, h, x, y, radiusPx);
+    };
+
+    TonicPickHit const extra = TonicPickExtraKindsCpu(
+        sets, componentMask, viewProj, w, h, x, y, radiusPx);
+    TonicPickHit const component = pointPick(componentMask);
+    bool const extraWins =
+        extra.hit && (!component.hit || extra.distPx < component.distPx ||
+                      (extra.distPx == component.distPx &&
+                       extra.depth < component.depth));
+    if (extraWins || component.hit) {
+        return extraWins ? extra : component;
+    }
+
+    // The normal point picker intentionally has a snap radius.  The exact
+    // projected quads of the *published* tube strips establish visible
+    // ownership first; a vertex snap survives only when no face owns the
+    // cursor. This is not a ray against an unbounded analytic tube: a hit
+    // has to land inside a visible rendered quad. X-ray levels remain
+    // pickable as drawn, but an active focus limits whole-tube picks to
+    // that level, matching the editing policy.
+    if (!(kindMask & TonicPick_TubeVert) || !viewProj || w <= 0 || h <= 0 ||
+        !(radiusPx >= 0.0f)) {
+        return TonicPickHit();
+    }
+    auto surfacePickable = [&](int tubeId, int level) {
+        auto const drawIt = _levelDisplay.find(level);
+        LevelDisplay const draw = drawIt == _levelDisplay.end()
+                                      ? LevelDisplay()
+                                      : drawIt->second;
+        return draw.visible && !draw.centersOnly &&
+               _IsTubeVisibleInActiveCutLocked(tubeId) &&
+               (_activeCutEnabled || _focusLevel <= 0 ||
+                level == _focusLevel);
+    };
+    bool surfaceFiltered = _activeCutEnabled || _focusLevel > 0;
+    for (_PickScratch::SurfaceStrip const &strip : scratch.surfaceStrips) {
+        if (!surfacePickable(strip.tubeId, strip.level)) {
+            surfaceFiltered = true;
+            break;
+        }
+    }
+
+    // With the default display every vertex is eligible and the existing
+    // device reduction keeps its performance contract.  A hidden/focused
+    // display needs the same filtering as the face path, so scan only the
+    // visible strips on the host and preserve the raw vertex ordinal.
+    TonicPickHit vertex;
+    if (!surfaceFiltered) {
+        vertex = pointPick(uint32_t(TonicPick_TubeVert));
+    } else {
+        float const r2 = radiusPx * radiusPx;
+        for (_PickScratch::SurfaceStrip const &strip : scratch.surfaceStrips) {
+            if (!surfacePickable(strip.tubeId, strip.level)) {
+                continue;
+            }
+            int const end = strip.firstVertex +
+                            strip.ringCount * strip.ringVerts;
+            for (int i = strip.firstVertex; i < end; ++i) {
+                float px, py, depth;
+                float const *p = sets.tubeVerts + size_t(i) * 3;
+                if (!TonicProjectPoint(p, viewProj, w, h, &px, &py, &depth)) {
+                    continue;
+                }
+                float const dx = px - x, dy = py - y;
+                float const d2 = dx * dx + dy * dy;
+                if (d2 > r2) {
+                    continue;
+                }
+                float const dist = std::sqrt(d2);
+                if (!vertex.hit || dist < vertex.distPx ||
+                    (dist == vertex.distPx && depth < vertex.depth)) {
+                    vertex.hit = true;
+                    vertex.kind = TonicPick_TubeVert;
+                    vertex.index = i;
+                    vertex.subIndex = -1;
+                    vertex.distPx = dist;
+                    vertex.depth = depth;
+                }
+            }
+        }
+    }
+
+    TonicPickHit surface;
+    auto considerTriangle = [&](int representative,
+                                float const *a, float const *b,
+                                float const *c) {
+        float ax, ay, az, bx, by, bz, cx, cy, cz;
+        if (!TonicProjectPoint(a, viewProj, w, h, &ax, &ay, &az) ||
+            !TonicProjectPoint(b, viewProj, w, h, &bx, &by, &bz) ||
+            !TonicProjectPoint(c, viewProj, w, h, &cx, &cy, &cz)) {
+            return;
+        }
+        float const area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        if (std::abs(area) < 1e-8f) {
+            return;
+        }
+        float const wa = ((bx - x) * (cy - y) - (by - y) * (cx - x)) /
+                         area;
+        float const wb = ((cx - x) * (ay - y) - (cy - y) * (ax - x)) /
+                         area;
+        float const wc = 1.0f - wa - wb;
+        constexpr float kEdgeTolerance = 1e-5f;
+        if (wa < -kEdgeTolerance || wb < -kEdgeTolerance ||
+            wc < -kEdgeTolerance) {
+            return;
+        }
+        float const depth = wa * az + wb * bz + wc * cz;
+        if (!surface.hit || depth < surface.depth) {
+            surface.hit = true;
+            surface.kind = TonicPick_TubeVert;
+            surface.index = representative;
+            surface.subIndex = -1;
+            surface.distPx = 0.0f;
+            surface.depth = depth;
+        }
+    };
+    for (_PickScratch::SurfaceStrip const &strip : scratch.surfaceStrips) {
+        if (!surfacePickable(strip.tubeId, strip.level)) {
+            continue;
+        }
+        for (int ring = 0; ring + 1 < strip.ringCount; ++ring) {
+            for (int slot = 0; slot < strip.ringVerts; ++slot) {
+                int const next = (slot + 1) % strip.ringVerts;
+                int const i0 = strip.firstVertex + ring * strip.ringVerts + slot;
+                int const i1 = strip.firstVertex + ring * strip.ringVerts + next;
+                int const i2 = strip.firstVertex + (ring + 1) * strip.ringVerts + next;
+                int const i3 = strip.firstVertex + (ring + 1) * strip.ringVerts + slot;
+                float const *p0 = sets.tubeVerts + size_t(i0) * 3;
+                float const *p1 = sets.tubeVerts + size_t(i1) * 3;
+                float const *p2 = sets.tubeVerts + size_t(i2) * 3;
+                float const *p3 = sets.tubeVerts + size_t(i3) * 3;
+                considerTriangle(strip.firstVertex, p0, p1, p2);
+                considerTriangle(strip.firstVertex, p0, p2, p3);
+            }
+        }
+    }
+    // An exact visible face owns the click.  A vertex from a rear tube is a
+    // useful snap target only when the cursor did not land on any visible
+    // surface, otherwise it defeats normal front-depth occlusion.
+    return surface.hit ? surface : vertex;
 }
 
 // -- V1: selection (plan/18 §2.3) --------------------------------------------
@@ -3353,6 +5480,85 @@ TonicModel::_LiveTubeIdsLocked() const
     return ids;
 }
 
+bool
+TonicModel::_IsDescendantOfLocked(int tubeId, int ancestorTubeId) const
+{
+    if (tubeId == ancestorTubeId) {
+        return false;
+    }
+    TonicTubeDesc desc;
+    if (!_TubeDescLocked(tubeId, &desc)) {
+        return false;
+    }
+    // A malformed imported hierarchy must not let a cycle make every tube
+    // disappear. Live ids bound the parent walk and unknown parents stop it.
+    size_t const limit = _tubes.size() + 1;
+    for (size_t steps = 0; steps < limit && desc.parentTubeId >= 0; ++steps) {
+        if (desc.parentTubeId == ancestorTubeId) {
+            return true;
+        }
+        if (!_TubeDescLocked(desc.parentTubeId, &desc)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+void
+TonicModel::_PruneActiveCutLocked()
+{
+    for (auto it = _expandedTubeIds.begin(); it != _expandedTubeIds.end();) {
+        TonicTubeDesc desc;
+        bool hasChild = false;
+        if (_TubeDescLocked(*it, &desc)) {
+            for (auto const &entry : _tubes) {
+                if (entry.second.actual.parentTubeId == *it) {
+                    hasChild = true;
+                    break;
+                }
+            }
+        }
+        if (!hasChild) {
+            it = _expandedTubeIds.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool
+TonicModel::_IsTubeVisibleInActiveCutLocked(int tubeId) const
+{
+    TonicTubeDesc desc;
+    if (!_TubeDescLocked(tubeId, &desc)) {
+        return false;
+    }
+    if (!_activeCutEnabled) {
+        return true;
+    }
+    // The cut has exactly one owner along each root-to-leaf path: an
+    // unexpanded tube with every ancestor expanded. An expanded non-leaf is
+    // replaced by its direct children. A stale bit on a leaf must never
+    // blank the frontier while an undo/redo restore is being reconciled.
+    if (_expandedTubeIds.count(tubeId) != 0) {
+        for (auto const &entry : _tubes) {
+            if (entry.second.actual.parentTubeId == tubeId) {
+                return false;
+            }
+        }
+    }
+    size_t const limit = _tubes.size() + 1;
+    for (size_t steps = 0; steps < limit && desc.parentTubeId >= 0; ++steps) {
+        if (_expandedTubeIds.count(desc.parentTubeId) == 0) {
+            return false;
+        }
+        if (!_TubeDescLocked(desc.parentTubeId, &desc)) {
+            return false;
+        }
+    }
+    return desc.parentTubeId < 0;
+}
+
 TonicSelectionItem
 TonicModel::_ItemFromCandidateLocked(_PickScratch const &scratch,
                                      uint32_t kind, int index,
@@ -3362,23 +5568,57 @@ TonicModel::_ItemFromCandidateLocked(_PickScratch const &scratch,
     item.kind = kind;
     switch (kind) {
     case TonicPick_TubeVert:
-        // A surface hit selects the tube it belongs to. Only tube 0 has a
-        // vertex mirror today (the audit's G2 tube-0 limitation), so every
-        // surface candidate is tube 0's.
-        item.id = 0;
+        // A surface hit selects the tube it belongs to. The single-tube
+        // path leaves the map empty and every surface candidate is tube
+        // 0's; with children the map names the tessellated tube.
+        if (scratch.tubeVertTubeIds.empty()) {
+            item.id = 0;
+        } else if (index < 0 ||
+                   index >= int(scratch.tubeVertTubeIds.size())) {
+            item.kind = 0;
+        } else {
+            item.id = scratch.tubeVertTubeIds[size_t(index)];
+        }
         break;
     case TonicPick_CenterCV:
-        item.id = 0;
-        item.subId = index;
+        if (index < 0 || index >= int(scratch.centerTubeIds.size()) ||
+            index >= int(scratch.centerCvIds.size())) {
+            item.kind = 0;
+            break;
+        }
+        item.id = scratch.centerTubeIds[size_t(index)];
+        item.subId = scratch.centerCvIds[size_t(index)];
         break;
     case TonicPick_SectionCV:
-        item.id = 0;
-        item.subId = index;     // ring
-        item.subSubId = subIndex;  // slot
+        // The shared TonicPickSets ABI carries a compact (index, subIndex)
+        // spelling. Reconstruct its flat candidate ordinal, then recover the
+        // actual tube/ring/slot from the per-candidate scratch maps.
+        {
+            if (index < 0 || subIndex < 0 || scratch.ringVerts <= 0) {
+                item.kind = 0;
+                break;
+            }
+            size_t const flat = size_t(index) * size_t(scratch.ringVerts) +
+                                size_t(subIndex);
+            if (flat >= scratch.sectionTubeIds.size() ||
+                flat >= scratch.sectionRingIds.size() ||
+                flat >= scratch.sectionSlotIds.size()) {
+                item.kind = 0;
+                break;
+            }
+            item.id = scratch.sectionTubeIds[flat];
+            item.subId = scratch.sectionRingIds[flat];
+            item.subSubId = scratch.sectionSlotIds[flat];
+        }
         break;
     case TonicPick_SectionRing:
-        item.id = 0;
-        item.subId = index;
+        if (index < 0 || index >= int(scratch.ringTubeIds.size()) ||
+            index >= int(scratch.ringIds.size())) {
+            item.kind = 0;
+            break;
+        }
+        item.id = scratch.ringTubeIds[size_t(index)];
+        item.subId = scratch.ringIds[size_t(index)];
         break;
     case TonicPick_GraphNode:
         item.id = index >= 0 && index < int(scratch.nodeIds.size())
@@ -3503,6 +5743,62 @@ TonicModel::_ItemPositionLocked(TonicSelectionItem const &item,
         o[2] = float(cz / n);
         return true;
     };
+    // Section handles cannot use the root-only pick scratch for child
+    // tubes: a child owns its own centre curve, sections and (for region
+    // tubes) pinned root frame.  Resolve its displayed section directly
+    // from the same descriptor/frame path as tessellation.
+    auto sectionPosition = [&](int tubeId, int ring, int slot, bool center,
+                               float o[3]) {
+        TonicTubeDesc desc;
+        if (!_TubeDescLocked(tubeId, &desc) || ring < 0 ||
+            ring >= int(desc.sections.size())) {
+            return false;
+        }
+        TonicTubeSection const &section = desc.sections[size_t(ring)];
+        if (section.u.empty() || section.u.size() != section.v.size() ||
+            (!center && (slot < 0 || slot >= int(section.u.size())))) {
+            return false;
+        }
+        std::vector<TonicFrame> frames;
+        std::string err;
+        if (!TonicTubeFramesCpu(desc, &frames, &err)) {
+            return false;
+        }
+        float cp[3];
+        TonicFrame frame;
+        if (!TonicSampleCenterCpu(desc, frames, section.t, &cp[0], &cp[1],
+                                  &cp[2], &frame, &err)) {
+            return false;
+        }
+        float const ct = std::cos(section.twist);
+        float const st = std::sin(section.twist);
+        auto point = [&](size_t i, float p[3]) {
+            float const u = section.u[i] * section.scale;
+            float const v = section.v[i] * section.scale;
+            float const ru = u * ct - v * st;
+            float const rv = u * st + v * ct;
+            p[0] = cp[0] + frame.nx * ru + frame.bx * rv;
+            p[1] = cp[1] + frame.ny * ru + frame.by * rv;
+            p[2] = cp[2] + frame.nz * ru + frame.bz * rv;
+        };
+        if (!center) {
+            point(size_t(slot), o);
+            return true;
+        }
+        double x = 0.0, y = 0.0, z = 0.0;
+        for (size_t i = 0; i < section.u.size(); ++i) {
+            float p[3];
+            point(i, p);
+            x += p[0];
+            y += p[1];
+            z += p[2];
+        }
+        double const n = double(section.u.size());
+        o[0] = float(x / n);
+        o[1] = float(y / n);
+        o[2] = float(z / n);
+        return true;
+    };
     switch (item.kind) {
     case TonicPick_TubeVert:
         return tubeCentroid(item.id, out);
@@ -3512,38 +5808,23 @@ TonicModel::_ItemPositionLocked(TonicSelectionItem const &item,
             item.subId >= int(desc.centerX.size())) {
             return false;
         }
-        out[0] = desc.centerX[size_t(item.subId)];
-        out[1] = desc.centerY[size_t(item.subId)];
-        out[2] = desc.centerZ[size_t(item.subId)];
+        std::string err;
+        if (!TonicCenterHandlePointCpu(desc, item.subId, &out[0], &out[1],
+                                       &out[2], &err)) {
+            // Match the visible/pick fallback for malformed imported data.
+            out[0] = desc.centerX[size_t(item.subId)];
+            out[1] = desc.centerY[size_t(item.subId)];
+            out[2] = desc.centerZ[size_t(item.subId)];
+        }
         return true;
     }
     case TonicPick_SectionCV: {
-        if (item.id != 0 || scratch.ringVerts <= 0 || item.subId < 0 ||
-            item.subSubId < 0) {
-            return false;
-        }
-        size_t const flat = size_t(item.subId) * size_t(scratch.ringVerts) +
-                            size_t(item.subSubId);
-        if (flat * 3 + 2 >= scratch.section.size()) {
-            return false;
-        }
-        out[0] = scratch.section[flat * 3 + 0];
-        out[1] = scratch.section[flat * 3 + 1];
-        out[2] = scratch.section[flat * 3 + 2];
-        return true;
+        return sectionPosition(item.id, item.subId, item.subSubId,
+                               /*center*/ false, out);
     }
     case TonicPick_SectionRing: {
-        if (item.id != 0 || item.subId < 0) {
-            return false;
-        }
-        size_t const o = size_t(item.subId) * 3;
-        if (o + 2 >= scratch.ringCenters.size()) {
-            return false;
-        }
-        out[0] = scratch.ringCenters[o + 0];
-        out[1] = scratch.ringCenters[o + 1];
-        out[2] = scratch.ringCenters[o + 2];
-        return true;
+        return sectionPosition(item.id, item.subId, -1,
+                               /*center*/ true, out);
     }
     case TonicPick_GraphNode: {
         TonicGraphNode const *node = _graph.FindNode(item.id);
@@ -3663,15 +5944,59 @@ TonicModel::_ApplyRegionSelectLocked(
 {
     std::vector<TonicSelectionItem> items;
     items.reserve(hits.size());
+    auto wholeTubePickable = [&](int tubeId) {
+        TonicTubeDesc desc;
+        if (!_TubeDescLocked(tubeId, &desc)) {
+            return false;
+        }
+        auto const drawIt = _levelDisplay.find(desc.level);
+        LevelDisplay const draw = drawIt == _levelDisplay.end()
+                                      ? LevelDisplay()
+                                      : drawIt->second;
+        return draw.visible && !draw.centersOnly &&
+               _IsTubeVisibleInActiveCutLocked(tubeId) &&
+               (_activeCutEnabled || _focusLevel <= 0 ||
+                desc.level == _focusLevel);
+    };
     for (TonicPickCandidate const &hit : hits) {
         TonicSelectionItem const item =
             _ItemFromCandidateLocked(scratch, hit.kind, hit.index,
                                      hit.subIndex);
-        if (item.kind) {
+        if (item.kind &&
+            (item.kind != TonicPick_TubeVert || wholeTubePickable(item.id))) {
             items.push_back(item);
         }
     }
     uint64_t const before = _selection.Generation();
+    // A band over displayed controls is an edit selection, not a second way
+    // to select every tessellated surface vertex underneath.  Keep the body
+    // only when the band found no tube component at all. Section CVs are
+    // more specific than their ring centroid; retaining both would apply a
+    // translate twice to that one control.
+    std::vector<int> componentTubes;
+    bool hasSectionCV = false;
+    for (TonicSelectionItem const &item : items) {
+        if (item.kind == TonicPick_CenterCV ||
+            item.kind == TonicPick_SectionCV ||
+            item.kind == TonicPick_SectionRing) {
+            componentTubes.push_back(item.id);
+            hasSectionCV = hasSectionCV || item.kind == TonicPick_SectionCV;
+        }
+    }
+    if (!componentTubes.empty()) {
+        std::sort(componentTubes.begin(), componentTubes.end());
+        componentTubes.erase(
+            std::unique(componentTubes.begin(), componentTubes.end()),
+            componentTubes.end());
+        items.erase(std::remove_if(items.begin(), items.end(),
+                                   [hasSectionCV](TonicSelectionItem const &item) {
+            return item.kind == TonicPick_TubeVert ||
+                   (hasSectionCV && item.kind == TonicPick_SectionRing);
+        }), items.end());
+        if (mode != TonicSelect_Set) {
+            _selection.RemoveWholeTubeItems(componentTubes);
+        }
+    }
     if (mode == TonicSelect_Set) {
         // An empty band clears the kinds it was asked for: dragging over
         // nothing is how an artist deselects.
@@ -3787,7 +6112,8 @@ TonicModel::SelectRect(float const viewProj[16], int w, int h, float x0,
     }
     _selection.PruneTubes(_LiveTubeIdsLocked());
     _PickScratch scratch;
-    TonicPickSets const sets = _BuildPickSetsLocked(&scratch);
+    TonicPickSets const sets = _BuildPickSetsLocked(
+        &scratch, kindMask & (TonicPick_GraphNode | TonicPick_GraphEdge));
     std::vector<unsigned char> tubeMask;
     std::vector<unsigned char> guideMask;
     unsigned char const *tubePtr = nullptr;
@@ -3819,7 +6145,8 @@ TonicModel::SelectPolygon(float const viewProj[16], int w, int h,
     }
     _selection.PruneTubes(_LiveTubeIdsLocked());
     _PickScratch scratch;
-    TonicPickSets const sets = _BuildPickSetsLocked(&scratch);
+    TonicPickSets const sets = _BuildPickSetsLocked(
+        &scratch, kindMask & (TonicPick_GraphNode | TonicPick_GraphEdge));
     std::vector<unsigned char> tubeMask;
     std::vector<unsigned char> guideMask;
     unsigned char const *tubePtr = nullptr;
@@ -3846,7 +6173,7 @@ TonicModel::SetGizmo(TonicGizmoRecord const &record)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     if (record.kind < TonicGizmo_None ||
-        record.kind > TonicGizmo_NodeTranslate) {
+        record.kind > TonicGizmo_Scale) {
         _diagnostic = "TonicModel::SetGizmo: unknown gizmo kind";
         return false;
     }
@@ -3978,13 +6305,301 @@ bool TonicModel::_WriteDescToTube0Locked(TonicTubeDesc const &desc)
     _host.centerZ = desc.centerZ;
     _sections = desc.sections;
     _useSections = true;
+    _rootFramePinned = desc.rootFramePinned;
+    _rootFrame = desc.rootFrame;
+    _frameReference = desc.frameReference;
     _roots.clear();
+    _tubeRoots.clear();
     _guides = TonicGuideSet();
     ++_guideVersion;
     if (!Sync()) {
         return false;
     }
     _dirty |= TonicDirty_Topology;
+    return true;
+}
+
+bool
+TonicModel::_ConformRegionRootSectionLocked(
+    int tubeId, TonicScalpGraph const &oldGraph, int oldRegionId,
+    int newRegionId, TonicTubeDesc const &oldActual, bool *outChanged)
+{
+    if (outChanged) {
+        *outChanged = false;
+    }
+    if (!_scalp) {
+        _diagnostic = "TonicModel::GraphMoveNodes: missing scalp for "
+                      "attachment conformance";
+        return false;
+    }
+    _RegionFootprint oldFootprint, newFootprint;
+    std::string err;
+    if (!_RegionCanonicalFootprint(*_scalp, oldGraph, oldRegionId,
+                                   &oldFootprint, &err) ||
+        !_RegionCanonicalFootprint(*_scalp, _graph, newRegionId,
+                                   &newFootprint, &err)) {
+        _diagnostic = err.empty()
+                          ? "TonicModel::GraphMoveNodes: invalid attachment "
+                            "footprint"
+                          : err;
+        return false;
+    }
+    // The baseline sample of a gesture must be a true no-op, even for a
+    // legacy root whose stored footprint is already stale. Repair is an
+    // intentional response to an edited region, never a side effect of
+    // pressing/releasing without moving a graph CV.
+    if (_SameRegionFootprint(oldFootprint, newFootprint)) {
+        return true;
+    }
+    TonicTubeDesc current;
+    if (!_TubeDescLocked(tubeId, &current) || current.centerX.empty() ||
+        current.sections.empty() || current.ringVerts < 3 ||
+        current.ringVerts != oldActual.ringVerts ||
+        int(current.sections.front().u.size()) != current.ringVerts ||
+        int(current.sections.front().v.size()) != current.ringVerts) {
+        _diagnostic = "TonicModel::GraphMoveNodes: invalid attached root";
+        return false;
+    }
+    std::vector<float> const slots =
+        _RecoverFootprintSlots(oldFootprint, oldActual);
+    if (int(slots.size()) != current.ringVerts) {
+        _diagnostic = "TonicModel::GraphMoveNodes: invalid attachment "
+                      "slot mapping";
+        return false;
+    }
+
+    // Keep the rigidly transported center cage intact.  CV0 may be offset
+    // within the support chart (for example after an artist whole-tube move),
+    // and moving it alone would rotate K4 above the root and shear every
+    // upper sculpted section.  Fit the graph footprint through the existing
+    // center/frame chart instead.
+    TonicTubeDesc candidate = current;
+    TonicTubeSection &section = candidate.sections.front();
+    if (!(section.scale > 1e-6f) || !std::isfinite(section.scale) ||
+        !std::isfinite(section.twist)) {
+        _diagnostic = "TonicModel::GraphMoveNodes: invalid attached root "
+                      "section transform";
+        return false;
+    }
+    std::vector<TonicFrame> frames;
+    if (!TonicTubeFramesCpu(candidate, &frames, &err) || frames.empty()) {
+        _diagnostic = err;
+        return false;
+    }
+    TonicFrame const &frame = frames.front();
+    float const ct = std::cos(section.twist);
+    float const st = std::sin(section.twist);
+    std::vector<std::array<float, 3>> targets;
+    targets.reserve(slots.size());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        std::array<float, 3> const target =
+            _FootprintPoint(newFootprint, slots[i]);
+        targets.push_back(target);
+        float const dx = target[0] - candidate.centerX[0];
+        float const dy = target[1] - candidate.centerY[0];
+        float const dz = target[2] - candidate.centerZ[0];
+        float const ru = dx * frame.nx + dy * frame.ny + dz * frame.nz;
+        float const rv = dx * frame.bx + dy * frame.by + dz * frame.bz;
+        // Invert K5's scale then twist application.  Do not change these
+        // scalar controls: they affect the upper interpolation too.
+        section.u[i] = (ct * ru + st * rv) / section.scale;
+        section.v[i] = (-st * ru + ct * rv) / section.scale;
+    }
+
+    float extent = 0.0f;
+    for (std::array<float, 3> const &target : targets) {
+        float const dx = target[0] - newFootprint.origin[0];
+        float const dy = target[1] - newFootprint.origin[1];
+        float const dz = target[2] - newFootprint.origin[2];
+        extent = std::max(extent, std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    float const tolerance = std::max(1e-5f, extent * 1e-5f);
+    std::vector<std::array<float, 3>> candidateBoundary;
+    if (!_SectionZeroWorld(candidate, &candidateBoundary) ||
+        candidateBoundary.size() != targets.size()) {
+        _diagnostic = "TonicModel::GraphMoveNodes: invalid fitted "
+                      "attachment section";
+        return false;
+    }
+    bool same = true;
+    std::vector<std::array<float, 3>> currentBoundary;
+    if (!_SectionZeroWorld(current, &currentBoundary) ||
+        currentBoundary.size() != targets.size()) {
+        same = false;
+    }
+    for (size_t i = 0; i < targets.size(); ++i) {
+        float const ex = candidateBoundary[i][0] - targets[i][0];
+        float const ey = candidateBoundary[i][1] - targets[i][1];
+        float const ez = candidateBoundary[i][2] - targets[i][2];
+        if (ex * ex + ey * ey + ez * ez > tolerance * tolerance) {
+            _diagnostic = "TonicModel::GraphMoveNodes: attachment root "
+                          "chart cannot represent region footprint";
+            return false;
+        }
+        if (same) {
+            float const dx = currentBoundary[i][0] - targets[i][0];
+            float const dy = currentBoundary[i][1] - targets[i][1];
+            float const dz = currentBoundary[i][2] - targets[i][2];
+            if (dx * dx + dy * dy + dz * dz > tolerance * tolerance) {
+                same = false;
+            }
+        }
+    }
+    if (same) {
+        return true;  // Exact rigid transport: retain every stored residual.
+    }
+
+    if (tubeId == 0) {
+        _host.centerX[0] = candidate.centerX[0];
+        _host.centerY[0] = candidate.centerY[0];
+        _host.centerZ[0] = candidate.centerZ[0];
+        _sections.front() = std::move(candidate.sections.front());
+    } else {
+        auto it = _tubes.find(tubeId);
+        if (it == _tubes.end()) {
+            return false;
+        }
+        it->second.actual = candidate;
+        // L1 roots retain their rigidly transported center cage.  Keep the
+        // reference aligned with the section-zero-only attachment edit;
+        // children get fresh attachment references below.
+        it->second.derived = std::move(candidate);
+    }
+    if (outChanged) {
+        *outChanged = true;
+    }
+    return true;
+}
+
+bool
+TonicModel::_PropagateAttachmentDownLocked(int tubeId)
+{
+    std::vector<int> kids;
+    for (auto const &kv : _tubes) {
+        if (kv.second.actual.parentTubeId == tubeId) {
+            kids.push_back(kv.first);
+        }
+    }
+    if (kids.empty()) {
+        return true;
+    }
+    TonicTubeDesc parent;
+    if (!_TubeDescLocked(tubeId, &parent)) {
+        return false;
+    }
+    std::vector<TonicFrame> parentFrames;
+    std::string err;
+    if (!TonicTubeFramesCpu(parent, &parentFrames, &err)) {
+        _diagnostic = err;
+        return false;
+    }
+    TonicSubdivideDesc params;
+    if (tubeId == 0) {
+        params.count = _subdivide.count;
+        params.seed = _subdivide.seed;
+        params.splitMode = _subdivide.splitMode == "edge" ? TonicSplit_Edge
+                                                            : TonicSplit_KMeans;
+        params.edgeA = _subdivide.edgeA;
+        params.edgeB = _subdivide.edgeB;
+        params.edgeC = _subdivide.edgeC;
+    } else {
+        auto parentIt = _tubes.find(tubeId);
+        if (parentIt == _tubes.end()) {
+            return false;
+        }
+        params = parentIt->second.subdivide;
+    }
+    std::vector<TonicTubeDesc> derivedAll;
+    if (!TonicSubdivideTubeCpu(parent, parentFrames, params, &derivedAll,
+                               &err)) {
+        _diagnostic = err;
+        return false;
+    }
+    for (int kid : kids) {
+        auto it = _tubes.find(kid);
+        if (it == _tubes.end()) {
+            return false;
+        }
+        HierarchyTube &entry = it->second;
+        if (entry.imported) {
+            continue;
+        }
+        int const childIndex = entry.actual.childIndex;
+        if (childIndex < 0 || size_t(childIndex) >= derivedAll.size()) {
+            _diagnostic = "TonicDeriveChildCpu: child index out of range";
+            return false;
+        }
+        TonicTubeDesc fresh = derivedAll[size_t(childIndex)];
+        if (!_SameRingLayout(fresh, entry.actual)) {
+            TonicTubeDesc matched;
+            if (!TonicResampleDescRingsCpu(fresh, entry.actual.ringVerts,
+                                            &matched, &err)) {
+                _diagnostic = err;
+                return false;
+            }
+            fresh = std::move(matched);
+        }
+        // All descendants were already transported by the region's proper
+        // support transform.  A changed root boundary gives K14 a new
+        // partition reference, but it must not make K6 regenerate the
+        // child's sculpted upper cage from that new partition.  Preserve the
+        // transported actual descriptor and fit only the fresh inherited
+        // root polygon into its existing material chart; then remeasure its
+        // residual against `fresh` below.
+        TonicTubeDesc actual = entry.actual;
+        std::vector<std::array<float, 3>> freshRoot;
+        if (!_SectionZeroWorld(fresh, &freshRoot) ||
+            !_FitSectionZeroWorld(&actual, freshRoot, &err)) {
+            _diagnostic = err.empty()
+                ? "TonicModel::GraphMoveNodes: cannot fit child attachment"
+                : err;
+            return false;
+        }
+        // TonicHierarchicalSculptApplyCpu retains old K14 triples when the
+        // layouts match.  Those root slots now name freshly derived geometry,
+        // so discard only section-zero triples and reconstruct exact retained
+        // parent corners from the installed child/parent root sections.
+        std::vector<TonicParentBoundaryBinding> rootBindings;
+        if (!_InstalledRootBoundaryBindings(parent, actual, &rootBindings)) {
+            _diagnostic = "TonicModel::GraphMoveNodes: invalid child "
+                          "attachment boundary";
+            return false;
+        }
+        actual.inheritedBoundaryBindings.erase(
+            std::remove_if(actual.inheritedBoundaryBindings.begin(),
+                           actual.inheritedBoundaryBindings.end(),
+                           [](TonicParentBoundaryBinding const &binding) {
+                               return binding.section == 0;
+                           }),
+            actual.inheritedBoundaryBindings.end());
+        actual.inheritedBoundaryBindings.insert(
+            actual.inheritedBoundaryBindings.end(), rootBindings.begin(),
+            rootBindings.end());
+        fresh.inheritedBoundaryBindings.erase(
+            std::remove_if(fresh.inheritedBoundaryBindings.begin(),
+                           fresh.inheritedBoundaryBindings.end(),
+                           [](TonicParentBoundaryBinding const &binding) {
+                               return binding.section == 0;
+                           }),
+            fresh.inheritedBoundaryBindings.end());
+        fresh.inheritedBoundaryBindings.insert(
+            fresh.inheritedBoundaryBindings.end(), rootBindings.begin(),
+            rootBindings.end());
+        std::vector<TonicFrame> childFrames;
+        TonicShapeDeltas stored;
+        if (!TonicTubeFramesCpu(fresh, &childFrames, &err) ||
+            !TonicComputeDeltasCpu(actual, fresh, childFrames, &stored,
+                                   &err)) {
+            _diagnostic = err;
+            return false;
+        }
+        entry.actual = std::move(actual);
+        entry.derived = std::move(fresh);
+        entry.deltas = std::move(stored);
+        if (!_PropagateAttachmentDownLocked(kid)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4006,11 +6621,7 @@ bool TonicModel::_PropagateDownLocked(int tubeId)
     }
     std::vector<TonicFrame> frames;
     std::string derr;
-    if (!TonicCenterFramesCpu(parentDesc.centerX.data(),
-                              parentDesc.centerY.data(),
-                              parentDesc.centerZ.data(),
-                              int(parentDesc.centerX.size()), &frames,
-                              &derr)) {
+    if (!TonicTubeFramesCpu(parentDesc, &frames, &derr)) {
         _diagnostic = derr;
         return false;
     }
@@ -4021,6 +6632,9 @@ bool TonicModel::_PropagateDownLocked(int tubeId)
         params.seed = _subdivide.seed;
         params.splitMode =
             _subdivide.splitMode == "edge" ? TonicSplit_Edge : TonicSplit_KMeans;
+        params.edgeA = _subdivide.edgeA;
+        params.edgeB = _subdivide.edgeB;
+        params.edgeC = _subdivide.edgeC;
     } else {
         auto pit = _tubes.find(tubeId);
         if (pit == _tubes.end()) {
@@ -4057,18 +6671,32 @@ bool TonicModel::_PropagateDownLocked(int tubeId)
             _diagnostic = "TonicDeriveChildCpu: child index out of range";
             return false;
         }
+        // K14 may choose a different ring count after a parent move.  A
+        // child re-based by K7 owns its current layout, so use that layout
+        // for both the K6 application and the stored reference instead of
+        // allowing a no-op K6 to silently re-sample its authored shape.
+        TonicTubeDesc fresh = derivedAll[size_t(childIndex)];
+        if (!_SameRingLayout(fresh, entry.actual)) {
+            TonicTubeDesc matched;
+            if (!TonicResampleDescRingsCpu(fresh, entry.actual.ringVerts,
+                                            &matched, &derr)) {
+                _diagnostic = derr;
+                return false;
+            }
+            fresh = std::move(matched);
+        }
         bool const locked = _globalLockChildren || entry.lockChildren;
         TonicTubeDesc actual;
         TonicShapeDeltas stored;
         if (!TonicHierarchicalSculptApplyCpu(
-                derivedAll[size_t(childIndex)], entry.actual, entry.derived,
+                fresh, entry.actual, entry.derived,
                 entry.deltas, locked, /*preserveLength=*/true, &actual,
                 &stored, &derr)) {
             _diagnostic = derr;
             return false;
         }
         entry.actual = actual;
-        entry.derived = derivedAll[size_t(childIndex)];
+        entry.derived = std::move(fresh);
         entry.deltas = stored;
         if (!_PropagateDownLocked(kid)) {
             return false;
@@ -4077,7 +6705,8 @@ bool TonicModel::_PropagateDownLocked(int tubeId)
     return true;
 }
 
-bool TonicModel::_PropagateUpLocked(int tubeId)
+bool TonicModel::_PropagateUpLocked(
+    int tubeId, HierarchyRollback const *beforeEdit)
 {
     auto it = _tubes.find(tubeId);
     if (it == _tubes.end()) {
@@ -4090,11 +6719,29 @@ bool TonicModel::_PropagateUpLocked(int tubeId)
     if (_globalLockParents || it->second.lockParents) {
         return true;  // the edited tube gates the whole upward chain
     }
-    // Gather the parent's children actuals in ascending id order.
+    // Gather the parent's children actuals in ascending id order.  A direct
+    // child edit supplies the pre-edit snapshot in the same stable order so
+    // K7 can inspect only frozen inherited boundary slots.  Comparing a
+    // child to a fresh K14 derivation is invalid here: its local frames may
+    // already differ from the parent before the edit.
     std::vector<TonicTubeDesc> sibs;
+    std::vector<TonicTubeDesc> priorSibs;
+    bool havePriorSibs = beforeEdit != nullptr;
     for (auto const &kv : _tubes) {
         if (kv.second.actual.parentTubeId == parentId) {
             sibs.push_back(kv.second.actual);
+            if (havePriorSibs) {
+                auto const old = beforeEdit->tubes.find(kv.first);
+                if (old == beforeEdit->tubes.end() ||
+                    old->second.actual.parentTubeId != parentId) {
+                    // Do not make an incomplete snapshot look like a stable
+                    // before-state.  The merge retains its legacy path.
+                    havePriorSibs = false;
+                    priorSibs.clear();
+                } else {
+                    priorSibs.push_back(old->second.actual);
+                }
+            }
         }
     }
     if (sibs.empty()) {
@@ -4110,6 +6757,9 @@ bool TonicModel::_PropagateUpLocked(int tubeId)
         params.seed = _subdivide.seed;
         params.splitMode =
             _subdivide.splitMode == "edge" ? TonicSplit_Edge : TonicSplit_KMeans;
+        params.edgeA = _subdivide.edgeA;
+        params.edgeB = _subdivide.edgeB;
+        params.edgeC = _subdivide.edgeC;
     } else {
         auto pit = _tubes.find(parentId);
         if (pit == _tubes.end()) {
@@ -4120,16 +6770,84 @@ bool TonicModel::_PropagateUpLocked(int tubeId)
             // (as siblings, above) but never overwrites them. The chain
             // still continues upward so ancestors refresh against the
             // import's unchanged actual.
-            return _PropagateUpLocked(parentId);
+            return _PropagateUpLocked(parentId, beforeEdit);
         }
         params = pit->second.subdivide;
     }
     std::string derr;
     TonicTubeDesc agg;
-    if (!TonicMergeTubesCpu(sibs, params, &parentDesc, &agg, &derr)) {
+    if (!TonicMergeTubesCpu(sibs, params, &parentDesc, &agg, &derr,
+                            havePriorSibs ? &priorSibs : nullptr)) {
         _diagnostic = derr;
         return false;
     }
+    // K7 writes a new actual parent from all of its children.  The children
+    // themselves did not move, so do not run K6 here: that would apply their
+    // old residuals to the new parent a second time.  Instead make each
+    // direct child's reference the fresh split of the written parent and
+    // measure its unchanged actual against that reference.  A later K6 then
+    // starts from this matched pair instead of stale pre-K7 geometry.
+    auto rebaseDirectChildren = [&](int rewrittenParentId) {
+        TonicTubeDesc writtenParent;
+        if (!_TubeDescLocked(rewrittenParentId, &writtenParent)) {
+            return false;
+        }
+        std::vector<TonicFrame> parentFrames;
+        if (!TonicTubeFramesCpu(writtenParent, &parentFrames, &derr)) {
+            _diagnostic = derr;
+            return false;
+        }
+        std::vector<TonicTubeDesc> freshAll;
+        if (!TonicSubdivideTubeCpu(writtenParent, parentFrames, params,
+                                   &freshAll, &derr)) {
+            _diagnostic = derr;
+            return false;
+        }
+        for (auto &kv : _tubes) {
+            HierarchyTube &child = kv.second;
+            if (child.actual.parentTubeId != rewrittenParentId ||
+                child.imported) {
+                continue;
+            }
+            int const childIndex = child.actual.childIndex;
+            if (childIndex < 0 || size_t(childIndex) >= freshAll.size()) {
+                _diagnostic = "TonicDeriveChildCpu: child index out of range";
+                return false;
+            }
+            // K14 can repartition ring-vertex counts.  Preserve the authored
+            // actual layout exactly; only resample the newly derived reference
+            // before computing its residual.
+            TonicTubeDesc fresh = freshAll[size_t(childIndex)];
+            if (!_SameRingLayout(fresh, child.actual)) {
+                TonicTubeDesc matched;
+                if (!TonicResampleDescRingsCpu(fresh,
+                                                child.actual.ringVerts,
+                                                &matched, &derr)) {
+                    _diagnostic = derr;
+                    return false;
+                }
+                fresh = std::move(matched);
+            }
+            // Fresh K14 bindings describe its own generated material slots.
+            // The actual child keeps its frozen inherited-corner identity:
+            // matching a reference layout does not prove the two slot orders
+            // represent the same source edge.
+            std::vector<TonicFrame> childFrames;
+            if (!TonicTubeFramesCpu(fresh, &childFrames, &derr)) {
+                _diagnostic = derr;
+                return false;
+            }
+            TonicShapeDeltas rebased;
+            if (!TonicComputeDeltasCpu(child.actual, fresh, childFrames,
+                                       &rebased, &derr)) {
+                _diagnostic = derr;
+                return false;
+            }
+            child.derived = std::move(fresh);
+            child.deltas = std::move(rebased);
+        }
+        return true;
+    };
     if (parentId == 0) {
         // Keep tube 0 on its own ring layout (a layout change here would
         // desync every later K6 re-derivation); pass hint-exact merges
@@ -4142,7 +6860,7 @@ bool TonicModel::_PropagateUpLocked(int tubeId)
         if (!_WriteDescToTube0Locked(fit)) {
             return false;
         }
-        return true;
+        return rebaseDirectChildren(parentId);
     }
     auto pit = _tubes.find(parentId);
     if (pit == _tubes.end()) {
@@ -4162,11 +6880,7 @@ bool TonicModel::_PropagateUpLocked(int tubeId)
     refit.parentTubeId = pit->second.actual.parentTubeId;
     refit.childIndex = pit->second.actual.childIndex;
     std::vector<TonicFrame> dframes;
-    if (!TonicCenterFramesCpu(pit->second.derived.centerX.data(),
-                              pit->second.derived.centerY.data(),
-                              pit->second.derived.centerZ.data(),
-                              int(pit->second.derived.centerX.size()),
-                              &dframes, &derr)) {
+    if (!TonicTubeFramesCpu(pit->second.derived, &dframes, &derr)) {
         _diagnostic = derr;
         return false;
     }
@@ -4178,7 +6892,10 @@ bool TonicModel::_PropagateUpLocked(int tubeId)
     }
     pit->second.actual = refit;
     pit->second.deltas = deltas;
-    return _PropagateUpLocked(parentId);
+    if (!rebaseDirectChildren(parentId)) {
+        return false;
+    }
+    return _PropagateUpLocked(parentId, beforeEdit);
 }
 
 bool TonicModel::SubdivideTube(int tubeId, int count, const char *splitMode,
@@ -4230,9 +6947,7 @@ bool TonicModel::SubdivideTube(int tubeId, int count, const char *splitMode,
     }
     std::vector<TonicFrame> frames;
     std::string derr;
-    if (!TonicCenterFramesCpu(desc.centerX.data(), desc.centerY.data(),
-                              desc.centerZ.data(), int(desc.centerX.size()),
-                              &frames, &derr)) {
+    if (!TonicTubeFramesCpu(desc, &frames, &derr)) {
         _diagnostic = derr;
         return false;
     }
@@ -4341,6 +7056,7 @@ bool TonicModel::MergeChildren(int tubeId)
     for (int id : doomed) {
         _tubes.erase(id);
     }
+    _PruneActiveCutLocked();
     if (tubeId == 0) {
         TonicTubeDesc fit;
         if (!_FitAggregateForWriteback(merged, parentDesc, &fit, &derr)) {
@@ -4367,11 +7083,7 @@ bool TonicModel::MergeChildren(int tubeId)
         refit.parentTubeId = pit->second.actual.parentTubeId;
         refit.childIndex = pit->second.actual.childIndex;
         std::vector<TonicFrame> dframes;
-        if (!TonicCenterFramesCpu(pit->second.derived.centerX.data(),
-                                  pit->second.derived.centerY.data(),
-                                  pit->second.derived.centerZ.data(),
-                                  int(pit->second.derived.centerX.size()),
-                                  &dframes, &derr)) {
+        if (!TonicTubeFramesCpu(pit->second.derived, &dframes, &derr)) {
             _diagnostic = derr;
             return false;
         }
@@ -4433,11 +7145,7 @@ bool TonicModel::MergeSelected(std::vector<int> const &tubeIds, int *outKept)
     refit.parentTubeId = parentId;
     refit.childIndex = kit->second.actual.childIndex;
     std::vector<TonicFrame> dframes;
-    if (!TonicCenterFramesCpu(kit->second.derived.centerX.data(),
-                              kit->second.derived.centerY.data(),
-                              kit->second.derived.centerZ.data(),
-                              int(kit->second.derived.centerX.size()),
-                              &dframes, &derr)) {
+    if (!TonicTubeFramesCpu(kit->second.derived, &dframes, &derr)) {
         _diagnostic = derr;
         return false;
     }
@@ -4453,6 +7161,7 @@ bool TonicModel::MergeSelected(std::vector<int> const &tubeIds, int *outKept)
     for (size_t i = 1; i < tubeIds.size(); ++i) {
         _tubes.erase(tubeIds[i]);
     }
+    _PruneActiveCutLocked();
     *outKept = kept;
     ++_version;
     ++_mapVersion;
@@ -4533,6 +7242,22 @@ bool TonicModel::GetTubeCenterCV(int tubeId, int cv, float *x, float *y,
     return true;
 }
 
+bool
+TonicModel::GetTubeCenterHandle(int tubeId, int cv, float *x, float *y,
+                                float *z) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!x || !y || !z) {
+        return false;
+    }
+    TonicTubeDesc desc;
+    if (!_TubeDescLocked(tubeId, &desc)) {
+        return false;
+    }
+    std::string err;
+    return TonicCenterHandlePointCpu(desc, cv, x, y, z, &err);
+}
+
 std::shared_ptr<TonicModel::GraphUndoState const>
 TonicModel::_GraphUndoStateLocked() const
 {
@@ -4595,11 +7320,17 @@ TonicModel::_SnapshotHierarchyLocked() const
     snap.shape = _shape;
     snap.useSections = _useSections;
     snap.roots = _roots;
+    snap.tubeRoots = _tubeRoots;
     snap.guides = _guides;
+    snap.generatedCurvesSuppressed = _generatedCurvesSuppressed;
+    snap.output = _output;
     snap.graph = _GraphUndoStateLocked();
     snap.regionTube = _regionTube;
     snap.tubeRegionKey = _tubeRegionKey;
     snap.tube0Region = _tubeRegionId;
+    snap.tube0RootFramePinned = _rootFramePinned;
+    snap.tube0RootFrame = _rootFrame;
+    snap.tube0FrameReference = _frameReference;
     return snap;
 }
 
@@ -4614,12 +7345,22 @@ void TonicModel::_RestoreHierarchyLocked(HierarchyRollback const &snap)
     _shape = snap.shape;
     _useSections = snap.useSections;
     _roots = snap.roots;
+    _tubeRoots = snap.tubeRoots;
     _guides = snap.guides;
+    _generatedCurvesSuppressed = snap.generatedCurvesSuppressed;
+    _output = snap.output;
     ++_guideVersion;
     _regionTube = snap.regionTube;
     _tubeRegionKey = snap.tubeRegionKey;
     _tubeRegionId = snap.tube0Region;
+    _rootFramePinned = snap.tube0RootFramePinned;
+    _rootFrame = snap.tube0RootFrame;
+    _frameReference = snap.tube0FrameReference;
     _RestoreGraphUndoLocked(snap.graph);
+    // Active-cut expansion is viewport state, not undo history. A restored
+    // hierarchy can remove an expanded parent or turn it back into a leaf;
+    // discard only those stale ids and preserve expansions in other branches.
+    _PruneActiveCutLocked();
     // Only re-tessellate when there IS a tube. A graph-only model reaches
     // this path from V1 on (graph edits are undoable now), and the legacy
     // tessellation reads _shape.rings CVs out of the center columns, which
@@ -4629,6 +7370,365 @@ void TonicModel::_RestoreHierarchyLocked(HierarchyRollback const &snap)
     }
     _diagnostic = keep;
     _dirty |= TonicDirty_Topology;
+}
+
+bool
+TonicModel::_TransportRegionAttachmentsLocked(
+    HierarchyRollback const &reference,
+    std::vector<int> const &movedNodeIds)
+{
+    if (!_scalp || !reference.graph) {
+        _diagnostic = "TonicModel::GraphMoveNodes: missing graph support";
+        return false;
+    }
+
+    // A gesture's node positions are absolute from its press-time baseline.
+    // Rebuild that graph locally so each accepted sample transports the
+    // original authored descriptors directly, never the last sampled pose.
+    TonicScalpGraph oldGraph;
+    std::string err;
+    if (!oldGraph.Restore(*_scalp, reference.graph->nodes,
+                          reference.graph->edges, reference.graph->linked,
+                          &err)) {
+        _diagnostic = err.empty()
+                          ? "TonicModel::GraphMoveNodes: restore baseline "
+                            "graph failed"
+                          : err;
+        return false;
+    }
+
+    auto sourceDesc = [&](int tubeId, TonicTubeDesc *out) {
+        if (!out) {
+            return false;
+        }
+        if (tubeId == 0) {
+            out->centerX = reference.cx;
+            out->centerY = reference.cy;
+            out->centerZ = reference.cz;
+            out->sections = reference.sections;
+            out->ringVerts = reference.shape.ringVerts;
+            out->tubeId = 0;
+            out->regionId = reference.tube0Region;
+            out->level = 1;
+            out->parentTubeId = -1;
+            out->childIndex = -1;
+            out->rootFramePinned = reference.tube0RootFramePinned;
+            out->rootFrame = reference.tube0RootFrame;
+            out->frameReference = reference.tube0FrameReference;
+            return out->centerX.size() >= 2;
+        }
+        auto const it = reference.tubes.find(tubeId);
+        if (it == reference.tubes.end()) {
+            return false;
+        }
+        *out = it->second.actual;
+        return true;
+    };
+
+    auto subtree = [&](int root) {
+        std::vector<int> ids;
+        std::vector<int> pending(1, root);
+        while (!pending.empty()) {
+            int const id = pending.back();
+            pending.pop_back();
+            ids.push_back(id);
+            for (auto const &kv : reference.tubes) {
+                if (kv.second.actual.parentTubeId == id) {
+                    pending.push_back(kv.first);
+                }
+            }
+        }
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    };
+
+    // Existing guide roots are world-space caches. Start each live sample
+    // from the same cache as the descriptor baseline so a frozen-root drag
+    // cannot retain roots from a previous sample's region support.
+    _roots = reference.roots;
+    _tubeRoots = reference.tubeRoots;
+    _guides = reference.guides;
+
+    std::set<std::vector<int>> affectedKeys;
+    for (int nodeId : movedNodeIds) {
+        for (int regionId : oldGraph.NodeRegions(nodeId)) {
+            if (regionId >= 0 && regionId < oldGraph.RegionCount()) {
+                affectedKeys.insert(_StableRegionLoopKey(
+                    oldGraph.Regions()[size_t(regionId)]));
+            }
+        }
+        for (int regionId : _graph.NodeRegions(nodeId)) {
+            if (regionId >= 0 && regionId < _graph.RegionCount()) {
+                affectedKeys.insert(_StableRegionLoopKey(
+                    _graph.Regions()[size_t(regionId)]));
+            }
+        }
+    }
+
+    auto transportCachedRoots = [&](std::vector<int> const &ids,
+                                    TonicRigidTransform const &rigid) {
+        for (int id : ids) {
+            auto rootsIt = _tubeRoots.find(id);
+            if (rootsIt == _tubeRoots.end()) {
+                continue;
+            }
+            TonicTubeDesc desc;
+            std::vector<TonicFrame> frames;
+            if (!_TubeDescLocked(id, &desc) ||
+                !TonicTubeFramesCpu(desc, &frames, &err) || frames.empty()) {
+                _diagnostic = err.empty()
+                                  ? "TonicModel::GraphMoveNodes: invalid "
+                                    "transported guide frame"
+                                  : err;
+                return false;
+            }
+            float const radius = TonicSectionMeanRadius(desc.sections.front());
+            if (!(radius > 1e-12f)) {
+                _diagnostic = "TonicModel::GraphMoveNodes: invalid "
+                              "transported guide radius";
+                return false;
+            }
+            for (TonicGuideRoot &root : rootsIt->second) {
+                float const p[3] = {root.px, root.py, root.pz};
+                float moved[3] = {
+                    rigid.rotation[0] * p[0] + rigid.rotation[1] * p[1] +
+                        rigid.rotation[2] * p[2] + rigid.translation[0],
+                    rigid.rotation[3] * p[0] + rigid.rotation[4] * p[1] +
+                        rigid.rotation[5] * p[2] + rigid.translation[1],
+                    rigid.rotation[6] * p[0] + rigid.rotation[7] * p[1] +
+                        rigid.rotation[8] * p[2] + rigid.translation[2]};
+                TonicHit const hit = TonicClosestPointCpu(*_scalp, moved);
+                if (!hit.hit) {
+                    _diagnostic = "TonicModel::GraphMoveNodes: guide root "
+                                  "left scalp support";
+                    return false;
+                }
+                root.faceId = hit.faceId;
+                root.u = hit.u;
+                root.v = hit.v;
+                root.px = hit.px;
+                root.py = hit.py;
+                root.pz = hit.pz;
+                float const d[3] = {hit.px - desc.centerX[0],
+                                    hit.py - desc.centerY[0],
+                                    hit.pz - desc.centerZ[0]};
+                float const n[3] = {frames[0].nx, frames[0].ny,
+                                    frames[0].nz};
+                float const b[3] = {frames[0].bx, frames[0].by,
+                                    frames[0].bz};
+                root.ru = TonicDot3(d, n) / radius;
+                root.rv = TonicDot3(d, b) / radius;
+            }
+        }
+        return true;
+    };
+
+    std::map<int, int> movedOwners;
+    std::set<int> transformed;
+    bool attached = false;
+    for (int root : _L1TubeIdsLocked()) {
+        TonicTubeDesc rootSource;
+        if (!sourceDesc(root, &rootSource) || rootSource.regionId < 0) {
+            continue;
+        }
+        std::vector<int> key;
+        auto const keyIt = reference.tubeRegionKey.find(root);
+        if (keyIt != reference.tubeRegionKey.end()) {
+            key = keyIt->second;
+        } else if (rootSource.regionId < oldGraph.RegionCount()) {
+            key = _StableRegionLoopKey(
+                oldGraph.Regions()[size_t(rootSource.regionId)]);
+        }
+        if (key.empty()) {
+            continue;  // an unrooted legacy tube is independent of graph edits
+        }
+        int const oldRegion = _RegionForStableLoop(oldGraph, key);
+        int const newRegion = _RegionForStableLoop(_graph, key);
+        if (oldRegion < 0 || newRegion < 0) {
+            _diagnostic = "TonicModel::GraphMoveNodes: region loop lost "
+                          "during geometry-only move";
+            return false;
+        }
+        if (affectedKeys.count(key) == 0) {
+            // Extraction may densely renumber an unchanged loop. Its world
+            // shape is independent of this bookkeeping id, but commit and
+            // subsequent exact-region fills must name the new slot.
+            for (int id : subtree(root)) {
+                if (id == 0) {
+                    _tubeRegionId = newRegion;
+                } else {
+                    auto current = _tubes.find(id);
+                    if (current != _tubes.end()) {
+                        current->second.actual.regionId = newRegion;
+                        current->second.derived.regionId = newRegion;
+                    }
+                }
+            }
+            movedOwners[newRegion] = root;
+            continue;
+        }
+        bool const importedRoot =
+            root != 0 && reference.tubes.count(root) != 0 &&
+            reference.tubes.at(root).imported;
+        _RegionSupport from, to;
+        if (!_RegionSupportFromGraph(*_scalp,
+                                     oldGraph.Regions()[size_t(oldRegion)],
+                                     &from) ||
+            !_RegionSupportFromGraph(*_scalp,
+                                     _graph.Regions()[size_t(newRegion)],
+                                     &to)) {
+            _diagnostic = "TonicModel::GraphMoveNodes: invalid region "
+                          "support frame";
+            return false;
+        }
+        TonicRigidTransform rigid;
+        if (!_RigidBetweenRegionSupports(from, to, &rigid)) {
+            _diagnostic = "TonicModel::GraphMoveNodes: invalid region "
+                          "transport";
+            return false;
+        }
+        // A whole-tube artist move can leave an existing region root above or
+        // below its support chart.  When this graph edit really changes the
+        // footprint, bring the complete subtree back by that normal component
+        // before fitting the base.  Never move CV0 alone: it changes K4 and
+        // shears upper sculpted sections.  The composed rigid is also used
+        // for cached guide roots below.
+        _RegionFootprint oldFootprint, newFootprint;
+        if (!_RegionCanonicalFootprint(*_scalp, oldGraph, oldRegion,
+                                       &oldFootprint, &err) ||
+            !_RegionCanonicalFootprint(*_scalp, _graph, newRegion,
+                                       &newFootprint, &err)) {
+            _diagnostic = err.empty()
+                              ? "TonicModel::GraphMoveNodes: invalid region "
+                                "attachment footprint"
+                              : err;
+            return false;
+        }
+        if (!importedRoot &&
+            !_SameRegionFootprint(oldFootprint, newFootprint)) {
+            TonicTubeDesc transformedRoot;
+            if (!TonicRigidTransformTubeCpu(rootSource, rigid,
+                                             &transformedRoot, &err)) {
+                _diagnostic = err;
+                return false;
+            }
+            float const dx = to.origin[0] - transformedRoot.centerX[0];
+            float const dy = to.origin[1] - transformedRoot.centerY[0];
+            float const dz = to.origin[2] - transformedRoot.centerZ[0];
+            float const normalOffset = dx * to.normal[0] +
+                                       dy * to.normal[1] +
+                                       dz * to.normal[2];
+            if (std::fabs(normalOffset) > 1e-6f) {
+                rigid.translation[0] += to.normal[0] * normalOffset;
+                rigid.translation[1] += to.normal[1] * normalOffset;
+                rigid.translation[2] += to.normal[2] * normalOffset;
+            }
+        }
+        std::vector<int> const ids = subtree(root);
+        for (int id : ids) {
+            if (!transformed.insert(id).second) {
+                continue;
+            }
+            if (id == 0) {
+                TonicTubeDesc before;
+                if (!sourceDesc(0, &before)) {
+                    _diagnostic = "TonicModel::GraphMoveNodes: invalid "
+                                  "tube-0 baseline";
+                    return false;
+                }
+                TonicTubeDesc after;
+                if (!TonicRigidTransformTubeCpu(before, rigid, &after,
+                                                 &err)) {
+                    _diagnostic = err;
+                    return false;
+                }
+                after.regionId = newRegion;
+                _shape.rings = int(after.centerX.size());
+                _shape.ringVerts = after.ringVerts;
+                _host.centerX = std::move(after.centerX);
+                _host.centerY = std::move(after.centerY);
+                _host.centerZ = std::move(after.centerZ);
+                _sections = std::move(after.sections);
+                _useSections = true;
+                _tubeRegionId = newRegion;
+                _rootFramePinned = after.rootFramePinned;
+                _rootFrame = after.rootFrame;
+                _frameReference = after.frameReference;
+                continue;
+            }
+            auto sourceIt = reference.tubes.find(id);
+            if (sourceIt == reference.tubes.end()) {
+                _diagnostic = "TonicModel::GraphMoveNodes: subtree baseline "
+                              "is incomplete";
+                return false;
+            }
+            HierarchyTube entry = sourceIt->second;
+            if (!TonicRigidTransformTubeCpu(sourceIt->second.actual, rigid,
+                                             &entry.actual, &err) ||
+                !TonicRigidTransformTubeCpu(sourceIt->second.derived, rigid,
+                                             &entry.derived, &err)) {
+                _diagnostic = err;
+                return false;
+            }
+            entry.actual.regionId = newRegion;
+            entry.derived.regionId = newRegion;
+            // The same proper transform and Q'=R*Q were applied to actual
+            // and derived. Their stored coefficients remain in that shared
+            // material frame exactly; re-measuring only injects float noise
+            // (and can turn a deliberate zero marker into a sculpt delta).
+            // A later ordinary K6 parent edit re-computes them in its new
+            // derived frame, as it has always done.
+            _tubes[id] = std::move(entry);
+        }
+        // Rigidly transported roots keep their exact residuals for pure
+        // support motion.  If the graph boundary itself changed, constrain
+        // just the attachment section to its canonical new footprint, then
+        // rebase descendants downward without ever fitting the root upward.
+        bool attachmentChanged = false;
+        if (!importedRoot &&
+            !_ConformRegionRootSectionLocked(root, oldGraph, oldRegion,
+                                              newRegion, rootSource,
+                                              &attachmentChanged)) {
+            return false;
+        }
+        if (attachmentChanged && !_PropagateAttachmentDownLocked(root)) {
+            return false;
+        }
+        if (!transportCachedRoots(ids, rigid)) {
+            return false;
+        }
+        movedOwners[newRegion] = root;
+        attached = true;
+    }
+
+    // The stable loop identity remains the source of ownership; only dense
+    // region ids may change after extraction. Rebuild this cheap index from
+    // the reference rather than invoking _SyncRegionTubesLocked, which is
+    // intentionally allowed to re-root on topological graph edits.
+    _regionTube.clear();
+    _tubeRegionKey = reference.tubeRegionKey;
+    for (auto const &kv : movedOwners) {
+        _regionTube[kv.first] = kv.second;
+    }
+    if (!_host.centerX.empty() && !Sync()) {
+        return false;
+    }
+    if (!TonicRasteriseRegionsCpu(*_scalp, _graph, &_maps, &err) ||
+        !TonicFlattenLoops(_graph, &_loops, &err)) {
+        _diagnostic = err;
+        return false;
+    }
+    if (attached && !_generatedCurvesSuppressed &&
+        !_RefillGuidesLocked(_previewFraction)) {
+        return false;
+    }
+    if (attached && _generatedCurvesSuppressed) {
+        ++_guideVersion;
+    }
+    if (attached) {
+        _dirty |= TonicDirty_Points | TonicDirty_Guides;
+    }
+    return true;
 }
 
 // Accounted bytes of one undo snapshot (payload only: vector contents
@@ -5018,11 +8118,7 @@ bool TonicModel::MoveTubeCenterCV(int tubeId, int cv, float dx, float dy,
         }
         std::vector<TonicFrame> dframes;
         std::string derr;
-        if (!TonicCenterFramesCpu(entry.derived.centerX.data(),
-                                  entry.derived.centerY.data(),
-                                  entry.derived.centerZ.data(),
-                                  int(entry.derived.centerX.size()), &dframes,
-                                  &derr)) {
+        if (!TonicTubeFramesCpu(entry.derived, &dframes, &derr)) {
             _diagnostic = derr;
             return rollback(false);
         }
@@ -5036,7 +8132,66 @@ bool TonicModel::MoveTubeCenterCV(int tubeId, int cv, float dx, float dy,
     if (!_PropagateDownLocked(tubeId)) {
         return rollback(false);
     }
-    if (!_PropagateUpLocked(tubeId)) {
+    if (!_PropagateUpLocked(tubeId, &snap)) {
+        return rollback(false);
+    }
+    _PushUndoSnapshotLocked(snap);
+    ++_version;
+    return true;
+}
+
+bool
+TonicModel::TranslateTube(int tubeId, float dx, float dy, float dz)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    HierarchyRollback const snap = _SnapshotHierarchyLocked();
+    auto const rollback = [&](bool ok) {
+        if (!ok) {
+            _RestoreHierarchyLocked(snap);
+        }
+        return ok;
+    };
+
+    if (tubeId == 0) {
+        int const n = int(_host.centerX.size());
+        if (n < 2) {
+            _diagnostic = "TonicModel::TranslateTube: tube 0 has no center";
+            return false;
+        }
+        for (int i = 0; i < n; ++i) {
+            _host.centerX[size_t(i)] += dx;
+            _host.centerY[size_t(i)] += dy;
+            _host.centerZ[size_t(i)] += dz;
+        }
+        if (!Sync()) {
+            return rollback(false);
+        }
+        _dirty |= TonicDirty_Points;
+    } else {
+        auto it = _tubes.find(tubeId);
+        if (it == _tubes.end() || it->second.actual.centerX.size() < 2) {
+            _diagnostic = "TonicModel::TranslateTube: unknown or empty tube";
+            return false;
+        }
+        HierarchyTube &entry = it->second;
+        for (size_t i = 0; i < entry.actual.centerX.size(); ++i) {
+            entry.actual.centerX[i] += dx;
+            entry.actual.centerY[i] += dy;
+            entry.actual.centerZ[i] += dz;
+        }
+        std::vector<TonicFrame> dframes;
+        std::string derr;
+        if (!TonicTubeFramesCpu(entry.derived, &dframes, &derr) ||
+            !TonicComputeDeltasCpu(entry.actual, entry.derived, dframes,
+                                   &entry.deltas, &derr)) {
+            _diagnostic = derr.empty()
+                              ? "TonicModel::TranslateTube: invalid child frame"
+                              : derr;
+            return rollback(false);
+        }
+        _dirty |= TonicDirty_Points;
+    }
+    if (!_PropagateDownLocked(tubeId) || !_PropagateUpLocked(tubeId, &snap)) {
         return rollback(false);
     }
     _PushUndoSnapshotLocked(snap);
@@ -5229,6 +8384,9 @@ _TonicBrushWeight(double distPx, double radiusPx, double t, double tCenter,
 bool
 _TonicShapeStroke(std::string const &brush, std::vector<float> const &cx,
                   std::vector<float> const &cy, std::vector<float> const &cz,
+                  std::vector<float> const *handleX,
+                  std::vector<float> const *handleY,
+                  std::vector<float> const *handleZ,
                   float const *viewProj, int w, int h, float cursorX,
                   float cursorY, float radiusPx, float const *deltaWorld,
                   float amount, float tCenter, float tRadius,
@@ -5242,11 +8400,16 @@ _TonicShapeStroke(std::string const &brush, std::vector<float> const &cx,
         }
         return false;
     }
+    bool const handlesValid = handleX && handleY && handleZ &&
+        int(handleX->size()) == n && int(handleY->size()) == n &&
+        int(handleZ->size()) == n;
     std::vector<float> weight(size_t(n), 0.0f);
     for (int i = 0; i < n; ++i) {
         float sx = 0.0f, sy = 0.0f;
-        if (!_TonicProjectPixel(viewProj, w, h, cx[size_t(i)], cy[size_t(i)],
-                                cz[size_t(i)], &sx, &sy)) {
+        float const px = handlesValid ? (*handleX)[size_t(i)] : cx[size_t(i)];
+        float const py = handlesValid ? (*handleY)[size_t(i)] : cy[size_t(i)];
+        float const pz = handlesValid ? (*handleZ)[size_t(i)] : cz[size_t(i)];
+        if (!_TonicProjectPixel(viewProj, w, h, px, py, pz, &sx, &sy)) {
             continue;
         }
         double const dx = double(sx) - double(cursorX);
@@ -5391,7 +8554,7 @@ bool TonicModel::SculptStroke(int tubeId, const char *brush, int const *cvIds,
     }
     HierarchyRollback const snap = _SnapshotHierarchyLocked();
     if (!_SculptApplyLocked(tubeId, b, cvIds, deltas, cvCount,
-                            preserveLength, mirrorX)) {
+                            preserveLength, mirrorX, &snap)) {
         _RestoreHierarchyLocked(snap);
         return false;
     }
@@ -5408,7 +8571,8 @@ bool TonicModel::SculptStroke(int tubeId, const char *brush, int const *cvIds,
 bool TonicModel::_SculptApplyLocked(int tubeId, std::string const &b,
                                     int const *cvIds, float const *deltas,
                                     int cvCount, bool preserveLength,
-                                    bool mirrorX)
+                                    bool mirrorX,
+                                    HierarchyRollback const *beforeEdit)
 {
     // Snapshot the pre-stroke length for preserveLength.
     TonicTubeDesc before;
@@ -5511,11 +8675,7 @@ bool TonicModel::_SculptApplyLocked(int tubeId, std::string const &b,
         auto it = _tubes.find(tubeId);
         HierarchyTube &entry = it->second;
         std::vector<TonicFrame> dframes;
-        if (!TonicCenterFramesCpu(entry.derived.centerX.data(),
-                                  entry.derived.centerY.data(),
-                                  entry.derived.centerZ.data(),
-                                  int(entry.derived.centerX.size()), &dframes,
-                                  &derr)) {
+        if (!TonicTubeFramesCpu(entry.derived, &dframes, &derr)) {
             _diagnostic = derr;
             return false;
         }
@@ -5529,7 +8689,7 @@ bool TonicModel::_SculptApplyLocked(int tubeId, std::string const &b,
     if (!_PropagateDownLocked(tubeId)) {
         return false;
     }
-    if (!_PropagateUpLocked(tubeId)) {
+    if (!_PropagateUpLocked(tubeId, beforeEdit)) {
         return false;
     }
     return true;
@@ -5575,10 +8735,81 @@ TonicModel::SculptStrokeShaped(int tubeId, const char *brush,
         _diagnostic = "TonicModel::SculptStrokeShaped: unknown tube";
         return false;
     }
+    // Grab is a drag: the press-time footprint stays put while each move
+    // applies its incremental view-plane delta to the CURRENT descriptor.
+    // Reprojecting the moving CVs would make a long grab lose its own CV as
+    // soon as it crossed the brush radius. Other brushes deliberately keep
+    // their current-shape footprint.
+    bool const frozenGrab = (b == "grab" && _gestureDepth > 0);
+    auto gestureDesc = [&](int id, TonicTubeDesc *out) {
+        if (!out) {
+            return false;
+        }
+        if (id == 0) {
+            if (_gestureBase.cx.size() < 2 ||
+                _gestureBase.cy.size() != _gestureBase.cx.size() ||
+                _gestureBase.cz.size() != _gestureBase.cx.size()) {
+                return false;
+            }
+            out->centerX = _gestureBase.cx;
+            out->centerY = _gestureBase.cy;
+            out->centerZ = _gestureBase.cz;
+            out->sections = _gestureBase.sections;
+            out->ringVerts = _gestureBase.shape.ringVerts;
+            out->tubeId = 0;
+            out->regionId = _gestureBase.tube0Region;
+            out->level = 1;
+            out->parentTubeId = -1;
+            out->childIndex = -1;
+            out->rootFramePinned = _gestureBase.tube0RootFramePinned;
+            out->rootFrame = _gestureBase.tube0RootFrame;
+            out->frameReference = _gestureBase.tube0FrameReference;
+            return true;
+        }
+        auto const it = _gestureBase.tubes.find(id);
+        if (it == _gestureBase.tubes.end()) {
+            return false;
+        }
+        *out = it->second.actual;
+        return out->centerX.size() >= 2;
+    };
+    TonicTubeDesc footprint = desc;
+    if (frozenGrab && !gestureDesc(tubeId, &footprint)) {
+        _diagnostic = "TonicModel::SculptStrokeShaped: gesture has no "
+                      "press-time tube";
+        return false;
+    }
+    if (footprint.centerX.size() != desc.centerX.size()) {
+        _diagnostic = "TonicModel::SculptStrokeShaped: tube layout changed "
+                      "during grab";
+        return false;
+    }
     std::vector<int> ids;
     std::vector<float> deltas;
     std::string err;
-    if (!_TonicShapeStroke(b, desc.centerX, desc.centerY, desc.centerZ,
+    auto handlePositions = [](TonicTubeDesc const &source,
+                              bool mirror,
+                              std::vector<float> *hx,
+                              std::vector<float> *hy,
+                              std::vector<float> *hz) {
+        hx->resize(source.centerX.size());
+        hy->resize(source.centerX.size());
+        hz->resize(source.centerX.size());
+        for (size_t i = 0; i < source.centerX.size(); ++i) {
+            float x = source.centerX[i], y = source.centerY[i],
+                  z = source.centerZ[i];
+            std::string ignored;
+            TonicCenterHandlePointCpu(source, int(i), &x, &y, &z, &ignored);
+            (*hx)[i] = mirror ? -x : x;
+            (*hy)[i] = y;
+            (*hz)[i] = z;
+        }
+    };
+    std::vector<float> footprintX, footprintY, footprintZ;
+    handlePositions(footprint, false, &footprintX, &footprintY, &footprintZ);
+    if (!_TonicShapeStroke(b, footprint.centerX, footprint.centerY,
+                           footprint.centerZ, &footprintX, &footprintY,
+                           &footprintZ,
                            viewProj, w, h, x, y, radiusPx, deltaWorld, amount,
                            tCenter, tRadius, &ids, &deltas, &err)) {
         _diagnostic = err;
@@ -5593,10 +8824,10 @@ TonicModel::SculptStrokeShaped(int tubeId, const char *brush,
     bool haveMirror = false;
     std::vector<int> mirrorIds;
     std::vector<float> mirrorDeltas;
-    if (mirrorX && !desc.centerX.empty()) {
-        float const mx = -desc.centerX.front();
-        float const my = desc.centerY.front();
-        float const mz = desc.centerZ.front();
+    if (mirrorX && !footprint.centerX.empty()) {
+        float const mx = -footprint.centerX.front();
+        float const my = footprint.centerY.front();
+        float const mz = footprint.centerZ.front();
         double best = -1.0;
         auto const consider = [&](int id, TonicTubeDesc const &cand) {
             if (cand.centerX.empty()) {
@@ -5611,18 +8842,28 @@ TonicModel::SculptStrokeShaped(int tubeId, const char *brush,
                 mirrorTube = id;
             }
         };
-        if (_host.centerX.size() >= 2) {
-            TonicTubeDesc hostDesc;
-            if (_TubeDescLocked(0, &hostDesc)) {
-                consider(0, hostDesc);
+        if (frozenGrab) {
+            TonicTubeDesc base;
+            if (gestureDesc(0, &base)) {
+                consider(0, base);
+            }
+            for (auto const &kv : _gestureBase.tubes) {
+                consider(kv.first, kv.second.actual);
+            }
+        } else {
+            if (_host.centerX.size() >= 2) {
+                TonicTubeDesc hostDesc;
+                if (_TubeDescLocked(0, &hostDesc)) {
+                    consider(0, hostDesc);
+                }
+            }
+            for (auto const &kv : _tubes) {
+                consider(kv.first, kv.second.actual);
             }
         }
-        for (auto const &kv : _tubes) {
-            consider(kv.first, kv.second.actual);
-        }
         float const arc = TonicCenterArcLength(
-            desc.centerX.data(), desc.centerY.data(), desc.centerZ.data(),
-            int(desc.centerX.size()));
+            footprint.centerX.data(), footprint.centerY.data(),
+            footprint.centerZ.data(), int(footprint.centerX.size()));
         double const tolerance = std::max(0.05 * double(arc), 1e-4);
         haveMirror = (best >= 0.0 && best <= tolerance);
     }
@@ -5632,14 +8873,31 @@ TonicModel::SculptStrokeShaped(int tubeId, const char *brush,
             _diagnostic = "TonicModel::SculptStrokeShaped: unknown tube";
             return false;
         }
-        std::vector<float> rx(mdesc.centerX.size());
-        for (size_t i = 0; i < mdesc.centerX.size(); ++i) {
-            rx[i] = -mdesc.centerX[i];
+        TonicTubeDesc mirrorFootprint = mdesc;
+        if (frozenGrab && !gestureDesc(mirrorTube, &mirrorFootprint)) {
+            _diagnostic = "TonicModel::SculptStrokeShaped: gesture has no "
+                          "press-time mirror tube";
+            return false;
         }
-        if (!_TonicShapeStroke(b, rx, mdesc.centerY, mdesc.centerZ, viewProj,
-                               w, h, x, y, radiusPx, deltaWorld, amount,
-                               tCenter, tRadius, &mirrorIds, &mirrorDeltas,
-                               &err)) {
+        if (mirrorFootprint.centerX.size() != mdesc.centerX.size()) {
+            _diagnostic = "TonicModel::SculptStrokeShaped: mirror layout "
+                          "changed during grab";
+            return false;
+        }
+        std::vector<float> rx(mirrorFootprint.centerX.size());
+        for (size_t i = 0; i < mirrorFootprint.centerX.size(); ++i) {
+            rx[i] = -mirrorFootprint.centerX[i];
+        }
+        std::vector<float> mirroredHandleX, mirroredHandleY,
+            mirroredHandleZ;
+        handlePositions(mirrorFootprint, true, &mirroredHandleX,
+                        &mirroredHandleY, &mirroredHandleZ);
+        if (!_TonicShapeStroke(b, rx, mirrorFootprint.centerY,
+                               mirrorFootprint.centerZ, &mirroredHandleX,
+                               &mirroredHandleY, &mirroredHandleZ,
+                               viewProj, w, h, x, y,
+                               radiusPx, deltaWorld, amount, tCenter, tRadius,
+                               &mirrorIds, &mirrorDeltas, &err)) {
             _diagnostic = err;
             return false;
         }
@@ -5655,14 +8913,14 @@ TonicModel::SculptStrokeShaped(int tubeId, const char *brush,
     HierarchyRollback const snap = _SnapshotHierarchyLocked();
     if (!ids.empty() &&
         !_SculptApplyLocked(tubeId, kRaw, ids.data(), deltas.data(),
-                            int(ids.size()), keepLength, false)) {
+                            int(ids.size()), keepLength, false, &snap)) {
         _RestoreHierarchyLocked(snap);
         return false;
     }
     if (!mirrorIds.empty() && mirrorTube != tubeId &&
         !_SculptApplyLocked(mirrorTube, kRaw, mirrorIds.data(),
                             mirrorDeltas.data(), int(mirrorIds.size()),
-                            keepLength, false)) {
+                            keepLength, false, &snap)) {
         _RestoreHierarchyLocked(snap);
         return false;
     }
@@ -5698,9 +8956,7 @@ TonicModel::SubdivideTubeAlongEdge(int tubeId, float const *worldA,
         }
         std::vector<TonicFrame> frames;
         std::string derr;
-        if (!TonicCenterFramesCpu(desc.centerX.data(), desc.centerY.data(),
-                                  desc.centerZ.data(),
-                                  int(desc.centerX.size()), &frames, &derr) ||
+        if (!TonicTubeFramesCpu(desc, &frames, &derr) ||
             frames.empty()) {
             _diagnostic = derr.empty() ? "TonicModel::SubdivideTubeAlongEdge:"
                                          " no root frame"
@@ -6105,6 +9361,7 @@ TonicModel::ClearHierarchy()
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _tubes.clear();
+    _PruneActiveCutLocked();
     _intersectFlags.clear();
     _regionTube.clear();
     _tubeRegionKey.clear();
@@ -6135,15 +9392,34 @@ TonicModel::RestoreTubeRecord(int tubeId, TubeRecord const &record)
         return false;
     }
     HierarchyTube &entry = it->second;
-    // The derived shape stays the one this model just re-derived from the
-    // parent (hydrate subdivides before it restores), so `actual` and
-    // `deltas` are installed verbatim: a hydrated tube reports exactly the
-    // bytes the committer wrote, which is what the round-trip test asserts.
+    // Hydrate subdivides before restoring the saved child.  K14 can choose a
+    // different ring count than the persisted actual after a K7 rebase, so
+    // normalize the fresh reference to the saved actual layout before
+    // installing its residuals.  This is the same fixed-layout contract as
+    // K7/K6, and keeps the next parent edit from re-sampling the child.
     TonicTubeDesc actual = record.actual;
     actual.tubeId = entry.actual.tubeId;
     actual.parentTubeId = entry.actual.parentTubeId;
     actual.childIndex = entry.actual.childIndex;
     actual.level = entry.actual.level;
+    if (!record.imported && !_SameRingLayout(entry.derived, actual)) {
+        TonicTubeDesc matched;
+        std::string derr;
+        if (!TonicResampleDescRingsCpu(entry.derived, actual.ringVerts,
+                                       &matched, &derr)) {
+            _diagnostic = derr;
+            return false;
+        }
+        entry.derived = std::move(matched);
+    }
+    // Legacy layers predate explicit parent-boundary links. Their freshly
+    // re-derived, layout-matched reference is the only authoritative source
+    // for reconstructing those links; a current layer's empty binding set is
+    // still an authored statement and must remain empty.
+    if (!record.imported && !record.hasInheritedBoundaryBindings) {
+        actual.inheritedBoundaryBindings =
+            entry.derived.inheritedBoundaryBindings;
+    }
     entry.actual = std::move(actual);
     if (!record.deltas.centerDu.empty()) {
         entry.deltas = record.deltas;
@@ -6221,8 +9497,14 @@ TonicModel::IsTubeFillSuspended(int tubeId) const
     if (tubeId != 0 && _tubes.find(tubeId) == _tubes.end()) {
         return false;
     }
+    return _FillSuspendedLocked(tubeId);
+}
+
+bool
+TonicModel::_FillSuspendedLocked(int tubeId) const
+{
     for (auto const &kv : _tubes) {
-        if (kv.second.actual.parentTubeId == tubeId) {
+        if (kv.second.actual.parentTubeId == tubeId && !kv.second.imported) {
             return true;
         }
     }
@@ -6231,7 +9513,8 @@ TonicModel::IsTubeFillSuspended(int tubeId) const
 
 bool
 TonicModel::_FinishChildEditLocked(int tubeId, bool layoutChanged,
-                                   uint32_t dirtyBits)
+                                   uint32_t dirtyBits,
+                                   HierarchyRollback const *beforeEdit)
 {
     auto it = _tubes.find(tubeId);
     if (it == _tubes.end()) {
@@ -6250,11 +9533,7 @@ TonicModel::_FinishChildEditLocked(int tubeId, bool layoutChanged,
     if (derivedChild) {
         std::vector<TonicFrame> dframes;
         std::string derr;
-        if (!TonicCenterFramesCpu(entry.derived.centerX.data(),
-                                  entry.derived.centerY.data(),
-                                  entry.derived.centerZ.data(),
-                                  int(entry.derived.centerX.size()), &dframes,
-                                  &derr)) {
+        if (!TonicTubeFramesCpu(entry.derived, &dframes, &derr)) {
             _diagnostic = derr;
             return false;
         }
@@ -6274,7 +9553,7 @@ TonicModel::_FinishChildEditLocked(int tubeId, bool layoutChanged,
     if (!_PropagateDownLocked(tubeId)) {
         return false;
     }
-    return _PropagateUpLocked(tubeId);
+    return _PropagateUpLocked(tubeId, beforeEdit);
 }
 
 bool
@@ -6289,7 +9568,7 @@ TonicModel::_EditChildTube(int tubeId, bool layoutChanged, uint32_t dirtyBits,
     }
     HierarchyRollback const snap = _SnapshotHierarchyLocked();
     if (!edit(it->second.actual) ||
-        !_FinishChildEditLocked(tubeId, layoutChanged, dirtyBits)) {
+        !_FinishChildEditLocked(tubeId, layoutChanged, dirtyBits, &snap)) {
         _RestoreHierarchyLocked(snap);
         return false;
     }
@@ -6739,6 +10018,8 @@ TonicModel::SetLevelDisplay(int level, bool visible, bool xray)
         next.centersOnly = it->second.centersOnly;
         next.xrayOpacity = it->second.xrayOpacity;
         next.centers = it->second.centers;
+        next.centerCVDots = it->second.centerCVDots;
+        next.ringCVDots = it->second.ringCVDots;
         next.guides = it->second.guides;
         if (it->second.visible == next.visible &&
             it->second.xray == next.xray) {
@@ -6770,6 +10051,8 @@ TonicModel::SetLevelDrawMode(int level, bool visible, bool xray,
     if (it != _levelDisplay.end()) {
         next.xrayOpacity = it->second.xrayOpacity;
         next.centers = it->second.centers;
+        next.centerCVDots = it->second.centerCVDots;
+        next.ringCVDots = it->second.ringCVDots;
         next.guides = it->second.guides;
         if (it->second.visible == next.visible &&
             it->second.xray == next.xray &&
@@ -6805,6 +10088,8 @@ TonicModel::SetLevelDraw(int level, LevelDisplay const &draw)
             it->second.xray == next.xray &&
             it->second.xrayOpacity == next.xrayOpacity &&
             it->second.centers == next.centers &&
+            it->second.centerCVDots == next.centerCVDots &&
+            it->second.ringCVDots == next.ringCVDots &&
             it->second.guides == next.guides) {
             return true;
         }
@@ -6812,7 +10097,10 @@ TonicModel::SetLevelDraw(int level, LevelDisplay const &draw)
         LevelDisplay const dflt;
         if (next.visible == dflt.visible && next.xray == dflt.xray &&
             next.xrayOpacity == dflt.xrayOpacity &&
-            next.centers == dflt.centers && next.guides == dflt.guides &&
+            next.centers == dflt.centers &&
+            next.centerCVDots == dflt.centerCVDots &&
+            next.ringCVDots == dflt.ringCVDots &&
+            next.guides == dflt.guides &&
             !next.centersOnly) {
             return true;  // already the default
         }
@@ -6911,6 +10199,83 @@ TonicModel::GetFocusLevel() const
 {
     std::lock_guard<std::mutex> lock(_mutex);
     return _focusLevel;
+}
+
+bool
+TonicModel::SetActiveCutEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_activeCutEnabled == enabled) {
+        return true;
+    }
+    _activeCutEnabled = enabled;
+    // This changes the staged tube membership, not authored topology. Mark
+    // display for policy consumers and topology so publishers rebuild their
+    // per-level membership hashes and scene-index notices.
+    _dirty |= TonicDirty_Display | TonicDirty_Topology;
+    ++_version;
+    return true;
+}
+
+bool
+TonicModel::GetActiveCutEnabled() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _activeCutEnabled;
+}
+
+bool
+TonicModel::SetTubeExpanded(int tubeId, bool expanded)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    TonicTubeDesc desc;
+    if (!_TubeDescLocked(tubeId, &desc)) {
+        _diagnostic = "TonicModel::SetTubeExpanded: unknown tube";
+        return false;
+    }
+    bool hasChild = false;
+    for (auto const &entry : _tubes) {
+        if (entry.second.actual.parentTubeId == tubeId) {
+            hasChild = true;
+            break;
+        }
+    }
+    if (!hasChild) {
+        _diagnostic = "TonicModel::SetTubeExpanded: tube is a leaf";
+        return false;
+    }
+    bool changed = false;
+    if (expanded) {
+        changed = _expandedTubeIds.insert(tubeId).second;
+    } else {
+        for (auto it = _expandedTubeIds.begin(); it != _expandedTubeIds.end();) {
+            if (*it == tubeId || _IsDescendantOfLocked(*it, tubeId)) {
+                it = _expandedTubeIds.erase(it);
+                changed = true;
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (changed) {
+        _dirty |= TonicDirty_Display | TonicDirty_Topology;
+        ++_version;
+    }
+    return true;
+}
+
+bool
+TonicModel::GetTubeExpanded(int tubeId) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _expandedTubeIds.count(tubeId) != 0;
+}
+
+bool
+TonicModel::IsTubeVisibleInActiveCut(int tubeId) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _IsTubeVisibleInActiveCutLocked(tubeId);
 }
 
 bool
@@ -7056,6 +10421,9 @@ TonicDisplayModeFromNames(char const *mode, char const *subMode)
         return TonicDisplayMode_Graph;
     }
     if (m == "tube") {
+        if (s == "tube") {
+            return TonicDisplayMode_TubeObject;
+        }
         // Ring and Section both edit the cross-sections, and both want the
         // rings readable against an opaque surface.
         return (s == "ring" || s == "section") ? TonicDisplayMode_TubeRing
@@ -7084,20 +10452,46 @@ TonicPolicyLevelDisplay(int displayMode, int level, int focusLevel)
     out.xray = false;
     out.xrayOpacity = TonicModel::kDefaultXrayOpacity;
     out.centers = true;
-    // The guide preview belongs to Fill (where it is being authored) and
-    // Output (where it is the result). Everywhere else it is a wall of
-    // hair in front of the control geometry the mode exists to edit.
-    out.guides = displayMode == TonicDisplayMode_Fill ||
-                 displayMode == TonicDisplayMode_Output;
+    // The interactive guide preview belongs to Fill, where it is being
+    // authored. Output renders the committed amplified tiles themselves;
+    // its authoring tubes, cage and preview guides must not occlude that
+    // interior hair.
+    out.guides = displayMode == TonicDisplayMode_Fill;
     // "Nothing focused" must not mean "everything is a ghost": with no
     // focus every level reads as the focused one.
     bool const focused = focusLevel <= 0 || level == focusLevel;
     switch (displayMode) {
     case TonicDisplayMode_Graph:
-    case TonicDisplayMode_Output:
+        // Graph mode is the scalp-patch and boundary editing view. Hiding
+        // tube/guides leaves the distinct subface patches readable.
+        out.visible = false;
         out.centers = false;
+        out.guides = false;
+        return out;
+    case TonicDisplayMode_Output:
+        // Output is a render/result view.  `visible` gates the Tonic tube
+        // and guide helpers only; it does not hide the committed amplified
+        // tiles supplied by the stage.  Switching back to another policy
+        // restores that mode's normal per-level base visibility.
+        out.visible = false;
+        out.centers = false;
+        out.guides = false;
+        return out;
+    case TonicDisplayMode_TubeObject:
+        out.centers = false;
+        out.centerCVDots = false;
+        out.ringCVDots = false;
+        out.guides = false;
+        // Object selection keeps its focused child legible through an
+        // enclosing ancestor, like Tube/Ring does for section controls.
+        if (!focused) {
+            out.xray = true;
+            out.xrayOpacity = TonicModel::kDefaultXrayOpacity;
+        }
         return out;
     case TonicDisplayMode_TubeRing:
+        out.centerCVDots = false;
+        out.ringCVDots = true;
         if (!focused) {
             out.xray = true;
             out.xrayOpacity = TonicModel::kDefaultXrayOpacity;
@@ -7108,6 +10502,8 @@ TonicPolicyLevelDisplay(int displayMode, int level, int focusLevel)
         out.xrayOpacity = TonicModel::kDefaultXrayOpacity;
         return out;
     case TonicDisplayMode_TubeCenter:
+        out.centerCVDots = true;
+        out.ringCVDots = false;
     case TonicDisplayMode_Hierarchy:
     case TonicDisplayMode_Sculpt:
         out.xray = true;
@@ -7125,6 +10521,7 @@ TonicPolicyRingDisplay(int displayMode)
     switch (displayMode) {
     case TonicDisplayMode_Graph:
     case TonicDisplayMode_Output:
+    case TonicDisplayMode_TubeObject:
         return TonicModel::Rings_Off;
     case TonicDisplayMode_TubeRing:
         return TonicModel::Rings_All;

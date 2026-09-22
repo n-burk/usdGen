@@ -170,9 +170,7 @@ bool TonicTubeIntersectCpu(TonicTubeDesc const *tubes, int tubeCount,
         }
         std::vector<TonicFrame> frames;
         std::string derr;
-        if (!TonicCenterFramesCpu(tube.centerX.data(), tube.centerY.data(),
-                                  tube.centerZ.data(),
-                                  int(tube.centerX.size()), &frames, &derr)) {
+        if (!TonicTubeFramesCpu(tube, &frames, &derr)) {
             return fail(err, derr.c_str());
         }
         if (!TonicRootChartCpu(tube, frames, &centers[size_t(i) * 3],

@@ -56,6 +56,12 @@ HdContainerDataSourceHandle Root(HdSceneIndexBase &sceneIndex,
         prim.dataSource->Get(TfToken("usdGenCurveRest")));
 }
 
+HdContainerDataSourceHandle Cage(HdContainerDataSourceHandle const &root)
+{
+    return root ? HdContainerDataSource::Cast(root->Get(TfToken("surfaceCage")))
+                : nullptr;
+}
+
 VtValue Leaf(HdContainerDataSourceHandle const &root, char const *name)
 {
     if (!root) return VtValue();
@@ -79,6 +85,14 @@ int main()
     curves.CreateCurveVertexCountsAttr(VtValue(VtIntArray{2}));
     curves.CreatePointsAttr(VtValue(restDefault));
     curves.GetPointsAttr().Set(VtValue(pointsAt24), UsdTimeCode(24.0));
+    UsdAttribute const ownerIds = curves.GetPrim().CreateAttribute(
+        TfToken("usdGen:surfaceCage:ownerIds"),
+        SdfValueTypeNames->IntArray, false);
+    UsdAttribute const normalizedT = curves.GetPrim().CreateAttribute(
+        TfToken("usdGen:surfaceCage:normalizedT"),
+        SdfValueTypeNames->FloatArray, false);
+    ownerIds.Set(VtIntArray{7, 8});
+    normalizedT.Set(VtFloatArray{0.0f, 0.37f, 1.0f});
     curves.GetPrim().AddAppliedSchema(TfToken("UsdGenCurveAPI"));
 
     UsdImagingCreateSceneIndicesInfo info;
@@ -98,6 +112,15 @@ int main()
     VtValue const firstProvenance = Leaf(firstRoot, "hasAuthoredRest");
     if (!firstProvenance.IsHolding<bool>() || firstProvenance.UncheckedGet<bool>())
         return Fail("missing rest provenance was not false");
+    HdContainerDataSourceHandle const firstCage = Cage(firstRoot);
+    if (!firstCage ||
+        !Leaf(firstCage, "ownerIds").IsHolding<VtIntArray>() ||
+        Leaf(firstCage, "ownerIds").UncheckedGet<VtIntArray>() !=
+            VtIntArray{7, 8} ||
+        !Leaf(firstCage, "normalizedT").IsHolding<VtFloatArray>() ||
+        Leaf(firstCage, "normalizedT").UncheckedGet<VtFloatArray>() !=
+            VtFloatArray{0.0f, 0.37f, 1.0f})
+        return Fail("surface cage fields were not exposed through CurveAPI");
 
     // A Default points edit must invalidate the root and update the already
     // acquired dynamic source; the time-sample at 24 is intentionally ignored.
@@ -144,6 +167,14 @@ int main()
     if (!emptyRest.IsHolding<VtVec3fArray>() || !emptyRest.UncheckedGet<VtVec3fArray>().empty() ||
         !emptyProvenance.IsHolding<bool>() || !emptyProvenance.UncheckedGet<bool>())
         return Fail("explicit empty rest was replaced by fallback points");
+
+    notice.Reset();
+    ownerIds.Set(VtIntArray{9, 10});
+    indices.stageSceneIndex->ApplyPendingUpdates();
+    if (!notice.seen) return Fail("surface cage edit did not invalidate its root");
+    if (Leaf(Cage(firstRoot), "ownerIds").UncheckedGet<VtIntArray>() !=
+        VtIntArray{9, 10})
+        return Fail("surface cage source retained stale owner ids");
 
     indices.finalSceneIndex->RemoveObserver(observer);
     std::printf("testUsdGenCurveRestAdapter: PASS\n");

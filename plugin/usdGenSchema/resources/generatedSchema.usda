@@ -190,7 +190,7 @@ class "UsdGenOperator"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     uniform int usdGen:seed = 0 (
         customData = {
@@ -212,7 +212,7 @@ class "UsdGenGenerator"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     uniform int usdGen:seed = 0 (
         customData = {
@@ -234,7 +234,7 @@ class "UsdGenStyler"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -265,7 +265,7 @@ class "UsdGenDeformer"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -315,7 +315,7 @@ class UsdGenScatter "UsdGenScatter"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     bool usdGen:flip = 0 (
         customData = {
@@ -362,7 +362,7 @@ class UsdGenGrow "UsdGenGrow"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:length = 1 (
         customData = {
@@ -445,7 +445,7 @@ class UsdGenGuideInterpolate "UsdGenGuideInterpolate"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     rel usdGen:guides (
         customData = {
@@ -536,6 +536,34 @@ class UsdGenGuideInterpolate "UsdGenGuideInterpolate"
     )
 }
 
+class UsdGenReferenceSource "UsdGenReferenceSource"
+{
+    bool usdGen:enabled = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Mute for this operator."
+        }
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+    )
+    rel usdGen:reference (
+        customData = {
+            string userDocBrief = "The in-stage BasisCurves prim whose baked geometry this source pulls into the operation stack (contract C3)."
+        }
+        doc = "The in-stage BasisCurves prim whose baked geometry this source pulls into the operation stack (contract C3). Exactly one target is required. Expression evaluation: groom (once per operator)."
+    )
+    uniform int usdGen:seed = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Randomisation seed for this operator."
+        }
+        doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
+    )
+}
+
 class UsdGenCurveSource "UsdGenCurveSource"
 {
     rel usdGen:curves (
@@ -544,6 +572,40 @@ class UsdGenCurveSource "UsdGenCurveSource"
         }
         doc = "The authored BasisCurves prim this source reads (contract C3). Exactly one target is required; it is the only way curve data enters the engine. Expression evaluation: groom (once per operator)."
     )
+    float usdGen:densityMultiplier = 1 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Positive multiplier applied to each surface-cage owner density."
+        }
+        doc = "Positive multiplier applied to each surface-cage owner's authored density when generating transient dense output. Expression evaluation: groom (once per operator)."
+    )
+    uniform uint64 usdGen:expectMapGeneration = 0 (
+        customData = {
+            string userDocBrief = "Required captured texture generation of usdGen:regionMap."
+        }
+        doc = "Required captured texture generation of usdGen:regionMap for surfaceCage interpolation. A mismatch is a cook error rather than a stale-map fallback."
+    )
+    uniform token usdGen:interpolationMode = "none" (
+        allowedTokens = ["none", "surfaceCage"]
+        customData = {
+            string userDocBrief = "Source expansion mode."
+        }
+        doc = "Source expansion mode. none reads authored C3 curves normally; surfaceCage turns sparse C3 cage rails into transient dense output at cook time. The dense result is never authored back to the stage."
+    )
+    rel usdGen:regionMap (
+        customData = {
+            string userDocBrief = "Categorical UsdGenPtexMap used by surfaceCage interpolation."
+        }
+        doc = "The categorical UsdGenPtexMap used by surfaceCage interpolation. Channel values are ownerId + 1; zero rejects output roots."
+    )
+    uniform int usdGen:regionMapChannel = 0 (
+        customData = {
+            string userDocBrief = "Categorical channel sampled from usdGen:regionMap."
+        }
+        doc = "The categorical channel to sample from usdGen:regionMap for surfaceCage interpolation."
+    )
     bool usdGen:enabled = 1 (
         customData = {
             dictionary usdGen = {
@@ -551,7 +613,7 @@ class UsdGenCurveSource "UsdGenCurveSource"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     uniform string usdGen:expectEpoch = "" (
         customData = {
@@ -740,7 +802,7 @@ class UsdGenClump "UsdGenClump"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -789,7 +851,7 @@ class UsdGenNoise "UsdGenNoise"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -908,7 +970,7 @@ class UsdGenLength "UsdGenLength"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     uniform token usdGen:length:method = "scale" (
         allowedTokens = ["scale", "cutExtend"]
@@ -987,7 +1049,7 @@ class UsdGenWidth "UsdGenWidth"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1101,7 +1163,7 @@ class UsdGenDirection "UsdGenDirection"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:followSkinContour = 0 (
         customData = {
@@ -1184,7 +1246,7 @@ class UsdGenSmooth "UsdGenSmooth"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     int usdGen:iterations = 1 (
         customData = {
@@ -1283,7 +1345,7 @@ class UsdGenResample "UsdGenResample"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1323,7 +1385,7 @@ class UsdGenScale "UsdGenScale"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1413,7 +1475,7 @@ class UsdGenCurl "UsdGenCurl"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:frequency = 2 (
         customData = {
@@ -1555,7 +1617,7 @@ class UsdGenBend "UsdGenBend"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1586,7 +1648,7 @@ class UsdGenStraighten "UsdGenStraighten"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1677,7 +1739,7 @@ class UsdGenDisplace "UsdGenDisplace"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1733,7 +1795,7 @@ class UsdGenWave "UsdGenWave"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:frequencyN = 1 (
         customData = {
@@ -1782,7 +1844,7 @@ class UsdGenPart "UsdGenPart"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -1837,7 +1899,7 @@ class UsdGenExprOp "UsdGenExprOp"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     rel usdGen:expr:maps (
         customData = {
@@ -1894,7 +1956,7 @@ class UsdGenSculptLayer "UsdGenSculptLayer"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:mask = 1 (
         customData = {
@@ -2001,7 +2063,7 @@ class UsdGenDeform "UsdGenDeform"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     rel usdGen:guides (
         customData = {
@@ -2062,7 +2124,7 @@ class UsdGenCollide "UsdGenCollide"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     int usdGen:iterations = 1 (
         customData = {
@@ -2145,7 +2207,7 @@ class UsdGenWind "UsdGenWind"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:gustStrength = 0 (
         customData = {
@@ -2210,7 +2272,7 @@ class UsdGenFreeze "UsdGenFreeze"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     rel usdGen:frozen:curves (
         customData = {
@@ -2258,7 +2320,7 @@ class UsdGenInstance "UsdGenInstance"
             }
             string userDocBrief = "Mute for this operator."
         }
-        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
+        doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
     float usdGen:instance:length = 0.09 (
         customData = {
@@ -2606,6 +2668,12 @@ class UsdGenPtexMap "UsdGenPtexMap"
             string userDocBrief = "First Ptex channel read by this map."
         }
         doc = "First Ptex channel read by this map. Expression evaluation: groom (once per operator)."
+    )
+    uniform uint64 usdGen:map:textureGeneration = 0 (
+        customData = {
+            string userDocBrief = "Immutable authored Ptex content generation."
+        }
+        doc = "Immutable authored Ptex content generation. Runtime compares this value with a CurveSource expected map generation; ReloadMaps cache generations remain separate."
     )
     float usdGen:map:offset = 0 (
         customData = {
@@ -3220,6 +3288,19 @@ class "UsdGenCurveAPI"
             }
         }
     )
+    int[] usdGen:surfaceCage:ownerIds = []
+    float[] usdGen:surfaceCage:ownerDensities = []
+    int[] usdGen:surfaceCage:ownerSeeds = []
+    int[] usdGen:surfaceCage:ownerCvCounts = []
+    float[] usdGen:surfaceCage:ownerEdgeBias = []
+    float2[] usdGen:surfaceCage:ownerChartCentroids = []
+    float[] usdGen:surfaceCage:ownerChartMeanRadii = []
+    int[] usdGen:surfaceCage:ownerLengthProfileOffsets = []
+    float2[] usdGen:surfaceCage:ownerLengthProfile = []
+    int3[] usdGen:surfaceCage:triangles = []
+    int[] usdGen:surfaceCage:triangleOwnerIndices = []
+    float[] usdGen:surfaceCage:normalizedT = []
+    float2[] usdGen:surfaceCage:triangleRootCharts = []
 }
 
 class UsdGenTonicGroom "UsdGenTonicGroom"

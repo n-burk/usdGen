@@ -183,7 +183,8 @@ def warningsKey(state, session, status=None):
 
 def warnings(state, dll, status=None):
     """The dock's warnings list: (severity, text, selectAction) rows for
-    coverage gaps, root intersections, kink spikes, device fallback and a
+    coarse centroid coverage gaps, root intersections, kink spikes, device
+    fallback and a
     detached committer (plan/18 section 3.5 item 5). `dll` is the
     session-shaped object tonicPanels.py's get/set closures also take.
     """
@@ -201,7 +202,8 @@ def warnings(state, dll, status=None):
         if int(rc) == 0 and uncovered.value > 0:
             out.append(Warning(
                 "warning",
-                "%d face(s) uncovered by any region." % uncovered.value,
+                "%d face center(s) outside regions (coarse coverage check)."
+                % uncovered.value,
                 None))
 
         ids = (ctypes.c_int * MAX_INTERSECTED_TUBES)()

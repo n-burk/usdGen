@@ -23,7 +23,7 @@
 #   * Part B: subdivide an L1 tube (count 4): 4 L2 children, zero deltas;
 #     enter/exit move the editing focus both ways; a parent edit
 #     re-derives descendants length-preserving (1e-4) with child sculpt
-#     kept (K6); a child edit refreshes the parent by averaging (K7); the
+#     kept (K6); a child edit refreshes its enclosing parent geometry (K7); the
 #     lock switches gate each direction; merge children round-trips the
 #     parent shape bit-exactly when the children are untouched; merge
 #     selected folds siblings; group builds a transient parent and
@@ -107,6 +107,49 @@ def _arcLength(centers):
     for a, b in zip(centers, centers[1:]):
         total += math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
     return total
+
+
+def _tubeSections(dll, model, tubeId):
+    """The complete authored section descriptor for one tube.
+
+    Keep this reader in the ABI test instead of extending the public Python
+    helper solely for one assertion.  K7 now holds edited descendants with a
+    conservative parent support envelope, so the relevant authored change is
+    often its UV loops rather than the parent's center cage.
+    """
+    entry = dll.Tonic_GetTubeSection
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                      ctypes.POINTER(ctypes.c_float),
+                      ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+                      ctypes.POINTER(ctypes.c_int),
+                      ctypes.POINTER(ctypes.c_float),
+                      ctypes.POINTER(ctypes.c_float)]
+    entry.restype = ctypes.c_int
+    count = int(dll.Tonic_GetTubeSectionCount(model, int(tubeId)))
+    if count < 0:
+        raise RuntimeError("Tonic_GetTubeSectionCount: unknown tube %d"
+                           % int(tubeId))
+    sections = []
+    for ring in range(count):
+        t = ctypes.c_float(0.0)
+        scale = ctypes.c_float(0.0)
+        twist = ctypes.c_float(0.0)
+        uvCount = ctypes.c_int(0)
+        if entry(model, int(tubeId), ring, ctypes.byref(t), None, 0,
+                 ctypes.byref(uvCount), ctypes.byref(scale),
+                 ctypes.byref(twist)) != 0 or uvCount.value < 3:
+            raise RuntimeError("Tonic_GetTubeSection census failed for "
+                               "tube %d ring %d" % (int(tubeId), ring))
+        uv = (ctypes.c_float * (2 * uvCount.value))()
+        if entry(model, int(tubeId), ring, ctypes.byref(t), uv,
+                 len(uv), ctypes.byref(uvCount), ctypes.byref(scale),
+                 ctypes.byref(twist)) != 0:
+            raise RuntimeError("Tonic_GetTubeSection read failed for "
+                               "tube %d ring %d" % (int(tubeId), ring))
+        sections.append((float(t.value),
+                         tuple(float(uv[i]) for i in range(2 * uvCount.value)),
+                         float(scale.value), float(twist.value)))
+    return tuple(sections)
 
 
 def run(stage):
@@ -212,11 +255,20 @@ def run(stage):
     # Enter L2, edit a child (K7 refreshes the parent bottom-up).
     hier.focusLevel(state, 2)
     parentBefore = hier.tubeCenters(dll, model, tube0)
+    parentSectionsBefore = _tubeSections(dll, model, tube0)
+    siblingSectionsBefore = _tubeSections(dll, model, l2[1])
     hier.moveTubeCenterCV(dll, model, l2[0], 2, 0.2, 0.0, 0.0)
     check(hier.tubeDeltaNorm(dll, model, l2[0]) > 0.0,
           "the L2 edit lands (nonzero deltas)")
-    check(hier.tubeCenters(dll, model, tube0) != parentBefore,
-          "the child edit refreshes the parent (K7)")
+    parentAfter = hier.tubeCenters(dll, model, tube0)
+    parentSectionsAfter = _tubeSections(dll, model, tube0)
+    check(parentAfter != parentBefore or
+          parentSectionsAfter != parentSectionsBefore,
+          "the child edit refreshes parent holding geometry (K7)")
+    check(parentSectionsAfter != parentSectionsBefore,
+          "K7 grows the parent section support envelope for the child edit")
+    check(_tubeSections(dll, model, l2[1]) == siblingSectionsBefore,
+          "K7 keeps an unedited sibling's authored geometry exact")
 
     # L2 -> L3 on the edited child; walk L1 -> L3 and back, editing each.
     l3 = hier.subdivide(dll, model, l2[0], 2, "kmeans", seed=12)
@@ -306,7 +358,7 @@ _C_STEPS = (
     "enter level L2, edit, exit back to L1",
     "subdivide one L2 into L3, walk L1 -> L3 and back",
     "parent edit re-derives descendants (K6, 1e-4 length)",
-    "child edit refreshes the parent (K7 averaging)",
+    "child edit refreshes the enclosing parent geometry (K7)",
     "lock parents / lock children gate propagation",
     "merge children round-trips the parent bit-exactly",
     "merge selected folds siblings",

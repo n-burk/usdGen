@@ -106,17 +106,57 @@ def setFocusPath(state, names):
     """
     path = tuple(str(n) for n in names)
     state.focusNames = path
+    # This is the legacy name/level helper.  Do not leave an earlier
+    # tube-id breadcrumb target attached to a new numeric path.
+    state.focusParentId = -1
+    state.focusAncestorIds = ()
     state.activeLevel = max(len(path), LEVEL_MIN)
     return "Tonic Hierarchy: %s." % breadcrumb(state)
 
 
+def setActiveCutFocus(state, parentId, ancestorIds=(), names=(), level=None):
+    """Record the UI context for a model-owned per-branch frontier.
+
+    The active cut itself is deliberately *not* mirrored in Python: the
+    model is authoritative for which branches are expanded and visible.
+    These fields only give the toolbar/HUD a stable breadcrumb and preserve
+    the old numeric ``activeLevel`` for level-display styling.
+    """
+    state.activeCutEnabled = True
+    state.focusParentId = int(parentId) if parentId is not None else -1
+    state.focusAncestorIds = tuple(int(v) for v in ancestorIds)
+    state.focusNames = tuple(str(v) for v in names)
+    if level is not None:
+        state.activeLevel = validateLevel(level)
+    return "Tonic Hierarchy: %s." % breadcrumb(state)
+
+
+def clearActiveCutFocus(state, level=LEVEL_MIN):
+    """Forget the Python breadcrumb context without changing model state."""
+    state.focusParentId = -1
+    state.focusAncestorIds = ()
+    state.focusNames = ()
+    state.activeLevel = validateLevel(level)
+
+
 def breadcrumbSegments(state):
-    """Clickable breadcrumb entries: [(level, label)] root-first.
+    """Clickable breadcrumb entries: [(target, label)] root-first.
 
     Labels carry the focus-path tube names when known, else the bare level
-    ("L1 tube_A" vs "L2"). The UI binds one click target per entry.
+    ("L1 tube_A" vs "L2").  Legacy focus paths bind numeric levels.  An
+    active-cut path instead binds stable tube ids, so clicking an ancestor
+    never accidentally changes every unrelated branch at that level.
     """
     names = tuple(getattr(state, "focusNames", ()))
+    ancestors = tuple(getattr(state, "focusAncestorIds", ()))
+    if bool(getattr(state, "activeCutEnabled", False)) and ancestors:
+        segments = []
+        for level, tubeId in enumerate(ancestors, 1):
+            name = names[level - 1] if level - 1 < len(names) else ""
+            label = "L%d %s" % (level, name) if name else "L%d T%d" % (
+                level, int(tubeId))
+            segments.append(("tube:%d" % int(tubeId), label))
+        return segments
     depth = max(validateLevel(state.activeLevel), len(names), LEVEL_MIN)
     segments = []
     for level in range(1, depth + 1):
@@ -390,10 +430,18 @@ REQUIRED_C_API = (
     ("Tonic_GetTubeCenterCV",
      "int Tonic_GetTubeCenterCV(void *model, int tubeId, int cv, float *out3)",
      "hierarchy"),
+    ("Tonic_GetTubeCenterHandle",
+     "int Tonic_GetTubeCenterHandle(void *model, int tubeId, int cv, "
+     "float *out3)",
+     "displayed center-CV handle"),
     ("Tonic_MoveTubeCenterCV",
      "int Tonic_MoveTubeCenterCV(void *model, int tubeId, int cv, float dx, "
      "float dy, float dz)",
      "K6/K7"),
+    ("Tonic_TranslateTube",
+     "int Tonic_TranslateTube(void *model, int tubeId, float dx, float dy, "
+     "float dz)",
+     "atomic whole-tube Move"),
     ("Tonic_ReadTubeDeltas",
      "int Tonic_ReadTubeDeltas(void *model, int tubeId, float *out, "
      "int outCap, int *outCount)",
@@ -456,6 +504,73 @@ def missingEntries(dll):
         if not found:
             missing.append(name)
     return missing
+
+
+def supportsActiveCut(dll):
+    """Whether this model DLL exposes the opt-in per-branch frontier API.
+
+    Older external callers still use level-only hierarchy navigation.  Keep
+    that path functional when loaded against an older DLL instead of making
+    hierarchy activation an ABI requirement.
+    """
+    return (dll is not None and
+            all(getattr(dll, name, None) is not None for name in (
+                "Tonic_SetActiveCutEnabled", "Tonic_SetTubeExpanded",
+                "Tonic_GetTubeExpanded", "Tonic_IsTubeVisible")))
+
+
+def _optionalEntry(dll, name, argtypes):
+    entry = getattr(dll, name, None) if dll is not None else None
+    if entry is None:
+        return None
+    entry.argtypes = argtypes
+    entry.restype = ctypes.c_int
+    return entry
+
+
+def setActiveCutEnabled(dll, model, enabled):
+    """Enable/disable model-owned per-branch visibility; False if absent."""
+    entry = _optionalEntry(dll, "Tonic_SetActiveCutEnabled",
+                           [ctypes.c_void_p, ctypes.c_int])
+    if entry is None:
+        return False
+    _check(entry(model, 1 if enabled else 0), "Tonic_SetActiveCutEnabled")
+    return True
+
+
+def getActiveCutEnabled(dll, model):
+    entry = _optionalEntry(dll, "Tonic_GetActiveCutEnabled",
+                           [ctypes.c_void_p])
+    if entry is None:
+        return None
+    return bool(entry(model))
+
+
+def setTubeExpanded(dll, model, tubeId, expanded):
+    """Change one branch in the active cut; False if the ABI is absent."""
+    entry = _optionalEntry(dll, "Tonic_SetTubeExpanded",
+                           [ctypes.c_void_p, ctypes.c_int, ctypes.c_int])
+    if entry is None:
+        return False
+    _check(entry(model, int(tubeId), 1 if expanded else 0),
+           "Tonic_SetTubeExpanded")
+    return True
+
+
+def getTubeExpanded(dll, model, tubeId):
+    entry = _optionalEntry(dll, "Tonic_GetTubeExpanded",
+                           [ctypes.c_void_p, ctypes.c_int])
+    if entry is None:
+        return None
+    return bool(entry(model, int(tubeId)))
+
+
+def isTubeVisible(dll, model, tubeId):
+    entry = _optionalEntry(dll, "Tonic_IsTubeVisible",
+                           [ctypes.c_void_p, ctypes.c_int])
+    if entry is None:
+        return None
+    return bool(entry(model, int(tubeId)))
 
 
 def _check(rc, name):
@@ -537,6 +652,39 @@ def tubeChildren(dll, model, tubeId):
     return [out[i] for i in range(got.value)]
 
 
+def tubeParent(dll, model, tubeId):
+    """The owning parent tube id, or None for a root/old DLL."""
+    entry = getattr(dll, "Tonic_GetTubeParent", None) if dll is not None \
+        else None
+    if entry is None:
+        return None
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                      ctypes.POINTER(ctypes.c_int),
+                      ctypes.POINTER(ctypes.c_int)]
+    entry.restype = ctypes.c_int
+    parent = ctypes.c_int(-1)
+    childIndex = ctypes.c_int(-1)
+    _check(entry(model, int(tubeId), ctypes.byref(parent),
+                 ctypes.byref(childIndex)), "Tonic_GetTubeParent")
+    return int(parent.value) if int(childIndex.value) >= 0 else None
+
+
+def tubeAncestorPath(dll, model, tubeId):
+    """Root-first owner ids, terminating safely if a corrupt cycle exists."""
+    path = []
+    current = int(tubeId)
+    seen = set()
+    while current >= 0 and current not in seen:
+        seen.add(current)
+        path.append(current)
+        parent = tubeParent(dll, model, current)
+        if parent is None:
+            break
+        current = int(parent)
+    path.reverse()
+    return tuple(path)
+
+
 def tubeCenterCount(dll, model, tubeId):
     """The center-CV count of `tubeId`."""
     entry = requireEntry(dll, "Tonic_GetTubeCenterCount")
@@ -556,6 +704,24 @@ def tubeCenterCV(dll, model, tubeId, cv):
     return (float(out[0]), float(out[1]), float(out[2]))
 
 
+def tubeCenterHandle(dll, model, tubeId, cv):
+    """Displayed center-CV handle; raw authored data stays in tubeCenterCV."""
+    entry = requireEntry(dll, "Tonic_GetTubeCenterHandle")
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                      ctypes.POINTER(ctypes.c_float)]
+    entry.restype = ctypes.c_int
+    out = (ctypes.c_float * 3)()
+    _check(entry(model, int(tubeId), int(cv), out),
+           "Tonic_GetTubeCenterHandle")
+    return (float(out[0]), float(out[1]), float(out[2]))
+
+
+def tubeCenterHandles(dll, model, tubeId):
+    """All displayed center-CV handles, root first."""
+    return [tubeCenterHandle(dll, model, tubeId, cv)
+            for cv in range(tubeCenterCount(dll, model, tubeId))]
+
+
 def tubeCenters(dll, model, tubeId):
     """All center CVs of `tubeId` as [(x, y, z)]."""
     return [tubeCenterCV(dll, model, tubeId, cv)
@@ -571,6 +737,16 @@ def moveTubeCenterCV(dll, model, tubeId, cv, dx, dy, dz):
     _check(entry(model, int(tubeId), int(cv), float(dx), float(dy),
                  float(dz)),
            "Tonic_MoveTubeCenterCV")
+
+
+def translateTube(dll, model, tubeId, dx, dy, dz):
+    """Translate every center CV in a tube through one K6/K7 update."""
+    entry = requireEntry(dll, "Tonic_TranslateTube")
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float,
+                      ctypes.c_float, ctypes.c_float]
+    entry.restype = ctypes.c_int
+    _check(entry(model, int(tubeId), float(dx), float(dy), float(dz)),
+           "Tonic_TranslateTube")
 
 
 def tubeDeltaNorm(dll, model, tubeId):

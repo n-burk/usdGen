@@ -8,9 +8,9 @@
 // Proven here:
 //   * the index attaches to TonicRegistry on construction and detaches on
 //     destruction; it owns no model;
-//   * with no active model it publishes the static test tube, and the first
-//     Tonic_Activate removes it (PrimsRemoved) for good — deactivating does
-//     not bring it back;
+//   * with no active model and USDGENTONIC_TEST_TUBE=1 it publishes the
+//     static test tube, and the first Tonic_Activate removes it
+//     (PrimsRemoved) for good — deactivating does not bring it back;
 //   * an activated model publishes /__usdGenTonic/tubes/L1 plus its center
 //     curves, CV dots, rings and ring CVs, with uniform primvars sized to
 //     the real face/curve count (not the P3 single-element `constant`);
@@ -41,6 +41,7 @@
 
 #include "usdGenTonic/imaging/tonicSceneIndex.h"
 #include "usdGenTonic/tonicApi.h"
+#include "usdGenTonic/tonicApiStage.h"
 #include "usdGenTonic/tonicGizmo.h"
 #include "usdGenTonic/tonicModel.h"
 #include "usdGenTonic/tonicPublish.h"
@@ -63,6 +64,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -143,6 +145,18 @@ bool ArraySize(HdSceneIndexBase const &index, SdfPath const &path,
         *out = array;
     }
     return array.size() == expected;
+}
+
+template <class T>
+bool ArrayNonEmpty(HdSceneIndexBase const &index, SdfPath const &path,
+                   char const *name)
+{
+    HdSampledDataSourceHandle ds = Primvar(index, path, name);
+    if (!ds) {
+        return false;
+    }
+    VtValue const v = ds->GetValue(0.0f);
+    return v.IsHolding<T>() && !v.UncheckedGet<T>().empty();
 }
 
 class RecordingObserver : public HdSceneIndexObserver {
@@ -259,12 +273,19 @@ HdDataSourceLocator const kVisibility(TfToken("visibility"),
 int
 main(int argc, char **argv)
 {
-    // USDGENTONIC_TEST_TUBE=0 (what record_usd.ps1 sets): the constructor
-    // publishes nothing — no tube under the root, GetPrim empty. The ctest
-    // entry testUsdGenTonicIndexNoTestTube drives this branch. The tool
-    // path still works: create a model, activate it, and the level prims
-    // appear.
+    // The default (and USDGENTONIC_TEST_TUBE=0, what record_usd.ps1 sets):
+    // the constructor publishes nothing — no tube under the root, GetPrim
+    // empty. The ctest entry testUsdGenTonicIndexNoTestTube drives this
+    // branch. The ambient variable is cleared first so this pins the
+    // default itself, not merely the explicit-off mode; the setting is
+    // first read below, so nothing has cached it yet. The tool path still
+    // works: create a model, activate it, and the level prims appear.
     if (argc > 1 && std::string(argv[1]) == "--no-test-tube") {
+#ifdef _WIN32
+        _putenv("USDGENTONIC_TEST_TUBE=");
+#else
+        unsetenv("USDGENTONIC_TEST_TUBE");
+#endif
         HdRetainedSceneIndexRefPtr input = HdRetainedSceneIndex::New();
         HdSceneIndexBaseRefPtr tonic = UsdGenTonicSceneIndex::New(input);
         SdfPath const root = UsdGenTonicSceneIndex::RootPath();
@@ -303,6 +324,9 @@ main(int argc, char **argv)
     SdfPath const centerCVsL2 = UsdGenTonicSceneIndex::CenterCVsPath(2);
     SdfPath const ringsL2 = UsdGenTonicSceneIndex::RingsPath(2);
     SdfPath const ringCVsL2 = UsdGenTonicSceneIndex::RingCVsPath(2);
+    SdfPath const tubesL3 = UsdGenTonicSceneIndex::TubesPath(3);
+    SdfPath const centersL3 = UsdGenTonicSceneIndex::CentersPath(3);
+    SdfPath const ringCVsL3 = UsdGenTonicSceneIndex::RingCVsPath(3);
 
     Check(registry.IndexCount() == 0, "registry starts with no index");
 
@@ -679,6 +703,10 @@ main(int argc, char **argv)
         Check(Tonic_SetLevelDisplay(ctx, 2, 1, 0) == TONIC_OK &&
                   Tonic_Publish(ctx, 0) == 1,
               "selection: L2 visible again");
+        VtVec3fArray l1PaletteBefore;
+        Check(ArraySize(*tonic, tubesL1, "clumpColor", 32,
+                        &l1PaletteBefore),
+              "selection: capture the unselected L1 clump palette");
         rec->Clear();
         int const tube0 = 0;
         Check(Tonic_SelectSet(ctx, usdGenTonic::TonicPick_TubeVert, &tube0,
@@ -750,11 +778,31 @@ main(int argc, char **argv)
                       Tonic_Publish(ctx, 0) == 1,
                   "selection: select one center CV");
             VtVec3fArray colors;
-            Check(ArraySize(*tonic, centerCVsL1, "displayColor", 5,
+        Check(ArraySize(*tonic, centerCVsL1, "displayColor", 5,
                             &colors) &&
                       colors[2] == GfVec3f(1.0f, 1.0f, 1.0f) &&
                       colors[1] != GfVec3f(1.0f, 1.0f, 1.0f),
                   "the selected CV dot is white and its neighbour is not");
+        VtFloatArray ownerSelected;
+        VtVec3fArray ownerPalette;
+        Check(ArraySize(*tonic, tubesL1, "selected", 32, &ownerSelected) &&
+                      ownerSelected[0] == 1.0f &&
+                      ownerSelected[31] == 1.0f &&
+                      ArraySize(*tonic, tubesL1, "clumpColor", 32,
+                                &ownerPalette) &&
+                      ownerPalette == l1PaletteBefore,
+                  "a selected center CV highlights its owner tube without "
+                  "replacing the clump palette");
+        Check(Tonic_SetHover(ctx, usdGenTonic::TonicPick_CenterCV, 0, 2,
+                             -1) == TONIC_OK &&
+                  Tonic_Publish(ctx, 0) == 1 &&
+                  ArraySize(*tonic, tubesL1, "selected", 32,
+                            &ownerSelected) &&
+                  ownerSelected[0] == 2.0f && ownerSelected[31] == 2.0f,
+              "hovering a center CV gives its owner tube the hover cue");
+        Check(Tonic_SetHover(ctx, 0, -1, -1, -1) == TONIC_OK &&
+                  Tonic_Publish(ctx, 0) == 1,
+              "selection: clear the center-CV hover");
         }
         // A level selection is every tube at that level and nothing else.
         rec->Clear();
@@ -804,17 +852,23 @@ main(int argc, char **argv)
         Check(rec->WasAdded(gizmo), "the gizmo prim arrives");
         Check(tonic->GetPrim(gizmo).primType == TfToken("basisCurves"),
               "the gizmo is basisCurves");
-        Check(ArraySize<VtVec3fArray>(*tonic, gizmo, "points", 6),
-              "a translate gizmo is three two-point axes");
+        Check(ArraySize<VtVec3fArray>(*tonic, gizmo, "points", 50),
+              "a translate gizmo has Maya axes, arrows and move squares");
         {
             VtIntArray handles;
             VtIntArray active;
-            Check(ArraySize(*tonic, gizmo, "handleId", 3, &handles) &&
-                      handles[0] == 0 && handles[2] == 2,
-                  "the gizmo carries one handle id per axis");
-            Check(ArraySize(*tonic, gizmo, "active", 3, &active) &&
-                      active[1] == 1 && active[0] == 0,
-                  "the active handle is flagged");
+            bool activeMatches = false;
+            if (ArraySize(*tonic, gizmo, "handleId", 19, &handles) &&
+                ArraySize(*tonic, gizmo, "active", 19, &active)) {
+                activeMatches = true;
+                for (size_t i = 0; i < handles.size(); ++i) {
+                    bool const want = handles[i] == 1;
+                    activeMatches = activeMatches &&
+                        (active[i] == (want ? 1 : 0));
+                }
+            }
+            Check(activeMatches,
+                  "every curve of the selected gizmo handle is flagged");
         }
         // Moving it dirties its own leaves and nothing else.
         rec->Clear();
@@ -919,31 +973,47 @@ main(int argc, char **argv)
 
     // -- the guide preview publishes per level -----------------------------
     {
-        SdfPath const guides = UsdGenTonicSceneIndex::GuidesPath(1);
+        SdfPath const guidesL1 = UsdGenTonicSceneIndex::GuidesPath(1);
+        SdfPath const guidesL2 = UsdGenTonicSceneIndex::GuidesPath(2);
         Check(!HasChild(*tonic, UsdGenTonicSceneIndex::GuidesScopePath(),
-                        guides),
-              "guides/L1 absent before the first refill");
+                        guidesL1) &&
+                  !HasChild(*tonic, UsdGenTonicSceneIndex::GuidesScopePath(),
+                            guidesL2),
+              "no guides anywhere before the first refill");
+        // Tube 0 is suspended (four children), so the global fill runs
+        // nowhere: each leaf fills from its own params and the four sets
+        // merge at the children's level.
         Check(Tonic_SetFillParams(ctx, 16.0f, 8, 7, 0.0f, nullptr, 0) ==
                   TONIC_OK,
               "fill params set");
+        bool leavesSet = (kidCount == 4);
+        for (int k = 0; leavesSet && k < kidCount; ++k) {
+            leavesSet =
+                Tonic_SetTubeFillParams(ctx, kids[k], 16.0f, 8, 7, 0.0f,
+                                        nullptr, 0) == TONIC_OK;
+        }
+        Check(leavesSet, "each leaf takes its own fill params");
         Check(Tonic_RefillGuides(ctx, 1.0f) == TONIC_OK,
               "full-density refill runs");
         rec->Clear();
         Check(Tonic_Publish(ctx, 0) == 1, "publish the refill");
-        Check(rec->WasAdded(guides), "the refill adds guides/L1");
-        Check(tonic->GetPrim(guides).primType == TfToken("basisCurves"),
-              "guides/L1 primType is basisCurves");
-        Check(ArraySize<VtVec3fArray>(*tonic, guides, "points", 128),
-              "guides/L1 has 16 guides x 8 CVs");
-        Check(ArraySize<VtFloatArray>(*tonic, guides, "widths", 128),
-              "guides/L1 has 128 widths");
+        Check(rec->WasAdded(guidesL2), "the refill adds guides/L2");
+        Check(!HasChild(*tonic, UsdGenTonicSceneIndex::GuidesScopePath(),
+                        guidesL1),
+              "and the suspended parent stages no guides/L1");
+        Check(tonic->GetPrim(guidesL2).primType == TfToken("basisCurves"),
+              "guides/L2 primType is basisCurves");
+        Check(ArraySize<VtVec3fArray>(*tonic, guidesL2, "points", 512),
+              "guides/L2 has 4 leaves x 16 guides x 8 CVs");
+        Check(ArraySize<VtFloatArray>(*tonic, guidesL2, "widths", 512),
+              "guides/L2 has 512 widths");
         VtFloatArray hairT;
-        Check(ArraySize(*tonic, guides, "hairT", 128, &hairT) &&
+        Check(ArraySize(*tonic, guidesL2, "hairT", 512, &hairT) &&
                   std::abs(hairT[0]) < 1e-6f &&
                   std::abs(hairT[7] - 1.0f) < 1e-6f,
-              "guides/L1 hairT ramps 0 -> 1 per guide");
-        Check(ArraySize<VtVec3fArray>(*tonic, guides, "displayColor", 16),
-              "guides/L1 displayColor is uniform, one per curve");
+              "guides/L2 hairT ramps 0 -> 1 per guide");
+        Check(ArraySize<VtVec3fArray>(*tonic, guidesL2, "displayColor", 64),
+              "guides/L2 displayColor is uniform, one per curve");
         rec->Clear();
         Check(Tonic_RefillGuides(ctx, 1.0f) == TONIC_OK,
               "same-density refill runs");
@@ -951,9 +1021,9 @@ main(int argc, char **argv)
         HdDataSourceLocatorSet const expected{
             Pv("points"), Pv("widths"), Pv("hairT"), kExtentMin, kExtentMax,
         };
-        Check(rec->DirtiedFor(guides) == expected,
+        Check(rec->DirtiedFor(guidesL2) == expected,
               "a same-count refill dirties the guide leaves exactly: " +
-                  ToString(rec->DirtiedFor(guides)));
+                  ToString(rec->DirtiedFor(guidesL2)));
     }
 
     // -- the clump palette is one table ------------------------------------
@@ -1066,9 +1136,14 @@ main(int argc, char **argv)
                   usdGenTonic::TonicDisplayModeFromNames("tube", "center") ==
                       usdGenTonic::TonicDisplayMode_TubeCenter,
               "Ring and Section share Tube's ring row, Center does not");
+        Check(usdGenTonic::TonicDisplayModeFromNames("tube", "tube") ==
+                      usdGenTonic::TonicDisplayMode_TubeObject &&
+                  usdGenTonic::TonicDisplayMode_TubeObject == 7,
+              "Whole Tube has an appended display row without renumbering");
 
-        // Graph and Output: opaque tubes, no centers, no rings.
-        for (char const *mode : {"graph", "output"}) {
+        // Graph hides authoring helpers behind the region surface.
+        {
+            char const *mode = "graph";
             TonicModel::LevelDisplay const focused = policy(mode, "", 2, 2);
             TonicModel::LevelDisplay const other = policy(mode, "", 1, 2);
             Check(!focused.xray && !other.xray,
@@ -1077,6 +1152,36 @@ main(int argc, char **argv)
                   std::string(mode) + " draws no centers or CV dots");
             Check(rings(mode, "") == TonicModel::Rings_Off,
                   std::string(mode) + " draws no rings");
+        }
+
+        // Output shows committed amplified tiles from the stage, not the
+        // authoring tube/cage/preview geometry that would occlude them.
+        // `visible` affects only Tonic's helper families; it does not hide
+        // the external amplified tile prims.
+        {
+            char const *mode = "output";
+            TonicModel::LevelDisplay const focused = policy(mode, "", 2, 2);
+            TonicModel::LevelDisplay const other = policy(mode, "", 1, 2);
+            Check(!focused.visible && !other.visible &&
+                      !focused.xray && !other.xray,
+                  "Output hides opaque authoring tube surfaces at every level");
+            Check(!focused.centers && !other.centers &&
+                      !focused.guides && !other.guides,
+                  "Output hides the cage and interactive guide preview");
+            Check(rings(mode, "") == TonicModel::Rings_Off,
+                  "Output draws no section rings");
+        }
+
+        {
+            TonicModel::LevelDisplay const focused =
+                policy("tube", "tube", 2, 2);
+            TonicModel::LevelDisplay const other =
+                policy("tube", "tube", 1, 2);
+            Check(!focused.xray && other.xray &&
+                      !focused.centers && !other.centers &&
+                      !focused.guides && !other.guides &&
+                      rings("tube", "tube") == TonicModel::Rings_Off,
+                  "Whole Tube is an opaque body-only selection display");
         }
 
         // Tube / Ring: the focused level stays opaque (its rings lie on the
@@ -1136,8 +1241,8 @@ main(int argc, char **argv)
                       b.xrayOpacity == TonicModel::kDefaultXrayOpacity,
                   "with no focused level every level reads as the focused one");
         }
-        Check(policy("graph", "", 1, 1).visible,
-              "the policy never hides a level: visibility is the panel's");
+        Check(!policy("graph", "", 1, 1).visible,
+              "Graph hides tube levels behind the region surface");
     }
 
     // -- input passthrough --------------------------------------------------
@@ -1166,7 +1271,9 @@ main(int argc, char **argv)
     // back. Before V6 the flag was written by the panel and read nowhere.
     rec->Clear();
     {
-        SdfPath const guidesL1 = UsdGenTonicSceneIndex::GuidesPath(1);
+        // The leaves' guides stage at L2 (their own level); the suspended
+        // parent stages none.
+        SdfPath const guidesLive = UsdGenTonicSceneIndex::GuidesPath(2);
         // A tile exactly where the groom scene index publishes them.
         SdfPath const tile("/Groom/Hair/__usdGenRender/tile0");
         input->AddPrims({{tile, TfToken("basisCurves"),
@@ -1182,8 +1289,8 @@ main(int argc, char **argv)
             return !vis || vis->GetValue(0.0f).UncheckedGet<bool>();
         };
         auto guidesVisible = [&]() {
-            HdSampledDataSourceHandle vis =
-                SampledAt(tonic->GetPrim(guidesL1).dataSource, kVisibility);
+            HdSampledDataSourceHandle vis = SampledAt(
+                tonic->GetPrim(guidesLive).dataSource, kVisibility);
             return !vis || vis->GetValue(0.0f).UncheckedGet<bool>();
         };
 
@@ -1284,8 +1391,13 @@ main(int argc, char **argv)
                 int const ix = std::min(std::max(int(std::floor(x)), 0), 3);
                 int const iz = std::min(std::max(int(std::floor(z)), 0), 3);
                 faces.push_back(ix * 4 + iz);
-                uvs.push_back(z - float(iz));
+                // Quad face coordinates follow the topology winding:
+                // u advances from p0 to p1 (X here), v from p0 to p3 (Z).
+                // Swapping them makes a multi-face rectangle self-cross at
+                // every coarse-face seam, which is invisible to a per-face
+                // map but invalid for an exact clipped display contour.
                 uvs.push_back(x - float(ix));
+                uvs.push_back(z - float(iz));
             }
         }
         faces.push_back(1);
@@ -1310,11 +1422,22 @@ main(int argc, char **argv)
         VtVec3fArray faceColor;
         VtIntArray faceRegion;
         VtVec3fArray clump;
-        Check(ArraySize(*tonic, regions, "displayColor", 16, &faceColor),
-              "V8: graph/regions paints one colour per scalp face");
-        Check(ArraySize(*tonic, regions, "usdGen:tonicRegion", 16,
-                        &faceRegion),
-              "V8: and carries the region primvar per face");
+        {
+            HdSampledDataSourceHandle colors =
+                Primvar(*tonic, regions, "displayColor");
+            HdSampledDataSourceHandle ids =
+                Primvar(*tonic, regions, "usdGen:tonicRegion");
+            VtValue const cv = colors ? colors->GetValue(0.0f) : VtValue();
+            VtValue const iv = ids ? ids->GetValue(0.0f) : VtValue();
+            if (cv.IsHolding<VtVec3fArray>()) {
+                faceColor = cv.UncheckedGet<VtVec3fArray>();
+            }
+            if (iv.IsHolding<VtIntArray>()) {
+                faceRegion = iv.UncheckedGet<VtIntArray>();
+            }
+        }
+        Check(faceColor.size() == faceRegion.size() && faceColor.size() > 16,
+              "V8: graph/regions carries sparse clipped patch faces");
         {
             HdSampledDataSourceHandle ds = Primvar(*tonic, tubesL1,
                                                    "clumpColor");
@@ -1365,11 +1488,16 @@ main(int argc, char **argv)
             // opaque meshes resolve by depth-buffer luck, and the luck ran
             // against the tint: the artist saw an untinted head.
             VtVec3fArray tintPoints;
-            Check(ArraySize(*tonic, regions, "points", 25, &tintPoints),
-                  "V8: graph/regions carries the scalp's 25 points");
+            HdSampledDataSourceHandle ds = Primvar(*tonic, regions, "points");
+            VtValue const value = ds ? ds->GetValue(0.0f) : VtValue();
+            if (value.IsHolding<VtVec3fArray>()) {
+                tintPoints = value.UncheckedGet<VtVec3fArray>();
+            }
+            Check(tintPoints.size() > 25,
+                  "V8: graph/regions retains the scalp and adds patch points");
             float lift = 0.0f;
-            bool everyPointLifted = !tintPoints.empty();
-            for (size_t i = 0; i < tintPoints.size(); ++i) {
+            bool everyPointLifted = tintPoints.size() >= 25;
+            for (size_t i = 0; i < 25 && i < tintPoints.size(); ++i) {
                 GfVec3f const source(points[i * 3 + 0], points[i * 3 + 1],
                                      points[i * 3 + 2]);
                 float const d = (tintPoints[i] - source).GetLength();
@@ -1475,9 +1603,211 @@ main(int argc, char **argv)
         Check(Tonic_SetDisplayScale(sc, -1.0f) == TONIC_ERROR,
               "V8: a negative scale is refused");
 
-        Check(Tonic_Deactivate(sc) == TONIC_OK && Tonic_Destroy(sc) ==
-                  TONIC_OK,
-              "V8: the scalp model destroys");
+        Check(Tonic_Deactivate(sc) == TONIC_OK,
+              "V8: the scalp model deactivates for the patch regression");
+        // Two completed loops fit in one authored quad.  The K3 primvar is
+        // necessarily one value for that quad; the display patch mesh must
+        // nevertheless expose both region colours.  Each side has an
+        // intermediate sample, which also guards ear clipping against the
+        // collinear K2 samples a real graph contour carries.
+        TonicModelContext *patchCtx = nullptr;
+        Check(Tonic_Create(&patchCtx) == TONIC_OK && patchCtx,
+              "V8: the same-face patch model creates");
+        if (patchCtx) {
+            float const patchPoints[] = {
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+            int const patchCounts[] = {4};
+            int const patchIndices[] = {0, 1, 2, 3};
+            Check(Tonic_BindScalp(patchCtx, patchPoints, 12, patchCounts, 1,
+                                  patchIndices, 4) == TONIC_OK &&
+                      Tonic_SetSnapRadius(patchCtx, 0.02f) == TONIC_OK,
+                  "V8: the one-quad patch scalp binds");
+            auto drawPatchLoop = [&](float v0, float v1, bool concave) {
+                // (u, v) follows the scalp face convention.  The first
+                // contour has a real inward notch; both retain intermediate
+                // edge samples, as K2 contours do in production.
+                std::vector<float> uvs = concave
+                    ? std::vector<float>{
+                          0.10f, v0, 0.50f, v0, 0.90f, v0,
+                          0.90f, v1, 0.60f, v1, 0.60f,
+                          0.5f * (v0 + v1), 0.45f,
+                          0.5f * (v0 + v1), 0.45f, v1,
+                          0.10f, v1, 0.10f, v0}
+                    : std::vector<float>{
+                          0.10f, v0, 0.50f, v0, 0.90f, v0,
+                          0.90f, 0.5f * (v0 + v1), 0.90f, v1,
+                          0.50f, v1, 0.10f, v1,
+                          0.10f, 0.5f * (v0 + v1), 0.10f, v0};
+                std::vector<int> faces(uvs.size() / 2, 0);
+                int chain[64] = {};
+                int chainCount = 0, closed = 0, weldStart = 0, weldEnd = 0;
+                return Tonic_GraphStroke(patchCtx, faces.data(), uvs.data(),
+                                         int(faces.size()),
+                                         0.01f, 0.001f, chain, 64,
+                                         &chainCount, &closed, &weldStart,
+                                         &weldEnd) == TONIC_OK && closed == 1;
+            };
+            Check(drawPatchLoop(0.10f, 0.42f, true) &&
+                      drawPatchLoop(0.58f, 0.90f, false) &&
+                      Tonic_Rasterise(patchCtx) == TONIC_OK &&
+                      Tonic_Activate(patchCtx) == TONIC_OK &&
+                      Tonic_Publish(patchCtx, ~0u) >= 1,
+                  "V8: two same-face graph regions publish");
+            VtVec3fArray patchColors;
+            VtIntArray patchIds;
+            {
+                HdSampledDataSourceHandle colors =
+                    Primvar(*tonic, regions, "displayColor");
+                HdSampledDataSourceHandle ids =
+                    Primvar(*tonic, regions, "usdGen:tonicRegion");
+                VtValue const cv =
+                    colors ? colors->GetValue(0.0f) : VtValue();
+                VtValue const iv = ids ? ids->GetValue(0.0f) : VtValue();
+                if (cv.IsHolding<VtVec3fArray>()) {
+                    patchColors = cv.UncheckedGet<VtVec3fArray>();
+                }
+                if (iv.IsHolding<VtIntArray>()) {
+                    patchIds = iv.UncheckedGet<VtIntArray>();
+                }
+            }
+            std::vector<GfVec3f> distinct;
+            for (size_t i = 0; i < patchIds.size() && i < patchColors.size();
+                 ++i) {
+                if (patchIds[i] < 0) {
+                    continue;
+                }
+                bool seen = false;
+                for (GfVec3f const &colour : distinct) {
+                    seen = seen ||
+                        (colour - patchColors[i]).GetLength() < 1.0e-5f;
+                }
+                if (!seen) {
+                    distinct.push_back(patchColors[i]);
+                }
+            }
+            Check(distinct.size() >= 2,
+                  "V8: one scalp quad exposes two distinct region colours");
+
+            // A hierarchy cut is per branch, not a global numeric level.
+            // Build two independent L1 roots, expose one root's L2 children,
+            // then expand exactly one of those children. The resulting
+            // frontier deliberately spans L1 (the unrelated root), L2 (the
+            // unexpanded sibling), and L3 (the expanded child's children).
+            int cutRootB = -1;
+            int cutKids[2] = {-1, -1};
+            int cutKidCount = 0;
+            int cutGrandkids[2] = {-1, -1};
+            int cutGrandkidCount = 0;
+            Check(Tonic_BuildTubeFromRegion(patchCtx, 0, 5, 0, 2.0f) ==
+                      TONIC_OK &&
+                      Tonic_BuildTubeFromRegion(patchCtx, 1, 5, 0, 2.0f) ==
+                      TONIC_OK,
+                  "cut: two graph regions build independent L1 roots");
+            int l1Roots[2] = {-1, -1};
+            int l1RootCount = 0;
+            bool const readRoots =
+                Tonic_ReadL1TubeIds(patchCtx, l1Roots, 2, &l1RootCount) ==
+                    TONIC_OK && l1RootCount == 2 && l1Roots[0] == 0;
+            if (readRoots) {
+                cutRootB = l1Roots[1];
+            }
+            Check(readRoots && cutRootB >= 0,
+                  "cut: both region roots have stable L1 identities");
+            Check(Tonic_SubdivideTube(patchCtx, 0, 2, "kmeans", 7, cutKids,
+                                      2, &cutKidCount) == TONIC_OK &&
+                      cutKidCount == 2 &&
+                      Tonic_SubdivideTube(patchCtx, cutKids[0], 2, "kmeans",
+                                          7, cutGrandkids, 2,
+                                          &cutGrandkidCount) == TONIC_OK &&
+                      cutGrandkidCount == 2,
+                  "cut: one L1 root has nested L2 and L3 descendants");
+            Check(Tonic_SetRingDisplay(patchCtx, 2) == TONIC_OK &&
+                      Tonic_SetDisplayScale(patchCtx, 0.004f) == TONIC_OK &&
+                      Tonic_SetActiveCutEnabled(patchCtx, 1) == TONIC_OK &&
+                      Tonic_Publish(patchCtx, ~0u) >= 1,
+                  "cut: enabling Levels publishes its collapsed L1 frontier");
+            int faces = 0, points = 0, tubes = 0;
+            Check(Tonic_GetPublishedLevelInfo(patchCtx, 1, &faces, &points,
+                                              &tubes) == TONIC_OK &&
+                      tubes == 2 &&
+                      Tonic_GetPublishedLevelInfo(patchCtx, 2, nullptr,
+                                                  nullptr, nullptr) ==
+                          TONIC_ERROR &&
+                      Tonic_IsTubeVisible(patchCtx, 0) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutRootB) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutKids[0]) == 0,
+                  "cut: collapsed roots hide every descendant from staging");
+            Check(Tonic_SetTubeExpanded(patchCtx, 0, 1) == TONIC_OK &&
+                      Tonic_Publish(patchCtx, ~0u) >= 1,
+                  "cut: expanding only root A republishes");
+            Check(Tonic_GetPublishedLevelInfo(patchCtx, 1, &faces, &points,
+                                              &tubes) == TONIC_OK &&
+                      tubes == 1 &&
+                      Tonic_GetPublishedLevelInfo(patchCtx, 2, &faces,
+                                                  &points, &tubes) == TONIC_OK &&
+                      tubes == 2 &&
+                      Tonic_GetPublishedLevelInfo(patchCtx, 3, nullptr,
+                                                  nullptr, nullptr) ==
+                          TONIC_ERROR &&
+                      Tonic_IsTubeVisible(patchCtx, 0) == 0 &&
+                      Tonic_IsTubeVisible(patchCtx, cutRootB) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutKids[0]) == 1,
+                  "cut: root A's L2 siblings coexist with unrelated root B");
+            Check(Tonic_SetTubeExpanded(patchCtx, cutKids[0], 1) == TONIC_OK &&
+                      Tonic_Publish(patchCtx, ~0u) >= 1,
+                  "cut: expanding one L2 child republishes mixed levels");
+            Check(Tonic_GetPublishedLevelInfo(patchCtx, 1, &faces, &points,
+                                              &tubes) == TONIC_OK &&
+                      tubes == 1 &&
+                      Tonic_GetPublishedLevelInfo(patchCtx, 2, &faces,
+                                                  &points, &tubes) == TONIC_OK &&
+                      tubes == 1 &&
+                      Tonic_GetPublishedLevelInfo(patchCtx, 3, &faces,
+                                                  &points, &tubes) == TONIC_OK &&
+                      tubes == cutGrandkidCount &&
+                      Tonic_IsTubeVisible(patchCtx, cutKids[0]) == 0 &&
+                      Tonic_IsTubeVisible(patchCtx, cutKids[1]) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutGrandkids[0]) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutGrandkids[1]) == 1,
+                  "cut: L1, L2 and L3 batches contain only their frontier members");
+            Check(ArraySize<VtVec3fArray>(*tonic, centersL1, "points", 5) &&
+                      ArraySize<VtVec3fArray>(*tonic, centersL2, "points", 5) &&
+                      ArraySize<VtVec3fArray>(*tonic, centersL3, "points", 10) &&
+                      ArrayNonEmpty<VtVec3fArray>(*tonic, ringCVsL1, "points") &&
+                      ArrayNonEmpty<VtVec3fArray>(*tonic, ringCVsL2, "points") &&
+                      ArrayNonEmpty<VtVec3fArray>(*tonic, ringCVsL3, "points"),
+                  "cut: center and ring controls match each visible branch batch");
+            using CutPx = usdGenTonic::TonicOverlayPixels;
+            Check(std::fabs(firstWidth(centersL1) -
+                            CutPx::kCenterCurveFocused * 0.004f) < 1e-6f &&
+                      std::fabs(firstWidth(centersL2) -
+                            CutPx::kCenterCurveFocused * 0.004f) < 1e-6f &&
+                      std::fabs(firstWidth(centersL3) -
+                            CutPx::kCenterCurveFocused * 0.004f) < 1e-6f,
+                  "cut: every mixed-depth frontier batch has active edit cues");
+            Check(Tonic_SetTubeExpanded(patchCtx, 0, 0) == TONIC_OK &&
+                      Tonic_Publish(patchCtx, ~0u) >= 1,
+                  "cut: collapsing root A republishes the two roots");
+            Check(Tonic_GetPublishedLevelInfo(patchCtx, 1, &faces, &points,
+                                              &tubes) == TONIC_OK &&
+                      tubes == 2 &&
+                      tonic->GetPrim(tubesL2).primType.IsEmpty() &&
+                      tonic->GetPrim(centersL2).primType.IsEmpty() &&
+                      tonic->GetPrim(ringCVsL2).primType.IsEmpty() &&
+                      tonic->GetPrim(tubesL3).primType.IsEmpty() &&
+                      tonic->GetPrim(centersL3).primType.IsEmpty() &&
+                      tonic->GetPrim(ringCVsL3).primType.IsEmpty() &&
+                      Tonic_IsTubeVisible(patchCtx, 0) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutRootB) == 1 &&
+                      Tonic_IsTubeVisible(patchCtx, cutKids[0]) == 0 &&
+                      Tonic_IsTubeVisible(patchCtx, cutGrandkids[0]) == 0,
+                  "cut: collapsing hides descendant meshes and component overlays");
+            Check(Tonic_Deactivate(patchCtx) == TONIC_OK &&
+                      Tonic_Destroy(patchCtx) == TONIC_OK,
+                  "V8: the same-face patch model destroys");
+        }
+        Check(Tonic_Destroy(sc) == TONIC_OK, "V8: the scalp model destroys");
         Check(Tonic_Activate(ctx) == TONIC_OK && Tonic_Publish(ctx, ~0u) >= 1,
               "V8: the first model comes back for the teardown checks");
     }
@@ -1506,6 +1836,8 @@ main(int argc, char **argv)
         SdfPath const dTubes2 = UsdGenTonicSceneIndex::TubesPath(2);
         SdfPath const dCenters2 = UsdGenTonicSceneIndex::CentersPath(2);
         SdfPath const dCVs2 = UsdGenTonicSceneIndex::CenterCVsPath(2);
+        SdfPath const dRingCVs2 = UsdGenTonicSceneIndex::RingCVsPath(2);
+        SdfPath const dGuides2 = UsdGenTonicSceneIndex::GuidesPath(2);
         auto xrayOf = [&](SdfPath const &path) -> float {
             VtFloatArray a;
             return ArraySize(*tonic, path, "xray", 1, &a) && !a.empty()
@@ -1522,15 +1854,13 @@ main(int argc, char **argv)
             return v.IsHolding<bool>() && v.UncheckedGet<bool>();
         };
 
-        // Graph: opaque tubes, no centers, no CV dots.
+        // Graph: region patches and their white boundary/CV controls must be
+        // readable without a tube wall in front of them.
         Check(Tonic_SetDisplayPolicy(dc, "graph", "", 0) == TONIC_OK &&
                   Tonic_Publish(dc, 0) >= 1,
               "V9: the Graph policy applies and publishes");
-        Check(xrayOf(dTubes1) == 0.0f && xrayOf(dTubes2) == 0.0f,
-              "V9: Graph publishes xray 0 on every level");
-        Check(MaterialBindingOf(*tonic, dTubes1) ==
-                  UsdGenTonicSceneIndex::TubeMaterialPath(),
-              "V9: and binds the opaque tube material");
+        Check(!visibleOf(dTubes1) && !visibleOf(dTubes2),
+              "V9: Graph hides every tube level");
         Check(!visibleOf(dCenters2) && !visibleOf(dCVs2),
               "V9: Graph hides the center curves and CV dots");
 
@@ -1571,7 +1901,20 @@ main(int argc, char **argv)
                   "V9: Tonic_GetLevelDraw reads the policy back");
         }
 
-        // Tube / Ring: focused opaque with every ring, others ghosted.
+        // The Tube component rows show exactly the point controls their
+        // selection domain accepts. Curves remain orientation guides; point
+        // glyphs never advertise an inactive component kind.
+        Check(Tonic_SetDisplayPolicy(dc, "tube", "tube", 2) == TONIC_OK &&
+                  Tonic_Publish(dc, 0) >= 1 &&
+                  !visibleOf(dCVs2) && !visibleOf(dRingCVs2),
+              "V9: Tube/Object hides all component dots");
+        Check(Tonic_SetDisplayPolicy(dc, "tube", "center", 2) == TONIC_OK &&
+                  Tonic_Publish(dc, 0) >= 1 &&
+                  visibleOf(dCVs2) && !visibleOf(dRingCVs2),
+              "V9: Tube/Center shows only center CV dots");
+
+        // Tube / Ring: focused opaque with every ring, others ghosted, and
+        // only section vertices are displayed as point controls.
         Check(Tonic_SetDisplayPolicy(dc, "tube", "ring", 2) == TONIC_OK &&
                   Tonic_Publish(dc, 0) >= 1,
               "V9: the Tube/Ring policy applies");
@@ -1582,10 +1925,43 @@ main(int argc, char **argv)
               "V9: and ghosts the level behind it at 25 %");
         Check(Tonic_GetRingDisplay(dc) == 2,
               "V9: Tube/Ring shows every ring");
+        Check(!visibleOf(dCVs2) && visibleOf(dRingCVs2),
+              "V9: Tube/Ring shows only section CV dots");
+        Check(Tonic_SetDisplayPolicy(dc, "tube", "section", 2) == TONIC_OK &&
+                  Tonic_Publish(dc, 0) >= 1 &&
+                  !visibleOf(dCVs2) && visibleOf(dRingCVs2),
+              "V9: Tube/Section keeps only section CV dots");
         Check(Tonic_SetDisplayPolicy(dc, "nonsense", "", 0) == TONIC_ERROR,
               "V9: an unknown mode is an error and changes nothing");
         Check(xrayOf(dTubes2) == 0.0f,
               "V9: the rejected call left the published state alone");
+
+        // Guide preview visibility is policy-owned.  Its path and topology
+        // stay stable while Fill switches to Tube/Center, so Hydra needs a
+        // visibility dirty on the existing curves or it keeps drawing the
+        // dense Fill preview over the Tube controls.
+        bool dLeavesSet = (dKidCount == 2);
+        for (int k = 0; dLeavesSet && k < dKidCount; ++k) {
+            dLeavesSet =
+                Tonic_SetTubeFillParams(dc, dKids[k], 8.0f, 6, 11, 0.0f,
+                                        nullptr, 0) == TONIC_OK;
+        }
+        Check(dLeavesSet && Tonic_RefillGuides(dc, 1.0f) == TONIC_OK &&
+                  Tonic_SetDisplayPolicy(dc, "fill", "", 2) == TONIC_OK &&
+                  Tonic_Publish(dc, 0) >= 1,
+              "V9: the Fill guide preview publishes");
+        Check(visibleOf(dGuides2),
+              "V9: Fill displays the live generated curves");
+        rec->Clear();
+        Check(Tonic_SetDisplayPolicy(dc, "tube", "center", 2) == TONIC_OK &&
+                  Tonic_Publish(dc, 0) >= 1,
+              "V9: Tube/Center publishes after Fill");
+        Check(!visibleOf(dGuides2),
+              "V9: Tube/Center hides the live generated curves");
+        Check(rec->DirtiedFor(dGuides2) == HdDataSourceLocatorSet{kVisibility},
+              "V9: changing only guide policy dirties guide visibility");
+        Check(!rec->WasAdded(dGuides2) && !rec->WasRemoved(dGuides2),
+              "V9: hiding generated curves does not change their topology");
 
         // -- the committed guides hide while the model is live -----------
         //

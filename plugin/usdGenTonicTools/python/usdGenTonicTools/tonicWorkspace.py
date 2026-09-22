@@ -23,6 +23,8 @@ from . import tonicHierarchy, tonicHud, tonicModes, tonicPanels
 
 TITLE = "Tonic"
 REFRESH_MS = 250
+SHELF_BUTTON_HEIGHT = 28
+STATUS_LINES = 3
 
 # Sub-mode shelf source per mode: the *_SUBMODES tuple, the setter that
 # records a click on `state`, and whether the shelf shows at all (plan/18
@@ -138,6 +140,8 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         self._statusAmber = None
         self._staleContent = False
         self._warningsAt = 0.0
+        self._geometryKey = None
+        self._instructionText = None
         self._buildUi()
         self._api.qMainWindow.addDockWidget(
             QtCore.Qt.RightDockWidgetArea, self)
@@ -199,26 +203,63 @@ class TonicWorkspace(QtWidgets.QDockWidget):
 
     def _buildUi(self):
         body = QtWidgets.QWidget(self)
+        body.setObjectName("tonicWorkspaceBody")
+        # Keep the standard dark Qt palette, with just enough checked-state
+        # contrast to show the active mode and sub-mode at a glance.
+        body.setStyleSheet(
+            "QToolButton:hover { background-color: #364b5c; }"
+            "QToolButton:checked { background-color: #456d8b;"
+            " color: #ffffff; }"
+            "QToolButton:checked:hover { background-color: #527f9f; }")
         layout = QtWidgets.QVBoxLayout(body)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        # 1. Mode shelf (plan/18 section 3.5 item 1): six checkable
-        # QToolButtons, hotkey 1-6 in the tooltip and the label.
-        modeRow = QtWidgets.QHBoxLayout()
+        # Geometry stays at the top while the artist changes modes.  Keeping
+        # the current mesh visible prevents a mode switch from looking like
+        # a lost binding, and makes the replacement action deliberate.
+        geometryBox = QtWidgets.QGroupBox("Geometry", body)
+        geometryBox.setObjectName("tonicGeometryBlock")
+        geometryRow = QtWidgets.QHBoxLayout(geometryBox)
+        geometryRow.setContentsMargins(6, 10, 6, 4)
+        self._geometryPathLabel = QtWidgets.QLabel("No geometry bound")
+        self._geometryPathLabel.setObjectName("tonicGeometryPath")
+        self._geometryPathLabel.setWordWrap(False)
+        self._geometryPathLabel.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        geometryRow.addWidget(self._geometryPathLabel, 1)
+        self._bindGeometryButton = QtWidgets.QPushButton("Bind geometry...")
+        self._bindGeometryButton.setObjectName("tonicBindGeometryButton")
+        self._bindGeometryButton.setToolTip(
+            "Choose a Mesh from the current stage. Rebinding an edited groom "
+            "requires explicit confirmation.")
+        self._bindGeometryButton.clicked.connect(self._onBindGeometry)
+        geometryRow.addWidget(self._bindGeometryButton)
+        layout.addWidget(geometryBox)
+
+        # 1. Mode shelf: six checkable buttons in a small grid so the dock
+        # remains usable at the normal 350-420 px width.
+        modeRow = QtWidgets.QGridLayout()
+        modeRow.setContentsMargins(0, 0, 0, 0)
+        modeRow.setHorizontalSpacing(3)
+        modeRow.setVerticalSpacing(3)
         self._modeGroup = QtWidgets.QButtonGroup(self)
         self._modeGroup.setExclusive(True)
         self._modeButtons = {}
-        for mode in tonicModes.MODES:
+        for index, mode in enumerate(tonicModes.MODES):
             btn = QtWidgets.QToolButton()
             btn.setText("%s %s" % (mode.hotkey, mode.label))
             btn.setCheckable(True)
+            btn.setFixedHeight(SHELF_BUTTON_HEIGHT)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                              QtWidgets.QSizePolicy.Fixed)
             btn.setToolTip("%s (%s)\n%s"
                           % (mode.label, mode.hotkey, mode.status))
             btn.clicked.connect(
                 lambda checked, m=mode.id: self._setActiveMode(m))
             self._modeGroup.addButton(btn)
             self._modeButtons[mode.id] = btn
-            modeRow.addWidget(btn)
+            modeRow.addWidget(btn, index // 3, index % 3)
         layout.addLayout(modeRow)
 
         # 2-4. Sub-mode shelf, generated parameter form and action
@@ -234,15 +275,50 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         # 40 Paint events per op, every one of them through two Python
         # application event filters.
         self._subModeStack = QtWidgets.QStackedWidget()
+        self._subModeStack.setObjectName("tonicSubModeStack")
         self._subModeStack.setContentsMargins(0, 0, 0, 0)
         self._subModeGroup = None
         self._subModeButtons = {}
         layout.addWidget(self._subModeStack)
+        self._tubeSelectionRow = QtWidgets.QWidget(body)
+        tubeSelectionLayout = QtWidgets.QHBoxLayout(self._tubeSelectionRow)
+        tubeSelectionLayout.setContentsMargins(0, 0, 0, 0)
+        tubeSelectionLayout.setSpacing(3)
+        self._tubeSelectionGroup = QtWidgets.QButtonGroup(
+            self._tubeSelectionRow)
+        self._tubeSelectionGroup.setExclusive(True)
+        self._tubeSelectionButtons = {}
+        for kind, label, hotkey in (
+                ("tube", "Tube", "F8"),
+                ("center", "Center", "F9"),
+                ("ring", "Ring", "F10"),
+                ("section", "Section", "F11")):
+            btn = QtWidgets.QToolButton(self._tubeSelectionRow)
+            btn.setText("%s %s" % (hotkey, label))
+            btn.setCheckable(True)
+            btn.setFixedHeight(SHELF_BUTTON_HEIGHT)
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                              QtWidgets.QSizePolicy.Fixed)
+            btn.setToolTip("Select %s (%s)" % (label, hotkey))
+            btn.clicked.connect(
+                lambda checked, k=kind: self._setTubeSelectionKind(k))
+            self._tubeSelectionGroup.addButton(btn)
+            self._tubeSelectionButtons[kind] = btn
+            tubeSelectionLayout.addWidget(btn)
+        self._tubeSelectionRow.setVisible(False)
+        layout.addWidget(self._tubeSelectionRow)
+        self._instructionLabel = QtWidgets.QLabel()
+        self._instructionLabel.setObjectName("tonicInstruction")
+        self._instructionLabel.setWordWrap(True)
+        self._instructionLabel.setTextFormat(QtCore.Qt.PlainText)
+        self._instructionLabel.setStyleSheet("font-size: 11px;")
+        layout.addWidget(self._instructionLabel)
 
         paramsBox = QtWidgets.QGroupBox("Parameters")
         paramsOuter = QtWidgets.QVBoxLayout(paramsBox)
-        paramsOuter.setContentsMargins(0, 0, 0, 0)
+        paramsOuter.setContentsMargins(6, 12, 6, 5)
         self._paramsStack = QtWidgets.QStackedWidget()
+        self._paramsStack.setObjectName("tonicParametersStack")
         paramsOuter.addWidget(self._paramsStack)
         layout.addWidget(paramsBox)
 
@@ -250,7 +326,7 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         # Save/Export/Import, which need Qt and so are wired here.
         actionsBox = QtWidgets.QGroupBox("Actions")
         actionsOuter = QtWidgets.QVBoxLayout(actionsBox)
-        actionsOuter.setContentsMargins(0, 0, 0, 0)
+        actionsOuter.setContentsMargins(6, 12, 6, 5)
         self._actionsStack = QtWidgets.QStackedWidget()
         actionsOuter.addWidget(self._actionsStack)
         layout.addWidget(actionsBox)
@@ -265,7 +341,7 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         layout.addWidget(warningsBox)
 
         # 6. Status strip.
-        statusRow = QtWidgets.QHBoxLayout()
+        statusBreadcrumbRow = QtWidgets.QHBoxLayout()
         self._statusLabel = QtWidgets.QLabel()
         self._statusLabel.setWordWrap(True)
         # Both strip labels are pinned: an Ignored horizontal policy and a
@@ -279,7 +355,7 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         self._statusLabel.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                         QtWidgets.QSizePolicy.Fixed)
         self._statusLabel.setFixedHeight(
-            self._statusLabel.fontMetrics().height() * 2)
+            self._statusLabel.fontMetrics().height())
         # The breadcrumb is a row of links (plan/18 section 3.5 item 6:
         # "breadcrumb (clickable)"): clicking L2 focuses level 2, which is
         # the same edit Ctrl+Down makes.
@@ -288,31 +364,44 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             QtCore.Qt.TextSelectableByMouse |
             QtCore.Qt.LinksAccessibleByMouse)
         self._statusLabel.linkActivated.connect(self._onBreadcrumbClicked)
-        statusRow.addWidget(self._statusLabel)
+        statusBreadcrumbRow.addWidget(self._statusLabel, 1)
+        layout.addLayout(statusBreadcrumbRow)
+        visibilityRow = QtWidgets.QHBoxLayout()
+        self._generatedCheck = QtWidgets.QCheckBox("Show generated curves")
+        self._generatedCheck.setObjectName("tonicShowGeneratedCurves")
+        self._generatedCheck.setToolTip(
+            "Show the generated guide curves when the active display mode "
+            "supports them.")
+        self._generatedCheck.toggled.connect(self._onGeneratedToggled)
+        visibilityRow.addWidget(self._generatedCheck)
+        self._amplifiedCheck = QtWidgets.QCheckBox("Show amplified hair")
+        self._amplifiedCheck.toggled.connect(self._onAmplifiedToggled)
+        visibilityRow.addWidget(self._amplifiedCheck)
+        visibilityRow.addStretch(1)
+        layout.addLayout(visibilityRow)
         # Versions, skew, swap time and the GPU/fallback note live in a
-        # PLAIN-text label beside the breadcrumb. They change on almost
+        # full-width PLAIN-text label below the breadcrumb. They change on almost
         # every publish, and setting rich text re-parses the HTML and
         # re-lays the label out each time -- measurable at four refreshes
-        # per artist op. The breadcrumb next door is the only part that
-        # needs the links, and it changes only when the level does.
+        # per artist op. The breadcrumb above is the only part that needs
+        # the links, and it changes only when the level does.
+        statusDetailRow = QtWidgets.QHBoxLayout()
         self._statusDetail = QtWidgets.QLabel()
         self._statusDetail.setWordWrap(True)
         self._statusDetail.setTextFormat(QtCore.Qt.PlainText)
         self._statusDetail.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
                                          QtWidgets.QSizePolicy.Fixed)
         self._statusDetail.setFixedHeight(
-            self._statusDetail.fontMetrics().height() * 2)
-        statusRow.addWidget(self._statusDetail, 1)
-        self._amplifiedCheck = QtWidgets.QCheckBox("Show amplified hair")
-        self._amplifiedCheck.toggled.connect(self._onAmplifiedToggled)
-        statusRow.addWidget(self._amplifiedCheck)
-        layout.addLayout(statusRow)
+            self._statusDetail.fontMetrics().height() * STATUS_LINES)
+        statusDetailRow.addWidget(self._statusDetail, 1)
+        layout.addLayout(statusDetailRow)
 
         layout.addStretch(1)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(body)
         self.setWidget(scroll)
+        self.setMinimumWidth(320)
 
     # ---- mode / sub-mode switching ----------------------------------------
 
@@ -321,15 +410,22 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         the sub-mode to the mode's default (plan/18 section 3.5 item 1) and
         rebuilds the panel below the shelf."""
         state = self._container.tonicState
-        tonicModes.SetActiveMode(state, modeId)
         viewport = getattr(self._container, "viewport", None)
         if viewport is not None and hasattr(viewport, "setMode"):
+            # ViewportController owns the live-loop transition and default
+            # sub-mode, including its display-policy publication.
             viewport.setMode(modeId)
-        submodes = _SUBMODES_BY_MODE.get(modeId)
-        if submodes is not None:
-            submodes[1](state, "")
-            if viewport is not None and hasattr(viewport, "setSubMode"):
-                viewport.setSubMode("")
+            if state.activeMode != modeId:
+                # Keep lightweight test/fallback viewport shims stateful too.
+                tonicModes.SetActiveMode(state, modeId)
+                submodes = _SUBMODES_BY_MODE.get(modeId)
+                if submodes is not None:
+                    submodes[1](state, "")
+        else:
+            tonicModes.SetActiveMode(state, modeId)
+            submodes = _SUBMODES_BY_MODE.get(modeId)
+            if submodes is not None:
+                submodes[1](state, "")
         self._adoptMode(modeId)
         self.refresh()
 
@@ -380,12 +476,28 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         page = self._ensurePage(modeId, state)
         self._pageLevel = int(getattr(state, "activeLevel", 0))
         self._subModeStack.setCurrentWidget(page["subMode"])
-        self._subModeStack.setVisible(page["hasSubModes"])
+        # Tube's F8--F11 row is the sole visible component shelf. Keep the
+        # legacy sub-mode page cached for loop state, but do not duplicate it
+        # beside the compact selection buttons.
+        showSubModes = page["hasSubModes"] and modeId != "tube"
+        self._subModeStack.setVisible(showSubModes)
+        if showSubModes:
+            self._subModeStack.setFixedHeight(
+                page["subMode"].layout().sizeHint().height())
+        self._tubeSelectionRow.setVisible(modeId == "tube")
+        self._syncTubeSelectionButtons()
         self._paramsStack.setCurrentWidget(page["params"])
         self._actionsStack.setCurrentWidget(page["actions"])
+        # Cached pages otherwise inherit the tallest page's stack height,
+        # leaving large blank gaps around short parameter/action forms.
+        self._paramsStack.setFixedHeight(
+            page["params"].layout().sizeHint().height())
+        self._actionsStack.setFixedHeight(
+            page["actions"].layout().sizeHint().height())
         self._subModeButtons = page["subButtons"]
         self._subModeGroup = page["subGroup"]
         self._paramWidgets = page["paramRows"]
+        self._syncInstruction()
 
     def _syncModeButtons(self):
         for modeId, btn in self._modeButtons.items():
@@ -393,11 +505,37 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             btn.setChecked(modeId == self._activeMode)
             btn.blockSignals(False)
 
+    def _setTubeSelectionKind(self, kind):
+        if kind not in self._tubeSelectionButtons:
+            return
+        state = self._container.tonicState
+        state.tubeSelectionKind = kind
+        viewport = getattr(self._container, "viewport", None)
+        setter = getattr(viewport, "setSelectionKind", None)
+        if callable(setter):
+            setter(kind)
+        self._syncTubeSelectionButtons()
+        self.refresh()
+
+    def _syncTubeSelectionButtons(self):
+        if not self._tubeSelectionButtons:
+            return
+        current = str(getattr(self._container.tonicState,
+                              "tubeSelectionKind", "tube"))
+        if current not in self._tubeSelectionButtons:
+            current = "tube"
+        for kind, btn in self._tubeSelectionButtons.items():
+            btn.blockSignals(True)
+            btn.setChecked(kind == current)
+            btn.blockSignals(False)
+
     def _buildSubModePage(self, modeId):
-        """The sub-mode shelf page for `modeId`, built once."""
+        """The sub-mode shelf page for modeId, built once."""
         page = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(page)
+        row = QtWidgets.QGridLayout(page)
         row.setContentsMargins(0, 0, 0, 0)
+        row.setHorizontalSpacing(3)
+        row.setVerticalSpacing(3)
         buttons = {}
         group = None
         entry = _SUBMODES_BY_MODE.get(modeId)
@@ -405,26 +543,47 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             submodes, setter = entry
             group = QtWidgets.QButtonGroup(page)
             group.setExclusive(True)
-            for sub in submodes:
+            for index, sub in enumerate(submodes):
                 btn = QtWidgets.QToolButton()
-                btn.setText("%s %s" % (sub.hotkey, sub.label))
+                label = sub.label
+                tip = sub.status
+                if modeId == "tube" and sub.id == "ring":
+                    label = "Sections"
+                    tip = "Sections: select rings, then drag the outer handle."
+                elif modeId == "tube" and sub.id == "section":
+                    label = "Section CVs"
+                    tip = ("Section CVs: select a CV, then drag the gizmo "
+                           "in the section plane.")
+                btn.setText("%s %s" % (sub.hotkey, label))
                 btn.setCheckable(True)
-                btn.setToolTip(sub.status)
+                btn.setFixedHeight(SHELF_BUTTON_HEIGHT)
+                btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                                  QtWidgets.QSizePolicy.Fixed)
+                btn.setToolTip(tip)
                 btn.clicked.connect(
                     lambda checked, s=sub.id, fn=setter:
                     self._onSubMode(fn, s))
                 group.addButton(btn)
                 buttons[sub.id] = btn
-                row.addWidget(btn)
+                row.addWidget(btn, index // 3, index % 3)
         return page, buttons, group
 
     def _onSubMode(self, setter, subId):
         state = self._container.tonicState
-        setter(state, subId)
         viewport = getattr(self._container, "viewport", None)
         if viewport is not None and hasattr(viewport, "setSubMode"):
+            # The loop must see the old state before clearing transient
+            # drafts during a sub-mode transition.
             viewport.setSubMode(subId)
+            attr = _SUBMODE_STATE_ATTR.get(state.activeMode)
+            if attr and getattr(state, attr, "") != subId:
+                # A minimal viewport shim may only record the call.
+                setter(state, subId)
+        else:
+            setter(state, subId)
         self._syncSubModeButtons()
+        self._syncInstruction()
+        self.refresh()
 
     def _syncSubModeButtons(self):
         attr = _SUBMODE_STATE_ATTR.get(self._activeMode)
@@ -434,6 +593,24 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             btn.blockSignals(True)
             btn.setChecked(subId == current)
             btn.blockSignals(False)
+
+    def _syncInstruction(self):
+        """Show the short interaction recipe for the active tool."""
+        state = self._container.tonicState
+        text = ""
+        if (self._activeMode == "graph" and
+                getattr(state, "graphSubMode", "") in
+                ("region", "createRegion")):
+            text = ("Create region: click CVs; first CV/Enter close, "
+                    "Backspace remove, Escape cancel. Shift-drag selects "
+                    "CVs; Ctrl+Shift adds.")
+        elif self._activeMode in ("tube", "fill"):
+            text = ("Drag empty space to select; Shift adds and Ctrl "
+                    "toggles selected items.")
+        if text != self._instructionText:
+            self._instructionText = text
+            self._instructionLabel.setText(text)
+            self._instructionLabel.setVisible(bool(text))
 
     # ---- parameters --------------------------------------------------
 
@@ -453,6 +630,22 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         for descriptor in descriptors:
             widget = self._makeParamWidget(descriptor)
             form.addRow(descriptor.label, widget)
+            if descriptor.id == "texelResolution":
+                helpText = tonicPanels.TEXEL_RESOLUTION_HELP
+                widget.setObjectName("tonicTexelResolution")
+                widget.setToolTip(helpText)
+                label = form.labelForField(widget)
+                if label is not None:
+                    label.setToolTip(helpText)
+            elif descriptor.id == "uniformScale":
+                helpText = (
+                    "Uniform scale for the selected section rings. "
+                    "Select one or more rings, then enter an absolute scale.")
+                widget.setObjectName("tonicUniformSectionScale")
+                widget.setToolTip(helpText)
+                label = form.labelForField(widget)
+                if label is not None:
+                    label.setToolTip(helpText)
             rows.append((descriptor, widget))
         return page, rows, _paramSignature(descriptors)
 
@@ -479,8 +672,18 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             return w
         if descriptor.kind == "enum":
             w = QtWidgets.QComboBox()
+            labels = {"select": "Select (Q)", "move": "Move (W)",
+                      "rotate": "Rotate (E)", "scale": "Scale (R)"}
             for choice in descriptor.choices:
-                w.addItem(str(choice), choice)
+                if descriptor.id == "transformTool":
+                    display = labels.get(str(choice), str(choice))
+                elif descriptor.id == "ringCvCount" and int(choice) == 0:
+                    display = "Match region CVs (Auto)"
+                else:
+                    display = str(choice)
+                w.addItem(display, choice)
+            if descriptor.id == "transformTool":
+                w.setToolTip("Q Select | W Move | E Rotate | R Scale")
             w.currentIndexChanged.connect(
                 lambda i, d=descriptor, box=w:
                 self._onParamChanged(d, box.itemData(i)))
@@ -498,7 +701,32 @@ class TonicWorkspace(QtWidgets.QDockWidget):
     def _onParamChanged(self, descriptor, value):
         session = getattr(self._container, "session", None)
         descriptor.set(self._container.tonicState, session, value)
+        if descriptor.id == "transformTool":
+            # The descriptor owns the state value; the active TubeLoop owns
+            # the gizmo placement and selection redraw.  Keep this bridge in
+            # the dock because descriptors intentionally receive only the
+            # Qt-free session, not the viewport container.
+            viewport = getattr(self._container, "viewport", None)
+            loop = (getattr(viewport, "loop", None)
+                    if viewport is not None else None)
+            applyTool = getattr(loop, "setTransformTool", None)
+            if callable(applyTool):
+                applyTool(value)
+        self._publishUiEdit(session)
         self.refresh()
+
+    @staticmethod
+    def _publishUiEdit(session):
+        """Flush one dock edit and request an immediate usdview repaint."""
+        if session is None:
+            return
+        publish = getattr(session, "publish", None)
+        if callable(publish):
+            publish()
+            return
+        refreshViewport = getattr(session, "refreshViewport", None)
+        if callable(refreshViewport):
+            refreshViewport()
 
     def _refreshParams(self, session):
         state = self._container.tonicState
@@ -516,7 +744,130 @@ class TonicWorkspace(QtWidgets.QDockWidget):
                 widget.setCurrentIndex(max(idx, 0))
             elif descriptor.kind == "ramp":
                 widget.setText(_ramp_to_text(value))
+            if descriptor.id == "uniformScale":
+                rings = tonicPanels._selectedSectionRings(session)
+                enabled = bool(rings)
+                widget.setEnabled(enabled)
+                widget.setToolTip(
+                    "Uniform scale for selected section rings. "
+                    "Select sections or section CVs first."
+                    if not enabled else
+                    "Uniform scale for the selected section rings.")
             widget.blockSignals(False)
+
+    # ---- geometry --------------------------------------------------------
+
+    def _stageMeshPaths(self):
+        """Return usable Mesh prim paths in the current stage."""
+        stage = getattr(self._api, "stage", None)
+        if stage is None:
+            return []
+        paths = []
+        try:
+            prims = stage.Traverse()
+        except AttributeError:
+            return []
+        for prim in prims:
+            try:
+                path = str(prim.GetPath())
+                validator = getattr(self._container, "isValidGeometry",
+                                    None)
+                valid = (bool(validator(self._api, path))
+                         if callable(validator)
+                         else (str(prim.GetTypeName()) == "Mesh"))
+                if valid:
+                    paths.append(path)
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                continue
+        return sorted(set(paths))
+
+    def _selectedMeshPath(self, paths):
+        selected = getattr(self._api, "selectedPaths", ())
+        for value in selected:
+            path = str(value)
+            if path in paths:
+                return path
+        return paths[0] if paths else ""
+
+    def _onBindGeometry(self):
+        paths = self._stageMeshPaths()
+        if not paths:
+            message = "Tonic: the current stage has no usable Mesh geometry."
+            self._container._status(self._api, message)
+            QtWidgets.QMessageBox.critical(self, "Bind geometry", message)
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setObjectName("tonicGeometryPicker")
+        dialog.setWindowTitle("Bind geometry")
+        dialog.setModal(True)
+        column = QtWidgets.QVBoxLayout(dialog)
+        column.addWidget(QtWidgets.QLabel(
+            "Choose the Mesh that anchors this groom:"))
+        combo = QtWidgets.QComboBox(dialog)
+        combo.setObjectName("tonicGeometryChoices")
+        combo.addItems(paths)
+        session = getattr(self._container, "session", None)
+        current = str(getattr(session, "scalpPath", "") or "")
+        default = current if current in paths else self._selectedMeshPath(paths)
+        if default:
+            combo.setCurrentIndex(paths.index(default))
+        column.addWidget(combo)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dialog)
+        buttons.setObjectName("tonicGeometryPickerButtons")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        column.addWidget(buttons)
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        path = str(combo.currentData() or combo.currentText())
+        if not path:
+            return
+        replace = False
+        if session is not None and getattr(session, "model", None) is not None:
+            current = str(getattr(session, "scalpPath", "") or "")
+            if current == path:
+                self._container._status(
+                    self._api, "Tonic: %s is already bound" % path)
+                self.refresh()
+                return
+            answer = QtWidgets.QMessageBox.warning(
+                self, "Replace bound geometry",
+                "Binding %s will replace the edited groom currently bound to "
+                "%s and clear its regions and maps. Continue?" %
+                (path, current or "the current mesh"),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Cancel)
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+            replace = True
+        bound = self._container.bindGeometry(
+            self._api, path, replace=replace)
+        if not bound:
+            session = getattr(self._container, "session", None)
+            detail = getattr(session, "lastError", lambda: "")()
+            message = ("Tonic: could not bind %s." % path)
+            if detail:
+                message += " " + str(detail)
+            QtWidgets.QMessageBox.critical(self, "Bind geometry", message)
+        self.refresh()
+
+    def _refreshGeometry(self):
+        session = getattr(self._container, "session", None)
+        bound = bool(getattr(session, "model", None))
+        path = (str(getattr(session, "scalpPath", "") or "")
+                if bound else "")
+        key = (path, bound)
+        if key == self._geometryKey:
+            return
+        self._geometryKey = key
+        if path:
+            self._geometryPathLabel.setText("Bound mesh: %s" % path)
+            self._geometryPathLabel.setToolTip(path)
+        else:
+            self._geometryPathLabel.setText("No geometry bound")
+            self._geometryPathLabel.setToolTip("")
 
     # ---- actions ----------------------------------------------------------
 
@@ -525,11 +876,14 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         page = QtWidgets.QWidget()
         column = QtWidgets.QVBoxLayout(page)
         column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(3)
+        column.setAlignment(QtCore.Qt.AlignTop)
         for action in tonicPanels.actions(modeId):
             label = action.label
             if action.hotkeyLabel:
                 label = "%s (%s)" % (label, action.hotkeyLabel)
             btn = QtWidgets.QPushButton(label)
+            btn.setFixedHeight(SHELF_BUTTON_HEIGHT)
             btn.clicked.connect(
                 lambda checked=False, a=action: self._onAction(a))
             column.addWidget(btn)
@@ -539,6 +893,7 @@ class TonicWorkspace(QtWidgets.QDockWidget):
                     ("Export center curves...", self._onExportCenterCurves),
                     ("Import curves...", self._onImportCurves)):
                 btn = QtWidgets.QPushButton(label)
+                btn.setFixedHeight(SHELF_BUTTON_HEIGHT)
                 btn.clicked.connect(
                     lambda checked=False, fn=handler: fn())
                 column.addWidget(btn)
@@ -546,6 +901,8 @@ class TonicWorkspace(QtWidgets.QDockWidget):
 
     def _onAction(self, action):
         action.handler(self._container)
+        # Panel actions publish their model edit themselves; successful
+        # session.publish calls refresh the viewport centrally.
         self.refresh()
 
     def _onSaveGroom(self):
@@ -595,6 +952,19 @@ class TonicWorkspace(QtWidgets.QDockWidget):
                 session.publish()
         self.refresh()
 
+    def _onGeneratedToggled(self, value):
+        state = self._container.tonicState
+        value = bool(value)
+        previous = bool(getattr(state, "showGeneratedCurves", True))
+        session = getattr(self._container, "session", None)
+        setter = getattr(session, "setGeneratedCurvesVisible", None)
+        if callable(setter):
+            if not setter(value):
+                value = previous
+        else:
+            state.showGeneratedCurves = value
+        self.refresh()
+
     # ---- warnings / status --------------------------------------------
 
     def _refreshWarnings(self, session, status=None):
@@ -606,7 +976,8 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             # The key moves on every model version, which is every
             # publish, so the key alone still means three bounded ABI
             # reads (4 096 smoothness scores among them) per artist op.
-            # The list is advisory -- uncovered faces, root crossings,
+            # The list is advisory -- coarse centroid coverage, root
+            # crossings,
             # kink spikes -- and nobody reads it inside a stroke, so it
             # is re-read at the dock's own 250 ms cadence at most. A
             # forced refresh (key None, mode change, end of gesture)
@@ -641,9 +1012,20 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             self.refresh()
 
     def _onBreadcrumbClicked(self, href):
-        """A breadcrumb link: focus that level."""
+        """Follow a per-tube breadcrumb, or retain a legacy level link."""
+        text = str(href)
         try:
-            level = int(href)
+            if text.startswith("tube:"):
+                tubeId = int(text.split(":", 1)[1])
+                viewport = getattr(self._container, "viewport", None)
+                loop = (getattr(viewport, "loop", None)
+                        if viewport is not None else None)
+                focusTube = getattr(loop, "focusTube", None)
+                if focusTube is not None:
+                    focusTube(tubeId)
+                    self.refresh()
+                return
+            level = int(text)
         except (TypeError, ValueError):
             return
         viewport = getattr(self._container, "viewport", None)
@@ -658,8 +1040,8 @@ class TonicWorkspace(QtWidgets.QDockWidget):
 
     def _breadcrumbHtml(self, state):
         return " &gt; ".join(
-            '<a href="%d">%s</a>' % (level, _escape(label))
-            for level, label in tonicHierarchy.breadcrumbSegments(state))
+            '<a href="%s">%s</a>' % (_escape(str(target)), _escape(label))
+            for target, label in tonicHierarchy.breadcrumbSegments(state))
 
     def _refreshStatusStrip(self, session, status=None):
         state = self._container.tonicState
@@ -696,6 +1078,13 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             self._amplifiedCheck.blockSignals(True)
             self._amplifiedCheck.setChecked(amplified)
             self._amplifiedCheck.blockSignals(False)
+        generatedGetter = getattr(session, "generatedCurvesVisible", None)
+        generated = (bool(generatedGetter()) if callable(generatedGetter)
+                     else bool(getattr(state, "showGeneratedCurves", True)))
+        if generated != self._generatedCheck.isChecked():
+            self._generatedCheck.blockSignals(True)
+            self._generatedCheck.setChecked(generated)
+            self._generatedCheck.blockSignals(False)
 
     # ---- refresh / timer --------------------------------------------------
 
@@ -731,11 +1120,24 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             # a level change so those labels follow it; the page cache
             # reuses everything whose signature did not move.
             self._adoptMode(self._activeMode)
+        if self._activeMode:
+            # Some parameter rows are conditional on committed model state.
+            # Output's density and width controls appear after its first
+            # commit, while the mode itself remains active; notice that
+            # signature change without rebuilding on every timer tick.
+            page = self._pages.get(self._activeMode)
+            signature = _paramSignature(
+                tonicPanels.descriptors(self._activeMode, state))
+            if page is None or page["paramSignature"] != signature:
+                self._adoptMode(self._activeMode)
         shelfKey = self._shelfSignature(state)
         if shelfKey != self._shelfKey:
             self._shelfKey = shelfKey
             self._syncModeButtons()
             self._syncSubModeButtons()
+        self._syncTubeSelectionButtons()
+        self._syncInstruction()
+        self._refreshGeometry()
         if getattr(session, "gestureActive", False):
             # Mid-stroke. The publish hook fires once per mouse sample, so
             # a six-sample drag would re-read the whole panel six times
@@ -764,10 +1166,20 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         # section 3.4): the shelf's number/letter keys only fire while the
         # dock is actually visible, not merely constructed.
         self._container.tonicState.workspaceOpen = bool(visible)
+        viewport = getattr(self._container, "viewport", None)
+        setActive = getattr(viewport, "setWorkspaceActive", None)
+        if setActive is not None:
+            setActive(bool(visible))
         if visible:
             self._timer.start()
         else:
             self._timer.stop()
+            # A click-created region is intentionally only a viewport
+            # draft.  Closing the dock must not leave that temporary
+            # contour armed when the workspace is shown again.
+            cancel = getattr(viewport, "cancelGesture", None)
+            if cancel is not None:
+                cancel()
 
     def _onTimerTick(self):
         if self.isVisible():

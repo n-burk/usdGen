@@ -171,7 +171,7 @@ what the artist made. The full synthesized set is §3.2.
 | Prim type prefix | `UsdGen…`; the schema `libraryPrefix` is `UsdGen` |
 | Property namespace | `usdGen:` on every schema-declared attribute and relationship |
 | Grouped parameters | second and third namespace levels: `usdGen:clump:size`, `usdGen:mask:ramp:knots`. `UsdGenPrimAdapterBase` (ADR §9 R3) splits each schema property name on `:` and hands `UsdImagingDataSourceMapped` an `HdDataSourceLocator` of that many elements — the locator is supplied by the client, the class does not split names (`pxr/usdImaging/usdImaging/dataSourceMapped.h:51-63`: "Has to be non-empty. If length is greater than one, nested container data sources will be created."). The class then builds the nested containers and stores the absolute locator, so invalidation is 1:1: `usdGen:mask:ramp:knots` → `usdGen/mask/ramp/knots`. MEASURED for the two-level case (`research/G-stage-free-parameter-and-time-transport.md` §2: containers `clumpRadius inputs map ramp surface`, nested `ramp/{knots,values}`, and `Invalidate({usdGen:ramp:knots, usdGen:surface})` → `usdGen/ramp/knots`, `usdGen/surface`); three-level nesting is the same code path and is asserted by gate SI-7. This is exactly the granularity the dirty router keys on (§6) |
-| Relationships (the complete set §2 declares; gate SI-7 checks it) | `usdGen:input`, `usdGen:surface`, `usdGen:terminal`, `usdGen:guides`, `usdGen:curves`, `usdGen:frozen:curves`, `usdGen:prototypes`, `usdGen:colliders`, `usdGen:mask:source`, `usdGen:mask:region`, `usdGen:clump:centers`, `usdGen:length:source`, `usdGen:displace:map`, `usdGen:look:colorMap`, `usdGen:expr:maps`, `usdGen:combine:inputs`, `usdGen:paint:surface` |
+| Relationships (the complete set §2 declares; gate SI-7 checks it) | `usdGen:input`, `usdGen:surface`, `usdGen:terminal`, `usdGen:guides`, `usdGen:curves`, `usdGen:reference`, `usdGen:frozen:curves`, `usdGen:prototypes`, `usdGen:colliders`, `usdGen:mask:source`, `usdGen:mask:region`, `usdGen:clump:centers`, `usdGen:length:source`, `usdGen:displace:map`, `usdGen:look:colorMap`, `usdGen:expr:maps`, `usdGen:combine:inputs`, `usdGen:paint:surface` |
 | Primvars usdGen owns | `primvars:usdGen:<name>` is used in exactly two places: the C3 curve contract (§5) and the paint-brush surface primvars a `UsdGenPaintMap` reads (§2.12). Operator *parameters* are never `primvars:` — that form is the M1 stop-condition fallback only (ADR §7) |
 | Booleans | positive sense, `enabled` not `disabled`; default `true` where the absence of an opinion means "on" |
 | Tokens | lowerCamelCase values, always with `allowedTokens` authored so the tool can build a combo box from `UsdPrimDefinition::GetAttributeDefinition(name)` (`pxr/usd/usd/primDefinition.h:277`; the older `GetSchemaAttributeSpec()` is deprecated, `:301-307`) |
@@ -573,6 +573,15 @@ from the mask block, capture). It **emits** `int[] primvars:guideIndex` and
 `groom_guide_weights` arity so a bake round-trips. The names carry **no `usdGen:` prefix**: they are
 published under contract C2 as `primvars/guideIndex` and `primvars/guideWeight` (ADR §2.3 and §9
 R24; `06-imaging.md` §4.1; `03-execution-engine.md` §1.2), and C1 and C2 must freeze one spelling.
+
+**`UsdGenReferenceSource`** (v1) — pulls one already-baked in-stage `BasisCurves`
+prim into the stack verbatim, as an alternative to Scatter/Instance. The set enters through the
+reference lane (ADR §4.1 I3); ids come from `primvars:usdGen:curveId` when authored and are
+synthesized from the source ordering otherwise. One row only.
+
+| Property | Type | Default | Doc | Dirty class |
+|---|---|---|---|---|
+| `usdGen:reference` | `rel` | — | Exactly one `BasisCurves` target under contract C3 (§5). | structural |
 
 **`UsdGenCurveSource`** (v1) — the v1 entry point for frozen, imported and simulated curves. All
 eight rows are declared here; `04-operators.md` §2.4 and `05-static-curves-and-deformation.md` §2.1
@@ -1812,7 +1821,7 @@ value on a `UsdGenOperator` and capture on a `UsdGenGuideSet`; `usdGen/direction
 | Locator prefix | On type | Engine action |
 |---|---|---|
 | `usdGen/input` | any `UsdGenOperator` | recompile the sub-graph from this node down; drop its capture caches |
-| `usdGen/terminal`, `usdGen/guides`, `usdGen/surface`, `usdGen/prototypes`, `usdGen/curves`, `usdGen/frozen/curves`, `usdGen/clump/centers`, `usdGen/length/source`, `usdGen/direction/source`, `usdGen/part/curves`, `usdGen/colliders`, `usdGen/mask/source`, `usdGen/displace/map`, `usdGen/look/colorMap`, `usdGen/expr/maps`, `usdGen/combine/inputs`, `usdGen/paint/surface` | the type that declares it (§2) | a relationship retarget changes a graph edge: recompile, re-link the map/surface dependency, re-`Capture()` |
+| `usdGen/terminal`, `usdGen/guides`, `usdGen/surface`, `usdGen/prototypes`, `usdGen/curves`, `usdGen/reference`, `usdGen/frozen/curves`, `usdGen/clump/centers`, `usdGen/length/source`, `usdGen/direction/source`, `usdGen/part/curves`, `usdGen/colliders`, `usdGen/mask/source`, `usdGen/displace/map`, `usdGen/look/colorMap`, `usdGen/expr/maps`, `usdGen/combine/inputs`, `usdGen/paint/surface` | the type that declares it (§2) | a relationship retarget changes a graph edge: recompile, re-link the map/surface dependency, re-`Capture()` |
 | `usdGen/schemaVersion`, `usdGen/sessionId` | `UsdGenGroom` | re-admit or refuse the whole groom (§8.4); re-key the session (ADR §4.5) |
 | `usdGen/space`, `usdGen/readPhase`, `usdGen/algorithmVersion` | any `UsdGenOperator` | three of the digest's own terms (ADR §4.2.1): recompile |
 | `usdGen/mode` | `UsdGenScatter`, `UsdGenDeform`, `UsdGenSmooth`, `UsdGenDirection`, `UsdGenDisplace`, `UsdGenExprOp` | recompile (kernel branch and capture set change) |

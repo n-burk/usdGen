@@ -134,7 +134,7 @@ class "UsdGenOperator" (
 )
 {
     bool usdGen:enabled = true (
-        doc = """Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."""
+        doc = """Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
     uniform int usdGen:seed = 0 (
@@ -314,6 +314,18 @@ class UsdGenGuideInterpolate "UsdGenGuideInterpolate" (
 }
 
 # UsdGenCurveSource — frozen, imported and simulated curves (02 §2.6, C3).
+class UsdGenReferenceSource "UsdGenReferenceSource" (
+    inherits = </UsdGenGenerator>
+    customData = {
+        string className = "ReferenceSource"
+    }
+)
+{
+    rel usdGen:reference (
+        doc = """The in-stage BasisCurves prim whose baked geometry this source pulls into the operation stack (contract C3). Exactly one target is required. Expression evaluation: groom (once per operator)."""
+    )
+}
+
 class UsdGenCurveSource "UsdGenCurveSource" (
     inherits = </UsdGenGenerator>
     customData = {
@@ -323,6 +335,23 @@ class UsdGenCurveSource "UsdGenCurveSource" (
 {
     rel usdGen:curves (
         doc = """The authored BasisCurves prim this source reads (contract C3). Exactly one target is required; it is the only way curve data enters the engine. Expression evaluation: groom (once per operator)."""
+    )
+    uniform token usdGen:interpolationMode = "none" (
+        doc = """Source expansion mode. "none" reads authored C3 curves normally; "surfaceCage" turns sparse C3 cage rails into transient dense output at cook time. The dense result is never authored back to the stage."""
+        allowedTokens = ["none", "surfaceCage"]
+    )
+    float usdGen:densityMultiplier = 1.0 (
+        doc = """Positive multiplier applied to each surface-cage owner's authored density when generating transient dense output. Expression evaluation: groom (once per operator)."""
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    rel usdGen:regionMap (
+        doc = """The categorical UsdGenPtexMap used by surfaceCage interpolation. Channel values are ownerId + 1; zero rejects output roots."""
+    )
+    uniform int usdGen:regionMapChannel = 0 (
+        doc = """The categorical channel to sample from usdGen:regionMap for surfaceCage interpolation."""
+    )
+    uniform uint64 usdGen:expectMapGeneration = 0 (
+        doc = """Required captured texture generation of usdGen:regionMap for surfaceCage interpolation. A mismatch is a cook error rather than a stale-map fallback."""
     )
     bool usdGen:useRest = true (
         doc = """True reads the source as rest-space geometry and requires an authored rest snapshot; false accepts already-posed points. Expression evaluation: groom (once per operator)."""
@@ -1200,6 +1229,9 @@ class UsdGenPtexMap "UsdGenPtexMap" (
         doc = """First Ptex channel read by this map. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
     )
+    uniform uint64 usdGen:map:textureGeneration = 0 (
+        doc = """Immutable authored Ptex content generation. Runtime compares this value with a CurveSource expected map generation; ReloadMaps cache generations remain separate."""
+    )
     int usdGen:map:channelCount = 1 (
         doc = """Number of Ptex channels read by this map. Expression evaluation: groom (once per operator)."""
         customData = { dictionary usdGen = { string evaluation = "groom" } }
@@ -1450,6 +1482,45 @@ class "UsdGenCurveAPI" (
     string primvars:usdGen:frozenEpoch = ""
     matrix4d[] primvars:usdGen:rootFrame = [] (
         customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
+    int[] usdGen:surfaceCage:ownerIds = [] (
+        doc = """Owner tube id per surface-cage owner. Parallel to all owner payload arrays."""
+    )
+    float[] usdGen:surfaceCage:ownerDensities = [] (
+        doc = """Base output density per surface-cage owner. Runtime applies CurveSource densityMultiplier."""
+    )
+    int[] usdGen:surfaceCage:ownerSeeds = [] (
+        doc = """Deterministic output seed per surface-cage owner."""
+    )
+    int[] usdGen:surfaceCage:ownerCvCounts = [] (
+        doc = """Common normalized rail CV count per surface-cage owner."""
+    )
+    float[] usdGen:surfaceCage:ownerEdgeBias = [] (
+        doc = """Per-owner runtime edge-bias control; raw cage rails do not include it."""
+    )
+    float2[] usdGen:surfaceCage:ownerChartCentroids = [] (
+        doc = """Per-owner chart centroids used only to normalize the runtime length profile."""
+    )
+    float[] usdGen:surfaceCage:ownerChartMeanRadii = [] (
+        doc = """Positive per-owner chart mean radii used only to normalize the runtime length profile."""
+    )
+    int[] usdGen:surfaceCage:ownerLengthProfileOffsets = [] (
+        doc = """Owner-indexed offsets into usdGen:surfaceCage:ownerLengthProfile; size ownerCount + 1."""
+    )
+    float2[] usdGen:surfaceCage:ownerLengthProfile = [] (
+        doc = """Packed owner length-profile pairs (normalized radius, length multiplier)."""
+    )
+    int3[] usdGen:surfaceCage:triangles = [] (
+        doc = """Sparse rail-index triples defining each surface-cage triangle."""
+    )
+    int[] usdGen:surfaceCage:triangleOwnerIndices = [] (
+        doc = """Owner-array index per surface-cage triangle."""
+    )
+    float[] usdGen:surfaceCage:normalizedT = [] (
+        doc = """Flattened per-point normalized longitudinal stations for the sparse rails. Values follow the BasisCurves point order and are strictly increasing within each rail; runtime interpolation never substitutes arc length or uniform CV indices."""
+    )
+    float2[] usdGen:surfaceCage:triangleRootCharts = [] (
+        doc = """Three root chart coordinates per surface-cage triangle, in triangle index order."""
     )
 }
 

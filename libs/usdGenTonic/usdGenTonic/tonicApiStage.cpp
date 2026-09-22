@@ -429,9 +429,8 @@ Tonic_GetTubeSectionFrame(TonicModelContext *ctx, int tubeId, int ring,
         // then the ring's own scale and twist.
         std::vector<usdGenTonic::TonicFrame> frames;
         std::string err;
-        if (!usdGenTonic::TonicCenterFramesCpu(
-                desc.centerX.data(), desc.centerY.data(), desc.centerZ.data(),
-                int(desc.centerX.size()), &frames, &err) || frames.empty()) {
+        if (!usdGenTonic::TonicTubeFramesCpu(desc, &frames, &err) ||
+            frames.empty()) {
             _SetError(err.empty() ? "Tonic_GetTubeSectionFrame: no frames"
                                   : err);
             return TONIC_ERROR;

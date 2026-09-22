@@ -64,6 +64,19 @@ def main():
     check(tube.SELECT_ALL == 0x1FF, "select all mask")
     check(len(tube.PICK_KIND_NAMES) == 9, "all nine kinds are named")
 
+    # -- region-root ring column requests ---------------------------------
+    check(tube.DEFAULT_RING_VERTS == 8 and
+          tube.DEFAULT_REGION_RING_VERTS == 0,
+          "test-tube default stays 8 while region roots default to Auto")
+    check(tube.regionRingVerts(0) == 0 and tube.regionRingVerts(-4) == 0,
+          "zero is the Region-build Auto sentinel")
+    check(tube.regionRingVerts(3) == 3 and tube.regionRingVerts(12) == 12
+          and tube.regionRingVerts(32) == 32,
+          "explicit Region ring requests preserve valid 3..32 values")
+    check(tube.regionRingVerts(1) == 3 and tube.regionRingVerts(2) == 3
+          and tube.regionRingVerts(99) == 32,
+          "invalid Region requests clamp before reaching the build ABI")
+
     # -- soft selection -----------------------------------------------------
     w = tube.softWeights(5, 2, 0.0)
     check(list(w) == [0.0, 0.0, 1.0, 0.0, 0.0],
@@ -170,7 +183,8 @@ def main():
 
     # -- sub-modes + state -----------------------------------------------------------------
     check([m.id for m in modes.TUBE_SUBMODES] ==
-          ["center", "ring", "section"], "tube sub-mode ids")
+          ["tube", "center", "ring", "section"],
+          "tube sub-mode ids include explicit Whole Tube")
     check([m.id for m in modes.FILL_SUBMODES] == ["params", "preview"],
           "fill sub-mode ids")
     state = stateModule.TonicToolState()

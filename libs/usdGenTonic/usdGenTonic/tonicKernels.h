@@ -183,16 +183,19 @@ bool TonicLaunchRootSampleMesh(
 
 // -- K9: guide fill -----------------------------------------------------------
 //
-// One thread per guide over guideCount x cvCount CVs. Section mean radii
-// are precomputed on the host (TonicSectionMeanRadius, same value both
-// sides) and uploaded. CPU twin: TonicGuideFillCpu (tolerance:
-// pow/atan2/trigonometry).
+// One thread per guide over guideCount x cvCount CVs. Each guide CV carries
+// a host-built triangle/material binding into the complete K5 section
+// payload, so terminal and interior rings retain authored U/V, scale/twist.
+// CPU twin: TonicGuideFillCpu (tolerance: Hermite/trigonometry).
 bool TonicLaunchGuideFill(
     float const *deviceCenterX, float const *deviceCenterY,
     float const *deviceCenterZ, int nCv, TonicFrame const *deviceFrames,
-    float const *deviceSectionT, float const *deviceSectionMeanR, int nSec,
-    TonicDeviceRoot const *deviceRoots, int guideCount, float edgeBias,
-    float const *deviceProfilePairs, int profilePairCount, float rootRadius,
+    float const *deviceSectionT, float const *deviceSectionU,
+    float const *deviceSectionV, float const *deviceSectionScale,
+    float const *deviceSectionTwist, int nSec, int ringVerts,
+    TonicDeviceRoot const *deviceRoots,
+    TonicGuideMaterialBinding const *deviceBindings, int guideCount,
+    float edgeBias, float const *deviceProfilePairs, int profilePairCount,
     float *deviceOut, float *deviceLengths, int cvCount, cudaStream_t stream,
     char *errBuf, size_t errBufLen);
 

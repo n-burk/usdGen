@@ -94,6 +94,10 @@ public:
     size_t Count(uint32_t kindMask) const;
     // Ascending by (kind, id, subId, subSubId). `kindMask` 0 = every kind.
     std::vector<TonicSelectionItem> Items(uint32_t kindMask) const;
+    // Component editing supersedes a whole-tube selection for the same
+    // owner. Used by area selection in Add/Toggle mode so a stale hierarchy
+    // selection cannot turn a newly selected CV drag into a whole-tube drag.
+    void RemoveWholeTubeItems(std::vector<int> const &tubeIds);
 
     // The one hovered item (kind 0 = nothing). Hover is separate from the
     // selection: it follows the cursor and never survives a press.

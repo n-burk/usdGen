@@ -101,9 +101,17 @@ public:
     int AddNode(TonicHit const &hit);
     // Move a node to a located point (drag). Edge polylines re-trace.
     bool MoveNode(TonicScalpMesh const &mesh, int nodeId, TonicHit const &hit);
+    // Atomic multi-node variant for a whole-edge drag. Every id/hit is
+    // validated before either endpoint changes; affected K2 edges retrace
+    // together and regions extract once.
+    bool MoveNodes(TonicScalpMesh const &mesh, std::vector<int> const &nodeIds,
+                   std::vector<TonicHit> const &hits);
     // Connect two nodes with a K2 edge. Connecting across a region splits it.
     // Returns the edge id, or -1 (already connected, dead nodes, K2 failure).
-    int Connect(TonicScalpMesh const &mesh, int a, int b);
+    // `extract=false` is for one model-owned atomic batch. The caller must
+    // finish that batch with exactly one ExtractRegions call.
+    int Connect(TonicScalpMesh const &mesh, int a, int b,
+                bool extract = true);
     // Split an edge at a located point: one edge becomes two. Returns the new
     // node id, or -1.
     int SplitEdge(TonicScalpMesh const &mesh, int edgeId, TonicHit const &hit);

@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace usdGenTonic {
 
@@ -342,9 +345,15 @@ void _FillLevelArrays(std::vector<float> const &positions,
         staged->centerCurveTubeId[t] = slice.tubeId;
         for (int c = 0; c < slice.centerCount; ++c) {
             size_t const o = size_t(slice.centerOffset + c);
-            staged->centerPoints[o] =
-                GfVec3f(desc.centerX[size_t(c)], desc.centerY[size_t(c)],
-                        desc.centerZ[size_t(c)]);
+            float x = desc.centerX[size_t(c)];
+            float y = desc.centerY[size_t(c)];
+            float z = desc.centerZ[size_t(c)];
+            std::string err;
+            // The core line and its dots must sit inside the visible tube.
+            // A malformed imported section keeps the legacy raw cage point;
+            // the model pick path uses the same fallback.
+            TonicCenterHandlePointCpu(desc, c, &x, &y, &z, &err);
+            staged->centerPoints[o] = GfVec3f(x, y, z);
             staged->centerIndices[o] = int(o);
             staged->centerCVColor[o] = slice.clumpColor;
             staged->centerCVTubeId[o] = slice.tubeId;
@@ -381,6 +390,15 @@ using _SelectionByTube = std::map<int, _TubeSelection>;
 void _NoteItem(_SelectionByTube *out, TonicSelectionItem const &item,
                int state, std::map<int, int> const &tubeLevels)
 {
+    auto noteOwner = [&]() -> _TubeSelection & {
+        _TubeSelection &selection = (*out)[item.id];
+        // A center, ring, or section CV is an edit handle owned by this
+        // tube.  Its local white/yellow feedback remains below, while the
+        // mesh gets the same durable rim/lift cue as a body selection.
+        // State 2 (hover) wins over a prior selected handle on the owner.
+        selection.tube = std::max(selection.tube, state);
+        return selection;
+    };
     switch (item.kind) {
     case TonicPick_TubeVert:
         (*out)[item.id].tube = state;
@@ -394,14 +412,14 @@ void _NoteItem(_SelectionByTube *out, TonicSelectionItem const &item,
         }
         break;
     case TonicPick_CenterCV:
-        (*out)[item.id].centerCVs[item.subId] = state;
+        noteOwner().centerCVs[item.subId] = state;
         break;
     case TonicPick_SectionCV:
-        (*out)[item.id]
-            .sectionCVs[std::make_pair(item.subId, item.subSubId)] = state;
+        noteOwner().sectionCVs[std::make_pair(item.subId, item.subSubId)] =
+            state;
         break;
     case TonicPick_SectionRing:
-        (*out)[item.id].rings[item.subId] = state;
+        noteOwner().rings[item.subId] = state;
         break;
     default:
         break;  // graph and guide selection is drawn by their own prims
@@ -494,11 +512,16 @@ void _FillSelection(_SelectionByTube const &selection,
 }
 
 // The K9/K10 guide preview as the committed Guides spelling: cubic bspline,
-// pinned wrap, per-vertex widths and hairT, per-curve clump colour.
-void _FillGuides(TonicModel::GuidePreview const &preview, GfVec3f const &color,
-                 int tubeId, TonicStagedLevel *staged)
+// pinned wrap, per-vertex widths and hairT, per-curve clump colour. One
+// level's curves at a time: the caller filters the merged preview by the
+// level each curve's tube sits at, so every curve keeps its own tube's
+// colour and id.
+void _FillGuides(std::vector<float> const &points,
+                 std::vector<int> const &counts,
+                 std::vector<GfVec3f> const &colors,
+                 std::vector<int> const &tubeIds, TonicStagedLevel *staged)
 {
-    size_t const cvTotal = preview.points.size() / 3;
+    size_t const cvTotal = points.size() / 3;
     staged->guidePoints.resize(cvTotal);
     staged->guideIndices.resize(cvTotal);
     staged->guideWidths.assign(
@@ -507,23 +530,22 @@ void _FillGuides(TonicModel::GuidePreview const &preview, GfVec3f const &color,
     staged->guideHairT.resize(cvTotal);
     for (size_t i = 0; i < cvTotal; ++i) {
         staged->guidePoints[i] =
-            GfVec3f(preview.points[i * 3 + 0], preview.points[i * 3 + 1],
-                    preview.points[i * 3 + 2]);
+            GfVec3f(points[i * 3 + 0], points[i * 3 + 1], points[i * 3 + 2]);
         staged->guideIndices[i] = int(i);
     }
-    staged->guideVertexCounts.resize(preview.counts.size());
-    staged->guideCurveColor.assign(preview.counts.size(), color);
-    staged->guideCurveTubeId.assign(preview.counts.size(), tubeId);
+    staged->guideVertexCounts.resize(counts.size());
+    staged->guideCurveColor.assign(colors.begin(), colors.end());
+    staged->guideCurveTubeId.assign(tubeIds.begin(), tubeIds.end());
     size_t cursor = 0;
-    for (size_t g = 0; g < preview.counts.size(); ++g) {
-        int const c = preview.counts[g];
+    for (size_t g = 0; g < counts.size(); ++g) {
+        int const c = counts[g];
         staged->guideVertexCounts[g] = c;
         for (int i = 0; i < c && cursor < cvTotal; ++i, ++cursor) {
             staged->guideHairT[cursor] =
                 c > 1 ? float(i) / float(c - 1) : 0.0f;
         }
     }
-    staged->guideCount = preview.guideCount;
+    staged->guideCount = int(counts.size());
     _Bounds(staged->guidePoints, &staged->guideMin, &staged->guideMax);
 }
 
@@ -642,12 +664,25 @@ TonicPublisher::Stage(TonicModel const &model)
     TonicTubeShape const shape = model.GetShape();
     TonicModel::HostTubeMesh const &host = model.GetHostMesh();
     int const focusLevel = model.GetFocusLevel();
+    // Hierarchy Levels can show a mixed-depth active cut: expanding one
+    // branch replaces only that branch's parent with its children.  The
+    // model predicate is deliberately a no-op until that presentation is
+    // enabled, preserving every existing caller's numeric-level batches.
+    bool const activeCut = model.GetActiveCutEnabled();
 
     // Group by level; sort by tube id so the layout is a pure function of
     // the model and two publishes of the same model agree byte for byte.
     std::map<int, std::vector<TonicTubeDesc>> byLevel;
     std::map<int, int> tubeLevels;
+    // Keep the unfiltered hierarchy for guide ownership. A cut removes an
+    // edit mesh from its numeric batch; it must never erase that leaf's
+    // generated hairs from Fill/Output.
+    std::map<int, TonicTubeDesc> allDescs;
     for (TonicModel::TubeView const &view : views) {
+        allDescs[view.desc.tubeId] = view.desc;
+        if (!model.IsTubeVisibleInActiveCut(view.desc.tubeId)) {
+            continue;
+        }
         int const level = std::max(view.desc.level, 1);
         byLevel[level].push_back(view.desc);
         tubeLevels[view.desc.tubeId] = level;
@@ -677,9 +712,14 @@ TonicPublisher::Stage(TonicModel const &model)
         staged.xray = display.xray;
         staged.xrayOpacity = display.xray ? display.xrayOpacity : 0.0f;
         staged.centers = display.centers;
+        staged.centerCVDots = display.centerCVDots;
+        staged.ringCVDots = display.ringCVDots;
         staged.centersOnly = display.centersOnly;
         staged.guidesVisible = guidesVisible && display.guides;
-        staged.focused = level == focusLevel;
+        // A branch cut has no single meaningful numeric focus level: every
+        // frontier member is directly editable, even when its siblings live
+        // at L1/L2/L3 in the same frame.
+        staged.focused = activeCut || level == focusLevel;
         staged.displayScale = displayScale;
 
         // -- layout ---------------------------------------------------------
@@ -859,10 +899,7 @@ TonicPublisher::Stage(TonicModel const &model)
                 }
             } else {
                 std::string err;
-                if (!TonicCenterFramesCpu(
-                        desc.centerX.data(), desc.centerY.data(),
-                        desc.centerZ.data(), int(desc.centerX.size()),
-                        &frames, &err)) {
+                if (!TonicTubeFramesCpu(desc, &frames, &err)) {
                     continue;
                 }
                 if (!TonicTessellateCpu(desc, frames, segments, &scratchPos,
@@ -904,25 +941,87 @@ TonicPublisher::Stage(TonicModel const &model)
     }
 
     // -- guides ------------------------------------------------------------
-    // One guide set exists today: tube 0's, refilled by Fill mode. It
-    // publishes at tube 0's level. When per-tube fills land (V0b G2) the
-    // set simply splits across the levels its tubes sit at; nothing here
-    // assumes a single one beyond looking tube 0 up.
+    // The live refill merges every producing tube's set with per-guide
+    // tube attribution; each level stages its own tubes' curves in the
+    // owning tube's clump colour (plan/18 §2.2 guides/L<n>). A curve
+    // whose tube is no longer staged (dropped after the last refill)
+    // falls back to level 1, where the pre-split set always lived.
     {
         TonicModel::GuidePreview const preview = model.GetGuidePreview();
-        auto it = next.levels.find(1);
-        if (it != next.levels.end() && preview.guideCount > 0 &&
-            !preview.points.empty() && !preview.counts.empty()) {
-            GfVec3f color = it->second.tubes.front().clumpColor;
-            int tubeId = it->second.tubes.front().tubeId;
-            for (TonicTubeSlice const &s : it->second.tubes) {
-                if (s.tubeId == 0) {
-                    color = s.clumpColor;
-                    tubeId = 0;
-                    break;
+        if (preview.guideCount > 0 && !preview.points.empty() &&
+            !preview.counts.empty() &&
+            preview.tubeIds.size() == preview.counts.size()) {
+            std::map<int, int> tubeLevel;  // tubeId -> level
+            for (auto const &lv : next.levels) {
+                for (TonicTubeSlice const &s : lv.second.tubes) {
+                    tubeLevel[s.tubeId] = lv.first;
                 }
             }
-            _FillGuides(preview, color, tubeId, &it->second);
+            int fallbackLevel = 1;
+            if (next.levels.find(1) == next.levels.end()) {
+                fallbackLevel = next.levels.begin()->first;
+            }
+            std::vector<size_t> offsets(preview.counts.size() + 1, 0);
+            for (size_t g = 0; g < preview.counts.size(); ++g) {
+                offsets[g + 1] = offsets[g] + size_t(preview.counts[g]);
+            }
+            struct _GuideOwner {
+                size_t index = 0;
+                int tubeId = -1;
+                GfVec3f color = GfVec3f(0.6f);
+            };
+            std::map<int, std::vector<_GuideOwner>> byLevel;
+            for (size_t g = 0; g < preview.counts.size(); ++g) {
+                int const ownerId = preview.tubeIds[g];
+                int batchId = ownerId;
+                auto owner = allDescs.find(ownerId);
+                // An active cut stages the full groom under the nearest
+                // visible ancestor, but retains the producing leaf's id and
+                // colour. Outside a cut this loop exits on the owner.
+                while (activeCut &&
+                       !model.IsTubeVisibleInActiveCut(batchId)) {
+                    auto const current = allDescs.find(batchId);
+                    if (current == allDescs.end() ||
+                        current->second.parentTubeId < 0) {
+                        batchId = -1;
+                        break;
+                    }
+                    batchId = current->second.parentTubeId;
+                }
+                auto const batch = tubeLevel.find(batchId);
+                int const level = batch == tubeLevel.end() ? fallbackLevel
+                                                            : batch->second;
+                GfVec3f const color = owner == allDescs.end()
+                    ? next.levels[level].tubes.front().clumpColor
+                    : _Rgb(TonicClumpColor(owner->second.regionId,
+                                            owner->second.level,
+                                            owner->second.childIndex));
+                byLevel[level].push_back(_GuideOwner{g, ownerId, color});
+            }
+            for (auto const &lv : byLevel) {
+                auto it = next.levels.find(lv.first);
+                if (it == next.levels.end()) {
+                    continue;
+                }
+                std::vector<float> points;
+                std::vector<int> counts;
+                std::vector<GfVec3f> colors;
+                std::vector<int> tubeIds;
+                for (_GuideOwner const &guide : lv.second) {
+                    colors.push_back(guide.color);
+                    tubeIds.push_back(guide.tubeId);
+                    counts.push_back(preview.counts[guide.index]);
+                    size_t const begin = offsets[guide.index] * 3;
+                    size_t end = offsets[guide.index + 1] * 3;
+                    if (end > preview.points.size()) {
+                        end = preview.points.size();
+                    }
+                    points.insert(points.end(),
+                                  preview.points.begin() + ptrdiff_t(begin),
+                                  preview.points.begin() + ptrdiff_t(end));
+                }
+                _FillGuides(points, counts, colors, tubeIds, &it->second);
+            }
         }
     }
 

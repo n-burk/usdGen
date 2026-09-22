@@ -27,19 +27,24 @@
 #include "pxr/imaging/hd/xformSchema.h"
 #include "pxr/usd/usdGeom/tokens.h"
 
+#include <array>
+#include <cmath>
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_ENV_SETTING(USDGENTONIC_ENABLE, true,
                       "Enable the usdGenTonic scene index plugin.");
-TF_DEFINE_ENV_SETTING(USDGENTONIC_TEST_TUBE, true,
+TF_DEFINE_ENV_SETTING(USDGENTONIC_TEST_TUBE, false,
                       "Publish the static test tube while no model is "
-                      "active. Headless records set 0 so the scaffolding "
-                      "never lands in rendered frames. Activating a model "
-                      "removes it either way.");
+                      "active. Opt-in scene-index scaffolding: an empty "
+                      "stage must open clean, so interactive and recorded "
+                      "frames never carry it unless a harness asks for it "
+                      "explicitly. Activating a model removes it either "
+                      "way.");
 TF_REGISTRY_FUNCTION(TfType) {
     HdSceneIndexPluginRegistry::Define<UsdGenTonicSceneIndexPlugin>();
 }
@@ -704,9 +709,13 @@ _BuildTestTubeDataSource(usdGenTonic::TonicStagedTubeMesh const &tube,
 
 // Graph nodes as a points prim: positions + per-point display colour
 // (white; unwelded coincident nodes warn orange — the HUD ring's data).
+// Bound to the overlay material like every other overlay dot: Storm does
+// not draw these points under the fallback material, so without the
+// binding a click that lands in the model leaves no dot on the screen.
 HdContainerDataSourceHandle
 _BuildNodesDataSource(VtVec3fArray const &points, VtVec3fArray const &colors,
-                      VtFloatArray const &widths)
+                      VtFloatArray const &widths,
+                      SdfPath const &materialPath)
 {
     std::vector<TfToken> pvNames;
     std::vector<HdDataSourceBaseHandle> pvValues;
@@ -734,16 +743,22 @@ _BuildNodesDataSource(VtVec3fArray const &points, VtVec3fArray const &colors,
     _Add(&names, &values, _tokExtent, _Extent(mn, mx));
     _Add(&names, &values, TfToken("xform"), _IdentityXform());
     _Add(&names, &values, _tokVisibility, _Visible(true));
+    if (!materialPath.IsEmpty()) {
+        _Add(&names, &values, _tokMaterialBindings,
+             _MaterialBinding(materialPath));
+    }
     return _Container(std::move(names), std::move(values));
 }
 
 // Graph edges as linear basisCurves: one curve per edge polyline, uniform
 // per-curve colour (shared edges white, border edges grey — plan/17 §5.1).
+// Bound to the overlay material with the nodes: same Storm, same rule.
 HdContainerDataSourceHandle
 _BuildEdgesDataSource(VtIntArray const &curveVertexCounts,
                       VtIntArray const &curveIndices,
                       VtVec3fArray const &points,
-                      VtVec3fArray const &curveColors)
+                      VtVec3fArray const &curveColors,
+                      SdfPath const &materialPath)
 {
     std::vector<TfToken> pvNames;
     std::vector<HdDataSourceBaseHandle> pvValues;
@@ -772,6 +787,10 @@ _BuildEdgesDataSource(VtIntArray const &curveVertexCounts,
     _Add(&names, &values, _tokExtent, _Extent(mn, mx));
     _Add(&names, &values, TfToken("xform"), _IdentityXform());
     _Add(&names, &values, _tokVisibility, _Visible(true));
+    if (!materialPath.IsEmpty()) {
+        _Add(&names, &values, _tokMaterialBindings,
+             _MaterialBinding(materialPath));
+    }
     return _Container(std::move(names), std::move(values));
 }
 
@@ -815,6 +834,275 @@ _BuildRegionsDataSource(VtVec3fArray const &points,
     _Add(&names, &values, TfToken("xform"), _IdentityXform());
     _Add(&names, &values, _tokVisibility, _Visible(true));
     return _Container(std::move(names), std::move(values));
+}
+
+// The live K3 map is deliberately one value per coarse scalp face: that is
+// the inexpensive channel the bake and root sampler share.  It is not a
+// sufficient display representation, though.  A graph boundary can cross a
+// single quad and leave two different regions on it.  The helpers below make
+// a small, display-only patch mesh by triangulating each region contour in
+// its chart and clipping those triangles against the scalp's existing face
+// fan.  Only faces touched by a patch acquire extra triangles; untouched
+// scalp stays at its authored resolution.
+struct _Patch2 {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+float
+_Cross2(_Patch2 const &a, _Patch2 const &b, _Patch2 const &c)
+{
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+float
+_PolygonArea2(std::vector<_Patch2> const &p)
+{
+    float area = 0.0f;
+    for (size_t i = 0; i < p.size(); ++i) {
+        _Patch2 const &a = p[i];
+        _Patch2 const &b = p[(i + 1) % p.size()];
+        area += a.x * b.y - a.y * b.x;
+    }
+    return area;
+}
+
+bool
+_InsideTriangle2(_Patch2 const &p, _Patch2 const &a, _Patch2 const &b,
+                 _Patch2 const &c, float sign)
+{
+    // Contours retain the K2 samples along a straight edge.  Those
+    // collinear samples lie on a candidate ear but do not occupy it, and
+    // must not prevent ear clipping from ever getting started.
+    float const eps = 1.0e-7f;
+    return sign * _Cross2(a, b, p) > eps &&
+           sign * _Cross2(b, c, p) > eps &&
+           sign * _Cross2(c, a, p) > eps;
+}
+
+// Ear clipping is local to one graph region.  It deliberately preserves a
+// concave loop's indentation; a fan from the first sample would paint the
+// indentation and turn an outside gap into a coloured tile.
+std::vector<std::array<int, 3>>
+_TriangulatePatch(std::vector<_Patch2> const &polygon)
+{
+    std::vector<std::array<int, 3>> triangles;
+    if (polygon.size() < 3) {
+        return triangles;
+    }
+    float const area = _PolygonArea2(polygon);
+    if (std::fabs(area) <= 1.0e-10f) {
+        return triangles;
+    }
+    float const sign = area > 0.0f ? 1.0f : -1.0f;
+    std::vector<int> remaining(polygon.size());
+    for (size_t i = 0; i < remaining.size(); ++i) {
+        remaining[i] = int(i);
+    }
+    // A bad contour should not make publishing unbounded.  The graph's
+    // contours are simple by construction, so this limit only catches an
+    // accidental duplicate/self-intersection and leaves that patch absent.
+    size_t guard = polygon.size() * polygon.size();
+    while (remaining.size() > 2 && guard-- > 0) {
+        bool clipped = false;
+        for (size_t i = 0; i < remaining.size(); ++i) {
+            int const ia = remaining[(i + remaining.size() - 1) %
+                                     remaining.size()];
+            int const ib = remaining[i];
+            int const ic = remaining[(i + 1) % remaining.size()];
+            if (sign * _Cross2(polygon[ia], polygon[ib], polygon[ic]) <=
+                1.0e-7f) {
+                continue;
+            }
+            bool contains = false;
+            for (int ip : remaining) {
+                if (ip != ia && ip != ib && ip != ic &&
+                    _InsideTriangle2(polygon[ip], polygon[ia], polygon[ib],
+                                     polygon[ic], sign)) {
+                    contains = true;
+                    break;
+                }
+            }
+            if (!contains) {
+                triangles.push_back({ia, ib, ic});
+                remaining.erase(remaining.begin() + i);
+                clipped = true;
+                break;
+            }
+        }
+        if (!clipped) {
+            triangles.clear();
+            return triangles;
+        }
+    }
+    return triangles;
+}
+
+// K2 deliberately retains samples along every traced edge for a smooth white
+// display curve.  They are useful to the graph, but a run of collinear
+// vertices can leave ear clipping with only degenerate candidate ears after
+// it has already emitted valid triangles.  Simplify only the fill polygon;
+// the boundary curve still publishes every original CV.
+std::vector<_Patch2>
+_RemoveCollinearPatchPoints(std::vector<_Patch2> polygon)
+{
+    bool changed = true;
+    while (changed && polygon.size() > 3) {
+        changed = false;
+        for (size_t i = 0; i < polygon.size() && polygon.size() > 3; ++i) {
+            _Patch2 const &a = polygon[(i + polygon.size() - 1) %
+                                       polygon.size()];
+            _Patch2 const &b = polygon[i];
+            _Patch2 const &c = polygon[(i + 1) % polygon.size()];
+            float const abx = b.x - a.x;
+            float const aby = b.y - a.y;
+            float const bcx = c.x - b.x;
+            float const bcy = c.y - b.y;
+            float const scale = abx * abx + aby * aby + bcx * bcx + bcy * bcy;
+            if (std::fabs(_Cross2(a, b, c)) <= 1.0e-6f *
+                                                   std::max(1.0f, scale)) {
+                polygon.erase(polygon.begin() + i);
+                changed = true;
+                break;
+            }
+        }
+    }
+    return polygon;
+}
+
+_Patch2
+_Intersect2(_Patch2 const &a, _Patch2 const &b, _Patch2 const &c,
+            _Patch2 const &d)
+{
+    float const abx = b.x - a.x;
+    float const aby = b.y - a.y;
+    float const cdx = d.x - c.x;
+    float const cdy = d.y - c.y;
+    float const denom = abx * cdy - aby * cdx;
+    if (std::fabs(denom) <= 1.0e-12f) {
+        return a;
+    }
+    float const t = ((c.x - a.x) * cdy - (c.y - a.y) * cdx) / denom;
+    return {a.x + t * abx, a.y + t * aby};
+}
+
+// Convex clip: the scalp face fan gives us triangles, so the clip polygon is
+// always convex even when an authored coarse n-gon is not.
+std::vector<_Patch2>
+_ClipPatchToTriangle(std::vector<_Patch2> subject, _Patch2 const &a,
+                     _Patch2 const &b, _Patch2 const &c)
+{
+    _Patch2 const clip[3] = {a, b, c};
+    float const sign = _Cross2(a, b, c) >= 0.0f ? 1.0f : -1.0f;
+    for (int edge = 0; edge != 3 && !subject.empty(); ++edge) {
+        std::vector<_Patch2> out;
+        _Patch2 const &e0 = clip[edge];
+        _Patch2 const &e1 = clip[(edge + 1) % 3];
+        _Patch2 prev = subject.back();
+        bool prevInside = sign * _Cross2(e0, e1, prev) >= -1.0e-6f;
+        for (_Patch2 const &current : subject) {
+            bool const currentInside =
+                sign * _Cross2(e0, e1, current) >= -1.0e-6f;
+            if (currentInside != prevInside) {
+                out.push_back(_Intersect2(prev, current, e0, e1));
+            }
+            if (currentInside) {
+                out.push_back(current);
+            }
+            prev = current;
+            prevInside = currentInside;
+        }
+        subject.swap(out);
+    }
+    return subject;
+}
+
+GfVec3f
+_LiftedPatchPoint(_Patch2 const &p, _Patch2 const &a, _Patch2 const &b,
+                  _Patch2 const &c, GfVec3f const &pa, GfVec3f const &pb,
+                  GfVec3f const &pc, GfVec3f const &na, GfVec3f const &nb,
+                  GfVec3f const &nc, float offset)
+{
+    float const denom = _Cross2(a, b, c);
+    if (std::fabs(denom) <= 1.0e-12f) {
+        return pa;
+    }
+    float const wb = _Cross2(a, p, c) / denom;
+    float const wc = _Cross2(a, b, p) / denom;
+    float const wa = 1.0f - wb - wc;
+    GfVec3f point = wa * pa + wb * pb + wc * pc;
+    GfVec3f normal = wa * na + wb * nb + wc * nc;
+    if (normal.GetLengthSq() > 1.0e-20f) {
+        point += normal.GetNormalized() * offset;
+    }
+    return point;
+}
+
+// SnapshotGraph is the renderer-safe boundary handoff.  Build the same
+// chart-local projection data as TonicFlattenLoops from its immutable region
+// contours; reading the live graph here would race a graph edit and could
+// combine a new contour with an old scalp snapshot.
+usdGenTonic::TonicRegionLoops
+_SnapshotDisplayLoops(usdGenTonic::TonicModel::GraphSnapshot const &snap)
+{
+    usdGenTonic::TonicRegionLoops loops;
+    for (size_t r = 0; r < snap.regionBoundaries.size(); ++r) {
+        std::vector<float> const &boundary = snap.regionBoundaries[r];
+        size_t const count = boundary.size() / 3;
+        if (count < 3 || count * 3 != boundary.size()) {
+            continue;
+        }
+        float nx = 0.0f, ny = 0.0f, nz = 0.0f;
+        for (size_t i = 0; i < count; ++i) {
+            float const *a = &boundary[i * 3];
+            float const *b = &boundary[((i + 1) % count) * 3];
+            nx += (a[1] - b[1]) * (a[2] + b[2]);
+            ny += (a[2] - b[2]) * (a[0] + b[0]);
+            nz += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        float const nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!(nl > 1.0e-10f)) {
+            continue;
+        }
+        nx /= nl;
+        ny /= nl;
+        nz /= nl;
+        float rx = std::fabs(nx) > 0.9f ? 0.0f : 1.0f;
+        float rz = std::fabs(nx) > 0.9f ? 1.0f : 0.0f;
+        float ux = rx - nx * (rx * nx + rz * nz);
+        float uy = -ny * (rx * nx + rz * nz);
+        float uz = rz - nz * (rx * nx + rz * nz);
+        float const ul = std::sqrt(ux * ux + uy * uy + uz * uz);
+        if (!(ul > 1.0e-10f)) {
+            continue;
+        }
+        ux /= ul;
+        uy /= ul;
+        uz /= ul;
+        int interp = int(r);
+        for (size_t f = 0; f < snap.faceRegionIds.size() &&
+                           f < snap.faceRegions.size(); ++f) {
+            if (snap.faceRegionIds[f] == int(r)) {
+                interp = snap.faceRegions[f];
+                break;
+            }
+        }
+        loops.loopBegin.push_back(int(loops.points.size() / 3));
+        loops.loopCount.push_back(int(count));
+        loops.points.insert(loops.points.end(), boundary.begin(),
+                            boundary.end());
+        loops.planeN.insert(loops.planeN.end(), {nx, ny, nz});
+        loops.planeP.insert(loops.planeP.end(),
+                            {boundary[0], boundary[1], boundary[2]});
+        loops.basisU.insert(loops.basisU.end(), {ux, uy, uz});
+        loops.basisV.insert(loops.basisV.end(),
+                            {ny * uz - nz * uy, nz * ux - nx * uz,
+                             nx * uy - ny * ux});
+        loops.interpIds.push_back(interp);
+        loops.regionIds.push_back(int(r));
+    }
+    loops.valid = true;
+    return loops;
 }
 
 SdfPath _LevelPath(SdfPath const &scope, int level)
@@ -1293,15 +1581,31 @@ UsdGenTonicSceneIndex::GraphNoticesFor(uint32_t dirty)
             HdDataSourceLocator(_tokPrimvars, _tokPoints, _tokPrimvarValue));
         locators.insert(HdDataSourceLocator(_tokPrimvars, _tokDisplayColor,
                                             _tokPrimvarValue));
+        // Widths ride with points: the dot array grows alongside them, and
+        // without this locator Storm keeps the stale size and drops every
+        // node placed after the first.
+        locators.insert(
+            HdDataSourceLocator(_tokPrimvars, _tokWidths, _tokPrimvarValue));
         locators.insert(HdDataSourceLocator(_tokBasisCurves, _tokTopology));
+        // Region patches are clipped against the graph's current contours,
+        // so a graph edit can add or remove patch triangles inside the same
+        // coarse scalp face.
+        locators.insert(HdDataSourceLocator(_tokMesh, _tokTopology));
+        locators.insert(HdDataSourceLocator(
+            _tokPrimvars, TfToken("usdGen:tonicRegion"), _tokPrimvarValue));
         locators.insert(HdDataSourceLocator(_tokExtent, _tokMin));
         locators.insert(HdDataSourceLocator(_tokExtent, _tokMax));
     }
     if (dirty & usdGenTonic::TonicDirty_Regions) {
+        locators.insert(
+            HdDataSourceLocator(_tokPrimvars, _tokPoints, _tokPrimvarValue));
         locators.insert(HdDataSourceLocator(_tokPrimvars, _tokDisplayColor,
                                             _tokPrimvarValue));
         locators.insert(HdDataSourceLocator(
             _tokPrimvars, TfToken("usdGen:tonicRegion"), _tokPrimvarValue));
+        locators.insert(HdDataSourceLocator(_tokMesh, _tokTopology));
+        locators.insert(HdDataSourceLocator(_tokExtent, _tokMin));
+        locators.insert(HdDataSourceLocator(_tokExtent, _tokMax));
     }
     if (dirty & usdGenTonic::TonicDirty_Selection) {
         locators.insert(HdDataSourceLocator(_tokPrimvars, _tokDisplayColor,
@@ -1369,6 +1673,15 @@ UsdGenTonicSceneIndex::_BuildLevelPrims(
     for (auto const &kv : staged.levels) {
         int const level = kv.first;
         usdGenTonic::TonicStagedLevel const &staging = kv.second;
+        // A point glyph spells one explicitly active component domain. The
+        // display policy carries those bits independently of ring geometry:
+        // a selected ring in Center/Hierarchy must not hide center dots just
+        // because its ring vertices happen to be staged.
+        bool const showCenterCVs = staging.visible && staging.centers &&
+            staging.centerCVDots;
+        bool const showRingCVs = staging.visible && staging.centers &&
+            !staging.centersOnly && staging.ringCVDots &&
+            !staging.ringCVPoints.empty();
         // An x-rayed level binds the translucent twin so it stops writing
         // depth and the overlays inside it come through (see
         // _kXrayMaterialOpacity).
@@ -1393,7 +1706,7 @@ UsdGenTonicSceneIndex::_BuildLevelPrims(
                       staging.centerPoints, staging.centerCVColor,
                       staging.centerCVWidth, staging.centerCVTubeId,
                       _tokCvIndex, staging.centerCVIndex, staging.centerMin,
-                      staging.centerMax, staging.visible && staging.centers,
+                      staging.centerMax, showCenterCVs,
                       OverlayMaterialPath())};
         (*prims)[RingsPath(level)] =
             _Prim{_curvesType,
@@ -1414,10 +1727,7 @@ UsdGenTonicSceneIndex::_BuildLevelPrims(
                       staging.ringCVPoints, staging.ringCVColor,
                       staging.ringCVWidth, staging.ringCVTubeId,
                       _tokSectionIndex, staging.ringCVSection, staging.ringMin,
-                      staging.ringMax,
-                      staging.visible && staging.centers &&
-                          !staging.centersOnly &&
-                          !staging.ringCVPoints.empty(),
+                      staging.ringMax, showRingCVs,
                       OverlayMaterialPath())};
         if (staging.guideCount > 0 && !staging.guidePoints.empty()) {
             (*prims)[GuidesScopePath()] =
@@ -1456,6 +1766,15 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
         }
     }
     usdGenTonic::TonicSelectionItem const hover = model.SelectionHover();
+    // The overlay stack, bottom to top: scalp, region tint, graph. The
+    // tint copies the scalp lifted 2e-3 of its diagonal off it, and the
+    // graph sits exactly ON the scalp — so without its own (larger) lift
+    // the tint covers every node and edge and clicks land in the model
+    // but leave nothing on the screen. Twice the tint offset keeps the
+    // stack ordered at every framing; the graph stays depth-tested, so it
+    // still hides behind the scalp from the back.
+    float const graphLift = usdGenTonic::TonicGraphDisplayLift(scalp.get());
+    float const tintOffset = 0.5f * graphLift;
     // Nodes: white, coincident (unwelded) sets warn orange, selected
     // white-bright and the hovered one yellow.
     VtVec3fArray nodePoints;
@@ -1468,7 +1787,10 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
         coincident.insert(group.begin(), group.end());
     }
     for (auto const &nd : snap.nodes) {
-        nodePoints.push_back(GfVec3f(nd.p[0], nd.p[1], nd.p[2]));
+        float displayP[3];
+        usdGenTonic::TonicGraphDisplayPosition(nd, scalp.get(), displayP);
+        GfVec3f const np(displayP[0], displayP[1], displayP[2]);
+        nodePoints.push_back(np);
         bool const hovered =
             hover.kind == usdGenTonic::TonicPick_GraphNode &&
             hover.id == nd.id;
@@ -1479,10 +1801,11 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
         } else {
             nodeColors.push_back(coincident.count(nd.id)
                                      ? GfVec3f(1.0f, 0.5f, 0.1f)
-                                     : GfVec3f(0.80f));
+                                     : GfVec3f(1.0f));
         }
     }
-    // Edges: one linear curve per polyline; shared white, border grey.
+    // Completed graph boundaries are white, providing a clean seam between
+    // neighbouring saturated region patches.
     VtIntArray curveCounts;
     VtIntArray curveIndices;
     VtVec3fArray edgePoints;
@@ -1497,12 +1820,16 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
             curveCounts.push_back(n);
             for (int i = 0; i < n; ++i) {
                 curveIndices.push_back(cursor + i);
-                edgePoints.push_back(GfVec3f(e.polyline[size_t(i) * 3 + 0],
-                                             e.polyline[size_t(i) * 3 + 1],
-                                             e.polyline[size_t(i) * 3 + 2]));
+                float const q[3] = {e.polyline[size_t(i) * 3 + 0],
+                                    e.polyline[size_t(i) * 3 + 1],
+                                    e.polyline[size_t(i) * 3 + 2]};
+                float displayP[3];
+                usdGenTonic::TonicGraphDisplaySurfacePosition(
+                    q, scalp.get(), displayP);
+                GfVec3f const ep(displayP[0], displayP[1], displayP[2]);
+                edgePoints.push_back(ep);
             }
             cursor += n;
-            size_t const sides = model.GetGraph().EdgeRegions(e.id).size();
             bool const hovered =
                 hover.kind == usdGenTonic::TonicPick_GraphEdge &&
                 hover.id == e.id;
@@ -1511,8 +1838,7 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
             } else if (selectedEdges.count(e.id)) {
                 edgeColors.push_back(kSelected);
             } else {
-                edgeColors.push_back(sides >= 2 ? GfVec3f(0.85f)
-                                                : GfVec3f(0.45f));
+                edgeColors.push_back(GfVec3f(1.0f));
             }
         }
     }
@@ -1566,21 +1892,12 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
                 }
             }
         }
-        GfVec3f lo(0.0f), hi(0.0f);
         for (size_t i = 0; i < vertexCount; ++i) {
-            GfVec3f const p(scalp->points[i * 3 + 0], scalp->points[i * 3 + 1],
-                            scalp->points[i * 3 + 2]);
-            scalpPoints[i] = p;
-            if (i == 0) {
-                lo = hi = p;
-            } else {
-                for (int a = 0; a < 3; ++a) {
-                    lo[a] = std::min(lo[a], p[a]);
-                    hi[a] = std::max(hi[a], p[a]);
-                }
-            }
+            scalpPoints[i] = GfVec3f(scalp->points[i * 3 + 0],
+                                     scalp->points[i * 3 + 1],
+                                     scalp->points[i * 3 + 2]);
         }
-        float const offset = 2.0e-3f * (hi - lo).GetLength();
+        float const offset = tintOffset;
         if (offset > 0.0f) {
             for (size_t i = 0; i < vertexCount; ++i) {
                 GfVec3f n = vertexNormal[i];
@@ -1589,21 +1906,156 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
                 }
             }
         }
-        usdGenTonic::TonicRegionMaps const &maps = model.GetRegionMaps();
-        for (size_t f = 0; f < snap.faceRegions.size(); ++f) {
-            int const interp = snap.faceRegions[f];
-            faceRegions.push_back(interp);
-            int const regionId = f < snap.faceRegionIds.size()
-                                     ? snap.faceRegionIds[f]
-                                     : -1;
-            if (interp < 0 || regionId < 0) {
-                faceColors.push_back(GfVec3f(0.35f, 0.05f, 0.05f));
-            } else if (f < maps.intersected.size() && maps.intersected[f]) {
-                faceColors.push_back(GfVec3f(1.0f, 0.0f, 1.0f));
-            } else {
+        // A coarse base represents the uncovered scalp.  The loop patches
+        // below are sparse: only a contour-covered face receives extra
+        // triangles, so this does not turn every scalp quad into a tile grid.
+        for (size_t f = 0; f < scalpCounts.size(); ++f) {
+            faceColors.push_back(GfVec3f(0.35f, 0.05f, 0.05f));
+            faceRegions.push_back(-1);
+        }
+        usdGenTonic::TonicRegionLoops const loops =
+            _SnapshotDisplayLoops(snap);
+        if (loops.valid) {
+            float const patchOffset = 1.5f * tintOffset;
+            auto restPoint = [&](int vertex) {
+                return GfVec3f(scalp->points[size_t(vertex) * 3 + 0],
+                               scalp->points[size_t(vertex) * 3 + 1],
+                               scalp->points[size_t(vertex) * 3 + 2]);
+            };
+            auto project = [&](size_t region, GfVec3f const &p) {
+                float const *pp = &loops.planeP[region * 3];
+                float const *u = &loops.basisU[region * 3];
+                float const *v = &loops.basisV[region * 3];
+                float const dx = p[0] - pp[0];
+                float const dy = p[1] - pp[1];
+                float const dz = p[2] - pp[2];
+                return _Patch2{dx * u[0] + dy * u[1] + dz * u[2],
+                               dx * v[0] + dy * v[1] + dz * v[2]};
+            };
+            for (size_t region = 0; region < loops.loopCount.size();
+                 ++region) {
+                int const begin = loops.loopBegin[region];
+                int const count = loops.loopCount[region];
+                if (count < 3 || size_t(begin + count) * 3 >
+                                     loops.points.size()) {
+                    continue;
+                }
+                std::vector<_Patch2> contour;
+                contour.reserve(size_t(count));
+                for (int i = 0; i < count; ++i) {
+                    size_t const at = size_t(begin + i) * 3;
+                    _Patch2 const p = project(
+                        region, GfVec3f(loops.points[at],
+                                        loops.points[at + 1],
+                                        loops.points[at + 2]));
+                    if (contour.empty() ||
+                        std::fabs(p.x - contour.back().x) > 1.0e-6f ||
+                        std::fabs(p.y - contour.back().y) > 1.0e-6f) {
+                        contour.push_back(p);
+                    }
+                }
+                if (contour.size() > 2 &&
+                    std::fabs(contour.front().x - contour.back().x) <=
+                        1.0e-6f &&
+                    std::fabs(contour.front().y - contour.back().y) <=
+                        1.0e-6f) {
+                    contour.pop_back();
+                }
+                contour = _RemoveCollinearPatchPoints(std::move(contour));
+                std::vector<std::array<int, 3>> const triangles =
+                    _TriangulatePatch(contour);
+                if (triangles.empty()) {
+                    continue;
+                }
+                int const regionId = loops.regionIds[region];
+                int const interp = loops.interpIds[region];
                 usdGenTonic::TonicRgb const rgb =
                     usdGenTonic::TonicClumpColor(regionId, 1, -1);
-                faceColors.push_back(GfVec3f(rgb.r, rgb.g, rgb.b));
+                GfVec3f const colour(rgb.r, rgb.g, rgb.b);
+                size_t const scalpFaceCount = scalp->faceVertexCounts.size();
+                for (size_t f = 0; f < scalpFaceCount; ++f) {
+                    int const n = scalp->faceVertexCounts[f];
+                    int const off = scalp->faceOffsets[f];
+                    if (n < 3 || off < 0 ||
+                        size_t(off + n) > scalp->faceVertexIndices.size()) {
+                        continue;
+                    }
+                    int const ia = scalp->faceVertexIndices[size_t(off)];
+                    if (ia < 0 || size_t(ia) >= vertexCount) {
+                        continue;
+                    }
+                    for (int corner = 1; corner + 1 < n; ++corner) {
+                        int const ib =
+                            scalp->faceVertexIndices[size_t(off + corner)];
+                        int const ic = scalp->faceVertexIndices[
+                            size_t(off + corner + 1)];
+                        if (ib < 0 || ic < 0 || size_t(ib) >= vertexCount ||
+                            size_t(ic) >= vertexCount) {
+                            continue;
+                        }
+                        GfVec3f const pa = restPoint(ia);
+                        GfVec3f const pb = restPoint(ib);
+                        GfVec3f const pc = restPoint(ic);
+                        _Patch2 const qa = project(region, pa);
+                        _Patch2 const qb = project(region, pb);
+                        _Patch2 const qc = project(region, pc);
+                        if (std::fabs(_Cross2(qa, qb, qc)) <= 1.0e-10f) {
+                            continue;
+                        }
+                        float const minX = std::min(qa.x, std::min(qb.x, qc.x));
+                        float const maxX = std::max(qa.x, std::max(qb.x, qc.x));
+                        float const minY = std::min(qa.y, std::min(qb.y, qc.y));
+                        float const maxY = std::max(qa.y, std::max(qb.y, qc.y));
+                        for (std::array<int, 3> const &tri : triangles) {
+                            _Patch2 const &ta = contour[size_t(tri[0])];
+                            _Patch2 const &tb = contour[size_t(tri[1])];
+                            _Patch2 const &tc = contour[size_t(tri[2])];
+                            float const triMinX = std::min(ta.x, std::min(tb.x, tc.x));
+                            float const triMaxX = std::max(ta.x, std::max(tb.x, tc.x));
+                            float const triMinY = std::min(ta.y, std::min(tb.y, tc.y));
+                            float const triMaxY = std::max(ta.y, std::max(tb.y, tc.y));
+                            if (triMaxX < minX || triMinX > maxX ||
+                                triMaxY < minY || triMinY > maxY) {
+                                continue;
+                            }
+                            std::vector<_Patch2> clipped = _ClipPatchToTriangle(
+                                {ta, tb, tc}, qa, qb, qc);
+                            if (clipped.size() < 3 ||
+                                std::fabs(_PolygonArea2(clipped)) <= 1.0e-10f) {
+                                continue;
+                            }
+                            int const first = int(scalpPoints.size());
+                            GfVec3f const na = vertexNormal[size_t(ia)];
+                            GfVec3f const nb = vertexNormal[size_t(ib)];
+                            GfVec3f const nc = vertexNormal[size_t(ic)];
+                            for (_Patch2 const &p : clipped) {
+                                scalpPoints.push_back(_LiftedPatchPoint(
+                                    p, qa, qb, qc, pa, pb, pc, na, nb, nc,
+                                    patchOffset));
+                            }
+                            // A graph loop may be walked either direction,
+                            // while the scalp's winding is authoritative for
+                            // its visible side.  Match every clipped fan to
+                            // that local face triangle; otherwise a valid
+                            // region drawn on a -Y (or inward-wound) scalp
+                            // can be back-face culled even though its base
+                            // overlay is double sided.
+                            bool const sameWinding =
+                                _PolygonArea2(clipped) * _Cross2(qa, qb, qc) >=
+                                0.0f;
+                            for (size_t i = 1; i + 1 < clipped.size(); ++i) {
+                                scalpCounts.push_back(3);
+                                scalpIndices.push_back(first);
+                                scalpIndices.push_back(
+                                    first + int(sameWinding ? i : i + 1));
+                                scalpIndices.push_back(
+                                    first + int(sameWinding ? i + 1 : i));
+                                faceColors.push_back(colour);
+                                faceRegions.push_back(interp);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1623,12 +2075,15 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
             _Prim{_pointsType,
                   _BuildNodesDataSource(nodePoints, nodeColors,
                                         VtFloatArray(nodePoints.size(),
-                                                     nodeWidth))};
+                                                     nodeWidth),
+                                        OverlayMaterialPath())};
     }
     if (!edgePoints.empty()) {
         (*prims)[GraphEdgesPath()] =
-            _Prim{_curvesType, _BuildEdgesDataSource(curveCounts, curveIndices,
-                                                     edgePoints, edgeColors)};
+            _Prim{_curvesType,
+                  _BuildEdgesDataSource(curveCounts, curveIndices,
+                                        edgePoints, edgeColors,
+                                        OverlayMaterialPath())};
     }
     if (!scalpPoints.empty()) {
         (*prims)[GraphRegionsPath()] =
@@ -1716,7 +2171,10 @@ UsdGenTonicSceneIndex::_CollectLevelDirties(
             dirty |= Dirty_Material;
         }
         if (was.visible != now.visible ||
-            was.centersOnly != now.centersOnly) {
+            was.centersOnly != now.centersOnly ||
+            was.centerCVDots != now.centerCVDots ||
+            was.ringCVDots != now.ringCVDots ||
+            was.guidesVisible != now.guidesVisible) {
             dirty |= Dirty_Visibility;
         }
         HdDataSourceLocatorSet const mesh = NoticesFor(dirty);
@@ -1724,10 +2182,12 @@ UsdGenTonicSceneIndex::_CollectLevelDirties(
             out->push_back({TubesPath(level), mesh});
         }
         // The overlays never carry x-ray and never swap material;
-        // everything else applies. The centers flag is theirs alone: it
-        // hides the center curves and CV dots without touching the mesh.
+        // everything else applies. Center curves and the two explicit dot
+        // domains can change visibility without touching the mesh.
         uint32_t overlay = dirty & ~(Dirty_Xray | Dirty_Material);
-        if (was.centers != now.centers) {
+        if (was.centers != now.centers ||
+            was.centerCVDots != now.centerCVDots ||
+            was.ringCVDots != now.ringCVDots) {
             overlay |= Dirty_Visibility;
         }
         // Ring visibility (plan/18 §2.4a) rides on its own hash, so that

@@ -171,6 +171,16 @@ def main():
           "the focus path drives the clickable breadcrumb")
     hier.setFocusPath(state, ())
     check(hier.breadcrumb(state) == "L1", "an empty path crumbs L1")
+    hier.setActiveCutFocus(state, 41, (7, 41), ("root", "child"), 3)
+    check(state.activeCutEnabled and state.focusParentId == 41 and
+          state.focusAncestorIds == (7, 41) and state.activeLevel == 3 and
+          hier.breadcrumbSegments(state) ==
+          [("tube:7", "L1 root"), ("tube:41", "L2 child")],
+          "active-cut context binds breadcrumbs to stable tube ids")
+    hier.clearActiveCutFocus(state)
+    check(state.focusParentId == -1 and state.focusAncestorIds == () and
+          state.activeLevel == 1,
+          "clearing only the UI context leaves level compatibility intact")
     check(hier.deriveChildLevel(1) == 2, "children sit at parent.level + 1")
 
     # -- locks: global default off, per-tube override ---------------------

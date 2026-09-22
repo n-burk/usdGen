@@ -80,10 +80,18 @@ def makeFakes(base):
             self.levelModes = {}       # level -> (visible, xray, centers)
             self.childIds = [1, 2]
             self.children = {}         # tube id -> child ids
+            self.parents = {}          # child id -> parent id
+            self.levels = {}           # tube id -> hierarchy level
+            self.activeCutEnabled = False
+            self.expanded = set()
             for name in ("Tonic_SculptStrokeShaped",
                          "Tonic_SubdivideTubeEdge", "Tonic_SetLevelDrawMode",
                          "Tonic_GetLevelDrawMode", "Tonic_GetTubeChildren",
-                         "Tonic_GetTubeCount"):
+                         "Tonic_GetTubeCount", "Tonic_GetTubeLevel",
+                         "Tonic_GetTubeParent", "Tonic_ReadTubeIds",
+                         "Tonic_SetActiveCutEnabled",
+                         "Tonic_GetActiveCutEnabled", "Tonic_SetTubeExpanded",
+                         "Tonic_GetTubeExpanded", "Tonic_IsTubeVisible"):
                 setattr(self, name, Entry(getattr(self, "_" + name[6].lower()
                                                   + name[7:])))
 
@@ -118,6 +126,75 @@ def makeFakes(base):
                 out[i] = value
             _deref(count).value = min(len(kids), cap)
             return 0
+
+        def _getTubeLevel(self, _ctx, tubeId):
+            tubeId = int(tubeId)
+            self._record("Tonic_GetTubeLevel", (tubeId,))
+            return self.levels.get(tubeId, 1)
+
+        def _getTubeParent(self, _ctx, tubeId, parent, childIndex):
+            tubeId = int(tubeId)
+            self._record("Tonic_GetTubeParent", (tubeId,))
+            value = self.parents.get(tubeId)
+            _deref(parent).value = -1 if value is None else int(value)
+            _deref(childIndex).value = -1 if value is None else 0
+            return 0
+
+        def _readTubeIds(self, _ctx, out, cap, count):
+            ids = sorted(self.levels)
+            self._record("Tonic_ReadTubeIds")
+            _deref(count).value = len(ids)
+            if out is not None:
+                for i, value in enumerate(ids[:cap]):
+                    out[i] = value
+            return 0
+
+        def _setActiveCutEnabled(self, _ctx, enabled):
+            self.activeCutEnabled = bool(int(enabled))
+            self._record("Tonic_SetActiveCutEnabled",
+                         (1 if self.activeCutEnabled else 0,))
+            return 0
+
+        def _getActiveCutEnabled(self, _ctx):
+            self._record("Tonic_GetActiveCutEnabled")
+            return 1 if self.activeCutEnabled else 0
+
+        def _setTubeExpanded(self, _ctx, tubeId, expanded):
+            tubeId = int(tubeId)
+            if tubeId not in self.children or not self.children[tubeId]:
+                return 1
+            if int(expanded):
+                self.expanded.add(tubeId)
+            else:
+                self.expanded.discard(tubeId)
+                # Native collapse clears nested expansion records too.
+                for candidate in tuple(self.expanded):
+                    current = self.parents.get(candidate)
+                    while current is not None:
+                        if current == tubeId:
+                            self.expanded.discard(candidate)
+                            break
+                        current = self.parents.get(current)
+            self._record("Tonic_SetTubeExpanded", (tubeId, int(expanded)))
+            return 0
+
+        def _getTubeExpanded(self, _ctx, tubeId):
+            self._record("Tonic_GetTubeExpanded", (int(tubeId),))
+            return 1 if int(tubeId) in self.expanded else 0
+
+        def _isTubeVisible(self, _ctx, tubeId):
+            tubeId = int(tubeId)
+            self._record("Tonic_IsTubeVisible", (tubeId,))
+            if not self.activeCutEnabled:
+                return 1
+            if tubeId in self.expanded:
+                return 0
+            parent = self.parents.get(tubeId)
+            while parent is not None:
+                if parent not in self.expanded:
+                    return 0
+                parent = self.parents.get(parent)
+            return 1
 
         def _getLevelDrawMode(self, _ctx, level, visible, xray,
                               centers):
@@ -343,6 +420,77 @@ def testHierarchyLevels(mods):
           "x-ray on L1 reaches the model (%r)" % (calls,))
 
 
+def testHierarchyActiveCut(mods):
+    print("-- HierarchyLoop: per-branch active cut ------------------")
+    tonicLib = mods["tonicLib"]
+    loop, dll, session, state, cam, sample = newHierarchy(mods)
+    # Two unrelated roots, each with its own L2 frontier.  This is the
+    # regression global activeLevel could never express.
+    dll.children = {0: [1, 2], 1: [3], 10: [11, 12]}
+    dll.parents = {1: 0, 2: 0, 3: 1, 11: 10, 12: 10}
+    dll.levels = {0: 1, 10: 1, 1: 2, 2: 2, 3: 3, 11: 2, 12: 2}
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [1],
+                         tonicLib.TONIC_PICK_CENTER_CV: [1]}
+
+    check(loop.activate() and dll.activeCutEnabled,
+          "activating Hierarchy opts into the native active cut")
+    check(session.selection.get(tonicLib.TONIC_PICK_TUBE_VERT) == [] and
+          tonicLib.TONIC_PICK_CENTER_CV not in session.selection and
+          session.hovers[-1:] == [(0, -1)],
+          "activation drops hidden component owners and hover")
+    check(dll._isTubeVisible(session.model, 0) == 1 and
+          dll._isTubeVisible(session.model, 1) == 0 and
+          dll._isTubeVisible(session.model, 10) == 1,
+          "an empty cut starts at every root frontier")
+
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0, 10]}
+    check(loop.enterLevel(), "Enter expands every selected root branch")
+    check(dll.expanded == {0, 10} and
+          session.selection[tonicLib.TONIC_PICK_TUBE_VERT] == [1, 2, 11, 12],
+          "Enter selects direct children without hiding the other branch")
+    check(dll._isTubeVisible(session.model, 0) == 0 and
+          dll._isTubeVisible(session.model, 1) == 1 and
+          dll._isTubeVisible(session.model, 10) == 0 and
+          dll._isTubeVisible(session.model, 11) == 1,
+          "each expanded parent is replaced only by its own children")
+    session.selection = {tonicLib.TONIC_PICK_CENTER_CV: [1]}
+    check(loop.activate() and
+          session.selection.get(tonicLib.TONIC_PICK_TUBE_VERT) == [1] and
+          tonicLib.TONIC_PICK_CENTER_CV not in session.selection,
+          "returning from a visible CV edit promotes its owner for Exit")
+    check(state.focusParentId == 0 and state.focusAncestorIds == (0,) and
+          state.activeLevel == 2,
+          "one selected branch supplies compatibility focus and breadcrumb")
+    check(dll.levelModes.get(1, (0, 0, 0))[1] == 0 and
+          dll.levelModes.get(2, (0, 0, 0))[1] == 0,
+          "mixed active-cut frontier levels stay opaque unless explicitly x-rayed")
+
+    # A mixed-depth request selects A's L2 owner and its L3 child.  Exit
+    # must collapse A only once; A's hidden child may not survive selected.
+    check(loop._setExpanded(1, True), "a nested selected branch can expand")
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [1, 3],
+                         tonicLib.TONIC_PICK_CENTER_CV: [3]}
+    check(loop.exitLevel(), "Exit collapses the parent of each selected child")
+    check(dll.expanded == {10} and
+          session.selection[tonicLib.TONIC_PICK_TUBE_VERT] == [0] and
+          tonicLib.TONIC_PICK_CENTER_CV not in session.selection and
+          dll._isTubeVisible(session.model, 0) == 1 and
+          dll._isTubeVisible(session.model, 1) == 0 and
+          dll._isTubeVisible(session.model, 10) == 0 and
+          dll._isTubeVisible(session.model, 11) == 1,
+          "Exit collapses only the shallowest requested branch")
+
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [11]}
+    check(loop.exitLevel() and dll.expanded == set() and
+          session.selection[tonicLib.TONIC_PICK_TUBE_VERT] == [10] and
+          dll._isTubeVisible(session.model, 10) == 1 and
+          dll._isTubeVisible(session.model, 11) == 0,
+          "a separate Exit restores B without reviving A descendants")
+    check(loop.focusTube(0) and
+          session.selection[tonicLib.TONIC_PICK_TUBE_VERT] == [0],
+          "a tube-id breadcrumb targets one branch, never a global level")
+
+
 # ---------------------------------------------------------------------------
 # SculptLoop
 # ---------------------------------------------------------------------------
@@ -431,12 +579,95 @@ def testSculptBrushes(mods):
           "comb passes a direction and a fixed push (%g)" % push)
 
     loop.setSubMode("grab")
+    state.sculptStrength = 0.25
+    delta, amount = loop.strokeParams(cam, (200.0, 200.0),
+                                      (300.0, 200.0))
+    check(near(delta[0], 0.25) and near(amount, 0.0),
+          "grab applies the brush strength to its world delta (%r)" %
+          (delta,))
+    state.sculptStrength = 1.0
     state.brushRadiusPx = 24.0
     loop.adjustRadius(8.0)
     check(near(state.brushRadiusPx, 32.0), "] grows the brush radius")
     loop.adjustRadius(-1000.0)
     check(near(state.brushRadiusPx, 2.0),
           "[ shrinks it and clamps (%g)" % state.brushRadiusPx)
+
+
+def testSculptRadiusResize(mods):
+    print("-- SculptLoop: F-drag brush radius ----------------------")
+    loop, dll, session, state, cam, sample = newSculpt(mods)
+    state.brushRadiusPx = 24.0
+    check(loop.beginRadiusResize(sample(100.0, 180.0)),
+          "F-LMB begins a UI-only radius drag")
+    check(not session.gestureStack and
+          not dll.argsOf("Tonic_SculptStrokeShaped"),
+          "resizing opens no sculpt undo bracket or stroke")
+    check(loop.resizeRadius(sample(160.0, 20.0)) and
+          near(loop.brushRadiusPx(), 54.0) and near(state.brushRadiusPx, 24.0),
+          "horizontal travel previews radius without a partial UI commit (%g)"
+          % loop.brushRadiusPx())
+    check(loop.endRadiusResize(sample(180.0, 700.0)) and
+          near(state.brushRadiusPx, 64.0) and not loop.resizingRadius,
+          "LMB release commits one final radius without sculpting (%g)"
+          % state.brushRadiusPx)
+    check(not session.gestureStack and
+          not dll.argsOf("Tonic_SculptStrokeShaped"),
+          "the completed width change authored no stroke")
+    check(loop.beginRadiusResize(sample(200.0, 100.0)) and
+          loop.resizeRadius(sample(-2000.0, 100.0)) and
+          near(loop.brushRadiusPx(), 2.0),
+          "left F-drag clamps at the minimum radius")
+    check(loop.cancelRadiusResize() and near(state.brushRadiusPx, 64.0),
+          "Escape/capture cancel restores the press-time radius")
+
+
+def testSculptViewPlane(mods):
+    print("-- SculptLoop: frozen view-plane stroke -----------------")
+    tonicLib = mods["tonicLib"]
+    sculpt = mods["tonicLoopsSculpt"]
+    loop, dll, session, state, cam, sample = newSculpt(mods)
+    state.brushRadiusPx = 40.0
+    # No geometry item exists at this press.  The existing explicit tube
+    # selection is nevertheless close enough in screen space to begin a
+    # sculpt gesture; no unselected/default tube may be guessed.
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [9]}
+    session.pickFn = lambda _mask, _x, _y: None
+    oldCount = sculpt.tonicHierarchy.tubeCenterCount
+    oldPoint = sculpt.tonicHierarchy.tubeCenterHandle
+    sculpt.tonicHierarchy.tubeCenterCount = lambda *_args: 5
+    sculpt.tonicHierarchy.tubeCenterHandle = (
+        lambda *_args: (2.0, 0.0, 2.0))  # projects to (200, 200)
+    try:
+        press = sample(224.0, 216.0)
+        check(loop.press(press),
+              "selected tube starts a near-empty-space sculpt press")
+        check(loop._tube == 9 and loop._cv > 0,
+              "the selected owner resolves to an editable center CV")
+        picksAtPress, raysAtPress = len(session.picks), len(session.rays)
+        loop.move(sample(360.0, 300.0))
+        check(len(session.picks) == picksAtPress and
+              len(session.rays) == raysAtPress,
+              "active drag never repicks or raycasts geometry")
+        strokes = dll.argsOf("Tonic_SculptStrokeShaped")
+        check(strokes and near(strokes[-1]["x"], 200.0) and
+              near(strokes[-1]["y"], 200.0),
+              "Grab keeps the projected press footprint, not the trail")
+        rings = dll.argsOf("Tonic_SetBrushRing")
+        if rings:
+            centre, normal = rings[-1][1], rings[-1][2]
+            projected = cam.worldToPixels((centre[0], centre[1], centre[2]))
+            check(projected is not None and near(projected[0], 360.0) and
+                  near(projected[1], 300.0),
+                  "the active brush ring follows the cursor on its view plane")
+            check(abs(float(normal[1])) > 0.99,
+                  "the frozen ring normal is camera-forward, not a surface normal")
+        else:
+            check(False, "the active view-plane brush ring is published")
+        check(loop.cancel(), "Escape cancels the background view-plane drag")
+    finally:
+        sculpt.tonicHierarchy.tubeCenterCount = oldCount
+        sculpt.tonicHierarchy.tubeCenterHandle = oldPoint
 
 
 # ---------------------------------------------------------------------------
@@ -593,8 +824,11 @@ def main():
     testHierarchyEdgeSplit(mods)
     testHierarchyResubdivide(mods)
     testHierarchyLevels(mods)
+    testHierarchyActiveCut(mods)
     testSculptStroke(mods)
     testSculptBrushes(mods)
+    testSculptRadiusResize(mods)
+    testSculptViewPlane(mods)
     testLadder(mods)
     print("testUsdGenTonicToolsLoopsHier: %d failure(s)" % failures)
     return 1 if failures else 0

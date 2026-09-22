@@ -2,6 +2,7 @@
 
 #include "usdGen/expressionTargets.h"
 #include "usdGen/opRegistry.h"
+#include "usdGen/surfaceCageSource.h"
 
 #include <algorithm>
 #include <cmath>
@@ -343,6 +344,16 @@ bool ValidateCudaResolvedInputs(UsdGenGraphDesc const& desc,
         auto const maps = node.mapBindings.empty() ? node.maps.size()
                                                    : node.mapBindings.size();
         if (references == 0 && maps == 0) continue;
+        if (node.type == TfToken("UsdGenCurveSource") &&
+            references == 0 && maps == 1 && node.curves.size() == 1 &&
+            node.surfaces.size() == 1 && node.inputs.empty() &&
+            node.mapBindings.size() == 1 &&
+            node.mapBindings.front().relationship == TfToken("usdGen:regionMap")) {
+            // surfaceCage expands on the CPU source-preparation boundary
+            // before ordinary C3 upload; detailed cage/map validation occurs
+            // in the same shared bridge used by the CPU CurveSource lane.
+            continue;
+        }
         if (node.type == TfToken("UsdGenReferenceSource") &&
             references == 1 && maps == 0 && node.curves.empty() &&
             node.surfaces.empty() && node.inputs.empty()) {
@@ -396,6 +407,12 @@ public:
     // Keep the shape explicit so source preparation, resource accounting and
     // publication never reinterpret captured roots as authored curve input.
     bool scatterGrow = false;
+    // A surface-cage CurveSource expands on the host before C3 upload.  Keep
+    // its descriptor-only upper bound on the plan so runtime preparation can
+    // prove the actual categorical-map result stayed within the capacity that
+    // was admitted during compilation.
+    uint64_t surfaceCageMaxCurves = 0;
+    uint64_t surfaceCageMaxCvs = 0;
     // Semantic Grow output that seeds the Width value DAG.  This is distinct
     // from sourceNode, which remains Scatter for immutable CPU capture.
     uint32_t scatterGrowOutputNode = UINT32_MAX;
@@ -2637,9 +2654,19 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         return true;
     }
     if (!ValidateExpressionTargets(node, diagnostics)) return false;
+    TfToken const interpolationMode = UsdGenParamView{&desc, &node}.GetToken(
+        TfToken("interpolationMode"), TfToken("none"));
+    if (interpolationMode != TfToken("none") && interpolationMode != TfToken("surfaceCage"))
+        return Fail(diagnostics, "CurveSource interpolationMode must be none or surfaceCage");
+    bool const surfaceCage = interpolationMode == TfToken("surfaceCage");
     if (!referenceSource && (!node.inputs.empty() || !node.references.empty() ||
-                             !node.maps.empty() || !node.mapBindings.empty()))
+        (!surfaceCage && (!node.maps.empty() || !node.mapBindings.empty()))))
         return Fail(diagnostics, "CurveSource cannot consume an upstream/reference/map in the current executor");
+    if (surfaceCage && (node.maps.size() != 1 || node.mapBindings.size() != 1 ||
+        node.maps.front() != node.mapBindings.front().map ||
+        node.mapBindings.front().relationship != TfToken("usdGen:regionMap") ||
+        node.surfaces.size() != 1))
+        return Fail(diagnostics, "surfaceCage CurveSource requires one bound surface and one usdGen:regionMap");
     for (auto const& ramp : node.ramps) {
         if (!ramp.positions.empty() || !ramp.colors.empty() ||
             std::any_of(ramp.knots.begin(), ramp.knots.end(), [](auto const& k) { return k[1] != 1.0f || !std::isfinite(k[0]); }))
@@ -2667,7 +2694,8 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
     // Never silently ignore an authored effect just because this is a source.
     static const std::set<std::string> supported{
         "useRest", "idSource", "expectEpoch", "staleAction",
-        "resampleTo", "rebind"};
+        "resampleTo", "rebind", "interpolationMode", "densityMultiplier",
+        "regionMapChannel", "expectMapGeneration"};
     std::set<TfToken> seen;
     for (auto const& param : node.params) {
         if (!seen.insert(param.name).second)
@@ -2676,10 +2704,27 @@ bool ValidateCudaGraph(UsdGenGraphDesc const& desc, UsdGenDiagnostics* diagnosti
         if (!supported.count(name))
             return Fail(diagnostics, "unsupported CurveSource parameter " + param.name.GetString());
         const bool validType = name == "useRest" ? param.value.IsHolding<bool>() :
-            name == "resampleTo" ? param.value.IsHolding<int>() :
+            name == "resampleTo" || name == "regionMapChannel" ? param.value.IsHolding<int>() :
+            name == "densityMultiplier" ? param.value.IsHolding<float>() &&
+                std::isfinite(param.value.UncheckedGet<float>()) && param.value.UncheckedGet<float>() > 0.0f :
+            name == "expectMapGeneration" ? param.value.IsHolding<uint64_t>() :
             (name == "expectEpoch") ? param.value.IsHolding<std::string>() :
             param.value.IsHolding<TfToken>();
-        if (!validType) return Fail(diagnostics, "wrong native type for source parameter " + name);
+        if (!validType || (surfaceCage && param.animated))
+            return Fail(diagnostics, "wrong native type for source parameter " + name);
+    }
+    if (surfaceCage) {
+        UsdGenParamView const cageParams{&desc, &node};
+        if (cageParams.GetInt(TfToken("regionMapChannel"), 0) != 0)
+            return Fail(diagnostics, "surfaceCage CurveSource requires categorical regionMapChannel zero");
+        auto const source = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
+            [&](auto const& curves) { return curves.path == node.curves.front(); });
+        auto const map = std::find_if(desc.maps.begin(), desc.maps.end(),
+            [&](auto const& value) { return value.path == node.maps.front(); });
+        if (source == desc.curveSets.end() || !source->surfaceCage ||
+            map == desc.maps.end() || map->type != TfToken("UsdGenPtexMap") ||
+            map->resolvedAssetPath.empty())
+            return Fail(diagnostics, "surfaceCage CurveSource requires a captured cage and resolved UsdGenPtexMap");
     }
     if (NoiseNeedsAuthoredSourceRest(desc, layout.source, layout.operators, layout.input)) {
         auto const source = std::find_if(desc.curveSets.begin(), desc.curveSets.end(),
@@ -3140,25 +3185,64 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         Fail(diagnostics, "CUDA memory estimate requires the source curve set");
         return {};
     }
-    uint64_t const sourcePoints = static_cast<uint64_t>(sourceIt->points.size());
-    uint64_t const sourceCurves =
+    UsdGenParamView sourceParams;
+    sourceParams.desc = &desc;
+    sourceParams.node = &desc.nodes[layout.source];
+    bool const sourceSurfaceCage = sourceNodeDesc.type == TfToken("UsdGenCurveSource") &&
+        sourceParams.GetToken(TfToken("interpolationMode"), TfToken("none")) ==
+            TfToken("surfaceCage");
+    uint64_t sourcePoints = static_cast<uint64_t>(sourceIt->points.size());
+    uint64_t sourceCurves =
         static_cast<uint64_t>(sourceIt->curveVertexCounts.size());
-    uint64_t sourceNamedChannelBytes = 0;
-    for (UsdGenAuthoredPlaneDesc const& plane : sourceIt->authoredPlanes) {
-        uint64_t planeValues = plane.type == UsdGenAuthoredPlaneType::Float32
-            ? static_cast<uint64_t>(plane.floatValues.size())
-            : static_cast<uint64_t>(plane.intValues.size());
-        uint64_t bytes = 0;
-        if (!EstimateMultiply(planeValues, sizeof(uint32_t), &bytes) ||
-            !EstimateAdd(&sourceNamedChannelBytes, bytes)) {
-            Fail(diagnostics, "CUDA memory estimate overflow for authored named channels");
-            return {};
-        }
-    }
-    bool const sourceHasRoots = SourceMayProduceRootBindings(sourceNodeDesc, *sourceIt);
-    [[maybe_unused]] bool const sourceHasCompleteRoots =
+    bool sourceHasRoots = SourceMayProduceRootBindings(sourceNodeDesc, *sourceIt);
+    [[maybe_unused]] bool sourceHasCompleteRoots =
         sourceIt->skinPrim.size() == sourceCurves &&
         sourceIt->skinPrimUv.size() == sourceCurves;
+    // A sparse surface cage is expanded before any CUDA upload.  Estimate its
+    // worst case now, before the bridge allocates transient host arrays, so
+    // the normal source/output and task-admission accounting sees dense C3
+    // cardinality rather than the authored rail count.  Map clipping only
+    // lowers this bound.
+    if (sourceSurfaceCage) {
+        std::string error;
+        uint64_t denseCurves = 0, densePoints = 0;
+        if (!UsdGenEstimateSurfaceCageCurveSet(desc, sourceNodeDesc, *sourceIt,
+                                                &denseCurves, &densePoints, &error)) {
+            Fail(diagnostics, "CUDA surfaceCage memory preflight failed: " + error);
+            return {};
+        }
+        sourceCurves = denseCurves;
+        sourcePoints = densePoints;
+        sourceHasRoots = true;
+        sourceHasCompleteRoots = true;
+#ifdef USDGEN_ENABLE_CUDA
+        plan->surfaceCageMaxCurves = denseCurves;
+        plan->surfaceCageMaxCvs = densePoints;
+#endif
+    }
+    uint64_t sourceNamedChannelBytes = 0;
+    if (sourceSurfaceCage) {
+        // The bridge emits uniform tubeId plus optional regionId and
+        // hierarchyLevel reporting planes. Charge all three even when the
+        // latter two are absent on a generic cage; payload arrays themselves
+        // are source metadata and never travel with dense C3 output.
+        if (!EstimateMultiply(sourceCurves, 3 * sizeof(uint32_t), &sourceNamedChannelBytes)) {
+            Fail(diagnostics, "CUDA surfaceCage named-channel memory estimate overflow");
+            return {};
+        }
+    } else {
+        for (UsdGenAuthoredPlaneDesc const& plane : sourceIt->authoredPlanes) {
+            uint64_t planeValues = plane.type == UsdGenAuthoredPlaneType::Float32
+                ? static_cast<uint64_t>(plane.floatValues.size())
+                : static_cast<uint64_t>(plane.intValues.size());
+            uint64_t bytes = 0;
+            if (!EstimateMultiply(planeValues, sizeof(uint32_t), &bytes) ||
+                !EstimateAdd(&sourceNamedChannelBytes, bytes)) {
+                Fail(diagnostics, "CUDA memory estimate overflow for authored named channels");
+                return {};
+            }
+        }
+    }
     bool sourceHasDynamicResample = false;
     for (auto const& binding : desc.nodes[layout.source].expressionBindings) {
         if (LocalName(binding.destination) == "resampleTo") {
@@ -3166,9 +3250,6 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             break;
         }
     }
-    UsdGenParamView sourceParams;
-    sourceParams.desc = &desc;
-    sourceParams.node = &desc.nodes[layout.source];
     int const literalResample = sourceParams.GetInt(TfToken("resampleTo"), 0);
     uint64_t finalPoints = sourcePoints;
     bool finalCardinalityKnown = !sourceHasDynamicResample;
@@ -3195,7 +3276,14 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
     }
     uint64_t finalNamedChannelBytes = 0;
     if (finalCardinalityKnown) {
-        for (UsdGenAuthoredPlaneDesc const& plane : sourceIt->authoredPlanes) {
+        if (sourceSurfaceCage) {
+            if (!EstimateMultiply(sourceCurves, 3 * sizeof(uint32_t),
+                                  &finalNamedChannelBytes)) {
+                Fail(diagnostics,
+                    "CUDA surfaceCage resampled named-channel estimate overflow");
+                return {};
+            }
+        } else for (UsdGenAuthoredPlaneDesc const& plane : sourceIt->authoredPlanes) {
             uint64_t elements = plane.domain == UsdGenAuthoredPlaneDomain::Point
                 ? finalPoints
                 : plane.domain == UsdGenAuthoredPlaneDomain::Primitive
@@ -3216,6 +3304,19 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
                                &sourceGeometryBytes) ||
         !EstimateAdd(&sourceGeometryBytes, sourceNamedChannelBytes)) {
         Fail(diagnostics, "CUDA memory estimate overflow for CurveSource input");
+        return {};
+    }
+    // The bridge first owns a dense helper result and then hands an ordinary
+    // C3 candidate to CurveLoader.  Charge both host packets before source
+    // preparation so the dense expansion cannot allocate beyond the
+    // compile-time-admitted source phase.  The CUDA reservation is a
+    // conservative common budget for this CPU preparation boundary and its
+    // subsequent device upload.
+    uint64_t surfaceCagePreparationBytes = 0;
+    if (sourceSurfaceCage &&
+        (!EstimateMultiply(sourceGeometryBytes, 2, &surfaceCagePreparationBytes) ||
+         !EstimateAdd(&surfaceCagePreparationBytes, sourceNamedChannelBytes))) {
+        Fail(diagnostics, "CUDA surfaceCage host preparation memory estimate overflow");
         return {};
     }
     uint64_t finalGeometryBytes = 0;
@@ -3326,7 +3427,7 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         }
 #endif
         if (task->kind == UsdGenExecutionTaskKind::Source) {
-            uint64_t scratch = 0;
+            uint64_t scratch = surfaceCagePreparationBytes;
             uint64_t steady = evaluatorBytes;
             uint64_t output = finalCardinalityKnown ? finalGeometryBytes : 0;
             uint64_t retention = 0;
@@ -8046,6 +8147,30 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
     if (found == desc.curveSets.end()) {
         Fail(diagnostics, "missing C3 input " + sourcePath.GetString()); this->failed = true; return false;
     }
+    // surfaceCage expands sparse rails on this CPU source-preparation
+    // boundary. CUDA only uploads the resulting transient ordinary C3 data;
+    // no worker consults a stage or a map relationship.
+    UsdGenCurveSetDesc surfaceCageSource;
+    UsdGenCurveSetDesc const* preparedInput = &*found;
+    TfToken const sourceInterpolationMode = UsdGenParamView{&desc, &node}.GetToken(
+        TfToken("interpolationMode"), TfToken("none"));
+    if (node.enabled && sourceInterpolationMode == TfToken("surfaceCage")) {
+        std::string error;
+        if (!UsdGenBuildSurfaceCageCurveSet(desc, node, *found,
+                                             &surfaceCageSource, &error)) {
+            Fail(diagnostics, "surfaceCage source preparation failed: " + error);
+            this->failed = true;
+            return false;
+        }
+        if (surfaceCageSource.curveVertexCounts.size() > plan.surfaceCageMaxCurves ||
+            surfaceCageSource.points.size() > plan.surfaceCageMaxCvs) {
+            Fail(diagnostics,
+                "surfaceCage source preparation exceeded its admitted dense capacity");
+            this->failed = true;
+            return false;
+        }
+        preparedInput = &surfaceCageSource;
+    }
     // 02 §6.3: a disabled generator publishes an EMPTY curve set. Substitute
     // an empty C3 input, keeping the authored topology metadata so the rest of
     // this preparation validates the same shape it always did; every step
@@ -8063,7 +8188,7 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
         emptySource.frozenEpoch = found->frozenEpoch;
         emptySource.curveGeneration = found->curveGeneration;
     }
-    auto const& curves = node.enabled ? *found : emptySource;
+    auto const& curves = node.enabled ? *preparedInput : emptySource;
     if (curves.type != TfToken("cubic") ||
         (curves.basis != TfToken("bspline") && curves.basis != TfToken("catmullRom")) ||
         (curves.wrap != TfToken("pinned") && curves.wrap != TfToken("nonperiodic"))) {

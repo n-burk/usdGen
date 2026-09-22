@@ -803,6 +803,19 @@ int main() {
     CHECK(CompileCudaGraph(directCurveSurfaceSource, &diagnostics));
     CHECK(!diagnostics.HasErrors());
 
+    // Only the explicit surfaceCage source boundary may consume its one
+    // categorical regionMap.  A normal CurveSource with a typed ordinary map
+    // must still fail before CUDA lowering rather than silently ignore it.
+    auto ordinarySourceMap = directCurveSurfaceSource;
+    ordinarySourceMap.nodes.front().maps = {SdfPath("/Maps/ordinary")};
+    ordinarySourceMap.nodes.front().mapBindings = {
+        {SdfPath("/Maps/ordinary"), TfToken("usdGen:map")}};
+    diagnostics = {};
+    CHECK(!CompileCudaGraph(ordinarySourceMap, &diagnostics));
+    CHECK(DiagnosticIs(diagnostics,
+        "CUDA: unresolved ReferenceInputs/maps are not supported by CUDA at "
+        "/Groom/Hair/Ops/ZSource (references=0, maps=1)"));
+
     auto unresolvedReference = MakeDesc();
     unresolvedReference.nodes[1].references = {SdfPath("/Guides")};
     diagnostics = {};

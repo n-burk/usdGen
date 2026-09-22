@@ -343,6 +343,10 @@ REQUIRED_C_API = (
      "int Tonic_GetTubeCenterCV(void *model, int tubeId, int cv, "
      "float *out3)",
      "hierarchy"),
+    ("Tonic_GetTubeCenterHandle",
+     "int Tonic_GetTubeCenterHandle(void *model, int tubeId, int cv, "
+     "float *out3)",
+     "displayed center-CV handle"),
     ("Tonic_GetTubeSectionCount",
      "int Tonic_GetTubeSectionCount(void *model, int tubeId)",
      "bridge"),
@@ -439,6 +443,27 @@ def tubeCenterCV(dll, model, tubeId, cv):
     out = (ctypes.c_float * 3)()
     _check(entry(model, int(tubeId), int(cv), out), "Tonic_GetTubeCenterCV")
     return (out[0], out[1], out[2])
+
+
+def tubeCenterHandle(dll, model, tubeId, cv):
+    """Displayed center-CV handle; tubeCenterCV remains authored/raw."""
+    entry = requireEntry(dll, "Tonic_GetTubeCenterHandle")
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                      ctypes.POINTER(ctypes.c_float)]
+    entry.restype = ctypes.c_int
+    out = (ctypes.c_float * 3)()
+    _check(entry(model, int(tubeId), int(cv), out),
+           "Tonic_GetTubeCenterHandle")
+    return (out[0], out[1], out[2])
+
+
+def tubeCenterHandles(dll, model, tubeId):
+    """Every displayed center-CV handle, root first."""
+    count = tubeCenterCount(dll, model, tubeId)
+    if count < 0:
+        raise RuntimeError("Tonic_GetTubeCenterCount: unknown tube %d" %
+                           tubeId)
+    return [tubeCenterHandle(dll, model, tubeId, cv) for cv in range(count)]
 
 
 def tubeCenters(dll, model, tubeId):

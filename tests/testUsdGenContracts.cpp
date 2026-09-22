@@ -172,10 +172,11 @@ void CheckSingleApplyAPI(std::string const &typeName)
 
 int main()
 {
-    // C1 §1 — frozen prim type names (35 concrete + 5 abstract + 4 API).
+    // C1 §1 — frozen prim type names (36 concrete + 5 abstract + 4 API).
     const char *kConcrete[] = {
         "UsdGenGroom", "UsdGenDescription", "UsdGenGuideSet", "UsdGenScatter",
-        "UsdGenGrow", "UsdGenGuideInterpolate", "UsdGenCurveSource",
+        "UsdGenGrow", "UsdGenGuideInterpolate", "UsdGenReferenceSource",
+        "UsdGenCurveSource",
         "UsdGenClump", "UsdGenNoise", "UsdGenLength", "UsdGenWidth",
         "UsdGenDirection", "UsdGenSmooth", "UsdGenResample", "UsdGenScale",
         "UsdGenCurl", "UsdGenBend", "UsdGenStraighten", "UsdGenDisplace",
@@ -279,6 +280,12 @@ int main()
         CheckAttr(grow, "usdGen:lift", "float", "0");
     } else {
         Check(false, "UsdGenGrow: no concrete prim definition");
+    }
+    if (UsdPrimDefinition const *referenceSource = UsdSchemaRegistry::GetInstance()
+            .FindConcretePrimDefinition(TfToken("UsdGenReferenceSource"))) {
+        CheckRel(referenceSource, "usdGen:reference");
+    } else {
+        Check(false, "UsdGenReferenceSource: no concrete prim definition");
     }
     if (UsdPrimDefinition const *source = UsdSchemaRegistry::GetInstance()
             .FindConcretePrimDefinition(TfToken("UsdGenCurveSource"))) {

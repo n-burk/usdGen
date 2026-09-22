@@ -383,6 +383,11 @@ def partC():
     check(session.scalpPath == "/World/Scalp",
           "session: and still records the scalp path (%r)"
           % session.scalpPath)
+    idleWakes = []
+    session.setIdleHook(lambda: idleWakes.append("commit"))
+    check(session.enqueueCommit() and idleWakes == ["commit"],
+          "session: a queued commit wakes the owning idle pump")
+    session.setIdleHook(None)
     session.dll.Tonic_Rasterise(session.model)
     total, uncovered, intersected = session.regionStats()
     check(total > 0 and uncovered < 16,

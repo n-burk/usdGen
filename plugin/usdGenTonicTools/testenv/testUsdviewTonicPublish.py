@@ -22,8 +22,9 @@
 #   * after Tonic_Activate + Tonic_Publish the scene index publishes
 #     /__usdGenTonic/tubes/L1 and /__usdGenTonic/tubes/L2 with exactly the
 #     face and point counts the model's own census predicts;
-#   * the static test tube is drawn while no model is active and is gone
-#     from the frame once one is;
+#   * with USDGENTONIC_TEST_TUBE=1 (what the ctest entry sets) the static
+#     test tube is drawn while no model is active and is gone from the
+#     frame once one is;
 #   * Hydra really rasterises the levels: the framebuffer carries the
 #     clump colour where the tubes are, hiding both levels clears it, and
 #     showing either one alone brings it back;
@@ -335,8 +336,9 @@ def run(stage, view):
     childIds = [kids[i] for i in range(kidCount.value)]
 
     # -- the test tube is on screen until a model takes over ---------------
-    # It is the record harness's convenience, and proving it renders here
-    # is what makes "gone after activate" mean something.
+    # It is the record harness's convenience (opted in via
+    # USDGENTONIC_TEST_TUBE=1 in the ctest entry), and proving it renders
+    # here is what makes "gone after activate" mean something.
     check(frameCamera(stage, view, (-0.5, 0.0, -0.5), (0.5, 4.0, 0.5)),
           "the scene camera frames the test tube")
     beforeFraction = clumpFraction(view)

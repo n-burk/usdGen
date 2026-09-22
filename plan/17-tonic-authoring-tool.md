@@ -1071,6 +1071,32 @@ evidence rules until P0 lands and the first measurements exist.
 > live layer the committer swaps into, which the worsening swap points
 > at directly.
 
+> **2026-09-19 (plan/18 V9-perf, dock cost + the per-frame reading).**
+> Two of the three V9-perf items landed; the third did not start. First,
+> the dock stopped re-reading the model on every publish: `refresh()` is
+> called on every publish, every idle pump and a 250 ms timer — about
+> four times per artist op in the controller soak, where the full
+> warnings re-read alone (three bounded ABI reads, 4 096 smoothness
+> scores among them) cost 2.6–5.9 ms per op. `tonicHud.warningsKey` is
+> the cheap signature of everything `warnings()` reads (model version,
+> fallback, committer attachment); the dock skips the re-read and the
+> widget rebuild on an unchanged key, re-reads at its own 250 ms cadence
+> at most, defers all content past a live gesture, and skips the rebuild
+> when the texts did not change. The soak meters each part
+> (`dock-refresh`, `dock-warnings`, `dock-params`, `dock-strip`) and a T0
+> pins the key contract (`testUsdGenTonicToolsPanels`). Second, the
+> per-frame reading V7 asked for is opt-in:
+> `USDGENTONIC_SOAK_PACE=1` drains the event loop after every input
+> event, so each event is timed as one frame, and reports the per-frame
+> figures beside the default whole-gesture reading; the gate does not
+> move with the switch, because the paced reading changes the workload
+> (it un-compresses the input Qt would compress) and the two readings
+> bracket the truth instead. Third, the committer-swap regression and
+> the host-side growth behind it were not touched — no C++ changed in
+> V9-perf, no new 30-minute run exists, and both controller-soak gates
+> stay red exactly as V7 left them. The suspects above (live layer, then
+> versioned map files against the path-keyed image-map cache) stand.
+
 > **2026-09-19 (plan/18 G11, hierarchy device lanes).** K6, K7 and K14 now
 > have batched CUDA lanes beside their CPU twins (`tonicKernels.{h,cu}`:
 > `TonicSubdivideTubesDevice`, `TonicParentAverageDevice`,

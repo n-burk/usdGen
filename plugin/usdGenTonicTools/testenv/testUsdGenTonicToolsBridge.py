@@ -205,10 +205,15 @@ def _partA(bridge):
                 "exporting nothing raises")
 
     # -- C ABI quote table ---------------------------------------------------
-    check(len(bridge.REQUIRED_C_API) == 8
-          and bridge.REQUIRED_C_API[0][0] == "Tonic_ReadTubeIds"
-          and bridge.REQUIRED_C_API[-1][0] == "Tonic_IsTubeImported",
-          "the P5 table quotes 8 entries, ReadTubeIds to IsTubeImported")
+    expectedEntries = ("Tonic_ReadTubeIds", "Tonic_GetTubeCenterCount",
+                       "Tonic_GetTubeCenterCV", "Tonic_GetTubeCenterHandle",
+                       "Tonic_GetTubeSectionCount", "Tonic_GetTubeSection",
+                       "Tonic_ImportLockedTube", "Tonic_ImportSweptMesh",
+                       "Tonic_IsTubeImported")
+    check(tuple(entry[0] for entry in bridge.REQUIRED_C_API) == expectedEntries,
+          "the bridge table includes the explicit displayed-center handle ABI")
+    check("float *out3" in bridge.cApiQuote("Tonic_GetTubeCenterHandle"),
+          "the displayed-center handle ABI has its complete C quote")
     quote = bridge.cApiQuote("Tonic_ImportSweptMesh")
     check("ringCount" in quote and bridge.cApiQuote("Tonic_Nope") == "",
           "cApiQuote resolves known entries and blanks unknown ones")
@@ -255,6 +260,11 @@ def _partB(bridge, tonicLib):
               and abs(centers[0][1]) < 1e-6
               and abs(centers[-1][1] - 4.0) < 1e-6,
               "tube 0 centers run 0..4 along +Y")
+        handles = bridge.tubeCenterHandles(dll, ctx, 0)
+        handleError = bridge.roundTripError(handles, centers)
+        check(handleError < 1e-5,
+              "a symmetric tube's displayed handles match its raw center cage "
+              "within centroid precision (%.3g)" % handleError)
         check(not bridge.isTubeImported(dll, ctx, 0),
               "tube 0 is not a bridge import")
 
@@ -361,4 +371,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

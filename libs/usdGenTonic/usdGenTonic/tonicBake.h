@@ -14,8 +14,9 @@
 // at the lowest priority (never tonicStream), own worker thread with
 // coalescing (takes the latest mapVersion when it wakes; a superseded bake
 // cancels at the next ~4K-face tile boundary), incremental rasterisation
-// (only faces whose region changed are re-classified; the Ptex writer still
-// writes the full file), and versioned filenames (the swap never points at a
+// (an exact classifier-input repeat reuses texels; a changed graph or
+// hierarchy refreshes them; the Ptex writer still writes the full file), and
+// versioned filenames (the swap never points at a
 // half-written file, and usdGen's imageMapCache, keyed by path, never serves
 // a stale map).
 //
@@ -72,6 +73,11 @@ struct USDGENTONIC_API TonicBakeInput {
     int resOverride = -1;  // per-face texel res override, or -1 for auto
     std::string outDir;  // versioned .ptx files land here
     std::string baseName = "regionMap";  // regionMap.v<m>.ptx
+    // A dedicated one-channel categorical map for Output CurveSource.  Its
+    // texels are the deepest live tube id plus one, or zero outside a Tonic
+    // root support.  This deliberately differs from RegionMap channel zero,
+    // which holds graph interpolation ids.
+    bool outputOwnerMap = false;
     // The hierarchy that fills channels >= 1. Parents before children; a
     // bridge import is not a subdivision cell and does not belong here.
     // Empty leaves every level channel at 0, which is what a groom with no
@@ -187,9 +193,9 @@ private:
     uint64_t _completedVersion = 0;
     std::string _completedPath;
     bool _hasCompleted = false;
-    // Incremental state, worker-thread-only: per-face interp ids from the
-    // last finished bake (the dirty set is the diff) and the per-ptex-face
-    // texel cache.
+    // Incremental state, worker-thread-only: per-face ids from the last
+    // finished bake (the dirty set is the diff) and the per-ptex-face texel
+    // cache. `_cacheDir` also holds the private classifier-cache identity.
     std::vector<int> _cachedFaceRegion;
     std::vector<std::vector<float>> _texelCache;
     std::string _cacheDir;

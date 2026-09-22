@@ -73,8 +73,13 @@ def typeKey(view, name, modifiers=()):
     keys = {"escape": QtCore.Qt.Key.Key_Escape,
             "5": QtCore.Qt.Key.Key_5,
             "1": QtCore.Qt.Key.Key_1,
+            "d": QtCore.Qt.Key.Key_D,
             "g": QtCore.Qt.Key.Key_G,
             "s": QtCore.Qt.Key.Key_S,
+            "c": QtCore.Qt.Key.Key_C,
+            "l": QtCore.Qt.Key.Key_L,
+            "t": QtCore.Qt.Key.Key_T,
+            "z": QtCore.Qt.Key.Key_Z,
             "[": QtCore.Qt.Key.Key_BracketLeft,
             "]": QtCore.Qt.Key.Key_BracketRight}
     mods = QtCore.Qt.KeyboardModifier.NoModifier
@@ -83,6 +88,16 @@ def typeKey(view, name, modifiers=()):
     for modifier in modifiers:
         mods |= table[modifier]
     QtTest.QTest.keyClick(view, keys[name], mods)
+
+
+def heldKey(view, name, down):
+    """Deliver one physical key transition through the real app filter."""
+    from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
+    keys = {"f": QtCore.Qt.Key.Key_F}
+    event = QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress if down else QtCore.QEvent.Type.KeyRelease,
+        keys[name], QtCore.Qt.KeyboardModifier.NoModifier, name)
+    QtWidgets.QApplication.sendEvent(view, event)
 
 
 def wait(ms=30):
@@ -114,6 +129,21 @@ def arcLength(points):
     return total
 
 
+def guideCount(session):
+    guides = ctypes.c_int(0)
+    cvs = ctypes.c_int(0)
+    if session.dll.Tonic_GetGuideCounts(session.model, ctypes.byref(guides),
+                                        ctypes.byref(cvs)) != 0:
+        return 0
+    return int(guides.value)
+
+
+def changed(before, after, epsilon=1e-5):
+    return (len(before) == len(after) and any(
+        abs(before[i][axis] - after[i][axis]) > epsilon
+        for i in range(len(before)) for axis in range(3)))
+
+
 def brushRing(session):
     """(active, centre, radius) of the ring the viewport draws."""
     active = ctypes.c_int(0)
@@ -127,6 +157,34 @@ def brushRing(session):
     return (bool(active.value),
             (float(centre[0]), float(centre[1]), float(centre[2])),
             float(radius.value))
+
+
+def graphStrokeDetail(session, samples):
+    """Failure-only census for the region that seeds this sculpt fixture."""
+    nodes, edges, regions = session.graphCounts()
+    nodeRecords = []
+    for nodeId in range(nodes + 8):
+        face = ctypes.c_int(-1)
+        uv = (ctypes.c_float * 2)()
+        point = (ctypes.c_float * 3)()
+        if session.dll.Tonic_GraphGetNode(
+                session.model, nodeId, ctypes.byref(face), uv, point) == 0:
+            nodeRecords.append((nodeId, int(face.value),
+                                tuple(round(float(value), 5)
+                                      for value in uv),
+                                tuple(round(float(value), 5)
+                                      for value in point)))
+    edgeRecords = []
+    for edgeId in range(edges + 8):
+        endpoints = (ctypes.c_int * 2)()
+        if session.dll.Tonic_GraphGetEdge(
+                session.model, edgeId, endpoints) == 0:
+            edgeRecords.append((edgeId, int(endpoints[0]), int(endpoints[1])))
+    compactSamples = [tuple(round(float(value), 2) for value in point)
+                      for point in samples]
+    return ("counts=%r nodes=%r edges=%r samples=%r"
+            % ((nodes, edges, regions), nodeRecords, edgeRecords,
+               compactSamples))
 
 
 def aimCamera(stage, view, eye, target):
@@ -214,14 +272,26 @@ def run(appController):
     session.setStatusSink(messages.append)
     stage.GetPrimAtPath("/Scalp").SetActive(False)
 
+    mouse = Mouse(view)
+    # Keep the fixture's press, held moves and release on one delivery path.
+    # Mixing QtTest endpoints with explicit held QMouseEvents can perturb the
+    # final sample on an unshown StageView, adding a spurious graph CV.
+    # Direct QMouseEvents still pass through the installed viewport filter.
+    mouse.direct = True
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
+    # Opening the workspace, hiding the source prim and changing the shelf
+    # can each settle the StageView layout on the following event turn.
+    # Project only after that turn, matching the camera the controller will
+    # resolve for the press.
+    view.update()
+    wait(50)
     camera = tonicCamera.resolve(view)
     if camera is None:
         print("FAIL: the controller's camera did not resolve")
         return 1
     state.snapRadiusPx = max(
         0.1 / max(camera.worldPerPixel((2.0, 0.0, 2.0)), 1e-9), 2.0)
-
-    mouse = Mouse(view)
     path = []
     for k in range(len(RECT)):
         x0, z0 = RECT[k]
@@ -233,20 +303,51 @@ def run(appController):
             path.append((hit[0], hit[1]))
     first = camera.worldToPixels((RECT[0][0], 0.0, RECT[0][1]))
     path.append((first[0], first[1]))
+    beforeGraphCounts = session.graphCounts()
+    delivered = mouse._point(path[0])
+    deliveredXY = (float(delivered.x()) * mouse._ratio,
+                   float(delivered.y()) * mouse._ratio)
+    deliveredRay = camera.rayThrough(*deliveredXY)
+    firstRayHit = (session.raycast(*deliveredRay)
+                   if deliveredRay is not None else None)
+    graphLoop = viewport.loop
+    capturedStroke = []
+    originalCommitStroke = graphLoop._commitStroke
+
+    def captureCommitStroke(snapRest):
+        capturedStroke[:] = list(graphLoop._stroke)
+        return originalCommitStroke(snapRest)
+
+    graphLoop._commitStroke = captureCommitStroke
     mouse.press(path[0])
-    if not viewport.gestureActive:
-        info("QtTest press did not land; using direct QMouseEvent delivery")
-        mouse.direct = True
-        mouse.press(path[0])
     for point in path[1:]:
         mouse.move(point)
     mouse.release(path[-1])
-    check(session.graphCounts() == (4, 4, 1),
-          "the drag stroked one closed region (%r)"
-          % (session.graphCounts(),))
-    check(session.dll.Tonic_BuildTubeFromRegion(
-        session.model, 0, CV_COUNT, 8, ctypes.c_float(TUBE_LENGTH)) == 0,
-        "a tube builds from the stroked region")
+    graphLoop._commitStroke = originalCommitStroke
+    graphCounts = session.graphCounts()
+    if graphCounts != (4, 4, 1):
+        info("initial graph fixture mismatch: %s"
+             % graphStrokeDetail(session, path))
+        info("initial graph before=%r delivered=%r firstRay=%r stroke=%r"
+             % (beforeGraphCounts, deliveredXY, firstRayHit,
+                (None if not capturedStroke else
+                 (capturedStroke[0], capturedStroke[-1],
+                  len(capturedStroke)))))
+        pressCamera = viewport.camera
+        info("stroke camera=%dx%d controller camera=%s"
+             % (camera.width, camera.height,
+                None if pressCamera is None else
+                "%dx%d" % (pressCamera.width, pressCamera.height)))
+    check(graphCounts == (4, 4, 1),
+          "the drag stroked one closed region (%r)" % (graphCounts,))
+    buildRc = session.dll.Tonic_BuildTubeFromRegion(
+        session.model, 0, CV_COUNT, 8, ctypes.c_float(TUBE_LENGTH))
+    if buildRc != 0:
+        info("initial tube build failed: %s" % session.lastError())
+    check(buildRc == 0, "a tube builds from the stroked region")
+    check(session.dll.Tonic_RefillGuides(session.model,
+                                         ctypes.c_float(1.0)) == 0,
+          "the fixture has a full guide preview before sculpting")
     session.publish()
 
     # -- side on, so the tube spans the frame ------------------------------
@@ -318,13 +419,55 @@ def run(appController):
     typeKey(view, "[")
     check(state.brushRadiusPx < 60.0, "[ shrinks it (%g)"
           % state.brushRadiusPx)
-    state.brushRadiusPx = 60.0
+
+    # -- F + LMB width drag ------------------------------------------------
+    state.brushRadiusPx = 40.0
+    beforeResize = centers(session)
+    heldKey(view, "f", True)
+    check(viewport._brushResizeArmed,
+          "holding F arms Sculpt brush-width drag")
+    mouse.press(tipPixel)
+    check(viewport.gestureActive and viewport._brushResizeActive,
+          "F-LMB captures a resize gesture instead of a sculpt stroke")
+    mouse.move((tipPixel[0] + 80.0, tipPixel[1] + 120.0))
+    grownRadius = loop.brushRadiusPx()
+    check(grownRadius > 40.0,
+          "horizontal F-drag grows the live ring radius (%g)" % grownRadius)
+    check(abs(state.brushRadiusPx - 40.0) < 1e-5,
+          "the panel radius waits for the completed F-drag")
+    mouse.release((tipPixel[0] + 80.0, tipPixel[1] + 120.0))
+    heldKey(view, "f", False)
+    check(not viewport.gestureActive and not viewport._brushResizeActive and
+          not viewport._brushResizeArmed,
+          "LMB/F release cleanly end resize capture and its arm")
+    check(not changed(beforeResize, centers(session)),
+          "F-drag changes brush width without sculpting geometry")
+    check(abs(state.brushRadiusPx - grownRadius) < 1e-5,
+          "LMB release commits one atomic brush-radius value")
+    heldKey(view, "f", True)
+    check(viewport._brushResizeArmed, "F can arm another width drag")
+    typeKey(view, "escape")
+    check(not viewport._brushResizeArmed and not viewport.gestureActive,
+          "Escape clears a stuck F arm without cancelling a sculpt stroke")
+    heldKey(view, "f", False)
+    # Start from the tube wall, more than the brush radius from its centre
+    # line.  This verifies the normal sculpt workflow after a body click;
+    # it must not depend on landing exactly on a displayed centre CV.
+    state.brushRadiusPx = 8.0
     state.sculptPreserveLength = True
     state.sculptMirrorX = False
     state.brushTRadius = 0.0
 
     # -- a real grab stroke ------------------------------------------------
-    start = pixelOf(base[CV_COUNT - 2])
+    body = list(base[CV_COUNT - 2])
+    body[2] += 0.25
+    start = pixelOf(body)
+    bodyPick = session.pickItem(camera, start[0], start[1],
+                                state.brushRadiusPx,
+                                tonicLibProbe.TONIC_PICK_TUBE_VERT)
+    check(bodyPick is not None,
+          "the broad tube-wall point resolves to its owning tube (%r)"
+          % (bodyPick,))
     mouse.press(start)
     if not viewport.gestureActive:
         info("the sculpt press did not open a gesture; status %r"
@@ -348,6 +491,101 @@ def run(appController):
          % (movedLength, relative))
     check(relative <= 1e-4,
           "and preserved the arc length to 1e-4 relative (%.2e)" % relative)
+    guidesBeforeBrushes = guideCount(session)
+    check(guidesBeforeBrushes > 0,
+          "the sculpt fixture has %d visible guides" % guidesBeforeBrushes)
+
+    # -- selected empty-space view-plane Grab ----------------------------
+    # An artist can keep dragging after leaving the rendered tube.  The
+    # initial point is deliberately near, rather than on, a selected owner;
+    # motion and the ring thereafter must use the press camera plane and no
+    # longer depend on a scalp/body ray hit.
+    state.brushRadiusPx = 120.0
+    session.select(tonicLibProbe.TONIC_PICK_TUBE_VERT, [0])
+    selectedBase = centers(session)
+    selectedAnchor = pixelOf(selectedBase[CV_COUNT - 2])
+    emptyStart = (selectedAnchor[0], selectedAnchor[1] + 105.0)
+    emptyEnd = (emptyStart[0] + 150.0, emptyStart[1])
+    mouse.press(emptyStart)
+    check(viewport.gestureActive,
+          "a selected nearby tube accepts a near-empty-space press")
+    mouse.move(emptyEnd)
+    active, planeCentre, planeRadius = brushRing(session)
+    check(active and planeRadius > 0.0,
+          "the brush ring remains visible through background")
+    if planeCentre is not None:
+        projected = camera.worldToPixels(planeCentre)
+        check(projected is not None and
+              abs(projected[0] - emptyEnd[0]) < 5.0 and
+              abs(projected[1] - emptyEnd[1]) < 5.0,
+              "the active ring follows the cursor on the frozen view plane")
+    mouse.release(emptyEnd)
+    selectedMoved = centers(session)
+    check(changed(selectedBase, selectedMoved),
+          "Grab continues to deform the selected owner after leaving it")
+    typeKey(view, "z", ("ctrl",))
+    wait(20)
+    check(centers(session) == selectedBase,
+          "one undo restores the view-plane Grab exactly")
+
+    # Escape follows the same plane path and restores the gesture base.
+    mouse.press(emptyStart)
+    mouse.move(emptyEnd)
+    check(changed(selectedBase, centers(session)),
+          "the view-plane Grab is live before Escape")
+    typeKey(view, "escape")
+    check(not viewport.gestureActive,
+          "Escape closes the view-plane Grab gesture")
+    mouse.release(emptyEnd)
+    check(centers(session) == selectedBase,
+          "Escape restores the view-plane Grab press-time centers exactly")
+    moved = selectedBase
+
+    # -- the remaining brushes use the bent grab result ------------------
+    # Each is a real mode hotkey plus press/move/release, then Ctrl+Z.  A
+    # straight column is a bad Smooth/Twist fixture because those operations
+    # can correctly be zero there; the body Grab above left this curve bent.
+    def brushStroke(key, dx, dy):
+        typeKey(view, key)
+        beforeBrush = centers(session)
+        startBrush = pixelOf(beforeBrush[CV_COUNT - 2])
+        mouse.press(startBrush)
+        check(viewport.gestureActive,
+              "%s opens a sculpt gesture" % key.upper())
+        mouse.move((startBrush[0] + dx, startBrush[1] + dy))
+        mouse.release((startBrush[0] + dx, startBrush[1] + dy))
+        afterBrush = centers(session)
+        check(changed(beforeBrush, afterBrush),
+              "%s changes the bent center curve" % key.upper())
+        if guidesBeforeBrushes:
+            check(guideCount(session) > 0,
+                  "%s keeps the guide preview populated" % key.upper())
+        typeKey(view, "z", ("ctrl",))
+        wait(20)
+        check(centers(session) == beforeBrush,
+              "Ctrl+Z restores the %s stroke exactly" % key.upper())
+
+    brushStroke("c", 40.0, 0.0)
+    brushStroke("s", 20.0, 0.0)
+    beforeLength = arcLength(centers(session))
+    typeKey(view, "l")
+    check(loop.brush() == "lengthen", "L selects the Lengthen brush")
+    lengthStart = pixelOf(centers(session)[CV_COUNT - 2])
+    mouse.press(lengthStart)
+    mouse.move((lengthStart[0], lengthStart[1] - 70.0))
+    mouse.release((lengthStart[0], lengthStart[1] - 70.0))
+    lengthened = centers(session)
+    check(arcLength(lengthened) > beforeLength + 1e-4,
+          "Lengthen grows the selected span")
+    if guidesBeforeBrushes:
+        check(guideCount(session) > 0,
+              "Lengthen keeps the guide preview populated")
+    typeKey(view, "z", ("ctrl",))
+    wait(20)
+    check(centers(session) == moved,
+          "Ctrl+Z restores the Lengthen stroke exactly")
+    brushStroke("t", 60.0, 0.0)
+    typeKey(view, "g")
 
     # -- Escape mid-stroke restores bit-exactly ---------------------------
     before = centers(session)

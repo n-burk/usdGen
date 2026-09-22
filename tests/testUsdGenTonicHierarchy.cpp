@@ -37,6 +37,7 @@
 #include "usdGenTonic/tonicHierarchy.h"
 #include "usdGenTonic/tonicModel.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -166,6 +167,61 @@ bool DescEqual(TonicTubeDesc const &a, TonicTubeDesc const &b)
         }
     }
     return true;
+}
+
+bool SameFootprint(TonicTubeDesc const &a, TonicTubeDesc const &b)
+{
+    if (a.ringVerts != b.ringVerts || a.frameReference != b.frameReference ||
+        a.rootFramePinned != b.rootFramePinned ||
+        a.sections.size() != b.sections.size()) {
+        return false;
+    }
+    if (a.rootFramePinned &&
+        std::memcmp(&a.rootFrame, &b.rootFrame, sizeof(TonicFrame)) != 0) {
+        return false;
+    }
+    for (size_t s = 0; s < a.sections.size(); ++s) {
+        TonicTubeSection const &x = a.sections[s];
+        TonicTubeSection const &y = b.sections[s];
+        if (x.t != y.t || x.scale != y.scale || x.twist != y.twist ||
+            x.u != y.u || x.v != y.v) {
+            return false;
+        }
+    }
+    return true;
+}
+
+TonicTubeDesc AsymmetricMaterialPolygon()
+{
+    TonicTubeDesc tube;
+    tube.centerX = {0.0f, 0.12f, -0.08f, 0.10f, 0.0f};
+    tube.centerY = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f};
+    tube.centerZ = {0.0f, 0.04f, -0.06f, 0.03f, 0.0f};
+    tube.ringVerts = 8;
+    tube.tubeId = 41;
+    tube.regionId = 8;
+    tube.level = 1;
+    // A proper, nonidentity material reference.  This exercises the Q-aware
+    // K4/K6 path rather than the legacy world-axis frame path.
+    tube.frameReference = {{0.8f, -0.6f, 0.0f,
+                            0.6f,  0.8f, 0.0f,
+                            0.0f,  0.0f, 1.0f}};
+    float const polygon[8][2] = {
+        {-1.32f, -0.35f}, {-0.58f, -0.96f}, {0.50f, -0.82f},
+        {1.28f, -0.24f},  {1.04f, 0.56f},   {0.30f, 1.12f},
+        {-0.82f, 0.86f},  {-1.24f, 0.22f}};
+    tube.sections.resize(5);
+    for (int s = 0; s < 5; ++s) {
+        TonicTubeSection &section = tube.sections[size_t(s)];
+        section.t = float(s) / 4.0f;
+        section.u.resize(8);
+        section.v.resize(8);
+        for (int i = 0; i < 8; ++i) {
+            section.u[size_t(i)] = polygon[i][0];
+            section.v[size_t(i)] = polygon[i][1];
+        }
+    }
+    return tube;
 }
 
 // World wall vertices of every section ring (placed with scale/twist).
@@ -323,6 +379,60 @@ double SignedDistToPoly(double u, double v,
     return inside ? -best : best;
 }
 
+bool SameParentLayoutFrame(TonicTubeDesc const &a, TonicTubeDesc const &b)
+{
+    if (a.ringVerts != b.ringVerts || a.sections.size() != b.sections.size() ||
+        a.rootFramePinned != b.rootFramePinned ||
+        a.frameReference != b.frameReference) {
+        return false;
+    }
+    if (a.rootFramePinned &&
+        std::memcmp(&a.rootFrame, &b.rootFrame, sizeof(TonicFrame)) != 0) {
+        return false;
+    }
+    for (size_t s = 0; s < a.sections.size(); ++s) {
+        if (a.sections[s].t != b.sections[s].t ||
+            a.sections[s].u.size() != b.sections[s].u.size() ||
+            a.sections[s].v.size() != b.sections[s].v.size()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Test the published K5 wall, rather than descriptor UVs.  Each child wall
+// point is projected into the parent frame at its exact rendered t and must
+// lie inside the parent's rendered ring.  This catches an envelope that only
+// encloses sparse section controls while Hermite spans contract underneath.
+bool SectionWorldPoint(TonicTubeDesc const &tube, int sectionIndex, int slot,
+                       float out[3], std::string *err)
+{
+    if (sectionIndex < 0 || sectionIndex >= int(tube.sections.size()) ||
+        slot < 0 || slot >= int(tube.sections[size_t(sectionIndex)].u.size())) {
+        return false;
+    }
+    std::vector<TonicFrame> frames;
+    float center[3] = {};
+    TonicFrame frame;
+    if (!TonicTubeFramesCpu(tube, &frames, err) ||
+        !TonicSampleCenterCpu(tube, frames,
+                              tube.sections[size_t(sectionIndex)].t,
+                              &center[0], &center[1], &center[2], &frame,
+                              err)) {
+        return false;
+    }
+    TonicTubeSection const &section = tube.sections[size_t(sectionIndex)];
+    float const scale = section.scale > 1e-6f ? section.scale : 1e-6f;
+    float const ct = std::cos(section.twist), st = std::sin(section.twist);
+    float const rawU = section.u[size_t(slot)] * scale;
+    float const rawV = section.v[size_t(slot)] * scale;
+    float const u = rawU * ct - rawV * st;
+    float const v = rawU * st + rawV * ct;
+    out[0] = center[0] + frame.nx * u + frame.bx * v;
+    out[1] = center[1] + frame.ny * u + frame.by * v;
+    out[2] = center[2] + frame.nz * u + frame.bz * v;
+    return true;
+}
 void CheckHausdorff()
 {
     TonicTubeDesc parent = StraightCylinder();
@@ -510,6 +620,155 @@ void CheckPropagation()
           "propagation: unedited spans move less than the edited span");
 }
 
+void CheckHoldingEdgeBindings()
+{
+    // K14 records only original outer parent corners.  An L2 edit therefore
+    // moves its inherited L1 holding edge, while an internal clipped CV stays
+    // local even after a subsequent K7 pass.
+    TonicTubeDesc parent = AsymmetricMaterialPolygon();
+    // Keep the nonidentity material Q and asymmetric ring, but make this
+    // first fixture straight so every holding target remains in its existing
+    // parent section plane and exact world alignment is representable.
+    for (size_t i = 0; i < parent.centerX.size(); ++i) {
+        parent.centerX[i] = 0.0f;
+        parent.centerY[i] = float(i);
+        parent.centerZ[i] = 0.0f;
+    }
+    std::string err;
+    std::vector<TonicFrame> parentFrames;
+    TonicSubdivideDesc params;
+    params.count = 4;
+    params.seed = 29;
+    std::vector<TonicTubeDesc> children;
+    if (!TonicTubeFramesCpu(parent, &parentFrames, &err) ||
+        !TonicSubdivideTubeCpu(parent, parentFrames, params, &children, &err) ||
+        children.size() != 4) {
+        Check(false, "holding-edge: K14 derive: " + err);
+        return;
+    }
+    bool complete = true;
+    for (int section = 0; section < int(parent.sections.size()); ++section) {
+        for (int parentSlot = 0; parentSlot < parent.ringVerts; ++parentSlot) {
+            int owners = 0;
+            for (TonicTubeDesc const &child : children) {
+                for (TonicParentBoundaryBinding const &binding :
+                     child.inheritedBoundaryBindings) {
+                    owners += binding.section == section &&
+                        binding.parentSlot == parentSlot;
+                }
+            }
+            complete = complete && owners >= 1;
+        }
+    }
+    Check(complete, "holding-edge: K14 records every retained outer parent corner");
+
+    int owner = -1;
+    TonicParentBoundaryBinding holding;
+    for (int child = 0; child < int(children.size()) && owner < 0; ++child) {
+        for (TonicParentBoundaryBinding const &binding :
+             children[size_t(child)].inheritedBoundaryBindings) {
+            if (binding.section > 0 && binding.section + 1 <
+                int(parent.sections.size())) {
+                owner = child;
+                holding = binding;
+                break;
+            }
+        }
+    }
+    if (owner < 0) {
+        Check(false, "holding-edge: finds an interior holding sample");
+        return;
+    }
+    std::vector<bool> bound(size_t(children[size_t(owner)].ringVerts), false);
+    for (TonicParentBoundaryBinding const &binding :
+         children[size_t(owner)].inheritedBoundaryBindings) {
+        if (binding.section == holding.section && binding.childSlot >= 0 &&
+            binding.childSlot < int(bound.size())) {
+            bound[size_t(binding.childSlot)] = true;
+        }
+    }
+    int internalSlot = -1;
+    for (int slot = 0; slot < int(bound.size()); ++slot) {
+        if (!bound[size_t(slot)]) {
+            internalSlot = slot;
+            break;
+        }
+    }
+    if (internalSlot < 0) {
+        Check(false, "holding-edge: finds a child-only cut sample");
+        return;
+    }
+    int untouchedParentSlot = -1;
+    for (int slot = 0; slot < parent.ringVerts; ++slot) {
+        bool owned = false;
+        for (TonicParentBoundaryBinding const &binding :
+             children[size_t(owner)].inheritedBoundaryBindings) {
+            owned = owned || (binding.section == holding.section &&
+                              binding.parentSlot == slot);
+        }
+        if (!owned) {
+            untouchedParentSlot = slot;
+            break;
+        }
+    }
+    if (untouchedParentSlot < 0) {
+        Check(false, "holding-edge: finds an unrelated outer corner");
+        return;
+    }
+
+    std::vector<TonicTubeDesc> beforeHolding = children;
+    children[size_t(owner)].sections[size_t(holding.section)].u[
+        size_t(holding.childSlot)] += 0.37f;
+    float holdingWorld[3] = {};
+    if (!SectionWorldPoint(children[size_t(owner)], holding.section,
+                           holding.childSlot, holdingWorld, &err)) {
+        Check(false, "holding-edge: evaluate edited child target: " + err);
+        return;
+    }
+    std::vector<TonicTubeDesc> holdingOnly = children;
+    TonicTubeDesc mergedHolding;
+    if (!TonicMergeTubesCpu(holdingOnly, params, &parent, &mergedHolding,
+                            &err, &beforeHolding)) {
+        Check(false, "holding-edge: merge edited holding edge: " + err);
+        return;
+    }
+    float parentWorld[3] = {};
+    bool const aligns = SectionWorldPoint(mergedHolding, holding.section,
+                                          holding.parentSlot, parentWorld,
+                                          &err) &&
+        std::sqrt(double(parentWorld[0] - holdingWorld[0]) *
+                      (parentWorld[0] - holdingWorld[0]) +
+                  double(parentWorld[1] - holdingWorld[1]) *
+                      (parentWorld[1] - holdingWorld[1]) +
+                  double(parentWorld[2] - holdingWorld[2]) *
+                      (parentWorld[2] - holdingWorld[2])) < 2e-4;
+    Check(aligns, "holding-edge: L1 bound corner aligns to the edited L2 edge");
+    float originalOther[3] = {}, mergedOther[3] = {};
+    bool const otherWorldStable =
+        SectionWorldPoint(parent, holding.section, untouchedParentSlot,
+                          originalOther, &err) &&
+        SectionWorldPoint(mergedHolding, holding.section, untouchedParentSlot,
+                          mergedOther, &err) &&
+        std::sqrt(double(mergedOther[0] - originalOther[0]) *
+                      (mergedOther[0] - originalOther[0]) +
+                  double(mergedOther[1] - originalOther[1]) *
+                      (mergedOther[1] - originalOther[1]) +
+                  double(mergedOther[2] - originalOther[2]) *
+                      (mergedOther[2] - originalOther[2])) < 2e-4;
+    Check(otherWorldStable,
+          "holding-edge: unrelated L1 corner stays world-stable");
+
+    std::vector<TonicTubeDesc> beforeInternal = children;
+    children[size_t(owner)].sections[size_t(holding.section)].u[
+        size_t(internalSlot)] += 0.91f;
+    children[size_t(owner)].sections[size_t(holding.section)].v[
+        size_t(internalSlot)] -= 0.44f;
+    TonicTubeDesc mergedInternal;
+    Check(TonicMergeTubesCpu(children, params, &mergedHolding,
+                             &mergedInternal, &err, &beforeInternal) &&
+              DescEqual(mergedHolding, mergedInternal),
+          "holding-edge: successive internal L2 CV edits never become L1 holding edges");
+}
 void CheckEdgeMode()
 {
     TonicTubeDesc parent = StraightCylinder();
@@ -748,6 +1007,105 @@ void CheckK6Resample()
     Check(su > 0.001, "k6-resample: section sculpt resampled across");
 }
 
+void CheckK6EqualLayoutSectionResidual()
+{
+    // Equal section layouts must retain the authored slot identity.  A
+    // one-slot UV sculpt is intentionally asymmetric, so an arc-resample to
+    // the same count is visible as a shear even when K6 itself is a no-op.
+    TonicTubeDesc parent = AsymmetricMaterialPolygon();
+    TonicSubdivideDesc params;
+    params.count = 4;
+    params.seed = 31;
+    std::string err;
+    std::vector<TonicFrame> parentFrames;
+    std::vector<TonicTubeDesc> children;
+    if (!TonicTubeFramesCpu(parent, &parentFrames, &err) ||
+        !TonicSubdivideTubeCpu(parent, parentFrames, params, &children, &err) ||
+        children.size() != 4) {
+        Check(false, "k6-equal-layout: child derivation: " + err);
+        return;
+    }
+    TonicTubeDesc const oldDerived = children[1];
+    TonicTubeDesc oldActual = oldDerived;
+    int const authoredSection = 2;
+    int const authoredSlot = 3;
+    oldActual.sections[size_t(authoredSection)].u[size_t(authoredSlot)] +=
+        0.38125f;
+    oldActual.sections[size_t(authoredSection)].v[size_t(authoredSlot)] -=
+        0.2175f;
+    std::vector<TonicFrame> oldFrames;
+    TonicShapeDeltas stored;
+    if (!TonicTubeFramesCpu(oldDerived, &oldFrames, &err) ||
+        !TonicComputeDeltasCpu(oldActual, oldDerived, oldFrames, &stored,
+                               &err)) {
+        Check(false, "k6-equal-layout: compute residual: " + err);
+        return;
+    }
+    TonicTubeDesc noOpActual;
+    TonicShapeDeltas noOpStored;
+    bool const noOp = TonicHierarchicalSculptApplyCpu(
+        oldDerived, oldActual, oldDerived, stored, false, false, &noOpActual,
+        &noOpStored, &err);
+    bool const noOpSlots = noOp &&
+        noOpStored.sections[size_t(authoredSection)].u ==
+            stored.sections[size_t(authoredSection)].u &&
+        noOpStored.sections[size_t(authoredSection)].v ==
+            stored.sections[size_t(authoredSection)].v &&
+        noOpActual.sections[size_t(authoredSection)].u ==
+            oldActual.sections[size_t(authoredSection)].u &&
+        noOpActual.sections[size_t(authoredSection)].v ==
+            oldActual.sections[size_t(authoredSection)].v;
+    Check(noOpSlots,
+          "k6-equal-layout: no-op K6 retains the nonuniform UV slot exactly");
+
+    // Translate the parent rigidly.  The expected child is constructed from
+    // the independently derived new baseline plus the same stored UV values;
+    // it does not call K6 to establish its expectation.
+    TonicTubeDesc parentMoved = parent;
+    for (size_t i = 0; i < parentMoved.centerX.size(); ++i) {
+        parentMoved.centerX[i] += 0.43f;
+        parentMoved.centerZ[i] -= 0.18f;
+    }
+    std::vector<TonicFrame> movedFrames;
+    TonicTubeDesc newDerived;
+    if (!TonicTubeFramesCpu(parentMoved, &movedFrames, &err) ||
+        !TonicDeriveChildCpu(parentMoved, movedFrames, params, 1, &newDerived,
+                              &err)) {
+        Check(false, "k6-equal-layout: translated child derivation: " + err);
+        return;
+    }
+    TonicTubeDesc expected = newDerived;
+    for (size_t s = 0; s < expected.sections.size(); ++s) {
+        for (size_t slot = 0; slot < expected.sections[s].u.size(); ++slot) {
+            expected.sections[s].u[slot] += stored.sections[s].u[slot];
+            expected.sections[s].v[slot] += stored.sections[s].v[slot];
+        }
+        expected.sections[s].scale += stored.sections[s].scale;
+        expected.sections[s].twist += stored.sections[s].twist;
+    }
+    TonicTubeDesc translatedActual;
+    TonicShapeDeltas translatedStored;
+    bool const translated = TonicHierarchicalSculptApplyCpu(
+        newDerived, oldActual, oldDerived, stored, false, false,
+        &translatedActual, &translatedStored, &err);
+    auto sameMesh = [&](TonicTubeDesc const &a, TonicTubeDesc const &b) {
+        std::vector<TonicFrame> af, bf;
+        std::vector<float> ap, an, at, bp, bn, bt;
+        std::string local;
+        return TonicTubeFramesCpu(a, &af, &local) &&
+            TonicTubeFramesCpu(b, &bf, &local) &&
+            TonicTessellateCpu(a, af, 8, &ap, &an, &at, &local) &&
+            TonicTessellateCpu(b, bf, 8, &bp, &bn, &bt, &local) &&
+            ap == bp && an == bn && at == bt;
+    };
+    Check(translated && sameMesh(translatedActual, expected) &&
+              translatedStored.sections[size_t(authoredSection)].u ==
+                  stored.sections[size_t(authoredSection)].u &&
+              translatedStored.sections[size_t(authoredSection)].v ==
+                  stored.sections[size_t(authoredSection)].v,
+          "k6-equal-layout: translated parent preserves UV slots and full child mesh");
+}
+
 void CheckSubdivideCarriedPartition()
 {
     TonicTubeDesc parent = ShiftedSectionParent();
@@ -899,9 +1257,11 @@ int main()
     CheckRoundTrip();
     CheckIdempotence();
     CheckPropagation();
+    CheckHoldingEdgeBindings();
     CheckEdgeMode();
     CheckK6();
     CheckK6Resample();
+    CheckK6EqualLayoutSectionResidual();
     CheckSubdivideCarriedPartition();
     CheckV0bHierarchyRecords();
     CheckK6MoveBudget();

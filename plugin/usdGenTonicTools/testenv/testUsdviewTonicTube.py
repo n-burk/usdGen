@@ -38,6 +38,7 @@
 # center CVs are visible through the open end and a probe on the axis
 # reads the CV dot rather than the tube wall.
 import ctypes
+import math
 import os
 import sys
 
@@ -102,7 +103,7 @@ class Mouse:
             mods |= table[name]
         return mods
 
-    def _send(self, kind, physical, mods, button):
+    def _send(self, kind, physical, mods, button, buttons=None):
         """One synthetic event straight at the widget.
 
         The fallback path, for a window the harness never showed: QtTest's
@@ -113,8 +114,10 @@ class Mouse:
         point = self._point(physical)
         local = self._QtCore.QPointF(point)
         globalPos = self._QtCore.QPointF(self._view.mapToGlobal(point))
+        if buttons is None:
+            buttons = button
         event = self._QtGui.QMouseEvent(kind, local, globalPos, button,
-                                        button, mods)
+                                        buttons, mods)
         self._QtWidgets.QApplication.sendEvent(self._view, event)
 
     def press(self, physical, modifiers=()):
@@ -131,11 +134,30 @@ class Mouse:
     def move(self, physical, modifiers=()):
         from pxr.Usdviewq.qt import QtCore
         mods = self._modifiers(modifiers)
-        if self.direct:
-            self._send(QtCore.QEvent.Type.MouseMove, physical, mods,
-                       QtCore.Qt.MouseButton.LeftButton)
-        else:
-            _qtTest().QTest.mouseMove(self._view, self._point(physical))
+        # QTest.mouseMove reports NoButton even after QTest.mousePress in
+        # this Qt build. A held drag must carry NoButton as the changed
+        # button and LeftButton in the persistent button-state field.
+        self._send(QtCore.QEvent.Type.MouseMove, physical, mods,
+                   QtCore.Qt.MouseButton.NoButton,
+                   QtCore.Qt.MouseButton.LeftButton)
+
+    def unheldMove(self, physical, modifiers=()):
+        """A real MouseMove reporting lost left-button capture."""
+        from pxr.Usdviewq.qt import QtCore
+        mods = self._modifiers(modifiers)
+        self._send(QtCore.QEvent.Type.MouseMove, physical, mods,
+                   QtCore.Qt.MouseButton.NoButton,
+                   QtCore.Qt.MouseButton.NoButton)
+
+    def focusOut(self):
+        """Send a keyboard-focus event without ending a held mouse drag."""
+        event = self._QtCore.QEvent(self._QtCore.QEvent.Type.FocusOut)
+        self._QtWidgets.QApplication.sendEvent(self._view, event)
+
+    def ungrabMouse(self):
+        """Send the capture-loss event that has no matching release."""
+        event = self._QtCore.QEvent(self._QtCore.QEvent.Type.UngrabMouse)
+        self._QtWidgets.QApplication.sendEvent(self._view, event)
 
     def release(self, physical, modifiers=()):
         from pxr.Usdviewq.qt import QtCore
@@ -143,7 +165,7 @@ class Mouse:
         mods = self._modifiers(modifiers)
         if self.direct:
             self._send(QtCore.QEvent.Type.MouseButtonRelease, physical, mods,
-                       button)
+                       button, QtCore.Qt.MouseButton.NoButton)
         else:
             _qtTest().QTest.mouseRelease(self._view, button, mods,
                                          self._point(physical))
@@ -151,6 +173,19 @@ class Mouse:
     def click(self, physical, modifiers=()):
         self.press(physical, modifiers)
         self.release(physical, modifiers)
+
+    def doubleClick(self, physical, modifiers=()):
+        """Deliver Qt's distinct double-click press followed by release."""
+        from pxr.Usdviewq.qt import QtCore
+        button = QtCore.Qt.MouseButton.LeftButton
+        mods = self._modifiers(modifiers)
+        if self.direct:
+            self._send(QtCore.QEvent.Type.MouseButtonDblClick, physical,
+                       mods, button)
+            self.release(physical, modifiers)
+        else:
+            _qtTest().QTest.mouseDClick(self._view, button, mods,
+                                        self._point(physical))
 
     def drag(self, points, modifiers=()):
         self.press(points[0], modifiers)
@@ -168,8 +203,13 @@ def typeKey(view, name, modifiers=()):
             "1": QtCore.Qt.Key.Key_1,
             "2": QtCore.Qt.Key.Key_2,
             "3": QtCore.Qt.Key.Key_3,
+            "d": QtCore.Qt.Key.Key_D,
             "c": QtCore.Qt.Key.Key_C,
+            "w": QtCore.Qt.Key.Key_W,
             "r": QtCore.Qt.Key.Key_R,
+            "m": QtCore.Qt.Key.Key_M,
+            "f10": QtCore.Qt.Key.Key_F10,
+            "f11": QtCore.Qt.Key.Key_F11,
             "delete": QtCore.Qt.Key.Key_Delete}
     mods = QtCore.Qt.KeyboardModifier.NoModifier
     table = {"shift": QtCore.Qt.KeyboardModifier.ShiftModifier,
@@ -263,8 +303,17 @@ def whiteFraction(view, camera, point, halfPx=6):
 # ---------------------------------------------------------------------------
 
 def centerCV(session, cv):
+    """The authored center cage, retained for geometry assertions."""
     out = (ctypes.c_float * 3)()
     if session.dll.Tonic_GetCenterCV(session.model, int(cv), out) != 0:
+        return None
+    return (float(out[0]), float(out[1]), float(out[2]))
+
+
+def centerHandle(session, cv):
+    """The centered core point published and picked for one root CV."""
+    out = (ctypes.c_float * 3)()
+    if session.dll.Tonic_GetTubeCenterHandle(session.model, 0, int(cv), out) != 0:
         return None
     return (float(out[0]), float(out[1]), float(out[2]))
 
@@ -274,6 +323,42 @@ def centers(session):
     return [centerCV(session, cv) for cv in range(max(count, 0))]
 
 
+def sectionCV(session, tubeId, ring, slot):
+    """World point for an authored section CV, using the public frame ABI."""
+    from usdGenTonicTools import tonicBridge
+    section = tonicBridge.tubeSection(session.dll, session.model, tubeId,
+                                      ring)
+    if slot < 0 or slot >= len(section[1]):
+        return None
+    entry = session.dll.Tonic_GetTubeSectionFrame
+    cfloat3 = ctypes.POINTER(ctypes.c_float)
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, cfloat3,
+                      cfloat3, cfloat3, cfloat3]
+    entry.restype = ctypes.c_int
+    origin = (ctypes.c_float * 3)()
+    frame = (ctypes.c_float * 9)()
+    scale = ctypes.c_float(1.0)
+    twist = ctypes.c_float(0.0)
+    if entry(session.model, int(tubeId), int(ring), origin, frame,
+             ctypes.byref(scale), ctypes.byref(twist)) != 0:
+        return None
+    ct, st = math.cos(twist.value), math.sin(twist.value)
+    u, v = section[1][slot]
+    u, v = u * scale.value, v * scale.value
+    u, v = u * ct - v * st, u * st + v * ct
+    # Tonic_GetTubeSectionFrame returns the ring centroid as origin.  Center
+    # the transformed authored UVs before applying that frame.
+    placed = []
+    for rawU, rawV in section[1]:
+        rawU, rawV = rawU * scale.value, rawV * scale.value
+        placed.append((rawU * ct - rawV * st,
+                       rawU * st + rawV * ct))
+    meanU = sum(pair[0] for pair in placed) / len(placed)
+    meanV = sum(pair[1] for pair in placed) / len(placed)
+    return tuple(origin[axis] + frame[axis] * (u - meanU) +
+                 frame[axis + 3] * (v - meanV) for axis in range(3))
+
+
 def guideCount(session):
     guides = ctypes.c_int(0)
     session.dll.Tonic_GetGuideCounts(session.model, ctypes.byref(guides),
@@ -281,7 +366,36 @@ def guideCount(session):
     return int(guides.value)
 
 
-def gizmoKind(session):
+def guidePreview(session):
+    """Immutable guide points, for observing a real section edit's refill."""
+    guides = ctypes.c_int(0)
+    cvs = ctypes.c_int(0)
+    if session.dll.Tonic_GetGuideCounts(session.model, ctypes.byref(guides),
+                                        ctypes.byref(cvs)) != 0:
+        return ()
+    if guides.value <= 0 or cvs.value <= 0:
+        return ()
+    xyz = (ctypes.c_float * (3 * guides.value * cvs.value))()
+    counts = (ctypes.c_int * guides.value)()
+    got = ctypes.c_int(0)
+    if session.dll.Tonic_ReadGuidePreview(
+            session.model, xyz, len(xyz), counts, len(counts),
+            ctypes.byref(got)) != 0:
+        return ()
+    return tuple(float(value) for value in xyz[:3 * got.value * cvs.value])
+
+
+def gizmoKind(session, viewport=None):
+    """Read the controller-owned gizmo when the Qt overlay is active.
+
+    The native scene-index record is deliberately cleared while usdview draws
+    the unoccluded transparent overlay, so it is a suppression check rather
+    than the source of an interactive gizmo's state.
+    """
+    loop = getattr(viewport, "loop", None) if viewport is not None else None
+    gizmo = getattr(loop, "_gizmo", None)
+    if gizmo is not None and gizmo.visible:
+        return (int(gizmo.kind), tuple(float(value) for value in gizmo.origin))
     kind = ctypes.c_int(0)
     origin = (ctypes.c_float * 3)()
     frameArr = (ctypes.c_float * 9)()
@@ -295,6 +409,28 @@ def gizmoKind(session):
             (float(origin[0]), float(origin[1]), float(origin[2])))
 
 
+def sectionUniformFactor(before, after):
+    """The common local-UV scale factor, or None when it is not uniform."""
+    old, new = before[1], after[1]
+    if len(old) != len(new) or len(old) < 2:
+        return None
+    oldCenter = tuple(sum(point[axis] for point in old) / len(old)
+                      for axis in range(2))
+    newCenter = tuple(sum(point[axis] for point in new) / len(new)
+                      for axis in range(2))
+    factors = []
+    for oldPoint, newPoint in zip(old, new):
+        oldRadius = math.hypot(oldPoint[0] - oldCenter[0],
+                               oldPoint[1] - oldCenter[1])
+        newRadius = math.hypot(newPoint[0] - newCenter[0],
+                               newPoint[1] - newCenter[1])
+        if oldRadius > 1e-6:
+            factors.append(newRadius / oldRadius)
+    if not factors or max(factors) - min(factors) > 2e-3:
+        return None
+    return sum(factors) / len(factors)
+
+
 def pumpUntilCommitted(viewport, session, tries=60):
     for _ in range(tries):
         viewport.pumpOnce()
@@ -302,6 +438,14 @@ def pumpUntilCommitted(viewport, session, tries=60):
             return True
         wait(25)
     return False
+
+
+def liveMarquee(loop):
+    """Read a loop's live marquee across the base and Tube loop APIs."""
+    getter = getattr(loop, "marqueeRect", None)
+    if callable(getter):
+        return getter()
+    return getattr(loop, "_marquee", None)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +463,8 @@ def run(appController):
                                                          "python")))
     try:
         import usdGenTonicTools
-        from usdGenTonicTools import tonicCamera, tonicPanels
+        from usdGenTonicTools import (tonicBridge, tonicCamera, tonicGizmo,
+                                      tonicHierarchy, tonicLib, tonicPanels)
     except ImportError as exc:
         print("FAIL: cannot import usdGenTonicTools: %s" % exc)
         return 1
@@ -345,13 +490,26 @@ def run(appController):
     session = container.session
     viewport = container.viewport
     state = container.tonicState
-    check(session is not None and session.model is not None,
+    workspace = container.workspace
+    check(session is not None and session.model is not None and
+          workspace is not None,
           "Bind scalp created a live model")
     check(viewport is not None and viewport.installed,
           "the viewport controller installed itself on the StageView")
-    if session is None or viewport is None or session.model is None:
+    if session is None or viewport is None or session.model is None or \
+            workspace is None:
         return 1
     session.setStatusSink(messages.append)
+
+    def clickControl(text):
+        """Invoke a visible dock action through its Qt button."""
+        from pxr.Usdviewq.qt import QtWidgets
+        for button in workspace.findChildren(QtWidgets.QAbstractButton):
+            if button.text().split(" (", 1)[0] == text:
+                button.click()
+                wait(15)
+                return True
+        return False
 
     # The region tint mesh is coincident with /Scalp, so leaving both on
     # would z-fight the pixel probes below. The model copied the scalp at
@@ -373,6 +531,8 @@ def run(appController):
 
     # -- Graph: a real stroke, and the G14 tube stub behind it -------------
     mouse = Mouse(view)
+    viewport.setPointerInside(True)
+    typeKey(view, "d")
     path = []
     for k in range(len(RECT)):
         x0, z0 = RECT[k]
@@ -410,6 +570,9 @@ def run(appController):
           "its root sits in the middle of the region (%r)" % (root,))
     check(tip is not None and abs(tip[1] - STUB_LENGTH) < 1e-3,
           "and it grows along the region normal (%r)" % (tip,))
+    tipHandle = centerHandle(session, cvCount - 1)
+    check(tipHandle is not None,
+          "the visible tip has a centered core handle (%r)" % (tipHandle,))
     check(session.enqueueCommit() and pumpUntilCommitted(viewport, session),
           "a graph-only groom now commits, because it has a tube")
     check(bool(stage.GetPrimAtPath("/TonicGroom")),
@@ -424,8 +587,11 @@ def run(appController):
     check(state.tubeSubMode == "center",
           "which opens in the Center sub-mode (%r)" % state.tubeSubMode)
 
-    tipPixel = pixel(*tip)
-    whiteBefore = whiteFraction(view, camera, tip)
+    if tipHandle is None:
+        shutdown()
+        return 1
+    tipPixel = pixel(*tipHandle)
+    whiteBefore = whiteFraction(view, camera, tipHandle)
     info("white at the tip CV before selecting: %.2f" % whiteBefore)
     check(whiteBefore < 0.05,
           "the tip CV draws in the clump colour, not white (%.2f)"
@@ -435,22 +601,74 @@ def run(appController):
     selected = session.readSelection(2)          # TonicPick_CenterCV
     check(selected and selected[0][1] == cvCount - 1,
           "one click selected the tip center CV (%r)" % (selected,))
-    kind, origin = gizmoKind(session)
-    check(kind == 1, "a translate gizmo went to the model (kind %r)" % kind)
-    check(origin is not None and abs(origin[1] - tip[1]) < 1e-3,
-          "at the selected CV (%r vs %r)" % (origin, tip))
-    whiteAfter = whiteFraction(view, camera, tip)
+    kind, origin = gizmoKind(session, viewport)
+    nativeKind, _ = gizmoKind(session)
+    overlay = getattr(viewport, "_gizmoOverlay", None)
+    check(kind == tonicGizmo.GIZMO_TRANSLATE and nativeKind == tonicGizmo.GIZMO_NONE
+          and overlay is not None and overlay.isVisible(),
+          "the Qt translate overlay is live while the native fallback is suppressed")
+    check(origin is not None and abs(origin[1] - tipHandle[1]) < 1e-3,
+          "at the selected core handle (%r vs %r)" % (origin, tipHandle))
+    whiteAfter = whiteFraction(view, camera, tipHandle)
     info("white at the tip CV after selecting: %.2f" % whiteAfter)
     check(whiteAfter > whiteBefore + 0.05,
           "and the published CV dot turned white: %.2f -> %.2f"
           % (whiteBefore, whiteAfter))
+
+    # Qt sends MouseButtonDblClick instead of the second press.  It is not
+    # hierarchy navigation in Tube mode: repeated direct QMouseEvents must
+    # retain the focused level and leave the selected CV draggable.
+    focusBeforeDouble = state.activeLevel
+    mouse.direct = True
+    for _click in range(3):
+        mouse.doubleClick(tipPixel)
+    selected = session.readSelection(2)
+    check(state.activeLevel == focusBeforeDouble and
+          selected == [(0, cvCount - 1, -1)] and
+          not viewport.gestureActive,
+          "repeated Tube double-clicks keep focus and selection usable %r"
+          % ({"level": state.activeLevel, "selection": selected,
+             "gesture": viewport.gestureActive},))
+
+    # Missed releases used to leave the controller captured forever.  A
+    # fresh real press must cancel the old no-travel bracket before arming
+    # the new one, and an actual no-left-button move must recover a stale
+    # marquee without treating an ordinary viewport Leave as cancellation.
+    mouse.press(tipPixel)
+    check(viewport.gestureActive, "the first recovery fixture press armed")
+    mouse.press(tipPixel)                 # prior release intentionally lost
+    check(viewport.gestureActive,
+          "a fresh press recovers then arms a new Tube gesture")
+    mouse.release(tipPixel)
+    mouse.press(tipPixel)
+    mouse.focusOut()
+    mouse.move((tipPixel[0] + 4.0, tipPixel[1]))
+    check(viewport.gestureActive,
+          "keyboard FocusOut preserves a held Tube mouse capture")
+    mouse.ungrabMouse()
+    check(not viewport.gestureActive,
+          "UngrabMouse cancels an otherwise release-less Tube gesture")
+    blank = pixel(0.25, 0.0, 0.25)
+    mouse.press(blank)
+    mouse.move((blank[0] + 16.0, blank[1] + 12.0))
+    check(viewport.gestureActive and liveMarquee(viewport.loop) is not None,
+          "a blank Tube drag owns a live marquee before capture loss")
+    mouse.unheldMove((blank[0] + 20.0, blank[1] + 14.0))
+    check(not viewport.gestureActive and liveMarquee(viewport.loop) is None,
+          "a no-left move cancels the stale marquee and recovers")
+    mouse.drag([blank, (blank[0] + 18.0, blank[1] + 14.0)])
+    check(not viewport.gestureActive,
+          "the next marquee completes after recovery")
+    mouse.click(tipPixel)
+    check(session.readSelection(2) == [(0, cvCount - 1, -1)],
+          "a CV remains selectable after interrupted marquee recovery")
 
     # -- the gizmo drag ----------------------------------------------------
     # The camera is 12 above the scalp and 8 above the tip, so a pixel is
     # worth less up there: the drag is unprojected at the CV's own depth,
     # and so is what this test expects of it.
     travelPx = 60.0
-    tipPerPixel = camera.worldPerPixel(tip)
+    tipPerPixel = camera.worldPerPixel(tipHandle)
     info("world per pixel at the tip CV: %.5f" % tipPerPixel)
     target = (tipPixel[0] + travelPx, tipPixel[1])
     before = centers(session)
@@ -475,22 +693,31 @@ def run(appController):
           % (version, session.modelVersion))
 
     movedTip = after[cvCount - 1]
-    check(whiteFraction(view, camera, movedTip) > 0.05,
+    movedTipHandle = centerHandle(session, cvCount - 1)
+    movedWhite = (whiteFraction(view, camera, movedTipHandle)
+                  if movedTipHandle is not None else 0.0)
+    check(movedTipHandle is not None and
+          movedWhite > 0.05,
           "the published centers followed: the white dot is where the "
           "cursor left it (%.2f)"
-          % whiteFraction(view, camera, movedTip))
-    check(whiteFraction(view, camera, tip) < 0.05,
+          % movedWhite)
+    check(whiteFraction(view, camera, tipHandle) < 0.05,
           "and gone from where it was (%.2f)"
-          % whiteFraction(view, camera, tip))
+          % whiteFraction(view, camera, tipHandle))
 
     # -- TN-1: 50 real moves through the real controller -------------------
     samples = []
-    mouse.press(pixel(*movedTip))
+    movedTipPixel = pixel(*movedTipHandle) if movedTipHandle is not None else None
+    if movedTipPixel is None:
+        check(False, "the moved center CV retains a visible core handle")
+        shutdown()
+        return 1
+    mouse.press(movedTipPixel)
     for step in range(50):
         offset = 4.0 * (1 if step % 2 == 0 else -1) * (1 + step % 5)
-        mouse.move((pixel(*movedTip)[0] + offset, pixel(*movedTip)[1]))
+        mouse.move((movedTipPixel[0] + offset, movedTipPixel[1]))
         samples.append(float(state.lastMoveMs))
-    mouse.release(pixel(*movedTip))
+    mouse.release(movedTipPixel)
     samples = [s for s in samples if s > 0.0]
     if samples:
         samples.sort()
@@ -536,6 +763,147 @@ def run(appController):
           "the idle pump drains the committer after the fill")
     check(bool(stage.GetPrimAtPath("/TonicGroom/Guides")),
           "and the committed guides reached the stage")
+
+    # -- Ring scale and Section CV editing on a non-root tube -------------
+    # Feed selection through the same live session the shelf uses, then
+    # drive the visible gizmos with real StageView mouse events.  A child is
+    # deliberate: root-only tests cannot catch an operation that silently
+    # falls back to tube 0.
+    # Select the visible root and subdivide through the Hierarchy dock.  This
+    # exercises the same active-cut expansion path as an artist; directly
+    # creating children leaves the parent frontier collapsed.
+    workspace._modeButtons["hierarchy"].click()
+    wait(15)
+    rootPoint = sectionCV(session, 0, 1, 0)
+    rootPixel = pixel(*rootPoint) if rootPoint is not None else None
+    if rootPixel is not None:
+        mouse.click(rootPixel)
+    rootSelection = session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)
+    check(rootSelection == [(0, -1, -1)],
+          "the visible root is selected before child subdivision %r"
+          % (rootSelection,))
+    didSubdivide = (rootSelection == [(0, -1, -1)] and
+                    clickControl("Subdivide"))
+    children = ([tube for tube in tonicBridge.readTubeIds(
+        session.dll, session.model) if tube != 0] if didSubdivide else [])
+    check(bool(children), "the root subdivides for non-root Tube editing")
+    if children:
+        entered = clickControl("Enter level")
+        check(entered and int(state.activeLevel) >= 2,
+              "the Hierarchy dock enters the created child level")
+        child = int(children[0])
+        ring = 1
+        beforeRing = tonicBridge.tubeSection(session.dll, session.model,
+                                             child, ring)
+        # This is the artist workflow: enter the descendant level before
+        # selecting its rings, so L2 is the focused editable display.
+        workspace._modeButtons["tube"].click()
+        wait(15)
+        if "ring" in getattr(workspace, "_tubeSelectionButtons", {}):
+            workspace._tubeSelectionButtons["ring"].click()
+            wait(10)
+        else:
+            view.setFocus()
+            typeKey(view, "f10")
+        check(state.tubeSubMode == "ring",
+              "F10 chooses the explicit Ring component mode")
+        session.clearSelection()
+        session.select(128, [child], [ring], [-1], 0)  # SectionRing
+        # The visible numeric control is an absolute value, complementary to
+        # the ring-handle's relative drag.  It must use the selected child,
+        # not silently modify tube 0, and it must refill live guides.
+        tubeRows = {row.id: row for row in tonicPanels.descriptors("tube",
+                                                                     state)}
+        previewBeforeScale = guidePreview(session)
+        numericScale = beforeRing[2] * 1.25
+        tubeRows["uniformScale"].set(state, session, numericScale)
+        numericRing = tonicBridge.tubeSection(session.dll, session.model,
+                                              child, ring)
+        previewAfterScale = guidePreview(session)
+        guidesAfterScale = guideCount(session)
+        check(abs(numericRing[2] - numericScale) < 1e-4 and
+              guidesAfterScale > 0 and previewAfterScale != previewBeforeScale,
+              "the selected-section scale control changes child T%d and "
+              "keeps a live guide preview" % child)
+        beforeRing = numericRing
+        typeKey(view, "r")
+        viewport.loop._placeGizmo(camera)
+        ringGizmo = viewport.loop._gizmo
+        scaleCenters = [handle for handle in ringGizmo.screenHandles(camera)
+                        if handle["kind"] == "center" and
+                        handle.get("grabbable", False)]
+        check(state.activeMode == "tube" and state.tubeSubMode == "ring" and
+              state.transformTool == "scale" and ringGizmo.visible and
+              ringGizmo.kind == tonicGizmo.GIZMO_SCALE and scaleCenters,
+              "R raises the explicit Scale gizmo on the focused child ring")
+        if scaleCenters:
+            ringPixel = scaleCenters[0]["points"][0]
+            target = (ringPixel[0] + 32.0, ringPixel[1])
+            check(ringGizmo.handleAt(camera, ringPixel[0], ringPixel[1]) ==
+                  tonicGizmo.HANDLE_CENTER,
+                  "the Scale gizmo centre accepts uniform child-ring scale")
+            mouse.press(ringPixel)
+            check(viewport.gestureActive and ringGizmo.dragging and
+                  ringGizmo.activeHandle == tonicGizmo.HANDLE_CENTER,
+                  "the real press begins a child Scale gesture")
+            mouse.move(target)
+            mouse.release(target)
+            afterRing = tonicBridge.tubeSection(session.dll, session.model,
+                                                child, ring)
+            guidesAfterRing = guideCount(session)
+            factor = sectionUniformFactor(beforeRing, afterRing)
+            check(factor is not None and factor > 1.01 and guidesAfterRing > 0,
+                  "a real Scale drag uniformly scales child T%d "
+                  "and retains its guide preview (factor %.3f, %d guides)"
+                  % (child, factor or 0.0, guidesAfterRing))
+
+        beforeSection = tonicBridge.tubeSection(session.dll, session.model,
+                                                 child, ring)
+        previewBeforeCV = guidePreview(session)
+        typeKey(view, "f11")
+        typeKey(view, "w")
+        session.clearSelection()
+        childCV = sectionCV(session, child, ring, 0)
+        check(childCV is not None,
+              "the child section CV has a public, projectable position")
+        if childCV is not None:
+            mouse.click(pixel(childCV[0], childCV[1], childCV[2]))
+        cvSelection = session.readSelection(4)         # SectionCV
+        check(cvSelection == [(child, ring, 0)],
+              "a real child Section-CV click selects its tube/ring/slot %r"
+              % (cvSelection,))
+        viewport.loop._placeGizmo(camera)
+        cvGizmo = viewport.loop._gizmo
+        kind, cvOrigin = gizmoKind(session, viewport)
+        check(state.tubeSubMode == "section" and state.transformTool == "move"
+              and cvGizmo.visible and kind == tonicGizmo.GIZMO_TRANSLATE and
+              cvOrigin is not None,
+              "F11 then W raises Move on the focused child section CV")
+        if cvOrigin is not None and cvGizmo.visible:
+            cvPixel = camera.worldToPixels(cvOrigin)
+            cvTarget = (cvPixel[0] + 24.0, cvPixel[1])
+            mouse.press(cvPixel)
+            check(viewport.gestureActive and cvGizmo.dragging,
+                  "the real press begins a child section-CV gesture")
+            mouse.move(cvTarget)
+            mouse.release(cvTarget)
+            afterSection = tonicBridge.tubeSection(session.dll, session.model,
+                                                    child, ring)
+            previewAfterCV = guidePreview(session)
+            guidesAfterCV = guideCount(session)
+            changed = (afterSection[1][0] != beforeSection[1][0])
+            siblingSame = (afterSection[1][1] == beforeSection[1][1])
+            previewChanged = (previewAfterCV != previewBeforeCV)
+            info("child section drag: changed=%r siblingSame=%r "
+                 "previewChanged=%r before=%r after=%r" %
+                 (changed, siblingSame, previewChanged,
+                  beforeSection[1][0], afterSection[1][0]))
+            check(changed and siblingSame,
+                  "a real Section drag moves only child T%d ring %d CV 0"
+                  % (child, ring))
+            check(guidesAfterCV > 0 and previewChanged,
+                  "the child Section drag refills its live guides (%d)"
+                  % guidesAfterCV)
 
     # -- tear down cleanly -------------------------------------------------
     viewport.uninstall()

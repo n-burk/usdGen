@@ -53,6 +53,16 @@ MAX_FILL_PROFILE_FLOATS = 64
 # tubes at once).
 MAX_SELECTION = 256
 
+# Shared wording for the Graph and Output controls.  The option is a
+# per-face Ptex bake resolution; it is independent from guide density in
+# Fill.  Keep this on the Qt-free descriptor module so headless callers and
+# the dock show the same explanation.
+TEXEL_RESOLUTION_HELP = (
+    "Ptex texels per face side. Auto uses 64×64 on region boundaries; "
+    "higher values resolve finer regions. Guide density is controlled in "
+    "Fill."
+)
+
 
 def _descriptor(id, label, kind, get, set, min=0.0, max=0.0, step=0.0,
                 choices=()):
@@ -123,29 +133,48 @@ def _loop(container, modeId):
 
 
 def selectedTubeIds(session):
-    """Distinct tube ids in the current tube selection, ascending.
+    """Distinct owning tube ids in the current editable selection.
 
-    Reads Tonic_ReadSelection(kind=TubeVert) (plan/18 section 2.3): a
-    selected tube is represented by its TubeVert entry, id = tubeId. Empty
-    when there is no model yet or nothing is selected.
+    A CV or section-ring selection carries its owner in the same first
+    tuple slot as a whole TubeVert selection. Resolve all editable kinds so
+    panel actions follow a selected child tube instead of falling back to
+    tube 0 merely because the whole-tube kind is empty.
     """
+    readSelection = getattr(session, "readSelection", None)
+    if callable(readSelection):
+        seen = set()
+        for kind in (tonicTube.PICK_TUBE_VERT,
+                     tonicTube.PICK_CENTER_CV,
+                     tonicTube.PICK_SECTION_CV,
+                     tonicTube.PICK_SECTION_RING):
+            try:
+                entries = readSelection(kind)
+            except (AttributeError, TypeError, RuntimeError):
+                continue
+            for entry in entries or ():
+                try:
+                    seen.add(int(entry[0]))
+                except (IndexError, TypeError, ValueError):
+                    continue
+        return sorted(seen)
     dll, ctx = _dll(session), _ctx(session)
     if dll is None or ctx is None:
         return []
-    outIds = (ctypes.c_int * MAX_SELECTION)()
-    outSub = (ctypes.c_int * MAX_SELECTION)()
-    outSubSub = (ctypes.c_int * MAX_SELECTION)()
-    got = ctypes.c_int(0)
-    rc = dll.Tonic_ReadSelection(ctx, tonicTube.PICK_TUBE_VERT, outIds,
-                                 outSub, outSubSub, MAX_SELECTION,
-                                 ctypes.byref(got))
-    if int(rc) != 0:
-        return []
-    seen = []
-    for i in range(got.value):
-        tubeId = int(outIds[i])
-        if tubeId not in seen:
-            seen.append(tubeId)
+    seen = set()
+    for kind in (tonicTube.PICK_TUBE_VERT,
+                 tonicTube.PICK_CENTER_CV,
+                 tonicTube.PICK_SECTION_CV,
+                 tonicTube.PICK_SECTION_RING):
+        outIds = (ctypes.c_int * MAX_SELECTION)()
+        outSub = (ctypes.c_int * MAX_SELECTION)()
+        outSubSub = (ctypes.c_int * MAX_SELECTION)()
+        got = ctypes.c_int(0)
+        rc = dll.Tonic_ReadSelection(ctx, kind, outIds, outSub, outSubSub,
+                                     MAX_SELECTION, ctypes.byref(got))
+        if int(rc) != 0:
+            continue
+        for i in range(got.value):
+            seen.add(int(outIds[i]))
     return sorted(seen)
 
 
@@ -195,6 +224,9 @@ def _graphDescriptors(state):
         _scalarDescriptor(
             "mirrorX", "Mirror X", "bool", "mirrorX", _boolCast,
             "Tonic_GetMirrorX", "Tonic_SetMirrorX", dllCast=_boolToInt),
+        _descriptor("texelResolution", "Ptex texels per face side", "enum",
+                    _texelResolutionGet, _texelResolutionSet,
+                    choices=TEXEL_CHOICES),
     ]
 
 
@@ -245,21 +277,162 @@ def _softRadiusSet(state, session, value):
                                    float(state.softRadius))
 
 
+def _selectionShapeGet(state, _session):
+    value = str(getattr(state, "selectionShape", "box")).lower()
+    return value if value in ("box", "lasso") else "box"
+
+
+def _selectionShapeSet(state, _session, value):
+    value = str(value).lower()
+    state.selectionShape = value if value in ("box", "lasso") else "box"
+
+
+def _transformToolGet(state, _session):
+    value = str(getattr(state, "transformTool", "move")).lower()
+    return value if value in ("select", "move", "rotate", "scale") \
+        else "move"
+
+
+def _transformToolSet(state, _session, value):
+    value = str(value).lower()
+    state.transformTool = (value if value in ("select", "move", "rotate",
+                                               "scale") else "move")
+
+
 def _tubeCache(state):
     return state.panels.setdefault("tube", {"ringCvCount": tonicTube.
-                                            DEFAULT_RING_VERTS})
+                                            DEFAULT_REGION_RING_VERTS})
 
 
 def _ringCvCountGet(state, session):
-    return int(_tubeCache(state)["ringCvCount"])
+    cache = _tubeCache(state)
+    value = tonicTube.regionRingVerts(cache.get(
+        "ringCvCount", tonicTube.DEFAULT_REGION_RING_VERTS))
+    cache["ringCvCount"] = value
+    return value
 
 
 def _ringCvCountSet(state, session, value):
-    _tubeCache(state)["ringCvCount"] = max(3, int(value))
+    _tubeCache(state)["ringCvCount"] = tonicTube.regionRingVerts(value)
+
+
+def _selectedSectionRings(session):
+    if session is None or not hasattr(session, "readSelection"):
+        return []
+    try:
+        rings = list(session.readSelection(tonicTube.PICK_SECTION_RING))
+        if rings:
+            return rings
+        # A section-CV selection still identifies its owning ring, so the
+        # same absolute scale control remains useful in Section CVs mode.
+        cvs = list(session.readSelection(tonicTube.PICK_SECTION_CV))
+        return [(tubeId, ring, -1) for tubeId, ring, _slot in cvs]
+    except (AttributeError, TypeError, RuntimeError):
+        return []
+
+
+def _readSectionScale(session, tubeId, ring):
+    """Read one ring scale through the optional bridge helper."""
+    if session is None or getattr(session, "model", None) is None:
+        return None
+    try:
+        try:
+            from . import tonicBridge
+        except ImportError:
+            import tonicBridge
+        section = tonicBridge.tubeSection(session.dll, session.model,
+                                          int(tubeId), int(ring))
+        return float(section[2])
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _uniformScaleGet(state, session):
+    cache = _tubeCache(state)
+    rings = _selectedSectionRings(session)
+    if rings:
+        scale = _readSectionScale(session, rings[0][0], rings[0][1])
+        if scale is not None and scale > 0.0:
+            cache["uniformScale"] = scale
+    return float(cache.get("uniformScale", 1.0))
+
+
+def _uniformScaleSet(state, session, value):
+    value = max(0.01, min(100.0, float(value)))
+    rings = _selectedSectionRings(session)
+    if not rings or session is None or getattr(session, "model", None) is None:
+        _tubeCache(state)["uniformScale"] = value
+        return
+    stage = _stage(session)
+    if stage is None:
+        return
+    targets = []
+    seen = set()
+    for tubeId, ring, _subSub in rings:
+        key = (int(tubeId), int(ring))
+        if key in seen:
+            continue
+        current = _readSectionScale(session, key[0], key[1])
+        if current is None or current <= 0.0:
+            return
+        seen.add(key)
+        targets.append((key[0], key[1], current))
+    if not targets:
+        return
+    begin = getattr(session, "beginGesture", None)
+    if not callable(begin) or not begin("Tube section scale"):
+        return
+    ok = True
+    refillError = False
+    try:
+        for tubeId, ring, current in targets:
+            result = stage.scaleSectionRing(
+                session.ctx, tubeId, ring, value / current)
+            if (result is False or
+                    isinstance(result, (int, float)) and result != 0):
+                ok = False
+                break
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        ok = False
+    if ok:
+        session.endGesture()
+        _tubeCache(state)["uniformScale"] = value
+        try:
+            try:
+                from . import tonicLoopsTube
+            except ImportError:
+                import tonicLoopsTube
+            tonicLoopsTube.restoreGuides(
+                session, None, refill=True)
+        except (ImportError, AttributeError, RuntimeError, TypeError):
+            refillError = True
+        enqueue = getattr(session, "enqueueCommit", None)
+        if callable(enqueue):
+            enqueue()
+        _publish(session)
+        if refillError:
+            report = getattr(session, "report", None)
+            if callable(report):
+                report("Tonic Tube: section changed; guide refill unavailable")
+    else:
+        cancel = getattr(session, "cancelGesture", None)
+        dirty = cancel() if callable(cancel) else 0
+        publish = getattr(session, "publish", None)
+        if callable(publish):
+            publish(dirty)
+        report = getattr(session, "report", None)
+        if callable(report):
+            report("Tonic Tube: section scale failed; edit cancelled")
 
 
 def _tubeDescriptors(state):
     return [
+        _descriptor("selectionShape", "Selection shape", "enum",
+                   _selectionShapeGet, _selectionShapeSet,
+                   choices=("box", "lasso")),
+        _descriptor("transformTool", "Transform", "enum",
+                   _transformToolGet, _transformToolSet,
+                   choices=("move", "rotate", "scale", "select")),
         _descriptor("softRadius", "Soft-selection radius (t)", "float",
                    _softRadiusGet, _softRadiusSet, min=0.0, max=1.0,
                    step=0.01),
@@ -267,8 +440,12 @@ def _tubeDescriptors(state):
             "displaySegments", "Display segments", "int", "displaySegments",
             int, "Tonic_GetDisplaySegments", "Tonic_SetDisplaySegments",
             min=1, max=8, step=1),
-        _descriptor("ringCvCount", "Ring CV count (next build)", "int",
-                   _ringCvCountGet, _ringCvCountSet, min=3, max=32, step=1),
+        _descriptor("ringCvCount", "Ring CVs (next region tube)", "enum",
+                   _ringCvCountGet, _ringCvCountSet,
+                   choices=tonicTube.REGION_RING_VERT_CHOICES),
+        _descriptor("uniformScale", "Selected section scale", "float",
+                   _uniformScaleGet, _uniformScaleSet,
+                   min=0.01, max=100.0, step=0.05),
     ]
 
 
@@ -454,20 +631,41 @@ def _fillDescriptors(state):
 
 
 def _refillHandler(container):
+    session = getattr(container, "session", None)
+    refill = getattr(session, "refillGeneratedCurves", None)
+    if callable(refill):
+        refill()
+        return
     loop = _loop(container, "fill")
     if loop is not None:
         loop.refill(1.0)          # the loop commits and reports as well
         return
-    session = getattr(container, "session", None)
     dll, ctx = _dll(session), _ctx(session)
     if dll is None or ctx is None:
         return
-    dll.Tonic_RefillGuides(ctx, 1.0)
+    generate = getattr(dll, "Tonic_GenerateGuides", None)
+    if generate is not None:
+        generate(ctx, 1.0)
+    else:
+        dll.Tonic_RefillGuides(ctx, 1.0)
     _publish(session)
 
 
+def _clearGeneratedCurvesHandler(container):
+    session = getattr(container, "session", None)
+    clear = getattr(session, "clearGeneratedCurves", None)
+    if callable(clear):
+        clear()
+        return
+    report = getattr(session, "report", None)
+    if callable(report):
+        report("Tonic: clear generated curves is unavailable")
+
+
 def _fillActions(state):
-    return [Action("refill", "Refill guides", "", _refillHandler)]
+    return [Action("refill", "Refill guides", "", _refillHandler),
+            Action("clearGeneratedCurves", "Clear generated curves", "",
+                   _clearGeneratedCurvesHandler)]
 
 
 # ---- Hierarchy ----------------------------------------------------------
@@ -853,16 +1051,84 @@ def _texelResolutionSet(state, session, value):
         rebake()
 
 
+def _outputSettings(state, session):
+    getter = getattr(session, "outputSettings", None) \
+        if session is not None else None
+    if callable(getter):
+        enabled, multiplier, width = getter()
+        state.outputEnabled = bool(enabled)
+        state.outputDensityMultiplier = float(multiplier)
+        state.outputStrandWidth = float(width)
+    return (bool(getattr(state, "outputEnabled", False)),
+            float(getattr(state, "outputDensityMultiplier", 1.0)),
+            float(getattr(state, "outputStrandWidth", 0.01)))
+
+
+def _outputDensityGet(state, session):
+    return _outputSettings(state, session)[1]
+
+
+def _outputDensitySet(state, session, value):
+    value = max(float(value), 1e-6)
+    setter = getattr(session, "setOutputSettings", None) \
+        if session is not None else None
+    if callable(setter):
+        if not setter(densityMultiplier=value):
+            return
+    state.outputDensityMultiplier = value
+
+
+def _outputWidthGet(state, session):
+    return _outputSettings(state, session)[2]
+
+
+def _outputWidthSet(state, session, value):
+    value = max(float(value), 0.0)
+    setter = getattr(session, "setOutputSettings", None) \
+        if session is not None else None
+    if callable(setter):
+        if not setter(strandWidth=value):
+            return
+    state.outputStrandWidth = value
+
+
+def _buildDescriptionHandler(container):
+    session = getattr(container, "session", None)
+    build = getattr(session, "buildOutputDescription", None) \
+        if session is not None else None
+    if callable(build):
+        build()
+        return
+    report = getattr(session, "report", None) if session is not None else None
+    if callable(report):
+        report("Tonic: Output description is unavailable")
+
+
+def _outputActions(_state):
+    return [Action("buildDescription", "Build/update description", "",
+                   _buildDescriptionHandler)]
+
+
 def _outputDescriptors(state):
-    return [
+    descriptors = [
         _descriptor("texelResolution",
-                   "Texel resolution override", "enum",
+                   "Ptex texels per face side", "enum",
                    _texelResolutionGet, _texelResolutionSet,
                    choices=TEXEL_CHOICES),
         _scalarDescriptor(
             "showAmplifiedHair", "Show amplified hair", "bool",
             "showAmplifiedHair", _boolCast),
     ]
+    if bool(getattr(state, "outputEnabled", False)):
+        descriptors[1:1] = [
+            _descriptor("outputDensityMultiplier", "Description density",
+                        "float", _outputDensityGet, _outputDensitySet,
+                        min=0.01, max=100.0, step=0.1),
+            _descriptor("outputStrandWidth", "Strand width", "float",
+                        _outputWidthGet, _outputWidthSet,
+                        min=0.0, max=1.0, step=0.001),
+        ]
+    return descriptors
 
 
 # ---- Dispatch ---------------------------------------------------------
@@ -881,6 +1147,7 @@ _ACTION_BUILDERS = {
     "tube": _tubeActions,
     "fill": _fillActions,
     "hierarchy": _hierarchyActions,
+    "output": _outputActions,
     # Sculpt has no one-shot action: every sculpt edit is a stroke, and
     # the brush ring leaves with the mode (SculptLoop.deactivate).
 }

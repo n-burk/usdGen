@@ -28,6 +28,7 @@
 #define USDGEN_TONIC_TUBE_H
 
 #include <cmath>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -40,6 +41,9 @@
 #endif
 
 namespace usdGenTonic {
+
+struct TonicScalpMesh;
+struct TonicRegionLoops;
 
 // Salt for the Tonic root/fill draw stream ("TonC").
 constexpr uint32_t kTonicSaltRoot = 0x546F6E43u;
@@ -115,6 +119,16 @@ struct TonicFrame {
     float bx = 0.0f, by = 0.0f, bz = 1.0f;
 };
 
+// A proper world-space rigid transform. `rotation` is row-major and maps a
+// column point as p' = R*p + translation.  Tube transport rejects reflection,
+// scale and non-finite input rather than silently distorting groom geometry.
+struct TonicRigidTransform {
+    float rotation[9] = {1.0f, 0.0f, 0.0f,
+                         0.0f, 1.0f, 0.0f,
+                         0.0f, 0.0f, 1.0f};
+    float translation[3] = {0.0f, 0.0f, 0.0f};
+};
+
 // One cross-section: parameter t in [0,1], ring CVs in the section plane,
 // a uniform scale and a twist (radians) applied before placement.
 struct TonicTubeSection {
@@ -123,6 +137,18 @@ struct TonicTubeSection {
     std::vector<float> v;  // ringVerts entries
     float scale = 1.0f;
     float twist = 0.0f;
+};
+
+// A persistent K14 material binding for an L2 boundary sample.  It says that
+// `childSlot` in this tube's `section` is the physical descendant of
+// `parentSlot` in the parent section.  K14 writes one only when clipping
+// actually retained the original parent corner; cut/intersection samples are
+// deliberately absent.  The three integers are serialized as one int[]
+// triple so old grooms can simply have an empty binding set.
+struct TonicParentBoundaryBinding {
+    int section = -1;
+    int parentSlot = -1;
+    int childSlot = -1;
 };
 
 // The authored shape of one tube (plan/17 §2.1 Tube, P3 single-tube form).
@@ -135,14 +161,38 @@ struct TonicTubeDesc {
     int tubeId = 0;
     int regionId = 0;
     int level = 1;
+    // Region-rooted tubes pin only their first frame to the support plane.
+    // K4 still derives every later frame from the authored center column, so
+    // bending CV 1 changes the shaft without peeling the root ring off its
+    // region.  Ordinary and legacy tubes leave this false and use pure K4.
+    bool rootFramePinned = false;
+    TonicFrame rootFrame;
+    // Proper local-to-world K4 material-frame reference.  Identity preserves
+    // the historic world-axis bootstrap bit-for-bit.  A rigid region move
+    // composes its rotation on the left, so K4's local chart and every
+    // interpolated section retain their world-space shape.
+    std::array<float, 9> frameReference = {{
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f}};
     // P4 hierarchy links (plan/17 §2.3): the parent this tube subdivided
     // from and the index within that subdivision. -1 = no parent (L1 root
     // or un-subdivided tube).
     int parentTubeId = -1;
     int childIndex = -1;
+    // K14-owned links to inherited parent boundary corners.  These are
+    // material identity, not a nearest-point relationship: K7 uses them to
+    // conform only the L1 edge held by an edited L2, leaving internal cuts
+    // and unrelated parent slots untouched.
+    std::vector<TonicParentBoundaryBinding> inheritedBoundaryBindings;
 };
 
 // Fill parameters (plan/17 §2.1 FillParams, P3 form with edgeBias).
+enum class TonicGuideSampler : uint8_t {
+    Legacy = 0,
+    RegionV3 = 1,
+};
+
 struct TonicFillDesc {
     float density = 100.0f;  // expected guides per unit root area
     int cvCount = 8;         // CVs per guide, in [2, 64]
@@ -151,6 +201,7 @@ struct TonicFillDesc {
     // +1 pushes roots toward the tube wall, -1 pulls them to the center.
     float edgeBias = 0.0f;
     std::vector<float> lengthProfile;  // flattened (pos, value) pairs
+    TonicGuideSampler sampler = TonicGuideSampler::RegionV3;
 };
 
 // One sampled guide root (K8 output, K9 input).
@@ -162,6 +213,34 @@ struct TonicGuideRoot {
     float ru = 0.0f, rv = 0.0f;  // normalised root-plane coordinate
 };
 
+// A transient K9 material binding. It names one deterministic triangle in
+// the actual placed section-0 polygon and its barycentric point. Root caches
+// remain ABI-compatible world roots; a fill rebuilds this binding from their
+// current world positions, so frozen roots and old committed grooms need no
+// migration. The same bytes upload to the optional K9 CUDA lane.
+struct TonicGuideMaterialBinding {
+    int slot0 = -1, slot1 = -1, slot2 = -1;
+    float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f;
+    // The shape-relative root radius after edge bias. It drives only the
+    // length profile; the three weights carry the complete K5 footprint.
+    float edgeRadius = 0.0f;
+    // Physical root minus its un-biased section-0 cage point. K9 fades this
+    // correction by (1 - t) so frozen/off-chart roots stay attached without
+    // changing a full-length terminal ring.
+    float rootDx = 0.0f, rootDy = 0.0f, rootDz = 0.0f;
+};
+
+// One ancestor partition a descendant root must satisfy. `childCenters` is
+// ordered by childIndex; the sample survives only when its owning cell is
+// `childIndex`. A chain is walked root-to-leaf so subface support and K14
+// hierarchy ownership use one deterministic rule in preview and commit.
+struct TonicRootOwnershipCell {
+    float rootCenter[3] = {0.0f, 0.0f, 0.0f};
+    TonicFrame frame;
+    std::vector<float> childCenters;
+    int childIndex = -1;
+};
+
 #ifndef __CUDA_ARCH__
 
 // -- K4: rotation-minimising center frames (double reflection) -------------
@@ -169,12 +248,55 @@ bool TonicCenterFramesCpu(float const *cx, float const *cy, float const *cz,
                           int nCv, std::vector<TonicFrame> *frames,
                           std::string *err);
 
+// Descriptor-aware frame path. Identity frameReference preserves raw K4;
+// a transported descriptor evaluates K4 in its material frame then maps it
+// to world. A region-rooted descriptor still replaces frame zero with its
+// stored support-plane frame. All display, guide, pick and commit paths that
+// start from a TonicTubeDesc must use this rather than raw K4 directly.
+bool TonicTubeFramesCpu(TonicTubeDesc const &tube,
+                        std::vector<TonicFrame> *frames, std::string *err);
+
+// Transport one authored tube with a proper rigid world transform.  The
+// center column and a pinned root frame are transformed directly. K4's
+// local frame reference composes with the transform, so all section UV,
+// scale and twist data stays authored and the complete K5 shape is rigid.
+// It preserves topology and supports `out == &source`.
+bool TonicRigidTransformTubeCpu(TonicTubeDesc const &source,
+                                TonicRigidTransform const &transform,
+                                TonicTubeDesc *out, std::string *err);
+
 // Evaluate the center curve (uniform Catmull-Rom, clamped ends) and its
 // frame (normalised-lerp of the K4 frames) at t in [0,1].
 bool TonicSampleCenterCpu(TonicTubeDesc const &tube,
                           std::vector<TonicFrame> const &frames, float t,
                           float *px, float *py, float *pz, TonicFrame *frame,
                           std::string *err);
+
+// Evaluate one exact K5 cross-section at t. The output is ringVerts world
+// positions in authored slot order, including Hermite U/V, scale and twist.
+// It is shared by tube tessellation, guide material sampling and sparse
+// output rails so each consumer agrees at section endpoints and interiors.
+bool TonicSampleTubeRingCpu(TonicTubeDesc const &tube,
+                            std::vector<TonicFrame> const &frames, float t,
+                            std::vector<float> *positions,
+                            std::string *err);
+
+// Deterministic nondegenerate ear triangulation in authored slot order. It
+// retains every boundary slot, including collinear edge splits, so sparse
+// rails and K9 material binds see the same section topology.
+bool TonicTriangulateSectionSlotsCpu(
+    TonicTubeSection const &section,
+    std::vector<std::array<int, 3>> *triangles, std::string *err);
+
+// The editable/displayed location of a center CV.  It evaluates the actual
+// section polygon at that CV's center parameter and returns its signed-area
+// centroid in world space.  The authored center column remains the source of
+// truth for K4/K6; consumers use this handle only for display, picking and
+// manipulator placement so a clipped or asymmetric tube is controlled from
+// inside its visible core rather than from an outer cage edge.
+bool TonicCenterHandlePointCpu(TonicTubeDesc const &tube, int centerCV,
+                               float *px, float *py, float *pz,
+                               std::string *err);
 
 // Mean ring radius of one section (used to normalise root coordinates).
 float TonicSectionMeanRadius(TonicTubeSection const &section);
@@ -209,11 +331,29 @@ bool TonicRootSampleMeshCpu(float const *points, int const *faceCounts,
                             TonicFrame const &rootFrame, float rootRadius,
                             std::vector<TonicGuideRoot> *roots, int frozen,
                             std::string *err);
+// Exact graph-region form of K8.  Unlike the legacy face-list form above,
+// this tests every emitted root against the closed graph polygon, so two
+// disjoint regions on one coarse mesh face keep separate root support.  The
+// source region id (not its interpolation id) selects the loop.
+bool TonicRootSampleRegionMeshCpu(
+    TonicScalpMesh const &scalp, TonicRegionLoops const &loops,
+    int sourceRegionId, float density, int tubeId, int seed,
+    float const rootCenter[3], TonicFrame const &rootFrame, float rootRadius,
+    std::vector<TonicGuideRoot> *roots, int frozen, std::string *err);
+void TonicFilterGuideRootsByOwnershipCells(
+    std::vector<TonicRootOwnershipCell> const &cells,
+    std::vector<TonicGuideRoot> *roots);
 
 // -- K9: guide fill ----------------------------------------------------------
-// A root's normalised position rides up the tube through the K5 section
-// interpolation; edgeBias remaps the radius and lengthProfile scales the
-// per-guide length. Output is guideCount x fill.cvCount x 3, guide-major.
+// A root binds to a deterministic triangle of the placed section-0 polygon.
+// Its barycentric material point rides through the complete K5 section
+// interpolation, including each CV, scale and twist; edgeBias remaps that
+// point relative to the polygon's material anchor. Output is guideCount x
+// fill.cvCount x 3, guide-major.
+bool TonicBuildGuideMaterialBindingsCpu(
+    TonicTubeDesc const &tube, std::vector<TonicFrame> const &frames,
+    std::vector<TonicGuideRoot> const &roots, TonicFillDesc const &fill,
+    std::vector<TonicGuideMaterialBinding> *bindings, std::string *err);
 bool TonicGuideFillCpu(TonicTubeDesc const &tube,
                        std::vector<TonicFrame> const &frames,
                        std::vector<TonicGuideRoot> const &roots,

@@ -845,6 +845,8 @@ C3 carries. Consumers test for a *value*, never for presence — `velocities`, `
 `research/G-freeze-bake-undo-and-frozen-reentry.md` §2.1 — a probe observation that has no `EV-nnn`
 row in `appendix-A-evidence-ledger.md` yet and should get one).
 
+**`UsdGenReferenceSource`** (v1, same section — the minimal sibling of `UsdGenCurveSource`) pulls one already-baked in-stage `BasisCurves` prim into the stack verbatim through the reference lane (ADR §4.1 I3), as a generator alternative to Scatter/Instance. One row only, declared in `02-schema.md` §2.6: `usdGen:reference` (`rel`, exactly one C3 `BasisCurves` target). **Capture** shares the resolved reference value's immutable buffer (points verbatim, rest with points fallback, ids from `primvars:usdGen:curveId` or synthesized from the source ordering); no parameters, ramps or expressions are accepted. **Evaluate** is nothing (the buffer is installed at capture). An empty or unresolvable reference fails closed at compile.
+
 ### 2.5 `UsdGenDeform` — curves follow the surface (A7 §9.1 G7, R3)
 
 **Purpose.** Transport rest-space curves onto the deformed surface, whoever deformed it — usdRig,
