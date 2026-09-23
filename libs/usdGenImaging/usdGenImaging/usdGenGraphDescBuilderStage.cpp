@@ -766,11 +766,15 @@ BuildGraphDescFromStage(
             } else if (isRegionMap) {
                 SdfPathVector targets;
                 rel.GetTargets(&targets);
-                if (targets.size() != 1) {
+                // Schema relationships are present with zero targets when
+                // unauthored. Empty means optional/unset; surfaceCage still
+                // rejects a missing map at operator admission. More than one
+                // target is a validation error.
+                if (targets.size() > 1) {
                     desc.validationErrors.push_back(
                         node.path.GetString() +
                         ": usdGen:regionMap requires exactly one target");
-                } else {
+                } else if (targets.size() == 1) {
                     node.maps.push_back(targets.front());
                     node.mapBindings.push_back(
                         {targets.front(), TfToken("usdGen:regionMap")});

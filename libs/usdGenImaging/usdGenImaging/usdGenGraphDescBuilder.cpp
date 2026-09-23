@@ -1038,11 +1038,14 @@ _HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
     if (node.type == TfToken("UsdGenCurveSource")) {
         SdfPathVector regionMap;
         if (_HGetPathArray(ug, &regionMap, {"regionMap"})) {
-            if (regionMap.size() != 1) {
+            // The schema relationship exists even when unauthored, so an
+            // empty target list is "not set". surfaceCage admission still
+            // requires a bound map later. More than one target is invalid.
+            if (regionMap.size() > 1) {
                 captured.validationErrors.push_back(
                     node.path.GetString() +
                     ": usdGen:regionMap requires exactly one target");
-            } else {
+            } else if (regionMap.size() == 1) {
                 node.maps.push_back(regionMap.front());
                 node.mapBindings.push_back(
                     {regionMap.front(), TfToken("usdGen:regionMap")});
