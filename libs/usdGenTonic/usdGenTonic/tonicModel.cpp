@@ -4756,6 +4756,24 @@ TonicModel::GetRoots() const
 
 // -- P3: pick -------------------------------------------------------------
 
+namespace {
+
+// The TonicPickCpu consider() rule as a fold predicate: `cand` (a
+// later kind's winner) replaces `best` on a strictly nearer pixel, or
+// an equal pixel at strictly lesser depth. Full ties keep `best`
+// (the earlier kind), exactly like the sequential scan.
+// The CPU pick path (USDGEN_ENABLE_CUDA off, which is the CI recipe)
+// calls this; keep it outside the CUDA guard.
+bool
+PickHitBetter(TonicPickHit const &cand, TonicPickHit const &best)
+{
+    return cand.hit &&
+           (!best.hit || cand.distPx < best.distPx ||
+            (cand.distPx == best.distPx && cand.depth < best.depth));
+}
+
+}  // namespace
+
 #ifdef USDGEN_TONIC_HAS_CUDA
 namespace {
 
@@ -4772,18 +4790,6 @@ CpuPickForced()
 {
     char const *forced = std::getenv("USDGEN_TONIC_FORCE_CPU_PICK");
     return forced && *forced;
-}
-
-// The TonicPickCpu consider() rule as a fold predicate: `cand` (a
-// later kind's winner) replaces `best` on a strictly nearer pixel, or
-// an equal pixel at strictly lesser depth. Full ties keep `best`
-// (the earlier kind), exactly like the sequential scan.
-bool
-PickHitBetter(TonicPickHit const &cand, TonicPickHit const &best)
-{
-    return cand.hit &&
-           (!best.hit || cand.distPx < best.distPx ||
-            (cand.distPx == best.distPx && cand.depth < best.depth));
 }
 
 }  // namespace
