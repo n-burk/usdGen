@@ -760,8 +760,13 @@ bool TonicBakePtex(TonicBakeInput const &input, std::string const &outPath,
 }
 
 TonicBakeWorker::TonicBakeWorker()
-    : _worker(&TonicBakeWorker::_WorkerLoop, this)
 {
+    // _worker is the first data member, so starting it from the initializer
+    // list runs _WorkerLoop before _mutex and _wake exist. Under ctest -j
+    // that race aborts in glibc ("The futex facility returned an unexpected
+    // error code"). Default-construct the thread with the other members,
+    // then start it once they are live. Same pattern as TonicCommitter.
+    _worker = std::thread(&TonicBakeWorker::_WorkerLoop, this);
 }
 
 TonicBakeWorker::~TonicBakeWorker()
