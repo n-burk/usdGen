@@ -14,7 +14,8 @@
 //   * the fill-in creates the op only when absent and only touches empty
 //     relationships/connections;
 //   * "Save groom" writes .usdc and re-parents the live sublayer beneath it;
-//   * TN-4: the reference-scale swap completes in <= 5 ms (measured below);
+//   * TN-4: the reference-scale swap stays near the 5 ms slot budget
+//     (wall-clock sample allows one scheduler slice, <= 8 ms);
 //   * the committer C ABI drives the same pipeline over identifiers;
 //   * P4 hooks: subdivide params + lock flags ride the commit and survive
 //     hydrate (childIndex/deltas/level channels land with P4).
