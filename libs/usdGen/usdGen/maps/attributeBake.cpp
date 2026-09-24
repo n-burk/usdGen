@@ -138,7 +138,11 @@ bool UsdGenAttributeBakePtex(UsdGenAttributeBakeInput const &input,
 
     int const res = input.map->Resolution();
     int const channels = input.map->Channels();
-    int const resLog2 = Log2Int(res);  // res is a validated power of two
+    // Ptex::Res takes the log2 as int8_t. A functional cast in the FaceInfo
+    // initializer below is parsed as a parameter declaration (int8_t resLog2),
+    // so the second argument redefines it. Store the value in that type and
+    // pass the name.
+    int8_t const resLog2 = int8_t(Log2Int(res));  // res is a validated power of two
     float const *src = input.map->Data();
 
     // The out directory is the worker's to own: create it rather than fail a
@@ -164,7 +168,7 @@ bool UsdGenAttributeBakePtex(UsdGenAttributeBakeInput const &input,
         for (int f = 0; f < faces && ok; ++f) {
             int adjFaces[4], adjEdges[4];
             adjacency.Resolve(input.faceVertexIndices, f, adjFaces, adjEdges);
-            Ptex::FaceInfo const info(Ptex::Res(int8_t(resLog2), int8_t(resLog2)),
+            Ptex::FaceInfo const info(Ptex::Res(resLog2, resLog2),
                                       adjFaces, adjEdges, /*isSubface*/ false);
             // Ptex face id == coarse face id on a quad mesh, and the texel
             // order matches the map's ((t * res) + s) grid, so each face
