@@ -509,15 +509,17 @@ def run(appController):
         event = mouse._QtCore.QEvent(kind)
         return mouse._QtWidgets.QApplication.sendEvent(view, event)
 
-    def clickDockControl(text):
-        """Invoke one visible dock button through Qt, never a hierarchy API."""
-        from pxr.Usdviewq.qt import QtWidgets
-        for button in workspace.findChildren(QtWidgets.QAbstractButton):
-            if button.text().split(" (", 1)[0] == text:
-                button.click()
-                wait(20)
-                return True
-        return False
+    def clickDockControl(actionId):
+        """Invoke one dock action button through Qt, never a hierarchy API.
+
+        Found by Action.id through workspace.button (DK-04): by text,
+        "Subdivide" is also the Hierarchy sub-mode button's label."""
+        button = workspace.button("action", actionId)
+        if button is None:
+            return False
+        button.click()
+        wait(20)
+        return True
 
     # Region mode starts by creating LEFT, then creates its neighbour from
     # the same two committed endpoint dots.  These are real clicks and a
@@ -712,7 +714,7 @@ def run(appController):
     # it through the Sculpt-to-Hierarchy mode switch; a second side-view
     # click would be an ambiguous front-tube selection in this compact rig.
     selectedRoot = session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)
-    subdivided = clickDockControl("Subdivide") if selectedRoot == [
+    subdivided = clickDockControl("subdivide") if selectedRoot == [
         (transportedRoot, -1, -1)] else False
     check(selectedRoot == [(transportedRoot, -1, -1)] and subdivided,
           "the real hierarchy surface click and Subdivide control create child tubes "
@@ -855,15 +857,20 @@ def run(appController):
         # without a button down from an incident edge into the CV's 8 px
         # displayed target: the 2 px boundary crossing must be delivered,
         # and a node must beat both the edge and its containing regions.
+        # The row is screen pixels; the model's snap radius is rest units
+        # and is never overwritten with the pixel number.
+        nativeBefore = float(session.dll.Tonic_GetSnapRadius(session.model))
         snapDescriptor = next((descriptor for descriptor in
                                tonicPanels.descriptors("graph", state)
                                if descriptor.id == "snapRadiusPx"), None)
         if snapDescriptor is not None:
             snapDescriptor.set(state, session, 1.0)
         nativeSnap = float(session.dll.Tonic_GetSnapRadius(session.model))
-        check(snapDescriptor is not None and abs(nativeSnap - 1.0) < 1e-5 and
+        check(snapDescriptor is not None and
+              abs(nativeSnap - nativeBefore) < 1e-7 and
               abs(float(state.snapRadiusPx) - 1.0) < 1e-5,
-              "the real Graph Snap radius control applies its 1 px minimum")
+              "the real Graph Snap radius control applies its 1 px minimum "
+              "to the pixel preference, not the model's world radius")
         bPixel = nodePixel(sharedB)
         edgeLength = (math.hypot(bPixel[0] - aPixel[0],
                                  bPixel[1] - aPixel[1])

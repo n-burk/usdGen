@@ -322,6 +322,28 @@ class FakeDll(object):
         self.Tonic_GroupTubes = groupTubes
         self.Tonic_MakePersistent = makePersistent
 
+        # DK-06: the Output row's model switch and the Density readout.
+        self.amplified = 0
+        self.guideCount = 0
+
+        def setAmplifiedHair(ctx, on):
+            log("Tonic_SetAmplifiedHair", ctx, on)
+            self.amplified = int(on)
+            return 0
+
+        def getAmplifiedHair(ctx):
+            log("Tonic_GetAmplifiedHair", ctx)
+            return self.amplified
+
+        def getGuideCounts(ctx, guidesPtr, cvPtr):
+            log("Tonic_GetGuideCounts", ctx)
+            guidesPtr._obj.value = self.guideCount
+            return 0
+
+        self.Tonic_SetAmplifiedHair = setAmplifiedHair
+        self.Tonic_GetAmplifiedHair = getAmplifiedHair
+        self.Tonic_GetGuideCounts = getGuideCounts
+
 
 class FakeSession(object):
     def __init__(self, dll, ctx=1):
@@ -340,6 +362,39 @@ class FakeSession(object):
 
     def rebake(self):
         self.rebakeCount += 1
+
+
+class FakeGestureSession(FakeSession):
+    """A FakeSession with TonicSession's gesture bracket (SS-02).
+
+    The bracket calls land in the FakeDll's call log under their ABI
+    names, so a test can read the order Begin / SetFillParams / End.
+    """
+
+    def __init__(self, dll, ctx=1):
+        FakeSession.__init__(self, dll, ctx)
+        self.gestureActive = False
+
+    def beginGesture(self, label):
+        self.dll.calls.append(("Tonic_BeginGesture", label))
+        self.gestureActive = True
+        return True
+
+    def endGesture(self):
+        self.dll.calls.append(("Tonic_EndGesture",))
+        self.gestureActive = False
+        return True
+
+    def cancelGesture(self):
+        self.dll.calls.append(("Tonic_CancelGesture",))
+        self.gestureActive = False
+        return 0
+
+    def endGestureIfChanged(self, changed):
+        if changed:
+            return self.endGesture()
+        self.cancelGesture()
+        return False
 
 
 class FakeBakeSession(object):
@@ -482,12 +537,477 @@ def _stateOnlyRoundTrip(tonicPanels, modeId, state):
                   "%s.%s: state-only round trip" % (modeId, d.id))
 
 
+def parameterWidgetRules(tonicPanels, tonicToolState, tonicSculpt):
+    """DK-06: ranges, the amplified row, stable level rows, readouts."""
+    # The Output row goes to the model, not only to the state field.
+    dll = FakeDll()
+    session = FakeSession(dll)
+    state = tonicToolState.TonicToolState()
+    state.outputEnabled = True
+    amplified = next(d for d in tonicPanels.descriptors("output", state)
+                     if d.id == "showAmplifiedHair")
+    published = session.publishCount
+    amplified.set(state, session, True)
+    check(("Tonic_SetAmplifiedHair", 1, 1) in dll.calls and
+          dll.amplified == 1 and state.showAmplifiedHair is True and
+          session.publishCount == published + 1,
+          "output.showAmplifiedHair.set calls Tonic_SetAmplifiedHair and "
+          "publishes (%r)" % [c for c in dll.calls if "Amplified" in c[0]])
+    dll.amplified = 0
+    check(amplified.get(state, session) is False and
+          state.showAmplifiedHair is False,
+          "output.showAmplifiedHair.get reads the model's switch back")
+
+    # A session with the TonicSession entry takes that one path.
+    class AmplifiedSession(object):
+        def __init__(self):
+            self.dll = None
+            self.ctx = None
+            self.calls = []
+
+        def setAmplifiedHair(self, flag):
+            self.calls.append(bool(flag))
+            return True
+    viaSession = AmplifiedSession()
+    amplified.set(state, viaSession, True)
+    check(viaSession.calls == [True],
+          "output.showAmplifiedHair.set prefers session.setAmplifiedHair")
+
+    # Every numeric row starts inside its own range on a fresh model.
+    for outputBuilt in (False, True):
+        dll = FakeDll()
+        session = FakeSession(dll)
+        for modeId in ALL_MODES:
+            fresh = tonicToolState.TonicToolState()
+            fresh.outputEnabled = outputBuilt
+            for d in tonicPanels.descriptors(modeId, fresh):
+                if d.kind not in ("int", "float"):
+                    continue
+                value = d.get(fresh, session)
+                check(float(d.min) <= float(value) <= float(d.max),
+                      "%s.%s: fresh value %r lies in [%r, %r]"
+                      % (modeId, d.id, value, d.min, d.max))
+
+    # Brush radius and strength ranges come from tonicSculpt.
+    state = tonicToolState.TonicToolState()
+    sculpt = {d.id: d for d in tonicPanels.descriptors("sculpt", state)}
+    check(sculpt["brushRadiusPx"].min == tonicSculpt.BRUSH_RADIUS_MIN_PX and
+          sculpt["brushRadiusPx"].max == tonicSculpt.BRUSH_RADIUS_MAX_PX,
+          "sculpt.brushRadiusPx uses the shared [%g, %g] px range"
+          % (tonicSculpt.BRUSH_RADIUS_MIN_PX,
+             tonicSculpt.BRUSH_RADIUS_MAX_PX))
+    check(sculpt["sculptStrength"].max == tonicSculpt.STRENGTH_MAX,
+          "sculpt.sculptStrength max is %g for the grab/comb brushes"
+          % tonicSculpt.STRENGTH_MAX)
+    state.sculptSubMode = "smooth"
+    smooth = {d.id: d for d in tonicPanels.descriptors("sculpt", state)}
+    check(smooth["sculptStrength"].max == 1.0,
+          "the Smooth brush's strength row stops at 1.0")
+
+    # The level rows no longer bake the level in: same signature, the
+    # level in a tooltip instead.
+    state = tonicToolState.TonicToolState()
+    state.activeLevel = 1
+    first = [(d.id, d.label) for d in
+             tonicPanels.descriptors("hierarchy", state)]
+    state.activeLevel = 3
+    third = [(d.id, d.label) for d in
+             tonicPanels.descriptors("hierarchy", state)]
+    labels = dict(third)
+    check(first == third and
+          labels.get("levelVisible") == "This level visible" and
+          labels.get("levelXray") == "This level see-through",
+          "hierarchy level rows keep one label across levels (%r)"
+          % [row for row in third if row[0].startswith("level")])
+    check("L3" in tonicPanels.levelRowTooltip("levelVisible", state) and
+          "L3" in tonicPanels.levelRowTooltip("levelXray", state) and
+          tonicPanels.levelRowTooltip("subdivideCount", state) == "",
+          "the level rows name the active level in their tooltip")
+
+    # Slider rows are bounded floats; Density carries its unit.
+    state = tonicToolState.TonicToolState()
+    byId = {}
+    for modeId in ALL_MODES:
+        for d in tonicPanels.descriptors(modeId, state):
+            byId.setdefault(d.id, d)
+    for rowId in sorted(tonicPanels.SLIDER_PARAM_IDS):
+        d = byId.get(rowId)
+        check(d is not None and d.kind == "float" and d.max > d.min,
+              "slider row %r is a bounded float descriptor" % rowId)
+    check(tonicPanels.SLIDER_GESTURE_IDS <= tonicPanels.SLIDER_PARAM_IDS,
+          "every gesture-bracketed slider row is a slider row")
+    check(byId["density"].max == 1000.0 and
+          byId["density"].unit == "/unit²",
+          "Fill density reaches 1000 and reads per unit area")
+    dll = FakeDll()
+    dll.guideCount = 42
+    check(tonicPanels.guideCountText(FakeSession(dll)) == "42 guides" and
+          tonicPanels.guideCountText(None) == "",
+          "the density readout shows the live guide count (%r)"
+          % tonicPanels.guideCountText(FakeSession(dll)))
+    check(":" in tonicPanels.RAMP_HINT,
+          "the ramp hint shows the pos:val form")
+
+
+def dockTruthRules(tonicPanels, tonicToolState, tonicHud, tonicModes):
+    """Task D: the dock shows what it commits, and says so before Bind."""
+    # -- Lock rows: the selected tubes' own flags, else the default --------
+    dll = FakeDll()
+    session = FakeSession(dll)
+    state = tonicToolState.TonicToolState()
+    rows = {d.id: d for d in tonicPanels.descriptors("hierarchy", state)}
+    lockC = rows["lockChildren"]
+    dll.selection = [3]
+    lockC.set(state, session, True)
+    check(("Tonic_SetLockChildren", 1, 3, 1) in dll.calls and
+          state.lockChildren is False,
+          "Lock children with T3 selected writes T3 only, not the global "
+          "default (%r, global %r)"
+          % ([c for c in dll.calls if c[0] == "Tonic_SetLockChildren"],
+             state.lockChildren))
+    check(lockC.get(state, session) is True,
+          "and the row reads T3's flag back (%r)" % lockC.get(state, session))
+    dll.selection = [5]
+    check(lockC.get(state, session) is False,
+          "a tube nobody locked shows unticked (%r)"
+          % lockC.get(state, session))
+    dll.selection = [3, 5]
+    check(lockC.get(state, session) == tonicPanels.MIXED,
+          "T3 locked + T5 not shows the mixed (part-checked) state (%r)"
+          % lockC.get(state, session))
+    del dll.calls[:]
+    lockC.set(state, session, True)
+    check(sorted(c[2] for c in dll.calls
+                 if c[0] == "Tonic_SetLockChildren") == [3, 5] and
+          lockC.get(state, session) is True,
+          "a click on the mixed row sets both tubes (%r)" % dll.calls)
+    dll.selection = []
+    check(lockC.get(state, session) is False,
+          "with nothing selected the row shows the global default (off)")
+    del dll.calls[:]
+    lockC.set(state, session, True)
+    check(("Tonic_SetLockChildren", 1, -1, 1) in dll.calls and
+          state.lockChildren is True and lockC.get(state, session) is True,
+          "and writes it through the model's -1 slot (%r)" % dll.calls)
+    fresh = {d.id: d for d in tonicPanels.descriptors("hierarchy", state)}
+    check("default is on" in fresh["lockChildren"].tooltip and
+          "default is on" not in fresh["lockParents"].tooltip,
+          "a lock row's tooltip says when the default locks every tube")
+    check("rigidly" in rows["lockChildren"].tooltip,
+          "Lock children says the children ride rigidly with the parent "
+          "(%r)" % rows["lockChildren"].tooltip)
+    tubeTips = {a.id: a.tooltip for a in tonicPanels.actions("tube")}
+    check("root CV" in tubeTips["matchSurface"] and
+          "scalp" in tubeTips["matchSurface"],
+          "Match surface says it snaps the root CV onto the scalp (%r)"
+          % tubeTips["matchSurface"])
+
+    # -- Relax that moves nothing leaves no undo step (SS-02) ---------------
+    class CentersBridge(object):
+        centers = {0: [(0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 2.0, 0.0)]}
+
+        @classmethod
+        def tubeCenters(cls, dll, model, tubeId):
+            return list(cls.centers[int(tubeId)])
+
+    previousBridge = sys.modules.get("tonicBridge")
+    sys.modules["tonicBridge"] = CentersBridge
+    try:
+        relaxDll = FakeDll()
+        relaxSession = FakeGestureSession(relaxDll)
+        messages = []
+        relaxSession.report = lambda text, level="info": messages.append(
+            (text, level))
+        container = FakeContainer(tonicToolState.TonicToolState(),
+                                  relaxSession)
+        tubeActions = {a.id: a for a in tonicPanels.actions("tube")}
+        tubeActions["relax"].handler(container)
+        names = [c[0] for c in relaxDll.calls
+                 if c[0] in ("Tonic_BeginGesture", "Tonic_RelaxCenter",
+                             "Tonic_EndGesture", "Tonic_CancelGesture")]
+        check(names == ["Tonic_BeginGesture", "Tonic_RelaxCenter",
+                        "Tonic_CancelGesture"],
+              "a Relax that moves no CV cancels its bracket: no empty undo "
+              "step (%r)" % names)
+        check(messages and "Relax" in messages[-1][0] and
+              "no change" in messages[-1][0],
+              "and the message says Relax made no change (%r)"
+              % messages[-1:])
+        # A Relax that moves a CV keeps exactly one step.
+        del relaxDll.calls[:]
+
+        def relaxMoves(ctx, strength, iterations):
+            relaxDll.calls.append(("Tonic_RelaxCenter", ctx))
+            CentersBridge.centers = {0: [(0.0, 0.0, 0.0), (0.1, 1.0, 0.0),
+                                         (0.0, 2.0, 0.0)]}
+            return 0
+        relaxDll.Tonic_RelaxCenter = relaxMoves
+        tubeActions["relax"].handler(container)
+        names = [c[0] for c in relaxDll.calls
+                 if c[0] in ("Tonic_BeginGesture", "Tonic_EndGesture",
+                             "Tonic_CancelGesture")]
+        check(names == ["Tonic_BeginGesture", "Tonic_EndGesture"],
+              "a Relax that moves a CV is one undo step (%r)" % names)
+        check("no change" not in messages[-1][0] and
+              "Relax" in messages[-1][0] and "T0" in messages[-1][0],
+              "and the message says what it relaxed (%r)" % messages[-1:])
+    finally:
+        if previousBridge is None:
+            sys.modules.pop("tonicBridge", None)
+        else:
+            sys.modules["tonicBridge"] = previousBridge
+
+    # -- before Bind: no green 'Synced' ------------------------------------
+    strip = tonicHud.statusStrip(tonicToolState.TonicToolState(), None)
+    got = tonicHud.syncSummary(strip, {"active": False})
+    check(got == ("No scalp bound", tonicHud.TONE_NEUTRAL),
+          "with no model the pill reads 'No scalp bound', neutral (%r)"
+          % (got,))
+    got = tonicHud.syncSummary(strip, {"active": False,
+                                       "commitError": "stale"})
+    check(got[0] == "No scalp bound",
+          "no model outranks a stale commit error (%r)" % (got,))
+    check(tonicHud.syncSummary(strip, {"active": True}) == ("Synced", "ok"),
+          "a bound, idle model still reads Synced")
+    check(tonicModes.UNBOUND_TITLE == "Bind a scalp mesh to start" and
+          tonicModes.UNBOUND_HINT.startswith(tonicModes.UNBOUND_TITLE),
+          "the unbound HUD title and hint name the first step")
+
+    # -- instruction strings name what the keys and clicks really do -------
+    tubeHint = tonicModes.hintFor("tube", "tube")
+    check("whole tubes" in tubeHint and "F8" in tubeHint,
+          "Tube's hint says Delete removes whole tubes in Whole tube (F8) "
+          "(%r)" % tubeHint)
+    hier = dict((m.id, m.status) for m in tonicModes.HIERARCHY_SUBMODES)
+    check("click" in hier["merge"] and "fold" in hier["merge"],
+          "Merge's status says a click folds children (%r)" % hier["merge"])
+    check("click" in hier["levels"] and "solo" in hier["levels"],
+          "Levels' status says a click solos (%r)" % hier["levels"])
+    check("box" in hier["group"] and "group" in hier["group"],
+          "Group's status says a box groups (%r)" % hier["group"])
+    # selectModeFor: a Shift box adds and a Ctrl box REMOVES, so the Group
+    # status must not say a Ctrl box gathers tubes for the Group button.
+    check("gather" not in hier["group"] and
+          "Shift box adds" in hier["group"] and
+          "Ctrl box removes" in hier["group"],
+          "Group's status says Shift boxes add, Ctrl boxes remove (%r)"
+          % hier["group"])
+    modes = dict((m.id, m.status) for m in tonicModes.MODES)
+    check("length ramp" in modes["fill"] and "preview" not in modes["fill"],
+          "Fill's shelf tooltip names the Length ramp sub-mode (%r)"
+          % modes["fill"])
+    check("save" not in modes["output"].lower() and
+          "maps" not in modes["output"] and
+          "hair description" in modes["output"],
+          "Output's shelf tooltip names what the Output page holds, not "
+          "Save (the file row's) (%r)" % modes["output"])
+    hierHint = tonicModes.hintFor("hierarchy", "navigate")
+    check("Q/W/E/R" in hierHint,
+          "Hierarchy's hint names Q with W/E/R, as the transform row's "
+          "Select (Q) button (%r)" % hierHint)
+    # The Length profile field's placeholder agrees with its tooltip.
+    check("full length" in tonicPanels.RAMP_PLACEHOLDER and
+          "uniform" not in tonicPanels.RAMP_PLACEHOLDER,
+          "the empty ramp field reads 'empty = full length' (%r)"
+          % tonicPanels.RAMP_PLACEHOLDER)
+    # -- warnings rows: the tooltip says what the click does -------------
+    retry = tonicHud._retryCommitAction()
+    outline = tonicHud._highlightUncoveredAction()
+    check(tonicHud.clickHint(retry) == " - click to retry commit",
+          "the commit-failure row's tooltip says the click retries "
+          "(%r)" % tonicHud.clickHint(retry))
+    check(tonicHud.clickHint(outline) == " - click to outline the faces",
+          "the coverage row's tooltip says the click outlines faces (%r)"
+          % tonicHud.clickHint(outline))
+    check(tonicHud.clickHint(lambda container: None) ==
+          tonicHud.CLICK_TO_SELECT and tonicHud.clickHint(None) == "",
+          "a select action still reads 'click to select'; no action, no "
+          "suffix")
+
+
+def artistFacingRules(tonicPanels, tonicToolState, tonicHierarchy,
+                      tonicModes, tonicFill, tonicSculpt):
+    """DK-07: every row explains itself, in words, with no kernel jargon."""
+    import re
+    kernelJargon = re.compile(r"\bK[0-9]")
+    placeholderLabel = re.compile(r"\(0 =|\bt\)")
+
+    # Every row in every state variant the builders branch on.
+    variants = []
+    for outputBuilt in (False, True):
+        for brushReach in (0.0, 0.3):
+            for solo in (-1, 2):
+                state = tonicToolState.TonicToolState()
+                state.outputEnabled = outputBuilt
+                state.brushTRadius = brushReach
+                state.soloLevel = solo
+                state.showMaxLevel = solo
+                variants.append(state)
+    seen = {}
+    for state in variants:
+        for modeId in ALL_MODES:
+            for d in tonicPanels.descriptors(modeId, state):
+                seen.setdefault((modeId, d.id), []).append(d)
+    noTip = sorted("%s.%s" % key for key, rows in seen.items()
+                   if not all(str(d.tooltip).strip() for d in rows))
+    check(not noTip, "every descriptor has a non-empty tooltip (%r)" % noTip)
+    badLabels = sorted(d.label for rows in seen.values() for d in rows
+                       if placeholderLabel.search(d.label))
+    check(not badLabels,
+          "no label reads '(0 = ...)' or '(t)' (%r)" % badLabels)
+    enums = [d for rows in seen.values() for d in rows if d.kind == "enum"]
+    check(enums and all(len(d.choiceLabels) == len(d.choices)
+                        for d in enums),
+          "every enum has one label per choice")
+    rows = {d.id: d for (m, _i), ds in seen.items() for d in ds}
+    check(rows["selectionShape"].choiceLabels == ("Box", "Lasso") and
+          rows["splitMode"].choiceLabels == ("K-means", "Edge"),
+          "enums show human names: %r / %r"
+          % (rows["selectionShape"].choiceLabels,
+             rows["splitMode"].choiceLabels))
+    texel = rows["texelResolution"]
+    check(texel.label == "Bake resolution" and
+          texel.choiceLabels[0] == "Auto (64 on boundaries)" and
+          "4 x 4" in texel.choiceLabels and texel.choices[0] == "auto",
+          "the texel row is 'Bake resolution' with sized choices (%r)"
+          % (texel.choiceLabels[:3],))
+    ring = rows["ringCvCount"]
+    check(ring.label == "Ring CVs for new tubes" and
+          ring.choiceLabels[0] == "Match region CVs (Auto)",
+          "ringCvCount reads 'Ring CVs for new tubes' with an Auto entry")
+    check(rows["softRadius"].label == "Soft selection falloff" and
+          rows["displaySegments"].label == "Curve smoothness (display)" and
+          rows["outputDensityMultiplier"].label ==
+          "Strand density multiplier",
+          "renamed rows use the artist wording")
+    check(all(str(d.unit) for d in (rows["density"], rows["brushRadiusPx"],
+                                    rows["snapRadiusPx"])),
+          "density and pixel rows carry a unit")
+
+    # Output: the rows exist, greyed, before the first Build.
+    state = tonicToolState.TonicToolState()
+    before = {d.id: d for d in tonicPanels.descriptors("output", state)}
+    check("outputDensityMultiplier" in before and
+          "outputStrandWidth" in before and
+          before["outputDensityMultiplier"].enabled is False and
+          before["outputStrandWidth"].enabled is False and
+          "Build" in before["outputDensityMultiplier"].tooltip,
+          "Output shows density/width disabled before Build, with a hint")
+    state.outputEnabled = True
+    after = {d.id: d for d in tonicPanels.descriptors("output", state)}
+    check(after["outputDensityMultiplier"].enabled is True and
+          after["outputStrandWidth"].enabled is True and
+          [d for d in before] == [d for d in after],
+          "Build enables the same Output rows in the same order")
+    build = [a for a in tonicPanels.actions("output")
+             if a.id == "buildDescription"]
+    check(build and build[0].label == "Build hair description" and
+          build[0].tooltip,
+          "the Output action is 'Build hair description' with a tooltip")
+    noActionTip = sorted(a.id for m in ALL_MODES
+                         for a in tonicPanels.actions(m) if not a.tooltip)
+    check(not noActionTip, "every action has a tooltip (%r)" % noActionTip)
+
+    # Preview density is a percentage over the 0-1 fraction.
+    state = tonicToolState.TonicToolState()
+    preview = next(d for d in tonicPanels.descriptors("fill", state)
+                   if d.id == "previewFraction")
+    preview.set(state, None, 40.0)
+    check(preview.unit == "%" and preview.max == 100.0 and
+          abs(state.previewFraction - 0.4) < 1e-9 and
+          abs(preview.get(state, None) - 40.0) < 1e-9,
+          "Preview density while dragging reads 0-100 %% (%r)"
+          % state.previewFraction)
+
+    # Brush reach: Whole strand is the old 0, and unticking brings a reach.
+    state = tonicToolState.TonicToolState()
+    sculpt = {d.id: d for d in tonicPanels.descriptors("sculpt", state)}
+    whole, reach = sculpt["brushWholeStrand"], sculpt["brushTRadius"]
+    check(whole.get(state, None) is True and reach.enabled is False and
+          reach.min > 0.0,
+          "a fresh brush reaches the whole strand; Brush reach is greyed")
+    reach.set(state, None, 0.4)
+    check(state.brushTRadius == 0.0,
+          "setting a reach while Whole strand is ticked keeps it unbounded")
+    whole.set(state, None, False)
+    check(abs(state.brushTRadius - 0.4) < 1e-9 and
+          next(d for d in tonicPanels.descriptors("sculpt", state)
+               if d.id == "brushTRadius").enabled is True,
+          "unticking Whole strand applies the remembered reach (%r)"
+          % state.brushTRadius)
+    whole.set(state, None, True)
+    check(state.brushTRadius == 0.0 and
+          abs(reach.get(state, None) - 0.4) < 1e-9,
+          "ticking it again unbounds the brush and keeps the reach shown")
+
+    # Solo level / Show levels up to: a checkbox and a level each.
+    state = tonicToolState.TonicToolState()
+    hier = {d.id: d for d in tonicPanels.descriptors("hierarchy", state)}
+    hier["soloLevel"].set(state, None, 3)
+    check(state.soloLevel == tonicHierarchy.SOLO_OFF,
+          "picking a solo level with Solo unticked does not solo")
+    hier["soloLevelOn"].set(state, None, True)
+    check(state.soloLevel == 3 and hier["soloLevelOn"].get(state, None),
+          "ticking Solo level solos the picked level (%r)" % state.soloLevel)
+    hier["soloLevelOn"].set(state, None, False)
+    check(state.soloLevel == tonicHierarchy.SOLO_OFF and
+          hier["soloLevel"].get(state, None) == 3,
+          "unticking turns Solo off and keeps the level shown")
+    hier["showAllLevels"].set(state, None, False)
+    hier["showMaxLevel"].set(state, None, 2)
+    check(state.showMaxLevel == 2 and
+          not hier["showAllLevels"].get(state, None),
+          "Show levels up to 2 applies once Show all levels is unticked")
+    hier["showAllLevels"].set(state, None, True)
+    check(state.showMaxLevel == tonicHierarchy.SHOW_ALL_LEVELS,
+          "Show all levels clears the limit")
+
+    # No kernel numbers in anything the artist reads.
+    texts = []
+    for rows_ in seen.values():
+        for d in rows_:
+            texts.extend((d.label, d.tooltip) + tuple(d.choiceLabels))
+    for modeId in ALL_MODES:
+        for a in tonicPanels.actions(modeId):
+            texts.extend((a.label, a.tooltip))
+    for table in (tonicModes.MODES, tonicModes.GRAPH_SUBMODES,
+                  tonicModes.TUBE_SUBMODES, tonicModes.FILL_SUBMODES,
+                  tonicModes.HIERARCHY_SUBMODES,
+                  tonicModes.SCULPT_SUBMODES):
+        texts.extend(m.status for m in table)
+        texts.extend(m.label for m in table)
+    texts.extend(tonicModes.HINTS.values())
+    state = tonicToolState.TonicToolState()
+    texts.extend((
+        tonicHierarchy.groupStatus([1, 2], True),
+        tonicHierarchy.groupStatus([1, 2], False),
+        tonicHierarchy.mergeChildrenStatus("T1"),
+        tonicHierarchy.mergeSelectedStatus([1, 2]),
+        tonicHierarchy.subdivideStatus(4, "kmeans", [1]),
+        tonicHierarchy.resubdivideConfirm("T1", 2, 4),
+        tonicHierarchy.hierarchyStatus(1, 3, [1, 2], 2, -1, True, True),
+        tonicHierarchy.setSoloLevel(state, 2),
+        tonicHierarchy.setShowMaxLevel(state, 2),
+        tonicFill.fillStatus(8.0, 8, 0.0, 0, [], False),
+        tonicSculpt.sculptStatus("grab", 24.0, 0.0, True, False),
+    ))
+    jargon = sorted(t for t in texts if kernelJargon.search(str(t)))
+    check(not jargon, "no K-number reaches an artist string (%r)" % jargon)
+
+
 def main():
     _load("tonicFill")
     _load("tonicGraph")
     _load("tonicHierarchy")
     _load("tonicSculpt")
     _load("tonicTube")
+    # tonicHud reads the refill drop list through tonicLib (Qt- and
+    # DLL-free at import), so its bare-name fallback needs it registered.
+    _load("tonicLib")
+    # The Tube gizmo rows (GZ-05, parity G20) read tonicGizmoSettings,
+    # which reads tonicGizmoScreen's tool tokens.
+    _load("tonicGizmoScreen")
+    tonicGizmoSettings = _load("tonicGizmoSettings")
     tonicToolState = _load("tonicToolState")
     tonicPanels = _load("tonicPanels")
     tonicHud = _load("tonicHud")
@@ -527,10 +1047,19 @@ def main():
     state = tonicToolState.TonicToolState()
 
     graphDescs = {d.id: d for d in tonicPanels.descriptors("graph", state)}
+    # The row is screen pixels; the model's snap radius is rest units, so
+    # the row is state-only (the loops convert px at the point of use). A
+    # write-through would hand the model pixels as world units, and every
+    # refresh would read the world radius back into the pixel field.
+    modelRadius = dll.snapRadius
     graphDescs["snapRadiusPx"].set(state, session, 12.0)
-    check(dll.snapRadius == 12.0
+    check(state.snapRadiusPx == 12.0
           and graphDescs["snapRadiusPx"].get(state, session) == 12.0,
-          "graph.snapRadiusPx writes through Tonic_SetSnapRadius")
+          "graph.snapRadiusPx round-trips its pixels through the state")
+    check(dll.snapRadius == modelRadius and
+          not any(c[0] in ("Tonic_SetSnapRadius", "Tonic_GetSnapRadius")
+                  for c in dll.calls),
+          "and never writes (or reads back) the model's world radius")
     graphDescs["mirrorX"].set(state, session, True)
     check(dll.mirrorX == 1 and graphDescs["mirrorX"].get(state, session)
           is True, "graph.mirrorX writes through Tonic_SetMirrorX")
@@ -557,16 +1086,173 @@ def main():
     check(ringCount.get(state, session) == 0,
           "tube.ringCvCount restores Auto/Match region CVs without an ABI call")
 
+    # -- GZ-05 / parity G20: the Tube gizmo settings rows -----------------
+    gizmoState = tonicToolState.TonicToolState()
+    gizmoDescs = {d.id: d for d in tonicPanels.descriptors("tube",
+                                                           gizmoState)}
+    wanted = ("transformOrientation", "stepSnap", "stepSize", "freeRotate",
+              "preventNegativeScale", "gridSize", "manipulatorSize")
+    check(all(name in gizmoDescs for name in wanted),
+          "the Tube panel carries the gizmo settings rows (%r)"
+          % [name for name in wanted if name not in gizmoDescs])
+    orientation = gizmoDescs["transformOrientation"]
+    check(orientation.kind == "enum" and
+          tuple(orientation.choices) == ("world", "screen", "tube") and
+          orientation.get(gizmoState, None) == "world",
+          "Axis orientation offers world/screen/tube and starts at World")
+    notified = []
+    settings = tonicGizmoSettings.settingsFor(gizmoState)
+    settings.AddListener(lambda: notified.append(1))
+    for value in ("tube", "screen", "world"):
+        orientation.set(gizmoState, None, value)
+        check(gizmoState.transformOrientation == value and
+              orientation.get(gizmoState, None) == value,
+              "transformOrientation round-trips %r" % value)
+    check(len(notified) == 3,
+          "each orientation change tells the gizmo listeners (%d)"
+          % len(notified))
+    orientation.set(gizmoState, None, "sideways")
+    check(gizmoState.transformOrientation == "world",
+          "an unknown orientation falls back to World")
+    gizmoState.transformTool = "rotate"
+    check(abs(gizmoDescs["stepSize"].get(gizmoState, None) - 15.0) < 1e-9,
+          "Step size follows the live tool: Rotate starts at 15 degrees")
+    gizmoDescs["stepSize"].set(gizmoState, None, 5.0)
+    gizmoState.transformTool = "move"
+    check(abs(gizmoDescs["stepSize"].get(gizmoState, None) - 1.0) < 1e-9 and
+          settings.For("rotate").stepSize == 5.0,
+          "each tool keeps its own step size")
+    gizmoDescs["freeRotate"].set(gizmoState, None, False)
+    check(settings.For("rotate").freeRotate is False,
+          "Free rotate writes the Rotate tool's option from any tool")
+    gizmoDescs["preventNegativeScale"].set(gizmoState, None, True)
+    check(settings.For("scale").preventNegativeScale is True,
+          "Prevent negative scale writes the Scale tool's option")
+    gizmoDescs["manipulatorSize"].set(gizmoState, None, 1000.0)
+    check(gizmoDescs["manipulatorSize"].get(gizmoState, None) ==
+          tonicGizmoSettings.MANIPULATOR_SIZE_MAX,
+          "the manipulator size row clamps like the '+' key")
+    gizmoState.transformTool = "rotate"
+    reset = {a.id: a for a in tonicPanels.actions("tube")}
+    check("resetTransformTool" in reset, "Tube offers Reset transform tool")
+
+    class _Container(object):
+        tonicState = gizmoState
+        session = None
+
+    reset["resetTransformTool"].handler(_Container())
+    check(settings.For("rotate").stepSize == 15.0 and
+          settings.For("rotate").freeRotate is True and
+          settings.For("scale").preventNegativeScale is True,
+          "Reset transform tool restores only the live tool's defaults")
+
     fillDescs = {d.id: d for d in tonicPanels.descriptors("fill", state)}
+    # MD-01: a fresh model holds the tonicModel.h default density (100); a
+    # descriptor range that excludes it makes the spinbox show a clamped
+    # number the model does not hold.
+    freshDll = FakeDll()
+    freshDll.fill["density"] = 100.0
+    density = fillDescs["density"]
+    shown = density.get(tonicToolState.TonicToolState(),
+                        FakeSession(freshDll))
+    check(density.min <= shown <= density.max and shown == 100.0,
+          "fill.density range [%g, %g] holds a fresh model's %g"
+          % (density.min, density.max, shown))
     fillDescs["density"].set(state, session, 16.0)
     check(dll.fill["density"] == 16.0,
           "fill.density writes through Tonic_SetFillParams")
     fillDescs["lengthProfile"].set(state, session, [0.0, 1.0, 1.0, 0.5])
     check(dll.fill["profile"] == [0.0, 1.0, 1.0, 0.5],
           "fill.lengthProfile writes through Tonic_SetFillParams")
-    fillDescs["previewFraction"].set(state, session, 0.5)
-    check(dll.previewFraction == 0.5,
-          "fill.previewFraction writes through Tonic_SetPreviewFraction")
+
+    # SS-02: a dock Fill edit is ONE undo step -- Begin, the write and its
+    # refill, End -- and a write of the value already held leaves none.
+    gestureDll = FakeDll()
+    gestureSession = FakeGestureSession(gestureDll)
+    gestureState = tonicToolState.TonicToolState()
+    gestureFill = {d.id: d for d in tonicPanels.descriptors("fill",
+                                                            gestureState)}
+    bracket = ("Tonic_BeginGesture", "Tonic_SetFillParams",
+               "Tonic_RefillGuides", "Tonic_EndGesture",
+               "Tonic_CancelGesture")
+
+    def bracketCalls():
+        names = [c for c in gestureDll.calls if c[0] in bracket]
+        del gestureDll.calls[:]
+        return names
+
+    gestureFill["density"].set(gestureState, gestureSession, 24.0)
+    calls = bracketCalls()
+    check([c[0] for c in calls] == ["Tonic_BeginGesture",
+                                    "Tonic_SetFillParams",
+                                    "Tonic_RefillGuides",
+                                    "Tonic_EndGesture"] and
+          calls[0][1] == "Fill params" and gestureDll.fill["density"] == 24.0,
+          "fill.density set() records Tonic_BeginGesture('Fill params') / "
+          "Tonic_EndGesture around Tonic_SetFillParams (%r)" % (calls,))
+    gestureFill["density"].set(gestureState, gestureSession, 24.0)
+    calls = [c[0] for c in bracketCalls()]
+    check(calls == ["Tonic_BeginGesture", "Tonic_SetFillParams",
+                    "Tonic_RefillGuides", "Tonic_CancelGesture"],
+          "re-writing the density already held cancels the bracket, so no "
+          "empty undo step is left (%r)" % (calls,))
+    gestureSession.gestureActive = True       # the dock's slider bracket
+    gestureFill["edgeBias"].set(gestureState, gestureSession, 0.25)
+    calls = [c[0] for c in bracketCalls()]
+    gestureSession.gestureActive = False
+    check(calls == ["Tonic_SetFillParams", "Tonic_RefillGuides"],
+          "inside an open gesture the write joins it instead of nesting "
+          "(%r)" % (calls,))
+
+    class _GestureOutputSession(FakeOutputSession):
+        ctx = 1
+
+        def __init__(self):
+            FakeOutputSession.__init__(self)
+            self.log = []
+            self.gestureActive = False
+
+        def beginGesture(self, label):
+            self.log.append(("begin", label))
+            return True
+
+        def endGestureIfChanged(self, changed):
+            self.log.append(("end" if changed else "cancel",))
+            return bool(changed)
+
+        def enqueueCommit(self):
+            self.log.append(("enqueue",))
+            return True
+
+    outputSession = _GestureOutputSession()
+    outputState = tonicToolState.TonicToolState()
+    outputDescs = {d.id: d for d in tonicPanels.descriptors("output",
+                                                            outputState)}
+    widthRow = next((outputDescs[k] for k in ("strandWidth", "width",
+                                              "outputStrandWidth")
+                     if k in outputDescs), None)
+    if widthRow is None:
+        check(False, "the Output panel has a strand width row (%r)"
+              % sorted(outputDescs))
+    else:
+        widthRow.set(outputState, outputSession, 0.02)
+        check(outputSession.log[:2] == [("begin", "Output settings"),
+                                        ("end",)] and
+              outputSession.strandWidth == 0.02,
+              "an Output width edit is one 'Output settings' undo step (%r)"
+              % (outputSession.log,))
+        del outputSession.log[:]
+        widthRow.set(outputState, outputSession, 0.02)
+        check(("cancel",) in outputSession.log and
+              ("end",) not in outputSession.log,
+              "and the same width again leaves no step (%r)"
+              % (outputSession.log,))
+    # The row reads 0-100 % (DK-07); the ABI still takes the fraction.
+    fillDescs["previewFraction"].set(state, session, 50.0)
+    check(dll.previewFraction == 0.5 and
+          fillDescs["previewFraction"].get(state, session) == 50.0,
+          "fill.previewFraction writes 50 % through Tonic_SetPreviewFraction "
+          "as 0.5")
     fillDescs["freezeRoots"].set(state, session, True)
     check(dll.freezeRoots == 1,
           "fill.freezeRoots writes through Tonic_SetFreezeRoots")
@@ -620,10 +1306,18 @@ def main():
     container = FakeContainer(state, session)
 
     graphActions = {a.id: a for a in tonicPanels.actions("graph")}
+    # No viewport, no camera: the session's recorded world-per-pixel at
+    # the scalp converts the row's pixels (8 px x 0.01 = 0.08 rest units).
+    state.snapRadiusPx = 8.0
+    session.displayScale = lambda: 0.01
     graphActions["weldAll"].handler(container)
-    check(any(c[0] == "Tonic_GraphWeldAll" for c in dll.calls)
-          and session.publishCount == 1,
+    welds = [c for c in dll.calls if c[0] == "Tonic_GraphWeldAll"]
+    check(welds and session.publishCount == 1,
           "graph weldAll calls Tonic_GraphWeldAll and publishes")
+    check(welds and abs(float(welds[-1][2]) - 0.08) < 1e-6,
+          "and hands it the snap radius in rest units, not pixels (%r)"
+          % (welds[-1:],))
+    del session.displayScale
     graphActions["rebake"].handler(container)
     check(session.rebakeCount == 1, "graph rebake calls session.rebake()")
 
@@ -668,7 +1362,7 @@ def main():
           "sculpt has no one-shot actions")
     outputActions = tonicPanels.actions("output")
     check([a.id for a in outputActions] == ["buildDescription"],
-          "Output exposes Build/update description beside file commands")
+          "Output exposes Build hair description beside file commands")
 
     # -- Output: the texel override reaches the bake (V7) ----------------
     # The descriptor's job is to hand the session a texel count and show
@@ -719,7 +1413,7 @@ def main():
           "Output density and strand width reach the session")
     outputActions[0].handler(FakeContainer(state, outputSession))
     check(outputSession.buildCount == 1 and outputSession.enabled,
-          "Build/update description enables the committed Output")
+          "Build hair description enables the committed Output")
 
     # -- no session: every action no-ops instead of raising --------------
     inertContainer = FakeContainer(tonicToolState.TonicToolState(), None)
@@ -745,7 +1439,17 @@ def main():
     session.committedVersion = 7
     strip = tonicHud.statusStrip(state, session)
     check(strip.amber is True,
-          "a committed version behind the live model version is amber")
+          "a committed version behind the pending (enqueued) version is "
+          "amber")
+
+    # DK-05: a selection publish bumps the MODEL version and enqueues
+    # nothing, so it must not turn the strip amber.
+    session.committedVersion = 10
+    session.pendingVersion = 10
+    session.modelVersion = 13
+    strip = tonicHud.statusStrip(state, session)
+    check(strip.amber is False,
+          "a model version ahead of an idle committer is not amber")
 
     check(tonicHud.statusStrip(state, FakeSession(FakeDll())).gpuText
           == "GPU", "no fallback reason reads as plain GPU")
@@ -758,13 +1462,70 @@ def main():
           "statusStrip works with session=None (breadcrumb from state "
           "alone)")
 
+    # -- tonicHud.syncSummary: the sync pill matrix (DK-05) ---------------
+    def pill(mapV=5, bakedV=5, committed=10, pending=10, model=10,
+             fallback=b"", status=None):
+        pillState = tonicToolState.TonicToolState()
+        pillState.mapVersion = mapV
+        pillState.bakedVersion = bakedV
+        pillDll = FakeDll()
+        if fallback:
+            pillDll.fallbackReason = fallback
+        pillSession = FakeSession(pillDll)
+        pillSession.committedVersion = committed
+        pillSession.pendingVersion = pending
+        pillSession.modelVersion = model
+        pillStrip = tonicHud.statusStrip(pillState, pillSession)
+        return pillStrip, tonicHud.syncSummary(pillStrip, status)
+
+    _s, got = pill()
+    check(got == ("Synced", "ok"), "idle and matched reads Synced (%r)"
+          % (got,))
+    _s, got = pill(model=14)
+    check(got == ("Synced", "ok"),
+          "a selection-only model bump still reads Synced (%r)" % (got,))
+    _s, got = pill(pending=11)
+    check(got == ("Committing...", "busy"),
+          "an enqueued, unswapped commit reads Committing... (%r)" % (got,))
+    _s, got = pill(mapV=6)
+    check(got == ("Baking map...", "busy"),
+          "a map newer than the last bake reads Baking map... (%r)" % (got,))
+    _s, got = pill(fallback=b"no CUDA device")
+    check(got == ("CPU fallback: no CUDA device", "info"),
+          "a device fallback reads CPU fallback: <reason> (%r)" % (got,))
+    _s, got = pill(status={"ladderStep": 2})
+    check(got == ("Reduced detail", "info"),
+          "a stepped ladder reads Reduced detail (%r)" % (got,))
+    _s, got = pill(pending=11, status={"commitError": "disk full"})
+    check(got == ("Commit failed: disk full", "error"),
+          "a commit error outranks work in flight (%r)" % (got,))
+    _s, got = pill(pending=11, mapV=6, fallback=b"x")
+    check(got[0] == "Committing...",
+          "a commit in flight outranks a bake and a fallback (%r)" % (got,))
+    _s, got = pill(mapV=6, fallback=b"x", status={"ladderStep": 1})
+    check(got[0] == "Baking map...",
+          "a bake in flight outranks a standing condition (%r)" % (got,))
+    for kwargs in ({}, {"pending": 11}, {"mapV": 6},
+                   {"fallback": b"no CUDA device"},
+                   {"status": {"ladderStep": 3}}):
+        dumpStrip, _pill = pill(**kwargs)
+        dump = tonicHud.diagnosticsText(dumpStrip, kwargs.get("status"))
+        check(dump and not dump.lstrip().startswith("|"),
+              "the diagnostics line never starts with '|' (%r)" % dump)
+    check(tonicHud.deviceChip(pill()[0]) == "GPU" and
+          tonicHud.deviceChip(pill(fallback=b"x")[0]) == "CPU",
+          "the device chip reads GPU, or CPU after a fallback")
+
     # -- tonicHud.warnings -------------------------------------------------
     dll = FakeDll()
     session = FakeSession(dll)
     container = FakeContainer(state, session)
     dll.regionStats = (4, 2, 0)
     warns = tonicHud.warnings(state, session)
-    check(any("face center(s) outside regions" in w.text for w in warns),
+    # DK-08: an info row an artist can read and click to see the faces.
+    check(any(w.text == "2 scalp faces have no region" and
+              w.severity == "info" and w.selectAction is not None
+              for w in warns),
           "a coarse uncovered-face count produces a coverage warning")
 
     dll.intersectedTubes = [2, 5]
@@ -779,7 +1540,7 @@ def main():
 
     dll.smoothnessScores = [0.0, 0.05, 0.0]
     warns = tonicHud.warnings(state, session)
-    check(any("Smoothness" in w.text for w in warns),
+    check(any(w.text.startswith("Kink on tube 0 at CV 1") for w in warns),
           "a smoothness spike produces a warning")
 
     dll.fallbackReason = b"no CUDA device"
@@ -824,6 +1585,111 @@ def main():
           "warningsKey() moves on a device fallback")
     check(tonicHud.warningsKey(keyState, None) is None,
           "warningsKey() with no session is None (force a re-read)")
+
+    # DK-01: one word for the scalp. The menu, the dock, the picker and the
+    # status lines used to say scalp, geometry and mesh for one thing.
+    stale = []
+    for name in sorted(os.listdir(SRC)):
+        if not name.endswith(".py"):
+            continue
+        with open(os.path.join(SRC, name), encoding="utf-8") as handle:
+            text = handle.read().lower()
+        for phrase in ("bind geometry", "no geometry bound"):
+            if phrase in text:
+                stale.append((name, phrase))
+    check(not stale,
+          "no package module names the scalp 'geometry' (%r)" % (stale,))
+
+    # DK-02: hotkey truth and per-tool instruction lines.
+    import re
+    tonicModes = _load("tonicModes")
+    shelves = {
+        "graph": tonicModes.GRAPH_SUBMODES,
+        "tube": tonicModes.TUBE_SUBMODES,
+        "fill": tonicModes.FILL_SUBMODES,
+        "hierarchy": tonicModes.HIERARCHY_SUBMODES,
+        "sculpt": tonicModes.SCULPT_SUBMODES,
+    }
+    missing = []
+    for mode in tonicModes.MODES:
+        subs = shelves.get(mode.id, ())
+        for subId in [""] + [sub.id for sub in subs]:
+            if not tonicModes.hintFor(mode.id, subId).strip():
+                missing.append((mode.id, subId))
+    check(not missing,
+          "every (mode, sub-mode) has a non-empty hint (%r)" % (missing,))
+    check(all(tonicModes.hintFor(m, s) == tonicModes.HINTS[(m, s)]
+              for (m, s) in tonicModes.HINTS),
+          "hintFor() answers the HINTS table")
+    tubeKeys = [sub.hotkey.lower() for sub in tonicModes.TUBE_SUBMODES]
+    check(tubeKeys == ["f8", "f9", "f10", "f11"] and
+          not set(tubeKeys) & {"q", "w", "e", "r", "c"},
+          "Tube sub-modes are F8-F11, never a transform letter (%r)"
+          % (tubeKeys,))
+    kNumbers = []
+    for mode in tonicModes.MODES + tuple(
+            sub for subs in shelves.values() for sub in subs):
+        if re.search(r"K[0-9]", mode.status):
+            kNumbers.append(mode.status)
+    kNumbers.extend(text for text in tonicModes.HINTS.values()
+                    if re.search(r"K[0-9]", text))
+    check(not kNumbers,
+          "no kernel K-number in any mode status or hint (%r)" % (kNumbers,))
+    check(tonicModes.SELECTION_HINT ==
+          "Click selects · Shift toggles · Ctrl removes · Ctrl+Shift adds "
+          "· drag empty space boxes",
+          "SELECTION_HINT is the shared modifier line")
+    check(next(sub.label for sub in tonicModes.FILL_SUBMODES
+               if sub.id == "preview") == "Length ramp",
+          "Fill's preview sub-mode is labelled Length ramp")
+    # Every letter a hint advertises for a sub-mode has to be the one the
+    # hotkey table routes: the Graph/Sculpt fallbacks list the shelf keys.
+    for modeId in ("graph", "sculpt"):
+        text = tonicModes.hintFor(modeId, "")
+        check(all((" %s " % sub.hotkey) in (text + " ")
+                  or text.endswith(" " + sub.hotkey)
+                  for sub in shelves[modeId]),
+              "%s's fallback hint lists its sub-mode keys" % modeId)
+
+    # DK-04: every dock button has one stable objectName and one glyph.
+    tonicDockIds = _load("tonicDockIds")
+    keys = tonicDockIds.dockButtonKeys(tonicPanels.actions)
+    names = [tonicDockIds.objectName(kind, itemId) for kind, itemId in keys]
+    dupes = sorted(set(n for n in names if names.count(n) > 1))
+    check(not dupes, "every dock button has its own objectName (%r)"
+          % (dupes,))
+    check(all(tonicDockIds.parseObjectName(n) == k
+              for n, k in zip(names, keys)),
+          "parseObjectName inverts objectName for every dock button")
+    for mode in tonicModes.MODES:
+        check(names.count("tonicMode:%s" % mode.id) == 1,
+              "Mode %r maps to exactly one objectName" % mode.id)
+        for action in tonicPanels.actions(mode.id):
+            check(names.count("tonicAction:%s" % action.id) == 1,
+                  "Action %r (%s) maps to exactly one objectName"
+                  % (action.id, mode.id))
+    noIcon = [k for k in keys
+              if not tonicDockIds.iconName(k[0], k[1],
+                                           tonicPanels.ACTION_ICONS)]
+    check(not noIcon, "every dock button names an icon (%r)" % (noIcon,))
+    check([t.hotkey for t in tonicDockIds.TRANSFORM_TOOLS] ==
+          ["Q", "W", "E", "R"] and
+          [t.id for t in tonicDockIds.TRANSFORM_TOOLS] ==
+          ["select", "move", "rotate", "scale"],
+          "the transform row is Select/Move/Rotate/Scale on Q/W/E/R")
+    tubeTool = [d for d in tonicPanels.descriptors(
+        "tube", tonicToolState.TonicToolState()) if d.id == "transformTool"]
+    check(len(tubeTool) == 1 and
+          set(tubeTool[0].choices) ==
+          set(t.id for t in tonicDockIds.TRANSFORM_TOOLS),
+          "the transform row covers the transformTool descriptor's choices")
+
+    parameterWidgetRules(tonicPanels, tonicToolState,
+                         sys.modules["tonicSculpt"])
+    artistFacingRules(tonicPanels, tonicToolState,
+                      sys.modules["tonicHierarchy"], tonicModes,
+                      sys.modules["tonicFill"], sys.modules["tonicSculpt"])
+    dockTruthRules(tonicPanels, tonicToolState, tonicHud, tonicModes)
 
     print("testUsdGenTonicToolsPanels: %d failure(s)" % failures)
     return 1 if failures else 0

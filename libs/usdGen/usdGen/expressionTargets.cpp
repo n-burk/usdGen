@@ -183,7 +183,7 @@ bool ValidateCurveSource(UsdGenNodeDesc const &node, std::vector<std::string> *e
 /// so the authoring fails closed instead of partially applying.
 bool ValidateGrow(UsdGenNodeDesc const &node, std::vector<std::string> *errors)
 {
-    static const std::set<std::string> floats{"length", "lift"};
+    static const std::set<std::string> floats{"length", "lift", "azimuth", "azimuthRandom"};
     std::set<std::string> seen;
     bool ok = true;
     for (auto const &binding : node.expressionBindings) {

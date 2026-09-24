@@ -23,12 +23,18 @@ from . import tonicLib
 from . import tonicLibStage
 from . import tonicLoopsTube
 from . import tonicModes
-from .tonicLoops import ToolLoop
+from .tonicLoops import (MIN_PICK_RADIUS_PX, ToolLoop, selectBand,
+                         selectItems, selectModeFor)
 
 # A marquee narrower than this many pixels is a click, not a band.
 MARQUEE_MIN_PX = 3.0
 # An edge stroke shorter than this is not an edge.
 EDGE_MIN_PX = 6.0
+# Sub-modes whose plain click on a tube does more than select it (MD-04):
+# Merge folds the clicked parent's children, Levels solos the clicked
+# tube's level. Group acts on a plain band instead; Navigate and Subdivide
+# keep click = select.
+CLICK_ACTION_SUBMODES = ("merge", "levels")
 
 
 class HierarchyLoop(ToolLoop):
@@ -46,9 +52,20 @@ class HierarchyLoop(ToolLoop):
         self._edge = None           # [worldA, worldB] of the drawn edge
         self._edgeLive = None       # the stroke being drawn
         self._edgeTube = -1         # which tube the edge was drawn over
+        # The tube under the stroke being drawn: it only becomes _edgeTube
+        # when the stroke is long enough to replace the recorded edge, so a
+        # rejected short stroke cannot re-target the old edge.
+        self._edgeLiveTube = -1
         self._edgeStartPx = None    # where the edge stroke was pressed
+        # (tubeId, x, y) of a plain press on a tube in Merge or Levels: the
+        # sub-mode acts at release, and only when the press did not travel,
+        # so a press that drags off the tube changes nothing.
+        self._clickTube = None
         self._active = False
         self._resubdivideArmed = ()  # the tubes the next call would redo
+        # The selection the confirm was armed over: a different selection
+        # lapses it (resubdivideArmed), so the dock's amber button reverts.
+        self._resubdivideSelection = ()
         self._lastStatus = ""
 
     def activate(self):
@@ -89,10 +106,48 @@ class HierarchyLoop(ToolLoop):
         return self.state.hierarchySubMode or self.defaultSubMode
 
     def setSubMode(self, subId):
+        previous = self.subMode()
         status = tonicModes.SetActiveHierarchySubMode(self.state, subId)
         if status:
             self._resubdivideArmed = ()
+            # A recorded split edge belongs to the Subdivide tool; leaving
+            # it must not leave a stale stroke armed for a later Shift+D.
+            if self.subMode() != previous:
+                self._clearEdge()
         return status
+
+    def deactivate(self):
+        """Leaving Hierarchy drops the drawn edge and the armed confirm."""
+        self._clearEdge()
+        self._resubdivideArmed = ()
+        return False
+
+    @property
+    def resubdivideArmed(self):
+        """True while Re-subdivide waits for its confirming second press.
+
+        The dock reads this on every refresh to relabel the button, so the
+        two-step confirm is visible where the artist clicks, not only on
+        the status line. Escape (cancel) disarms it, and so does selecting
+        something else: the confirm belongs to the tubes it named.
+        """
+        if not self._resubdivideArmed:
+            return False
+        if tuple(self.selectedTubes()) != tuple(self._resubdivideSelection):
+            self._resubdivideArmed = ()
+            self._resubdivideSelection = ()
+            return False
+        return True
+
+    def _clearEdge(self):
+        """Forget the recorded and the live split edge."""
+        had = self._edge is not None or self._edgeLive is not None
+        self._edge = None
+        self._edgeTube = -1
+        self._edgeLive = None
+        self._edgeLiveTube = -1
+        self._edgeStartPx = None
+        return had
 
     # -- status ------------------------------------------------------------
 
@@ -163,12 +218,23 @@ class HierarchyLoop(ToolLoop):
         if self.session.model is None:
             return False
         self._active = True
-        if sample.has("shift"):
+        # Any selection modifier holds the press until travel says band or
+        # click; both then go through the one modifier table.
+        if selectModeFor(sample) != tonicLib.TONIC_SELECT_SET:
             self._marquee = (sample.x, sample.y)
             return True
         if self._wantsEdgeStroke():
             return self._pressEdge(sample)
-        return self._pressSelect(sample)
+        item = sample.item(self.pickMask, self.pickRadiusPx())
+        if item is None:
+            # Empty space: a drag boxes tubes and a click without travel
+            # deselects, both decided on release like the modifier band.
+            self._marquee = (sample.x, sample.y)
+            return True
+        claimed = self._pressSelect(sample, item)
+        if self.subMode() in CLICK_ACTION_SUBMODES:
+            self._clickTube = (int(item["id"]), sample.x, sample.y)
+        return claimed
 
     def move(self, sample):
         if not self._active or self.session.model is None:
@@ -187,25 +253,52 @@ class HierarchyLoop(ToolLoop):
             return False
         claimed = True
         if self._marquee is not None:
+            x0, y0 = self._marquee
+            banded = (abs(sample.x - x0) + abs(sample.y - y0) >=
+                      MARQUEE_MIN_PX)
             self._releaseMarquee(sample)
+            if banded and self._bandGroups(sample):
+                self.group()
         elif self._edgeLive is not None:
             self._releaseEdge(sample)
+        elif self._clickTube is not None:
+            self._releaseClick(sample)
         else:
             claimed = True
         self._marquee = None
         self._edgeLive = None
+        self._clickTube = None
         self._active = False
         return claimed
 
     def cancel(self):
-        if not self._active and self._marquee is None and \
-                self._edgeLive is None:
-            return False
-        self._marquee = None
-        self._edgeLive = None
-        self._active = False
-        self._status("Tonic Hierarchy: cancelled")
-        return True
+        """Escape peels one layer: the live gesture, then the idle state.
+
+        Mid-drag only the band or the stroke being drawn goes, so a stray
+        Escape does not also throw away an edge recorded earlier. With no
+        drag, Escape forgets the recorded split edge and disarms a pending
+        Re-subdivide -- an armed confirm must never survive the artist
+        backing out of it.
+        """
+        armed = bool(self._resubdivideArmed)
+        self._resubdivideArmed = ()
+        if self._active or self._marquee is not None or \
+                self._edgeLive is not None:
+            self._marquee = None
+            self._edgeLive = None
+            self._edgeLiveTube = -1
+            self._edgeStartPx = None
+            self._clickTube = None    # Escape mid-click: Merge/Levels hold
+            self._active = False
+            self._status("Tonic Hierarchy: cancelled")
+            return True
+        if self._clearEdge():
+            self._status("Tonic Hierarchy: split edge cleared")
+            return True
+        if armed:
+            self._status("Tonic Hierarchy: Re-subdivide cancelled")
+            return True
+        return False
 
     def hover(self, sample):
         if self.session.model is None:
@@ -245,17 +338,18 @@ class HierarchyLoop(ToolLoop):
 
     # -- selection ----------------------------------------------------------
 
-    def _pressSelect(self, sample):
-        item = sample.item(self.pickMask, self.pickRadiusPx())
-        mode = (tonicLib.TONIC_SELECT_TOGGLE if sample.has("ctrl")
-                else tonicLib.TONIC_SELECT_SET)
+    def _pressSelect(self, sample, item):
+        """One click on `item` (a K11 pick, or None for empty space)."""
+        # A no-travel Shift-click toggles; it never replaces what the
+        # artist was extending.
+        mode = selectModeFor(sample)
         if not item:
             if mode == tonicLib.TONIC_SELECT_SET:
                 self.session.clearSelection(tonicLib.TONIC_PICK_TUBE_VERT)
                 self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
             return True
-        self.session.select(tonicLib.TONIC_PICK_TUBE_VERT, [int(item["id"])],
-                            mode=mode)
+        selectItems(self.session, tonicLib.TONIC_PICK_TUBE_VERT,
+                    [(int(item["id"]), -1, -1)], mode)
         self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
         self._status("Tonic Hierarchy: tube %d (L%d)"
                      % (int(item["id"]), self._levelOf(int(item["id"]))))
@@ -263,20 +357,75 @@ class HierarchyLoop(ToolLoop):
 
     def _moveMarquee(self, sample):
         x0, y0 = self._marquee
-        mode = (tonicLib.TONIC_SELECT_ADD if sample.has("ctrl")
-                else tonicLib.TONIC_SELECT_SET)
-        self.session.selectRect(sample.camera, x0, y0, sample.x, sample.y,
-                                tonicLib.TONIC_PICK_TUBE_VERT, mode)
+        selectBand(self.session, tonicLib.TONIC_PICK_TUBE_VERT,
+                   selectModeFor(sample, band=True),
+                   lambda mode: self.session.selectRect(
+                       sample.camera, x0, y0, sample.x, sample.y,
+                       tonicLib.TONIC_PICK_TUBE_VERT, mode))
         self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
         return True
 
     def _releaseMarquee(self, sample):
         x0, y0 = self._marquee
         if abs(sample.x - x0) + abs(sample.y - y0) < MARQUEE_MIN_PX:
-            return self._pressSelect(sample)
+            return self._pressSelect(
+                sample, sample.item(self.pickMask, self.pickRadiusPx()))
         self._moveMarquee(sample)
         self._status("Tonic Hierarchy: %d tube(s) selected"
                      % len(self.selectedTubes()))
+        return True
+
+    # -- sub-modes that act (MD-04) -----------------------------------------
+
+    def _releaseClick(self, sample):
+        """A plain click on a tube in Merge or Levels does the sub-mode.
+
+        Until MD-04 only the edge stroke read the sub-mode, so Merge, Group
+        and Levels were three more names for Navigate. The press already
+        selected the tube (a click that acts still shows what it acted on);
+        a press that travelled off it is a cancelled click.
+        """
+        tubeId, x0, y0 = self._clickTube
+        self._clickTube = None
+        if abs(sample.x - x0) + abs(sample.y - y0) >= MARQUEE_MIN_PX:
+            return False
+        subMode = self.subMode()
+        if subMode == "merge":
+            # Shift+M over the one clicked tube: a parent folds its own
+            # children; a visible child (the active cut shows children, not
+            # their parent) folds its siblings back into their parent.
+            return self.mergeChildrenOfSelection()
+        if subMode == "levels":
+            return self.soloLevelOf(tubeId)
+        return False
+
+    def _bandGroups(self, sample):
+        """Whether this band's release groups what it caught.
+
+        Only a plain band groups: it replaced the selection, so the group
+        is exactly the tubes boxed. A modifier band just edits the
+        selection, which lets a group be gathered over several bands and
+        closed with the dock's Group button.
+        """
+        return (self.subMode() == "group" and
+                selectModeFor(sample, band=True) == tonicLib.TONIC_SELECT_SET)
+
+    def soloLevelOf(self, tubeId):
+        """Levels click: solo the clicked tube's level; again un-solos.
+
+        A solo hides every other level, so the only tubes left to click
+        are the soloed level's own -- clicking one of them again is the
+        way back, with no trip to the dock's Solo box.
+        """
+        level = self._levelOf(tubeId)
+        if int(self.state.soloLevel) == level:
+            status = tonicHierarchy.setSoloLevel(self.state,
+                                                 tonicHierarchy.SOLO_OFF)
+        else:
+            status = (tonicHierarchy.setSoloLevel(self.state, level) +
+                      " Click an L%d tube again to un-solo." % level)
+        self.syncLevelDisplay()
+        self._status(status)
         return True
 
     # -- the edge stroke ----------------------------------------------------
@@ -290,8 +439,8 @@ class HierarchyLoop(ToolLoop):
         hit = sample.surface()
         item = sample.item(self.pickMask, self.pickRadiusPx())
         tubes = self.selectedTubes()
-        self._edgeTube = (int(item["id"]) if item
-                          else (tubes[0] if tubes else -1))
+        self._edgeLiveTube = (int(item["id"]) if item
+                              else (tubes[0] if tubes else -1))
         if hit is None:
             self._status("Tonic Hierarchy: draw the split across the root "
                          "region")
@@ -312,14 +461,34 @@ class HierarchyLoop(ToolLoop):
                          "split along")
             return False
         self._edge = list(self._edgeLive)
-        self._status("Tonic Hierarchy: split edge recorded over tube %d -- "
-                     "Shift+D splits along it" % self._edgeTube)
+        self._edgeTube = self._edgeLiveTube
+        if self._edgeTube >= 0:
+            self._status("Tonic Hierarchy: split edge recorded over T%d -- "
+                         "Shift+D splits along it" % self._edgeTube)
+        else:
+            self._status("Tonic Hierarchy: split edge recorded -- select "
+                         "the tube it crosses, then Shift+D splits along it")
         return True
 
     @property
     def edge(self):
         """The recorded split edge, or None (read by the T0 test)."""
         return tuple(self._edge) if self._edge else None
+
+    def edgePreview(self):
+        """World endpoints the viewport overlay draws for the edge tool.
+
+        Hydra draws only model state and the edge is not in the model until
+        Shift+D, so without this the stroke was drawn blind. Both are None
+        outside Subdivide's edge split mode: a stroke recorded there is not
+        what any other tool will act on.
+        """
+        if not self._wantsEdgeStroke():
+            return {"live": None, "recorded": None}
+        live = (list(self._edgeLive) if self._active and
+                self._edgeLive is not None else None)
+        recorded = list(self._edge) if self._edge else None
+        return {"live": live, "recorded": recorded}
 
     # -- shared plumbing ----------------------------------------------------
 
@@ -333,6 +502,38 @@ class HierarchyLoop(ToolLoop):
         self.session.enqueueCommit()
         self.session.rebake()
         return True
+
+    def _beginAction(self, label):
+        """Open the action's undo bracket; False (and said so) if refused.
+
+        Running the tree edit with no bracket would make it un-undoable and
+        leave a later endGesture closing someone else's step.
+        """
+        if self.session.beginGesture(label):
+            return True
+        self._status("Tonic Hierarchy: %s could not start an undo step -- "
+                     "nothing changed" % label)
+        return False
+
+    def _endAction(self, done):
+        """Seal the bracket, or roll it back when nothing succeeded.
+
+        An all-failed action cancels instead of ending, so the undo stack
+        never gains an empty (or half-applied) step.
+        """
+        if done:
+            self.session.endGesture()
+            self.endOfEdit()
+            return True
+        dirty = self.session.cancelGesture()
+        self.session.publish(int(dirty or 0))
+        return False
+
+    def _failureStatus(self, label, done, failures):
+        """'<label>: N done, M failed: <first reason>' -- never overwritten
+        by a success line, so a partial failure stays on screen."""
+        return self._status("Tonic Hierarchy: %s: %d done, %d failed: %s"
+                            % (label, done, len(failures), failures[0]))
 
     def _childrenOf(self, tubeId):
         dll, model = self._dll(), self.session.model
@@ -406,7 +607,7 @@ class HierarchyLoop(ToolLoop):
         path = self._ancestorPath(parentId)
         tonicHierarchy.setActiveCutFocus(
             self.state, parentId, path,
-            names=tuple("T%d" % tubeId for tubeId in path),
+            names=tuple("Tube %d" % tubeId for tubeId in path),
             level=tonicHierarchy.deriveChildLevel(self._levelOf(parentId)))
 
     def _setCollapsedFocus(self, tubeId):
@@ -418,12 +619,13 @@ class HierarchyLoop(ToolLoop):
             path = self._ancestorPath(parent)
             tonicHierarchy.setActiveCutFocus(
                 self.state, parent, path,
-                names=tuple("T%d" % value for value in path), level=level)
+                names=tuple("Tube %d" % value for value in path),
+                level=level)
             return
         path = self._ancestorPath(tubeId)
         tonicHierarchy.setActiveCutFocus(
             self.state, -1, path,
-            names=tuple("T%d" % value for value in path), level=level)
+            names=tuple("Tube %d" % value for value in path), level=level)
 
     def _enterParentsActiveCut(self, parents):
         """Expand each selected parent and select their direct children."""
@@ -504,11 +706,30 @@ class HierarchyLoop(ToolLoop):
             self._status("Tonic Hierarchy: draw one stroke across the root "
                          "region first -- edge mode splits along it")
             return False
-        session.beginGesture("Subdivide")
+        if splitMode == "edge" and [int(t) for t in tubes] != \
+                [int(self._edgeTube)]:
+            # One stroke describes one cut through one tube's root region;
+            # applying it to every selected tube split tubes it never
+            # crossed. The artist either selects the stroked tube alone or
+            # strokes the tube they meant.
+            if len(tubes) == 1:
+                self._status("Tonic Hierarchy: draw the split across T%d"
+                             % int(tubes[0]))
+            elif self._edgeTube >= 0:
+                self._status("Tonic Hierarchy: the edge was drawn over T%d "
+                             "-- select only T%d, or draw the split across "
+                             "the tube you want" % (self._edgeTube,
+                                                    self._edgeTube))
+            else:
+                self._status("Tonic Hierarchy: edge split cuts one tube -- "
+                             "select it and draw the split across it")
+            return False
+        if not self._beginAction("Subdivide"):
+            return False
         made = 0
         children = []
         childrenByParent = {}
-        failed = ""
+        failures = []
         for tubeId in tubes:
             try:
                 if splitMode == "edge":
@@ -517,15 +738,21 @@ class HierarchyLoop(ToolLoop):
                     created = tonicHierarchy.subdivide(
                         session.dll, session.model, tubeId, count, splitMode,
                         seed)
-                made += len(created)
-                children.extend(created)
-                childrenByParent[int(tubeId)] = list(created)
             except (RuntimeError, NotImplementedError) as exc:
-                failed = str(exc)
-        session.endGesture()
-        self.endOfEdit()
-        if made == 0 and failed:
-            self._status("Tonic Hierarchy: %s" % failed)
+                failures.append("T%d: %s" % (int(tubeId), exc))
+                continue
+            made += len(created)
+            children.extend(created)
+            childrenByParent[int(tubeId)] = list(created)
+        done = len(childrenByParent)
+        self._endAction(done)
+        if done and splitMode == "edge":
+            # The stroke is consumed: a second Shift+D must not split the
+            # new children along a cut that was drawn for their parent.
+            self._clearEdge()
+        if not done:
+            self._failureStatus("Subdivide", 0, failures or
+                                ["nothing to split"])
             return False
         # TonicSelection remaps a selected parent itself, but make the UI
         # contract explicit for a dock-button invocation too: subdivision
@@ -549,6 +776,9 @@ class HierarchyLoop(ToolLoop):
                 levels = {self._levelOf(tubeId) for tubeId in children}
                 if len(levels) == 1:
                     self.focusLevel(next(iter(levels)))
+        if failures:
+            self._failureStatus("Subdivide", done, failures)
+            return False
         self._status("Tonic Hierarchy: %d child tube(s) from %d parent(s)%s"
                      % (made, len(tubes),
                         " along the drawn edge" if splitMode == "edge"
@@ -587,14 +817,22 @@ class HierarchyLoop(ToolLoop):
         if self._activeCutAvailable():
             for tubeId in targets:
                 self._setExpanded(tubeId, False)
-        session.beginGesture("Merge children")
+        if not self._beginAction("Merge children"):
+            return False
+        failures = []
         for tubeId in targets:
             try:
                 tonicHierarchy.mergeChildren(session.dll, session.model,
                                              tubeId)
             except (RuntimeError, NotImplementedError) as exc:
-                self._status("Tonic Hierarchy: %s" % exc)
-        session.endGesture()
+                failures.append("T%d: %s" % (int(tubeId), exc))
+        done = len(targets) - len(failures)
+        if done:
+            session.endGesture()
+        else:
+            # Nothing merged: roll the bracket back rather than leave an
+            # empty undo step (endOfEdit below has nothing to commit).
+            session.publish(session.cancelGesture())
         if targets:
             if self._activeCutAvailable():
                 self._selectFrontierTubes(targets)
@@ -603,7 +841,11 @@ class HierarchyLoop(ToolLoop):
             else:
                 self.session.select(tonicLib.TONIC_PICK_TUBE_VERT, targets)
                 self.focusLevel(self._levelOf(targets[0]))
-        self.endOfEdit()
+        if done:
+            self.endOfEdit()
+        if failures:
+            self._failureStatus("Merge children", done, failures)
+            return False
         self._status(tonicHierarchy.mergeChildrenStatus(
             "%d tube(s)" % len(targets)))
         return True
@@ -628,13 +870,14 @@ class HierarchyLoop(ToolLoop):
             self._status("Tonic Hierarchy: select two or more siblings to "
                          "merge")
             return False
-        session.beginGesture("Merge selected")
+        if not self._beginAction("Merge selected"):
+            return False
         try:
             kept = tonicHierarchy.mergeSelected(session.dll, session.model,
                                                 tubes)
         except (RuntimeError, NotImplementedError) as exc:
-            session.endGesture()
-            self._status("Tonic Hierarchy: %s" % exc)
+            self._endAction(0)
+            self._failureStatus("Merge selected", 0, [str(exc)])
             return False
         session.endGesture()
         self.endOfEdit()
@@ -668,6 +911,7 @@ class HierarchyLoop(ToolLoop):
         count = tonicHierarchy.clampSubdivideCount(self.state.subdivideCount)
         if tuple(parents) != tuple(self._resubdivideArmed):
             self._resubdivideArmed = tuple(parents)
+            self._resubdivideSelection = tuple(tubes)
             self._status(tonicHierarchy.resubdivideConfirm(
                 "%d tube(s)" % len(parents),
                 max(len(self._childrenOf(parents[0])),
@@ -677,20 +921,44 @@ class HierarchyLoop(ToolLoop):
         self._resubdivideArmed = ()
         seed = int(self.state.panels.get("hierarchy", {})
                    .get("subdivideSeed", 0))
-        session.beginGesture("Re-subdivide")
+        if not self._beginAction("Re-subdivide"):
+            return False
         made = 0
         children = []
+        failures = []
+        done = 0
         for tubeId in parents:
             try:
                 tonicHierarchy.mergeChildren(session.dll, session.model,
                                              tubeId)
+            except (RuntimeError, NotImplementedError) as exc:
+                # The merge refused before touching the tree: this parent
+                # is unchanged, so the others may still go ahead.
+                failures.append("T%d: %s" % (int(tubeId), exc))
+                continue
+            try:
                 created = tonicHierarchy.subdivide(
                     session.dll, session.model, tubeId, count,
                     self.state.splitMode, seed)
-                made += len(created)
-                children.extend(created)
             except (RuntimeError, NotImplementedError) as exc:
-                self._status("Tonic Hierarchy: %s" % exc)
+                # Merged but not re-split: the parent's children (and their
+                # sculpt deltas) are gone. Sealing that inside the step
+                # would flatten it silently, and only a Ctrl+Z that also
+                # undid every good parent could bring it back, so the whole
+                # action rolls back instead.
+                self._endAction(0)
+                self._status("Tonic Hierarchy: Re-subdivide rolled back -- "
+                             "T%d merged but its re-split refused (%s); "
+                             "nothing changed" % (int(tubeId), exc))
+                return False
+            done += 1
+            made += len(created)
+            children.extend(created)
+        if not done:
+            # Every merge refused: nothing changed, no empty step.
+            self._endAction(0)
+            self._failureStatus("Re-subdivide", 0, failures)
+            return False
         session.endGesture()
         if children:
             if self._activeCutAvailable():
@@ -709,6 +977,9 @@ class HierarchyLoop(ToolLoop):
                 if len(levels) == 1:
                     self.focusLevel(next(iter(levels)))
         self.endOfEdit()
+        if failures:
+            self._failureStatus("Re-subdivide", done, failures)
+            return False
         self._status("Tonic Hierarchy: re-subdivided %d parent(s) into %d "
                      "child tube(s)" % (len(parents), made))
         return True
@@ -721,13 +992,14 @@ class HierarchyLoop(ToolLoop):
             self._status("Tonic Hierarchy: select two or more tubes to "
                          "group")
             return False
-        session.beginGesture("Group")
+        if not self._beginAction("Group"):
+            return False
         try:
             parent = tonicHierarchy.groupTubes(session.dll, session.model,
                                                tubes, transient=transient)
         except (RuntimeError, NotImplementedError) as exc:
-            session.endGesture()
-            self._status("Tonic Hierarchy: %s" % exc)
+            self._endAction(0)
+            self._failureStatus("Group", 0, [str(exc)])
             return False
         session.endGesture()
         self.session.select(tonicLib.TONIC_PICK_TUBE_VERT, [parent])
@@ -743,17 +1015,57 @@ class HierarchyLoop(ToolLoop):
         if session.model is None or not tubes:
             self._status("Tonic Hierarchy: select the group to keep")
             return False
-        session.beginGesture("Make persistent")
+        if not self._beginAction("Make persistent"):
+            return False
+        failures = []
         for tubeId in tubes:
             try:
                 tonicHierarchy.makePersistent(session.dll, session.model,
                                               tubeId)
             except (RuntimeError, NotImplementedError) as exc:
-                self._status("Tonic Hierarchy: %s" % exc)
-        session.endGesture()
-        self.endOfEdit()
+                failures.append("T%d: %s" % (int(tubeId), exc))
+        done = len(tubes) - len(failures)
+        self._endAction(done)
+        if failures:
+            self._failureStatus("Make persistent", done, failures)
+            return False
         self._status("Tonic Hierarchy: %d group(s) kept" % len(tubes))
         return True
+
+    # -- actions: delete (SL-03) ---------------------------------------------
+
+    def deleteSelection(self):
+        """Delete: the selected tubes with their subtrees, one undo step.
+
+        An L1 root is refused with its reason (its graph region owns it).
+        A parent whose last child went is a leaf again, so it comes back
+        on the frontier selected, the way Merge children leaves it.
+        """
+        tubes = self.selectedTubes()
+        if self.session.model is None or not tubes:
+            self._status("Tonic Hierarchy: select a tube to delete")
+            return False
+        self._resubdivideArmed = ()
+        parents = {self._parentOf(tubeId) for tubeId in tubes}
+        removed, roots, error = tonicLoopsTube.deleteWholeTubes(self.session,
+                                                                tubes)
+        if removed:
+            if int(self._edgeTube) in removed:
+                self._clearEdge()     # the stroke's tube is gone
+            emptied = sorted(parent for parent in parents
+                             if parent is not None and
+                             parent not in removed and
+                             not self._childrenOf(parent))
+            if emptied and self._activeCutAvailable():
+                self._selectFrontierTubes(emptied)
+                self._setCollapsedFocus(emptied[0])
+                self._pushFocus()
+            else:
+                # A level may have emptied; the display table follows.
+                self.syncLevelDisplay()
+        self._status(tonicLoopsTube.deleteTubesStatus(
+            "Tonic Hierarchy", removed, roots, error))
+        return bool(removed)
 
     # -- actions: locks ------------------------------------------------------
 
@@ -938,8 +1250,15 @@ class HierarchyLoop(ToolLoop):
     # -- keys ----------------------------------------------------------------
 
     def adjustRadius(self, delta):
-        """`[` / `]`: the pick radius Hierarchy selects with."""
-        value = max(1.0, min(128.0, float(self.state.snapRadiusPx) +
+        """`[` / `]`: the pick radius Hierarchy selects with.
+
+        Its own `pickRadiusPx`, not Graph's weld/snap distance: widening
+        the Hierarchy pick used to change how far Graph strokes weld.
+        """
+        value = max(1.0, min(128.0, float(self.state.pickRadiusPx) +
                              float(delta)))
-        self.state.snapRadiusPx = value
+        self.state.pickRadiusPx = value
         return self._status("Tonic Hierarchy: pick radius %.0f px" % value)
+
+    def pickRadiusPx(self):
+        return max(float(self.state.pickRadiusPx), MIN_PICK_RADIUS_PX)

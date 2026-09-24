@@ -16,7 +16,11 @@
 #   * a Tube-mode move (center CV edit + version poll) completes, timed;
 #   * a K11 pick completes, timed;
 #   * TN-4 (idle-swap budget) and TN-7 (bake isolation) skip with their
-#     harness reasons.
+#     harness reasons;
+#   * SS-06: a ~100k-face scalp binds (TonicSession.activate) within
+#     FAST_BIND_S, and a usdview that bound a scalp through the plugin
+#     exits within QUIT_BUDGET_S of its script ending with its per-process
+#     bake directory removed (a child testusdview run of this same file).
 import ctypes
 import os
 import sys
@@ -31,6 +35,17 @@ PICK_GUIDE = 16
 # headroom; the reference-scene gates keep them exactly.
 TN1_MOVE_MS = 8.0
 TN2_PICK_MS = 0.5
+
+# SS-06 budgets. The bind covers the whole activate() -- stage read,
+# Tonic_BindScalp, committer + bake start, first publish -- of a 317x317
+# quad grid; the per-element Python conversion it replaced spent most of
+# its time in list comprehensions before the model saw a single face.
+FAST_BIND_FACES_SIDE = 317
+FAST_BIND_S = 3.0
+QUIT_BUDGET_S = 20.0
+# Set in the child testusdview's environment to the path its result goes
+# to; the same file then runs as the quit probe's child.
+QUIT_CHILD_ENV = "USDGENTONIC_PERF_QUIT_CHILD"
 
 
 def check(ok, what):
@@ -200,14 +215,314 @@ def run(stage):
     skip("TN-7 bake isolation: needs the reference bake in flight")
 
     dll.Tonic_Destroy(model)
+    fastBind()
     print("testUsdviewTonicPerf: %d failure(s), %d skip(s)"
           % (failures, skips))
     return 1 if failures else 0
 
 
+def gridScalpStage(side):
+    """An in-memory stage whose /Scalp is a side x side quad grid."""
+    import numpy
+    from pxr import Usd, UsdGeom, Vt
+    verts = side + 1
+    axis = numpy.linspace(0.0, 4.0, verts, dtype=numpy.float32)
+    xs, zs = numpy.meshgrid(axis, axis, indexing="ij")
+    points = numpy.stack([xs.ravel(), numpy.zeros(verts * verts,
+                                                  numpy.float32),
+                          zs.ravel()], axis=1).astype(numpy.float32)
+    rows, cols = numpy.meshgrid(numpy.arange(side), numpy.arange(side),
+                                indexing="ij")
+    first = (rows * verts + cols).ravel()
+    indices = numpy.stack([first, first + verts, first + verts + 1,
+                           first + 1], axis=1).ravel().astype(numpy.int32)
+    stage = Usd.Stage.CreateInMemory("tonicFastBind")
+    mesh = UsdGeom.Mesh.Define(stage, "/Scalp")
+    mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(points))
+    mesh.CreateFaceVertexCountsAttr(Vt.IntArray.FromNumpy(
+        numpy.full(side * side, 4, numpy.int32)))
+    mesh.CreateFaceVertexIndicesAttr(Vt.IntArray.FromNumpy(indices))
+    return stage
+
+
+def fastBind():
+    """SS-06: a ~100k-face scalp binds within FAST_BIND_S."""
+    try:
+        import numpy  # noqa: F401 -- the fixture is built with it
+    except ImportError:
+        skip("fast bind: numpy is not importable")
+        return
+    from usdGenTonicTools import tonicSession, tonicToolState
+    side = FAST_BIND_FACES_SIDE
+    stage = gridScalpStage(side)
+    session = tonicSession.TonicSession(tonicToolState.TonicToolState())
+    heard = []
+    session.setStatusSink(lambda *args: heard.append(args))
+    t0 = time.perf_counter()
+    mesh = session._scalpMesh("/Scalp", stage)
+    convert = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    ok = session.activate("/Scalp", stage=stage)
+    elapsed = time.perf_counter() - t0
+    print("info: fast bind: %d faces, conversion %.3f s, activate %.3f s "
+          "(budget %.1f s)" % (side * side, convert, elapsed, FAST_BIND_S))
+    check(mesh is not None and len(mesh[1]) == side * side,
+          "fast bind: the grid reads as %d faces" % (side * side))
+    check(ok and session.model is not None,
+          "fast bind: the ~100k-face scalp binds (%r)" % heard)
+    check(elapsed < FAST_BIND_S,
+          "fast bind: activate() within %.1f s (%.3f s)"
+          % (FAST_BIND_S, elapsed))
+    session.deactivate()
+
+
+def quitChild(appController, resultPath):
+    """The quit probe's child: bind through the plugin, then just return.
+
+    Nothing here tears the session down: that is the container's quit
+    hook's job, and whether it did it is what the parent measures.
+    """
+    import json
+    result = {"pid": os.getpid(), "bound": False, "bakeDir": "",
+              "baked": False, "end": 0.0}
+    try:
+        import usdGenTonicTools
+        dataModel = appController._dataModel
+        registry = appController._plugRegistry
+        dataModel.selection.setPrimPath("/Scalp")
+        registry.getCommandPlugin("usdGenTonicTools.openWorkspace").run()
+        registry.getCommandPlugin("usdGenTonicTools.bindScalp").run()
+        session = usdGenTonicTools.container().session
+        result["bound"] = session is not None and session.model is not None
+        if result["bound"]:
+            result["bakeDir"] = session.bakeDir
+            # A real region map in the directory when the bake obliges;
+            # a marker file otherwise, so "the directory is gone" is never
+            # vacuously true.
+            dll = session.dll
+            strokeRect(dll, session.model,
+                       [(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)],
+                       0.1)
+            session.rasterise()
+            session.ensureRegionTubes()
+            if session.rebake():
+                deadline = time.monotonic() + 15.0
+                while time.monotonic() < deadline and \
+                        session.hasPendingWork():
+                    session.pump()
+                    time.sleep(0.02)
+                result["baked"] = bool(session._state.bakedVersion)
+            if session.bakeDir:
+                os.makedirs(session.bakeDir, exist_ok=True)
+                with open(os.path.join(session.bakeDir, "quitProbe.txt"),
+                          "w") as marker:
+                    marker.write("SS-06 quit probe\n")
+    finally:
+        result["end"] = time.time()
+        with open(resultPath, "w") as handle:
+            json.dump(result, handle)
+    return 0
+
+
+def quitProbe():
+    """SS-06: a bound usdview exits promptly and takes its bake dir along.
+
+    Runs this file again in a child testusdview (the same command line
+    CTest gave this one) with QUIT_CHILD_ENV set. The child binds a scalp
+    and returns without any teardown of its own; testusdview then closes
+    its windows and the interpreter exits, so only the container's quit
+    hook (aboutToQuit, or atexit where the event loop never ends) can join
+    the workers and remove the directory.
+    """
+    import json
+    import subprocess
+    import tempfile
+    argv = list(sys.argv)
+    if "--testScript" not in argv or len(argv) < 4:
+        skip("quit probe: not running under testusdview (%r)" % argv)
+        return
+    script = argv[argv.index("--testScript") + 1]
+    scene = argv[-1]
+    handle, resultPath = tempfile.mkstemp(prefix="tonicQuitProbe",
+                                          suffix=".json")
+    os.close(handle)
+    env = dict(os.environ)
+    env.pop("USDGENTONIC_BAKE_DIR", None)   # the per-process default
+    env[QUIT_CHILD_ENV] = resultPath
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, argv[0], "--testScript", script, scene],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            output, _ = proc.communicate(timeout=200)
+            exited = time.time()
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate()
+            exited = None
+        text = output.decode("utf-8", "replace") if output else ""
+        try:
+            with open(resultPath) as stream:
+                result = json.load(stream)
+        except (OSError, ValueError):
+            result = {}
+    finally:
+        try:
+            os.remove(resultPath)
+        except OSError:
+            pass
+    clean = ("Traceback" not in text and "FAIL:" not in text)
+    if exited is None or not result or not clean:
+        # The child's own words, defanged so CTest's FAIL:/Traceback
+        # expression fires on this test's verdict alone.
+        for line in text.splitlines()[-25:]:
+            print("info: child| %s" % line.replace("FAIL:", "F-AIL:")
+                  .replace("Traceback", "T-raceback"))
+    check(exited is not None, "quit probe: the child usdview exits")
+    check(bool(result.get("bound")),
+          "quit probe: the child bound /Scalp through the plugin (%r)"
+          % result)
+    if exited is not None and result.get("end"):
+        lag = exited - float(result["end"])
+        check(lag <= QUIT_BUDGET_S,
+              "quit probe: it exits %.1f s after its script (budget %.0f s)"
+              % (lag, QUIT_BUDGET_S))
+    bakeDir = result.get("bakeDir", "")
+    print("info: quit probe: child pid %s, bake dir %s, baked %s"
+          % (result.get("pid"), bakeDir, result.get("baked")))
+    check(bool(bakeDir) and not os.path.exists(bakeDir),
+          "quit probe: its per-process bake directory is gone (%r)"
+          % bakeDir)
+    check(clean, "quit probe: the child printed no traceback or failure")
+
+
+def _testenvDir():
+    """This file's directory; testusdview execs it with no __file__."""
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        pass
+    for index, argument in enumerate(sys.argv):
+        if argument == "--testScript" and index + 1 < len(sys.argv):
+            return os.path.dirname(os.path.abspath(sys.argv[index + 1]))
+    return ""
+
+
+def ladderChip(appController):
+    """FB-02: a drag that steps the fallback ladder says so in the HUD.
+
+    The budget is forced to 0 ms so every real move is over it: the chip
+    must name the live rung while the button is held, linger about a
+    second after the release restored full detail, then go.  With
+    `ladderEnabled` off the same drag never steps at all.
+    """
+    here = _testenvDir()
+    if here and here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import tonicT3
+        from usdGenTonicTools import tonicCamera, tonicLadder
+    except ImportError as exc:
+        check(False, "ladder chip: the T3 helpers import: %s" % exc)
+        return
+    session, viewport, state, _workspace, container = tonicT3.openAndBind(
+        appController, "/Scalp")
+    try:
+        check(session is not None and session.model is not None and
+              viewport is not None and viewport.installed,
+              "ladder chip: /Scalp binds with a live viewport")
+        if session is None or session.model is None or viewport is None:
+            return
+        view = viewport.view
+        stage = appController._dataModel.stage
+        check(tonicT3.frameScalp(stage, view), "ladder chip: top camera")
+        view.setFocus()
+        tonicT3.wait(50)
+        viewport.setPointerInside(True)
+        mouse = tonicT3.Mouse(view)
+        mouse.direct = True
+        viewport.setMode("graph")
+        viewport.setSubMode("draw")
+        camera = tonicCamera.resolve(view)
+        check(camera is not None, "ladder chip: the camera resolves")
+        if camera is None:
+            return
+        hud = viewport._hudOverlay
+
+        def stroke(z):
+            points = []
+            for i in range(25):
+                p = camera.worldToPixels((0.6 + 2.8 * i / 24.0, 0.0, z))
+                points.append((p[0], p[1]))
+            return points
+
+        state.moveBudgetMs = 0.0
+        path = stroke(0.6)
+        mouse.press(path[0])
+        for point in path[1:]:
+            mouse.move(point)
+        tonicT3.wait(10)
+        step = int(state.ladderStep)
+        chip = hud.chip if hud is not None else ""
+        check(step >= 2 and chip == tonicLadder.chipLabel(step) and
+              "(auto)" in chip and hud.isVisible(),
+              "ladder chip: a 0 ms budget steps the ladder and the HUD chip "
+              "names the rung (step %d, %r)" % (step, chip))
+        mouse.release(path[-1])
+        tonicT3.wait(10)
+        check(int(state.ladderStep) == 0 and hud.chip.startswith(chip),
+              "ladder chip: the release restores full detail and the chip "
+              "lingers (%r)" % hud.chip)
+        tonicT3.wait(_chipLingerMs() + 400)
+        check(hud.chip == "",
+              "ladder chip: about a second later the chip is gone (%r)"
+              % hud.chip)
+
+        state.ladderEnabled = False
+        path = stroke(3.4)
+        mouse.press(path[0])
+        for point in path[1:]:
+            mouse.move(point)
+        tonicT3.wait(10)
+        check(int(state.ladderStep) == 0 and hud.chip == "",
+              "ladder chip: with the ladder disabled the same drag never "
+              "steps (step %d, %r)" % (state.ladderStep, hud.chip))
+        mouse.release(path[-1])
+    finally:
+        state = getattr(container, "tonicState", None)
+        if state is not None:
+            state.ladderEnabled = True
+            state.moveBudgetMs = tonicLadder.MOVE_BUDGET_MS
+        viewport = getattr(container, "viewport", None)
+        session = getattr(container, "session", None)
+        try:
+            if viewport is not None:
+                viewport.uninstall()
+        finally:
+            if session is not None:
+                session.deactivate()
+
+
+def _chipLingerMs():
+    from usdGenTonicTools import tonicViewport
+    return int(tonicViewport.LADDER_CHIP_LINGER_MS)
+
+
 def testUsdviewInputFunction(appController):
+    resultPath = os.environ.get(QUIT_CHILD_ENV)
+    if resultPath:
+        return quitChild(appController, resultPath)
     model = getattr(appController, "_dataModel", appController)
-    return run(model.stage)
+    code = run(model.stage)
+    before = failures
+    ladderChip(appController)
+    print("testUsdviewTonicPerf: ladder chip %d failure(s)"
+          % (failures - before))
+    before = failures
+    quitProbe()
+    print("testUsdviewTonicPerf: quit probe %d failure(s)"
+          % (failures - before))
+    return 1 if failures else code
 
 
 if __name__ == "__main__":

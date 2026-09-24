@@ -1,6 +1,6 @@
 // usdGen — UsdGenGrowOp implementation (M1). 02-schema.md §2.6, 04 §2.2.
 // Roots -> straight strands: sets the CV count (usdGen:segments), the length
-// and the root-frame-B angular lift followed by normalized U-tangent blending.
+// and root-frame-B lift followed by azimuth around root-frame N.
 // Capture fixes the topology (cvCount) and the
 // per-curve target length (kSaltGrow draw); Evaluate writes the CV
 // positions and hairT. Direction: surfaceNormal (root frame N), attribute
@@ -90,8 +90,7 @@ inline GfVec3f RotateGrowDirection(GfVec3f direction, GfVec3f axis,
         direction[2] * c + cross[2] * s + axis[2] * dot * oneMinusC);
 }
 
-// Blend after lift toward the retained U tangent. Preserve length and keep
-// the lifted direction when no usable local tangent/blend direction exists.
+// Azimuth is captured once per stable strand, independently of length draws.
 struct UsdGenGrowCapture final : public UsdGenCapturePayload
 {
     // perCurve[c] = target length of curve c (kSaltGrow draw applied).
@@ -103,6 +102,7 @@ struct UsdGenGrowCapture final : public UsdGenCapturePayload
     TfToken direction = TfToken("surfaceNormal");
     GfVec3f directionVector{0.0f, 1.0f, 0.0f};
     VtFloatArray liftPerCurve;
+    VtFloatArray azimuthPerCurve;
     VtVec3fArray dirPerCurve;
     uint64_t upstreamTopologyVersion = 0;
     uint64_t upstreamValueVersion = 0;
@@ -137,6 +137,8 @@ static TfTokenVector _valueParams = [] {
     TfTokenVector v = UsdGenBaseValueParams();
     v.push_back(TfToken("directionVector"));
     v.push_back(TfToken("lift"));
+    v.push_back(TfToken("azimuth"));
+    v.push_back(TfToken("azimuthRandom"));
     // Grow is a generator: no upstream curves to leave untouched, no mask.
     return v;
 }();
@@ -182,6 +184,13 @@ bool UsdGenGrowOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
             diag->Error("UsdGenGrow: usdGen:lift must be finite and in [-90, 90] degrees");
         return false;
     }
+    double const azimuth = params.GetDouble(TfToken("azimuth"), 0.0);
+    double const azimuthRandom = params.GetDouble(TfToken("azimuthRandom"), 0.0);
+    if (!std::isfinite(azimuth) || azimuth < -360.0 || azimuth > 360.0 ||
+        !std::isfinite(azimuthRandom) || azimuthRandom < 0.0 || azimuthRandom > 1.0) {
+        if (diag) diag->Error("UsdGenGrow: azimuth must be in [-360,360] degrees and azimuthRandom in [0,1]");
+        return false;
+    }
     VtValue const directionValue = params.GetVtValue(
         TfToken("directionVector"), VtValue());
     if (!directionValue.IsEmpty() && !directionValue.IsHolding<GfVec3f>()) {
@@ -221,6 +230,8 @@ UsdGenEpoch UsdGenGrowOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
         feed("direction",
              uint64_t(p->GetToken(TfToken("direction"), TfToken("surfaceNormal")).Hash()));
         feed("lift", doubleAsBits(p->GetDouble(TfToken("lift"), 0.0)));
+        feed("azimuth", doubleAsBits(p->GetDouble(TfToken("azimuth"), 0.0)));
+        feed("azimuthRandom", doubleAsBits(p->GetDouble(TfToken("azimuthRandom"), 0.0)));
         GfVec3f directionVector(0.0f, 1.0f, 0.0f);
         if (VtValue const v = p->GetVtValue(TfToken("directionVector"), VtValue());
             v.IsHolding<GfVec3f>())
@@ -449,15 +460,40 @@ bool UsdGenGrowOp::Capture(
     // Evaluate agree without re-reading expressions per frame.
     cap.perCurve.clear();
     cap.liftPerCurve.clear();
+    cap.azimuthPerCurve.clear();
     cap.dirPerCurve.clear();
+    UsdGenParamField const azimuthField = p
+        ? p->GetScalarField(TfToken("azimuth"), 0.0) : UsdGenParamField{0.0};
+    UsdGenParamField const azimuthRandomField = p
+        ? p->GetScalarField(TfToken("azimuthRandom"), 0.0) : UsdGenParamField{0.0};
+    // Validate literal controls even for an empty groom. Bind also checks
+    // these, but direct Capture callers must fail closed independently.
+    double const azimuth = p ? p->GetDouble(TfToken("azimuth"), 0.0) : 0.0;
+    double const azimuthRandom = p ? p->GetDouble(TfToken("azimuthRandom"), 0.0) : 0.0;
+    if (!std::isfinite(azimuth) || azimuth < -360.0 || azimuth > 360.0 ||
+        !std::isfinite(azimuthRandom) || azimuthRandom < 0.0 || azimuthRandom > 1.0) {
+        if (diag) diag->Error("UsdGenGrow: azimuth must be in [-360,360] degrees and azimuthRandom in [0,1]");
+        return false;
+    }
     if (R) {
         cap.perCurve.resize(R);
+        cap.azimuthPerCurve.resize(R);
         if (liftField.connected) cap.liftPerCurve.resize(R);
         if (dirField.connected) cap.dirPerCurve.resize(R);
         auto const *ids = upstream.curveId.empty() ? nullptr : upstream.curveId.data();
         auto *len = cap.perCurve.data();
         for (uint32_t c = 0; c < R; ++c) {
             uint32_t const root = rootSpans[c];
+            double const azimuthC = azimuthField.Value(c, root);
+            double const azimuthRandomC = azimuthRandomField.Value(c, root);
+            if (!std::isfinite(azimuthC) || azimuthC < -360.0 || azimuthC > 360.0 ||
+                !std::isfinite(azimuthRandomC) || azimuthRandomC < 0.0 || azimuthRandomC > 1.0) {
+                if (diag) diag->Error("UsdGenGrow: per-strand azimuth must be in [-360,360] degrees and azimuthRandom in [0,1]");
+                return false;
+            }
+            cap.azimuthPerCurve[c] = static_cast<float>(azimuthC) +
+                static_cast<float>(azimuthRandomC) * 360.0f *
+                (UsdGenDraw01(int(ctx.seed), ids ? ids[c] : 0, kSaltGrowAzimuth) - 0.5f);
             double const lengthC = lengthField.Value(c, root);
             double loC = lo, hiC = hi;
             if (randomField.connected) {
@@ -552,6 +588,8 @@ bool UsdGenGrowOp::Capture(
             ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootB[c];
         float const liftC = cap.liftPerCurve.size() == R ? cap.liftPerCurve[c] : cap.lift;
         dir = RotateGrowDirection(dir, axis, liftC);
+        dir = RotateGrowDirection(dir, upstream.rootN.empty()
+            ? GfVec3f(0.0f, 1.0f, 0.0f) : upstream.rootN[c], cap.azimuthPerCurve[c]);
         for (uint32_t i = 0; i != static_cast<uint32_t>(cap.cvCount); ++i) {
             float const t = cap.cvCount > 1 ? float(i) / float(cap.cvCount - 1) : 0.0f;
             float const distance = cap.perCurve[c] * t;
@@ -610,6 +648,8 @@ void UsdGenGrowOp::Evaluate(
             absolute < cap.liftPerCurve.size()
             ? cap.liftPerCurve[absolute] : cap.lift;
         d = RotateGrowDirection(d, axis, liftC);
+        d = RotateGrowDirection(d, view->rootN ? view->rootN[c]
+            : GfVec3f(0.0f, 1.0f, 0.0f), cap.azimuthPerCurve[absolute]);
         // perCurve is a whole-buffer capture payload: chunk views pre-offset
         // the plane/per-curve arrays only, so index by absolute curve.
         const float targetLen = cap.perCurve.empty()

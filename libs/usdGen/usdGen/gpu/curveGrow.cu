@@ -23,8 +23,7 @@ __device__ uint64_t Hash64(uint64_t key, uint32_t salt) {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     return z ^ (z >> 31);
 }
-__device__ float DrawGrow(int seed, uint64_t id) {
-    constexpr uint32_t salt = 0x47726F77u;
+__device__ float DrawGrow(int seed, uint64_t id, uint32_t salt = 0x47726F77u) {
     uint64_t key = Hash64(uint64_t(uint32_t(seed)), salt) ^ id;
     return float(uint32_t(Hash64(key, salt) >> 32) >> 8) * 0x1.0p-24f;
 }
@@ -113,6 +112,9 @@ __global__ void GrowKernel(CurveGrowInput input, uint32_t curves, uint32_t cvCou
         controls.direction == CurveGrowDirection::RootTangent ? t : controls.literalDirection;
     direction = Normalize(direction);
     direction = RotateAroundB(direction, b, controls.lift);
+    float const azimuth = controls.azimuth + controls.azimuthRandom * 360.0f *
+        (DrawGrow(controls.seed, id, 0x4772417Au) - 0.5f); // kSaltGrowAzimuth
+    direction = RotateAroundB(direction, n, azimuth);
     // Match CPU Capture: authored length/random math happens in double and
     // the captured per-curve target is then narrowed to float.
     double targetDouble = controls.length * (controls.randomLo +
@@ -272,6 +274,8 @@ CurveGrowStatus CudaCurveGrow::validate(CurveGrowInput const& in,
        !Finite(c.randomLo)||!Finite(c.randomHi)||!Finite(c.lift)||
        !Finite(c.fallbackWidth)||c.length<0||c.randomLo<0||c.randomHi<0||
        c.fallbackWidth<0||c.lift < -90.0f||c.lift > 90.0f||
+       !Finite(c.azimuth)||c.azimuth < -360.0f||c.azimuth > 360.0f||
+       !Finite(c.azimuthRandom)||c.azimuthRandom < 0.0f||c.azimuthRandom > 1.0f||
        c.direction>CurveGrowDirection::Literal||
        (c.direction==CurveGrowDirection::Literal&&!Finite(c.literalDirection)))
         return CurveGrowStatus::InvalidArgument;

@@ -415,6 +415,12 @@ def run(appController):
           "Open workspace built the dock and stored it on the container")
     check(container.tonicState.workspaceOpen,
           "the dock reports itself open, which is what arms the hotkeys")
+    # DK-08: nothing to warn about before a scalp is bound, so no box.
+    container.workspace._warningsKey = None
+    container.workspace.refresh()
+    check(container.workspace._warningsList.count() == 0 and
+          container.workspace._warningsBox.isHidden(),
+          "the Warnings group is hidden while its list is empty")
     # Route the tool's status lines here: usdview sends them to a widget,
     # and a failure below is only readable if its reason came with it.
     messages = []
@@ -529,6 +535,78 @@ def run(appController):
     info("region colour outside the square: %.2f" % outside)
     check(outside < 0.2, "and only inside it (%.2f)" % outside)
 
+    # -- DK-08: the coverage row names the gap and shows it ----------------
+    from pxr.Usdviewq.qt import QtCore
+    from pxr.Usdviewq.qt import PySideModule
+    import importlib
+    QtTest = importlib.import_module("%s.QtTest" % PySideModule)
+    workspace = container.workspace
+    workspace._warningsKey = None
+    workspace.refresh()
+    warningsList = workspace._warningsList
+    coverage = None
+    for row in range(warningsList.count()):
+        item = warningsList.item(row)
+        if item.text() == "12 scalp faces have no region":
+            coverage = item
+    check(coverage is not None,
+          "the coverage row reads '12 scalp faces have no region' (%r)"
+          % ([warningsList.item(r).text()
+              for r in range(warningsList.count())],))
+    check(not workspace._warningsBox.isHidden(),
+          "the Warnings group shows once it has a row")
+    if coverage is not None:
+        check(not coverage.icon().isNull(),
+              "the row carries its severity icon")
+        # The click outlines faces, it selects nothing: the tooltip says
+        # what the click does (tonicHud.clickHint), not "click to select".
+        check(coverage.toolTip().endswith("click to outline the faces"),
+              "and says what its click does (%r)" % coverage.toolTip())
+        check(workspace.highlightedFaces() == [],
+              "nothing is highlighted before the click")
+        rect = warningsList.visualItemRect(coverage)
+        QtTest.QTest.mouseClick(warningsList.viewport(),
+                                QtCore.Qt.MouseButton.LeftButton,
+                                QtCore.Qt.KeyboardModifier.NoModifier,
+                                rect.center())
+        wait(30)
+        from usdGenTonicTools import tonicHud
+        uncoveredFaces = tonicHud.readUncoveredFaces(session.dll,
+                                                     session.model)
+        highlighted = workspace.highlightedFaces()
+        check(len(highlighted) == 12 and highlighted == uncoveredFaces,
+              "clicking it highlights the twelve uncovered faces (%r)"
+              % (highlighted,))
+        overlay = workspace._faceOverlay
+        check(overlay is not None and overlay.isVisible() and
+              overlay.polygonCount() == 12,
+              "as outlines drawn over the viewport")
+        if overlay is not None:
+            image = overlay.grab().toImage()
+            ratio = max(float(view.devicePixelRatioF()), 1.0)
+
+            def tint(x, z):
+                projected = camera.worldToPixels((x, 0.0, z))
+                colour = image.pixelColor(int(projected[0] / ratio),
+                                          int(projected[1] / ratio))
+                return colour.red(), colour.green(), colour.alpha()
+
+            red, green, alpha = tint(0.5, 0.5)
+            check(alpha > 0 and red > green + 40,
+                  "an uncovered corner face is tinted red (%r)"
+                  % ((red, green, alpha),))
+            check(tint(*CENTRE)[2] == 0,
+                  "and the claimed middle is left alone (%r)"
+                  % (tint(*CENTRE),))
+        QtTest.QTest.mouseClick(warningsList.viewport(),
+                                QtCore.Qt.MouseButton.LeftButton,
+                                QtCore.Qt.KeyboardModifier.NoModifier,
+                                rect.center())
+        wait(30)
+        check(workspace.highlightedFaces() == [] and
+              (overlay is None or not overlay.isVisible()),
+              "a second click takes the highlight away")
+
     # -- the graph itself reaches the frame, not just the tint ------------
     # The stroke's L1 tube is fitted wide enough to cover the corners, so
     # it hides for these readings the way it did for the outside one.
@@ -613,6 +691,60 @@ def run(appController):
     redoneNodes, _e, _r = graphCounts(session)
     check(redoneNodes == 4,
           "Ctrl+Y welds it again (got %d)" % redoneNodes)
+
+    # -- SL-02: Shift-click adds, Escape drops an armed pick, empty drag --
+    from usdGenTonicTools import tonicLib
+    NODE = tonicLib.TONIC_PICK_GRAPH_NODE
+
+    def selectedNodes():
+        return sorted(item[0] for item in session.readSelection(NODE))
+
+    session.clearSelection(NODE)
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+    mouse.click(pixel(*RECT[0]), ("shift",))
+    firstPick = selectedNodes()
+    check(len(firstPick) == 1,
+          "Shift-click on a corner selects that node (%r)" % (firstPick,))
+    mouse.click(pixel(*RECT[2]), ("shift",))
+    both = selectedNodes()
+    check(len(both) == 2 and set(firstPick) <= set(both),
+          "a second Shift-click adds the other node (%r)" % (both,))
+    check(graphCounts(session)[0] == 4 and
+          container.tonicState.graphSubMode == "weld",
+          "and neither Shift-click welded anything (%r)"
+          % (graphCounts(session),))
+
+    session.clearSelection(NODE)
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+    mouse.click(pixel(*RECT[0]))
+    check(len(selectedNodes()) == 1,
+          "a plain click arms the weld and draws its node (%r)"
+          % (selectedNodes(),))
+    typeKey(view, "escape")
+    check(selectedNodes() == [],
+          "Escape drops the armed pick (%r)" % (selectedNodes(),))
+    mouse.click(pixel(*RECT[2]))
+    check(graphCounts(session)[0] == 4,
+          "so the next click arms afresh instead of welding (%d nodes)"
+          % graphCounts(session)[0])
+    typeKey(view, "escape")
+
+    start = pixel(0.3, 0.3)
+    end = pixel(3.7, 3.7)
+    marquee = viewport._marqueeOverlay
+    mouse.press(start)
+    mouse.move(((start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5))
+    mouse.move(end)
+    wait(10)
+    check(marquee is not None and marquee.isVisible(),
+          "a plain drag from empty space in Weld shows the marquee")
+    mouse.release(end)
+    wait(10)
+    check(len(selectedNodes()) == 4 and graphCounts(session)[0] == 4,
+          "and boxes all four corner nodes without authoring (%r)"
+          % (selectedNodes(),))
+    session.clearSelection(NODE)
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
 
     # -- mode keys ---------------------------------------------------------
     typeKey(view, "2")

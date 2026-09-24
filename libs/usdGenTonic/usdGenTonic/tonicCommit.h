@@ -386,7 +386,12 @@ public:
     // Enqueue with a caller-computed fill-in plan (the ctypes path: Python
     // plans over pxr and passes the flags, since no UsdStage crosses the C
     // ABI). An empty plan authors no description opinions for this version.
-    void EnqueuePlan(TonicFillPlan const &plan);
+    // The artist-owned-output guard runs here, against `stage` when one is
+    // given: a refused enqueue parks the model version as failed and leaves
+    // the reason for TakeDiagnostic, exactly like a failed build. Every
+    // enqueue clears the parked failure, so an explicit re-enqueue retries.
+    void EnqueuePlan(TonicFillPlan const &plan,
+                     UsdStagePtr const &stage = UsdStagePtr());
 
     enum SwapResult {
         Swapped,          // live now carries the committed version
@@ -464,10 +469,20 @@ public:
     // keeps both the previous built layer and the thread (plan/18 §7 G5).
     void ThrowOnNextBuildsForTest(int count);
     size_t WorkerThrowCount() const { return _workerThrowCount.load(); }
+    // The last build (or enqueue guard) failure, cleared by the read. The
+    // tool's pump takes it once per idle slot so a failure reaches the
+    // artist exactly once.
     std::string TakeDiagnostic();
+    // The version whose build failed or whose enqueue the guard refused
+    // (0 when the latest enqueue has not failed). The worker never retries
+    // it on its own, so a pending version at or below it is not in flight.
+    uint64_t FailedVersion() const;
 
 private:
     void _WorkerLoop();
+    // The reserved Output path an artist owns (no outputOwned marker), or
+    // an empty path when enabling Tonic output may author all three.
+    SdfPath _BlockedOutputPath(UsdStagePtr const &stage) const;
     SwapResult _SwapFull(SdfLayerHandle const &live, SdfLayerHandle const &built,
                          uint64_t version);
     SwapResult _SwapPartialSlot(SdfLayerHandle const &live,

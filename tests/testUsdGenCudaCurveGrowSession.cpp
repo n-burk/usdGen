@@ -172,8 +172,11 @@ UsdGenGraphDesc Desc(bool resampleAndLift = false, bool namedPlanes = true,
                  {TfToken("length"),VtValue(2.0),false},
                  {TfToken("lengthRandom"),VtValue(GfVec2f(.5f,1.5f)),false},
                  {TfToken("direction"),VtValue(TfToken("surfaceNormal")),false}};
-    if(resampleAndLift)
+    if(resampleAndLift) {
         grow.params.push_back({TfToken("lift"),VtValue(30.0f),false});
+        grow.params.push_back({TfToken("azimuth"),VtValue(35.0f),false});
+        grow.params.push_back({TfToken("azimuthRandom"),VtValue(1.0f),false});
+    }
     auto left=Width("/Ops/Left","/Ops/Grow",.2f);
     auto right=Width("/Ops/Right","/Ops/Grow",.8f);
     UsdGenNodeDesc noise;

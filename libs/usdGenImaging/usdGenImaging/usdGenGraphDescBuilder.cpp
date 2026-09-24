@@ -665,6 +665,19 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
     out->path = path;
     HdContainerDataSourceHandle const mesh = _HChild(primDs, "mesh");
     HdContainerDataSourceHandle const topo = _HChild(mesh, "topology");
+    _HGetTyped(mesh, t, &out->subdivisionScheme, {"subdivisionScheme"});
+    _HGetTyped(topo, t, &out->orientation, {"orientation"});
+    _HGetTyped(topo, t, &out->holeIndices, {"holeIndices"});
+    auto const tags = _HChild(mesh, "subdivisionTags");
+    _HGetTyped(tags, t, &out->interpolateBoundary, {"interpolateBoundary"});
+    _HGetTyped(tags, t, &out->faceVaryingLinearInterpolation, {"faceVaryingLinearInterpolation"});
+    _HGetTyped(tags, t, &out->triangleSubdivisionRule, {"triangleSubdivisionRule"});
+    _HGetTyped(tags, t, &out->creaseMethod, {"creaseMethod"});
+    _HGetTyped(tags, t, &out->creaseIndices, {"creaseIndices"});
+    _HGetTyped(tags, t, &out->creaseLengths, {"creaseLengths"});
+    _HGetTyped(tags, t, &out->creaseSharpnesses, {"creaseSharpnesses"});
+    _HGetTyped(tags, t, &out->cornerIndices, {"cornerIndices"});
+    _HGetTyped(tags, t, &out->cornerSharpnesses, {"cornerSharpnesses"});
     _HGetTyped(topo, t, &out->faceVertexCounts, {"faceVertexCounts"});
     _HGetTyped(topo, t, &out->faceVertexIndices, {"faceVertexIndices"});
     if (!_HGetTyped(primDs, t, &out->points, {"points"})) {

@@ -181,11 +181,52 @@ def main():
         sculpt.stroke(dll, ctx, leaf, "grab", [2, 3],
                       [j, 0.0, 0.0, j, 0.0, 0.0])
 
+    # Guide-count floor. A refill returns 0 while ANY tube fills, so a
+    # child whose rings its material chart cannot triangulate used to shed
+    # its guides silently (750 -> 150 preview guides) long before the first
+    # hard failure. At the reference fanout (36 tubes: every producer is a
+    # K14/K6-built leaf whose disc stream has a fixed count) a refill must
+    # skip no tube and must not fall below the post-warmup census taken at
+    # the same fraction. Off the fanout (an undo rewound past a re-split,
+    # leaving a K7-merged L1 producing) a skipped tube is counted and
+    # printed, not failed: MergeChildren deliberately does not gate its
+    # aggregate (Re-subdivide merges first), and the drop is reported to
+    # the artist by the dock's warning row instead. Filled in after warmup.
+    guideFloor = {}
+    offFanoutDrops = []
+
+    def guideCount():
+        got = ctypes.c_int(0)
+        assert dll.Tonic_GetGuideCounts(ctx, ctypes.byref(got),
+                                        None) == 0, "guide counts rc"
+        return got.value
+
+    def refillProblem(fraction):
+        """None, or why the refill that just returned 0 was unhealthy."""
+        drops = tonicLib.readRefillDrops(dll, ctx)
+        if hier.tubeCount(dll, ctx) != 36:
+            if drops:
+                offFanoutDrops.append(drops[0])
+            return None
+        if drops:
+            return ("refill skipped %d tube(s), first tube %d: %s"
+                    % (len(drops), drops[0][0], drops[0][1]))
+        floor = guideFloor.get(fraction)
+        if floor is not None:
+            got = guideCount()
+            if got < floor:
+                return ("guide count %d fell below the post-warmup %d"
+                        % (got, floor))
+        return None
+
     def previewRefill():
-        # Refills have no shape-reject mode: any nonzero rc is engine
-        # breakage, surfaced as a hard failure by the loop handler.
+        # Refills have no shape-reject mode: any nonzero rc -- or a tube
+        # skipped under a zero rc -- is engine breakage, surfaced as a
+        # hard failure by the loop handler.
         assert dll.Tonic_RefillGuides(
             ctx, ctypes.c_float(0.25)) == 0, "preview refill rc"
+        problem = refillProblem(0.25)
+        assert problem is None, problem
 
     ops = {
         "move-l1": lambda: hier.moveTubeCenterCV(
@@ -225,6 +266,17 @@ def main():
     for kid in l1:
         assert len(hier.tubeChildren(dll, ctx, kid)) == 6, \
             "warmup must restore every L1"
+    # The guide-count floors, at full fanout (release first so the loop
+    # starts from a preview set like the warmup left it).
+    for fraction in (1.0, 0.25):
+        assert dll.Tonic_RefillGuides(
+            ctx, ctypes.c_float(fraction)) == 0, "baseline refill rc"
+        problem = refillProblem(fraction)
+        assert problem is None, problem
+        guideFloor[fraction] = guideCount()
+    assert guideFloor[0.25] > 0, "post-warmup preview has no guides"
+    print("soak: post-warmup guide floor %d full, %d preview"
+          % (guideFloor[1.0], guideFloor[0.25]))
     # Rejected edits (the engine returning TONIC_ERROR with a clean
     # rollback, e.g. a K7-merged parent ring that no longer re-partitions
     # into its Voronoi chart) are artist-handled: undo the edit that led
@@ -283,6 +335,9 @@ def main():
                                 % (rc, lastError()))
                 continue
             fullRefills.append((time.perf_counter() - t0) * 1000.0)
+            problem = refillProblem(1.0)
+            if problem:
+                failures.append("full-refill: HARD %s" % problem)
             continue
         name = rng.choice(sorted(ops))
         t0 = time.perf_counter()
@@ -369,6 +424,11 @@ def main():
     if fullRefills:
         print("soak: full refill x%-6d worst %7.3f ms (informational)"
               % (len(fullRefills), max(fullRefills)))
+    if offFanoutDrops:
+        tube, reason = offFanoutDrops[0]
+        print("soak: %d off-fanout refill(s) skipped a merged tube "
+              "(informational; first tube %d: %s)"
+              % (len(offFanoutDrops), tube, reason))
     ok = True
     for name, ms in sorted(worst.items()):
         if ms > FRAME_BUDGET_MS:

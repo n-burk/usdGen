@@ -50,6 +50,9 @@ enum TonicGizmoKind : int {
     TonicGizmo_Scale = 5,
 };
 
+// TonicGizmoRecord::allowedMask with every handle allowed.
+constexpr unsigned int TonicGizmoAllHandles = 0xFFFFFFFFu;
+
 struct USDGENTONIC_API TonicGizmoRecord {
     int kind = TonicGizmo_None;
     float origin[3] = {0.0f, 0.0f, 0.0f};
@@ -58,6 +61,12 @@ struct USDGENTONIC_API TonicGizmoRecord {
     float frame[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float sizeWorld = 1.0f;
     int activeHandle = -1;  // -1 = none; else the handle id below
+    // Bit (1 << handleId) set = that handle may be drawn.  The tool hides
+    // what a sub-mode cannot drive (a section chart has no tangent move),
+    // and the headless fallback must hide the same handles the Qt overlay
+    // does (GZ-06), so the tool's whitelist rides on the record.  All bits
+    // set is "every handle this kind has".
+    unsigned int allowedMask = TonicGizmoAllHandles;
 
     bool operator==(TonicGizmoRecord const &o) const;
     bool operator!=(TonicGizmoRecord const &o) const { return !(*this == o); }
@@ -118,7 +127,9 @@ int USDGENTONIC_API TonicGizmoCircleSegments();
 
 // Build the curves for one record. False (and an empty payload) for kind
 // none, a non-finite record or a non-positive size — "no gizmo" is a state,
-// not an error, and the caller publishes nothing.
+// not an error, and the caller publishes nothing.  Curves whose handle id
+// is not in `record.allowedMask` are left out; a mask that leaves nothing
+// is "no gizmo" too.
 bool USDGENTONIC_API TonicBuildGizmoCurves(TonicGizmoRecord const &record,
                                            TonicOverlayCurves *out);
 

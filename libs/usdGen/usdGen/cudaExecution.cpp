@@ -263,6 +263,10 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
 bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t terminal,
                          UsdGenDiagnostics* diagnostics, bool c3 = false) {
     auto const& scatter = desc.nodes[source];
+    for(auto const& param:scatter.params)
+        if(param.name==TfToken("subdivisionLevel") &&
+           (!param.value.IsHolding<int>() || param.value.UncheckedGet<int>()!=0))
+            return Fail(diagnostics,"OpenSubdiv limit Scatter requires the CPU reference backend");
     auto const& grow = desc.nodes[terminal];
     if (!grow.mode.IsEmpty())
         return Fail(diagnostics, "Scatter->Grow has no Grow mode property");
@@ -282,7 +286,8 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
     // control, so every authored value must be both unique and native-typed.
     static std::set<TfToken> const allowed{
         TfToken("segments"), TfToken("length"), TfToken("lengthRandom"),
-        TfToken("lift"), TfToken("direction"), TfToken("directionVector")};
+        TfToken("lift"), TfToken("azimuth"), TfToken("azimuthRandom"),
+        TfToken("direction"), TfToken("directionVector")};
     std::set<TfToken> seen;
     for (auto const& value : grow.params) {
         if (value.animated || !seen.insert(value.name).second)
@@ -293,7 +298,8 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
                 value.name.GetString());
         bool valid = false;
         if (value.name == TfToken("segments")) valid = value.value.IsHolding<int>();
-        else if (value.name == TfToken("length") || value.name == TfToken("lift"))
+        else if (value.name == TfToken("length") || value.name == TfToken("lift") ||
+                 value.name == TfToken("azimuth") || value.name == TfToken("azimuthRandom"))
             valid = value.value.IsHolding<float>() || value.value.IsHolding<double>();
         else if (value.name == TfToken("lengthRandom")) valid = value.value.IsHolding<GfVec2f>();
         else if (value.name == TfToken("direction"))
@@ -317,6 +323,11 @@ bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t 
     double const lift=p.GetDouble(TfToken("lift"),0.0);
     if (!std::isfinite(lift) || lift < -90.0 || lift > 90.0)
         return Fail(diagnostics,"Grow requires lift in [-90,90] degrees");
+    double const azimuth=p.GetDouble(TfToken("azimuth"),0.0);
+    double const azimuthRandom=p.GetDouble(TfToken("azimuthRandom"),0.0);
+    if (!std::isfinite(azimuth) || azimuth < -360.0 || azimuth > 360.0 ||
+        !std::isfinite(azimuthRandom) || azimuthRandom < 0.0 || azimuthRandom > 1.0)
+        return Fail(diagnostics,"Grow requires azimuth in [-360,360] degrees and azimuthRandom in [0,1]");
     TfToken direction=p.GetToken(TfToken("direction"),TfToken("surfaceNormal"));
     if (direction!=TfToken("surfaceNormal") && direction!=TfToken("vector"))
         return Fail(diagnostics,"Grow requires surfaceNormal or literal vector direction");
@@ -2797,6 +2808,8 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
         plan->scatterGrowControls.seed = desc.nodes[layout.scatterGrowOutput].seed;
         plan->scatterGrowControls.length = grow.GetDouble(TfToken("length"), 1.0);
         plan->scatterGrowControls.lift = float(grow.GetDouble(TfToken("lift"), 0.0));
+        plan->scatterGrowControls.azimuth = float(grow.GetDouble(TfToken("azimuth"), 0.0));
+        plan->scatterGrowControls.azimuthRandom = float(grow.GetDouble(TfToken("azimuthRandom"), 0.0));
         plan->scatterGrowControls.fallbackWidth = desc.defaultWidth;
         auto random = grow.GetVtValue(TfToken("lengthRandom"), VtValue(GfVec2f(1,1))).UncheckedGet<GfVec2f>();
         plan->scatterGrowControls.randomLo = random[0];
@@ -3137,6 +3150,8 @@ std::shared_ptr<const UsdGenCudaExecutionPlan> CompileCudaGraph(
             auto const random = params.GetVtValue(TfToken("lengthRandom"), VtValue(GfVec2f(1,1))).UncheckedGet<GfVec2f>();
             controls.randomLo = random[0]; controls.randomHi = random[1];
             controls.lift = float(params.GetDouble(TfToken("lift"), 0.0));
+            controls.azimuth = float(params.GetDouble(TfToken("azimuth"), 0.0));
+            controls.azimuthRandom = float(params.GetDouble(TfToken("azimuthRandom"), 0.0));
             controls.fallbackWidth = desc.defaultWidth;
             auto const direction = params.GetToken(TfToken("direction"), TfToken("surfaceNormal"));
             controls.direction = direction == TfToken("vector") ? gpu::CurveGrowDirection::Literal :

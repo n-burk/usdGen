@@ -163,6 +163,17 @@ void CheckSurface(UsdGenSurfaceDesc const &a, UsdGenSurfaceDesc const &b,
     CheckEq(a.path, b.path, ctx + " path");
     CheckEq(a.faceVertexCounts, b.faceVertexCounts, ctx + " counts");
     CheckEq(a.faceVertexIndices, b.faceVertexIndices, ctx + " indices");
+    CheckEq(a.subdivisionScheme,b.subdivisionScheme,ctx+" scheme");
+    CheckEq(a.orientation,b.orientation,ctx+" orientation");
+    CheckEq(a.interpolateBoundary,b.interpolateBoundary,ctx+" boundary");
+    CheckEq(a.faceVaryingLinearInterpolation,b.faceVaryingLinearInterpolation,ctx+" face varying");
+    CheckEq(a.triangleSubdivisionRule,b.triangleSubdivisionRule,ctx+" triangle rule");
+    CheckEq(a.holeIndices,b.holeIndices,ctx+" holes");
+    CheckEq(a.creaseIndices,b.creaseIndices,ctx+" crease indices");
+    CheckEq(a.creaseLengths,b.creaseLengths,ctx+" crease lengths");
+    CheckEq(a.creaseSharpnesses,b.creaseSharpnesses,ctx+" crease sharpness");
+    CheckEq(a.cornerIndices,b.cornerIndices,ctx+" corner indices");
+    CheckEq(a.cornerSharpnesses,b.cornerSharpnesses,ctx+" corner sharpness");
     CheckEq(a.restPoints, b.restPoints, ctx + " restPoints");
     CheckEq(a.restNormals, b.restNormals, ctx + " restNormals");
     CheckEq(a.restNormalDomain, b.restNormalDomain,
@@ -317,6 +328,45 @@ main(int argc, char **argv)
         totalNew += n;
         std::printf("%s: %s (%d new diffs)\n", name,
                     n == 0 ? "PARITY" : "MISMATCH", n);
+    }
+    {
+        auto stage=UsdStage::CreateInMemory();
+        Check(stage->GetRootLayer()->ImportFromString(R"USD(#usda 1.0
+def Xform "World" {
+    def Mesh "Skin" (prepend apiSchemas=["UsdGenRestAPI"]) {
+        point3f[] points=[(0,0,0),(1,0,0),(1,1,0),(0,1,0)]
+        int[] faceVertexCounts=[4]
+        int[] faceVertexIndices=[0,1,2,3]
+        uniform token subdivisionScheme="catmullClark"
+        uniform token orientation="leftHanded"
+        uniform token interpolateBoundary="edgeOnly"
+        uniform token faceVaryingLinearInterpolation="all"
+        uniform token triangleSubdivisionRule="smooth"
+        int[] holeIndices=[0]
+        int[] creaseIndices=[0,1]
+        int[] creaseLengths=[2]
+        float[] creaseSharpnesses=[2.5]
+        int[] cornerIndices=[2]
+        float[] cornerSharpnesses=[3]
+    }
+    def UsdGenDescription "Coat" {
+        rel usdGen:surface=</World/Skin>
+        def Scope "Ops" {
+            def UsdGenScatter "scatter" {
+                int usdGen:subdivisionLevel=3
+            }
+        }
+    }
+}
+)USD"),"load subdivision opinions fixture");
+        UsdGenGraphDescBuildOptions opts;opts.time=0;
+        auto a=BuildGraphDescFromStage(stage,SdfPath("/World/Coat"),opts);
+        UsdImagingCreateSceneIndicesInfo info;info.stage=stage;
+        auto sis=UsdImagingCreateSceneIndices(info);
+        auto b=BuildGraphDescFromHydra(*sis.finalSceneIndex,SdfPath("/World/Coat"),opts);
+        CheckDesc(a,b,"authored subdivision opinions");
+        Check(a.surfaces.size()==1 && a.surfaces[0].creaseSharpnesses==VtFloatArray{2.5f},"authored sharpness captured");
+        ++opened;
     }
     if (opened == 0) {
         std::printf("SKIP: G1–G4 fixtures not present under %s "

@@ -3,6 +3,7 @@
 // Private serial work-owner implementation. The command owner supplies a
 // copied request and alone decides whether this candidate may publish.
 #include "usdGen/sessionCooker.h"
+#include "usdGen/limitSurface.h"
 #include "usdGen/debugCodes.h"
 #include "usdGen/furOcclusion.h"
 #include "usdGen/cudaExecution.h"
@@ -372,6 +373,7 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         }
     }
     for (UsdGenSurfaceDesc const &surface : desc.surfaces) {
+        _CacheMix(&h0, UsdGenSubdivisionDigest(surface));
         _CacheMixText(&h0, surface.path.GetString());
         _CacheMix(&h1, surface.id);
         _CacheMix(&h0, static_cast<uint64_t>(surface.restNormalDomain));

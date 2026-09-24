@@ -35,6 +35,9 @@ TONIC_SELECT_ALL = 0x1FF
 TONIC_SELECT_SET = 0
 TONIC_SELECT_ADD = 1
 TONIC_SELECT_TOGGLE = 2
+# Python-only: the C ABI has no subtract yet, so tonicLoops.selectItems /
+# selectBand emulate it. Never pass it to a Tonic_Select* entry point.
+TONIC_SELECT_REMOVE = 3
 
 # TonicGizmoKind (tonicGizmo.h).
 TONIC_GIZMO_NONE = 0
@@ -69,6 +72,9 @@ TONIC_COMMITTER_NOTHING_PENDING = 2
 TONIC_COMMITTER_SKIPPED_GESTURE = 3
 TONIC_COMMITTER_SKIPPED_STALE = 4
 TONIC_COMMITTER_DETACHED = 5
+# The swap failed (unknown live layer, a throw): the reason is in
+# Tonic_GetLastError. Negative, so it never reads as PARTIAL (SS-05).
+TONIC_COMMITTER_ERROR = -1
 
 
 def TonicLibraryPath():
@@ -422,6 +428,15 @@ class Library:
         dll.Tonic_GetGeneratedCurvesVisible.restype = ctypes.c_int
         dll.Tonic_GetGuideCounts.argtypes = [cvp, cip, cip]
         dll.Tonic_GetGuideCounts.restype = ctypes.c_int
+        # Tubes the last refill skipped (tube ids + per-index reason): a
+        # refill that loses some tubes still returns 0. Guarded so a DLL
+        # predating the entry still binds.
+        if hasattr(dll, "Tonic_ReadRefillDrops"):
+            dll.Tonic_ReadRefillDrops.argtypes = [cvp, cip, ctypes.c_int,
+                                                  cip]
+            dll.Tonic_ReadRefillDrops.restype = ctypes.c_int
+            dll.Tonic_GetRefillDropReason.argtypes = [cvp, ctypes.c_int]
+            dll.Tonic_GetRefillDropReason.restype = ctypes.c_char_p
         dll.Tonic_ReadGuidePreview.argtypes = [
             cvp, cfp, ctypes.c_int, cip, ctypes.c_int, cip]
         dll.Tonic_ReadGuidePreview.restype = ctypes.c_int
@@ -624,6 +639,15 @@ class Library:
         dll.Tonic_CommitterDetach.restype = ctypes.c_int
         dll.Tonic_CommitterReattach.argtypes = [cvp]
         dll.Tonic_CommitterReattach.restype = ctypes.c_int
+        # SS-05: a failed build or a refused enqueue, taken once per pump.
+        # Optional so a DLL that predates them still loads; the session
+        # probes with getattr.
+        if hasattr(dll, "Tonic_CommitterTakeDiagnostic"):
+            dll.Tonic_CommitterTakeDiagnostic.argtypes = [
+                cvp, ctypes.c_char_p, ctypes.c_int]
+            dll.Tonic_CommitterTakeDiagnostic.restype = ctypes.c_int
+            dll.Tonic_CommitterFailedVersion.argtypes = [cvp]
+            dll.Tonic_CommitterFailedVersion.restype = ctypes.c_ulonglong
 
     def _bindBake(self, dll):
         cvp = ctypes.c_void_p
@@ -647,6 +671,16 @@ class Library:
         dll.Tonic_BakePendingVersion.restype = ctypes.c_ulonglong
         dll.Tonic_BakeCompletedVersion.argtypes = [cvp]
         dll.Tonic_BakeCompletedVersion.restype = ctypes.c_ulonglong
+        # The hierarchy-carrying enqueue lives in tonicApiStage.h, and so
+        # does its error text: it writes Tonic_StageGetLastError, not the
+        # model buffer Tonic_GetLastError reads (SS-05), so the session
+        # needs both bound whether or not StageLibrary was ever built.
+        if hasattr(dll, "Tonic_BakeEnqueueLevels"):
+            dll.Tonic_BakeEnqueueLevels.argtypes = [cvp]
+            dll.Tonic_BakeEnqueueLevels.restype = ctypes.c_int
+        if hasattr(dll, "Tonic_StageGetLastError"):
+            dll.Tonic_StageGetLastError.argtypes = []
+            dll.Tonic_StageGetLastError.restype = ctypes.c_char_p
 
     @property
     def dll(self):
@@ -655,3 +689,34 @@ class Library:
     def lastError(self):
         text = self._dll.Tonic_GetLastError()
         return text.decode("utf-8") if text else ""
+
+
+def readRefillDrops(dll, ctx):
+    """[(tubeId, reason)] for every tube the last refill skipped.
+
+    A refill returns 0 while ANY tube filled, so a tube whose rings its
+    material chart cannot triangulate loses its guides without an error;
+    this is the one place that loss is visible. Empty when every tube
+    filled, when nothing is bound, or with a DLL predating the entry.
+    """
+    if dll is None or ctx is None or \
+            not hasattr(dll, "Tonic_ReadRefillDrops"):
+        return []
+    count = ctypes.c_int(0)
+    if dll.Tonic_ReadRefillDrops(ctx, None, 0, ctypes.byref(count)) != 0 \
+            or count.value <= 0:
+        return []
+    ids = (ctypes.c_int * count.value)()
+    got = ctypes.c_int(0)
+    if dll.Tonic_ReadRefillDrops(ctx, ids, count.value,
+                                 ctypes.byref(got)) != 0 \
+            or got.value > count.value:
+        # A refill between the probe and the read grew the list; the ABI
+        # left `ids` unwritten. The next dock refresh reads it again.
+        return []
+    out = []
+    for i in range(got.value):
+        raw = dll.Tonic_GetRefillDropReason(ctx, i)
+        out.append((int(ids[i]),
+                    raw.decode("utf-8", "replace") if raw else ""))
+    return out

@@ -228,18 +228,26 @@ def run(appController):
         result = liveCamera().worldToPixels(point)
         return (result[0], result[1]) if result is not None else None
 
-    def clickControl(text):
+    def clickControl(actionId):
         """Use an actual dock control, never a direct hierarchy call."""
-        from pxr.Usdviewq.qt import QtWidgets
-        for button in workspace.findChildren(QtWidgets.QAbstractButton):
-            if button.text().split(" (", 1)[0] == text:
-                button.click()
-                wait(15)
-                return True
-        return False
+        button = workspace.button("action", actionId)
+        if button is None:
+            return False
+        button.click()
+        wait(15)
+        return True
 
     def choiceControl(identifier, value):
-        """Drive a dock descriptor's Qt combobox by its public descriptor."""
+        """Drive a dock descriptor's Qt combobox by its public descriptor.
+
+        The transform tool is the Q/W/E/R icon row, not a combo (DK-04)."""
+        if identifier == "transformTool":
+            button = workspace.button("tool", value)
+            if button is None or not button.isEnabled():
+                return False
+            button.click()
+            wait(10)
+            return True
         for descriptor, widget in getattr(workspace, "_paramWidgets", ()):
             if descriptor.id == identifier:
                 index = widget.findData(value)
@@ -294,7 +302,7 @@ def run(appController):
 
     # Select the displayed tube and invoke the dock's Subdivide action.  The
     # action must select every new child and focus their editable level.
-    workspace._modeButtons["hierarchy"].click()
+    workspace.button("mode", "hierarchy").click()
     wait(15)
     surface = sectionCV(session, 0, 1, 0)
     if surface is not None:
@@ -302,7 +310,7 @@ def run(appController):
     selectedRoot = session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)
     check(selectedRoot == [(0, -1, -1)],
           "a visible root surface click selects the root for subdivision")
-    check(clickControl("Subdivide"), "the hierarchy dock exposes Subdivide")
+    check(clickControl("subdivide"), "the hierarchy dock exposes Subdivide")
     children = [tube for tube in tonicBridge.readTubeIds(session.dll,
                                                          session.model)
                 if tube != 0]
@@ -329,14 +337,14 @@ def run(appController):
         return 1
 
     # Component selection and the manipulator are real StageView events.
-    workspace._modeButtons["tube"].click()
+    workspace.button("mode", "tube").click()
     wait(15)
-    hasCenterTool = "center" in getattr(workspace, "_tubeSelectionButtons", {})
+    hasCenterTool = workspace.button("comp", "center") is not None
     check(hasCenterTool, "the Tube component toolbar exposes Center CV selection")
     if not hasCenterTool:
         shutdown()
         return 1
-    workspace._tubeSelectionButtons["center"].click()
+    workspace.button("comp", "center").click()
     mouse.click(targetPixel)
     selected = session.readSelection(tonicLib.TONIC_PICK_CENTER_CV)
     forbidden = (session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) +
@@ -352,8 +360,47 @@ def run(appController):
     check(overlay is not None and overlay.isVisible(),
           "the selected manipulator is visibly overlaid above the StageView")
 
-    # A direct click on an unselected child CV has to beat an old group's
-    # visible gizmo even when Qt has delivered no intervening hover event.
+    def componentClickPixel(tube, cv):
+        """A pixel that picks center CV (tube, cv) and is off every handle.
+
+        A visible gizmo handle wins the press (GZ-01, RigExec parity), so a
+        selection click has to land where no handle answers.  Scan the CV's
+        own pick footprint; when a handle covers all of it, clear the
+        selection so the gizmo hides and the dot itself is clickable.
+        """
+        handleCamera = liveCamera()
+        point = tonicBridge.tubeCenterHandle(session.dll, session.model,
+                                             tube, cv)
+        centre = pixel(point)
+        if centre is None:
+            return None
+        gizmo = viewport.loop._gizmo
+        radius = viewport.loop.componentPickRadiusPx()
+        for fraction in (0.0, 0.4, 0.7, 0.95):
+            for k in range(16 if fraction else 1):
+                angle = 2.0 * math.pi * k / 16.0
+                candidate = eventPixel(
+                    (centre[0] + fraction * radius * math.cos(angle),
+                     centre[1] + fraction * radius * math.sin(angle)))
+                if gizmo.visible and gizmo.handleAt(
+                        handleCamera, candidate[0], candidate[1]) != \
+                        tonicGizmo.HANDLE_NONE:
+                    continue
+                item = tonicLoops.Sample(
+                    session, handleCamera, candidate[0], candidate[1]).item(
+                        viewport.loop.componentMask, radius)
+                if item is not None and \
+                        (item["kind"], item["id"], item["subId"]) == \
+                        (tonicLib.TONIC_PICK_CENTER_CV, tube, cv):
+                    return candidate
+        session.clearSelection()
+        viewport.loop._placeGizmo(handleCamera)
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        wait(10)
+        return centre
+
+    # GZ-01 (RigExec/Maya parity): a visible gizmo handle wins the press
+    # even over an unselected child CV under it, with no intervening hover.
     # Deliberately lay the existing target gizmo over the sibling's displayed
     # CV.  This changes only the transient overlay; the component targets and
     # all model geometry remain untouched until the actual direct press.
@@ -385,20 +432,51 @@ def run(appController):
         setattr(viewport.loop, "_hoveredComponent", None)
         session.setHover()
         session.publish(tonicLib.TONIC_DIRTY_SELECTION)
-        mouse.press(conflictPixel)
+        # The controller re-places an idle gizmo from the selection at every
+        # press (syncDisplayScale -> refreshGizmo).  Hold the relocated one
+        # still for this one press so the overlap is the one checked above.
+        pressLoop = viewport.loop
+        pressLoop.refreshGizmo = lambda _camera: False
+        try:
+            mouse.press(conflictPixel)
+        finally:
+            del pressLoop.refreshGizmo
         conflictSelection = session.readSelection(tonicLib.TONIC_PICK_CENTER_CV)
         conflictForbidden = (
             session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) +
             session.readSelection(tonicLib.TONIC_PICK_SECTION_RING) +
             session.readSelection(tonicLib.TONIC_PICK_SECTION_CV))
-        check(conflictSelection == [(sibling, conflictCv, -1)] and
-              not conflictForbidden and not viewport.loop._dragging and
-              not oldGizmo.dragging,
-              "a direct CV press wins over the old gizmo without starting its drag")
+        check(conflictSelection == [(target, targetCv, -1)] and
+              not conflictForbidden and viewport.loop._dragging and
+              oldGizmo.dragging,
+              "a press on the old gizmo's handle drags it and leaves the "
+              "selection alone, even over an unselected CV %r"
+              % (conflictSelection,))
+        # Escape: the handle drag cancels with no travel, nothing moved.
+        typeKey(view, "escape")
+        wait(10)
+        check(not viewport.loop._dragging and not oldGizmo.dragging,
+              "Escape cancels the handle drag")
         check(all(sameGeometry(snapshotTube(session, tube),
                                conflictBefore[tube]) for tube in children),
-              "the no-hover selection press leaves both child geometries exact")
+              "the cancelled handle press leaves both child geometries exact")
         mouse.release(conflictPixel)
+
+        # Select the sibling where no handle answers (the gizmo is back on
+        # the target after the cancel).
+        siblingPixel = componentClickPixel(sibling, conflictCv)
+        check(siblingPixel is not None, "the sibling CV has a clickable pixel")
+        if siblingPixel is not None:
+            mouse.click(siblingPixel)
+        check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
+              [(sibling, conflictCv, -1)],
+              "a click off every handle selects the unselected sibling CV %r"
+              % (session.readSelection(tonicLib.TONIC_PICK_CENTER_CV),))
+        check(all(sameGeometry(snapshotTube(session, tube),
+                               conflictBefore[tube]) for tube in children),
+              "the selection click leaves both child geometries exact")
+        conflictPixel = pixel(tonicBridge.tubeCenterHandle(
+            session.dll, session.model, sibling, conflictCv))
 
         # The newly selected child owns the next real transform; its sibling
         # and the previous gizmo owner must stay fixed.
@@ -417,11 +495,13 @@ def run(appController):
         # Restore the original target for the remaining move/rotate/scale
         # workflow, resolving its current public-model position after the
         # independent sibling edit.
+        # The sibling's gizmo may cover the target dot, so aim off-handle.
         targetPoint = tonicBridge.tubeCenterHandle(session.dll, session.model,
                                                    target, targetCv)
+        targetClick = componentClickPixel(target, targetCv)
+        if targetClick is not None:
+            mouse.click(targetClick)
         targetPixel = pixel(targetPoint)
-        if targetPixel is not None:
-            mouse.click(targetPixel)
         selected = session.readSelection(tonicLib.TONIC_PICK_CENTER_CV)
         forbidden = (session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) +
                      session.readSelection(tonicLib.TONIC_PICK_SECTION_RING) +
@@ -638,9 +718,9 @@ def run(appController):
     generatedControl.setChecked(True)
     check(guideCount(session) > 0,
           "the pre-clear generated preview contains live curves")
-    workspace._modeButtons["fill"].click()
+    workspace.button("mode", "fill").click()
     wait(15)
-    hasClear = clickControl("Clear generated curves")
+    hasClear = clickControl("clearGeneratedCurves")
     check(hasClear, "the Fill panel exposes Clear generated curves")
     if not hasClear:
         shutdown()
@@ -656,10 +736,10 @@ def run(appController):
     check(guideCount(session) == 0,
           "redoing Clear restores the explicit suppression")
 
-    workspace._modeButtons["tube"].click()
+    workspace.button("mode", "tube").click()
     wait(15)
-    if "center" in getattr(workspace, "_tubeSelectionButtons", {}):
-        workspace._tubeSelectionButtons["center"].click()
+    if workspace.button("comp", "center") is not None:
+        workspace.button("comp", "center").click()
     choiceControl("transformTool", "move")
     viewport.loop._placeGizmo(liveCamera())
     targetPoint = tonicBridge.tubeCenterHandle(session.dll, session.model,
@@ -673,9 +753,9 @@ def run(appController):
         mouse.release((targetPixel[0] + 12.0, targetPixel[1]))
     check(guideCount(session) == 0,
           "a later isolated child edit does not silently repopulate Clear")
-    workspace._modeButtons["fill"].click()
+    workspace.button("mode", "fill").click()
     wait(15)
-    hasRefill = clickControl("Refill guides")
+    hasRefill = clickControl("refill")
     check(hasRefill, "the Fill panel exposes an explicit guide refill")
     if not hasRefill:
         shutdown()
@@ -689,7 +769,7 @@ def run(appController):
     # the Graph UI, then exercise mixed-depth navigation using only dock,
     # keyboard, and StageView gestures.  Native active-cut reads below are
     # observations of the published model, not test-side selection setup.
-    workspace._modeButtons["graph"].click()
+    workspace.button("mode", "graph").click()
     wait(15)
     typeKey(view, "d")
     second = ((0.1, 0.1), (0.8, 0.1), (0.8, 0.8), (0.1, 0.8))
@@ -728,7 +808,7 @@ def run(appController):
         check(active is True,
               "the real hierarchy UI enables model-owned active-cut state")
 
-    workspace._modeButtons["hierarchy"].click()
+    workspace.button("mode", "hierarchy").click()
     wait(15)
     # The first branch may still be expanded after the preceding child edit.
     # Exit it through the current child selection before picking its parent;
@@ -742,7 +822,7 @@ def run(appController):
         check(session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) ==
               [(childrenA[0], -1, -1)],
               "the current child is selected before branch exit")
-        check(clickControl("Exit level"),
+        check(clickControl("exitLevel"),
               "the Hierarchy dock exits the already expanded branch")
         check(tonicHierarchy.getTubeExpanded(session.dll, session.model,
                                               rootA) is False,
@@ -755,7 +835,7 @@ def run(appController):
     check(rootSelection == [(rootA, -1, -1)],
           "a real parent-surface click selects root A before branch entry %r"
           % (rootSelection,))
-    check(clickControl("Enter level"),
+    check(clickControl("enterLevel"),
           "the Hierarchy dock exposes explicit branch entry")
     if activeCut:
         check(tonicHierarchy.getTubeExpanded(session.dll, session.model,
@@ -779,10 +859,10 @@ def run(appController):
                                               childA, childCv)
     childPixel = pixel(childPoint)
     childBefore = snapshotTube(session, childA)
-    workspace._modeButtons["tube"].click()
+    workspace.button("mode", "tube").click()
     wait(15)
-    if "center" in getattr(workspace, "_tubeSelectionButtons", {}):
-        workspace._tubeSelectionButtons["center"].click()
+    if workspace.button("comp", "center") is not None:
+        workspace.button("comp", "center").click()
     if childPixel is not None:
         mouse.click(childPixel)
     check(session.readSelection(tonicLib.TONIC_PICK_CENTER_CV) ==
@@ -797,9 +877,9 @@ def run(appController):
     childEdited = snapshotTube(session, childA)
     check(not sameGeometry(childBefore, childEdited),
           "the selected A child changes through its visible gizmo")
-    workspace._modeButtons["hierarchy"].click()
+    workspace.button("mode", "hierarchy").click()
     wait(15)
-    check(clickControl("Exit level"),
+    check(clickControl("exitLevel"),
           "the Hierarchy dock exposes explicit branch exit")
     parentSelection = session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)
     check(parentSelection == [(rootA, -1, -1)],
@@ -817,10 +897,10 @@ def run(appController):
     check(rootBaseAnchor is not None,
           "root A retains a slot-to-edge base mapping before its whole-tube Move")
     rootBBefore = snapshotTube(session, rootB)
-    workspace._modeButtons["tube"].click()
+    workspace.button("mode", "tube").click()
     wait(15)
-    if "tube" in getattr(workspace, "_tubeSelectionButtons", {}):
-        workspace._tubeSelectionButtons["tube"].click()
+    if workspace.button("comp", "tube") is not None:
+        workspace.button("comp", "tube").click()
     parentPoint = sectionCV(session, rootA, 1, 0)
     parentPixel = pixel(parentPoint) if parentPoint is not None else None
     if parentPixel is not None:
@@ -910,7 +990,7 @@ def run(appController):
     rootSectionsBefore = snapshotTube(session, rootA)[1]
     childRootsBefore = {tube: childrenBefore[tube][0][0] for tube in childrenA}
     sculptWitnessBefore = centerResidual(tubeDeltas(session, target), targetCv)
-    workspace._modeButtons["graph"].click()
+    workspace.button("mode", "graph").click()
     wait(15)
     typeKey(view, "m")
     graphStart = pixel((RECT[0][0], 0.0, RECT[0][1]))

@@ -68,6 +68,7 @@ constexpr uint32_t kSaltScatter      = 0x52C4A11Eu;  // "ratt"
 constexpr uint32_t kSaltDensity      = 0xDE51732Eu;  // never 0
 constexpr uint32_t kSaltNoise        = 0x4E01523Eu;  // "Noiz"
 constexpr uint32_t kSaltGrow         = 0x47726F77u;  // "Grow" (04 §0.6)
+constexpr uint32_t kSaltGrowAzimuth  = 0x4772417Au;  // "GrAz": independent of length
 constexpr uint32_t kSaltLength       = 0x4C656E67u;  // "Leng" (04 §0.6)
 constexpr uint32_t kSaltMaskRandom   = 0x4D41534Eu;  // "MASK"
 constexpr uint32_t kSaltClump        = 0x43174D50u;  // "CLMP"; per level use kSaltClump + level

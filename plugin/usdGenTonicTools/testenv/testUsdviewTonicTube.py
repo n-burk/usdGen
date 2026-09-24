@@ -203,20 +203,81 @@ def typeKey(view, name, modifiers=()):
             "1": QtCore.Qt.Key.Key_1,
             "2": QtCore.Qt.Key.Key_2,
             "3": QtCore.Qt.Key.Key_3,
+            "4": QtCore.Qt.Key.Key_4,
+            "5": QtCore.Qt.Key.Key_5,
+            "6": QtCore.Qt.Key.Key_6,
             "d": QtCore.Qt.Key.Key_D,
             "c": QtCore.Qt.Key.Key_C,
             "w": QtCore.Qt.Key.Key_W,
+            "e": QtCore.Qt.Key.Key_E,
             "r": QtCore.Qt.Key.Key_R,
             "m": QtCore.Qt.Key.Key_M,
+            "p": QtCore.Qt.Key.Key_P,
+            "g": QtCore.Qt.Key.Key_G,
+            "s": QtCore.Qt.Key.Key_S,
+            "f8": QtCore.Qt.Key.Key_F8,
+            "f9": QtCore.Qt.Key.Key_F9,
             "f10": QtCore.Qt.Key.Key_F10,
             "f11": QtCore.Qt.Key.Key_F11,
             "delete": QtCore.Qt.Key.Key_Delete}
+    keys.update(_gizmoKeys())
     mods = QtCore.Qt.KeyboardModifier.NoModifier
     table = {"shift": QtCore.Qt.KeyboardModifier.ShiftModifier,
              "ctrl": QtCore.Qt.KeyboardModifier.ControlModifier}
     for modifier in modifiers:
         mods |= table[modifier]
     _qtTest().QTest.keyClick(view, keys[name], mods)
+
+
+def _gizmoKeys():
+    """GZ-05 / parity G11, G13: the gizmo keys, and the J / X holds."""
+    from pxr.Usdviewq.qt import QtCore
+    return {"j": QtCore.Qt.Key.Key_J, "x": QtCore.Qt.Key.Key_X,
+            "l": QtCore.Qt.Key.Key_L, "+": QtCore.Qt.Key.Key_Plus,
+            "=": QtCore.Qt.Key.Key_Equal, "-": QtCore.Qt.Key.Key_Minus}
+
+
+def holdKey(view, name, down):
+    """Press (down=True) or release one gizmo hold key WITHOUT the other half.
+
+    QTest.keyClick would press and release at once; a hold has to stay
+    down across mouse moves, exactly as the artist's finger does.
+    """
+    from pxr.Usdviewq.qt import QtCore
+    mods = QtCore.Qt.KeyboardModifier.NoModifier
+    key = _gizmoKeys()[name]
+    if down:
+        _qtTest().QTest.keyPress(view, key, mods)
+    else:
+        _qtTest().QTest.keyRelease(view, key, mods)
+
+
+def wheel(view, physical, notches=1):
+    """One real QWheelEvent (a dolly notch) sent straight at the StageView.
+
+    The left button is reported held, as it is under a gizmo drag.  The
+    (pos, globalPos, pixelDelta, angleDelta, buttons, modifiers, phase,
+    inverted) constructor is the same in Qt 5.12+ and Qt 6.  Returns False
+    when this binding cannot build the event.
+    """
+    from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
+    try:
+        ratio = float(view.devicePixelRatioF())
+    except AttributeError:
+        ratio = 1.0
+    local = QtCore.QPointF(physical[0] / ratio, physical[1] / ratio)
+    globalPos = QtCore.QPointF(view.mapToGlobal(local.toPoint()))
+    try:
+        event = QtGui.QWheelEvent(
+            local, globalPos, QtCore.QPoint(0, 0),
+            QtCore.QPoint(0, 120 * int(notches)),
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+            QtCore.Qt.ScrollPhase.NoScrollPhase, False)
+    except (TypeError, AttributeError):
+        return False
+    QtWidgets.QApplication.sendEvent(view, event)
+    return True
 
 
 def wait(ms=30):
@@ -448,6 +509,789 @@ def liveMarquee(loop):
     return getattr(loop, "_marquee", None)
 
 
+def gizmoParity(stage, view, session, viewport, mouse):
+    """GZ-01/GZ-03 and RigExec parity G03/G04 through real events.
+
+    A side camera spaces the stub's center CVs about 55 px apart, so with
+    CV 1 selected the next CV sits on the V axis of its 90 px gizmo (the
+    live walkthrough's step 10).  The handle must win that press, hover
+    must prehighlight it, the dragged handle stays remembered and a middle
+    drag repeats it; an unselected CV off the gizmo tweak-drags in one
+    gesture; Ctrl on the centre over the selected CV is a click when it
+    does not travel and the root-normal constraint when it does.  Every
+    click leaves no undo step, so exactly one Ctrl+Z per real drag puts
+    the tube back.  The top camera is restored at the end.
+    """
+    from usdGenTonicTools import tonicCamera, tonicGizmo, tonicLib, tonicLoops
+    loop = viewport.loop
+    gizmo = loop._gizmo
+    cvCount = int(session.dll.Tonic_GetCenterCVCount(session.model))
+    beforeParity = centers(session)
+    tip = cvCount - 1
+
+    # testusdview execs this script with no __file__; --testScript names it.
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        here = ""
+        for index, argument in enumerate(sys.argv):
+            if argument == "--testScript" and index + 1 < len(sys.argv):
+                here = os.path.dirname(os.path.abspath(sys.argv[index + 1]))
+    if here and here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import tonicT3
+    except ImportError as exc:
+        check(False, "tonicT3 (middle-button driver) imports: %s" % exc)
+        return
+
+    def side(distance):
+        tonicT3.sideCamera(stage, view, eye=(2.0 + distance, 2.1, 2.0))
+        view.setFocus()
+        wait(40)
+        return tonicCamera.resolve(view)
+
+    def px(camera, cv):
+        point = centerHandle(session, cv)
+        projected = camera.worldToPixels(point) if point else None
+        return (projected[0], projected[1]) if projected else None
+
+    # Dolly so the CV spacing is about 55 px whatever the window size.
+    camera = side(13.0)
+    p1, p2 = px(camera, 1), px(camera, 2)
+    spacing = abs(p2[1] - p1[1]) if p1 and p2 else 0.0
+    if spacing > 1.0:
+        camera = side(13.0 * spacing / 55.0)
+    p1, p2 = px(camera, 1), px(camera, 2)
+    info("side camera CV spacing %.1f px" % abs(p2[1] - p1[1]))
+
+    session.clearSelection()
+    loop._placeGizmo(camera)
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+    mouse.click(p1)
+    check(session.readSelection(2) == [(0, 1, -1)] and gizmo.visible,
+          "GZ-01: a click selects CV 1 and raises its gizmo %r"
+          % (session.readSelection(2),))
+    camera = tonicCamera.resolve(view)
+    p1, p2 = px(camera, 1), px(camera, 2)
+    handle = gizmo.handleAt(camera, p2[0], p2[1])
+    component = loop._componentItem(tonicLoops.Sample(session, camera,
+                                                      p2[0], p2[1]))
+    check(handle != tonicGizmo.HANDLE_NONE and component is not None and
+          (component["id"], component["subId"]) == (0, 2),
+          "CV 2's pixel is both on a handle (%r) and on the unselected CV "
+          "(%r)" % (handle, component))
+
+    # G03: hover prehighlights the handle, not the CV under it.
+    mouse.unheldMove(p2)
+    wait(10)
+    records = gizmo.screenHandles(camera)
+    hovered = [r for r in records if r.get("hovered")]
+    check(gizmo.hoverHandle == tonicGizmo.HANDLE_V and hovered and
+          hovered[0]["handle"] == tonicGizmo.HANDLE_V and
+          hovered[0]["color"] == tonicGizmo.HOVER_COLOR,
+          "hovering CV 2's pixel prehighlights HANDLE_V in the hover colour "
+          "(%r, %r)" % (gizmo.hoverHandle,
+                        [r["handle"] for r in hovered]))
+    from pxr.Usdviewq.qt import QtCore
+    shapes = QtCore.Qt.CursorShape
+    check(view.cursor().shape() == shapes.SizeAllCursor,
+          "FB-02: the cursor over a gizmo handle is SizeAll (%r)"
+          % (view.cursor().shape(),))
+
+    # GZ-01: the press drags the V handle; CV 1 moves, CV 2 does not.
+    before = centers(session)
+    perPixel = camera.worldPerPixel(centerHandle(session, 1))
+    travel = 50.0
+    mouse.press(p2)
+    check(viewport.gestureActive and gizmo.dragging and
+          gizmo.activeHandle == tonicGizmo.HANDLE_V,
+          "the press on CV 2's pixel drags the V handle")
+    check(view.cursor().shape() == shapes.ClosedHandCursor,
+          "FB-02: a handle drag holds the closed-hand cursor (%r)"
+          % (view.cursor().shape(),))
+    for step in range(1, 6):
+        mouse.move((p2[0], p2[1] - travel * step / 5.0))
+    mouse.release((p2[0], p2[1] - travel))
+    after = centers(session)
+    moved = after[1][1] - before[1][1]
+    want = travel * perPixel
+    check(abs(moved - want) < 0.05 * want,
+          "CV 1 rose by the cursor travel (%.4f vs %.4f)" % (moved, want))
+    check(after[2] == before[2] and session.readSelection(2) ==
+          [(0, 1, -1)],
+          "CV 2 did not move and the selection is still CV 1 %r"
+          % (session.readSelection(2),))
+
+    # G04: the dragged handle stays remembered, and a middle drag in open
+    # space repeats it.
+    records = gizmo.screenHandles(camera)
+    vRecord = [r for r in records if r["handle"] == tonicGizmo.HANDLE_V]
+    check(gizmo.selectedHandle == tonicGizmo.HANDLE_V and vRecord and
+          vRecord[0]["selected"] and
+          vRecord[0]["color"] == tonicGizmo.ACTIVE_COLOR,
+          "after the release HANDLE_V stays selected, in yellow")
+    middle = tonicT3.Mouse(view)
+    middle.direct = True
+    camera = tonicCamera.resolve(view)
+    p1 = px(camera, 1)
+    away = (p1[0] + 150.0, p1[1])
+    check(gizmo.handleAt(camera, away[0], away[1]) == tonicGizmo.HANDLE_NONE,
+          "150 px right of the gizmo is open space")
+    before = centers(session)
+    perPixel = camera.worldPerPixel(centerHandle(session, 1))
+    middle.press(away, button="middle")
+    check(viewport.gestureActive and gizmo.dragging and
+          gizmo.activeHandle == tonicGizmo.HANDLE_V,
+          "a middle press there repeats the V handle")
+    for step in range(1, 4):
+        middle.move((away[0], away[1] - 30.0 * step / 3.0))
+    middle.release((away[0], away[1] - 30.0), button="middle")
+    after = centers(session)
+    moved = after[1][1] - before[1][1]
+    want = 30.0 * perPixel
+    check(not viewport.gestureActive and abs(moved - want) < 0.05 * want,
+          "the middle drag moved CV 1 along V by its travel (%.4f vs %.4f)"
+          % (moved, want))
+    # Two drags, two undo steps (the selecting click made none).  Undo
+    # them so CV 1's gizmo is back well below the tip.
+    for _ in range(2):
+        typeKey(view, "z", ("ctrl",))
+        wait(10)
+    check(all(abs(a - b) < 1e-4 for cv in range(cvCount)
+              for a, b in zip(centers(session)[cv], beforeParity[cv])),
+          "two Ctrl+Z undo the V and the middle drag: the click made no "
+          "undo step")
+    loop._placeGizmo(tonicCamera.resolve(view))
+
+    # GZ-03: an UNSELECTED tip off the gizmo tweak-drags in one gesture.
+    camera = tonicCamera.resolve(view)
+    tipPixel = px(camera, tip)
+    check(gizmo.handleAt(camera, tipPixel[0], tipPixel[1]) ==
+          tonicGizmo.HANDLE_NONE, "the tip CV is off the gizmo")
+    before = centers(session)
+    perPixel = camera.worldPerPixel(centerHandle(session, tip))
+    mouse.drag([tipPixel] + [(tipPixel[0], tipPixel[1] + 60.0 * s / 6.0)
+                             for s in range(1, 7)])
+    after = centers(session)
+    moved = before[tip][1] - after[tip][1]
+    want = 60.0 * perPixel
+    check(session.readSelection(2) == [(0, tip, -1)] and
+          abs(moved - want) < 0.05 * want,
+          "one press selected the tip and dragged it down (%.4f vs %.4f)"
+          % (moved, want))
+    typeKey(view, "z", ("ctrl",))
+    wait(10)
+    check(all(abs(a - b) < 1e-4 for a, b in
+              zip(centers(session)[tip], before[tip])),
+          "one Ctrl+Z undoes the whole tweak")
+
+    # GZ-03: Ctrl-click on the selected tip (under the centre) deselects.
+    loop._placeGizmo(tonicCamera.resolve(view))
+    camera = tonicCamera.resolve(view)
+    tipPixel = px(camera, tip)
+    if session.readSelection(2) != [(0, tip, -1)]:
+        mouse.click(tipPixel)
+    before = centers(session)
+    check(gizmo.handleAt(camera, tipPixel[0], tipPixel[1]) ==
+          tonicGizmo.HANDLE_CENTER, "the selected tip sits under the centre")
+    mouse.click(tipPixel, ("ctrl",))
+    check(session.readSelection(2) == [] and centers(session) == before,
+          "a Ctrl click on it deselects it and moves nothing %r"
+          % (session.readSelection(2),))
+
+    # Ctrl-drag on the centre: the root-normal (+Y here) constraint.
+    mouse.click(tipPixel)
+    before = centers(session)
+    mouse.drag([tipPixel] + [(tipPixel[0] + 8.0 * s, tipPixel[1] - 8.0 * s)
+                             for s in range(1, 6)], ("ctrl",))
+    after = centers(session)
+    delta = [after[tip][i] - before[tip][i] for i in range(3)]
+    check(delta[1] > 0.0 and abs(delta[0]) < 0.1 * delta[1] and
+          abs(delta[2]) < 0.1 * delta[1],
+          "a Ctrl drag on the centre moves the tip along the root normal "
+          "(%r)" % (delta,))
+
+    # One real drag remains (Ctrl); no click left a step.
+    typeKey(view, "z", ("ctrl",))
+    wait(10)
+    restored = centers(session)
+    check(all(abs(a - b) < 1e-4 for cv in range(cvCount)
+              for a, b in zip(restored[cv], beforeParity[cv])),
+          "one Ctrl+Z restores the tube: the clicks made no undo steps")
+
+    frameScalp(stage, view)
+    view.setFocus()
+    wait(40)
+    session.clearSelection()
+    loop._placeGizmo(tonicCamera.resolve(view))
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+
+
+def gizmoLook(view, session, viewport, mouse, messages):
+    """GZ-02 / parity G05, G10: the RigExec look through the real overlay.
+
+    With the tip CV selected: Move draws cone tips, Scale cube tips, and a
+    real rotate drag on the camera-facing ring reports its angle in the
+    status line and grows a pie wedge.  Each state is painted through the
+    real overlay (a paint exception would print a Traceback), and a red
+    cone pixel is probed in the overlay's own grab.  The rotate drag is
+    undone and the Move tool restored, so the tip stays selected under
+    Move for the checks that follow.
+    """
+    from usdGenTonicTools import tonicCamera, tonicGizmo
+    loop = viewport.loop
+    gizmo = loop._gizmo
+    overlay = viewport._gizmoOverlay
+    viewport.setPointerInside(True)
+    view.setFocus()
+    wait(10)
+    selection = session.readSelection(2)
+    before = centers(session)
+
+    def paint():
+        overlay.repaint()
+        wait(5)
+
+    def axisTips():
+        return [record.get("tip") for record in viewport.gizmoScreenHandles()
+                if record["kind"] == "axis"]
+
+    tips = axisTips()
+    check(toolOf(viewport) == "move" and len(tips) == 3 and
+          all(tip == "cone" for tip in tips),
+          "GZ-02: Move draws three cone-tipped axes %r" % (tips,))
+    paint()
+    uAxis = [record for record in viewport.gizmoScreenHandles()
+             if record["handle"] == tonicGizmo.HANDLE_U and
+             record["grabbable"] and not record["hovered"] and
+             not record["selected"]]
+    if uAxis and overlay is not None:
+        start, end = uAxis[0]["points"][0], uAxis[0]["points"][-1]
+        length = ((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5
+        cone = (tonicGizmo.CONE_RADIUS * tonicGizmo.CONE_LENGTH_RATIO *
+                uAxis[0]["sizePx"])
+        probe = (end[0] - (end[0] - start[0]) / length * cone * 0.4,
+                 end[1] - (end[1] - start[1]) / length * cone * 0.4)
+        image = overlay.grab().toImage()
+        pixel = image.pixelColor(int(round(probe[0])), int(round(probe[1])))
+        check(pixel.red() > 180 and pixel.green() < 90 and
+              pixel.blue() < 90,
+              "the U cone paints solid red in the overlay (rgba %r at %r)"
+              % ((pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()),
+                 probe))
+    else:
+        check(False, "a plain grabbable U axis to probe (%r)" % (uAxis,))
+
+    typeKey(view, "r")
+    wait(10)
+    tips = axisTips()
+    check(toolOf(viewport) == "scale" and gizmo.kind ==
+          tonicGizmo.GIZMO_SCALE and len(tips) == 3 and
+          all(tip == "cube" for tip in tips),
+          "GZ-02: R's Scale gizmo draws three cube-tipped axes %r" % (tips,))
+    paint()
+
+    # G10: a real rotate drag on the ring facing the camera.  Rotate starts
+    # Local (parity G16), so L puts it on World first; the camera looks
+    # straight down, so the ring about world Y (V) is the one facing it.
+    typeKey(view, "e")
+    wait(10)
+    check(loop.transformOrientation() == "tube",
+          "G16: E's Rotate starts in the Local (tube) orientation (%r)"
+          % loop.transformOrientation())
+    typeKey(view, "l")
+    wait(10)
+    check(loop.transformOrientation() == "world",
+          "and L flips Rotate to World (%r)" % loop.transformOrientation())
+    camera = tonicCamera.resolve(view)
+    loop._placeGizmo(camera)
+    facing = tonicGizmo.HANDLE_V
+    rings = [record for record in viewport.gizmoScreenHandles()
+             if record["handle"] == facing and
+             record["kind"] == "ring"]
+    check(toolOf(viewport) == "rotate" and rings,
+          "E raises the Rotate gizmo with its camera-facing V ring")
+    if rings:
+        paint()
+        centre = gizmo.origin
+        cx, cy = camera.worldToPixels(centre)[:2]
+        radius = 0.85 * rings[0]["sizePx"]
+        import math
+
+        def onRing(degrees):
+            radians = math.radians(degrees)
+            return (cx + radius * math.cos(radians),
+                    cy - radius * math.sin(radians))
+
+        press = onRing(45.0)
+        check(gizmo.handleAt(camera, press[0], press[1]) == facing,
+              "45 degrees round the V ring picks HANDLE_V")
+        del messages[:]
+        mouse.press(press)
+        for step in range(1, 7):
+            mouse.move(onRing(45.0 + 90.0 * step / 6.0))
+        angle = gizmo.dragAngle()
+        pie = gizmo.pieSlice()
+        paint()                         # the pie through the real painter
+        mouse.release(onRing(135.0))
+        readouts = [line for line in messages
+                    if "Rotate" in str(line) and "°" in str(line)]
+        check(abs(angle) > 1.0 and abs(abs(angle) - 90.0) < 10.0,
+              "a quarter turn on the W ring reads %.1f deg" % angle)
+        check(pie is not None and len(pie[0]) > 3,
+              "the drag grew a pie wedge (%r points)"
+              % (len(pie[0]) if pie else None,))
+        check(readouts, "the status line reads the live angle (%r)"
+              % (readouts[-1:] or messages[-3:],))
+        check(gizmo.pieSlice() is None, "the release takes the pie away")
+        typeKey(view, "z", ("ctrl",))
+        wait(10)
+    typeKey(view, "w")
+    wait(10)
+    loop._placeGizmo(tonicCamera.resolve(view))
+    restored = centers(session)
+    check(toolOf(viewport) == "move" and
+          session.readSelection(2) == selection and
+          all(abs(a - b) < 1e-4 for cv in range(len(before))
+              for a, b in zip(restored[cv], before[cv])),
+          "one Ctrl+Z undid the rotation; W is back on the selected tip")
+
+
+def gizmoSettingsParity(stage, view, session, viewport, state, mouse,
+                        messages, workspace=None):
+    """GZ-05 and parity G07/G08/G11/G13/G14/G23 through real events.
+
+    An oblique camera, so every world axis has screen length.  World is
+    the default orientation (three grabbable axes >= 12 px); `+`/`-` resize
+    the manipulator and `L` flips World <-> Tube; Ctrl mid-drag on an axis
+    moves in the perpendicular plane; held J quantises, held X lands the
+    pivot on the grid and letting go un-snaps, and usdview's own J never
+    fires; undo refuses mid-drag and all three redo keys redo; Scale through
+    the pivot mirrors unless Prevent Negative Scale; Free Rotate hides the
+    ball.  Every drag is undone; the top camera is restored at the end.
+    """
+    from usdGenTonicTools import (tonicCamera, tonicGizmo,
+                                  tonicGizmoSettings, tonicLib, tonicPanels)
+    try:
+        import tonicT3
+    except ImportError as exc:
+        check(False, "tonicT3 (camera helper) imports: %s" % exc)
+        return
+    loop = viewport.loop
+    gizmo = loop._gizmo
+    settings = tonicGizmoSettings.settingsFor(state)
+    cvCount = int(session.dll.Tonic_GetCenterCVCount(session.model))
+    tip = cvCount - 1
+    baseline = centers(session)
+    tonicT3.sideCamera(stage, view, eye=(9.0, 8.0, 10.0),
+                       target=(2.0, 3.0, 2.0),
+                       primPath="/TonicT3ObliqueCamera")
+    view.setFocus()
+    viewport.setPointerInside(True)
+    wait(40)
+    camera = tonicCamera.resolve(view)
+    ratio = tonicGizmo.cameraPixelRatio(camera)
+
+    def px(cv):
+        projected = camera.worldToPixels(centerHandle(session, cv))
+        return (projected[0], projected[1])
+
+    def restored(what):
+        typeKey(view, "z", ("ctrl",))
+        wait(10)
+        now = centers(session)
+        check(all(abs(a - b) < 1e-4 for cv in range(cvCount)
+                  for a, b in zip(now[cv], baseline[cv])),
+              "one Ctrl+Z undoes the %s" % what)
+
+    def axisRecords():
+        return {record["handle"]: record
+                for record in viewport.gizmoScreenHandles()
+                if record["kind"] == "axis"}
+
+    def length(record):
+        start, end = record["points"][0], record["points"][-1]
+        return math.hypot(end[0] - start[0], end[1] - start[1])
+
+    typeKey(view, "w")
+    session.clearSelection()
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+    mouse.click(px(tip))
+    camera = tonicCamera.resolve(view)
+    loop._placeGizmo(camera)
+    axes = axisRecords()
+    check(session.readSelection(2) == [(0, tip, -1)] and
+          state.transformOrientation == "world" and
+          gizmo.frame == tonicGizmo.IDENTITY_FRAME,
+          "GZ-05: the tip's Move gizmo is World-oriented by default")
+    check(len(axes) == 3 and
+          all(length(record) >= tonicGizmo.MIN_AXIS_PIXELS * ratio and
+              record["grabbable"] for record in axes.values()),
+          "three grabbable world axis records >= 12 px long (%r)"
+          % [round(length(record), 1) for record in axes.values()])
+
+    # G13: +/=/- resize the manipulator by 10 %; L flips World <-> Tube.
+    before = length(axes[tonicGizmo.HANDLE_U])
+    typeKey(view, "+")
+    wait(10)
+    grown = length(axisRecords()[tonicGizmo.HANDLE_U])
+    check(abs(settings.manipulatorSize - 99.0) < 1e-6 and
+          abs(grown / before - 1.1) < 0.02,
+          "'+' grows the manipulator 10%% (%g px, %.1f -> %.1f)"
+          % (settings.manipulatorSize, before, grown))
+    typeKey(view, "-")
+    typeKey(view, "=")
+    typeKey(view, "-")
+    wait(10)
+    check(abs(settings.manipulatorSize - 90.0) < 1e-6,
+          "'-' and '=' step it back and forth to 90 (%g)"
+          % settings.manipulatorSize)
+    typeKey(view, "l")
+    wait(10)
+    check(state.transformOrientation == "tube" and
+          abs(gizmo.frame[7] - 1.0) < 1e-3,
+          "L flips to the Tube frame, w along the root normal (%r)"
+          % (gizmo.frame[6:9],))
+    typeKey(view, "l")
+    wait(10)
+    check(state.transformOrientation == "world" and
+          gizmo.frame == tonicGizmo.IDENTITY_FRAME, "and L flips back")
+
+    # G07: Ctrl on an axis moves in the perpendicular plane, every sample.
+    camera = tonicCamera.resolve(view)
+    u = axisRecords()[tonicGizmo.HANDLE_U]
+    mid = ((u["points"][0][0] + u["points"][-1][0]) * 0.5,
+           (u["points"][0][1] + u["points"][-1][1]) * 0.5)
+    mouse.press(mid)
+    check(viewport.gestureActive and gizmo.activeHandle ==
+          tonicGizmo.HANDLE_U, "the press on the U midpoint drags U")
+    for step in range(1, 4):
+        mouse.move((mid[0] + 10.0 * step, mid[1] + 6.0 * step))
+    plain = centers(session)[tip]
+    mouse.move((mid[0] + 33.0, mid[1] + 18.0), ("ctrl",))
+    ctrl = centers(session)[tip]
+    mouse.move((mid[0] + 36.0, mid[1] + 18.0))
+    back = centers(session)[tip]
+    home = baseline[tip]
+    check(plain[0] - home[0] > 1e-3 and abs(plain[1] - home[1]) < 1e-4 and
+          abs(plain[2] - home[2]) < 1e-4,
+          "a plain U drag moves along world X only (%r)" % (plain,))
+    check(abs(ctrl[0] - home[0]) < 1e-3 and
+          (abs(ctrl[1] - home[1]) > 1e-3 or abs(ctrl[2] - home[2]) > 1e-3),
+          "G07: Ctrl mid-drag moves in the YZ plane, no X (%r)" % (ctrl,))
+    check(back[0] - home[0] > 1e-3 and abs(back[1] - home[1]) < 1e-4 and
+          abs(back[2] - home[2]) < 1e-4,
+          "and letting Ctrl go returns to the axis (%r)" % (back,))
+
+    # G14: undo refuses while the drag is live.
+    typeKey(view, "z", ("ctrl",))
+    wait(10)
+    check(viewport.gestureActive and centers(session)[tip] == back,
+          "Ctrl+Z during the drag is refused; the drag goes on")
+    if workspace is not None:
+        # ...and the dock header's buttons say so (G14): grey mid-drag.
+        workspace.refresh()
+        undoButton = workspace.button("file", "undo")
+        redoButton = workspace.button("file", "redo")
+        check(undoButton is not None and redoButton is not None and
+              not undoButton.isEnabled() and not redoButton.isEnabled(),
+              "G14: the dock's Undo and Redo grey out while the drag is "
+              "live (%r, %r)" % (undoButton and undoButton.isEnabled(),
+                                 redoButton and redoButton.isEnabled()))
+    mouse.release((mid[0] + 36.0, mid[1] + 18.0))
+    if workspace is not None:
+        wait(10)
+        workspace.refresh()
+        check(workspace.button("file", "undo").isEnabled(),
+              "and Undo comes back on the release")
+    dragged = centers(session)
+    restored("Ctrl-plane drag")
+    typeKey(view, "z", ("ctrl", "shift"))
+    wait(10)
+    check(centers(session)[tip] == dragged[tip],
+          "Ctrl+Shift+Z redoes it (%r)" % (centers(session)[tip],))
+    typeKey(view, "z", ("ctrl",))
+    wait(10)
+    typeKey(view, "z", ("shift",))
+    wait(10)
+    check(centers(session)[tip] == dragged[tip], "and so does Shift+Z")
+    restored("redone drag")
+
+    # G11: J held = step snap, X held = world grid; release un-snaps.
+    loop._placeGizmo(tonicCamera.resolve(view))
+    camera = tonicCamera.resolve(view)
+    settings.For("move").stepSize = 0.5
+    centre = px(tip)
+    viewProj = tuple(camera.viewProj)
+    mouse.press(centre)
+    for step in range(1, 5):
+        mouse.move((centre[0] + 11.0 * step, centre[1] + 3.0 * step))
+    raw = [centers(session)[tip][i] - home[i] for i in range(3)]
+    holdKey(view, "j", True)
+    wait(10)
+    stepped = [centers(session)[tip][i] - home[i] for i in range(3)]
+    check(viewport.holdActive("stepSnap") and
+          all(abs(v / 0.5 - round(v / 0.5)) < 1e-3 for v in stepped) and
+          stepped != raw,
+          "holding J snaps the live drag to 0.5 steps at once (%r -> %r)"
+          % ([round(v, 3) for v in raw], [round(v, 3) for v in stepped]))
+    check(tuple(tonicCamera.resolve(view).viewProj) == viewProj,
+          "and usdview's own J (Toggle Framed View) did not fire")
+    holdKey(view, "j", False)
+    wait(10)
+    unsnapped = [centers(session)[tip][i] - home[i] for i in range(3)]
+    check(not viewport.holdActive("stepSnap") and
+          all(abs(a - b) < 1e-4 for a, b in zip(unsnapped, raw)),
+          "releasing J un-snaps at once")
+    holdKey(view, "x", True)
+    wait(10)
+    check(viewport.holdActive("grid") and
+          all(abs(v - round(v)) < 1e-3 for v in gizmo.origin),
+          "holding X lands the pivot on the world grid (%r)"
+          % (gizmo.origin,))
+    mouse.release((centre[0] + 44.0, centre[1] + 12.0))
+    check(not viewport.holdActive("grid"), "the drag's end clears the hold")
+    holdKey(view, "x", False)
+    restored("snapped drag")
+
+    # G08: Scale through the pivot mirrors, unless Prevent Negative Scale.
+    typeKey(view, "r")
+    wait(10)
+    rows = {row.id: row for row in tonicPanels.descriptors("tube", state)}
+
+    def scaleThrough():
+        cam = tonicCamera.resolve(view)
+        loop._placeGizmo(cam)
+        v = axisRecords()[tonicGizmo.HANDLE_V]
+        start, end = v["points"][0], v["points"][-1]
+        half = ((start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5)
+        mirror = (2.0 * start[0] - half[0], 2.0 * start[1] - half[1])
+        mouse.press(half)
+        grabbed = gizmo.activeHandle
+        for step in range(1, 5):
+            t = step / 4.0
+            mouse.move((half[0] + (mirror[0] - half[0]) * t,
+                        half[1] + (mirror[1] - half[1]) * t))
+        mouse.release(mirror)
+        return grabbed, centers(session)[tip]
+
+    grabbed, flipped = scaleThrough()
+    root = baseline[0]
+    check(grabbed == tonicGizmo.HANDLE_V and flipped[1] < root[1] - 1.0,
+          "G08: Scale V dragged through the pivot mirrors the tip below "
+          "the root (%r)" % (flipped,))
+    restored("mirroring scale")
+    rows["preventNegativeScale"].set(state, session, True)
+    grabbed, clamped = scaleThrough()
+    check(grabbed == tonicGizmo.HANDLE_V and clamped[1] >= root[1] and
+          clamped[1] - root[1] < 0.01,
+          "with Prevent Negative Scale it stops at the pivot (%r)"
+          % (clamped,))
+    restored("clamped scale")
+    rows["preventNegativeScale"].set(state, session, False)
+
+    # G23: Free Rotate hides the ball.
+    typeKey(view, "e")
+    wait(10)
+    loop._placeGizmo(tonicCamera.resolve(view))
+    kinds = [record["kind"] for record in viewport.gizmoScreenHandles()]
+    rows["freeRotate"].set(state, session, False)
+    wait(10)
+    without = [record["kind"] for record in viewport.gizmoScreenHandles()]
+    check("free" in kinds and "free" not in without,
+          "G23: Free Rotate off takes the ball away at once (%r -> %r)"
+          % (kinds.count("free"), without.count("free")))
+    rows["freeRotate"].set(state, session, True)
+    typeKey(view, "w")
+    settings.For("move").stepSize = 1.0
+
+    tonicT3.frameScalp(stage, view)
+    view.setFocus()
+    wait(40)
+    session.clearSelection()
+    loop._placeGizmo(tonicCamera.resolve(view))
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+
+
+def toolOf(viewport):
+    return getattr(viewport.loop, "transformTool", lambda: None)()
+
+
+def dockIcons(view, session, viewport, state, workspace):
+    """DK-04 / parity G21: icon shelves, the Q/W/E/R row, button hooks."""
+    from pxr.Usdviewq.qt import QtWidgets
+    from usdGenTonicTools import (tonicBridge, tonicCamera, tonicDockIds,
+                                  tonicGizmo, tonicGizmoIcons, tonicLib,
+                                  tonicModes)
+    typeKey(view, "2")
+    wait(10)
+    workspace.refresh()
+    shelves = [("mode", m.id, m.hotkey) for m in tonicModes.MODES]
+    for subs in tonicDockIds.SUBMODES.values():
+        shelves.extend(("sub", s.id, s.hotkey) for s in subs)
+    shelves.extend(("comp", s.id, s.hotkey)
+                   for s in tonicModes.TUBE_SUBMODES)
+    shelves.extend(("tool", t.id, t.hotkey)
+                   for t in tonicDockIds.TRANSFORM_TOOLS)
+    missing, iconless, keyless, misnamed = [], [], [], []
+    for kind, itemId, hotkey in shelves:
+        btn = workspace.button(kind, itemId)
+        if btn is None:
+            missing.append((kind, itemId))
+            continue
+        if btn.icon().isNull():
+            iconless.append((kind, itemId))
+        if ("(%s)" % hotkey) not in btn.toolTip():
+            keyless.append((kind, itemId, btn.toolTip()))
+        if btn.objectName() != tonicDockIds.objectName(kind, itemId):
+            misnamed.append((kind, itemId, btn.objectName()))
+    check(not missing, "workspace.button() finds every shelf button (%r)"
+          % (missing,))
+    check(not iconless, "every mode/sub-mode/comp/tool button has an icon "
+          "(%r)" % (iconless,))
+    check(not keyless, "every shelf tooltip names its hotkey (%r)"
+          % (keyless[:3],))
+    check(not misnamed, "every shelf button carries its tonic objectName "
+          "(%r)" % (misnamed[:3],))
+    names = [b.objectName() for b in
+             workspace.findChildren(QtWidgets.QAbstractButton)
+             if tonicDockIds.parseObjectName(b.objectName()) is not None]
+    check(len(names) == len(set(names)),
+          "no two dock buttons share an objectName (%d named)" % len(names))
+    for fileId, keys in (("undo", ("Ctrl+Z",)),
+                         ("redo", ("Ctrl+Y", "Ctrl+Shift+Z", "Shift+Z"))):
+        btn = workspace.button("file", fileId)
+        check(btn is not None and all(k in btn.toolTip() for k in keys) and
+              not btn.icon().isNull(),
+              "the header's %s button has its glyph and names %s (%r)"
+              % (fileId, ", ".join(keys), btn and btn.toolTip()))
+    check(workspace.button("file", "settings") is not None,
+          "the header has a Settings button")
+    check(all(tonicGizmoIcons.HasArt(n) for n in
+              ("select", "move", "rotate", "scale", "undo", "redo",
+               "settings")),
+          "tonicGizmoIcons finds the usdRig-family art for the row glyphs")
+    check("transformTool" in workspace.parameterIds() and
+          "transformTool" not in [d.id for d, _w in workspace._paramWidgets],
+          "Tube's transform tool is the icon row, not a form combo")
+    check(not workspace._transformRow.isHidden(),
+          "the transform row shows in Tube")
+
+    # A whole tube selected, so the row's clicks have a gizmo to change.
+    typeKey(view, "f8")
+    wait(10)
+    tubes = tonicBridge.readTubeIds(session.dll, session.model)
+    tube = int(tubes[-1]) if tubes else 0
+    session.clearSelection()
+    session.select(tonicLib.TONIC_PICK_TUBE_VERT, [tube], [-1], [-1])
+    camera = tonicCamera.resolve(view)
+    viewport.loop._placeGizmo(camera)
+    rotate = workspace.button("tool", "rotate")
+    rotate.click()
+    wait(10)
+    gizmo = viewport.loop._gizmo
+    check(state.transformTool == "rotate" and gizmo.visible and
+          gizmo.kind == tonicGizmo.GIZMO_ROTATE and rotate.isChecked(),
+          "clicking the Rotate button raises the Rotate gizmo (%r, kind %r)"
+          % (state.transformTool, gizmo.kind))
+    typeKey(view, "w")
+    wait(10)
+    workspace.refresh()
+    move = workspace.button("tool", "move")
+    check(state.transformTool == "move" and move.isChecked() and
+          not rotate.isChecked(),
+          "W checks the Move button (%r)" % state.transformTool)
+
+    # Parity G21/G16/G17: the Global/Local and group-pivot toggles.
+    orientBtn = workspace.button("gizmo", "orientation")
+    pivotBtn = workspace.button("gizmo", "groupPivot")
+    check(orientBtn is not None and pivotBtn is not None and
+          orientBtn.objectName() ==
+          tonicDockIds.objectName("gizmo", "orientation") and
+          "(L)" in orientBtn.toolTip() and "(P)" in pivotBtn.toolTip() and
+          not orientBtn.icon().isNull() and not pivotBtn.icon().isNull(),
+          "the transform row carries the L and P toggles with glyphs")
+    if orientBtn is not None and pivotBtn is not None:
+        state.transformOrientation = "world"
+        workspace.refresh()
+        check(orientBtn.isEnabled() and not orientBtn.isChecked() and
+              not pivotBtn.isEnabled(),
+              "under Move: Global shown, group pivot greyed (no choice)")
+        orientBtn.click()
+        wait(10)
+        check(state.transformOrientation == "tube" and
+              orientBtn.isChecked() and orientBtn.text() == "Local" and
+              gizmo.frame != tonicGizmo.IDENTITY_FRAME,
+              "clicking the orientation toggle flips Move to Local and "
+              "re-orients the gizmo (%r, %r)"
+              % (state.transformOrientation, orientBtn.text()))
+        orientBtn.click()
+        wait(10)
+        check(state.transformOrientation == "world" and
+              not orientBtn.isChecked() and
+              gizmo.frame == tonicGizmo.IDENTITY_FRAME,
+              "and back to Global")
+        typeKey(view, "e")
+        wait(10)
+        workspace.refresh()
+        settings = state.gizmoSettings
+        pivotWas = settings.For("rotate").groupPivot
+        if pivotWas != "individual":
+            settings.For("rotate").groupPivot = "individual"
+        workspace.refresh()
+        viewport.loop._placeGizmo(tonicCamera.resolve(view))
+        eachOrigin = tuple(gizmo.origin)
+        check(pivotBtn.isEnabled() and not pivotBtn.isChecked(),
+              "under Rotate the pivot toggle is live, on Individual")
+        typeKey(view, "p")
+        wait(10)
+        workspace.refresh()
+        bounds = viewport.loop._selectionBounds()
+        middle = tuple(0.5 * (bounds[0][i] + bounds[1][i])
+                       for i in range(3)) if bounds else None
+        check(settings.For("rotate").groupPivot == "centre" and
+              pivotBtn.isChecked() and middle is not None and
+              all(abs(gizmo.origin[i] - middle[i]) < 1e-4
+                  for i in range(3)),
+              "P switches Rotate to Selection Centre and the gizmo moves "
+              "to the selection's middle (%r vs %r)"
+              % (tuple(gizmo.origin), middle))
+        pivotBtn.click()
+        wait(10)
+        check(settings.For("rotate").groupPivot == "individual" and
+              not pivotBtn.isChecked() and
+              all(abs(gizmo.origin[i] - eachOrigin[i]) < 1e-4
+                  for i in range(3)),
+              "clicking the pivot toggle cycles back to Individual, the "
+              "gizmo back on the root (%r)" % (tuple(gizmo.origin),))
+        typeKey(view, "w")
+        wait(10)
+
+    # Hierarchy: the row waits for a tube, then jumps like its W/E/R keys.
+    typeKey(view, "4")
+    wait(10)
+    session.clearSelection()
+    workspace.refresh()
+    scale = workspace.button("tool", "scale")
+    check(not workspace._transformRow.isHidden() and not scale.isEnabled(),
+          "in Hierarchy the transform row waits for a selected tube")
+    session.select(tonicLib.TONIC_PICK_TUBE_VERT, [tube], [-1], [-1])
+    workspace.refresh()
+    check(scale.isEnabled(), "a selected tube enables the Hierarchy row")
+    scale.click()
+    wait(10)
+    check(state.activeMode == "tube" and state.transformTool == "scale" and
+          session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT) ==
+          [(tube, -1, -1)],
+          "Hierarchy's Scale button jumps to Tube/Scale with the tube "
+          "(%r, %r, %r)" % (state.activeMode, state.transformTool,
+                            session.readSelection(
+                                tonicLib.TONIC_PICK_TUBE_VERT)))
+    typeKey(view, "w")
+    wait(10)
+
+
 # ---------------------------------------------------------------------------
 # The test
 # ---------------------------------------------------------------------------
@@ -464,7 +1308,8 @@ def run(appController):
     try:
         import usdGenTonicTools
         from usdGenTonicTools import (tonicBridge, tonicCamera, tonicGizmo,
-                                      tonicHierarchy, tonicLib, tonicPanels)
+                                      tonicHierarchy, tonicLib, tonicModes,
+                                      tonicPanels)
     except ImportError as exc:
         print("FAIL: cannot import usdGenTonicTools: %s" % exc)
         return 1
@@ -501,15 +1346,14 @@ def run(appController):
         return 1
     session.setStatusSink(messages.append)
 
-    def clickControl(text):
-        """Invoke a visible dock action through its Qt button."""
-        from pxr.Usdviewq.qt import QtWidgets
-        for button in workspace.findChildren(QtWidgets.QAbstractButton):
-            if button.text().split(" (", 1)[0] == text:
-                button.click()
-                wait(15)
-                return True
-        return False
+    def clickControl(actionId):
+        """Invoke a dock action through its Qt button (DK-04 hook)."""
+        button = workspace.button("action", actionId)
+        if button is None:
+            return False
+        button.click()
+        wait(15)
+        return True
 
     # The region tint mesh is coincident with /Scalp, so leaving both on
     # would z-fight the pixel probes below. The model copied the scalp at
@@ -533,6 +1377,17 @@ def run(appController):
     mouse = Mouse(view)
     viewport.setPointerInside(True)
     typeKey(view, "d")
+    # FB-02: a Graph point tool shows a cross, and the HUD names the tool.
+    from pxr.Usdviewq.qt import QtCore
+    shapes = QtCore.Qt.CursorShape
+    check(view.cursor().shape() == shapes.CrossCursor,
+          "FB-02: Graph Draw shows the cross cursor (%r)"
+          % (view.cursor().shape(),))
+    hud = viewport._hudOverlay
+    check(hud is not None and hud.isVisible() and "Graph" in hud.title and
+          "Draw" in hud.title and hud.hint,
+          "FB-02: the viewport HUD reads the Graph tool and its hint (%r)"
+          % (hud.text() if hud is not None else None,))
     path = []
     for k in range(len(RECT)):
         x0, z0 = RECT[k]
@@ -586,6 +1441,12 @@ def run(appController):
           "and the controller built the Tube loop")
     check(state.tubeSubMode == "center",
           "which opens in the Center sub-mode (%r)" % state.tubeSubMode)
+    hudText = viewport._hudOverlay.text() \
+        if viewport._hudOverlay is not None else ""
+    check("Tube" in hudText and "Center" in hudText and
+          viewport._hudOverlay.hint == tonicModes.hintFor("tube", "center"),
+          "FB-02: after 2 the HUD reads Tube > Center and its hint (%r)"
+          % hudText)
 
     if tipHandle is None:
         shutdown()
@@ -615,20 +1476,47 @@ def run(appController):
           "and the published CV dot turned white: %.2f -> %.2f"
           % (whiteBefore, whiteAfter))
 
+    # GZ-08: picking the current mode again is a no-op -- the loop, its
+    # gizmo and the Qt overlay all survive a redundant `2`.
+    loopBefore = viewport.loop
+    typeKey(view, "2")
+    check(viewport.loop is loopBefore and state.activeMode == "tube",
+          "GZ-08: a redundant 2 keeps the live Tube loop")
+    check(overlay is not None and overlay.isVisible() and
+          viewport.loop._gizmo.visible,
+          "GZ-08: and its gizmo and overlay stay up")
+
+    # -- GZ-02: cone/cube tips, the painted overlay, the rotate readout ----
+    gizmoLook(view, session, viewport, mouse, messages)
+
     # Qt sends MouseButtonDblClick instead of the second press.  It is not
-    # hierarchy navigation in Tube mode: repeated direct QMouseEvents must
-    # retain the focused level and leave the selected CV draggable.
+    # hierarchy navigation in Tube mode (GZ-08): a double-click on a centre
+    # CV grows the selection to its whole tube, keeps the focused level and
+    # leaves no gesture behind, however often it repeats.
     focusBeforeDouble = state.activeLevel
     mouse.direct = True
     for _click in range(3):
         mouse.doubleClick(tipPixel)
-    selected = session.readSelection(2)
+    wholeTube = session.readSelection(1)         # TonicPick_TubeVert
     check(state.activeLevel == focusBeforeDouble and
-          selected == [(0, cvCount - 1, -1)] and
+          wholeTube == [(0, -1, -1)] and
+          not session.readSelection(2) and
           not viewport.gestureActive,
-          "repeated Tube double-clicks keep focus and selection usable %r"
-          % ({"level": state.activeLevel, "selection": selected,
-             "gesture": viewport.gestureActive},))
+          "GZ-08: Tube double-clicks on a CV select its whole tube and keep "
+          "focus %r" % ({"level": state.activeLevel, "tubes": wholeTube,
+                         "gesture": viewport.gestureActive},))
+    check(viewport.loop._gizmo.visible and overlay.isVisible(),
+          "GZ-08: the gizmo re-placed on the whole tube")
+    # Back to the tip CV the steps below drag, through the dock's route
+    # (a programmatic selection followed by refreshGizmo).
+    session.clearSelection(1)
+    session.select(2, [0], [cvCount - 1], [-1], 0)
+    viewport.refreshGizmo()
+    check(session.readSelection(2) == [(0, cvCount - 1, -1)] and
+          viewport.loop._gizmo.visible and
+          abs(viewport.loop._gizmo.origin[1] - tipHandle[1]) < 1e-3,
+          "GZ-08: refreshGizmo puts the gizmo back on the tip CV (%r)"
+          % (tuple(viewport.loop._gizmo.origin),))
 
     # Missed releases used to leave the controller captured forever.  A
     # fresh real press must cancel the old no-travel bracket before arming
@@ -673,11 +1561,43 @@ def run(appController):
     target = (tipPixel[0] + travelPx, tipPixel[1])
     before = centers(session)
     version = session.modelVersion
+    originBeforeDrag = tuple(viewport.loop._gizmo.origin)
+    mark = len(messages)
     mouse.press(tipPixel)
     check(viewport.gestureActive, "the press took the gizmo's free handle")
     for step in range(1, 7):
         mouse.move((tipPixel[0] + travelPx * step / 6.0, tipPixel[1]))
+        if step == 2:
+            # GZ-07: the live readout, on the status line and in a label
+            # the Qt overlay paints beside the gizmo centre.
+            overlay = viewport._gizmoOverlay
+            overlay.repaint()
+            wait(5)
+            readout = viewport.loop.dragReadout()
+            check(readout.startswith("Move"),
+                  "GZ-07: the drag has a live readout (%r)" % readout)
+            check(overlay.isVisible() and
+                  getattr(overlay, "readoutText", "") == readout,
+                  "GZ-07: the overlay painted it as a label (%r)"
+                  % getattr(overlay, "readoutText", None))
+            check(any("Move" in str(line) for line in messages[mark:]),
+                  "GZ-07: a status recorded mid-drag reads Move (%r)"
+                  % messages[-2:])
+        if step == 3:
+            # GZ-08: a wheel dolly mid-drag would move the camera the drag
+            # was projected with; the controller swallows it, so neither
+            # the overlay nor the camera changes and the CV delta below
+            # still matches the cursor travel.
+            recordsBefore = viewport.gizmoScreenHandles()
+            viewBefore = tonicCamera.resolve(view).viewProj
+            check(wheel(view, (tipPixel[0] + travelPx * 0.5, tipPixel[1])),
+                  "GZ-08: a QWheelEvent reached the view mid-drag")
+            wait(10)
+            check(viewport.gizmoScreenHandles() == recordsBefore and
+                  tonicCamera.resolve(view).viewProj == viewBefore,
+                  "GZ-08: the wheel neither dollied nor moved the overlay")
     mouse.release(target)
+    originAfterDrag = tuple(viewport.loop._gizmo.origin)
     after = centers(session)
     moved = after[cvCount - 1][0] - before[cvCount - 1][0]
     want = travelPx * tipPerPixel
@@ -732,12 +1652,30 @@ def run(appController):
         check(False, "the controller timed no moves at all")
 
     # -- Ctrl+Z ------------------------------------------------------------
+    # GZ-08: the gizmo follows each step at once -- no wait, no mouse event.
+    def originNear(want):
+        got = viewport.loop._gizmo.origin
+        return max(abs(got[i] - want[i]) for i in range(3)) < 1e-4
     typeKey(view, "z", ("ctrl",))
+    check(originNear(originAfterDrag),
+          "GZ-08: the first Ctrl+Z puts the gizmo back where the 60 px drag "
+          "left it (%r vs %r)" % (tuple(viewport.loop._gizmo.origin),
+                                  originAfterDrag))
     typeKey(view, "z", ("ctrl",))
+    check(originNear(originBeforeDrag),
+          "GZ-08: the second Ctrl+Z puts it on the pre-drag tip (%r vs %r)"
+          % (tuple(viewport.loop._gizmo.origin), originBeforeDrag))
     restored = centers(session)
     check(abs(restored[cvCount - 1][0] - before[cvCount - 1][0]) < 1e-4,
           "two Ctrl+Z (one per drag) put the tip CV back (%r vs %r)"
           % (restored[cvCount - 1], before[cvCount - 1]))
+
+    # -- GZ-01/GZ-03/G03/G04: handle priority, hover, tweak, repeat ---------
+    gizmoParity(stage, view, session, viewport, mouse)
+
+    # -- GZ-05 / G07/G08/G11/G13/G14/G23: orientation, keys, snaps ---------
+    gizmoSettingsParity(stage, view, session, viewport, state, mouse,
+                        messages, workspace)
 
     # -- Fill --------------------------------------------------------------
     typeKey(view, "3")
@@ -759,6 +1697,27 @@ def run(appController):
     check(int(round(descriptors["density"].get(state, session))) == 32,
           "and the panel reads back what it wrote")
 
+    # SS-02 (walkthrough step 12): a panel density edit is its own undo
+    # step. Ctrl+Z used to skip it and restore a snapshot from before the
+    # guides were grown -- 38 guides to 0 -- leaving the density at 32.
+    check(session.status()["undoLabel"] == "Fill params",
+          "the density edit is a 'Fill params' undo step (%r)"
+          % session.status()["undoLabel"])
+    typeKey(view, "z", ("ctrl",))
+    wait(10)
+    check(int(round(descriptors["density"].get(state, session))) == 8 and
+          guideCount(session) == sparse,
+          "Ctrl+Z restores the density and its guides (%g, %d guides, "
+          "want 8 and %d)" % (descriptors["density"].get(state, session),
+                              guideCount(session), sparse))
+    typeKey(view, "y", ("ctrl",))
+    wait(10)
+    check(int(round(descriptors["density"].get(state, session))) == 32 and
+          guideCount(session) == dense,
+          "Ctrl+Y re-applies it (%g, %d guides, want 32 and %d)"
+          % (descriptors["density"].get(state, session), guideCount(session),
+             dense))
+
     check(session.enqueueCommit() and pumpUntilCommitted(viewport, session),
           "the idle pump drains the committer after the fill")
     check(bool(stage.GetPrimAtPath("/TonicGroom/Guides")),
@@ -772,7 +1731,7 @@ def run(appController):
     # Select the visible root and subdivide through the Hierarchy dock.  This
     # exercises the same active-cut expansion path as an artist; directly
     # creating children leaves the parent frontier collapsed.
-    workspace._modeButtons["hierarchy"].click()
+    workspace.button("mode", "hierarchy").click()
     wait(15)
     rootPoint = sectionCV(session, 0, 1, 0)
     rootPixel = pixel(*rootPoint) if rootPoint is not None else None
@@ -783,12 +1742,12 @@ def run(appController):
           "the visible root is selected before child subdivision %r"
           % (rootSelection,))
     didSubdivide = (rootSelection == [(0, -1, -1)] and
-                    clickControl("Subdivide"))
+                    clickControl("subdivide"))
     children = ([tube for tube in tonicBridge.readTubeIds(
         session.dll, session.model) if tube != 0] if didSubdivide else [])
     check(bool(children), "the root subdivides for non-root Tube editing")
     if children:
-        entered = clickControl("Enter level")
+        entered = clickControl("enterLevel")
         check(entered and int(state.activeLevel) >= 2,
               "the Hierarchy dock enters the created child level")
         child = int(children[0])
@@ -797,10 +1756,10 @@ def run(appController):
                                              child, ring)
         # This is the artist workflow: enter the descendant level before
         # selecting its rings, so L2 is the focused editable display.
-        workspace._modeButtons["tube"].click()
+        workspace.button("mode", "tube").click()
         wait(15)
-        if "ring" in getattr(workspace, "_tubeSelectionButtons", {}):
-            workspace._tubeSelectionButtons["ring"].click()
+        if workspace.button("comp", "ring") is not None:
+            workspace.button("comp", "ring").click()
             wait(10)
         else:
             view.setFocus()
@@ -904,6 +1863,101 @@ def run(appController):
             check(guidesAfterCV > 0 and previewChanged,
                   "the child Section drag refills its live guides (%d)"
                   % guidesAfterCV)
+
+    # -- DK-02: hotkey truth and the dock's instruction/status lines ------
+    # The shelf used to print C/R/E for Tube sub-modes while Q/W/E/R were
+    # eaten by the transform tool; these checks hold the keys the dock
+    # advertises to what the keys actually do, through real key events.
+    view.setFocus()
+    viewport.setPointerInside(True)
+    wait(15)
+
+    def dockLines():
+        workspace.refresh()
+        return (workspace._instructionLabel.text(),
+                workspace._toolStatusLabel.text())
+
+    typeKey(view, "2")
+    typeKey(view, "f9")
+    wait(10)
+    check(state.activeMode == "tube" and state.tubeSubMode == "center",
+          "F9 picks the Center CV component (%r/%r)"
+          % (state.activeMode, state.tubeSubMode))
+    subBefore = state.tubeSubMode
+    typeKey(view, "r")
+    wait(10)
+    check(state.transformTool == "scale" and state.tubeSubMode == subBefore,
+          "R is the Scale tool and leaves the component kind alone "
+          "(%r, %r)" % (state.transformTool, state.tubeSubMode))
+    typeKey(view, "f10")
+    wait(10)
+    check(state.tubeSubMode == "ring",
+          "the F10 key picks the Ring component (%r)" % state.tubeSubMode)
+    # DK-04: the label is the component's name; the key is in the tooltip.
+    workspace.refresh()
+    ringButton = workspace.button("comp", "ring")
+    check(ringButton is not None and ringButton.text() == "Ring" and
+          "(F10)" in ringButton.toolTip() and ringButton.isChecked(),
+          "the dock's Ring button is checked and tooltips F10 (%r)"
+          % (ringButton.toolTip() if ringButton is not None else None,))
+
+    # Hierarchy W jumps to Tube/Move and says so in the status line.
+    statusLines = []
+    printStatus = viewport._status
+    viewport._status = lambda text: (statusLines.append(text),
+                                      printStatus(text))
+    typeKey(view, "4")
+    typeKey(view, "w")
+    wait(10)
+    viewport._status = printStatus
+    check(state.activeMode == "tube" and state.transformTool == "move" and
+          any("Tonic Tube: Move (from Hierarchy)" in line
+              for line in statusLines),
+          "Hierarchy W jumps to Tube/Move and reports it (%r)"
+          % (statusLines[-3:],))
+
+    instructions = {}
+    for key in ("1", "2", "3", "4", "6", "5"):
+        typeKey(view, key)
+        wait(10)
+        instructions[key] = dockLines()[0]
+    check(all(text.strip() for text in instructions.values()),
+          "the dock shows an instruction line for every mode key 1-6 (%r)"
+          % ([k for k, t in instructions.items() if not t.strip()],))
+    tubeLine = instructions["2"]
+    check("Q/W/E/R" in tubeLine and "F8-F11" in tubeLine and
+          "Shift toggles" in tubeLine,
+          "Tube's line names its real keys and the selection modifiers")
+
+    # "5" was last, so Sculpt is active: its tool line is the loop's own.
+    sculptStatus = dockLines()[1]
+    check("Sculpt" in sculptStatus,
+          "the dock's status line reads the Sculpt loop after 5 (%r)"
+          % sculptStatus)
+    typeKey(view, "g")
+    wait(10)
+    grabLine = dockLines()[0]
+    typeKey(view, "s")
+    wait(10)
+    smoothLine = dockLines()[0]
+    check(state.sculptSubMode == "smooth" and grabLine != smoothLine and
+          grabLine.startswith("Grab") and smoothLine.startswith("Smooth"),
+          "the instruction line follows the Sculpt brush (%r -> %r)"
+          % (grabLine, smoothLine))
+    typeKey(view, "1")
+    typeKey(view, "d")
+    wait(10)
+    drawLine = dockLines()[0]
+    typeKey(view, "p")
+    wait(10)
+    placeLine = dockLines()[0]
+    check(state.graphSubMode == "place" and drawLine != placeLine,
+          "the instruction line follows the Graph tool (%r -> %r)"
+          % (drawLine, placeLine))
+    typeKey(view, "escape")
+    wait(10)
+
+    dockIcons(view, session, viewport, state, workspace)
 
     # -- tear down cleanly -------------------------------------------------
     viewport.uninstall()

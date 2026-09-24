@@ -71,6 +71,30 @@ _Guard(char const *name, TonicModelContext *ctx, Fn &&fn)
     }
 }
 
+// The half both hydrate entry points share once they have a stage.
+int
+_HydrateStage(TonicModelContext *ctx, UsdStageRefPtr const &stage,
+              SdfPath const &groomPath, int *outTubeCount, int *outGuideCount,
+              int *outImportedCount)
+{
+    usdGenTonic::TonicHydrateResult const result =
+        usdGenTonic::TonicHydrateModel(stage, groomPath, &_Impl(ctx)->model);
+    if (!result.ok) {
+        _SetError(result.diagnostic);
+        return TONIC_ERROR;
+    }
+    if (outTubeCount) {
+        *outTubeCount = int(result.tubeCount);
+    }
+    if (outGuideCount) {
+        *outGuideCount = int(result.guideCount);
+    }
+    if (outImportedCount) {
+        *outImportedCount = int(result.importedTubeCount);
+    }
+    return TONIC_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -111,27 +135,87 @@ Tonic_Hydrate(TonicModelContext *ctx, const char *layerOrStage,
                       layerOrStage);
             return TONIC_ERROR;
         }
-        usdGenTonic::TonicHydrateResult const result =
-            usdGenTonic::TonicHydrateModel(stage, path, &_Impl(ctx)->model);
-        if (!result.ok) {
-            _SetError(result.diagnostic);
-            return TONIC_ERROR;
-        }
-        if (outTubeCount) {
-            *outTubeCount = int(result.tubeCount);
-        }
-        if (outGuideCount) {
-            *outGuideCount = int(result.guideCount);
-        }
-        if (outImportedCount) {
-            *outImportedCount = int(result.importedTubeCount);
-        }
-        return TONIC_OK;
+        return _HydrateStage(ctx, stage, path, outTubeCount, outGuideCount,
+                             outImportedCount);
     } catch (std::exception const &e) {
         _SetError(e.what());
         return TONIC_ERROR;
     } catch (...) {
         _SetError("Tonic_Hydrate: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_HydrateFromLayers(TonicModelContext *ctx,
+                        const char *const *layerIdentifiers, int layerCount,
+                        const char *groomPath, int *outTubeCount,
+                        int *outGuideCount, int *outImportedCount)
+{
+    try {
+        if (!ctx || !layerIdentifiers || layerCount < 1 || !groomPath) {
+            _SetError("Tonic_HydrateFromLayers: null argument or no layers");
+            return TONIC_ERROR;
+        }
+        SdfPath const path(groomPath);
+        if (path.IsEmpty() || !path.IsAbsolutePath()) {
+            _SetError("Tonic_HydrateFromLayers: groom path must be absolute");
+            return TONIC_ERROR;
+        }
+        // Held here for the whole call: an anonymous session layer made
+        // below names the others only by identifier, and SdfLayer::Find
+        // can only resolve a layer something keeps alive.
+        std::vector<SdfLayerRefPtr> layers;
+        layers.reserve(size_t(layerCount));
+        for (int i = 0; i < layerCount; ++i) {
+            char const *id = layerIdentifiers[i];
+            if (!id || !*id) {
+                _SetError("Tonic_HydrateFromLayers: empty layer identifier");
+                return TONIC_ERROR;
+            }
+            SdfLayerRefPtr layer = SdfLayer::Find(std::string(id));
+            if (!layer) {
+                layer = SdfLayer::FindOrOpen(std::string(id));
+            }
+            if (!layer) {
+                _SetError(std::string("Tonic_HydrateFromLayers: cannot open ") +
+                          id);
+                return TONIC_ERROR;
+            }
+            layers.push_back(layer);
+        }
+        // The stage usdview shows is its root layer composed under its
+        // session layer. A groom saved beside the session's live overlay
+        // lives only in the session layer's stack, and the scalp mesh it
+        // points at usually lives only in the root layer's, so neither
+        // layer alone can hydrate it (SS-03).
+        UsdStageRefPtr stage;
+        if (layers.size() == 1) {
+            stage = UsdStage::Open(layers[0]);
+        } else if (layers.size() == 2) {
+            stage = UsdStage::Open(layers[0], layers[1]);
+        } else {
+            SdfLayerRefPtr const session =
+                SdfLayer::CreateAnonymous("usdGenTonic-hydrate-session");
+            std::vector<std::string> subLayers;
+            for (size_t i = 1; i < layers.size(); ++i) {
+                subLayers.push_back(layers[i]->GetIdentifier());
+            }
+            session->SetSubLayerPaths(subLayers);
+            stage = UsdStage::Open(layers[0], session);
+        }
+        if (!stage) {
+            _SetError(std::string("Tonic_HydrateFromLayers: cannot compose ") +
+                      layerIdentifiers[0]);
+            return TONIC_ERROR;
+        }
+        return _HydrateStage(ctx, stage, path, outTubeCount, outGuideCount,
+                             outImportedCount);
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_HydrateFromLayers: unknown exception");
         return TONIC_ERROR;
     }
 }
@@ -369,6 +453,18 @@ Tonic_IsTubePersistent(TonicModelContext const *ctx, int tubeId)
         _SetError("Tonic_IsTubePersistent: unknown exception");
         return -1;
     }
+}
+
+int
+Tonic_RemoveTubes(TonicModelContext *ctx, const int *ids, int n)
+{
+    if (!ids || n <= 0) {
+        _SetError("Tonic_RemoveTubes: no tube ids");
+        return TONIC_ERROR;
+    }
+    return _Guard("Tonic_RemoveTubes", ctx, [&](usdGenTonic::TonicModel &m) {
+        return m.RemoveTubes(std::vector<int>(ids, ids + n), nullptr);
+    });
 }
 
 int

@@ -22,10 +22,12 @@ import ctypes
 
 try:
     from . import tonicFill, tonicGraph, tonicHierarchy, tonicSculpt, tonicTube
+    from . import tonicLib
 except ImportError:  # file-path test load
     import tonicFill
     import tonicGraph
     import tonicHierarchy
+    import tonicLib
     import tonicSculpt
     import tonicTube
 
@@ -80,7 +82,7 @@ def _status(session, status=None):
         return dict(status() or {})
     out = {}
     for name in ("modelVersion", "committedVersion", "pendingVersion",
-                 "lastSwapMs", "fallbackReason", "detached"):
+                 "lastSwapMs", "fallbackReason", "detached", "commitError"):
         value = getattr(session, name, None)
         if value is not None and not callable(value):
             out[name] = value
@@ -112,7 +114,12 @@ def statusStrip(state, session, status=None):
     pendingVersion = int(_get(session, "pendingVersion", 0, status))
     mapVersion = int(state.mapVersion)
     bakedVersion = int(state.bakedVersion)
-    amber = (bakedVersion < mapVersion) or (committedVersion < modelVersion)
+    # Amber means work is actually in flight: a map newer than the last
+    # bake, or a commit enqueued and not yet swapped. It used to compare
+    # against the MODEL version, which every selection publish bumps
+    # without ever enqueueing a commit, so the strip sat amber almost
+    # permanently and meant nothing (DK-05).
+    amber = (bakedVersion < mapVersion) or (committedVersion < pendingVersion)
     fallbackReason = _fallbackReason(session, status)
     gpuText = "GPU" if not fallbackReason else "CPU-only (%s)" % fallbackReason
     return StatusStrip(
@@ -123,6 +130,92 @@ def statusStrip(state, session, status=None):
         bakedVersion=bakedVersion, amber=amber,
         lastSwapMs=float(_get(session, "lastSwapMs", 0.0, status)),
         gpuText=gpuText, fallbackReason=fallbackReason)
+
+
+# syncSummary tones: the dock maps each to one pill colour.
+TONE_OK = "ok"
+TONE_BUSY = "busy"
+TONE_INFO = "info"
+TONE_ERROR = "error"
+# Nothing to report on yet (no scalp bound): neither good nor bad.
+TONE_NEUTRAL = "neutral"
+NO_MODEL_TEXT = "No scalp bound"
+
+
+def syncSummary(strip, status=None):
+    """The sync pill: (text, tone) for a statusStrip() result.
+
+    One artist-facing word for what the version dump says (DK-05). The
+    order is severity first: a failed commit outranks work in flight,
+    work in flight outranks a standing condition (CPU fallback, reduced
+    detail), and only then is the groom "Synced". `status` is the
+    session's status() dict; `commitError` (SS-05) and `ladderStep` come
+    from it, everything else from the strip.
+
+    Before a scalp is bound there is no model and nothing to sync, so a
+    status whose `active` is False reads 'No scalp bound' in the neutral
+    tone rather than a green 'Synced' over a dock whose tools are all
+    greyed out. A status without the key (a test double, None) keeps the
+    old matrix.
+    """
+    status = status or {}
+    if "active" in status and not status.get("active"):
+        return (NO_MODEL_TEXT, TONE_NEUTRAL)
+    error = str(status.get("commitError") or "")
+    if error:
+        return ("Commit failed: %s" % error, TONE_ERROR)
+    if status.get("detached") or status.get("committerDetached"):
+        return ("Commit failed: committer detached", TONE_ERROR)
+    if strip.committedVersion < strip.pendingVersion:
+        return ("Committing...", TONE_BUSY)
+    if strip.bakedVersion < strip.mapVersion:
+        return ("Baking map...", TONE_BUSY)
+    if strip.fallbackReason:
+        return ("CPU fallback: %s" % strip.fallbackReason, TONE_INFO)
+    if int(status.get("ladderStep", 0) or 0) > 0:
+        return ("Reduced detail", TONE_INFO)
+    return ("Synced", TONE_OK)
+
+
+def diagnosticsText(strip, status=None):
+    """The version dump behind the sync pill (its tooltip and the
+    Show diagnostics line): level, model/stage/pending/map/baked
+    versions, the last swap time, the device and the ladder step.
+
+    No leading '| ': the strip used to open with a bare separator."""
+    status = status or {}
+    ladder = int(status.get("ladderStep", 0) or 0)
+    parts = ["L%d" % strip.level,
+             "model v%d stage v%d pending v%d" % (
+                 strip.modelVersion, strip.committedVersion,
+                 strip.pendingVersion),
+             "map v%d baked v%d" % (strip.mapVersion, strip.bakedVersion),
+             "swap %.1f ms" % strip.lastSwapMs,
+             strip.gpuText]
+    if ladder:
+        parts.append("fidelity step %d" % ladder)
+    return " | ".join(parts)
+
+
+def deviceChip(strip):
+    """The GPU/CPU chip text: 'GPU', or 'CPU' when the device fell back."""
+    return "CPU" if strip.fallbackReason else "GPU"
+
+
+def refillDropWarning(drops):
+    """The warning text for tubes the last refill skipped, or "".
+
+    `drops` is tonicLib.readRefillDrops' [(tubeId, reason)]. Only the
+    first reason is quoted: they almost always share one cause.
+    """
+    if not drops:
+        return ""
+    names = ", ".join("T%d" % int(t) for t, _ in drops[:6])
+    if len(drops) > 6:
+        names += ", ..."
+    reason = drops[0][1] or "unknown reason"
+    return ("%d tube(s) produced no guides (%s): %s"
+            % (len(drops), names, reason))
 
 
 def _selectTubesAction(tubeIds):
@@ -158,6 +251,96 @@ def _selectCentersAction(cvIndices):
     return action
 
 
+def coverageWarning(uncovered):
+    """The coverage row's text: how many scalp faces no region claims."""
+    count = int(uncovered)
+    if count <= 0:
+        return ""
+    if count == 1:
+        return "1 scalp face has no region"
+    return "%d scalp faces have no region" % count
+
+
+def readUncoveredFaces(dll, ctx):
+    """Scalp face indices no region claims (the -1 entries of the K3 map)."""
+    if dll is None or ctx is None:
+        return []
+    count = ctypes.c_int(0)
+    if int(dll.Tonic_ReadFaceRegions(ctx, None, 0, ctypes.byref(count))) \
+            != 0 or count.value <= 0:
+        return []
+    out = (ctypes.c_int * count.value)()
+    if int(dll.Tonic_ReadFaceRegions(ctx, out, count.value,
+                                     ctypes.byref(count))) != 0:
+        return []
+    return [i for i, region in enumerate(out[:count.value]) if region < 0]
+
+
+# The commit-failure row's action, named for the dock's tooltip/menus.
+RETRY_COMMIT_LABEL = "Retry commit"
+OUTLINE_FACES_LABEL = "Outline the faces"
+CLICK_TO_SELECT = " - click to select"
+
+
+def clickHint(action):
+    """The tooltip suffix a warnings row's click earns: what it does.
+
+    Rows whose click selects tubes or CVs read ' - click to select'; a row
+    whose action carries a `.label` (Retry commit, Outline the faces) says
+    that instead, so the hover never promises a selection the click will
+    not make. No action, no suffix.
+    """
+    if action is None:
+        return ""
+    label = str(getattr(action, "label", "") or "")
+    return (" - click to %s" % (label[:1].lower() + label[1:])
+            if label else CLICK_TO_SELECT)
+
+
+def commitErrorWarning(commitError):
+    """The commit-failure row's text, or "" when the commit is healthy."""
+    reason = str(commitError or "")
+    return ("Commit failed: %s" % reason) if reason else ""
+
+
+def _retryCommitAction():
+    """The commit-failure row's click: enqueue the model again (SS-05).
+
+    The committer never retries a failed version on its own (it would
+    spin on a persistent failure), so the artist's retry is an explicit
+    enqueue; the session forgets the old reason and reports anew if the
+    retry fails too.
+    """
+
+    def action(container):
+        session = getattr(container, "session", None)
+        enqueue = getattr(session, "enqueueCommit", None)
+        if callable(enqueue):
+            enqueue()
+    action.label = RETRY_COMMIT_LABEL
+    return action
+
+
+def _highlightUncoveredAction():
+    """The coverage row's click: outline the uncovered scalp faces.
+
+    Neither the Hydra publish nor usdview's selection can highlight a
+    face subset, so the dock draws them as a viewport overlay
+    (TonicWorkspace.highlightScalpFaces); the action only reads which
+    faces those are.
+    """
+
+    def action(container):
+        session = getattr(container, "session", None)
+        faces = readUncoveredFaces(_dll(session), _ctx(session))
+        workspace = getattr(container, "workspace", None)
+        highlight = getattr(workspace, "highlightScalpFaces", None)
+        if highlight is not None:
+            highlight(faces)
+    action.label = OUTLINE_FACES_LABEL
+    return action
+
+
 def warningsKey(state, session, status=None):
     """The cheap signature of everything `warnings()` reads.
 
@@ -178,12 +361,17 @@ def warningsKey(state, session, status=None):
         # ever.
         return None
     return (int(version), _fallbackReason(session, status),
-            bool(_get(session, "detached", False, status)))
+            bool(_get(session, "detached", False, status)),
+            str(_get(session, "scalpMissing", "", status) or ""),
+            # A commit failure arrives from the worker without a model
+            # version bump, so it must move the key on its own (SS-05).
+            str(_get(session, "commitError", "", status) or ""))
 
 
 def warnings(state, dll, status=None):
     """The dock's warnings list: (severity, text, selectAction) rows for
-    coarse centroid coverage gaps, root intersections, kink spikes, device
+    tubes the last refill skipped (no guides), coarse centroid coverage
+    gaps, root intersections, kink spikes, device
     fallback and a
     detached committer (plan/18 section 3.5 item 5). `dll` is the
     session-shaped object tonicPanels.py's get/set closures also take.
@@ -191,8 +379,20 @@ def warnings(state, dll, status=None):
     session = dll
     status = _status(session, status)
     out = []
+    # First, because nothing else on the list matters while the stage is
+    # not receiving the groom (SS-05); clicking the row retries.
+    text = commitErrorWarning(_get(session, "commitError", "", status))
+    if text:
+        out.append(Warning("error", text, _retryCommitAction()))
     d, ctx = _dll(session), _ctx(session)
     if d is not None and ctx is not None:
+        # Tubes the last refill skipped: the refill itself succeeded (some
+        # tube filled), so without this row they vanish silently.
+        drops = tonicLib.readRefillDrops(d, ctx)
+        if drops:
+            out.append(Warning("warning", refillDropWarning(drops),
+                               _selectTubesAction([t for t, _ in drops])))
+
         regions = ctypes.c_int(0)
         uncovered = ctypes.c_int(0)
         intersectedRegions = ctypes.c_int(0)
@@ -200,11 +400,10 @@ def warnings(state, dll, status=None):
                                     ctypes.byref(uncovered),
                                     ctypes.byref(intersectedRegions))
         if int(rc) == 0 and uncovered.value > 0:
-            out.append(Warning(
-                "warning",
-                "%d face center(s) outside regions (coarse coverage check)."
-                % uncovered.value,
-                None))
+            # Info, not a warning: a scalp is only partly groomed for
+            # most of a session, and the row is there to find the gap.
+            out.append(Warning("info", coverageWarning(uncovered.value),
+                               _highlightUncoveredAction()))
 
         ids = (ctypes.c_int * MAX_INTERSECTED_TUBES)()
         got = ctypes.c_int(0)
@@ -227,7 +426,8 @@ def warnings(state, dll, status=None):
                                           ctypes.byref(got))
         if int(rc) == 0 and got.value > 0:
             values = scores[:got.value]
-            text = tonicHierarchy.smoothnessWarning(values)
+            # Tonic_ReadSmoothnessScores reads tube 0 (tonicApi.h).
+            text = tonicHierarchy.smoothnessWarning(values, tubeId=0)
             if text:
                 spikes = [i for i, s in enumerate(values)
                          if s >= tonicHierarchy.SMOOTHNESS_SPIKE_THRESHOLD]
@@ -238,7 +438,15 @@ def warnings(state, dll, status=None):
     if fallbackReason:
         out.append(Warning("info", "CPU-only: %s" % fallbackReason, None))
 
-    if _get(session, "detached", False, status):
+    scalpMissing = str(_get(session, "scalpMissing", "", status) or "")
+    if scalpMissing:
+        # A reopen that lost the scalp (SS-01): the committer is detached
+        # too, but the artist can only fix it by binding a scalp again.
+        out.append(Warning(
+            "error",
+            "Scalp %s not found in the new stage: bind a scalp mesh to "
+            "continue." % scalpMissing, None))
+    elif _get(session, "detached", False, status):
         out.append(Warning(
             "error",
             "Committer detached: edits are not reaching the stage.", None))

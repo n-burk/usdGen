@@ -485,6 +485,17 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
     UsdPrim const meshPrim = mesh.GetPrim();
 
     out->path = path;
+    mesh.GetSubdivisionSchemeAttr().Get(&out->subdivisionScheme);
+    mesh.GetOrientationAttr().Get(&out->orientation);
+    mesh.GetInterpolateBoundaryAttr().Get(&out->interpolateBoundary);
+    mesh.GetFaceVaryingLinearInterpolationAttr().Get(&out->faceVaryingLinearInterpolation);
+    mesh.GetTriangleSubdivisionRuleAttr().Get(&out->triangleSubdivisionRule);
+    mesh.GetHoleIndicesAttr().Get(&out->holeIndices);
+    mesh.GetCreaseIndicesAttr().Get(&out->creaseIndices);
+    mesh.GetCreaseLengthsAttr().Get(&out->creaseLengths);
+    mesh.GetCreaseSharpnessesAttr().Get(&out->creaseSharpnesses);
+    mesh.GetCornerIndicesAttr().Get(&out->cornerIndices);
+    mesh.GetCornerSharpnessesAttr().Get(&out->cornerSharpnesses);
     _GetTyped(mesh.GetFaceVertexCountsAttr(), UsdTimeCode::Default(),
               &out->faceVertexCounts);
     _GetTyped(mesh.GetFaceVertexIndicesAttr(), UsdTimeCode::Default(),

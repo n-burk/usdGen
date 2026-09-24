@@ -216,6 +216,24 @@ int main(int argc, char** argv) {
               Near(points[1],V(1,1,3)));
 
         CurveGrowControls lift=c; lift.lift=90.1f; CudaCurveGrow rejected;
+        for (float random : {0.0f, 1.0f}) {
+            angular.lift=90.f; angular.azimuth=90.f; angular.azimuthRandom=random;
+            CudaCurveGrow azimuthGrow; Relay azimuthRelay;
+            CHECK(azimuthGrow.BeginFresh(input->Input(1,2),input,angular,stream)==CurveGrowStatus::Ok &&
+                  azimuthGrow.FinishFreshAsync(stream,Done,&azimuthRelay)==CurveGrowStatus::Ok &&
+                  cudaStreamSynchronize(stream)==cudaSuccess && azimuthRelay.status.load()==int(cudaSuccess) &&
+                  azimuthGrow.CommitFreshFinish()==CurveGrowStatus::Ok);
+            float const angle=(90.f+random*360.f*(UsdGenDraw01(angular.seed,99,kSaltGrowAzimuth)-.5f))*3.14159265358979323846f/180.f;
+            points.assign(2,{}); rest.assign(2,{});
+            CHECK(Download(azimuthGrow.view().points,&points,stream) &&
+                  Download(azimuthGrow.view().restPoints,&rest,stream) &&
+                  Near(points[1],V(1,2+std::cos(angle),3+std::sin(angle))) &&
+                  Near(rest[1],V(9,8+std::cos(angle),7+std::sin(angle))));
+        }
+        CurveGrowControls badAzimuth=c; badAzimuth.azimuth=361.f;
+        CHECK(rejected.BeginFresh(input->Input(1,2),input,badAzimuth,stream)==CurveGrowStatus::InvalidArgument);
+        badAzimuth.azimuth=0; badAzimuth.azimuthRandom=1.01f;
+        CHECK(rejected.BeginFresh(input->Input(1,2),input,badAzimuth,stream)==CurveGrowStatus::InvalidArgument);
         CHECK(rejected.BeginFresh(input->Input(1,2),input,lift,stream)==CurveGrowStatus::InvalidArgument);
         lift.lift=std::numeric_limits<float>::infinity();
         CudaCurveGrow nonFiniteLift;

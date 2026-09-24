@@ -295,6 +295,96 @@ def testHierarchySelection(mods):
           % state.activeLevel)
 
 
+def testHierarchySelectionMatrix(mods):
+    """SL-01: Hierarchy clicks and bands read the shared modifier table."""
+    print("-- HierarchyLoop: click and band modifier matrix ---------")
+    tonicLib = mods["tonicLib"]
+    base = mods["base"]
+    Dll, _Session = mods["fakes"]
+    dll = Dll()
+    session = base.MatrixSession(dll)
+    state = mods["TonicToolState"]()
+    loop = mods["tonicLoopsHierarchy"].HierarchyLoop(session, state)
+    cam = base.topDownCamera(mods["tonicCamera"])
+    Sample = mods["tonicLoops"].Sample
+    kind = tonicLib.TONIC_PICK_TUBE_VERT
+    names = {"A": (7, -1, -1), "B": (8, -1, -1), "C": (9, -1, -1)}
+    session.bandHits = {kind: [names["A"], names["C"]]}
+
+    def reset():
+        session.items = {kind: [names["A"], names["B"]]}
+
+    def read():
+        return session.readSelection(kind)
+
+    def click(entry, modifiers):
+        session.pickFn = (lambda mask, x, y:
+                          {"kind": kind, "id": entry[0], "subId": -1,
+                           "subSubId": -1} if mask & kind else None)
+        loop.press(Sample(session, cam, 100.0, 100.0, modifiers))
+        loop.release(Sample(session, cam, 100.0, 100.0, modifiers))
+
+    def band(modifiers):
+        session.pickFn = lambda mask, x, y: None
+        loop.press(Sample(session, cam, 50.0, 50.0, modifiers))
+        loop.move(Sample(session, cam, 250.0, 250.0, modifiers))
+        loop.release(Sample(session, cam, 300.0, 300.0, modifiers))
+
+    # SL-02: every row, the plain band included -- a plain press on empty
+    # space is a marquee in every sub-mode but the edge stroke.
+    base.runSelectionMatrix("Hierarchy", names, reset, read, click, band)
+    for sub in ("navigate", "subdivide", "merge", "group", "levels"):
+        loop.setSubMode(sub)
+        state.splitMode = "kmeans"
+        session.rects = []
+        reset()
+        session.pickFn = lambda mask, x, y: None
+        loop.press(Sample(session, cam, 50.0, 50.0))
+        check(loop.marqueeRect() == (50.0, 50.0),
+              "%s: a plain press on empty space starts a marquee" % sub)
+        loop.move(Sample(session, cam, 250.0, 250.0))
+        check(session.rects and
+              session.rects[-1][5] == tonicLib.TONIC_SELECT_SET,
+              "%s: moving it calls selectRect (%r)"
+              % (sub, session.rects[-1:]))
+        dll.reset()
+        loop.release(Sample(session, cam, 250.0, 250.0))
+        if sub == "group":
+            # MD-04: Group's plain band groups exactly what it boxed.
+            groups = dll.argsOf("Tonic_GroupTubes")
+            check(len(groups) == 1 and
+                  list(groups[0][1][:groups[0][2]]) == [7, 9],
+                  "group: the band grouped the tubes it caught (%r)"
+                  % ([list(g[1][:g[2]]) for g in groups],))
+            continue
+        check(read() == sorted([names["A"], names["C"]]),
+              "%s: the band replaced the selection (%r)" % (sub, read()))
+        check(dll.count("Tonic_GroupTubes") == 0,
+              "%s: and grouped nothing" % sub)
+    # The edge stroke keeps its plain press in subdivide + edge.
+    loop.setSubMode("subdivide")
+    state.splitMode = "edge"
+    loop.press(Sample(session, cam, 50.0, 50.0))
+    check(loop.marqueeRect() is None,
+          "subdivide + edge: a plain press draws the edge, not a band")
+    loop.cancel()
+    state.splitMode = "kmeans"
+    loop.setSubMode("navigate")
+    # A plain click without travel on empty space deselects on release.
+    reset()
+    session.bandHits = {}
+    loop.press(Sample(session, cam, 50.0, 50.0))
+    loop.release(Sample(session, cam, 50.0, 50.0))
+    check(read() == [], "a plain empty click deselects (%r)" % (read(),))
+    check(set(session.abiModes) <= {tonicLib.TONIC_SELECT_SET,
+                                    tonicLib.TONIC_SELECT_ADD,
+                                    tonicLib.TONIC_SELECT_TOGGLE},
+          "only real Tonic_Select* modes reached the ABI (%r)"
+          % sorted(set(session.abiModes)))
+    check(not session.gestureStack,
+          "no selection gesture opened an undo bracket")
+
+
 def testHierarchyActions(mods):
     print("-- HierarchyLoop: subdivide / merge / group --------------")
     tonicLib = mods["tonicLib"]
@@ -375,6 +465,134 @@ def testHierarchyEdgeSplit(mods):
               % (worldA, worldB))
         check(near(worldA[1], 0.0, 1e-3), "on the scalp plane")
 
+    # MD-03: the split consumes the stroke, so a second Shift+D cannot cut
+    # the new children along a line drawn for their parent.
+    check(loop.edge is None, "the split consumed the recorded edge")
+    check(loop.edgePreview() == {"live": None, "recorded": None},
+          "and the overlay has nothing left to draw (%r)"
+          % (loop.edgePreview(),))
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0]}
+    check(not loop.subdivideSelection(), "a second Shift+D is refused")
+    check(len(dll.argsOf("Tonic_SubdivideTubeEdge")) == 1,
+          "and splits nothing (%d edge splits)"
+          % len(dll.argsOf("Tonic_SubdivideTubeEdge")))
+
+
+def testHierarchyEdgeOverlay(mods):
+    print("-- HierarchyLoop: the edge preview and its lifetime ------")
+    tonicLib = mods["tonicLib"]
+    loop, dll, session, state, cam, sample = newHierarchy(mods)
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0]}
+    session.pickFn = lambda mask, x, y: None
+    state.splitMode = "kmeans"
+    loop.setSubMode("subdivide")
+    check(loop.edgePreview() == {"live": None, "recorded": None},
+          "no edge preview outside edge split mode")
+    state.splitMode = "edge"
+
+    loop.press(sample(100.0, 200.0))
+    loop.move(sample(250.0, 200.0))
+    preview = loop.edgePreview()
+    check(preview["live"] is not None and preview["recorded"] is None,
+          "the stroke in flight is previewed live (%r)" % (preview,))
+    if preview["live"] is not None:
+        check(near(preview["live"][1][0], 2.5, 1e-3),
+              "its free end follows the cursor (%r)" % (preview["live"],))
+    loop.release(sample(300.0, 200.0))
+    preview = loop.edgePreview()
+    check(preview["live"] is None and preview["recorded"] is not None,
+          "release turns it into the recorded edge (%r)" % (preview,))
+
+    # A too-short re-stroke keeps the recorded edge and its tube.
+    session.pickFn = (lambda mask, x, y:
+                      {"kind": tonicLib.TONIC_PICK_TUBE_VERT, "id": 3,
+                       "subId": -1, "subSubId": -1})
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(101.0, 100.0))
+    check(loop.edge is not None and loop._edgeTube == 0,
+          "a rejected short stroke leaves the recorded edge on T0 (T%d)"
+          % loop._edgeTube)
+    session.pickFn = lambda mask, x, y: None
+
+    # The edge is drawn for ONE tube: any other selection is refused.
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0, 3]}
+    dll.reset()
+    check(not loop.subdivideSelection(),
+          "Shift+D over two tubes with a one-tube edge is refused")
+    check(dll.count("Tonic_SubdivideTubeEdge") == 0 and
+          not session.gestureStack, "and opens no bracket, calls no ABI")
+    check("select only T0" in session.statuses[-1],
+          "the status names the stroked tube (%r)" % session.statuses[-1:])
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [3]}
+    check(not loop.subdivideSelection(), "so is a different single tube")
+    check("draw the split across T3" in session.statuses[-1],
+          "which is told to draw the split across T3 (%r)"
+          % session.statuses[-1:])
+
+    # Escape: first the idle recorded edge goes, with no selection change.
+    check(loop.cancel(), "Escape with a recorded edge is consumed")
+    check(loop.edge is None, "and forgets the edge")
+    check(not loop.cancel(), "a second Escape has nothing left to cancel")
+
+    # A sub-mode change drops it too.
+    loop.press(sample(100.0, 200.0))
+    loop.release(sample(300.0, 200.0))
+    check(loop.edge is not None, "a fresh edge is recorded")
+    loop.setSubMode("navigate")
+    check(loop.edge is None, "leaving Subdivide drops the recorded edge")
+    loop.setSubMode("subdivide")
+    loop.press(sample(100.0, 200.0))
+    loop.release(sample(300.0, 200.0))
+    loop.deactivate()
+    check(loop.edge is None, "leaving Hierarchy drops it as well")
+
+
+def testHierarchyHonestFailures(mods):
+    print("-- HierarchyLoop: failures are reported, not overwritten --")
+    tonicLib = mods["tonicLib"]
+    loop, dll, session, state, cam, sample = newHierarchy(mods)
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0, 3]}
+    dll.children = {0: [1, 2], 3: [4, 5]}
+
+    def mergeChildren(_ctx, tubeId):
+        dll._record("Tonic_MergeChildren", (int(tubeId),))
+        return 7 if int(tubeId) == 3 else 0
+    dll.Tonic_MergeChildren = Entry(mergeChildren)
+    session.events = []
+    check(not loop.mergeChildrenOfSelection(),
+          "Merge children with one failed tube reports failure")
+    final = session.statuses[-1] if session.statuses else ""
+    check("1 done, 1 failed" in final and "T3" in final,
+          "the final status says what failed (%r)" % final)
+    events = [name for name, _a in session.events]
+    check(events.count("begin") == 1 and events.count("end") == 1,
+          "the tube that merged is still one undo step (%r)" % (events,))
+
+    # Every subdivide failing rolls the bracket back: no empty undo step.
+    def failSubdivide(*_args):
+        dll._record("Tonic_SubdivideTube")
+        return 5
+    dll.Tonic_SubdivideTube = Entry(failSubdivide)
+    state.splitMode = "kmeans"
+    session.events = []
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0, 3]}
+    check(not loop.subdivideSelection(), "an all-failed Subdivide is False")
+    events = [name for name, _a in session.events]
+    check("cancel" in events and "end" not in events and
+          "enqueueCommit" not in events,
+          "and cancels its gesture instead of committing (%r)" % (events,))
+    check("0 done, 2 failed" in session.statuses[-1],
+          "with the count in the status (%r)" % session.statuses[-1:])
+
+    # A refused bracket means nothing runs at all.
+    session.beginGesture = lambda label: False
+    dll.reset()
+    check(not loop.makePersistent(), "a refused undo bracket is a refusal")
+    check(dll.count("Tonic_MakePersistent") == 0,
+          "and the action never reaches the ABI")
+    check("undo step" in session.statuses[-1],
+          "the status says why (%r)" % session.statuses[-1:])
+
 
 def testHierarchyResubdivide(mods):
     print("-- HierarchyLoop: Re-subdivide confirms ------------------")
@@ -383,17 +601,84 @@ def testHierarchyResubdivide(mods):
     session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0]}
     dll.children = {0: [1, 2]}
 
+    check(not loop.resubdivideArmed, "nothing is armed before the first call")
     check(not loop.resubdivide(), "the first call only arms it")
+    check(loop.resubdivideArmed,
+          "resubdivideArmed says so, for the dock's confirm button (DK-08)")
     check(dll.count("Tonic_MergeChildren") == 0,
           "nothing is merged yet")
     check(any("Re-subdivide" in s for s in session.statuses),
           "and the confirm text goes to the status line, not a modal (%r)"
+          % (session.statuses[-1:],))
+    # MD-03: Escape disarms, so the next press re-prompts instead of
+    # silently discarding the children's sculpt deltas.
+    check(loop.cancel(), "Escape over an armed Re-subdivide is consumed")
+    check(not loop.resubdivideArmed, "and cancel() disarms it")
+    session.statuses = []
+    check(not loop.resubdivide(), "after Escape Re-subdivide re-prompts")
+    check(loop.resubdivideArmed, "which arms it again")
+    check(dll.count("Tonic_MergeChildren") == 0 and
+          any("confirm" in s for s in session.statuses),
+          "with the confirm text again, merging nothing (%r)"
           % (session.statuses[-1:],))
     check(loop.resubdivide(), "the second call carries it out")
     order = [n for n in dll.names()
              if n in ("Tonic_MergeChildren", "Tonic_SubdivideTube")]
     check(order == ["Tonic_MergeChildren", "Tonic_SubdivideTube"],
           "as a merge followed by a split (%r)" % (order,))
+    check(not loop.resubdivideArmed, "carrying it out disarms it")
+
+    # DK-08: the confirm belongs to the selection it was armed over.
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0]}
+    dll.children = {0: [1, 2]}
+    dll.reset()
+    check(not loop.resubdivide() and loop.resubdivideArmed,
+          "a fresh press arms it over tube 0")
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [5]}
+    check(not loop.resubdivideArmed,
+          "selecting something else lapses the confirm")
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0]}
+    check(not loop.resubdivideArmed and not loop.resubdivide() and
+          dll.count("Tonic_MergeChildren") == 0,
+          "and going back re-prompts instead of discarding the children")
+
+    # A parent whose merge went through but whose re-split refused must
+    # not be sealed merged-flat beside a good parent: the whole action
+    # rolls back and the status says so.
+    session.selection = {tonicLib.TONIC_PICK_TUBE_VERT: [0, 3]}
+    dll.children = {0: [1, 2], 3: [4, 5]}
+
+    def splitRefusesT3(_ctx, tubeId, count, mode, seed, out, cap, got):
+        dll._record("Tonic_SubdivideTube", (int(tubeId),))
+        if int(tubeId) == 3:
+            return 5
+        _deref(got).value = 0
+        return 0
+    realSplit = dll.__dict__.get("Tonic_SubdivideTube")
+    dll.Tonic_SubdivideTube = Entry(splitRefusesT3)
+    try:
+        dll.reset()
+        check(not loop.resubdivide() and loop.resubdivideArmed,
+              "a two-parent Re-subdivide arms first")
+        session.events = []
+        check(not loop.resubdivide(),
+              "a half-applied Re-subdivide reports failure")
+        events = [name for name, _a in session.events]
+        check(events.count("begin") == 1 and "cancel" in events and
+              "end" not in events and "enqueueCommit" not in events and
+              not session.gestureActive,
+              "and rolls the whole bracket back, the good parent too (%r)"
+              % (events,))
+        final = session.statuses[-1] if session.statuses else ""
+        check("rolled back" in final and "T3" in final and
+              "nothing changed" in final,
+              "the status names the parent and says nothing changed (%r)"
+              % (final,))
+    finally:
+        if realSplit is None:
+            del dll.Tonic_SubdivideTube
+        else:
+            dll.Tonic_SubdivideTube = realSplit
 
 
 def testHierarchyLevels(mods):
@@ -418,6 +703,173 @@ def testHierarchyLevels(mods):
     calls = [c[1:] for c in dll.argsOf("Tonic_SetLevelDisplay")]
     check(any(level == 1 and xray for level, _v, xray in calls),
           "x-ray on L1 reaches the model (%r)" % (calls,))
+
+
+def testHierarchySubModeActions(mods):
+    """MD-04: Merge, Group and Levels act; Navigate/Subdivide select."""
+    print("-- HierarchyLoop: sub-modes that act (MD-04) -------------")
+    tonicLib = mods["tonicLib"]
+    from usdGenTonicTools import tonicHierarchy, tonicLoopsFill
+    TUBE = tonicLib.TONIC_PICK_TUBE_VERT
+    loop, dll, session, state, cam, sample = newHierarchy(mods)
+    dll.children = {0: [1, 2]}
+    dll.parents = {1: 0, 2: 0}
+    dll.levels = {0: 1, 1: 2, 2: 2}
+
+    def over(tubeId):
+        session.pickFn = (lambda mask, x, y:
+                          {"kind": TUBE, "id": tubeId, "subId": -1,
+                           "subSubId": -1} if mask & TUBE else None)
+
+    def click(x=100.0, y=100.0, modifiers=frozenset()):
+        loop.press(sample(x, y, modifiers))
+        loop.release(sample(x, y, modifiers))
+
+    def merges():
+        return [int(args[-1]) for args in dll.argsOf("Tonic_MergeChildren")]
+
+    # Navigate and Subdivide (k-means): a click on a parent only selects.
+    for sub in ("navigate", "subdivide"):
+        loop.setSubMode(sub)
+        state.splitMode = "kmeans"
+        dll.reset()
+        session.events = []
+        over(0)
+        click()
+        check(session.selection.get(TUBE) == [0] and not merges() and
+              not dll.argsOf("Tonic_SetLevelDisplay") and
+              not session.events,
+              "%s: a click on a parent selects it and does nothing else "
+              "(%r)" % (sub, session.events))
+
+    # Merge: a plain click on a parent folds its children, as Shift+M.
+    loop.setSubMode("merge")
+    dll.reset()
+    session.events = []
+    session.statuses = []
+    over(0)
+    click()
+    check(merges() == [0],
+          "merge: clicking a parent merges its children (%r)" % merges())
+    events = [name for name, _a in session.events]
+    check(events.count("begin") == 1 and events.count("end") == 1,
+          "as one undo step (%r)" % (events,))
+    check(session.statuses and session.statuses[-1] ==
+          tonicHierarchy.mergeChildrenStatus("1 tube(s)"),
+          "with Shift+M's status (%r)" % session.statuses[-1:])
+    # A visible child folds its siblings back into their parent.
+    dll.reset()
+    over(1)
+    click()
+    check(merges() == [0],
+          "merge: clicking a child merges its parent's children (%r)"
+          % merges())
+    # A press that travels off the tube is a cancelled click.
+    dll.reset()
+    over(0)
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(130.0, 100.0))
+    check(not merges(), "merge: a press dragged off the tube merges nothing")
+    # A modifier click only edits the selection.
+    dll.reset()
+    click(modifiers=frozenset(["shift"]))
+    check(not merges(), "merge: a Shift-click only toggles the selection")
+    # Escape between press and release drops the pending click.
+    dll.reset()
+    loop.press(sample(100.0, 100.0))
+    loop.cancel()
+    loop.release(sample(100.0, 100.0))
+    check(not merges(), "merge: Escape mid-click merges nothing")
+
+    # Levels: a click solos the clicked tube's level; again un-solos.
+    loop.setSubMode("levels")
+    dll.reset()
+    session.events = []
+    over(1)
+    click()
+    check(state.soloLevel == 2,
+          "levels: clicking an L2 tube solos L2 (%d)" % state.soloLevel)
+    calls = [c[1:] for c in dll.argsOf("Tonic_SetLevelDisplay")]
+    check(any(level == 1 and not visible for level, visible, _x in calls) and
+          any(level == 2 and visible for level, visible, _x in calls),
+          "and the model shows L2 alone (%r)" % (calls,))
+    check("solo L2" in session.statuses[-1],
+          "the status says so (%r)" % session.statuses[-1:])
+    check(not session.events, "soloing opens no undo step")
+    over(2)
+    click()
+    check(state.soloLevel == tonicHierarchy.SOLO_OFF,
+          "levels: a second L2 click un-solos (%d)" % state.soloLevel)
+    over(0)
+    click()
+    check(state.soloLevel == 1, "an L1 click solos L1 (%d)" % state.soloLevel)
+    over(1)
+    click()
+    check(state.soloLevel == 2,
+          "and an L2 click moves the solo to L2 (%d)" % state.soloLevel)
+    loop.setSolo(tonicHierarchy.SOLO_OFF)
+
+    # Group: a plain band groups what it boxed.
+    loop.setSubMode("group")
+    band = []
+
+    def selectRect(camera, x0, y0, x1, y1, kindMask, mode):
+        session.rects.append((x0, y0, x1, y1, int(kindMask), int(mode)))
+        session.selection[TUBE] = list(band)
+        return True
+    session.selectRect = selectRect
+    session.pickFn = lambda mask, x, y: None
+
+    def drag(modifiers=frozenset()):
+        loop.press(sample(50.0, 50.0, modifiers))
+        loop.move(sample(200.0, 200.0, modifiers))
+        loop.release(sample(250.0, 250.0, modifiers))
+
+    band[:] = [1, 2]
+    dll.reset()
+    session.events = []
+    drag()
+    groups = dll.argsOf("Tonic_GroupTubes")
+    check(len(groups) == 1 and list(groups[0][1][:groups[0][2]]) == [1, 2],
+          "group: a plain band groups the tubes it boxed (%r)"
+          % ([list(g[1][:g[2]]) for g in groups],))
+    events = [name for name, _a in session.events]
+    check(events.count("begin") == 1 and events.count("end") == 1,
+          "as one undo step (%r)" % (events,))
+    dll.reset()
+    drag(frozenset(["shift"]))
+    check(dll.count("Tonic_GroupTubes") == 0,
+          "group: a Shift band only adds to the selection")
+    band[:] = [1]
+    dll.reset()
+    drag()
+    check(dll.count("Tonic_GroupTubes") == 0 and
+          "two or more" in session.statuses[-1],
+          "group: a band over one tube says why it did not group (%r)"
+          % session.statuses[-1:])
+    dll.reset()
+    click(50.0, 50.0)
+    check(dll.count("Tonic_GroupTubes") == 0,
+          "group: an empty click without travel groups nothing")
+
+    # [ / ] change Hierarchy's own pick radius, never Graph's weld snap.
+    state.snapRadiusPx = 8.0
+    state.pickRadiusPx = 8.0
+    loop.adjustRadius(4.0)
+    check(near(state.pickRadiusPx, 12.0) and near(state.snapRadiusPx, 8.0),
+          "] widens pickRadiusPx and leaves snapRadiusPx (%g, %g)"
+          % (state.pickRadiusPx, state.snapRadiusPx))
+    loop.setSubMode("navigate")
+    session.picks = []
+    over(0)
+    click()
+    check(session.picks and near(session.picks[-1][3], 12.0),
+          "Hierarchy picks with pickRadiusPx (%r)" % (session.picks[-1:],))
+    state.snapRadiusPx = 40.0
+    fill = tonicLoopsFill.FillLoop(session, state)
+    check(near(fill.pickRadiusPx(), 12.0),
+          "Fill picks with pickRadiusPx, not the snap radius (%g)"
+          % fill.pickRadiusPx())
 
 
 def testHierarchyActiveCut(mods):
@@ -509,8 +961,9 @@ def testSculptStroke(mods):
                       if mask == tonicLib.TONIC_PICK_CENTER_CV else None)
 
     check(loop.press(sample(200.0, 200.0)), "the press claims the event")
-    check(session.gestureStack == ["Sculpt grab"],
-          "and opens one gesture bracket (%r)" % (session.gestureStack,))
+    check(session.gestureStack == ["Sculpt Grab"],
+          "and opens one gesture bracket labelled for the undo menu (%r)"
+          % (session.gestureStack,))
     check(dll.count("Tonic_SetBrushRing") >= 1,
           "the brush ring is placed on press")
     check(all(near(r, 32.0) for m, _x, _y, r in session.picks
@@ -586,12 +1039,41 @@ def testSculptBrushes(mods):
           "grab applies the brush strength to its world delta (%r)" %
           (delta,))
     state.sculptStrength = 1.0
-    state.brushRadiusPx = 24.0
-    loop.adjustRadius(8.0)
-    check(near(state.brushRadiusPx, 32.0), "] grows the brush radius")
-    loop.adjustRadius(-1000.0)
+    state.brushRadiusPx = 40.0
+    loop.adjustRadius(1.0)
+    check(near(state.brushRadiusPx, 46.0),
+          "] scales the brush radius by 1.15 (%g)" % state.brushRadiusPx)
+    loop.adjustRadius(-1.0)
+    check(near(state.brushRadiusPx, 40.0),
+          "[ divides it back (%g)" % state.brushRadiusPx)
+    loop.adjustRadius(0.5)
+    check(near(state.brushRadiusPx, 42.0),
+          "the fine step scales by 1.05 (%g)" % state.brushRadiusPx)
+    state.brushRadiusPx = 3.0
+    loop.adjustRadius(1.0)
+    check(near(state.brushRadiusPx, 4.0),
+          "a small brush still moves by at least 1 px (%g)"
+          % state.brushRadiusPx)
+    state.brushRadiusPx = 2.5
+    loop.adjustRadius(-1.0)
     check(near(state.brushRadiusPx, 2.0),
-          "[ shrinks it and clamps (%g)" % state.brushRadiusPx)
+          "[ clamps at BRUSH_RADIUS_MIN_PX (%g)" % state.brushRadiusPx)
+    state.brushRadiusPx = 500.0
+    loop.adjustRadius(1.0)
+    check(near(state.brushRadiusPx, 512.0),
+          "] clamps at BRUSH_RADIUS_MAX_PX (%g)" % state.brushRadiusPx)
+    check(mods["tonicLoopsSculpt"].BRUSH_RADIUS_MIN_PX == 2.0 and
+          mods["tonicLoopsSculpt"].BRUSH_RADIUS_MAX_PX == 512.0,
+          "the loop's radius range is tonicSculpt's")
+    check("brush radius 512 px" in session.statuses[-1],
+          "each key reports the radius (%r)" % (session.statuses[-1:],))
+    loop.setSubMode("smooth")
+    state.sculptStrength = 2.5
+    line = loop.statusLine()
+    check("strength 1.00" in line and "capped" in line,
+          "the Smooth status shows the strength it applies (%r)" % line)
+    loop.setSubMode("grab")
+    state.sculptStrength = 1.0
 
 
 def testSculptRadiusResize(mods):
@@ -618,8 +1100,98 @@ def testSculptRadiusResize(mods):
           loop.resizeRadius(sample(-2000.0, 100.0)) and
           near(loop.brushRadiusPx(), 2.0),
           "left F-drag clamps at the minimum radius")
+    session.statuses = []
+    loop.resizeRadius(sample(400.0, 100.0))
+    check(session.statuses and
+          "brush radius" in session.statuses[-1] and
+          loop.resizingRadius,
+          "every resize sample reports the live radius (%r)"
+          % (session.statuses[-1:],))
     check(loop.cancelRadiusResize() and near(state.brushRadiusPx, 64.0),
           "Escape/capture cancel restores the press-time radius")
+
+
+def testSculptHonesty(mods):
+    print("-- SculptLoop: facing ring, misses, clicks --------------")
+    tonicLib = mods["tonicLib"]
+    sculpt = mods["tonicLoopsSculpt"]
+    loop, dll, session, state, cam, sample = newSculpt(mods)
+    state.brushRadiusPx = 40.0
+    oldCount = sculpt.tonicHierarchy.tubeCenterCount
+    oldPoint = sculpt.tonicHierarchy.tubeCenterHandle
+    sculpt.tonicHierarchy.tubeCenterCount = lambda *_args: 5
+    sculpt.tonicHierarchy.tubeCenterHandle = (
+        lambda *_args: (2.0, 0.5, 2.0))
+    try:
+        session.pickFn = (lambda mask, x, y:
+                          {"kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 5,
+                           "subId": 2, "subSubId": -1}
+                          if mask == tonicLib.TONIC_PICK_CENTER_CV else None)
+        forward = cam.rayThrough(cam.width * 0.5, cam.height * 0.5)[1]
+        for cursor in ((210.0, 205.0), (190.0, 214.0)):
+            dll.reset()
+            loop.hover(sample(*cursor))
+            rings = dll.argsOf("Tonic_SetBrushRing")
+            check(bool(rings), "a hover over a tube places the ring")
+            if not rings:
+                continue
+            centre, normal = rings[-1][1], rings[-1][2]
+            dot = sum(float(normal[k]) * forward[k] for k in range(3))
+            check(abs(dot) > 0.99,
+                  "the idle ring faces the camera (dot %.3f)" % dot)
+            projected = cam.worldToPixels(
+                (centre[0], centre[1], centre[2]))
+            check(projected is not None and
+                  abs(projected[0] - cursor[0]) < 1.0 and
+                  abs(projected[1] - cursor[1]) < 1.0,
+                  "and sits under the cursor, not on the CV (%r vs %r)"
+                  % (projected, cursor))
+        check(session.hovers and
+              session.hovers[-1] == (tonicLib.TONIC_PICK_CENTER_CV, 5),
+              "the anchor CV is the hover prehighlight (%r)"
+              % (session.hovers[-1:],))
+        hoverCalls = len(session.hovers)
+        loop.hover(sample(215.0, 205.0))
+        check(len(session.hovers) == hoverCalls,
+              "the same anchor CV is not re-hovered on every move")
+
+        dll.reset()
+        check(loop.clearHover(), "leaving the view clears an idle ring")
+        rings = dll.argsOf("Tonic_SetBrushRing")
+        check(rings and float(getattr(rings[-1][3], "value",
+                                      rings[-1][3])) == 0.0,
+              "with a zero-radius ring (%r)" % (rings[-1:],))
+        check(session.hovers[-1] == (0, -1), "and drops the CV hover")
+
+        # A no-travel click leaves no undo step.
+        session.events = []
+        check(loop.press(sample(200.0, 200.0)), "a press on the tube claims")
+        check(loop.release(sample(200.0, 200.0)),
+              "the release closes it")
+        check(("cancel", None) in session.events and
+              ("end", None) not in session.events and
+              ("enqueueCommit", None) not in session.events,
+              "a click without a drag cancels its bracket (%r)"
+              % (session.events,))
+        check(not session.gestureStack, "no bracket is left open")
+        check("nothing changed" in session.statuses[-1],
+              "and says so (%r)" % (session.statuses[-1:],))
+
+        # An honest miss: a status, no gesture, and the ring off-target.
+        session.pickFn = lambda _mask, _x, _y: None
+        session.selection = {}
+        session.surfaceMisses = True
+        session.events = []
+        check(not loop.press(sample(20.0, 20.0)),
+              "a press off every tube opens nothing")
+        check(not session.gestureStack and
+              not any(e[0] == "begin" for e in session.events),
+              "no gesture bracket on a miss")
+        check("no tube under the brush" in session.statuses[-1],
+              "the miss is reported (%r)" % (session.statuses[-1:],))
+    finally:
+        sculpt.tonicHierarchy.tubeCenterCount = oldCount
+        sculpt.tonicHierarchy.tubeCenterHandle = oldPoint
 
 
 def testSculptViewPlane(mods):
@@ -820,14 +1392,19 @@ def main():
     check(tonicLoops.makeLoop("sculpt", None, None) is not None,
           "and so does Sculpt")
     testHierarchySelection(mods)
+    testHierarchySelectionMatrix(mods)
     testHierarchyActions(mods)
     testHierarchyEdgeSplit(mods)
+    testHierarchyEdgeOverlay(mods)
+    testHierarchyHonestFailures(mods)
     testHierarchyResubdivide(mods)
     testHierarchyLevels(mods)
+    testHierarchySubModeActions(mods)
     testHierarchyActiveCut(mods)
     testSculptStroke(mods)
     testSculptBrushes(mods)
     testSculptRadiusResize(mods)
+    testSculptHonesty(mods)
     testSculptViewPlane(mods)
     testLadder(mods)
     print("testUsdGenTonicToolsLoopsHier: %d failure(s)" % failures)

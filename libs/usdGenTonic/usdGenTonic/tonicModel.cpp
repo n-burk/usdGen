@@ -3,6 +3,7 @@
 #include "usdGenTonic/tonicModel.h"
 
 #include "usdGenTonic/tonicCheck.h"
+#include "usdGen/concaveMaterialRemap.h"
 
 #ifdef USDGEN_TONIC_HAS_CUDA
 #include "usdGenTonic/tonicKernels.h"
@@ -11,6 +12,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -3351,6 +3353,17 @@ TonicModel::_SubtreeCarriesDeltasLocked(int tubeId) const
 void
 TonicModel::_DropSubtreeLocked(int tubeId)
 {
+    if (tubeId < 0) {
+        // Group parents carry negative ids and own their members through
+        // `members`, not parentTubeId; their own parentTubeId is -1, the
+        // same as every L1 root's. Expanding -1 as a parent id collected
+        // the group itself plus every root and recursed forever (Delete
+        // on the first group of a session). A group has no subtree.
+        _tubes.erase(tubeId);
+        _tubeRegionKey.erase(tubeId);
+        _PruneActiveCutLocked();
+        return;
+    }
     std::vector<int> kids;
     for (auto const &kv : _tubes) {
         if (kv.second.actual.parentTubeId == tubeId) {
@@ -4268,6 +4281,7 @@ TonicModel::ClearGeneratedCurves()
     _roots.clear();
     _tubeRoots.clear();
     _guides = TonicGuideSet();
+    _refillDrops.clear();
     ++_guideVersion;
     _dirty |= TonicDirty_Guides;
     _PushUndoSnapshotLocked(snap);
@@ -4311,6 +4325,7 @@ TonicModel::SetGeneratedCurvesSuppressed(bool suppressed)
         _roots.clear();
         _tubeRoots.clear();
         _guides = TonicGuideSet();
+        _refillDrops.clear();
         ++_guideVersion;
         _dirty |= TonicDirty_Guides;
     }
@@ -4388,6 +4403,15 @@ TonicModel::_RefillGuidesLocked(float fraction)
         }
         for (size_t head = 0; head < order.size(); ++head) {
             int const parentId = order[head];
+            // Groups carry negative ids (minted from _nextGroupId) and own
+            // their members through membership, not parentTubeId; their
+            // own parentTubeId is -1, so expanding a negative id would
+            // re-enqueue every root plus the group itself and the walk
+            // never terminates (hydrating a scene with an on-the-fly
+            // group spun here forever).
+            if (parentId < 0) {
+                continue;
+            }
             for (auto const &kv : _tubes) {
                 if (kv.second.actual.parentTubeId == parentId) {
                     order.push_back(kv.first);
@@ -4475,9 +4499,13 @@ TonicModel::_RefillGuidesLocked(float fraction)
     // One tube's diagnostics keep their historical spelling; a store
     // tube's name its id. Only the first survives to the caller, on a
     // total failure: a degenerate tube is skipped, never fatal to its
-    // siblings.
+    // siblings. Every skipped tube is also kept in `drops`, published as
+    // RefillDrops() on success: a partial refill that silently lost a
+    // tube's guides looked exactly like a healthy one to the artist.
     std::string firstErr;
+    std::vector<std::pair<int, std::string>> drops;
     auto note = [&](int tubeId, std::string const &problem) {
+        drops.emplace_back(tubeId, problem);
         if (!firstErr.empty()) {
             return;
         }
@@ -4692,6 +4720,7 @@ TonicModel::_RefillGuidesLocked(float fraction)
             cvTaken = true;
         }
     }
+    _refillDrops = std::move(drops);
     if (!anyOk) {
         _diagnostic = firstErr.empty()
                           ? "TonicModel::RefillGuides: no tube"
@@ -4746,6 +4775,13 @@ TonicGuideSet const &
 TonicModel::GetGuides() const
 {
     return _guides;
+}
+
+std::vector<std::pair<int, std::string>>
+TonicModel::RefillDrops() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _refillDrops;
 }
 
 std::vector<TonicGuideRoot> const &
@@ -6252,6 +6288,114 @@ bool _FitAggregateForWriteback(TonicTubeDesc const &agg,
     return TonicResampleDescRingsCpu(agg, current.ringVerts, out, derr);
 }
 
+// K14 output gate.  Every ring K9 will triangulate for this tube -- the
+// authored section t's and the common fill stations of `cvCount` CVs --
+// must be a simple polygon, or the refill drops the whole tube.  The chart
+// is built exactly as TonicBuildGuideMaterialBindingsCpu builds it (ring
+// minus center, projected on the frame's normal/binormal), and a complete
+// point taper passes as it does there.  A subdivide, merge or K6
+// re-derivation that fails here is rejected and rolled back like any
+// other K7/K14 reject; never loosen the triangulator instead: a twisted
+// ring has no honest material chart.
+bool _ValidateChildMaterialRings(TonicTubeDesc const &tube, int cvCount,
+                                 char const *stage, std::string *err)
+{
+    auto fail = [&](std::string const &text) {
+        if (err) {
+            *err = text;
+        }
+        return false;
+    };
+    std::string const who =
+        std::string(stage) + ": tube " + std::to_string(tube.tubeId);
+    int const rv = tube.ringVerts;
+    if (rv < 3 || tube.sections.size() < 2) {
+        return fail(who + " has a malformed section layout");
+    }
+    std::vector<TonicFrame> frames;
+    std::string derr;
+    if (!TonicTubeFramesCpu(tube, &frames, &derr)) {
+        return fail(who + ": " + derr);
+    }
+    std::vector<float> stations;
+    for (TonicTubeSection const &section : tube.sections) {
+        stations.push_back(section.t);
+    }
+    float const t0 = tube.sections.front().t;
+    float const t1 = tube.sections.back().t;
+    float const span = t1 > t0 ? t1 - t0 : 1.0f;
+    for (int c = 1; c + 1 < cvCount; ++c) {
+        stations.push_back(t0 + span * (float(c) / float(cvCount - 1)));
+    }
+    std::vector<float> ring;
+    std::vector<PXR_NS::GfVec2f> chart(static_cast<size_t>(rv));
+    std::vector<std::array<int, 3>> triangles;
+    for (float const t : stations) {
+        TonicFrame frame;
+        float center[3] = {0.0f, 0.0f, 0.0f};
+        if (!TonicSampleTubeRingCpu(tube, frames, t, &ring, &derr) ||
+            !TonicSampleCenterCpu(tube, frames, t, &center[0], &center[1],
+                                  &center[2], &frame, &derr) ||
+            ring.size() != size_t(rv) * 3) {
+            return fail(who + ": " + derr);
+        }
+        float maxRadius2 = 0.0f;
+        float maxExtent2 = 0.0f;
+        for (int slot = 0; slot < rv; ++slot) {
+            size_t const at = size_t(slot) * 3;
+            float const dx = ring[at + 0] - center[0];
+            float const dy = ring[at + 1] - center[1];
+            float const dz = ring[at + 2] - center[2];
+            float const u = dx * frame.nx + dy * frame.ny + dz * frame.nz;
+            float const v = dx * frame.bx + dy * frame.by + dz * frame.bz;
+            chart[size_t(slot)] = PXR_NS::GfVec2f(u, v);
+            maxRadius2 = std::max(maxRadius2, u * u + v * v);
+            float const du = u - chart[0][0];
+            float const dv = v - chart[0][1];
+            maxExtent2 = std::max(maxExtent2, du * du + dv * dv);
+        }
+        float const epsilon = std::numeric_limits<float>::epsilon();
+        bool const collapsed = maxExtent2 == 0.0f ||
+            (maxRadius2 > 0.0f &&
+             maxExtent2 <= 64.0f * epsilon * epsilon * maxRadius2);
+        if (collapsed) {
+            continue;
+        }
+        std::string triangulateErr;
+        if (!usdGen::UsdGenTriangulateConcaveMaterialSlots(
+                chart, &triangles, &triangulateErr)) {
+            return fail(who + " ring at t=" + std::to_string(t) +
+                        " is not a simple polygon (" + triangulateErr +
+                        "); try another seed or smooth the parent");
+        }
+    }
+    return true;
+}
+
+// The K6 re-derivation gate: the same check for a descendant rebuilt from
+// fresh K14 output plus its stored residuals. Per-slot residuals applied to
+// a re-split whose slot layout changed can twist one section just as a
+// misaligned split does, and the refill would then drop the tube. The
+// material chart is the K5 section interpolation expressed in the tube's
+// own frame, so only the sections decide it: an edit that left them
+// bit-identical cannot have broken them, and skipping it keeps a drag's
+// per-move cost to the tubes whose rings actually changed.
+bool _ValidateRederivedChild(TonicTubeDesc const &before,
+                             TonicTubeDesc const &after, int cvCount,
+                             std::string *err)
+{
+    bool same = before.ringVerts == after.ringVerts &&
+                before.sections.size() == after.sections.size();
+    for (size_t i = 0; same && i < after.sections.size(); ++i) {
+        TonicTubeSection const &a = before.sections[i];
+        TonicTubeSection const &b = after.sections[i];
+        same = a.t == b.t && a.scale == b.scale && a.twist == b.twist &&
+               a.u == b.u && a.v == b.v;
+    }
+    return same || _ValidateChildMaterialRings(
+                       after, cvCount, "TonicHierarchicalSculptApplyCpu", err);
+}
+
 }  // namespace
 
 bool TonicModel::_TubeDescLocked(int tubeId, TonicTubeDesc *out) const
@@ -6561,6 +6705,57 @@ TonicModel::_PropagateAttachmentDownLocked(int tubeId)
                 : err;
             return false;
         }
+        // The refit root is a fresh K14 split, and K14 starts its ring at
+        // whichever parent corner first falls in the clip: against the
+        // transported section 1 it can arrive rotated, and K5 would twist
+        // the root span into a figure-eight at the first fill stations.
+        // Find the renumbering that aligns the root to its neighbour (as
+        // TonicSubdivideTubeCpu aligns consecutive stations), but apply its
+        // inverse to every UPPER section instead of renumbering the root:
+        // the root keeps the fresh split's slot order, K14 anchors section
+        // 0 the same way, so the actual and `fresh` share one slot order at
+        // every station and the residual below stays sculpt-sized.
+        // (Renumbering only the root stored a rotation-sized section-0
+        // residual: an unsculpted child turned "sculpted", and any later
+        // K6 re-split that started its root on another corner re-applied
+        // it to the wrong slots and was refused as a non-simple ring.)
+        // Every upper section moves by the same permutation, so the
+        // actual's own section-to-section correspondence -- its surface --
+        // is unchanged; only slot numbers move.
+        std::vector<int> rootFrom;
+        if (actual.sections.size() > 1) {
+            TonicTubeSection probe = actual.sections[0];
+            TonicAlignSectionRingCpu(&probe, actual.sections[1], &rootFrom);
+        }
+        size_t const slotCount = rootFrom.size();
+        bool const relabelUpper =
+            slotCount > 0 &&
+            std::all_of(actual.sections.begin() + 1, actual.sections.end(),
+                        [slotCount](TonicTubeSection const &sec) {
+                            return sec.u.size() == slotCount &&
+                                   sec.v.size() == slotCount;
+                        });
+        if (relabelUpper) {
+            // probe[i] = root[rootFrom[i]] pairs with upper[i]; so upper
+            // slot i moves to rootFrom[i].
+            for (size_t s = 1; s < actual.sections.size(); ++s) {
+                TonicTubeSection &sec = actual.sections[s];
+                std::vector<float> u(slotCount), v(slotCount);
+                for (size_t i = 0; i < slotCount; ++i) {
+                    u[size_t(rootFrom[i])] = sec.u[i];
+                    v[size_t(rootFrom[i])] = sec.v[i];
+                }
+                sec.u = std::move(u);
+                sec.v = std::move(v);
+            }
+            for (TonicParentBoundaryBinding &binding :
+                 actual.inheritedBoundaryBindings) {
+                if (binding.section > 0 && binding.childSlot >= 0 &&
+                    size_t(binding.childSlot) < slotCount) {
+                    binding.childSlot = rootFrom[size_t(binding.childSlot)];
+                }
+            }
+        }
         // TonicHierarchicalSculptApplyCpu retains old K14 triples when the
         // layouts match.  Those root slots now name freshly derived geometry,
         // so discard only section-zero triples and reconstruct exact retained
@@ -6588,6 +6783,8 @@ TonicModel::_PropagateAttachmentDownLocked(int tubeId)
                                return binding.section == 0;
                            }),
             fresh.inheritedBoundaryBindings.end());
+        // rootBindings name the installed root slots, which keep the fresh
+        // reference's slot order.
         fresh.inheritedBoundaryBindings.insert(
             fresh.inheritedBoundaryBindings.end(), rootBindings.begin(),
             rootBindings.end());
@@ -6599,9 +6796,37 @@ TonicModel::_PropagateAttachmentDownLocked(int tubeId)
             _diagnostic = err;
             return false;
         }
+        // The refit root of a tube that fills must stay triangulable too;
+        // the graph-move callers restore the hierarchy on false.
+        if (!_FillSuspendedLocked(kid) &&
+            !_ValidateRederivedChild(entry.actual, actual,
+                                     entry.fill.cvCount, &err)) {
+            _diagnostic = err;
+            return false;
+        }
         entry.actual = std::move(actual);
         entry.derived = std::move(fresh);
         entry.deltas = std::move(stored);
+        if (relabelUpper) {
+            // Grandchildren bind this child's upper slots by number: follow
+            // the relabel (their section-0 triples are rebuilt below).
+            for (auto &gkv : _tubes) {
+                if (gkv.second.actual.parentTubeId != kid) {
+                    continue;
+                }
+                for (TonicTubeDesc *desc :
+                     {&gkv.second.actual, &gkv.second.derived}) {
+                    for (TonicParentBoundaryBinding &binding :
+                         desc->inheritedBoundaryBindings) {
+                        if (binding.section > 0 && binding.parentSlot >= 0 &&
+                            size_t(binding.parentSlot) < slotCount) {
+                            binding.parentSlot =
+                                rootFrom[size_t(binding.parentSlot)];
+                        }
+                    }
+                }
+            }
+        }
         if (!_PropagateAttachmentDownLocked(kid)) {
             return false;
         }
@@ -6698,6 +6923,16 @@ bool TonicModel::_PropagateDownLocked(int tubeId)
                 fresh, entry.actual, entry.derived,
                 entry.deltas, locked, /*preserveLength=*/true, &actual,
                 &stored, &derr)) {
+            _diagnostic = derr;
+            return false;
+        }
+        // Every caller rolls the whole hierarchy back on false, exactly as
+        // for a K14 reject above. Only a tube that fills is checked: a
+        // subdivided parent's own stations feed no guides (its children
+        // re-split its authored sections, not its interpolated rings).
+        if (!_FillSuspendedLocked(kid) &&
+            !_ValidateRederivedChild(entry.actual, actual,
+                                     entry.fill.cvCount, &derr)) {
             _diagnostic = derr;
             return false;
         }
@@ -6962,7 +7197,6 @@ bool TonicModel::SubdivideTube(int tubeId, int count, const char *splitMode,
         _diagnostic = derr;
         return false;
     }
-    _PushUndoLocked();
     // Children inherit the parent's fill params (§2.3 step 4); the parent's
     // own fill is suspended from here until the children are merged back.
     FillParams inherited = _fill;
@@ -6972,6 +7206,17 @@ bool TonicModel::SubdivideTube(int tubeId, int count, const char *splitMode,
             inherited = pit->second.fill;
         }
     }
+    // Reject (model untouched, nothing to roll back yet) a split whose
+    // child rings K9 could not triangulate: accepting it would make every
+    // later refill drop those children's guides.
+    for (TonicTubeDesc const &k : kids) {
+        if (!_ValidateChildMaterialRings(k, inherited.cvCount,
+                                         "TonicSubdivideTubeCpu", &derr)) {
+            _diagnostic = derr;
+            return false;
+        }
+    }
+    _PushUndoLocked();
     outChildren->clear();
     for (auto &k : kids) {
         HierarchyTube entry;
@@ -7049,6 +7294,11 @@ bool TonicModel::MergeChildren(int tubeId)
         _diagnostic = derr;
         return false;
     }
+    // The merged parent is NOT gated like a split: Re-subdivide is a merge
+    // followed by a split, and refusing an unfillable aggregate would block
+    // the very re-split that repairs it. If the merged tube's rings do not
+    // triangulate, the next refill skips it and RefillDrops() reports it
+    // (the dock shows a warning row) instead of losing it silently.
     _PushUndoLocked();
     // Remove the whole subtree below tubeId.
     std::vector<int> doomed = kids;
@@ -7172,6 +7422,71 @@ bool TonicModel::MergeSelected(std::vector<int> const &tubeIds, int *outKept)
     ++_version;
     ++_mapVersion;
     _dirty |= TonicDirty_Topology;
+    return true;
+}
+
+bool TonicModel::RemoveTubes(std::vector<int> const &tubeIds, int *outRemoved)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (outRemoved) {
+        *outRemoved = 0;
+    }
+    if (tubeIds.empty()) {
+        _diagnostic = "TonicModel::RemoveTubes: no tube ids";
+        return false;
+    }
+    // Validate everything before touching anything: a half-applied delete
+    // would be an undo step the artist never asked for.
+    std::vector<int> const roots = _L1TubeIdsLocked();
+    for (int id : tubeIds) {
+        if (id == 0 ||
+            std::find(roots.begin(), roots.end(), id) != roots.end()) {
+            _diagnostic = "TonicModel::RemoveTubes: tube " +
+                          std::to_string(id) +
+                          " is an L1 root; its graph region owns it";
+            return false;
+        }
+        if (_tubes.find(id) == _tubes.end()) {
+            _diagnostic = "TonicModel::RemoveTubes: unknown tube " +
+                          std::to_string(id);
+            return false;
+        }
+    }
+    _PushUndoLocked();
+    std::set<int> before;
+    for (auto const &kv : _tubes) {
+        before.insert(kv.first);
+    }
+    for (int id : tubeIds) {
+        // An id already taken with an earlier id's subtree is simply gone.
+        if (_tubes.find(id) != _tubes.end()) {
+            _DropSubtreeLocked(id);
+        }
+    }
+    std::set<int> gone;
+    for (int id : before) {
+        if (_tubes.find(id) == _tubes.end()) {
+            gone.insert(id);
+            _intersectFlags.erase(id);
+        }
+    }
+    // A group parent must not keep naming a member that no longer exists:
+    // the committer would serialise a dangling member path.
+    for (auto &kv : _tubes) {
+        std::vector<int> &members = kv.second.members;
+        members.erase(std::remove_if(members.begin(), members.end(),
+                                     [&gone](int member) {
+                                         return gone.count(member) > 0;
+                                     }),
+                      members.end());
+    }
+    _selection.PruneTubes(_LiveTubeIdsLocked());
+    if (outRemoved) {
+        *outRemoved = int(gone.size());
+    }
+    ++_version;
+    ++_mapVersion;
+    _dirty |= TonicDirty_Topology | TonicDirty_Selection;
     return true;
 }
 
@@ -7330,6 +7645,7 @@ TonicModel::_SnapshotHierarchyLocked() const
     snap.guides = _guides;
     snap.generatedCurvesSuppressed = _generatedCurvesSuppressed;
     snap.output = _output;
+    snap.fill = _fill;
     snap.graph = _GraphUndoStateLocked();
     snap.regionTube = _regionTube;
     snap.tubeRegionKey = _tubeRegionKey;
@@ -7355,6 +7671,7 @@ void TonicModel::_RestoreHierarchyLocked(HierarchyRollback const &snap)
     _guides = snap.guides;
     _generatedCurvesSuppressed = snap.generatedCurvesSuppressed;
     _output = snap.output;
+    _fill = snap.fill;
     ++_guideVersion;
     _regionTube = snap.regionTube;
     _tubeRegionKey = snap.tubeRegionKey;
@@ -7857,6 +8174,15 @@ bool TonicModel::Undo(uint32_t *outDirty)
     if (outDirty) {
         *outDirty = TonicDirty_Clean;
     }
+    if (_gestureDepth > 0) {
+        // Redo's rule, for the same reason: inside a bracket the top of
+        // the stack is the press-time step Begin pushed. Popping it here
+        // (Ctrl+Z mid-drag on a dock slider) restored the base under a
+        // still-open bracket, and a later CancelGesture then popped an
+        // unrelated older step.
+        _diagnostic = "TonicModel::Undo: a gesture is open";
+        return false;
+    }
     if (_undoStack.empty()) {
         return true;  // nothing to undo: no-op success
     }
@@ -7976,6 +8302,10 @@ bool TonicModel::EndGesture()
     }
     _gestureDepth = 0;
     _gestureBase = HierarchyRollback();
+    // A label set by a push that was suppressed while the gesture was
+    // open must not leak onto the next step pushed outside any gesture
+    // (a stub build after a Connect used to be labelled "connect").
+    _nextUndoLabel.clear();
     ++_version;  // one coalescing key for the whole drag
     return true;
 }
@@ -7993,6 +8323,7 @@ bool TonicModel::CancelGesture(uint32_t *outDirty)
     HierarchyRollback const base = _gestureBase;
     _gestureDepth = 0;
     _gestureBase = HierarchyRollback();
+    _nextUndoLabel.clear();  // same leak as EndGesture
     // Drop the step Begin pushed: the drag never happened as far as the
     // history is concerned. Pushes were suppressed while it was open, so
     // the top of the stack is that step.

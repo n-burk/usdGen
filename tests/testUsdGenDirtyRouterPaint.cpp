@@ -236,6 +236,12 @@ int main()
         CHECK(pending.nodeBits[growId] == UsdGenDirtyCapture);
     }
 
-    std::printf("ok: paint-map primvar dirties re-capture the sampling node\n");
+    for(auto const* field:{"subdivisionScheme","subdivisionTags","topology"}) {
+        UsdGenPendingDirty pending;
+        router.Route(Dirtied(SdfPath("/Scalp"),Loc({TfToken("mesh"),TfToken(field)})),&pending);
+        CHECK(pending.surfaceBits.size()==1);
+        CHECK(pending.surfaceBits[0]==UsdGenDirtySurfaceTopo);
+    }
+    std::printf("ok: paint and subdivision dirties re-capture consumers\n");
     return 0;
 }

@@ -72,5 +72,9 @@ int main() {
           CudaScatterInputStatus::Unsupported && roots == emptyPreserved);
     auto mapped=d; mapped.nodes[0].maps.push_back(SdfPath("/ignored"));
     CHECK(PrepareCudaScatterInput(mapped,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::Unsupported);
+    auto level=d;level.nodes[0].params.push_back({TfToken("subdivisionLevel"),VtValue(0),false});
+    CHECK(PrepareCudaScatterInput(level,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::Ok);
+    level.nodes[0].params.back().value=VtValue(3);
+    CHECK(PrepareCudaScatterInput(level,SdfPath("/scatter"),&roots,&reason)==CudaScatterInputStatus::Unsupported);
     std::puts("testUsdGenCudaScatterInput: PASS"); return 0;
 }

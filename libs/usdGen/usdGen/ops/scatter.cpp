@@ -15,6 +15,7 @@
 #include "usdGen/ops/scatter.h"
 
 #include "usdGen/opParams.h"
+#include "usdGen/limitSurface.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 
@@ -66,6 +67,7 @@ static TfTokenVector _topoParams = [] {
     v.push_back(TfToken("enabled"));      // generator: topology-class (02 §6.2)
     v.push_back(TfToken("density"));     // capture (02 §6.4)
     v.push_back(TfToken("flip"));
+    v.push_back(TfToken("subdivisionLevel"));
     return v;
 }();
 
@@ -94,6 +96,11 @@ uint32_t UsdGenScatterOp::PlanesTouched() const
 
 bool UsdGenScatterOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
 {
+    int const level=params.GetInt(TfToken("subdivisionLevel"),0);
+    if(level<0 || level>6) {
+        if(diag)diag->Error("UsdGenScatter: subdivisionLevel must be in [0,6]");
+        return false;
+    }
     double const density = params.GetDouble(TfToken("density"), 100.0);
     if (!std::isfinite(density) || density < 0.0) {
         if (diag) diag->Error("UsdGenScatter: density must be finite and >= 0");
@@ -117,9 +124,11 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     feed("density", p ? double_as_bits(p->GetDouble(TfToken("density"), 100.0)) : 0);
     feed("flip", p && p->GetBool(TfToken("flip"), false) ? 1u : 0u);
     feed("seed", ctx.seed);
+    feed("subdivisionLevel", p ? p->GetInt(TfToken("subdivisionLevel"),0) : 0);
     UsdGenGraphDesc const *desc = ctx.desc;
     if (desc && ctx.surface < desc->surfaces.size()) {
         feed("surfaceGen", desc->surfaces[ctx.surface].surfaceGeneration);
+        feed("subdivision", UsdGenSubdivisionDigest(desc->surfaces[ctx.surface]));
         feed("subset", uint64_t(desc->surfaces[ctx.surface].subsetFaces.size()));
         // The paint primvar edits no generation, so the multiplier content
         // itself joins the digest: without this a paint stroke would read
@@ -158,6 +167,15 @@ bool UsdGenScatterOp::Capture(
         return false;
     }
     UsdGenSurfaceDesc const &surf = desc->surfaces[ctx.surface];
+    int const level=p ? p->GetInt(TfToken("subdivisionLevel"),0) : 0;
+    UsdGenLimitSurface limit;
+    if(level) {
+        std::string error;
+        if(!limit.Build(surf,level,&error)) {
+            if(diag)diag->Error("UsdGenScatter: "+error);
+            return false;
+        }
+    }
     if (surf.faceVertexCounts.empty() || surf.restPoints.empty()) {
         if (diag) diag->Warn(std::string("UsdGenScatter::Capture: surface '") +
                              surf.path.GetText() + "' has no topology; 0 roots");
@@ -222,6 +240,7 @@ bool UsdGenScatterOp::Capture(
     for (size_t fi = 0; fi < faces.size(); ++fi) {
         int const f = faces[fi];
         if (f < 0 || size_t(f) >= surf.faceVertexCounts.size()) continue;  // bad subset
+        if(level && limit.IsHole(f)) continue;
         int const nc = fvc[f];
         if (nc < 3) continue;
         size_t const cbase = cornerOff[f];
@@ -251,6 +270,26 @@ bool UsdGenScatterOp::Capture(
             nAcc += GfCross(pb - p0, pc - p0);
         }
         GfVec3f const Nrest = Normalize3(nAcc);
+        // Area quadrature uses a 2^level grid on each coarse patch. Actual
+        // roots and frames are evaluated on the bicubic/Gregory limit patch,
+        // never on these quadrature triangles. Keep coarse face IDs for Ptex.
+        int const grid=level ? (1<<level) : 0;
+        if(level) {
+            triArea.clear();areaRest=0;
+            std::vector<GfVec3f> samples((grid+1)*(grid+1));
+            GfVec3f du,dv;
+            for(int y=0;y<=grid;++y) for(int x=0;x<=grid;++x)
+                if(!limit.Evaluate(f,float(x)/grid,float(y)/grid,&samples[y*(grid+1)+x],&du,&dv)) {
+                    if(diag)diag->Error("UsdGenScatter: limit patch evaluation failed");
+                    return false;
+                }
+            for(int y=0;y<grid;++y) for(int x=0;x<grid;++x) {
+                auto const& a=samples[y*(grid+1)+x];auto const& b=samples[y*(grid+1)+x+1];
+                auto const& c=samples[(y+1)*(grid+1)+x+1];auto const& d=samples[(y+1)*(grid+1)+x];
+                float a0=.5f*GfCross(b-a,c-a).GetLength(),a1=.5f*GfCross(c-a,d-a).GetLength();
+                triArea.push_back(a0);triArea.push_back(a1);areaRest+=double(a0)+double(a1);
+            }
+        }
 
         double mult = 1.0;
         if (hasMult) {
@@ -303,13 +342,28 @@ bool UsdGenScatterOp::Capture(
                     if (target < cum) { ti = t; break; }
                 }
             }
+            GfVec3f pos,T,N=Nrest;
+            GfVec2f puv;
+            if(level) {
+                int const cell=int(ti/2),x=cell%grid,y=cell/grid;
+                GfVec2f a(float(x)/grid,float(y)/grid);
+                GfVec2f b(float(x+1)/grid,float(y+(ti%2 ? 1:0))/grid);
+                GfVec2f c(float(x+(ti%2 ? 0:1))/grid,float(y+1)/grid);
+                float const r=std::sqrt(u1);
+                puv=a*(1-r)+b*(u2*r)+c*((1-u2)*r);
+                GfVec3f du,dv;
+                if(!limit.Evaluate(f,puv[0],puv[1],&pos,&du,&dv)) return false;
+                N=Normalize3(GfCross(du,dv));
+                if(surf.orientation==TfToken("leftHanded")) N=-N;
+                T=Normalize3(du-N*GfDot(du,N));
+            } else {
             size_t const ib = cbase + ti + 1;
             size_t const ic = ib + 1;
             GfVec3f const pb = rest[fvi[ib]];
             GfVec3f const pc = rest[fvi[ic]];
             float const r1 = std::sqrt(u1);
-            GfVec3f const pos = p0 * (1.0f - r1) + pb * (u2 * r1) + pc * (r1 * (1.0f - u2));
-            GfVec2f puv(1.0f / 3.0f, 1.0f / 3.0f);
+            pos = p0 * (1.0f - r1) + pb * (u2 * r1) + pc * (r1 * (1.0f - u2));
+            puv=GfVec2f(1.0f / 3.0f, 1.0f / 3.0f);
             if (uv)
                 puv = uv[fvi[cbase]] * (1.0f - r1)
                     + uv[fvi[ib]] * (u2 * r1)
@@ -321,20 +375,21 @@ bool UsdGenScatterOp::Capture(
             GfVec3f e0 = pb - p0;
             if (std::abs(float(GfDot(e0, Nrest))) > 0.9f * float(e0.GetLength()))
                 e0 = pc - p0;  // e0 too normal-parallel; try the other edge
-            GfVec3f T = e0 - Nrest * GfDot(e0, Nrest);
+            T = e0 - Nrest * GfDot(e0, Nrest);
             if (T.GetLength() < 1e-9f) {
                 T = std::abs(Nrest[0]) > 0.9f ? GfVec3f(0.0f, 1.0f, 0.0f)
                                              : GfVec3f(1.0f, 0.0f, 0.0f);
                 T = T - Nrest * GfDot(T, Nrest);
             }
             T = Normalize3(T);
-            GfVec3f B = Normalize3(GfCross(Nrest, T));
+            }
+            GfVec3f B = Normalize3(GfCross(N, T));
             if (flip) { T = -T; B = -B; }  // rest frame handedness (02 §2.6)
             ax.push_back(pos[0]); ay.push_back(pos[1]); az.push_back(pos[2]);
             aids.push_back(curveId);
             aPrim.push_back(f);
             aUv.push_back(puv);
-            aT.push_back(T); aN.push_back(Nrest); aB.push_back(B);
+            aT.push_back(T); aN.push_back(N); aB.push_back(B);
         }
     }
 

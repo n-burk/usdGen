@@ -52,8 +52,10 @@ struct CurveGrowControls {
     float fallbackWidth = 0.01f;
     CurveGrowDirection direction = CurveGrowDirection::RootNormal;
     float3 literalDirection = {0.0f, 1.0f, 0.0f};
-    // Blend the lifted direction toward the captured root tangent after the
-    // angular lift. Appended to preserve aggregate initialization order.
+    // Root-normal rotation after lift; random=1 spans a full circle.
+    // Appended to preserve aggregate initialization order.
+    float azimuth = 0.0f;
+    float azimuthRandom = 0.0f;
 };
 
 enum class CurveGrowStatus {

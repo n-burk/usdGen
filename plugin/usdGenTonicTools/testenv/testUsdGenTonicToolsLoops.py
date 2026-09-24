@@ -67,6 +67,9 @@ class FakeDll:
         self.graphEdges = {}
         self.closestMiss = False
         self.batchReject = False
+        # Nodes Tonic_GraphUnweld creates; 0 is a node no second region
+        # shares (nothing to split).
+        self.unweldCreated = 2
 
     # -- bookkeeping -------------------------------------------------------
 
@@ -195,7 +198,7 @@ class FakeDll:
 
     def Tonic_GraphUnweld(self, _model, nodeId, _out, _cap, count):
         self._record("Tonic_GraphUnweld", (nodeId,))
-        _deref(count).value = 2
+        _deref(count).value = self.unweldCreated
         return 0
 
     def Tonic_GraphDeleteNode(self, _model, nodeId):
@@ -301,6 +304,16 @@ class FakeSession:
             self.gestureStack.pop()
         return 1
 
+    def endGestureIfChanged(self, changed):
+        # TonicSession's SS-02 close: keep the step only when the model
+        # changed, else cancel it and publish what the cancel restored.
+        if changed:
+            return self.endGesture()
+        dirty = self.cancelGesture()
+        if dirty:
+            self.publish(dirty)
+        return False
+
     @property
     def gestureActive(self):
         return bool(self.gestureStack)
@@ -364,6 +377,18 @@ class FakeSession:
 
     def readSelection(self, kind):
         return [(i, -1, -1) for i in self.selection.get(int(kind), [])]
+
+    def select(self, kind, ids, subIds=None, subSubIds=None, mode=0):
+        # Graph's two-click pick draws its first pick as a selection
+        # (SL-02); SET and ADD are all that path uses.
+        import usdGenTonicTools.tonicLib as tonicLib
+        current = self.selection.setdefault(int(kind), [])
+        if int(mode) == tonicLib.TONIC_SELECT_SET:
+            current[:] = []
+        for ident in ids:
+            if int(ident) not in current:
+                current.append(int(ident))
+        return True
 
     def clearSelection(self, kindMask=0):
         self.selection = {}
@@ -513,6 +538,14 @@ def testHotkeys(tonicModes):
         ("w", frozenset(["shift"]), (tonicModes.ACTION_WELD, None)),
         ("u", frozenset(["shift"]), (tonicModes.ACTION_UNWELD, None)),
         ("s", frozenset(["ctrl", "shift"]), (tonicModes.ACTION_SAVE, None)),
+        # Parity G14: RigExec/Maya's three redo spellings.
+        ("z", frozenset(["ctrl", "shift"]), (tonicModes.ACTION_REDO, None)),
+        ("z", frozenset(["shift"]), (tonicModes.ACTION_REDO, None)),
+        # SL-03: select all / none / invert.
+        ("a", frozenset(["ctrl"]), (tonicModes.ACTION_SELECT_ALL, None)),
+        ("a", frozenset(["ctrl", "shift"]),
+         (tonicModes.ACTION_DESELECT_ALL, None)),
+        ("i", frozenset(["ctrl"]), (tonicModes.ACTION_INVERT, None)),
     )
     for key, mods, expected in rows:
         got = action(key, mods)
@@ -532,9 +565,20 @@ def testHotkeys(tonicModes):
           "but a mode key works wherever the pointer is")
     check(action("d", frozenset(), textFocus=True) is None,
           "typing into a text field is never a sub-mode switch")
-    check(action("escape", frozenset(), textFocus=True) ==
-          (tonicModes.ACTION_CANCEL, None),
-          "Escape still cancels while a field has focus")
+    # SL-03: a focused field owns Escape (it reverts the typing there), and
+    # the destructive keys need the viewport.
+    check(action("escape", frozenset(), textFocus=True) is None,
+          "Escape in a focused text field is the field's, not a cancel")
+    check(action("delete", frozenset(), pointerInside=False) is None,
+          "Delete off the viewport is not ours")
+    check(action("backspace", frozenset(), pointerInside=False) is None,
+          "nor is Backspace off the viewport")
+    check(action("a", frozenset(["ctrl"]), pointerInside=False) is None,
+          "Ctrl+A off the viewport stays a dock list's select-all")
+    check(action("a", frozenset(["ctrl"]), textFocus=True) is None,
+          "and Ctrl+A in a text field selects its text")
+    check(action("i", frozenset(["ctrl", "shift"])) is None,
+          "Ctrl+Shift+I is unclaimed")
     check(action("f", frozenset()) == (tonicModes.ACTION_SUBMODE, "F"),
           "F reaches the controller, which declines it so usdview frames")
     check(action("k", frozenset(["ctrl"])) is None,
@@ -586,7 +630,7 @@ def testGizmo(tonicCamera, tonicGizmo):
           "a pixel along the y axis picks the v handle")
     check(gizmo.handleAt(cam, 380.0, 40.0) == tonicGizmo.HANDLE_NONE,
           "a pixel off every handle picks nothing")
-    check(gizmo.handleAt(cam, 200.0, 150.0) == tonicGizmo.HANDLE_PLANE,
+    check(gizmo.handleAt(cam, 200.0, 150.0) == tonicGizmo.HANDLE_CENTER,
           "the centre is the free handle: every axis starts there, so no "
           "axis can claim it (V4)")
 
@@ -599,7 +643,7 @@ def testGizmo(tonicCamera, tonicGizmo):
     check(gizmo.abiHandle() == -1 and not gizmo.dragging,
           "ending the drag clears the active handle")
 
-    check(gizmo.begin(tonicGizmo.HANDLE_PLANE, cam, 200.0, 150.0),
+    check(gizmo.begin(tonicGizmo.HANDLE_CENTER, cam, 200.0, 150.0),
           "a screen-plane drag starts")
     delta = gizmo.drag(cam, 300.0, 50.0)
     # The frame is 400 x 300 over 4 x 4 world units, so a pixel is wider
@@ -608,6 +652,38 @@ def testGizmo(tonicCamera, tonicGizmo):
           "a plane drag tracks the cursor in both axes (%r)" % (delta,))
     check(gizmo.abiHandle() == tonicGizmo.HANDLE_CENTER,
           "the centre handle stays active in the ABI so its square highlights")
+    gizmo.end()
+
+    # Parity G08: the Scale centre is the vendored MayaScaleFactor centre
+    # rule, 1 + dx / manipulator size in pixels (100 px here): right
+    # grows, left shrinks, vertical travel does nothing, and past zero it
+    # mirrors unless Prevent Negative Scale clamps it at MIN_SCALE_FACTOR.
+    from usdGenTonicTools import tonicGizmoScreen
+    gizmo.place((0.0, 0.0, -5.0), 1.0, tonicGizmo.GIZMO_SCALE)
+    check(gizmo.begin(tonicGizmo.HANDLE_CENTER, cam, 200.0, 150.0),
+          "a Scale centre drag starts on the pivot")
+    check(near(gizmo.scaleFactor(cam, 200.0, 150.0), 1.0),
+          "no travel is exactly 1x")
+    check(near(gizmo.scaleFactor(cam, 250.0, 150.0), 1.5) and
+          near(gizmo.scaleFactor(cam, 300.0, 150.0), 2.0),
+          "50 px right is 1.5x, one manipulator size is 2x")
+    check(near(gizmo.scaleFactor(cam, 200.0, 50.0), 1.0) and
+          near(gizmo.scaleFactor(cam, 250.0, 100.0), 1.5),
+          "vertical travel does nothing (RigExec reads dx alone)")
+    check(near(gizmo.scaleFactor(cam, 160.0, 150.0), 0.6),
+          "left shrinks")
+    check(near(gizmo.scaleFactor(cam, 50.0, 150.0), -0.5),
+          "past zero it mirrors with Prevent Negative Scale off")
+    check(near(gizmo.scaleFactor(cam, 50.0, 150.0, allowNegative=False),
+               tonicGizmoScreen.MIN_SCALE_FACTOR),
+          "and Prevent Negative Scale clamps it at MIN_SCALE_FACTOR")
+    centre = [h for h in gizmo.handles(cam)
+              if h.handleId == tonicGizmo.HANDLE_CENTER][0]
+    check(near(gizmo.scaleFactor(cam, 237.0, 150.0),
+               tonicGizmoScreen.MayaScaleFactor(
+                   centre, (200.0, 150.0), (200.0, 150.0), (237.0, 150.0),
+                   True)),
+          "exactly the vendored MayaScaleFactor for the centre handle")
     gizmo.end()
 
     gizmo.place((0.0, 0.0, -5.0), 1.0, tonicGizmo.GIZMO_ROTATE)
@@ -645,6 +721,209 @@ def testGizmo(tonicCamera, tonicGizmo):
           "point-to-segment distance is the perpendicular where it lands")
 
 
+def _polygonArea(points):
+    total = 0.0
+    for i in range(len(points)):
+        x0, y0 = points[i]
+        x1, y1 = points[(i + 1) % len(points)]
+        total += x0 * y1 - x1 * y0
+    return abs(total) * 0.5
+
+
+def testGizmoLook(tonicCamera, tonicGizmo, tonicViewport):
+    """GZ-02 / parity G05, G06, G10, G22, G24: the RigExec look.
+
+    The records the Qt overlay paints carry the RigExec palette, the tip
+    that tells Move from Scale, the sizes the tips scale with and the
+    locked opacity; a rotate drag reports its angle and a pie wedge; the
+    overlay paints from a cache rebuilt only when the gizmo or the camera
+    changes; pixel constants are logical and scale with the pixel ratio;
+    and the C++ Hydra fallback uses the same constants.
+    """
+    print("-- gizmo look (GZ-02) ------------------------------------")
+    cam = orthoCamera(tonicCamera)
+    gizmo = tonicGizmo.GizmoState()
+    origin = (0.0, 0.0, -5.0)
+
+    # G06: RigExec's palette.
+    check(tonicGizmo.AXIS_COLORS == ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                                     (0.0, 0.0, 1.0)) and
+          tonicGizmo.ACTIVE_COLOR == (1.0, 1.0, 0.0) and
+          tonicGizmo.HOVER_COLOR == (1.0, 0.85, 0.4) and
+          tonicGizmo.VIEW_COLOR == (0.4, 0.75, 1.0) and
+          tonicGizmo.SPHERE_COLOR == (0.6, 0.6, 0.6) and
+          tonicGizmo.LOCKED_OPACITY == 0.4 and tonicGizmo.LINE_WIDTH == 2.0,
+          "the gizmo palette is RigExec's (primaries, yellow, pale hover)")
+
+    # G05: the tip tells Move from Scale.
+    gizmo.place(origin, 1.0, tonicGizmo.GIZMO_TRANSLATE)
+    records = gizmo.screenHandles(cam)
+    axes = [r for r in records if r["kind"] == "axis"]
+    check(len(axes) == 3 and all(r["tip"] == "cone" for r in axes),
+          "Move axes end in cones %r" % [r.get("tip") for r in axes])
+    check([r["color"] for r in axes if r["grabbable"]] ==
+          [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+          "the grabbable Move axes are pure red and green")
+    locked = [r for r in axes if not r["grabbable"]]
+    check(len(locked) == 1 and locked[0]["handle"] == tonicGizmo.HANDLE_W and
+          locked[0]["opacity"] == tonicGizmo.LOCKED_OPACITY,
+          "the axis pointing at the camera is drawn at LOCKED_OPACITY")
+    check(all(near(r["sizePx"], 100.0) for r in records),
+          "every record carries the manipulator size in pixels (%r)"
+          % sorted({round(r["sizePx"], 3) for r in records}))
+    xy = [r for r in records if r["handle"] == tonicGizmo.HANDLE_PLANE_XY]
+    # 1 world unit is 100 px across and 75 px down in this camera.
+    want = (tonicGizmo.PLANE_SIDE * 100.0) * (tonicGizmo.PLANE_SIDE * 75.0)
+    check(xy and near(_polygonArea(xy[0]["points"]), want, 0.5) and
+          xy[0]["fillAlpha"] == tonicGizmo.PLANE_FILL_OPACITY,
+          "the xy square is PLANE_SIDE of the gizmo and half filled "
+          "(%.2f px^2, want %.2f)" % (_polygonArea(xy[0]["points"])
+                                       if xy else -1.0, want))
+    check([r["kind"] for r in records][0] == "center",
+          "the centre record comes first (Tonic's record order)")
+
+    gizmo.setHoverHandle(tonicGizmo.HANDLE_U)
+    uRecord = [r for r in gizmo.screenHandles(cam)
+               if r["handle"] == tonicGizmo.HANDLE_U][0]
+    check(uRecord["hovered"] and uRecord["color"] == tonicGizmo.HOVER_COLOR,
+          "a hovered U axis is drawn in the hover colour")
+    gizmo.setHoverHandle(tonicGizmo.HANDLE_NONE)
+
+    gizmo.place(origin, 1.0, tonicGizmo.GIZMO_SCALE)
+    axes = [r for r in gizmo.screenHandles(cam) if r["kind"] == "axis"]
+    check(len(axes) == 3 and all(r["tip"] == "cube" for r in axes),
+          "Scale axes end in cubes %r" % [r.get("tip") for r in axes])
+    check(len([r for r in gizmo.screenHandles(cam)
+               if r["kind"] == "plane"]) == 3,
+          "Scale has the three planar squares too")
+    gizmo.place(origin, 1.0, tonicGizmo.GIZMO_RING_TRS)
+    axes = [r for r in gizmo.screenHandles(cam) if r["kind"] == "axis"]
+    check(axes and all(r["tip"] == "cone" for r in axes),
+          "the ringTRS gizmo moves along its axes, so it has cones")
+
+    # G10: the rotate readout and the pie wedge.
+    gizmo.place(origin, 1.0, tonicGizmo.GIZMO_ROTATE)
+    records = gizmo.screenHandles(cam)
+    free = [r for r in records if r["kind"] == "free"]
+    check(free and free[0]["fillAlpha"] == tonicGizmo.SPHERE_FILL_OPACITY,
+          "the free-rotate ball is a filled wash")
+    check(gizmo.dragAngle() == 0.0 and gizmo.pieSlice() is None,
+          "an idle gizmo has no drag angle and no pie")
+    # The z ring faces this camera: radius 0.85 is 85 px across, 63.75 down.
+    check(gizmo.begin(tonicGizmo.HANDLE_W, cam, 285.0, 150.0),
+          "a z-ring rotate drag starts")
+    check(near(gizmo.startParameter, 0.0),
+          "the press on the ring's +u point is ring parameter 0 (%r)"
+          % gizmo.startParameter)
+    gizmo.rotationDrag(cam, 200.0, 150.0 - 63.75)
+    angle = gizmo.dragAngle()
+    pie = gizmo.pieSlice()
+    check(near(angle, 90.0, 0.5),
+          "a quarter turn reads 90 deg (%.2f)" % angle)
+    check(pie is not None and len(pie[0]) == 14 and
+          pie[1] == (0.0, 0.0, 1.0) and
+          near(pie[0][0][0], 200.0) and near(pie[0][0][1], 150.0),
+          "the pie is the centre plus a quarter of the blue ring (%r)"
+          % ((len(pie[0]), pie[1]) if pie else None,))
+    gizmo.end()
+    check(gizmo.pieSlice() is None and gizmo.dragAngle() == 0.0,
+          "the release takes the pie away")
+
+    # G24: pixel constants are logical, scaled by the device ratio.
+    viewProj = cam.viewProj
+    retina = tonicCamera.TonicCamera(viewProj, 400, 300, pixelRatio=2.0)
+    gizmo.place(origin, 1.0, tonicGizmo.GIZMO_TRANSLATE)
+    check(gizmo.handleAt(cam, 260.0, 162.0) == tonicGizmo.HANDLE_NONE and
+          gizmo.handleAt(retina, 260.0, 162.0) == tonicGizmo.HANDLE_U,
+          "12 px off the u axis misses at ratio 1 and hits at ratio 2")
+    from usdGenTonicTools import tonicLoopsTube
+    single = tonicLoopsTube.worldSizeForPixels(cam, origin)
+    double = tonicLoopsTube.worldSizeForPixels(retina, origin)
+    check(near(double, 2.0 * single) and
+          near(single, tonicLoopsTube.GIZMO_PIXELS * 0.01),
+          "the placed gizmo is GIZMO_PIXELS LOGICAL pixels: twice the "
+          "world size at ratio 2 (%r, %r)" % (single, double))
+
+    # G22: the overlay paints from a cache; a repaint resolves no camera.
+    class _Loop(object):
+        pass
+
+    loop = _Loop()
+    loop._gizmo = gizmo
+    resolves = []
+
+    def countingResolve(_view):
+        resolves.append(1)
+        return cam
+
+    oldResolve = tonicViewport.tonicCamera.resolve
+    try:
+        tonicViewport.tonicCamera.resolve = countingResolve
+        controller = tonicViewport.ViewportController(
+            _toolState(), FakeSession(FakeDll()), None)
+        controller._view = object()
+        controller._loop = loop
+        first, _ = controller.gizmoPaint()
+        second, _ = controller.gizmoPaint()
+        check(first and second is first and len(resolves) == 1,
+              "a second paint reuses the cached records (%d resolves)"
+              % len(resolves))
+        gizmo.setHoverHandle(tonicGizmo.HANDLE_V)
+        third, _ = controller.gizmoPaint()
+        check(len(resolves) == 2 and [r["handle"] for r in third
+                                      if r["hovered"]] ==
+              [tonicGizmo.HANDLE_V],
+              "a hover change rebuilds them")
+        controller.gizmoScreenHandles()
+        check(len(resolves) == 3,
+              "gizmoScreenHandles (the event-driven sync) always rebuilds")
+        gizmo.setHoverHandle(tonicGizmo.HANDLE_NONE)
+    finally:
+        tonicViewport.tonicCamera.resolve = oldResolve
+
+    # The C++ Hydra fallback uses the same constants and palette.
+    import re
+    cpp = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..",
+        "libs", "usdGenTonic", "usdGenTonic", "tonicGizmo.cpp"))
+    if not os.path.isfile(cpp):
+        print("info: %s not found; C++ lockstep not checked" % cpp)
+        return
+    with open(cpp, "r") as handle:
+        source = handle.read()
+
+    def scalar(name):
+        match = re.search(r"constexpr float %s = ([0-9.]+)f;" % name, source)
+        return float(match.group(1)) if match else None
+
+    def triple(text):
+        return tuple(float(v) for v in re.findall(r"([0-9.]+)f", text))
+
+    check(scalar("kPlaneOffset") == tonicGizmo.PLANE_OFFSET and
+          scalar("kPlaneSide") == tonicGizmo.PLANE_SIDE and
+          scalar("kCentreSide") == tonicGizmo.CENTER_SIDE and
+          scalar("kCubeSide") == tonicGizmo.CUBE_SIDE and
+          scalar("kConeRadius") == tonicGizmo.CONE_RADIUS and
+          scalar("kConeLengthRatio") == tonicGizmo.CONE_LENGTH_RATIO,
+          "tonicGizmo.cpp's handle geometry equals the Python constants")
+    axisBlock = re.search(r"kAxisColors\[3\]\[3\] = \{(.*?)\};", source,
+                          re.S)
+    active = re.search(r"kActiveColor\[3\] = \{(.*?)\};", source)
+    view = re.search(r"kViewColor\[3\] = \{(.*?)\};", source)
+    ring = re.search(r"kRingColor\[3\] = \{(.*?)\};", source)
+    flat = triple(axisBlock.group(1)) if axisBlock else ()
+    check(flat == sum(tonicGizmo.AXIS_COLORS, ()) and active and
+          triple(active.group(1)) == tonicGizmo.ACTIVE_COLOR and view and
+          triple(view.group(1)) == tonicGizmo.VIEW_COLOR and ring and
+          triple(ring.group(1)) == tonicGizmo.RING_COLOR,
+          "tonicGizmo.cpp's palette equals the Python one")
+
+
+def _toolState():
+    from usdGenTonicTools.tonicToolState import TonicToolState
+    return TonicToolState()
+
+
 def newLoop(tonicLoops, TonicToolState, subMode="draw"):
     dll = FakeDll()
     session = FakeSession(dll)
@@ -663,9 +942,14 @@ def testSessionRegionTubeDefaults(tonicSession, TonicToolState):
         def __init__(self):
             self.existing = {1: 19}
             self.builds = []
+            self.refills = []
 
         def Tonic_TubeForRegion(self, _model, regionId):
             return self.existing.get(int(regionId), -1)
+
+        def Tonic_RefillGuides(self, _model, fraction):
+            self.refills.append(float(fraction.value))
+            return 0
 
         def Tonic_BuildTubeFromRegion(self, _model, regionId, rings,
                                       ringVerts, length):
@@ -693,6 +977,16 @@ def testSessionRegionTubeDefaults(tonicSession, TonicToolState):
     check(built == 2 and [(item[0], item[2]) for item in dll.builds] ==
           [(0, 0), (2, 0)],
           "new Region stubs pass Auto while existing sculpted roots are skipped")
+    # MD-01: new stubs grow their guides at once (one full-density refill),
+    # instead of staying bare until a Fill parameter is touched.
+    check(dll.refills == [1.0],
+          "building stubs refills the guides once at full density (%r)"
+          % (dll.refills,))
+    dll.refills = []
+    dll.existing = {0: 1, 1: 19, 2: 20}
+    check(tonicSession.TonicSession.ensureRegionTubes(shell) == 0 and
+          not dll.refills,
+          "no stub built means no refill (%r)" % (dll.refills,))
 
     dll.existing = {}
     dll.builds = []
@@ -739,12 +1033,15 @@ def testGraphDraw(tonicCamera, tonicLoops, TonicToolState):
               "the samples land on the faces the pixels aim at (%r)"
               % (faces,))
     order = [name for name, _ in session.events]
-    check(order[-4:] == ["rasterise", "ensureRegionTubes", "enqueueCommit",
-                         "rebake"],
-          "release rasterises, gives a closed region its tube stub (G14), "
-          "then enqueues the commit and the bake (%r)" % (order,))
+    check(order[-5:] == ["rasterise", "ensureRegionTubes", "end",
+                         "enqueueCommit", "rebake"],
+          "release rasterises and gives a closed region its tube stub (G14) "
+          "inside the stroke's bracket, then enqueues the commit and the "
+          "bake (%r)" % (order,))
+    check(order.count("begin") == 1 and order.count("end") == 1,
+          "the stroke and its stub are one undo step (%r)" % (order,))
     check(session.events.index(("end", None)) <
-          session.events.index(("rasterise", None)),
+          session.events.index(("enqueueCommit", None)),
           "the bracket is sealed BEFORE the stage work is enqueued")
 
     # Escape mid-stroke.
@@ -759,6 +1056,40 @@ def testGraphDraw(tonicCamera, tonicLoops, TonicToolState):
           "a cancelled stroke never reaches Tonic_GraphStroke")
     check(not loop.release(sample(200.0, 200.0)),
           "the release after a cancel is not ours")
+
+    # A refused Begin (another owner's bracket is open): the press is
+    # claimed but nothing runs, and neither release nor Escape touches the
+    # foreign bracket.
+    for sub in ("draw", "place"):
+        loop.setSubMode(sub)
+        dll.reset()
+        session.events = []
+        session.gestureStack = ["Dock slider"]
+        realBegin = session.beginGesture
+        session.beginGesture = lambda label: (
+            session.events.append(("begin-refused", label)) or False)
+        try:
+            check(loop.press(sample(100.0, 100.0)),
+                  "%s: a refused Begin still claims the press" % sub)
+            loop.move(sample(300.0, 100.0))
+            loop.release(sample(300.0, 300.0))
+            loop.cancel()
+        finally:
+            session.beginGesture = realBegin
+        names = [name for name, _ in session.events]
+        check(session.gestureStack == ["Dock slider"] and
+              "end" not in names and "cancel" not in names,
+              "%s: the foreign bracket is neither sealed nor rolled back "
+              "(%r, %r)" % (sub, session.gestureStack, names))
+        check(dll.count("Tonic_GraphStroke") == 0 and
+              dll.count("Tonic_GraphAddNode") == 0 and
+              dll.count("Tonic_GraphMoveNode") == 0,
+              "%s: and nothing reaches the graph (%r)" % (sub, dll.names()))
+        check(any("another edit is still open" in s
+                  for s in session.statuses[-3:]),
+              "%s: the status says why (%r)" % (sub, session.statuses[-3:]))
+    session.gestureStack = []
+    loop.setSubMode("draw")
 
 
 def testGraphRegion(tonicCamera, tonicLoops, TonicToolState):
@@ -1245,6 +1576,12 @@ def testGraphPlaceAndClicks(tonicCamera, tonicLoops, TonicToolState):
           "and the connecting click is exactly one bracket (%r)"
           % (brackets,))
     check(not session.gestureStack, "which is closed by the time it ends")
+    names = [name for name, _a in session.events]
+    check("ensureRegionTubes" in names and
+          names.index("ensureRegionTubes") < names.index("end") <
+          names.index("enqueueCommit"),
+          "the stub of a region the click closed is built inside that "
+          "bracket, the commit after it (%r)" % (names,))
 
     # Delete sub-mode: a node first, an edge when there is no node.
     dll.reset()
@@ -1331,11 +1668,12 @@ def testGraphHoverMarqueeKeys(tonicCamera, tonicLoops, TonicToolState):
           % (session.rects,))
     if session.rects:
         x0, y0, x1, y1, kind, mode = session.rects[-1]
+        # SL-01's band column: a Shift band adds (Blender's extend).
         check(kind == tonicLib.TONIC_PICK_GRAPH_NODE and
-              mode == tonicLib.TONIC_SELECT_SET and
+              mode == tonicLib.TONIC_SELECT_ADD and
               near(x0, 100.0) and near(y1, 320.0),
-              "the band is the press-to-release rectangle over nodes (%r)"
-              % (session.rects[-1],))
+              "the band is the press-to-release rectangle over nodes, "
+              "adding (%r)" % (session.rects[-1],))
     session.rects = []
     loop.press(sample(100.0, 100.0, frozenset(["shift", "ctrl"])))
     loop.release(sample(200.0, 200.0, frozenset(["shift", "ctrl"])))
@@ -1372,7 +1710,655 @@ def testGraphHoverMarqueeKeys(tonicCamera, tonicLoops, TonicToolState):
     session.selection = {tonicLib.TONIC_PICK_GRAPH_NODE: [4, 5, 6]}
     check(not loop.weldSelected(), "three nodes is not a weld")
     session.selection = {tonicLib.TONIC_PICK_GRAPH_NODE: [4]}
+    session.events = []
+    session.statuses = []
     check(loop.unweldSelected(), "Shift+U unwelds the one selected node")
+    names = [name for name, _a in session.events]
+    check(names[:4] == ["begin", "rasterise", "ensureRegionTubes", "end"]
+          and names.count("end") == 1,
+          "and the split, K3 and the stubs are one undo step (%r)"
+          % (names,))
+    check(any("unwelded into 3 nodes" in s for s in session.statuses),
+          "and the status counts the pieces (%r)" % (session.statuses,))
+
+    # SS-02: a node no second region shares has nothing to split.
+    dll.unweldCreated = 0
+    session.events = []
+    session.statuses = []
+    check(not loop.unweldSelected(),
+          "Shift+U on an unshared node is not an unweld")
+    names = [name for name, _a in session.events]
+    check(names == ["begin", "cancel"],
+          "and leaves no undo step and no commit (%r)" % (names,))
+    check(session.statuses and "not shared" in session.statuses[-1] and
+          not any("unwelded into" in s for s in session.statuses),
+          "and says so instead of 'unwelded into 1' (%r)"
+          % (session.statuses,))
+    dll.unweldCreated = 2
+
+    # SS-02: a refused weld leaves no step either.
+    session.selection = {tonicLib.TONIC_PICK_GRAPH_NODE: [4, 5]}
+    session.events = []
+    dll.Tonic_GraphWeld = lambda _model, _keep, _drop: 1
+    check(not loop.weldSelected(), "a weld the model refuses is not a weld")
+    names = [name for name, _a in session.events]
+    check(names == ["begin", "cancel"],
+          "and leaves no undo step and no commit (%r)" % (names,))
+    del dll.Tonic_GraphWeld
+
+    # Weld all: the panel's pixels become rest units at the scalp (4 world
+    # units over 400 px is 0.01 per pixel, so 8 px is 0.08), never 8.0.
+    state.snapRadiusPx = 8.0
+    dll.reset()
+    session.events = []
+    check(loop.weldAll(cam), "Weld all runs")
+    radii = dll.argsOf("Tonic_GraphWeldAll")
+    check(len(radii) == 1 and near(radii[0][0], 0.08, 1e-3),
+          "Weld all hands the ABI the snap radius in rest units (%r)"
+          % (radii,))
+    names = [name for name, _a in session.events]
+    check(names[:4] == ["begin", "rasterise", "ensureRegionTubes", "end"]
+          and names.count("end") == 1,
+          "and welds, rasterises and grows stubs as one undo step (%r)"
+          % (names,))
+    dll.reset()
+    check(loop.weldAll(None) and
+          near(dll.argsOf("Tonic_GraphWeldAll")[0][0], 0.05, 1e-6),
+          "with no camera and no recorded scale it falls back to the "
+          "model's world radius, not the pixel number (%r)"
+          % dll.argsOf("Tonic_GraphWeldAll"))
+    session.displayScale = lambda: 0.002
+    dll.reset()
+    check(loop.weldAll(None) and
+          near(dll.argsOf("Tonic_GraphWeldAll")[0][0], 0.016, 1e-6),
+          "with no camera the recorded display scale converts the pixels "
+          "(%r)" % dll.argsOf("Tonic_GraphWeldAll"))
+    del session.displayScale
+
+
+# ---------------------------------------------------------------------------
+# SL-01: one selection-modifier table for every loop
+# ---------------------------------------------------------------------------
+
+class MatrixSession(FakeSession):
+    """FakeSession with Tonic's selection arithmetic (tonicSelection.cpp).
+
+    SET replaces the kinds it names (an empty SET is a no-op), a band SET
+    clears its whole mask first, and a Python-only mode reaching an ABI
+    call is a test failure. Every band covers `bandHits`.
+    """
+
+    def __init__(self, dll):
+        super(MatrixSession, self).__init__(dll)
+        self.items = {}
+        self.bandHits = {}
+        self.abiModes = []
+
+    def select(self, kind, ids, subIds=None, subSubIds=None, mode=0):
+        import usdGenTonicTools.tonicLib as tonicLib
+        self.abiModes.append(int(mode))
+        rows =[(int(ids[i]), int(subIds[i]) if subIds else -1,
+                 int(subSubIds[i]) if subSubIds else -1)
+                for i in range(len(ids))]
+        current = self.items.setdefault(int(kind), [])
+        if int(mode) == tonicLib.TONIC_SELECT_SET:
+            if rows:
+                current[:] = list(dict.fromkeys(rows))
+        for row in rows:
+            if int(mode) == tonicLib.TONIC_SELECT_TOGGLE and row in current:
+                current.remove(row)
+            elif row not in current:
+                current.append(row)
+        return True
+
+    def _band(self, kindMask, mode):
+        import usdGenTonicTools.tonicLib as tonicLib
+        self.abiModes.append(int(mode))
+        if int(mode) == tonicLib.TONIC_SELECT_SET:
+            self.clearSelection(kindMask)
+        for kind, rows in self.bandHits.items():
+            if kind & kindMask and rows:
+                self.select(kind, [r[0] for r in rows], [r[1] for r in rows],
+                            [r[2] for r in rows],
+                            tonicLib.TONIC_SELECT_ADD
+                            if int(mode) == tonicLib.TONIC_SELECT_SET
+                            else mode)
+        return True
+
+    def selectRect(self, camera, x0, y0, x1, y1, kindMask, mode):
+        self.rects.append((x0, y0, x1, y1, int(kindMask), int(mode)))
+        return self._band(kindMask, mode)
+
+    def selectPolygon(self, camera, points, kindMask, mode):
+        return self._band(kindMask, mode)
+
+    def clearSelection(self, kindMask=0):
+        for kind in list(self.items):
+            if not kindMask or kind & kindMask:
+                self.items.pop(kind)
+        return True
+
+    def readSelection(self, kind):
+        return sorted(self.items.get(int(kind), []))
+
+    def selectionCount(self, kindMask=0):
+        return sum(len(v) for k, v in self.items.items()
+                   if not kindMask or k & kindMask)
+
+
+# Start from {A, B} selected and C not. A click lands on A (selected) or C
+# (not); a band covers A and C. The table (backlog "Selection-modifier
+# convention"): click none/Shift/Ctrl/Ctrl+Shift = SET/TOGGLE/REMOVE/ADD,
+# band = SET/ADD/REMOVE/ADD.
+MATRIX_MODIFIERS = ((), ("shift",), ("ctrl",), ("ctrl", "shift"))
+MATRIX_CLICK = {
+    ((), "A"): "A", ((), "C"): "C",
+    (("shift",), "A"): "B", (("shift",), "C"): "ABC",
+    (("ctrl",), "A"): "B", (("ctrl",), "C"): "AB",
+    (("ctrl", "shift"), "A"): "AB", (("ctrl", "shift"), "C"): "ABC",
+}
+MATRIX_BAND = {(): "AC", ("shift",): "ABC", ("ctrl",): "B",
+               ("ctrl", "shift"): "ABC"}
+
+
+def runSelectionMatrix(label, names, reset, read, click=None, band=None,
+                       skip=(), skipBand=()):
+    """Drive the matrix; `names` maps 'A'/'B'/'C' to selection entries.
+
+    `skip` drops a modifier row entirely, `skipBand` only its band.
+    """
+    for mods in MATRIX_MODIFIERS:
+        if mods in skip:
+            continue
+        spelled = "+".join(mods) or "none"
+        for target in ("A", "C"):
+            if click is None:
+                break
+            reset()
+            click(names[target], frozenset(mods))
+            want = sorted(names[c] for c in MATRIX_CLICK[(mods, target)])
+            got = read()
+            check(got == want, "%s: %s-click on %s -> %s (%r)"
+                  % (label, spelled, target, MATRIX_CLICK[(mods, target)],
+                     got))
+        if band is not None and mods not in skipBand:
+            reset()
+            band(frozenset(mods))
+            want = sorted(names[c] for c in MATRIX_BAND[mods])
+            got = read()
+            check(got == want, "%s: %s-band over A and C -> %s (%r)"
+                  % (label, spelled, MATRIX_BAND[mods], got))
+
+
+def testSelectModeTable(tonicLoops):
+    print("-- SL-01: the selection-modifier table ------------------")
+    import usdGenTonicTools.tonicLib as tonicLib
+    SET, ADD, TOGGLE, REMOVE = (tonicLib.TONIC_SELECT_SET,
+                                tonicLib.TONIC_SELECT_ADD,
+                                tonicLib.TONIC_SELECT_TOGGLE,
+                                tonicLib.TONIC_SELECT_REMOVE)
+    check(REMOVE not in (SET, ADD, TOGGLE),
+          "TONIC_SELECT_REMOVE is its own Python-only sentinel")
+    rows = (((), SET, SET), (("shift",), TOGGLE, ADD),
+            (("ctrl",), REMOVE, REMOVE), (("ctrl", "shift"), ADD, ADD),
+            (("alt",), SET, SET))
+    for mods, click, band in rows:
+        check(tonicLoops.selectModeFor(frozenset(mods)) == click and
+              tonicLoops.selectModeFor(frozenset(mods), band=True) == band,
+              "%s: click %d, band %d" % ("+".join(mods) or "none", click,
+                                         band))
+    sample = tonicLoops.Sample(None, None, 0, 0, frozenset(["ctrl"]))
+    check(tonicLoops.selectModeFor(sample) == REMOVE,
+          "a Sample is read through its modifiers")
+
+    # applyRemove toggles only what is selected: Ctrl on an unselected
+    # item must never add it.
+    session = MatrixSession(FakeDll())
+    kind = tonicLib.TONIC_PICK_CENTER_CV
+    session.items = {kind: [(0, 1, -1), (0, 2, -1)]}
+    check(tonicLoops.applyRemove(session, kind, [(0, 1, -1), (0, 3, -1)])
+          and session.readSelection(kind) == [(0, 2, -1)],
+          "click-remove drops the selected item and ignores the other")
+    check(not tonicLoops.applyRemove(session, kind, [(0, 3, -1)]) and
+          session.readSelection(kind) == [(0, 2, -1)],
+          "removing an unselected item changes nothing")
+    tube = tonicLib.TONIC_PICK_TUBE_VERT
+    session.items = {tube: [(4, -1, -1)]}
+    tonicLoops.applyRemove(session, tube,
+                           [{"kind": tube, "id": 4, "subId": 17,
+                             "subSubId": -1}])
+    check(session.readSelection(tube) == [],
+          "a whole tube is removed by id, whatever vertex was picked")
+
+    # Band-remove is S - B, and a failed band query leaves S alone.
+    session.items = {kind: [(0, 1, -1), (0, 2, -1)],
+                     tube: [(4, -1, -1)]}
+    session.bandHits = {kind: [(0, 2, -1), (0, 3, -1)]}
+    check(tonicLoops.selectBand(session, kind, REMOVE,
+                                lambda mode: session.selectRect(
+                                    None, 0, 0, 1, 1, kind, mode)),
+          "a Ctrl band applies")
+    check(session.readSelection(kind) == [(0, 1, -1)] and
+          session.readSelection(tube) == [(4, -1, -1)],
+          "it removes what it covers and nothing outside its mask (%r)"
+          % (session.items,))
+    check(not tonicLoops.selectBand(session, kind, REMOVE,
+                                    lambda mode: False) and
+          session.readSelection(kind) == [(0, 1, -1)],
+          "a band query that fails leaves the selection as it was")
+
+
+def testGraphSelectionMatrix(tonicCamera, tonicLoops, TonicToolState):
+    print("-- SL-01: Graph click and band modifier matrix -----------")
+    import usdGenTonicTools.tonicLib as tonicLib
+    kind = tonicLib.TONIC_PICK_GRAPH_NODE
+    dll = FakeDll()
+    session = MatrixSession(dll)
+    state = TonicToolState()
+    state.snapRadiusPx = 8.0
+    loop = tonicLoops.GraphLoop(session, state)
+    loop.setSubMode("connect")
+    cam = topDownCamera(tonicCamera)
+    names = {"A": (1, -1, -1), "B": (2, -1, -1), "C": (3, -1, -1)}
+    session.bandHits = {kind: [names["A"], names["C"]]}
+
+    def reset():
+        session.items = {kind: [names["A"], names["B"]]}
+
+    def read():
+        return session.readSelection(kind)
+
+    def click(entry, mods):
+        session.pickFn = (lambda mask, x, y:
+                          {"kind": kind, "id": entry[0], "subId": -1,
+                           "subSubId": -1}
+                          if mask & kind else None)
+        loop.press(tonicLoops.Sample(session, cam, 120.0, 120.0, mods))
+        loop.release(tonicLoops.Sample(session, cam, 120.0, 120.0, mods))
+
+    def band(mods):
+        session.pickFn = lambda mask, x, y: None
+        loop.press(tonicLoops.Sample(session, cam, 100.0, 100.0, mods))
+        loop.move(tonicLoops.Sample(session, cam, 200.0, 200.0, mods))
+        loop.release(tonicLoops.Sample(session, cam, 220.0, 220.0, mods))
+
+    # A plain click on a node in connect arms it (drawn as a SET selection,
+    # so it would match the table) but the next plain click would connect
+    # the pair, so the plain row runs its band only: since SL-02 an empty
+    # plain drag in a click sub-mode is a node marquee.
+    runSelectionMatrix("Graph", names, reset, read, click, band,
+                       skip=((),))
+    runSelectionMatrix("Graph plain", names, reset, read, None, band,
+                       skip=MATRIX_MODIFIERS[1:])
+    check(not dll.count("Tonic_GraphConnect"),
+          "no modifier click or band armed or ran a connect")
+    check(session.abiModes and
+          set(session.abiModes) <= {tonicLib.TONIC_SELECT_SET,
+                                    tonicLib.TONIC_SELECT_ADD,
+                                    tonicLib.TONIC_SELECT_TOGGLE},
+          "only real Tonic_Select* modes reached the ABI (%r)"
+          % sorted(set(session.abiModes)))
+
+
+def testGraphEmptyDragAndTwoClickCancel(tonicCamera, tonicLoops,
+                                        TonicToolState):
+    print("-- SL-02: Graph empty-drag marquee, Shift-click, cancel --")
+    import usdGenTonicTools.tonicLib as tonicLib
+    kind = tonicLib.TONIC_PICK_GRAPH_NODE
+    cam = topDownCamera(tonicCamera)
+    dll = FakeDll()
+    session = MatrixSession(dll)
+    state = TonicToolState()
+    state.snapRadiusPx = 8.0
+    loop = tonicLoops.GraphLoop(session, state)
+
+    def sample(x, y, mods=frozenset()):
+        return tonicLoops.Sample(session, cam, x, y, mods)
+
+    def onNode(ident):
+        return (lambda mask, x, y:
+                {"kind": kind, "id": ident, "subId": -1, "subSubId": -1}
+                if mask & kind else None)
+
+    # Shift press/release on a node pixel grows the selection by one, in an
+    # authoring sub-mode too (Shift is the selection override there).
+    for sub in ("draw", "connect"):
+        loop.setSubMode(sub)
+        session.items = {kind: [(1, -1, -1)]}
+        session.pickFn = onNode(2)
+        loop.press(sample(120.0, 120.0, frozenset(["shift"])))
+        loop.release(sample(120.0, 120.0, frozenset(["shift"])))
+        check(session.readSelection(kind) == [(1, -1, -1), (2, -1, -1)],
+              "%s: a Shift-click on a node adds exactly it (%r)"
+              % (sub, session.readSelection(kind)))
+    check(not dll.count("Tonic_GraphStroke") and
+          not dll.count("Tonic_GraphConnect"),
+          "and authors nothing")
+
+    # A plain press on empty space in a click sub-mode is a node marquee.
+    for sub in ("connect", "weld", "unweld", "delete", "link"):
+        loop.setSubMode(sub)
+        dll.reset()
+        session.rects = []
+        session.items = {kind: [(1, -1, -1)]}
+        session.bandHits = {kind: [(3, -1, -1)]}
+        session.pickFn = lambda mask, x, y: None
+        dll.surfaceRegionFn = lambda _face, _u, _v: -1
+        check(loop.press(sample(100.0, 100.0)) and
+              loop.marqueeRect() == (100.0, 100.0),
+              "%s: a plain press on empty space starts a marquee" % sub)
+        loop.move(sample(200.0, 200.0))
+        check(session.rects and session.rects[-1][4] == kind and
+              session.rects[-1][5] == tonicLib.TONIC_SELECT_SET,
+              "%s: dragging it boxes nodes with SET (%r)"
+              % (sub, session.rects[-1:]))
+        loop.release(sample(210.0, 210.0))
+        check(session.readSelection(kind) == [(3, -1, -1)] and
+              loop.marqueeRect() is None,
+              "%s: and the band replaced the selection (%r)"
+              % (sub, session.readSelection(kind)))
+        authored = [name for name in dll.names() if name.startswith(
+            "Tonic_Graph") and name not in ("Tonic_GraphGetNode",
+                                            "Tonic_GraphGetEdge")]
+        check(not authored and not session.gestureStack,
+              "%s: the band authored nothing (%r)" % (sub, authored))
+    dll.surfaceRegionFn = lambda _face, _u, _v: 0
+
+    # A plain click on empty space (no travel) deselects nodes.
+    loop.setSubMode("delete")
+    session.items = {kind: [(1, -1, -1)]}
+    session.bandHits = {}          # a zero-area band covers nothing
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(100.0, 100.0))
+    check(session.readSelection(kind) == [] and
+          not dll.count("Tonic_GraphDeleteNode") and
+          not dll.count("Tonic_GraphDeleteEdge"),
+          "a plain empty click in Delete deselects and deletes nothing")
+
+    # Arm connect: the first pick is drawn as the selection.
+    loop.setSubMode("connect")
+    dll.reset()
+    session.items = {}
+    session.pickFn = onNode(11)
+    loop.press(sample(120.0, 120.0))
+    loop.release(sample(120.0, 120.0))
+    check(session.readSelection(kind) == [(11, -1, -1)],
+          "the armed connect node is selected so it is drawn (%r)"
+          % (session.readSelection(kind),))
+    # An armed miss keeps the pick (a short second click is not a cancel).
+    session.rects = []
+    session.pickFn = lambda mask, x, y: None
+    loop.press(sample(300.0, 300.0))
+    loop.release(sample(300.0, 300.0))
+    check(not session.rects and
+          session.readSelection(kind) == [(11, -1, -1)],
+          "a miss while armed neither boxes nor drops the pick")
+    # Escape between the clicks drops the pick.
+    session.statuses = []
+    check(loop.cancel(), "cancel() with an armed first pick is claimed")
+    check(session.readSelection(kind) == [] and
+          session.hovers and session.hovers[-1] == (0, -1),
+          "it clears the pick's selection and the hover (%r, %r)"
+          % (session.readSelection(kind), session.hovers[-1:]))
+    check(session.statuses and "connect cancelled" in session.statuses[-1],
+          "and says so (%r)" % (session.statuses[-1:],))
+    check(not loop.cancel(), "a second Escape has nothing left to cancel")
+    session.pickFn = onNode(12)
+    loop.press(sample(200.0, 200.0))
+    loop.release(sample(200.0, 200.0))
+    check(not dll.count("Tonic_GraphConnect"),
+          "the next node click arms afresh instead of connecting")
+    session.pickFn = onNode(13)
+    loop.press(sample(220.0, 220.0))
+    loop.release(sample(220.0, 220.0))
+    check(dll.argsOf("Tonic_GraphConnect") == [(12, 13)] and
+          session.readSelection(kind) == [],
+          "and the pair after it connects, spending the pick (%r)"
+          % (dll.argsOf("Tonic_GraphConnect"),))
+
+    # Link arms a region the same way, and Escape drops it too.
+    loop.setSubMode("link")
+    dll.reset()
+    dll.surfaceRegionFn = lambda _face, _u, _v: 4
+    loop.press(sample(120.0, 120.0))
+    loop.release(sample(120.0, 120.0))
+    check(session.readSelection(tonicLib.TONIC_PICK_REGION) ==
+          [(4, -1, -1)], "the armed link region is selected")
+    session.statuses = []
+    check(loop.cancel() and
+          session.readSelection(tonicLib.TONIC_PICK_REGION) == [] and
+          "link cancelled" in session.statuses[-1],
+          "and Escape cancels the link (%r)" % (session.statuses[-1:],))
+    dll.surfaceRegionFn = lambda _face, _u, _v: 5
+    loop.press(sample(320.0, 120.0))
+    loop.release(sample(320.0, 120.0))
+    check(not dll.count("Tonic_GraphLinkRegions"),
+          "a click after the cancel only arms")
+
+    # A sub-mode switch drops an armed pick as well.
+    loop.setSubMode("connect")
+    check(session.readSelection(tonicLib.TONIC_PICK_REGION) == [],
+          "leaving Link takes its armed region back")
+
+
+def testGraphPolish(tonicCamera, tonicLoops, TonicToolState):
+    print("-- MD-05: close snap, honest no-ops, hover masks ---------")
+    import usdGenTonicTools.tonicLib as tonicLib
+    NODE = tonicLib.TONIC_PICK_GRAPH_NODE
+    EDGE = tonicLib.TONIC_PICK_GRAPH_EDGE
+    REGION = tonicLib.TONIC_PICK_REGION
+    cam = topDownCamera(tonicCamera)
+
+    # -- Region: the hover snaps onto the first CV and arms the close ------
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState, "region")
+
+    def sample(x, y, mods=frozenset()):
+        return tonicLoops.Sample(session, cam, x, y, mods)
+
+    def samePoint(a, b):
+        return (a is not None and b is not None and
+                all(near(a[i], b[i]) for i in range(3)))
+
+    loop.press(sample(100.0, 100.0))
+    loop.release(sample(100.0, 100.0))
+    loop.hover(sample(104.0, 100.0))
+    preview = loop.draftRegionPreview()
+    check(samePoint(preview["hover"], preview["points"][0]) and
+          not preview["closeArmed"],
+          "a one-CV draft snaps its rubber band to the first CV but cannot "
+          "close yet (%r)" % (preview,))
+    for x, y in ((300.0, 100.0), (300.0, 300.0)):
+        loop.press(sample(x, y))
+        loop.release(sample(x, y))
+    session.statuses = []
+    loop.hover(sample(104.0, 100.0))
+    preview = loop.draftRegionPreview()
+    check(samePoint(preview["hover"], preview["points"][0]) and
+          preview["closeArmed"] is True,
+          "a hover 4 px from the first CV of a 3-CV draft snaps onto it "
+          "and arms the close (%r)" % (preview,))
+    check(any("click to close" in text for text in session.statuses),
+          "and the status says a click closes it (%r)" % (session.statuses,))
+    loop.hover(sample(103.0, 101.0))
+    check(sum("click to close" in text for text in session.statuses) == 1,
+          "the close status is said once per approach, not per move")
+    loop.hover(sample(200.0, 200.0))
+    preview = loop.draftRegionPreview()
+    check(not preview["closeArmed"] and
+          not samePoint(preview["hover"], preview["points"][0]),
+          "moving away disarms the close and frees the rubber band")
+    loop.hover(sample(104.0, 100.0))
+    loop.press(sample(104.0, 100.0))
+    loop.release(sample(104.0, 100.0))
+    check(dll.count("Tonic_GraphCreateRegion") == 1 and
+          not loop.draftRegionPreview()["closeArmed"],
+          "clicking the armed first CV closes the region and disarms")
+
+    # -- Place: a grabbed node that never moves is no edit ------------------
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState, "place")
+    session.pickFn = (lambda mask, x, y:
+                      {"kind": NODE, "id": 7, "subId": -1, "subSubId": -1}
+                      if mask == NODE else None)
+    session.events = []
+    loop.press(sample(120.0, 120.0))
+    loop.release(sample(120.0, 120.0))
+    names = [name for name, _args in session.events]
+    check(names == ["begin", "cancel"] and not session.gestureStack,
+          "a Place press on a node released without a move cancels its "
+          "bracket (%r)" % (names,))
+    check("rasterise" not in names and "enqueueCommit" not in names and
+          not dll.count("Tonic_GraphMoveNode"),
+          "and neither rasterises nor commits")
+    # A move the model refuses is no edit either.
+    dll.Tonic_GraphMoveNode = lambda *_args: 1
+    session.events = []
+    loop.press(sample(120.0, 120.0))
+    loop.move(sample(160.0, 160.0))
+    loop.release(sample(160.0, 160.0))
+    names = [name for name, _args in session.events]
+    check(names == ["begin", "cancel"],
+          "a drag whose every move is refused cancels too (%r)" % (names,))
+    del dll.Tonic_GraphMoveNode
+    session.events = []
+    loop.press(sample(120.0, 120.0))
+    loop.move(sample(160.0, 160.0))
+    loop.release(sample(160.0, 160.0))
+    names = [name for name, _args in session.events]
+    check(names[:4] == ["begin", "rasterise", "ensureRegionTubes", "end"]
+          and names.count("end") == 1,
+          "an accepted move still seals one step, rasterising inside it "
+          "(%r)" % (names,))
+
+    # -- per-sub-mode hover masks -------------------------------------------
+    dll, session, state, loop = newLoop(tonicLoops, TonicToolState, "delete")
+    items = {}
+
+    def maskedPick(mask, _x, _y):
+        # Everything is under the cursor; only the mask decides.
+        for kind in (NODE, EDGE, REGION):
+            if mask & kind and kind in items:
+                return {"kind": kind, "id": items[kind], "subId": -1,
+                        "subSubId": -1}
+        return None
+    session.pickFn = maskedPick
+    dll.surfaceRegionFn = lambda _face, _u, _v: 4
+
+    items = {REGION: 9}
+    session.picks = []
+    loop.hover(sample(150.0, 150.0))
+    check(session.hovers[-1] == (0, -1) and
+          not any(mask & REGION for mask, _x, _y, _r in session.picks),
+          "Delete hover never highlights a region (%r, %r)"
+          % (session.hovers[-1:], session.picks))
+    items = {REGION: 9, EDGE: 3}
+    loop.hover(sample(150.0, 150.0))
+    check(session.hovers[-1] == (EDGE, 3),
+          "Delete hover falls back to the edge (%r)" % (session.hovers[-1:],))
+    items = {REGION: 9, EDGE: 3, NODE: 6}
+    loop.hover(sample(150.0, 150.0))
+    check(session.hovers[-1] == (NODE, 6),
+          "and prefers the node, as its press does (%r)"
+          % (session.hovers[-1:],))
+    for sub in ("connect", "weld", "unweld"):
+        loop.setSubMode(sub)
+        items = {REGION: 9, EDGE: 3}
+        session.picks = []
+        loop.hover(sample(150.0, 150.0))
+        check(session.hovers[-1] == (0, -1) and
+              all(mask == NODE for mask, _x, _y, _r in session.picks),
+              "%s hover targets nodes only (%r)" % (sub, session.picks))
+        items = {NODE: 6}
+        loop.hover(sample(150.0, 150.0))
+        check(session.hovers[-1] == (NODE, 6),
+              "%s hover highlights the node it would act on" % sub)
+    loop.setSubMode("link")
+    items = {NODE: 6, EDGE: 3}
+    session.picks = []
+    loop.hover(sample(150.0, 150.0))
+    check(session.hovers[-1] == (REGION, 4) and not session.picks,
+          "Link hover is the region containing the cursor, never a node "
+          "or edge (%r)" % (session.hovers[-1:],))
+
+    # -- honest no-ops -------------------------------------------------------
+    loop.setSubMode("delete")
+    items = {}
+    session.statuses = []
+    loop.press(sample(150.0, 150.0))
+    loop.release(sample(150.0, 150.0))
+    check(session.statuses and
+          "no node or edge here" in session.statuses[-1] and
+          not dll.count("Tonic_GraphDeleteNode") and
+          not dll.count("Tonic_GraphDeleteEdge"),
+          "a Delete click on empty space says so (%r)"
+          % (session.statuses[-1:],))
+    loop._pressDelete((EDGE, -1))
+    check("no node or edge here" in session.statuses[-1],
+          "so does a direct Delete press on nothing")
+    loop.press(sample(150.0, 150.0))
+    loop.move(sample(250.0, 250.0))
+    loop.release(sample(250.0, 250.0))
+    check("node(s) selected" in session.statuses[-1],
+          "a real box over empty space still reports the selection (%r)"
+          % (session.statuses[-1:],))
+    loop.setSubMode("link")
+    dll.surfaceRegionFn = lambda _face, _u, _v: -1
+    loop.press(sample(150.0, 150.0))
+    loop.release(sample(150.0, 150.0))
+    check("no region here" in session.statuses[-1],
+          "a Link click on no region says so (%r)" % (session.statuses[-1:],))
+
+
+def testFillCancelRestores(tonicCamera, tonicLoops, TonicToolState):
+    print("-- SL-02: Fill marquee cancel restores the selection -----")
+    import usdGenTonicTools.tonicLib as tonicLib
+    from usdGenTonicTools import tonicLoopsFill
+    tube = tonicLib.TONIC_PICK_TUBE_VERT
+    session = MatrixSession(FakeDll())
+    state = TonicToolState()
+    loop = tonicLoopsFill.FillLoop(session, state)
+    cam = topDownCamera(tonicCamera)
+
+    def sample(x, y, mods=frozenset()):
+        return tonicLoops.Sample(session, cam, x, y, mods)
+
+    session.pickFn = (lambda mask, x, y:
+                      {"kind": tube, "id": 0, "subId": -1, "subSubId": -1}
+                      if mask & tube else None)
+    loop.press(sample(120.0, 120.0))
+    loop.release(sample(120.0, 120.0))
+    check(session.readSelection(tube) == [(0, -1, -1)],
+          "a click selects tube 0 (%r)" % (session.readSelection(tube),))
+    session.pickFn = lambda mask, x, y: None
+    session.bandHits = {tube: [(1, -1, -1)]}
+    loop.press(sample(50.0, 50.0))
+    loop.move(sample(250.0, 250.0))
+    check(session.readSelection(tube) == [(1, -1, -1)],
+          "a live band over tube 1 selects it (%r)"
+          % (session.readSelection(tube),))
+    session.published = []
+    session.statuses = []
+    check(loop.cancel(), "cancel() takes the live band")
+    check(session.readSelection(tube) == [(0, -1, -1)],
+          "and restores the press-time selection (%r)"
+          % (session.readSelection(tube),))
+    check(tonicLib.TONIC_DIRTY_SELECTION in session.published,
+          "publishing the selection locator (%r)" % (session.published,))
+    check(session.statuses and
+          "selection cancelled" in session.statuses[-1],
+          "and says so (%r)" % (session.statuses[-1:],))
+    # Cancelling a band that started from nothing selected clears it.
+    session.items = {}
+    loop.press(sample(50.0, 50.0))
+    loop.move(sample(250.0, 250.0))
+    loop.cancel()
+    check(session.readSelection(tube) == [],
+          "a cancelled band from an empty selection leaves it empty")
+    # A completed band is not undone by a later Escape.
+    loop.press(sample(50.0, 50.0))
+    loop.move(sample(250.0, 250.0))
+    loop.release(sample(250.0, 250.0))
+    check(not loop.cancel() and session.readSelection(tube) == [(1, -1, -1)],
+          "after release the band is kept")
 
 
 def testSurfaceMiss(tonicCamera, tonicLoops, TonicToolState):
@@ -1511,8 +2497,12 @@ def testOutputModeSwitches(tonicLoops, tonicViewport, TonicToolState):
     status = controller.setMode("output")
     check(state.activeMode == "output",
           "the shelf records Output as active (%r)" % state.activeMode)
-    check(status == "Tonic: Output panel: maps, bake, save groom.",
+    check(status == "Tonic: Output mode: build the hair description, bake "
+          "resolution, strand density and width.",
           "and reports the mode's own status line (%r)" % status)
+    check("save" not in status.lower(),
+          "which no longer sends the artist to Output for Save (it is on "
+          "the always-visible file row, DK-03) (%r)" % status)
     check("not built" not in status,
           "with no stale refusal in it (%r)" % status)
     check(controller.loop is None,
@@ -1535,6 +2525,8 @@ def testViewportExceptionRecovery(tonicViewport, TonicToolState):
 
     class _MouseButton(object):
         LeftButton = 1
+        RightButton = 2
+        MiddleButton = 4
         NoButton = 0
 
     class _KeyboardModifier(object):
@@ -1625,6 +2617,53 @@ def testViewportExceptionRecovery(tonicViewport, TonicToolState):
         check(len(session.published) >= 2,
               "both exception paths republish their recovered state %r" %
               session.published)
+
+        # A loop whose cancel raises after its press opened the session
+        # bracket: the controller still closes that bracket, or every
+        # later Begin is refused until a rebind.
+        class _LeakyLoop(_FailingLoop):
+            def press(self, _sample):
+                session.beginGesture("Tube move")
+                return True
+
+            def cancel(self):
+                self.cancelCalls += 1
+                raise RuntimeError("cancel exploded")
+
+        leaky = _LeakyLoop("")
+        controller._loop = leaky
+        session.events = []
+        session.published = []
+        check(controller.onPress(_View(), _Event()) and
+              session.gestureActive, "the leaky loop's press opens a bracket")
+        controller.cancelGesture()
+        check(leaky.cancelCalls == 1 and not session.gestureActive and
+              ("cancel", None) in session.events and
+              not controller.gestureActive,
+              "Escape over a raising cancel still rolls the bracket back "
+              "(%r)" % (session.events,))
+        check(session.published,
+              "and publishes what the cancel restored (%r)"
+              % (session.published,))
+        check(any("rolled it back" in text for text in session.statuses),
+              "the status says the edit was rolled back (%r)"
+              % (session.statuses[-2:],))
+        check(controller.onPress(_View(), _Event()) and
+              session.gestureStack == ["Tube move"],
+              "and the next press can open its own bracket (%r)"
+              % (session.gestureStack,))
+        session.gestureStack = []
+        controller._resetGestureState()
+
+        # An idle Escape (no capture) whose loop cancel returns normally
+        # leaves another owner's bracket (a held dock slider) alone.
+        session.gestureStack = ["Dock slider"]
+        controller._loop = _FailingLoop("")
+        controller.cancelGesture()
+        check(session.gestureStack == ["Dock slider"],
+              "an idle Escape leaves a foreign bracket open (%r)"
+              % (session.gestureStack,))
+        session.gestureStack = []
     finally:
         tonicViewport.tonicCamera.resolve = oldResolve
         for name, prior in oldModules.items():
@@ -1632,6 +2671,125 @@ def testViewportExceptionRecovery(tonicViewport, TonicToolState):
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = prior
+
+
+def testViewportFallbackHierarchyKeys(tonicViewport, TonicToolState):
+    """Shift+D / Shift+M from Tube/Graph/Fill/Sculpt run the controller's
+    own forms; they follow HierarchyLoop's bracket rules: a refused Begin
+    runs nothing, and an action that changed nothing leaves no step."""
+    print("-- controller: fallback Shift+D / Shift+M brackets --------")
+    from usdGenTonicTools import tonicLib, tonicModes
+
+    class HierDll(FakeDll):
+        def __init__(self):
+            FakeDll.__init__(self)
+            self.children = {}
+            self.subdivideRc = 0
+            # Plain functions, not bound methods: tonicHierarchy writes
+            # ctypes argtypes/restype onto the entry it is handed.
+            for name in ("Tonic_GetTubeCount", "Tonic_GetTubeChildren",
+                         "Tonic_MergeChildren", "Tonic_SubdivideTube"):
+                bound = getattr(self, "_" + name)
+
+                def entry(*args, _bound=bound):
+                    return _bound(*args)
+                setattr(self, name, entry)
+
+        def _Tonic_GetTubeCount(self, _model):
+            return 8
+
+        def _Tonic_GetTubeChildren(self, _model, tubeId, out, cap, count):
+            self._record("Tonic_GetTubeChildren", (int(tubeId),))
+            kids = self.children.get(int(tubeId), [])
+            for i, value in enumerate(kids[:cap]):
+                out[i] = value
+            getattr(count, "_obj", count).value = min(len(kids), cap)
+            return 0
+
+        def _Tonic_MergeChildren(self, _model, tubeId):
+            self._record("Tonic_MergeChildren", (int(tubeId),))
+            self.children.pop(int(tubeId), None)
+            return 0
+
+        def _Tonic_SubdivideTube(self, _model, tubeId, *rest):
+            self._record("Tonic_SubdivideTube", (int(tubeId),))
+            if self.subdivideRc:
+                return self.subdivideRc
+            got = rest[-1]
+            getattr(got, "_obj", got).value = 0
+            return 0
+
+    dll = HierDll()
+    session = FakeSession(dll)
+    state = TonicToolState()
+    controller = tonicViewport.ViewportController(state, session, None)
+    controller._loop = None             # the Tube-mode fallback route
+    TUBE = tonicLib.TONIC_PICK_TUBE_VERT
+    session.selection = {TUBE: [0, 3]}
+
+    # Shift+M over leaves: the merges succeed doing nothing -> no step.
+    session.events = []
+    check(not controller.runAction(tonicModes.ACTION_MERGE),
+          "Shift+M over leaf tubes reports nothing done")
+    names = [name for name, _ in session.events]
+    check("cancel" in names and "end" not in names and
+          "enqueueCommit" not in names and not session.gestureActive,
+          "and cancels its bracket instead of sealing an empty step (%r)"
+          % (names,))
+    check(dll.count("Tonic_MergeChildren") == 0,
+          "a leaf is never handed to Tonic_MergeChildren")
+    check("nothing merged" in session.statuses[-1],
+          "the status says nothing merged (%r)" % session.statuses[-1:])
+
+    # Shift+M over a real parent: one sealed step and a commit.
+    dll.children = {0: [1, 2]}
+    session.events = []
+    check(controller.runAction(tonicModes.ACTION_MERGE),
+          "Shift+M over a parent merges")
+    names = [name for name, _ in session.events]
+    check(names.count("begin") == 1 and names.count("end") == 1 and
+          "cancel" not in names and "enqueueCommit" in names,
+          "as one sealed undo step and a commit (%r)" % (names,))
+
+    # Shift+D where every split is refused: no step.
+    dll.subdivideRc = 5
+    session.events = []
+    check(not controller.runAction(tonicModes.ACTION_SUBDIVIDE),
+          "an all-refused Shift+D reports failure")
+    names = [name for name, _ in session.events]
+    check("cancel" in names and "end" not in names and
+          "enqueueCommit" not in names and not session.gestureActive,
+          "and cancels its bracket (%r)" % (names,))
+    check("nothing split" in session.statuses[-1] and
+          "T0" in session.statuses[-1],
+          "with the refusal in the status (%r)" % session.statuses[-1:])
+
+    # A refused Begin (a drag's bracket is open): nothing runs, and the
+    # other owner's bracket is left alone.
+    dll.subdivideRc = 0
+    dll.children = {0: [1, 2]}
+    dll.reset()
+    session.events = []
+    session.gestureStack = ["Tube move"]
+    realBegin = session.beginGesture
+    session.beginGesture = lambda label: False
+    try:
+        check(not controller.runAction(tonicModes.ACTION_SUBDIVIDE) and
+              not controller.runAction(tonicModes.ACTION_MERGE),
+              "a refused Begin refuses Shift+D and Shift+M")
+    finally:
+        session.beginGesture = realBegin
+    names = [name for name, _ in session.events]
+    check(session.gestureStack == ["Tube move"] and "end" not in names and
+          "cancel" not in names,
+          "without sealing or cancelling the drag's bracket (%r, %r)"
+          % (session.gestureStack, names))
+    check(dll.count("Tonic_SubdivideTube") == 0 and
+          dll.count("Tonic_MergeChildren") == 0,
+          "and without reaching the ABI (%r)" % (dll.names(),))
+    check("undo step" in session.statuses[-1],
+          "the status says why (%r)" % session.statuses[-1:])
+    session.gestureStack = []
 
 
 def testSculptBrushResizeKeyLifecycle(tonicViewport, TonicToolState):
@@ -1680,6 +2838,450 @@ def testSculptBrushResizeKeyLifecycle(tonicViewport, TonicToolState):
         tonicViewport.modifierSet = oldModifiers
 
 
+def testKeyPressLatch(tonicViewport, TonicToolState):
+    """One physical press runs onKey once, however many widgets the
+    declined KeyPress propagates through (usdRig _claimedKey)."""
+    print("-- viewport: once-per-press key latch ----------------------")
+
+    class _Event(object):
+        def __init__(self, code, mods=(), repeating=False):
+            self.code = code
+            self.mods = frozenset(mods)
+            self._repeating = repeating
+
+        def key(self):
+            return self.code
+
+        def isAutoRepeat(self):
+            return self._repeating
+
+    ENTER, Z, SHIFT = 0x01000004, 0x5a, 0x01000020
+    oldModifiers = tonicViewport.modifierSet
+    try:
+        tonicViewport.modifierSet = lambda event: event.mods
+        controller = tonicViewport.ViewportController(
+            TonicToolState(workspaceOpen=True), FakeSession(FakeDll()), None)
+        calls = []
+        answers = {}
+
+        def onKey(event):
+            calls.append((event.code, event.mods))
+            answer = answers.get(event.code, False)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        controller.onKey = onKey
+        controller.onKeyRelease = lambda _event: False
+
+        # A declined Enter: Qt's override, then the KeyPress bubbling up
+        # seven widgets.  onKey runs once; every copy passes on (False).
+        controller.keyOverride(_Event(ENTER))
+        results = [controller.deliverKeyPress(_Event(ENTER))
+                   for _ in range(7)]
+        check(len(calls) == 1 and not any(results),
+              "a declined Enter delivered 7 times runs onKey once and "
+              "passes every copy on to usdview (%d calls, %r)"
+              % (len(calls), results))
+        controller.deliverKeyRelease(_Event(ENTER))
+        controller.keyOverride(_Event(ENTER))
+        controller.deliverKeyPress(_Event(ENTER))
+        check(len(calls) == 2, "the next Enter press runs onKey again (%d)"
+              % len(calls))
+        controller.deliverKeyRelease(_Event(ENTER))
+
+        # Ctrl+Z then Shift+Z (both refused mid-drag): two presses, two
+        # runs, with QTest's modifier-key presses in between.
+        del calls[:]
+        for mods in (("ctrl",), ("shift",)):
+            controller.keyOverride(_Event(Z, mods))
+            for _ in range(7):
+                controller.deliverKeyPress(_Event(Z, mods))
+            controller.deliverKeyRelease(_Event(Z, mods))
+        check(calls == [(Z, frozenset(("ctrl",))), (Z, frozenset(("shift",)))],
+              "Ctrl+Z and Shift+Z run onKey once each (%r)" % (calls,))
+
+        # A claimed key answers True to a repeat delivery without acting.
+        del calls[:]
+        answers[Z] = True
+        controller.keyOverride(_Event(Z))
+        check(controller.deliverKeyPress(_Event(Z)) and
+              controller.deliverKeyPress(_Event(Z)) and len(calls) == 1,
+              "a claimed key stays swallowed for its later deliveries")
+        # OS auto-repeat: an override precedes every repeated press.
+        controller.keyOverride(_Event(Z, repeating=True))
+        controller.deliverKeyPress(_Event(Z, repeating=True))
+        controller.deliverKeyRelease(_Event(Z, repeating=True))
+        controller.deliverKeyPress(_Event(Z, repeating=True))
+        check(len(calls) == 2,
+              "each auto-repeat press acts once; an auto-repeat release "
+              "keeps the latch (%d)" % len(calls))
+        controller.deliverKeyRelease(_Event(Z))
+        answers[Z] = False
+
+        # Straight-at-the-view events with no override: a different key
+        # or modifier set, or the key's release, starts a new press.
+        del calls[:]
+        controller.deliverKeyPress(_Event(SHIFT, ("shift",)))
+        controller.deliverKeyPress(_Event(Z, ("shift",)))
+        controller.deliverKeyPress(_Event(Z, ("shift",)))
+        controller.deliverKeyPress(_Event(Z))
+        controller.deliverKeyRelease(_Event(Z))
+        controller.deliverKeyPress(_Event(Z))
+        check(len(calls) == 4,
+              "no override: key, modifiers or a release separate presses "
+              "(%d calls)" % len(calls))
+        controller.deliverKeyRelease(_Event(Z))
+
+        # A raising onKey is still its press's one run.
+        del calls[:]
+        answers[ENTER] = RuntimeError("boom")
+        raised = 0
+        controller.keyOverride(_Event(ENTER))
+        for _ in range(3):
+            try:
+                controller.deliverKeyPress(_Event(ENTER))
+            except RuntimeError:
+                raised += 1
+        check(raised == 1 and len(calls) == 1,
+              "a raising onKey reports once per press (%d raised, %d calls)"
+              % (raised, len(calls)))
+
+        # The Qt-free latch on its own.
+        latch = tonicViewport.KeyPressLatch()
+        ran = []
+        latch.press((1, frozenset()), lambda: ran.append(1) or False)
+        latch.press((1, frozenset()), lambda: ran.append(1) or False)
+        check(latch.latched == (1, frozenset()) and len(ran) == 1,
+              "KeyPressLatch acts on the first delivery only")
+        latch.release(2)
+        check(latch.latched is not None, "another key's release keeps it")
+        latch.release(1)
+        check(latch.latched is None, "its own release clears it")
+    finally:
+        tonicViewport.modifierSet = oldModifiers
+
+
+def testGizmoHoldsAndUndoGuard(tonicViewport, TonicToolState):
+    """Parity G11 / G14: the J/X holds belong to a live gizmo drag only;
+    undo/redo refuse mid-drag."""
+    print("-- controller: snap holds, undo refused mid-drag --------")
+    from usdGenTonicTools import tonicModes
+
+    class HoldLoop(object):
+        modeId = "tube"
+
+        def __init__(self):
+            self.dragging = True
+            self.moves = []
+
+        def gizmoDragActive(self):
+            return self.dragging
+
+        def move(self, sample):
+            self.moves.append((sample.x, sample.y, sample.modifiers))
+            return True
+
+    class UndoSession(FakeSession):
+        def __init__(self, dll):
+            FakeSession.__init__(self, dll)
+            self.undos = 0
+
+        def undo(self):
+            self.undos += 1
+            return True
+
+        def redo(self):
+            self.undos += 1
+            return True
+
+    state = TonicToolState()
+    state.workspaceOpen = True
+    session = UndoSession(FakeDll())
+    controller = tonicViewport.ViewportController(state, session, None)
+    loop = HoldLoop()
+    controller._loop = loop
+    controller._installed = True
+    controller._textFocus = lambda: False    # no Qt in a T1
+    controller._camera = object()
+    check(not controller._pressHold("j", frozenset()),
+          "J is usdview's while no drag is live")
+    controller._gesture = True
+    controller._lastXY = (40.0, 30.0)
+    check(controller._pressHold("j", frozenset()) and
+          controller.holdActive("stepSnap") and not loop.moves,
+          "J during a gizmo drag is claimed; an unmoved drag is left alone")
+    controller._gestureMoved = True
+    check(controller._pressHold("x", frozenset(["ctrl"])) and
+          loop.moves and loop.moves[-1][:2] == (40.0, 30.0) and
+          {"stepSnap", "grid", "ctrl"} <= set(loop.moves[-1][2]),
+          "X re-applies the live drag at once with both holds (%r)"
+          % (loop.moves[-1:],))
+    count = len(loop.moves)
+    check(controller._pressHold("x", frozenset()) and
+          len(loop.moves) == count,
+          "OS key repeat of a held key does not re-apply")
+    check(controller._releaseHold("x", frozenset(), autoRepeat=True) and
+          controller.holdActive("grid"),
+          "an auto-repeat release keeps the hold")
+    check(controller._releaseHold("x", frozenset()) and
+          not controller.holdActive("grid") and
+          "grid" not in loop.moves[-1][2] and
+          "stepSnap" in loop.moves[-1][2],
+          "releasing X un-snaps at once and keeps J (%r)"
+          % (loop.moves[-1:],))
+    controller._holds.clear()
+    check(not controller._pressHold("j", frozenset(["alt"])) and
+          not controller.holdActive("stepSnap"),
+          "Alt+J stays the camera's")
+    loop.dragging = False
+    check(not controller._pressHold("j", frozenset()),
+          "a marquee (no gizmo drag) leaves J to usdview")
+    loop.dragging = True
+    controller._pressHold("j", frozenset())
+    check(not controller.runAction(tonicModes.ACTION_UNDO) and
+          not controller.runAction(tonicModes.ACTION_REDO) and
+          session.undos == 0,
+          "undo and redo refuse while the drag is live")
+    check(session.statuses and "finish the drag" in session.statuses[-1],
+          "and say why (%r)" % (session.statuses[-1:],))
+    controller._resetGestureState()
+    check(not controller._holds and not controller._gestureMoved,
+          "the drag's end clears every hold")
+    check(controller.runAction(tonicModes.ACTION_UNDO) and
+          session.undos == 1, "after the drag undo runs")
+
+
+def testSelectionKeys(tonicViewport, tonicModes, tonicLoopsTube,
+                      TonicToolState):
+    """SL-03: Escape keeps the selection; Ctrl+A/Ctrl+Shift+A/Ctrl+I; the
+    Backspace route through the loop's exitLevel."""
+    print("-- viewport: Escape / select all / invert / Backspace -----")
+    import usdGenTonicTools.tonicLib as tonicLib
+    NODE = tonicLib.TONIC_PICK_GRAPH_NODE
+    TUBE = tonicLib.TONIC_PICK_TUBE_VERT
+
+    class _Camera(object):
+        width = 400
+        height = 300
+
+    class _Loop(object):
+        modeId = "graph"
+        label = "Graph"
+
+        def __init__(self):
+            self.disarms = []
+            self.exits = 0
+
+        def cancel(self):
+            return False                 # nothing live
+
+        def _disarm(self, clearSelection=True):
+            self.disarms.append(clearSelection)
+            return False
+
+        def exitLevel(self):
+            self.exits += 1
+            return True
+
+    def rows(*ids):
+        return [(i, -1, -1) for i in ids]
+
+    oldResolve = tonicViewport.tonicCamera.resolve
+    try:
+        tonicViewport.tonicCamera.resolve = lambda _view: _Camera()
+        session = MatrixSession(FakeDll())
+        controller = tonicViewport.ViewportController(TonicToolState(),
+                                                       session, None)
+        controller._view = object()
+        loop = _Loop()
+        controller._loop = loop
+
+        session.items = {NODE: rows(1, 2)}
+        check(not controller.cancelGesture() and
+              session.readSelection(NODE) == rows(1, 2),
+              "Escape with nothing live keeps the selection (%r)"
+              % session.readSelection(NODE))
+
+        session.bandHits = {NODE: rows(2, 3)}
+        session.rects = []
+        check(controller.runAction(tonicModes.ACTION_SELECT_ALL) and
+              session.readSelection(NODE) == rows(2, 3),
+              "Ctrl+A selects every node a whole-view band covers (%r)"
+              % session.readSelection(NODE))
+        check(session.rects and session.rects[-1][:5] ==
+              (0.0, 0.0, 400.0, 300.0, NODE),
+              "over the whole view and only Graph's node kind (%r)"
+              % session.rects[-1:])
+        check(loop.disarms == [False],
+              "and it disarms a pending two-click pick without clearing")
+
+        session.items = {NODE: rows(1, 2)}
+        check(controller.runAction(tonicModes.ACTION_INVERT) and
+              session.readSelection(NODE) == rows(1, 3),
+              "Ctrl+I flips what the view covers, keeps the rest (%r)"
+              % session.readSelection(NODE))
+
+        session.items = {NODE: rows(1, 2), TUBE: rows(0)}
+        check(controller.runAction(tonicModes.ACTION_DESELECT_ALL) and
+              session.selectionCount(0) == 0,
+              "Ctrl+Shift+A clears every kind (%r)" % session.items)
+
+        # A whole tube is hit once per tessellated vertex; the invert must
+        # still flip it exactly once.
+        session.items = {TUBE: rows(0)}
+        session.bandHits = {TUBE: rows(0, 0, 0, 16, 16)}
+        check(tonicLoopsTube.invertBand(
+            session, TUBE, tonicLoopsTube.viewBand(session, _Camera(), TUBE))
+              and session.readSelection(TUBE) == rows(16),
+              "invert over repeated per-vertex tube hits flips each tube once"
+              " (%r)" % session.readSelection(TUBE))
+
+        loop.modeId = "sculpt"
+        session.items = {NODE: rows(1)}
+        check(not controller.runAction(tonicModes.ACTION_SELECT_ALL) and
+              session.readSelection(NODE) == rows(1),
+              "Sculpt has no selection, so Ctrl+A is not its")
+
+        check(controller.runAction(tonicModes.ACTION_BACKSPACE) and
+              loop.exits == 1,
+              "Backspace goes through the loop's exitLevel (the active-cut"
+              " collapse), not the plain level step")
+    finally:
+        tonicViewport.tonicCamera.resolve = oldResolve
+
+
+def testLadderControlsAndFeedback(tonicViewport, TonicToolState):
+    """FB-02: the ladder honours ladderEnabled/moveBudgetMs, its hover-off
+    rung is a documented post-release cool-down, the HUD chip reads the
+    rung; the cursor table, band tint and HUD title are Qt-free."""
+    print("-- FB-02: ladder controls, cursors, band tint, HUD --------")
+    from usdGenTonicTools import tonicLadder
+    tv = tonicViewport
+
+    # The hover-off rung is kept and given a meaning: MAX_STEP stays 6 and
+    # the release from it holds hover off for HOVER_COOLDOWN_MS.
+    with open(tonicLadder.__file__, encoding="utf-8") as stream:
+        documented = "cool-down" in stream.read()
+    check(tonicLadder.MAX_STEP == tonicLadder.STEP_HOVER_OFF == 6 and
+          tonicLadder.HOVER_COOLDOWN_MS == 500.0 and documented,
+          "the hover-off rung is kept with a documented 500 ms cool-down")
+    check(tonicLadder.chipLabel(0) == "" and
+          tonicLadder.chipLabel(2) == "Preview 10 % (auto)" and
+          tonicLadder.chipLabel(99) == "Hover off (auto)",
+          "the HUD chip names the rung: %r" % tonicLadder.chipLabel(2))
+
+    # No session: the rungs have nothing to write, the stepping is pure.
+    state = TonicToolState()
+    state.ladderEnabled = False
+    ladder = tonicLadder.FallbackLadder(None, state)
+    check(not ladder.arm(1) and not ladder.armed,
+          "with ladderEnabled off a press does not arm the ladder")
+    check(not any(ladder.noteMove(50.0) for _ in range(9)) and
+          ladder.step == 0,
+          "so a slow drag keeps full fidelity (step %d)" % ladder.step)
+    check(not ladder.restore(), "and its release has nothing to restore")
+
+    state.ladderEnabled = True
+    state.moveBudgetMs = 0.0
+    check(ladder.arm(1) and ladder.budgetMs == 0.0,
+          "the next press arms with the state's moveBudgetMs (%g)"
+          % ladder.budgetMs)
+    for _ in range(6):
+        ladder.noteMove(0.5)
+    check(ladder.step == 2 and
+          ladder.chipLabel() == "Preview 10 % (auto)" and
+          int(state.ladderStep) == 2,
+          "a zero budget steps on any move time (step %d, %r)"
+          % (ladder.step, ladder.chipLabel()))
+    check(ladder.restore(1000.0) and not ladder.hoverCoolingDown(1000.0),
+          "a release short of the hover-off rung starts no cool-down")
+    ladder.arm(1)
+    for _ in range(3 * tonicLadder.MAX_STEP):
+        ladder.noteMove(0.5)
+    check(ladder.hoverSuppressed, "a heavy drag reaches hover off")
+    ladder.restore(2000.0)
+    check(not ladder.hoverSuppressed and ladder.hoverCoolingDown(2200.0) and
+          not ladder.hoverCoolingDown(2500.0) and
+          abs(ladder.hoverCooldownRemainingMs(2100.0) - 400.0) < 1e-6,
+          "its release keeps hover off for 500 ms, then gives it back")
+    state.moveBudgetMs = 8.0
+    fixed = tonicLadder.FallbackLadder(None, state, budgetMs=3.0)
+    fixed.arm(1)
+    check(fixed.budgetMs == 3.0,
+          "an explicit constructor budget still pins the ladder")
+
+    # The cursor table: (mode, subMode, tool, hoverHandle) plus the drag.
+    rows = (
+        (("graph", "region", "move", -1), {}, tv.CURSOR_CROSS),
+        (("graph", "draw", "move", -1), {}, tv.CURSOR_CROSS),
+        (("graph", "place", "move", -1), {}, tv.CURSOR_CROSS),
+        (("graph", "reposition", "move", -1), {}, tv.CURSOR_CROSS),
+        (("graph", "connect", "move", -1), {}, tv.CURSOR_ARROW),
+        (("graph", "reposition", "move", -1), {"dragging": True},
+         tv.CURSOR_CLOSED_HAND),
+        (("hierarchy", "subdivide", "move", -1), {"edgeStroke": True},
+         tv.CURSOR_CROSS),
+        (("hierarchy", "subdivide", "move", -1), {}, tv.CURSOR_ARROW),
+        (("sculpt", "grab", "move", -1), {}, tv.CURSOR_CROSS),
+        (("sculpt", "grab", "move", -1), {"ring": True}, tv.CURSOR_BLANK),
+        (("tube", "center", "move", 2), {}, tv.CURSOR_SIZE_ALL),
+        (("tube", "center", "select", 2), {}, tv.CURSOR_ARROW),
+        (("tube", "center", "move", -1), {}, tv.CURSOR_ARROW),
+        (("tube", "center", "move", 2), {"dragging": True},
+         tv.CURSOR_CLOSED_HAND),
+        (("tube", "center", "move", -1), {"band": True}, tv.CURSOR_CROSS),
+        (("fill", "params", "move", -1), {}, tv.CURSOR_ARROW),
+        (("output", "", "move", -1), {}, tv.CURSOR_ARROW),
+    )
+    for args, flags, want in rows:
+        got = tv.cursorFor(*args, **flags)
+        check(got == want, "cursor %r %r -> %s (%s)" % (args, flags, want,
+                                                        got))
+
+    for mods, want in ((frozenset(), tv.BAND_REPLACE),
+                       (frozenset(["shift"]), tv.BAND_ADD),
+                       (frozenset(["ctrl"]), tv.BAND_REMOVE),
+                       (frozenset(["ctrl", "shift"]), tv.BAND_ADD)):
+        check(tv.bandRecordFor(mods) == want,
+              "a band with %s is tinted %s" % (sorted(mods) or "no key",
+                                               want))
+    check(tv.BAND_GLYPH[tv.BAND_ADD] == "+" and
+          tv.BAND_GLYPH[tv.BAND_REMOVE] == "−" and
+          not tv.BAND_GLYPH[tv.BAND_REPLACE],
+          "add/remove bands carry a +/- glyph, replace none")
+
+    hud = TonicToolState(activeMode="tube", tubeSubMode="center",
+                         transformTool="move")
+    check(tv.hudTitle(hud) == "Tube › Center CV › Move",
+          "the HUD title is Mode > Sub-mode > Tool (%r)" % tv.hudTitle(hud))
+    check(tv.hudHint(hud) == tv.tonicModes.hintFor("tube", "center"),
+          "the HUD hint is the dock's instruction line")
+    check(tv.hudTitle(TonicToolState(activeMode="sculpt",
+                                     sculptSubMode="smooth")) ==
+          "Sculpt › Smooth" and tv.hudTitle(TonicToolState()) == "",
+          "only Tube names a transform tool; no mode, no title")
+
+    # The controller's chip: the live rung, then ~1 s marked restored.
+    controller = tv.ViewportController(TonicToolState(moveBudgetMs=0.0),
+                                       None, None)
+    ladder = controller._ladder
+    ladder.arm(1)
+    for _ in range(6):
+        ladder.noteMove(0.5)
+    check(controller.ladderChipText() == "Preview 10 % (auto)",
+          "the controller's chip shows the live rung (%r)"
+          % controller.ladderChipText())
+    controller._resetGestureState()
+    lingering = controller.ladderChipText()
+    check(lingering.startswith("Preview 10 % (auto)") and
+          controller._ladderChipLinger is not None,
+          "after the release it lingers, marked restored (%r)" % lingering)
+    controller._ladderChipLinger = (lingering, 0.0)
+    check(controller.ladderChipText() == "",
+          "and goes once its linger has run out")
+
+
 def main():
     try:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -1698,18 +3300,32 @@ def main():
     testHotkeys(tonicModes)
     testModesShelf(tonicModes, tonicLoops)
     testGizmo(tonicCamera, tonicGizmo)
+    testGizmoLook(tonicCamera, tonicGizmo, tonicViewport)
     testSessionRegionTubeDefaults(tonicSession, TonicToolState)
     testGraphDraw(tonicCamera, tonicLoops, TonicToolState)
     testGraphRegion(tonicCamera, tonicLoops, TonicToolState)
     testGraphReposition(tonicCamera, tonicLoops, TonicToolState)
     testGraphPlaceAndClicks(tonicCamera, tonicLoops, TonicToolState)
     testGraphHoverMarqueeKeys(tonicCamera, tonicLoops, TonicToolState)
+    testSelectModeTable(tonicLoops)
+    testGraphSelectionMatrix(tonicCamera, tonicLoops, TonicToolState)
+    testGraphEmptyDragAndTwoClickCancel(tonicCamera, tonicLoops,
+                                        TonicToolState)
+    testGraphPolish(tonicCamera, tonicLoops, TonicToolState)
+    testFillCancelRestores(tonicCamera, tonicLoops, TonicToolState)
     testSurfaceMiss(tonicCamera, tonicLoops, TonicToolState)
     testRingDisplayFollowsMode(tonicViewport, TonicToolState)
     testDisplayScaleHook(tonicCamera, tonicViewport, TonicToolState)
     testOutputModeSwitches(tonicLoops, tonicViewport, TonicToolState)
     testViewportExceptionRecovery(tonicViewport, TonicToolState)
+    testViewportFallbackHierarchyKeys(tonicViewport, TonicToolState)
     testSculptBrushResizeKeyLifecycle(tonicViewport, TonicToolState)
+    testKeyPressLatch(tonicViewport, TonicToolState)
+    testGizmoHoldsAndUndoGuard(tonicViewport, TonicToolState)
+    from usdGenTonicTools import tonicLoopsTube
+    testSelectionKeys(tonicViewport, tonicModes, tonicLoopsTube,
+                      TonicToolState)
+    testLadderControlsAndFeedback(tonicViewport, TonicToolState)
     print("testUsdGenTonicToolsLoops: %d failure(s)" % failures)
     return 1 if failures else 0
 

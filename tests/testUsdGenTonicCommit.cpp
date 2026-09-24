@@ -42,6 +42,7 @@
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/attributeSpec.h"
 #include "pxr/usd/sdf/layer.h"
+#include "pxr/usd/sdf/listOp.h"
 #include "pxr/usd/sdf/primSpec.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
@@ -1402,6 +1403,194 @@ main()
         }
     }
 
+    // -- partial swap carries the scalp over (UsdGenRestAPI for Output) -----
+    //
+    // Regression: once a full swap blew the budget, partial mode latched and
+    // its slot list never included the scalp over, so UsdGenRestAPI never
+    // reached the live layer and Output's surface-cage CurveSource capture
+    // failed ("surface-cage requires authored/default-time surface rest").
+    {
+        int const n = 4;
+        Grid const grid = MakeGrid(n);
+        TonicModel om;
+        Check(om.BindScalp(grid.points, grid.counts, grid.indices),
+              "partial scalp: the Output model binds its scalp");
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const mesh =
+            om.GetScalp();
+        if (mesh) {
+            BuildTwoRegions(&om, *mesh, n);
+        }
+        Check(om.Rasterise() && om.BuildTubeFromRegion(0, 5, 0, 2.0f),
+              "partial scalp: a region tube builds: " +
+                  std::string(om.GetDiagnostic()));
+        TonicModel::OutputSettings output = om.GetOutputSettings();
+        output.enabled = true;
+        Check(om.SetOutputSettings(output), "partial scalp: Output enables");
+
+        SdfLayerRefPtr liveO = SdfLayer::CreateAnonymous("tonic-live-partial-scalp");
+        UsdStageRefPtr so = MakeStage(liveO);
+        SdfPath const scalpPath("/Scalp");
+        {
+            UsdGeomMesh scalp = UsdGeomMesh::Define(so, scalpPath);
+            VtVec3fArray pts(grid.points.size() / 3);
+            for (size_t i = 0; i < pts.size(); ++i) {
+                pts[i] = GfVec3f(grid.points[i * 3 + 0],
+                                 grid.points[i * 3 + 1],
+                                 grid.points[i * 3 + 2]);
+            }
+            scalp.GetPointsAttr().Set(pts);
+            scalp.GetFaceVertexCountsAttr().Set(
+                VtIntArray(grid.counts.begin(), grid.counts.end()));
+            scalp.GetFaceVertexIndicesAttr().Set(
+                VtIntArray(grid.indices.begin(), grid.indices.end()));
+        }
+        TonicCommitPaths outputPaths = paths;
+        outputPaths.scalpPath = scalpPath;
+        TonicCommitter co(&om, outputPaths);
+        co.ForcePartialModeForTest(true);
+
+        // Drain every idle slot of one version; counts the partial slots so
+        // the case proves it really went through _SwapPartialSlot.
+        auto drainPartial = [&](uint64_t want, size_t *partialSlots) {
+            *partialSlots = 0;
+            auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(10000);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (co.SwapIfIdle(liveO, /*gestureActive*/ false) ==
+                    TonicCommitter::PartialProgress) {
+                    ++*partialSlots;
+                }
+                if (co.CommittedVersion() >= want) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        };
+        auto liveScalpHasRest = [&]() {
+            SdfPrimSpecHandle const over = liveO->GetPrimAtPath(scalpPath);
+            if (!over) {
+                return false;
+            }
+            VtValue const value = over->GetInfo(TfToken("apiSchemas"));
+            if (!value.IsHolding<SdfTokenListOp>()) {
+                return false;
+            }
+            TfTokenVector applied;
+            value.UncheckedGet<SdfTokenListOp>().ApplyOperations(&applied);
+            return std::find(applied.begin(), applied.end(),
+                             TfToken("UsdGenRestAPI")) != applied.end();
+        };
+
+        co.Enqueue(so);
+        size_t partialSlots = 0;
+        Check(drainPartial(om.GetVersion(), &partialSlots),
+              "partial scalp: the Output groom commits in partial mode: " +
+                  co.TakeDiagnostic());
+        Check(partialSlots > 0,
+              "partial scalp: the commit went through partial slots (" +
+                  std::to_string(partialSlots) + ")");
+        Check(bool(liveO->GetPrimAtPath(outputPaths.OutputPath())),
+              "partial scalp: the Output description lands");
+        Check(liveScalpHasRest(),
+              "partial scalp: the live scalp over carries UsdGenRestAPI");
+
+        // Turning Output off drops RestAPI from the built over; the partial
+        // scalp slot must replace the live over, not leave it stale.
+        output.enabled = false;
+        Check(om.SetOutputSettings(output), "partial scalp: Output disables");
+        co.Enqueue(so);
+        Check(drainPartial(om.GetVersion(), &partialSlots),
+              "partial scalp: the Output-off groom commits in partial mode");
+        Check(!liveScalpHasRest(),
+              "partial scalp: a stale UsdGenRestAPI does not survive on live");
+
+        // A groom authored UNDER the scalp prim (/Scalp/TonicGroom, e.g. a
+        // resumed hand-placed groom): the scalp slot is the last one, and a
+        // whole-spec copy of the scalp re-copied the entire groom subtree
+        // in that single slot. A sentinel child planted on live before every
+        // slot must survive the last one (a whole-spec copy replaces the
+        // scalp's children with the built layer's), and the scalp over must
+        // still carry UsdGenRestAPI.
+        output.enabled = true;
+        Check(om.SetOutputSettings(output),
+              "partial scalp: Output re-enables for the nested groom");
+        SdfLayerRefPtr liveN =
+            SdfLayer::CreateAnonymous("tonic-live-partial-nested");
+        UsdStageRefPtr sn = MakeStage(liveN);
+        {
+            UsdGeomMesh scalp = UsdGeomMesh::Define(sn, scalpPath);
+            VtVec3fArray pts(grid.points.size() / 3);
+            for (size_t i = 0; i < pts.size(); ++i) {
+                pts[i] = GfVec3f(grid.points[i * 3 + 0],
+                                 grid.points[i * 3 + 1],
+                                 grid.points[i * 3 + 2]);
+            }
+            scalp.GetPointsAttr().Set(pts);
+            scalp.GetFaceVertexCountsAttr().Set(
+                VtIntArray(grid.counts.begin(), grid.counts.end()));
+            scalp.GetFaceVertexIndicesAttr().Set(
+                VtIntArray(grid.indices.begin(), grid.indices.end()));
+        }
+        TonicCommitPaths nestedPaths = outputPaths;
+        nestedPaths.groomPath = scalpPath.AppendChild(TfToken("TonicGroom"));
+        TonicCommitter cn(&om, nestedPaths);
+        cn.ForcePartialModeForTest(true);
+        SdfPath const sentinel =
+            nestedPaths.groomPath.AppendChild(TfToken("ZzSlotSentinel"));
+        cn.Enqueue(sn);
+        bool nestedSwapped = false;
+        bool sentinelSurvivedLast = false;
+        size_t nestedSlots = 0;
+        {
+            auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(10000);
+            while (std::chrono::steady_clock::now() < deadline) {
+                SdfCreatePrimInLayer(liveN, sentinel);
+                TonicCommitter::SwapResult const r =
+                    cn.SwapIfIdle(liveN, /*gestureActive*/ false);
+                if (r == TonicCommitter::PartialProgress) {
+                    ++nestedSlots;
+                } else if (r == TonicCommitter::Swapped) {
+                    nestedSwapped = true;
+                    sentinelSurvivedLast = bool(liveN->GetPrimAtPath(sentinel));
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        Check(nestedSwapped && nestedSlots > 0,
+              "partial scalp: a groom under the scalp commits in partial "
+              "slots (" + std::to_string(nestedSlots) + "): " +
+                  cn.TakeDiagnostic());
+        Check(sentinelSurvivedLast,
+              "partial scalp: the last (scalp) slot does not re-copy the "
+              "groom subtree beneath the scalp");
+        if (SdfPrimSpecHandle const sentinelSpec =
+                liveN->GetPrimAtPath(sentinel)) {
+            liveN->GetPrimAtPath(nestedPaths.groomPath)
+                ->RemoveNameChild(sentinelSpec);
+        }
+        {
+            SdfPrimSpecHandle const over = liveN->GetPrimAtPath(scalpPath);
+            TfTokenVector applied;
+            if (over) {
+                VtValue const value = over->GetInfo(TfToken("apiSchemas"));
+                if (value.IsHolding<SdfTokenListOp>()) {
+                    value.UncheckedGet<SdfTokenListOp>().ApplyOperations(
+                        &applied);
+                }
+            }
+            Check(std::find(applied.begin(), applied.end(),
+                            TfToken("UsdGenRestAPI")) != applied.end(),
+                  "partial scalp: the nested groom's scalp over still "
+                  "carries UsdGenRestAPI");
+        }
+        Check(bool(liveN->GetPrimAtPath(nestedPaths.GuidesPath())) &&
+                  bool(liveN->GetPrimAtPath(nestedPaths.OutputPath())),
+              "partial scalp: the nested groom's Guides and Output land");
+    }
+
     // -- committer C ABI ----------------------------------------------------
     {
         Check(Tonic_CommitterCreate(nullptr, "/G", nullptr, nullptr) ==
@@ -1436,7 +1625,8 @@ main()
         }
         Check(swapResult == TonicCommitter_Swapped,
               "C ABI swap lands the commit");
-        Check(Tonic_CommitterSwap(cc, "no-such-layer", 0) == TONIC_ERROR,
+        Check(Tonic_CommitterSwap(cc, "no-such-layer", 0) ==
+                  TonicCommitter_Error,
               "C ABI swap rejects an unknown live layer");
         Check(Tonic_CommitterSetSwapBudgetMs(cc, 5.0) == TONIC_OK,
               "C ABI budget sets");
@@ -1995,6 +2185,154 @@ main()
                   SameDeltas(sourceAfterK6.deltas,
                              hydratedAfterK6.deltas),
               "V0b: hydrated scale/twist child remains exact through a later parent K6");
+
+        // K14 generation marker (review 2026-09-24): K14's child slot order
+        // changed with the ring alignment, and stored residuals are per slot
+        // of the derivation that measured them. A marked groom installs them
+        // verbatim (bit-exact hydrate); a groom without the marker was
+        // written by the old K14, so its residuals are re-measured from the
+        // stored actual against today's derivation instead of being added
+        // to the wrong slots by the next K6. Simulate the old slot order by
+        // rotating tube3's stored section residual one slot per section.
+        {
+            TfToken subdivider;
+            UsdPrim const groomPrim = sh->GetPrimAtPath(SdfPath("/TonicGroom"));
+            Check(groomPrim &&
+                      groomPrim.GetAttribute(TfToken("usdGen:tonic:subdivider"))
+                          .Get(&subdivider) &&
+                      subdivider == TfToken("aligned-v1"),
+                  "K14 marker: the commit records usdGen:tonic:subdivider = "
+                  "aligned-v1");
+            SdfPath const childPath("/TonicGroom/Tubes/tube0/tube3");
+            TonicModel::TubeRecord source;
+            bool const haveSource = hm.GetTubeRecord(kids[2], &source) &&
+                                    source.actual.ringVerts >= 3;
+            int const ringVerts = haveSource ? source.actual.ringVerts : 0;
+            VtVec2fArray rotatedDeltas;
+            // marker: "keep", "drop" or any other token to author
+            auto variant = [&](char const *name, char const *marker) {
+                SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(name);
+                layer->TransferContent(liveH);
+                SdfAttributeSpecHandle const deltasSpec =
+                    layer->GetAttributeAtPath(childPath.AppendProperty(
+                        TfToken("usdGen:tonic:sectionDeltas")));
+                if (deltasSpec && ringVerts > 0) {
+                    VtValue const value = deltasSpec->GetDefaultValue();
+                    if (value.IsHolding<VtVec2fArray>()) {
+                        VtVec2fArray d = value.UncheckedGet<VtVec2fArray>();
+                        VtVec2fArray r = d;
+                        size_t const n = size_t(ringVerts);
+                        for (size_t base = 0; base + n <= d.size(); base += n) {
+                            for (size_t i = 0; i < n; ++i) {
+                                r[base + i] = d[base + (i + 1) % n];
+                            }
+                        }
+                        deltasSpec->SetDefaultValue(VtValue(r));
+                        rotatedDeltas = r;
+                    }
+                }
+                SdfPath const markerPath =
+                    SdfPath("/TonicGroom")
+                        .AppendProperty(TfToken("usdGen:tonic:subdivider"));
+                SdfAttributeSpecHandle const markerSpec =
+                    layer->GetAttributeAtPath(markerPath);
+                if (std::string(marker) == "drop") {
+                    if (markerSpec) {
+                        layer->GetPrimAtPath(SdfPath("/TonicGroom"))
+                            ->RemoveProperty(markerSpec);
+                    }
+                } else if (std::string(marker) != "keep" && markerSpec) {
+                    markerSpec->SetDefaultValue(VtValue(TfToken(marker)));
+                }
+                return layer;
+            };
+            auto sectionsNear = [](usdGenTonic::TonicShapeDeltas const &a,
+                                   usdGenTonic::TonicShapeDeltas const &b) {
+                if (a.sections.size() != b.sections.size()) {
+                    return false;
+                }
+                for (size_t s = 0; s < a.sections.size(); ++s) {
+                    auto const &x = a.sections[s];
+                    auto const &y = b.sections[s];
+                    if (x.u.size() != y.u.size() || x.v.size() != y.v.size() ||
+                        std::fabs(x.scale - y.scale) > 1e-4f ||
+                        std::fabs(x.twist - y.twist) > 1e-4f) {
+                        return false;
+                    }
+                    for (size_t i = 0; i < x.u.size(); ++i) {
+                        if (std::fabs(x.u[i] - y.u[i]) > 1e-4f ||
+                            std::fabs(x.v[i] - y.v[i]) > 1e-4f) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            };
+
+            // Marked: the rotated residual is installed exactly as stored.
+            TonicModel marked;
+            usdGenTonic::TonicHydrateResult const markedResult =
+                usdGenTonic::TonicHydrateModel(
+                    MakeStage(variant("tonic-k14-marked", "keep")),
+                    SdfPath("/TonicGroom"), &marked);
+            TonicModel::TubeRecord markedRecord;
+            bool verbatim = haveSource && markedResult.ok &&
+                            !rotatedDeltas.empty() &&
+                            marked.GetTubeRecord(kids[2], &markedRecord);
+            if (verbatim) {
+                size_t k = 0;
+                for (auto const &sec : markedRecord.deltas.sections) {
+                    for (size_t i = 0; verbatim && i < sec.u.size(); ++i, ++k) {
+                        verbatim = k < rotatedDeltas.size() &&
+                                   sec.u[i] == rotatedDeltas[k][0] &&
+                                   sec.v[i] == rotatedDeltas[k][1];
+                    }
+                }
+                verbatim = verbatim && k == rotatedDeltas.size();
+            }
+            Check(verbatim,
+                  "K14 marker: a marked groom installs its stored residuals "
+                  "verbatim");
+
+            // Unmarked (pre-alignment): re-measured against today's K14.
+            TonicModel legacy;
+            usdGenTonic::TonicHydrateResult const legacyResult =
+                usdGenTonic::TonicHydrateModel(
+                    MakeStage(variant("tonic-k14-legacy", "drop")),
+                    SdfPath("/TonicGroom"), &legacy);
+            TonicModel::TubeRecord legacyRecord;
+            Check(haveSource && legacyResult.ok &&
+                      legacy.GetTubeRecord(kids[2], &legacyRecord) &&
+                      SameDesc(legacyRecord.actual, source.actual) &&
+                      sectionsNear(legacyRecord.deltas, source.deltas),
+                  "K14 marker: an unmarked groom re-measures its residuals "
+                  "from the stored actual (the stale slot order is gone): " +
+                      legacyResult.diagnostic);
+            TonicModel::TubeRecord legacyAfterK6, sourceAfterK6b;
+            TonicModel sourceClone;
+            bool const k6 =
+                usdGenTonic::TonicHydrateModel(sh, SdfPath("/TonicGroom"),
+                                               &sourceClone).ok &&
+                legacy.MoveTubeCenterCV(0, 1, 0.02f, -0.01f, 0.01f) &&
+                sourceClone.MoveTubeCenterCV(0, 1, 0.02f, -0.01f, 0.01f) &&
+                legacy.GetTubeRecord(kids[2], &legacyAfterK6) &&
+                sourceClone.GetTubeRecord(kids[2], &sourceAfterK6b);
+            Check(k6 && sectionsNear(legacyAfterK6.deltas,
+                                     sourceAfterK6b.deltas),
+                  "K14 marker: and a later parent K6 treats the migrated "
+                  "child like the source");
+
+            TonicModel unknown;
+            usdGenTonic::TonicHydrateResult const unknownResult =
+                usdGenTonic::TonicHydrateModel(
+                    MakeStage(variant("tonic-k14-unknown", "aligned-v9")),
+                    SdfPath("/TonicGroom"), &unknown);
+            Check(!unknownResult.ok &&
+                      unknownResult.diagnostic.find("subdivider") !=
+                          std::string::npos,
+                  "K14 marker: an unknown subdivider is refused, not "
+                  "guessed (" + unknownResult.diagnostic + ")");
+        }
 
         // A hand-authored foreign guide becomes a locked L3 tube.
         {

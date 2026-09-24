@@ -198,7 +198,11 @@ def tubeStatus(centerCount, sectionCount, ringVerts, regionId):
 def tubeEditHint(subMode):
     """One concise, mode-specific affordance for the Tube status/panel."""
     if str(subMode) == "ring":
-        return "Scale selected sections: drag the outer ring handle."
+        # GZ-06: names only handles the ringTRS gizmo really offers under
+        # Move (the in-plane arrows/square/centre, the scale circle and the
+        # W twist arrow) plus the tool keys.
+        return ("Move drags the ring in its plane, the outer circle scales "
+                "it, the W arrow twists it; R = uniform scale, E = rotate")
     if str(subMode) == "section":
         return "Edit section CVs: select a CV, then drag in its ring plane."
     return ""

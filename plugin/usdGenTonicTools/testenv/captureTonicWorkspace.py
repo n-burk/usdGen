@@ -1,12 +1,14 @@
 # captureTonicWorkspace -- writes renders/tonic-workspace.png (plan/18 V3
-# exit, V7 deliverable).
+# exit, V7 deliverable) and renders/tonic-first-run.png (the unbound dock,
+# docs/tonic-tool.md "First run").
 #
-#   testusdview --testScript \
+#   powershell -File bin/launch_usdview.ps1 -TestScript \
 #       plugin/usdGenTonicTools/testenv/captureTonicWorkspace.py \
 #       examples/tonic-graph-scalp.usda
 #
-# with the same PXR_PLUGINPATH_NAME / PYTHONPATH the T3 tonic tests use.
-# bin/capture_tonic_workspace.ps1 builds that environment and calls it.
+# The launcher builds the same PXR_PLUGINPATH_NAME / PYTHONPATH the T3
+# tonic tests use. The stroke below is drawn at x/z 1..3, so it needs the
+# 4x4 graph-scalp fixture (tonic-single-quad.usda spans only -1..1).
 #
 # NOT a test -- nothing here asserts a budget or a pixel, and it writes
 # into the source tree, which is why its name does not start with "test"
@@ -148,8 +150,30 @@ def run(appController):
         return 1
     view.setFocus()
 
+    root = os.path.normpath(os.path.join(here, "..", "..", ".."))
     dataModel.selection.setPrimPath("/Scalp")
     registry.getCommandPlugin("usdGenTonicTools.openWorkspace").run()
+    # The first-run shot (docs/tonic-tool.md "First run"): the dock open
+    # with nothing bound -- the Bind button, the Step 1 hint and the
+    # gated shelf -- before the bind below changes any of it.
+    firstRun = container.workspace
+    if firstRun is not None:
+        firstRun.setMinimumWidth(DOCK_WIDTH)
+        mainWindow.resize(VIEW[0] + DOCK_WIDTH + CHROME[0],
+                          mainWindow.height())
+        firstRun.refresh()
+        wait(50)
+        view.update()
+        view.repaint()
+        early = mainWindow.grab()
+        earlyOut = os.path.join(root, "renders", "tonic-first-run.png")
+        os.makedirs(os.path.dirname(earlyOut), exist_ok=True)
+        if early.save(earlyOut, "PNG"):
+            print("wrote %s (%dx%d)" % (earlyOut, early.width(),
+                                        early.height()))
+        else:
+            print("FAIL: could not write %s" % earlyOut)
+            return 1
     registry.getCommandPlugin("usdGenTonicTools.bindScalp").run()
     session = container.session
     viewport = container.viewport

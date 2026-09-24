@@ -2092,8 +2092,10 @@ __device__ double _HPolyArea(TonicHPt const *poly, int n)
 
 // Subdivide edges longer than maxLen until the budget is reached (inserted
 // points stay on the polygon). `poly` holds at least `budget` vertices.
+// tieRel > 0 splits the lowest-index edge within that relative margin of
+// the longest (the twin's K14 tie rule, see SubdivideLongEdges).
 __device__ void _HSubdivideLongEdges(TonicHPt *poly, int *n, double maxLen,
-                                     int budget)
+                                     int budget, double tieRel = 0.0)
 {
     for (;;) {
         int const m = *n;
@@ -2116,6 +2118,19 @@ __device__ void _HSubdivideLongEdges(TonicHPt *poly, int *n, double maxLen,
         if (bi < 0) {
             return;
         }
+        if (tieRel > 0.0) {
+            double const tied = fmax(maxLen, bl * (1.0 - tieRel));
+            for (int i = 0; i < bi; ++i) {
+                TonicHPt const P = poly[i];
+                TonicHPt const Q = poly[(i + 1) % m];
+                double const du = double(Q.u) - double(P.u);
+                double const dv = double(Q.v) - double(P.v);
+                if (sqrt(du * du + dv * dv) > tied) {
+                    bi = i;
+                    break;
+                }
+            }
+        }
         TonicHPt const P = poly[bi];
         TonicHPt const Q = poly[(bi + 1) % m];
         TonicHPt mid;
@@ -2127,6 +2142,140 @@ __device__ void _HSubdivideLongEdges(TonicHPt *poly, int *n, double maxLen,
         poly[bi + 1] = mid;
         *n = m + 1;
     }
+}
+
+// Twin of DropCoincidentVertices: drop consecutive (cyclic) clip vertices
+// closer than tol, a merged pair keeping the original parent corner. The
+// twin tracks corners by provenance; here a corner is a vertex bitwise
+// equal to one of the placed parent ring's `corners` (a clip copies its
+// inside vertices verbatim, and a fresh intersection never lands on one
+// but at an endpoint, where it is that corner).
+__device__ void _HDropCoincident(TonicHPt *poly, int *n,
+                                 TonicHPt const *corners, int cornerCount,
+                                 double tol, TonicHPt *scratch)
+{
+    int const m = *n;
+    if (m < 4 || !(tol > 0.0)) {
+        return;
+    }
+    double const tol2 = tol * tol;
+    auto close = [tol2](TonicHPt const &a, TonicHPt const &b) {
+        double const du = double(a.u) - double(b.u);
+        double const dv = double(a.v) - double(b.v);
+        return du * du + dv * dv < tol2;
+    };
+    auto corner = [&](TonicHPt const &a) {
+        for (int j = 0; j < cornerCount; ++j) {
+            if (corners[j].u == a.u && corners[j].v == a.v) {
+                return true;
+            }
+        }
+        return false;
+    };
+    int k = 0;
+    for (int i = 0; i < m; ++i) {
+        TonicHPt const p = poly[i];
+        if (k > 0 && close(scratch[k - 1], p)) {
+            if (!corner(scratch[k - 1]) && corner(p)) {
+                scratch[k - 1] = p;
+            }
+            continue;
+        }
+        scratch[k++] = p;
+    }
+    while (k > 3 && close(scratch[k - 1], scratch[0])) {
+        if (!corner(scratch[0]) && corner(scratch[k - 1])) {
+            scratch[0] = scratch[k - 1];
+        }
+        --k;
+    }
+    if (k >= 3) {
+        for (int i = 0; i < k; ++i) {
+            poly[i] = scratch[i];
+        }
+        *n = k;
+    }
+}
+
+// Twin of AlignRingToReference: whether `poly` (n points) must reverse to
+// take the reference ring's winding, and the cyclic shift that then best
+// matches it slot for slot (least summed squared distance about each
+// ring's own mean, normalised by its mean radius; near-ties keep the
+// smallest shift). Emit slot i as poly[idx], idx = (i + shift) % n, taken
+// from the end when reversed.
+__device__ void _HAlignToReference(TonicHPt const *poly, int n,
+                                   float const *refU, float const *refV,
+                                   bool *reversed, int *shift)
+{
+    *reversed = false;
+    *shift = 0;
+    if (n < 3) {
+        return;
+    }
+    double area = 0.0, refArea = 0.0;
+    for (int i = 0; i < n; ++i) {
+        int const j = (i + 1) % n;
+        area += double(poly[i].u) * double(poly[j].v) -
+                double(poly[j].u) * double(poly[i].v);
+        refArea += double(refU[i]) * double(refV[j]) -
+                   double(refU[j]) * double(refV[i]);
+    }
+    area *= 0.5;
+    refArea *= 0.5;
+    bool const rev =
+        (area > 0.0 && refArea < 0.0) || (area < 0.0 && refArea > 0.0);
+    double pu[kTonicDeviceMaxRing], pv[kTonicDeviceMaxRing];
+    double ru[kTonicDeviceMaxRing], rv[kTonicDeviceMaxRing];
+    for (int i = 0; i < n; ++i) {
+        TonicHPt const p = poly[rev ? n - 1 - i : i];
+        pu[i] = double(p.u);
+        pv[i] = double(p.v);
+        ru[i] = double(refU[i]);
+        rv[i] = double(refV[i]);
+    }
+    auto normalise = [n](double *u, double *v) {
+        double mu = 0.0, mv = 0.0;
+        for (int i = 0; i < n; ++i) {
+            mu += u[i];
+            mv += v[i];
+        }
+        mu /= double(n);
+        mv /= double(n);
+        double radius = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double const du = u[i] - mu;
+            double const dv = v[i] - mv;
+            radius += sqrt(du * du + dv * dv);
+        }
+        radius /= double(n);
+        double const inv = radius > 0.0 ? 1.0 / radius : 1.0;
+        for (int i = 0; i < n; ++i) {
+            u[i] = (u[i] - mu) * inv;
+            v[i] = (v[i] - mv) * inv;
+        }
+    };
+    normalise(pu, pv);
+    normalise(ru, rv);
+    double costs[kTonicDeviceMaxRing];
+    double best = 1e300;
+    for (int k = 0; k < n; ++k) {
+        double cost = 0.0;
+        for (int i = 0; i < n; ++i) {
+            int const j = (i + k) % n;
+            double const du = pu[j] - ru[i];
+            double const dv = pv[j] - rv[i];
+            cost += du * du + dv * dv;
+        }
+        costs[k] = cost;
+        best = fmin(best, cost);
+    }
+    double const tied = best + 1e-4 * double(n);
+    int k = 0;
+    while (costs[k] > tied) {
+        ++k;
+    }
+    *reversed = rev;
+    *shift = k;
 }
 
 // Arc-length resample of a closed polygon to `count` points. The running
@@ -2309,6 +2458,8 @@ __device__ bool _HRescaleCenterLength(float *cx, float *cy, float *cz,
 }
 
 constexpr int kHClipCap = kTonicDeviceMaxRing + kTonicDeviceMaxChildren + 8;
+// The twin's kSplitTieRel: K14's densify/pad edge-length tie margin.
+constexpr double kHSplitTieRel = 1e-4;
 constexpr int kHCloudCap = kTonicDeviceMaxRing * kTonicDeviceMaxChildren;
 
 // -- K14: subdivide -----------------------------------------------------------
@@ -2496,8 +2647,10 @@ __global__ void _HSubdivideKernel(TonicHSpan in, TonicHTube const *parents,
                 failSection = s;
                 break;
             }
+            // bufA still holds the placed parent ring (the corners).
+            _HDropCoincident(bufB, &cnt, bufA, prv, 1e-4 * s_spacing, bufC);
             _HSubdivideLongEdges(bufB, &cnt, 2.0 * s_spacing,
-                                 kTonicDeviceMaxRing);
+                                 kTonicDeviceMaxRing, kHSplitTieRel);
             if (pass == 0) {
                 if (cnt > target) {
                     target = cnt;
@@ -2526,7 +2679,8 @@ __global__ void _HSubdivideKernel(TonicHSpan in, TonicHTube const *parents,
                     bufA[i] = bufB[i];
                 }
                 int padded = cnt;
-                _HSubdivideLongEdges(bufA, &padded, 0.0, target);
+                _HSubdivideLongEdges(bufA, &padded, 0.0, target,
+                                     kHSplitTieRel);
                 if (padded != target) {
                     _HResamplePoly(bufB, cnt, target, bufC);
                     emit = bufC;
@@ -2536,9 +2690,21 @@ __global__ void _HSubdivideKernel(TonicHSpan in, TonicHTube const *parents,
             }
             size_t const ringBase =
                 size_t(oBase) * size_t(outRingStride) + size_t(s * target);
+            // Slot alignment to the section already emitted before this
+            // one (section 0 is the anchor), as the twin does.
+            bool reversed = false;
+            int shift = 0;
+            if (s > 0) {
+                _HAlignToReference(emit, target,
+                                   out.ringU + ringBase - size_t(target),
+                                   out.ringV + ringBase - size_t(target),
+                                   &reversed, &shift);
+            }
             for (int i = 0; i < target; ++i) {
-                out.ringU[ringBase + size_t(i)] = emit[i].u;
-                out.ringV[ringBase + size_t(i)] = emit[i].v;
+                int const k = (i + shift) % target;
+                TonicHPt const e = emit[reversed ? target - 1 - k : k];
+                out.ringU[ringBase + size_t(i)] = e.u;
+                out.ringV[ringBase + size_t(i)] = e.v;
             }
             size_t const secBase = size_t(oBase) * size_t(outSecStride);
             out.secT[secBase + size_t(s)] = in.secT[parent.sectionBegin + s];

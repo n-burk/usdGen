@@ -417,6 +417,32 @@ void CheckPtexParameters()
           "each strand reads its root face, scaled and offset by the map prim");
     Check(parameters.TakeWarnings().empty(), "a clean read warns about nothing");
 
+    // Limit roots carry authoritative face UVs. They must not be projected
+    // back onto the cage to recover a different texel after smoothing.
+    // A varying Ptex fixture is used so merely preserving the face ID cannot
+    // pass this test. Put the UV and object-space projections on opposite sides.
+    {
+        auto limitDesc=desc;
+        auto const varyingFile=fs::temp_directory_path()/"testUsdGenLimitExpression.ptx";
+        Ptex::String error;
+        {PtexPtr<PtexWriter> writer(PtexWriter::open(varyingFile.string().c_str(),Ptex::mt_quad,Ptex::dt_float,1,-1,2,error,true));
+        Check(bool(writer),"create varying limit Ptex");
+        if(writer){int adj[4]={-1,-1,-1,-1},edges[4]={0,0,0,0};
+            for(int f=0;f<2;++f){float pixels[16];for(int j=0;j<4;++j)for(int i=0;i<4;++i)pixels[j*4+i]=(i+.5f)/4;
+                writer->writeFace(f,Ptex::FaceInfo(Ptex::Res(2,2),adj,edges),pixels);}
+            Check(writer->close(error),"close varying limit Ptex");}}
+        limitDesc.maps[0].resolvedAssetPath=varyingFile.string();
+        UsdGenNodeDesc scatter;scatter.path=SdfPath("/Groom/Scatter");scatter.type=TfToken("UsdGenScatter");
+        scatter.params={{TfToken("subdivisionLevel"),VtValue(3),false}};
+        limitDesc.nodes[0].inputs={scatter.path};limitDesc.nodes.push_back(scatter);
+        auto limitStrands=strands;limitStrands.rootUV={{.875f,.375f},{.125f,.625f}};
+        UsdGenCpuParameters sampled;
+        Check(sampled.Evaluate(limitDesc,limitDesc.nodes[0],limitStrands,0,0,0,&changed,&errors),"evaluate exact limit UV Ptex");
+        auto const* samples=sampled.Find(TfToken("region"));
+        Check(samples && samples->values.size()==2 && Near(samples->values[0],2.75) && Near(samples->values[1],1.25),"Ptex uses retained limit UV, not projected cage position");
+        std::error_code ignored;fs::remove(varyingFile,ignored);
+    }
+
     // A missing file is not a broken groom: map:default, and a warning.
     desc.maps[0].resolvedAssetPath = (fs::temp_directory_path() / "noSuchMap.ptx").string();
     desc.maps[0].params.push_back({TfToken("map:default"), VtValue(0.5f), false});

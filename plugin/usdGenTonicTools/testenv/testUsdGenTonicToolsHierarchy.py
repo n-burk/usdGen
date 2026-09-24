@@ -175,8 +175,23 @@ def main():
     check(state.activeCutEnabled and state.focusParentId == 41 and
           state.focusAncestorIds == (7, 41) and state.activeLevel == 3 and
           hier.breadcrumbSegments(state) ==
-          [("tube:7", "L1 root"), ("tube:41", "L2 child")],
-          "active-cut context binds breadcrumbs to stable tube ids")
+          [("tube:7", "L1 root"), ("tube:41", "L2 child"), (None, "L3")],
+          "active-cut context binds breadcrumbs to stable tube ids, then "
+          "a non-link frontier")
+    check(hier.breadcrumbSegments(state, childCount=3)[-1] ==
+          (None, "L3 (3 children)") and
+          hier.breadcrumbSegments(state, childCount=1)[-1] ==
+          (None, "L3 (1 child)"),
+          "the frontier counts the entered parent's children (DK-08)")
+    # DK-08: an entered L1 tube reads "L1 Tube 0 > L2", ending at L2.
+    hier.setActiveCutFocus(state, 0, (0,), (), 2)
+    check(hier.breadcrumb(state) == "L1 Tube 0 > L2" and
+          hier.breadcrumb(state).endswith("L2"),
+          "the breadcrumb at L2 names the tube and ends with L2 (%r)"
+          % hier.breadcrumb(state))
+    hier.setActiveCutFocus(state, -1, (0,), (), 1)
+    check(hier.breadcrumbSegments(state) == [("tube:0", "L1 Tube 0")],
+          "a collapsed focus has no frontier: the tube is where you are")
     hier.clearActiveCutFocus(state)
     check(state.focusParentId == -1 and state.focusAncestorIds == () and
           state.activeLevel == 1,
@@ -276,8 +291,14 @@ def main():
     check(hier.smoothnessWarning([0.0, 0.01, 0.0]) == "",
           "quiet scores raise no smoothness warning")
     warn = hier.smoothnessWarning([0.0, 0.5, 0.02])
-    check("CV 1" in warn and "relax" in warn,
-          "a spiking CV names itself and the relax action")
+    check("CV 1" in warn and "Relax" in warn and "Smooth" in warn,
+          "a spiking CV names itself and the Smooth/Relax fix (%r)" % warn)
+    check("°" in warn and "15°" in warn and "tube 0" in warn and
+          "tube" in warn,
+          "the kink reads in degrees on a named tube (%r)" % warn)
+    check("tube 4" in hier.smoothnessWarning([0.5], tubeId=4) and
+          "1 more CV" in hier.smoothnessWarning([0.5, 0.0, 0.6]),
+          "the tube id is the caller's and further spikes are counted")
     check(hier.intersectionWarning([]) == "",
           "clear roots raise no intersection warning")
     check(hier.intersectionWarning([4, 2]) ==

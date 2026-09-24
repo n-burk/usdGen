@@ -84,11 +84,13 @@ def typeKey(view, name, modifiers=()):
             "d": QtCore.Qt.Key.Key_D,
             "m": QtCore.Qt.Key.Key_M,
             "n": QtCore.Qt.Key.Key_N,
+            "l": QtCore.Qt.Key.Key_L,
             "1": QtCore.Qt.Key.Key_1,
             "4": QtCore.Qt.Key.Key_4,
             "up": QtCore.Qt.Key.Key_Up,
             "down": QtCore.Qt.Key.Key_Down,
-            "backspace": QtCore.Qt.Key.Key_Backspace}
+            "backspace": QtCore.Qt.Key.Key_Backspace,
+            "delete": QtCore.Qt.Key.Key_Delete}
     mods = QtCore.Qt.KeyboardModifier.NoModifier
     table = {"shift": QtCore.Qt.KeyboardModifier.ShiftModifier,
              "ctrl": QtCore.Qt.KeyboardModifier.ControlModifier}
@@ -104,18 +106,27 @@ def wait(ms=30):
     QtTest.QTest.qWait(int(ms))
 
 
-def clickAction(workspace, label):
-    """Click one visible dock action through Qt, as an artist does."""
+def clickWidget(widget):
+    """One left click on a dock widget through QtTest."""
     from pxr.Usdviewq.qt import QtCore
     from pxr.Usdviewq.qt import PySideModule
     import importlib
     QtTest = importlib.import_module("%s.QtTest" % PySideModule)
-    QtWidgets = importlib.import_module("%s.QtWidgets" % PySideModule)
-    for button in workspace.findChildren(QtWidgets.QPushButton):
-        if str(button.text()).startswith(label):
-            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
-            return True
-    return False
+    QtTest.QTest.mouseClick(widget, QtCore.Qt.MouseButton.LeftButton)
+
+
+def clickAction(workspace, actionId):
+    """Click one dock action through Qt, as an artist does; the button is
+    found by its Action.id (DK-04 workspace.button hook), not its text."""
+    from pxr.Usdviewq.qt import QtCore
+    from pxr.Usdviewq.qt import PySideModule
+    import importlib
+    QtTest = importlib.import_module("%s.QtTest" % PySideModule)
+    button = workspace.button("action", actionId)
+    if button is None:
+        return False
+    QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +234,15 @@ def frameTube(stage, view, target):
     mat.SetRow(2, Gf.Vec4d(zAxis[0], zAxis[1], zAxis[2], 0.0))
     mat.SetRow(3, Gf.Vec4d(eye[0], eye[1], eye[2], 1.0))
     xf = UsdGeom.Xformable(cam.GetPrim())
-    op = xf.AddTransformOp()
+    # Reuse the op on a second call (MD-04 re-aims this camera):
+    # AddTransformOp refuses a duplicate.
+    op = None
+    for candidate in xf.GetOrderedXformOps():
+        if candidate.GetOpType() == UsdGeom.XformOp.TypeTransform:
+            op = candidate
+            break
+    if op is None:
+        op = xf.AddTransformOp()
     op.Set(mat)
     view._dataModel.viewSettings.cameraPrim = stage.GetPrimAtPath(
         "/TonicLevelsTubeCamera")
@@ -346,9 +365,10 @@ def run(appController):
     # tessellated vertex.  This is the ordinary artist selection path, not a
     # test-only giant pick radius.
     target = pixel(root[0], root[2] + 0.25, 0.5 * tip[1])
-    state.snapRadiusPx = 2.0
+    # MD-04: Hierarchy clicks with its own pick radius, not Graph's snap.
+    state.pickRadiusPx = 2.0
     probe = session.pickItem(camera, target[0], target[1],
-                             state.snapRadiusPx,
+                             state.pickRadiusPx,
                              tonicLib.TONIC_PICK_TUBE_VERT)
     check(probe is not None,
           "the side-wall point resolves to a visible tube (%r)" % (probe,))
@@ -363,7 +383,7 @@ def run(appController):
     state.subdivideCount = 4
     before = levelInfo(session, 2)
     check(before is None, "nothing is published at L2 yet (%r)" % (before,))
-    check(clickAction(container.workspace, "Subdivide"),
+    check(clickAction(container.workspace, "subdivide"),
           "the visible Subdivide button was clicked")
     wait(20)
     after = levelInfo(session, 2)
@@ -408,6 +428,50 @@ def run(appController):
           "frontier display levels stay solid unless the artist enables x-ray"
           " (L1 %s/%s, L2 %s/%s)" % (visible1, xray1, visible2, xray2))
 
+    # -- DK-08: the breadcrumb is a row of buttons -------------------------
+    workspace = container.workspace
+    workspace.refresh()
+    crumbs = workspace.breadcrumbButtons()
+    check(len(crumbs) == 2,
+          "after subdivide + enter the breadcrumb has two buttons (%r)"
+          % ([button.text() for button in crumbs],))
+    if len(crumbs) == 2:
+        check(crumbs[0].text() == "Groom" and crumbs[1].text() == "Tube 0"
+              and "Level 1" in crumbs[1].toolTip(),
+              "Groom, then the tube's name with its level in the tooltip "
+              "(%r, %r)" % (crumbs[1].text(), crumbs[1].toolTip()))
+        frontier = workspace._breadcrumbBar.frontierLabel.text()
+        check(frontier == "L2 (%d children)" % len(kids),
+              "the frontier reads where the artist is (%r)" % frontier)
+        clickWidget(crumbs[0])
+        wait(20)
+        check(state.activeLevel == 1 and
+              int(session.dll.Tonic_GetFocusLevel(session.model)) == 1 and
+              tonicHierarchy.isTubeVisible(session.dll, session.model, 0)
+              is True,
+              "clicking the first crumb returns to L1 with the parent on "
+              "screen (state L%d)" % state.activeLevel)
+        typeKey(view, "down", ("ctrl",))
+        wait(20)
+        check(state.activeLevel == 2, "Ctrl+Down enters the branch again")
+        workspace.refresh()
+        exitButton = workspace._breadcrumbBar.exitButton
+        check(exitButton.isEnabled() and
+              "Ctrl+Up" in exitButton.toolTip(),
+              "the breadcrumb's up arrow is Exit level (Ctrl+Up)")
+        clickWidget(exitButton)
+        wait(20)
+        check(state.activeLevel == 1 and
+              [item[0] for item in
+               session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)] == [0],
+              "clicking it exits to the selected parent")
+        typeKey(view, "down", ("ctrl",))
+        wait(20)
+        selectedIds = [item[0] for item in
+                       session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)]
+        check(state.activeLevel == 2 and sorted(selectedIds) == sorted(kids),
+              "and Ctrl+Down comes back to the children (%r)" % selectedIds)
+
     # -- an L2 edit, then a parent edit after Ctrl+Up (K6) -----------------
     if not kids:
         print("FAIL: no children to walk the K6 propagation over")
@@ -451,6 +515,50 @@ def run(appController):
           "and the child still carries its own edit (%r -> %r)"
           % (editNorm, afterNorm))
 
+    # -- DK-08: Re-subdivide's confirm shows on the button -----------------
+    TUBE = tonicLib.TONIC_PICK_TUBE_VERT
+    workspace = container.workspace
+    resub = workspace.button("action", "resubdivide")
+    check(resub is not None, "the dock has a Re-subdivide button")
+    if resub is not None:
+        plainText = resub.text()
+        check(clickAction(workspace, "resubdivide"), "Re-subdivide clicked")
+        wait(20)
+        check("Confirm" in resub.text() and viewport.loop.resubdivideArmed,
+              "one click arms it and the button asks to confirm (%r)"
+              % resub.text())
+        check(sorted(childrenOf(session, 0)) == sorted(kids) and
+              (deltaNorm(session, child) or 0.0) > 1e-4,
+              "and nothing was re-subdivided yet: the child keeps its edit")
+        session.select(TUBE, [kids[0]])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        workspace.refresh()
+        check("Confirm" not in resub.text() and resub.text() == plainText,
+              "a new selection reverts the button (%r)" % resub.text())
+        session.select(TUBE, [0])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        clickAction(workspace, "resubdivide")
+        wait(20)
+        clickAction(workspace, "resubdivide")
+        wait(20)
+        # The model recycles freed tube ids, so "new" children are told
+        # apart by what Re-subdivide throws away: the children's sculpt.
+        redone = childrenOf(session, 0)
+        norms = [deltaNorm(session, tubeId) for tubeId in redone]
+        check(len(redone) == 4 and
+              all(norm is not None and norm < 1e-5 for norm in norms) and
+              "re-subdivided" in str(messages[-1:]),
+              "two clicks re-subdivide: four children recreated without "
+              "the old sculpt (%r, deltas %r; %r)"
+              % (redone, norms, messages[-1:]))
+        check("Confirm" not in resub.text(),
+              "and the button is plain again (%r)" % resub.text())
+        # Back to the parent, as Shift+M below expects.
+        typeKey(view, "up", ("ctrl",))
+        wait(20)
+        check([item[0] for item in session.readSelection(TUBE)] == [0],
+              "Ctrl+Up selects the parent again")
+
     # -- Shift+M merges the children away ----------------------------------
     typeKey(view, "m", ("shift",))
     wait(20)
@@ -471,7 +579,7 @@ def run(appController):
     check(levelInfo(session, 2) is None and
           tonicHierarchy.isTubeVisible(session.dll, session.model, 0) is True,
           "undo restores topology but keeps the merged parent collapsed")
-    check(clickAction(container.workspace, "Enter level"),
+    check(clickAction(container.workspace, "enterLevel"),
           "an explicit Enter returns the restored branch to the frontier")
     wait(20)
     check(levelInfo(session, 2) is not None and
@@ -481,6 +589,243 @@ def run(appController):
                   for child in restored),
           "and explicitly entering publishes the restored L2 children"
           " (%r)" % (levelInfo(session, 2),))
+
+    # -- MD-03: the edge split is drawn visibly and consumed ---------------
+    typeKey(view, "m", ("shift",))
+    wait(20)
+    check(not childrenOf(session, 0),
+          "Shift+M folds the children away again for the edge split")
+    session.select(tonicLib.TONIC_PICK_TUBE_VERT, [0])
+    check(frameScalp(stage, view), "the top-down camera is back")
+    view.setFocus()
+    wait(50)
+    camera = tonicCamera.resolve(view)
+    if camera is None:
+        print("FAIL: the top-down camera did not resolve")
+        return 1
+    state.splitMode = "edge"
+    typeKey(view, "d")
+    loop = viewport.loop
+    check(loop is not None and loop.subMode() == "subdivide",
+          "D picks the Subdivide sub-mode (%r)"
+          % (loop.subMode() if loop is not None else None,))
+    overlay = viewport._regionOverlay
+    check(overlay is not None and not overlay.isVisible(),
+          "no edge overlay before a stroke")
+    stroke = [pixel(0.6 + 2.8 * i / 8.0, 2.0) for i in range(9)]
+    mouse.press(stroke[0])
+    for point in stroke[1:]:
+        mouse.move(point)
+    live = loop.edgePreview()["live"]
+    check(live is not None and overlay.isVisible(),
+          "the stroke in flight is drawn by the overlay (%r)" % (live,))
+    mouse.release(stroke[-1])
+    wait(20)
+    check(loop.edge is not None,
+          "the drag across the root recorded a split edge (%r)"
+          % (messages[-1:],))
+    check(overlay.isVisible(),
+          "and the recorded edge stays on screen until Shift+D")
+    typeKey(view, "d", ("shift",))
+    wait(20)
+    edgeKids = childrenOf(session, 0)
+    check(len(edgeKids) == 2,
+          "Shift+D splits the root along the edge into two (%r, %r)"
+          % (edgeKids, messages[-1:]))
+    check(loop.edge is None and not overlay.isVisible(),
+          "the split consumed the edge and hid the overlay")
+
+    # -- SL-02: a plain drag from empty space boxes tubes -------------------
+    typeKey(view, "n")
+    check(viewport.loop is not None and
+          viewport.loop.subMode() == "navigate",
+          "N picks the Navigate sub-mode (%r)"
+          % (viewport.loop.subMode() if viewport.loop is not None
+             else None,))
+    session.clearSelection(tonicLib.TONIC_PICK_TUBE_VERT)
+    session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+    start = pixel(0.3, 0.3)
+    end = pixel(3.7, 3.7)
+    probe = session.pickItem(camera, start[0], start[1],
+                             viewport.loop.pickRadiusPx(),
+                             tonicLib.TONIC_PICK_TUBE_VERT)
+    check(probe is None, "the band starts on empty space (%r)" % (probe,))
+    check(abs(end[0] - start[0]) >= 40.0 and abs(end[1] - start[1]) >= 40.0,
+          "the band spans at least 40 px each way (%r -> %r)"
+          % (start, end))
+    marquee = viewport._marqueeOverlay
+    mouse.press(start)
+    mouse.move(((start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5))
+    mouse.move(end)
+    wait(10)
+    check(marquee is not None and marquee.isVisible(),
+          "a plain drag from empty space shows the marquee")
+    mouse.release(end)
+    wait(10)
+    boxed = sorted(item[0] for item in
+                   session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT))
+    check(edgeKids and set(edgeKids) <= set(boxed),
+          "and selects the tubes it encloses (%r, children %r)"
+          % (boxed, edgeKids))
+    check(marquee is None or not marquee.isVisible(),
+          "the marquee goes away on release")
+
+    # -- SL-03: Backspace leaves the entered level; Delete removes a child --
+    viewport.setPointerInside(True)
+    TUBE = tonicLib.TONIC_PICK_TUBE_VERT
+    if len(edgeKids) == 2:
+        session.select(TUBE, [edgeKids[0]])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        typeKey(view, "backspace")
+        wait(20)
+        check(tonicHierarchy.isTubeVisible(session.dll, session.model, 0)
+              is True and
+              not any(tonicHierarchy.isTubeVisible(session.dll,
+                                                   session.model, child)
+                      for child in edgeKids),
+              "Backspace collapses the branch: parent visible, children "
+              "hidden")
+        check(int(session.dll.Tonic_GetFocusLevel(session.model)) == 1 and
+              int(state.activeLevel) == 1,
+              "and focuses level 1 (focus %d, state %d)"
+              % (int(session.dll.Tonic_GetFocusLevel(session.model)),
+                 int(state.activeLevel)))
+        check([item[0] for item in session.readSelection(TUBE)] == [0],
+              "with the parent selected (%r)" % (session.readSelection(TUBE),))
+
+        typeKey(view, "down", ("ctrl",))
+        wait(20)
+        check(all(tonicHierarchy.isTubeVisible(session.dll, session.model,
+                                               child) for child in edgeKids),
+              "Ctrl+Down enters the branch again")
+        victim, survivor = edgeKids
+        session.select(TUBE, [victim])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        undoDepth = int(session.dll.Tonic_GetUndoDepth(session.model))
+        typeKey(view, "delete")
+        wait(20)
+        remaining = childrenOf(session, 0)
+        check(remaining == [survivor],
+              "Delete removes the selected child and only it (%r, %r)"
+              % (remaining, messages[-1:]))
+        check(victim not in [item[0] for item in
+                             session.readSelection(TUBE)],
+              "and the deleted tube leaves the selection")
+        check(int(session.dll.Tonic_GetUndoDepth(session.model)) ==
+              undoDepth + 1,
+              "as exactly one undo step")
+        typeKey(view, "z", ("ctrl",))
+        wait(20)
+        check(sorted(childrenOf(session, 0)) == sorted(edgeKids),
+              "Ctrl+Z restores the deleted child (%r)"
+              % (childrenOf(session, 0),))
+        session.select(TUBE, [0])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        typeKey(view, "delete")
+        wait(20)
+        check(sorted(childrenOf(session, 0)) == sorted(edgeKids) and
+              messages and "L1 root" in str(messages[-1]),
+              "Delete refuses the L1 root with the reason (%r)"
+              % (messages[-1:],))
+    else:
+        check(False, "the edge split left two children for the Delete step")
+
+    # -- MD-04: Levels and Merge act on a plain click ----------------------
+    def clickablePixel(tubeId):
+        """A pixel whose Hierarchy pick is `tubeId` -- probed through the
+        loop's own pick radius, never assumed from a projection."""
+        radius = viewport.loop.pickRadiusPx()
+        for cv in (2, 3, 1, 4, 0):
+            point = centerCV(session, tubeId, cv)
+            if point is None:
+                continue
+            base = camera.worldToPixels(point)
+            if base is None:
+                continue
+            for dx, dy in ((0.0, 0.0), (4.0, 0.0), (-4.0, 0.0), (0.0, 4.0),
+                           (0.0, -4.0)):
+                x, y = base[0] + dx, base[1] + dy
+                hit = session.pickItem(camera, x, y, radius, TUBE)
+                if hit is not None and int(hit["id"]) == int(tubeId):
+                    return (x, y)
+        return None
+
+    if len(edgeKids) == 2 and root is not None and tip is not None:
+        session.select(TUBE, [0])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        typeKey(view, "down", ("ctrl",))
+        wait(20)
+        check(all(tonicHierarchy.isTubeVisible(session.dll, session.model,
+                                               child) for child in edgeKids),
+              "MD-04: Ctrl+Down shows the L2 children for the Levels click")
+        check(frameTube(stage, view, (root[0], 0.5 * tip[1], root[2])),
+              "the side camera is back for the sub-mode clicks")
+        view.setFocus()
+        wait(50)
+        camera = tonicCamera.resolve(view)
+        if camera is None:
+            print("FAIL: the side camera did not resolve for MD-04")
+            return 1
+
+        typeKey(view, "l")
+        check(viewport.loop is not None and
+              viewport.loop.subMode() == "levels",
+              "L picks the Levels sub-mode (%r)"
+              % (viewport.loop.subMode() if viewport.loop is not None
+                 else None,))
+        spot = clickablePixel(edgeKids[0])
+        check(spot is not None, "an L2 child has a clickable pixel")
+        if spot is not None:
+            mouse.click(spot)
+            wait(20)
+            check(int(state.soloLevel) == 2 and
+                  levelDisplay(session, 2)[0] and
+                  not levelDisplay(session, 1)[0],
+                  "a Levels click on an L2 child solos L2 (solo %d, %r)"
+                  % (int(state.soloLevel), messages[-1:]))
+            wait(300)       # two clicks, never a double-click (Enter)
+            mouse.click(spot)
+            wait(20)
+            check(int(state.soloLevel) == tonicHierarchy.SOLO_OFF and
+                  levelDisplay(session, 1)[0],
+                  "a second click un-solos it (solo %d, %r)"
+                  % (int(state.soloLevel), messages[-1:]))
+
+        # Merge: back to the parent, whose click folds its children.
+        session.select(TUBE, [edgeKids[0]])
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        typeKey(view, "up", ("ctrl",))
+        wait(20)
+        check(tonicHierarchy.isTubeVisible(session.dll, session.model, 0)
+              is True, "Ctrl+Up puts the parent back on screen")
+        typeKey(view, "m")
+        check(viewport.loop is not None and
+              viewport.loop.subMode() == "merge",
+              "M picks the Merge sub-mode (%r)"
+              % (viewport.loop.subMode() if viewport.loop is not None
+                 else None,))
+        spot = clickablePixel(0)
+        check(spot is not None, "the parent has a clickable pixel")
+        if spot is not None:
+            undoDepth = int(session.dll.Tonic_GetUndoDepth(session.model))
+            mouse.click(spot)
+            wait(20)
+            check(not childrenOf(session, 0),
+                  "a Merge click on the parent folds its children (%r, %r)"
+                  % (childrenOf(session, 0), messages[-1:]))
+            check(int(session.dll.Tonic_GetUndoDepth(session.model)) ==
+                  undoDepth + 1, "as exactly one undo step")
+            check(messages and
+                  "Merge children (Shift+M)" in str(messages[-1]),
+                  "with Shift+M's status (%r)" % (messages[-1:],))
+            typeKey(view, "z", ("ctrl",))
+            wait(20)
+            check(sorted(childrenOf(session, 0)) == sorted(edgeKids),
+                  "Ctrl+Z brings the children back (%r)"
+                  % (childrenOf(session, 0),))
+        typeKey(view, "n")
+    else:
+        check(False, "the edge split left two children for the MD-04 clicks")
 
     status = session.status()
     info("model v%d committed v%d, last move %.2f ms, ladder step %d"

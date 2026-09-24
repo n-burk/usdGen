@@ -35,9 +35,22 @@ class TonicToolState:
     workspaceOpen:  bool = False
     lastMoveMs:     float = 0.0
     ladderStep:     int = 0              # 0 = full fidelity (V5 steps it)
+    # FB-02: the dock's "Ladder enabled" box and the per-move budget the
+    # ladder steps on. Both are read at the next press, never mid-drag.
+    ladderEnabled:  bool = True
+    moveBudgetMs:   float = 8.0          # tonicLadder.MOVE_BUDGET_MS
+    # Viewport navigation (FB-03). "maya" leaves the camera on usdview's
+    # Alt+LMB/MMB/RMB; "blender" also orbits on plain MMB, pans on
+    # Shift+MMB and dollies on Ctrl+MMB. Either way a plain MMB/RMB press
+    # over an open workspace never picks a prim or opens its context menu.
+    navigationStyle: str = "maya"
     # Graph mode (P2, plan/17 section 5.1).
     graphSubMode:   str = "region"       # one of GRAPH_SUBMODES
     snapRadiusPx:   float = 8.0          # on-screen weld/snap distance
+    # MD-04: the click tolerance Hierarchy and Fill pick tubes with (their
+    # `[`/`]` in Hierarchy). Separate from snapRadiusPx, which is Graph's
+    # weld distance: one number used to drive both.
+    pickRadiusPx:   float = 8.0
     mirrorX:        bool = False         # symmetric node creation
     mapVersion:     int = 0              # last map version enqueued
     bakedVersion:   int = 0              # last map version swapped
@@ -46,6 +59,17 @@ class TonicToolState:
     selectionShape: str = "box"          # "box" | "lasso" in Tube edits
     tubeSelectionKind: str = "tube"      # tube, center, ring or section
     transformTool:  str = "move"         # select, move, rotate or scale
+    # GZ-05 / parity G16: which way the Move/Rotate/Scale handles point --
+    # "world" (identity), "screen" (camera plane) or "tube" (the owner
+    # tube's root-normal frame).  Ring/Section keep the ring's own frame.
+    # This is the LIVE tool's value: tonicGizmoSettings.SwitchTool banks it
+    # per tool on a tool change (Move/Scale start World, Rotate Tube).
+    transformOrientation: str = "world"
+    # Parity G20: tonicGizmoSettings.GizmoSettings (per-tool step snap,
+    # free rotate, prevent negative scale; manipulator size, grid size).
+    # None until tonicGizmoSettings.settingsFor(state) first creates it, so
+    # this dataclass keeps importing with nothing but the standard library.
+    gizmoSettings:  object = None
     softCenter:     float = 0.0          # soft-selection center in t
     softRadius:     float = 0.0          # 0 = exact CV only
     displaySegments: int = 1             # tessellation spans (ladder step 2)

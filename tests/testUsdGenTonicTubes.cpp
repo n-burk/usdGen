@@ -42,6 +42,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -1658,6 +1659,296 @@ void CheckProbes()
     }
 }
 
+// The K9 chart of `tube` at t, built exactly as
+// TonicBuildGuideMaterialBindingsCpu builds it (ring minus center on the
+// frame's normal/binormal), as a section TonicTriangulateSectionSlotsCpu
+// takes.
+bool MaterialChartAt(TonicTubeDesc const &tube,
+                     std::vector<TonicFrame> const &frames, float t,
+                     TonicTubeSection *chart)
+{
+    using namespace usdGenTonic;
+    std::vector<float> ring;
+    std::string err;
+    float c[3] = {0.0f, 0.0f, 0.0f};
+    TonicFrame f;
+    if (!TonicSampleTubeRingCpu(tube, frames, t, &ring, &err) ||
+        !TonicSampleCenterCpu(tube, frames, t, &c[0], &c[1], &c[2], &f,
+                              &err) ||
+        ring.size() != size_t(tube.ringVerts) * 3) {
+        return false;
+    }
+    chart->t = t;
+    chart->scale = 1.0f;
+    chart->twist = 0.0f;
+    chart->u.resize(size_t(tube.ringVerts));
+    chart->v.resize(size_t(tube.ringVerts));
+    for (int i = 0; i < tube.ringVerts; ++i) {
+        float const dx = ring[size_t(i) * 3 + 0] - c[0];
+        float const dy = ring[size_t(i) * 3 + 1] - c[1];
+        float const dz = ring[size_t(i) * 3 + 2] - c[2];
+        chart->u[size_t(i)] = dx * f.nx + dy * f.ny + dz * f.nz;
+        chart->v[size_t(i)] = dx * f.bx + dy * f.by + dz * f.bz;
+    }
+    return true;
+}
+
+// Summed squared slot distance between two same-size rings after cyclic
+// shift k of `b`, both taken about their own vertex means and normalised
+// by their mean radius (the shape K14's alignment compares).
+double ShiftCost(TonicTubeSection const &a, TonicTubeSection const &b, int k)
+{
+    auto normalised = [](TonicTubeSection const &s, std::vector<double> *u,
+                         std::vector<double> *v) {
+        size_t const n = s.u.size();
+        double mu = 0.0, mv = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            mu += s.u[i];
+            mv += s.v[i];
+        }
+        mu /= double(n);
+        mv /= double(n);
+        double r = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            r += std::hypot(s.u[i] - mu, s.v[i] - mv);
+        }
+        r = r > 0.0 ? r / double(n) : 1.0;
+        u->resize(n);
+        v->resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            (*u)[i] = (s.u[i] - mu) / r;
+            (*v)[i] = (s.v[i] - mv) / r;
+        }
+    };
+    std::vector<double> au, av, bu, bv;
+    normalised(a, &au, &av);
+    normalised(b, &bu, &bv);
+    size_t const n = au.size();
+    double cost = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        size_t const j = (i + size_t(k)) % n;
+        cost += (bu[j] - au[i]) * (bu[j] - au[i]) +
+                (bv[j] - av[i]) * (bv[j] - av[i]);
+    }
+    return cost;
+}
+
+// BUG-SUBDIVIDE-RING-ALIGNMENT (the testTonicSoak regression from 28a4c0e).
+// A K7-merged parent carries a different ring at every station, so each
+// child's Voronoi cell starts on a different parent corner per section.
+// K14 must keep the child's slot numbering aligned section to section --
+// K5 interpolates per slot, and a rotated neighbour twists the ring into a
+// figure-eight the concave material triangulator (rightly) refuses at a
+// fill station -- the model must refuse a split it could not fill, and a
+// refill that skips a tube must say so instead of shedding its guides.
+void CheckSubdivideRingAlignment()
+{
+    using namespace usdGenTonic;
+    // Parent: 5 CVs along +Y, a 16-slot ring at t = 0, .25, .5, .75, 1.
+    // Each station turns the ring geometry a further 45 degrees (slot
+    // order fixed, so the parent itself only twists smoothly) and breathes
+    // its radius: the per-station drift a merge of edited children leaves.
+    // (Without the K14 alignment the two slot checks below fail on it.)
+    TonicTubeDesc parent;
+    parent.tubeId = 1;
+    parent.level = 1;
+    parent.centerX = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    parent.centerY = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f};
+    parent.centerZ = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    parent.ringVerts = 16;
+    float const twoPi = 6.28318530717958647692f;
+    for (int k = 0; k < 5; ++k) {
+        TonicTubeSection s;
+        s.t = float(k) * 0.25f;
+        float const turn = float(k) * (45.0f / 360.0f) * twoPi;
+        float const radius = 0.5f * (1.0f + 0.12f * std::sin(float(k)));
+        for (int i = 0; i < parent.ringVerts; ++i) {
+            float const a = twoPi * float(i) / float(parent.ringVerts) + turn;
+            s.u.push_back(radius * std::cos(a));
+            s.v.push_back(0.8f * radius * std::sin(a));
+        }
+        parent.sections.push_back(std::move(s));
+    }
+    std::vector<TonicFrame> const parentFrames = FramesFor(parent);
+    TonicSubdivideDesc params;
+    params.count = 4;
+    params.seed = 3;
+    params.splitMode = TonicSplit_KMeans;
+    std::vector<TonicTubeDesc> kids;
+    std::string err;
+    Check(TonicSubdivideTubeCpu(parent, parentFrames, params, &kids, &err) &&
+              kids.size() == 4,
+          "ring alignment: the drifting parent subdivides (" + err + ")");
+
+    int const cvCount = 11;
+    std::string misaligned, jumped, untriangulable, unbindable;
+    for (TonicTubeDesc const &kid : kids) {
+        std::string const who = "child " + std::to_string(kid.tubeId);
+        // Slot numbering: shift 0 is the best cyclic match between every
+        // pair of adjacent sections, and slot 0 itself moves continuously.
+        for (size_t s = 0; s + 1 < kid.sections.size(); ++s) {
+            TonicTubeSection const &a = kid.sections[s];
+            TonicTubeSection const &b = kid.sections[s + 1];
+            double best = ShiftCost(a, b, 0);
+            for (int k = 1; k < kid.ringVerts; ++k) {
+                best = std::min(best, ShiftCost(a, b, k));
+            }
+            if (ShiftCost(a, b, 0) > best + 1e-4 * double(kid.ringVerts)) {
+                misaligned += " " + who + " s" + std::to_string(s);
+            }
+            float const radius = TonicSectionMeanRadius(a);
+            if (std::hypot(b.u[0] - a.u[0], b.v[0] - a.v[0]) >
+                0.5f * radius) {
+                jumped += " " + who + " s" + std::to_string(s);
+            }
+        }
+        // Every ring K9 triangulates: each section t and each fill station.
+        std::vector<TonicFrame> frames;
+        if (!TonicTubeFramesCpu(kid, &frames, &err)) {
+            untriangulable += " " + who + " (frames: " + err + ")";
+            continue;
+        }
+        std::vector<float> stations;
+        for (TonicTubeSection const &s : kid.sections) {
+            stations.push_back(s.t);
+        }
+        float const t0 = kid.sections.front().t;
+        float const t1 = kid.sections.back().t;
+        for (int c = 1; c + 1 < cvCount; ++c) {
+            stations.push_back(t0 + (t1 - t0) * float(c) / float(cvCount - 1));
+        }
+        for (float t : stations) {
+            TonicTubeSection chart;
+            std::vector<std::array<int, 3>> triangles;
+            std::string terr;
+            if (!MaterialChartAt(kid, frames, t, &chart) ||
+                !TonicTriangulateSectionSlotsCpu(chart, &triangles, &terr)) {
+                untriangulable += " " + who + " t=" + std::to_string(t);
+            }
+        }
+        // And the real consumer: K9 binds a root disc through every station.
+        float const rootCenter[3] = {kid.centerX[0], kid.centerY[0],
+                                     kid.centerZ[0]};
+        std::vector<TonicGuideRoot> roots;
+        TonicFillDesc fill;
+        fill.cvCount = cvCount;
+        std::vector<TonicGuideMaterialBinding> bindings;
+        if (!TonicRootSampleDiscCpu(kid.tubeId, 7,
+                                    TonicSectionMeanRadius(kid.sections[0]),
+                                    rootCenter, frames[0], 24, &roots, 0,
+                                    &err) ||
+            !TonicBuildGuideMaterialBindingsCpu(kid, frames, roots, fill,
+                                                &bindings, &err)) {
+            unbindable += " " + who + " (" + err + ")";
+        }
+        // K14 provenance rotates with the slots: two inherited corners of
+        // one section sit as far apart in the child as in the parent.
+        auto const &bb = kid.inheritedBoundaryBindings;
+        for (size_t i = 0; i + 1 < bb.size(); ++i) {
+            TonicParentBoundaryBinding const &p = bb[i];
+            TonicParentBoundaryBinding const &q = bb[i + 1];
+            if (p.section != q.section) {
+                continue;
+            }
+            TonicTubeSection const &cs = kid.sections[size_t(p.section)];
+            TonicTubeSection const &ps = parent.sections[size_t(p.section)];
+            float const childD = std::hypot(
+                cs.u[size_t(p.childSlot)] - cs.u[size_t(q.childSlot)],
+                cs.v[size_t(p.childSlot)] - cs.v[size_t(q.childSlot)]);
+            float const parentD = std::hypot(
+                ps.u[size_t(p.parentSlot)] - ps.u[size_t(q.parentSlot)],
+                ps.v[size_t(p.parentSlot)] - ps.v[size_t(q.parentSlot)]);
+            if (!Near(childD, parentD, 1e-4f)) {
+                misaligned += " " + who + " binding s" +
+                              std::to_string(p.section);
+            }
+        }
+    }
+    Check(misaligned.empty(),
+          "ring alignment: child slots stay aligned section to section and "
+          "K14 bindings follow them" + misaligned);
+    Check(jumped.empty(),
+          "ring alignment: child slot 0 moves continuously between adjacent "
+          "sections" + jumped);
+    Check(untriangulable.empty(),
+          "ring alignment: every child ring triangulates at every section t "
+          "and fill station" + untriangulable);
+    Check(unbindable.empty(),
+          "ring alignment: K9 binds every child's roots through every "
+          "station" + unbindable);
+
+    // Deterministic: hydrate re-derives the stored children bit-exactly.
+    std::vector<TonicTubeDesc> again;
+    bool same = TonicSubdivideTubeCpu(parent, parentFrames, params, &again,
+                                      &err) &&
+                again.size() == kids.size();
+    for (size_t i = 0; same && i < kids.size(); ++i) {
+        same = SameSections(kids[i].sections, again[i].sections) &&
+               kids[i].inheritedBoundaryBindings.size() ==
+                   again[i].inheritedBoundaryBindings.size();
+    }
+    Check(same, "ring alignment: the aligned split is deterministic");
+
+    // The model: a refill that skips a tube reports it, and a leaf whose
+    // rings K9 cannot triangulate cannot be split into more of them.
+    TonicModel model;
+    Check(model.BuildTestTube(), "refill drops: the test tube builds");
+    std::vector<int> leaves;
+    Check(model.SubdivideTube(0, 4, "kmeans", 2, &leaves) &&
+              leaves.size() == 4,
+          "refill drops: the tube subdivides into four children");
+    Check(model.RefillGuides(1.0f) && model.RefillDrops().empty(),
+          "refill drops: a healthy refill reports no dropped tube");
+    int const bent = leaves.empty() ? -1 : leaves[0];
+    // Bow-tie every non-root section of one child: drag slot 0 through
+    // the ring past its opposite corner.
+    bool edited = bent >= 0;
+    int const nSec = model.GetTubeSectionCount(bent);
+    for (int s = 1; edited && s < nSec; ++s) {
+        TonicTubeSection sec;
+        edited = model.GetTubeSection(bent, s, &sec) && sec.u.size() >= 4;
+        if (edited) {
+            size_t const far = sec.u.size() / 2;
+            edited = model.MoveTubeSectionCV(
+                bent, s, 0, 1.6f * (sec.u[far] - sec.u[0]),
+                1.6f * (sec.v[far] - sec.v[0]));
+        }
+    }
+    Check(edited, "refill drops: one child's sections bow-tie (" +
+                      std::string(model.GetDiagnostic()) + ")");
+    std::vector<std::pair<int, std::string>> drops;
+    Check(model.RefillGuides(1.0f),
+          "refill drops: the siblings still fill (" +
+              std::string(model.GetDiagnostic()) + ")");
+    drops = model.RefillDrops();
+    Check(drops.size() == 1 && drops[0].first == bent &&
+              !drops[0].second.empty(),
+          "refill drops: the bow-tied child is reported with its reason");
+    int const tubesBefore = model.GetTubeCount();
+    std::vector<int> grandkids;
+    bool const split = model.SubdivideTube(bent, 2, "kmeans", 1, &grandkids);
+    std::string const splitWhy = model.GetDiagnostic();
+    Check(!split && model.GetTubeCount() == tubesBefore,
+          "refill drops: splitting the bow-tied child is refused, model "
+          "untouched (" + splitWhy + ")");
+
+    // The C ABI reads the same list (two-call probe), empty after a clean
+    // refill, and rejects a null count.
+    TonicModelContext *ctx = nullptr;
+    Check(Tonic_Create(&ctx) == TONIC_OK &&
+              Tonic_BuildTestTube(ctx, 5, 8, 0.5f, 4.0f) == TONIC_OK &&
+              Tonic_RefillGuides(ctx, 1.0f) == TONIC_OK,
+          "refill drops ABI: a test tube refills");
+    int dropCount = -1;
+    Check(Tonic_ReadRefillDrops(ctx, nullptr, 0, &dropCount) == TONIC_OK &&
+              dropCount == 0 &&
+              std::string(Tonic_GetRefillDropReason(ctx, 0)).empty(),
+          "refill drops ABI: a clean refill reports no dropped tube");
+    Check(Tonic_ReadRefillDrops(ctx, nullptr, 0, nullptr) == TONIC_ERROR,
+          "refill drops ABI: a null count is an error");
+    Tonic_Destroy(ctx);
+}
+
 #ifdef USDGEN_TONIC_HAS_CUDA
 bool HaveCudaDevice()
 {
@@ -2350,6 +2641,18 @@ void CheckPerTubeOps()
     Check(model.MergeChildren(0), "per-tube: the children merge back");
     Check(!model.IsTubeFillSuspended(0),
           "per-tube: the fill resumes once the children are gone");
+    // The child above was edited far enough (scale 1.5, twist, a dragged
+    // CV, a copied ring) that the K7 aggregate may not triangulate at every
+    // station. Whatever the refill makes of the merged tube, it is never
+    // silent: tube 0 either produces guides or is named in RefillDrops().
+    bool const refilled = model.RefillGuides(1.0f);
+    std::vector<std::pair<int, std::string>> const drops =
+        model.RefillDrops();
+    bool const reported = drops.size() == 1 && drops[0].first == 0 &&
+                          !drops[0].second.empty();
+    Check((refilled && model.GetGuides().guideCount > 0 && drops.empty()) ||
+              (!refilled && reported),
+          "per-tube: the merged tube fills or its refill drop is reported");
 }
 
 // V0b: the per-tube C ABI (tonicApiStage.h) drives the same operations.
@@ -2430,6 +2733,7 @@ int main()
     CheckProbes();
     CheckPerTubeOps();
     CheckPerTubeAbi();
+    CheckSubdivideRingAlignment();
 #ifdef USDGEN_TONIC_HAS_CUDA
     CheckCudaParity();
     CheckProductionPickScale();

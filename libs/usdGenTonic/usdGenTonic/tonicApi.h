@@ -333,6 +333,16 @@ int USDGENTONIC_API Tonic_GetGeneratedCurvesVisible(
 /* Guide census. Any out-param may be NULL. */
 int USDGENTONIC_API Tonic_GetGuideCounts(TonicModelContext const *ctx,
                                          int *outGuides, int *outCv);
+/* Tubes the last refill skipped (they produced no guides), in fill order
+ * (two-call (NULL, 0) probe). A refill still returns TONIC_OK while any
+ * tube filled, so this is how a partial drop reaches the dock. */
+int USDGENTONIC_API Tonic_ReadRefillDrops(TonicModelContext const *ctx,
+                                          int *out, int outCap,
+                                          int *outCount);
+/* The reason the index-th dropped tube was skipped ("" when out of
+ * range). The string stays valid until the next call on this thread. */
+const char *USDGENTONIC_API Tonic_GetRefillDropReason(
+    TonicModelContext const *ctx, int index);
 /* The current guide set (guide-major points + per-guide counts).
  * `outXYZ` must hold 3 * guides * cv floats, `outCounts` guides ints;
  * *outGuideCount receives the guide count. */
@@ -373,6 +383,10 @@ typedef struct TonicCommitterContext TonicCommitterContext;
 #define TonicCommitter_SkippedGesture 3
 #define TonicCommitter_SkippedStale 4
 #define TonicCommitter_Detached 5
+/* Tonic_CommitterSwap failed (null argument, unknown live layer, a throw);
+ * the reason is in Tonic_GetLastError. Negative so it can never be read as
+ * TonicCommitter_PartialProgress, which TONIC_ERROR (1) used to alias. */
+#define TonicCommitter_Error (-1)
 
 /* Create a committer for `modelCtx` (which must outlive it) writing the
  * groom at `groomPath` and filling the description at `descPath` (NULL or
@@ -393,11 +407,29 @@ int USDGENTONIC_API Tonic_CommitterEnqueue(
 
 /* Swap the latest built layer into the live layer named `liveIdentifier`
  * (found via SdfLayer::Find). `gestureActive` nonzero holds the swap back.
- * Returns a TonicCommitter_Swap* code, or TONIC_ERROR (with GetLastError)
- * when the live layer is unknown. */
+ * Returns a TonicCommitter_Swap* code, or TonicCommitter_Error (with
+ * GetLastError) when the live layer is unknown or the swap failed. */
 int USDGENTONIC_API Tonic_CommitterSwap(TonicCommitterContext *cc,
                                         const char *liveIdentifier,
                                         int gestureActive);
+
+/* Take the committer's last failure: a worker build that failed or threw,
+ * or an enqueue the artist-owned-output guard refused. The text is cleared
+ * by the call, so a tool pumping once per idle slot reports each failure
+ * once. Copies at most cap-1 bytes plus a NUL into `out` and returns the
+ * full length (0 when there is nothing to take; a return >= cap means the
+ * copy was truncated). With out NULL or cap <= 0 the text is still taken
+ * and only its length returned. -1 (with GetLastError) on a null
+ * committer. */
+int USDGENTONIC_API Tonic_CommitterTakeDiagnostic(TonicCommitterContext *cc,
+                                                  char *out, int cap);
+
+/* The model version whose build failed or whose enqueue was refused, or 0
+ * when the latest enqueue has not failed. The worker never retries it on
+ * its own; a pending version at or below it is not in flight, and only a
+ * fresh Tonic_CommitterEnqueue tries again. */
+unsigned long long USDGENTONIC_API Tonic_CommitterFailedVersion(
+    TonicCommitterContext const *cc);
 
 unsigned long long USDGENTONIC_API Tonic_CommitterCommittedVersion(
     TonicCommitterContext const *cc);
@@ -801,14 +833,23 @@ int USDGENTONIC_API Tonic_PickItem(TonicModelContext *ctx,
  * the u, v, w axes, 3 floats each; `activeHandle` is -1 or a stable handle
  * id (0/1/2 axis, 3 legacy ring, 4 centre, 5/6/7 planar, 8 view, 9 free).
  * Setting the same record twice
- * dirties nothing. */
+ * dirties nothing.  Tonic_SetGizmo allows every handle; Tonic_SetGizmoEx
+ * also takes `allowedMask`, bit (1 << handleId) set for each handle the
+ * headless fallback may draw (0xFFFFFFFF = all), so it hides exactly what
+ * the tool's own overlay hides (GZ-06). */
 int USDGENTONIC_API Tonic_SetGizmo(TonicModelContext *ctx, int kind,
                                    const float *origin, const float *frame,
                                    float sizeWorld, int activeHandle);
+int USDGENTONIC_API Tonic_SetGizmoEx(TonicModelContext *ctx, int kind,
+                                     const float *origin, const float *frame,
+                                     float sizeWorld, int activeHandle,
+                                     unsigned int allowedMask);
 int USDGENTONIC_API Tonic_GetGizmo(TonicModelContext const *ctx,
                                    int *outKind, float *outOrigin,
                                    float *outFrame, float *outSizeWorld,
                                    int *outActiveHandle);
+int USDGENTONIC_API Tonic_GetGizmoAllowedMask(TonicModelContext const *ctx,
+                                              unsigned int *outMask);
 /* The sculpt brush ring. A radius <= 0 clears it. */
 int USDGENTONIC_API Tonic_SetBrushRing(TonicModelContext *ctx,
                                        const float *center,

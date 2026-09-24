@@ -72,6 +72,7 @@ def typeKey(view, name, modifiers=()):
     from pxr.Usdviewq.qt import QtCore
     keys = {
         "r": QtCore.Qt.Key.Key_R,
+        "2": QtCore.Qt.Key.Key_2,
         "return": QtCore.Qt.Key.Key_Return,
         "backspace": QtCore.Qt.Key.Key_Backspace,
         "escape": QtCore.Qt.Key.Key_Escape,
@@ -168,6 +169,15 @@ def graphHover(session):
             int(subsub.value))
 
 
+def guideCount(session):
+    """The live guide count (Tonic_GetGuideCounts), -1 on an error."""
+    guides = ctypes.c_int(0)
+    if session.dll.Tonic_GetGuideCounts(session.model, ctypes.byref(guides),
+                                        None) != 0:
+        return -1
+    return int(guides.value)
+
+
 def l1TubeIds(session):
     got = ctypes.c_int(0)
     session.dll.Tonic_ReadL1TubeIds(session.model, None, 0,
@@ -242,23 +252,160 @@ def _widgetFor(workspace, predicate):
     return None
 
 
-def _bindGeometryFromDock(workspace):
-    """Use the visible Bind Geometry button and modal mesh picker.
+def _pickMalformedFromDock(workspace, badPath):
+    """With two Meshes the Bind button opens the picker.
 
-    The picker deliberately accepts a list, tree, combo or path edit.  The
-    dock supplies the concrete view, while this test expresses the artist
-    contract: choose /Scalp then press its affirmative button.
+    The picker lists every Mesh by type (the malformed one included) and
+    only the accepted choice is run through the full topology check, which
+    must refuse it with a message box instead of replacing the groom.
     """
     from pxr.Usdviewq.qt import QtCore, QtWidgets
     QtTest = _qtTest()
-    button = None
-    for candidate in workspace.findChildren(QtWidgets.QPushButton):
-        if "bind geometry" in candidate.text().lower():
-            button = candidate
-            break
-    check(button is not None, "the dock exposes Bind Geometry")
+    result = {"listed": [], "label": "", "error": ""}
+
+    def dismissError(attempt=0):
+        box = QtWidgets.QApplication.activeModalWidget()
+        if isinstance(box, QtWidgets.QMessageBox):
+            result["error"] = box.text()
+            box.accept()
+        elif attempt < 100:
+            QtCore.QTimer.singleShot(
+                20, lambda: dismissError(attempt + 1))
+
+    def chooseBad():
+        dialog = QtWidgets.QApplication.activeModalWidget()
+        if not isinstance(dialog, QtWidgets.QDialog):
+            return
+        labels = [w.text() for w in dialog.findChildren(QtWidgets.QLabel)]
+        result["label"] = " ".join(labels)
+        combo = dialog.findChild(QtWidgets.QComboBox, "tonicGeometryChoices")
+        box = dialog.findChild(QtWidgets.QDialogButtonBox,
+                               "tonicGeometryPickerButtons")
+        ok = box.button(QtWidgets.QDialogButtonBox.Ok) if box else None
+        if combo is None or ok is None:
+            dialog.reject()
+            return
+        result["listed"] = [combo.itemText(i) for i in range(combo.count())]
+        index = combo.findText(badPath, QtCore.Qt.MatchExactly)
+        if index < 0:
+            dialog.reject()
+            return
+        combo.setCurrentIndex(index)
+        QtCore.QTimer.singleShot(20, dismissError)
+        QtTest.QTest.mouseClick(ok, QtCore.Qt.MouseButton.LeftButton)
+
+    QtCore.QTimer.singleShot(0, chooseBad)
+    QtTest.QTest.mouseClick(workspace.button("file", "bind"),
+                            QtCore.Qt.MouseButton.LeftButton)
+    wait(30)
+    check(sorted(result["listed"]) == sorted(["/Scalp", badPath]),
+          "the scalp picker lists every Mesh by type (%r)"
+          % (result["listed"],))
+    check("Choose the scalp Mesh:" in result["label"],
+          "the picker asks for the scalp Mesh (%r)" % result["label"])
+    check("not a valid scalp mesh" in result["error"],
+          "accepting a malformed Mesh reports it is not a valid scalp "
+          "(%r)" % result["error"])
+
+
+def _checkUnboundDock(workspace, container, view):
+    """DK-01: before a scalp is bound the dock offers only Bind.
+
+    Every tool control is greyed out, the first-run hint says what to do,
+    and the mode hotkeys refuse (with a status line) instead of silently
+    entering a tool that has no model to edit.
+    """
+    state = container.tonicState
+    workspace.refresh()
+    check(not workspace.button("mode", "tube").isEnabled() and
+          not workspace._paramsStack.isEnabled() and
+          not workspace._actionsStack.isEnabled(),
+          "unbound, the mode shelf, parameters and actions are disabled")
+    check(workspace.button("file", "bind").isEnabled() and
+          workspace.button("file", "bind").text() == "Bind scalp mesh...",
+          "unbound, Bind scalp mesh stays live (%r)"
+          % workspace.button("file", "bind").text())
+    hint = workspace._firstRunHint
+    check(hint.isVisible() and hint.text().startswith("Step 1"),
+          "unbound, the first-run hint is visible (%r)" % hint.text())
+    check(workspace._geometryPathLabel.text() == "No scalp bound",
+          "unbound, the dock says No scalp bound (%r)"
+          % workspace._geometryPathLabel.text())
+    api = getattr(container.viewport, "_api", None)
+    printStatus = getattr(api, "PrintStatus", None)
+    messages = []
+
+    def recordStatus(text, *args, **kwargs):
+        messages.append(str(text))
+        return printStatus(text, *args, **kwargs)
+
+    instrumented = False
+    if callable(printStatus):
+        try:
+            api.PrintStatus = recordStatus
+            instrumented = True
+        except (AttributeError, TypeError):
+            pass
+    try:
+        view.setFocus()
+        wait(10)
+        typeKey(view, "2")
+        wait(10)
+    finally:
+        if instrumented:
+            api.PrintStatus = printStatus
+    check(state.activeMode == "graph",
+          "unbound, pressing 2 leaves the mode on Graph (%r)"
+          % state.activeMode)
+    check(not instrumented or
+          any("bind a scalp mesh first" in m for m in messages),
+          "unbound, pressing 2 says to bind a scalp mesh first (%r)"
+          % (messages[-2:],))
+
+
+def _bindGeometryFromDock(workspace):
+    """Use the visible Bind scalp mesh button (and its picker, if any).
+
+    The picker deliberately accepts a list, tree, combo or path edit.  The
+    dock supplies the concrete view, while this test expresses the artist
+    contract: choose /Scalp then press its affirmative button.  With exactly
+    one Mesh on the stage (tonic-graph-scalp.usda) there is nothing to
+    choose, so the button binds it directly and its tooltip names it.
+    """
+    from pxr import UsdGeom
+    from pxr.Usdviewq.qt import QtCore, QtWidgets
+    QtTest = _qtTest()
+    button = workspace.button("file", "bind")
+    check(button is not None and
+          "bind scalp mesh" in button.text().lower(),
+          "the dock exposes Bind scalp mesh")
     if button is None:
         return False
+    stage = workspace._api.stage
+    meshes = [str(p.GetPath()) for p in stage.Traverse()
+              if p.IsA(UsdGeom.Mesh)]
+    if meshes == ["/Scalp"]:
+        check("/Scalp" in button.toolTip(),
+              "with one Mesh the Bind tooltip names it (%r)"
+              % button.toolTip())
+        modal = []
+        # A picker would block in exec_(); this callback only records one
+        # (and rejects it so the test cannot hang) -- none must appear.
+        def noPicker():
+            dialog = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(dialog, QtWidgets.QDialog):
+                modal.append(dialog.objectName())
+                dialog.reject()
+        QtCore.QTimer.singleShot(0, noPicker)
+        QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+        wait(50)
+        session = getattr(workspace._container, "session", None)
+        check(not modal, "the only Mesh binds without a picker (%r)"
+              % (modal,))
+        bound = (session is not None and session.model is not None and
+                 session.scalpPath == "/Scalp")
+        check(bound, "one click on Bind scalp mesh binds /Scalp")
+        return bound
     result = {"dialog": False, "chosen": False}
 
     # QDialog.exec_() starts its nested event loop synchronously inside the
@@ -285,7 +432,7 @@ def _bindGeometryFromDock(workspace):
 
     QtCore.QTimer.singleShot(0, chooseScalp)
     QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
-    check(result["dialog"], "Bind Geometry opens a modal mesh picker")
+    check(result["dialog"], "Bind scalp mesh opens a modal scalp picker")
     check(result["chosen"], "the picker lists /Scalp as a bindable mesh")
     wait(50)
     return bool(result["chosen"])
@@ -301,7 +448,7 @@ def _setPtexDensity(workspace):
     if widget is None:
         return None
     if isinstance(widget, QtWidgets.QComboBox):
-        index = widget.findText("128")
+        index = widget.findData("128")
         check(index >= 0, "Ptex density offers an explicit 128 setting")
         if index < 0:
             return None
@@ -327,8 +474,8 @@ def _verifyButtonRedraw(workspace, state):
     from pxr.Usdviewq.qt import QtCore
     api = getattr(workspace, "_api", None)
     update = getattr(api, "UpdateViewport", None)
-    tube = workspace._modeButtons.get("tube")
-    graph = workspace._modeButtons.get("graph")
+    tube = workspace.button("mode", "tube")
+    graph = workspace.button("mode", "graph")
     if not callable(update) or tube is None or graph is None:
         check(False, "the mode shelf exposes an instrumentable viewport redraw")
         return
@@ -403,12 +550,22 @@ def run(appController):
     if workspace is None:
         shutdown()
         return 1
+    _checkUnboundDock(workspace, container, view)
     _bindGeometryFromDock(workspace)
     session = container.session
     viewport = container.viewport
     state = container.tonicState
     check(session is not None and session.model is not None,
-          "Bind Geometry creates the live Tonic model")
+          "Bind scalp mesh creates the live Tonic model")
+    workspace.refresh()
+    check(workspace.button("mode", "tube").isEnabled() and
+          workspace._paramsStack.isEnabled(),
+          "binding enables the mode shelf and the parameters")
+    check(not workspace._firstRunHint.isVisible(),
+          "the first-run hint hides once a scalp is bound")
+    check(workspace._geometryPathLabel.text() == "Scalp: /Scalp",
+          "the dock names the bound scalp (%r)"
+          % workspace._geometryPathLabel.text())
     check(session is not None and session.scalpPath == "/Scalp",
           "the selected mesh is persistently bound as /Scalp")
     if session is None or session.model is None or viewport is None:
@@ -458,8 +615,8 @@ def run(appController):
           "Graph defaults to the point CV Region sub-mode")
     typeKey(view, "r")
     check(state.graphSubMode == "region", "R selects Region")
-    check(workspace._modeButtons["graph"].isChecked() and
-          workspace._subModeButtons["region"].isChecked(),
+    check(workspace.button("mode", "graph").isChecked() and
+          workspace.button("sub", "region").isChecked(),
           "the Graph and Region shelf buttons visibly remain checked")
 
     camera = tonicCamera.resolve(view)
@@ -518,12 +675,40 @@ def run(appController):
     # Enter closes the first triangle and creates exactly one auto root.
     for point in LEFT:
         mouse.click(pixel(point))
+    # MD-05: hovering 6 px from the first draft CV snaps the rubber band onto
+    # it and arms the close, which the overlay draws as a closing edge.
+    firstPixel = pixel(LEFT[0])
+    mouse.move((firstPixel[0] + 6.0, firstPixel[1]))
+    wait(25)
+    closing = viewport.regionDraftPreview()
+    firstPoint = closing["points"][0] if closing["points"] else None
+    snapped = (closing["hover"] is not None and firstPoint is not None and
+               all(abs(closing["hover"][i] - firstPoint[i]) < 1e-6
+                   for i in range(3)))
+    check(snapped and closing.get("closeArmed") is True,
+          "a 6 px hover over the first draft CV snaps onto it and arms the "
+          "close (%r)" % (closing,))
+    check(viewport._regionOverlay is not None and
+          viewport._regionOverlay.isVisible(),
+          "the draft overlay is showing the armed closing edge")
+    middle = pixel((-0.52, -0.26))
+    mouse.move(middle)
+    wait(25)
+    check(not viewport.regionDraftPreview().get("closeArmed"),
+          "moving off the first CV disarms the close")
     typeKey(view, "return")
     afterFirst = session.graphCounts()
     firstRoots = l1TubeIds(session)
     check(afterFirst[2] == 1 and len(firstRoots) == 1,
           "Enter closes one CV polygon and creates its one L1 tube (%r/%r)"
           % (afterFirst, firstRoots))
+    # MD-01: the new stub grows its guides at once. No Fill panel value
+    # has been touched in this run, which is exactly the case that used to
+    # show a bare tube until the artist nudged a Fill parameter.
+    guidesAfterFirst = guideCount(session)
+    check(guidesAfterFirst > 0,
+          "the closed region shows guides without a Fill panel edit (%d)"
+          % guidesAfterFirst)
 
     # This is the artist path, not a direct GraphCreateRegion fixture. The
     # auto Region ring keeps one published root section CV for every authored
@@ -560,7 +745,13 @@ def run(appController):
           session.graphCounts() == afterFirst,
           "a malformed replacement is rejected before it can discard the "
           "bound groom")
+    _pickMalformedFromDock(workspace, str(malformedPath))
+    check(session.model is modelBeforeInvalid and
+          session.scalpPath == "/Scalp",
+          "picking the malformed Mesh in the dock keeps the bound groom")
     stage.RemovePrim(malformedPath)
+    view.setFocus()
+    wait(10)
 
     # Re-selecting the exact same mesh is intentionally a no-op: it must
     # not clear the graph merely because the artist reopened the picker.
@@ -580,20 +771,27 @@ def run(appController):
           "redo restores the region and its automatic tube")
 
     # Start the next contour on a CV of the closed first triangle. The graph
-    # snap preference must make the actual model setting too: a state-only
-    # test could pass even though publish/sync restores a different native
-    # value before the artist's first click.
+    # snap preference is screen pixels and the model's snap radius is rest
+    # units, so the row keeps its 1 px in the tool state (the loops convert
+    # at the point of use) and must survive the dock's next refresh; it
+    # never lands in the model as 1.0 world unit.
     firstLoops = regionLoops(session)
     firstCounts = session.graphCounts()
+    nativeBefore = float(session.dll.Tonic_GetSnapRadius(session.model))
     snapDescriptor = next((descriptor for descriptor in
                            tonicPanels.descriptors("graph", state)
                            if descriptor.id == "snapRadiusPx"), None)
     if snapDescriptor is not None:
         snapDescriptor.set(state, session, 1.0)
+    workspace.refresh()
     nativeSnap = float(session.dll.Tonic_GetSnapRadius(session.model))
-    check(snapDescriptor is not None and abs(nativeSnap - 1.0) < 1e-5 and
-          abs(float(state.snapRadiusPx) - 1.0) < 1e-5,
-          "the real Graph Snap radius control applies native 1 px")
+    check(snapDescriptor is not None and
+          abs(float(state.snapRadiusPx) - 1.0) < 1e-5 and
+          abs(nativeSnap - nativeBefore) < 1e-7,
+          "the real Graph Snap radius control keeps 1 px through a dock "
+          "refresh and leaves the model's world radius alone (%.4f px, "
+          "native %.4f -> %.4f)" % (float(state.snapRadiusPx),
+                                    nativeBefore, nativeSnap))
 
     def stableNodeAt(point, loops=None):
         """The stable id at an authored fixture point, independent of winding."""

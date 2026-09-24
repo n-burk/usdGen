@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ctypes
 
+from . import tonicGizmo
 from . import tonicLib
 from . import tonicModes
 
@@ -35,6 +36,10 @@ REGION_NODE_PICK_RADIUS_PX = COMPONENT_PICK_RADIUS_PX
 # Keep these fixed: snapping may intentionally be much larger or smaller.
 REPOSITION_NODE_PICK_RADIUS_PX = 8.0
 REPOSITION_EDGE_PICK_RADIUS_PX = 5.0
+# Graph sub-modes whose press acts on an existing node/edge/region; a press
+# on nothing there starts a node marquee. The authoring sub-modes (draw,
+# region, place, reposition) press on empty scalp on purpose.
+CLICK_SUBMODES = ("connect", "weld", "unweld", "delete", "link")
 
 
 class Sample:
@@ -78,6 +83,121 @@ class Sample:
 
     def has(self, name):
         return name in self.modifiers
+
+
+# -- the selection-modifier table ---------------------------------------------
+#
+# One convention for every loop, click and band, so a modifier means the
+# same thing in Graph, Tube, Fill and Hierarchy (Maya: Shift toggles, Ctrl
+# deselects, Ctrl+Shift adds; Blender: Shift extends, Ctrl-box subtracts):
+#
+#   gesture       none   Shift    Ctrl     Ctrl+Shift
+#   click         SET    TOGGLE   REMOVE   ADD
+#   box / lasso   SET    ADD      REMOVE   ADD
+#
+# The loops decide only WHEN a gesture is a click or a band; what the
+# modifiers make of it lives here and nowhere else.
+
+def selectModeFor(modifiers, band=False):
+    """The TONIC_SELECT_* a click (or, with band=True, a box/lasso) means.
+
+    `modifiers` is a Sample or any container of modifier names.
+    """
+    modifiers = getattr(modifiers, "modifiers", modifiers) or ()
+    shift = "shift" in modifiers
+    ctrl = "ctrl" in modifiers
+    if ctrl and shift:
+        return tonicLib.TONIC_SELECT_ADD
+    if ctrl:
+        return tonicLib.TONIC_SELECT_REMOVE
+    if shift:
+        return (tonicLib.TONIC_SELECT_ADD if band
+                else tonicLib.TONIC_SELECT_TOGGLE)
+    return tonicLib.TONIC_SELECT_SET
+
+
+def _selectionEntry(item):
+    """(id, subId, subSubId) from a K11 pick dict or a selection tuple."""
+    if isinstance(item, dict):
+        return (int(item.get("id", -1)), int(item.get("subId", -1)),
+                int(item.get("subSubId", -1)))
+    entry = tuple(int(v) for v in item)
+    return (entry + (-1, -1, -1))[:3]
+
+
+def _selectionKey(kind, entry):
+    # A whole tube is one thing however it was picked: only its id counts.
+    if int(kind) == tonicLib.TONIC_PICK_TUBE_VERT:
+        return (int(entry[0]),)
+    return tuple(int(v) for v in entry[:3])
+
+
+def _kindsIn(kindMask):
+    mask = int(kindMask)
+    bit = 1
+    while bit <= mask:
+        if mask & bit:
+            yield bit
+        bit <<= 1
+
+
+def _selectEntries(session, kind, entries, mode):
+    return session.select(kind, [e[0] for e in entries],
+                          [e[1] for e in entries], [e[2] for e in entries],
+                          mode)
+
+
+def applyRemove(session, kind, items):
+    """Click-remove: deselect whichever of `items` is selected now.
+
+    The C ABI has no subtract (TONIC_SELECT_REMOVE is Python-only), so this
+    TOGGLEs exactly the selection's own entries that match: toggling an
+    unselected item would ADD it, the opposite of what Ctrl means.
+    """
+    targets = {_selectionKey(kind, _selectionEntry(item)) for item in items}
+    hit = [_selectionEntry(entry) for entry in session.readSelection(kind)
+           if _selectionKey(kind, _selectionEntry(entry)) in targets]
+    if not hit:
+        return False
+    return _selectEntries(session, kind, hit, tonicLib.TONIC_SELECT_TOGGLE)
+
+
+def selectItems(session, kind, items, mode):
+    """Apply one click's items of one kind through the modifier table."""
+    if int(mode) == tonicLib.TONIC_SELECT_REMOVE:
+        return applyRemove(session, kind, items)
+    return _selectEntries(session, kind,
+                          [_selectionEntry(item) for item in items], mode)
+
+
+def selectBand(session, kindMask, mode, band):
+    """Apply one box/lasso through the modifier table.
+
+    `band(mode)` runs the rect/polygon query with a real Tonic_Select*
+    mode. REMOVE runs it as SET to learn what the band covers (B), then
+    puts back what was selected before (S) minus B, kind by kind.
+    """
+    if int(mode) != tonicLib.TONIC_SELECT_REMOVE:
+        return band(mode)
+    if not int(kindMask):
+        return False             # clearSelection(0) would mean "every kind"
+    before = {kind: [_selectionEntry(entry)
+                     for entry in session.readSelection(kind)]
+              for kind in _kindsIn(kindMask)}
+    if not band(tonicLib.TONIC_SELECT_SET):
+        # The query failed before touching the selection; reading it back
+        # now would call everything "covered" and remove it all.
+        return False
+    covered = {kind: {_selectionKey(kind, _selectionEntry(entry))
+                      for entry in session.readSelection(kind)}
+               for kind in before}
+    session.clearSelection(kindMask)
+    for kind, entries in before.items():
+        keep = [entry for entry in entries
+                if _selectionKey(kind, entry) not in covered[kind]]
+        if keep:
+            _selectEntries(session, kind, keep, tonicLib.TONIC_SELECT_ADD)
+    return True
 
 
 class ToolLoop:
@@ -128,6 +248,10 @@ class ToolLoop:
         return False
 
     def hover(self, sample):
+        return False
+
+    def clearHover(self):
+        """The pointer left the view: drop loop-owned hover drawing."""
         return False
 
     def marqueeRect(self):
@@ -192,11 +316,15 @@ class GraphLoop(ToolLoop):
         # draft CV to close and for the viewport's transient overlay.
         self._regionDraft = []
         self._regionHover = None
+        # The hover sits on the first draft CV of a closable (3+ CV) draft:
+        # the rubber band is snapped there and a click would close it.
+        self._closeArmed = False
         self._regionCloseRequested = False
         self._marquee = None       # (x0, y0) while a rubber band is live
         self._active = False
         self._bracketOpen = False  # an undo bracket is open on the model
         self._pendingEdit = False  # the gesture changed the model
+        self._editFinished = False  # _finishEdit's K3 ran; endOfEdit due
         self._lastStatus = ""
         # Reposition uses canonical scalp locations as a frozen press-time
         # baseline.  The visible graph glyph may be lifted from that scalp;
@@ -224,8 +352,7 @@ class GraphLoop(ToolLoop):
             self._clearRegionDraft()
         status = tonicModes.SetActiveGraphSubMode(self.state, subId)
         if status:
-            self._clickNode = -1
-            self._clickRegion = -1
+            self._disarm()
         return status
 
     def deactivate(self):
@@ -234,21 +361,87 @@ class GraphLoop(ToolLoop):
             self.cancel()
         if self.subMode() in ("region", "reposition"):
             self._setGraphHover(None)
-        return self._clearRegionDraft()
+        disarmed = self._disarm()
+        return self._clearRegionDraft() or disarmed
+
+    # -- the two-click pick (connect, weld, link) --------------------------
+
+    def _armed(self):
+        return self._clickNode >= 0 or self._clickRegion >= 0
+
+    def _arm(self, kind, ident):
+        """Hold the first pick of a two-click action and draw it.
+
+        Hover follows the cursor, so it cannot mark a pick the artist has
+        already made; the selection can, and it is what Escape clears.
+        """
+        if kind == tonicLib.TONIC_PICK_REGION:
+            self._clickRegion = int(ident)
+        else:
+            self._clickNode = int(ident)
+        self.session.select(kind, [int(ident)], None, None,
+                            tonicLib.TONIC_SELECT_SET)
+        self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+
+    def _disarm(self, clearSelection=True):
+        """Forget a pending first pick; True when one was armed.
+
+        `clearSelection` also takes back the selection _arm drew it with.
+        A modifier press keeps it: the armed node then simply stays one
+        of the selected nodes the artist is extending.
+        """
+        kind = (tonicLib.TONIC_PICK_GRAPH_NODE if self._clickNode >= 0 else
+                tonicLib.TONIC_PICK_REGION if self._clickRegion >= 0 else 0)
+        self._clickNode = -1
+        self._clickRegion = -1
+        if not kind:
+            return False
+        if clearSelection and self.session.model is not None:
+            self.session.clearSelection(kind)
+            self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        return True
 
     def draftRegionPreview(self):
         """The transient contour consumed by tonicViewport's Qt overlay."""
         return {"points": [self._draftDisplayPoint(entry)
                             for entry in self._regionDraft],
-                "hover": self._regionHover}
+                "hover": self._regionHover,
+                "closeArmed": self._closeArmed}
 
     def _clearRegionDraft(self):
         hadDraft = bool(self._regionDraft or self._regionHover or
                         self._regionCloseRequested)
         self._regionDraft = []
         self._regionHover = None
+        self._closeArmed = False
         self._regionCloseRequested = False
         return hadDraft
+
+    def _trackRegionHover(self, nodeId, hit, sample):
+        """Move the draft's rubber band end to what a click here would add.
+
+        Over the first CV the end snaps onto it, so the closing segment the
+        artist is about to author is drawn exactly, not a few pixels off.
+        `closeArmed` needs 3 CVs because a press there closes nothing
+        before that (it says "region needs at least 3 CVs" instead).
+        """
+        if not self._regionDraft:
+            self._regionHover = None
+            self._closeArmed = False
+            return
+        if self._regionFirstMatches(nodeId, sample):
+            self._regionHover = self._draftDisplayPoint(self._regionDraft[0])
+            armed = len(self._regionDraft) >= 3
+            if armed and not self._closeArmed:
+                # Once per approach, not per mouse move.
+                self._status("Tonic Graph: click to close the region (%d CVs)"
+                             % len(self._regionDraft))
+            self._closeArmed = armed
+            return
+        self._closeArmed = False
+        self._regionHover = (None if hit is None else
+                             (self._graphNodeDisplayPoint(nodeId) or
+                              hit["point"]))
 
     # -- status ------------------------------------------------------------
 
@@ -268,32 +461,33 @@ class GraphLoop(ToolLoop):
     # -- geometry helpers --------------------------------------------------
 
     def _bracket(self, label, action):
-        """Run one mutating click as a single undo step."""
-        self.session.beginGesture(label)
+        """Run one mutating click as a single undo step (SS-02).
+
+        The edit, the K3 pass after it and the tube stub of any region it
+        closed all land inside this one bracket, so one Ctrl+Z takes the
+        whole click back. `action()` answers whether the model changed; a
+        refused or no-op action leaves no undo step at all. Returns that
+        answer; the caller runs endOfEdit() once the bracket is sealed.
+        """
+        if not self.session.beginGesture(label):
+            return False
+        changed = False
         try:
-            return action()
+            changed = bool(action())
+            if changed:
+                self._finishEdit()
         finally:
-            self.session.endGesture()
-            self._pendingEdit = True
+            self.session.endGestureIfChanged(changed)
+        if changed and self._active:
+            self._pendingEdit = True     # release() runs endOfEdit()
+        return changed
 
     def _snapRest(self, sample):
-        """The snap radius in rest units at the sampled depth.
-
-        The panel's number is pixels; the ABI's is rest units. The camera
-        converts the two with a measured world-per-pixel at the point the
-        artist is actually pointing at, so the same 8 px means the same
-        thing zoomed in and zoomed out.
-        """
+        """The snap radius in rest units at the sampled depth."""
+        from .tonicGraph import snapRadiusRest
         hit = sample.surface()
-        point = hit["point"] if hit else None
-        if point is None or sample.camera is None:
-            return float(self.session.dll.Tonic_GetSnapRadius(
-                self.session.model))
-        perPixel = sample.camera.worldPerPixel(point)
-        if perPixel <= 0.0:
-            return float(self.session.dll.Tonic_GetSnapRadius(
-                self.session.model))
-        return max(perPixel * float(self.state.snapRadiusPx), 1e-6)
+        return snapRadiusRest(self.session, self.state, sample.camera,
+                              hit["point"] if hit else None)
 
     def _nodeAt(self, sample):
         item = sample.item(tonicLib.TONIC_PICK_GRAPH_NODE,
@@ -401,9 +595,23 @@ class GraphLoop(ToolLoop):
     def press(self, sample):
         if self.session.model is None:
             return False
-        if sample.has("shift"):
+        # A selection modifier makes the press a node selection: a band on
+        # travel, a click through the modifier table without (no Graph
+        # authoring gesture reads Shift or Ctrl).
+        if selectModeFor(sample) != tonicLib.TONIC_SELECT_SET:
+            self._disarm(clearSelection=False)
             return self._pressMarquee(sample)
         sub = self.subMode()
+        target = None
+        if sub in CLICK_SUBMODES:
+            # The click sub-modes act on what is under the cursor, so a
+            # press on nothing is free: it boxes nodes like any other
+            # tool's empty drag. An armed first pick keeps the old miss
+            # (a status line) so a slightly short second click does not
+            # throw the pick away; Escape is how it is dropped.
+            target = self._clickTarget(sample, sub)
+            if target[1] < 0 and not self._armed():
+                return self._pressMarquee(sample)
         self._active = True
         self._pendingEdit = False
         # A drag holds one bracket open for its whole life. A click mode
@@ -412,7 +620,15 @@ class GraphLoop(ToolLoop):
         # with steps that undo to the state they were taken from, so those
         # wrap their own mutation instead (_bracket below).
         if sub in ("draw", "place"):
-            self.session.beginGesture("Graph %s" % sub)
+            # A refused Begin means another owner's bracket is open; the
+            # stroke must not run inside it, and release/Escape must not
+            # later seal or roll back a bracket this press never opened.
+            # The press is still claimed, like _pressReposition's refusal.
+            if not self.session.beginGesture("Graph %s" % sub):
+                self._active = False
+                self._status("Tonic Graph %s: another edit is still open "
+                             "-- nothing drawn" % sub)
+                return True
             self._bracketOpen = True
         if sub == "reposition":
             return self._pressReposition(sample)
@@ -426,15 +642,28 @@ class GraphLoop(ToolLoop):
         if sub == "place":
             return self._pressPlace(sample)
         if sub in ("connect", "weld"):
-            return self._pressClickNode(sample, sub)
+            return self._pressClickNode(target[1], sub)
         if sub == "unweld":
-            return self._pressUnweld(sample)
+            return self._pressUnweld(target[1])
         if sub == "delete":
-            return self._pressDelete(sample)
+            return self._pressDelete(target)
         if sub == "link":
-            return self._pressLink(sample)
+            return self._pressLink(target[1])
         self._active = False
         return False
+
+    def _clickTarget(self, sample, sub):
+        """(kind, id) a click sub-mode's press acts on; id -1 for nothing.
+
+        One pick per press: a caller that probed and then picked again
+        would ask K11 twice for the same pixel.
+        """
+        if sub == "link":
+            return (tonicLib.TONIC_PICK_REGION, self._regionAt(sample))
+        node = self._nodeAt(sample)
+        if node >= 0 or sub != "delete":
+            return (tonicLib.TONIC_PICK_GRAPH_NODE, node)
+        return (tonicLib.TONIC_PICK_GRAPH_EDGE, self._edgeAt(sample))
 
     def move(self, sample):
         if self.session.model is None:
@@ -451,19 +680,22 @@ class GraphLoop(ToolLoop):
             return True
         if sub == "region":
             nodeId, hit = self._regionHitAt(sample)
-            self._regionHover = (None if hit is None else
-                                 (self._graphNodeDisplayPoint(nodeId) or
-                                  hit["point"]))
+            self._trackRegionHover(nodeId, hit, sample)
             return True
         if sub == "place" and self._dragNode >= 0:
             hit = sample.surface()
             if not hit:
                 return True
             self._dropPoint = hit["point"]
-            self.session.dll.Tonic_GraphMoveNode(
-                self.session.model, self._dragNode, hit["face"],
-                ctypes.c_float(hit["u"]), ctypes.c_float(hit["v"]))
-            self.session.publish()
+            # Only a move the model accepted makes the gesture an edit; a
+            # press on a node that never moves is undone on release instead
+            # of sealing an empty step and re-rasterising for nothing.
+            if self.session.dll.Tonic_GraphMoveNode(
+                    self.session.model, self._dragNode, hit["face"],
+                    ctypes.c_float(hit["u"]),
+                    ctypes.c_float(hit["v"])) == tonicLib.TONIC_OK:
+                self._pendingEdit = True
+                self.session.publish()
             return True
         if sub == "reposition":
             return self._moveReposition(sample)
@@ -484,11 +716,13 @@ class GraphLoop(ToolLoop):
             self._pendingEdit = self._commitStroke(self._snapRest(sample))
         elif sub == "region":
             self._regionHover = None
+            self._closeArmed = False
             if self._regionCloseRequested:
                 self._regionCloseRequested = False
                 self._pendingEdit = self.completeRegionDraft()
         elif sub == "place" and self._dragNode >= 0:
-            self._finishPlaceDrag(sample)
+            if self._finishPlaceDrag(sample):
+                self._pendingEdit = True
         # K3 has to see the moved graph and its transported attachment
         # subtrees while the single undo bracket is still live.  Reposition
         # carries existing root/child shapes coherently; it is not a fresh
@@ -512,19 +746,28 @@ class GraphLoop(ToolLoop):
                              (not self._pendingEdit or
                               self._repositionAtBase or
                               repositionFinalizeFailed))
+        # Place likewise: a press on a node that was never moved or dropped
+        # (or an add the model refused) changed nothing.
+        placeRestore = sub == "place" and not self._pendingEdit
         self._stroke = []
         self._dragNode = -1
         self._dropPoint = None
         self._resetReposition()
-        # Seal the undo bracket FIRST: the committer snapshots the model,
-        # and a snapshot taken mid-bracket would carry half a gesture.
+        # K3 and the stub of a region the edit closed belong to the same
+        # undo step as the edit (Reposition ran them in _finalizeReposition
+        # above). Then seal the bracket BEFORE the stage work: the committer
+        # snapshots the model, and a snapshot taken mid-bracket would carry
+        # half a gesture.
         if self._bracketOpen:
-            if repositionRestore:
+            if repositionRestore or placeRestore:
                 dirty = self.session.cancelGesture()
                 self._pendingEdit = False
                 self.session.publish(dirty)
             else:
-                self.session.endGesture()
+                if self._pendingEdit and sub != "reposition":
+                    self._finishEdit()
+                # A stroke the model refused changed nothing: no step.
+                self.session.endGestureIfChanged(self._pendingEdit)
             self._bracketOpen = False
         self._active = False
         if self._pendingEdit and sub != "region":
@@ -548,14 +791,22 @@ class GraphLoop(ToolLoop):
             if self._clearRegionDraft():
                 self._status("Tonic Graph: region draft cancelled")
                 return True
+            # Between the two clicks of connect/weld/link nothing is held
+            # down, but the first pick is still live and Escape backs out
+            # of it (returning True keeps the controller from clearing the
+            # rest of the selection as well).
+            action = self.subMode()
+            if self._disarm():
+                self._setGraphHover(None)
+                self._status("Tonic Graph: %s cancelled" % action)
+                return True
             return False
         self._stroke = []
         self._clearRegionDraft()
         self._dragNode = -1
         self._dropPoint = None
         self._resetReposition()
-        self._clickNode = -1
-        self._clickRegion = -1
+        self._disarm()
         self._pendingEdit = False
         dirty = 0
         if self._bracketOpen:
@@ -570,45 +821,57 @@ class GraphLoop(ToolLoop):
         """Highlight whatever a click would act on."""
         if self.session.model is None:
             return False
-        if self.subMode() == "region":
+        sub = self.subMode()
+        if sub == "region":
             nodeId, hit = self._regionHitAt(sample)
-            if self._regionDraft:
-                point = (None if hit is None else
-                         (self._graphNodeDisplayPoint(nodeId) or hit["point"]))
-                if point != self._regionHover:
-                    self._regionHover = point
-            else:
-                self._regionHover = None
+            self._trackRegionHover(nodeId, hit, sample)
             self._setGraphHover(
                 {"kind": tonicLib.TONIC_PICK_GRAPH_NODE, "id": nodeId,
                  "subId": -1, "subSubId": -1} if nodeId >= 0 else None)
             return False
-        if self.subMode() == "reposition":
+        if sub == "reposition":
             # Press installs the active target highlight; cursor motion while
             # a drag is live must not replace it with a nearby edge or CV.
             if self._active:
                 return False
             self._setGraphHover(self._repositionTarget(sample))
             return False
-        item = sample.item(self.pickMask, self.pickRadiusPx())
-        if item:
-            changed = self.session.setHover(item["kind"], item["id"],
-                                            item["subId"], item["subSubId"])
-        else:
-            changed = self.session.setHover(0, -1, -1, -1)
-        if changed:
-            self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        if sub in CLICK_SUBMODES:
+            # Hover exactly what the press would act on (connect, weld and
+            # unweld: nodes; delete: a node, else an edge; link: the region
+            # containing the cursor), so a highlighted region under a
+            # Delete cursor can never promise a delete that does not come.
+            kind, ident = self._clickTarget(sample, sub)
+            self._setGraphHover(
+                {"kind": kind, "id": ident, "subId": -1, "subSubId": -1}
+                if ident >= 0 else None)
+            return False
+        self._setGraphHover(sample.item(self.pickMask, self.pickRadiusPx()))
         return False
 
+    def _finishEdit(self):
+        """K3, then the tube stub of every newly closed region.
+
+        Runs INSIDE the edit's undo bracket, so the stub (and the MD-01
+        guide refill that comes with it) is part of the artist's one step
+        rather than a second one Ctrl+Z would spend first. plan/17 section
+        5.1: a closed region gets a tube stub; it has to follow K3 (the
+        stub is built from the faces the region claims) and precede the
+        commit (a groom with no tube cannot be committed at all).
+        plan/18 section 7 G14.
+        """
+        self._editFinished = bool(self.session.rasterise())
+        if self._editFinished:
+            self.session.ensureRegionTubes()
+        return self._editFinished
+
     def endOfEdit(self):
-        """Rasterise, enqueue the commit and the bake, refresh the HUD."""
-        if not self.session.rasterise():
+        """After the bracket is sealed: enqueue the commit and the bake,
+        publish, refresh the HUD. False when _finishEdit's K3 failed."""
+        finished = self._editFinished
+        self._editFinished = False
+        if not finished:
             return False
-        # plan/17 section 5.1: a closed region gets a tube stub. It has to
-        # happen after K3 (the stub is built from the faces the region
-        # claims) and before the commit (a groom with no tube cannot be
-        # committed at all). plan/18 section 7 G14.
-        self.session.ensureRegionTubes()
         self.session.enqueueCommit()
         self.session.rebake()
         self.session.publish()
@@ -623,19 +886,49 @@ class GraphLoop(ToolLoop):
 
     def _moveMarquee(self, sample):
         x0, y0 = self._marquee
-        mode = (tonicLib.TONIC_SELECT_ADD if sample.has("ctrl")
-                else tonicLib.TONIC_SELECT_SET)
-        self.session.selectRect(sample.camera, x0, y0, sample.x, sample.y,
-                                tonicLib.TONIC_PICK_GRAPH_NODE, mode)
+        selectBand(self.session, tonicLib.TONIC_PICK_GRAPH_NODE,
+                   selectModeFor(sample, band=True),
+                   lambda mode: self.session.selectRect(
+                       sample.camera, x0, y0, sample.x, sample.y,
+                       tonicLib.TONIC_PICK_GRAPH_NODE, mode))
         self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
         return True
 
     def _releaseMarquee(self, sample):
-        self._moveMarquee(sample)
+        x0, y0 = self._marquee
+        # Click-versus-band slop in the physical pixels a Sample carries
+        # (logical CLICK_SLOP_PX x the view's devicePixelRatio).
+        slop = tonicGizmo.clickSlopPixels(sample.camera)
+        nodeId = (self._nodeAt(sample)
+                  if abs(sample.x - x0) + abs(sample.y - y0) < slop else -1)
+        if nodeId >= 0:
+            # No travel over a node: a click, which the table reads
+            # differently from a band (Shift toggles instead of adding).
+            selectItems(self.session, tonicLib.TONIC_PICK_GRAPH_NODE,
+                        [(nodeId, -1, -1)], selectModeFor(sample))
+            self.session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        else:
+            self._moveMarquee(sample)
         count = self.session.selectionCount(tonicLib.TONIC_PICK_GRAPH_NODE)
         self._marquee = None
+        sub = self.subMode()
+        if (nodeId < 0 and sub in CLICK_SUBMODES and
+                abs(sample.x - x0) + abs(sample.y - y0) < slop and
+                selectModeFor(sample) == tonicLib.TONIC_SELECT_SET):
+            # A plain click that found nothing to act on: it only cleared
+            # the selection, and the artist should hear why nothing
+            # happened rather than a bare "0 node(s) selected".
+            self._status(self._missStatus(sub))
+            return True
         self._status("Tonic Graph: %d node(s) selected" % count)
         return True
+
+    @staticmethod
+    def _missStatus(sub):
+        """What a click sub-mode's press on nothing says."""
+        return "Tonic Graph %s: %s" % (sub, {
+            "delete": "no node or edge here",
+            "link": "no region here"}.get(sub, "no node here"))
 
     # -- sub-mode actions --------------------------------------------------
 
@@ -670,6 +963,7 @@ class GraphLoop(ToolLoop):
         self._regionDraft.append((hit["face"], hit["u"], hit["v"],
                                   hit["point"], sample.x, sample.y, nodeId))
         self._regionHover = None
+        self._closeArmed = False
         self._status("Tonic Graph: region CV %d%s (Enter or first CV closes)"
                      % (len(self._regionDraft),
                         " shares node %d" % nodeId if nodeId >= 0 else ""))
@@ -734,6 +1028,7 @@ class GraphLoop(ToolLoop):
             return False
         self._regionDraft.pop()
         self._regionHover = None
+        self._closeArmed = False
         self._regionCloseRequested = False
         self._status("Tonic Graph: region CV removed (%d remaining)"
                      % len(self._regionDraft))
@@ -792,12 +1087,15 @@ class GraphLoop(ToolLoop):
         dll = self.session.dll
         node = self._nodeAt(sample)
         if node >= 0:
+            # Grabbing a node is not an edit yet: move() marks one only when
+            # Tonic_GraphMoveNode accepts a position, and release() undoes
+            # the bracket of a grab that never moved or dropped anywhere.
             self._dragNode = node
             self._dropPoint = None
-            self._pendingEdit = True
             return True
         hit = sample.surface()
         if hit is None:
+            self._status("Tonic Graph place: no scalp under cursor")
             return True
         self._dropPoint = hit["point"]
         nodeId = ctypes.c_int(-1)
@@ -951,16 +1249,21 @@ class GraphLoop(ToolLoop):
         return True
 
     def _finishPlaceDrag(self, sample):
-        """A drag that ends on another node or edge welds (plan/17 5.1)."""
+        """A drag that ends on another node or edge welds (plan/17 5.1).
+
+        True when the drop changed the graph.
+        """
         dll = self.session.dll
         other = self._nodeAt(sample)
         if other >= 0 and other != self._dragNode:
-            dll.Tonic_GraphWeld(self.session.model, other, self._dragNode)
+            welded = dll.Tonic_GraphWeld(
+                self.session.model, other,
+                self._dragNode) == tonicLib.TONIC_OK
             self._dragNode = other
-            return
+            return welded
         edge = self._edgeAt(sample)
         if edge < 0:
-            return
+            return False
         # The release pick can still see the edge under the node that was
         # dragged.  Splitting that incident edge and welding its new midpoint
         # back to the dragged node deletes/replaces the node during an
@@ -972,30 +1275,35 @@ class GraphLoop(ToolLoop):
                 getEdge(self.session.model, edge, endpoints) ==
                 tonicLib.TONIC_OK and
                 self._dragNode in (int(endpoints[0]), int(endpoints[1]))):
-            return
+            return False
         hit = sample.surface()
         if hit is None:
-            return
+            return False
         mid = ctypes.c_int(-1)
         if dll.Tonic_GraphSplitEdge(self.session.model, edge, hit["face"],
                                     ctypes.c_float(hit["u"]),
                                     ctypes.c_float(hit["v"]),
-                                    ctypes.byref(mid)) == tonicLib.TONIC_OK:
-            dll.Tonic_GraphWeld(self.session.model, mid.value,
-                                self._dragNode)
-            self._dragNode = mid.value
+                                    ctypes.byref(mid)) != tonicLib.TONIC_OK:
+            return False
+        # The split alone is an edit even if the weld after it is refused.
+        dll.Tonic_GraphWeld(self.session.model, mid.value, self._dragNode)
+        self._dragNode = mid.value
+        return True
 
-    def _pressClickNode(self, sample, action):
+    def _pressClickNode(self, node, action):
         dll = self.session.dll
-        node = self._nodeAt(sample)
         if node < 0:
             self._status("Tonic Graph %s: no node here" % action)
             return True
         if self._clickNode < 0:
-            self._clickNode = node
-            self._status("Tonic Graph %s: node %d ..." % (action, node))
+            self._arm(tonicLib.TONIC_PICK_GRAPH_NODE, node)
+            self._status("Tonic Graph %s: node %d ... (Esc cancels)"
+                         % (action, node))
             return True
-        first, self._clickNode = self._clickNode, -1
+        # The pick is spent either way; a weld may even have deleted the
+        # node its selection named.
+        first = self._clickNode
+        self._disarm()
         if first == node:
             return True
         if action == "connect":
@@ -1016,23 +1324,54 @@ class GraphLoop(ToolLoop):
                          % ("ok" if ok else self.session.lastError()))
         return True
 
-    def _pressUnweld(self, sample):
-        node = self._nodeAt(sample)
+    def _pressUnweld(self, node):
         if node < 0:
             self._status("Tonic Graph unweld: no node here")
             return True
-        out = (ctypes.c_int * 64)()
-        count = ctypes.c_int(0)
-        self._bracket(
-            "Graph unweld",
-            lambda: self.session.dll.Tonic_GraphUnweld(
-                self.session.model, node, out, 64, ctypes.byref(count)))
-        self._status("Tonic Graph: unwelded into %d" % (count.value + 1))
+        self._unweld(node)
         return True
 
-    def _pressDelete(self, sample):
+    def _unweld(self, node):
+        """Split `node` per region as one undo step; True when it split.
+
+        A node only one region uses has nothing to split: that leaves no
+        undo step and says so. A split reports the pieces the node became
+        and, when the split opened a region's boundary, the region count
+        before and after (unwelding a corner whose third edge is shared
+        leaves one closed region, not two).
+        """
         dll = self.session.dll
-        node = self._nodeAt(sample)
+        out = (ctypes.c_int * 64)()
+        count = ctypes.c_int(0)
+        before = self.session.graphCounts()
+        result = {"ok": False}       # stays False if the bracket refused
+
+        def unweld():
+            result["ok"] = dll.Tonic_GraphUnweld(
+                self.session.model, node, out, 64,
+                ctypes.byref(count)) == tonicLib.TONIC_OK
+            return result["ok"] and count.value > 0
+
+        if not self._bracket("Graph unweld", unweld):
+            if result["ok"]:
+                self._status("Tonic Graph unweld: node %d is not shared, "
+                             "nothing to split" % node)
+            else:
+                self._status("Tonic Graph unweld: " +
+                             self.session.lastError())
+            return False
+        after = self.session.graphCounts()
+        text = "Tonic Graph: unwelded into %d nodes" % (count.value + 1)
+        if after[2] != before[2]:
+            text += " (regions %d -> %d)" % (before[2], after[2])
+        self._status(text)
+        return True
+
+    def _pressDelete(self, target):
+        """`target` is _clickTarget's: a node first, else the edge."""
+        dll = self.session.dll
+        kind, ident = target
+        node = ident if kind == tonicLib.TONIC_PICK_GRAPH_NODE else -1
         if node >= 0:
             ok = self._bracket(
                 "Graph delete node",
@@ -1041,7 +1380,7 @@ class GraphLoop(ToolLoop):
             self._status("Tonic Graph: node deleted (%s)"
                          % ("ok" if ok else self.session.lastError()))
             return True
-        edge = self._edgeAt(sample)
+        edge = ident if kind == tonicLib.TONIC_PICK_GRAPH_EDGE else -1
         if edge >= 0:
             ok = self._bracket(
                 "Graph delete edge",
@@ -1050,18 +1389,20 @@ class GraphLoop(ToolLoop):
             self._status("Tonic Graph: edge deleted, regions merged (%s)"
                          % ("ok" if ok else self.session.lastError()))
             return True
+        self._status(self._missStatus("delete"))
         return True
 
-    def _pressLink(self, sample):
-        region = self._regionAt(sample)
+    def _pressLink(self, region):
         if region < 0:
             self._status("Tonic Graph link: no region here")
             return True
         if self._clickRegion < 0:
-            self._clickRegion = region
-            self._status("Tonic Graph link: region %d ..." % region)
+            self._arm(tonicLib.TONIC_PICK_REGION, region)
+            self._status("Tonic Graph link: region %d ... (Esc cancels)"
+                         % region)
             return True
-        first, self._clickRegion = self._clickRegion, -1
+        first = self._clickRegion
+        self._disarm()
         if first == region:
             return True
         ok = self._bracket(
@@ -1083,17 +1424,26 @@ class GraphLoop(ToolLoop):
             tonicLib.TONIC_PICK_GRAPH_EDGE)]
         if not nodes and not edges:
             return False
-        self.session.beginGesture("Graph delete")
-        for edgeId in edges:
-            dll.Tonic_GraphDeleteEdge(self.session.model, edgeId)
-        for nodeId in nodes:
-            dll.Tonic_GraphDeleteNode(self.session.model, nodeId)
-        self.session.endGesture()
+        gone = {"nodes": 0, "edges": 0}
+
+        def delete():
+            for edgeId in edges:
+                if dll.Tonic_GraphDeleteEdge(
+                        self.session.model, edgeId) == tonicLib.TONIC_OK:
+                    gone["edges"] += 1
+            for nodeId in nodes:
+                if dll.Tonic_GraphDeleteNode(
+                        self.session.model, nodeId) == tonicLib.TONIC_OK:
+                    gone["nodes"] += 1
+            return gone["nodes"] + gone["edges"] > 0
+
+        changed = self._bracket("Graph delete", delete)
         self.session.clearSelection(tonicLib.TONIC_PICK_GRAPH_NODE |
                                     tonicLib.TONIC_PICK_GRAPH_EDGE)
         self._status("Tonic Graph: deleted %d node(s), %d edge(s)"
-                     % (len(nodes), len(edges)))
-        self.endOfEdit()
+                     % (gone["nodes"], gone["edges"]))
+        if changed:
+            self.endOfEdit()
         return True
 
     def adjustRadius(self, delta):
@@ -1107,17 +1457,33 @@ class GraphLoop(ToolLoop):
 
     # -- one-shot actions the dock drives ----------------------------------
 
-    def weldAll(self):
+    def weldAll(self, camera=None):
+        """Weld every node pair closer than the snap radius, one step.
+
+        The radius is the panel's pixels converted to rest units at the
+        scalp through `camera` (tonicGraph.snapRadiusRest), never the
+        pixel number itself. No weld in range leaves no undo step.
+        """
+        from .tonicGraph import snapRadiusRest
         dll = self.session.dll
         welds = ctypes.c_int(0)
-        radius = float(dll.Tonic_GetSnapRadius(self.session.model))
-        if dll.Tonic_GraphWeldAll(self.session.model, ctypes.c_float(radius),
-                                  ctypes.byref(welds)) == tonicLib.TONIC_OK:
-            self._status("Tonic Graph: %d weld(s)" % welds.value)
+        radius = snapRadiusRest(self.session, self.state, camera)
+        result = {"ok": False}       # stays False if the bracket refused
+
+        def weld():
+            result["ok"] = dll.Tonic_GraphWeldAll(
+                self.session.model, ctypes.c_float(radius),
+                ctypes.byref(welds)) == tonicLib.TONIC_OK
+            return result["ok"] and welds.value > 0
+
+        changed = self._bracket("Graph weld all", weld)
+        if not result["ok"]:
+            self._status("Tonic Graph: " + self.session.lastError())
+            return False
+        self._status("Tonic Graph: %d weld(s)" % welds.value)
+        if changed:
             self.endOfEdit()
-            return True
-        self._status("Tonic Graph: " + self.session.lastError())
-        return False
+        return True
 
     def toggleMirrorX(self):
         on = not self.state.mirrorX
@@ -1134,13 +1500,14 @@ class GraphLoop(ToolLoop):
             self._status("Tonic Graph: weld wants exactly two nodes "
                          "(%d selected)" % len(nodes))
             return False
-        self.session.beginGesture("Graph weld")
-        ok = self.session.dll.Tonic_GraphWeld(
-            self.session.model, nodes[0], nodes[1]) == tonicLib.TONIC_OK
-        self.session.endGesture()
+        ok = self._bracket(
+            "Graph weld",
+            lambda: self.session.dll.Tonic_GraphWeld(
+                self.session.model, nodes[0], nodes[1]) == tonicLib.TONIC_OK)
         self._status("Tonic Graph: welded (%s)"
                      % ("ok" if ok else self.session.lastError()))
-        self.endOfEdit()
+        if ok:
+            self.endOfEdit()
         return ok
 
     def unweldSelected(self):
@@ -1151,15 +1518,10 @@ class GraphLoop(ToolLoop):
             self._status("Tonic Graph: unweld wants exactly one node "
                          "(%d selected)" % len(nodes))
             return False
-        out = (ctypes.c_int * 64)()
-        count = ctypes.c_int(0)
-        self.session.beginGesture("Graph unweld")
-        self.session.dll.Tonic_GraphUnweld(self.session.model, nodes[0], out,
-                                           64, ctypes.byref(count))
-        self.session.endGesture()
-        self._status("Tonic Graph: unwelded into %d" % (count.value + 1))
-        self.endOfEdit()
-        return True
+        ok = self._unweld(nodes[0])
+        if ok:
+            self.endOfEdit()
+        return ok
 
 
 # The modes that drive the viewport. Output is deliberately absent: it is

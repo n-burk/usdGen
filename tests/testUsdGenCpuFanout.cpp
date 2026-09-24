@@ -681,6 +681,177 @@ UsdGenGraphDesc MakeScatterValidationDesc(double density)
     return desc;
 }
 
+void TestGrowAzimuth()
+{
+    UsdGenGrowOp grow;
+    UsdGenNodeDesc node;
+    node.params = {{TfToken("segments"), VtValue(2), false},
+                   {TfToken("length"), VtValue(1.0f), false},
+                   {TfToken("lift"), VtValue(42.0f), false},
+                   {TfToken("azimuth"), VtValue(0.0f), false},
+                   {TfToken("azimuthRandom"), VtValue(0.0f), false}};
+    UsdGenParamView params; params.node = &node;
+    UsdGenCaptureContext context; context.params = &params; context.seed = 21;
+    UsdGenDiagnostics diag;
+    UsdGenCurveBuffer roots;
+    constexpr uint32_t count = 2048;
+    roots.totalCurves = roots.totalCvs = count;
+    roots.px.assign(count, 0); roots.py.assign(count, 0); roots.pz.assign(count, 0);
+    roots.curveId.resize(count);
+    roots.rootT.assign(count, GfVec3f(1,0,0));
+    roots.rootB.assign(count, GfVec3f(0,1,0));
+    roots.rootN.assign(count, GfVec3f(0,0,1));
+    for (uint32_t c=0;c<count;++c) roots.curveId[c] = c+100;
+    auto capture = [&]() {
+        auto cap = grow.CreateCapture();
+        Check(grow.Capture(context, roots, cap.get(), &diag), "Grow azimuth capture succeeds");
+        return cap;
+    };
+    auto zero = capture();
+    // Explicit zero must retain the exact existing direction path.
+    node.params.erase(node.params.begin()+3,node.params.end());
+    auto absent = capture();
+    Check(zero->Buffer().rest == absent->Buffer().rest,
+          "Grow zero azimuth controls preserve existing points bit-for-bit");
+    node.params.push_back({TfToken("azimuth"), VtValue(90.0f), false});
+    node.params.push_back({TfToken("azimuthRandom"), VtValue(0.0f), false});
+    auto fixed = capture();
+    auto const endpoint = fixed->Buffer().rest[1];
+    Check(std::fabs(endpoint[0]) < 1e-5f &&
+          std::fabs(endpoint[1]-std::sin(42.f*3.14159265358979323846f/180.f)) < 1e-5f &&
+          std::fabs(endpoint[2]-zero->Buffer().rest[1][2]) < 1e-5f,
+          "Grow azimuth turns the leaned direction around N, preserving inclination");
+    node.params[3].value = VtValue(0.0f);
+    node.params[4].value = VtValue(1.0f);
+    auto random = capture();
+    auto repeat = capture();
+    Check(random->Buffer().rest == repeat->Buffer().rest, "Grow azimuth repeatability");
+    std::swap(roots.curveId[0], roots.curveId[1]);
+    auto reordered = capture();
+    Check(reordered->Buffer().rest[1] == random->Buffer().rest[3] &&
+          reordered->Buffer().rest[3] == random->Buffer().rest[1],
+          "Grow random azimuth follows stable IDs when strand order changes");
+    std::swap(roots.curveId[0], roots.curveId[1]);
+    GfVec3f mean(0);
+    int quadrants[4] = {};
+    bool shape = true;
+    for(uint32_t c=0;c<count;++c) {
+        auto const v = random->Buffer().rest[c*2+1];
+        mean += v;
+        ++quadrants[(v[0]<0 ? 1:0)+(v[1]<0 ? 2:0)];
+        shape &= std::fabs(v.GetLength()-1.f)<1e-5f &&
+                 std::fabs(v[2]-zero->Buffer().rest[1][2])<1e-5f &&
+                 random->Buffer().rest[c*2] == GfVec3f(0);
+    }
+    mean /= float(count);
+    Check(shape && std::fabs(mean[0])<.04f && std::fabs(mean[1])<.04f &&
+          *std::min_element(quadrants,quadrants+4)>400,
+          "Random azimuth covers the full circle without changing roots, lengths or lean");
+    // Regression for the puppet's visible quad pattern: four neighbouring
+    // parameter charts turn T/B by 90 degrees, while N stays smooth.
+    // No chart should receive one common azimuth or a preferred direction.
+    roots.rootPrim.resize(count);
+    GfVec3f const tangents[4] = {GfVec3f(1,0,0),GfVec3f(0,1,0),GfVec3f(-1,0,0),GfVec3f(0,-1,0)};
+    GfVec3f const binormals[4] = {GfVec3f(0,1,0),GfVec3f(-1,0,0),GfVec3f(0,-1,0),GfVec3f(1,0,0)};
+    for(uint32_t c=0;c<count;++c) {
+        uint32_t const face=c/(count/4);
+        roots.rootPrim[c]=int(face);
+        roots.rootT[c]=tangents[face]; roots.rootB[c]=binormals[face];
+    }
+    auto charts=capture();
+    bool isotropicCharts=true;
+    for(uint32_t face=0;face<4;++face) {
+        GfVec3f chartMean(0);
+        int bins[4]={};
+        for(uint32_t c=face*(count/4);c<(face+1)*(count/4);++c) {
+            GfVec3f const v=charts->Buffer().rest[c*2+1];
+            chartMean+=v;
+            ++bins[(v[0]<0 ? 1:0)+(v[1]<0 ? 2:0)];
+        }
+        chartMean/=float(count/4);
+        isotropicCharts &= std::fabs(chartMean[0])<.09f && std::fabs(chartMean[1])<.09f &&
+            *std::min_element(bins,bins+4)>75;
+    }
+    Check(isotropicCharts, "Full random azimuth has no shared face direction across rotated quad charts");
+    for(uint32_t c=0;c<count;++c) roots.rootPrim[c]+=73;
+    auto renamedFaces=capture();
+    Check(renamedFaces->Buffer().rest == charts->Buffer().rest,
+          "Grow direction does not use face ID as a random input");
+    roots.rootPrim.clear();
+    roots.rootT.assign(count,GfVec3f(1,0,0)); roots.rootB.assign(count,GfVec3f(0,1,0));
+    // Evaluate as two nonzero-offset chunks; captured randomness must not
+    // depend on how the scheduler partitions the strands.
+    bool equal = true;
+    for(uint32_t begin : {0u, count/2}) {
+        UsdGenChunkDesc chunk; chunk.firstCurve=begin; chunk.curveCount=count/2;
+        chunk.liveCount=count/2; chunk.cvCount=2;
+        std::vector<float> x(count),y(count),z(count);
+        UsdGenChunkView view{}; view.desc=&chunk;
+        view.curveCount=count/2; view.cvCount=2; view.inCvCount=1;
+        view.inPx=roots.px.cdata()+begin; view.inPy=roots.py.cdata()+begin; view.inPz=roots.pz.cdata()+begin;
+        view.rootN=roots.rootN.cdata()+begin; view.rootB=roots.rootB.cdata()+begin;
+        view.px=x.data(); view.py=y.data(); view.pz=z.data();
+        UsdGenEvalContext eval; eval.params=&params;
+        grow.Evaluate(eval,*random,&view);
+        for(uint32_t i=0;i<count;++i)
+            equal &= GfVec3f(x[i],y[i],z[i]) == random->Buffer().rest[begin*2+i];
+    }
+    Check(equal, "Grow posed/rest azimuth agrees across chunk boundaries");
+    auto const digest = grow.CaptureDigest(context);
+    context.seed = 22;
+    auto reseeded = capture();
+    Check(reseeded->Buffer().rest != random->Buffer().rest,
+          "Grow seed changes azimuth without a shared global RNG");
+    context.seed = 21;
+    node.params[4].value = VtValue(.5f);
+    Check(grow.CaptureDigest(context)[0] != digest[0], "Grow azimuthRandom invalidates capture");
+    node.params[4].value = VtValue(1.0f);
+    node.params[3].value = VtValue(15.0f);
+    Check(grow.CaptureDigest(context)[0] != digest[0], "Grow azimuth invalidates capture");
+    // Exercise actual primitive-domain expression evaluation, not just
+    // connection admission. Each root gets its own angle; changing the
+    // connected value must reach Capture and validate per strand.
+    node.path=SdfPath("/groom/grow"); node.type=TfToken("UsdGenGrow");
+    UsdGenGraphDesc desc; desc.description=SdfPath("/groom");
+    expr::ValueShape const scalarShape{expr::ScalarType::Float32,1,1,1,1,false};
+    desc.expressions.push_back({SdfPath("/groom/azimuth"),"90 * ($index % 2)",
+        {{TfToken("result"),TfToken("float"),scalarShape}}});
+    node.expressionBindings.push_back({SdfPath("/groom/azimuth"),TfToken("result"),TfToken("float"),
+        TfToken("azimuth"),scalarShape,expr::Domain::Primitive,VtValue(0.f)});
+    node.params[3].value=VtValue(0.f); node.params[4].value=VtValue(0.f);
+    UsdGenCpuParameters expressions; bool changed=false;
+    std::vector<std::string> expressionErrors;
+    Check(expressions.Evaluate(desc,node,roots,0,0,21,&changed,&expressionErrors),
+          "Grow primitive azimuth expression evaluates");
+    params.expressions=&expressions;
+    auto connected=capture();
+    Check(connected->Buffer().rest[1] == zero->Buffer().rest[1] &&
+          (connected->Buffer().rest[3]-fixed->Buffer().rest[1]).GetLength()<1e-5f,
+          "Grow consumes a distinct connected azimuth at each root");
+    node.expressionBindings[0].destination=TfToken("azimuthRandom");
+    desc.expressions[0].source="$index % 2";
+    Check(expressions.Evaluate(desc,node,roots,0,0,21,&changed,&expressionErrors),
+          "Grow primitive azimuthRandom expression evaluates");
+    auto connectedRandom=capture();
+    Check(connectedRandom->Buffer().rest[1] == zero->Buffer().rest[1] &&
+          connectedRandom->Buffer().rest[3] == random->Buffer().rest[3],
+          "Grow consumes connected azimuthRandom independently per root");
+    desc.expressions[0].source="1.1";
+    Check(expressions.Evaluate(desc,node,roots,0,0,21,&changed,&expressionErrors),
+          "Out-of-range expression is evaluated before Grow validates it");
+    auto invalidConnected=grow.CreateCapture();
+    Check(!grow.Capture(context,roots,invalidConnected.get(),&diag),
+          "Grow rejects out-of-range connected azimuthRandom");
+    params.expressions=nullptr;
+    for (int index : {3,4}) for(float invalid : {-361.f, 361.f, std::numeric_limits<float>::quiet_NaN()}) {
+        node.params[3].value=VtValue(0.f); node.params[4].value=VtValue(0.f);
+        node.params[index].value=VtValue(invalid); diag={};
+        auto rejected=grow.CreateCapture();
+        Check(!grow.Bind(params,&diag) && !grow.Capture(context,roots,rejected.get(),&diag),
+              "Grow rejects invalid azimuth controls in Bind and Capture");
+    }
+}
+
 void TestScatterGrowDefaultWidthThroughScheduler()
 {
     UsdGenGraphDesc desc = MakeScatterValidationDesc(300.0);
@@ -1450,6 +1621,7 @@ int main()
     TestGrowNamedPlaneTopologyOwnership();
     TestGrowWidthFallbackCapture();
     TestGrowAngularLift();
+    TestGrowAzimuth();
     TestScatterGrowDefaultWidthThroughScheduler();
     TestScatterDensityValidation();
     TestAuthoredSourcePlanes();

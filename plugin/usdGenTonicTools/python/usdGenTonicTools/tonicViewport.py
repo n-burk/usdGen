@@ -17,22 +17,38 @@
 # committed layers and drains finished bakes when nothing is being dragged.
 from __future__ import annotations
 
+import ctypes
 import time
 
+from . import tonicBridge
 from . import tonicCamera
 from . import tonicGizmo
+from . import tonicGizmoSettings
 from . import tonicHierarchy
 from . import tonicLadder
 from . import tonicLib
 from . import tonicLoops
 from . import tonicModes
 
-# plan/18 section 3.2: a move under this many pixels is not a move.
-MOVE_THRESHOLD_PX = 2.0
+# plan/18 section 3.2: a move under this many LOGICAL pixels is not a move
+# (scaled by the display ratio where it is compared, parity G24).
+MOVE_THRESHOLD_PX = tonicGizmo.CLICK_SLOP_PX
 # ... and a hover under this many is not a hover.
 HOVER_THRESHOLD_PX = 3.0
 # plan/18 section 3.3: the idle pump's period while anything is pending.
 PUMP_INTERVAL_MS = 50
+# FB-03 framing: StageView's own frame fit (about a 10 % margin), and the
+# on-screen size under which a selection is centred rather than zoomed onto.
+FRAME_FIT = 1.1
+FRAME_MIN_PIXELS = 8.0
+# Parity G11: the keys held during a gizmo drag -> the Sample modifier name
+# TubeLoop reads.  J = relative Step Snap, X = the pivot on the world grid.
+# Both are shared with usdview (J toggles its framed view), so they are
+# claimed only while a gizmo drag is live.
+HOLD_KEYS = {"j": "stepSnap", "x": "grid"}
+# Parity G13: Tube-mode gizmo keys.  '+' is Shift+'=' on most layouts, so
+# Shift is not read on these.
+SIZE_KEYS = ("+", "=", "-")
 
 
 def stageViewOf(usdviewApi):
@@ -108,6 +124,74 @@ def keyName(event):
     return ""
 
 
+def keyCode(event):
+    """A QKeyEvent's raw key code (the latch identity), or its keyName."""
+    try:
+        return int(event.key())
+    except (AttributeError, TypeError, ValueError):
+        return keyName(event)
+
+
+class KeyPressLatch(object):
+    """Run the key handler exactly ONCE per physical key press.
+
+    usdRig gizmoUI `_Act`/`_claimedKey`: one press reaches the
+    application-level filter many times.  Qt sends a ShortcutOverride and
+    then a KeyPress, and delivers each unaccepted one to the focus widget
+    and then to every ancestor up to the window -- seven hops from
+    usdview's StageView.  A handled key stops the delivery at once, but a
+    DECLINED key (runAction returned False: a two-CV region's Enter, Ctrl+Z
+    mid-drag) keeps propagating, and acting on every delivery printed
+    "needs at least 3 CVs" seven times for one Enter.
+
+    The rule: act on the first KeyPress delivery, remember the key with
+    its result, and answer every later delivery of the same press with
+    that result -- True keeps swallowing, False keeps passing the event on
+    to usdview untouched -- without acting again.  A ShortcutOverride
+    (which Qt sends before every physical press, auto-repeats included)
+    or the key's real KeyRelease starts the next press; so does a
+    different key or modifier set, for events sent straight at the view
+    with no override in front.  Qt-free: identities are whatever the
+    caller passes (the controller uses (keyCode, modifierSet)).
+    """
+
+    def __init__(self):
+        self._press = None          # (identity, result) of the live press
+
+    @property
+    def latched(self):
+        """The identity of the press already acted on, or None."""
+        return None if self._press is None else self._press[0]
+
+    def newPress(self):
+        """A ShortcutOverride: whatever KeyPress follows is a new press."""
+        self._press = None
+
+    def press(self, identity, handler):
+        """One KeyPress delivery; runs `handler()` on the first only."""
+        live = self._press
+        if live is not None and live[0] == identity:
+            return live[1]
+        # Latched before the call: a handler that raises still counts as
+        # the press's one run (declined), so the propagating copies do not
+        # raise -- and report -- once per widget.
+        marker = (identity, False)
+        self._press = marker
+        result = bool(handler())
+        if self._press is marker:
+            self._press = (identity, result)
+        return result
+
+    def release(self, key, autoRepeat=False):
+        """A KeyRelease: the real one of the latched key ends its press."""
+        live = self._press
+        if not autoRepeat and live is not None and live[0][0] == key:
+            self._press = None
+
+    def clear(self):
+        self._press = None
+
+
 def eventPixels(view, event):
     """An event position as PHYSICAL, top-left-origin viewport pixels.
 
@@ -126,20 +210,191 @@ def eventPixels(view, event):
     return (event.x() * ratio, event.y() * ratio)
 
 
-def askSaveFile(parent, caption, nameFilter, initial=""):
-    """A modal save dialog; "" when the artist cancels."""
-    from pxr.Usdviewq.qt import QtWidgets
-    path, _chosen = QtWidgets.QFileDialog.getSaveFileName(
-        parent, caption, initial, nameFilter)
-    return str(path) if path else ""
+# -- cursors, HUD and band tint (FB-02) --------------------------------------
+#
+# Qt-free on purpose: the tables below are what a T0 test reads, and the
+# controller maps the names onto Qt.CursorShape / painted colours.
+
+CURSOR_ARROW = "arrow"
+CURSOR_CROSS = "cross"
+CURSOR_BLANK = "blank"
+CURSOR_SIZE_ALL = "sizeAll"
+CURSOR_CLOSED_HAND = "closedHand"
+
+# Graph tools whose click lands a point on the scalp: a cross says "this
+# pixel", which an arrow's hot spot at its tip does not.
+GRAPH_CROSS_SUBMODES = frozenset(("draw", "place", "region", "reposition"))
 
 
-def askOpenFile(parent, caption, nameFilter, initial=""):
-    """A modal open dialog; "" when the artist cancels."""
-    from pxr.Usdviewq.qt import QtWidgets
-    path, _chosen = QtWidgets.QFileDialog.getOpenFileName(
-        parent, caption, initial, nameFilter)
-    return str(path) if path else ""
+def cursorFor(mode, subMode="", transformTool="", hoverHandle=-1,
+              dragging=False, band=False, ring=False, edgeStroke=False):
+    """The viewport cursor name for one (mode, sub-mode, tool, handle).
+
+    `dragging` is a live drag that moves something (a gizmo handle, a
+    Reposition CV/edge, a Place node), `band` a live box or lasso, `ring`
+    Sculpt's brush ring on screen (the ring IS the cursor there, so the
+    arrow is hidden under it), `edgeStroke` Hierarchy's edge-split tool.
+    `hoverHandle` is the gizmo handle under an idle pointer (-1 = none);
+    the Select tool has no gizmo, so it never has one.
+    """
+    mode = str(mode or "")
+    subMode = str(subMode or "")
+    if band:
+        return CURSOR_CROSS
+    if dragging:
+        return CURSOR_CLOSED_HAND
+    if mode == "graph" and subMode in GRAPH_CROSS_SUBMODES:
+        return CURSOR_CROSS
+    if mode == "hierarchy" and edgeStroke:
+        return CURSOR_CROSS
+    if mode == "sculpt":
+        return CURSOR_BLANK if ring else CURSOR_CROSS
+    if (mode == "tube" and str(transformTool or "") != "select" and
+            int(hoverHandle) >= 0):
+        return CURSOR_SIZE_ALL
+    return CURSOR_ARROW
+
+
+# The band's colour record, keyed by the TONIC_SELECT_* the modifier table
+# gives a box/lasso (tonicLoops.selectModeFor(..., band=True)).
+BAND_REPLACE = "replace"
+BAND_ADD = "add"
+BAND_REMOVE = "remove"
+BAND_RGB = {BAND_REPLACE: (90, 190, 255),
+            BAND_ADD: (90, 220, 120),
+            BAND_REMOVE: (255, 96, 96)}
+BAND_GLYPH = {BAND_REPLACE: "", BAND_ADD: "+", BAND_REMOVE: "−"}
+BAND_FILL_ALPHA = 0.12
+
+
+def bandRecordFor(modifiers):
+    """'replace' / 'add' / 'remove' for a band dragged with `modifiers`."""
+    mode = tonicLoops.selectModeFor(modifiers or (), band=True)
+    if int(mode) == tonicLib.TONIC_SELECT_REMOVE:
+        return BAND_REMOVE
+    if int(mode) == tonicLib.TONIC_SELECT_SET:
+        return BAND_REPLACE
+    return BAND_ADD
+
+
+HUD_SEPARATOR = " › "
+
+
+def hudTitle(state, bound=True):
+    """'Mode › Sub-mode › Tool' for the viewport HUD; '' with no mode.
+
+    Unbound (no scalp, so every tool is gated) it names the first step
+    instead of a tool that cannot act.
+    """
+    modeId = str(getattr(state, "activeMode", "") or "")
+    mode = tonicModes.ModeById(modeId)
+    if mode is None:
+        return ""
+    if not bound:
+        return tonicModes.UNBOUND_TITLE
+    parts = [mode.label]
+    subId = str(getattr(state, "%sSubMode" % modeId, "") or "")
+    for sub in tonicLoops.subModesFor(modeId):
+        if sub.id == subId:
+            parts.append(sub.label)
+            break
+    if modeId == "tube":
+        tool = str(getattr(state, "transformTool", "") or "")
+        if tool:
+            parts.append(tool.title())
+    return HUD_SEPARATOR.join(parts)
+
+
+def hudHint(state, bound=True):
+    """The HUD's bottom line: the dock's instruction line for the tool."""
+    if not bound:
+        return tonicModes.UNBOUND_HINT
+    modeId = str(getattr(state, "activeMode", "") or "")
+    subId = str(getattr(state, "%sSubMode" % modeId, "") or "")
+    return tonicModes.hintFor(modeId, subId)
+
+
+# How long the ladder chip stays up after a release restored fidelity.
+LADDER_CHIP_LINGER_MS = 1000
+
+
+def _makeHudOverlay(controller, view):
+    """The in-viewport HUD: tool breadcrumb, hint line and ladder chip.
+
+    Mouse-transparent and keyboard-free like every other overlay here; it
+    paints only text the controller already resolved (`title`, `hint`,
+    `chip`), so a paint never touches the model or the camera.
+    """
+    from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
+
+    class HudOverlay(QtWidgets.QWidget):
+        def __init__(self, parent):
+            super(HudOverlay, self).__init__(parent)
+            self.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground,
+                              True)
+            self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            self.setGeometry(parent.rect())
+            self.title = ""
+            self.hint = ""
+            self.chip = ""
+            self.hide()
+
+        def text(self):
+            """Everything the HUD shows, one line each (for tests)."""
+            return "\n".join(line for line in (self.title, self.chip,
+                                               self.hint) if line)
+
+        def _box(self, painter, x, y, text, colour, bold=False,
+                 bottom=False):
+            font = QtGui.QFont(painter.font())
+            font.setBold(bold)
+            painter.setFont(font)
+            metrics = QtGui.QFontMetrics(font)
+            # A long hint on a narrow viewport elides rather than running
+            # off the right edge.
+            room = max(int(self.width() - x - 20), 40)
+            text = metrics.elidedText(text, QtCore.Qt.TextElideMode.ElideRight,
+                                      room)
+            width = metrics.horizontalAdvance(text) \
+                if hasattr(metrics, "horizontalAdvance") \
+                else metrics.width(text)
+            height = metrics.height()
+            top = y - height - 6 if bottom else y
+            rect = QtCore.QRectF(x, top, width + 12, height + 6)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor(20, 20, 20, 150))
+            painter.drawRoundedRect(rect, 4.0, 4.0)
+            painter.setPen(colour)
+            painter.drawText(rect.adjusted(6, 3, -6, -3),
+                             int(QtCore.Qt.AlignmentFlag.AlignLeft |
+                                 QtCore.Qt.AlignmentFlag.AlignVCenter), text)
+            return rect
+
+        def paintEvent(self, _event):
+            if not (self.title or self.hint or self.chip):
+                return
+            painter = QtGui.QPainter(self)
+            try:
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing,
+                                      True)
+                y = 8.0
+                if self.title:
+                    rect = self._box(painter, 8.0, y, self.title,
+                                     QtGui.QColor(235, 235, 235), bold=True)
+                    y = rect.bottom() + 4.0
+                if self.chip:
+                    # Amber: the picture is knowingly degraded right now.
+                    self._box(painter, 8.0, y, self.chip,
+                              QtGui.QColor(255, 190, 80))
+                if self.hint:
+                    self._box(painter, 8.0, self.height() - 8.0, self.hint,
+                              QtGui.QColor(210, 210, 210), bottom=True)
+            finally:
+                painter.end()
+
+    return HudOverlay(view)
 
 
 def _makeRegionDraftOverlay(controller, view):
@@ -150,7 +405,9 @@ def _makeRegionDraftOverlay(controller, view):
     state it does not own, so this small Qt child paints only the temporary
     orange CVs, their connected contour and the last-CV rubber band.  It
     projects the stored world points on each paint, which keeps the draft
-    pinned to the scalp across a camera move or viewport resize.
+    pinned to the scalp across a camera move or viewport resize.  The same
+    layer draws Hierarchy's edge-split stroke, which is equally pre-model
+    until Shift+D consumes it.
     """
     from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
@@ -172,7 +429,50 @@ def _makeRegionDraftOverlay(controller, view):
                 return None
             return QtCore.QPointF(projected[0] / ratio, projected[1] / ratio)
 
+        def _paintEdges(self, edges):
+            """Hierarchy's split edge: dashed, with endpoint dots.
+
+            The recorded edge (what Shift+D will cut along) is cyan; the
+            stroke still being drawn is orange like every other live draft,
+            so a re-stroke reads as "replacing" the cyan one.
+            """
+            pairs = [(edges.get("recorded"), QtGui.QColor(0, 200, 255, 235)),
+                     (edges.get("live"), QtGui.QColor(255, 145, 0, 235))]
+            pairs = [(pair, colour) for pair, colour in pairs
+                     if pair is not None and len(pair) == 2]
+            if not pairs:
+                return
+            camera = tonicCamera.resolve(view)
+            if camera is None:
+                return
+            try:
+                ratio = max(float(view.devicePixelRatioF()), 1.0)
+            except AttributeError:
+                ratio = 1.0
+            painter = QtGui.QPainter(self)
+            try:
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing,
+                                      True)
+                for pair, colour in pairs:
+                    a = self._logicalPoint(camera, pair[0], ratio)
+                    b = self._logicalPoint(camera, pair[1], ratio)
+                    if a is None or b is None:
+                        continue
+                    pen = QtGui.QPen(colour)
+                    pen.setWidthF(2.0)
+                    pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+                    painter.setPen(pen)
+                    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                    painter.drawLine(a, b)
+                    painter.setPen(QtGui.QPen(colour))
+                    painter.setBrush(QtGui.QBrush(colour))
+                    painter.drawEllipse(a, 4.0, 4.0)
+                    painter.drawEllipse(b, 4.0, 4.0)
+            finally:
+                painter.end()
+
         def paintEvent(self, _event):
+            self._paintEdges(controller.hierarchyEdgePreview())
             preview = controller.regionDraftPreview()
             points = preview["points"]
             if not points:
@@ -202,19 +502,27 @@ def _makeRegionDraftOverlay(controller, view):
                 painter.setPen(line)
                 for a, b in zip(projected, projected[1:]):
                     painter.drawLine(a, b)
-                if hoverPoint is not None:
+                closeArmed = bool(preview.get("closeArmed"))
+                if closeArmed:
+                    # The hover sits on the first CV: draw the segment a
+                    # click would author as a solid edge of the contour, so
+                    # the closed shape reads before it exists.
+                    painter.drawLine(projected[-1], projected[0])
+                elif hoverPoint is not None:
                     rubber = QtGui.QPen(orange)
                     rubber.setWidthF(1.5)
                     rubber.setStyle(QtCore.Qt.PenStyle.DashLine)
                     painter.setPen(rubber)
                     painter.drawLine(projected[-1], hoverPoint)
                 # The first CV has a ring so its role as the close target is
-                # legible before the contour gains its third point.
+                # legible before the contour gains its third point; it grows
+                # and thickens while a click there would close.
                 firstPen = QtGui.QPen(QtGui.QColor(255, 215, 120, 250))
-                firstPen.setWidthF(2.0)
+                firstPen.setWidthF(3.0 if closeArmed else 2.0)
                 painter.setPen(firstPen)
                 painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(projected[0], 6.5, 6.5)
+                ring = 10.0 if closeArmed else 6.5
+                painter.drawEllipse(projected[0], ring, ring)
                 painter.setPen(QtGui.QPen(orange))
                 painter.setBrush(QtGui.QBrush(orange))
                 for point in projected:
@@ -226,17 +534,59 @@ def _makeRegionDraftOverlay(controller, view):
 
 
 def _makeMarqueeOverlay(view):
-    """A visible, mouse-transparent selection rectangle over StageView."""
-    from pxr.Usdviewq.qt import QtCore, QtWidgets
-    shape = getattr(QtWidgets.QRubberBand, "Rectangle", None)
-    if shape is None:  # PySide6 scopes the enum; PySide2 did not.
-        shape = QtWidgets.QRubberBand.Shape.Rectangle
-    band = QtWidgets.QRubberBand(shape, view)
-    band.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-                      True)
-    band.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-    band.hide()
-    return band
+    """A painted, mouse-transparent selection rectangle over StageView.
+
+    A QRubberBand drew the same platform rectangle for replace, add and
+    remove; this one is a 1 px border over a 12 % fill in the colour of
+    the modifier the band will apply (`colourRecord`: replace/add/remove,
+    BAND_RGB) with a '+'/'−' glyph by the cursor corner (FB-02).  It covers
+    the view and paints `band` (a logical QRect) so the glyph may sit
+    outside the rectangle itself.
+    """
+    from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
+
+    class MarqueeOverlay(QtWidgets.QWidget):
+        def __init__(self, parent):
+            super(MarqueeOverlay, self).__init__(parent)
+            self.setAttribute(
+                QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground,
+                              True)
+            self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            self.setGeometry(parent.rect())
+            self.band = None             # logical QRect, normalised
+            self.cursorPoint = None      # logical QPoint of the drag end
+            self.colourRecord = BAND_REPLACE
+            self.hide()
+
+        def paintEvent(self, _event):
+            rect = self.band
+            if rect is None:
+                return
+            rgb = BAND_RGB.get(self.colourRecord, BAND_RGB[BAND_REPLACE])
+            painter = QtGui.QPainter(self)
+            try:
+                pen = QtGui.QPen(QtGui.QColor(rgb[0], rgb[1], rgb[2], 235))
+                pen.setWidthF(1.0)
+                painter.setPen(pen)
+                painter.setBrush(QtGui.QColor(
+                    rgb[0], rgb[1], rgb[2], int(round(255 * BAND_FILL_ALPHA))))
+                painter.drawRect(QtCore.QRectF(rect).adjusted(0.5, 0.5,
+                                                              -0.5, -0.5))
+                glyph = BAND_GLYPH.get(self.colourRecord, "")
+                corner = self.cursorPoint
+                if glyph and corner is not None:
+                    font = QtGui.QFont(painter.font())
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.setPen(QtGui.QColor(rgb[0], rgb[1], rgb[2], 255))
+                    painter.drawText(QtCore.QPointF(corner.x() + 10.0,
+                                                    corner.y() + 18.0),
+                                     glyph)
+            finally:
+                painter.end()
+
+    return MarqueeOverlay(view)
 
 
 def _makeLassoOverlay(controller, view):
@@ -269,7 +619,10 @@ def _makeLassoOverlay(controller, view):
             try:
                 painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing,
                                       True)
-                pen = QtGui.QPen(QtGui.QColor(90, 190, 255, 235))
+                # The same add/remove tint as the box (FB-02).
+                rgb = BAND_RGB.get(controller.bandRecord(),
+                                   BAND_RGB[BAND_REPLACE])
+                pen = QtGui.QPen(QtGui.QColor(rgb[0], rgb[1], rgb[2], 235))
                 pen.setWidthF(1.5)
                 pen.setStyle(QtCore.Qt.PenStyle.DashLine)
                 painter.setPen(pen)
@@ -302,8 +655,40 @@ def _makeGizmoOverlay(controller, view):
             self.setGeometry(parent.rect())
             self.hide()
 
+        # The drawing is RigExec's GizmoOverlay (gizmoUI.py _Draw*), port
+        # for port: same shapes, opacities and draw order.  Records arrive
+        # in PHYSICAL pixels; every size below is divided by the ratio once,
+        # so LINE_WIDTH and the tip sizes stay LOGICAL on a HiDPI display.
+
+        @staticmethod
+        def _color(rgb, opacity=1.0):
+            return QtGui.QColor(
+                int(round(rgb[0] * 255)), int(round(rgb[1] * 255)),
+                int(round(rgb[2] * 255)),
+                int(round(max(0.0, min(1.0, opacity)) * 255)))
+
+        @staticmethod
+        def _point(point, ratio):
+            return QtCore.QPointF(point[0] / ratio, point[1] / ratio)
+
+        def _polygon(self, points, ratio):
+            return QtGui.QPolygonF([self._point(p, ratio) for p in points])
+
+        def _recordColor(self, record, opacity=1.0):
+            # GizmoState already resolved the state colour; an ungrabbable
+            # handle arrives with LOCKED_OPACITY and is dimmed here.
+            return self._color(record["color"],
+                               record.get("opacity", 1.0) * opacity)
+
+        def _pen(self, record):
+            pen = QtGui.QPen(self._recordColor(record))
+            pen.setWidthF(tonicGizmo.LINE_WIDTH)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+            return pen
+
         def paintEvent(self, _event):
-            records = controller.gizmoScreenHandles()
+            records, pie = controller.gizmoPaint()
             if not records:
                 return
             try:
@@ -314,36 +699,167 @@ def _makeGizmoOverlay(controller, view):
             try:
                 painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing,
                                       True)
+                # Draw order is hit order (RigExec paintEvent): the free
+                # ball under the rings, the rings, the rotation wedge, then
+                # axes, planes and the centre on top -- what looks on top
+                # is what a press picks.
                 for record in records:
-                    color = record["color"]
-                    alpha = 255 if record.get("grabbable", False) else 95
-                    pen = QtGui.QPen(QtGui.QColor(
-                        round(255.0 * color[0]), round(255.0 * color[1]),
-                        round(255.0 * color[2]), alpha))
-                    pen.setWidthF(2.0)
-                    painter.setPen(pen)
-                    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-                    points = [QtCore.QPointF(point[0] / ratio,
-                                             point[1] / ratio)
-                              for point in record["points"]]
-                    kind = record["kind"]
-                    if kind == "center":
-                        side = (tonicGizmo.CENTER_SIDE * 90.0) / ratio
-                        point = points[0]
-                        painter.setBrush(QtGui.QBrush(pen.color()))
-                        painter.drawRect(QtCore.QRectF(point.x() - side * 0.5,
-                                                       point.y() - side * 0.5,
-                                                       side, side))
-                    elif kind == "free":
-                        point = points[0]
-                        radius = float(record.get("radiusPx", 0.0)) / ratio
-                        painter.drawEllipse(point, radius, radius)
-                    elif kind == "plane":
-                        painter.drawPolygon(QtGui.QPolygonF(points))
-                    else:
-                        painter.drawPolyline(QtGui.QPolygonF(points))
+                    if record["kind"] == "free":
+                        self._drawSphere(painter, record, ratio)
+                for record in records:
+                    if record["kind"] in ("ring", "view"):
+                        self._drawRing(painter, record, ratio)
+                self._drawPie(painter, pie, ratio)
+                for record in records:
+                    if record["kind"] == "axis":
+                        tip = record.get("tip")
+                        if tip == "cube":
+                            self._drawScaleAxis(painter, record, ratio)
+                        elif tip == "cone":
+                            self._drawArrow(painter, record, ratio)
+                        else:
+                            self._drawLine(painter, record, ratio)
+                for record in records:
+                    if record["kind"] == "plane":
+                        self._drawPlane(painter, record, ratio)
+                for record in records:
+                    if record["kind"] == "center":
+                        self._drawCenter(painter, record, ratio)
+                self._drawReadout(painter, ratio)
             finally:
                 painter.end()
+
+        def _drawReadout(self, painter, ratio):
+            """GZ-07: the live drag value in a dark box beside the centre.
+
+            `readoutText` keeps what was last painted ("" when nothing),
+            so a T3 can see the label without reading pixels.
+            """
+            readout = controller.gizmoReadout()
+            self.readoutText = readout[0] if readout else ""
+            if not readout:
+                return
+            text, anchor = readout
+            font = QtGui.QFont(painter.font())
+            font.setBold(True)
+            painter.setFont(font)
+            metrics = QtGui.QFontMetricsF(font)
+            pad = 4.0
+            width = metrics.horizontalAdvance(text) \
+                if hasattr(metrics, "horizontalAdvance") \
+                else metrics.width(text)
+            # Up and to the right of the pivot, clear of the centre square
+            # and the arrows' first stretch, kept inside the viewport.
+            x = anchor[0] / ratio + 16.0
+            y = anchor[1] / ratio - 16.0 - metrics.height()
+            box = QtCore.QRectF(x, y, width + 2.0 * pad,
+                                metrics.height() + 2.0 * pad)
+            if box.right() > self.width():
+                box.moveRight(float(self.width()) - 2.0)
+            if box.top() < 0.0:
+                box.moveTop(2.0)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QBrush(QtGui.QColor(20, 20, 24, 200)))
+            painter.drawRoundedRect(box, 3.0, 3.0)
+            painter.setPen(QtGui.QColor(235, 235, 235))
+            painter.drawText(box, QtCore.Qt.AlignmentFlag.AlignCenter, text)
+
+        def _drawLine(self, painter, record, ratio):
+            painter.setPen(self._pen(record))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.drawLine(self._point(record["points"][0], ratio),
+                             self._point(record["points"][-1], ratio))
+
+        def _drawArrow(self, painter, record, ratio):
+            """A move axis: a line stopping short of a filled cone tip."""
+            import math
+            start = self._point(record["points"][0], ratio)
+            end = self._point(record["points"][-1], ratio)
+            dx, dy = end.x() - start.x(), end.y() - start.y()
+            length = math.hypot(dx, dy)
+            radius = tonicGizmo.CONE_RADIUS * record["sizePx"] / ratio
+            coneLength = min(radius * tonicGizmo.CONE_LENGTH_RATIO,
+                             length * 0.9)
+            painter.setPen(self._pen(record))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            if length < 1e-6:
+                return
+            ux, uy = dx / length, dy / length
+            base = QtCore.QPointF(end.x() - ux * coneLength,
+                                  end.y() - uy * coneLength)
+            painter.drawLine(start, base)
+            painter.setBrush(QtGui.QBrush(self._recordColor(record)))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawPolygon(QtGui.QPolygonF([
+                end,
+                QtCore.QPointF(base.x() - uy * radius, base.y() + ux * radius),
+                QtCore.QPointF(base.x() + uy * radius,
+                               base.y() - ux * radius)]))
+
+        def _drawScaleAxis(self, painter, record, ratio):
+            """A scale axis: a line ending in a filled cube (a square)."""
+            start = self._point(record["points"][0], ratio)
+            end = self._point(record["points"][-1], ratio)
+            side = tonicGizmo.CUBE_SIDE * record["sizePx"] / ratio
+            painter.setPen(self._pen(record))
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.drawLine(start, end)
+            painter.setBrush(QtGui.QBrush(self._recordColor(record)))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawRect(QtCore.QRectF(end.x() - side * 0.5,
+                                           end.y() - side * 0.5, side, side))
+
+        def _drawPlane(self, painter, record, ratio):
+            painter.setBrush(QtGui.QBrush(self._recordColor(
+                record, record.get("fillAlpha",
+                                   tonicGizmo.PLANE_FILL_OPACITY))))
+            painter.setPen(self._pen(record))
+            painter.drawPolygon(self._polygon(record["points"], ratio))
+
+        def _drawCenter(self, painter, record, ratio):
+            point = self._point(record["points"][0], ratio)
+            side = tonicGizmo.CENTER_SIDE * record["sizePx"] / ratio
+            painter.setBrush(QtGui.QBrush(self._recordColor(record)))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawRect(QtCore.QRectF(point.x() - side * 0.5,
+                                           point.y() - side * 0.5,
+                                           side, side))
+
+        def _drawRing(self, painter, record, ratio):
+            # Only the camera-side runs, which are also all HitTest picks;
+            # a fully visible run repeats its first point, so the seam is
+            # closed without a chord across the manipulator.
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.setPen(self._pen(record))
+            for run in record.get("frontPoints") or [record["points"]]:
+                if len(run) > 1:
+                    painter.drawPolyline(self._polygon(run, ratio))
+
+        def _drawSphere(self, painter, record, ratio):
+            # The ball keeps its own grey whatever the state (RigExec): it
+            # is a wash behind the rings, not a handle that lights up.
+            point = self._point(record["points"][0], ratio)
+            radius = float(record.get("radiusPx", 0.0)) / ratio
+            painter.setBrush(QtGui.QBrush(self._color(
+                tonicGizmo.SPHERE_COLOR,
+                record.get("fillAlpha", tonicGizmo.SPHERE_FILL_OPACITY))))
+            pen = QtGui.QPen(self._color(tonicGizmo.SPHERE_COLOR,
+                                         tonicGizmo.SPHERE_OPACITY))
+            pen.setWidthF(tonicGizmo.LINE_WIDTH)
+            painter.setPen(pen)
+            painter.drawEllipse(point, radius, radius)
+
+        def _drawPie(self, painter, pie, ratio):
+            """The rotation-amount wedge from the press to the sweep."""
+            if not pie:
+                return
+            polygon, color = pie
+            if len(polygon) < 3:
+                return
+            painter.setBrush(QtGui.QBrush(self._color(
+                color, tonicGizmo.PIE_OPACITY)))
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.drawPolygon(self._polygon(polygon, ratio))
 
     return GizmoOverlay(view)
 
@@ -362,10 +878,17 @@ class ViewportController:
         self._trackingWas = None
         self._timer = None
         self._loop = None
+        self._loopModel = None        # the model self._loop was built on
         self._camera = None
         self._gesture = False
         self._brushResizeArmed = False
         self._brushResizeActive = False
+        # Whether the current F hold started a width drag: releasing F
+        # without one is a tap, which frames instead (FB-03).
+        self._brushResizeUsed = False
+        # A Blender-style MMB camera drag Tonic drives itself:
+        # [mode, lastX, lastY] in physical pixels, or None (FB-03).
+        self._navDrag = None
         self._lastXY = None
         self._lastHoverXY = None
         self._pointerInside = False
@@ -377,10 +900,50 @@ class ViewportController:
         self._marqueeOverlay = None
         self._lassoOverlay = None
         self._gizmoOverlay = None
+        # FB-02: the in-viewport HUD, the cursor Tonic last set (a
+        # tonicViewport.CURSOR_* name, None = usdview's own) and the cursor
+        # the view had before install, which uninstall/suspend restore.
+        self._hudOverlay = None
+        self._cursorName = None
+        self._cursorWas = None
+        # The modifiers of the live band's last event (its colour record)
+        # and the ladder chip lingering after a release: (text, until s).
+        self._bandModifiers = frozenset()
+        self._ladderChipLinger = None
+        # (loop, gizmo paint signature, records, pie): what the gizmo
+        # overlay paints from, rebuilt on camera/gesture/selection events
+        # rather than on every paint (parity G22).
+        self._gizmoPaintCache = None
         self._rolloverWas = None
+        self._focusPolicyWas = None
+        # Who received the last press: "tonic" (claimed, even as a miss) or
+        # "stageview" (the camera's, or usdview's own pick).  An idle move
+        # with a button held is claimed or passed on by this owner, and its
+        # release re-runs one hover (FB-01).
+        self._pressOwner = None
+        # The last press-less pointer sample, for the hover that re-runs
+        # after a camera move: (x, y, modifiers) in physical pixels.
+        self._lastPointer = None
+        self._rehoverPending = False
+        # Dock hidden: the view filter is off and usdview owns the view, but
+        # the session and its model stay live (FB-01 suspend/resume).
+        self._suspended = False
         # The fallback ladder (plan/18 section 3.7): armed at press, fed
         # every move's measured time, restored at release.
         self._ladder = tonicLadder.FallbackLadder(session, state)
+        # Parity G11: the snap holds (J = step snap, X = world grid) held
+        # during a gizmo drag, as Sample modifier names.  Claimed only while
+        # a drag is live, cleared when it ends or the window deactivates.
+        self._holds = set()
+        # One run of onKey per physical press, however many widgets the
+        # declined KeyPress propagates through (usdRig _claimedKey).
+        self._keyLatch = KeyPressLatch()
+        # Whether the live gesture has had a forwarded move: a hold is
+        # re-applied at once only to a drag that has actually moved, so a
+        # tweak press held still stays a click.
+        self._gestureMoved = False
+        # The GizmoSettings listener while installed (dock rows, +/-, L).
+        self._settingsListening = None
 
     # -- accessors ---------------------------------------------------------
 
@@ -415,6 +978,14 @@ class ViewportController:
     def _status(self, text):
         if not text:
             return
+        # Through the session, like every loop's line, so the dock's
+        # message area (the session's status sink, DK-05) sees the
+        # controller's refusals too; the session falls back to usdview's
+        # status bar when no sink is installed.
+        report = getattr(self._session, "report", None)
+        if report is not None:
+            report(text)
+            return
         api = self._api
         if api is None:
             return
@@ -436,7 +1007,7 @@ class ViewportController:
 
     def install(self, view=None):
         """Attach both filters. True once the view is really there."""
-        from pxr.Usdviewq.qt import QtCore, QtWidgets
+        from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
         view = view if view is not None else stageViewOf(self._api)
         if view is None:
             self._state.viewportFailed = True
@@ -453,12 +1024,32 @@ class ViewportController:
             view.setMouseTracking(True)
         except AttributeError:
             self._trackingWas = None
+        # usdview's StageView takes no keyboard focus, so once a dock field
+        # had it, clicking the viewport left it there and every hotkey read
+        # as typing.  ClickFocus lets a click hand the keys back to the view.
+        try:
+            self._focusPolicyWas = view.focusPolicy()
+            view.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        except (AttributeError, RuntimeError):
+            self._focusPolicyWas = None
+        self._suspended = False
         self._viewFilter = _ViewFilter(self, view)
         view.installEventFilter(self._viewFilter)
         self._regionOverlay = _makeRegionDraftOverlay(self, view)
         self._marqueeOverlay = _makeMarqueeOverlay(view)
         self._lassoOverlay = _makeLassoOverlay(self, view)
         self._gizmoOverlay = _makeGizmoOverlay(self, view)
+        self._hudOverlay = _makeHudOverlay(self, view)
+        # The view's own cursor (usually none: StageView inherits the
+        # arrow), so uninstall hands back exactly what it found.
+        try:
+            self._cursorWas = (QtGui.QCursor(view.cursor())
+                               if view.testAttribute(
+                                   QtCore.Qt.WidgetAttribute.WA_SetCursor)
+                               else None)
+        except (AttributeError, RuntimeError):
+            self._cursorWas = None
+        self._cursorName = None
         # GizmoState.push clears the Hydra record while this child exists.
         # The dynamic session flag deliberately keeps headless/fallback
         # routes free of any Qt dependency.
@@ -483,6 +1074,11 @@ class ViewportController:
             setIdleHook(self.scheduleIdle)
         self._installed = True
         self._state.viewportFailed = False
+        # A gizmo setting (dock row, +/-, L, Reset) re-places the gizmo at
+        # once through the live camera (parity G20).
+        settings = tonicGizmoSettings.settingsFor(self._state)
+        settings.AddListener(self._onGizmoSettings)
+        self._settingsListening = settings
         # workspaceOpen belongs to the dock, which sets it from its own
         # visibility (plan/18 section 3.4: the hotkeys live while the
         # workspace is open, not merely while the filter is installed).
@@ -492,8 +1088,17 @@ class ViewportController:
         self.syncDisplayScale()
         if not self._state.activeMode:
             self.setMode(tonicModes.MODES[0].id)
+        self._syncHud()
+        self._syncCursor()
         if getattr(self._session, "hasPendingWork", lambda: False)():
             self.scheduleIdle()
+        # Installed with no workspace on screen (usdGen > Tonic > Bind
+        # selected as scalp before Open workspace) is the same as a hidden
+        # dock: the filter would otherwise claim every left click as a
+        # Graph region press and forced tracking would make StageView run
+        # a Hydra pick per hover.  The dock's first show resumes.
+        if not self._state.workspaceOpen:
+            self.suspend()
         return True
 
     def uninstall(self):
@@ -518,6 +1123,22 @@ class ViewportController:
             except AttributeError:
                 pass
         self._trackingWas = None
+        if self._view is not None and self._focusPolicyWas is not None:
+            try:
+                self._view.setFocusPolicy(self._focusPolicyWas)
+            except (AttributeError, RuntimeError):
+                pass
+        self._focusPolicyWas = None
+        self._disconnectFrustumSignal()
+        self._disconnectStageSignals()
+        if self._settingsListening is not None:
+            self._settingsListening.RemoveListener(self._onGizmoSettings)
+            self._settingsListening = None
+        self._holds.clear()
+        self._keyLatch.clear()
+        self._pressOwner = None
+        self._lastPointer = None
+        self._suspended = False
         if self._keyFilter is not None:
             application = QtWidgets.QApplication.instance()
             if application is not None:
@@ -540,6 +1161,13 @@ class ViewportController:
             self._gizmoOverlay.hide()
             self._gizmoOverlay.deleteLater()
             self._gizmoOverlay = None
+        if self._hudOverlay is not None:
+            self._hudOverlay.hide()
+            self._hudOverlay.deleteLater()
+            self._hudOverlay = None
+        self._restoreCursor()
+        self._cursorWas = None
+        self._ladderChipLinger = None
         if self._session is not None:
             self._session.qtGizmoOverlay = False
             gizmo = getattr(self._loop, "_gizmo", None)
@@ -557,6 +1185,15 @@ class ViewportController:
         view = self._view
         if view is None:
             return
+        # The HUD and the tool cursor exist only while the tool is on
+        # screen; a closed dock gives usdview its own arrow back (FB-02).
+        if active:
+            self._syncHud()
+            self._syncCursor()
+        else:
+            if self._hudOverlay is not None:
+                self._hudOverlay.hide()
+            self._restoreCursor()
         if active:
             if self._rolloverWas is None:
                 try:
@@ -587,9 +1224,26 @@ class ViewportController:
         api = self._api
         if api is None:
             return
+        if getattr(self, "_stageSignalConnected", False):
+            return
         try:
             api.dataModel.signalStageReplaced.connect(self._onStageReplaced)
+            self._stageSignalConnected = True
         except (AttributeError, RuntimeError):
+            pass
+
+    def _disconnectStageSignals(self):
+        # Qt does not de-duplicate connections: without this every
+        # uninstall/install cycle (a replaced StageView, a re-bind after
+        # shutdown) ran _onStageReplaced once more per File > Reopen.
+        api = self._api
+        if api is None or not getattr(self, "_stageSignalConnected", False):
+            return
+        self._stageSignalConnected = False
+        try:
+            api.dataModel.signalStageReplaced.disconnect(
+                self._onStageReplaced)
+        except (AttributeError, RuntimeError, TypeError):
             pass
 
     def _connectFrustumSignal(self):
@@ -605,9 +1259,141 @@ class ViewportController:
         if view is None:
             return
         try:
-            view.signalFrustumChanged.connect(self.syncDisplayScale)
+            view.signalFrustumChanged.connect(self._onFrustumChanged)
         except (AttributeError, RuntimeError):
             pass
+
+    def _disconnectFrustumSignal(self):
+        view = self._view
+        if view is None:
+            return
+        try:
+            view.signalFrustumChanged.disconnect(self._onFrustumChanged)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    def _onFrustumChanged(self):
+        self.syncDisplayScale()
+        # What sits under a still cursor changed with the camera.  The hover
+        # waits for the event loop: this signal fires inside StageView's
+        # paintGL, which must not be asked to render again from within.
+        self._scheduleRehover()
+
+    def _scheduleRehover(self):
+        """Re-run one hover at the last pointer sample, once, deferred."""
+        if self._rehoverPending or not self._installed or self._suspended:
+            return
+        try:
+            from pxr.Usdviewq.qt import QtCore
+            self._rehoverPending = True
+            QtCore.QTimer.singleShot(0, self._rehover)
+        except (AttributeError, ImportError, RuntimeError):
+            self._rehoverPending = False
+
+    def _rehover(self):
+        self._rehoverPending = False
+        # A camera drag re-renders every move by itself; its release asks
+        # again once the button is up.
+        if (not self._installed or self._suspended or self._gesture or
+                self._pressOwner is not None or not self._pointerInside or
+                not self._state.workspaceOpen or not self._ready() or
+                self._lastPointer is None or self._view is None):
+            return
+        x, y, modifiers = self._lastPointer
+        if "alt" in modifiers or "meta" in modifiers:
+            return
+        self._lastHoverXY = None        # same pixel, new camera: evaluate
+        try:
+            self._hoverAt(self._view, x, y, modifiers)
+        except Exception as exc:        # noqa: BLE001 - timer boundary
+            self._status("Tonic viewport hover: %s" % exc)
+
+    def suspend(self):
+        """The dock was hidden: give the StageView back to usdview.
+
+        The view filter comes off (a click picks prims again, a hover rolls
+        over), tracking and rollover return to usdview's settings and the
+        idle pump stops, but the session, its model and the key filter
+        stay, so showing the dock resumes exactly where the artist was.
+        """
+        if not self._installed or self._suspended:
+            return
+        self._recoverGesture("workspace hidden")
+        self._clearHover()
+        self._suspended = True
+        self._pressOwner = None
+        view = self._view
+        if view is not None and self._viewFilter is not None:
+            view.removeEventFilter(self._viewFilter)
+        self.setWorkspaceActive(False)
+        if view is not None and self._trackingWas is not None:
+            try:
+                view.setMouseTracking(self._trackingWas)
+            except (AttributeError, RuntimeError):
+                pass
+        # usdview's StageView is NoFocus: with the dock hidden a click on it
+        # must not pull the keys off usdview's own search field.
+        if view is not None and self._focusPolicyWas is not None:
+            try:
+                view.setFocusPolicy(self._focusPolicyWas)
+            except (AttributeError, RuntimeError):
+                pass
+        self.stopIdle()
+        for overlay in (self._regionOverlay, self._marqueeOverlay,
+                        self._lassoOverlay, self._gizmoOverlay,
+                        self._hudOverlay):
+            if overlay is not None:
+                overlay.hide()
+        self._pointerInside = False
+        self._refresh()
+
+    def resume(self):
+        """The dock is visible again: retake the view, focus included."""
+        if not self._installed:
+            return
+        view = self._view
+        if self._suspended:
+            self._suspended = False
+            try:
+                self._trackingWas = bool(view.hasMouseTracking())
+            except (AttributeError, RuntimeError):
+                self._trackingWas = None
+            try:
+                from pxr.Usdviewq.qt import QtCore
+                self._focusPolicyWas = view.focusPolicy()
+                view.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+            except (AttributeError, ImportError, RuntimeError):
+                self._focusPolicyWas = None
+            if view is not None and self._viewFilter is not None:
+                view.installEventFilter(self._viewFilter)
+            self.syncDisplayScale()
+            self._syncRegionOverlay()
+            self._syncMarqueeOverlay()
+            self._syncGizmoOverlay()
+            if getattr(self._session, "hasPendingWork", lambda: False)():
+                self.scheduleIdle()
+        self.setWorkspaceActive(True)
+        # Opening or re-showing the workspace must never leave the keys on
+        # a dock widget; the viewport is where the artist works.
+        self._takeViewFocus(view)
+        self._refresh()
+
+    def _takeViewFocus(self, view=None):
+        view = view if view is not None else self._view
+        if view is None:
+            return
+        try:
+            view.setFocus()
+        except (AttributeError, RuntimeError):
+            pass
+
+    def viewHasKeys(self):
+        """Viewport keys are live: the pointer is over it or it has focus."""
+        return self._pointerInside or self.viewHasFocus()
+
+    @property
+    def suspended(self):
+        return self._suspended
 
     def syncDisplayScale(self, camera=None):
         """Push world-units-per-pixel at the groom into the model.
@@ -654,6 +1440,25 @@ class ViewportController:
         mode = tonicModes.ModeById(str(modeId))
         if mode is None:
             return ""
+        if (self._state.activeMode and
+                (self._session is None or self._session.model is None)):
+            # Nothing is bound, so every mode but the initial one would be a
+            # loop over no model: pressing 2 used to enter Tube silently and
+            # leave the artist in a tool that cannot do anything. install()
+            # still runs its first setMode (activeMode is empty then).
+            self._status("Tonic: bind a scalp mesh first")
+            return ""
+        if mode.id == self._state.activeMode and self._loop is not None and \
+                getattr(self, "_loopModel", None) is getattr(
+                    self._session, "model", None):
+            # GZ-08: picking the mode already current (its hotkey, its shelf
+            # button) is a no-op.  Rebuilding the loop threw away its gizmo,
+            # Graph's region draft and the brush ring for nothing.  A bind
+            # or resume (a different model) still rebuilds: the old loop's
+            # drafts belong to the old model.
+            status = tonicModes.SetActiveMode(self._state, mode.id)
+            self._status(status)
+            return status
         if mode.id != "sculpt":
             self._brushResizeArmed = False
         # A first hover at the same physical point in the new mode is still
@@ -681,6 +1486,7 @@ class ViewportController:
         # viewport keeps the camera, so the mode's own status line is the
         # whole truth about it.
         self._loop = tonicLoops.makeLoop(mode.id, self._session, self._state)
+        self._loopModel = getattr(self._session, "model", None)
         if self._loop is not None and not self._subModeOf(mode.id):
             self.setSubMode(self._loop.defaultSubMode)
         if self._loop is not None:
@@ -691,7 +1497,9 @@ class ViewportController:
         self._applyDisplayPolicy()
         self._syncRegionOverlay()
         self._syncMarqueeOverlay()
-        self._syncGizmoOverlay()
+        # GZ-08: a Tube loop entered with a selection shows its gizmo now,
+        # sized for the live camera (activate() had none to size it with).
+        self.refreshGizmo()
         self._refresh()
         self._status(status)
         return status
@@ -882,10 +1690,29 @@ class ViewportController:
 
     def onPress(self, view, event):
         from pxr.Usdviewq.qt import QtCore
+        # Every return False below hands the press, and so its drag, to
+        # StageView; the claimed paths retake it.
+        self._pressOwner = "stageview"
+        if self._installed and self._state.workspaceOpen:
+            self._takeViewFocus(view)
+        navigation = self._navigationPress(view, event)
+        if navigation is not None:
+            return navigation
         if not self._ready():
             return False
-        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+        # A plain middle press repeats the last-dragged gizmo handle from
+        # anywhere (RigExec/Maya, parity G04) in a loop that offers it;
+        # otherwise only the left button is Tonic's.
+        middleButton = getattr(QtCore.Qt.MouseButton, "MiddleButton", None)
+        middle = (middleButton is not None and
+                  event.button() == middleButton and
+                  callable(getattr(self._loop, "middlePress", None)))
+        if event.button() != QtCore.Qt.MouseButton.LeftButton and \
+                not middle:
             return False
+        if middle and self._gesture:
+            self._pressOwner = "tonic"
+            return True                  # a live left drag keeps going
         # A missing MouseButtonRelease (focus change, native modal dialog,
         # or a view replacement) must never consume the next real click.
         if self._gesture:
@@ -893,6 +1720,10 @@ class ViewportController:
         modifiers = modifierSet(event)
         if "alt" in modifiers or "meta" in modifiers:
             return False                 # the camera's, always
+        # A band this press may start is tinted by these (FB-02).
+        self._bandModifiers = modifiers
+        if middle:
+            modifiers = modifiers | frozenset(("middle",))
         x, y = eventPixels(view, event)
         self._camera = tonicCamera.resolve(view)
         if self._camera is None:
@@ -900,16 +1731,18 @@ class ViewportController:
         self.syncDisplayScale(self._camera)
         sample = tonicLoops.Sample(self._session, self._camera, x, y,
                                    modifiers)
-        if self._brushResizeArmed and self._canBrushResize():
+        if not middle and self._brushResizeArmed and self._canBrushResize():
             begin = getattr(self._loop, "beginRadiusResize", None)
             if begin is not None and begin(sample):
                 self._brushResizeActive = True
+                self._brushResizeUsed = True
                 self._gesture = True
                 self._lastXY = (x, y)
                 self._syncRegionOverlay()
                 self._syncMarqueeOverlay()
                 self._syncGizmoOverlay()
                 self._refresh()
+                self._pressOwner = "tonic"
                 return True
         try:
             claimed = bool(self._loop.press(sample))
@@ -921,9 +1754,23 @@ class ViewportController:
             self._recoverGesture("press exception", force=True)
             return False
         if not claimed:
-            return False
+            if not self._state.workspaceOpen:
+                return False
+            # A Tonic miss (Sculpt off every tube, an empty Fill click, a
+            # middle press with no handle to repeat) is still a Tonic
+            # click: handing it on made StageView pick and replace the
+            # usdview prim selection under the artist.
+            self._pressOwner = "tonic"
+            self._syncGizmoOverlay()
+            self._refresh()
+            return True
         self._syncActiveCutBreadcrumb()
         self._gesture = True
+        self._gestureMoved = False
+        # The button that owns the capture: a middle repeat drag is held
+        # by the middle button, and its moves/release must read that one.
+        self._gestureButton = event.button()
+        self._pressOwner = "tonic"
         self._lastXY = (x, y)
         self._ladder.arm(self._state.activeLevel)
         self._session.publish()
@@ -933,11 +1780,282 @@ class ViewportController:
         self._refresh()
         return True
 
+    # -- navigation (FB-03) ------------------------------------------------
+
+    def _navigationPress(self, view, event):
+        """A middle/right press over the open workspace; None passes on.
+
+        StageView turns every non-Alt press into `pickObject`: a middle
+        press re-picks under the groom and a right press opens usdview's
+        prim context menu, neither of which an artist working on hair
+        meant.  Alt/Meta presses stay usdview's camera in both styles.
+        """
+        from pxr.Usdviewq.qt import QtCore
+        buttons = QtCore.Qt.MouseButton
+        button = event.button()
+        middle = button == getattr(buttons, "MiddleButton", None)
+        right = button == buttons.RightButton
+        if not (middle or right):
+            return None
+        if not (self._installed and self._state.workspaceOpen):
+            return None
+        modifiers = modifierSet(event)
+        if "alt" in modifiers or "meta" in modifiers:
+            return None
+        if self._gesture:
+            # A second button under a live left drag must not move the
+            # camera its press-time projection was measured with.
+            self._pressOwner = "tonic"
+            return True
+        style = str(getattr(self._state, "navigationStyle", "maya")).lower()
+        if middle and style == "blender":
+            mode = ("truck" if "shift" in modifiers else
+                    "zoom" if "ctrl" in modifiers else "tumble")
+            camera = self._freeCamera(view, switch=True)
+            if camera is not None:
+                self._seatPivot(camera, view)
+                x, y = eventPixels(view, event)
+                self._navDrag = [mode, x, y]
+        elif middle and self._ready() and self._middleRepeats(view):
+            return None                  # Maya: the G04 handle repeat
+        self._pressOwner = "tonic"
+        return True
+
+    def _middleRepeats(self, view=None):
+        """Whether a plain Maya-style middle press repeats a gizmo handle.
+
+        Blender-style MMB is the camera, always: an orbit that turned into
+        a handle drag whenever a tube was selected would be unusable.  The
+        loop is asked at this press's camera, so a remembered handle the
+        overlay now dims as ungrabbable leaves the press to usdview.
+        """
+        middlePress = getattr(self._loop, "middlePress", None)
+        if not callable(middlePress):
+            return False
+        available = getattr(self._loop, "middleRepeatAvailable", None)
+        if not callable(available):
+            return True                  # the loop's press decides
+        try:
+            camera = tonicCamera.resolve(view) if view is not None else None
+            return bool(available(camera))
+        except Exception:               # noqa: BLE001 - GUI boundary
+            return False
+
+    @staticmethod
+    def _viewSettings(view, api=None):
+        dataModel = getattr(view, "_dataModel", None)
+        if dataModel is None and api is not None:
+            dataModel = getattr(api, "dataModel", None)
+        return getattr(dataModel, "viewSettings", None)
+
+    def _freeCamera(self, view, switch=False):
+        """usdview's free camera, taken over from a scene camera first."""
+        view = view if view is not None else self._view
+        if view is None:
+            return None
+        if switch:
+            # StageView does the same before its own Alt drags and framing:
+            # a scene camera prim is never edited by navigation.
+            toFree = getattr(view, "switchToFreeCamera", None)
+            if callable(toFree):
+                try:
+                    toFree()
+                except (AttributeError, RuntimeError):
+                    return None
+        settings = self._viewSettings(view, self._api)
+        return getattr(settings, "freeCamera", None)
+
+    def _navigationMove(self, view, event):
+        """One Blender-style MMB drag step on usdview's free camera."""
+        mode, lastX, lastY = self._navDrag
+        x, y = eventPixels(view, event)
+        dx, dy = x - lastX, y - lastY
+        if dx == 0 and dy == 0:
+            return True
+        camera = self._freeCamera(view)
+        if camera is None:
+            return True
+        # StageView.mouseMoveEvent's own factors, so a Blender drag moves
+        # exactly as far as usdview's Alt drag over the same pixels.
+        if mode == "tumble":
+            camera.Tumble(0.25 * dx, 0.25 * dy)
+        elif mode == "zoom":
+            zoomDelta = -0.002 * (dx + dy)
+            if camera.orthographic:
+                camera.fov *= (1 + zoomDelta)
+            else:
+                camera.AdjustDistance(1 + zoomDelta)
+        else:
+            height = float(view.GetPhysicalWindowSize()[1])
+            perPixel = camera.ComputePixelsToWorldFactor(height)
+            camera.Truck(-dx * perPixel, dy * perPixel)
+        self._navDrag = [mode, x, y]
+        view.updateGL()
+        return True
+
+    def frameBounds(self):
+        """World (min, max) that F frames, or None when Tonic has nothing.
+
+        The model's selection bounds cover every selected kind (graph nodes
+        and edges, CVs, rings, section CVs), but a whole selected tube
+        counts only as its centroid there, so its displayed centre line is
+        added to frame the tube itself.  Sculpt has no selection of its
+        own, so with nothing selected it frames the whole groom.
+        """
+        session = self._session
+        if session is None or session.model is None:
+            return None
+        points = []
+        dll, model = session.dll, session.model
+        lo = (ctypes.c_float * 3)()
+        hi = (ctypes.c_float * 3)()
+        try:
+            if dll.Tonic_GetSelectionBounds(model, lo, hi) == tonicLib.TONIC_OK:
+                points.append((lo[0], lo[1], lo[2]))
+                points.append((hi[0], hi[1], hi[2]))
+            tubes = [item[0] for item in
+                     session.readSelection(tonicLib.TONIC_PICK_TUBE_VERT)]
+            if (not points and self._state.activeMode == "sculpt" and
+                    self._loop is not None):
+                tubes = tonicBridge.readTubeIds(dll, model)
+            for tubeId in tubes:
+                points.extend(tonicHierarchy.tubeCenterHandles(dll, model,
+                                                               tubeId))
+        except (AttributeError, RuntimeError, NotImplementedError) as exc:
+            self._status("Tonic frame: %s" % exc)
+        if not points:
+            return None
+        return (tuple(min(p[a] for p in points) for a in range(3)),
+                tuple(max(p[a] for p in points) for a in range(3)))
+
+    def frameSelection(self):
+        """Frame the Tonic selection in usdview's free camera; True if so.
+
+        A selection too small to fill any of the view (one CV, a ring seen
+        edge on) is centred at the current distance rather than zoomed onto,
+        so repeated F never dives through the groom.
+        """
+        from pxr import Gf
+        view = self._view
+        if view is None:
+            return False
+        bounds = self.frameBounds()
+        if bounds is None:
+            return False
+        lo, hi = bounds
+        centre = tuple(0.5 * (lo[a] + hi[a]) for a in range(3))
+        size = max(hi[a] - lo[a] for a in range(3))
+        pixelSize = 0.0
+        current = tonicCamera.resolve(view)
+        if current is not None:
+            try:
+                pixelSize = size / max(current.worldPerPixel(centre), 1e-12)
+            except (AttributeError, RuntimeError, ValueError):
+                pixelSize = 0.0
+        camera = self._freeCamera(view, switch=True)
+        if camera is None:
+            return False
+        if pixelSize < FRAME_MIN_PIXELS:
+            self._recentre(camera, view, centre)
+        else:
+            box = Gf.BBox3d(Gf.Range3d(Gf.Vec3d(*lo), Gf.Vec3d(*hi)))
+            camera.frameSelection(box, FRAME_FIT)
+        settings = self._viewSettings(view, self._api)
+        if getattr(settings, "autoComputeClippingPlanes", False):
+            closest = getattr(view, "computeAndSetClosestDistance", None)
+            if callable(closest):
+                closest()
+        view.updateGL()
+        self._status("Tonic: framed the %s" % (
+            "selection" if self._session.selectionCount(0) else "groom"))
+        self._scheduleRehover()
+        return True
+
+    @staticmethod
+    def _viewAxis(view):
+        """The unit world view direction through the viewport centre."""
+        camera = tonicCamera.resolve(view)
+        if camera is None:
+            return None
+        ray = camera.rayThrough(0.5 * camera.width, 0.5 * camera.height)
+        return None if ray is None else ray[1]
+
+    def _recentre(self, camera, view, point):
+        """Slide the free camera sideways until `point` is on its axis.
+
+        The depth to the point is kept, so it keeps its on-screen size; a
+        bare `center` assignment would instead keep the old orbit distance,
+        which is 0 for a free camera taken over from a plain camera prim --
+        the eye would land on the point itself.
+        """
+        from pxr import Gf
+        axis = self._viewAxis(view)
+        target = Gf.Vec3d(*point)
+        if axis is None:
+            camera.center = target
+            return
+        axis = Gf.Vec3d(*axis)
+        eye = camera.center - camera.dist * axis
+        depth = Gf.Dot(target - eye, axis)
+        if depth <= 1e-6:
+            depth = (target - eye).GetLength()
+        camera.center = target
+        if depth > 1e-6:
+            camera.dist = depth
+
+    def _seatPivot(self, camera, view):
+        """Give a pivot-less free camera a pivot at the groom's depth.
+
+        FreeCamera.FromGfCamera takes its orbit distance from the scene
+        camera's focusDistance, which a plain camera prim leaves at 0: the
+        pivot is then the eye, so an orbit only looks around and a pan
+        (world units per pixel scale with that distance) never moves.  The
+        eye stays exactly where it is; only the pivot moves out to the
+        scalp's depth along the view axis.
+        """
+        from pxr import Gf
+        try:
+            if float(camera.dist) > 1e-6:
+                return
+        except (AttributeError, TypeError, ValueError):
+            return
+        centre = getattr(self._session, "scalpCenter", None) \
+            if self._session is not None else None
+        axis = self._viewAxis(view)
+        if centre is None or axis is None:
+            return
+        axis = Gf.Vec3d(*axis)
+        eye = Gf.Vec3d(camera.center)    # dist 0: the centre is the eye
+        depth = Gf.Dot(Gf.Vec3d(*centre) - eye, axis)
+        if depth <= 1e-6:
+            return
+        camera.center = eye + depth * axis
+        camera.dist = depth
+
+    def hasFrameTarget(self):
+        """Whether F is Tonic's (it frames usdview's prims otherwise)."""
+        if not (self._installed and self._state.workspaceOpen and
+                self._ready()):
+            return False
+        return self.frameBounds() is not None
+
     def onMove(self, view, event):
         x, y = eventPixels(view, event)
         self._pointerInside = True
+        if self._navDrag is not None:
+            if self._buttonsHeld(event):
+                return self._navigationMove(view, event)
+            self._navDrag = None         # its release was lost
+            self._pressOwner = None
         if not self._ready():
-            return False
+            # Nothing is bound, so there is no Tonic hover, but the forced
+            # mouse tracking would still turn every press-less move into a
+            # StageView rollover pick and prim tooltip.  A press Tonic
+            # swallowed (a middle/right click) keeps its drag too.
+            if self._pressOwner == "tonic" and self._buttonsHeld(event):
+                return True
+            return (bool(self._state.workspaceOpen) and
+                    not self._buttonsHeld(event))
         if not self._gesture:
             return self._onHover(view, event, x, y)
         if not self._leftButtonHeld(event):
@@ -947,18 +2065,23 @@ class ViewportController:
             self._recoverGesture("move without left button")
             return self._onHover(view, event, x, y)
         if self._lastXY is not None:
+            # x, y are physical pixels (eventPixels); the slop is logical.
             if (abs(x - self._lastXY[0]) + abs(y - self._lastXY[1]) <
-                    MOVE_THRESHOLD_PX):
+                    tonicGizmo.clickSlopPixels(self._camera)):
                 return True
         self._lastXY = (x, y)
+        self._gestureMoved = True
         started = time.perf_counter()
+        # Pressing or letting go of Shift/Ctrl mid-band re-tints it (FB-02).
+        self._bandModifiers = modifierSet(event)
         sample = tonicLoops.Sample(self._session, self._camera, x, y,
-                                   modifierSet(event))
+                                   self._bandModifiers | self._holdModifiers())
         if self._brushResizeActive:
             resize = getattr(self._loop, "resizeRadius", None)
-            claimed = bool(resize(sample)) if resize is not None else False
+            if resize is not None:
+                resize(sample)
         else:
-            claimed = bool(self._loop.move(sample))
+            self._loop.move(sample)
         self._session.publish()
         self._syncRegionOverlay()
         self._syncMarqueeOverlay()
@@ -971,11 +2094,66 @@ class ViewportController:
         self._state.lastMoveMs = elapsed
         if not self._brushResizeActive and self._ladder.noteMove(elapsed):
             self._status("Tonic: %s" % self._ladder.describe())
-        return claimed
+            self._syncHud()             # the chip names the new rung
+        # Whatever the loop made of it, a move inside a Tonic gesture is
+        # never StageView's: it would pick or re-render a second time.
+        return True
 
     def _onHover(self, view, event, x, y):
+        """An idle move.  True claims it from StageView.
+
+        With no button held StageView only rollover-picks (usdview's prim
+        tooltip) because the tool forces mouse tracking on, so an open
+        workspace always claims such a move, hovering or not.  A move with a
+        button held and no Tonic gesture is a camera drag: StageView renders
+        it once, and a Tonic hover here would render it a second time
+        against a camera that is moving -- it re-runs on release instead.
+        """
+        workspaceOpen = bool(self._state.workspaceOpen)
+        if not self._buttonsHeld(event):
+            # No button is down, so no drag is either, whatever release was
+            # lost.
+            self._pressOwner = None
+        elif self._pressOwner == "stageview":
+            return False             # the camera's drag
+        elif self._pressOwner == "tonic":
+            # A press Tonic swallowed (a miss) keeps its drag off usdview's
+            # picker, without hovering under a held button.
+            return True
+        # A held button whose press this view never saw (a drag that began
+        # elsewhere, or a synthetic move) is a hover like any other.
+        modifiers = modifierSet(event)
+        self._lastPointer = (x, y, modifiers)
+        if not workspaceOpen:
+            return False
+        if "alt" in modifiers or "meta" in modifiers:
+            return True              # the camera's key; hover resumes after
+        self._hoverAt(view, x, y, modifiers)
+        return True
+
+    @staticmethod
+    def _buttonsHeld(event):
+        """Any mouse button down; False for a lightweight/headless event."""
+        try:
+            buttons = event.buttons()
+        except (AttributeError, RuntimeError):
+            return False
+        if buttons is None:
+            return False
+        try:
+            from pxr.Usdviewq.qt import QtCore
+            return buttons != QtCore.Qt.MouseButton.NoButton
+        except (AttributeError, ImportError):
+            return bool(buttons)
+
+    def _hoverAt(self, view, x, y, modifiers):
+        """Tonic's hover at one physical pixel; True when it evaluated."""
         if self._ladder.hoverSuppressed:
             return False             # the ladder's last rung
+        if self._ladder.hoverCoolingDown(time.perf_counter() * 1000.0):
+            # ... and its post-release cool-down (FB-02): the full-detail
+            # republish lands first; _resetGestureState re-hovers after.
+            return False
         # Component dots in Tube and Hierarchy are as precise as Graph's
         # CV/edge affordances.  Do not make a one- or two-pixel crossing
         # wait for the old generic rollover threshold.
@@ -989,37 +2167,56 @@ class ViewportController:
         camera = tonicCamera.resolve(view)
         if camera is None:
             return False
-        sample = tonicLoops.Sample(self._session, camera, x, y,
-                                   modifierSet(event))
-        # Hover never claims the event: usdview's own rollover and the
-        # camera modes keep working over the same pixels.
+        sample = tonicLoops.Sample(self._session, camera, x, y, modifiers)
         self._loop.hover(sample)
         self._syncRegionOverlay()
         self._syncGizmoOverlay()
         self._refresh()
-        return False
+        return True
 
     def onRelease(self, view, event):
         from pxr.Usdviewq.qt import QtCore
+        if (self._navDrag is not None and
+                event.button() == getattr(QtCore.Qt.MouseButton,
+                                          "MiddleButton", None)):
+            # The Blender-style camera drag ends; what is under the still
+            # cursor changed with the camera.
+            self._navDrag = None
+            self._pressOwner = None
+            self._scheduleRehover()
+            return True
         if not self._gesture or not self._ready():
+            owner, self._pressOwner = self._pressOwner, None
+            if owner == "stageview":
+                # A camera drag may have moved the scene under a cursor
+                # that stayed still: one hover now that the button is up.
+                self._scheduleRehover()
+            return owner == "tonic"
+        # Only the button that holds the capture ends it (left, or middle
+        # for a repeat drag).
+        held = getattr(self, "_gestureButton", None)
+        if held is None:
+            held = QtCore.Qt.MouseButton.LeftButton
+        if event.button() not in (held, QtCore.Qt.MouseButton.NoButton):
             return False
-        if event.button() not in (QtCore.Qt.MouseButton.LeftButton,
-                                  QtCore.Qt.MouseButton.NoButton):
-            return False
+        self._pressOwner = None
         x, y = eventPixels(view, event)
-        claimed = False
         released = False
         resizing = self._brushResizeActive
         try:
             sample = tonicLoops.Sample(self._session, self._camera, x, y,
-                                       modifierSet(event))
+                                       modifierSet(event) |
+                                       self._holdModifiers())
             if self._brushResizeActive:
                 end = getattr(self._loop, "endRadiusResize", None)
-                claimed = bool(end(sample)) if end is not None else False
+                if end is not None:
+                    end(sample)
             else:
-                claimed = bool(self._loop.release(sample))
+                self._loop.release(sample)
             released = True
-            return claimed
+            # The release closes a Tonic gesture whatever the loop made of
+            # it; StageView never saw the press.
+            return True
         except Exception as exc:          # noqa: BLE001 - GUI boundary
             self._status("Tonic viewport release: %s" % exc)
             # A failed release must restore the loop's press-time snapshot,
@@ -1044,9 +2241,12 @@ class ViewportController:
     def onDoubleClick(self, view, event):
         """Let Hierarchy navigate a valid target; otherwise preserve clicks."""
         from pxr.Usdviewq.qt import QtCore
-        if not self._ready():
-            return False
+        self._pressOwner = "stageview"   # as onPress: until claimed
         if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            # StageView's default double click is a second press, so a
+            # middle/right one would pick or open the prim menu (FB-03).
+            return self.onPress(view, event)
+        if not self._ready():
             return False
         if self._gesture:
             self._recoverGesture("double click after lost release")
@@ -1055,6 +2255,8 @@ class ViewportController:
             return False
         # Hierarchy alone owns double-click navigation, and only when its
         # target resolver accepted a visible tube (plan/18 section 3.6).
+        # Tube's double-click grows the selection over a component (GZ-08)
+        # and never changes the level.
         handler = getattr(self._loop, "doubleClick", None)
         if handler is not None:
             x, y = eventPixels(view, event)
@@ -1062,12 +2264,17 @@ class ViewportController:
             sample = tonicLoops.Sample(self._session, self._camera, x, y,
                                        modifiers)
             if handler(sample):
+                self._pressOwner = "tonic"
+                # Tube's double-click (GZ-08) re-placed its gizmo on the
+                # grown selection; the Qt overlay follows at once.
+                self._syncGizmoOverlay()
                 self._refresh()
                 return True
         # Qt delivers MouseButtonDblClick in place of the second press.
         # It is hierarchy navigation only when that loop accepted a visible
-        # tube target.  Tube, Graph and Sculpt must see the ordinary second
-        # press/release instead; blindly entering a level here quickly puts
+        # tube target.  Graph, Sculpt and a Tube double-click over no
+        # component must see the ordinary second press/release instead;
+        # blindly entering a level here quickly puts
         # them on an empty level where nothing can be picked.
         return self.onPress(view, event)
 
@@ -1097,14 +2304,19 @@ class ViewportController:
                 self._syncGizmoOverlay()
                 self._refresh()
         self._pointerInside = inside
+        # Leaving drops the hover (and Sculpt's ring) the cursor followed.
+        self._syncCursor()
 
     def cancelGesture(self):
         """Escape: drop the live gesture, restoring the press-time base."""
         # Graph can retain an idle transient region draft after the click
         # release. Escape must still reach that loop even though the
         # controller no longer has a captured mouse gesture.
+        # Escape only cancels (SL-03): with nothing live it leaves the
+        # selection alone -- a stray Escape used to throw away a careful
+        # multi-CV pick. Ctrl+Shift+A is the deselect key.
         return self._recoverGesture("cancelled", force=True,
-                                    clearSelection=True)
+                                    clearSelection=False)
 
     def _leftButtonHeld(self, event):
         """False only when a real Qt move reports that capture was lost."""
@@ -1115,14 +2327,33 @@ class ViewportController:
             return True                # lightweight/headless event
         if buttons is None:
             return True
-        return bool(buttons & QtCore.Qt.MouseButton.LeftButton)
+        # The capture's own button: middle for a repeat drag (G04).
+        held = getattr(self, "_gestureButton", None)
+        if held is None:
+            held = QtCore.Qt.MouseButton.LeftButton
+        return bool(buttons & held)
 
     def _resetGestureState(self):
         """Clear controller-only capture state; safe after every exit path."""
         self._gesture = False
+        self._gestureButton = None
         self._brushResizeActive = False
         self._lastXY = None
-        self._ladder.restore()
+        # The snap holds belong to one drag (RigExec _ClearHolds).
+        self._holds.clear()
+        self._gestureMoved = False
+        chip = self._ladder.chipLabel() if self._ladder.armed else ""
+        nowMs = time.perf_counter() * 1000.0
+        if self._ladder.restore(nowMs):
+            self._noteLadderRestored(chip)
+            coolMs = self._ladder.hoverCooldownRemainingMs(nowMs)
+            if coolMs > 0.0:
+                try:
+                    from pxr.Usdviewq.qt import QtCore
+                    QtCore.QTimer.singleShot(int(coolMs) + 20,
+                                             self._scheduleRehover)
+                except (AttributeError, ImportError, RuntimeError):
+                    pass
 
     def _recoverGesture(self, reason="", force=False, clearSelection=False):
         """Cancel an interrupted gesture and leave the controller reusable.
@@ -1132,6 +2363,9 @@ class ViewportController:
         leave intentionally does not call this helper because Qt commonly
         keeps a valid left-button capture outside the widget.
         """
+        # A lost capture ends a Tonic-driven camera drag too; its release
+        # will never come.
+        self._navDrag = None
         if self._loop is None:
             self._resetGestureState()
             return False
@@ -1141,6 +2375,12 @@ class ViewportController:
                 return True
             return False
         cancelled = False
+        # Whose bracket may still be open afterwards: a live viewport
+        # capture (the controller owns the mouse, so any open bracket is
+        # the interrupted gesture's), or a loop cancel that raised before
+        # it could close its own. An idle Escape with neither leaves a
+        # bracket some other owner (a held dock slider) opened alone.
+        closeLeaked = bool(self._gesture)
         try:
             if self._brushResizeActive:
                 cancelResize = getattr(self._loop, "cancelRadiusResize", None)
@@ -1149,10 +2389,13 @@ class ViewportController:
             else:
                 cancelled = bool(self._loop.cancel())
         except Exception as exc:        # noqa: BLE001 - recovery boundary
+            closeLeaked = True
             self._status("Tonic viewport recovery: %s" % exc)
         finally:
             self._resetGestureState()
             self._brushResizeArmed = False
+            if closeLeaked and self._closeLeakedBracket(reason):
+                cancelled = True
         if not cancelled and clearSelection and self._session is not None:
             if self._session.selectionCount(0) > 0:
                 self._session.clearSelection(0)
@@ -1170,12 +2413,46 @@ class ViewportController:
         self.scheduleIdle()
         return cancelled
 
+    def _closeLeakedBracket(self, reason=""):
+        """Roll back a session bracket the loop's cancel left open.
+
+        The loop's cancel is the only thing that calls cancelGesture for
+        its own bracket; if it raised (or forgot) after the press opened
+        one, the model would keep a gesture open for good -- every later
+        Begin refused, Tube drags dead, the dock's Undo greyed -- until a
+        rebind. _recoverGesture calls this only when the controller held
+        the capture or the loop's cancel raised, so whatever is still open
+        is the interrupted gesture's and is cancelled to its press-time
+        base. True when a bracket was closed.
+        """
+        session = self._session
+        if session is None or not getattr(session, "gestureActive", False):
+            return False
+        closed = False
+        try:
+            # Bounded: a session with no model keeps its depth on cancel.
+            for _ in range(8):
+                if not session.gestureActive:
+                    break
+                dirty = session.cancelGesture()
+                session.publish(int(dirty or 0))
+                closed = True
+        except Exception as exc:        # noqa: BLE001 - recovery boundary
+            self._status("Tonic viewport recovery: %s" % exc)
+            return closed
+        if closed:
+            self._status("Tonic: %s left an edit open -- rolled it back"
+                         % (reason or "an interrupted gesture"))
+        return closed
+
     def _clearHover(self):
         """Drop an idle prehighlight when its viewport context changes."""
         self._lastHoverXY = None
         if self._gesture or self._session is None:
             return False
         changed = False
+        if getattr(self._loop, "clearHover", lambda: False)():
+            changed = True               # e.g. Sculpt's idle brush ring
         graphClear = getattr(self._loop, "_setGraphHover", None)
         try:
             if graphClear is not None:
@@ -1193,8 +2470,19 @@ class ViewportController:
         loop = self._loop
         getter = getattr(loop, "draftRegionPreview", None)
         if getter is None:
-            return {"points": (), "hover": None}
+            return {"points": (), "hover": None, "closeArmed": False}
         return getter()
+
+    def hierarchyEdgePreview(self):
+        """HierarchyLoop's split edge: the stroke in flight and the recorded
+        one, as world endpoint pairs (None when absent or off-tool)."""
+        getter = getattr(self._loop, "edgePreview", None)
+        if getter is None:
+            return {"live": None, "recorded": None}
+        try:
+            return getter()
+        except (AttributeError, RuntimeError):
+            return {"live": None, "recorded": None}
 
     def _syncRegionOverlay(self):
         """Repaint and resize the mouse-transparent draft overlay."""
@@ -1203,7 +2491,10 @@ class ViewportController:
         if overlay is None or view is None:
             return
         overlay.setGeometry(view.rect())
-        overlay.setVisible(bool(self.regionDraftPreview()["points"]))
+        edges = self.hierarchyEdgePreview()
+        overlay.setVisible(bool(self.regionDraftPreview()["points"]) or
+                           edges["live"] is not None or
+                           edges["recorded"] is not None)
         overlay.raise_()
         overlay.update()
 
@@ -1238,9 +2529,16 @@ class ViewportController:
         if rect.width() < 2 and rect.height() < 2:
             overlay.hide()
             return
-        overlay.setGeometry(rect)
+        # The painted band covers the view and draws the rect itself, so
+        # its add/remove glyph can sit past the cursor corner (FB-02).
+        if overlay.geometry() != view.rect():
+            overlay.setGeometry(view.rect())
+        overlay.band = rect
+        overlay.cursorPoint = finish
+        overlay.colourRecord = self.bandRecord()
         overlay.show()
         overlay.raise_()
+        overlay.update()
 
     def selectionLassoPoints(self):
         loop = self._loop
@@ -1261,18 +2559,88 @@ class ViewportController:
         overlay.raise_()
         overlay.update()
 
-    def gizmoScreenHandles(self):
-        """Physical-pixel handles from the active Tube loop, if any."""
+    def _activeGizmo(self):
         loop = self._loop
-        gizmo = getattr(loop, "_gizmo", None) if loop is not None else None
+        return getattr(loop, "_gizmo", None) if loop is not None else None
+
+    def gizmoScreenHandles(self):
+        """Physical-pixel handles from the active Tube loop, if any.
+
+        Always built from the live camera and gizmo, and it refreshes the
+        cache the overlay paints from.
+        """
+        return self._rebuildGizmoPaint()[0]
+
+    def _rebuildGizmoPaint(self):
+        """Resolve the camera once and rebuild the overlay's records + pie."""
+        gizmo = self._activeGizmo()
         view = self._view
-        if gizmo is None or view is None:
-            return ()
-        camera = tonicCamera.resolve(view)
-        return tuple(gizmo.screenHandles(camera)) if camera is not None else ()
+        camera = (tonicCamera.resolve(view)
+                  if gizmo is not None and view is not None else None)
+        if camera is None:
+            self._gizmoPaintCache = None
+            return (), None
+        records = tuple(gizmo.screenHandles(camera))
+        pie = gizmo.pieSlice() if records else None
+        self._gizmoPaintCache = (self._loop, gizmo.paintSignature(),
+                                 records, pie)
+        return records, pie
+
+    def gizmoPaint(self):
+        """(records, pie) for the overlay's paintEvent.
+
+        RigExec rebuilds its handles on frustum/resize/selection/gesture
+        events, never per paint (parity G22).  Those events all reach
+        `_syncGizmoOverlay`, which rebuilds; a paint only rebuilds when the
+        gizmo itself changed since (its cheap paint signature), so a
+        repaint Storm asks for costs no camera resolve at all.
+        """
+        gizmo = self._activeGizmo()
+        cache = self._gizmoPaintCache
+        if gizmo is not None and cache is not None and \
+                cache[0] is self._loop and \
+                cache[1] == gizmo.paintSignature():
+            return cache[2], cache[3]
+        return self._rebuildGizmoPaint()
+
+    def gizmoReadout(self):
+        """(text, (x, y) physical pixels of the pivot) while a drag runs.
+
+        GZ-07: TubeLoop.dragReadout() drawn beside the gizmo centre.  None
+        when no loop drag is live, so an idle repaint resolves no camera.
+        """
+        readout = getattr(self._loop, "dragReadout", None)
+        text = readout() if callable(readout) else ""
+        gizmo = self._activeGizmo()
+        if not text or gizmo is None or self._view is None:
+            return None
+        camera = tonicCamera.resolve(self._view)
+        point = (camera.worldToPixels(gizmo.origin)
+                 if camera is not None else None)
+        if point is None:
+            return None
+        return text, (point[0], point[1])
+
+    def refreshGizmo(self):
+        """GZ-08: re-place the loop's gizmo on the live selection and view.
+
+        For changes that arrive without a mouse event -- undo/redo, a dock
+        action, a warning row's click -- so the handles never trail the
+        model.  A live drag keeps its press-time gizmo (the loop refuses).
+        """
+        refresh = getattr(self._loop, "refreshGizmo", None)
+        if refresh is not None:
+            # No view (headless) or no camera yet: the loop re-places with
+            # the camera it last saw, keeping the gizmo's size.
+            refresh(tonicCamera.resolve(self._view))
+        self._syncGizmoOverlay()
 
     def _syncGizmoOverlay(self):
         """Keep the unoccluded Qt gizmo in lockstep with the live picker."""
+        # Every mode/sub-mode/tool/hover/gesture change already lands here
+        # (the dock's tool buttons included), so the HUD and the cursor
+        # follow the same beat; both are no-ops when nothing changed.
+        self._syncFeedback()
         overlay = self._gizmoOverlay
         view = self._view
         if overlay is None:
@@ -1286,9 +2654,157 @@ class ViewportController:
         overlay.raise_()
         overlay.update()
 
+    # -- HUD, cursor and band tint (FB-02) -----------------------------------
+
+    def _feedbackLive(self):
+        return (self._installed and not self._suspended and
+                self._view is not None and
+                bool(self._state.workspaceOpen))
+
+    def _syncFeedback(self):
+        self._syncHud()
+        self._syncCursor()
+
+    def ladderChipText(self):
+        """The HUD's ladder chip now: the live rung, or '' at full detail.
+
+        A release that restored fidelity keeps the rung it had on screen
+        for LADDER_CHIP_LINGER_MS, marked as restored, so a short heavy
+        drag still says why it looked coarse.
+        """
+        live = self._ladder.chipLabel() if self._ladder.armed else ""
+        if live:
+            return live
+        linger = self._ladderChipLinger
+        if linger is None:
+            return ""
+        text, until = linger
+        if time.monotonic() >= until:
+            self._ladderChipLinger = None
+            return ""
+        return text
+
+    def hudText(self):
+        """(title, hint, chip): what the viewport HUD shows."""
+        bound = getattr(self._session, "model", None) is not None
+        return (hudTitle(self._state, bound), hudHint(self._state, bound),
+                self.ladderChipText())
+
+    def _syncHud(self):
+        overlay = self._hudOverlay
+        if overlay is None:
+            return
+        if not self._feedbackLive() or not self._state.activeMode:
+            overlay.hide()
+            return
+        title, hint, chip = self.hudText()
+        view = self._view
+        if overlay.geometry() != view.rect():
+            overlay.setGeometry(view.rect())
+        changed = (title, hint, chip) != (overlay.title, overlay.hint,
+                                          overlay.chip)
+        overlay.title, overlay.hint, overlay.chip = title, hint, chip
+        if not overlay.isVisible():
+            overlay.show()
+            overlay.raise_()
+            changed = True
+        if changed:
+            overlay.update()
+
+    def _noteLadderRestored(self, label):
+        """A release restored a stepped ladder: linger its chip ~1 s."""
+        if not label:
+            return
+        self._ladderChipLinger = (
+            "%s → full" % label,
+            time.monotonic() + LADDER_CHIP_LINGER_MS / 1000.0)
+        try:
+            from pxr.Usdviewq.qt import QtCore
+            # A little after the deadline, so the check sees it expired.
+            QtCore.QTimer.singleShot(LADDER_CHIP_LINGER_MS + 50,
+                                     self._syncHud)
+        except (AttributeError, ImportError, RuntimeError):
+            pass
+
+    def cursorName(self):
+        """The CURSOR_* name the live mode, tool and pointer call for."""
+        state = self._state
+        loop = self._loop
+        mode = str(state.activeMode or "")
+        subMode = self._subModeOf(mode) if mode else ""
+        gizmo = self._activeGizmo()
+        hoverHandle = int(getattr(gizmo, "hoverHandle", -1)) \
+            if gizmo is not None and getattr(gizmo, "visible", True) else -1
+        band = self._gesture and loop is not None and (
+            loop.marqueeRect() is not None or
+            bool(self.selectionLassoPoints()))
+        dragging = False
+        if self._gesture and loop is not None and not band:
+            active = getattr(loop, "gizmoDragActive", None)
+            dragging = bool(callable(active) and active())
+            if not dragging and mode == "graph":
+                # Reposition moves a CV/edge and Place drags its new node;
+                # Draw and Region lay points, which the cross already says.
+                dragging = bool(
+                    (subMode == "reposition" and
+                     getattr(loop, "_repositionIds", ())) or
+                    (subMode == "place" and
+                     int(getattr(loop, "_dragNode", -1)) >= 0))
+        edge = getattr(loop, "_wantsEdgeStroke", None)
+        return cursorFor(
+            mode, subMode, getattr(state, "transformTool", ""), hoverHandle,
+            dragging=dragging, band=band,
+            ring=bool(getattr(loop, "_ringShown", False)) or
+            (self._brushResizeActive and mode == "sculpt"),
+            edgeStroke=bool(callable(edge) and edge()))
+
+    def _syncCursor(self):
+        view = self._view
+        if view is None:
+            return
+        if not self._feedbackLive():
+            self._restoreCursor()
+            return
+        name = self.cursorName()
+        if name == self._cursorName:
+            return
+        from pxr.Usdviewq.qt import QtCore, QtGui
+        shapes = QtCore.Qt.CursorShape
+        shape = {CURSOR_ARROW: shapes.ArrowCursor,
+                 CURSOR_CROSS: shapes.CrossCursor,
+                 CURSOR_BLANK: shapes.BlankCursor,
+                 CURSOR_SIZE_ALL: shapes.SizeAllCursor,
+                 CURSOR_CLOSED_HAND: shapes.ClosedHandCursor}[name]
+        try:
+            view.setCursor(QtGui.QCursor(shape))
+        except (AttributeError, RuntimeError):
+            return
+        self._cursorName = name
+
+    def _restoreCursor(self):
+        """Hand the view back the cursor it had before install."""
+        view = self._view
+        if self._cursorName is None or view is None:
+            self._cursorName = None
+            return
+        try:
+            if self._cursorWas is not None:
+                view.setCursor(self._cursorWas)
+            else:
+                view.unsetCursor()
+        except (AttributeError, RuntimeError):
+            pass
+        self._cursorName = None
+
+    def bandRecord(self):
+        """The live band's colour record: 'replace', 'add' or 'remove'."""
+        return bandRecordFor(self._bandModifiers)
+
     # -- the idle pump (plan/18 section 3.3) -------------------------------
 
     def scheduleIdle(self):
+        if self._suspended:
+            return                      # resume() restarts pending work
         if self._timer is not None and not self._timer.isActive():
             self._timer.start()
 
@@ -1321,11 +2837,23 @@ class ViewportController:
         container = self._container
         if container is None:
             return
-        refresh = getattr(getattr(container, "workspace", None), "refresh",
-                          None)
+        workspace = getattr(container, "workspace", None)
+        refresh = getattr(workspace, "refresh", None)
         if refresh is None:
             return
+        viewFocused = self.viewHasFocus()
         refresh()
+        if viewFocused and not self.viewHasFocus():
+            # A rebuilt page can hand focus down the dock's tab chain when
+            # its focused row is replaced; the keys stay with the viewport.
+            self._takeViewFocus()
+
+    def viewHasFocus(self):
+        view = self._view
+        try:
+            return bool(view is not None and view.hasFocus())
+        except (AttributeError, RuntimeError):
+            return False
 
     # -- keys --------------------------------------------------------------
 
@@ -1346,6 +2874,26 @@ class ViewportController:
                 (self._pointerInside or self._brushResizeArmed or
                  self._brushResizeActive))
 
+    def keyOverride(self, _event=None):
+        """A ShortcutOverride delivery: the next KeyPress is a new press."""
+        self._keyLatch.newPress()
+
+    def deliverKeyPress(self, event):
+        """One KeyPress delivery from the application filter.
+
+        onKey runs once per physical press (KeyPressLatch); the later
+        deliveries of the same press get its answer back without acting.
+        """
+        identity = (keyCode(event), modifierSet(event))
+        return self._keyLatch.press(identity, lambda: self.onKey(event))
+
+    def deliverKeyRelease(self, event):
+        """One KeyRelease delivery: ends the latched press, then F/J/X."""
+        repeating = getattr(event, "isAutoRepeat", None)
+        self._keyLatch.release(keyCode(event),
+                               bool(callable(repeating) and repeating()))
+        return self.onKeyRelease(event)
+
     def onKey(self, event):
         """The plan/18 section 3.4 table, dispatched. True consumes."""
         if not self._installed or self._session is None:
@@ -1354,44 +2902,158 @@ class ViewportController:
             return False
         key = keyName(event)
         modifiers = modifierSet(event)
+        if self._pressHold(key, modifiers):
+            return True
         if key == "f" and not modifiers:
             if self._brushResizeArmed or self._brushResizeActive:
                 return True             # OS key-repeat while F is held
             if self._canBrushResize():
                 self._brushResizeArmed = True
+                self._brushResizeUsed = False
                 return True
         if self._runTubeShortcut(key, modifiers):
             return True
         action = tonicModes.HotkeyAction(key, modifiers,
-                                         self._pointerInside,
+                                         self.viewHasKeys(),
                                          self._textFocus())
         if action is None:
             return False
         return self.runAction(action[0], action[1])
 
+    # -- snap holds (parity G11) -------------------------------------------
+
+    def _holdModifiers(self):
+        """The live snap holds as Sample modifier names."""
+        return frozenset(self._holds)
+
+    def holdActive(self, name):
+        """True while the "stepSnap" / "grid" hold is claimed."""
+        return name in self._holds
+
+    def _holdCandidate(self, key, modifiers):
+        """J / X belong to Tonic only while a gizmo drag is live.
+
+        Anywhere else they stay usdview's (J toggles its framed view), and
+        typing in a field always wins.
+        """
+        if key not in HOLD_KEYS or not self._installed or \
+                not self._state.workspaceOpen or not self._gesture:
+            return False
+        if "alt" in modifiers or "meta" in modifiers or self._textFocus():
+            return False
+        dragging = getattr(self._loop, "gizmoDragActive", None)
+        return bool(callable(dragging) and dragging())
+
+    def _pressHold(self, key, modifiers):
+        """A J / X press during a gizmo drag: claim it and snap at once."""
+        if not self._holdCandidate(key, modifiers):
+            return False
+        name = HOLD_KEYS[key]
+        if name not in self._holds:
+            # OS key repeat re-sends the press; only the first one acts.
+            self._holds.add(name)
+            self._reapplyDrag(modifiers)
+        return True
+
+    def _releaseHold(self, key, modifiers, autoRepeat=False):
+        """Letting go of J / X un-snaps the live drag at once."""
+        name = HOLD_KEYS.get(key)
+        if name is None or name not in self._holds:
+            return False
+        if autoRepeat:
+            return True                  # still held
+        self._holds.discard(name)
+        self._reapplyDrag(modifiers)
+        return True
+
+    def _reapplyDrag(self, modifiers):
+        """Re-run the live drag at the last cursor with the holds changed.
+
+        RigExec _ReapplyDrag: a hold changes the result under a still
+        cursor, so the artist sees the snap (or its release) without
+        having to nudge the mouse.  A drag that has not moved yet is left
+        alone, so a press held still stays a click.
+        """
+        if not self._gesture or not self._gestureMoved or \
+                self._lastXY is None or self._camera is None or \
+                self._loop is None:
+            return False
+        sample = tonicLoops.Sample(
+            self._session, self._camera, self._lastXY[0], self._lastXY[1],
+            frozenset(modifiers) | self._holdModifiers())
+        self._loop.move(sample)
+        self._session.publish()
+        self._syncGizmoOverlay()
+        self._refresh()
+        return True
+
+    # -- gizmo settings (parity G20) ----------------------------------------
+
+    def _onGizmoSettings(self):
+        """A gizmo setting changed: re-place the gizmo with the live camera.
+
+        Reached from the dock's rows (through the GizmoSettings listeners),
+        the `+`/`-`/`L` keys and Reset transform tool; a live drag keeps
+        its press-time gizmo (TubeLoop.refreshGizmo refuses).
+        """
+        if not self._installed or self._loop is None or self._gesture:
+            return
+        refresh = getattr(self._loop, "refreshGizmo", None)
+        if refresh is None or self._view is None:
+            return
+        camera = tonicCamera.resolve(self._view)
+        if camera is None:
+            return
+        refresh(camera)
+        self._session.publish(tonicLib.TONIC_DIRTY_GIZMO)
+        self._syncGizmoOverlay()
+        self._refresh()
+
     def onKeyRelease(self, event):
         """F is a held sculpt modifier, never a persistent usdview hotkey."""
+        if self._holds:
+            repeating = getattr(event, "isAutoRepeat", None)
+            if self._releaseHold(keyName(event), modifierSet(event),
+                                 bool(callable(repeating) and repeating())):
+                return True
         if keyName(event) != "f":
             return False
         consumed = bool(self._brushResizeArmed or self._brushResizeActive)
         repeating = getattr(event, "isAutoRepeat", None)
         if callable(repeating) and repeating():
             return consumed
+        # A tap -- F down and up with no width drag in between -- frames,
+        # as F does in every other mode; a hold that dragged stays a resize.
+        tap = (self._brushResizeArmed and not self._brushResizeActive and
+               not self._brushResizeUsed)
         self._brushResizeArmed = False
+        self._brushResizeUsed = False
+        if tap:
+            self.frameSelection()
         return consumed
 
     def _tubeShortcutCandidate(self, key, modifiers):
         """Whether a plain viewport key is reserved by the Tube workflow."""
-        if (not self._pointerInside or self._textFocus() or modifiers or
+        if key in SIZE_KEYS:
+            # '+' is Shift+'=' on most layouts; Shift means nothing here.
+            modifiers = frozenset(modifiers) - frozenset(("shift",))
+        if (not self.viewHasKeys() or self._textFocus() or modifiers or
                 self._state.activeMode not in ("tube", "hierarchy")):
             return False
         if key in ("f8", "f9", "f10", "f11"):
             return self._state.activeMode == "tube"
         if self._state.activeMode == "tube":
-            return key in ("q", "w", "e", "r")
-        # Hierarchy W/E/R enters Tube object editing while retaining the
-        # hierarchy's already selected whole-tube owners.
-        return key in ("w", "e", "r")
+            # Parity G13: +/=/- resize the manipulator and L flips World <->
+            # Tube orientation.  Tube mode only: L is Link in Graph,
+            # Levels in Hierarchy and Lengthen in Sculpt.  Parity G17: P
+            # cycles Rotate/Scale's group pivot (P is Place in Graph and
+            # Params in Fill, never a Tube key).
+            return key in ("q", "w", "e", "r", "l", "p") + SIZE_KEYS
+        # Hierarchy Q/W/E/R enters Tube object editing while retaining the
+        # hierarchy's already selected whole-tube owners -- the same jump
+        # the dock's transform row makes, so its "Select (Q)" tooltip is
+        # true here too (Q is no Hierarchy sub-mode letter).
+        return key in ("q", "w", "e", "r")
 
     def _runTubeShortcut(self, key, modifiers):
         if not self._tubeShortcutCandidate(key, modifiers):
@@ -1401,7 +3063,10 @@ class ViewportController:
         if key in component:
             self.setSelectionKind(component[key])
             return True
-        if self._state.activeMode == "hierarchy":
+        if key in ("l", "p") or key in SIZE_KEYS:
+            return self._runGizmoKey(key)
+        fromHierarchy = self._state.activeMode == "hierarchy"
+        if fromHierarchy:
             # Do not call TubeLoop.setSubMode here: it deliberately clears
             # incompatible component selections, while this route promises
             # to retain the hierarchy's whole-tube owners.
@@ -1413,7 +3078,45 @@ class ViewportController:
                 "r": "scale"}.get(key)
         if setTool is None or tool is None or not setTool(tool):
             return False
+        # The jump changes mode as well as tool; say so, or W in Hierarchy
+        # reads as the dock switching to Tube on its own (DK-02).
+        self._status("Tonic Tube: %s%s" % (
+            tool.title(), " (from Hierarchy)" if fromHierarchy else ""))
         self._syncGizmoOverlay()
+        self._refresh()
+        return True
+
+    def _runGizmoKey(self, key):
+        """`L` orientation toggle, `+`/`=`/`-` manipulator size (G13), `P`
+        group pivot cycle (G17).
+
+        Declined (False) mid-drag, where the press-time gizmo must hold.
+        """
+        loop = self._loop
+        camera = (tonicCamera.resolve(self._view)
+                  if self._view is not None else None)
+        if key == "l":
+            toggle = getattr(loop, "toggleOrientation", None)
+            if toggle is None or toggle(camera) is None:
+                return False
+        elif key == "p":
+            cycle = getattr(loop, "cycleGroupPivot", None)
+            if cycle is None:
+                return False
+            dragging = getattr(loop, "gizmoDragActive", None)
+            if callable(dragging) and dragging():
+                return False
+            # Under Move/Select the loop refuses and says why in the
+            # status line; the key is still Tube's, so it is consumed.
+            cycle(camera)
+        else:
+            resize = getattr(loop, "scaleManipulator", None)
+            step = tonicGizmoSettings.MANIPULATOR_SIZE_STEP
+            factor = step if key in ("+", "=") else 1.0 / step
+            if resize is None or resize(factor, camera) is None:
+                return False
+        self._syncGizmoOverlay()
+        self.refreshWorkspace()
         self._refresh()
         return True
 
@@ -1421,10 +3124,13 @@ class ViewportController:
     def _textFocus():
         from pxr.Usdviewq.qt import QtWidgets
         widget = QtWidgets.QApplication.focusWidget()
+        if isinstance(widget, QtWidgets.QComboBox):
+            # A plain choice list takes arrow keys, not typing; only an
+            # editable one would eat the hotkeys' letters and digits.
+            return bool(widget.isEditable())
         return isinstance(widget, (QtWidgets.QLineEdit, QtWidgets.QTextEdit,
                                    QtWidgets.QPlainTextEdit,
-                                   QtWidgets.QAbstractSpinBox,
-                                   QtWidgets.QComboBox))
+                                   QtWidgets.QAbstractSpinBox))
 
     def runAction(self, action, argument=None):
         """Execute one hotkey action; True when it was ours."""
@@ -1435,7 +3141,11 @@ class ViewportController:
         if action == modes.ACTION_SUBMODE:
             subId = self._subModeForLetter(argument)
             if not subId:
-                return False             # e.g. F, which usdview frames with
+                if str(argument).upper() == "F":
+                    # Frame the Tonic selection; with none, usdview's F
+                    # frames its prims (ShortcutOverride left it there).
+                    return self.frameSelection()
+                return False
             self.setSubMode(subId)
             return True
         if action == modes.ACTION_CANCEL:
@@ -1455,25 +3165,50 @@ class ViewportController:
                 self._refresh()
                 return True
             # Backspace remains the hierarchy convenience key unless Graph
-            # has a retained Region CV to remove.
-            return self.exitLevel()
+            # has a retained Region CV to remove. It is Ctrl+Up's twin, so
+            # it goes through the same loop-first route: HierarchyLoop's
+            # exitLevel collapses the active cut (parent back on screen,
+            # children hidden), which the plain level step never did.
+            return self._loopOr("exitLevel", self.exitLevel)
+        if action in (modes.ACTION_UNDO, modes.ACTION_REDO) and \
+                self._gesture:
+            # Parity G14: undo/redo refuse while a drag is live (RigExec
+            # 2333-2348).  The drag's native bracket is still open, so an
+            # undo now would pop the wrong step out from under it.
+            self._status("Tonic: finish the drag before %s" % (
+                "undo" if action == modes.ACTION_UNDO else "redo"))
+            return False
         if action == modes.ACTION_UNDO:
             self._session.undo()
+            # GZ-08: the step moved what the gizmo sits on; follow it now,
+            # not on the next mouse event.
+            self.refreshGizmo()
             self._refresh()
             self.scheduleIdle()
             return True
         if action == modes.ACTION_REDO:
             self._session.redo()
+            self.refreshGizmo()
             self._refresh()
             self.scheduleIdle()
             return True
         if action == modes.ACTION_DELETE:
+            if self._gesture:
+                # Deleting what a live drag holds would leave its open
+                # bracket editing tubes that no longer exist.
+                self._status("Tonic: finish the drag before deleting")
+                return False
             if self._loop is None or not self._loop.deleteSelection():
                 return False
             self._session.publish()
+            # A whole-tube or CV delete takes the gizmo's target with it.
+            self._syncGizmoOverlay()
             self._refresh()
             self.scheduleIdle()
             return True
+        if action in (modes.ACTION_SELECT_ALL, modes.ACTION_DESELECT_ALL,
+                      modes.ACTION_INVERT):
+            return self.selectionCommand(action)
         if action == modes.ACTION_RADIUS:
             return self._adjustRadius(float(argument))
         # The hierarchy keys belong to HierarchyLoop when it is the
@@ -1505,6 +3240,9 @@ class ViewportController:
         if handler is None:
             return bool(fallback())
         done = bool(handler())
+        # Shift+D consumes Hierarchy's drawn split edge; the overlay that
+        # shows it must go in the same key press, not on the next hover.
+        self._syncRegionOverlay()
         self._refresh()
         self.scheduleIdle()
         return done
@@ -1525,6 +3263,74 @@ class ViewportController:
         self.scheduleIdle()
         return True
 
+    # -- select all / none / invert (SL-03) --------------------------------
+
+    # The kinds Ctrl+A and Ctrl+I range over in a mode whose loop has no
+    # command of its own: exactly the kinds that mode's box select takes.
+    # Sculpt selects nothing, so the keys are not its.
+    SELECTION_KINDS = {
+        "graph": tonicLib.TONIC_PICK_GRAPH_NODE,
+        "hierarchy": tonicLib.TONIC_PICK_TUBE_VERT,
+        "fill": tonicLib.TONIC_PICK_TUBE_VERT,
+    }
+
+    def selectionCommand(self, action):
+        """Ctrl+A / Ctrl+Shift+A / Ctrl+I; True when it was ours.
+
+        `action` is tonicModes.ACTION_SELECT_ALL / _DESELECT_ALL / _INVERT,
+        which is also the name of the loop method that may own it (Tube
+        does: its kinds follow the component sub-mode) and is called with
+        the camera. Otherwise the controller runs it over SELECTION_KINDS.
+        "All" is a box over the whole view, so it takes exactly what the
+        focused level shows and nothing a hidden level or a collapsed
+        branch holds.
+        """
+        session = self._session
+        loop = self._loop
+        if (self._gesture or loop is None or session is None or
+                session.model is None):
+            return False
+        # A Graph two-click action draws its first pick as a selection;
+        # replacing the selection must not leave that pick armed under it.
+        disarm = getattr(loop, "_disarm", None)
+        if callable(disarm):
+            disarm(clearSelection=False)
+        camera = (tonicCamera.resolve(self._view)
+                  if self._view is not None else None)
+        handler = getattr(loop, action, None)
+        if handler is not None:
+            done = bool(handler(camera))
+        else:
+            done = self._selectionFallback(action, camera, loop)
+        if not done:
+            return False
+        session.publish(tonicLib.TONIC_DIRTY_SELECTION)
+        self._syncGizmoOverlay()
+        self._refresh()
+        self.scheduleIdle()
+        return True
+
+    def _selectionFallback(self, action, camera, loop):
+        from . import tonicLoopsTube
+        session = self._session
+        label = "Tonic %s" % (getattr(loop, "label", "") or "")
+        if action == tonicModes.ACTION_DESELECT_ALL:
+            session.clearSelection(0)
+            self._status("%s: nothing selected" % label.rstrip())
+            return True
+        kinds = self.SELECTION_KINDS.get(getattr(loop, "modeId", ""), 0)
+        if not kinds or camera is None:
+            return False
+        band = tonicLoopsTube.viewBand(session, camera, kinds)
+        if action == tonicModes.ACTION_SELECT_ALL:
+            done = band(tonicLib.TONIC_SELECT_SET)
+        else:
+            done = tonicLoopsTube.invertBand(session, kinds, band)
+        if done:
+            self._status("%s: %d selected"
+                         % (label.rstrip(), session.selectionCount(kinds)))
+        return bool(done)
+
     # -- hierarchy keys ----------------------------------------------------
 
     def selectedTubes(self):
@@ -1541,22 +3347,59 @@ class ViewportController:
             self._status("Tonic: select a tube to subdivide")
             return False
         count = tonicHierarchy.clampSubdivideCount(self._state.subdivideCount)
-        session.beginGesture("Subdivide")
+        if not self._beginHierarchyAction(session, "Subdivide"):
+            return False
         made = 0
+        done = 0
+        failures = []
         for tubeId in tubes:
             try:
                 made += len(tonicHierarchy.subdivide(
                     session.dll, session.model, tubeId, count,
                     self._state.splitMode, 0))
-            except RuntimeError as exc:
-                self._status("Tonic Hierarchy: %s" % exc)
-        session.endGesture()
-        session.publish()
-        session.enqueueCommit()
-        self._refresh()
-        self.scheduleIdle()
+                done += 1
+            except (RuntimeError, NotImplementedError) as exc:
+                failures.append("T%d: %s" % (int(tubeId), exc))
+        if not self._endHierarchyAction(session, done):
+            self._status("Tonic Hierarchy: Subdivide: nothing split -- %s"
+                         % (failures[0] if failures else "no tube split"))
+            return False
+        if failures:
+            self._status("Tonic Hierarchy: Subdivide: %d done, %d failed: %s"
+                         % (done, len(failures), failures[0]))
+            return False
         self._status("Tonic Hierarchy: %d child tube(s)" % made)
         return True
+
+    def _beginHierarchyAction(self, session, label):
+        """Open the fallback hierarchy key's bracket; False when refused.
+
+        HierarchyLoop._beginAction's twin for Shift+D / Shift+M from the
+        other modes: a refused Begin means someone else's bracket is open
+        (a live drag, a dock slider), so running the edit would land in
+        that bracket and the closing endGesture would seal it.
+        """
+        if session.beginGesture(label):
+            return True
+        self._status("Tonic Hierarchy: %s could not start an undo step -- "
+                     "nothing changed" % label)
+        return False
+
+    def _endHierarchyAction(self, session, done):
+        """Seal the bracket when something changed, else roll it back.
+
+        Mirrors HierarchyLoop._endAction: zero successes cancels, so the
+        undo stack never gains a step that undoes to where it was.
+        """
+        if done:
+            session.endGesture()
+            session.publish()
+            session.enqueueCommit()
+        else:
+            session.publish(int(session.cancelGesture() or 0))
+        self._refresh()
+        self.scheduleIdle()
+        return bool(done)
 
     def mergeChildrenOfSelection(self):
         """Shift+M over the selected tubes."""
@@ -1565,20 +3408,37 @@ class ViewportController:
         if session is None or session.model is None or not tubes:
             self._status("Tonic: select a parent tube to merge")
             return False
-        session.beginGesture("Merge children")
+        if not self._beginHierarchyAction(session, "Merge children"):
+            return False
+        done = 0
+        failures = []
         for tubeId in tubes:
+            # Tonic_MergeChildren on a leaf succeeds doing nothing, so a
+            # success only counts when the tube had children to merge.
+            try:
+                hadChildren = bool(tonicHierarchy.tubeChildren(
+                    session.dll, session.model, tubeId))
+            except (RuntimeError, NotImplementedError):
+                hadChildren = True      # cannot tell: let the merge decide
+            if not hadChildren:
+                continue
             try:
                 tonicHierarchy.mergeChildren(session.dll, session.model,
                                              tubeId)
-            except RuntimeError as exc:
-                self._status("Tonic Hierarchy: %s" % exc)
-        session.endGesture()
-        session.publish()
-        session.enqueueCommit()
-        self._refresh()
-        self.scheduleIdle()
+                done += 1
+            except (RuntimeError, NotImplementedError) as exc:
+                failures.append("T%d: %s" % (int(tubeId), exc))
+        if not self._endHierarchyAction(session, done):
+            self._status("Tonic Hierarchy: Merge children: nothing merged "
+                         "-- %s" % (failures[0] if failures else
+                                    "those tubes have no children"))
+            return False
+        if failures:
+            self._status("Tonic Hierarchy: Merge children: %d done, %d "
+                         "failed: %s" % (done, len(failures), failures[0]))
+            return False
         self._status(tonicHierarchy.mergeChildrenStatus(
-            "%d tube(s)" % len(tubes)))
+            "%d tube(s)" % done))
         return True
 
     def enterLevel(self):
@@ -1611,15 +3471,15 @@ class ViewportController:
     # -- file commands -----------------------------------------------------
 
     def _saveGroom(self):
+        # Ctrl+Shift+S takes the same dialog, suffix and failure warning
+        # as the menu and the dock: the container owns the one path (DK-03).
         session = self._session
         if session is None or session.model is None:
             return False
-        parent = getattr(self._api, "qMainWindow", None)
-        path = askSaveFile(parent, "Save Tonic groom",
-                           "USD crate (*.usdc)", "groom.usdc")
-        if not path:
-            return True
-        session.saveGroom(path)
+        save = getattr(self._container, "saveGroomInteractive", None)
+        if save is None:
+            return False
+        save(self._api)
         return True
 
 
@@ -1642,6 +3502,16 @@ def _ViewFilter(controller, view):
                     return controller.onRelease(view, event)
                 if kind == QtCore.QEvent.Type.MouseButtonDblClick:
                     return controller.onDoubleClick(view, event)
+                if kind == QtCore.QEvent.Type.Wheel:
+                    # A dolly under a live drag would move the camera the
+                    # gesture's press-time projection was measured with.
+                    return bool(controller.gestureActive)
+                if kind == QtCore.QEvent.Type.ContextMenu:
+                    # The right press is Tonic's while the workspace is
+                    # open (FB-03); the platform's follow-up context-menu
+                    # event must not reach a parent's popup either.
+                    return bool(controller._installed and
+                                controller._state.workspaceOpen)
                 hardLossTypes = tuple(value for value in (
                     getattr(QtCore.QEvent.Type, "Hide", None),
                     getattr(QtCore.QEvent.Type, "UngrabMouse", None),
@@ -1654,11 +3524,15 @@ def _ViewFilter(controller, view):
                     # release, so restore only for the latter.
                     controller._recoverGesture(
                         "viewport focus/capture loss type=%s" % int(kind))
+                    controller._pressOwner = None
                     controller.setPointerInside(False)
                     return False
                 if kind == QtCore.QEvent.Type.Resize:
                     controller._syncRegionOverlay()
                     controller._syncMarqueeOverlay()
+                    # The gizmo layer must cover the new rect and its
+                    # cached handles are projected for the old one (G22).
+                    controller._syncGizmoOverlay()
                 if kind == QtCore.QEvent.Type.Enter:
                     controller.setPointerInside(True)
                 elif kind == QtCore.QEvent.Type.Leave:
@@ -1691,15 +3565,28 @@ def _KeyFilter(controller):
                                 if value is not None)
             if kind in deactivated:
                 controller._recoverGesture("application deactivated")
+                # A hold whose release went to another window must not
+                # snap the next drag (RigExec _ClearHolds on deactivate).
+                controller._holds.clear()
+                controller._keyLatch.clear()
                 controller.setPointerInside(False)
                 return False
             if kind == QtCore.QEvent.Type.ShortcutOverride:
+                # Every physical press (auto-repeat included) starts with
+                # an override: the KeyPress that follows acts once.
+                controller.keyOverride(event)
                 # usdview binds L itself.  Claim a Tonic key at Qt's
                 # shortcut-arbitration stage so the following KeyPress still
                 # reaches onKey instead of silently retaining the previous
                 # brush.
                 key = keyName(event)
                 modifiers = modifierSet(event)
+                if controller._holdCandidate(key, modifiers) or \
+                        HOLD_KEYS.get(key) in controller._holds:
+                    # J / X during a gizmo drag: claimed here so usdview's
+                    # own J (Toggle Framed View) never fires (parity G11).
+                    event.accept()
+                    return True
                 if (controller._brushResizeShortcutCandidate() and key == "f" and
                         not modifiers):
                     event.accept()
@@ -1711,11 +3598,15 @@ def _KeyFilter(controller):
                     return True
                 action = tonicModes.HotkeyAction(
                     key, modifiers,
-                    controller._pointerInside, controller._textFocus())
+                    controller.viewHasKeys(), controller._textFocus())
                 if (action is not None and
                         action[0] == tonicModes.ACTION_SUBMODE and
-                        not controller._subModeForLetter(action[1])):
-                    action = None       # e.g. F still frames in usdview
+                        not controller._subModeForLetter(action[1]) and
+                        not (str(action[1]).upper() == "F" and
+                             controller.hasFrameTarget())):
+                    # F frames Tonic's selection when there is one and
+                    # usdview's prim selection otherwise.
+                    action = None
                 if (controller._installed and
                         controller._state.workspaceOpen and
                         action is not None):
@@ -1723,11 +3614,13 @@ def _KeyFilter(controller):
                     return True
                 return False
             if kind == QtCore.QEvent.Type.KeyRelease:
-                return controller.onKeyRelease(event)
+                return controller.deliverKeyRelease(event)
             if kind != QtCore.QEvent.Type.KeyPress:
                 return False
             try:
-                return controller.onKey(event)
+                # Once per physical press: a declined key propagates up the
+                # StageView's parents and comes back here for each one.
+                return controller.deliverKeyPress(event)
             except Exception as exc:        # noqa: BLE001 - never wedge Qt
                 controller._status("Tonic hotkey: %s" % exc)
                 return False

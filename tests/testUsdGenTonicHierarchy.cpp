@@ -1143,6 +1143,79 @@ void CheckSubdivideCarriedPartition()
     Check(layout, "carried: center/section counts kept, rings valid");
 }
 
+// Adjacent-station slot alignment for a replaced root (the Reposition refit
+// bug): the attachment refresh installs a fresh K14 root under a child's
+// transported upper sections, and K14 may start that ring at a different
+// parent corner.  TonicAlignSectionRingCpu must give it back the
+// neighbour's slot order and winding (so the K5 root span cannot twist),
+// report the renumbering, and leave an aligned ring bit-exact.
+void CheckAlignSectionRing()
+{
+    TonicTubeDesc parent = StraightCylinder();
+    std::vector<TonicFrame> frames;
+    std::string err;
+    TonicCenterFramesCpu(parent.centerX.data(), parent.centerY.data(),
+                         parent.centerZ.data(), 3, &frames, &err);
+    TonicSubdivideDesc params;
+    params.count = 4;
+    params.seed = 11;
+    std::vector<TonicTubeDesc> kids;
+    if (!TonicSubdivideTubeCpu(parent, frames, params, &kids, &err) ||
+        kids.empty() || kids[0].sections.size() < 2) {
+        Check(false, "align: subdivide for the adjacent-station fixture");
+        return;
+    }
+    TonicTubeSection const root = kids[0].sections[0];
+    // A tapered, twisted neighbour: the comparison must use placed rings.
+    TonicTubeSection neighbour = kids[0].sections[1];
+    neighbour.scale = 0.6f;
+    neighbour.twist = 0.2f;
+    int const n = int(root.u.size());
+    auto sameRing = [](TonicTubeSection const &a, TonicTubeSection const &b) {
+        return a.u == b.u && a.v == b.v;
+    };
+    auto permuted = [n](TonicTubeSection const &sec, int shift, bool reverse) {
+        TonicTubeSection out = sec;
+        for (int i = 0; i < n; ++i) {
+            int const rotated = (i + shift) % n;
+            int const from = reverse ? n - 1 - rotated : rotated;
+            out.u[size_t(i)] = sec.u[size_t(from)];
+            out.v[size_t(i)] = sec.v[size_t(from)];
+        }
+        return out;
+    };
+    TonicTubeSection same = root;
+    std::vector<int> from;
+    Check(!TonicAlignSectionRingCpu(&same, neighbour, &from) &&
+              sameRing(same, root) && from.empty(),
+          "align: a root already aligned to its neighbour is left "
+          "bit-identical");
+    bool rotations = true;
+    for (int shift = 1; shift < n; ++shift) {
+        TonicTubeSection rotated = permuted(root, shift, false);
+        TonicTubeSection const arrived = rotated;
+        bool const moved = TonicAlignSectionRingCpu(&rotated, neighbour, &from);
+        bool mapped = int(from.size()) == n;
+        for (int i = 0; mapped && i < n; ++i) {
+            mapped = arrived.u[size_t(from[size_t(i)])] == rotated.u[size_t(i)];
+        }
+        rotations = rotations && moved && sameRing(rotated, root) && mapped;
+    }
+    Check(rotations, "align: every rotated root returns to its neighbour's "
+                     "slot order, with the renumbering reported");
+    TonicTubeSection flipped = permuted(root, 2, true);
+    Check(TonicAlignSectionRingCpu(&flipped, neighbour, nullptr) &&
+              sameRing(flipped, root),
+          "align: a reversed, rotated root takes its neighbour's winding");
+    TonicTubeSection shorter = root;
+    shorter.u.pop_back();
+    shorter.v.pop_back();
+    TonicTubeSection const shorterCopy = shorter;
+    Check(!TonicAlignSectionRingCpu(&shorter, neighbour, &from) &&
+              sameRing(shorter, shorterCopy),
+          "align: a different ring size is left to the resampler");
+}
+
 // V0b (plan/18 §7 G1/G2/G4): the hierarchy facts the stage contract rests
 // on — the cell partition, per-tube fill inheritance, the record round trip
 // and a clean slate for hydrate.
@@ -1243,6 +1316,29 @@ void CheckV0bHierarchyRecords()
     Check(model.GroupTubes({kids2[0]}, false, &groupAgain) &&
               groupAgain == -1,
           "records: the group-id mint restarts at -1");
+
+    // Delete on that first group parent: -1 is also every root's
+    // parentTubeId, so a subtree walk from it collected the group itself
+    // plus every root and recursed forever. The group goes alone; its
+    // members, their parent and tube 0 all stay.
+    size_t const tubesBefore = model.TubeIds().size();
+    int removed = -7;
+    Check(model.RemoveTubes({groupAgain}, &removed) && removed == 1,
+          "records: RemoveTubes on group -1 returns and removes one tube");
+    std::vector<int> const left = model.TubeIds();
+    Check(left.size() + 1 == tubesBefore &&
+              std::find(left.begin(), left.end(), groupAgain) == left.end(),
+          "records: only the group parent left the store");
+    bool membersAlive = true;
+    for (int k : kids2) {
+        membersAlive = membersAlive &&
+                       std::find(left.begin(), left.end(), k) != left.end();
+    }
+    Check(membersAlive &&
+              std::find(left.begin(), left.end(), 0) != left.end(),
+          "records: the group's members and tube 0 survive its delete");
+    Check(model.Undo(nullptr) && model.TubeIds().size() == tubesBefore,
+          "records: undo brings the group parent back");
 }
 
 }  // namespace
@@ -1263,6 +1359,7 @@ int main()
     CheckK6Resample();
     CheckK6EqualLayoutSectionResidual();
     CheckSubdivideCarriedPartition();
+    CheckAlignSectionRing();
     CheckV0bHierarchyRecords();
     CheckK6MoveBudget();
     std::printf("%d failure(s)\n", g_failures);

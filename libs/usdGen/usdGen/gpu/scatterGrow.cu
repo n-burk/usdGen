@@ -22,8 +22,7 @@ __device__ uint64_t Hash64(uint64_t key, uint32_t salt) {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     return z ^ (z >> 31);
 }
-__device__ float DrawGrow(int seed, uint64_t id) {
-    constexpr uint32_t salt = 0x47726F77u; // kSaltGrow
+__device__ float DrawGrow(int seed, uint64_t id, uint32_t salt = 0x47726F77u) {
     uint64_t key = Hash64(uint64_t(uint32_t(seed)), salt) ^ id;
     return float(uint32_t(Hash64(key, salt) >> 32) >> 8) * 0x1.0p-24f;
 }
@@ -61,8 +60,7 @@ uint64_t Hash64Host(uint64_t key, uint32_t salt) {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     return z ^ (z >> 31);
 }
-float DrawGrowHost(int seed, uint64_t id) {
-    constexpr uint32_t salt = 0x47726F77u;
+float DrawGrowHost(int seed, uint64_t id, uint32_t salt = 0x47726F77u) {
     uint64_t key = Hash64Host(uint64_t(uint32_t(seed)), salt) ^ id;
     return float(uint32_t(Hash64Host(key, salt) >> 32) >> 8) * 0x1.0p-24f;
 }
@@ -92,7 +90,7 @@ float3 RotateAroundBHost(float3 direction, float3 axis, float degrees) {
 __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
     int32_t const* rootPrimIn, float2 const* rootUVIn, float3 const* rootTIn,
     float3 const* rootBIn, float3 const* rootNIn, uint32_t curves, uint32_t cvCount,
-    int seed, double length, double lo, double hi, float lift, float width,
+    int seed, double length, double lo, double hi, float lift, float azimuth, float azimuthRandom, float width,
     ScatterGrowDirection direction, float3 literal,
     float3* points, float3* rest, float* widths, float* hairT, uint32_t* offsets,
     uint64_t* outIds, int32_t* rootPrim, float2* rootUV, float3* rootT,
@@ -105,6 +103,9 @@ __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
         direction == ScatterGrowDirection::RootTangent ? rootTIn[c] : literal;
     dir = Normalize(dir);
     dir = RotateAroundB(dir, rootBIn[c], lift);
+    float const angle = azimuth + azimuthRandom * 360.0f *
+        (DrawGrow(seed, ids[c], 0x4772417Au) - 0.5f); // kSaltGrowAzimuth
+    dir = RotateAroundB(dir, rootNIn[c], angle);
     // Match CPU Grow: random/length arithmetic is double, then the captured
     // per-curve target is narrowed to float.
     double targetDouble = length * (lo + double(DrawGrow(seed, ids[c])) * (hi - lo));
@@ -228,6 +229,8 @@ ScatterGrowStatus CudaScatterGrow::validate(
        !Finite(c.randomHi)||!Finite(c.lift)||!Finite(c.fallbackWidth)||c.length<0||
        c.randomLo<0||c.randomHi<0||c.fallbackWidth<0 || c.lift < -90.0f ||
        c.lift > 90.0f || c.direction>ScatterGrowDirection::Literal ||
+       !Finite(c.azimuth) || c.azimuth < -360.0f || c.azimuth > 360.0f ||
+       !Finite(c.azimuthRandom) || c.azimuthRandom < 0.0f || c.azimuthRandom > 1.0f ||
        (c.direction==ScatterGrowDirection::Literal&&!Finite(c.literalDirection)))
         return ScatterGrowStatus::InvalidArgument;
     size_t n=r->positions.size();
@@ -253,6 +256,9 @@ ScatterGrowStatus CudaScatterGrow::validate(
         float3 direction = c.direction == ScatterGrowDirection::RootNormal ? r->rootN[i] :
             c.direction == ScatterGrowDirection::RootTangent ? r->rootT[i] : c.literalDirection;
         direction = RotateAroundBHost(NormalizeHost(direction), r->rootB[i], c.lift);
+        float const azimuth = c.azimuth + c.azimuthRandom * 360.0f *
+            (DrawGrowHost(c.seed, r->stableIds[i], 0x4772417Au) - 0.5f);
+        direction = RotateAroundBHost(direction, r->rootN[i], azimuth);
         if (!Finite(direction)) return ScatterGrowStatus::NonFiniteInput;
         double const targetDouble = c.length *
             (c.randomLo + double(DrawGrowHost(c.seed, r->stableIds[i])) *
@@ -324,7 +330,7 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
         if (e != cudaSuccess) return Status(e);
         return ScatterGrowStatus::Ok;
     }
-    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pendingInput_.stableIds.data(),pendingInput_.rootPrim.data(),pendingInput_.rootUV.data(),pendingInput_.rootT.data(),pendingInput_.rootB.data(),pendingInput_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.restPoints.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),error_.data());
+    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pendingInput_.stableIds.data(),pendingInput_.rootPrim.data(),pendingInput_.rootUV.data(),pendingInput_.rootT.data(),pendingInput_.rootB.data(),pendingInput_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.azimuth,controls.azimuthRandom,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.restPoints.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),error_.data());
     e=cudaGetLastError(); if(e!=cudaSuccess)return Status(e); return ScatterGrowStatus::Ok;
 }
 

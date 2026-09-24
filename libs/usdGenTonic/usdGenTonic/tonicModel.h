@@ -472,6 +472,15 @@ public:
     // Fold sibling tubeIds into one child at their level (K7 over the
     // subset, no hint); the kept id is tubeIds[0]. Bumps version + map.
     bool MergeSelected(std::vector<int> const &tubeIds, int *outKept);
+    // Whole-tube Delete (SL-03): drop every listed tube with its subtree
+    // as ONE undo step (a gesture bracket suppresses the snapshot as
+    // usual). A parent that loses its last child becomes a producing leaf
+    // again. Refuses the whole call, model untouched, for an unknown id,
+    // tube 0 or any other L1 root: an L1 tube belongs to its graph region
+    // (plan/18 §7 G14) and the next region sync would only rebuild it.
+    // `outRemoved` (optional) receives how many tubes went, descendants
+    // included. Bumps version + map.
+    bool RemoveTubes(std::vector<int> const &tubeIds, int *outRemoved);
     int GetTubeCount() const;  // tube 0 (when built) + the store
     // Level/children/centers of any tube (0 included). Children list in
     // ascending id order.
@@ -689,6 +698,11 @@ public:
     // region maps are current. True when at least one tube filled; a
     // degenerate tube is skipped, never fatal to its siblings.
     bool RefillGuides(float fraction);
+    // The producing tubes the last refill skipped, as (tubeId, reason) in
+    // fill order; empty when every tube filled. Skipped tubes contribute
+    // no guides, so the dock warns about them instead of letting a
+    // partial refill pass as a healthy one.
+    std::vector<std::pair<int, std::string>> RefillDrops() const;
     // Explicit Fill after Clear: restores generation. Ordinary refills are
     // auto-refreshes and respect a cleared cache.
     bool GenerateGuides(float fraction);
@@ -1089,6 +1103,10 @@ private:
         TonicGuideSet guides;
         bool generatedCurvesSuppressed = false;
         OutputSettings output;
+        // Tube 0's fill params live outside _tubes, so they travel here: a
+        // Fill-panel density edit is an undo step (SS-02) and Ctrl+Z has
+        // to put the density back, not only the guides it grew.
+        FillParams fill;
         std::shared_ptr<GraphUndoState const> graph;  // null = no scalp
         // Region ownership travels with the step (plan/18 §7 G14): undoing
         // a stub build has to put the region->tube map back, or the next
@@ -1295,6 +1313,8 @@ private:
     uint64_t _mapVersion = 0;  // bumped by graph/hierarchy edits only (§3.1a)
     uint32_t _dirty = TonicDirty_Clean;
     std::string _diagnostic;
+    // (tubeId, reason) per tube the last refill skipped (RefillDrops).
+    std::vector<std::pair<int, std::string>> _refillDrops;
     // Guards _shape/_host/_fill/_subdivide/_locks/_dirty/_graph/_maps/_scalp.
     // GetVersion is lock-free (atomic); GetHostMesh/GetGraph stay
     // UI-thread-only by convention.

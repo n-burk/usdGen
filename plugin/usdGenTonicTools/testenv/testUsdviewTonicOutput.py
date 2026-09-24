@@ -279,14 +279,14 @@ def saveFrame(view, name):
         return False
 
 
-def action(workspace, text):
-    from pxr.Usdviewq.qt import QtWidgets
-    for button in workspace.findChildren(QtWidgets.QAbstractButton):
-        if button.text().split(" (", 1)[0] == text:
-            button.click()
-            wait(20)
-            return True
-    return False
+def action(workspace, actionId):
+    """Click one dock action by its Action.id (DK-04 button hook)."""
+    button = workspace.button("action", actionId)
+    if button is None:
+        return False
+    button.click()
+    wait(20)
+    return True
 
 
 def setParameter(workspace, identifier, value):
@@ -301,6 +301,441 @@ def setParameter(workspace, identifier, value):
         wait(20)
         return True
     return False
+
+
+def sameCenters(before, after, epsilon=1e-4):
+    return len(before) == len(after) and len(before) > 0 and all(
+        abs(before[index][axis] - after[index][axis]) <= epsilon
+        for index in range(len(before)) for axis in range(3))
+
+
+def waitFor(predicate, tries=80):
+    for _ in range(tries):
+        if predicate():
+            return True
+        wait(25)
+    return bool(predicate())
+
+
+def patchDialog(name, answer, calls):
+    """Replace one static QFileDialog getter; returns the original."""
+    from pxr.Usdviewq.qt import QtWidgets
+    original = getattr(QtWidgets.QFileDialog, name)
+
+    def fake(*args, **kwargs):
+        calls.append(args)
+        return (answer, "")
+    setattr(QtWidgets.QFileDialog, name, fake)
+    return original
+
+
+class BoxCloser(object):
+    """Close the next modal QMessageBox from a QTimer and keep its text.
+
+    QMessageBox.warning blocks in its own event loop, so the test can only
+    answer it from a timer queued before the click that raises it.
+    """
+
+    def __init__(self):
+        self.texts = []
+        self.active = True
+        self._arm()
+
+    def _arm(self):
+        from pxr.Usdviewq.qt import QtCore
+        QtCore.QTimer.singleShot(40, self._poll)
+
+    def _poll(self):
+        from pxr.Usdviewq.qt import QtWidgets
+        if not self.active:
+            return
+        candidates = [QtWidgets.QApplication.activeModalWidget()]
+        candidates += list(QtWidgets.QApplication.topLevelWidgets())
+        for widget in candidates:
+            if isinstance(widget, QtWidgets.QMessageBox) and \
+                    widget.isVisible():
+                self.texts.append(str(widget.text()))
+                widget.done(0)
+                self.active = False
+                return
+        self._arm()
+
+    def stop(self):
+        self.active = False
+
+
+def fileRowAndUndo(registry, container, workspace, session, viewport, state,
+                   view, mouse, child):
+    """DK-03: the dock's Undo/Redo and the one save/export/import path."""
+    from pxr.Usdviewq.qt import QtWidgets
+    from usdGenTonicTools import tonicCamera, tonicLib, tonicModes
+
+    # -- Undo/Redo from the dock after a real gizmo drag -------------------
+    workspace.button("mode", "tube").click()
+    wait(20)
+    camera = tonicCamera.resolve(view)
+    before = centers(session, child)
+    cv = max(len(before) - 2, 1)
+    state.transformTool = "move"
+    session.clearSelection()
+    session.select(tonicLib.TONIC_PICK_CENTER_CV, [child], [cv], [-1])
+    loop = viewport.loop
+    placed = (loop is not None and camera is not None and
+              bool(loop._placeGizmo(camera)))
+    gizmo = getattr(loop, "_gizmo", None)
+    origin = (tuple(gizmo.origin) if placed and gizmo is not None and
+              gizmo.visible else None)
+    start = camera.worldToPixels(origin) if origin is not None else None
+    check(start is not None,
+          "a selected child center CV raises the Move gizmo (%r)" % (origin,))
+    if start is None:
+        return
+    mouse.press(start)
+    for step in range(1, 7):
+        mouse.move((start[0] + 5.0 * step, start[1]))
+    mouse.release((start[0] + 30.0, start[1]))
+    after = centers(session, child)
+    check(changed(before, after), "the gizmo drag moved the child CV")
+    label = session.undoLabel()
+    undoButton = workspace.button("file", "undo")
+    redoButton = workspace.button("file", "redo")
+    check(waitFor(lambda: undoButton.isEnabled() and
+                  label in undoButton.toolTip()),
+          "the dock's Undo is enabled and names the step (%r, %r)"
+          % (label, undoButton.toolTip()))
+    check(bool(label), "the drag left a labelled undo step (%r)" % label)
+    undoButton.click()
+    wait(20)
+    check(sameCenters(before, centers(session, child)),
+          "clicking Undo restores the dragged CV")
+    check(waitFor(redoButton.isEnabled),
+          "Redo enables once there is something to redo")
+    redoButton.click()
+    wait(20)
+    check(sameCenters(after, centers(session, child)),
+          "clicking Redo re-applies the drag")
+
+    # -- Save: one dialog path from the menu, Ctrl+Shift+S and the dock ----
+    # The files land in a temp folder (never the checkout or the cwd), and
+    # the helpers remember that folder in an .ini inside it rather than the
+    # artist's QSettings.  cleanFileRow runs at the end of the section, or
+    # from testUsdviewInputFunction's finally when the section raised.
+    import shutil
+    import tempfile
+    import tonicT3
+    folder = tempfile.mkdtemp(prefix="tonicFileRow")
+    restoreSettings = tonicT3.isolateSettings(container, folder)
+
+    def cleanFileRow():
+        if cleanFileRow not in _CLEANUP:
+            return                      # already ran
+        _CLEANUP.remove(cleanFileRow)
+        check(restoreSettings(),
+              "the artist's own Tonic QSettings are untouched by the file "
+              "row (%r)" % (tonicT3.realSettingsSnapshot(container),))
+        shutil.rmtree(folder, ignore_errors=True)
+        check(not os.path.exists(folder),
+              "the file-row fixture folder is removed (%s)" % folder)
+
+    _CLEANUP.append(cleanFileRow)
+    messages = []
+    session.setStatusSink(lambda *args: messages.append(str(args[0])))
+    calls = []
+    original = patchDialog("getSaveFileName", os.path.join(folder, "x"),
+                           calls)
+    try:
+        registry.getCommandPlugin("usdGenTonicTools.saveGroom").run()
+    finally:
+        QtWidgets.QFileDialog.getSaveFileName = original
+    check(os.path.isfile(os.path.join(folder, "x.usdc")) and
+          any("saved" in line for line in messages),
+          "the menu save of a bare name 'x' writes x.usdc (%r)"
+          % messages[-1:])
+    check(calls and calls[-1][3] == "USD crate (*.usdc)" and
+          str(calls[-1][2]).endswith("-groom.usdc"),
+          "the save dialog offers only .usdc and a <scene>-groom name %r"
+          % (calls[-1:],))
+
+    original = patchDialog("getSaveFileName", os.path.join(folder, "k"),
+                           calls)
+    try:
+        viewport.runAction(tonicModes.ACTION_SAVE)
+    finally:
+        QtWidgets.QFileDialog.getSaveFileName = original
+    check(os.path.isfile(os.path.join(folder, "k.usdc")),
+          "Ctrl+Shift+S takes the same path (k -> k.usdc)")
+    check(os.path.normcase(os.path.dirname(str(calls[-1][2]))) ==
+          os.path.normcase(folder),
+          "the next dialog opens in the directory the last one used (%r)"
+          % (calls[-1][2],))
+    check(tonicT3.realSettingsSnapshot(container) == restoreSettings.before,
+          "and remembers it in the test's settings file, not the artist's")
+
+    closer = BoxCloser()
+    original = patchDialog("getSaveFileName",
+                           os.path.join(folder, "y.usda"), calls)
+    raised = None
+    try:
+        workspace.button("file", "save").click()
+    except Exception as exc:  # noqa: BLE001 - the check reports it
+        raised = exc
+    finally:
+        QtWidgets.QFileDialog.getSaveFileName = original
+        closer.stop()
+    info("save y.usda -> box %r" % (closer.texts,))
+    check(raised is None and
+          (os.path.isfile(os.path.join(folder, "y.usdc")) or
+           bool(closer.texts)) and
+          not os.path.isfile(os.path.join(folder, "y.usda")),
+          "a dock save named .usda writes .usdc or warns, never raises "
+          "(%r)" % (raised,))
+
+    # -- Export, then import it back under the selection -------------------
+    original = patchDialog("getSaveFileName",
+                           os.path.join(folder, "centers"), calls)
+    try:
+        workspace.button("file", "export").click()
+    finally:
+        QtWidgets.QFileDialog.getSaveFileName = original
+    exported = os.path.join(folder, "centers.usda")
+    check(os.path.isfile(exported) and
+          str(calls[-1][1]).startswith("Export"),
+          "the dock export writes centers.usda (%r)" % (calls[-1][1:2],))
+
+    openCalls = []
+    session.clearSelection()
+    session.select(tonicLib.TONIC_PICK_TUBE_VERT, [child], [-1], [-1])
+    check(container.importParentTubeId() == child,
+          "the import parent is the selected tube T%d" % child)
+    original = patchDialog("getOpenFileName", exported, openCalls)
+    try:
+        del messages[:]
+        registry.getCommandPlugin("usdGenTonicTools.importCurves").run()
+        menuLines = list(messages)
+        del messages[:]
+        session.clearSelection()
+        session.select(tonicLib.TONIC_PICK_TUBE_VERT, [child], [-1], [-1])
+        workspace.button("file", "import").click()
+        dockLines = list(messages)
+        del messages[:]
+        session.clearSelection()
+        workspace.button("file", "import").click()
+        rootLines = list(messages)
+    finally:
+        QtWidgets.QFileDialog.getOpenFileName = original
+        session.setStatusSink(None)
+        cleanFileRow()
+    want = "under tube %d" % child
+    check(any(want in line for line in menuLines) and
+          any(want in line for line in dockLines),
+          "the menu and the dock import under the same parent T%d "
+          "(%r / %r)" % (child, menuLines[-1:], dockLines[-1:]))
+    check(any("under tube 0" in line for line in rootLines) and
+          container.importParentTubeId() == 0,
+          "with nothing selected the import parent is 0, never -1 (%r)"
+          % rootLines[-1:])
+    check(len(openCalls) == 3 and
+          "tube %d" % child in str(openCalls[0][1]),
+          "the import caption names its parent (%r)"
+          % ([call[1] for call in openCalls],))
+
+
+def paramRow(workspace, identifier):
+    """The live page's widget for descriptor `identifier`, or None."""
+    for descriptor, widget in getattr(workspace, "_paramWidgets", ()):
+        if descriptor.id == identifier:
+            return widget
+    return None
+
+
+def focusWidget(widget):
+    from pxr.Usdviewq.qt import QtWidgets
+    widget.window().activateWindow()
+    widget.setFocus()
+    wait(20)
+    return QtWidgets.QApplication.focusWidget() is widget
+
+
+def parameterWidgets(workspace, session, viewport, state, view, child):
+    """DK-06: keyboard tracking, ramp validation, the amplified row and a
+    hierarchy page that survives a level change, all through real widgets."""
+    from pxr.Usdviewq.qt import QtCore, QtWidgets
+    from usdGenTonicTools import tonicLib, tonicPanels
+    qtest = _qtTest().QTest
+
+    publishes = [0]
+    priorPublishHook = getattr(session, "_publishHook", None)
+
+    def countingPublishHook():
+        publishes[0] += 1
+        if priorPublishHook is not None:
+            priorPublishHook()
+    raised = []
+    priorExceptHook = sys.excepthook
+
+    def countingExceptHook(kind, value, trace):
+        raised.append(value)
+        priorExceptHook(kind, value, trace)
+    session.setPublishHook(countingPublishHook)
+    sys.excepthook = countingExceptHook
+    try:
+        # -- the Output row drives the model, and both controls agree -----
+        workspace.button("mode", "output").click()
+        wait(20)
+        workspace._amplifiedCheck.setChecked(False)
+        workspace.refresh()
+        hidden = stableImage(view)
+        row = paramRow(workspace, "showAmplifiedHair")
+        check(row is not None and not row.isChecked() and
+              not bool(session.dll.Tonic_GetAmplifiedHair(session.model)),
+              "the Output 'Show amplified hair' row starts unticked with the "
+              "model off")
+        if row is not None:
+            before = publishes[0]
+            row.click()
+            wait(20)
+            workspace.refresh()
+            shown = waitForImage(
+                view, lambda image: imageDifferenceCount(hidden, image) >=
+                max(24, len(image) // 500))
+            check(bool(session.dll.Tonic_GetAmplifiedHair(session.model)) and
+                  publishes[0] > before,
+                  "ticking the Output row switches the model's amplified "
+                  "hair on and publishes (%d publish(es))"
+                  % (publishes[0] - before))
+            check(shown is not None,
+                  "the Output row brings the amplified tiles into the "
+                  "framebuffer")
+            check(workspace._amplifiedCheck.isChecked() and row.isChecked(),
+                  "the Display checkbox follows the Output row")
+            workspace._amplifiedCheck.setChecked(False)
+            workspace.refresh()
+            check(not row.isChecked() and
+                  not bool(session.dll.Tonic_GetAmplifiedHair(session.model)),
+                  "unticking the Display checkbox unticks the Output row")
+
+        # -- the hierarchy page is not rebuilt by a level change ----------
+        workspace.button("mode", "hierarchy").click()
+        wait(20)
+        workspace.refresh()
+        page = workspace._pages["hierarchy"]["params"]
+        levelBefore = int(state.activeLevel)
+        session.clearSelection()
+        session.select(tonicLib.TONIC_PICK_TUBE_VERT, [0], [-1], [-1])
+        workspace.button("action", "enterLevel").click()
+        wait(20)
+        loop = viewport.loop
+        if int(state.activeLevel) == levelBefore and \
+                hasattr(loop, "focusLevel"):
+            # The active-cut path expands the branch without moving the
+            # focus level; move it directly so the label question is asked.
+            loop.focusLevel(levelBefore + 1)
+        workspace.refresh()
+        wait(20)
+        visibleRow = paramRow(workspace, "levelVisible")
+        check(int(state.activeLevel) != levelBefore,
+              "the hierarchy focus moved L%d -> L%d"
+              % (levelBefore, int(state.activeLevel)))
+        check(workspace._pages["hierarchy"]["params"] is page,
+              "entering a level keeps the same hierarchy parameter page")
+        check(visibleRow is not None and
+              ("L%d" % int(state.activeLevel)) in visibleRow.toolTip(),
+              "the 'This level visible' row names L%d in its tooltip (%r)"
+              % (int(state.activeLevel),
+                 visibleRow.toolTip() if visibleRow is not None else None))
+        if hasattr(loop, "focusLevel"):
+            loop.focusLevel(levelBefore)
+        session.clearSelection()
+
+        # -- Density: typed digits commit once, on Enter ------------------
+        workspace.button("mode", "fill").click()
+        wait(20)
+        session.clearSelection()
+        workspace.refresh()
+        check(waitForAutomaticIdle(viewport, session,
+                                   requireCommitted=False),
+              "the density edit starts from an idle viewport")
+        spin = paramRow(workspace, "density")
+        check(spin is not None and not spin.keyboardTracking() and
+              spin.suffix() == " /unit²",
+              "the Density spin box commits on Enter and reads /unit²")
+        readout = workspace.findChild(QtWidgets.QLabel,
+                                      "tonicDensityReadout")
+        check(readout is not None and readout.text().endswith("guides"),
+              "the Density row shows the guide count it grew (%r)"
+              % (readout.text() if readout is not None else None))
+        slider = workspace.findChild(QtWidgets.QSlider, "tonicSlider_density")
+        check(slider is not None and slider.value() > 0,
+              "the Density row has a paired slider at the current value")
+        if spin is not None:
+            focused = focusWidget(spin)
+            info("density spin focused=%r" % focused)
+            spin.selectAll()
+            before = publishes[0]
+            qtest.keyClicks(spin, "12")
+            typed = publishes[0] - before
+            qtest.keyClick(spin, QtCore.Qt.Key.Key_Return)
+            wait(20)
+            committed = publishes[0] - before
+            live = tonicPanels._readPrimaryFillParams(session) or {}
+            check(typed == 0,
+                  "typing '12' publishes nothing before Enter (%d)" % typed)
+            check(committed == 1,
+                  "Enter commits exactly one refill/publish (%d)"
+                  % committed)
+            check(abs(float(live.get("density", -1.0)) - 12.0) < 1e-4,
+                  "Tonic_GetFillParams reads density 12 (%r)"
+                  % live.get("density"))
+            check(QtWidgets.QApplication.focusWidget() is not spin,
+                  "Enter hands the keyboard back from the spin box")
+
+        # -- the ramp refuses a typo instead of raising -------------------
+        ramp = paramRow(workspace, "lengthProfile")
+        check(ramp is not None, "the Fill page has the length-profile field")
+        if ramp is not None:
+            check(ramp.placeholderText() == tonicPanels.RAMP_PLACEHOLDER and
+                  "empty = full length" in ramp.placeholderText(),
+                  "the empty field says empty = full length, as its "
+                  "tooltip does (%r)" % ramp.placeholderText())
+            profileBefore = list(
+                (tonicPanels._readPrimaryFillParams(session) or {})
+                .get("profile", []))
+            focusWidget(ramp)
+            ramp.selectAll()
+            qtest.keyClicks(ramp, "garbage")
+            qtest.keyClick(ramp, QtCore.Qt.Key.Key_Return)
+            wait(20)
+            profileAfter = list(
+                (tonicPanels._readPrimaryFillParams(session) or {})
+                .get("profile", []))
+            check(not raised,
+                  "a garbage length profile raises nothing (%r)" % raised)
+            check(profileAfter == profileBefore,
+                  "a garbage length profile leaves the ramp unchanged")
+            check("border" in ramp.styleSheet() and
+                  "pos:val" in ramp.toolTip() and
+                  ramp.text() == "garbage",
+                  "the refused ramp turns red and says what it takes (%r)"
+                  % ramp.toolTip())
+            workspace.refresh()
+            check(ramp.text() == "garbage",
+                  "a refresh keeps the refused text for the artist to fix")
+            ramp.selectAll()
+            qtest.keyClicks(ramp, "0:1, 1:0.5")
+            qtest.keyClick(ramp, QtCore.Qt.Key.Key_Return)
+            wait(20)
+            fixed = list(
+                (tonicPanels._readPrimaryFillParams(session) or {})
+                .get("profile", []))
+            check(len(fixed) == 4 and
+                  all(abs(a - b) < 1e-5
+                      for a, b in zip(fixed, (0.0, 1.0, 1.0, 0.5))) and
+                  ramp.styleSheet() == "",
+                  "a corrected ramp commits and clears the red border (%r)"
+                  % fixed)
+    finally:
+        sys.excepthook = priorExceptHook
+        session.setPublishHook(priorPublishHook)
 
 
 def run(appController):
@@ -361,6 +796,14 @@ def run(appController):
     if workspace is None or session is None or session.model is None or \
             viewport is None:
         return 1
+    # Force the budgeted partial-swap path. With the default 5 ms budget a
+    # quiet box stays on full TransferContent swaps and only a loaded one
+    # latches partial mode, so the scalp-over (UsdGenRestAPI) regression in
+    # the partial path used to pass or fail by machine load alone.
+    check(session.committer is not None and
+          session.dll.Tonic_CommitterSetSwapBudgetMs(
+              session.committer, ctypes.c_double(0.0)) == 0,
+          "the committer takes a zero swap budget (partial swaps forced)")
 
     def shutdown():
         try:
@@ -418,13 +861,13 @@ def run(appController):
           "the hierarchy camera exposes the root tube wall")
     wait(40)
     camera = tonicCamera.resolve(view)
-    workspace._modeButtons["hierarchy"].click()
+    workspace.button("mode", "hierarchy").click()
     wait(20)
     rootHandle = tonicBridge.tubeCenterHandle(session.dll, session.model, 0, 1)
     rootPixel = camera.worldToPixels(rootHandle) if camera is not None else None
     if rootPixel is not None:
         mouse.click(rootPixel)
-    check(action(workspace, "Subdivide"),
+    check(action(workspace, "subdivide"),
           "the hierarchy dock exposes Subdivide for the selected root")
     children = [tube for tube in tubeIds(session) if tube != 0]
     check(len(children) >= 2,
@@ -438,7 +881,7 @@ def run(appController):
     # Sculpt a child through a real brush event.  Resolve its displayed
     # center handle after the hierarchy action, then use its live screen
     # coordinate for the press and drag.
-    workspace._modeButtons["sculpt"].click()
+    workspace.button("mode", "sculpt").click()
     wait(20)
     camera = tonicCamera.resolve(view)
     beforeChild = centers(session, child)
@@ -456,7 +899,7 @@ def run(appController):
 
     # Build through Luna's public session action.  The native settings are
     # then the sole source for the committed description and worker cook.
-    workspace._modeButtons["output"].click()
+    workspace.button("mode", "output").click()
     wait(20)
     check(waitForAutomaticIdle(viewport, session, requireCommitted=False),
           "the Output action starts from an idle stopped viewport timer")
@@ -466,13 +909,42 @@ def run(appController):
                                     strandWidth=0.02, publish=True,
                                     enqueue=False),
           "Output settings accept the full-Fill baseline")
-    check(action(workspace, "Build/update description"),
-          "the public Build/update description action queues Output")
+    # DK-07: before the first Build the density/width rows are already on
+    # the page, greyed, and say what they are waiting for.
+    workspace.refresh()
+    outputPage = workspace._pages["output"]["params"]
+    densityRow = paramRow(workspace, "outputDensityMultiplier")
+    widthRow = paramRow(workspace, "outputStrandWidth")
+    check(densityRow is not None and widthRow is not None and
+          not densityRow.isEnabled() and not widthRow.isEnabled() and
+          "Build" in densityRow.toolTip(),
+          "Output shows density and width disabled before Build (%r)"
+          % (densityRow.toolTip() if densityRow is not None else None))
+    texelRow = paramRow(workspace, "texelResolution")
+    check(texelRow is not None and
+          texelRow.currentText().startswith("Auto") and
+          texelRow.findData("128") >= 0 and
+          texelRow.itemText(texelRow.findData("128")) == "128 x 128",
+          "the Bake resolution combo shows sized choices (%r)"
+          % (texelRow.currentText() if texelRow is not None else None))
+    buildButton = workspace.button("action", "buildDescription")
+    check(buildButton is not None and
+          buildButton.text().startswith("Build hair description") and
+          buildButton.toolTip() != "",
+          "the Output action reads 'Build hair description' with a tooltip")
+    check(action(workspace, "buildDescription"),
+          "the public Build hair description action queues Output")
     check(waitForAutomaticIdle(
         viewport, session,
         lambda: bool(stage.GetPrimAtPath("/TonicGroom/Output")) and
         bool(stage.GetPrimAtPath("/TonicGroom/OutputCurves"))),
           "the real idle timer commits the Output description")
+    workspace.refresh()
+    workspace.refresh()
+    check(densityRow is not None and densityRow.isEnabled() and
+          widthRow.isEnabled() and
+          workspace._pages["output"]["params"] is outputPage,
+          "Build enables the same rows without rebuilding the Output page")
 
     output = stage.GetPrimAtPath("/TonicGroom/Output")
     source = stage.GetPrimAtPath("/TonicGroom/OutputCurves")
@@ -515,7 +987,7 @@ def run(appController):
     # Output visibility is controlled by the real workspace display mode;
     # merely toggling its checkbox while Sculpt owns the viewport does not
     # request its scene-index population.
-    workspace._modeButtons["output"].click()
+    workspace.button("mode", "output").click()
     wait(20)
     workspace._amplifiedCheck.setChecked(False)
     hiddenForDensity = stableImage(view)
@@ -587,7 +1059,7 @@ def run(appController):
           "the Output width widget commits through the real idle timer")
 
     # A later child sculpt must propagate into the description on commit.
-    workspace._modeButtons["sculpt"].click()
+    workspace.button("mode", "sculpt").click()
     wait(20)
     camera = tonicCamera.resolve(view)
     beforeOutput = cagePayload(source)
@@ -611,7 +1083,7 @@ def run(appController):
     # delta proves the generated usdGen imaging scene changes, while the
     # authored helper source remains hidden and therefore is never mistaken
     # for the rendered amplified result.
-    workspace._modeButtons["output"].click()
+    workspace.button("mode", "output").click()
     wait(20)
     workspace._amplifiedCheck.setChecked(False)
     # Establish a stable no-tiles image before requesting an output cook.
@@ -646,16 +1118,34 @@ def run(appController):
     check(str(visibility) == "invisible",
           "the /TonicGroom/OutputCurves helper source stays hidden from imaging")
 
+    # DK-03 last: it saves, sublayers and imports, which the imaging checks
+    # above must not see.
+    fileRowAndUndo(registry, container, workspace, session, viewport, state,
+                   view, mouse, child)
+
+    # DK-06 after that: it edits Fill's density and ramp, which would move
+    # the guide-driven imaging the checks above compare.
+    parameterWidgets(workspace, session, viewport, state, view, child)
+
     shutdown()
     print("testUsdviewTonicOutput: %d failure(s)" % failures)
     return 1 if failures else 0
+
+
+# Cleanups a section registers while its fixture exists; each removes
+# itself when it runs, and testUsdviewInputFunction runs what is left.
+_CLEANUP = []
 
 
 def testUsdviewInputFunction(appController):
     if getattr(appController, "_stageView", None) is None:
         print("FAIL: no StageView for Output acceptance")
         return 1
-    return run(appController)
+    try:
+        return run(appController)
+    finally:
+        for cleanup in list(_CLEANUP):
+            cleanup()
 
 
 if __name__ == "__main__":

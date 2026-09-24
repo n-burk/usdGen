@@ -4,6 +4,7 @@
 #include "usdGenTonic/tonicTube.h"
 
 #include <cmath>
+#include <utility>
 
 namespace usdGenTonic {
 
@@ -11,14 +12,18 @@ namespace {
 
 constexpr int kCircleSegments = 48;
 
-// Maya's axis colours, which is what plan/18 §2.4a asks for: x red, y
-// green, z blue, the handle under the drag yellow.
+// RigExec's manipulator palette (gizmoScreen.py _AXIS_COLORS,
+// COLOR_SELECTED, COLOR_VIEW), which the Qt overlay in tonicGizmo.py /
+// tonicViewport.py draws with too: x, y, z the flat primaries, the handle
+// under the drag pure yellow.  The headless fallback must look like the
+// interactive gizmo, so these change only together with tonicGizmo.py.
 constexpr float kAxisColors[3][3] = {
-    {0.90f, 0.15f, 0.15f},
-    {0.20f, 0.85f, 0.20f},
-    {0.25f, 0.45f, 0.95f},
+    {1.0f, 0.0f, 0.0f},
+    {0.0f, 1.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f},
 };
-constexpr float kActiveColor[3] = {1.0f, 0.85f, 0.10f};
+constexpr float kActiveColor[3] = {1.0f, 1.0f, 0.0f};
+// Tonic's own ringTRS scale ring (tonicGizmo.py RING_COLOR).
 constexpr float kRingColor[3] = {0.85f, 0.85f, 0.90f};
 constexpr float kViewColor[3] = {0.40f, 0.75f, 1.00f};
 constexpr float kBrushColor[3] = {1.0f, 0.75f, 0.25f};
@@ -28,8 +33,11 @@ constexpr float kBrushColor[3] = {1.0f, 0.75f, 0.25f};
 constexpr float kPlaneOffset = 0.30f;
 constexpr float kPlaneSide = 0.15f;
 constexpr float kCentreSide = 0.12f;
-constexpr float kConeStart = 0.84f;
+constexpr float kCubeSide = 0.08f;
 constexpr float kConeRadius = 0.05f;
+// A cone is CONE_LENGTH_RATIO (3) base radii long and ends at the tip.
+constexpr float kConeLengthRatio = 3.0f;
+constexpr float kConeStart = 1.0f - kConeRadius * kConeLengthRatio;
 
 bool _Finite(float v)
 {
@@ -126,6 +134,43 @@ void _AddSquare(TonicOverlayCurves *out, float const origin[3],
     _PushCurve(out, 5, active ? kActiveColor : color, width, handleId, active);
 }
 
+// A wire cube of edge `side` centred on `centre`, its edges along the unit
+// axes a, b, c: the Scale tip (RigExec draws a filled square in screen
+// space; with no camera here the wire cube reads the same from any side).
+// Two closed faces plus the four edges joining them: six curves.
+void _AddCube(TonicOverlayCurves *out, float const centre[3],
+              float const a[3], float const b[3], float const c[3],
+              float side, float const color[3], int handleId, bool active,
+              float width)
+{
+    float const half = side * 0.5f;
+    float const *const tint = active ? kActiveColor : color;
+    auto corner = [&](float sa, float sb, float sc, float p[3]) {
+        for (int i = 0; i < 3; ++i) {
+            p[i] = centre[i] + (a[i] * sa + b[i] * sb + c[i] * sc) * half;
+        }
+    };
+    static int const kLoop[5][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1},
+                                     {-1, -1}};
+    for (int face = 0; face < 2; ++face) {
+        float const sc = face == 0 ? -1.0f : 1.0f;
+        for (int i = 0; i < 5; ++i) {
+            float p[3];
+            corner(float(kLoop[i][0]), float(kLoop[i][1]), sc, p);
+            _PushPoint(out, p);
+        }
+        _PushCurve(out, 5, tint, width, handleId, active);
+    }
+    for (int i = 0; i < 4; ++i) {
+        float p[3];
+        corner(float(kLoop[i][0]), float(kLoop[i][1]), -1.0f, p);
+        _PushPoint(out, p);
+        corner(float(kLoop[i][0]), float(kLoop[i][1]), 1.0f, p);
+        _PushPoint(out, p);
+        _PushCurve(out, 2, tint, width, handleId, active);
+    }
+}
+
 // A closed circle of radius `r` around `center` in the (u, v) plane; the
 // last CV repeats the first so a linear nonperiodic curve reads closed (the
 // spelling the ring overlays already use).
@@ -148,13 +193,40 @@ void _AddCircle(TonicOverlayCurves *out, float const center[3],
                handleId, active);
 }
 
+// Drop every curve whose handle id is not in `mask` (GZ-06): the builders
+// above stay kind-driven and the tool's per-sub-mode whitelist is applied
+// once, the same way GizmoState.handles filters its records.
+void _KeepAllowedHandles(TonicOverlayCurves *out, unsigned int mask)
+{
+    TonicOverlayCurves kept;
+    size_t point = 0;
+    for (int c = 0; c < out->CurveCount(); ++c) {
+        int const count = out->vertexCounts[c];
+        int const id = out->handleIds[c];
+        bool const allowed = id >= 0 && id < 32 && ((mask >> id) & 1u) != 0;
+        if (allowed) {
+            kept.points.insert(kept.points.end(),
+                               out->points.begin() + point * 3,
+                               out->points.begin() + (point + count) * 3);
+            kept.vertexCounts.push_back(count);
+            kept.colors.insert(kept.colors.end(), out->colors.begin() + c * 3,
+                               out->colors.begin() + c * 3 + 3);
+            kept.widths.push_back(out->widths[c]);
+            kept.handleIds.push_back(id);
+            kept.active.push_back(out->active[c]);
+        }
+        point += size_t(count);
+    }
+    *out = std::move(kept);
+}
+
 }  // namespace
 
 bool
 TonicGizmoRecord::operator==(TonicGizmoRecord const &o) const
 {
     if (kind != o.kind || activeHandle != o.activeHandle ||
-        sizeWorld != o.sizeWorld) {
+        sizeWorld != o.sizeWorld || allowedMask != o.allowedMask) {
         return false;
     }
     for (int i = 0; i < 3; ++i) {
@@ -261,14 +333,31 @@ TonicBuildGizmoCurves(TonicGizmoRecord const &record, TonicOverlayCurves *out)
                        kAxisColors[a], a, record.activeHandle == a, width);
         }
     } else {
+        // The tip tells the tools apart, as in the Qt overlay
+        // (GizmoState.tipKind): a cone for Move and the ringTRS gizmo, a
+        // cube for Scale, bare lines for the node gizmo.
         for (int a = 0; a < 3; ++a) {
-            _AddAxis(out, record.origin, axes[a], a, record.activeHandle == a,
-                     width);
-            _AddArrowHead(out, record.origin, axes[a], a,
-                          record.activeHandle == a, width);
+            bool const active = record.activeHandle == a;
+            _AddAxis(out, record.origin, axes[a], a, active, width);
+            if (record.kind == TonicGizmo_Scale) {
+                float const tip[3] = {record.origin[0] + axes[a][0],
+                                      record.origin[1] + axes[a][1],
+                                      record.origin[2] + axes[a][2]};
+                float unit[3][3];
+                for (int k = 0; k < 3; ++k) {
+                    for (int i = 0; i < 3; ++i) {
+                        unit[k][i] = axes[k][i] / scale;
+                    }
+                }
+                _AddCube(out, tip, unit[0], unit[1], unit[2],
+                         kCubeSide * scale, kAxisColors[a], a, active, width);
+            } else if (record.kind != TonicGizmo_NodeTranslate) {
+                _AddArrowHead(out, record.origin, axes[a], a, active, width);
+            }
         }
     }
-    if (record.kind == TonicGizmo_Translate) {
+    if (record.kind == TonicGizmo_Translate ||
+        record.kind == TonicGizmo_Scale) {
         // yz is red, xz green, xy blue: plane colours name their missing
         // axis, exactly as in Maya and RigExec's viewport gizmo.
         _AddSquare(out, record.origin, axes[1], axes[2], kPlaneOffset,
@@ -291,6 +380,12 @@ TonicBuildGizmoCurves(TonicGizmoRecord const &record, TonicOverlayCurves *out)
         _AddSquare(out, record.origin, axes[0], axes[1], 0.0f,
                    kCentreSide, kViewColor, TonicGizmoHandle_Center,
                    record.activeHandle == TonicGizmoHandle_Center, width);
+    }
+    if (record.allowedMask != TonicGizmoAllHandles) {
+        _KeepAllowedHandles(out, record.allowedMask);
+        if (out->CurveCount() == 0) {
+            return false;  // everything hidden: no gizmo, as for kind none
+        }
     }
     return true;
 }

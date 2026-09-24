@@ -343,6 +343,25 @@ bool ReadsVariable(expr::IRProgram const &program, expr::Variable a, expr::Varia
     return false;
 }
 
+// Only the connected single-source ancestry qualifies. Another description
+// scattering on the same surface must not reinterpret this chain's UVs.
+bool HasLimitScatter(UsdGenGraphDesc const& desc, UsdGenNodeDesc const& node) {
+    auto const* current=&node;
+    for(size_t step=0;step<=desc.nodes.size();++step) {
+        if(current->type==TfToken("UsdGenScatter")) {
+            for(auto const& p:current->params)
+                if(p.name==TfToken("subdivisionLevel") && p.value.IsHolding<int>())
+                    return p.value.UncheckedGet<int>()>0;
+            return false;
+        }
+        if(current->inputs.size()!=1) return false;
+        auto it=std::find_if(desc.nodes.begin(),desc.nodes.end(),[&](auto const& n){return n.path==current->inputs.front();});
+        if(it==desc.nodes.end()) return false;
+        current=&*it;
+    }
+    return false;
+}
+
 } // namespace
 
 std::vector<std::string> UsdGenCpuParameters::TakeWarnings()
@@ -512,6 +531,7 @@ bool UsdGenCpuParameters::PrepareSamplers(UsdGenGraphDesc const &desc,
         VtVec3fArray const &corners = surface->restPoints.empty() ? surface->points
                                                                   : surface->restPoints;
         size_t const faceCount = surface->faceVertexCounts.size();
+        bool const limitUV=HasLimitScatter(desc,node) && geometry.rootUV.size()==curves;
         std::vector<int> faceOffsets(faceCount + 1, 0);
         for (size_t f = 0; f < faceCount; ++f)
             faceOffsets[f + 1] = faceOffsets[f] + surface->faceVertexCounts[f];
@@ -557,7 +577,10 @@ bool UsdGenCpuParameters::PrepareSamplers(UsdGenGraphDesc const &desc,
                         ? geometry.rest[root]
                         : GfVec3f(geometry.px[root], geometry.py[root], geometry.pz[root]);
                     double u = 0.0, v = 0.0;
-                    if (PaintQuadUV(positions, corners.size(), cornerIds, begin, p, &u, &v)) {
+                    bool located=false;
+                    if(limitUV) {u=geometry.rootUV[c][0];v=geometry.rootUV[c][1];located=true;}
+                    else located=PaintQuadUV(positions, corners.size(), cornerIds, begin, p, &u, &v);
+                    if (located) {
                         double const c0 = double(map->paintValues[size_t(begin)]);
                         double const c1 = double(map->paintValues[size_t(begin + 1)]);
                         double const c2 = double(map->paintValues[size_t(begin + 2)]);
@@ -595,13 +618,16 @@ bool UsdGenCpuParameters::PrepareSamplers(UsdGenGraphDesc const &desc,
                 : GfVec3f(geometry.px[root], geometry.py[root], geometry.pz[root]);
             int ptexFace = -1;
             float u = 0.0f, v = 0.0f;
-            if (!points ||
-                !UsdGenPtexFaceCoordinate(points, corners.size(), surface->faceVertexCounts.cdata(),
+            bool located=false;
+            int const face=geometry.rootPrim[c];
+            if(limitUV && !triangles && face>=0 && size_t(face)<faceCount) {
+                ptexFace=firstIds[face];u=geometry.rootUV[c][0];v=geometry.rootUV[c][1];located=true;
+            } else if(points) located=UsdGenPtexFaceCoordinate(points, corners.size(), surface->faceVertexCounts.cdata(),
                                           surface->faceVertexIndices.cdata(), faceOffsets.data(),
                                           faceCount, firstIds.data(), triangles,
                                           geometry.rootPrim[c], p[0], p[1], p[2],
-                                          &ptexFace, &u, &v) ||
-                !sampler->Sample(ptexFace, u, v, texel)) {
+                                          &ptexFace, &u, &v);
+            if (!located || !sampler->Sample(ptexFace, u, v, texel)) {
                 ++misses;
                 continue;
             }

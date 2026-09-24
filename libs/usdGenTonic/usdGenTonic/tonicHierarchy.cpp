@@ -374,10 +374,62 @@ double PolyArea(std::vector<Pt> const &poly)
     return 0.5 * acc;
 }
 
-// Subdivide edges longer than maxLen (inserted points stay on the polygon).
-// Stops once poly reaches budget points.
-void SubdivideLongEdges(std::vector<Pt> *poly, double maxLen, int budget)
+// Drop consecutive (cyclic) vertices closer than tol.  Sutherland-Hodgman
+// emits a corner AND its intersection when a bisector passes through that
+// corner, and two bisectors meeting at a Voronoi vertex emit that vertex
+// twice; the resulting zero-length edge survives the pad and the K5
+// per-slot interpolation, and float noise then decides whether the
+// material triangulator sees a degenerate ring at a fill station.  A
+// merged pair keeps the original parent corner (K14 provenance).
+void DropCoincidentVertices(std::vector<Pt> *poly, double tol)
 {
+    if (poly->size() < 4 || !(tol > 0.0)) {
+        return;
+    }
+    double const tol2 = tol * tol;
+    auto close = [tol2](Pt const &a, Pt const &b) {
+        double const du = double(a.u) - double(b.u);
+        double const dv = double(a.v) - double(b.v);
+        return du * du + dv * dv < tol2;
+    };
+    auto absorb = [](Pt *kept, Pt const &dropped) {
+        if (kept->parentSlot < 0 && dropped.parentSlot >= 0) {
+            *kept = dropped;
+        }
+    };
+    std::vector<Pt> out;
+    out.reserve(poly->size());
+    for (Pt const &p : *poly) {
+        if (!out.empty() && close(out.back(), p)) {
+            absorb(&out.back(), p);
+            continue;
+        }
+        out.push_back(p);
+    }
+    while (out.size() > 3 && close(out.back(), out.front())) {
+        absorb(&out.front(), out.back());
+        out.pop_back();
+    }
+    if (out.size() >= 3) {
+        poly->swap(out);
+    }
+}
+
+// Relative edge-length margin K14 treats as a tie when it densifies or pads
+// a child cell (see SubdivideLongEdges).
+constexpr double kSplitTieRel = 1e-4;
+
+// Subdivide edges longer than maxLen (inserted points stay on the polygon).
+// Stops once poly reaches budget points.  tieRel > 0 treats every edge
+// within that relative margin of the longest as tied and splits the lowest
+// index among them: a regular parent ring has edges equal up to float
+// noise, and letting that noise pick the edge re-lays a K14 child's slots
+// whenever an unrelated edit perturbs its parent by an ulp (K6 then adds
+// the stored per-slot residuals to the wrong slots).
+void SubdivideLongEdges(std::vector<Pt> *poly, double maxLen, int budget,
+                        double tieRel = 0.0)
+{
+    std::vector<double> lens;
     for (;;) {
         int n = int(poly->size());
         if (n >= budget) {
@@ -385,12 +437,14 @@ void SubdivideLongEdges(std::vector<Pt> *poly, double maxLen, int budget)
         }
         int bi = -1;
         double bl = maxLen;
+        lens.resize(size_t(n));
         for (int i = 0; i < n; ++i) {
             Pt const &P = (*poly)[size_t(i)];
             Pt const &Q = (*poly)[size_t((i + 1) % n)];
             double const du = double(Q.u) - double(P.u);
             double const dv = double(Q.v) - double(P.v);
             double const len = std::sqrt(du * du + dv * dv);
+            lens[size_t(i)] = len;
             if (len > bl) {
                 bl = len;
                 bi = i;
@@ -398,6 +452,15 @@ void SubdivideLongEdges(std::vector<Pt> *poly, double maxLen, int budget)
         }
         if (bi < 0) {
             return;
+        }
+        if (tieRel > 0.0) {
+            double const tied = std::max(maxLen, bl * (1.0 - tieRel));
+            for (int i = 0; i < bi; ++i) {
+                if (lens[size_t(i)] > tied) {
+                    bi = i;
+                    break;
+                }
+            }
         }
         Pt const &P = (*poly)[size_t(bi)];
         Pt const &Q = (*poly)[size_t((bi + 1) % n)];
@@ -446,6 +509,83 @@ std::vector<Pt> ResamplePoly(std::vector<Pt> const &poly, int count)
         out.push_back(x);
     }
     return out;
+}
+
+// K14 slot alignment between adjacent child sections.  Each section's
+// Voronoi-clipped cell starts at whichever parent corner first falls in
+// the clip, so once the parent rings differ per station (a K7 merge
+// averages its children) slot 0 lands on a different corner at each
+// station.  K5 interpolates per slot, so a rotated neighbour twists the
+// ring into a figure-eight that the concave material triangulator
+// (rightly) refuses.  Give `poly` the reference's winding, then rotate it
+// cyclically to the shift with the least summed squared slot distance.
+// Both rings are compared about their own vertex means, normalised by
+// their mean radius, so a tapering or drifting section still matches by
+// shape.  Ties keep the smallest shift: deterministic, so hydrate's
+// re-derivation reproduces the stored child bit-exactly.
+void AlignRingToReference(std::vector<Pt> *poly, std::vector<Pt> const &ref)
+{
+    int const n = int(poly->size());
+    if (n < 3 || int(ref.size()) != n) {
+        return;
+    }
+    double const area = PolyArea(*poly);
+    double const refArea = PolyArea(ref);
+    if ((area > 0.0 && refArea < 0.0) || (area < 0.0 && refArea > 0.0)) {
+        std::reverse(poly->begin(), poly->end());
+    }
+    auto normalised = [n](std::vector<Pt> const &ring,
+                          std::vector<double> *u, std::vector<double> *v) {
+        double mu = 0.0, mv = 0.0;
+        for (Pt const &p : ring) {
+            mu += double(p.u);
+            mv += double(p.v);
+        }
+        mu /= double(n);
+        mv /= double(n);
+        double radius = 0.0;
+        for (Pt const &p : ring) {
+            double const du = double(p.u) - mu;
+            double const dv = double(p.v) - mv;
+            radius += std::sqrt(du * du + dv * dv);
+        }
+        radius /= double(n);
+        double const inv = radius > 0.0 ? 1.0 / radius : 1.0;
+        u->resize(size_t(n));
+        v->resize(size_t(n));
+        for (int i = 0; i < n; ++i) {
+            (*u)[size_t(i)] = (double(ring[size_t(i)].u) - mu) * inv;
+            (*v)[size_t(i)] = (double(ring[size_t(i)].v) - mv) * inv;
+        }
+    };
+    std::vector<double> pu, pv, ru, rv;
+    normalised(*poly, &pu, &pv);
+    normalised(ref, &ru, &rv);
+    std::vector<double> costs(size_t(n), 0.0);
+    double bestCost = std::numeric_limits<double>::infinity();
+    for (int k = 0; k < n; ++k) {
+        double cost = 0.0;
+        for (int i = 0; i < n; ++i) {
+            size_t const j = size_t((i + k) % n);
+            double const du = pu[j] - ru[size_t(i)];
+            double const dv = pv[j] - rv[size_t(i)];
+            cost += du * du + dv * dv;
+        }
+        costs[size_t(k)] = cost;
+        bestCost = std::min(bestCost, cost);
+    }
+    // Shifts within a hair of the best (1% of the mean radius per slot,
+    // squared) are ties: a symmetric cell must keep the same answer when
+    // an unrelated edit perturbs it by an ulp, or K6 re-derivation would
+    // hand its stored residuals to rotated slots.
+    double const tied = bestCost + 1e-4 * double(n);
+    int best = 0;
+    while (costs[size_t(best)] > tied) {
+        ++best;
+    }
+    if (best != 0) {
+        std::rotate(poly->begin(), poly->begin() + best, poly->end());
+    }
 }
 
 // Piecewise-linear arc-length resample of a center curve to outN points.
@@ -1157,8 +1297,9 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
         int target = 0;
         for (int s = 0; s < nSec; ++s) {
             clipped[size_t(s)] = cells[size_t(s * params.count + c)];
+            DropCoincidentVertices(&clipped[size_t(s)], 1e-4 * spacing);
             SubdivideLongEdges(&clipped[size_t(s)], 2.0 * spacing,
-                               kMaxRingVerts);
+                               kMaxRingVerts, kSplitTieRel);
             // Recenter with the same generator chart as the center CVs.
             {
                 float ou = 0.0f, ov = 0.0f;
@@ -1190,6 +1331,11 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
         }
         child.ringVerts = target;
         child.sections.resize(size_t(nSec));
+        // The previous section's final slot order: section 0 (the scalp
+        // attachment chart) is the anchor, every later section follows
+        // its predecessor.  The K14 bindings below are recorded from the
+        // aligned polygon, so their child slot index rotates with it.
+        std::vector<Pt> previous;
         for (int s = 0; s < nSec; ++s) {
             std::vector<Pt> poly = clipped[size_t(s)];
             if (int(poly.size()) > target) {
@@ -1198,11 +1344,15 @@ bool TonicSubdivideTubeCpu(TonicTubeDesc const &parent,
                 // Exact-length pad: a 0 bound splits the longest edge
                 // first, so every inserted point stays on the polygon.
                 // (Fully degenerate runs fall back to the resample.)
-                SubdivideLongEdges(&poly, 0.0, target);
+                SubdivideLongEdges(&poly, 0.0, target, kSplitTieRel);
                 if (int(poly.size()) != target) {
                     poly = ResamplePoly(clipped[size_t(s)], target);
                 }
             }
+            if (s > 0) {
+                AlignRingToReference(&poly, previous);
+            }
+            previous = poly;
             TonicTubeSection &cs = child.sections[size_t(s)];
             cs.t = parent.sections[size_t(s)].t;
             cs.scale = 1.0f;
@@ -1649,6 +1799,58 @@ bool TonicResampleDescRingsCpu(TonicTubeDesc const &tube, int ringVerts,
             sec.u[size_t(i)] = rs[size_t(i)].u;
             sec.v[size_t(i)] = rs[size_t(i)].v;
         }
+    }
+    return true;
+}
+
+bool TonicAlignSectionRingCpu(TonicTubeSection *section,
+                              TonicTubeSection const &neighbour,
+                              std::vector<int> *outFrom)
+{
+    if (outFrom) {
+        outFrom->clear();
+    }
+    if (!section) {
+        return false;
+    }
+    size_t const n = section->u.size();
+    if (n < 3 || section->v.size() != n || neighbour.u.size() != n ||
+        neighbour.v.size() != n) {
+        return false;
+    }
+    // Compare the rings as K5 places them (scale, then twist) so a twisted
+    // or scaled neighbour is matched by shape, not by raw chart coords.
+    std::vector<Pt> placed, reference;
+    PlaceRing(*section, &placed);
+    PlaceRing(neighbour, &reference);
+    if (placed.size() != n || reference.size() != n) {
+        return false;
+    }
+    // Carry each slot's index through the alignment in the provenance
+    // field (unused by the comparison).
+    for (size_t i = 0; i < n; ++i) {
+        placed[i].parentSlot = int(i);
+    }
+    AlignRingToReference(&placed, reference);
+    bool changed = false;
+    for (size_t i = 0; i < n; ++i) {
+        changed = changed || placed[i].parentSlot != int(i);
+    }
+    if (!changed) {
+        return false;
+    }
+    std::vector<float> u(n), v(n);
+    std::vector<int> from(n);
+    for (size_t i = 0; i < n; ++i) {
+        size_t const j = size_t(placed[i].parentSlot);
+        from[i] = int(j);
+        u[i] = section->u[j];
+        v[i] = section->v[j];
+    }
+    section->u = std::move(u);
+    section->v = std::move(v);
+    if (outFrom) {
+        *outFrom = std::move(from);
     }
     return true;
 }

@@ -33,6 +33,23 @@ DEFAULT_BRUSH = "grab"
 DEFAULT_RADIUS_PX = 24.0
 DEFAULT_PRESERVE_LENGTH = True
 
+# The brush radius range, in physical pixels, shared by the panel
+# descriptor, the [ ] keys and the F-drag so the three can never disagree
+# about what the smallest or largest brush is.
+BRUSH_RADIUS_MIN_PX = 2.0
+BRUSH_RADIUS_MAX_PX = 512.0
+# [ ] scale the radius instead of stepping it: a 1 px step is invisible on
+# a 200 px brush and a 20 px step swallows a small one.  Shift is the fine
+# step.  Either way a key press moves the radius by at least a pixel, so a
+# tiny brush does not appear stuck.
+BRUSH_RADIUS_STEP = 1.15
+BRUSH_RADIUS_FINE_STEP = 1.05
+# The panel's strength range. Smooth blends toward the neighbour mean, so
+# its row stops at 1 (effectiveStrength caps it there anyway); a 0-4 row
+# for Smooth put three quarters of its travel on values that do nothing.
+STRENGTH_MAX = 4.0
+SMOOTH_STRENGTH_MAX = 1.0
+
 
 def validateBrush(brush):
     """The brush id; raises ValueError when unknown."""
@@ -45,6 +62,38 @@ def validateBrush(brush):
 def brushLabel(brush):
     """The display label for `brush`."""
     return BRUSH_LABELS[validateBrush(brush)]
+
+
+def clampBrushRadius(radiusPx):
+    """`radiusPx` inside [BRUSH_RADIUS_MIN_PX, BRUSH_RADIUS_MAX_PX]."""
+    return max(BRUSH_RADIUS_MIN_PX, min(BRUSH_RADIUS_MAX_PX, float(radiusPx)))
+
+
+def steppedBrushRadius(radiusPx, direction, fine=False):
+    """One [ or ] press: the radius times (or over) the step, clamped.
+
+    `direction` > 0 grows, < 0 shrinks, 0 only clamps.  The change is at
+    least one pixel (the floor), then clamped to the shared range.
+    """
+    value = clampBrushRadius(radiusPx)
+    step = BRUSH_RADIUS_FINE_STEP if fine else BRUSH_RADIUS_STEP
+    if direction > 0:
+        value = max(value * step, value + 1.0)
+    elif direction < 0:
+        value = min(value / step, value - 1.0)
+    return clampBrushRadius(value)
+
+
+def effectiveStrength(brush, strength):
+    """The strength a brush actually applies.
+
+    Smooth blends toward the neighbour mean, so anything past 1 is the
+    same as 1; every other brush scales its drag by the raw value.
+    """
+    value = max(float(strength), 0.0)
+    if validateBrush(brush) == "smooth":
+        return min(value, SMOOTH_STRENGTH_MAX)
+    return value
 
 
 def brushFalloff(distPx, radiusPx, t=None, center=0.5, tRadius=0.0):
@@ -213,13 +262,25 @@ def twistPreview(points, weights, angle, preserveLength=True):
 
 
 def sculptStatus(brush, radiusPx, tRadius, preserveLength, mirrorX,
-                 target="centers"):
-    """The one-line Sculpt-mode HUD status."""
+                 target="centers", strength=None):
+    """The one-line Sculpt-mode HUD status.
+
+    With `strength` the line shows the value the brush really applies
+    (effectiveStrength), so a Smooth panel set past 1 does not promise a
+    stronger relax than the kernel gives.
+    """
     brush = validateBrush(brush)
     if target not in ("centers", "guides"):
         raise ValueError("sculptStatus: want target centers|guides, got %r"
                          % (target,))
     flags = []
+    if strength is not None:
+        applied = effectiveStrength(brush, strength)
+        if applied < max(float(strength), 0.0):
+            flags.append("strength %.2f (capped from %.2f)"
+                         % (applied, float(strength)))
+        else:
+            flags.append("strength %.2f" % applied)
     flags.append("length-preserving" if preserveLength else "raw length")
     if mirrorX:
         flags.append("mirror-X")

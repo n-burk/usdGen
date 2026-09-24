@@ -539,24 +539,67 @@ Tonic_CommitterSwap(TonicCommitterContext *cc, const char *liveIdentifier,
                     int gestureActive)
 {
     try {
+        // TonicCommitter_Error, never TONIC_ERROR: TONIC_ERROR is 1, which
+        // is also TonicCommitter_PartialProgress, so a failed swap used to
+        // read as "call again next idle slot" and nobody ever heard of it.
         if (!cc || !liveIdentifier) {
             _SetError("Tonic_CommitterSwap: null argument");
-            return TONIC_ERROR;
+            return TonicCommitter_Error;
         }
         SdfLayerHandle live =
             SdfLayer::Find(std::string(liveIdentifier));
         if (!live) {
-            _SetError("Tonic_CommitterSwap: unknown live layer");
-            return TONIC_ERROR;
+            std::string const what =
+                "Tonic_CommitterSwap: unknown live layer " +
+                std::string(liveIdentifier);
+            _SetError(what.c_str());
+            return TonicCommitter_Error;
         }
         return int(_CImpl(cc)->committer->SwapIfIdle(
             live, gestureActive != 0));
     } catch (std::exception const &e) {
         _SetError(e.what());
-        return TONIC_ERROR;
+        return TonicCommitter_Error;
     } catch (...) {
         _SetError("Tonic_CommitterSwap: unknown exception");
-        return TONIC_ERROR;
+        return TonicCommitter_Error;
+    }
+}
+
+int
+Tonic_CommitterTakeDiagnostic(TonicCommitterContext *cc, char *out, int cap)
+{
+    try {
+        if (!cc) {
+            _SetError("Tonic_CommitterTakeDiagnostic: null committer");
+            return -1;
+        }
+        std::string const text = _CImpl(cc)->committer->TakeDiagnostic();
+        if (out && cap > 0) {
+            size_t const n = std::min(text.size(), size_t(cap - 1));
+            std::memcpy(out, text.data(), n);
+            out[n] = '\0';
+        }
+        return int(std::min(text.size(), size_t(0x7fffffff)));
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return -1;
+    } catch (...) {
+        _SetError("Tonic_CommitterTakeDiagnostic: unknown exception");
+        return -1;
+    }
+}
+
+unsigned long long
+Tonic_CommitterFailedVersion(TonicCommitterContext const *cc)
+{
+    try {
+        if (!cc) {
+            return 0;
+        }
+        return _CImpl(cc)->committer->FailedVersion();
+    } catch (...) {
+        return 0;
     }
 }
 
@@ -2543,6 +2586,54 @@ Tonic_GetGuideCounts(TonicModelContext const *ctx, int *outGuides, int *outCv)
 }
 
 int
+Tonic_ReadRefillDrops(TonicModelContext const *ctx, int *out, int outCap,
+                      int *outCount)
+{
+    try {
+        if (!ctx || !outCount) {
+            _SetError("Tonic_ReadRefillDrops: null context or count");
+            return TONIC_ERROR;
+        }
+        std::vector<std::pair<int, std::string>> const drops =
+            _Impl(ctx)->model.RefillDrops();
+        *outCount = int(drops.size());
+        if (out && outCap >= *outCount) {
+            for (size_t i = 0; i < drops.size(); ++i) {
+                out[i] = drops[i].first;
+            }
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_ReadRefillDrops: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+const char *
+Tonic_GetRefillDropReason(TonicModelContext const *ctx, int index)
+{
+    // A copy per thread: the model's list is replaced by the next refill,
+    // possibly on another thread, while the caller still reads this one.
+    static thread_local std::string reason;
+    try {
+        reason.clear();
+        if (ctx && index >= 0) {
+            std::vector<std::pair<int, std::string>> const drops =
+                _Impl(ctx)->model.RefillDrops();
+            if (size_t(index) < drops.size()) {
+                reason = drops[size_t(index)].second;
+            }
+        }
+        return reason.c_str();
+    } catch (...) {
+        return "";
+    }
+}
+
+int
 Tonic_ReadGuidePreview(TonicModelContext *ctx, float *outXYZ, int xyzLen,
                        int *outCounts, int countsLen, int *outGuideCount)
 {
@@ -4432,6 +4523,15 @@ int
 Tonic_SetGizmo(TonicModelContext *ctx, int kind, const float *origin,
                const float *frame, float sizeWorld, int activeHandle)
 {
+    return Tonic_SetGizmoEx(ctx, kind, origin, frame, sizeWorld,
+                            activeHandle, usdGenTonic::TonicGizmoAllHandles);
+}
+
+int
+Tonic_SetGizmoEx(TonicModelContext *ctx, int kind, const float *origin,
+                 const float *frame, float sizeWorld, int activeHandle,
+                 unsigned int allowedMask)
+{
     try {
         if (!ctx) {
             _SetError("Tonic_SetGizmo: null context");
@@ -4439,6 +4539,7 @@ Tonic_SetGizmo(TonicModelContext *ctx, int kind, const float *origin,
         }
         usdGenTonic::TonicGizmoRecord record;
         record.kind = kind;
+        record.allowedMask = allowedMask;
         if (origin) {
             for (int i = 0; i < 3; ++i) {
                 record.origin[i] = origin[i];
@@ -4501,6 +4602,25 @@ Tonic_GetGizmo(TonicModelContext const *ctx, int *outKind, float *outOrigin,
         return TONIC_ERROR;
     } catch (...) {
         _SetError("Tonic_GetGizmo: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_GetGizmoAllowedMask(TonicModelContext const *ctx, unsigned int *outMask)
+{
+    try {
+        if (!ctx || !outMask) {
+            _SetError("Tonic_GetGizmoAllowedMask: null argument");
+            return TONIC_ERROR;
+        }
+        *outMask = _Impl(ctx)->model.GetGizmo().allowedMask;
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_GetGizmoAllowedMask: unknown exception");
         return TONIC_ERROR;
     }
 }

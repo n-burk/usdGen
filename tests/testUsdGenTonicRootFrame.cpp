@@ -2069,6 +2069,174 @@ void CheckRegionTransportedSubtree()
           "region transport: cancel restores every descendant K5 mesh exactly");
 }
 
+// Review 2026-09-24 (attachment-refresh root alignment): K14 starts a
+// child's root ring on whichever parent corner first falls in the clip, so a
+// refreshed root can arrive rotated against the child's transported upper
+// sections. The refresh used to renumber only the ROOT to match them and
+// store the rotation as a section residual: an unsculpted child turned
+// "sculpted", and a later K6 re-split re-applied that full-radius residual
+// slot by slot. It must instead bring the upper sections into the fresh
+// split's slot order, so a child whose numbering was rotated before the
+// move converges to exactly the un-rotated control: same actual, same
+// derived, same (sculpt-sized) residual -- and a later parent edit agrees.
+void CheckAttachmentRefreshKeepsFreshSlotOrder()
+{
+    using namespace usdGenTonic;
+    std::vector<float> const points = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    std::vector<int> const counts = {4};
+    std::vector<int> const indices = {0, 1, 2, 3};
+    float const normal[3] = {0, 0, 1};
+    struct Rig {
+        TonicModel model;
+        std::vector<int> nodes;
+        int root = -1;
+        std::vector<int> kids;
+    };
+    auto build = [&](Rig *rig) {
+        TonicModel &model = rig->model;
+        if (!model.BindScalp(points, counts, indices)) {
+            return false;
+        }
+        float const uv[8] = {0.15f, 0.20f, 0.85f, 0.20f,
+                             0.80f, 0.55f, 0.20f, 0.60f};
+        for (int i = 0; i < 4; ++i) {
+            int const node = model.GraphAddNode(
+                HitFace(*model.GetScalp(), 0, uv[i * 2], uv[i * 2 + 1],
+                        normal));
+            if (node < 0) {
+                return false;
+            }
+            rig->nodes.push_back(node);
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (model.GraphConnect(rig->nodes[size_t(i)],
+                                   rig->nodes[size_t((i + 1) % 4)]) < 0) {
+                return false;
+            }
+        }
+        if (!model.Rasterise()) {
+            return false;
+        }
+        int const region = model.RegionAtSurface(0, 0.5f, 0.4f);
+        if (region < 0 || !model.BuildTubeFromRegion(region, 5, 8, 2.0f)) {
+            return false;
+        }
+        rig->root = model.TubeForRegion(region);
+        return rig->root >= 0 &&
+               model.SubdivideTube(rig->root, 2, "kmeans", 131,
+                                   &rig->kids) &&
+               rig->kids.size() == 2;
+    };
+    auto move = [&](Rig *rig) {
+        // One corner only: the region boundary itself changes, so the
+        // refresh re-derives every child root (attachmentChanged).
+        TonicGraphNode current;
+        if (!rig->model.GraphGetNode(rig->nodes[1], &current)) {
+            return false;
+        }
+        std::vector<int> const moved = {rig->nodes[1]};
+        std::vector<TonicHit> const targets = {
+            HitFace(*rig->model.GetScalp(), current.faceId,
+                    current.u + 0.06f, current.v + 0.05f, normal)};
+        return rig->model.GraphMoveNodes(moved, targets) &&
+               rig->model.Rasterise();
+    };
+    auto closeTo = [](std::vector<float> const &a, std::vector<float> const &b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (!(std::fabs(a[i] - b[i]) <= 1e-5f)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto sameSections = [&](std::vector<TonicTubeSection> const &a,
+                            std::vector<TonicTubeSection> const &b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (size_t s = 0; s < a.size(); ++s) {
+            if (!closeTo(a[s].u, b[s].u) || !closeTo(a[s].v, b[s].v)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto maxSectionDelta = [](TonicShapeDeltas const &d) {
+        float worst = 0.0f;
+        for (TonicTubeSection const &sec : d.sections) {
+            for (float x : sec.u) worst = std::max(worst, std::fabs(x));
+            for (float x : sec.v) worst = std::max(worst, std::fabs(x));
+        }
+        return worst;
+    };
+
+    Rig control, rotated;
+    bool const setup = build(&control) && build(&rotated);
+    Check(setup, "slot order: two identical subdivided regions build");
+    if (!setup) {
+        return;
+    }
+    // Rotate every section of one unsculpted child by one slot, bindings
+    // along: the same surface, numbered as if an older K14 had started its
+    // ring one corner later.
+    int const kid = rotated.kids[0];
+    TonicModel::TubeRecord record;
+    bool relabelled = rotated.model.GetTubeRecord(kid, &record) &&
+                      record.actual.ringVerts >= 4;
+    if (relabelled) {
+        int const n = record.actual.ringVerts;
+        for (TonicTubeSection &sec : record.actual.sections) {
+            TonicTubeSection const old = sec;
+            for (int i = 0; i < n; ++i) {
+                sec.u[size_t(i)] = old.u[size_t((i + 1) % n)];
+                sec.v[size_t(i)] = old.v[size_t((i + 1) % n)];
+            }
+        }
+        for (TonicParentBoundaryBinding &b :
+             record.actual.inheritedBoundaryBindings) {
+            b.childSlot = (b.childSlot + n - 1) % n;
+        }
+        record.hasInheritedBoundaryBindings = true;
+        relabelled = rotated.model.RestoreTubeRecord(kid, record);
+    }
+    Check(relabelled, "slot order: one child is renumbered by one slot");
+    Check(move(&control) && move(&rotated),
+          "slot order: moving one region corner refreshes both hierarchies");
+
+    TonicModel::TubeRecord want, got;
+    bool const read = control.model.GetTubeRecord(control.kids[0], &want) &&
+                      rotated.model.GetTubeRecord(kid, &got);
+    std::printf("info: slot order max section residual control=%g "
+                "rotated=%g\n",
+                read ? maxSectionDelta(want.deltas) : -1.0f,
+                read ? maxSectionDelta(got.deltas) : -1.0f);
+    Check(read && sameSections(got.actual.sections, want.actual.sections) &&
+              sameSections(got.derived.sections, want.derived.sections),
+          "slot order: the renumbered child converges to the control's "
+          "slot order at every section");
+    Check(read && sameSections(got.deltas.sections, want.deltas.sections),
+          "slot order: and stores the control's residual, not a "
+          "rotation-sized one");
+
+    // A later parent edit re-derives both children with K6.
+    bool const edited =
+        control.model.MoveTubeCenterCV(control.root, 2, 0.02f, -0.01f,
+                                       0.01f) &&
+        rotated.model.MoveTubeCenterCV(rotated.root, 2, 0.02f, -0.01f,
+                                       0.01f);
+    Check(edited, "slot order: a parent edit after the refresh is accepted");
+    TonicModel::TubeRecord want2, got2;
+    Check(edited && control.model.GetTubeRecord(control.kids[0], &want2) &&
+              rotated.model.GetTubeRecord(kid, &got2) &&
+              sameSections(got2.actual.sections, want2.actual.sections) &&
+              sameSections(got2.deltas.sections, want2.deltas.sections),
+          "slot order: and K6 re-derives the renumbered child exactly as "
+          "the control");
+}
+
 } // namespace
 
 int main()
@@ -2082,6 +2250,7 @@ int main()
     CheckRegionTransportedSubtree();
     CheckCurvedRegionFrameTransport();
     CheckGeneratedCurveClear();
+    CheckAttachmentRefreshKeepsFreshSlotOrder();
     std::printf("testUsdGenTonicRootFrame: %d failure(s)\n", g_failures);
     return g_failures ? 1 : 0;
 }

@@ -37,12 +37,74 @@ except ImportError:  # file-path test load
     import tonicSculpt
     import tonicTube
 
+# The artist-facing half of a row (DK-07): `tooltip` says what the row does
+# in the artist's words, `unit` is the spin box suffix ('px', '%'),
+# `choiceLabels` are the combo texts for an enum's `choices` (same length,
+# same order: the choice stays the stored value, the label is only shown),
+# and `enabled` is False for a row that exists but cannot be used yet (the
+# Output rows before Build). They default so a positional nine-field
+# constructor still works; tooltip and enabled may change with state, so
+# the dock re-reads them on refresh and they are not part of a page's
+# signature.
 Descriptor = collections.namedtuple(
     "Descriptor",
-    ("id", "label", "kind", "min", "max", "step", "choices", "get", "set"))
+    ("id", "label", "kind", "min", "max", "step", "choices", "get", "set",
+     "tooltip", "unit", "choiceLabels", "enabled"),
+    defaults=("", "", (), True))
 
 Action = collections.namedtuple(
-    "Action", ("id", "label", "hotkeyLabel", "handler"))
+    "Action", ("id", "label", "hotkeyLabel", "handler", "tooltip"),
+    defaults=("",))
+
+# Icon glyph per Action.id / dock command id / status pill (IC-01,
+# plugin/usdGenTonicTools/resources/icons/README.md). tonicIcons.loadIcon
+# resolves the PNG; kept here rather than on Action so the table stays
+# reachable without constructing every mode's actions() list first. A
+# sub-mode action that reuses its sub-mode glyph (Subdivide, Merge
+# children, Group) is not repeated here -- see tonicModes.ICONS instead.
+ACTION_ICONS = {
+    "weldAll": "act_weld_all",
+    "rebake": "act_rebake",
+    "matchSurface": "act_match_surface",
+    "relax": "act_relax",
+    "snapRoot": "act_snap_root",
+    # Reset transform tool (parity G20): the settings glyph, as the
+    # RigExec Tool Settings window's Reset Tool sits under its Settings.
+    "resetTransformTool": "act_settings",
+    "refill": "act_refill",
+    "clearGeneratedCurves": "act_clear_generated",
+    "mergeSelected": "act_merge_selected",
+    "resubdivide": "act_resubdivide",
+    "makePersistent": "act_make_persistent",
+    "enterLevel": "act_enter_level",
+    "exitLevel": "act_exit_level",
+    "buildDescription": "act_build_description",
+
+    "saveGroom": "act_save",
+    "exportCenterCurves": "act_export",
+    "importCurves": "act_import",
+    "bindScalp": "act_bind_scalp",
+    "resumeGroom": "act_resume_groom",
+    "undo": "act_undo",
+    "redo": "act_redo",
+    "deselectAll": "act_deselect_all",
+    "frameSelected": "act_frame_selected",
+    "settings": "act_settings",
+
+    "showGeneratedCurves": "toggle_show_curves",
+    "showAmplifiedHair": "toggle_show_hair",
+
+    "statusSynced": "status_synced",
+    "statusPending": "status_pending",
+    "statusDetached": "status_detached",
+    "statusWarning": "status_warning",
+    "statusError": "status_error",
+    "statusInfo": "status_info",
+    "statusLadder": "status_ladder",
+
+    "pivotCentre": "pivot_centre",
+    "pivotEach": "pivot_each",
+}
 
 # The maximum length-profile floats a Fill descriptor round-trips in one
 # Tonic_GetFillParams call (32 (position, value) knots is generous for a
@@ -58,16 +120,80 @@ MAX_SELECTION = 256
 # Fill.  Keep this on the Qt-free descriptor module so headless callers and
 # the dock show the same explanation.
 TEXEL_RESOLUTION_HELP = (
-    "Ptex texels per face side. Auto uses 64×64 on region boundaries; "
-    "higher values resolve finer regions. Guide density is controlled in "
-    "Fill."
+    "How finely the region map is baked, in texels per scalp face side. "
+    "Auto uses 64 x 64 on faces a region border crosses and one texel "
+    "inside a region; higher values follow finer region borders. Guide "
+    "density is set in Fill."
 )
+
+# Bounded float rows the dock pairs with a slider (DK-06). A slider drag
+# is one gesture (one undo step), so only rows whose whole range is worth
+# scrubbing are listed; the dock maps a range spanning two decades or more
+# logarithmically so the low end is reachable.
+SLIDER_PARAM_IDS = frozenset((
+    "density", "sculptStrength", "brushRadiusPx", "previewFraction",
+    "edgeBias", "softRadius"))
+
+# The slider rows whose drag is bracketed in one gesture (one undo step).
+# Only Fill's density and edge bias write state the undo snapshot restores
+# (the tube's fill params and its refilled guides); brush radius and
+# strength are tool settings and preview fraction / soft radius are model
+# display values, so a bracket around those would push an undo step that
+# changes nothing.
+SLIDER_GESTURE_IDS = frozenset(("density", "edgeBias"))
+
+# Fill density's unit (DK-06): guides per unit of scalp area; the bare
+# number read like a count. Descriptor.unit carries it to the spin box.
+DENSITY_UNIT = "/unit²"
+
+# The tooltip of a row that exists before it can be used: Output's
+# density and width rows are shown greyed until the first Build (DK-07),
+# rather than appearing from nowhere after it.
+BUILD_FIRST_TIP = "Build the hair description first (Build hair description)."
+
+# What the length-profile field accepts; shown as its tooltip when a typo
+# is refused instead of raised (DK-06).
+RAMP_HINT = "pos:val pairs, e.g. 0:1, 0.5:0.6, 1:0.8"
+# The empty field's placeholder: an empty profile is every guide at full
+# length, as the row's tooltip and the manual say -- not "uniform" at
+# whatever length was last set.
+RAMP_PLACEHOLDER = "pos:val, pos:val ... (empty = full length)"
+
+
+def guideCount(session):
+    """The live guide count (Tonic_GetGuideCounts), or None when unbound."""
+    dll, ctx = _dll(session), _ctx(session)
+    entry = (getattr(dll, "Tonic_GetGuideCounts", None)
+             if dll is not None and ctx is not None else None)
+    if entry is None:
+        return None
+    guides = ctypes.c_int(0)
+    if int(entry(ctx, ctypes.byref(guides), None)) != 0:
+        return None
+    return int(guides.value)
+
+
+def guideCountText(session):
+    """The density row's readout: what the density produced ('' unbound)."""
+    count = guideCount(session)
+    if count is None:
+        return ""
+    return "%d guide%s" % (count, "" if count == 1 else "s")
 
 
 def _descriptor(id, label, kind, get, set, min=0.0, max=0.0, step=0.0,
-                choices=()):
-    return Descriptor(id, label, kind, min, max, step, tuple(choices),
-                      get, set)
+                choices=(), tooltip="", unit="", choiceLabels=None,
+                enabled=True):
+    choices = tuple(choices)
+    # An enum always has one shown label per choice; a builder that names
+    # none gets the choice's own text rather than a short list.
+    labels = (tuple(str(c) for c in choices) if choiceLabels is None
+              else tuple(str(c) for c in choiceLabels))
+    if len(labels) != len(choices):
+        raise ValueError("tonicPanels: %s has %d choice labels for %d "
+                         "choices" % (id, len(labels), len(choices)))
+    return Descriptor(id, label, kind, min, max, step, choices, get, set,
+                      str(tooltip), str(unit), labels, bool(enabled))
 
 
 # ---- session access (defensive: every call works with session=None) ------
@@ -95,27 +221,42 @@ def _stage(session):
     return getattr(session, "stageLib", None) if session is not None else None
 
 
-def _perTube(session, entry, fallback, *args):
-    """Run one operation over the tube selection, or over tube 0.
+def _undoStep(session, label, write, snapshot):
+    """Run one dock edit as exactly one undo step (SS-02).
 
-    `entry` is the StageLibrary method (it takes ctx, tubeId, ...) and
-    `fallback` the tonicApi.h name that means the same thing on the
-    primary tube. Nothing selected means the primary tube, so a groom with
-    one tube needs no click before its buttons work.
+    A panel write used to be no undo step at all, so Ctrl+Z after a
+    density change skipped it and restored an older snapshot -- one taken
+    before the guides were grown. Bracketing the write in a gesture makes
+    the edit its own step; `snapshot()` is read before and after so a
+    write of the value already held leaves no empty step behind
+    (endGestureIfChanged cancels it); a snapshot of None means "cannot
+    tell" and always keeps the step. Inside an open gesture -- the dock's
+    slider drag brackets itself -- the write joins that step instead, and
+    a session without the bracket (a test's fake) just writes.
     """
-    dll, ctx = _dll(session), _ctx(session)
-    if dll is None or ctx is None:
-        return 0
-    stage = _stage(session)
-    tubes = selectedTubeIds(session)
-    if stage is None or not tubes:
-        getattr(dll, fallback)(ctx, *args)
-        return 1
-    done = 0
-    for tubeId in tubes:
-        getattr(stage, entry)(ctx, tubeId, *args)
-        done += 1
-    return done
+    begin = getattr(session, "beginGesture", None) \
+        if session is not None else None
+    if (not callable(begin) or _ctx(session) is None or
+            getattr(session, "gestureActive", False) is True):
+        return write()
+    before = snapshot()
+    if not begin(label):
+        return write()
+    try:
+        result = write()
+    except Exception:
+        cancel = getattr(session, "cancelGesture", None)
+        dirty = cancel() if callable(cancel) else 0
+        if dirty and hasattr(session, "publish"):
+            session.publish(dirty)
+        raise
+    changed = before is None or snapshot() != before
+    finish = getattr(session, "endGestureIfChanged", None)
+    if callable(finish):
+        finish(changed)
+    else:
+        session.endGesture()
+    return result
 
 
 def _loop(container, modeId):
@@ -217,17 +358,35 @@ def _boolToInt(v):
 
 def _graphDescriptors(state):
     return [
+        # State only: the row is screen pixels, the model's
+        # Tonic_Get/SetSnapRadius is rest units. The loops convert at the
+        # point of use (tonicGraph.snapRadiusRest); mirroring the row into
+        # the model would hand it pixels as world units, and every dock
+        # refresh would read the world radius back into the pixel field.
         _scalarDescriptor(
-            "snapRadiusPx", "Snap radius (px)", "float", "snapRadiusPx",
-            float, "Tonic_GetSnapRadius", "Tonic_SetSnapRadius",
-            min=1.0, max=64.0, step=1.0),
+            "snapRadiusPx", "Snap radius", "float", "snapRadiusPx",
+            float, min=1.0, max=64.0, step=1.0, unit="px",
+            tooltip="How close, in screen pixels, a click or stroke end "
+                    "has to land to weld onto an existing CV or edge."),
         _scalarDescriptor(
             "mirrorX", "Mirror X", "bool", "mirrorX", _boolCast,
-            "Tonic_GetMirrorX", "Tonic_SetMirrorX", dllCast=_boolToInt),
-        _descriptor("texelResolution", "Ptex texels per face side", "enum",
-                    _texelResolutionGet, _texelResolutionSet,
-                    choices=TEXEL_CHOICES),
+            "Tonic_GetMirrorX", "Tonic_SetMirrorX", dllCast=_boolToInt,
+            tooltip="Repeat every region edit on the other side of the "
+                    "scalp (mirrored across X = 0)."),
+        _texelResolutionDescriptor(),
     ]
+
+
+def _viewportCamera(container):
+    """The viewport's camera as it is now, or None without a viewport."""
+    viewport = getattr(container, "viewport", None)
+    view = getattr(viewport, "view", None)
+    if view is not None:
+        from . import tonicCamera
+        camera = tonicCamera.resolve(view)
+        if camera is not None:
+            return camera
+    return getattr(viewport, "camera", None)
 
 
 def _weldAllHandler(container):
@@ -235,10 +394,24 @@ def _weldAllHandler(container):
     dll, ctx = _dll(session), _ctx(session)
     if dll is None or ctx is None:
         return
-    state = container.tonicState
+    camera = _viewportCamera(container)
+    viewport = getattr(container, "viewport", None)
+    loop = getattr(viewport, "loop", None)
+    if getattr(loop, "modeId", None) == "graph" and \
+            callable(getattr(loop, "weldAll", None)):
+        # The Graph loop welds as one undo step and runs K3, the stubs
+        # and the commit after it, like any other Graph edit.
+        loop.weldAll(camera)
+        getattr(viewport, "scheduleIdle", lambda: None)()
+        return
+    # The Snap radius row is screen pixels; the ABI wants rest units.
+    try:
+        from . import tonicGraph
+    except ImportError:  # file-path test load
+        import tonicGraph
+    radius = tonicGraph.snapRadiusRest(session, container.tonicState, camera)
     welds = ctypes.c_int(0)
-    dll.Tonic_GraphWeldAll(ctx, float(state.snapRadiusPx),
-                           ctypes.byref(welds))
+    dll.Tonic_GraphWeldAll(ctx, float(radius), ctypes.byref(welds))
     _publish(session)
 
 
@@ -250,8 +423,12 @@ def _rebakeHandler(container):
 
 def _graphActions(state):
     return [
-        Action("weldAll", "Weld all within radius", "", _weldAllHandler),
-        Action("rebake", "Rebake map now", "", _rebakeHandler),
+        Action("weldAll", "Weld all within radius", "", _weldAllHandler,
+               "Merge every pair of region CVs closer than the snap "
+               "radius."),
+        Action("rebake", "Rebake map now", "", _rebakeHandler,
+               "Bake the region map again now instead of after the next "
+               "region edit."),
     ]
 
 
@@ -295,8 +472,94 @@ def _transformToolGet(state, _session):
 
 def _transformToolSet(state, _session, value):
     value = str(value).lower()
-    state.transformTool = (value if value in ("select", "move", "rotate",
-                                               "scale") else "move")
+    value = value if value in ("select", "move", "rotate", "scale") \
+        else "move"
+    # Parity G16: each tool keeps its own Axis Orientation (Rotate starts
+    # in Tube), so a tool change swaps the live orientation too.
+    _gizmoSettingsModule().SwitchTool(state, value)
+    state.transformTool = value
+
+
+# ---- Tube gizmo settings (GZ-05, parity G20) ------------------------------
+#
+# The vendored RigExec Tool Settings panel in the Tonic idiom: extra Tube
+# rows over tonicGizmoSettings.  A write notifies the GizmoSettings
+# listeners, which is how the viewport controller re-places the gizmo
+# without the dock knowing it exists.
+
+def _gizmoSettingsModule():
+    try:
+        from . import tonicGizmoSettings
+    except ImportError:  # file-path test load
+        import tonicGizmoSettings
+    return tonicGizmoSettings
+
+
+def _gizmoSettings(state):
+    return _gizmoSettingsModule().settingsFor(state)
+
+
+def _toolSettings(state, tool=None):
+    return _gizmoSettings(state).For(
+        tool or getattr(state, "transformTool", "move"))
+
+
+def _orientationGet(state, _session):
+    return _gizmoSettingsModule().NormalizeOrientation(
+        getattr(state, "transformOrientation", "world"))
+
+
+def _orientationSet(state, _session, value):
+    value = _gizmoSettingsModule().NormalizeOrientation(value)
+    if value == getattr(state, "transformOrientation", None):
+        return
+    state.transformOrientation = value
+    # The live tool's orientation lives on the state (SwitchTool banks the
+    # others), not in a ToolSettings, so announce it the way a
+    # ToolSettings write would.
+    _gizmoSettings(state).Notify()
+
+
+def _toolFieldDescriptor(id, label, kind, field, tool=None, cast=None,
+                         **ranges):
+    """A row over one ToolSettings field: `tool`'s, or the live tool's."""
+    convert = cast or (bool if kind == "bool" else float)
+
+    def get(state, _session):
+        return convert(getattr(_toolSettings(state, tool), field))
+
+    def set(state, _session, value):
+        setattr(_toolSettings(state, tool), field, convert(value))
+
+    return _descriptor(id, label, kind, get, set, **ranges)
+
+
+def _globalFieldDescriptor(id, label, field, **ranges):
+    """A float row over one session-wide GizmoSettings field."""
+    def get(state, _session):
+        return float(getattr(_gizmoSettings(state), field))
+
+    def set(state, _session, value):
+        setattr(_gizmoSettings(state), field, float(value))
+
+    return _descriptor(id, label, "float", get, set, **ranges)
+
+
+def _resetTransformToolHandler(container):
+    """Reset transform tool: the live tool's step/rotate/scale defaults,
+    its group pivot and its Axis Orientation (parity G16/G17)."""
+    state = getattr(container, "tonicState", None)
+    if state is None:
+        return
+    tool = getattr(state, "transformTool", "move")
+    settings = _gizmoSettings(state)
+    orientation = _gizmoSettingsModule().DefaultOrientation(tool)
+    moved = getattr(state, "transformOrientation", None) != orientation
+    state.transformOrientation = orientation
+    # Reset notifies when a field changed; the orientation is on the state,
+    # so a change there alone still has to tell the gizmo listeners.
+    if not settings.Reset(tool) and moved:
+        settings.Notify()
 
 
 def _tubeCache(state):
@@ -425,53 +688,248 @@ def _uniformScaleSet(state, session, value):
             report("Tonic Tube: section scale failed; edit cancelled")
 
 
+# The section-scale row is only live with section rings (or section CVs)
+# selected; the dock swaps these two tooltips as it greys the row.
+UNIFORM_SCALE_TIP = ("Scale the selected section rings to this size "
+                     "(1 = as built).")
+UNIFORM_SCALE_EMPTY_TIP = ("Scale selected section rings. Select rings or "
+                           "section CVs first (F10 / F11).")
+
+
 def _tubeDescriptors(state):
     return [
         _descriptor("selectionShape", "Selection shape", "enum",
                    _selectionShapeGet, _selectionShapeSet,
-                   choices=("box", "lasso")),
+                   choices=("box", "lasso"), choiceLabels=("Box", "Lasso"),
+                   tooltip="What a drag on empty space draws to select: a "
+                           "rectangle or a free-hand loop."),
         _descriptor("transformTool", "Transform", "enum",
                    _transformToolGet, _transformToolSet,
-                   choices=("move", "rotate", "scale", "select")),
-        _descriptor("softRadius", "Soft-selection radius (t)", "float",
+                   choices=("move", "rotate", "scale", "select"),
+                   choiceLabels=("Move (W)", "Rotate (E)", "Scale (R)",
+                                 "Select (Q)"),
+                   tooltip="The handle the selection gets: move, rotate, "
+                           "scale, or none (select only)."),
+        # GZ-05 / parity G16, G20, G23, G08, G11: the gizmo's settings.
+        # Step snap / step size follow the live transform tool, as the
+        # RigExec panel is rebuilt per tool; the Rotate- and Scale-only
+        # options name their tool.
+        _descriptor("transformOrientation", "Axis orientation (L)", "enum",
+                   _orientationGet, _orientationSet,
+                   choices=_gizmoSettingsModule().ORIENTATIONS,
+                   choiceLabels=tuple(
+                       _gizmoSettingsModule().OrientationLabel(o)
+                       for o in _gizmoSettingsModule().ORIENTATIONS),
+                   tooltip="Which way the live tool's handle axes point: "
+                           "the scene axes, the view, or the tube's own "
+                           "root direction. Each tool keeps its own (Move "
+                           "and Scale start World, Rotate Tube). L flips "
+                           "World <-> Tube."),
+        _toolFieldDescriptor("stepSnap", "Step snap (hold J)", "bool",
+                             "stepSnap",
+                             tooltip="Move, turn or scale in whole steps "
+                                     "of the step size. Holding J does "
+                                     "the same for one drag."),
+        _toolFieldDescriptor("stepSize", "Step size", "float", "stepSize",
+                             min=0.001, max=360.0, step=0.5,
+                             tooltip="The step Step snap uses: scene "
+                                     "units for Move, degrees for Rotate, "
+                                     "a factor for Scale."),
+        _toolFieldDescriptor("freeRotate", "Free rotate ball (Rotate)",
+                             "bool", "freeRotate", tool="rotate",
+                             tooltip="Show the Rotate handle's inner ball, "
+                                     "which turns freely about any axis."),
+        _toolFieldDescriptor("preventNegativeScale",
+                             "Prevent negative scale (Scale)", "bool",
+                             "preventNegativeScale", tool="scale",
+                             tooltip="Stop a Scale drag at zero instead "
+                                     "of flipping the selection inside "
+                                     "out."),
+        _globalFieldDescriptor("gridSize", "Grid size (hold X)", "gridSize",
+                               min=0.001, max=1000.0, step=0.1,
+                               tooltip="The spacing a Move snaps to while "
+                                       "X is held, in scene units."),
+        _globalFieldDescriptor("manipulatorSize",
+                               "Manipulator size (+ / -)",
+                               "manipulatorSize", min=20.0, max=400.0,
+                               step=10.0, unit="px",
+                               tooltip="How big the transform handle "
+                                       "draws on screen. + and - resize "
+                                       "it."),
+        _descriptor("softRadius", "Soft selection falloff", "float",
                    _softRadiusGet, _softRadiusSet, min=0.0, max=1.0,
-                   step=0.01),
+                   step=0.01,
+                   tooltip="How far along the strand (0 = root end, 1 = "
+                           "whole length) a move fades out around the "
+                           "selected CVs. Off at the left end: only the "
+                           "selection moves."),
         _scalarDescriptor(
-            "displaySegments", "Display segments", "int", "displaySegments",
-            int, "Tonic_GetDisplaySegments", "Tonic_SetDisplaySegments",
-            min=1, max=8, step=1),
-        _descriptor("ringCvCount", "Ring CVs (next region tube)", "enum",
+            "displaySegments", "Curve smoothness (display)", "int",
+            "displaySegments", int, "Tonic_GetDisplaySegments",
+            "Tonic_SetDisplaySegments", min=1, max=8, step=1,
+            tooltip="Extra drawn points between center CVs so tubes look "
+                    "smooth in the viewport. Display only: the saved "
+                    "groom does not change."),
+        _descriptor("ringCvCount", "Ring CVs for new tubes", "enum",
                    _ringCvCountGet, _ringCvCountSet,
-                   choices=tonicTube.REGION_RING_VERT_CHOICES),
+                   choices=tonicTube.REGION_RING_VERT_CHOICES,
+                   choiceLabels=tuple(
+                       "Match region CVs (Auto)" if int(c) == 0 else str(c)
+                       for c in tonicTube.REGION_RING_VERT_CHOICES),
+                   tooltip="How many CVs go round each section ring of the "
+                           "next tube a region builds. Auto matches the "
+                           "region's own outline."),
         _descriptor("uniformScale", "Selected section scale", "float",
                    _uniformScaleGet, _uniformScaleSet,
-                   min=0.01, max=100.0, step=0.05),
+                   min=0.01, max=100.0, step=0.05,
+                   tooltip=UNIFORM_SCALE_TIP),
     ]
 
 
-def _matchSurfaceHandler(container):
+# A center CV that moved less than this (scene units) did not move: the
+# closest-point query can land a root already on the scalp a float ulp
+# away, and that is not an edit worth an undo step.
+_ACTION_EPSILON_DIGITS = 6
+
+
+def _tubeCentersSnapshot(session, tubeIds):
+    """Every target tube's center CVs, rounded; None when unreadable.
+
+    What a tube action is compared by (SS-02): the same snapshot before
+    and after means the click changed nothing. None means "cannot tell",
+    which keeps the undo step, as _undoStep documents.
+    """
+    dll, ctx = _dll(session), _ctx(session)
+    if dll is None or ctx is None:
+        return None
+    try:
+        try:
+            from . import tonicBridge
+        except ImportError:
+            import tonicBridge
+        return tuple(
+            (int(tubeId),
+             tuple(tuple(round(float(c), _ACTION_EPSILON_DIGITS)
+                         for c in point)
+                   for point in tonicBridge.tubeCenters(dll, ctx, tubeId)))
+            for tubeId in tubeIds)
+    except (ImportError, AttributeError, NotImplementedError, RuntimeError,
+            TypeError, ValueError, ctypes.ArgumentError):
+        return None
+
+
+def _tubeNames(tubeIds, selected):
+    names = ", ".join("T%d" % int(t) for t in tubeIds)
+    if not selected:
+        return "%s (nothing selected: the primary tube)" % names
+    return names
+
+
+def _runTubeAction(container, label, entry, fallback, doneText,
+                   unchangedText, *args):
+    """One Tube-panel action as one undo step, or none when nothing moved.
+
+    Relax, Match surface and Snap root each used to call the ABI bare: the
+    model pushed a step per tube whether or not a CV moved, so a Relax over
+    a straight tube left an empty step for Ctrl+Z to spend. Now the whole
+    click is one bracket (SS-02): the target tubes' centers are read before
+    and after, and endGestureIfChanged drops the bracket when they match.
+    The message area says what happened either way.
+    """
     session = getattr(container, "session", None)
-    _perTube(session, "matchSurface", "Tonic_MatchSurface")
+    report = getattr(session, "report", None) if session is not None \
+        else None
+
+    def say(text, level="info"):
+        # The Tube tool's own line follows, as the dock adds it to an
+        # action that reports nothing (tonicWorkspace._onAction).
+        loop = _loop(container, "tube")
+        try:
+            line = str(loop.statusLine() or "") if loop is not None else ""
+        except Exception:  # noqa: BLE001 - a status read must not raise
+            line = ""
+        if line:
+            text = "%s -- %s" % (text, line)
+        if callable(report):
+            report(text, level)
+
+    if _dll(session) is None or _ctx(session) is None:
+        say("Tonic: %s needs a bound scalp" % label, "warning")
+        return
+    selected = selectedTubeIds(session)
+    targets = selected or [0]
+    names = _tubeNames(targets, bool(selected))
+    failures = []
+
+    def write():
+        stage = _stage(session)
+        dll, ctx = _dll(session), _ctx(session)
+        if stage is None or not selected:
+            rc = getattr(dll, fallback)(ctx, *args)
+            if isinstance(rc, int) and rc != 0:
+                lastError = getattr(session, "lastError", None)
+                failures.append(lastError() if callable(lastError)
+                                else "%s returned %d" % (fallback, rc))
+            return
+        for tubeId in selected:
+            try:
+                getattr(stage, entry)(ctx, tubeId, *args)
+            except RuntimeError as exc:
+                failures.append("T%d: %s" % (int(tubeId), exc))
+
+    def snapshot():
+        return _tubeCentersSnapshot(session, targets)
+
+    before = snapshot()
+    _undoStep(session, label, write, snapshot)
+    after = snapshot()
+    changed = before is None or after is None or after != before
     _publish(session)
+    if failures and not changed:
+        say("Tonic: %s failed -- %s" % (label, "; ".join(failures)),
+            "warning")
+    elif not changed:
+        say("Tonic: %s -- no change: %s" % (label, unchangedText % names))
+    elif failures:
+        say("Tonic: %s %s; %s" % (label, doneText % names,
+                                   "; ".join(failures)), "warning")
+    else:
+        say("Tonic: %s %s." % (label, doneText % names))
+
+
+def _matchSurfaceHandler(container):
+    _runTubeAction(container, "Match surface", "matchSurface",
+                   "Tonic_MatchSurface",
+                   "put the root CV of %s on the scalp",
+                   "the root CV of %s is already on the scalp")
 
 
 def _relaxHandler(container):
-    session = getattr(container, "session", None)
-    _perTube(session, "relaxCenter", "Tonic_RelaxCenter", 1.0, 1)
-    _publish(session)
+    _runTubeAction(container, "Relax", "relaxCenter", "Tonic_RelaxCenter",
+                   "smoothed the center curve of %s",
+                   "%s has no kink to relax", 1.0, 1)
 
 
 def _snapRootHandler(container):
-    session = getattr(container, "session", None)
-    _perTube(session, "snapRootToScalp", "Tonic_SnapRootToScalp")
-    _publish(session)
+    _runTubeAction(container, "Snap root", "snapRootToScalp",
+                   "Tonic_SnapRootToScalp",
+                   "moved %s so its root sits on the scalp",
+                   "%s already starts on the scalp")
 
 
 def _tubeActions(state):
     return [
-        Action("matchSurface", "Match surface", "", _matchSurfaceHandler),
-        Action("relax", "Relax", "", _relaxHandler),
-        Action("snapRoot", "Snap root to scalp", "", _snapRootHandler),
+        Action("matchSurface", "Match surface", "", _matchSurfaceHandler,
+               "Snap the selected tubes' root CV onto the scalp; the rest "
+               "of the curve stays where it is."),
+        Action("relax", "Relax", "", _relaxHandler,
+               "Smooth kinks out of the selected tubes' center curves."),
+        Action("snapRoot", "Snap root to scalp", "", _snapRootHandler,
+               "Put the selected tubes' first CV back on the scalp."),
+        Action("resetTransformTool", "Reset transform tool", "",
+               _resetTransformToolHandler,
+               "Restore the current transform tool's step and snap "
+               "settings to their defaults."),
     ]
 
 
@@ -541,14 +999,43 @@ def _writeFillParams(session, values):
     screen, so the write ends in a full-density Tonic_RefillGuides
     (plan/17 section 5.3: preview during a drag, full otherwise). Freeze
     roots is left exactly as the artist set it; the refill keeps the
-    frozen prefix by itself.
+    frozen prefix by itself. The write and its refill are one undo step
+    labelled 'Fill params' (SS-02), so Ctrl+Z puts the density and the
+    guides it grew back together.
     """
     dll, ctx = _dll(session), _ctx(session)
     if dll is None or ctx is None:
         return
+    tubes = selectedTubeIds(session)
+    _undoStep(session, "Fill params",
+              lambda: _applyFillParams(session, values, tubes),
+              lambda: _fillSnapshot(session, tubes, values))
+
+
+def _fillSnapshot(session, tubes, values):
+    """Every fill param a write to `tubes` can change, for change checks.
+
+    None when a no-op cannot be proven: a child tube's read hands back
+    its profile COUNT only, so a same-length profile edit there would
+    compare equal and the edit would be cancelled away.
+    """
+    snap = [_readPrimaryFillParams(session)]
+    stage = _stage(session)
+    if stage is not None:
+        if values["profile"] and any(int(t) != 0 for t in tubes):
+            return None
+        for tubeId in tubes:
+            try:
+                snap.append(stage.fillParams(_ctx(session), tubeId))
+            except (RuntimeError, AttributeError, TypeError):
+                snap.append(None)
+    return snap
+
+
+def _applyFillParams(session, values, tubes):
+    dll, ctx = _dll(session), _ctx(session)
     pairs = [float(v) for v in values["profile"]]
     stage = _stage(session)
-    tubes = selectedTubeIds(session)
     if stage is None or not tubes:
         arr = (ctypes.c_float * len(pairs))(*pairs) if pairs else None
         dll.Tonic_SetFillParams(ctx, float(values["density"]),
@@ -608,26 +1095,72 @@ def _fillDescriptors(state):
     edgeBiasGet, edgeBiasSet = _fillField("edgeBias", float)
     seedGet, seedSet = _fillField("seed", int)
     profileGet, profileSet = _fillProfile()
+    # The model's own default is 100 guides per unit area (tonicModel.h
+    # FillParams), so a max below that made the spinbox clamp and show a
+    # number the model did not hold.
     return [
         _descriptor("density", "Density", "float", densityGet, densitySet,
-                   min=0.1, max=64.0, step=0.5),
-        _descriptor("cvCount", "CV count", "int", cvCountGet, cvCountSet,
-                   min=2, max=64, step=1),
+                   min=0.1, max=1000.0, step=0.5, unit=DENSITY_UNIT,
+                   tooltip="Guides per unit of scalp area in the selected "
+                           "tubes (every tube when none is selected). The "
+                           "line under it counts the guides it grew."),
+        _descriptor("cvCount", "CVs per guide", "int", cvCountGet,
+                   cvCountSet, min=2, max=64, step=1,
+                   tooltip="Points along each guide curve; more follow a "
+                           "bent tube more closely."),
         _descriptor("edgeBias", "Edge bias", "float", edgeBiasGet,
-                   edgeBiasSet, min=-1.0, max=1.0, step=0.05),
+                   edgeBiasSet, min=-1.0, max=1.0, step=0.05,
+                   tooltip="Where guide roots gather inside a tube: +1 "
+                           "toward its wall, -1 toward its middle, 0 even."),
         _descriptor("seed", "Seed", "int", seedGet, seedSet, min=0,
-                   max=9999, step=1),
+                   max=9999, step=1,
+                   tooltip="A different seed scatters the same number of "
+                           "guides in a different pattern."),
         _descriptor("lengthProfile", "Length profile", "ramp", profileGet,
-                   profileSet),
-        _scalarDescriptor(
-            "previewFraction", "Preview fraction", "float",
-            "previewFraction", float, "Tonic_GetPreviewFraction",
-            "Tonic_SetPreviewFraction", min=0.0, max=1.0, step=0.05),
+                   profileSet,
+                   tooltip="Guide length by where the guide's root sits "
+                           "across the tube, centre (0) to wall (1), as "
+                           "%s; each value is the fraction of full length "
+                           "(0 to 1, above 1 acts as 1). Empty = every "
+                           "guide full length. The Length ramp tool (V) "
+                           "edits it by dragging." % RAMP_HINT),
+        _previewPercentDescriptor(),
         _scalarDescriptor(
             "freezeRoots", "Freeze roots", "bool", "freezeRoots", _boolCast,
             "Tonic_GetFreezeRoots", "Tonic_SetFreezeRoots",
-            dllCast=_boolToInt),
+            dllCast=_boolToInt,
+            tooltip="Keep the existing guides' roots where they are when "
+                    "the guides refill, so a density change adds or "
+                    "removes guides instead of re-scattering them all."),
     ]
+
+
+def _previewPercentDescriptor():
+    """Preview density as 0-100 % over the model's 0-1 preview fraction.
+
+    The fraction is what the C ABI and the state hold; artists read a
+    percentage, and 'fraction' of what was never said on the row.
+    """
+    def get(state, session):
+        dll, ctx = _dll(session), _ctx(session)
+        if dll is not None and ctx is not None:
+            state.previewFraction = float(dll.Tonic_GetPreviewFraction(ctx))
+        # Rounded so a float32 0.3 shows as 30, not 30.0000012.
+        return round(float(state.previewFraction) * 100.0, 4)
+
+    def set(state, session, value):
+        fraction = min(max(float(value), 0.0), 100.0) / 100.0
+        state.previewFraction = fraction
+        dll, ctx = _dll(session), _ctx(session)
+        if dll is not None and ctx is not None:
+            dll.Tonic_SetPreviewFraction(ctx, fraction)
+
+    return _descriptor(
+        "previewFraction", "Preview density while dragging", "float", get,
+        set, min=0.0, max=100.0, step=5.0, unit="%",
+        tooltip="How many of the guides draw while a drag is live, as a "
+                "percentage of the full density. Lower keeps big drags "
+                "smooth; the full set returns on release.")
 
 
 def _refillHandler(container):
@@ -663,9 +1196,13 @@ def _clearGeneratedCurvesHandler(container):
 
 
 def _fillActions(state):
-    return [Action("refill", "Refill guides", "", _refillHandler),
+    return [Action("refill", "Refill guides", "", _refillHandler,
+                   "Grow the guides again at full density from the current "
+                   "settings."),
             Action("clearGeneratedCurves", "Clear generated curves", "",
-                   _clearGeneratedCurvesHandler)]
+                   _clearGeneratedCurvesHandler,
+                   "Remove the generated guide curves; Refill guides "
+                   "brings them back.")]
 
 
 # ---- Hierarchy ----------------------------------------------------------
@@ -682,56 +1219,153 @@ def _subdivideSeedSet(state, session, value):
     _hierarchyCache(state)["subdivideSeed"] = int(value)
 
 
+# A bool row's value when the tubes it speaks for disagree: the dock shows
+# the box part-checked, and a click sets every one of them.
+MIXED = "mixed"
+
+
+def _tubeLockFlag(state, tubeId, key):
+    """The tube's OWN lock flag, as the dock last wrote it.
+
+    The model keeps each tube's flag beside the global default (the -1
+    slot); propagation honours either, and the commit writes the tube's
+    own flag. A tube nobody set has it off, as TonicModel does.
+    """
+    record = state.tubeLocks.get(int(tubeId))
+    value = record.get(key) if record is not None else None
+    return bool(value) if value is not None else False
+
+
+def _lockRowGet(state, session, key):
+    """What a lock row shows: the selected tubes' flags, else the default.
+
+    The row used to read the global flag whatever was selected while its
+    setter wrote only the tubes selected at the time, so a tube selected
+    later showed ticked and committed unticked. With tubes selected it now
+    shows theirs (MIXED when they disagree); with none it shows the
+    model's global default.
+    """
+    tubes = selectedTubeIds(session)
+    if not tubes:
+        return bool(getattr(state, key))
+    values = set(_tubeLockFlag(state, tubeId, key) for tubeId in tubes)
+    return values.pop() if len(values) == 1 else MIXED
+
+
+def _lockRowSet(state, session, key, value):
+    """Write the lock where the row reads it: the selection, else the
+    global default."""
+    value = bool(value)
+    if key == "lockParents":
+        setFlag = tonicHierarchy.setLockParents
+        entry = tonicHierarchy.setLockParentsEntry
+    else:
+        setFlag = tonicHierarchy.setLockChildren
+        entry = tonicHierarchy.setLockChildrenEntry
+    dll, ctx = _dll(session), _ctx(session)
+    for tubeId in selectedTubeIds(session) or [None]:
+        setFlag(state, value, tubeId)
+        if dll is not None and ctx is not None:
+            # -1 is the model's global default (HierarchyLoop._pushLocks).
+            entry(dll, ctx, -1 if tubeId is None else tubeId, value)
+
+
 def _lockParentsGet(state, session):
-    return bool(tonicHierarchy.effectiveLockParents(state))
+    return _lockRowGet(state, session, "lockParents")
 
 
 def _lockParentsSet(state, session, value):
-    tonicHierarchy.setLockParents(state, value)
-    dll, ctx = _dll(session), _ctx(session)
-    if dll is not None and ctx is not None:
-        for tubeId in selectedTubeIds(session):
-            tonicHierarchy.setLockParentsEntry(dll, ctx, tubeId, value)
+    _lockRowSet(state, session, "lockParents", value)
 
 
 def _lockChildrenGet(state, session):
-    return bool(tonicHierarchy.effectiveLockChildren(state))
+    return _lockRowGet(state, session, "lockChildren")
 
 
 def _lockChildrenSet(state, session, value):
-    tonicHierarchy.setLockChildren(state, value)
-    dll, ctx = _dll(session), _ctx(session)
-    if dll is not None and ctx is not None:
-        for tubeId in selectedTubeIds(session):
-            tonicHierarchy.setLockChildrenEntry(dll, ctx, tubeId, value)
+    _lockRowSet(state, session, "lockChildren", value)
 
 
-def _levelOrOff(rawLevel):
-    """0 (the spinbox floor) <-> the -1 SOLO_OFF/SHOW_ALL_LEVELS sentinel.
+def _lockTooltip(state, key, text):
+    """A lock row's tooltip: what it does, and what it applies to."""
+    scope = (" Applies to the selected tubes; with none selected it sets "
+             "the default for every tube.")
+    if bool(getattr(state, key, False)):
+        scope += " The default is on, so every tube is locked this way."
+    return text + scope
 
-    tonicHierarchy.validateLevel rejects 0 outright (levels start at 1), so
-    a contiguous 0..8 spinbox range needs 0 translated to -1 at the state
-    boundary rather than exposing the -1..8 range with its unusable 0 gap.
-    """
-    return -1 if int(rawLevel) <= 0 else int(rawLevel)
+
+# The level spin boxes' ceiling. Levels have no depth limit in the model,
+# but a groom deeper than this is not something a spin box helps with.
+MAX_PANEL_LEVEL = 8
+
+# Solo and Show-levels-up-to are each a checkbox plus a level spin box
+# (DK-07). The state keeps its -1 'off' sentinel; the level the spin box
+# shows while the checkbox is off is remembered here, so ticking the box
+# brings back the level the artist last picked rather than 0 -- which the
+# old single '(0 = off)' spin box made the artist type to turn it off.
+_LEVEL_PICK_KEYS = {"soloLevel": "soloPick", "showMaxLevel": "showPick"}
+
+
+def _clampLevel(level):
+    return min(max(int(level), tonicHierarchy.LEVEL_MIN), MAX_PANEL_LEVEL)
+
+
+def _levelPick(state, attr):
+    """The level `attr`'s spin box shows: the live one, else the last pick."""
+    live = int(getattr(state, attr))
+    cache = _hierarchyCache(state)
+    key = _LEVEL_PICK_KEYS[attr]
+    if live >= tonicHierarchy.LEVEL_MIN:
+        cache[key] = _clampLevel(live)
+    return _clampLevel(cache.get(
+        key, max(int(getattr(state, "activeLevel", 1)), 1)))
+
+
+def _soloOnGet(state, session):
+    return int(state.soloLevel) >= tonicHierarchy.LEVEL_MIN
+
+
+def _soloOnSet(state, session, value):
+    level = _levelPick(state, "soloLevel")
+    tonicHierarchy.setSoloLevel(
+        state, level if value else tonicHierarchy.SOLO_OFF)
+    _syncLevels(state, session)
 
 
 def _soloLevelGet(state, session):
-    return max(int(state.soloLevel), 0)
+    return _levelPick(state, "soloLevel")
 
 
 def _soloLevelSet(state, session, value):
-    tonicHierarchy.setSoloLevel(state, _levelOrOff(value))
+    level = _clampLevel(value)
+    _hierarchyCache(state)["soloPick"] = level
+    if _soloOnGet(state, session):
+        tonicHierarchy.setSoloLevel(state, level)
+        _syncLevels(state, session)
+
+
+def _showAllGet(state, session):
+    return int(state.showMaxLevel) < tonicHierarchy.LEVEL_MIN
+
+
+def _showAllSet(state, session, value):
+    level = _levelPick(state, "showMaxLevel")
+    tonicHierarchy.setShowMaxLevel(
+        state, tonicHierarchy.SHOW_ALL_LEVELS if value else level)
     _syncLevels(state, session)
 
 
 def _showMaxLevelGet(state, session):
-    return max(int(state.showMaxLevel), 0)
+    return _levelPick(state, "showMaxLevel")
 
 
 def _showMaxLevelSet(state, session, value):
-    tonicHierarchy.setShowMaxLevel(state, _levelOrOff(value))
-    _syncLevels(state, session)
+    level = _clampLevel(value)
+    _hierarchyCache(state)["showPick"] = level
+    if not _showAllGet(state, session):
+        tonicHierarchy.setShowMaxLevel(state, level)
+        _syncLevels(state, session)
 
 
 def _syncLevels(state, session):
@@ -832,32 +1466,93 @@ def _levelXraySet(state, session, value):
                                   _boolToInt(value))
 
 
+def levelRowTooltip(descriptorId, state):
+    """The tooltip naming the level a 'This level ...' row edits, or ''.
+
+    The level used to be baked into the two row labels, which changed the
+    page signature and rebuilt the whole hierarchy form (and dropped any
+    focused widget) on every Enter/Exit level. The labels are now fixed
+    (DK-06); this is the rows' Descriptor.tooltip, which the dock re-reads
+    on refresh (DK-07).
+    """
+    template = LEVEL_ROW_TOOLTIPS.get(descriptorId)
+    if template is None:
+        return ""
+    return template % int(getattr(state, "activeLevel", 0))
+
+
+LEVEL_ROW_TOOLTIPS = {
+    "levelVisible": "Show or hide L%d, the level you are editing.",
+    "levelXray": "Draw L%d, the level you are editing, see-through so the "
+                 "levels behind it stay visible.",
+}
+
+
+SPLIT_MODE_LABELS = {"kmeans": "K-means", "edge": "Edge"}
+
+
 def _hierarchyDescriptors(state):
-    level = int(state.activeLevel)
+    soloOn = int(getattr(state, "soloLevel", -1)) >= tonicHierarchy.LEVEL_MIN
+    showAll = (int(getattr(state, "showMaxLevel", -1)) <
+               tonicHierarchy.LEVEL_MIN)
     return [
         _scalarDescriptor(
             "subdivideCount", "Subdivide count", "int", "subdivideCount",
             int, min=tonicHierarchy.SUBDIVIDE_MIN,
-            max=tonicHierarchy.SUBDIVIDE_MAX, step=1),
+            max=tonicHierarchy.SUBDIVIDE_MAX, step=1,
+            tooltip="How many child tubes Subdivide (Shift+D) splits each "
+                    "selected tube into."),
         _scalarDescriptor(
             "splitMode", "Split mode", "enum", "splitMode", str,
-            choices=tonicHierarchy.SPLIT_MODES),
+            choices=tonicHierarchy.SPLIT_MODES,
+            choiceLabels=tuple(SPLIT_MODE_LABELS.get(m, m)
+                               for m in tonicHierarchy.SPLIT_MODES),
+            tooltip="How Subdivide shares a tube's roots out: K-means makes "
+                    "even clumps; Edge cuts it in two along a line you "
+                    "draw."),
         _descriptor("subdivideSeed", "Subdivide seed", "int",
                    _subdivideSeedGet, _subdivideSeedSet, min=0, max=9999,
-                   step=1),
+                   step=1,
+                   tooltip="A different seed splits the same tube into "
+                           "differently shaped children."),
         _descriptor("lockParents", "Lock parents", "bool", _lockParentsGet,
-                   _lockParentsSet),
+                   _lockParentsSet,
+                   tooltip=_lockTooltip(
+                       state, "lockParents",
+                       "Editing a child leaves its parent tubes where they "
+                       "are instead of refitting them to follow.")),
         _descriptor("lockChildren", "Lock children", "bool",
-                   _lockChildrenGet, _lockChildrenSet),
-        _descriptor("soloLevel", "Solo level (0 = off)", "int",
-                   _soloLevelGet, _soloLevelSet, min=0, max=8, step=1),
-        _descriptor("showMaxLevel", "Show <= level (0 = all)", "int",
-                   _showMaxLevelGet, _showMaxLevelSet, min=0, max=8,
-                   step=1),
-        _descriptor("levelVisible", "L%d visible" % level, "bool",
-                   _levelVisibleGet, _levelVisibleSet),
-        _descriptor("levelXray", "L%d x-ray" % level, "bool",
-                   _levelXrayGet, _levelXraySet),
+                   _lockChildrenGet, _lockChildrenSet,
+                   tooltip=_lockTooltip(
+                       state, "lockChildren",
+                       "Editing a parent carries its child tubes along "
+                       "rigidly, their sculpt unchanged, instead of "
+                       "re-deriving them from the new parent shape.")),
+        _descriptor("soloLevelOn", "Solo level", "bool",
+                   _soloOnGet, _soloOnSet,
+                   tooltip="Show only one level of the hierarchy (the "
+                           "level below)."),
+        _descriptor("soloLevel", "Level to solo", "int",
+                   _soloLevelGet, _soloLevelSet, min=tonicHierarchy.LEVEL_MIN,
+                   max=MAX_PANEL_LEVEL, step=1, enabled=soloOn,
+                   tooltip="The level Solo level shows on its own."
+                   if soloOn else "Tick Solo level to use this."),
+        _descriptor("showAllLevels", "Show all levels", "bool",
+                   _showAllGet, _showAllSet,
+                   tooltip="Untick to hide every level deeper than the one "
+                           "below."),
+        _descriptor("showMaxLevel", "Show levels up to", "int",
+                   _showMaxLevelGet, _showMaxLevelSet,
+                   min=tonicHierarchy.LEVEL_MIN, max=MAX_PANEL_LEVEL,
+                   step=1, enabled=not showAll,
+                   tooltip="The deepest level drawn; deeper levels hide."
+                   if not showAll else "Untick Show all levels to use this."),
+        _descriptor("levelVisible", "This level visible", "bool",
+                   _levelVisibleGet, _levelVisibleSet,
+                   tooltip=levelRowTooltip("levelVisible", state)),
+        _descriptor("levelXray", "This level see-through", "bool",
+                   _levelXrayGet, _levelXraySet,
+                   tooltip=levelRowTooltip("levelXray", state)),
     ]
 
 
@@ -962,40 +1657,121 @@ def _exitLevelHandler(container):
 
 def _hierarchyActions(state):
     return [
-        Action("subdivide", "Subdivide", "Shift+D", _subdivideHandler),
+        Action("subdivide", "Subdivide", "Shift+D", _subdivideHandler,
+               "Split each selected tube into Subdivide count children. "
+               "The groom looks the same until you edit a child."),
         Action("mergeChildren", "Merge children", "Shift+M",
-              _mergeChildrenHandler),
-        Action("mergeSelected", "Merge selected", "", _mergeSelectedHandler),
-        Action("resubdivide", "Re-subdivide", "", _resubdivideHandler),
-        Action("group", "Group", "", _groupHandler),
+              _mergeChildrenHandler,
+              "Fold the selected tube's children back into it."),
+        Action("mergeSelected", "Merge selected", "", _mergeSelectedHandler,
+               "Fold the selected sibling tubes into one child."),
+        Action("resubdivide", "Re-subdivide", "", _resubdivideHandler,
+               "Split the selected tube again with the current count; "
+               "click twice to confirm, as the children's sculpting is "
+               "lost."),
+        Action("group", "Group", "", _groupHandler,
+               "Make a temporary parent tube over the selected tubes so "
+               "they move together."),
         Action("makePersistent", "Make persistent", "",
-              _makePersistentHandler),
+              _makePersistentHandler,
+              "Keep a temporary Group parent as a real tube in the "
+              "groom."),
         Action("enterLevel", "Enter level", "Ctrl+Down",
-              _enterLevelHandler),
-        Action("exitLevel", "Exit level", "Ctrl+Up", _exitLevelHandler),
+              _enterLevelHandler,
+              "Work on the selected tubes' children."),
+        Action("exitLevel", "Exit level", "Ctrl+Up", _exitLevelHandler,
+               "Go back up to the parent level."),
     ]
 
 
 # ---- Sculpt -------------------------------------------------------------
 
 def _sculptDescriptors(state):
+    # The strength row's range follows the brush: Smooth stops at 1. The
+    # max is part of the page signature, so a brush switch rebuilds the
+    # one sculpt page and nothing else.
+    smooth = str(getattr(state, "sculptSubMode", "") or "") == "smooth"
+    wholeStrand = not float(getattr(state, "brushTRadius", 0.0)) > 0.0
     return [
+        # One range for the row, the [ ] keys and the F-drag (tonicSculpt):
+        # a 200 px row maximum used to clamp a 300 px brush the keys made.
         _scalarDescriptor(
-            "brushRadiusPx", "Brush radius (px)", "float", "brushRadiusPx",
-            float, min=2.0, max=200.0, step=1.0),
-        _scalarDescriptor(
-            "brushTRadius", "Brush t radius (0 = unbounded)", "float",
-            "brushTRadius", float, min=0.0, max=1.0, step=0.01),
+            "brushRadiusPx", "Brush radius", "float", "brushRadiusPx",
+            float, min=tonicSculpt.BRUSH_RADIUS_MIN_PX,
+            max=tonicSculpt.BRUSH_RADIUS_MAX_PX, step=1.0, unit="px",
+            tooltip="The brush circle's size on screen. [ and ] or "
+                    "F+drag resize it."),
+        _descriptor("brushWholeStrand", "Whole strand", "bool",
+                   _wholeStrandGet, _wholeStrandSet,
+                   tooltip="The brush moves the whole length of every "
+                           "strand it touches. Untick to limit it with "
+                           "Brush reach."),
+        _descriptor("brushTRadius", "Brush reach", "float",
+                   _brushReachGet, _brushReachSet, min=BRUSH_REACH_MIN,
+                   max=1.0, step=0.01, enabled=not wholeStrand,
+                   tooltip="How far along the strand the brush reaches from "
+                           "the point under it, as a fraction of the "
+                           "strand's length."
+                   if not wholeStrand else
+                   "Untick Whole strand to limit how far along the strand "
+                   "the brush reaches."),
         _scalarDescriptor(
             "sculptPreserveLength", "Preserve length", "bool",
-            "sculptPreserveLength", _boolCast),
+            "sculptPreserveLength", _boolCast,
+            tooltip="Keep each strand's length while it is pulled, so "
+                    "brushing bends hair instead of stretching it."),
         _scalarDescriptor(
             "sculptStrength", "Brush strength", "float", "sculptStrength",
-            float, min=0.0, max=4.0, step=0.05),
+            float, min=0.0,
+            max=(tonicSculpt.SMOOTH_STRENGTH_MAX if smooth
+                 else tonicSculpt.STRENGTH_MAX), step=0.05,
+            tooltip="How strongly one stroke moves the strands. Smooth "
+                    "stops at 1 (fully relaxed)."),
         _scalarDescriptor(
             "sculptMirrorX", "Mirror X", "bool", "sculptMirrorX",
-            _boolCast),
+            _boolCast,
+            tooltip="Repeat every stroke on the other side of the groom "
+                    "(mirrored across X = 0)."),
     ]
+
+
+# 'Brush reach' is state.brushTRadius, where 0 has always meant 'no bound
+# along the strand'. The row now shows that as a Whole strand checkbox
+# (DK-07) and keeps a real reach for when it is unticked.
+BRUSH_REACH_MIN = 0.01
+DEFAULT_BRUSH_REACH = 0.25
+
+
+def _sculptCache(state):
+    return state.panels.setdefault("sculpt", {})
+
+
+def _brushReachGet(state, session):
+    live = float(state.brushTRadius)
+    cache = _sculptCache(state)
+    if live > 0.0:
+        cache["reach"] = live
+    return min(max(float(cache.get("reach", DEFAULT_BRUSH_REACH)),
+                   BRUSH_REACH_MIN), 1.0)
+
+
+def _brushReachSet(state, session, value):
+    reach = min(max(float(value), BRUSH_REACH_MIN), 1.0)
+    _sculptCache(state)["reach"] = reach
+    if float(state.brushTRadius) > 0.0:
+        state.brushTRadius = reach
+
+
+def _wholeStrandGet(state, session):
+    return not float(state.brushTRadius) > 0.0
+
+
+def _wholeStrandSet(state, session, value):
+    if value:
+        _brushReachGet(state, session)       # remember the reach first
+        state.brushTRadius = 0.0
+    else:
+        state.brushTRadius = _brushReachGet(state, session)
 
 
 
@@ -1051,6 +1827,22 @@ def _texelResolutionSet(state, session, value):
         rebake()
 
 
+# What the Bake resolution combo shows for each TEXEL_CHOICES entry; the
+# choice itself stays the stored value.
+TEXEL_CHOICE_LABELS = tuple(
+    "Auto (64 on boundaries)" if c == "auto" else "%s x %s" % (c, c)
+    for c in TEXEL_CHOICES)
+
+
+def _texelResolutionDescriptor():
+    """The one Bake resolution row Graph and Output share."""
+    return _descriptor("texelResolution", "Bake resolution", "enum",
+                       _texelResolutionGet, _texelResolutionSet,
+                       choices=TEXEL_CHOICES,
+                       choiceLabels=TEXEL_CHOICE_LABELS,
+                       tooltip=TEXEL_RESOLUTION_HELP)
+
+
 def _outputSettings(state, session):
     getter = getattr(session, "outputSettings", None) \
         if session is not None else None
@@ -1068,13 +1860,36 @@ def _outputDensityGet(state, session):
     return _outputSettings(state, session)[1]
 
 
-def _outputDensitySet(state, session, value):
-    value = max(float(value), 1e-6)
+def _setOutputScalar(session, **settings):
+    """One Output scalar write as one labelled undo step (SS-02).
+
+    The model already pushes a step per real change; the bracket gives it
+    the name the Edit strip shows and keeps a same-value write stepless.
+    Returns the setter's answer (True with no setter to call).
+    """
     setter = getattr(session, "setOutputSettings", None) \
         if session is not None else None
-    if callable(setter):
-        if not setter(densityMultiplier=value):
-            return
+    if not callable(setter):
+        return True
+    getter = getattr(session, "outputSettings", None)
+    snapshot = ((lambda: tuple(getter())) if callable(getter)
+                else (lambda: None))
+    ok = _undoStep(session, "Output settings",
+                   lambda: setter(**settings), snapshot)
+    # The setter queued its commit inside the bracket, and closing the
+    # bracket bumps the model version once more; queue again so the
+    # committed version catches up instead of reading as unsynced.
+    enqueue = getattr(session, "enqueueCommit", None)
+    if ok and callable(enqueue) and callable(
+            getattr(session, "beginGesture", None)):
+        enqueue()
+    return ok
+
+
+def _outputDensitySet(state, session, value):
+    value = max(float(value), 1e-6)
+    if not _setOutputScalar(session, densityMultiplier=value):
+        return
     state.outputDensityMultiplier = value
 
 
@@ -1084,11 +1899,8 @@ def _outputWidthGet(state, session):
 
 def _outputWidthSet(state, session, value):
     value = max(float(value), 0.0)
-    setter = getattr(session, "setOutputSettings", None) \
-        if session is not None else None
-    if callable(setter):
-        if not setter(strandWidth=value):
-            return
+    if not _setOutputScalar(session, strandWidth=value):
+        return
     state.outputStrandWidth = value
 
 
@@ -1104,31 +1916,79 @@ def _buildDescriptionHandler(container):
         report("Tonic: Output description is unavailable")
 
 
+def _amplifiedHairGet(state, session):
+    """The model's amplified-hair switch when live, else the state's."""
+    dll, ctx = _dll(session), _ctx(session)
+    entry = (getattr(dll, "Tonic_GetAmplifiedHair", None)
+             if dll is not None and ctx is not None else None)
+    if entry is not None:
+        state.showAmplifiedHair = bool(entry(ctx))
+    return bool(state.showAmplifiedHair)
+
+
+def _amplifiedHairSet(state, session, value):
+    """Show amplified hair through the model, not the state field alone.
+
+    The row used to write only state.showAmplifiedHair, so it and the
+    Display checkbox both read ticked while the viewport kept showing
+    guides. TonicSession.setAmplifiedHair is the one path (model switch +
+    publish); a session without it -- the headless panel test's fake --
+    gets the same ABI call directly.
+    """
+    value = bool(value)
+    setter = getattr(session, "setAmplifiedHair", None) \
+        if session is not None else None
+    if callable(setter):
+        setter(value)
+        return
+    dll, ctx = _dll(session), _ctx(session)
+    entry = (getattr(dll, "Tonic_SetAmplifiedHair", None)
+             if dll is not None and ctx is not None else None)
+    if entry is not None:
+        if int(entry(ctx, _boolToInt(value))) != 0:
+            return
+        state.showAmplifiedHair = value
+        _publish(session)
+        return
+    state.showAmplifiedHair = value
+
+
+BUILD_DESCRIPTION_TIP = (
+    "Turn the guides into the renderable hair description (usdGen hair "
+    "under /TonicGroom/Output) and keep it updated as you groom. Strand "
+    "density and width work once it exists.")
+
+
 def _outputActions(_state):
-    return [Action("buildDescription", "Build/update description", "",
-                   _buildDescriptionHandler)]
+    return [Action("buildDescription", "Build hair description", "",
+                   _buildDescriptionHandler, BUILD_DESCRIPTION_TIP)]
 
 
 def _outputDescriptors(state):
-    descriptors = [
-        _descriptor("texelResolution",
-                   "Ptex texels per face side", "enum",
-                   _texelResolutionGet, _texelResolutionSet,
-                   choices=TEXEL_CHOICES),
-        _scalarDescriptor(
-            "showAmplifiedHair", "Show amplified hair", "bool",
-            "showAmplifiedHair", _boolCast),
+    # The density and width rows are always there, greyed until the first
+    # Build (DK-07): rows that appeared from nowhere after Build gave no
+    # hint that Build was what they were waiting for.
+    built = bool(getattr(state, "outputEnabled", False))
+    return [
+        _texelResolutionDescriptor(),
+        _descriptor("outputDensityMultiplier", "Strand density multiplier",
+                    "float", _outputDensityGet, _outputDensitySet,
+                    min=0.01, max=100.0, step=0.1, enabled=built,
+                    tooltip="Rendered strands per guide-density unit: 2 "
+                            "grows twice the hair Fill's density gives."
+                    if built else BUILD_FIRST_TIP),
+        _descriptor("outputStrandWidth", "Strand width", "float",
+                    _outputWidthGet, _outputWidthSet,
+                    min=0.0, max=1.0, step=0.001, unit="units",
+                    enabled=built,
+                    tooltip="Rendered strand thickness, in scene units."
+                    if built else BUILD_FIRST_TIP),
+        _descriptor("showAmplifiedHair", "Show amplified hair", "bool",
+                    _amplifiedHairGet, _amplifiedHairSet,
+                    tooltip="Draw the full rendered hair in the viewport "
+                            "instead of only the guides. The same switch "
+                            "as Display > Show amplified hair."),
     ]
-    if bool(getattr(state, "outputEnabled", False)):
-        descriptors[1:1] = [
-            _descriptor("outputDensityMultiplier", "Description density",
-                        "float", _outputDensityGet, _outputDensitySet,
-                        min=0.01, max=100.0, step=0.1),
-            _descriptor("outputStrandWidth", "Strand width", "float",
-                        _outputWidthGet, _outputWidthSet,
-                        min=0.0, max=1.0, step=0.001),
-        ]
-    return descriptors
 
 
 # ---- Dispatch ---------------------------------------------------------

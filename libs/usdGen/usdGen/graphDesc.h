@@ -258,6 +258,12 @@ struct UsdGenSurfaceDesc
     SdfPath        path;
     UsdGenSurfaceId id = 0;
     VtIntArray     faceVertexCounts, faceVertexIndices;
+    // USD subdivision opinions, captured identically by stage/Hydra builders.
+    TfToken subdivisionScheme{"none"}, orientation{"rightHanded"};
+    TfToken interpolateBoundary{"edgeAndCorner"}, faceVaryingLinearInterpolation{"cornersPlus1"};
+    TfToken triangleSubdivisionRule{"catmullClark"}, creaseMethod{"uniform"};
+    VtIntArray holeIndices, creaseIndices, creaseLengths, cornerIndices;
+    VtFloatArray creaseSharpnesses, cornerSharpnesses;
     VtVec3fArray   restPoints;        // usdGen/rest/points (S12), UsdTimeCode::Default()
     VtVec3fArray   restNormals;       // usdGen/rest/normals, Default-time Mesh normals
     UsdGenSurfaceNormalDomain restNormalDomain = UsdGenSurfaceNormalDomain::None;

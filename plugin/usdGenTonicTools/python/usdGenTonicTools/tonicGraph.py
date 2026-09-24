@@ -78,6 +78,43 @@ def pixelsToRest(pixels, distance, viewportHeightPx, fovYDeg):
     return max(pixels * worldHeight / height, 0.0)
 
 
+def snapRadiusRest(session, state, camera=None, point=None):
+    """The Graph snap radius in rest (world) units.
+
+    The panel's number (`state.snapRadiusPx`) is screen pixels; the ABI's
+    radius is rest units. The camera converts one into the other with a
+    measured world-per-pixel at `point` (where the artist is pointing),
+    else at the scalp centre, so the same 8 px means the same thing zoomed
+    in and zoomed out. With no camera the session's recorded display scale
+    (world units per pixel at the scalp, plan/18 section 2.4a) stands in;
+    with neither, the model's own world radius. Pixels are never handed to
+    the ABI as rest units.
+    """
+    px = float(getattr(state, "snapRadiusPx", 0.0) or 0.0)
+    perPixel = 0.0
+    if camera is not None:
+        where = point if point is not None else getattr(
+            session, "scalpCenter", None)
+        if where is not None:
+            perPixel = float(camera.worldPerPixel(where) or 0.0)
+    if not perPixel > 0.0:
+        recorded = getattr(session, "displayScale", None)
+        if callable(recorded):
+            try:
+                perPixel = float(recorded())
+            except (TypeError, ValueError):
+                perPixel = 0.0
+    if perPixel > 0.0 and px > 0.0:
+        return max(perPixel * px, 1e-6)
+    dll = getattr(session, "dll", None)
+    model = getattr(session, "model", None)
+    if model is None:
+        model = getattr(session, "ctx", None)
+    if dll is None or model is None:
+        return 0.0
+    return float(dll.Tonic_GetSnapRadius(model))
+
+
 def hudStatus(counts, stats, mapVersion, bakedVersion, stagedVersion=None,
               fallbackReason=""):
     """One-line Graph-mode HUD status.

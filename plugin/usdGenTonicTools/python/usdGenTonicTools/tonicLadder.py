@@ -27,6 +27,19 @@
 # The edited subtree keeps its fidelity in the rung that can say so: rung 5
 # leaves the focused level alone and takes every other level down to its
 # center curves.
+#
+# Rung 6 ("hover off") cannot act mid-drag -- the controller never hovers
+# under a live gesture -- so it is what the release does that gives it a
+# meaning (FB-02): a drag that reached it keeps hover off for
+# HOVER_COOLDOWN_MS after the release, which is the window the full-fidelity
+# republish needs to land before per-sample highlight work resumes on top of
+# it.  The caller hands the clock in (restore(nowMs), hoverCoolingDown(nowMs))
+# so this module still reads none.
+#
+# FB-02 also puts the ladder under the artist's control: the tool state's
+# `ladderEnabled` (the dock's "Ladder enabled" box) and `moveBudgetMs` are
+# read at each press, and `chipLabel()` is the words the viewport HUD shows
+# while a rung is live.
 from __future__ import annotations
 
 import ctypes
@@ -57,6 +70,30 @@ STEP_LABELS = (
     "centers only",
     "hover off",
 )
+
+# The HUD chip's words for each rung (FB-02): capitalised, with the spaced
+# percent the rest of the dock uses, and "(auto)" so the artist knows the
+# tool did it and it will come back by itself.
+CHIP_LABELS = (
+    "",
+    "Preview 25 %",
+    "Preview 10 %",
+    "Preview off",
+    "Half segments",
+    "Centers only",
+    "Hover off",
+)
+
+# After a release from the hover-off rung, hover stays off this long.
+HOVER_COOLDOWN_MS = 500.0
+
+
+def chipLabel(step):
+    """The HUD chip for `step`, e.g. 'Preview 10 % (auto)'; '' at full."""
+    step = int(step)
+    if step <= STEP_FULL:
+        return ""
+    return "%s (auto)" % CHIP_LABELS[min(step, MAX_STEP)]
 
 # The preview fraction each of the first three rungs asks for.
 _PREVIEW_AT = {STEP_PREVIEW_25: 0.25, STEP_PREVIEW_10: 0.10,
@@ -102,12 +139,17 @@ def levelsPresent(session, maxLevel=0):
 class FallbackLadder:
     """One ladder per controller; armed at press, restored at release."""
 
-    def __init__(self, session, state, budgetMs=MOVE_BUDGET_MS,
+    def __init__(self, session, state, budgetMs=None,
                  trigger=TRIGGER_MOVES):
         self._session = session
         self._state = state
-        self._budgetMs = float(budgetMs)
+        # An explicit budget pins the ladder (a test's); None follows the
+        # tool state's moveBudgetMs, re-read at every arm().
+        self._fixedBudgetMs = (float(budgetMs) if budgetMs is not None
+                               else None)
+        self._budgetMs = self._stateBudget()
         self._trigger = max(int(trigger), 1)
+        self._hoverCooldownUntil = 0.0   # caller's clock, milliseconds
         self._step = 0
         self._overBudget = 0
         self._armed = False
@@ -142,8 +184,33 @@ class FallbackLadder:
         """
         return self._firstTriggerMs
 
+    @property
+    def budgetMs(self):
+        """The move budget the live (or next) drag steps on."""
+        return self._budgetMs
+
+    def hoverCoolingDown(self, nowMs):
+        """True inside the post-release window of a hover-off drag."""
+        return float(nowMs) < self._hoverCooldownUntil
+
+    def hoverCooldownRemainingMs(self, nowMs):
+        return max(0.0, self._hoverCooldownUntil - float(nowMs))
+
     def label(self):
         return STEP_LABELS[min(self._step, MAX_STEP)]
+
+    def chipLabel(self):
+        """The HUD chip for the live rung; '' at full fidelity."""
+        return chipLabel(self._step)
+
+    def _stateBudget(self):
+        if self._fixedBudgetMs is not None:
+            return self._fixedBudgetMs
+        try:
+            return max(float(getattr(self._state, "moveBudgetMs",
+                                     MOVE_BUDGET_MS)), 0.0)
+        except (TypeError, ValueError):
+            return MOVE_BUDGET_MS
 
     def describe(self):
         if self._step <= 0:
@@ -158,9 +225,15 @@ class FallbackLadder:
 
         Two numbers, two ABI reads: the level scan costs one call per tube
         and belongs to the rung that needs it, not to every press.
+
+        With the tool state's `ladderEnabled` off nothing is armed, so the
+        drag keeps full fidelity however slow it runs (FB-02).
         """
         if self._armed:
             return False
+        if not bool(getattr(self._state, "ladderEnabled", True)):
+            return False
+        self._budgetMs = self._stateBudget()
         self._armed = True
         self._step = 0
         self._overBudget = 0
@@ -192,11 +265,17 @@ class FallbackLadder:
         self._syncState()
         return True
 
-    def restore(self):
-        """Release: put every value back and republish at full fidelity."""
+    def restore(self, nowMs=None):
+        """Release: put every value back and republish at full fidelity.
+
+        `nowMs` (the caller's clock) starts the hover cool-down when the
+        drag had reached the hover-off rung.
+        """
         if not self._armed:
             return False
         stepped = self._step > 0
+        if self._step >= STEP_HOVER_OFF and nowMs is not None:
+            self._hoverCooldownUntil = float(nowMs) + HOVER_COOLDOWN_MS
         if stepped:
             if self._basePreview is not None:
                 self._writePreview(self._basePreview)

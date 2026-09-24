@@ -16,11 +16,14 @@
 #include "usdGenTonic/tonicRegistry.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -1177,12 +1180,118 @@ main()
                   "V1: every curve of the requested handle is active");
             Check(curves.colors[0] > 0.8f && curves.colors[1] < 0.2f,
                   "V1: the u axis is red");
+            // GZ-02 / parity G06: the headless fallback uses RigExec's
+            // palette, the same one the Qt overlay draws with (pure
+            // primaries, the dragged handle pure yellow).
+            {
+                // Curve colour per handle id, first curve of each wins.
+                auto colourOf = [&](int handleId, float const want[3]) {
+                    for (size_t i = 0; i < curves.handleIds.size(); ++i) {
+                        if (curves.handleIds[i] == handleId) {
+                            return curves.colors[i * 3 + 0] == want[0] &&
+                                   curves.colors[i * 3 + 1] == want[1] &&
+                                   curves.colors[i * 3 + 2] == want[2];
+                        }
+                    }
+                    return false;
+                };
+                float const red[3] = {1.0f, 0.0f, 0.0f};
+                float const green[3] = {0.0f, 1.0f, 0.0f};
+                float const blue[3] = {0.0f, 0.0f, 1.0f};
+                float const pureYellow[3] = {1.0f, 1.0f, 0.0f};
+                bool const primaries =
+                    colourOf(0, red) && colourOf(1, green) &&
+                    colourOf(usdGenTonic::TonicGizmoHandle_PlaneXY, blue);
+                bool const yellow = colourOf(2, pureYellow);
+                Check(primaries && yellow,
+                      "GZ-02: axes are pure primaries and the active handle "
+                      "is pure yellow");
+            }
+            // GZ-02 / parity G05: Scale is capped by cubes (six curves each:
+            // two faces and four joining edges) and has the three planes.
+            record.kind = usdGenTonic::TonicGizmo_Scale;
+            record.activeHandle = -1;
+            {
+                bool const built =
+                    usdGenTonic::TonicBuildGizmoCurves(record, &curves);
+                int perAxis[3] = {0, 0, 0};
+                int planes = 0;
+                int centres = 0;
+                for (size_t i = 0; i < curves.handleIds.size(); ++i) {
+                    int const id = curves.handleIds[i];
+                    if (id >= 0 && id < 3) {
+                        ++perAxis[id];
+                    } else if (id >= usdGenTonic::TonicGizmoHandle_PlaneYZ &&
+                               id <= usdGenTonic::TonicGizmoHandle_PlaneXY) {
+                        ++planes;
+                    } else if (id == usdGenTonic::TonicGizmoHandle_Center) {
+                        ++centres;
+                    }
+                }
+                Check(built && curves.CurveCount() == 25 &&
+                          curves.points.size() == 80 * 3 &&
+                          perAxis[0] == 7 && perAxis[1] == 7 &&
+                          perAxis[2] == 7 && planes == 3 && centres == 1,
+                      "GZ-02: a scale gizmo has three axes with cube caps, "
+                      "three planes and the centre (" +
+                          std::to_string(curves.CurveCount()) + " curves)");
+            }
+            record.activeHandle = 2;
             record.kind = usdGenTonic::TonicGizmo_RingTRS;
             Check(usdGenTonic::TonicBuildGizmoCurves(record, &curves) &&
                       curves.CurveCount() == 18 &&
                       curves.vertexCounts[0] ==
                           usdGenTonic::TonicGizmoCircleSegments() + 1,
                   "V1: a ring gizmo is a closed circle plus three axes");
+            // GZ-06: the tool's handle whitelist reaches the headless
+            // fallback.  A mask of {U, V, Center, PlaneXY} draws no scale
+            // ring and no W axis; every surviving curve is an allowed one.
+            {
+                using namespace usdGenTonic;
+                unsigned int const mask =
+                    (1u << TonicGizmoHandle_AxisU) |
+                    (1u << TonicGizmoHandle_AxisV) |
+                    (1u << TonicGizmoHandle_Center) |
+                    (1u << TonicGizmoHandle_PlaneXY);
+                record.allowedMask = mask;
+                bool const built = TonicBuildGizmoCurves(record, &curves);
+                bool ring = false, w = false, foreign = false;
+                size_t points = 0;
+                for (int c = 0; c < curves.CurveCount(); ++c) {
+                    int const id = curves.handleIds[c];
+                    ring = ring || id == TonicGizmoHandle_Ring;
+                    w = w || id == TonicGizmoHandle_AxisW;
+                    foreign = foreign || ((mask >> id) & 1u) == 0;
+                    points += size_t(curves.vertexCounts[c]);
+                }
+                Check(built && curves.CurveCount() > 0 && !ring && !w &&
+                          !foreign && points * 3 == curves.points.size() &&
+                          curves.colors.size() ==
+                              size_t(curves.CurveCount()) * 3,
+                      "GZ-06: a RingTRS record masked to {U,V,Center,"
+                      "PlaneXY} yields no ring curve and no W axis");
+                record.allowedMask = 0u;
+                Check(!TonicBuildGizmoCurves(record, &curves) &&
+                          curves.CurveCount() == 0,
+                      "GZ-06: a mask that hides every handle is no gizmo");
+                record.allowedMask = TonicGizmoAllHandles;
+                float const o[3] = {0.0f, 0.0f, 0.0f};
+                float const f[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                                    0.0f, 0.0f, 1.0f};
+                unsigned int got = 0;
+                unsigned long long const before = Tonic_GetVersion(gc);
+                Check(Tonic_SetGizmoEx(gc, 2, o, f, 1.0f, -1, mask) ==
+                              TONIC_OK &&
+                          Tonic_GetGizmoAllowedMask(gc, &got) == TONIC_OK &&
+                          got == mask && Tonic_GetVersion(gc) == before + 1,
+                      "GZ-06: Tonic_SetGizmoEx stores the allowed mask");
+                Check(Tonic_SetGizmo(gc, 2, o, f, 1.0f, -1) == TONIC_OK &&
+                          Tonic_GetGizmoAllowedMask(gc, &got) == TONIC_OK &&
+                          got == TonicGizmoAllHandles &&
+                          Tonic_GetVersion(gc) == before + 2,
+                      "GZ-06: plain Tonic_SetGizmo allows every handle, and "
+                      "a mask change alone is a new record");
+            }
             record.kind = usdGenTonic::TonicGizmo_None;
             Check(!usdGenTonic::TonicBuildGizmoCurves(record, &curves) &&
                       curves.CurveCount() == 0,
@@ -1292,6 +1401,23 @@ main()
         Check(Tonic_ReadTubePoints(bc, probe.data(), int(floats)) ==
                   TONIC_OK && probe != base,
               "V1: the cancelled drag did move the tube first");
+        {
+            // Ctrl+Z mid-drag (a dock slider holds the bracket with the
+            // keyboard free) must refuse like Redo does: popping Begin's
+            // step lost the base and made Cancel pop an older step.
+            std::vector<float> mid(floats);
+            int const redoBefore = Tonic_GetRedoDepth(bc);
+            Check(Tonic_Undo(bc, nullptr) == TONIC_ERROR &&
+                      Tonic_GetUndoDepth(bc) == depthBefore + 1 &&
+                      Tonic_GetRedoDepth(bc) == redoBefore &&
+                      Tonic_GetGestureDepth(bc) == 1,
+                  "V1: Undo inside an open bracket is refused, stacks intact");
+            Check(Tonic_ReadTubePoints(bc, mid.data(), int(floats)) ==
+                      TONIC_OK && mid == probe,
+                  "V1: the refused Undo leaves the dragged shape alone");
+            Check(Tonic_Redo(bc, nullptr) == TONIC_ERROR,
+                  "V1: Redo inside an open bracket is refused too");
+        }
         coreDirty = 0;
         Check(Tonic_CancelGesture(bc, &coreDirty) == TONIC_OK &&
                   (coreDirty & usdGenTonic::TonicDirty_Points) != 0,
@@ -1996,6 +2122,98 @@ main()
                       TONIC_OK && edges == 0,
               "V1: undoing the connect removes the edge");
         Check(Tonic_Destroy(gc) == TONIC_OK, "V1: graph undo model destroys");
+    }
+
+    // -- SS-05: committer failures reach the caller ----------------------
+    // A bound scalp with no tube is a real model version the committer
+    // cannot build ("snapshot holds no tubes"): the worker parks the
+    // version as failed and leaves the reason for TakeDiagnostic. No stage
+    // is needed for any of it, and the swap-error half needs no layer.
+    {
+        Check(Tonic_CommitterTakeDiagnostic(nullptr, nullptr, 0) == -1,
+              "SS-05: TakeDiagnostic rejects a null committer");
+        Check(Tonic_CommitterFailedVersion(nullptr) == 0,
+              "SS-05: FailedVersion(null) answers 0");
+        Check(Tonic_CommitterSwap(nullptr, "x", 0) == TonicCommitter_Error,
+              "SS-05: Swap(null) answers TonicCommitter_Error");
+        Check(TonicCommitter_Error != TonicCommitter_PartialProgress &&
+                  TonicCommitter_Error < 0,
+              "SS-05: the swap error code cannot read as partial progress");
+
+        TonicModelContext *fc = nullptr;
+        Check(Tonic_Create(&fc) == TONIC_OK && fc != nullptr,
+              "SS-05: failing-commit model creates");
+        float const quad[] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                              1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+        int const counts[] = {4};
+        int const indices[] = {0, 3, 2, 1};
+        Check(fc && Tonic_BindScalp(fc, quad, 12, counts, 1, indices, 4) ==
+                        TONIC_OK && Tonic_GetVersion(fc) > 0,
+              "SS-05: a one-quad scalp binds (a version with no tube)");
+        TonicCommitterContext *fcc = nullptr;
+        Check(fc && Tonic_CommitterCreate(fc, "/TonicGroom", nullptr, &fcc) ==
+                        TONIC_OK && fcc != nullptr,
+              "SS-05: the committer creates");
+        if (fc && fcc) {
+            Check(Tonic_CommitterFailedVersion(fcc) == 0,
+                  "SS-05: a fresh committer has no failed version");
+            char none[8] = {'x', 0};
+            Check(Tonic_CommitterTakeDiagnostic(fcc, none, sizeof(none)) ==
+                      0 && none[0] == '\0',
+                  "SS-05: nothing to take yet (empty string, length 0)");
+            Check(Tonic_CommitterEnqueue(fcc, 0, 0, 0, nullptr) == TONIC_OK,
+                  "SS-05: enqueue of the tubeless version succeeds");
+            unsigned long long const version = Tonic_GetVersion(fc);
+            auto const deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(10000);
+            while (Tonic_CommitterFailedVersion(fcc) != version &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            Check(Tonic_CommitterFailedVersion(fcc) == version,
+                  "SS-05: FailedVersion names the version the worker "
+                  "could not build");
+            char text[512] = {0};
+            int const length =
+                Tonic_CommitterTakeDiagnostic(fcc, text, sizeof(text));
+            Check(length > 0 && size_t(length) == std::strlen(text) &&
+                      std::strstr(text, "no tubes") != nullptr,
+                  std::string("SS-05: TakeDiagnostic returns the build "
+                              "failure (") + text + ")");
+            Check(Tonic_CommitterTakeDiagnostic(fcc, text, sizeof(text)) ==
+                      0 && text[0] == '\0',
+                  "SS-05: and the take cleared it (reported once)");
+            Check(Tonic_CommitterEnqueue(fcc, 0, 0, 0, nullptr) == TONIC_OK,
+                  "SS-05: a retry enqueues the same version again");
+            auto const retryDeadline = std::chrono::steady_clock::now() +
+                                       std::chrono::milliseconds(10000);
+            char retry[4] = {0};
+            int retryLength = 0;
+            while (retryLength == 0 &&
+                   std::chrono::steady_clock::now() < retryDeadline) {
+                retryLength =
+                    Tonic_CommitterTakeDiagnostic(fcc, retry, sizeof(retry));
+                if (retryLength == 0) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(1));
+                }
+            }
+            Check(retryLength >= int(sizeof(retry)) &&
+                      std::strlen(retry) == sizeof(retry) - 1,
+                  "SS-05: the retry rebuilds (and fails again); a short "
+                  "buffer truncates with a NUL and reports the full length");
+            Check(Tonic_CommitterSwap(fcc, "no-such-layer", 0) ==
+                      TonicCommitter_Error &&
+                      std::strstr(Tonic_GetLastError(), "no-such-layer") !=
+                          nullptr,
+                  "SS-05: a swap into an unknown live layer answers "
+                  "TonicCommitter_Error and names the layer");
+            Check(Tonic_CommitterCommittedVersion(fcc) == 0,
+                  "SS-05: nothing was committed");
+        }
+        Check(Tonic_CommitterDestroy(fcc) == TONIC_OK,
+              "SS-05: the committer destroys");
+        Check(Tonic_Destroy(fc) == TONIC_OK, "SS-05: the model destroys");
     }
 
     std::printf("%d failure(s)\n", g_failures);

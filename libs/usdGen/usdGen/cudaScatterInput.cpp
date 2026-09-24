@@ -23,12 +23,14 @@ bool Finite(GfVec2f const& v) { return std::isfinite(v[0]) && std::isfinite(v[1]
 
 // Scatter is a generator: it declares only density and flip.
 bool AllowedScatterParam(TfToken const& name) {
-    return name == TfToken("density") || name == TfToken("flip");
+    return name == TfToken("density") || name == TfToken("flip") || name == TfToken("subdivisionLevel");
 }
 
 bool IsFloat(VtValue const& v) { return v.IsHolding<float>() || v.IsHolding<double>(); }
 
 bool ValidScatterParam(UsdGenParamValue const& param) {
+    if(param.name==TfToken("subdivisionLevel"))
+        return param.value.IsHolding<int>() && param.value.UncheckedGet<int>()==0;
     if (param.name == TfToken("density")) return IsFloat(param.value);
     return param.name == TfToken("flip") && param.value.IsHolding<bool>();
 }

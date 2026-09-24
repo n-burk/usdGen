@@ -14,7 +14,3 @@ def Mesh "Scalp"
     point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
     color3f[] primvars:displayColor = [(0.22, 0.2, 0.19)]
 }
-
-def Scope "Groom"
-{
-}

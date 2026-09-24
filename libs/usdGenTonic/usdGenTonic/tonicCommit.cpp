@@ -21,6 +21,7 @@
 #include "pxr/usd/sdf/primSpec.h"
 #include "pxr/usd/sdf/propertySpec.h"
 #include "pxr/usd/sdf/relationshipSpec.h"
+#include "pxr/usd/sdf/schema.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -1632,6 +1633,15 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
                   SdfValueTypeNames->Token, TfToken("region-v3"))) {
         return fail("TonicBuildCommitLayer: cannot author the root sampler");
     }
+    // K14's child slot order changed on 2026-09-24 (coincident-vertex drop,
+    // split tie rule, per-station ring alignment): the same (parent, seed)
+    // now numbers a child's ring slots differently. Stored residuals are
+    // per slot of the derivation that measured them, so hydrate must know
+    // which K14 wrote them (see TonicHydrateModel).
+    if (!_SetAttr(groom, "usdGen:tonic:subdivider",
+                  SdfValueTypeNames->Token, TfToken("aligned-v1"))) {
+        return fail("TonicBuildCommitLayer: cannot author the subdivider");
+    }
     if (!_SetAttr(groom, "usdGen:tonic:generatedCurvesSuppressed",
                   SdfValueTypeNames->Bool,
                   snapshot.generatedCurvesSuppressed)) {
@@ -2376,6 +2386,35 @@ TonicPlanGuideInterpolateFill(UsdStagePtr const &stage,
     return plan;
 }
 
+namespace {
+
+// Whether a stored residual carries any authoring at all (the K6 "zero
+// sculpt stays zero" rule compares against exact 0.0 the same way).
+bool
+_AnyShapeDelta(TonicShapeDeltas const &d)
+{
+    auto any = [](std::vector<float> const &values) {
+        for (float x : values) {
+            if (x != 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (any(d.centerDu) || any(d.centerDv) || any(d.centerDw)) {
+        return true;
+    }
+    for (TonicTubeSection const &sec : d.sections) {
+        if (sec.scale != 0.0f || sec.twist != 0.0f || any(sec.u) ||
+            any(sec.v)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 TonicHydrateResult
 TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
                   TonicModel *model)
@@ -2419,6 +2458,20 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
         } else {
             return fail("unsupported root sampler (want \"region-v1\" or "
                         "\"region-v2\" or \"region-v3\")");
+        }
+    }
+    // Missing means the layer predates K14's ring-slot alignment: its
+    // stored child residuals were measured against a derivation whose slot
+    // order the current K14 no longer reproduces. Those are re-measured
+    // from the stored (authoritative) actual against today's derivation
+    // below; a marked layer installs its residuals verbatim (bit-exact).
+    UsdAttribute const subdividerAttr =
+        groom.GetAttribute(TfToken("usdGen:tonic:subdivider"));
+    bool const legacySubdivider = !subdividerAttr;
+    if (!legacySubdivider) {
+        TfToken subdivider;
+        if (!subdividerAttr.Get(&subdivider) || subdivider != "aligned-v1") {
+            return fail("unsupported subdivider (want \"aligned-v1\")");
         }
     }
     bool generatedCurvesSuppressed = false;
@@ -3076,6 +3129,33 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
             if (!model->RestoreTubeRecord(childId, install)) {
                 return fail(model->GetDiagnostic());
             }
+            if (legacySubdivider && !record.locked &&
+                _AnyShapeDelta(record.deltas)) {
+                // Pre-alignment K14: the stored residual names the old
+                // slot order, and K6 would add it to today's slots (a
+                // twisted child, or a refused parent edit). Re-measure it
+                // from the stored actual against the derivation just
+                // restored. Zero residuals stay exactly zero (untouched).
+                TonicModel::TubeRecord restored;
+                std::vector<TonicFrame> frames;
+                std::string derr;
+                if (!model->GetTubeRecord(childId, &restored) ||
+                    !TonicTubeFramesCpu(restored.derived, &frames, &derr) ||
+                    !TonicComputeDeltasCpu(restored.actual, restored.derived,
+                                           frames, &restored.deltas,
+                                           &derr)) {
+                    return fail("cannot re-measure a pre-alignment child "
+                                "residual" +
+                                (derr.empty() ? std::string()
+                                              : ": " + derr));
+                }
+                // The actual already carries its bindings (or the derived
+                // ones, for a legacy layer): keep them as installed.
+                restored.hasInheritedBoundaryBindings = true;
+                if (!model->RestoreTubeRecord(childId, restored)) {
+                    return fail(model->GetDiagnostic());
+                }
+            }
             idOfPath[record.prim.GetPath()] = childId;
             ++result.tubeCount;
             queue.emplace_back(record.prim, childId);
@@ -3516,41 +3596,39 @@ TonicCommitter::Enqueue(UsdStagePtr const &stage)
 {
     TonicFillPlan plan;
     if (stage) {
-        // Output is a reserved generated path only when its owner marker is
-        // present on the sparse cage, categorical owner map, and description.
-        // Never let enabling Tonic output replace an artist-owned member of
-        // that atomic triple.
-        TonicModel::OutputSettings const output = _model->GetOutputSettings();
-        if (output.enabled) {
-            SdfPath const guarded[] = {_paths.OutputCurvesPath(),
-                                       _paths.OutputRegionMapPath(),
-                                       _paths.OutputPath()};
-            SdfPath blocked;
-            for (SdfPath const &path : guarded) {
-                UsdPrim const existing = stage->GetPrimAtPath(path);
-                if (!existing) {
-                    continue;
-                }
-                bool owned = false;
-                UsdAttribute const marker = existing.GetAttribute(
-                    TfToken("usdGen:tonic:outputOwned"));
-                if (!marker || !marker.Get(&owned) || !owned) {
-                    blocked = path;
-                    break;
-                }
-            }
-            if (!blocked.IsEmpty()) {
-                std::lock_guard<std::mutex> lock(_mutex);
-                _diagnostic = "TonicCommitter::Enqueue: refusing to overwrite "
-                              "artist-owned output at " + blocked.GetString();
-                return;
-            }
-        }
         plan = TonicPlanGuideInterpolateFill(stage, _paths);
     } else {
         plan.opPath = _paths.InterpOpPath();
     }
-    EnqueuePlan(plan);
+    EnqueuePlan(plan, stage);
+}
+
+SdfPath
+TonicCommitter::_BlockedOutputPath(UsdStagePtr const &stage) const
+{
+    // Output is a reserved generated path only when its owner marker is
+    // present on the sparse cage, categorical owner map, and description.
+    // Never let enabling Tonic output replace an artist-owned member of
+    // that atomic triple.
+    if (!stage || !_model->GetOutputSettings().enabled) {
+        return SdfPath();
+    }
+    SdfPath const guarded[] = {_paths.OutputCurvesPath(),
+                               _paths.OutputRegionMapPath(),
+                               _paths.OutputPath()};
+    for (SdfPath const &path : guarded) {
+        UsdPrim const existing = stage->GetPrimAtPath(path);
+        if (!existing) {
+            continue;
+        }
+        bool owned = false;
+        UsdAttribute const marker = existing.GetAttribute(
+            TfToken("usdGen:tonic:outputOwned"));
+        if (!marker || !marker.Get(&owned) || !owned) {
+            return path;
+        }
+    }
+    return SdfPath();
 }
 
 size_t
@@ -3587,10 +3665,27 @@ TonicCommitter::GetScalpPath() const
 }
 
 void
-TonicCommitter::EnqueuePlan(TonicFillPlan const &plan)
+TonicCommitter::EnqueuePlan(TonicFillPlan const &plan,
+                            UsdStagePtr const &stage)
 {
+    // The guard lives here, not in Enqueue(stage), so every enqueue that
+    // can see a stage is checked the same way; a refusal is a failure the
+    // artist must hear about (TakeDiagnostic + FailedVersion), not a
+    // silent drop.
+    SdfPath const blocked = _BlockedOutputPath(stage);
+    if (!blocked.IsEmpty()) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _diagnostic = "refusing to overwrite artist-owned output at " +
+                      blocked.GetString();
+        _failedVersion = _model->GetVersion();
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(_mutex);
+        // An explicit enqueue is a request to try again: without this a
+        // "Retry commit" of an unchanged model would name the very version
+        // the worker parked and never build.
+        _failedVersion = 0;
         _pendingVersion = _model->GetVersion();
         _pendingPlan = plan;
         if (_pendingPlan.opPath.IsEmpty()) {
@@ -3874,6 +3969,78 @@ _DropStaleChildren(SdfLayerHandle const &built, SdfLayerHandle const &live,
     }
 }
 
+// Mirror the built layer's scalp over onto live. It must be a whole-spec
+// SdfCopySpec, not _CopyPrimSelf: the over carries UsdGenRestAPI in its
+// apiSchemas metadata (the Output CurveSource's rest binding), which a
+// self copy of specifier/type/properties silently drops. When the built
+// layer no longer overs the scalp, the live over goes too, so a stale
+// RestAPI or tonicRegion preview never outlives the edit that removed it.
+void
+_SyncScalpOver(SdfLayerHandle const &built, SdfLayerHandle const &live,
+               SdfPath const &scalpPath)
+{
+    if (scalpPath.IsEmpty() || !scalpPath.IsPrimPath()) {
+        return;
+    }
+    if (built->GetPrimAtPath(scalpPath)) {
+        SdfPath const parentPath = scalpPath.GetParentPath();
+        if (parentPath != SdfPath::AbsoluteRootPath() &&
+            !live->GetPrimAtPath(parentPath)) {
+            // SdfCopySpec needs the destination parent; the built layer
+            // only carries overs above the scalp, so overs suffice here.
+            SdfCreatePrimInLayer(live, parentPath);
+        }
+        SdfPrimSpecHandle const src = built->GetPrimAtPath(scalpPath);
+        if (src->GetNameChildren().empty()) {
+            SdfCopySpec(built, scalpPath, live, scalpPath);
+        } else {
+            // The groom (or its description) lives UNDER the scalp prim:
+            // a whole-spec copy would re-copy that entire subtree in this
+            // one slot (defeating the per-slot budget and the TN-4 Guides
+            // split), and those children already have slots of their own.
+            // Mirror the scalp's own fields -- apiSchemas included, which
+            // _CopyPrimSelf would drop -- and its properties only.
+            SdfPrimSpecHandle const dst =
+                SdfCreatePrimInLayer(live, scalpPath);
+            if (!dst) {
+                return;
+            }
+            SdfSchemaBase const &schema = src->GetSchema();
+            for (TfToken const &field : dst->ListFields()) {
+                if (!schema.HoldsChildren(field) && !src->HasField(field)) {
+                    dst->ClearField(field);
+                }
+            }
+            for (TfToken const &field : src->ListFields()) {
+                if (!schema.HoldsChildren(field)) {
+                    dst->SetField(field, src->GetField(field));
+                }
+            }
+            for (SdfAttributeSpecHandle const &attr : src->GetAttributes()) {
+                SdfCopySpec(built, attr->GetPath(), live, attr->GetPath());
+            }
+            for (SdfRelationshipSpecHandle const &rel :
+                 src->GetRelationships()) {
+                SdfCopySpec(built, rel->GetPath(), live, rel->GetPath());
+            }
+            std::vector<SdfPropertySpecHandle> staleProps;
+            for (SdfPropertySpecHandle const &prop : dst->GetProperties()) {
+                if (!built->HasSpec(prop->GetPath())) {
+                    staleProps.push_back(prop);
+                }
+            }
+            for (SdfPropertySpecHandle const &prop : staleProps) {
+                dst->RemoveProperty(prop);
+            }
+        }
+    } else if (SdfPrimSpecHandle const stale = live->GetPrimAtPath(scalpPath)) {
+        if (SdfPrimSpecHandle const parent =
+                live->GetPrimAtPath(scalpPath.GetParentPath())) {
+            parent->RemoveNameChild(stale);
+        }
+    }
+}
+
 } // namespace
 
 void
@@ -3962,6 +4129,12 @@ TonicCommitter::_BeginPartial(SdfLayerHandle const &built)
         built->GetPrimAtPath(_paths.descriptionPath)) {
         _partialSlots.push_back(_PartialSlot{_paths.descriptionPath, false});
     }
+    // The scalp over (UsdGenRestAPI for Output, the tonicRegion preview
+    // primvar) gets its own slot even when the built layer dropped it: the
+    // slot then removes the live over (_SyncScalpOver).
+    if (!_paths.scalpPath.IsEmpty()) {
+        _partialSlots.push_back(_PartialSlot{_paths.scalpPath, false});
+    }
 }
 
 TonicCommitter::SwapResult
@@ -4003,6 +4176,13 @@ TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
                 }
             }
         } else if (slot.outputPair) {
+            // The Output CurveSource captures against the scalp's rest
+            // binding (UsdGenRestAPI on the scalp over), so the over must
+            // land in the same ChangeBlock as the Output triple, or the
+            // first capture after a partial transfer sees no rest and fails.
+            if (built->GetPrimAtPath(_paths.scalpPath)) {
+                _SyncScalpOver(built, live, _paths.scalpPath);
+            }
             SdfCopySpec(built, _paths.OutputCurvesPath(), live,
                         _paths.OutputCurvesPath());
             SdfCopySpec(built, _paths.OutputRegionMapPath(), live,
@@ -4014,6 +4194,8 @@ TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
             // follow in per-property slots (TN-4).
             _CopyPrimSelf(built, live, slot.path,
                           /*shellOnly*/ slot.path == _paths.GuidesPath());
+        } else if (slot.path == _paths.scalpPath) {
+            _SyncScalpOver(built, live, slot.path);
         } else {
             SdfCopySpec(built, slot.path, live, slot.path);
         }
@@ -4078,6 +4260,13 @@ TonicCommitter::TakeDiagnostic()
     std::string diagnostic = _diagnostic;
     _diagnostic.clear();
     return diagnostic;
+}
+
+uint64_t
+TonicCommitter::FailedVersion() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _failedVersion;
 }
 
 } // namespace usdGenTonic

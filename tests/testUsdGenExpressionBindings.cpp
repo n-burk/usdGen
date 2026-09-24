@@ -123,6 +123,15 @@ int main()
     grow.nodes[0].expressionBindings[0].domain = expr::Domain::Primitive;
     Check(compiler.Compile(grow, &cpuGraph).ok,
           "a primitive-domain usdGen:lift connection compiles on Grow");
+    for(char const* name : {"azimuth", "azimuthRandom"}) {
+        auto azimuth = grow;
+        azimuth.nodes[0].expressionBindings[0].destination = TfToken(name);
+        Check(compiler.Compile(azimuth, &cpuGraph).ok,
+              "a primitive-domain azimuth control connection compiles on Grow");
+        azimuth.nodes[0].expressionBindings[0].domain = expr::Domain::Point;
+        expectFail(azimuth, "point-domain Grow azimuth fails closed",
+                   "requires groom/primitive evaluation");
+    }
     auto growForeign = grow;
     growForeign.nodes[0].expressionBindings[0].destination = TfToken("width");
     expectFail(growForeign, "a destination Grow does not own fails closed",

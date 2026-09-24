@@ -231,6 +231,16 @@ int main(int argc, char** argv) {
             malformed.nodes[1].params.push_back({TfToken("lift"), VtValue(lift), false});
             CHECK(rejects(malformed));
         }
+        for (char const* name : {"azimuth", "azimuthRandom"}) {
+            for (double value : {-361.0, 361.0, std::numeric_limits<double>::quiet_NaN()}) {
+                malformed = desc;
+                malformed.nodes[1].params.push_back({TfToken(name), VtValue(value), false});
+                CHECK(rejects(malformed));
+            }
+            malformed = desc;
+            malformed.nodes[1].params.push_back({TfToken(name), VtValue(std::string("1")), false});
+            CHECK(rejects(malformed));
+        }
         UsdGenSession session;
         session.SetDevicePublicationEnabled(true);
         session.SetGraphDesc(desc);
@@ -317,6 +327,8 @@ int main(int argc, char** argv) {
             float const lift = lifts[variant];
             auto angular = Desc();
             angular.nodes[1].params.push_back({TfToken("lift"),VtValue(lift),false});
+            angular.nodes[1].params.push_back({TfToken("azimuth"),VtValue(float(variant)*30.f),false});
+            angular.nodes[1].params.push_back({TfToken("azimuthRandom"),VtValue(float(variant)/3.f),false});
             UsdGenCurveBuffer angularReference;
             CHECK(CpuReference(angular,&angularReference));
             UsdGenDiagnostics angularDiagnostics;

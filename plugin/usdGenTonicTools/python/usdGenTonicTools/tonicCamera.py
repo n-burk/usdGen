@@ -81,9 +81,9 @@ class TonicCamera:
     "resolve camera once").
     """
 
-    __slots__ = ("_m", "_inv", "_w", "_h")
+    __slots__ = ("_m", "_inv", "_w", "_h", "_ratio")
 
-    def __init__(self, viewProj, width, height):
+    def __init__(self, viewProj, width, height, pixelRatio=1.0):
         m = tuple(float(v) for v in viewProj)
         if len(m) != 16:
             raise ValueError("tonicCamera: want 16 floats, got %d" % len(m))
@@ -91,6 +91,18 @@ class TonicCamera:
         self._inv = matInverse(m)
         self._w = max(int(width), 1)
         self._h = max(int(height), 1)
+        ratio = float(pixelRatio) if pixelRatio else 1.0
+        self._ratio = ratio if ratio > 0.0 else 1.0
+
+    @property
+    def pixelRatio(self):
+        """Physical pixels per Qt logical pixel (devicePixelRatioF).
+
+        Pixel tolerances and handle sizes are LOGICAL numbers; anything
+        comparing them against this camera's physical pixels multiplies by
+        this first, so a HiDPI display keeps the same hand-sized targets.
+        """
+        return self._ratio
 
     @property
     def viewProj(self):
@@ -213,4 +225,8 @@ def resolve(stageView):
         return None
     if width < 1 or height < 1:
         return None
-    return TonicCamera(viewProj, width, height)
+    try:
+        ratio = float(stageView.devicePixelRatioF())
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        ratio = 1.0
+    return TonicCamera(viewProj, width, height, ratio)

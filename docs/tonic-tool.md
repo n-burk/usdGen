@@ -11,387 +11,615 @@ Tonic is **one viewport tool**, not a menu. Almost everything an artist does
 is a mode, a sub-mode, a hotkey or a panel field inside one dockable
 workspace; the menu carries exactly five commands.
 
+Every key, label, row and message below is read from the shipped code
+(`tonicModes.py`, `tonicPanels.py`, `tonicDockIds.py`, `tonicWorkspace.py`,
+`tonicViewport.py`, `tonicLoopsTube.py`, `tonicGizmoSettings.py`,
+`tonicSession.py`); `tests/checks/check_tonic_docs.py` fails when a hotkey in
+those tables is missing from this page.
+
 ## Opening it
 
-Open a stage with `bin/launch_usdview.ps1`, then, in the menu bar:
+Open a stage with `bin/launch_usdview.ps1`, then, in the menu bar under
+**usdGen → Tonic**:
 
-* **usdGen → Tonic → Open workspace** — docks the **Tonic** panel on the
-  right and installs the viewport controller (mouse and keyboard) on the
-  active StageView. Needs a stage open first.
-* The dock's **Geometry** block stays visible while modes change. Click
-  **Bind geometry…** to open a picker containing the usable Mesh prims in the
-  current stage; the current selection is the initial choice when it is a
-  usable mesh. Binding starts the commit and bake workers and switches the
-  shelf to Graph mode. Replacing an edited binding asks for explicit
-  confirmation because it clears that groom's regions and maps.
-* **usdGen → Tonic → Bind scalp (selection)** is the menu shortcut for the
-  same operation when a mesh prim is already selected. Every other mode needs
-  a bound geometry.
-* **usdGen → Tonic → Save groom…**, **Export center curves…**,
-  **Import curves…** — see *Save, export, import* below.
+* **Open workspace** — docks the **Tonic** panel on the right and installs
+  the viewport controller (mouse and keyboard) on the active StageView.
+  Needs a stage open first.
+* **Bind selected as scalp** — binds the mesh selected in usdview as the
+  scalp. It never asks about a saved groom (scripts drive it with no one
+  to answer a box); when the stage already holds one, the status line says
+  it is covered and names **Resume groom**. It does not open the dock:
+  until **Open workspace** shows it, the viewport stays usdview's (a click
+  picks prims, no Tonic hover or keys) and the status line says so.
+* **Save groom…**, **Export center curves…**, **Import curves…** — the
+  same commands as the dock's file row; see *Save, export, import*.
 
 No other menu item exists. Everything else — modes, parameters, one-shot
 actions — lives in the dock or on a hotkey.
 
 ## The dock
 
-![The Tonic Graph workspace: Create region mode with CV boundaries, coloured patches, and the persistent dock](../renders/tonic-cv-regions.png)
+![The Tonic workspace: Tube mode, a center CV selected with its Move gizmo, the Parameters form and the status strip](../renders/tonic-workspace.png)
 
-Refresh the shot with
-`bin/launch_usdview.ps1 -TestScript plugin/usdGenTonicTools/testenv/captureTonicCvRegions.py examples/tonic-single-quad.usda`.
+`TonicWorkspace` is one right-docked panel. Top to bottom:
 
-`TonicWorkspace` is a persistent right-docked panel with seven stacked
-blocks: the **Geometry** block (the bound mesh path and picker); the **mode
-shelf** (six checkable buttons, `1`–`6`); the active mode's
-**sub-mode shelf** (hidden for Output); a generated **Parameters** form
-whose fields read and write the model live; an **Actions** block of the
-mode's one-shot buttons (Output's build and file actions live here too); a
-**Warnings** list (click a row to select what it names); and a **status
-strip** with **Show generated curves** and **Show amplified hair** checkboxes.
-The dock refreshes after
-every publish and on a 250 ms timer while visible, and a refresh that
-finds a different active mode rebuilds the shelves, the rows and the
-buttons — so a mode switched with a number key over the viewport is the
-mode the dock shows.
+1. **Scalp** — `Scalp: /path` (or `No scalp bound`), the accent
+   **Bind scalp mesh...** button and, only when the stage holds a saved
+   groom and nothing is live, **Resume groom**.
+2. **File row** — Undo and Redo (icon buttons whose tooltip names the step,
+   e.g. `Undo Tube center (Ctrl+Z)`), then **Save**, **Export**, **Import**
+   and **Settings** (scrolls the dock to the active mode's Parameters).
+   They are there in every mode.
+3. **Mode shelf** — six buttons in a 3 × 2 grid, glyph over label; the
+   number key is in each tooltip.
+4. **Sub-mode shelf** for the active mode (glyph beside label, two columns;
+   hidden in Output). Tube shows its **component row** instead: **Whole
+   tube**, **Center CV**, **Ring**, **Section CV** (`F8`–`F11`).
+5. **Transform row** (Tube and Hierarchy) — icon-only **Select / Move /
+   Rotate / Scale** (`Q` / `W` / `E` / `R`), then the **Global/Local**
+   orientation toggle (`L`) and the **group pivot** toggle (`P`,
+   Rotate/Scale only). In Hierarchy the tool buttons make the same jump to
+   Tube that `W`/`E`/`R` make.
+6. **Instruction line** — what the pointer and keys do in this tool (the
+   `tonicModes.HINTS` text), with the selection-modifier line under it in
+   Tube, Fill and Hierarchy; below it the tool's own one-line summary
+   (counts, brush radius, density...).
+7. **Parameters** — a form generated from `tonicPanels.descriptors`, with
+   units, ranges and a tooltip on every row; values are read from and
+   written to the model live.
+8. **Actions** — the mode's one-shot buttons (a button with a key shows
+   it, e.g. `Subdivide (Shift+D)`).
+9. **Warnings** — hidden while empty; see *Warnings*.
+10. **Display** — **Show generated curves**, **Show amplified hair**,
+    **Show diagnostics**, **Ladder enabled** and **Navigation**
+    (Maya / Blender).
+11. **Status strip** — the message area, the sync pill, the tool summary,
+    the `GPU`/`CPU` chip, the breadcrumb and (with Show diagnostics) the
+    version line; see *Status strip*.
 
-While the dock is visible and active, it suppresses StageView rollover
-picking and its hover tooltip so Tonic owns hover feedback. Closing or hiding
-the dock restores the prior StageView rollover setting; uninstalling the
-controller also restores it.
+The dock refreshes after every publish and on a 250 ms timer while visible.
+Each mode builds its pages once and keeps them, so a mode switched with a
+number key over the viewport is the mode the dock shows. Each mode
+**remembers its last sub-mode**: leaving Graph in Draw and coming back
+returns to Draw (the default applies only the first time).
 
-## The mode shelf (`1`–`6`)
+While the dock is visible it suppresses StageView rollover picking and its
+hover tooltip so Tonic owns hover feedback; hiding the dock restores the
+prior setting and suspends the controller, showing it resumes. Suspended,
+the StageView gets back usdview's own mouse tracking and focus policy (a
+click on it no longer takes the keys from usdview's search field), and the
+idle commit pump waits for the dock to show again; a controller installed
+with no dock on screen (a menu bind) starts suspended.
 
-| Key | Mode | Component selection / tools |
-|---|---|---|
-| `1` | Graph | Create region `R`, Draw `D`, Place `P`, Reposition `M`, Connect `C`, Weld `W`, Unweld `U`, Delete `X`, Link `L` |
-| `2` | Tube | Whole Tube `F8`, Center CV `F9`, Ring `F10`, Section CV `F11`; Select `Q`, Move `W`, Rotate `E`, Scale `R` |
-| `3` | Fill | Params `P`, Preview `V` |
-| `4` | Hierarchy | Navigate `N`, Subdivide `D`, Merge `M`, Group `G`, Levels `L` |
-| `5` | Sculpt | Grab `G`, Smooth `S`, Comb `C`, Lengthen `L`, Twist `T` |
-| `6` | Output | — (panel only, no viewport gesture) |
+### First run
 
-A Tube selection row provides **Whole Tube** (`F8`), **Center CV** (`F9`),
-**Ring** (`F10`), and **Section CV** (`F11`) component selection. Its
-**Selection shape** field chooses Box (the default) or Lasso; Shift adds to
-the current component selection. The **Transform tool** field selects
-`Q` Select, `W` Move, `E` Rotate, or `R` Scale. These keys fire while the
-pointer sits over the viewport and no text field has focus. Switching modes
-drops any live gesture and resets the sub-mode to the new mode's default;
-leaving a mode also takes its gizmo, brush ring and hover highlight off screen.
-Visible component dots follow the active choice: F8 Whole Tube shows no
-component dots, F9 shows center CV dots, and F10/F11 show section control dots;
-the centerline guide may remain visible.
+![The dock before a scalp is bound: Bind scalp mesh, the Step 1 hint and the greyed tools](../renders/tonic-first-run.png)
 
-## Global hotkeys
+With no scalp bound the dock shows `No scalp bound`, the blue default
+button **Bind scalp mesh...** and the line *Step 1 — Bind a scalp mesh to
+start grooming. Select the scalp in the viewport, then click Bind scalp
+mesh.* The mode shelf, sub-mode shelf, transform row, Parameters, Actions,
+Warnings and Save/Export/Import are greyed out, and a mode key says
+`Tonic: bind a scalp mesh first` instead of entering a tool that cannot do
+anything. The sync pill reads `No scalp bound` (grey), and the viewport HUD
+and the dock's instruction line read *Bind a scalp mesh to start* instead
+of a tool's name and click recipe.
+
+**Bind scalp mesh...** binds the stage's only Mesh straight away, or opens a
+picker (*Choose the scalp Mesh:*) when there are several; the selected
+mesh is the initial choice. A mesh that fails validation (points, faces of
+three or more vertices, indices inside the point list) is refused with a
+dialog. Binding shows a wait cursor, starts the commit and bake workers
+and switches to Graph. Replacing a bound, edited scalp asks **Replace bound
+scalp** first because it clears that groom's regions and maps. When the
+stage already holds a saved groom for the mesh, the dock asks *Saved groom
+found*: **Resume** (edit that groom), **Start new** (an empty groom that
+covers it until you save over it) or **Cancel** (nothing happens).
+
+## The mode shelf (`1`–`6`) and sub-modes
+
+| Key | Mode | Sub-modes / component kinds | Tools |
+|---|---|---|---|
+| `1` | Graph | Create region `R`, Draw `D`, Place `P`, Reposition `M`, Connect `C`, Weld `W`, Unweld `U`, Delete `X`, Link `L` | — |
+| `2` | Tube | Whole tube `F8`, Center CV `F9`, Ring `F10`, Section CV `F11` | Select `Q`, Move `W`, Rotate `E`, Scale `R`; orientation `L`; group pivot `P`; size `+` / `-` |
+| `3` | Fill | Params `P`, Length ramp `V` | — |
+| `4` | Hierarchy | Navigate `N`, Subdivide `D`, Merge `M`, Group `G`, Levels `L` | `Q` / `W` / `E` / `R` jump to Tube with the tool |
+| `5` | Sculpt | Grab `G`, Smooth `S`, Comb `C`, Lengthen `L`, Twist `T` | — |
+| `6` | Output | — (panel only, no viewport gesture) | — |
+
+Number keys work whenever no text field has focus. Sub-mode letters,
+brackets, `Delete`, `Backspace` and the Tube keys need the pointer over the
+viewport, so typing in the outliner or a dock field is never stolen.
+Switching modes drops any live gesture; leaving a mode takes its gizmo,
+brush ring and hover highlight off screen.
+
+In Tube, `F8`–`F11` **convert** the selection to the new kind instead of
+dropping it (Maya's component conversion): a section CV becomes its ring, a
+ring the center CV that owns it, a center CV its whole tube, and back down
+(a ring to its section CVs, a center CV to its rings). A whole tube
+converted to a component kind stays as the *owner set*: component clicks
+only pick that tube's components until you click another tube's body.
+
+## Hotkeys
 
 | Key | Action |
 |---|---|
-| `Escape` | Cancel the live gesture, restoring the press-time shape exactly; with nothing live, clears the selection instead. |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo the model. |
-| `Delete` | Delete the current mode's selection (nodes/edges, center CVs/rings, or tubes). |
-| `[` / `]` | Shrink/grow the active mode's radius — snap (Graph), soft-selection `t` (Tube), preview fraction (Fill), pick radius (Hierarchy), brush radius (Sculpt). |
-| `Shift+D` / `Shift+M` | Subdivide / merge-children the selected tube(s). |
-| `Ctrl+Down` / Hierarchy double-click | Enter the level below; Tube double-clicks stay in Tube editing. |
-| `Ctrl+Up` | Exit to the level above. `Backspace` does the same except in Graph → Create region, where it removes the most recent draft CV. |
-| `Shift+W` / `Shift+U` | Weld the two selected graph nodes / unweld the one selected shared node. |
-| `Ctrl+Shift+S` | Save groom (prompts for a file). |
-| `Alt`-drag / `Meta`-drag | Always the camera, in every mode. |
+| `Escape` | Cancel the live gesture, restoring the press-time shape exactly. With nothing live it drops an idle draft (Graph region draft, first pick of a two-click tool, Hierarchy's recorded split edge or an armed Re-subdivide) and **never** clears the selection. A focused text field owns Escape. |
+| `Ctrl+Z` | Undo. |
+| `Ctrl+Y`, `Ctrl+Shift+Z`, `Shift+Z` | Redo. |
+| `Ctrl+A` | Select everything of the active mode's kind the view shows (graph nodes, the Tube component kind, tubes in Fill/Hierarchy). |
+| `Ctrl+Shift+A` | Deselect all. |
+| `Ctrl+I` | Invert the selection within the view. |
+| `Delete` | Delete the selection: graph nodes and edges (Graph); center CVs, else rings, else whole tubes (Tube); whole tubes with their subtrees (Hierarchy; an on-the-fly group parent goes alone and its members stay). An L1 root tube is refused — its graph region owns it; delete the region in Graph. A tube keeps at least 2 center CVs and 2 rings: removals past that are refused with the reason, and a Delete whose every removal is refused leaves no undo step and keeps the selection. |
+| `Backspace` | In Graph's Create region draft, remove the last CV; everywhere else, exit to the level above (as `Ctrl+Up`). |
+| `Enter` | Close the Create region draft (three or more CVs). |
+| `[` / `]` | Shrink / grow the mode's radius: snap radius (Graph), soft-selection falloff (Tube), preview fraction (Fill), pick radius (Hierarchy), brush radius ×1.15 (Sculpt). |
+| `Shift+D` / `Shift+M` | Subdivide / merge children of the selected tube(s), from any mode. Outside Hierarchy, a Shift+M over tubes with no children (or a Shift+D whose every split is refused) says so and leaves no undo step. |
+| `Ctrl+Down` / `Ctrl+Up` | Enter the level below / exit to the level above. |
+| `Shift+W` / `Shift+U` | Weld the two selected graph nodes / unweld the selected shared node. |
+| `Ctrl+Shift+S` | Save groom (file dialog). |
+| `F` | Frame the Tonic selection (usdview's own Frame Selected when Tonic has nothing selected). In Sculpt, hold `F` and drag left/right to resize the brush; a tap still frames, and with nothing selected Sculpt frames the whole groom. |
+| `Q` / `W` / `E` / `R` | Tube: Select / Move / Rotate / Scale tool. Hierarchy: `Q` / `W` / `E` / `R` switch to Tube (Whole tube) with that tool, keeping the selected tubes, as the transform row's buttons do. |
+| `F8` / `F9` / `F10` / `F11` | Tube component kind: Whole tube / Center CV / Ring / Section CV. |
+| `L` | Tube: flip the Axis Orientation World ↔ Tube (local). |
+| `P` | Tube, Rotate/Scale: cycle the group pivot Individual Origins ↔ Selection Centre. |
+| `+` / `=` / `-` | Tube: manipulator size ×1.1 / ÷1.1 (20–400 px). |
+| `J` (hold) | During a gizmo drag only: step snap. |
+| `X` (hold) | During a gizmo drag only: snap the pivot to the world grid. |
+| `Alt`-drag / `Meta`-drag | Always usdview's camera, in every mode. |
 
-In Graph's **Create region** sub-mode, `Enter` closes the draft after at
-least three CVs and `Backspace` removes its most recently clicked CV. These
-keys are draft operations only; they do not change the graph until the
-region closes.
+`J`, `X`, `L`, `P` and `F` are shared with usdview; Tonic claims them only in
+the states above (a live drag for `J`/`X`, Tube for `L`/`P`, a Tonic
+selection or a Sculpt hold for `F`), otherwise usdview's own binding runs.
+Undo and redo refuse while a drag is live (`Tonic: finish the drag before
+undo`), and the dock's Undo/Redo buttons grey out for the drag. That includes
+a held dock slider (Density, Edge bias): the session and the model both
+refuse the step while its bracket is open.
 
-`F` is left to usdview's own Frame Selected — it is not a sub-mode letter in
-any mode, so it falls through untouched.
+## Selection, gizmos and gestures
 
-## Selection, gizmos and gestures, per mode
+### The one selection-modifier table
 
-Selection drags show a visible, mouse-transparent Qt `QRubberBand` marquee,
-so the StageView still receives the gesture. Graph uses `Shift`-drag to select
-graph CVs;
-plain clicks in **Create region** remain CV-authoring clicks. Tube gives
-component CV hits fixed 8 px priority and prehighlights the candidate. A body
-drag starts the selected Box or Lasso marquee instead of being stolen by a
-whole-tube click; `Shift` adds to the current component selection.
-Other selection loops use the same visible marquee without intercepting the
-viewport. Selection, hover, and gizmo changes request an immediate viewport
-redraw. A geometry drag never touches the stage — only the release enqueues a
-commit.
+Every click, box and lasso in every mode that selects uses one table
+(`tonicLoops.selectModeFor`):
+
+| Gesture | none | `Shift` | `Ctrl` | `Ctrl+Shift` |
+|---|---|---|---|---|
+| click | replace | toggle | remove | add |
+| box / lasso | replace | add | remove | add |
+
+The dock repeats it as *Click selects · Shift toggles · Ctrl removes ·
+Ctrl+Shift adds · drag empty space boxes*. A drag that starts on empty
+space draws a box (Tube's **Selection shape** can make it a lasso); the
+band is tinted by what it will do — blue replace, green `+` add, red `−`
+remove. A band edits the selection live as it grows; a release with no
+travel is a click. A plain click on empty space clears the selection
+(Hierarchy, Tube, and Graph's click tools).
+
+Viewport feedback: the top-left HUD reads `Mode › Sub-mode › Tool`, the
+bottom-left repeats the instruction line, and an amber chip names the
+fallback rung while the ladder has reduced detail. The cursor says what a
+press will do — a cross for drawing tools and bands, a four-way arrow over
+a gizmo handle, a closed hand while dragging, no cursor under Sculpt's
+brush ring. Selection, hover and gizmo changes redraw at once; a drag never
+touches the stage — only the release enqueues a commit.
 
 ### Graph — draw regions on the scalp
 
-Regions are the foundation; start here after binding geometry. Graph opens in
-**Create region** (`R`) by default. Click successive positions on the scalp
-to place transient CVs. Click the first CV, or press `Enter`, to close a
-three-or-more-CV contour as one region and commit one undo step. `Backspace`
-removes the last uncommitted CV; `Escape` discards the draft. A closed region
-is rasterised and receives its L1 root/tube automatically. Clicking within an
-existing graph CV's pick radius reuses that exact graph node in the new
-contour, including a CV already shared by another region, so adjacent regions
-can share the same boundary instead of accumulating coincident CVs.
+Regions are the foundation; start here after binding. Graph opens in
+**Create region** (`R`). Click successive positions on the scalp to place
+transient CVs; click the first CV (from three CVs on, the rubber band snaps
+to it and says *click to close*) or press `Enter` to close the contour as
+one region and one undo step. `Backspace` removes the last uncommitted CV;
+`Escape` discards the draft. A closed region is rasterised and receives its
+L1 root tube automatically. Clicking within an existing graph CV's pick
+radius reuses that exact graph node, including one shared by another
+region, so neighbouring regions share one boundary.
 
-* **Draw** (`D`) remains the freehand workflow: press-drag a stroke; release
-  commits it. Ends within the snap radius of a node or edge weld
-  automatically; a stroke that closes on itself splits the region it crosses.
-* **Place** — click empty scalp to add a node; drag an existing node to
-  move it (dropping it on another node or an edge welds or splits into it).
+* **Draw** (`D`) — press-drag a stroke; release commits it. Ends within the
+  snap radius of a node or edge weld automatically; a stroke that closes on
+  itself splits the region it crosses.
+* **Place** (`P`) — click empty scalp to add a node; drag an existing node
+  to move it (dropping it on a node or an edge welds or splits into it).
 * **Reposition** (`M`) — drag an existing graph CV or a whole edge along the
   scalp. A rigid whole-region move carries the attached tube and all
   subdivided descendants by one translation/rotation, preserving sculpted
-  centers, sections, and child offsets while the base stays aligned to its
+  centers, sections and child offsets while the base stays aligned to its
   support plane. When a CV or edge move changes the region footprint, the
-  existing tube base is refit to that footprint, upper sculpting is retained,
-  and generated subdivided attachments are refreshed; an imported tube with an
-  explicit authored shape is preserved. A shared boundary updates both owning
-  subtrees; unrelated regions stay unchanged. Empty clicks do nothing and this
-  tool never auto-welds. The live preview is one undo step; `Escape` cancels
-  it to the press-time shape.
-* **Connect** — click two nodes in turn to join them with a geodesic edge.
-* **Weld** / **Unweld** — click two nodes to merge them, or a shared node
-  to split it back per region (`Shift+W`/`Shift+U` do the same to the
-  current selection).
-* **Delete** — click a node or edge to remove it.
-* **Link** — click two regions in turn to share one interpolation id.
+  tube base is refit to it, upper sculpting is retained and generated
+  subdivided attachments are refreshed; an imported tube with an explicit
+  authored shape is preserved. A shared boundary updates both owning
+  subtrees. Empty clicks do nothing and this tool never auto-welds. The
+  live preview is one undo step; `Escape` cancels it to the press-time
+  shape. A grab that never moved leaves no undo step.
+* **Connect** (`C`) — click two nodes in turn to join them with a geodesic
+  edge.
+* **Weld** (`W`) / **Unweld** (`U`) — click two nodes to merge them, or a
+  shared node to split it back per region (`Shift+W` / `Shift+U` do the
+  same to the current selection). The status names the nodes the split
+  made and, when it opened a region's boundary, the region count before
+  and after; a node only one region uses has nothing to split, and Unweld
+  says so and leaves no undo step.
+* **Delete** (`X`) — click a node, else an edge, to remove it.
+* **Link** (`L`) — click two regions in turn to share one interpolation id.
 
-Shift-drag opens a node marquee regardless of sub-mode. Every committed edit
-re-rasterises the graph, gives newly closed regions their tube stub, enqueues
-a commit and a map bake, and refreshes the coverage/intersection warnings.
+In the two-click tools the first pick is shown selected; `Escape`, a
+sub-mode change or finishing the action drops it. A press on empty space in
+Connect/Weld/Unweld/Delete/Link starts a node box, and any `Shift` or
+`Ctrl` press in any Graph tool is a node selection click or box through the
+modifier table — no Graph authoring gesture reads them. Every committed edit
+re-rasterises the graph and gives newly closed regions their tube stub
+inside the edit's one undo step (one `Ctrl+Z` takes back the edit and the
+stub it grew), then enqueues a commit and a map bake and refreshes the
+warnings.
 
-Parameters: **Snap radius (px)**, **Mirror X**, and **Ptex texels per face
-side**. Graph and Output show the same live bake control: `auto`, or an
-explicit `4`, `8`, `16`, `32`, `64`, `128`, `256`, `512`, `1024`, `2048`, or
-`4096` texels per side. Changing it rebakes immediately. Actions: **Weld all
-within radius**, **Rebake map now**.
+Parameters: **Snap radius** (1–64 px, in screen pixels: a stroke end or
+**Weld all** converts it to scalp units at the current zoom), **Mirror X**,
+**Bake resolution** (`Auto (64 on boundaries)`, or an explicit `4 x 4` …
+`4096 x 4096` texels per scalp face side; the same row as Output, and a
+change rebakes at once). Actions: **Weld all within radius** (one undo
+step; none when no pair is in range), **Rebake map now**.
 
 ### Tube — sculpt center curves and section rings
 
 Each closed region grows one L1 tube, including a region occupying only part
 of a coarse scalp face. Root sampling tests the graph region itself, so
-separate subface regions retain separate root support and each closed region
-gets its own auto-tube. New region tubes default to **Match region CVs**
-(Auto); artists do not need to enter a numeric zero. The tube has one
-longitudinal column for each ordered region CV, with its base following the
-polygon's projected fitted support plane. A higher **Ring CV count** adds edge
-controls while preserving the region corners; construction does not use a
-polar or averaged fit. Existing sculpted tubes are not regenerated when this
-setting changes. Regions with more than 32 CVs retain their authored graph and
-  report the 32-CV construction limit. A body click selects the whole tube
-when it is not the start of a marquee; fixed-priority center CV, ring, and
-Section CV hits select that item on the reported tube, including a real child
-tube, and prehighlight before the press makes the target clear.
+separate subface regions keep separate root support. New region tubes
+default to **Ring CVs for new tubes** = `Match region CVs (Auto)`: one
+longitudinal column per ordered region CV, the base following the polygon's
+projected fitted support plane. A higher count adds edge controls while
+preserving the region corners; existing sculpted tubes are not regenerated
+when it changes. Regions with more than 32 CVs keep their authored graph and
+report the 32-CV construction limit.
 
-* **Center** — a translate gizmo sits at the selection's midpoint,
-  screen-aligned. Drag an axis handle to constrain the move, drag the
-  centre disc to move freely in the screen plane, or hold `Ctrl` on the
-  disc to constrain along the tube's own root tangent. A selected whole
-  tube translates rigidly; selected CVs move individually, or spread with
-  the panel's **Soft-selection radius (t)** falloff around the clicked CV.
-* **Ring** — the selected ring is edited in its own cross-section frame. The
-  active Transform tool determines the operation: **Move** uses the in-plane
-  axes or plane handle, **Rotate** uses the rotation handle around the ring
-  pivot, and **Scale** uses the scale handle for uniform or axis-constrained
-  scale. The projected ring/ellipse remains the visible handle when the view
-  is edge-on.
-* **Section CVs** — click selects one ring CV; the same gizmo drags only that
-  individual CV inside the ring's plane. **Move**, **Rotate**, and **Scale**
-  apply to the selected CV around its owning ring frame. Selecting or
-  hovering a center CV, ring, or Section CV also highlights its owning tube
-  mesh; a selected center CV or Section CV therefore gives both the local CV
-cue and the owning-tube highlight, including for child tubes.
+The component row picks what a click selects: **Whole tube** (`F8`, the
+body), **Center CV** (`F9`, the default), **Ring** (`F10`) or **Section CV**
+(`F11`). Selecting or hovering a component also highlights its owning tube,
+child tubes included. A drag on the body in a component kind draws a
+component box rather than grabbing the whole tube. `Delete` removes selected
+center CVs, else selected rings, else (Whole tube) the selected tubes.
 
-Centered section-core handles use the actual section-area centroid, while the
-edit remains attached to the same selected center CV.
+The transform tool (`Q`/`W`/`E`/`R`) is the gizmo, drawn at the selection's
+pivot:
 
-`Delete` removes selected center CVs, else selected rings. Guides refill at
-preview density on every move, full density on release; `Escape` restores
-the press-time shape and guides bit-exactly. The viewport requests a redraw on
-each drag sample, while the commit and full-density refill remain release/idle
-work.
+| Tool | Gizmo | Handles |
+|---|---|---|
+| Select `Q` | none | click and drag only select |
+| Move `W` | arrows with filled cones, three planar squares, a centre square | axis = along it; plane square = in that plane; centre = the camera plane |
+| Rotate `E` | three rings (front halves), a camera-facing view ring, a free-rotate ball | ring = about its axis (a pie wedge shows the sweep, in whole steps while step snap is on); view ring = about the view axis; ball = trackball |
+| Scale `R` | axes ending in filled cubes, planar squares, a centre square | axis = one axis; plane = its two axes; centre = uniform, horizontal travel only (right grows, left shrinks; one manipulator size is 2×; past zero it mirrors unless **Prevent negative scale**) |
 
-Parameters: **Selection shape**, **Transform tool**, **Soft-selection radius (t)**,
-**Display segments**, **Ring CV count** (used for newly constructed region
-tubes, not retroactively), and **Selected section scale** (a numeric uniform scale for
-the selected rings or the owning rings of selected Section CVs). Actions:
-**Match surface**, **Relax**,
-**Snap root to scalp** — each applies to the selected tube(s), or the primary
-tube if none are selected.
+In **Ring** the Move tool is the ring gizmo: u/v arrows, planar square and
+centre move the ring in its own plane, the outer circle scales it and the
+w arrow twists it; Rotate twists about the ring normal and Scale scales in
+the ring plane. **Section CV** acts inside the ring plane. Ring and Section
+always use the ring's own frame.
+
+| Handle | Colour | Drag | Modifier during the drag |
+|---|---|---|---|
+| X / Y / Z axis | red / green / blue | along the axis (Move), about it (Rotate), one axis (Scale) | `Ctrl`: Move in the plane **perpendicular** to the axis |
+| planar square | coloured like its normal axis, half filled | in that plane / its two axes | — |
+| centre square | light blue | camera plane (Move), uniform (Scale) | `Ctrl`: along the tube's root normal (Center CV / Whole tube only) |
+| view ring | light blue | about the view axis | — |
+| free ball | grey wash | trackball rotate | — |
+| ring (Ring Move) | pale grey | scale the ring | — |
+| any, hovered | pale yellow | shows what a press will grab | — |
+| any, dragging or last dragged | yellow | — | `Shift`: precision (a tenth of the travel); `J`: step snap; `X`: grid snap |
+| any, ungrabbable | its colour at 40 % | edge-on axis or plane, or a pinned root | — |
+
+A handle **wins the press** even over a CV dot inside its tolerance, and the
+last-dragged handle stays yellow so a **plain middle drag anywhere repeats
+it** (Maya navigation style), unless the camera has since turned that handle
+edge-on (dimmed, ungrabbable): then the middle drag is left to the camera.
+With Move and no modifier, pressing an
+unselected component (or, in Whole tube, a tube body) **selects it and
+drags it in the same gesture**
+(tweak); a release without travel is a plain click, leaves no undo step and
+lights no handle (the last-dragged handle stays what it was).
+`Ctrl`/`Shift`-clicking the selected component (or tube) under the centre square
+without moving is a selection click, not a drag. A Tube double-click grows
+the selection one step: center CV → its tube, section CV → its ring, ring →
+every ring of its tube.
+
+While a drag runs, a readout beside the gizmo (and the status line) reads
+`Move X 0.420`, `Move XY 0.420`, `Rotate 23.4°`, `Scale 1.25` or
+`Twist 12.0°`, followed by ` · Shift precision`, ` · snap step 15` or
+` · grid 1` when those shape the value. A selected root CV alone keeps
+Move but is **pinned** for Rotate/Scale: the gizmo stays dimmed and the
+status line says *Root CV is pinned: Rotate/Scale act on CVs above the
+root. Select the tube (F8) to transform it whole.*
+
+Rotate and Scale transform each selected owner about its own pivot (the
+root, or the ring centre) — **Individual Origins**, the default — with the
+gizmo drawn at the lead owner's; `P` (or the group-pivot toggle) switches to
+**Selection Centre**, one pivot at the middle of the selection where the
+gizmo is then drawn. Move always moves everything by one delta. Selected CVs
+spread with the **Soft selection falloff** around the clicked CV. Guides
+refill at the preview density on every move and at full density on release;
+`Escape` restores the press-time shape and guides bit-exactly.
+
+Parameters: **Selection shape** (Box / Lasso), **Axis orientation (L)**
+(World, Screen, Tube (local); each tool remembers its own — Move and Scale
+start World, Rotate Tube), **Step snap (hold J)**, **Step size** (1.0 for
+Move, 15° for Rotate, 0.1 for Scale), **Free rotate ball (Rotate)**,
+**Prevent negative scale (Scale)**, **Grid size (hold X)** (1.0),
+**Manipulator size (+ / -)** (90 px, 20–400), **Soft selection falloff**,
+**Curve smoothness (display)**, **Ring CVs for new tubes**, **Selected
+section scale** (uniform scale for the selected rings, greyed with none).
+Gizmo settings are per session and not saved. Actions: **Match surface**
+(snaps each tube's root CV onto the scalp, the rest of the curve stays),
+**Relax** (smooths kinks out of the center curve, root and tip held),
+**Snap root to scalp** (translates the whole tube so its root sits on the
+scalp) — each on the selected tubes, or the primary tube with none
+selected, as one undo step; a click that moves nothing says `no change` and
+leaves no undo step — and **Reset transform tool** (the current tool's step
+and snap settings back to defaults).
 
 ### Fill — guide density and the length ramp
 
-* **Params** — click a tube (body or guide) to select it for the form; the
-  density, CV count, edge bias, seed and length-profile fields then apply
-  to the selection (or the primary tube with nothing selected).
-* **Preview** — press on a tube or its guides and drag up/down to
-  lift/drop the length ramp at the `t` under the cursor (knots snap to a
-  0.05 grid); release writes the ramp to every selected tube and refills at
-  full density.
+Entering Fill with no guides grows them, so there is something to see.
+
+* **Params** (`P`) — click a tube to select it for the form (a box selects
+  several); the fields then apply to the selection, or every tube with none
+  selected. Clicking a guide says *strands belong to the tube they grow
+  from; click the tube*.
+* **Length ramp** (`V`) — press on a tube and drag up for longer, down for
+  shorter guides at the radial position under the cursor: the pressed
+  strand's root, or where the press sits across the tube (centre 0, wall 1).
+  Knots snap to a 0.05 grid and hold a fraction of full length from 0 to 1,
+  so dragging up only lengthens guides the profile has already shortened
+  (a full-length knot says `(full length)`). A drag over the whole 240 px
+  range covers 0 to 1. The status line reads
+  `Tonic Fill: length ramp r=0.35: 0.80`. The pressed tube is edited (with
+  the rest of the selection when it is part of it); release refills at full
+  density; `Escape` restores the selection and ramp.
 
 Fill carries each root through the actual section polygons, including their
-CV positions, scale and twist. At full length, the guide tips follow the last
-ring; a shorter length profile ends within the corresponding section interval.
+CV positions, scale and twist. The length profile is a function of the
+root's radial position in the root ring, after the edge-bias remap: each
+guide grows the profile's value at that position (clamped to 0–1) of the
+full length. At full length the guide tips follow the last ring; a shorter
+profile ends inside the corresponding section interval.
 
-Parameters: **Density**, **CV count**, **Edge bias**, **Seed**, **Length
-profile** (a `pos:val, pos:val, …` ramp), **Preview fraction**, **Freeze
-roots**. **Clear generated curves** removes generated guide output from the
-model while keeping authored tubes; the committed suppression is undoable.
-**Show generated curves** controls visibility independently. Clear suppresses
-automatic refill until the explicit **Refill guides** action, which regenerates
-the output. Hidden generated curves are not pick targets; authored tubes and
-their CVs remain editable.
+Parameters: **Density** (0.1–1000 guides /unit², with the live `N guides`
+count under it), **CVs per guide** (2–64), **Edge bias** (−1 middle … +1
+wall), **Seed**, **Length profile** (`pos:val` pairs, radial position to
+length fraction, such as `0:1, 0.5:0.6, 1:0.8`; values above 1 act as 1;
+empty is full length; an invalid entry turns red and is not applied), **Preview density while dragging** (%), **Freeze roots**.
+Dragging the Density or Edge bias slider is one undo step. Actions:
+**Refill guides**, **Clear generated curves** (removes generated guides but
+keeps authored tubes; undoable; automatic refill stays off until **Refill
+guides**). Hidden generated curves are not pick targets.
 
 ### Hierarchy — subdivide and navigate levels
 
-* **Navigate** — click selects a tube; Shift-drag marquees several;
-  double-click enters the clicked tube's children's level (or stays put)
-  and selects them. This is explicit Hierarchy navigation; a rapid Tube
-  double-click never enters a hierarchy level.
-* **Subdivide** — with **Split mode** `kmeans` (default), `Shift+D` or
-  **Subdivide** splits the selection into **Subdivide count** (2–8)
-  children by **Subdivide seed**; the new children become the selection and
-  focus moves to their level. With `edge` mode, first drag a stroke across
-  the root region (very short strokes are rejected); `Shift+D` then splits
-  along the recorded edge.
-* **Merge** — `Shift+M`/**Merge children** folds a tube's children back
-  (a selected child walks up to its parent first). **Merge selected** folds
-  two or more selected siblings into one. **Re-subdivide** is a two-step
-  confirm: the first press reports what would be lost, the second does it.
-* **Group** — select two or more tubes, press **Group** for an on-the-fly
-  parent; **Make persistent** commits it into the groom.
-* **Levels** — no gesture; **Solo level**, **Show ≤ level**, **L*n*
-  visible**, **L*n* x-ray** drive per-level visibility/x-ray model-wide.
+A click selects a tube (with the modifier table); a drag on empty space
+boxes tubes; a click on empty space deselects. A **double-click** enters the
+clicked tube's branch and selects its children; `Backspace` or `Ctrl+Up`
+exits. `W`/`E`/`R` jump to Tube with the tubes still selected.
 
-**Enter/Exit level** (also `Ctrl+Down`/`Up`, a Hierarchy double-click, or a
-breadcrumb click) walk the focus depth. Entering a selected tube's child level selects
-its children; exiting restores the corresponding parent selection. `Backspace`
-exits a level except while Graph's Create region draft is active. **Lock parents**/**Lock
-children** gate K6/K7 propagation per selected tube, or globally with none
-selected. Warnings fire post-gesture: a **smoothness** spike is a
-center-CV bend sharper than 15° between segments; a **root intersection**
-lists tubes whose root rings overlap in area.
+* **Navigate** (`N`) — select and walk levels.
+* **Subdivide** (`D`) — with **Split mode** `K-means`, `Shift+D` or
+  **Subdivide** splits each selected tube into **Subdivide count** (2–8)
+  children by **Subdivide seed**; the children become the selection and
+  focus moves to their level. With `Edge`, first drag a stroke across the
+  tube — a live line follows the drag and the recorded edge stays drawn
+  until `Shift+D` consumes it (`Escape` clears it; very short strokes are
+  refused).
+* **Merge** (`M`) — a click on a tube folds its children back
+  (`Shift+M` / **Merge children**; a visible child folds its siblings into
+  their parent). **Merge selected** folds two or more selected siblings
+  into one.
+* **Group** (`G`) — a plain box groups what it caught under an on-the-fly
+  parent; modifier boxes just gather the selection for the **Group**
+  button. **Make persistent** commits a group into the groom.
+* **Levels** (`L`) — a click solos the clicked tube's level; clicking one of
+  its tubes again un-solos.
+
+**Re-subdivide** is a two-press confirm: the first press arms it and the
+button turns amber, reading *Confirm re-subdivide (discards child sculpt)*;
+the second press does it; `Escape` or a different selection disarms it. A
+refused or failed action says why and leaves no undo step. If a parent's
+children were merged but its re-split is refused, the whole Re-subdivide
+rolls back (every selected parent keeps its children) and the status line
+names that parent.
+
+The breadcrumb at the foot of the dock (exit arrow, `Groom › Tube 0 › L2
+(4 children)`) is clickable; **Enter level** / **Exit level** (also
+`Ctrl+Down` / `Ctrl+Up`) walk the focus. Entering a selected tube's child
+level selects its children; exiting restores the parent selection.
+**Lock parents** / **Lock children** gate parent/child propagation per selected
+tube, or globally with none selected. With tubes selected the boxes show
+and set those tubes' own flags (part-checked when they disagree; a click
+sets them all); with none selected they show and set the default for every
+tube. Lock children makes a parent edit carry its children along rigidly;
+Lock parents leaves the parents where they are when a child is edited.
 
 Levels are branch-local. Entering root A exposes only A's children, so a
-separate root B can remain at its current frontier; the view can therefore
-show A at L2 while B remains at L1. Exiting A restores A's parent selection
-and visibility without changing B. Whole-tube Move applies one atomic
-translation; parent updates preserve each child's sculpted centers, sections,
-offsets, and individual CV offset slots. K7 inherits only the original outer
-boundary from L1 to drive the parent layout; internal sibling edges and added
-L2 detail remain child edits, with no full-volume refit. Editing a child
-remains local while the parent layout is preserved. Holding a boundary is
-exact when the target is coplanar with existing L1 sections; bent or
-non-coplanar inherited edges use the existing planar sections' projection
-instead of claiming an arbitrary 3D edge fit.
+separate root B can stay at its frontier; the view can show A at L2 while B
+stays at L1. Whole-tube Move applies one atomic translation; parent updates
+preserve each child's sculpted centers, sections, offsets and individual CV
+offset slots. The parent layout inherits only the original outer boundary
+from L1; internal sibling edges and added L2 detail remain child
+edits, with no full-volume refit. Holding a boundary is exact when the
+target is coplanar with existing L1 sections; bent or non-coplanar inherited
+edges use the planar sections' projection.
+
+Parameters: **Subdivide count**, **Split mode**, **Subdivide seed**, **Lock
+parents**, **Lock children**, **Solo level** + **Level to solo**, **Show all
+levels** + **Show levels up to**, **This level visible**, **This level
+see-through**. `[` / `]` change Hierarchy's own pick radius (Fill picks with
+the same radius, but its brackets change the preview fraction), never
+Graph's snap radius. Actions: **Subdivide (Shift+D)**,
+**Merge children (Shift+M)**, **Merge selected**, **Re-subdivide**,
+**Group**, **Make persistent**, **Enter level (Ctrl+Down)**, **Exit level
+(Ctrl+Up)**.
 
 ### Sculpt — hierarchical brushes over center curves
 
-A brush ring follows the cursor near the scalp or a tube. Press first picks the
-nearest center CV inside the brush radius; if no CV is hit, clicking a visible
-tube body supplies its owning tube as the sculpt target. With no tube body
-under the brush, the ring can fall back to the scalp surface, but the press
-does not start a stroke. Every move strokes the chosen tube:
+A screen-facing brush ring follows the cursor over the scalp or a tube; it
+is the cursor. A press picks the center CVs inside the brush radius, or the
+visible tube body under it; a press with no tube under the brush is an
+honest miss (*no tube under the brush*), not a stroke, and never a usdview
+pick. Every move strokes the chosen tube:
 
-* **Grab** — CVs follow the cursor's world-space delta, scaled by **Brush
-  strength**.
-* **Comb** — a fixed push per move sample along the drag direction (not
-  proportional to speed), scaled by **Brush strength**.
-* **Smooth** — relaxes each CV toward its neighbours' mean; **Brush
-  strength** (0–1) sets how far.
-* **Lengthen** — drag up/down to grow/shrink the tube, root pinned.
-* **Twist** — drag right/left to rotate offsets about the chord axis.
+* **Grab** (`G`) — CVs follow the cursor's world-space delta.
+* **Smooth** (`S`) — relaxes each CV toward its neighbours' mean.
+* **Comb** (`C`) — a fixed push per move along the drag, independent of
+  speed.
+* **Lengthen** (`L`) — drag up/down to grow/shrink, root pinned.
+* **Twist** (`T`) — drag right/left to rotate offsets about the chord axis.
 
-At press, Sculpt freezes the active plane and camera/depth context for the
-stroke. Grab also freezes the initial CV weights through background updates;
-its ring stays camera-facing at the cursor. The other brushes apply their
-screen-space footprint against that press context. Every brush honours **Brush
-strength**, **Preserve length**, **Mirror X** and **Brush t radius** (0 = whole
-tube). `Escape` restores the pre-stroke shape bit-exactly. Sculpt has no
-one-shot action — every edit is a stroke.
-Hold `F` and drag horizontally with the left mouse button to resize the Sculpt
-brush live; the radius changes during the drag.
-Parameters: **Brush radius (px)**, **Brush t radius**, **Preserve length**,
-**Brush strength**, **Mirror X**.
+At press Sculpt freezes the active plane and camera/depth context for the
+stroke. `Escape` restores the pre-stroke shape bit-exactly; a stroke that
+changed nothing leaves no undo step. Resize the brush with `[` / `]`
+(×1.15 per press) or hold `F` and drag horizontally (the status line reads
+the radius live). Sculpt has no one-shot action.
 
-### Output — maps and file commands, no gesture
+Parameters: **Brush radius** (2–512 px), **Whole strand** + **Brush reach**
+(untick Whole strand to limit how far along the strand the brush reaches),
+**Preserve length**, **Brush strength** (0–4; Smooth 0–1), **Mirror X**.
 
-No sub-mode shelf, no viewport loop. Output is a result view: authoring tube
-walls, center controls, and generated guide helpers are hidden so they cannot
-occlude the generated strands. **Show amplified hair** independently controls
-the committed generated result; before the first build there is no guide
-fallback in this mode. Parameters: **Ptex texels per face
-side** — `auto` uses the bake's area-based plan, keeps region-boundary faces
-at least 64×64 so a region contained within a coarse face remains
-representable, and conservatively collapses a face to 1×1 only when its
-samples are uniform and no boundary can affect it. Any explicit choice from
-`4` through `4096` forces that many texels per face side over the whole
-scalp. Graph and Output are synchronized, and a change rebakes immediately
-rather than waiting for the next graph edit. The other parameter is **Show
-amplified hair** (mirrors the status strip's checkbox). **Build/update
-description** enables the committed output and exposes **Description density**
-and **Strand width**. Density `1` uses the tube's Fill density; other values
-scale the generated strand count without changing the sparse source curves.
-The build writes sparse tube-shape guides to `<groom>/OutputCurves`, bakes
-their ownership into `<groom>/OutputRegionMap`, and creates the instanced
-description under `<groom>/Output`. Its `CurveSource` interpolates new strands
-from the sparse guides at cook time, followed by `Width`. The PTex map keeps
-roots within their owning region and subdivided tube. The curves, map and
-description update together; saving flushes the newest commit and includes
-the map asset.
+### Output — the hair description, no gesture
 
-**Show amplified hair** only controls visibility. Clearing or hiding generated
-guides does not remove or regenerate the committed description. After the first
-build, tube, region, and Sculpt edits regenerate the Output automatically on
-commit while the model is live. A saved sparse output can generate hair without
-the model; reopening the model and pressing **Build/update description**
-activates or rebuilds it when needed.
-Actions: **Build/update description**, **Save groom…**, **Export center
-curves…**, **Import curves…**, each a one-shot action or file dialog as
-labelled.
+No sub-mode shelf, no viewport loop. Output is a result view: tube walls,
+center controls and guide helpers are hidden so they cannot occlude the
+generated strands. **Build hair description** turns the guides into the
+renderable usdGen hair under `/TonicGroom/Output` and keeps it updated as you
+groom: it writes sparse tube-shape guides to `<groom>/OutputCurves`, bakes
+their ownership into `<groom>/OutputRegionMap` and creates the instanced
+description under `<groom>/Output`, whose `CurveSource` interpolates strands
+from the sparse guides at cook time, followed by `Width`. After the first
+build, tube, region and Sculpt edits regenerate the output on commit while
+the model is live; a saved sparse output generates hair without the model.
 
-A forced resolution costs what it says: on the 64-face reference scalp a
-bake is about 43 ms at 128 texels per side and about 1 s at 1024. It is
-a debugging and hero-bake control, not something to leave on.
+Parameters: **Bake resolution** (the Graph row), **Strand density
+multiplier** (1 uses each tube's Fill density; other values scale the strand
+count without changing the sparse curves), **Strand width** (units) — both
+greyed with *Build the hair description first* until it exists — and **Show
+amplified hair** (the same switch as Display › Show amplified hair; it only
+controls visibility, off keeps the viewport on the guides, which is faster).
+
+`Auto` bakes 64 × 64 on faces a region border crosses and one texel inside a
+region; an explicit resolution forces that many texels per face side over
+the whole scalp. It costs what it says: on the 64-face reference scalp a
+bake is about 43 ms at 128 and about 1 s at 1024 — a debugging and
+hero-bake control, not something to leave on.
+
+## Coming from Maya / Blender
+
+The Tube gizmo is the RigExec manipulator (`../usdRig/usdRig`
+`gizmoScreen.py`, vendored as `tonicGizmoScreen.py`), so it behaves the way
+Maya and Blender hands expect:
+
+* **Hit priority.** A handle under the cursor wins the press — centre, then
+  planes, then axes, then rings — even when a CV dot sits inside its
+  tolerance; hover pre-highlights exactly what a press will grab. Off every
+  handle, the press selects.
+* **Colours.** X/Y/Z are red/green/blue in every orientation; a hovered
+  handle turns pale yellow, the dragged (and last-dragged) one yellow.
+* **Orientation.** World (default for Move/Scale), Screen, or Tube — the
+  tube's own root frame, Maya's *Object* (default for Rotate); `L` flips
+  World ↔ Tube.
+* **Tweak.** Press-drag on an unselected CV, ring or (Whole tube) tube body
+  selects and moves it in one gesture.
+* **Selection modifiers.** Shift toggles, Ctrl removes, Ctrl+Shift adds
+  (Maya); a Shift box extends and a Ctrl box subtracts (Blender).
+
+| Behaviour | Maya | Blender | Tonic |
+|---|---|---|---|
+| Select / Move / Rotate / Scale | `Q` `W` `E` `R` | `G` `R` `S` (modal) | `Q` `W` `E` `R` + the transform row |
+| Handle wins over the component under it | yes | yes | yes |
+| Hover pre-highlight | yellow | lighter | pale yellow |
+| Selected / dragged handle | yellow | white | yellow, kept after release |
+| Axis colours | red / green / blue | red / green / blue | red / green / blue |
+| Move tip / Scale tip | cone / cube | cone / cube | cone / cube |
+| Plane handles | squares | squares | half-filled squares |
+| Uniform scale (centre square) | horizontal travel, 1 + dx / size; mirrors past zero unless Prevent Negative Scale | `S`, distance from the pivot | as Maya (**Prevent negative scale**) |
+| Constrain to the plane perpendicular to an axis | `Ctrl` + axis | `Shift` + axis key | `Ctrl` + axis |
+| Precision drag | — | `Shift` | `Shift` (a tenth of the travel) |
+| Step snap while dragging | `J` hold | `Ctrl` | `J` hold, or **Step snap** |
+| Grid snap | `X` hold | increment snap | `X` hold (**Grid size**) |
+| Manipulator size | `+` / `-` | preferences | `+` / `-` (**Manipulator size**) |
+| Global / Local | tool settings (RigExec binds `L`) | orientation menu | `L`, the Global/Local toggle |
+| Pivot for a multi-selection | tool settings (RigExec binds `P`) | pivot menu | `P`: Individual Origins / Selection Centre |
+| Repeat the last handle | middle drag anywhere | — | middle drag anywhere (Maya style); declined while that handle is edge-on |
+| Cancel a drag | `Escape` | `Escape` / right-click | `Escape` |
+| Frame the selection | `F` | numpad `.` | `F` |
+| Orbit / pan / dolly | `Alt` + LMB / MMB / RMB | MMB / `Shift`+MMB / `Ctrl`+MMB | `Alt` always; Blender style adds MMB / `Shift`+MMB / `Ctrl`+MMB |
+
+**Navigation** in the Display group picks the style. **Maya**: `Alt`+LMB
+orbits, `Alt`+MMB pans, `Alt`+RMB dollies (usdview's own camera); a plain
+middle drag repeats the last gizmo handle in Tube. **Blender**: plain MMB
+orbits, `Shift`+MMB pans, `Ctrl`+MMB dollies, and `Alt` still works; the
+middle button is always the camera. In both styles a right press over the
+workspace never opens usdview's prim context menu, a second button during a
+drag is ignored, and the wheel is ignored mid-drag so the camera the drag
+was measured with cannot move under it.
 
 ## Warnings
 
-* **Coverage (coarse check)** — `N face center(s) outside regions (coarse
-  coverage check)`; this reports the coarse face-center diagnostic and does
-  not say that every subface point on that face is uncovered.
-* **Root intersections** — overlapping root rings, listed by tube id.
-* **Smoothness** — CVs past the 15° spike threshold.
-* **CPU-only** (info) — why the GPU mirror fell back.
-* **Committer detached** (error) — the stage went away under the tool.
+The list is hidden while empty. Each row carries a severity glyph (the
+`status_error`, `status_warning` and `status_info` icons; Qt's message-box
+icons if the art is missing), and a row with a pointing-hand cursor does
+something when clicked; its tooltip ends with what (*click to select*,
+*click to retry commit*, *click to outline the faces*):
 
-Clicking a coverage-causing or intersection/smoothness row selects the
-tubes or CVs it names.
+| Severity | Row | Click |
+|---|---|---|
+| error | `Commit failed: <reason>` | **Retry commit** (enqueues the model again) |
+| warning | `N tube(s) produced no guides (T3, ...): <reason>` | selects those tubes |
+| info | `N scalp faces have no region` (coarse face-centre check) | outlines the uncovered faces in red on the scalp |
+| warning | `Roots overlap on N tube(s): T1, T2.` | selects those tubes |
+| warning | `Kink on tube 0 at CV 3 (bend > 15°) — Smooth or Relax to fix` | selects the kinked center CVs |
+| info | `CPU-only: <reason>` | — |
+| error | `Scalp /path not found in the new stage: bind a scalp mesh to continue.` | — |
+| error | `Committer detached: edits are not reaching the stage.` | — |
 
-## Status strip and the amber skew rule
+## Status strip
 
-Left to right: the clickable breadcrumb, the focused level, `model v<X>
-stage v<Y> pending v<Z>`, `map v<A> baked v<B>`, the last swap time, and
-`GPU` or `CPU-only (<reason>)`; `fidelity step N` is appended once the
-ladder has stepped down. It turns **amber** with `[MAP BEHIND]` appended
-whenever the baked map trails the enqueued map, or the committed stage
-trails the model — both expected, momentary states that clear once the next
-pump lands.
+Top to bottom: the **message area** (the last status line, fading after
+4 s; errors red, warnings amber), then the **sync pill**, the tool summary
+and the `GPU` / `CPU` chip, then the breadcrumb, then — only with **Show
+diagnostics** — the version line (`L1 | model v12 stage v12 pending v12 |
+map v3 baked v3 | swap 2.1 ms | GPU`, plus `fidelity step N` while the
+ladder is down). The pill's tooltip always carries the version line.
 
-The **Show amplified hair** checkbox beside the strip is what actually calls
-`Tonic_SetAmplifiedHair` on the model, controlling visibility of committed
-usdGen tiles. **Build/update description** creates the self-contained Output
-description that supplies those tiles; the Output panel field of the same
-name mirrors the checkbox state.
+The **sync pill** is one word for where the groom is, most severe first:
+
+| Pill | Colour | Means |
+|---|---|---|
+| `Commit failed: <reason>` | red | the last commit did not reach the stage (see Warnings) |
+| `Commit failed: committer detached` | red | the stage went away under the tool |
+| `Committing...` | amber | a commit is enqueued and not yet swapped in |
+| `Baking map...` | amber | the region map trails the latest graph edit |
+| `CPU fallback: <reason>` | blue | the GPU mirror dropped; results are identical |
+| `Reduced detail` | blue | the ladder has stepped the drag preview down |
+| `Synced` | green | the stage shows the model |
+| `No scalp bound` | grey | nothing to sync yet: bind a scalp mesh first |
+
+Amber is momentary by design: the bake lands after the commit carrying the
+same graph change, so the amplified preview can briefly cook against the
+previous map.
 
 ## Undo and redo
 
 Every tube, hierarchy and graph edit — moves, sculpts, subdivides, merges,
 groups, section work, imports, strokes, welds, splits, deletes, region
-links — pushes one pre-edit snapshot. A drag is **one** undo step: the loop
-opens a bracket at press and seals it at release; `Escape` mid-drag
-restores the press-time base instead of sealing anything. If a gesture is
-interrupted, the controller cancels and rolls it back; a normal mouse leave
-while a drag is held keeps that drag active. `Ctrl+Z`/`Ctrl+Y`
-walk the stack; any new edit clears the redo side. Not covered: the
-selection itself and deterministic guide refills.
+links, panel edits of fill parameters — is one undo step with a label
+(`Tube center`, `Graph draw`, `Delete tubes`, `Import curves`...). A drag is
+one step, opened at press and sealed at release; `Escape` mid-drag restores
+the press-time base instead. A click that only selected, a press that never
+moved and a refused action leave **no** step. Only one edit can be open
+at a time: a press or action that starts while another edit is still open
+(a held dock slider, say) is refused with *another edit is still open* and
+leaves that edit alone. If a mode's own cancel fails while a drag is being
+interrupted, the viewport still rolls the drag back to its press-time base
+and says so, so the tool never stays locked. `Ctrl+Z` reports
+`Undo: <label>` (or `Nothing to undo` in red); redo is `Ctrl+Y`,
+`Ctrl+Shift+Z` or `Shift+Z`. The dock buttons name the step in their
+tooltips and grey out while a drag runs. Guides the artist had on screen are
+regrown after a step. Not covered: the selection itself.
 
 ## The viewport look
 
@@ -405,131 +633,185 @@ Simmons & Whited (EG 2014) Fig. 1(c)–(e), Kaur, Simmons & Whited (SIGGRAPH
   draw at a quarter opacity, same hue.
 * **Scalp regions** paint in the same palette, so a scalp patch and its
   rooted tube match.
-* **Graph mode** hides tube geometry so the scalp patches and graph edges read
-  cleanly. The patch overlay follows the authored region boundaries; it is an
-  authoring display, not a claim of pixel-identical output to the reference.
+* **Graph mode** hides tube geometry so the scalp patches and graph edges
+  read cleanly.
 * **Center curves** are thick in the clump colour on the focused level,
   thinner elsewhere; **CVs** are round dots, larger on the focused level;
   selections brighten and rim.
-* **Rings** and their CVs draw thin, shown in Tube mode's Ring/Section
-  sub-modes and on any selected tube elsewhere.
+* **Rings** and their CVs draw thin, shown in Tube's Ring/Section kinds and
+  on any selected tube elsewhere.
 * **Guides** draw thin in their clump colour; amplified tiles replace them
   when **Show amplified hair** is on.
-* **Gizmos** follow Maya convention; the **brush ring** is a thin
-  screen-facing circle at the cursor.
-
-The screen-space gizmo geometry adapts the upstream material in
-`../usdRig/usdRig` (RigExec's `gizmoScreen.py`); this repository has no
-`../usdGen/usdGen` source tree to attribute. The shared geometry is consumed
-by the Qt overlay with the Hydra scene-index path as fallback.
-
-What draws depends on the mode — the tool shows either solid tubes or
-control curves through x-rayed tubes, never both:
+* **Gizmos** are the RigExec manipulators drawn by a Qt overlay on the
+  StageView (the Hydra scene-index gizmo is the headless fallback, with the
+  same colours); the **brush ring** is a thin screen-facing circle.
 
 | Mode | Focused level | Other levels | Guides |
 |---|---|---|---|
 | Graph | scalp patches and graph edges; tube geometry hidden | tube geometry hidden | off |
 | Output | generated result when shown; tube walls and center controls hidden | generated result when shown; helper geometry hidden | off |
 | Tube · Ring/Section | opaque, curves on | x-rayed | off |
-| Tube · Center, Hierarchy, Sculpt | x-rayed, curves on | x-rayed fainter | off |
+| Tube · Whole tube/Center, Hierarchy, Sculpt | x-rayed, curves on | x-rayed fainter | off |
 | Fill | x-rayed, curves on | x-rayed, curves on | on |
 
-(Rings draw on every tube in Tube's Ring/Section sub-modes, and on
-selected tubes elsewhere.) The look comes from one policy table the
-controller pushes on every mode, sub-mode or focus change, so switching
-modes is all it takes to move between these rows.
+The look comes from one policy table the controller pushes on every mode,
+sub-mode or focus change.
 
 ## What runs automatically
 
 Two worker threads keep the stage in sync; neither blocks a gesture, and
-the viewport's idle pump (roughly every 50 ms while work is pending) drains
+the viewport's idle pump (about every 50 ms while work is pending) drains
 them:
 
-* **Commit worker** — snapshots the model off-thread on release, builds the
-  groom layer anonymously; the pump swaps it into the live sublayer. A full
-  swap at the reference scene (2 400 tubes, 12 000 guides) costs about
+* **Commit worker** — snapshots the model off-thread on release and builds
+  the groom layer anonymously; the pump swaps it into the live sublayer. A
+  full swap at the reference scene (2 400 tubes, 12 000 guides) costs about
   104 ms, so the committer falls back to a **partial transfer** — one tube
-  subtree per idle slot, each under roughly 2.3 ms.
+  subtree per idle slot, each under roughly 2.3 ms. A commit that would
+  overwrite artist-owned output is refused and reported (red pill, Retry
+  row).
 * **Bake worker** — bakes the region map to versioned `.ptx` files on its
   own CUDA stream, swapped with one attribute author each.
 * **Guide refill cache** — a per-tube content hash means a one-CV move only
-  refills that tube's guides: at reference scale, a one-tube version fell
-  from 35.5 ms of worker time (every tube refilled) to 2.4 ms (one tube).
-* **The fallback ladder** — the controller times each move end to end.
-  Three *consecutive* moves over the 8 ms budget step it one rung: guide
-  preview 25 % → 10 % → 0 %, then display segments halved, then non-focused
-  levels as centers only, then hover off. One in-budget move resets the
-  count; release always restores full fidelity. Measured at 1.16–1.30
-  ms/move over a 36-tube subtree, the ladder never leaves step 0 at tested
-  scales — it exists for grooms roughly a magnitude heavier.
+  refills that tube's guides (35.5 ms → 2.4 ms of worker time at reference
+  scale).
+* **The fallback ladder** (Display › **Ladder enabled**) — the controller
+  times each move. Three consecutive moves over the 8 ms budget step it one
+  rung: `Preview 25 %`, `Preview 10 %`, `Preview off`, `Half segments`,
+  `Centers only`, `Hover off`; the HUD chip names the rung (`Preview 10 %
+  (auto)`) and lingers a second after release, which always restores full
+  fidelity. After the hover-off rung, hover stays off for a short cool-down.
 
-Because the bake lands after the commit carrying the same graph change,
-the amplified preview can briefly cook against the previous map — the amber
-skew window above, accepted by design. If the GPU mirror fails, the model
-drops to the CPU host mirror with identical results; the warnings list and
-status strip report it, and the tool keeps working.
+If the GPU mirror fails, the model drops to the CPU host mirror with
+identical results; the pill, the chip and the warnings list say so.
 
 ## Save, export, import
 
-* **Save groom…** writes the live layer to a `.usdc` (never `.usda`) and
-  re-parents it under the live sublayer; a baked map is copied beside it
-  and referenced with a relative `./regionMap.ptx` path.
-* **Export center curves…** writes the focused level's tube centers as
-  `BasisCurves` to a chosen file.
-* **Import curves…** reads every `BasisCurves` in a file and adds them as
-  locked child tubes under the selected (or primary) tube — the reverse of
-  export, reproducing the Tonic ↔ Houdini braid round trip.
+The three commands are the dock's file row, the menu and (Save)
+`Ctrl+Shift+S`; all three go through one dialog path that remembers the
+last directory.
 
-All three live under **usdGen → Tonic** and, redundantly, in Output mode's
-Actions block.
+* **Save** writes the live layer to a `.usdc` (default name
+  `<scene>-groom.usdc`; a name typed without an extension gets `.usdc`, a
+  `.usda` name is refused with a warning dialog). It flushes the newest
+  commit first (usdview keeps painting, input is held), copies the baked
+  map beside the file as `<stem>.regionMap.ptx` with a relative reference,
+  and sublayers the groom in the **session layer**. The stored preference
+  `usdGenTonicTools.container().setSaveGroomToScene(True)` makes Save add
+  the groom to the scene's **root layer** instead and save that layer, so
+  File › Reopen and a new usdview bring it back; it has no dock control
+  yet.
+* **Export** writes the focused level's tube centers (every tube at level
+  0) as `BasisCurves` (default `<scene>-centers.usda`).
+* **Import** reads every `BasisCurves` in a file and adds them as locked
+  child tubes under the first selected tube, else the root tube (tube 0);
+  the dialog title says which. It is one undo step, `Import curves`, and
+  reports `Tonic: Imported N curve(s) under tube M`.
+
+A failure shows a warning dialog with the reason, not just a status-bar
+line.
+
+**Resume.** A groom saved into the scene (or any `UsdGenTonicGroom` on the
+stage) can be edited again: the dock's **Resume groom** button appears
+while no model is live, and the dock's Bind asks *Resume / Start new /
+Cancel* when the chosen mesh already has one. Resume hydrates the saved
+groom — tubes, guides, regions — into a live model and reports
+`Tonic: resumed <groom> on <scalp> (N tube(s), M guide(s))`.
+The groom prim records which subdivision numbered its children's ring
+slots (`usdGen:tonic:subdivider = "aligned-v1"`); such a groom resumes
+its sculpt residuals verbatim. A groom saved before that marker existed
+(before the 2026-09-24 ring-slot alignment) keeps every saved shape and
+guide, but each sculpted child's residual is re-measured from its saved
+shape against today's subdivision, so the next parent edit carries the
+sculpt instead of twisting the child. Any other marker value is refused.
 
 ## Stage reloads
 
 If the stage closes or reloads under the tool, the committer detaches: the
-warnings list reports it, stage swaps stop, and the model — every edit and
-the undo stack — survives untouched. **Reattach** happens automatically
-when a new stage appears: it re-hosts the live sublayer and the next idle
-swap re-creates the groom from the surviving model (post-detach edits
-included), filling an existing groom prim in place rather than duplicating
-it.
+pill turns red, stage swaps stop, and the model — every edit and the undo
+stack — survives untouched. **Reattach** happens automatically when a new
+stage appears and **never re-binds the scalp** (a rebind would clear the
+graph and the undo stack): it re-hosts the live sublayer and the next idle
+swap re-creates the groom from the surviving model, post-detach edits
+included, filling an existing groom prim in place. If the new stage has no
+prim at the bound scalp path, the session stays detached, the old groom is
+kept off the stage, and the warnings list says `Scalp /path not found in
+the new stage: bind a scalp mesh to continue.`
 
 ## Deferred, not built
-
-Two plan/17 features are deliberately deferred, for one shared reason —
-what a brush stroke *means* in a hierarchy is one decision, not two:
 
 * **Guide brushes.** Sculpt reaches center curves only, never guides
   directly, because `<groom>/Guides` is a reproducible stage contract (the
   committer writes exactly what the fill kernels generate, and hydrate
   bit-compares a regeneration); guide deltas would make it authored data no
-  fill can reproduce, which is a schema and hydrate change of its own.
+  fill can reproduce.
 * **Hierarchy soft selection.** Soft selection along one tube's center
   works everywhere; spreading one move across neighbouring tubes by hop
-  distance is not built, because it collides with the K6/K7 propagation
-  running on the same move.
+  distance is not built, because it collides with the parent/child
+  propagation running on the same move.
+* **Point / edge / surface snapping** of the gizmo (RigExec `V`/`C`) — only
+  step and grid snaps exist.
+* A dock control for Save-to-scene, and `Shift+[` / `Shift+]` fine brush
+  steps.
 
 ## Troubleshooting
 
-* **Amber `[MAP BEHIND]`** — bake or commit is a version behind; wait, or
-  press **Rebake map now** (Graph). Harmless by design.
-* **No hair on some faces** — coverage warning names them; extend a
-  boundary or link a neighbouring region.
-* **Kink warnings** — Sculpt's Smooth or a Tube Ring-scale pass usually
-  clears them; anything past 15° stays listed until fixed.
-* **A drag feels heavy** — check the status strip for `fidelity step N`
-  (the ladder is already stepping down); Solo the edited level
-  (Hierarchy → Levels) to cut what else draws.
-* **CPU-only banner** — GPU mirror dropped (reason in the warnings list);
+* **Amber `Baking map...` / `Committing...`** — the bake or commit is a
+  version behind; wait, or press **Rebake map now** (Graph). Harmless.
+* **Red `Commit failed`** — click the warnings row to retry; the reason is
+  in the pill's text and tooltip.
+* **No hair on some faces** — click the coverage row to outline them;
+  extend a boundary or link a neighbouring region.
+* **Kink warnings** — Sculpt's Smooth or Tube's **Relax** usually clears
+  them; anything past 15° stays listed until fixed.
+* **A drag feels heavy** — watch for the ladder chip / `Reduced detail`;
+  solo the edited level (Hierarchy › Levels) to cut what else draws.
+* **CPU fallback** — the GPU mirror dropped (reason in the warnings list);
   results are identical; restart the tool to retry the GPU.
+* **A key does nothing** — keys other than digits need the pointer over the
+  viewport and no focused text field; click the viewport once.
+* **Rotate/Scale does nothing on a root CV** — roots are pinned; select the
+  tube (`F8`) or a CV above the root.
 * **An edit was rejected** — the tube partition could not divide cleanly;
-  nothing changed. If a follow-up also refuses, undo past the edit that
-  led here and retry with a smaller nudge.
+  nothing changed. Undo past the edit that led here and retry with a
+  smaller nudge.
 * **Merge won't split back** — merging sculpted children bakes them into
   the parent, usually a one-way door (pristine children still round-trip
   through Re-subdivide). Treat merge as a late step, or undo it.
-* **Committer detached** — see *Stage reloads*; reattachment is automatic.
-* **A thin green line through the tubes** — that is usdview's own origin
-  axes (the +Y axis is pure green), not groom content. They draw in
-  every viewport with no toggle; opaque tubes occlude them and x-rayed
-  tubes do not, so they only show in the x-ray modes above. The
-  reference screenshots turn them off for the shot.
+* **Committer detached / scalp not found** — see *Stage reloads*.
+* **A thin green line through the tubes** — usdview's own origin axes (the
+  +Y axis is pure green), not groom content; opaque tubes hide it and
+  x-rayed ones do not.
+
+## Testing
+
+* **Suite:** `ctest --test-dir build -L tonic -LE T4 --output-on-failure`.
+  Plain `-L tonic` also pulls the T4 soak (about 30 minutes). One test:
+  `ctest --test-dir build -R testUsdviewTonicTube --output-on-failure`.
+  T0/T1 are plain python (tables, panels, gizmo maths — this page's hotkey
+  check is `testTonicDocsHotkeys`, `tests/checks/check_tonic_docs.py`);
+  T3 drive a real `testusdview` with QTest/QMouseEvent input through the
+  shared helpers in `plugin/usdGenTonicTools/testenv/tonicT3.py`.
+* **Interactive:** any T3 or capture script runs in a visible usdview with
+  `powershell -File bin/launch_usdview.ps1 -TestScript
+  plugin/usdGenTonicTools/testenv/testUsdviewTonicTube.py
+  examples/tonic-graph-scalp.usda`.
+* **Staged package:** T3 tests and the launcher import the package staged
+  under `build/python`, not the source tree. After editing plugin python
+  (or adding a test file) re-run the CMake configure
+  (`cmake -S . -B build`) so the edit is staged and new tests register.
+* **Screenshots:** this page's shots are refreshed with
+  `powershell -File bin/launch_usdview.ps1 -TestScript
+  plugin/usdGenTonicTools/testenv/captureTonicWorkspace.py
+  examples/tonic-graph-scalp.usda` (writes `renders/tonic-workspace.png`
+  and `renders/tonic-first-run.png`) and
+  `... -TestScript plugin/usdGenTonicTools/testenv/captureTonicCvRegions.py
+  examples/tonic-single-quad.usda` (writes `renders/tonic-cv-regions.png`
+  and `renders/tonic-cv-draft.png`).
+* **Icons:** the dock glyphs live in
+  `plugin/usdGenTonicTools/resources/icons/` (naming in its `README.md`).
+  `bin/gen_tonic_icons.sh [manifest] [outdir]` generates missing ones from
+  `manifest.txt` with codex image generation, one at a time — never in
+  parallel, since concurrent runs share one output directory.
+
+![Two CV regions on one scalp face: Create region with the Bake resolution at 128](../renders/tonic-cv-regions.png)

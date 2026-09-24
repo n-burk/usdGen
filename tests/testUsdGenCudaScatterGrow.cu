@@ -99,6 +99,25 @@ int main() {
                   Near(points[2], V(0, expectedY, 0)));
         }
 
+        for(float random : {0.f,1.f}) {
+            controls.lift=90.f; controls.azimuth=90.f; controls.azimuthRandom=random;
+            CudaScatterGrow azimuthGrow; Relay relay;
+            CHECK(azimuthGrow.BeginFresh(roots,controls,stream)==ScatterGrowStatus::Ok &&
+                  azimuthGrow.FinishFreshAsync(stream,Done,&relay)==ScatterGrowStatus::Ok &&
+                  cudaStreamSynchronize(stream)==cudaSuccess && relay.status.load()==int(cudaSuccess) &&
+                  azimuthGrow.CommitFreshFinish()==ScatterGrowStatus::Ok);
+            float const angle=(90.f+random*360.f*(UsdGenDraw01(controls.seed,77,kSaltGrowAzimuth)-.5f))*3.14159265358979323846f/180.f;
+            std::vector<float3> points(3);
+            CHECK(Get(azimuthGrow.view().points,points,stream) &&
+                  Near(points[2],V(0,2*std::cos(angle),2*std::sin(angle))));
+        }
+        CudaScatterGrow invalidAzimuth;
+        controls.azimuth=361.f;
+        CHECK(invalidAzimuth.BeginFresh(roots,controls,stream)==ScatterGrowStatus::InvalidArgument);
+        controls.azimuth=0; controls.azimuthRandom=1.01f;
+        CHECK(invalidAzimuth.BeginFresh(roots,controls,stream)==ScatterGrowStatus::InvalidArgument);
+        controls.azimuthRandom=0;
+
         // Both target narrowing overflow and endpoint arithmetic overflow are
         // rejected before any device allocation or stream submission.
         auto badTarget = std::make_shared<ScatterGrowRoots>(*roots);

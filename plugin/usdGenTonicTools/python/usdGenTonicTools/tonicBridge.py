@@ -616,9 +616,21 @@ def readBasisCurves(stage, curvesPath):
     if not prim:
         raise RuntimeError("tonicBridge: no prim at %s" % curvesPath)
     curves = UsdGeom.BasisCurves(prim)
-    points = [tuple(float(v) for v in p)
-              for p in curves.GetPointsAttr().Get()]
-    counts = [int(v) for v in curves.GetCurveVertexCountsAttr().Get()]
+    # An authored-but-empty prim reads back None rather than an empty
+    # array; a hand-edited file can disagree between counts and points.
+    # Both are the file's fault, so say which prim (ValueError), instead
+    # of a TypeError from iterating None deep inside an import.
+    rawPoints = curves.GetPointsAttr().Get()
+    rawCounts = curves.GetCurveVertexCountsAttr().Get()
+    if rawPoints is None or rawCounts is None:
+        raise ValueError("tonicBridge: %s has no points or no "
+                         "curveVertexCounts" % curvesPath)
+    points = [tuple(float(v) for v in p) for p in rawPoints]
+    counts = [int(v) for v in rawCounts]
+    if any(c < 0 for c in counts) or sum(counts) != len(points):
+        raise ValueError("tonicBridge: %s curveVertexCounts sum to %d but "
+                         "it has %d points"
+                         % (curvesPath, sum(counts), len(points)))
     curves_out = []
     offset = 0
     for count in counts:
@@ -642,22 +654,49 @@ def importCurvesAsLockedTubes(dll, model, parentId, curves, ringVerts=8,
 
     Each curve becomes one tube whose sections are unit rings about the
     resampled centers (§5.7: a single-curve tube from a curve).
+
+    Every curve is validated and resampled BEFORE the first tube is
+    added (SS-04): a bad third curve used to raise after two tubes had
+    landed, leaving a half import. ValueError names the offending curve;
+    a RuntimeError can still come from the C++ side mid-loop, which the
+    session's gesture bracket rolls back.
     """
     ringVerts = validateRingVerts(ringVerts)
     if int(sectionsPerCurve) < 2:
         raise ValueError("tonicBridge: want at least 2 sections per curve")
+    curves = list(curves)
+    if not curves:
+        raise ValueError("tonicBridge: no curves to import")
+    allCenters = [_importCenters(index, curve)
+                  for index, curve in enumerate(curves)]
+    step = 1.0 / (int(sectionsPerCurve) - 1)
+    ring = [(math.cos(2.0 * math.pi * k / ringVerts),
+             math.sin(2.0 * math.pi * k / ringVerts))
+            for k in range(ringVerts)]
+    sections = [(min(1.0, s * step), list(ring))
+                for s in range(int(sectionsPerCurve))]
     ids = []
-    for curve in curves:
-        centers = resamplePolyline(curve, max(len(curve), 2))
-        step = 1.0 / (int(sectionsPerCurve) - 1)
-        sections = []
-        for s in range(int(sectionsPerCurve)):
-            ring = [(math.cos(2.0 * math.pi * k / ringVerts),
-                     math.sin(2.0 * math.pi * k / ringVerts))
-                    for k in range(ringVerts)]
-            sections.append((min(1.0, s * step), ring))
+    for centers in allCenters:
         ids.append(importLockedTube(dll, model, parentId, centers, sections))
     return ids
+
+
+def _importCenters(index, curve):
+    """The resampled centers of curve `index`, or ValueError naming it."""
+    try:
+        pts = [(float(x), float(y), float(z)) for x, y, z in curve]
+    except (TypeError, ValueError):
+        raise ValueError("tonicBridge: curve %d has a point that is not "
+                         "three numbers" % index) from None
+    if len(pts) < 2:
+        raise ValueError("tonicBridge: curve %d has %d point(s); a tube "
+                         "needs at least 2" % (index, len(pts)))
+    if not all(math.isfinite(v) for p in pts for v in p):
+        raise ValueError("tonicBridge: curve %d has a non-finite point"
+                         % index)
+    if polylineLength(pts) <= 0.0:
+        raise ValueError("tonicBridge: curve %d has zero length" % index)
+    return resamplePolyline(pts, len(pts))
 
 
 def roundTripStatus(tubeId, error, tolerance):

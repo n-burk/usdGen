@@ -182,6 +182,24 @@ bool TonicRescaleCenterLength(float const *cx, float const *cy,
 bool TonicResampleDescRingsCpu(TonicTubeDesc const &tube, int ringVerts,
                                TonicTubeDesc *out, std::string *err);
 
+// Adjacent-station slot alignment, the K14 rule TonicSubdivideTubeCpu
+// applies between a child's consecutive sections, for a caller that
+// replaces ONE section of an existing tube (the Reposition attachment
+// refresh installs a freshly split root under the child's transported
+// upper sections).  K14 starts each split's ring at whichever parent corner
+// first falls in the clip, so the new ring can arrive rotated against its
+// neighbour; K5 interpolates per slot and would twist that span into a
+// figure-eight.  Give `section` the neighbour's winding and the cyclic shift
+// with the least summed squared slot distance, comparing both rings as K5
+// places them (scale, twist) about their own means, normalised by their
+// mean radius; near-ties keep the smallest shift, so an aligned ring is
+// left bit-identical.  `outFrom` (optional) receives the renumbering, new
+// slot i = old slot outFrom[i], when it returns true.  Returns false
+// (section untouched) when already aligned or when the ring sizes differ.
+bool TonicAlignSectionRingCpu(TonicTubeSection *section,
+                              TonicTubeSection const &neighbour,
+                              std::vector<int> *outFrom);
+
 // K6: re-derive one child from an edited parent and re-apply its sculpt.
 // lockChildren rides rigidly (world deltas frozen, stored deltas copied
 // bit-exactly); otherwise deltas re-apply in the new derived frames and

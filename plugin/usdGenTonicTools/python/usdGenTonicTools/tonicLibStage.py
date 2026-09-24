@@ -36,6 +36,13 @@ class StageLibrary:
 
         dll.Tonic_Hydrate.argtypes = [cvp, ccp, ccp, cip, cip, cip]
         dll.Tonic_Hydrate.restype = ctypes.c_int
+        # Optional: a DLL older than SS-03 lacks it, and hydrate() then
+        # falls back to the root layer alone.
+        fromLayers = getattr(dll, "Tonic_HydrateFromLayers", None)
+        if fromLayers is not None:
+            fromLayers.argtypes = [cvp, ctypes.POINTER(ccp), ctypes.c_int,
+                                   ccp, cip, cip, cip]
+            fromLayers.restype = ctypes.c_int
 
         for name, extra in (
                 ("Tonic_InsertTubeCenterCV", [ctypes.c_int]),
@@ -104,6 +111,31 @@ class StageLibrary:
             ctx, layerOrStage.encode("utf-8"), groomPath.encode("utf-8"),
             ctypes.byref(tubes), ctypes.byref(guides), ctypes.byref(imported))
         self._check(status, "Tonic_Hydrate")
+        return tubes.value, guides.value, imported.value
+
+    def canHydrateFromLayers(self):
+        return getattr(self._dll, "Tonic_HydrateFromLayers", None) is not None
+
+    def hydrateFromLayers(self, ctx, identifiers, groomPath):
+        """Hydrate `ctx` from the stage `identifiers` compose.
+
+        identifiers[0] is the root layer and identifiers[1] the session
+        layer (further entries become the session layer's sublayers), so
+        passing a usdview stage's two layers hydrates exactly what the
+        viewport shows. Returns (tubeCount, guideCount, importedCount).
+        """
+        identifiers = [str(i) for i in identifiers if i]
+        if not identifiers:
+            raise RuntimeError("Tonic_HydrateFromLayers failed: no layers")
+        names = (ctypes.c_char_p * len(identifiers))(
+            *[i.encode("utf-8") for i in identifiers])
+        tubes = ctypes.c_int(0)
+        guides = ctypes.c_int(0)
+        imported = ctypes.c_int(0)
+        status = self._dll.Tonic_HydrateFromLayers(
+            ctx, names, len(identifiers), groomPath.encode("utf-8"),
+            ctypes.byref(tubes), ctypes.byref(guides), ctypes.byref(imported))
+        self._check(status, "Tonic_HydrateFromLayers")
         return tubes.value, guides.value, imported.value
 
     # -- per-tube center operations ---------------------------------------
@@ -221,6 +253,12 @@ class StageLibrary:
             raise RuntimeError("Tonic_IsTubePersistent failed: %s"
                                % self.lastError())
         return status == 1
+
+    # -- SL-03: whole-tube Delete ------------------------------------------
+
+    def removeTubes(self, ctx, tubeIds):
+        """Remove tubes (with their subtrees) as one undo step."""
+        removeTubes(self._dll, ctx, tubeIds)
 
     # -- bake --------------------------------------------------------------
 
@@ -353,3 +391,38 @@ def setLevelDrawMode(dll, ctx, level, visible, xray, centersOnly):
     return dll.Tonic_SetLevelDrawMode(ctx, int(level), 1 if visible else 0,
                                       1 if xray else 0,
                                       1 if centersOnly else 0) == TONIC_OK
+
+
+# -- SL-03: whole-tube Delete ------------------------------------------------
+#
+# A module function for the same reason as bindV5: Hierarchy holds the raw
+# handle (TonicSession.dll), Tube the StageLibrary, and both must bind the
+# entry the same way. Binding here is idempotent and cheap.
+
+def bindRemoveTubes(dll):
+    dll.Tonic_RemoveTubes.argtypes = [ctypes.c_void_p,
+                                      ctypes.POINTER(ctypes.c_int),
+                                      ctypes.c_int]
+    dll.Tonic_RemoveTubes.restype = ctypes.c_int
+    # The refusal reason is read straight after; without a restype ctypes
+    # would hand back the pointer as an int.
+    dll.Tonic_StageGetLastError.argtypes = []
+    dll.Tonic_StageGetLastError.restype = ctypes.c_char_p
+    return dll
+
+
+def removeTubes(dll, ctx, tubeIds):
+    """Tonic_RemoveTubes over `tubeIds`; raises with the model's reason.
+
+    One call is one undo step, so a multi-tube Delete undoes in one Ctrl+Z.
+    L1 roots (tube 0 included) are refused by the model: filter them first.
+    """
+    ids = [int(t) for t in tubeIds]
+    if not ids:
+        raise RuntimeError("Tonic_RemoveTubes failed: no tube ids")
+    bindRemoveTubes(dll)
+    array = (ctypes.c_int * len(ids))(*ids)
+    if dll.Tonic_RemoveTubes(ctx, array, len(ids)) != TONIC_OK:
+        reason = dll.Tonic_StageGetLastError()
+        raise RuntimeError("Tonic_RemoveTubes failed: %s"
+                           % (reason.decode("utf-8") if reason else ""))

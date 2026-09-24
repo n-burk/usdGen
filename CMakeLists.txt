@@ -646,6 +646,17 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/python/usdGenTonicTools"
     DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/python"
     FILES_MATCHING PATTERN "*.py")
+# Tonic's shelf/toolbar icons (IC-01), staged the same way as the brush
+# palette's under usdGenTools (L604-612 above): white PNGs beside
+# plugInfo.json under resources/icons, resolved by tonicIcons.iconDir().
+file(GLOB _usdgen_tonic_tools_icons CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/resources/icons/*.png")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_usdgen_tonic_tools_icons})
+if(_usdgen_tonic_tools_icons)
+    file(COPY ${_usdgen_tonic_tools_icons}
+        DESTINATION "${_usdgen_tonic_tools_resources}/icons")
+endif()
 
 # ---------------------------------------------------------------------------
 # CUDA foundations and legacy optional GPU noise
@@ -1626,7 +1637,7 @@ foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
            testUsdGenCpuFanout testUsdGenCpuReferenceMap testUsdGenCurveRagged
            testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
            testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
-           testUsdGenSurfaceBindingCache testUsdGenScatterDensity)
+           testUsdGenSurfaceBindingCache testUsdGenScatterDensity testUsdGenLimitScatter)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -2376,6 +2387,29 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         LABELS "T3;tonic;tools;usdview;cv-regions" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # SS-01: File > Reopen keeps the live model (graph, undo stack and the
+    # committed groom); a stage without the scalp keeps the session
+    # detached with a missing-scalp warning instead of re-binding.
+    add_test(NAME testUsdviewTonicReattach
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicReattach.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-single-quad.usda")
+    set_tests_properties(testUsdviewTonicReattach PROPERTIES
+        LABELS "T3;tonic;tools;usdview;session" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # SS-03: a dock save with "add to the scene" sublayers the groom in the
+    # root layer, survives File > Reopen and comes back through Resume
+    # groom; binding over a saved groom asks Resume / Start new / Cancel.
+    # The script works on a temp copy of the scene (it saves the root layer).
+    add_test(NAME testUsdviewTonicFileCommands
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicFileCommands.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-single-quad.usda")
+    set_tests_properties(testUsdviewTonicFileCommands PROPERTIES
+        LABELS "T3;tonic;tools;usdview;session" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
     # Graph Reposition through actual StageView drags: shared CV and edge
     # motion stays live in both incident regions, preserves stable topology
     # and root descriptors, and owns one undo / Escape transaction.
@@ -2400,6 +2434,95 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-reference.usda")
     set_tests_properties(testUsdviewTonicBakeIsolation PROPERTIES
         LABELS "T3;tonic;tools;usdview;gate:TN-7" TIMEOUT 600
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # DK-05 artist status strip: the sync pill follows a real drag's commit
+    # (Committing... then Synced), a selection publish stays calm, Relax and
+    # an undo past the bottom reach the dock's message area, and every
+    # Display control writes its state field.
+    add_test(NAME testUsdviewTonicDock
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicDock.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicDock PROPERTIES
+        LABELS "T3;tonic;tools;usdview;dock" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TS-04 artist walkthrough: one session start to finish with real input
+    # (menu open, gated dock, picker bind, two regions, Tube gizmo/tweak/
+    # Escape/undo, Fill density + ramp, Hierarchy subdivide/merge/re-split,
+    # Sculpt, Output build, dock Save, warnings row, dock close/reopen, the
+    # Synced pill); every CONFUSING line of the 2026-09-23 walkthrough is a
+    # hard check.
+    add_test(NAME testUsdviewTonicArtistWalkthrough
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicArtistWalkthrough.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-single-quad.usda")
+    set_tests_properties(testUsdviewTonicArtistWalkthrough PROPERTIES
+        LABELS "T3;tonic;tools;usdview;walkthrough" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TS-02 hotkey sweep: every documented key in every mode through real
+    # QtTest key events (modes, sub-modes, F8-F11, Q/W/E/R, [ ], L, + = -,
+    # P, J/X holds mid-drag, Escape cancel-only, Delete and its gate,
+    # Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z / Shift+Z, Ctrl+A / Ctrl+Shift+A /
+    # Ctrl+I, Hierarchy level keys, Ctrl+Shift+S).
+    add_test(NAME testUsdviewTonicHotkeys
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicHotkeys.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicHotkeys PROPERTIES
+        LABELS "T3;tonic;tools;usdview;hotkeys" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TS-02 navigation and focus: Alt camera drags over an active scalp,
+    # Maya vs Blender MMB (the Display group's Navigation combo), wheel
+    # mid-drag, one render per camera move, no usdview rollover/pick/menu,
+    # focus back from a dock field, dock close/reopen, F framing.
+    add_test(NAME testUsdviewTonicNavigation
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicNavigation.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicNavigation PROPERTIES
+        LABELS "T3;tonic;tools;usdview;navigation" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    # TS-03 mode coverage through real clicks and keys: the Graph click
+    # tools (Connect/Link/Unweld/Delete, Shift+W/U), Fill (tube pick,
+    # density row, length-ramp drag), Hierarchy ops (double-click,
+    # Group/Make persistent, Merge selected, Solo, locks) and the Tube
+    # actions (Relax, Match surface, Snap root). Shared fixture:
+    # testenv/tonicT3Groom.py.
+    add_test(NAME testUsdviewTonicGraphTools
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicGraphTools.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicGraphTools PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    add_test(NAME testUsdviewTonicFill
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicFill.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicFill PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    add_test(NAME testUsdviewTonicHierarchyOps
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicHierarchyOps.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicHierarchyOps PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
+    add_test(NAME testUsdviewTonicTubeActions
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdviewTonicTubeActions.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/tonic-graph-scalp.usda")
+    set_tests_properties(testUsdviewTonicTubeActions PROPERTIES
+        LABELS "T3;tonic;tools;usdview" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
     # TN-5 through the REAL controller (plan/18 V7): 30 minutes of QtTest
@@ -2536,6 +2659,20 @@ if(_usdgen_test_python)
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endif()
 
+# The vendored RigExec gizmo maths (tonic_gizmo_parity G08/G09/G11/G16/G20/
+# G24): AxisDragParameter's ratio-scaled floor, MayaScaleFactor, the step and
+# world-grid snaps, the per-tool settings model and the World/Screen/Tube
+# frames, ported from usdRig's test_gizmo_screen/snap/settings. Pure maths.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsGizmoScreen
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsGizmoScreen.py")
+    set_tests_properties(testUsdGenTonicToolsGizmoScreen PROPERTIES
+        LABELS "T0;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
 # The Qt-free half of the V5 loops (plan/18 V5): HierarchyLoop's actions and
 # their undo brackets, the drawn-edge subdivide, SculptLoop's one shaped
 # stroke per move, and the fallback ladder stepped on synthetic timings.
@@ -2620,6 +2757,46 @@ if(_usdgen_test_python)
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsPanels.py")
     set_tests_properties(testUsdGenTonicToolsPanels PROPERTIES
+        LABELS "T1;tonic;tools" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# Icon loader + name-table coverage (IC-01): every name tonicModes.ICONS /
+# tonicPanels.ACTION_ICONS references resolves, when a PNG exists for it,
+# to a square RGBA glyph tonicIcons can tint. Plain python + PIL, no Qt.
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsIcons
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsIcons.py")
+    set_tests_properties(testUsdGenTonicToolsIcons PROPERTIES
+        LABELS "T1;tonic;tools;icons" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+endif()
+
+# DOC-01: docs/tonic-tool.md names every hotkey the tool binds -- the
+# tonicModes shelf tables, HotkeyAction, the dock's HINTS lines and the
+# viewport's J/X holds and +/- keys, all read from the code. Plain python,
+# no pxr or Qt.
+if(_usdgen_test_python)
+    add_test(NAME testTonicDocsHotkeys
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/check_tonic_docs.py")
+    set_tests_properties(testTonicDocsHotkeys PROPERTIES
+        LABELS "T0;tonic;tools;docs" TIMEOUT 60
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback")
+endif()
+
+# TS-01: the Qt-free half of tonicT3.py, the shared T3 driver module --
+# typeKey's key table against tonicViewport.keyName's own source, and the
+# check/info/statusRecorder helpers -- same plain interpreter as its
+# siblings above (no pxr, no Qt).
+if(_usdgen_test_python)
+    add_test(NAME testUsdGenTonicToolsT3Helpers
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsT3Helpers.py")
+    set_tests_properties(testUsdGenTonicToolsT3Helpers PROPERTIES
         LABELS "T1;tonic;tools" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
@@ -2984,6 +3161,8 @@ install(FILES
 install(DIRECTORY plugin/usdGenTonicTools/python/usdGenTonicTools
     DESTINATION "${USDGEN_INSTALL_PYTHONDIR}"
     FILES_MATCHING PATTERN "*.py")
+install(DIRECTORY plugin/usdGenTonicTools/resources/icons
+    DESTINATION "${USDGEN_INSTALL_PLUGINDIR}/usdGenTonicTools/resources")
 
 # Export targets so the package config's include(usdGenTargets.cmake) resolves.
 install(EXPORT usdGenTargets

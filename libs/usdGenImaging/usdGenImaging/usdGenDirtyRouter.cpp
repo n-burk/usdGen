@@ -178,6 +178,16 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
             // (the deeper points prefix wins); the bake always carries the
             // fine primvar locator too, so the re-capture still lands.
             Entry const paintDensity{node.id, usdGen::UsdGenDirtyCapture};
+            Entry const limitTopology{node.id, usdGen::UsdGenDirtySurfaceTopo,
+                                      node.surface, true};
+            // A scheme/boundary/crease edit changes the limit surface even
+            // when points and face indices remain identical.
+            pp.prefixes.emplace_back(
+                _Loc({TfToken("mesh"),TfToken("subdivisionScheme")}), limitTopology);
+            pp.prefixes.emplace_back(
+                _Loc({TfToken("mesh"),TfToken("subdivisionTags")}), limitTopology);
+            pp.prefixes.emplace_back(
+                _Loc({TfToken("mesh"),TfToken("topology")}), limitTopology);
             pp.prefixes.emplace_back(
                 _Loc({TfToken("primvars"),
                       TfToken("usdGen:paint:density")}),

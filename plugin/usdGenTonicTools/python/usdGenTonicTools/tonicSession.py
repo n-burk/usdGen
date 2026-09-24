@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import ctypes
+import inspect
 import os
 import shutil
 import tempfile
@@ -49,8 +50,191 @@ def bakeDirectory():
     override = os.environ.get("USDGENTONIC_BAKE_DIR")
     if override:
         return override
-    return os.path.join(tempfile.gettempdir(), "usdGenTonicBake",
-                        "p%d" % os.getpid())
+    base = os.path.join(tempfile.gettempdir(), "usdGenTonicBake")
+    _sweepStaleBakeDirectories(base)
+    return os.path.join(base, "p%d" % os.getpid())
+
+
+def _pidAlive(pid):
+    """Whether process `pid` still runs; True when the answer is unknown.
+
+    Unknown counts as alive: sweeping a live process's directory would
+    delete the map its stage is reading, and a leftover directory costs
+    only disk.
+    """
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                       wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        queryLimited = 0x1000        # PROCESS_QUERY_LIMITED_INFORMATION
+        handle = kernel.OpenProcess(queryLimited, False, int(pid))
+        if not handle:
+            # ERROR_ACCESS_DENIED means the process exists and belongs to
+            # someone else; ERROR_INVALID_PARAMETER means no such pid.
+            return ctypes.get_last_error() == 5
+        try:
+            code = wintypes.DWORD(0)
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True                   # EPERM: alive, not ours
+    return True
+
+
+def _sweepStaleBakeDirectories(base):
+    """Remove `p<pid>` bake directories whose process is gone (SS-06).
+
+    A crashed or killed usdview never runs deactivate(), so its per-process
+    directory -- versioned .ptx maps, easily hundreds of MB on a dense
+    scalp -- would stay in %TEMP% forever. Each new session sweeps the
+    ones whose owner is dead; live owners are left alone.
+    """
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith("p") and name[1:].isdigit()):
+            continue
+        if _pidAlive(int(name[1:])):
+            continue
+        shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+
+
+def _meshArrays(points, counts, indices):
+    """numpy (flat float32 points, int32 counts, int32 indices, centre).
+
+    None when numpy is missing or the arrays are not the shape a mesh's
+    are (a Vt array without the buffer protocol converts to an object
+    array); the caller then takes the list path.
+    """
+    try:
+        import numpy
+    except ImportError:
+        return None
+    try:
+        xyz = numpy.asarray(points, dtype=numpy.float32)
+        cnt = numpy.ascontiguousarray(counts, dtype=numpy.int32)
+        idx = numpy.ascontiguousarray(indices, dtype=numpy.int32)
+    except (TypeError, ValueError):
+        return None
+    if xyz.ndim != 2 or xyz.shape[1] < 3 or cnt.ndim != 1 or idx.ndim != 1:
+        return None
+    xyz = numpy.ascontiguousarray(xyz[:, :3])
+    lo = xyz.min(axis=0)
+    hi = xyz.max(axis=0)
+    centre = tuple(float(0.5 * (lo[a] + hi[a])) for a in range(3))
+    return xyz.reshape(-1), cnt, idx, centre
+
+
+def _cArray(values, ctype):
+    """A ctypes argument over `values` (a numpy array or a list).
+
+    numpy memory is borrowed, not copied: the caller keeps `values`
+    alive for the duration of the call.
+    """
+    if hasattr(values, "ctypes"):
+        return values.ctypes.data_as(ctypes.POINTER(ctype))
+    return (ctype * len(values))(*values)
+
+
+def _takesLevel(sink):
+    """Whether a status sink accepts a second (level) argument.
+
+    Older sinks -- `list.append`, usdview's PrintStatus, most T3
+    recorders -- take the text alone and would raise on a second
+    argument; the dock's _onStatus colours by level. A builtin with no
+    introspectable signature is treated as text-only.
+    """
+    try:
+        params = inspect.signature(sink).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = 0
+    for param in params:
+        if param.kind == param.VAR_POSITIONAL:
+            return True
+        if param.kind in (param.POSITIONAL_ONLY,
+                          param.POSITIONAL_OR_KEYWORD):
+            positional += 1
+    return positional >= 2
+
+
+class _StatusSink:
+    """A registered sink, called with `(text, level)` or `(text)` alone.
+
+    Stored as the session's _statusFn so callers that borrow and forward
+    it (the dock's file-command recorder calls `previous(*args)` with
+    whatever the session sent) can always pass the level along, whatever
+    the sink underneath accepts. Compares equal to the sink it wraps.
+    """
+
+    def __init__(self, sink):
+        self.sink = sink
+        self._withLevel = _takesLevel(sink)
+
+    def __call__(self, text, level="info"):
+        if self._withLevel:
+            self.sink(text, level)
+        else:
+            self.sink(text)
+
+    def __eq__(self, other):
+        if isinstance(other, _StatusSink):
+            other = other.sink
+        return self.sink == other
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(self.sink)
+
+
+def _wrapSink(sink):
+    if sink is None or isinstance(sink, _StatusSink):
+        return sink
+    return _StatusSink(sink)
+
+
+def _errorText(exc, lastError=""):
+    """One readable line for a failed file command's status.
+
+    A Tf.ErrorException reads "\\n\\tError in 'Fn' at line N in file F :
+    'what went wrong'"; the artist wants only the quoted part. The
+    bridge's ctypes wrappers raise "Tonic_X failed with code N", which
+    says nothing without the library's lastError(), so that is appended
+    -- to that kind of error only: the library never clears its last
+    error, so on a pxr or validation error it would describe some older
+    failure.
+    """
+    text = str(exc).strip()
+    marker = text.rfind(" : '")
+    if marker >= 0:
+        text = text[marker + 4:].rstrip().rstrip("'")
+    text = " ".join(text.split())
+    # The bridge prefixes its own module name; the artist needs the reason.
+    if text.startswith("tonicBridge: "):
+        text = text[len("tonicBridge: "):]
+    if lastError and "failed with code" in text and lastError not in text:
+        text = "%s (%s)" % (text, lastError) if text else lastError
+    return text or exc.__class__.__name__
 
 
 class TonicSession:
@@ -63,7 +247,7 @@ class TonicSession:
     def __init__(self, state, usdviewApi=None, statusFn=None):
         self._state = state
         self._api = usdviewApi
-        self._statusFn = statusFn
+        self._statusFn = _wrapSink(statusFn)
         self._model = None
         self._committer = None
         self._bake = None
@@ -79,8 +263,20 @@ class TonicSession:
         self._mapPath = DEFAULT_GROOM_PATH + "/RegionMap"
         self._mapFile = ""
         self._detached = False
+        # The scalp path a reattach could not find in the new stage, or "".
+        # Set only by reattach(); the session then stays detached until the
+        # artist binds a scalp again (SS-01).
+        self._scalpMissing = ""
+        # (tubes, guides, imported) the last hydrate() restored; the file
+        # commands' tests compare a reopened save against it.
+        self._hydratedCounts = (0, 0, 0)
         self._gestureDepth = 0
         self._lastSwapCode = tonicLib.TONIC_COMMITTER_NOTHING_PENDING
+        # Why the latest commit did not reach the stage, or "" (SS-05): a
+        # worker build that failed, an enqueue the artist-owned-output
+        # guard refused, or a swap into a live layer that is gone. The
+        # sync pill and the warnings list read it from status().
+        self._commitError = ""
         self._bakeInFlight = False
         self._bakeDir = ""
         # The bake options this session has asked the worker for. `texels`
@@ -91,9 +287,16 @@ class TonicSession:
         self._bakeTexels = 0
         self._bakeLevels = 1
         self._pendingOutputReveal = False
+        # Called after every publish that reached the indices, in the order
+        # they were added (SS-06). A list, not one slot: the dock's refresh
+        # and a test's counter (or a second view) used to overwrite each
+        # other. _publishHook is the one entry setPublishHook() owns.
+        self._publishListeners = []
         self._publishHook = None
-        # The viewport owns the Qt timer; this callback is the Qt-free wake
-        # seam used whenever a worker item is queued from a dock action.
+        # The viewport owns the Qt timer; these callbacks are the Qt-free
+        # wake seam used whenever a worker item is queued from a dock
+        # action. _idleHook is the entry setIdleHook() owns.
+        self._idleListeners = []
         self._idleHook = None
         self._stageLib = None
         # Centre of the bound scalp's bounding box, in world units. The
@@ -188,6 +391,16 @@ class TonicSession:
         return self._detached
 
     @property
+    def scalpMissing(self):
+        """The scalp path the last reattach could not find, or ""."""
+        return self._scalpMissing
+
+    @property
+    def hydratedCounts(self):
+        """(tubes, guides, imported) the last hydrate() brought back."""
+        return self._hydratedCounts
+
+    @property
     def gestureActive(self):
         return self._gestureDepth > 0
 
@@ -210,43 +423,87 @@ class TonicSession:
             self._stageLib = tonicLibStage.StageLibrary(self._state.lib)
         return self._stageLib
 
-    def report(self, text):
-        """One status line to usdview (or to the test's recorder)."""
-        self._status(text)
+    def report(self, text, level="info"):
+        """One status line to usdview (or to the test's recorder).
+
+        `level` is 'info', 'warning' or 'error'; the dock colours by it.
+        """
+        self._status(text, level)
 
     def setStatusSink(self, sink):
         """Send status lines to `sink` instead of usdview's status bar.
 
         usdview's PrintStatus goes to a widget; a test needs the text, and
-        so will the workspace's message area.
+        so will the workspace's message area. A sink that takes two
+        arguments is called with `(text, level)`, any other with the text
+        alone (SS-02), so every existing recorder keeps working.
         """
-        self._statusFn = sink
+        self._statusFn = _wrapSink(sink)
 
-    def setPublishHook(self, hook):
-        """Call `hook` after every publish that reached the indices.
+    def addPublishListener(self, listener):
+        """Call `listener()` after every publish that reached the indices.
 
         The workspace dock wires its refresh here (plan/18 section 3.5):
         the status strip and the warnings are derived from the model, so
-        they go stale exactly when the viewport would.
+        they go stale exactly when the viewport would. Adding the same
+        callable twice registers it once.
         """
-        self._publishHook = hook
+        if listener is not None and listener not in self._publishListeners:
+            self._publishListeners.append(listener)
 
-    def setIdleHook(self, hook):
-        """Wake the owning viewport after deferred work is queued.
+    def removePublishListener(self, listener):
+        """Stop calling `listener`; a listener never added is ignored."""
+        if listener in self._publishListeners:
+            self._publishListeners.remove(listener)
 
-        The session stays Qt-free.  The viewport supplies ``scheduleIdle``
+    def setPublishHook(self, hook):
+        """Replace the listener a previous setPublishHook() installed.
+
+        The one-slot spelling the dock and older tests use; listeners
+        added with addPublishListener() are left alone. None removes it.
+        """
+        self._publishHook = self._swapListener(self._publishListeners,
+                                               self._publishHook, hook)
+
+    def addIdleListener(self, listener):
+        """Call `listener()` whenever deferred work is queued.
+
+        The session stays Qt-free: the viewport supplies ``scheduleIdle``
         once its timer is ready and removes it before teardown.
         """
-        self._idleHook = hook
+        if listener is not None and listener not in self._idleListeners:
+            self._idleListeners.append(listener)
+
+    def removeIdleListener(self, listener):
+        if listener in self._idleListeners:
+            self._idleListeners.remove(listener)
+
+    def setIdleHook(self, hook):
+        """Replace the idle listener a previous setIdleHook() installed."""
+        self._idleHook = self._swapListener(self._idleListeners,
+                                            self._idleHook, hook)
+
+    @staticmethod
+    def _swapListener(listeners, previous, hook):
+        if previous is not None and previous in listeners:
+            listeners.remove(previous)
+        if hook is not None and hook not in listeners:
+            listeners.append(hook)
+        return hook
+
+    @staticmethod
+    def _notify(listeners):
+        # A snapshot: a listener may remove itself (or add another) while
+        # it runs, and every listener registered at the call still fires.
+        for listener in list(listeners):
+            listener()
 
     def _wakeIdle(self):
-        hook = self._idleHook
-        if hook is not None:
-            hook()
+        self._notify(self._idleListeners)
 
-    def _status(self, text):
+    def _status(self, text, level="info"):
         if self._statusFn is not None:
-            self._statusFn(text)
+            self._statusFn(text, level)
             return
         api = self._api
         if api is None:
@@ -317,7 +574,16 @@ class TonicSession:
         outDir = bakeDirectory()
         if dll.Tonic_BakeCreate(self._model, outDir.encode("utf-8"), None,
                                 ctypes.byref(bake)) != tonicLib.TONIC_OK:
-            self._status("Tonic: " + self.lastError())
+            self._status("Tonic: " + self.lastError(), "error")
+            # Undo this call's half-start (SS-06): a committer thread with
+            # no bake worker, and a live sublayer the stage would keep
+            # composing after the tool gave up, are both worse than no
+            # session at all.
+            dll.Tonic_CommitterDestroy(committer)
+            self._committer = None
+            self._removeLiveSublayer()
+            self._liveLayer = None
+            self._liveId = ""
             return False
         self._bake = bake
         self._bakeDir = outDir
@@ -341,17 +607,22 @@ class TonicSession:
         self._descPath = descPath or ""
         self._scalpPath = str(scalpPath)
         self._mapPath = self._groomPath + "/RegionMap"
+        # Every failure from here on tears the half-built session down
+        # (SS-06): a model with no committer, or a committer and live
+        # sublayer with no bake worker, would otherwise stay behind with
+        # `model` set, and the dock would offer tools over it.
         if not self.bindScalpFromStage(self._scalpPath, stage):
-            self.dll.Tonic_Destroy(model)
-            self._model = None
+            self.deactivate()
             return False
         dll = self.dll
         dll.Tonic_SetSnapRadius(model, ctypes.c_float(0.05))
         dll.Tonic_SetMirrorX(model, 1 if self._state.mirrorX else 0)
         if not self._startWorkers(stage):
+            self.deactivate()
             return False
         if dll.Tonic_Activate(model) != tonicLib.TONIC_OK:
             self._status("Tonic: " + self.lastError())
+            self.deactivate()
             return False
         self._state.activated = True
         self._state.groomRoot = self._groomPath
@@ -376,26 +647,43 @@ class TonicSession:
             return False
         prim = stage.GetPrimAtPath(str(groomPath))
         if not prim:
-            self._status("Tonic: no groom at %s" % groomPath)
+            self._status("Tonic: no groom at %s" % groomPath, "error")
             return False
-        if self._model is not None:
-            self.deactivate()
         model = self._createModel()
         if model is None:
             return False
+        stageLib = tonicLibStage.StageLibrary(self._state.lib)
+        # Hydrate into the new model BEFORE tearing the old one down: the
+        # old model's live layer may be all the stage holds of this groom,
+        # and deactivate() takes that layer out of the session layer.
+        try:
+            if layerOrStage:
+                tubes, guides, imported = stageLib.hydrate(
+                    model, str(layerOrStage), str(groomPath))
+            elif stageLib.canHydrateFromLayers():
+                # What usdview shows is the root layer composed under the
+                # session layer. A groom saved beside the live overlay is
+                # only in the session layer's stack, which a stage opened
+                # on the root layer alone never sees (SS-03).
+                tubes, guides, imported = stageLib.hydrateFromLayers(
+                    model, [stage.GetRootLayer().identifier,
+                            stage.GetSessionLayer().identifier],
+                    str(groomPath))
+            else:
+                tubes, guides, imported = stageLib.hydrate(
+                    model, stage.GetRootLayer().identifier, str(groomPath))
+        except RuntimeError as exc:
+            self._status("Tonic: %s" % exc, "error")
+            self.dll.Tonic_Destroy(model)
+            return False
+        # Read while the prim is still composed (see the ordering note).
+        scalpPath = self._scalpPathFromGroom(stage, prim)
+        if self._model is not None:
+            self.deactivate()
         self._model = model
         self._groomPath = str(groomPath)
         self._mapPath = self._groomPath + "/RegionMap"
-        identifier = layerOrStage or stage.GetRootLayer().identifier
-        stageLib = tonicLibStage.StageLibrary(self._state.lib)
-        try:
-            tubes, guides, imported = stageLib.hydrate(
-                model, identifier, self._groomPath)
-        except RuntimeError as exc:
-            self._status("Tonic: %s" % exc)
-            self.dll.Tonic_Destroy(model)
-            self._model = None
-            return False
+        self._hydratedCounts = (int(tubes), int(guides), int(imported))
         # Tonic_Hydrate has ALREADY bound the scalp and restored the scalp
         # graph, its region loops and the per-face region ids from the
         # committed ScalpGraph prim. Re-binding here would throw all of
@@ -404,14 +692,17 @@ class TonicSession:
         # come up with a uniformly dark-red scalp: every face rasterised
         # as uncovered because there were no region loops left to cover
         # it. The path is recorded for the committer and nothing else.
-        scalpPath = self._scalpPathFromGroom(stage, prim)
         if scalpPath:
             self._scalpPath = scalpPath
             self.recordScalpCenter(scalpPath, stage)
+        # From here the new model is the session's: a failure tears it
+        # down whole, as activate() does (SS-06).
         if not self._startWorkers(stage):
+            self.deactivate()
             return False
         if self.dll.Tonic_Activate(model) != tonicLib.TONIC_OK:
             self._status("Tonic: " + self.lastError())
+            self.deactivate()
             return False
         self._state.activated = True
         self._state.groomRoot = self._groomPath
@@ -444,7 +735,14 @@ class TonicSession:
             return None
 
     def _scalpMesh(self, scalpPath, stage):
-        """(flatPoints, counts, indices) for the mesh at `scalpPath`, or None."""
+        """(flatPoints, counts, indices, centre) for `scalpPath`, or None.
+
+        The three arrays are numpy float32/int32 when numpy imports, else
+        plain lists; _cArray() turns either into what Tonic_BindScalp
+        takes. Per-element Python loops over the Vt arrays made a 100k-face
+        scalp take seconds to bind (SS-06); numpy reads the Vt buffers in
+        one copy each.
+        """
         prim = stage.GetPrimAtPath(str(scalpPath))
         if not prim:
             self._status("Tonic: no prim at %s" % scalpPath)
@@ -452,11 +750,17 @@ class TonicSession:
         points = prim.GetAttribute("points").Get() or []
         counts = prim.GetAttribute("faceVertexCounts").Get() or []
         indices = prim.GetAttribute("faceVertexIndices").Get() or []
-        if not points or not counts:
+        if not len(points) or not len(counts):
             self._status("Tonic: %s is not a mesh with points" % scalpPath)
             return None
+        arrays = _meshArrays(points, counts, indices)
+        if arrays is not None:
+            return arrays
         flat = [float(c) for p in points for c in (p[0], p[1], p[2])]
-        return flat, counts, indices
+        centre = tuple(
+            0.5 * (min(flat[a::3]) + max(flat[a::3])) for a in range(3))
+        return (flat, [int(c) for c in counts], [int(i) for i in indices],
+                centre)
 
     def recordScalpCenter(self, scalpPath, stage=None):
         """Note the scalp's bounding-box centre without touching the model.
@@ -470,9 +774,7 @@ class TonicSession:
         mesh = self._scalpMesh(scalpPath, stage)
         if mesh is None:
             return False
-        flat = mesh[0]
-        self._scalpCenter = tuple(
-            0.5 * (min(flat[a::3]) + max(flat[a::3])) for a in range(3))
+        self._scalpCenter = mesh[3]
         return True
 
     def bindScalpFromStage(self, scalpPath, stage=None):
@@ -489,17 +791,18 @@ class TonicSession:
         mesh = self._scalpMesh(scalpPath, stage)
         if mesh is None:
             return False
-        flat, counts, indices = mesh
-        pts = (ctypes.c_float * len(flat))(*flat)
-        cnt = (ctypes.c_int * len(counts))(*[int(c) for c in counts])
-        idx = (ctypes.c_int * len(indices))(*[int(i) for i in indices])
+        # `flat`, `counts` and `indices` stay referenced until the call
+        # returns: for numpy input the ctypes pointers borrow their memory.
+        flat, counts, indices, centre = mesh
+        pts = _cArray(flat, ctypes.c_float)
+        cnt = _cArray(counts, ctypes.c_int)
+        idx = _cArray(indices, ctypes.c_int)
         if self.dll.Tonic_BindScalp(self._model, pts, len(flat), cnt,
                                     len(counts), idx,
                                     len(indices)) != tonicLib.TONIC_OK:
             self._status("Tonic: " + self.lastError())
             return False
-        self._scalpCenter = tuple(
-            0.5 * (min(flat[a::3]) + max(flat[a::3])) for a in range(3))
+        self._scalpCenter = centre
         return True
 
     def deactivate(self):
@@ -522,6 +825,26 @@ class TonicSession:
         self._liveId = ""
         self._gestureDepth = 0
         self._scalpCenter = None
+        # Everything below describes the torn-down workers and the stage
+        # they wrote to (SS-06). Left set, the next activate() inherited
+        # them: a bake "in flight" kept hasPendingWork() True forever (the
+        # new worker never completes the old version), the map file named
+        # the previous groom's .ptx in a directory that is now gone, an
+        # Output reveal fired on the new groom's first swap, and the
+        # stage handle kept a closed stage alive.
+        self._bakeInFlight = False
+        self._mapFile = ""
+        self._pendingOutputReveal = False
+        self._stage = None
+        # Rebound on demand over whatever library is loaded next; shutdown
+        # drops the library itself, and this binding would pin it.
+        self._stageLib = None
+        # A reattach that found no scalp leaves the session detached until
+        # the artist binds again, and binding starts with this teardown.
+        self._scalpMissing = ""
+        self._detached = False
+        self._commitError = ""
+        self._lastSwapCode = tonicLib.TONIC_COMMITTER_NOTHING_PENDING
         self._state.activated = False
 
     def _removeBakeDirectory(self):
@@ -561,21 +884,38 @@ class TonicSession:
         return True
 
     def reattach(self, stage=None):
-        """A new stage arrived: re-host the live sublayer and re-commit."""
+        """A new stage arrived: re-host the live sublayer and re-commit.
+
+        The model is the artist's work and survives the stage (plan/17
+        section 3.4), so this never re-binds the scalp: Tonic_BindScalp
+        clears the scalp graph, its region loops and the undo stack, and a
+        File > Reopen used to commit an empty groom that way. Only the
+        scalp's centre is re-measured, as hydrate does.
+
+        A stage without the bound scalp keeps the session detached and
+        the live layer out of it: the old groom would float over a scene
+        that has nothing to grow it from.
+        """
         if self._committer is None:
             return False
         stage = stage if stage is not None else self._apiStage()
         if stage is None:
             return False
+        if self._scalpPath and not stage.GetPrimAtPath(self._scalpPath):
+            self._scalpMissing = self._scalpPath
+            self._status("Scalp %s not found in the new stage: bind a scalp "
+                         "mesh to continue" % self._scalpPath)
+            return False
+        self._scalpMissing = ""
         self._stage = stage
         if self._liveLayer is not None:
             paths = list(stage.GetSessionLayer().subLayerPaths)
             if self._liveId not in paths:
                 stage.GetSessionLayer().subLayerPaths.insert(0, self._liveId)
+        if self._scalpPath:
+            self.recordScalpCenter(self._scalpPath, stage)
         self.dll.Tonic_CommitterReattach(self._committer)
         self._detached = False
-        if self._scalpPath:
-            self.bindScalpFromStage(self._scalpPath, stage)
         self.enqueueCommit()
         self.publish(PUBLISH_ALL)
         return True
@@ -596,8 +936,7 @@ class TonicSession:
             self._status("Tonic: " + self.lastError())
             return 0
         self._state.generation = int(self.modelVersion)
-        if self._publishHook is not None:
-            self._publishHook()
+        self._notify(self._publishListeners)
         # Dock buttons and viewport gestures share this publication path.
         # Updating the view here keeps a successful model publish visible
         # immediately instead of waiting for the idle pump or dock timer.
@@ -678,6 +1017,29 @@ class TonicSession:
         self._state.showGeneratedCurves = bool(visible.value)
         return bool(visible.value)
 
+    def setAmplifiedHair(self, visible):
+        """Show or hide the amplified hair through the model (DK-06).
+
+        The model owns the swap (plan/17 section 3.2), so both dock
+        controls -- the Output row and the Display checkbox -- come here;
+        writing the state field alone left both ticked over guides only.
+        """
+        visible = bool(visible)
+        if self._model is None:
+            self._state.showAmplifiedHair = visible
+            return True
+        entry = getattr(self.dll, "Tonic_SetAmplifiedHair", None)
+        if entry is None:
+            self._status("Tonic: amplified hair is unavailable in this "
+                         "library")
+            return False
+        if int(entry(self._model, 1 if visible else 0)) != tonicLib.TONIC_OK:
+            self._status("Tonic: " + self.lastError())
+            return False
+        self._state.showAmplifiedHair = visible
+        self.publish()
+        return True
+
     # -- Output description ----------------------------------------------
 
     def outputSettingsAvailable(self):
@@ -715,11 +1077,15 @@ class TonicSession:
         self._state.outputStrandWidth = width
         return enabled, multiplier, width
 
-    def _outputCollision(self):
-        """Reject artist-owned Output prims before native output is enabled."""
-        stage = self._stage if self._stage is not None else self._apiStage()
+    def _blockedOutputPath(self, stage):
+        """The reserved Output prim an artist owns, or "".
+
+        The same rule as the committer's enqueue guard (tonicCommit.cpp
+        `_BlockedOutputPath`): Output, OutputCurves and OutputRegionMap
+        are the tool's only while they carry the outputOwned marker.
+        """
         if stage is None:
-            return True
+            return ""
         markerName = "usdGen:tonic:outputOwned"
         for suffix in ("Output", "OutputCurves", "OutputRegionMap"):
             prim = stage.GetPrimAtPath(self._groomPath + "/" + suffix)
@@ -727,11 +1093,38 @@ class TonicSession:
                 continue
             marker = prim.GetAttribute(markerName)
             if not marker or marker.Get() is not True:
-                self._status("Tonic: cannot build Output description; "
-                             "%s is not Tonic-owned (preserving it)"
-                             % prim.GetPath())
-                return False
+                return str(prim.GetPath())
+        return ""
+
+    def _outputCollision(self):
+        """Reject artist-owned Output prims before native output is enabled."""
+        stage = self._stage if self._stage is not None else self._apiStage()
+        blocked = self._blockedOutputPath(stage)
+        if blocked:
+            self._status("Tonic: cannot build Output description; "
+                         "%s is not Tonic-owned (preserving it)" % blocked)
+            return False
         return True
+
+    def _nativeOutputEnabled(self):
+        """Whether the MODEL has Output on (what the next build authors).
+
+        Read straight from the library: outputSettings() also mirrors
+        into the tool state and folds in the pending reveal, and the
+        enqueue guard must neither write state nor be fooled by it.
+        """
+        entry = getattr(self.dll, "Tonic_GetOutputSettings", None) \
+            if self._model is not None else None
+        if entry is None:
+            return False
+        enabled = ctypes.c_int(0)
+        multiplier = ctypes.c_float(0.0)
+        width = ctypes.c_float(0.0)
+        if int(entry(self._model, ctypes.byref(enabled),
+                     ctypes.byref(multiplier),
+                     ctypes.byref(width))) != tonicLib.TONIC_OK:
+            return False
+        return bool(enabled.value)
 
     def setOutputSettings(self, enabled=None, densityMultiplier=None,
                           strandWidth=None, publish=True, enqueue=True):
@@ -856,31 +1249,105 @@ class TonicSession:
             return 0
         return int(dirty.value)
 
+    def endGestureIfChanged(self, changed):
+        """Close the open gesture, leaving no undo step when nothing changed.
+
+        A click that selected, a slider press that never moved, a panel
+        write of the value already held: each opened a bracket, and
+        Tonic_EndGesture keeps the step Begin pushed whether or not the
+        model moved, so Ctrl+Z would spend a keypress on nothing. Cancel
+        drops that step and restores the press-time base; its dirty bits
+        are published because the viewport may have drawn the gesture.
+        Returns True when an undo step was kept.
+        """
+        if changed:
+            return self.endGesture()
+        dirty = self.cancelGesture()
+        if dirty:
+            self.publish(dirty)
+        return False
+
     # -- undo / redo -------------------------------------------------------
 
     def undo(self):
-        if self._model is None:
-            return False
-        dirty = ctypes.c_uint(0)
-        if self.dll.Tonic_Undo(self._model,
-                               ctypes.byref(dirty)) != tonicLib.TONIC_OK:
-            self._status("Tonic: nothing to undo")
-            return False
-        self.publish(int(dirty.value))
-        self.enqueueCommit()
-        return True
+        """Step back one undo step; False (and says why) when there is none."""
+        return self._stepHistory(True)
 
     def redo(self):
+        """Re-apply the step undo left; False (and says why) when none."""
+        return self._stepHistory(False)
+
+    def _stepHistory(self, backward):
         if self._model is None:
             return False
-        dirty = ctypes.c_uint(0)
-        if self.dll.Tonic_Redo(self._model,
-                               ctypes.byref(dirty)) != tonicLib.TONIC_OK:
-            self._status("Tonic: nothing to redo")
+        dll = self.dll
+        word = "undo" if backward else "redo"
+        if self.gestureActive:
+            # Parity G14, for session gestures too: a dock slider drag
+            # (Density, Edge bias) holds a session bracket the viewport's
+            # own drag guard never sees, and Ctrl+Z still reaches us. The
+            # model refuses as well; saying why here beats "undo failed".
+            self._status("Tonic: finish the drag before %s" % word,
+                         "warning")
             return False
-        self.publish(int(dirty.value))
+        # Tonic_Undo/Redo on an empty stack is a no-op SUCCESS, so the
+        # depth is the only honest answer to "is there anything to undo":
+        # without it the session published and committed an unchanged
+        # model and the artist got no word at all.
+        depth = self.undoDepth() if backward else self.redoDepth()
+        if depth <= 0:
+            self._status("Nothing to %s" % word, "warning")
+            return False
+        label = self.undoLabel(0 if backward else -1)
+        guidesBefore = self._guideCount()
+        dirty = ctypes.c_uint(0)
+        entry = dll.Tonic_Undo if backward else dll.Tonic_Redo
+        if entry(self._model, ctypes.byref(dirty)) != tonicLib.TONIC_OK:
+            self._status("Tonic: %s failed: %s" % (word, self.lastError()),
+                         "error")
+            return False
+        bits = int(dirty.value)
+        # A step recorded before the guides were grown (a stub build, a
+        # panel edit from before SS-02) restores an empty guide set, and
+        # walkthrough step 12 lost all 38 guides to one Ctrl+Z. Regrow them
+        # from the restored tubes whenever the artist had guides on screen;
+        # RefillGuides stays a no-op after an explicit Clear.
+        if guidesBefore > 0 and dll.Tonic_RefillGuides(
+                self._model, ctypes.c_float(1.0)) == tonicLib.TONIC_OK:
+            bits |= tonicLib.TONIC_DIRTY_GUIDES
+        self.publish(bits)
         self.enqueueCommit()
+        verb = "Undo" if backward else "Redo"
+        self._status("%s: %s" % (verb, label) if label else verb)
         return True
+
+    def _guideCount(self):
+        if self._model is None:
+            return 0
+        entry = getattr(self.dll, "Tonic_GetGuideCounts", None)
+        if entry is None:
+            return 0
+        guides = ctypes.c_int(0)
+        if entry(self._model, ctypes.byref(guides), None) \
+                != tonicLib.TONIC_OK:
+            return 0
+        return int(guides.value)
+
+    def undoDepth(self):
+        """Steps Ctrl+Z can take (0 with no model)."""
+        if self._model is None:
+            return 0
+        return max(int(self.dll.Tonic_GetUndoDepth(self._model)), 0)
+
+    def redoDepth(self):
+        """Steps Ctrl+Y can take (0 with no model)."""
+        if self._model is None:
+            return 0
+        return max(int(self.dll.Tonic_GetRedoDepth(self._model)), 0)
+
+    def redoLabel(self):
+        """What Ctrl+Y would redo, or "" when the redo stack is empty."""
+        return self.undoLabel(-1)
 
     def undoLabel(self, depth=0):
         if self._model is None:
@@ -1033,15 +1500,88 @@ class TonicSession:
     # -- commit + bake -----------------------------------------------------
 
     def enqueueCommit(self):
-        """Ask the worker for a layer of the model's latest version."""
+        """Ask the worker for a layer of the model's latest version.
+
+        Also the warnings row's "Retry commit": every enqueue is a fresh
+        attempt, so the last failure is forgotten here and a repeat of it
+        is reported again rather than swallowed.
+        """
         if self._committer is None:
             return False
+        self._commitError = ""
+        # A scalp with no tube yet (a graph still being drawn) is a model
+        # the committer refuses to build ("snapshot holds no tubes").
+        # Before anything reached the stage that refusal is not news -- the
+        # groom has simply not started -- and reporting it would turn the
+        # sync pill red on every graph stroke. Once a groom is on the
+        # stage an empty model IS news (the stage keeps the old tubes), so
+        # that enqueue goes through and its failure is reported.
+        if self.committedVersion == 0 and self._tubeCount() == 0:
+            return True
+        # The committer's artist-owned-output guard needs the composed
+        # stage, and no UsdStage crosses the C ABI, so the ctypes path runs
+        # the same rule here, over the stage the session already holds
+        # (SS-05). Without it an artist's Output prim would be overwritten
+        # by the live layer's stronger opinions without a word.
+        if self._nativeOutputEnabled():
+            stage = self._stage if self._stage is not None \
+                else self._apiStage()
+            blocked = self._blockedOutputPath(stage)
+            if blocked:
+                self._commitFailed(
+                    "refusing to overwrite artist-owned output at %s"
+                    % blocked)
+                return False
         if self.dll.Tonic_CommitterEnqueue(self._committer, 0, 0, 0,
                                            None) != tonicLib.TONIC_OK:
-            self._status("Tonic: " + self.lastError())
+            self._status("Tonic: " + self.lastError(), "error")
             return False
         self._wakeIdle()
         return True
+
+    def _tubeCount(self):
+        """Live tubes in the model, or -1 when the library cannot say."""
+        entry = getattr(self.dll, "Tonic_GetTubeCount", None) \
+            if self._model is not None else None
+        if entry is None:
+            return -1
+        return int(entry(self._model))
+
+    def _commitFailed(self, reason):
+        """Record why the commit failed; say so once per distinct reason.
+
+        The pump sees a persistent failure (a live layer that is gone)
+        on every idle slot; one status line per reason is the artist's
+        cue, the sync pill and the warnings row keep standing after it.
+        """
+        reason = str(reason or "unknown reason")
+        if reason != self._commitError:
+            self._status("Tonic: commit failed: " + reason, "error")
+        self._commitError = reason
+
+    def _takeCommitDiagnostic(self):
+        """The committer's parked failure text, taken (cleared) once."""
+        entry = getattr(self.dll, "Tonic_CommitterTakeDiagnostic", None)
+        if entry is None or self._committer is None:
+            return ""
+        buffer = ctypes.create_string_buffer(4096)
+        length = int(entry(self._committer, buffer, 4096))
+        if length <= 0:
+            return ""
+        return buffer.value.decode("utf-8", "replace")
+
+    def stageLastError(self):
+        """Tonic_StageGetLastError: the error buffer of tonicApiStage.h.
+
+        The per-tube and hierarchy entries (Tonic_BakeEnqueueLevels among
+        them) write this one, not the model buffer lastError() reads.
+        """
+        entry = getattr(self.dll, "Tonic_StageGetLastError", None) \
+            if self._state.lib is not None else None
+        if entry is None:
+            return ""
+        text = entry()
+        return text.decode("utf-8", "replace") if text else ""
 
     def rasterise(self):
         """K3 over the current graph (gesture end only, plan/17 4.2)."""
@@ -1058,9 +1598,12 @@ class TonicSession:
         plan/17 section 5.1: "each closed region gets a tube stub". Until
         one exists the groom cannot be committed at all -- the committer
         refuses a snapshot with no tubes -- so an artist who only drew a
-        graph would save nothing. Called after a graph gesture, once K3 has
-        claimed the faces Tonic_BuildTubeFromRegion needs (the rasterise
-        also re-attaches the existing tubes to the renumbered regions).
+        graph would save nothing. Called at the end of a graph edit, once K3
+        has claimed the faces Tonic_BuildTubeFromRegion needs (the rasterise
+        also re-attaches the existing tubes to the renumbered regions), and
+        while that edit's undo bracket is still open: outside a bracket each
+        build (and the refill below) pushes its own undo step, and the
+        artist's first Ctrl+Z would take back only the stub.
 
         Returns the number of stubs built. The model holds one L1 tube per
         region, so a scalp with five regions ends with five L1 roots.
@@ -1091,6 +1634,11 @@ class TonicSession:
                     == tonicLib.TONIC_OK:
                 built += 1
         if built:
+            # A new stub has no guides until something refills them, and
+            # nothing else does until a Fill parameter is touched: the
+            # artist closed a region and saw bare tubes. The native
+            # post-Clear latch keeps this a no-op after an explicit Clear.
+            self.dll.Tonic_RefillGuides(self._model, ctypes.c_float(1.0))
             self._status("Tonic: %d tube stub%s built"
                          % (built, "" if built == 1 else "s"))
         return built
@@ -1168,7 +1716,13 @@ class TonicSession:
         status = (entry(self._bake) if entry is not None
                   else self.dll.Tonic_BakeEnqueue(self._bake))
         if status != tonicLib.TONIC_OK:
-            self._status("Tonic: " + self.lastError())
+            # Tonic_BakeEnqueueLevels is a tonicApiStage.h entry and sets
+            # the STAGE error buffer; the model buffer would print some
+            # older, unrelated failure (SS-05).
+            reason = self.stageLastError() if entry is not None else ""
+            self._status("Tonic: region map bake failed: " +
+                         (reason or self.lastError() or "unknown reason"),
+                         "error")
             return False
         self._state.mapVersion = int(self.dll.Tonic_GetMapVersion(self._model))
         self._bakeInFlight = True
@@ -1186,11 +1740,18 @@ class TonicSession:
         swapped = False
         baked = 0
         if self._committer is not None:
-            code = self.dll.Tonic_CommitterSwap(
+            code = int(self.dll.Tonic_CommitterSwap(
                 self._committer, self._liveId.encode("utf-8"),
-                1 if self.gestureActive else 0)
-            self._lastSwapCode = int(code)
+                1 if self.gestureActive else 0))
+            self._lastSwapCode = code
             swapped = code == tonicLib.TONIC_COMMITTER_SWAPPED
+            if code == tonicLib.TONIC_COMMITTER_ERROR:
+                # Reported once (the same reason on the next slot is
+                # silent); the pill keeps showing it until a swap lands.
+                self._commitFailed(self.lastError() or
+                                   "the live layer could not be swapped")
+            elif swapped:
+                self._commitError = ""
             if swapped and self._pendingOutputReveal:
                 self._pendingOutputReveal = False
                 self.outputSettings()
@@ -1210,8 +1771,21 @@ class TonicSession:
             pending = int(self.dll.Tonic_BakePendingVersion(self._bake))
             completed = int(self.dll.Tonic_BakeCompletedVersion(self._bake))
             self._bakeInFlight = pending > completed
+        # Pending work BEFORE the diagnostic: the worker parks the failed
+        # version and its reason together, so a failure landing after this
+        # read still leaves `pending` True and the next slot takes it; read
+        # the other way round, the idle timer could stop with the reason
+        # still parked and the artist would never hear of it.
+        pendingWork = self.hasPendingWork()
+        if self._committer is not None:
+            # A failed build parks its reason in the committer; take it
+            # once per idle slot so the artist hears of it exactly once.
+            diagnostic = self._takeCommitDiagnostic()
+            if diagnostic:
+                self._commitError = ""
+                self._commitFailed(diagnostic)
         return {"swapped": swapped, "swapCode": self._lastSwapCode,
-                "baked": baked, "pending": self.hasPendingWork()}
+                "baked": baked, "pending": pendingWork}
 
     def hasPendingWork(self):
         """True while the pump still has work (plan/18 section 3.3).
@@ -1224,7 +1798,17 @@ class TonicSession:
             return False
         if self._bakeInFlight:
             return True
-        return self.pendingVersion > self.committedVersion
+        pending = self.pendingVersion
+        if pending <= self.committedVersion:
+            return False
+        # Nothing the pump can finish (SS-05): a swap that errors will
+        # error again on the next slot, and the worker never retries a
+        # failed version on its own. Only a fresh enqueue is new work, and
+        # it wakes the pump itself.
+        if self._lastSwapCode == tonicLib.TONIC_COMMITTER_ERROR:
+            return False
+        failed = self.failedVersion
+        return not (failed and failed >= pending)
 
     # -- status ------------------------------------------------------------
 
@@ -1245,6 +1829,20 @@ class TonicSession:
         if self._committer is None:
             return 0
         return int(self.dll.Tonic_CommitterPendingVersion(self._committer))
+
+    @property
+    def failedVersion(self):
+        """The version the committer failed to build (0 when none)."""
+        entry = getattr(self.dll, "Tonic_CommitterFailedVersion", None) \
+            if self._committer is not None else None
+        if entry is None:
+            return 0
+        return int(entry(self._committer))
+
+    @property
+    def commitError(self):
+        """Why the latest commit did not reach the stage, or ""."""
+        return self._commitError
 
     @property
     def lastSwapMs(self):
@@ -1295,6 +1893,7 @@ class TonicSession:
             "active": self._model is not None,
             "detached": self._detached,
             "committerDetached": self._detached,
+            "scalpMissing": self._scalpMissing,
             "gestureActive": self.gestureActive,
             "modelVersion": self.modelVersion,
             "committedVersion": self.committedVersion,
@@ -1304,6 +1903,10 @@ class TonicSession:
             "lastSwapMs": self.lastSwapMs,
             "partialMode": self.partialMode,
             "swapCode": self._lastSwapCode,
+            # SS-05: the sync pill reads 'Commit failed: <reason>' and the
+            # warnings list offers 'Retry commit' while this is set.
+            "commitError": self._commitError,
+            "failedVersion": self.failedVersion,
             "fallbackReason": self.fallbackReason(),
             "nodes": nodes, "edges": edges, "regions": regions,
             "uncovered": uncovered, "intersected": intersected,
@@ -1311,129 +1914,352 @@ class TonicSession:
             # Where the fallback ladder stands (plan/18 section 3.7); the
             # status strip prints it, and 0 means full fidelity.
             "ladderStep": int(getattr(self._state, "ladderStep", 0)),
+            # The Edit strip names the steps Ctrl+Z / Ctrl+Y would take.
+            "undoLabel": self.undoLabel(0),
+            "redoLabel": self.redoLabel(),
+            "undoDepth": self.undoDepth(),
+            "redoDepth": self.redoDepth(),
         }
 
     # -- file commands -----------------------------------------------------
 
-    def flushLatest(self, timeout=10.0):
-        """Swap the newest model layer before a file save can copy it."""
+    def _commitPending(self):
+        """True while the committer owes the stage a newer version."""
+        if self._committer is None:
+            return False
+        return self.pendingVersion > self.committedVersion
+
+    def flushLatest(self, timeout=10.0, tick=None):
+        """Swap the newest model layer in before a file save copies it.
+
+        Waits for the committer only: a region-map bake can take seconds
+        on a dense scalp and the save copies whichever map is already
+        baked, so waiting on it too made Save block the UI for up to ten
+        seconds. `tick` is called on every wait loop -- the dock passes
+        QApplication.processEvents so the viewport keeps painting -- and
+        the wait gives up after `timeout` seconds, saying so.
+        """
         if self._committer is None:
             return True
+        if self._detached:
+            self._status("Tonic: the groom is detached from the stage; bind "
+                         "a scalp mesh before saving", "error")
+            return False
         if not self.enqueueCommit():
             return False
-        deadline = time.monotonic() + max(float(timeout), 0.1)
-        while self.hasPendingWork() and time.monotonic() < deadline:
+        timeout = max(float(timeout), 0.0)
+        deadline = time.monotonic() + timeout
+        while True:
             self.pump()
-            if self.hasPendingWork():
-                time.sleep(0.01)
-        if self.hasPendingWork():
-            self._status("Tonic: timed out waiting for the latest groom "
-                         "commit")
-            return False
-        return True
+            if not self._commitPending():
+                return True
+            if self._commitError:
+                # The build failed or the swap cannot land (SS-05): the
+                # version the save wants will never arrive, so waiting
+                # out the timeout would only hide the reason.
+                self._status("Tonic: the latest groom commit failed (%s); "
+                             "nothing was saved" % self._commitError,
+                             "error")
+                return False
+            if time.monotonic() >= deadline:
+                break
+            if tick is not None:
+                tick()
+            time.sleep(0.005)
+        self._status("Tonic: timed out after %.1f s waiting for the latest "
+                     "groom commit; nothing was saved" % timeout, "error")
+        return False
 
-    def saveGroom(self, filePath, stage=None):
-        """Write the live layer to a `.usdc` and re-parent it under the live
-        sublayer, then drop the latest baked map beside it.
+    def saveGroom(self, filePath, stage=None, addToRootLayer=False,
+                  timeout=10.0, tick=None):
+        """Write the live layer to a `.usdc`, place it in the stage, and
+        drop the latest baked map beside it.
+
+        A name without an extension gets `.usdc`. By default the file is
+        sublayered under the live overlay in the SESSION layer, which is
+        what this usdview session composes and nothing on disk remembers.
+        `addToRootLayer` adds it to the scene's root layer instead (a path
+        relative to that layer) and saves the root layer, so reopening the
+        scene brings the groom back and Resume can hydrate it (SS-03).
 
         The Python twin of TonicSaveGroomAndMaps (tonicCommit.cpp): that one
         is C++-only because it needs a UsdStagePtr, and the C ABI carries no
-        stage. Same contract, including the relative `./regionMap.ptx` the
-        V0b note requires so a moved groom keeps resolving.
+        stage. Same contract, with the map named after the groom file
+        (`./<stem>.regionMap.ptx`) so two grooms saved into one directory
+        keep their own maps, and relative so a moved groom keeps resolving.
         """
         from pxr import Sdf
         stage = stage if stage is not None else (self._stage
                                                  or self._apiStage())
         if stage is None or self._liveLayer is None:
-            self._status("Tonic: nothing to save (no live layer)")
-            return False
-        if not self.flushLatest():
+            self._status("Tonic: nothing to save (no live layer)", "error")
             return False
         filePath = str(filePath)
-        if not filePath.lower().endswith(".usdc"):
-            self._status("Tonic: grooms are .usdc, never .usda (S42)")
+        extension = os.path.splitext(filePath)[1]
+        if not extension:
+            filePath += ".usdc"
+        elif extension.lower() != ".usdc":
+            self._status("Tonic: grooms are saved as .usdc, not %s (%s)"
+                         % (extension, filePath), "error")
             return False
-        layer = Sdf.Layer.FindOrOpen(filePath) or Sdf.Layer.CreateNew(filePath)
+        if not self.flushLatest(timeout, tick):
+            return False
+        layer = None
+        if os.path.isfile(filePath):
+            layer = Sdf.Layer.FindOrOpen(filePath)
         if layer is None:
-            self._status("Tonic: cannot open or create %s" % filePath)
+            layer = Sdf.Layer.CreateNew(filePath)
+        if layer is None:
+            self._status("Tonic: cannot open or create %s" % filePath,
+                         "error")
             return False
         layer.TransferContent(self._liveLayer)
+        mapWarning = self._saveMapBeside(layer, filePath)
         if not layer.Save():
-            self._status("Tonic: cannot save %s" % filePath)
+            self._status("Tonic: cannot save %s" % filePath, "error")
             return False
-        session = stage.GetSessionLayer()
-        ordered = [self._liveId, layer.identifier]
-        ordered += [p for p in session.subLayerPaths
-                    if p not in (self._liveId, layer.identifier)]
-        session.subLayerPaths = ordered
-        if self._mapFile and os.path.isfile(self._mapFile):
-            self._saveMapBeside(layer, filePath)
-        self._status("Tonic: saved %s" % filePath)
+        placed = self._placeSavedGroom(stage, layer, filePath,
+                                       addToRootLayer)
+        if placed is None:
+            return False
+        text = "Tonic: saved %s%s" % (filePath, placed)
+        if mapWarning:
+            self._status("%s; %s" % (text, mapWarning), "warning")
+        else:
+            self._status(text)
         return True
 
+    def _placeSavedGroom(self, stage, layer, filePath, addToRootLayer):
+        """Sublayer a saved groom; the status suffix, or None on failure.
+
+        The live layer stays the strongest session sublayer either way: it
+        is the overlay the tool edits, and the saved file slots in under
+        it (plan/17 section 3.2).
+        """
+        session = stage.GetSessionLayer()
+        root = stage.GetRootLayer()
+        suffix = ""
+        if addToRootLayer and root.anonymous:
+            addToRootLayer = False
+            suffix = (" (the scene has no file of its own, so the groom is "
+                      "in this session only)")
+        if not addToRootLayer:
+            ordered = [self._liveId, layer.identifier]
+            ordered += [p for p in session.subLayerPaths
+                        if p not in (self._liveId, layer.identifier)]
+            session.subLayerPaths = ordered
+            return suffix
+        # One placement only: the same file composed from both stacks would
+        # be one groom opened twice.
+        if layer.identifier in session.subLayerPaths:
+            session.subLayerPaths = [p for p in session.subLayerPaths
+                                     if p != layer.identifier]
+        target = os.path.normcase(os.path.abspath(filePath))
+        present = False
+        for entry in root.subLayerPaths:
+            try:
+                resolved = root.ComputeAbsolutePath(entry)
+            except Exception:
+                resolved = entry
+            if os.path.normcase(os.path.abspath(resolved)) == target:
+                present = True
+                break
+        if not present:
+            root.subLayerPaths.insert(0, self._relativeToLayer(root,
+                                                               filePath))
+        # The root layer is saved so a reopen (which reloads it from disk)
+        # still names the groom; unsaved scene edits go with it, which the
+        # dock's confirmation says before it asks for this.
+        if root.dirty and not root.Save():
+            self._status("Tonic: saved %s but cannot write %s to add it to "
+                         "the scene" % (filePath, root.identifier), "error")
+            return None
+        return " and added it to %s" % os.path.basename(root.identifier)
+
+    @staticmethod
+    def _relativeToLayer(layer, filePath):
+        """`filePath` as an asset path relative to `layer`'s own file."""
+        path = os.path.abspath(filePath)
+        base = os.path.dirname(os.path.abspath(layer.realPath or
+                                               layer.identifier))
+        try:
+            relative = os.path.relpath(path, base)
+        except ValueError:
+            # Another drive: there is no relative spelling.
+            return path.replace("\\", "/")
+        relative = relative.replace("\\", "/")
+        if not relative.startswith("."):
+            relative = "./" + relative
+        return relative
+
     def _saveMapBeside(self, layer, filePath):
-        import shutil
+        """Copy the latest baked map beside the groom and point at it.
+
+        Returns a warning for the save's status line, or "". Nothing is
+        saved here; saveGroom saves the layer once afterwards.
+        """
         from pxr import Sdf
-        dest = os.path.join(os.path.dirname(os.path.abspath(filePath)),
-                            "regionMap.ptx")
+        if not self._mapFile:
+            return "no region map baked yet"
+        if not os.path.isfile(self._mapFile):
+            return "the baked region map %s is gone" % self._mapFile
+        stem = os.path.splitext(os.path.basename(filePath))[0]
+        name = "%s.regionMap.ptx" % stem
+        dest = os.path.join(os.path.dirname(os.path.abspath(filePath)), name)
         try:
             shutil.copyfile(self._mapFile, dest)
         except OSError as exc:
-            self._status("Tonic: cannot copy the region map: %s" % exc)
-            return
+            return "cannot copy the region map: %s" % exc
         spec = Sdf.CreatePrimInLayer(layer, Sdf.Path(self._mapPath))
         attr = spec.attributes.get("usdGen:map:file")
         if attr is None:
             attr = Sdf.AttributeSpec(spec, "usdGen:map:file",
                                      Sdf.ValueTypeNames.Asset)
-        attr.default = Sdf.AssetPath("./regionMap.ptx")
-        layer.Save()
+        attr.default = Sdf.AssetPath("./" + name)
+        return ""
 
     def exportCenterCurves(self, filePath, level=0):
-        """Write the center curves of one level (0 = every tube) to a file."""
-        from pxr import Usd
+        """Write the center curves of one level (0 = every tube) to a file.
+
+        Honest about the result (SS-04): a bare name gets `.usda`, a
+        directory or a non-USD extension is refused up front, and success
+        is reported only when Export() said so AND the file is on disk.
+        Every failure is one 'error' status line; nothing raises.
+        """
+        from pxr import Sdf, Usd
         from . import tonicBridge
         if self._model is None:
-            self._status("Tonic: no model to export")
+            self._status("Tonic: no model to export", "error")
             return False
-        tubeIds = self._tubeIdsAtLevel(level)
+        path = str(filePath)
+        # The folder test comes first: a folder has no extension, and
+        # suffixing it would quietly write <folder>.usda beside it.
+        if not path:
+            self._status("Tonic: no file to export to", "error")
+            return False
+        if os.path.isdir(path) or path.endswith(("/", "\\")):
+            self._status("Tonic: cannot write %s: it is a folder" % path,
+                         "error")
+            return False
+        if not os.path.splitext(path)[1]:
+            path += ".usda"
+        if os.path.isdir(path):
+            self._status("Tonic: cannot write %s: it is a folder" % path,
+                         "error")
+            return False
+        ext = os.path.splitext(path)[1][1:]
+        if Sdf.FileFormat.FindByExtension(ext) is None:
+            # Export would happily write usda text into x.txt, which
+            # Import then cannot open.
+            self._status("Tonic: cannot write %s: .%s is not a USD format "
+                         "(use .usda or .usdc)" % (path, ext), "error")
+            return False
+        try:
+            tubeIds = self._tubeIdsAtLevel(level)
+        except (RuntimeError, ValueError) as exc:
+            self._status("Tonic: cannot read the tubes to export: %s"
+                         % _errorText(exc, self.lastError()), "error")
+            return False
         if not tubeIds:
-            self._status("Tonic: no tubes at level %d" % level)
+            self._status("Tonic: no tubes to export" if int(level) <= 0
+                         else "Tonic: no tubes to export at level %d"
+                         % int(level), "warning")
             return False
-        out = Usd.Stage.CreateInMemory()
-        tonicBridge.exportCenterCurves(out, self.dll, self._model, tubeIds,
-                                       "/TonicExport")
-        out.GetRootLayer().Export(str(filePath))
+        try:
+            out = Usd.Stage.CreateInMemory()
+            tonicBridge.exportCenterCurves(out, self.dll, self._model,
+                                           tubeIds, "/TonicExport")
+            written = bool(out.GetRootLayer().Export(path))
+        except (RuntimeError, ValueError) as exc:
+            # Sdf raises Tf errors (RuntimeError) for an unwritable path.
+            self._status("Tonic: cannot write %s: %s"
+                         % (path, _errorText(exc, self.lastError())),
+                         "error")
+            return False
+        if not written or not os.path.isfile(path):
+            self._status("Tonic: cannot write %s" % path, "error")
+            return False
         self._status("Tonic: exported %d center curve(s) to %s"
-                     % (len(tubeIds), filePath))
+                     % (len(tubeIds), path))
         return True
 
     def importCurves(self, filePath, parentTubeId=0):
-        """Import every BasisCurves in a file as locked child tubes."""
-        from pxr import Usd, UsdGeom
+        """Import every BasisCurves in a file as locked child tubes.
+
+        Atomic and honest (SS-04): the file is prechecked with
+        Sdf.Layer.FindOrOpen (a missing file or a non-USD one is a status
+        line, not Tf noise), every curve is validated before the model is
+        touched, and the tubes are added inside one "Import curves"
+        gesture, so a failure part-way (a C++ refusal on the third curve)
+        cancels back to the press-time model and leaves no undo step.
+        Returns True only when every curve landed.
+        """
+        from pxr import Sdf, Usd, UsdGeom
         from . import tonicBridge
         if self._model is None:
-            self._status("Tonic: no model to import into")
+            self._status("Tonic: no model to import into", "error")
             return False
-        stage = Usd.Stage.Open(str(filePath))
+        path = str(filePath)
+        parentTubeId = int(parentTubeId)
+        if not os.path.isfile(path):
+            self._status("Tonic: cannot import %s: %s"
+                         % (path, "it is a folder" if os.path.isdir(path)
+                            else "no such file"), "error")
+            return False
+        try:
+            layer = Sdf.Layer.FindOrOpen(path)
+            stage = Usd.Stage.Open(layer) if layer is not None else None
+        except RuntimeError as exc:
+            self._status("Tonic: cannot import %s: %s"
+                         % (path, _errorText(exc, "")), "error")
+            return False
         if stage is None:
-            self._status("Tonic: cannot open %s" % filePath)
+            self._status("Tonic: cannot import %s: not a USD file" % path,
+                         "error")
             return False
         curves = []
-        for prim in stage.Traverse():
-            if not prim.IsA(UsdGeom.BasisCurves):
-                continue
-            curves.extend(tonicBridge.readBasisCurves(stage, prim.GetPath()))
-        if not curves:
-            self._status("Tonic: %s carries no BasisCurves" % filePath)
+        try:
+            for prim in stage.Traverse():
+                if prim.IsA(UsdGeom.BasisCurves):
+                    curves.extend(tonicBridge.readBasisCurves(
+                        stage, prim.GetPath()))
+        except (RuntimeError, ValueError) as exc:
+            self._status("Tonic: cannot import %s: %s"
+                         % (path, _errorText(exc, "")), "error")
             return False
-        ids = tonicBridge.importCurvesAsLockedTubes(self.dll, self._model,
-                                                    int(parentTubeId), curves)
+        if not curves:
+            self._status("Tonic: %s carries no BasisCurves" % path, "error")
+            return False
+        if not self.beginGesture("Import curves"):
+            # beginGesture already said why (another edit is open).
+            self._status("Tonic: cannot import %s while another edit is "
+                         "open" % path, "error")
+            return False
+        try:
+            ids = tonicBridge.importCurvesAsLockedTubes(
+                self.dll, self._model, parentTubeId, curves)
+        except (RuntimeError, ValueError) as exc:
+            detail = _errorText(exc, self.lastError())
+            self._rollBackGesture()
+            self._status("Tonic: cannot import %s: %s" % (path, detail),
+                         "error")
+            return False
+        except BaseException:
+            self._rollBackGesture()
+            raise
+        self.endGesture()
         self.publish(PUBLISH_ALL)
         self.enqueueCommit()
-        self._status("Tonic: imported %d curve(s) as tubes %r"
-                     % (len(curves), ids))
+        self._status("Tonic: Imported %d curve%s under tube %d"
+                     % (len(ids), "" if len(ids) == 1 else "s",
+                        parentTubeId))
         return True
+
+    def _rollBackGesture(self):
+        """Cancel the open gesture and publish what it restored."""
+        dirty = self.cancelGesture()
+        if dirty:
+            self.publish(dirty)
 
     def _tubeIdsAtLevel(self, level):
         from . import tonicBridge, tonicHierarchy

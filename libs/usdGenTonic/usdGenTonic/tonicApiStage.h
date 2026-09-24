@@ -38,6 +38,17 @@ int USDGENTONIC_API Tonic_Hydrate(TonicModelContext *ctx,
                                   const char *groomPath, int *outTubeCount,
                                   int *outGuideCount, int *outImportedCount);
 
+/* Tonic_Hydrate over a stage composed from several open layers, so the tool
+ * hydrates exactly what usdview shows (SS-03). `layerIdentifiers[0]` is the
+ * root layer; with two identifiers the second is the session layer; with
+ * more, identifiers 1..n-1 are the session layer's sublayers, strongest
+ * first. Each identifier is found in the layer registry first (anonymous
+ * layers included) and opened from disk otherwise. */
+int USDGENTONIC_API Tonic_HydrateFromLayers(
+    TonicModelContext *ctx, const char *const *layerIdentifiers,
+    int layerCount, const char *groomPath, int *outTubeCount,
+    int *outGuideCount, int *outImportedCount);
+
 /* Per-tube §5.2 center operations. tubeId 0 is the primary tube; an id that
  * names a derived child refuses the two layout-changing ones (its CV count
  * belongs to the parent's subdivision). */
@@ -97,6 +108,13 @@ int USDGENTONIC_API Tonic_GetTubeParent(TonicModelContext const *ctx,
 /* 1 when the tube is an on-the-fly parent the artist kept, else 0. */
 int USDGENTONIC_API Tonic_IsTubePersistent(TonicModelContext const *ctx,
                                            int tubeId);
+/* SL-03 whole-tube Delete: remove `n` tubes, each with its subtree, as one
+ * undo step (inside a gesture bracket the bracket's snapshot covers it).
+ * TONIC_ERROR, model untouched, for n <= 0, an unknown id, tube 0 or any
+ * other L1 root -- an L1 tube belongs to its graph region, which would
+ * only rebuild it; Tonic_StageGetLastError names the refused tube. */
+int USDGENTONIC_API Tonic_RemoveTubes(TonicModelContext *ctx, const int *ids,
+                                      int n);
 
 /* Enqueue a bake that carries the hierarchy, so channel k of the map holds
  * the level-(k+1) tube id (plan/17 §4.5). Same coalescing and worker as

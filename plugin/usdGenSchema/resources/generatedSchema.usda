@@ -335,6 +335,15 @@ class UsdGenScatter "UsdGenScatter"
         }
         doc = "Randomisation seed for this operator. Every per-curve draw is keyed by (seed, curveId, salt), so the same seed reproduces the same groom exactly. Expression evaluation: groom (once per operator)."
     )
+    int usdGen:subdivisionLevel = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "0 preserves polygon-cage scattering."
+        }
+        doc = "0 preserves polygon-cage scattering. 1-6 opt into CPU OpenSubdiv Catmull-Clark limit patches with this adaptive isolation depth and a 2^level area quadrature grid. Level 3 is the production felt setting. Requires quad topology, preserves coarse face/Ptex coordinates, honors holes/boundaries/creases. CUDA limit scattering is not supported. Expression evaluation: groom (once per operator)."
+    )
 }
 
 class UsdGenGrow "UsdGenGrow"
@@ -382,6 +391,26 @@ class UsdGenGrow "UsdGenGrow"
         }
         doc = "Per-curve multiplier range (lo, hi) applied to usdGen:length. A reversed pair is swapped; both components must be finite and >= 0. Expression evaluation: primitive (once per curve root)."
     )
+    float usdGen:azimuth = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Rotation around the root normal after lift, in degrees in [-360, 360]."
+        }
+        doc = "Rotation around the root normal after lift, in degrees in [-360, 360]. Zero preserves the existing face-local lean. Expression evaluation: primitive (once per curve root)."
+    )
+
+    float usdGen:azimuthRandom = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value."
+        }
+        doc = "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value. One distributes the lean around the full circle, avoiding face-axis patterns in isotropic felt. Seeded by usdGen:seed and stable strand ID, independently of length. Zero preserves existing direction. Expression evaluation: primitive (once per curve root)."
+    )
+
     float usdGen:lift = 0 (
         customData = {
             dictionary usdGen = {

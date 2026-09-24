@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 
 # Subdivide spinner range (plan/17 section 5.4): 2..8, default 4.
 SUBDIVIDE_MIN = 2
@@ -139,13 +140,29 @@ def clearActiveCutFocus(state, level=LEVEL_MIN):
     state.activeLevel = validateLevel(level)
 
 
-def breadcrumbSegments(state):
-    """Clickable breadcrumb entries: [(target, label)] root-first.
+def frontierLabel(level, childCount=None):
+    """The breadcrumb's last, non-link segment: "L2" or "L2 (3 children)".
+
+    It names where the artist is editing -- the children of the focused
+    parent -- which is not a place a click can take them, so it is text.
+    """
+    label = "L%d" % validateLevel(level)
+    if childCount is not None:
+        count = int(childCount)
+        label += " (%d %s)" % (count, "child" if count == 1 else "children")
+    return label
+
+
+def breadcrumbSegments(state, childCount=None):
+    """Breadcrumb entries: [(target, label)] root-first.
 
     Labels carry the focus-path tube names when known, else the bare level
     ("L1 tube_A" vs "L2").  Legacy focus paths bind numeric levels.  An
     active-cut path instead binds stable tube ids, so clicking an ancestor
-    never accidentally changes every unrelated branch at that level.
+    never accidentally changes every unrelated branch at that level.  When
+    the focus is the children of an entered parent, a frontier segment
+    with target None follows the parent ("L2", or "L2 (3 children)" when
+    the caller knows `childCount`); it is where the artist is, not a link.
     """
     names = tuple(getattr(state, "focusNames", ()))
     ancestors = tuple(getattr(state, "focusAncestorIds", ()))
@@ -153,9 +170,14 @@ def breadcrumbSegments(state):
         segments = []
         for level, tubeId in enumerate(ancestors, 1):
             name = names[level - 1] if level - 1 < len(names) else ""
-            label = "L%d %s" % (level, name) if name else "L%d T%d" % (
+            label = "L%d %s" % (level, name) if name else "L%d Tube %d" % (
                 level, int(tubeId))
             segments.append(("tube:%d" % int(tubeId), label))
+        parentId = int(getattr(state, "focusParentId", -1))
+        if parentId >= 0 and int(ancestors[-1]) == parentId:
+            segments.append((None, frontierLabel(
+                max(validateLevel(state.activeLevel), len(ancestors) + 1),
+                childCount)))
         return segments
     depth = max(validateLevel(state.activeLevel), len(names), LEVEL_MIN)
     segments = []
@@ -298,8 +320,8 @@ def subdivideStatus(count, splitMode, selected):
 
 def mergeChildrenStatus(tubeLabel):
     """The one-line Merge-children (Shift+M) status."""
-    return ("Merge children (Shift+M): %s absorbs its children's aggregate "
-            "shape (K7); undoable." % tubeLabel)
+    return ("Merge children (Shift+M): %s takes on its children's "
+            "combined shape; undoable." % tubeLabel)
 
 
 def mergeSelectedStatus(count):
@@ -320,7 +342,7 @@ def groupStatus(childIds, transient):
     """The one-line Group / on-the-fly-parent status."""
     ids = list(childIds)
     kind = "transient" if transient else "persistent"
-    return ("Group: K7 builds a %s on-the-fly parent over %d tube(s)."
+    return ("Group: a %s parent tube now moves %d tube(s) together."
             % (kind, len(ids)))
 
 
@@ -368,16 +390,27 @@ def childAnnotation(childIndex, count, seed, splitMode, level):
 SMOOTHNESS_SPIKE_THRESHOLD = 0.0340742
 
 
-def smoothnessWarning(scores, threshold=SMOOTHNESS_SPIKE_THRESHOLD):
-    """The HUD warning for spiking center CVs ("" when all quiet)."""
+def smoothnessWarning(scores, threshold=SMOOTHNESS_SPIKE_THRESHOLD,
+                      tubeId=0):
+    """The HUD warning for spiking center CVs ("" when all quiet).
+
+    Worded for the artist: the bend in degrees (the score is 1 - cos of
+    the bend), the tube it is on and the two tools that fix it.  The
+    scores come from Tonic_ReadSmoothnessScores, which reads tube 0.
+    """
     spikes = [(i, float(s)) for i, s in enumerate(scores)
               if float(s) >= float(threshold)]
     if not spikes:
         return ""
     worst = max(spikes, key=lambda kv: kv[1])
-    return ("Smoothness: %d CV(s) spike past %.4g (worst %.4g at CV %d); "
-            "relax to settle."
-            % (len(spikes), float(threshold), worst[1], worst[0]))
+    degrees = math.degrees(math.acos(
+        max(-1.0, min(1.0, 1.0 - float(threshold)))))
+    more = ""
+    if len(spikes) > 1:
+        more = "; %d more CV%s" % (len(spikes) - 1,
+                                   "s" if len(spikes) > 2 else "")
+    return ("Kink on tube %d at CV %d (bend > %.0f°%s) — Smooth or Relax "
+            "to fix" % (int(tubeId), worst[0], degrees, more))
 
 
 def intersectionWarning(tubeIds):

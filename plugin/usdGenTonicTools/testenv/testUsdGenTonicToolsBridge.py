@@ -330,9 +330,274 @@ def _partB(bridge, tonicLib):
         check(lib.dll.Tonic_Destroy(ctx) == 0, "Tonic_Destroy releases it")
 
 
+def _partAImportValidation(bridge):
+    """SS-04, pure Python: a bad curve is refused before the DLL is used.
+
+    `_NoDll` exports nothing, so reaching importLockedTube would raise
+    NotImplementedError; a ValueError proves every curve was validated
+    before the first tube could have been added.
+    """
+    good = [(0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 2.0, 0.0)]
+    cases = (
+        ([good, [(1.0, 0.0, 0.0)]], "a one-point second curve"),
+        ([good, [(1.0, 0.0, 0.0), (1.0, 0.0, 0.0)]], "a zero-length curve"),
+        ([good, [(1.0, 0.0, 0.0), (1.0, float("nan"), 0.0)]],
+         "a non-finite point"),
+        ([good, [(1.0, 0.0), (1.0, 1.0)]], "a two-component point"),
+        ([], "an empty curve list"),
+    )
+    for curves, what in cases:
+        try:
+            bridge.importCurvesAsLockedTubes(_NoDll(), None, 0, curves)
+        except ValueError as exc:
+            check("curve" in str(exc),
+                  "import validation refuses %s up front (%s)" % (what, exc))
+        except Exception as other:  # noqa: BLE001 - the test names the type
+            check(False, "import validation refuses %s up front (raised %r)"
+                  % (what, other))
+        else:
+            check(False, "import validation refuses %s up front (no raise)"
+                  % what)
+
+
+def _loadSessionPackage():
+    """tonicSession & co. through a synthetic package.
+
+    tonicSession uses relative imports, so it cannot load through the
+    flat `_load`; a package named after this test keeps the real
+    usdGenTonicTools/__init__.py (which imports Qt) out of the process.
+    """
+    import types
+    pkgName = "tonic_bridge_pkg"
+    pkg = sys.modules.get(pkgName)
+    if pkg is None:
+        pkg = types.ModuleType(pkgName)
+        pkg.__path__ = [SRC]
+        sys.modules[pkgName] = pkg
+    loaded = {}
+    for name in ("tonicLib", "tonicBridge", "tonicToolState",
+                 "tonicSession"):
+        full = "%s.%s" % (pkgName, name)
+        module = sys.modules.get(full)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(
+                full, os.path.join(SRC, "%s.py" % name))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[full] = module
+            spec.loader.exec_module(module)
+            setattr(pkg, name, module)
+        loaded[name] = module
+    return loaded
+
+
+def _partC():
+    """SS-04: TonicSession import/export are atomic and honest.
+
+    A bad file imports nothing and raises nothing; a C++ refusal part-way
+    through rolls the tubes already added back; export refuses folders
+    and non-USD names out loud and succeeds only with a file on disk.
+    """
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix="tonicBridgeImport")
+    try:
+        _partCIn(folder)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _writeCurves(path, curves):
+    from pxr import Usd, UsdGeom
+    stage = Usd.Stage.CreateNew(path)
+    prim = UsdGeom.BasisCurves.Define(stage, "/Strands")
+    prim.CreateTypeAttr(UsdGeom.Tokens.linear)
+    prim.CreatePointsAttr([p for curve in curves for p in curve])
+    prim.CreateCurveVertexCountsAttr([len(curve) for curve in curves])
+    stage.GetRootLayer().Save()
+
+
+def _partCIn(folder):
+    from pxr import Usd, UsdGeom
+    mods = _loadSessionPackage()
+    tonicSession = mods["tonicSession"]
+    tonicToolState = mods["tonicToolState"]
+    pkgBridge = mods["tonicBridge"]
+
+    stage = Usd.Stage.CreateInMemory("tonicBridgeImport")
+    mesh = UsdGeom.Mesh.Define(stage, "/Scalp")
+    # A 2x2-quad plane over [0, 4] in XZ, facing +Y.
+    points = [(float(x), 0.0, float(z)) for z in (0, 2, 4) for x in (0, 2, 4)]
+    indices = []
+    for row in range(2):
+        for col in range(2):
+            a = row * 3 + col
+            indices += [a, a + 3, a + 4, a + 1]
+    mesh.CreatePointsAttr(points)
+    mesh.CreateFaceVertexCountsAttr([4] * 4)
+    mesh.CreateFaceVertexIndicesAttr(indices)
+
+    heard = []
+    session = tonicSession.TonicSession(tonicToolState.TonicToolState())
+    session.setStatusSink(lambda text, level="info": heard.append(
+        (text, level)))
+    if not session.activate("/Scalp", stage=stage):
+        check(False, "import: a session binds the plane scalp (%r)" % heard)
+        return
+    try:
+        _partCSession(folder, session, heard, pkgBridge)
+    finally:
+        session.deactivate()
+
+
+def _partCSession(folder, session, heard, pkgBridge):
+    from pxr import Usd, UsdGeom
+    dll = session.dll
+    model = session.model
+
+    def lastLine():
+        return heard[-1] if heard else ("", "")
+
+    def tubes():
+        return pkgBridge.readTubeIds(dll, model)
+
+    # -- export with nothing to export ------------------------------------
+    del heard[:]
+    empty = os.path.join(folder, "empty.usda")
+    check(not tubes() and session.exportCenterCurves(empty) is False and
+          not os.path.exists(empty) and
+          "no tubes to export" in lastLine()[0],
+          "export: an empty model exports nothing and says so (%r)"
+          % (lastLine(),))
+
+    check(dll.Tonic_BuildTestTube(model, 0, 0, 0.0, 0.0) == 0,
+          "import: the test tube builds over the scalp")
+    before = tubes()
+    depth = session.undoDepth()
+
+    # -- a two-curve file whose second curve has one point ----------------
+    bad = os.path.join(folder, "oneTooShort.usda")
+    _writeCurves(bad, [[(1.0, 0.0, 1.0), (1.0, 0.5, 1.0), (1.0, 1.0, 1.0)],
+                       [(3.0, 0.0, 3.0)]])
+    del heard[:]
+    try:
+        ok = session.importCurves(bad, 0)
+        raised = None
+    except Exception as exc:  # noqa: BLE001 - the test names the escape
+        ok, raised = None, exc
+    check(raised is None and ok is False,
+          "import: a one-point second curve returns False without raising "
+          "(%r, %r)" % (ok, raised))
+    check(tubes() == before and session.undoDepth() == depth,
+          "import: and adds no tube and no undo step (%r -> %r)"
+          % (before, tubes()))
+    check(lastLine()[1] == "error" and "curve 1" in lastLine()[0],
+          "import: the error names the bad curve (%r)" % (lastLine(),))
+
+    # -- files that are not curves at all ---------------------------------
+    notUsd = os.path.join(folder, "notes.txt")
+    with open(notUsd, "w") as handle:
+        handle.write("hello\n")
+    broken = os.path.join(folder, "broken.usda")
+    with open(broken, "w") as handle:
+        handle.write("#usda 1.0\nthis is not { usd\n")
+    noCurves = os.path.join(folder, "noCurves.usda")
+    plain = Usd.Stage.CreateNew(noCurves)
+    plain.DefinePrim("/Nothing", "Scope")
+    plain.GetRootLayer().Save()
+    del plain
+    for path, what in ((os.path.join(folder, "missing.usda"), "a missing"),
+                       (notUsd, "a non-USD"), (broken, "a malformed"),
+                       (noCurves, "a curve-less"), (folder, "a folder as")):
+        del heard[:]
+        try:
+            ok = session.importCurves(path, 0)
+            raised = None
+        except Exception as exc:  # noqa: BLE001
+            ok, raised = None, exc
+        check(ok is False and raised is None and tubes() == before and
+              lastLine()[1] == "error",
+              "import: %s file is refused with an error line (%r)"
+              % (what, lastLine()))
+
+    # -- a C++ refusal part-way through rolls back -------------------------
+    good = os.path.join(folder, "twoCurves.usda")
+    _writeCurves(good, [[(1.0, 0.0, 1.0), (1.0, 0.5, 1.1), (1.0, 1.0, 1.2)],
+                        [(3.0, 0.0, 3.0), (3.0, 0.5, 3.1), (3.0, 1.0, 3.2),
+                         (3.0, 1.5, 3.3)]])
+    realImport = pkgBridge.importLockedTube
+    calls = []
+
+    def failSecond(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("Tonic_ImportLockedTube failed with code 1")
+        return realImport(*args, **kwargs)
+
+    pkgBridge.importLockedTube = failSecond
+    del heard[:]
+    try:
+        ok = session.importCurves(good, 0)
+    finally:
+        pkgBridge.importLockedTube = realImport
+    check(ok is False and len(calls) == 2 and tubes() == before and
+          session.undoDepth() == depth,
+          "import: a failure on the second tube removes the first "
+          "(%r -> %r, %d call(s))" % (before, tubes(), len(calls)))
+    check(lastLine()[1] == "error" and "cannot import" in lastLine()[0],
+          "import: and reports it (%r)" % (lastLine(),))
+
+    # -- an unknown parent is the library's refusal, with its reason -------
+    del heard[:]
+    check(session.importCurves(good, 987) is False and tubes() == before,
+          "import: an unknown parent imports nothing (%r)" % (lastLine(),))
+    check(session.lastError() and session.lastError() in lastLine()[0],
+          "import: the error line carries lastError() (%r)"
+          % (lastLine(),))
+
+    # -- the good file lands whole, as one undo step ------------------------
+    del heard[:]
+    check(session.importCurves(good, 0) is True and
+          len(tubes()) == len(before) + 2 and
+          session.undoDepth() == depth + 1,
+          "import: two curves land as two tubes in one undo step "
+          "(%r, depth %d)" % (tubes(), session.undoDepth()))
+    check(lastLine() == ("Tonic: Imported 2 curves under tube 0", "info"),
+          "import: the status says 'Imported 2 curves under tube 0' (%r)"
+          % (lastLine(),))
+
+    # -- export ------------------------------------------------------------
+    del heard[:]
+    check(session.exportCenterCurves(folder) is False and
+          lastLine()[1] == "error" and "cannot write" in lastLine()[0],
+          "export: a folder path is refused with a status (%r)"
+          % (lastLine(),))
+    del heard[:]
+    textFile = os.path.join(folder, "centers.txt")
+    check(session.exportCenterCurves(textFile) is False and
+          not os.path.exists(textFile) and "cannot write" in lastLine()[0],
+          "export: a non-USD extension is refused (%r)" % (lastLine(),))
+    del heard[:]
+    out = os.path.join(folder, "centers.usda")
+    check(session.exportCenterCurves(out) is True and os.path.isfile(out),
+          "export: a temp .usda is written (%r)" % (lastLine(),))
+    reread = Usd.Stage.Open(out)
+    found = [p for p in reread.Traverse() if p.IsA(UsdGeom.BasisCurves)]
+    counts = (list(UsdGeom.BasisCurves(found[0])
+                   .GetCurveVertexCountsAttr().Get()) if found else [])
+    check(len(found) == 1 and len(counts) == len(tubes()),
+          "export: the file parses with one BasisCurves, a curve per tube "
+          "(%d prim(s), %d curve(s))" % (len(found), len(counts)))
+    del heard[:]
+    bare = os.path.join(folder, "bare")
+    check(session.exportCenterCurves(bare) is True and
+          os.path.isfile(bare + ".usda"),
+          "export: a bare name gets .usda (%r)" % (lastLine(),))
+
+
 def main():
     bridge = _load("tonicBridge")
     _partA(bridge)
+    _partAImportValidation(bridge)
 
     # Part B needs pxr and the DLL. Under CTest (USDGENTONIC_DLL set)
     # both must be there; direct runs without them skip Part B.
@@ -364,6 +629,12 @@ def main():
         import traceback
         traceback.print_exc()
         check(False, "Part B raises no exception (%s)" % exc)
+    try:
+        _partC()
+    except Exception as exc:  # noqa: BLE001 - the test reports, not raises
+        import traceback
+        traceback.print_exc()
+        check(False, "Part C raises no exception (%s)" % exc)
     print("testUsdGenTonicToolsBridge: %d failure(s), %d skip(s)"
           % (failures, skips))
     return 1 if failures else 0
