@@ -539,37 +539,28 @@ UsdGenTilePublisher::IsPreviewMaterialPath(SdfPath const &descriptionPath,
 
 namespace {
 
-// A material whose universal-render-context network is one `surface` node.
+// One `surface`-terminal network around one `surface` node.
 HdContainerDataSourceHandle
-_SurfaceMaterial(TfToken const &identifier, HdContainerDataSourceHandle const &parameters)
+_Network(TfToken const &identifier, HdContainerDataSourceHandle const &parameters,
+         HdContainerDataSourceHandle const &inputConnections)
 {
     static TfToken const surface("surface");
     HdContainerDataSourceHandle const node =
         HdMaterialNodeSchema::Builder()
             .SetNodeIdentifier(_Tok(identifier))
             .SetParameters(parameters)
-            .SetInputConnections(HdRetainedContainerDataSource::New())
+            .SetInputConnections(inputConnections)
             .Build();
     HdContainerDataSourceHandle const terminal =
         HdMaterialConnectionSchema::Builder()
             .SetUpstreamNodePath(_Tok(surface))
             .SetUpstreamNodeOutputName(_Tok(surface))
             .Build();
-    HdContainerDataSourceHandle const network =
-        HdMaterialNetworkSchema::Builder()
-            .SetNodes(HdRetainedContainerDataSource::New(surface, node))
-            .SetTerminals(
-                HdRetainedContainerDataSource::New(surface, terminal))
-            .Build();
-    // The universal render context ("") applies to every renderer; Storm's
-    // render-context filter falls back to it when no `glslfx` context exists
-    // (hdsi/materialRenderContextFilteringSceneIndex.h:20-45).
-    TfToken const contextName =
-        HdMaterialSchemaTokens->universalRenderContext;
-    HdDataSourceBaseHandle const contextValue = network;
-    return HdRetainedContainerDataSource::New(
-        HdMaterialSchemaTokens->material,
-        HdMaterialSchema::BuildRetained(1, &contextName, &contextValue));
+    return HdMaterialNetworkSchema::Builder()
+        .SetNodes(HdRetainedContainerDataSource::New(surface, node))
+        .SetTerminals(
+            HdRetainedContainerDataSource::New(surface, terminal))
+        .Build();
 }
 
 HdDataSourceBaseHandle
@@ -586,6 +577,86 @@ _Param(GfVec3f const &value)
     return HdMaterialNodeParameterSchema::Builder()
         .SetValue(HdRetainedTypedSampledDataSource<GfVec3f>::New(value))
         .Build();
+}
+
+HdDataSourceBaseHandle
+_Param(TfToken const &value)
+{
+    return HdMaterialNodeParameterSchema::Builder()
+        .SetValue(HdRetainedTypedSampledDataSource<TfToken>::New(value))
+        .Build();
+}
+
+// The universal-context fallback network: a UsdPreviewSurface whose
+// diffuseColor reads the per-curve displayColor the tiles bake, falling
+// back to `rootFallback` where the prim carries none. hdMoonray reads the
+// universal context when no moonray context exists; a glslfx-only node
+// there makes it look for an RDL DSO of that name, so the fallback is
+// what keeps synthetic materials rendering outside Storm
+// (docs/moonray-fur.md). Roughness is the same constant the fur
+// generator's fallback uses.
+HdContainerDataSourceHandle
+_PreviewNetwork(GfVec3f const &rootFallback)
+{
+    static TfToken const surface("surface");
+    static TfToken const reader("DisplayColor");
+    static TfToken const result("result");
+    HdDataSourceBaseHandle const connection =
+        HdMaterialConnectionSchema::Builder()
+            .SetUpstreamNodePath(_Tok(reader))
+            .SetUpstreamNodeOutputName(_Tok(result))
+            .Build();
+    HdDataSourceBaseHandle const connectionVector =
+        HdRetainedSmallVectorDataSource::New(1, &connection);
+    HdContainerDataSourceHandle const preview =
+        HdMaterialNodeSchema::Builder()
+            .SetNodeIdentifier(_Tok(TfToken("UsdPreviewSurface")))
+            .SetParameters(HdRetainedContainerDataSource::New(
+                TfToken("roughness"), _Param(0.6f)))
+            .SetInputConnections(HdRetainedContainerDataSource::New(
+                TfToken("diffuseColor"), connectionVector))
+            .Build();
+    TfToken const readerNames[] = {TfToken("varname"), TfToken("fallback")};
+    HdDataSourceBaseHandle const readerValues[] = {
+        _Param(TfToken("displayColor")), _Param(rootFallback)};
+    HdContainerDataSourceHandle const readerNode =
+        HdMaterialNodeSchema::Builder()
+            .SetNodeIdentifier(_Tok(TfToken("UsdPrimvarReader_float3")))
+            .SetParameters(HdRetainedContainerDataSource::New(
+                2, readerNames, readerValues))
+            .SetInputConnections(HdRetainedContainerDataSource::New())
+            .Build();
+    HdContainerDataSourceHandle const terminal =
+        HdMaterialConnectionSchema::Builder()
+            .SetUpstreamNodePath(_Tok(surface))
+            .SetUpstreamNodeOutputName(_Tok(surface))
+            .Build();
+    TfToken const nodeNames[] = {surface, reader};
+    HdDataSourceBaseHandle const nodeValues[] = {preview, readerNode};
+    return HdMaterialNetworkSchema::Builder()
+        .SetNodes(HdRetainedContainerDataSource::New(2, nodeNames, nodeValues))
+        .SetTerminals(
+            HdRetainedContainerDataSource::New(surface, terminal))
+        .Build();
+}
+
+// A material with both networks: the identifier's shading under the
+// `glslfx` context Storm prefers, the preview under the universal one
+// every other delegate falls back to. Storm's pixels are unchanged: it
+// reads the same node and parameters as before, from its own context.
+HdContainerDataSourceHandle
+_SurfaceMaterial(TfToken const &identifier, HdContainerDataSourceHandle const &parameters,
+                 GfVec3f const &previewFallback)
+{
+    HdContainerDataSourceHandle const shaded = _Network(
+        identifier, parameters, HdRetainedContainerDataSource::New());
+    HdContainerDataSourceHandle const preview = _PreviewNetwork(previewFallback);
+    TfToken const contextNames[] = {HdMaterialSchemaTokens->universalRenderContext,
+                                    TfToken("glslfx")};
+    HdDataSourceBaseHandle const contextValues[] = {preview, shaded};
+    return HdRetainedContainerDataSource::New(
+        HdMaterialSchemaTokens->material,
+        HdMaterialSchema::BuildRetained(2, contextNames, contextValues));
 }
 
 // A two-colour approximation of the look's ramp: the authored root/tip pair,
@@ -630,9 +701,11 @@ UsdGenTilePublisher::BuildDefaultMaterialDataSource()
 {
     // Parameters are left unset so the shader def's Sdr defaults apply. This
     // overload exists for callers with no description in hand (the C2 contract
-    // test); the groom scene index always uses the look-carrying one.
+    // test); the groom scene index always uses the look-carrying one. The
+    // preview fallback is the default look's root, as it would be there.
+    usdGen::UsdGenLookDesc const look;
     return _SurfaceMaterial(DefaultMaterialIdentifier(),
-                            HdRetainedContainerDataSource::New());
+                            HdRetainedContainerDataSource::New(), look.rootColor);
 }
 
 /*static*/
@@ -659,7 +732,8 @@ UsdGenTilePublisher::BuildDefaultMaterialDataSource(
     return _SurfaceMaterial(
         DefaultMaterialIdentifier(),
         HdRetainedContainerDataSource::New(
-            sizeof(names) / sizeof(names[0]), names, values));
+            sizeof(names) / sizeof(names[0]), names, values),
+        root);
 }
 
 /*static*/
@@ -711,8 +785,11 @@ UsdGenTilePublisher::BuildPreviewMaterialDataSource(bool flat)
     HdDataSourceBaseHandle const value = HdMaterialNodeParameterSchema::Builder()
         .SetValue(HdRetainedTypedSampledDataSource<float>::New(flat ? 0.0f : 1.0f))
         .Build();
+    // The preview mode always repaints displayColor, so the fallback only
+    // shows where the prim carries none; mid-gray is deliberately neutral.
     return _SurfaceMaterial(TfToken("UsdGenValuePreview"),
-                            HdRetainedContainerDataSource::New(shading, value));
+                            HdRetainedContainerDataSource::New(shading, value),
+                            GfVec3f(0.5f));
 }
 
 /*static*/
@@ -838,7 +915,7 @@ UsdGenTilePublisher::BuildScalpShadowMaterialDataSource(
     HdDataSourceBaseHandle const values[] = {_Param(root)};
     return _SurfaceMaterial(
         ScalpShadowIdentifier(),
-        HdRetainedContainerDataSource::New(1, names, values));
+        HdRetainedContainerDataSource::New(1, names, values), root);
 }
 
 }  // namespace usdGenImaging

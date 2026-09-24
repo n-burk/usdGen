@@ -20,13 +20,16 @@
 //   (9) variationPrimvars (displayColor per-curve/per-CV, float/int/constant
 //       extra planes, unresolved names, dedupe);
 //  (10) Hydra data sources (topology round-trip, instance primvars,
-//       primOrigin, purpose/visibility, exactly-one instancedBy path);
+//       primOrigin, purpose/visibility, exactly-one instancedBy path,
+//       MoonRay wire types: quath rotations, packed varyings, color role);
 //  (11) notice locators (Translations, never topology, for value edits).
 #include "usdGenImaging/usdGenInstancer.h"
 
 #include "usdGen/curveBuffer.h"
 
+#include "pxr/base/gf/quath.h"
 #include "pxr/base/gf/quatf.h"
+#include "pxr/base/gf/vec2f.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/imaging/hd/instancedBySchema.h"
 #include "pxr/imaging/hd/instancerTopologySchema.h"
@@ -744,6 +747,95 @@ static void CheckDataSources()
           LeafIsToken(LeafValue(colorPv->Get(TfToken("interpolation"))),
                       "instance"),
           "displayColor publishes at instance interpolation");
+
+    // MoonRay wire format (docs/moonray-fur.md): USD maps PointInstancer
+    // `orientations` (quath[]) straight through to hydra:instanceRotations
+    // (dataSourcePointInstancer.cpp), and hdMoonray only accepts
+    // VtQuathArray there -- a VtQuatfArray mis-syncs every instance.
+    // Storm accepts both, so the data source publishes quath while Bake
+    // keeps full float precision.
+    VtValue rValue = LeafValue(
+        Child(primvars, HdInstancerTokens->instanceRotations)
+            ->Get(TfToken("primvarValue")));
+    bool quathOk = rValue.IsHolding<VtQuathArray>() &&
+        rValue.UncheckedGet<VtQuathArray>().size() == result.rotations.size();
+    for (size_t i = 0; quathOk && i != result.rotations.size(); ++i) {
+        GfQuath const q = rValue.UncheckedGet<VtQuathArray>()[i];
+        GfQuatf const b = result.rotations[i];
+        GfVec3h const qi = q.GetImaginary();
+        GfVec3f const bi = b.GetImaginary();
+        quathOk = Near(float(q.GetReal()), b.GetReal(), 2e-3f) &&
+            Near(float(qi[0]), bi[0], 2e-3f) &&
+            Near(float(qi[1]), bi[1], 2e-3f) &&
+            Near(float(qi[2]), bi[2], 2e-3f);
+    }
+    Check(quathOk, "instanceRotations publish as VtQuathArray");
+
+    // hdMoonray ignores primvar elementSize, so float varyings publish
+    // packed (arity 3 -> VtVec3fArray) instead of flat float arrays; the
+    // color role matches USD's own color3f primvar convention.
+    VtValue colorValue = LeafValue(colorPv->Get(TfToken("primvarValue")));
+    Check(colorValue.IsHolding<VtVec3fArray>() &&
+          colorValue.UncheckedGet<VtVec3fArray>() == input.displayColor,
+          "displayColor publishes packed VtVec3fArray");
+    Check(LeafIsToken(LeafValue(colorPv->Get(TfToken("role"))), "color"),
+          "displayColor carries the color role");
+    Check(colorPv->Get(TfToken("elementSize")) == nullptr,
+          "packed varyings carry no elementSize");
+
+    // Packing across arities and types: float2 packs, scalar int rides
+    // through flat (MoonRay reads scalar ints; only Storm honors
+    // elementSize on the rest).
+    UsdGenCurveBuffer packed = StraightStrands(roots, 4, 0.25f);
+    UsdGenPlane pair;
+    pair.name = TfToken("usdGen:pair");
+    pair.interpolation = TfToken("uniform");
+    pair.type = TfToken("float");
+    pair.arity = 2;
+    pair.f = VtFloatArray{0.0f, 1.0f, 2.0f, 3.0f};
+    packed.extraCurve.push_back(pair);
+    UsdGenPlane zone;
+    zone.name = TfToken("usdGen:zone");
+    zone.interpolation = TfToken("uniform");
+    zone.type = TfToken("int");
+    zone.arity = 1;
+    zone.i = VtIntArray{3, 4};
+    packed.extraCurve.push_back(zone);
+    UsdGenInstanceCurves packedInput;
+    packedInput.curves = &packed;
+    packedInput.displayColor = input.displayColor;
+    UsdGenInstanceParams packedParams = CardsParams();
+    packedParams.variationPrimvars = VtArray<TfToken>{
+        TfToken("displayColor"), TfToken("usdGen:pair"), TfToken("usdGen:zone")};
+    UsdGenInstanceResult packedResult;
+    Check(BakeOk(packedParams, packedInput, &packedResult),
+          "packing bake cooks");
+    HdContainerDataSourceHandle pc = UsdGenInstancer::BuildInstancerDataSource(
+        packedResult, SdfPath("/groom"));
+    HdContainerDataSourceHandle ppv = Child(pc, "primvars");
+    HdContainerDataSourceHandle pairPv =
+        ppv ? HdContainerDataSource::Cast(ppv->Get(TfToken("usdGen:pair")))
+            : nullptr;
+    bool pairOk = false;
+    if (pairPv) {
+        VtValue pairValue = LeafValue(pairPv->Get(TfToken("primvarValue")));
+        pairOk = pairValue.IsHolding<VtVec2fArray>() &&
+            pairValue.UncheckedGet<VtVec2fArray>().size() == 2 &&
+            pairValue.UncheckedGet<VtVec2fArray>()[1] == GfVec2f(2.0f, 3.0f);
+    }
+    Check(pairOk, "float2 varyings publish packed VtVec2fArray");
+    Check(pairPv && pairPv->Get(TfToken("role")) == nullptr,
+          "non-color varyings carry no role");
+    HdContainerDataSourceHandle zonePv =
+        ppv ? HdContainerDataSource::Cast(ppv->Get(TfToken("usdGen:zone")))
+            : nullptr;
+    bool zoneDsOk = false;
+    if (zonePv) {
+        VtValue zoneValue = LeafValue(zonePv->Get(TfToken("primvarValue")));
+        zoneDsOk = zoneValue.IsHolding<VtIntArray>() &&
+            zoneValue.UncheckedGet<VtIntArray>() == VtIntArray{3, 4};
+    }
+    Check(zoneDsOk, "int varyings publish VtIntArray");
 
     HdXformSchema xform = HdXformSchema::GetFromParent(c);
     VtValue matrix = xform.GetMatrix()->GetValue(0.0);

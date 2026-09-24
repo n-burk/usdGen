@@ -41,6 +41,9 @@
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/materialBindingsSchema.h"
+#include "pxr/imaging/hd/materialNetworkSchema.h"
+#include "pxr/imaging/hd/materialNodeSchema.h"
+#include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -751,6 +754,32 @@ int main()
         Check(has(nx, { TfToken("xform"), TfToken("matrix") }) &&
                   !has(nx, { pv, pts, val }) && !has(nx, { pv, wdt, val }),
               "xform-only delta is xform-only (no republish, S4)");
+    }
+
+    // Synthetic scalp-shadow material: the Storm-only UsdGenScalpShadow
+    // node in the glslfx context plus the universal UsdPreviewSurface
+    // fallback (docs/moonray-fur.md) -- without the fallback hdMoonray
+    // looks for an RDL DSO named UsdGenScalpShadow.
+    {
+        UsdGenLookDesc look;
+        look.rootColor = GfVec3f(0.10f, 0.05f, 0.02f);
+        HdContainerDataSourceHandle const ds =
+            UsdGenTilePublisher::BuildScalpShadowMaterialDataSource(look);
+        HdMaterialSchema const mat = HdMaterialSchema::GetFromParent(ds);
+        HdMaterialNodeSchema const shaded = mat
+            .GetMaterialNetwork(TfToken("glslfx"))
+            .GetNodes().Get(TfToken("surface"));
+        Check(shaded.IsDefined() && shaded.GetNodeIdentifier() &&
+                  shaded.GetNodeIdentifier()->GetTypedValue(0) ==
+                      UsdGenTilePublisher::ScalpShadowIdentifier(),
+              "scalp-shadow material shades UsdGenScalpShadow in glslfx");
+        HdMaterialNodeSchema const fallback = mat
+            .GetMaterialNetwork(HdMaterialSchemaTokens->universalRenderContext)
+            .GetNodes().Get(TfToken("surface"));
+        Check(fallback.IsDefined() && fallback.GetNodeIdentifier() &&
+                  fallback.GetNodeIdentifier()->GetTypedValue(0) ==
+                      TfToken("UsdPreviewSurface"),
+              "scalp-shadow material falls back to UsdPreviewSurface");
     }
 
     return g_failures ? 1 : 0;

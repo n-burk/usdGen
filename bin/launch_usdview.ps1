@@ -14,6 +14,10 @@ param(
     # screenshot need exactly the plugin, python and DLL paths this
     # launcher already assembles.
     [string] $TestScript = "",
+    # Print the assembled viewer environment as JSON and exit without
+    # launching. Headless hook for tests: usdview/testusdview need GL,
+    # this does not. Wins over -TestScript.
+    [switch] $PrintEnv,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $UsdviewArgs
 )
@@ -39,6 +43,53 @@ if (-not (Test-Path (Join-Path $Build "usd\usdGenSchema\resources\plugInfo.json"
     throw "usdGen has not been built. Run .\bin\build_usdgen.ps1 first."
 }
 
+# MoonRay's Hydra delegate renders usdGen's instanced curves
+# (docs/moonray-fur.md). The MoonRay build lives beside this repo
+# (../moonray/build-windows); MOONRAY_BUILD overrides, as USD does for
+# the OpenUSD prefix. Only the two render-delegate plugInfos register:
+# their LibraryPaths resolve inside the build tree, while the adapters
+# and Sdr plugInfos point at DLLs that exist only in the build's bin/
+# and would register unloadable plugins. They precede the prefix's
+# plugin/usd: that prefix also ships hdMoonray plugInfos whose
+# LibraryPaths (../hdMoonray.dll) resolve to nothing, and the first
+# registration of a plugin name wins, so the build tree's working
+# delegate shadows the prefix's broken one. Without a MoonRay build
+# this is a no-op.
+$MoonrayBuildDir = $env:MOONRAY_BUILD
+if (-not $MoonrayBuildDir) {
+    $MoonrayBuildDir = Join-Path (Split-Path $Root) "moonray\build-windows"
+}
+$moonrayPluginDirs = @()
+$MoonrayBinDir = $null
+if ($MoonrayBuildDir -and (Test-Path $MoonrayBuildDir)) {
+    $candidateBin = Join-Path $MoonrayBuildDir "bin"
+    if (Test-Path $candidateBin) { $MoonrayBinDir = $candidateBin }
+    # hdMoonray renders through Arras even locally; without session
+    # definitions selecting the renderer fails outright. This is the
+    # same variable MoonRay's own building/Windows/run-env.ps1 sets.
+    # The caller's value wins, as with USD and PY.
+    $sessions = Join-Path $MoonrayBuildDir "moonray\hydra\hdMoonray\sessions"
+    if ((-not $env:ARRAS_SESSION_PATH) -and (Test-Path $sessions)) {
+        $env:ARRAS_SESSION_PATH = $sessions
+    }
+    # hdMoonray finds RDL scene classes (RdlCurveGeometry et al)
+    # through RDL2_DSO_PATH; without it the search path is just '.',
+    # the usdview working directory. The staged rdl2dso set wins,
+    # bin/ seconds. The caller's value wins, as with USD and PY.
+    $dsoDir = Join-Path $MoonrayBuildDir "rdl2dso"
+    if (-not (Test-Path $dsoDir)) { $dsoDir = $MoonrayBinDir }
+    if ((-not $env:RDL2_DSO_PATH) -and $dsoDir -and (Test-Path $dsoDir)) {
+        $env:RDL2_DSO_PATH = $dsoDir
+    }
+    foreach ($leaf in @("hd_moonray", "hd_moonray_debug")) {
+        $dir = Join-Path $MoonrayBuildDir "moonray\hydra\hdMoonray\plugin\$leaf"
+        $dll = Join-Path $MoonrayBuildDir "moonray\hydra\hdMoonray\$leaf.dll"
+        if ((Test-Path (Join-Path $dir "plugInfo.json")) -and (Test-Path $dll)) {
+            $moonrayPluginDirs += $dir
+        }
+    }
+}
+
 # Plug consumes a semicolon-delimited list on Windows. Put the build-tree
 # resources first so this launcher uses the plugins just built here.
 $pluginDirs = @(
@@ -47,7 +98,8 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenShaders\resources"),
     (Join-Path $Build "usd\usdGenTools\resources"),
     (Join-Path $Build "usd\usdGenTonic\resources"),
-    (Join-Path $Build "usd\usdGenTonicTools\resources"),
+    (Join-Path $Build "usd\usdGenTonicTools\resources")
+) + $moonrayPluginDirs + @(
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")
 ) | Where-Object { Test-Path $_ }
@@ -85,7 +137,12 @@ if (Test-Path $CachePath) {
 }
 
 # usdGen and OpenUSD DLLs must be discoverable before Python imports pxr.
-$runtimeDirs = @($Build, $CudaBinDir, (Join-Path $UsdInstallDir "bin"), (Join-Path $UsdInstallDir "lib")) |
+# MoonRay's bin/ carries the delegate's runtime (hydramoonray, the
+# moonray core, the RDL DSOs beside them). It precedes the USD prefix:
+# the only DLL names it shares with the prefix are tbb/tbbmalloc
+# (identical 2020.3 builds either way) and embree4 (MoonRay's 4.4.1 over
+# the prefix's 4.3.3, the safe direction for both sides).
+$runtimeDirs = @($Build, $CudaBinDir, $MoonrayBinDir, (Join-Path $UsdInstallDir "bin"), (Join-Path $UsdInstallDir "lib")) |
     Where-Object { $_ -and (Test-Path $_) }
 $env:PATH = (($runtimeDirs -join ';') + ';' + $env:PATH)
 
@@ -106,6 +163,19 @@ $pythonDirs = @(
 ) | Where-Object { Test-Path $_ }
 $env:PYTHONPATH = ($pythonDirs -join ';') +
     $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })
+
+if ($PrintEnv) {
+    [pscustomobject]@{
+        MoonrayBuildDir = $MoonrayBuildDir
+        MoonrayFound = ($moonrayPluginDirs.Count -gt 0)
+        ARRAS_SESSION_PATH = $env:ARRAS_SESSION_PATH
+        RDL2_DSO_PATH = $env:RDL2_DSO_PATH
+        PXR_PLUGINPATH_NAME = $env:PXR_PLUGINPATH_NAME
+        PATH = $env:PATH
+        PYTHONPATH = $env:PYTHONPATH
+    } | ConvertTo-Json -Compress
+    exit 0
+}
 
 # The prefix's own viewer comes first in either form it ships: the
 # extensionless python script (what usd-install has, and what the usdRig

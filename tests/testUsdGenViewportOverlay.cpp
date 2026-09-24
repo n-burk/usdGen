@@ -19,8 +19,12 @@
 //     carry no materialBindings at all, so Storm fell back to flat
 //     displayColor shading. A tile now binds the synthetic
 //     <description>/__usdGenRender/material_storm, which must be a reachable
-//     `material` prim whose surface terminal is the Sdr id
-//     UsdGenTilePublisher::DefaultMaterialIdentifier() (UE-parity WS1: UsdGenHairStrandsTranslucent).
+//     `material` prim with TWO networks: the `glslfx` one, whose surface
+//     terminal is the Sdr id
+//     UsdGenTilePublisher::DefaultMaterialIdentifier() (UE-parity WS1: UsdGenHairStrandsTranslucent),
+//     and the universal one, a UsdPreviewSurface reading displayColor
+//     through a primvar reader, which is what hdMoonray (and every other
+//     non-Storm delegate) falls back to (docs/moonray-fur.md).
 //   * materialBindings — the binding is a FUNCTION of the inherited
 //     displayStyle, which is what buys complexity parity with a native
 //     UsdGeomBasisCurves. refineLevel 0 carries NO binding at all (the hair
@@ -51,6 +55,7 @@
 #include "pxr/imaging/hd/materialBindingsSchema.h"
 #include "pxr/imaging/hd/materialConnectionSchema.h"
 #include "pxr/imaging/hd/materialNetworkSchema.h"
+#include "pxr/imaging/hd/materialNodeParameterSchema.h"
 #include "pxr/imaging/hd/materialNodeSchema.h"
 #include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
@@ -58,6 +63,8 @@
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/selectionSchema.h"
 #include "pxr/imaging/hd/selectionsSchema.h"
+#include "pxr/base/gf/vec3f.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdShade/material.h"
@@ -251,6 +258,15 @@ SdfPath TileMaterial(HdSceneIndexBase const &index, SdfPath const &tile)
     return SdfPath();
 }
 
+VtValue NodeParam(HdMaterialNodeSchema const &node, char const *name)
+{
+    HdMaterialNodeParameterSchema const param =
+        node.GetParameters().Get(TfToken(name));
+    HdSampledDataSourceHandle const sampled =
+        param.IsDefined() ? param.GetValue() : nullptr;
+    return sampled ? sampled->GetValue(0.0f) : VtValue();
+}
+
 int TileRefineLevel(HdSceneIndexBase const &index, SdfPath const &tile)
 {
     HdSceneIndexPrim const prim = index.GetPrim(tile);
@@ -327,26 +343,89 @@ int main()
         HdSceneIndexPrim const prim = groomBase->GetPrim(material);
         Check(prim.primType == TfToken("material"),
               "material_storm has Hydra prim type 'material'");
-        HdMaterialNetworkSchema network =
-            HdMaterialSchema::GetFromParent(prim.dataSource)
-                .GetMaterialNetwork(
-                    HdMaterialSchemaTokens->universalRenderContext);
-        Check(network.IsDefined(),
-              "material_storm carries a universal-render-context network");
-        HdMaterialNodeSchema node =
-            network.GetNodes().Get(TfToken("surface"));
+        HdMaterialSchema const matSchema =
+            HdMaterialSchema::GetFromParent(prim.dataSource);
+        // The glslfx network is Storm's hair shading, unchanged: Storm
+        // prefers its glslfx render context over the universal one.
+        HdMaterialNetworkSchema const glslfx =
+            matSchema.GetMaterialNetwork(TfToken("glslfx"));
+        Check(glslfx.IsDefined(),
+              "material_storm carries a glslfx-render-context network");
+        HdMaterialNodeSchema const hair =
+            glslfx.GetNodes().Get(TfToken("surface"));
         TfToken const &expected =
             ::usdGenImaging::UsdGenTilePublisher::DefaultMaterialIdentifier();
-        Check(node.IsDefined() && node.GetNodeIdentifier() &&
-                  node.GetNodeIdentifier()->GetTypedValue(0) == expected,
-              ("surface node binds the Sdr identifier " +
+        Check(hair.IsDefined() && hair.GetNodeIdentifier() &&
+                  hair.GetNodeIdentifier()->GetTypedValue(0) == expected,
+              ("glslfx surface node binds the Sdr identifier " +
                expected.GetString()).c_str());
-        HdMaterialConnectionSchema terminal =
-            network.GetTerminals().Get(TfToken("surface"));
-        Check(terminal.IsDefined() && terminal.GetUpstreamNodePath() &&
-                  terminal.GetUpstreamNodePath()->GetTypedValue(0) ==
+        HdMaterialConnectionSchema const hairTerminal =
+            glslfx.GetTerminals().Get(TfToken("surface"));
+        Check(hairTerminal.IsDefined() && hairTerminal.GetUpstreamNodePath() &&
+                  hairTerminal.GetUpstreamNodePath()->GetTypedValue(0) ==
                       TfToken("surface"),
-              "the surface terminal points at the surface node");
+              "the glslfx surface terminal points at the surface node");
+        // The fixture authors no look: default tip color flows through.
+        VtValue const tipColor = NodeParam(hair, "tipColor");
+        Check(tipColor.IsHolding<GfVec3f>() &&
+                  tipColor.UncheckedGet<GfVec3f>() ==
+                      GfVec3f(0.210f, 0.115f, 0.045f),
+              "glslfx hair node carries the default tip color");
+        // The universal network is the renderer-agnostic fallback
+        // (docs/moonray-fur.md): hdMoonray reads the universal context
+        // when no moonray context exists, and a UsdGenHairStrands node
+        // there makes it look for an RDL DSO of that name. The preview
+        // instead reads the per-curve displayColor the tiles bake.
+        HdMaterialNetworkSchema const universal =
+            matSchema.GetMaterialNetwork(
+                HdMaterialSchemaTokens->universalRenderContext);
+        Check(universal.IsDefined(),
+              "material_storm carries a universal-render-context network");
+        HdMaterialNodeSchema const preview =
+            universal.GetNodes().Get(TfToken("surface"));
+        Check(preview.IsDefined() && preview.GetNodeIdentifier() &&
+                  preview.GetNodeIdentifier()->GetTypedValue(0) ==
+                      TfToken("UsdPreviewSurface"),
+              "universal surface node is a UsdPreviewSurface");
+        HdMaterialConnectionSchema const previewTerminal =
+            universal.GetTerminals().Get(TfToken("surface"));
+        Check(previewTerminal.IsDefined() &&
+                  previewTerminal.GetUpstreamNodePath() &&
+                  previewTerminal.GetUpstreamNodePath()->GetTypedValue(0) ==
+                      TfToken("surface"),
+              "the universal surface terminal points at the surface node");
+        HdMaterialNodeSchema const reader =
+            universal.GetNodes().Get(TfToken("DisplayColor"));
+        Check(reader.IsDefined() && reader.GetNodeIdentifier() &&
+                  reader.GetNodeIdentifier()->GetTypedValue(0) ==
+                      TfToken("UsdPrimvarReader_float3"),
+              "universal network reads displayColor through a primvar reader");
+        VtValue const varname = NodeParam(reader, "varname");
+        Check(varname.IsHolding<TfToken>() &&
+                  varname.UncheckedGet<TfToken>() == TfToken("displayColor"),
+              "the reader reads varname displayColor");
+        VtValue const fallback = NodeParam(reader, "fallback");
+        Check(fallback.IsHolding<GfVec3f>() &&
+                  fallback.UncheckedGet<GfVec3f>() ==
+                      GfVec3f(0.035f, 0.018f, 0.008f),
+              "the reader falls back to the default root color");
+        HdMaterialConnectionVectorSchema const conns =
+            preview.GetInputConnections().Get(TfToken("diffuseColor"));
+        HdMaterialConnectionSchema const diffuseColor =
+            conns.IsDefined() && conns.GetNumElements() > 0
+                ? conns.GetElement(0)
+                : HdMaterialConnectionSchema(HdContainerDataSourceHandle());
+        Check(diffuseColor.IsDefined() && diffuseColor.GetUpstreamNodePath() &&
+                  diffuseColor.GetUpstreamNodePath()->GetTypedValue(0) ==
+                      TfToken("DisplayColor") &&
+                  diffuseColor.GetUpstreamNodeOutputName() &&
+                  diffuseColor.GetUpstreamNodeOutputName()->GetTypedValue(0) ==
+                      TfToken("result"),
+              "preview diffuseColor connects to the reader result");
+        VtValue const roughness = NodeParam(preview, "roughness");
+        Check(roughness.IsHolding<float>() &&
+                  roughness.UncheckedGet<float>() == 0.6f,
+              "preview roughness is the documented constant");
 
         bool bound = true;
         for (SdfPath const &tile : tiles)

@@ -113,9 +113,19 @@ def generate(count, out_path):
                "        float inputs:intensity = 0.3\n"
                "        color3f inputs:color = (0.85, 0.9, 1.0)\n"
                "    }\n\n")
+    # The universal outputs:surface is the renderer-agnostic fallback
+    # (docs/moonray-fur.md): Storm prefers its glslfx context, while
+    # hdMoonray -- and any other Hydra delegate -- falls back to the
+    # UsdPreviewSurface, whose diffuseColor reads the per-instance
+    # displayColor through a primvar reader. A MoonRay-native hair
+    # material (HairMaterial_v3) is deliberately NOT authored: UsdImaging
+    # drops nodes whose info:id has no Sdr definition, and MoonRay's own
+    # Sdr plugins are not on the translation path, so such a terminal
+    # would resolve to no material at all.
     out.append('''    def Material "FurLook"
     {
         token outputs:glslfx:surface.connect = </World/FurLook/Surface.outputs:surface>
+        token outputs:surface.connect = </World/FurLook/Preview.outputs:surface>
         def Shader "Surface"
         {
             uniform token info:id = "UsdGenHairPreview"
@@ -124,6 +134,20 @@ def generate(count, out_path):
             float inputs:selfOcclusion = 0.5
             float inputs:specular1Gain = 0.18
             token outputs:surface
+        }
+        def Shader "Preview"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </World/FurLook/DisplayColor.outputs:result>
+            float inputs:roughness = 0.6
+            token outputs:surface
+        }
+        def Shader "DisplayColor"
+        {
+            uniform token info:id = "UsdPrimvarReader_float3"
+            token inputs:varname = "displayColor"
+            color3f inputs:fallback = (0.16, 0.10, 0.06)
+            color3f outputs:result
         }
     }
 ''')

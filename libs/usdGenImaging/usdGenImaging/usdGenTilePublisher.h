@@ -104,9 +104,14 @@ public:
     /// The `material` prim data source for MaterialPath(): one node named
     /// `surface` whose nodeIdentifier is DefaultMaterialIdentifier()
     /// (bind by identifier, never an asset path — see
-    /// usdGenShaders/resources/hairLook.usda), wired to the universal
-    /// render context's `surface` terminal. Parameters are left unset so the
-    /// shader def's Sdr defaults apply.
+    /// usdGenShaders/resources/hairLook.usda), wired to the `glslfx`
+    /// render context's `surface` terminal, plus a universal-context
+    /// fallback network (UsdPreviewSurface reading displayColor through
+    /// a primvar reader) for hdMoonray and every other non-Storm
+    /// delegate (docs/moonray-fur.md). Storm prefers its glslfx context
+    /// over the universal one, so its shading is unchanged. Parameters
+    /// are left unset so the shader def's Sdr defaults apply; the
+    /// reader fallback is the default look's root colour.
     static HdContainerDataSourceHandle BuildDefaultMaterialDataSource();
 
     /// The same material carrying the description's `usdGen:look:*`.
@@ -119,7 +124,10 @@ public:
     /// shader's light-brown tip.
     ///
     /// A multi-stop `usdGen:look:colorRamp` cannot be expressed in the
-    /// shader's two-colour ramp; its first and last stops are used.
+    /// shader's two-colour ramp; its first and last stops are used. The
+    /// universal fallback's reader fallback is the same root colour the
+    /// baseColor parameter carries, so the no-displayColor route agrees
+    /// in both networks.
     static HdContainerDataSourceHandle BuildDefaultMaterialDataSource(
         usdGen::UsdGenLookDesc const &look);
 

@@ -8,6 +8,7 @@
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/quatd.h"
+#include "pxr/base/gf/quath.h"
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/gf/vec4d.h"
@@ -224,15 +225,21 @@ _Container(std::vector<TfToken> &&names,
         names.size(), names.data(), values.data());
 }
 
-// One primvars/<name> entry at `instance` interpolation (06 §4.3). No role:
-// displayColor carries none on tiles either (tile publisher), and Storm
-// applies no filtering to instance-rate primvars (02 §2.11).
+// One primvars/<name> entry at `instance` interpolation (06 §4.3). The
+// color role is set for displayColor only, matching USD's own color3f
+// primvar convention; Storm applies no filtering to instance-rate primvars
+// either way (02 §2.11).
 HdContainerDataSourceHandle
-_InstancePrimvar(HdSampledDataSourceHandle const &values, int elementSize = 0)
+_InstancePrimvar(HdSampledDataSourceHandle const &values,
+                 TfToken const &role = TfToken(),
+                 int elementSize = 0)
 {
     HdPrimvarSchema::Builder b;
     b.SetPrimvarValue(values);
     b.SetInterpolation(_Tok(TfToken("instance")));
+    if (!role.IsEmpty()) {
+        b.SetRole(_Tok(role));
+    }
     if (elementSize > 0) {
         b.SetElementSize(HdRetainedTypedSampledDataSource<int>::New(elementSize));
     }
@@ -707,19 +714,49 @@ UsdGenInstancer::BuildInstancerDataSource(
         std::vector<HdDataSourceBaseHandle> pvValues;
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceTranslations,
              _InstancePrimvar(_Samp(result.translations)));
+        // USD maps PointInstancer `orientations` (quath[]) straight through
+        // to hydra:instanceRotations (dataSourcePointInstancer.cpp), and
+        // hdMoonray only accepts VtQuathArray there: a VtQuatfArray
+        // mis-syncs every instance. Storm accepts both encodings, so the
+        // data source publishes quath -- the wire type every Hydra consumer
+        // reads -- while Bake keeps full float precision (docs/moonray-fur.md).
+        VtQuathArray quath(result.rotations.size());
+        for (size_t i = 0; i != result.rotations.size(); ++i)
+            quath[i] = GfQuath(result.rotations[i]);
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceRotations,
-             _InstancePrimvar(_Samp(result.rotations)));
+             _InstancePrimvar(_Samp(quath)));
         _Add(&pvNames, &pvValues, HdInstancerTokens->instanceScales,
              _InstancePrimvar(_Samp(result.scales)));
         for (usdGen::UsdGenPlane const &plane : result.varyings) {
             HdSampledDataSourceHandle sampled;
+            TfToken role;
+            int elementSize = 0;
             if (plane.type == TfToken("int")) {
+                // Scalar ints ride through flat; hdMoonray reads them, and
+                // only Storm honors elementSize on multi-arity int planes.
                 sampled = _Samp(plane.i);
+                elementSize = plane.arity;
+            } else if (plane.arity == 3 && plane.f.size() % 3 == 0) {
+                // hdMoonray ignores elementSize, so pack float3: a flat
+                // VtFloatArray would be misread as one scalar per instance.
+                VtVec3fArray packed(plane.f.size() / 3);
+                for (size_t i = 0; i != packed.size(); ++i)
+                    packed[i] = GfVec3f(plane.f[3 * i], plane.f[3 * i + 1],
+                                        plane.f[3 * i + 2]);
+                sampled = _Samp(packed);
+                if (plane.name == TfToken("displayColor"))
+                    role = TfToken("color");
+            } else if (plane.arity == 2 && plane.f.size() % 2 == 0) {
+                VtVec2fArray packed(plane.f.size() / 2);
+                for (size_t i = 0; i != packed.size(); ++i)
+                    packed[i] = GfVec2f(plane.f[2 * i], plane.f[2 * i + 1]);
+                sampled = _Samp(packed);
             } else {
                 sampled = _Samp(plane.f);
+                elementSize = plane.arity;
             }
             _Add(&pvNames, &pvValues, plane.name,
-                 _InstancePrimvar(sampled, plane.arity));
+                 _InstancePrimvar(sampled, role, elementSize));
         }
         _Add(&names, &values, TfToken("primvars"),
              _Container(std::move(pvNames), std::move(pvValues)));

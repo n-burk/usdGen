@@ -100,10 +100,17 @@ struct UsdGenInstanceResult
     VtBoolArray mask;                       // empty == all true (never written here)
     // Instance-rate arrays, one entry per curve, ascending curve order:
     VtVec3fArray translations;              // primvars/hydra:instanceTranslations
-    VtQuatfArray rotations;                 // primvars/hydra:instanceRotations
+    VtQuatfArray rotations;                 // baked at full float precision;
+                                            // the data source publishes
+                                            // VtQuathArray (USD's own
+                                            // orientations encoding, required
+                                            // by hdMoonray)
     VtVec3fArray scales;                    // primvars/hydra:instanceScales
     VtIntArray prototypeIndex;              // owning prototype per instance
-    // Instance-interpolated varyings (displayColor + extraCurve planes).
+    // Instance-interpolated varyings (displayColor + extraCurve planes) as
+    // flat float/int planes. Float arity 2/3 pack to VtVec2f/3fArray at
+    // assembly (hdMoonray ignores elementSize); displayColor publishes
+    // with the color role.
     std::vector<usdGen::UsdGenPlane> varyings;
     // Requested variation names with no baked source: publish nothing.
     std::vector<TfToken> unresolvedPrimvars;
@@ -173,6 +180,14 @@ public:
     /// `instance` interpolation, identity xform + resetXformStack (instance
     /// translations are final, as tile points are), purpose/visibility and
     /// primOrigin/scenePath. Absolute primOrigin outside prototypes (02 §3.2).
+    ///
+    /// Wire types follow USD's own PointInstancer encoding so every Hydra
+    /// consumer (Storm and hdMoonray alike) reads the prim (docs/moonray-
+    /// fur.md): instanceRotations publishes VtQuathArray, float varyings of
+    /// arity 3/2 publish VtVec3f/2fArray with no elementSize, and
+    /// displayColor carries the color role. Scalar int varyings ride
+    /// through as VtIntArray; only Storm honors elementSize on multi-arity
+    /// int planes.
     ///
     /// INTEGRATION: UsdGenGroomSceneIndex::GetPrim answers this alongside
     /// the tile map (groomSceneIndexPlugin.cpp, next to the

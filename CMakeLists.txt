@@ -2213,9 +2213,12 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         "${_usdgen_shader_resources}"
         "${_usdgen_tonic_resources}" "${_usdgen_tonic_tools_resources}"
         "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    # bin/launch_env last so its sitecustomize lands first on PYTHONPATH and
+    # scrubs a nanousd editable install's pxr shadow (no-op otherwise).
     usdgen_test_path_list_ops(_usdgen_tonic_python_env PYTHONPATH path_list_prepend
         "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
-        "${CMAKE_CURRENT_BINARY_DIR}/python")
+        "${CMAKE_CURRENT_BINARY_DIR}/python"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdviewTonicGraph PROPERTIES
         LABELS "T3;tonic;tools;usdview" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
@@ -2557,10 +2560,16 @@ if(_usdgen_test_python)
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testTonicSoak.py"
             --minutes 30)
+    # The soak imports the prefix's pxr through tonicLib; bin/launch_env
+    # first so its sitecustomize scrubs a nanousd editable install's shadow.
+    usdgen_test_path_list_ops(_usdgen_tonicsoak_python_env PYTHONPATH path_list_prepend
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testTonicSoak PROPERTIES
         LABELS "T4;tonic;tools;gate:TN-5" TIMEOUT 2400
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT "USDGENTONIC_DLL=$<TARGET_FILE:usdGenTonic>"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonicsoak_python_env}"
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
     # The smoke is 60 seconds and DOES run in the default suite, so it is
     # not T4: T4 here means "wall clock, excluded by -LE T4", and the two
@@ -2574,6 +2583,7 @@ if(_usdgen_test_python)
         LABELS "T1;tonic;tools;gate:TN-5" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT "USDGENTONIC_DLL=$<TARGET_FILE:usdGenTonic>"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tonicsoak_python_env}"
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 endif()
 
@@ -2626,7 +2636,8 @@ if(_usdgen_test_python)
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsBridge.py")
     usdgen_test_path_list_ops(_usdgen_tonicbridge_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages")
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenTonicToolsBridge PROPERTIES
         LABELS "T1;tonic;tools" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
@@ -2644,7 +2655,8 @@ if(_usdgen_test_python)
         COMMAND "${_usdgen_test_python}"
             "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTonicTools/testenv/testUsdGenTonicToolsStage.py")
     usdgen_test_path_list_ops(_usdgen_tonicstage_python_env PYTHONPATH path_list_prepend
-        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages")
+        "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenTonicToolsStage PROPERTIES
         LABELS "T1;tonic;tools" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
@@ -2680,7 +2692,8 @@ if(_usdgen_test_python)
         "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
     usdgen_test_path_list_ops(_usdgen_hair_python_env PYTHONPATH path_list_prepend
         "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
-        "${CMAKE_CURRENT_BINARY_DIR}/python")
+        "${CMAKE_CURRENT_BINARY_DIR}/python"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
 
     add_test(NAME testUsdGenHairEnergy
         COMMAND "${_usdgen_test_python}"
@@ -2688,6 +2701,31 @@ if(_usdgen_test_python)
     set_tests_properties(testUsdGenHairEnergy PROPERTIES
         LABELS "T1;shaders;gate:L-2" TIMEOUT 300
         FAIL_REGULAR_EXPRESSION "FAIL|Traceback"
+        SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+
+    # fur_gen.py MoonRay fallback (docs/moonray-fur.md): the generated
+    # PointInstancer fur must carry a universal UsdPreviewSurface terminal
+    # with a displayColor primvar reader beside its Storm glslfx terminal.
+    # Stdlib only, no pxr -- nothing to skip on.
+    add_test(NAME testUsdGenFurGenMaterial
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/check_fur_gen_material.py")
+    set_tests_properties(testUsdGenFurGenMaterial PROPERTIES
+        LABELS "T1;fur" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback")
+
+    # launch_usdview.ps1 MoonRay wiring (docs/moonray-fur.md): the
+    # launcher must place the MoonRay build's hd_moonray plugInfos ahead
+    # of the OpenUSD prefix, its bin/ ahead of the prefix on PATH, and
+    # set ARRAS_SESSION_PATH/RDL2_DSO_PATH for interactive rendering.
+    # Skips (77) off Windows, without powershell, or without a MoonRay
+    # build beside the repo.
+    add_test(NAME testUsdGenUsdviewEnv
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/checks/check_usdview_env.py")
+    set_tests_properties(testUsdGenUsdviewEnv PROPERTIES
+        LABELS "T1;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 
     add_test(NAME testUsdGenHairStrandsDefs

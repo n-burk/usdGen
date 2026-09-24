@@ -165,10 +165,11 @@ bool Has(SdfPathVector const &paths, SdfPath const &path)
     return std::find(paths.begin(), paths.end(), path) != paths.end();
 }
 
-TfToken SurfaceNode(HdSceneIndexPrim const &prim)
+TfToken SurfaceNode(HdSceneIndexPrim const &prim, TfToken const &renderContext)
 {
     HdMaterialNetworkSchema const network =
-        HdMaterialSchema::GetFromParent(prim.dataSource).GetMaterialNetwork();
+        HdMaterialSchema::GetFromParent(prim.dataSource).GetMaterialNetwork(
+            renderContext);
     if (!network) return TfToken();
     HdMaterialNodeSchema const node = network.GetNodes().Get(TfToken("surface"));
     HdTokenDataSourceHandle const id = node.GetNodeIdentifier();
@@ -276,8 +277,11 @@ void CheckScene()
     Check(Has(regions.children, lit), "material_preview is a child of the render scope");
     HdSceneIndexPrim const material = scene.groom->GetPrim(lit);
     Check(material.primType == TfToken("material") &&
-          SurfaceNode(material) == TfToken("UsdGenValuePreview"),
-          "material_preview is a UsdGenValuePreview material");
+          SurfaceNode(material, TfToken("glslfx")) == TfToken("UsdGenValuePreview"),
+          "material_preview is a UsdGenValuePreview material in the glslfx context");
+    Check(SurfaceNode(material, HdMaterialSchemaTokens->universalRenderContext) ==
+              TfToken("UsdPreviewSurface"),
+          "material_preview falls back to UsdPreviewSurface universally");
     Check(regions.curves == look.curves && regions.colors.size() == regions.curves,
           "the map preview is one colour per strand");
     size_t const cells = Distinct(regions.colors);
