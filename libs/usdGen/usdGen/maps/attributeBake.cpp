@@ -199,8 +199,14 @@ bool UsdGenAttributeBakePtex(UsdGenAttributeBakeInput const &input,
 }
 
 UsdGenAttributeBakeWorker::UsdGenAttributeBakeWorker()
-    : _worker(&UsdGenAttributeBakeWorker::_WorkerLoop, this)
 {
+    // _worker is the first data member, so starting it from the initializer
+    // list runs _WorkerLoop before _mutex and _wake exist. Under ctest -j
+    // that race throws std::system_error "Invalid argument" from the worker
+    // thread and std::terminate takes the process down. Default-construct
+    // the thread with the other members, then start it once they are live.
+    // Same pattern as TonicBakeWorker.
+    _worker = std::thread(&UsdGenAttributeBakeWorker::_WorkerLoop, this);
 }
 
 UsdGenAttributeBakeWorker::~UsdGenAttributeBakeWorker()
@@ -210,7 +216,7 @@ UsdGenAttributeBakeWorker::~UsdGenAttributeBakeWorker()
         _stop = true;
     }
     _wake.notify_all();
-    _worker.join();
+    if (_worker.joinable()) _worker.join();
 }
 
 void UsdGenAttributeBakeWorker::Enqueue(uint64_t version, UsdGenAttributeBakeInput input)
