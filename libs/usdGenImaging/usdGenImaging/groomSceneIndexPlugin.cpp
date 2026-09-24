@@ -589,6 +589,13 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     // deliberately has no sequence:
     // no waiter may depend on work that was never admitted.
     std::atomic<bool> deferredFullCapture{false};
+    // asyncPoll recovery back-off (see _SystemMessage): the steady-clock
+    // tick before which a poll must not retry after a THROWING recovery
+    // capture, the consecutive-failure count that sizes the back-off, and
+    // a warn-once latch.
+    std::atomic<int64_t> pollRecoveryNotBefore{0};
+    std::atomic<uint32_t> pollRecoveryFailures{0};
+    std::atomic<bool> pollRecoveryWarned{false};
     // Owner-only state below.
     std::map<SdfPath, std::shared_ptr<Groom>> members;
     std::map<SdfPath, uint64_t> events, tombstones;
@@ -608,6 +615,14 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     Snapshot::SourceValue rootValue;
     std::atomic<uint64_t> captureCount{0};
     std::atomic<uint64_t> cookCount{0};
+    static std::atomic<uint64_t>& ProcessCooks() {
+        static std::atomic<uint64_t> count{0};
+        return count;
+    }
+    static std::atomic<uint64_t>& ProcessPublishes() {
+        static std::atomic<uint64_t> count{0};
+        return count;
+    }
     uint64_t captureTrustSequence = 0;
     std::vector<TfWeakPtr<Session>> usedSessions;
     std::unique_ptr<Pipeline> owner; // removed at process shutdown, even if public index survives
@@ -886,11 +901,13 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->tiles = std::move(fresh);
         g->scalpShadow = std::move(freshScalp);
         g->scalpDigest = freshScalpDigest;
+        ProcessPublishes().fetch_add(1, std::memory_order_acq_rel);
         Notify(added, removed, dirtied);
     }
     void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
         if (!g->session || !g->desc || closing.load() || !Current(g)) return;
         cookCount.fetch_add(1, std::memory_order_acq_rel);
+        ProcessCooks().fetch_add(1, std::memory_order_acq_rel);
         uint64_t const attachmentEpoch = g->attachmentEpoch;
         Session::CommitRequest request;
         request.reason = usdGen::UsdGenCommitReason::NoticeBatchEnd;
@@ -1921,11 +1938,67 @@ void UsdGenGroomSceneIndex::_SystemMessage(
     }
     if (messageType == HdSystemMessageTokens->asyncPoll &&
         _state->asyncAllowed.load(std::memory_order_acquire)) {
-        // Poll is a render-thread flush only: it must not await owner work or
-        // start cooking.  The engine's temporary observer sees these notices.
+        // Poll is a render-thread flush: it never awaits owner work, and it
+        // starts no capture or cook of its own.  The engine's temporary
+        // observer sees these notices.
         auto live = TfCreateRefPtrFromProtectedWeakPtr(_state->recipient);
         if (!live) return;
         _DrainPublications(false);
+        // The one exception: a notice dropped under admission backpressure
+        // (deferredFullCapture) is owed an authoritative rescan, and in async
+        // mode nothing else would run it until the NEXT external notice --
+        // so the last write of a brush drag could stay uncooked until the
+        // user touched the stage again.  The poll is the Hydra-thread
+        // boundary that keeps arriving without one, so it retries the
+        // recovery here.  _CaptureAndSubmit is non-blocking in async mode
+        // (it posts; a later poll delivers), and while admission is still
+        // saturated it only re-arms the latch, so a stalled owner costs one
+        // failed ticket reservation per poll.
+        //
+        // Threading: this capture reads the INPUT scene index (the UsdImaging
+        // stage scene index), which is only safe on the thread that edits
+        // the stage and delivers its notices.  asyncPoll is sent from
+        // UsdImagingGLEngine::PollForAsynchronousUpdates, which usdview (and
+        // every client we support) calls on that same application/main
+        // thread; a client polling from another thread must not enable
+        // asyncAllowed.
+        //
+        // Scope: the recovery restamps EVERY source and rescans the whole
+        // catalog, re-cooking every groom.  Recovering only the dropped
+        // paths is not possible: a latch set by Apply (a full-source packet
+        // older than sourceThrough) or by a throwing capture has no path set,
+        // and a dropped Added/Removed needs the namespace resync regardless.
+        //
+        // Back-off: a recovery that THROWS (not one merely refused by
+        // admission) waits 50 ms doubling to 2 s before the next poll
+        // retries, and warns once until a recovery succeeds.
+        int64_t const now = std::chrono::steady_clock::now().time_since_epoch().count();
+        if (_state->deferredFullCapture.load(std::memory_order_acquire) &&
+            !_state->closing.load(std::memory_order_acquire) &&
+            now >= _state->pollRecoveryNotBefore.load(std::memory_order_acquire)) {
+            TF_DEBUG(USDGEN_INGRESS).Msg(
+                "usdGen ingress   asyncPoll retries a pressure-deferred rescan\n");
+            _Ingress recovery;
+            recovery.forceFullDiscovery = true;
+            recovery.recoverSourceNamespace = true;
+            // A failed capture re-arms the latch itself; never let it
+            // escape into the engine's poll.
+            try {
+                _CaptureAndSubmit(std::move(recovery));
+                _state->pollRecoveryFailures.store(0, std::memory_order_release);
+                _state->pollRecoveryWarned.store(false, std::memory_order_release);
+            } catch (...) {
+                uint32_t const failures =
+                    _state->pollRecoveryFailures.fetch_add(1, std::memory_order_acq_rel) + 1;
+                auto const backoff = (std::min)(std::chrono::milliseconds(2000),
+                    std::chrono::milliseconds(50) * (int64_t(1) << (std::min<uint32_t>)(failures - 1, 6)));
+                _state->pollRecoveryNotBefore.store(
+                    now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(backoff).count(),
+                    std::memory_order_release);
+                if (!_state->pollRecoveryWarned.exchange(true, std::memory_order_acq_rel))
+                    TF_WARN("usdGen deferred rescan failed; asyncPoll backs off and retries");
+            }
+        }
     }
 }
 
@@ -2061,6 +2134,12 @@ int64_t UsdGenGroomSceneIndex::_TestPendingPublishedGeneration(SdfPath const& ro
 }
 uint64_t UsdGenGroomSceneIndex::_TestCaptureCount() const noexcept {
     return _state->captureCount.load(std::memory_order_acquire);
+}
+uint64_t UsdGenGroomSceneIndex::ProcessCookCount() noexcept {
+    return _State::ProcessCooks().load(std::memory_order_acquire);
+}
+uint64_t UsdGenGroomSceneIndex::ProcessPublishCount() noexcept {
+    return _State::ProcessPublishes().load(std::memory_order_acquire);
 }
 uint64_t UsdGenGroomSceneIndex::_TestCookCount() const noexcept {
     return _state->cookCount.load(std::memory_order_acquire);

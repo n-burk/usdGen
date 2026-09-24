@@ -171,6 +171,17 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
             pp.prefixes.emplace_back(
                 _Loc({TfToken("usdGen"), TfToken("rest"),
                       TfToken("normalsInterpolation")}), restNormals);
+            // Paint density the brush bakes on the bound surface: scatter
+            // captures its face means, so a density edit re-captures the
+            // node (the capture digest decides the recook). A bare coarse
+            // `primvars` dirty keeps its pre-existing SurfacePoints route
+            // (the deeper points prefix wins); the bake always carries the
+            // fine primvar locator too, so the re-capture still lands.
+            Entry const paintDensity{node.id, usdGen::UsdGenDirtyCapture};
+            pp.prefixes.emplace_back(
+                _Loc({TfToken("primvars"),
+                      TfToken("usdGen:paint:density")}),
+                paintDensity);
         }
         // C3 curves changed -> re-capture the consuming node (no curve scope
         // in UsdGenPendingDirty: the capture class carries it, 02 §6 row 5).
@@ -183,6 +194,23 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
             table[mapRef].prefixes.emplace_back(
                 HdDataSourceLocator(UsdGenContainerToken()),
                 Entry{node.id, usdGen::UsdGenDirtyMap});
+        }
+        // A paint map's primvar lives on the surface, not on the map prim:
+        // the brush bake edits primvars:<name> on the mesh, so route that
+        // locator to the sampling node or the re-captured snapshot never
+        // cooks (length/width/clump/curl paints would do nothing). Same
+        // class as graph.DirtyMap (Map | Capture): the fresh snapshot
+        // re-captures the node and re-sweeps its chunks. The primvar-deep
+        // locator wins over the coarse primvars SurfacePoints row; a bare
+        // coarse primvars dirty keeps its pre-existing route.
+        for (usdGen::UsdGenPaintRoutingRef const &paint : node.paintRefs) {
+            if (paint.primvar.IsEmpty() ||
+                paint.surface >= snapshot.surfacePaths.size())
+                continue;
+            table[snapshot.surfacePaths[paint.surface]].prefixes.emplace_back(
+                _Loc({TfToken("primvars"), paint.primvar}),
+                Entry{node.id, usdGen::UsdGenDirtyMap |
+                                   usdGen::UsdGenDirtyCapture});
         }
         // Geometry and maps a connected expression samples: any edit of the
         // prim re-captures the consumer, whose expression values then move.
@@ -206,6 +234,14 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
         pp.prefixes.emplace_back(
             _Loc({UsdGenContainerToken(), TfToken("curve"), TfToken("basis")}),
             Entry{terminal, usdGen::UsdGenDirtyTopology});
+        pp.prefixes.emplace_back(
+            _Loc({UsdGenContainerToken(), TfToken("curve"), TfToken("basis")}),
+            Entry{terminal, usdGen::UsdGenDirtyTopology});
+        // The authored execution order (usdGen:operatorOrder): reordering
+        // the chain is a recompile, not a value sweep.
+        pp.prefixes.emplace_back(
+            _Loc({UsdGenContainerToken(), TfToken("operatorOrder")}),
+            Entry{terminal, 0u, {}, {}, true});
     }
 
     for (auto &primEntry : table) {
@@ -256,6 +292,12 @@ UsdGenDirtyRouter::Route(
         }
 
         for (auto const &locator : entry.dirtyLocators) {
+            if (locator == s_container) {
+                // Adapter resync of the whole usdGen container (02 §6.6 r2)
+                // subsumes every routed leaf beneath it.
+                out->structural = true;
+                continue;
+            }
             bool matched = false;
             for (auto const &prefix : pp.prefixes) {
                 // Intersects: locator is under the table prefix, equal to
@@ -263,7 +305,9 @@ UsdGenDirtyRouter::Route(
                 // routed leaf beneath). Universal entries store the empty
                 // locator, which is a prefix of everything.
                 if (locator.Intersects(prefix.first)) {
-                    if (prefix.second.surfaceScoped) {
+                    if (prefix.second.structural) {
+                        out->structural = true;
+                    } else if (prefix.second.surfaceScoped) {
                         out->surfaceBits[prefix.second.surface] |=
                             prefix.second.bits;
                     } else {
@@ -276,10 +320,7 @@ UsdGenDirtyRouter::Route(
             if (matched) {
                 continue;
             }
-            if (locator == s_container) {
-                // Adapter resync of the whole usdGen container (02 §6.6 r2).
-                out->structural = true;
-            } else if (locator.GetFirstElement() == UsdGenContainerToken()) {
+            if (locator.GetFirstElement() == UsdGenContainerToken()) {
                 _WarnUnknownRoute(entry.primPath, locator.GetLastElement());
             }
         }

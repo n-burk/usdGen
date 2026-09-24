@@ -331,6 +331,10 @@ int main() {
         lengthStage, SdfPath("/Character/Groom/hair"));
     auto const randomHydraDesc = usdGenImaging::BuildGraphDescFromHydra(
         *lengthIndices.finalSceneIndex, SdfPath("/Character/Groom/hair"));
+    for (auto const &e : randomStageDesc.validationErrors)
+        std::printf("stage validation: %s\n", e.c_str());
+    for (auto const &e : randomHydraDesc.validationErrors)
+        std::printf("hydra validation: %s\n", e.c_str());
     CHECK(randomStageDesc.validationErrors.empty() &&
           randomHydraDesc.validationErrors.empty());
     CHECK(hasRandomTransport(randomStageDesc) && hasRandomTransport(randomHydraDesc));

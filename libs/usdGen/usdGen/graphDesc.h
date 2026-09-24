@@ -268,6 +268,10 @@ struct UsdGenSurfaceDesc
     VtVec3fArray   velocities;        // motion profile P1 only; empty otherwise
     VtVec2fArray   uv;                // the surface's primary uv set
     VtIntArray     subsetFaces;       // empty == whole mesh; a GeomSubset restricts scatter (R15)
+    VtFloatArray   densityMultiplier; // per-face scatter density scale from
+                                     // usdGen:paint:density (face means,
+                                     // clamped >= 0, non-finite -> 0);
+                                     // empty == all 1.0
     GfMatrix4d     worldMatrix{1.0};  // post-flattening, resetXformStack (S4)
     uint64_t       surfaceGeneration = 0; // bumped by any points/topology change
 };
@@ -278,6 +282,15 @@ struct UsdGenMapDesc
     TfToken      type;                // UsdGenImageMap | UsdGenPtexMap | UsdGenExprMap | ...
     std::string  resolvedAssetPath;   // stage-free (S13)
     uint64_t     textureGeneration = 0;  // bumped by ReloadMaps()
+    // UsdGenPaintMap payload (empty unless type == UsdGenPaintMap): the
+    // surface primvar snapshotted at capture, scalar-folded through
+    // usdGen:map:channel. v1 carries faceVarying float data only; any other
+    // interpolation, a missing primvar, or a size mismatch leaves
+    // paintValues empty and the sampler fails closed.
+    SdfPath      paintSurface;
+    TfToken      paintPrimvar;
+    TfToken      paintInterpolation;
+    VtFloatArray paintValues;
     std::vector<UsdGenParamValue> params;
     // Optional stage-free decoded pixels for a typed ImageMap consumer. The
     // immutable payload is backend-neutral; callers replacing it must also

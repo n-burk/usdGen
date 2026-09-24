@@ -93,8 +93,9 @@ private:
         bool readsTime = false;          // the element expression reads $frame/$time
         double builtFrame = 0.0, builtTime = 0.0;
         bool built = false;
-        // Ptex
+        // Ptex / Paint
         SdfPath map;
+        bool paint = false;            // UsdGenPaintMap: read paintValues, no texture
         std::shared_ptr<const UsdGenPtexTexture> texture;
         int channel = 0;                 // index into the sampled window; -1 = luminance
         double scale = 1.0, offset = 0.0, fallback = 0.0;

@@ -32,6 +32,16 @@ constexpr uint32_t kUsdGenMaxExtraPlaneSlots = 16;
 /// Owning, read-only routing input detached from a compiled graph.  The
 /// imaging router may retain this value while the graph is recompiled or
 /// destroyed; none of its fields point into UsdGenGraph or an operator.
+/// One UsdGenPaintMap a node samples: the surface primvar whose edits must
+/// re-capture the node (the brush bakes the primvar, never the map prim, so
+/// the map-prim row alone would leave the snapshot stale). `surface` indexes
+/// UsdGenGraphRoutingSnapshot::surfacePaths.
+struct UsdGenPaintRoutingRef
+{
+    UsdGenSurfaceId surface = 0;
+    TfToken primvar;
+};
+
 struct UsdGenGraphRoutingNode
 {
     UsdGenNodeId id = kUsdGenInvalidNode;
@@ -46,6 +56,7 @@ struct UsdGenGraphRoutingNode
     std::vector<SdfPath> mapRefs;
     std::vector<UsdGenMapBindingDesc> mapBindingRefs;
     std::vector<SdfPath> geometryRefs;
+    std::vector<UsdGenPaintRoutingRef> paintRefs;
 };
 
 struct UsdGenGraphRoutingSnapshot

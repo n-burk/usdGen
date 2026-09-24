@@ -73,6 +73,11 @@ public:
     // at a time; scene registration/final-reference retirement may continue
     // concurrently and is collected safely by that caller.
     static void DrainRetired();
+    // Process-wide totals over every groom scene index (tools and T3
+    // tests read them through the brush C ABI): cooks issued, and
+    // generations published into a scene index.
+    static uint64_t ProcessCookCount() noexcept;
+    static uint64_t ProcessPublishCount() noexcept;
     // -- HdSceneIndexObserver (input observations; 06 §3.2) --------------------
     // HdSingleInputFilteringSceneIndexBase installs a private bridge observer
     // on the input; filter subclasses override the underscore hooks below.

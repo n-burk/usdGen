@@ -39,6 +39,7 @@
 #include "pxr/usdImaging/usdImaging/dataSourcePrim.h"
 #include "pxr/base/tf/hash.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <tbb/concurrent_unordered_map.h>
@@ -111,6 +112,9 @@ public:
         VtArray<SdfPath> result;
         UsdPrim const ops = _description.GetChild(TfToken("Ops"));
         if (!ops) return result;
+        // Bottom-up hierarchy, always: reverse prim order, post-order
+        // over groups. Reordering the Ops children (USD spec order)
+        // reorders execution; no metadata overrides it.
         std::vector<UsdPrim> children;
         for (UsdPrim const &child : ops.GetChildren()) children.push_back(child);
         for (auto child = children.rbegin(); child != children.rend(); ++child) {

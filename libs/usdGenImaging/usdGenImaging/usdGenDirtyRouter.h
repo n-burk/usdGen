@@ -53,6 +53,9 @@ public:
         uint32_t bits;               // OR of usdGen::UsdGenDirty* bits
         usdGen::UsdGenSurfaceId surface = 0;
         bool surfaceScoped = false;
+        // A structural row (the authored operatorOrder): the match sets
+        // PendingDirty::structural for a recompile; node/bits are unused.
+        bool structural = false;
     };
 
     /// Rebuild the routing table from a compiled graph: one entry list per

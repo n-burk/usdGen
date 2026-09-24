@@ -79,6 +79,50 @@ UsdGenGraph::RoutingSnapshot() const
         copy.mapRefs = node.mapRefs;
         copy.mapBindingRefs = node.mapBindingRefs;
         copy.geometryRefs = node.geometryRefs;
+        // Paint refs: every mapRef or geometryRef naming a UsdGenPaintMap
+        // becomes the (surface, primvar) whose bakes re-capture this
+        // node. Both lists matter: direct map slots land in mapRefs, but
+        // an expression input (the length wiring's ptex("lengthPaint"))
+        // lands in geometryRefs. Linear over the desc maps (a handful per
+        // description, at recompile only); a map whose paint surface is
+        // not routed, or whose primvar is empty, keeps the map-prim row
+        // as its only route.
+        if (_desc) {
+            std::vector<SdfPath> paintCandidates;
+            paintCandidates.reserve(node.mapRefs.size() +
+                                    node.geometryRefs.size());
+            paintCandidates.insert(paintCandidates.end(), node.mapRefs.begin(),
+                                   node.mapRefs.end());
+            paintCandidates.insert(paintCandidates.end(),
+                                   node.geometryRefs.begin(),
+                                   node.geometryRefs.end());
+            for (SdfPath const &mapRef : paintCandidates) {
+                for (auto const &map : _desc->maps) {
+                    if (map.path != mapRef) continue;
+                    if (map.type != TfToken("UsdGenPaintMap")) break;
+                    if (map.paintPrimvar.IsEmpty()) break;
+                    for (size_t s = 0;
+                         s < snapshot->surfacePaths.size(); ++s) {
+                        if (snapshot->surfacePaths[s] != map.paintSurface)
+                            continue;
+                        UsdGenPaintRoutingRef ref;
+                        ref.surface = static_cast<UsdGenSurfaceId>(s);
+                        ref.primvar = map.paintPrimvar;
+                        bool known = false;
+                        for (auto const &prior : copy.paintRefs) {
+                            if (prior.surface == ref.surface &&
+                                prior.primvar == ref.primvar) {
+                                known = true;
+                                break;
+                            }
+                        }
+                        if (!known) copy.paintRefs.push_back(ref);
+                        break;
+                    }
+                    break;
+                }
+            }
+        }
         if (node.desc) {
             copy.path = node.desc->path;
         }
@@ -365,16 +409,23 @@ bool UsdGenGraph::Repartition(int totalCurves, int cvCount)
             cvpUniform = eff.totalCvs / eff.totalCurves;
         }
         uint32_t const cvp = offs.empty() ? cvpUniform : 0u;
-        // Keep existing chunks only if the count matches and EVERY chunk's
-        // (firstCv, cvCount) still equals the desired values.
+        // Keep existing chunks only if the count matches and EVERY chunk
+        // still equals the desired layout (curve span AND cv span: a 10->20
+        // root recook keeps 1 chunk and the same cv/curve, so comparing cv
+        // fields alone keeps a stale curve span that under-emits tiles when
+        // growing -- or over-reads buffers when shrinking).
         bool keep = !n.chunks.empty() && int(n.chunks.size()) == nChunks;
         for (int c = 0; keep && c < nChunks; ++c) {
             uint32_t const firstCurve = static_cast<uint32_t>(c * _chunkSize);
+            uint32_t const curveCount = static_cast<uint32_t>(
+                std::min(_chunkSize, totalCurves - c * _chunkSize));
             uint32_t const wantFirstCv = offs.empty()
                 ? firstCurve * cvp
                 : static_cast<uint32_t>(
                       offs[std::min<size_t>(firstCurve, offs.size() - 1)]);
-            keep = n.chunks[c].cvCount == cvp &&
+            keep = n.chunks[c].firstCurve == firstCurve &&
+                   n.chunks[c].curveCount == curveCount &&
+                   n.chunks[c].cvCount == cvp &&
                    n.chunks[c].firstCv == wantFirstCv;
         }
         if (keep) {

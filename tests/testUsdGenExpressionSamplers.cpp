@@ -7,7 +7,7 @@
 //     element expression with each reduction;
 //   * UsdGenCpuParameters resolves the inputs against a UsdGenGraphDesc and
 //     re-resolves when the sampled geometry changes;
-//   * ptex() reads a UsdGenPtexMap at the strand root.
+//   * ptex() reads a UsdGenPtexMap at the strand root, or a UsdGenPaintMap (bilinear at the root's face-local uv).
 #include "usdGen/cpuParameters.h"
 #include "usdGen/expressions/cpuEvaluator.h"
 #include "usdGen/expressions/frontend.h"
@@ -439,6 +439,108 @@ void CheckPtexParameters()
     fs::remove(file, ignored);
 }
 
+void CheckPaintParameters()
+{
+    // The same two quads as CheckPtexParameters; strand 0 roots on face 0,
+    // strand 1 on face 1. A paint map bilinearly samples its faceVarying
+    // snapshot at each strand root's face-local (u, v): strand 0 lands in
+    // triangle B (u = 2/15, v = 1/4), strand 1 in triangle A of a uniform
+    // face, which still reads its mean.
+    UsdGenGraphDesc desc = Description("ptex(\"lengthMap\")");
+    UsdGenSurfaceDesc surface;
+    surface.path = SdfPath("/Groom/Skin");
+    surface.faceVertexCounts = VtIntArray{4, 4};
+    surface.faceVertexIndices = VtIntArray{0, 1, 2, 3, 1, 4, 5, 2};
+    surface.restPoints = VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1.5f, 0, 0), GfVec3f(1.5f, 0, 1),
+                                      GfVec3f(0, 0, 1), GfVec3f(3, 0, 0), GfVec3f(3, 0, 1)};
+    desc.surfaces.push_back(surface);
+    desc.nodes[0].surfaces = {surface.path};
+    UsdGenMapDesc map;
+    map.path = SdfPath("/Groom/Desc/Maps/lengths");
+    map.type = TfToken("UsdGenPaintMap");
+    map.paintSurface = surface.path;
+    map.paintPrimvar = TfToken("usdGen:paint:length");
+    map.paintInterpolation = TfToken("faceVarying");
+    map.paintValues = VtFloatArray{0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f, 2.0f};
+    map.params.push_back({TfToken("map:scale"), VtValue(2.0f), false});
+    map.params.push_back({TfToken("map:offset"), VtValue(1.0f), false});
+    map.params.push_back({TfToken("map:clamp"), VtValue(GfVec2f(0, 0)), false});
+    desc.maps.push_back(map);
+    desc.expressions[0].inputs[0].name = TfToken("lengthMap");
+    desc.expressions[0].inputs[0].targets = {map.path};
+    desc.expressions[0].inputs[0].geometries.clear();
+    desc.expressions[0].inputs[0].maps = {map.path};
+
+    UsdGenCurveBuffer strands = Strands();
+    UsdGenCpuParameters parameters;
+    bool changed = false;
+    std::vector<std::string> errors;
+    bool const ok = parameters.Evaluate(desc, desc.nodes[0], strands, 0, 0, 0, &changed, &errors);
+    Check(ok, "a paint binding evaluates" + (errors.empty() ? "" : ": " + errors[0]));
+    auto const *value = parameters.Find(TfToken("region"));
+    Check(value && value->values.size() == 2 &&
+              Near(value->values[0], 1.8166667, 1e-4) && Near(value->values[1], 5.0),
+          "each strand reads the bilinear root sample, scaled and offset");
+    Check(parameters.TakeWarnings().empty(), "a clean paint read warns about nothing");
+
+    // An empty payload is not a broken groom: map:default, and a warning.
+    desc.maps[0].paintValues = VtFloatArray();
+    desc.maps[0].params.push_back({TfToken("map:default"), VtValue(0.5f), false});
+    UsdGenCpuParameters fallback;
+    errors.clear();
+    Check(fallback.Evaluate(desc, desc.nodes[0], strands, 0, 0, 0, &changed, &errors),
+          "an empty paint payload still evaluates");
+    value = fallback.Find(TfToken("region"));
+    Check(value && Near(value->values[0], 0.5) && Near(value->values[1], 0.5),
+          "every strand reads usdGen:map:default");
+    Check(!fallback.TakeWarnings().empty(), "and the empty payload is reported");
+
+    // v1 roots paint on its own surface: any other mesh fails the read.
+    desc.maps[0].paintValues = VtFloatArray{0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f, 2.0f};
+    desc.maps[0].paintSurface = SdfPath("/Groom/OtherSkin");
+    UsdGenCpuParameters wrongSurface;
+    errors.clear();
+    Check(!wrongSurface.Evaluate(desc, desc.nodes[0], strands, 0, 0, 0, &changed, &errors),
+          "paint for another surface fails the read");
+    bool named = false;
+    for (auto const &e : errors) named = named || e.find("not the root surface") != std::string::npos;
+    Check(named, "and says the paint misses the root surface");
+
+    // A payload that does not cover the faces fails the read too.
+    desc.maps[0].paintSurface = surface.path;
+    desc.maps[0].paintValues = VtFloatArray{0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f};
+    UsdGenCpuParameters shortPayload;
+    errors.clear();
+    Check(!shortPayload.Evaluate(desc, desc.nodes[0], strands, 0, 0, 0, &changed, &errors),
+          "a short paint payload fails the read");
+    named = false;
+    for (auto const &e : errors) named = named || e.find("paint values for") != std::string::npos;
+    Check(named, "and says how many face vertices the payload covers");
+
+    // The snapshot is scalar-folded: g/b/a select nothing.
+    desc.maps[0].paintValues = VtFloatArray{0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f, 2.0f};
+    desc.maps[0].params.push_back({TfToken("map:channel"), VtValue(TfToken("g")), false});
+    UsdGenCpuParameters badChannel;
+    errors.clear();
+    Check(!badChannel.Evaluate(desc, desc.nodes[0], strands, 0, 0, 0, &changed, &errors),
+          "a paint read on channel g fails");
+    named = false;
+    for (auto const &e : errors) named = named || e.find("scalar paint snapshot") != std::string::npos;
+    Check(named, "and says the snapshot is scalar");
+
+    // A root face outside the mesh reads the fallback, and is reported.
+    desc.maps[0].params.pop_back();
+    strands.rootPrim = VtIntArray{0, 99};
+    UsdGenCpuParameters strayRoot;
+    errors.clear();
+    Check(strayRoot.Evaluate(desc, desc.nodes[0], strands, 0, 0, 0, &changed, &errors),
+          "a stray root face still evaluates" + (errors.empty() ? "" : ": " + errors[0]));
+    value = strayRoot.Find(TfToken("region"));
+    Check(value && Near(value->values[0], 1.8166667, 1e-4) && Near(value->values[1], 0.5),
+          "the stray strand reads usdGen:map:default");
+    Check(!strayRoot.TakeWarnings().empty(), "and the stray root is reported");
+}
+
 } // namespace
 
 int main()
@@ -448,6 +550,7 @@ int main()
     CheckEndToEnd();
     CheckParameters();
     CheckPtexParameters();
+    CheckPaintParameters();
     std::printf("testUsdGenExpressionSamplers: %s\n", g_failures ? "FAILED" : "PASS");
     return g_failures ? 1 : 0;
 }

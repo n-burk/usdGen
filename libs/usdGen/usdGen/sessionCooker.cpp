@@ -327,6 +327,13 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixText(&h1, map.type.GetString());
         _CacheMixText(&h0, map.resolvedAssetPath);
         _CacheMix(&h1, map.textureGeneration);
+        // A paint map's snapshot is capture content, not identity: the
+        // path, type and generation never move under a repaint, so the
+        // values themselves join the key or a length stroke would hit the
+        // pre-stroke cache entry and the groom would freeze (the density
+        // multiplier's row below is the same contract).
+        if (map.type == TfToken("UsdGenPaintMap"))
+            _CacheMixArray(&h0, map.paintValues);
         _CacheMix(&h0, static_cast<uint64_t>(map.params.size()));
         for (UsdGenParamValue const &param : map.params) {
             _CacheMixText(&h1, param.name.GetString());
@@ -384,6 +391,9 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixArray(&h0, surface.velocities);
         _CacheMixArray(&h1, surface.uv);
         _CacheMixArray(&h0, surface.subsetFaces);
+        // Paint density the brush bakes: a repaint must miss the cache,
+        // or the stale pre-stroke roots publish and the groom freezes.
+        _CacheMixArray(&h1, surface.densityMultiplier);
         _CacheMixMatrix(&h0, surface.worldMatrix);
         _CacheMix(&h1, surface.surfaceGeneration);
     }

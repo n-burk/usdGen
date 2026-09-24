@@ -36,6 +36,14 @@ public:
     /// Published tile count for the groom across live indices.
     static size_t publishedTileCount(SdfPath const &groom);
 
+    /// Published strands of `groom` (a description or groom root) across
+    /// live indices: curve count and summed control-polygon length over
+    /// the synthetic tiles under <groom>/__usdGenRender, read through
+    /// GetPrim like any Hydra consumer. false when no live index publishes
+    /// a tile for it. The usdview brush T3s read it through the brush ABI.
+    static bool publishedCurveStats(SdfPath const &groom, uint64_t *curves,
+                                    double *totalLength);
+
     /// Number of registry entries in the published immutable snapshot. This
     /// does not promote weak handles; it is test-only observability.
     static size_t registeredIndexCount();

@@ -507,6 +507,27 @@ int main()
     } while (std::chrono::steady_clock::now() < deadline);
     Check(delivered, "asyncPoll alone installs the exact newly cooked width 0.16");
 
+    // Backpressure in async mode: the dropped notice is the LAST edit (the
+    // end of a brush drag), so no later notice will ever consume the
+    // deferred-capture latch. Polling alone must recover it.
+    heldCredits = 0;
+    while (heldCredits < 4096 && UsdGenImagingTestHook::holdOneGroomOwnerCredit()) ++heldCredits;
+    Check(width.Set(0.18f, UsdTimeCode(3.0)), "last-edit width sample authors under pressure");
+    first.indices.stageSceneIndex->ApplyPendingUpdates();
+    Check(std::fabs(FirstWidth(first, tile) - 0.16f) < 1e-6f,
+          "the dropped last edit is not visible yet");
+    UsdGenImagingTestHook::releaseGroomOwnerCredits();
+    auto const recoverDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool recovered = false;
+    do {
+        first.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+        recovered = std::fabs(FirstWidth(first, tile) - 0.18f) < 1e-6f;
+        if (recovered) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < recoverDeadline);
+    Check(recovered,
+          "asyncPoll alone recovers a dropped last edit (no further notice, no Synchronize)");
+
     // Exercise shutdown with accepted work still in flight. Lazy static
     // operator tables used to be destroyed before the retirement service
     // drained this cook (caught by ASan in Graph::RoutingSnapshot).

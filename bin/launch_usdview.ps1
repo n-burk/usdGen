@@ -93,8 +93,13 @@ $env:PATH = (($runtimeDirs -join ';') + ';' + $env:PATH)
 # install keeps its modules in Lib\site-packages, a build configured the POSIX
 # way under lib\python; both are added when both exist rather than one being
 # assumed (this is what _env.bat does on the usdRig side). build\python is
-# where usdGen stages its own python package.
+# where usdGen stages its own python package. bin\launch_env comes first:
+# its sitecustomize scrubs import hooks that would otherwise shadow the
+# prefix's pxr (nanousd's editable-install finder front-runs sys.path,
+# so ordering alone cannot beat it), and only the first sitecustomize on
+# the path is honored.
 $pythonDirs = @(
+    (Join-Path $PSScriptRoot "launch_env"),
     (Join-Path $Build "python"),
     (Join-Path $UsdInstallDir "Lib\site-packages"),
     (Join-Path $UsdInstallDir "lib\python")

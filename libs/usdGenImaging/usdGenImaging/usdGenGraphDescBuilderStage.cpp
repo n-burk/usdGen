@@ -211,6 +211,133 @@ _PullParams(UsdPrim const &prim, double time,
     // into params above, so S14's pull-all contract holds.
 }
 
+// Snapshots a UsdGenPaintMap's surface primvar into the map desc (scalar,
+// folded through usdGen:map:channel). v1 carries faceVarying float data
+// only; anything else fails closed with a validation error and leaves the
+// payload empty, which the sampler treats as unusable. A missing primvar
+// reads usdGen:map:default everywhere instead of failing.
+void
+_CapturePaintMap(UsdStageRefPtr const &stage, UsdPrim const &prim,
+                 double time, usdGen::UsdGenMapDesc *map,
+                 std::vector<std::string> *errors)
+{
+    auto fail = [&](std::string const &what) {
+        if (errors) {
+            errors->push_back(map->path.GetString() + ": " + what);
+        }
+    };
+    UsdRelationship rel = prim.GetRelationship(TfToken("usdGen:paint:surface"));
+    SdfPathVector targets;
+    if (rel) {
+        rel.GetTargets(&targets);
+    }
+    if (targets.size() != 1) {
+        fail("usdGen:paint:surface requires exactly one target");
+        return;
+    }
+    UsdPrim surface = stage->GetPrimAtPath(targets.front());
+    if (!surface || !UsdGeomMesh(surface)) {
+        fail("usdGen:paint:surface must target a UsdGeomMesh");
+        return;
+    }
+    TfToken primvarName;
+    _GetToken(prim, "usdGen:paint:primvar", &primvarName);
+    if (primvarName.IsEmpty()) {
+        fail("usdGen:paint:primvar is empty");
+        return;
+    }
+    UsdGeomPrimvar pv = UsdGeomPrimvarsAPI(surface).GetPrimvar(primvarName);
+    VtValue value;
+    if (pv) {
+        _GetPrimvar(surface, primvarName, UsdTimeCode(time), &value);
+    }
+    if (!pv || value.IsEmpty()) {
+        // No baked primvar yet: the map reads its authored default
+        // everywhere (the BaseGridFromStage semantic), so a wired but
+        // unpainted map cooks instead of rejecting the commit.
+        UsdAttribute defaultAttr = prim.GetAttribute(TfToken("usdGen:map:default"));
+        float defaultValue = 0.0f;
+        if (!defaultAttr || !defaultAttr.Get(&defaultValue)) {
+            fail("surface " + targets.front().GetString() + " has no primvar " +
+                 primvarName.GetString());
+            return;
+        }
+        TfToken promised;
+        _GetToken(prim, "usdGen:paint:interpolation", &promised);
+        if (!promised.IsEmpty() && promised != UsdGeomTokens->faceVarying) {
+            fail("primvar " + primvarName.GetString() + " is " + promised.GetString() +
+                 ", v1 paints faceVarying only");
+            return;
+        }
+        VtIntArray defaultCounts;
+        UsdGeomMesh(surface).GetFaceVertexCountsAttr().Get(&defaultCounts);
+        size_t defaultFaceVarying = 0;
+        for (int c : defaultCounts) defaultFaceVarying += size_t(c);
+        map->paintSurface = targets.front();
+        map->paintPrimvar = primvarName;
+        map->paintInterpolation = UsdGeomTokens->faceVarying;
+        map->paintValues.assign(defaultFaceVarying, defaultValue);
+        return;
+    }
+    TfToken const interp = pv.GetInterpolation();
+    if (interp != UsdGeomTokens->faceVarying) {
+        fail("primvar " + primvarName.GetString() + " is " + interp.GetString() +
+             ", v1 paints faceVarying only");
+        return;
+    }
+    TfToken channel;
+    _GetToken(prim, "usdGen:map:channel", &channel);
+    if (channel.IsEmpty()) {
+        channel = TfToken("r");
+    }
+    VtFloatArray folded;
+    if (value.IsHolding<VtFloatArray>()) {
+        if (channel != TfToken("r") && channel != TfToken("luminance")) {
+            fail("scalar primvar " + primvarName.GetString() +
+                 " cannot supply channel " + channel.GetString());
+            return;
+        }
+        folded = value.UncheckedGet<VtFloatArray>();
+    } else if (value.IsHolding<VtVec3fArray>()) {
+        VtVec3fArray const &v = value.UncheckedGet<VtVec3fArray>();
+        size_t pick = 0;
+        bool luminance = false;
+        if (channel == TfToken("r")) pick = 0;
+        else if (channel == TfToken("g")) pick = 1;
+        else if (channel == TfToken("b")) pick = 2;
+        else if (channel == TfToken("luminance")) luminance = true;
+        else {
+            fail("primvar " + primvarName.GetString() +
+                 " cannot supply channel " + channel.GetString());
+            return;
+        }
+        folded.resize(v.size());
+        for (size_t i = 0; i < v.size(); ++i) {
+            folded[i] = luminance
+                ? 0.2126f * v[i][0] + 0.7152f * v[i][1] + 0.0722f * v[i][2]
+                : v[i][pick];
+        }
+    } else {
+        fail("primvar " + primvarName.GetString() + " must be float or "
+             "float3-valued");
+        return;
+    }
+    VtIntArray counts;
+    UsdGeomMesh(surface).GetFaceVertexCountsAttr().Get(&counts);
+    size_t faceVarying = 0;
+    for (int c : counts) faceVarying += size_t(c);
+    if (folded.size() != faceVarying) {
+        fail("primvar " + primvarName.GetString() + " has " +
+             std::to_string(folded.size()) + " values for " +
+             std::to_string(faceVarying) + " face vertices");
+        return;
+    }
+    map->paintSurface = targets.front();
+    map->paintPrimvar = primvarName;
+    map->paintInterpolation = interp;
+    map->paintValues = folded;
+}
+
 // Follows usdGen:input edges back from the terminal, collecting the operator
 // set. Relationships are NOT traversed as data edges (02 §2.3).
 struct _GraphWalker
@@ -271,6 +398,9 @@ _StageOperatorOrder(UsdPrim const &description)
     if (!ops) {
         return out;
     }
+    // Oracle twin of the adapter rule: bottom-up hierarchy, always.
+    // Reverse prim order, post-order over groups; reordering the Ops
+    // children reorders execution, and no metadata overrides it.
     std::vector<UsdPrim> children;
     for (UsdPrim const &child : ops.GetChildren()) children.push_back(child);
     for (auto child = children.rbegin(); child != children.rend(); ++child) {
@@ -298,6 +428,38 @@ _ExpressionDomain(UsdAttribute const &attr)
     if (d == TfToken("primitive")) return usdGen::expr::Domain::Primitive;
     if (d == TfToken("point")) return usdGen::expr::Domain::Point;
     return usdGen::expr::Domain::Groom;
+}
+
+// Per-face scatter density scale from the composed usdGen:paint:density
+// face-varying primvar (the brush bake and live scratch write it): face
+// means, clamped >= 0, non-finite clamped to 0. A missing primvar, wrong
+// interpolation/type or a size mismatch leaves the multiplier empty,
+// which scatter reads as all 1.0.
+void
+_CaptureDensityMultiplier(UsdPrim const &meshPrim, double time,
+                          UsdGenSurfaceDesc *out)
+{
+    UsdGeomPrimvar pv = UsdGeomPrimvarsAPI(meshPrim).GetPrimvar(
+        TfToken("usdGen:paint:density"));
+    if (!pv) return;
+    if (pv.GetInterpolation() != TfToken("faceVarying")) return;
+    VtValue value;
+    if (!pv.GetAttr().Get(&value, UsdTimeCode(time)) ||
+        !value.IsHolding<VtFloatArray>()) return;
+    VtFloatArray const &flat = value.UncheckedGet<VtFloatArray>();
+    size_t total = 0;
+    for (int c : out->faceVertexCounts) total += size_t(c);
+    if (flat.size() != total || out->faceVertexCounts.empty()) return;
+    out->densityMultiplier.resize(out->faceVertexCounts.size());
+    size_t k = 0;
+    for (size_t f = 0; f < out->faceVertexCounts.size(); ++f) {
+        int const n = out->faceVertexCounts[f];
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) sum += double(flat[k++]);
+        float mean = n > 0 ? float(sum / double(n)) : 1.0f;
+        if (!std::isfinite(mean) || mean < 0.0f) mean = 0.0f;
+        out->densityMultiplier[f] = mean;
+    }
 }
 
 // Fills a surface desc from a Mesh; a GeomSubset target instead records
@@ -361,6 +523,7 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
     }
     _GetPrimvarTyped(meshPrim, TfToken("velocities"), UsdTimeCode(time),
                      &out->velocities);  // motion profile P1 only
+    _CaptureDensityMultiplier(meshPrim, time, out);
 
     out->samples.push_back(UsdGenSurfaceSample{time, out->points});
     out->worldMatrix = UsdGeomImageable(prim).ComputeLocalToWorldTransform(
@@ -921,6 +1084,10 @@ BuildGraphDescFromStage(
                 }
             }
             _PullParams(prim, time, &map.params);
+            if (map.type == TfToken("UsdGenPaintMap")) {
+                _CapturePaintMap(stage, prim, time, &map,
+                                 &desc.validationErrors);
+            }
         }
         mapIndex.emplace(p.GetString(), desc.maps.size());
         desc.maps.push_back(std::move(map));

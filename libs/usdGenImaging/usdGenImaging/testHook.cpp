@@ -18,6 +18,9 @@
 
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
+#include "pxr/imaging/hd/sceneIndex.h"
+#include "pxr/base/gf/vec3f.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/base/tf/weakPtr.h"
 #include "pxr/usd/sdf/path.h"
 
@@ -184,6 +187,57 @@ UsdGenImagingTestHook::publishedTileCount(SdfPath const &groom)
         total += _PublishedTileCountOn(*live, groom);
     }
     return total;
+}
+
+bool
+UsdGenImagingTestHook::publishedCurveStats(SdfPath const &groom,
+                                           uint64_t *curves,
+                                           double *totalLength)
+{
+    uint64_t count = 0;
+    double length = 0.0;
+    bool found = false;
+    RegistrySnapshot weaks = std::atomic_load(&_HookRegistry().published);
+    if (weaks && groom.IsAbsolutePath() && groom.IsPrimPath()) {
+        SdfPath const render = groom.AppendChild(TfToken("__usdGenRender"));
+        static HdDataSourceLocator const countsLoc(
+            TfToken("basisCurves"), TfToken("topology"),
+            TfToken("curveVertexCounts"));
+        static HdDataSourceLocator const pointsLoc(
+            TfToken("primvars"), TfToken("points"), TfToken("primvarValue"));
+        for (auto const &entry : *weaks) {
+            HdSceneIndexBaseRefPtr live =
+                TfCreateRefPtrFromProtectedWeakPtr(entry.weak);
+            if (!live) continue;
+            for (SdfPath const &tile : live->GetChildPrimPaths(render)) {
+                HdSceneIndexPrim const prim = live->GetPrim(tile);
+                HdSampledDataSourceHandle const countsDs =
+                    HdSampledDataSource::Cast(
+                        HdContainerDataSource::Get(prim.dataSource, countsLoc));
+                HdSampledDataSourceHandle const pointsDs =
+                    HdSampledDataSource::Cast(
+                        HdContainerDataSource::Get(prim.dataSource, pointsLoc));
+                if (!countsDs || !pointsDs) continue;
+                VtValue const counts = countsDs->GetValue(0.0f);
+                VtValue const points = pointsDs->GetValue(0.0f);
+                if (!counts.IsHolding<VtIntArray>() ||
+                    !points.IsHolding<VtVec3fArray>()) continue;
+                found = true;
+                VtVec3fArray const &p = points.UncheckedGet<VtVec3fArray>();
+                size_t base = 0;
+                for (int n : counts.UncheckedGet<VtIntArray>()) {
+                    if (n < 0 || base + size_t(n) > p.size()) break;
+                    for (int k = 1; k < n; ++k)
+                        length += double((p[base + k] - p[base + k - 1]).GetLength());
+                    base += size_t(n);
+                    ++count;
+                }
+            }
+        }
+    }
+    if (curves) *curves = count;
+    if (totalLength) *totalLength = length;
+    return found;
 }
 
 size_t

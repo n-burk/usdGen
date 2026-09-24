@@ -762,6 +762,43 @@ int main()
     Check(mapResult && cooker.TakeCacheCandidate(),
           "resolved map parameter change misses exact cache identity");
 
+    UsdGenGraphDesc densityChanged = desc;
+    densityChanged.surfaces.front().densityMultiplier = VtFloatArray{0.0f};
+    auto densityChangedDesc = std::make_shared<const UsdGenGraphDesc>(
+        std::move(densityChanged));
+    UsdGenGenerationConstPtr densityResult = cooker.Cook(
+        densityChangedDesc, UsdGenContext::Interactive, false, {}, 1.0,
+        UsdGenCommitReason::NoticeBatchEnd, mapResult, {}, false, 5, 6, -1);
+    Check(densityResult && cooker.TakeCacheCandidate(),
+          "paint-density change misses exact cache identity (no stale roots)");
+
+    UsdGenGraphDesc paintBase = desc;
+    UsdGenMapDesc paint;
+    paint.path = SdfPath("/cache/groomA/lengthPaint");
+    paint.type = TfToken("UsdGenPaintMap");
+    paint.paintSurface = paintBase.surfaces.front().path;
+    paint.paintPrimvar = TfToken("usdGen:paint:length");
+    paint.paintValues = VtFloatArray{1.0f, 1.0f};
+    paintBase.maps.push_back(paint);
+    auto paintBaseDesc = std::make_shared<const UsdGenGraphDesc>(paintBase);
+    UsdGenGenerationConstPtr paintResult = cooker.Cook(
+        paintBaseDesc, UsdGenContext::Interactive, false, {}, 1.0,
+        UsdGenCommitReason::NoticeBatchEnd, densityResult, {}, false,
+        6, 7, -1);
+    Check(paintResult && cooker.TakeCacheCandidate(),
+          "paint-map snapshot addition misses exact cache identity");
+
+    UsdGenGraphDesc paintChanged = paintBase;
+    paintChanged.maps.back().paintValues = VtFloatArray{0.0f, 0.0f};
+    auto paintChangedDesc = std::make_shared<const UsdGenGraphDesc>(
+        std::move(paintChanged));
+    UsdGenGenerationConstPtr paintChangedResult = cooker.Cook(
+        paintChangedDesc, UsdGenContext::Interactive, false, {}, 1.0,
+        UsdGenCommitReason::NoticeBatchEnd, paintResult, {}, false,
+        7, 8, -1);
+    Check(paintChangedResult && cooker.TakeCacheCandidate(),
+          "paint-map repaint misses exact cache identity (no stale groom)");
+
     if (failures) return 1;
     std::puts("ok");
     return 0;

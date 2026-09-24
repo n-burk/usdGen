@@ -319,7 +319,7 @@ constexpr FunctionRow kFunctions[] = {
  // geoSampler's width is its element expression's (1 or 3); Dim() asks the
  // resolved sampler rather than this row.
  {"geoSampler",2,5,1,false,"sampling","geoSampler(string input, string expression, string iterate=\"prim\", string reduce=\"nearest\", vector query=$P)","Evaluates a one-line expression over the point, prim or geometry elements of the input:<input> geometry and returns the nearest element's value (reduce: nearest, nearest2, min, max, sum, mean). Element variables: $P $Pref $N $rootP $index $count $id $primIndex $pointIndex $t $cLength, the query $Q and $Qdist."},
- {"ptex",1,1,1,false,"sampling","ptex(string input)","The UsdGenPtexMap named by input:<input>, read at the strand root (channel, scale, offset and clamp come from the map prim)."},
+ {"ptex",1,1,1,false,"sampling","ptex(string input)","The UsdGenPtexMap or UsdGenPaintMap named by input:<input>, read at the strand root (channel, scale, offset and clamp come from the map prim; a paint map reads the face average of its snapshot)."},
 };
 constexpr size_t kFunctionCount = sizeof(kFunctions) / sizeof(kFunctions[0]);
 

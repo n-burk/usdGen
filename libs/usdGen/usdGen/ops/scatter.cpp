@@ -121,6 +121,20 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     if (desc && ctx.surface < desc->surfaces.size()) {
         feed("surfaceGen", desc->surfaces[ctx.surface].surfaceGeneration);
         feed("subset", uint64_t(desc->surfaces[ctx.surface].subsetFaces.size()));
+        // The paint primvar edits no generation, so the multiplier content
+        // itself joins the digest: without this a paint stroke would read
+        // back the cached pre-stroke roots.
+        auto const &mult = desc->surfaces[ctx.surface].densityMultiplier;
+        feed("densityMultSize", uint64_t(mult.size()));
+        uint64_t mh = 1469598103934665603ULL;
+        for (float v : mult) {
+            uint32_t bits = 0;
+            static_assert(sizeof(bits) == sizeof(v), "float is 32 bits");
+            std::memcpy(&bits, &v, sizeof(bits));
+            mh ^= uint64_t(bits);
+            mh *= 0x100000001b3ULL;
+        }
+        feed("densityMult", mh);
     }
 
     return {h, h ^ 0x9E3779B97F4A7C15ull};
@@ -182,6 +196,15 @@ bool UsdGenScatterOp::Capture(
         if (diag) diag->Error("UsdGenScatter::Capture: density must be finite and >= 0");
         return false;
     }
+    // Per-face density scale from usdGen:paint:density (the brush); empty
+    // == all 1.0. Sized once here; the loop below only range-checks values.
+    bool const hasMult = !surf.densityMultiplier.empty();
+    if (hasMult &&
+        surf.densityMultiplier.size() != surf.faceVertexCounts.size()) {
+        if (diag) diag->Error("UsdGenScatter::Capture: density multiplier "
+                              "has the wrong face count");
+        return false;
+    }
     const bool flip = p ? p->GetBool(TfToken("flip"), false) : false;
 
     // Per-face area-weighted emission (plan/04 :634-635).
@@ -229,7 +252,16 @@ bool UsdGenScatterOp::Capture(
         }
         GfVec3f const Nrest = Normalize3(nAcc);
 
-        double const expected = density * areaRest;
+        double mult = 1.0;
+        if (hasMult) {
+            mult = double(surf.densityMultiplier[size_t(f)]);
+            if (!std::isfinite(mult) || mult < 0.0) {
+                if (diag) diag->Error("UsdGenScatter::Capture: density "
+                                      "multiplier must be finite and >= 0");
+                return false;
+            }
+        }
+        double const expected = density * areaRest * mult;
         if (!std::isfinite(areaRest) || !std::isfinite(expected)) {
             if (diag) diag->Error("UsdGenScatter::Capture: non-finite root count on face " +
                                   std::to_string(f));

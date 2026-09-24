@@ -15,6 +15,18 @@
                                        "hdPrman:motionBlur"]
                         }
                     },
+                    "UsdGenAttributePreviewSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "usdGen attribute brush preview",
+                        "loadWithRenderer": "",
+                        "priority": 0,
+                        "tags": ["usdGen:attributePreview"],
+                        "ordering": {
+                            "after": ["usdGen:groom"],
+                            "before": ["hdGp:proceduralResolution",
+                                       "hdPrman:motionBlur"]
+                        }
+                    },
                     "UsdGenMetadataSceneIndexPlugin": {
                         "bases": ["UsdImagingSceneIndexPlugin"],
                         "displayName": "usdGen instancing metadata"

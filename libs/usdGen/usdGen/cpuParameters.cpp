@@ -61,6 +61,62 @@ uint64_t MixDouble(uint64_t h, double value)
     return Mix(h, bits);
 }
 
+// Closest-point barycentric of p in triangle (a, b, c):
+// p = a + s(b-a) + t(c-a). False when the triangle is degenerate.
+bool TriCoords(GfVec3d const &a, GfVec3d const &b, GfVec3d const &c,
+               GfVec3d const &p, double *s, double *t)
+{
+    GfVec3d const e0 = b - a, e1 = c - a, ap = p - a;
+    double const d00 = GfDot(e0, e0);
+    double const d01 = GfDot(e0, e1);
+    double const d11 = GfDot(e1, e1);
+    double const denom = d00 * d11 - d01 * d01;
+    if (!(denom > 1e-18 * d00 * d11)) return false;
+    double const d20 = GfDot(ap, e0);
+    double const d21 = GfDot(ap, e1);
+    *s = (d11 * d20 - d01 * d21) / denom;
+    *t = (d00 * d21 - d01 * d20) / denom;
+    return true;
+}
+
+// Face-local (u, v) of root p on the quad whose corners start at
+// indices[begin]: the brush tool's pick convention (brushPick.pickFace:
+// v0=(0,0), v1=(1,0), v2=(1,1), v3=(0,1), diagonal v0-v2, triangle A
+// first). False when the quad is degenerate, a corner index is out of
+// range, or p sits outside both halves past tolerance.
+bool PaintQuadUV(float const *points, size_t numPoints, int const *indices,
+                 int begin, GfVec3f const &p, double *u, double *v)
+{
+    int iv[4];
+    for (int k = 0; k < 4; ++k) {
+        int const id = indices[begin + k];
+        if (id < 0 || size_t(id) >= numPoints) return false;
+        iv[k] = id;
+    }
+    auto at = [&](int k) -> GfVec3d {
+        return GfVec3d(double(points[size_t(iv[k]) * 3]),
+                       double(points[size_t(iv[k]) * 3 + 1]),
+                       double(points[size_t(iv[k]) * 3 + 2]));
+    };
+    GfVec3d const pp{double(p[0]), double(p[1]), double(p[2])};
+    double s = 0.0, t = 0.0;
+    // Triangle A (v0, v1, v2): u = s + t, v = t.
+    if (TriCoords(at(0), at(1), at(2), pp, &s, &t) && s >= -1e-6 &&
+        t >= -1e-6 && s + t <= 1.0 + 1e-6) {
+        *u = std::min(1.0, std::max(0.0, s + t));
+        *v = std::min(1.0, std::max(0.0, t));
+        return true;
+    }
+    // Triangle B (v0, v2, v3): u = s, v = s + t.
+    if (TriCoords(at(0), at(2), at(3), pp, &s, &t) && s >= -1e-6 &&
+        t >= -1e-6 && s + t <= 1.0 + 1e-6) {
+        *u = std::min(1.0, std::max(0.0, s));
+        *v = std::min(1.0, std::max(0.0, s + t));
+        return true;
+    }
+    return false;
+}
+
 template <class T>
 bool ScalarLiteral(VtValue const &value, std::vector<double> *output)
 {
@@ -334,14 +390,15 @@ bool UsdGenCpuParameters::ResolveSamplers(UsdGenGraphDesc const &desc,
             state->geometry = std::make_unique<expr::GeometrySampler>();
         } else {
             if (input->maps.size() != 1)
-                return fail(call + ": input:" + spec.input + " must target exactly one UsdGenPtexMap");
+                return fail(call + ": input:" + spec.input + " must target exactly one UsdGenPtexMap or UsdGenPaintMap");
             UsdGenMapDesc const *map = FindMap(desc, input->maps.front());
             if (!map)
                 return fail(call + ": map " + input->maps.front().GetString() + " was not resolved");
-            if (map->type != TfToken("UsdGenPtexMap"))
+            if (map->type != TfToken("UsdGenPtexMap") && map->type != TfToken("UsdGenPaintMap"))
                 return fail(call + ": " + map->path.GetString() + " is a " + map->type.GetString() +
-                            ", not a UsdGenPtexMap");
+                            ", not a UsdGenPtexMap or UsdGenPaintMap");
             state->map = map->path;
+            state->paint = map->type == TfToken("UsdGenPaintMap");
             UsdGenPtexMapOptions options;
             MapToken(*map, "map:filter", &options.filter);
             MapToken(*map, "map:borderMode", &options.borderMode);
@@ -368,15 +425,23 @@ bool UsdGenCpuParameters::ResolveSamplers(UsdGenGraphDesc const &desc,
             else
                 return fail(call + ": usdGen:map:channel \"" + channel +
                             "\" cannot drive a scalar; use r, g, b, a or luminance");
+            if (state->paint && channel != "r" && channel != "luminance")
+                return fail(call + ": " + map->path.GetString() +
+                            " is a scalar paint snapshot; usdGen:map:channel \"" + channel +
+                            "\" cannot drive it, use r or luminance");
             std::string error;
-            state->texture = UsdGenPtexTexture::Open(map->resolvedAssetPath, options, &error);
+            if (!state->paint)
+                state->texture = UsdGenPtexTexture::Open(map->resolvedAssetPath, options, &error);
+            else if (map->paintValues.empty())
+                warnings_.push_back(call + ": " + map->path.GetString() +
+                    " carries no paint payload (see the capture errors); using usdGen:map:default");
             if (state->texture) {
                 const int window = state->texture->SampleChannels();
                 if ((state->channel < 0 && window < 3) || state->channel >= window)
                     return fail(call + ": usdGen:map:channel \"" + channel + "\" is outside the " +
                                 std::to_string(window) + "-channel window of " +
                                 map->resolvedAssetPath);
-            } else {
+            } else if (!state->paint) {
                 // A map that cannot be read is not a broken groom: every strand
                 // reads usdGen:map:default, and the reason is reported (07 §5.1).
                 warnings_.push_back(call + ": " + (map->resolvedAssetPath.empty()
@@ -433,7 +498,11 @@ bool UsdGenCpuParameters::PrepareSamplers(UsdGenGraphDesc const &desc,
         state.values.assign(curves, state.fallback);
         slot.values = state.values.data();
         slot.count = state.values.size();
-        if (!curves || !state.texture) continue;
+        if (!curves) continue;
+        // A ptex file that could not be read leaves the fallback values
+        // Resolve already warned about; paint (which never opens a
+        // texture) always reaches its branch below.
+        if (!state.paint && !state.texture) continue;
         std::string const call = "ptex(\"" + state.spec.input + "\")";
         UsdGenSurfaceDesc const *surface = RootSurface(desc, node);
         if (!surface)
@@ -449,6 +518,68 @@ bool UsdGenCpuParameters::PrepareSamplers(UsdGenGraphDesc const &desc,
         if (size_t(faceOffsets.back()) != surface->faceVertexIndices.size())
             return fail(state, call + ": surface " + surface->path.GetString() +
                         " has inconsistent topology");
+        if (state.paint) {
+            // Paint: one value per strand, bilinearly sampled from the
+            // faceVarying snapshot at the strand root's face-local (u, v).
+            // v1 requires the paint surface to be the root surface: root
+            // face ids index that mesh's faces. Non-quad faces, degenerate
+            // quads and unreadable corners fall back to the face mean, so a
+            // paint read never fails a cook on sampling alone.
+            UsdGenMapDesc const *map = FindMap(desc, state.map);
+            if (!map || map->paintValues.empty()) continue;  // Resolve warned; strands read the fallback
+            if (map->paintSurface != surface->path)
+                return fail(state, call + ": " + map->path.GetString() + " paints " +
+                            map->paintSurface.GetString() + ", not the root surface " +
+                            surface->path.GetString());
+            if (map->paintValues.size() != size_t(faceOffsets.back()))
+                return fail(state, call + ": " + map->path.GetString() + " carries " +
+                            std::to_string(map->paintValues.size()) + " paint values for " +
+                            std::to_string(faceOffsets.back()) + " face vertices of " +
+                            surface->path.GetString());
+            float const *positions = corners.empty()
+                ? nullptr
+                : reinterpret_cast<float const *>(corners.cdata());
+            int const *cornerIds = surface->faceVertexIndices.cdata();
+            size_t misses = 0;
+            for (size_t c = 0; c < curves; ++c) {
+                int const face = geometry.rootPrim[c];
+                if (face < 0 || size_t(face) >= faceCount) { ++misses; continue; }
+                int const begin = faceOffsets[size_t(face)];
+                int const n = surface->faceVertexCounts[size_t(face)];
+                if (n <= 0) { ++misses; continue; }
+                double sum = 0.0;
+                for (int k = 0; k < n; ++k) sum += double(map->paintValues[size_t(begin + k)]);
+                double sample = sum / double(n);
+                if (n == 4 && positions && cornerIds) {
+                    size_t const root = offsets_[c];
+                    GfVec3f const p =
+                        geometry.rest.size() == geometry.totalCvs && root < geometry.rest.size()
+                        ? geometry.rest[root]
+                        : GfVec3f(geometry.px[root], geometry.py[root], geometry.pz[root]);
+                    double u = 0.0, v = 0.0;
+                    if (PaintQuadUV(positions, corners.size(), cornerIds, begin, p, &u, &v)) {
+                        double const c0 = double(map->paintValues[size_t(begin)]);
+                        double const c1 = double(map->paintValues[size_t(begin + 1)]);
+                        double const c2 = double(map->paintValues[size_t(begin + 2)]);
+                        double const c3 = double(map->paintValues[size_t(begin + 3)]);
+                        sample = (c0 * (1.0 - u) + c1 * u) * (1.0 - v) +
+                                 (c3 * (1.0 - u) + c2 * u) * v;
+                    }
+                }
+                double value = sample * state.scale + state.offset;
+                if (state.clampLo < state.clampHi)
+                    value = std::min(state.clampHi, std::max(state.clampLo, value));
+                state.values[c] = value;
+            }
+            // Reported when the count changes, not on every cook.
+            if (misses != state.reportedMisses && misses)
+                warnings_.push_back(call + ": " + std::to_string(misses) + " of " +
+                                    std::to_string(curves) + " strand roots name no face of " +
+                                    surface->path.GetString() + "; they read usdGen:map:default");
+            state.reportedMisses = misses;
+            continue;
+        }
+
         std::vector<int> const firstIds =
             UsdGenPtexFirstFaceIds(surface->faceVertexCounts.cdata(), faceCount);
         float const *points = corners.empty() ? nullptr

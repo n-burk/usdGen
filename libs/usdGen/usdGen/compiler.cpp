@@ -334,6 +334,21 @@ uint64_t MapValueIdentity(UsdGenMapDesc const &map)
     h = Fnv1aTfToken(h, map.type);
     h = Fnv1aCstr(h, map.resolvedAssetPath.c_str());
     h = Fnv1aI64(h, static_cast<int64_t>(map.textureGeneration));
+    // A UsdGenPaintMap's payload is the surface primvar snapshot, not a
+    // file: a repaint changes only paintValues, so they are the identity a
+    // direct map-slot consumer re-captures on (the execution-cache key in
+    // sessionCooker.cpp folds the same fields).
+    if (!map.paintValues.empty() || !map.paintSurface.IsEmpty()) {
+        h = Fnv1aCstr(h, map.paintSurface.GetText());
+        h = Fnv1aTfToken(h, map.paintPrimvar);
+        h = Fnv1aTfToken(h, map.paintInterpolation);
+        h = Fnv1aI64(h, static_cast<int64_t>(map.paintValues.size()));
+        for (float v : map.paintValues) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, &v, sizeof(bits));
+            h = Fnv1aI64(h, static_cast<int64_t>(bits));
+        }
+    }
     std::vector<UsdGenParamValue const *> params;
     params.reserve(map.params.size());
     for (UsdGenParamValue const &param : map.params) params.push_back(&param);
@@ -1331,6 +1346,10 @@ void UsdGenCompiler::_Build(
     // oldNodeForNewDesc[di] = old node index, or -1 (recorded by the merge,
     // so the node loop needs no per-node searches on the hit path).
     std::vector<int> oldNodeForNewDesc(desc.nodes.size(), -1);
+    // oldNodeAtPath[di] = the path-matched old node index even when the desc
+    // entry changed (-1 when the path is new). A rebuilt node continues that
+    // node's buffer stamps; see the rebuild branch of the node loop.
+    std::vector<int> oldNodeAtPath(desc.nodes.size(), -1);
     // entries copy from the input. Entry ORDER follows the input (S26).
     // Identity is positional (nodeByDesc) with a linear-scan fallback.
     static_assert(sizeof(UsdGenGraphDesc) ==
@@ -1384,6 +1403,7 @@ void UsdGenCompiler::_Build(
                         }
                     }
                 }
+                if (on < oldSize) oldNodeAtPath[i] = int(on);
                 if (o < oldSize && sameNodeDesc(oldDescPtr->nodes[o], desc.nodes[i])) {
                     fresh->nodes.push_back(std::move(oldDescPtr->nodes[o]));
                     descChanged[i] = 0;
@@ -1688,6 +1708,23 @@ void UsdGenCompiler::_Build(
             digestChanged[pos] = 1;
         }
 
+        // A rebuilt node REPLACES its path-matched predecessor: its buffer
+        // stamps continue the old sequence instead of restarting at zero.
+        // Downstream captures (Clump, Curl, Expr, ...) key their validity on
+        // the upstream (topologyVersion, valueVersion); a fresh node counting
+        // 0 -> 1 again in one cook reproduces the very stamps they recorded,
+        // so they keep serving the old geometry. Every expression-bound node
+        // rebuilds on every recompile (sameNodeDesc), so a length-paint
+        // repaint rebuilt Grow and the groom stayed unchanged until a
+        // density edit changed the curve count under the whole chain.
+        if (node->buffer.topologyVersion == 0 && node->buffer.valueVersion == 0 &&
+            oldNodeAtPath[di] >= 0 && size_t(oldNodeAtPath[di]) < oldNodes.size() &&
+            oldNodes[size_t(oldNodeAtPath[di])]) {
+            UsdGenCompiledNode const &prior = *oldNodes[size_t(oldNodeAtPath[di])];
+            node->topologySeq = prior.topologySeq;
+            node->buffer.topologyVersion = prior.buffer.topologyVersion;
+            node->buffer.valueVersion = prior.buffer.valueVersion;
+        }
         out->_nodeByPath[nd.path] = node->id;
         out->_nodes[pos] = std::move(node);
     }

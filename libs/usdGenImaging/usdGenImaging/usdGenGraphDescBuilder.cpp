@@ -609,6 +609,38 @@ _HCollectSubtree(HdSceneIndexBase &input, SdfPath const &root,
     }
 }
 
+// Hydra mirror of the stage-side density fill: face means of the composed
+// usdGen:paint:density face-varying primvar, clamped >= 0 (non-finite to
+// 0). Missing/wrong-shaped data leaves the multiplier empty (== all 1.0).
+void
+_HCaptureDensityMultiplier(HdContainerDataSourceHandle const &primDs,
+                           _HdTime t, UsdGenSurfaceDesc *out)
+{
+    HdPrimvarSchema const primvar =
+        HdPrimvarsSchema::GetFromParent(primDs).GetPrimvar(
+            TfToken("usdGen:paint:density"));
+    HdSampledDataSourceHandle const values = primvar.GetPrimvarValue();
+    if (!values) return;
+    HdTokenDataSourceHandle const interp = primvar.GetInterpolation();
+    if (!interp || interp->GetTypedValue(t) != TfToken("faceVarying")) return;
+    VtValue const value = values->GetValue(t);
+    if (!value.IsHolding<VtFloatArray>()) return;
+    VtFloatArray const &flat = value.UncheckedGet<VtFloatArray>();
+    size_t total = 0;
+    for (int c : out->faceVertexCounts) total += size_t(c);
+    if (flat.size() != total || out->faceVertexCounts.empty()) return;
+    out->densityMultiplier.resize(out->faceVertexCounts.size());
+    size_t k = 0;
+    for (size_t f = 0; f < out->faceVertexCounts.size(); ++f) {
+        int const n = out->faceVertexCounts[f];
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) sum += double(flat[k++]);
+        float mean = n > 0 ? float(sum / double(n)) : 1.0f;
+        if (!std::isfinite(mean) || mean < 0.0f) mean = 0.0f;
+        out->densityMultiplier[f] = mean;
+    }
+}
+
 // Fills a surface desc from a Mesh prim in the flattened index. A GeomSubset
 // target is detected by the caller (R15); xform/matrix is already the world
 // matrix post-flattening (S4).
@@ -663,6 +695,7 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
     }
     _HPrimvarTyped(primDs, "st", t, &out->uv);
     _HPrimvarTyped(primDs, "velocities", t, &out->velocities);
+    _HCaptureDensityMultiplier(primDs, t, out);
 
     // Only the RestAPI's live Default-time snapshot is authoritative for
     // F_rest. It updates on an authored Default edit, never per shutter.
@@ -1063,6 +1096,144 @@ _HNodeDirty(SdfPath const &node, SdfPathVector const &dirtyPaths)
     return false;
 }
 
+// Hydra mirror of the stage-side _CapturePaintMap (usdGenGraphDescBuilderStage.cpp):
+// snapshots a UsdGenPaintMap's surface primvar into the map desc (scalar,
+// folded through usdGen:map:channel). v1 carries faceVarying float data
+// only; anything else fails closed with a validation error and leaves the
+// payload empty, which the sampler treats as unusable. A missing primvar
+// reads usdGen:map:default everywhere instead of failing.
+void
+_HCapturePaintMap(HdSceneIndexBase &input,
+                 HdContainerDataSourceHandle const &primDs, _HdTime t,
+                 usdGen::UsdGenMapDesc *map,
+                 std::vector<std::string> *errors)
+{
+    auto fail = [&](std::string const &what) {
+        if (errors) {
+            errors->push_back(map->path.GetString() + ": " + what);
+        }
+    };
+    HdContainerDataSourceHandle const ug = _HUsdGen(primDs);
+    SdfPathVector targets;
+    _HGetPathArray(ug, &targets, {"paint", "surface"});
+    if (targets.size() != 1) {
+        fail("usdGen:paint:surface requires exactly one target");
+        return;
+    }
+    HdContainerDataSourceHandle surfaceDs;
+    TfToken surfaceType;
+    if (!_HPrim(input, targets.front(), &surfaceDs, &surfaceType) ||
+        surfaceType != TfToken("mesh") ||
+        HdGeomSubsetSchema::GetFromParent(surfaceDs).IsDefined()) {
+        fail("usdGen:paint:surface must target a UsdGeomMesh");
+        return;
+    }
+    TfToken primvarName;
+    _HGetToken(ug, t, &primvarName, {"paint", "primvar"});
+    if (primvarName.IsEmpty()) {
+        fail("usdGen:paint:primvar is empty");
+        return;
+    }
+    HdPrimvarSchema const primvar =
+        HdPrimvarsSchema::GetFromParent(surfaceDs).GetPrimvar(primvarName);
+    HdSampledDataSourceHandle const values = primvar.GetPrimvarValue();
+    VtValue value;
+    if (values) {
+        value = values->GetValue(t);
+    }
+    if (!values || value.IsEmpty()) {
+        // No baked primvar yet: the map reads its authored default
+        // everywhere (the BaseGridFromStage semantic), so a wired but
+        // unpainted map cooks instead of rejecting the commit.
+        float defaultValue = 0.0f;
+        if (!_HGetTyped(ug, t, &defaultValue, {"map", "default"})) {
+            fail("surface " + targets.front().GetString() + " has no primvar " +
+                 primvarName.GetString());
+            return;
+        }
+        TfToken promised;
+        _HGetToken(ug, t, &promised, {"paint", "interpolation"});
+        if (!promised.IsEmpty() && promised != TfToken("faceVarying")) {
+            fail("primvar " + primvarName.GetString() + " is " + promised.GetString() +
+                 ", v1 paints faceVarying only");
+            return;
+        }
+        VtIntArray defaultCounts;
+        HdContainerDataSourceHandle const defaultTopo =
+            _HChild(_HChild(surfaceDs, "mesh"), "topology");
+        _HGetTyped(defaultTopo, t, &defaultCounts, {"faceVertexCounts"});
+        size_t defaultFaceVarying = 0;
+        for (int c : defaultCounts) defaultFaceVarying += size_t(c);
+        map->paintSurface = targets.front();
+        map->paintPrimvar = primvarName;
+        map->paintInterpolation = TfToken("faceVarying");
+        map->paintValues.assign(defaultFaceVarying, defaultValue);
+        return;
+    }
+    TfToken interp;
+    if (HdTokenDataSourceHandle const i = primvar.GetInterpolation()) {
+        interp = i->GetTypedValue(t);
+    }
+    if (interp != TfToken("faceVarying")) {
+        fail("primvar " + primvarName.GetString() + " is " + interp.GetString() +
+             ", v1 paints faceVarying only");
+        return;
+    }
+    TfToken channel;
+    _HGetToken(ug, t, &channel, {"map", "channel"});
+    if (channel.IsEmpty()) {
+        channel = TfToken("r");
+    }
+    VtFloatArray folded;
+    if (value.IsHolding<VtFloatArray>()) {
+        if (channel != TfToken("r") && channel != TfToken("luminance")) {
+            fail("scalar primvar " + primvarName.GetString() +
+                 " cannot supply channel " + channel.GetString());
+            return;
+        }
+        folded = value.UncheckedGet<VtFloatArray>();
+    } else if (value.IsHolding<VtVec3fArray>()) {
+        VtVec3fArray const &v = value.UncheckedGet<VtVec3fArray>();
+        size_t pick = 0;
+        bool luminance = false;
+        if (channel == TfToken("r")) pick = 0;
+        else if (channel == TfToken("g")) pick = 1;
+        else if (channel == TfToken("b")) pick = 2;
+        else if (channel == TfToken("luminance")) luminance = true;
+        else {
+            fail("primvar " + primvarName.GetString() +
+                 " cannot supply channel " + channel.GetString());
+            return;
+        }
+        folded.resize(v.size());
+        for (size_t i = 0; i < v.size(); ++i) {
+            folded[i] = luminance
+                ? 0.2126f * v[i][0] + 0.7152f * v[i][1] + 0.0722f * v[i][2]
+                : v[i][pick];
+        }
+    } else {
+        fail("primvar " + primvarName.GetString() + " must be float or "
+             "float3-valued");
+        return;
+    }
+    VtIntArray counts;
+    HdContainerDataSourceHandle const topo =
+        _HChild(_HChild(surfaceDs, "mesh"), "topology");
+    _HGetTyped(topo, t, &counts, {"faceVertexCounts"});
+    size_t faceVarying = 0;
+    for (int c : counts) faceVarying += size_t(c);
+    if (folded.size() != faceVarying) {
+        fail("primvar " + primvarName.GetString() + " has " +
+             std::to_string(folded.size()) + " values for " +
+             std::to_string(faceVarying) + " face vertices");
+        return;
+    }
+    map->paintSurface = targets.front();
+    map->paintPrimvar = primvarName;
+    map->paintInterpolation = interp;
+    map->paintValues = folded;
+}
+
 }  // namespace
 
 
@@ -1301,6 +1472,10 @@ CaptureGraphDescFromHydra(
                 }
             }
             _HPullUsdGen(ug, t, nullptr, &map.params, "usdGen");
+            if (map.type == TfToken("UsdGenPaintMap")) {
+                _HCapturePaintMap(input, primDs, t, &map,
+                                     &desc.validationErrors);
+            }
         }
         mapIndex.emplace(p.GetString(), desc.maps.size());
         desc.maps.push_back(std::move(map));

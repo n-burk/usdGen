@@ -578,7 +578,7 @@ file(COPY
 # the launchers put on PYTHONPATH (plan/08 §5).
 # ---------------------------------------------------------------------------
 set(_usdgen_tools_resources "${CMAKE_CURRENT_BINARY_DIR}/usd/usdGenTools/resources")
-file(GLOB_RECURSE _usdgen_tools_python
+file(GLOB_RECURSE _usdgen_tools_python CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/python/*.py")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/plugInfo.json"
@@ -601,6 +601,16 @@ file(COPY
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/expressions"
     DESTINATION "${_usdgen_tools_resources}"
     FILES_MATCHING PATTERN "*.se")
+# The brush palette's icons (256x256 RGBA PNGs), resolved the same way as the
+# expression presets: beside plugInfo.json under resources/icons.
+file(GLOB _usdgen_tools_icons CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/resources/icons/*.png")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_usdgen_tools_icons})
+if(_usdgen_tools_icons)
+    file(COPY ${_usdgen_tools_icons}
+        DESTINATION "${_usdgen_tools_resources}/icons")
+endif()
 
 # ---------------------------------------------------------------------------
 # usdGenTonic scene-index plugin resources + usdGenTonicTools usdview plugin
@@ -662,6 +672,16 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
     # Exact float op order vs the CPU FBM path (04 §2.9): no fused FMA.
     # 1394-D is nvcc's spelling of C4251 (see the MSVC warning block above).
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --fmad=false -diag-suppress 1394")
+    # nvcc establishes its own Visual Studio environment by re-running
+    # vcvars on every invocation; nested inside an already-configured shell
+    # that re-entry overflows cmd's line limit ("input line too long") and
+    # every kernel compile dies before it starts. Kernel builds only ever
+    # run where cl.exe already works, so hand nvcc that same environment
+    # instead of a broken nested one (the arch probe below makes the same
+    # choice per configure environment).
+    if(MSVC)
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use-local-env")
+    endif()
     foreach(_config RELEASE RELWITHDEBINFO MINSIZEREL)
         string(REGEX REPLACE "[/-]DNDEBUG" "" CMAKE_CUDA_FLAGS_${_config}
             "${CMAKE_CUDA_FLAGS_${_config}}")
@@ -699,18 +719,31 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
     file(WRITE "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.cu"
         "__global__ void usdgen_cuda_arch_probe() {}\n")
     set(USDGEN_CUDA_ARCH "")
+    set(_usdgen_probe_local_env "")
+    if(DEFINED ENV{VCToolsInstallDir})
+        # Configured from a Visual Studio shell: nvcc must reuse this
+        # environment instead of re-running vcvars into it (see above).
+        # From a clean shell the flag stays off and nvcc sets Visual
+        # Studio up itself.
+        set(_usdgen_probe_local_env "--use-local-env")
+    endif()
     foreach(_arch IN LISTS _usdgen_cuda_archs)
         execute_process(
-            COMMAND "${CMAKE_CUDA_COMPILER}" -c
+            COMMAND "${CMAKE_CUDA_COMPILER}" ${_usdgen_probe_local_env} -c
                     "-gencode=arch=compute_${_arch},code=sm_${_arch}"
                     "-o" "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.o"
                     "${CMAKE_BINARY_DIR}/usdgen_cuda_arch_probe.cu"
             RESULT_VARIABLE _usdgen_cuda_arch_rc
-            OUTPUT_QUIET ERROR_QUIET)
+            OUTPUT_VARIABLE _usdgen_cuda_arch_out
+            ERROR_VARIABLE _usdgen_cuda_arch_err)
         if(_usdgen_cuda_arch_rc EQUAL 0)
             set(USDGEN_CUDA_ARCH "${_arch}")
             break()
         endif()
+        # Say why: "input line is too long" here means nvcc's nested vcvars
+        # overflowed cmd (an over-long PATH), not a toolkit problem.
+        message(STATUS "usdGen: sm_${_arch} probe failed: "
+            "${_usdgen_cuda_arch_out}${_usdgen_cuda_arch_err}")
     endforeach()
     if(NOT USDGEN_CUDA_ARCH)
         string(REPLACE ";" ", sm_" _usdgen_cuda_archs_tried "${_usdgen_cuda_archs}")
@@ -718,7 +751,8 @@ if(USE_GPU_NOISE OR USDGEN_ENABLE_CUDA)
             "(sm_${_usdgen_cuda_archs_tried}) compiles with "
             "${CMAKE_CUDA_COMPILER} (CUDA ${CUDAToolkit_VERSION}); install a "
             "toolkit new enough for this host's GPU, or set "
-            "CMAKE_CUDA_COMPILER at the one that is.")
+            "CMAKE_CUDA_COMPILER at the one that is. Last nvcc output: "
+            "${_usdgen_cuda_arch_out}${_usdgen_cuda_arch_err}")
     endif()
     set(CMAKE_CUDA_ARCHITECTURES "${USDGEN_CUDA_ARCH}" CACHE STRING
         "CUDA arch for the noise kernel (probed at configure time)" FORCE)
@@ -945,6 +979,21 @@ target_link_libraries(testUsdGenRegistryOwners PRIVATE usdGenImaging usdGen)
 add_test(NAME testUsdGenRegistryOwners COMMAND testUsdGenRegistryOwners)
 set_tests_properties(testUsdGenRegistryOwners PROPERTIES LABELS "T1;scheduling;imaging" TIMEOUT 60)
 add_executable(testUsdGenSceneOwner tests/testUsdGenSceneOwner.cpp)
+add_executable(testUsdGenDirtyRouterOrder tests/testUsdGenDirtyRouterOrder.cpp)
+target_link_libraries(testUsdGenDirtyRouterOrder PRIVATE usdGenImaging usdGen)
+add_test(NAME testUsdGenDirtyRouterOrder COMMAND testUsdGenDirtyRouterOrder)
+set_tests_properties(testUsdGenDirtyRouterOrder PROPERTIES
+    LABELS "T1;scheduling;imaging;dirty-router;order" TIMEOUT 60)
+add_executable(testUsdGenDirtyRouterPaint tests/testUsdGenDirtyRouterPaint.cpp)
+target_link_libraries(testUsdGenDirtyRouterPaint PRIVATE usdGenImaging usdGen)
+add_test(NAME testUsdGenDirtyRouterPaint COMMAND testUsdGenDirtyRouterPaint)
+set_tests_properties(testUsdGenDirtyRouterPaint PROPERTIES
+    LABELS "T1;scheduling;imaging;dirty-router;paint" TIMEOUT 60)
+add_executable(testUsdGenDirtyRouterDensity tests/testUsdGenDirtyRouterDensity.cpp)
+target_link_libraries(testUsdGenDirtyRouterDensity PRIVATE usdGenImaging usdGen)
+add_test(NAME testUsdGenDirtyRouterDensity COMMAND testUsdGenDirtyRouterDensity)
+set_tests_properties(testUsdGenDirtyRouterDensity PROPERTIES
+    LABELS "T1;scheduling;imaging;dirty-router;density" TIMEOUT 60)
 add_executable(testUsdGenIncrementalCapture tests/testUsdGenIncrementalCapture.cpp)
 add_executable(testUsdGenCaptureCache tests/testUsdGenCaptureCache.cpp)
 add_executable(testUsdGenAsyncScenePublication tests/testUsdGenAsyncScenePublication.cpp)
@@ -1577,7 +1626,7 @@ foreach(_t testUsdGenGraph testUsdGenKernelDeterminism testUsdGenWidth
            testUsdGenCpuFanout testUsdGenCpuReferenceMap testUsdGenCurveRagged
            testUsdGenCpuCurveSource testUsdGenLengthRaggedLayout testUsdGenSurfaceRootFrames
            testUsdGenSurfaceRootBindings testUsdGenSurfaceRootBindingBoundaries
-           testUsdGenSurfaceBindingCache)
+           testUsdGenSurfaceBindingCache testUsdGenScatterDensity)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtils)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -1595,6 +1644,7 @@ set_tests_properties(testUsdGenSurfaceRootFrames PROPERTIES LABELS "T0;sources;r
 set_tests_properties(testUsdGenSurfaceRootBindings PROPERTIES LABELS "T0;sources;root-bindings;cow")
 set_tests_properties(testUsdGenSurfaceRootBindingBoundaries PROPERTIES LABELS "T0;sources;root-bindings")
 set_tests_properties(testUsdGenSurfaceBindingCache PROPERTIES LABELS "T0;sources;cache;cow")
+set_tests_properties(testUsdGenScatterDensity PROPERTIES LABELS "T0;sources;scatter;density")
 
 # M1 T0 perf benches (E-1/E-7 via --threads; E-2 sparse; carried in from
 # prototypes/data-plane-benchmark, 11 §2.2).
@@ -1619,7 +1669,7 @@ foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalid
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
            testUsdGenSourceColor testUsdGenLookPrimvars
-           testUsdGenInstance testUsdGenReferenceSource)
+           testUsdGenInstance testUsdGenReferenceSource testUsdGenPaintLengthRecook)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -1633,6 +1683,8 @@ set_tests_properties(testUsdGenFurOcclusion PROPERTIES LABELS "T1;fur;shadows")
 set_tests_properties(testUsdGenSourceColor PROPERTIES LABELS "T1;look;sources")
 set_tests_properties(testUsdGenReferenceSource PROPERTIES LABELS "T1;sources;reference")
 set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars")
+set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
+    LABELS "T1;imaging;paint;brush" TIMEOUT 120)
 set_tests_properties(testUsdGenScenePublication PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
@@ -1809,6 +1861,39 @@ add_executable(testUsdGenPtexMap tests/testUsdGenPtexMap.cpp)
 target_link_libraries(testUsdGenPtexMap PRIVATE usdGen usdGen_ptex)
 add_test(NAME testUsdGenPtexMap COMMAND testUsdGenPtexMap)
 set_tests_properties(testUsdGenPtexMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
+# Paintable per-surface attribute maps + stroke accumulation (the XGen-style
+# brush model over per-face storage). Engine-only, no USD dependency.
+add_executable(testUsdGenAttributeMap tests/testUsdGenAttributeMap.cpp)
+target_link_libraries(testUsdGenAttributeMap PRIVATE usdGen)
+add_test(NAME testUsdGenAttributeMap COMMAND testUsdGenAttributeMap)
+set_tests_properties(testUsdGenAttributeMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
+# Painted attribute maps: the .ptx bake and the async bake-to-stage worker.
+# Engine-only (threads + filesystem, no USD/Hydra), like the map it bakes.
+add_executable(testUsdGenAttributeBake tests/testUsdGenAttributeBake.cpp)
+target_link_libraries(testUsdGenAttributeBake PRIVATE usdGen)
+add_test(NAME testUsdGenAttributeBake COMMAND testUsdGenAttributeBake)
+set_tests_properties(testUsdGenAttributeBake PROPERTIES LABELS "T1;maps" TIMEOUT 120)
+# Authored maps into groom cooking/instancing: keep/drop + prototype index
+# per strand root, CPU-only and separate from Tonic's region-map flow.
+add_executable(testUsdGenAttributeInstance tests/testUsdGenAttributeInstance.cpp)
+target_link_libraries(testUsdGenAttributeInstance PRIVATE usdGen)
+add_test(NAME testUsdGenAttributeInstance COMMAND testUsdGenAttributeInstance)
+set_tests_properties(testUsdGenAttributeInstance PROPERTIES LABELS "T0;maps" TIMEOUT 120)
+# The live paint-preview overlay: app -> Hydra displayColor for the brushed
+# surface and the groom, over the real UsdImaging chain.
+add_executable(testUsdGenAttributePreview tests/testUsdGenAttributePreview.cpp)
+target_link_libraries(testUsdGenAttributePreview PRIVATE usdGenTestUtilsHd)
+add_test(NAME testUsdGenAttributePreview COMMAND testUsdGenAttributePreview)
+set_tests_properties(testUsdGenAttributePreview PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;maps;preview" TIMEOUT 120)
+# The attribute-brush C ABI: pick/footprint, dab kernel with hardness and
+# erase, the cross-face corner smooth, commit == working, the 100k-face
+# per-move cost, and the global preview overlay.
+add_executable(testUsdGenBrushApi tests/testUsdGenBrushApi.cpp)
+target_link_libraries(testUsdGenBrushApi PRIVATE usdGenTestUtilsHd)
+add_test(NAME testUsdGenBrushApi COMMAND testUsdGenBrushApi)
+set_tests_properties(testUsdGenBrushApi PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}" LABELS "T1;maps;preview;brush" TIMEOUT 120)
 add_executable(testUsdGenSurfaceCageInterpolate tests/testUsdGenSurfaceCageInterpolate.cpp)
 target_link_libraries(testUsdGenSurfaceCageInterpolate PRIVATE usdGen usdGen_ptex)
 add_test(NAME testUsdGenSurfaceCageInterpolate COMMAND testUsdGenSurfaceCageInterpolate)
@@ -2065,13 +2150,46 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
         "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
     # Both python package layouts OpenUSD installs on Windows/POSIX, plus
-    # build/python where the usdGenTools package is staged.
+    # build/python where the usdGenTools package is staged. Last, the
+    # nanousd scrub (bin/launch_env/sitecustomize.py): the last prepend
+    # lands first on PYTHONPATH, so the scrub's sitecustomize wins and a
+    # nanousd editable install cannot shadow the prefix's pxr. A no-op
+    # where nanousd is absent.
     usdgen_test_path_list_ops(_usdgen_tools_python_env PYTHONPATH path_list_prepend
         "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
-        "${CMAKE_CURRENT_BINARY_DIR}/python")
+        "${CMAKE_CURRENT_BINARY_DIR}/python"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenToolsExprEditor PROPERTIES
         LABELS "T2;tools;usdview" TIMEOUT 180
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
+
+    # Brush tool through REAL mouse events (plan/08 section 2.1 exit):
+    # bind a UsdGenPaintMap to /Plane, press-drag-release over the
+    # viewport, the session preview repaints while the drag is live, and
+    # release bakes the paint primvar into the edit target. T3: opens a
+    # window through testusdview like the Tonic mode scripts.
+    add_test(NAME testUsdviewBrushStroke
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdviewBrushStroke.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/test-plane.usda")
+    set_tests_properties(testUsdviewBrushStroke PROPERTIES
+        LABELS "T3;tools;brush;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
+
+    # Description setup through REAL mouse events: the palette's Setup
+    # defines a ready-to-cook description (Scatter -> Grow Ops), paint-to
+    # binds its Maps PaintMap, the cursor ring tracks the hover, and a
+    # stroke bakes into the Maps primvar. The extra FAIL tokens are the
+    # engine errors an operator-less description used to emit per frame.
+    add_test(NAME testUsdviewBrushSetup
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdviewBrushSetup.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/test-plane.usda")
+    set_tests_properties(testUsdviewBrushSetup PROPERTIES
+        LABELS "T3;tools;brush;usdview" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback|operatorOrder|no operator nodes|CaptureGraphDescFromHydra|commit rejected"
         ENVIRONMENT_MODIFICATION "${_usdgen_tools_plugin_env};${_usdgen_tools_python_env}")
 endif()
 
@@ -2326,11 +2444,38 @@ if(_usdgen_test_python)
         "${_usdgen_schema_resources}" "${_usdgen_imaging_resources}"
         "${_usdgen_shader_resources}" "${_usdgen_tools_resources}"
         "${USD_INSTALL_DIR}/plugin/usd" "${USD_INSTALL_DIR}/lib/usd")
+    # bin/launch_env last: the last prepend lands first on PYTHONPATH, so
+    # its sitecustomize scrubs a nanousd editable install's pxr shadow
+    # before the test imports (a no-op where nanousd is absent).
     usdgen_test_path_list_ops(_usdgen_toolsapi_python_env PYTHONPATH path_list_prepend
         "${USD_INSTALL_DIR}/lib/python" "${USD_INSTALL_DIR}/Lib/site-packages"
-        "${CMAKE_CURRENT_BINARY_DIR}/python")
+        "${CMAKE_CURRENT_BINARY_DIR}/python"
+        "${CMAKE_CURRENT_SOURCE_DIR}/bin/launch_env")
     set_tests_properties(testUsdGenToolsExprApi PROPERTIES
         LABELS "T1;tools;expressions" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+
+    # The Qt-free half of the brush tool -- the map/stroke twin, camera
+    # maths, CPU surface pick, bind/bake authoring, session preview, the
+    # gesture loop and the panel descriptors -- in a plain python process.
+    add_test(NAME testUsdGenToolsBrush
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsBrush.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/test-plane.usda")
+    set_tests_properties(testUsdGenToolsBrush PROPERTIES
+        LABELS "T1;tools;brush" TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
+
+    # The Qt-free UI half of the brush (state, loop cadence, palette and
+    # panel descriptors, hotkey logic) in the same plain interpreter.
+    add_test(NAME testUsdGenToolsBrushUI
+        COMMAND "${_usdgen_test_python}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenTools/testenv/testUsdGenToolsBrushUI.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/test-plane.usda")
+    set_tests_properties(testUsdGenToolsBrushUI PROPERTIES
+        LABELS "T1;tools;brush" TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_toolsapi_plugin_env};${_usdgen_toolsapi_python_env}")
 endif()

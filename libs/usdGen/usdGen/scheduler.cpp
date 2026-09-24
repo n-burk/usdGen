@@ -877,7 +877,13 @@ UsdGenRunResult UsdGenScheduler::Run(
             auto cap = op.CreateCapture();
             if (cap && op.Capture(cctx, upBuf, cap.get(), &nodeDiag)) {
                 if (cap->OwnsBuffer()) {
+                    // valueVersion is monotone per node: the capture's own
+                    // buffer counts from zero, and adopting that stamp would
+                    // let a downstream capture keyed on the old stamp match.
+                    uint64_t const priorValueVersion = node.buffer.valueVersion;
                     node.buffer = cap->Buffer();
+                    node.buffer.valueVersion =
+                        std::max(node.buffer.valueVersion, priorValueVersion);
                     node.buffer.topologyVersion = ++node.topologySeq;
                     if (hasUp) InheritPerCurve(node.buffer, upBuf);
                 }
@@ -892,19 +898,19 @@ UsdGenRunResult UsdGenScheduler::Run(
             // Generators and CV-repartitioning stylers (Resample) publish a new
             // CV layout from Capture; the chunk plan must follow it. CurveCount
             // stylers (Length) do not own a buffer and keep the upstream plan.
-            if ((node.op->IsGenerator() ||
-                 node.topoFx == UsdGenTopoFx::CvCount) &&
-                node.buffer.totalCurves > 0) {
+            // Repartition unconditionally: its own keep-check is the single
+            // comparator (a pre-check on chunk COUNT misses 20->10 curves at
+            // 1 chunk, leaving stale spans that sweep out of bounds), and it
+            // early-outs with no writes and no topology change when the layout
+            // already matches. No totalCurves > 0 gate either: a generator
+            // re-capturing to ZERO curves must still repartition, or its stale
+            // chunk plan sweeps dead chunks against empty buffers.
+            if (node.op->IsGenerator() ||
+                node.topoFx == UsdGenTopoFx::CvCount) {
                 int const total = static_cast<int>(node.buffer.totalCurves);
                 int const cvp = int(node.buffer.totalCvs /
                                     std::max<uint32_t>(1, node.buffer.totalCurves));
-                int const nChunks = ComputeNumChunks(total, graph.ChunkSize());
-                bool const layoutMoved =
-                    int(node.chunks.size()) != nChunks ||
-                    (node.chunks.empty() ? false :
-                     int(node.chunks[0].cvCount) != cvp) ||
-                    !node.buffer.cvOffsets.empty();
-                if (layoutMoved && graph.Repartition(total, cvp))
+                if (graph.Repartition(total, cvp))
                     result.topologyChanged = true;
             } else if (job->reCaptured && node.chunks.empty() && hasUp) {
                 UsdGenCompiledNode const &upN = graph.Node(node.input);
