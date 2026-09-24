@@ -62,6 +62,11 @@ public:
     static HdSceneIndexBaseRefPtr New(
         HdSceneIndexBaseRefPtr const &inputScene,
         int renderInstanceId = 0);
+    /// The scalp shadow is a raster approximation. Ray-tracing frontends
+    /// omit it while retaining the same shared groom session and strand data.
+    static HdSceneIndexBaseRefPtr New(
+        HdSceneIndexBaseRefPtr const &inputScene,
+        int renderInstanceId, bool publishScalpShadow);
 
     // -- HdSceneIndexInterface ------------------------------------------------
     HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
@@ -104,7 +109,7 @@ private:
 
     UsdGenGroomSceneIndex(
         HdSceneIndexBaseRefPtr const &inputScene,
-        int renderInstanceId);
+        int renderInstanceId, bool publishScalpShadow);
     ~UsdGenGroomSceneIndex() override;
 
     // Hydra capture stays on the caller/notice boundary. Only owning value
@@ -156,6 +161,7 @@ private:
                                       // pruning spliced (06 §3.5); NEVER
                                       // spliced into the chain
     uint64_t _renderInstanceId = 0;
+    bool const _publishScalpShadow;
 
     std::shared_ptr<_State> _state;
     bool _dispatching = false;

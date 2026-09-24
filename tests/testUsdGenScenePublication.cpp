@@ -98,11 +98,11 @@ struct Scene {
     UsdGenGroomSceneIndex *owner = nullptr;
 };
 
-Scene MakeScene(char const *name)
+Scene MakeScene(char const *name, char const *fixture = kFixture)
 {
     Scene out;
     out.stage = UsdStage::CreateInMemory(name);
-    out.stage->GetRootLayer()->ImportFromString(kFixture);
+    out.stage->GetRootLayer()->ImportFromString(fixture);
     UsdImagingCreateSceneIndicesInfo info;
     info.stage = out.stage;
     out.indices = UsdImagingCreateSceneIndices(info);
@@ -297,6 +297,65 @@ bool WaitFor(std::atomic<bool> const &value)
 int main()
 {
     usdGen::usdGenRegisterM1Operators();
+    {
+        // Scatter over an area: the one-line publication fixture above has
+        // degenerate X/Z bounds and intentionally produces no shadow volume.
+        Scene raster = MakeScene("scalp-shadow-renderer-policy", R"USDA(#usda 1.0
+def Mesh "Scalp" (prepend apiSchemas = ["UsdGenRestAPI"])
+{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0,1,2,3]
+    point3f[] points = [(-.1,0,-.1),(-.1,0,.1),(.1,0,.1),(.1,0,-.1)]
+    point3f[] primvars:rest = [(-.1,0,-.1),(-.1,0,.1),(.1,0,.1),(.1,0,-.1)] (interpolation = "vertex")
+}
+def Scope "Groom"
+{
+    def UsdGenDescription "hair"
+    {
+        rel usdGen:surface = </Scalp>
+        def Scope "Ops"
+        {
+            def UsdGenWidth "width"
+            {
+                float usdGen:width = .01
+                bool usdGen:replace = true
+            }
+            def UsdGenGrow "grow"
+            {
+                float usdGen:length = .025
+                int usdGen:segments = 4
+            }
+            def UsdGenScatter "scatter"
+            {
+                float usdGen:density = 1000
+            }
+        }
+    }
+}
+)USDA");
+        raster.owner->Synchronize();
+        auto traced = UsdGenGroomSceneIndex::New(raster.indices.finalSceneIndex, 0, false);
+        auto tracedOwner = dynamic_cast<UsdGenGroomSceneIndex *>(traced.operator->());
+        SdfPath const render("/Groom/hair/__usdGenRender");
+        SdfPath const cap = render.AppendChild(TfToken("scalpShadow"));
+        SdfPath const material = render.AppendChild(TfToken("material_scalpShadow"));
+        SourceNoticeObserver capNotices(cap), materialNotices(material);
+        traced->AddObserver(TfCreateWeakPtr(&capNotices));
+        traced->AddObserver(TfCreateWeakPtr(&materialNotices));
+        tracedOwner->Synchronize();
+        Check(HasChild(*raster.groom, render, cap) &&
+                  raster.groom->GetPrim(cap).primType == TfToken("mesh"),
+              "Storm publication retains its generated scalp shadow");
+        Check(!HasChild(*traced, render, cap) && !HasChild(*traced, render, material) &&
+                  traced->GetPrim(cap).primType.IsEmpty() &&
+                  traced->GetPrim(material).primType.IsEmpty() &&
+                  !capNotices.added.load() && !materialNotices.added.load(),
+              "ray-tracing publication omits cap geometry, material and notices");
+        Check(traced->GetPrim(FirstTile(raster)).primType == TfToken("basisCurves"),
+              "ray-tracing publication retains the actual groom strands");
+        traced->RemoveObserver(TfCreateWeakPtr(&capNotices));
+        traced->RemoveObserver(TfCreateWeakPtr(&materialNotices));
+    }
     Scene first = MakeScene("scene-publication-first");
     Check(first.owner != nullptr, "first concrete groom scene owner is available");
     if (!first.owner) return 1;

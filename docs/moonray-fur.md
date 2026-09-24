@@ -49,6 +49,24 @@ reads the baked per-curve `displayColor` through a
 `UsdPrimvarReader_float3` (fallback: the look's root color, mid-gray
 for the value preview). Pinned by `tests/testUsdGenValuePreview.cpp`.
 
+**Renderer-specific scalp-shadow publication.** The shadow cap is a Storm
+approximation, not a physical surface. The groom scene-index plugin reads
+Hydra's renderer display name and publishes that cap only to Storm (`GL` /
+`Storm`). Other delegates receive neither its mesh nor its material or
+notices. Strand publications and the shared CPU session remain unchanged.
+Publishing the cap to MoonRay exposed the emitter cage through the subdivided
+skin and added false shadows and polygon bands. Transparency also produced
+artifacts in this build, so the fix excludes the geometry at publication.
+Ray tracers shade and shadow the actual strands. Covered by
+`tests/testUsdGenScenePublication.cpp` (cap present for raster, absent from
+ray-tracing enumeration/GetPrim/notices, strands retained).
+
+**Texture inputs.** This MoonRay build rejects untiled PNGs in its texture
+cache, leaving connected surface inputs black. Supply tiled, mipmapped
+EXRs (including dome maps), for example with OpenImageIO `maketx --oiio
+-d half --format openexr`. Preserve the source colour space; linear atlas
+values should use `sourceColorSpace = raw` in `UsdUVTexture`.
+
 **MoonRay patch (one hunk).** `BasisCurves.cc` rejects any wrap
 other than `nonperiodic`, but its tessellation ignores wrap
 entirely, so `pinned` (USD's default, and the correct authoring for
@@ -87,13 +105,12 @@ launcher behaves exactly as before. Covered by
 `tests/checks/check_usdview_env.py` (`testUsdGenUsdviewEnv`); `-PrintEnv`
 dumps the assembled environment as JSON without needing GL.
 
-Caveat: hdMoonray's *render* path is broken in this Windows build
-independently of the launcher -- `hd_render -renderer Moonray` exits
-`0xC0000409` even on a one-sphere scene (the Embree control renders
-fine), and the usdview viewport shows a fixed pattern instead of the
-scene. Selecting the Moonray renderer loads cleanly; rendering through
-it awaits the upstream fix. Batch rendering via `hd_usd2rdl` + `moonray`
-above is unaffected and is the working path today.
+Windows verification, 2026-09-24: the in-process **Moonray (debug)** delegate
+(`HdMoonrayRendererDebugPlugin`) renders the live puppet groom to convergence
+through usdview. The ARRAS-backed `HdMoonrayRendererPlugin` instead reports
+that local sessions are unsupported by this client. Choose the in-process
+delegate for this build. The earlier blanket statement that interactive
+MoonRay rendering was broken is superseded by this verification.
 
 ## Known limits
 
@@ -111,6 +128,6 @@ above is unaffected and is the working path today.
 * Procedural groom tiles cannot be file-translated yet: the usdGen
   scene index does not engage under `hd_usd2rdl`'s delegate path
   (the groom prim is skipped), so tiles reach MoonRay only through
-  an interactive Hydra session -- which awaits the render-path fix
-  above. The tile material networks are pinned at the data-source
+  an interactive Hydra session, using the in-process delegate on this
+  Windows build. The tile material networks are pinned at the data-source
   level by the material tests.

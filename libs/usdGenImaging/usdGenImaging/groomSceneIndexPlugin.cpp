@@ -48,8 +48,13 @@ TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
 }
 HdSceneIndexBaseRefPtr UsdGenGroomSceneIndexPlugin::_AppendSceneIndex(
     std::string const&, HdSceneIndexBaseRefPtr const& input,
-    HdContainerDataSourceHandle const&) {
-    return UsdGenGroomSceneIndex::New(input, 0);
+    HdContainerDataSourceHandle const& args) {
+    auto renderer = args ? HdStringDataSource::Cast(args->Get(
+        HdSceneIndexPluginRegistryTokens->rendererDisplayName)) : nullptr;
+    std::string const name = renderer ? renderer->GetTypedValue(0) : std::string();
+    // The cap is an overlay for Storm, not physical geometry. Suppress its
+    // prim, material and notices for other delegates, not just its shading.
+    return UsdGenGroomSceneIndex::New(input, 0, name == "GL" || name == "Storm");
 }
 bool UsdGenGroomSceneIndexPlugin::_IsEnabled(HdContainerDataSourceHandle const&) const {
     return TfGetEnvSetting(USDGEN_ENABLE);
@@ -1344,10 +1349,12 @@ void UsdGenSceneService::DrainRetired() {
     }
 }
 
-UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id)
+UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id,
+                                         bool publishScalpShadow)
     : HdSingleInputFilteringSceneIndexBase(input),
       _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(input)),
-      _renderInstanceId(static_cast<uint32_t>(id)) {
+      _renderInstanceId(static_cast<uint32_t>(id)),
+      _publishScalpShadow(publishScalpShadow) {
     static std::atomic<uint64_t> next{uint64_t(1) << 32};
     if (id == 0) _renderInstanceId = next.fetch_add(1);
     auto& service = SceneService();
@@ -1372,7 +1379,11 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input
     service.Register(UsdGenSceneService::Entry{_state, record});
 }
 HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input, int id) {
-    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id));
+    return New(input, id, true);
+}
+HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input,
+                                               int id, bool publishScalpShadow) {
+    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id, publishScalpShadow));
     index->_state->recipient = TfCreateWeakPtr(index.operator->());
     UsdGenImagingTestHook::_RegisterIndex(index.operator->());
     _Ingress initial;
@@ -1452,7 +1463,7 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                 };
                 std::map<SdfPath, TfToken> beforeNames, targetNames;
                 std::map<SdfPath, Synthetic> beforeSynthetic, targetSynthetic;
-                auto collect = [](std::shared_ptr<const _State::Snapshot> const& snapshot,
+                auto collect = [this](std::shared_ptr<const _State::Snapshot> const& snapshot,
                                   std::map<SdfPath, TfToken>& names,
                                   std::map<SdfPath, Synthetic>& synthetic) {
                     for (auto const& source : *snapshot->source)
@@ -1489,7 +1500,7 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         }
                         // The scalp-shadow cap and the material it binds, both
                         // present only while the groom has one.
-                        if (g.scalpShadow) {
+                        if (_publishScalpShadow && g.scalpShadow) {
                             SdfPath const cap = ScalpShadowPath(g.description);
                             if (!names.count(cap)) {
                                 names.emplace(cap, TfToken("mesh"));
@@ -2030,9 +2041,9 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
         // The scalp-shadow cap. It carries no primOrigin and takes no
         // DescriptionOverlay: picking passes straight through it to whatever
         // the user authored underneath, and it never highlights.
-        if (g.scalpShadow && path == ScalpShadowPath(g.description))
+        if (_publishScalpShadow && g.scalpShadow && path == ScalpShadowPath(g.description))
             return {TfToken("mesh"), g.scalpShadow};
-        if (g.scalpShadow && path == ScalpShadowMaterialPath(g.description))
+        if (_publishScalpShadow && g.scalpShadow && path == ScalpShadowMaterialPath(g.description))
             return {TfToken("material"),
                     ::usdGenImaging::UsdGenTilePublisher::
                         BuildScalpShadowMaterialDataSource(g.look)};
@@ -2076,7 +2087,7 @@ SdfPathVector UsdGenGroomSceneIndex::GetChildPrimPaths(SdfPath const& path) cons
             append(MaterialPath(g.description));
             SdfPath const preview = BoundPreviewMaterial(g.description, *g.tiles);
             if (!preview.IsEmpty()) append(preview);
-            if (g.scalpShadow) {
+            if (_publishScalpShadow && g.scalpShadow) {
                 append(ScalpShadowPath(g.description));
                 append(ScalpShadowMaterialPath(g.description));
             }
