@@ -54,7 +54,8 @@ HdSceneIndexBaseRefPtr UsdGenGroomSceneIndexPlugin::_AppendSceneIndex(
     std::string const name = renderer ? renderer->GetTypedValue(0) : std::string();
     // The cap is an overlay for Storm, not physical geometry. Suppress its
     // prim, material and notices for other delegates, not just its shading.
-    return UsdGenGroomSceneIndex::New(input, 0, name == "GL" || name == "Storm");
+    bool const storm = name == "GL" || name == "Storm";
+    return UsdGenGroomSceneIndex::New(input, 0, storm, storm);
 }
 bool UsdGenGroomSceneIndexPlugin::_IsEnabled(HdContainerDataSourceHandle const&) const {
     return TfGetEnvSetting(USDGEN_ENABLE);
@@ -157,7 +158,8 @@ SdfPath BoundPreviewMaterial(SdfPath const& description, TileMap const& tiles) {
 // data source is returned unwrapped.
 HdContainerDataSourceHandle DescriptionOverlay(
     HdSceneIndexBaseRefPtr const& input, SdfPath const& description,
-    SdfPath const& tilePath, HdContainerDataSourceHandle const& tile) {
+    SdfPath const& tilePath, HdContainerDataSourceHandle const& tile,
+    bool stormMaterialPolicy) {
     if (!input) return nullptr;
     HdContainerDataSourceHandle const desc = input->GetPrim(description).dataSource;
     if (!desc) return nullptr;
@@ -199,7 +201,10 @@ HdContainerDataSourceHandle DescriptionOverlay(
     bool const authored =
         BoundMaterialPath(tile) !=
         ::usdGenImaging::UsdGenTilePublisher::DefaultMaterialPath(tilePath);
-    if (effective == 0 || (effective == 1 && !authored)) {
+    // These repr restrictions belong to Storm. Applying them to MoonRay
+    // discards an otherwise valid material at usdview's default Low setting.
+    if (stormMaterialPolicy &&
+        (effective == 0 || (effective == 1 && !authored))) {
         // A block, not an empty container: HdOverlayContainerDataSource MERGES
         // two containers of the same name, so an empty one would leave the
         // publisher's binding visible underneath. A block resolves to null
@@ -1350,11 +1355,12 @@ void UsdGenSceneService::DrainRetired() {
 }
 
 UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input, int id,
-                                         bool publishScalpShadow)
+                                         bool publishScalpShadow, bool stormMaterialPolicy)
     : HdSingleInputFilteringSceneIndexBase(input),
       _pruned(HdSiExtComputationPrimvarPruningSceneIndex::New(input)),
       _renderInstanceId(static_cast<uint32_t>(id)),
-      _publishScalpShadow(publishScalpShadow) {
+      _publishScalpShadow(publishScalpShadow),
+      _stormMaterialPolicy(stormMaterialPolicy) {
     static std::atomic<uint64_t> next{uint64_t(1) << 32};
     if (id == 0) _renderInstanceId = next.fetch_add(1);
     auto& service = SceneService();
@@ -1383,7 +1389,13 @@ HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& 
 }
 HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input,
                                                int id, bool publishScalpShadow) {
-    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(input, id, publishScalpShadow));
+    return New(input, id, publishScalpShadow, true);
+}
+HdSceneIndexBaseRefPtr UsdGenGroomSceneIndex::New(HdSceneIndexBaseRefPtr const& input,
+                                               int id, bool publishScalpShadow,
+                                               bool stormMaterialPolicy) {
+    auto index = TfCreateRefPtr(new UsdGenGroomSceneIndex(
+        input, id, publishScalpShadow, stormMaterialPolicy));
     index->_state->recipient = TfCreateWeakPtr(index.operator->());
     UsdGenImagingTestHook::_RegisterIndex(index.operator->());
     _Ingress initial;
@@ -2060,11 +2072,10 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
         // opinion onto every tile of that groom.  Upstream goes FIRST: the
         // slider wins, and the publication's own refineLevel stays as the
         // underlay fallback for a host that offers no opinion at all.  The
-        // same overlay masks the tile's material binding at the two lowest
-        // complexity levels, so Low and Medium look like an unbound native
-        // UsdGeomBasisCurves.
+        // On Storm only, the same overlay masks material bindings at the
+        // two lowest levels to match its native curve repr restrictions.
         if (auto upstream = DescriptionOverlay(input, g.description, path,
-                                               tile->second))
+                                               tile->second, _stormMaterialPolicy))
             return {TfToken("basisCurves"),
                     HdOverlayContainerDataSource::New(upstream, tile->second)};
         return {TfToken("basisCurves"), tile->second};

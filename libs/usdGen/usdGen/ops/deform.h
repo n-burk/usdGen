@@ -16,10 +16,12 @@ namespace usdGen {
 ///
 /// CUDA lane: driven by samples of the bound surface (the persistent RBF
 /// library in cudaExecution.cpp); this class supplies its metadata only.
-/// CPU lane: driven by the animated curves usdGen:guides targets. Every
+/// CPU lane: driven by usdGen:guides, or the bound surface when absent. Every
 /// driver CV (up to usdGen:rbfSamples of them, farthest-point sampled) is an
 /// RBF sample bound at its rest position and moved to its current one, and
-/// every incoming CV moves by the resulting field.
+/// every incoming CV moves by the resulting field. Surface input requires
+/// Default-time rest data and the same object space as the groom; a shared
+/// animated parent is applied once by publication.
 class UsdGenDeformOp final : public UsdGenOp
 {
 public:

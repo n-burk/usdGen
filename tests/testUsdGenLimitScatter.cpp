@@ -52,6 +52,21 @@ int main() {
     CHECK(UsdGenSubdivisionDigest(s)!=UsdGenSubdivisionDigest(tags));
     UsdGenScatterOp op;auto d0=Desc(s,3),d1=Desc(tags,3);UsdGenCaptureContext c0,c1;c0.desc=&d0;c1.desc=&d1;
     CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
+    // Pose and parent motion are downstream deformation inputs, not rest
+    // scatter inputs. Rest/topology/UV/paint edits must still invalidate.
+    d1=d0;d1.surfaces[0].points[0]+=GfVec3f(0,0,3);
+    d1.surfaces[0].worldMatrix.SetTranslate(GfVec3d(2,0,0));
+    d1.surfaces[0].surfaceGeneration=99;
+    d1.surfaces[0].samples.push_back({42,d1.surfaces[0].points});
+    CHECK(op.CaptureDigest(c0)==op.CaptureDigest(c1));
+    d1.surfaces[0].restPoints[0]+=GfVec3f(0,0,1);
+    CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
+    d1=d0;d1.surfaces[0].subsetFaces={3};
+    CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
+    d1=d0;d1.surfaces[0].uv.push_back(GfVec2f(.2f,.3f));
+    CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
+    d1=d0;d1.surfaces[0].densityMultiplier.assign(9,.5f);
+    CHECK(op.CaptureDigest(c0)!=op.CaptureDigest(c1));
     CHECK(Run(Desc(s,0),&b));CHECK(b.totalCurves!=a.totalCurves);
     CHECK(!Run(Desc(s,7),&b));
     tags=s;tags.subdivisionScheme=TfToken("none");CHECK(!Run(Desc(tags,3),&b));

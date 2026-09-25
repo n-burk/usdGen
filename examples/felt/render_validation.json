@@ -1,0 +1,12 @@
+{
+  "renderer": "HdMoonrayRendererDebugPlugin",
+  "converged": true,
+  "loadedCoats": [
+    "Felt",
+    "FeltCurls",
+    "Flyaways"
+  ],
+  "rejectedCooks": 0,
+  "quadFaces": 1536,
+  "allTextureAssetsResolve": true
+}

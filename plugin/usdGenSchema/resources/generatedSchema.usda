@@ -2098,7 +2098,7 @@ class UsdGenDeform "UsdGenDeform"
         customData = {
             string userDocBrief = "Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied."
         }
-        doc = "Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied. Each driver CV is an RBF sample bound at its rest position (primvars:rest, else its Default-time position) and moved to its current position, and every incoming CV moves by the resulting smooth field, which passes through the driver CVs and reproduces any affine motion of them exactly. Animate the curves' points; the drivers must span 3D (not all in one plane). Unset, the RBF samples the bound surface instead, which runs on the CUDA lane only. Expression evaluation: groom (once per operator)."
+        doc = "Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied. Each driver CV is an RBF sample bound at its rest position (primvars:rest, else its Default-time position) and moved to its current position, and every incoming CV moves by the resulting smooth field, which passes through the driver CVs and reproduces any affine motion of them exactly. Animate the curves' points; the drivers must span 3D (not all in one plane). Unset, the RBF samples the bound surface on CPU or CUDA. CPU surface input requires UsdGenRestAPI, Default-time rest points and the same object space as the groom; a shared animated parent is applied once during publication. Set lockRoots=false to carry roots with the skin. Expression evaluation: groom (once per operator)."
     )
     bool usdGen:lockRoots = 1 (
         customData = {

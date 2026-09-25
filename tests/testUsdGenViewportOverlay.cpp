@@ -326,6 +326,12 @@ int main()
 
     owner->Synchronize();
 
+    // A ray-tracing frontend shares the groom data but must not inherit
+    // Storm's wire/ribbon material suppression at Low and Medium.
+    HdSceneIndexBaseRefPtr traced = UsdGenGroomSceneIndex::New(stamp, 0, false, false);
+    auto *tracedOwner = dynamic_cast<UsdGenGroomSceneIndex *>(traced.operator->());
+    tracedOwner->Synchronize();
+
     SdfPathVector tiles;
     for (SdfPath const &child : groomBase->GetChildPrimPaths(render)) {
         if (child.GetName().rfind("tile_", 0) == 0) tiles.push_back(child);
@@ -459,6 +465,12 @@ int main()
         owner->Synchronize();
 
         std::string const at = " at refineLevel " + std::to_string(upstream);
+        tracedOwner->Synchronize();
+        bool tracedCorrect = true;
+        for (SdfPath const &tile : tiles)
+            if (TileMaterial(*traced, tile) != material ||
+                TileRefineLevel(*traced, tile) != upstream) tracedCorrect = false;
+        Check(tracedCorrect, "ray tracing retains universal material and requested refinement" + at);
         bool followed = true, correct = true;
         for (SdfPath const &tile : tiles) {
             if (TileRefineLevel(*groomBase, tile) != upstream) followed = false;
@@ -508,6 +520,13 @@ int main()
                              HdLegacyDisplayStyleSchema::GetDefaultLocator()});
             owner->Synchronize();
 
+            tracedOwner->Synchronize();
+            bool tracedCorrect = true;
+            for (SdfPath const &tile : tiles)
+                if (TileMaterial(*traced, tile) != authored ||
+                    TileRefineLevel(*traced, tile) != upstream) tracedCorrect = false;
+            Check(tracedCorrect, "ray tracing retains authored material at refineLevel " +
+                  std::to_string(upstream));
             bool correct = true;
             for (SdfPath const &tile : tiles)
                 if (TileMaterial(*groomBase, tile) !=

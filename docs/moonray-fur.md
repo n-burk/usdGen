@@ -114,6 +114,14 @@ MoonRay rendering was broken is superseded by this verification.
 
 ## Known limits
 
+Material binding policy is renderer-specific. Storm suppresses bindings at
+Low complexity (and its synthetic default at Medium) because its wire repr
+cannot compile the hair shader. MoonRay and other delegates retain authored
+and universal fallback materials at every complexity. Previously the Storm
+workaround also affected MoonRay, turning the felt grey after switching from
+Storm at usdview's default Low setting. `testUsdGenViewportOverlay` covers
+both policies at levels 0–3, for synthetic and authored materials.
+
 * The `pinned` patch above lives in the MoonRay working tree
   (`moonray/hydra/hdMoonray/lib/hydramoonray/BasisCurves.cc`);
   re-apply it after syncing MoonRay until it lands upstream.

@@ -165,12 +165,15 @@ struct Cooked {
     uint32_t cvs = 0;
 };
 
-Cooked Cook(UsdStageRefPtr const &stage, double time)
+Cooked Cook(UsdStageRefPtr const &stage, double time,
+            SdfPath const &description = kDescription,
+            SdfPath const &deform = kDeform,
+            SdfPath const &input = kDeformInput)
 {
     Cooked out;
     usdGenImaging::UsdGenGraphDescBuildOptions options;
     options.time = time;
-    UsdGenGraphDesc const desc = usdGenImaging::BuildGraphDescFromStage(stage, kDescription, options);
+    UsdGenGraphDesc const desc = usdGenImaging::BuildGraphDescFromStage(stage, description, options);
     out.errors = desc.validationErrors;
     UsdGenCompiler compiler;
     UsdGenGraph graph;
@@ -185,8 +188,8 @@ Cooked Cook(UsdStageRefPtr const &stage, double time)
     UsdGenRunResult const run = scheduler.Run(graph, context, 1);
     out.errors.insert(out.errors.end(), run.diagnostics.errors.begin(), run.diagnostics.errors.end());
     if (run.diagnostics.HasErrors()) return out;
-    out.input = graph.Node(graph.NodeIdForPath(kDeformInput)).buffer;
-    out.output = graph.Node(graph.NodeIdForPath(kDeform)).buffer;
+    out.input = graph.Node(graph.NodeIdForPath(input)).buffer;
+    out.output = graph.Node(graph.NodeIdForPath(deform)).buffer;
     out.ok = out.output.totalCurves > 0 && out.output.totalCvs == out.input.totalCvs &&
         out.output.totalCvs % out.output.totalCurves == 0;
     out.cvs = out.ok ? out.output.totalCvs / out.output.totalCurves : 0;
@@ -293,8 +296,9 @@ void CheckExample()
     guides.ClearTargets(true);
     Cooked const unguided = Cook(stage, 20.0);
     bool mentions = false;
-    for (auto const &e : unguided.errors) mentions |= e.find("usdGen:guides") != std::string::npos;
-    Check(!unguided.ok && mentions, "without usdGen:guides the CPU lane reports why" + Errors(unguided));
+    for (auto const &e : unguided.errors)
+        mentions |= e.find("span 3D") != std::string::npos || e.find("rest") != std::string::npos;
+    Check(!unguided.ok && mentions, "without guides the planar/rest-less surface is refused" + Errors(unguided));
 
     UsdGeomBasisCurves flat = UsdGeomBasisCurves::Define(stage, SdfPath("/World/FlatDrivers"));
     flat.GetPrim().AddAppliedSchema(TfToken("UsdGenCurveAPI"));
@@ -307,6 +311,49 @@ void CheckExample()
     for (auto const &e : planar.errors) mentions |= e.find("span 3D") != std::string::npos;
     Check(!planar.ok && mentions, "drivers in one plane are refused" + Errors(planar));
     guides.SetTargets({kDrivers});
+}
+
+void CheckSurfaceExample()
+{
+    auto stage = UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/felt/felt_sphere_animated.usda");
+    Check(bool(stage), "animated sphere example opens");
+    if (!stage) return;
+    SdfPath const description("/World/Motion/Groom/Hair");
+    SdfPath const deform = description.AppendPath(SdfPath("Ops/surfaceAnimate"));
+    SdfPath const input = description.AppendPath(SdfPath("Ops/width"));
+    auto cook = [&](double time) { return Cook(stage, time, description, deform, input); };
+    Cooked const rest = cook(1);
+    Check(rest.ok && MaxShift(rest, false) < 1e-6, "surface RBF preserves the rest groom" + Errors(rest));
+    if (!rest.ok) return;
+    for (int frame : {13, 26, 38, 51, 75, 100}) {
+        Cooked const pose = cook(frame);
+        bool stable = pose.ok && pose.input.totalCvs == rest.input.totalCvs;
+        double error = 0;
+        double const stretch = std::exp(.48 * std::sin(4 * 3.141592653589793 * (frame-1)/99.0));
+        double const wide = 1 / std::sqrt(stretch);
+        for (size_t cv = 0; stable && cv < pose.input.totalCvs; ++cv) {
+            stable = P(pose.input,cv) == P(rest.input,cv);
+            GfVec3f const p = P(rest.input,cv);
+            GfVec3f const expected(float(p[0]*wide),float(p[1]*wide),float(p[2]*stretch));
+            error = std::max(error,double((P(pose.output,cv)-expected).GetLength()));
+        }
+        Check(stable, "Scatter/Grow/style remain rest-local at frame " + std::to_string(frame) + Errors(pose));
+        Check(pose.ok && error < 2e-6, "surface RBF follows squash/stretch without double parent motion at frame " +
+              std::to_string(frame) + " error=" + std::to_string(error));
+    }
+    // Opening at a posed frame must still use Default-time rest, not first pull.
+    auto posedFirst = UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/felt/felt_sphere_animated.usda");
+    Cooked const first = Cook(posedFirst,38,description,deform,input);
+    bool same = first.ok && first.input.totalCvs == rest.input.totalCvs;
+    for (size_t cv=0; same && cv<first.input.totalCvs; ++cv)
+        same = P(first.input,cv) == P(rest.input,cv);
+    Check(same,"opening on frame 38 generates from Default, not the animated input");
+    // A time-sampled surface with no default must fail, not bind to first pull.
+    auto prim=stage->GetPrimAtPath(SdfPath("/World/Motion/Sphere"));
+    prim.GetAttribute(TfToken("points")).ClearAtTime(UsdTimeCode::Default());
+    prim.RemoveProperty(TfToken("primvars:rest"));
+    Cooked const missing = cook(38);
+    Check(!missing.ok,"surface RBF refuses missing Default-time rest data");
 }
 
 // --- the example, through the groom scene index -----------------------------------
@@ -517,6 +564,7 @@ int main()
     usdGenRegisterM1Operators();
     CheckField();
     CheckExample();
+    CheckSurfaceExample();
     CheckScene();
     CheckPlaybackNotices();
     UsdGenGroomSceneIndex::DrainRetired();

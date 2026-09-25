@@ -1,0 +1,42 @@
+{
+  "frames": 100,
+  "strands": 3188,
+  "controlVertices": 25504,
+  "scatterSubdivisionLevel": 3,
+  "deformer": "UsdGenDeform surface-driven CPU RBF",
+  "rbfSamples": 64,
+  "rejectedCooks": 0,
+  "capturedViewportFrames": 100,
+  "operators": {
+    "scatter": {
+      "initialCaptures": 1,
+      "reusedCaptures": 99,
+      "poseCaptures": 0,
+      "zeroChunkEvaluations": 99
+    },
+    "grow": {
+      "initialCaptures": 1,
+      "reusedCaptures": 99,
+      "poseCaptures": 0,
+      "zeroChunkEvaluations": 99
+    },
+    "curl": {
+      "initialCaptures": 1,
+      "reusedCaptures": 99,
+      "poseCaptures": 0,
+      "zeroChunkEvaluations": 99
+    },
+    "width": {
+      "initialCaptures": 1,
+      "reusedCaptures": 99,
+      "poseCaptures": 0,
+      "zeroChunkEvaluations": 99
+    },
+    "surfaceAnimate": {
+      "initialCaptures": 1,
+      "reusedCaptures": 0,
+      "poseCaptures": 99,
+      "zeroChunkEvaluations": 0
+    }
+  }
+}

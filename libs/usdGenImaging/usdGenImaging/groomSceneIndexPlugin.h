@@ -67,6 +67,11 @@ public:
     static HdSceneIndexBaseRefPtr New(
         HdSceneIndexBaseRefPtr const &inputScene,
         int renderInstanceId, bool publishScalpShadow);
+    /// Only Storm needs material suppression for its Low/Medium curve reprs.
+    /// Other delegates retain authored and universal materials at every level.
+    static HdSceneIndexBaseRefPtr New(
+        HdSceneIndexBaseRefPtr const &inputScene,
+        int renderInstanceId, bool publishScalpShadow, bool stormMaterialPolicy);
 
     // -- HdSceneIndexInterface ------------------------------------------------
     HdSceneIndexPrim GetPrim(SdfPath const &primPath) const override;
@@ -109,7 +114,7 @@ private:
 
     UsdGenGroomSceneIndex(
         HdSceneIndexBaseRefPtr const &inputScene,
-        int renderInstanceId, bool publishScalpShadow);
+        int renderInstanceId, bool publishScalpShadow, bool stormMaterialPolicy);
     ~UsdGenGroomSceneIndex() override;
 
     // Hydra capture stays on the caller/notice boundary. Only owning value
@@ -162,6 +167,7 @@ private:
                                       // spliced into the chain
     uint64_t _renderInstanceId = 0;
     bool const _publishScalpShadow;
+    bool const _stormMaterialPolicy;
 
     std::shared_ptr<_State> _state;
     bool _dispatching = false;

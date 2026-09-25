@@ -111,10 +111,9 @@ bool UsdGenScatterOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *dia
 
 UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) const
 {
-    // Capture-class inputs: density/flip + seed, pinned to the surface's
-    // topology generation
-    // (03 §3.4). The surfaceGeneration term is bumped by the imaging layer on
-    // any rest/topology change, so no point-level re-hashing is needed here.
+    // Scatter consumes only rest geometry. The general surfaceGeneration
+    // includes posed points, shutter samples and world transforms, so it
+    // would regenerate rest roots on every animation frame.
     UsdGenParamView const *p = ctx.params ? &*ctx.params : nullptr;
     uint64_t h = 1469598103934665603ULL;
     auto feed = [&](std::string const &k, uint64_t v) {
@@ -127,9 +126,21 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     feed("subdivisionLevel", p ? p->GetInt(TfToken("subdivisionLevel"),0) : 0);
     UsdGenGraphDesc const *desc = ctx.desc;
     if (desc && ctx.surface < desc->surfaces.size()) {
-        feed("surfaceGen", desc->surfaces[ctx.surface].surfaceGeneration);
-        feed("subdivision", UsdGenSubdivisionDigest(desc->surfaces[ctx.surface]));
-        feed("subset", uint64_t(desc->surfaces[ctx.surface].subsetFaces.size()));
+        auto const &surface = desc->surfaces[ctx.surface];
+        auto array = [&](char const *name, auto const &values) {
+            uint64_t hash = 1469598103934665603ULL;
+            auto const *bytes = reinterpret_cast<unsigned char const *>(values.cdata());
+            for (size_t i = 0; i < values.size() * sizeof(*values.cdata()); ++i) {
+                hash ^= bytes[i]; hash *= 0x100000001b3ULL;
+            }
+            feed(name, hash); feed(name, uint64_t(values.size()));
+        };
+        array("restPoints", surface.restPoints);
+        array("faceCounts", surface.faceVertexCounts);
+        array("faceIndices", surface.faceVertexIndices);
+        array("subset", surface.subsetFaces);
+        array("uv", surface.uv);
+        feed("subdivision", UsdGenSubdivisionDigest(surface));
         // The paint primvar edits no generation, so the multiplier content
         // itself joins the digest: without this a paint stroke would read
         // back the cached pre-stroke roots.

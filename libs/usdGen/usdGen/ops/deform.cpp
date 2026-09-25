@@ -3,7 +3,8 @@
 // CUDA lane: the persistent RBF library in cudaExecution.cpp deforms the groom
 // by samples of the bound surface; this class only supplies metadata there.
 //
-// CPU lane: the drivers are the animated curves usdGen:guides targets. Capture
+// CPU lane: drivers are usdGen:guides, or the bound surface when no guides
+// are supplied. Surface and groom must share an object-space domain. Capture
 // resolves the whole result, because every CV reads the same field:
 //
 //   samples  up to usdGen:rbfSamples driver CVs, farthest-point sampled at
@@ -125,9 +126,8 @@ bool UsdGenDeformOp::Bind(UsdGenParamView const& params, UsdGenDiagnostics* diag
     if (cuda && guided)
         return fail("UsdGenDeform: guide-driven RBF (usdGen:guides) runs on the CPU lane; "
                     "the CUDA lane samples the bound surface");
-    if (!cuda && !guided)
-        return fail("UsdGenDeform: on the CPU lane the RBF is driven by usdGen:guides; "
-                    "surface-driven RBF runs on the CUDA lane");
+    if (!cuda && !guided && (!params.desc || params.desc->surfaces.empty()))
+        return fail("UsdGenDeform: requires usdGen:guides or a bound usdGen:surface");
     return true;
 }
 
@@ -152,6 +152,14 @@ UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const& ctx) const
         d.Mix(uint64_t(p->GetBool(sLockRoots, true)));
     }
     d.Mix(ctx.upstreamGeneration);
+    if (ctx.referenceCount == 0 && ctx.desc && ctx.surface < ctx.desc->surfaces.size()) {
+        auto const &surface = ctx.desc->surfaces[ctx.surface];
+        MixArray(&d, surface.restPoints.cdata(), surface.restPoints.size() * sizeof(GfVec3f));
+        MixArray(&d, surface.points.cdata(), surface.points.size() * sizeof(GfVec3f));
+        d.Mix(uint64_t(surface.restFromCurrentPoints));
+        GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
+        MixArray(&d, relative.GetArray(), 16 * sizeof(double));
+    }
     for (uint32_t r = 0; r < ctx.referenceCount; ++r) {
         UsdGenResolvedReferenceValue const *value =
             ctx.resolvedReferences ? ctx.resolvedReferences[r] : nullptr;
@@ -183,10 +191,10 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     UsdGenParamView const *p = ctx.params;
     if (ctx.desc && ctx.desc->executionBackend == UsdGenExecutionBackend::Cuda)
         return fail("the CUDA RBF executor owns this node; it cannot run through the host scheduler");
-    if (ctx.referenceCount != 1 || !ctx.resolvedReferences || !ctx.resolvedReferences[0] ||
-        !ctx.resolvedReferences[0]->value)
-        return fail("on the CPU lane the RBF is driven by usdGen:guides, which must target one "
-                    "BasisCurves prim; surface-driven RBF runs on the CUDA lane");
+    bool const surfaceDriven = ctx.referenceCount == 0;
+    if (!surfaceDriven && (ctx.referenceCount != 1 || !ctx.resolvedReferences ||
+        !ctx.resolvedReferences[0] || !ctx.resolvedReferences[0]->value))
+        return fail("usdGen:guides must resolve to one curve input");
     auto &cap = *static_cast<UsdGenDeformCapture *>(out);
     cap.upstreamTopologyVersion = upstream.topologyVersion;
     cap.upstreamValueVersion = upstream.valueVersion;
@@ -201,31 +209,54 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     // --- driver samples, in the description's space --------------------------
     auto const solveField = [&]() -> bool {
         TRACE_SCOPE("usdGen deform: bind and solve the field");
-        UsdGenResolvedReferenceValue const &reference = *ctx.resolvedReferences[0];
-        UsdGenCurveBuffer const &drivers = reference.value->buffer;
-        if (UsdGenCurveSetDesc const *curves = FindCurves(ctx.desc, reference.path);
-            curves && curves->restFromCurrentPoints)
-            return fail("usdGen:guides " + reference.path.GetString() +
-                        " has no rest pose to bind; apply UsdGenCurveAPI to it (its rest is "
-                        "primvars:rest, else the Default-time points)");
-        if (drivers.px.size() != drivers.totalCvs || drivers.py.size() != drivers.totalCvs ||
-            drivers.pz.size() != drivers.totalCvs)
-            return fail("the driver curves' point planes do not match their CV count");
-        GfMatrix4d const toGroom = DriverToGroom(ctx.desc, reference.path);
-        std::vector<GfVec3d> driverRest(drivers.totalCvs), driverNow(drivers.totalCvs);
-        GfRange3d extent;
-        for (size_t i = 0; i < drivers.totalCvs; ++i) {
-            driverRest[i] = toGroom.Transform(GfVec3d(opUtil::RestPoint(drivers, i)));
-            driverNow[i] = toGroom.Transform(GfVec3d(opUtil::Point(drivers, i)));
-            extent.UnionWith(driverRest[i]);
+        std::vector<GfVec3d> driverRest, driverNow;
+        std::string driverLabel;
+        if (surfaceDriven) {
+            if (!ctx.desc || ctx.surface >= ctx.desc->surfaces.size())
+                return fail("surface-driven RBF requires one bound usdGen:surface");
+            auto const &surface = ctx.desc->surfaces[ctx.surface];
+            driverLabel = "usdGen:surface " + surface.path.GetString();
+            if (surface.restFromCurrentPoints || surface.restPoints.empty())
+                return fail(driverLabel + " requires Default-time rest points and UsdGenRestAPI");
+            if (surface.points.size() != surface.restPoints.size())
+                return fail(driverLabel + " animated/rest vertex counts differ");
+            // Scatter/Grow produce rest-local points. A shared animated parent
+            // belongs to publication, not the RBF field (avoid double motion).
+            GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
+            for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
+                if (std::abs(relative[r][c] - (r == c ? 1.0 : 0.0)) > 1e-9)
+                    return fail(driverLabel + " must share the groom's object space; "
+                                "put the surface and groom under the same animated Xform");
+            driverRest.assign(surface.restPoints.begin(), surface.restPoints.end());
+            driverNow.assign(surface.points.begin(), surface.points.end());
+        } else {
+            UsdGenResolvedReferenceValue const &reference = *ctx.resolvedReferences[0];
+            driverLabel = "usdGen:guides " + reference.path.GetString();
+            UsdGenCurveBuffer const &drivers = reference.value->buffer;
+            if (UsdGenCurveSetDesc const *curves = FindCurves(ctx.desc, reference.path);
+                curves && curves->restFromCurrentPoints)
+                return fail("usdGen:guides " + reference.path.GetString() +
+                            " has no rest pose to bind; apply UsdGenCurveAPI to it (its rest is "
+                            "primvars:rest, else the Default-time points)");
+            if (drivers.px.size() != drivers.totalCvs || drivers.py.size() != drivers.totalCvs ||
+                drivers.pz.size() != drivers.totalCvs)
+                return fail("the driver curves' point planes do not match their CV count");
+            GfMatrix4d const toGroom = DriverToGroom(ctx.desc, reference.path);
+            driverRest.resize(drivers.totalCvs); driverNow.resize(drivers.totalCvs);
+            for (size_t i = 0; i < drivers.totalCvs; ++i) {
+                driverRest[i] = toGroom.Transform(GfVec3d(opUtil::RestPoint(drivers, i)));
+                driverNow[i] = toGroom.Transform(GfVec3d(opUtil::Point(drivers, i)));
+            }
         }
+        GfRange3d extent;
+        for (GfVec3d const &point : driverRest) extent.UnionWith(point);
         double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
         std::vector<size_t> const chosen =
             rbf::SelectSamples(driverRest, size_t(budget), std::max(1e-12, size * 1e-7));
         if (chosen.size() < 4)
-            return fail("usdGen:guides " + reference.path.GetString() + " has " +
+            return fail(driverLabel + " has " +
                         std::to_string(chosen.size()) +
-                        " distinct CVs; the RBF needs at least four that span 3D");
+                        " distinct samples; the RBF needs at least four that span 3D");
         std::vector<GfVec3d> rest(chosen.size()), now(chosen.size());
         for (size_t k = 0; k < chosen.size(); ++k) {
             rest[k] = driverRest[chosen[k]];
@@ -235,7 +266,7 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
         if (!field_.Bound() || rest != boundRest_) {
             boundRest_.clear();
             if (!field_.Bind(rest, &error))
-                return fail("usdGen:guides " + reference.path.GetString() + ": " + error);
+                return fail(driverLabel + ": " + error);
             boundRest_ = rest;
         }
         if (!field_.Solve(now, &error)) return fail(error);
