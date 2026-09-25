@@ -235,60 +235,6 @@ def Xform "World"
             )
             uniform token subdivisionScheme = "catmullClark"
         }
-
-        def Scope "Groom"
-        {
-            def UsdGenDescription "Hair" (
-                prepend apiSchemas = ["UsdGenLookAPI", "MaterialBindingAPI"]
-            )
-            {
-                rel material:binding = </World/Looks/Fibre>
-                custom color3f usdGen:look:rootColor = (0.72, 0.48, 0.08)
-                custom color3f usdGen:look:tipColor = (0.8, 0.6, 0.13)
-                custom rel usdGen:surface = </World/Motion/Sphere>
-
-                def Scope "Ops"
-                {
-                    reorder nameChildren = ["surfaceAnimate", "width", "curl", "grow", "scatter"]
-                    def UsdGenScatter "scatter"
-                    {
-                        custom float usdGen:density = 4500
-                        custom int usdGen:seed = 41
-                        custom int usdGen:subdivisionLevel = 3
-                    }
-
-                    def UsdGenGrow "grow"
-                    {
-                        custom float usdGen:azimuthRandom = 1
-                        custom float usdGen:length = 0.025
-                        custom float2 usdGen:lengthRandom = (0.75, 1.25)
-                        custom float usdGen:lift = 20
-                        custom int usdGen:segments = 8
-                    }
-
-                    def UsdGenCurl "curl"
-                    {
-                        custom float usdGen:frequency = 55
-                        custom float usdGen:phaseRandom = 1
-                        custom float usdGen:radius = 0.002
-                    }
-
-                    def UsdGenWidth "width"
-                    {
-                        custom bool usdGen:replace = 1
-                        custom float usdGen:width = 0.0011
-                        custom float2[] usdGen:width:knots = [(0, 1), (0.7, 0.7), (1, 0.08)]
-                    }
-
-                    def UsdGenDeform "surfaceAnimate"
-                    {
-                        custom bool usdGen:lockRoots = 0
-                        custom float usdGen:mask = 1
-                        custom int usdGen:rbfSamples = 64
-                    }
-                }
-            }
-        }
     }
 
     def "Looks"
@@ -320,6 +266,60 @@ def Xform "World"
         }
     }
 
+    def Scope "Groom"
+    {
+        def UsdGenDescription "Hair" (
+            prepend apiSchemas = ["UsdGenLookAPI", "MaterialBindingAPI"]
+        )
+        {
+            rel material:binding = </World/Looks/Fibre>
+            custom color3f usdGen:look:rootColor = (0.72, 0.48, 0.08)
+            custom color3f usdGen:look:tipColor = (0.8, 0.6, 0.13)
+            custom rel usdGen:surface = </World/Motion/Sphere>
+
+            def Scope "Ops"
+            {
+                reorder nameChildren = ["surfaceAnimate", "width", "curl", "grow", "scatter"]
+                def UsdGenScatter "scatter"
+                {
+                    custom float usdGen:density = 4500
+                    custom int usdGen:seed = 41
+                    custom int usdGen:subdivisionLevel = 3
+                }
+
+                def UsdGenGrow "grow"
+                {
+                    custom float usdGen:azimuthRandom = 1
+                    custom float usdGen:length = 0.025
+                    custom float2 usdGen:lengthRandom = (0.75, 1.25)
+                    custom float usdGen:lift = 20
+                    custom int usdGen:segments = 8
+                }
+
+                def UsdGenCurl "curl"
+                {
+                    custom float usdGen:frequency = 55
+                    custom float usdGen:phaseRandom = 1
+                    custom float usdGen:radius = 0.002
+                }
+
+                def UsdGenWidth "width"
+                {
+                    custom bool usdGen:replace = 1
+                    custom float usdGen:width = 0.0011
+                    custom float2[] usdGen:width:knots = [(0, 1), (0.7, 0.7), (1, 0.08)]
+                }
+
+                def UsdGenDeform "surfaceAnimate"
+                {
+                    custom bool usdGen:lockRoots = 0
+                    custom float usdGen:mask = 1
+                    custom int usdGen:rbfSamples = 64
+                }
+            }
+        }
+    }
+
     def Camera "Camera"
     {
         float2 clippingRange = (0.01, 100)
@@ -342,7 +342,7 @@ def Xform "World"
     def DomeLight "Fill"
     {
         float inputs:intensity = 0.6
-        asset inputs:texture:file = @textures/studio.exr@
+        asset inputs:texture:file = @../felt/textures/studio.exr@
     }
 }
 

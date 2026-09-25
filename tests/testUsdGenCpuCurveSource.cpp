@@ -248,6 +248,19 @@ int main() {
             UsdGenScheduler frameScheduler(2);
             UsdGenEvalContext frameCtx; frameCtx.desc = &frameGraph.Desc();
             CHECK(!frameScheduler.Run(frameGraph,frameCtx,1).diagnostics.HasErrors());
+            auto const frozen = frameGraph.Output();
+            auto posed = derived;
+            posed.surfaces[0].points[0] += GfVec3f(0,0,2);
+            posed.surfaces[0].surfaceGeneration = 91;
+            posed.surfaces[0].worldMatrix.SetTranslate(GfVec3d(.4,0,0));
+            posed.curveSets[0].worldMatrix = posed.surfaces[0].worldMatrix;
+            posed.surfaces[0].samples.push_back({38,posed.surfaces[0].points});
+            CHECK(frameCompiler.Recompile(posed,&frameGraph).ok);
+            frameCtx.desc = &frameGraph.Desc();
+            CHECK(!frameScheduler.Run(frameGraph,frameCtx,2).diagnostics.HasErrors());
+            // Rest root capture survives changing posed points/sample times;
+            // reusing its COW storage proves generation was not rerun.
+            CHECK(frameGraph.Output().px.cdata() == frozen.px.cdata());
             auto priorNormals = frameGraph.Output().rootN;
             auto recaptured = derived;
             recaptured.surfaces[0].restNormalDomain = UsdGenSurfaceNormalDomain::Constant;
@@ -256,7 +269,7 @@ int main() {
             // must invalidate the source capture independently of that hint.
             CHECK(frameCompiler.Recompile(recaptured,&frameGraph).ok);
             frameCtx.desc = &frameGraph.Desc();
-            CHECK(!frameScheduler.Run(frameGraph,frameCtx,2).diagnostics.HasErrors());
+            CHECK(!frameScheduler.Run(frameGraph,frameCtx,3).diagnostics.HasErrors());
             CHECK(frameGraph.Output().rootN != priorNormals &&
                   priorNormals == VtVec3fArray(2,GfVec3f(0,0,1)));
         }

@@ -980,8 +980,22 @@ class UsdGenDeform "UsdGenDeform" (
     }
 )
 {
+    rel usdGen:regionMap (
+        doc = """Optional categorical UsdGenPtexMap sampled at each strand's rest root. Raw integer IDs in map:firstChannel override usdGen:region and partition guide interpolation; filter must be nearest, blur zero, and regionCrossover zero. Each growth guide inherits the region of its nearest rest strand root. Missing regions fail instead of borrowing another region's guides. Map scale/offset/clamp are not applied to IDs."""
+    )
+    uniform token usdGen:mode = "" (
+        allowedTokens = ["", "curveWrap"]
+        doc = """Empty selects the existing RBF deformer. curveWrap is CPU-only and uses one open center curve, or multiple center curves partitioned by regionMap and guideRegions, with matching rest/current CV topology. Each incoming CV binds to the nearest rest segment of its assigned center curve and keeps its segment fraction and local offset; rotation-minimizing frames preserve thickness. Straight and planar rest curves are supported. Animate driver points; roll about the tangent uses minimum twist. Guides and incoming groom must share a rest coordinate domain. rbfSamples is unused in curveWrap mode."""
+    )
+    rel usdGen:regionMap (
+        doc = """Optional categorical UsdGenPtexMap for curveWrap. Sampled at each strand's rest root, its raw integer ID selects the center curve labelled by guideRegions. Required for multiple centers. The whole strand follows that center without cross-region blending or nearest-driver fallback. Requires filter=nearest and blur=0; map:firstChannel selects the ID channel. Map scale/offset/clamp are not applied. Invalid or unmatched IDs fail the cook."""
+    )
+    int[] usdGen:guideRegions = [] (
+        doc = """Region ID for each center curve in the usdGen:guides target's curve order. Required with regionMap; one unique nonnegative integer per curve. Used only by curveWrap."""
+        customData = { dictionary usdGen = { string evaluation = "groom" } }
+    )
     rel usdGen:guides (
-        doc = """Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied. Each driver CV is an RBF sample bound at its rest position (primvars:rest, else its Default-time position) and moved to its current position, and every incoming CV moves by the resulting smooth field, which passes through the driver CVs and reproduces any affine motion of them exactly. Animate the curves' points; the drivers must span 3D (not all in one plane). Unset, the RBF samples the bound surface on CPU or CUDA. CPU surface input requires UsdGenRestAPI, Default-time rest points and the same object space as the groom; a shared animated parent is applied once during publication. Set lockRoots=false to carry roots with the skin. Expression evaluation: groom (once per operator)."""
+        doc = """Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied. Each driver CV is an RBF sample bound at its rest position (primvars:rest, else its Default-time position) and moved to its current position, and every incoming CV moves by the resulting smooth field, which passes through the driver CVs and reproduces any affine motion of them exactly. Animate the curves' points; the drivers must span 3D (not all in one plane). Unset, the RBF samples the bound surface on CPU or CUDA. CPU surface input requires UsdGenRestAPI and Default-time rest points. Incoming CVs must be in surface rest-local coordinates. Posed surface samples are transformed into current groom space, supporting a groom outside the animated surface hierarchy; shared ancestor motion is applied once during publication. Set lockRoots=false to carry roots with the skin. Expression evaluation: groom (once per operator)."""
     )
     bool usdGen:lockRoots = true (
         doc = """True keeps every root where it arrives: the whole strand is shifted back by the field's displacement at its root, so the deformation only bends the strand above it. Expression evaluation: groom (once per operator)."""

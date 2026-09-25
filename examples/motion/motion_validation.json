@@ -1,0 +1,209 @@
+{
+  "renderer": "HdStormRendererPlugin",
+  "frames": 100,
+  "scenes": {
+    "felt_sphere_animated": {
+      "controlVertices": 25504,
+      "strands": 3188,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "scatter": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "grow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "curl": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "surfaceAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    },
+    "felt_sphere_groom_outside_xform": {
+      "controlVertices": 25504,
+      "strands": 3188,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "scatter": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "grow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "curl": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "surfaceAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    },
+    "braid_animated_guides": {
+      "controlVertices": 24384,
+      "strands": 381,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "roots": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideGrow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    },
+    "braid_animated_guides_and_surface": {
+      "controlVertices": 24384,
+      "strands": 381,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "roots": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideGrow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        },
+        "surfaceAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    },
+    "braid_simulated_center_curve": {
+      "controlVertices": 24384,
+      "strands": 381,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "roots": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideGrow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    },
+    "two_curves_ptex_regions": {
+      "controlVertices": 128,
+      "strands": 2,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "roots": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideGrow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "regionAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    },
+    "two_braids_ptex_regions": {
+      "controlVertices": 48768,
+      "strands": 762,
+      "capturedViewportFrames": 100,
+      "rejectedCooks": 0,
+      "operators": {
+        "roots": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "guideGrow": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "width": {
+          "no capture yet": 1,
+          "capture reused": 99,
+          "zeroChunkEvaluations": 99
+        },
+        "regionAnimate": {
+          "no capture yet": 1,
+          "capture digest moved": 99
+        }
+      }
+    }
+  }
+}

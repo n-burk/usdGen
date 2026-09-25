@@ -25,6 +25,7 @@
 
 #include "usdGen/opParams.h"
 #include "usdGen/ops/opUtil.h"
+#include "usdGen/ops/regionMap.h"
 #include "usdGen/scheduler.h"
 #include "usdGenMath/usdGenMath/hash.h"
 
@@ -170,6 +171,7 @@ static TfTokenVector _topoParams = [] {
     TfTokenVector v = UsdGenBaseTopologyParams();
     v.push_back(TfToken("enabled"));
     v.push_back(TfToken("guides"));
+    v.push_back(TfToken("regionMap"));
     for (char const *name : {"cvCount", "maxGuides", "influenceRadius", "influenceDecay",
                              "maxGuideAngle", "blendMethod", "blendInSkinSpace",
                              "useUniqueGuide", "randomizeGuide", "regionCrossover", "region"})
@@ -279,6 +281,12 @@ bool UsdGenGuideInterpolateOp::Capture(
     if (regionField.connected)
         for (size_t c = 0; c < R; ++c)
             hairRegion[c] = opUtil::RegionKey(regionField.Value(c, rootSpans[c]));
+    bool mapped=false;std::vector<int> mapRegions;
+    if (!UsdGenReadRootRegions(ctx,upstream,&mapRegions,&mapped,&error)) return fail(error);
+    if (mapped) {
+        if (s.crossover!=0) return fail("regionMap requires regionCrossover=0 for hard partitions");
+        for (size_t c=0;c<R;++c) hairRegion[c]=opUtil::RegionKey(double(mapRegions[c]));
+    }
     uint64_t const *ids = upstream.curveId.size() == R ? upstream.curveId.cdata() : nullptr;
 
     Cloud hairCloud;
@@ -455,6 +463,7 @@ bool UsdGenGuideInterpolateOp::Capture(
             for (int d = 0; d < 3; ++d)
                 cap.result[(c * n + i) * 3 + d] = outRest[i * 3 + d] + delta[d];
     });
+    if (mapped && orphans.load()) return fail("regionMap contains a region with no growth guide");
     if (orphans.load() && diag)
         diag->Warn("UsdGenGuideInterpolate: " + std::to_string(orphans.load()) +
                    " strands lie in regions without a guide and follow the nearest guide of"

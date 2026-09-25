@@ -4,7 +4,8 @@
 // by samples of the bound surface; this class only supplies metadata there.
 //
 // CPU lane: drivers are usdGen:guides, or the bound surface when no guides
-// are supplied. Surface and groom must share an object-space domain. Capture
+// are supplied. Surface-driven input is in the surface's rest-local domain;
+// output is transformed into the current description domain. Capture
 // resolves the whole result, because every CV reads the same field:
 //
 //   samples  up to usdGen:rbfSamples driver CVs, farthest-point sampled at
@@ -21,6 +22,8 @@
 // re-captures on every frame it moves; the factorization is kept while the
 // rest samples do not change. Evaluate applies usdGen:mask.
 #include "usdGen/ops/deform.h"
+#include "usdGen/ops/curveWrap.h"
+#include "usdGen/ops/regionMap.h"
 
 #include "usdGen/opParams.h"
 #include "usdGen/ops/opUtil.h"
@@ -108,6 +111,9 @@ UsdGenDeformOp::UsdGenDeformOp()
       valueParameters_(UsdGenBaseValueParams())
 {
     topologyParameters_.push_back(sRbfSamples);
+    topologyParameters_.push_back(TfToken("mode"));
+    topologyParameters_.push_back(TfToken("regionMap"));
+    topologyParameters_.push_back(TfToken("guideRegions"));
     valueParameters_.push_back(TfToken("enabled"));
     valueParameters_.push_back(sLockRoots);
     valueParameters_.push_back(sMask);   // operator envelope (02 §2.13)
@@ -118,11 +124,18 @@ bool UsdGenDeformOp::Bind(UsdGenParamView const& params, UsdGenDiagnostics* diag
         if (diagnostics) diagnostics->Error(message);
         return false;
     };
-    if (!params.node || !params.node->mode.IsEmpty())
-        return fail("UsdGenDeform has no mode property; it is always RBF");
+    if (!params.node || (!params.node->mode.IsEmpty() && params.node->mode != TfToken("curveWrap")))
+        return fail("UsdGenDeform mode must be empty (RBF) or curveWrap");
     bool const cuda = params.desc &&
         params.desc->executionBackend == UsdGenExecutionBackend::Cuda;
     bool const guided = !params.node->curves.empty() || !params.node->references.empty();
+    if (params.node->mode == TfToken("curveWrap") && (cuda || !guided))
+        return fail("UsdGenDeform curveWrap requires guide curves on the CPU lane");
+    if (params.node->mode.IsEmpty()) {
+        for (auto const &binding:params.node->mapBindings)
+            if (binding.relationship==TfToken("usdGen:regionMap"))
+                return fail("UsdGenDeform regionMap is supported only in curveWrap mode");
+    }
     if (cuda && guided)
         return fail("UsdGenDeform: guide-driven RBF (usdGen:guides) runs on the CPU lane; "
                     "the CUDA lane samples the bound surface");
@@ -150,6 +163,8 @@ UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const& ctx) const
     if (UsdGenParamView const *p = ctx.params) {
         d.Mix(uint64_t(p->GetInt(sRbfSamples, 100)));
         d.Mix(uint64_t(p->GetBool(sLockRoots, true)));
+        d.Mix(uint64_t(p->node ? p->node->mode.Hash() : 0));
+        d.Mix(p->GetVtValue(TfToken("guideRegions"),VtValue()));
     }
     d.Mix(ctx.upstreamGeneration);
     if (ctx.referenceCount == 0 && ctx.desc && ctx.surface < ctx.desc->surfaces.size()) {
@@ -189,6 +204,7 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
         return false;
     };
     UsdGenParamView const *p = ctx.params;
+    if (p && !Bind(*p,diagnostics)) return false;
     if (ctx.desc && ctx.desc->executionBackend == UsdGenExecutionBackend::Cuda)
         return fail("the CUDA RBF executor owns this node; it cannot run through the host scheduler");
     bool const surfaceDriven = ctx.referenceCount == 0;
@@ -203,8 +219,21 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     cap.result.clear();
     cap.samples = 0;
 
+    bool const wrap = p && p->node && p->node->mode == TfToken("curveWrap");
+    std::vector<curveWrap::Field> wrapFields;
+    std::vector<int> rootRegions;
+    bool regionMapped=false;
+    VtIntArray guideRegions;
+    std::string regionError;
+    if (wrap) {
+        if (!UsdGenReadRootRegions(ctx,upstream,&rootRegions,&regionMapped,&regionError)) return fail(regionError);
+        auto const value=p->GetVtValue(TfToken("guideRegions"),VtValue(VtIntArray{}));
+        if (!value.IsHolding<VtIntArray>()) return fail("guideRegions must be an int array");
+        guideRegions=value.UncheckedGet<VtIntArray>();
+    }
+    std::vector<uint32_t> driverSpans;
     int const budget = p ? p->GetInt(sRbfSamples, 100) : 100;
-    if (budget < 4) return fail("usdGen:rbfSamples must be at least 4");
+    if (!wrap && budget < 4) return fail("usdGen:rbfSamples must be at least 4");
 
     // --- driver samples, in the description's space --------------------------
     auto const solveField = [&]() -> bool {
@@ -220,19 +249,35 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 return fail(driverLabel + " requires Default-time rest points and UsdGenRestAPI");
             if (surface.points.size() != surface.restPoints.size())
                 return fail(driverLabel + " animated/rest vertex counts differ");
-            // Scatter/Grow produce rest-local points. A shared animated parent
-            // belongs to publication, not the RBF field (avoid double motion).
+            // Scatter/Grow produce surface rest-local points, independently of
+            // hierarchy. Map posed drivers into current groom space. Shared
+            // ancestor motion cancels here and is applied once by publication;
+            // a separately parented groom receives that motion through the field.
             GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
-            for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
-                if (std::abs(relative[r][c] - (r == c ? 1.0 : 0.0)) > 1e-9)
-                    return fail(driverLabel + " must share the groom's object space; "
-                                "put the surface and groom under the same animated Xform");
             driverRest.assign(surface.restPoints.begin(), surface.restPoints.end());
-            driverNow.assign(surface.points.begin(), surface.points.end());
+            driverNow.reserve(surface.points.size());
+            for (GfVec3f const &point : surface.points)
+                driverNow.push_back(relative.Transform(GfVec3d(point)));
         } else {
             UsdGenResolvedReferenceValue const &reference = *ctx.resolvedReferences[0];
             driverLabel = "usdGen:guides " + reference.path.GetString();
             UsdGenCurveBuffer const &drivers = reference.value->buffer;
+            if (wrap && drivers.totalCurves != 1 && !regionMapped)
+                return fail("multiple curveWrap center curves require regionMap and guideRegions");
+            if (wrap) {
+                std::string error;
+                if (!opUtil::CurveSpans(drivers,&driverSpans,&error)) return fail(error);
+                if (regionMapped) {
+                    if (guideRegions.size()!=drivers.totalCurves)
+                        return fail("guideRegions must label every center curve when regionMap is bound");
+                    for (size_t g=0;g<guideRegions.size();++g)
+                        if (guideRegions[g]<0 || std::find(guideRegions.begin(),guideRegions.begin()+g,guideRegions[g])!=guideRegions.begin()+g)
+                            return fail("guideRegions must contain unique nonnegative region IDs");
+                }
+                auto const *curves = FindCurves(ctx.desc, reference.path);
+                if (curves && curves->wrap == TfToken("periodic"))
+                    return fail("curveWrap requires an open, non-periodic center curve");
+            }
             if (UsdGenCurveSetDesc const *curves = FindCurves(ctx.desc, reference.path);
                 curves && curves->restFromCurrentPoints)
                 return fail("usdGen:guides " + reference.path.GetString() +
@@ -247,6 +292,17 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 driverRest[i] = toGroom.Transform(GfVec3d(opUtil::RestPoint(drivers, i)));
                 driverNow[i] = toGroom.Transform(GfVec3d(opUtil::Point(drivers, i)));
             }
+        }
+        if (wrap) {
+            std::string error;
+            if (driverSpans.size()<2) return fail("curveWrap requires an open center curve");
+            wrapFields.resize(driverSpans.size()-1);
+            for (size_t g=0;g<wrapFields.size();++g) {
+                std::vector<GfVec3d> rest(driverRest.begin()+driverSpans[g],driverRest.begin()+driverSpans[g+1]);
+                std::vector<GfVec3d> now(driverNow.begin()+driverSpans[g],driverNow.begin()+driverSpans[g+1]);
+                if (!wrapFields[g].Bind(rest,now,&error)) return fail(error);
+            }
+            return true;
         }
         GfRange3d extent;
         for (GfVec3d const &point : driverRest) extent.UnionWith(point);
@@ -286,6 +342,12 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     if (upstream.px.size() != totalCvs || upstream.py.size() != totalCvs ||
         upstream.pz.size() != totalCvs)
         return fail("input point planes do not match the CV count");
+    std::vector<size_t> driverForCurve(R,0);
+    if (wrap && regionMapped) for (size_t c=0;c<R;++c) {
+        auto const found=std::find(guideRegions.begin(),guideRegions.end(),rootRegions[c]);
+        if (found==guideRegions.end()) return fail("regionMap region "+std::to_string(rootRegions[c])+" has no center curve");
+        driverForCurve[c]=size_t(found-guideRegions.begin());
+    }
     UsdGenParamField const lock = p
         ? p->GetScalarField(sLockRoots, p->GetBool(sLockRoots, true) ? 1.0 : 0.0)
         : UsdGenParamField{1.0};
@@ -294,16 +356,19 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     rbf::CubicField const &field = field_;
     std::vector<float> &result = cap.result;
     ParallelFor(ctx.dispatcher, R, [&](size_t c) {
+        auto displacement = [&](GfVec3d const &x) {
+            return wrap ? wrapFields[driverForCurve[c]].Map(x)-x : field.Displacement(x);
+        };
         size_t const first = spans[c], last = spans[c + 1];
         if (first >= last) return;
         // The root's displacement serves as both the root CV's own and,
         // with usdGen:lockRoots, the shift of the whole strand.
-        GfVec3d const rootDisplacement = field.Displacement(GfVec3d(opUtil::Point(upstream, first)));
+        GfVec3d const rootDisplacement = displacement(GfVec3d(opUtil::Point(upstream, first)));
         GfVec3d const shift = lock.Value(c, first) != 0.0 ? rootDisplacement : GfVec3d(0.0);
         for (size_t cv = first; cv < last; ++cv) {
             GfVec3d const x(opUtil::Point(upstream, cv));
             GfVec3d const moved =
-                x + (cv == first ? rootDisplacement : field.Displacement(x)) - shift;
+                x + (cv == first ? rootDisplacement : displacement(x)) - shift;
             result[cv * 3] = float(moved[0]);
             result[cv * 3 + 1] = float(moved[1]);
             result[cv * 3 + 2] = float(moved[2]);

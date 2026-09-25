@@ -4,8 +4,7 @@ from pathlib import Path
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdLux
 
 
-def main():
-    out = Path(__file__).parent / 'felt_sphere_animated.usda'
+def build_sphere(outside=False):
     s = Usd.Stage.CreateInMemory()
     s.SetDefaultPrim(s.DefinePrim('/World', 'Xform'))
     s.SetStartTimeCode(1); s.SetEndTimeCode(100)
@@ -62,8 +61,9 @@ def main():
     UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(cloth)
     # An untyped groom container selects the established CPU reference lane,
     # required by OpenSubdiv limit Scatter. No baked/authored curve groom.
-    s.DefinePrim('/World/Motion/Groom','Scope')
-    desc=s.DefinePrim('/World/Motion/Groom/Hair','UsdGenDescription')
+    groom = '/World/Groom' if outside else '/World/Motion/Groom'
+    s.DefinePrim(groom,'Scope')
+    desc=s.DefinePrim(groom+'/Hair','UsdGenDescription')
     desc.AddAppliedSchema('UsdGenLookAPI')
     desc.CreateRelationship('usdGen:surface').SetTargets([mesh.GetPath()])
     UsdShade.MaterialBindingAPI.Apply(desc).Bind(fibre)
@@ -93,7 +93,13 @@ def main():
     key.CreateIntensityAttr(1);key.CreateNormalizeAttr(True);key.CreateAngleAttr(15)
     UsdGeom.Xformable(key).AddTransformOp().Set(Gf.Matrix4d().SetLookAt(Gf.Vec3d(-1,-2,3),Gf.Vec3d(0),Gf.Vec3d(0,0,1)).GetInverse())
     fill=UsdLux.DomeLight.Define(s,'/World/Fill');fill.CreateIntensityAttr(.6)
-    fill.CreateTextureFileAttr('textures/studio.exr')
+    fill.CreateTextureFileAttr('../felt/textures/studio.exr')
+    return s
+
+
+def main():
+    out = Path(__file__).parent / 'felt_sphere_animated.usda'
+    s = build_sphere()
     s.GetRootLayer().Export(str(out))
     print(out)
 

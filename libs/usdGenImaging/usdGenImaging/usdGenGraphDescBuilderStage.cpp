@@ -921,7 +921,8 @@ BuildGraphDescFromStage(
             bool const isColliders =
                 isCollide && rel.GetName().GetString() == "usdGen:colliders";
             bool const isRegionMap =
-                node.type == TfToken("UsdGenCurveSource") &&
+                (node.type == TfToken("UsdGenCurveSource") || node.type == TfToken("UsdGenDeform") ||
+                 node.type == TfToken("UsdGenGuideInterpolate")) &&
                 rel.GetName().GetString() == "usdGen:regionMap";
             SdfPathVector *bucket = &node.references;
             if (name == "input") {

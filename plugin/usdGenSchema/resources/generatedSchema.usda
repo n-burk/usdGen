@@ -348,6 +348,24 @@ class UsdGenScatter "UsdGenScatter"
 
 class UsdGenGrow "UsdGenGrow"
 {
+    float usdGen:azimuth = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Rotation around the root normal after lift, in degrees in [-360, 360]."
+        }
+        doc = "Rotation around the root normal after lift, in degrees in [-360, 360]. Zero preserves the existing face-local lean. Expression evaluation: primitive (once per curve root)."
+    )
+    float usdGen:azimuthRandom = 0 (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "primitive"
+            }
+            string userDocBrief = "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value."
+        }
+        doc = "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value. One distributes the lean around the full circle, avoiding face-axis patterns in isotropic felt. Seeded by usdGen:seed and stable strand ID, independently of length. Zero preserves existing direction. Expression evaluation: primitive (once per curve root)."
+    )
     uniform token usdGen:direction = "surfaceNormal" (
         allowedTokens = ["surfaceNormal", "vector"]
         customData = {
@@ -391,26 +409,6 @@ class UsdGenGrow "UsdGenGrow"
         }
         doc = "Per-curve multiplier range (lo, hi) applied to usdGen:length. A reversed pair is swapped; both components must be finite and >= 0. Expression evaluation: primitive (once per curve root)."
     )
-    float usdGen:azimuth = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-            string userDocBrief = "Rotation around the root normal after lift, in degrees in [-360, 360]."
-        }
-        doc = "Rotation around the root normal after lift, in degrees in [-360, 360]. Zero preserves the existing face-local lean. Expression evaluation: primitive (once per curve root)."
-    )
-
-    float usdGen:azimuthRandom = 0 (
-        customData = {
-            dictionary usdGen = {
-                string evaluation = "primitive"
-            }
-            string userDocBrief = "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value."
-        }
-        doc = "Per-strand azimuth variation in [0, 1]: adds a stable uniform offset in [-180, 180) degrees multiplied by this value. One distributes the lean around the full circle, avoiding face-axis patterns in isotropic felt. Seeded by usdGen:seed and stable strand ID, independently of length. Zero preserves existing direction. Expression evaluation: primitive (once per curve root)."
-    )
-
     float usdGen:lift = 0 (
         customData = {
             dictionary usdGen = {
@@ -606,34 +604,9 @@ class UsdGenCurveSource "UsdGenCurveSource"
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = "Positive multiplier applied to each surface-cage owner density."
+            string userDocBrief = "Positive multiplier applied to each surface-cage owner's authored density when generating transient dense output."
         }
         doc = "Positive multiplier applied to each surface-cage owner's authored density when generating transient dense output. Expression evaluation: groom (once per operator)."
-    )
-    uniform uint64 usdGen:expectMapGeneration = 0 (
-        customData = {
-            string userDocBrief = "Required captured texture generation of usdGen:regionMap."
-        }
-        doc = "Required captured texture generation of usdGen:regionMap for surfaceCage interpolation. A mismatch is a cook error rather than a stale-map fallback."
-    )
-    uniform token usdGen:interpolationMode = "none" (
-        allowedTokens = ["none", "surfaceCage"]
-        customData = {
-            string userDocBrief = "Source expansion mode."
-        }
-        doc = "Source expansion mode. none reads authored C3 curves normally; surfaceCage turns sparse C3 cage rails into transient dense output at cook time. The dense result is never authored back to the stage."
-    )
-    rel usdGen:regionMap (
-        customData = {
-            string userDocBrief = "Categorical UsdGenPtexMap used by surfaceCage interpolation."
-        }
-        doc = "The categorical UsdGenPtexMap used by surfaceCage interpolation. Channel values are ownerId + 1; zero rejects output roots."
-    )
-    uniform int usdGen:regionMapChannel = 0 (
-        customData = {
-            string userDocBrief = "Categorical channel sampled from usdGen:regionMap."
-        }
-        doc = "The categorical channel to sample from usdGen:regionMap for surfaceCage interpolation."
     )
     bool usdGen:enabled = 1 (
         customData = {
@@ -650,6 +623,12 @@ class UsdGenCurveSource "UsdGenCurveSource"
         }
         doc = "Expected frozen-curve epoch string. Empty disables the check; otherwise a mismatch is reported through usdGen:staleAction. Expression evaluation: groom (once per operator)."
     )
+    uniform uint64 usdGen:expectMapGeneration = 0 (
+        customData = {
+            string userDocBrief = "Required captured texture generation of usdGen:regionMap for surfaceCage interpolation."
+        }
+        doc = "Required captured texture generation of usdGen:regionMap for surfaceCage interpolation. A mismatch is a cook error rather than a stale-map fallback."
+    )
     uniform token usdGen:idSource = "primvar" (
         allowedTokens = ["primvar", "index"]
         customData = {
@@ -657,12 +636,31 @@ class UsdGenCurveSource "UsdGenCurveSource"
         }
         doc = 'Where stable curve ids come from: "primvar" uses the authored curveId primvar, "index" synthesizes them from the source ordering. Expression evaluation: groom (once per operator).'
     )
+    uniform token usdGen:interpolationMode = "none" (
+        allowedTokens = ["none", "surfaceCage"]
+        customData = {
+            string userDocBrief = "Source expansion mode."
+        }
+        doc = 'Source expansion mode. "none" reads authored C3 curves normally; "surfaceCage" turns sparse C3 cage rails into transient dense output at cook time. The dense result is never authored back to the stage.'
+    )
     uniform token usdGen:rebind = "onError" (
         allowedTokens = ["never", "onError", "always"]
         customData = {
             string userDocBrief = 'When to re-derive root bindings and frames from the bound surface: "never", "onError", or "always".'
         }
         doc = 'When to re-derive root bindings and frames from the bound surface: "never", "onError", or "always". Expression evaluation: groom (once per operator).'
+    )
+    rel usdGen:regionMap (
+        customData = {
+            string userDocBrief = "The categorical UsdGenPtexMap used by surfaceCage interpolation."
+        }
+        doc = "The categorical UsdGenPtexMap used by surfaceCage interpolation. Channel values are ownerId + 1; zero rejects output roots."
+    )
+    uniform int usdGen:regionMapChannel = 0 (
+        customData = {
+            string userDocBrief = "The categorical channel to sample from usdGen:regionMap for surfaceCage interpolation."
+        }
+        doc = "The categorical channel to sample from usdGen:regionMap for surfaceCage interpolation."
     )
     uniform int usdGen:resampleTo = 0 (
         customData = {
@@ -2094,11 +2092,20 @@ class UsdGenDeform "UsdGenDeform"
         }
         doc = "Mute for this operator. A disabled styler or deformer passes its upstream through unchanged; a disabled generator (Scatter, Grow, CurveSource, ReferenceSource) produces an empty curve set, so the description publishes no curves. Expression evaluation: groom (once per operator)."
     )
+    int[] usdGen:guideRegions = [] (
+        customData = {
+            dictionary usdGen = {
+                string evaluation = "groom"
+            }
+            string userDocBrief = "Region ID for each center curve in the usdGen:guides target's curve order."
+        }
+        doc = "Region ID for each center curve in the usdGen:guides target's curve order. Required with regionMap; one unique nonnegative integer per curve. Used only by curveWrap."
+    )
     rel usdGen:guides (
         customData = {
             string userDocBrief = "Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied."
         }
-        doc = "Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied. Each driver CV is an RBF sample bound at its rest position (primvars:rest, else its Default-time position) and moved to its current position, and every incoming CV moves by the resulting smooth field, which passes through the driver CVs and reproduces any affine motion of them exactly. Animate the curves' points; the drivers must span 3D (not all in one plane). Unset, the RBF samples the bound surface on CPU or CUDA. CPU surface input requires UsdGenRestAPI, Default-time rest points and the same object space as the groom; a shared animated parent is applied once during publication. Set lockRoots=false to carry roots with the skin. Expression evaluation: groom (once per operator)."
+        doc = "Animated curves that drive the deformation on the CPU lane: one BasisCurves prim with UsdGenCurveAPI applied. Each driver CV is an RBF sample bound at its rest position (primvars:rest, else its Default-time position) and moved to its current position, and every incoming CV moves by the resulting smooth field, which passes through the driver CVs and reproduces any affine motion of them exactly. Animate the curves' points; the drivers must span 3D (not all in one plane). Unset, the RBF samples the bound surface on CPU or CUDA. CPU surface input requires UsdGenRestAPI and Default-time rest points. Incoming CVs must be in surface rest-local coordinates. Posed surface samples are transformed into current groom space, supporting a groom outside the animated surface hierarchy; shared ancestor motion is applied once during publication. Set lockRoots=false to carry roots with the skin. Expression evaluation: groom (once per operator)."
     )
     bool usdGen:lockRoots = 1 (
         customData = {
@@ -2118,6 +2125,13 @@ class UsdGenDeform "UsdGenDeform"
         }
         doc = "Per-operator effect weight in [0, 1]. 1 applies the operator fully, 0 leaves the upstream curves bit-for-bit untouched. Author a literal for a uniform weight, or connect this attribute to a UsdGenExpression (to the prim, or to its outputs:result) to drive it per curve. Expression evaluation: primitive (once per curve root); override the attribute's customData usdGen:evaluation to \"point\" for a per-CV weight (use $t for the root-to-tip parameter)."
     )
+    uniform token usdGen:mode = "" (
+        allowedTokens = ["", "curveWrap"]
+        customData = {
+            string userDocBrief = "Empty selects the existing RBF deformer."
+        }
+        doc = "Empty selects the existing RBF deformer. curveWrap is CPU-only and uses one open center curve, or multiple center curves partitioned by regionMap and guideRegions, with matching rest/current CV topology. Each incoming CV binds to the nearest rest segment of its assigned center curve and keeps its segment fraction and local offset; rotation-minimizing frames preserve thickness. Straight and planar rest curves are supported. Animate driver points; roll about the tangent uses minimum twist. Guides and incoming groom must share a rest coordinate domain. rbfSamples is unused in curveWrap mode."
+    )
     int usdGen:rbfSamples = 100 (
         customData = {
             dictionary usdGen = {
@@ -2126,6 +2140,12 @@ class UsdGenDeform "UsdGenDeform"
             string userDocBrief = "Most RBF samples used: taken on the bound surface, or, with usdGen:guides, farthest-point sampled from the driver CVs."
         }
         doc = "Most RBF samples used: taken on the bound surface, or, with usdGen:guides, farthest-point sampled from the driver CVs. Higher values track the drivers more closely at a higher per-frame cost. At least 4. Expression evaluation: groom (once per operator)."
+    )
+    rel usdGen:regionMap (
+        customData = {
+            string userDocBrief = "Optional categorical UsdGenPtexMap for curveWrap."
+        }
+        doc = "Optional categorical UsdGenPtexMap for curveWrap. Sampled at each strand's rest root, its raw integer ID selects the center curve labelled by guideRegions. Required for multiple centers. The whole strand follows that center without cross-region blending or nearest-driver fallback. Requires filter=nearest and blur=0; map:firstChannel selects the ID channel. Map scale/offset/clamp are not applied. Invalid or unmatched IDs fail the cook."
     )
     uniform int usdGen:seed = 0 (
         customData = {
@@ -2698,12 +2718,6 @@ class UsdGenPtexMap "UsdGenPtexMap"
         }
         doc = "First Ptex channel read by this map. Expression evaluation: groom (once per operator)."
     )
-    uniform uint64 usdGen:map:textureGeneration = 0 (
-        customData = {
-            string userDocBrief = "Immutable authored Ptex content generation."
-        }
-        doc = "Immutable authored Ptex content generation. Runtime compares this value with a CurveSource expected map generation; ReloadMaps cache generations remain separate."
-    )
     float usdGen:map:offset = 0 (
         customData = {
             dictionary usdGen = {
@@ -2721,6 +2735,12 @@ class UsdGenPtexMap "UsdGenPtexMap"
             string userDocBrief = "Multiplier applied to the sampled value before usdGen:map:offset."
         }
         doc = "Multiplier applied to the sampled value before usdGen:map:offset. Expression evaluation: primitive (once per curve root)."
+    )
+    uniform uint64 usdGen:map:textureGeneration = 0 (
+        customData = {
+            string userDocBrief = "Immutable authored Ptex content generation."
+        }
+        doc = "Immutable authored Ptex content generation. Runtime compares this value with a CurveSource expected map generation; ReloadMaps cache generations remain separate."
     )
 }
 
@@ -3317,19 +3337,84 @@ class "UsdGenCurveAPI"
             }
         }
     )
-    int[] usdGen:surfaceCage:ownerIds = []
-    float[] usdGen:surfaceCage:ownerDensities = []
-    int[] usdGen:surfaceCage:ownerSeeds = []
-    int[] usdGen:surfaceCage:ownerCvCounts = []
-    float[] usdGen:surfaceCage:ownerEdgeBias = []
-    float2[] usdGen:surfaceCage:ownerChartCentroids = []
-    float[] usdGen:surfaceCage:ownerChartMeanRadii = []
-    int[] usdGen:surfaceCage:ownerLengthProfileOffsets = []
-    float2[] usdGen:surfaceCage:ownerLengthProfile = []
-    int3[] usdGen:surfaceCage:triangles = []
-    int[] usdGen:surfaceCage:triangleOwnerIndices = []
-    float[] usdGen:surfaceCage:normalizedT = []
-    float2[] usdGen:surfaceCage:triangleRootCharts = []
+    float[] usdGen:surfaceCage:normalizedT = [] (
+        customData = {
+            string userDocBrief = "Flattened per-point normalized longitudinal stations for the sparse rails."
+        }
+        doc = "Flattened per-point normalized longitudinal stations for the sparse rails. Values follow the BasisCurves point order and are strictly increasing within each rail; runtime interpolation never substitutes arc length or uniform CV indices."
+    )
+    float2[] usdGen:surfaceCage:ownerChartCentroids = [] (
+        customData = {
+            string userDocBrief = "Per-owner chart centroids used only to normalize the runtime length profile."
+        }
+        doc = "Per-owner chart centroids used only to normalize the runtime length profile."
+    )
+    float[] usdGen:surfaceCage:ownerChartMeanRadii = [] (
+        customData = {
+            string userDocBrief = "Positive per-owner chart mean radii used only to normalize the runtime length profile."
+        }
+        doc = "Positive per-owner chart mean radii used only to normalize the runtime length profile."
+    )
+    int[] usdGen:surfaceCage:ownerCvCounts = [] (
+        customData = {
+            string userDocBrief = "Common normalized rail CV count per surface-cage owner."
+        }
+        doc = "Common normalized rail CV count per surface-cage owner."
+    )
+    float[] usdGen:surfaceCage:ownerDensities = [] (
+        customData = {
+            string userDocBrief = "Base output density per surface-cage owner."
+        }
+        doc = "Base output density per surface-cage owner. Runtime applies CurveSource densityMultiplier."
+    )
+    float[] usdGen:surfaceCage:ownerEdgeBias = [] (
+        customData = {
+            string userDocBrief = "Per-owner runtime edge-bias control; raw cage rails do not include it."
+        }
+        doc = "Per-owner runtime edge-bias control; raw cage rails do not include it."
+    )
+    int[] usdGen:surfaceCage:ownerIds = [] (
+        customData = {
+            string userDocBrief = "Owner tube id per surface-cage owner."
+        }
+        doc = "Owner tube id per surface-cage owner. Parallel to all owner payload arrays."
+    )
+    float2[] usdGen:surfaceCage:ownerLengthProfile = [] (
+        customData = {
+            string userDocBrief = "Packed owner length-profile pairs (normalized radius, length multiplier)."
+        }
+        doc = "Packed owner length-profile pairs (normalized radius, length multiplier)."
+    )
+    int[] usdGen:surfaceCage:ownerLengthProfileOffsets = [] (
+        customData = {
+            string userDocBrief = "Owner-indexed offsets into usdGen:surfaceCage:ownerLengthProfile; size ownerCount + 1."
+        }
+        doc = "Owner-indexed offsets into usdGen:surfaceCage:ownerLengthProfile; size ownerCount + 1."
+    )
+    int[] usdGen:surfaceCage:ownerSeeds = [] (
+        customData = {
+            string userDocBrief = "Deterministic output seed per surface-cage owner."
+        }
+        doc = "Deterministic output seed per surface-cage owner."
+    )
+    int[] usdGen:surfaceCage:triangleOwnerIndices = [] (
+        customData = {
+            string userDocBrief = "Owner-array index per surface-cage triangle."
+        }
+        doc = "Owner-array index per surface-cage triangle."
+    )
+    float2[] usdGen:surfaceCage:triangleRootCharts = [] (
+        customData = {
+            string userDocBrief = "Three root chart coordinates per surface-cage triangle, in triangle index order."
+        }
+        doc = "Three root chart coordinates per surface-cage triangle, in triangle index order."
+    )
+    int3[] usdGen:surfaceCage:triangles = [] (
+        customData = {
+            string userDocBrief = "Sparse rail-index triples defining each surface-cage triangle."
+        }
+        doc = "Sparse rail-index triples defining each surface-cage triangle."
+    )
 }
 
 class UsdGenTonicGroom "UsdGenTonicGroom"

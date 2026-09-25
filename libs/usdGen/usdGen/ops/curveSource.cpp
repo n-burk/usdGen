@@ -272,7 +272,22 @@ UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) 
          feed("restFromCurrent", found->restFromCurrentPoints);
          feed("curveGeneration", found->curveGeneration);
          bytes(found->frozenEpoch.data(), found->frozenEpoch.size());
-         bytes(&found->worldMatrix[0][0], 16 * sizeof(double));
+         // Ordinary C3 points stay source-local. Root binding consumes only
+         // the surface-to-source transform, not shared ancestor motion.
+         bool const cageMode = p->GetToken(TfToken("interpolationMode"), TfToken("none")) != TfToken("none");
+         auto const bound = p->node->surfaces.size() == 1
+             ? std::find_if(ctx.desc->surfaces.begin(), ctx.desc->surfaces.end(),
+                 [&](UsdGenSurfaceDesc const &s) { return s.path == p->node->surfaces.front(); })
+             : ctx.desc->surfaces.end();
+         if (!cageMode && bound != ctx.desc->surfaces.end()) {
+            GfMatrix4d const relative = bound->worldMatrix * found->worldMatrix.GetInverse();
+            bytes(relative.GetArray(), 16 * sizeof(double));
+            bool validWorld = std::isfinite(found->worldMatrix.GetDeterminant()) &&
+                              found->worldMatrix.GetDeterminant() != 0.0;
+            for (int r=0;r<4;++r) for (int c=0;c<4;++c)
+               validWorld = validWorld && std::isfinite(found->worldMatrix[r][c]);
+            feed("validSourceWorld", validWorld);
+         } else bytes(found->worldMatrix.GetArray(), 16 * sizeof(double));
          feed("curveCounts", found->curveVertexCounts.size());
          if (!found->curveVertexCounts.empty())
             bytes(found->curveVertexCounts.cdata(), found->curveVertexCounts.size() * sizeof(int));
@@ -345,7 +360,12 @@ UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) 
           [&](UsdGenSurfaceDesc const &candidate) { return candidate.path == path; });
       if (found == ctx.desc->surfaces.end()) feed("missingSurface", 1);
       else {
-         feed("surfaceGeneration", found->surfaceGeneration);
+         // The general generation includes posed points and sample times,
+         // even on a static rest snapshot. Root capture reads the rest data
+         // below, so playback must not regenerate a rest-bound source.
+         // Surface-cage interpolation has additional surface dependencies.
+         if (p->GetToken(TfToken("interpolationMode"), TfToken("none")) != TfToken("none"))
+            feed("surfaceGeneration", found->surfaceGeneration);
          feed("restFromCurrentPoints", found->restFromCurrentPoints);
          feed("restNormalDomain", static_cast<uint64_t>(found->restNormalDomain));
          feed("surfaceFaceCounts", found->faceVertexCounts.size());
@@ -360,7 +380,10 @@ UsdGenEpoch UsdGenCurveSourceOp::CaptureDigest(UsdGenCaptureContext const &ctx) 
          feed("surfaceRestNormals", found->restNormals.size());
          for (GfVec3f const &normal : found->restNormals)
             bytes(&normal[0], 3 * sizeof(float));
-         bytes(&found->worldMatrix[0][0], 16 * sizeof(double));
+         // Ordinary C3 already hashes the relative binding transform above.
+         if (p->GetToken(TfToken("interpolationMode"), TfToken("none")) != TfToken("none") ||
+             p->node->curves.size() != 1)
+            bytes(found->worldMatrix.GetArray(), 16 * sizeof(double));
       }
    }
    return {h, h ^ 0x9E3779B97F4A7C15ull};

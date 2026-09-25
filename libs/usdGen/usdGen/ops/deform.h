@@ -12,7 +12,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace usdGen {
 
-/// UsdGenDeform: topology-preserving cubic RBF deformation.
+/// UsdGenDeform: topology-preserving RBF or centerline deformation.
 ///
 /// CUDA lane: driven by samples of the bound surface (the persistent RBF
 /// library in cudaExecution.cpp); this class supplies its metadata only.
@@ -20,8 +20,14 @@ namespace usdGen {
 /// driver CV (up to usdGen:rbfSamples of them, farthest-point sampled) is an
 /// RBF sample bound at its rest position and moved to its current one, and
 /// every incoming CV moves by the resulting field. Surface input requires
-/// Default-time rest data and the same object space as the groom; a shared
-/// animated parent is applied once by publication.
+/// Default-time rest data. Its input is surface rest-local and its output is
+/// in current groom space, so different parents work and shared ancestor
+/// motion is applied once by publication.
+/// CPU mode=curveWrap instead transports the incoming geometry around one
+/// open guide using rotation-minimizing frames. It supports straight rest
+/// curves and preserves transverse offsets; the centerline supplies no roll.
+/// Multiple open guides use a categorical Ptex regionMap at rest roots and
+/// guideRegions IDs to select exactly one centerline per incoming strand.
 class UsdGenDeformOp final : public UsdGenOp
 {
 public:

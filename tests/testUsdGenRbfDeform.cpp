@@ -23,6 +23,7 @@
 #include "usdGen/graph.h"
 #include "usdGen/opRegistry.h"
 #include "usdGen/ops/rbfField.h"
+#include "usdGen/ops/curveWrap.h"
 #include "usdGen/scheduler.h"
 #include "usdGenImaging/groomSceneIndexPlugin.h"
 #include "usdGenImaging/testHook.h"
@@ -313,17 +314,19 @@ void CheckExample()
     guides.SetTargets({kDrivers});
 }
 
-void CheckSurfaceExample()
+void CheckSurfaceExample(bool outside = false)
 {
-    auto stage = UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/felt/felt_sphere_animated.usda");
+    std::string const scene = std::string(USDGEN_TEST_SOURCE_DIR) + "/examples/motion/" +
+        (outside ? "felt_sphere_groom_outside_xform.usda" : "felt_sphere_animated.usda");
+    auto stage = UsdStage::Open(scene);
     Check(bool(stage), "animated sphere example opens");
     if (!stage) return;
-    SdfPath const description("/World/Motion/Groom/Hair");
+    SdfPath const description(outside ? "/World/Groom/Hair" : "/World/Motion/Groom/Hair");
     SdfPath const deform = description.AppendPath(SdfPath("Ops/surfaceAnimate"));
     SdfPath const input = description.AppendPath(SdfPath("Ops/width"));
     auto cook = [&](double time) { return Cook(stage, time, description, deform, input); };
     Cooked const rest = cook(1);
-    Check(rest.ok && MaxShift(rest, false) < 1e-6, "surface RBF preserves the rest groom" + Errors(rest));
+    Check(rest.ok && (outside || MaxShift(rest, false) < 1e-6), "surface RBF cooks the rest groom" + Errors(rest));
     if (!rest.ok) return;
     for (int frame : {13, 26, 38, 51, 75, 100}) {
         Cooked const pose = cook(frame);
@@ -334,7 +337,8 @@ void CheckSurfaceExample()
         for (size_t cv = 0; stable && cv < pose.input.totalCvs; ++cv) {
             stable = P(pose.input,cv) == P(rest.input,cv);
             GfVec3f const p = P(rest.input,cv);
-            GfVec3f const expected(float(p[0]*wide),float(p[1]*wide),float(p[2]*stretch));
+            GfVec3f expected(float(p[0]*wide),float(p[1]*wide),float(p[2]*stretch));
+            if (outside) expected += GfVec3f(float(.55*std::sin(2*3.141592653589793*(frame-1)/99.0)),0,.5f);
             error = std::max(error,double((P(pose.output,cv)-expected).GetLength()));
         }
         Check(stable, "Scatter/Grow/style remain rest-local at frame " + std::to_string(frame) + Errors(pose));
@@ -342,7 +346,7 @@ void CheckSurfaceExample()
               std::to_string(frame) + " error=" + std::to_string(error));
     }
     // Opening at a posed frame must still use Default-time rest, not first pull.
-    auto posedFirst = UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/felt/felt_sphere_animated.usda");
+    auto posedFirst = UsdStage::Open(scene);
     Cooked const first = Cook(posedFirst,38,description,deform,input);
     bool same = first.ok && first.input.totalCvs == rest.input.totalCvs;
     for (size_t cv=0; same && cv<first.input.totalCvs; ++cv)
@@ -356,12 +360,177 @@ void CheckSurfaceExample()
     Check(!missing.ok,"surface RBF refuses missing Default-time rest data");
 }
 
+void CheckCurveWrapField()
+{
+    curveWrap::Field field;
+    std::vector<GfVec3d> rest={{0,0,0},{0,0,.25},{0,0,.5},{0,0,.75},{0,0,1}};
+    std::string error;
+    Check(field.Bind(rest,rest,&error),"straight centerline binds without a 3D RBF cage");
+    auto queries=Cloud(100,456);
+    double identity=0;
+    for (auto const &q:queries) identity=std::max(identity,(field.Map(q)-q).GetLength());
+    Check(identity<1e-12,"curveWrap rest pose is identity, including endpoint offsets");
+    auto pose=rest;
+    GfRotation rotation(GfVec3d(0,1,0),65);
+    GfVec3d shift(.2,.1,-.3);
+    for (auto &p:pose) p=rotation.TransformDir(p)+shift;
+    Check(field.Bind(rest,pose,&error),"single centerline rotation and translation bind");
+    double rigid=0;
+    for (auto const &q:queries) rigid=std::max(rigid,(field.Map(q)-rotation.TransformDir(q)-shift).GetLength());
+    Check(rigid<1e-10,"curveWrap preserves the full cross-section under rigid bending");
+    for (size_t i=0;i<pose.size();++i) {
+        double const a=double(i)*.3;
+        pose[i]=GfVec3d(1-std::cos(a),0,std::sin(a));
+    }
+    Check(field.Bind(rest,pose,&error),"a planar curved pose binds");
+    double radiusError=0;
+    for (size_t i=0;i+1<rest.size();++i) for (int j=0;j<12;++j) {
+        double const a=j*2*3.141592653589793/12;
+        auto const center=(rest[i]+rest[i+1])*.5;
+        auto const q=center+GfVec3d(.05*std::cos(a),.05*std::sin(a),0);
+        radiusError=std::max(radiusError,std::abs((field.Map(q)-(pose[i]+pose[i+1])*.5).GetLength()-.05));
+    }
+    Check(radiusError<1e-10,"curved centerline keeps braid cross-section radius");
+    auto bad=rest;bad[1]=bad[0];
+    Check(!field.Bind(rest,bad,&error),"collapsed driver segment is diagnosed");
+    bad=rest;bad.pop_back();
+    Check(!field.Bind(rest,bad,&error),"changing driver topology is diagnosed");
+}
+
+void CheckBraidExamples()
+{
+    auto guide = UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/motion/braid_animated_guides.usda");
+    auto both = UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/motion/braid_animated_guides_and_surface.usda");
+    Check(bool(guide) && bool(both), "both guide-grown braid examples open");
+    if (!guide || !both) return;
+    SdfPath const description("/World/Motion/Groom/Hair");
+    auto path = [&](char const *name) { return description.AppendPath(SdfPath(std::string("Ops/")+name)); };
+    auto const rest = Cook(guide,1,description,path("guideAnimate"),path("width"));
+    Check(rest.ok && rest.output.totalCurves == 381 && rest.cvs == 64,
+          "fixed guide roots grow 381 strands, 64 CVs each" + Errors(rest));
+    if (!rest.ok) return;
+    Check(MaxShift(rest,false)<1e-6,"guide rest pose preserves the grown braid");
+    for (int frame : {13,26,38,51,75,100}) {
+        auto const a = Cook(guide,frame,description,path("guideAnimate"),path("width"));
+        auto const b = Cook(both,frame,description,path("surfaceAnimate"),path("width"));
+        bool stable = a.ok && b.ok && a.input.totalCvs==rest.input.totalCvs &&
+            b.output.totalCvs==a.output.totalCvs;
+        double error=0;
+        double const stretch=std::exp(.48*std::sin(4*3.141592653589793*(frame-1)/99.0));
+        double const wide=1/std::sqrt(stretch);
+        for (size_t cv=0; stable && cv<a.input.totalCvs; ++cv) {
+            stable = P(a.input,cv)==P(rest.input,cv) && P(b.input,cv)==P(rest.input,cv);
+            auto const p=P(a.output,cv);
+            GfVec3f const expected(float(p[0]*wide),float(p[1]*wide),float(p[2]*stretch));
+            error=std::max(error,double((P(b.output,cv)-expected).GetLength()));
+        }
+        Check(stable,"braid growth stays at Default at frame "+std::to_string(frame)+Errors(a)+Errors(b));
+        Check(a.ok && MaxShift(a,true)<1e-6,"guide bend locks braid roots");
+        Check(stable && error<3e-6,"guide and surface deformation compose once ("+std::to_string(error)+")");
+        if (frame==26) Check(MaxShift(a,false)>.15,"animated guides visibly bend the braid");
+    }
+}
+
+void CheckSingleCenterExample()
+{
+    auto stage=UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/motion/braid_simulated_center_curve.usda");
+    Check(bool(stage),"single simulated center example opens");
+    if (!stage) return;
+    SdfPath const desc("/World/Motion/Groom/Hair");
+    auto const deform=desc.AppendPath(SdfPath("Ops/guideAnimate"));
+    auto const input=desc.AppendPath(SdfPath("Ops/width"));
+    auto rest=Cook(stage,1,desc,deform,input);
+    Check(rest.ok && rest.output.totalCurves==381 && MaxShift(rest,false)<1e-6,
+          "one straight center drives 381 rest-grown braid strands"+Errors(rest));
+    if (!rest.ok) return;
+    for (int frame:{18,37,65,100,1}) {
+        auto pose=Cook(stage,frame,desc,deform,input);
+        bool stable=pose.ok && pose.input.totalCvs==rest.input.totalCvs;
+        for (size_t cv=0;stable && cv<pose.input.totalCvs;++cv)
+            stable=P(pose.input,cv)==P(rest.input,cv);
+        Check(stable,"simulated-center playback keeps rest growth fixed at "+std::to_string(frame)+Errors(pose));
+        Check(pose.ok && MaxShift(pose,true)<1e-6,"pinned center preserves attached braid roots");
+        if (frame==37) Check(MaxShift(pose,false)>.02,"simulation visibly moves the braid");
+    }
+    auto center=stage->GetPrimAtPath(SdfPath("/World/Motion/SimulatedCenter"));
+    VtIntArray counts;
+    center.GetAttribute(TfToken("curveVertexCounts")).Get(&counts);
+    Check(counts==VtIntArray{31},"exactly one 31-CV simulation driver is authored");
+    center.GetAttribute(TfToken("curveVertexCounts")).Set(VtIntArray{15,16});
+    auto invalid=Cook(stage,37,desc,deform,input);
+    Check(!invalid.ok,"curveWrap refuses multiple driver curves");
+}
+
+void CheckRegionExamples()
+{
+    for (bool dense:{false,true}) {
+        std::string const scene=std::string(USDGEN_TEST_SOURCE_DIR)+"/examples/motion/"+
+            (dense?"two_braids_ptex_regions.usda":"two_curves_ptex_regions.usda");
+        auto stage=UsdStage::Open(scene);
+        Check(bool(stage),"Ptex multi-center example opens");if (!stage) continue;
+        SdfPath const desc("/World/Motion/Groom/Hair");
+        auto const deform=desc.AppendPath(SdfPath("Ops/regionAnimate"));
+        auto const input=desc.AppendPath(SdfPath("Ops/width"));
+        auto cook=[&](int frame) {return Cook(stage,frame,desc,deform,input);};
+        auto rest=cook(1);
+        Check(rest.ok && rest.output.totalCurves==(dense?762u:2u),
+              "one description grows the expected number of region strands"+Errors(rest));
+        if (!rest.ok) continue;
+        auto driver=UsdGeomBasisCurves(stage->GetPrimAtPath(SdfPath("/World/Motion/Drivers")));
+        VtVec3fArray driverRest;VtIntArray counts;
+        driver.GetPointsAttr().Get(&driverRest,UsdTimeCode::Default());
+        driver.GetCurveVertexCountsAttr().Get(&counts);
+        Check(counts==VtIntArray({31,31}),"two center curves drive a single description");
+        auto verify=[&](int frame,bool swapped) {
+            auto pose=cook(frame);
+            VtVec3fArray driverNow;driver.GetPointsAttr().Get(&driverNow,UsdTimeCode(frame));
+            curveWrap::Field fields[2];std::string error;
+            for (int g=0;g<2;++g) {
+                std::vector<GfVec3d> r,n;
+                for (int i=g*31;i<(g+1)*31;++i) {r.emplace_back(driverRest[i]);n.emplace_back(driverNow[i]);}
+                Check(fields[g].Bind(r,n,&error),"region driver field binds");
+            }
+            bool stable=pose.ok && pose.input.totalCvs==rest.input.totalCvs;double maxError=0;
+            for (size_t c=0;stable && c<pose.input.totalCurves;++c) {
+                int g=P(rest.input,c*rest.cvs)[0]<0 ? 0:1;if (swapped) g=1-g;
+                for (size_t cv=c*rest.cvs;stable && cv<(c+1)*rest.cvs;++cv) {
+                    stable=P(pose.input,cv)==P(rest.input,cv);
+                    maxError=std::max(maxError,(GfVec3d(P(pose.output,cv))-fields[g].Map(GfVec3d(P(rest.input,cv)))).GetLength());
+                }
+            }
+            Check(stable && maxError<2e-6,(swapped?"swapping Ptex texels rebinds across space":"Ptex regions follow only their assigned center")+
+                  std::string(" error=")+std::to_string(maxError)+Errors(pose));
+        };
+        verify(37,false);verify(100,false);
+        // Moving just driver 1 cannot affect region 0, even though they share a
+        // description, operator, surface and one two-curve driver prim.
+        VtVec3fArray changed=driverRest;
+        for (size_t i=31;i<changed.size();++i) changed[i]+=GfVec3f(.1f,.07f,-.02f);
+        driver.GetPointsAttr().Set(changed,UsdTimeCode(55));verify(55,false);
+        auto map=stage->GetPrimAtPath(desc.AppendPath(SdfPath("Maps/Regions")));
+        map.GetAttribute(TfToken("usdGen:map:file")).Set(SdfAssetPath(
+            USDGEN_TEST_SOURCE_DIR "/examples/motion/maps/two_regions_swapped.ptx"));
+        verify(37,true);
+        // Reject missing driver IDs instead of silently choosing a nearby driver.
+        auto regionIds=stage->GetPrimAtPath(deform).GetAttribute(TfToken("usdGen:guideRegions"));
+        regionIds.Set(VtIntArray{7,8});
+        auto missing=cook(37);
+        Check(!missing.ok && Errors(missing).find("has no center curve")!=std::string::npos,
+              "unmapped Ptex IDs are diagnosed"+Errors(missing));
+        regionIds.Set(VtIntArray{0,1});
+        map.GetAttribute(TfToken("usdGen:map:filter")).Set(TfToken("bilinear"));
+        auto filtered=cook(37);
+        Check(!filtered.ok,"regionMap refuses filtered/blended category IDs");
+    }
+}
+
 // --- the example, through the groom scene index -----------------------------------
 
-std::vector<GfVec3f> PublishedPoints(HdSceneIndexBaseRefPtr const &groom)
+std::vector<GfVec3f> PublishedPoints(HdSceneIndexBaseRefPtr const &groom,
+                                  SdfPath const &description = kDescription)
 {
     std::vector<GfVec3f> points;
-    SdfPath const render = kDescription.AppendChild(TfToken("__usdGenRender"));
+    SdfPath const render = description.AppendChild(TfToken("__usdGenRender"));
     SdfPathVector tiles = groom->GetChildPrimPaths(render);
     std::sort(tiles.begin(), tiles.end());
     for (SdfPath const &tile : tiles) {
@@ -378,6 +547,45 @@ std::vector<GfVec3f> PublishedPoints(HdSceneIndexBaseRefPtr const &groom)
         for (GfVec3f const &p : value.UncheckedGet<VtVec3fArray>()) points.push_back(p);
     }
     return points;
+}
+
+void CheckOutsidePublication()
+{
+    auto stage=UsdStage::Open(USDGEN_TEST_SOURCE_DIR "/examples/motion/felt_sphere_groom_outside_xform.usda");
+    if (!stage) { Check(false,"outside groom stage opens for Hydra"); return; }
+    SdfPath const description("/World/Groom/Hair");
+    // An independently transformed groom must cancel its own world transform
+    // during deformation, then receive it once from Hydra publication.
+    auto container=stage->GetPrimAtPath(SdfPath("/World/Groom"));
+    container.SetTypeName(TfToken("Xform"));
+    GfMatrix4d transform(1.0);
+    transform.SetRotate(GfRotation(GfVec3d(0,1,0),23));
+    transform.SetTranslateOnly(GfVec3d(.12,.05,-.1));
+    container.CreateAttribute(TfToken("xformOp:transform"),SdfValueTypeNames->Matrix4d).Set(transform);
+    container.CreateAttribute(TfToken("xformOpOrder"),SdfValueTypeNames->TokenArray).Set(VtTokenArray{TfToken("xformOp:transform")});
+    UsdImagingCreateSceneIndicesInfo info; info.stage=stage;
+    auto indices=UsdImagingCreateSceneIndices(info);
+    auto groom=UsdGenGroomSceneIndex::New(indices.finalSceneIndex);
+    auto *owner=dynamic_cast<UsdGenGroomSceneIndex *>(groom.operator->());
+    for (int frame : {38,1,26,100}) {
+        indices.stageSceneIndex->SetTime(UsdTimeCode(frame));
+        indices.stageSceneIndex->ApplyPendingUpdates(); owner->Synchronize();
+        auto actual=PublishedPoints(groom,description);
+        auto rest=Cook(stage,frame,description,description.AppendPath(SdfPath("Ops/surfaceAnimate")),
+                       description.AppendPath(SdfPath("Ops/width")));
+        double error=0;
+        double const stretch=std::exp(.48*std::sin(4*3.141592653589793*(frame-1)/99.0));
+        double const wide=1/std::sqrt(stretch);
+        GfVec3d offset(.55*std::sin(2*3.141592653589793*(frame-1)/99.0),0,.5);
+        bool valid=rest.ok && actual.size()==rest.input.totalCvs;
+        for (size_t cv=0; valid && cv<actual.size(); ++cv) {
+            auto p=P(rest.input,cv);
+            GfVec3d expected(p[0]*wide,p[1]*wide,p[2]*stretch);
+            error=std::max(error,(transform.Transform(GfVec3d(actual[cv]))-expected-offset).GetLength());
+        }
+        Check(valid && error<3e-6,"separately transformed groom publishes correct world points at frame "+
+              std::to_string(frame)+" error="+std::to_string(error));
+    }
 }
 
 void CheckScene()
@@ -563,8 +771,14 @@ int main()
 {
     usdGenRegisterM1Operators();
     CheckField();
+    CheckCurveWrapField();
     CheckExample();
     CheckSurfaceExample();
+    CheckSurfaceExample(true);
+    CheckBraidExamples();
+    CheckSingleCenterExample();
+    CheckRegionExamples();
+    CheckOutsidePublication();
     CheckScene();
     CheckPlaybackNotices();
     UsdGenGroomSceneIndex::DrainRetired();

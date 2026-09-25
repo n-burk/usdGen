@@ -1081,7 +1081,8 @@ _HReadNode(HdSceneIndexBase &input, SdfPath const &p, _HdTime t)
     // after surface inheritance below.
     if (node.type == TfToken("UsdGenCollide"))
         _HGetPathArray(ug, &captured.colliders, {"colliders"});
-    if (node.type == TfToken("UsdGenCurveSource")) {
+    if (node.type == TfToken("UsdGenCurveSource") || node.type == TfToken("UsdGenDeform") ||
+        node.type == TfToken("UsdGenGuideInterpolate")) {
         SdfPathVector regionMap;
         if (_HGetPathArray(ug, &regionMap, {"regionMap"})) {
             // The schema relationship exists even when unauthored, so an
