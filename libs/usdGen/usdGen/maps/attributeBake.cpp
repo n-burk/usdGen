@@ -138,7 +138,11 @@ bool UsdGenAttributeBakePtex(UsdGenAttributeBakeInput const &input,
 
     int const res = input.map->Resolution();
     int const channels = input.map->Channels();
-    int const resLog2 = Log2Int(res);  // res is a validated power of two
+    // Ptex::Res takes the log2 as int8_t. A functional cast in the FaceInfo
+    // initializer below is parsed as a parameter declaration (int8_t resLog2),
+    // so the second argument redefines it. Store the value in that type and
+    // pass the name.
+    int8_t const resLog2 = int8_t(Log2Int(res));  // res is a validated power of two
     float const *src = input.map->Data();
 
     // The out directory is the worker's to own: create it rather than fail a
@@ -164,7 +168,7 @@ bool UsdGenAttributeBakePtex(UsdGenAttributeBakeInput const &input,
         for (int f = 0; f < faces && ok; ++f) {
             int adjFaces[4], adjEdges[4];
             adjacency.Resolve(input.faceVertexIndices, f, adjFaces, adjEdges);
-            Ptex::FaceInfo const info(Ptex::Res(int8_t(resLog2), int8_t(resLog2)),
+            Ptex::FaceInfo const info(Ptex::Res(resLog2, resLog2),
                                       adjFaces, adjEdges, /*isSubface*/ false);
             // Ptex face id == coarse face id on a quad mesh, and the texel
             // order matches the map's ((t * res) + s) grid, so each face
@@ -195,8 +199,14 @@ bool UsdGenAttributeBakePtex(UsdGenAttributeBakeInput const &input,
 }
 
 UsdGenAttributeBakeWorker::UsdGenAttributeBakeWorker()
-    : _worker(&UsdGenAttributeBakeWorker::_WorkerLoop, this)
 {
+    // _worker is the first data member, so starting it from the initializer
+    // list runs _WorkerLoop before _mutex and _wake exist. Under ctest -j
+    // that race throws std::system_error "Invalid argument" from the worker
+    // thread and std::terminate takes the process down. Default-construct
+    // the thread with the other members, then start it once they are live.
+    // Same pattern as TonicBakeWorker.
+    _worker = std::thread(&UsdGenAttributeBakeWorker::_WorkerLoop, this);
 }
 
 UsdGenAttributeBakeWorker::~UsdGenAttributeBakeWorker()
@@ -206,7 +216,7 @@ UsdGenAttributeBakeWorker::~UsdGenAttributeBakeWorker()
         _stop = true;
     }
     _wake.notify_all();
-    _worker.join();
+    if (_worker.joinable()) _worker.join();
 }
 
 void UsdGenAttributeBakeWorker::Enqueue(uint64_t version, UsdGenAttributeBakeInput input)
