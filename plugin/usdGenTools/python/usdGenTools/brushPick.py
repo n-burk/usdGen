@@ -25,6 +25,12 @@
 # and (v0,v2,v3) barycentrics map onto that square. Corner i of the map
 # grid therefore bakes onto the i-th face-vertex.
 #
+# Face mask (a binding to a face GeomSubset, plan/02-schema.md section 2.20):
+# the snapshot is always the whole PARENT mesh with parent face ids, and
+# faceMask names the paintable faces. Every face still occludes the pick,
+# but a nearest hit on a masked face is a miss; the footprint never spills
+# onto a masked face (usdGenBrushApi.h, "Face mask").
+#
 # Qt-free. Needs pxr only for the UsdGeomMesh snapshot helper; the
 # intersection itself is arithmetic over the snapshot, so the T1 suite
 # checks it without a stage.
@@ -45,10 +51,14 @@ PICK_MOVE_PIXELS = 3.0
 class MeshSnapshot(object):
     """Points + quad faces of the bound surface, read once per gesture."""
 
-    def __init__(self, points, faces):
+    def __init__(self, points, faces, faceMask=None):
         # points: [(x, y, z)] in world space; faces: [(v0, v1, v2, v3)].
         self.points = points
         self.faces = faces
+        # The paintable face ids (a frozenset), or None for every face.
+        # Fixed at construction: the native mesh bakes it in.
+        self.faceMask = (None if faceMask is None
+                         else frozenset(int(f) for f in faceMask))
         # The lazily built _FaceGrid, or None until the first pick.
         self.faceGrid = None
         # The lazily built brushApi.NativeMesh (False: tried, unavailable).
@@ -57,11 +67,23 @@ class MeshSnapshot(object):
     def faceCount(self):
         return len(self.faces)
 
+    def paintable(self, face):
+        """True when the face mask lets a stroke paint `face`."""
+        return self.faceMask is None or face in self.faceMask
 
-def snapshotMesh(meshPrim):
+
+def _paintable(snapshot, face):
+    """paintable() for any snapshot-like object (tests hand in their own)."""
+    mask = getattr(snapshot, "faceMask", None)
+    return mask is None or face in mask
+
+
+def snapshotMesh(meshPrim, faces=None):
     """(snapshot, error): the mesh's world-space points and quad faces.
 
-    Fails closed for a non-mesh prim, missing points, or any non-quad face."""
+    faces: the paintable parent-mesh face ids (a GeomSubset binding), or
+    None for every face. Fails closed for a non-mesh prim, missing
+    points, any non-quad face, or a face id the mesh does not have."""
     if meshPrim is None or not meshPrim.IsValid():
         return (None, "brush bind needs a valid surface prim")
     from pxr import Gf, Usd, UsdGeom
@@ -85,6 +107,14 @@ def snapshotMesh(meshPrim):
     if len(indices) != 4 * len(counts):
         return (None, "the surface mesh face indices do not match "
                 "its face counts")
+    if faces is not None:
+        try:
+            faces = frozenset(int(f) for f in faces)
+        except (TypeError, ValueError):
+            return (None, "the face subset is not a list of face ids")
+        if any(f < 0 or f >= len(counts) for f in faces):
+            return (None, "the face subset names a face the %d-face mesh "
+                    "does not have" % len(counts))
     xform = UsdGeom.Xformable(meshPrim).ComputeLocalToWorldTransform(
         Usd.TimeCode.Default())
     try:
@@ -106,21 +136,21 @@ def snapshotMesh(meshPrim):
             return (None, "the surface mesh has an out-of-range "
                     "face-vertex index")
         world = [tuple(p) for p in worldArr.tolist()]
-        faces = [tuple(q) for q in idx.tolist()]
-        return (MeshSnapshot(world, faces), "")
+        quads = [tuple(q) for q in idx.tolist()]
+        return (MeshSnapshot(world, quads, faces), "")
     world = []
     for p in points:
         q = xform.Transform(Gf.Vec3d(p))
         world.append((float(q[0]), float(q[1]), float(q[2])))
-    faces = []
+    quads = []
     for f in range(len(counts)):
         quad = (int(indices[4 * f]), int(indices[4 * f + 1]),
                 int(indices[4 * f + 2]), int(indices[4 * f + 3]))
         if any(v < 0 or v >= len(world) for v in quad):
             return (None, "the surface mesh has an out-of-range "
                     "face-vertex index")
-        faces.append(quad)
-    return (MeshSnapshot(world, faces), "")
+        quads.append(quad)
+    return (MeshSnapshot(world, quads, faces), "")
 
 
 def _sub(a, b):
@@ -373,7 +403,7 @@ def _pickBrute(snapshot, origin, direction):
             continue
         if best is None or got[0] < best[0]:
             best = (got[0], face, got[1], got[2], got[3])
-    if best is None:
+    if best is None or not _paintable(snapshot, best[1]):
         return None
     return (best[1], best[2], best[3], best[4])
 
@@ -385,7 +415,8 @@ def pickFace(snapshot, origin, direction):
     camera may sit anywhere, and a one-sided pick would read as a tool
     bug. (u, v) is face-local per the module convention. A uniform-grid
     index narrows the candidates; the triangle tests run in face-id
-    order, so the answer matches brute force bit for bit."""
+    order, so the answer matches brute force bit for bit. A nearest hit
+    on a face outside the snapshot's faceMask is a miss (it occludes)."""
     if snapshot is None or origin is None or direction is None:
         return None
     native = brushApi.meshFor(snapshot)
@@ -410,7 +441,7 @@ def pickFace(snapshot, origin, direction):
             continue
         if best is None or got[0] < best[0]:
             best = (got[0], face, got[1], got[2], got[3])
-    if best is None:
+    if best is None or not _paintable(snapshot, best[1]):
         return None
     return (best[1], best[2], best[3], best[4])
 
@@ -683,10 +714,10 @@ class DabFootprint(object):
         """[(face, u, v, radius)] the footprint covers; picked face first.
 
         The picked face keeps its exact (u, v, radius); every other
-        face within the world-space disk gets the dab centre in its own
-        UNCLAMPED (u, v) frame (quadCentreUV: past the border, so the
-        falloff continues across it) and the radius rescaled by its own
-        edge length. Degenerate faces
+        paintable face within the world-space disk gets the dab centre
+        in its own UNCLAMPED (u, v) frame (quadCentreUV: past the
+        border, so the falloff continues across it) and the radius
+        rescaled by its own edge length. Degenerate and masked faces
         are skipped; bad inputs yield the primary alone."""
         primary = [(face, u, v, radiusUv)]
         snapshot = self._snapshot
@@ -726,7 +757,7 @@ class DabFootprint(object):
         if others is None:
             others = range(len(snapshot.faces))
         for other in others:
-            if other == face:
+            if other == face or not _paintable(snapshot, other):
                 continue
             edge = self._edges[other]
             if edge <= self._MIN_EDGE:

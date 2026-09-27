@@ -1109,6 +1109,9 @@ bool TonicScalpGraph::Restore(TonicScalpMesh const &mesh,
     Clear();
     int maxNode = -1;
     for (auto const &nd : nodes) {
+        // Parent-mesh range, not the face subset: a subset never renumbers
+        // faces, and a node on a face a later subset edit dropped still
+        // addresses real geometry (plan/02 §2.20 rule 2).
         if (nd.faceId < 0 ||
             size_t(nd.faceId) >= mesh.faceVertexCounts.size()) {
             if (err) {

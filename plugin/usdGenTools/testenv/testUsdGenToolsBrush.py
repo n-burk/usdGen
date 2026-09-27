@@ -3,7 +3,9 @@
 # Python, including the cross-face corner smooth), the camera maths, the
 # surface pick (both backends), bind/bake authoring with auto texel
 # density, the preview client (session path; the Hydra overlay itself is
-# covered by the C++ testUsdGenBrushApi), and loop smoke tests. The loop
+# covered by the C++ testUsdGenBrushApi), loop smoke tests, and GeomSubset
+# face masks (both backends agree; subset-bound descriptions paint, smooth,
+# live-write and flood their own faces only). The loop
 # cadence, panel descriptors, hotkeys and palette are the UI suite's
 # (testUsdGenToolsBrushUI.py).
 #
@@ -1704,7 +1706,7 @@ def testHardnessErase():
     check(brushMap.MODE_ERASE in brushMap.MODES, "erase is a mode")
 
 
-def _gridPlane(n):
+def _gridPlane(n, faceMask=None):
     """n x n unit quads on y = 0: face (i, j) spans x [i, i+1], z [j, j+1]."""
     points, faces = [], []
     for j in range(n + 1):
@@ -1714,7 +1716,7 @@ def _gridPlane(n):
         for i in range(n):
             v = j * (n + 1) + i
             faces.append((v, v + 1, v + n + 2, v + n + 1))
-    return brushPick.MeshSnapshot(points, faces)
+    return brushPick.MeshSnapshot(points, faces, faceMask)
 
 
 def _hardEdgeBase(n, res=8):
@@ -2015,6 +2017,303 @@ def testPreviewFallback(stagePath):
 
 
 
+# -- GeomSubsets: the face mask and subset-bound descriptions -------------
+
+def _leftColumns(n, cols):
+    """Face ids of columns 0..cols-1 of an n x n grid (face = j * n + i)."""
+    return [j * n + i for j in range(n) for i in range(cols)]
+
+
+def _maskedPick():
+    n = 4
+    mask = _leftColumns(n, 2)
+    snapshot = _gridPlane(n, mask)
+    down = (0.0, -1.0, 0.0)
+    inside = brushPick.pickFace(snapshot, (1.5, 3.0, 1.5), down)
+    outside = brushPick.pickFace(snapshot, (2.5, 3.0, 1.5), down)
+    brute = brushPick._pickBrute(snapshot, (2.5, 3.0, 1.5), down)
+    foot = brushPick.DabFootprint(snapshot).expand(
+        5, 0.95, 0.5, (1.95, 0.0, 1.5), 0.6)
+    return (inside, outside, brute, foot)
+
+
+def testMaskedPick():
+    python = _pythonOnly(_maskedPick)
+    inside, outside, brute, foot = python
+    check(inside is not None and inside[0] == 5,
+          "python: a pick inside the face mask hits face 5")
+    check(outside is None and brute is None,
+          "python: a pick on a masked face misses (index and brute force)")
+    check([f[0] for f in foot] == [5, 1, 9],
+          "python: the footprint spills onto subset faces only (%r)"
+          % [f[0] for f in foot])
+    snapshot = _gridPlane(4)
+    check(snapshot.faceMask is None and snapshot.paintable(6),
+          "an unmasked snapshot paints every face")
+    if not brushApi.available():
+        print("ok: native masked pick skipped (%s)" % brushApi.reason())
+        return
+    native = _maskedPick()
+    check(native[0] is not None and native[0][0] == 5
+          and native[1] is None,
+          "native: the same hit and the same masked miss")
+    check([f[0] for f in native[3]] == [f[0] for f in foot]
+          and all(near(a[1], b[1], 1e-5) and near(a[2], b[2], 1e-5)
+                  and near(a[3], b[3], 1e-5)
+                  for a, b in zip(native[3], foot)),
+          "native and python masked footprints agree")
+    masked = brushApi.meshFor(_gridPlane(4, [0, 1]))
+    check(masked is not None and masked.faceInMask(1)
+          and not masked.faceInMask(2),
+          "the native mesh carries the snapshot's face mask")
+
+
+def _maskedStroke(native):
+    """Set, move trail, smooth and erase on a 4 x 4 grid masked to its
+    two left columns; masked faces start at 0.75, subset faces at 0.25."""
+    import numpy as np
+    n = 4
+    mask = _leftColumns(n, 2)
+    snapshot = _gridPlane(n, mask)
+    corners = np.full((n * n, 4, 1), 0.25)
+    for face in range(n * n):
+        if face not in mask:
+            corners[face] = 0.75
+    base, error = brushMap.CornerGrid.create(
+        brushMap.BrushMapSpec(n * n, 8, 1, 0.0, False), corners)
+    live, error = brushMap.LiveStroke.create(snapshot, base, native=native)
+    label = "native" if native else "python"
+    check(live is not None and live.native == native,
+          "a masked %s live stroke builds (%s)" % (label, error))
+    if live is None:
+        return None
+    count, error = live.dab(6, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 0,
+                            brushMap.MODE_SET, brushMap.FALLOFF_SMOOTH)
+    check(count < 0 and error and live.dabCount() == 0,
+          "%s: a dab on a masked face is rejected (%s)" % (label, error))
+    live.dab(5, 1.0, 0.5, 1.5, 0.5, 1.0, 1.0, 0, brushMap.MODE_SET,
+             brushMap.FALLOFF_SMOOTH)
+    live.dab(9, 1.0, 0.9, 1.5, 0.5, 1.0, 1.0, 0, brushMap.MODE_SET,
+             brushMap.FALLOFF_SMOOTH, True, 0.5)
+    live.dab(5, 1.0, 0.5, 1.0, 0.5, 1.0, 0.0, 0, brushMap.MODE_SMOOTH,
+             brushMap.FALLOFF_SMOOTH)
+    live.dab(1, 0.9, 0.2, 0.6, 0.0, 0.5, 0.0, 0, brushMap.MODE_ERASE,
+             brushMap.FALLOFF_LINEAR)
+    touched = live.takeTouched()
+    check(touched and all(f in mask for f in touched),
+          "%s: only subset faces come back touched (%r)" % (label, touched))
+    working = live.workingCorners()
+    outside = [f for f in range(n * n) if f not in mask]
+    check(float(abs(working[outside] - 0.75).max()) == 0.0,
+          "%s: masked faces keep their base corners exactly" % label)
+    check(float(working[mask].max()) > 0.9,
+          "%s: subset faces carry the paint" % label)
+    committed = brushMap.cornerBufferOf(live.commitGrid())
+    check(float(abs(committed - working).max()) < 1e-6,
+          "%s: the masked stroke commits its working grid" % label)
+    live.close()
+    return working
+
+
+def testMaskedLiveStroke():
+    python = _pythonOnly(_maskedStroke, False)
+    if not brushApi.available():
+        print("ok: native masked stroke skipped (%s)" % brushApi.reason())
+        return
+    native = _maskedStroke(True)
+    if python is not None and native is not None:
+        check(abs(native - python).max() < 1e-5,
+              "native and python agree under a face mask (max |d| %.2e)"
+              % abs(native - python).max())
+
+
+def _defineSubset(stage, path, indices, elementType="face"):
+    subset = UsdGeom.Subset.Define(stage, path)
+    subset.CreateElementTypeAttr(elementType)
+    subset.CreateIndicesAttr(Vt.IntArray([int(i) for i in indices]))
+    return subset
+
+
+def _outsideSame(values, before, faces, n=64):
+    """True when every corner of the faces NOT in `faces` is unchanged."""
+    inside = set(faces)
+    return all(values[4 * f + k] == before[4 * f + k]
+               for f in range(n) if f not in inside for k in range(4))
+
+
+def _subsetFlow(stagePath, label):
+    """Descriptions on /Plane's left and right halves (face GeomSubsets):
+    binds, strokes, live writes, smooth and flood touch only their half."""
+    stage = Usd.Stage.Open(Sdf.Layer.OpenAsAnonymous(stagePath))
+    # The fixture's points run z-fastest: face = xColumn * 8 + zRow, so
+    # faces 0..31 are the x < 0 half.
+    left = list(range(32))
+    right = list(range(32, 64))
+    _defineSubset(stage, "/Plane/Left", left)
+    _defineSubset(stage, "/Plane/Right", right)
+    # Paint someone else already put on the whole mesh.
+    UsdGeom.PrimvarsAPI(stage.GetPrimAtPath("/Plane")).CreatePrimvar(
+        "usdGen:paint:density", Sdf.ValueTypeNames.FloatArray,
+        "faceVarying").GetAttr().Set(Vt.FloatArray([0.3] * 256))
+    state = brushState.BrushToolState()
+    loop = brushLoop.BrushLoop(state)
+    camera = fixtureCamera()
+
+    target, error = brushAuthor.ResolveSurface(stage, "/Plane/Left")
+    check(target is not None and target.meshPath == Sdf.Path("/Plane")
+          and target.faces == tuple(left),
+          "%s: a face subset resolves to its parent and faces (%s)"
+          % (label, error))
+    ok, info = loop.setupDescriptionFromSelection(stage, ["/Plane/Left"])
+    check(ok, "%s: setup grows a description from a subset (%s)"
+          % (label, info))
+    descLeft = Sdf.Path(state.activeDescription)
+    binding = state.binding
+    check(binding is not None and binding.surfacePath == Sdf.Path("/Plane")
+          and binding.subsetPath == Sdf.Path("/Plane/Left")
+          and binding.faces == tuple(left),
+          "%s: the binding paints the parent's primvar on the subset faces"
+          % label)
+    desc = stage.GetPrimAtPath(descLeft)
+    check(desc.GetRelationship("usdGen:surface").GetTargets()
+          == [Sdf.Path("/Plane/Left")],
+          "%s: usdGen:surface targets the subset" % label)
+    paintMap = stage.GetPrimAtPath(binding.mapPath)
+    check(paintMap.GetRelationship("usdGen:paint:surface").GetTargets()
+          == [Sdf.Path("/Plane/Left")],
+          "%s: the PaintMap's usdGen:paint:surface targets the subset"
+          % label)
+    check(brushAuthor.DescriptionSurface(stage, descLeft)
+          == (Sdf.Path("/Plane/Left"), ""),
+          "%s: DescriptionSurface reads the subset back" % label)
+    check("bound: /Plane/Left" in brushPanels.statusText(state, ""),
+          "%s: the status line names the subset" % label)
+
+    before = brushAuthor.BakedValues(stage, binding)
+    state.strength = 1.0
+    state.hardness = 1.0
+    state.radiusWorld = 0.6
+    state.value = 1.0
+    # Face 45 (x column 5) is on the right half: a miss, not a stroke.
+    captured, info = loop.press(stage, camera, 255.0, 145.0)
+    check(not captured and not loop.gestureActive(),
+          "%s: a press outside the subset is a miss (%s)" % (label, info))
+    # Face 28, just left of x = 0: a disk that reaches well past the border.
+    captured, info = loop.press(stage, camera, 195.0, 175.0)
+    check(captured, "%s: a press inside the subset strokes (%s)"
+          % (label, info))
+    loop.move(stage, 195.0, 160.0)
+    session = stage.GetSessionLayer().GetAttributeAtPath(
+        "/Plane.primvars:usdGen:paint:density")
+    live = list(session.default) if session is not None else None
+    check(live is not None and _outsideSame(live, before, left),
+          "%s: the live groom write keeps the other half's corners" % label)
+    baked, info = loop.release(stage)
+    check(baked, "%s: the subset stroke bakes (%s)" % (label, info))
+    values = brushAuthor.BakedValues(stage, binding)
+    check(_outsideSame(values, before, left),
+          "%s: the bake never writes a face outside the subset" % label)
+    check(max(values[4 * f + k] for f in left for k in range(4)) > 0.9,
+          "%s: and paints inside it" % label)
+    check(not [p.GetName() for p in
+               stage.GetPrimAtPath("/Plane/Left").GetAuthoredProperties()
+               if p.GetName().startswith("primvars:")],
+          "%s: nothing is authored on the GeomSubset itself" % label)
+
+    state.activeBrush = "smooth"
+    painted = list(values)
+    loop.press(stage, camera, 195.0, 175.0)
+    loop.move(stage, 195.0, 160.0)
+    baked, info = loop.release(stage)
+    values = brushAuthor.BakedValues(stage, binding)
+    check(baked and _outsideSame(values, before, left)
+          and values != painted,
+          "%s: smooth relaxes the subset and nothing else (%s)"
+          % (label, info))
+    state.activeBrush = "paint"
+
+    state.value = 0.8
+    ok, info = loop.flood(stage)
+    values = brushAuthor.BakedValues(stage, binding)
+    check(ok and _outsideSame(values, before, left)
+          and all(abs(values[4 * f + k] - 0.8) < 1e-6
+                  for f in left for k in range(4)),
+          "%s: flood fills the subset faces only (%s)" % (label, info))
+
+    # A second description on the other half: its own target, its own faces.
+    state.activeDescription = ""
+    ok, info = loop.setupDescriptionFromSelection(stage, ["/Plane/Right"])
+    descRight = Sdf.Path(state.activeDescription)
+    check(ok and descRight != descLeft
+          and state.binding.faces == tuple(right),
+          "%s: a second subset grows its own description (%s)"
+          % (label, info))
+    check(brushAuthor.DescriptionForSurface(stage, "/Plane/Left")[0]
+          == descLeft
+          and brushAuthor.DescriptionForSurface(stage, "/Plane/Right")[0]
+          == descRight
+          and brushAuthor.DescriptionForSurface(stage, "/Plane")[0] is None,
+          "%s: DescriptionForSurface tells subsets of one mesh apart"
+          % label)
+    leftPaint = brushAuthor.BakedValues(stage, state.binding)
+    state.value = 0.1
+    ok, info = loop.flood(stage)
+    values = brushAuthor.BakedValues(stage, state.binding)
+    check(ok and _outsideSame(values, leftPaint, right)
+          and all(abs(values[4 * f + k] - 0.1) < 1e-6
+                  for f in right for k in range(4)),
+          "%s: flooding the right half keeps the left half's paint"
+          % label)
+    state.activeDescription = ""
+    ok, info = loop.setupDescriptionFromSelection(stage, ["/Plane/Left"])
+    check(ok and Sdf.Path(state.activeDescription) == descLeft
+          and len(brushAuthor.ListDescriptions(stage)) == 2,
+          "%s: setup on a subset adopts its description (%s)"
+          % (label, info))
+
+    # Widening the subset widens the next flood (the binding re-reads it).
+    rightPaint = brushAuthor.BakedValues(stage, state.binding)
+    UsdGeom.Subset(stage.GetPrimAtPath("/Plane/Left")).GetIndicesAttr().Set(
+        Vt.IntArray(list(range(40))))
+    state.value = 0.5
+    ok, info = loop.flood(stage)
+    values = brushAuthor.BakedValues(stage, state.binding)
+    check(ok and values[4 * 32] == values[0]
+          and abs(values[4 * 32] - 0.5) < 1e-6
+          and _outsideSame(values, rightPaint, list(range(40))),
+          "%s: a widened subset floods its new faces too (%s)"
+          % (label, info))
+
+    # Invalid subsets fail with their reason.
+    _defineSubset(stage, "/Plane/Points", [0, 1], "point")
+    _defineSubset(stage, "/Plane/Wide", [0, 64])
+    stage.DefinePrim("/Loose", "Xform")
+    _defineSubset(stage, "/Loose/Sub", [0])
+    nope, error = brushAuthor.BindSurface(stage, "/Plane/Points")
+    check(nope is None and "\"face\"" in error,
+          "%s: a point subset is rejected (%s)" % (label, error))
+    nope, error = brushAuthor.BindSurface(stage, "/Plane/Wide")
+    check(nope is None and "names face 64" in error,
+          "%s: an out-of-range subset index is rejected (%s)"
+          % (label, error))
+    nope, error = brushAuthor.EnsureDescription(stage, "/Loose/Sub")
+    check(nope is None and "not the child of a Mesh" in error,
+          "%s: a subset off a non-mesh is rejected (%s)" % (label, error))
+    state.activeDescription = ""
+    ok, error = loop.bindFromSelection(stage, ["/Plane/Points"])
+    check(not ok and "face" in error,
+          "%s: binding a selected point subset says why (%s)"
+          % (label, error))
+
+
+def testSubsetBinding(stagePath):
+    _pythonOnly(_subsetFlow, stagePath, "python")
+    if brushApi.available():
+        _subsetFlow(stagePath, "native")
+    else:
+        print("ok: native subset flow skipped (%s)" % brushApi.reason())
+
+
 def main():
     if len(sys.argv) < 2:
         print("FAIL: expected the path of test-plane.usda")
@@ -2051,10 +2350,13 @@ def main():
     testNativePick()
     testPreviewFallback(sys.argv[1])
     testFalloffBand()
+    testMaskedPick()
+    testMaskedLiveStroke()
+    testSubsetBinding(sys.argv[1])
     if FAILURES:
         print("FAIL: %d check(s) failed" % len(FAILURES))
         return 1
-    print("PASS: usdGenTools brush map, pick, bind, loop, presets, descriptions, upsample, patching, hardening, display, preset switch, flood, hardness/erase, LiveStroke (%s), auto resolution and preview fallback"
+    print("PASS: usdGenTools brush map, pick, bind, loop, presets, descriptions, upsample, patching, hardening, display, preset switch, flood, hardness/erase, LiveStroke (%s), auto resolution, preview fallback and GeomSubset face masks"
           % ("native + python" if brushApi.available() else "python only: " + brushApi.reason()))
     return 0
 

@@ -262,7 +262,11 @@ def coverageWarning(uncovered):
 
 
 def readUncoveredFaces(dll, ctx):
-    """Scalp face indices no region claims (the -1 entries of the K3 map)."""
+    """Scalp face indices no region claims (the -1 entries of the K3 map).
+
+    Parent-mesh ids. A face GeomSubset scalp's other faces read -1 too, but
+    they are not scalp (plan/02 section 2.20), so they are never reported.
+    """
     if dll is None or ctx is None:
         return []
     count = ctypes.c_int(0)
@@ -273,7 +277,22 @@ def readUncoveredFaces(dll, ctx):
     if int(dll.Tonic_ReadFaceRegions(ctx, out, count.value,
                                      ctypes.byref(count))) != 0:
         return []
-    return [i for i, region in enumerate(out[:count.value]) if region < 0]
+    active = _readFaceActive(dll, ctx, count.value)
+    return [i for i, region in enumerate(out[:count.value])
+            if region < 0 and (active is None or active[i])]
+
+
+def _readFaceActive(dll, ctx, faceCount):
+    """Per parent face 1/0 (on the growth surface), or None for "all"."""
+    read = getattr(dll, "Tonic_ReadScalpFaceActive", None)
+    if read is None:
+        return None
+    active = (ctypes.c_int * faceCount)()
+    got = ctypes.c_int(0)
+    if int(read(ctx, active, faceCount, ctypes.byref(got))) != 0 or \
+            got.value != faceCount:
+        return None
+    return active
 
 
 # The commit-failure row's action, named for the dock's tooltip/menus.

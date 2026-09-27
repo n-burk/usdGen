@@ -36,6 +36,17 @@
 # Bind resolution: None picks brushPick.suggestResolution for the mesh (auto
 # texel density; Binding.resolutionAuto records it).
 #
+# GeomSubsets (plan/02-schema.md section 2.20): a surface target may be a
+# face UsdGeomSubset of a Mesh. ResolveSurface turns it into its PARENT mesh
+# -- the primvar owner, always: nothing is ever authored on the subset --
+# plus the subset's parent-mesh face ids. The PaintMap's usdGen:paint:surface
+# and the description's usdGen:surface name the subset itself; the Binding
+# keeps surfacePath = the parent and faces = the subset's faces. The
+# faceVarying layout stays 4 corners per PARENT quad (so the parent must be
+# all-quad), strokes paint only subset faces (brushPick / brushMap face
+# mask), and every bake or live write keeps the composed values of the
+# other faces -- another description may own that paint.
+#
 # Qt-free, like exprAuthor, so the T1 suite drives it headless.
 
 import collections
@@ -131,13 +142,21 @@ def BindMaskPreset(stage, surfacePath, presetId, mapsParent=None,
 
 
 class Binding(object):
-    """A bound surface: where the stroke paints and where it bakes."""
+    """A bound surface: where the stroke paints and where it bakes.
+
+    surfacePath is the mesh that owns the primvar; for a GeomSubset target
+    that is the subset's parent, subsetPath names the subset and faces
+    holds its sorted parent-mesh face ids (None: the whole mesh)."""
 
     def __init__(self, surfacePath, mapPath, primvar=DEFAULT_PRIMVAR,
                  interpolation=DEFAULT_INTERPOLATION, storage="primvar",
                  resolution=16, channels=1, defaultValue=0.0,
-                 created=False, resolutionAuto=False, resolutionInfo=""):
+                 created=False, resolutionAuto=False, resolutionInfo="",
+                 subsetPath=None, faces=None):
         self.surfacePath = Sdf.Path(str(surfacePath))
+        self.subsetPath = (Sdf.Path(str(subsetPath))
+                           if subsetPath is not None else None)
+        self.faces = tuple(faces) if faces is not None else None
         self.mapPath = Sdf.Path(str(mapPath))
         self.primvar = str(primvar)
         self.interpolation = str(interpolation)
@@ -151,13 +170,88 @@ class Binding(object):
         self.resolutionAuto = bool(resolutionAuto)
         self.resolutionInfo = str(resolutionInfo)
 
+    @property
+    def targetPath(self):
+        """What the map (and a description) targets: the subset or mesh."""
+        return self.subsetPath if self.subsetPath is not None \
+            else self.surfacePath
+
     def propName(self):
         # plan/08 section 3.1 rows 6-8: primvars:usdGen:paint:<name>.
         return "primvars:" + self.primvar
 
     def __repr__(self):
         return ("Binding(surface=%r, map=%r, primvar=%r)" % (
-            str(self.surfacePath), str(self.mapPath), self.primvar))
+            str(self.targetPath), str(self.mapPath), self.primvar))
+
+
+SurfaceTarget = collections.namedtuple(
+    "SurfaceTarget", ("path", "meshPath", "subsetPath", "faces"))
+
+
+def ResolveSurface(stage, path):
+    """What a surface target paints. (SurfaceTarget, error).
+
+    A UsdGeomMesh resolves to itself (subsetPath and faces None). A
+    GeomSubset resolves to its parent mesh plus its sorted, unique
+    parent-mesh face ids; elementType other than "face", a parent that
+    is not a Mesh, and an index outside the parent's faces fail closed
+    (plan/02-schema.md section 2.20 rule 1). Anything else fails too."""
+    if stage is None:
+        return (None, "a brush surface needs a stage")
+    try:
+        path = Sdf.Path(str(path))
+    except (TypeError, ValueError, RuntimeError):
+        return (None, "surface path %r is not a path" % (path,))
+    prim = stage.GetPrimAtPath(path)
+    if not prim or not prim.IsValid():
+        return (None, "no such surface prim: %s" % path)
+    if UsdGeom.Mesh(prim):
+        return (SurfaceTarget(path, path, None, None), "")
+    subset = UsdGeom.Subset(prim)
+    if not subset:
+        return (None, "the brush paints a UsdGeomMesh or a face "
+                "GeomSubset of one, got %s at %s"
+                % (prim.GetTypeName() or "an untyped prim", path))
+    elementType = subset.GetElementTypeAttr().Get()
+    if elementType != UsdGeom.Tokens.face:
+        return (None, "GeomSubset %s has elementType %r; a brush surface "
+                "needs a \"face\" subset" % (path, elementType))
+    parent = prim.GetParent()
+    if not parent or not UsdGeom.Mesh(parent):
+        return (None, "GeomSubset %s is not the child of a Mesh (its "
+                "parent is %s)" % (path, (parent.GetTypeName() or "untyped")
+                                   if parent else "missing"))
+    counts = UsdGeom.Mesh(parent).GetFaceVertexCountsAttr().Get()
+    faceCount = len(counts) if counts is not None else 0
+    indices = subset.GetIndicesAttr().Get()
+    faces = sorted(set(int(i) for i in (indices if indices is not None
+                                        else [])))
+    bad = [f for f in faces if f < 0 or f >= faceCount]
+    if bad:
+        return (None, "GeomSubset %s names face %d, but its parent %s has "
+                "%d faces" % (path, bad[0], parent.GetPath(), faceCount))
+    return (SurfaceTarget(path, parent.GetPath(), path, tuple(faces)), "")
+
+
+def RefreshBindingFaces(stage, binding):
+    """Re-read a subset binding's faces from the stage. (ok, error).
+
+    The subset may have been widened or narrowed since the bind; a
+    press or flood refreshes first so the stroke masks the current
+    faces. A mesh binding is always fine."""
+    if getattr(binding, "subsetPath", None) is None:
+        return (True, "")
+    target, error = ResolveSurface(stage, binding.subsetPath)
+    if target is None:
+        return (False, error)
+    if target.meshPath != binding.surfacePath:
+        return (False, "GeomSubset %s moved off %s"
+                % (binding.subsetPath, binding.surfacePath))
+    if target.faces != binding.faces:
+        # Only on change: callers key caches on the tuple's identity.
+        binding.faces = target.faces
+    return (True, "")
 
 
 def _meshFaceCount(meshPrim):
@@ -245,13 +339,18 @@ def BindSurface(stage, surfacePath, mapName="densityPaint",
                 undoStack=None):
     """Bind the mesh at `surfacePath` to a UsdGenPaintMap. (binding, error).
 
+    surfacePath may name a face GeomSubset (ResolveSurface): the map's
+    usdGen:paint:surface targets the subset, the binding paints the
+    parent mesh's primvar on the subset's faces only.
+
     resolution None picks the texels per face edge from the mesh
     (brushPick.suggestResolution; binding.resolutionAuto is True).
 
     Defines <mapsParent>/<mapName> when it is missing (outside any change
     block), then writes the surface relationship and the paint properties
     into the current edit target inside one Sdf.ChangeBlock. Rebinding the
-    same map to a DIFFERENT surface fails closed rather than stealing it."""
+    same map to a DIFFERENT surface (another mesh, or another subset of
+    the same one) fails closed rather than stealing it."""
     if stage is None:
         return (None, "brush bind needs a stage")
     if interpolation not in INTERPOLATIONS:
@@ -272,13 +371,11 @@ def BindSurface(stage, surfacePath, mapName="densityPaint",
     if defaultValue != defaultValue:  # NaN
         return (None, "brush default must be finite")
 
-    surfacePath = Sdf.Path(str(surfacePath))
-    surface = stage.GetPrimAtPath(surfacePath)
-    if not surface or not surface.IsValid():
-        return (None, "no such surface prim: %s" % surfacePath)
-    if not UsdGeom.Mesh(surface):
-        return (None, "brush bind needs a UsdGeomMesh, got %s "
-                "at %s" % (surface.GetTypeName(), surfacePath))
+    target, error = ResolveSurface(stage, surfacePath)
+    if target is None:
+        return (None, "brush bind: %s" % error)
+    surfacePath = target.path
+    surface = stage.GetPrimAtPath(target.meshPath)
     ok, _faces, error = _meshFaceCount(surface)
     if not ok:
         return (None, error)
@@ -322,10 +419,11 @@ def BindSurface(stage, surfacePath, mapName="densityPaint",
             prim.GetAttribute(RESOLUTION_ATTR).Set(int(resolution))
             prim.GetAttribute(DEFAULT_ATTR).Set(float(defaultValue))
 
-    binding = Binding(surfacePath, mapPath, primvar, interpolation,
+    binding = Binding(target.meshPath, mapPath, primvar, interpolation,
                       storage, resolution, channels, defaultValue,
                       created=created, resolutionAuto=resolutionAuto,
-                      resolutionInfo=resolutionInfo)
+                      resolutionInfo=resolutionInfo,
+                      subsetPath=target.subsetPath, faces=target.faces)
     if undoStack is not None and created:
         layer = stage.GetEditTarget().GetLayer()
         undoStack.push(
@@ -402,6 +500,88 @@ def _gridToVt(grid, channels):
     return _toVt(flat, channels)
 
 
+def _composedCorners(surface, binding, faceCount):
+    """The composed paint primvar as numpy (F, 4, C) float64, or None.
+
+    None when it is absent, not faceVarying or not 4 * F values of the
+    binding's shape."""
+    np = _numpy()
+    primvar = UsdGeom.PrimvarsAPI(surface).GetPrimvar(binding.primvar)
+    if (not primvar or not primvar.HasValue()
+            or primvar.GetInterpolation() != "faceVarying"):
+        return None
+    raw = primvar.GetAttr().Get()
+    if raw is None or len(raw) != 4 * faceCount:
+        return None
+    try:
+        return np.array(raw, dtype=np.float64).reshape(
+            (faceCount, 4, binding.channels))
+    except (TypeError, ValueError):
+        return None
+
+
+def _composedFlat(surface, binding, faceCount):
+    """_composedCorners without numpy: [(c0[, c1, c2])] per face-vertex."""
+    primvar = UsdGeom.PrimvarsAPI(surface).GetPrimvar(binding.primvar)
+    if (not primvar or not primvar.HasValue()
+            or primvar.GetInterpolation() != "faceVarying"):
+        return None
+    raw = primvar.GetAttr().Get()
+    if raw is None or len(raw) != 4 * faceCount:
+        return None
+    flat = []
+    try:
+        for v in list(raw):
+            if binding.channels == 1:
+                flat.append((float(v),))
+            else:
+                flat.append((float(v[0]), float(v[1]), float(v[2])))
+    except (TypeError, ValueError, IndexError):
+        return None
+    return flat
+
+
+def _bindingToVt(surface, binding, grid, faceCount):
+    """The primvar value a bake or live write authors. Raises on failure.
+
+    The whole grid for a mesh binding. A subset binding takes the grid on
+    its faces only; every other face keeps the composed primvar (another
+    description may own that paint), or the binding default when there
+    is no usable primvar yet."""
+    faces = getattr(binding, "faces", None)
+    if faces is None:
+        return _gridToVt(grid, binding.channels)
+    channels = binding.channels
+    np = _numpy()
+    if np is not None:
+        try:
+            from . import brushMap
+        except ImportError:  # file-path test load
+            import brushMap
+        corners = brushMap.cornerBufferOf(grid)
+        out = _composedCorners(surface, binding, faceCount)
+        if out is None:
+            out = np.full((faceCount, 4, channels),
+                          float(binding.defaultValue))
+        if faces:
+            inside = np.asarray(faces, dtype=np.int64)
+            out[inside] = corners[inside]
+        return _cornersToVt(out, channels)
+    ok, flat = _bakeArray(None, grid)
+    if not ok:
+        raise ValueError("the grid failed to sample")
+    prior = _composedFlat(surface, binding, faceCount)
+    inside = set(faces)
+    for face in range(faceCount):
+        if face in inside:
+            continue
+        for corner in range(4):
+            i = face * 4 + corner
+            flat[i] = (prior[i] if prior is not None
+                       else (float(binding.defaultValue),) * channels)
+    return _toVt(flat, channels)
+
+
 def _primvarTypeName(channels):
     if channels == 1:
         return Sdf.ValueTypeNames.FloatArray
@@ -419,8 +599,10 @@ def BakeStroke(stage, binding, grid, undoStack=None, label="Bake paint stroke"):
 
     Corner-samples every face (brushPick's convention: corner i onto the
     i-th face-vertex) and writes the values -- and only the values -- in
-    one Sdf.ChangeBlock. (True, "") or (False, reason); pushes one undo
-    entry that restores the primvar's previous spec byte for byte."""
+    one Sdf.ChangeBlock. A subset binding changes only its faces' corners
+    (_bindingToVt), so a whole-grid flood floods the subset. (True, "")
+    or (False, reason); pushes one undo entry that restores the primvar's
+    previous spec byte for byte."""
     if stage is None:
         return (False, "brush bake needs a stage")
     if binding is None:
@@ -446,7 +628,7 @@ def BakeStroke(stage, binding, grid, undoStack=None, label="Bake paint stroke"):
                 % (binding.interpolation,))
 
     try:
-        newValue = _gridToVt(grid, binding.channels)
+        newValue = _bindingToVt(surface, binding, grid, faces)
     except Exception as exc:
         return (False, "the stroke grid failed to sample (%s)" % exc)
     layer = stage.GetEditTarget().GetLayer()
@@ -541,9 +723,12 @@ def PatchLivePrimvar(stage, binding, grid, faces):
     if channels != binding.channels:
         return (False, "the stroke grid has %d channels for a %d-channel "
                 "binding" % (channels, binding.channels))
-    dirty = sorted(set(
-        f for f in (faces or [])
-        if type(f) is int and 0 <= f < faceCount))
+    dirty = set(f for f in (faces or [])
+                if type(f) is int and 0 <= f < faceCount)
+    if getattr(binding, "faces", None) is not None:
+        # A subset binding never rewrites another face's corners.
+        dirty &= set(binding.faces)
+    dirty = sorted(dirty)
     if not dirty:
         return (True, "")
     session = stage.GetSessionLayer()
@@ -618,7 +803,7 @@ def WriteLivePrimvar(stage, binding, grid):
     if not surface or not surface.IsValid():
         return (False, "live groom needs the bound surface")
     try:
-        newValue = _gridToVt(grid, binding.channels)
+        newValue = _bindingToVt(surface, binding, grid, grid.numFaces())
     except Exception as exc:
         return (False, "the working grid failed to sample (%s)" % exc)
     try:
@@ -846,11 +1031,15 @@ def ListDescriptions(stage):
 
 
 def DescriptionForSurface(stage, surfacePath):
-    """The one description growing from the mesh, else None. (path, error).
+    """The one description growing from the surface, else None. (path, error).
 
-    Exactly-one wins: no match (a mesh-only stage) and ambiguous
-    matches (a multi-groom stage) both return None, so the caller
-    mints a fresh path or asks the user instead of guessing."""
+    surfacePath is a mesh or a face GeomSubset, matched against each
+    description's usdGen:surface target exactly: descriptions on disjoint
+    subsets of one mesh are told apart by their subset, and a subset's
+    description is not the mesh's. Exactly-one wins: no match (a
+    mesh-only stage) and ambiguous matches (two descriptions on the same
+    target) both return None, so the caller mints a fresh path or asks
+    the user instead of guessing."""
     if stage is None:
         return (None, "")
     try:
@@ -868,7 +1057,10 @@ def DescriptionForSurface(stage, surfacePath):
 
 
 def DescriptionSurface(stage, descPath):
-    """The mesh a description grows from. (surfacePath, error)."""
+    """The surface a description grows from. (surfacePath, error).
+
+    The usdGen:surface target itself: a mesh, or a face GeomSubset (bind
+    it with BindSurface; ResolveSurface names the parent mesh)."""
     if stage is None:
         return (None, "brush descriptions need a stage")
     descPath = Sdf.Path(str(descPath))
@@ -883,10 +1075,10 @@ def DescriptionSurface(stage, descPath):
     if not targets:
         return (None, "%s names no %s" % (descPath, DESCRIPTION_SURFACE_REL))
     surfacePath = Sdf.Path(targets[0].GetPrimPath())
-    surface = stage.GetPrimAtPath(surfacePath)
-    if not surface or not surface.IsValid() or not UsdGeom.Mesh(surface):
-        return (None, "%s names %s, which is not a UsdGeomMesh"
-                % (descPath, surfacePath))
+    target, error = ResolveSurface(stage, surfacePath)
+    if target is None:
+        return (None, "%s names %s, which is not a UsdGeomMesh or a face "
+                "GeomSubset (%s)" % (descPath, surfacePath, error))
     return (surfacePath, "")
 
 
@@ -1176,8 +1368,9 @@ def _EnsureOperators(stage, descPath, createdPaths=None):
 
 def SetupDescription(stage, surfacePath, descPath=None, groomParent=None,
                      undoStack=None):
-    """Define a ready-to-cook UsdGenDescription on the mesh. (path, error).
+    """Define a ready-to-cook UsdGenDescription on the surface. (path, error).
 
+    The surface is a mesh or a face GeomSubset (EnsureDescription).
     EnsureDescription plus the Scatter -> Grow -> Clump -> Curl ->
     Width chain in pipeline-bottom-up prim order (a re-run
     upgrades an old two-op description in place): an
@@ -1408,22 +1601,22 @@ def EnsurePaintWiring(stage, descPath, presetId, undoStack=None):
 
 def EnsureDescription(stage, surfacePath, descPath=None, groomParent=None,
                       undoStack=None):
-    """Define a UsdGenDescription growing from the mesh. (path, error).
+    """Define a UsdGenDescription growing from the surface. (path, error).
 
-    `descPath` defaults to an unused /Groom/Description[N]. An existing
-    UsdGenDescription there is adopted when it names no other surface;
-    anything else fails closed rather than stealing it. Structural
-    (Define outside any change block), undoable via SetActive(False)
-    like a bind."""
+    The surface is a mesh or a face GeomSubset of one; usdGen:surface
+    targets it as given, so a subset's description roots on the subset's
+    faces only. `descPath` defaults to an unused /Groom/Description[N].
+    An existing UsdGenDescription there is adopted when it names no
+    other surface; anything else fails closed rather than stealing it.
+    Structural (Define outside any change block), undoable via
+    SetActive(False) like a bind."""
     if stage is None:
         return (None, "brush descriptions need a stage")
-    surfacePath = Sdf.Path(str(surfacePath))
-    surface = stage.GetPrimAtPath(surfacePath)
-    if not surface or not surface.IsValid():
-        return (None, "no such surface prim: %s" % surfacePath)
-    if not UsdGeom.Mesh(surface):
-        return (None, "a description grows from a UsdGeomMesh, got %s "
-                "at %s" % (surface.GetTypeName(), surfacePath))
+    target, error = ResolveSurface(stage, surfacePath)
+    if target is None:
+        return (None, "a description grows from a UsdGeomMesh or a face "
+                "GeomSubset: %s" % error)
+    surfacePath = target.path
     if descPath is None:
         descPath, error = UniqueDescriptionPath(stage, groomParent)
         if descPath is None:

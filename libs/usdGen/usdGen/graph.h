@@ -35,7 +35,7 @@ constexpr uint32_t kUsdGenMaxExtraPlaneSlots = 16;
 /// One UsdGenPaintMap a node samples: the surface primvar whose edits must
 /// re-capture the node (the brush bakes the primvar, never the map prim, so
 /// the map-prim row alone would leave the snapshot stale). `surface` indexes
-/// UsdGenGraphRoutingSnapshot::surfacePaths.
+/// UsdGenGraphRoutingSnapshot::meshPaths, the prim that carries the primvar.
 struct UsdGenPaintRoutingRef
 {
     UsdGenSurfaceId surface = 0;
@@ -62,7 +62,11 @@ struct UsdGenGraphRoutingNode
 struct UsdGenGraphRoutingSnapshot
 {
     SdfPath description;
+    /// Per desc.surfaces entry: the bound target, and the Mesh prim whose
+    /// points, topology and primvars it reads. They differ only for a
+    /// GeomSubset target, whose own prim carries just indices and type (R15).
     std::vector<SdfPath> surfacePaths;
+    std::vector<SdfPath> meshPaths;
     std::vector<UsdGenGraphRoutingNode> nodes;
     UsdGenNodeId terminal = kUsdGenInvalidNode;
 };

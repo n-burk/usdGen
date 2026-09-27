@@ -71,6 +71,8 @@ def make(dense, simulated):
     # A reversed pair for baking the regression fixture; hidden guide purpose.
     reverse=UsdGeom.Points.Define(s,'/World/RegionSeedsReverse')
     reverse.CreatePointsAttr([(.25,0,.5),(-.25,0,.5)]);reverse.CreatePurposeAttr('guide')
+    reverse.CreateWidthsAttr([.003,.003])
+    reverse.CreateVisibilityAttr('invisible')
     s.DefinePrim('/World/Motion/Groom','Scope')
     desc=s.DefinePrim('/World/Motion/Groom/Hair','UsdGenDescription');desc.AddAppliedSchema('UsdGenLookAPI')
     desc.CreateRelationship('usdGen:surface').SetTargets([surface.GetPath()])

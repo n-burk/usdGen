@@ -1808,6 +1808,68 @@ main(int argc, char **argv)
                   "V8: the same-face patch model destroys");
         }
         Check(Tonic_Destroy(sc) == TONIC_OK, "V8: the scalp model destroys");
+
+        // plan/02 §2.20: a face GeomSubset scalp tints its own faces only.
+        // The faces a subset leaves out are not scalp, so the coarse base
+        // must not paint them as uncovered (or at all).
+        TonicModelContext *subsetCtx = nullptr;
+        Check(Tonic_Create(&subsetCtx) == TONIC_OK && subsetCtx != nullptr,
+              "subset tint: the model creates");
+        if (subsetCtx) {
+            int const keep[] = {0, 1, 2, 3, 4, 6, 7, 8,
+                                9, 10, 11, 12, 13, 14, 15};  // all but 5
+            Check(Tonic_BindScalpSubset(subsetCtx, points.data(),
+                                        int(points.size()), counts.data(),
+                                        int(counts.size()), indices.data(),
+                                        int(indices.size()), keep, 15) ==
+                          TONIC_OK &&
+                      Tonic_Rasterise(subsetCtx) == TONIC_OK &&
+                      Tonic_Activate(subsetCtx) == TONIC_OK &&
+                      Tonic_Publish(subsetCtx, ~0u) >= 1,
+                  "subset tint: the subset scalp binds and publishes");
+            VtIntArray tintCounts, tintIndices, tintRegions;
+            HdContainerDataSourceHandle const tintPrim =
+                tonic->GetPrim(regions).dataSource;
+            if (HdSampledDataSourceHandle const ds = SampledAt(
+                    tintPrim, HdDataSourceLocator(TfToken("mesh"),
+                                                  TfToken("topology"),
+                                                  TfToken("faceVertexCounts")))) {
+                VtValue const v = ds->GetValue(0.0f);
+                if (v.IsHolding<VtIntArray>()) {
+                    tintCounts = v.UncheckedGet<VtIntArray>();
+                }
+            }
+            if (HdSampledDataSourceHandle const ds = SampledAt(
+                    tintPrim, HdDataSourceLocator(TfToken("mesh"),
+                                                  TfToken("topology"),
+                                                  TfToken("faceVertexIndices")))) {
+                VtValue const v = ds->GetValue(0.0f);
+                if (v.IsHolding<VtIntArray>()) {
+                    tintIndices = v.UncheckedGet<VtIntArray>();
+                }
+            }
+            ArraySize<VtIntArray>(*tonic, regions, "usdGen:tonicRegion", 15,
+                                  &tintRegions);
+            bool uncovered = tintRegions.size() == 15;
+            for (int id : tintRegions) {
+                uncovered = uncovered && id == -1;
+            }
+            // Face 5 is the quad (6, 11, 12, 7) of the parent grid.
+            bool holeDrawn = false;
+            for (size_t f = 0; f < tintIndices.size() / 4; ++f) {
+                holeDrawn = holeDrawn || (tintIndices[f * 4 + 0] == 6 &&
+                                          tintIndices[f * 4 + 1] == 11 &&
+                                          tintIndices[f * 4 + 2] == 12 &&
+                                          tintIndices[f * 4 + 3] == 7);
+            }
+            Check(tintCounts.size() == 15 && tintIndices.size() == 60 &&
+                      uncovered && !holeDrawn,
+                  "subset tint: only the 15 subset faces are tinted uncovered "
+                  "(got " + std::to_string(tintCounts.size()) + ")");
+            Check(Tonic_Deactivate(subsetCtx) == TONIC_OK &&
+                      Tonic_Destroy(subsetCtx) == TONIC_OK,
+                  "subset tint: the model destroys");
+        }
         Check(Tonic_Activate(ctx) == TONIC_OK && Tonic_Publish(ctx, ~0u) >= 1,
               "V8: the first model comes back for the teardown checks");
     }

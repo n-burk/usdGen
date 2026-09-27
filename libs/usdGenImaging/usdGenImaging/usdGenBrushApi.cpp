@@ -141,6 +141,8 @@ struct MeshData {
     std::vector<float> edges;     // longest edge per face
     std::vector<float> meanEdges; // mean edge per face
     std::vector<Vec3> bmin, bmax; // per face
+    // Face mask (a GeomSubset's faces): empty = every face paintable.
+    std::vector<uint8_t> allowed;
     // Grid.
     bool hasGrid = false;
     int cells[3] = {1, 1, 1};
@@ -158,6 +160,8 @@ struct MeshData {
     mutable uint32_t stampId = 0;
 
     int NumFaces() const { return int(faces.size() / 4); }
+
+    bool Allowed(int f) const { return allowed.empty() || allowed[size_t(f)] != 0; }
 
     uint32_t NextStamp() const
     {
@@ -218,29 +222,37 @@ struct MeshData {
         BuildGrid(lo, hi);
     }
 
+    // Over paintable faces only: a masked mesh smooths like the subset's own
+    // submesh, so paint outside the mask never bleeds in at its border.
     void BuildAdjacency()
     {
         size_t const P = points.size();
         int const F = NumFaces();
         std::vector<uint32_t> count(P + 1, 0);
-        for (int v : faces) ++count[size_t(v) + 1];
+        for (int f = 0; f < F; ++f)
+            if (Allowed(f))
+                for (int i = 0; i < 4; ++i) ++count[size_t(faces[size_t(f) * 4 + size_t(i)]) + 1];
         cornerStart.assign(P + 1, 0);
         for (size_t p = 0; p < P; ++p) cornerStart[p + 1] = cornerStart[p] + count[p + 1];
-        cornerList.assign(faces.size(), 0);
+        cornerList.assign(cornerStart[P], 0);
         std::vector<uint32_t> fill(cornerStart.begin(), cornerStart.end() - 1);
-        for (int f = 0; f < F; ++f)
+        for (int f = 0; f < F; ++f) {
+            if (!Allowed(f)) continue;
             for (int i = 0; i < 4; ++i) {
                 int const v = faces[size_t(f) * 4 + size_t(i)];
                 cornerList[fill[size_t(v)]++] = f * 4 + i;
             }
+        }
         // Edge neighbours: corner i's previous and next vertex on each face.
         std::vector<std::vector<int>> nbrs(P);
-        for (int f = 0; f < F; ++f)
+        for (int f = 0; f < F; ++f) {
+            if (!Allowed(f)) continue;
             for (int i = 0; i < 4; ++i) {
                 int const v = faces[size_t(f) * 4 + size_t(i)];
                 nbrs[size_t(v)].push_back(faces[size_t(f) * 4 + size_t((i + 1) % 4)]);
                 nbrs[size_t(v)].push_back(faces[size_t(f) * 4 + size_t((i + 3) % 4)]);
             }
+        }
         nbrStart.assign(P + 1, 0);
         nbrList.clear();
         for (size_t p = 0; p < P; ++p) {
@@ -338,7 +350,8 @@ struct MeshData {
         return true;
     }
 
-    // Nearest hit: (face, u, v, dist). Ties keep the lower face id.
+    // Nearest hit: (face, u, v, dist). Ties keep the lower face id. Every
+    // face occludes; a nearest hit on a masked face is a miss.
     bool Pick(Vec3 const &o, Vec3 const &d, int *outFace, float *outU, float *outV,
               double *outDist) const
     {
@@ -419,7 +432,7 @@ struct MeshData {
                 cell[ax] += step[ax];
             }
         }
-        if (best < 0) return false;
+        if (best < 0 || !Allowed(best)) return false;
         *outFace = best;
         *outU = bu;
         *outV = bv;
@@ -536,9 +549,10 @@ struct MeshData {
         float u, v, radiusUV;
     };
 
-    // The dab's footprint: primary first (exact u, v), then every other face
-    // within the world radius, ascending face id, each with the dab centre
-    // in its own unclamped (u, v) frame (may lie outside [0, 1]).
+    // The dab's footprint: primary first (exact u, v), then every other
+    // paintable face within the world radius, ascending face id, each with
+    // the dab centre in its own unclamped (u, v) frame (may lie outside
+    // [0, 1]).
     void Footprint(int face, float u, float v, Vec3 const &point, double worldR,
                    bool primaryRadiusGiven, float primaryRadiusUV,
                    std::vector<Stamp> *out) const
@@ -555,7 +569,7 @@ struct MeshData {
         std::vector<int> candidates;
         Nearby(point, limit, &candidates);
         for (int other : candidates) {
-            if (other == face) continue;
+            if (other == face || !Allowed(other)) continue;
             double const edge = edges[size_t(other)];
             if (edge <= 1e-12) continue;
             double box = 0.0;
@@ -872,6 +886,14 @@ int UsdGenBrush_ApiVersion(void) { return USDGEN_BRUSH_API_VERSION; }
 void *UsdGenBrush_MeshCreate(const double *worldPoints, int numPoints,
                              const int *faceVertexIndices, int numFaces)
 {
+    return UsdGenBrush_MeshCreateMasked(worldPoints, numPoints, faceVertexIndices, numFaces,
+                                        nullptr, 0);
+}
+
+void *UsdGenBrush_MeshCreateMasked(const double *worldPoints, int numPoints,
+                                   const int *faceVertexIndices, int numFaces,
+                                   const int *maskFaces, int maskCount)
+{
     try {
         if (!worldPoints || !faceVertexIndices || numPoints <= 0 || numFaces <= 0) return nullptr;
         auto data = std::make_shared<MeshData>();
@@ -885,6 +907,15 @@ void *UsdGenBrush_MeshCreate(const double *worldPoints, int numPoints,
         data->faces.assign(faceVertexIndices, faceVertexIndices + size_t(numFaces) * 4);
         for (int v : data->faces)
             if (v < 0 || v >= numPoints) return nullptr;
+        if (maskFaces) {
+            if (maskCount < 0) return nullptr;
+            data->allowed.assign(size_t(numFaces), 0);
+            for (int k = 0; k < maskCount; ++k) {
+                int const f = maskFaces[k];
+                if (f < 0 || f >= numFaces) return nullptr;
+                data->allowed[size_t(f)] = 1;
+            }
+        }
         data->Build();
         auto *handle = new MeshHandle;
         handle->data = std::move(data);
@@ -906,6 +937,13 @@ int UsdGenBrush_MeshFaceCount(void *mesh)
 {
     MeshData const *m = MeshOf(mesh);
     return m ? m->NumFaces() : -1;
+}
+
+int UsdGenBrush_MeshFaceInMask(void *mesh, int face)
+{
+    MeshData const *m = MeshOf(mesh);
+    if (!m || face < 0 || face >= m->NumFaces()) return -1;
+    return m->Allowed(face) ? 1 : 0;
 }
 
 int UsdGenBrush_MeshPick(void *mesh, const double *rayOrigin3, const double *rayDir3,
@@ -1061,6 +1099,7 @@ int UsdGenBrush_StrokeDab(void *stroke, int face, float u, float v, float radius
         if (channel < -1 || channel >= s->channels) return -8;
         if (mode < 0 || mode > 3 || falloff < 0 || falloff > 2) return -9;
         if (isMove && (!std::isfinite(spacing) || spacing <= 0.0f || spacing > 1.0f)) return -10;
+        if (s->mesh && !s->mesh->Allowed(face)) return -11;
         UsdGenBrushDab dab;
         dab.face = face;
         dab.u = u;

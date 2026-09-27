@@ -110,8 +110,8 @@ def braid(combined):
 
 
 def main():
-    scenes = [('felt_sphere_animated',build_sphere()),
-              ('felt_sphere_groom_outside_xform',build_sphere(outside=True)),
+    scenes = [('felt_sphere_animated',build_sphere(studio=True)),
+              ('felt_sphere_groom_outside_xform',build_sphere(outside=True,studio=True)),
               ('braid_animated_guides',braid(False)),
               ('braid_animated_guides_and_surface',braid(True))]
     for name, stage in scenes:

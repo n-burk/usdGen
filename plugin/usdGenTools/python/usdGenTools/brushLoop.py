@@ -23,6 +23,12 @@
 # working grid showed; the base is never mutated, which is what makes a
 # stroke idempotent and abortable.
 #
+# GeomSubsets: a mesh or a face GeomSubset binds (brushAuthor.ResolveSurface).
+# A subset binding paints its parent mesh's primvar, and press masks the
+# snapshot to the subset's current faces, so picks outside it miss and no
+# stamp, spill or smooth writes another face; flood and every bake keep the
+# other faces' composed values.
+#
 # Qt-free: the viewport filter feeds this loop camera-resolved picks, and
 # the T1 suite drives it with a hand-built camera and stage. No Qt import.
 
@@ -149,11 +155,19 @@ class BrushLoop(object):
 
     # -- bind -----------------------------------------------------------
 
-    def bindFromSelection(self, stage, paths, **options):
-        """Bind the first mesh among the selected prim paths. (ok, info).
+    @staticmethod
+    def _isSurfacePrim(prim):
+        """A mesh, or a GeomSubset (BindSurface validates it: a non-face
+        subset or one off a Mesh fails with its reason, not a skip)."""
+        from pxr import UsdGeom
+        return bool(UsdGeom.Mesh(prim)) or bool(UsdGeom.Subset(prim))
 
-        With an active description the selection is ignored: the bind
-        goes to the description's surface and Maps scope instead."""
+    def bindFromSelection(self, stage, paths, **options):
+        """Bind the first mesh or face GeomSubset selected. (ok, info).
+
+        A subset binds its parent mesh's primvar and paints only its
+        faces. With an active description the selection is ignored: the
+        bind goes to the description's surface and Maps scope instead."""
         if stage is None:
             return (False, "brush bind needs a stage")
         self._stage = stage
@@ -166,8 +180,7 @@ class BrushLoop(object):
             prim = stage.GetPrimAtPath(path)
             if not prim or not prim.IsValid():
                 continue
-            from pxr import UsdGeom
-            if not UsdGeom.Mesh(prim):
+            if not self._isSurfacePrim(prim):
                 continue
             binding, error = brushAuthor.BindSurface(
                 stage, prim.GetPath(), undoStack=self._state.undoStack,
@@ -177,9 +190,10 @@ class BrushLoop(object):
             old = self._state.binding
             self._state.binding = binding
             self._showBindingDisplay(stage, old)
-            return (True, "bound %s -> %s" % (binding.surfacePath,
+            return (True, "bound %s -> %s" % (binding.targetPath,
                                               binding.mapPath))
-        return (False, "select a mesh prim to bind the brush to")
+        return (False, "select a mesh (or a face GeomSubset) to bind the "
+                "brush to")
 
     def _bindResolution(self):
         """None (auto texel density) or the manual power-of-two size."""
@@ -193,19 +207,20 @@ class BrushLoop(object):
     def setupDescriptionFromSelection(self, stage, paths):
         """Define a ready-to-cook description on the first mesh. (ok, info).
 
-        The new description becomes the paint target: its Maps scope
-        holds the active preset's PaintMap."""
+        A selected face GeomSubset grows the description from its faces
+        only (usdGen:surface targets the subset). The new description
+        becomes the paint target: its Maps scope holds the active
+        preset's PaintMap."""
         if stage is None:
             return (False, "brush descriptions need a stage")
         if self.gestureActive():
             return (False, "finish the live stroke first")
         self._stage = stage
-        from pxr import UsdGeom
         for path in paths or []:
             prim = stage.GetPrimAtPath(path)
             if not prim or not prim.IsValid():
                 continue
-            if not UsdGeom.Mesh(prim):
+            if not self._isSurfacePrim(prim):
                 continue
             descPath, error = brushAuthor.SetupDescription(
                 stage, prim.GetPath(), undoStack=self._state.undoStack)
@@ -215,7 +230,8 @@ class BrushLoop(object):
             if ok:
                 return (True, "setup %s" % descPath)
             return (False, "setup %s, but %s" % (descPath, info))
-        return (False, "select a mesh prim to grow the description from")
+        return (False, "select a mesh (or a face GeomSubset) to grow the "
+                "description from")
 
     def paintToDescription(self, stage, descPath):
         """Paint the active preset into `descPath`'s Maps scope. (ok, info).
@@ -355,7 +371,7 @@ class BrushLoop(object):
             self._showBindingDisplay(stage, binding)
             return (True, "already painting %s" % preset.id)
         newBinding, error = brushAuthor.BindMaskPreset(
-            stage, binding.surfacePath, preset.id,
+            stage, binding.targetPath, preset.id,
             mapsParent=binding.mapPath.GetParentPath(),
             undoStack=self._state.undoStack,
             interpolation=binding.interpolation,
@@ -381,9 +397,11 @@ class BrushLoop(object):
         """Fill the bound map with the brush value. (ok, info).
 
         One undoable bake over every texel (the channel row scopes it:
-        all channels, or one); the display redraws from the flooded
-        primvar, and the bake cooks like any other. Refuses mid-stroke:
-        the gesture owns the base until release or Escape."""
+        all channels, or one) -- of the subset's faces only for a
+        GeomSubset binding (BakeStroke keeps every other face); the
+        display redraws from the flooded primvar, and the bake cooks like
+        any other. Refuses mid-stroke: the gesture owns the base until
+        release or Escape."""
         if stage is None:
             return (False, "brush flood needs a stage")
         binding = self._state.binding
@@ -406,6 +424,9 @@ class BrushLoop(object):
         if channel != -1 and not 0 <= channel < binding.channels:
             return (False, "channel %r is out of range for a %d-channel "
                     "binding" % (channel, binding.channels))
+        ok, error = brushAuthor.RefreshBindingFaces(stage, binding)
+        if not ok:
+            return (False, error)
         grid, error = brushAuthor.BaseGridFromStage(stage, binding)
         if grid is None:
             return (False, error)
@@ -505,8 +526,15 @@ class BrushLoop(object):
         if camera is None or not camera.invertible:
             return (False, "no camera")
         self._stage = stage
-        surface = stage.GetPrimAtPath(self._state.binding.surfacePath)
-        snapshot, error = brushPick.snapshotMesh(surface)
+        binding = self._state.binding
+        # A subset binding masks the snapshot to the subset's CURRENT faces
+        # (the pick misses, and the footprint and smooth stop, outside them).
+        ok, error = brushAuthor.RefreshBindingFaces(stage, binding)
+        if not ok:
+            return (False, error)
+        surface = stage.GetPrimAtPath(binding.surfacePath)
+        snapshot, error = brushPick.snapshotMesh(
+            surface, getattr(binding, "faces", None))
         if snapshot is None:
             return (False, error)
         base, error = brushAuthor.BaseGridFromStage(stage,

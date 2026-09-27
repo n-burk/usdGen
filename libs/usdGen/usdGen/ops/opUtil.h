@@ -92,6 +92,7 @@ inline double RestSurfaceArea(UsdGenGraphDesc const *desc, UsdGenSurfaceId surfa
     if (!desc || !hasSurface || surface >= desc->surfaces.size()) return 0.0;
     UsdGenSurfaceDesc const *mesh = &desc->surfaces[surface];
     VtIntArray const subset = mesh->subsetFaces;
+    bool const restricted = UsdGenSurfaceRestricted(*mesh);
     if (mesh->faceVertexCounts.empty()) {
         SdfPath const parent = mesh->path.GetParentPath();
         mesh = nullptr;
@@ -118,7 +119,7 @@ inline double RestSurfaceArea(UsdGenGraphDesc const *desc, UsdGenSurfaceId surfa
         return 0.5 * sum.GetLength();
     };
     double area = 0.0;
-    if (!subset.empty()) {
+    if (restricted) {
         for (int f : subset)
             if (f >= 0 && size_t(f) < mesh->faceVertexCounts.size()) area += faceArea(size_t(f));
     } else {

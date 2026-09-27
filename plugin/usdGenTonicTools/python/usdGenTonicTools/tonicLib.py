@@ -233,6 +233,14 @@ class Library:
         dll.Tonic_BindScalp.argtypes = [cvp, cfp, ctypes.c_int, cip,
                                         ctypes.c_int, cip, ctypes.c_int]
         dll.Tonic_BindScalp.restype = ctypes.c_int
+        # A face GeomSubset scalp: the parent mesh's arrays plus its
+        # parent-mesh face ids (plan/02 section 2.20).
+        dll.Tonic_BindScalpSubset.argtypes = [cvp, cfp, ctypes.c_int, cip,
+                                              ctypes.c_int, cip, ctypes.c_int,
+                                              cip, ctypes.c_int]
+        dll.Tonic_BindScalpSubset.restype = ctypes.c_int
+        dll.Tonic_ReadScalpFaceActive.argtypes = [cvp, cip, ctypes.c_int, cip]
+        dll.Tonic_ReadScalpFaceActive.restype = ctypes.c_int
         dll.Tonic_HasScalp.argtypes = [cvp]
         dll.Tonic_HasScalp.restype = ctypes.c_int
         dll.Tonic_Raycast.argtypes = [cvp, cfp, cfp, cip, cip, cfp, cfp, cfp]
@@ -635,6 +643,9 @@ class Library:
         dll.Tonic_CommitterCancelCooks.restype = ctypes.c_int
         dll.Tonic_CommitterSetScalpPath.argtypes = [cvp, ctypes.c_char_p]
         dll.Tonic_CommitterSetScalpPath.restype = ctypes.c_int
+        dll.Tonic_CommitterSetScalpTarget.argtypes = [cvp, ctypes.c_char_p,
+                                                      ctypes.c_char_p]
+        dll.Tonic_CommitterSetScalpTarget.restype = ctypes.c_int
         dll.Tonic_CommitterDetach.argtypes = [cvp]
         dll.Tonic_CommitterDetach.restype = ctypes.c_int
         dll.Tonic_CommitterReattach.argtypes = [cvp]

@@ -1871,10 +1871,25 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
     VtIntArray faceRegions;
     if (scalp && scalp->finalized) {
         size_t const vertexCount = scalp->points.size() / 3;
-        scalpCounts.assign(scalp->faceVertexCounts.begin(),
-                           scalp->faceVertexCounts.end());
-        scalpIndices.assign(scalp->faceVertexIndices.begin(),
-                            scalp->faceVertexIndices.end());
+        // A face GeomSubset scalp tints its own faces only: the rest of the
+        // parent mesh is not scalp, so painting it "uncovered" would be a
+        // lie (plan/02 §2.20). The whole-mesh case keeps the bulk copy.
+        if (scalp->activeFaces.empty()) {
+            scalpCounts.assign(scalp->faceVertexCounts.begin(),
+                               scalp->faceVertexCounts.end());
+            scalpIndices.assign(scalp->faceVertexIndices.begin(),
+                                scalp->faceVertexIndices.end());
+        } else {
+            for (int f : scalp->activeFaces) {
+                int const off = scalp->faceOffsets[size_t(f)];
+                int const n = scalp->faceVertexCounts[size_t(f)];
+                scalpCounts.push_back(n);
+                scalpIndices.insert(
+                    scalpIndices.end(),
+                    scalp->faceVertexIndices.begin() + off,
+                    scalp->faceVertexIndices.begin() + off + n);
+            }
+        }
         scalpPoints.assign(vertexCount, GfVec3f(0.0f));
         std::vector<GfVec3f> vertexNormal(vertexCount, GfVec3f(0.0f));
         for (size_t f = 0; f + 1 < scalp->faceOffsets.size(); ++f) {
@@ -1974,6 +1989,9 @@ UsdGenTonicSceneIndex::_BuildGraphPrims(usdGenTonic::TonicModel &model,
                 GfVec3f const colour(rgb.r, rgb.g, rgb.b);
                 size_t const scalpFaceCount = scalp->faceVertexCounts.size();
                 for (size_t f = 0; f < scalpFaceCount; ++f) {
+                    if (!usdGenTonic::TonicScalpFaceActive(*scalp, int(f))) {
+                        continue;  // outside the face subset: no patch
+                    }
                     int const n = scalp->faceVertexCounts[f];
                     int const off = scalp->faceOffsets[f];
                     if (n < 3 || off < 0 ||

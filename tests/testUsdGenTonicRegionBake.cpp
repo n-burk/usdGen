@@ -49,6 +49,7 @@
 // headers so their std::min/std::max are already parsed.
 #include <Ptexture.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1111,6 +1112,102 @@ void CheckBakeLevelsAbi()
     fs::remove_all(dir, ec);
 }
 
+// plan/02 §2.20: a face GeomSubset scalp still bakes every PARENT face
+// (ptex ids are parent-derived and never renumbered), but a face the subset
+// leaves out is never claimed: one texel of -1 even inside a region, on the
+// synchronous CPU bake and on the worker (whose GPU lane classifies when a
+// device exists). The same graph bound whole claims those faces.
+void CheckSubsetBake()
+{
+    using namespace usdGenTonic;
+    Grid const grid = MakeGrid(4);
+    // Faces 5 and 6 (x in [1, 2], z in [1, 3]) lie inside region A.
+    std::vector<int> const subsetFaces = {0, 1, 2, 3, 4, 7, 8, 9,
+                                          10, 11, 12, 13, 14, 15};
+    TonicModel model;
+    TonicModel whole;
+    Check(model.BindScalp(grid.points, grid.counts, grid.indices,
+                          subsetFaces) &&
+              whole.BindScalp(grid.points, grid.counts, grid.indices),
+          "subset bake: the scalp binds through a face subset and whole");
+    BuildAdjoining(&model, *model.GetScalp(), 4);
+    BuildAdjoining(&whole, *whole.GetScalp(), 4);
+    Check(model.Rasterise() && whole.Rasterise(), "subset bake: K3 runs");
+
+    fs::path const dir =
+        fs::temp_directory_path() / "testUsdGenTonicSubsetRegionBake";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    auto inputFor = [&](TonicModel const &from) {
+        TonicBakeInput input;
+        input.scalp = from.GetScalp();
+        input.graph = from.GetGraph();
+        input.outDir = dir.string();
+        return input;
+    };
+    auto readFaces = [](std::string const &path,
+                        std::vector<std::vector<float>> *out) {
+        out->clear();
+        Ptex::String error;
+        PtexPtr<PtexTexture> tex(
+            PtexTexture::open(path.c_str(), error, /*premultiply=*/false));
+        if (!tex || tex->numChannels() != 1) {
+            return false;
+        }
+        for (int f = 0; f < tex->numFaces(); ++f) {
+            Ptex::Res const res = tex->getFaceInfo(f).res;
+            out->emplace_back(size_t(res.size()), 0.0f);
+            tex->getData(f, out->back().data(), 0);
+        }
+        return true;
+    };
+    auto claims = [](std::vector<float> const &texels, float id) {
+        return std::find(texels.begin(), texels.end(), id) != texels.end();
+    };
+    auto leftOutUnclaimed = [](std::vector<std::vector<float>> const &faces) {
+        bool ok = faces.size() == 16;
+        for (int f : {5, 6}) {
+            ok = ok && faces[size_t(f)].size() == 1 &&
+                 faces[size_t(f)][0] == -1.0f;
+        }
+        return ok;
+    };
+
+    std::vector<std::vector<float>> texels;
+    std::string const wholePath =
+        (dir / TonicBakeFileName("wholeMap", 1)).string();
+    std::vector<std::vector<float>> cache;
+    std::string err;
+    Check(TonicBakePtex(inputFor(whole), wholePath, nullptr, &cache, nullptr,
+                        &err) &&
+              readFaces(wholePath, &texels) && texels.size() == 16 &&
+              claims(texels[5], 0.0f) && claims(texels[6], 0.0f),
+          "subset bake: bound whole, region A claims faces 5 and 6: " + err);
+
+    std::string const syncPath =
+        (dir / TonicBakeFileName("regionMap", 1)).string();
+    cache.clear();
+    Check(TonicBakePtex(inputFor(model), syncPath, nullptr, &cache, nullptr,
+                        &err) &&
+              readFaces(syncPath, &texels) && leftOutUnclaimed(texels) &&
+              claims(texels[1], 0.0f) && claims(texels[9], 1.0f),
+          "subset bake: the CPU bake keeps 16 parent faces and bakes the "
+          "left-out ones as one unclaimed texel: " + err);
+
+    TonicBakeWorker worker;
+    uint64_t const version = model.GetMapVersion();
+    worker.Enqueue(version, inputFor(model));
+    std::string workerPath;
+    uint64_t done = 0;
+    Check(worker.WaitCompleted(version) &&
+              worker.TakeCompleted(&done, &workerPath) && done == version &&
+              readFaces(workerPath, &texels) && leftOutUnclaimed(texels) &&
+              claims(texels[1], 0.0f) && claims(texels[9], 1.0f),
+          "subset bake: the worker (GPU lane when present) agrees");
+    fs::remove_all(dir, ec);
+}
+
 }  // namespace
 
 int
@@ -1125,6 +1222,7 @@ main()
     CheckSweepAfterSwap();
     CheckTexelResolutionOverride();
     CheckBakeLevelsAbi();
+    CheckSubsetBake();
     std::printf("%d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -337,6 +337,157 @@ int main()
         UsdGenBrush_MeshDestroy(wideMesh);
     }
 
+    // ---- face mask: a GeomSubset's faces are the only paintable ones --------
+    {
+        // Columns i <= 1 of the 4 x 4 plane are the subset.
+        std::vector<int> mask;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i <= 1; ++i) mask.push_back(plane.Face(i, j));
+        mask.push_back(plane.Face(0, 0));  // duplicates are harmless
+        int const P = int(plane.points.size() / 3);
+        void *masked = UsdGenBrush_MeshCreateMasked(plane.points.data(), P, plane.indices.data(),
+                                                    F, mask.data(), int(mask.size()));
+        Check(masked != nullptr && UsdGenBrush_MeshFaceCount(masked) == F,
+              "a masked mesh keeps every parent face");
+        Check(UsdGenBrush_MeshFaceInMask(masked, plane.Face(1, 2)) == 1 &&
+                  UsdGenBrush_MeshFaceInMask(masked, plane.Face(2, 2)) == 0 &&
+                  UsdGenBrush_MeshFaceInMask(mesh, plane.Face(2, 2)) == 1 &&
+                  UsdGenBrush_MeshFaceInMask(masked, F) < 0,
+              "MeshFaceInMask reports the mask (an unmasked mesh allows all)");
+        int const outside[1] = {F};
+        Check(UsdGenBrush_MeshCreateMasked(plane.points.data(), P, plane.indices.data(), F,
+                                           outside, 1) == nullptr &&
+                  UsdGenBrush_MeshCreateMasked(plane.points.data(), P, plane.indices.data(), F,
+                                               mask.data(), -1) == nullptr,
+              "an out-of-range mask id or a negative count is rejected");
+        void *none = UsdGenBrush_MeshCreateMasked(plane.points.data(), P, plane.indices.data(),
+                                                  F, mask.data(), 0);
+        Check(none != nullptr && UsdGenBrush_MeshFaceInMask(none, 0) == 0,
+              "an empty mask masks every face out");
+        UsdGenBrush_MeshDestroy(none);
+
+        double const d[3] = {0.0, -1.0, 0.0};
+        int face = -1;
+        float u = 0, v = 0;
+        double p[3];
+        double const inside[3] = {1.5, 2.0, 1.5};
+        double const off[3] = {2.25, 2.0, 1.75};
+        Check(UsdGenBrush_MeshPick(masked, inside, d, &face, &u, &v, p) == 1 &&
+                  face == plane.Face(1, 1),
+              "a pick inside the mask hits");
+        Check(UsdGenBrush_MeshPick(masked, off, d, &face, &u, &v, p) == 0,
+              "a pick on a masked face is a miss");
+        {
+            // Two stacked planes: the upper one (y = 1) is masked out and
+            // must still occlude the paintable lower one.
+            Plane two = MakePlane(2);
+            int const half = int(two.points.size() / 3);
+            std::vector<double> pts = two.points;
+            for (int k = 0; k < half; ++k) {
+                pts.push_back(two.points[size_t(k) * 3]);
+                pts.push_back(1.0);
+                pts.push_back(two.points[size_t(k) * 3 + 2]);
+            }
+            std::vector<int> idx = two.indices;
+            for (int k : two.indices) idx.push_back(k + half);
+            int const lower[4] = {0, 1, 2, 3};
+            void *stack = UsdGenBrush_MeshCreateMasked(pts.data(), 2 * half, idx.data(), 8,
+                                                       lower, 4);
+            double const above[3] = {0.5, 5.0, 0.5};
+            double const below[3] = {0.5, -5.0, 0.5};
+            double const up[3] = {0.0, 1.0, 0.0};
+            Check(stack && UsdGenBrush_MeshPick(stack, above, d, &face, &u, &v, p) == 0,
+                  "a masked face in front occludes (miss, not a paint-through)");
+            Check(stack && UsdGenBrush_MeshPick(stack, below, up, &face, &u, &v, p) == 1 &&
+                      face == 0,
+                  "the unoccluded side of the subset still picks");
+            UsdGenBrush_MeshDestroy(stack);
+        }
+
+        int faces[64];
+        float us[64], vs[64], rs[64];
+        int const n = UsdGenBrush_MeshFootprint(masked, plane.Face(1, 1), 0.95f, 0.5f, nullptr,
+                                                0.6f, faces, us, vs, rs, 64);
+        bool clean = n >= 2 && faces[0] == plane.Face(1, 1);
+        bool spilled = false;
+        for (int i = 1; i < n; ++i) {
+            clean = clean && UsdGenBrush_MeshFaceInMask(masked, faces[i]) == 1;
+            spilled = spilled || faces[i] == plane.Face(1, 2);
+        }
+        Check(clean && spilled,
+              "the footprint spills onto subset neighbours only (" + std::to_string(n) +
+                  " faces)");
+
+        // A hard set dab right on the subset border: masked faces stay at the
+        // base, and only subset faces come back touched.
+        void *stroke = UsdGenBrush_StrokeCreate(masked, F, 8, 1, nullptr, 0.0f);
+        Check(UsdGenBrush_StrokeDab(stroke, plane.Face(2, 1), 0.5f, 0.5f, 0.5f, 1.0f, 1.0f, 1.0f,
+                                    0, USDGEN_BRUSH_MODE_SET, USDGEN_BRUSH_FALLOFF_SMOOTH, 0,
+                                    0.5f) == -11 &&
+                  UsdGenBrush_StrokeDabCount(stroke) == 0,
+              "a dab on a masked face is rejected (-11), nothing recorded");
+        UsdGenBrush_StrokeDab(stroke, plane.Face(1, 1), 1.0f, 0.5f, 1.5f, 1.0f, 1.0f, 1.0f, 0,
+                              USDGEN_BRUSH_MODE_SET, USDGEN_BRUSH_FALLOFF_SMOOTH, 0, 0.5f);
+        UsdGenBrush_StrokeDab(stroke, plane.Face(1, 2), 1.0f, 0.9f, 1.5f, 1.0f, 1.0f, 1.0f, 0,
+                              USDGEN_BRUSH_MODE_SET, USDGEN_BRUSH_FALLOFF_SMOOTH, 1, 0.5f);
+        std::vector<float> c = Corners(stroke, F);
+        bool outsideZero = true, insidePainted = false;
+        for (int f = 0; f < F; ++f)
+            for (int k = 0; k < 4; ++k) {
+                if (UsdGenBrush_MeshFaceInMask(masked, f) == 0)
+                    outsideZero = outsideZero && c[size_t(f) * 4 + size_t(k)] == 0.0f;
+                else
+                    insidePainted = insidePainted || c[size_t(f) * 4 + size_t(k)] == 1.0f;
+            }
+        Check(outsideZero && insidePainted,
+              "a border set dab paints subset corners and never a masked face");
+        std::vector<int> touched(64, -1);
+        int const nTouched = UsdGenBrush_StrokeTakeTouched(stroke, touched.data(), 64);
+        bool touchedInside = nTouched > 0;
+        for (int i = 0; i < nTouched; ++i)
+            touchedInside = touchedInside && UsdGenBrush_MeshFaceInMask(masked, touched[size_t(i)]) == 1;
+        Check(touchedInside, "only subset faces come back touched");
+        std::vector<float> committed(c.size());
+        UsdGenBrush_StrokeCommitCorners(stroke, committed.data());
+        Check(committed == c, "a masked stroke commits exactly the working grid");
+        UsdGenBrush_StrokeDestroy(stroke);
+
+        // Smooth along the subset border: subset = 1, outside = 0. The masked
+        // smoother averages paintable faces only, so the border corners keep
+        // 1 and the outside keeps 0; the unmasked one pulls both across.
+        std::vector<float> base(size_t(F) * 4);
+        for (int j = 0; j < 4; ++j)
+            for (int i = 0; i < 4; ++i)
+                for (int k = 0; k < 4; ++k) base[size_t(plane.Face(i, j)) * 4 + k] = i <= 1 ? 1.0f : 0.0f;
+        auto smoothBorder = [&](void *m) {
+            void *s = UsdGenBrush_StrokeCreate(m, F, 8, 1, base.data(), 1.0f);
+            for (int j = 0; j < 4; ++j)
+                UsdGenBrush_StrokeDab(s, plane.Face(1, j), 1.0f, 0.5f, 1.0f, 0.5f, 1.0f, 0.0f, 0,
+                                      USDGEN_BRUSH_MODE_SMOOTH, USDGEN_BRUSH_FALLOFF_SMOOTH, 0,
+                                      0.5f);
+            std::vector<float> out = Corners(s, F);
+            std::vector<float> again(out.size());
+            UsdGenBrush_StrokeCommitCorners(s, again.data());
+            UsdGenBrush_StrokeDestroy(s);
+            return std::make_pair(out, again == out);
+        };
+        auto const maskedSmooth = smoothBorder(masked);
+        auto const openSmooth = smoothBorder(mesh);
+        float const borderMasked = maskedSmooth.first[size_t(plane.Face(1, 1)) * 4 + 1];
+        float const borderOpen = openSmooth.first[size_t(plane.Face(1, 1)) * 4 + 1];
+        bool outsideKept = true;
+        for (int j = 0; j < 4; ++j)
+            for (int i = 2; i < 4; ++i)
+                for (int k = 0; k < 4; ++k)
+                    outsideKept = outsideKept &&
+                                  maskedSmooth.first[size_t(plane.Face(i, j)) * 4 + size_t(k)] == 0.0f;
+        Check(outsideKept && borderMasked == 1.0f && borderOpen < 0.9f && maskedSmooth.second,
+              "masked smooth never writes outside faces nor pulls their paint in (border " +
+                  std::to_string(borderMasked) + " masked, " + std::to_string(borderOpen) +
+                  " open)");
+        UsdGenBrush_MeshDestroy(masked);
+    }
+
     // ---- per-move cost on a 100k-face mesh ---------------------------------
     {
         Plane const big = MakePlane(317);  // 100,489 faces

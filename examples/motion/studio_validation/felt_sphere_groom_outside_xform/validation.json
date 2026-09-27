@@ -1,0 +1,26 @@
+{
+  "scene": "felt_sphere_groom_outside_xform.usda",
+  "sceneLightsOnly": true,
+  "renderers": {
+    "storm": {
+      "plugin": "HdStormRendererPlugin",
+      "converged": true,
+      "lightRemovalMeanPixelDifferences": {
+        "Key": 2.7353906250000004,
+        "Fill": 0.9074262152777778,
+        "Back": 0.5355729166666667,
+        "Environment": 40.29306134259259
+      }
+    },
+    "moonray": {
+      "plugin": "HdMoonrayRendererDebugPlugin",
+      "converged": true,
+      "lightRemovalMeanPixelDifferences": {
+        "Key": 2.5263715277777776,
+        "Fill": 0.7382103587962963,
+        "Back": 0.3476302083333333,
+        "Environment": 0.22550491898148148
+      }
+    }
+  }
+}

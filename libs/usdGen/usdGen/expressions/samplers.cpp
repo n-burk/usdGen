@@ -97,6 +97,11 @@ bool ValidateSource(SamplerGeometrySource const &s, size_t index, std::string *e
         return Fail(error, where + " has a malformed rest point array");
     if (!s.normals.empty() && (s.normals.size() != s.points.size() || !Finite(s.normals)))
         return Fail(error, where + " has a malformed normal array");
+    if ((s.subset || !s.faces.empty()) && s.kind != SamplerGeometrySource::Kind::Mesh)
+        return Fail(error, where + " restricts faces but is not a mesh");
+    for (int face : s.faces)
+        if (face < 0 || size_t(face) >= s.counts.size())
+            return Fail(error, where + " has a subset face out of range");
     switch (s.kind) {
     case SamplerGeometrySource::Kind::Points:
         if (!s.ids.empty() && s.ids.size() != pointCount)
@@ -306,19 +311,45 @@ bool GeometrySampler::Build(std::vector<SamplerGeometrySource> const &sources,
         size_t const pointCount = src.points.size() / 3;
         auto restAt = [&](size_t i) { return rest ? rest + i * 3 : nullptr; };
 
+        // A mesh subset visits only its faces' corners (offsets[f] ..
+        // offsets[f + 1]) and the points they use.
+        std::vector<size_t> offsets;
+        std::vector<char> faceUsed, pointUsed;
+        if (src.kind == SamplerGeometrySource::Kind::Mesh) {
+            offsets.assign(src.counts.size() + 1, 0);
+            for (size_t f = 0; f < src.counts.size(); ++f)
+                offsets[f + 1] = offsets[f] + size_t(src.counts[f]);
+            if (src.subset) {
+                faceUsed.assign(src.counts.size(), 0);
+                pointUsed.assign(pointCount, 0);
+                for (int f : src.faces) {
+                    faceUsed[size_t(f)] = 1;
+                    for (size_t c = offsets[size_t(f)]; c < offsets[size_t(f) + 1]; ++c)
+                        pointUsed[size_t(src.indices[c])] = 1;
+                }
+            }
+        }
+        auto visitsPoint = [&](size_t i) { return pointUsed.empty() || pointUsed[i]; };
+        auto visitsFace = [&](size_t f) { return faceUsed.empty() || faceUsed[f]; };
+
         if (spec.iterate == SampleIterate::Geometry) {
             double centroid[3]{}, restCentroid[3]{};
-            for (size_t i = 0; i < pointCount; ++i)
+            size_t visited = 0;
+            for (size_t i = 0; i < pointCount; ++i) {
+                if (!visitsPoint(i)) continue;
+                ++visited;
                 for (int d = 0; d < 3; ++d) {
                     centroid[d] += pts[i * 3 + d];
                     restCentroid[d] += (rest ? rest : pts)[i * 3 + d];
                 }
+            }
+            if (src.subset && !visited) continue;  // an empty subset is no element
             float c[3]{}, rc[3]{};
             for (int d = 0; d < 3; ++d) {
-                c[d] = pointCount ? float(centroid[d] / double(pointCount)) : 0.0f;
-                rc[d] = pointCount ? float(restCentroid[d] / double(pointCount)) : 0.0f;
+                c[d] = visited ? float(centroid[d] / double(visited)) : 0.0f;
+                rc[d] = visited ? float(restCentroid[d] / double(visited)) : 0.0f;
             }
-            element(c, rc, c, rc, nullptr, uint64_t(s), s, 0, pointCount, 0.0, 0.0);
+            element(c, rc, c, rc, nullptr, uint64_t(s), s, 0, visited, 0.0, 0.0);
             continue;
         }
 
@@ -363,20 +394,22 @@ bool GeometrySampler::Build(std::vector<SamplerGeometrySource> const &sources,
             if (spec.iterate == SampleIterate::Point) {
                 std::vector<size_t> owner(pointCount, primBase);
                 std::vector<char> seen(pointCount, 0);
-                size_t corner = 0;
                 for (size_t f = 0; f < src.counts.size(); ++f) {
-                    for (int k = 0; k < src.counts[f]; ++k) {
-                        size_t const v = size_t(src.indices[corner + size_t(k)]);
+                    if (!visitsFace(f)) continue;
+                    for (size_t c = offsets[f]; c < offsets[f + 1]; ++c) {
+                        size_t const v = size_t(src.indices[c]);
                         if (!seen[v]) { seen[v] = 1; owner[v] = primBase + f; }
                     }
-                    corner += size_t(src.counts[f]);
                 }
                 for (size_t i = 0; i < pointCount; ++i)
-                    element(pts + i * 3, restAt(i), pts + i * 3, restAt(i),
-                            vertexNormals.data() + i * 3, uint64_t(i), owner[i], 0, 1, 0.0, 0.0);
+                    if (visitsPoint(i))
+                        element(pts + i * 3, restAt(i), pts + i * 3, restAt(i),
+                                vertexNormals.data() + i * 3, uint64_t(i), owner[i], 0, 1,
+                                0.0, 0.0);
             } else {
-                size_t corner = 0;
                 for (size_t f = 0; f < src.counts.size(); ++f) {
+                    if (!visitsFace(f)) continue;
+                    size_t const corner = offsets[f];
                     int const n = src.counts[f];
                     double centroid[3]{}, restCentroid[3]{};
                     for (int k = 0; k < n; ++k) {
@@ -393,7 +426,6 @@ bool GeometrySampler::Build(std::vector<SamplerGeometrySource> const &sources,
                     }
                     element(c, rc, c, rc, faceNormals.data() + f * 3, uint64_t(f),
                             primBase + f, 0, size_t(n), 0.0, 0.0);
-                    corner += size_t(n);
                 }
             }
             primBase += src.counts.size();

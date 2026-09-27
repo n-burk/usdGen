@@ -315,6 +315,8 @@ expr::SamplerGeometrySource ToSamplerSource(UsdGenGraphDesc const &desc,
     source.counts.assign(geometry.counts.cbegin(), geometry.counts.cend());
     source.indices.assign(geometry.indices.cbegin(), geometry.indices.cend());
     source.ids.assign(geometry.ids.cbegin(), geometry.ids.cend());
+    source.subset = geometry.isSubset;
+    source.faces.assign(geometry.subsetFaces.cbegin(), geometry.subsetFaces.cend());
     return source;
 }
 
@@ -541,16 +543,18 @@ bool UsdGenCpuParameters::PrepareSamplers(UsdGenGraphDesc const &desc,
         if (state.paint) {
             // Paint: one value per strand, bilinearly sampled from the
             // faceVarying snapshot at the strand root's face-local (u, v).
-            // v1 requires the paint surface to be the root surface: root
-            // face ids index that mesh's faces. Non-quad faces, degenerate
+            // v1 requires the paint surface to be the root surface's mesh:
+            // root face ids index that mesh's faces (a GeomSubset root
+            // surface keeps its parent's ids, R15). Non-quad faces, degenerate
             // quads and unreadable corners fall back to the face mean, so a
             // paint read never fails a cook on sampling alone.
             UsdGenMapDesc const *map = FindMap(desc, state.map);
             if (!map || map->paintValues.empty()) continue;  // Resolve warned; strands read the fallback
-            if (map->paintSurface != surface->path)
+            SdfPath const rootMesh = UsdGenSurfaceMeshPath(*surface);
+            if (map->paintSurface != rootMesh)
                 return fail(state, call + ": " + map->path.GetString() + " paints " +
                             map->paintSurface.GetString() + ", not the root surface " +
-                            surface->path.GetString());
+                            rootMesh.GetString());
             if (map->paintValues.size() != size_t(faceOffsets.back()))
                 return fail(state, call + ": " + map->path.GetString() + " carries " +
                             std::to_string(map->paintValues.size()) + " paint values for " +

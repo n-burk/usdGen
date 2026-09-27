@@ -254,9 +254,9 @@ scene.append('# here the head itself is ~%s x %s x %s cm and strands are 3-6cm).
     fmt(2 * RX), fmt(2 * RY), fmt(2 * RZ)))
 scene.append('#')
 scene.append('# FADE MECHANISM')
-scene.append('#   Scatter roots the whole Head ellipsoid uniformly (UsdGenScatter has no')
-scene.append('#   per-face density mask on the CPU lane -- usdGen:density is one groom-wide')
-scene.append('#   scalar, and binding usdGen:surface to a GeomSubset instead fails closed:')
+scene.append('#   Scatter roots the whole Head ellipsoid uniformly (usdGen:density is one')
+scene.append('#   groom-wide scalar; binding usdGen:surface to a scalp GeomSubset would')
+scene.append('#   restrict the roots, but with a hard edge, and a fade is graded:')
 scene.append('#   see the Head mesh comment below). An expression')
 scene.append('#   (Expressions/scalpFade, elevation -> [0, 1], elevation being the mesh\'s')
 scene.append('#   own "v" -- 1 at the crown, 0 at the far pole) shrinks each strand toward')
@@ -375,17 +375,12 @@ scene.append('    }')
 scene.append('')
 
 # Head mesh ------------------------------------------------------------
-# usdGen:surface docs it can target a Mesh or a GeomSubset (ADR R15), which
-# would have restricted Scatter to a scalp cap for free. In this build the
-# CPU Scatter op reads desc.surfaces[node.surface] directly -- the SAME
-# entry the GeomSubset itself resolves to, which the builder only ever
-# populates with subsetFaces, never the parent's faceVertexCounts/restPoints
-# (that walk-up merge, cpuParameters.cpp's RootSurface(), is used for
-# geoSampler lookups but not wired into Scatter's own surface binding) -- so
-# binding usdGen:surface straight to a GeomSubset fails closed with "has no
-# topology; 0 roots". Scatter is bound to the whole Head mesh instead, and
-# the elevation fade below (Expressions/scalpFade + Length's cullThreshold)
-# does the same job: it is a real per-strand fade, not a spatial density
+# usdGen:surface can target a Mesh or a face GeomSubset (ADR R15; see
+# examples/subset-scatter-plane.usda), and a scalp-cap subset would restrict
+# Scatter to it. It is not used here: a subset cuts the roots off at face
+# boundaries, and a barbershop fade is graded. Scatter is bound to the whole
+# Head mesh, and the elevation fade below (Expressions/scalpFade + Length's
+# cullThreshold) does the job: it is a real per-strand fade, not a spatial density
 # cut, so every follicle exists everywhere but only survives, visibly, on
 # and above the fade band -- which is what a barbershop fade looks like
 # anyway (follicle density is uniform; only visible length varies).
@@ -520,7 +515,7 @@ scene.append('                    float usdGen:lift.connect = </World/Groom/Hair
 scene.append('                }')
 scene.append('')
 scene.append('                # Runs first: roots over the whole Head (see the mesh comment above')
-scene.append('                # on why this cannot be restricted to a scalp subset).')
+scene.append('                # on why this is not restricted to a scalp subset).')
 scene.append('                def UsdGenScatter "scatter"')
 scene.append('                {')
 scene.append('                    int usdGen:seed = 41')

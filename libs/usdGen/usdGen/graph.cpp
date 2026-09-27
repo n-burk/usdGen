@@ -62,8 +62,11 @@ UsdGenGraph::RoutingSnapshot() const
     if (_desc) {
         snapshot->description = _desc->description;
         snapshot->surfacePaths.reserve(_desc->surfaces.size());
-        for (auto const &surface : _desc->surfaces)
+        snapshot->meshPaths.reserve(_desc->surfaces.size());
+        for (auto const &surface : _desc->surfaces) {
             snapshot->surfacePaths.push_back(surface.path);
+            snapshot->meshPaths.push_back(UsdGenSurfaceMeshPath(surface));
+        }
     }
     snapshot->nodes.reserve(_nodes.size());
     for (auto const &nodePtr : _nodes) {
@@ -102,8 +105,8 @@ UsdGenGraph::RoutingSnapshot() const
                     if (map.type != TfToken("UsdGenPaintMap")) break;
                     if (map.paintPrimvar.IsEmpty()) break;
                     for (size_t s = 0;
-                         s < snapshot->surfacePaths.size(); ++s) {
-                        if (snapshot->surfacePaths[s] != map.paintSurface)
+                         s < snapshot->meshPaths.size(); ++s) {
+                        if (snapshot->meshPaths[s] != map.paintSurface)
                             continue;
                         UsdGenPaintRoutingRef ref;
                         ref.surface = static_cast<UsdGenSurfaceId>(s);

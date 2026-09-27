@@ -1,0 +1,178 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "GeomSubset surfaces: two descriptions grow from face subsets of one plane, one of them from the union of two subsets."
+)
+
+# usdGen:surface (and usdGen:colliders, usdGen:paint:surface, an expression's
+# input:<name>, usdGen:tonic:scalp) accepts a face GeomSubset wherever it
+# accepts a Mesh (plan/02-schema.md §2.20, ADR R15):
+#
+#   * A subset is the stock form: a GeomSubset child of the Mesh with
+#     elementType = "face" and PARENT-mesh face indices. familyName is for
+#     artists only; usdGen never reads it.
+#   * Scatter roots only on the subset's faces, with exactly the roots (ids,
+#     positions) the whole mesh would give those faces, so widening a subset
+#     adds strands without re-rolling the existing ones.
+#   * Face ids, ptex ids, rest points (UsdGenRestAPI) and paint primvars stay
+#     on the parent Mesh; deformation follows the whole parent.
+#   * Several targets on the same mesh are unioned (Mane below binds two
+#     subsets); a face named twice scatters once. An empty subset scatters
+#     nothing. A non-face subset, or an index outside the mesh, is a hard
+#     diagnostic and the description publishes nothing.
+#
+# The 4 x 4 plane's face f is column f % 4, row f / 4 (x and z, 0.5 apart).
+#
+# View it:   .\bin\launch_usdview.ps1 examples\subset-scatter-plane.usda
+# Record it: .\bin\record_usd.ps1 -Scene examples\subset-scatter-plane.usda `
+#                -Output out.png -Camera /World/Cam
+
+def Xform "World"
+{
+    # Eye (3.3, 2.4, 3.6) looking at (1, 0.1, 1), Y up.
+    def Camera "Cam"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = ( (0.748997, 0.000000, -0.662574, 0), (-0.365963, 0.833622, -0.413698, 0), (0.552336, 0.552336, 0.624380, 0), (3.3, 2.4, 3.6, 1) )
+        float2 clippingRange = (0.05, 50)
+        float focalLength = 35
+        float horizontalAperture = 24
+        float verticalAperture = 18
+    }
+
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 10
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-10, 40, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        asset inputs:texture:file = @./maps/StinsonBeach.hdr@
+        float inputs:intensity = 2
+        color3f inputs:color = (1, 1, 1)
+    }
+
+    # 2 x 2 units in the XZ plane facing +Y (counter-clockwise from +Y).
+    def Mesh "Plane" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 5, 6, 1, 1, 6, 7, 2, 2, 7, 8, 3, 3, 8, 9, 4,
+            5, 10, 11, 6, 6, 11, 12, 7, 7, 12, 13, 8, 8, 13, 14, 9,
+            10, 15, 16, 11, 11, 16, 17, 12, 12, 17, 18, 13, 13, 18, 19, 14,
+            15, 20, 21, 16, 16, 21, 22, 17, 17, 22, 23, 18, 18, 23, 24, 19
+        ]
+        point3f[] points = [
+            (0, 0, 0), (0.5, 0, 0), (1, 0, 0), (1.5, 0, 0), (2, 0, 0),
+            (0, 0, 0.5), (0.5, 0, 0.5), (1, 0, 0.5), (1.5, 0, 0.5), (2, 0, 0.5),
+            (0, 0, 1), (0.5, 0, 1), (1, 0, 1), (1.5, 0, 1), (2, 0, 1),
+            (0, 0, 1.5), (0.5, 0, 1.5), (1, 0, 1.5), (1.5, 0, 1.5), (2, 0, 1.5),
+            (0, 0, 2), (0.5, 0, 2), (1, 0, 2), (1.5, 0, 2), (2, 0, 2)
+        ]
+        texCoord2f[] primvars:st = [
+            (0, 0), (0.25, 0), (0.5, 0), (0.75, 0), (1, 0),
+            (0, 0.25), (0.25, 0.25), (0.5, 0.25), (0.75, 0.25), (1, 0.25),
+            (0, 0.5), (0.25, 0.5), (0.5, 0.5), (0.75, 0.5), (1, 0.5),
+            (0, 0.75), (0.25, 0.75), (0.5, 0.75), (0.75, 0.75), (1, 0.75),
+            (0, 1), (0.25, 1), (0.5, 1), (0.75, 1), (1, 1)
+        ] (
+            interpolation = "vertex"
+        )
+        color3f[] primvars:displayColor = [(0.25, 0.25, 0.28)]
+
+        # The diagonal band: faces on and just right of the diagonal.
+        def GeomSubset "Stripe"
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "usdGenSurfaces"
+            int[] indices = [0, 1, 5, 6, 10, 11, 15]
+        }
+
+        # The far-left corner; face 12 is named twice on purpose (a union
+        # with Stripe, which does not contain it, still scatters it once).
+        def GeomSubset "Corner"
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "usdGenSurfaces"
+            int[] indices = [8, 12, 13, 12]
+        }
+
+        # The near-right corner face, for the long tuft.
+        def GeomSubset "Tip"
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "usdGenSurfaces"
+            int[] indices = [3]
+        }
+    }
+
+    # A plain Xform parent keeps the descriptions on the CPU lane, which
+    # Storm displays (scatter-grow-plane.usda explains why).
+    def Xform "Groom"
+    {
+        # Bound to two subsets of one mesh: they union into one surface.
+        def UsdGenDescription "Mane"
+        {
+            rel usdGen:surface = [
+                </World/Plane/Stripe>,
+                </World/Plane/Corner>,
+            ]
+            uniform token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.004
+
+            def Scope "Ops"
+            {
+                def UsdGenGrow "grow"
+                {
+                    int usdGen:seed = 19
+                    int usdGen:segments = 5
+                    float usdGen:length = 0.25
+                    float2 usdGen:lengthRandom = (0.7, 1.3)
+                    uniform token usdGen:direction = "surfaceNormal"
+                }
+
+                # usdGen:density is per unit area of the SUBSET's faces, so
+                # the band is exactly as dense as the whole plane would be.
+                def UsdGenScatter "scatter"
+                {
+                    int usdGen:seed = 41
+                    float usdGen:density = 600
+                }
+            }
+        }
+
+        def UsdGenDescription "Tuft"
+        {
+            rel usdGen:surface = </World/Plane/Tip>
+            uniform token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.006
+
+            def Scope "Ops"
+            {
+                def UsdGenGrow "grow"
+                {
+                    int usdGen:seed = 7
+                    int usdGen:segments = 8
+                    float usdGen:length = 0.6
+                    float2 usdGen:lengthRandom = (0.9, 1.1)
+                    uniform token usdGen:direction = "surfaceNormal"
+                }
+
+                def UsdGenScatter "scatter"
+                {
+                    int usdGen:seed = 3
+                    float usdGen:density = 300
+                }
+            }
+        }
+    }
+}

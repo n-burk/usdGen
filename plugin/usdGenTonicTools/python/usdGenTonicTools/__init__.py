@@ -68,6 +68,25 @@ def _validMeshPrim(prim):
     return all(0 <= index < pointCount for index in indices)
 
 
+def _scalpTargetError(stage, path):
+    """"" when `path` can bind as the scalp, else why not.
+
+    A Mesh must pass the full topology contract; a face GeomSubset must
+    resolve (plan/02 section 2.20: elementType "face", directly under a
+    Mesh, in-range parent face indices) and its parent must pass it. The
+    malformed-Mesh wording is the one the dock has always shown.
+    """
+    from .tonicSession import resolveScalpTarget
+    meshPrim, _faces, error = resolveScalpTarget(stage, path)
+    if meshPrim is None:
+        return error
+    if not _validMeshPrim(meshPrim):
+        return ("%s is not a valid scalp mesh. It needs points, faces of "
+                "three or more vertices and face indices inside the point "
+                "list." % meshPrim.GetPath())
+    return ""
+
+
 def container():
     """The live plugin container, or None outside usdview.
 
@@ -329,11 +348,18 @@ class UsdGenTonicToolsPluginContainer(PluginContainer):
 
     def isValidGeometry(self, usdviewApi, scalpPath):
         """Return whether a stage path satisfies the binding mesh contract."""
+        return not self.geometryError(usdviewApi, scalpPath)
+
+    def geometryError(self, usdviewApi, scalpPath):
+        """"" when a stage path (Mesh or face GeomSubset) can bind, else why.
+        """
         try:
-            prim = usdviewApi.stage.GetPrimAtPath(str(scalpPath))
-        except (AttributeError, TypeError, ValueError, RuntimeError):
-            return False
-        return _validMeshPrim(prim)
+            stage = usdviewApi.stage
+        except AttributeError:
+            stage = None
+        if stage is None:
+            return "no stage to bind %s from" % scalpPath
+        return _scalpTargetError(stage, str(scalpPath))
 
     def bindGeometry(self, usdviewApi, scalpPath, replace=False,
                      resume=None):
@@ -357,15 +383,16 @@ class UsdGenTonicToolsPluginContainer(PluginContainer):
         try:
             stage = usdviewApi.stage
             path = str(scalpPath)
-            prim = stage.GetPrimAtPath(path)
         except (AttributeError, TypeError, ValueError, RuntimeError):
             self._status(usdviewApi, "Tonic: no stage mesh at %s" % scalpPath)
             return False
         # This complete topology check must happen before the old model can
-        # be deactivated: activate() tears down an existing model first.
-        if not _validMeshPrim(prim):
-            self._status(usdviewApi,
-                         "Tonic: %s is not a valid scalp mesh" % path)
+        # be deactivated: activate() tears down an existing model first. A
+        # face GeomSubset binds its parent Mesh's faces (plan/02 2.20); a
+        # bad subset is refused here, by name, never bound as the mesh.
+        error = _scalpTargetError(stage, path)
+        if error:
+            self._status(usdviewApi, "Tonic: %s" % error)
             return False
         current = str(getattr(session, "scalpPath", "") or "")
         if getattr(session, "model", None) is not None:

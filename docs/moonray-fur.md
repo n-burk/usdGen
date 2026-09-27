@@ -112,6 +112,25 @@ that local sessions are unsupported by this client. Choose the in-process
 delegate for this build. The earlier blanket statement that interactive
 MoonRay rendering was broken is superseded by this verification.
 
+## Scene-authored lookdev settings
+
+The local hdMoonray build now consumes the active `UsdRenderSettings` prim
+selected by the stage's `renderSettingsPrimPath`. Both plugins register the
+render-settings filtering and dependency-forwarding scene indices before
+Hydra constructs its scene-index chain. Namespaced attributes such as
+`moonray:sceneVariable:sampling_mode = "adaptive"` override the host settings;
+`disableMotionBlur` is also honored. Use enum names rather than numeric RDL
+values, because the generic value converter interprets numbers as enum ordinals.
+
+Changes apply live. Deactivating or removing the settings prim restores host
+settings, and removed SceneVariables overrides reset to their native defaults.
+This does not implement offline render-product export: viewport framing and
+resolution remain controlled by the host. Restart usdview to load rebuilt DLLs.
+
+`examples/felt/check_groom.py` checks the actual renderer values, the exported
+SceneVariables, live edits and removal using **Moonray (debug)**. The felt sphere
+uses a 32–128 sample adaptive lookdev preset with restrained secondary sampling.
+
 ## Known limits
 
 Material binding policy is renderer-specific. Storm suppresses bindings at

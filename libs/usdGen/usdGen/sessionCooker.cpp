@@ -24,6 +24,7 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -308,6 +309,8 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixArray(&h1, geometry.rest);
         _CacheMixArray(&h0, geometry.normals);
         _CacheMixArray(&h1, geometry.ids);
+        _CacheMixArray(&h0, geometry.subsetFaces);
+        _CacheMix(&h1, geometry.isSubset ? 1u : 0u);
         _CacheMixMatrix(&h0, geometry.worldMatrix);
         _CacheMix(&h1, geometry.generation);
     }
@@ -393,6 +396,7 @@ UsdGenEpoch _ExecutionPlanDigest(UsdGenGraph const &graph,
         _CacheMixArray(&h0, surface.velocities);
         _CacheMixArray(&h1, surface.uv);
         _CacheMixArray(&h0, surface.subsetFaces);
+        _CacheMix(&h1, surface.isSubset ? 1u : 0u);
         // Paint density the brush bakes: a repaint must miss the cache,
         // or the stale pre-stroke roots publish and the groom freezes.
         _CacheMixArray(&h1, surface.densityMultiplier);
@@ -1920,9 +1924,14 @@ UsdGenStats publishedStats, bool invalidateValues,
         // through the scalp (Unreal injects the opaque depth for the same
         // reason). Deformed points at this frame, in the same world space the
         // tiles were transformed into.
+        // A GeomSubset surface carries its whole parent mesh, which occludes
+        // whole and once, however many subsets of it the groom binds.
         occlusion.occluders.reserve(_desc.surfaces.size());
+        std::set<SdfPath> occludingMeshes;
         for (UsdGenSurfaceDesc const &surface : _desc.surfaces) {
             if (surface.points.empty() || surface.faceVertexIndices.empty())
+                continue;
+            if (!occludingMeshes.insert(UsdGenSurfaceMeshPath(surface)).second)
                 continue;
             UsdGenFurOccluder occluder;
             occluder.points = surface.points;

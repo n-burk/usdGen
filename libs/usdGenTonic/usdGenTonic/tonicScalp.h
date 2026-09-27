@@ -18,6 +18,14 @@
 //     sampler documents (corner k, edge-midpoint k/k+1, centroid, edge-midpoint
 //     k-1/k); u = (k + fu) / n carries the winning sub-face k, v = fv.
 // TonicFacePosition inverts the encoding exactly.
+//
+// Face subsets (plan/02 §2.20): a UsdGeomSubset scalp binds its parent
+// Mesh whole and names the growth surface in TonicScalpMesh::activeFaces.
+// Face ids, ptex ids and every per-face array stay parent-mesh indexed (a
+// subset never renumbers faces); only the surface queries -- the LBVH and
+// so every raycast, closest point, region raster -- skip inactive faces.
+// The device edge trace (TonicLaunchEdgeTrace) is a test-only twin that
+// still walks every face.
 #ifndef USDGEN_TONIC_SCALP_H
 #define USDGEN_TONIC_SCALP_H
 
@@ -37,8 +45,13 @@ struct USDGENTONIC_API TonicScalpMesh {
     std::vector<int> faceVertexCounts;
     std::vector<int> faceVertexIndices;
     std::vector<int> faceOffsets;  // F+1, filled by TonicScalpFinalize
+    // The face subset: parent-mesh face ids the growth surface is limited
+    // to; empty binds every face. TonicScalpFinalize sorts and de-dupes it
+    // and rejects an out-of-range id.
+    std::vector<int> activeFaces;
 
     // Derived per-face data, filled by TonicScalpFinalize:
+    std::vector<char> faceActive;      // F, 1 = on the growth surface
     std::vector<float> faceCentroids;  // 3F
     std::vector<float> faceNormals;    // 3F, Newell, unit length
     std::vector<float> faceAreas;      // F
@@ -54,8 +67,17 @@ struct USDGENTONIC_API TonicScalpMesh {
 };
 
 // Validates topology, fills faceOffsets and every derived field. Returns
-// false with *err set on bad topology (short faces, out-of-range indices).
+// false with *err set on bad topology (short faces, out-of-range indices)
+// or a face subset naming a face the mesh does not have.
 USDGENTONIC_API bool TonicScalpFinalize(TonicScalpMesh *mesh, std::string *err);
+
+// Whether coarse face `face` is on the growth surface: in range, and in the
+// face subset when one is bound.
+inline bool TonicScalpFaceActive(TonicScalpMesh const &mesh, int face)
+{
+    return face >= 0 && size_t(face) < mesh.faceVertexCounts.size() &&
+           (mesh.faceActive.empty() || mesh.faceActive[size_t(face)] != 0);
+}
 
 // One LBVH node. Leaves hold a Morton-order run of faces (one face per leaf
 // in this implementation); interior nodes hold child indices. The layout is
@@ -76,8 +98,9 @@ struct USDGENTONIC_API TonicScalpBvh {
     bool valid = false;
 };
 
-// Builds the LBVH over the mesh faces (Morton sort + radix tree + bottom-up
-// AABBs). Empty meshes build an empty-but-valid BVH (root -1).
+// Builds the LBVH over the active faces (Morton sort + radix tree +
+// bottom-up AABBs), so a raycast never lands outside a face subset. Empty
+// meshes build an empty-but-valid BVH (root -1).
 USDGENTONIC_API bool TonicScalpBvhBuild(TonicScalpMesh const &mesh,
                                        TonicScalpBvh *bvh, std::string *err);
 // Recomputes every node AABB from the current rest points after a deform.
@@ -105,11 +128,14 @@ USDGENTONIC_API TonicHit TonicRaycastCpu(TonicScalpMesh const &mesh,
                                         float const origin[3],
                                         float const dir[3]);
 
-// Brute-force closest point over all faces (stroke projection, snap search,
-// mirror-X). Graph-scale call sites project tens of samples; the per-face
-// cost is one point-to-fan projection.
+// Brute-force closest point over the active faces (stroke projection, snap
+// search, mirror-X). Graph-scale call sites project tens of samples; the
+// per-face cost is one point-to-fan projection. `activeOnly = false` walks
+// every parent face, which is how a root sampler tells a candidate that
+// lies over an inactive face from one on the growth surface.
 USDGENTONIC_API TonicHit TonicClosestPointCpu(TonicScalpMesh const &mesh,
-                                             float const p[3]);
+                                             float const p[3],
+                                             bool activeOnly = true);
 
 // Mirrors p across the x = 0 plane and returns the closest surface point to
 // the mirrored position (plan/17 §5.1 mirror-X).

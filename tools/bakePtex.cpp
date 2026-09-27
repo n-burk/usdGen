@@ -3,6 +3,11 @@
 // are written against the same Ptex face ids and sub-face corners the
 // sampler resolves roots with (usdGen/maps/ptexMap.h), in the mesh's object
 // space, as an mt_quad dt_float file with mipmaps and full adjacency.
+//
+// The prim may also be a face GeomSubset (plan/02-schema.md §2.20): the file
+// still covers the whole PARENT mesh (Ptex face ids are parent-mesh ids, rule
+// 2), but scattered voronoi seeds land on the subset's faces only, so its
+// cells tile the region a subset-bound description grows from.
 #include "usdGen/maps/ptexMap.h"
 
 #include "pxr/base/gf/range3d.h"
@@ -10,6 +15,8 @@
 #include "pxr/usd/usdGeom/curves.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/pointBased.h"
+#include "pxr/usd/usdGeom/subset.h"
+#include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 
 // Last: <Ptexture.h> brings in <windows.h>.
@@ -36,6 +43,8 @@ namespace {
 
 char const *const kUsage =
     "Usage: usdGenBakePtex <stage.usda> <meshPrimPath> <out.ptx> [options]\n"
+    "  <meshPrimPath>       a Mesh, or a face GeomSubset of one: the file covers the\n"
+    "                       parent mesh, scattered seeds land on the subset's faces\n"
     "  --res N              face resolution 2^N x 2^N, N in [0, 12] (default 5);\n"
     "                       n-gon sub-faces use 2^(N-1)\n"
     "  --pattern P          voronoi | stripes | constant (default voronoi)\n"
@@ -414,10 +423,13 @@ struct Surface {
     double area = 0.0;
 };
 
-Surface Triangulate(Mesh const &mesh)
+// `only` (a GeomSubset's faces; empty = every face) limits the triangles, so
+// the area and the scattered seeds cover those faces alone.
+Surface Triangulate(Mesh const &mesh, std::vector<uint8_t> const &only)
 {
     Surface surface;
     for (int f = 0; f < int(mesh.FaceCount()); ++f) {
+        if (!only.empty() && !only[size_t(f)]) continue;
         int const n = mesh.counts[size_t(f)];
         int const *corners = &mesh.indices[size_t(mesh.offsets[size_t(f)])];
         GfVec3d centroid(0.0);
@@ -437,7 +449,8 @@ Surface Triangulate(Mesh const &mesh)
 
 std::vector<GfVec3d> ScatterSeeds(Surface const &surface, int count, uint64_t seed)
 {
-    if (!(surface.area > 0.0)) throw std::runtime_error("the mesh has no area to scatter seeds on");
+    if (!(surface.area > 0.0))
+        throw std::runtime_error("the mesh (or subset) has no area to scatter seeds on");
     std::vector<GfVec3d> seeds;
     seeds.reserve(size_t(count));
     for (int i = 0; i < count; ++i) {
@@ -569,10 +582,44 @@ int main(int argc, char **argv) try {
 
     UsdStageRefPtr const stage = UsdStage::Open(options.stagePath);
     if (!stage) throw std::runtime_error("cannot open stage " + options.stagePath);
-    UsdPrim const meshPrim = stage->GetPrimAtPath(SdfPath(options.meshPath));
+    UsdPrim const target = stage->GetPrimAtPath(SdfPath(options.meshPath));
+    if (!target) throw std::runtime_error("no prim at " + options.meshPath);
+    // A face GeomSubset bakes its parent mesh (§2.20 rules 1-2).
+    UsdPrim meshPrim = target;
+    VtIntArray subsetIndices;
+    bool const isSubset = bool(UsdGeomSubset(target));
+    if (isSubset) {
+        UsdGeomSubset const subset(target);
+        TfToken elementType;
+        subset.GetElementTypeAttr().Get(&elementType);
+        if (elementType != UsdGeomTokens->face) {
+            throw std::runtime_error("GeomSubset " + options.meshPath + " has elementType '" +
+                                     elementType.GetString() + "'; bake a \"face\" subset");
+        }
+        meshPrim = target.GetParent();
+        if (!UsdGeomMesh(meshPrim))
+            throw std::runtime_error("GeomSubset " + options.meshPath + " is not the child of a Mesh");
+        subset.GetIndicesAttr().Get(&subsetIndices);
+    }
     UsdGeomMesh const usdMesh(meshPrim);
-    if (!usdMesh) throw std::runtime_error("no Mesh prim at " + options.meshPath);
+    if (!usdMesh) throw std::runtime_error("no Mesh or face GeomSubset prim at " + options.meshPath);
     Mesh const mesh = ReadMesh(usdMesh);
+    std::vector<uint8_t> inSubset;
+    size_t subsetFaceCount = 0;
+    if (isSubset) {
+        inSubset.assign(mesh.FaceCount(), 0);
+        for (int index : subsetIndices) {
+            if (index < 0 || size_t(index) >= mesh.FaceCount()) {
+                throw std::runtime_error("GeomSubset " + options.meshPath + " names face " +
+                                         std::to_string(index) + ", but its parent mesh has " +
+                                         std::to_string(mesh.FaceCount()) + " faces");
+            }
+            if (!inSubset[size_t(index)]) ++subsetFaceCount;
+            inSubset[size_t(index)] = 1;
+        }
+        if (subsetFaceCount == 0 && options.pattern == "voronoi" && options.seedsPrim.empty())
+            throw std::runtime_error("GeomSubset " + options.meshPath + " names no faces to scatter seeds on");
+    }
     std::vector<PtexFace> const faces = PtexFaces(mesh, options.resLog2);
 
     Pattern pattern;
@@ -580,7 +627,7 @@ int main(int argc, char **argv) try {
     std::vector<GfVec3d> seeds;
     std::unique_ptr<KdTree> tree;
     if (options.pattern == "voronoi") {
-        Surface const surface = Triangulate(mesh);
+        Surface const surface = Triangulate(mesh, inSubset);
         seeds = options.seedsPrim.empty() ? ScatterSeeds(surface, options.cells, options.seed)
                                           : ReadSeeds(stage, options.seedsPrim, meshPrim);
         tree = std::make_unique<KdTree>(seeds);
@@ -644,9 +691,11 @@ int main(int argc, char **argv) try {
         cells = std::to_string(used.size()) + " stripes";
     else
         cells = "constant";
-    std::printf("usdGenBakePtex: %s: %zu mesh faces -> %d Ptex faces, %zu texels, %s (%.2f ms)\n",
-                options.outPath.c_str(), mesh.FaceCount(), mesh.ptexFaceCount, texelCount,
-                cells.c_str(),
+    std::string const scope =
+        isSubset ? " (subset: " + std::to_string(subsetFaceCount) + " faces)" : "";
+    std::printf("usdGenBakePtex: %s: %zu mesh faces%s -> %d Ptex faces, %zu texels, %s (%.2f ms)\n",
+                options.outPath.c_str(), mesh.FaceCount(), scope.c_str(), mesh.ptexFaceCount,
+                texelCount, cells.c_str(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                     .count());
     return 0;

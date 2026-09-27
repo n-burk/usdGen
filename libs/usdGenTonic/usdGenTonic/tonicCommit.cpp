@@ -28,6 +28,8 @@
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usdGeom/mesh.h"
+#include "pxr/usd/usdGeom/subset.h"
+#include "pxr/usd/usdGeom/tokens.h"
 
 #include <algorithm>
 #include <array>
@@ -577,6 +579,14 @@ uint64_t _HashScalp(TonicSnapshot const &snapshot)
     if (!snapshot.scalp.faceVertexIndices.empty()) {
         h = _HashBytes(h, snapshot.scalp.faceVertexIndices.data(),
                        snapshot.scalp.faceVertexIndices.size() * sizeof(int));
+    }
+    // A face subset moves every region root it clips (plan/02 §2.20 rule
+    // 5: a subset edit is a recapture). Whole-mesh binds hash exactly as
+    // they always did.
+    if (!snapshot.scalp.activeFaces.empty()) {
+        h = _HashInt(h, int64_t(snapshot.scalp.activeFaces.size()));
+        h = _HashBytes(h, snapshot.scalp.activeFaces.data(),
+                       snapshot.scalp.activeFaces.size() * sizeof(int));
     }
     // Exact polygon support and child-cell ownership are derived from this
     // graph. Include it in the shared cache salt so an in-face graph drag,
@@ -1950,14 +1960,19 @@ TonicBuildCommitLayer(TonicSnapshot const &snapshot,
     // this primvar is the live preview the HUD and the bake read from.
     SdfPath const boundScalpPath = snapshot.scalpPath.IsEmpty()
         ? paths.scalpPath : snapshot.scalpPath;
+    // Both opinions belong to the Mesh: for a face GeomSubset scalp that is
+    // the subset's parent (plan/02 §2.20), and the per-face primvar stays
+    // parent-sized because a subset never renumbers faces.
+    SdfPath const boundMeshPath = snapshot.scalpPath.IsEmpty()
+        ? paths.ScalpMeshPath()
+        : (snapshot.scalpMeshPath.IsEmpty() ? snapshot.scalpPath
+                                            : snapshot.scalpMeshPath);
     bool const needOutputRest = snapshot.outputEnabled &&
         !boundScalpPath.IsEmpty();
     if (needOutputRest || (!snapshot.scalpPath.IsEmpty() &&
                            !snapshot.graph.faceRegions.empty())) {
         SdfPrimSpecHandle scalp =
-            _EnsurePrim(layer, needOutputRest ? boundScalpPath
-                                              : snapshot.scalpPath,
-                        SdfSpecifierOver, nullptr);
+            _EnsurePrim(layer, boundMeshPath, SdfSpecifierOver, nullptr);
         if (!scalp) {
             return fail("TonicBuildCommitLayer: cannot over the scalp mesh");
         }
@@ -2415,6 +2430,90 @@ _AnyShapeDelta(TonicShapeDeltas const &d)
 
 } // namespace
 
+bool
+TonicResolveScalpTarget(UsdStagePtr const &stage, SdfPath const &path,
+                        TonicScalpTarget *out, std::string *err)
+{
+    auto fail = [&](std::string const &what) {
+        if (err) {
+            *err = what;
+        }
+        return false;
+    };
+    if (!stage || !out) {
+        return fail("TonicResolveScalpTarget: null stage or output");
+    }
+    *out = TonicScalpTarget();
+    out->targetPath = path;
+    UsdPrim const prim = stage->GetPrimAtPath(path);
+    if (!prim) {
+        return fail("scalp link names no prim at " + path.GetString());
+    }
+    UsdPrim meshPrim = prim;
+    if (prim.IsA<UsdGeomSubset>()) {
+        // Rule 1: a face subset under its Mesh, nothing else. The token is
+        // read as authored (the schema fallback is "face").
+        UsdGeomSubset const subset(prim);
+        TfToken elementType;
+        subset.GetElementTypeAttr().Get(&elementType);
+        if (elementType != UsdGeomTokens->face) {
+            return fail("scalp GeomSubset " + path.GetString() +
+                        " has elementType \"" + elementType.GetString() +
+                        "\"; a scalp subset must be \"face\"");
+        }
+        meshPrim = prim.GetParent();
+        if (!meshPrim || !meshPrim.IsA<UsdGeomMesh>()) {
+            return fail("scalp GeomSubset " + path.GetString() +
+                        " is not a child of a Mesh");
+        }
+        VtIntArray indices;
+        subset.GetIndicesAttr().Get(&indices);
+        if (indices.empty()) {
+            return fail("scalp GeomSubset " + path.GetString() +
+                        " names no faces");
+        }
+        out->activeFaces.assign(indices.begin(), indices.end());
+        out->isSubset = true;
+    } else if (!prim.IsA<UsdGeomMesh>()) {
+        return fail("scalp link " + path.GetString() + " names a " +
+                    prim.GetTypeName().GetString() +
+                    ", not a Mesh or a face GeomSubset");
+    }
+    out->meshPath = meshPrim.GetPath();
+    UsdGeomMesh const mesh(meshPrim);
+    VtVec3fArray pts;
+    VtIntArray counts, indices;
+    if (!mesh.GetPointsAttr().Get(&pts) ||
+        !mesh.GetFaceVertexCountsAttr().Get(&counts) ||
+        !mesh.GetFaceVertexIndicesAttr().Get(&indices)) {
+        return fail("scalp mesh " + out->meshPath.GetString() +
+                    " has no readable topology");
+    }
+    out->points.resize(pts.size() * 3);
+    for (size_t i = 0; i < pts.size(); ++i) {
+        out->points[i * 3 + 0] = pts[i][0];
+        out->points[i * 3 + 1] = pts[i][1];
+        out->points[i * 3 + 2] = pts[i][2];
+    }
+    out->faceVertexCounts.assign(counts.begin(), counts.end());
+    out->faceVertexIndices.assign(indices.begin(), indices.end());
+    // Rule 2: indices are parent-mesh face ids. Union semantics tolerate a
+    // repeat; a face the parent does not have is an error, not a clamp.
+    std::vector<int> &active = out->activeFaces;
+    std::sort(active.begin(), active.end());
+    active.erase(std::unique(active.begin(), active.end()), active.end());
+    if (!active.empty() &&
+        (active.front() < 0 ||
+         size_t(active.back()) >= out->faceVertexCounts.size())) {
+        int const bad = active.front() < 0 ? active.front() : active.back();
+        return fail("scalp GeomSubset " + path.GetString() + " names face " +
+                    std::to_string(bad) + ", but " +
+                    out->meshPath.GetString() + " has " +
+                    std::to_string(out->faceVertexCounts.size()) + " faces");
+    }
+    return true;
+}
+
 TonicHydrateResult
 TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
                   TonicModel *model)
@@ -2545,30 +2644,20 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
     SdfPathVector scalpTargets =
         _Targets(groom.GetRelationship(TfToken("usdGen:tonic:scalp")));
     bool haveScalp = false;
+    // The Mesh behind the link: the linked prim itself, or a face
+    // GeomSubset's parent, which carries the live primvar (plan/02 §2.20).
     UsdPrim scalpPrim;
     if (!scalpTargets.empty()) {
-        scalpPrim = stage->GetPrimAtPath(scalpTargets[0]);
-        UsdGeomMesh const scalpMesh(scalpPrim);
-        if (!scalpPrim || !scalpMesh) {
-            return fail("scalp link names no mesh prim");
+        TonicScalpTarget target;
+        std::string targetErr;
+        if (!TonicResolveScalpTarget(stage, scalpTargets[0], &target,
+                                     &targetErr)) {
+            return fail(targetErr);
         }
-        VtVec3fArray pts;
-        VtIntArray counts, indices;
-        if (!scalpMesh.GetPointsAttr().Get(&pts) ||
-            !scalpMesh.GetFaceVertexCountsAttr().Get(&counts) ||
-            !scalpMesh.GetFaceVertexIndicesAttr().Get(&indices)) {
-            return fail("scalp mesh has no readable topology");
-        }
-        std::vector<float> points(pts.size() * 3);
-        for (size_t i = 0; i < pts.size(); ++i) {
-            points[i * 3 + 0] = pts[i][0];
-            points[i * 3 + 1] = pts[i][1];
-            points[i * 3 + 2] = pts[i][2];
-        }
-        if (!model->BindScalp(points,
-                              std::vector<int>(counts.begin(), counts.end()),
-                              std::vector<int>(indices.begin(),
-                                               indices.end()))) {
+        scalpPrim = stage->GetPrimAtPath(target.meshPath);
+        if (!model->BindScalp(target.points, target.faceVertexCounts,
+                              target.faceVertexIndices,
+                              target.activeFaces)) {
             return fail(model->GetDiagnostic());
         }
         haveScalp = true;
@@ -3651,10 +3740,14 @@ TonicCommitter::CancelDescriptionCooks() const
 }
 
 void
-TonicCommitter::SetScalpPath(SdfPath const &scalpPath)
+TonicCommitter::SetScalpPath(SdfPath const &scalpPath, SdfPath const &meshPath)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _paths.scalpPath = scalpPath;
+    // A retarget always restates the Mesh: a stale parent from the previous
+    // subset must not receive the next scalp's rest binding.
+    _paths.scalpMeshPath =
+        (scalpPath.IsEmpty() || meshPath == scalpPath) ? SdfPath() : meshPath;
 }
 
 SdfPath
@@ -3662,6 +3755,13 @@ TonicCommitter::GetScalpPath() const
 {
     std::lock_guard<std::mutex> lock(_mutex);
     return _paths.scalpPath;
+}
+
+SdfPath
+TonicCommitter::GetScalpMeshPath() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _paths.ScalpMeshPath();
 }
 
 void
@@ -3781,6 +3881,7 @@ TonicCommitter::_WorkerLoop()
             }
             TonicSnapshot snapshot = TonicSnapshotFromModel(*_model);
             snapshot.scalpPath = paths.scalpPath;
+            snapshot.scalpMeshPath = paths.scalpMeshPath;
             snapshot.version = snapshot.tubes.empty()
                                    ? version
                                    : snapshot.tubes[0].tube.version;
@@ -4131,9 +4232,10 @@ TonicCommitter::_BeginPartial(SdfLayerHandle const &built)
     }
     // The scalp over (UsdGenRestAPI for Output, the tonicRegion preview
     // primvar) gets its own slot even when the built layer dropped it: the
-    // slot then removes the live over (_SyncScalpOver).
-    if (!_paths.scalpPath.IsEmpty()) {
-        _partialSlots.push_back(_PartialSlot{_paths.scalpPath, false});
+    // slot then removes the live over (_SyncScalpOver). It sits on the
+    // Mesh, which is a face subset's parent (plan/02 §2.20).
+    if (!_paths.ScalpMeshPath().IsEmpty()) {
+        _partialSlots.push_back(_PartialSlot{_paths.ScalpMeshPath(), false});
     }
 }
 
@@ -4180,8 +4282,8 @@ TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
             // binding (UsdGenRestAPI on the scalp over), so the over must
             // land in the same ChangeBlock as the Output triple, or the
             // first capture after a partial transfer sees no rest and fails.
-            if (built->GetPrimAtPath(_paths.scalpPath)) {
-                _SyncScalpOver(built, live, _paths.scalpPath);
+            if (built->GetPrimAtPath(_paths.ScalpMeshPath())) {
+                _SyncScalpOver(built, live, _paths.ScalpMeshPath());
             }
             SdfCopySpec(built, _paths.OutputCurvesPath(), live,
                         _paths.OutputCurvesPath());
@@ -4194,7 +4296,7 @@ TonicCommitter::_SwapPartialSlot(SdfLayerHandle const &live,
             // follow in per-property slots (TN-4).
             _CopyPrimSelf(built, live, slot.path,
                           /*shellOnly*/ slot.path == _paths.GuidesPath());
-        } else if (slot.path == _paths.scalpPath) {
+        } else if (slot.path == _paths.ScalpMeshPath()) {
             _SyncScalpOver(built, live, slot.path);
         } else {
             SdfCopySpec(built, slot.path, live, slot.path);

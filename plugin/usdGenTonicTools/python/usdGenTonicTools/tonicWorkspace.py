@@ -696,8 +696,9 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             "QPushButton:hover { background-color: #3a8fd2; }"
             "QPushButton:pressed { background-color: #266a9f; }")
         self._bindGeometryButton.setToolTip(
-            "Choose the scalp Mesh from the current stage. Rebinding an "
-            "edited groom requires explicit confirmation.")
+            "Choose the scalp Mesh (or a face GeomSubset of one) from the "
+            "current stage. Rebinding an edited groom requires explicit "
+            "confirmation.")
         self._bindGeometryButton.clicked.connect(self._onBindGeometry)
         geometryRow.addWidget(self._bindGeometryButton)
         # Resume is SS-03's: the container answers whether the stage holds
@@ -1955,12 +1956,14 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         return getattr(session, "model", None) is not None
 
     def _stageMeshPaths(self):
-        """Every Mesh prim path in the current stage, for the scalp picker.
+        """Every Mesh prim path in the current stage, for the scalp picker,
+        plus every face GeomSubset directly under a Mesh (plan/02 2.20).
 
-        Listed by schema type only. The full topology check
-        (__init__._validMeshPrim) reads every point and face index, which
-        is far too slow to run over a production stage just to fill a
-        combo box, so it runs once, on the mesh the artist accepts.
+        Listed by schema type only (a subset also by its elementType token,
+        one uniform read). The full topology check (__init__._validMeshPrim)
+        reads every point and face index, which is far too slow to run over
+        a production stage just to fill a combo box, so it runs once, on the
+        path the artist accepts.
         """
         stage = getattr(self._api, "stage", None)
         if stage is None:
@@ -1974,6 +1977,11 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         for prim in prims:
             try:
                 if prim.IsA(UsdGeom.Mesh):
+                    paths.append(str(prim.GetPath()))
+                elif prim.IsA(UsdGeom.Subset) and \
+                        prim.GetParent().IsA(UsdGeom.Mesh) and \
+                        str(UsdGeom.Subset(prim).GetElementTypeAttr().Get()
+                            or "") == "face":
                     paths.append(str(prim.GetPath()))
             except (AttributeError, TypeError, ValueError, RuntimeError):
                 continue
@@ -2029,11 +2037,18 @@ class TonicWorkspace(QtWidgets.QDockWidget):
             path = self._pickScalpPath(paths, session)
         if not path:
             return
+        # The container names the reason (a malformed Mesh, or a GeomSubset
+        # that is not a face subset of one); a container that only answers
+        # yes/no keeps the Mesh wording.
+        explain = getattr(self._container, "geometryError", None)
         validator = getattr(self._container, "isValidGeometry", None)
-        if callable(validator) and not validator(self._api, path):
-            message = ("Tonic: %s is not a valid scalp mesh. It needs "
-                       "points, faces of three or more vertices and face "
-                       "indices inside the point list." % path)
+        reason = explain(self._api, path) if callable(explain) else (
+            "" if not callable(validator) or validator(self._api, path)
+            else "%s is not a valid scalp mesh. It needs points, faces of "
+                 "three or more vertices and face indices inside the point "
+                 "list." % path)
+        if reason:
+            message = "Tonic: %s" % reason
             self._container._status(self._api, message)
             QtWidgets.QMessageBox.critical(self, "Bind scalp mesh", message)
             self.refresh()
@@ -2108,8 +2123,9 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         else:
             self._geometryPathLabel.setText("No scalp bound")
             self._geometryPathLabel.setToolTip("")
-        tip = ("Choose the scalp Mesh from the current stage. Rebinding an "
-               "edited groom requires explicit confirmation.")
+        tip = ("Choose the scalp Mesh (or a face GeomSubset of one) from the "
+               "current stage. Rebinding an edited groom requires explicit "
+               "confirmation.")
         if not bound:
             paths = self._stageMeshPaths()
             if len(paths) == 1:
@@ -2506,10 +2522,14 @@ class TonicWorkspace(QtWidgets.QDockWidget):
         The model holds its own copy but exposes no reader, so this reads
         the stage mesh the session bound (the model binds its raw points,
         which is also what the region tint draws). Cached per model and
-        scalp path: the scalp does not change under a live model.
+        scalp path: the scalp does not change under a live model. A face
+        GeomSubset scalp reads its parent Mesh (the session recorded it at
+        bind): face ids are parent-mesh ids, so the parent's arrays are the
+        ones they index (plan/02 section 2.20).
         """
         session = getattr(self._container, "session", None)
-        path = str(getattr(session, "scalpPath", "") or "")
+        path = str(getattr(session, "scalpMeshPath", "") or
+                   getattr(session, "scalpPath", "") or "")
         stage = getattr(self._api, "stage", None)
         if not path or stage is None:
             return None

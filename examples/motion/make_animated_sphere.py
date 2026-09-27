@@ -1,10 +1,13 @@
 """Run with the usdGen/OpenUSD Python environment to regenerate the example."""
 import math
+import sys
 from pathlib import Path
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdLux
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'felt'))
+from studio_lighting import add_studio_lighting
 
 
-def build_sphere(outside=False):
+def build_sphere(outside=False, studio=False):
     s = Usd.Stage.CreateInMemory()
     s.SetDefaultPrim(s.DefinePrim('/World', 'Xform'))
     s.SetStartTimeCode(1); s.SetEndTimeCode(100)
@@ -89,17 +92,22 @@ def build_sphere(outside=False):
     cam.CreateFocalLengthAttr(55);cam.CreateHorizontalApertureAttr(36);cam.CreateVerticalApertureAttr(20.25)
     cam.CreateClippingRangeAttr(Gf.Vec2f(.01,100))
     cam.AddTransformOp().Set(Gf.Matrix4d().SetLookAt(Gf.Vec3d(0,-3.5,1.15),Gf.Vec3d(0,0,.5),Gf.Vec3d(0,0,1)).GetInverse())
-    key=UsdLux.DistantLight.Define(s,'/World/Key')
-    key.CreateIntensityAttr(1);key.CreateNormalizeAttr(True);key.CreateAngleAttr(15)
-    UsdGeom.Xformable(key).AddTransformOp().Set(Gf.Matrix4d().SetLookAt(Gf.Vec3d(-1,-2,3),Gf.Vec3d(0),Gf.Vec3d(0,0,1)).GetInverse())
-    fill=UsdLux.DomeLight.Define(s,'/World/Fill');fill.CreateIntensityAttr(.6)
-    fill.CreateTextureFileAttr('../felt/textures/studio.exr')
+    if studio:
+        add_studio_lighting(s, '/World/Studio', (0, 0, .5),
+                            '../felt/textures/studio_contrast.exr')
+    else:
+        # Braid generators reuse this base scene and retain their lighting.
+        key=UsdLux.DistantLight.Define(s,'/World/Key')
+        key.CreateIntensityAttr(1);key.CreateNormalizeAttr(True);key.CreateAngleAttr(15)
+        UsdGeom.Xformable(key).AddTransformOp().Set(Gf.Matrix4d().SetLookAt(Gf.Vec3d(-1,-2,3),Gf.Vec3d(0),Gf.Vec3d(0,0,1)).GetInverse())
+        fill=UsdLux.DomeLight.Define(s,'/World/Fill');fill.CreateIntensityAttr(.6)
+        fill.CreateTextureFileAttr('../felt/textures/studio.exr')
     return s
 
 
 def main():
     out = Path(__file__).parent / 'felt_sphere_animated.usda'
-    s = build_sphere()
+    s = build_sphere(studio=True)
     s.GetRootLayer().Export(str(out))
     print(out)
 

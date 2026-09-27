@@ -19,6 +19,7 @@
 #include "pxr/imaging/hd/primvarsSchema.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/selectionsSchema.h"
+#include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h"
 #include "pxr/base/tf/envSetting.h"
 #include "pxr/base/tf/refPtr.h"
@@ -260,6 +261,45 @@ bool OnlySceneGlobals(HdDataSourceLocatorSet const& locators) {
     return true;
 }
 
+// Whether a dirty can change a prim's resolved visibility.
+bool TouchesVisibility(HdDataSourceLocatorSet const& locators) {
+    return locators.IsEmpty() ||
+        locators.Intersects(HdVisibilitySchema::GetDefaultLocator());
+}
+
+// Why a groom is dormant, or null when it is awake. A dormant groom is never
+// captured or cooked, and its last-good tiles are held hidden; it still
+// attaches its session once when first discovered. It is dormant while its
+// Description resolves invisible (the input is flattened, so an invisible
+// ancestor counts), or while a UsdGenGroom stands in for a Description it no
+// longer has: with no active Description child and no operators of its own
+// (on a stage only a Description carries usdGen:operatorOrder, served flat
+// at the prim root like every mapped property) there is nothing to cook. A
+// deactivated groom or Description needs no rule of its own: UsdImaging
+// removes it from the input.
+char const* DormantReason(HdSceneIndexBase const& input, HdSceneIndexPrim const& root,
+                          SdfPath const& rootPath, SdfPath const& description) {
+    if (description == rootPath && TypeName(root) == TfToken("UsdGenGroom") &&
+        !HdContainerDataSource::Get(root.dataSource,
+            HdDataSourceLocator(TfToken("operatorOrder"))))
+        return "no active description";
+    HdBoolDataSourceHandle const visibility = HdVisibilitySchema::GetFromParent(
+        input.GetPrim(description).dataSource).GetVisibility();
+    return visibility && !visibility->GetTypedValue(0.0f) ? "invisible" : nullptr;
+}
+
+// Overlaid on a hidden groom's tiles and scalp-shadow cap. The tiles keep the
+// visibility they were cooked with, and a dormant groom is not re-cooked just
+// to bake a new one.
+HdContainerDataSourceHandle const& HiddenOverlay() {
+    static HdContainerDataSourceHandle const hidden = HdRetainedContainerDataSource::New(
+        HdVisibilitySchema::GetSchemaToken(),
+        HdVisibilitySchema::Builder()
+            .SetVisibility(HdRetainedTypedSampledDataSource<bool>::New(false))
+            .Build());
+    return hidden;
+}
+
 // Whether any expression of the description reads the frame or the time
 // (SeExpr $frame / $time, sampler element expressions included).
 bool DescReadsTime(Desc const& desc) {
@@ -320,6 +360,9 @@ struct UsdGenGroomSceneIndex::_Ingress {
         std::shared_ptr<const SdfPathVector> dependencies;
         std::shared_ptr<const CaptureCache> cache;
         bool authoredRender = false;
+        // Dormant (see DormantReason): nothing was captured, so desc, cache
+        // and dependencies are empty and the member keeps its previous ones.
+        bool dormant = false;
     };
     uint64_t sequence = 0;
     int device = -2;
@@ -499,6 +542,12 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // not sufficient to admit delayed store or session callbacks.
         uint64_t attachmentEpoch = 0;
         bool alive = true, authoredRender = false;
+        // dormant: the last ingress found the groom hidden or without an
+        // active Description, so it is neither captured nor cooked. hidden:
+        // its tiles are published invisible. Going dormant hides at once;
+        // waking reveals only when the cook that woke it completes, so the
+        // tiles never show geometry from before the groom was hidden.
+        bool dormant = false, hidden = false;
         SdfPath root, description;
         Key key;
         SessionHandle session;
@@ -543,6 +592,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // served from here, and nothing else would tell Hydra it changed.
         HdContainerDataSourceHandle scalpShadow;
         uint64_t scalpDigest = 0;
+        bool dormant = false, hidden = false;
     };
     struct Snapshot {
         std::vector<View> members;
@@ -664,7 +714,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                                      g.dependencies, g.cache, g.frame,
                                      !g.desc || DescReadsTime(*g.desc),
                                      g.desc ? g.desc->look : usdGen::UsdGenLookDesc(),
-                                     g.scalpShadow, g.scalpDigest});
+                                     g.scalpShadow, g.scalpDigest, g.dormant, g.hidden});
         }
         auto result = std::shared_ptr<const Snapshot>(std::move(next));
         std::atomic_store(&catalog, result);
@@ -914,8 +964,18 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         ProcessPublishes().fetch_add(1, std::memory_order_acq_rel);
         Notify(added, removed, dirtied);
     }
+    // Shows a woken groom's tiles again. No-op while it is dormant.
+    void Reveal(std::shared_ptr<Groom> const& g) {
+        if (!g->hidden || g->dormant || closing.load() || !Current(g)) return;
+        g->hidden = false;
+        Notify({}, {}, {});
+    }
     void Cook(std::shared_ptr<Groom> const& g, uint64_t seq) {
-        if (!g->session || !g->desc || closing.load() || !Current(g)) return;
+        // An Attach reply can land after its groom went dormant again.
+        if (g->dormant) return;
+        if (!g->session || !g->desc || closing.load() || !Current(g)) { Reveal(g); return; }
+        // A hidden groom that is awake is waiting for exactly this cook.
+        bool const reveals = g->hidden;
         cookCount.fetch_add(1, std::memory_order_acq_rel);
         ProcessCooks().fetch_add(1, std::memory_order_acq_rel);
         uint64_t const attachmentEpoch = g->attachmentEpoch;
@@ -932,22 +992,28 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         auto self = shared_from_this();
         auto ticket = std::make_shared<Pipeline::CommandTicket>(
             owner->ReserveCommandTicket());
-        if (!*ticket) return;
+        if (!*ticket) { Reveal(g); return; }
         Hold(seq);
         bool accepted = false;
         try {
             SessionHandle const sourceSession = g->session;
             accepted = sourceSession->CommitAsync(std::move(request),
-                [self, g, sourceSession, attachmentEpoch, seq, ticket](
+                [self, g, sourceSession, attachmentEpoch, seq, ticket, reveals](
                     Session::CommitPayload const& payload, Pipeline::Outcome) {
-                    (void)self->Post(std::move(*ticket), [self, g, sourceSession, attachmentEpoch, seq, payload] {
-                        try { self->Publish(g, sourceSession, attachmentEpoch, payload); }
+                    (void)self->Post(std::move(*ticket), [self, g, sourceSession, attachmentEpoch, seq, payload, reveals] {
+                        try {
+                            self->Publish(g, sourceSession, attachmentEpoch, payload);
+                            // Whether or not it published: an unchanged
+                            // groom keeps tiles that are already current.
+                            if (reveals) self->Reveal(g);
+                        }
                         catch (...) { TF_WARN("usdGen scene publication failed"); }
                         self->Release(seq);
                     }, [self, seq] { self->Release(seq); });
                 });
         } catch (...) { TF_WARN("usdGen scene cook request failed"); }
         if (!accepted) {
+            Reveal(g);
             Release(seq);
             return;
         }
@@ -968,7 +1034,9 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         replies->sourceDetach = ::usdGenImaging::UsdGenSessionStore::GetInstance()
             .ReserveLifecycleCommand();
         replies->republish = owner->ReserveCommandMailbox();
-        if (!*replies) return;
+        // Every path that gives up on the attachment reveals: no cook is
+        // coming to do it, and a later ingress retries the attachment.
+        if (!*replies) { Reveal(g); return; }
         Hold(seq);
         bool accepted = false;
         try {
@@ -977,7 +1045,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                 [self, g, requestedKey, attachmentEpoch, seq, replies](SessionHandle session) {
                     (void)self->Post(std::move(replies->attachAck), [self, g, requestedKey, attachmentEpoch, seq, session, replies] {
                         try {
-                            if (!session) { self->Release(seq); return; }
+                            if (!session) { self->Reveal(g); self->Release(seq); return; }
                             self->RememberSession(session);
                             if (self->closing.load() || !self->Current(g) ||
                                 !(g->key == requestedKey) ||
@@ -998,6 +1066,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                                 self->Detach(session, requestedKey, seq,
                                              std::move(replies->sourceDetach),
                                              std::move(replies->detachAck));
+                                self->Reveal(g);
                                 self->Release(seq);
                                 return;
                             }
@@ -1028,7 +1097,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                     }, [self, seq] { self->Release(seq); });
                 });
         } catch (...) { TF_WARN("usdGen scene attachment request failed"); }
-        if (!accepted) Release(seq);
+        if (!accepted) { Reveal(g); Release(seq); }
     }
     void Apply(_Ingress const& packet) {
         const uint64_t seq = packet.sequence;
@@ -1206,10 +1275,15 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                 members.emplace(input.root, groom);
                 if (!input.authoredRender)
                     forwardAdded.emplace_back(RenderPath(input.description), TfToken("scope"));
+                // Adoption attaches the session even when dormant; the
+                // attachment's cook then declines (Cook).
                 startAttach.push_back(groom);
             } else {
                 groom = it->second;
-                if (!(groom->key == input.key)) {
+                if (input.dormant) {
+                    // Nothing was captured, so the key is incomplete: keep
+                    // the session, key and last-good tiles for the wake-up.
+                } else if (!(groom->key == input.key)) {
                     // CUDA graphs use renderer-local keys even when their
                     // stock-Storm handoff is not implemented. Retain displayed
                     // CPU tiles while the replacement is rejected; old
@@ -1225,9 +1299,14 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                 }
             }
             groom->captured = seq;
-            groom->desc = input.desc;
-            groom->dependencies = input.dependencies;
-            groom->cache = input.cache;
+            groom->dormant = input.dormant;
+            if (input.dormant) {
+                groom->hidden = true;
+            } else {
+                groom->desc = input.desc;
+                groom->dependencies = input.dependencies;
+                groom->cache = input.cache;
+            }
             groom->device = packet.device;
             groom->frame = packet.frame;
         }
@@ -1472,6 +1551,9 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                     // deforming groom rebakes it every frame, and a universal
                     // dirty there costs a full re-sync per frame.
                     HdContainerDataSourceHandle scalp;
+                    // The groom is hidden: GetPrim overlays visibility false
+                    // on its tiles and cap, so a flip is a visibility dirty.
+                    bool hidden = false;
                 };
                 std::map<SdfPath, TfToken> beforeNames, targetNames;
                 std::map<SdfPath, Synthetic> beforeSynthetic, targetSynthetic;
@@ -1518,7 +1600,7 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                                 names.emplace(cap, TfToken("mesh"));
                                 synthetic.emplace(cap, Synthetic{TfToken("mesh"),
                                     g.id, g.generation, g.tiles, descStamp, 0,
-                                    g.scalpDigest, g.scalpShadow});
+                                    g.scalpDigest, g.scalpShadow, g.hidden});
                             }
                             SdfPath const capMaterial =
                                 ScalpShadowMaterialPath(g.description);
@@ -1534,7 +1616,8 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                         for (auto const& tile : *g.tiles) if (!names.count(tile.first)) {
                             names.emplace(tile.first, TfToken("basisCurves"));
                             synthetic.emplace(tile.first, Synthetic{TfToken("basisCurves"),
-                                g.id, g.generation, g.tiles, descStamp});
+                                g.id, g.generation, g.tiles, descStamp, 0, 0, nullptr,
+                                g.hidden});
                         }
                     }
                 };
@@ -1654,6 +1737,13 @@ void UsdGenGroomSceneIndex::_DrainPublications(bool waitForIngress, bool explici
                             // never re-uploads geometry.
                             dirtied.emplace_back(now.first,
                                                  InheritedFromDescriptionLocators());
+                        // Hiding or revealing a groom moves only the
+                        // visibility GetPrim overlays on its geometry. A
+                        // replaced root was dirtied universally above.
+                        if (sameRoot && a.hidden != b.hidden &&
+                            (b.type == TfToken("basisCurves") || b.type == TfToken("mesh")))
+                            dirtied.emplace_back(now.first, HdDataSourceLocatorSet{
+                                HdVisibilitySchema::GetDefaultLocator()});
                     }
                 }
                 // Root is never structural, but a root value notice remains
@@ -1766,6 +1856,18 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
             catalog->captureTrusted && catalog->capturedThrough == packet.sequence - 1) {
             packet.fullPopulation = false;
             for (auto const& member : catalog->members) {
+                if (member.dormant) {
+                    // Edits of a dormant groom's operators, surfaces and
+                    // inputs, and frame changes, are no-ops. Only a change
+                    // of its Description's resolved visibility can wake it.
+                    if (std::any_of(packet.dirtied.begin(), packet.dirtied.end(),
+                            [&member](auto const& dirty) {
+                                return member.description.HasPrefix(dirty.primPath) &&
+                                    TouchesVisibility(dirty.dirtyLocators);
+                            }))
+                        stack.push_back(member.root);
+                    continue;
+                }
                 bool affected = !member.dependencies;
                 for (auto const& dirty : packet.dirtied) {
                     auto const& path = dirty.primPath;
@@ -1868,14 +1970,25 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                     }
                     auto authored = input->GetPrim(RenderPath(captured.description));
                     captured.authoredRender = authored.dataSource || !authored.primType.IsEmpty();
+                    if (char const* const reason =
+                            DormantReason(*input, prim, path, captured.description)) {
+                        TF_DEBUG(USDGEN_INGRESS).Msg(
+                            "usdGen ingress   %s is dormant (%s): capture and cook skipped\n",
+                            path.GetText(), reason);
+                        captured.dormant = true;
+                        packet.inputs.push_back(std::move(captured));
+                        continue;
+                    }
                     RecordingInput recorder(_pruned);
                     ::usdGenImaging::UsdGenGraphDescBuildOptions options;
                     // Hydra samples are relative to the current stage frame:
                     // keep offset zero, and gate reuse with the absolute
                     // packet frame separately. Passing packet.frame as the
                     // offset here would sample at twice the current frame.
+                    // A groom waking from dormancy slept through dirties
+                    // this packet does not carry, so it captures in full.
                     if (!packet.fullPopulation && known != catalog->members.end() &&
-                        known->frame == packet.frame) {
+                        !known->dormant && known->frame == packet.frame) {
                         options.reuseNodes = true;
                         options.previousCache = known->cache;
                         for (auto const& dirty : packet.dirtied)
@@ -1893,6 +2006,7 @@ void UsdGenGroomSceneIndex::_CaptureAndSubmit(_Ingress packet) {
                         options.reuseNodes ? "on" :
                         known == catalog->members.end() ? "off: new groom" :
                         packet.fullPopulation ? "off: full population" :
+                        known->dormant ? "off: waking from dormancy" :
                         "off: the frame changed");
                     captured.desc = std::make_shared<const Desc>(std::move(result.desc));
                     // A CUDA graph always has renderer-local session identity,
@@ -2054,7 +2168,9 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
         // DescriptionOverlay: picking passes straight through it to whatever
         // the user authored underneath, and it never highlights.
         if (_publishScalpShadow && g.scalpShadow && path == ScalpShadowPath(g.description))
-            return {TfToken("mesh"), g.scalpShadow};
+            return {TfToken("mesh"), g.hidden
+                ? HdOverlayContainerDataSource::New(HiddenOverlay(), g.scalpShadow)
+                : g.scalpShadow};
         if (_publishScalpShadow && g.scalpShadow && path == ScalpShadowMaterialPath(g.description))
             return {TfToken("material"),
                     ::usdGenImaging::UsdGenTilePublisher::
@@ -2074,8 +2190,14 @@ HdSceneIndexPrim UsdGenGroomSceneIndex::GetPrim(SdfPath const& path) const {
         // underlay fallback for a host that offers no opinion at all.  The
         // On Storm only, the same overlay masks material bindings at the
         // two lowest levels to match its native curve repr restrictions.
-        if (auto upstream = DescriptionOverlay(input, g.description, path,
-                                               tile->second, _stormMaterialPolicy))
+        // A hidden groom's tiles read invisible over all of it.
+        HdContainerDataSourceHandle upstream = DescriptionOverlay(
+            input, g.description, path, tile->second, _stormMaterialPolicy);
+        if (g.hidden)
+            upstream = upstream
+                ? HdOverlayContainerDataSource::New(HiddenOverlay(), upstream)
+                : HiddenOverlay();
+        if (upstream)
             return {TfToken("basisCurves"),
                     HdOverlayContainerDataSource::New(upstream, tile->second)};
         return {TfToken("basisCurves"), tile->second};

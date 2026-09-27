@@ -297,8 +297,10 @@ def statusText(state, extra=""):
         else:
             text = "unbound: select a mesh, Bind paint map"
     else:
+        # The subset for a GeomSubset binding (its parent owns the primvar).
         text = "bound: %s -> %s (%s)" % (
-            bound.surfacePath, bound.mapPath, bound.primvar)
+            getattr(bound, "targetPath", bound.surfacePath), bound.mapPath,
+            bound.primvar)
         if active:
             text += " | desc: %s" % active
     text += " | brush: %s r=%.3g s=%.2f h=%.2f" % (

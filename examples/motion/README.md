@@ -23,7 +23,12 @@ From the pipeline repository:
 Restart an existing viewer to load the rebuilt usdGen DLLs. The static Ptex felt
 study remains at `../felt/felt_sphere.usda`; these motion studies use simpler
 materials and grooms to make deformation easier to inspect. Studio illumination
-references `../felt/textures/studio.exr`.
+uses fixed key, fill and back RectLights under `/World/Studio` in the two felt
+sphere scenes, plus the contrasting `../felt/textures/studio_contrast.exr` HDR.
+The braid studies retain their environment illumination from
+`../felt/textures/studio.exr`. The felt rig is shared with the static sphere;
+see [its lighting notes](../felt/README.md#three-point-studio) for Storm and
+Moonray settings. Select `/World/Camera` in the motion scenes.
 
 ## Rest generation and downstream motion
 

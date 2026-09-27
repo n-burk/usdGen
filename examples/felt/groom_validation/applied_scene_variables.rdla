@@ -1,0 +1,14 @@
+SceneVariables {
+    ["camera"] = PerspectiveCamera("primaryCamera"),
+    ["layer"] = Layer("defaultLayer"),
+    ["image_width"] = 640,
+    ["image_height"] = 640,
+    ["sampling_mode"] = "adaptive",
+    ["min_adaptive_samples"] = 32,
+    ["max_adaptive_samples"] = 128,
+    ["target_adaptive_error"] = 3.0999999,
+    ["light_samples"] = 1,
+    ["bsdf_samples"] = 1,
+    ["max_depth"] = 4,
+    ["enable_motion_blur"] = false,
+}

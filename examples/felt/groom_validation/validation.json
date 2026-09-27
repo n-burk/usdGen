@@ -1,0 +1,25 @@
+{
+  "settings": {
+    "sampling_mode": "adaptive",
+    "min_adaptive_samples": 32,
+    "max_adaptive_samples": 128,
+    "target_adaptive_error": 3.0,
+    "light_samples": 1,
+    "bsdf_samples": 1,
+    "max_depth": 4,
+    "max_diffuse_depth": 2,
+    "max_glossy_depth": 2
+  },
+  "converged": true,
+  "sceneSettingsReadback": true,
+  "editAndRemovalVerified": true,
+  "seconds": {
+    "tuned": 20.062000000005355,
+    "default": 26.40700000000652,
+    "reference": 107.51600000000326
+  },
+  "meanPixelErrorAgainst256sppReference": {
+    "moonray": 0.8023006184895833,
+    "moonray_default_sampling": 0.6974625651041667
+  }
+}

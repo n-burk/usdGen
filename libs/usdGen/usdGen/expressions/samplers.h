@@ -46,6 +46,11 @@ struct SamplerGeometrySource {
     std::vector<int> counts;        // mesh: faceVertexCounts; curves: curveVertexCounts
     std::vector<int> indices;       // mesh: faceVertexIndices
     std::vector<uint64_t> ids;      // optional stable id per prim (curve / point)
+    // Mesh only: a GeomSubset input (R15) visits just `faces` (sorted parent
+    // face ids) and the points they use; ids and prim indices stay the
+    // parent mesh's, so widening the subset renumbers nothing.
+    bool subset = false;
+    std::vector<int> faces;
 };
 
 class GeometrySampler {

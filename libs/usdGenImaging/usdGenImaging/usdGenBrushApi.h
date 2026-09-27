@@ -12,7 +12,9 @@
  * Handles:
  *   mesh   — a world-space quad-mesh snapshot plus a uniform-grid face index
  *            (pick, footprint, edge lengths, vertex adjacency). Read-only
- *            after creation; one per gesture or per bind.
+ *            after creation; one per gesture or per bind. An optional face
+ *            mask (MeshCreateMasked: a face UsdGeomSubset's parent-mesh face
+ *            ids, plan/02-schema.md §2.20) makes only those faces paintable.
  *   stroke — the press-time base (4 corners per face, bilinearly upsampled to
  *            a res x res texel grid per face), the working grid, and the
  *            recorded PRIMARY dabs. Footprint expansion happens inside
@@ -32,6 +34,15 @@
  * reaches is blended, by the dab weight, toward the mean of its mesh vertex
  * (all face-corners sharing it) and that vertex's edge neighbours; affected
  * faces are then re-upsampled from their corners.
+ *
+ * Face mask: face ids stay parent-mesh ids and every array stays whole-mesh
+ * (4 corners per parent face), so a masked mesh changes only what a stroke
+ * may write. The pick still intersects every face -- a masked face in front
+ * occludes -- and reports a miss when the nearest hit is masked out; the
+ * footprint never spills onto a masked face; the smoother's vertex means
+ * and edge neighbours come from paintable faces only; StrokeDab rejects a
+ * primary on a masked face. Masked faces' working corners therefore always
+ * equal the base.
  */
 #ifndef USDGEN_IMAGING_BRUSH_API_H
 #define USDGEN_IMAGING_BRUSH_API_H
@@ -68,15 +79,28 @@ USDGENIMAGING_API int UsdGenBrush_ApiVersion(void);
  * NULL for bad input (no faces, an out-of-range index, non-finite points). */
 USDGENIMAGING_API void *UsdGenBrush_MeshCreate(const double *worldPoints, int numPoints,
                                                const int *faceVertexIndices, int numFaces);
+/* MeshCreate plus a face mask: only the maskCount face ids in maskFaces
+ * (parent-mesh ids, any order, duplicates allowed) are paintable; see "Face
+ * mask" above. maskFaces NULL is MeshCreate (every face paintable); a
+ * non-NULL maskFaces with maskCount 0 masks every face out. NULL for a
+ * negative maskCount or an id outside [0, numFaces). */
+USDGENIMAGING_API void *UsdGenBrush_MeshCreateMasked(const double *worldPoints, int numPoints,
+                                                     const int *faceVertexIndices, int numFaces,
+                                                     const int *maskFaces, int maskCount);
 USDGENIMAGING_API void UsdGenBrush_MeshDestroy(void *mesh);
 USDGENIMAGING_API int UsdGenBrush_MeshFaceCount(void *mesh);
-/* Nearest quad under the ray (both windings). 1 hit, 0 miss, <0 error. */
+/* 1 when the face is paintable (always, on an unmasked mesh), 0 when the
+ * mask leaves it out, <0 for a bad mesh or face. */
+USDGENIMAGING_API int UsdGenBrush_MeshFaceInMask(void *mesh, int face);
+/* Nearest quad under the ray (both windings). 1 hit, 0 miss (including a
+ * nearest hit on a masked face), <0 error. */
 USDGENIMAGING_API int UsdGenBrush_MeshPick(void *mesh, const double *rayOrigin3,
                                            const double *rayDir3, int *outFace,
                                            float *outU, float *outV, double *outPoint3);
 /* Faces within worldRadius of point3 (NULL: the bilinear point of (face, u,
  * v)); the primary face first with its exact (u, v), the rest with their
- * closest-point (u, v). outRadiusUV[i] = worldRadius / longestEdge(face i).
+ * closest-point (u, v). Masked faces never appear past the primary.
+ * outRadiusUV[i] = worldRadius / longestEdge(face i).
  * Writes at most cap entries and returns the TOTAL footprint size (like
  * StrokeTakeTouched), so a return > cap means truncated; <0 on error. */
 USDGENIMAGING_API int UsdGenBrush_MeshFootprint(void *mesh, int face, float u, float v,
@@ -106,7 +130,8 @@ USDGENIMAGING_API void UsdGenBrush_StrokeDestroy(void *stroke);
 /* Record one primary dab (isMove: interpolate from the previous primary on
  * the same face, stamps spaced spacing*radius apart) and apply it and its
  * footprint spill to the working grid. Returns the number of stamps applied
- * (primaries times footprint faces), <0 on a rejected dab (nothing recorded). */
+ * (primaries times footprint faces), <0 on a rejected dab (nothing recorded;
+ * -11: the face is outside the mesh's face mask). */
 USDGENIMAGING_API int UsdGenBrush_StrokeDab(void *stroke, int face, float u, float v,
                                             float radiusUV, float hardness, float strength,
                                             float value, int channel, int mode, int falloff,

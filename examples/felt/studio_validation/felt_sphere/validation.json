@@ -1,0 +1,26 @@
+{
+  "scene": "felt_sphere.usda",
+  "sceneLightsOnly": true,
+  "renderers": {
+    "storm": {
+      "plugin": "HdStormRendererPlugin",
+      "converged": true,
+      "lightRemovalMeanPixelDifferences": {
+        "Key": 9.814527994791666,
+        "Fill": 5.13716064453125,
+        "Back": 6.186113281249999,
+        "Environment": 30.105423177083335
+      }
+    },
+    "moonray": {
+      "plugin": "HdMoonrayRendererDebugPlugin",
+      "converged": true,
+      "lightRemovalMeanPixelDifferences": {
+        "Key": 9.0484375,
+        "Fill": 4.918848470052083,
+        "Back": 1.6725390625,
+        "Environment": 0.9760856119791667
+      }
+    }
+  }
+}

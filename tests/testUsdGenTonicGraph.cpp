@@ -17,8 +17,12 @@
 //   * the model: graph edits bump the version AND the map version while
 //     tube edits bump only the version (no bake on sculpt drags);
 //   * the C ABI drives the same graph (plus its error paths);
+//   * face GeomSubset scalps (plan/02 §2.20): the LBVH, raycast, closest
+//     point, K3 raster, region picking and ABI placement skip the faces
+//     a subset leaves out while face ids stay parent-mesh ids, and an
+//     empty or out-of-range subset is an error;
 //   * TN-6 parity (CUDA builds with a device only): K1/K2/K3 device lanes
-//     match their CPU twins.
+//     match their CPU twins (K1 over a face subset too).
 
 #include "usdGenTonic/tonicApi.h"
 #include "usdGenTonic/tonicGraph.h"
@@ -31,10 +35,12 @@
 #include <cuda_runtime.h>
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -94,6 +100,27 @@ Grid MakeGrid(float x0 = 0.0f)
     }
     if (!usdGenTonic::TonicScalpBvhBuild(grid.mesh, &grid.bvh, &err)) {
         std::printf("FAIL: fixture bvh: %s\n", err.c_str());
+        ++g_failures;
+    }
+    return grid;
+}
+
+// The same grid bound through a face GeomSubset (plan/02 §2.20): every face
+// but 5 (x and z in [1, 2]), so a region drawn around the hole covers a face
+// the subset leaves out. Authored unsorted and with a repeat, as a union of
+// two subsets would produce.
+std::vector<int> const kSubsetFaces = {15, 0, 1, 2, 3, 4, 6, 7,
+                                       8, 9, 10, 11, 12, 13, 14, 0};
+int const kHoleFace = 5;
+
+Grid MakeSubsetGrid()
+{
+    Grid grid = MakeGrid();
+    grid.mesh.activeFaces = kSubsetFaces;
+    std::string err;
+    if (!usdGenTonic::TonicScalpFinalize(&grid.mesh, &err) ||
+        !usdGenTonic::TonicScalpBvhBuild(grid.mesh, &grid.bvh, &err)) {
+        std::printf("FAIL: subset fixture: %s\n", err.c_str());
         ++g_failures;
     }
     return grid;
@@ -691,6 +718,218 @@ void CheckCApi(Grid &grid)
     Check(Tonic_Destroy(nullptr) == TONIC_OK, "C ABI: null destroy is a noop");
 }
 
+// A loop around the subset's hole: corners on faces 0, 12, 15 and 3, every
+// traced edge over active faces, face 5 strictly inside. `mesh` traces it.
+std::vector<int> AddRingRegion(Grid const &grid,
+                               usdGenTonic::TonicScalpMesh const &mesh,
+                               usdGenTonic::TonicScalpGraph *graph)
+{
+    int const r0 = graph->AddNode(Locate(grid, 0.5f, 0.5f));
+    int const r1 = graph->AddNode(Locate(grid, 3.5f, 0.5f));
+    int const r2 = graph->AddNode(Locate(grid, 3.5f, 3.5f));
+    int const r3 = graph->AddNode(Locate(grid, 0.5f, 3.5f));
+    graph->Connect(mesh, r0, r1);
+    graph->Connect(mesh, r1, r2);
+    graph->Connect(mesh, r2, r3);
+    graph->Connect(mesh, r3, r0);
+    return {r0, r1, r2, r3};
+}
+
+// plan/02 §2.20: a face GeomSubset scalp. Face ids stay parent-mesh ids and
+// every per-face array stays parent-sized; only the surface queries (LBVH
+// raycast, closest point, K3, region picking, ABI placement) skip the faces
+// the subset leaves out, and an invalid subset is an error.
+void CheckSubset(Grid const &whole)
+{
+    using namespace usdGenTonic;
+    Grid sub = MakeSubsetGrid();
+    std::vector<int> wantActive;
+    for (int f = 0; f < 16; ++f) {
+        if (f != kHoleFace) {
+            wantActive.push_back(f);
+        }
+    }
+    Check(sub.mesh.finalized && sub.mesh.activeFaces == wantActive,
+          "subset: finalize sorts and de-dupes the parent face ids");
+    Check(sub.mesh.faceVertexCounts.size() == 16 &&
+              sub.mesh.faceActive.size() == 16 &&
+              sub.mesh.faceAreas.size() == 16 &&
+              sub.mesh.faceNeighbours.size() == 16,
+          "subset: per-face arrays stay parent-sized (no renumbering)");
+    bool flags = true;
+    for (int f = 0; f < 16; ++f) {
+        flags = flags && TonicScalpFaceActive(sub.mesh, f) == (f != kHoleFace);
+    }
+    Check(flags && !TonicScalpFaceActive(sub.mesh, 16) &&
+              !TonicScalpFaceActive(sub.mesh, -1),
+          "subset: exactly the subset's faces are active");
+    Check(sub.bvh.valid && sub.bvh.order.size() == 15 &&
+              sub.bvh.nodes.size() == 2 * 15 - 1 &&
+              std::find(sub.bvh.order.begin(), sub.bvh.order.end(),
+                        kHoleFace) == sub.bvh.order.end(),
+          "subset: the LBVH holds the subset's faces only");
+
+    // K1: rays and closest points respect the subset.
+    float const down[3] = {0.0f, -1.0f, 0.0f};
+    float const overHole[3] = {1.5f, 5.0f, 1.5f};
+    float const overActive[3] = {1.5f, 5.0f, 2.5f};
+    Check(!TonicRaycastCpu(sub.mesh, sub.bvh, overHole, down).hit &&
+              TonicRaycastCpu(whole.mesh, whole.bvh, overHole, down).faceId ==
+                  kHoleFace,
+          "subset: a ray at a face outside the subset misses (the whole "
+          "mesh hits it)");
+    TonicHit const in = TonicRaycastCpu(sub.mesh, sub.bvh, overActive, down);
+    Check(in.hit && in.faceId == 6 && in.ptexFaceId == 6 &&
+              Near(in.u, 0.5f) && Near(in.v, 0.5f),
+          "subset: a ray at a subset face hits it by its parent id");
+    float const aboveHole[3] = {1.2f, 1.0f, 1.5f};
+    TonicHit const snapped = TonicClosestPointCpu(sub.mesh, aboveHole);
+    Check(snapped.hit && snapped.faceId == 1 && Near(snapped.px, 1.0f) &&
+              Near(snapped.pz, 1.5f),
+          "subset: the closest point lands on a subset face, by parent id");
+    TonicHit const anyFace =
+        TonicClosestPointCpu(sub.mesh, aboveHole, /*activeOnly*/ false);
+    Check(anyFace.hit && anyFace.faceId == kHoleFace &&
+              Near(anyFace.px, 1.2f) && Near(anyFace.pz, 1.5f),
+          "subset: activeOnly=false still sees every parent face");
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    Check(TonicFacePosition(sub.mesh, kHoleFace, 0.5f, 0.5f, &px, &py, &pz) &&
+              Near(px, 1.5f) && Near(pz, 1.5f),
+          "subset: a left-out face still addresses parent geometry");
+    Check(TonicScalpBvhRefit(sub.mesh, &sub.bvh) &&
+              TonicRaycastCpu(sub.mesh, sub.bvh, overActive, down).faceId == 6 &&
+              !TonicRaycastCpu(sub.mesh, sub.bvh, overHole, down).hit,
+          "subset: a refit keeps the subset-only tree");
+
+    // Invalid subsets are errors, never a silent clamp or a whole bind.
+    for (std::vector<int> const &bad : {std::vector<int>{3, 16},
+                                        std::vector<int>{-1, 2}}) {
+        TonicScalpMesh mesh = whole.mesh;
+        mesh.activeFaces = bad;
+        std::string err;
+        bool const refused = !TonicScalpFinalize(&mesh, &err) &&
+                             !mesh.finalized &&
+                             err.find("out of range") != std::string::npos;
+        Check(refused,
+              "subset: an out-of-range face id is refused (" + err + ")");
+    }
+
+    // K3: left-out faces are never claimed and never counted uncovered.
+    TonicRegionMaps maps;
+    std::string err;
+    TonicScalpGraph empty;
+    Check(TonicRasteriseRegionsCpu(sub.mesh, empty, &maps, &err) &&
+              maps.uncoveredCount == 15 && maps.faceRegion.size() == 16,
+          "subset K3: with no region, only the 15 subset faces are uncovered");
+    TonicScalpGraph ring;
+    AddRingRegion(whole, sub.mesh, &ring);
+    Check(ring.RegionCount() == 1, "subset K3: the ring is one region");
+    TonicRegionMaps wholeMaps;
+    Check(TonicRasteriseRegionsCpu(sub.mesh, ring, &maps, &err) &&
+              TonicRasteriseRegionsCpu(whole.mesh, ring, &wholeMaps, &err),
+          "subset K3: the ring rasterises on both bindings: " + err);
+    bool claimed = maps.faceRegion.size() == 16;
+    for (int f = 0; claimed && f < 16; ++f) {
+        claimed = f == kHoleFace
+            ? maps.faceRegion[size_t(f)] == -1 && !maps.covered[size_t(f)]
+            : maps.faceRegion[size_t(f)] == 0;
+    }
+    Check(claimed && maps.uncoveredCount == 0 && maps.intersectedCount == 0,
+          "subset K3: the ring claims every subset face and never the hole");
+    Check(wholeMaps.faceRegion[size_t(kHoleFace)] == 0,
+          "subset K3: the whole mesh claims the same face (the mask is the "
+          "only difference)");
+    TonicRegionLoops loops;
+    TonicFlattenLoops(ring, &loops, &err);
+    std::vector<int> const res = TonicFaceResLog2(sub.mesh, maps, loops, 3);
+    Check(res.size() == 16 && res[size_t(kHoleFace)] == 0 && res[6] == 3,
+          "subset K3: a left-out face bakes 1x1 even under an override");
+
+    // The model: RegionAtSurface and the face-map census.
+    TonicModel model;
+    Check(model.BindScalp(whole.mesh.points, whole.mesh.faceVertexCounts,
+                          whole.mesh.faceVertexIndices, kSubsetFaces),
+          "subset model: the scalp binds through a face subset");
+    std::shared_ptr<TonicScalpMesh const> const bound = model.GetScalp();
+    Check(bound && bound->activeFaces == wantActive,
+          "subset model: the bound scalp keeps the parent mesh + subset");
+    TonicModel rejected;
+    Check(!rejected.BindScalp(whole.mesh.points, whole.mesh.faceVertexCounts,
+                              whole.mesh.faceVertexIndices, {0, 99}) &&
+              !rejected.HasScalp() &&
+              std::string(rejected.GetDiagnostic()).find("out of range") !=
+                  std::string::npos,
+          "subset model: an out-of-range subset refuses the bind");
+    int const n0 = model.GraphAddNode(Locate(whole, 0.5f, 0.5f));
+    int const n1 = model.GraphAddNode(Locate(whole, 3.5f, 0.5f));
+    int const n2 = model.GraphAddNode(Locate(whole, 3.5f, 3.5f));
+    int const n3 = model.GraphAddNode(Locate(whole, 0.5f, 3.5f));
+    model.GraphConnect(n0, n1);
+    model.GraphConnect(n1, n2);
+    model.GraphConnect(n2, n3);
+    model.GraphConnect(n3, n0);
+    Check(model.Rasterise() && model.GetRegionMaps().uncoveredCount == 0 &&
+              model.SnapshotGraph().faceRegions.size() == 16 &&
+              model.SnapshotGraph().faceRegions[size_t(kHoleFace)] == -1,
+          "subset model: the live map is parent-sized, the hole reads -1");
+    Check(model.RegionAtSurface(6, 0.5f, 0.5f) == 0 &&
+              model.RegionAtSurface(kHoleFace, 0.5f, 0.5f) == -1,
+          "subset model: region picking never answers for a left-out face");
+
+    // The C ABI.
+    TonicModelContext *ctx = nullptr;
+    Check(Tonic_Create(&ctx) == TONIC_OK && ctx, "subset C ABI: model creates");
+    std::vector<float> const &pts = whole.mesh.points;
+    std::vector<int> const &counts = whole.mesh.faceVertexCounts;
+    std::vector<int> const &indices = whole.mesh.faceVertexIndices;
+    Check(Tonic_BindScalpSubset(ctx, pts.data(), int(pts.size()),
+                                counts.data(), int(counts.size()),
+                                indices.data(), int(indices.size()), nullptr,
+                                0) == TONIC_ERROR &&
+              std::string(Tonic_GetLastError()).find("names no faces") !=
+                  std::string::npos,
+          "subset C ABI: an empty subset is an error, not the whole mesh");
+    int const outOfRange[2] = {3, 16};
+    Check(Tonic_BindScalpSubset(ctx, pts.data(), int(pts.size()),
+                                counts.data(), int(counts.size()),
+                                indices.data(), int(indices.size()),
+                                outOfRange, 2) == TONIC_ERROR &&
+              Tonic_HasScalp(ctx) == 0,
+          "subset C ABI: an out-of-range subset is an error");
+    Check(Tonic_BindScalpSubset(ctx, pts.data(), int(pts.size()),
+                                counts.data(), int(counts.size()),
+                                indices.data(), int(indices.size()),
+                                kSubsetFaces.data(),
+                                int(kSubsetFaces.size())) == TONIC_OK &&
+              Tonic_HasScalp(ctx) == 1,
+          "subset C ABI: the subset binds");
+    int active[16] = {0};
+    int got = 0;
+    bool activeOk =
+        Tonic_ReadScalpFaceActive(ctx, active, 16, &got) == TONIC_OK &&
+        got == 16;
+    for (int f = 0; activeOk && f < 16; ++f) {
+        activeOk = active[f] == (f == kHoleFace ? 0 : 1);
+    }
+    Check(activeOk && Tonic_ReadScalpFaceActive(ctx, active, 4, &got) ==
+                          TONIC_ERROR,
+          "subset C ABI: the per-face active flags read back");
+    int hit = 1, face = -1;
+    float uv[2] = {0.0f, 0.0f};
+    float p[3] = {0.0f, 0.0f, 0.0f};
+    float nrm[3] = {0.0f, 0.0f, 0.0f};
+    Check(Tonic_Raycast(ctx, overHole, down, &hit, &face, uv, p, nrm) ==
+                  TONIC_OK &&
+              hit == 0,
+          "subset C ABI: the raycast misses a left-out face");
+    int nodeId = -1;
+    Check(Tonic_GraphAddNode(ctx, kHoleFace, 0.5f, 0.5f, &nodeId) ==
+                  TONIC_ERROR &&
+              Tonic_GraphAddNode(ctx, 6, 0.5f, 0.5f, &nodeId) == TONIC_OK,
+          "subset C ABI: nodes place on subset faces only");
+    Check(Tonic_Destroy(ctx) == TONIC_OK, "subset C ABI: model destroys");
+}
+
 #ifdef USDGEN_TONIC_HAS_CUDA
 bool HaveCudaDevice()
 {
@@ -801,6 +1040,47 @@ void CheckCudaParity(Grid &grid)
         }
     }
     Check(k1, "TN-6: K1 device raycast matches the CPU twin");
+    // The same rays over a face-subset LBVH (plan/02 §2.20): the device
+    // walks the uploaded subset-only tree, so it misses the hole exactly
+    // where the CPU twin does. The mesh buffers are shared (same grid).
+    Grid const sub = MakeSubsetGrid();
+    float const holeOrigin[3] = {1.5f, 5.0f, 1.5f};
+    std::memcpy(origins + 5 * 3, holeOrigin, sizeof(holeOrigin));
+    dirs[5 * 3 + 0] = 0.0f;
+    dirs[5 * 3 + 1] = -1.0f;
+    dirs[5 * 3 + 2] = 0.0f;
+    size_t const nSubNodes = sub.bvh.nodes.size();
+    size_t const nSubOrder = sub.bvh.order.size();
+    TonicDeviceBvhNode *dSubNodes = nullptr;
+    int *dSubOrder = nullptr;
+    cudaMalloc(&dSubNodes, nSubNodes * sizeof(TonicDeviceBvhNode));
+    cudaMalloc(&dSubOrder, nSubOrder * sizeof(int));
+    cudaMemcpy(dSubNodes, sub.bvh.nodes.data(),
+               nSubNodes * sizeof(TonicDeviceBvhNode), cudaMemcpyHostToDevice);
+    cudaMemcpy(dSubOrder, sub.bvh.order.data(), nSubOrder * sizeof(int),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(dOrg, origins, sizeof(origins), cudaMemcpyHostToDevice);
+    cudaMemcpy(dDir, dirs, sizeof(dirs), cudaMemcpyHostToDevice);
+    bool const subLaunched = TonicLaunchRaycastBatch(
+        dPts, dCounts, dIndices, dOffsets, dNormals, dSubNodes, dSubOrder,
+        int(nCounts), int(nSubNodes), sub.bvh.root, dOrg, dDir, dHits,
+        rayCount, nullptr, err, sizeof(err));
+    cudaDeviceSynchronize();
+    TonicDeviceHit subHits[rayCount];
+    cudaMemcpy(subHits, dHits, sizeof(subHits), cudaMemcpyDeviceToHost);
+    bool k1Subset = subLaunched && subHits[5].faceId < 0;
+    for (int r = 0; r < rayCount && k1Subset; ++r) {
+        TonicHit const cpu = TonicRaycastCpu(sub.mesh, sub.bvh,
+                                             origins + r * 3, dirs + r * 3);
+        k1Subset = cpu.hit == (subHits[r].faceId >= 0) &&
+                   (!cpu.hit || (subHits[r].faceId == cpu.faceId &&
+                                 Near(subHits[r].t, cpu.t, 1e-5f)));
+    }
+    Check(k1Subset,
+          "TN-6: K1 device raycast over a face subset matches the CPU twin "
+          "and misses the left-out face");
+    cudaFree(dSubNodes);
+    cudaFree(dSubOrder);
     cudaFree(dOrg);
     cudaFree(dDir);
     cudaFree(dHits);
@@ -929,6 +1209,7 @@ main()
     CheckK3(grid);
     CheckModel(grid);
     CheckCApi(grid);
+    CheckSubset(grid);
     CheckCudaParity(grid);
     std::printf("%d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -143,6 +143,95 @@ def _meshArrays(points, counts, indices):
     return xyz.reshape(-1), cnt, idx, centre
 
 
+def resolveScalpTarget(stage, path):
+    """(meshPrim, faces, error) for the scalp prim at `path` (plan/02 2.20).
+
+    A Mesh binds whole: `faces` is None. A GeomSubset whose elementType is
+    "face" and whose parent is a Mesh binds that parent's geometry
+    restricted to the subset's `indices` -- PARENT-mesh face ids, returned
+    sorted and unique. A subset never renumbers faces: geometry, primvars
+    and the rest binding all stay on the parent. Anything else returns
+    (None, None, reason) -- a non-face subset, a subset outside a Mesh, an
+    empty or out-of-range index list is an error, never a silent bind of
+    the whole mesh. The one resolver every bind and bind validation uses;
+    TonicResolveScalpTarget (tonicCommit.h) is its hydrate-side twin.
+    """
+    from pxr import UsdGeom
+    path = str(path)
+    try:
+        prim = stage.GetPrimAtPath(path)
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        prim = None
+    if not prim:
+        return None, None, "no prim at %s" % path
+    if prim.IsA(UsdGeom.Mesh):
+        return prim, None, ""
+    if not prim.IsA(UsdGeom.Subset):
+        return None, None, ("%s is a %s, not a Mesh or a face GeomSubset"
+                            % (path, prim.GetTypeName() or "typeless prim"))
+    subset = UsdGeom.Subset(prim)
+    elementType = str(subset.GetElementTypeAttr().Get() or "")
+    if elementType != "face":
+        return None, None, ('GeomSubset %s has elementType "%s"; a scalp '
+                            'subset must be "face"' % (path, elementType))
+    parent = prim.GetParent()
+    if not parent or not parent.IsA(UsdGeom.Mesh):
+        return None, None, ("GeomSubset %s is not a child of a Mesh"
+                            % path)
+    try:
+        faces = sorted(set(
+            int(i) for i in (subset.GetIndicesAttr().Get() or [])))
+    except (TypeError, ValueError, OverflowError):
+        return None, None, "GeomSubset %s has unreadable indices" % path
+    if not faces:
+        return None, None, "GeomSubset %s names no faces" % path
+    faceCount = len(parent.GetAttribute("faceVertexCounts").Get() or [])
+    for face in (faces[0], faces[-1]):
+        if face < 0 or face >= faceCount:
+            return None, None, ("GeomSubset %s names face %d, but %s has "
+                                "%d faces" % (path, face, parent.GetPath(),
+                                              faceCount))
+    return parent, faces, ""
+
+
+def _facesCentre(flat, counts, indices, faces):
+    """Bounding-box centre of the vertices `faces` use, or None.
+
+    A face subset scalp frames on its own faces, not on the whole parent.
+    """
+    try:
+        import numpy
+    except ImportError:
+        numpy = None
+    try:
+        if numpy is not None and hasattr(flat, "reshape"):
+            cnt = numpy.asarray(counts, dtype=numpy.int64)
+            keep = numpy.zeros(len(cnt), dtype=bool)
+            keep[numpy.asarray(faces, dtype=numpy.int64)] = True
+            corners = keep[numpy.repeat(numpy.arange(len(cnt)), cnt)]
+            verts = numpy.asarray(indices)[corners]
+            if not len(verts):
+                return None
+            xyz = numpy.asarray(flat).reshape(-1, 3)[verts]
+            lo = xyz.min(axis=0)
+            hi = xyz.max(axis=0)
+            return tuple(float(0.5 * (lo[a] + hi[a])) for a in range(3))
+        offsets = [0]
+        for count in counts:
+            offsets.append(offsets[-1] + int(count))
+        verts = set()
+        for face in faces:
+            verts.update(int(i) for i in
+                         indices[offsets[face]:offsets[face + 1]])
+        if not verts:
+            return None
+        return tuple(0.5 * (min(flat[v * 3 + a] for v in verts) +
+                            max(flat[v * 3 + a] for v in verts))
+                     for a in range(3))
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
 def _cArray(values, ctype):
     """A ctypes argument over `values` (a numpy array or a list).
 
@@ -260,6 +349,10 @@ class TonicSession:
         self._groomPath = DEFAULT_GROOM_PATH
         self._descPath = ""
         self._scalpPath = ""
+        # The Mesh behind _scalpPath: the same path, or a face GeomSubset's
+        # parent (plan/02 section 2.20). Recorded whenever the scalp is
+        # read (bind, hydrate, reattach).
+        self._scalpMeshPath = ""
         self._mapPath = DEFAULT_GROOM_PATH + "/RegionMap"
         self._mapFile = ""
         self._detached = False
@@ -338,6 +431,11 @@ class TonicSession:
     @property
     def scalpPath(self):
         return self._scalpPath
+
+    @property
+    def scalpMeshPath(self):
+        """The Mesh carrying the scalp: scalpPath, or a face subset's parent."""
+        return self._scalpMeshPath or self._scalpPath
 
     @property
     def scalpCenter(self):
@@ -547,8 +645,15 @@ class TonicSession:
             return False
         self._committer = committer
         if self._scalpPath:
-            dll.Tonic_CommitterSetScalpPath(committer,
-                                            self._scalpPath.encode("utf-8"))
+            # A face GeomSubset scalp links the subset but puts its rest
+            # binding and live primvar on the parent Mesh (plan/02 2.20).
+            meshPath = self._scalpMeshPath \
+                if self._scalpMeshPath != self._scalpPath else ""
+            if dll.Tonic_CommitterSetScalpTarget(
+                    committer, self._scalpPath.encode("utf-8"),
+                    meshPath.encode("utf-8") if meshPath else None) \
+                    != tonicLib.TONIC_OK:
+                self._status("Tonic: " + self.lastError(), "error")
         # The model needs the groom path too, for one reason that has
         # nothing to do with committing: the scene index hides the
         # committed <groom>/Guides prim while this model is live
@@ -606,6 +711,7 @@ class TonicSession:
         self._groomPath = groomPath or DEFAULT_GROOM_PATH
         self._descPath = descPath or ""
         self._scalpPath = str(scalpPath)
+        self._scalpMeshPath = ""
         self._mapPath = self._groomPath + "/RegionMap"
         # Every failure from here on tears the half-built session down
         # (SS-06): a model with no committer, or a committer and live
@@ -694,6 +800,7 @@ class TonicSession:
         # it. The path is recorded for the committer and nothing else.
         if scalpPath:
             self._scalpPath = scalpPath
+            self._scalpMeshPath = ""
             self.recordScalpCenter(scalpPath, stage)
         # From here the new model is the session's: a failure tears it
         # down whole, as activate() does (SS-06).
@@ -735,38 +842,50 @@ class TonicSession:
             return None
 
     def _scalpMesh(self, scalpPath, stage):
-        """(flatPoints, counts, indices, centre) for `scalpPath`, or None.
+        """(flatPoints, counts, indices, centre, faces, meshPath) or None.
 
         The three arrays are numpy float32/int32 when numpy imports, else
         plain lists; _cArray() turns either into what Tonic_BindScalp
         takes. Per-element Python loops over the Vt arrays made a 100k-face
         scalp take seconds to bind (SS-06); numpy reads the Vt buffers in
         one copy each.
+
+        `scalpPath` may name a face GeomSubset (resolveScalpTarget): the
+        arrays are then its parent Mesh's, `faces` its parent-mesh face ids
+        and `centre` the centre of those faces; `faces` is None for a Mesh.
+        `meshPath` is the Mesh the arrays came from.
         """
-        prim = stage.GetPrimAtPath(str(scalpPath))
-        if not prim:
-            self._status("Tonic: no prim at %s" % scalpPath)
+        prim, faces, error = resolveScalpTarget(stage, scalpPath)
+        if prim is None:
+            self._status("Tonic: %s" % error, "error")
             return None
+        meshPath = str(prim.GetPath())
         points = prim.GetAttribute("points").Get() or []
         counts = prim.GetAttribute("faceVertexCounts").Get() or []
         indices = prim.GetAttribute("faceVertexIndices").Get() or []
         if not len(points) or not len(counts):
-            self._status("Tonic: %s is not a mesh with points" % scalpPath)
+            self._status("Tonic: %s is not a mesh with points" % meshPath)
             return None
         arrays = _meshArrays(points, counts, indices)
         if arrays is not None:
-            return arrays
-        flat = [float(c) for p in points for c in (p[0], p[1], p[2])]
-        centre = tuple(
-            0.5 * (min(flat[a::3]) + max(flat[a::3])) for a in range(3))
-        return (flat, [int(c) for c in counts], [int(i) for i in indices],
-                centre)
+            flat, counts, indices, centre = arrays
+        else:
+            flat = [float(c) for p in points for c in (p[0], p[1], p[2])]
+            centre = tuple(
+                0.5 * (min(flat[a::3]) + max(flat[a::3])) for a in range(3))
+            counts = [int(c) for c in counts]
+            indices = [int(i) for i in indices]
+        if faces is not None:
+            centre = _facesCentre(flat, counts, indices, faces) or centre
+        return (flat, counts, indices, centre, faces, meshPath)
 
     def recordScalpCenter(self, scalpPath, stage=None):
         """Note the scalp's bounding-box centre without touching the model.
 
         The centre is what the camera frames on; binding is what clears the
         scalp graph. Hydrate needs the first and must not do the second.
+        The Mesh behind a face subset scalp is recorded with it, for the
+        committer's rest binding.
         """
         stage = stage if stage is not None else self._apiStage()
         if stage is None:
@@ -775,10 +894,11 @@ class TonicSession:
         if mesh is None:
             return False
         self._scalpCenter = mesh[3]
+        self._scalpMeshPath = mesh[5]
         return True
 
     def bindScalpFromStage(self, scalpPath, stage=None):
-        """Bind the mesh at `scalpPath` as the model's scalp.
+        """Bind the mesh (or face GeomSubset) at `scalpPath` as the scalp.
 
         NOTE: TonicModel::BindScalp clears the scalp graph, its region
         loops and the rasterised face ids. Call it to attach a scalp, never
@@ -793,16 +913,23 @@ class TonicSession:
             return False
         # `flat`, `counts` and `indices` stay referenced until the call
         # returns: for numpy input the ctypes pointers borrow their memory.
-        flat, counts, indices, centre = mesh
+        flat, counts, indices, centre, faces, meshPath = mesh
         pts = _cArray(flat, ctypes.c_float)
         cnt = _cArray(counts, ctypes.c_int)
         idx = _cArray(indices, ctypes.c_int)
-        if self.dll.Tonic_BindScalp(self._model, pts, len(flat), cnt,
-                                    len(counts), idx,
-                                    len(indices)) != tonicLib.TONIC_OK:
+        if faces is None:
+            rc = self.dll.Tonic_BindScalp(self._model, pts, len(flat), cnt,
+                                          len(counts), idx, len(indices))
+        else:
+            active = _cArray(faces, ctypes.c_int)
+            rc = self.dll.Tonic_BindScalpSubset(
+                self._model, pts, len(flat), cnt, len(counts), idx,
+                len(indices), active, len(faces))
+        if rc != tonicLib.TONIC_OK:
             self._status("Tonic: " + self.lastError())
             return False
         self._scalpCenter = centre
+        self._scalpMeshPath = meshPath
         return True
 
     def deactivate(self):

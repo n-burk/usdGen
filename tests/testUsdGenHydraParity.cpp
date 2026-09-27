@@ -189,6 +189,7 @@ void CheckSurface(UsdGenSurfaceDesc const &a, UsdGenSurfaceDesc const &b,
     CheckEq(a.velocities, b.velocities, ctx + " velocities");
     CheckEq(a.uv, b.uv, ctx + " uv");
     CheckEq(a.subsetFaces, b.subsetFaces, ctx + " subsetFaces");
+    CheckEq(a.isSubset, b.isSubset, ctx + " isSubset");
     CheckEq(a.worldMatrix, b.worldMatrix, ctx + " worldMatrix");
     CheckEq(a.surfaceGeneration, b.surfaceGeneration,
             ctx + " surfaceGeneration");

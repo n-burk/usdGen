@@ -52,7 +52,9 @@ CudaSurfacePreparationStatus PrepareCudaSurface(
     if (sampleBudget < 4) return fail(CudaSurfacePreparationStatus::InvalidArgument, "surface sampleBudget must be at least 4");
     if (source.restFromCurrentPoints)
         return fail(CudaSurfacePreparationStatus::UnsupportedFeature, "RBF requires a Default-time rest surface; current-frame fallback is not a binding");
-    if (!source.subsetFaces.empty()) return fail(CudaSurfacePreparationStatus::UnsupportedFeature, "surface subsets are unsupported");
+    // A GeomSubset surface carries its parent mesh's full topology (R15):
+    // like the CPU lane, the RBF field samples the whole parent, so
+    // subsetFaces (a Scatter/Collide restriction) is not an RBF input.
     if (!Identity(source.worldMatrix)) return fail(CudaSurfacePreparationStatus::UnsupportedFeature, "non-identity surface transforms are unsupported");
     if (source.restPoints.empty() || source.points.empty() || source.restPoints.size() != source.points.size())
         return fail(CudaSurfacePreparationStatus::InvalidTopology, "surface rest/current vertex counts do not match");

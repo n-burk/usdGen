@@ -1680,7 +1680,8 @@ foreach(_t testUsdGenTileContract testUsdGenStockStormContract testUsdGenInvalid
            testUsdGenRestAdapter testUsdGenCurveRestAdapter testUsdGenContracts
            testUsdGenExpressionPrimConnection testUsdGenViewportOverlay testUsdGenFurOcclusion
            testUsdGenSourceColor testUsdGenLookPrimvars
-           testUsdGenInstance testUsdGenReferenceSource testUsdGenPaintLengthRecook)
+           testUsdGenInstance testUsdGenReferenceSource testUsdGenPaintLengthRecook
+           testUsdGenDormantGroom)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_libraries(${_t} PRIVATE usdGenTestUtilsHd)
     add_test(NAME ${_t} COMMAND ${_t})
@@ -1697,6 +1698,8 @@ set_tests_properties(testUsdGenLookPrimvars PROPERTIES LABELS "T1;look;primvars"
 set_tests_properties(testUsdGenPaintLengthRecook PROPERTIES
     LABELS "T1;imaging;paint;brush" TIMEOUT 120)
 set_tests_properties(testUsdGenScenePublication PROPERTIES
+    LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
+set_tests_properties(testUsdGenDormantGroom PROPERTIES
     LABELS "T1;scheduling;imaging;scene-owner" TIMEOUT 60)
 set_tests_properties(testUsdGenInvalidation PROPERTIES LABELS "T1;gate:SI-2")
 
@@ -1765,6 +1768,29 @@ set_tests_properties(testUsdGenHydraParity
     LABELS "T1;gate:SI-12"
     TIMEOUT 300
     SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77"
+)
+
+# GeomSubset targets wherever usdGen needs a mesh (02 §2.20, R15): both
+# builders, Scatter restriction/union/diagnostics, subset paint and
+# geoSampler inputs, cooked on the CPU lane from an authored stage.
+add_executable(testUsdGenGeomSubset
+    tests/testUsdGenGeomSubset.cpp
+)
+target_link_libraries(testUsdGenGeomSubset
+    PUBLIC usdGenTestUtilsHd
+    PUBLIC usdGenImaging
+)
+set_target_properties(testUsdGenGeomSubset PROPERTIES
+    VISIBILITY_INLINES_HIDDEN ON
+)
+add_test(NAME testUsdGenGeomSubset
+    COMMAND testUsdGenGeomSubset
+)
+set_tests_properties(testUsdGenGeomSubset
+    PROPERTIES
+    ENVIRONMENT_MODIFICATION "${_usdgen_m1_env}"
+    LABELS "T1"
+    TIMEOUT 300
 )
 
 add_executable(testUsdGenHierarchy tests/testUsdGenHierarchy.cpp)

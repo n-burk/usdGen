@@ -87,6 +87,11 @@ struct UsdGenGeometryDesc
     VtVec3fArray       rest;         // Default-time rest when the prim has one, else empty
     VtVec3fArray       normals;      // points: optional per-point normals
     VtArray<uint64_t>  ids;          // curves: usdGen:curveId; points: ids (optional)
+    // A GeomSubset input (R15): `path` is the subset, the arrays above its
+    // parent Mesh's, and only subsetFaces (sorted parent face ids) and their
+    // points are sampled. isSubset keeps an empty subset empty.
+    VtIntArray         subsetFaces;
+    bool               isSubset = false;
     GfMatrix4d         worldMatrix{1.0};
     /// Content identity of everything above, computed by the builder. Any
     /// edit of the prim's data changes it, so a consumer's capture identity
@@ -273,7 +278,12 @@ struct UsdGenSurfaceDesc
     std::vector<UsdGenSurfaceSample> samples;
     VtVec3fArray   velocities;        // motion profile P1 only; empty otherwise
     VtVec2fArray   uv;                // the surface's primary uv set
-    VtIntArray     subsetFaces;       // empty == whole mesh; a GeomSubset restricts scatter (R15)
+    // A GeomSubset target (R15) carries its parent Mesh's full geometry
+    // above, so face ids stay parent-mesh ids, plus its sorted, unique faces
+    // here. isSubset makes subsetFaces authoritative even when empty (an
+    // empty subset selects no face); otherwise empty == whole mesh.
+    VtIntArray     subsetFaces;
+    bool           isSubset = false;
     VtFloatArray   densityMultiplier; // per-face scatter density scale from
                                      // usdGen:paint:density (face means,
                                      // clamped >= 0, non-finite -> 0);
@@ -281,6 +291,22 @@ struct UsdGenSurfaceDesc
     GfMatrix4d     worldMatrix{1.0};  // post-flattening, resetXformStack (S4)
     uint64_t       surfaceGeneration = 0; // bumped by any points/topology change
 };
+
+/// Whether consumers restrict a surface to subsetFaces: a GeomSubset target
+/// (even an empty one) or a hand-built desc that names faces.
+inline bool
+UsdGenSurfaceRestricted(UsdGenSurfaceDesc const &surface)
+{
+    return surface.isSubset || !surface.subsetFaces.empty();
+}
+
+/// The Mesh prim a surface's geometry and primvars live on: the target
+/// itself, or a GeomSubset's parent (a subset is always a Mesh's child).
+inline SdfPath
+UsdGenSurfaceMeshPath(UsdGenSurfaceDesc const &surface)
+{
+    return surface.isSubset ? surface.path.GetParentPath() : surface.path;
+}
 
 struct UsdGenMapDesc
 {

@@ -1247,6 +1247,28 @@ proposals accepted subsets and none defined them (`design/judge-delivery.md` §5
 7. A target that resolves to neither a `Mesh` nor a face `GeomSubset` is a hard diagnostic
    (`TF_WARN` naming both the operator and the target) and the description publishes nothing;
    silence here produced the worst debugging experience in the prior-art survey.
+8. **Every relationship that needs a mesh accepts a face `GeomSubset` (2026-09-27).** Both
+   builders resolve a subset into ONE self-contained `UsdGenSurfaceDesc` — its parent's full
+   geometry, `path` = the subset, `isSubset`, and sorted, unique `subsetFaces` — so no consumer
+   walks to a parent entry and face ids stay parent ids by construction. An empty subset selects
+   no face (it never widens to the mesh); an index outside the parent is a hard diagnostic.
+   What a subset restricts, and what still reads the whole parent:
+
+   | Consumer | Restricted to the subset's faces | Whole parent mesh |
+   |---|---|---|
+   | `usdGen:surface` → Scatter (CPU and the CUDA scatter input), limit scatter, surface-cage fill | roots, rest area / density | limit-surface build, ptex ids |
+   | `usdGen:colliders` (and the bound surface) → Collide | collision faces | — |
+   | Deform RBF (CPU and CUDA `PrepareCudaSurface`), root frames, Grow | — | RBF samples, rest/posed points, root frames |
+   | `usdGen:paint:surface` (PaintMap) | faces outside read `usdGen:map:default` | primvar is read from the parent; `paintSurface` records the parent |
+   | expression `input:<name>` (`geoSampler`) | elements visited | `$id`/`$primIndex`/`$primCount` numbering |
+   | Storm scalp-shadow occluders | — | the parent occludes, once per mesh |
+   | `usdGen:tonic:scalp` (Tonic) | raycast BVH, closest point, root sampling, region fill and uncovered count, tint | geometry, graph face ids, `tonicRegion` primvar, UsdGenRestAPI, ptex bake layout |
+   | brush tools (`usdGenBrushApi` face mask + Python twins) | pick, dab spill, smooth, flood, bake/live writes | the primvar (written on the parent, subset corners only) |
+   | `usdGenBakePtex` on a subset path | voronoi seeds | the baked file (every parent face) |
+
+   The routing snapshot carries `meshPaths` beside `surfacePaths`: points, topology and paint
+   primvar rows key on the parent mesh, and the subset's own prim routes `indices`/`type` (bare
+   and `geomSubset/`-prefixed) as a recapture (rule 5). Evidence: `tests/testUsdGenGeomSubset.cpp`.
 
 ---
 

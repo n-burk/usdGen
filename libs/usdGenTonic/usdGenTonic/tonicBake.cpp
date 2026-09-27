@@ -68,6 +68,9 @@ uint64_t _ClassifierKey(TonicBakeInput const &input,
     _HashVector(&hash, mesh.points);
     _HashVector(&hash, mesh.faceVertexCounts);
     _HashVector(&hash, mesh.faceVertexIndices);
+    if (!mesh.activeFaces.empty()) {
+        _HashVector(&hash, mesh.activeFaces);  // a face subset (§2.20)
+    }
     _HashVector(&hash, loops.points);
     _HashVector(&hash, loops.loopBegin);
     _HashVector(&hash, loops.loopCount);
@@ -113,6 +116,9 @@ struct _BakeFace {
     int sub = 0;  // n-gon sub-face, else 0
     int resU = 1;
     int resV = 1;
+    // False outside a bound face subset: the ptex keeps every parent face
+    // (ids are parent-derived), but such a face is never claimed.
+    bool active = true;
     float corners[12];
 };
 
@@ -150,6 +156,7 @@ bool _PlanFaces(TonicBakeInput const &input, TonicRegionMaps const &maps,
             _BakeFace bf;
             bf.coarse = int(f);
             bf.sub = s;
+            bf.active = TonicScalpFaceActive(mesh, int(f));
             int rr = (subs == 1) ? r : std::max(r - 1, 0);
             bf.resU = bf.resV = 1 << rr;
             float const *pts = mesh.points.data();
@@ -405,6 +412,20 @@ int _ClassifyOutputOwner(_LevelIndex const &index, int region,
     return current >= 0 ? current + 1 : 0;
 }
 
+// The texels of a face no region claims: channel 0 is -1 (an Output owner
+// map's unowned sentinel is 0), every level channel 0 (plan/17 §2.2).
+std::vector<float> _UnclaimedTexels(_BakePlan const &plan,
+                                    _BakeFace const &bf)
+{
+    std::vector<float> texels(size_t(bf.resU) * size_t(bf.resV) *
+                              size_t(plan.channels));
+    for (size_t t = 0; t < size_t(bf.resU) * size_t(bf.resV); ++t) {
+        texels[t * size_t(plan.channels)] =
+            plan.outputOwnerMap ? 0.0f : -1.0f;
+    }
+    return texels;
+}
+
 // Classify every texel of the plan's dirty coarse faces on the CPU.
 void _ClassifyDirtyCpu(TonicRegionLoops const &loops, _BakePlan const &plan,
                        _LevelIndex const &levels,
@@ -415,6 +436,15 @@ void _ClassifyDirtyCpu(TonicRegionLoops const &loops, _BakePlan const &plan,
     for (size_t id = 0; id < plan.faces.size(); ++id) {
         _BakeFace const &bf = plan.faces[id];
         if (!isDirty[size_t(bf.coarse)]) {
+            continue;
+        }
+        if (!bf.active) {
+            // Outside the face subset: unclaimed whatever a loop spans,
+            // exactly as the live primvar reads it.
+            (*texelCache)[id] = _UnclaimedTexels(plan, bf);
+            if (stats) {
+                ++stats->facesClassified;
+            }
             continue;
         }
         std::vector<float> texels(size_t(bf.resU) * size_t(bf.resV) *
@@ -523,6 +553,14 @@ bool _ClassifyDirtyGpu(TonicRegionLoops const &loops, _BakePlan const &plan,
         if (!isDirty[size_t(bf.coarse)]) {
             continue;
         }
+        if (!bf.active) {
+            // Outside the face subset: no kernel work (the CPU twin agrees).
+            (*texelCache)[id] = _UnclaimedTexels(plan, bf);
+            if (stats) {
+                ++stats->facesClassified;
+            }
+            continue;
+        }
         _Span span{id, positions.size() / 3, 0};
         for (int tv = 0; tv < bf.resV; ++tv) {
             for (int tu = 0; tu < bf.resU; ++tu) {
@@ -544,15 +582,9 @@ bool _ClassifyDirtyGpu(TonicRegionLoops const &loops, _BakePlan const &plan,
         // No regions: every dirty texel is -1, no kernel needed.
         for (auto const &span : spans) {
             _BakeFace const &bf = plan.faces[span.id];
-            std::vector<float> texels(size_t(bf.resU) * size_t(bf.resV) *
-                                      size_t(plan.channels));
-            for (size_t t = 0; t < size_t(bf.resU) * size_t(bf.resV); ++t) {
-                texels[t * size_t(plan.channels)] =
-                    plan.outputOwnerMap ? 0.0f : -1.0f;
-            }
             // No regions means no L1 tube either, so every level channel
             // stays 0; nothing to classify.
-            (*texelCache)[span.id] = std::move(texels);
+            (*texelCache)[span.id] = _UnclaimedTexels(plan, bf);
             if (stats) {
                 ++stats->facesClassified;
                 stats->texelsClassified +=

@@ -39,6 +39,9 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/usd/usdGeom/mesh.h"
+#include "pxr/usd/usdGeom/subset.h"
+#include "pxr/usd/usdGeom/tokens.h"
+#include "pxr/usd/usdGeom/xform.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/attributeSpec.h"
 #include "pxr/usd/sdf/layer.h"
@@ -1591,6 +1594,251 @@ main()
               "partial scalp: the nested groom's Guides and Output land");
     }
 
+    // -- plan/02 §2.20: a face GeomSubset scalp commits and hydrates -------
+    //
+    // The scalp link and Output's usdGen:surface name the subset; the rest
+    // binding and the live tonicRegion primvar land on the parent Mesh,
+    // parent-sized (a subset never renumbers faces); hydrate re-binds
+    // through the subset and round-trips bit-exactly, on the full and the
+    // partial swap alike. Every invalid subset is an error naming the prim.
+    {
+        int const n = 4;
+        Grid const grid = MakeGrid(n);
+        SdfPath const meshPath("/Scalp");
+        SdfPath const subsetPath("/Scalp/patch");
+        // Every face but 5 (x, z in [1, 2]), unsorted with a repeat as a
+        // union of subsets produces; the ring region below surrounds 5.
+        VtIntArray const authored = {15, 0, 1, 2, 3, 4, 6, 7,
+                                     8, 9, 10, 11, 12, 13, 14, 0};
+        int const hole = 5;
+        std::vector<int> wantActive;
+        for (int f = 0; f < n * n; ++f) {
+            if (f != hole) {
+                wantActive.push_back(f);
+            }
+        }
+        auto defineScene = [&](UsdStagePtr const &stage) {
+            UsdGeomMesh scalp = UsdGeomMesh::Define(stage, meshPath);
+            VtVec3fArray pts(grid.points.size() / 3);
+            for (size_t i = 0; i < pts.size(); ++i) {
+                pts[i] = GfVec3f(grid.points[i * 3 + 0],
+                                 grid.points[i * 3 + 1],
+                                 grid.points[i * 3 + 2]);
+            }
+            scalp.GetPointsAttr().Set(pts);
+            scalp.GetFaceVertexCountsAttr().Set(
+                VtIntArray(grid.counts.begin(), grid.counts.end()));
+            scalp.GetFaceVertexIndicesAttr().Set(
+                VtIntArray(grid.indices.begin(), grid.indices.end()));
+            UsdGeomSubset patch = UsdGeomSubset::Define(stage, subsetPath);
+            patch.GetElementTypeAttr().Set(UsdGeomTokens->face);
+            patch.GetIndicesAttr().Set(authored);
+            // What the resolver must refuse, each by name.
+            UsdGeomSubset pointSet =
+                UsdGeomSubset::Define(stage, SdfPath("/Scalp/pointSet"));
+            pointSet.GetElementTypeAttr().Set(TfToken("point"));
+            pointSet.GetIndicesAttr().Set(VtIntArray{0, 1});
+            UsdGeomSubset wide =
+                UsdGeomSubset::Define(stage, SdfPath("/Scalp/wide"));
+            wide.GetElementTypeAttr().Set(UsdGeomTokens->face);
+            wide.GetIndicesAttr().Set(VtIntArray{0, 16});
+            UsdGeomSubset none =
+                UsdGeomSubset::Define(stage, SdfPath("/Scalp/none"));
+            none.GetElementTypeAttr().Set(UsdGeomTokens->face);
+            none.GetIndicesAttr().Set(VtIntArray());
+            UsdGeomXform::Define(stage, SdfPath("/Holder"));
+            UsdGeomSubset orphan =
+                UsdGeomSubset::Define(stage, SdfPath("/Holder/orphan"));
+            orphan.GetElementTypeAttr().Set(UsdGeomTokens->face);
+            orphan.GetIndicesAttr().Set(VtIntArray{0});
+        };
+        auto overHasRest = [](SdfLayerHandle const &layer, SdfPath const &at) {
+            SdfPrimSpecHandle const over = layer->GetPrimAtPath(at);
+            TfTokenVector applied;
+            if (over) {
+                VtValue const value = over->GetInfo(TfToken("apiSchemas"));
+                if (value.IsHolding<SdfTokenListOp>()) {
+                    value.UncheckedGet<SdfTokenListOp>().ApplyOperations(
+                        &applied);
+                }
+            }
+            return std::find(applied.begin(), applied.end(),
+                             TfToken("UsdGenRestAPI")) != applied.end();
+        };
+
+        SdfLayerRefPtr liveS = SdfLayer::CreateAnonymous("tonic-live-subset");
+        UsdStageRefPtr ss = MakeStage(liveS);
+        defineScene(ss);
+        usdGenTonic::TonicScalpTarget target;
+        std::string err;
+        bool const wholeOk =
+            usdGenTonic::TonicResolveScalpTarget(ss, meshPath, &target,
+                                                 &err) &&
+            !target.isSubset && target.activeFaces.empty() &&
+            target.meshPath == meshPath;
+        Check(wholeOk, "subset: a Mesh link resolves to the whole mesh: " + err);
+        bool const subsetOk =
+            usdGenTonic::TonicResolveScalpTarget(ss, subsetPath, &target,
+                                                 &err) &&
+            target.isSubset && target.targetPath == subsetPath &&
+            target.meshPath == meshPath && target.activeFaces == wantActive &&
+            target.faceVertexCounts.size() == size_t(n * n) &&
+            target.points == grid.points;
+        Check(subsetOk,
+              "subset: a face GeomSubset resolves to its parent's geometry "
+              "plus sorted, unique parent face ids: " + err);
+        struct BadTarget {
+            char const *path;
+            char const *says;
+        };
+        for (BadTarget const &bad :
+             {BadTarget{"/Scalp/pointSet", "elementType \"point\""},
+              BadTarget{"/Scalp/wide", "names face 16"},
+              BadTarget{"/Scalp/none", "names no faces"},
+              BadTarget{"/Holder/orphan", "is not a child of a Mesh"},
+              BadTarget{"/Holder", "not a Mesh or a face GeomSubset"},
+              BadTarget{"/Missing", "no prim"}}) {
+            std::string why;
+            bool const refused = !usdGenTonic::TonicResolveScalpTarget(
+                                     ss, SdfPath(bad.path), &target, &why) &&
+                                 why.find(bad.says) != std::string::npos &&
+                                 why.find(bad.path) != std::string::npos;
+            Check(refused, "subset: " + std::string(bad.path) +
+                               " is refused by name (" + why + ")");
+        }
+
+        bool const resolved =
+            usdGenTonic::TonicResolveScalpTarget(ss, subsetPath, &target, &err);
+        Check(resolved, "subset: the patch resolves again: " + err);
+        TonicModel sm;
+        Check(sm.BindScalp(target.points, target.faceVertexCounts,
+                           target.faceVertexIndices, target.activeFaces),
+              "subset: the model binds the parent mesh through the subset");
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const mesh =
+            sm.GetScalp();
+        if (mesh) {
+            // A ring around the hole: its corners and every traced edge sit
+            // on subset faces, and face 5 lies strictly inside it.
+            int const r0 = sm.GraphAddNode(Locate(*mesh, n, 0.5f, 0.5f));
+            int const r1 = sm.GraphAddNode(Locate(*mesh, n, 3.5f, 0.5f));
+            int const r2 = sm.GraphAddNode(Locate(*mesh, n, 3.5f, 3.5f));
+            int const r3 = sm.GraphAddNode(Locate(*mesh, n, 0.5f, 3.5f));
+            sm.GraphConnect(r0, r1);
+            sm.GraphConnect(r1, r2);
+            sm.GraphConnect(r2, r3);
+            sm.GraphConnect(r3, r0);
+        }
+        Check(sm.Rasterise() && sm.BuildTubeFromRegion(0, 5, 0, 2.0f),
+              "subset: the ring region builds its tube: " +
+                  std::string(sm.GetDiagnostic()));
+        TonicModel::OutputSettings output = sm.GetOutputSettings();
+        output.enabled = true;
+        Check(sm.SetOutputSettings(output), "subset: Output enables");
+        TonicCommitPaths subsetPaths = paths;
+        subsetPaths.scalpPath = subsetPath;
+        subsetPaths.scalpMeshPath = meshPath;
+        Check(subsetPaths.ScalpMeshPath() == meshPath,
+              "subset: the commit paths name the parent as the scalp mesh");
+        TonicCommitter cs(&sm, subsetPaths);
+        cs.Enqueue(ss);
+        Check(WaitCommitted(cs, liveS, sm.GetVersion()),
+              "subset: the subset groom commits: " + cs.TakeDiagnostic());
+        UsdPrim const groomS = ss->GetPrimAtPath(SdfPath("/TonicGroom"));
+        Check(bool(groomS) &&
+                  Targets(groomS.GetRelationship(
+                      TfToken("usdGen:tonic:scalp"))) ==
+                      SdfPathVector{subsetPath},
+              "subset: the groom's scalp link names the subset");
+        UsdPrim const outputS = ss->GetPrimAtPath(subsetPaths.OutputPath());
+        Check(bool(outputS) &&
+                  Targets(outputS.GetRelationship(
+                      TfToken("usdGen:surface"))) ==
+                      SdfPathVector{subsetPath},
+              "subset: Output grows on the subset (usdGen:surface names it)");
+        Check(overHasRest(liveS, meshPath) &&
+                  !liveS->GetPrimAtPath(subsetPath),
+              "subset: UsdGenRestAPI lands on the parent mesh, and the subset "
+              "itself carries no usdGen opinion");
+        VtIntArray regions;
+        bool primvarOk = ss->GetPrimAtPath(meshPath)
+                             .GetAttribute(
+                                 TfToken("primvars:usdGen:tonicRegion"))
+                             .Get(&regions) &&
+                         regions.size() == size_t(n * n);
+        for (int f = 0; primvarOk && f < n * n; ++f) {
+            primvarOk = f == hole ? regions[size_t(f)] == -1
+                                  : regions[size_t(f)] == 0;
+        }
+        Check(primvarOk && !ss->GetPrimAtPath(subsetPath).GetAttribute(
+                               TfToken("primvars:usdGen:tonicRegion")),
+              "subset: the live primvar is on the parent mesh, parent-sized, "
+              "-1 on the face the subset leaves out");
+
+        TonicModel hs;
+        usdGenTonic::TonicHydrateResult const hsr =
+            usdGenTonic::TonicHydrateModel(ss, SdfPath("/TonicGroom"), &hs);
+        Check(hsr.ok && hsr.guidesBitEqual && hsr.graphRoundTrip,
+              "subset: the groom hydrates through the subset link: " +
+                  hsr.diagnostic);
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const back =
+            hs.GetScalp();
+        Check(back && back->activeFaces == wantActive &&
+                  back->faceVertexCounts.size() == size_t(n * n) &&
+                  hs.SnapshotGraph().faceRegions ==
+                      sm.SnapshotGraph().faceRegions,
+              "subset: hydrate re-binds the parent mesh + subset and the "
+              "same parent-indexed region map");
+
+        // A link that names a bad subset fails hydrate by name; it never
+        // falls back to the whole mesh.
+        ss->SetEditTarget(UsdEditTarget(ss->GetSessionLayer()));
+        groomS.GetRelationship(TfToken("usdGen:tonic:scalp"))
+            .SetTargets({SdfPath("/Scalp/pointSet")});
+        ss->SetEditTarget(UsdEditTarget(ss->GetRootLayer()));
+        TonicModel refused;
+        usdGenTonic::TonicHydrateResult const hbad =
+            usdGenTonic::TonicHydrateModel(ss, SdfPath("/TonicGroom"),
+                                           &refused);
+        Check(!hbad.ok &&
+                  hbad.diagnostic.find("/Scalp/pointSet") !=
+                      std::string::npos &&
+                  hbad.diagnostic.find("elementType") != std::string::npos,
+              "subset: hydrate refuses a non-face subset link by name (" +
+                  hbad.diagnostic + ")");
+
+        // The partial swap syncs the over onto the parent mesh too.
+        SdfLayerRefPtr liveP = SdfLayer::CreateAnonymous("tonic-live-subset-p");
+        UsdStageRefPtr sp = MakeStage(liveP);
+        defineScene(sp);
+        TonicCommitter cp(&sm, subsetPaths);
+        cp.ForcePartialModeForTest(true);
+        cp.Enqueue(sp);
+        size_t partialSlots = 0;
+        bool partialDone = false;
+        {
+            auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(10000);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (cp.SwapIfIdle(liveP, /*gestureActive*/ false) ==
+                    TonicCommitter::PartialProgress) {
+                    ++partialSlots;
+                }
+                if (cp.CommittedVersion() >= sm.GetVersion()) {
+                    partialDone = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        Check(partialDone && partialSlots > 0 && overHasRest(liveP, meshPath) &&
+                  !liveP->GetPrimAtPath(subsetPath) &&
+                  bool(sp->GetPrimAtPath(meshPath).GetAttribute(
+                      TfToken("primvars:usdGen:tonicRegion"))),
+              "subset: a partial swap puts RestAPI and the primvar on the "
+              "parent mesh (" + std::to_string(partialSlots) + " slots): " +
+                  cp.TakeDiagnostic());
+    }
+
     // -- committer C ABI ----------------------------------------------------
     {
         Check(Tonic_CommitterCreate(nullptr, "/G", nullptr, nullptr) ==
@@ -1630,6 +1878,19 @@ main()
               "C ABI swap rejects an unknown live layer");
         Check(Tonic_CommitterSetSwapBudgetMs(cc, 5.0) == TONIC_OK,
               "C ABI budget sets");
+        // A face GeomSubset scalp names its parent Mesh (plan/02 §2.20).
+        Check(Tonic_CommitterSetScalpTarget(cc, "/Scalp/patch", "/Other") ==
+                  TONIC_ERROR,
+              "C ABI scalp target rejects a mesh that is not the parent");
+        Check(Tonic_CommitterSetScalpTarget(cc, "patch", nullptr) ==
+                  TONIC_ERROR,
+              "C ABI scalp target rejects a relative path");
+        Check(Tonic_CommitterSetScalpTarget(cc, "/Scalp/patch", "/Scalp") ==
+                  TONIC_OK,
+              "C ABI scalp target takes a subset and its parent mesh");
+        Check(Tonic_CommitterSetScalpTarget(cc, nullptr, nullptr) ==
+                  TONIC_OK,
+              "C ABI scalp target clears the link");
         Check(Tonic_CommitterDestroy(cc) == TONIC_OK, "C ABI destroys");
         Check(Tonic_Destroy(ctx) == TONIC_OK, "C ABI model destroys");
     }

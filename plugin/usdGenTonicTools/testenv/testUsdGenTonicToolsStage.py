@@ -355,6 +355,7 @@ def main():
     partE()
     partF()
     partG()
+    partH()
     return 0
 
 
@@ -1281,6 +1282,139 @@ def partG():
         if savedOverride is not None:
             os.environ["USDGENTONIC_BAKE_DIR"] = savedOverride
         shutil.rmtree(base, ignore_errors=True)
+
+
+def _subsetStage(name):
+    """_planeStage plus face GeomSubsets of /Scalp (plan/02 section 2.20).
+
+    /Scalp/patch is the x in [2, 4] half (parent faces 1 and 3, authored
+    unsorted with a repeat); /Scalp/pointSet and /Scalp/wide are the
+    invalid kinds: a non-face subset and an out-of-range index.
+    """
+    from pxr import UsdGeom
+    stage = _planeStage(name)
+    for path, elementType, indices in (
+            ("/Scalp/patch", "face", [3, 1, 1]),
+            ("/Scalp/pointSet", "point", [0, 1]),
+            ("/Scalp/wide", "face", [0, 4])):
+        subset = UsdGeom.Subset.Define(stage, path)
+        subset.CreateElementTypeAttr(elementType)
+        subset.CreateIndicesAttr(indices)
+    return stage
+
+
+def partH():
+    """plan/02 section 2.20: a face GeomSubset scalp through the session.
+
+    activate() on /Scalp/patch binds the parent mesh restricted to the
+    subset's parent-mesh faces: a ray at a face the subset leaves out
+    misses, the HUD never calls it uncovered, the committed groom links the
+    subset while the live primvar lands on /Scalp, and hydrate() brings the
+    same subset back. A bad subset is refused by name before any model
+    exists.
+    """
+    tonicLib = sys.modules.get(_PKG + ".tonicLib") or _load("tonicLib")
+    tonicSession = sys.modules.get(_PKG + ".tonicSession") or \
+        _load("tonicSession")
+    tonicToolState = sys.modules.get(_PKG + ".tonicToolState") or \
+        _load("tonicToolState")
+    tonicHud = sys.modules.get(_PKG + ".tonicHud") or _load("tonicHud")
+
+    stage = _subsetStage("tonicSubset")
+    mesh, faces, error = tonicSession.resolveScalpTarget(stage,
+                                                         "/Scalp/patch")
+    check(mesh is not None and str(mesh.GetPath()) == "/Scalp" and
+          faces == [1, 3] and error == "",
+          "subset: /Scalp/patch resolves to /Scalp and parent faces [1, 3] "
+          "(%r, %r)" % (faces, error))
+    mesh, faces, error = tonicSession.resolveScalpTarget(stage, "/Scalp")
+    check(mesh is not None and faces is None and error == "",
+          "subset: a Mesh resolves whole")
+    for path, says in (("/Scalp/pointSet", 'elementType "point"'),
+                       ("/Scalp/wide", "names face 4"),
+                       ("/Nowhere", "no prim")):
+        mesh, faces, error = tonicSession.resolveScalpTarget(stage, path)
+        check(mesh is None and says in error and path in error,
+              "subset: %s is refused by name (%r)" % (path, error))
+
+    heard = []
+    session = tonicSession.TonicSession(tonicToolState.TonicToolState())
+    session.setStatusSink(lambda text, level="info": heard.append(
+        (text, level)))
+    check(session.activate("/Scalp/wide", stage=stage) is False and
+          session.model is None and
+          any("names face 4" in text and level == "error"
+              for text, level in heard),
+          "subset: an out-of-range subset refuses the bind, by name (%r)"
+          % heard[-1:])
+    del heard[:]
+    if not session.activate("/Scalp/patch", stage=stage):
+        check(False, "subset: the session binds /Scalp/patch (%r)" % heard)
+        return
+    dll = session.dll
+    model = session.model
+    check(session.scalpPath == "/Scalp/patch" and
+          session.scalpMeshPath == "/Scalp",
+          "subset: the session links the subset and records its mesh "
+          "(%r, %r)" % (session.scalpPath, session.scalpMeshPath))
+    check(tuple(round(c, 5) for c in session.scalpCenter) == (3.0, 0.0, 2.0),
+          "subset: the camera centre is the subset's, not the mesh's (%r)"
+          % (session.scalpCenter,))
+    active = (ctypes.c_int * 4)()
+    got = ctypes.c_int(0)
+    check(dll.Tonic_ReadScalpFaceActive(model, active, 4,
+                                        ctypes.byref(got)) ==
+          tonicLib.TONIC_OK and list(active) == [0, 1, 0, 1],
+          "subset: only parent faces 1 and 3 are active (%r)" % list(active))
+    missed = session.raycast((1.0, 5.0, 1.0), (0.0, -1.0, 0.0))
+    landed = session.raycast((3.0, 5.0, 1.0), (0.0, -1.0, 0.0))
+    check(missed is None and landed is not None and landed["face"] == 1,
+          "subset: a ray at parent face 0 misses, one at face 1 hits it "
+          "(%r, %r)" % (missed, landed))
+    check(dll.Tonic_Rasterise(model) == tonicLib.TONIC_OK and
+          tonicHud.readUncoveredFaces(dll, model) == [1, 3],
+          "subset: the HUD calls only subset faces uncovered (%r)"
+          % tonicHud.readUncoveredFaces(dll, model))
+    check(dll.Tonic_BuildTestTube(model, 0, 0, 0.0, 0.0) ==
+          tonicLib.TONIC_OK, "subset: the test tube builds")
+    check(session.flushLatest(), "subset: the groom commits (%r)"
+          % heard[-1:])
+    groom = stage.GetPrimAtPath("/TonicGroom")
+    link = groom.GetRelationship("usdGen:tonic:scalp") if groom else None
+    check(link is not None and
+          [str(p) for p in link.GetTargets()] == ["/Scalp/patch"],
+          "subset: the committed groom links the subset")
+    regions = stage.GetPrimAtPath("/Scalp").GetAttribute(
+        "primvars:usdGen:tonicRegion").Get()
+    check(regions is not None and len(regions) == 4 and
+          not stage.GetPrimAtPath("/Scalp/patch").GetAttribute(
+              "primvars:usdGen:tonicRegion"),
+          "subset: the live primvar lands on the parent mesh, parent-sized "
+          "(%r)" % (list(regions) if regions is not None else None,))
+    live = session._liveLayer
+    check(live is not None and live.GetPrimAtPath("/Scalp") is not None and
+          live.GetPrimAtPath("/Scalp/patch") is None,
+          "subset: the live layer overs the mesh, never the subset")
+
+    fresh = tonicSession.TonicSession(tonicToolState.TonicToolState())
+    fresh.setStatusSink(lambda text, level="info": heard.append(
+        (text, level)))
+    del heard[:]
+    if not fresh.hydrate(groomPath="/TonicGroom", stage=stage):
+        check(False, "subset: the groom hydrates (%r)" % heard)
+        session.deactivate()
+        return
+    back = (ctypes.c_int * 4)()
+    check(fresh.scalpPath == "/Scalp/patch" and
+          fresh.scalpMeshPath == "/Scalp" and
+          fresh.dll.Tonic_ReadScalpFaceActive(
+              fresh.model, back, 4, ctypes.byref(got)) ==
+          tonicLib.TONIC_OK and list(back) == [0, 1, 0, 1] and
+          fresh.raycast((1.0, 5.0, 1.0), (0.0, -1.0, 0.0)) is None,
+          "subset: hydrate re-binds the same subset (%r, %r, %r)"
+          % (fresh.scalpPath, fresh.scalpMeshPath, list(back)))
+    fresh.deactivate()
+    session.deactivate()
 
 
 if __name__ == "__main__":

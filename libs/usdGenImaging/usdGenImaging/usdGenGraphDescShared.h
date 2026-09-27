@@ -11,9 +11,11 @@
 
 #include "pxr/base/tf/token.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace usdGenImaging {
 
@@ -40,6 +42,9 @@ UsdGenGeometryContentHash(usdGen::UsdGenGeometryDesc const &g)
     array(g.rest);
     array(g.normals);
     array(g.ids);
+    array(g.subsetFaces);
+    uint8_t const subset = g.isSubset ? 1 : 0;
+    bytes(&subset, 1);
     bytes(g.worldMatrix.GetArray(), 16 * sizeof(double));
     return h;
 }
@@ -148,9 +153,114 @@ UsdGenFinalizeInputGenerations(usdGen::UsdGenGraphDesc *desc)
         h.Array(surface.velocities);
         h.Array(surface.uv);
         h.Array(surface.subsetFaces);
+        h.Word(surface.isSubset ? 1u : 0u);
         h.Bytes(surface.worldMatrix.GetArray(), 16 * sizeof(double));
         surface.surfaceGeneration = h.Value();
     }
+}
+
+/// R15 (02 §2.20 rule 4): targets of one usdGen:surface that resolve to the
+/// bound (front) target's mesh — sibling GeomSubsets, or the Mesh itself —
+/// union into the front target. They leave `targets` and are returned as its
+/// union members; targets on other meshes stay (only the front one binds).
+/// `meshOf` maps a target to the Mesh it reads (itself for a Mesh, the
+/// parent for a GeomSubset), or an empty path for anything else.
+template <class MeshOf>
+inline SdfPathVector
+UsdGenUnionSurfaceTargets(SdfPathVector *targets, MeshOf const &meshOf)
+{
+    SdfPathVector unioned;
+    if (!targets || targets->size() < 2) return unioned;
+    SdfPath const front = targets->front();
+    SdfPath const mesh = meshOf(front);
+    if (mesh.IsEmpty()) return unioned;
+    SdfPathVector kept{front};
+    for (size_t i = 1; i < targets->size(); ++i) {
+        SdfPath const &target = (*targets)[i];
+        if (target == front) continue;
+        if (meshOf(target) != mesh) {
+            kept.push_back(target);
+        } else if (std::find(unioned.begin(), unioned.end(), target) ==
+                   unioned.end()) {
+            unioned.push_back(target);
+        }
+    }
+    *targets = std::move(kept);
+    return unioned;
+}
+
+/// R15: appends the faces one GeomSubset's `indices` name to `faces`. An
+/// index outside the parent's `faceCount` faces is a hard diagnostic (rule
+/// 7) and is dropped; a parent with no faces yet skips the check, its
+/// consumers already warn about the missing topology.
+inline void
+UsdGenAppendSubsetFaces(VtIntArray const &indices, size_t faceCount,
+                        SdfPath const &subset, SdfPath const &mesh,
+                        std::vector<int> *faces,
+                        std::vector<std::string> *errors)
+{
+    for (int face : indices) {
+        if (faceCount && (face < 0 || size_t(face) >= faceCount)) {
+            if (errors) {
+                errors->push_back(subset.GetString() + ": GeomSubset names face " +
+                    std::to_string(face) + ", outside the " +
+                    std::to_string(faceCount) + " faces of " + mesh.GetString() +
+                    " (R15)");
+            }
+            continue;
+        }
+        faces->push_back(face);
+    }
+}
+
+/// R15: the sorted, unique subsetFaces a union of GeomSubsets selects, so
+/// a face named twice scatters once and authored index order is inert.
+/// `whole` (the Mesh itself is a union member) selects every face.
+inline VtIntArray
+UsdGenFinalizeSubsetFaces(std::vector<int> faces, bool whole, size_t faceCount)
+{
+    if (whole) {
+        faces.resize(faceCount);
+        for (size_t f = 0; f < faceCount; ++f) faces[f] = int(f);
+    }
+    std::sort(faces.begin(), faces.end());
+    faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+    return VtIntArray(faces.begin(), faces.end());
+}
+
+/// R15: a UsdGenPaintMap whose usdGen:paint:surface is a GeomSubset reads
+/// its parent Mesh's faceVarying primvar; the corners of faces outside
+/// `faces` (sorted parent-mesh ids) read `fallback`, usdGen:map:default.
+/// `values` must hold exactly one value per face vertex of the parent.
+inline void
+UsdGenMaskPaintValues(VtIntArray const &faceVertexCounts,
+                      VtIntArray const &faces, float fallback,
+                      VtFloatArray *values)
+{
+    size_t corner = 0;
+    for (size_t f = 0; f < faceVertexCounts.size(); ++f) {
+        size_t const n = size_t(std::max(0, faceVertexCounts[f]));
+        if (!std::binary_search(faces.cbegin(), faces.cend(), int(f))) {
+            for (size_t k = 0; k < n && corner + k < values->size(); ++k)
+                (*values)[corner + k] = fallback;
+        }
+        corner += n;
+    }
+}
+
+/// The diagnostic both builders report for a subset surface that is not a
+/// face set (rule 1) or whose parent is not a Mesh (rule 7).
+inline std::string
+UsdGenSubsetElementTypeError(SdfPath const &subset, std::string const &type)
+{
+    return subset.GetString() + ": GeomSubset has elementType '" + type +
+        "'; usdGen surfaces need a face subset (R15)";
+}
+inline std::string
+UsdGenSubsetParentError(SdfPath const &subset)
+{
+    return subset.GetString() + ": GeomSubset parent " +
+        subset.GetParentPath().GetString() + " is not a Mesh (R15)";
 }
 
 /// True for the usdGen map prim types (UsdGenPtexMap, UsdGenImageMap, ...).

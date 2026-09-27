@@ -117,6 +117,11 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
     }
 
     std::map<SdfPath, PerPrim> table;
+    // Hand-built snapshots may omit meshPaths: every target is its own mesh.
+    auto const meshOf = [&](size_t surface) -> SdfPath const & {
+        return surface < snapshot.meshPaths.size() ? snapshot.meshPaths[surface]
+                                                   : snapshot.surfacePaths[surface];
+    };
 
     for (auto const &node : snapshot.nodes) {
 
@@ -147,7 +152,23 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
         // the C3 source behind each curve / map ref (06 §3.6: authored curve
         // prims dirty via their own prims, routed as capture/map re-capture).
         if (node.hasSurface && node.surface < snapshot.surfacePaths.size()) {
-            PerPrim &pp = table[snapshot.surfacePaths[node.surface]];
+            // A GeomSubset target (R15) reads its parent Mesh's points,
+            // topology and primvars, so those rows key on the mesh; the
+            // subset's own prim carries only indices and type, a recapture
+            // (02 §2.20 rule 5: the adapter dirties the bare leaves, the
+            // prefixed spellings are accepted too).
+            SdfPath const &target = snapshot.surfacePaths[node.surface];
+            SdfPath const &mesh = meshOf(node.surface);
+            if (mesh != target) {
+                PerPrim &subset = table[target];
+                Entry const recapture{node.id, usdGen::UsdGenDirtyCapture};
+                for (char const *leaf : {"indices", "type"}) {
+                    subset.prefixes.emplace_back(_Loc({TfToken(leaf)}), recapture);
+                    subset.prefixes.emplace_back(
+                        _Loc({TfToken("geomSubset"), TfToken(leaf)}), recapture);
+                }
+            }
+            PerPrim &pp = table[mesh];
             Entry const e{node.id, usdGen::UsdGenDirtySurfacePoints,
                           node.surface, true};
             pp.prefixes.emplace_back(
@@ -217,7 +238,7 @@ UsdGenDirtyRouter::Rebuild(usdGen::UsdGenGraphRoutingSnapshot const &snapshot)
             if (paint.primvar.IsEmpty() ||
                 paint.surface >= snapshot.surfacePaths.size())
                 continue;
-            table[snapshot.surfacePaths[paint.surface]].prefixes.emplace_back(
+            table[meshOf(paint.surface)].prefixes.emplace_back(
                 _Loc({TfToken("primvars"), paint.primvar}),
                 Entry{node.id, usdGen::UsdGenDirtyMap |
                                    usdGen::UsdGenDirtyCapture});

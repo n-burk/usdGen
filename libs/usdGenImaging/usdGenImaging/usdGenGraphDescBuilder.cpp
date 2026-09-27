@@ -758,6 +758,83 @@ _HBuildSurface(HdSceneIndexBase &input, SdfPath const &path, double time,
     }
 }
 
+// The Mesh a surface target reads (R15): the target itself, a geomSubset's
+// parent mesh, or empty for anything else.
+SdfPath
+_HSurfaceMesh(HdSceneIndexBase &input, SdfPath const &path)
+{
+    HdContainerDataSourceHandle primDs, parentDs;
+    TfToken primType, parentType;
+    if (!_HPrim(input, path, &primDs, &primType)) return SdfPath();
+    if (primType == TfToken("mesh")) return path;
+    if (HdGeomSubsetSchema::GetFromParent(primDs).IsDefined() &&
+        _HPrim(input, path.GetParentPath(), &parentDs, &parentType) &&
+        parentType == TfToken("mesh"))
+        return path.GetParentPath();
+    return SdfPath();
+}
+
+// Whether a geomSubset is a face set (02 §2.20 rule 1: the adapter maps
+// elementType "face" to typeFaceSet). An absent type passes: hand-built
+// sources may publish indices only. Otherwise `type` names the offender.
+bool
+_HFaceSubset(HdGeomSubsetSchema const &schema, _HdTime t, std::string *type)
+{
+    HdTokenDataSourceHandle const typeDs = schema.GetType();
+    if (!typeDs) return true;
+    TfToken const value = typeDs->GetTypedValue(t);
+    if (value == HdGeomSubsetSchemaTokens->typeFaceSet) return true;
+    *type = value.GetString();
+    return false;
+}
+
+// Hydra mirror of the stage-side _BuildSubsetSurface: a geomSubset target's
+// desc carries its parent mesh's full geometry plus the sorted, unique
+// PARENT-mesh faces it (and any rule-4 union members) selects.
+void
+_HBuildSubsetSurface(HdSceneIndexBase &input, SdfPath const &path,
+                     SdfPathVector const &unioned, double time, _HdTime t,
+                     UsdGenSurfaceDesc *out, std::vector<std::string> *errors)
+{
+    SdfPath const meshPath = path.GetParentPath();
+    HdContainerDataSourceHandle meshDs;
+    TfToken meshType;
+    if (!_HPrim(input, meshPath, &meshDs, &meshType) ||
+        meshType != TfToken("mesh")) {
+        errors->push_back(UsdGenSubsetParentError(path));
+        return;
+    }
+    _HBuildSurface(input, meshPath, time, t, out, errors);
+    out->path = path;
+    out->isSubset = true;
+    size_t const faceCount = out->faceVertexCounts.size();
+    std::vector<int> faces;
+    bool whole = false;
+    SdfPathVector members{path};
+    members.insert(members.end(), unioned.begin(), unioned.end());
+    for (SdfPath const &member : members) {
+        if (member == meshPath) {
+            whole = true;
+            continue;
+        }
+        HdContainerDataSourceHandle memberDs;
+        if (!_HPrim(input, member, &memberDs, nullptr)) continue;
+        HdGeomSubsetSchema const schema =
+            HdGeomSubsetSchema::GetFromParent(memberDs);
+        std::string type;
+        if (!_HFaceSubset(schema, t, &type)) {
+            errors->push_back(UsdGenSubsetElementTypeError(member, type));
+            continue;
+        }
+        VtIntArray indices;
+        if (HdIntArrayDataSourceHandle const idx = schema.GetIndices())
+            indices = idx->GetTypedValue(t);
+        UsdGenAppendSubsetFaces(indices, faceCount, member, meshPath, &faces,
+                                errors);
+    }
+    out->subsetFaces = UsdGenFinalizeSubsetFaces(std::move(faces), whole, faceCount);
+}
+
 template <class T>
 bool
 _HSurfaceCageField(HdContainerDataSourceHandle const &root, _HdTime t,
@@ -955,6 +1032,11 @@ _HCollectInputTarget(HdSceneIndexBase &input, SdfPath const &path, int depth,
         geometries->push_back(path);
         return;
     }
+    // A mesh's geomSubset samples the mesh restricted to its faces (R15).
+    if (HdGeomSubsetSchema::GetFromParent(primDs).IsDefined()) {
+        if (!_HSurfaceMesh(input, path).IsEmpty()) geometries->push_back(path);
+        return;
+    }
     if (depth > 64) return;
     for (SdfPath const &child : input.GetChildPrimPaths(path))
         _HCollectInputTarget(input, child, depth + 1, geometries, maps);
@@ -962,15 +1044,37 @@ _HCollectInputTarget(HdSceneIndexBase &input, SdfPath const &path, int depth,
 
 // A gprim an expression samples. Rest follows the RestAPI/CurveAPI adapters
 // when applied, then an authored primvars:rest; otherwise it stays empty and
-// the sampler reads the current points as rest.
+// the sampler reads the current points as rest. A face geomSubset samples its
+// parent mesh restricted to the sorted, unique faces it names (R15).
 void
 _HBuildGeometry(HdSceneIndexBase &input, SdfPath const &path, _HdTime t,
-                usdGen::UsdGenGeometryDesc *out)
+                usdGen::UsdGenGeometryDesc *out, std::vector<std::string> *errors)
 {
     HdContainerDataSourceHandle primDs;
     TfToken primType;
     out->path = path;
     if (!_HPrim(input, path, &primDs, &primType)) return;
+    HdGeomSubsetSchema const subset = HdGeomSubsetSchema::GetFromParent(primDs);
+    if (subset.IsDefined()) {
+        SdfPath const meshPath = path.GetParentPath();
+        _HBuildGeometry(input, meshPath, t, out, errors);
+        out->path = path;
+        out->isSubset = true;
+        std::string type;
+        if (!_HFaceSubset(subset, t, &type)) {
+            errors->push_back(UsdGenSubsetElementTypeError(path, type));
+        } else {
+            VtIntArray indices;
+            if (HdIntArrayDataSourceHandle const idx = subset.GetIndices())
+                indices = idx->GetTypedValue(t);
+            std::vector<int> faces;
+            UsdGenAppendSubsetFaces(indices, out->counts.size(), path, meshPath,
+                                    &faces, errors);
+            out->subsetFaces = UsdGenFinalizeSubsetFaces(std::move(faces), false, 0);
+        }
+        out->generation = UsdGenGeometryContentHash(*out);
+        return;
+    }
     if (auto matrix = HdXformSchema::GetFromParent(primDs).GetMatrix())
         out->worldMatrix = matrix->GetTypedValue(t);
     if (!_HGetTyped(primDs, t, &out->points, {"points"}))
@@ -1134,13 +1238,35 @@ _HCapturePaintMap(HdSceneIndexBase &input,
         fail("usdGen:paint:surface requires exactly one target");
         return;
     }
+    // A face geomSubset target (R15) paints its parent mesh: the primvar is
+    // read there and the corners outside the subset read usdGen:map:default.
+    SdfPath const meshPath = _HSurfaceMesh(input, targets.front());
     HdContainerDataSourceHandle surfaceDs;
-    TfToken surfaceType;
-    if (!_HPrim(input, targets.front(), &surfaceDs, &surfaceType) ||
-        surfaceType != TfToken("mesh") ||
-        HdGeomSubsetSchema::GetFromParent(surfaceDs).IsDefined()) {
-        fail("usdGen:paint:surface must target a UsdGeomMesh");
+    if (meshPath.IsEmpty() || !_HPrim(input, meshPath, &surfaceDs, nullptr)) {
+        fail("usdGen:paint:surface must target a UsdGeomMesh or a face "
+             "GeomSubset of one");
         return;
+    }
+    bool const subset = meshPath != targets.front();
+    VtIntArray subsetFaces;
+    if (subset) {
+        HdContainerDataSourceHandle subsetDs;
+        _HPrim(input, targets.front(), &subsetDs, nullptr);
+        HdGeomSubsetSchema const schema = HdGeomSubsetSchema::GetFromParent(subsetDs);
+        std::string type;
+        if (!_HFaceSubset(schema, t, &type)) {
+            fail(UsdGenSubsetElementTypeError(targets.front(), type));
+            return;
+        }
+        VtIntArray faceCounts, indices;
+        _HGetTyped(_HChild(_HChild(surfaceDs, "mesh"), "topology"), t,
+                   &faceCounts, {"faceVertexCounts"});
+        if (HdIntArrayDataSourceHandle const idx = schema.GetIndices())
+            indices = idx->GetTypedValue(t);
+        std::vector<int> faces;
+        UsdGenAppendSubsetFaces(indices, faceCounts.size(), targets.front(),
+                                meshPath, &faces, errors);
+        subsetFaces = UsdGenFinalizeSubsetFaces(std::move(faces), false, 0);
     }
     TfToken primvarName;
     _HGetToken(ug, t, &primvarName, {"paint", "primvar"});
@@ -1161,7 +1287,7 @@ _HCapturePaintMap(HdSceneIndexBase &input,
         // unpainted map cooks instead of rejecting the commit.
         float defaultValue = 0.0f;
         if (!_HGetTyped(ug, t, &defaultValue, {"map", "default"})) {
-            fail("surface " + targets.front().GetString() + " has no primvar " +
+            fail("surface " + meshPath.GetString() + " has no primvar " +
                  primvarName.GetString());
             return;
         }
@@ -1178,7 +1304,7 @@ _HCapturePaintMap(HdSceneIndexBase &input,
         _HGetTyped(defaultTopo, t, &defaultCounts, {"faceVertexCounts"});
         size_t defaultFaceVarying = 0;
         for (int c : defaultCounts) defaultFaceVarying += size_t(c);
-        map->paintSurface = targets.front();
+        map->paintSurface = meshPath;
         map->paintPrimvar = primvarName;
         map->paintInterpolation = TfToken("faceVarying");
         map->paintValues.assign(defaultFaceVarying, defaultValue);
@@ -1242,7 +1368,12 @@ _HCapturePaintMap(HdSceneIndexBase &input,
              std::to_string(faceVarying) + " face vertices");
         return;
     }
-    map->paintSurface = targets.front();
+    if (subset) {
+        float fallback = 0.0f;
+        _HGetTyped(ug, t, &fallback, {"map", "default"});
+        UsdGenMaskPaintValues(counts, subsetFaces, fallback, &folded);
+    }
+    map->paintSurface = meshPath;
     map->paintPrimvar = primvarName;
     map->paintInterpolation = interp;
     map->paintValues = folded;
@@ -1390,9 +1521,15 @@ CaptureGraphDescFromHydra(
     }
 
     // ---- surface inheritance (02 §2) -------------------------------------
+    // Targets on the bound target's mesh union into it (02 §2.20 rule 4).
+    std::map<SdfPath, SdfPathVector> surfaceUnions;
     {
         SdfPathVector descSurfaces;
         _HGetPathArray(descUg, &descSurfaces, {"surface"});
+        SdfPathVector unioned = UsdGenUnionSurfaceTargets(&descSurfaces,
+            [&](SdfPath const &p) { return _HSurfaceMesh(input, p); });
+        if (!unioned.empty())
+            surfaceUnions.emplace(descSurfaces.front(), std::move(unioned));
         if (!descSurfaces.empty()) {
             for (UsdGenNodeDesc &node : desc.nodes) {
                 node.surfaces = descSurfaces;
@@ -1435,13 +1572,12 @@ CaptureGraphDescFromHydra(
         HdContainerDataSourceHandle primDs;
         if (_HPrim(input, p, &primDs, nullptr) &&
             HdGeomSubsetSchema::GetFromParent(primDs).IsDefined()) {
-            // R15: subsetFaces are PARENT-mesh face indices; the parent's
-            // desc (added separately) carries the geometry.
-            HdIntArrayDataSourceHandle const idx =
-                HdGeomSubsetSchema::GetFromParent(primDs).GetIndices();
-            if (idx) {
-                slot.subsetFaces = idx->GetTypedValue(t);
-            }
+            // R15: the subset's desc carries its parent mesh's geometry and
+            // the PARENT-mesh face indices it selects.
+            auto const u = surfaceUnions.find(p);
+            _HBuildSubsetSurface(input, p,
+                                 u == surfaceUnions.end() ? SdfPathVector() : u->second,
+                                 time, t, &slot, &desc.validationErrors);
         } else {
             _HBuildSurface(input, p, time, t, &slot, &desc.validationErrors);
         }
@@ -1511,7 +1647,7 @@ CaptureGraphDescFromHydra(
             for (SdfPath const &g : in.geometries) {
                 if (geometryIndex.count(g.GetString())) continue;
                 usdGen::UsdGenGeometryDesc geometry;
-                _HBuildGeometry(input, g, t, &geometry);
+                _HBuildGeometry(input, g, t, &geometry, &desc.validationErrors);
                 geometryIndex.emplace(g.GetString(), desc.geometries.size());
                 desc.geometries.push_back(std::move(geometry));
             }
@@ -1523,11 +1659,6 @@ CaptureGraphDescFromHydra(
     for (UsdGenNodeDesc &node : desc.nodes) {
         for (SdfPath const &s : node.surfaces) {
             surfaceFor(s);
-            HdContainerDataSourceHandle primDs;
-            if (_HPrim(input, s, &primDs, nullptr) &&
-                HdGeomSubsetSchema::GetFromParent(primDs).IsDefined()) {
-                surfaceFor(s.GetParentPath());  // parent mesh too
-            }
         }
         for (SdfPath const &c : node.curves) {
             UsdGenRole role = UsdGenRole::Curves;

@@ -68,7 +68,7 @@ class UsdGenDescription "UsdGenDescription" (
 )
 {
     rel usdGen:surface (
-        doc = """The Mesh or GeomSubset this description grows from (ADR R15). Every operator in the chain uses this one target set; there is no per-operator override. Only the first target is bound. Expression evaluation: groom (once per operator)."""
+        doc = """The Mesh or face GeomSubset this description grows from (ADR R15). A GeomSubset (elementType "face", a namespace child of its Mesh) restricts Scatter and Collide to the faces its indices name, and an empty subset selects none; face, ptex and root-binding ids stay the parent mesh's, and rest, primvars and deformation are read from the parent Mesh. Further targets on the same mesh (sibling subsets, or the Mesh itself) are unioned into the first; of targets on other meshes only the first is bound. A subset that is not a face set, whose parent is not a Mesh, or that names a face outside its parent is a hard diagnostic and the description publishes nothing. Every operator in the chain uses this one target set; there is no per-operator override. Expression evaluation: groom (once per operator)."""
     )
     rel usdGen:guides (
         doc = """Guide sets available to this description. Reserved for guide-driven generators; the M1 kernels do not consume it. Expression evaluation: groom (once per operator)."""
@@ -1018,7 +1018,7 @@ class UsdGenCollide "UsdGenCollide" (
 )
 {
     rel usdGen:colliders (
-        doc = """Collider meshes for the push-out solve, appended after the bound surface, which always collides too. Each of the iterations sweeps moves penetrating CVs out along the closest-point direction, keeping an offset gap and scaling the correction by pushAmount. Expression evaluation: groom (once per operator)."""
+        doc = """Collider Meshes or face GeomSubsets for the push-out solve, appended after the bound surface, which always collides too. A GeomSubset collides with just the parent-mesh faces it names; an empty one is an error. Each of the iterations sweeps moves penetrating CVs out along the closest-point direction, keeping an offset gap and scaling the correction by pushAmount. Expression evaluation: groom (once per operator)."""
     )
     float usdGen:offset = 0.0 (
         doc = """Rest gap kept between CVs and collider surfaces after the push-out solve. Expression evaluation: primitive (once per curve root)."""
@@ -1299,7 +1299,7 @@ class UsdGenPaintMap "UsdGenPaintMap" (
 )
 {
     rel usdGen:paint:surface (
-        doc = """Relationship consumed by PaintMap. Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
+        doc = """The Mesh whose faceVarying usdGen:paint:primvar this map reads, or a face GeomSubset of it. Exactly one target. A GeomSubset still reads the primvar from its parent Mesh, and the corners of faces outside the subset read usdGen:map:default. Strands sample it by their root face, so it must be the mesh of the description's usdGen:surface (a subset of that mesh included). Expression evaluation: groom (once per operator)."""
     )
     token usdGen:paint:primvar = "usdGen:paint:density" (
         doc = """Authored PaintMap control "primvar". Declared for the frozen v1-v3 vocabulary; no kernel implements PaintMap yet (02 §8.2), so this value is never read. Expression evaluation: groom (once per operator)."""
@@ -1568,7 +1568,7 @@ class UsdGenTonicGroom "UsdGenTonicGroom" (
 )
 {
     rel usdGen:tonic:scalp (
-        doc = """The growth mesh this groom is bound to. Expression evaluation: groom (once per operator)."""
+        doc = """The growth mesh this groom is bound to: a Mesh, or a face GeomSubset of one. A subset limits picking, placement, region fill and the uncovered-face count to its faces, while face ids, the usdGen:tonicRegion primvar and UsdGenRestAPI stay on the parent Mesh; the Output description's usdGen:surface names the subset too. Expression evaluation: groom (once per operator)."""
     )
     rel usdGen:tonic:description (
         doc = """The UsdGenDescription this groom feeds: the committer fills in its GuideInterpolate operator. Expression evaluation: groom (once per operator)."""

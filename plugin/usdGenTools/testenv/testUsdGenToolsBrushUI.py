@@ -549,7 +549,7 @@ def testLoopPressRelease():
         for module, name, value in (
                 (brushLoop.brushMap, "LiveStroke", LiveStroke),
                 (brushLoop.brushPick, "snapshotMesh",
-                 lambda prim: (snapshot, "")),
+                 lambda prim, faces=None: (snapshot, "")),
                 (brushLoop.brushPick, "pickPixels",
                  lambda s, c, x, y: (1, 0.25, 0.75, (0.0, 0.0, 0.0))),
                 (brushLoop.brushPick, "faceEdgeLen", lambda s, f: 1.0),

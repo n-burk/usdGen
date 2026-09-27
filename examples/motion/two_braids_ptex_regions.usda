@@ -360,6 +360,8 @@ def Xform "World"
     {
         point3f[] points = [(0.25, 0, 0.5), (-0.25, 0, 0.5)]
         uniform token purpose = "guide"
+        token visibility = "invisible"
+        float[] widths = [0.003, 0.003]
     }
 }
 

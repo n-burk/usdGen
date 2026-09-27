@@ -11,9 +11,9 @@
 # here the head itself is ~17 x 20 x 18 cm and strands are 3-6cm).
 #
 # FADE MECHANISM
-#   Scatter roots the whole Head ellipsoid uniformly (UsdGenScatter has no
-#   per-face density mask on the CPU lane -- usdGen:density is one groom-wide
-#   scalar, and binding usdGen:surface to a GeomSubset instead fails closed:
+#   Scatter roots the whole Head ellipsoid uniformly (usdGen:density is one
+#   groom-wide scalar; binding usdGen:surface to a scalp GeomSubset would
+#   restrict the roots, but with a hard edge, and a fade is graded:
 #   see the Head mesh comment below). An expression
 #   (Expressions/scalpFade, elevation -> [0, 1], elevation being the mesh's
 #   own "v" -- 1 at the crown, 0 at the far pole) shrinks each strand toward
@@ -5673,7 +5673,7 @@ def Xform "World"
                 }
 
                 # Runs first: roots over the whole Head (see the mesh comment above
-                # on why this cannot be restricted to a scalp subset).
+                # on why this is not restricted to a scalp subset).
                 def UsdGenScatter "scatter"
                 {
                     int usdGen:seed = 41

@@ -193,8 +193,14 @@ bool TonicRasteriseRegionsCpu(TonicScalpMesh const &mesh,
     if (!TonicFlattenLoops(graph, &loops, err)) {
         return false;
     }
+    // Faces outside a bound face subset are not scalp: never claimed, never
+    // counted as uncovered, and never a bridge for the flood below.
+    int activeCount = 0;
+    for (size_t f = 0; f < faceCount; ++f) {
+        activeCount += TonicScalpFaceActive(mesh, int(f)) ? 1 : 0;
+    }
     if (loops.loopCount.empty()) {
-        maps->uncoveredCount = int(faceCount);  // no regions: all uncovered
+        maps->uncoveredCount = activeCount;  // no regions: all uncovered
         return true;
     }
     // Candidate inside-sets per region (loop-plane test at face centroids).
@@ -204,8 +210,10 @@ bool TonicRasteriseRegionsCpu(TonicScalpMesh const &mesh,
     for (size_t r = 0; r < regionCount; ++r) {
         for (size_t f = 0; f < faceCount; ++f) {
             float const *c = &mesh.faceCentroids[f * 3];
-            inside[r][f] =
-                TonicPointInRegionCpu(loops, int(r), c) ? 1 : 0;
+            inside[r][f] = TonicScalpFaceActive(mesh, int(f)) &&
+                                   TonicPointInRegionCpu(loops, int(r), c)
+                               ? 1
+                               : 0;
         }
     }
     // Connectivity flood per region from its seed: only inside faces
@@ -264,6 +272,9 @@ bool TonicRasteriseRegionsCpu(TonicScalpMesh const &mesh,
         }
     }
     for (size_t f = 0; f < faceCount; ++f) {
+        if (!TonicScalpFaceActive(mesh, int(f))) {
+            continue;
+        }
         maps->uncoveredCount += maps->covered[f] ? 0 : 1;
         maps->intersectedCount += maps->intersected[f] ? 1 : 0;
     }
@@ -277,9 +288,19 @@ std::vector<int> TonicFaceResLog2(TonicScalpMesh const &mesh,
 {
     size_t const faceCount = mesh.faceVertexCounts.size();
     std::vector<int> res(faceCount, 2);
+    // A face outside a bound subset is uniformly unclaimed: one texel,
+    // whatever the override.
+    auto collapseInactive = [&]() {
+        for (size_t f = 0; f < faceCount; ++f) {
+            if (!TonicScalpFaceActive(mesh, int(f))) {
+                res[f] = 0;
+            }
+        }
+    };
     if (resOverride >= 0) {
         std::fill(res.begin(), res.end(),
                   std::min(std::max(resOverride, 0), 12));
+        collapseInactive();
         return res;
     }
     float const median =
@@ -387,6 +408,7 @@ std::vector<int> TonicFaceResLog2(TonicScalpMesh const &mesh,
             }
         }
     }
+    collapseInactive();
     return res;
 }
 

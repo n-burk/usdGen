@@ -211,6 +211,19 @@ _PullParams(UsdPrim const &prim, double time,
     // into params above, so S14's pull-all contract holds.
 }
 
+// The Mesh a surface target reads (R15): the target itself, a GeomSubset's
+// parent Mesh, or empty for anything else.
+SdfPath
+_SurfaceMesh(UsdStageRefPtr const &stage, SdfPath const &path)
+{
+    UsdPrim const prim = stage->GetPrimAtPath(path);
+    if (!prim) return SdfPath();
+    if (prim.IsA<UsdGeomMesh>()) return path;
+    if (prim.IsA<UsdGeomSubset>() && prim.GetParent().IsA<UsdGeomMesh>())
+        return path.GetParentPath();
+    return SdfPath();
+}
+
 // Snapshots a UsdGenPaintMap's surface primvar into the map desc (scalar,
 // folded through usdGen:map:channel). v1 carries faceVarying float data
 // only; anything else fails closed with a validation error and leaves the
@@ -235,10 +248,33 @@ _CapturePaintMap(UsdStageRefPtr const &stage, UsdPrim const &prim,
         fail("usdGen:paint:surface requires exactly one target");
         return;
     }
-    UsdPrim surface = stage->GetPrimAtPath(targets.front());
-    if (!surface || !UsdGeomMesh(surface)) {
-        fail("usdGen:paint:surface must target a UsdGeomMesh");
+    // A face GeomSubset target (R15) paints its parent Mesh: the primvar is
+    // read there and the corners outside the subset read usdGen:map:default.
+    SdfPath const meshPath = _SurfaceMesh(stage, targets.front());
+    UsdPrim surface = meshPath.IsEmpty() ? UsdPrim() : stage->GetPrimAtPath(meshPath);
+    if (!surface) {
+        fail("usdGen:paint:surface must target a UsdGeomMesh or a face "
+             "GeomSubset of one");
         return;
+    }
+    bool const subset = meshPath != targets.front();
+    VtIntArray subsetFaces;
+    if (subset) {
+        UsdGeomSubset const geomSubset(stage->GetPrimAtPath(targets.front()));
+        TfToken elementType;
+        geomSubset.GetElementTypeAttr().Get(&elementType);
+        if (elementType != UsdGeomTokens->face) {
+            fail(UsdGenSubsetElementTypeError(targets.front(),
+                                              elementType.GetString()));
+            return;
+        }
+        VtIntArray faceCounts, indices;
+        UsdGeomMesh(surface).GetFaceVertexCountsAttr().Get(&faceCounts);
+        _GetTyped(geomSubset.GetIndicesAttr(), UsdTimeCode(time), &indices);
+        std::vector<int> faces;
+        UsdGenAppendSubsetFaces(indices, faceCounts.size(), targets.front(),
+                                meshPath, &faces, errors);
+        subsetFaces = UsdGenFinalizeSubsetFaces(std::move(faces), false, 0);
     }
     TfToken primvarName;
     _GetToken(prim, "usdGen:paint:primvar", &primvarName);
@@ -258,7 +294,7 @@ _CapturePaintMap(UsdStageRefPtr const &stage, UsdPrim const &prim,
         UsdAttribute defaultAttr = prim.GetAttribute(TfToken("usdGen:map:default"));
         float defaultValue = 0.0f;
         if (!defaultAttr || !defaultAttr.Get(&defaultValue)) {
-            fail("surface " + targets.front().GetString() + " has no primvar " +
+            fail("surface " + meshPath.GetString() + " has no primvar " +
                  primvarName.GetString());
             return;
         }
@@ -273,7 +309,7 @@ _CapturePaintMap(UsdStageRefPtr const &stage, UsdPrim const &prim,
         UsdGeomMesh(surface).GetFaceVertexCountsAttr().Get(&defaultCounts);
         size_t defaultFaceVarying = 0;
         for (int c : defaultCounts) defaultFaceVarying += size_t(c);
-        map->paintSurface = targets.front();
+        map->paintSurface = meshPath;
         map->paintPrimvar = primvarName;
         map->paintInterpolation = UsdGeomTokens->faceVarying;
         map->paintValues.assign(defaultFaceVarying, defaultValue);
@@ -332,7 +368,13 @@ _CapturePaintMap(UsdStageRefPtr const &stage, UsdPrim const &prim,
              std::to_string(faceVarying) + " face vertices");
         return;
     }
-    map->paintSurface = targets.front();
+    if (subset) {
+        float fallback = 0.0f;
+        if (UsdAttribute defaultAttr = prim.GetAttribute(TfToken("usdGen:map:default")))
+            defaultAttr.Get(&fallback);
+        UsdGenMaskPaintValues(counts, subsetFaces, fallback, &folded);
+    }
+    map->paintSurface = meshPath;
     map->paintPrimvar = primvarName;
     map->paintInterpolation = interp;
     map->paintValues = folded;
@@ -541,6 +583,50 @@ _BuildSurface(UsdStageRefPtr const &stage, SdfPath const &path, double time,
         UsdTimeCode(time));
 }
 
+// Fills a surface desc for a GeomSubset target (02 §2.20): its parent Mesh's
+// full geometry, so face, ptex and root-binding ids stay parent-mesh ids,
+// plus the sorted, unique faces it selects. `unioned` are further targets on
+// the same mesh (sibling subsets, or the Mesh itself) folded in by rule 4.
+// A non-face subset or a non-Mesh parent is a hard diagnostic (rules 1, 7).
+void
+_BuildSubsetSurface(UsdStageRefPtr const &stage, SdfPath const &path,
+                    SdfPathVector const &unioned, double time,
+                    UsdGenSurfaceDesc *out, std::vector<std::string> *errors)
+{
+    SdfPath const meshPath = path.GetParentPath();
+    if (!UsdGeomMesh(stage->GetPrimAtPath(meshPath))) {
+        errors->push_back(UsdGenSubsetParentError(path));
+        return;
+    }
+    _BuildSurface(stage, meshPath, time, out);
+    out->path = path;
+    out->isSubset = true;
+    size_t const faceCount = out->faceVertexCounts.size();
+    std::vector<int> faces;
+    bool whole = false;
+    SdfPathVector members{path};
+    members.insert(members.end(), unioned.begin(), unioned.end());
+    for (SdfPath const &member : members) {
+        if (member == meshPath) {
+            whole = true;
+            continue;
+        }
+        UsdGeomSubset const subset(stage->GetPrimAtPath(member));
+        TfToken elementType;
+        subset.GetElementTypeAttr().Get(&elementType);
+        if (elementType != UsdGeomTokens->face) {
+            errors->push_back(
+                UsdGenSubsetElementTypeError(member, elementType.GetString()));
+            continue;
+        }
+        VtIntArray indices;
+        _GetTyped(subset.GetIndicesAttr(), UsdTimeCode(time), &indices);
+        UsdGenAppendSubsetFaces(indices, faceCount, member, meshPath, &faces,
+                                errors);
+    }
+    out->subsetFaces = UsdGenFinalizeSubsetFaces(std::move(faces), whole, faceCount);
+}
+
 bool
 _BuildSurfaceCagePayload(UsdPrim const &prim, UsdTimeCode time,
                          std::shared_ptr<const UsdGenSurfaceCagePayload> *out)
@@ -741,6 +827,11 @@ _CollectInputTarget(UsdStageRefPtr const &stage, SdfPath const &path, int depth,
         geometries->push_back(path);
         return;
     }
+    // A Mesh's GeomSubset samples the mesh restricted to its faces (R15).
+    if (prim.IsA<UsdGeomSubset>()) {
+        if (!_SurfaceMesh(stage, path).IsEmpty()) geometries->push_back(path);
+        return;
+    }
     if (depth > 64) return;
     for (UsdPrim const &child : prim.GetChildren())
         _CollectInputTarget(stage, child.GetPath(), depth + 1, geometries, maps);
@@ -748,14 +839,36 @@ _CollectInputTarget(UsdStageRefPtr const &stage, SdfPath const &path, int depth,
 
 // Oracle twin of _HBuildGeometry: rest is what the RestAPI/CurveAPI adapters
 // publish when applied (authored primvars:rest, else Default-time points),
-// otherwise an authored primvars:rest, otherwise empty.
+// otherwise an authored primvars:rest, otherwise empty. A face GeomSubset
+// samples its parent Mesh restricted to the faces it names (R15).
 void
 _BuildGeometry(UsdStageRefPtr const &stage, SdfPath const &path, double time,
-               usdGen::UsdGenGeometryDesc *out)
+               usdGen::UsdGenGeometryDesc *out, std::vector<std::string> *errors)
 {
     out->path = path;
     UsdPrim const prim = stage->GetPrimAtPath(path);
     if (!prim) return;
+    if (UsdGeomSubset const subset{prim}) {
+        SdfPath const meshPath = path.GetParentPath();
+        _BuildGeometry(stage, meshPath, time, out, errors);
+        out->path = path;
+        out->isSubset = true;
+        TfToken elementType;
+        subset.GetElementTypeAttr().Get(&elementType);
+        if (elementType != UsdGeomTokens->face) {
+            errors->push_back(
+                UsdGenSubsetElementTypeError(path, elementType.GetString()));
+        } else {
+            VtIntArray indices;
+            _GetTyped(subset.GetIndicesAttr(), UsdTimeCode(time), &indices);
+            std::vector<int> faces;
+            UsdGenAppendSubsetFaces(indices, out->counts.size(), path, meshPath,
+                                    &faces, errors);
+            out->subsetFaces = UsdGenFinalizeSubsetFaces(std::move(faces), false, 0);
+        }
+        out->generation = UsdGenGeometryContentHash(*out);
+        return;
+    }
     out->worldMatrix =
         UsdGeomImageable(prim).ComputeLocalToWorldTransform(UsdTimeCode(time));
     UsdGeomPointBased const pointBased(prim);
@@ -1001,13 +1114,19 @@ BuildGraphDescFromStage(
     }
 
     // 02 §2: the bound surface is the Description's. There is no per-operator
-    // override, so every node sees the same target set.
+    // override, so every node sees the same target set. Targets on the bound
+    // target's mesh union into it (02 §2.20 rule 4).
+    std::map<SdfPath, SdfPathVector> surfaceUnions;
     {
         SdfPathVector descSurfaces;
         if (UsdRelationship rel = descPrim.GetRelationship(
                 TfToken("usdGen:surface"))) {
             rel.GetTargets(&descSurfaces);
         }
+        SdfPathVector unioned = UsdGenUnionSurfaceTargets(&descSurfaces,
+            [&](SdfPath const &p) { return _SurfaceMesh(stage, p); });
+        if (!unioned.empty())
+            surfaceUnions.emplace(descSurfaces.front(), std::move(unioned));
         if (!descSurfaces.empty()) {
             for (UsdGenNodeDesc &node : desc.nodes) {
                 node.surfaces = descSurfaces;
@@ -1051,11 +1170,13 @@ BuildGraphDescFromStage(
         desc.surfaces.push_back(std::move(surface));
         UsdPrim prim = stage->GetPrimAtPath(p);
         if (prim && prim.IsA<UsdGeomSubset>()) {
-            // R15: subsetFaces are PARENT-mesh face indices; the parent's
-            // desc (added separately) carries the geometry.
-            UsdGeomSubset subset(prim);
-            _GetTyped(subset.GetIndicesAttr(), UsdTimeCode(time),
-                      &desc.surfaces[surfaceIndex[p.GetString()]].subsetFaces);
+            // R15: the subset's desc carries its parent Mesh's geometry and
+            // the PARENT-mesh face indices it selects.
+            auto const u = surfaceUnions.find(p);
+            _BuildSubsetSurface(stage, p,
+                                u == surfaceUnions.end() ? SdfPathVector() : u->second,
+                                time, &desc.surfaces[surfaceIndex[p.GetString()]],
+                                &desc.validationErrors);
         } else {
             _BuildSurface(stage, p, time,
                           &desc.surfaces[surfaceIndex[p.GetString()]]);
@@ -1119,7 +1240,7 @@ BuildGraphDescFromStage(
             for (SdfPath const &g : in.geometries) {
                 if (geometryIndex.count(g.GetString())) continue;
                 usdGen::UsdGenGeometryDesc geometry;
-                _BuildGeometry(stage, g, time, &geometry);
+                _BuildGeometry(stage, g, time, &geometry, &desc.validationErrors);
                 geometryIndex.emplace(g.GetString(), desc.geometries.size());
                 desc.geometries.push_back(std::move(geometry));
             }
@@ -1130,10 +1251,6 @@ BuildGraphDescFromStage(
     for (UsdGenNodeDesc &node : desc.nodes) {
         for (SdfPath const &s : node.surfaces) {
             surfaceFor(s);
-            UsdPrim sPrim = stage->GetPrimAtPath(s);
-            if (sPrim && sPrim.IsA<UsdGeomSubset>()) {
-                surfaceFor(sPrim.GetParent().GetPath());  // parent mesh too
-            }
         }
         for (SdfPath const &c : node.curves) {
             UsdGenRole role = UsdGenRole::Curves;

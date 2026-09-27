@@ -39,7 +39,16 @@ struct USDGENTONIC_API TonicCommitPaths {
     SdfPath groomPath = SdfPath("/TonicGroom");
     SdfPath descriptionPath;  // empty = no GuideInterpolate fill-in
     SdfPath scalpPath;  // empty = no scalp link, live primvar, or graph
+    // The Mesh that carries scalpPath's geometry when scalpPath is a face
+    // GeomSubset (plan/02 §2.20): UsdGenRestAPI and the live tonicRegion
+    // primvar land here, while usdGen:tonic:scalp and Output's
+    // usdGen:surface keep naming the subset. Empty = scalpPath is the Mesh.
+    SdfPath scalpMeshPath;
 
+    SdfPath ScalpMeshPath() const
+    {
+        return scalpMeshPath.IsEmpty() ? scalpPath : scalpMeshPath;
+    }
     SdfPath TubesPath() const { return groomPath.AppendChild(TfToken("Tubes")); }
     // The prim NAME of one tube: "tube<n>", or "group<n>" for the negative
     // ids the on-the-fly parents mint (a '-' is not a legal prim name).
@@ -147,6 +156,7 @@ struct USDGENTONIC_API TonicSnapshot {
     std::vector<TonicSnapshotTube> tubes;
     TonicModel::GraphSnapshot graph;  // scalp graph + live primvar + map file
     SdfPath scalpPath;  // empty = author no scalp opinion
+    SdfPath scalpMeshPath;  // TonicCommitPaths::scalpMeshPath, same rule
     // Mesh-fill inputs: the scalp copy plus the L1 tube's region faces
     // (faces at its interpolation id). Empty faces mean the disc stream.
     // The per-tube split of those faces lives on each TonicSnapshotTube:
@@ -320,6 +330,28 @@ TonicHydrateResult USDGENTONIC_API
 TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
                   TonicModel *model);
 
+// Resolve what a scalp link names (plan/02 §2.20). A UsdGeomMesh binds
+// whole. A UsdGeomSubset binds its parent Mesh's geometry restricted to the
+// subset's `indices`, which are parent-mesh face ids (sorted and de-duped
+// here; a subset never renumbers faces). The subset must author
+// elementType "face" and sit directly under a Mesh, and every index must
+// name a parent face; anything else -- including a subset that names no
+// face -- returns false with *err naming the prim, never a silent fallback
+// to the whole mesh. Geometry is read at the default time, as bind does.
+struct USDGENTONIC_API TonicScalpTarget {
+    SdfPath targetPath;  // what the link names (Mesh or GeomSubset)
+    SdfPath meshPath;    // the Mesh carrying the geometry and primvars
+    std::vector<float> points;  // 3N, the Mesh's
+    std::vector<int> faceVertexCounts;
+    std::vector<int> faceVertexIndices;
+    std::vector<int> activeFaces;  // empty = the whole Mesh
+    bool isSubset = false;
+};
+bool USDGENTONIC_API TonicResolveScalpTarget(UsdStagePtr const &stage,
+                                             SdfPath const &path,
+                                             TonicScalpTarget *out,
+                                             std::string *err);
+
 // "Save groom" (UI thread). Copies the live layer's content into the file
 // layer at `filePath` (created when missing; .usdc, never .usda per S42),
 // saves it, and re-parents the layer stack so the live sublayer sits beneath
@@ -445,8 +477,12 @@ public:
     void SetSwapBudgetMs(double ms) { _swapBudgetMs.store(ms); }
     // Retarget the scalp link (UI thread; takes effect on the next build).
     // Empty clears the link (no scalp opinion, no live primvar, no graph).
-    void SetScalpPath(SdfPath const &scalpPath);
+    // `meshPath` is the parent Mesh of a face GeomSubset scalp (see
+    // TonicCommitPaths::scalpMeshPath); empty = scalpPath is the Mesh.
+    void SetScalpPath(SdfPath const &scalpPath,
+                      SdfPath const &meshPath = SdfPath());
     SdfPath GetScalpPath() const;
+    SdfPath GetScalpMeshPath() const;
     double LastSwapMs() const { return _lastSwapMs.load(); }
     uint64_t CommittedVersion() const { return _committedVersion.load(); }
     uint64_t PendingVersion() const { return _pendingVersionAtomic.load(); }

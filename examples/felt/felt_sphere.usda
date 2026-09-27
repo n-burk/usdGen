@@ -2,6 +2,7 @@
 (
     defaultPrim = "FeltSphere"
     metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/FeltMoonray"
     upAxis = "Z"
 )
 
@@ -224,7 +225,7 @@ def Xform "FeltSphere"
                 {
                     custom rel input:map = </FeltSphere/Groom/Felt/Maps/tightness>
                     custom float outputs:result
-                    string usdGen:expr:source = '0.45 * ptex("map")'
+                    string usdGen:expr:source = '0.18 * ptex("map")'
                 }
 
                 def UsdGenExpression "width"
@@ -257,14 +258,17 @@ def Xform "FeltSphere"
 
                 def UsdGenClump "microclump"
                 {
-                    float usdGen:clump:amount = 0.7
+                    float usdGen:clump:amount = 0.18
                     float usdGen:clump:amount.connect = </FeltSphere/Groom/Felt/Expressions/tightness.outputs:result>
                     int usdGen:clump:levels = 1
                     float usdGen:clump:map = 0
                     float usdGen:clump:map.connect = </FeltSphere/Groom/Felt/Expressions/regions.outputs:result>
                     token usdGen:clump:method = "linearBlend"
-                    float2[] usdGen:clump:profile:knots = [(0, 0), (0.25, 0.15), (0.7, 0.85), (1, 0.8)]
+                    float2[] usdGen:clump:profile:knots = [(0, 0), (0.25, 0.04), (0.7, 0.5), (1, 0.35)]
                     float usdGen:clump:size = 0.01
+                    custom float usdGen:clump:stray:amount = 0.65
+                    custom float usdGen:clump:stray:falloff = 0.7
+                    custom float usdGen:clump:stray:rate = 0.25
                     float usdGen:preserveLength = 0.5
                 }
 
@@ -394,7 +398,7 @@ def Xform "FeltSphere"
                 {
                     custom rel input:map = </FeltSphere/Groom/FeltCurls/Maps/tightness>
                     custom float outputs:result
-                    string usdGen:expr:source = '0.95 * ptex("map")'
+                    string usdGen:expr:source = '0.45 * ptex("map")'
                 }
 
                 def UsdGenExpression "width"
@@ -427,14 +431,17 @@ def Xform "FeltSphere"
 
                 def UsdGenClump "microclump"
                 {
-                    float usdGen:clump:amount = 0.7
+                    float usdGen:clump:amount = 0.45
                     float usdGen:clump:amount.connect = </FeltSphere/Groom/FeltCurls/Expressions/tightness.outputs:result>
                     int usdGen:clump:levels = 1
                     float usdGen:clump:map = 0
                     float usdGen:clump:map.connect = </FeltSphere/Groom/FeltCurls/Expressions/regions.outputs:result>
                     token usdGen:clump:method = "linearBlend"
-                    float2[] usdGen:clump:profile:knots = [(0, 0), (0.25, 0.15), (0.7, 0.85), (1, 0.8)]
+                    float2[] usdGen:clump:profile:knots = [(0, 0), (0.25, 0.08), (0.7, 0.65), (1, 0.5)]
                     float usdGen:clump:size = 0.01
+                    custom float usdGen:clump:stray:amount = 0.65
+                    custom float usdGen:clump:stray:falloff = 0.7
+                    custom float usdGen:clump:stray:rate = 0.25
                     float usdGen:preserveLength = 0.5
                 }
 
@@ -713,18 +720,94 @@ def Camera "Camera"
     uniform token[] xformOpOrder = ["xformOp:transform"]
 }
 
-def DistantLight "Key"
+def "Render"
 {
-    float inputs:angle = 18
-    float inputs:intensity = 1
-    bool inputs:normalize = 1
-    matrix4d xformOp:transform = ( (0.894427190999916, -0.447213595499958, 0, 0), (0.3585685828003181, 0.7171371656006362, 0.5976143046671968, 0), (-0.26726124191242434, -0.5345224838248487, 0.8017837257372731, 0), (-0.9999999999999999, -1.9999999999999998, 2.9999999999999996, 0.9999999999999999) )
-    uniform token[] xformOpOrder = ["xformOp:transform"]
+    def RenderSettings "FeltMoonray" (
+        doc = "Felt lookdev: adaptive primary sampling, single light/BSDF samples, two diffuse bounces; no motion blur or depth of field on this static study."
+    )
+    {
+        rel camera = </Camera>
+        uniform bool disableDepthOfField = 1
+        uniform bool disableMotionBlur = 1
+        custom int moonray:sceneVariable:bsdf_samples = 1
+        custom int moonray:sceneVariable:light_samples = 1
+        custom int moonray:sceneVariable:max_adaptive_samples = 128
+        custom int moonray:sceneVariable:max_depth = 4
+        custom int moonray:sceneVariable:max_diffuse_depth = 2
+        custom int moonray:sceneVariable:max_glossy_depth = 2
+        custom int moonray:sceneVariable:min_adaptive_samples = 32
+        custom token moonray:sceneVariable:sampling_mode = "adaptive"
+        custom float moonray:sceneVariable:target_adaptive_error = 3
+        uniform int2 resolution = (800, 800)
+    }
 }
 
-def DomeLight "Fill"
+def Xform "Studio" (
+    doc = "Three-point studio: broad key, weaker fill, rear strip back light, and a low-intensity contrast HDR environment. Enable scene lights and scene materials in usdview."
+)
 {
-    float inputs:intensity = 0.6
-    asset inputs:texture:file = @textures/studio.exr@
+    double3 xformOp:translate = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def RectLight "Key" (
+        prepend apiSchemas = ["ShadowAPI"]
+    )
+    {
+        color3f inputs:color = (1, 0.96, 0.9)
+        float inputs:diffuse = 1
+        float inputs:exposure = 0
+        float inputs:height = 1.5
+        float inputs:intensity = 12
+        bool inputs:normalize = 0
+        bool inputs:shadow:enable = 1
+        float inputs:specular = 1
+        float inputs:width = 1.5
+        matrix4d xformOp:transform = ( (0.8, -0.6000000000000001, 2.7755575615628914e-17, 0), (0.35481819817651045, 0.47309093090201393, 0.8064049958557056, 0), (-0.4838429975134233, -0.6451239966845644, 0.5913636636275174, 0), (-1.8, -2.4000000000000004, 2.2, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def RectLight "Fill" (
+        prepend apiSchemas = ["ShadowAPI"]
+    )
+    {
+        color3f inputs:color = (0.9, 0.95, 1)
+        float inputs:diffuse = 1
+        float inputs:exposure = 0
+        float inputs:height = 2
+        float inputs:intensity = 1.7
+        bool inputs:normalize = 0
+        bool inputs:shadow:enable = 1
+        float inputs:specular = 1
+        float inputs:width = 2
+        matrix4d xformOp:transform = ( (0.4788521306805733, 0.8778955729143845, 0, 0), (-0.32536974676129665, 0.1774744073243436, 0.9287827316640651, -0), (0.8153742483272114, -0.4447495899966607, 0.3706246583305505, 0), (2.2000000000000006, -1.2000000000000002, 1, 1.0000000000000002) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def RectLight "Back" (
+        prepend apiSchemas = ["ShadowAPI"]
+    )
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:diffuse = 1
+        float inputs:exposure = 0
+        float inputs:height = 1.8
+        float inputs:intensity = 16
+        bool inputs:normalize = 0
+        bool inputs:shadow:enable = 1
+        float inputs:specular = 1
+        float inputs:width = 1
+        matrix4d xformOp:transform = ( (-0.8532818336519591, 0.5214500094539749, 2.7755575615628914e-17, 0), (-0.3587685132329218, -0.5870757489265994, 0.7256908563120464, 0), (0.3784115038845798, 0.6192188245384033, 0.6880209161537815, -0), (1.1000000000000003, 1.8, 2.0000000000000004, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def DomeLight "Environment"
+    {
+        float inputs:exposure = 0
+        float inputs:intensity = 0.12
+        asset inputs:texture:file = @textures/studio_contrast.exr@
+        token inputs:texture:format = "latlong"
+        float xformOp:rotateX:orientToStageUpAxis = 90
+        uniform token[] xformOpOrder = ["xformOp:rotateX:orientToStageUpAxis"]
+    }
 }
 

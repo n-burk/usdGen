@@ -1151,7 +1151,8 @@ bool TonicRootSampleRegionMeshCpu(
         // root into the next fill.
         float q[3] = {(*roots)[size_t(i)].px, (*roots)[size_t(i)].py,
                       (*roots)[size_t(i)].pz};
-        if (TonicClassifyPointCpu(loops, q) == interp) {
+        if (TonicClassifyPointCpu(loops, q) == interp &&
+            TonicScalpFaceActive(scalp, (*roots)[size_t(i)].faceId)) {
             out.push_back((*roots)[size_t(i)]);
         }
     }
@@ -1183,8 +1184,12 @@ bool TonicRootSampleRegionMeshCpu(
         if (!TonicPointInRegionCpu(loops, sampleLoop, candidate)) {
             continue;
         }
-        TonicHit const hit = TonicClosestPointCpu(scalp, candidate);
-        if (!hit.hit) {
+        // Project over EVERY parent face, then drop a candidate that lands
+        // outside a bound face subset: projecting onto the subset alone
+        // would pile the rejected area's roots up along its border.
+        TonicHit const hit =
+            TonicClosestPointCpu(scalp, candidate, /*activeOnly*/ false);
+        if (!hit.hit || !TonicScalpFaceActive(scalp, hit.faceId)) {
             continue;
         }
         float q[3] = {hit.px, hit.py, hit.pz};

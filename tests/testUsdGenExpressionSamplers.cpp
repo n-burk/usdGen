@@ -129,6 +129,18 @@ SamplerGeometrySource Quad(float x)
     return s;
 }
 
+// Two unit quads side by side in the XZ plane (x in [0, 2]), normal +Y;
+// face 1 is points 3, 2, 4, 5.
+SamplerGeometrySource Strip()
+{
+    SamplerGeometrySource s;
+    s.kind = SamplerGeometrySource::Kind::Mesh;
+    s.points = {0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 2, 0, 1, 2, 0, 0};
+    s.counts = {4, 4};
+    s.indices = {0, 1, 2, 3, 3, 2, 4, 5};
+    return s;
+}
+
 IRSampler Spec(char const *element, SampleIterate iterate, SampleReduce reduce,
                std::string *error = nullptr)
 {
@@ -214,6 +226,51 @@ void CheckGeometrySampler()
 
     // Nothing to sample: NaN, which poisons the consuming expression.
     Check(std::isnan(Sample({}, "$index", P, SampleReduce::Nearest, a)), "an empty input samples NaN");
+}
+
+// A GeomSubset input (R15): only its faces and the points they use are
+// sampled, and element ids stay the parent mesh's.
+void CheckSubsetGeometry()
+{
+    auto P = SampleIterate::Prim;
+    auto Pt = SampleIterate::Point;
+    auto G = SampleIterate::Geometry;
+    SamplerGeometrySource strip = Strip();
+    strip.subset = true;
+    strip.faces = {1};
+    std::vector<SamplerGeometrySource> subset{strip};
+    double left[3] = {0.2, 0, 0.1};
+    Check(Near(Sample({Strip()}, "1", P, SampleReduce::Sum, left), 2), "the whole strip has two faces");
+    Check(Near(Sample(subset, "1", P, SampleReduce::Sum, left), 1), "a subset samples only its faces");
+    Check(Near(Sample(subset, "$primIndex", P, SampleReduce::Nearest, left), 1),
+          "a subset face keeps its parent face index, even nearest the other face");
+    Check(Near(Sample(subset, "$primCount", P, SampleReduce::Nearest, left), 2),
+          "$primCount stays the parent's, so $primIndex / $primCount keeps its range");
+    Check(Near(Sample({Strip()}, "1", Pt, SampleReduce::Sum, left), 6), "the whole strip has six points");
+    Check(Near(Sample(subset, "1", Pt, SampleReduce::Sum, left), 4), "a subset samples only its faces' points");
+    Check(Near(Sample(subset, "$id", Pt, SampleReduce::Nearest, left), 3),
+          "a subset point keeps its parent point id");
+    Check(Near(Sample(subset, "$primIndex", Pt, SampleReduce::Nearest, left), 1),
+          "a subset point is owned by a subset face");
+    Check(Near(Sample(subset, "$pointCount", G, SampleReduce::Sum, left), 4),
+          "geometry iteration counts the subset's points");
+    Check(Near(Sample(subset, "$P", G, SampleReduce::Nearest, left, 0), 1.5),
+          "the geometry centroid is the subset's");
+
+    SamplerGeometrySource empty = Strip();
+    empty.subset = true;
+    Check(std::isnan(Sample({empty}, "$primIndex", P, SampleReduce::Nearest, left)),
+          "an empty subset selects nothing rather than the whole mesh");
+    Check(std::isnan(Sample({empty}, "$id", Pt, SampleReduce::Nearest, left)),
+          "an empty subset samples no point");
+
+    SamplerGeometrySource wild = Strip();
+    wild.subset = true;
+    wild.faces = {2};
+    std::string error;
+    Check(std::isnan(Sample({wild}, "1", P, SampleReduce::Sum, left, 0, &error)) &&
+          error.find("subset face") != std::string::npos,
+          "an out-of-range subset face fails the build");
 }
 
 void CheckEndToEnd()
@@ -532,6 +589,27 @@ void CheckPaintParameters()
     for (auto const &e : errors) named = named || e.find("not the root surface") != std::string::npos;
     Check(named, "and says the paint misses the root surface");
 
+    // A GeomSubset root surface (R15) carries its parent mesh's geometry and
+    // face ids, so paint on that mesh reads exactly as it does on the mesh.
+    {
+        UsdGenGraphDesc onSubset = desc;
+        onSubset.maps[0].paintSurface = surface.path;
+        onSubset.surfaces[0].path = SdfPath("/Groom/Skin/crown");
+        onSubset.surfaces[0].isSubset = true;
+        onSubset.surfaces[0].subsetFaces = VtIntArray{0, 1};
+        onSubset.nodes[0].surfaces = {onSubset.surfaces[0].path};
+        UsdGenCpuParameters subsetParameters;
+        errors.clear();
+        Check(subsetParameters.Evaluate(onSubset, onSubset.nodes[0], strands, 0, 0, 0,
+                                        &changed, &errors),
+              "paint on a subset's parent mesh evaluates" +
+                  (errors.empty() ? "" : ": " + errors[0]));
+        value = subsetParameters.Find(TfToken("region"));
+        Check(value && value->values.size() == 2 &&
+                  Near(value->values[0], 1.8166667, 1e-4) && Near(value->values[1], 5.0),
+              "and reads the parent mesh's paint");
+    }
+
     // A payload that does not cover the faces fails the read too.
     desc.maps[0].paintSurface = surface.path;
     desc.maps[0].paintValues = VtFloatArray{0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f};
@@ -573,6 +651,7 @@ int main()
 {
     CheckFrontend();
     CheckGeometrySampler();
+    CheckSubsetGeometry();
     CheckEndToEnd();
     CheckParameters();
     CheckPtexParameters();

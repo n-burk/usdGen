@@ -8,5 +8,56 @@
   ],
   "rejectedCooks": 0,
   "quadFaces": 1536,
-  "allTextureAssetsResolve": true
+  "allTextureAssetsResolve": true,
+  "studioLighting": {
+    "scene": "felt_sphere.usda",
+    "sceneLightsOnly": true,
+    "renderers": {
+      "storm": {
+        "plugin": "HdStormRendererPlugin",
+        "converged": true,
+        "lightRemovalMeanPixelDifferences": {
+          "Key": 9.814527994791666,
+          "Fill": 5.13716064453125,
+          "Back": 6.186113281249999,
+          "Environment": 30.105423177083335
+        }
+      },
+      "moonray": {
+        "plugin": "HdMoonrayRendererDebugPlugin",
+        "converged": true,
+        "lightRemovalMeanPixelDifferences": {
+          "Key": 9.0484375,
+          "Fill": 4.918848470052083,
+          "Back": 1.6725390625,
+          "Environment": 0.9760856119791667
+        }
+      }
+    }
+  },
+  "groomPreset": {
+    "settings": {
+      "sampling_mode": "adaptive",
+      "min_adaptive_samples": 32,
+      "max_adaptive_samples": 128,
+      "target_adaptive_error": 3.0,
+      "light_samples": 1,
+      "bsdf_samples": 1,
+      "max_depth": 4,
+      "max_diffuse_depth": 2,
+      "max_glossy_depth": 2
+    },
+    "converged": true,
+    "sceneSettingsReadback": true,
+    "editAndRemovalVerified": true,
+    "seconds": {
+      "tuned": 20.062000000005355,
+      "default": 26.40700000000652,
+      "reference": 107.51600000000326
+    },
+    "meanPixelErrorAgainst256sppReference": {
+      "moonray": 0.8023006184895833,
+      "moonray_default_sampling": 0.6974625651041667
+    }
+  }
 }

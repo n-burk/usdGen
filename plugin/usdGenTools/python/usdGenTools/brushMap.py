@@ -29,6 +29,12 @@
 #    and that vertex's edge neighbours; affected faces re-upsample from their
 #    corners.
 #
+#    Face mask: a snapshot with a faceMask (a GeomSubset binding) paints
+#    only those parent faces. Dabs on a masked face are rejected, the
+#    footprint skips masked faces (brushPick.DabFootprint), and the corner
+#    smoother's adjacency is built over paintable faces only, so masked
+#    faces keep their base values exactly -- the C ABI's rule.
+#
 # CornerGrid is the corner-backed grid the fast paths hand around (four
 # corners per face, upsampled on read). It exposes the BrushMap surface
 # (numFaces, clone, fill, fillChannel, cornerValues, getTexel/setTexel,
@@ -714,13 +720,18 @@ def applyDab(liveMap, dab):
 
 
 class MeshAdjacency(object):
-    """Vertex -> face-corners and vertex -> edge-neighbour vertices."""
+    """Vertex -> face-corners and vertex -> edge-neighbour vertices.
 
-    def __init__(self, faces):
+    faceMask (paintable face ids, or None for all) limits both maps to
+    paintable faces, like the C ABI's masked mesh."""
+
+    def __init__(self, faces, faceMask=None):
         self.faces = faces
         corners = {}
         nbrs = {}
         for f, quad in enumerate(faces):
+            if faceMask is not None and f not in faceMask:
+                continue
             for i in range(4):
                 p = quad[i]
                 corners.setdefault(p, []).append((f, i))
@@ -1076,6 +1087,8 @@ class LiveStroke(object):
         self._footprint = None
         self._adjacency = None
         self._touched = set()
+        # The snapshot's paintable faces (None: all), both paths.
+        self._faceMask = None
         # Every accepted dab() call as a BrushDab (call level: a move's
         # interpolated trail is not expanded here). Status lines and
         # tests read it; it never drives painting.
@@ -1101,6 +1114,7 @@ class LiveStroke(object):
         live._channels = channels
         live._resolution = res
         live._default = float(default)
+        live._faceMask = getattr(snapshot, "faceMask", None)
         useNative = brushApi.available() if native is None else bool(native)
         if useNative:
             ok, error = live._initNative(snapshot, base)
@@ -1145,7 +1159,7 @@ class LiveStroke(object):
         self._stroke = BrushStroke(self._base)
         if snapshot is not None:
             self._footprint = _pickModule().DabFootprint(snapshot)
-            self._adjacency = MeshAdjacency(snapshot.faces)
+            self._adjacency = MeshAdjacency(snapshot.faces, self._faceMask)
 
     # -- lifetime ------------------------------------------------------------
 
@@ -1167,11 +1181,15 @@ class LiveStroke(object):
         """Record one primary dab and paint it (plus trail and spill).
 
         (stampsApplied, "") or (-1, reason); a rejected dab records
-        nothing."""
+        nothing -- a dab on a face outside the snapshot's faceMask
+        included."""
         if mode not in MODES:
             return (-1, "brush dab mode %r is unknown" % (mode,))
         if falloff not in FALLOFFS:
             return (-1, "brush dab falloff %r is unknown" % (falloff,))
+        if self._faceMask is not None and face not in self._faceMask:
+            return (-1, "brush dab face %r is outside the bound face "
+                    "subset" % (face,))
         if self.native:
             if not self._handle:
                 return (-1, "the stroke is closed")

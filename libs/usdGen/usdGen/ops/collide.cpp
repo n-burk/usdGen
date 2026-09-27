@@ -259,7 +259,7 @@ bool ValidateColliderMesh(SdfPath const &path, UsdGenSurfaceDesc const &entry,
         }
     }
     faces->clear();
-    if (!entry.subsetFaces.empty()) {
+    if (UsdGenSurfaceRestricted(entry)) {
         faces->assign(entry.subsetFaces.cbegin(), entry.subsetFaces.cend());
         std::sort(faces->begin(), faces->end());
         faces->erase(std::unique(faces->begin(), faces->end()), faces->end());
@@ -270,6 +270,12 @@ bool ValidateColliderMesh(SdfPath const &path, UsdGenSurfaceDesc const &entry,
                          " outside its mesh";
                 return false;
             }
+        }
+        // Collider faces empty == whole mesh downstream: an empty GeomSubset
+        // must not widen to its parent.
+        if (faces->empty()) {
+            *error = "collider subset '" + path.GetString() + "' names no face";
+            return false;
         }
     }
     // At least one non-degenerate triangle must exist; count the skipped.

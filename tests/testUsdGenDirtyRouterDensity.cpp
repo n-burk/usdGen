@@ -121,6 +121,39 @@ int main()
         CHECK(pending.nodeBits[0] == UsdGenDirtyCapture);
     }
 
+    // 6. A GeomSubset-bound node (02 §2.20): the subset's desc reads its
+    // parent mesh, so points, topology and paint rows key on the mesh; the
+    // subset's own indices/type (bare and prefixed) re-capture the node.
+    {
+        UsdGenGraphRoutingSnapshot snap = Snapshot();
+        snap.surfacePaths = {SdfPath("/Scalp/crown")};
+        snap.meshPaths = {SdfPath("/Scalp")};
+        usdGenImaging::UsdGenDirtyRouter subsetRouter;
+        subsetRouter.Rebuild(snap);
+
+        UsdGenPendingDirty points;
+        subsetRouter.Route(Dirtied(SdfPath("/Scalp"),
+                                   Loc({TfToken("primvars"), TfToken("points")})),
+                           &points);
+        CHECK(points.surfaceBits.size() == 1);
+        CHECK(points.surfaceBits[0] == UsdGenDirtySurfacePoints);
+
+        UsdGenPendingDirty paint;
+        subsetRouter.Route(Dirtied(SdfPath("/Scalp"),
+                                   Loc({TfToken("primvars"),
+                                        TfToken("usdGen:paint:density")})),
+                           &paint);
+        CHECK(paint.nodeBits.size() == 1 && paint.nodeBits[0] == UsdGenDirtyCapture);
+
+        for (HdDataSourceLocator const &loc :
+             {Loc({TfToken("indices")}), Loc({TfToken("type")}),
+              Loc({TfToken("geomSubset"), TfToken("indices")})}) {
+            UsdGenPendingDirty edit;
+            subsetRouter.Route(Dirtied(SdfPath("/Scalp/crown"), loc), &edit);
+            CHECK(edit.nodeBits.size() == 1 && edit.nodeBits[0] == UsdGenDirtyCapture);
+        }
+    }
+
     std::printf("ok: paint-density dirties re-capture the surface node\n");
     return 0;
 }

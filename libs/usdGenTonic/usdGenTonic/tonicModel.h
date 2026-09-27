@@ -242,9 +242,14 @@ public:
     // (the §3.1a bake key); tube/sculpt edits bump only the version, so a
     // sculpt drag never enqueues a bake. K3 runs explicitly (Rasterise, at
     // gesture end per §4.2), never inside a graph edit.
+    //
+    // `activeFaces` binds a face GeomSubset (plan/02 §2.20): the arrays are
+    // the PARENT mesh's and the ids are parent-mesh face indices; empty
+    // binds every face. See TonicScalpMesh::activeFaces.
     bool BindScalp(std::vector<float> const &points,
                    std::vector<int> const &faceVertexCounts,
-                   std::vector<int> const &faceVertexIndices);
+                   std::vector<int> const &faceVertexIndices,
+                   std::vector<int> const &activeFaces = std::vector<int>());
     bool HasScalp() const;
     // UI-thread-only views (like GetHostMesh); the commit worker reads
     // through SnapshotGraph() instead.

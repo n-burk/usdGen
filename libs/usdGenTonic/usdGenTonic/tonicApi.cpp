@@ -85,7 +85,8 @@ TonicBakeContextImpl const *_BImpl(TonicBakeContext const *bake)
 }
 
 // Locate (faceId, u, v) on the model's scalp (positions via
-// TonicFacePosition, normals from the face frame).
+// TonicFacePosition, normals from the face frame). A face outside a bound
+// face subset is off the scalp, exactly as a raycast would report it.
 bool _Locate(usdGenTonic::TonicModel &model, int faceId, float u, float v,
              usdGenTonic::TonicHit *hit)
 {
@@ -94,12 +95,11 @@ bool _Locate(usdGenTonic::TonicModel &model, int faceId, float u, float v,
     if (!scalp || !scalp->finalized || !hit) {
         return false;
     }
-    float px = 0.0f, py = 0.0f, pz = 0.0f;
-    if (!usdGenTonic::TonicFacePosition(*scalp, faceId, u, v, &px, &py, &pz)) {
+    if (!usdGenTonic::TonicScalpFaceActive(*scalp, faceId)) {
         return false;
     }
-    if (faceId < 0 ||
-        size_t(faceId) >= scalp->faceVertexCounts.size()) {
+    float px = 0.0f, py = 0.0f, pz = 0.0f;
+    if (!usdGenTonic::TonicFacePosition(*scalp, faceId, u, v, &px, &py, &pz)) {
         return false;
     }
     hit->hit = true;
@@ -756,6 +756,80 @@ Tonic_BindScalp(TonicModelContext *ctx, float const *points, int pointFloats,
         return TONIC_ERROR;
     } catch (...) {
         _SetError("Tonic_BindScalp: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_BindScalpSubset(TonicModelContext *ctx, float const *points,
+                      int pointFloats, int const *faceVertexCounts,
+                      int faceCount, int const *faceVertexIndices,
+                      int indexCount, int const *activeFaces, int activeCount)
+{
+    try {
+        if (!ctx || !points || !faceVertexCounts || !faceVertexIndices ||
+            pointFloats <= 0 || faceCount <= 0 || indexCount <= 0) {
+            _SetError("Tonic_BindScalpSubset: null or empty scalp input");
+            return TONIC_ERROR;
+        }
+        // An empty subset is a GeomSubset that names no face: an authoring
+        // error, never "the whole mesh" (that is Tonic_BindScalp).
+        if (!activeFaces || activeCount <= 0) {
+            _SetError("Tonic_BindScalpSubset: the face subset names no faces");
+            return TONIC_ERROR;
+        }
+        std::vector<float> pts(points, points + pointFloats);
+        std::vector<int> counts(faceVertexCounts,
+                                faceVertexCounts + faceCount);
+        std::vector<int> indices(faceVertexIndices,
+                                 faceVertexIndices + indexCount);
+        std::vector<int> active(activeFaces, activeFaces + activeCount);
+        if (!_Impl(ctx)->model.BindScalp(pts, counts, indices, active)) {
+            _SetError(_Impl(ctx)->model.GetDiagnostic());
+            return TONIC_ERROR;
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_BindScalpSubset: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_ReadScalpFaceActive(TonicModelContext *ctx, int *out, int maxOut,
+                          int *outCount)
+{
+    try {
+        if (!ctx || !outCount) {
+            _SetError("Tonic_ReadScalpFaceActive: null argument");
+            return TONIC_ERROR;
+        }
+        std::shared_ptr<usdGenTonic::TonicScalpMesh const> const scalp =
+            _Impl(ctx)->model.GetScalp();
+        if (!scalp || !scalp->finalized) {
+            *outCount = 0;
+            return TONIC_OK;
+        }
+        int const faceCount = int(scalp->faceVertexCounts.size());
+        *outCount = faceCount;
+        if (out) {
+            if (maxOut < faceCount) {
+                _SetError("Tonic_ReadScalpFaceActive: output too small");
+                return TONIC_ERROR;
+            }
+            for (int f = 0; f < faceCount; ++f) {
+                out[f] = usdGenTonic::TonicScalpFaceActive(*scalp, f) ? 1 : 0;
+            }
+        }
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_ReadScalpFaceActive: unknown exception");
         return TONIC_ERROR;
     }
 }
@@ -2781,6 +2855,47 @@ Tonic_CommitterSetScalpPath(TonicCommitterContext *cc, const char *scalpPath)
         return TONIC_ERROR;
     } catch (...) {
         _SetError("Tonic_CommitterSetScalpPath: unknown exception");
+        return TONIC_ERROR;
+    }
+}
+
+int
+Tonic_CommitterSetScalpTarget(TonicCommitterContext *cc,
+                              const char *scalpPath, const char *meshPath)
+{
+    try {
+        if (!cc) {
+            _SetError("Tonic_CommitterSetScalpTarget: null committer");
+            return TONIC_ERROR;
+        }
+        if (!scalpPath || !*scalpPath) {
+            _CImpl(cc)->committer->SetScalpPath(SdfPath());
+            return TONIC_OK;
+        }
+        SdfPath const path(scalpPath);
+        SdfPath const mesh =
+            (meshPath && *meshPath) ? SdfPath(meshPath) : SdfPath();
+        if (!path.IsAbsolutePath() ||
+            (!mesh.IsEmpty() && !mesh.IsAbsolutePath())) {
+            _SetError("Tonic_CommitterSetScalpTarget: paths must be absolute");
+            return TONIC_ERROR;
+        }
+        // A face GeomSubset is a namespace child of its Mesh (plan/02
+        // §2.20 rule 1); anything else would put the rest binding on a
+        // prim that does not carry the subset's geometry.
+        if (!mesh.IsEmpty() && mesh != path && path.GetParentPath() != mesh) {
+            _SetError(("Tonic_CommitterSetScalpTarget: " + mesh.GetString() +
+                       " is not the parent of the subset " + path.GetString())
+                          .c_str());
+            return TONIC_ERROR;
+        }
+        _CImpl(cc)->committer->SetScalpPath(path, mesh);
+        return TONIC_OK;
+    } catch (std::exception const &e) {
+        _SetError(e.what());
+        return TONIC_ERROR;
+    } catch (...) {
+        _SetError("Tonic_CommitterSetScalpTarget: unknown exception");
         return TONIC_ERROR;
     }
 }

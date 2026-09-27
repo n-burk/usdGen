@@ -102,7 +102,27 @@ int USDGENTONIC_API Tonic_BindScalp(TonicModelContext *ctx,
                                     int const *faceVertexCounts, int faceCount,
                                     int const *faceVertexIndices,
                                     int indexCount);
+/* Bind a face GeomSubset scalp (plan/02 section 2.20): the arrays are the
+ * PARENT mesh's, `activeFaces` are parent-mesh face indices (repeats are
+ * fine, out-of-range ids and an empty list are errors). Face ids never
+ * renumber: raycasts, closest points and region rasters skip the faces the
+ * subset leaves out, while every per-face read stays parent-sized. */
+int USDGENTONIC_API Tonic_BindScalpSubset(TonicModelContext *ctx,
+                                          float const *points,
+                                          int pointFloats,
+                                          int const *faceVertexCounts,
+                                          int faceCount,
+                                          int const *faceVertexIndices,
+                                          int indexCount,
+                                          int const *activeFaces,
+                                          int activeCount);
 int USDGENTONIC_API Tonic_HasScalp(TonicModelContext const *ctx);
+/* Per parent face: 1 on the growth surface, 0 outside a bound face subset
+ * (all 1 for a whole-mesh bind). Same sizing rule as Tonic_ReadFaceRegions;
+ * *outCount is 0 with no scalp bound. */
+int USDGENTONIC_API Tonic_ReadScalpFaceActive(TonicModelContext *ctx,
+                                              int *out, int maxOut,
+                                              int *outCount);
 
 /* K1 queries. *outHit is 1 on a hit (face/uv/position/normal written) and
  * 0 on a miss (outputs untouched). */
@@ -454,6 +474,14 @@ int USDGENTONIC_API Tonic_CommitterCancelCooks(TonicCommitterContext *cc);
  * clears it. */
 int USDGENTONIC_API Tonic_CommitterSetScalpPath(TonicCommitterContext *cc,
                                                 const char *scalpPath);
+/* Tonic_CommitterSetScalpPath for a face GeomSubset scalp (plan/02 section
+ * 2.20): usdGen:tonic:scalp and Output's usdGen:surface name `scalpPath`,
+ * while UsdGenRestAPI and primvars:usdGen:tonicRegion land on `meshPath`,
+ * the subset's parent Mesh. NULL/empty `meshPath` means `scalpPath` is the
+ * Mesh itself; any other meshPath must be scalpPath's parent. */
+int USDGENTONIC_API Tonic_CommitterSetScalpTarget(TonicCommitterContext *cc,
+                                                  const char *scalpPath,
+                                                  const char *meshPath);
 
 /* Stage closed or reloaded under the tool (plan/17 section 3.4): Detach
  * idles the committer (the model survives); Swap reports Detached until

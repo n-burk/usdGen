@@ -1356,7 +1356,9 @@ is the whole reason expressions are capture-time.
 > `geoSampler("<name>", "<element expression>" [, iterate [, reduce [, query]]])`
 > iterates the `point`/`prim`/`geometry` elements of the meshes, curves and
 > points the relationship targets (a group prim contributes the gprims below
-> it), evaluates the one-line element expression with the element's own
+> it; a face `GeomSubset` of a mesh contributes that mesh restricted to the
+> subset's faces and the points they use, with `$id`/`$primIndex`/`$primCount`
+> kept as the parent mesh's — 02 §2.20), evaluates the one-line element expression with the element's own
 > variables plus `$Q`/`$Qdist`, and reduces with `nearest`, `nearest2`, `min`,
 > `max`, `sum` or `mean` about the query (default `$P`); `ptex("<name>")`
 > reads the `UsdGenPtexMap` it targets at the strand root, applying

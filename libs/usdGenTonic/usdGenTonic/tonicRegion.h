@@ -13,7 +13,9 @@
 // the face is connected to the region's seed face through inside faces (dual
 // flood fill). The flood keeps far-side faces of a closed scalp out of a
 // chart-local region. Faces claimed by two regions keep the lowest region
-// id and raise the intersection bit; unclaimed faces bake as -1.
+// id and raise the intersection bit; unclaimed faces bake as -1. Faces
+// outside a bound face subset are never claimed and never counted as
+// uncovered: they are not scalp (plan/02 §2.20).
 //
 // Values written are interpolation ids (linked regions share one id), so the
 // primvar and the bake agree exactly, which testUsdGenTonicRegionBake proves
@@ -82,7 +84,8 @@ USDGENTONIC_API bool TonicRasteriseRegionsCpu(TonicScalpMesh const &mesh,
 // the median, clamped to 2..6 (4..64 per side), artist-overridable.
 // Boundary-bearing faces use at least 64x64; only faces proven clear of all
 // region boundaries may collapse to 1x1 (resLog2 0). `resOverride >= 0`
-// forces one resolution for every face.
+// forces one resolution for every face of the growth surface; faces outside
+// a bound face subset always bake 1x1 (they are never claimed).
 USDGENTONIC_API std::vector<int> TonicFaceResLog2(
     TonicScalpMesh const &mesh, TonicRegionMaps const &maps,
     TonicRegionLoops const &loops, int resOverride = -1);

@@ -330,19 +330,73 @@ def Xform "World"
         uniform token[] xformOpOrder = ["xformOp:transform"]
     }
 
-    def DistantLight "Key"
+    def Xform "Studio" (
+        doc = "Three-point studio: broad key, weaker fill, rear strip back light, and a low-intensity contrast HDR environment. Enable scene lights and scene materials in usdview."
+    )
     {
-        float inputs:angle = 15
-        float inputs:intensity = 1
-        bool inputs:normalize = 1
-        matrix4d xformOp:transform = ( (0.894427190999916, -0.447213595499958, 0, 0), (0.3585685828003181, 0.7171371656006362, 0.5976143046671968, 0), (-0.26726124191242434, -0.5345224838248487, 0.8017837257372731, 0), (-0.9999999999999999, -1.9999999999999998, 2.9999999999999996, 0.9999999999999999) )
-        uniform token[] xformOpOrder = ["xformOp:transform"]
-    }
+        double3 xformOp:translate = (0, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
 
-    def DomeLight "Fill"
-    {
-        float inputs:intensity = 0.6
-        asset inputs:texture:file = @../felt/textures/studio.exr@
+        def RectLight "Key" (
+            prepend apiSchemas = ["ShadowAPI"]
+        )
+        {
+            color3f inputs:color = (1, 0.96, 0.9)
+            float inputs:diffuse = 1
+            float inputs:exposure = 0
+            float inputs:height = 1.5
+            float inputs:intensity = 12
+            bool inputs:normalize = 0
+            bool inputs:shadow:enable = 1
+            float inputs:specular = 1
+            float inputs:width = 1.5
+            matrix4d xformOp:transform = ( (0.8, -0.6000000000000001, 2.7755575615628914e-17, 0), (0.35481819817651045, 0.47309093090201393, 0.8064049958557056, 0), (-0.4838429975134233, -0.6451239966845644, 0.5913636636275174, 0), (-1.8, -2.4000000000000004, 2.2, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def RectLight "Fill" (
+            prepend apiSchemas = ["ShadowAPI"]
+        )
+        {
+            color3f inputs:color = (0.9, 0.95, 1)
+            float inputs:diffuse = 1
+            float inputs:exposure = 0
+            float inputs:height = 2
+            float inputs:intensity = 1.7
+            bool inputs:normalize = 0
+            bool inputs:shadow:enable = 1
+            float inputs:specular = 1
+            float inputs:width = 2
+            matrix4d xformOp:transform = ( (0.4788521306805733, 0.8778955729143845, 0, 0), (-0.32536974676129665, 0.1774744073243436, 0.9287827316640651, -0), (0.8153742483272114, -0.4447495899966607, 0.3706246583305505, 0), (2.2000000000000006, -1.2000000000000002, 1, 1.0000000000000002) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def RectLight "Back" (
+            prepend apiSchemas = ["ShadowAPI"]
+        )
+        {
+            color3f inputs:color = (1, 1, 1)
+            float inputs:diffuse = 1
+            float inputs:exposure = 0
+            float inputs:height = 1.8
+            float inputs:intensity = 16
+            bool inputs:normalize = 0
+            bool inputs:shadow:enable = 1
+            float inputs:specular = 1
+            float inputs:width = 1
+            matrix4d xformOp:transform = ( (-0.8532818336519591, 0.5214500094539749, 2.7755575615628914e-17, 0), (-0.3587685132329218, -0.5870757489265994, 0.7256908563120464, 0), (0.3784115038845798, 0.6192188245384033, 0.6880209161537815, -0), (1.1000000000000003, 1.8, 2.0000000000000004, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+
+        def DomeLight "Environment"
+        {
+            float inputs:exposure = 0
+            float inputs:intensity = 0.12
+            asset inputs:texture:file = @../felt/textures/studio_contrast.exr@
+            token inputs:texture:format = "latlong"
+            float xformOp:rotateX:orientToStageUpAxis = 90
+            uniform token[] xformOpOrder = ["xformOp:rotateX:orientToStageUpAxis"]
+        }
     }
 }
 

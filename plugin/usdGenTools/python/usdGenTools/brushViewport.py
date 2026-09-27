@@ -1011,8 +1011,15 @@ class BrushViewportController(object):
         if snapshot is None or binding is None:
             return
         self._hoverSnapshot = snapshot
-        self._hoverKey = str(binding.surfacePath)
+        self._hoverKey = self._hoverKeyOf(binding)
         self._hoverAt = None
+
+    @staticmethod
+    def _hoverKeyOf(binding):
+        # A subset binding's faces mask the hover pick (the ring hides off
+        # the subset), so they key the snapshot too.
+        return (str(binding.surfacePath),
+                getattr(binding, "faces", None))
 
     def _hoverSnapshotFor(self, stage, binding):
         """The cached hover snapshot, re-read when the binding changes.
@@ -1020,10 +1027,11 @@ class BrushViewportController(object):
         Paint never moves points, so a snapshot outlives every stroke;
         only an outside sculpt or a rebind stales it -- the same
         staleness class as the press-frozen drag snapshot."""
-        key = str(binding.surfacePath)
+        key = self._hoverKeyOf(binding)
         if self._hoverSnapshot is None or self._hoverKey != key:
             surface = stage.GetPrimAtPath(binding.surfacePath)
-            snapshot, _error = brushPick.snapshotMesh(surface)
+            snapshot, _error = brushPick.snapshotMesh(
+                surface, getattr(binding, "faces", None))
             if snapshot is None:
                 self._hoverSnapshot = None
                 self._hoverKey = None

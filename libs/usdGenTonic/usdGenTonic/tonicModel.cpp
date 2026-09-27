@@ -1481,13 +1481,15 @@ TonicGenerateGuidesOnRegionForTube(TonicModel::TubeSnapshot const &snapshot,
 bool
 TonicModel::BindScalp(std::vector<float> const &points,
                       std::vector<int> const &faceVertexCounts,
-                      std::vector<int> const &faceVertexIndices)
+                      std::vector<int> const &faceVertexIndices,
+                      std::vector<int> const &activeFaces)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     std::shared_ptr<TonicScalpMesh> scalp(new TonicScalpMesh());
     scalp->points = points;
     scalp->faceVertexCounts = faceVertexCounts;
     scalp->faceVertexIndices = faceVertexIndices;
+    scalp->activeFaces = activeFaces;
     std::string err;
     if (!TonicScalpFinalize(scalp.get(), &err)) {
         _diagnostic = err;
@@ -2255,8 +2257,9 @@ int
 TonicModel::RegionAtSurface(int faceId, float u, float v) const
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    if (!_scalp || !_scalp->finalized) {
-        return -1;
+    if (!_scalp || !_scalp->finalized ||
+        !TonicScalpFaceActive(*_scalp, faceId)) {
+        return -1;  // a face outside a bound subset is off the scalp
     }
     float p[3] = {0.0f, 0.0f, 0.0f};
     if (!TonicFacePosition(*_scalp, faceId, u, v, &p[0], &p[1], &p[2])) {
@@ -2290,7 +2293,10 @@ TonicModel::RegionAtSurface(int faceId, float u, float v) const
             std::vector<char> inside(faceCount, 0);
             for (size_t f = 0; f < faceCount; ++f) {
                 float const *c = &_scalp->faceCentroids[f * 3];
-                inside[f] = TonicPointInRegionCpu(loops, int(r), c) ? 1 : 0;
+                inside[f] = TonicScalpFaceActive(*_scalp, int(f)) &&
+                                    TonicPointInRegionCpu(loops, int(r), c)
+                                ? 1
+                                : 0;
             }
             inside[size_t(faceId)] = 1;
             std::queue<int> work;

@@ -24,6 +24,8 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
 #include "pxr/usd/sdf/layer.h"
+#include "pxr/usd/sdf/listOp.h"
+#include "pxr/usd/sdf/primSpec.h"
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/attribute.h"
@@ -31,6 +33,8 @@
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/basisCurves.h"
 #include "pxr/usd/usdGeom/mesh.h"
+#include "pxr/usd/usdGeom/subset.h"
+#include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
@@ -196,6 +200,7 @@ UsdStageRefPtr CommitStage(TonicModel const &model, TonicCommitPaths const &path
     // give the standalone helper the same authored scalp identity so hydrate
     // can reconstruct the graph after the layer is exported.
     if (snapshot.scalpPath.IsEmpty()) snapshot.scalpPath = paths.scalpPath;
+    if (snapshot.scalpMeshPath.IsEmpty()) snapshot.scalpMeshPath = paths.scalpMeshPath;
     SdfLayerRefPtr layer;
     if (!TonicBuildCommitLayer(snapshot, paths, &layer, err) || !layer) {
         return nullptr;
@@ -212,9 +217,11 @@ UsdStageRefPtr CommitStage(TonicModel const &model, TonicCommitPaths const &path
     }
     // TonicBuildCommitLayer deliberately authors only an over for its scalp
     // link.  This standalone commit-layer test supplies the backing mesh so
-    // the real stage builder can resolve Output's CurveSource surface.
+    // the real stage builder can resolve Output's CurveSource surface.  A
+    // face GeomSubset link (plan/02 §2.20) gets its parent mesh plus the
+    // subset naming the model's faces.
     if (stage && snapshot.hasScalp && !paths.scalpPath.IsEmpty()) {
-        UsdGeomMesh mesh = UsdGeomMesh::Define(stage, paths.scalpPath);
+        UsdGeomMesh mesh = UsdGeomMesh::Define(stage, paths.ScalpMeshPath());
         VtVec3fArray points(snapshot.scalp.points.size() / 3);
         for (size_t i = 0; i < points.size(); ++i) {
             points[i] = GfVec3f(snapshot.scalp.points[i * 3],
@@ -228,6 +235,12 @@ UsdStageRefPtr CommitStage(TonicModel const &model, TonicCommitPaths const &path
         mesh.GetFaceVertexIndicesAttr().Set(
             VtIntArray(snapshot.scalp.faceVertexIndices.begin(),
                        snapshot.scalp.faceVertexIndices.end()));
+        if (paths.ScalpMeshPath() != paths.scalpPath) {
+            UsdGeomSubset subset = UsdGeomSubset::Define(stage, paths.scalpPath);
+            subset.GetElementTypeAttr().Set(UsdGeomTokens->face);
+            subset.GetIndicesAttr().Set(VtIntArray(
+                snapshot.scalp.activeFaces.begin(), snapshot.scalp.activeFaces.end()));
+        }
     }
     return stage;
 }
@@ -693,6 +706,109 @@ bool CageTrajectoryFollowsPhysicalRoot(UsdPrim const &curves,
 
 } // namespace
 
+// plan/02 §2.20: Output on a face GeomSubset scalp. The subset drops faces 5
+// and 6 (x in [1, 2], z in [1, 3]), which lie inside region A. Output's
+// usdGen:surface names the subset, the rest binding sits on the parent Mesh,
+// and every cooked root lands on a subset face named by its parent-mesh id;
+// the same groom bound whole does grow roots there, so the check has teeth.
+void CheckSubsetOutput(Grid const &grid, int n)
+{
+    std::vector<int> const subsetFaces = {0, 1, 2, 3, 4, 7, 8, 9,
+                                          10, 11, 12, 13, 14, 15};
+    auto build = [&](TonicModel *model, std::vector<int> const &active) {
+        if (!model->BindScalp(grid.points, grid.counts, grid.indices, active) ||
+            !model->GetScalp()) {
+            return false;
+        }
+        AddTwoAdjacentRegions(model, *model->GetScalp(), n);
+        TonicModel::FillParams fill;
+        fill.density = 12.0f;
+        fill.cvCount = 6;
+        fill.seed = 19;
+        TonicModel::OutputSettings output;
+        output.enabled = true;
+        output.densityMultiplier = 4.0f;
+        output.width = 0.02f;
+        return model->Rasterise() && model->BuildTubeFromRegion(0, 5, 8, 2.0f) &&
+               model->BuildTubeFromRegion(1, 5, 8, 2.0f) &&
+               model->L1TubeIds().size() == 2 &&
+               model->SetTubeFillParams(model->L1TubeIds()[0], fill) &&
+               model->SetTubeFillParams(model->L1TubeIds()[1], fill) &&
+               model->SetOutputSettings(output);
+    };
+    auto rootFaces = [](Cooked const &cooked) {
+        std::vector<int> faces(cooked.buffer.rootPrim.begin(),
+                               cooked.buffer.rootPrim.end());
+        std::sort(faces.begin(), faces.end());
+        faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+        return faces;
+    };
+    auto touchesDropped = [](std::vector<int> const &faces) {
+        return std::find(faces.begin(), faces.end(), 5) != faces.end() ||
+               std::find(faces.begin(), faces.end(), 6) != faces.end();
+    };
+
+    TonicModel whole;
+    TonicModel subset;
+    Check(build(&whole, {}) && build(&subset, subsetFaces),
+          "Output subset: the same two-region groom binds whole and through a "
+          "face subset");
+    TonicCommitPaths wholePaths;
+    wholePaths.groomPath = SdfPath("/World/TonicWholeOutput");
+    wholePaths.scalpPath = SdfPath("/Scalp");
+    TonicCommitPaths subsetPaths;
+    subsetPaths.groomPath = SdfPath("/World/TonicSubsetOutput");
+    subsetPaths.scalpPath = SdfPath("/Scalp/patch");
+    subsetPaths.scalpMeshPath = SdfPath("/Scalp");
+    std::string error;
+    UsdStageRefPtr wholeStage = CommitStage(whole, wholePaths, &error);
+    Cooked const wholeCook = wholeStage
+        ? CookOutput(wholeStage, OutputDescriptionPath(wholePaths)) : Cooked{};
+    std::vector<int> const wholeFaces = rootFaces(wholeCook);
+    Check(wholeCook.ok && wholeCook.buffer.totalCurves > 0 &&
+          touchesDropped(wholeFaces),
+          "Output subset: bound whole, the groom roots hairs on faces 5/6: " +
+          error + wholeCook.diagnostic);
+
+    error.clear();
+    UsdStageRefPtr stage = CommitStage(subset, subsetPaths, &error);
+    Check(bool(stage), "Output subset: builds the subset commit layer: " + error);
+    if (!stage) return;
+    SdfPathVector surface;
+    stage->GetPrimAtPath(OutputDescriptionPath(subsetPaths))
+        .GetRelationship(TfToken("usdGen:surface")).GetTargets(&surface);
+    Check(surface == SdfPathVector{subsetPaths.scalpPath},
+          "Output subset: Output's usdGen:surface names the subset");
+    TfTokenVector applied;
+    if (SdfPrimSpecHandle const over =
+            stage->GetRootLayer()->GetPrimAtPath(subsetPaths.ScalpMeshPath())) {
+        VtValue const value = over->GetInfo(TfToken("apiSchemas"));
+        if (value.IsHolding<SdfTokenListOp>()) {
+            value.UncheckedGet<SdfTokenListOp>().ApplyOperations(&applied);
+        }
+    }
+    VtIntArray regions;
+    Check(std::find(applied.begin(), applied.end(), TfToken("UsdGenRestAPI")) !=
+              applied.end() &&
+          stage->GetPrimAtPath(subsetPaths.ScalpMeshPath())
+              .GetAttribute(TfToken("primvars:usdGen:tonicRegion")).Get(&regions) &&
+          regions.size() == grid.counts.size() && regions[5] == -1 &&
+          regions[6] == -1,
+          "Output subset: RestAPI and the parent-sized live primvar land on the "
+          "parent mesh");
+    Cooked const cooked = CookOutput(stage, OutputDescriptionPath(subsetPaths));
+    std::vector<int> const faces = rootFaces(cooked);
+    bool inSubset = !faces.empty();
+    for (int face : faces) {
+        inSubset = inSubset && std::binary_search(subsetFaces.begin(),
+                                                  subsetFaces.end(), face);
+    }
+    Check(cooked.ok && cooked.buffer.totalCurves > 0 && inSubset &&
+          !touchesDropped(faces),
+          "Output subset: every cooked root lands on a subset face, by its "
+          "parent-mesh id: " + cooked.diagnostic);
+}
+
 int main()
 {
     usdGenRegisterM1Operators();
@@ -1040,6 +1156,8 @@ int main()
     Check(emptyCook.ok && emptyCook.buffer.totalCurves == 0 &&
           emptyCook.buffer.totalCvs == 0,
           "Output: enabled zero-density Fill cooks an empty valid source");
+
+    CheckSubsetOutput(grid, n);
 
     std::printf("testUsdGenTonicOutput: %d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

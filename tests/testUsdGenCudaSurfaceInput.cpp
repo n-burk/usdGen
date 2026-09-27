@@ -92,9 +92,21 @@ int main() {
         prepared.faceOffsets.back() != sentinel.faceOffsets.back()) {
         std::fprintf(stderr, "malformed surface was accepted or damaged prior output\n"); return 1;
     }
-    malformed = source;
-    malformed.subsetFaces = {0};
-    if (PrepareCudaSurface(malformed, 8, &prepared, nullptr) != CudaSurfacePreparationStatus::UnsupportedFeature) return 1;
+    {
+        // A GeomSubset surface (R15) binds the RBF over its whole parent,
+        // exactly as the CPU lane does: subsetFaces restricts Scatter only.
+        auto subset = source;
+        subset.subsetFaces = {0};
+        subset.isSubset = true;
+        CudaSurfacePrepared subsetPrepared, wholePrepared;
+        if (PrepareCudaSurface(subset, 8, &subsetPrepared, nullptr) != CudaSurfacePreparationStatus::Ok ||
+            PrepareCudaSurface(source, 8, &wholePrepared, nullptr) != CudaSurfacePreparationStatus::Ok ||
+            subsetPrepared.faceOffsets != wholePrepared.faceOffsets ||
+            subsetPrepared.faceVertexIndices != wholePrepared.faceVertexIndices ||
+            subsetPrepared.restPoints.size() != wholePrepared.restPoints.size()) {
+            std::fprintf(stderr, "subset surface did not bind like its parent mesh\n"); return 1;
+        }
+    }
     malformed = source;
     malformed.restFromCurrentPoints = true;
     if (PrepareCudaSurface(malformed, 8, &prepared, nullptr) != CudaSurfacePreparationStatus::UnsupportedFeature) return 1;

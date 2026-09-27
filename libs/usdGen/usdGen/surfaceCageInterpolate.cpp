@@ -612,7 +612,7 @@ bool UsdGenInterpolateSurfaceCage(UsdGenSurfaceCageInput const &input,
         for (size_t face = 0; face != faces.size(); ++face)
             faceOffsets[face + 1] = faceOffsets[face] + int(faces[face].vertices.size());
         std::vector<int> selectedFaces;
-        if (input.surface.subsetFaces.empty()) {
+        if (!UsdGenSurfaceRestricted(input.surface)) {
             selectedFaces.resize(faces.size());
             std::iota(selectedFaces.begin(), selectedFaces.end(), 0);
         } else {

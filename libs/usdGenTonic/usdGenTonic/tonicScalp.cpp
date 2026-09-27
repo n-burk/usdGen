@@ -309,6 +309,20 @@ bool TonicScalpFinalize(TonicScalpMesh *mesh, std::string *err)
             return fail("TonicScalpFinalize: a face index is out of range");
         }
     }
+    // A face subset names parent faces (plan/02 §2.20 rule 2). Repeats are
+    // harmless (several subsets union, rule 4); a face the mesh does not
+    // have is an authoring error, never a silent clamp.
+    std::vector<int> &active = mesh->activeFaces;
+    std::sort(active.begin(), active.end());
+    active.erase(std::unique(active.begin(), active.end()), active.end());
+    if (!active.empty() &&
+        (active.front() < 0 || size_t(active.back()) >= faceCount)) {
+        return fail("TonicScalpFinalize: a face subset index is out of range");
+    }
+    mesh->faceActive.assign(faceCount, active.empty() ? 1 : 0);
+    for (int f : active) {
+        mesh->faceActive[size_t(f)] = 1;
+    }
     mesh->faceCentroids.assign(faceCount * 3, 0.0f);
     mesh->faceNormals.assign(faceCount * 3, 0.0f);
     mesh->faceAreas.assign(faceCount, 0.0f);
@@ -417,7 +431,15 @@ bool TonicScalpBvhBuild(TonicScalpMesh const &mesh, TonicScalpBvh *bvh,
     if (!mesh.finalized) {
         return fail("TonicScalpBvhBuild: mesh is not finalized");
     }
-    int const n = int(mesh.faceVertexCounts.size());
+    // Leaves are the growth surface only: a face subset's inactive faces
+    // never enter the tree, so no traversal (host or device) can hit them.
+    if (mesh.activeFaces.empty()) {
+        bvh->order.resize(mesh.faceVertexCounts.size());
+        std::iota(bvh->order.begin(), bvh->order.end(), 0);
+    } else {
+        bvh->order = mesh.activeFaces;
+    }
+    int const n = int(bvh->order.size());
     if (n == 0) {
         bvh->valid = true;
         return true;
@@ -427,7 +449,7 @@ bool TonicScalpBvhBuild(TonicScalpMesh const &mesh, TonicScalpBvh *bvh,
                    std::numeric_limits<float>::infinity(),
                    std::numeric_limits<float>::infinity()};
     float mx[3] = {-mn[0], -mn[1], -mn[2]};
-    for (int f = 0; f < n; ++f) {
+    for (int f : bvh->order) {
         for (int a = 0; a < 3; ++a) {
             mn[a] = std::min(mn[a], mesh.faceCentroids[size_t(f) * 3 + a]);
             mx[a] = std::max(mx[a], mesh.faceCentroids[size_t(f) * 3 + a]);
@@ -436,16 +458,15 @@ bool TonicScalpBvhBuild(TonicScalpMesh const &mesh, TonicScalpBvh *bvh,
     float span[3] = {std::max(mx[0] - mn[0], 1e-12f),
                      std::max(mx[1] - mn[1], 1e-12f),
                      std::max(mx[2] - mn[2], 1e-12f)};
+    // Indexed by parent face id; only the active entries are read.
     std::vector<uint32_t> codes;
-    codes.resize(size_t(n));
-    for (int f = 0; f < n; ++f) {
+    codes.resize(mesh.faceVertexCounts.size());
+    for (int f : bvh->order) {
         codes[size_t(f)] = _Morton3(
             (mesh.faceCentroids[size_t(f) * 3 + 0] - mn[0]) / span[0],
             (mesh.faceCentroids[size_t(f) * 3 + 1] - mn[1]) / span[1],
             (mesh.faceCentroids[size_t(f) * 3 + 2] - mn[2]) / span[2]);
     }
-    bvh->order.resize(size_t(n));
-    std::iota(bvh->order.begin(), bvh->order.end(), 0);
     std::stable_sort(bvh->order.begin(), bvh->order.end(),
                      [&](int a, int b) { return codes[size_t(a)] < codes[size_t(b)]; });
     std::vector<uint32_t> sorted;
@@ -528,7 +549,8 @@ bool TonicScalpBvhRefit(TonicScalpMesh const &mesh, TonicScalpBvh *bvh)
     if (!bvh || !bvh->valid || !mesh.finalized) {
         return false;
     }
-    int const n = int(mesh.faceVertexCounts.size());
+    // One leaf per active face, in Morton order.
+    int const n = int(bvh->order.size());
     if (n == 0 || bvh->nodes.empty()) {
         return true;
     }
@@ -687,7 +709,8 @@ TonicHit TonicRaycastCpu(TonicScalpMesh const &mesh, TonicScalpBvh const &bvh,
     return hit;
 }
 
-TonicHit TonicClosestPointCpu(TonicScalpMesh const &mesh, float const p[3])
+TonicHit TonicClosestPointCpu(TonicScalpMesh const &mesh, float const p[3],
+                              bool activeOnly)
 {
     TonicHit miss;
     if (!mesh.finalized || !p) {
@@ -701,6 +724,9 @@ TonicHit TonicClosestPointCpu(TonicScalpMesh const &mesh, float const p[3])
     float best[3] = {0.0f, 0.0f, 0.0f};
     float cand[3];
     for (int f = 0; f < faceCount; ++f) {
+        if (activeOnly && !TonicScalpFaceActive(mesh, f)) {
+            continue;
+        }
         int const nv = mesh.faceVertexCounts[size_t(f)];
         int const off = mesh.faceOffsets[size_t(f)];
         // AABB pre-filter (squared distance to the box).

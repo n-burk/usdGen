@@ -139,6 +139,7 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
         array("faceCounts", surface.faceVertexCounts);
         array("faceIndices", surface.faceVertexIndices);
         array("subset", surface.subsetFaces);
+        feed("isSubset", surface.isSubset ? 1u : 0u);
         array("uv", surface.uv);
         feed("subdivision", UsdGenSubdivisionDigest(surface));
         // The paint primvar edits no generation, so the multiplier content
@@ -192,9 +193,10 @@ bool UsdGenScatterOp::Capture(
                              surf.path.GetText() + "' has no topology; 0 roots");
     }
 
-    // Face list: whole mesh or the GeomSubset restriction (R15).
+    // Face list: whole mesh or the GeomSubset restriction (R15). An empty
+    // subset selects no face.
     std::vector<int> faces;
-    if (!surf.subsetFaces.empty()) faces.assign(surf.subsetFaces.cbegin(), surf.subsetFaces.cend());
+    if (UsdGenSurfaceRestricted(surf)) faces.assign(surf.subsetFaces.cbegin(), surf.subsetFaces.cend());
     else {
         faces.resize(surf.faceVertexCounts.size());
         std::iota(faces.begin(), faces.end(), 0);

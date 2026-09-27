@@ -6,6 +6,9 @@
 # in C++ behind opaque handles; brushMap / brushPick / brushPreview /
 # brushAuthor call through here when the library loads and fall back to their
 # pure-Python paths when it does not (the Qt-free T1 suite runs either way).
+# A snapshot's faceMask (a GeomSubset binding's parent-mesh faces) goes into
+# the mesh handle (UsdGenBrush_MeshCreateMasked), so pick, spill and smooth
+# honour it natively exactly as the Python twins do.
 #
 # The loader mirrors exprApi.py: USDGEN_IMAGING_LIBRARY, then the build tree
 # the package was staged from (<build>, <build>/lib, <build>/bin), then the
@@ -47,8 +50,12 @@ def _bind(lib):
     sig("UsdGenBrush_ApiVersion", ctypes.c_int, [])
     sig("UsdGenBrush_MeshCreate", vp,
         [_c_double_p, ctypes.c_int, _c_int_p, ctypes.c_int])
+    sig("UsdGenBrush_MeshCreateMasked", vp,
+        [_c_double_p, ctypes.c_int, _c_int_p, ctypes.c_int, _c_int_p,
+         ctypes.c_int])
     sig("UsdGenBrush_MeshDestroy", None, [vp])
     sig("UsdGenBrush_MeshFaceCount", ctypes.c_int, [vp])
+    sig("UsdGenBrush_MeshFaceInMask", ctypes.c_int, [vp, ctypes.c_int])
     sig("UsdGenBrush_MeshPick", ctypes.c_int,
         [vp, _c_double_p, _c_double_p, _c_int_p, _c_float_p, _c_float_p,
          _c_double_p])
@@ -170,8 +177,11 @@ class NativeMesh(object):
         self.faceCount = faceCount
 
     @staticmethod
-    def create(points, faces):
-        """NativeMesh or None. points: [(x,y,z)] or (N,3); faces: [(4 ids)]."""
+    def create(points, faces, faceMask=None):
+        """NativeMesh or None. points: [(x,y,z)] or (N,3); faces: [(4 ids)].
+
+        faceMask: the paintable parent-mesh face ids (a GeomSubset's), or
+        None for every face (UsdGenBrush_MeshCreateMasked)."""
         lib = load()
         if lib is None:
             return None
@@ -181,12 +191,24 @@ class NativeMesh(object):
                                        .reshape((-1, 3)))
             idx = np.ascontiguousarray(np.asarray(faces, dtype=np.int32)
                                        .reshape((-1, 4)))
+            mask = None
+            if faceMask is not None:
+                # One spare slot: an empty mask must still pass a non-NULL
+                # pointer (NULL means "no mask").
+                ids = sorted(int(f) for f in faceMask)
+                mask = np.ascontiguousarray(
+                    np.asarray(ids + [0], dtype=np.int32))
         except (TypeError, ValueError):
             return None
         if len(idx) == 0 or len(pts) == 0:
             return None
-        handle = lib.UsdGenBrush_MeshCreate(doublePtr(pts), len(pts),
-                                            intPtr(idx), len(idx))
+        if mask is None:
+            handle = lib.UsdGenBrush_MeshCreate(doublePtr(pts), len(pts),
+                                                intPtr(idx), len(idx))
+        else:
+            handle = lib.UsdGenBrush_MeshCreateMasked(
+                doublePtr(pts), len(pts), intPtr(idx), len(idx),
+                intPtr(mask), len(mask) - 1)
         if not handle:
             return None
         return NativeMesh(lib, handle, len(idx))
@@ -247,6 +269,11 @@ class NativeMesh(object):
         return float(self._lib.UsdGenBrush_MeshFaceEdgeLen(self.handle,
                                                            int(face)))
 
+    def faceInMask(self, face):
+        """True when the mask lets a stroke paint `face`."""
+        return self._lib.UsdGenBrush_MeshFaceInMask(self.handle,
+                                                    int(face)) == 1
+
     def suggestResolution(self, budgetTexels):
         buf = ctypes.create_string_buffer(256)
         res = self._lib.UsdGenBrush_MeshSuggestResolution(
@@ -269,7 +296,8 @@ def meshFor(snapshot):
     if load() is None:
         return None
     try:
-        mesh = NativeMesh.create(snapshot.points, snapshot.faces)
+        mesh = NativeMesh.create(snapshot.points, snapshot.faces,
+                                 getattr(snapshot, "faceMask", None))
     except Exception:
         mesh = None
     try:
