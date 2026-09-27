@@ -19,10 +19,8 @@
 #include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <thread>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -283,6 +281,16 @@ int main()
           "showing the groom at frame 2 cooks the frame-2 width");
 
     // --- Waking in async mode never shows stale strands ----------------------
+    // With asyncAllow, ApplyPendingUpdates captures and cooks on the owner
+    // but does not touch the frontend. GetPrim keeps returning the last
+    // synced snapshot — here the pre-hide frame, visible at width 0.12 —
+    // until asyncPoll installs a newer one. That frame is not the tile
+    // reappearing (testUsdGenScenePublication asserts the same "previous
+    // value until polled" rule). The snapshot delivered once the wake cook
+    // has finished must be visible and must carry the edit the groom slept
+    // through; Publish runs before Reveal, so a poll cannot observe the
+    // pre-hide strands as a visible woken tile.
+    uint64_t const cooksBeforeWake = scene.Cooks();
     scene.groom->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
     Check(SetVisibility(scene, "/Groom/hair", "invisible"), "async: hidden");
     scene.Apply();
@@ -290,18 +298,15 @@ int main()
     scene.Apply();
     Check(SetVisibility(scene, "/Groom/hair", "inherited"), "async: shown");
     scene.Apply();
-    bool revealed = false, staleWhileVisible = false;
-    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (std::chrono::steady_clock::now() < deadline) {
-        scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
-        if (Visible(scene, tile)) {
-            revealed = true;
-            staleWhileVisible = !Near(FirstWidth(scene, tile), 0.2f);
-            break;
-        }
-        std::this_thread::yield();
-    }
-    Check(revealed && !staleWhileVisible,
+    Check(Visible(scene, tile) && Near(FirstWidth(scene, tile), 0.12f),
+          "async: the pre-hide frame stays visible until polled");
+    UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(*scene.groom);
+    Check(scene.Cooks() > cooksBeforeWake,
+          "async: showing the groom cooks the edit it slept through");
+    Check(Visible(scene, tile) && Near(FirstWidth(scene, tile), 0.12f),
+          "async: draining the owner does not reveal the woken tile");
+    scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+    Check(Visible(scene, tile) && Near(FirstWidth(scene, tile), 0.2f),
           "async: the woken tile reappears only with the edit it slept through");
     scene.groom->RemoveObserver(TfCreateWeakPtr(&visibilityNotices));
 
