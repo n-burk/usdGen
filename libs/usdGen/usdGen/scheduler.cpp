@@ -389,6 +389,9 @@ struct NodeSweepPayload
                                    // post-sweep bookkeeping lives on the
                                    // commit thread; per-chunk flags must not
                                    // false-share).
+    // Invoked after this chunk's writes have completed. Installed only on the
+    // terminal node of an opt-in progressive CPU cook.
+    std::function<void(size_t)> onChunkCompleted;
 };
 
 // A prepared node job owns the small vectors whose addresses are published in
@@ -606,6 +609,7 @@ void SweepChunk(size_t index, void *payload)
     pl.op->Evaluate(pl.ctx, *node.capture, &view);
 
     pl.didEval[index] = 1;
+    if (pl.onChunkCompleted) pl.onChunkCompleted(index);
 }
 
 // ---------------------------------------------------------------------------
@@ -733,7 +737,8 @@ int CalibrateThreads()
 UsdGenRunResult UsdGenScheduler::Run(
     UsdGenGraph &graph,
     UsdGenEvalContext const &evalCtx,
-    uint64_t generationRequested)
+    uint64_t generationRequested,
+    TileCompleted tileCompleted)
 {
     TF_UNUSED(generationRequested);  // supersession is checked by the session
     TRACE_FUNCTION();
@@ -745,7 +750,7 @@ UsdGenRunResult UsdGenScheduler::Run(
     auto dispatcher = MakeWorkDispatcher();
     UsdGenCurveBuffer const emptyBuf;
 
-    int const nTiles = graph.NumTiles();
+    int nTiles = graph.NumTiles();
     std::vector<char> tileTouched(nTiles, 0);
 
     // Each frontier is dependency-ready and therefore may share one flattened
@@ -1050,6 +1055,12 @@ UsdGenRunResult UsdGenScheduler::Run(
                     return result;
                 }
             }
+            // Capture can repartition the graph. Keep completion counters and
+            // the eventual interleave sweep aligned with the new tile plan.
+            if (graph.NumTiles() != nTiles) {
+                nTiles = graph.NumTiles();
+                tileTouched.resize(nTiles, 1);
+            }
 
             // Prepare every node only after every capture/repartition above
             // has settled the graph-wide chunk layout.
@@ -1069,6 +1080,33 @@ UsdGenRunResult UsdGenScheduler::Run(
                     if (job->evalAll ||
                         (job->sweep.node->chunkDirty[c] & UsdGenDirtyParameter))
                         work.push_back({&job->sweep, c});
+                }
+            }
+            // The terminal output has no downstream writer. Its chunk spans
+            // are disjoint, so completion of the last selected chunk in a
+            // tile makes that tile safe to copy while other tiles still run.
+            // The counters live through ParallelFor's synchronous join.
+            std::unique_ptr<std::atomic<uint32_t>[]> terminalRemaining;
+            if (tileCompleted && nTiles > 0) {
+                for (auto const &job : jobs) {
+                    if (!job->shouldSweep ||
+                        job->sweep.node->id != graph.TerminalNodeId()) continue;
+                    terminalRemaining = std::make_unique<std::atomic<uint32_t>[]>(nTiles);
+                    for (int t = 0; t < nTiles; ++t)
+                        terminalRemaining[t].store(0, std::memory_order_relaxed);
+                    for (ChunkExecution const &item : work) {
+                        if (item.payload != &job->sweep) continue;
+                        UsdGenTileId const tile = job->sweep.node->chunks[item.chunk].tile;
+                        if (tile < static_cast<UsdGenTileId>(nTiles))
+                            terminalRemaining[tile].fetch_add(1, std::memory_order_relaxed);
+                    }
+                    job->sweep.onChunkCompleted = [&, node=job->sweep.node](size_t chunk) {
+                        UsdGenTileId const tile = node->chunks[chunk].tile;
+                        if (tile >= static_cast<UsdGenTileId>(nTiles)) return;
+                        if (terminalRemaining[tile].fetch_sub(1, std::memory_order_acq_rel) == 1)
+                            tileCompleted(graph.Tiles()[tile], node->buffer);
+                    };
+                    break;
                 }
             }
             if (!work.empty()) {

@@ -55,7 +55,9 @@ public:
                     request.frame, request.reason, std::move(request.previous),
                     std::move(request.publishedStats), request.invalidateValues,
                     request.previousPublishedWorkerEpoch, request.cancellation.epoch,
-                    request.callerDevice, std::move(request.coalescedHooks));
+                    request.callerDevice, std::move(request.coalescedHooks),
+                    std::move(request.tileProgress),
+                    [cancel=request.cancellation] { return cancel.Superseded(); });
                 if (request.completion) request.completion(std::move(generation), {});
                 return;
             }
@@ -97,7 +99,9 @@ public:
                 request.frame, request.reason, std::move(request.previous),
                 std::move(request.publishedStats), request.invalidateValues,
                 request.previousPublishedWorkerEpoch, request.cancellation.epoch,
-                request.callerDevice, std::move(request.coalescedHooks));
+                request.callerDevice, std::move(request.coalescedHooks),
+                std::move(request.tileProgress),
+                [cancel=request.cancellation] { return cancel.Superseded(); });
             if (_cooker.GetCoalescedRole() ==
                     UsdGenSessionCooker::CoalescedRole::Follower ||
                 _cooker.GetCoalescedRole() ==

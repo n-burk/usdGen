@@ -105,6 +105,14 @@ launcher behaves exactly as before. Covered by
 `tests/checks/check_usdview_env.py` (`testUsdGenUsdviewEnv`); `-PrintEnv`
 dumps the assembled environment as JSON without needing GL.
 
+The launcher enables OpenUSD `--allow-async` only for its Storm (`GL`) path.
+Select a MoonRay renderer explicitly (for this Windows build, **Moonray
+(debug)**) and it keeps the existing complete-operation publication behavior:
+
+```powershell
+.\bin\launch_usdview.ps1 --renderer HdMoonrayRendererDebugPlugin examples\felt\felt_sphere.usda
+```
+
 Windows verification, 2026-09-24: the in-process **Moonray (debug)** delegate
 (`HdMoonrayRendererDebugPlugin`) renders the live puppet groom to convergence
 through usdview. The ARRAS-backed `HdMoonrayRendererPlugin` instead reports

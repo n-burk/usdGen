@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <limits>
@@ -78,7 +79,12 @@ struct UsdGenImagingSession::State {
     // Last accepted descriptor remains immutable and available for explicit
     // map reload even after `staged` transfers to the core owner.
     std::shared_ptr<const usdGen::UsdGenGraphDesc> currentDesc;
-    std::vector<std::pair<int, std::function<void(CommitPayload const&)>>> callbacks;
+    struct Subscription {
+        int token;
+        std::function<void(CommitPayload const&)> terminal;
+        ProgressCallback progress;
+    };
+    std::vector<Subscription> callbacks;
     unsigned outstanding = 0;
     bool closing = false;
     std::function<void()> closeDone;
@@ -131,9 +137,59 @@ struct UsdGenImagingSession::State {
         stopped.store(true, std::memory_order_release);
     }
 
+    struct ProgressRelay {
+        std::mutex mutex;
+        std::vector<TileProgressPtr> waiting;
+        std::vector<TileProgressPtr> cumulative;
+        uint64_t epoch = 0;
+        uint64_t sequence = 0;
+        double frame = 0.0;
+        Pipeline::CommandMailbox mailbox;
+        ProgressCallback direct;
+        uint64_t cookToken = 0;
+    };
+
+    void DrainProgress(std::shared_ptr<ProgressRelay> const& relay) {
+        if (!relay || !accepting.load(std::memory_order_acquire) ||
+            relay->cookToken != cookToken.load(std::memory_order_acquire)) return;
+        std::vector<TileProgressPtr> waiting;
+        {
+            std::lock_guard<std::mutex> lock(relay->mutex);
+            waiting.swap(relay->waiting);
+        }
+        if (waiting.empty()) return;
+        for (auto const& tile : waiting) {
+            if (!tile) continue;
+            if (relay->epoch != tile->epoch) {
+                relay->cumulative.clear();
+                relay->epoch = tile->epoch;
+            }
+            relay->sequence = tile->sequence;
+            relay->frame = tile->frame;
+            relay->cumulative.push_back(tile);
+        }
+        ProgressPayload payload;
+        payload.epoch = relay->epoch;
+        payload.sequence = relay->sequence;
+        payload.frame = relay->frame;
+        payload.tiles = std::make_shared<const std::vector<TileProgressPtr>>(
+            relay->cumulative);
+        for (auto const& entry : callbacks) if (entry.progress) {
+            try { entry.progress(payload); }
+            catch (...) { TF_WARN("usdGen progress callback threw"); }
+        }
+        if (relay->direct) {
+            try { relay->direct(payload); }
+            catch (...) { TF_WARN("usdGen imaging progress completion threw"); }
+        }
+    }
+
     void Finish(usdGen::UsdGenSession::SnapshotPtr snapshot,
-                Pipeline::Outcome outcome, Completion const& done) {
+                Pipeline::Outcome outcome, Completion const& done,
+                std::shared_ptr<ProgressRelay> const& relay) {
+        DrainProgress(relay);
         CommitPayload payload;
+        if (relay) payload.progressEpoch = relay->epoch;
         if (!accepting.load()) outcome = Pipeline::Outcome::Superseded;
         if (snapshot) {
             payload.generation = snapshot->generation;
@@ -152,12 +208,19 @@ struct UsdGenImagingSession::State {
             // collection recursively while this publication is being sent.
             for (auto const& entry : callbacks) {
                 if (!accepting.load()) break;
-                try { entry.second(payload); }
+                try { if (entry.terminal) entry.terminal(payload); }
                 catch (...) { TF_WARN("usdGen republish callback threw"); }
             }
         } else if (outcome == Pipeline::Outcome::Failed) {
             for (auto const& error : payload.diagnostics.errors)
                 TF_WARN("usdGen commit rejected: %s", error.c_str());
+        }
+        if (!payload.published && payload.progressEpoch) {
+            for (auto const& entry : callbacks) {
+                if (!accepting.load()) break;
+                try { if (entry.terminal) entry.terminal(payload); }
+                catch (...) { TF_WARN("usdGen republish callback threw"); }
+            }
         }
         if (done) {
             try { done(payload, outcome); }
@@ -167,7 +230,8 @@ struct UsdGenImagingSession::State {
         CompleteClose();
     }
 
-    void Start(CommitRequest request, int callerDevice, Completion done) {
+    void Start(CommitRequest request, int callerDevice, Completion done,
+               ProgressCallback progress) {
         if (!accepting.load() || !engine) {
             if (done) done({}, Pipeline::Outcome::Superseded);
             return;
@@ -192,6 +256,21 @@ struct UsdGenImagingSession::State {
             }
             return;
         }
+        bool wantsProgress = request.progressive && bool(progress);
+        if (request.progressive) for (auto const& entry : callbacks)
+            wantsProgress = wantsProgress || bool(entry.progress);
+        std::shared_ptr<ProgressRelay> relay;
+        if (wantsProgress) {
+            auto candidate = std::make_shared<ProgressRelay>();
+            candidate->mailbox = owner.ReserveCommandMailbox();
+            // Pressure may suppress preview without suppressing the complete
+            // commit. No callback runs unless its relay has reserved ingress.
+            if (candidate->mailbox) {
+                candidate->direct = std::move(progress);
+                candidate->cookToken = *request.cookToken;
+                relay = std::move(candidate);
+            }
+        }
         if (request.frame) frame = *request.frame;
         if (request.context) context = *request.context;
         if (request.desc) {
@@ -212,18 +291,34 @@ struct UsdGenImagingSession::State {
         input.callerDevice = callerDevice;
         ++outstanding;
         try {
+            usdGen::UsdGenSession::TileProgressCallback progressFromCore;
+            if (relay) progressFromCore = [this, relay](TileProgressPtr tile) {
+                if (!tile || relay->cookToken !=
+                    cookToken.load(std::memory_order_acquire)) return;
+                {
+                    std::lock_guard<std::mutex> lock(relay->mutex);
+                    relay->waiting.push_back(std::move(tile));
+                }
+                (void)owner.PostLatestCommand(relay->mailbox, [this, relay] {
+                    DrainProgress(relay);
+                });
+            };
             if (engine->CommitAsync(std::move(input),
-                [this, done, finishTicket](
+                [this, done, finishTicket, relay](
                     usdGen::UsdGenSession::SnapshotPtr snapshot, Pipeline::Outcome outcome) mutable {
                     // Close leaves the owner alive until every relay arrives.
                     // A valid reserved ticket cannot be rejected for normal
                     // pressure. Rejection here is a framework/lifecycle
                     // breach; never mutate this owner from the producer.
                     if (!owner.PostCommand(std::move(*finishTicket),
-                        [this, snapshot, outcome, done] { Finish(snapshot, outcome, done); },
-                        [this, done] { Finish({}, Pipeline::Outcome::Superseded, done); }))
+                        [this, snapshot, outcome, done, relay] {
+                            Finish(snapshot, outcome, done, relay);
+                        },
+                        [this, done, relay] {
+                            Finish({}, Pipeline::Outcome::Superseded, done, relay);
+                        }))
                         std::terminate();
-                })) {
+                }, std::move(progressFromCore))) {
                 // The core owner has retained its input snapshot. Only now
                 // consume this staging slot: keeping it after acceptance
                 // would resend a structural descriptor on every later tool
@@ -232,10 +327,10 @@ struct UsdGenImagingSession::State {
                 return;
             }
         } catch (...) {
-            Finish({}, Pipeline::Outcome::Failed, done);
+            Finish({}, Pipeline::Outcome::Failed, done, relay);
             return;
         }
-        Finish({}, Pipeline::Outcome::Superseded, done);
+        Finish({}, Pipeline::Outcome::Superseded, done, relay);
     }
 };
 
@@ -273,7 +368,8 @@ uint64_t UsdGenImagingSession::CancelCooks() noexcept {
 uint64_t UsdGenImagingSession::CookToken() const noexcept {
     return _state->cookToken.load(std::memory_order_acquire);
 }
-bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done) {
+bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done,
+                                       ProgressCallback progress) {
     auto* state = _state.get();
     if (!state->accepting.load()) return false;
     // Stamp the request with the token it was accepted under, so a
@@ -283,8 +379,9 @@ bool UsdGenImagingSession::CommitAsync(CommitRequest request, Completion done) {
     }
     const int device = request.callerDevice ? *request.callerDevice :
         usdGen::UsdGenSession::CaptureCallerDevice();
-    return state->owner.PostCommand([state, request=std::move(request), device, done] {
-        state->Start(request, device, done);
+    return state->owner.PostCommand([state, request=std::move(request), device,
+                                     done, progress=std::move(progress)] {
+        state->Start(request, device, done, progress);
     }, [done] { if (done) done({}, Pipeline::Outcome::Superseded); });
 }
 void UsdGenImagingSession::_Commit(CommitRequest request) {
@@ -305,27 +402,30 @@ void UsdGenImagingSession::StageAndCommit(usdGen::UsdGenGraphDesc const& desc, u
     request.desc = std::make_shared<const usdGen::UsdGenGraphDesc>(desc);
     _Commit(std::move(request));
 }
-int UsdGenImagingSession::RegisterRepublishCallback(std::function<void(CommitPayload const&)> callback) {
+int UsdGenImagingSession::RegisterRepublishCallback(
+    std::function<void(CommitPayload const&)> callback, ProgressCallback progress) {
     auto* state = _state.get();
     const auto token = state->nextToken.fetch_add(1);
     if (token > static_cast<uint64_t>(std::numeric_limits<int>::max()) || !state->accepting.load()) return -1;
-    if (!state->owner.PostCommand([state, token, callback=std::move(callback)] {
-        state->callbacks.emplace_back(static_cast<int>(token), callback);
+    if (!state->owner.PostCommand([state, token, callback=std::move(callback),
+                                   progress=std::move(progress)] {
+        state->callbacks.push_back({static_cast<int>(token), callback, progress});
     })) return -1;
     return static_cast<int>(token);
 }
 int UsdGenImagingSession::RegisterRepublishCallback(
     Pipeline::CommandTicket&& ticket,
     std::function<void(CommitPayload const&)> callback,
-    std::function<void()> registered) {
+    std::function<void()> registered, ProgressCallback progress) {
     auto* state = _state.get();
     const auto token = state->nextToken.fetch_add(1);
     if (token > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
         !state->accepting.load(std::memory_order_acquire)) return -1;
     auto cancelled = registered;
     if (!state->owner.PostCommand(std::move(ticket),
-        [state, token, callback=std::move(callback), registered=std::move(registered)] {
-            state->callbacks.emplace_back(static_cast<int>(token), callback);
+        [state, token, callback=std::move(callback), registered=std::move(registered),
+         progress=std::move(progress)] {
+            state->callbacks.push_back({static_cast<int>(token), callback, progress});
             if (registered) registered();
         }, [cancelled=std::move(cancelled)] {
             if (cancelled) cancelled();
@@ -339,7 +439,7 @@ bool UsdGenImagingSession::UnregisterRepublishCallbackAsync(
     auto cancelled = completion;
     return state->owner.PostCommand([state, token, completion=std::move(completion)] {
         state->callbacks.erase(std::remove_if(state->callbacks.begin(), state->callbacks.end(),
-            [token](auto const& entry) { return entry.first == token; }), state->callbacks.end());
+            [token](auto const& entry) { return entry.token == token; }), state->callbacks.end());
         if (completion) completion();
     }, [completion=std::move(cancelled)] {
         if (completion) completion();
@@ -359,7 +459,7 @@ bool UsdGenImagingSession::UnregisterRepublishCallbackAsync(
     return state->owner.PostCommand(std::move(ticket),
         [state, token, completion=std::move(completion)] {
             state->callbacks.erase(std::remove_if(state->callbacks.begin(), state->callbacks.end(),
-                [token](auto const& entry) { return entry.first == token; }), state->callbacks.end());
+                [token](auto const& entry) { return entry.token == token; }), state->callbacks.end());
             if (completion) completion();
         }, [completion=std::move(cancelled)] {
             if (completion) completion();

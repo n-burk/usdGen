@@ -82,6 +82,38 @@ public:
                   UsdGenChunkView *) const override {}
 };
 
+struct HoldTileState {
+    static std::atomic<bool> entered;
+    static std::atomic<bool> release;
+    static std::atomic<bool> fail;
+};
+std::atomic<bool> HoldTileState::entered{false};
+std::atomic<bool> HoldTileState::release{true};
+std::atomic<bool> HoldTileState::fail{false};
+
+class HoldTileOp final : public UsdGenOp {
+public:
+    TfToken Type() const override { return TfToken("UsdGenAsyncTileHold"); }
+    TfSpan<const TfToken> TopologyParameters() const override { return {}; }
+    TfSpan<const TfToken> ValueParameters() const override { return {}; }
+    bool Bind(UsdGenParamView const&, UsdGenDiagnostics*) override { return true; }
+    UsdGenEpoch CaptureDigest(UsdGenCaptureContext const&) const override { return {1, 1}; }
+    bool Capture(UsdGenCaptureContext const&, UsdGenCurveBuffer const&,
+                 UsdGenCapture*, UsdGenDiagnostics*) override { return true; }
+    void Evaluate(UsdGenEvalContext const&, UsdGenCapture const&,
+                  UsdGenChunkView* view) const override {
+        if (view->desc->tile != 1) return;
+        HoldTileState::entered.store(true, std::memory_order_release);
+        auto const deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(10);
+        while (!HoldTileState::release.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (HoldTileState::fail.load(std::memory_order_acquire))
+            throw std::runtime_error("held terminal tile failed");
+    }
+};
+
 bool WaitFor(std::atomic<bool> const &value, int milliseconds = 10000)
 {
     auto const deadline = std::chrono::steady_clock::now() +
@@ -140,6 +172,23 @@ UsdGenGraphDesc MakeDesc(float width)
     return d;
 }
 
+UsdGenGraphDesc MakeProgressDesc()
+{
+    UsdGenGraphDesc desc = MakeDesc(0.025f);
+    // Six or more chunks on this unit-area surface make tile 1 independently
+    // holdable while tile 0 can complete on another arena worker.
+    desc.nodes.front().params.push_back(
+        {TfToken("density"), VtValue(3000.0), false});
+    desc.tileTarget = 32;
+    UsdGenNodeDesc tail;
+    tail.path = SdfPath("/async/tileHold");
+    tail.type = TfToken("UsdGenAsyncTileHold");
+    tail.inputs = {desc.terminal};
+    desc.terminal = tail.path;
+    desc.nodes.push_back(std::move(tail));
+    return desc;
+}
+
 } // namespace
 
 int main()
@@ -165,6 +214,128 @@ int main()
     usdGenRegisterM1Operators();
     UsdGenOpRegistry::Get().Register(TfToken("UsdGenAsyncHold"),
                                       [] { return std::make_unique<HoldCaptureOp>(); });
+    UsdGenOpRegistry::Get().Register(TfToken("UsdGenAsyncTileHold"),
+                                      [] { return std::make_unique<HoldTileOp>(); });
+
+    // A terminal tile publishes before a later tile finishes evaluation.
+    // The public full-generation snapshot remains untouched until the cook
+    // succeeds, even though a worker delivered an immutable provisional tile.
+    {
+        UsdGenSession progressive(4);
+        progressive.SetGraphDesc(MakeProgressDesc());
+        HoldTileState::entered.store(false, std::memory_order_release);
+        HoldTileState::release.store(false, std::memory_order_release);
+        HoldTileState::fail.store(false, std::memory_order_release);
+        std::atomic<bool> firstTile{false}, terminal{false};
+        std::atomic<bool> workerCallback{false}, finalStillEmpty{false};
+        std::atomic<bool> terminalPublished{false};
+        auto const submitter = std::this_thread::get_id();
+        UsdGenSession::CommitRequest request;
+        request.frame = 1.0;
+        bool const accepted = progressive.CommitAsync(std::move(request),
+            [&](UsdGenSession::SnapshotPtr snapshot,
+                UsdGenExecutionPipeline::Outcome outcome) {
+                terminalPublished.store(outcome == UsdGenExecutionPipeline::Outcome::Published &&
+                    snapshot && snapshot->generation && snapshot->generation->tiles.size() > 1,
+                    std::memory_order_release);
+                terminal.store(true, std::memory_order_release);
+            },
+            [&](UsdGenSession::TileProgressPtr tile) {
+                if (!tile || tile->tile.tile != 0) return;
+                workerCallback.store(std::this_thread::get_id() != submitter,
+                                     std::memory_order_release);
+                auto snapshot = progressive.Snapshot();
+                finalStillEmpty.store(!snapshot || !snapshot->generation,
+                                      std::memory_order_release);
+                firstTile.store(true, std::memory_order_release);
+            });
+        Check(accepted, "progressive CPU cook accepted");
+        bool const held = WaitFor(HoldTileState::entered);
+        bool const early = WaitFor(firstTile);
+        Check(held && early && !terminal.load(std::memory_order_acquire),
+              "first tile arrives while a later terminal tile is still evaluating");
+        Check(workerCallback.load(std::memory_order_acquire) &&
+              finalStillEmpty.load(std::memory_order_acquire),
+              "tile callback is off submitter and full snapshot remains atomic");
+        HoldTileState::release.store(true, std::memory_order_release);
+        Check(WaitFor(terminal) && terminalPublished.load(std::memory_order_acquire),
+              "full generation publishes after held tile completes");
+        progressive.Drain();
+    }
+    {
+        UsdGenSession progressive(4);
+        progressive.SetGraphDesc(MakeProgressDesc());
+        HoldTileState::entered.store(false, std::memory_order_release);
+        HoldTileState::release.store(false, std::memory_order_release);
+        HoldTileState::fail.store(true, std::memory_order_release);
+        std::atomic<bool> firstTile{false}, terminal{false}, failed{false};
+        UsdGenSession::CommitRequest request;
+        request.frame = 2.0;
+        Check(progressive.CommitAsync(std::move(request),
+            [&](UsdGenSession::SnapshotPtr snapshot,
+                UsdGenExecutionPipeline::Outcome outcome) {
+                failed.store(outcome == UsdGenExecutionPipeline::Outcome::Failed &&
+                    snapshot && !snapshot->generation,
+                    std::memory_order_release);
+                terminal.store(true, std::memory_order_release);
+            }, [&](UsdGenSession::TileProgressPtr tile) {
+                if (tile && tile->tile.tile == 0)
+                    firstTile.store(true, std::memory_order_release);
+            }), "failing progressive cook accepted");
+        bool const early = WaitFor(firstTile);
+        bool const held = WaitFor(HoldTileState::entered);
+        Check(early && held && !terminal.load(std::memory_order_acquire),
+              "provisional tile can precede a later tile failure");
+        HoldTileState::release.store(true, std::memory_order_release);
+        Check(WaitFor(terminal) && failed.load(std::memory_order_acquire),
+              "terminal failure identifies provisional tiles for rollback");
+        progressive.Drain();
+        HoldTileState::fail.store(false, std::memory_order_release);
+    }
+    {
+        UsdGenSession progressive(4);
+        progressive.SetGraphDesc(MakeProgressDesc());
+        HoldTileState::entered.store(false, std::memory_order_release);
+        HoldTileState::release.store(false, std::memory_order_release);
+        std::atomic<bool> firstTile{false}, oldTerminal{false}, newTerminal{false};
+        std::atomic<bool> oldSuperseded{false}, newPublished{false};
+        UsdGenSession::CommitRequest oldRequest;
+        oldRequest.frame = 3.0;
+        Check(progressive.CommitAsync(std::move(oldRequest),
+            [&](UsdGenSession::SnapshotPtr,
+                UsdGenExecutionPipeline::Outcome outcome) {
+                oldSuperseded.store(outcome == UsdGenExecutionPipeline::Outcome::Superseded,
+                                    std::memory_order_release);
+                oldTerminal.store(true, std::memory_order_release);
+            }, [&](UsdGenSession::TileProgressPtr tile) {
+                if (tile && tile->tile.tile == 0)
+                    firstTile.store(true, std::memory_order_release);
+            }), "superseded progressive cook accepted");
+        bool const early = WaitFor(firstTile);
+        bool const held = WaitFor(HoldTileState::entered);
+        Check(early && held && !oldTerminal.load(std::memory_order_acquire),
+              "superseded attempt emitted provisional tile before replacement");
+        auto replacement = MakeProgressDesc();
+        replacement.nodes[3].params[0] =
+            {TfToken("width"), VtValue(0.03f), false};
+        progressive.SetGraphDesc(replacement);
+        UsdGenSession::CommitRequest newRequest;
+        newRequest.frame = 4.0;
+        Check(progressive.CommitAsync(std::move(newRequest),
+            [&](UsdGenSession::SnapshotPtr snapshot,
+                UsdGenExecutionPipeline::Outcome outcome) {
+                newPublished.store(outcome == UsdGenExecutionPipeline::Outcome::Published &&
+                    snapshot && snapshot->generation && snapshot->generation->frame == 4.0,
+                    std::memory_order_release);
+                newTerminal.store(true, std::memory_order_release);
+            }), "replacement progressive cook accepted");
+        HoldTileState::release.store(true, std::memory_order_release);
+        Check(WaitFor(oldTerminal) && oldSuperseded.load(std::memory_order_acquire),
+              "superseded outcome identifies old provisional tiles for rollback");
+        Check(WaitFor(newTerminal) && newPublished.load(std::memory_order_acquire),
+              "replacement alone publishes the full generation");
+        progressive.Drain();
+    }
 
     // Seed an actual good publication before exercising supersession and
     // failure retention.  The held operator is disabled for this cook.

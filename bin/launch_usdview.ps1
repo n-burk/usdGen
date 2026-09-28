@@ -164,6 +164,53 @@ $pythonDirs = @(
 $env:PYTHONPATH = ($pythonDirs -join ';') +
     $(if ($env:PYTHONPATH) { ';' + $env:PYTHONPATH } else { '' })
 
+# PowerShell supplies an empty element for an unbound remaining-arguments
+# parameter. It is not a usdview argument and must not become a phantom scene.
+$UsdviewArgs = @($UsdviewArgs | Where-Object { $_ -ne $null -and $_ -ne '' })
+
+# usdview enables OpenUSD's asynchronous scene processing only at engine
+# construction. This launcher makes its no-renderer-argument default explicit:
+# Storm is selected and receives --allow-async. A caller selecting any
+# MoonRay delegate stays on the complete-operation path. Unknown delegates are
+# also conservative; pass their renderer name explicitly to keep async off.
+# Do not add this flag to testusdview: its scripts exercise a synchronous,
+# deterministic UI harness rather than the interactive progressive viewport.
+$requestedRenderer = $null
+for ($i = 0; $i -lt $UsdviewArgs.Count; ++$i) {
+    if ($UsdviewArgs[$i] -eq '--renderer' -and $i + 1 -lt $UsdviewArgs.Count) {
+        $requestedRenderer = $UsdviewArgs[$i + 1]
+        break
+    }
+    if ($UsdviewArgs[$i] -eq '-r' -and $i + 1 -lt $UsdviewArgs.Count) {
+        $requestedRenderer = $UsdviewArgs[$i + 1]
+        break
+    }
+    if ($UsdviewArgs[$i].StartsWith('--renderer=')) {
+        $requestedRenderer = $UsdviewArgs[$i].Substring('--renderer='.Length)
+        break
+    }
+    if ($UsdviewArgs[$i].StartsWith('-r=')) {
+        $requestedRenderer = $UsdviewArgs[$i].Substring('-r='.Length)
+        break
+    }
+}
+if (-not $requestedRenderer -and -not $TestScript) {
+    $requestedRenderer = 'GL'
+    $UsdviewArgs = @('--renderer', $requestedRenderer) + $UsdviewArgs
+}
+$rendererKey = if ($requestedRenderer) {
+    $requestedRenderer.ToLowerInvariant()
+} else {
+    ''
+}
+$stormViewport = -not $TestScript -and
+    ($rendererKey -eq 'gl' -or $rendererKey -eq 'storm' -or
+     $rendererKey -eq 'hdstormrendererplugin')
+if ($stormViewport -and -not ($UsdviewArgs -contains '--allow-async')) {
+    $UsdviewArgs += '--allow-async'
+}
+$asyncSceneProcessing = $UsdviewArgs -contains '--allow-async'
+
 if ($PrintEnv) {
     [pscustomobject]@{
         MoonrayBuildDir = $MoonrayBuildDir
@@ -173,6 +220,9 @@ if ($PrintEnv) {
         PXR_PLUGINPATH_NAME = $env:PXR_PLUGINPATH_NAME
         PATH = $env:PATH
         PYTHONPATH = $env:PYTHONPATH
+        Renderer = $requestedRenderer
+        AsyncSceneProcessing = $asyncSceneProcessing
+        UsdviewArgs = $UsdviewArgs
     } | ConvertTo-Json -Compress
     exit 0
 }

@@ -112,6 +112,32 @@ def main():
         _GEN, "build", "usd", "usdGenSchema", "resources"))
     if schema_resources not in plugin_entries:
         fail("usdGen build resources missing from PXR_PLUGINPATH_NAME")
+
+    # The interactive default is Storm and must opt into OpenUSD's exact
+    # --allow-async switch. The launcher reports its resolved invocation in
+    # -PrintEnv so this remains a headless Windows check.
+    launch_args = env.get("UsdviewArgs") or []
+    if (env.get("Renderer") != "GL" or
+            not env.get("AsyncSceneProcessing") or
+            "--allow-async" not in launch_args):
+        fail("default launcher invocation does not select Storm with "
+             "--allow-async")
+
+    # A MoonRay renderer must retain the complete-operation path. This uses
+    # the same headless launcher route as the Storm assertion above.
+    try:
+        moon_proc = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-File", launcher,
+             "-PrintEnv", "--renderer=HdMoonrayRendererDebugPlugin"],
+            capture_output=True, text=True, timeout=180)
+        moon_env = json.loads(moon_proc.stdout) if moon_proc.returncode == 0 else {}
+    except (subprocess.TimeoutExpired, ValueError):
+        moon_env = {}
+    moon_args = moon_env.get("UsdviewArgs") or []
+    if (moon_env.get("Renderer") != "HdMoonrayRendererDebugPlugin" or
+            moon_env.get("AsyncSceneProcessing") or
+            "--allow-async" in moon_args):
+        fail("MoonRay launcher invocation enables asynchronous scene processing")
     # hdMoonray renders through Arras even locally; without session
     # definitions selecting the renderer fails outright. The caller's
     # value wins, so equality is only asserted when the caller set

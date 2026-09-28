@@ -490,13 +490,15 @@ bool UsdGenSession::EndDeviceEdit(uint64_t token,
     return ok;
 }
 
-bool UsdGenSession::CommitAsync(CommitRequest request, Completion completion) {
+bool UsdGenSession::CommitAsync(CommitRequest request, Completion completion,
+                                TileProgressCallback tileProgress) {
     // CUDA's current device is thread-local. Capture it at the caller boundary,
     // never infer it from whichever framework worker picks up this request.
     const int callerDevice = request.callerDevice ? *request.callerDevice : CaptureCallerDevice();
     auto reply = std::make_shared<CommitReply>();
     reply->completion = std::move(completion);
-    return _state->pipeline.PostCommand([this, request=std::move(request), callerDevice, reply] {
+    return _state->pipeline.PostCommand([this, request=std::move(request), callerDevice,
+                                         reply, tileProgress=std::move(tileProgress)] {
         auto& state = *_state;
         try {
             // These optional mutations and the baseline capture are one owner
@@ -739,7 +741,8 @@ bool UsdGenSession::CommitAsync(CommitRequest request, Completion completion) {
                          device=state.devicePublication, pending=state.pending,
                          invalidate=state.invalidateValues, publishedEpoch=state.publishedWorkerEpoch,
                          baseline, previous, frame, reason, callerDevice, contextLosses,
-                         makePublication, makeCoalescedHooks, deviceReturn]
+                         makePublication, makeCoalescedHooks, deviceReturn,
+                         tileProgress=std::move(tileProgress)]
                         (UsdGenExecutionPipeline::Cancellation const& cancellation,
                          UsdGenExecutionPipeline::AsyncCompletion done) mutable {
                 auto coalescedHooks = makeCoalescedHooks(done, cancellation.epoch);
@@ -768,6 +771,7 @@ bool UsdGenSession::CommitAsync(CommitRequest request, Completion completion) {
                 request.contextLosses = std::move(contextLosses);
                 request.completion = std::move(finish);
                 request.coalescedHooks = std::move(coalescedHooks);
+                request.tileProgress = std::move(tileProgress);
                 if (deviceReturn) {
                     request.deviceReturnBinder = [deviceReturn](
                         UsdGenSessionCooker::DeviceResultHandler handler) {

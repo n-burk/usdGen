@@ -24,6 +24,8 @@
 #include <cstring>
 #include <memory>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -1608,7 +1610,8 @@ UsdGenGenerationConstPtr UsdGenSessionCooker::Cook(
     UsdGenCommitReason reason, UsdGenGenerationConstPtr previous,
 UsdGenStats publishedStats, bool invalidateValues,
     uint64_t previousPublishedWorkerEpoch, uint64_t workEpoch, int callerDevice,
-    CoalescedHooks hooks)
+    CoalescedHooks hooks, UsdGenSession::TileProgressCallback progress,
+    std::function<bool()> superseded)
 {
     // _Prepare resets private accounting from the last published baseline.
     struct LastCooked { uint64_t& out; uint64_t epoch; ~LastCooked() { out = epoch; } }
@@ -1814,7 +1817,44 @@ UsdGenStats publishedStats, bool invalidateValues,
     UsdGenEvalContext evalCtx;
     evalCtx.time = frame;
     evalCtx.desc = &_desc;
-    UsdGenRunResult result = _scheduler.Run(_graph, evalCtx, myReq);
+    // Tile copies may start on terminal sweep workers. A previous cook's
+    // preview colors must never be visible there; active preview is deferred
+    // until its whole-output color pass below has completed.
+    _previewColors = UsdGenPreviewColors{};
+    std::mutex progressMutex;
+    uint64_t progressSequence = 0;
+    std::map<UsdGenTileId, UsdGenTilePublication> streamedTiles;
+    auto emitProgress = [&](UsdGenTilePublication tile) {
+        if (!progress || (superseded && superseded())) return;
+        auto update = std::make_shared<UsdGenSession::TileProgress>();
+        update->epoch = workEpoch;
+        update->frame = frame;
+        update->tile = std::move(tile);
+        std::lock_guard<std::mutex> lock(progressMutex);
+        if (superseded && superseded()) return;
+        update->sequence = ++progressSequence;
+        try { progress(std::move(update)); } catch (...) {
+            // A provisional render consumer cannot invalidate the cook.
+        }
+    };
+    auto tileCompleted = progress && !_desc.preview.Active()
+        ? UsdGenScheduler::TileCompleted([&](UsdGenTileView const& tile,
+                                               UsdGenCurveBuffer const& output) {
+            if (superseded && superseded()) return;
+            UsdGenRunResult partial;
+            partial.terminalOutput = &output;
+            UsdGenTilePublication publication = _BuildTilePublication(tile, partial, {});
+            {
+                std::lock_guard<std::mutex> lock(progressMutex);
+                // VtArray copies share their immutable storage. Reuse this
+                // exact geometry in the final generation instead of gathering
+                // the tile's points a second time.
+                streamedTiles.emplace(tile.tile, publication);
+            }
+            emitProgress(std::move(publication));
+        }) : UsdGenScheduler::TileCompleted{};
+    UsdGenRunResult result = _scheduler.Run(_graph, evalCtx, myReq,
+                                             std::move(tileCompleted));
     _lastDiagnostics = result.diagnostics;
     phases.Phase("run operators");
 
@@ -1906,7 +1946,11 @@ UsdGenStats publishedStats, bool invalidateValues,
             continue;
         }
         ++rebuiltTiles;
-        gen.tiles.push_back(_BuildTilePublication(tv, result, prev));
+        auto streamed = streamedTiles.find(tv.tile);
+        gen.tiles.push_back(streamed != streamedTiles.end()
+            ? streamed->second : _BuildTilePublication(tv, result, prev));
+        if (progress && streamed == streamedTiles.end())
+            emitProgress(gen.tiles.back());
     }
     std::sort(gen.tiles.begin(), gen.tiles.end(),
               [](UsdGenTilePublication const &a, UsdGenTilePublication const &b) {

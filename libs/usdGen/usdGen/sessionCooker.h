@@ -70,7 +70,9 @@ public:
         UsdGenPendingDirty pending, double frame, UsdGenCommitReason reason,
         UsdGenGenerationConstPtr previous, UsdGenStats publishedStats,
         bool invalidateValues, uint64_t previousPublishedWorkerEpoch,
-        uint64_t workEpoch, int callerDevice, CoalescedHooks hooks = {});
+        uint64_t workEpoch, int callerDevice, CoalescedHooks hooks = {},
+        UsdGenSession::TileProgressCallback progress = {},
+        std::function<bool()> superseded = {});
     // Begins a real source -> operator* -> final CUDA task graph. The caller
     // must retain this cooker through completion (the session pipeline does).
     void CookCudaAsync(UsdGenExecutionRuntime&, UsdGenExecutionPipeline::Cancellation const&,

@@ -31,6 +31,7 @@ struct UsdGenSessionBackendRequest {
     std::vector<UsdGenDeviceContextLoss> contextLosses;
     UsdGenSessionCooker::CudaCompletion completion;
     UsdGenSessionCooker::CoalescedHooks coalescedHooks;
+    UsdGenSession::TileProgressCallback tileProgress;
     UsdGenSessionCooker::DeviceReturnBinder deviceReturnBinder;
 };
 

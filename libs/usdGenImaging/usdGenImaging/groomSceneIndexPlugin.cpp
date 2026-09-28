@@ -531,8 +531,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         Pipeline::CommandTicket sourceRegister;
         Pipeline::CommandTicket sourceUnregister;
         Pipeline::CommandMailbox republish;
+        Pipeline::CommandMailbox progress;
         explicit operator bool() const noexcept {
-            return attachAck && detachAck && unregisterAck && sourceAttach && sourceDetach && republish;
+            return attachAck && detachAck && unregisterAck && sourceAttach &&
+                sourceDetach && republish;
         }
     };
     struct Groom {
@@ -562,6 +564,14 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         std::shared_ptr<const CaptureCache> cache;
         std::shared_ptr<const usdGenImaging::UsdGenDirtyRouter> router;
         std::shared_ptr<const TileMap> tiles = std::make_shared<const TileMap>();
+        // Tiles shown before the current provisional cook. A failed or
+        // superseded attempt restores this exact immutable baseline.
+        std::shared_ptr<const TileMap> progressBaseline;
+        HdContainerDataSourceHandle progressScalpBaseline;
+        uint64_t progressScalpDigest = 0;
+        uint64_t progressEpoch = 0, progressSequence = 0;
+        bool progressActive = false;
+        bool progressWasHidden = false;
         // The scalp-shadow cap, built once per publication beside the tiles.
         // Null when the generation carries none.
         HdContainerDataSourceHandle scalpShadow;
@@ -644,6 +654,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     std::atomic<bool> closing{false};
     std::atomic<bool> quiesced{false};
     std::atomic<bool> asyncAllowed{false};
+    bool const progressiveRenderer;
     // An input notice that cannot enter the bounded owner immediately
     // requests one later authoritative namespace/synthetic rescan.  It
     // deliberately has no sequence:
@@ -691,8 +702,10 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     Pipeline::CommandTicket closeTicket;
     std::vector<Pipeline::CommandTicket> testHeldCredits;
 
-    explicit _State(usdGen::UsdGenExecutionRuntime& runtime)
+    explicit _State(usdGen::UsdGenExecutionRuntime& runtime,
+                    bool progressive)
         : sequences(s_testSequenceCapacity.load(std::memory_order_acquire)),
+          progressiveRenderer(progressive),
           owner(new Pipeline(runtime, 4096,
                              s_testCommandCapacity.load(std::memory_order_acquire))) {
         closeTicket = owner->ReserveCommandTicket();
@@ -843,6 +856,18 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // This also invalidates an AttachAsync that has not acquired a
         // session yet.  It deliberately does not clear last-good display.
         AdvanceAttachmentEpoch(*g);
+        if (g->progressActive) {
+            g->tiles = g->progressBaseline;
+            if (g->progressWasHidden) g->hidden = true;
+            g->scalpShadow = g->progressScalpBaseline;
+            g->scalpDigest = g->progressScalpDigest;
+            Notify({}, {}, {});
+        }
+        g->progressBaseline.reset();
+        g->progressScalpBaseline = nullptr;
+        g->progressActive = false;
+        g->progressWasHidden = false;
+        g->progressEpoch = g->progressSequence = 0;
         if (g->session) {
             SessionHandle const session = g->session;
             Key const key = g->key;
@@ -901,9 +926,44 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
     void Publish(std::shared_ptr<Groom> const& g, SessionHandle const& sourceSession,
                  uint64_t attachmentEpoch,
                  Session::CommitPayload const& payload) {
-        if (closing.load() || !Current(g) || !payload.published || !payload.generation ||
+        if (closing.load() || !Current(g) ||
             !sourceSession || g->session != sourceSession ||
-            g->attachmentEpoch != attachmentEpoch ||
+            g->attachmentEpoch != attachmentEpoch) return;
+        if (payload.progressEpoch && payload.progressEpoch < g->progressEpoch)
+            return;
+        if (!payload.published || !payload.generation) {
+            if (payload.generation &&
+                payload.generation->id > g->sessionGeneration) {
+                // A newer attempt can begin previewing before an older
+                // successful terminal reaches this owner. The core's failed
+                // snapshot still carries that last complete generation.
+                auto complete = payload;
+                complete.published = true;
+                Publish(g, sourceSession, attachmentEpoch, complete);
+                return;
+            }
+            if (g->progressActive && payload.progressEpoch == g->progressEpoch) {
+                g->tiles = g->progressBaseline;
+                if (g->progressWasHidden) g->hidden = true;
+                g->scalpShadow = g->progressScalpBaseline;
+                g->scalpDigest = g->progressScalpDigest;
+                g->progressBaseline.reset();
+                g->progressScalpBaseline = nullptr;
+                g->progressActive = false;
+                g->progressWasHidden = false;
+                Notify({}, {}, {});
+            }
+            g->progressEpoch = (std::max)(g->progressEpoch, payload.progressEpoch);
+            return;
+        }
+        // Fence a terminal attempt before considering the generation id.
+        // Progress and terminal notices use separate owner mailboxes, and a
+        // late progress delivery must never re-open a completed attempt.
+        if (payload.progressEpoch) {
+            g->progressEpoch = (std::max)(g->progressEpoch, payload.progressEpoch);
+            g->progressActive = false;
+        }
+        if (
             payload.generation->id <= g->sessionGeneration) return;
         TRACE_SCOPE("usdGen publish tiles to the scene index");
         auto const& generation = *payload.generation;
@@ -959,10 +1019,66 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         g->sessionGeneration = generation.id;
         g->generation = generation.id;
         g->tiles = std::move(fresh);
+        g->progressBaseline.reset();
+        g->progressScalpBaseline = nullptr;
+        g->progressActive = false;
+        g->progressWasHidden = false;
         g->scalpShadow = std::move(freshScalp);
         g->scalpDigest = freshScalpDigest;
         ProcessPublishes().fetch_add(1, std::memory_order_acq_rel);
         Notify(added, removed, dirtied);
+    }
+    void PublishProgress(std::shared_ptr<Groom> const& g,
+                         SessionHandle const& sourceSession,
+                         uint64_t attachmentEpoch,
+                         Session::ProgressPayload const& payload) {
+        if (closing.load() || !Current(g) || g->dormant || !sourceSession ||
+            g->session != sourceSession || g->attachmentEpoch != attachmentEpoch ||
+            !payload.epoch || !payload.tiles || payload.tiles->empty() ||
+            payload.epoch < g->progressEpoch) return;
+        if (payload.epoch != g->progressEpoch) {
+            // A newer cook replaces any incomplete attempt. Preserve only
+            // the last complete set as its rollback baseline.
+            if (g->progressActive) {
+                g->tiles = g->progressBaseline;
+                if (g->progressWasHidden) g->hidden = true;
+                g->scalpShadow = g->progressScalpBaseline;
+                g->scalpDigest = g->progressScalpDigest;
+            }
+            g->progressBaseline = g->tiles;
+            g->progressScalpBaseline = g->scalpShadow;
+            g->progressScalpDigest = g->scalpDigest;
+            g->progressEpoch = payload.epoch;
+            g->progressSequence = 0;
+            g->progressActive = true;
+            g->progressWasHidden = g->hidden;
+            if (g->hidden) {
+                // A waking groom must reveal only completed tiles. Previous
+                // geometry slept through edits and cannot be shown yet.
+                g->tiles = std::make_shared<const TileMap>();
+                g->scalpShadow = nullptr;
+                g->scalpDigest = 0;
+                g->hidden = false;
+            }
+        } else if (!g->progressActive) {
+            // Terminal publication or rollback already closed this epoch.
+            return;
+        }
+        if (payload.sequence <= g->progressSequence) return;
+        auto fresh = std::make_shared<TileMap>(*g->tiles);
+        SdfPath const render = RenderPath(g->description);
+        for (auto const& tile : *payload.tiles) {
+            if (!tile || tile->epoch != payload.epoch ||
+                tile->sequence <= g->progressSequence ||
+                !tile->tile.primPath.HasPrefix(render)) continue;
+            (*fresh)[tile->tile.primPath] =
+                ::usdGenImaging::UsdGenTilePublisher::BuildTileDataSource(
+                    tile->tile, g->generation + 1);
+        }
+        g->progressSequence = payload.sequence;
+        g->tiles = std::move(fresh);
+        ProcessPublishes().fetch_add(1, std::memory_order_acq_rel);
+        Notify({}, {}, {});
     }
     // Shows a woken groom's tiles again. No-op while it is dormant.
     void Reveal(std::shared_ptr<Groom> const& g) {
@@ -988,6 +1104,8 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         // session state) so CUDA authoring fails closed and retains the
         // previous CPU snapshot.
         request.devicePublication = false;
+        request.progressive = progressiveRenderer &&
+            asyncAllowed.load(std::memory_order_acquire);
         if (!g->session->HasAppDriver()) request.frame = g->frame;
         auto self = shared_from_this();
         auto ticket = std::make_shared<Pipeline::CommandTicket>(
@@ -1034,6 +1152,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
         replies->sourceDetach = ::usdGenImaging::UsdGenSessionStore::GetInstance()
             .ReserveLifecycleCommand();
         replies->republish = owner->ReserveCommandMailbox();
+        if (progressiveRenderer) replies->progress = owner->ReserveCommandMailbox();
         // Every path that gives up on the attachment reveals: no cook is
         // coming to do it, and a later ingress retries the attachment.
         if (!*replies) { Reveal(g); return; }
@@ -1074,6 +1193,24 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                             std::weak_ptr<Groom> groom(g);
                             TfWeakPtr<Session> weakSession(session);
                             Pipeline::CommandMailbox mailbox = replies->republish;
+                            Pipeline::CommandMailbox progressMailbox = replies->progress;
+                            Session::ProgressCallback progressCallback;
+                            if (self->progressiveRenderer && progressMailbox) progressCallback =
+                                [weak, groom, weakSession, attachmentEpoch,
+                                 progressMailbox](Session::ProgressPayload const& payload) {
+                                    auto state = weak.lock();
+                                    auto member = groom.lock();
+                                    SessionHandle sourceSession =
+                                        TfCreateRefPtrFromProtectedWeakPtr(weakSession);
+                                    if (!state || !member || !sourceSession ||
+                                        state->closing.load()) return;
+                                    (void)state->owner->PostLatestCommand(progressMailbox,
+                                        [state, member, sourceSession,
+                                         attachmentEpoch, payload] {
+                                            state->PublishProgress(member, sourceSession,
+                                                                   attachmentEpoch, payload);
+                                        });
+                                };
                             g->callback = session->RegisterRepublishCallback(
                                 std::move(replies->sourceRegister),
                                 [weak, groom, weakSession, attachmentEpoch, mailbox](
@@ -1090,7 +1227,7 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
                                         state->Publish(member, sourceSession,
                                                        attachmentEpoch, payload);
                                     });
-                                });
+                                }, {}, std::move(progressCallback));
                             self->Cook(g, seq);
                             self->Release(seq);
                         } catch (...) { std::terminate(); }
@@ -1444,7 +1581,8 @@ UsdGenGroomSceneIndex::UsdGenGroomSceneIndex(HdSceneIndexBaseRefPtr const& input
     if (id == 0) _renderInstanceId = next.fetch_add(1);
     auto& service = SceneService();
     auto record = std::make_shared<UsdGenSceneService::RetirementRecord>();
-    _state = std::shared_ptr<_State>(new _State(service.runtime), [&service, record](_State* state) {
+    _state = std::shared_ptr<_State>(new _State(service.runtime, stormMaterialPolicy),
+        [&service, record](_State* state) {
         if (state->quiesced.load(std::memory_order_acquire)) {
             // A static public handle may outlive the process service. All
             // pipelines/subscriptions have already been removed externally.

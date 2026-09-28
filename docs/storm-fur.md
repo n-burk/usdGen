@@ -10,6 +10,32 @@ the original approximate model described below. `UsdGenHairStrands` /
 `UsdGenHairStrandsTranslucent` is a port of Unreal's strand-hair shading and is
 what a usdGen tile binds by default; see **UE-parity strand hair** at the end.
 
+## Progressive Storm viewport tiles
+
+Launch the interactive Storm viewport through the repository launcher:
+
+```powershell
+.\bin\launch_usdview.ps1 examples\head-hair-closeup.usda
+```
+
+With no renderer argument, the launcher selects Storm (`--renderer GL`) and
+adds OpenUSD's `--allow-async` flag. The viewer then polls completed scene work
+while the CPU evaluator publishes finished hair tiles, so the first completed
+tile can appear before the full groom finishes. Pass an explicit non-Storm
+renderer name to leave asynchronous scene processing disabled.
+
+Tile preparation and generation run on workers. Hydra input capture, source
+notices, and `asyncPoll` remain serialized on the frontend thread, which is
+the safe boundary for the stage scene index. A host other than usdview must set
+`allowAsynchronousSceneProcessing` when it creates its imaging engine and poll
+for asynchronous updates itself. This is currently a CPU publication path;
+there is no stock-Storm GPU-resident tile handoff.
+
+An active diagnostic preview waits for its whole-output colour pass, and
+whole-groom occlusion plus the scalp-shadow cap settle with the final complete
+generation. Progressive tiles therefore expose completed curve geometry early
+without presenting those whole-groom results as partial data.
+
 ## Findings
 
 The procedural groom publishes tiled BasisCurves, not one draw primitive per

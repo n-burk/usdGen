@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -58,6 +59,8 @@ private:
 class UsdGenScheduler
 {
 public:
+    using TileCompleted = std::function<void(UsdGenTileView const&,
+                                             UsdGenCurveBuffer const&)>;
     /// threadLimit: 0 == env USDGEN_THREAD_LIMIT, else one-shot calibration.
     explicit UsdGenScheduler(int threadLimit = 0);
     ~UsdGenScheduler();
@@ -74,7 +77,8 @@ public:
     /// topological order with its dirty chunks, runs the reference lane first,
     /// interleaves dirty tiles, and checks for supersession between nodes.
     UsdGenRunResult Run(UsdGenGraph &graph, UsdGenEvalContext const &evalCtx,
-                        uint64_t generationRequested);
+                        uint64_t generationRequested,
+                        TileCompleted tileCompleted = {});
 
 private:
     tbb::task_arena _arena;

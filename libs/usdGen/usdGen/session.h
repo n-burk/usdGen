@@ -113,6 +113,17 @@ class UsdGenSession
 {
 public:
     using SnapshotPtr = std::shared_ptr<const UsdGenSessionSnapshot>;
+    /// Provisional CPU tile from an in-flight cook. `epoch` identifies the
+    /// pipeline attempt; a terminal failure or supersession discards every
+    /// tile from that attempt. The final Session snapshot remains atomic.
+    struct TileProgress {
+        uint64_t epoch = 0;
+        uint64_t sequence = 0;
+        double frame = 0.0;
+        UsdGenTilePublication tile;
+    };
+    using TileProgressPtr = std::shared_ptr<const TileProgress>;
+    using TileProgressCallback = std::function<void(TileProgressPtr)>;
     using Completion = std::function<void(
         SnapshotPtr, UsdGenExecutionPipeline::Outcome)>;
     using CommitRequest = UsdGenSessionCommitRequest;
@@ -165,8 +176,11 @@ public:
 
     /// Asynchronously accept a command snapshot and schedule private cooking.
     /// The completion runs on the command owner and may enqueue follow-up
-    /// commands, but must not make synchronous Session calls.
-    bool CommitAsync(CommitRequest, Completion = {});
+    /// commands, but must not make synchronous Session calls. Optional tile
+    /// progress is CPU-only, delivered serially from the work lane as terminal
+    /// tiles complete. It is provisional until completion reports Published;
+    /// callers discard the attempt's progress by `epoch` on Failed or Superseded.
+    bool CommitAsync(CommitRequest, Completion = {}, TileProgressCallback = {});
     bool CommitAsync(double, UsdGenCommitReason, Completion = {});
     /// Single external quiescent shutdown/test boundary; never called by
     /// render reads or other command owners.

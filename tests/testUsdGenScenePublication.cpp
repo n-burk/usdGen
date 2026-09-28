@@ -5,6 +5,9 @@
 #include "usdGen/opRegistry.h"
 
 #include "pxr/imaging/hd/dataSource.h"
+#include "pxr/imaging/hd/overlayContainerDataSource.h"
+#include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/filteringSceneIndex.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/systemMessages.h"
 #include "pxr/usd/sdf/layer.h"
@@ -18,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -292,11 +296,296 @@ bool WaitFor(std::atomic<bool> const &value)
     }
     return value.load(std::memory_order_acquire);
 }
+
+struct ProgressiveTileHold {
+    static std::atomic<bool> entered;
+    static std::atomic<bool> release;
+    static std::atomic<bool> timedOut;
+};
+std::atomic<bool> ProgressiveTileHold::entered{false};
+std::atomic<bool> ProgressiveTileHold::release{true};
+std::atomic<bool> ProgressiveTileHold::timedOut{false};
+
+class ProgressiveTileHoldOp final : public usdGen::UsdGenOp {
+public:
+    TfToken Type() const override { return TfToken("UsdGenImagingTileHold"); }
+    TfSpan<const TfToken> TopologyParameters() const override { return {}; }
+    TfSpan<const TfToken> ValueParameters() const override { return {}; }
+    bool Bind(usdGen::UsdGenParamView const&, usdGen::UsdGenDiagnostics*) override {
+        return true;
+    }
+    usdGen::UsdGenEpoch CaptureDigest(usdGen::UsdGenCaptureContext const&) const override {
+        return {1, 1};
+    }
+    bool Capture(usdGen::UsdGenCaptureContext const&,
+                 usdGen::UsdGenCurveBuffer const&, usdGen::UsdGenCapture*,
+                 usdGen::UsdGenDiagnostics*) override { return true; }
+    void Evaluate(usdGen::UsdGenEvalContext const&, usdGen::UsdGenCapture const&,
+                  usdGen::UsdGenChunkView* view) const override {
+        if (view->desc->tile != 1) return;
+        ProgressiveTileHold::entered.store(true, std::memory_order_release);
+        auto const deadline = std::chrono::steady_clock::now() +
+                              std::chrono::seconds(10);
+        while (!ProgressiveTileHold::release.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        if (!ProgressiveTileHold::release.load(std::memory_order_acquire))
+            ProgressiveTileHold::timedOut.store(true, std::memory_order_release);
+    }
+};
+
+class ProgressiveTypeOverlay final : public HdSingleInputFilteringSceneIndexBase {
+public:
+    static HdSceneIndexBaseRefPtr New(HdSceneIndexBaseRefPtr const& input) {
+        return TfCreateRefPtr(new ProgressiveTypeOverlay(input));
+    }
+    HdSceneIndexPrim GetPrim(SdfPath const& path) const override {
+        HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(path);
+        if (path == SdfPath("/Groom/hair/Ops/hold") && prim.dataSource) {
+            auto const overlay = HdRetainedContainerDataSource::New(
+                TfToken("type"),
+                HdRetainedTypedSampledDataSource<TfToken>::New(
+                    TfToken("UsdGenImagingTileHold")));
+            prim.dataSource = HdOverlayContainerDataSource::New(
+                overlay, prim.dataSource);
+        }
+        return prim;
+    }
+    SdfPathVector GetChildPrimPaths(SdfPath const& path) const override {
+        return _GetInputSceneIndex()->GetChildPrimPaths(path);
+    }
+protected:
+    explicit ProgressiveTypeOverlay(HdSceneIndexBaseRefPtr const& input)
+        : HdSingleInputFilteringSceneIndexBase(input) {}
+    void _PrimsAdded(HdSceneIndexBase const&,
+                     HdSceneIndexObserver::AddedPrimEntries const& entries) override {
+        _SendPrimsAdded(entries);
+    }
+    void _PrimsRemoved(HdSceneIndexBase const&,
+                       HdSceneIndexObserver::RemovedPrimEntries const& entries) override {
+        _SendPrimsRemoved(entries);
+    }
+    void _PrimsDirtied(HdSceneIndexBase const&,
+                       HdSceneIndexObserver::DirtiedPrimEntries const& entries) override {
+        _SendPrimsDirtied(entries);
+    }
+};
+
+class ProgressiveGatedInput final : public HdSingleInputFilteringSceneIndexBase {
+public:
+    static TfRefPtr<ProgressiveGatedInput> New(HdSceneIndexBaseRefPtr const& input) {
+        return TfCreateRefPtr(new ProgressiveGatedInput(input));
+    }
+    HdSceneIndexPrim GetPrim(SdfPath const& path) const override {
+        return _active ? _GetInputSceneIndex()->GetPrim(path) : HdSceneIndexPrim{};
+    }
+    SdfPathVector GetChildPrimPaths(SdfPath const& path) const override {
+        return _active ? _GetInputSceneIndex()->GetChildPrimPaths(path) : SdfPathVector{};
+    }
+    void Activate() {
+        _active = true;
+        HdSceneIndexObserver::AddedPrimEntries roots;
+        for (auto const& path : _GetInputSceneIndex()->GetChildPrimPaths(
+                 SdfPath::AbsoluteRootPath()))
+            roots.emplace_back(path, _GetInputSceneIndex()->GetPrim(path).primType);
+        _SendPrimsAdded(roots);
+    }
+protected:
+    explicit ProgressiveGatedInput(HdSceneIndexBaseRefPtr const& input)
+        : HdSingleInputFilteringSceneIndexBase(input) {}
+    void _PrimsAdded(HdSceneIndexBase const&,
+                     HdSceneIndexObserver::AddedPrimEntries const& entries) override {
+        if (_active) _SendPrimsAdded(entries);
+    }
+    void _PrimsRemoved(HdSceneIndexBase const&,
+                       HdSceneIndexObserver::RemovedPrimEntries const& entries) override {
+        if (_active) _SendPrimsRemoved(entries);
+    }
+    void _PrimsDirtied(HdSceneIndexBase const&,
+                       HdSceneIndexObserver::DirtiedPrimEntries const& entries) override {
+        if (_active) _SendPrimsDirtied(entries);
+    }
+private:
+    bool _active = false; // test frontend only
+};
+
+class ProgressiveNoticeObserver final : public HdSceneIndexObserver {
+public:
+    std::thread::id const frontend = std::this_thread::get_id();
+    std::atomic<bool> wrongThread{false};
+    unsigned tilesAdded = 0;
+    void PrimsAdded(HdSceneIndexBase const&, AddedPrimEntries const& entries) override {
+        if (std::this_thread::get_id() != frontend) {
+            wrongThread.store(true, std::memory_order_release);
+            return;
+        }
+        for (auto const& entry : entries)
+            if (entry.primType == TfToken("basisCurves") &&
+                entry.primPath.HasPrefix(SdfPath("/Groom/hair/__usdGenRender")))
+                ++tilesAdded;
+    }
+    void PrimsRemoved(HdSceneIndexBase const&, RemovedPrimEntries const&) override {}
+    void PrimsDirtied(HdSceneIndexBase const&, DirtiedPrimEntries const&) override {}
+    void PrimsRenamed(HdSceneIndexBase const&, RenamedPrimEntries const&) override {}
+};
+
+void TestProgressiveStormPublication()
+{
+    usdGen::UsdGenOpRegistry::Get().Register(TfToken("UsdGenImagingTileHold"),
+        [] { return std::make_unique<ProgressiveTileHoldOp>(); });
+    ProgressiveTileHold::entered.store(false, std::memory_order_release);
+    ProgressiveTileHold::release.store(false, std::memory_order_release);
+    ProgressiveTileHold::timedOut.store(false, std::memory_order_release);
+    char const* fixture = R"USDA(#usda 1.0
+def Mesh "Scalp" (prepend apiSchemas = ["UsdGenRestAPI"])
+{
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0,1,2,3]
+    point3f[] points = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]
+    point3f[] primvars:rest = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)] (interpolation = "vertex")
+}
+def Scope "Groom"
+{
+    def UsdGenDescription "hair"
+    {
+        int usdGen:tileTarget = 32
+        rel usdGen:surface = </Scalp>
+        def Scope "Ops"
+        {
+            def UsdGenWidth "hold"
+            {
+            }
+            def UsdGenWidth "width"
+            {
+                float usdGen:width = .025
+                bool usdGen:replace = true
+            }
+            def UsdGenGrow "grow"
+            {
+                float usdGen:length = .1
+                int usdGen:segments = 4
+            }
+            def UsdGenScatter "scatter"
+            {
+                float usdGen:density = 3000
+            }
+        }
+    }
+}
+)USDA";
+    // Populate the stage before constructing UsdImaging's adapters, then
+    // gate its already valid scene-index view until both downstream indices
+    // have negotiated async delivery. This models viewport population
+    // without relying on adapter behavior for importing a layer mid-chain.
+    Scene scene;
+    scene.stage = UsdStage::CreateInMemory("progressive-storm");
+    Check(scene.stage->GetRootLayer()->ImportFromString(fixture),
+          "progressive fixture authors multi-tile groom");
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = scene.stage;
+    scene.indices = UsdImagingCreateSceneIndices(info);
+    auto overlaid = ProgressiveTypeOverlay::New(scene.indices.finalSceneIndex);
+    auto gated = ProgressiveGatedInput::New(overlaid);
+    scene.groom = UsdGenGroomSceneIndex::New(gated, 9211);
+    auto moonray = UsdGenGroomSceneIndex::New(gated, 9212, false, false);
+    auto* moonrayOwner = dynamic_cast<UsdGenGroomSceneIndex*>(moonray.operator->());
+    scene.owner = dynamic_cast<UsdGenGroomSceneIndex*>(scene.groom.operator->());
+    ProgressiveNoticeObserver notices;
+    scene.groom->AddObserver(TfCreateWeakPtr(&notices));
+    scene.groom->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
+    moonray->SystemMessage(HdSystemMessageTokens->asyncAllow, nullptr);
+    gated->Activate();
+    usdGenImaging::UsdGenSessionKey key{"", SdfPath("/Groom/hair"), 9211};
+    bool const entered = WaitFor(ProgressiveTileHold::entered);
+    if (!entered) {
+        auto probe = usdGenImaging::UsdGenSessionStore::GetInstance().Find(key);
+        if (probe) {
+            auto const graph = probe->Engine()->Graph();
+            auto const generation = probe->Engine()->Generation();
+            std::printf("progressive diagnostic: terminal=%s tileTarget=%d nodes=%zu generationTiles=%zu\n",
+                graph.desc.terminal.GetText(), graph.desc.tileTarget,
+                graph.desc.nodes.size(), generation ? generation->tiles.size() : 0);
+            for (auto const& node : graph.desc.nodes)
+                std::printf("progressive node: %s %s\n",
+                    node.path.GetText(), node.type.GetText());
+            for (auto const& error : probe->Engine()->LastDiagnostics().errors)
+                std::printf("progressive error: %s\n", error.c_str());
+        } else std::printf("progressive diagnostic: no session attached\n");
+    }
+    Check(entered,
+          "later tile enters held evaluation while earlier tiles can finish");
+    auto const render = SdfPath("/Groom/hair/__usdGenRender");
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool partial = false;
+    auto const first = render.AppendChild(TfToken("tile_0000"));
+    while (std::chrono::steady_clock::now() < deadline && !partial) {
+        scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+        partial = scene.groom->GetPrim(first).primType == TfToken("basisCurves") &&
+            FirstWidth(scene, first) > 0.0f && notices.tilesAdded > 0;
+        std::this_thread::yield();
+    }
+    auto session = usdGenImaging::UsdGenSessionStore::GetInstance().Find(key);
+    Check(partial && session && !session->Engine()->Generation() &&
+              !ProgressiveTileHold::timedOut.load(std::memory_order_acquire),
+          "Storm sees completed tile and frontend notice before full generation");
+    Check(!notices.wrongThread.load(std::memory_order_acquire),
+          "provisional tile notice runs on polling frontend thread");
+    moonray->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+    Check(moonray->GetPrim(first).primType.IsEmpty(),
+          "Moonray policy retains complete-generation publication while a tile is held");
+    ProgressiveTileHold::release.store(true, std::memory_order_release);
+    if (scene.owner) scene.owner->Synchronize();
+    if (moonrayOwner) moonrayOwner->Synchronize();
+    Check(session && session->Engine()->Generation() &&
+              session->Engine()->Generation()->tiles.size() > 1,
+          "terminal publication completes the remaining tiles");
+    Check(moonray->GetPrim(first).primType == TfToken("basisCurves"),
+          "Moonray policy publishes complete geometry after terminal success");
+    ProgressiveTileHold::entered.store(false, std::memory_order_release);
+    ProgressiveTileHold::timedOut.store(false, std::memory_order_release);
+    ProgressiveTileHold::release.store(false, std::memory_order_release);
+    UsdAttribute width = scene.stage->GetAttributeAtPath(
+        SdfPath("/Groom/hair/Ops/width.usdGen:width"));
+    Check(width.Set(0.04f), "new width edit starts a second progressive cook");
+    scene.indices.stageSceneIndex->ApplyPendingUpdates();
+    Check(WaitFor(ProgressiveTileHold::entered),
+          "second cook reaches held later tile");
+    auto const previewDeadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(5);
+    bool changedEarly = false;
+    while (std::chrono::steady_clock::now() < previewDeadline && !changedEarly) {
+        scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+        changedEarly = std::fabs(FirstWidth(scene, first) - .04f) < 1e-5f;
+        std::this_thread::yield();
+    }
+    Check(changedEarly && !ProgressiveTileHold::timedOut.load(std::memory_order_acquire),
+          "changed tile appears before the second complete generation");
+    Check(scene.stage->RemovePrim(SdfPath("/Groom/hair")),
+          "removing held groom cancels its provisional scene publication");
+    scene.indices.stageSceneIndex->ApplyPendingUpdates();
+    auto const removalDeadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(5);
+    bool removedEarly = false;
+    while (std::chrono::steady_clock::now() < removalDeadline && !removedEarly) {
+        scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+        removedEarly = scene.groom->GetPrim(first).primType.IsEmpty();
+        std::this_thread::yield();
+    }
+    Check(removedEarly,
+          "removed groom withdraws provisional tile before held cook ends");
+    ProgressiveTileHold::release.store(true, std::memory_order_release);
+    if (scene.owner) scene.owner->Synchronize();
+    scene.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
+    Check(scene.groom->GetPrim(first).primType.IsEmpty(),
+          "late completion cannot resurrect a removed groom");
+    scene.groom->RemoveObserver(TfCreateWeakPtr(&notices));
+}
 } // namespace
 
 int main()
 {
     usdGen::usdGenRegisterM1Operators();
+    TestProgressiveStormPublication();
     {
         // Scatter over an area: the one-line publication fixture above has
         // degenerate X/Z bounds and intentionally produces no shadow volume.

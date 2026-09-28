@@ -74,7 +74,9 @@ struct UsdGenSessionKeyHash
 /// to one session (renderer switch, Storm + hdPrman preflight in one
 /// process); the session owns ONE current frame, ONE context, ONE
 /// generation — each attached index republishes the same generation. The
-/// prim set is a session property and never differs per index.
+/// complete-generation prim set is a session property and never differs per
+/// index. Opted-in progressive viewports can show provisional tiles while a
+/// complete generation is still cooking.
 class UsdGenImagingSession : public TfRefBase, public TfWeakBase
 {
 public:
@@ -128,9 +130,14 @@ public:
     /// report. Callbacks must never reread live Engine()->Generation() /
     /// LastReport() — a concurrent commit can replace them mid-iteration
     /// (report/generation pairing + data race). Empty published==false
-    /// means "nothing published, no republish".
+    /// normally means "nothing published, no republish"; a nonzero
+    /// progressEpoch is the terminal rollback exception for provisional tiles.
     struct CommitPayload {
         bool published = false;
+        // Nonzero when this attempt exposed provisional tiles. Terminal
+        // callbacks also run for failed/superseded attempts in that case so
+        // subscribers can restore their last complete scene snapshot.
+        uint64_t progressEpoch = 0;
         usdGen::UsdGenGenerationConstPtr generation;
         usdGen::UsdGenDirtyReport report;
         std::shared_ptr<const usdGen::UsdGenGraphRoutingSnapshot> routing;
@@ -154,10 +161,25 @@ public:
         // engine, if CancelCooks() has moved the token since. This is how an
         // authoring tool abandons a cook its own newer edit has invalidated.
         std::optional<uint64_t> cookToken;
+        // Scene indices set this from Hydra's asyncAllow handshake. Offline
+        // and app-driven callers retain the default for interested viewers.
+        bool progressive = true;
     };
     using Completion = std::function<void(CommitPayload const&,
         usdGen::UsdGenExecutionPipeline::Outcome)>;
-    bool CommitAsync(CommitRequest request, Completion completion = {});
+    using TileProgress = usdGen::UsdGenSession::TileProgress;
+    using TileProgressPtr = std::shared_ptr<const TileProgress>;
+    struct ProgressPayload {
+        uint64_t epoch = 0;
+        uint64_t sequence = 0;
+        double frame = 0.0;
+        // Cumulative pointer set makes latest-wins owner mailboxes lossless
+        // without copying tile geometry for each completed chunk.
+        std::shared_ptr<const std::vector<TileProgressPtr>> tiles;
+    };
+    using ProgressCallback = std::function<void(ProgressPayload const&)>;
+    bool CommitAsync(CommitRequest request, Completion completion = {},
+                     ProgressCallback progress = {});
     // Single external boundary: finish accepted requests/callbacks, then stop.
     // Concurrent Shutdown callers are rejected, not made to wait on each other. Never
     // call from a pipeline callback. Destruction otherwise retires state on
@@ -197,11 +219,13 @@ public:
     /// command owner, with THIS commit's immutable payload. Callbacks must not
     /// block on GetPrim and must not reread live engine state.
     int RegisterRepublishCallback(
-        std::function<void(CommitPayload const &)> cb);
+        std::function<void(CommitPayload const &)> cb,
+        ProgressCallback progress = {});
     int RegisterRepublishCallback(
         usdGen::UsdGenExecutionPipeline::CommandTicket&& ticket,
         std::function<void(CommitPayload const &)> cb,
-        std::function<void()> registered = {});
+        std::function<void()> registered = {},
+        ProgressCallback progress = {});
     /// Enqueues callback removal and acknowledges after the owner has erased
     /// it. If the accepted command is cancelled during shutdown, completion
     /// is still invoked; false means it was never accepted and completion is
