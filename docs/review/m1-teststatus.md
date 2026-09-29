@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # M1 Test-Status Census
 
 Date: 2026-09-09 · Tree: `usdGen` @ `831c869` (+ untracked in-flight work from sibling lanes)

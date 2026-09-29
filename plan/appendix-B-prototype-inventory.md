@@ -78,7 +78,7 @@ Which graphics harness a prototype needs (`research/ENVIRONMENT.md` CORRECTIONS;
 `research/G-storm-hair-look-prototype.md` §0):
 
 * **EGL — GPU, real Storm numbers.** `prototypes/storm-hair-look/eglctx.h` makes a headless GL 4.6
-  **compatibility** context on the GB10 via `EGL_EXT_platform_device` with a 64×64 pbuffer. A core
+  **compatibility** context on the measurement host via `EGL_EXT_platform_device` with a 64×64 pbuffer. A core
   profile yields ~25 `invalid enum` per frame (MEASURED, `research/G-storm-hair-look-prototype.md`
   §0) and a white image; a surfaceless context leaves the default FBO incomplete and
   `HgiGL_ScopedStateHolder` fails. Both are handled inside `eglctx.h`.
@@ -249,7 +249,7 @@ gate: it belongs to PW-1's `benchUsdGenKnn` (§13; M0 pre-work, binding at M3).
 
 **2.6 Caveats.** `vdfBench.cpp` (the v1 prototype whose bug is §2 of the report) was **not copied**,
 yet `CMakeLists.txt` still declares its target, so a clean configure fails until that is fixed. Every
-timing is GB10-only (10× Cortex-X925 + 10× Cortex-A725); both engines regress past ~8–10 threads,
+timing is measurement-host-only (10× Cortex-X925 + 10× Cortex-A725); both engines regress past ~8–10 threads,
 hence `USDGEN_THREAD_LIMIT`, the one-shot calibration, and E-7 stated as a ratio. The kernel is
 uniform-CV only: the ragged path (`cvCount == 0` + `cvOffsets`, ADR §4.2) is unimplemented and gate
 E-1r has no harness (§13, PW-9). Gate **E-6** (append a node to a 200-node groom: ≤ 0.2 ms, exactly one
@@ -575,7 +575,7 @@ re-read. `probe3`–`probe6` have no captured output in the copy.
 
 **7.1 Purpose.** Settle S35 (the plugin glslfx is the v1 Storm look) and S36 (the three-terminal
 material) — and, the finding that changed what the whole plan can verify, prove Storm runs headless
-on the GB10 through an EGL device-platform context.
+on the measurement host through an EGL device-platform context.
 
 **7.2 Files.**
 
@@ -649,7 +649,7 @@ of the four `dump*/` GLSL directories were copied; `eglprobe.c`, `make_scene_mtl
 §0.2 is the only frame ledger that publishes it (ADR §9.5 R41, R42) and gate **S-1** re-measures it at
 100 k in **both 720p and 1080p** (09 §5.3; ADR §9.5 R40). The deform numbers came from `pointsAttr.Set()` + `Render()`, not a
 scene index publishing `primvars/points`; that path is UNMEASURED. All numbers are one prim, the best
-case for batching. GB10 + driver 580.173.02 only, and
+case for batching. measurement host + driver 580.173.02 only, and
 `HDST_ENABLE_HGI_RESOURCE_GENERATION=1` (`pxr/imaging/hdSt/codeGen.cpp:166`), the Metal/Vulkan proxy
 for gate R-3, has not been run against this shader.
 
@@ -1124,7 +1124,7 @@ commands recorded here. The check belongs in M0 and is cheap.
 |---|---|---|
 | **T0** (no USD, no Hydra) | `data-plane-benchmark` rebuilds and reproduces the numbers in its captured `results_main.txt` / `results_scale.txt`; `thirdparty-bench` rebuilds and is checked against `research/A8-seexpr-ptex-libs.md` §1.6/§2.8 (it carries no captured output); `motion-blur` rebuilds in one `g++` line (§12.3) | B-1, E-1, E-1r, E-2, E-3, E-4, E-5, E-7, E-8 baselines; the T0 halves of L-3 and L-4 |
 | **T1** (headless scene index over the real `UsdImagingCreateSceneIndices` chain) | `chain-order`, `evaluation-scheduling`, `stage-free-transport`, `instancing`, the `storm-throughput` CPU probes and `freeze-bake`'s C++ probes all build and run with no GL | SI-1…SI-9 and SI-11 (through PW-6), T-2, T-INST-1/2. **SI-10** (two scene-index instances on one session, T1 M2, `09-…` §5.2) has no prototype |
-| **T2** (EGL Storm on the GB10) | `storm-hair-look` renders `hair_scene.usda` with zero GL errors and `bench_hair` reproduces the **4 k** row (0.85 ms). The 40 k and 200 k rows need `make_scene_40000.py` / `make_scene_200000.py`, which were not copied (§7.6) — M0 rewrites them from `make_scene.py` (one parameter) alongside `make_scene_100000.py` for PW-10 (§13) | S-1…S-12, L-1, L-2 |
+| **T2** (EGL Storm on the measurement host) | `storm-hair-look` renders `hair_scene.usda` with zero GL errors and `bench_hair` reproduces the **4 k** row (0.85 ms). The 40 k and 200 k rows need `make_scene_40000.py` / `make_scene_200000.py`, which were not copied (§7.6) — M0 rewrites them from `make_scene.py` (one parameter) alongside `make_scene_100000.py` for PW-10 (§13) | S-1…S-12, L-1, L-2 |
 | **T3** (`testusdview` under Xvfb on `DISPLAY=:77`) | `freeze-bake/uv/testUsdviewFreezeCost.py` and `storm-throughput/bench_usdview.py` run, and every number from them is labelled CPU. The X server is **not** in `plan/prototypes/` (§0.3; the shipped harness finds it through `USDGEN_XVFB_ROOT`, `10-…` §5.2), so no T3 gate is reproducible from this directory alone | T-1, T-3, T-4, T-5 |
 | **T4** (workstation protocol) | `storm-throughput/run_bench.sh` and the hdPrman parity run are documented well enough for a human at a display to execute them without this conversation | R-1, R-2, R-3 |
 

@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # PW-6 / SI-11: Notice Behavior for `reorder nameChildren` (Record Only)
 
 Host: headless aarch64, OpenUSD 26.08 (`$USD`), usdGen build-tree

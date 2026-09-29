@@ -71,7 +71,7 @@ four future migrations. Only then do we build breadth.
 |---|---|---|
 | Renderer-level placement, ordering stability | `probes/G-chain-order/` | MEASURED |
 | TBB DAG beats VDF 4–15× | `probes/data-plane-engine-prototype-benchmark/` | MEASURED |
-| Storm renders hair headlessly on the GB10 | `probes/storm-hair-look/eglctx.h` | MEASURED |
+| Storm renders hair headlessly on the measurement host | `probes/storm-hair-look/eglctx.h` | MEASURED |
 | The hair glslfx compiles and looks right | `probes/storm-hair-look/usdGenHairPreview.glslfx` | EXISTS |
 | Codeless schema + `DataSourceMapped` + `TsSpline` transport | `probes/G-stage-free/` | MEASURED |
 | Frozen prim re-enters from the SI, locator taxonomy | `probes/freeze-bake/probe7` | MEASURED |
@@ -1140,7 +1140,7 @@ those is its own risk, so none of them is allowed to block a release.
 S36 fixes the shape: one `Material` prim, three terminals — `outputs:surface` (UsdPreviewSurface,
 universal fallback), `outputs:mtlx:surface` (MaterialX `chiang_hair_bsdf`, the render-time look),
 Storm-specific (the glslfx). Route 1 is the v1 Storm look and **the file already exists, parses in
-Sdr, and renders with zero warnings** on the GB10 (`probes/storm-hair-look/usdGenHairPreview.glslfx`,
+Sdr, and renders with zero warnings** on the measurement host (`probes/storm-hair-look/usdGenHairPreview.glslfx`,
 `hair_pv_tangent.png`).
 
 The one unverified link is whether Storm prefers `outputs:glslfx:surface` over the plain
@@ -1442,7 +1442,7 @@ Four tiers, in the order a change hits them:
 |---|---|---|---|
 | **T0 engine** | `testUsdGenGraph`, `testUsdGenKernels`, `testUsdGenOps` — pure `UsdGenGraph` over synthetic buffers, no Hydra, no USD | ms | every commit |
 | **T1 scene index** | headless tests over the **real** `UsdImagingCreateSceneIndices` chain + the renderer-plugin append, with a recording observer; assert on `HdBasisCurvesSchema` contents and on **emitted dirty locators** | < 100 ms each | every commit — the primary regression suite |
-| **T2 Storm** | the **EGL device-platform harness** (`probes/storm-hair-look/eglctx.h`: compatibility profile + 64×64 pbuffer) renders on the GB10 headlessly; golden images with a fractional-pixel-difference tolerance, plus GPU frame timing | ~1 s each | every commit (correctness), nightly (timing) |
+| **T2 Storm** | the **EGL device-platform harness** (`probes/storm-hair-look/eglctx.h`: compatibility profile + 64×64 pbuffer) renders on the measurement host headlessly; golden images with a fractional-pixel-difference tolerance, plus GPU frame timing | ~1 s each | every commit (correctness), nightly (timing) |
 | **T3 app** | `testusdview` scripts under the scratchpad Xvfb (`DISPLAY=:77`, llvmpipe). **llvmpipe frame times are CPU numbers and are never quoted as Storm numbers.** | seconds | pre-merge |
 | **T4 workstation** | MSAA/alpha-to-coverage quality, Metal/Vulkan Hgi (`HDST_ENABLE_HGI_RESOURCE_GENERATION=1`), non-NVIDIA drivers, a real hdPrman install, 4K interactive | manual | per slice exit |
 
@@ -1453,7 +1453,7 @@ Budget context: RigExec costs ~1.35 ms/frame on `ArmShotAnim` and a full termina
 0.24 ms, leaving roughly **15 ms/frame** for usdGen at 60 fps before any GPU time; two extra
 pass-through filtering scene indices cost nothing measurable (MEASURED). Storm draws 200 k curves ×
 8 CV at refineLevel 2 in **23.9 ms** at 720p, and streaming 19.2 MB of new points adds **2.5 ms**
-(MEASURED on the GB10).
+(MEASURED on the measurement host).
 
 ### 9.2 Slices
 

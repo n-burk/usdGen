@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # sol M0 re-verification notes
 (Sandbox deviation: danger-full-access because host bwrap netns fails with RTM_NEWADDR EPERM; read-only discipline enforced by prompt.)
 ## Results

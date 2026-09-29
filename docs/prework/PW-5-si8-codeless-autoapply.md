@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # PW-5 — SI-8 pre-work: does API-schema auto-apply propagate to CODELESS derived types?
 
 ## 1. What was asked

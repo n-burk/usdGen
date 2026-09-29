@@ -551,7 +551,7 @@ CPU-side batching effect.
 - Whether the degenerate-CV trick (§2.4/3) is actually cheaper than eating the
   VBO relocation — depends on how much a near-zero-area patch costs in the
   rasteriser, which needs B7 plus a variant with N hidden strands.
-- Whether `HgiDeviceCapabilitiesBitsUnifiedMemory` is set on the GB10 under
+- Whether `HgiDeviceCapabilitiesBitsUnifiedMemory` is set on the measurement host under
   HgiGL; if it is, `StageCopy` never takes the direct path
   (`hdSt/stagingBuffer.cpp:74`) and the 512 KiB chunk threshold is moot.
 - Whether a Hydra-2 scene index can populate `invisibleCurves` (A5's open

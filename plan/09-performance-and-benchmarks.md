@@ -124,7 +124,7 @@ notice-delivery pair below is **`EV-084`** (delivery) and **`EV-085`** (entry bu
 appendix A §2.4.
 
 Host for every row (`research/ENVIRONMENT.md` with CORRECTIONS): Linux 6.17 aarch64, 20 CPUs
-(10× Cortex-X925 + 10× Cortex-A725), NVIDIA GB10, driver 580.173.02, GL 4.6 compatibility profile,
+(10× Cortex-X925 + 10× Cortex-A725), measurement host, driver 580.173.02, GL 4.6 compatibility profile,
 g++ 13.3, OpenUSD v26.08 at `$USD`. Reports by block:
 `research/G-data-plane-engine-prototype-benchmark.md` §3–§6 (EV-001…EV-018);
 `research/G-storm-hair-look-prototype.md` §5 (EV-019…EV-023);

@@ -63,7 +63,7 @@ where it is executed.
 
 ### 0.3 The measured basis: bespoke TBB DAG (S21)
 
-All numbers MEASURED on this host (aarch64, NVIDIA GB10 = 10× Cortex-X925 + 10× Cortex-A725,
+All numbers MEASURED on this host (aarch64, measurement host = 10× Cortex-X925 + 10× Cortex-A725,
 20 cores, g++ 13.3.0, `research/ENVIRONMENT.md`), workload 100 000 curves × 8 CV = 800 000 CVs
 (9.6 MB), five styler nodes, ≈16 flops/CV, prototype `prototypes/data-plane-benchmark/tbbBench.cpp`,
 raw log `prototypes/data-plane-benchmark/results_main.txt`
@@ -2055,7 +2055,7 @@ milestone exits (ADR §7).
 
 * **A public operator ABI.** `UsdGenOpRegistry` is internal in v1 and v2; third-party operators are
   v3 (ADR §3). Engine headers are not installed until M7.
-* **GPU evaluation.** Everything here is CPU. A GB10-class machine could plausibly run these kernels
+* **GPU evaluation.** Everything here is CPU. A measurement-host-class machine could plausibly run these kernels
   in HGI compute, but nothing on this host has exercised it and the v3 "GPU tail" is a roadmap item,
   not a design (`research/G-data-plane-engine-prototype-benchmark.md`, open questions).
 * **An OpenExec/VDF backend.** S16 keeps it as a future adapter behind the same operator interface;

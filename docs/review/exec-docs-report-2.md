@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # exec-docs-report-2 — docs/CI/env lane, round 2 (sol M0 exit notes)
 
 Inputs: `docs/review/sol-m0-exit-notes.md` (X-1..X-10). This lane owns

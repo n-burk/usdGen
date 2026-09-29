@@ -1,5 +1,10 @@
 # usdGen — implementation plan
 
+This directory is the design record, not the product manual. Build and install
+steps are in the repository [README](../README.md). Some paragraphs below record
+what had been validated when an overlay was written. Treat them as evidence,
+not as a checklist of what to do next.
+
 Date: 2026-09-05 v1; overlays 2026-09-11/12. Status: plan v2 (accepted: v1 history
 in `00`–`12` plus overlay `13-codebase-alignment.md`). The subsequent user
 decisions in **[14-hierarchy-cuda-implementation.md](14-hierarchy-cuda-implementation.md)**
@@ -9,8 +14,7 @@ The active resource-aware execution overlay is
 **[15-resource-aware-execution.md](15-resource-aware-execution.md)**; its
 implementation evidence is explicitly OPEN.
 
-Current execution work is **phase 6: asynchronous CUDA execution** in overlay
-15. Source upload/resampling, retirement shutdown, and fresh Width/expression
+When overlay 15 was written, execution work was **phase 6: asynchronous CUDA execution**. Source upload/resampling, retirement shutdown, and fresh Width/expression
 primitives and production asynchronous Width have recorded limited validation,
 including allocation-rejection recovery. Asynchronous Length/compaction also
 has recorded integration, repeat and CUDA sanitizer validation. Its initially
@@ -29,14 +33,13 @@ the production RBF/deformation path therefore still contains execution waits.
 Phases 7–9 follow, but earlier compiler,
 multi-groom cache/dirty propagation, memory and lifecycle gates remain open.
 
-This directory is the complete plan for **usdGen**, an procedural hair/fur grooming and instancing
+This directory is the design record for **usdGen**, a procedural hair/fur grooming and instancing
 plugin for OpenUSD 26.08 and Hydra 2.0. usdGen is built as a sibling CMake project of usdRig, runs
 *after* usdRig (or any other deformer) in the Hydra scene-index chain, generates curves for Storm and
 hdPrman at run/render time, loads and deforms static curves, styles them with a chainable operator
 stack, paints and expresses look through maps, Ptex and SeExpr, and is groomed interactively through
 usdview plugins that follow the app → data modification → Hydra loop. The verbatim request is quoted
-in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended repository is
-`<usdgen-src>`, and this plan lives there as `plan/`.
+in `00-request-and-scope.md` §0.1. The project name is `usdGen`. This plan lives in `plan/`.
 
 ## 1. TL;DR (the binding decisions, `design/adr-v1.md`)
 
@@ -155,7 +158,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
 
 ## 7. How this plan was produced
 
-Two research rounds on this host (Linux aarch64, 20 cores, NVIDIA GB10, OpenUSD 26.08 installed at
+Two research rounds on this host (Linux aarch64, 20 cores, measurement host, OpenUSD 26.08 installed at
 `$USD`, no display) produced `research/`; a brief with requirements and
 settled decisions; three independent architecture proposals scored by three judges; the binding ADR
 and its 2026-09-05 addendum; then the fifteen documents, each adversarially reviewed and fixed, four

@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # PW-2 — S-8 pre-work: default glslfx variant (inData.Neye vs hairTangent primvar)
 
 ## 1. What was asked
@@ -12,7 +14,7 @@ ADR §9 R4: `usdGenShaders` ships **three** glslfx files (default, translucent, 
 
 ## 2. Method + exact commands
 
-All under `docs/prework/probes/PW-egl/` (EGL headless harness, NVIDIA GB10 via `EGL_EXT_platform_device`, GL 4.6 compat, 1280×720, Storm renderer, color AOV).
+All under `docs/prework/probes/PW-egl/` (EGL headless harness, measurement host via `EGL_EXT_platform_device`, GL 4.6 compat, 1280×720, Storm renderer, color AOV).
 
 Environment for every run:
 
@@ -143,7 +145,7 @@ Observations:
 
 ## 5. Risks / follow-ups
 
-- **Host contention caveat (absolute numbers):** measurements ran on NVIDIA GB10 (driver 580.173.02) while a sibling process (sglang) held ~96 % GPU utilization; absolute ms are inflated vs the Sep-04 research baseline (our ~25.9 ms at 100 k steady sits well above the ~12.2 ms that EV-020/EV-021 interpolate at 100 k; the same-day A vs B/B+ comparison is contention-independent because all cells ran under the same conditions). Re-verify A vs B+ once on an idle workstation before M1's C2/C5 freeze — cheap (two 60-frame runs).
+- **Host contention caveat (absolute numbers):** measurements ran on measurement host (driver 580.173.02) while a another process held ~96 % GPU utilization; absolute ms are inflated vs the Sep-04 research baseline (our ~25.9 ms at 100 k steady sits well above the ~12.2 ms that EV-020/EV-021 interpolate at 100 k; the same-day A vs B/B+ comparison is contention-independent because all cells ran under the same conditions). Re-verify A vs B+ once on an idle workstation before M1's C2/C5 freeze — cheap (two 60-frame runs).
 - **ADR §5.4 cost estimate stale:** "+1.5–2.5 ms per deforming frame if B becomes default" understates the measured ~+12.9 ms; update ADR §5.4 or the performance ledger note when S-8 is closed. (Moot if A is the default, but the number feeds the "B as fallback" budget for non-usdGen-owned curves.)
 - **HGI compile was GL-side only:** the override banner confirms the HGI resource-generation path ran, but the true Metal/Vulkan proxy build is a T4 (workstation/CI) check; `testUsdGenStormHgiResource` (gate S-8's test binary, M1) is the binding validation.
 - **Wire/mesh display styles:** variant A's `inData.Neye` is only valid where the SDR block provides it (RIBBON/HAIR/ROUND/HALFTUBE tessellation). Variant B must stay the fallback for refineLevel-0 (wire) contexts — already the ADR plan; no action.

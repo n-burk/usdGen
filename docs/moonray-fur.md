@@ -79,7 +79,7 @@ delegates log the error but emit the same geometry.
 From a shell with the MoonRay build and the USD prefix on `PATH`:
 
 ```powershell
-$env:PATH = "D:\work\moonray\build-windows\bin;D:\work\usdRig\usd-install\lib;D:\work\usdRig\usd-install\bin;" + $env:PATH
+$env:PATH = "$env:MOONRAY_BUILD\bin;$env:USD\lib;$env:USD\bin;" + $env:PATH
 python tools/fur_gen.py 200000 build/fur_200k.usda
 .\build\usdGenBakeFur.exe build/fur_200k.usda build/fur_200k_shadowed.usda
 hd_usd2rdl -in build/fur_200k.usda -out build/fur_200k.rdla

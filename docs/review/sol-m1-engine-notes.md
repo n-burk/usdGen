@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 > **Review-runner note (qwen, 2026-09-07):** sol (gpt-5.6-sol via codex-sol) was invoked with
 > `-s danger-full-access` because the host bwrap netns is broken and the read-only sandbox cannot
 > start; sol's read-only discipline came from its prompt, not the sandbox. Runner verification:
@@ -110,7 +112,7 @@
 - `python3 usdGenShaders/test/checkC5.py` passes: all three files have the identical frozen 20-input block and match `docs/freezes/C5.md`.
 - Direct Sdr asset parsing succeeds for all three glslfx files with 20 inputs and the expected variant-specific primvars.
 - A manual shipped-schema probe reports `HasAPI("UsdGenMaskAPI") == True`, 22 mask properties, and successful explicit `ApplyAPI`; the formal SI-8 test remains a stub.
-- GPU utilization was 0% (`NVIDIA GB10, 0, 0`). No valid GPU milliseconds were produced, so no contention-qualified timing is reportable.
+- GPU utilization was 0% (`measurement host, 0, 0`). No valid GPU milliseconds were produced, so no contention-qualified timing is reportable.
 
 ## Summary
 

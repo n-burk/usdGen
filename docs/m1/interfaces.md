@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # M1 Interfaces
 
 Interface source of truth for the M1 engine (`libs/usdGen/usdGen`) and the M1

@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # PW-3 — S-9 pre-work: refineLevel-1 "tumble tier" switch cost
 
 ## 1. What was asked
@@ -14,7 +16,7 @@ Complexity → refineLevel mapping (verified against `pxr/usdImaging/usdImagingG
 
 ## 2. Method + exact commands
 
-Toggle benchmark via `bench_refine.cpp` (same EGL/Storm harness as the prototype `bench_hair.cpp`; NVIDIA GB10, EGL device platform, GL 4.6 compat; `UsdImagingGLEngine` + color AOV, 1280×720, single simple light + ambient, `glFinish()` inside the timed region; deform=0 default). Scene: `scene_200k_B.usdc` (200 k × 8 CV = 1.6 M CVs, variant-B glslfx material, Key+Rim distant lights in-scene).
+Toggle benchmark via `bench_refine.cpp` (same EGL/Storm harness as the prototype `bench_hair.cpp`; measurement host, EGL device platform, GL 4.6 compat; `UsdImagingGLEngine` + color AOV, 1280×720, single simple light + ambient, `glFinish()` inside the timed region; deform=0 default). Scene: `scene_200k_B.usdc` (200 k × 8 CV = 1.6 M CVs, variant-B glslfx material, Key+Rim distant lights in-scene).
 
 ```bash
 # env (all runs)
@@ -32,7 +34,7 @@ export PXR_PLUGINPATH_NAME="...usdGenImaging/resources:...usdGenSchema/resources
 ./build/bench_hair scene_200k_B.usdc /World/Cam 1280 720 1.2 20 0   # -> results_s9_steady_benchhair.txt
 ```
 
-**Host-state caveat:** all re-measures ran while a sibling `sglang` GPU workload held ~96 % GPU utilization (`nvidia-smi`: utilization.gpu 96 %, SM clock 2470/3003 MHz, temp 61 °C). Absolute steady-state numbers are therefore inflated vs the idle-state EV-021 baseline; relative (A-vs-B-style) comparisons within the same window remain valid.
+**Host-state caveat:** all re-measures ran while a another GPU workload held ~96 % GPU utilization (`nvidia-smi`: utilization.gpu 96 %, SM clock 2470/3003 MHz, temp 61 °C). Absolute steady-state numbers are therefore inflated vs the idle-state EV-021 baseline; relative (A-vs-B-style) comparisons within the same window remain valid.
 
 ## 3. Raw evidence
 
@@ -225,7 +227,7 @@ Stable across harnesses: **r1 ≈ 26.4–27.0 ms, r2 ≈ 28.4–29.1 ms** (stead
 | refineLevel 1 | **8.17 ms** | ≈ 26.5–27.0 ms | +223 % |
 | refineLevel 2 | **23.93 ms** | ≈ 28.4–29.1 ms | +20 % |
 
-The 2.9× r1-over-r2 lever from EV-021 did **not** reproduce under today's conditions: the r1 cost inflated far more than r2, consistent with a contended integrated GPU (GB10 SoC, sibling `sglang` process at 96 % utilization) adding time-slice wait that hits r1's smaller-GPU-work frames proportionally hardest. The r2 re-measure (≈ 29 ms vs 23.93 ms) is within ~20 % of the EV baseline and corroborates the EV-021 r2 number.
+The 2.9× r1-over-r2 lever from EV-021 did **not** reproduce under today's conditions: the r1 cost inflated far more than r2, consistent with a contended integrated GPU (measurement-host SoC, another process at 96 % utilization) adding time-slice wait that hits r1's smaller-GPU-work frames proportionally hardest. The r2 re-measure (≈ 29 ms vs 23.93 ms) is within ~20 % of the EV baseline and corroborates the EV-021 r2 number.
 
 ## 4. DECISION
 
@@ -233,7 +235,7 @@ The 2.9× r1-over-r2 lever from EV-021 did **not** reproduce under today's condi
 
 ## 5. Risks / follow-ups
 
-- **Host contention:** this host currently runs a sibling `sglang` GPU workload (nvidia-smi: 96 % utilization, 2470/3003 MHz SM clock) which inflates all GL frame times. The switch-cost decision is threshold-robust, but the steady-state r1/r2 comparison is not comparable to EV-021 under these conditions. Follow-up: re-run `bench_refine steady` at 1.1/1.2 on an idle GPU before M5 LOD design; if idle r1 ≈ 8 ms reappears, the tumble-tier economics improve but the measured switch overhead (index rebuild + revalidation, largely CPU-side) still exceeds 3 ms.
+- **Host contention:** this host currently runs a another GPU workload (nvidia-smi: 96 % utilization, 2470/3003 MHz SM clock) which inflates all GL frame times. The switch-cost decision is threshold-robust, but the steady-state r1/r2 comparison is not comparable to EV-021 under these conditions. Follow-up: re-run `bench_refine steady` at 1.1/1.2 on an idle GPU before M5 LOD design; if idle r1 ≈ 8 ms reappears, the tumble-tier economics improve but the measured switch overhead (index rebuild + revalidation, largely CPU-side) still exceeds 3 ms.
 - **First-entry cost:** the one-time r2→r1 switch (~200 ms overhead) means the tumble tier would need to be *warmed up* (pre-enter r1 once) to be usable interactively — another argument against shipping it.
 - **Toggle cadence:** the spec's 10-frame toggle interval was used verbatim; a slower toggle cadence in a real tumble tier would amortize nothing, since switch cost is per-transition, not per-frame.
 - Draw-batch counts on level switch were not recorded (Storm does not expose them through the usdImagingGL harness); pixel/behavior equivalence of r1 vs r2 output is visually untested here.

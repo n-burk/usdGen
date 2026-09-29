@@ -1867,7 +1867,7 @@ sampler from `prototypes/data-plane-benchmark/sampler.h` is carried into `usdGen
 Tiers (S45, ADR §9 R2; definitions in `10-build-dependencies-testing.md` §5.1): **T1** headless
 scene-index tests over the real `UsdImagingCreateSceneIndices` chain, sub-100 ms, no GL — the primary
 regression suite; **T2** Storm correctness and GPU timing headlessly through the EGL
-device-platform context (`prototypes/storm-hair-look/eglctx.h`, which renders on the GB10); **T3**
+device-platform context (`prototypes/storm-hair-look/eglctx.h`, which renders on the measurement host); **T3**
 `testusdview` under the scratchpad Xvfb (CPU numbers only); **T4** workstation protocols, which are
 release criteria and never milestone exits (R39). **T0** needs neither Hydra nor a stage
 (`03-execution-engine.md`); nothing in this document is T0.

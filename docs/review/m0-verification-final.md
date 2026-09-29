@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # M0 final verification — gatekeeper report (final)
 
 - **Role:** m0-gatekeeper-2 (final M0 exit gate, independent re-verification)

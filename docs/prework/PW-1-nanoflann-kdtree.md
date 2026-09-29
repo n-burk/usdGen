@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # PW-1 — E-4 pre-work: nanoflann KD-tree capture-cost check
 
 ## 1. What was asked

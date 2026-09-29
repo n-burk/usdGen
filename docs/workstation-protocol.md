@@ -47,9 +47,11 @@ Two facts about the 26.08 toolchain shape every command here:
 
 ```sh
 # --- machine constants (export once per session) ---------------------------
-export USD=$USD            # OpenUSD 26.08 install prefix
-export PY=$VENV/bin/python3              # python 3.12 with the USD python stack
-export GEN=<usdgen-src>                   # usdGen repo (source + build tree)
+# Run from the repository root, or set USDGEN_SRC to that root.
+export GEN="${USDGEN_SRC:-$PWD}"
+export USD="${USD:?Set USD to the OpenUSD 26.08 install prefix}"
+export PY="${VENV:+$VENV/bin/python3}"
+export PY="${PY:-python3}"
 
 # --- sanity (run once; every section assumes it passes) ---------------------
 test -x "$USD/bin/usdcat"

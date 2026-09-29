@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # ADR S-8: HGI resource generation stays opt-in (B is the default)
 
 Date: 2026-09-09 — Milestone M1 exit gate S-8 (plan/09 §5.3, PW decision).
@@ -12,7 +14,7 @@ shipping default for the usdGen Storm path.
 
 ## Evidence
 
-- `ctest -R testUsdGenStormHgiResource` (T2, EGL headless, GB10,
+- `ctest -R testUsdGenStormHgiResource` (T2, EGL headless, measurement host,
   GL 4.6.0 NVIDIA 580.173.02): both branches render the L-2 scene at
   complexity 1.2, 256x256; **A/B mean pixel difference = 0.00000** (bit-parity)
   and the B branch is bit-stable across re-renders.

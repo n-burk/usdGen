@@ -737,7 +737,7 @@ test binary owned by `10-build-dependencies-testing.md`.
 |---|---|---|---|
 | T0 engine and build | `testUsdGenMath`, `testUsdGenKernelDeterminism`, `testUsdGenGraph`, `testUsdGenOps`, `benchUsdGenChain`, `benchUsdGenSparse`, `benchUsdGenKnn`, `benchUsdGenMemory`, `testUsdGenExpr`, `testUsdGenPtex`, `testUsdGenLinkRule_*` — the spellings of `10-…` §5.6 | B-1; E-1, E-1r, E-2 … E-8; L-3, L-4 (T0 half); T-EXPR-1, T-PTEX-1 | every commit |
 | T1 scene index | headless over the real `UsdImagingCreateSceneIndices` chain with a recording observer | SI-1 … SI-11; T-2; T-INST-1/2; L-4 (T1 half), L-5; `testUsdGenContracts`, `testUsdGenAbi`, `testUsdGenSkelInterop`, `testUsdGenFrozenReentry`, `testUsdGenStageEdits` | every commit — the primary regression suite |
-| T2 Storm | the EGL device-platform harness on the GB10, driver `benchUsdGenStorm` (`09-…` §4.1) | S-1 … S-12 (S-10 at M8, S-11 record-only at M7, S-12 at M1); L-1, L-2; golden-image demos (not gate ids) | every commit (correctness), nightly (timing) |
+| T2 Storm | the EGL device-platform harness on the measurement host, driver `benchUsdGenStorm` (`09-…` §4.1) | S-1 … S-12 (S-10 at M8, S-11 record-only at M7, S-12 at M1); L-1, L-2; golden-image demos (not gate ids) | every commit (correctness), nightly (timing) |
 | T3 app | `testusdview` and `usdrecord --renderer GL` under Xvfb `:77`, llvmpipe — **CPU numbers, never quoted as Storm numbers** | T-1, T-3, T-4, T-5 | pre-merge |
 | T4 workstation | `docs/workstation-protocol.md` §§1–11, written at M0, run by the M7 T4-protocol runner (`10-…` §5.2) | R-1, R-2, R-3, RC-4 | release only |
 

@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # M1 compile lane — notes (2026-07)
 
 Lane goal (m1-compile): make the whole tree build and keep the 13 M0 tests green.
