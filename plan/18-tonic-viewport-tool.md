@@ -31,7 +31,7 @@ only, and every later phase's usdview exit was met at the ABI, not in the viewpo
 
 One dockable **Tonic workspace**, one **viewport controller**, six modes on a shelf with number keys,
 everything the artist looks at drawn by Hydra through the Tonic scene index, and three menu items.
-Maya/Tonic conventions: left-click acts in the current mode, `Alt`/`Meta` drags always belong to the
+a DCC/Tonic conventions: left-click acts in the current mode, `Alt`/`Meta` drags always belong to the
 camera, `Escape` cancels the live gesture, `Ctrl+Z`/`Ctrl+Y` undo/redo the model, number keys switch
 modes, letters switch sub-modes inside a mode, `[`/`]` change the brush radius.
 
@@ -151,13 +151,10 @@ mark `GIZMO`/`BRUSH` dirty. The scene index turns them into the `gizmo` and `bru
 hit-testing is screen-space in Python (`tonicMath.gizmoHit(viewProj, w, h, x, y, origin, frame,
 sizeWorld)`), unit-tested Qt-free.
 
-### 2.4a The viewport look (reference: the public Tonic stills)
+### 2.4a The viewport look
 
-The reference images are the WDAS Tonic technology-page hero, Simmons/Whited EG 2014 Fig. 1
-(c)(d)(e), Kaur/Simmons/Whited SIGGRAPH 2018 Figs. 1, 2 and 4, and Kaur et al. SIGGRAPH 2024
-Fig. 1 (all listed in the clean-room brief's "Screenshots & examples" tab; copies of the PDFs and
-the hero JPEG are in the session scratchpad `ref/`). What they consistently show, and what the
-index must therefore draw:
+The scene index draws the authoring model in its own terms. There is no external
+still, film frame, or local PDF to match. What the index draws:
 
 | Element | Reference look | Implementation |
 |---|---|---|
@@ -170,7 +167,7 @@ index must therefore draw:
 | Guides | thin lines, coloured by their clump (2014 (e), 2018 Fig. 2 middle) | `guides/L<n>` gets `displayColor` uniform per curve = clump colour; the hair-preview material keeps its width/shading; when "show amplified hair" is on, the amplified tiles draw in their own material and the guides hide |
 | Scalp graph | nodes as dots, edges as lines on the head (2014 (d)) | as today; node dots white, shared edges solid white, border edges dashed grey, selected/hovered yellow |
 | Selection | selected tube brighter with a rim; hover a lighter tint | `selected` primvar → glslfx rim (kept) + 15 % lightness lift; hover = 8 % lift, no rim |
-| Gizmo / brush | Maya-style translate gizmo (red/green/blue axes, yellow when active), brush ring as a thin circle | `gizmo` and `brushRing` prims with the unlit overlay material |
+| Gizmo / brush | host-application translate gizmo (red/green/blue axes, yellow when active), brush ring as a thin circle | `gizmo` and `brushRing` prims with the unlit overlay material |
 
 The palette (sRGB, chosen to match the stills' saturation): `#2F6BFF #FFD400 #E0248F #4CD62B #8A3FFF #FF7A1A #00C8D6 #FF3B3B #A6E22E #F062F0 #1FA3FF #FFB000 #17C77A #C43CFF #FF5E9A #7BD3FF`,
 indexed `regionId mod 16`; a T0 test checks that neighbouring regions in `tonic-graph-scalp.usda`

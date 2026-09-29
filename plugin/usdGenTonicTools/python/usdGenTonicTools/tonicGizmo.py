@@ -540,7 +540,7 @@ class GizmoState:
     def pieSlice(self):
         """(polygon in physical pixels, rgb) of the rotation wedge, or None.
 
-        Maya's rotation-amount pie (RigExec PieSlice): the centre plus the
+        the host application's rotation-amount pie (RigExec PieSlice): the centre plus the
         arc of the grabbed ring from where it was pressed through the swept
         angle, drawn in the ring's own colour.  Only ring and view drags
         have one; the free ball has no arc to fill.
@@ -705,7 +705,7 @@ class GizmoState:
 
         Axis handles project the pixel travel onto the axis's press-time
         screen span (the vendored AxisDragParameter, floored at
-        MIN_AXIS_PIXELS logical pixels), which is the Maya feel: the handle
+        MIN_AXIS_PIXELS logical pixels), which is the host application feel: the handle
         follows the cursor's component along the axis and ignores the rest.
         With `ctrl` -- read on EVERY sample, as RigExec's DragState does --
         an axis moves in the plane PERPENDICULAR to it instead (parity G07).
@@ -790,7 +790,7 @@ class GizmoState:
         return now / was
 
     def rotationDrag(self, camera, x, y):
-        """(worldAxis, radians) for the live Maya rotation handle."""
+        """(worldAxis, radians) for the live the host application rotation handle."""
         import math
         if not self._dragging or self.kind != GIZMO_ROTATE:
             return None

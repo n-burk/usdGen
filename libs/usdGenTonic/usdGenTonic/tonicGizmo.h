@@ -19,7 +19,7 @@
 //
 // Geometry, in world units, from one record:
 //
-//   translate      Maya-style RGB axis arrows, one planar square for each
+//   translate      host-application RGB axis arrows, one planar square for each
 //                  two-axis move, and a cyan centre square for free
 //                  camera-plane moves.  The active handle is yellow.
 //   ringTRS        a circle in the frame's uv plane (handle 0) plus the

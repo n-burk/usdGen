@@ -73,7 +73,7 @@ of a complete SeExpr or CUDA evaluator.
 
 ## Qwen review evidence
 
-`qwen3.8-flash-next` reviewed the vendored-subset situation and recommended
+`<local-model>` reviewed the vendored-subset situation and recommended
 requiring the complete upstream frontend, then applying a strict host-side
 AST/function whitelist before CUDA lowering. It specifically warned against a
 toy parser and silent host/CUDA type-semantic divergence.

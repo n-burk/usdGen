@@ -10,7 +10,7 @@
 //   usdGen/rest/normals             VtVec3fArray (Mesh normals at Default)
 //   usdGen/rest/normalsInterpolation TfToken
 //
-// Rest points are `primvars:rest` when authored (the Houdini convention,
+// Rest points are `primvars:rest` when authored (the a DCC convention,
 // S12 — it passes through the chain untouched), otherwise the deformed
 // `points` opinion at UsdTimeCode::Default(). Live leaves re-read Default
 // time after edits, including through cached handles. They never register

@@ -16,12 +16,12 @@ Probes: `docs/prework/probes/PW-1/` (`compile_probe.cpp`, `bench_knn.cpp`, `Make
 
 ```bash
 # compile probe — exact roadmap instantiation
-g++ -std=c++17 -O3 -DNDEBUG -w -I /home/burkard/work/usdGen/thirdparty/nanoflann \
+g++ -std=c++17 -O3 -DNDEBUG -w -I <usdgen-src>/thirdparty/nanoflann \
     compile_probe.cpp -o compile_probe -lpthread
 ./compile_probe
 
 # benchmark — matches the repo's Release flags (CMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG")
-g++ -std=c++17 -O3 -DNDEBUG -w -I /home/burkard/work/usdGen/thirdparty/nanoflann \
+g++ -std=c++17 -O3 -DNDEBUG -w -I <usdgen-src>/thirdparty/nanoflann \
     bench_knn.cpp -o bench_knn -lpthread
 ./bench_knn 7   # run 1
 ./bench_knn 11  # run 2

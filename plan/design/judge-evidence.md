@@ -3,7 +3,7 @@
 Judge: **correctness against the settled constraints S1–S46 and the measured evidence.**
 Scope: `design/proposal-artist.md`, `design/proposal-performance.md`, `design/proposal-risk.md`,
 scored per open area D1–D8. Every API name asserted below was re-verified by grep in
-`/home/burkard/work/OpenUSD` (tag v26.08, `ee47c679a`); every number was re-checked against the
+`<openusd-src>` (tag v26.08, `ee47c679a`); every number was re-checked against the
 report it is quoted from. Findings are stated as file:line or `report §` so they can be audited.
 
 ---
@@ -121,13 +121,13 @@ F" frames the hair.
 
 ### D4 Operator catalogue — artist 9, performance 8, risk 8
 
-Artist wins on vocabulary parity: every operator carries a column naming its XGen/Houdini/Unreal
+Artist wins on vocabulary parity: every operator carries a column naming its a host groomer/a DCC/a host renderer
 equivalent, and §6.4's "rules every operator obeys" is the most transferable half-page in the three
 documents — in particular `hash(seed, curveId, salt)` with a **per-operator salt** so two
 `UsdGenClump`s with the same seed do not correlate. Performance's catalogue adds a "what the capture
 epoch caches" column, which is the column an implementer actually needs. Risk's parameter lists are
-the most complete (its `Clump` row carries the whole XGen set) and it is the only one that specifies
-the **emitted** primvars — `clumpId_<level>`, `guideIndex[3]`/`guideWeight[3]` at Unreal's arity —
+the most complete (its `Clump` row carries the whole a host groomer set) and it is the only one that specifies
+the **emitted** primvars — `clumpId_<level>`, `guideIndex[3]`/`guideWeight[3]` at a host renderer's arity —
 so a bake round-trips.
 
 ### D5 Look — artist 9, performance 8, risk 9

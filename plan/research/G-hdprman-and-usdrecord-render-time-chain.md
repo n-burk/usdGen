@@ -1,15 +1,15 @@
 # G — hdPrman and usdrecord: the render-time scene-index chain (OpenUSD 26.08)
 
-Path abbreviations: `P/` = `/home/burkard/work/OpenUSD/third_party/renderman/plugin/hdPrman/`,
-`U/` = `/home/burkard/work/OpenUSD/pxr/`. All line numbers are from the v26.08 tree on disk.
+Path abbreviations: `P/` = `<openusd-src>/third_party/renderman/plugin/hdPrman/`,
+`U/` = `<openusd-src>/pxr/`. All line numbers are from the v26.08 tree on disk.
 
 ## 0. Scope and corrections to A2/A4
 
 A2 (§ "hdPrman is not in this tree", A2:233-236, A2:717) and A4 (A4:315, A4:394) marked hdPrman
 behaviour UNVERIFIED. It is in the tree under `third_party/renderman` (built only with
-`PXR_BUILD_PRMAN_PLUGIN=ON`, default OFF — `/home/burkard/work/OpenUSD/CMakeLists.txt:47-52`,
-`/home/burkard/work/OpenUSD/cmake/defaults/Options.cmake:27`). The local install
-`/home/burkard/work/OpenUSD_26_08/plugin/usd/` contains only `hdStorm`, `hioAvif`, `hioOpenEXR`,
+`PXR_BUILD_PRMAN_PLUGIN=ON`, default OFF — `<openusd-src>/CMakeLists.txt:47-52`,
+`<openusd-src>/cmake/defaults/Options.cmake:27`). The local install
+`$USD/plugin/usd/` contains only `hdStorm`, `hioAvif`, `hioOpenEXR`,
 `sdrGlslfx`, `usdShaders` — **no hdPrman binary exists on this machine**, so everything below is
 source-verified, not run-verified. The findings resolve the four questions posed:
 
@@ -218,7 +218,7 @@ hdPrman itself reads that value from the terminal SI: `HdUtils::GetCurrentFrame(
 - Dependency forwarding is the same `HdDependencyForwardingSceneIndex` at phase 1000 AtEnd in hdPrman (`P/dependencyForwardingSceneIndexPlugin.cpp:29-50`) and Storm (`hdSt/dependencyForwardingSceneIndexPlugin.cpp:42-46`, `hdSt/plugInfo.json:31-43`); upstream declarers differ (`P/dependencySceneIndexPlugin.cpp:63-81` phase 900 vs `hdSt/dependencySceneIndexPlugin.cpp:44-57` phase 100).
 - No hdPrman-owned hdGp resolver (`CHANGELOG.md:2188-2191`; grep of `P/` shows only comments and CMake link `P/CMakeLists.txt:81`); the universal one is gated by `HDGP_INCLUDE_DEFAULT_RESOLVER` default false (`hdGp/sceneIndexPlugin.cpp:25-27,60-66`) and unset by usdrecord/usdview.
 - usdrecord: `usdrecord.py:373-394` → `frameRecorder.cpp:460-484` → `engine.cpp:741-750`, `:483-498`, `:2062-2073`; hdPrman reads `currentFrame` via `HdUtils::GetCurrentFrame` (`P/renderSettings.cpp:278-291`, `hd/utils.cpp:87-108`) and `rileyGlobalsSceneIndex.cpp:183-198`.
-- hdPrman is not built or installed locally (`/home/burkard/work/OpenUSD_26_08/plugin/usd/` lacks it; `PXR_BUILD_PRMAN_PLUGIN` default OFF, `Options.cmake:27`).
+- hdPrman is not built or installed locally (`$USD/plugin/usd/` lacks it; `PXR_BUILD_PRMAN_PLUGIN` default OFF, `Options.cmake:27`).
 
 ## Open questions
 

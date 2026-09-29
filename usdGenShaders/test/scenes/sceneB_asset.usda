@@ -54,7 +54,7 @@ def Xform "World"
 
             def Shader "GlslfxSurface"
             {
-                custom asset info:glslfx:sourceAsset = @/home/burkard/work/usdGen/usdGenShaders/resources/shaders/usdGenHairPreviewPrimvar.glslfx@
+                custom asset info:glslfx:sourceAsset = @../../resources/shaders/usdGenHairPreviewPrimvar.glslfx@
                 uniform token info:implementationSource = "sourceAsset"
                 float inputs:randomValue = 0.25
                 color3f inputs:rootColor = (0.03, 0.014, 0.006)

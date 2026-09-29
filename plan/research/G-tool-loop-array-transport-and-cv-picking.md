@@ -5,11 +5,11 @@ leaves open. Everything below is either **measured on this host** (commands and
 probe sources in the appendix), **read in the source** with `file:line`, or
 explicitly marked UNMEASURED with a workstation protocol.
 
-Abbrev: `USD` = `/home/burkard/work/OpenUSD` (tag v26.08), `INST` =
-`/home/burkard/work/OpenUSD_26_08`, `RIG` = `/home/burkard/work/usdRig`,
-`P` = `/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/tool-loop`.
+Abbrev: `USD` = `<openusd-src>` (tag v26.08), `INST` =
+`$USD`, `RIG` = `<usdrig-src>`,
+`P` = `<session-scratch>`.
 
-Measurement conditions: aarch64, 20 CPUs, python 3.12.3 (`/home/burkard/.venv`),
+Measurement conditions: aarch64, 20 CPUs, python 3.12.3 (`$VENV`),
 `PYTHONPATH=$INST/lib/python3.12/site-packages`. All numbers reported as
 **best-of-N** with the median beside them; the runs quoted in the tables were
 taken at `load average: 0.37–0.47` (`uptime` before/after each). An earlier
@@ -23,7 +23,7 @@ this is itself a finding.
 ### 1.1 The venv now has numpy and pybind11 (installed, verified)
 
 ```
-$ /home/burkard/.venv/bin/pip install numpy pybind11
+$ $VENV/bin/pip install numpy pybind11
 Successfully installed numpy-2.5.2 pybind11-3.1.0
 ```
 `numpy 2.5.2` (cp312 aarch64 manylinux wheel), `pybind11 3.1.0`. Both import
@@ -513,14 +513,14 @@ All under `P` = `…/scratchpad/probes/tool-loop/`:
 | `bench_transport.py` (§1.2), `bench_stroke.py` (§1.4, §1.6), `bench_pick_cpu.py` / `bench_pick_cpp.py` (§2.4) | run as `REPS=101 python bench_transport.py 100000`; raw output in `bench_*.log` |
 
 Every python run needs
-`PYTHONPATH=/home/burkard/work/OpenUSD_26_08/lib/python3.12/site-packages:.`
-and `/home/burkard/.venv/bin/python3`.
+`PYTHONPATH=$USD/lib/python3.12/site-packages:.`
+and `$VENV/bin/python3`.
 
 ---
 
 ## Key facts
 
-- `numpy 2.5.2` and `pybind11 3.1.0` installed cleanly into `/home/burkard/.venv`
+- `numpy 2.5.2` and `pybind11 3.1.0` installed cleanly into `$VENV`
   (`pip install numpy pybind11`) and coexist with `pxr`; a pxr_boost.python
   module also builds out-of-tree against the install
   (`$INST/include/pxr/external/boost/python.hpp`, `libusd_boost.so`,

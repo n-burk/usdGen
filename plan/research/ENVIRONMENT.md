@@ -6,14 +6,14 @@
 - `/usr/bin/Xorg` exists but cannot be started without root.
 
 ## OpenUSD
-- SOURCE: `/home/burkard/work/OpenUSD` at git tag **v26.08** (`ee47c679a`). Read-only for us.
-- INSTALL: `/home/burkard/work/OpenUSD_26_08` (headers in `include/pxr`, libs in `lib`,
+- SOURCE: `<openusd-src>` at git tag **v26.08** (`ee47c679a`). Read-only for us.
+- INSTALL: `$USD` (headers in `include/pxr`, libs in `lib`,
   plugins in `lib/usd/*/resources` and `plugin/usd`, tools in `bin`).
-- Python bindings: **`/home/burkard/work/OpenUSD_26_08/lib/python3.12/site-packages`**
+- Python bindings: **`$USD/lib/python3.12/site-packages`**
   (NOT `lib/python`). Import with:
-  `PYTHONPATH=/home/burkard/work/OpenUSD_26_08/lib/python3.12/site-packages /home/burkard/.venv/bin/python3`
+  `PYTHONPATH=$USD/lib/python3.12/site-packages $VENV/bin/python3`
   Verified working: `pxr.Usd`, `pxr.UsdImagingGL`, `pxr.Usdviewq`.
-- Python interpreter: `/home/burkard/.venv/bin/python3` = **3.12.3**. PySide6 6.11.2 and PyOpenGL
+- Python interpreter: `$VENV/bin/python3` = **3.12.3**. PySide6 6.11.2 and PyOpenGL
   are importable. `pybind11` and `numpy` are NOT installed (checked by an earlier agent).
 - Bundled third party in the install: MaterialX 1.39.5 (incl. `libMaterialXGenGlsl`),
   OpenSubdiv 3.6.1, oneTBB 2020.3.1. **No Ptex, no OpenImageIO, no SeExpr** in the install.
@@ -26,7 +26,7 @@
   install was built without it.
 
 ## What CAN be run here
-- Headless C++ built against the install (`find_package(pxr CONFIG PATHS /home/burkard/work/OpenUSD_26_08)`).
+- Headless C++ built against the install (`find_package(pxr CONFIG PATHS $USD)`).
   g++ 13.3, cmake 3.28.3, ninja available.
 - Headless scene-index work: `UsdImagingCreateSceneIndices`, `HdMergingSceneIndex`,
   `HdFlatteningSceneIndex`, GetPrim pulls, notice observers. No render delegate needed.
@@ -42,21 +42,21 @@
   workstation with a display**, and clearly labelled UNMEASURED in the plan. Never invent numbers.
 
 ## usdRig
-- `/home/burkard/work/usdRig`, branch `main`, working tree clean at session start. **Do not modify it.**
-  Build only out-of-tree: `cmake -S /home/burkard/work/usdRig -B <scratch>/usdRigBuild -DUSD_INSTALL_DIR=/home/burkard/work/OpenUSD_26_08 -DCMAKE_PREFIX_PATH=/home/burkard/work/OpenUSD_26_08`.
+- `<usdrig-src>`, branch `main`, working tree clean at session start. **Do not modify it.**
+  Build only out-of-tree: `cmake -S <usdrig-src> -B <scratch>/usdRigBuild -DUSD_INSTALL_DIR=$USD -DCMAKE_PREFIX_PATH=$USD`.
 - `bin/_env.sh` hard-codes python3.11 and sibling `usd-install`/`usd-pr4156-venv` paths that do
-  not exist here; set `USD=/home/burkard/work/OpenUSD_26_08` and override `PY_SITE` yourself.
+  not exist here; set `USD=$USD` and override `PY_SITE` yourself.
 - README marks Linux as "intended, not yet verified".
 
 ## Target project
-- `/home/burkard/work/usdGen` exists and is EMPTY. The new plugin is expected to live there as a
+- `<usdgen-src>` exists and is EMPTY. The new plugin is expected to live there as a
   sibling project (working name **usdGen**, C++ namespace/prefix `UsdGen`, USD property namespace
   `usdGen:`), consuming the unmodified OpenUSD install, and optionally `find_package(rigExec)`.
 
 ## CORRECTIONS (2026-09-04, after the verification round — these override the sections above)
-- `pybind11` 3.1.0 and `numpy` 2.5.2 ARE installed in `/home/burkard/.venv` (installed during
+- `pybind11` 3.1.0 and `numpy` 2.5.2 ARE installed in `$VENV` (installed during
   the verification round). `ninja` 1.13.2 is installed in the venv too
-  (`/home/burkard/.venv/bin/ninja`; pass `-DCMAKE_MAKE_PROGRAM` or put the venv bin on PATH).
+  (`$VENV/bin/ninja`; pass `-DCMAKE_MAKE_PROGRAM` or put the venv bin on PATH).
 - **Storm CAN run headlessly here, two ways:**
   1. GPU-accelerated on the NVIDIA GB10 via an EGL device-platform context
      (`EGL_EXT_platform_device`, compatibility profile, 64x64 pbuffer). Harness:

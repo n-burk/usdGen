@@ -178,8 +178,8 @@ error, not a tuning problem: Storm has already spent the rest of the frame.
 ## 1. The five nouns, and the Hydra-only render scope
 
 usdGen names the artist's model once and never re-names it downstream (`design/proposal-artist.md` §2,
-ADR §2.1-2.2). An XGen artist thinks *description -> generator -> modifiers -> guides -> maps -> a look*;
-a Houdini artist thinks *a chain of SOPs with masks*. Both land on the same five nouns, and every
+ADR §2.1-2.2). An a host groomer artist thinks *description -> generator -> modifiers -> guides -> maps -> a look*;
+a DCC artist thinks *a chain of SOPs with masks*. Both land on the same five nouns, and every
 concrete usdGen prim type in ADR §2.1's hierarchy is an instance of one of them.
 
 | Artist noun | usdGen prim | Hydra consequence |
@@ -602,7 +602,7 @@ republishes the same generation. Consequences that must not be violated:
 
 ### 5.1 Targets
 
-Sibling CMake project at `/home/burkard/work/usdGen`, consuming the unmodified OpenUSD install and
+Sibling CMake project at `<usdgen-src>`, consuming the unmodified OpenUSD install and
 mirroring usdRig's layout and generated-plugInfo pattern verbatim (S44). The normative target
 registry, with the full link and install detail, is `10-build-dependencies-testing.md` §1.2 (§1.3 the
 dependency rule, §1.6 the target-to-milestone schedule, §3.4 the install tree, §4.4 the plugInfo
@@ -638,7 +638,7 @@ Every name in the Links column is a **CMake target**, not a file name. The insta
 `add_library(<name> SHARED IMPORTED)` per library — `arch js plug tf gf vt ts ar sdf sdr usd usdGeom
 usdShade work trace hf hio pxOsd hd hdsi hdSt hgiGL usdImaging usdImagingGL usdAppUtils boost python`
 are the ones named above (all verified in
-`/home/burkard/work/OpenUSD_26_08/cmake/pxrTargets.cmake`) — whose shared objects are `libusd_vt.so` and
+`$USD/cmake/pxrTargets.cmake`) — whose shared objects are `libusd_vt.so` and
 friends. There is no `usd_vt` target, and `target_link_libraries(... usd_vt)` does not resolve.
 
 ### 5.2 The dependency rule
@@ -951,8 +951,8 @@ arithmetic and the 1 954-chunk figure); `11-roadmap.md` §1 (PW-1…PW-6), §2.1
 `appendix-A-evidence-ledger.md` §2 (every `EV-nnn` cited above), §2.11 (the DERIVED and ASSUMPTION
 provenance), §3.6 (the Storm material, fastpath and upload facts).
 
-**OpenUSD 26.08** (`/home/burkard/work/OpenUSD`, tag v26.08; the install built against is
-`/home/burkard/work/OpenUSD_26_08`, whose `cmake/pxrTargets.cmake` defines §5.1's imported target names).
+**OpenUSD 26.08** (`<openusd-src>`, tag v26.08; the install built against is
+`$USD`, whose `cmake/pxrTargets.cmake` defines §5.1's imported target names).
 Every API name and line range above was re-grepped while writing this. Six the architecture would be
 invalid without: `usdImaging/sceneIndices.cpp:240, :282, :287, :295, :298, :302` with
 `usdImaging/niPrototypePropagatingSceneIndex.cpp:204` (propagation and flattening precede the plugin

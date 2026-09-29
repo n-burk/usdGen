@@ -13,8 +13,7 @@
 # and ctest does not run it. It is captureTonicWorkspace's sibling: that
 # one frames the whole workspace on the 4x4 graph fixture, this one
 # frames the VIEWPORT alone on the committed braid hierarchy, which is
-# the scene plan/18 section 2.4a names for the side-by-side with
-# Simmons/Whited EG 2014 Fig. 1 (c)+(d).
+# the scene plan/18 section 2.4a uses for the viewport look.
 #
 # What the shot has to show: the L1 parent x-rayed, its L2 children solid
 # and focused (thick center curves, 8 px CV dots), the guide preview in

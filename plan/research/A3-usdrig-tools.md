@@ -3,10 +3,10 @@
 Research report for the usdGen (hair/fur grooming) plan. Every claim cites
 `absolute/path:line`; anything not read directly is marked UNVERIFIED.
 Line numbers are for the files as of commit `c92c040` (usdRig) and tag
-`v26.08` (OpenUSD source at `/home/burkard/work/OpenUSD`).
+`v26.08` (OpenUSD source at `<openusd-src>`).
 
-Abbreviations: `RIG` = `/home/burkard/work/usdRig`, `USD` =
-`/home/burkard/work/OpenUSD`, `UVQ` = `USD/pxr/usdImaging/usdviewq`,
+Abbreviations: `RIG` = `<usdrig-src>`, `USD` =
+`<openusd-src>`, `UVQ` = `USD/pxr/usdImaging/usdviewq`,
 `PLUG` = `RIG/plugin/rigExecUsdview`.
 
 ---
@@ -634,8 +634,8 @@ tests listed in `SCHEMA_TESTS`.
 
 `RIG/bin/_env.sh:12-32` assumes `usd-install` and `usd-pr4156-venv` as
 siblings and hard-codes `PY_SITE="$USD/lib/python3.11/site-packages"` (22).
-Here the install is `/home/burkard/work/OpenUSD_26_08` with `lib/python`
-for Python 3.12 and the venv is `/home/burkard/.venv` (task statement), and
+Here the install is `$USD` with `lib/python`
+for Python 3.12 and the venv is `$VENV` (task statement), and
 the README says Linux is "intended, but not yet verified" (`RIG/README.md`
 platform table). A usdGen env script should derive the site-packages path
 from the interpreter (or glob `lib/python*/site-packages`, as

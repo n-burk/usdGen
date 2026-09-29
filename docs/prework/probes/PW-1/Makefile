@@ -1,6 +1,6 @@
 # PW-1 / E-4 probes. Reproduce with: make run
 # Release-equivalent flags (build/CMakeCache.txt: CMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG).
-NANOFLANN := /home/burkard/work/usdGen/thirdparty/nanoflann
+NANOFLANN := <usdgen-src>/thirdparty/nanoflann
 CXX       ?= g++
 CXXFLAGS  := -std=c++17 -O3 -DNDEBUG -w
 LDLIBS    := -lpthread

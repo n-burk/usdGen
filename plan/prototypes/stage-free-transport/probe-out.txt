@@ -57,7 +57,7 @@ UsdPrimDefinition::GetPropertyNames():
     usdGen:map  [container]
       interpolation  [sampled] = (TfToken) constant
       role  [null]
-      primvarValue  [sampled] = SdfAssetPath{path='maps/density.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/density.exr'}
+      primvarValue  [sampled] = SdfAssetPath{path='maps/density.exr', resolved='<session-scratch>'}
     usdGen:rampKnots  [container]
       interpolation  [sampled] = (TfToken) constant
       role  [null]
@@ -65,7 +65,7 @@ UsdPrimDefinition::GetPropertyNames():
     usdGen:udimMap  [container]
       interpolation  [sampled] = (TfToken) constant
       role  [null]
-      primvarValue  [sampled] = SdfAssetPath{path='maps/clump_<UDIM>.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/clump_<UDIM>.exr'}
+      primvarValue  [sampled] = SdfAssetPath{path='maps/clump_<UDIM>.exr', resolved='<session-scratch><UDIM>.exr'}
   usdMaterialBindings  [null]
   geomModel  [null]
   model  [null]
@@ -120,11 +120,11 @@ UsdPrimDefinition::GetPropertyNames():
   primvars:rest @t=24 = (VtArray<GfVec3f>) [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
 
 ===== 2. direct data sources (UsdImagingDataSourceAttributeNew) =====  usdGen:map (asset)  authored=1  hasSpline=0  mightVary=0
-    @0.0  = SdfAssetPath{path='maps/density.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/density.exr'}
+    @0.0  = SdfAssetPath{path='maps/density.exr', resolved='<session-scratch>'}
     contributingSampleTimes(-0.25,0.25) = 0 {}
     usd GetTimeSamplesInInterval(0,30) = {}
   usdGen:mapArray (asset[])  authored=1  hasSpline=0  mightVary=0
-    @0.0  = SdfAssetPath[]{('maps/clump_1001.exr','/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/clump_1001.exr') ('maps/does_not_exist.exr','') }
+    @0.0  = SdfAssetPath[]{('maps/clump_1001.exr','<session-scratch>') ('maps/does_not_exist.exr','') }
     contributingSampleTimes(-0.25,0.25) = 0 {}
     usd GetTimeSamplesInInterval(0,30) = {}
   usdGen:ramp:knots (float2[])  authored=1  hasSpline=0  mightVary=0
@@ -175,7 +175,7 @@ UsdPrimDefinition::GetPropertyNames():
 ===== 4. UsdImagingDataSourceMapped with nested locators + custom REST factory =====  container names: clumpRadius inputs map ramp surface
     clumpRadius  [sampled] = (float) 0.9  contribTimes{-0.25 0.25 }
     inputs  [sampled] = (SdfPath) /World/Gen
-    map  [sampled] = SdfAssetPath{path='maps/density.exr', resolved='/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/maps/density.exr'}
+    map  [sampled] = SdfAssetPath{path='maps/density.exr', resolved='<session-scratch>'}
     ramp  [container]
       knots  [sampled] = (VtArray<GfVec2f>) [(0, 0), (0.5, 1), (1, 0.2)]
       values  [sampled] = (VtArray<float>) [0, 1, 0.2]

@@ -5,7 +5,7 @@ mode_hierarchy|one thick strand forking into three thinner strands (tree)
 mode_sculpt|comb head over a bent strand
 mode_output|document with a hair strand and an outward arrow
 tool_select|arrow cursor
-tool_move|three orthogonal arrows meeting at a dot (Maya move)
+tool_move|three orthogonal arrows meeting at a dot (a DCC move)
 tool_rotate|two nested arcs with an arrowhead
 tool_scale|three axes ending in small cubes
 sub_graph_region|a closed pentagon of five filled node dots joined by straight edges with a small pencil tip touching the last edge

@@ -1,8 +1,10 @@
-# usdGenTonicTools.tonicGizmoSettings -- the per-tool transform settings
-# behind the Tube panel's gizmo rows (tonic_gizmo_parity G20, G23, G08, G11).
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
 #
-# Vendored from usdRig `plugin/rigExecUsdview/gizmoSettings.py` at 2dcf882
-# (2026-09-16), adapted for Tonic; keep in sync. Qt-free and pxr-free: the
+# usdGenTonicTools.tonicGizmoSettings -- the per-tool transform settings
+# behind the Tube panel's gizmo rows.
+#
+# Adapted for this groom tool. Qt-free and pxr-free: the
 # T0/T1 tests import it without either, and the dock, the viewport keys and
 # the drag code all read the same fields, so a typo is an AttributeError
 # rather than a silent wrong default.

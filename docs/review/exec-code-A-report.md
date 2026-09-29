@@ -204,7 +204,7 @@ Reconfigured + `ninja -C build` clean (only pre-existing TBB deprecation
 pragmas). Full run:
 
 ```
-env LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib \
+env LD_LIBRARY_PATH=$USD/lib \
   ctest --test-dir build -L '^T[01]$' --output-on-failure
 ...
 100% tests passed, 0 tests failed out of 11

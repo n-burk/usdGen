@@ -708,7 +708,7 @@ def testSelectAndGizmo(mods):
     # SL-01's click table: Shift toggles (so it adds an unselected CV),
     # Ctrl removes and never adds -- off every handle.  CV 2's own pixel
     # (200, 75) is within the V axis tip's tolerance, and a Shift press on
-    # a handle now drags it (Maya), so these clicks land in open space.
+    # a handle now drags it (a DCC), so these clicks land in open space.
     session.pickFn = lambda mask, x, y: {
         "kind": tonicLib.TONIC_PICK_CENTER_CV, "id": 0, "subId": 2,
         "subSubId": -1}
@@ -808,7 +808,7 @@ def testSelectAndGizmo(mods):
 
 
 def testGizmoParity(mods):
-    """Parity G07, G08, G11, G23: Ctrl+axis, Maya scale, snaps, free ball."""
+    """Parity G07, G08, G11, G23: Ctrl+axis, the host application scale, snaps, free ball."""
     print("-- Gizmo parity: Ctrl plane, Maya scale, snaps ------------")
     tonicLib = mods["tonicLib"]
     tonicGizmo = mods["tonicGizmo"]
@@ -883,7 +883,7 @@ def testGizmoParity(mods):
           % (dll.centers[0][1],))
     loop.release(sample(mods, session, cam, 287.0, 150.0, ("grid",)))
 
-    # G08: Maya scale -- through the pivot mirrors, unless Prevent
+    # G08: a DCC scale -- through the pivot mirrors, unless Prevent
     # Negative Scale clamps.  A whole tube scales about its root.
     def scaleDrag(prevent):
         dll, session, state, loop = newTube(mods)
@@ -1072,7 +1072,7 @@ def testGizmoPriority(mods):
     state.transformTool = "move"
     loop._placeGizmo(cam)
 
-    # Shift over a handle drags too (Maya); Shift off it is a marquee.
+    # Shift over a handle drags too (a DCC); Shift off it is a marquee.
     dll.reset()
     uTip = cam.worldToPixels(gizmo.axisEndpoint(tonicGizmo.HANDLE_U))
     loop.press(sample(mods, session, cam, uTip[0] - 20.0, uTip[1],
@@ -3272,7 +3272,7 @@ def testDragReadout(mods):
     check(loop.dragReadout() == "", "the release clears the readout")
 
     # Ctrl at the press on an axis moves in the plane whose normal is
-    # that axis (Maya).  An oblique camera, so that plane is not edge-on.
+    # that axis (a DCC).  An oblique camera, so that plane is not edge-on.
     dll, session, state, loop = newTube(mods)
     cam = lookAtCamera(mods["tonicCamera"], (4.0, 3.0, -1.0))
     cv = cam.worldToPixels(CENTERS[1])

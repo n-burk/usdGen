@@ -1,10 +1,9 @@
-# 17 — Tonic-parity groom authoring tool for usdview (`usdGenTonic`)
+# 17 — hierarchical groom authoring tool for usdview (`usdGenTonic`)
 
-Date: 2026-09-18. Status: **proposed overlay** (plan v2). Sources: the clean-room Tonic brief
-(public WDAS sources only: Simmons/Whited EG 2014, Kaur/Simmons/Whited SIGGRAPH 2018, Chun et al.
-SIGGRAPH 2023, Kaur et al. SIGGRAPH 2024, the WDAS Tonic technology page) and the current repository
-state (`13-codebase-alignment.md`, `08-tools.md`, `gpu/tools.h`, `gpu/picking.cu`,
-`ops/sculptLayer.cpp`, `plugin/usdGenTools`).
+Date: 2026-09-18. Status: **proposed overlay** (plan v2). The tool is specified
+from the repository itself (`13-codebase-alignment.md`, `08-tools.md`,
+`gpu/tools.h`, `gpu/picking.cu`, `ops/sculptLayer.cpp`, `plugin/usdGenTools`).
+`usdGenTonic` is the in-tree module name.
 
 This overlay supersedes `08-tools.md` wherever the two disagree about **when the stage is written**
 (§3) and **what the tool authors** (§2). It leaves every other `08-tools.md` decision in force,
@@ -15,14 +14,14 @@ and the workstation protocol.
 
 ## 0. The request, and the three decisions it forces
 
-> Build a usdview plugin that builds / models / sculpts hair in parity with Disney Animation's Tonic
-> in the viewport. CUDA powered, feature parity, easy for artists to use like Tonic. Instead of XGen
-> it creates data for usdGen. **Viewport-only authoring that does not commit data to the stage
+> Build a usdview plugin that builds, models, and sculpts hair in the viewport.
+> CUDA powered, and easy for artists to use. It creates data for usdGen.
+> **Viewport-only authoring that does not commit data to the stage
 > synchronously; commit to the UsdStage asynchronously and non-blocking; prioritise interactivity.**
 
-### 0.1 What Tonic is (public contract, `Gaps` honoured)
+### 0.1 What the authoring model is
 
-Tonic is a **hierarchical volume/tube groomer**, not a brush groomer. Its public geometric contract:
+The authoring model is a **hierarchical volume/tube groomer**, not a brush groomer. Its geometric contract:
 
 1. A 2D graph authored on the 3D scalp; nodes are added, removed and dragged during grooming.
 2. Every closed region of that graph is the root set of one **clump**.
@@ -31,18 +30,18 @@ Tonic is a **hierarchical volume/tube groomer**, not a brush groomer. Its public
 5. Guide curves are generated at a **prescribed density**, filling the volume so they reflect the
    center profile and the tube extent.
 6. Volumes must give complete scalp coverage, no root-level intersections, and sufficient smoothness.
-7. Coarse-to-fine: clumps are subdivided; since Moana the hierarchy is **persistent** (children of
-   coarse parents; Wish names the levels L1/L2/L3).
+7. Coarse-to-fine: clumps are subdivided. The hierarchy is **persistent** (children of
+   coarse parents). Levels are named L1, L2, and L3.
 8. A **hierarchical, length-preserving sculpt** deforms children when a parent control curve moves;
    parents are built **bottom-up by recursive averaging**; on-the-fly parents can be made from any
    curve subset, transiently or persistently.
 9. Outputs: tubes, center curves, cross-sections, guides, region/clump maps, hierarchy annotations —
-   consumed by sim (a guide subset) and by the procedural amplifier (XGen: noise, curl, clumping,
+   consumed by sim (a guide subset) and by the procedural amplifier (a host groomer: noise, curl, clumping,
    render-time interpolation).
-10. Wish scale: > 500 K tube vertices with interactive rendering and selection (~60× optimisation).
+10. Reference scale: > 500 K tube vertices with interactive rendering and selection (~60× optimisation).
 
-Explicitly **not** Tonic (and therefore downstream of this tool, in usdGen operators): noise, curl,
-clumping, dense interpolation, brush-painted maps (iGroom), SeExpr. The fill kernel, region-map
+Explicitly **not** this tool (and therefore downstream, in usdGen operators): noise, curl,
+clumping, dense interpolation, and brush-painted maps, plus SeExpr. The fill kernel, region-map
 rasterisation, UI chrome, undo model and file formats are unpublished; everything below in those
 areas is our own design and is labelled as such.
 
@@ -60,7 +59,7 @@ This inverts `08-tools.md` §2.1/§2.4 ("one write at release; the cook runs ins
 design is still the right one for **brush edits on usdGen-generated curves** (the M5 shelf). It is the
 wrong one for a Tonic-style tool, where a single drag on a parent center curve can rewrite tens of
 thousands of tube vertices and re-fill thousands of guides; a synchronous write plus a cook inside
-the repaint would put the Wish-scale groom on the UI thread.
+the repaint would put the reference-scale groom on the UI thread.
 
 **D2 — The tool renders itself through its own scene index, not through the groom cook.** A
 `UsdGenTonicSceneIndex` (a second `HdSceneIndexPlugin`, `plugin/usdGenTonic`) publishes synthetic
@@ -73,12 +72,12 @@ OpenUSD patches). The usdGen cook of the *committed* guides is a separate, lower
 cancellable pass that the artist can toggle ("show amplified hair").
 
 **D3 — The stage contract is the existing usdGen guide contract, plus a small tube schema.** The
-tool's job "instead of XGen" is to emit exactly what usdGen's amplifier already consumes:
+tool's job "instead of a host groomer" is to emit exactly what usdGen's amplifier already consumes:
 `BasisCurves` guides with `UsdGenCurveAPI` (`role = guide`) targeted by `UsdGenGuideInterpolate`'s
 `usdGen:guides`, a region map targeted by its `usdGen:region`, and a `UsdGenDeform` driver set for
 sim/anim. Tubes, scalp graph and hierarchy are stored alongside as new codeless prims
 (`UsdGenTube`, `UsdGenScalpGraph`, §2) so the groom round-trips, but **no usdGen kernel reads them**;
-they are authoring-side only, as Tonic's tubes are authoring-side to XGen.
+they are authoring-side only, as Tonic's tubes are authoring-side to a host groomer.
 
 ---
 
@@ -126,7 +125,7 @@ becomes a usdGen edit only through the committer.
   request (§3). Nothing else. The frame after release is identical to the last move frame.
 * **escape** — restore the press-time base; publish; drop the bracket.
 
-The budget for a move is the tool's own end-to-end **≤ 8 ms** at the Wish reference scene (§7),
+The budget for a move is the tool's own end-to-end **≤ 8 ms** at the reference scene (§7),
 with a fallback ladder that degrades what is *drawn*, never what is *edited*.
 
 ---
@@ -325,7 +324,7 @@ L1 tube with 2 400 L3 descendants is one K6 pass per move (gate TN-1).
 Opening the tool on a stage that already holds a `UsdGenTonicGroom` builds `TonicModel` from the
 prims above. Guides on the stage are **not** re-read as authoritative geometry: they are regenerated
 from tubes + fill params + seed, and the committer asserts bit-equality with the stored guides
-(same kernels, same seed) so a stage produced by the tool always round-trips. Foreign guides (Houdini,
+(same kernels, same seed) so a stage produced by the tool always round-trips. Foreign guides (a DCC,
 hand-authored) are imported as **L3 locked tubes** (§5.7) rather than as fill output.
 
 > **2026-09-19 (V0b, plan/18 §7 G3).** Hydrate rebuilds every level: the L1
@@ -367,7 +366,7 @@ off-thread into a layer that **no stage has opened**, and the main thread does o
   This is a single change-processing pass that resyncs the tool's subtree once. It runs from a Qt
   idle timer (`QTimer.singleShot(0)`), is skipped while a gesture is active, and is skipped if a newer
   version is already being built (the worker will hand a newer layer soon). Measured budget: ≤ 5 ms
-  for a Wish-scale groom (gate TN-4, §7). If the measured swap exceeds the budget, the fallback is
+  for a reference-scale groom (gate TN-4, §7). If the measured swap exceeds the budget, the fallback is
   **partial transfer**: one child prim subtree per idle slot (`SdfCopySpec` per tube), which keeps every
   slot under budget at the cost of a few frames of staleness in the stage — acceptable because the
   viewport is showing the model, not the stage.
@@ -622,7 +621,7 @@ release.
 * **Phase A, host-staged (ships first).** Each published buffer is copied device → pinned host on
   `tonicStream`; the Tonic index hands `VtArray`s that alias the pinned block (`HdVtBufferSource`
   over an external buffer with a keep-alive) so no second copy is made in Python or in Hydra. At the
-  Wish reference (500 K tube verts × 12 B pos + 12 B N ≈ 12 MB) a PCIe 4 copy is ≈ 0.5 ms; Storm's
+  reference (500 K tube verts × 12 B pos + 12 B N ≈ 12 MB) a PCIe 4 copy is ≈ 0.5 ms; Storm's
   upload is the same cost it pays for any changed mesh. This is fully inside the §7 budget.
 * **Phase B, CUDA-GL interop (later).** Route tube meshes and guide previews through
   `UsdGenCudaGlComputation` once the OpenUSD patches (`patches/openusd/`, commit `cb0be00`) are
@@ -922,12 +921,12 @@ hierarchy propagation. Symmetry mirror-X. Falloff by screen radius and by `t`.
   and "Wire Clump to level *n*" (§2.2). "Save groom", "Export center curves" (§5.7).
 * Status line: model version, committed version, swap time, last cook time, GPU memory.
 
-### 5.7 Bridges (contract 9–10, Wish workflow)
+### 5.7 Bridges (contract 9–10, production workflow)
 
 * Export center curves (selected level) as `BasisCurves` to a file layer; import swept meshes or
   curves as **L3 locked tubes** under a chosen parent (a tube whose sections come from the mesh's
-  rings, or a single-curve tube from a curve). This reproduces the Tonic ↔ Houdini braid round trip
-  without any Houdini-specific code.
+  rings, or a single-curve tube from a curve). This reproduces the Tonic ↔ a DCC braid round trip
+  without any a DCC-specific code.
 
 ### 5.8 Explicitly not built (and why)
 
@@ -961,7 +960,7 @@ evidence rules until P0 lands and the first measurements exist.
 
 ## 7. Performance targets and the fallback ladder
 
-**Reference scene ("Wish-scale"):** a 60 K-face scalp, 80 L1 regions, 400 L2 tubes, 2 400 L3 tubes
+**Reference scene ("reference-scale"):** a 60 K-face scalp, 80 L1 regions, 400 L2 tubes, 2 400 L3 tubes
 (20 rings × 16 CVs → ≈ 770 K tube vertices), 12 000 guides × 16 CVs. Built by
 `examples/tools/make_tonic_reference.py`.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT
 // benchUsdGenStorm - M1/M2 storm timing-gate driver (plan/09 S-1/S-2/S-3/S-4/S-5/S-6/S-12).
 //
 // UsdImagingGLEngine + HdStormRendererPlugin on a headless EGL device context

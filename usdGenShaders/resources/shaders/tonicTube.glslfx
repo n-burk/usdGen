@@ -7,10 +7,8 @@
 // publishes under /__usdGenTonic: the per-level tube meshes and, through the
 // overlay material, the center curves, section rings and CV dots.
 //
-// The look is the one the public Tonic stills show (WDAS technology page
-// hero; Simmons/Whited EG 2014 Fig. 1 (c)(d)(e); Kaur/Simmons/Whited
-// SIGGRAPH 2018 Figs. 1, 2, 4): opaque, smoothly shaded tube volumes, ONE
-// saturated colour per clump, no wireframe and no level tint. So this shader
+// The look is opaque, smoothly shaded tube volumes, ONE saturated colour
+// per clump, no wireframe and no level tint. So this shader
 // reads a per-face `clumpColor` primvar and lights it; the level/region
 // colouring that used to live here (levelColor1..3 + a tubeId hue shift)
 // is gone, because the colour is now decided once, in C++, by

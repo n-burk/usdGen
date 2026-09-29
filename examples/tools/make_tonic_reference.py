@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Writes examples/tonic-reference.usda (plan/17 section 7).
 
-The Wish-scale reference scene: a scalp grid partitioned into L1 regions,
+The large reference scene: a scalp grid partitioned into L1 regions,
 an L1/L2/L3 tube hierarchy, guides on the deepest level, and a usdGen
 description that amplifies them. At --wish scale this is the scene the TN
 gates run on (60 K-face scalp, 80 L1 regions, 400 L2 tubes, 2400 L3 tubes,

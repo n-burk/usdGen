@@ -399,7 +399,7 @@ def run(appController):
         wait(10)
         return centre
 
-    # GZ-01 (RigExec/Maya parity): a visible gizmo handle wins the press
+    # GZ-01 (RigExec/a DCC parity): a visible gizmo handle wins the press
     # even over an unselected child CV under it, with no intervening hover.
     # Deliberately lay the existing target gizmo over the sibling's displayed
     # CV.  This changes only the transient overlay; the component targets and

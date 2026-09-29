@@ -1,6 +1,6 @@
 # Tonic authoring tool (usdGenTonicTools)
 
-A usdview plugin for authoring Tonic-parity grooms: draw regions on a
+A usdview plugin for authoring hierarchical grooms: draw regions on a
 scalp, grow tubes, fill them with guides, subdivide into hierarchies, sculpt
 and commit the result as ordinary USD (`UsdGenGroom` + `GuideInterpolate` +
 `RegionMap`) that the usdGen description amplifies downstream. Tubes are
@@ -72,7 +72,7 @@ actions — lives in the dock or on a hotkey.
 9. **Warnings** — hidden while empty; see *Warnings*.
 10. **Display** — **Show generated curves**, **Show amplified hair**,
     **Show diagnostics**, **Ladder enabled** and **Navigation**
-    (Maya / Blender).
+    (a DCC / a DCC).
 11. **Status strip** — the message area, the sync pill, the tool summary,
     the `GPU`/`CPU` chip, the breadcrumb and (with Show diagnostics) the
     version line; see *Status strip*.
@@ -134,7 +134,7 @@ Switching modes drops any live gesture; leaving a mode takes its gizmo,
 brush ring and hover highlight off screen.
 
 In Tube, `F8`–`F11` **convert** the selection to the new kind instead of
-dropping it (Maya's component conversion): a section CV becomes its ring, a
+dropping it (a DCC's component conversion): a section CV becomes its ring, a
 ring the center CV that owns it, a center CV its whole tube, and back down
 (a ring to its section CVs, a center CV to its rings). A whole tube
 converted to a component kind stays as the *owner set*: component clicks
@@ -309,7 +309,7 @@ always use the ring's own frame.
 
 A handle **wins the press** even over a CV dot inside its tolerance, and the
 last-dragged handle stays yellow so a **plain middle drag anywhere repeats
-it** (Maya navigation style), unless the camera has since turned that handle
+it** (a DCC navigation style), unless the camera has since turned that handle
 edge-on (dimmed, ungrabbable): then the middle drag is left to the camera.
 With Move and no modifier, pressing an
 unselected component (or, in Whole tube, a tube body) **selects it and
@@ -506,11 +506,11 @@ the whole scalp. It costs what it says: on the 64-face reference scalp a
 bake is about 43 ms at 128 and about 1 s at 1024 — a debugging and
 hero-bake control, not something to leave on.
 
-## Coming from Maya / Blender
+## Coming from a DCC / a DCC
 
 The Tube gizmo is the RigExec manipulator (`../usdRig/usdRig`
 `gizmoScreen.py`, vendored as `tonicGizmoScreen.py`), so it behaves the way
-Maya and Blender hands expect:
+a DCC and a DCC hands expect:
 
 * **Hit priority.** A handle under the cursor wins the press — centre, then
   planes, then axes, then rings — even when a CV dot sits inside its
@@ -519,14 +519,14 @@ Maya and Blender hands expect:
 * **Colours.** X/Y/Z are red/green/blue in every orientation; a hovered
   handle turns pale yellow, the dragged (and last-dragged) one yellow.
 * **Orientation.** World (default for Move/Scale), Screen, or Tube — the
-  tube's own root frame, Maya's *Object* (default for Rotate); `L` flips
+  tube's own root frame, a DCC's *Object* (default for Rotate); `L` flips
   World ↔ Tube.
 * **Tweak.** Press-drag on an unselected CV, ring or (Whole tube) tube body
   selects and moves it in one gesture.
 * **Selection modifiers.** Shift toggles, Ctrl removes, Ctrl+Shift adds
-  (Maya); a Shift box extends and a Ctrl box subtracts (Blender).
+  (a DCC); a Shift box extends and a Ctrl box subtracts (a DCC).
 
-| Behaviour | Maya | Blender | Tonic |
+| Behaviour | a DCC | a DCC | Tonic |
 |---|---|---|---|
 | Select / Move / Rotate / Scale | `Q` `W` `E` `R` | `G` `R` `S` (modal) | `Q` `W` `E` `R` + the transform row |
 | Handle wins over the component under it | yes | yes | yes |
@@ -535,7 +535,7 @@ Maya and Blender hands expect:
 | Axis colours | red / green / blue | red / green / blue | red / green / blue |
 | Move tip / Scale tip | cone / cube | cone / cube | cone / cube |
 | Plane handles | squares | squares | half-filled squares |
-| Uniform scale (centre square) | horizontal travel, 1 + dx / size; mirrors past zero unless Prevent Negative Scale | `S`, distance from the pivot | as Maya (**Prevent negative scale**) |
+| Uniform scale (centre square) | horizontal travel, 1 + dx / size; mirrors past zero unless Prevent Negative Scale | `S`, distance from the pivot | as a DCC (**Prevent negative scale**) |
 | Constrain to the plane perpendicular to an axis | `Ctrl` + axis | `Shift` + axis key | `Ctrl` + axis |
 | Precision drag | — | `Shift` | `Shift` (a tenth of the travel) |
 | Step snap while dragging | `J` hold | `Ctrl` | `J` hold, or **Step snap** |
@@ -543,14 +543,14 @@ Maya and Blender hands expect:
 | Manipulator size | `+` / `-` | preferences | `+` / `-` (**Manipulator size**) |
 | Global / Local | tool settings (RigExec binds `L`) | orientation menu | `L`, the Global/Local toggle |
 | Pivot for a multi-selection | tool settings (RigExec binds `P`) | pivot menu | `P`: Individual Origins / Selection Centre |
-| Repeat the last handle | middle drag anywhere | — | middle drag anywhere (Maya style); declined while that handle is edge-on |
+| Repeat the last handle | middle drag anywhere | — | middle drag anywhere (a DCC style); declined while that handle is edge-on |
 | Cancel a drag | `Escape` | `Escape` / right-click | `Escape` |
 | Frame the selection | `F` | numpad `.` | `F` |
-| Orbit / pan / dolly | `Alt` + LMB / MMB / RMB | MMB / `Shift`+MMB / `Ctrl`+MMB | `Alt` always; Blender style adds MMB / `Shift`+MMB / `Ctrl`+MMB |
+| Orbit / pan / dolly | `Alt` + LMB / MMB / RMB | MMB / `Shift`+MMB / `Ctrl`+MMB | `Alt` always; a DCC style adds MMB / `Shift`+MMB / `Ctrl`+MMB |
 
-**Navigation** in the Display group picks the style. **Maya**: `Alt`+LMB
+**Navigation** in the Display group picks the style. **a DCC**: `Alt`+LMB
 orbits, `Alt`+MMB pans, `Alt`+RMB dollies (usdview's own camera); a plain
-middle drag repeats the last gizmo handle in Tube. **Blender**: plain MMB
+middle drag repeats the last gizmo handle in Tube. **a DCC**: plain MMB
 orbits, `Shift`+MMB pans, `Ctrl`+MMB dollies, and `Alt` still works; the
 middle button is always the camera. In both styles a right press over the
 workspace never opens usdview's prim context menu, a second button during a
@@ -623,9 +623,7 @@ regrown after a step. Not covered: the selection itself.
 
 ## The viewport look
 
-Follows the published Tonic stills — the WDAS technology-page hero,
-Simmons & Whited (EG 2014) Fig. 1(c)–(e), Kaur, Simmons & Whited (SIGGRAPH
-2018) Figs. 1, 2, 4, and Kaur et al. (SIGGRAPH 2024) Fig. 1:
+The viewport draws the authoring model directly:
 
 * **Tubes** are opaque and smoothly shaded, one saturated colour per clump
   (a fixed 16-entry palette by L1 region id; children shift lightness

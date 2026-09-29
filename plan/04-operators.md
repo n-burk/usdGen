@@ -133,7 +133,7 @@ its capture, so ids survive mute/unmute (R14). (Recorded in the decisions list o
 
 ### 0.5 The blend envelope
 
-`float usdGen:blend = 1` is Houdini's per-operator *Blend*. The contract is an **identity by
+`float usdGen:blend = 1` is a DCC's per-operator *Blend*. The contract is an **identity by
 early-out, not by arithmetic**:
 
 ```
@@ -221,7 +221,7 @@ Distinct salts are what keep two different operators drawing different numbers f
 decorrelate two prims of the *same* type: two `UsdGenClump` prims at the same level, with the same
 authored `usdGen:seed` and the same input id set, draw identical numbers, because nothing in
 `UsdGenDraw01(seed, curveId, kSaltClump + L)` distinguishes them. That is deliberate and matches
-XGen's `Generator Seed` and Houdini's per-node seeds: **the artist varies `usdGen:seed`**, and the
+a host groomer's `Generator Seed` and a DCC's per-node seeds: **the artist varies `usdGen:seed`**, and the
 tool authors a distinct random seed on every operator prim it creates, so the default case is
 already decorrelated. A per-node term derived from the prim path was rejected — it would make a
 rename a silent look change, defeat `usdGen:algorithmVersion` (§7) and break freeze reproducibility
@@ -395,7 +395,7 @@ motion profile or `UsdGenNodeStats` row. Sharing a setup between brows and lashe
 | 6 | `UsdGenClump "clump_fine"` (`clump:size = 0.4`) | curves from 5 + its own centres | `clumpId_1` |
 | 7 | `UsdGenNoise "frizz"` (`noise:magnitude = 0.09`) | curves from 6 | same topology, frizzed |
 
-This is XGen's "guides at 10 %, then interpolate again" and Houdini's hair-from-hair pattern
+This is a host groomer's "guides at 10 %, then interpolate again" and a DCC's hair-from-hair pattern
 (`research/A7-prior-art-grooming.md` §1.2, §3.1) expressed with nothing but `usdGen:input` and a
 `usdGen:guides` retarget. Node 2's captured guide weights are unaffected by anything downstream;
 node 5's are recaptured whenever node 3's topology or capture epoch changes, not when its
@@ -495,7 +495,7 @@ breadth, v3 = later (ADR §9.5 R38, which amends ADR §6); **M** — the milesto
 `UsdGenPtexMap` (M4), `UsdGenInstance` (M6) and motion profiles P0/P1/P2 (M7) are v1, and
 `UsdGenScatter`'s `uniform` mode is not.
 
-| Type | Kind | `usdGen:mode` | Topo | Space | Surface read | Cost | Capture cache | Emitted primvars | Parity (XGen / Unreal / Houdini) | M |
+| Type | Kind | `usdGen:mode` | Topo | Space | Surface read | Cost | Capture cache | Emitted primvars | Parity (a host groomer / a host renderer / a DCC) | M |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `UsdGenScatter` | gen | `random` (M1) \| `atGuides` (M3) \| `points` (M5) \| `uniform` (v2, M8) | `CurveCount` | rest | rest | A (+B relax) | face areas, per-face counts, ids, root frames, Morton order | `st` (uniform float2, root UV), `hairId` | Generator modes / — / Scatter + Hair Generate density | M1/M3/M5 |
 | `UsdGenGrow` | gen | — | `CvCount` | rest | rest | A | per-curve length draws | — | Splines CV count/length / — / Guide Initialize | M1 |
@@ -548,7 +548,7 @@ sampled at capture and are wired by `rel`, never by `usdGen:input`.
 
 | Type | Kind | Concept switch | Topo | Space | Cost | Capture cache | Emitted | Parity | M |
 |---|---|---|---|---|---|---|---|---|---|
-| `UsdGenCurl` | sty | `usdGen:axisMode = curveTangent \| guide` | `None` | rest | A | minimal-twist frames, ramp LUTs | — | Coil / IGS Curl / Blender Curl / Hair Clump curling | M8 |
+| `UsdGenCurl` | sty | `usdGen:axisMode = curveTangent \| guide` | `None` | rest | A | minimal-twist frames, ramp LUTs | — | Coil / IGS Curl / a DCC Curl / Hair Clump curling | M8 |
 | `UsdGenBend` | sty | `usdGen:axisMode = rootDirection \| uniform \| attribute` | `None` | rest | A | ramp LUT, per-curve angle draws | — | Bend Param/U/V / — / Bend | M8 |
 | `UsdGenStraighten` | sty | — | `None` | rest | A | rest chord vectors | — | — / — / Straighten | M8 |
 | `UsdGenDisplace` | sty | `usdGen:mode = height \| vector` | `None` | rest | A | map samples per root, root normals | — | IGS Displacement / — / Displace | M8 |
@@ -662,7 +662,7 @@ for face f: grid the face's UV extent at (spacingU, spacingV); for cell (i,j):
 
 **Stable ids.** In `random` mode `curveId = UsdGenCurveId(seed, faceIndex, k)` (§0.6, a `uint64`),
 so raising `density` only appends to each face's tail: existing ids, sculpt deltas and clump ids
-survive (XGen `Generator Seed` semantics, A7 §1.1). In `points` mode the id keys on the authored face index and slot, so the Place brush can insert a root
+survive (a host groomer `Generator Seed` semantics, A7 §1.1). In `points` mode the id keys on the authored face index and slot, so the Place brush can insert a root
 without renumbering the others. In `atGuides` mode the id keys on the *guide's* `curveId`, so
 reordering the guide set does not renumber the hairs. In the v2 `uniform` mode the id keys on the
 grid cell, so a `spacingU`/`spacingV` edit renumbers and the tool warns exactly as it does for a seed
@@ -673,7 +673,7 @@ Storm, S37) and `hairId` (uniform float, §0.6). `rootPrim`, `rootUV` and `rootF
 and reach Hydra only through the C3 contract on a freeze.
 
 **Interactions.** `usdGen:density` multiplies the resolved mask (§5), so a paint map on the mask
-block *is* XGen's density Mask — which also means `mask:amount = 0` on a Scatter yields zero roots,
+block *is* a host groomer's density Mask — which also means `mask:amount = 0` on a Scatter yields zero roots,
 not a pass-through (§8). `mode = "atGuides"` takes guide roots from `usdGen:guides`, or from
 `usdGen:input` when that carries `role = guide` curves. Decimation by
 `densityScale`/`renderDensityScale` happens **after** capture, by the salted hash of §0.6, so it
@@ -750,17 +750,17 @@ guide set, in the guides' root frames, with region and parting constraints.
 | Property | Type | Default | Range | Doc |
 |---|---|---|---|---|
 | `usdGen:guides` | `rel` | — | — | a `UsdGenGuideSet` **or** an operator (reference lane, §0.10 rule 3) |
-| `usdGen:maxGuides` | `int` | `3` | 1–8 | guides blended per hair; 3 is Unreal's arity and the arity of the emitted primvars |
+| `usdGen:maxGuides` | `int` | `3` | 1–8 | guides blended per hair; 3 is a host renderer's arity and the arity of the emitted primvars |
 | `usdGen:influenceRadius` | `float` | `4.0` | > 0 | search radius in rest stage units (`02-schema.md` §2.6) |
 | `usdGen:influenceDecay` | `float` | `2.0` | ≥ 0 | weight = `(1 − d/R)^decay` |
 | `usdGen:maxGuideAngle` | `float` | `90` | 0–180 | reject a guide whose rest normal differs by more than this |
-| `usdGen:blendInSkinSpace` | `float` | `1.0` | 0–1 | 1 = blend guide offsets in the guide's root frame (XGen relative interpolation); 0 = blend world offsets |
-| `usdGen:blendMethod` | `uniform token` | `"linearBlend"` | `linearBlend`,`extrudeAndBlend` | Houdini's two shapes (`02-schema.md` §2.6) |
-| `usdGen:useUniqueGuide` | `bool` | `false` | — | 1 guide per hair (Unreal) |
+| `usdGen:blendInSkinSpace` | `float` | `1.0` | 0–1 | 1 = blend guide offsets in the guide's root frame (a host groomer relative interpolation); 0 = blend world offsets |
+| `usdGen:blendMethod` | `uniform token` | `"linearBlend"` | `linearBlend`,`extrudeAndBlend` | a DCC's two shapes (`02-schema.md` §2.6) |
+| `usdGen:useUniqueGuide` | `bool` | `false` | — | 1 guide per hair (a host renderer) |
 | `usdGen:randomizeGuide` | `float` | `0` | 0–1 | jitter the guide choice per hair |
 | `usdGen:cvCount` | `int` | `8` | 2–64 | CVs per generated curve (`02-schema.md` §2.6) |
 | `usdGen:length:source` | `rel` | — | — | a `UsdGenMap` whose value multiplies the interpolated strand length |
-| `usdGen:clumpCrossover` | `float` | `0` | 0–1 | allow weight to cross a clump/region boundary (Houdini `Clump Crossover`) |
+| `usdGen:clumpCrossover` | `float` | `0` | 0–1 | allow weight to cross a clump/region boundary (a DCC `Clump Crossover`) |
 | `usdGen:mask:region` | `rel` | — | — | region map: guides only influence hairs of their own region id (§5.3) |
 
 **Capture** (cost B; the operator gate E-4 is written for):
@@ -799,13 +799,13 @@ as the Hydra locators `primvars/guideIndex` and `primvars/guideWeight` (`06-imag
 this document use. `elementSize` is the USD
 encoding for "three values per element" — `pxr/usd/usdGeom/primvar.h:322-331` declares
 `int GetElementSize()` / `bool SetElementSize(int)`. It is **not** `int3`/`float3`: `int3` is a
-`GfVec3i` (`pxr/usd/sdf/types.h:367`), a different value type. The arity is Unreal's
+`GfVec3i` (`pxr/usd/sdf/types.h:367`), a different value type. The arity is a host renderer's
 `groom_closest_guides` / `groom_guide_weights`, so a bake round-trips (ADR §2.3; A7 §2.1;
 `02-schema.md` §2.6).
 
 **Interactions.** Region maps and parting are one mechanism at capture: `usdGen:mask:region` (§5.3)
 gives every root and every guide a region id, and a mismatch rejects the candidate;
-`clumpCrossover > 0` lets that fraction of the weight survive a mismatch, which is how Houdini avoids
+`clumpCrossover > 0` lets that fraction of the weight survive a mismatch, which is how a DCC avoids
 hard seams. **Failure mode reported, not hidden:** a root with zero candidates is a bald patch; the
 node counts them and `UsdGenNodeStats::warnings` surfaces "guide angle rejected N % of candidates" in
 the stack profiler (`design/proposal-artist.md` §4.10) instead of emitting a straight-up hair.
@@ -865,9 +865,9 @@ UsdSkel, or any other modifier upstream in the scene index (R5, S1, S3).
 
 | Property | Type | Default | Doc |
 |---|---|---|---|
-| `usdGen:mode` | `uniform token` | `"rigidFrame"` | `rigidFrame` (v1, per-root frame transport) \| `rbf` (v2, an Unreal-style displacement field from ≤ `rbfSamples` surface samples) \| `pointDeform` (v2, per-CV weights over the nearest surface points). An unimplemented mode is a compile error naming the prim and the mode, never a silent downgrade (`05-static-curves-and-deformation.md` §4.1) |
+| `usdGen:mode` | `uniform token` | `"rigidFrame"` | `rigidFrame` (v1, per-root frame transport) \| `rbf` (v2, an a host renderer-style displacement field from ≤ `rbfSamples` surface samples) \| `pointDeform` (v2, per-CV weights over the nearest surface points). An unimplemented mode is a compile error naming the prim and the mode, never a silent downgrade (`05-static-curves-and-deformation.md` §4.1) |
 | `usdGen:twistAware` | `bool` | `true` | build the root frame from `dPdu` so the strand twists with the surface |
-| `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only; ≤ 100, the Unreal binding arity. Cost class B |
+| `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only; ≤ 100, the a host renderer binding arity. Cost class B |
 | `usdGen:preserveShape` | `float` | `0.0` | 0 = off. `> 0` runs the Cosserat stretch/bend relaxation (A7 §9.1 G7, §3.5). **v2**; in v1 a non-zero value is one warning and is ignored |
 | `usdGen:preserveShape:iterations` | `int` | `0` | Cosserat iteration count, v2 |
 | `usdGen:lockRoots` | `bool` | `true` | pin CV 0 exactly to the deformed root position (A7 §9.1 G7) |
@@ -921,7 +921,7 @@ Freezes are siblings under `<Description>/Frozen/…` and the tool never re-auth
 sibling curve prims and 1.3–1.5 ms of scene-index work, MEASURED, ledger row `EV-052`,
 `research/G-freeze-bake-undo-and-frozen-reentry.md` §4.2).
 
-### 2.7 `UsdGenSculptLayer` — hand work that survives (A7 §9.3, XGen sculpt layers)
+### 2.7 `UsdGenSculptLayer` — hand work that survives (A7 §9.3, a host groomer sculpt layers)
 
 **Purpose.** Per-CV deltas in the root frame keyed by stable `curveId`, so surface deformation and
 upstream parameter tweaks that keep ids still apply. This is what the Comb, Grab, Smooth, Length, Cut
@@ -929,7 +929,7 @@ and Freeze-paint brushes commit to (`08-tools.md`).
 
 | Property | Type | Default | Doc |
 |---|---|---|---|
-| `usdGen:sculpt:weight` | `float` | `1.0` | layer weight 0–1 (XGen sculpt-layer semantics) |
+| `usdGen:sculpt:weight` | `float` | `1.0` | layer weight 0–1 (a host groomer sculpt-layer semantics) |
 | `usdGen:sculpt:curveIds` | `uint64[]` | `[]` | sorted ids that have deltas — 64-bit, matching `primvars:usdGen:curveId` (ADR §9.2 R12) |
 | `usdGen:sculpt:cvOffsets` | `int[]` | `[]` | prefix offsets into `deltas`, size `curveIds.size() + 1` |
 | `usdGen:sculpt:deltas` | `vector3f[]` | `[]` | per-CV delta |
@@ -960,30 +960,30 @@ multiplies into its resolved mask. A `sculpt:epoch` mismatch is a badge plus one
 > `volumize`, `copy*`, `cut`, `flatness`, `offset`, `curl:*` and `noise:*` were
 > removed rather than left as dead knobs (docs/freezes/C1.md §9).
 
-**Purpose.** Pull hairs toward clump centres, with the full XGen parameter set and Houdini's fractal
+**Purpose.** Pull hairs toward clump centres, with the full a host groomer parameter set and a DCC's fractal
 multi-level scheme. Two `UsdGenClump` prims in one chain at different sizes are the canonical groom.
 
 | Property | Type | Default | Range | Doc |
 |---|---|---|---|---|
 | `usdGen:clump:amount` | `float` | `0.5` | 0–1 | strength of the pull toward the clump curve |
-| `usdGen:clump:profile:knots` | `float2[]` | `[(0,0),(1,1)]` | — | root→tip ramp on `amount` (XGen `Clump Scale`) |
+| `usdGen:clump:profile:knots` | `float2[]` | `[(0,0),(1,1)]` | — | root→tip ramp on `amount` (a host groomer `Clump Scale`) |
 | `usdGen:clump:centers` | `rel` | — | — | a curve set, a nested `UsdGenScatter`, or a map — the artist-visible clump source (ADR §2.3) |
 | `usdGen:clump:density` | `float` | `4.0` | > 0 | clump points per square **stage unit on the rest surface**, used when `centers` is absent (`02-schema.md` §2.7.1 is the normative row, ADR §9.2 R7) |
 | `usdGen:clump:size` | `float` | `1.0` | > 0 | clump radius in rest stage units (alternative parameterisation of `density`) |
 | `usdGen:clump:seed` | `uniform int` | `0` | — | seed for the implicit centre scatter and every per-hair draw |
 | `usdGen:clump:method` | `uniform token` | `"linearBlend"` | `linearBlend`,`extrudeAndBlend` | see the kernel |
-| `usdGen:clump:volumize` | `float` | `0` | 0–1 | push hairs radially outward before clumping (XGen `Clump Volumize`) |
+| `usdGen:clump:volumize` | `float` | `0` | 0–1 | push hairs radially outward before clumping (a host groomer `Clump Volumize`) |
 | `usdGen:clump:stray:amount` / `:rate` / `:falloff` | `float` | `0` / `0` / `1` | 0–1, 0–1, ≥0 | fraction of the pull removed / share of hairs chosen / along-curve falloff |
 | `usdGen:clump:copy` / `:copyVariance` | `float` | `0` / `0` | 0–1 | blend a hair's shape toward its clump's neighbours; per-hair variance |
 | `usdGen:clump:cut` | `float` | `0` | 0–1 | shorten a hash-chosen share of the clump's hairs by this fraction |
 | `usdGen:clump:noise:amount` / `:frequency` / `:correlation` | `float` | `0` / `1` / `0` | — | per-clump noise, correlated between neighbouring clumps |
-| `usdGen:clump:flatness` | `float` | `0` | 0–1 | flatten the clump cross-section (XGen `Flatness`) |
+| `usdGen:clump:flatness` | `float` | `0` | 0–1 | flatten the clump cross-section (a host groomer `Flatness`) |
 | `usdGen:clump:offset` | `float` | `0` | — | offset the clump centre along the surface normal |
-| `usdGen:clump:curl:amplitude` / `:frequency` | `float` | `0` / `1` | ≥ 0 | curl applied to the clump curve *before* clumping (XGen `Curl`; `02-schema.md` §2.7). One float cannot express a curl: it needs a radius and a turn rate |
+| `usdGen:clump:curl:amplitude` / `:frequency` | `float` | `0` / `1` | ≥ 0 | curl applied to the clump curve *before* clumping (a host groomer `Curl`; `02-schema.md` §2.7). One float cannot express a curl: it needs a radius and a turn rate |
 | `usdGen:clump:crossover` | `float` | `0` | 0–1 | let a hair be pulled by a neighbouring clump across a region boundary |
 | `usdGen:clump:levels` | `int` | `1` | 1–4 | fractal levels |
 | `usdGen:clump:level` | `uniform int` | `-1` | ≥ −1 | `-1` = auto: this node's ordinal among **all** `UsdGenClump` nodes of the compiled chain, disabled ones included, so enable/disable never renumbers a published primvar. An authored value ≥ 0 pins the emitted `clumpId_<n>` index (ADR §9.2 R10; `02-schema.md` §2.7.1) |
-| `usdGen:clump:sizeReduction` | `float` | `0.5` | 0–1 | size multiplier per level (Houdini) |
+| `usdGen:clump:sizeReduction` | `float` | `0.5` | 0–1 | size multiplier per level (a DCC) |
 | `usdGen:clump:tightnessReduction` | `float` | `0.8` | 0–1 | amount multiplier per level |
 | `usdGen:clump:goalFeedback` | `float` | `1` | 0–1 | 1 = level L's centres derive from level L−1's **output**; 0 = from the node's input |
 | `usdGen:preserveLength` | `float` | `1` | 0–1 | restore rest segment lengths root-locked after the pull. **Flat, shared with `UsdGenNoise`** (`02-schema.md` §2.7; artist §6.4 rule 3) — not `clump:preserveLength` |
@@ -1031,7 +1031,7 @@ curveId[c], kSaltClump+7)`; `strayFalloff(t) = pow(t, clump:stray:falloff)`;
 `w(c,i)`, so `w` here is `w(c,i)` scaled by the level amount and the stray/profile terms.
 
 **Emitted primvars.** `clumpId_<n>` (uniform int) per level, numbered chain-wide (§0.11); a shader
-drives per-clump variation from it (Unreal's `Clump ID`), and `UsdGenInstance` (v1, M6) can carry it
+drives per-clump variation from it (a host renderer's `Clump ID`), and `UsdGenInstance` (v1, M6) can carry it
 into the instancer by naming it in `usdGen:instance:variationPrimvars`, which publishes it as an
 `instance`-interpolated primvar (`02-schema.md` §2.11; `06-imaging.md` §4.3). There is no
 `usdGen:protoSelect` property: prototype choice is the hashed draw over `usdGen:instance:weights`,
@@ -1040,7 +1040,7 @@ and material variety across cards is **several prototypes with partitioned
 (`06-imaging.md` §4.3).
 
 **Interactions.** `clump:centers` targeting an operator marks that node `UsdGenRole::Reference`;
-targeting a `UsdGenMap` reads its value as a clump-id field (XGen's `.xuv` point maps). `clump:amount`
+targeting a `UsdGenMap` reads its value as a clump-id field (a host groomer's `.xuv` point maps). `clump:amount`
 is a **value** edit; `clump:size`, `:density`, `:seed`, `:levels` and the region map are **capture**
 edits (§6.4). `cut` truncates within the existing CV count and never removes CVs.
 
@@ -1057,7 +1057,7 @@ edits (§6.4). `cut` truncates within the existing CV count and never removes CV
 | `usdGen:noise:octaves` | `int` | `1` | 1–6 | fBm octaves (`02-schema.md` §2.7.1) |
 | `usdGen:noise:lacunarity` | `float` | `2` | > 1 | frequency multiplier per octave |
 | `usdGen:noise:gain` | `float` | `0.5` | 0–1 | amplitude multiplier per octave |
-| `usdGen:cumulative` | `bool` | `false` | — | accumulate the offset along the curve (Blender frizz) instead of displacing each CV independently. **Flat** (`02-schema.md` §2.7) |
+| `usdGen:cumulative` | `bool` | `false` | — | accumulate the offset along the curve (a DCC frizz) instead of displacing each CV independently. **Flat** (`02-schema.md` §2.7) |
 | `usdGen:preserveLength` | `float` | `1` | 0–1 | restore rest segment lengths after the displacement. **Flat, the same property `UsdGenClump` carries** |
 
 **Capture.** The correlation hash per curve and the 257-entry magnitude LUT. **Evaluate:**
@@ -1086,7 +1086,7 @@ and moves the node into the motion tail. There is no `world` token (ADR §9.2 R9
 | `usdGen:length:random` | `float2` | `(1,1)` | per-curve multiplier drawn in [x,y] |
 | `usdGen:length:source` | `rel` | — | a `UsdGenMap` sampled per root, multiplying `length:value` |
 | `usdGen:length:method` | `uniform token` | `"scale"` | `scale` (stretch the whole curve) \| `cutExtend` (truncate/extend along the existing shape) |
-| `usdGen:rebuild` | `uniform token` | `"keepParam"` | `keepParam` (CVs collapse to the cut point, XGen) \| `reparam` (redistribute CVs over the new length) |
+| `usdGen:rebuild` | `uniform token` | `"keepParam"` | `keepParam` (CVs collapse to the cut point, a host groomer) \| `reparam` (redistribute CVs over the new length) |
 | `usdGen:minRemainingLength` | `float` | `0` | floor on the resulting length |
 | `usdGen:cullThreshold` | `float` | `0` | curves shorter than this are removed — the **only** topology effect in this operator |
 
@@ -1113,7 +1113,7 @@ locator regardless (§0.3 rule 1).
 `CurveCount`). **Evaluate:** with `length:method = "scale"` the kernel is
 `P[i] = root + (P[i] - root) * s`, `s = lerp(1, target/current, w(c,i))`; with `cutExtend` it walks
 the arc-length table to `s_cut` and then either collapses the trailing CVs onto the cut point
-(`rebuild = "keepParam"`, XGen) or redistributes them over the new length (`"reparam"`). Culling is
+(`rebuild = "keepParam"`, a host groomer) or redistributes them over the new length (`"reparam"`). Culling is
 applied at capture, so a frame change never changes counts.
 **Interaction with density scrubbing:** during a drag the buffer is held at the maximum count and
 culled curves are *parked* (CVs collapsed to the root, `widths = 0`), so element counts never change
@@ -1125,10 +1125,10 @@ padded arrays render fallback red in 26.08 (S28).
 | Property | Type | Default | Doc |
 |---|---|---|---|
 | `usdGen:width` | `float` | `0.01` | base strand width in stage units |
-| `usdGen:width:knots` | `float2[]` | `[(0,1),(1,1)]` | root→tip multiplier ramp (XGen `Width Ramp`) |
+| `usdGen:width:knots` | `float2[]` | `[(0,1),(1,1)]` | root→tip multiplier ramp (a host groomer `Width Ramp`) |
 | `usdGen:taper` | `float` | `0` | 0–1 tip narrowing applied after `taperStart` |
 | `usdGen:taperStart` | `float` | `0.5` | where the taper begins (0 = root, 1 = tip) |
-| `usdGen:rootScale` / `usdGen:tipScale` | `float` | `1` / `1` | Unreal's root/tip radius scales |
+| `usdGen:rootScale` / `usdGen:tipScale` | `float` | `1` / `1` | a host renderer's root/tip radius scales |
 | `usdGen:replace` | `bool` | `true` | `true` = set widths, `false` = multiply the upstream widths |
 
 **Capture.** The 257-entry `width:knots` LUT. **Evaluate** — the target profile first, then §0.5's
@@ -1166,14 +1166,14 @@ node declares no reference inputs and `mode = "neighbours"` is a compile error n
 better a hard diagnostic than a silent wrong look (`design/proposal-risk.md` §5's hard-diagnostic
 rule).
 
-### 2.13 `UsdGenDirection` / Lift — XGen Tilt (A7 §9.2 S5)
+### 2.13 `UsdGenDirection` / Lift — a host groomer Tilt (A7 §9.2 S5)
 
 | Property | Type | Default | Doc |
 |---|---|---|---|
 | `usdGen:direction` | `vector3f` | `(0,1,0)` | target direction in the read-phase surface's space (the `vector3f` half of the §0.2 name collision) |
 | `usdGen:amount` | `float` | `0` | 0–1 rotation toward the target direction |
-| `usdGen:lift` | `float` | `0` | degrees away from the surface tangent plane (XGen Tilt N) |
-| `usdGen:tiltU` / `:tiltV` / `:tiltN` / `:aroundN` | `float` | `0` | degrees, the four XGen Tilt axes expressed directly (`02-schema.md` §2.7); each is a pre-rotation of `direction` in the root frame |
+| `usdGen:lift` | `float` | `0` | degrees away from the surface tangent plane (a host groomer Tilt N) |
+| `usdGen:tiltU` / `:tiltV` / `:tiltN` / `:aroundN` | `float` | `0` | degrees, the four a host groomer Tilt axes expressed directly (`02-schema.md` §2.7); each is a pre-rotation of `direction` in the root frame |
 | `usdGen:mode` | `uniform token` | `"rigid"` | `rigid` (rotate the whole curve about the root) \| `perSegment` (accumulate per segment) |
 | `usdGen:followSkinContour` | `float` | `0` | 0–1 blend of the target toward `dPdu`/`dPdv` at the root |
 | `usdGen:direction:source` | `rel` | — | a `UsdGenMap` supplying a per-root direction (`returnType = "color"` read as a vector) |
@@ -1182,7 +1182,7 @@ rule).
 **Capture.** Per-root frames and, for a map-driven direction, the sampled vectors. **Evaluate:**
 project the target into the tangent plane at the root, build the rotation about `N_root` (plus the
 lift rotation about `N_root × T`), and either apply it rigidly to every CV or accumulate it per
-segment weighted by the ramp. XGen's Tilt U / Tilt V / Tilt N / Around N are the same operator: those four axis angles named
+segment weighted by the ramp. a host groomer's Tilt U / Tilt V / Tilt N / Around N are the same operator: those four axis angles named
 directly, with `direction`/`lift` the general form they compose into — one prim type, not four.
 
 ### 2.14 `UsdGenScale` — global length multiplier (A7 §9.2 S13)
@@ -1192,7 +1192,7 @@ directly, with `direction`/`lift` the general form they compose into — one pri
 it changes the published primvar set); all four are `02-schema.md` §2.7.1's rows.
 Capture stores the rest arc lengths; evaluate scales each curve about its root by
 `lerp(1, scale * scaleLUT[t] * random(c), w(c,i))` and, when `widthToo`, scales `widths` by the same
-factor. It is XGen IGS's `xgmModifierScale` and it exists because "make the whole groom 10 % longer
+factor. It is a host groomer IGS's `xgmModifierScale` and it exists because "make the whole groom 10 % longer
 for this shot" must not be a `UsdGenLength` mode edit that a shot-level override then fights with.
 
 ### 2.15 `UsdGenResample` — change the CV count (A7 §9.2 S14)
@@ -1360,15 +1360,15 @@ listing is in `02-schema.md`'s `UsdGenMaskAPI` section; the properties and their
 | `usdGen:mask:invert` | `bool` | `false` | `x → 1 − x` after the range remap |
 | `usdGen:mask:range` | `float2` | `(0,1)` | remap of the source value before use |
 | `usdGen:mask:combine` | `uniform token` | `"multiply"` | `multiply`\|`add`\|`subtract`\|`max`\|`min`\|`average`\|`replace` — how the **random** term folds into the map term (`02-schema.md` §2.13) |
-| `usdGen:mask:random` | `float` | `0.0` | per-curve `rand` multiplier amount (XGen `rand()` masks) |
+| `usdGen:mask:random` | `float` | `0.0` | per-curve `rand` multiplier amount (a host groomer `rand()` masks) |
 | `usdGen:mask:randomSeed` | `uniform int` | `0` | seed for that draw |
 | `usdGen:mask:ramp:knots` | `float2[]` | `[(0,1),(1,1)]` | along-curve ramp, `(t, value)` sorted by `t` |
 | `usdGen:mask:ramp:interpolation` | `uniform token` | `"catmullRom"` | `linear`\|`catmullRom`\|`bspline`\|`constant` (ADR §9.2 R11; `02-schema.md` §2.13, §2.17) |
 | `usdGen:mask:ramp:spline` | `float` | — | **v2.** The whole-`TsSpline` transport of ADR §9.2 R11, authored with `.spline`; never flagged time-varying |
-| `usdGen:mask:rangeMin` / `:rangeMax` / `:effectPosition` / `:falloff` | `float` | `0`/`1`/`0.5`/`0.5` | Houdini's curve-mask shortcut (§5.4) |
-| `usdGen:mask:influenceWidth` | `float` | `0.5` | 0–1 width of the shortcut's band, the fifth Houdini parameter (`research/A7-prior-art-grooming.md` §7); declared in `02-schema.md` §2.13, which delegates the shortcut formula to §5.4 |
+| `usdGen:mask:rangeMin` / `:rangeMax` / `:effectPosition` / `:falloff` | `float` | `0`/`1`/`0.5`/`0.5` | a DCC's curve-mask shortcut (§5.4) |
+| `usdGen:mask:influenceWidth` | `float` | `0.5` | 0–1 width of the shortcut's band, the fifth a DCC parameter (`research/A7-prior-art-grooming.md` §7); declared in `02-schema.md` §2.13, which delegates the shortcut formula to §5.4 |
 | `usdGen:mask:rangeMode` | `uniform token` | `"normalized"` | `normalized` \| `absoluteLength` — is `t` normalised arc length or stage units. Spelled `rangeMode`, not `range:mode` |
-| `usdGen:mask:noise:amount` / `:frequency` / `:gain` / `:bias` / `:seed` | `float`/`int` | `0`/`1`/`0.5`/`0.5`/`0` | Houdini's Noise Mask over the rest root position |
+| `usdGen:mask:noise:amount` / `:frequency` / `:gain` / `:bias` / `:seed` | `float`/`int` | `0`/`1`/`0.5`/`0.5`/`0` | a DCC's Noise Mask over the rest root position |
 | `usdGen:mask:region` | `rel` | — | region/parting map (§5.3) |
 
 ### 5.2 Evaluation order and arithmetic
@@ -1402,7 +1402,7 @@ w(c, i)      = usdGen:blend * curveMask(c) * rampWeight
 draw; `sample(mask:source, rootUV(c))` selects the channel the map prim's `usdGen:map:channel`
 names (`02-schema.md` §2.12); `region(c)` is 1 unless `usdGen:mask:region` rejects the curve (§5.3);
 `lockedCurveSuppression(c)` is the per-curve suppression mask `UsdGenSculptLayer` publishes from
-`usdGen:sculpt:lockedCurves` (§2.7), which is how one mechanism implements XGen's Freeze brush for
+`usdGen:sculpt:lockedCurves` (§2.7), which is how one mechanism implements a host groomer's Freeze brush for
 every downstream styler at once. `w(c, i)` — the `usdGen:blend` envelope of §0.5 applied to the
 mask — is the weight every kernel in §2 writes as `w(c,i)`; `w(c, i) == 0` is an early-out and the
 operator writes the input value bitwise.
@@ -1421,7 +1421,7 @@ combine(t, m, r) =  t == "multiply" ? m * r
 bias(x, b)       = pow(x, log(b) / log(0.5))
 gain(x, g)       = x < 0.5 ? 0.5 * bias(2*x, 1 - g)
                            : 1 - 0.5 * bias(2 - 2*x, 1 - g)
-biasGain(x,b,g)  = gain(bias(x, b), g)                               # Houdini Noise Mask convention
+biasGain(x,b,g)  = gain(bias(x, b), g)                               # a DCC Noise Mask convention
 ```
 
 Four properties of the order matter. (1) The **source is remapped before it is inverted**, so
@@ -1451,13 +1451,13 @@ The `w(c,i) == 0` early-out is what makes the mask identity tests of §8 exact.
 an integer channel, or a colour quantised by `UsdGenImageMap`'s `map:channel = "rgb"` into a stable
 id via `hash32(quantise(rgb, 1/64))`. At capture every root and every guide/clump centre gets a
 region id from the same map. `GuideInterpolate` and `Clump` then reject a candidate whose region id
-differs, except for the fraction allowed by `clumpCrossover` / `clump:crossover`. This is XGen's
+differs, except for the fraction allowed by `clumpCrossover` / `clump:crossover`. This is a host groomer's
 Region Map, whose stated purpose is that "clumps cannot cross the boundaries defined by the Region
 Map" (`research/A7-prior-art-grooming.md` §1.4). `design/judge-artist.md` flagged that the ADR's
 `usdGen:mask:region` had no defined semantics; this paragraph is that definition. `UsdGenPart` (v2)
 produces the same per-root ids from a curve set instead of a map, so the consumers do not change.
 
-### 5.4 The Houdini shortcut, the guide-proximity source, and expression masks
+### 5.4 The a DCC shortcut, the guide-proximity source, and expression masks
 
 When `usdGen:mask:ramp:knots` has fewer than two authored knots, the shortcut applies instead:
 `rangeMin`/`rangeMax` bound the effect along `t` (in normalised arc length, or in stage units when
@@ -1477,7 +1477,7 @@ It exists because it is one slider drag rather than a ramp edit
 
 `UsdGenGuideProximityMap` (`rel usdGen:guides`, `float proximity:radius`, `float proximity:decay`)
 yields the normalised distance from each root to the nearest guide root — the mask for "fade this
-styler out near hand-placed guides". `UsdGenExprMap` supplies the XGen SeExpr variable set
+styler out near hand-placed guides". `UsdGenExprMap` supplies the a host groomer SeExpr variable set
 (`$u $v $id $faceId $P $N $dPdu $dPdv $Pref $Nref $t $frame $cLength`) with `map()`, `ptex()` and the
 added `rand()`, which is **not** a SeExpr2 builtin (MEASURED absent,
 `research/A8-seexpr-ptex-libs.md` §1.7: "`Function rand has no definition`"; ADR §6 adds it). One
@@ -1528,7 +1528,7 @@ A comb stroke commits into `SculptLayer`'s delta arrays inside one `Sdf.ChangeBl
 move it is a live override with only the touched leaves dirtied (S40). Freezing belongs on **chain
 A**, not here: a `UsdGenFreeze` inserted between `clump_fine` and `frizz`
 (`frozen:mode = "frozen"`) snapshots the expensive generator/clump head, `frizz` keeps running on the
-snapshot, and everything above stays authored and greyed — XGen Groom Bake exactly
+snapshot, and everything above stays authored and greyed — a host groomer Groom Bake exactly
 (`research/A7-prior-art-grooming.md` §1.4). Unfreezing is one token edit, never a prim removal
 (S41).
 

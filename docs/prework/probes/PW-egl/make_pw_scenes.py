@@ -9,10 +9,10 @@ Usage:
 - variant B: hairTangent vertex primvar; material -> usdGenHairPreviewPrimvar.glslfx
 Geometry: same strand field as the prototype (seed 7), scaled to ncurves x 8 CV.
 """
-import math, random, sys
+import math, os, random, sys
 from pxr import Usd, UsdGeom, UsdShade, UsdLux, Sdf, Gf, Vt
 
-HERE = "/home/burkard/work/usdGen/docs/prework/probes/PW-egl"
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 def build_hair(ncurves, ncv):
     random.seed(7)

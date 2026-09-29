@@ -73,8 +73,8 @@ identical in both. No GPU/EGL involved.
 Build and run (also `make run` from the probe dir):
 
 ```
-cd /home/burkard/work/usdGen/docs/prework/probes/PW-5
-PXR=/home/burkard/work/OpenUSD_26_08
+cd <usdgen-src>/docs/prework/probes/PW-5
+PXR=$USD
 g++ -std=c++17 -O1 -w probe.cpp -o probe \
   -I $PXR/include -I /usr/include/python3.12 -L $PXR/lib \
   -lusd_usd -lusd_usdGeom -lusd_tf -lusd_sdf -lusd_gf -lusd_arch \
@@ -82,13 +82,13 @@ g++ -std=c++17 -O1 -w probe.cpp -o probe \
   -lusd_ar -lusd_hio -lusd_usdImaging -lusd_hd -lusd_hdsi -lusd_python \
   -Wl,-rpath,$PXR/lib
 LD_LIBRARY_PATH=$PXR/lib \
-PXR_PLUGINPATH_NAME="/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:\
-/home/burkard/work/usdGen/build/usd/usdGenImaging/resources:$PXR/plugin/usd" \
+PXR_PLUGINPATH_NAME="<usdgen-src>/build/usd/usdGenSchema/resources:\
+<usdgen-src>/build/usd/usdGenImaging/resources:$PXR/plugin/usd" \
 ./probe 2>&1 | tee run1.txt
 ```
 
 Host: headless aarch64 Linux, g++ 13.3, C++17, OpenUSD 26.08
-(`/home/burkard/work/OpenUSD_26_08`, flat-namespace
+(`$USD`, flat-namespace
 `pxrInternal_v0_26_8__pxrReserved__` build).
 
 ## 3. Raw evidence
@@ -97,7 +97,7 @@ Full output (`docs/prework/probes/PW-5/run1.txt`), verbatim:
 
 ```
 == plugin path ==
-PXR_PLUGINPATH_NAME=/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:/home/burkard/work/usdGen/build/usd/usdGenImaging/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd
+PXR_PLUGINPATH_NAME=<usdgen-src>/build/usd/usdGenSchema/resources:<usdgen-src>/build/usd/usdGenImaging/resources:$USD/plugin/usd
 
 == TfType resolution (triggers plugin discovery + load) ==
   UsdGenNoise : UsdGenNoise

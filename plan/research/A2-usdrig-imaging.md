@@ -1,10 +1,10 @@
 # A2 — usdRig (RigExec) Hydra 2.0 imaging: scene indices, chain placement, invalidation, C entry points, guides
 
 Evidence report for the usdGen hair/fur plan. All paths are absolute. Line numbers refer to
-`/home/burkard/work/usdRig` (commit c92c040) and `/home/burkard/work/OpenUSD` (tag v26.08).
+`<usdrig-src>` (commit c92c040) and `<openusd-src>` (tag v26.08).
 Claims without a citation are marked UNVERIFIED.
 
-Abbreviations: `R` = `/home/burkard/work/usdRig`, `U` = `/home/burkard/work/OpenUSD/pxr`,
+Abbreviations: `R` = `<usdrig-src>`, `U` = `<openusd-src>/pxr`,
 `SI` = scene index, `DS` = data source.
 
 ---
@@ -590,7 +590,7 @@ renderer-level plugin can get the frame from the scene-globals prim (§2.2) inst
 `UsdSkelImagingSkeletonResolvingSceneIndex` then `UsdSkelImagingPointsResolvingSceneIndex`
 (`U/usdImaging/usdSkelImaging/resolvingSceneIndexPlugin.cpp:28-41`), registered in
 `usdSkelImaging/plugInfo.json:42-47` (present in the install:
-`/home/burkard/work/OpenUSD_26_08/lib/usd/usdSkelImaging/resources/plugInfo.json` contains
+`$USD/lib/usd/usdSkelImaging/resources/plugInfo.json` contains
 `UsdSkelImagingResolvingSceneIndexPlugin`). It is in the same unordered slot as RigExec (§2.1).
 
 What a skinned `mesh|points|basisCurves` looks like downstream (`dataSourceResolvedPointsBasedPrim.cpp`):

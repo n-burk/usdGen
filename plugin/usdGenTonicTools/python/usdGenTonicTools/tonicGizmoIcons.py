@@ -1,12 +1,14 @@
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
+#
 # usdGenTonicTools.tonicGizmoIcons -- the transform row's fallback glyphs.
 #
-# Vendored from usdRig `plugin/rigExecUsdview/gizmoIcons.py` at 2757b5f
-# (2026-09-14), adapted for Tonic; keep the glyph code in sync with the
-# original.
+# Adapted for this groom tool. Keep the glyph drawing in sync with the
+# screen-space gizmo module.
 # Tonic changes, and only these:
 #  * the art is Tonic's own resources/icons set, found through
 #    tonicIcons.iconPath under the Tonic manifest names (`_TONIC_ART`
-#    maps usdRig glyph names to them) instead of an icons/ directory
+#    maps the previous glyph names to them) instead of an icons/ directory
 #    beside this module;
 #  * `IconFor(tonicName)` answers in Tonic names, for tonicWorkspace.
 # The dock loads this module only when tonicIcons.loadIcon finds no PNG

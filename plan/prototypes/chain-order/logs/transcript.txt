@@ -1,40 +1,40 @@
 == permutation sweep of UsdImagingSceneIndexPlugin set order ==
-PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources
+PATH: <session-scratch>:<session-scratch>:<session-scratch>
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
   [1] UsdGenStubUiA
   [2] UsdGenStubUiB
   [3] UsdSkelImagingResolvingSceneIndexPlugin
 
-PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources
+PATH: <session-scratch>:<session-scratch>:<session-scratch>
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
   [1] UsdGenStubUiB
   [2] UsdGenStubUiA
   [3] UsdSkelImagingResolvingSceneIndexPlugin
 
-PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources
+PATH: <session-scratch>:<session-scratch>:<session-scratch>
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
   [1] UsdGenStubUiA
   [2] UsdGenStubUiB
   [3] UsdSkelImagingResolvingSceneIndexPlugin
 
-PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources
+PATH: <session-scratch>:<session-scratch>:<session-scratch>
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
   [1] UsdGenStubUiA
   [2] UsdGenStubUiB
   [3] UsdSkelImagingResolvingSceneIndexPlugin
 
-PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources
+PATH: <session-scratch>:<session-scratch>:<session-scratch>
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
   [1] UsdGenStubUiB
   [2] UsdGenStubUiA
   [3] UsdSkelImagingResolvingSceneIndexPlugin
 
-PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources
+PATH: <session-scratch>:<session-scratch>:<session-scratch>
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
   [1] UsdGenStubUiB
@@ -43,7 +43,7 @@ PATH: /tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67
 
 == full chain, rig+skel stage, with stubs and render index ==
 === PXR_PLUGINPATH_NAME ===
-/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecSchema/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubR/resources
+<session-scratch>:<session-scratch>:<session-scratch>:<session-scratch>:<session-scratch>
 
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin
@@ -190,7 +190,7 @@ render delegate display name = "UsdGenStubRenderer"
 probeChainOrder: DONE
 == same, with dirty promotion ON ==
 === PXR_PLUGINPATH_NAME ===
-/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecSchema/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild/usd/rigExecImaging/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubA/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubB/resources:/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/stubR/resources
+<session-scratch>:<session-scratch>:<session-scratch>:<session-scratch>:<session-scratch>
 
 --- std::set<TfType> order for UsdImagingSceneIndexPlugin (4 types) ---
   [0] RigExecUsdImagingSceneIndexPlugin

@@ -1,5 +1,5 @@
 == plugin path ==
-PXR_PLUGINPATH_NAME=/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:/home/burkard/work/usdGen/build/usd/usdGenImaging/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd
+PXR_PLUGINPATH_NAME=<usdgen-src>/build/usd/usdGenSchema/resources:<usdgen-src>/build/usd/usdGenImaging/resources:$USD/plugin/usd
 
 == TfType resolution (triggers plugin discovery + load) ==
   UsdGenNoise : UsdGenNoise

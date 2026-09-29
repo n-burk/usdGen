@@ -370,7 +370,7 @@ image or Ptex map, and "Reload maps" picks up an overwritten file while nothing 
 
 **Scope** (`07-look-maps-expressions.md`). The `usdGen_seexpr` and `usdGen_ptex` targets (static,
 hidden, never installed next to USD); `UsdGenImageMap`, `UsdGenPtexMap`, `UsdGenExprMap`,
-`UsdGenPaintMap`, `UsdGenNoiseMap`, `UsdGenCombineMap`, `UsdGenGuideProximityMap`; the XGen variable set
+`UsdGenPaintMap`, `UsdGenNoiseMap`, `UsdGenCombineMap`, `UsdGenGuideProximityMap`; the a host groomer variable set
 with `map()`/`ptex()`/`rand()`, one thread-safe `VarBlock` and one `PtexFilter` per worker (S38);
 `UsdGenLookAPI` with its explicit bake order; `UsdGenImaging_ReloadMaps`; the mask block resolved once
 per capture into one `VtFloatArray` plus a 257-entry LUT. Plus `UsdGenScale`, the last v1 styler moved

@@ -339,7 +339,7 @@ void LinkRenderManager::drawLinkInstances(
       glUniform3f(
           highlightedLinkColorLoc, highlightedColor[0], highlightedColor[1], highlightedColor[2]);
     } else {
-      glUniform3f(highlightedLinkColorLoc, 0.31f, 0.78f, 0.47f); // default green (Presto)
+      glUniform3f(highlightedLinkColorLoc, 0.31f, 0.78f, 0.47f); // default green
     }
   }
 

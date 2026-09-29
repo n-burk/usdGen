@@ -27,9 +27,9 @@ $VENV/python make_pw4_scenes.py   # writes pw4_*.usda (glslfx sourceAsset relati
 Render (EGL headless, Storm, sRGB, complexity 1.5 → refineLevel 2, 640×640, cam `/World/Cam`):
 
 ```bash
-export PATH=/home/burkard/.venv/bin:$PATH
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-export PXR_PLUGINPATH_NAME="...usdGenImaging/resources:...usdGenSchema/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd:/home/burkard/work/OpenUSD_26_08/lib/usd"
+export PATH=$VENV/bin:$PATH
+export LD_LIBRARY_PATH=$USD/lib
+export PXR_PLUGINPATH_NAME="...usdGenImaging/resources:...usdGenSchema/resources:$USD/plugin/usd:$USD/lib/usd"
 cd docs/prework/probes/PW-egl
 ./build/render_hair pw4_both.usda pw4_both.png /World/Cam 640     # rendered this continuation
 ./build/render_hair pw4_both.usda pw4_both_r2.png /World/Cam 640  # determinism check
@@ -40,10 +40,10 @@ cd docs/prework/probes/PW-egl
 Pixel diff (`diff_png.py`: sha256 of each file, mean/max absolute per-channel difference, fraction of pixels differing > 8/255):
 
 ```bash
-/home/burkard/.venv/bin/python diff_png.py pw4_both.png pw4_glslfx_only.png
-/home/burkard/.venv/bin/python diff_png.py pw4_both.png pw4_mtlx_only.png
-/home/burkard/.venv/bin/python diff_png.py pw4_glslfx_only.png pw4_mtlx_only.png       # control
-/home/burkard/.venv/bin/python diff_png.py pw4_glslfx_only.png pw4_glslfx_ctx_only.png # terminal-name control
+$VENV/bin/python diff_png.py pw4_both.png pw4_glslfx_only.png
+$VENV/bin/python diff_png.py pw4_both.png pw4_mtlx_only.png
+$VENV/bin/python diff_png.py pw4_glslfx_only.png pw4_mtlx_only.png       # control
+$VENV/bin/python diff_png.py pw4_glslfx_only.png pw4_glslfx_ctx_only.png # terminal-name control
 # output captured in pw4_diffs.txt
 ```
 

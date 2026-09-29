@@ -422,7 +422,7 @@ Discovered while greening SI-12; re-deriving them is wasted time:
 
 ### 9.4 Next actions — ordered, each with its acceptance check
 
-Pre: `export PATH=/home/burkard/.venv/bin:$PATH`; reconfigure `build/`
+Pre: `export PATH=$VENV/bin:$PATH`; reconfigure `build/`
 (README Build block). Then:
 
 | # | Action | Accept |

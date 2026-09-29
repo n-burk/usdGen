@@ -538,7 +538,7 @@ def testHotkeys(tonicModes):
         ("w", frozenset(["shift"]), (tonicModes.ACTION_WELD, None)),
         ("u", frozenset(["shift"]), (tonicModes.ACTION_UNWELD, None)),
         ("s", frozenset(["ctrl", "shift"]), (tonicModes.ACTION_SAVE, None)),
-        # Parity G14: RigExec/Maya's three redo spellings.
+        # Parity G14: RigExec/a DCC's three redo spellings.
         ("z", frozenset(["ctrl", "shift"]), (tonicModes.ACTION_REDO, None)),
         ("z", frozenset(["shift"]), (tonicModes.ACTION_REDO, None)),
         # SL-03: select all / none / invert.
@@ -1668,7 +1668,7 @@ def testGraphHoverMarqueeKeys(tonicCamera, tonicLoops, TonicToolState):
           % (session.rects,))
     if session.rects:
         x0, y0, x1, y1, kind, mode = session.rects[-1]
-        # SL-01's band column: a Shift band adds (Blender's extend).
+        # SL-01's band column: a Shift band adds (a DCC's extend).
         check(kind == tonicLib.TONIC_PICK_GRAPH_NODE and
               mode == tonicLib.TONIC_SELECT_ADD and
               near(x0, 100.0) and near(y1, 320.0),

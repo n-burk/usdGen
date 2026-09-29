@@ -23,7 +23,7 @@ if ! PY="$(pick_python)"; then
 fi
 
 # Workstation env (plugin path, USD prefix). Do not let a missing sibling
-# OpenUSD prefix abort the skip path: CI has no /home/burkard/.venv and no
+# OpenUSD prefix abort the skip path: CI has no $VENV and no
 # ../OpenUSD_26_08.
 set +e
 # shellcheck disable=SC1091

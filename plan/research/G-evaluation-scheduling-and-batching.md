@@ -4,10 +4,10 @@
 **Question:** *When*, and on *which thread*, does the hair graph evaluate, and how do the several
 per-frame dirty notices coalesce into exactly one run?
 
-Everything below is either (a) cited to `file:line` in `/home/burkard/work/OpenUSD` (v26.08,
-`ee47c679a`) or `/home/burkard/work/usdRig`, or (b) produced by a probe I built and ran headlessly.
+Everything below is either (a) cited to `file:line` in `<openusd-src>` (v26.08,
+`ee47c679a`) or `<usdrig-src>`, or (b) produced by a probe I built and ran headlessly.
 Probe sources and captured output live in
-`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/evalsched/`
+`<session-scratch>`
 (`evalSched.cpp`, `models.cpp`, `chainOrder.cpp`, `asyncProbe.cpp`, `noticeCost.cpp`; outputs
 `run1.txt`, `models.txt`, `chainOrder.txt`, `chainOrder_hdgp.txt`, `async.txt`, `noticeCost.txt`).
 No GPU or display was used; nothing here is a GPU measurement.
@@ -206,7 +206,7 @@ Readings:
 `std::atomic_load(&_published)` while the main thread published 20 generations,
 **16 734 reads, 0 torn reads** — a reader never saw a snapshot whose `frame` and `density` came from
 different generations. This is exactly `RigExecSnapshotStore::Publish`/`Get`
-(`/home/burkard/work/usdRig/libs/rigExecImaging/snapshotStore.h:326-378`).
+(`<usdrig-src>/libs/rigExecImaging/snapshotStore.h:326-378`).
 (Caveat: `std::atomic_load(std::shared_ptr*)` is deprecated in C++20; prefer
 `std::atomic<std::shared_ptr<T>>` if the project ever moves to C++20.)
 
@@ -237,7 +237,7 @@ backstop is load-bearing there too.
 
 usdRig does not key on Hydra notices at all. `RigExecImagingRegistry::SetTime` evaluates every
 session, builds a combined snapshot, publishes it atomically and then broadcasts the diff as Hydra
-dirties (`/home/burkard/work/usdRig/libs/rigExecImaging/registry.cpp:342-378`); it is reached from
+dirties (`<usdrig-src>/libs/rigExecImaging/registry.cpp:342-378`); it is reached from
 (a) an `extern "C"` entry point `RigExecImaging_SetTime(double)` (`registry.cpp:1198-1201`) called by
 the usdview plugin via `ctypes` on `dataModel.currentFrameChanged`
 (`plugin/rigExecUsdview/rigExecUsdview.py:174`, `600-610`), and (b) a `UsdNotice::ObjectsChanged`

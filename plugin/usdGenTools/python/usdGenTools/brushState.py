@@ -5,7 +5,7 @@
 # from the stage and re-read, never cached. pxr-free and Qt-free.
 #
 # Hotkey note: the shelf brushes claim no digit keys (the Tonic workspace
-# owns 1-6). The viewport claims the Blender-style brush keys -- F /
+# owns 1-6). The viewport claims the host-application brush keys -- F /
 # Shift+F / Ctrl+F drag-adjust and [ / ] steps (brushPanels.HOTKEYS) --
 # ONLY while the pointer is over the StageView, a surface is bound,
 # strokes are armed, no gesture is live and no text field has focus, so

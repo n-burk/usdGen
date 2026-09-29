@@ -6,9 +6,9 @@ decision below carries the report and section that proves it. Architects and wri
 section 2 as **constraints** (do not re-litigate; cite them), section 3 as the **design space
 still open** (this is where proposals differ), and section 4 as the deliverable.
 
-Working name **usdGen**: sibling repo `/home/burkard/work/usdGen` (empty today), C++ prefix
+Working name **usdGen**: sibling repo `<usdgen-src>` (empty today), C++ prefix
 `UsdGen`, namespace `usdGen`, property namespace `usdGen:`, plugin display name "usdGen".
-The reference system is usdRig (code name RigExec, `/home/burkard/work/usdRig`).
+The reference system is usdRig (code name RigExec, `<usdrig-src>`).
 
 ## 1. Requirements (from the request)
 
@@ -17,7 +17,7 @@ R1 Grooming nodes are prims on the stage, wired explicitly, executed dynamically
 R2 Curves are generated at run/render time in Hydra 2.0 (OpenUSD 26.08), in usdview/Storm and in
    usdrecord / hdPrman-class delegates, with one plugin binary.
 R3 Static (frozen, cached, imported) curves load quickly and deform with a deforming surface.
-R4 XGen/Unreal-style stylers and modifiers, chainable at will
+R4 a host groomer/a host renderer-style stylers and modifiers, chainable at will
    (generator → clump → generator → clump → frizz …), applicable to generated, rigged or
    simulated curves.
 R5 Works on top of / after usdRig: reads deformed surfaces from the scene index, whoever
@@ -198,7 +198,7 @@ S37 All map/Ptex/SeExpr evaluation is **CPU at capture time**, baked to per-curv
     (colour, density, length, masks, widths); Storm textures only for UV-mapped scalp colour via
     `st`. Ptex is compiled out of the install and mesh-only in Storm's GLSL.
 S38 Third-party: vendor wdas/SeExpr `main` @8f8c8f2 (interpreter only, static + hidden, add
-    `rand()`; XGen variable set `$u $v $id $faceId $P $N $dPdu $dPdv $Pref $Nref $t $frame
+    `rand()`; a host groomer variable set `$u $v $id $faceId $P $N $dPdu $dPdv $Pref $Nref $t $frame
     $cLength …`, functions `map() ptex() rand()`; one thread-safe `VarBlock` per worker; measured
     13–117 ns/eval), Ptex v2.4.3 (zlib, static + hidden; face ids and adjacency via installed
     `Far::PtexIndices`; measured 23 ns/lookup; `PtexWriter` for painting), nanoflann 1.12.1

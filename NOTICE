@@ -1,32 +1,79 @@
-# usdGen — Hair/Fur Grooming Plugin for OpenUSD
+usdGen
+Copyright (c) 2026 Nick Burkard
 
-## License
+The usdGen project is licensed under the MIT License. See the LICENSE file
+at the root of this repository.
 
-usdGen is provided under the Apache License, Version 2.0.
-See LICENSE for the full text.
+This NOTICE credits third-party components. Their licenses are not changed
+by the project license. See THIRD_PARTY.md for the same list with paths.
 
-## Third-Party Components
+Build dependencies (not vendored in this repository)
+----------------------------------------------------
 
-| Component   | Version  | License           |
-|-------------|----------|-------------------|
-| OpenUSD     | 26.08    | Apache-2.0        |
-| SeExpr      | main@8f8c8f2 | Apache-2.0 (modified §6) |
-| nanoflann   | 1.12.1   | BSD-2-Clause      |
-| OpenSubdiv  | 3.6.1    | Apache-2.0        |
-| Ptex        | 2.4.3    | BSD-3-Clause (Disney no-endorsement) |
-| TBB         | 2020.3   | Apache-2.0        |
-| zlib        | 1.3      | zlib License      |
+OpenUSD
+  Tomorrow Open Source Technology License 1.0
+  https://openusd.org/license
 
-### SeExpr License Note
+OpenSubdiv
+  Apache License 2.0, with a modified trademarks section
+  https://github.com/PixarAnimationStudios/OpenSubdiv
 
-SeExpr is distributed under the Apache License 2.0 with a modification
-to Section 6 (Trademarks): the license does not grant permission to use
-Disney's trade names or trademarks. This modification preserves the
-intent of the original license while making it suitable for inclusion
-in a non-Disney product.
+MaterialX
+  Apache License 2.0
+  https://github.com/AcademySoftwareFoundation/MaterialX
 
-### Ptex License Note
+oneTBB
+  Apache License 2.0
+  https://github.com/uxlfoundation/oneTBB
 
-Ptex is distributed under a BSD-3-Clause license with a Disney
-non-endorsement clause. This project does not use the Ptex name in
-marketing or documentation.
+Vendored in thirdparty/
+-----------------------
+
+SeExpr (thirdparty/seexpr, thirdparty/seexprFrontend)
+  Copyright Disney Enterprises, Inc.
+  Apache License 2.0 with Section 6 (Trademarks) replaced so the license
+  does not grant permission to use Disney trade names. The notice is in
+  each source header and in thirdparty/seexprFrontend/LICENSE.
+
+Ptex (thirdparty/ptex)
+  Copyright 2014 Disney Enterprises, Inc.
+  BSD-3-Clause with a non-endorsement clause for the names Disney,
+  Walt Disney Pictures, and Walt Disney Animation Studios.
+  See thirdparty/ptex/LICENSE.
+
+nanoflann (thirdparty/nanoflann/nanoflann.hpp)
+  BSD-2-Clause.
+  Copyright 2008-2009 Marius Muja, Copyright 2008-2009 David G. Lowe,
+  Copyright 2011-2026 Jose Luis Blanco. The copyright lines and author
+  addresses in the header are part of that license and must stay.
+
+zlib (thirdparty/zlib)
+  zlib License.
+  Copyright (C) 1995-2022 Jean-loup Gailly and Mark Adler.
+  See thirdparty/zlib/LICENSE.
+
+usdNoodles/ (vendored node-graph library)
+-----------------------------------------
+
+Files that also exist in https://github.com/facebookexperimental/noodles
+stay under that project's MIT license:
+
+  Copyright (c) Meta Platforms, Inc. and affiliates.
+  usdNoodles/LICENSE.txt
+
+Poppins MSDF atlases (usdNoodles/assets/fonts/Poppins-*)
+  SIL Open Font License 1.1.
+  Copyright 2020 The Poppins Project Authors.
+  The license text is in usdNoodles/THIRD_PARTY_LICENSES.txt.
+
+Baskerville atlas (usdNoodles/assets/fonts/baskerville.*)
+  Listed by the noodles project as public domain. See
+  usdNoodles/THIRD_PARTY_LICENSES.txt. Provenance of this particular
+  atlas is called out for review in THIRD_PARTY.md.
+
+GLEW, stb_image, and RapidJSON are not bundled. noodles fetches them at
+build time. Their notices are in usdNoodles/THIRD_PARTY_LICENSES.txt.
+
+Files under usdNoodles/ that are not in the public noodles tree are
+usdGen code under the MIT license in the root LICENSE. They are listed
+in THIRD_PARTY.md.

@@ -466,7 +466,7 @@ def HotkeyAction(key, modifiers=frozenset(), pointerInside=True,
             return (ACTION_SELECT_ALL if key == "a" else ACTION_INVERT,
                     None)
     # Parity G14: redo answers Ctrl+Shift+Z and Shift+Z as well as Ctrl+Y,
-    # the three RigExec (and Maya) bind.
+    # the three RigExec (and a DCC) bind.
     if shift and key == "z":
         return (ACTION_REDO, None)
     if ctrl and not shift:

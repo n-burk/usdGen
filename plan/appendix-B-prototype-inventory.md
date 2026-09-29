@@ -46,10 +46,11 @@ them; the Python package is the lowercase `usdgen` (ADR §9.1 R5). Where a name 
 
 ### 0.2 Where the code is
 
-The twelve directories are **source-only copies** of working directories under the session scratchpad
+The twelve directories are **source-only copies** of working directories under a local session scratchpad
 (`.../scratchpad/probes/<name>/`); build trees, generated stages, images and shader dumps were
-dropped, with two deliberate exceptions: `usdrig-linux-build/consumer/build/` (kept as evidence of
-the out-of-tree link, §11.2) and three reference PNGs under `storm-hair-look` (§7.2). The scratchpad
+dropped. The CMake configure tree that used to sit at `usdrig-linux-build/consumer/build/` is not
+in the repository. `rigexec_env.sh` remains and reads `USD`, `RIG`, and `RIGBUILD` from the
+environment. Three reference PNGs under `storm-hair-look` (§7.2) stay. The scratchpad
 is temporary, so `plan/prototypes/` is the only durable copy and anything a report cites under
 `…/scratchpad/…` but absent here is gone — each §x.6 lists what its directory lost. Directories were renamed on the way in: `probes/G-chain-order` → `chain-order`,
 `probes/data-plane-engine-prototype-benchmark` → `data-plane-benchmark`, `probes/evalsched` →
@@ -64,13 +65,13 @@ Every command below assumes this block — the usdGen analogue of the verified
 from `research/ENVIRONMENT.md`.
 
 ```sh
-export USD=/home/burkard/work/OpenUSD_26_08          # install: include/, lib/, lib/usd/, bin/
-export USDSRC=/home/burkard/work/OpenUSD             # v26.08 source, read-only
-export PROTO=/home/burkard/work/usdGen/plan/prototypes
-export PATH="/home/burkard/.venv/bin:$USD/bin:$PATH" # ninja 1.13.2 is in the venv
+export USD=$USD          # install: include/, lib/, lib/usd/, bin/
+export USDSRC=<openusd-src>             # v26.08 source, read-only
+export PROTO=<usdgen-src>/plan/prototypes
+export PATH="$VENV/bin:$USD/bin:$PATH" # ninja 1.13.2 is in the venv
 export LD_LIBRARY_PATH="$USD/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$USD/lib/python3.12/site-packages${PYTHONPATH:+:$PYTHONPATH}"
-PY=/home/burkard/.venv/bin/python3                   # 3.12.3, numpy 2.5.2, pybind11 3.1.0
+PY=$VENV/bin/python3                   # 3.12.3, numpy 2.5.2, pybind11 3.1.0
 ```
 
 Which graphics harness a prototype needs (`research/ENVIRONMENT.md` CORRECTIONS;
@@ -771,7 +772,7 @@ both are safe from TBB workers.
 | File | One line |
 |---|---|
 | `se_min.cpp` | the minimum viable embedding: an `Expression` subclass, an `ExprVarRef`, parse-error reporting, construct/eval/destroy |
-| `seexpr_bench.cpp` | the XGen-shaped harness: `$u $v $id $P` custom vars, a custom `map()` `ExprFuncSimple`, 8-thread evaluation with one `VarBlock` per worker |
+| `seexpr_bench.cpp` | the a host groomer-shaped harness: `$u $v $id $P` custom vars, a custom `map()` `ExprFuncSimple`, 8-thread evaluation with one `VarBlock` per worker |
 | `ptex_test.cpp` | writes a quad `.ptx` (per-face resolutions, adjacency, mipmaps) and a triangle `.ptx`, reads back through `PtexCache`, filters across the shared edge, times 8-thread lookups |
 
 **9.3 Build and run.** No CMake here; both libraries are built first (verified commands,
@@ -958,10 +959,10 @@ bugs to contain), by building usdRig out of tree and linking a consumer against 
 ```sh
 . $PROTO/usdrig-linux-build/rigexec_env.sh     # fix RIGBUILD first (scratchpad-absolute); add
                                                # RIGEXEC_IMAGING_DLL and DISPLAY back, see 11.2
-cmake -S /home/burkard/work/usdRig -B $RIGBUILD -G Ninja -DCMAKE_BUILD_TYPE=Release \
+cmake -S <usdrig-src> -B $RIGBUILD -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DUSD_INSTALL_DIR=$USD -DCMAKE_PREFIX_PATH=$USD \
-  -DPython3_EXECUTABLE=/home/burkard/.venv/bin/python3 \
-  -DCMAKE_MAKE_PROGRAM=/home/burkard/.venv/bin/ninja -DCMAKE_CXX_FLAGS="-ffp-contract=off"
+  -DPython3_EXECUTABLE=$VENV/bin/python3 \
+  -DCMAKE_MAKE_PROGRAM=$VENV/bin/ninja -DCMAKE_CXX_FLAGS="-ffp-contract=off"
 ninja -C $RIGBUILD -j16 && ctest --test-dir $RIGBUILD -j8 --output-on-failure
 cmake --install $RIGBUILD --prefix <prefix>
 cmake -S $PROTO/usdrig-linux-build/consumer -B <b> -DCMAKE_PREFIX_PATH=<prefix> && cmake --build <b>

@@ -88,8 +88,8 @@ class Sample:
 # -- the selection-modifier table ---------------------------------------------
 #
 # One convention for every loop, click and band, so a modifier means the
-# same thing in Graph, Tube, Fill and Hierarchy (Maya: Shift toggles, Ctrl
-# deselects, Ctrl+Shift adds; Blender: Shift extends, Ctrl-box subtracts):
+# same thing in Graph, Tube, Fill and Hierarchy (a DCC: Shift toggles, Ctrl
+# deselects, Ctrl+Shift adds; a DCC: Shift extends, Ctrl-box subtracts):
 #
 #   gesture       none   Shift    Ctrl     Ctrl+Shift
 #   click         SET    TOGGLE   REMOVE   ADD

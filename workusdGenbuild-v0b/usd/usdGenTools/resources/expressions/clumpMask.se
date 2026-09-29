@@ -1,5 +1,0 @@
-# domain: primitive
-# A mask that falls off from the middle of the surface outwards, for driving a
-# clump or any other per-strand weight. Single statement on purpose: it is the
-# one preset that compiles against the frontend as it stands today.
-clamp(1.0 - 2.0 * smoothstep(abs($v - 0.5), 0.1, 0.45), 0.0, 1.0)

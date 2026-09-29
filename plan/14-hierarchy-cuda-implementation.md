@@ -476,7 +476,7 @@ remain required. The scene retirement registry retains weak bookkeeping
 until process shutdown. GPU renderer interop, render-context density effects,
 complete operators/maps/tools, robust fault recovery, collision-notice
 coverage and all original release requirements remain open. Local Qwen gave
-an inspected visible audit; the two Hivemind audit requests returned no usable
+an inspected visible audit; the two the inference service audit requests returned no usable
 visible answers and are not counted as completed model reviews.
 
 ### Incremental source and operator capture follow-through
@@ -531,7 +531,7 @@ measurement and further work. No GPU graphics interop or production CPU
 fallback is introduced. The original milestone/release scope remains open.
 Native Terra/Luna lanes supplied implementation/review assistance; local Qwen
 returned visible review suggestions which were checked against the actual
-Hydra contracts. The two Hivemind requests again exhausted their reasoning
+Hydra contracts. The two the inference service requests again exhausted their reasoning
 budgets without visible answers and are not counted as successful reviews.
 
 ### CUDA to Storm-owned OpenGL buffer bridge
@@ -666,7 +666,7 @@ as a pass. No production performance/release gate is waived by these checks.
 
 Terra/Luna supplied bounded implementation and review assistance. Local Qwen
 returned visible but generic/speculative reviews that were checked against
-the actual source rather than accepted as proof. Both Hivemind review lanes
+the actual source rather than accepted as proof. Both the inference service review lanes
 again returned empty visible answers; those calls are not successful reviews.
 
 ### Remaining native Storm integration boundary
@@ -786,7 +786,7 @@ CUDA-GL bridge passes both tests ten consecutive times with
 `detect_leaks=0` and `halt_on_error=1`; the remaining SDK and core CUDA build
 are not instrumented by this harness. The patch passes `git apply --check`
 against the clean original v26.08 checkout. Local Qwen returned generic but
-visible review guidance that was checked against source; both Hivemind lanes
+visible review guidance that was checked against source; both the inference service lanes
 again returned empty visible answers and are not counted as reviews.
 
 The production scene index still declines live device-generation publication.
@@ -953,7 +953,7 @@ can proceed without claiming those criteria passed.
   regression verifies all six errors, a live repair notice, and cleared errors
   on the same scene index. Backend tests cover unknown tokens, the composed
   schema CUDA fallback, and a genuinely undeclared legacy backend. Root checked
-  the source and actual executions; local Qwen and both Hivemind lanes supplied
+  the source and actual executions; local Qwen and both the inference service lanes supplied
   usable reviews during this checkpoint. All native workers were Luna.
 
 ### CUDA Width execution checkpoint
@@ -998,7 +998,7 @@ larger discussion network remains unsupported as a complete cook/render.
   in `/tmp/usdgen-cpu-check-4XIfVs`. Earlier targeted runs encountered
   intermittent CUDA stream-allocation failures; no services were stopped or
   reset. These functional checks are not performance or full-release gates.
-  Native workers were Luna, with local Qwen and Hivemind review lanes; root
+  Native workers were Luna, with local Qwen and the inference service review lanes; root
   reviewed, corrected and ran the integrated code.
 
 ### CUDA RBF execution checkpoint
@@ -1062,7 +1062,7 @@ rest-to-animated Deform step; a second deformation is rejected.
   **0 errors** for both `testUsdGenCudaSurfaceBinding` and
   `testUsdGenCudaRbfSession`. These are bounded memory checks, not full fault
   injection or a performance gate. Native workers were Luna; local Qwen
-  supplied review, while the later Hivemind attempts returned empty responses
+  supplied review, while the later the inference service attempts returned empty responses
   or timed out and are not counted as completed substantive reviews.
 - Final checkpoint rerun: `cmake --build build-codex -j6` succeeded and
   `ctest --test-dir build-codex -L 'T0|T1' -E bench --output-on-failure`
@@ -1160,7 +1160,7 @@ bindings consume the surviving, reordered GPU channels.
   footprint hits, translation/perspective/depth projection, duplicate rejection,
   repeated and replaced moves, cancellation, rival tool wrappers, imaging
   callbacks, topology edits and leases retained after session/tool destruction.
-  Local Qwen contributed inspected topology/lifetime review; both Hivemind
+  Local Qwen contributed inspected topology/lifetime review; both the inference service
   lanes reached the loaded model but again received no visible final answer.
 - The first full non-benchmark T0/T1 run passed **62/62**. CUDA initcheck reported
   **0 errors** for `testUsdGenCudaPicking`, `testUsdGenCudaPointOverride`,
@@ -1225,11 +1225,11 @@ verified for the new implementation; old CPU numbers are historical only.
 ## Delegation
 
 Root integrates and validates. Native workers use Terra or Luna, as requested.
-One lane uses local Qwen (`qwen3.8-flash-next`); two use the Hivemind LMStudio
-endpoint (currently loaded as `qwen3.8-27b@q4_0`, verified through `/v1/models`)
+One lane uses local Qwen (`<local-model>`); two use the inference service LMStudio
+endpoint (currently loaded as `<remote-model>`, verified through `/v1/models`)
 for substantive implementation/review tasks. A model
 request is only counted as used when its response was received and inspected.
-This two-Hivemind-lane routing is historical and superseded by the bounded
+This two-the inference service-lane routing is historical and superseded by the bounded
 single-model, two-request-per-service policy recorded in the current no-patch
 checkpoint below.
 The Length/compaction audit requests reached this loaded model, but exhausted
@@ -1285,7 +1285,7 @@ kernel’s memcheck and InitCheck results are zero.
 At that earlier checkpoint, this did not provide stable capture-ordinal
 compaction membership,
 generation-paired render metadata, or live atomic multi-tile `Publish`; those
-remain required. Hivemind requests for the lease review
+remain required. the inference service requests for the lease review
 returned empty visible answers after token exhaustion and are not counted.
 
 ### Stable GPU-tile architecture checkpoint (2026-09-11)
@@ -1361,7 +1361,7 @@ Release passes do not establish the cause of those earlier failures.
 
 Actual local Qwen supplied the destination capacity of 3072 but also proposed
 an erroneous draw count of 6144; coordinator/root review rejected that
-draw-count interpretation. Larger Hivemind requests ended in server protocol
+draw-count interpretation. Larger the inference service requests ended in server protocol
 errors with no visible answer and are not counted as substantive review.
 
 ### CUDA bounds and scalar presentation checkpoint (2026-09-11)
@@ -1465,20 +1465,20 @@ InitCheck runs were clean (root runs 140435, 238cf1, 77b224, and 952cab).
 Those results do not include the separate native T2 regression, which remains
 intentionally red at run 50821f.
 
-One bounded Hivemind request reached model `qwen3.8-27b@q4_0`, but ended at
+One bounded the inference service request reached model `<remote-model>`, but ended at
 its token limit with empty visible content (reasoning only); it contributed no
 review finding. The schema conclusions above are source-backed coordinator
 work, not model output.
 
 A later local-Qwen client request used verified `enable_thinking=false` with
 `max_tokens=2048` and returned 673 visible completion tokens with zero
-reasoning tokens (`chatcmpl-9460170a86f34ad8`). Its material/visibility/matrix
+reasoning tokens (`<response-id>`). Its material/visibility/matrix
 helper was corrected against source (removing nonexistent metadata fields and
 using the actual schema builders), integrated into `testDeviceTilePublisher`,
 and passed both focused Release runs with `TileContract` (root run e584a9).
 This is one bounded, inspected contribution; it is not a general model-quality
 or all-suite claim. The artifact is
-`/tmp/usdGen-local-qwen-tile-publisher-matrix/`.
+`<session-scratch>`.
 
 The current CPU-off ASAN/UBSAN core-and-imaging build passed both
 `DeviceTilePublisher` and `TileContract` with this helper (root run 48526,
@@ -1536,7 +1536,7 @@ wired. The new frontend helper is unbuilt and outside this checkpoint.
 Local Qwen contributed portions of the member/control helpers and the
 reentrant-observer test. Coordinator/root integrated and corrected the APIs
 and authored the exception cleanup from the root reproducer; Qwen is not
-credited with that cleanup. The actual Hivemind service provided no usable
+credited with that cleanup. The actual the inference service service provided no usable
 current visible answer; coordinator/root source-backed review was the fallback.
 
 ### GPU group-control removal and ingress checkpoint (2026-09-12)
@@ -1573,7 +1573,7 @@ appended after `callerDevice` and is atomically relayed to the core commit
 owner. No live Groom enablement, subtree CPU fallback, or device-generation
 stamp-format change is included in this checkpoint. A local-Qwen cleanup block
 (`bce8feee8ef70d59`) was inspected and integrated only where source review
-confirmed it; current Hivemind calls produced no usable visible completion.
+confirmed it; current the inference service calls produced no usable visible completion.
 
 The current private-harness run completed 13/15 targets in 4.69 seconds
 (`eb4205`). The two exact failures were the known unexpected
@@ -1704,8 +1704,8 @@ publication. `useRest` remains a space declaration: loaded points and the
 independent authored `rest` channel are deliberately not substituted.
 
 This checkpoint does not claim support for all CurveSource attributes. It
-credits bounded local-Qwen reviews `chatcmpl-b5ecc036f96881cc` and
-`chatcmpl-a3eb3bab46f9d24c`. The persisted `chatcmpl-8f02cfd7a5932cc8` reply
+credits bounded local-Qwen reviews `<response-id>` and
+`<response-id>`. The persisted `<response-id>` reply
 was specification-only (no source excerpt was supplied), not a code review.
 The root review corrected an earlier point-selection misinterpretation, which
 was reverted in favor of the documented loaded-points/rest separation.
@@ -1762,9 +1762,9 @@ source identities were Noise `230ae88d...` and root-frames `1e85bcd9...`
 integration, full-mask, renderer, or full-main-suite claim.
 
 Actual local-Qwen contributions were the root-math review
-`chatcmpl-baaa4c8c35d208d3` and verbatim lifecycle review
-`chatcmpl-9e4593938bc88303`; coordinator/root integrated and constrained the
-result. The two attempted Hivemind qwen3.8-27b@q4_0 requests both ended in
+`<response-id>` and verbatim lifecycle review
+`<response-id>`; coordinator/root integrated and constrained the
+result. The two attempted the inference service <remote-model> requests both ended in
 transport timeout with zero response bytes, so they contributed no review.
 
 The main T0/T1 selection subsequently passed **88/88** (`4eba54`, 28.88 s)
@@ -1857,20 +1857,20 @@ does not claim a completed GPU-resident stock-Storm path, a new renderer/rprim,
 or all renderer/operator work.
 
 Current inference routing is bounded per service: prefer actual local Qwen
-at `http://127.0.0.1:18310/v1` with model `qwen3.8-flash-next`, and actual
-Hivemind at `http://hivemind.local:1235/v1` with the single model
-`qwen3.8-27b@q4_0`. At most two requests may be in flight for each service,
+at `http://127.0.0.1:18310/v1` with model `<local-model>`, and actual
+the inference service at `http://<inference-host>:1235/v1` with the single model
+`<remote-model>`. At most two requests may be in flight for each service,
 and no OpenAI endpoint/model substitution is permitted when either fails;
 report the service error instead. Coordinator/agent labels do not prove model
 execution—only a received, inspected response does.
 
 The actual local-Qwen stock audit completed as
-`chatcmpl-80982a0bc1308335` (artifacts:
-`/tmp/usdGen-local-qwen-stock-handoff/request.json` and `response.json`). Its
+`<response-id>` (artifacts:
+`<session-scratch>` and `response.json`). Its
 inspected contribution was a bounded ExtComputation BAR/Hgi dispatch audit;
 it is not evidence that plugin-side insertion or scheduling is implemented.
-The first cleanup Hivemind review terminated with HTTP 400
-`{"error":"terminated"}` (`/tmp/usdgen-hivemind-cleanup-review-fotwfW`), and
+The first cleanup the inference service review terminated with HTTP 400
+`{"error":"terminated"}` (`<session-scratch>`), and
 the regranted current-source retry recorded no response headers or body before
-its bounded transport ended (`/tmp/usdgen-hivemind-cleanup-review-retry-PyRzyF`).
-Neither Hivemind call contributed a review finding.
+its bounded transport ended (`<session-scratch>`).
+Neither the inference service call contributed a review finding.

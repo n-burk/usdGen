@@ -10,7 +10,7 @@
 #include <cmath>
 using namespace SeExpr2;
 
-// A stand-in for XGen's map(): takes a string + returns a varying float
+// A stand-in for a host groomer's map(): takes a string + returns a varying float
 // computed from the current $u,$v (here: read through a pointer into the
 // per-thread evaluation context).
 struct MapCtx { double u, v; };

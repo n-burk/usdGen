@@ -322,7 +322,7 @@ a `.spline` on a ramp position is a compile error, because it would dirty every 
 | `usdGen:surface` | `rel` | — | Overrides the groom's. |
 | `usdGen:primitive` | `rel` | — | A `UsdGenPrimitive` prim; absent ⇒ `UsdGenSplines` defaults. |
 | `usdGen:maxCurves` | `uniform int` | `0` | 0 ⇒ derived from the generator at first compile; fixes the tile count for the session (ASSUMPTION 6). |
-| `usdGen:renderDensity` | `float` | `1.0` | Multiplier applied only when `sceneGlobals` says we are not interactive (XGen's Render Density Multiplier, A7 §8). |
+| `usdGen:renderDensity` | `float` | `1.0` | Multiplier applied only when `sceneGlobals` says we are not interactive (a host groomer's Render Density Multiplier, A7 §8). |
 | `usdGen:guideVisibility` | `uniform token` | `"guide"` | purpose of the guide prim set (S27). |
 | `material:binding` | `rel` | — | Standard. §9 explains the three-terminal material. |
 
@@ -1067,7 +1067,7 @@ Capture (once per capture epoch, O(n log g)):
      drop g if regionId(g) != regionId(r)                  # region map, capture-time
      w_g = (1 - d_g/R)^decay ; normalise ; keep top maxGuides
   store cap.i0/i1/i2 = guideIdx[0..2], cap.f0/f1/f2 = guideW[0..2]
-     (== Unreal's groom_closest_guides / groom_guide_weights, A7 §2)
+     (== a host renderer's groom_closest_guides / groom_guide_weights, A7 §2)
 
 Evaluate (per chunk, O(curveCount * cvCount * maxGuides)):
   for curve c:  F_c = frame(rootT,rootN,rootB)[c]
@@ -1083,8 +1083,8 @@ no matrix inverse, no tree.
 **`Clump` (A7 §9.1 S1).** Clump centres are a reference set produced by a nested `ScatterRandom`
 (density = `1/clumpSize²`) or by an authored curve set or a clump map. Capture assigns
 `clumpId[level]` per hair by nearest-centre kd-tree query and a `stray` coin flip; evaluate lerps
-each CV toward the clump curve's CV in the root frame. Multi-level clumping (`levels > 1`, XGen and
-Houdini both do this, A7 §9.1) makes level L's centres a *derived* reference set: when
+each CV toward the clump curve's CV in the root frame. Multi-level clumping (`levels > 1`, a host groomer and
+a DCC both do this, A7 §9.1) makes level L's centres a *derived* reference set: when
 `goalFeedback = 1` the level-L clump curves come from level-(L−1)'s output, which means the
 reference lane has its own small topological order. Level barriers are `tbb::parallel_for` fences,
 not per-chunk dependencies.
@@ -1458,7 +1458,7 @@ v1 also ships `UsdGenGroom`, `UsdGenDescription`, `UsdGenMaskAPI`, `UsdGenRestAP
 | `ScatterAtGuides` | R | yes | A | one hair per guide root |
 | `Curl` | R | no | A | RMF frame from `usdGenMath` (`RigExecSampleCurveRMF` is reusable, A1 §7): `radius` + ramp, `frequency`, `phase`, `taper`, `axisMode` |
 | `Bend` | R | no | A | cumulative per-segment rotation, `angle` + random, `axisMode` |
-| `Direction` / `Lift` | R | no | A | rigid rotate about the root normal; XGen Tilt U/V/N |
+| `Direction` / `Lift` | R | no | A | rigid rotate about the root normal; a host groomer Tilt U/V/N |
 | `Straighten`, `Smooth` (along-curve) | R | no | A | Laplacian, `iterations`, `lockRoot` |
 | `Wave` | R | no | A | `frequency`/`amplitude` in T and N |
 | `Displace` | R | no | A | map-driven along the root normal |
@@ -1558,13 +1558,13 @@ out of this OpenUSD install and is mesh-only in Storm's GLSL anyway (S37, A8 §2
 | `UsdGenExprMap` | vendored `wdas/SeExpr` `main@8f8c8f2`, interpreter only, static+hidden, `rand()` added | one thread-safe `VarBlock` per TBB worker; 13–117 ns/eval (S38) |
 | `UsdGenPaintMap` | the paint tool's output: EXR (float) via Hio, or `.ptx` via `PtexWriter` | same as the corresponding reader |
 
-SeExpr variable set (XGen dialect, S38, A8 §1.8): `$u $v $id $faceId $patchId $frame $t
+SeExpr variable set (a host groomer dialect, S38, A8 §1.8): `$u $v $id $faceId $patchId $frame $t
 $cLength $cWidth $cDepth $P $Pref $N $Nref $dPdu $dPdv $dPduref $dPdvref $Cs $As`, plus functions
 `map("name"[,s,t][,channel])`, `ptex("name", faceId, u, v[, channel])`, `rand([min,max][,seed])` and
 the full SeExpr builtin set. `${DESC}`-style macros are pre-substituted and resolved through Ar.
 **Noise has one implementation** — SeExpr's `Noise.h` templates — used by both the expression layer
 and the C++ stylers, so `noise($P)` in an expression and the `Noise` styler agree bit-for-bit (S38).
-SeExpr's `noise` is 0..1 while XGen's is −1..1; usdGen keeps SeExpr semantics and documents `snoise`.
+SeExpr's `noise` is 0..1 while a host groomer's is −1..1; usdGen keeps SeExpr semantics and documents `snoise`.
 
 ### 9.3 Reload and the paint round-trip
 
@@ -1682,7 +1682,7 @@ documented fallback is a private render index with `HdxPickTask` (`UsdImagingGLE
 
 | Flow | What happens |
 |---|---|
-| **Freeze operator** | The engine writes the node's current buffer to a T1 session-layer `BasisCurves` under `__UsdGenFrozen`, inserts a `UsdGenCurveSource` pointing at it, and re-parents the downstream node's `usdGen:input`. Upstream nodes are left authored but become unreachable — XGen's "Groom Bake deactivates all modifiers below it" (A7 §9.3), expressed as a wiring change instead of a mode flag. All of it in one `Sdf.ChangeBlock`, prims `Define`d outside it (S41) |
+| **Freeze operator** | The engine writes the node's current buffer to a T1 session-layer `BasisCurves` under `__UsdGenFrozen`, inserts a `UsdGenCurveSource` pointing at it, and re-parents the downstream node's `usdGen:input`. Upstream nodes are left authored but become unreachable — a host groomer's "Groom Bake deactivates all modifiers below it" (A7 §9.3), expressed as a wiring change instead of a mode flag. All of it in one `Sdf.ChangeBlock`, prims `Define`d outside it (S41) |
 | **Unfreeze** | `SetActive(false)` on the frozen prim and restore the wiring — 0.02 ms, no OpenExec diagnostic (S41) |
 | **Commit to stage** | T2: export the frozen prims to `<asset>_groomBake.usdc` and sublayer it (10.6 ms + 1.2 ms export at 100k) |
 | **Bake for render** | T3 payload for very heavy grooms |
@@ -1785,7 +1785,7 @@ dependency and build story (S38, S44–S45).
 |---|---|---|---|
 | **R-1** | Storm, not usdGen, blows the frame budget at production density (500k–1M hairs). | 23.9 ms at 200k, MEASURED. 1M would be ~120 ms. | The LOD ladder is a *product* feature, not a fallback: decimate by stable id (S31), cull by tile extent, and expose `usdGen:lod:ratio` per description. **Stop condition:** if S-4 shows tile culling rejects nothing on a real head (tiles too spread out), change the chunk partition from Morton-over-roots to a UV-island partition before shipping P3. |
 | **R-2** | Cross-chunk operators someone wants later (neighbour smooth, collide) break P3. | The data-plane report leaves cross-chunk kernels unmeasured. | They are v3 and they get their own lane: a per-frame grid rebuilt on the commit thread, evaluated as a *two-pass* node (gather then scatter), never as a chunk fan-in. If a v1 operator ever needs a hair-to-hair read, that is a design review, not a patch. |
-| **R-3** | Uniform CV count per chunk (ASSUMPTION 1) is wrong for imported grooms. | Alembic/Unreal grooms routinely have mixed CV counts. | The ragged path exists (`cvCount == 0` + `cvOffsets`) and is correct but slower; `UsdGenResample` in v2 converts an imported groom to uniform. **Stop condition:** if the ragged path is more than 2× slower on E-1, promote `Resample` to v1 and make it automatic on import. |
+| **R-3** | Uniform CV count per chunk (ASSUMPTION 1) is wrong for imported grooms. | Alembic/a host renderer grooms routinely have mixed CV counts. | The ragged path exists (`cvCount == 0` + `cvOffsets`) and is correct but slower; `UsdGenResample` in v2 converts an imported groom to uniform. **Stop condition:** if the ragged path is more than 2× slower on E-1, promote `Resample` to v1 and make it automatic on import. |
 | **R-4** | The primvar-descriptor / bare-leaf optimisation breaks if a caching filter is ever inserted between usdGen and the render index. | The optimisation is conditional on usdGen being the sole producer (`G-storm-throughput §1.9`). | SI-2 asserts the exact locator set; a second assertion in tier 2 checks `drawBatches` and re-sync counts. If a host inserts a caching SI, flip a single flag to `ComputeDirtyLocators` and pay 0.51 µs/prim/frame. |
 | **R-5** | The `esfUsd/stageData.cpp:360` OpenExec resync bug turns freeze/undo into a diagnostic storm. | Reproduced with bare `ExecUsdSystem` (S41, S46). | Contain it (`TfErrorMark` in C++, `try/except` + post-condition assert in Python), never rely on `RemovePrim` interactively, batch removals in one `Sdf.ChangeBlock`. File upstream. |
 | **R-6** | Storm's render-context material resolution does not work as ASSUMPTION 7 hopes, and the scene index has to author per-delegate bindings forever. | S36 marks it UNVERIFIED. | Gate L-1 answers it in P4 in an afternoon on this host. The fallback (author the binding we want) is already the plan, so the risk is only that the material is less portable. |

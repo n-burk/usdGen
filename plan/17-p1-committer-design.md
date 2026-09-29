@@ -161,7 +161,7 @@ from a stage that already holds a `UsdGenTonicGroom`:
 3. Same rule for the graph: extracted loops and the re-rasterised live
    primvar must equal the stored opinions bit-exactly (`graphRoundTrip`).
 
-Foreign guides (Houdini, hand-authored) fail step 2 by design; P5 imports
+Foreign guides (a DCC, hand-authored) fail step 2 by design; P5 imports
 those as L3 locked tubes instead of fill output. Result struct reports
 `guidesBitEqual`, `graphRoundTrip`, counts, and a diagnostic string.
 

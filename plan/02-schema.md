@@ -87,7 +87,7 @@ scatter from Poisson to at-guides is then one **attribute edit** (structural, bu
 not a prim delete plus create — which
 would be a resync, a rewire of `usdGen:input`, a lost mask block and a walk into the
 `RemovePrim`-under-OpenExec defect (`pxr/exec/esfUsd/stageData.cpp:361`, S41, MEASURED
-`research/G-freeze-bake-undo-and-frozen-reentry.md` §1.4). XGen ships **one** Generator whose
+`research/G-freeze-bake-undo-and-frozen-reentry.md` §1.4). a host groomer ships **one** Generator whose
 `Generate Primitives` attribute selects "Randomly across the surface" / "In uniform rows and
 columns" / "At specified locations" / "At guide locations", for the same reason
 (`research/A7-prior-art-grooming.md` §1.1). A7 §9.1's four separate `Scatter*` operators are the
@@ -303,7 +303,7 @@ surface frame; `UsdGenCollide` and `UsdGenWind` are v3 and need deformed-space s
 **`UsdGenFreeze`.** Caps the chain at a snapshot: `usdGen:frozen:mode = "frozen"` reads the frozen
 `BasisCurves` and does not evaluate upstream; `"live"` passes the input through and keeps the
 snapshot as a stale artefact. Upstream operators stay authored and stay in the stack, greyed —
-XGen's "Groom Bake deactivates all modifiers below it", reversibly, by one token
+a host groomer's "Groom Bake deactivates all modifiers below it", reversibly, by one token
 (`research/A7-prior-art-grooming.md` §9.3).
 
 **`UsdGenSculptLayer`.** Per-CV deltas in the root frame keyed by stable `curveId`, at a layer
@@ -332,10 +332,10 @@ kernels are `04-operators.md`.
 | `UsdGenNoise` | v1 | Frizz: add correlated fBm displacement in the root frame so it follows the deforming surface. |
 | `UsdGenLength` | v1 | Set, scale, cut or cull strand length, with a map and per-curve randomness. |
 | `UsdGenWidth` | v1 | Author `widths` from a base width, a root→tip ramp and a taper. |
-| `UsdGenDirection` | v1 | XGen Tilt/Around-N: rotate strands toward a direction and lift them off the surface. |
+| `UsdGenDirection` | v1 | a host groomer Tilt/Around-N: rotate strands toward a direction and lift them off the surface. |
 | `UsdGenSmooth` | v1 | Laplacian smoothing along each curve with the root locked. |
 | `UsdGenResample` | v1 | Change the CV count, uniformly or by arc length; the one styler that is topology-bumping. |
-| `UsdGenScale` | v1 | Global length multiplier with an optional ramp (XGen IGS). |
+| `UsdGenScale` | v1 | Global length multiplier with an optional ramp (a host groomer IGS). |
 | `UsdGenSculptLayer` | v1 | Apply hand-authored per-CV deltas in the root frame, keyed by `curveId`, at a layer weight. |
 | `UsdGenFreeze` | v1 | Cap the chain at an authored snapshot; one token switches between frozen and live. |
 | `UsdGenDeform` | v1 | Transport rest curves through the animated surface frame (rigid frame, RBF or point deform). |
@@ -350,7 +350,7 @@ kernels are `04-operators.md`.
 | `UsdGenCollide` | v3 | Push or rotate strands out of colliders and the skin. |
 | `UsdGenWind` | v3 | Time-dependent force field with gust and shear terms. |
 | `UsdGenImageMap` | v1 | Sample a UV-mapped image through the surface's `st`. |
-| `UsdGenExprMap` | v1 | Evaluate a SeExpr expression over the XGen variable set. |
+| `UsdGenExprMap` | v1 | Evaluate a SeExpr expression over the a host groomer variable set. |
 | `UsdGenPaintMap` | v1 | Read a primvar the paint brush writes on the surface during the session. |
 | `UsdGenNoiseMap` | v1 | Procedural fBm/noise field, using SeExpr's noise as the single implementation (S38). |
 | `UsdGenCombineMap` | v1 | Combine several maps (multiply, add, max, …) — usdRig's weight-object shape. |
@@ -464,7 +464,7 @@ knob and stays capture (§6.4). A product greater than 1 is clamped with one `TF
 description: raising density above the authored `usdGen:density` would move the id space and
 silently invalidate every sculpt layer. A groom that wants a quarter-density viewport and a
 full-density render authors `usdGen:density` at the **full render count**, `densityScale = 0.25`
-and `renderDensityScale = 1` — XGen's Render Density Multiplier expressed so that ids hold
+and `renderDensityScale = 1` — a host groomer's Render Density Multiplier expressed so that ids hold
 (`research/A7-prior-art-grooming.md` §1.5).
 
 The interactive ceiling is a **session** value, not a schema property:
@@ -497,7 +497,7 @@ groom.
 | Property | Type | Default | Doc | Dirty class |
 |---|---|---|---|---|
 | `usdGen:surface` | `rel` | — (inherits the description's) | The mesh the guide roots bind to. Used to recompute `skinprim`/`skinprimuv` when guides are replanted. | structural |
-| `usdGen:blend` | `float[]` | `[]` | Per-guide range of influence in `[0,1]`, XGen's guide "Blend". Indexed by the child curves' `primvars:usdGen:curveId` in ascending order. Empty means all `1.0`. | capture |
+| `usdGen:blend` | `float[]` | `[]` | Per-guide range of influence in `[0,1]`, a host groomer's guide "Blend". Indexed by the child curves' `primvars:usdGen:curveId` in ascending order. Empty means all `1.0`. | capture |
 | `usdGen:label` | `string` | `""` | | *cosmetic* |
 
 The guide curves themselves are the namespace children of the set: `UsdGeomBasisCurves` prims with
@@ -563,13 +563,13 @@ structural), `usdGen:maxGuides` (`int`, `3`, capture), `usdGen:influenceRadius` 
 capture), `usdGen:influenceDecay` (`float`, `2.0`, capture), `usdGen:maxGuideAngle` (`float`, `90`
 degrees, capture), `usdGen:blendMethod` (`uniform token`, `"linearBlend"`, structural — allowed
 `linearBlend | extrudeAndBlend`), `usdGen:blendInSkinSpace` (`float`, `1.0`, value),
-`usdGen:useUniqueGuide` (`bool`, `false`, capture — one guide per hair, Unreal's mode),
+`usdGen:useUniqueGuide` (`bool`, `false`, capture — one guide per hair, a host renderer's mode),
 `usdGen:randomizeGuide` (`float`, `0.0`, capture), `usdGen:cvCount` (`int`, `8`, structural),
 `usdGen:clumpCrossover` (`float`, `0.0`, capture), `usdGen:length:source` (`rel` → a `UsdGenMap`
 whose value multiplies the interpolated strand length, structural), `usdGen:mask:region` (inherited
 from the mask block, capture). It **emits** `int[] primvars:guideIndex` and
 `float[] primvars:guideWeight`, both `uniform` with `elementSize = 3`
-(`pxr/usd/usdGeom/primvar.h:325-331`), matching Unreal's `groom_closest_guides` /
+(`pxr/usd/usdGeom/primvar.h:325-331`), matching a host renderer's `groom_closest_guides` /
 `groom_guide_weights` arity so a bake round-trips. The names carry **no `usdGen:` prefix**: they are
 published under contract C2 as `primvars/guideIndex` and `primvars/guideWeight` (ADR §2.3 and §9
 R24; `06-imaging.md` §4.1; `03-execution-engine.md` §1.2), and C1 and C2 must freeze one spelling.
@@ -706,7 +706,7 @@ styler that moves CVs — `UsdGenClump`, `UsdGenNoise`, `UsdGenCurl`, `UsdGenBen
 | `usdGen:direction` | `vector3f` | `(0,1,0)` | `UsdGenDirection` target direction | value |
 | `usdGen:amount` | `float` | `0.0` | `[0,1]`, `UsdGenDirection` | value |
 | `usdGen:lift` | `float` | `0.0` | degrees, `UsdGenGrow` and `UsdGenDirection` | value |
-| `usdGen:tiltU` / `:tiltV` / `:tiltN` / `:aroundN` | `float` | `0.0` | degrees, the four XGen Tilt axes | value |
+| `usdGen:tiltU` / `:tiltV` / `:tiltN` / `:aroundN` | `float` | `0.0` | degrees, the four a host groomer Tilt axes | value |
 | `usdGen:followSkinContour` | `float` | `0.0` | `[0,1]` | value |
 | `usdGen:direction:source` | `rel` | — | a `UsdGenMap` supplying a per-root direction (`returnType = "color"` read as a vector), `UsdGenDirection` | structural |
 | `usdGen:direction:knots` | `float2[]` | `[(0,1),(1,1)]` | §2.17 scalar ramp on `amount`, meaningful only in `perSegment` mode, `UsdGenDirection` | value |
@@ -812,13 +812,13 @@ into (`research/G-freeze-bake-undo-and-frozen-reentry.md` §1.5).
 
 | Property | Type | Default | Doc | Dirty class |
 |---|---|---|---|---|
-| `usdGen:sculpt:weight` | `float` | `1.0` | Layer weight `[0,1]`, XGen sculpt-layer semantics. Multiple layers stack in chain order and blend additively. | value |
+| `usdGen:sculpt:weight` | `float` | `1.0` | Layer weight `[0,1]`, a host groomer sculpt-layer semantics. Multiple layers stack in chain order and blend additively. | value |
 | `usdGen:sculpt:space` | `uniform token` | `"rootFrame"` | `rootFrame \| object`. `rootFrame` is what makes a delta survive surface deformation. | structural |
 | `usdGen:sculpt:curveIds` | `uint64[]` | `[]` | Curve ids that carry deltas, **sorted ascending**, matching `primvars:usdGen:curveId` (64-bit, ADR §9 R12). | capture |
 | `usdGen:sculpt:cvOffsets` | `int[]` | `[]` | Prefix offsets into `deltas`; size `curveIds.size() + 1`; last element = `deltas.size()`. | capture |
 | `usdGen:sculpt:deltas` | `vector3f[]` | `[]` | Per-CV delta in that curve's root frame. | value |
 | `usdGen:sculpt:epoch` | `uniform string` | `""` | The epoch the deltas were authored against. A mismatch is a badge plus a "Rebase sculpt" action (one undoable re-match by nearest root UV, in the tool); deltas for ids that no longer exist are kept and ignored, never dropped. | capture |
-| `usdGen:sculpt:lockedCurves` | `uint64[]` | `[]` | XGen Freeze-brush ids: downstream stylers are zeroed for these curves. | capture |
+| `usdGen:sculpt:lockedCurves` | `uint64[]` | `[]` | a host groomer Freeze-brush ids: downstream stylers are zeroed for these curves. | capture |
 | `usdGen:sculpt:rootPrims` | `int[]` | `[]` | Optional, parallel to `curveIds`: the parent-mesh face each delta's curve was rooted on. Lets "Rebase sculpt" re-match by nearest root UV without re-running the generator (ADR §9 R8). | capture |
 | `usdGen:sculpt:rootUVs` | `texCoord2f[]` | `[]` | Optional, parallel to `curveIds`: the root UV inside that face. | capture |
 
@@ -868,7 +868,7 @@ are fields (this is the second D1 defect the panel flagged in the performance pr
 | `UsdGenImageMap` | v1 | `asset usdGen:map:file` (**one** `asset`, never `asset[]`) · `token usdGen:map:uvSet = "st"` · `token usdGen:map:wrap = "clamp"` (`clamp \| repeat \| mirror \| black`) · `token usdGen:map:filter = "bilinear"` (allowed **`nearest \| bilinear`**) · `token usdGen:map:colorSpace = "raw"` (`auto \| raw \| sRGB`; the default is `raw` so a scalar mask is never silently transfer-transformed, `07-look-maps-expressions.md` §5.1) |
 | `UsdGenPtexMap` | v1 (M4) | `asset usdGen:map:file` (`.ptx`), sampled by the ptex face id derived from the parent-mesh face id and the sub-face quadrant (§2.20 rule 2) · `token usdGen:map:filter = "bilinear"` (allowed **`nearest \| bilinear \| box \| gaussian \| bicubic \| bspline \| catmullrom \| mitchell`** — the eight `PtexFilter::FilterType` names, `07-look-maps-expressions.md` §5.3) · `float usdGen:map:blur = 0` · `int usdGen:map:firstChannel = 0` · `int usdGen:map:channelCount = 1` · `token usdGen:map:borderMode = "clamp"` (`clamp \| black \| periodic`) |
 | `UsdGenExprMap` | v1 | `string usdGen:expr:source` (SeExpr text) · `uniform token usdGen:expr:returnType = "float"` (`float \| color`) · `uniform int usdGen:expr:seed = 0` · `rel usdGen:expr:maps` (named `UsdGenMap` prims reachable from `map("<primName>")`) |
-| `UsdGenPaintMap` | v1 | `rel usdGen:paint:surface` · `token usdGen:paint:primvar = "usdGen:paint:density"` · `token usdGen:paint:interpolation = "faceVarying"` · `token usdGen:paint:storage = "primvar"` (`primvar \| file` — which of the storage states is live, `07-look-maps-expressions.md` §8.1) · `int usdGen:paint:resolution = 256` (the per-face `Res` a `.ptx` bake writes, §8.3 there; XGen's `#3dpaint, N`) · `asset usdGen:paint:bakedFile` (EXR or `.ptx` after an explicit bake) |
+| `UsdGenPaintMap` | v1 | `rel usdGen:paint:surface` · `token usdGen:paint:primvar = "usdGen:paint:density"` · `token usdGen:paint:interpolation = "faceVarying"` · `token usdGen:paint:storage = "primvar"` (`primvar \| file` — which of the storage states is live, `07-look-maps-expressions.md` §8.1) · `int usdGen:paint:resolution = 256` (the per-face `Res` a `.ptx` bake writes, §8.3 there; a host groomer's `#3dpaint, N`) · `asset usdGen:paint:bakedFile` (EXR or `.ptx` after an explicit bake) |
 | `UsdGenNoiseMap` | v1 | `token usdGen:noise:type = "fbm"` (`perlin \| snoise \| fbm \| turbulence \| cellnoise \| voronoi`) · `float usdGen:noise:frequency = 1` · `float usdGen:noise:lacunarity = 2` · `float usdGen:noise:gain = 0.5` · `int usdGen:noise:octaves = 3` · `uniform int usdGen:noise:seed = 0` · `token usdGen:noise:space = "rest"` (`rest \| deformed`; there is **no** `world` token, because post-flattening deformed space *is* world space — ADR §9 R9, S4) |
 | `UsdGenCombineMap` | v1 | `rel usdGen:combine:inputs` (ordered) · `token usdGen:combine:mode = "multiply"` (`multiply \| add \| subtract \| max \| min \| average \| overlay`, usdRig's `RigExecCombineWeight` vocabulary, `research/A1-usdrig-graph.md` §6) |
 | `UsdGenGuideProximityMap` | v1 | `rel usdGen:guides` · `float usdGen:proximity:radius = 1.0` · `float usdGen:proximity:decay = 2.0` |
@@ -916,17 +916,17 @@ creation until gate **SI-8** proves auto-apply works on this codeless domain (AD
 | `usdGen:mask:range` | `float2` | `(0,1)` | Remap of the source value before use: `(s - x) / (y - x)`, clamped. | value |
 | `usdGen:mask:rangeMode` | `uniform token` | `"normalized"` | `normalized \| absoluteLength` — the axis the along-curve ramp is evaluated on. | structural |
 | `usdGen:mask:combine` | `uniform token` | `"multiply"` | `multiply \| add \| subtract \| max \| min \| average \| replace` — how the random term combines with the map term. Deliberately **not** the same set as `usdGen:combine:mode` on `UsdGenCombineMap` (§2.12), which is usdRig's `RigExecCombineWeight` vocabulary `multiply \| add \| subtract \| max \| min \| average \| overlay` (`research/A1-usdrig-graph.md` §6): `replace` is meaningful only for the random term, `overlay` only for map composition. | structural |
-| `usdGen:mask:random` | `float` | `0.0` | Per-curve `rand(randomSeed, curveId)` multiplier amount, XGen's `rand()` masks. | capture |
+| `usdGen:mask:random` | `float` | `0.0` | Per-curve `rand(randomSeed, curveId)` multiplier amount, a host groomer's `rand()` masks. | capture |
 | `usdGen:mask:randomSeed` | `uniform int` | `0` | | capture |
 | `usdGen:mask:ramp:knots` | `float2[]` | `[(0,1),(1,1)]` | Along-curve ramp, `(position, value)`, sorted by position (S11). | value |
 | `usdGen:mask:ramp:interpolation` | `uniform token` | `"catmullRom"` | `linear \| catmullRom \| bspline \| constant` (ADR §9 R11). §2.17 states how each builds its LUT. | value |
 | `usdGen:mask:ramp:spline` | `float` | — | **v2.** The whole-`TsSpline` transport of §2.17. Authored with `.spline`; the adapter publishes it as `HdTypedSampledDataSource<TsSpline>` and never flags it time-varying. This is *not* an animated scalar. | value |
-| `usdGen:mask:rangeMin` | `float` | `0.0` | Houdini's four-parameter curve-mask shortcut, used when fewer than two ramp knots are authored. | value |
+| `usdGen:mask:rangeMin` | `float` | `0.0` | a DCC's four-parameter curve-mask shortcut, used when fewer than two ramp knots are authored. | value |
 | `usdGen:mask:rangeMax` | `float` | `1.0` | | value |
 | `usdGen:mask:effectPosition` | `float` | `0.5` | | value |
 | `usdGen:mask:falloff` | `float` | `0.5` | Shapes the shoulders of the shortcut band. | value |
-| `usdGen:mask:influenceWidth` | `float` | `0.5` | `[0,1]`. Width of the band the shortcut's falloff shapes — the fifth Houdini curve-mask parameter (`research/A7-prior-art-grooming.md` §7). Consumed by `04-operators.md` §5.4's shortcut formula. | value |
-| `usdGen:mask:noise:amount` | `float` | `0.0` | Houdini "Noise Mask", evaluated on the rest root position. | capture |
+| `usdGen:mask:influenceWidth` | `float` | `0.5` | `[0,1]`. Width of the band the shortcut's falloff shapes — the fifth a DCC curve-mask parameter (`research/A7-prior-art-grooming.md` §7). Consumed by `04-operators.md` §5.4's shortcut formula. | value |
+| `usdGen:mask:noise:amount` | `float` | `0.0` | a DCC "Noise Mask", evaluated on the rest root position. | capture |
 | `usdGen:mask:noise:frequency` | `float` | `1.0` | | capture |
 | `usdGen:mask:noise:gain` | `float` | `0.5` | | capture |
 | `usdGen:mask:noise:bias` | `float` | `0.5` | | capture |
@@ -1063,8 +1063,8 @@ second trap: `Usd.Prim.GetCustomDataByKey("usdGen:frozenEpoch")` returns `None` 
 Interpolation is authored per prim, not fixed by the schema (as `UsdGeomGprim` does for
 `primvars:displayColor`); C3 (§5) fixes it. The three unprefixed primvars C3 also requires —
 `primvars:rest`, `primvars:skinprim`, `primvars:skinprimuv` — are **deliberately not** declared
-here: they are Houdini convention names (`research/A7-prior-art-grooming.md` §3.6), and a groom
-exported from Houdini or Unreal must satisfy C3 without applying a usdGen schema at all.
+here: they are a DCC convention names (`research/A7-prior-art-grooming.md` §3.6), and a groom
+exported from a DCC or a host renderer must satisfy C3 without applying a usdGen schema at all.
 
 ### 2.17 Ramp encodings
 
@@ -1759,7 +1759,7 @@ aggregation key (MEASURED, `research/G-stage-free-parameter-and-time-transport.m
 
 One contract, four producers: **guides**, **freezes**, **imports** and **sim caches**. It is
 S42 plus `primvars:usdGen:role` (ADR §3). It is frozen at the end of **M2**. It removes four future
-migrations: a groom exported from Houdini, a bake written by usdGen, a hand-drawn guide set and an
+migrations: a groom exported from a DCC, a bake written by usdGen, a hand-drawn guide set and an
 Alembic-converted sim cache are the same kind of input to a styler.
 
 ```usda
@@ -1814,7 +1814,7 @@ on. usdGen itself always authors `uint64[]`.
 
 `primvars:usdGen:role` is the only marker distinguishing a guide set's curves from a freeze's, and
 it is what lets `UsdGenCurveSource` accept both. A curve prim that satisfies C3 but has no
-`UsdGenCurveAPI` applied is still accepted (an exported Houdini groom will not have it); the API
+`UsdGenCurveAPI` applied is still accepted (an exported a DCC groom will not have it); the API
 schema buys fallbacks, `GetPropertyNames()` visibility and a one-call validity predicate, not
 admission.
 
@@ -2354,7 +2354,7 @@ re-cut (ADR §7).
 | `research/G-stage-free-parameter-and-time-transport.md` | §1 codeless prims stage-free, §1.1 relationship primvars, §2 parameter transport table, §2.1 the ramp question, §3 rest surface, §4 containers through instancing, §5 invalidation, §7 registry, key facts |
 | `research/G-freeze-bake-undo-and-frozen-reentry.md` | §1.4–1.5 `RemovePrim` and the edit target, §2.1 the C3 contract dump, §2.2 stage-free re-entry, §2.3 what usdImaging will not carry, §2.4 dirty-locator taxonomy, §3 landing places and the `primvars:rest` cost (`EV-048`), §4.2 the resync-per-stroke rule |
 | `research/A4-openusd-hdgp-adapters.md` | §2.1 plugInfo keys, §2.2 Hydra 2.0 virtuals, §2.3 data sources and locators, §2.4 free vs implemented invalidation, §2.5 population predicate |
-| `research/A7-prior-art-grooming.md` | §1.1 XGen's one Generator with a `Generate Primitives` mode, §1.5 render density multiplier, §3.6 Houdini primvar names, §7 mask survey, §9.1 generators, §9.2 stylers (S1 `Clump.method`), §9.3 freeze/sculpt semantics, §9.4 map prims |
+| `research/A7-prior-art-grooming.md` | §1.1 a host groomer's one Generator with a `Generate Primitives` mode, §1.5 render density multiplier, §3.6 a DCC primvar names, §7 mask survey, §9.1 generators, §9.2 stylers (S1 `Clump.method`), §9.3 freeze/sculpt semantics, §9.4 map prims |
 | `research/A3-usdrig-tools.md` | §6 spec/plan conventions, §7.2 paint round trip |
 | `research/A2-usdrig-imaging.md` | §3.2 rigExec's points replacement, §5 `__RigExecGenerated`, §6 `UsdGeomBBoxCache` |
 | `research/A1-usdrig-graph.md` | §5 blend envelope and failure semantics, §6 weight objects and falloff LUTs |
@@ -2369,5 +2369,5 @@ re-cut (ADR §7).
 | `prototypes/stage-free-transport/` | `plugin/usdGenProbeSchema/resources/` (the codeless registration proof), `probe.cpp`, `probe6.cpp` (TsSpline transport) |
 | `prototypes/freeze-bake/` | `probe4_frozen_reentry_si.cpp`, `probe7_locators_and_reentry.cpp` |
 | `prototypes/instancing/` | `instProbe.cpp`, `instProbe3.cpp`, `out-probe1.txt`, `out-probe2.txt` |
-| OpenUSD 26.08 (`/home/burkard/work/OpenUSD`, tag `v26.08`, merge commit `ee47c679a`) | Every file:line cited in this document, re-verified by grep: `usd/primDefinition.h`, `usd/schemaRegistry.cpp`, `usd/usdGenSchema.py`, `usd/attribute.h`, `usd/stage.cpp`, `base/ts/types.h`, `usdGeom/{curves.h, primvar.h, subset.h, boundableComputeExtent.cpp}`, `usdImaging/{adapterRegistry.cpp, dataSourceMapped.h, dataSourceAttribute.h, sceneIndexPrimAdapter.h, sceneIndexPlugin.h, geomSubsetAdapter.cpp, stageSceneIndex.cpp, piPrototypeSceneIndex.cpp, piPrototypePropagatingSceneIndex.cpp, plugInfo.json}`, `sdf/textFileFormatParser.h`, `imaging/hd/{sceneGlobalsSchema.h, geomSubsetSchema.{h,cpp}, instancerTopologySchema.h, sceneIndexObserver.h, sceneIndexAdapterSceneDelegate.cpp}`, `imaging/hdSt/primUtils.cpp`, `imaging/pxOsd/refinerFactory.h`, OpenSubdiv `far/ptexIndices.h`. Consolidated in `appendix-A-evidence-ledger.md`. |
-| usdRig (`/home/burkard/work/usdRig`) | `bin/gen_schema.sh:1-28`; `CMakeLists.txt:425-474` (the generated-plugInfo pattern); `libs/rigExecSchema/schema.usda`; `plugin/rigExecSchema/resources/plugInfo.json`; `docs/superpowers/specs/2026-09-01-graph-editor-design.md` (format) |
+| OpenUSD 26.08 (`<openusd-src>`, tag `v26.08`, merge commit `ee47c679a`) | Every file:line cited in this document, re-verified by grep: `usd/primDefinition.h`, `usd/schemaRegistry.cpp`, `usd/usdGenSchema.py`, `usd/attribute.h`, `usd/stage.cpp`, `base/ts/types.h`, `usdGeom/{curves.h, primvar.h, subset.h, boundableComputeExtent.cpp}`, `usdImaging/{adapterRegistry.cpp, dataSourceMapped.h, dataSourceAttribute.h, sceneIndexPrimAdapter.h, sceneIndexPlugin.h, geomSubsetAdapter.cpp, stageSceneIndex.cpp, piPrototypeSceneIndex.cpp, piPrototypePropagatingSceneIndex.cpp, plugInfo.json}`, `sdf/textFileFormatParser.h`, `imaging/hd/{sceneGlobalsSchema.h, geomSubsetSchema.{h,cpp}, instancerTopologySchema.h, sceneIndexObserver.h, sceneIndexAdapterSceneDelegate.cpp}`, `imaging/hdSt/primUtils.cpp`, `imaging/pxOsd/refinerFactory.h`, OpenSubdiv `far/ptexIndices.h`. Consolidated in `appendix-A-evidence-ledger.md`. |
+| usdRig (`<usdrig-src>`) | `bin/gen_schema.sh:1-28`; `CMakeLists.txt:425-474` (the generated-plugInfo pattern); `libs/rigExecSchema/schema.usda`; `plugin/rigExecSchema/resources/plugInfo.json`; `docs/superpowers/specs/2026-09-01-graph-editor-design.md` (format) |

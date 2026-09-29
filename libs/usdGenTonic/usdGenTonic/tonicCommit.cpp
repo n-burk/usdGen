@@ -3408,7 +3408,7 @@ TonicHydrateModel(UsdStagePtr const &stage, SdfPath const &groomPath,
             return fail(model->GetDiagnostic());
         }
     }
-    // Foreign guides (hand-authored, Houdini) are not fill output: they
+    // Foreign guides (hand-authored, a DCC) are not fill output: they
     // become locked tubes one level under the tube whose region roots them
     // (plan/17 §2.5, §5.7), so the next commit carries them as geometry.
     for (size_t s : foreign) {

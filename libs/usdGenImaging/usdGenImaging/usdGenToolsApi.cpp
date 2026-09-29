@@ -206,7 +206,7 @@ struct HasCategory<T, std::void_t<decltype(std::declval<T const &>().category)>>
 
 struct CategoryRow { const char *name; const char *category; };
 
-// Covers the SeExpr2/XGen function set, not only what this engine lowers
+// Covers the SeExpr2/a host groomer function set, not only what this engine lowers
 // today, so the classification stays right as the frontend grows into it.
 constexpr CategoryRow kCategories[] = {
     {"abs", "Math"}, {"ceil", "Math"}, {"floor", "Math"}, {"round", "Math"},

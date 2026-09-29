@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Derive Zinke-2008 dual-scattering parameters for the Unreal-Engine hair BSDF.
+"""Derive Zinke-2008 dual-scattering parameters for the host-renderer hair BSDF.
 
 What this computes
 ------------------
-The BSDF is a literal transcription of Unreal Engine's ``HairShading()`` from
-``HairBsdf.ush`` -- Brian Karis, "Physically Based Hair Shading in Unreal",
+The BSDF is a literal transcription of the host renderer's ``HairShading()`` from
+``HairBsdf.ush`` -- Brian Karis, "Physically Based Hair Shading in a host renderer",
 SIGGRAPH 2016 Physically Based Shading in Theory and Practice course.  ``N`` is
 the strand tangent, ``V`` points at the eye, ``L`` at the light; the R / TT /
 TRT lobes are summed with the Gaussian longitudinal term ``Hair_g`` and the
@@ -103,7 +103,7 @@ TFIT_NTHETA = 33
 ROUGH_RANGE = (0.05, 1.0)
 COLOR_RANGE = (0.02, 0.98)
 
-# UE's own dual-scattering spread inputs (HairStrandsLUT.usf), for cross-check:
+# the host renderer's own dual-scattering spread inputs (HairStrandsLUT.usf), for cross-check:
 # Beta_R = r^2, Beta_TT = (r/2)^2, Beta_TRT = (2r)^2 with r clamped to this band.
 UE_BETA_CLAMP = (0.18, 0.6)
 
@@ -798,9 +798,9 @@ def fit_theta(fast=False, quad=None):
 
 
 def ue_beta_comparison(sc):
-    """UE's blended-Beta shortcut vs. the measured weighted variances.
+    """the host renderer's blended-Beta shortcut vs. the measured weighted variances.
 
-    UE's dual scattering does not integrate the variance: it takes per-lobe
+    the host renderer's dual scattering does not integrate the variance: it takes per-lobe
     constants Beta_R = r^2, Beta_TT = (r/2)^2, Beta_TRT = (2r)^2 with r clamped
     to UE_BETA_CLAMP, and blends them with the same per-lobe a_f / a_b weights.
     Beta_R matches HairShading's own B[0] = r^2 exactly, so the Betas read as

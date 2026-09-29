@@ -23,7 +23,7 @@
 #   Section CV (F11) click selects ring CVs; the tools act inside the
 #                    ring plane.
 #
-# The press ladder (RigExec/Maya parity): a visible handle wins the press
+# The press ladder (RigExec/a DCC parity): a visible handle wins the press
 # (hover pre-highlights it); off every handle Shift reserves a band; a
 # component click selects through the one modifier table
 # (tonicLoops.selectModeFor) and, with Move and no modifier, drags what it
@@ -71,7 +71,7 @@ from .tonicLoops import (COMPONENT_PICK_RADIUS_PX, ToolLoop, selectBand,
                          selectItems, selectModeFor)
 
 # The gizmo's on-screen size: axes this many pixels long, whatever the zoom
-# (plan/18 section 2.4a). Maya's translate manipulator is about this long on
+# (plan/18 section 2.4a). a DCC's translate manipulator is about this long on
 # a 1080p viewport, and it has to stay clear of the 8 px CV dots it sits
 # among without covering the tube it moves.  LOGICAL pixels, the RigExec
 # manipulator size (tonicGizmoScreen.GIZMO_PIXELS).
@@ -84,7 +84,7 @@ SOFT_RADIUS_STEP = 0.05
 PINNED_ROOT_STATUS = ("Root CV is pinned: Rotate/Scale act on CVs above the "
                       "root. Select the tube (F8) to transform it whole.")
 # GZ-07: Shift held mid-drag moves the handle this fraction of the pointer
-# travel (Blender/Maya precision), from the sample where it went down.
+# travel (a DCC/a DCC precision), from the sample where it went down.
 PRECISION_FACTOR = 0.1
 # GZ-07: the live drag readout reaches the status line at most this often
 # (seconds); the viewport label repaints with every sample regardless.
@@ -372,7 +372,7 @@ class TubeLoop(ToolLoop):
             # name the same selection domain.  Keep either route in sync.
             self.state.tubeSelectionKind = subId
             # GZ-04: the kinds a click means changed, so the selection is
-            # CONVERTED to the new kind (Maya's component conversion), not
+            # CONVERTED to the new kind (a DCC's component conversion), not
             # thrown away -- F9 after a body click used to lose the tube.
             converted = self._convertSelection(self.subMode())
             self._pickedCV = None
@@ -442,7 +442,7 @@ class TubeLoop(ToolLoop):
         section CVs, a centre CV -> its rings).  A whole tube converted to a
         component kind stays selected as the OWNER SET: its TubeVert record
         is kept, and component picks are restricted to it while it exists
-        (_componentItem), as Maya shows only the hilited object's
+        (_componentItem), as the host application shows only the hilited object's
         components.  Returns how many items the new selection holds.
         """
         read = self.session.readSelection
@@ -982,7 +982,7 @@ class TubeLoop(ToolLoop):
         # selection records physical-pixel points only while it is live.
         self._lasso = []
         modifiers = sample.modifiers
-        # (a) A visible gizmo handle wins the press, as in RigExec/Maya
+        # (a) A visible gizmo handle wins the press, as in RigExec/a DCC
         # (gizmoUI._OnPress: the hit test runs first and a hit ALWAYS
         # drags).  A CV dot inside a handle's tolerance no longer steals
         # the drag; the handle prehighlight (hover) shows what a press will
@@ -1099,7 +1099,7 @@ class TubeLoop(ToolLoop):
     def middlePress(self, sample):
         """A middle drag anywhere repeats the last-dragged handle.
 
-        RigExec/Maya (gizmoUI._OnPress): the middle button needs no hit
+        RigExec/the host application (gizmoUI._OnPress): the middle button needs no hit
         test, it re-grabs the remembered handle from wherever the cursor
         is, so a small or crowded handle can be driven from open space.
         Declined (usdview keeps the press) when there is no gizmo or no
@@ -1433,7 +1433,7 @@ class TubeLoop(ToolLoop):
         """GZ-08: grow the selection one step from the component clicked.
 
         centre CV -> its whole tube, section CV -> its ring, ring -> every
-        ring of its tube (Maya's double-click loop/shell select).  Never a
+        ring of its tube (the host application's double-click loop/shell select).  Never a
         level change: Hierarchy owns navigation.  Declined (the controller
         replays an ordinary press) when no component is under the cursor.
         """
@@ -2053,7 +2053,7 @@ class TubeLoop(ToolLoop):
 
         `X` (held) lands the PIVOT on the world grid -- only along what the
         handle may move, via the vendored GridPoint + ConstrainToHandle --
-        and wins over a step snap as in RigExec.  Step Snap / `J` is Maya's
+        and wins over a step snap as in RigExec.  Step Snap / `J` is the host application's
         Discrete Move: the delta advances in whole steps along the gizmo's
         own axes, so a selection that began off the grid stays off it.
         """
@@ -2098,7 +2098,7 @@ class TubeLoop(ToolLoop):
             return False
         step = self._stepSize(sample)
         if step > 0.0:
-            # Maya's Snap Rotate: the swept angle in whole steps (degrees).
+            # a DCC's Snap Rotate: the swept angle in whole steps (degrees).
             self._snappedDegrees = tonicGizmoScreen.SnapRelative(
                 math.degrees(radians), step)
             radians = math.radians(self._snappedDegrees)
@@ -2116,7 +2116,7 @@ class TubeLoop(ToolLoop):
         if not self._transformOwners:
             return False
         # Parity G08: dragging an axis or square onto the pivot gives 0 and
-        # through it a mirrored negative factor, as in Maya, unless Prevent
+        # through it a mirrored negative factor, as in a DCC, unless Prevent
         # Negative Scale clamps it at MIN_SCALE_FACTOR.  A sample through
         # the pivot is applied, not dropped, so the drag never sticks.
         allowNegative = not bool(self.toolSettings().preventNegativeScale)

@@ -1,8 +1,8 @@
 # G — Storm hair "looks rendered": prototype, three routes, measured
 
-Gap key: `storm-hair-look`. Target: OpenUSD **v26.08** source `/home/burkard/work/OpenUSD`, install
-`/home/burkard/work/OpenUSD_26_08`. All probe sources, scenes, generated GLSL dumps and screenshots live in
-`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/storm-hair-look/`
+Gap key: `storm-hair-look`. Target: OpenUSD **v26.08** source `<openusd-src>`, install
+`$USD`. All probe sources, scenes, generated GLSL dumps and screenshots live in
+`<session-scratch>`
 (referred to below as `$P/`).
 
 ---
@@ -12,7 +12,7 @@ Gap key: `storm-hair-look`. Target: OpenUSD **v26.08** source `/home/burkard/wor
 `ENVIRONMENT.md` says Storm cannot run here because `garch` on Linux is GLX-only
 (`pxr/imaging/garch/glPlatformContextGLX.cpp`) and there is no X display. **That is true of garch's
 *context creation*, but Storm itself never creates a context** — `HgiGL` only calls `GarchGLApiLoad()`
-(`/home/burkard/work/OpenUSD/pxr/imaging/hgiGL/hgi.cpp:54`), and `GarchGLApiLoad` resolves entry points
+(`<openusd-src>/pxr/imaging/hgiGL/hgi.cpp:54`), and `GarchGLApiLoad` resolves entry points
 through `glXGetProcAddressARB` from libGL (`pxr/imaging/garch/glApi.cpp:3130-3164`), which under GLVND
 dispatches against **whatever** context is current — including one created by EGL. A grep over
 `hgiGL/ hdSt/ hdx/ usdImagingGL/` finds **zero** references to `GlfGLContext` outside unit-test drawing
@@ -63,7 +63,7 @@ jitter + optional scalp colour map + width-wise soft edge.
 
 ### 2.1 Sdr parses it (verified headlessly)
 
-`$P/sdr_parse_test.py` (run with `PYTHONPATH=/home/burkard/work/OpenUSD_26_08/lib/python3.12/site-packages`):
+`$P/sdr_parse_test.py` (run with `PYTHONPATH=$USD/lib/python3.12/site-packages`):
 
 ```
 node: 611668652201644050<><glslfx> (context: 'glslfx', ...)
@@ -91,7 +91,7 @@ rather than the parser's black (`parserPlugin.cpp:236-242`).
 `displayColor` uniform color3f, `st` uniform texCoord2f, `minScreenSpaceWidths` constant 1.0).
 
 ```
-$ LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib HAIR_CAMLIGHT=1 \
+$ LD_LIBRARY_PATH=$USD/lib HAIR_CAMLIGHT=1 \
   ./build/render_hair hair_scene.usda hair_camlight.png /World/Cam 800
 eglctx: GL context current on EGL device 0 (EGL 1.5)
 GL_VERSION=4.6.0 NVIDIA 580.173.02
@@ -229,7 +229,7 @@ plan must set lighting explicitly. UNVERIFIED which of `HdxSimpleLightTask`'s in
 Authored in USD as `ND_deon_hair_absorption_from_melanin` → `ND_chiang_hair_roughness` →
 `ND_chiang_hair_bsdf` → `ND_surface`, bound through `outputs:mtlx:surface`
 (`$P/make_scene_mtlx.py`, `$P/hair_scene_mtlx.usda`). Nodedefs at
-`/home/burkard/work/OpenUSD_26_08/libraries/pbrlib/pbrlib_defs.mtlx:146-158` (bsdf) and `:433-441` (melanin).
+`$USD/libraries/pbrlib/pbrlib_defs.mtlx:146-158` (bsdf) and `:433-441` (melanin).
 
 **It compiles and renders.** No warnings, no fallback. The generated FS
 (`$P/dump_mtlx/program5_shader9_FRAGMENT_SHADER.glsl`, 3 721 lines, 96 `chiang` hits) contains
@@ -363,10 +363,10 @@ Re-running the headless probes after any change:
 
 ```
 cd $P
-cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=/home/burkard/work/OpenUSD_26_08 -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=$USD -DCMAKE_BUILD_TYPE=Release
 ninja -C build
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-PYTHONPATH=/home/burkard/work/OpenUSD_26_08/lib/python3.12/site-packages /home/burkard/.venv/bin/python3 make_scene.py
+export LD_LIBRARY_PATH=$USD/lib
+PYTHONPATH=$USD/lib/python3.12/site-packages $VENV/bin/python3 make_scene.py
 HAIR_CAMLIGHT=1 ./build/render_hair hair_scene.usda out.png /World/Cam 800
 TF_DEBUG=HDST_DUMP_SHADER_SOURCEFILE HAIR_CAMLIGHT=1 ./build/render_hair hair_scene.usda /tmp/x.png /World/Cam 400
 ./build/bench_hair hair_scene.usda /World/Cam 1280 720 1.2 60 0

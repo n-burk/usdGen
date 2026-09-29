@@ -67,7 +67,7 @@
 - `build/build.ninja` applies `-ffp-contract=off` only to `usdGenMath`; other target compile rules omit it.
 - Schema and imaging `file(GENERATE)` calls occur before test declarations, so their build-tree resources exist before test execution.
 - `usdGenConfig.cmake.in` does call `find_dependency` for pxr, TBB, and OpenGL; its path expansion defect is recorded above.
-- Requested suite result: `ctest --test-dir /home/burkard/work/usdGen/build -L '^T[01]$' --output-on-failure` passed 7/7 tests in 0.24 seconds. The hidden coding error found under verbose execution is recorded above.
+- Requested suite result: `ctest --test-dir <usdgen-src>/build -L '^T[01]$' --output-on-failure` passed 7/7 tests in 0.24 seconds. The hidden coding error found under verbose execution is recorded above.
 
 ## Summary
 P0: 3, P1: 5, P2: 1; verdict: FAIL

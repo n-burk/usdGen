@@ -10,8 +10,8 @@ the output are bytes the tool wrote.
 Run it with the OpenUSD python that usdGen builds against, with the tonic
 DLL named:
 
-    $env:USDGENTONIC_DLL = "D:\\work\\usdGen\\build\\usdGenTonic.dll"
-    $env:PYTHONPATH = "D:\\work\\usdRig\\usd-install\\lib\\python"
+    $env:USDGENTONIC_DLL = "<usdgen-src>\\build\\usdGenTonic.dll"
+    $env:PYTHONPATH = "<usdrig-src>\\usd-install\\lib\\python"
     python examples\\tools\\gen_tonic_braid_hierarchy.py
 """
 from __future__ import annotations

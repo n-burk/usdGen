@@ -52,7 +52,7 @@ _GIZMO_DEFAULT_ICONS = {
     "groupPivot": PIVOT_ICONS["individual"],
 }
 
-# The transform row, in usdRig/Maya order. Mode-shaped so the dock can
+# The transform row, in usdRig/a DCC order. Mode-shaped so the dock can
 # treat it like any other shelf; the status text is the tooltip body and
 # names the gesture, not just the tool (the usdRig toolbar's wording).
 TRANSFORM_TOOLS = (

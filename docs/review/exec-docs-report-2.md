@@ -46,7 +46,7 @@ untouched, still 11 sections, zero `W-[0-9]`):
   Vulkan/Metal therefore run through the stock GL render engine
   (`usdrecord -r GL`); there is no separate Metal Hydra delegate in 26.08
   (Metal is the `hgiMetal` Hgi backend).
-- Dev-host caveat made explicit: `/home/burkard/work/OpenUSD_26_08` ships
+- Dev-host caveat made explicit: `$USD` ships
   `libusd_hgiGL.so`/`libusd_hgiInterop.so` only, no `libusd_hgiVulkan.so` /
   `libusd_hgiMetal.so`; on the dev host only Leg 1 (GL) runs.
 - **Leg 1 (GL, mandatory smoke, dev host + all M7 runners)**: single
@@ -84,7 +84,7 @@ untouched, still 11 sections, zero `W-[0-9]`):
 `bin/_env.sh` rewritten to the plan/10 §3.6 contract:
 - `export USD` (default `$(cd $GEN/..)/OpenUSD_26_08`, kept if pre-set),
   `export GEN` (repo root from the file's own location), `export GENBUILD`
-  (`$GEN/build`), `export PY` (`${VENV:-/home/burkard/.venv}/bin/python3`);
+  (`$GEN/build`), `export PY` (`${VENV:-$VENV}/bin/python3`);
   all honor existing environment values (overrides allowed, incl. `USD`).
 - `PATH` prepends `$GENBUILD:$USD/bin`.
 - `LD_LIBRARY_PATH` = `$USD/lib:$GENBUILD` + inherited; `DYLD_LIBRARY_PATH`
@@ -101,9 +101,9 @@ untouched, still 11 sections, zero `W-[0-9]`):
 
 Verification (clean shell, `env -i`):
 ```
-$ cd /home/burkard/work/usdGen && env -i /bin/bash -c 'source bin/_env.sh && command -v usdcat && echo GENBUILD=$GENBUILD'
-/home/burkard/work/OpenUSD_26_08/bin/usdcat
-GENBUILD=/home/burkard/work/usdGen/build
+$ cd <usdgen-src> && env -i /bin/bash -c 'source bin/_env.sh && command -v usdcat && echo GENBUILD=$GENBUILD'
+$USD/bin/usdcat
+GENBUILD=<usdgen-src>/build
 ```
 Additionally: `usdcat --version` runs after sourcing; exports confirmed:
 `PXR=…/build/usd/usdGenSchema/resources:…/build/usd/usdGenImaging/resources:…/OpenUSD_26_08/plugin/usd:…/OpenUSD_26_08/lib/usd`;
@@ -166,13 +166,13 @@ $ grep -cE '^## [0-9]+\.' docs/workstation-protocol.md; grep -cE 'W-[0-9]' docs/
 11
 0
 $ env -i /bin/bash -c 'source bin/_env.sh && command -v usdcat && echo GENBUILD=$GENBUILD'
-/home/burkard/work/OpenUSD_26_08/bin/usdcat
-GENBUILD=/home/burkard/work/usdGen/build
+$USD/bin/usdcat
+GENBUILD=<usdgen-src>/build
 $ git check-ignore -v docs/prework/probes/PW-egl/scene_100k_A.usdc … (7 giants + scratch)
 .gitignore:23 / .gitignore:24 / .gitignore:55 matches on all
 $ git check-ignore docs/prework/probes/PW-egl/{make_pw_scenes.py,results_s8.txt,pw4_both.png,usdGenHairPreview.glslfx,small_test.usdc}
 (no output → still committable)
-$ env LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib ctest --test-dir build -L '^T[01]$'
+$ env LD_LIBRARY_PATH=$USD/lib ctest --test-dir build -L '^T[01]$'
 100% tests passed, 0 tests failed out of 7   (code untouched; baseline state)
 ```
 

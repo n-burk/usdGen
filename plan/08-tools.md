@@ -539,8 +539,8 @@ Notes that are not optional:
   Density scrubbing and Cut park culled or trimmed strands as degenerate CVs with zero width and
   commit the real count change on release.
 * Comb, Grab and Smooth in hair mode *are* the sculpt brush; there is no separate "sculpt" tool.
-* Brush 10 is XGen's **Freeze** brush — the name `02-schema.md` §2.10 uses for
-  `usdGen:sculpt:lockedCurves` ("XGen Freeze-brush ids") and `04-operators.md` uses for the same
+* Brush 10 is a host groomer's **Freeze** brush — the name `02-schema.md` §2.10 uses for
+  `usdGen:sculpt:lockedCurves` ("a host groomer Freeze-brush ids") and `04-operators.md` uses for the same
   gesture. This document calls it **Lock paint** so that "freeze" always means `UsdGenFreeze` (§4);
   the shelf label is "Lock paint (Freeze)" and the property is `usdGen:sculpt:lockedCurves` either
   way.
@@ -1465,7 +1465,7 @@ registered type (shares gate **SI-7**).
 
 ## 10. Out of scope
 
-* **Other hosts.** Maya, Houdini, Katana, Nuke, Solaris. The C ABI and `_usdGen` are host-agnostic on
+* **Other hosts.** a DCC, a DCC, Katana, Nuke, Solaris. The C ABI and `_usdGen` are host-agnostic on
   purpose, but a second host is a v3 conversation.
 * **GPU brushes.** Every kernel is CPU numpy over a zero-copy view; a compute-shader brush needs the
   evaluator's buffers on the GPU, which is the v3 "GPU tail" (ADR §6).
@@ -1542,7 +1542,7 @@ only gate registry); `10-build-dependencies-testing.md` §3.5 (the env-var regis
 `probe9_error_containment.py`, `probe10_resync_blast.cpp`, `uv/testUsdviewFreezeCost.py`,
 `uv/makeStage.py`).
 
-**OpenUSD 26.08 file:line index** (every one re-verified by reading `/home/burkard/work/OpenUSD/pxr/…`
+**OpenUSD 26.08 file:line index** (every one re-verified by reading `<openusd-src>/pxr/…`
 while writing this document): `usdImaging/usdviewq/plugin.py:113,121,129,333,342`;
 `usdImaging/usdviewq/appController.py:381,432,522-527,1283,1863,1868`;
 `usdImaging/usdImaging/stageSceneIndex.cpp:511,754,792`;

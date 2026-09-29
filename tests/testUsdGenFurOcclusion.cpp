@@ -210,7 +210,7 @@ int main() try {
 
     // ---- hair count calibration --------------------------------------------
     // N layers of parallel fibres of width w spaced s apart must read exactly
-    // N*w/s crossings from below: that is Unreal's HairCount, not a strand
+    // N*w/s crossings from below: that is a host renderer's HairCount, not a strand
     // count, and the shader's HairCount-1 shift depends on the scale.
     {
         int const layers=5; float const width=0.01f, spacing=0.05f;
@@ -499,7 +499,7 @@ int main() try {
         // one. Sampling the cap a voxel out along the normal, which an earlier
         // version did to clear an opaque shell that its hair-only sweep never
         // contains, skipped the voxel the roots sit in and silently produced
-        // exactly Unreal's self-shifted value.
+        // exactly a host renderer's self-shifted value.
         {
             GfVec3f const at(-0.45f,0.f,0.f), up(0,1,0);
             std::vector<UsdGenTilePublication> withProbe{

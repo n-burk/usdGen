@@ -886,7 +886,7 @@ class ViewportController:
         # Whether the current F hold started a width drag: releasing F
         # without one is a tap, which frames instead (FB-03).
         self._brushResizeUsed = False
-        # A Blender-style MMB camera drag Tonic drives itself:
+        # A host-application MMB camera drag Tonic drives itself:
         # [mode, lastX, lastY] in physical pixels, or None (FB-03).
         self._navDrag = None
         self._lastXY = None
@@ -1701,7 +1701,7 @@ class ViewportController:
         if not self._ready():
             return False
         # A plain middle press repeats the last-dragged gizmo handle from
-        # anywhere (RigExec/Maya, parity G04) in a loop that offers it;
+        # anywhere (RigExec/a DCC, parity G04) in a loop that offers it;
         # otherwise only the left button is Tonic's.
         middleButton = getattr(QtCore.Qt.MouseButton, "MiddleButton", None)
         middle = (middleButton is not None and
@@ -1822,9 +1822,9 @@ class ViewportController:
         return True
 
     def _middleRepeats(self, view=None):
-        """Whether a plain Maya-style middle press repeats a gizmo handle.
+        """Whether a plain host-application middle press repeats a gizmo handle.
 
-        Blender-style MMB is the camera, always: an orbit that turned into
+        host-application MMB is the camera, always: an orbit that turned into
         a handle drag whenever a tube was selected would be unusable.  The
         loop is asked at this press's camera, so a remembered handle the
         overlay now dims as ungrabbable leaves the press to usdview.
@@ -1866,7 +1866,7 @@ class ViewportController:
         return getattr(settings, "freeCamera", None)
 
     def _navigationMove(self, view, event):
-        """One Blender-style MMB drag step on usdview's free camera."""
+        """One host-application MMB drag step on usdview's free camera."""
         mode, lastX, lastY = self._navDrag
         x, y = eventPixels(view, event)
         dx, dy = x - lastX, y - lastY
@@ -1875,7 +1875,7 @@ class ViewportController:
         camera = self._freeCamera(view)
         if camera is None:
             return True
-        # StageView.mouseMoveEvent's own factors, so a Blender drag moves
+        # StageView.mouseMoveEvent's own factors, so a DCC drag moves
         # exactly as far as usdview's Alt drag over the same pixels.
         if mode == "tumble":
             camera.Tumble(0.25 * dx, 0.25 * dy)
@@ -2179,7 +2179,7 @@ class ViewportController:
         if (self._navDrag is not None and
                 event.button() == getattr(QtCore.Qt.MouseButton,
                                           "MiddleButton", None)):
-            # The Blender-style camera drag ends; what is under the still
+            # The host-application camera drag ends; what is under the still
             # cursor changed with the camera.
             self._navDrag = None
             self._pressOwner = None

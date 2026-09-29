@@ -33,7 +33,7 @@ ADR §9 R40–R41), `adr-v1.md` §9 (the rulings every finding is measured again
    ids, tiers, milestones and thresholds (ADR §9 R40).
 5. **`02-schema.md`** for property names, types and defaults (ADR §9 R7); **`10-…` §3.5** for env
    vars (R35); **`08-…` §1.4** for the C ABI (R31).
-6. **OpenUSD 26.08 at `/home/burkard/work/OpenUSD`** for every `file:line`, re-verified by reading
+6. **OpenUSD 26.08 at `<openusd-src>`** for every `file:line`, re-verified by reading
    the cited lines during this pass.
 
 ### 0.2 Verdict
@@ -269,7 +269,7 @@ Untagged or under-tagged numbers found (each needs one of the four tags):
 
 ## 7. `file:line` citations
 
-Every citation below was re-read in `/home/burkard/work/OpenUSD` during this pass.
+Every citation below was re-read in `<openusd-src>` during this pass.
 
 ### 7.1 Wrong, and load-bearing
 
@@ -392,7 +392,7 @@ tier **T0**, all runnable before M0 closes; they belong to gate **B-1**'s job in
 | Every `EV-nnn` cited in any `plan/*.md` exists in `appendix-A-evidence-ledger.md` §2, and no document cites a retired handle (`A2.n-Xn`, `Q<n>`, `FZ*`, `ST*`, `CPU*`, `TL*`, `MB*`, `X<n>`, or the literal string `EV-nnn`) | **T0** | `check_evidence_handles` — grep each handle, resolve against §2, fail on a miss. Closes N-01…N-11 |
 | Every number appendix A §2.11 lists appears in siblings only with a `MEASURED` / `DERIVED` / `UNMEASURED` / `ASSUMPTION` token within the same table cell or sentence | **T0** | appendix A §7's existing grep check, extended with the figures this pass added (`0.04 ms`, `1.44 ms`, `49 tiles`, `60 B/curve`, `16.6 ms`, `0.0003 ms`) |
 | Every gate id in any `plan/*.md` appears in `09-…` §5 with the same tier and milestone, and no id names two gates | **T0** | `check_gate_registry` — parse `09-…` §5, diff against every other document. Closes N-32…N-36, N-40, N-42 |
-| Every `file:line` in `plan/*.md` still resolves to the quoted symbol in `/home/burkard/work/OpenUSD` and `/home/burkard/work/usdRig` | **T0** | appendix A §7's `check_citations` script, run over all fifteen documents rather than appendix A alone. Closes N-43…N-45 |
+| Every `file:line` in `plan/*.md` still resolves to the quoted symbol in `<openusd-src>` and `<usdrig-src>` | **T0** | appendix A §7's `check_citations` script, run over all fifteen documents rather than appendix A alone. Closes N-43…N-45 |
 | Every value in §1's canonical table appears identically in each document that quotes that quantity | **T0** | `check_canonical_numbers` — a table-driven grep seeded from §1 above |
 
 ---
@@ -437,7 +437,7 @@ against); `design/brief-v1.md` §2 (S1–S46).
 `research/G-freeze-bake-undo-and-frozen-reentry.md` §1.3, §3, §4.1, §4.3;
 `research/A8-seexpr-ptex-libs.md` §1.6, §2.8; `research/ENVIRONMENT.md` with CORRECTIONS.
 
-**OpenUSD 26.08** at `/home/burkard/work/OpenUSD` (v26.08), re-read this pass:
+**OpenUSD 26.08** at `<openusd-src>` (v26.08), re-read this pass:
 `pxr/exec/esfUsd/stageData.cpp:345-365`; `pxr/imaging/hdSt/renderDelegate.cpp:690-715`;
 `pxr/base/vt/array.h:36-56, 940-950, 980-990, 1018-1028`;
 `pxr/imaging/hdSt/basisCurves.cpp:286-345, 925-940, 970-995`;
@@ -452,4 +452,4 @@ against); `design/brief-v1.md` §2 (S1–S46).
 `pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h:14-48` and `.cpp:690-735`;
 `third_party/renderman/plugin/hdPrman/renderDelegate.cpp:800-812`;
 `cmake/defaults/Options.cmake:25-40`; `pxr/usd/usd/usdGenSchema.py:205-210, 244-248`;
-`/home/burkard/work/OpenUSD_26_08/pxrConfig.cmake:15-19`.
+`$USD/pxrConfig.cmake:15-19`.

@@ -94,7 +94,7 @@ def scaleInFrame(vector, frame, factors):
 def transformedPoint(point, pivot, translation=(0.0, 0.0, 0.0),
                      frame=IDENTITY_FRAME, scale=(1.0, 1.0, 1.0),
                      rotateAxis=None, radians=0.0):
-    """Return one absolute Maya-style TRS result from a frozen point.
+    """Return one absolute host-application TRS result from a frozen point.
 
     Scale and rotation happen around the press-time pivot, then translation
     is added.  Callers pass a frame-local scale and (when applicable) a

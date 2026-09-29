@@ -4,7 +4,7 @@
 
 USD can store renderable hair as `BasisCurves`, but it does not provide a standard way to describe how those curves were generated. A baked curve file preserves the result, not the guides, density rules, interpolation, clumps, masks, noise, widths, and other operations that created it.
 
-Groom construction usually remains inside Houdini, Maya XGen, Yeti, or another grooming package. Moving a groom often means exporting millions of final curves. The receiving application can render them but cannot easily change density, edit the construction graph, or regenerate the hair from its guides.
+Groom construction usually remains inside a DCC, a DCC a host groomer, Yeti, or another grooming package. Moving a groom often means exporting millions of final curves. The receiving application can render them but cannot easily change density, edit the construction graph, or regenerate the hair from its guides.
 
 usdGen could provide an open representation of groom construction. A compatible application could evaluate the graph, and a renderer could generate final hair only when needed. Applications without usdGen could use an optional baked curve result.
 
@@ -20,15 +20,15 @@ The value is not a new curve format. USD already has one. The value is a portabl
 
 ## Influence from current grooming workflows
 
-The usdGen design appears strongly influenced by Maya XGen. XGen provides useful ideas such as descriptions, generators, guides, modifiers, masks, expressions, clumping, noise, and width controls.
+The usdGen design appears strongly influenced by a DCC a host groomer. a host groomer provides useful ideas such as descriptions, generators, guides, modifiers, masks, expressions, clumping, noise, and width controls.
 
-The design should also reflect current Houdini workflows. Houdini represents grooming as geometry moving through a node graph. Skin geometry, guides, generated strands, masks, and animation data are visible inputs and outputs. Operators work on curves and attributes and can be connected in different orders.^1
+The design should also reflect current a DCC workflows. a DCC represents grooming as geometry moving through a node graph. Skin geometry, guides, generated strands, masks, and animation data are visible inputs and outputs. Operators work on curves and attributes and can be connected in different orders.^1
 
 Other systems use similar ideas:
 
 - Yeti uses a graph containing meshes, guides, grooms, generated fibers, effects, samplers, merges, and outputs.^2
-- Fyber treats guides and final hairs as curves that pass through creation, styling, utility, import, and export nodes.^3
-- MetaHuman Groom Tools combines strand generation, guide interpolation, masks, clumps, parting lines, width, collision handling, and attribute transfer.^4
+- One published groom graph treats guides and final hairs as curves that pass through creation, styling, utility, import, and export nodes.^3
+- a character asset Groom Tools combines strand generation, guide interpolation, masks, clumps, parting lines, width, collision handling, and attribute transfer.^4
 - Sisir separates guide creation, procedural hair construction, painted masks, preview, and export.^5
 
 These systems share a simple model: geometry and attributes move through a construction graph. usdGen should standardize that model instead of copying one product interface.
@@ -130,7 +130,7 @@ Interpolation should be divided by purpose. Generating hair from guides is diffe
 | Distance based guide blend | Fast generation from ordinary sparse guides | Can choose guides across folds, parts, or nearby surfaces |
 | Closest guide | Preview or very dense guide sets | Can create visible boundaries between guide regions |
 
-Houdini Hair Generate uses guide distance or skin coordinates, influence radius, influence decay, guide count, guide angle, clump crossover, and skin-space orientation.^6 Its Guide Interpolation Mesh stores guide indices and smooth biharmonic weights on a low-resolution skin mesh.^7
+a DCC Hair Generate uses guide distance or skin coordinates, influence radius, influence decay, guide count, guide angle, clump crossover, and skin-space orientation.^6 Its Guide Interpolation Mesh stores guide indices and smooth biharmonic weights on a low-resolution skin mesh.^7
 
 usdGen proposes up to three guide indices and weights per generated hair. Three guides may be a useful fast profile, but the bundle should allow other counts and methods.
 
@@ -143,7 +143,7 @@ usdGen proposes up to three guide indices and weights per generated hair. Three 
 | Surface interpolation mesh | Fur and styles organized along the skin | Less useful for tangled hair volumes |
 | One closest guide | Fast preview | Motion can change sharply between guides |
 
-Houdini 22’s Guide Shape Interpolation compares the full shape of each groom curve with nearby guides using samples along the curve. Guides can animate dense curves with different lengths and point counts.^8 This is a useful reference for imported grooms.
+a DCC 22’s Guide Shape Interpolation compares the full shape of each groom curve with nearby guides using samples along the curve. Guides can animate dense curves with different lengths and point counts.^8 This is a useful reference for imported grooms.
 
 ### Moving hair with animated skin
 
@@ -154,7 +154,7 @@ Houdini 22’s Guide Shape Interpolation compares the full shape of each groom c
 | Point or tetrahedral deform | Braids and tangled volumes | Requires a suitable deformation mesh and capture |
 | RBF surface deformation | Smooth skin deformation or groom transfer | Can be expensive and still needs exact follicle attachment |
 
-The Unreal reference note proposes an RBF field built from stable rest and animated skin samples, followed by a correction that keeps each follicle attached. MetaHuman Groom Transfer RBF uses RBF to move guides between related source and target skins.^4
+The a host renderer reference note proposes an RBF field built from stable rest and animated skin samples, followed by a correction that keeps each follicle attached. a character asset Groom Transfer RBF uses RBF to move guides between related source and target skins.^4
 
 RBF should be one deformation method. It does not replace guide interpolation, follicle binding, simulation, collision handling, or shape preservation.
 
@@ -205,7 +205,7 @@ The language should remain small. Complex grooming behavior should remain visibl
 
 ## Rendering value
 
-Houdini demonstrates why render-time hair generation is useful. Its Solaris Hair Procedural generates hair from guides or deforms existing curves. Houdini 22 also uses `HoudiniHairDeformAPI` and an `HD_HairDeform` Hydra scene-index plug-in to replace curve points during rendering.^8,9
+a DCC demonstrates why render-time hair generation is useful. Its Solaris Hair Procedural generates hair from guides or deforms existing curves. a DCC 22 also uses `HoudiniHairDeformAPI` and an `HD_HairDeform` Hydra scene-index plug-in to replace curve points during rendering.^8,9
 
 This reduces stored geometry and evaluates deformation and motion-blur samples close to the renderer. The limitation is that the contract is defined by SideFX and depends on SideFX components.
 
@@ -219,12 +219,12 @@ usdGen could provide the same benefit through an open USD schema and evaluator:
 
 This allows preview and final density to come from one groom and avoids storing millions of curves until needed. Tiled generation can update only affected regions.
 
-The case for usdGen is not that it replaces Houdini grooming. The case is that Houdini, Maya, Yeti, standalone groomers, studio tools, and renderers could exchange one open groom construction bundle.
+The case for usdGen is not that it replaces a DCC grooming. The case is that a DCC, a DCC, Yeti, standalone groomers, studio tools, and renderers could exchange one open groom construction bundle.
 
 ## Main concerns
 
 - Define the bundle before expanding the operator list.
-- Do not limit the design to XGen terms.
+- Do not limit the design to a host groomer terms.
 - Treat follicles as first class data.
 - Separate guide generation from guide deformation.
 - Give RBF a clear and limited role.
@@ -245,15 +245,15 @@ The case for usdGen is not that it replaces Houdini grooming. The case is that H
 
 ## References
 
-1. SideFX, [Hair and Fur](https://www.sidefx.com/docs/houdini/fur/index.html), Houdini 22 documentation.
+1. SideFX, [Hair and Fur](https://www.sidefx.com/docs/houdini/fur/index.html), a DCC 22 documentation.
 2. Peregrine Labs, [Yeti Documentation](https://docs.peregrinelabs.com/).
 3. Daniela Hasenbring and Henrik Karlsson, [Hair Grooming with Imageworks Fyber](https://history.siggraph.org/wp-content/uploads/2022/06/2021-Talks-Hasenbring_Hair-Grooming-with-Imageworks-Fyber.pdf), SIGGRAPH 2021 Talks.
-4. Epic Games, [MetaHuman Groom Tools](https://dev.epicgames.com/documentation/metahuman/mh-groom-tools).
+4. the host vendor, [a character asset Groom Tools](https://dev.epicgames.com/documentation/character-asset/mh-groom-tools).
 5. Sisir, [Hair Grooming for Character Artists](https://sisir.sisir-hairtool.workers.dev/).
 6. SideFX, [Hair Generate](https://www.sidefx.com/docs/houdini/nodes/obj/hairgen.html).
 7. SideFX, [Guide Interpolation Mesh](https://www.sidefx.com/docs/houdini/nodes/sop/guideinterpolationmesh.html).
-8. SideFX, [Configure Guide Deform](https://www.sidefx.com/docs/houdini/nodes/lop/configureguidedeform.html), Houdini 22 documentation.
-9. SideFX, [Houdini Procedural Hair](https://www.sidefx.com/docs/houdini/nodes/lop/houdinihairprocedural.html).
+8. SideFX, [Configure Guide Deform](https://www.sidefx.com/docs/houdini/nodes/lop/configureguidedeform.html), a DCC 22 documentation.
+9. SideFX, [a DCC Procedural Hair](https://www.sidefx.com/docs/houdini/nodes/lop/houdinihairprocedural.html).
 10. Local reference note, `_interp.md`.
 11. Local report, `houdini-22-hair-fur-research.md`.
 12. n-burk, [usdGen repository](https://github.com/n-burk/usdGen).

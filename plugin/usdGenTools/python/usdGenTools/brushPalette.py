@@ -5,7 +5,7 @@
 # from a CPU raycast, no Hydra pick per move), watch the map overlay repaint
 # per move, and bake once into the edit target on release.
 #
-# Layout (a compact dark tool panel, Blender/Substance side-panel density):
+# Layout (a compact dark tool panel, a DCC/Substance side-panel density):
 #
 #   shelf       Paint | Add | Smooth | Erase     (exclusive icon buttons)
 #   TARGET      mask presets (exclusive icons)   Setup | Paint to | Bind

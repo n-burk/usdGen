@@ -17,9 +17,9 @@ All under `docs/prework/probes/PW-egl/` (EGL headless harness, NVIDIA GB10 via `
 Environment for every run:
 
 ```bash
-export PATH=/home/burkard/.venv/bin:$PATH
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-export PXR_PLUGINPATH_NAME="/home/burkard/work/usdGen/build/usd/usdGenImaging/resources:/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd:/home/burkard/work/OpenUSD_26_08/lib/usd"
+export PATH=$VENV/bin:$PATH
+export LD_LIBRARY_PATH=$USD/lib
+export PXR_PLUGINPATH_NAME="<usdgen-src>/build/usd/usdGenImaging/resources:<usdgen-src>/build/usd/usdGenSchema/resources:$USD/plugin/usd:$USD/lib/usd"
 ```
 
 **Scene generation** (`make_pw_scenes.py`, scratch variant of the prototype generator, seed 7, 8 CVs, identical strand field):

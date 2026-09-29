@@ -324,7 +324,7 @@ void CheckLanguage(Geometry const &g)
           "a diagnostic carries a source position");
 }
 
-/// The XGen/SeExpr function library, against values worked out by hand from
+/// The a host groomer/SeExpr function library, against values worked out by hand from
 /// SeExpr2's own definitions.
 void CheckLibrary(Geometry const &g)
 {

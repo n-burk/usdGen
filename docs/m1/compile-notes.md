@@ -16,7 +16,7 @@ All 54 census errors are fixed; clean rebuild of all 78 targets exits 0;
 - No test names, labels, env or commands were changed — only properties.
 
 ## API fixes applied (OpenUSD 26.08 gotchas, confirmed against
-/home/burkard/work/OpenUSD_26_08 headers)
+$USD headers)
 
 - `TfToken` has `Hash()` (returns `size_t`) — not `GetId()` and not `GetHash()`.
   Fixed in compiler.cpp:54, ops/grow.cpp:130, ops/scatter.cpp:134,

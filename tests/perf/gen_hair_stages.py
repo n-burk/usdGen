@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 """M1 storm-lane: generate the benchUsdGenStorm timing-gate stages (plan/09
 S-1 / S-5 / S-6 / S-12).
 

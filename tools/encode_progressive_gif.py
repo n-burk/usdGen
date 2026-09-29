@@ -5,10 +5,27 @@ Raw viewport PNGs and capture.json are never changed.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+
+def _ui_font(size):
+    candidates = []
+    env = os.environ.get("USDGEN_UI_FONT")
+    if env:
+        candidates.append(Path(env))
+    candidates.extend([
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+        Path("C:/Windows/Fonts/segoeui.ttf"),
+    ])
+    for path in candidates:
+        if path.is_file():
+            return ImageFont.truetype(str(path), size)
+    return ImageFont.load_default()
 
 
 def main():
@@ -16,9 +33,8 @@ def main():
     data = json.loads((directory / "capture.json").read_text())
     rows = data["frames"]
     assert rows, "No captured frames"
-    font_path = Path("C:/Windows/Fonts/segoeui.ttf")
-    font = ImageFont.truetype(str(font_path), 19) if font_path.exists() else ImageFont.load_default()
-    small = ImageFont.truetype(str(font_path), 13) if font_path.exists() else ImageFont.load_default()
+    font = _ui_font(19)
+    small = _ui_font(13)
 
     def annotate(source, elapsed, subtitle):
         image = Image.open(source).convert("RGB")

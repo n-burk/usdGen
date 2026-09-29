@@ -1,4 +1,4 @@
-// usdGenTonic — Tonic-parity groom authoring model (plan/17, P0 skeleton).
+// usdGenTonic — hierarchical groom authoring model (plan/17, P0 skeleton).
 //
 // Build visibility follows the usdGenImaging convention: the library is built
 // with default visibility, so this macro is a no-op placeholder that keeps

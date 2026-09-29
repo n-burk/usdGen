@@ -1,11 +1,11 @@
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
+#
 # usdGenTonicTools.tonicGizmoScreen -- screen-space gizmo geometry, hit
 # testing and drag parameters.
 #
-# Vendored from usdRig `plugin/rigExecUsdview/gizmoScreen.py` at 4fe4142
-# (2026-09-03), adapted for TonicCamera; keep in sync. The RigExec
-# manipulators are the reference the Tonic gizmo must behave like
-# (tonic_gizmo_parity section 4), so the handle layout, the kind-ordered
-# HitTest and the drag mapping below are that module's, rule for rule.
+# Adapted for TonicCamera. The handle layout, the kind-ordered HitTest and
+# the drag mapping follow a rig-viewport manipulator, rule for rule.
 #
 # What changed in the port, and why:
 #
@@ -44,7 +44,7 @@ CENTER_PIXELS = 6.0
 RING_FRACTION = 0.85
 RING_SEGMENTS = 48
 
-# Maya manipulator geometry, as fractions of the manipulator size (design
+# a DCC manipulator geometry, as fractions of the manipulator size (design
 # section 8.1-8.4).  PLANE_OFFSET places each planar handle 30% out along
 # both of its axes; PLANE_SIDE is the square's side; CENTER_SIDE the
 # view-plane / uniform-scale square; CUBE_SIDE the scale axis cubes;
@@ -57,8 +57,8 @@ CUBE_SIDE = 0.08
 CONE_RADIUS = 0.05
 VIEW_RING_FRACTION = 1.25
 
-# Maya's manipulator palette.  The axis colours are the flat primaries
-# Maya uses, not softened pastels, so a screenshot matches Maya's.
+# a DCC's manipulator palette.  The axis colours are the flat primaries
+# a DCC uses, not softened pastels, so a screenshot matches a DCC's.
 COLOR_VIEW = (0.4, 0.75, 1.0)
 COLOR_HOVER = (1.0, 0.85, 0.4)
 COLOR_SELECTED = (1.0, 1.0, 0.0)
@@ -160,7 +160,7 @@ class Handle(object):
 
     Rings carry `frontPoints`, the runs of projected points on the
     camera side of the ring centre, and `frontWorld`, those points in
-    world space.  Maya hides the back half of each ring so the three
+    world space.  the host application hides the back half of each ring so the three
     rings stay tellable apart; drawing and picking both use the front.
 
     `grabbable` is False for an axis that is too foreshortened to drag
@@ -370,7 +370,7 @@ def BuildHandles(tool, origin, frame, camera, pixelRatio,
                  sizePixels=GIZMO_PIXELS, worldLength=None, gimbalAxes=None,
                  freeRotate=True):
     """
-    Maya's manipulator for `tool`, laid out in screen space.
+    the host application's manipulator for `tool`, laid out in screen space.
 
     `origin` places the manipulator; `frame` (9 floats, rows are the world
     axes to draw along) sets the direction of the handles, which is what
@@ -464,7 +464,7 @@ def BuildHandles(tool, origin, frame, camera, pixelRatio,
             screen, world = _ProjectRing(camera, origin, u, v, radius)
             if screen is None:
                 continue
-            # Maya hides the half of each ring that is behind the ring
+            # a DCC hides the half of each ring that is behind the ring
             # centre, so three overlapping circles stay readable.
             mask = [_dot(_sub(p, origin), toCamera) >= -1e-9 for p in world]
             runs = _FrontRuns(mask)
@@ -577,7 +577,7 @@ def HitTest(handles, x, y, radius):
 
     `radius` is the pick tolerance in physical pixels for everything with
     an outline; the free-rotate disc instead claims its whole interior,
-    which is how Maya's works.
+    which is how the host application's manipulator works.
 
     Handles marked not grabbable are skipped, so a foreshortened axis or
     an edge-on plane cannot be picked by accident -- it has collapsed
@@ -688,7 +688,7 @@ def RayPlaneDragDelta(camera, worldOrigin, worldNormal, press, current):
 
     Ray/plane intersection rather than scaled screen travel, so the point
     the artist grabbed stays under the cursor as the plane recedes --
-    Maya's planar handles behave this way and a plain screen mapping
+    the host application's planar handles behave this way and a plain screen mapping
     visibly slides away from the cursor in a perspective view.
 
     Falls back to the camera-plane mapping when the plane is edge-on:
@@ -714,7 +714,7 @@ def AccumulateAngle(total, previous, current):
     `total` plus the shortest way round from `previous` to `current`.
 
     RotationDragAngle wraps into (-180, 180], but a rotate drag has to
-    keep counting: Maya lets one sweep run to 400 degrees. Accumulating
+    keep counting: the host application lets one sweep run to 400 degrees. Accumulating
     the wrapped step rather than the raw difference is what makes the
     crossing at 180 invisible.
     """
@@ -752,7 +752,7 @@ def TrackballRotation(camera, worldOrigin, press, current, radiusPixels):
 
 def MayaScaleFactor(handle, origin2d, press, current, allowNegative):
     """
-    Maya's scale ratio: how far the cursor is from the manipulator origin
+    the host application's scale ratio: how far the cursor is from the manipulator origin
     along the handle, over how far it was when the drag started.
 
     Dragging the handle onto the origin therefore gives 0 and carrying it
@@ -797,7 +797,7 @@ def _RoundToStep(value, step):
 
 def SnapRelative(value, step):
     """
-    Quantise a DELTA to a multiple of `step` (Maya's Discrete move /
+    Quantise a DELTA to a multiple of `step` (the host application's Discrete move /
     Snap rotate). Relative to the drag start, so an object that began off
     the grid stays off it and only moves in whole steps.
 
@@ -810,7 +810,7 @@ def SnapRelative(value, step):
 
 def SnapAbsolute(value, step):
     """
-    Quantise a POSITION onto a grid of `step` (Maya's `X` hold). Same
+    Quantise a POSITION onto a grid of `step` (the host application's `X` hold). Same
     arithmetic as SnapRelative but a different meaning, and the two are
     separate names because a caller must not confuse a delta with a
     position: this one lands the object ON the grid.
@@ -837,7 +837,7 @@ def RingParameter(handle, point2d):
 
 def PiePolygon(handle, startParameter, sweepDegrees):
     """
-    Maya's rotation-amount wedge: the manipulator centre followed by the
+    the host application's rotation-amount wedge: the manipulator centre followed by the
     arc from `startParameter` through `sweepDegrees`.
 
     `sweepDegrees` is degrees about the ring's OWN world axis -- what

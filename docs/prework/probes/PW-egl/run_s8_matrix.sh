@@ -2,8 +2,9 @@
 # PW-2 (S-8) benchmark matrix: 100k x 8 CV deforming, 60 frames, 1280x720, complexity 1.2 (refine 2)
 set -u
 cd "$(dirname "$0")"
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-export PXR_PLUGINPATH_NAME="$PWD:/home/burkard/work/OpenUSD_26_08/plugin/usd"
+: "${USD:?Set USD to the OpenUSD install prefix}"
+export LD_LIBRARY_PATH="$USD/lib"
+export PXR_PLUGINPATH_NAME="$PWD:$USD/plugin/usd"
 LOG=results_s8.txt
 : > "$LOG"
 run() { # label scene deform repub [env...]

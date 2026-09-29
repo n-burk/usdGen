@@ -24,7 +24,7 @@ constexpr char const* names[] = {"furTauP", "furTauN"};
 // lands, never how much of it there is.
 constexpr float kSamplesPerVoxel = 1.0f;
 constexpr int   kMaxSegmentSteps = 512;
-// Published depth is gathered from a fixed-point grid, as Unreal's voxel pages
+// Published depth is gathered from a fixed-point grid, as a host renderer's voxel pages
 // are (24-bit hair count at x1000): half the bytes of the eight cells every CV
 // touches, and the same quantisation the engine it is matched to uses.
 constexpr float kDepthScale = 1000.f;
@@ -210,7 +210,7 @@ void BuildScalpShadow(std::vector<Triangle> const& triangles,
     // it did instead was skip the voxel the roots sit in, which is the densest
     // one, and cost the cap almost exactly one crossing: measured in-render
     // against a strand CV at the same point and direction, the cap read 1.53
-    // where the strand read 2.51, i.e. the strand's count after Unreal's
+    // where the strand read 2.51, i.e. the strand's count after a host renderer's
     // self-shift -- the very shift a skin receiver must not apply.
     float const probe=0.f;
     // A hair's breadth of separation, so the cap wins the depth test against
@@ -746,7 +746,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     // opaque shell ------------------------------------------------------------
     // Prefix integration is O(voxels), independent of hair count and number of
     // lights. Half the receiver's own cell is the correct discretisation of an
-    // integral that starts at the CV, and is what Unreal's HairCount - 1 shift
+    // integral that starts at the CV, and is what a host renderer's HairCount - 1 shift
     // expects to find.
     std::array<std::vector<float>,6> tau;
     auto sweep=[&] {
@@ -788,7 +788,7 @@ bool UsdGenBuildFurOcclusion(std::vector<UsdGenTilePublication>* tiles,
     }
 
     // --- opaque occluders: a saturated shell just under the surface -----------
-    // Unreal injects the opaque depth buffer with InjectOpaque.BiasCount /
+    // a host renderer injects the opaque depth buffer with InjectOpaque.BiasCount /
     // MarkCount; with real triangles the same shell is marked along the inward
     // normal, so light is blocked through the scalp while roots resting on it
     // are not shadowed by it.

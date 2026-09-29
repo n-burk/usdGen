@@ -15,18 +15,18 @@
 #
 # Covered:
 #   * idle hover is Tonic's: no usdview rollover pick, no prim tooltip;
-#   * Maya (default): Alt+LMB orbit, Alt+MMB pan, Alt+RMB dolly move the
+#   * a DCC (default): Alt+LMB orbit, Alt+MMB pan, Alt+RMB dolly move the
 #     camera, render once per move, never open a Tonic gesture, never pick
 #     or change either selection; plain MMB / RMB are inert (no pick, no
 #     context menu, no camera move);
 #   * the Display group's Navigation combo, driven by keys, switches to
-#     Blender and a focused (non-editable) combo still lets hotkeys through;
-#   * Blender: MMB orbits, Shift+MMB pans, Ctrl+MMB dollies usdview's free
+#     a DCC and a focused (non-editable) combo still lets hotkeys through;
+#   * a DCC: MMB orbits, Shift+MMB pans, Ctrl+MMB dollies usdview's free
 #     camera, with a CV selected and never as a handle repeat; Alt+LMB
 #     still orbits;
 #   * an idle wheel dollies; a wheel during a gizmo drag is swallowed and
 #     the drag finishes as one undo step;
-#   * F frames the Tonic selection after a Blender pan;
+#   * F frames the Tonic selection after a DCC pan;
 #   * a focused dock spin box owns the keys until a viewport click takes
 #     them back;
 #   * closing the dock with its title-bar close button hands the view back
@@ -394,7 +394,7 @@ def checkHover(ctx):
 
 
 # ---------------------------------------------------------------------------
-# 2. Maya: Alt drags
+# 2. a DCC: Alt drags
 # ---------------------------------------------------------------------------
 
 def checkMayaCamera(ctx):
@@ -408,7 +408,7 @@ def checkMayaCamera(ctx):
     # usdview's own Alt+MMB truck and Alt+RMB zoom scale with the free
     # camera's orbit distance, which FreeCamera.FromGfCamera takes from the
     # camera prim's focusDistance; the helper camera leaves it at 0 (the
-    # pivot is then the eye and a Maya pan / dolly cannot move), so give it
+    # pivot is then the eye and a DCC pan / dolly cannot move), so give it
     # the scalp's depth, as a real shot camera would carry.
     from pxr import UsdGeom
     from tonicT3 import frameScalp, wait
@@ -560,7 +560,7 @@ def checkStyleCombo(ctx):
 
 
 # ---------------------------------------------------------------------------
-# 4. Blender: MMB orbit / Shift+MMB pan / Ctrl+MMB dolly
+# 4. a DCC: MMB orbit / Shift+MMB pan / Ctrl+MMB dolly
 # ---------------------------------------------------------------------------
 
 def checkBlenderCamera(ctx):

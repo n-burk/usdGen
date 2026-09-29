@@ -1,6 +1,6 @@
 # usdGenTonicTools.tonicBridge -- Qt-free P5 bridge helpers (plan/17 §5.7).
 #
-# The Tonic <-> Houdini braid round trip without any Houdini-specific code:
+# The Tonic <-> a DCC braid round trip without any a DCC-specific code:
 # export tube centers as BasisCurves to a file layer, import swept meshes or
 # curves back as L3 locked tubes under a chosen parent. Everything here is
 # plain Python + ctypes: no pxr, Qt or numpy at import (the headless tests

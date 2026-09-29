@@ -1898,7 +1898,7 @@ add_executable(testUsdGenPtexMap tests/testUsdGenPtexMap.cpp)
 target_link_libraries(testUsdGenPtexMap PRIVATE usdGen usdGen_ptex)
 add_test(NAME testUsdGenPtexMap COMMAND testUsdGenPtexMap)
 set_tests_properties(testUsdGenPtexMap PROPERTIES LABELS "T0;maps" TIMEOUT 120)
-# Paintable per-surface attribute maps + stroke accumulation (the XGen-style
+# Paintable per-surface attribute maps + stroke accumulation (the host-groomer
 # brush model over per-face storage). Engine-only, no USD dependency.
 add_executable(testUsdGenAttributeMap tests/testUsdGenAttributeMap.cpp)
 target_link_libraries(testUsdGenAttributeMap PRIVATE usdGen)
@@ -2502,7 +2502,7 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_tonic_plugin_env};${_usdgen_tonic_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenTonic>")
     # TS-02 navigation and focus: Alt camera drags over an active scalp,
-    # Maya vs Blender MMB (the Display group's Navigation combo), wheel
+    # host navigation presets (the Display group's Navigation combo), wheel
     # mid-drag, one render per camera move, no usdview rollover/pick/menu,
     # focus back from a dock field, dock close/reopen, F framing.
     add_test(NAME testUsdviewTonicNavigation
@@ -2869,7 +2869,7 @@ if(_usdgen_test_python)
 endif()
 
 # ---------------------------------------------------------------------------
-# UE-parity strand hair (plan/16-ue-hair-parity.md WS1). Three python checks,
+# Strand hair checks (plan/16-ue-hair-parity.md WS1). Three python checks,
 # all cross-platform, all sharing the interpreter the expression tests found.
 #
 #   testUsdGenHairEnergy        integrates the ported BSDF over the sphere on

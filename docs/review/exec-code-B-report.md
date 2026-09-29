@@ -157,8 +157,8 @@ None. All four assigned sol findings were factually correct; evidence above.
 ## Test results
 
 - Canonical run (no install prefix): `env
-  LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib ctest --test-dir
-  /home/burkard/work/usdGen/build -L '^T[01]$'` → **13/13 passed**
+  LD_LIBRARY_PATH=$USD/lib ctest --test-dir
+  <usdgen-src>/build -L '^T[01]$'` → **13/13 passed**
   (T0 = 11, T1 = 2; the two new install tests skip cleanly with a printed note
   when `USDGEN_INSTALL_PREFIX` is unset).
 - Scratch install: `cmake --install build --prefix /tmp/usdgen-install-scratch`

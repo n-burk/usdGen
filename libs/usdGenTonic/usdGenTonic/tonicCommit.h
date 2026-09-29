@@ -311,7 +311,7 @@ TonicPlanGuideInterpolateFill(UsdStagePtr const &stage,
 // bit-equal against the stored <groom>/Guides: a stage the tool produced
 // always round-trips, so a mismatch is a hard failure, never a silent
 // accept. Stored curves that no model tube claims are FOREIGN (hand-
-// authored, Houdini) and are imported as locked tubes one level below the
+// authored, a DCC) and are imported as locked tubes one level below the
 // tube whose region roots them (plan/17 §2.5, §5.7) instead of failing.
 // The graph round-trips the same way: the extracted loops and the
 // re-rasterised live primvar must equal the stored opinions bit-exactly.

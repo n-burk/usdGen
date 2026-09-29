@@ -99,8 +99,8 @@ only the Kahn tie-break.
 | Surface targets | `usdGen:surface` accepts `Mesh` prims and `GeomSubset`s. A subset restricts scatter to its faces; `skinprim` and Ptex face ids are always indices into the **parent mesh's** faces; a subset edit is a recapture. Instance-proxy targets translate via S7. |
 | Clump centres | `rel usdGen:clump:centers` (a curve set, a nested scatter, or a map) as an explicit artist-visible input, plus `usdGen:clump:density` when absent |
 | Region / parting | `rel usdGen:mask:region` on the mask block (per-face int/colour map) consumed by `GuideInterpolate` and `Clump` in v1; a parting-line *operator* (`UsdGenPart`, curve-set based: radius, strength) is v2, and its brush v2 |
-| Guides | per-guide `float[] usdGen:blend` on `UsdGenGuideSet` (XGen range-of-influence) |
-| Emitted primvars | `Clump` emits `clumpId_<level>` (uniform int); `GuideInterpolate` emits `guideIndex[3]`/`guideWeight[3]` (Unreal arity) so bakes round-trip |
+| Guides | per-guide `float[] usdGen:blend` on `UsdGenGuideSet` (a host groomer range-of-influence) |
+| Emitted primvars | `Clump` emits `clumpId_<level>` (uniform int); `GuideInterpolate` emits `guideIndex[3]`/`guideWeight[3]` (a host renderer arity) so bakes round-trip |
 | Freeze | `UsdGenFreeze { rel frozen:curves; token frozen:mode = frozen|live; string frozen:epoch; token frozen:tier = session|sublayer|payload }` — the freeze **caps** the chain; upstream stays authored (greyed); unfreeze is one token |
 | Sculpt | `UsdGenSculptLayer { weight; sculpt:curveIds; sculpt:cvOffsets; sculpt:deltas (root frame); sculpt:epoch; sculpt:lockedCurves }`; stale ⇒ badge + "Rebase sculpt" (re-match by nearest root UV, one undoable action, in the tool) |
 
@@ -241,9 +241,9 @@ that Storm resolves `outputs:glslfx:surface` first. If it does not, flip the def
 
 ## 6. Operators (D4), look (D5), tools (D6), build (D8)
 
-* **Catalogue v1** = risk §6.1 parameter lists (Clump with the full XGen set incl. copy/copyVariance/
+* **Catalogue v1** = risk §6.1 parameter lists (Clump with the full a host groomer set incl. copy/copyVariance/
   cut/flatness/offset/curl/crossover; `GuideInterpolate` with `regionMap` + `clumpCrossover`) **plus**
-  `Direction/Lift` (XGen Tilt), `Smooth` (along-curve), `Resample`, `Scale` moved into v1; artist's
+  `Direction/Lift` (a host groomer Tilt), `Smooth` (along-curve), `Resample`, `Scale` moved into v1; artist's
   §6.4 operator rules (mask block on every op; `hash(seed, curveId, saltPerOperator)`; `preserveLength`;
   `Space()` declared; topology-bumping list). **v2** = Curl, Bend, Straighten, Displace, Wave, Part,
   Instance (cards/archives/spheres), PtexMap, ExprOp, TsSpline ramps, sculpt rebase, P1 motion.

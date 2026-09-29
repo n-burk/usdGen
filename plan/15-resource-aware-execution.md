@@ -390,13 +390,13 @@ unsupported top-level `thinking` field and omitted both
 showed they were actively generating; root terminated their exact curl handles
 at elapsed 952 s. Reused retry status/stderr paths are not treated as evidence
 of the original requests' terminal outcome. Corrected, uniquely stored local
-requests used `qwen3.8-flash-next`, `stream:false`,
+requests used `<local-model>`, `stream:false`,
 `chat_template_kwargs:{enable_thinking:false}`, and
 `max_completion_tokens:1800`; both returned HTTP 200, IDs
-`chatcmpl-ab33a7771ce4283e` and `chatcmpl-94ab5bf2ee14380a`, with
+`<response-id>` and `<response-id>`, with
 `finish_reason=length`. Their artifacts, including requests, responses,
 statuses, stderr, and curl handles, are under
-`/tmp/usdgen-local-qwen-corrected-Iwfnak`. Their only accepted limited finding
+`<session-scratch>`. Their only accepted limited finding
 is the already-known absence of per-task peak-byte pre-admission and
 event-retirement accounting; speculative cancellation, stream-order, queue
 destruction, and broad OOM/accounting claims were rejected by source review.
@@ -474,12 +474,12 @@ requirements above rather than treating this checkpoint as completion.
 
 ## Bounded external review record
 
-Two concurrent reviews were submitted to the required Hivemind endpoint using
-only `qwen3.8-27b@q4_0`, with thinking disabled: one asked for dependency-ready
+Two concurrent reviews were submitted to the required the inference service endpoint using
+only `<remote-model>`, with thinking disabled: one asked for dependency-ready
 dirty/cache architecture and one for memory/retirement/interactive/backend
 constraints. Artifacts are preserved at
-`/tmp/usdgen-hivemind-architecture-request.json`,
-`/tmp/usdgen-hivemind-architecture-status.txt`, and their `resource` peers.
+`<session-scratch>`,
+`<session-scratch>`, and their `resource` peers.
 The two request files exist (690 and 654 bytes); each status file records
 curl transport code `000` (4 bytes including newline), and neither response
 file was created. Both bounded calls therefore had no response body.
@@ -492,15 +492,15 @@ was owner-state and test-idea review only. Source-Qwen claims that `try_put`
 backpressure, cancellation, or await behavior had been established were
 rejected by coordinator/root inspection and are not evidence in this plan.
 
-### Provider record: native Hivemind `qwen3.8-27b@q4_k_m`
+### Provider record: native the inference service `<remote-model>`
 
 Two concurrent read-only reviews used the native `/api/v1/chat` endpoint with
-only `qwen3.8-27b@q4_k_m`, `reasoning: "off"`, `max_output_tokens: 1800`,
+only `<remote-model>`, `reasoning: "off"`, `max_output_tokens: 1800`,
 `temperature: 0`, `stream: false`, and `store: false`. Both curl requests
 completed with HTTP 200 and exit status 0; their exact request, response,
 stderr, status, and handle artifacts are in
-`/tmp/usdgen-hivemind-q4km-0fLcfH` (also named by
-`/tmp/usdgen-hivemind-q4km-dir.txt`). The native response schema contains no
+`<session-scratch>` (also named by
+`<session-scratch>`). The native response schema contains no
 request ID or finish-reason field. It identifies the same model instance for
 both reviews, reports zero reasoning tokens, and reports exactly 1800 output
 tokens for each, so these are cap-limited review outputs rather than complete
@@ -593,15 +593,15 @@ added, and the sanitizer-repeat gate remains **OPEN**. The existing install
 test's successful `SKIP` and the lack of renderer device-handoff proof remain
 explicit caveats to the suite counts above.
 
-Actual local Spark Qwen reviews also completed in this slice, model
-`qwen3.8-flash-next`, two concurrent requests, HTTP 200/curl exit 0:
-`/tmp/usdgen-local-qwen-session-retire-pgz3Af`. Session review
-`chatcmpl-8f3208fc77bc8c04` reached its output cap; retirement review
-`chatcmpl-84ca5af85f064e88` finished normally. Only source-corroborated findings
-were used. The alternate Hivemind `qwen3.8-27b-km` returned only question marks
-in bounded probes; the user-selected `qwen3.8-27b@q4_k_m` subsequently passed
+Actual the local inference host Qwen reviews also completed in this slice, model
+`<local-model>`, two concurrent requests, HTTP 200/curl exit 0:
+`<session-scratch>`. Session review
+`<response-id>` reached its output cap; retirement review
+`<response-id>` finished normally. Only source-corroborated findings
+were used. The alternate the inference service `<remote-model>` returned only question marks
+in bounded probes; the user-selected `<remote-model>` subsequently passed
 its probe and supplied the two reviews recorded above. Root verified only
-that latter model was loaded on Hivemind. Neither provider was replaced with
+that latter model was loaded on the inference service. Neither provider was replaced with
 an OpenAI inference endpoint.
 
 This closes a session integration gap, **not a numbered phase**. Stages still
@@ -716,11 +716,11 @@ no assertion failure, but `run-final.log` still reports **9504 bytes in 36
 unresolved; no leak suppression was added and the sanitizer gate stays OPEN.
 It does not resolve the separately recorded core-pipeline leak.
 
-Real model reviews used local Spark `qwen3.8-flash-next` and Hivemind
-`qwen3.8-27b@q4_k_m`. The complete-source batch used two concurrent requests
+Real model reviews used the local inference host `<local-model>` and the inference service
+`<remote-model>`. The complete-source batch used two concurrent requests
 per provider, all curl exit 0 / HTTP 200, in
 `/tmp/usdgen-retirement4.l7hmqc`. Local completions
-`chatcmpl-9d721c9b370bea54` and `chatcmpl-aa97f6d4ee606dcf` both ended normally.
+`<response-id>` and `<response-id>` both ended normally.
 Earlier batches with missing/truncated implementation snippets were not
 accepted as lifecycle-review evidence. Model allegations without a reachable
 source-level interleaving were not treated as established bugs. Terra performed
@@ -835,12 +835,12 @@ other numbered gates remain **OPEN**. Previous sanitizer leak findings remain
 unresolved; this command checkpoint does not supersede them.
 
 Actual model review attempts used two concurrent requests per provider. The
-corrected local Spark batch is `/tmp/usdgen_spark_native_review_2543008`
-(`qwen3.8-flash-next`, thinking disabled): ticket response
-`chatcmpl-a64e5ecbc8da112b` ended with `stop`; cleanup response
-`chatcmpl-aad0fdf304e81264` hit its 2400-token limit. The corrected Hivemind
-native batch is `/tmp/usdgen_hivemind_native_review_2540464`
-(`qwen3.8-27b@q4_k_m`): both curl processes completed successfully with
+corrected the local inference host batch is `/tmp/usdgen_spark_native_review_2543008`
+(`<local-model>`, thinking disabled): ticket response
+`<response-id>` ended with `stop`; cleanup response
+`<response-id>` hit its 2400-token limit. The corrected the inference service
+native batch is `<session-scratch>`
+(`<remote-model>`): both curl processes completed successfully with
 HTTP 200, but both outputs hit 2400 tokens mid-analysis. Initial requests
 using the wrong native payload/thinking configuration were rejected or
 produced no usable answer and are not review evidence. No OpenAI inference
@@ -930,7 +930,7 @@ Root validation for this checkpoint:
   `/tmp/usdgen-sequence-window-check.J3LpzM`. This does **not** resolve the
   previously recorded TBB arena/pipeline sanitizer leaks.
 
-Two real Spark and two real Hivemind reviews of the pre-change baseline are
+Two real Spark and two real the inference service reviews of the pre-change baseline are
 recorded under `/tmp/usdgen_groom_provider_review_2564190`. All four curl
 requests completed successfully without truncation; the verified backlog and
 stalled-prefix findings informed the implementation. These were baseline
@@ -1021,11 +1021,11 @@ Root validation:
   Previous sanitizer leak findings remain unresolved and were not superseded
   by these non-sanitized lifecycle tests.
 
-Actual provider review used two concurrent requests each to local Spark
-`qwen3.8-flash-next` and native Hivemind `qwen3.8-27b@q4_k_m`, with no OpenAI
+Actual provider review used two concurrent requests each to the local inference host
+`<local-model>` and native the inference service `<remote-model>`, with no OpenAI
 endpoint substitution. Artifacts: `/tmp/usdgen_lifecycle_provider_review_2585556`.
-Spark responses `chatcmpl-b4550d22a9f12f50` and
-`chatcmpl-8a74d48ef03b5640` finished with `stop`; both Hivemind requests
+Spark responses `<response-id>` and
+`<response-id>` finished with `stop`; both the inference service requests
 returned HTTP 200 (1024 and 1157 output tokens), and all curl processes exited
 zero. Baseline reviews supported preserving per-record gap protection and
 session deduplication. The claim that the old states vector was consumed by
@@ -1147,12 +1147,12 @@ Source-upload checkpoint validation (2026-09-12):
   `/tmp/usdgen-async-source-cpu-{build,tests}.log`.
   `git diff --check` passed; external OpenUSD source remains clean.
 
-Actual baseline reviews ran two requests each to local Spark
-`qwen3.8-flash-next` and native Hivemind `qwen3.8-27b@q4_k_m` without OpenAI
+Actual baseline reviews ran two requests each to the local inference host
+`<local-model>` and native the inference service `<remote-model>` without OpenAI
 endpoint substitution. All four returned HTTP 200 and curl exit zero.
 Artifacts use prefix `/tmp/usdgen_cuda_async_review_20260912_`;
-Spark response IDs were `chatcmpl-ba46539a199977a3` and
-`chatcmpl-a94d2430ec04e04d` (both `stop`). Hivemind returned 1021 and 1118
+Spark response IDs were `<response-id>` and
+`<response-id>` (both `stop`). the inference service returned 1021 and 1118
 output tokens. Reviews informed lifetime/status/capture checks; they do not
 constitute an independent audit of the final implementation.
 
@@ -1233,11 +1233,11 @@ early commit and duplicate finish rejection, capture rejection, fresh/legacy
 API isolation, NaN status, and `{0, UINT32_MAX, 6}` malformed device offsets.
 
 All four baseline review requests completed using two concurrent requests to
-local Spark `qwen3.8-flash-next` and two to native Hivemind
-`qwen3.8-27b@q4_k_m`, without OpenAI endpoint substitution. Each returned HTTP
+the local inference host `<local-model>` and two to native the inference service
+`<remote-model>`, without OpenAI endpoint substitution. Each returned HTTP
 200 and curl exit zero. Artifacts: `/tmp/usdgen-resample-review.wSiLwJ`.
-Spark IDs: `chatcmpl-8dbf53bdcb74c8c8`, `chatcmpl-9a8963e2aea065fc` (both
-`stop`, 1360/1365 output tokens). Hivemind returned 1142/849 output tokens.
+Spark IDs: `<response-id>`, `<response-id>` (both
+`stop`, 1360/1365 output tokens). the inference service returned 1142/849 output tokens.
 Reviews informed lifetime and phase-order tests. Root rejected suggestions to
 copy from CUDA callbacks, require mapped status memory, skip generic input
 validation, free unproven allocations, or treat cancellation as device loss.
@@ -1302,11 +1302,11 @@ failed because its held payload omitted its destructor counter increment. That
 fixture was corrected; the subsequent repeat validation is recorded below.
 
 Shutdown review used two concurrent Spark requests and two concurrent native
-Hivemind requests, all HTTP 200/curl exit zero, archived in
+the inference service requests, all HTTP 200/curl exit zero, archived in
 `/tmp/usdgen-retirement-close-review.bJvblF`. Spark used
-`qwen3.8-flash-next` (`chatcmpl-ab949f551727ca90`,
-`chatcmpl-8318d1c8fa6a681b`); Hivemind used only
-`qwen3.8-27b@q4_k_m`. Review suggestions were checked against the credit protocol
+`<local-model>` (`<response-id>`,
+`<response-id>`); the inference service used only
+`<remote-model>`. Review suggestions were checked against the credit protocol
 and observed teardown trace; they are not independent final-code validation.
 
 The next operator slice is asynchronous Width **including runtime expression
@@ -1383,13 +1383,13 @@ have already established the final implementation.
 The review artifacts are in
 `/tmp/usdgen-width-parameter-review-20260912-161341`. Two original Spark requests
 timed out at 180 seconds without responses. Two compact retries returned HTTP
-200 (`chatcmpl-a39388f3614cc161`, `chatcmpl-a73c98644a3e17bd`), but exhausted their
+200 (`<response-id>`, `<response-id>`), but exhausted their
 1600-token budgets in internal reasoning with no answer content; they supplied
-no usable review conclusion. Both Hivemind requests initially returned HTTP 400
+no usable review conclusion. Both the inference service requests initially returned HTTP 400
 because the launcher supplied the wrong native input key. Corrected native
 requests returned HTTP 200 and usable phase/lifetime/test suggestions. Models
-remained local Spark `qwen3.8-flash-next` and Hivemind
-`qwen3.8-27b@q4_k_m`, at most two requests per provider, with no OpenAI inference
+remained the local inference host `<local-model>` and the inference service
+`<remote-model>`, at most two requests per provider, with no OpenAI inference
 endpoint substitution. Root rejected recommendations to poll, make dynamic RBF
 expression inputs compile-time constants, poison ordinary semantic failures, or
 reclaim quarantine without lifetime proof. Runtime expression evaluation and
@@ -1398,8 +1398,8 @@ backend-neutral scheduled continuations remain required.
 Root inspected the Spark request artifacts and identified the reasoning-only
 cause: the launcher had put `enable_thinking` at the top level rather than in
 `chat_template_kwargs`. A final compact pair with the correct nested setting
-returned HTTP 200 and actual answer content: `chatcmpl-851ccf9fcfb9eeb0` (1301
-completion tokens) and `chatcmpl-b5875cf35168af49` (1488). Raw `retry2` artifacts
+returned HTTP 200 and actual answer content: `<response-id>` (1301
+completion tokens) and `<response-id>` (1488). Raw `retry2` artifacts
 remain alongside the earlier failures. Useful lifetime/barrier/test suggestions
 were checked against the source; claims that the old context/program loops
 were interleaved and suggestions to cancel native CUDA work were rejected.
@@ -1631,13 +1631,13 @@ Remaining phase-6 slices are explicit, not implied complete by these results:
   performance/soak evidence are still required to close the numbered gates.
 
 Preferred-provider design input was obtained through two concurrent Spark Qwen
-requests and two concurrent Hivemind requests, with no OpenAI inference
+requests and two concurrent the inference service requests, with no OpenAI inference
 substitution. Spark artifacts are in
 `/tmp/usdgen-length-async-review-20260912-165731`; response IDs are
-`chatcmpl-9560a128a7335c2c` and `chatcmpl-996d964d8a50c6f1` (HTTP 200).
-Hivemind artifacts are `/tmp/usdgen-length-async-hivemind-a.json` and
-`/tmp/usdgen-length-async-hivemind-b.json`, model `qwen3.8-27b@q4_k_m`,
-1800 output tokens each. The Hivemind prompts were brief conceptual prompts,
+`<response-id>` and `<response-id>` (HTTP 200).
+the inference service artifacts are `<session-scratch>` and
+`<session-scratch>`, model `<remote-model>`,
+1800 output tokens each. The the inference service prompts were brief conceptual prompts,
 not source audits; provider output is advisory, not verification. Root and
 implementers rejected worst-case output allocation, readiness polling,
 callback-side CUDA allocation, timeout-as-proof, and the false claim that exact
@@ -1729,9 +1729,9 @@ focused runs are archived as `/tmp/usdgen-async-final-focused-{1,2}.log`; they
 
 Preferred-provider finalization advice is retained in
 `/tmp/usdgen-topology-finalize-source-review-20260912-172457` (Spark source
-excerpts, HTTP 200, IDs `chatcmpl-b61cd0d7aefc881b` and
-`chatcmpl-948a3fd5abe75c76`) and
-`/tmp/usdgen-finalize-hivemind-retry-{a,b}.json` (Hivemind compressed/conceptual
+excerpts, HTTP 200, IDs `<response-id>` and
+`<response-id>`) and
+`<session-scratch>{a,b}.json` (the inference service compressed/conceptual
 scope, 302/288 input tokens, not full source audits). Initial conceptual prompts
 are not source audits. Suggestions involving polling, callback-side CUDA,
 invented APIs, and unsafe lifetime shortcuts were rejected.
@@ -1740,9 +1740,9 @@ Read-only preparation for the next source-control/RBF work also used two
 concurrent requests per preferred provider, without OpenAI substitution. Spark
 source-excerpt artifacts are in
 `/tmp/usdgen-rbf-phase6-review-20260912-173649`, HTTP 200 IDs
-`chatcmpl-a64638a8c4c0aa42` and `chatcmpl-be1c9e1032260938` (5191/4752 input
-tokens). Hivemind artifacts are `/tmp/usdgen-rbf-hivemind-{a,b}.response.json`,
-HTTP 200, model `qwen3.8-27b@q4_k_m`, 300/307 input tokens: source-informed
+`<response-id>` and `<response-id>` (5191/4752 input
+tokens). the inference service artifacts are `<session-scratch>{a,b}.response.json`,
+HTTP 200, model `<remote-model>`, 300/307 input tokens: source-informed
 conceptual summaries, not verbatim-source reviews. In particular, the claimed
 existing RBF cache use-after-free omitted current synchronous completion and
 was rejected as unsupported.
@@ -1957,10 +1957,10 @@ The RBF conversion is now being implemented in separate low-level RBF and
 surface-binding slices, with an independent execution/cache integration
 review. No new RBF asynchronous runtime validation is claimed yet. A
 preceding literal-source review
-used two concurrent Spark Qwen requests and two concurrent Hivemind requests,
+used two concurrent Spark Qwen requests and two concurrent the inference service requests,
 all HTTP 200, with artifacts in `/tmp/usdgen-rbf-review-20260912`. Spark used
-`qwen3.8-flash-next` (response IDs `chatcmpl-87636fcaa98f8e7f` and
-`chatcmpl-a1958af4a228a84e`); Hivemind used `qwen3.8-27b@q4_k_m` through its
+`<local-model>` (response IDs `<response-id>` and
+`<response-id>`); the inference service used `<remote-model>` through its
 native API. Each response reached its 1600-token output limit, so these are
 bounded advisory reviews, not complete audits or test evidence. Root rejected
 low-level callback ownership, event-query polling, and retaining borrowed views
@@ -2051,12 +2051,12 @@ deformation. The next slice must distinguish accepted and rejected candidates
 and retain the accepted factorization through a rejected rebind.
 
 A second actual provider-review batch used two concurrent Spark Qwen requests
-and two concurrent Hivemind requests on literal draft surface/deformer files.
+and two concurrent the inference service requests on literal draft surface/deformer files.
 All four returned HTTP 200; logs are
 `/tmp/usdgen-rbf-fresh-review-1789264674270-{spark,hive}-{surface,deform}.log`.
-Spark response IDs were `chatcmpl-9901ed2e61d9a059` and
-`chatcmpl-909e9ff48fa5ccce`; Hivemind identified
-`qwen3.8-27b@q4_k_m`. Each response reached 1600 output tokens. These are advisory
+Spark response IDs were `<response-id>` and
+`<response-id>`; the inference service identified
+`<remote-model>`. Each response reached 1600 output tokens. These are advisory
 reviews of changing drafts, not frozen-source verification. Root rejected
 suggestions to free pinned proof storage from host-only commits and claims
 that `begin >= end` permits empty curves; the validation explicitly rejects
@@ -2286,7 +2286,7 @@ and CPU/Metal/Vulkan capability population remain open.
 
 The next bounded slice makes the dataflow boundary explicit without claiming
 that the current CUDA mutable workspace can execute branches. Four independent
-local design reviews (two Spark Qwen and two native Hivemind Qwen requests)
+local design reviews (two Spark Qwen and two native the inference service Qwen requests)
 converged on the same requirement: fan-out needs independently retained value
 storage, and fan-in is undefined until the consuming operator declares an
 actual merge operation. Those reviews were advisory; the implementation below
@@ -2337,8 +2337,8 @@ value topology.
 ### CUDA source-rooted unary Width DAG checkpoint
 
 The next bounded CUDA slice implements real source-rooted unary Width fan-out
-without claiming concurrent branch execution. Two local Spark Qwen reviews and
-two native Hivemind Qwen reviews independently converged on the same core
+without claiming concurrent branch execution. Two the local inference host Qwen reviews and
+two native the inference service Qwen reviews independently converged on the same core
 requirements: deterministic semantic-node identity, immutable predecessor
 views, separately owned per-node outputs, declared-terminal publication and
 proof-driven cleanup. The implementation was split between production and test
@@ -2395,8 +2395,8 @@ population remain open.
 ### CUDA Width DAG concurrent-dispatch and COW checkpoint (2026-09-12)
 
 The serialized Width-DAG checkpoint is superseded by a bounded concurrent
-lowering. Two local Spark `qwen3.8-flash-next` reviews and two native Hivemind
-`qwen3.8-27b@q4_k_m` reviews completed with HTTP 200 under
+lowering. Two the local inference host `<local-model>` reviews and two native the inference service
+`<remote-model>` reviews completed with HTTP 200 under
 `/tmp/usdgen-cuda-branch-overlap-20260912/`. Their useful consensus was fixed
 nonblocking branch streams, task-local evaluator/geometry state, distinct
 owned results, cross-stream event waits and deterministic test gates. Host
@@ -2461,12 +2461,12 @@ correctness work; they are not implied by the Width-only COW contract.
 
 The asynchronous CUDA RBF publication path now resolves its provisional field
 solve and surface update as one checked logical transaction. Two local
-`qwen3.8-flash-next` reviews (`chatcmpl-b6b948eb1b2df94f`,
-`chatcmpl-b1ae564d4da7c8b4`) and two Hivemind reviews
-(`chatcmpl-r29yyzz9izmpc8qpzh829h` on `qwen3.8-27b@q4_0`, and
-`chatcmpl-h7nfb8n7fjoks8vd1n8e8` on `qwen3.8-27b@q4_k_s`) were inspected from
+`<local-model>` reviews (`<response-id>`,
+`<response-id>`) and two the inference service reviews
+(`<response-id>` on `<remote-model>`, and
+`<response-id>` on `<remote-model>`) were inspected from
 `/tmp/usdgen-rbf-atomic-20260912/`. The first four longer requests all timed
-out after 180 seconds with zero bytes and one bounded Hivemind retry returned
+out after 180 seconds with zero bytes and one bounded the inference service retry returned
 HTTP 500; those failed calls contributed no findings. The usable responses
 agreed that arbitrary sequential irreversible accepts cannot be made strictly
 atomic without a common commit primitive or undo. They also identified the
@@ -2533,12 +2533,12 @@ samples and coefficients. In both cases, the cache pointer, key, identity and
 counters remain unchanged until terminal generation construction succeeds and
 `ResolvePendingRbf(true)` accepts both resources.
 
-Two local Spark `qwen3.8-flash-next` reviews
-(`chatcmpl-8ab604befcd9215e`, `chatcmpl-b0b61a94c0c73c6a`) and two usable
-Hivemind `qwen3.8-27b@q4_0` reviews
-(`chatcmpl-nw2n9w2r0xtrqh2up95sh`,
-`chatcmpl-cver80jaex57g981tsuvhs`) were inspected from
-`/tmp/usdgen-rbf-sync-transaction-20260912/`. One initial Hivemind lifecycle
+Two the local inference host `<local-model>` reviews
+(`<response-id>`, `<response-id>`) and two usable
+the inference service `<remote-model>` reviews
+(`<response-id>`,
+`<response-id>`) were inspected from
+`/tmp/usdgen-rbf-sync-transaction-20260912/`. One initial the inference service lifecycle
 request timed out, one portability request returned HTTP 500, and one bounded
 retry returned HTTP 400; these failed calls contributed no findings. The
 usable reviews agreed on a synchronous driver over the existing fresh stages,
@@ -2606,9 +2606,9 @@ ReadWrite. Width-DAG operators declare no physical workspace hazard: siblings
 share immutable geometry/value inputs and privately own their COW Width output,
 so automatic lowering does not reserialize them.
 
-The required parallel review used two Spark `qwen3.8-flash-next` responses
-(`chatcmpl-b5e7204a4c2a5355`, `chatcmpl-b92ff1a900c6e4c3`) and two Hivemind
-`qwen3.8-27b@q4_k_m` responses. All four returned HTTP 200; request, response,
+The required parallel review used two Spark `<local-model>` responses
+(`<response-id>`, `<response-id>`) and two the inference service
+`<remote-model>` responses. All four returned HTTP 200; request, response,
 status and stderr artifacts are retained in
 `/tmp/usdgen-fanin-review-20260912/`. Their useful consensus was immutable
 producer versions, explicit physical conflicts, stable authored join order and
@@ -2673,10 +2673,10 @@ Width values while requiring the selected terminal value, and the serial
 negative control plus re-arm verifies that counters cannot manufacture an
 overlap result from dependency-ordered tasks.
 
-The required external review used two Spark `qwen3.8-flash-next` responses
-(`chatcmpl-ba23343d4d5d6fbd`, `chatcmpl-aac00566f5f54fb4`) and two successful
-Hivemind `qwen3.8-27b@q4_0` responses. Initial concurrent Hivemind attempts
-against `qwen3.8-27b@q4_k_m` returned one model-load HTTP 500 and one timeout;
+The required external review used two Spark `<local-model>` responses
+(`<response-id>`, `<response-id>`) and two successful
+the inference service `<remote-model>` responses. Initial concurrent the inference service attempts
+against `<remote-model>` returned one model-load HTTP 500 and one timeout;
 the serialized retries returned HTTP 200. Requests, responses and status
 artifacts are retained under
 `/tmp/usdgen-width-device-overlap-20260912/`. Suggestions to treat CUDA event
@@ -2737,9 +2737,9 @@ workspace is not fully bounded yet. Expression-dependent cardinality is also
 unavailable. No execution-time numbers are fabricated: time remains
 unavailable until measured or analytically justified.
 
-The required external review used two Spark `qwen3.8-flash-next` responses
-(`chatcmpl-a00a6a9c6a000ccd`, `chatcmpl-b08aaf47e1184023`) and two Hivemind
-`qwen3.8-27b@q4_0` responses. All four returned HTTP 200; requests, responses
+The required external review used two Spark `<local-model>` responses
+(`<response-id>`, `<response-id>`) and two the inference service
+`<remote-model>` responses. All four returned HTTP 200; requests, responses
 and status artifacts are retained under
 `/tmp/usdgen-task-estimates-20260912/`. Their common warning was adopted:
 snapshot-only admission is racy, and reserving the graph peak separately from
@@ -2797,10 +2797,10 @@ exact value. Length, RBF and expression-dependent graphs remain unavailable
 for enforced admission because their complete workspace/cardinality bounds
 are not yet known.
 
-The required parallel architecture review used two local Spark
-`qwen3.8-flash-next` responses (`chatcmpl-9e44b7248ea16bd8`,
-`chatcmpl-9da1d556598b15da`) and two Hivemind
-`qwen3.8-27b@q4_0` responses. The initial Hivemind requests exceeded that
+The required parallel architecture review used two the local inference host
+`<local-model>` responses (`<response-id>`,
+`<response-id>`) and two the inference service
+`<remote-model>` responses. The initial the inference service requests exceeded that
 server's context limit and returned HTTP 500; compact parallel retries both
 returned HTTP 200. Requests, responses and transport status are retained under
 `/tmp/usdgen-reservation-review-20260912/`. The adopted consensus was explicit
@@ -2877,10 +2877,10 @@ owner. Static-resample metadata therefore classifies
 This paragraph supersedes the scratch classification in the preceding
 transferable-reservation checkpoint; the total conservative bound is unchanged.
 
-The integration reused the required two local Spark
-`qwen3.8-flash-next` reviews (`chatcmpl-9e44b7248ea16bd8`,
-`chatcmpl-9da1d556598b15da`) and two successful Hivemind
-`qwen3.8-27b@q4_0` compact reviews retained under
+The integration reused the required two the local inference host
+`<local-model>` reviews (`<response-id>`,
+`<response-id>`) and two successful the inference service
+`<remote-model>` compact reviews retained under
 `/tmp/usdgen-reservation-review-20260912/`, followed by a separate read-only
 CUDA allocation audit. The implemented boundary follows their common advice:
 explicit per-job transfer, no TLS, no snapshot-based admission and no global
@@ -2941,9 +2941,9 @@ used as the admission decision. No CUDA-native handle was added to the portable
 estimate/reservation interfaces, leaving the contract suitable for future Metal
 and Vulkan adapters without pretending those adapters already exist.
 
-The design was challenged by two local Spark `qwen3.8-flash-next` reviews
-(`chatcmpl-96dd666516912e61`, `chatcmpl-8558e4c6541bc718`) and two successful
-Hivemind `qwen3.8-27b@q4_0` reviews retained under
+The design was challenged by two the local inference host `<local-model>` reviews
+(`<response-id>`, `<response-id>`) and two successful
+the inference service `<remote-model>` reviews retained under
 `/tmp/usdgen-sync-reservation-review-20260912/`. A separate read-only CUDA
 allocation audit found no uncovered normal-path device allocation in the
 admitted subset. Implementation and tests were split across Terra and Luna
@@ -3023,10 +3023,10 @@ returns unused Pending while the published compactor's child permits remain
 charged until its COW generation owner dies. Proven failures recycle normally;
 only native work lacking completion proof follows the existing quarantine rule.
 
-The required external challenge used two local Spark
-`qwen3.8-flash-next` reviews (`chatcmpl-8a1059c4f72b2f01`,
-`chatcmpl-90bed470946606a0`) and two successful Hivemind
-`qwen3.8-27b@q4_0` reviews. All returned HTTP 200; requests, responses and status
+The required external challenge used two the local inference host
+`<local-model>` reviews (`<response-id>`,
+`<response-id>`) and two successful the inference service
+`<remote-model>` reviews. All returned HTTP 200; requests, responses and status
 artifacts are retained under
 `/tmp/usdgen-length-admission-review-20260913/`. Their shared recommendations
 for selected-device refinement, all-survivor output and explicit ticket
@@ -3096,8 +3096,8 @@ the old accepted cache/output is never mutated before publication resolution.
 
 External review artifacts are retained under
 `/tmp/usdgen-rbf-admission-review-20260913/`: Spark architecture
-`chatcmpl-863d38df55efd7fb` (`spark-architecture.json`) and adversarial
-`chatcmpl-99e7340cfe54152e` (`spark-adversarial.json`); Hivemind architecture
+`<response-id>` (`spark-architecture.json`) and adversarial
+`<response-id>` (`spark-adversarial.json`); the inference service architecture
 `hive-architecture.json` and adversarial `hive-adversarial.json` (both HTTP
 200). The reviews drove the explicit COW baseline distinction, selected-device
 bound, no-snapshot/no-TLS design, and proof-lifetime audit. Root validation
@@ -3157,9 +3157,9 @@ and erased the evaluator candidate. It now checked-adds the resampler status
 bytes, preserving both the evaluator and COW geometry terms. The affected CUDA
 session then passed 20 consecutive runs.
 
-The required external challenge used two local Spark
-`qwen3.8-flash-next` reviews (`chatcmpl-a43de2902d3d4f1c`,
-`chatcmpl-a453b0120add702b`) and two Hivemind `qwen3.8-27b@q4_0` reviews
+The required external challenge used two the local inference host
+`<local-model>` reviews (`<response-id>`,
+`<response-id>`) and two the inference service `<remote-model>` reviews
 (`resp_0ef23cc4b43832f4c1f94eae2b502e6d6cee36196739cbd2`,
 `resp_c498799bb751486cbe9e881a51096cb6d9355b722208d32d`). Requests and
 responses are retained under
@@ -3214,9 +3214,9 @@ were hardened so partially submitted or otherwise unproved CUDA storage is
 quarantined rather than freed, while sequential pre-submit failures discard
 their candidate and staging state normally.
 
-The required external review used two local Spark `qwen3.8-flash-next`
-responses (`chatcmpl-9965db9bcd1dab9a`,
-`chatcmpl-ba12cd2b1da7f47c`) and two Hivemind `qwen3.8-27b@q4_0`
+The required external review used two the local inference host `<local-model>`
+responses (`<response-id>`,
+`<response-id>`) and two the inference service `<remote-model>`
 responses (`resp_0576db4a7409a33bd62aa48c37c8dd30036cd0f7f493df2f`,
 `resp_26205ac5778f9916ec88d2a6926925e458875553998c9a25`). All returned HTTP
 200; artifacts are retained under
@@ -3280,8 +3280,8 @@ handoff.
 
 The required external review artifacts are retained under
 `/tmp/usdgen-cross-graph-review-20260913/`. Local Spark/Qwen architecture and
-adversarial reviews returned HTTP 200 as `chatcmpl-b2d51341f29752b4` and
-`chatcmpl-9c91456fa65a8273`. Hivemind adversarial and retried architecture
+adversarial reviews returned HTTP 200 as `<response-id>` and
+`<response-id>`. the inference service adversarial and retried architecture
 reviews both returned HTTP 200 (`hive-adversarial.json` and
 `hive-architecture-retry.json`; the native responses expose no request id).
 Terra supplied the independent backend/device actor design and Luna supplied
@@ -3357,8 +3357,8 @@ published, so extra-plane COW remains open and is not part of this checkpoint.
 
 The required external review artifacts are retained under
 `/tmp/usdgen-topology-cow-review-20260913/`. Spark architecture and adversarial
-reviews returned HTTP 200 as `chatcmpl-8296e0bc78f9f430` and
-`chatcmpl-9897510815e53d31`; Hivemind architecture and adversarial reviews
+reviews returned HTTP 200 as `<response-id>` and
+`<response-id>`; the inference service architecture and adversarial reviews
 returned HTTP 200 as `resp_60ba0980033fdff7cf26e6f039a7e5701e4b6359bdc4cb07`
 and `resp_74d96155f68fef7d9e4544af350639327406321af7a05865`.
 Their stream-visibility, sibling-failure, workspace-accounting and physical-
@@ -3425,9 +3425,9 @@ explicitly while retaining stable existing enum values. A generic owner test
 constructs valid Metal and Vulkan generations without importing either native
 API, pinning the portability boundary for their future synchronization adapters.
 
-The required review used two local Spark `qwen3.8-flash-next` responses
-(`chatcmpl-80abe0c8265a65c9`, `chatcmpl-a5b70e8c7432a6d4`) and two Hivemind
-`qwen3.8-27b@q4_0` responses
+The required review used two the local inference host `<local-model>` responses
+(`<response-id>`, `<response-id>`) and two the inference service
+`<remote-model>` responses
 (`resp_a45806cd78c46c783f9a38c09f8e50de3f074f6004ab34e9`,
 `resp_dd51e687cd8ed62348d65b6c23e810ab7f01ccdcb4620f6e`). All returned HTTP
 200; artifacts are retained under
@@ -3499,9 +3499,9 @@ contract for a future immutable execution cache; it does not yet implement cache
 storage, lease retention, eviction, or accepted-tuple compare-and-publish.
 
 The required independent review artifacts are retained under
-`/tmp/usdgen-reference-cache-review-20260913/`. The two local Spark/Qwen reviews
-returned HTTP 200 as `chatcmpl-9b4ee1616a0c5c2e` and
-`chatcmpl-99927ddef47e324b`; the two Hivemind reviews returned HTTP 200 as
+`/tmp/usdgen-reference-cache-review-20260913/`. The two the local inference host/Qwen reviews
+returned HTTP 200 as `<response-id>` and
+`<response-id>`; the two the inference service reviews returned HTTP 200 as
 `resp_fadf6ed00fff90ae695f0c48ad41d32e7e7ac170cd04f59e` and
 `resp_7ed17d6f09dd0b82b3423ae2e45b5616e8eece1d22f52ce6`. Their common
 requirements—canonical tuples, full-field equality, semantic input/context
@@ -3568,10 +3568,10 @@ open. Metal and Vulkan likewise remain backend identities and neutral contracts,
 not implemented resource or synchronization adapters.
 
 The required parallel review artifacts are retained under
-`/tmp/usdgen-cache-plane-review-20260913/`. Two local Spark
-`qwen3.8-flash-next` reviews returned HTTP 200 as
-`chatcmpl-973097ee34d328dd` and `chatcmpl-8f2dc31e46989a93`; two Hivemind
-`qwen3.8-27b@q4_0` reviews returned HTTP 200 as
+`/tmp/usdgen-cache-plane-review-20260913/`. Two the local inference host
+`<local-model>` reviews returned HTTP 200 as
+`<response-id>` and `<response-id>`; two the inference service
+`<remote-model>` reviews returned HTTP 200 as
 `resp_6b66893330fcd977f550e3094479afd9524e584bdaf23fe1` and
 `resp_d5b43d7f82dbd333c381637f77ad77f0f8101cda64c0be4c`. Their collision,
 transaction, lease/COW, destructor re-entry, topology/cardinality and fail-closed
@@ -3635,10 +3635,10 @@ backend-neutral identities only; they still need concrete allocation, fence,
 queue and retirement adapters.
 
 The required parallel review artifacts are retained under
-`/tmp/usdgen-session-cuda-plane-review-20260913/`. Two local Spark
-`qwen3.8-flash-next` reviews returned HTTP 200 as
-`chatcmpl-8d6b96b73c5348f4` and `chatcmpl-b9709ac34ee198a4`; two Hivemind
-`qwen3.8-27b@q4_0` reviews returned HTTP 200 as
+`/tmp/usdgen-session-cuda-plane-review-20260913/`. Two the local inference host
+`<local-model>` reviews returned HTTP 200 as
+`<response-id>` and `<response-id>`; two the inference service
+`<remote-model>` reviews returned HTTP 200 as
 `resp_3b04135515bae150b6cbd4b4da4e62060caf0465b1a6ef35` and
 `resp_13a08c00c383863e1c2c28117355a37515b3f35e059c8b7d`. Their common
 requirements--accepted-publication-only cache admission, full semantic keys,
@@ -3705,8 +3705,8 @@ still fail before device work instead of publishing stale-cardinality data.
 
 The four required reviews are retained under
 `/tmp/usdgen-cuda-named-graph-review-20260913/`. Local Spark
-`qwen3.8-flash-next` returned HTTP 200 as `chatcmpl-be69f8bdc068268a` and
-`chatcmpl-9563256a1b20b6ce`; Hivemind `qwen3.8-27b@q4_0` returned HTTP 200 as
+`<local-model>` returned HTTP 200 as `<response-id>` and
+`<response-id>`; the inference service `<remote-model>` returned HTTP 200 as
 `resp_19c4c2d0bdf635113bdd97014033c8ff8ea7202f011b77b3` and
 `resp_9bab6f0dab854d2cae2829fc564a2fdcb2169f9d05f4fdf8`. Their shared
 requirements--private write-once outputs, generation fencing, exact callback
@@ -3781,8 +3781,8 @@ their allocation, fence and queue adapters remain unimplemented.
 
 The requested parallel review cycle is retained under
 `/tmp/usdgen-cow-relay-review-20260913/`. Local Spark
-`qwen3.8-flash-next` returned HTTP 200 as `chatcmpl-b74979807378ebe1` and
-`chatcmpl-adb0f9c7c52a235f`; Hivemind `qwen3.8-27b@q4_0` returned HTTP 200 as
+`<local-model>` returned HTTP 200 as `<response-id>` and
+`<response-id>`; the inference service `<remote-model>` returned HTTP 200 as
 `resp_63fff021746f156033b5cfb7db00498c70b0be129881e42d` and
 `resp_f581b68771b62bf3ebd4217a204a3ad3cefb6c487f8898d8`. Their actionable
 callback-lifetime, cross-stream RAW, sync-failure, stable-ID, empty-buffer,

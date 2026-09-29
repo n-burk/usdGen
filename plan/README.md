@@ -29,14 +29,14 @@ the production RBF/deformation path therefore still contains execution waits.
 Phases 7–9 follow, but earlier compiler,
 multi-groom cache/dirty propagation, memory and lifecycle gates remain open.
 
-This directory is the complete plan for **usdGen**, an XGen-like hair/fur grooming and instancing
+This directory is the complete plan for **usdGen**, an procedural hair/fur grooming and instancing
 plugin for OpenUSD 26.08 and Hydra 2.0. usdGen is built as a sibling CMake project of usdRig, runs
 *after* usdRig (or any other deformer) in the Hydra scene-index chain, generates curves for Storm and
 hdPrman at run/render time, loads and deforms static curves, styles them with a chainable operator
 stack, paints and expresses look through maps, Ptex and SeExpr, and is groomed interactively through
 usdview plugins that follow the app → data modification → Hydra loop. The verbatim request is quoted
 in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended repository is
-`/home/burkard/work/usdGen`, and this plan lives there as `plan/`.
+`<usdgen-src>`, and this plan lives there as `plan/`.
 
 ## 1. TL;DR (the binding decisions, `design/adr-v1.md`)
 
@@ -87,7 +87,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
 * **Gate status** (09 §5). `MEASURED-pass`, `UNMEASURED`, `record only` (SI-11, S-11). Tier-4 gates
   are release criteria (`RC-n`), never milestone exits.
 * **Source facts.** Every OpenUSD or usdRig `file:line` in the plan was re-verified by grep against
-  `/home/burkard/work/OpenUSD` at v26.08 (`ee47c679a`) and usdRig at `c92c040`; verification limits
+  `<openusd-src>` at v26.08 (`ee47c679a`) and usdRig at `c92c040`; verification limits
   are listed in `appendix-A-evidence-ledger.md` §3.11.
 
 ## 3. Single registries (where a name is owned)
@@ -156,7 +156,7 @@ in `00-request-and-scope.md` §0.1. The working name is `usdGen`; the intended r
 ## 7. How this plan was produced
 
 Two research rounds on this host (Linux aarch64, 20 cores, NVIDIA GB10, OpenUSD 26.08 installed at
-`/home/burkard/work/OpenUSD_26_08`, no display) produced `research/`; a brief with requirements and
+`$USD`, no display) produced `research/`; a brief with requirements and
 settled decisions; three independent architecture proposals scored by three judges; the binding ADR
 and its 2026-09-05 addendum; then the fifteen documents, each adversarially reviewed and fixed, four
 cross-document consistency passes, per-file reconciliation against the addendum, and a final

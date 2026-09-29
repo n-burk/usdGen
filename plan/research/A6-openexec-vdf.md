@@ -1,8 +1,8 @@
 # A6 — OpenExec / VDF / Esf in OpenUSD 26.08: what is usable for a dynamic hair operator graph with sparse invalidation
 
-Scope: `/home/burkard/work/OpenUSD/pxr/exec/{vdf,ef,esf,esfUsd,exec,execUsd,execGeom,execIr}` (tag v26.08),
-`/home/burkard/work/OpenUSD/pxr/usdImaging/usdExecImaging`, `/home/burkard/work/OpenUSD/extras/exec/examples`,
-and usdRig's own use of these libraries (`/home/burkard/work/usdRig/libs/rigExec`, `libs/rigExecImaging`,
+Scope: `<openusd-src>/pxr/exec/{vdf,ef,esf,esfUsd,exec,execUsd,execGeom,execIr}` (tag v26.08),
+`<openusd-src>/pxr/usdImaging/usdExecImaging`, `<openusd-src>/extras/exec/examples`,
+and usdRig's own use of these libraries (`<usdrig-src>/libs/rigExec`, `libs/rigExecImaging`,
 `docs/exec-api-notes.md`, `docs/execusd-api-notes.md`, `docs/mover-graph-cutover.md`).
 All paths below are absolute; `file:line` cites the source as of v26.08. Claims I could not verify in source are
 marked UNVERIFIED.
@@ -15,8 +15,8 @@ marked UNVERIFIED.
    (time, leaf nodes, page caches, executors on top of vdf) and `exec/execUsd` (a compiler from a UsdStage plus
    schema-registered computations into a vdf network, with change-driven invalidation). Only `execUsd` + the
    registration DSL in `exec` are documented as public; `esf`/`esfUsd` carry a "not meant for public use" note
-   (`/home/burkard/work/OpenUSD/pxr/exec/esf/README.md:3-4`, `esfUsd/README.md:3-4`). All eight libraries and
-   their headers *are* installed (`/home/burkard/work/OpenUSD_26_08/include/pxr/exec/{ef,esf,esfUsd,exec,execGeom,execIr,execUsd,vdf}`,
+   (`<openusd-src>/pxr/exec/esf/README.md:3-4`, `esfUsd/README.md:3-4`). All eight libraries and
+   their headers *are* installed (`$USD/include/pxr/exec/{ef,esf,esfUsd,exec,execGeom,execIr,execUsd,vdf}`,
    `lib/libusd_{vdf,ef,esf,esfUsd,exec,execUsd,execGeom,execIr}.so`), so linking against `vdf`/`ef` directly is
    possible today (usdRig already does: `libs/rigExec/moverGraph.cpp:18-30`).
 2. **Through ExecUsd, a `VtArray` attribute is ONE data-flow element (a `Vdf_BoxedContainer`), not N vectorized
@@ -57,7 +57,7 @@ marked UNVERIFIED.
    would need a private `Exec_RequestImpl` subclass (`exec/requestImpl.h:83-113`).
 7. **26.08 ships `usdExecImaging`** — an exec-driven initial scene index that UsdImagingGL merges in front of the
    stage scene index when `USDIMAGINGGL_ENGINE_ENABLE_EXEC_SCENE_INDEX=1` (default false,
-   `/home/burkard/work/OpenUSD/pxr/usdImaging/usdImagingGL/engine.cpp:90-96,1617-1645`). Its adapter registry is
+   `<openusd-src>/pxr/usdImaging/usdImagingGL/engine.cpp:90-96,1617-1645`). Its adapter registry is
    hard-coded (UsdGeomXformable, ExecIrXformable; `usdExecImaging/adapterRegistry.cpp:28-51`), so it is a *pattern*
    to copy (request per stage, lazy `HdSampledDataSource` over `ExecUsdCacheView`, invalidation callbacks → dirty
    locators, `SetTime`/`ApplyPendingUpdates` from the engine's main-thread update), not an extension point.
@@ -206,7 +206,7 @@ fine; for the curve data plane it is not the right tool.
 
 | Constraint | Evidence | Effect on a hair graph |
 |---|---|---|
-| No reverse-relationship accessor; a computation on a joint cannot reach the solver that names it | `docs/mover-graph-cutover.md` "The OpenExec constraint that shapes all of this"; accessor list `exec/computationBuilders.h:840` | Operators must be wired **downstream → upstream** (styler names its generator), which happens to be natural for hair (like XGen modifiers referencing the description). Any "surface → hair" push direction must be resolved outside exec. |
+| No reverse-relationship accessor; a computation on a joint cannot reach the solver that names it | `docs/mover-graph-cutover.md` "The OpenExec constraint that shapes all of this"; accessor list `exec/computationBuilders.h:840` | Operators must be wired **downstream → upstream** (styler names its generator), which happens to be natural for hair (like a host groomer modifiers referencing the description). Any "surface → hair" push direction must be resolved outside exec. |
 | Relationship accessor can only request *computations* on targets, not a named attribute of them | `mover-graph-cutover.md` "Pass 1.5 ... points are unreachable from the ribbon"; `computationBuilders.h:840` | A styler that wants `scalp.points` via `rel groom:surface` cannot; you would register a computation on the scalp schema (e.g. `computePoints`) or box the array into a custom type. |
 | Array overrides rejected (type-checked against element type) | `exec/system.cpp:168-181`; `mover-graph-cutover.md` "Pass 1.5" | Supplying externally-computed arrays (e.g. from usdRig's deformed surface, or a simulation) into exec requires a registered boxed struct (usdRig: `RigExecPointsPacket`). |
 | Callbacks must be pure; all scene reads declared as inputs ("cache safety") | `exec-api-notes.md` §3.2, §8 item 11; `vdf/node.h:350-353` thread-safety | Fine for math kernels; awkward for texture/ptex lookups (must be inputs or side tables). |
@@ -529,7 +529,7 @@ per-N-curves task granularity with per-chunk dirty bits) gets most of the benefi
 
 ## Key facts
 
-- `esf`/`esfUsd` are marked not for public use — `/home/burkard/work/OpenUSD/pxr/exec/esf/README.md:3-4`, `esfUsd/README.md:3-4`; yet all exec libs/headers are installed — `/home/burkard/work/OpenUSD_26_08/include/pxr/exec/*`, `lib/libusd_vdf.so` etc.
+- `esf`/`esfUsd` are marked not for public use — `<openusd-src>/pxr/exec/esf/README.md:3-4`, `esfUsd/README.md:3-4`; yet all exec libs/headers are installed — `$USD/include/pxr/exec/*`, `lib/libusd_vdf.so` etc.
 - ExecUsd public surface is `ExecUsdSystem{ChangeTime, BuildRequest, PrepareRequest, Compute, ComputeWithOverrides}`, `ExecUsdRequest::IsValid`, `ExecUsdCacheView::Get(int)`, `ExecUsdValueKey` — `execUsd/system.h:48-154`, `execUsd/request.h:31-63`, `execUsd/cacheView.h:38-39`, `execUsd/valueKey.h:61-70`.
 - Invalidation callback types: `ExecRequestIndexSet = pxr_tsl::robin_set<int>`; value callback gets an `EfTimeInterval` — `exec/request.h:19,28-41`.
 - `Compute()` always recompiles the request; schedule rebuilt only when invalid; interest reset per compute — `exec/requestImpl.cpp:385-388,479-485,496-500`.

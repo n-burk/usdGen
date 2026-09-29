@@ -45,9 +45,9 @@ namespace {
 //                old overload-resolution problem with ::cbrt, so on Windows
 //                they are simply absent. The language must not depend on the
 //                platform it was compiled for.
-//   rand         XGen's, not SeExpr2's: the parser has never heard of it.
+//   rand         a host groomer's, not SeExpr2's: the parser has never heard of it.
 //   dist         bound in ExprBuiltins.cpp as six scalars even though its own
-//                docstring, XGen's reference and every other vector builtin
+//                docstring, a host groomer's reference and every other vector builtin
 //                spell it dist(vector, vector).
 //
 // All four are STUBS. They exist so the type checker knows each name's shape;
@@ -1248,7 +1248,7 @@ private:
         return 0;
     }
 
-    /// rand() is XGen's, not SeExpr's: deterministic per strand rather than per
+    /// rand() is a host groomer's, not SeExpr's: deterministic per strand rather than per
     /// evaluation, so a groom looks the same every cook. The seed is the
     /// operator's $seed, the strand's $id and the call site's index, which is
     /// what makes two rand() calls in one expression independent.

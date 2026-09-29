@@ -1,8 +1,9 @@
-# usdGenTonicTools.tonicGizmoSnap -- world-grid snapping for the `X` hold
-# (tonic_gizmo_parity G11).
+# Copyright (c) 2026 Nick Burkard
+# SPDX-License-Identifier: MIT
 #
-# Vendored from usdRig `plugin/rigExecUsdview/gizmoSnap.py` at 4fe4142
-# (2026-09-03), adapted for Tonic; keep in sync. Only the grid half is
+# usdGenTonicTools.tonicGizmoSnap -- world-grid snapping for the `X` hold.
+#
+# Adapted for this groom tool. Only the grid half is
 # here: ConstrainToHandle, DirectionIsWorldAligned, _PlaneBasis and
 # GridPoint, rule for rule. Point / edge / surface snapping (NearestPoint,
 # NearestSegment, the pick resolver) is rig-geometry specific and is left

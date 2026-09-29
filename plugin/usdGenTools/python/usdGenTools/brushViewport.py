@@ -12,7 +12,7 @@
 #     so a view-local filter would never see it), and the brush hotkeys
 #     only under the conditions below.
 #
-# Hotkeys (Blender style; brushPanels.hotkeyFor is the table):
+# Hotkeys (a DCC style; brushPanels.hotkeyFor is the table):
 #   F / Shift+F / Ctrl+F  drag-adjust radius / strength / hardness: the
 #                         press anchors at the cursor, horizontal motion
 #                         changes the value with live rings and a readout,

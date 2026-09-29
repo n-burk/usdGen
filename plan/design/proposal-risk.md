@@ -89,7 +89,7 @@ have workstation protocols already written.
 
 ## 2. D8 — Library decomposition, naming, CMake
 
-Sibling CMake project at `/home/burkard/work/usdGen`, consuming the unmodified OpenUSD install,
+Sibling CMake project at `<usdgen-src>`, consuming the unmodified OpenUSD install,
 mirroring usdRig's layout and generated-plugInfo pattern verbatim (S44).
 
 | CMake target | Kind | Installed? | Links | Contents |
@@ -230,7 +230,7 @@ That is the single biggest lever on the cost of the v2/v3 catalogue.
 | `usdGen:motion:sampleCount` | `uniform int` | `3` | clamped [2,16] (S32) |
 | `usdGen:motion:forwardSurfaceSamples` | `uniform bool` | `false` | forward the surface's own contributing times instead of clamping to the shutter |
 | `usdGen:guides` | `rel` | — | `UsdGenGuideSet` prims visible to this description |
-| `usdGen:renderDensity` | `float` | `1.0` | render-time-only multiplier (XGen `Render Density Multiplier`, A7 §1.5) |
+| `usdGen:renderDensity` | `float` | `1.0` | render-time-only multiplier (a host groomer `Render Density Multiplier`, A7 §1.5) |
 
 Chunk prims are minted as `<Description>/Chunks/chunk_NNNN`, guides as
 `<Description>/Guides/<guideSetName>`, instancers as `<Description>/Instancers/<name>` with
@@ -261,7 +261,7 @@ exactly right once (A7 §7 recommendation).
 | `usdGen:mask:noise:seed` | `int` | `0` |
 
 Semantics: per-curve weight `w(h) = clamp(amount × map(rootUV) × noise(rootRest) , 0, 1)`, inverted
-if asked; per-CV weight `w(h) × ramp(t)` with the Houdini four-parameter shortcut applied when the
+if asked; per-CV weight `w(h) × ramp(t)` with the a DCC four-parameter shortcut applied when the
 ramp has fewer than two authored knots. Evaluated **once per capture** and cached as a
 `VtFloatArray` (S25).
 
@@ -301,7 +301,7 @@ multiple map prims. Reload is the explicit `UsdGenImaging_ReloadMaps()` action (
 
 ### 3.7 Freeze and sculpt
 
-`UsdGenFreeze` — the XGen *Groom Bake* analogue (A7 §1.4): everything upstream is deactivated while
+`UsdGenFreeze` — the a host groomer *Groom Bake* analogue (A7 §1.4): everything upstream is deactivated while
 the freeze is live; everything downstream reads the frozen buffer (A7 §9.3).
 
 | Property | Type | Default | Meaning |
@@ -319,7 +319,7 @@ upstream parameter tweaks still apply (A7 §9.3).
 
 | Property | Type | Meaning |
 |---|---|---|
-| `usdGen:weight` | `float` (default 1.0) | layer weight 0..1 (XGen sculpt-layer semantics) |
+| `usdGen:weight` | `float` (default 1.0) | layer weight 0..1 (a host groomer sculpt-layer semantics) |
 | `usdGen:sculpt:curveIds` | `int[]` | which curves have deltas, sorted |
 | `usdGen:sculpt:cvOffsets` | `int[]` | prefix offsets into `deltas`, size `curveIds.size()+1` |
 | `usdGen:sculpt:deltas` | `vector3f[]` | per-CV delta in that curve's root frame |
@@ -403,7 +403,7 @@ def Xform "Char" {
 
         def UsdGenGuideSet "HeadGuides" {
             rel usdGen:curves = </Char/Groom/HeadGuides/Curves>
-            float[] usdGen:blend = []                     # per-guide range-of-influence (XGen "Blend")
+            float[] usdGen:blend = []                     # per-guide range-of-influence (a host groomer "Blend")
             def BasisCurves "Curves" {
                 uniform token type = "cubic" ; uniform token basis = "bspline" ; uniform token wrap = "pinned"
                 uniform token purpose = "guide"
@@ -491,7 +491,7 @@ def Xform "Char" {
                 def UsdGenClump "ClumpSmall" {
                     rel   usdGen:input = </Char/Groom/Hair/Ops/ClumpBig>
                     float usdGen:clump        = 0.5
-                    float usdGen:clumpDensity = 3600          # XGen: 2x-4x the first map (A7 §1.4)
+                    float usdGen:clumpDensity = 3600          # a host groomer: 2x-4x the first map (A7 §1.4)
                     int   usdGen:clumpSeed    = 12
                     float usdGen:noise        = 0.08
                     float usdGen:noiseFrequency = 6.0
@@ -624,7 +624,7 @@ def UsdGenGroom "Groom" {
                 int   usdGen:prototypeSeed = 5
                 float usdGen:scale = 1.0
                 float2 usdGen:scaleRandom = (0.85, 1.25)
-                float usdGen:tiltN = 12.0                   # XGen Tilt N, degrees
+                float usdGen:tiltN = 12.0                   # a host groomer Tilt N, degrees
                 float usdGen:aroundN = 360.0
                 token usdGen:orient = "surfaceFrame"        # surfaceFrame | camera | guide
             }
@@ -1098,8 +1098,8 @@ SDF queries per CV. Space: `R` = restSpace, `D` = deformedSpace (re-runs per mot
 | `UsdGenImageMap`/`PtexMap`/`ExprMap`/`PaintMap` | maps | A | §3.6 | S4 |
 | `UsdGenScale` | styler R | A | `scale` | S4 |
 
-Emitted primvars: `Clump` writes `clumpId_<level>` (uniform int) for shading (Unreal `Clump ID`);
-`GuideInterpolate` writes `guideIndex[3]`/`guideWeight[3]` (the Unreal `groom_closest_guides` /
+Emitted primvars: `Clump` writes `clumpId_<level>` (uniform int) for shading (a host renderer `Clump ID`);
+`GuideInterpolate` writes `guideIndex[3]`/`guideWeight[3]` (the a host renderer `groom_closest_guides` /
 `groom_guide_weights` arity, A7 §2.1) so a bake round-trips.
 
 ### 6.2 v2 — Slices 6–8
@@ -1110,7 +1110,7 @@ Emitted primvars: `Clump` writes `clumpId_<level>` (uniform int) for shading (Un
 | `UsdGenScatterPoints` | gen R | A | explicit `rootPrims[]`/`rootUVs[]` — what the Place brush authors |
 | `UsdGenCurl` | styler R | A | `radius`(+ramp), `frequency`, `phase`, `taper`, `axisMode`, minimal-twist frame |
 | `UsdGenBend` | styler R | A | `angle`(±random,bias), `axisMode`, ramp |
-| `UsdGenDirection` | styler R | A | `direction`, `amount`, `lift`, `mode`, `followSkinContour` (XGen Tilt U/V/N) |
+| `UsdGenDirection` | styler R | A | `direction`, `amount`, `lift`, `mode`, `followSkinContour` (a host groomer Tilt U/V/N) |
 | `UsdGenStraighten` | styler R | A | `tangentStraightness`, `normalStraightness` |
 | `UsdGenDisplace` | styler R | A | `amount`, `map`, `base`, `scale`, `offset`, `coordSys` |
 | `UsdGenWave` | styler R | A | `frequencyX/Y`, `amplitudeX/Y` |
@@ -1210,7 +1210,7 @@ in Storm's GLSL, so a `.ptx` never reaches a Storm material.
 **SeExpr** (S38, A8 §1): vendored `wdas/SeExpr` main@8f8c8f2, interpreter only, static + hidden.
 One `VarBlockCreator` per compiled expression; **one thread-safe `VarBlock` per TBB worker**.
 
-Variable set (the XGen dialect artists expect, A7 §1.3, A8 §1.8):
+Variable set (the a host groomer dialect artists expect, A7 §1.3, A8 §1.8):
 
 ```
 $u $v            surface parameters at the root
@@ -1233,9 +1233,9 @@ plus three usdGen additions:
 * **`rand([min],[max],[seed])`** — **not** a SeExpr2 builtin (verified: "Function rand has no
   definition"), so usdGen must add it, implemented on `hash` for determinism.
 
-`noise()` keeps SeExpr's 0..1 range, not XGen's −1..1; `snoise` is the signed form and the difference
+`noise()` keeps SeExpr's 0..1 range, not a host groomer's −1..1; `snoise` is the signed form and the difference
 is documented in one line of the user docs. **ASSUMPTION**: matching SeExpr semantics beats matching
-XGen's, because SeExpr's own noise is the single implementation shared by the C++ stylers (S38) and
+a host groomer's, because SeExpr's own noise is the single implementation shared by the C++ stylers (S38) and
 having `noise()` mean two things in one product is worse than a one-line porting note.
 
 Measured cost: 13 ns (`$u*$v+1`), 34 ns (`map()` + `hash`), 106–117 ns (noise + fbm) per eval; 50 M
@@ -1558,7 +1558,7 @@ exceeds 20 % of the frame at 1 M curves, the fallback is to widen chunks for clu
 **S4 — Maps and expressions · 3 weeks · 8 eng-weeks**
 
 Deliver: vendored SeExpr + Ptex (static, hidden, `-ffp-contract=off` not needed there);
-`UsdGenImageMap`/`PtexMap`/`ExprMap`/`PaintMap`; the `map()`/`ptex()`/`rand()` functions and the XGen
+`UsdGenImageMap`/`PtexMap`/`ExprMap`/`PaintMap`; the `map()`/`ptex()`/`rand()` functions and the a host groomer
 variable set; `UsdGenLookAPI` colour baking; `UsdGenImaging_ReloadMaps`.
 
 *Exit criteria.* (1) A density map, a length expression and a Ptex mask each change the groom, with
@@ -1673,7 +1673,7 @@ honest planning number.
 Simulation and self-collision; XPD/Alembic import (the `UsdGenCurveSource` path takes a converted
 `BasisCurves` instead); Ptex sampling *in Storm* (compiled out of the install; the CPU bake is the
 route, S37); an OpenExec backend (not plugin-extensible in 26.08, S16); GPU compute kernels; a
-node-graph UI (the operator stack is a list, as in XGen and Houdini's Guide Process); hdGp hosting of
+node-graph UI (the operator stack is a list, as in a host groomer and a DCC's Guide Process); hdGp hosting of
 third-party procedurals (S6 leaves the door open, it is not a v1 feature); Windows and macOS builds
 (explicitly deferred to a slice of their own, gated by R2 and R7).
 
@@ -1688,7 +1688,7 @@ Everything below is mine, not the brief's, and each is cheap to reverse.
    S-number requires.
 3. **Ramp encoding specialised into scalar `float2[] knots` and colour `positions`+`colors`**
    (§3.5), as a reading of S11's "knot arrays".
-4. **SeExpr's `noise()` 0..1 semantics kept over XGen's −1..1** (§7.3), with `snoise` as the signed
+4. **SeExpr's `noise()` 0..1 semantics kept over a host groomer's −1..1** (§7.3), with `snoise` as the signed
    form.
 5. **The Storm material-binding override behind `USDGEN_STORM_MATERIAL_OVERRIDE`** (§7.1) as the
    hedge against S36's unverified render-context resolution.
@@ -1702,7 +1702,7 @@ Everything below is mine, not the brief's, and each is cheap to reverse.
 10. **`UsdGenRestAPI` as an applied API schema on the surface** rather than an implicit adapter on
     every mesh — S12 fixes the mechanism, not where it is applied; making it explicit keeps the cost
     off untouched meshes.
-11. **The description/groom split** (XGen Collection/Description) rather than a single prim type —
+11. **The description/groom split** (a host groomer Collection/Description) rather than a single prim type —
     D1 leaves the grouping open; this shape matches the prior art artists know (A7 §1.1).
 12. **Guides reuse the frozen-curve contract C3** rather than having their own schema — one on-disk
     format for guides, freezes, imports and sim caches.

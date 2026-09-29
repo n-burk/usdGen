@@ -15,7 +15,7 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES = os.path.dirname(HERE)
 
-# Key + a DomeLight fill so the physically based default hair material (a UE
+# Key + a DomeLight fill so the physically based default hair material (a the host renderer
 # port) doesn't render near-black under only usdrecord's camera headlight.
 # inputs:normalize = 1 is required on the DistantLight: HdSt otherwise
 # multiplies intensity by its (tiny, 0.53deg-default) solid angle, so an
@@ -406,7 +406,7 @@ def write_clump_example():
 #       maps/clump_regions.ptx holds one random value per voronoi cell (about
 #       90 cells over the skin, with wobbly borders). Strands whose roots read
 #       the same value form one clump, centred on the member nearest the
-#       cell's centroid: the map's cells ARE the clumps (XGen's clump map).
+#       cell's centroid: the map's cells ARE the clumps (a host groomer's clump map).
 #   usdGen:clump:amount <- 0.3 + 0.65 * ptex("clumpTightness")
 #       maps/clump_tightness.ptx has six large patches of random value, so
 #       some areas clump tightly and others stay loose.

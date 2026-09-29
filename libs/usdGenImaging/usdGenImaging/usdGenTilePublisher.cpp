@@ -743,7 +743,7 @@ UsdGenTilePublisher::DefaultMaterialIdentifier()
     // The OPAQUE variant. The two differ only in materialTag, and the choice
     // is between two failure modes of stock Storm, both measured on
     // examples/head-hair-closeup.usda at 1280x960 (docs/storm-fur.md):
-    //   * translucent/OIT composites the UE coverage exactly, but Storm's OIT
+    //   * translucent/OIT composites the host renderer coverage exactly, but Storm's OIT
     //     pool is 8 * width * height fragments for the WHOLE frame, handed out
     //     by one atomic counter, and a fragment past the end is silently
     //     dropped (hdx/shaders/renderPass.glslfx RenderOutputImpl). This groom

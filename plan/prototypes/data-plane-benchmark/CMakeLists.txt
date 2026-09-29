@@ -9,7 +9,7 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 find_package(pxr CONFIG REQUIRED
-  PATHS /home/burkard/work/OpenUSD_26_08 NO_DEFAULT_PATH)
+  PATHS $USD NO_DEFAULT_PATH)
 
 add_executable(vdfBench vdfBench.cpp)
 target_include_directories(vdfBench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -17,7 +17,7 @@ target_link_libraries(vdfBench PRIVATE vdf exec tf gf vt work trace arch)
 
 add_executable(tbbBench tbbBench.cpp)
 target_include_directories(tbbBench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-  /home/burkard/work/OpenUSD_26_08/include)
+  $USD/include)
 target_link_libraries(tbbBench PRIVATE tf gf vt work arch TBB::tbb)
 
 add_executable(simdBench simdBench.cpp)

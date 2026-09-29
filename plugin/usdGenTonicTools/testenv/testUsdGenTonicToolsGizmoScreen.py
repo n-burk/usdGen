@@ -346,15 +346,10 @@ def testClickSlopAndCentreScale(tonicCamera, tonicGizmo, gs):
         gizmo.end()
 
 
-# The vendored modules and the usdRig file each ports.  A header that cites
-# a commit must cite one that already had every upstream name the port
-# carries -- a port of a LATER upstream than its header says would make a
-# "keep in sync" diff against that commit misleading.
-_VENDORED = (("tonicGizmoScreen.py", "plugin/rigExecUsdview/gizmoScreen.py"),
-             ("tonicGizmoSettings.py",
-              "plugin/rigExecUsdview/gizmoSettings.py"),
-             ("tonicGizmoSnap.py", "plugin/rigExecUsdview/gizmoSnap.py"),
-             ("tonicGizmoIcons.py", "plugin/rigExecUsdview/gizmoIcons.py"))
+# Screen-space gizmo modules. Their headers are project MIT; they do not
+# cite a private repository path or commit.
+_MIT_MODULES = ("tonicGizmoScreen.py", "tonicGizmoSettings.py",
+                "tonicGizmoSnap.py", "tonicGizmoIcons.py")
 
 
 def _topLevelNames(source):
@@ -370,44 +365,17 @@ def _topLevelNames(source):
     return names
 
 
-def testVendoredHeaders(packageDir):
-    print("-- vendored headers cite the usdRig commit they copy -------")
-    import re
-    import subprocess
-    rig = os.environ.get("USDRIG_ROOT", "D:/work/usdRig/usdRig")
-    for port, upstream in _VENDORED:
-        text = open(os.path.join(packageDir, port), encoding="utf-8").read()
+def testModuleHeaders(packageDir):
+    print("-- gizmo modules carry the project MIT header --------------")
+    for name in _MIT_MODULES:
+        text = open(os.path.join(packageDir, name), encoding="utf-8").read()
         head = "\n".join(text.splitlines()[:8])
-        match = re.search(r"%s`? at ([0-9a-f]{7,40})\b" %
-                          re.escape(upstream.rsplit("/", 1)[1]), head)
-        check(match is not None,
-              "%s names the usdRig commit it was vendored from" % port)
-        if match is None or not os.path.isdir(os.path.join(rig, ".git")):
-            continue
-
-        def show(rev):
-            try:
-                return subprocess.run(
-                    ["git", "-C", rig, "show", "%s:%s" % (rev, upstream)],
-                    capture_output=True, text=True, encoding="utf-8",
-                    check=True).stdout
-            except (OSError, subprocess.CalledProcessError):
-                return None
-
-        cited, latest = show(match.group(1)), show("HEAD")
-        if latest is None:
-            print("skip: %s is not in %s" % (upstream, rig))
-            continue
-        check(cited is not None,
-              "%s: %s exists at the cited %s" % (port, upstream,
-                                                 match.group(1)))
-        if cited is None:
-            continue
-        missing = sorted((_topLevelNames(text) & _topLevelNames(latest)) -
-                         _topLevelNames(cited))
-        check(not missing,
-              "%s: every upstream name it ports exists at %s (missing %r)"
-              % (port, match.group(1), missing))
+        check("SPDX-License-Identifier: MIT" in head,
+              "%s names the MIT license" % name)
+        check("Copyright (c) 2026 Nick Burkard" in head,
+              "%s names the project copyright" % name)
+        check("D:/" not in head and "/home/" not in head,
+              "%s header has no machine path" % name)
 
 
 def main():
@@ -431,7 +399,7 @@ def main():
     testOrientationFrames(tonicGizmoScreen, tonicCamera, tonicGizmo)
     testHiDpi(tonicCamera, tonicGizmo)
     testClickSlopAndCentreScale(tonicCamera, tonicGizmo, tonicGizmoScreen)
-    testVendoredHeaders(os.path.dirname(os.path.abspath(
+    testModuleHeaders(os.path.dirname(os.path.abspath(
         tonicGizmoScreen.__file__)))
     print("testUsdGenTonicToolsGizmoScreen: %d failure(s)" % failures)
     return 1 if failures else 0

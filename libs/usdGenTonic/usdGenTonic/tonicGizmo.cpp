@@ -359,7 +359,7 @@ TonicBuildGizmoCurves(TonicGizmoRecord const &record, TonicOverlayCurves *out)
     if (record.kind == TonicGizmo_Translate ||
         record.kind == TonicGizmo_Scale) {
         // yz is red, xz green, xy blue: plane colours name their missing
-        // axis, exactly as in Maya and RigExec's viewport gizmo.
+        // axis, exactly as in a DCC and RigExec's viewport gizmo.
         _AddSquare(out, record.origin, axes[1], axes[2], kPlaneOffset,
                    kPlaneSide, kAxisColors[0], TonicGizmoHandle_PlaneYZ,
                    record.activeHandle == TonicGizmoHandle_PlaneYZ, width);

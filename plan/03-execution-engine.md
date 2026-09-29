@@ -219,7 +219,7 @@ struct UsdGenPlane {
     TfToken      name;            // "clumpId_0", "guideIndex", "guideWeight", "displayColor:r", ...
     TfToken      interpolation;   // vertex | uniform | constant
     TfToken      type;            // float | int
-    uint8_t      arity = 1;       // 3 for guideIndex / guideWeight (Unreal arity, ADR §2.3)
+    uint8_t      arity = 1;       // 3 for guideIndex / guideWeight (a host renderer arity, ADR §2.3)
     VtFloatArray f;
     VtIntArray   i;
 };
@@ -390,9 +390,9 @@ description (R21, §3.6).
 **Hair chunks never read hair chunks.** Every cross-curve influence flows through a *reference set*:
 
 * A node whose `Role()` is `UsdGenRole::Reference` — guide sets, clump centres, card/archive source
-  roots — produces a buffer that is **not chunked for dirtiness**. It is small — **1–10 % of hairs**: XGen
-  and Maya IGS both default to creating guides at 10 % of hair density
-  (`research/A7-prior-art-grooming.md` §9.3, and §1.5 for Maya IGS's "guides at 10% default hair
+  roots — produces a buffer that is **not chunked for dirtiness**. It is small — **1–10 % of hairs**: a host groomer
+  and a DCC IGS both default to creating guides at 10 % of hair density
+  (`research/A7-prior-art-grooming.md` §9.3, and §1.5 for a DCC IGS's "guides at 10% default hair
   density"; R26 says design and budget for 10 %), and gate E-4's fixture is 4 000 guides against
   100 000 roots, i.e. 4 %. At 10 % the reference lane costs about 10 % of a chain run, ≈ 0.1–0.2 ms
   at 100 k (DERIVED from §0.3's 1.02 ms @8 threads), which is why it is affordable as a **fence**
@@ -415,7 +415,7 @@ not per-chunk dependencies.
 struct UsdGenReferenceSet {                 // one per reference node, per generation
     UsdGenCurveBuffer buffer;               // evaluated in full, never chunk-dirty
     VtFloatArray      localX, localY, localZ;  // root-local offsets, refreshed per frame
-    VtFloatArray      guideBlend;           // per-guide usdGen:blend, XGen range of influence
+    VtFloatArray      guideBlend;           // per-guide usdGen:blend, a host groomer range of influence
     uint64_t          generation;
 };
 ```
@@ -912,7 +912,7 @@ a parallel loop over independent nodes with no shared state (S25, I4, R22):
 * **roots** — scatter positions, `curveId` (the 64-bit `UsdGenHash64` of §1.7), `rootPrim`, `rootUV`;
 * **root frames** — `rootT/rootN/rootB` in **rest** space, from the surface's `dPdu`/`dPdv`/normal;
 * **face ids** — the parent mesh's face index for `primvars:skinprim` and for Ptex face lookup;
-* **guide bindings** — `guideIdx[3]` and `guideW[3]` per curve (Unreal's arity, so a bake
+* **guide bindings** — `guideIdx[3]` and `guideW[3]` per curve (a host renderer's arity, so a bake
   round-trips; ADR §2.3), from a kd-tree over guide roots;
 * **clump ids** — `clumpId[level]` per curve per level, from a kd-tree over clump centres plus a
   stray coin flip;
@@ -1653,7 +1653,7 @@ a slow taper. `02-schema.md` §2.13 and `04-operators.md` §5.2 carry the same l
 `view.CvRagged(c, i)`), never by the intra-curve index `i`.
 
 8. **`preserveLength`**: after any displacement, segment lengths are restored root-locked (walk from
-   the root, renormalise each segment to its captured rest length), as XGen and Blender both do. It
+   the root, renormalise each segment to its captured rest length), as a host groomer and a DCC both do. It
    is a per-operator `bool`, applied inside the kernel because it must see the operator's own
    displacement.
 
@@ -2134,7 +2134,7 @@ density R26 budgets for). `research/A8-seexpr-ptex-libs.md` §1, §2 (SeExpr 13�
 kernel.h, sampler.h, results_main.txt, results_scale.txt}` — carried into `usdGenTestUtils` and into
 gates E-1, E-2, E-3, E-5, E-7, E-8.
 
-**OpenUSD 26.08** (`/home/burkard/work/OpenUSD`, tag v26.08), each verified by grep for this
+**OpenUSD 26.08** (`<openusd-src>`, tag v26.08), each verified by grep for this
 document: `pxr/imaging/hd/renderIndex.cpp:1830-1862` (parallel Rprim sync);
 `pxr/imaging/hd/sceneIndex.h:98,109` (`GetPrim` threadsafe);
 `pxr/imaging/hd/sceneIndexObserver.h:123,132,143,151` (observers not threadsafe);
@@ -2156,7 +2156,7 @@ one);
 `pxr/exec/vdf/scheduler.cpp:855-872` (the hardcoded 500-element grain);
 `OpenUSD_26_08/include/tbb/task_arena.h:282-283` (`tbb::task_arena(int, unsigned)`).
 
-**usdRig** (`/home/burkard/work/usdRig`), each verified by grep for this document:
+**usdRig** (`<usdrig-src>`), each verified by grep for this document:
 `libs/rigExecImaging/snapshotStore.h:284-285` (`std::shared_ptr<const RigExecImagingSnapshot>`),
 `:330` / `:369-370` / `:376-377` (`std::atomic_load` / `std::atomic_store` publish-read pair),
 `:326-378` (the snapshot diff §6.1 copies);

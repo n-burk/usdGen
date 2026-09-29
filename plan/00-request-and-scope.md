@@ -49,7 +49,7 @@ The request, verbatim (2026-09-04):
 > stage via the tooling
 
 `design/brief-v1.md` §1 reads that text into the nine requirements below (headed "Requirements (from
-the request)"); `design/proposal-artist.md` §0 restates it in one sentence — "an XGen-like hair/fur
+the request)"); `design/proposal-artist.md` §0 restates it in one sentence — "an procedural hair/fur
 grooming *and instancing* plugin for OpenUSD 26.08 / Hydra 2.0, on top of usdRig". R1–R9 are quoted
 unchanged from brief §1 and are normative for this plan; the request's "instancing" half is carried by
 `UsdGenInstance` — **v1**, built in M6 (ADR §9 R38) — not by an R-number.
@@ -60,7 +60,7 @@ R1 Grooming nodes are prims on the stage, wired explicitly, executed dynamically
 R2 Curves are generated at run/render time in Hydra 2.0 (OpenUSD 26.08), in usdview/Storm and in
    usdrecord / hdPrman-class delegates, with one plugin binary.
 R3 Static (frozen, cached, imported) curves load quickly and deform with a deforming surface.
-R4 XGen/Unreal-style stylers and modifiers, chainable at will
+R4 a host groomer/a host renderer-style stylers and modifiers, chainable at will
    (generator → clump → generator → clump → frizz …), applicable to generated, rigged or
    simulated curves.
 R5 Works on top of / after usdRig: reads deformed surfaces from the scene index, whoever
@@ -73,10 +73,10 @@ R9 usdview tools on the Storm viewport: freeze an operator's output, then comb/g
    app → data modification → Hydra loop during interaction; commit to the stage via the tool.
 ```
 
-Working name **usdGen**: sibling repo `/home/burkard/work/usdGen` (empty today,
+Working name **usdGen**: sibling repo `<usdgen-src>` (empty today,
 `research/ENVIRONMENT.md`), C++ prefix `UsdGen`, namespace `usdGen`, property namespace `usdGen:`,
 plugin display name "usdGen". The reference system is usdRig (code name RigExec,
-`/home/burkard/work/usdRig`).
+`<usdrig-src>`).
 
 ### 0.2 Acceptance per requirement
 
@@ -92,7 +92,7 @@ decides the requirement is met (gate families in §5.4).
 | R4b (instancing, from the request framing; no brief R-number) | `UsdGenInstance` emits a real Hydra `instancer` with hand-authored `instancedBy` (exactly one path) and prototypes as namespace children (S33); grooms on natively instanced scalps resolve per propagated prototype (S34); a click on an instance resolves through `primOrigin`. | `06-imaging.md`, `04-operators.md` | T-INST-1, T-INST-2 |
 | R5 | usdGen reads `points` after every upstream deformer, including UsdSkel ext-computation points, through its private `HdSiExtComputationPrimvarPruningSceneIndex` wrapper (S3), with no change to usdRig. | `06-imaging.md` | SI-5 and `testUsdGenSkelInterop` (`11-roadmap.md` §2.3, M2) |
 | R6 | The shipped `usdGenHairPreview.glslfx` renders from the same `UsdShade` inputs that the MaterialX and `UsdPreviewSurface` terminals carry (S35, S36), with the tangent strategy decided by measurement. | `07-look-maps-expressions.md` | S-8, L-1, L-2 |
-| R7 | `UsdGenImageMap`/`UsdGenPtexMap`/`UsdGenExprMap`/`UsdGenPaintMap` sample on the CPU at capture and bake to per-curve/per-CV primvars (S37); SeExpr2 carries the XGen variable and function set (S38). | `07-look-maps-expressions.md` | L-3, L-4, L-5; T-EXPR-1, T-PTEX-1; E-8 re-run at M4 + the M4 exit criteria (`11-roadmap.md` §2.5: golden per-curve values for a density map, a length expression and a Ptex mask; paint round-trip primvar → EXR → `UsdGenImageMap` and primvar → `.ptx` → `UsdGenPtexMap` at ≤ 1e-4; `ReloadMaps` changes the groom and nothing else does) |
+| R7 | `UsdGenImageMap`/`UsdGenPtexMap`/`UsdGenExprMap`/`UsdGenPaintMap` sample on the CPU at capture and bake to per-curve/per-CV primvars (S37); SeExpr2 carries the a host groomer variable and function set (S38). | `07-look-maps-expressions.md` | L-3, L-4, L-5; T-EXPR-1, T-PTEX-1; E-8 re-run at M4 + the M4 exit criteria (`11-roadmap.md` §2.5: golden per-curve values for a density map, a length expression and a Ptex mask; paint round-trip primvar → EXR → `UsdGenImageMap` and primvar → `.ptx` → `UsdGenPtexMap` at ≤ 1e-4; `ReloadMaps` changes the groom and nothing else does) |
 | R8 | A parameter edit re-runs only the dirty sub-graph on the dirty chunks and dirties only the leaves that changed, with exactly one cook per edit. | `03-execution-engine.md`, `09-performance-and-benchmarks.md` | E-2, E-3, SI-2, SI-3 |
 | R9 | A freeze is one token edit, a brush drag costs no stage traffic per move, and release writes once inside an undo bracket. | `08-tools.md` | T-1, T-4 |
 
@@ -118,11 +118,11 @@ by S33 and S34.
 
 ---
 
-## 1. What "XGen-like" and "Unreal-curve-modifier-like" mean here
+## 1. What "procedural" and "a host renderer-curve-modifier-like" mean here
 
 ### 1.1 The nouns
 
-usdGen takes XGen's object model, Houdini's parameter vocabulary and Unreal's *data* arity where a
+usdGen takes a host groomer's object model, a DCC's parameter vocabulary and a host renderer's *data* arity where a
 bake must round-trip (`design/proposal-artist.md` §2, with the ADR's type names):
 
 | Artist noun | usdGen prim type | Hydra consequence |
@@ -136,29 +136,29 @@ bake must round-trip (`design/proposal-artist.md` §2, with the ADR's type names
 
 ### 1.2 Parity summary
 
-The catalogue with parameter lists and the XGen/Houdini/Unreal column lives in **`04-operators.md`**;
+The catalogue with parameter lists and the a host groomer/a DCC/a host renderer column lives in **`04-operators.md`**;
 `research/A7-prior-art-grooming.md` §9 is its source of truth. The summary an outside reader needs:
 
 | Family | What usdGen takes |
 |---|---|
-| Generators | XGen's single generator with a mode becomes `UsdGenScatter`, `usdGen:mode = random \| uniform \| points \| atGuides` (ADR §2.1; A7 §9.1 G1–G4). `UsdGenGrow` = Houdini Guide Initialize (G5); `UsdGenGuideInterpolate` = XGen relative interpolation + Houdini radius/decay/angle + Unreal unique/randomize (G6). |
-| Stylers | XGen `Clumping` in full plus Houdini's fractal clump levels (`04-operators.md` owns the parameter list); frizz = `UsdGenNoise`; XGen Tilt = `UsdGenDirection`; Length, Width, Smooth, Straighten, Scale, Resample per ADR §2.1. |
-| Deformers | Houdini Guide Deform and Unreal's root-triangle binding are one operator, `UsdGenDeform`, `deformedSpace`, so it and its tail alone re-run per motion sample (S25). |
-| Unreal arity, where it is data | `UsdGenGuideInterpolate` emits `int[] primvars:usdGen:guideIndex` and `float[] primvars:usdGen:guideWeight`, both `uniform` with `elementSize = 3` — `int[3]`/`float[3]` are not USD type names (ADR §9 R24; `02-schema.md` §2.6) — matching the arity of Unreal's `groom_closest_guides` (int32[3]) and `groom_guide_weights` (float[3]) (A7 §9). `UsdGenClump` emits `clumpId_<level>` (uniform int, Unreal Clump ID; ADR §2.3). A bake round-trips. |
-| Masks | Houdini's triad — skin mask, curve mask ramp, noise mask — is the auto-applied `UsdGenMaskAPI` on every `UsdGenOperator` (ADR §2.1). |
+| Generators | a host groomer's single generator with a mode becomes `UsdGenScatter`, `usdGen:mode = random \| uniform \| points \| atGuides` (ADR §2.1; A7 §9.1 G1–G4). `UsdGenGrow` = a DCC Guide Initialize (G5); `UsdGenGuideInterpolate` = a host groomer relative interpolation + a DCC radius/decay/angle + a host renderer unique/randomize (G6). |
+| Stylers | a host groomer `Clumping` in full plus a DCC's fractal clump levels (`04-operators.md` owns the parameter list); frizz = `UsdGenNoise`; a host groomer Tilt = `UsdGenDirection`; Length, Width, Smooth, Straighten, Scale, Resample per ADR §2.1. |
+| Deformers | a DCC Guide Deform and a host renderer's root-triangle binding are one operator, `UsdGenDeform`, `deformedSpace`, so it and its tail alone re-run per motion sample (S25). |
+| a host renderer arity, where it is data | `UsdGenGuideInterpolate` emits `int[] primvars:usdGen:guideIndex` and `float[] primvars:usdGen:guideWeight`, both `uniform` with `elementSize = 3` — `int[3]`/`float[3]` are not USD type names (ADR §9 R24; `02-schema.md` §2.6) — matching the arity of a host renderer's `groom_closest_guides` (int32[3]) and `groom_guide_weights` (float[3]) (A7 §9). `UsdGenClump` emits `clumpId_<level>` (uniform int, a host renderer Clump ID; ADR §2.3). A bake round-trips. |
+| Masks | a DCC's triad — skin mask, curve mask ramp, noise mask — is the auto-applied `UsdGenMaskAPI` on every `UsdGenOperator` (ADR §2.1). |
 
-"Unreal-curve-modifier-like" means the *modifier* semantics, not Unreal's runtime: a chain of
+"a host renderer-curve-modifier-like" means the *modifier* semantics, not a host renderer's runtime: a chain of
 per-curve / per-CV operations with an envelope (`float usdGen:blend = 1`) and stable ids, on the CPU.
-Unreal has no styling modifier stack of its own (`research/A7-prior-art-grooming.md` §6 feature
-matrix, Unreal column: clump, clump noise/copy/cut, noise/frizz, curl, bend/lift/direction and
-smooth/straighten are all ○; §7, masks: "none per operator"), so the stack shape comes from XGen and
-Houdini and only the attribute vocabulary comes from Unreal.
+a host renderer has no styling modifier stack of its own (`research/A7-prior-art-grooming.md` §6 feature
+matrix, a host renderer column: clump, clump noise/copy/cut, noise/frizz, curl, bend/lift/direction and
+smooth/straighten are all ○; §7, masks: "none per operator"), so the stack shape comes from a host groomer and
+a DCC and only the attribute vocabulary comes from a host renderer.
 
 ### 1.3 What is deliberately not copied
 
-XGen's Groomable Splines, which "do not follow deforming or animated meshes"
+a host groomer's Groomable Splines, which "do not follow deforming or animated meshes"
 (`research/A7-prior-art-grooming.md` §1.1): the equivalent is `UsdGenFreeze` plus
-`UsdGenSculptLayer`, which do. XGen's `.xpd`/`.xuv` sidecars: freeze tiers are `.usdc` session layer,
+`UsdGenSculptLayer`, which do. a host groomer's `.xpd`/`.xuv` sidecars: freeze tiers are `.usdc` session layer,
 sublayer or payload, never `.usda` (S42).
 
 ---
@@ -172,7 +172,7 @@ labels). Type names are ADR §2.1's; the milestone in brackets is `11-roadmap.md
 
 | Version | Contents |
 |---|---|
-| **v1** (M0–M7) | `UsdGenScatter` — ADR §2.1 collapses risk §6.1's four `UsdGenScatterX` prims into one type with `usdGen:mode = random \| uniform \| points \| atGuides`; `random` [M1], `atGuides` [M3] and `points` [M5, with the Place-guide brush that authors it, `11-roadmap.md` §2.6] are v1, `uniform` is v2 (§2.3). Plus `UsdGenGrow` [M1], `UsdGenGuideInterpolate` [M3], `UsdGenCurveSource` [M2], `UsdGenFreeze` [M2], `UsdGenSculptLayer` [M2], `UsdGenClump` [M3] (full XGen set incl. copy/copyVariance/cut/flatness/offset/curl/crossover; `GuideInterpolate` with `regionMap` + `clumpCrossover`), `UsdGenNoise` [M1], `UsdGenLength` [M1], `UsdGenWidth` [M1], `UsdGenDeform` [M2], `UsdGenDirection` (XGen Tilt) [M3], `UsdGenSmooth` in `alongCurve` mode [M3], `UsdGenResample` [M3], `UsdGenScale` [M4]; `UsdGenInstance` (cards \| archives \| spheres) [M6]; the map set `UsdGenImageMap`, `UsdGenPtexMap` [M4], `UsdGenExprMap`, `UsdGenPaintMap`, `UsdGenNoiseMap`, `UsdGenCombineMap`, `UsdGenGuideProximityMap` [all M4]; the containers `UsdGenGroom`, `UsdGenDescription`, `UsdGenGuideSet` and the API schemas `UsdGenMaskAPI`, `UsdGenLookAPI`, `UsdGenRestAPI`, `UsdGenCurveAPI`; the mask block on every operator, the salted stable-id hash `hash(seed, curveId, saltPerOperatorType)` pinned by ADR §9 R12 (`UsdGenHash64`/`UsdGenHash32`, `02-schema.md` §2.19.1), `preserveLength`, a declared `Space()` per operator; the ten brushes [M5]; **motion profiles P0 (single), P1 (velocities) and P2 (samples)** [M7]. ADR §6's v2 label on `UsdGenPtexMap`, `UsdGenInstance` and motion profile P1 is superseded by ADR §9 R38 (`11-roadmap.md` §6.1, `04-operators.md` §1.2). |
+| **v1** (M0–M7) | `UsdGenScatter` — ADR §2.1 collapses risk §6.1's four `UsdGenScatterX` prims into one type with `usdGen:mode = random \| uniform \| points \| atGuides`; `random` [M1], `atGuides` [M3] and `points` [M5, with the Place-guide brush that authors it, `11-roadmap.md` §2.6] are v1, `uniform` is v2 (§2.3). Plus `UsdGenGrow` [M1], `UsdGenGuideInterpolate` [M3], `UsdGenCurveSource` [M2], `UsdGenFreeze` [M2], `UsdGenSculptLayer` [M2], `UsdGenClump` [M3] (full a host groomer set incl. copy/copyVariance/cut/flatness/offset/curl/crossover; `GuideInterpolate` with `regionMap` + `clumpCrossover`), `UsdGenNoise` [M1], `UsdGenLength` [M1], `UsdGenWidth` [M1], `UsdGenDeform` [M2], `UsdGenDirection` (a host groomer Tilt) [M3], `UsdGenSmooth` in `alongCurve` mode [M3], `UsdGenResample` [M3], `UsdGenScale` [M4]; `UsdGenInstance` (cards \| archives \| spheres) [M6]; the map set `UsdGenImageMap`, `UsdGenPtexMap` [M4], `UsdGenExprMap`, `UsdGenPaintMap`, `UsdGenNoiseMap`, `UsdGenCombineMap`, `UsdGenGuideProximityMap` [all M4]; the containers `UsdGenGroom`, `UsdGenDescription`, `UsdGenGuideSet` and the API schemas `UsdGenMaskAPI`, `UsdGenLookAPI`, `UsdGenRestAPI`, `UsdGenCurveAPI`; the mask block on every operator, the salted stable-id hash `hash(seed, curveId, saltPerOperatorType)` pinned by ADR §9 R12 (`UsdGenHash64`/`UsdGenHash32`, `02-schema.md` §2.19.1), `preserveLength`, a declared `Space()` per operator; the ten brushes [M5]; **motion profiles P0 (single), P1 (velocities) and P2 (samples)** [M7]. ADR §6's v2 label on `UsdGenPtexMap`, `UsdGenInstance` and motion profile P1 is superseded by ADR §9 R38 (`11-roadmap.md` §6.1, `04-operators.md` §1.2). |
 | **v2** (M8) | `UsdGenCurl`, `UsdGenBend`, `UsdGenStraighten`, `UsdGenDisplace`, `UsdGenWave`, `UsdGenPart` (and its brush), `UsdGenExprOp` (SeExpr, capture-time only), `UsdGenScatter` `mode = uniform`, `TsSpline` ramps in the UI, sculpt rebase, progressive generation (gate T-5), the in-place overlay path (gate S-10). |
 | **v3** | `UsdGenCollide`/Shrinkwrap, `UsdGenWind`/Force, `UsdGenSmooth` in `neighbours` mode, Braid, SimSource, an OpenExec backend behind the same operator interface, a third-party operator ABI, a GPU tail. |
 
@@ -223,7 +223,7 @@ below.
 
 ### 3.1 OpenUSD 26.08 only
 
-The target is the unmodified install at `/home/burkard/work/OpenUSD_26_08`, source tag v26.08
+The target is the unmodified install at `$USD`, source tag v26.08
 (`research/ENVIRONMENT.md`). Codeless schemas (`skipCodeGeneration = true`,
 `pxr/usd/usd/usdGenSchema.py:208,246`) mean usdGen ships no generated schema C++ (S9). The install
 has no Ptex, no OpenImageIO and no SeExpr, and `PXR_ENABLE_PTEX_SUPPORT` is OFF, so those are
@@ -312,7 +312,7 @@ implementation, `UsdGenPrimAdapterBase`, behind five registered one-line subclas
 
 ### 3.7 Non-goals
 
-No DCC bridge (Maya, Houdini, Blender) in v1–v3; the C ABI and the pxr_boost module are the
+No DCC bridge (a DCC, a DCC, a DCC) in v1–v3; the C ABI and the pxr_boost module are the
 integration surface if one is ever written. No simulation solver — `UsdGenCurveSource` consumes sim
 caches, it does not produce them. No GPU evaluation in v1/v2. No third-party operator ABI before v3
 (`UsdGenOpRegistry` is internal, ADR §3). No authored output from the evaluator, so no `.usda` bakes
@@ -394,7 +394,7 @@ only (`research/A3-usdrig-tools.md` §2).
   `UsdGenStyler` is topology-preserving (`UsdGenResample` and length-culling are the declared
   exceptions); `UsdGenDeformer` is deformed-space and re-runs per motion sample (S25).
 * **Guide / GuideSet** — `UsdGenGuideSet` names a set; its children are `BasisCurves` under C3, with
-  a per-guide `float[] usdGen:blend` (XGen's range of influence, ADR §2.3).
+  a per-guide `float[] usdGen:blend` (a host groomer's range of influence, ADR §2.3).
 * **Map** — `UsdGenMap`, a field prim: Image, Ptex, Expr, Paint, Noise, Combine, GuideProximity. The
   map is the *field*; the *slot* consuming it is the operator's mask block.
 * **Freeze** — `UsdGenFreeze`, which **caps** the chain: `rel usdGen:frozen:curves`,
@@ -585,7 +585,7 @@ redefinition here. It does not list the rejected alternatives in full — ADR §
 | `design/proposal-artist.md` | §0 (request and lens), §1 items 1–9 (assumptions), §2 (the five nouns) |
 | `design/judge-evidence.md`, `judge-artist.md`, `judge-delivery.md` | the rejected-idea lists folded into ADR §1 and §8 |
 | `research/A1-usdrig-graph.md` §0; `research/A2-usdrig-imaging.md` §5, §9; `research/A3-usdrig-tools.md` §2, §6, §7–8 | RigExec's two engines and deferred publish; generated-prim ownership and the invalidation contract; undo, the spec/plan format, plugin conventions |
-| `research/A7-prior-art-grooming.md` | §1.1 (XGen data model), §6 (feature matrix), §7 (masks per system), §9 (reference operator catalogue) |
+| `research/A7-prior-art-grooming.md` | §1.1 (a host groomer data model), §6 (feature matrix), §7 (masks per system), §9 (reference operator catalogue) |
 | `research/B-usdrig-build.md` §3, §8; `research/ENVIRONMENT.md` | ctest roster incl. `testRigExecNoAuthoring`; the double-`pxrConfig` trap; host facts and the CORRECTIONS block |
 | `research/G-chain-order-probe.md` §2–3; `research/G-data-plane-engine-prototype-benchmark.md` §0, §4–8 | measured renderer-level placement; TBB DAG vs VDF; the 512-curve chunk basis (§5) |
 | `research/G-evaluation-scheduling-and-batching.md` §4–5, §9; `research/G-freeze-bake-undo-and-frozen-reentry.md` §2.2–2.3; `research/G-stage-free-parameter-and-time-transport.md` §1, §5 | commit model, notice counts; frozen re-entry; no notice without an adapter |

@@ -796,11 +796,11 @@ ND_geompropvalue_vector3(geomprop = "hairTangent")  ->  ND_transformvector_vecto
 ```
 
 Nodedefs, all re-read in the install for this document: `ND_chiang_hair_bsdf` at
-`/home/burkard/work/OpenUSD_26_08/libraries/pbrlib/pbrlib_defs.mtlx:146-158` (with
+`$USD/libraries/pbrlib/pbrlib_defs.mtlx:146-158` (with
 `curve_direction … defaultgeomprop="Tworld"` at `:157`), `ND_deon_hair_absorption_from_melanin` at
 `:433-439`, `ND_chiang_hair_roughness` at `:455-463` — the file is 465 lines long, so any citation
 past `:463` is out of range — and `ND_transformvector_vector3` at
-`/home/burkard/work/OpenUSD_26_08/libraries/stdlib/stdlib_defs.mtlx:2821`, whose `fromspace` and
+`$USD/libraries/stdlib/stdlib_defs.mtlx:2821`, whose `fromspace` and
 `tospace` string inputs are at `:2823-2824` (`research/A7-prior-art-grooming.md` §5.3).
 
 The chain ships as a document rather than as four nodes re-authored per Material: `usdGenShaders`
@@ -944,7 +944,7 @@ verbatim. The four properties this document originally needed and 02 lacked have
 `float usdGen:map:default = 0.0` (the failed-sample value the error policy of §5.5 and §7.7
 returns), `token usdGen:noise:space = "rest"` with allowed tokens `rest | deformed` (§5.2 has three
 sampling spaces and a noise map has to say which it evaluates in), `int usdGen:paint:resolution =
-256` (the per-face `Res` a `.ptx` bake needs, §8.3, and what XGen writes as `#3dpaint, N`) and
+256` (the per-face `Res` a `.ptx` bake needs, §8.3, and what a host groomer writes as `#3dpaint, N`) and
 `token usdGen:paint:storage = "primvar"` (§8.1: three storage states need a property that says which
 one is live) — and so has the fifth item, which was not a new property but a missing token list:
 `usdGen:map:filter` is declared by **two** types with **two** allowed sets, and a codeless schema
@@ -1208,7 +1208,7 @@ Rules, all verified in `research/A8-seexpr-ptex-libs.md` §2.5–2.6:
   target restricts scatter; ids are unchanged.
 * **Subdivision does not renumber.** `Far::PtexIndices` is built over the refiner's base level, so
   face ids are per *coarse* face whatever `subdivisionScheme` says — which matches how Ptex files are
-  authored and how XGen addresses them. Refined patch parameters carry the same ptex index in
+  authored and how a host groomer addresses them. Refined patch parameters carry the same ptex index in
   `Far::PatchParam` (`pxr/imaging/hdSt/codeGen.cpp:5524`), for consistency with Storm's convention
   ("ptexId matches the primitiveID for quadrangulated or triangulated meshes",
   `codeGen.cpp:5620-5621`) should a site ever enable Storm Ptex.
@@ -1276,7 +1276,7 @@ here as they appear in an expression (with the `$`); `registerVariable` takes th
 |---|---|---|
 | `$u`, `$v` | float | the root's surface parameters in the map's uv set |
 | `$id` | float | the stable curve id. SeExpr has only doubles, and `curveId` is 64-bit (ADR §9.2 R12), so the slot carries `double(curveId)` — exact to 2^53 and the value `rand($id)`/`hash($id)` are seeded from. Never compare `$id` for equality against an id printed elsewhere above that bound |
-| `$faceId` | float | parent-mesh face index (§5.2); `$faceid` is accepted as an XGen-compatible alias |
+| `$faceId` | float | parent-mesh face index (§5.2); `$faceid` is accepted as an a host groomer-compatible alias |
 | `$patchId` | float | the surface index within the description's surface table |
 | `$descId` | float | a stable hash of the `UsdGenDescription` path |
 | `$P`, `$N`, `$dPdu`, `$dPdv` | vec3 | deformed surface point, normal and derivatives at the root |
@@ -1286,7 +1286,7 @@ here as they appear in an expression (with the `$`); `registerVariable` takes th
 | `$cLength`, `$cWidth`, `$cDepth` | float | the curve's computed length, width and depth *so far* in the chain |
 | `$Cs`, `$As` | vec3, float | the **surface's own** `primvars:displayColor` / `displayOpacity` sampled at the root — never the `UsdGenLookAPI` result. Inside a `UsdGenExprMap` reached from `usdGen:look:colorMap` they carry the surface value, so the §1.2 look bake never depends on its own output; `(1,1,1)` and `1.0` when the surface authors neither |
 
-XGen's world-space aliases (`$Pw`, `$Prefw`) are deliberately absent: usdGen reads post-flattening,
+a host groomer's world-space aliases (`$Pw`, `$Prefw`) are deliberately absent: usdGen reads post-flattening,
 so deformed space already carries the world transform and ADR §9.2 R9 recognises no separate world
 space (S4). A porting note covers it; a second name for the same vector would not.
 
@@ -1318,7 +1318,7 @@ space (S4). A porting note covers it; a second name for the same vector would no
 > `primitive`, `point`), and a variable used outside its domain is a compile
 > error naming the variable and the domain, not a zero.
 
-This is otherwise the XGen dialect artists expect (`research/A7-prior-art-grooming.md` §1.3,
+This is otherwise the a host groomer dialect artists expect (`research/A7-prior-art-grooming.md` §1.3,
 `research/A8-seexpr-ptex-libs.md` §1.8). Variables an expression does not reference cost nothing:
 they are registered on the creator but never filled.
 
@@ -1338,7 +1338,7 @@ is the whole reason expressions are capture-time.
 > `expr::Frontend::SupportedFunctions()` is the single source of truth for what
 > it accepts, with a name, arity range, signature, one-line doc, result width
 > and category for each entry. The set is the SeExpr2 builtin library, which is
-> what XGen expressions are written against:
+> what a host groomer expressions are written against:
 >
 > | Category | Functions |
 > |---|---|
@@ -1401,12 +1401,12 @@ is the whole reason expressions are capture-time.
 > `tests/testUsdGenSeExprOracle.cpp` so they stay deliberate:
 >
 > * `dist` is bound as `dist(vector, vector)`, which is what its own docstring,
->   XGen's reference and every other vector builtin say. `ExprBuiltins.cpp`
+>   a host groomer's reference and every other vector builtin say. `ExprBuiltins.cpp`
 >   binds it as six scalars.
 > * `clamp` with `hi < lo` refuses the whole evaluation instead of answering
 >   with a bound. An inverted range is an authoring mistake and a silent answer
 >   hides it.
-> * `rand` is XGen's, not SeExpr2's, which has no `rand` at all. It is
+> * `rand` is a host groomer's, not SeExpr2's, which has no `rand` at all. It is
 >   `hash($seed, $id, <call site index> [, seeds...])`, so it is stable per
 >   strand, identical on both lanes, and two `rand()` calls in one expression
 >   are independent. `rand(min, max, seed)` scales into the range.
@@ -1482,15 +1482,15 @@ Argument 0 is a **prim name**, not a path and not a file; it is resolved at prep
 of `usdGen:expr:maps`, and an unknown name is a compile error naming the targets that do exist. This
 is what keeps the expression language from being a file-system API (§7.6).
 
-`${DESC}`-style macros from XGen are pre-substituted over the expression string before parsing, and
+`${DESC}`-style macros from a host groomer are pre-substituted over the expression string before parsing, and
 the resulting asset references go through Ar like any other (S13). SeExpr preserves comments
-(`Expression::_comments`, `Expression.h:291`), so XGen's `#3dpaint, 200` (paint resolution) and
+(`Expression::_comments`, `Expression.h:291`), so a host groomer's `#3dpaint, 200` (paint resolution) and
 `#0.10,1.00` (slider range) annotations survive a round trip and the tool's expression editor reads
 them (`08-tools.md`).
 
 ### 7.4 Noise semantics
 
-**SeExpr's `noise()` returns 0..1; XGen's returns −1..1.** usdGen keeps SeExpr semantics and ships
+**SeExpr's `noise()` returns 0..1; a host groomer's returns −1..1.** usdGen keeps SeExpr semantics and ships
 `snoise` as the signed form, documented in the user docs and in the expression editor's help pane
 (ADR §6). SeExpr's `Noise.h` templates (`Noise`, `PNoise`, `FBM`, `CellNoise`, `Noise.h:23-36`) are
 the **single** noise implementation in the product — the `UsdGenNoise` styler, the `UsdGenNoiseMap`
@@ -1674,7 +1674,7 @@ field is shown on the scalp while the groom behind it updates at the recapture r
   (`pxr/imaging/hio/stbImage.cpp:615-700`).
 * **Per face → `.ptx`**, through `PtexWriter` with adjacency from `Far::PtexIndices::GetAdjacency`
   (§6.5). `usdGen:paint:resolution` (default 256) gives the per-face `Res`, which is the same
-  quantity XGen writes as `#3dpaint, N`.
+  quantity a host groomer writes as `#3dpaint, N`.
 
 After a bake `usdGen:paint:storage` is `"file"`, the sampler reads the file, the primvar can be
 deleted from the mesh, and the capture epoch changes because the map digest now includes the new
@@ -1842,7 +1842,7 @@ decision, material tag/OIT, lights), §3 (MaterialX), §4 (UsdPreviewSurface + u
 (shading routes), §5 (three colour-map routes), §6 (Hio formats), §7 (per-frame cost).
 `research/A8-seexpr-ptex-libs.md` §0 (host inventory), §1.1–1.10 (SeExpr), §2.1–2.9 (Ptex), §3
 (Hio), §4 (noise libraries), §6 (dependency strategy), §7 (licensing).
-`research/A7-prior-art-grooming.md` §1.3 (the XGen expression dialect), §5.1–5.4 (hair shading
+`research/A7-prior-art-grooming.md` §1.3 (the a host groomer expression dialect), §5.1–5.4 (hair shading
 references, the MaterialX hair nodes in this install, BasisCurves conventions), §9.4 (map inputs).
 `research/G-storm-throughput-and-prim-granularity.md` §2 "Topology strategy" item 5 and Key facts
 (interpolation choices, varying widths), §1.11 (batching). `research/G-tool-loop-array-transport-and-cv-picking.md` §5 (live primvar paint).
@@ -1859,7 +1859,7 @@ R4; `appendix-B-prototype-inventory.md` §7 records the same rename) — `eglctx
 `hair_pv_tangent.png`, `hair_translucent.png`, `hair_preview_tex.png`.
 `prototypes/thirdparty-bench/seexpr_bench.cpp`, `se_min.cpp`, `ptex_test.cpp`.
 
-**OpenUSD 26.08 source** (`/home/burkard/work/OpenUSD`, tag v26.08). Every `pxr/...:line` cited
+**OpenUSD 26.08 source** (`<openusd-src>`, tag v26.08). Every `pxr/...:line` cited
 inline in this document was re-read against that tree while writing it; the consolidated file:line
 index lives in `appendix-A-evidence-ledger.md` §3.6. The load-bearing ones are the terminal-resolution
 chain (`pxr/imaging/hdSt/renderDelegate.cpp:695-707` for the render contexts and `:710` for the

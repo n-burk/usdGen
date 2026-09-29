@@ -11,6 +11,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -20,10 +21,14 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace {
 void RegisterUsdGenPlugins()
 {
-    static const std::vector<std::string> kPaths = {
-        "/home/burkard/work/usdGen/build/usd/usdGenSchema/resources",
-        "/home/burkard/work/usdGen/build/usd/usdGenImaging/resources"};
-    PlugRegistry::GetInstance().RegisterPlugins(kPaths);
+    const char* gen = std::getenv("GEN");
+    if (!gen || !gen[0]) {
+        gen = std::getenv("USDGEN_SRC");
+    }
+    const std::string root = (gen && gen[0]) ? gen : ".";
+    PlugRegistry::GetInstance().RegisterPlugins(std::vector<std::string>{
+        root + "/build/usd/usdGenSchema/resources",
+        root + "/build/usd/usdGenImaging/resources"});
 }
 
 const SdfPath kOps = SdfPath("/Groom/Description/Ops");
