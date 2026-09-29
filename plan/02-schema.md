@@ -1262,7 +1262,7 @@ proposals accepted subsets and none defined them (`design/judge-delivery.md` §5
    | `usdGen:paint:surface` (PaintMap) | faces outside read `usdGen:map:default` | primvar is read from the parent; `paintSurface` records the parent |
    | expression `input:<name>` (`geoSampler`) | elements visited | `$id`/`$primIndex`/`$primCount` numbering |
    | Storm scalp-shadow occluders | — | the parent occludes, once per mesh |
-   | `usdGen:tonic:scalp` (Tonic) | raycast BVH, closest point, root sampling, region fill and uncovered count, tint | geometry, graph face ids, `tonicRegion` primvar, UsdGenRestAPI, ptex bake layout |
+   | `usdGen:pomade:scalp` (Pomade) | raycast BVH, closest point, root sampling, region fill and uncovered count, tint | geometry, graph face ids, `pomadeRegion` primvar, UsdGenRestAPI, ptex bake layout |
    | brush tools (`usdGenBrushApi` face mask + Python twins) | pick, dab spill, smooth, flood, bake/live writes | the primvar (written on the parent, subset corners only) |
    | `usdGenBakePtex` on a subset path | voronoi seeds | the baked file (every parent face) |
 

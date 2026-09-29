@@ -5,11 +5,11 @@
 # cannot move the geometry under the cursor.
 #
 # The matrix is the row-major USD spelling Gf composes (`view * proj`,
-# flattened row by row), the same convention usdGenTonicTools.tonicCamera
+# flattened row by row), the same convention usdGenPomadeTools.pomadeCamera
 # carries; pixels are top-left-origin PHYSICAL pixels, what
 # StageView.computeWindowViewport reports and what the event filter scales
-# Qt's logical coordinates into. Kept independent of the Tonic module on
-# purpose: this is the non-Tonic paint tool, and it must not move with it.
+# Qt's logical coordinates into. Kept independent of the Pomade module on
+# purpose: this is the non-Pomade paint tool, and it must not move with it.
 #
 # Qt-free and pxr-free at import: pure arithmetic over a float[16], so the T1
 # suite checks every projection from a hand-written frustum. resolve() is the

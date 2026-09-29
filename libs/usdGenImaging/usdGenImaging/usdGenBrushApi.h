@@ -5,7 +5,7 @@
  * spill onto neighbouring faces, the corner extraction and the preview
  * colours, each touching O(faces) Python objects per mouse move. This header
  * moves that hot path into C++ behind opaque handles, in the style of
- * usdGenToolsApi.h / tonicApi.h, and adds the viewport overlay the preview
+ * usdGenToolsApi.h / pomadeApi.h, and adds the viewport overlay the preview
  * draws through (attributePreviewSceneIndex.h), so a move writes nothing to
  * the stage.
  *

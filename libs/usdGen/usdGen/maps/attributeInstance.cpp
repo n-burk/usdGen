@@ -1,5 +1,5 @@
 // usdGen — authored attribute maps into groom cooking/instancing.
-// See attributeInstance.h for the contract and its distance from Tonic.
+// See attributeInstance.h for the contract and its distance from Pomade.
 #include "usdGen/maps/attributeInstance.h"
 
 #include <algorithm>

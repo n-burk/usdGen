@@ -51,7 +51,7 @@ from `.omp/gate-status.md`).
 | Tools (C ABI, M5) | 19-entry C ABI + `_usdGen` + `usdgen` package + brushes | **Not started**: `cApi.h` declares all 19 entries, **no `cApi.cpp` implements them**; `python/usdgen/` empty; `tools/fur_gen.py` is an unrelated PointInstancer demo |
 | Freezes | C1/C2/C5 at M1, C3 at M2, C4 at M5 | C1/C2/C5 frozen on disk; **no `docs/freezes/C3.md`/`C4.md`** (C3/C4 unfrozen, correctly) |
 | Docs/status text | — | **Stale**: root `README.md` says "Status: M0 (skeleton)"; `CMakeLists.txt:465` says tests are "M1-STUB mains" — no `M1-STUB` string remains anywhere under `tests/` or `libs/` |
-| Tonic authoring tool (overlay `17-tonic-authoring-tool.md`, plan/17 §10) | Not started | **Implemented**: `17-tonic-authoring-tool.md` phases P0–P6 and the `18-tonic-viewport-tool.md` viewport overlay (V0–V7) are both built and dated 2026-09-19 (see plan/18 §8's Delivered table); `libs/usdGenTonic/`, `plugin/usdGenTonicTools/`, `plugin/usdGenTonic/`, `docs/tonic-tool.md`. Tubes stay authoring-side only, per the overlay's contract; no usdGen kernel reads them |
+| Pomade authoring tool (overlay `17-pomade-authoring-tool.md`, plan/17 §10) | Not started | **Implemented**: `17-pomade-authoring-tool.md` phases P0–P6 and the `18-pomade-viewport-tool.md` viewport overlay (V0–V7) are both built and dated 2026-09-19 (see plan/18 §8's Delivered table); `libs/usdGenPomade/`, `plugin/usdGenPomadeTools/`, `plugin/usdGenPomade/`, `docs/pomade-tool.md`. Tubes stay authoring-side only, per the overlay's contract; no usdGen kernel reads them |
 
 ---
 

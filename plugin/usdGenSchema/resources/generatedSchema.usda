@@ -3417,7 +3417,7 @@ class "UsdGenCurveAPI"
     )
 }
 
-class UsdGenTonicGroom "UsdGenTonicGroom"
+class UsdGenPomadeGroom "UsdGenPomadeGroom"
 {
     rel proxyPrim (
         customData = {
@@ -3434,19 +3434,19 @@ class UsdGenTonicGroom "UsdGenTonicGroom"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    rel usdGen:tonic:description (
+    rel usdGen:pomade:description (
         customData = {
             string userDocBrief = "The UsdGenDescription this groom feeds: the committer fills in its GuideInterpolate operator."
         }
         doc = "The UsdGenDescription this groom feeds: the committer fills in its GuideInterpolate operator. Expression evaluation: groom (once per operator)."
     )
-    rel usdGen:tonic:scalp (
+    rel usdGen:pomade:scalp (
         customData = {
             string userDocBrief = "The growth mesh this groom is bound to: a Mesh, or a face GeomSubset of one."
         }
-        doc = "The growth mesh this groom is bound to: a Mesh, or a face GeomSubset of one. A subset limits picking, placement, region fill and the uncovered-face count to its faces, while face ids, the usdGen:tonicRegion primvar and UsdGenRestAPI stay on the parent Mesh; the Output description's usdGen:surface names the subset too. Expression evaluation: groom (once per operator)."
+        doc = "The growth mesh this groom is bound to: a Mesh, or a face GeomSubset of one. A subset limits picking, placement, region fill and the uncovered-face count to its faces, while face ids, the usdGen:pomadeRegion primvar and UsdGenRestAPI stay on the parent Mesh; the Output description's usdGen:surface names the subset too. Expression evaluation: groom (once per operator)."
     )
-    token usdGen:tonic:version = "1" (
+    token usdGen:pomade:version = "1" (
         customData = {
             string userDocBrief = "Committer format version of this groom."
         }
@@ -3492,7 +3492,7 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    int2[] usdGen:tonic:edges = [] (
+    int2[] usdGen:pomade:edges = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3501,7 +3501,7 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
         }
         doc = "Node index pairs forming the graph edges. Expression evaluation: groom (once per operator)."
     )
-    int2[] usdGen:tonic:linkedRegions = [] (
+    int2[] usdGen:pomade:linkedRegions = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3510,25 +3510,25 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
         }
         doc = "Region index pairs that share one interpolation id while staying distinct tubes. Expression evaluation: groom (once per operator)."
     )
-    int[] usdGen:tonic:nodeFaceIds = [] (
+    int[] usdGen:pomade:nodeFaceIds = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = "Scalp face id per graph node; parallel to usdGen:tonic:nodeUVs."
+            string userDocBrief = "Scalp face id per graph node; parallel to usdGen:pomade:nodeUVs."
         }
-        doc = "Scalp face id per graph node; parallel to usdGen:tonic:nodeUVs. Expression evaluation: groom (once per operator)."
+        doc = "Scalp face id per graph node; parallel to usdGen:pomade:nodeUVs. Expression evaluation: groom (once per operator)."
     )
-    float2[] usdGen:tonic:nodeUVs = [] (
+    float2[] usdGen:pomade:nodeUVs = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
             }
-            string userDocBrief = "Face UV per graph node; parallel to usdGen:tonic:nodeFaceIds."
+            string userDocBrief = "Face UV per graph node; parallel to usdGen:pomade:nodeFaceIds."
         }
-        doc = "Face UV per graph node; parallel to usdGen:tonic:nodeFaceIds. Expression evaluation: groom (once per operator)."
+        doc = "Face UV per graph node; parallel to usdGen:pomade:nodeFaceIds. Expression evaluation: groom (once per operator)."
     )
-    color3f[] usdGen:tonic:regionColors = [] (
+    color3f[] usdGen:pomade:regionColors = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3537,7 +3537,7 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
         }
         doc = "Display colour per region. Expression evaluation: groom (once per operator)."
     )
-    int[] usdGen:tonic:regionNodeCounts = [] (
+    int[] usdGen:pomade:regionNodeCounts = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3546,7 +3546,7 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
         }
         doc = "Node count per closed region; polygon-style region encoding. Expression evaluation: groom (once per operator)."
     )
-    int[] usdGen:tonic:regionNodeIndices = [] (
+    int[] usdGen:pomade:regionNodeIndices = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3555,7 +3555,7 @@ class UsdGenScalpGraph "UsdGenScalpGraph"
         }
         doc = "Shared node ids per region loop, regionNodeCounts at a time. Expression evaluation: groom (once per operator)."
     )
-    float usdGen:tonic:snapRadius = 0.01 (
+    float usdGen:pomade:snapRadius = 0.01 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3598,7 +3598,7 @@ class UsdGenTube "UsdGenTube"
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
-    point3f[] usdGen:tonic:centerDeltas = [] (
+    point3f[] usdGen:pomade:centerDeltas = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3607,7 +3607,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Child center edits relative to the derived shape; empty at L1. Expression evaluation: groom (once per operator)."
     )
-    point3f[] usdGen:tonic:centerPoints = [] (
+    point3f[] usdGen:pomade:centerPoints = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3616,7 +3616,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Center curve control vertices in groom space. Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:childIndex = -1 (
+    int usdGen:pomade:childIndex = -1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3625,7 +3625,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Index within the parent's subdivision; -1 at L1. Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:fill:cvCount = 8 (
+    int usdGen:pomade:fill:cvCount = 8 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3634,7 +3634,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "CVs per filled guide, in [2, 64]. Expression evaluation: groom (once per operator)."
     )
-    float usdGen:tonic:fill:density = 100 (
+    float usdGen:pomade:fill:density = 100 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3643,7 +3643,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Expected guides per unit of root-section area. Must be finite and >= 0. Expression evaluation: groom (once per operator)."
     )
-    float usdGen:tonic:fill:edgeBias = 0 (
+    float usdGen:pomade:fill:edgeBias = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3652,7 +3652,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Radial root remap in [-1, 1]: +1 pushes roots toward the tube wall, -1 pulls them to the center, 0 is uniform. Expression evaluation: groom (once per operator)."
     )
-    float[] usdGen:tonic:fill:lengthProfile = [] (
+    float[] usdGen:pomade:fill:lengthProfile = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3661,7 +3661,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Length ramp knots in the usdGenMath ramp encoding; empty means uniform length. Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:fill:seed = 0 (
+    int usdGen:pomade:fill:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3670,7 +3670,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Seed for root sampling and fill; guides regenerate bit-exactly from (tubeId, seed). Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:level = 1 (
+    int usdGen:pomade:level = 1 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3679,7 +3679,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Hierarchy level (L1/L2/L3...), derived from the prim depth and stored for tools. Must be >= 1. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:tonic:lockChildren = 0 (
+    bool usdGen:pomade:lockChildren = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3688,7 +3688,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "True moves descendants rigidly with parent edits instead of re-deriving them. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:tonic:locked = 0 (
+    bool usdGen:pomade:locked = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3697,7 +3697,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "True freezes this tube against all edits. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:tonic:lockParents = 0 (
+    bool usdGen:pomade:lockParents = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3706,7 +3706,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "True stops child edits from refreshing ancestors bottom-up. Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:regionId = 0 (
+    int usdGen:pomade:regionId = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3715,7 +3715,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Scalp-graph region this tube is rooted in (-1 = unrooted, the root-disc stream). Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:sectionCvCount = 8 (
+    int usdGen:pomade:sectionCvCount = 8 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3724,7 +3724,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Ring control vertices per cross-section, in [3, 32]. Expression evaluation: groom (once per operator)."
     )
-    float2[] usdGen:tonic:sectionCvs = [] (
+    float2[] usdGen:pomade:sectionCvs = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3733,7 +3733,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Flattened cross-section ring CVs in the section plane, sectionCvCount per section. Expression evaluation: groom (once per operator)."
     )
-    float2[] usdGen:tonic:sectionDeltas = [] (
+    float2[] usdGen:pomade:sectionDeltas = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3742,7 +3742,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Child section edits relative to the derived shape; empty at L1. Expression evaluation: groom (once per operator)."
     )
-    float[] usdGen:tonic:sectionT = [] (
+    float[] usdGen:pomade:sectionT = [] (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3751,7 +3751,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Parametric position of each cross-section along the center curve. Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:subdivide:count = 4 (
+    int usdGen:pomade:subdivide:count = 4 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3760,7 +3760,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Child tubes per subdivision, in [2, 8]. Expression evaluation: groom (once per operator)."
     )
-    int usdGen:tonic:subdivide:seed = 0 (
+    int usdGen:pomade:subdivide:seed = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"
@@ -3769,7 +3769,7 @@ class UsdGenTube "UsdGenTube"
         }
         doc = "Seed for the subdivision split; children re-derive bit-exactly from (tubeId, seed). Expression evaluation: groom (once per operator)."
     )
-    token usdGen:tonic:subdivide:splitMode = "kmeans" (
+    token usdGen:pomade:subdivide:splitMode = "kmeans" (
         allowedTokens = ["kmeans", "edge"]
         customData = {
             string userDocBrief = 'How the parent root region is partitioned: "kmeans" splits by seeded k-means in the root frame, "edge" follows an artist-drawn splitting edge.'
@@ -3795,13 +3795,13 @@ class UsdGenTube "UsdGenTube"
 
 class "UsdGenTubeHierarchyAPI"
 {
-    rel usdGen:tonic:members (
+    rel usdGen:pomade:members (
         customData = {
             string userDocBrief = "Tubes this on-the-fly parent was built from."
         }
         doc = "Tubes this on-the-fly parent was built from. Expression evaluation: groom (once per operator)."
     )
-    bool usdGen:tonic:persistent = 0 (
+    bool usdGen:pomade:persistent = 0 (
         customData = {
             dictionary usdGen = {
                 string evaluation = "groom"

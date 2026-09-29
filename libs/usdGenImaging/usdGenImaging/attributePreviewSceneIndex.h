@@ -140,7 +140,7 @@ private:
 };
 
 // The process-global overlay table the brush C ABI writes. Deliberately
-// leaked (like TonicRegistry): scene indices may be destroyed during static
+// leaked (like PomadeRegistry): scene indices may be destroyed during static
 // destruction and must still be able to detach.
 class UsdGenAttributePreviewRegistry {
 public:

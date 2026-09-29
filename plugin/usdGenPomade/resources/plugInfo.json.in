@@ -1,0 +1,27 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "UsdGenPomadeSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "displayName": "usdGen pomade authoring",
+                        "loadWithRenderer": "",
+                        "priority": 0,
+                        "tags": ["usdGen:pomade"],
+                        "ordering": {
+                            "after": ["usdGen:groom"],
+                            "before": ["hdGp:proceduralResolution",
+                                       "hdPrman:motionBlur"]
+                        }
+                    }
+                }
+            },
+            "LibraryPath": "../../$<TARGET_FILE_NAME:usdGenPomade>",
+            "Name": "usdGenPomade",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

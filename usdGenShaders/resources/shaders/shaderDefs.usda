@@ -231,17 +231,17 @@ def Shader "UsdGenHairStrandsTranslucent" (
     )
 }
 
-# The Tonic tube look (plan/17 section 4.4, P3). NOT part of the C5 freeze,
+# The Pomade tube look (plan/17 section 4.4, P3). NOT part of the C5 freeze,
 # which covers the `inputs:` block of the three UsdGenHairPreview* defs
-# above and nothing else. UsdGenTonicSceneIndex binds it by identifier on
-# the tube meshes it publishes under /__usdGenTonic.
-def Shader "UsdGenTonicTube" (
-    doc = "Tonic tube surface: per-clump colour, eye-space key/fill shading, selection fresnel rim, x-ray for non-focused levels."
+# above and nothing else. UsdGenPomadeSceneIndex binds it by identifier on
+# the tube meshes it publishes under /__usdGenPomade.
+def Shader "UsdGenPomadeTube" (
+    doc = "Pomade tube surface: per-clump colour, eye-space key/fill shading, selection fresnel rim, x-ray for non-focused levels."
     sdrMetadata = { string primvars = "clumpColor|selected|xray" }
 )
 {
     uniform token info:implementationSource = "sourceAsset"
-    uniform asset info:glslfx:sourceAsset = @./tonicTube.glslfx@
+    uniform asset info:glslfx:sourceAsset = @./pomadeTube.glslfx@
     color3f inputs:selectedColor = (1, 0.85, 0.35)
     float inputs:rimGain = 1
     float inputs:specGain = 0.25

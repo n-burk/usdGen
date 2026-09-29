@@ -1,6 +1,6 @@
 # Viewport stroke capture for the brush tool: the StageView event filters.
 #
-# Two filters, installed together (the tonicViewport.py arrangement):
+# Two filters, installed together (the pomadeViewport.py arrangement):
 #   * one on the StageView, turning left press / move / release into
 #     BrushLoop.press / move / release at PHYSICAL pixels (Qt's logical
 #     coordinates times devicePixelRatioF, the scaling StageView's own
@@ -63,7 +63,7 @@ def stageViewOf(usdviewApi):
 
     UsdviewApi exposes no stageView property in this USD build; the
     fallbacks are the app controller's private member and then the widget
-    tree (the same lesson tonicViewport.stageViewOf records)."""
+    tree (the same lesson pomadeViewport.stageViewOf records)."""
     if usdviewApi is None:
         return None
     view = getattr(usdviewApi, "stageView", None)
