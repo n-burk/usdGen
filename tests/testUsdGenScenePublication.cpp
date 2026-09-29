@@ -275,14 +275,26 @@ private:
 class AnyNoticeObserver final : public HdSceneIndexObserver {
 public:
     std::atomic<unsigned> notices{0};
+    // Notices that only the drain may send: namespace changes and anything
+    // about usdGen's synthetic prims.  Upstream dirties of stage prims are
+    // forwarded at once in async mode (pass-through) and are not counted.
+    std::atomic<unsigned> drainOnly{0};
+    static bool IsSynthetic(SdfPath const &path) {
+        return path.GetString().find("__usdGenRender") != std::string::npos;
+    }
     void PrimsAdded(HdSceneIndexBase const &, AddedPrimEntries const &) override {
         notices.fetch_add(1, std::memory_order_release);
+        drainOnly.fetch_add(1, std::memory_order_release);
     }
     void PrimsRemoved(HdSceneIndexBase const &, RemovedPrimEntries const &) override {
         notices.fetch_add(1, std::memory_order_release);
+        drainOnly.fetch_add(1, std::memory_order_release);
     }
-    void PrimsDirtied(HdSceneIndexBase const &, DirtiedPrimEntries const &) override {
+    void PrimsDirtied(HdSceneIndexBase const &, DirtiedPrimEntries const &entries) override {
         notices.fetch_add(1, std::memory_order_release);
+        for (auto const &entry : entries)
+            if (IsSynthetic(entry.primPath))
+                drainOnly.fetch_add(1, std::memory_order_release);
     }
     void PrimsRenamed(HdSceneIndexBase const &, RenamedPrimEntries const &) override {}
 };
@@ -993,13 +1005,13 @@ def Scope "Groom"
                   allGenerationBatchesBounded &&
                   generationBeforeBurst >= 0 && generationAfterBurst >= generationBeforeBurst &&
                   generationAfterBurst >= generationBeforeBurst + kGenerationBurst &&
-                  coalescedNotices.notices.load(std::memory_order_acquire) == 0 &&
+                  coalescedNotices.drainOnly.load(std::memory_order_acquire) == 0 &&
                   std::fabs(FirstWidth(coalesced, coalescedTile) - visibleBefore) < 1e-6f,
               "4098 superseded CPU generations release old snapshots while visible geometry stays unchanged");
         coalesced.groom->SystemMessage(HdSystemMessageTokens->asyncPoll, nullptr);
         Check(std::fabs(FirstWidth(coalesced, coalescedTile) -
                              static_cast<float>(kGenerationBurst)) < 1e-6f &&
-                  coalescedNotices.notices.load(std::memory_order_acquire) > 0 &&
+                  coalescedNotices.drainOnly.load(std::memory_order_acquire) > 0 &&
                   UsdGenImagingTestHook::groomCaptureCount(*coalesced.groom) ==
                       capturesBeforeCoalescedPoll &&
                   UsdGenImagingTestHook::groomCookCount(*coalesced.groom) ==

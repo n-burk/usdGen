@@ -163,6 +163,27 @@ int main() {
               UsdGenImagingTestHook::groomCaptureCount(*index) == capturesBeforePoll &&
               UsdGenImagingTestHook::groomCookCount(*index) == cooksBeforePoll,
           "one asyncPoll installs final net namespace without capture or cook work");
+    // Async pass-through: an upstream dirty never waits for a poll.  It
+    // reaches the observer at once, on the caller's thread, with the input's
+    // own locators, and the next poll does not send it a second time.  The
+    // absolute root (the scene globals' current frame) passes the same way.
+    observer.events.clear();
+    HdDataSourceLocatorSet const pointsOnly{HdDataSourceLocator(TfToken("points"))};
+    input->DirtyPrims({{SdfPath("/netFinal"), pointsOnly},
+                       {SdfPath::AbsoluteRootPath(), pointsOnly}});
+    Check(observer.events == std::vector<std::string>{"d:/netFinal", "d:/"} && !observer.wrongThread,
+          "async upstream dirties are forwarded immediately, before any poll");
+    UsdGenImagingTestHook::drainGroomOwnersWithoutFrontend(*index);
+    index->SystemMessage(HdSystemMessageTokens->asyncPoll,nullptr);
+    Check(observer.events == std::vector<std::string>{"d:/netFinal", "d:/"},
+          "a poll never re-sends a dirty the pass-through already forwarded");
+    // A namespace change still waits for the poll (its snapshot ordering).
+    observer.events.clear();
+    add("/afterPassThrough");
+    Check(observer.events.empty(), "async namespace notices still wait for a poll");
+    Check(PollUntil(*index,[&] { return !observer.events.empty(); }) &&
+              observer.events == std::vector<std::string>{"A:/afterPassThrough"},
+          "the poll delivers the deferred namespace notice once");
     // Authored roots are live upstream; synthetic namespaces advance only
     // with the corresponding frontend publication packet.
     observer.events.clear();

@@ -374,6 +374,10 @@ struct UsdGenGroomSceneIndex::_Ingress {
     bool recoverSourceNamespace = false;
     bool sourceFull = false;
     bool fullPopulation = true;
+    // Async pass-through: the frontend already forwarded `dirtied` downstream
+    // when it arrived (see _PrimsDirtied), so Apply advances the source stamps
+    // without recording locators for the drain to send a second time.
+    bool dirtiedDelivered = false;
     SdfPathVector captureRoots;
     Added added;
     Removed removed;
@@ -1358,15 +1362,24 @@ struct UsdGenGroomSceneIndex::_State : std::enable_shared_from_this<_State> {
             // every primvar each frame). A stale read of `shown` only makes
             // the locators accumulate longer.
             auto const shown = VisibleSnapshot();
+            // A delivered dirty (async pass-through) already reached every
+            // downstream observer.  The stamp still advances -- a
+            // Description's tiles inherit its displayStyle and selections by
+            // that stamp, and those synthetic dirties stay on the drain -- but
+            // no locators are left for the drain to forward again.  Dirties
+            // recorded earlier and not yet shown are kept (Dirty accumulates).
+            static HdDataSourceLocatorSet const delivered;
             for (auto const& dirty : forwardDirtied) {
+                HdDataSourceLocatorSet const& locators =
+                    packet.dirtiedDelivered ? delivered : dirty.dirtyLocators;
                 if (dirty.primPath == SdfPath::AbsoluteRootPath()) {
-                    rootValue.Dirty(seq, dirty.dirtyLocators, shown->rootValue.stamp);
+                    rootValue.Dirty(seq, locators, shown->rootValue.stamp);
                     continue;
                 }
                 auto it = next->find(dirty.primPath);
                 if (it == next->end()) continue;
                 auto const was = shown->source->find(dirty.primPath);
-                it->second.Dirty(seq, dirty.dirtyLocators,
+                it->second.Dirty(seq, locators,
                                  was == shown->source->end() ? 0 : was->second.stamp);
                 changed = true;
             }
@@ -2195,7 +2208,24 @@ void UsdGenGroomSceneIndex::_PrimsRemoved(HdSceneIndexBase const&, Removed const
     _Ingress packet; packet.removed = entries; _CaptureAndSubmit(std::move(packet));
 }
 void UsdGenGroomSceneIndex::_PrimsDirtied(HdSceneIndexBase const&, Dirtied const& entries) {
-    _Ingress packet; packet.dirtied = entries; _CaptureAndSubmit(std::move(packet));
+    _Ingress packet; packet.dirtied = entries;
+    // Async pass-through.  With asynchronous scene processing, notices reach
+    // Hydra only when the drain runs, and the drain runs on asyncPoll -- a
+    // host timer (usdview: every 100 ms).  Holding upstream dirties until
+    // then delays EVERY viewport update behind that timer (edits, animation,
+    // selection, rig deformation), groom or not.  A dirty never changes
+    // namespace, and GetPrim serves every upstream prim straight from the
+    // input, so forwarding it now is exactly what the drain would send later.
+    // Namespace notices and everything synthetic (tiles, render scopes,
+    // materials, the scalp cap) stay on the drain, whose snapshot ordering
+    // they depend on; the packet still enters the owner so cooks and
+    // dependency tracking see the dirty.
+    if (_state->asyncAllowed.load(std::memory_order_acquire) &&
+        !_state->closing.load(std::memory_order_acquire) && !entries.empty()) {
+        _SendPrimsDirtied(entries);
+        packet.dirtiedDelivered = true;
+    }
+    _CaptureAndSubmit(std::move(packet));
 }
 void UsdGenGroomSceneIndex::_PrimsRenamed(HdSceneIndexBase const& sender,
     HdSceneIndexObserver::RenamedPrimEntries const& entries) {
