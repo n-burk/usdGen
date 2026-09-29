@@ -30,7 +30,7 @@ GCC 13.3, CMake 3.28.3) to turn "should work" into "does work":
 | libdeflate | runtime only (`libdeflate.so.0`), **no headers** | `ls /usr/include/libdeflate.h` → missing |
 | LLVM | runtime libs only (`libllvm18`, `libllvm20`), no `llvm-config`/dev headers | `dpkg -l`, `llvm-config --version` → empty |
 | Python venv | PySide6 6.11.2, PyOpenGL; **no numpy, no pybind11** | `python -m pybind11 --cmakedir` → "No module named pybind11" |
-| Arch | aarch64 (NVIDIA GB10) — x86 `-msse4.1` flags must be disabled | `uname`; SeExpr `ENABLE_SSE4` default TRUE adds `-msse4.1` (`seexpr/CMakeLists.txt:98,202`) |
+| Arch | aarch64 (measurement host) — x86 `-msse4.1` flags must be disabled | `uname`; SeExpr `ENABLE_SSE4` default TRUE adds `-msse4.1` (`seexpr/CMakeLists.txt:98,202`) |
 
 ---
 

@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # PW-4 — L-1 pre-work: Storm render-context material resolution (glslfx vs mtlx terminal)
 
 ## 1. What was asked

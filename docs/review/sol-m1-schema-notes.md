@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # sol M1 schema/shaders/build validation notes
 
 > Sandbox deviation: invoked with `-s danger-full-access` (host bwrap netns is broken, so the
@@ -56,11 +58,11 @@
 - fix: Make internal static dependencies private where required, remove them from the install/export set, and defer their public headers to the milestone specified by §1.2.
 - why: This exposes implementation libraries as an unintended public ABI and violates the frozen install layout.
 
-### [P1] N-8: CI remains an M0 workflow and does not document the M1 GB10 gate run adequately
+### [P1] N-8: CI remains an M0 workflow and does not document the M1 measurement host gate run adequately
 - location: `.github/workflows/usdgen.yml:2`
-- issue: CI still describes M0 scope and only mentions a generic manual `ctest -L T2`; it does not identify or provide a complete GB10 command for M1 gates S-1, S-5, S-6, S-12, and L-2.
+- issue: CI still describes M0 scope and only mentions a generic manual `ctest -L T2`; it does not identify or provide a complete measurement host command for M1 gates S-1, S-5, S-6, S-12, and L-2.
 - evidence: There is no `t2-egl` job. The referenced workstation protocol is a T4 document and contains no T2 CTest command. CI also retains stale claims that install-tree tests and PATH_VARS are absent.
-- fix: Add a triggerable GB10 job or a copy-pasteable manual block with environment, build directory, `ctest -L '^T2$'`, and the five gate mappings; update the workflow header and stale install-check commentary.
+- fix: Add a triggerable measurement host job or a copy-pasteable manual block with environment, build directory, `ctest -L '^T2$'`, and the five gate mappings; update the workflow header and stale install-check commentary.
 - why: The required GPU gates have no reproducible M1 execution route.
 
 ### [P1] N-9: Shader and C5 documentation is malformed or contradictory

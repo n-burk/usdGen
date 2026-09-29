@@ -32,7 +32,7 @@ All §2 rows were produced on one machine on 2026-09-04, in one of three configu
 | Id | Configuration | Measures |
 |---|---|---|
 | **H1** | CPU only, no graphics context. aarch64, 20 cores, GCC 13.3, `-O2`/`-O3`. | Engine, scene index, USD authoring, transport, adapters, third-party libs. |
-| **H1-GPU** | Storm on the NVIDIA GB10 through the EGL harness `prototypes/storm-hair-look/eglctx.h` (compatibility profile, 64×64 pbuffer). | Real Storm GPU frame times. |
+| **H1-GPU** | Storm on the measurement host through the EGL harness `prototypes/storm-hair-look/eglctx.h` (compatibility profile, 64×64 pbuffer). | Real Storm GPU frame times. |
 | **H1-SW** | Storm on Mesa llvmpipe through a user-space Xvfb on `DISPLAY=:77`. | Storm *correctness* and app-loop behaviour only; never a Storm frame time. |
 
 H1 is heterogeneous (10× Cortex-X925 + 10× Cortex-A725). Both the bespoke TBB engine and VDF regress past ~8–10 threads on it (rows `EV-008` and `EV-011`; `research/G-data-plane-engine-prototype-benchmark.md` §3.3), which is why the design pins a private `tbb::task_arena` at 8 workers with a one-shot calibration and `USDGEN_THREAD_LIMIT` (ADR §4.1, invariant I8) rather than hard-coding 8.
@@ -49,7 +49,7 @@ Paths are relative to `plan/` (`<usdgen-src>/plan`): `research/<file>.md`, `desi
 
 ### 1.1 Hardware and OS
 
-Linux 6.17, **aarch64**, 20 CPUs = **10× Cortex-X925 + 10× Cortex-A725** (`lscpu`; `research/G-data-plane-engine-prototype-benchmark.md:27-30` — ENVIRONMENT.md says only "20 CPUs"). SVE2 is present but GCC 13.3 emits only 16-byte NEON for these kernels, even with `-mcpu=native` (§2.2). **NVIDIA GB10**, driver **580.173.02**, GL 4.6 compatibility through EGL (`research/G-storm-hair-look-prototype.md` §5, `:29`, `:97`). No `DISPLAY`, no root. `perf` is refused (`perf_event_paranoid = 4`) and `gdb -p` by yama `ptrace_scope` (same report `:29-30`, §8), so profiling uses the in-process SIGPROF sampler `prototypes/data-plane-benchmark/sampler.h`. Toolchain: g++ 13.3.0, cmake 3.28.3, ninja 1.13.2 (venv only — pass `-DCMAKE_MAKE_PROGRAM`). **GCC defaults to `-ffp-contract=fast` on aarch64**, which flips branches in surface-walking kernels (`EV-078`) — hence `-ffp-contract=off` on `usdGenMath`.
+Linux 6.17, **aarch64**, 20 CPUs = **10× Cortex-X925 + 10× Cortex-A725** (`lscpu`; `research/G-data-plane-engine-prototype-benchmark.md:27-30` — ENVIRONMENT.md says only "20 CPUs"). SVE2 is present but GCC 13.3 emits only 16-byte NEON for these kernels, even with `-mcpu=native` (§2.2). **measurement host**, driver **580.173.02**, GL 4.6 compatibility through EGL (`research/G-storm-hair-look-prototype.md` §5, `:29`, `:97`). No `DISPLAY`, no root. `perf` is refused (`perf_event_paranoid = 4`) and `gdb -p` by yama `ptrace_scope` (same report `:29-30`, §8), so profiling uses the in-process SIGPROF sampler `prototypes/data-plane-benchmark/sampler.h`. Toolchain: g++ 13.3.0, cmake 3.28.3, ninja 1.13.2 (venv only — pass `-DCMAKE_MAKE_PROGRAM`). **GCC defaults to `-ffp-contract=fast` on aarch64**, which flips branches in surface-walking kernels (`EV-078`) — hence `-ffp-contract=off` on `usdGenMath`.
 
 ### 1.2 OpenUSD source and install
 
@@ -64,7 +64,7 @@ Interpreter `$VENV/bin/python3` = 3.12.3; PySide6 6.11.2 and PyOpenGL importable
 | Capability | Status | How |
 |---|---|---|
 | Headless scene-index work (`UsdImagingCreateSceneIndices`, notices, `GetPrim`) | **Yes**, no GL | the tier-1 harness, sub-100 ms |
-| **Storm on the GB10** | **Yes** | `EGL_EXT_platform_device`, **compatibility** profile, 64×64 **pbuffer** (`prototypes/storm-hair-look/eglctx.h`). A core profile gives ~25 `GL_INVALID_ENUM`/frame and a white image; surfaceless fails in `HgiGL_ScopedStateHolder` (`research/G-storm-hair-look-prototype.md` §0 Key facts, `:37`, `:412`) |
+| **Storm on the measurement host** | **Yes** | `EGL_EXT_platform_device`, **compatibility** profile, 64×64 **pbuffer** (`prototypes/storm-hair-look/eglctx.h`). A core profile gives ~25 `GL_INVALID_ENUM`/frame and a white image; surfaceless fails in `HgiGL_ScopedStateHolder` (`research/G-storm-hair-look-prototype.md` §0 Key facts, `:37`, `:412`) |
 | `usdview` / `testusdview` / `usdrecord --renderer GL` correctness | **Yes**, software | user-space Xvfb `:77` + llvmpipe (LLVM 20.1.2, GL 4.5 core), `dpkg-deb -x`'d, no root |
 | `usdrecord` on the GPU | **No** | its `main` opens a GLX window first; link `eglctx.h` into your own driver |
 | GPU-accelerated GLX | **No** | zink needs DRI3, which Xvfb lacks |
@@ -579,7 +579,7 @@ Each row was wrong in an earlier document. The plan cites the corrected statemen
 
 | # | Wrong statement (where) | Corrected statement (where the correction lives) |
 |---|---|---|
-| K1 | Three linked claims in `research/ENVIRONMENT.md`'s body: "garch is GLX-only, therefore Storm needs an X display"; "anything needing a GL context cannot run"; "all Storm numbers must be a workstation protocol, labelled UNMEASURED" | The premise is true, the conclusions false. Storm renders on the GB10 through an EGL device-platform context; correctness runs under Xvfb + llvmpipe; only `usdrecord`'s own binary core-dumps. §2.3 is MEASURED for single-prim draw and deform. The protocol caveat survives only for multi-prim cost, MSAA/OIT and Metal/Vulkan (§5 U1, U15, U16) — `research/G-storm-hair-look-prototype.md` §0, §5–§6; §1.4 here |
+| K1 | Three linked claims in `research/ENVIRONMENT.md`'s body: "garch is GLX-only, therefore Storm needs an X display"; "anything needing a GL context cannot run"; "all Storm numbers must be a workstation protocol, labelled UNMEASURED" | The premise is true, the conclusions false. Storm renders on the measurement host through an EGL device-platform context; correctness runs under Xvfb + llvmpipe; only `usdrecord`'s own binary core-dumps. §2.3 is MEASURED for single-prim draw and deform. The protocol caveat survives only for multi-prim cost, MSAA/OIT and Metal/Vulkan (§5 U1, U15, U16) — `research/G-storm-hair-look-prototype.md` §0, §5–§6; §1.4 here |
 | K2 | "`pybind11` and `numpy` are NOT installed"; "ninja available" — `research/ENVIRONMENT.md` body | Both packages are installed; ninja was not and is now in the venv — `research/B-usdrig-build.md` §1; §1.3 here |
 | K2b | "No Xvfb installed" — `research/ENVIRONMENT.md` body | An Xvfb unpacked into user space with `dpkg-deb -x` serves `DISPLAY=:77` with llvmpipe and no root; `usdview`, `testusdview` and `usdrecord --renderer GL` all run there. This is what makes **test tier T3** a CI tier (ADR §9 R2) — `research/ENVIRONMENT.md` CORRECTIONS; §1.4 here |
 | K3 | "The `Usd_PrimFlagsPredicate` error comes from RigExec holding a `UsdPrimRange` across a resync" — `usdRig/docs/curvenet.md:513-522` | Stock OpenUSD 26.08 (`exec/esfUsd/stageData.cpp:361`), reproduced with zero usdRig code — `research/G-freeze-bake-undo-and-frozen-reentry.md` §1.4; §3.10 here |

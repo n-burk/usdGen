@@ -160,7 +160,7 @@ S30 Invalidation discipline: bare `primvars/points/primvarValue` where usdGen ow
     never co-dirty `displayColor` with `points`; one refineLevel and one material per chunk set;
     `__dependencies` declared per chunk (32–256 edges, not per curve). Live paint dirties
     `primvars/<name>/primvarValue` per move and `primvars/<name>` once on appearance.
-S31 Measured Storm on the GB10 (EGL headless): 200k curves × 8 CV at refineLevel 2 = 23.9 ms
+S31 Measured Storm on the measurement host (EGL headless): 200k curves × 8 CV at refineLevel 2 = 23.9 ms
     (42 fps) at 720p, one prim; deforming 19.2 MB of points adds 2.5 ms. refineLevel 0 is
     *slower* than 1 at 200k (LineList of all CVs); interaction LOD = decimate curve count.
 S32 Motion blur: retained per-offset cache; profiles P0 single (default, Storm never samples),
@@ -250,7 +250,7 @@ S44 Sibling CMake project against the unmodified OpenUSD install; **optional
 S45 Test harness tiers: (1) headless scene-index tests over the real `UsdImagingCreateSceneIndices`
     chain (sub-100 ms, no GL) as the primary regression suite; (2) **Storm correctness and GPU
     timing headlessly via an EGL device-platform context** (`probes/storm-hair-look/eglctx.h`:
-    compatibility profile + pbuffer, renders on the GB10) and, as fallback, the scratchpad Xvfb +
+    compatibility profile + pbuffer, renders on the measurement host) and, as fallback, the scratchpad Xvfb +
     llvmpipe (`DISPLAY=:77`, CPU numbers only); (3) `testusdview` scripts for the app loop; (4)
     workstation protocols for whatever remains (MSAA quality, Metal/Vulkan Hgi path, non-NVIDIA
     drivers). usdRig builds on this host in 21 s with `-ffp-contract=off`; RigExec costs

@@ -269,7 +269,7 @@ array of one node at once, so a freeze is one call not eight); **`SetLivePrimvar
 and the mask visualisation push a `VtFloatArray`, not points).
 
 MEASURED transport costs (`research/G-tool-loop-array-transport-and-cv-picking.md` §1.2, §1.4;
-`appendix-A-evidence-ledger.md` §2.7; best-of-N at load 0.37–0.47 on the GB10 host):
+`appendix-A-evidence-ledger.md` §2.7; best-of-N at load 0.37–0.47 on the measurement host):
 
 | Operation | 100 k CV | 1 M CV | Row |
 |---|---:|---:|:--|

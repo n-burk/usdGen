@@ -58,7 +58,7 @@ restored evaluation metadata on 281 properties and full doc on 387, and the
 post-process step completed ("regenerated plugin/usdGenSchema/resources").
 Re-running over the already-regenerated tree is stable (identical diff:
 `generatedSchema.usda` +415/−10, `plugInfo.json` +32). No toolchain failure;
-no blocker. Uses the default USD prefix `D:\work\usdRig\usd-install`
+no blocker. Uses the OpenUSD prefix in `$USD`
 (`$env:USD` unset) and the Python 3.10 on PATH. (The `__init__.py` /
 `CMakeLists.txt` / `module.cpp` warnings and the
 `USD_DISABLE_PRIM_DEFINITIONS_FOR_USDGENSCHEMA` banner are pre-existing

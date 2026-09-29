@@ -1801,7 +1801,7 @@ dependency and build story (S38, S44–S45).
 Hair **simulation** (usdGen consumes simulated curves through `UsdGenCurveSource`, it does not solve
 them); a node-graph authoring UI (the operator stack is a list, because the chain is a list — usdRig
 has no node-graph editor to reuse either, A1 §8.2); GPU evaluation of the chain (HGI compute is
-plausible on a GB10 but every number here is CPU, and Storm dominates the frame anyway — R-1);
+plausible on a measurement host but every number here is CPU, and Storm dominates the frame anyway — R-1);
 grooming on non-mesh surfaces; per-instance material bindings (Storm has none, S33); automatic
 pickup of overwritten map files (S13); Windows and macOS builds beyond keeping the CMake honest
 (bison/flex and the Hgi resource path are the two known blockers, A8 §6.2, S35 open questions).

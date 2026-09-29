@@ -1,73 +1,22 @@
-# Verified environment facts (checked 2026-09-04, do not re-derive)
+# Measurement host notes (historical)
 
-## Hardware / OS
-- Linux 6.17 aarch64 (arm64). 20 CPUs. NVIDIA GB10 GPU present (`nvidia-smi -L` ok).
-- **No DISPLAY, no WAYLAND_DISPLAY. No Xvfb installed. No sudo (password required).**
-- `/usr/bin/Xorg` exists but cannot be started without root.
+Snapshot from 2026-09-04 of one Linux aarch64 workstation used while the plan was written. It is not a requirement for building usdGen, and it is not a setup guide. Current build steps are in the repository [README](../../README.md) and in [AGENTS.md](../../AGENTS.md).
 
-## OpenUSD
-- SOURCE: `<openusd-src>` at git tag **v26.08** (`ee47c679a`). Read-only for us.
-- INSTALL: `$USD` (headers in `include/pxr`, libs in `lib`,
-  plugins in `lib/usd/*/resources` and `plugin/usd`, tools in `bin`).
-- Python bindings: **`$USD/lib/python3.12/site-packages`**
-  (NOT `lib/python`). Import with:
-  `PYTHONPATH=$USD/lib/python3.12/site-packages $VENV/bin/python3`
-  Verified working: `pxr.Usd`, `pxr.UsdImagingGL`, `pxr.Usdviewq`.
-- Python interpreter: `$VENV/bin/python3` = **3.12.3**. PySide6 6.11.2 and PyOpenGL
-  are importable. `pybind11` and `numpy` are NOT installed (checked by an earlier agent).
-- Bundled third party in the install: MaterialX 1.39.5 (incl. `libMaterialXGenGlsl`),
-  OpenSubdiv 3.6.1, oneTBB 2020.3.1. **No Ptex, no OpenImageIO, no SeExpr** in the install.
-- Hio image plugins present: `hioAvif`, `hioOpenEXR` (plus hio's built-in stb formats).
-  `hioOiio` and `hioImageIO` are NOT built.
-- Hgi backends built: **hgiGL only** (`libusd_hgiGL.so`). No hgiVulkan, no hgiMetal.
-- `garch` on Linux is **GLX-only** in 26.08 (`glPlatformContextGLX.cpp`; there is no EGL
-  context path). Therefore Storm needs an X display.
-- `PXR_ENABLE_PTEX_SUPPORT` defaults OFF (`cmake/defaults/Options.cmake:36`) and this
-  install was built without it.
+## What that host had
 
-## What CAN be run here
-- Headless C++ built against the install (`find_package(pxr CONFIG PATHS $USD)`).
-  g++ 13.3, cmake 3.28.3, ninja available.
-- Headless scene-index work: `UsdImagingCreateSceneIndices`, `HdMergingSceneIndex`,
-  `HdFlatteningSceneIndex`, GetPrim pulls, notice observers. No render delegate needed.
-- Headless Python USD: stage authoring, `Usd.Stage`, `Sdf`, `Ts`, `UsdShade`, `Sdr` registry,
-  MaterialX ShaderGen (offline GLSL generation).
-- Building third-party libs from source (an earlier agent already built SeExpr2 and Ptex here).
+- OpenUSD 26.08 at `$USD` (headers in `include/pxr`, libraries in `lib`, tools in `bin`).
+- Python bindings in `$USD/lib/python3.12/site-packages`, not `lib/python`.
+- The OpenUSD install did not include Ptex or SeExpr. This repository vendors those libraries under `thirdparty/`.
+- MaterialX, OpenSubdiv, and oneTBB were present as part of that OpenUSD build.
+- Storm on that host needed either a display or an EGL device-platform context. `usdcat` did not.
 
-## What CANNOT be run here
-- **Anything that needs a GL context**: `usdview`, `testusdview`, `usdrecord --renderer GL`,
-  `UsdImagingGLEngine::Render`, Storm shader compilation, GPU timings, picking, screenshots.
-  `usdrecord` was tried and it core-dumps (no X display).
-- Therefore all Storm *runtime* numbers must be written as a **benchmark protocol to run on a
-  workstation with a display**, and clearly labelled UNMEASURED in the plan. Never invent numbers.
+## Corrections recorded the same day
 
-## usdRig
-- `<usdrig-src>`, branch `main`, working tree clean at session start. **Do not modify it.**
-  Build only out-of-tree: `cmake -S <usdrig-src> -B <scratch>/usdRigBuild -DUSD_INSTALL_DIR=$USD -DCMAKE_PREFIX_PATH=$USD`.
-- `bin/_env.sh` hard-codes python3.11 and sibling `usd-install`/`usd-pr4156-venv` paths that do
-  not exist here; set `USD=$USD` and override `PY_SITE` yourself.
-- README marks Linux as "intended, not yet verified".
+These override any older sentence in the plan that says Storm cannot run without an X display on that host.
 
-## Target project
-- `<usdgen-src>` exists and is EMPTY. The new plugin is expected to live there as a
-  sibling project (working name **usdGen**, C++ namespace/prefix `UsdGen`, USD property namespace
-  `usdGen:`), consuming the unmodified OpenUSD install, and optionally `find_package(rigExec)`.
+- A virtualenv at `$VENV` had Python 3.12, PySide6, `pybind11`, and `numpy`.
+- Storm was run headlessly through an EGL device-platform context, and also through a software display. Frame times from the software display are CPU numbers, not GPU numbers.
+- `usdrecord` opening its own window was unreliable without a real display. The EGL harness was the driver for GPU timings.
+- usdRig was built out of tree against the same OpenUSD prefix. Those build directories are not part of this repository. Do not assume they exist.
 
-## CORRECTIONS (2026-09-04, after the verification round — these override the sections above)
-- `pybind11` 3.1.0 and `numpy` 2.5.2 ARE installed in `$VENV` (installed during
-  the verification round). `ninja` 1.13.2 is installed in the venv too
-  (`$VENV/bin/ninja`; pass `-DCMAKE_MAKE_PROGRAM` or put the venv bin on PATH).
-- **Storm CAN run headlessly here, two ways:**
-  1. GPU-accelerated on the NVIDIA GB10 via an EGL device-platform context
-     (`EGL_EXT_platform_device`, compatibility profile, 64x64 pbuffer). Harness:
-     `scratchpad/probes/storm-hair-look/eglctx.h` + `render_hair.cpp` / `bench_hair.cpp`.
-     Real GPU frame times were measured this way. `usdrecord` itself still core-dumps (it opens a
-     GLX window), so use the harness as the driver.
-  2. Software (llvmpipe) through a user-space Xvfb on `DISPLAY=:77` (pid may change; restart with
-     `scratchpad/xvfbtry/root/usr/bin/Xvfb :77 -screen 0 1280x1024x24 -nolisten tcp -xkbdir
-     scratchpad/xvfbtry/root/usr/share/X11/xkb &`). `usdview`, `testusdview`, `usdrecord --renderer GL`
-     all work there. **llvmpipe frame times are CPU numbers, never Storm GPU numbers.**
-- usdRig is built out of tree at `scratchpad/usdRigBuild` (26/27 ctest pass; needs
-  `-DCMAKE_CXX_FLAGS=-ffp-contract=off`); env snippet `scratchpad/probes/B-build/rigexec_env.sh`;
-  installed prefix `scratchpad/rigExecInstall` (find_package(rigExec) works).
-- SeExpr2 and Ptex are built in `scratchpad/thirdparty/install` (see A8).
+Citations elsewhere to `research/ENVIRONMENT.md` or its corrections block mean this page.

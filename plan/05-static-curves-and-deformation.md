@@ -1411,7 +1411,7 @@ id use that driver's name; rows with no gate are tests this document mints, regi
 | `testUsdGenScheduling` | 10 interactive edits produce exactly 10 commits, **all on the thread that committed**, with zero cooks inside `GetPrim` (the full SI-3 assertion) | **SI-3** | M1 |
 | `testUsdGenMotionSamples` | P2 evaluates `k · tail`, not `k · chain`; `forwardSurfaceSamples` toggles the offset list; `velocities` are blocked outside P1 | — (the T1 half of **R-1**, whose T4 counterpart is the gate) | release |
 
-**T2 — Storm through the EGL harness** (`usdGenTestUtils`/`eglctx.h`, on the GB10):
+**T2 — Storm through the EGL harness** (`usdGenTestUtils`/`eglctx.h`, on the measurement host):
 
 | Test | Asserts | Gate | Exits |
 |---|---|---|---|

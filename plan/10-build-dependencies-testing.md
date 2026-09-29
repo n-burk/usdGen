@@ -37,7 +37,7 @@ rows are cited as **`EV-nnn`** and by nothing else (`ADR §9.1 R1`, `ADR §9.5 R
 | Fact | Value | Source |
 |---|---|---|
 | OS / arch | Linux 6.17, aarch64, 20 CPUs = 10× Cortex-X925 + 10× Cortex-A725, heterogeneous (MEASURED) | `appendix-A-evidence-ledger.md` §1.1; `research/G-data-plane-engine-prototype-benchmark.md:27-30` (`lscpu`) |
-| GPU | NVIDIA GB10, driver 580.173.02, GL 4.6 compatibility profile through EGL (MEASURED) | `research/G-storm-hair-look-prototype.md` §0, §5 |
+| GPU | measurement host, driver 580.173.02, GL 4.6 compatibility profile through EGL (MEASURED) | `research/G-storm-hair-look-prototype.md` §0, §5 |
 | Compiler | GCC 13.3.0 — the compiler the OpenUSD install was built with | `research/A8-seexpr-ptex-libs.md` key facts; `g++ --version` |
 | CMake / Ninja | 3.28.3; ninja 1.13.2 **only** at `$VENV/bin/ninja` (pip, not on `PATH`) | `research/ENVIRONMENT.md` CORRECTIONS; `research/B-usdrig-build.md` §1 |
 | bison / flex / sed / zlib | bison 3.8.2, flex 2.6.4, sed, zlib 1.3 with headers | `research/A8-seexpr-ptex-libs.md` key facts |
@@ -84,7 +84,7 @@ usdRig uses it — is not a usdGen build dependency.
 |---|---|---|
 | Headless C++ against the install | `find_package(pxr CONFIG PATHS $USD)` | `research/ENVIRONMENT.md` |
 | Full `UsdImagingCreateSceneIndices` chain, notices, `GetPrim` pulls, **no GL** | plain executable — `probeImagingPipeline`, 36 assertions in 0.07 s (MEASURED, `appendix-A-evidence-ledger.md` §2.10) | `research/B-usdrig-build.md` decision 4 |
-| **Storm on the GB10 GPU** | EGL device-platform context: `EGL_EXT_platform_device`, **compatibility** profile, 64×64 pbuffer, `eglMakeCurrent(d, surf, surf, ctx)`; entry points `dlopen`ed because no EGL headers exist here | `research/G-storm-hair-look-prototype.md` §0; `prototypes/storm-hair-look/eglctx.h` |
+| **Storm on the measurement host GPU** | EGL device-platform context: `EGL_EXT_platform_device`, **compatibility** profile, 64×64 pbuffer, `eglMakeCurrent(d, surf, surf, ctx)`; entry points `dlopen`ed because no EGL headers exist here | `research/G-storm-hair-look-prototype.md` §0; `prototypes/storm-hair-look/eglctx.h` |
 | `usdview`, `testusdview`, `usdrecord --renderer GL` | user-space Xvfb, Mesa **llvmpipe** (LLVM 20.1.2), GL 4.5 core, unpacked with `dpkg-deb -x` into a scratch directory (no root) | `research/B-usdrig-build.md` §6; `research/ENVIRONMENT.md` CORRECTIONS |
 
 `usdrecord` itself core-dumps under EGL because its `main` creates a GLX window first; the EGL
@@ -801,7 +801,7 @@ Variant B does not exist in the prototype and is authored during pre-work **PW-2
 |---|---|---|---|---|
 | **T0** | engine and build: `usdGenMath` kernels, `UsdGenGraph` over synthetic `UsdGenGraphDesc`, chunk/tile arithmetic, maps, expressions, Ptex, the Qt-free Python model modules, the build-rule checks. **No Hydra, no `UsdStage`** | nothing | ms | every commit |
 | **T1** | headless scene index over the **real** `UsdImagingCreateSceneIndices` chain plus the renderer-plugin append, with a recording observer; asserts on `HdBasisCurvesSchema` contents **and on emitted dirty locators** | no GL | < 100 ms each (`S45`) | every commit — the primary regression suite |
-| **T2** | Storm correctness and GPU timing through the **EGL harness** on the GB10; golden images with a fractional-pixel tolerance | GPU + EGL | ~1 s each (UNMEASURED; baseline `design/proposal-risk.md` §9.1) | correctness every commit, timing nightly |
+| **T2** | Storm correctness and GPU timing through the **EGL harness** on the measurement host; golden images with a fractional-pixel tolerance | GPU + EGL | ~1 s each (UNMEASURED; baseline `design/proposal-risk.md` §9.1) | correctness every commit, timing nightly |
 | **T3** | `testusdview` scripts under Xvfb / llvmpipe: the app→data→Hydra loop, panels, brushes, undo, picking | Xvfb | seconds | pre-merge |
 | **T4** | workstation protocols: MSAA/OIT quality, Metal/Vulkan Hgi, non-NVIDIA drivers, a real hdPrman, 4K interactive | a human at a display | manual | **release criteria only** |
 
@@ -881,12 +881,12 @@ is 172 MB (MEASURED, `research/G-storm-hair-look-prototype.md` §6).
 ### 5.4 Golden data policy
 
 * **Golden images** live in `tests/golden/`, are ≤ 256×256 PNG, and are produced **only** by the EGL
-  harness on the GB10. Each carries a sidecar `<name>.json` recording GL vendor/renderer/version,
+  harness on the measurement host. Each carries a sidecar `<name>.json` recording GL vendor/renderer/version,
   driver, refineLevel, complexity and the generation counter. Comparison is a fractional-pixel
   difference: mean absolute per-channel difference ≤ 2/255 **and** fewer than 0.5 % of pixels above
   8/255 (all ASSUMPTION; calibrated at M1 against ten consecutive `testUsdGenStormLook` runs and
   re-stated there as MEASURED noise floors).
-* **GB10 goldens are never compared against llvmpipe output.** T3 image checks are *not* goldens:
+* **measurement host goldens are never compared against llvmpipe output.** T3 image checks are *not* goldens:
   they are fraction-of-pixels-changed mutation checks under llvmpipe
   (`08-tools.md` §9.4 — `stageView.grabFrameBuffer()`, HUD off, a subsampled pixel set compared as a
   fraction of the frame, every check mutation-verified), and they carry no timing assertion.
@@ -982,7 +982,7 @@ milestone-exit suite; `ctest -LE flaky` is what gates a merge.
 | `configure-offline` | configure with `FETCHCONTENT_FULLY_DISCONNECTED=ON` and `USDGEN_WITH_RIGEXEC=OFF` | every push |
 | `build-release` | `-DCMAKE_BUILD_TYPE=Release`, `ninja -j16` (no global `-ffp-contract`: the flag is per target, §3.1) | every push |
 | `t0` + `t1` | `ctest -L '^T[01]$' -j8` — `-L` takes a **CMake regex**, in which `\|` is an escaped literal pipe and matches nothing; anchored so `T1` never matches a future `T10` | every push |
-| `t2-egl` | `ctest -L T2` on the GB10 through the EGL harness | every push (correctness) |
+| `t2-egl` | `ctest -L T2` on the measurement host through the EGL harness | every push (correctness) |
 | `t3-xvfb` | `bin/xvfb.sh` then `ctest -L T3` | pre-merge |
 | `build-fpfast` | same sources, `-DUSDGEN_FP_CONTRACT=fast`, tolerance suite only (§5.5) | nightly |
 | `nightly-perf` | `ctest -L perf` plus `benchUsdGenStorm`; results appended to a CSV with the git sha | nightly |
@@ -1284,7 +1284,7 @@ gate id where one exists.
 | Five adapter entries make every `usdGen:*` property visible and dirtyable | T1 | `testUsdGenAdapter`, `testUsdGenRestAdapter` | **SI-7** |
 | The scene index lands in the right chain slot | T1 | `testUsdGenChainOrder` | **SI-5** |
 | The extent function registers from `libusdGenSchema.so` and `usdcat`/`usdrecord` see a bound | T1 | `testUsdGenPluginDiscovery` (extent leg) | — (M1) |
-| The EGL harness renders on the GB10 with zero GL errors and the golden matches | T2 | `testUsdGenStormLook` | **L-2** |
+| The EGL harness renders on the measurement host with zero GL errors and the golden matches | T2 | `testUsdGenStormLook` | **L-2** |
 | Storm throughput and batching hold at 100 k | T2 | `benchUsdGenStorm --static`, `--batches` | **S-1**, **S-5** |
 | The `testusdview` suites run against both the build tree and the install tree | T3 | the eleven scripts of §5.6 | — (M5) |
 | hdPrman parity, MSAA/OIT, Metal/Vulkan compile | T4 | `docs/workstation-protocol.md` §§3, 5, 7 | **R-1**, **R-2**, **R-3** (release) |
@@ -1304,7 +1304,7 @@ anything in tier 4, which by construction cannot run here.
 * **A Ptex-enabled OpenUSD build.** Ptex is CPU-side at capture only; Storm's Ptex path is compiled
   out of this install and is mesh-only anyway (`S37`, `research/A8-seexpr-ptex-libs.md` §2.9).
 * **hdPrman in CI.** No RenderMan on this host; R-1 stays a tier-4 protocol.
-* **Multi-GPU / multi-vendor CI.** One GB10, one driver.
+* **Multi-GPU / multi-vendor CI.** One measurement host, one driver.
 * **Cross-compilation and static-only distributions.**
 * **A third-party operator ABI** and an OpenExec backend — both v3 (`ADR §3`, `S16`); neither appears
   in the target graph.

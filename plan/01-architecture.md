@@ -856,7 +856,7 @@ and milestones come from `09-performance-and-benchmarks.md` §5 (ADR §9 R40).
 |---|---|---|
 | **T0 engine** | `UsdGenGraph` / `UsdGenGraphDesc` over synthetic buffers, no Hydra and no USD; plus the build checks. Links `usdGenTestUtils` only — the T0 helper that itself links nothing but `usdGen` and is covered by gate B-1 | ms, every commit |
 | **T1 scene index** | headless tests over the **real** `UsdImagingCreateSceneIndices` chain plus the renderer-plugin append, with a recording observer; assert data-source contents **and emitted dirty locators**. Uses `usdGenTestUtilsHd` (`sceneFixture.h`, `recordingObserver.h`) | < 100 ms each — the primary suite |
-| **T2 Storm** | the EGL harness on the GB10, headless (`eglctx.h` and `imageDiff.h` in `usdGenTestUtilsHd`, carried from `prototypes/storm-hair-look/eglctx.h`); golden images plus GPU frame timing | ~1 s each |
+| **T2 Storm** | the EGL harness on the measurement host, headless (`eglctx.h` and `imageDiff.h` in `usdGenTestUtilsHd`, carried from `prototypes/storm-hair-look/eglctx.h`); golden images plus GPU frame timing | ~1 s each |
 | **T3 app** | `testusdview` under the scratchpad Xvfb (`DISPLAY=:77`, llvmpipe), against `usdGenTestUtilsHd`'s fixtures. **llvmpipe frame times are CPU numbers, never quoted as Storm numbers.** | seconds, pre-merge |
 | **T4 workstation** | MSAA/OIT, Metal/Vulkan Hgi, non-NVIDIA drivers, a real hdPrman install, 4K interactive. **Release criteria `RC-n` only, never milestone exits** (ADR §7, §9 R39). | manual |
 

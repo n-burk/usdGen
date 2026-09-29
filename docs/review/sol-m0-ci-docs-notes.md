@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # sol CI/docs validation notes
 ## Findings
 

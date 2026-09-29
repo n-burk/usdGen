@@ -43,8 +43,8 @@ side = png + ".json"
 json.dump({
     "golden": "stormLook_A.png",
     "git_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-    "host": os.uname().nodename,
-    "gpu": grab("GL_RENDERER") or "GB10 (nvidia)",
+    "host": "redacted",
+    "gpu": grab("GL_RENDERER") or "unknown",
     "gl_version": grab("GL_VERSION"),
     "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "command": "bin/regen_goldens.sh (testUsdGenStormLook, complexity 1.2, 256x256)",

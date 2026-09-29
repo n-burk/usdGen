@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # Execution report — CODE LANE A (gates + chain test + plugin registration)
 
 Date: 2026-09-05 (usdGen M0, OpenUSD 26.08)

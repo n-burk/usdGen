@@ -72,7 +72,7 @@ never by handing a texture to Storm, except for the one UV path that is measured
 
 ### 0.3 The measurements this document rests on
 
-Every number below was produced on this host (Linux aarch64, NVIDIA GB10, driver 580.173.02,
+Every number below was produced on this host (Linux aarch64, measurement host, driver 580.173.02,
 GL 4.6 compatibility profile through an EGL device-platform context; `research/ENVIRONMENT.md`
 CORRECTIONS block).
 
@@ -1704,7 +1704,7 @@ downstream changes when they switch.
 Tiers are T0–T4, fixed by ADR §9.1 R2 and defined in `10-build-dependencies-testing.md` §5.1: T0 engine,
 no USD and no Hydra; T1 headless scene index over the real `UsdImagingCreateSceneIndices` chain;
 T2 Storm through the EGL device-platform harness (`prototypes/storm-hair-look/eglctx.h`) on the
-GB10; T3 `testusdview` under a user-space Xvfb on `DISPLAY=:77` (llvmpipe — CPU numbers, never quoted
+measurement host; T3 `testusdview` under a user-space Xvfb on `DISPLAY=:77` (llvmpipe — CPU numbers, never quoted
 as Storm numbers), with `10-build-dependencies-testing.md` §5.2 owning how CI stands that server up
 (the `USDGEN_XVFB_ROOT` entry of its §3.5 variable registry), since
 the research scratchpad it originally ran in no longer exists (§2.8); T4 workstation protocol, a

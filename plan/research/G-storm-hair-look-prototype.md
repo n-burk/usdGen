@@ -26,7 +26,7 @@ $ $P/eglprobe
 devices=3
 dev 0: EGL 1.5 vendor=NVIDIA
 dev 0: surfaceless=yes no_config=yes
-dev 0: GL_VERSION=4.5.0 NVIDIA 580.173.02   GL_RENDERER=NVIDIA GB10/PCIe   GLSL=4.50 NVIDIA
+dev 0: GL_VERSION=4.5.0 NVIDIA 580.173.02   GL_RENDERER=measurement host   GLSL=4.50 NVIDIA
 OK-CONTEXT dev=0
 ```
 
@@ -298,7 +298,7 @@ normals it reads as shiny plastic tubes, not hair.
 ## 5. Measured performance (real, this machine)
 
 `$P/bench_hair.cpp`: `UsdImagingGLEngine` + `color` AOV, 1280×720, one camera light, 8 warm-up frames,
-`glFinish()` inside the timed region. GPU **NVIDIA GB10**, driver 580.173.02, GL 4.6 compat.
+`glFinish()` inside the timed region. GPU **measurement host**, driver 580.173.02, GL 4.6 compat.
 Scene: cubic/bspline/pinned curves, 8 CVs, `widths` vertex, our glslfx material, `minScreenSpaceWidths=1`.
 Complexity → refineLevel per `usdImagingGL/engine.cpp:2317-2350`: 1.0→0, 1.1→1, 1.2→2, 1.3→3.
 
@@ -421,7 +421,7 @@ so it is correct for hdPrman/Karma and does not silently pick up `cross(N,(0,1,0
 - **MaterialX `chiang_hair_bsdf` compiles and renders in Storm 26.08** (`mx_chiang_hair_bsdf` at line 3303 of `$P/dump_mtlx/program5_shader9_FRAGMENT_SHADER.glsl`) but looks near-black even at melanin 0.03, because `Tworld` is `cross(normalWorld,(0,1,0))` when no texcoord primvar is present (`materialXShaderGen.cpp:29-46`, verbatim at dump lines 2239-2251) and Storm's MaterialX light loop does not drive the TT/TRT lobes.
 - An explicit `ND_geompropvalue_vector3(geomprop="hairTangent")` **does** feed `curve_direction` in Storm — verified in `$P/dump_mtlx2/...`: `#define HD_HAS_hairTangent 1` (169), `HdGet_hairTangent` (687), `vd.i_geomprop_hairTangent` used as `curve_direction` (3426).
 - **UsdPreviewSurface + `UsdPrimvarReader_float2` on a UNIFORM `st` + `UsdUVTexture` works on curves** — per-curve root-UV texture lookup, proven by the checker/gradient mapping in `$P/hair_preview_tex.png`; `HdGet_st()` resolves via `GetAggregatedElementID()`.
-- Measured Storm frame times at 1280×720 on NVIDIA GB10 (driver 580.173.02), one draw item, our glslfx: 4 k curves 0.85 ms; 40 k 5.0 ms; **200 k curves / 1.6 M CVs 23.9 ms (42 fps)** at refineLevel 2. Per-frame points re-author + upload adds 0.22 / 0.83 / 2.46 ms respectively.
+- Measured Storm frame times at 1280×720 on measurement host (driver 580.173.02), one draw item, our glslfx: 4 k curves 0.85 ms; 40 k 5.0 ms; **200 k curves / 1.6 M CVs 23.9 ms (42 fps)** at refineLevel 2. Per-frame points re-author + upload adds 0.22 / 0.83 / 2.46 ms respectively.
 - refineLevel 0 is *slower* than refineLevel 1 at 200 k curves (12.4 vs 8.2 ms) because cubic curves at level 0 are drawn as a per-CV `LineList` polyline (`basisCurves.cpp:292-301`). Interaction LOD should reduce curve **count**, not refine level.
 - `usdrecord`/`UsdAppUtilsFrameRecorder` with `SetCameraLightEnabled(false)` renders the scene **black** despite two `UsdLux` `DistantLight`s (`frameRecorder.cpp:436-454` passes an empty `GlfSimpleLightVector`); the tools plan must set lighting explicitly.
 - glslfx `textures` entries honour a `"default"` value (`hio/glslfxConfig.cpp:34, 548-550`), so an unconnected map input yields white rather than the parser's black fallback (`parserPlugin.cpp:236-242`).

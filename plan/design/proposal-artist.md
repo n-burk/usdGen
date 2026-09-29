@@ -54,7 +54,7 @@ things, and every design choice below is traceable to one of them:
    unit* on the **rest** surface, which is the only definition stable under deformation. A host groomer
    quotes density per unit²; A7 §9.1 keeps the same.
 4. **ASSUMPTION** — v1 targets ≤ 1 M rendered curves and ≤ 200 k interactive curves per
-   description. 200 k × 8 CV at refineLevel 2 is 23.9 ms/frame on this GB10 (S31, MEASURED), so
+   description. 200 k × 8 CV at refineLevel 2 is 23.9 ms/frame on the measurement host (S31, MEASURED), so
    the interactive LOD ladder (§3.6) is mandatory above ~150 k.
 5. **ASSUMPTION** — The `UsdGenMask` abstract prim base named in S9's parenthetical is realised
    here as (a) an applied API schema `UsdGenMaskAPI` — the per-operator mask *slot* — plus (b)
@@ -1185,7 +1185,7 @@ def Material "HairLook"
 ```
 
 **MEASURED** (S35, `G-storm-hair-look`): the glslfx parses in Sdr (20 inputs, `primvars` metadata
-`hairId|hairT|hairTangent|st`), compiles and renders in Storm with zero warnings on this GB10;
+`hairId|hairT|hairTangent|st`), compiles and renders in Storm with zero warnings on the measurement host;
 `float[2]`/`float[4]` parameters bind fine; a bound material's tag beats `displayOpacity`, so two
 files ship — `usdGenHairPreview.glslfx` (`defaultMaterialTag`, alpha-to-coverage: the default for
 scalp hair) and `usdGenHairPreviewTranslucent.glslfx` (`translucent`, routed to `HdxOitRenderTask`:
@@ -1506,7 +1506,7 @@ function. `usdGenConfig.cmake` guards `if(NOT TARGET usd)`.
 | Tier | What | Where it runs |
 |---|---|---|
 | 1 | Headless scene-index tests over the real `UsdImagingCreateSceneIndices` chain, sub-100 ms, no GL — the primary regression suite | this host |
-| 2 | Storm correctness and GPU timing headlessly via the **EGL device-platform context** (`probes/storm-hair-look/eglctx.h`, EXISTS, renders on the GB10); fallback Xvfb+llvmpipe on `DISPLAY=:77` for CPU-only numbers | this host |
+| 2 | Storm correctness and GPU timing headlessly via the **EGL device-platform context** (`probes/storm-hair-look/eglctx.h`, EXISTS, renders on the measurement host); fallback Xvfb+llvmpipe on `DISPLAY=:77` for CPU-only numbers | this host |
 | 3 | `testusdview` scripts for the app loop (§8.8) | this host, on `:77` |
 | 4 | Workstation protocols: MSAA quality, Metal/Vulkan Hgi path, non-NVIDIA drivers, instancer scaling (`G-instancing` §9), multi-prim Sync cost | elsewhere, documented |
 

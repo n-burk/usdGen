@@ -6674,7 +6674,7 @@ Local toolchain provisioning is now verified: four exact ARM64 package versions
 and SHA256 hashes are recorded in `scripts/vulkan-toolchain-manifest.txt`;
 root verified all downloaded hashes. Extracted tools/headers live under the
 ignored `.vulkan-toolchain/root` directory, without system installation.
-Root independently ran vulkaninfo: NVIDIA GB10 API 1.4.312, proprietary driver
+Root independently ran vulkaninfo: measurement host API 1.4.312, proprietary driver
 580.173.02, and llvmpipe API 1.4.318 enumerate successfully. This proves native
 device discovery, not application compute execution. The local development
 package's `libvulkan.so` symlink lacks its runtime target, so build integration
@@ -6698,7 +6698,7 @@ remain required next steps.
 The opt-in `USDGEN_BUILD_VULKAN_TESTS` target builds and validates SPIR-V,
 links the host Vulkan loader, and uses the shared GPU test resource lock.
 Root completed the native Width probe and ran it successfully on the NVIDIA
-GB10 (0.51 seconds). It creates a real Vulkan device/queue/pipeline/buffers,
+measurement host (0.51 seconds). It creates a real Vulkan device/queue/pipeline/buffers,
 uses explicit host/compute visibility barriers, and waits on a bounded native
 fence before test-only readback. Set/multiply output, a 257-point partial
 workgroup, overflow/invalid-input status, empty-control preflight, output
@@ -6768,7 +6768,7 @@ integration remain unverified; compilation is not lifecycle proof.
 ### Vulkan resource lifecycle hardware proof
 
 Root fixed the resource-test include path, built the target, and verified both
-normal and lost-proof modes on NVIDIA GB10. All three Vulkan probes (resource
+normal and lost-proof modes on measurement host. All three Vulkan probes (resource
 lifecycle, quarantine, scalar Width) then passed 20 consecutive repetitions
 each: 60 successful executions in 25.11 seconds. Full CUDA-enabled and
 CUDA-disabled builds also pass after the native-source isolation change.
@@ -6812,7 +6812,7 @@ The new cases exercise ten invalid context configurations, immutable pool
 configuration mismatch, invalid buffer construction, null fence/lifetime,
 double arm, pending poll, real submission-lifetime retention and release,
 and a separate destructor-triggered quarantine whose charge and native owners
-survive later fence completion. All five Vulkan probes pass together on GB10
+survive later fence completion. All five Vulkan probes pass together on measurement host
 (2.10 seconds). These remain native ownership tests, not production Session
 or complete cross-platform execution evidence.
 
@@ -6846,7 +6846,7 @@ low-level trusted `DeviceContext::Create` remains available; no claim that
 arbitrary externally supplied raw handles prove their own association is made.
 
 Root's factory test passes with API/synchronization validation: independent
-instances of the same GB10 UUID share one pool, 32 requests initiated in an
+instances of the same measurement host UUID share one pool, 32 requests initiated in an
 owner frame converge on one entry, configuration mismatches reject, different
 UUID entries do not alias, mismatched native UUIDs cannot construct a context,
 and allocations from two native contexts charge the same exact ledger.
@@ -6949,7 +6949,7 @@ validation (10.99 seconds). After adding exact footprint assertions, all 11
 native Vulkan fixtures passed together, with the new notification capability
 probe skipped (12 registered, 5.60 seconds). No validation errors occurred.
 
-The GB10 driver advertises VK_KHR_external_fence_fd but does not report
+The measurement host driver advertises VK_KHR_external_fence_fd but does not report
 SYNC_FD fence exportability. The Linux probe therefore correctly skips before
 attempting export. This is not evidence of a working pollable notification
 bridge. Autonomous completion, the owner-scheduled Source/Width job, neutral
@@ -6992,13 +6992,13 @@ proof: no autonomous backend execution is claimed. Retained completed handles
 still hold admission credits in this baseline; immutable control detachment is
 under review rather than adding an application mutex.
 
-The separate semaphore SYNC_FD probe also skips on GB10: exportability is
+The separate semaphore SYNC_FD probe also skips on measurement host: exportability is
 unsupported (0.47 seconds). A capability-gated timeline notification probe is
 next, with a dedicated native waiter outside framework/owner workers and a
 host-signaled control timeline. Production completion-service integration,
 neutral adapters, Session routing and the full plan remain open.
 
-The timeline capability alternative is now proved on GB10: 20 repetitions of
+The timeline capability alternative is now proved on measurement host: 20 repetitions of
 GPU-signaled completion and host-signaled control wake passed under validation
 (16.58 seconds). Each wait runs on a dedicated native test thread, not an owner
 or framework worker; the original proof fence remains intact. Root corrected
@@ -7973,7 +7973,7 @@ consumer execution pass against final native headers/library and all five
 shader modules. git diff --check is clean. All worker assignments and root
 build/test processes are terminal. CPU/CUDA suites were not rerun for this
 Vulkan-only checkpoint; their preceding recorded results remain historical
-evidence, not new runs. Linux ARM64/NVIDIA GB10 only; broader execution-graph
+evidence, not new runs. Linux ARM64/measurement host only; broader execution-graph
 implementation and cross-platform validation remain unfinished.
 
 ### Vulkan C3 authored named-channel transport (2026-09-14)
@@ -8191,7 +8191,7 @@ test; it is not a claim of exhaustive field-by-field runtime testing.
 Scope still open: broader CUDA/Vulkan operators and compositions, maps and
 source transforms/resampling, actual ready-branch GPU concurrency, renderer
 residency/global Vulkan availability, broader reliability/soak and additional
-platform/driver validation. This checkpoint is Linux ARM64/NVIDIA GB10 only.
+platform/driver validation. This checkpoint is Linux ARM64/measurement host only.
 Metal and the user's excluded work remain excluded. The full execution-graph
 goal is active and is not marked complete by this tested source-capture slice.
 
@@ -8737,7 +8737,7 @@ PASS with all nine shaders and typed rooted Reparam threshold compilation.
 Remaining native ownership/domain/admission and Cull→Reparam runtime composition
 tests, plus full regression, are still in progress.
 
-Final native fixture review and focused validation now PASS (0.61s, NVIDIA GB10).
+Final native fixture review and focused validation now PASS (0.61s, measurement host).
 Coverage includes absent and equal-byte-but-foreign hairT ownership rejection,
 invalid hairT extent/usage/context before submission, negative/above-one/NaN/Inf
 shader-domain rejection, missing-module admission, mandatory resource saturation,
@@ -8760,7 +8760,7 @@ remains current. No new CUDA/CPU full-suite run is claimed for this Vulkan-only
 slice, and no production CPU geometry fallback/readback was introduced.
 
 Literal Length CutExtend+Reparam is implemented and verified on Linux ARM64
-NVIDIA GB10; the broader goal is still open. Remaining work includes nonidentity
+measurement host; the broader goal is still open. Remaining work includes nonidentity
 Length controls, additional Vulkan operators, whole-graph native RBF resource
 refinement, actual GPU branch concurrency, renderer residency, and additional
 platform/driver validation. Metal (excluded item 8) remains out of scope.
@@ -8808,7 +8808,7 @@ float/double minimum + rooted Reparam threshold lowering. This is package/compil
 evidence, not yet GPU geometry evidence for the new minimum path. Native and
 Session runtime fixtures and additional CUDA conformance tests are in progress.
 
-New native minimum core build/runtime PASS (0.82s, NVIDIA GB10, VUID/SYNC-free):
+New native minimum core build/runtime PASS (0.82s, measurement host, VUID/SYNC-free):
 binding and nonbinding floors, Scale/Set × radial/KeepParam/Reparam, radial ignored
 rebuild, same-current Reparam sampling, zero-current positive-floor failure,
 empty and invalid controls. Full inherited packet owners/bytes, geometry metadata,

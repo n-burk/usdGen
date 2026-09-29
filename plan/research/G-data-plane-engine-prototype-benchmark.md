@@ -24,7 +24,7 @@ cmake --build <probedir>/build
 #                 CMAKE_CXX_FLAGS_RELEASE = "-O3 -DNDEBUG"
 ```
 
-Host (measured, `lscpu`): aarch64, **NVIDIA GB10 = 10× Cortex-X925 + 10× Cortex-A725** (20 cores,
+Host (measured, `lscpu`): aarch64, **measurement host = 10× Cortex-X925 + 10× Cortex-A725** (20 cores,
 heterogeneous — this matters for the scaling curves), SVE2 present, g++ 13.3.0, cmake 3.28.3.
 `perf` is refused (`/proc/sys/kernel/perf_event_paranoid = 4`) and `gdb -p` is refused by yama
 `ptrace_scope`, so profiling was done with an in-process SIGPROF sampler.
@@ -614,7 +614,7 @@ The prototype shows it can be made to work; the mandatory rules are:
   buffers; neither prototype measures allocation-dominated frames.
 - **Cross-chunk kernels.** Clumping to a *guide* curve owned by another chunk, and any neighbour
   search, are not modelled. The `UpstreamChunks` hook in §7 is a placeholder; its cost is unmeasured.
-- **GPU.** Everything here is CPU. A GB10-class machine could plausibly run these kernels in HGI
+- **GPU.** Everything here is CPU. A measurement-host-class machine could plausibly run these kernels in HGI
   compute and skip the CPU chain entirely for playback, but Storm/HGI could not be exercised on this
   host (no display, GLX-only garch — see `ENVIRONMENT.md`).
 - **Motion blur.** Neither prototype evaluates at multiple sample times; see

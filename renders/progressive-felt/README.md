@@ -20,7 +20,7 @@ appeared at 3.078 seconds, followed by a settled final frame.
 Reproduce from the repository root:
 
 ```powershell
-$env:USDGEN_PROGRESS_DIR = 'D:\work\usdGen\renders\progressive-felt'
+$env:USDGEN_PROGRESS_DIR = Join-Path (Get-Location) 'renders\progressive-felt'
 .\bin\launch_usdview.ps1 -TestScript .\tools\capture_progressive_felt.py .\examples\felt\felt_sphere.usda --allow-async --renderer GL
 python .\tools\encode_progressive_gif.py .\renders\progressive-felt
 ```

@@ -8,7 +8,7 @@ It does **not** establish quality or performance parity with a host renderer.
 Two materials ship. `UsdGenHairPreview*` (three variants, C5-frozen inputs) is
 the original approximate model described below. `UsdGenHairStrands` /
 `UsdGenHairStrandsTranslucent` is a port of a host renderer's strand-hair shading and is
-what a usdGen tile binds by default; see **the host renderer-parity strand hair** at the end.
+what a usdGen tile binds by default; see **Strand-hair shading** at the end.
 
 ## Progressive Storm viewport tiles
 
@@ -153,7 +153,7 @@ reference and fails if power 2 ever beats power 4 on transmittance.
 
 Procedural CPU grooms automatically receive the density data and bind the
 default material at high/veryhigh complexity — `UsdGenHairStrands` since the
-the host renderer-parity work below; `UsdGenHairPreview*` remain available and are
+strand-hair shading below; `UsdGenHairPreview*` remain available and are
 bound by naming them on the description's material. There is no new
 renderer plugin or OpenUSD patch. CUDA-to-stock-Storm publication remains
 unimplemented in this checkout; this change does not add that handoff.
@@ -272,7 +272,7 @@ the stock material/scene-index path implemented here.
 References: [the host vendor groom pipeline and performance](https://dev.epicgames.com/documentation/unreal-engine/groom-scalability-and-performance-with-unreal-engine),
 [Pixar volumetric hair methods](https://graphics.pixar.com/library/Hair/paper.pdf).
 
-## the host renderer-parity strand hair
+## Strand-hair shading
 
 `usdGenShaders/resources/shaders/usdGenHairStrands.glslfx` and
 `...Translucent.glslfx` share `usdGenHairStrandsBsdf.glslfx` and are registered

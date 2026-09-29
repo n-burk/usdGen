@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # exec-code-B report — lane B (package config, install layout, public API)
 
 Run: lane B of the M0 exit-criteria fix round. Assigned: S-5/X-4, S-6, S-7, S-8.

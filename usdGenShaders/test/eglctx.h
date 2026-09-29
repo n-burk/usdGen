@@ -1,5 +1,5 @@
 // Vendored verbatim from docs/prework/probes/PW-egl/eglctx.h (known-good
-// PW-2 EGL harness on this GB10 host); kept in sync manually.
+// PW-2 EGL harness on the measurement host); kept in sync manually.
 // Headless GL context via EGL_EXT_platform_device. No EGL headers on this host,
 // so entry points are declared by hand and resolved via dlopen/eglGetProcAddress.
 #pragma once

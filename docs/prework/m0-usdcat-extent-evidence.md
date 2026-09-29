@@ -1,3 +1,5 @@
+> Historical engineering note. It records a review or probe, not the current product overview. Start at the [repository README](../../README.md) and [docs index](../README.md).
+
 # M0 exit gate evidence — usdcat / extent on `UsdGenDescription`
 
 Gate (`plan/11-roadmap.md` §2.1): *"usdcat --flatten on the M0 fixture resolves

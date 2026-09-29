@@ -73,7 +73,7 @@ R9 usdview tools on the Storm viewport: freeze an operator's output, then comb/g
    app → data modification → Hydra loop during interaction; commit to the stage via the tool.
 ```
 
-Working name **usdGen**: sibling repo `<usdgen-src>` (empty today,
+Working name **usdGen** (this repository; the 2026-09 measurement-host note is
 `research/ENVIRONMENT.md`), C++ prefix `UsdGen`, namespace `usdGen`, property namespace `usdGen:`,
 plugin display name "usdGen". The reference system is usdRig (code name RigExec,
 `<usdrig-src>`).
@@ -478,7 +478,7 @@ definitive statement is `10-build-dependencies-testing.md` §5.1):
 |---|---|---|
 | **T0** | pure engine: `UsdGenGraph`/kernels/operators over synthetic buffers, no Hydra, no USD | every commit, milliseconds |
 | **T1** | headless scene-index tests over the real `UsdImagingCreateSceneIndices` chain with a recording observer, asserting values **and** emitted dirty locators | every commit; the primary regression suite, target < 100 ms each (**ASSUMPTION** — design budget, `design/proposal-risk.md` §9.1) |
-| **T2** | Storm through the EGL device-platform harness (`prototypes/storm-hair-look/eglctx.h`) on the GB10: golden images and GPU frame timing | every commit for correctness, nightly for timing |
+| **T2** | Storm through the EGL device-platform harness (`prototypes/storm-hair-look/eglctx.h`) on the measurement host: golden images and GPU frame timing | every commit for correctness, nightly for timing |
 | **T3** | `testusdview` scripts under the scratchpad Xvfb (`DISPLAY=:77`, llvmpipe — **CPU numbers, never Storm numbers**) | pre-merge |
 | **T4** | workstation protocols: MSAA/OIT quality, Metal/Vulkan Hgi, non-NVIDIA drivers, a real hdPrman install, 4K | manual; **release criteria, never a milestone exit** (ADR §7) |
 
