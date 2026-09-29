@@ -1,0 +1,131 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Showcase: dense scatter/grow fur with layered noise, length, and width styling on a unit plane."
+)
+
+# SHOWCASE — Scatter / Grow / Style
+#
+# A clear groom graph for demos: Scatter -> Grow -> Noise -> Length -> Width.
+# CPU lane (plain Xform parent). Documented for usdview + usdrecord.
+#
+# View:
+#     source bin/_env.sh
+#     "$PY" "$USD/bin/usdview" examples/showcase/scatter-grow-styled.usda
+# Record:
+#     usdrecord --renderer Storm --camera /World/Cam \
+#         examples/showcase/scatter-grow-styled.usda renders/showcase/scatter-grow-styled.png
+
+def Xform "World"
+{
+    def Camera "Cam"
+    {
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+        matrix4d xformOp:transform = ( (0.752577, 0, -0.658505, 0), (-0.319565, 0.874354, -0.365217, 0), (0.575766, 0.485289, 0.658018, 0), (1.9, 1.35, 2.15, 1) )
+        float2 clippingRange = (0.05, 50)
+        float focalLength = 35
+        float horizontalAperture = 24
+        float verticalAperture = 18
+    }
+
+    def DistantLight "Key"
+    {
+        float inputs:intensity = 12
+        bool inputs:normalize = 1
+        color3f inputs:color = (1, 0.98, 0.94)
+        float3 xformOp:rotateXYZ = (-12, 42, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Rim"
+    {
+        float inputs:intensity = 5
+        bool inputs:normalize = 1
+        color3f inputs:color = (0.75, 0.85, 1.0)
+        float3 xformOp:rotateXYZ = (25, -120, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Mesh "Plane" (
+        prepend apiSchemas = ["UsdGenRestAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        point3f[] primvars:rest = [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        color3f[] primvars:displayColor = [(0.2, 0.2, 0.24)]
+    }
+
+    def Xform "Groom"
+    {
+        def UsdGenDescription "Fur"
+        {
+            rel usdGen:surface = </World/Plane>
+            uniform token usdGen:curve:basis = "bspline"
+            float usdGen:width:default = 0.0035
+            color3f usdGen:look:rootColor = (0.12, 0.08, 0.05)
+            color3f usdGen:look:tipColor = (0.45, 0.28, 0.12)
+
+            def Scope "Ops"
+            {
+                def UsdGenWidth "width"
+                {
+                    float usdGen:width = 0.0055
+                    float2[] usdGen:width:knots = [(0, 1), (0.55, 0.75), (1, 0.15)]
+                    uniform token usdGen:width:interpolation = "catmullRom"
+                    bool usdGen:replace = true
+                }
+
+                def UsdGenLength "length"
+                {
+                    uniform token usdGen:length:mode = "scale"
+                    float usdGen:length:value = 1.15
+                    float2 usdGen:length:random = (0.55, 1.05)
+                    uniform token usdGen:length:method = "scale"
+                    uniform token usdGen:rebuild = "keepParam"
+                }
+
+                def UsdGenNoise "clumpNoise"
+                {
+                    int usdGen:seed = 11
+                    float usdGen:noise:magnitude = 0.04
+                    float2[] usdGen:noise:magnitude:knots = [(0, 0), (0.35, 0.25), (1, 1)]
+                    uniform token usdGen:noise:magnitude:interpolation = "catmullRom"
+                    float usdGen:noise:frequency = 1.8
+                    float usdGen:noise:correlation = 0.65
+                    int usdGen:noise:octaves = 3
+                    float usdGen:noise:lacunarity = 2.1
+                    float usdGen:noise:gain = 0.45
+                    bool usdGen:cumulative = false
+                    float usdGen:preserveLength = 1
+                    float usdGen:mask = 1
+                }
+
+                def UsdGenGrow "grow"
+                {
+                    int usdGen:seed = 29
+                    int usdGen:segments = 14
+                    float usdGen:length = 0.32
+                    float2 usdGen:lengthRandom = (0.75, 1.25)
+                    uniform token usdGen:direction = "vector"
+                    vector3f usdGen:directionVector = (0.28, 1, 0.18)
+                }
+
+                def UsdGenScatter "scatter"
+                {
+                    int usdGen:seed = 53
+                    float usdGen:density = 1200
+                }
+            }
+        }
+    }
+}

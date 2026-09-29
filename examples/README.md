@@ -19,6 +19,7 @@ and render headlessly:
 | `clump-ptex-plane.usda` | CPU | clumping from Ptex maps: a region map decides clump membership, a second map the clump tightness; two clump levels |
 | `rbf-guides-plane.usda` | CPU | hair deformed by animated curves: `UsdGenDeform` with `usdGen:guides` bends the groom through a cubic RBF over 16 driver curves (frames 1-48; press play) |
 | [motion/](motion/README.md) | CPU | seven 100-frame demos: squash/stretch sphere, groom outside the moving Xform, animated braids, combined guide/surface deformation, simulated centers, and Ptex-separated two-center growth/deformation; rest growth is reused during playback |
+| [showcase/](showcase/README.md) | CPU | first-look scenes: a three-strand Pomade plait (`pomade-plait-braid.usda`) and a styled scatter-grow groom (`scatter-grow-styled.usda`) |
 | `cuda-width-network.usda` | CUDA | CurveSource -> Width on the device lane (cooks; stock Storm cannot display device-resident curves yet) |
 | `cuda-rbf-network.usda` | CUDA | CurveSource -> RBF Deform -> Width |
 | `cuda-length-network.usda` | CUDA | CurveSource -> Length -> Width |
