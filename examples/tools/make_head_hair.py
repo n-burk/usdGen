@@ -226,9 +226,8 @@ DOME_TEXTURE = "./maps/StinsonBeach.hdr"
 # below, converted sRGB->linear properly -- Storm's render path is linear
 # with no tonemap, so a single measured render solves the scale exactly):
 # the best clean, unshadowed 24x24px bare-skin window (a max-mean box scan
-# rejecting any window touching the pale background) averaged 0.196 linear,
-# against target_metahuman.png's own measured 0.454 linear -- about 2.3x
-# under. Target mid-range is 0.40-0.45; the true ceiling is a handful (~50
+# rejecting any window touching the pale background) averaged 0.196 linear.
+# Target mid-range is 0.40-0.45; the true ceiling is a handful (~50
 # of 1.2M) of hair/background silhouette anti-aliasing pixels, not real
 # material response (traced their coordinates: they trace the diagonal
 # hair/skin/background boundary line exactly), whose 99.99th-percentile
