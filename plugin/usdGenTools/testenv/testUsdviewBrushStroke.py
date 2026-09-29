@@ -113,7 +113,7 @@ class Mouse:
     coordinates, so everything converts once, here. Moves during a drag go
     straight at the widget: QTest.mouseMove reports NoButton even after a
     press in this Qt build, and a drag must carry LeftButton (the
-    testUsdviewTonicGraph.Mouse arrangement).
+    testUsdviewPomadeGraph.Mouse arrangement).
     """
 
     def __init__(self, view):

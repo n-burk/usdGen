@@ -3,7 +3,7 @@
 Gap G freeze/bake, part (a): whole-subtree undo for a freeze.
 
 Extends the shape of usdRig's attribute-only EditRecorder
-(/home/burkard/work/usdRig/plugin/rigExecUsdview/rigExecUndo.py:203-243)
+(<usdrig-src>/plugin/rigExecUsdview/rigExecUndo.py:203-243)
 to a whole prim subtree, using Sdf.CopySpec into an anonymous stash layer
 plus nameChildren removal.  Measures author / stash / undo / redo for a
 10k-curve BasisCurves freeze, and compares against the "freeze lives in

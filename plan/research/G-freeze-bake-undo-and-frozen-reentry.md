@@ -1,9 +1,9 @@
 # G — Freeze / bake / undo, and how a frozen curve prim re-enters the graph
 
 Gap key: `freeze-bake-undo-and-frozen-reentry`.
-All paths absolute. `USD` = `/home/burkard/work/OpenUSD` (v26.08 source),
-`USDI` = `/home/burkard/work/OpenUSD_26_08` (install), `RIG` = `/home/burkard/work/usdRig`,
-`SCR` = `/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad`,
+All paths absolute. `USD` = `<openusd-src>` (v26.08 source),
+`USDI` = `$USD` (install), `RIG` = `<usdrig-src>`,
+`SCR` = `<session-scratch>`,
 probes in `SCR/probes/freeze-bake/`.
 
 Everything below was **run**, headless, on this machine (llvmpipe Storm under the
@@ -218,9 +218,9 @@ terminal prim /Groom/Frozen type=basisCurves
 |---|---|---|---|
 | `points`, `curveVertexCounts`, `type`, `basis`, `wrap` | schema | the curves themselves | topology line above; `wrap=pinned` survives (`USD/pxr/usdImaging/usdImaging/basisCurvesAdapter.cpp:367-368` in the 1.0 path) |
 | `widths` | `float[]`, `vertex` | Storm needs it; the adapter falls back `primvars:widths` → inherited → `widths` (`basisCurvesAdapter.cpp:140-263`, `:230-239`) | reaches SI as primvar `widths` interp `vertex` |
-| `primvars:rest` | `point3f[]`, `vertex` | Houdini Guide Deform / Hair Procedural `primvars:rest` (A7 §3.6, §3.7) | role `point`, 80 000 elements |
-| `primvars:skinprim` | `int[]`, `uniform` | Houdini `Prim Num Attribute` (A7 §3.6) — the bound face index per curve | uniform, 10 000 |
-| `primvars:skinprimuv` | `texCoord2f[]`, `uniform` | Houdini `Prim UVW Attribute` — barycentric/uv within that face | role `textureCoordinate` |
+| `primvars:rest` | `point3f[]`, `vertex` | a DCC Guide Deform / Hair Procedural `primvars:rest` (A7 §3.6, §3.7) | role `point`, 80 000 elements |
+| `primvars:skinprim` | `int[]`, `uniform` | a DCC `Prim Num Attribute` (A7 §3.6) — the bound face index per curve | uniform, 10 000 |
+| `primvars:skinprimuv` | `texCoord2f[]`, `uniform` | a DCC `Prim UVW Attribute` — barycentric/uv within that face | role `textureCoordinate` |
 | `primvars:usdGen:curveId` | `int[]`, `uniform` | stable per-curve id: the key sculpt layers and re-freezes match on (A7 §9.1: "Frozen data should carry frozenEpoch … so a mismatch marks the freeze stale") | namespace **preserved** — the SI name is literally `usdGen:curveId` |
 | `primvars:usdGen:frozenEpoch` | `string`, **`constant`** | staleness digest of (scatter seed, surface topology, guide ids) | see §2.3 — reaches the SI and dirties precisely |
 | `primvars:usdGen:rootFrame` | `matrix4d[]`, `uniform`, optional | rest frame per root for the rigid-transport mode of `DeformWithSurface` (A7 §9.1 G7) | declared-but-unauthored primvars *do* appear, with no interpolation and no value — the consumer must test for a value, not for presence |

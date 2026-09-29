@@ -6,7 +6,7 @@ Open hair.usda. Keep guides.usdc, strands.usdc and skin.usdc beside it.
 - guides.usdc: /World/Guides, 2,500 curves. Default points and primvars:rest come from out_guides.abc. Points/widths at frames 1-48 come from groom_animated.abc. UsdGenCurveAPI and guide role are authored; purpose=guide keeps drivers out of ordinary renders.
 - skin.usdc: /World/Scalp. Default points and primvars:rest come from out_skin.abc. Points and UV animation at frames 1-48 come from skin_animated.abc. UsdGenRestAPI is authored.
 
-Rest/default time is distinct from frame 1. This matches the rest-plus-animated attribute pattern in D:/Codex/USD Hair/examples/rbf-guides-plane.usda. The source animated guide archive labels its curves as strands, but its curve counts and IDs match out_guides.abc; this conversion identifies them as guides.
+Rest/default time is distinct from frame 1. This matches the rest-plus-animated attribute pattern in <local-examples>/examples/rbf-guides-plane.usda. The source animated guide archive labels its curves as strands, but its curve counts and IDs match out_guides.abc; this conversion identifies them as guides.
 
 The collector uses 24 fps, frames 1-48, centimeter units and Z-up, matching adjacent asset collectors. These particular Alembics contain meter-scale positions. Groom axes are swapped into Y-up local space without dividing by 100. Skin positions are already Y-up local. One shared World transform scales by 100 and rotates +90 degrees around X into centimeter/Z-up stage space. Matching transform opinions in sublayers compose once.
 
@@ -16,7 +16,7 @@ This collector composes geometry and preview materials/lights/camera. It does no
 
 Validation: every animated point sample and guide width sample was compared against its transformed Alembic source; rest positions, guide IDs and topology correspondence were checked; the collector was reopened successfully. Interactive rendering and RBF deformation were not tested. See conversion_report.json for counts and file sizes.
 
-Rebuild script: C:/Users/dest1/Documents/Scratch/metahuman_python_export/convert_cabybara.py (Houdini 22 hython). It refuses existing output files. Source Alembics are unchanged.
+Rebuild script: <scratch>/convert_cabybara.py (the host application hython). It refuses existing output files. Source Alembics are unchanged.
 
 ## RBF hookup
 
@@ -26,7 +26,7 @@ The current project schema permits only CUDA execution, and CUDA explicitly reje
 
 Deform uses 100 RBF samples and lockRoots=false so the animal's motion carries the strand roots. Adjust /World/Groom/Hair/Ops/deform.usdGen:rbfSamples to tune accuracy/cost. This is an adapter for the CUDA surface path, not the reference's unavailable CPU guide-input path.
 
-Validation: USD graph targets, default/rest inputs, 48 driver samples and identity world transforms were checked. The project's trace_playback.ps1 process exited with code 1 without diagnostics using the configured D:/back/OpenUSD-install runtime, so live engine/rendered deformation could not be verified here. Reload hair.usda using the built usdGen plugin to evaluate it.
+Validation: USD graph targets, default/rest inputs, 48 driver samples and identity world transforms were checked. The project's trace_playback.ps1 process exited with code 1 without diagnostics using the configured <openusd-install> runtime, so live engine/rendered deformation could not be verified here. Reload hair.usda using the built usdGen plugin to evaluate it.
 
 ### Playback diagnosis
 

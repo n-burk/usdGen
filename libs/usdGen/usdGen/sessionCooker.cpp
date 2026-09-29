@@ -1965,7 +1965,7 @@ UsdGenStats publishedStats, bool invalidateValues,
         UsdGenFurOcclusionParams occlusion;
         occlusion.dispatcher = &dispatcher;
         // The emitting surfaces are opaque: without them light reaches hair
-        // through the scalp (Unreal injects the opaque depth for the same
+        // through the scalp (a host renderer injects the opaque depth for the same
         // reason). Deformed points at this frame, in the same world space the
         // tiles were transformed into.
         // A GeomSubset surface carries its whole parent mesh, which occludes
@@ -2170,7 +2170,7 @@ UsdGenTilePublication UsdGenSessionCooker::_BuildTilePublication(
 
     // Precedence (02 §2.14): an AUTHORED look on the description wins;
     // otherwise the source curves' own displayColor, which is what a
-    // MetaHuman-style asset already carries; otherwise the look's schema
+    // character asset already carries; otherwise the look's schema
     // defaults. "Authored" has to mean an opinion that differs from the
     // fallback -- a description that merely applies UsdGenLookAPI has a full
     // set of schema-default look values, and treating those as authored would

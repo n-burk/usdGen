@@ -1,0 +1,16 @@
+#usda 1.0
+#
+# Minimal Pomade CV-region fixture.  Two closed sub-face polygons can occupy
+# this one quad, making it useful for testing that a groom's regions do not
+# have to correspond one-for-one with scalp faces.
+
+def Mesh "Scalp"
+{
+    float3[] extent = [(-1, -0.1, -1), (1, 0.1, 1)]
+    int[] faceVertexCounts = [4]
+    # Wound for a +Y normal so the top-down Pomade camera sees the scalp and
+    # its lifted region overlay as front-facing geometry.
+    int[] faceVertexIndices = [0, 3, 2, 1]
+    point3f[] points = [(-1, 0, -1), (1, 0, -1), (1, 0, 1), (-1, 0, 1)]
+    color3f[] primvars:displayColor = [(0.22, 0.2, 0.19)]
+}

@@ -18,9 +18,9 @@ Toggle benchmark via `bench_refine.cpp` (same EGL/Storm harness as the prototype
 
 ```bash
 # env (all runs)
-export PATH=/home/burkard/.venv/bin:$PATH
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-export PXR_PLUGINPATH_NAME="...usdGenImaging/resources:...usdGenSchema/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd:/home/burkard/work/OpenUSD_26_08/lib/usd"
+export PATH=$VENV/bin:$PATH
+export LD_LIBRARY_PATH=$USD/lib
+export PXR_PLUGINPATH_NAME="...usdGenImaging/resources:...usdGenSchema/resources:$USD/plugin/usd:$USD/lib/usd"
 
 # toggle: r2 (cx 1.2) -> r1 (cx 1.1) -> r2 ... every 10 frames, 60 frames  [pre-existing, Sep 6 10:56]
 ./build/bench_refine toggle scene_200k_B.usdc /World/Cam 1280 720 1.2 1.1 10 60 0

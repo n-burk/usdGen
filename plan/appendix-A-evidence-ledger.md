@@ -39,7 +39,7 @@ H1 is heterogeneous (10× Cortex-X925 + 10× Cortex-A725). Both the bespoke TBB 
 
 ### 0.3 Conventions
 
-Paths are relative to `plan/` (`/home/burkard/work/usdGen/plan`): `research/<file>.md`, `design/<file>.md`, `prototypes/<dir>/<file>`. Siblings are cited **by section**, never by line number; only source files carry `file:line`. OpenUSD citations are relative to `/home/burkard/work/OpenUSD` at tag **v26.08** (`ee47c679a`), usdRig citations to `/home/burkard/work/usdRig` at `c92c040`; a citation outside `pxr/` names its full path from the source root (`extras/imaging/docs/…`). Generated headers are cited by their `.in` template (`pxr/pxr.h.in`), with the install copy named where it differs. This appendix carries no probe build lines (`appendix-B-prototype-inventory.md`) and no design rationale (the ADR and the numbered documents). It restates a gate id or a threshold only where the claim is unintelligible without it; **`09-performance-and-benchmarks.md` §5 owns every gate id, tier, milestone and threshold, and wins on conflict** (ADR §9 R40).
+Paths are relative to `plan/` (`<usdgen-src>/plan`): `research/<file>.md`, `design/<file>.md`, `prototypes/<dir>/<file>`. Siblings are cited **by section**, never by line number; only source files carry `file:line`. OpenUSD citations are relative to `<openusd-src>` at tag **v26.08** (`ee47c679a`), usdRig citations to `<usdrig-src>` at `c92c040`; a citation outside `pxr/` names its full path from the source root (`extras/imaging/docs/…`). Generated headers are cited by their `.in` template (`pxr/pxr.h.in`), with the install copy named where it differs. This appendix carries no probe build lines (`appendix-B-prototype-inventory.md`) and no design rationale (the ADR and the numbered documents). It restates a gate id or a threshold only where the claim is unintelligible without it; **`09-performance-and-benchmarks.md` §5 owns every gate id, tier, milestone and threshold, and wins on conflict** (ADR §9 R40).
 
 ---
 
@@ -53,11 +53,11 @@ Linux 6.17, **aarch64**, 20 CPUs = **10× Cortex-X925 + 10× Cortex-A725** (`lsc
 
 ### 1.2 OpenUSD source and install
 
-Source `/home/burkard/work/OpenUSD` at v26.08, read-only; install `/home/burkard/work/OpenUSD_26_08`, `PXR_VERSION "2608"` (`pxrConfig.cmake:17`). Python bindings live in **`lib/python3.12/site-packages`**, not `lib/python`. Bundled: MaterialX 1.39.5 (incl. `libMaterialXGenGlsl`), OpenSubdiv 3.6.1, oneTBB 2020.3.1; **no Ptex, no OpenImageIO, no SeExpr**. Installed plugins are exactly `hdStorm`, `hioAvif`, `hioOpenEXR`, `sdrGlslfx`, `usdShaders` — **hdPrman is not built here** (`PXR_BUILD_PRMAN_PLUGIN` OFF, `cmake/defaults/Options.cmake:27`), so every hdPrman statement in the plan is source-verified, never run-verified. Hio built-in formats are `bmp, jpg, jpeg, png, tga, hdr` (`pxr/imaging/hio/plugInfo.json:8`) plus the EXR and AVIF plugins; no tif, no `.tx`, no Ptex. Hgi: **hgiGL only**, so H1-GPU is always the GLSL resource path (`HDST_ENABLE_HGI_RESOURCE_GENERATION` false, `pxr/imaging/hdSt/codeGen.cpp:166`). `PXR_ENABLE_PTEX_SUPPORT` is OFF (`Options.cmake:36`), so Storm cannot sample `.ptx` and Ptex is a CPU-at-capture library. Exec **is** built (`UsdExecImagingCreateStageSceneIndex()` returns non-null) but gated behind `USDIMAGINGGL_ENGINE_ENABLE_EXEC_SCENE_INDEX`, default false (`engine.cpp:91`).
+Source `<openusd-src>` at v26.08, read-only; install `$USD`, `PXR_VERSION "2608"` (`pxrConfig.cmake:17`). Python bindings live in **`lib/python3.12/site-packages`**, not `lib/python`. Bundled: MaterialX 1.39.5 (incl. `libMaterialXGenGlsl`), OpenSubdiv 3.6.1, oneTBB 2020.3.1; **no Ptex, no OpenImageIO, no SeExpr**. Installed plugins are exactly `hdStorm`, `hioAvif`, `hioOpenEXR`, `sdrGlslfx`, `usdShaders` — **hdPrman is not built here** (`PXR_BUILD_PRMAN_PLUGIN` OFF, `cmake/defaults/Options.cmake:27`), so every hdPrman statement in the plan is source-verified, never run-verified. Hio built-in formats are `bmp, jpg, jpeg, png, tga, hdr` (`pxr/imaging/hio/plugInfo.json:8`) plus the EXR and AVIF plugins; no tif, no `.tx`, no Ptex. Hgi: **hgiGL only**, so H1-GPU is always the GLSL resource path (`HDST_ENABLE_HGI_RESOURCE_GENERATION` false, `pxr/imaging/hdSt/codeGen.cpp:166`). `PXR_ENABLE_PTEX_SUPPORT` is OFF (`Options.cmake:36`), so Storm cannot sample `.ptx` and Ptex is a CPU-at-capture library. Exec **is** built (`UsdExecImagingCreateStageSceneIndex()` returns non-null) but gated behind `USDIMAGINGGL_ENGINE_ENABLE_EXEC_SCENE_INDEX`, default false (`engine.cpp:91`).
 
 ### 1.3 Python and third-party
 
-Interpreter `/home/burkard/.venv/bin/python3` = 3.12.3; PySide6 6.11.2 and PyOpenGL importable. **numpy 2.5.2 and pybind11 3.1.0 ARE installed**; Python dev headers at `/usr/include/python3.12/Python.h`. `pxr_boost.python` is reachable out of tree: `include/pxr/external/boost/python.hpp`, `lib/libusd_boost.so`, `lib/libusd_python.so`, and `pxr/pxr.h.in:48`, `:59` (generated as `<install>/include/pxr/pxr.h`, identical line numbers here) define `PXR_PYTHON_SUPPORT_ENABLED` / `PXR_USE_INTERNAL_BOOST_PYTHON`. SeExpr `main` @ `8f8c8f2` and Ptex `v2.4.3` were built from source in the scratchpad; bison 3.8.2, flex 2.6.4 and zlib dev are present, **LLVM dev headers are not**, so SeExpr's LLVM backend is unavailable here.
+Interpreter `$VENV/bin/python3` = 3.12.3; PySide6 6.11.2 and PyOpenGL importable. **numpy 2.5.2 and pybind11 3.1.0 ARE installed**; Python dev headers at `/usr/include/python3.12/Python.h`. `pxr_boost.python` is reachable out of tree: `include/pxr/external/boost/python.hpp`, `lib/libusd_boost.so`, `lib/libusd_python.so`, and `pxr/pxr.h.in:48`, `:59` (generated as `<install>/include/pxr/pxr.h`, identical line numbers here) define `PXR_PYTHON_SUPPORT_ENABLED` / `PXR_USE_INTERNAL_BOOST_PYTHON`. SeExpr `main` @ `8f8c8f2` and Ptex `v2.4.3` were built from source in the scratchpad; bison 3.8.2, flex 2.6.4 and zlib dev are present, **LLVM dev headers are not**, so SeExpr's LLVM backend is unavailable here.
 
 ### 1.4 Graphics: what can and cannot run headlessly
 
@@ -381,7 +381,7 @@ Host **H1**, no GL. Probes `prototypes/stage-free-transport/probe.cpp` and `prob
 
 ## 3. Verified OpenUSD 26.08 facts (file:line)
 
-Every row was re-verified by grep in `/home/burkard/work/OpenUSD` while writing this appendix. Anything with a verification limit is in §3.11.
+Every row was re-verified by grep in `<openusd-src>` while writing this appendix. Anything with a verification limit is in §3.11.
 
 ### 3.1 Scene-index plugin registry and ordering
 
@@ -644,4 +644,4 @@ usdRig documents cited only as the superseded side of a correction: `usdRig/docs
 
 Prototypes consulted: `prototypes/chain-order/`, `data-plane-benchmark/`, `evaluation-scheduling/`, `freeze-bake/`, `instancing/`, `motion-blur/`, `stage-free-transport/`, `storm-hair-look/`, `storm-throughput/`, `thirdparty-bench/`, `tool-loop/`, `usdrig-linux-build/`.
 
-OpenUSD source read at `/home/burkard/work/OpenUSD` (v26.08, `ee47c679a`) and usdRig at `/home/burkard/work/usdRig` (`c92c040`); every citation in §3 and §4 was re-verified by grep on 2026-09-05.
+OpenUSD source read at `<openusd-src>` (v26.08, `ee47c679a`) and usdRig at `<usdrig-src>` (`c92c040`); every citation in §3 and §4 was re-verified by grep on 2026-09-05.

@@ -10,7 +10,7 @@
 // callers, so HdxShadowTask is dropped from the task list outright. Hair
 // therefore cannot shadow the scalp through the renderer, and the gaps between
 // clumps show fully lit skin -- the single largest remaining difference from
-// the Unreal reference, where the scalp under hair is dark.
+// the host renderer reference, where the scalp under hair is dark.
 //
 // So the engine publishes the shadow as geometry. UsdGenGroomSceneIndex adds
 // one synthetic Mesh, <description>/__usdGenRender/scalpShadow: the haired part
@@ -31,7 +31,7 @@
 // Two deliberate differences from the strand shader:
 //
 //   * NO self shift. UsdGenStrandsHairCount's result goes in as it stands,
-//     without Unreal's `max(0, HairCount - 1)`. That shift removes the
+//     without a host renderer's `max(0, HairCount - 1)`. That shift removes the
 //     shading strand's own crossing; the receiver here is skin, not a fibre,
 //     and every crossing between it and the light is real.
 //
@@ -98,7 +98,7 @@
 #define USDGEN_SCALP_RING_COS 0.5
 
 // The average forward attenuation one crossing costs, from the same 39-term
-// fit of Unreal's scattering LUT the strand shader uses. The hair near a scalp
+// fit of a host renderer's scattering LUT the strand shader uses. The hair near a scalp
 // lies in its tangent plane rather than along its normal, so the light's angle
 // to the fibre is the tangential part of L, averaged over an isotropic comb
 // direction: E[|dot(T, L)|] = (2/pi) * sin(angle to the normal).

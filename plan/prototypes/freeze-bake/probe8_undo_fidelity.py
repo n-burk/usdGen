@@ -10,7 +10,7 @@ handles for attributes.
 import sys
 from pxr import Gf, Sdf, Ts, Usd, UsdGeom, Vt
 
-sys.path.insert(0, "/tmp/claude-1000/-home-burkard-work-usdRig/"
+sys.path.insert(0, "<session-scratch>"
                    "887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/"
                    "freeze-bake")
 from probe1_freeze_undo import SubtreeSnapshot        # noqa: E402

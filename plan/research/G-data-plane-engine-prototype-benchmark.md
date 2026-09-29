@@ -1,8 +1,8 @@
 # G — Data-plane engine prototype benchmark: persistent VdfNetwork vs. bespoke TBB DAG
 
 **Everything below was measured on this machine.** Two ~300-line prototypes were built out-of-tree
-against `/home/burkard/work/OpenUSD_26_08` and run. Sources, build files and raw logs live in
-`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/data-plane-engine-prototype-benchmark/`:
+against `$USD` and run. Sources, build files and raw logs live in
+`<session-scratch>`:
 
 | File | What it is |
 |---|---|
@@ -19,7 +19,7 @@ Build (verbatim):
 ```
 cmake -S <probedir> -B <probedir>/build -GNinja -DCMAKE_BUILD_TYPE=Release
 cmake --build <probedir>/build
-# CMakeLists.txt: find_package(pxr CONFIG REQUIRED PATHS /home/burkard/work/OpenUSD_26_08 NO_DEFAULT_PATH)
+# CMakeLists.txt: find_package(pxr CONFIG REQUIRED PATHS $USD NO_DEFAULT_PATH)
 #                 target_link_libraries(vdfBench2 PRIVATE vdf exec tf gf vt work trace arch)
 #                 CMAKE_CXX_FLAGS_RELEASE = "-O3 -DNDEBUG"
 ```
@@ -41,7 +41,7 @@ this plugin needs (100k–1M curves, 5-node chains, interactive edits) the bespo
 prototype, are what cost it:
 
 1. `VdfScheduler` splits every pool output that passes its buffer into `ceil(n/500)` invocations
-   (grain size hardcoded, `/home/burkard/work/OpenUSD/pxr/exec/vdf/scheduler.cpp:861`) and calls
+   (grain size hardcoded, `<openusd-src>/pxr/exec/vdf/scheduler.cpp:861`) and calls
    `Compute()` once per invocation with a per-invocation affects mask. **A node that writes its
    whole buffer does O(n²/500) work and races the other invocations.**
 2. The **scheduled** affects masks are frozen at schedule time from the request mask, so
@@ -124,7 +124,7 @@ compute_calls 1601  curves_processed  40025000  (expected calls=5 curves=125000)
 
 v2 (`vdfBench2.cpp`) fixes both. `PoolSlice<T>` (a `VdfIterator` subclass) returns the buffer base
 pointer plus the scheduled affects mask, and `ForEachAffectedRun` walks the mask's RLE runs with
-`TfCompressedBits::GetPlatformsView()` (`/home/burkard/work/OpenUSD/pxr/base/tf/compressedBits.h:1810-1893`)
+`TfCompressedBits::GetPlatformsView()` (`<openusd-src>/pxr/base/tf/compressedBits.h:1810-1893`)
 so the kernel still runs over contiguous ranges. Same run, corrected:
 
 ```
@@ -189,7 +189,7 @@ node's output, so invalidating anything downstream forces a re-run **from the so
 `--request-all 0` shows `elements_touched = 4 000 000` even for a last-styler parameter edit.
 
 The lever is `VdfScheduler::_ScheduleBufferPasses`
-(`/home/burkard/work/OpenUSD/pxr/exec/vdf/scheduler.cpp:426-432`): *"In order to avoid passing
+(`<openusd-src>/pxr/exec/vdf/scheduler.cpp:426-432`): *"In order to avoid passing
 buffers for outputs, which are requested, we set the keep mask to include the whole request mask at
 each output in the request."* Putting each styler's output in the `VdfRequest` turns that node into
 a durable cache. Measured effect (100k, cv mode): last-param edit drops from 4 000 000 touched /
@@ -330,7 +330,7 @@ design itself needs).
 ## 6. SIMD: does g++ -O3 autovectorise a strip kernel on aarch64?
 
 usdRig's only SIMD kernel is SSE2 with a scalar fallback — on this aarch64 host it takes the scalar
-path (`/home/burkard/work/usdRig/libs/rigExecMath/simdKernels.cpp:14-45`: `RIGEXEC_HAS_SSE2` is
+path (`<usdrig-src>/libs/rigExecMath/simdKernels.cpp:14-45`: `RIGEXEC_HAS_SSE2` is
 defined only for `__SSE2__ / _M_X64 / _M_IX86_FP>=2`, and the `#else` branch loops
 `RigExecApplyWeightedMatrix` scalar). So there is nothing to inherit; the question is what the
 compiler does unaided.
@@ -374,10 +374,10 @@ Readings for the plan:
 
 ## 7. The two usdRig traps, re-tested
 
-| Trap (`/home/burkard/work/usdRig/docs/mover-graph-cutover.md:511-519`) | Result here |
+| Trap (`<usdrig-src>/docs/mover-graph-cutover.md:511-519`) | Result here |
 |---|---|
 | *"A revision uses a READWRITE connector … must not `Allocate`. Allocating fails with 'output cannot hold a boxed value' and silently degrades to pass-through."* | **Reproduced exactly.** `./build/vdfBench2 --curves 5000 --stylers 2 --element cv --allocate-trap 1` → `Coding Error: in Vdf_AllocateBoxedValueVector at line 75 of .../vdf/allocateBoxedValue.cpp -- Output '.pool' cannot hold a boxed value.` once per invocation, exit code 0. Root cause: `VdfReadWriteIterator<T>::Allocate` routes to `Vdf_AllocateBoxedValue` (`readWriteIterator.h:215-234`), and a pool output cannot hold a boxed value. |
-| *"Anything talking to VDF directly must force `ExecTypeRegistry::GetInstance()`, or the executor cannot distinguish registered value types."* | **Did not reproduce in a single-binary, VDF-only program.** `--skip-type-registry 1` ran correctly for `GfVec3f`, `float` and my custom `probe::HairStrip`, because `VdfOutputSpecs::Connector<T>()` reaches `VdfExecutionTypeRegistry` (`executionTypeRegistry.h:85-101`), whose `GetInstance()` fires the `TF_REGISTRY_FUNCTION(VdfExecutionTypeRegistry)` **in the same binary**. The trap is real when the registrations live in a *plugin library* that has not been loaded yet, and for `ExecTypeRegistry` (exec-level) types such as usdRig's packets (`/home/burkard/work/usdRig/libs/rigExec/types.cpp:96-106`). Keep the forced `GetInstance()` in library init; it costs nothing. |
+| *"Anything talking to VDF directly must force `ExecTypeRegistry::GetInstance()`, or the executor cannot distinguish registered value types."* | **Did not reproduce in a single-binary, VDF-only program.** `--skip-type-registry 1` ran correctly for `GfVec3f`, `float` and my custom `probe::HairStrip`, because `VdfOutputSpecs::Connector<T>()` reaches `VdfExecutionTypeRegistry` (`executionTypeRegistry.h:85-101`), whose `GetInstance()` fires the `TF_REGISTRY_FUNCTION(VdfExecutionTypeRegistry)` **in the same binary**. The trap is real when the registrations live in a *plugin library* that has not been loaded yet, and for `ExecTypeRegistry` (exec-level) types such as usdRig's packets (`<usdrig-src>/libs/rigExec/types.cpp:96-106`). Keep the forced `GetInstance()` in library init; it costs nothing. |
 
 One trap this probe **adds** to that list, and it is worse than either: **never write outside your
 invocation's scheduled affects mask on a pool output** (§2). It is silent (no error, no crash),
@@ -513,7 +513,7 @@ The prototype shows it can be made to work; the mandatory rules are:
 ## Key facts
 
 - VDF splits every buffer-passing pool output into `ceil(n/500)` invocations; grain size is hardcoded
-  at `/home/burkard/work/OpenUSD/pxr/exec/vdf/scheduler.cpp:861` and the partitioning is at
+  at `<openusd-src>/pxr/exec/vdf/scheduler.cpp:861` and the partitioning is at
   `scheduler.cpp:644-781, 866-872`. Measured: `compute_calls 6401` for 5 nodes over 800 000 elements
   (`./build/vdfBench --curves 100000 --stylers 5`).
 - A pool node that ignores its invocation's affects mask is quadratic: 854 ms vs 7.6 ms for the same
@@ -557,7 +557,7 @@ The prototype shows it can be made to work; the mandatory rules are:
 - The `ExecTypeRegistry::GetInstance()` trap did **not** reproduce in a single-binary VDF program:
   `VdfOutputSpecs::Connector<T>` reaches `VdfExecutionTypeRegistry::GetInstance()`, which fires
   same-binary `TF_REGISTRY_FUNCTION`s. It remains necessary for plugin-registered and exec-level types
-  (`/home/burkard/work/usdRig/libs/rigExec/types.cpp:96-106`).
+  (`<usdrig-src>/libs/rigExec/types.cpp:96-106`).
 - Instantiating the parallel executor also needs `#include "pxr/exec/vdf/parallelSpeculationExecutorEngine.h"`;
   without it g++ reports `'VdfSpeculationExecutor<E, D>::_engine' has incomplete type`.
 - g++ 13.3 `-O3` autovectorises all three kernels with 128-bit NEON (`-fopt-info-vec-optimized`:
@@ -568,7 +568,7 @@ The prototype shows it can be made to work; the mandatory rules are:
 - `-mcpu=native` does not enable SVE codegen in GCC 13 here (still "16 byte vectors") but lifts the
   bandwidth-bound SoA case from 23.5 to 29.8 GFLOP/s.
 - usdRig's only SIMD kernel is SSE2 + scalar fallback and takes the scalar path on aarch64
-  (`/home/burkard/work/usdRig/libs/rigExecMath/simdKernels.cpp:14-45`); nothing to reuse.
+  (`<usdrig-src>/libs/rigExecMath/simdKernels.cpp:14-45`); nothing to reuse.
 - TBB chunk sizing: 128 → 1.55 ms, 512 → 1.83, 1024 → 1.89, 4096 → 9.40, 16384 → 2.58 (100k curves,
   20 threads). Use 128–1024 **curves**, aligned to curve boundaries.
 - Host is heterogeneous (10× Cortex-X925 + 10× Cortex-A725); both engines regress past ~8–10 threads,

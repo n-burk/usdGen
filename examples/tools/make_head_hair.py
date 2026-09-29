@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Writes examples/head-hair-closeup.usda: a head-sized ellipsoid scalp with a
 dense, dark, combed-back groom that fades to bare skin at a "hairline" band,
-built to compare against a MetaHuman-style reference photo (UE parity work).
+built to compare against a character-asset reference photo (the host renderer parity work).
 
     python examples/tools/make_head_hair.py
 
@@ -245,7 +245,7 @@ scene.append('    metersPerUnit = 1')
 scene.append('    upAxis = "Y"')
 scene.append('    doc = "Head-hair close-up: a dense, dark, combed groom on a head-sized '
              'ellipsoid, fading to bare skin at a scalp-cap boundary -- a '
-             'render-comparison scene for MetaHuman-style hair (renders/ue-parity)."')
+             'render-comparison scene for a character groom (renders/ue-parity)."')
 scene.append(')')
 scene.append('')
 scene.append('# Numbers are centimetres by convention (as in styled-fur-plane.usda: hair')

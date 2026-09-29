@@ -3,8 +3,24 @@ build/
 build-*/
 build_check/
 cmake-build-*/
+workusdGenbuild*/
 Testing/
 CTestTestfile.cmake
+
+# Compiled objects, archives, and extension modules
+*.o
+*.os
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.lib
+*.pyc
+
+# Host-renderer comparison captures (regenerate locally; do not commit)
+renders/ue-parity/
 
 # Harnesses
 .omp/

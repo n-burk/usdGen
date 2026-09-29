@@ -6,7 +6,7 @@
 namespace usdGen {
 class UsdGenWorkDispatcher;
 
-/// Opaque geometry injected into the fur density volume, Unreal's
+/// Opaque geometry injected into the fur density volume, a host renderer's
 /// `r.HairStrands.Voxelization.InjectOpaqueDepth`. Without it light leaks
 /// through the scalp and hair on the unlit side of a head stays lit. `points`
 /// are in the mesh's own object space; `worldMatrix` places them in the same
@@ -29,7 +29,7 @@ struct UsdGenFurOcclusionParams
     /// resolution of a head.
     std::vector<UsdGenFurOccluder> occluders;
 
-    /// Target voxel edge in world units when `resolution` is 0. Unreal uses
+    /// Target voxel edge in world units when `resolution` is 0. A host renderer uses
     /// 0.3 cm (`Voxelization.Virtual.VoxelWorldSize`) and this scene
     /// convention is centimetres. The bake never chooses a voxel coarser than
     /// the historical 48-cube fitted to the longest axis, and never a grid
@@ -42,7 +42,7 @@ struct UsdGenFurOcclusionParams
     /// explicit argument). Clamped to [8, maxDimension].
     int   resolution = 0;
 
-    /// Unreal's `InjectOpaque.BiasCount` / `MarkCount`, in voxels: the opaque
+    /// a host renderer's `InjectOpaque.BiasCount` / `MarkCount`, in voxels: the opaque
     /// shell starts this far below the surface and is this thick.
     int   opaqueBiasVoxels = 2;
     int   opaqueMarkVoxels = 4;
@@ -64,7 +64,7 @@ struct UsdGenFurOcclusionParams
 
 /// Bakes geometry-derived directional optical depth for a whole groom.
 ///
-/// SEMANTICS (matched to Unreal's `FHairTransmittanceMask::HairCount`, which
+/// SEMANTICS (matched to a host renderer's `FHairTransmittanceMask::HairCount`, which
 /// is what `ComputeDualScatteringTerms` consumes):
 ///   furTauP[k] / furTauN[k] = the EXPECTED NUMBER OF FIBRE CROSSINGS for a
 ///   ray leaving the CV toward +axis[k] / -axis[k] and running to the edge of
@@ -76,8 +76,8 @@ struct UsdGenFurOcclusionParams
 ///
 /// The receiver's OWN contribution IS included (half of its own voxel, the
 /// correct discretisation of an integral that starts at the CV). That matches
-/// Unreal, whose ray march also starts inside the shaded strand's voxel, so
-/// the consumer must apply Unreal's shift, `HairCount = max(0, tau - 1)`,
+/// a host renderer, whose ray march also starts inside the shaded strand's voxel, so
+/// the consumer must apply a host renderer's shift, `HairCount = max(0, tau - 1)`,
 /// before `Tf = pow(A_front, HairCount)`.
 ///
 /// RECONSTRUCTION. For a world-space direction L the consumer must use the
@@ -105,7 +105,7 @@ struct UsdGenFurOcclusionParams
 /// rebuilds. On the reuse path it is left untouched, so a caller that wants the
 /// COW share seeds it from the previous generation before calling. Its depths
 /// are HAIR ONLY and carry no self shift: the receiver is skin, not a fibre, so
-/// the consumer uses the count as it stands rather than Unreal's
+/// the consumer uses the count as it stands rather than a host renderer's
 /// `max(0, HairCount - 1)`.
 ///
 /// Throws std::invalid_argument for malformed or non-finite geometry.

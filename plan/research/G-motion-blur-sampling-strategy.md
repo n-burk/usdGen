@@ -1,6 +1,6 @@
 # G — Motion-blur sampling strategy for generated hair (gap fill)
 
-Scope: decide and verify how usdGen's output prims (basisCurves minted or overlaid by the hair scene index) should answer Hydra's sampled-data-source protocol so that (1) Storm never pays for motion samples, (2) hdPrman-class renderers get correct deformation blur, and (3) the hair graph is not evaluated N times per frame unless that is actually what the renderer asked for. All paths are absolute; `OpenUSD` = `/home/burkard/work/OpenUSD` (v26.08 source), `usdRig` = `/home/burkard/work/usdRig`, `hdPrman` = `OpenUSD/third_party/renderman/plugin/hdPrman`.
+Scope: decide and verify how usdGen's output prims (basisCurves minted or overlaid by the hair scene index) should answer Hydra's sampled-data-source protocol so that (1) Storm never pays for motion samples, (2) hdPrman-class renderers get correct deformation blur, and (3) the hair graph is not evaluated N times per frame unless that is actually what the renderer asked for. All paths are absolute; `OpenUSD` = `<openusd-src>` (v26.08 source), `usdRig` = `<usdrig-src>`, `hdPrman` = `OpenUSD/third_party/renderman/plugin/hdPrman`.
 
 Decision in one line: **serve motion from a retained per-offset point cache that is filled lazily on the first `GetContributingSampleTimesForInterval(start,end)` pull (or eagerly by an app-supplied preflight profile), emit velocities only as an explicit cheap "linear" profile, and never evaluate the whole styler chain per sample — evaluate only the deform-transport tail per sample.** Rationale and evidence follow.
 
@@ -145,7 +145,7 @@ Lazy evaluation runs inside `HdRenderIndex::SyncAll`, which is multithreaded acr
 
 ### 4.3 Per-sample cost must not be the whole chain
 
-The decisive design lever is **where time enters the graph**. In XGen/Houdini-style grooms the generator, clump, frizz, etc. run in surface rest/UV space and the deformed result is obtained by transporting the rest-space curve with the surface's per-point deformation (A7: Houdini's "skin-only / capture-and-deform" deform options). Under that split:
+The decisive design lever is **where time enters the graph**. In a host groomer/host-application grooms the generator, clump, frizz, etc. run in surface rest/UV space and the deformed result is obtained by transporting the rest-space curve with the surface's per-point deformation (A7: a DCC's "skin-only / capture-and-deform" deform options). Under that split:
 
 - Time-invariant head (distribution, seeds, stylers in rest space): evaluated once per edit, cached across frames and offsets.
 - Time-varying tail (surface `points` at offset `t` → per-root frame → transport of N cvs, plus any world-space styler such as gravity/collide/sim): evaluated once per **offset**.

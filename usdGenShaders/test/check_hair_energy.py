@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Energy sanity check for the UE hair BSDF ported to OpenUSD Storm.
+"""Energy sanity check for the host renderer hair BSDF ported to OpenUSD Storm.
 
 What this checks
 ----------------
-The BSDF is Unreal Engine's ``HairShading()`` from ``HairBsdf.ush`` -- Brian
-Karis, "Physically Based Hair Shading in Unreal", SIGGRAPH 2016 Physically
+The BSDF is the host renderer's ``HairShading()`` from ``HairBsdf.ush`` -- Brian
+Karis, "Physically Based Hair Shading in a host renderer", SIGGRAPH 2016 Physically
 Based Shading in Theory and Practice course -- transcribed in
 fit_hair_scattering.py, which this module imports (both the reference
 integrator and the fitted dual-scattering closed forms).

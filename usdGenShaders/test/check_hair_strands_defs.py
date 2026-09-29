@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sdr validation of the two UE-parity strand-hair shader defs.
+"""Sdr validation of the two the host renderer-parity strand-hair shader defs.
 
 The counterpart of checkC5.py for `UsdGenHairStrands` /
 `UsdGenHairStrandsTranslucent` (plan/16-ue-hair-parity.md WS1). Those two are
@@ -62,7 +62,7 @@ PRIMVARS = {"hairId", "hairT", "st",
             # that half of the look to the material's Sdr default.
             "hairTipColor", "hairColorRamp", "hairRandomHue", "hairRandomValue"}
 
-# UE's own names and defaults (docs/research/ue-hair-rendering.md). baseColor
+# Shader input names and defaults. baseColor
 # and tipColor mirror the C1 schema defaults usdGen:look:rootColor/:tipColor,
 # because on a usdGen tile the description's look supplies them
 # (UsdGenTilePublisher::BuildDefaultMaterialDataSource).

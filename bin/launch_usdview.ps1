@@ -10,7 +10,7 @@ param(
     [int] $Supersample = 0,
     # Run the prefix's testusdview on this script instead of opening
     # usdview interactively. The environment is the same either way,
-    # which is the point: the T3 tonic scripts and the workspace
+    # which is the point: the T3 pomade scripts and the workspace
     # screenshot need exactly the plugin, python and DLL paths this
     # launcher already assembles.
     [string] $TestScript = "",
@@ -97,8 +97,8 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenImaging\resources"),
     (Join-Path $Build "usd\usdGenShaders\resources"),
     (Join-Path $Build "usd\usdGenTools\resources"),
-    (Join-Path $Build "usd\usdGenTonic\resources"),
-    (Join-Path $Build "usd\usdGenTonicTools\resources")
+    (Join-Path $Build "usd\usdGenPomade\resources"),
+    (Join-Path $Build "usd\usdGenPomadeTools\resources")
 ) + $moonrayPluginDirs + @(
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")

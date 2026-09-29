@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.20)
 
 project(noodles_package_consumer LANGUAGES CXX)

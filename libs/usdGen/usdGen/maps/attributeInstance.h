@@ -7,12 +7,12 @@
 // per kept strand (card/archive variant selection, 07 §10.5: variety comes
 // from multiple prototypes).
 //
-// This is deliberately NOT Tonic's flow and shares no code with it:
-// Tonic rasterises region ids on CUDA into regionMap.v<m>.ptx and assigns
-// guides through GuideInterpolate (usdGenTonic/tonicBake.h); this cook runs
+// This is deliberately NOT Pomade's flow and shares no code with it:
+// Pomade rasterises region ids on CUDA into regionMap.v<m>.ptx and assigns
+// guides through GuideInterpolate (usdGenPomade/pomadeBake.h); this cook runs
 // on the CPU, pre-bake, straight from the authored map, with no USD, CUDA
 // or Hydra dependency, like its attributeMap/attributeBake siblings. It
-// never reads or writes Tonic state.
+// never reads or writes Pomade state.
 //
 // Rules:
 //   - Sampling is bilinear at (face, u, v), the same call the groom

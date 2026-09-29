@@ -2,7 +2,7 @@
 //
 // This is deliberately an engine-only value helper.  It receives a captured
 // rest mesh and immutable Ptex sampler, never a USD stage, scene-index, or
-// Tonic model.  CurveSource and CUDA source preparation may therefore share
+// Pomade model.  CurveSource and CUDA source preparation may therefore share
 // its exact CPU admission and source topology without importing UI code.
 #ifndef USDGEN_SURFACE_CAGE_INTERPOLATE_H
 #define USDGEN_SURFACE_CAGE_INTERPOLATE_H

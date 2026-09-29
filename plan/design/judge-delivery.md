@@ -322,7 +322,7 @@ stack-profiler column *and* as the CI counter source; the `<Description>/__usdGe
 scope (usdRig's `__RigExecGenerated` precedent) so no machine-generated prim ever appears in the USD
 tree; the reserved `Ops`/`Guides`/`Maps`/`Prototypes`/`Frozen` scopes with reorder-as-`reorder
 nameChildren` **while the tool always authors `usdGen:input`** (keep the gesture, drop the implicit
-sibling edge); the full `UsdGenMaskAPI` block including Houdini's `rangeMin/rangeMax/effectPosition/
+sibling edge); the full `UsdGenMaskAPI` block including a DCC's `rangeMin/rangeMax/effectPosition/
 falloff` shortcut and `mask:random`, resolved once per capture into one `VtFloatArray` + a 257-entry
 LUT; the seed-salting rule `hash(seed, curveId, saltPerOperator)`; freeze staleness UX (epoch prefix
 versioning, stale badge, "Rebase sculpt" by nearest root UV); `UsdGeomComputeExtentFunction` on a

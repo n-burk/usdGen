@@ -1,5 +1,5 @@
 // Paintable per-surface attribute maps and the stroke-accumulation model the
-// XGen-style brushes operate on.
+// host-groomer brushes operate on.
 //
 // A UsdGenPaintMap in per-face storage (plan/07-look-maps-expressions.md §5.2,
 // §8) addresses values by (faceId, u, v) into the parent mesh's faces. This
@@ -22,7 +22,7 @@
 //     C ABI (usdGenImaging/usdGenBrushApi.h) expands footprints onto
 //     neighbouring faces and smooths across them at the corner level.
 //   - Resolution is uniform over faces (usdGen:paint:resolution, default 256
-//     in 02-schema.md §2.12; the quantity XGen writes as `#3dpaint, N`).
+//     in 02-schema.md §2.12; the quantity a host groomer writes as `#3dpaint, N`).
 //
 // This header has no USD dependency, like ptexMap.h.
 #ifndef USDGEN_MAPS_ATTRIBUTE_MAP_H
@@ -174,7 +174,7 @@ USDGEN_CORE_API float UsdGenBrushWeight(UsdGenBrushFalloff falloff, float hardne
 USDGEN_CORE_API void UsdGenApplyBrushDab(UsdGenAttributeMap *map,
                                          UsdGenBrushDab const &dab);
 
-// Non-accumulating stroke application (Blender's model). Along a move the
+// Non-accumulating stroke application (a DCC's model). Along a move the
 // stamps overlap heavily (spacing 0.5 * radius), and applying Set per stamp
 // (tex += (value - tex) * k) saturates every texel under the trail to value
 // after a few stamps: the falloff washes out and strength 1 paints a hard

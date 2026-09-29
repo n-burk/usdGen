@@ -1,5 +1,5 @@
-Coding Error: in _DefineCppType at line 915 of /home/burkard/work/OpenUSD/pxr/base/tf/type.cpp -- TfType 'UsdGenMetadataSceneIndexPlugin' already has a defined C++ type; cannot redefine
-Runtime Error: in _GetAttributeValueTypeName at line 6329 of /home/burkard/work/OpenUSD/pxr/usd/usd/stage.cpp -- Empty typeName for </Groom/Description/Ops/OpNoise.usdGen:magnitude>
+Coding Error: in _DefineCppType at line 915 of <openusd-src>/pxr/base/tf/type.cpp -- TfType 'UsdGenMetadataSceneIndexPlugin' already has a defined C++ type; cannot redefine
+Runtime Error: in _GetAttributeValueTypeName at line 6329 of <openusd-src>/pxr/usd/usd/stage.cpp -- Empty typeName for </Groom/Description/Ops/OpNoise.usdGen:magnitude>
 === registered usdGen plugin types ===
   UsdGenGroomAdapter                 REGISTERED
   UsdGenDescriptionAdapter           REGISTERED

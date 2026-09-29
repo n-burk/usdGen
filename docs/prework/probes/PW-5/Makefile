@@ -1,6 +1,6 @@
-PXR ?= /home/burkard/work/OpenUSD_26_08
-SCHEMA_RES ?= /home/burkard/work/usdGen/build/usd/usdGenSchema/resources
-IMAGING_RES ?= /home/burkard/work/usdGen/build/usd/usdGenImaging/resources
+PXR ?= $USD
+SCHEMA_RES ?= <usdgen-src>/build/usd/usdGenSchema/resources
+IMAGING_RES ?= <usdgen-src>/build/usd/usdGenImaging/resources
 
 probe: probe.cpp
 	g++ -std=c++17 -O1 -w $< -o $@ -I $(PXR)/include -I /usr/include/python3.12 \

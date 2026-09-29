@@ -3,12 +3,12 @@
 The implementation works with stock OpenUSD 26.08 Storm/OpenGL. It provides
 geometry-derived self-shadowing, R/TT/TRT strand highlights, absorption-colored
 transmission, pixel-footprint highlight filtering, and bounded colored fill.
-It does **not** establish quality or performance parity with Unreal Engine.
+It does **not** establish quality or performance parity with a host renderer.
 
 Two materials ship. `UsdGenHairPreview*` (three variants, C5-frozen inputs) is
 the original approximate model described below. `UsdGenHairStrands` /
-`UsdGenHairStrandsTranslucent` is a port of Unreal's strand-hair shading and is
-what a usdGen tile binds by default; see **UE-parity strand hair** at the end.
+`UsdGenHairStrandsTranslucent` is a port of a host renderer's strand-hair shading and is
+what a usdGen tile binds by default; see **the host renderer-parity strand hair** at the end.
 
 ## Progressive Storm viewport tiles
 
@@ -54,7 +54,7 @@ regenerate them into a new output path using the tool below.
 
 `furOcclusion.cpp` voxelizes the entire groom into one world-space grid. The
 grid is anisotropic and derived from the groom's bounds at a target world voxel
-size — 0.3 units, Unreal's `Voxelization.Virtual.VoxelWorldSize` — never coarser
+size — 0.3 units, a host renderer's `Voxelization.Virtual.VoxelWorldSize` — never coarser
 than the historical 48-cube fitted to the longest axis and never more than 128
 voxels on an axis. `UsdGenFurOcclusionParams::voxelSize` moves the target and
 `::resolution` pins the old cube instead. Every curve is sampled along the
@@ -63,13 +63,13 @@ extrapolated phantom end control points), not along its control polygon, and
 each sub-sample deposits projected fibre area over the cell cross-section for
 the three axes with a trilinear splat. Six prefix sweeps integrate optical depth
 toward positive/negative X/Y/Z into one interleaved fixed-point grid (x1000, the
-quantisation Unreal's voxel pages use), and trilinear gathers publish two float3
+quantisation a host renderer's voxel pages use), and trilinear gathers publish two float3
 vertex primvars, `furTauP` and `furTauN`.
 
-The published number is Unreal's `FHairTransmittanceMask::HairCount`: the
+The published number is a host renderer's `FHairTransmittanceMask::HairCount`: the
 expected number of fibre crossings from the CV to the edge of the volume,
-**including** the receiver's own half-voxel, exactly as Unreal's voxel ray march
-does — so the consumer applies Unreal's `HairCount = max(0, tau - 1)` shift
+**including** the receiver's own half-voxel, exactly as a host renderer's voxel ray march
+does — so the consumer applies a host renderer's `HairCount = max(0, tau - 1)` shift
 before `Tf = pow(A_front, HairCount)`. These are expectations over a voxel
 cross-section, not strand counts: a single fibre of width `w` in a voxel of edge
 `h` contributes `w/h`, around 0.03 for real hair, while a dense groom reads tens.
@@ -82,10 +82,10 @@ reconstructed with a normalised cosine-power-4 blend of the six stored depths,
 
 whose divisor is at least 1/9 for a unit `L`, so no epsilon is needed.
 
-The groom's emitting surfaces are injected as opaque blockers, Unreal's
+The groom's emitting surfaces are injected as opaque blockers, a host renderer's
 `Voxelization.InjectOpaqueDepth`: without them light reaches hair straight
 through the scalp and the unlit side of a head stays lit. Each triangle marks a
-saturated shell two voxels beneath the surface and four voxels thick (Unreal's
+saturated shell two voxels beneath the surface and four voxels thick (a host renderer's
 `InjectOpaque.BiasCount` / `MarkCount`), so one crossing reaches the ceiling
 while roots resting on the surface keep their sideways and upward light. Which
 side of a triangle is solid is decided by where the fur is, not by the winding
@@ -153,7 +153,7 @@ reference and fails if power 2 ever beats power 4 on transmittance.
 
 Procedural CPU grooms automatically receive the density data and bind the
 default material at high/veryhigh complexity — `UsdGenHairStrands` since the
-UE-parity work below; `UsdGenHairPreview*` remain available and are
+the host renderer-parity work below; `UsdGenHairPreview*` remain available and are
 bound by naming them on the description's material. There is no new
 renderer plugin or OpenUSD patch. CUDA-to-stock-Storm publication remains
 unimplemented in this checkout; this change does not add that handoff.
@@ -185,7 +185,7 @@ groom's bounds.
 
 The generator itself needs only Python. The bake executable needs the USD/core
 DLLs on PATH (the standard project launcher environment). A typical Windows
-prefix here is `D:/work/usdRig/usd-install`.
+prefix here is `<usdrig-src>/usd-install`.
 
 ## Verification and measured limits
 
@@ -208,7 +208,7 @@ times 60 steady frames after 10 warmups with `glFinish`, excluding image export
 and the bake. Example:
 
 ```powershell
-python usdGenShaders/test/validate_fur.py build/fur_200k_shadowed.usda build/fur_validation_200k --usdrecord D:/work/usdRig/usd-install/bin/usdrecord --width 1600
+python usdGenShaders/test/validate_fur.py build/fur_200k_shadowed.usda build/fur_validation_200k --usdrecord <usdrig-src>/usd-install/bin/usdrecord --width 1600
 ```
 
 On the RTX 4090 in this workspace, the 200,000-instance / 1.6-million-CV scene at
@@ -263,16 +263,16 @@ objects and mesh shadows on fur. CPU bake costs are unsuitable for large animate
 grooms every frame. Metal/Vulkan are untested, and the variant-A tangent still
 depends on Storm's GL curve-patch layout.
 
-Unreal's groom pipeline uses density voxelization and optional dedicated deep
+A host renderer's groom pipeline uses density voxelization and optional dedicated deep
 shadow maps, with view-dependent voxel sizing and specialized visibility and
 composition passes. Achieving or exceeding that full feature/quality envelope
 requires renderer integration and matched scenes/hardware benchmarks, beyond
 the stock material/scene-index path implemented here.
 
-References: [Epic groom pipeline and performance](https://dev.epicgames.com/documentation/unreal-engine/groom-scalability-and-performance-with-unreal-engine),
+References: [the host vendor groom pipeline and performance](https://dev.epicgames.com/documentation/unreal-engine/groom-scalability-and-performance-with-unreal-engine),
 [Pixar volumetric hair methods](https://graphics.pixar.com/library/Hair/paper.pdf).
 
-## UE-parity strand hair
+## the host renderer-parity strand hair
 
 `usdGenShaders/resources/shaders/usdGenHairStrands.glslfx` and
 `...Translucent.glslfx` share `usdGenHairStrandsBsdf.glslfx` and are registered
@@ -280,28 +280,28 @@ as the fifth and sixth defs in `shaderDefs.usda`. They are outside the C5
 freeze, which covers the `inputs:` block of the three `UsdGenHairPreview*`
 files and nothing else; the three frozen files are unchanged.
 
-The model is a port of Unreal Engine 5.3, quoted verbatim in
-`docs/research/ue-hair-rendering.md`:
+The model is a Marschner R/TT/TRT lobe plus dual scattering, in
+`usdGenHairStrandsBsdf.glslfx`:
 
-| UE | Here |
+| the host renderer | Here |
 |---|---|
-| `HairBsdf.ush HairShading()` — Karis 2016 R/TT/TRT | `UsdGenStrandsShading()`, line for line, UE's constants |
+| `HairBsdf.ush HairShading()` — Karis 2016 R/TT/TRT | `UsdGenStrandsShading()`, line for line, the host renderer's constants |
 | `ComputeDualScatteringTerms()` — Zinke 2008, driven by a hair count | `UsdGenStrandsDualScattering()` |
 | `A_front`/`A_back` from a 64x64x16 LUT (`HairStrandsLUT.usf`) | polynomial fits of the same half-sphere integrals |
-| `KajiyaKayDiffuseAttenuation()` — the `Scatter` fake | fallback for curves with no `furTau*` primvars, as UE uses it for cards |
+| `KajiyaKayDiffuseAttenuation()` — the `Scatter` fake | fallback for curves with no `furTau*` primvars, as the host renderer uses it for cards |
 | `Coverage = saturate(r / max(r, PixelRadius) * CoverageScale)` | same, from `widths` and the projection Storm used |
 | `EvaluateEnvHair()` — the BSDF against the sky, `Area = 0.2` | 8-tap fibre-frame quadrature normalised by the analytic albedo |
 | `GetHairColorFromMelanin()`, Chiang absorption | `UsdGenStrandsColorFromMelanin()` |
 
-Inputs are UE's names and defaults: `baseColor`, `tipColor`, `colorRamp`,
+Inputs are the host renderer's names and defaults: `baseColor`, `tipColor`, `colorRamp`,
 `useMelanin`, `melanin`, `redness`, `dyeColor`, `roughness`, `specular`,
 `scatter`, `backlit`, `opacity`, `randomHue`, `randomValue`,
 `randomRoughness`, `selfShadow`, `hairCoverageScale`, `minPixelWidth` and the
-`baseColorMap` texture. Output is linear radiance: UE's BSDF carries no extra
+`baseColorMap` texture. Output is linear radiance: the host renderer's BSDF carries no extra
 `NoL`, and `light.diffuse.rgb` is radiance in the same convention Storm's own
 `previewSurface.glslfx` uses, so a light that correctly exposes a
 `UsdPreviewSurface` correctly exposes hair. There is no artist budget and no
-tonemap, so a grazing highlight can exceed 1 and clip where UE would roll it
+tonemap, so a grazing highlight can exceed 1 and clip where the host renderer would roll it
 off in its filmic curve.
 
 `UsdGenTilePublisher::BuildDefaultMaterialDataSource()` binds the
@@ -315,7 +315,7 @@ the shader's single lerp; its first and last stops are used.
 
 ### How the coverage is spent, and why the default is the opaque variant
 
-UE spends its coverage through a per-sample visibility buffer. Stock Storm has
+the host renderer spends its coverage through a per-sample visibility buffer. Stock Storm has
 no such pass, but a material CAN drive the sample mask: Storm declares
 `hd_SampleMask` as a stage output only for `PRIM_POINTS`
 (`codeGen.cpp:2931-2941`), yet `gl_SampleMask` is a built-in fragment output in
@@ -366,12 +366,12 @@ the test that identifies the cause. The loss is by draw order, so it moves as
 the camera moves. Bind `UsdGenHairStrandsTranslucent` by hand for a hero still
 of a groom that fits the budget.
 
-One thing here is still not UE's. UE's default is `RasterizationScale = 0.5`
+One thing here is still not the host renderer's. the host renderer's default is `RasterizationScale = 0.5`
 with 8x MSAA, i.e. a strand is snapped to **one MSAA sample**, 1/8 of a pixel,
 and the geometry carries most of the sub-pixel coverage. A usdGen tile
-publishes `minScreenSpaceWidths = 1` (C2:35), UE's *stable rasterization* mode,
+publishes `minScreenSpaceWidths = 1` (C2:35), the host renderer's *stable rasterization* mode,
 which maximises the coverage that has to be paid back in the mask — measured
-mean coverage over the hair pixels of the HeadCam frame is 0.54. UE's own
+mean coverage over the hair pixels of the HeadCam frame is 0.54. the host renderer's own
 comment recommends 1.325 where there is no TAA, which is what we have; the
 value we use is 1 because it is the contract's, not because it is the best one.
 Lowering it is a C2 change, not a shader one.
@@ -393,7 +393,7 @@ head-hair-closeup at 1280, against a 4x supersampled reference:
 |---|---|---|---|---|
 | frame time | 14.84 ms | 16.71 ms | 24.52 ms | -- |
 | isolated-pixel spike score | 0.00631 | 0.00536 | 0.00530 | 0.00176 |
-| metahuman frame time | 3.25 ms | 3.63 ms | 6.03 ms | -- |
+| character-asset frame time | 3.25 ms | 3.63 ms | 6.03 ms | -- |
 
 8 buys nearly all of the improvement for +12.6%; 16 costs +65% for almost
 nothing more and is indistinguishable in the crops
@@ -412,7 +412,7 @@ practice**: at 1280 wide, N = 8 renders 10240 x 7680 and completes, and the
 script's own `ValidateRange(1, 8)` is the only limit. usdrecord prints an
 `HdStVBOSimpleMemoryManager can't reassign ranges` warning at every N
 including 1, which is benign — the image is correct. **N = 4 is the practical
-choice**, because the metahuman TempleCam spike score converges there and
+choice**, because the character-asset TempleCam spike score converges there and
 stops moving:
 
 | | 1x (8x MSAA) | SS 4 | SS 6 | SS 8 |
@@ -444,7 +444,7 @@ against the converged reference on head-hair-closeup and both are worse:
 
 The reason is stratification. Lighting exactly k samples is a stratified
 estimate of the coverage; letting each sample decide for itself is plain
-Bernoulli with the same mean and higher variance. UE can afford per-sample
+Bernoulli with the same mean and higher variance. the host renderer can afford per-sample
 because its visibility buffer resolves coverage analytically rather than
 stochastically — the mechanism being "more correct" does not survive the
 variance arithmetic here.
@@ -561,9 +561,9 @@ so they are that viewer's real output, not a reconstruction.
 
 The Kajiya term is not a fallback for missing dual-scattering data: it is
 always added, gated by `GBuffer.Metallic`, which `MaterialAttributeDefinitionMap`
-maps to the hair label **Scatter**. UE's strands path is dark there only because
+maps to the hair label **Scatter**. the host renderer's strands path is dark there only because
 `HairSampleToGBufferData` hardcodes `Out.Metallic = 0`. This material keeps it
-as the input it is, added in the same place, and defaults it to **0** — UE's own
+as the input it is, added in the same place, and defaults it to **0** — the host renderer's own
 default and what its strands path forces.
 
 That matters for a viewport. Every Marschner lobe needs the light near the
@@ -592,7 +592,7 @@ also no way for a scene to turn it down again -- `UsdGenLookAPI` has no
 `scatter`, so a description cannot override it without authoring a whole
 material -- which is the other reason the safe value is the default.
 
-`ScatterTint` is `Shadow < 1 ? pow(BaseColor/luma, 1 - Shadow) : 1`, and UE's
+`ScatterTint` is `Shadow < 1 ? pow(BaseColor/luma, 1 - Shadow) : 1`, and the host renderer's
 `Shadow` there is `FShadowTerms.TransmissionShadow` — the shadow map, not the
 dual-scattering transmittance. Feeding it the latter pins the tint at full
 saturation everywhere inside a dark coat and turns the fill orange.
@@ -625,7 +625,7 @@ so `tipColor` silently falls back to its Sdr default `(0.21, 0.115, 0.045)` — 
 light blond — while `rootColor` keeps arriving. The albedo is
 `mix(displayColor, tipColor, pow(t, colorRamp))`, so you get a half-applied
 look, and on a groom viewed down the strands the tip end is most of what you
-see. Measured on `examples/metahuman-hair-parity.usda`: with a bound material,
+see. Measured on a converted groom that is not part of this tree: with a bound material,
 halving the look's `rootColor` moved the lit coat by 7.5% and setting the look
 to pure black still read a shader albedo of `0.2086` in R. Removing the binding
 took the same halving to 24% and the black-look albedo to 0.0015.
@@ -678,15 +678,15 @@ Pinned by `tests/testUsdGenLookPrimvars.cpp`.
 
 ### What is approximated, beyond the list above
 
-- `a_f`/`a_b` are 39-coefficient closed forms rather than UE's 64x64x16 LUT.
-  They keep the incidence angle, as UE's does. Measured strictly between the
+- `a_f`/`a_b` are 39-coefficient closed forms rather than the host renderer's 64x64x16 LUT.
+  They keep the incidence angle, as the host renderer's does. Measured strictly between the
   fitted nodes: `a_f` max 10.0% / rms 4.4% within +-60 degrees and 15.5% / 5.0%
   to +-75; `a_b` 12.1% / 3.0% and 12.1% / 3.6%. Keeping the angle costs about
   8% of the frame on the TempleCam (13.82 ms against 12.76) and is worth it,
   because `a_f` enters as `Tf = a_f^n`: the theta-averaged fit the script also
   prints is max 38% / rms 15% on `a_f` inside +-60 degrees, and at ten
   crossings 15% on `a_f` is a factor of four in transmittance.
-- `delta_b` and `sigma_b` follow Zinke's published equations. UE's shipped
+- `delta_b` and `sigma_b` follow Zinke's published equations. the host renderer's shipped
   lines multiply where the paper adds, and repeat one square root; both are
   small shifts of an already broad back-scatter lobe.
 - The hair count is the six-axis baked optical depth (`furTauP`/`furTauN`)
@@ -706,7 +706,7 @@ Pinned by `tests/testUsdGenLookPrimvars.cpp`.
 
 ## Hair shadowing the scalp
 
-The largest remaining difference from the Unreal reference, once the strand
+The largest remaining difference from the host renderer reference, once the strand
 material was in, was not the hair: it was the skin. Every gap between clumps
 showed fully lit scalp, so the temple fade read as hairs pasted onto a bright
 surface rather than as hair growing out of a shadowed one.
@@ -762,7 +762,7 @@ usdview's default lighting, where a shadow map would have nothing to offer.
     T = SUM_i w_i * a_f(hairColour, roughness, theta_i) ^ HairCount(L_i)
         / SUM_i w_i,     w_i = radiance_i * attenuation_i * max(0, N . L_i)
 
-with `a_f` the same 39-term fit of Unreal's scattering LUT the strand material
+with `a_f` the same 39-term fit of a host renderer's scattering LUT the strand material
 uses (`#import`ed from `usdGenHairStrandsBsdf.glslfx`, not copied) and
 `HairCount` the same normalised cosine-power-4 blend of the six stored depths.
 Weighting each light by what it actually contributes to the skin is what lets
@@ -772,7 +772,7 @@ cosine-weighted taps about the normal rather than the three axes a bare
 
 Two deliberate differences from the strand shader:
 
-* **No self shift.** Unreal's `max(0, HairCount - 1)` removes the *shading
+* **No self shift.** a host renderer's `max(0, HairCount - 1)` removes the *shading
   strand's* own crossing. The receiver here is skin, so every crossing between
   it and the light is real and the count goes in as it stands.
 * **Hair-only depth.** The bake runs the six sweeps twice: once over hair

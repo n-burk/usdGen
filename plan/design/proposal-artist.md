@@ -16,7 +16,7 @@ report is marked **ASSUMPTION**.
 
 ## 0. Request and lens
 
-The request (brief §1, R1–R9) is an XGen-like hair/fur grooming *and instancing* plugin for
+The request (brief §1, R1–R9) is an procedural hair/fur grooming *and instancing* plugin for
 OpenUSD 26.08 / Hydra 2.0, on top of usdRig, with dynamic in-memory evaluation, render-time curve
 generation in one binary, fast static-curve load and deformation, chainable stylers, Storm looks
 close to the render, image/Ptex/SeExpr-driven colour and attributes, hard interactivity, and
@@ -28,7 +28,7 @@ things, and every design choice below is traceable to one of them:
 * **A1 — The stage is the UI.** What an artist sees in usdview's prim tree and in a `.usda` diff
   must read like a groom: a description, a stack of named operators in the order they run, a
   guide set, maps, a material. No opaque blobs, no `primvars:` smuggling of parameters.
-* **A2 — Vocabulary parity.** An artist arriving from XGen, Houdini or Unreal must find the
+* **A2 — Vocabulary parity.** An artist arriving from a host groomer, a DCC or a host renderer must find the
   parameter they already know, under a name they can guess, with the same units and the same
   mask/ramp block on *every* operator (A7 §7 recommends exactly this).
 * **A3 — The loop, not the frame.** A brush stroke, a slider drag and a scrub must all cost the
@@ -48,10 +48,10 @@ things, and every design choice below is traceable to one of them:
    stack in namespace under the character rather than in a separate "groom file" that references
    the scalp.
 2. **ASSUMPTION** — The primary artist application is usdview plus the usdGen plugin. A DCC
-   bridge (Maya/Houdini) is out of scope for v1–v3; the C ABI and pxr_boost module (S39) are the
+   bridge between host applications is out of scope for v1–v3; the C ABI and pxr_boost module (S39) are the
    integration surface if one is written later.
 3. **ASSUMPTION** — Units are the stage's `metersPerUnit`; `density` is *hairs per square stage
-   unit* on the **rest** surface, which is the only definition stable under deformation. XGen
+   unit* on the **rest** surface, which is the only definition stable under deformation. A host groomer
    quotes density per unit²; A7 §9.1 keeps the same.
 4. **ASSUMPTION** — v1 targets ≤ 1 M rendered curves and ≤ 200 k interactive curves per
    description. 200 k × 8 CV at refineLevel 2 is 23.9 ms/frame on this GB10 (S31, MEASURED), so
@@ -59,7 +59,7 @@ things, and every design choice below is traceable to one of them:
 5. **ASSUMPTION** — The `UsdGenMask` abstract prim base named in S9's parenthetical is realised
    here as (a) an applied API schema `UsdGenMaskAPI` — the per-operator mask *slot* — plus (b)
    the abstract prim base `UsdGenMap` for the field that feeds it. Rationale from the lens: an
-   artist authors a mask as a block on the operator (XGen, Houdini, Blender all do), and the only
+   artist authors a mask as a block on the operator (a host groomer and other host applications all do), and the only
    thing that deserves its own prim is the *field* (an image, a Ptex, an expression, a paint
    layer). S9's normative content — codeless schemas, a common abstract base — is honoured.
 6. **ASSUMPTION** — Operator prims are non-imageable (`UsdTyped` base). They must still appear in
@@ -67,7 +67,7 @@ things, and every design choice below is traceable to one of them:
    `visibility`/`purpose`, whose meaning would be ambiguous against `usdGen:enabled`.
 7. **ASSUMPTION** — The schema ships one prim type per *operator concept*, not per *mode*
    (`UsdGenScatter` with `usdGen:mode = random|uniform|points|atGuides`, not four types). Fewer
-   types read better in the prim tree and match XGen's single "generator" with a mode; the cost
+   types read better in the prim tree and match a host groomer's single "generator" with a mode; the cost
    is unused properties, which usdview hides behind "show only authored".
 8. **ASSUMPTION** — Chain edges are always authored by the tool as `usdGen:input` (S26). The
    schema *additionally* defines an implicit fallback — an operator with no authored
@@ -82,8 +82,8 @@ things, and every design choice below is traceable to one of them:
 
 ## 2. From the artist's mental model to the object model
 
-An XGen artist thinks: *description → a generator → a stack of modifiers → guides → maps →
-a look*. A Houdini artist thinks: *a chain of SOPs with masks*. Both map onto the same five
+An a host groomer artist thinks: *description → a generator → a stack of modifiers → guides → maps →
+a look*. A a DCC artist thinks: *a chain of SOPs with masks*. Both map onto the same five
 nouns, and this proposal names them exactly once:
 
 | Artist noun | usdGen prim | Hydra consequence |
@@ -136,8 +136,8 @@ defaults and the global density switch.
 | Property | Type | Default | Meaning |
 |---|---|---|---|
 | `usdGen:surface` | `rel` | — | default bound surface for all descriptions (mesh, or `GeomSubset`s) |
-| `usdGen:densityScale` | `float` | 1.0 | viewport multiplier on every description's density (XGen "preview density") |
-| `usdGen:renderDensityScale` | `float` | 1.0 | multiplier applied only when the delegate is not Storm (XGen "Render Density Multiplier", A7 §8) |
+| `usdGen:densityScale` | `float` | 1.0 | viewport multiplier on every description's density (a host groomer "preview density") |
+| `usdGen:renderDensityScale` | `float` | 1.0 | multiplier applied only when the delegate is not Storm (a host groomer "Render Density Multiplier", A7 §8) |
 | `usdGen:schemaVersion` | `uniform int` | 1 | |
 | `usdGen:sessionId` | `uniform string` | "" | stable key for the stage-free registry path (S15, `G-stage-free` §7) |
 
@@ -149,7 +149,7 @@ the hair (the usdRig precedent, A2 §6: `UsdGeomBBoxCache` ignores Hydra entirel
 |---|---|---|---|
 | `usdGen:surface` | `rel` | inherits Groom | mesh / `GeomSubset` targets. Instance-proxy targets are translated by S7's `ProxyPathTranslationDataSourceNames` |
 | `usdGen:output` | `rel` | last op in `Ops` | terminal operator; the thing that is drawn |
-| `usdGen:primitive` | `uniform token` | `"splines"` | `splines`, `cards`, `archives`, `spheres` (XGen primitive types, A7 §1.1) |
+| `usdGen:primitive` | `uniform token` | `"splines"` | `splines`, `cards`, `archives`, `spheres` (a host groomer primitive types, A7 §1.1) |
 | `usdGen:chunkCount` | `uniform int` | 64 | S27's 32–256; clamped |
 | `usdGen:chunkPolicy` | `uniform token` | `"surfaceLocality"` | `surfaceLocality` \| `index`; locality is what makes frustum culling work (`G-storm-throughput` §2) |
 | `usdGen:interactive:maxCurves` | `int` | 50000 | LOD ceiling while a tool is dragging (S31: decimate count, never refineLevel) |
@@ -171,8 +171,8 @@ adapter picks it up for free (`includeDerivedPrimTypes: true`, S10, A4 §2.1).
 | Property | Type | Default | Meaning |
 |---|---|---|---|
 | `usdGen:input` | `rel` | (implicit preceding sibling, §1.8) | upstream operator(s); multi-target for ops that merge |
-| `usdGen:enabled` | `bool` | 1 | XGen per-modifier enable; disabling is a *pass-through*, not a recompile (§4.6) |
-| `usdGen:blend` | `float` | 1.0 | Houdini "Blend": final lerp between the input and this operator's result |
+| `usdGen:enabled` | `bool` | 1 | a host groomer per-modifier enable; disabling is a *pass-through*, not a recompile (§4.6) |
+| `usdGen:blend` | `float` | 1.0 | a DCC "Blend": final lerp between the input and this operator's result |
 | `usdGen:seed` | `uniform int` | 0 | every hash in the operator is `hash(seed, curveId, salt)` |
 | `usdGen:space` | `uniform token` | per type | `rest` \| `deformed` \| `world`; drives S25's `restSpace/deformedSpace` classification and therefore motion-blur cost (§4.8) |
 | `usdGen:readPhase` | `uniform token` | `"final"` | `base` \| `preceding` \| `final` \| `@<prim>`, retained from usdRig for surface reads (S26) |
@@ -180,23 +180,23 @@ adapter picks it up for free (`includeDerivedPrimTypes: true`, S10, A4 §2.1).
 | `usdGen:label` | `string` | "" | free-text note shown in the stack editor |
 
 **`UsdGenMaskAPI`** (applied API schema; applied to every operator by the tool at creation) — the
-uniform mask block, the single biggest parity item with XGen/Houdini (A7 §7).
+uniform mask block, the single biggest parity item with a host groomer/a DCC (A7 §7).
 
 | Property | Type | Default | Meaning |
 |---|---|---|---|
 | `usdGen:mask:source` | `rel` | — | at most one `UsdGenMap`; composition is a `UsdGenCombineMap` (usdRig's weight-object shape, A1 §6) |
 | `usdGen:mask:invert` | `bool` | 0 | |
 | `usdGen:mask:range` | `float2` | (0,1) | remap of the source before use |
-| `usdGen:mask:random` | `float` | 0.0 | per-curve `rand(seed,id)` multiplier amount (XGen `rand()` masks) |
+| `usdGen:mask:random` | `float` | 0.0 | per-curve `rand(seed,id)` multiplier amount (a host groomer `rand()` masks) |
 | `usdGen:mask:randomSeed` | `uniform int` | 0 | |
 | `usdGen:mask:ramp:knots` | `float2[]` | `[(0,1),(1,1)]` | along-curve ramp, (t, value) sorted by t (S11) |
 | `usdGen:mask:ramp:interpolation` | `uniform token` | `"linear"` | `constant`\|`linear`\|`smooth`\|`monotoneCubic` |
 | `usdGen:mask:ramp` | `float` (with `.spline`) | — | v2: whole `TsSpline` published by the adapter, parameter axis reinterpreted as root→tip (S11, MEASURED probe6) |
-| `usdGen:mask:rangeMin` / `:rangeMax` / `:effectPosition` / `:falloff` | `float` | 0,1,0.5,0.5 | Houdini's four-parameter curve-mask shortcut, an alternative to the ramp (A7 §7) |
-| `usdGen:mask:noise:amount` | `float` | 0.0 | Houdini "Noise Mask" |
+| `usdGen:mask:rangeMin` / `:rangeMax` / `:effectPosition` / `:falloff` | `float` | 0,1,0.5,0.5 | a DCC's four-parameter curve-mask shortcut, an alternative to the ramp (A7 §7) |
+| `usdGen:mask:noise:amount` | `float` | 0.0 | a DCC "Noise Mask" |
 | `usdGen:mask:noise:frequency` | `float` | 1.0 | |
 | `usdGen:mask:noise:gain` / `:bias` | `float` | 0.5 / 0.5 | |
-| `usdGen:mask:region` | `rel` | — | region/parting map that constrains membership (XGen region maps) |
+| `usdGen:mask:region` | `rel` | — | region/parting map that constrains membership (a host groomer region maps) |
 
 The resolved mask is `w(h,t) = clamp(range(source(h)) ^invert * lerp(1, rand, amount) * noise(h)) * ramp(t)`,
 computed once per capture into one `VtFloatArray` per operator (per curve) plus one 257-entry ramp
@@ -253,8 +253,8 @@ upstream parameter tweak that keeps ids still applies (A7 §9.3):
 | `usdGen:sculpt:cvOffsets` | `int[]` | `[]` (prefix sum, size = curveIds+1) |
 | `usdGen:sculpt:deltas` | `vector3f[]` | `[]` |
 | `usdGen:sculpt:space` | `uniform token` | `"rootFrame"` (\| `object`) |
-| `usdGen:sculpt:weight` | `float` | 1.0 (XGen sculpt-layer weight) |
-| `usdGen:sculpt:freezeMask` | `int[]` | `[]` — curve ids whose downstream stylers are suppressed (XGen Freeze brush) |
+| `usdGen:sculpt:weight` | `float` | 1.0 (a host groomer sculpt-layer weight) |
+| `usdGen:sculpt:freezeMask` | `int[]` | `[]` — curve ids whose downstream stylers are suppressed (a host groomer Freeze brush) |
 
 Multiple sculpt layers stack in chain order and blend additively.
 
@@ -457,7 +457,7 @@ is machine-generated. This is A1.
 ### 3.8 `.usda` example (b) — frozen curves deformed with the surface, plus a sculpt layer
 
 The freeze operator does not replace the chain; it *caps* it. Upstream operators stay in the
-stack, greyed out in the stack editor, and can be re-enabled by switching one token — XGen's
+stack, greyed out in the stack editor, and can be re-enabled by switching one token — a host groomer's
 "deactivates all modifiers below it" (A7 §9.3), reversibly.
 
 ```usda
@@ -859,7 +859,7 @@ Both need queries beyond a chunk, and both are solved in **capture**, never in e
 
 * **Guide interpolation.** Capture builds a kd-tree (nanoflann 1.12.1, S38) over guide roots in
   *rest* space, filters candidates by angle, region and parting lines, and stores per curve
-  `guideIdx[maxGuides]` + `guideW[maxGuides]` — the Unreal `groom_closest_guides`/
+  `guideIdx[maxGuides]` + `guideW[maxGuides]` — the host renderer `groom_closest_guides`/
   `groom_guide_weights` shape (A7 §9.1 G6). Evaluate is then per-curve embarrassingly parallel
   (cost class A) reading a *whole-buffer* guide array that lives outside the chunk system, because
   guides are a separate, small node (typically 100–2000 curves) evaluated to completion before any
@@ -1014,7 +1014,7 @@ public:
 `Sample` reads through the private pruning wrapper so UsdSkel-skinned scalps (blocked
 `primvars/points`, ext-computation points) work under Storm as well as hdPrman (S3), and it reads
 rest points from `usdGen/rest/points` (S12), falling back to an authored `primvars:rest` (S12,
-Houdini convention). Everything read is post-flattening: `xform/matrix` is world with
+A DCC convention). Everything read is post-flattening: `xform/matrix` is world with
 `resetXformStack=true`, and dirtiness is per prim, never hierarchical (S4).
 
 ### 5.5 Output spaces and invalidation
@@ -1073,19 +1073,19 @@ Reference: A7 §9. Cost classes: **A** = per-curve parallel; **B** = spatial str
 
 | Type | Mode / key params (defaults) | Class | Space | Parity |
 |---|---|---|---|---|
-| `UsdGenScatter` | `mode = random\|uniform\|points\|atGuides`; `density = 100`, `seed = 0`, `relaxIterations = 0` (0–50), `areaCompensation = 1`, `spacingU/V = 0.1` (uniform), `rootPrims[]`/`rootUVs[]` (points) | A (relax B) | rest | XGen generator; Houdini Scatter |
-| `UsdGenGrow` | `segments = 8`, `length = 1.0`, `lengthRandom = (1,1)`, `direction = normal\|attribute\|vector`, `lift = 0`, `uvBlend = 0` | A | rest | Houdini Guide Initialize |
-| `UsdGenGuideSet` | `source = children\|scatter`, `density = 10`, `cvCount = 8`, `rebuild = 1` | A | rest | XGen "guides at 10 %" |
-| `UsdGenGuideInterpolate` | `maxGuides = 3`, `influenceRadius = 5`, `influenceDecay = 2`, `maxGuideAngle = 90`, `blendInSkinSpace = 1`, `blendMethod = linearBlend\|extrudeAndBlend`, `useUniqueGuide = 0`, `randomizeGuide = 0`, `cvCount = 0` (0 = max of guides), `clumpCrossover = 0` | capture B, eval A | rest | XGen relative interpolation; Houdini Hair Generate; Unreal 3-guide weights |
+| `UsdGenScatter` | `mode = random\|uniform\|points\|atGuides`; `density = 100`, `seed = 0`, `relaxIterations = 0` (0–50), `areaCompensation = 1`, `spacingU/V = 0.1` (uniform), `rootPrims[]`/`rootUVs[]` (points) | A (relax B) | rest | a host groomer generator; a DCC Scatter |
+| `UsdGenGrow` | `segments = 8`, `length = 1.0`, `lengthRandom = (1,1)`, `direction = normal\|attribute\|vector`, `lift = 0`, `uvBlend = 0` | A | rest | a DCC Guide Initialize |
+| `UsdGenGuideSet` | `source = children\|scatter`, `density = 10`, `cvCount = 8`, `rebuild = 1` | A | rest | a host groomer "guides at 10 %" |
+| `UsdGenGuideInterpolate` | `maxGuides = 3`, `influenceRadius = 5`, `influenceDecay = 2`, `maxGuideAngle = 90`, `blendInSkinSpace = 1`, `blendMethod = linearBlend\|extrudeAndBlend`, `useUniqueGuide = 0`, `randomizeGuide = 0`, `cvCount = 0` (0 = max of guides), `clumpCrossover = 0` | capture B, eval A | rest | a host groomer relative interpolation; a DCC Hair Generate; a host renderer 3-guide weights |
 | `UsdGenCurveSource` | `rel usdGen:curves`, `resample = 0`, `cvCount = 0` | A | rest | reads frozen / imported / simulated curves (R4) |
-| `UsdGenDeform` | `mode = rigidFrame\|pointDeform`, `twistAware = 1`, `lockRoots = 1`, `preserveShape = 0` | A | **deformed** | Houdini Guide Deform; Unreal binding (R3) |
-| `UsdGenClump` | `amount = 0.5` + `profile` ramp, `size = 1.0` \| `density`, `seed`, `stray:amount/rate/falloff = 0/0/1`, `volumize = 0`, `noise:amount/frequency/correlation = 0/1/0`, `levels = 1`, `sizeReduction = 0.5`, `tightnessReduction = 0.8`, `method = linearBlend\|extrudeAndBlend`, `preserveLength = 100` | capture B, eval A×levels | rest | XGen Clumping; Houdini Hair Clump 2.0 |
-| `UsdGenNoise` (frizz) | `magnitude = 0.05` + ramp, `frequency = 3`, `correlation = 0.5`, `octaves = 1`, `lacunarity = 2`, `gain = 0.5`, `space`, `preserveLength = 1` | A | rest | XGen Noise; Houdini Frizz |
-| `UsdGenLength` | `mode = set\|add\|multiply\|cutAbsolute\|cutRelative`, `value = 1`, `valueRandom = (1,1)`, `method = scale\|cutExtend`, `rebuild = keepParam\|reparam`, `cullThreshold = 0` | A | rest | XGen Cut; Houdini Set Length |
-| `UsdGenWidth` | `width = 0.01`, `widthRamp`, `taper = 0`, `taperStart = 0.5`, `rootScale = 1`, `tipScale = 1`, `replace = 1` | A | rest | Unreal root/tip scale; XGen Width Ramp |
-| `UsdGenDirection` | `direction = (0,1,0)`, `amount = 0`, `lift = 0`, `mode = rigid\|perSegment`, `followSkinContour = 0` | A | rest | XGen Tilt U/V/N |
-| `UsdGenFreeze` | §3.4 | — | — | XGen Groom Bake |
-| `UsdGenSculptLayer` | §3.4 | A | rest | XGen sculpt layers |
+| `UsdGenDeform` | `mode = rigidFrame\|pointDeform`, `twistAware = 1`, `lockRoots = 1`, `preserveShape = 0` | A | **deformed** | a DCC Guide Deform; a host renderer binding (R3) |
+| `UsdGenClump` | `amount = 0.5` + `profile` ramp, `size = 1.0` \| `density`, `seed`, `stray:amount/rate/falloff = 0/0/1`, `volumize = 0`, `noise:amount/frequency/correlation = 0/1/0`, `levels = 1`, `sizeReduction = 0.5`, `tightnessReduction = 0.8`, `method = linearBlend\|extrudeAndBlend`, `preserveLength = 100` | capture B, eval A×levels | rest | a host groomer Clumping; a DCC Hair Clump 2.0 |
+| `UsdGenNoise` (frizz) | `magnitude = 0.05` + ramp, `frequency = 3`, `correlation = 0.5`, `octaves = 1`, `lacunarity = 2`, `gain = 0.5`, `space`, `preserveLength = 1` | A | rest | a host groomer Noise; a DCC Frizz |
+| `UsdGenLength` | `mode = set\|add\|multiply\|cutAbsolute\|cutRelative`, `value = 1`, `valueRandom = (1,1)`, `method = scale\|cutExtend`, `rebuild = keepParam\|reparam`, `cullThreshold = 0` | A | rest | a host groomer Cut; a DCC Set Length |
+| `UsdGenWidth` | `width = 0.01`, `widthRamp`, `taper = 0`, `taperStart = 0.5`, `rootScale = 1`, `tipScale = 1`, `replace = 1` | A | rest | a host renderer root/tip scale; a host groomer Width Ramp |
+| `UsdGenDirection` | `direction = (0,1,0)`, `amount = 0`, `lift = 0`, `mode = rigid\|perSegment`, `followSkinContour = 0` | A | rest | a host groomer Tilt U/V/N |
+| `UsdGenFreeze` | §3.4 | — | — | a host groomer Groom Bake |
+| `UsdGenSculptLayer` | §3.4 | A | rest | a host groomer sculpt layers |
 
 Maps in v1: `UsdGenImageMap`, `UsdGenPaintMap`, `UsdGenExprMap`, `UsdGenCombineMap`,
 `UsdGenNoiseMap`. Mask block (`UsdGenMaskAPI`) on every operator from day one — it is the parity
@@ -1131,8 +1131,8 @@ OpenExec).
    LUT, computed once per capture.
 2. Seeds are `hash(usdGen:seed, curveId, salt)` where `salt` is a per-operator constant, so two
    `UsdGenClump`s with the same seed do *not* produce correlated randomness.
-3. `preserveLength` restores rest segment lengths root-locked after any displacement, as XGen and
-   Blender both do.
+3. `preserveLength` restores rest segment lengths root-locked after any displacement, as a host groomer and
+   a DCC both do.
 4. Every operator declares `Space()`. A `deformed`-space operator pushes itself and everything
    downstream into the per-shutter-offset tail (§4.8) — the stack editor shows a small motion icon
    on those rows so an artist can see what a render will cost.
@@ -1227,14 +1227,14 @@ Quads map 1:1; an n-gon occupies n consecutive face ids. **MEASURED:** 23 ns/loo
 228 M lookups/s at 8 threads.
 
 SeExpr: upstream `wdas/SeExpr` `main` @8f8c8f2, interpreter only, static and hidden, with `rand()`
-added (S38). The XGen variable set an artist expects, bound through one `VarBlockCreator` and one
+added (S38). The a host groomer variable set an artist expects, bound through one `VarBlockCreator` and one
 thread-safe `VarBlock` per TBB worker:
 
 | Slot | Contents |
 |---|---|
 | Variables | `$u $v` (root surface uv), `$id`, `$faceId`, `$P $N $dPdu $dPdv` (deformed), `$Pref $Nref` (rest), `$t` (0 root → 1 tip, `cv` domain only), `$frame`, `$cLength $cWidth`, `$descId` |
 | Functions | SeExpr's builtins plus `map("name" [,s,t] [,channel])`, `ptex("name" [,faceId,u,v])`, `rand([min,max][,seed])` |
-| Notes | SeExpr's `noise` is 0..1, XGen's is −1..1; usdGen keeps SeExpr semantics and ships `snoise` for the signed form, documented in the expression editor's help pane (A8 §1.8) |
+| Notes | SeExpr's `noise` is 0..1, a host groomer's is −1..1; usdGen keeps SeExpr semantics and ships `snoise` for the signed form, documented in the expression editor's help pane (A8 §1.8) |
 
 `${DESC}`-style macros are pre-substituted before parse; asset paths resolve through the adapter's
 already-resolved `SdfAssetPath` (S13 — resolution is free and stage-free).
@@ -1659,7 +1659,7 @@ this design assumes usdGen runs after every deformer.
 ## 12. Out of scope (deliberately)
 
 Simulation (usdGen consumes sim caches through `UsdGenCurveSource`, it does not run a solver);
-a DCC bridge; GPU evaluation of the curve chain (the data plane is CPU; Storm only draws);
+A DCC bridge; GPU evaluation of the curve chain (the data plane is CPU; Storm only draws);
 per-instance material binding (Storm has none — S33); XPD/Alembic import (a converter, not a
 plugin feature); authoring by the evaluator (R1: nothing the evaluator computes is ever written to
 the stage except through an explicit freeze/bake action).

@@ -679,7 +679,7 @@ It publishes `usdGen/rest/points` from an `AttributeMapping::factory` whose data
 (probe1 §5): at stage time 24 the deformed points read `[(0,0,5)…]` and the rest points read
 `[(0,0,0)…]`, with only the deformed source appearing in the stage globals' time-varying list — so
 the rest channel costs no per-frame dirty. An authored `primvars:rest` is honoured when present and
-passes through the whole chain untouched (probe1 §1e, the Houdini convention). Capture-on-first-cook
+passes through the whole chain untouched (probe1 §1e, the host application convention). Capture-on-first-cook
 is rejected: it is wrong whenever the first drawn frame is not the rest frame.
 
 The same adapter serves rest **curve** points for frozen curves (S42,
@@ -2026,5 +2026,5 @@ ASSUMPTION provenances), §3.10 (`pxr/exec/esfUsd/stageData.cpp:361`).
 `prototypes/instancing/` (`testUsdGenInstancer`), `prototypes/storm-hair-look/` (`eglctx.h` and
 `bench_hair.cpp` become the T2 harness; `usdGenHairPreview.glslfx` is contract C5).
 
-**OpenUSD 26.08** (`/home/burkard/work/OpenUSD`, tag v26.08). Every file:line above was re-verified by
+**OpenUSD 26.08** (`<openusd-src>`, tag v26.08). Every file:line above was re-verified by
 grep in this tree while writing.

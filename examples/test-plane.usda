@@ -1,5 +1,5 @@
 #usda 1.0
-# Simple test plane for interactive Tonic tool testing: an 8x8
+# Simple test plane for interactive Pomade tool testing: an 8x8
 # quad grid in the XZ plane (y=0), x,z in [-2,2].
 
 def Mesh "Plane"

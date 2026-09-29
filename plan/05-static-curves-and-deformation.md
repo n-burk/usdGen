@@ -456,8 +456,8 @@ artist's mesh is inverted on purpose); usdGen never flips it silently.
 ### 3.3 `skinprim` and `skinprimuv`
 
 `primvars:skinprim` (uniform `int`) is the bound face index and `primvars:skinprimuv` (uniform
-`texCoord2f`) is the position within that face. The naming follows Houdini's *Prim Num Attribute* /
-*Prim UVW Attribute* so that a Houdini-authored groom round-trips (A7 §3.6, §3.7).
+`texCoord2f`) is the position within that face. The naming follows a DCC's *Prim Num Attribute* /
+*Prim UVW Attribute* so that a DCC-authored groom round-trips (A7 §3.6, §3.7).
 
 **Face indices are always indices into the parent mesh** (ADR §2.3, "Surface targets"). When
 `usdGen:surface` targets a `GeomSubset`, the subset restricts *scatter* to its `indices` (a face set;
@@ -533,7 +533,7 @@ re-runs per motion sample.
 | `usdGen:twistAware` | `bool` | `true` | see §4.3 |
 | `usdGen:preserveShape` | `float` | `0.0` | 0 = off; strength of the Cosserat shape-preservation pass (A7 §3.5). **v2**; in v1 a non-zero value is a warning and is ignored |
 | `usdGen:preserveShape:iterations` | `int` | `0` | Cosserat iteration count, v2 |
-| `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only (v2); Unreal's ≤100-sample binding |
+| `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only (v2); a host renderer's ≤100-sample binding |
 | `usdGen:readPhase` | `uniform token` | `"final"` | `base` \| `preceding` \| `final` \| `@<primPath>` (S26) |
 | `usdGen:space` | `uniform token` | `"auto"` (inherited, not redeclared) | Tokens are `auto \| rest \| deformed` only — **there is no `world` token**, because post-flattening deformed space *is* world space (ADR §9 R9, S4). `auto` resolves to `deformed` for this type **by its declared class** (S25, `02-schema.md` §2.5 and §2.8); authoring `rest` on a `UsdGenDeformer` is a compile error naming the prim. The engine enum is `UsdGenSpace { Inherit, Rest, Deformed }`, `Inherit` ⇔ `auto` |
 
@@ -619,8 +619,8 @@ transform (S4, §4.6), so the choice is invariant under the surface's world matr
 recorded per curve at capture so it cannot flip between frames. The hair then follows the normal and
 never the parameterisation, and both poses use the same rule, so there is no pop at `blend = 0`.
 
-`rbf` (a displacement field from ≤100 surface samples, the Unreal binding shape) and `pointDeform`
-(per-CV weights over surface points, Houdini's capture-and-deform) are **v2** (A7 §9.1 G7). They
+`rbf` (a displacement field from ≤100 surface samples, the host renderer binding shape) and `pointDeform`
+(per-CV weights over surface points, a DCC's capture-and-deform) are **v2** (A7 §9.1 G7). They
 exist in the token now so that a v2 upgrade is a value edit, not a prim swap.
 
 ### 4.4 Where `UsdGenDeform` sits, and what may follow it
@@ -801,7 +801,7 @@ Tiles keep their surface `__dependencies` edge as C2 specifies; sources do not g
 
 ### 5.2 What a freeze caps, and what stays authored
 
-A freeze **caps** the chain; it does not replace it (A7 §1.4, XGen *Groom Bake*: "deactivates all
+A freeze **caps** the chain; it does not replace it (A7 §1.4, a host groomer *Groom Bake*: "deactivates all
 modifiers below it", reversibly). With `mode = "frozen"`:
 
 * Every node upstream of the freeze is excluded from the compiled DAG. Its prims stay on the stage,
@@ -1082,7 +1082,7 @@ sub-millisecond" is true only up to the delegate boundary. Gate **T-4** covers t
 | Property | Type | Default | Meaning |
 |---|---|---|---|
 | `usdGen:input` | `rel` | — | one upstream node |
-| `usdGen:sculpt:weight` | `float` | `1.0` | layer weight `[0,1]`, XGen sculpt-layer semantics |
+| `usdGen:sculpt:weight` | `float` | `1.0` | layer weight `[0,1]`, a host groomer sculpt-layer semantics |
 | `usdGen:sculpt:space` | `uniform token` | `"rootFrame"` | `rootFrame` \| `object`. `rootFrame` is what makes a delta survive surface deformation; `object` is the escape hatch for a fix that must not follow the surface |
 | `usdGen:sculpt:curveIds` | `uint64[]` | `[]` | which curves have deltas, **sorted ascending**; 64-bit, matching `primvars:usdGen:curveId` (ADR §9 R12) |
 | `usdGen:sculpt:cvOffsets` | `int[]` | `[]` | prefix offsets into `deltas`; size `curveIds.size() + 1` |
@@ -1136,7 +1136,7 @@ deltas for that curve are **retained and ignored**, the layer is marked stale, a
 the count in `UsdGenNodeStats`. Deltas are never silently resampled: the artist decides.
 
 Multiple `UsdGenSculptLayer` prims chained in sequence blend additively in chain order, each with its
-own weight, exactly as XGen's sculpt layers do.
+own weight, exactly as a host groomer's sculpt layers do.
 
 ### 6.3 Sparse addressing
 
@@ -1164,7 +1164,7 @@ form and requires it to be arithmetically identical to `02-schema.md` §2.13's b
 may move the term outside. The
 existing per-curve `VtFloatArray curveMask` in `UsdGenCurveBuffer` (`03-execution-engine.md`
 §1.2) carries it; there is no `lockMask` field and no extra pass, because the mask is already
-resolved once per node per capture. One mechanism implements XGen's Freeze brush for every
+resolved once per node per capture. One mechanism implements a host groomer's Freeze brush for every
 downstream styler at once.
 
 ### 6.5 Epoch, staleness and rebase
@@ -1253,12 +1253,12 @@ inflates 10–20× on a loaded host (**EV-065**). Gate **T-2** bounds it at 0.25
 
 A `UsdGenGuideSet` (a `UsdGeomImageable`, ADR §2.1) is a named set whose children are `BasisCurves`
 under contract C3 with `primvars:usdGen:role = "guide"`. It lives at `<Description>/Guides/<setName>`
-(ADR §2.2). Guides are, mechanically, a freeze of a sparse subset — XGen's "create guides at 10 %
+(ADR §2.2). Guides are, mechanically, a freeze of a sparse subset — a host groomer's "create guides at 10 %
 density" — and they load through exactly the §2 path with `usdGen:lane = "reference"`.
 
 | Property | Type | Default | Meaning |
 |---|---|---|---|
-| `usdGen:blend` | `float[]` | `[]` | **per guide**, XGen's range-of-influence blend (ADR §2.3), indexed by the child curves' `primvars:usdGen:curveId` in ascending order. Empty = 1.0 for every guide. Array-typed, and a different property from the scalar `usdGen:blend` envelope on `UsdGenOperator`: a `UsdGenGuideSet` is a `UsdGeomImageable`, not an operator, so the two never appear on one prim |
+| `usdGen:blend` | `float[]` | `[]` | **per guide**, a host groomer's range-of-influence blend (ADR §2.3), indexed by the child curves' `primvars:usdGen:curveId` in ascending order. Empty = 1.0 for every guide. Array-typed, and a different property from the scalar `usdGen:blend` envelope on `UsdGenOperator`: a `UsdGenGuideSet` is a `UsdGeomImageable`, not an operator, so the two never appear on one prim |
 | `usdGen:surface` | `rel` | — | overrides the Description's surface for this set's rest binding |
 
 Per-guide `usdGen:blend` scales that guide's weight after normalisation in `GuideInterpolate`, which
@@ -1274,7 +1274,7 @@ document:
 * A guide set is evaluated in full before any dependent chunk runs. Its own chain (guides may
   themselves be styled) is a small graph evaluated in the same commit.
 * `UsdGenGuideInterpolate` emits `guideIndex` (`int[]`, `uniform`, `elementSize = 3`) and
-  `guideWeight` (`float[]`, `uniform`, `elementSize = 3`), matching Unreal's
+  `guideWeight` (`float[]`, `uniform`, `elementSize = 3`), matching a host renderer's
   `groom_closest_guides` / `groom_guide_weights` arity so a bake round-trips (ADR §2.3, ADR §9 R24,
   A7 §2.1). They land on the tiles under contract C2 as `primvars/guideIndex` and
   `primvars/guideWeight` — no `usdGen:` prefix (`06-imaging.md` §4.1). `int[3]` / `float[3]` are not
@@ -1545,7 +1545,7 @@ tier T2).
 
 
 **OpenUSD 26.08 sources** are cited inline by `file:line` throughout and every one was re-verified
-by grep in `/home/burkard/work/OpenUSD/pxr` for this revision; `appendix-A-evidence-ledger.md`
+by grep in `<openusd-src>/pxr` for this revision; `appendix-A-evidence-ledger.md`
 carries the consolidated index. Three citations were corrected in the process and the corrections
 matter to anyone chasing them: `basisCurvesAdapter.cpp` **:367-368** for the `pinned` branch (§1.1,
 and it is the Hydra 1.0 adapter), `esfUsd/stageData.cpp` **:351 and :361** for the OpenExec resync

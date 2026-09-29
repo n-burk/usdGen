@@ -7,8 +7,8 @@
 // OIT path does not need)
 //
 // A Storm (HdSt) surface shader for hair/fur on basisCurves prims that
-// reproduces Unreal Engine's strand-hair shading as closely as stock Storm
-// allows. The model, the constants and the parameter names below are UE's; see
+// reproduces a host renderer's strand-hair shading as closely as stock Storm
+// allows. The model, the constants and the parameter names below are the host renderer's; see
 // usdGenHairStrandsBsdf.glslfx (which this file imports and which holds the
 // whole implementation) and docs/research/ue-hair-rendering.md.
 //
@@ -26,7 +26,7 @@
 //
 // materialTag: "translucent", which routes the prims to HdxOitRenderTask, i.e.
 // order-independent transparency (pxr/imaging/hdx/taskController.cpp:331-336
-// vs :392-400). The UE coverage compensation this file computes then becomes a
+// vs :392-400). The the host renderer coverage compensation this file computes then becomes a
 // true partial alpha instead of a sample mask, which is smoother than the
 // opaque file's stochastic coverage -- but Storm's OIT has a HARD GLOBAL
 // BUDGET of 8 * width * height fragments over the whole frame, allocated from

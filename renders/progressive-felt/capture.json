@@ -1,5 +1,5 @@
 {
-  "scene": "D:\\work\\usdGen\\examples\\felt\\felt_sphere.usda",
+  "scene": "<usdgen-src>\\examples\\felt\\felt_sphere.usda",
   "renderer": "HdStormRendererPlugin",
   "async": true,
   "camera": "/Camera",

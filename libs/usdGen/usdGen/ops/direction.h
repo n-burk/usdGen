@@ -1,5 +1,5 @@
 // usdGen — UsdGenDirectionOp. 02-schema.md §2.7.1, 04-operators.md §2.13.
-// XGen Tilt: comb every strand toward an authored target direction.
+// a host groomer Tilt: comb every strand toward an authored target direction.
 //
 // Per strand, with root frame (T, B, N) and input points P, the kernel builds
 // a unit target direction and rotates the strand toward it:

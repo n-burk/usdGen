@@ -7,7 +7,7 @@
 )
 
 # usdGen:surface (and usdGen:colliders, usdGen:paint:surface, an expression's
-# input:<name>, usdGen:tonic:scalp) accepts a face GeomSubset wherever it
+# input:<name>, usdGen:pomade:scalp) accepts a face GeomSubset wherever it
 # accepts a Mesh (plan/02-schema.md §2.20, ADR R15):
 #
 #   * A subset is the stock form: a GeomSubset child of the Mesh with

@@ -1,0 +1,17 @@
+{
+  "golden": "pomade-ponytail.png",
+  "scene": "pomade-ponytail.usda",
+  "git_sha": "2cee7e8a29331eaed530a6f842b42441b3eb05b2",
+  "host": "HIVEMIND",
+  "created_utc": "2026-09-21T01:19:55.451357+00:00",
+  "command": "USDGEN_REGEN_GOLDEN=1 ctest -R testPomadeGolden (bin/record_pomade.py, width 512, complexity veryhigh, L2 focus)",
+  "model": {
+    "tubes": 0,
+    "guides": 0
+  },
+  "tolerance": {
+    "mean_abs_max": 0.00784313725490196,
+    "frac_gt_8_255_max": 0.005
+  },
+  "png_sha256": "b425e0fb9c7deb346ef8331bd0c560d34bd9be68337b782ca7cdf1425c917d2f"
+}

@@ -3,7 +3,7 @@
     defaultPrim = "World"
     metersPerUnit = 1
     upAxis = "Y"
-    doc = "Head-hair close-up: a dense, dark, combed groom on a head-sized ellipsoid, fading to bare skin at a scalp-cap boundary -- a render-comparison scene for MetaHuman-style hair (renders/ue-parity)."
+    doc = "Head-hair close-up: a dense, dark, combed groom on a head-sized ellipsoid, fading to bare skin at a scalp-cap boundary -- a render-comparison scene for a character groom (renders/ue-parity)."
 )
 
 # Numbers are centimetres by convention (as in styled-fur-plane.usda: hair

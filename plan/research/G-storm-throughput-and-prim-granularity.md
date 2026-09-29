@@ -8,13 +8,13 @@ the *cost structure* from source plus **CPU-side measurements that do run here**
 and Part 2 is the exact benchmark protocol for a workstation.
 
 **Host for all measured numbers:** Linux aarch64, 20× Cortex-X925, OpenUSD
-26.08 install at `/home/burkard/work/OpenUSD_26_08`. Probes and raw output:
-`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/storm-throughput/`
+26.08 install at `$USD`. Probes and raw output:
+`<session-scratch>`
 (`PROBE_OUTPUT.txt` has everything verbatim). Six probes were built and run;
 one GL harness (`hairbench.cpp`) was built and **core-dumps here for want of a
 display**, exactly as `ENVIRONMENT.md` predicts.
 
-Absolute paths below are under `/home/burkard/work/OpenUSD/` unless stated.
+Absolute paths below are under `<openusd-src>/` unless stated.
 
 ---
 
@@ -204,7 +204,7 @@ ComputeDirtyLocators(leaf) set -> clears cache? primvars/__containerDataSource
 ```
 
 usdRig's `RigExecResultsSceneIndex` uses `ComputeDirtyLocators`
-(`/home/burkard/work/usdRig/libs/rigExecImaging/sceneIndices.cpp:2504-2505`), so
+(`<usdrig-src>/libs/rigExecImaging/sceneIndices.cpp:2504-2505`), so
 it pays 0.51 µs/prim of descriptor recompute every deform frame. That is correct
 and necessary *there*, because it overlays an upstream container that downstream
 caching scene indices may hold handles to.

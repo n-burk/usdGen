@@ -5,9 +5,9 @@ parameter, map, mask, ramp, relationship and *rest* value the grooming plan need
 data sources? Where must evaluator state live so a renderer switch or stage replace does not lose it? Is the
 ExecUsd control plane usable without a bespoke app handoff?
 
-All OpenUSD paths below are relative to `/home/burkard/work/OpenUSD` (git tag `v26.08`). Probe sources,
+All OpenUSD paths below are relative to `<openusd-src>` (git tag `v26.08`). Probe sources,
 scene files and captured output live under
-`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-stage-free/`
+`<session-scratch>`
 (see §8). Everything marked **MEASURED** was produced by running one of those probes headless on this
 machine; nothing here needs a GPU.
 
@@ -31,7 +31,7 @@ machine; nothing here needs a GPU.
 ## 1. What a codeless-schema prim looks like to a stage-free consumer (MEASURED)
 
 The probe registers a **codeless** schema plugin (`plugInfo.json` `"Type": "resource"`, `Root`/`ResourcePath` `"."`,
-plus a hand-written `generatedSchema.usda` — the usdRig pattern, `/home/burkard/work/usdRig/plugin/rigExecSchema/resources/`)
+plus a hand-written `generatedSchema.usda` — the usdRig pattern, `<usdrig-src>/plugin/rigExecSchema/resources/`)
 declaring `UsdGenProbeOperator` (bases `UsdTyped`), `UsdGenProbeClumpStyler` (derived), and
 `UsdGenProbeImageableOp` (bases `UsdGeomImageable`). No imaging adapter is registered.
 
@@ -179,12 +179,12 @@ t=24 points = [(0,0,5),(1,0,5),(1,1,5),(0,1,5)]
 ```
 
 Downstream of rigExec the situation is worse: rigExec **replaces** `primvars/points` with a retained array
-(A2 §3.2, `/home/burkard/work/usdRig/libs/rigExecImaging/sceneIndices.cpp:1336-1357`), so the stage's default
+(A2 §3.2, `<usdrig-src>/libs/rigExecImaging/sceneIndices.cpp:1336-1357`), so the stage's default
 value is not reachable at all through the chain. Three verified routes:
 
 | Route | Mechanism | Measured result | Cost |
 |---|---|---|---|
-| **R1 — authored `primvars:rest`** | Houdini convention; `UsdImagingDataSourcePrimvars` passes it through untouched, and rigExec only owns `points/velocities/accelerations/normals` (A2 §3.2, :387) | probe1 §1e: `primvars on Scalp: rest st points velocities accelerations normals`; `primvars:rest @t=24 = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]` | zero code, but requires the asset to author it |
+| **R1 — authored `primvars:rest`** | a DCC convention; `UsdImagingDataSourcePrimvars` passes it through untouched, and rigExec only owns `points/velocities/accelerations/normals` (A2 §3.2, :387) | probe1 §1e: `primvars on Scalp: rest st points velocities accelerations normals`; `primvars:rest @t=24 = [(0,0,0),(1,0,0),(1,1,0),(0,1,0)]` | zero code, but requires the asset to author it |
 | **R2 — adapter data source at `UsdTimeCode::Default()`** | custom `UsdImagingDataSourceMapped::AttributeMapping::factory` returning a DS whose `GetTypedValue` calls `_q.Get<T>(&r, UsdTimeCode::Default())` | probe1 §5, at stage time 24: `deformed = [(0,0,5)…]`, `rest = [(0,0,0)…]`; stage globals show only `usdGenRest/deformed` flagged time-varying — the rest DS costs **no per-frame dirty** | ~30 lines; needs an API-schema adapter on the scalp |
 | **R3 — capture on first cook** | procedural/graph stores the first-seen `primvars/points` | not measured (design) | fragile if the first frame is not the rest frame |
 
@@ -362,7 +362,7 @@ Directory: `…/scratchpad/probes/G-stage-free/`
 | `probe4.cpp` | `UsdExecImagingCreateStageSceneIndex()` availability and contents |
 | `probe5.cpp` | custom container survival through the full chain and through native-instance propagation |
 | `probe6.cpp` | `TsSpline` transported whole as `HdTypedSampledDataSource<TsSpline>` and evaluated as a ramp |
-| `CMakeLists.txt`, `build/` | `find_package(pxr CONFIG PATHS /home/burkard/work/OpenUSD_26_08)`; build with `cmake -S . -B build -G Ninja && ninja -C build` |
+| `CMakeLists.txt`, `build/` | `find_package(pxr CONFIG PATHS $USD)`; build with `cmake -S . -B build -G Ninja && ninja -C build` |
 
 Run any probe with
 `PXR_PLUGINPATH_NAME=<probedir>/plugin/usdGenProbeSchema/resources ./build/probeN scene.usda` from the probe
@@ -374,7 +374,7 @@ directory (relative asset paths resolve against the scene's layer).
 
 - A codeless schema needs no C++ at all: `plugInfo.json` + `generatedSchema.usda` gives working
   `GetTypeName`, `IsA`, prim definitions, fallbacks and derived-type queries. (probe1 §0; usdRig pattern at
-  `/home/burkard/work/usdRig/plugin/rigExecSchema/resources/plugInfo.json`)
+  `<usdrig-src>/plugin/rigExecSchema/resources/plugInfo.json`)
 - `UsdPrimDefinition::GetPropertyNames()` / `GetSpecType()` / `GetSchemaAttributeSpec()->GetTypeName()` is the
   generic way to build `UsdImagingDataSourceMapped` mappings for a codeless type. (`pxr/usd/usd/primDefinition.h:38,290,307`; probe1 §0)
 - A codeless prim with no adapter reaches the terminal scene index with `primType == ""`, data sources
@@ -437,8 +437,8 @@ directory (relative asset paths resolve against the scene's layer).
   (`usdExecImaging/adapterRegistry.cpp:28-52`, `adapterRegistry.h:20-24`)
 - The proven interactive handoff is rigExec's: usdview Python inserts the stage into `UsdUtilsStageCache` and
   passes the id through a `extern "C"` entry point to a process-global registry.
-  (`/home/burkard/work/usdRig/libs/rigExecImaging/registry.cpp:1157-1195`;
-  `/home/burkard/work/usdRig/plugin/rigExecUsdview/rigExecUsdview.py:571-577`)
+  (`<usdrig-src>/libs/rigExecImaging/registry.cpp:1157-1195`;
+  `<usdrig-src>/plugin/rigExecUsdview/rigExecUsdview.py:571-577`)
 - `HdSceneIndexNameRegistry` is a process singleton reachable from usdview's Python via `HydraObserver`, so a
   tool can *discover* our scene indices by name (read-only). (`hd/sceneIndex.h:260-304`;
   `usdviewq/hydraObserver.cpp:28,65`)

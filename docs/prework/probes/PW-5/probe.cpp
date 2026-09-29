@@ -18,7 +18,7 @@
 //   - UsdGenMaskAPI (singleApplyAPI)                    -> print its declared props
 //
 // Compile (see docs/prework/PW-5-si8-codeless-autoapply.md):
-//   PXR=/home/burkard/work/OpenUSD_26_08
+//   PXR=$USD
 //   g++ -std=c++17 -O1 -w probe.cpp -o probe \
 //     -I $PXR/include -I /usr/include/python3.12 \
 //     -L $PXR/lib \
@@ -28,7 +28,7 @@
 //
 // Run:
 //   LD_LIBRARY_PATH=$PXR/lib \
-//   PXR_PLUGINPATH_NAME="/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:$PXR/plugin/usd" \
+//   PXR_PLUGINPATH_NAME="<usdgen-src>/build/usd/usdGenSchema/resources:$PXR/plugin/usd" \
 //   ./probe
 
 #include "pxr/pxr.h"
@@ -98,9 +98,16 @@ int main() {
 
     // Belt: explicitly register the build-tree schema resources dir (the
     // environment already puts it on PXR_PLUGINPATH_NAME).
+    std::string root = TfGetenv("GEN");
+    if (root.empty()) {
+        root = TfGetenv("USDGEN_SRC");
+    }
+    if (root.empty()) {
+        root = ".";
+    }
     PlugRegistry::GetInstance().RegisterPlugins(
         std::vector<std::string>{
-            "/home/burkard/work/usdGen/build/usd/usdGenSchema/resources"});
+            root + "/build/usd/usdGenSchema/resources"});
 
     std::cout << "\n== TfType resolution (triggers plugin discovery + load) =="
               << std::endl;

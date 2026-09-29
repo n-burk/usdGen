@@ -205,7 +205,7 @@ UsdGenAttributeBakeWorker::UsdGenAttributeBakeWorker()
     // that race throws std::system_error "Invalid argument" from the worker
     // thread and std::terminate takes the process down. Default-construct
     // the thread with the other members, then start it once they are live.
-    // Same pattern as TonicBakeWorker.
+    // Same pattern as PomadeBakeWorker.
     _worker = std::thread(&UsdGenAttributeBakeWorker::_WorkerLoop, this);
 }
 

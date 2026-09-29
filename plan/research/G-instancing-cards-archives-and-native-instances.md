@@ -1,20 +1,20 @@
 # G — Instancing: cards, archives, and native instances
 
-**Gap:** the request is an XGen-like *instancing* plugin (XGen primitive types include Splines,
+**Gap:** the request is an procedural *instancing* plugin (a host groomer primitive types include Splines,
 Spheres, **Cards** and **Archives** — A7 §1.1), yet no prior report designs emitting an
 `HdInstancer` from the hair system. This report determines, with running code, exactly how a
 `usdGen` scene index can emit an instancer whose prototypes are stage-authored prims, how that
 interacts with UsdImaging's own point-instancer and native-instancer propagation, and what a
 groom under a natively-instanced scalp looks like.
 
-Everything below is either a `file:line` citation into `/home/burkard/work/OpenUSD` (tag v26.08,
+Everything below is either a `file:line` citation into `<openusd-src>` (tag v26.08,
 `ee47c679a`) or the output of a probe that was **built and run headless in this session**. Sources
 and captured outputs live in
-`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/instancing/`
+`<session-scratch>`
 (`instProbe.cpp`, `instProbe2.cpp`, `instProbe3.cpp`, `instProbe4.cpp`, `makeStage.py`,
 `out-probe1.txt` … `out-probe4.txt`, `README.md`). No GPU/display was used or needed: everything
 here is data-source-level and goes through `Hd_UnitTestNullRenderDelegate`
-(`/home/burkard/work/OpenUSD_26_08/include/pxr/imaging/hd/unitTestNullRenderDelegate.h:16-80`,
+(`$USD/include/pxr/imaging/hd/unitTestNullRenderDelegate.h:16-80`,
 symbol present in `libusd_hd.so`).
 
 ---
@@ -239,7 +239,7 @@ downstream.
   `sceneIndices.cpp:180-188` and `:292-296`) is what translates a `usdGen:scalp` relationship that
   targets an instance proxy (`/World/HeadA/ScalpMesh`) into the prototype path. usdRig's redesign
   doc names exactly these two hooks as its deferred task #16
-  (`/home/burkard/work/usdRig/docs/imaging-datasource-redesign.md:209-217`, exposure restated at
+  (`<usdrig-src>/docs/imaging-datasource-redesign.md:209-217`, exposure restated at
   `:332-334`); `usdGen` should implement them from day one rather than inherit the deferral.
 
 ---
@@ -277,7 +277,7 @@ replaces on absolute ones (`hdx/pickTask.cpp:1271-1295`), and that is what turns
 
 ## 7. Cards and archives specifically
 
-| XGen concept (A7 §1.1) | usdGen expression | Notes |
+| a host groomer concept (A7 §1.1) | usdGen expression | Notes |
 |---|---|---|
 | **Cards** ("individual NURBS planes attached to the patch at the plane pivot") | one `mesh` prototype (a quad) as a namespace child of the `usdGen` instancer; per-card T/R/S in `hydra:instanceTranslations/Rotations/Scales`; width/length variation via `instanceScales`; per-card colour/UV-offset via arbitrary `instance` primvars | Storm composes `T*R*S*instanceTransforms` at `instancing.glslfx:38-87`; no per-card rprim, so 1M cards = 1 rprim + 1 instancer |
 | **Archives** (`.xarc` Alembic instances) | a **subtree** prototype: reference the asset under `…/Instancer/Prototypes/<Archive_k>`; `prototypes` may be subtree roots (`instancerTopologySchema.h:64-70`) and `ComputeInstanceIndicesForProto` matches by prefix (`instancerTopologySchema.cpp:55-59`) | Probe 2 case (b) verifies a 2-prim subtree prototype: both prims got `instancedBy` |
@@ -449,5 +449,5 @@ ENVIRONMENT.md). Protocol to run where Storm can execute:
   the same contract as vertex primvars — cross-check against
   `G-motion-blur-sampling-strategy.md`, not verified here.
 - **Ptex on instanced prototypes**: `hdSt/mesh.cpp:2443 _MaterialHasPtex` is per-rprim; whether a
-  ptex face id can vary per instance (needed for XGen-style per-patch painted colour on cards) is
+  ptex face id can vary per instance (needed for host-groomer per-patch painted colour on cards) is
   unverified and interacts with the per-rprim material limit.

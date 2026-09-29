@@ -1,6 +1,6 @@
 # Probe: instancing (cards / archives / native instances) — usdGen plan appendix
 
-Environment: OpenUSD 26.08 install at /home/burkard/work/OpenUSD_26_08 (headless, no GL).
+Environment: OpenUSD 26.08 install at $USD (headless, no GL).
 
     python3 makeStage.py probe.usda            # writes probe.usda + probe_scalp.usda
     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build

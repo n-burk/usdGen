@@ -38,8 +38,8 @@ record is copy-paste reproducible. `TF_DEBUG` is **space-separated** in
 OpenUSD — a comma list like `PLUG_LOAD,PLUG_REGISTRATION` matches nothing.
 
 ```sh
-export PXR=/home/burkard/work/OpenUSD_26_08
-export REPO=/home/burkard/work/usdGen
+export PXR=$USD
+export REPO=<usdgen-src>
 export FIX="$REPO/tests/scenes/scene_empty_groom.usda"
 export PROBE="$REPO/docs/prework/probes/m0-usdcat-extent/probe_usdcat_extent"
 export LD_LIBRARY_PATH="$PXR/lib"
@@ -67,15 +67,15 @@ Compile command (run from `$REPO/docs/prework/probes/m0-usdcat-extent/`):
 
 ```sh
 g++ -std=c++17 -O1 -Wno-cpp \
-    -I /home/burkard/work/OpenUSD_26_08/include \
+    -I $USD/include \
     -I /usr/include/python3.12 \
     probe_usdcat_extent.cpp -o probe_usdcat_extent \
-    -L /home/burkard/work/OpenUSD_26_08/lib \
+    -L $USD/lib \
     -lusd_usd -lusd_usdGeom \
     -lusd_python -lpython3.12 \
     -lusd_tf -lusd_sdf -lusd_gf -lusd_arch -lusd_kind -lusd_vt \
     -lusd_trace -lusd_work -lusd_js -lusd_plug -lusd_ar -lusd_hio \
-    -Wl,-rpath,/home/burkard/work/OpenUSD_26_08/lib
+    -Wl,-rpath,$USD/lib
 ```
 
 Note: `-lusd_python -lpython3.12` and `-I /usr/include/python3.12` are required
@@ -94,27 +94,27 @@ Verbatim output (addresses vary per run; the dependency set does not):
 
 ```
 	linux-vdso.so.1 (0x0000f6ddc748c000)
-	libusd_usd.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_usd.so
-	libusd_usdGeom.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_usdGeom.so
-	libusd_python.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_python.so
-	libusd_tf.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_tf.so
-	libusd_sdf.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_sdf.so
-	libusd_vt.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_vt.so
+	libusd_usd.so => $USD/lib/libusd_usd.so
+	libusd_usdGeom.so => $USD/lib/libusd_usdGeom.so
+	libusd_python.so => $USD/lib/libusd_python.so
+	libusd_tf.so => $USD/lib/libusd_tf.so
+	libusd_sdf.so => $USD/lib/libusd_sdf.so
+	libusd_vt.so => $USD/lib/libusd_vt.so
 	libstdc++.so.6 => /lib/aarch64-linux-gnu/libstdc++.so.6
 	libgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1
 	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6
 	/lib/ld-linux-aarch64.so.1 (0x0000f6ddc7458000)
-	libusd_kind.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_kind.so
-	libusd_pcp.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_pcp.so
-	libusd_ar.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_ar.so
-	libusd_plug.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_plug.so
-	libusd_ts.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_ts.so
-	libusd_work.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_work.so
-	libusd_gf.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_gf.so
-	libusd_trace.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_trace.so
-	libusd_js.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_js.so
-	libusd_arch.so => /home/burkard/work/OpenUSD_26_08/lib/libusd_arch.so
-	libtbb.so.2 => /home/burkard/work/OpenUSD_26_08/lib/libtbb.so.2
+	libusd_kind.so => $USD/lib/libusd_kind.so
+	libusd_pcp.so => $USD/lib/libusd_pcp.so
+	libusd_ar.so => $USD/lib/libusd_ar.so
+	libusd_plug.so => $USD/lib/libusd_plug.so
+	libusd_ts.so => $USD/lib/libusd_ts.so
+	libusd_work.so => $USD/lib/libusd_work.so
+	libusd_gf.so => $USD/lib/libusd_gf.so
+	libusd_trace.so => $USD/lib/libusd_trace.so
+	libusd_js.so => $USD/lib/libusd_js.so
+	libusd_arch.so => $USD/lib/libusd_arch.so
+	libtbb.so.2 => $USD/lib/libtbb.so.2
 	libpython3.12.so.1.0 => /lib/aarch64-linux-gnu/libpython3.12.so.1.0
 	libm.so.6 => /lib/aarch64-linux-gnu/libm.so.6
 	libz.so.1 => /lib/aarch64-linux-gnu/libz.so.1
@@ -141,7 +141,7 @@ env -i PATH="$PATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
 Verbatim output:
 
 ```
-Coding Error: in _ComputeExtentFromPlugins at line 227 of /home/burkard/work/OpenUSD/pxr/usd/usdGeom/boundableComputeExtent.cpp -- Invalid UsdGeomBoundable 'UsdGenDescription' prim </Groom/Description> on stage with rootLayer @/home/burkard/work/usdGen/tests/scenes/scene_empty_groom.usda@, sessionLayer @anon:0xae8f7828b410:scene_empty_groom-session.usda@
+Coding Error: in _ComputeExtentFromPlugins at line 227 of <openusd-src>/pxr/usd/usdGeom/boundableComputeExtent.cpp -- Invalid UsdGeomBoundable 'UsdGenDescription' prim </Groom/Description> on stage with rootLayer @<usdgen-src>/tests/scenes/scene_empty_groom.usda@, sessionLayer @anon:0xae8f7828b410:scene_empty_groom-session.usda@
 prim type = UsdGenDescription
 type-check UsdGenGroom          TfType::FindByName known=0  UsdSchemaRegistry::IsConcrete=0
 type-check UsdGenDescription    TfType::FindByName known=0  UsdSchemaRegistry::IsConcrete=0
@@ -199,7 +199,7 @@ Verbatim output:
 #usda 1.0
 (
     defaultPrim = "Groom"
-    doc = """Generated from Composed Stage of root layer /home/burkard/work/usdGen/tests/scenes/scene_empty_groom.usda
+    doc = """Generated from Composed Stage of root layer <usdgen-src>/tests/scenes/scene_empty_groom.usda
 """
     metersPerUnit = 1
     upAxis = "Y"
@@ -257,7 +257,7 @@ probe's own output. The load-relevant lines, verbatim, with line numbers in
 the combined log:
 
 ```
-1:    Registering shared library plugin 'usdGenSchema' at '/home/burkard/work/usdGen/build/libusdGenSchema.so'.
+1:    Registering shared library plugin 'usdGenSchema' at '<usdgen-src>/build/libusdGenSchema.so'.
 109:  Loading plugin 'sdf'.
 110:  prim type = UsdGenDescription
 111:  type-check UsdGenGroom          TfType::FindByName known=1  UsdSchemaRegistry::IsConcrete=1
@@ -287,7 +287,7 @@ env -i PATH="$PATH" LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
 ```
 
 The log (138 lines) contains the same `Registering shared library plugin
-'usdGenSchema' at '/home/burkard/work/usdGen/build/libusdGenSchema.so'.` at
+'usdGenSchema' at '<usdgen-src>/build/libusdGenSchema.so'.` at
 line 1, but the only `Loading plugin …` line in the whole log is
 `Loading plugin 'sdf'.` — there is **no** `Loading plugin 'usdGenSchema'`.
 

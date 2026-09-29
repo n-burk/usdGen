@@ -39,7 +39,7 @@ rows are cited as **`EV-nnn`** and by nothing else (`ADR §9.1 R1`, `ADR §9.5 R
 | OS / arch | Linux 6.17, aarch64, 20 CPUs = 10× Cortex-X925 + 10× Cortex-A725, heterogeneous (MEASURED) | `appendix-A-evidence-ledger.md` §1.1; `research/G-data-plane-engine-prototype-benchmark.md:27-30` (`lscpu`) |
 | GPU | NVIDIA GB10, driver 580.173.02, GL 4.6 compatibility profile through EGL (MEASURED) | `research/G-storm-hair-look-prototype.md` §0, §5 |
 | Compiler | GCC 13.3.0 — the compiler the OpenUSD install was built with | `research/A8-seexpr-ptex-libs.md` key facts; `g++ --version` |
-| CMake / Ninja | 3.28.3; ninja 1.13.2 **only** at `/home/burkard/.venv/bin/ninja` (pip, not on `PATH`) | `research/ENVIRONMENT.md` CORRECTIONS; `research/B-usdrig-build.md` §1 |
+| CMake / Ninja | 3.28.3; ninja 1.13.2 **only** at `$VENV/bin/ninja` (pip, not on `PATH`) | `research/ENVIRONMENT.md` CORRECTIONS; `research/B-usdrig-build.md` §1 |
 | bison / flex / sed / zlib | bison 3.8.2, flex 2.6.4, sed, zlib 1.3 with headers | `research/A8-seexpr-ptex-libs.md` key facts |
 | Privileges | **no sudo**; `/usr/bin/Xorg` exists but cannot be started; **no Xvfb installed** | `research/ENVIRONMENT.md` "Hardware / OS" |
 | Network | reachable (`pip`, `apt-get download` both work) | `research/B-usdrig-build.md` §1 |
@@ -51,8 +51,8 @@ rows are cited as **`EV-nnn`** and by nothing else (`ADR §9.1 R1`, `ADR §9.5 R
 
 | Fact | Value |
 |---|---|
-| Source mirror (read-only, for grepping) | `/home/burkard/work/OpenUSD`, tag v26.08 (`ee47c679a`) |
-| Install prefix | `/home/burkard/work/OpenUSD_26_08` (`include/pxr`, `lib`, `bin`) |
+| Source mirror (read-only, for grepping) | `<openusd-src>`, tag v26.08 (`ee47c679a`) |
+| Install prefix | `$USD` (`include/pxr`, `lib`, `bin`) |
 | Plugins | `lib/usd/<name>/resources` and `plugin/usd/<name>/resources` |
 | Python bindings | `lib/python3.12/site-packages` — **not** `lib/python` |
 | Bundled third party | MaterialX 1.39.5, OpenSubdiv 3.6.1, oneTBB 2020.3.1 (interface 11103) |
@@ -73,7 +73,7 @@ directories into `<USD>/plugin/usd/` and need no `PXR_PLUGINPATH_NAME` at all (�
 
 ### 0.3 Python
 
-`/home/burkard/.venv/bin/python3` is 3.12.3, with `numpy` 2.5.2, `ninja` 1.13.2, `PySide6` 6.11.2
+`$VENV/bin/python3` is 3.12.3, with `numpy` 2.5.2, `ninja` 1.13.2, `PySide6` 6.11.2
 and PyOpenGL (`research/ENVIRONMENT.md` CORRECTIONS); headers at `/usr/include/python3.12/Python.h`.
 usdGen's extension module is **pxr_boost**, not pybind11 (`S39`), so `pybind11` — present because
 usdRig uses it — is not a usdGen build dependency.
@@ -82,7 +82,7 @@ usdRig uses it — is not a usdGen build dependency.
 
 | Capability | How | Evidence |
 |---|---|---|
-| Headless C++ against the install | `find_package(pxr CONFIG PATHS /home/burkard/work/OpenUSD_26_08)` | `research/ENVIRONMENT.md` |
+| Headless C++ against the install | `find_package(pxr CONFIG PATHS $USD)` | `research/ENVIRONMENT.md` |
 | Full `UsdImagingCreateSceneIndices` chain, notices, `GetPrim` pulls, **no GL** | plain executable — `probeImagingPipeline`, 36 assertions in 0.07 s (MEASURED, `appendix-A-evidence-ledger.md` §2.10) | `research/B-usdrig-build.md` decision 4 |
 | **Storm on the GB10 GPU** | EGL device-platform context: `EGL_EXT_platform_device`, **compatibility** profile, 64×64 pbuffer, `eglMakeCurrent(d, surf, surf, ctx)`; entry points `dlopen`ed because no EGL headers exist here | `research/G-storm-hair-look-prototype.md` §0; `prototypes/storm-hair-look/eglctx.h` |
 | `usdview`, `testusdview`, `usdrecord --renderer GL` | user-space Xvfb, Mesa **llvmpipe** (LLVM 20.1.2), GL 4.5 core, unpacked with `dpkg-deb -x` into a scratch directory (no root) | `research/B-usdrig-build.md` §6; `research/ENVIRONMENT.md` CORRECTIONS |
@@ -121,7 +121,7 @@ is built without LTO.
 
 ## 1. Repository layout and the CMake target graph
 
-usdGen is a **sibling CMake project** at `/home/burkard/work/usdGen`, consuming the unmodified
+usdGen is a **sibling CMake project** at `<usdgen-src>`, consuming the unmodified
 OpenUSD install and optionally `find_package(rigExec CONFIG)` (`S44`; proven end to end by
 `prototypes/usdrig-linux-build/consumer/`, `research/B-usdrig-build.md` §8).
 
@@ -387,7 +387,7 @@ profiles (`ADR §9.1 R1`).
 | TP-3 | bison/flex are hard requirements on POSIX; `src/SeExpr2/generated/` is empty in git | fall back to the pre-generated sources upstream ships at `windows7/SeExpr/generated/` (verified present in the clone); document `apt install bison flex` |
 | TP-4 | `ENABLE_SSE4` defaults TRUE upstream and adds `-msse4.1` (`CMakeLists.txt:98, 202`); this is aarch64 | not carried — we compile the sources ourselves and never set it |
 | TP-5 | Ptex 2.4.3 defaults to C++98 (`CMakeLists.txt:11-19`) and its build installs a static library, seven headers, a `Ptex::` package and `ptxinfo` (§2.3) | never `add_subdirectory` Ptex; declare `usdGen_ptex` STATIC over the ten sources in `${ptex_SOURCE_DIR}/src/ptex/` (`PtexCache PtexFilters PtexHalf PtexReader PtexSeparableFilter PtexSeparableKernel PtexTriangleFilter PtexTriangleKernel PtexUtils PtexWriter`), `target_compile_definitions(usdGen_ptex PUBLIC PTEX_STATIC)`, `target_link_libraries(usdGen_ptex PRIVATE ZLIB::ZLIB Threads::Threads)`; usdGen calls `find_package(ZLIB/Threads REQUIRED)` itself (§3.1) because Ptex's top-level CMake, which normally provides them (`CMakeLists.txt:34, 36`), never runs |
-| TP-6 | `rand()` is not a SeExpr2 builtin (`ExprBuiltins.cpp:1719-1849` registers `hash`, not `rand`) although XGen users expect it (`S38`) | added **on usdGen's side** through `Expression::resolveFunc` as an `ExprFuncSimple` implemented on `hash` for determinism (`design/proposal-risk.md` §7.3) — no vendor patch |
+| TP-6 | `rand()` is not a SeExpr2 builtin (`ExprBuiltins.cpp:1719-1849` registers `hash`, not `rand`) although a host groomer users expect it (`S38`) | added **on usdGen's side** through `Expression::resolveFunc` as an `ExprFuncSimple` implemented on `hash` for determinism (`design/proposal-risk.md` §7.3) — no vendor patch |
 | TP-7 | SeExpr's Windows build is STATIC already; Ptex builds fine | Windows is deferred (§10); TP-3's fallback is the Windows path |
 | TP-8 | Ptex configure-generates a header **into its own source tree** (`src/ptex/CMakeLists.txt:1-2`), dirtying the checked-in `thirdparty/ptex` fallback tree so `bin/regen_goldens.sh`'s clean-tree check refuses (§5.4) | we never run Ptex's CMake (TP-5); usdGen runs `configure_file(… PtexVersion.h.in ${CMAKE_CURRENT_BINARY_DIR}/ptex/PtexVersion.h @ONLY)` itself and puts that dir first on the include path. `.gitignore` carries both generated paths as belt and braces |
 
@@ -619,10 +619,10 @@ Modelled on `prototypes/usdrig-linux-build/rigexec_env.sh` with the three defect
 helper fixed (`S46`; `research/B-usdrig-build.md` §7; §8.3 below):
 
 ```sh
-export USD=${USD:-/home/burkard/work/OpenUSD_26_08}
+export USD=${USD:-$USD}
 export GEN=${GEN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 export GENBUILD=${GENBUILD:-$GEN/build}
-export PY=${PY:-${VENV:-/home/burkard/.venv}/bin/python3}   # OpenUSD's tools are python scripts
+export PY=${PY:-${VENV:-$VENV}/bin/python3}   # OpenUSD's tools are python scripts
 PY_SITE=$(ls -d "$USD"/lib/python*/site-packages 2>/dev/null | head -1)   # never hard-code 3.12
 export PATH="$GENBUILD:$USD/bin:$PATH"
 export LD_LIBRARY_PATH="$USD/lib:$GENBUILD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

@@ -1,5 +1,5 @@
 // usdGen — the function library against Disney's own SeExpr2, which is the
-// definition of "XGen parity" for everything except XGen's own rand().
+// definition of "a host groomer parity" for everything except a host groomer's own rand().
 //
 // expressions/exprMath.h re-implements SeExpr2's builtins as `__host__
 // __device__` code so the CUDA lane and the CPU reference lane can share ONE
@@ -440,7 +440,7 @@ void CheckDeliberateDifferences()
               CpuExpressionStatus::InvalidValue,
               "usdGen refuses an inverted clamp rather than answering");
     }
-    // rand() is XGen's, not SeExpr2's: SeExpr2 has no rand at all, so there is
+    // rand() is a host groomer's, not SeExpr2's: SeExpr2 has no rand at all, so there is
     // nothing to compare against. It is specified in plan/07 and covered by
     // testUsdGenExpressionCpuEval (repeatable, per-strand, per-call-site).
     Check(Frontend::Compile("rand(1234)", {Domain::Groom, ScalarType::Float64, 1}).ok,
@@ -453,7 +453,7 @@ void CheckDeliberateDifferences()
                             {Domain::Groom, ScalarType::Float64, 1}).ok,
           "voronoi compiles");
     // dist: ExprBuiltins.cpp binds it as six scalars, contradicting its own
-    // docstring and XGen's reference. usdGen rebinds it to dist(vector, vector)
+    // docstring and a host groomer's reference. usdGen rebinds it to dist(vector, vector)
     // and computes exactly SeExpr2's arithmetic, which is what the scalar cases
     // above compare against.
     Check(!Frontend::Compile("dist(1, 2, 3, 4, 5, 6)",

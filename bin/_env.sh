@@ -16,8 +16,12 @@ export GENBUILD="${GENBUILD:-$GEN/build}"
 export USD="${USD:-$(cd "$GEN/.." && pwd)/OpenUSD_26_08}"
 
 # OpenUSD's tools are python scripts; PY is their interpreter.
-VENV="${VENV:-/home/burkard/.venv}"
-export PY="${PY:-$VENV/bin/python3}"
+# VENV is optional. When it is unset, PY defaults to python3 on PATH.
+if [ -n "${VENV:-}" ]; then
+    export PY="${PY:-$VENV/bin/python3}"
+else
+    export PY="${PY:-$(command -v python3 || true)}"
+fi
 
 # usdGen binaries/tests (GENBUILD) and the OpenUSD tools (usdcat, usdview,
 # usdrecord, ...) must both be launchable.

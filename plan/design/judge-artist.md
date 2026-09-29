@@ -1,6 +1,6 @@
 # Judge report — artist / TD usability lens
 
-**Panel seat:** would an XGen or Houdini groomer understand and like this schema and tool set? Is the
+**Panel seat:** would an a host groomer or a DCC groomer understand and like this schema and tool set? Is the
 operator vocabulary complete for real production (parting lines, clump maps, region maps, LOD,
 render density multiplier)? Is the interactive loop believable?
 
@@ -60,7 +60,7 @@ nouns, named once (§2), each with an obvious Hydra consequence; reserved namesp
   `mode = random|uniform|points|atGuides` instead of four types means switching from a Poisson
   scatter to "at guides" is a value edit. In the other two proposals it is a prim delete + create:
   a resync, a re-wire of `usdGen:input`, a lost mask block, and a walk straight into S41's
-  `RemovePrim`-under-OpenExec trap (`esfUsd/stageData.cpp:360`). XGen has one generator with a mode
+  `RemovePrim`-under-OpenExec trap (`esfUsd/stageData.cpp:360`). A host groomer has one generator with a mode
   for exactly this reason (A7 §9.1 key facts).
 * **`usdGen:enabled` is explicitly non-structural** (§4.6): the node stays in the graph and becomes a
   memcpy pass-through, so toggling a modifier costs one tail re-run, not a recompile and not a
@@ -75,13 +75,13 @@ preceding-sibling wiring fallback (§1.8) rests on `reorder nameChildren` produc
 invalidation, which nothing measured.
 
 **D4 (8).** v1 is the right shape — Scatter, Grow, GuideSet, GuideInterpolate, CurveSource, Deform,
-Clump, Noise, Length, Width, **Direction** (XGen Tilt U/V/N, correctly in v1), Freeze, SculptLayer,
+Clump, Noise, Length, Width, **Direction** (a host groomer Tilt U/V/N, correctly in v1), Freeze, SculptLayer,
 plus the mask block on everything from day one with the stated reason ("retrofitting it later would
 change every operator's behaviour"). §6.4's rules are the best-written page in any of the three:
 per-operator seed salting so two `UsdGenClump`s with the same seed are uncorrelated, `preserveLength`
 after any displacement, a motion badge on `deformed`-space rows so the artist can see what a render
 will cost. Weaknesses: `Smooth` and `Resample` are v2 (both are daily); region/parting on
-`GuideInterpolate` is v2 and `UsdGenPart` is v3; the `Clump` parameter list drops XGen's
+`GuideInterpolate` is v2 and `UsdGenPart` is v3; the `Clump` parameter list drops a host groomer's
 `copy`/`copyVariance`/`cut`/`flatness`/`offset`/`curl`/`crossover`.
 
 **D6 (10).** The best tooling section by a wide margin, and it is not close. Ten brushes, each with a
@@ -117,8 +117,8 @@ tightness) and make a brush footprint touch O(1) chunks. The private `tbb::task_
 `Hair`, `DensityMap`, `LengthVariation`, `ClumpMask` and `Guides`, all flat under `/Character/Groom`.
 Put three descriptions on a character (hair, brows, lashes — the normal case) and the prim browser
 shows one flat bag of ~30 operator prims with nothing but naming discipline to say which chain they
-belong to. `usdGen:terminal` is the only structure. That is a legibility regression against XGen's
-Collection→Description→modifier-stack and against Houdini's chain, and the proposal never argues the
+belong to. `usdGen:terminal` is the only structure. That is a legibility regression against a host groomer's
+Collection→Description→modifier-stack and against a DCC's chain, and the proposal never argues the
 tradeoff (operator sharing between descriptions is a genuine benefit of the flat layout, but it is
 not claimed).
 
@@ -128,7 +128,7 @@ config prim referenced by `usdGen:primitive` and is *not* in the chain, while in
 `UsdGenCards "Cards"` is simultaneously the `usdGen:terminal`, the `usdGen:primitive`, and a node with
 `usdGen:input`. An artist cannot form one mental model from those two examples.
 
-**D4 (6).** The thinnest catalogue. v1 has no `Direction`/`Lift` (XGen Tilt — v2), no `Smooth` (v2),
+**D4 (6).** The thinnest catalogue. v1 has no `Direction`/`Lift` (a host groomer Tilt — v2), no `Smooth` (v2),
 no parting lines or region maps *anywhere in v1, v2 or v3* apart from one line of `GuideInterpolate`
 capture pseudocode, and a `Clump` parameter list missing copy/cut/flatness/offset/curl/crossover. It
 also uses a `UsdGenPtexMap` in its own v1 example (§4.5 `ClumpMask` → `@./maps/clumpmask.ptx@`) while
@@ -151,13 +151,13 @@ stated, and a totals table that answers the question a production asks: *S0–S5
 20 weeks*.
 
 **D4 (9).** The most faithful implementation of A7 §9. `UsdGenClump` in v1 carries the full
-XGen/IGS parameter set including `copy`, `copyVariance`, `cut`, `flatness`, `offset`, `curl`,
+A host groomer/IGS parameter set including `copy`, `copyVariance`, `cut`, `flatness`, `offset`, `curl`,
 `crossover`, `goalFeedback`, `sizeReduction`, `tightnessReduction`, `levels`, `stray{Amount,Rate,
 Falloff}`, `volumize`, `preserveLength`. `UsdGenGuideInterpolate` carries `regionMap` **and**
 `clumpCrossover` in v1 — the only proposal that ships region maps in the first release. `Smooth` and
-`Resample` are v1. `UsdGenScale` (XGen IGS's global length multiplier) is there. And it is the only
+`Resample` are v1. `UsdGenScale` (a host groomer IGS's global length multiplier) is there. And it is the only
 proposal that says operators **emit** `clumpId_<level>` (uniform int) and `guideIndex[3]` /
-`guideWeight[3]` primvars — Unreal's `groom_closest_guides` / `groom_guide_weights` arity — so a bake
+`guideWeight[3]` primvars — a host renderer's `groom_closest_guides` / `groom_guide_weights` arity — so a bake
 round-trips and a shader can drive variation from clump id. Gaps: `Direction`/`Lift` is v2 (should be
 v1), and there is still no parting-line *operator* or brush at any tier.
 
@@ -171,7 +171,7 @@ that `rand` is **not** a SeExpr2 builtin ("verified: Function rand has no defini
 
 **D1 (8) / D6 (8).** C3 — one curve contract for guides, freezes, imports and sim caches, tagged by
 `primvars:usdGen:role = "hair"|"guide"` — is elegant and removes four future migrations; guide sets
-are first class and carry a per-guide `usdGen:blend` array (XGen's range-of-influence, which nobody
+are first class and carry a per-guide `usdGen:blend` array (a host groomer's range-of-influence, which nobody
 else models). Tooling has the per-tool press/move/release table, the missing
 `UsdGenImaging_ClosestSurfacePoint` C ABI call that Place-guide and paint actually need, and the
 usdview gotchas that only come from having shipped one (state in a `UsdGenToolState` dataclass built
@@ -214,8 +214,8 @@ or a mechanism that does not exist in OpenUSD 26.08.
    The field does not exist.** `HdSceneGlobalsSchema` in this install carries exactly
    `sceneGlobals, primaryCameraPrim, activeRenderPassPrim, activeRenderSettingsPrim, startTimeCode,
    endTimeCode, timeCodesPerSecond, currentFrame, sceneStateId`
-   (`/home/burkard/work/OpenUSD_26_08/include/pxr/imaging/hd/sceneGlobalsSchema.h:37-47`). There is no
-   interactive flag. This is a hard evidence contradiction on the one XGen feature the lens was asked
+   (`$USD/include/pxr/imaging/hd/sceneGlobalsSchema.h:37-47`). There is no
+   interactive flag. This is a hard evidence contradiction on the one a host groomer feature the lens was asked
    to check (Render Density Multiplier, A7 §1.5 / §5).
 2. **§4.2 `usdGen:enabled` marked "Structural: bumps the digest"**, combined with §5.3 ("only the
    changed nodes and their descendants are recreated"), means toggling an operator drops that node's
@@ -285,7 +285,7 @@ or a mechanism that does not exist in OpenUSD 26.08.
    structural stage edit per freeze and per unfreeze, and collides with S41's "a freeze may only be
    undone in the layer it was authored into".)
 5. **Two density controls: `usdGen:densityScale` (preview) + `usdGen:renderDensityScale` (render).**
-   XGen's exact pair; the other two carry only the render half.
+   a host groomer's exact pair; the other two carry only the render half.
 6. **The stack profiler column** — `UsdGenNodeStats{captureMs, lastEvalMs, meanEvalMs, chunksDirty,
    captureHits/Misses, warnings}` published per generation, shown per operator row as ms and "% of
    frame", so an artist lowers `clump:levels` instead of guessing.
@@ -295,9 +295,9 @@ or a mechanism that does not exist in OpenUSD 26.08.
 8. **The status line with the edit-target label** — `curves … · chunks … · eval … ms · gen … ·
    LOD 40k · edit target: session`.
 9. **`usdGen:clump:centers`** as an explicit relationship (clump centres from a curve set, a nested
-   scatter, or a map) — the only proposal that models XGen's clump map as an artist-visible input
+   scatter, or a map) — the only proposal that models a host groomer's clump map as an artist-visible input
    rather than an internal detail — and **`usdGen:mask:region`** on the universal mask block.
-10. **Ten-brush shelf with a named commit target per brush**, plus `usdGen:sculpt:freezeMask` (XGen
+10. **Ten-brush shelf with a named commit target per brush**, plus `usdGen:sculpt:freezeMask` (a host groomer
     Freeze brush) and a **"Rebase sculpt"** action that re-matches deltas by nearest root UV when
     `frozenEpoch` goes stale.
 11. **Extent on two channels**: Hydra `extent` per chunk *and* a `UsdGeomComputeExtentFunction`
@@ -358,7 +358,7 @@ or a mechanism that does not exist in OpenUSD 26.08.
 30. **Clump's full A7 §9.2 S1 parameter set in v1**, and `GuideInterpolate` carrying `regionMap` +
     `clumpCrossover` **in v1**.
 31. **Operators emit `clumpId_<level>` (uniform int) and `guideIndex[3]`/`guideWeight[3]` primvars** —
-    Unreal `groom_closest_guides`/`groom_guide_weights` parity, so a bake round-trips and a shader can
+    a host renderer `groom_closest_guides`/`groom_guide_weights` parity, so a bake round-trips and a shader can
     read clump id.
 32. **`UsdGenImaging_ClosestSurfacePoint(surfacePath, p, &face, uv, P)`** in the C ABI — the missing
     primitive for Place-guide, density paint and map paint.
@@ -370,7 +370,7 @@ or a mechanism that does not exist in OpenUSD 26.08.
 35. **usdview plugin specifics**: state in a `UsdGenToolState` dataclass built in `__init__`; viewport
     tools installed from `signalStageReplaced` with a bounded 0 ms `QTimer` retry; `usdGenLib.py`
     pinning `OPENBLAS_NUM_THREADS`/`OMP_NUM_THREADS` before `import numpy`.
-36. **Per-guide `usdGen:blend`** float array on `UsdGenGuideSet` (XGen's range-of-influence) and the
+36. **Per-guide `usdGen:blend`** float array on `UsdGenGuideSet` (a host groomer's range-of-influence) and the
     preserved SeExpr `#3dpaint,N` / `#min,max` annotation convention in the expression field.
 37. **The eight-slice plan with the S1 stop condition**: if precise `usdGen:*` invalidation cannot be
     demonstrated, fall back to `primvars:usdGen:*` and re-plan — *do not* proceed to S2 with imprecise
@@ -393,7 +393,7 @@ or a mechanism that does not exist in OpenUSD 26.08.
    on the disabled node's *output topology*. Decide once and measure the A/B cost, because it is the
    most frequent artist gesture in the product.
 4. **Region maps and parting lines: what is the data model, and when do they ship?** A per-face
-   int/colour map, a curve set (Houdini `guidepartition`: `radius`, `strength`), or both? Which
+   int/colour map, a curve set (a DCC `guidepartition`: `radius`, `strength`), or both? Which
    operators consume it (GuideInterpolate, Clump, Part)? Risk ships `regionMap` in v1; nobody ships a
    parting-line authoring tool before v3. A hairline part is table stakes for a character groom.
 5. **Units.** Is `usdGen:density` hairs per square *stage* unit on the rest surface (Artist assumption
@@ -409,7 +409,7 @@ or a mechanism that does not exist in OpenUSD 26.08.
    Performance's two-pass gather/scatter node on a per-frame grid, or is the operator class cut?
 9. **Is the published prim's curve count allowed to float?** `chunkCurves` 512 vs a 256-prim cap
    cannot both hold at 1 M curves. Adopt `chunksPerTile` or make `chunkCurves` advisory and say so.
-10. **How does an artist debug a mask?** None of the three ships Houdini's `Visualize Masks`
+10. **How does an artist debug a mask?** None of the three ships a DCC's `Visualize Masks`
     equivalent, nor a "show the three guides driving this hair" display — even though the resolved
     per-curve mask array and `guideIndex/guideWeight` already exist in all three designs.
 11. **Is symmetry (mirror-X grooming) a v1 brush feature?** One word in one table row across three
@@ -462,5 +462,5 @@ chain.
 **Fix before writing the plan.** Drop the `sceneGlobals`-interactive mechanism (it does not exist) and
 decide question 1; label the interpolated 100 k Storm number UNMEASURED wherever it appears as a gate;
 correct Risk's R4 fallback; specify where the synthesized per-delegate material prim lives; and pull
-`Direction`/`Lift` (XGen Tilt) into v1 in every catalogue — it is a daily tool in all three reference
+`Direction`/`Lift` (a host groomer Tilt) into v1 in every catalogue — it is a daily tool in all three reference
 systems and it is a trivial kernel.

@@ -1,12 +1,12 @@
 # G — chain-order probe: where does usdGen insert, and what does it see?
 
 **Everything below was measured on this machine, headless, with no GL context.**
-Probe sources: `/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/probes/G-chain-order/`
+Probe sources: `<session-scratch>`
 (`src/probeChainOrder.cpp`, `src/stub.cpp`, `src/stubRenderer.cpp`, `stubA|stubB|stubR/resources/plugInfo.json`,
 `stages/skelAndRig.usda`, `CMakeLists.txt`). Raw run transcript: `.../probes/G-chain-order/logs/transcript.txt`.
-Built with `cmake -G Ninja -DCMAKE_PREFIX_PATH=/home/burkard/work/OpenUSD_26_08`; three stub shared libraries
+Built with `cmake -G Ninja -DCMAKE_PREFIX_PATH=$USD`; three stub shared libraries
 (`libusdGenStubA.so`, `libusdGenStubB.so`, `libusdGenStubRenderer.so`) plus `probeChainOrder`.
-Nothing under `/home/burkard/work/usdRig` or `/home/burkard/work/OpenUSD` was modified.
+Nothing under `<usdrig-src>` or `<openusd-src>` was modified.
 
 ---
 
@@ -34,13 +34,13 @@ display name, so a chain walk shows exactly where each landed.
 ## 2. UsdImagingSceneIndexPlugin order is unspecified and path-order sensitive
 
 `UsdImagingCreateSceneIndices` appends plugin scene indices in one place —
-`_AddPluginSceneIndices` at `/home/burkard/work/OpenUSD/pxr/usdImaging/usdImaging/sceneIndices.cpp:68-78`,
+`_AddPluginSceneIndices` at `<openusd-src>/pxr/usdImaging/usdImaging/sceneIndices.cpp:68-78`,
 called at `:302`, i.e. **after** `UsdImagingMaterialBindingsResolvingSceneIndex` (`:298`) and **before**
 `UsdImagingSelectionSceneIndex` (`:305`). The iteration order comes from
 `UsdImagingSceneIndexPlugin::GetAllSceneIndexPlugins`
-(`/home/burkard/work/OpenUSD/pxr/usdImaging/usdImaging/sceneIndexPlugin.cpp:50-54`), which fills a
+(`<openusd-src>/pxr/usdImaging/usdImaging/sceneIndexPlugin.cpp:50-54`), which fills a
 `std::set<TfType>` from `PlugRegistry::GetAllDerivedTypes`. `TfType::operator<` compares the private
-`_TypeInfo *_info` pointer (`/home/burkard/work/OpenUSD/pxr/base/tf/type.h:119` and `:728`) — a heap address,
+`_TypeInfo *_info` pointer (`<openusd-src>/pxr/base/tf/type.h:119` and `:728`) — a heap address,
 not a name. **There is no ordering API and no ordering metadata at this level.**
 
 Measured sweep of all six orderings of the three plugin-path entries (rigExecImaging, stubA, stubB):
@@ -101,7 +101,7 @@ i.e. it would read *unskinned* points off every skinned mesh and silently groom 
 
 `HdRenderIndex`'s constructor calls
 `HdSceneIndexPluginRegistry::AppendSceneIndicesForRenderer` at
-`/home/burkard/work/OpenUSD/pxr/imaging/hd/renderIndex.cpp:209-214`, **guarded by
+`<openusd-src>/pxr/imaging/hd/renderIndex.cpp:209-214`, **guarded by
 `if (!rendererDisplayName.empty())` at `:208`**. That display name can only be set by
 `HdRendererPlugin::CreateDelegate` (`hd/rendererPlugin.cpp:76-78`); `_SetRendererDisplayName` is private with
 `friend class HdRendererPlugin` (`hd/renderDelegate.h:584-589`). **A render delegate an application news up
@@ -125,7 +125,7 @@ This is structurally guaranteed, not luck: the UsdImaging chain is an *input* to
 (`renderIndex.cpp:196-198` + `HdRenderIndex::InsertSceneIndex` at `:314-335`), and renderer plugins are
 appended *on top of* the merge. `UsdImagingGLEngine` — what usdview actually uses — does the same thing with
 its own merging index: `AppendSceneIndicesForRenderer` at
-`/home/burkard/work/OpenUSD/pxr/usdImaging/usdImagingGL/engine.cpp:1776-1779`, and the UsdImaging chain is
+`<openusd-src>/pxr/usdImaging/usdImagingGL/engine.cpp:1776-1779`, and the UsdImaging chain is
 inserted into that merge at `engine.cpp:1544`. (`USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX` defaults **true**,
 `engine.cpp:78`.)
 
@@ -180,7 +180,7 @@ points live only in `extComputationPrimvars:points`, produced by the
 ### 4b. `HdSiExtComputationPrimvarPruningSceneIndex` restores them, headlessly
 
 Wrapping the terminal in `HdSiExtComputationPrimvarPruningSceneIndex`
-(`/home/burkard/work/OpenUSD/pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h:19-33`) turns the
+(`<openusd-src>/pxr/imaging/hdsi/extComputationPrimvarPruningSceneIndex.h:19-33`) turns the
 computed primvar back into an ordinary authored primvar, executing the CPU kernel on pull. Measured: with
 `--bake`, `primvars:points` reappears as a container with n=10 and the values track the animation
 (`p[0] = (-0.2000,0,0.3) → (-0.2269,…) → (-0.2562,…)` for t=1001/1012/1024). No render delegate, no GL.

@@ -8,7 +8,7 @@
 // "Authored" has to mean an opinion that DIFFERS from the schema fallback.
 // Applying UsdGenLookAPI without setting anything leaves a full set of
 // fallbacks, and counting those as authored would silently discard the colour
-// every converted asset already carries — which is exactly what a MetaHuman
+// every converted asset already carries — which is exactly what a character asset
 // groom ships with. That case is asserted here because it is the one a
 // "does the API exist?" test would get wrong.
 //
@@ -52,14 +52,14 @@ void Check(bool ok, std::string const &what)
 }
 
 SdfPath const kDescription("/World/Groom/Hair");
-GfVec3f const kSourceColor(0.12f, 0.055f, 0.022f);   // the MetaHuman asset's
+GfVec3f const kSourceColor(0.12f, 0.055f, 0.022f);   // the converted groom's
 GfVec3f const kLookRoot(0.40f, 0.20f, 0.10f);
 // UsdGenLookDesc's defaults, i.e. the UsdGenLookAPI schema fallbacks.
 
 enum class Look { None, FallbackOnly, Authored };
 
 /// A groom whose only operator is a UsdGenCurveSource over BasisCurves that
-/// author a uniform displayColor, modelled on examples/metahuman-hair-parity.
+/// author a uniform displayColor, modelled on a converted character groom.
 UsdStageRefPtr MakeStage(Look look, TfToken const &interpolation,
                          VtVec3fArray const &colors)
 {

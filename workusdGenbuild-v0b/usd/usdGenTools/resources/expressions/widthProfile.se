@@ -1,5 +1,0 @@
-# domain: point
-# A hand-shaped root-to-tip width profile. Drag the knots in the Controls
-# panel rather than editing the numbers: the text below is what they write.
-$profile = curve($t, 0, 0.6, 4, 0.25, 1.0, 4, 1, 0.05, 4); # curve
-$value * $profile

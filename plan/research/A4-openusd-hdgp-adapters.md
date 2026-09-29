@@ -1,6 +1,6 @@
 # A4 — OpenUSD 26.08: hdGp generative procedurals, usdProc, UsdImaging prim adapters for custom schemas, codeless schemas, Hydra basisCurves/instancer contracts
 
-Evidence base: OpenUSD source at `/home/burkard/work/OpenUSD` (git tag `v26.08`), install at `/home/burkard/work/OpenUSD_26_08`, usdRig at `/home/burkard/work/usdRig`. All paths below are absolute unless prefixed by `pxr/` (then relative to `/home/burkard/work/OpenUSD`). Line numbers are from the checked-out v26.08 files. Claims I could not verify are marked **UNVERIFIED**.
+Evidence base: OpenUSD source at `<openusd-src>` (git tag `v26.08`), install at `$USD`, usdRig at `<usdrig-src>`. All paths below are absolute unless prefixed by `pxr/` (then relative to `<openusd-src>`). Line numbers are from the checked-out v26.08 files. Claims I could not verify are marked **UNVERIFIED**.
 
 ---
 
@@ -14,7 +14,7 @@ Evidence base: OpenUSD source at `/home/burkard/work/OpenUSD` (git tag `v26.08`)
 | How do procedural children get their data? | `GetPrim()` on a generated path calls `proc->GetChildPrim(inputScene, path)` **every time**; the resolver caches nothing but the child type map. | `generativeProceduralResolvingSceneIndex.cpp:58-86` |
 | Do prims of a custom (codeless) type reach Hydra without an adapter? | Yes: path present, `primType == ""`, data source = `UsdImagingDataSourcePrim` (xform/visibility/purpose/extent/primvars only). Custom (non-primvar) attributes are neither exposed nor invalidated. | `pxr/usdImaging/usdImaging/adapterManager.cpp:71-102,205-225`; `dataSourcePrim.cpp:693-812,864-911` |
 | Can emitted curves declare a Hydra dependency on the surface mesh points? | Yes via `__dependencies`; Storm's chain has `HdSt_DependencyForwardingSceneIndexPlugin` (phase 1000, GL only). Discovery is lazy (first `GetPrim`). | `pxr/imaging/hd/dependencyForwardingSceneIndex.cpp:33-58,309-361,487-570`; `pxr/imaging/hdSt/dependencyForwardingSceneIndexPlugin.cpp:26-36` |
-| Ordering vs rigExec | rigExec inserts via `UsdImagingSceneIndexPlugin`; that mechanism orders plugins by `std::set<TfType>` (pointer order) — **undefined relative order** between two such plugins. Use the renderer-chain (`HdSceneIndexPlugin`) mechanism to be reliably after rigExec. | `/home/burkard/work/usdRig/libs/rigExecImaging/sceneIndexPlugin.cpp:23-45`; `pxr/usdImaging/usdImaging/sceneIndexPlugin.cpp:45-55`; `pxr/base/tf/type.h:119` |
+| Ordering vs rigExec | rigExec inserts via `UsdImagingSceneIndexPlugin`; that mechanism orders plugins by `std::set<TfType>` (pointer order) — **undefined relative order** between two such plugins. Use the renderer-chain (`HdSceneIndexPlugin`) mechanism to be reliably after rigExec. | `<usdrig-src>/libs/rigExecImaging/sceneIndexPlugin.cpp:23-45`; `pxr/usdImaging/usdImaging/sceneIndexPlugin.cpp:45-55`; `pxr/base/tf/type.h:119` |
 | Codeless vs generated schema | Codeless (as usdRig does) is sufficient: adapters key off the schema identifier string; `UsdImagingDataSourceMapped`/`UsdImagingDataSourceAttributeNew` work on untyped `UsdAttribute`. | `pxr/usd/usd/usdGenSchema.py:195-247`, `pxr/usd/usd/docs/generatingSchemas.md:689-703`, `adapterManager.cpp:170-172` |
 
 ---
@@ -35,7 +35,7 @@ Evidence base: OpenUSD source at `/home/burkard/work/OpenUSD` (git tag `v26.08`)
 | `pxr/usdImaging/usdProcImaging/generativeProceduralAdapter.h/.cpp`, `plugInfo.json` | Prim adapter mapping USD `GenerativeProcedural` → Hydra prim of type `<proceduralSystem>` |
 | `pxr/usdImaging/usdImagingGL/testenv/TestUsdImagingGLHdGpProcedurals.cpp` + `_plugInfo.json`, `testUsdImagingGLHdGp/test.usda` | Reference procedurals (MakeSomeStuff, CubePerMeshPoint, DependsOnChildNames, AsyncTest, DependsOnRemoved) |
 
-Installed: `libusd_hdGp.so`, `libusd_usdProc.so`, `libusd_usdProcImaging.so` and their `lib/usd/{hdGp,usdProc,usdProcImaging}` plugInfo dirs exist in `/home/burkard/work/OpenUSD_26_08/lib`; Python module `UsdProc` exists under `lib/python3.12/site-packages/pxr/` (no Python bindings for hdGp itself — no `wrap*.cpp` in `pxr/imaging/hdGp`).
+Installed: `libusd_hdGp.so`, `libusd_usdProc.so`, `libusd_usdProcImaging.so` and their `lib/usd/{hdGp,usdProc,usdProcImaging}` plugInfo dirs exist in `$USD/lib`; Python module `UsdProc` exists under `lib/python3.12/site-packages/pxr/` (no Python bindings for hdGp itself — no `wrap*.cpp` in `pxr/imaging/hdGp`).
 
 ### 1.2 Tokens and the two-level type convention
 
@@ -174,7 +174,7 @@ The library is `Load()`ed lazily on first `ConstructAdapter` (`:392-436`); the a
 }
 ```
 
-Lookup key per prim is `UsdPrimTypeInfo::GetSchemaTypeName()` (`adapterManager.cpp:170-171`), i.e. the `schemaIdentifier` of a codeless type (e.g. `RigExecAimConstraint` in `/home/burkard/work/usdRig/plugin/rigExecSchema/resources/plugInfo.json`), so `primTypeName` must be that identifier (for a `UsdGen` family: whatever identifiers `schema.usda` declares).
+Lookup key per prim is `UsdPrimTypeInfo::GetSchemaTypeName()` (`adapterManager.cpp:170-171`), i.e. the `schemaIdentifier` of a codeless type (e.g. `RigExecAimConstraint` in `<usdrig-src>/plugin/rigExecSchema/resources/plugInfo.json`), so `primTypeName` must be that identifier (for a `UsdGen` family: whatever identifiers `schema.usda` declares).
 
 ### 2.2 The Hydra 2.0 virtuals
 
@@ -220,7 +220,7 @@ Recommended layout for an operator prim: Hydra type `"usdGenOperator"` (or per-o
 USD → Hydra change flow (`stageSceneIndex.cpp`):
 - `_OnUsdObjectsChanged` (`:500-590`): prim resyncs → repopulate subtree (`removed`+`added`); property resyncs → `Resync` invalidation; info-only property changes → `Update` invalidation; **prim-level metadata changes only resync if the field is a plugin field** (`:552-566`) — note for `apiSchemas`/custom metadata edits; asset-path dependents are tracked separately (`:577-589`).
 - `ApplyPendingUpdates` (`:754-800`) runs `_ApplyPendingResyncs` then `_ComputeDirtiedEntries` (`:803-873`) which calls each adapter's `InvalidateImagingSubprim`; returning the locator `UsdImagingTokens->stageSceneIndexRepopulate` (`"__usdStageSceneIndexRepopulate"`, `tokens.h:44`) forces a resync of that prim — the usdProc adapter uses this when `proceduralSystem` changes the Hydra type (`generativeProceduralAdapter.cpp:86-95`).
-- The engine calls `ApplyPendingUpdates()` in `_PreSetTime` on every `PrepareBatch`/`Render` (`engine.cpp:2354-2386`, `:468-498`); usdview redraws on stage-change notices, so a USD edit becomes Hydra notices at the next frame. Edits made from the usdview plugin (Python) therefore round-trip through the stage; there is no direct "poke Hydra" API — rigExec instead keeps an out-of-stage store and its own results scene index (`/home/burkard/work/usdRig/libs/rigExecImaging/registry.h:355-475`).
+- The engine calls `ApplyPendingUpdates()` in `_PreSetTime` on every `PrepareBatch`/`Render` (`engine.cpp:2354-2386`, `:468-498`); usdview redraws on stage-change notices, so a USD edit becomes Hydra notices at the next frame. Edits made from the usdview plugin (Python) therefore round-trip through the stage; there is no direct "poke Hydra" API — rigExec instead keeps an out-of-stage store and its own results scene index (`<usdrig-src>/libs/rigExecImaging/registry.h:355-475`).
 
 Free: xform/visibility/purpose/extent/primvar invalidation, time-varying dirtying, resync on prim type/apiSchemas (plugin-field) changes, native/point instancing propagation, flattening of `xform`, `visibility`, `purpose`, `materialBindings`, `model`, coordSys (`pxr/usdImaging/usdImaging/flattenedDataSourceProviders.cpp:28-78`, applied inside `UsdImagingNiPrototypePropagatingSceneIndex` at `niPrototypePropagatingSceneIndex.cpp:196-206`).
 
@@ -264,7 +264,7 @@ Storm in 26.08 is still a Hydra 1.0 render delegate wrapped by `HdRenderDelegate
 | `primvars/normals` | `VtVec3fArray`, role `normal`; `varying` → linear normal interpolation; absent → implicit camera-facing/basis | optional | `basisCurves.cpp:1084-1098` |
 | `primvars/displayColor`, `primvars/displayOpacity` | role `color`; any interpolation | optional (fallback material) | `tokens.h:38-39` |
 | `primvars/velocities`, `accelerations` | for renderers with velocity blur (not Storm) | optional | `tokens.h:19,101` |
-| `xform/matrix`, `xform/resetXformStack` | `GfMatrix4d`, `bool` | optional (identity) — **world-space** when emitted after flattening | `xformSchema.h:36-38`; rigExec note `/home/burkard/work/usdRig/libs/rigExecImaging/sceneIndices.cpp:1453-1460` |
+| `xform/matrix`, `xform/resetXformStack` | `GfMatrix4d`, `bool` | optional (identity) — **world-space** when emitted after flattening | `xformSchema.h:36-38`; rigExec note `<usdrig-src>/libs/rigExecImaging/sceneIndices.cpp:1453-1460` |
 | `visibility/visibility` | `bool` | optional | `visibilitySchema.h:36` |
 | `purpose/purpose` | `geometry`/`render`/`proxy`/`guide` (Hydra render tag tokens) | optional | `purposeSchema.h:36-38`; skeleton example uses `HdRenderTagTokens->guide` (`dataSourceSkeletonPrim.cpp:96-105`) |
 | `extent/min`, `extent/max` | `GfVec3d` | optional | `extentSchema.h:36-38` |
@@ -384,8 +384,8 @@ Answer to the plan's question: yes — curve prims we emit anywhere upstream of 
 - A valid `basisCurves` prim needs type `basisCurves`, `basisCurves/topology/curveVertexCounts`, and `primvars/points` (vertex, role point); `basis` defaults to bezier and `type` to linear; widths/normals with `varying` interpolation switch Storm to linear interpolation. (`sceneIndexAdapterSceneDelegate.cpp:865-901`; `hdSt/basisCurves.cpp:1083-1098`; `tokens.h:25-77`)
 - A valid `instancer` needs `instancerTopology/{prototypes,instanceIndices[,mask]}` and `instance`-interpolated primvars (`hydra:instanceTransforms` or T/R/S); prototypes must carry `instancedBy/paths=[instancer]`. (`instancerTopologySchema.h:36-132`; `hdSt/instancer.cpp:110-126`; `sceneIndexAdapterSceneDelegate.cpp:2623-2690`)
 - Storm's plugin chain includes `HdSt_DependencySceneIndexPlugin` (phase 100) and `HdSt_DependencyForwardingSceneIndexPlugin` (phase 1000, GL only) which honour `__dependencies` declared by any upstream prim; dependencies are discovered lazily on first `GetPrim`. (`dependencyForwardingSceneIndexPlugin.cpp:26-36`; `dependencyForwardingSceneIndex.cpp:33-58,487-570`; `hdSt/plugInfo.json:33-43`)
-- No flattening happens after the UsdImaging chain's `UsdImagingNiPrototypePropagatingSceneIndex`; anything emitted later (UsdImagingSceneIndexPlugins, hdGp, renderer plugins) must author world-space `xform/matrix`. (`niPrototypePropagatingSceneIndex.cpp:196-206`; `sceneIndices.cpp:286-302`; `/home/burkard/work/usdRig/libs/rigExecImaging/sceneIndices.cpp:1453-1460`)
-- `UsdImagingSceneIndexPlugin`s are instantiated in `std::set<TfType>` order (pointer comparison), so the relative order of rigExec's and another such plugin is undefined. (`sceneIndexPlugin.cpp:45-55`; `pxr/base/tf/type.h:119`; `/home/burkard/work/usdRig/libs/rigExecImaging/sceneIndexPlugin.cpp:23-45`)
+- No flattening happens after the UsdImaging chain's `UsdImagingNiPrototypePropagatingSceneIndex`; anything emitted later (UsdImagingSceneIndexPlugins, hdGp, renderer plugins) must author world-space `xform/matrix`. (`niPrototypePropagatingSceneIndex.cpp:196-206`; `sceneIndices.cpp:286-302`; `<usdrig-src>/libs/rigExecImaging/sceneIndices.cpp:1453-1460`)
+- `UsdImagingSceneIndexPlugin`s are instantiated in `std::set<TfType>` order (pointer comparison), so the relative order of rigExec's and another such plugin is undefined. (`sceneIndexPlugin.cpp:45-55`; `pxr/base/tf/type.h:119`; `<usdrig-src>/libs/rigExecImaging/sceneIndexPlugin.cpp:23-45`)
 - Codeless schemas (`skipCodeGeneration = true`) emit only `generatedSchema.usda` + `plugInfo.json`; usdRig regenerates a "library"-typed plugInfo pointing at rigExecImaging solely for `implementsComputeExtent`. (`usdGenSchema.py:195-247`; `generatingSchemas.md:689-703`; `usdRig/bin/gen_schema.sh`; `usdRig/CMakeLists.txt:409-475`)
 - 26.08 removed `HD_ENABLE_SCENE_INDEX_EMULATION`, introduced `HdRendererPlugin::CreateRenderer`/`HdRendererCreateArgsSchema`, and deprecates Hydra 1.0 engine APIs; Storm still runs through `HdRenderDelegateAdapterRenderer` + `HdSceneIndexAdapterSceneDelegate`, ignoring unknown prim types. (`CHANGELOG.md:254-269`; `rendererPlugin.cpp:139-157`; `renderIndex.cpp:223-230`; `sceneIndexAdapterSceneDelegate.cpp:268-286`)
 

@@ -125,7 +125,7 @@ appendix A §2.4.
 
 Host for every row (`research/ENVIRONMENT.md` with CORRECTIONS): Linux 6.17 aarch64, 20 CPUs
 (10× Cortex-X925 + 10× Cortex-A725), NVIDIA GB10, driver 580.173.02, GL 4.6 compatibility profile,
-g++ 13.3, OpenUSD v26.08 at `/home/burkard/work/OpenUSD_26_08`. Reports by block:
+g++ 13.3, OpenUSD v26.08 at `$USD`. Reports by block:
 `research/G-data-plane-engine-prototype-benchmark.md` §3–§6 (EV-001…EV-018);
 `research/G-storm-hair-look-prototype.md` §5 (EV-019…EV-023);
 `research/G-storm-throughput-and-prim-granularity.md` §1 (EV-024…EV-034 and EV-084…EV-088 from the
@@ -416,7 +416,7 @@ replaces both prototype binaries — frame time from `bench_hair.cpp`, Hydra cou
 — and takes **flags, not positionals**:
 
 ```
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
+export LD_LIBRARY_PATH=$USD/lib
 export HD_ENABLE_PERFLOG=1
 ./build/benchUsdGenStorm --scene bench/head100k.usda --cam /World/Cam --res 1280x720 \
     --refine 2 --frames 60 --warmup 10 --repeats 3 --json out/head100k_S1.json
@@ -799,7 +799,7 @@ map); `11-roadmap.md` §1 (PW-1…PW-6), §2.0 (gate → milestone), §6.4 (RC-1
 from it (single thread, `-O2`, 1.6 M `float3`).
 
 **OpenUSD 26.08 source.** Every file:line was re-verified by grep against
-`/home/burkard/work/OpenUSD` while this document was written. The load-bearing ones:
+`<openusd-src>` while this document was written. The load-bearing ones:
 `hdSt/vboMemoryManager.cpp:605-620` (unconditional reallocation on any element-count change),
 `hdSt/basisCurves.cpp:932-935` (the points fastpath), `:292-301` (refineLevel-0 downcast to
 `HdTokens->linear`), `:975-990` (`GetValue(0.0f)` — Storm never samples in time),

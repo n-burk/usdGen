@@ -1,13 +1,13 @@
 # A8 — SeExpr2, Ptex, image IO and third-party dependency strategy for usdGen
 
-Research report for the usdGen (XGen-like grooming) plan. Everything below is either
+Research report for the usdGen (procedural grooming) plan. Everything below is either
 cited to a file:line on this machine, cited to a URL, or explicitly marked UNVERIFIED.
 Beyond reading source, three things were actually executed on this host (aarch64,
 GCC 13.3, CMake 3.28.3) to turn "should work" into "does work":
 
 | Verification | Location | Result |
 |---|---|---|
-| SeExpr `main` (commit 8f8c8f2, 2026-01-27) built interpreter-only, no Qt/Python/LLVM/SSE4 | `/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/thirdparty/{seexpr,build-seexpr,install}` | `libSeExpr2.so.2.0` + `share/cmake/seexpr2/seexpr2-config.cmake` produced |
+| SeExpr `main` (commit 8f8c8f2, 2026-01-27) built interpreter-only, no Qt/Python/LLVM/SSE4 | `<session-scratch>{seexpr,build-seexpr,install}` | `libSeExpr2.so.2.0` + `share/cmake/seexpr2/seexpr2-config.cmake` produced |
 | Ptex `v2.4.3` built static+shared against system zlib | `.../thirdparty/{ptex,build-ptex,install}` | `libPtex.a`, `libPtex.so.2.4`, `lib/cmake/Ptex/ptex-config.cmake` produced |
 | SeExpr embedding + micro-benchmark (custom vars, custom `map()` function, 8-thread VarBlock evaluation) | `.../thirdparty/bench/seexpr_bench.cpp` | 13–117 ns/eval single-thread; 50 M evals/s on 8 threads |
 | Ptex write/read/filter API test (quad + triangle files, cross-face blend, 8-thread lookups) | `.../thirdparty/bench/ptex_test.cpp` | 23–26 ns/lookup single-thread; 228 M lookups/s on 8 threads |
@@ -19,10 +19,10 @@ GCC 13.3, CMake 3.28.3) to turn "should work" into "does work":
 
 | Item | State | Evidence |
 |---|---|---|
-| OpenUSD install | 26.08, shared libs, Python 3.12, TBB 2020.3, OpenSubdiv 3.6.1, MaterialX 1.39.5 | `/home/burkard/work/OpenUSD_26_08/pxrConfig.cmake` (`PXR_VERSION "2608"`, `find_dependency(OpenSubdiv 3.6.1 CONFIG)`, `find_dependency(MaterialX)`); `/home/burkard/work/OpenUSD_26_08/include/tbb/tbb_stddef.h:21-25` (`TBB_VERSION_MAJOR 2020`, `MINOR 3`, `TBB_INTERFACE_VERSION 11103`) |
+| OpenUSD install | 26.08, shared libs, Python 3.12, TBB 2020.3, OpenSubdiv 3.6.1, MaterialX 1.39.5 | `$USD/pxrConfig.cmake` (`PXR_VERSION "2608"`, `find_dependency(OpenSubdiv 3.6.1 CONFIG)`, `find_dependency(MaterialX)`); `$USD/include/tbb/tbb_stddef.h:21-25` (`TBB_VERSION_MAJOR 2020`, `MINOR 3`, `TBB_INTERFACE_VERSION 11103`) |
 | Compiler used for the install | GCC 13.3.0 (Ubuntu 24.04) | `strings libusd_tf.so` → `GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0` |
 | Ptex in the install | **absent** (no header, no lib, no CMake mention) | `grep -rn PTEX pxrConfig.cmake cmake/` → nothing; `ls include | grep -i ptex` → nothing |
-| OpenImageIO / OpenColorIO / OpenVDB plugins | **absent** (all default OFF) | `/home/burkard/work/OpenUSD/cmake/defaults/Options.cmake:16,20,37`; installed plugins are only `hdStorm, hioAvif, hioOpenEXR, sdrGlslfx, usdShaders` (`ls /home/burkard/work/OpenUSD_26_08/plugin/usd`) |
+| OpenImageIO / OpenColorIO / OpenVDB plugins | **absent** (all default OFF) | `<openusd-src>/cmake/defaults/Options.cmake:16,20,37`; installed plugins are only `hdStorm, hioAvif, hioOpenEXR, sdrGlslfx, usdShaders` (`ls $USD/plugin/usd`) |
 | SeExpr / KSeExpr | absent anywhere on machine | task statement; confirmed by `dpkg -l` grep |
 | bison / flex / sed | present: bison 3.8.2, flex 2.6.4 | `which bison flex` |
 | Ninja | **absent** (`which ninja` empty; CMake `-G Ninja` fails) — use `Unix Makefiles` or install ninja | configure error seen during verification |
@@ -208,13 +208,13 @@ From `.../thirdparty/bench/seexpr_bench.cpp` output:
 | VarBlock(threadSafe) noise+fbm expression, 1 thread | – | 128 |
 | Same, 8 threads (one VarBlock each) | – | 159 ns/eval/thread → **50 M evals/s aggregate** |
 
-Ballpark: a typical XGen-style per-hair attribute expression (one noise + fbm + remap) costs ~0.1 µs; 1 M hairs × 10 attributes ≈ 1 s single-threaded, ≈ 0.15 s on 8 threads. That is interactive for regenerate-on-edit if evaluation is only redone for dirty attributes.
+Ballpark: a typical host-groomer per-hair attribute expression (one noise + fbm + remap) costs ~0.1 µs; 1 M hairs × 10 attributes ≈ 1 s single-threaded, ≈ 0.15 s on 8 threads. That is interactive for regenerate-on-edit if evaluation is only redone for dirty attributes.
 
 ### 1.7 Builtins present in SeExpr2 (verified registration)
 
 Registered in `defineBuiltins()` (`ExprBuiltins.cpp:1719-1849`; `FUNCNDOC(func,min,max)` macro at `:1756`): math (`abs acos asin atan atan2 ceil cos cosh exp floor fmod log log10 pow sin sinh sqrt tan tanh cbrt asinh acosh atanh trunc`), degree variants (`deg rad cosd sind tand acosd asind atand atan2d`), `clamp round max min invert compress expand fit gamma bias contrast boxstep linearstep smoothstep gaussstep mix hsi(4..5) midhsi(5..7) hsltorgb rgbtohsl hash(1..n)`, noise: `noise(1..4) snoise vnoise cnoise snoise4 vnoise4 cnoise4 pnoise turbulence vturbulence cturbulence fbm vfbm cfbm fbm4 vfbm4 cfbm4 cellnoise ccellnoise voronoi(1..7) cvoronoi pvoronoi`, vector: `dist length norm dot cross angle ortho rotate up`, selection: `cycle pick choose wchoose`, curves: `spline(5..n) curve ccurve`, `printf sprintf`. Full user documentation with signatures: https://wdas.github.io/SeExpr/doxygen/userdoc.html.
 
-**Not present:** `rand()` — verified at runtime: `Function rand has no definition` (`.../bench/se_min.cpp` run). The userdoc still documents `rand([min,max],[seed])`, but the current `ExprBuiltins.cpp` registers only `hash`. XGen exposes `rand` (below), so usdGen must add it (`hash($id, $seed)`-style, or a `Funcn` wrapper).
+**Not present:** `rand()` — verified at runtime: `Function rand has no definition` (`.../bench/se_min.cpp` run). The userdoc still documents `rand([min,max],[seed])`, but the current `ExprBuiltins.cpp` registers only `hash`. A host groomer exposes `rand` (below), so usdGen must add it (`hash($id, $seed)`-style, or a `Funcn` wrapper).
 
 Noise implementation to reuse from C++ stylers without the expression layer (`src/SeExpr2/Noise.h:23-36`):
 
@@ -227,20 +227,20 @@ template <int d_in, int d_out, class T> void CellNoise(const T* in, T* out);
 
 and the higher-level `SeExpr2::noise/snoise/vnoise/cnoise/fbm/vfbm/turbulence/cellnoise/pnoise/hash` in `ExprBuiltins.h`. SeExpr `noise()` returns **0..1** (0.5 at lattice points — verified: `noise($P*4)` at integer P printed 0.5), `snoise` is −1..1.
 
-### 1.8 The XGen dialect that users expect
+### 1.8 The a host groomer dialect that users expect
 
-XGen expressions are SeExpr with XGen-provided globals and a few extra functions. From Autodesk's reference pages (2014 reference: https://download.autodesk.com/global/docs/maya2014/en_us/files/GUID-AFB8F7F3-DCCC-414A-9EC3-83B97FCC8C30.htm ; 2018 globals: https://help.autodesk.com/cloudhelp/2018/ENU/Maya-CharEffEnvBuild/files/GUID-A502A05B-0AF2-4C66-8F64-0D5363BF0A38.htm):
+A host groomer expressions are SeExpr with a host groomer-provided globals and a few extra functions. From Autodesk's reference pages (2014 reference: https://download.autodesk.com/global/docs/maya2014/en_us/files/GUID-AFB8F7F3-DCCC-414A-9EC3-83B97FCC8C30.htm ; 2018 globals: https://help.autodesk.com/cloudhelp/2018/ENU/Maya-CharEffEnvBuild/files/GUID-A502A05B-0AF2-4C66-8F64-0D5363BF0A38.htm):
 
 Global variables (floats): `$u`, `$v` ("The u/v parameter of the underlying surface"), `$id` ("The current primitive's ID"), `$frame`, `$cLength`/`$cWidth`/`$cDepth` ("final, computed length/width/depth"), `$descId`, `$faceid`/`$faceId`, `$patchId` (`$objectId` alias), `$aCount`. Vectors: `$P $Pg $Pref $Prefg` (+ world variants `$Pw $Pgw $Prefw $Prefgw`), `$dPdu $dPdug $dPduref $dPdurefg`, `$dPdv ...`, normals `$N $Ng $Nref $Nrefg`; image `$Cs`, `$As`. The 2018 page also documents `$cid` (description id), `$ptexId`, `$fitR` (search snippet — treat exact semantics as UNVERIFIED). Primitive-space variables used in guide/modifier expressions: `$t` (0 root → 1 tip), `$Prefg`, per https://jesusfc.net/blog/xgen-expressions-for-vfx.
 
-XGen-specific functions: `map("mapname" [, s, t] [, channel])` — "Evaluates map at current or provided coordinates"; `rand([min, max] [, seed])`; `noise([x][,y][,z])` documented by XGen as "Perlin noise function...between -1 and 1" (**different range from SeExpr's 0..1 `noise`** — usdGen must decide which convention to expose; recommend keeping SeExpr semantics and providing `snoise`, documenting the difference); `alignU/alignV/alignN([X])`, `shadow(x)`, `component(x,y,z)`, `dist(x1,y1,z1,x2,y2,z2)` (XGen's 6-float form), `remap`, `fit`, `cycle`, `pick`, `curve/ccurve`... (the 2014 page does not list `vmap()`/`cvar()` — UNVERIFIED whether they exist). Painted-map syntax (Autodesk "Basic expression examples", https://help.autodesk.com/cloudhelp/2016/ENU/Maya/files/GUID-72119439-1CDA-4094-BB94-03BECF23DF3A.htm):
+A host groomer-specific functions: `map("mapname" [, s, t] [, channel])` — "Evaluates map at current or provided coordinates"; `rand([min, max] [, seed])`; `noise([x][,y][,z])` documented by a host groomer as "Perlin noise function...between -1 and 1" (**different range from SeExpr's 0..1 `noise`** — usdGen must decide which convention to expose; recommend keeping SeExpr semantics and providing `snoise`, documenting the difference); `alignU/alignV/alignN([X])`, `shadow(x)`, `component(x,y,z)`, `dist(x1,y1,z1,x2,y2,z2)` (a host groomer's 6-float form), `remap`, `fit`, `cycle`, `pick`, `curve/ccurve`... (the 2014 page does not list `vmap()`/`cvar()` — UNVERIFIED whether they exist). Painted-map syntax (Autodesk "Basic expression examples", https://help.autodesk.com/cloudhelp/2016/ENU/Maya/files/GUID-72119439-1CDA-4094-BB94-03BECF23DF3A.htm):
 
 ```
 $a =map('${DESC}/paintmaps/length/'); #3dpaint, 200
 $a
 ```
 
-where `${DESC}` is the description directory macro, the path names a *directory of per-patch Ptex files* ("Maya creates sub-folders inside the Description for these Ptex files", https://help.autodesk.com/cloudhelp/2017/ENU/Maya/files/GUID-56075F6B-D1C9-4056-BDBC-9766C44AB88C.htm), and the trailing `#3dpaint, 200` comment carries the paint-tool texel resolution; `#0.10,1.00` comments carry slider ranges (`$min= 0.4000; #0.10,1.00`). `${PAL,name}` references palette expressions (`map( "baseCoat_${PAL,myPick}" )`). SeExpr preserves comments (`Expression::_comments`, `Expression.h:291`) so a UI can read these annotations.
+where `${DESC}` is the description directory macro, the path names a *directory of per-patch Ptex files* ("a DCC creates sub-folders inside the Description for these Ptex files", https://help.autodesk.com/cloudhelp/2017/ENU/Maya/files/GUID-56075F6B-D1C9-4056-BDBC-9766C44AB88C.htm), and the trailing `#3dpaint, 200` comment carries the paint-tool texel resolution; `#0.10,1.00` comments carry slider ranges (`$min= 0.4000; #0.10,1.00`). `${PAL,name}` references palette expressions (`map( "baseCoat_${PAL,myPick}" )`). SeExpr preserves comments (`Expression::_comments`, `Expression.h:291`) so a UI can read these annotations.
 
 Implication for usdGen: the "variables" are all things a groom evaluator already has per hair root (surface uv, face id, P/N/dPdu/dPdv in rest and deformed space, primitive id, frame); map lookup is a custom function bound to the plugin's texture prims; `rand` must be added; `${DESC}`-style macros become a pre-substitution over the expression string (asset paths resolved through Ar).
 
@@ -257,7 +257,7 @@ GPL-3 is incompatible with shipping a permissively licensed USD plugin, and the 
 
 ### 1.10 Recommendation (SeExpr)
 
-Vendor upstream `wdas/SeExpr` at commit `8f8c8f2c5e27e96fae70d6b82ac1ff4f4811d6dc` (2026-01-27; there is no tag after v3.0.1 and the C++17 fix is only on main) via `FetchContent` with `ENABLE_LLVM_BACKEND=OFF ENABLE_QT5=OFF ENABLE_SSE4=OFF USE_PYTHON=OFF BUILD_*=OFF`. Build it as a **static** library with PIC and hide it inside `usdGen`'s shared library (SeExpr's CMake only offers SHARED on non-Windows — either patch via `add_library` override, or set `BUILD_SHARED_LIBS`-equivalent by editing one line in a vendored copy; simplest: vendor the ~30 core files under `thirdparty/SeExpr2/` with a 20-line CMakeLists that runs bison/flex — the parser regeneration is 3 commands, `src/SeExpr2/CMakeLists.txt:42-74`). Static linking avoids a second `libSeExpr2.so.2` colliding with any DCC's copy (Maya ships its own SeExpr; Katana/Houdini plugins historically hit symbol clashes — UNVERIFIED for 2026 versions). Expose: `$u $v $id $faceId $P $N $dPdu $dPdv $Pref $Nref $t $frame $cLength...` via a `VarBlockCreator`; custom `map()`, `rand()`, `ptex()`; evaluate with one thread-safe VarBlock per TBB worker.
+Vendor upstream `wdas/SeExpr` at commit `8f8c8f2c5e27e96fae70d6b82ac1ff4f4811d6dc` (2026-01-27; there is no tag after v3.0.1 and the C++17 fix is only on main) via `FetchContent` with `ENABLE_LLVM_BACKEND=OFF ENABLE_QT5=OFF ENABLE_SSE4=OFF USE_PYTHON=OFF BUILD_*=OFF`. Build it as a **static** library with PIC and hide it inside `usdGen`'s shared library (SeExpr's CMake only offers SHARED on non-Windows — either patch via `add_library` override, or set `BUILD_SHARED_LIBS`-equivalent by editing one line in a vendored copy; simplest: vendor the ~30 core files under `thirdparty/SeExpr2/` with a 20-line CMakeLists that runs bison/flex — the parser regeneration is 3 commands, `src/SeExpr2/CMakeLists.txt:42-74`). Static linking avoids a second `libSeExpr2.so.2` colliding with a host application's copy of SeExpr (symbol clashes with host plugins are UNVERIFIED for 2026 versions). Expose: `$u $v $id $faceId $P $N $dPdu $dPdv $Pref $Nref $t $frame $cLength...` via a `VarBlockCreator`; custom `map()`, `rand()`, `ptex()`; evaluate with one thread-safe VarBlock per TBB worker.
 
 ---
 
@@ -352,7 +352,7 @@ virtual bool close(Ptex::String& error) = 0;                       // :919
 
 Class doc (`:801-806`): "textures being written to the file are expected to have unmultiplied-alpha data. Generated mipmaps will be premultiplied by the Ptex library. On read, PtexTexture will (if requested) premultiply all textures by alpha when getData is called; by default only reductions are premultiplied."
 
-`template <class T> class PtexPtr` (`:1032`) — RAII wrapper calling `release()`; Storm uses its own `_ReleaseUniquePtr` for the same purpose (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/ptexTextureObject.cpp:31-42`).
+`template <class T> class PtexPtr` (`:1032`) — RAII wrapper calling `release()`; Storm uses its own `_ReleaseUniquePtr` for the same purpose (`<openusd-src>/pxr/imaging/hdSt/ptexTextureObject.cpp:31-42`).
 
 ### 2.4 Thread safety (documented + verified)
 
@@ -377,7 +377,7 @@ From the Ptex file-format spec (https://ptex.us/PtexFile.html) and adjacency pag
 
 Two independent sources agree on the rule "quads map 1:1; an n-gon expands to n ptex sub-faces in order":
 
-1. OpenSubdiv (installed, header available): `Far::PtexIndices` (`/home/burkard/work/OpenUSD_26_08/include/opensubdiv/far/ptexIndices.h:46-88`):
+1. OpenSubdiv (installed, header available): `Far::PtexIndices` (`$USD/include/opensubdiv/far/ptexIndices.h:46-88`):
    ```cpp
    class PtexIndices {
        PtexIndices(TopologyRefiner const &refiner);
@@ -387,14 +387,14 @@ Two independent sources agree on the rule "quads map 1:1; an n-gon expands to n 
        // quadrant: "quadrant index if 'face' is not a quad (the local ptex sub-face index). Must be less than the number of face vertices."
    };
    ```
-   A `TopologyRefiner` for a Hydra/USD mesh comes from `PxOsdRefinerFactory::Create(PxOsdMeshTopology const&, TfToken name)` (`/home/burkard/work/OpenUSD/pxr/imaging/pxOsd/refinerFactory.h:34-41`). This gives usdGen both the face-id map **and the `adjfaces/adjedges` needed to author `.ptx` files from a paint tool** (the `GetAdjacency` output is exactly `FaceInfo::setadjfaces/setadjedges` input).
-2. Storm's shader convention: for coarse (unrefined) meshes "ptexId matches the primitiveID for quadrangulated or triangulated meshes" (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/codeGen.cpp:5620-5621`), and Hd quadrangulation "Produces a mesh where each non-quad face in the base mesh topology is quadrangulated such that the resulting mesh consists entirely of quads" (`/home/burkard/work/OpenUSD/pxr/imaging/hd/meshUtil.h:132-137`); for refined patches the ptex index rides in `Far::PatchParam` field0 ("faceId | 28 | the faceId of the patch (Storm uses ptexIndex)", `codeGen.cpp:5524`) and `HdSt_Subdivision` uses `patchTable->GetNumPtexFaces()` (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/subdivision.cpp:1602`).
+   A `TopologyRefiner` for a Hydra/USD mesh comes from `PxOsdRefinerFactory::Create(PxOsdMeshTopology const&, TfToken name)` (`<openusd-src>/pxr/imaging/pxOsd/refinerFactory.h:34-41`). This gives usdGen both the face-id map **and the `adjfaces/adjedges` needed to author `.ptx` files from a paint tool** (the `GetAdjacency` output is exactly `FaceInfo::setadjfaces/setadjedges` input).
+2. Storm's shader convention: for coarse (unrefined) meshes "ptexId matches the primitiveID for quadrangulated or triangulated meshes" (`<openusd-src>/pxr/imaging/hdSt/codeGen.cpp:5620-5621`), and Hd quadrangulation "Produces a mesh where each non-quad face in the base mesh topology is quadrangulated such that the resulting mesh consists entirely of quads" (`<openusd-src>/pxr/imaging/hd/meshUtil.h:132-137`); for refined patches the ptex index rides in `Far::PatchParam` field0 ("faceId | 28 | the faceId of the patch (Storm uses ptexIndex)", `codeGen.cpp:5524`) and `HdSt_Subdivision` uses `patchTable->GetNumPtexFaces()` (`<openusd-src>/pxr/imaging/hdSt/subdivision.cpp:1602`).
 
 Caveat for the tri case: Storm's triangulation is *fan* triangulation of the base face (a different sub-face count than Ptex's "subdivide once" rule for tri meshes); usdGen should treat `mt_quad` files with OSD's `PtexIndices` as the canonical mapping and only support `mt_triangle` files for all-triangle meshes (1:1).
 
 ### 2.7 Writing .ptx from a paint tool (verified pattern)
 
-`.../thirdparty/bench/ptex_test.cpp` wrote a 2-face quad file (64×64 and 16×32, shared edge with `adjfaces`/`adjedges` set), a `dt_uint8` `mt_triangle` file (`Res(3,3)`), read them back through `PtexCache`, and confirmed cross-face blending (`eval` at `u=0.999` with a wide footprint returned a value between face 0 and face 1). `ptxinfo -m quad.ptx` reports `meshType: quad, dataType: float32, numChannels: 3, hasMipMaps: yes, numMetaKeys: 1`. Ptex's own reference for adjacency authoring is `src/tests/wtest.cpp` (3×3 grid of faces with explicit `adjfaces`/`adjedges` tables). A paint tool therefore needs: face count + per-face `Res` (from a `#3dpaint, N` style resolution parameter; XGen uses this exact annotation), adjacency from `Far::PtexIndices::GetAdjacency`, and channel data; `PtexWriter::edit(path, incremental=true, ...)` supports appending edits without rewriting (`Ptexture.h:850`).
+`.../thirdparty/bench/ptex_test.cpp` wrote a 2-face quad file (64×64 and 16×32, shared edge with `adjfaces`/`adjedges` set), a `dt_uint8` `mt_triangle` file (`Res(3,3)`), read them back through `PtexCache`, and confirmed cross-face blending (`eval` at `u=0.999` with a wide footprint returned a value between face 0 and face 1). `ptxinfo -m quad.ptx` reports `meshType: quad, dataType: float32, numChannels: 3, hasMipMaps: yes, numMetaKeys: 1`. Ptex's own reference for adjacency authoring is `src/tests/wtest.cpp` (3×3 grid of faces with explicit `adjfaces`/`adjedges` tables). A paint tool therefore needs: face count + per-face `Res` (from a `#3dpaint, N` style resolution parameter; a host groomer uses this exact annotation), adjacency from `Far::PtexIndices::GetAdjacency`, and channel data; `PtexWriter::edit(path, incremental=true, ...)` supports appending edits without rewriting (`Ptexture.h:850`).
 
 ### 2.8 Ptex performance (measured, v2.4.3, `-O2`, this host)
 
@@ -410,13 +410,13 @@ So per-root Ptex sampling is cheaper than the SeExpr expression that consumes it
 
 | Fact | Evidence |
 |---|---|
-| Build flag `option(PXR_ENABLE_PTEX_SUPPORT "Enable Ptex support" OFF)`; when on: `find_package(PTex REQUIRED)` and global `add_definitions(-DPXR_PTEX_SUPPORT_ENABLED)` | `/home/burkard/work/OpenUSD/cmake/defaults/Options.cmake:36`; `cmake/defaults/Packages.cmake:266-269` |
-| `hdSt` links `Ptex::Ptex_dynamic` and adds `ptexMipmapTextureLoader` only under the flag; `ptexTextureObject` and `shaders/ptexTexture.glslfx` are always compiled/installed | `/home/burkard/work/OpenUSD/pxr/imaging/hdSt/CMakeLists.txt:35-38,110,214` |
-| No `FindPTex.cmake` module exists in `cmake/modules` — `find_package(PTex)` relies on Ptex's own `ptex-config.cmake` (verified target names match) | `ls /home/burkard/work/OpenUSD/cmake/modules | grep -i ptex` → empty |
+| Build flag `option(PXR_ENABLE_PTEX_SUPPORT "Enable Ptex support" OFF)`; when on: `find_package(PTex REQUIRED)` and global `add_definitions(-DPXR_PTEX_SUPPORT_ENABLED)` | `<openusd-src>/cmake/defaults/Options.cmake:36`; `cmake/defaults/Packages.cmake:266-269` |
+| `hdSt` links `Ptex::Ptex_dynamic` and adds `ptexMipmapTextureLoader` only under the flag; `ptexTextureObject` and `shaders/ptexTexture.glslfx` are always compiled/installed | `<openusd-src>/pxr/imaging/hdSt/CMakeLists.txt:35-38,110,214` |
+| No `FindPTex.cmake` module exists in `cmake/modules` — `find_package(PTex)` relies on Ptex's own `ptex-config.cmake` (verified target names match) | `ls <openusd-src>/cmake/modules | grep -i ptex` → empty |
 | **This install was built with the flag OFF.** Probe linking the installed `libusd_hdSt.so`: `HdStIsSupportedPtexTexture("a.ptx") = 0`; `PXR_PTEX_SUPPORT_ENABLED` is not exported to consumers; `include/pxr/imaging/hdSt/ptexTextureObject.h` is installed but `ptexMipmapTextureLoader.h` is not | `.../scratchpad/ptexprobe/probe.cpp` output; `ls include/pxr/imaging/hdSt | grep -i ptex` → `ptexTextureObject.h` only |
 | Behaviour of a `.ptx` in a Storm material on this install: `HdStPtexTextureObject::_Load()` body is entirely `#ifdef PXR_PTEX_SUPPORT_ENABLED` (`ptexTextureObject.cpp:111-231`), so `_format` stays `HgiFormatInvalid`, `IsValid()` is false (`:322`) and `_Commit()` uploads a 1×1 black "PtexTextureFallback" texel array plus a 1×1 layout texture (`:233-268`) — i.e. silently black, no error | source |
-| How Storm would bind Ptex if enabled: material node with sdr metadata `isPtex` → `texParam.textureType = HdStTextureType::Ptex` (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/materialNetwork.cpp:684-686`); `HdStPtexSubtextureIdentifier(premultiplyAlpha)` (`:582-583`); registry creates `HdStPtexTextureObject` (`textureObjectRegistry.cpp:63-64`); loader packs all faces + mips + gutter into a `2DArray` texel texture (`maxNumPages=2048`, `PtexCache::create(1, 128 MiB, premultiplyAlpha)`, `cache->get(filename, err)`, `HdStPtexMipmapTextureLoader loader(reader, maxNumPages, maxLevels=-1, GetTargetMemory())`, layout 3 `UInt16Vec2` texels per face in a `1DArray` up to 16384 wide — `ptexTextureObject.cpp:129-170`); two samplers (`HdStPtexSamplerObject::GetTexelsSampler/GetLayoutSampler`, `samplerObject.h:119-139`); binder emits `<name>` and `<name>_layout` bindings (`textureBinder.cpp:69-80,203-235`); codegen includes `ptexTexture.glslfx`'s `PtexTextureSampler` when a `TEXTURE_PTEX_TEXEL` binding exists (`codeGen.cpp:2191-2193`) and generates `HdGet_<name>() { return GlopPtexTextureLookup(<name>_Data, <name>_Packing, GetPatchCoord()) }` (`codeGen.cpp:6361-6379`); `GetPatchCoord()` = interpolated patch coord with `.w = ptexFaceIndex + HdGet_ptexFaceOffset()` (`shaders/mesh.glslfx:1445-1456`), `ptexFaceOffset` defaulting to 0 (`materialNetworkShader.cpp:316,341`) | source |
-| The only shipped sdr node with `isPtex` is the deprecated `HwPtexTexture_1` (`sdrMetadata { token role = "texture"; token isPtex = "1" }`, inputs `faceIndexPrimvar = "ptexFaceIndex"`, `faceOffsetPrimvar = "ptexFaceOffset"`, `asset inputs:file`), installed at `lib/usd/usdHydra/resources/shaders/shaderDefs.usda` | `/home/burkard/work/OpenUSD/pxr/usd/usdHydra/shaders/shaderDefs.usda:3-29`; `ls /home/burkard/work/OpenUSD_26_08/lib/usd/usdHydra/resources/shaders` |
+| How Storm would bind Ptex if enabled: material node with sdr metadata `isPtex` → `texParam.textureType = HdStTextureType::Ptex` (`<openusd-src>/pxr/imaging/hdSt/materialNetwork.cpp:684-686`); `HdStPtexSubtextureIdentifier(premultiplyAlpha)` (`:582-583`); registry creates `HdStPtexTextureObject` (`textureObjectRegistry.cpp:63-64`); loader packs all faces + mips + gutter into a `2DArray` texel texture (`maxNumPages=2048`, `PtexCache::create(1, 128 MiB, premultiplyAlpha)`, `cache->get(filename, err)`, `HdStPtexMipmapTextureLoader loader(reader, maxNumPages, maxLevels=-1, GetTargetMemory())`, layout 3 `UInt16Vec2` texels per face in a `1DArray` up to 16384 wide — `ptexTextureObject.cpp:129-170`); two samplers (`HdStPtexSamplerObject::GetTexelsSampler/GetLayoutSampler`, `samplerObject.h:119-139`); binder emits `<name>` and `<name>_layout` bindings (`textureBinder.cpp:69-80,203-235`); codegen includes `ptexTexture.glslfx`'s `PtexTextureSampler` when a `TEXTURE_PTEX_TEXEL` binding exists (`codeGen.cpp:2191-2193`) and generates `HdGet_<name>() { return GlopPtexTextureLookup(<name>_Data, <name>_Packing, GetPatchCoord()) }` (`codeGen.cpp:6361-6379`); `GetPatchCoord()` = interpolated patch coord with `.w = ptexFaceIndex + HdGet_ptexFaceOffset()` (`shaders/mesh.glslfx:1445-1456`), `ptexFaceOffset` defaulting to 0 (`materialNetworkShader.cpp:316,341`) | source |
+| The only shipped sdr node with `isPtex` is the deprecated `HwPtexTexture_1` (`sdrMetadata { token role = "texture"; token isPtex = "1" }`, inputs `faceIndexPrimvar = "ptexFaceIndex"`, `faceOffsetPrimvar = "ptexFaceOffset"`, `asset inputs:file`), installed at `lib/usd/usdHydra/resources/shaders/shaderDefs.usda` | `<openusd-src>/pxr/usd/usdHydra/shaders/shaderDefs.usda:3-29`; `ls $USD/lib/usd/usdHydra/resources/shaders` |
 | Storm tests for ptex exist but are compiled only under the flag (`testHdStPtex`, `pxr/imaging/hdSt/CMakeLists.txt:3017-3198`; `usdImagingGL` tests gated on `PTEX_FOUND AND PXR_ENABLE_PTEX_SUPPORT`, `pxr/usdImaging/usdImagingGL/CMakeLists.txt:5486`) | source |
 
 **Design consequence:** on an unmodified 26.08 install (the plan's hard constraint), Storm cannot sample `.ptx`. usdGen must (a) sample Ptex **on the CPU** with the vendored library when evaluating groom attributes (density, length, clump, color at roots), and (b) for *viewport color*, bake results to per-curve / per-vertex `displayColor`-style primvars (or, for surface-space maps, to an ordinary UV image consumed by a `UsdUVTexture`) — never hand a `.ptx` path to a Storm material. If a site builds OpenUSD with `PXR_ENABLE_PTEX_SUPPORT=ON`, usdGen's Ptex copy must then be ABI-compatible with the one Storm loads: build usdGen's Ptex **static with hidden visibility** (`Ptex::Ptex_static`, `-fvisibility=hidden`) so two Ptex versions never clash in one process.
@@ -425,7 +425,7 @@ So per-root Ptex sampling is cheaper than the SeExpr expression that consumes it
 
 ## 3. Image IO for painted maps (Hio)
 
-### 3.1 API (`/home/burkard/work/OpenUSD/pxr/imaging/hio/image.h`)
+### 3.1 API (`<openusd-src>/pxr/imaging/hio/image.h`)
 
 ```cpp
 class HioImage {
@@ -446,18 +446,18 @@ class HioImage {
 class HioImageFactory<T> : HioImageFactoryBase { HioImageSharedPtr New() const; };  // :187-198  plugin factory
 ```
 
-"Texture paths are UTF-8 strings, resolvable by AR. Texture system dispatch is driven by extension" (`image.h:36-37`). Dispatch: `HioImageRegistry::_ConstructImage` lowercases `ArGetResolver().GetExtension(filename)` and looks it up in a `HioRankedTypeMap` built from plugInfo metadata key `imageTypes` with optional `precedence` (default 1; higher wins) (`/home/burkard/work/OpenUSD/pxr/imaging/hio/imageRegistry.cpp:43-60`; `rankedTypeMap.h:121-137`). Env setting `HIO_IMAGE_PLUGIN_RESTRICTION` "Restricts HioImage plugin loading to the specified plugin" (`imageRegistry.cpp:31`). Formats/helpers: `HioFormat` enum (`hio/types.h:34-113`, e.g. `HioFormatUNorm8Vec4`, `HioFormatFloat16Vec4`, `HioFormatFloat32Vec3`, `HioFormatUNorm8Vec4srgb`), `HioGetFormat(nchannels, HioType, isSRGB)` (`types.h:162`), `HioGetHioType`, `HioGetComponentCount`, `HioGetDataSizeOfFormat` (`:168-184`).
+"Texture paths are UTF-8 strings, resolvable by AR. Texture system dispatch is driven by extension" (`image.h:36-37`). Dispatch: `HioImageRegistry::_ConstructImage` lowercases `ArGetResolver().GetExtension(filename)` and looks it up in a `HioRankedTypeMap` built from plugInfo metadata key `imageTypes` with optional `precedence` (default 1; higher wins) (`<openusd-src>/pxr/imaging/hio/imageRegistry.cpp:43-60`; `rankedTypeMap.h:121-137`). Env setting `HIO_IMAGE_PLUGIN_RESTRICTION` "Restricts HioImage plugin loading to the specified plugin" (`imageRegistry.cpp:31`). Formats/helpers: `HioFormat` enum (`hio/types.h:34-113`, e.g. `HioFormatUNorm8Vec4`, `HioFormatFloat16Vec4`, `HioFormatFloat32Vec3`, `HioFormatUNorm8Vec4srgb`), `HioGetFormat(nchannels, HioType, isSRGB)` (`types.h:162`), `HioGetHioType`, `HioGetComponentCount`, `HioGetDataSizeOfFormat` (`:168-184`).
 
 ### 3.2 Format plugins present in the install (verified by probe)
 
 | Extension | Plugin | Read | Write | Evidence |
 |---|---|---|---|---|
-| `bmp jpg jpeg png tga hdr` | `Hio_StbImage` in `libusd_hio.so` (`precedence 30`) | yes (8-bit; `hdr` float) | yes | `/home/burkard/work/OpenUSD_26_08/lib/usd/hio/resources/plugInfo.json`; probe: png/jpg/hdr/tga/bmp = 1 |
-| `exr` | `hioOpenEXR` plugin (`Hio_OpenEXRImage`, precedence 30) — built-in "nanoexr" reader/writer, no external OpenEXR library | yes (half/float, mips via subimages) | yes | `/home/burkard/work/OpenUSD_26_08/plugin/usd/hioOpenEXR/resources/plugInfo.json`; probe exr = 1 |
+| `bmp jpg jpeg png tga hdr` | `Hio_StbImage` in `libusd_hio.so` (`precedence 30`) | yes (8-bit; `hdr` float) | yes | `$USD/lib/usd/hio/resources/plugInfo.json`; probe: png/jpg/hdr/tga/bmp = 1 |
+| `exr` | `hioOpenEXR` plugin (`Hio_OpenEXRImage`, precedence 30) — built-in "nanoexr" reader/writer, no external OpenEXR library | yes (half/float, mips via subimages) | yes | `$USD/plugin/usd/hioOpenEXR/resources/plugInfo.json`; probe exr = 1 |
 | `avif` | `hioAvif` plugin | yes | UNVERIFIED (not needed) | `.../plugin/usd/hioAvif/resources/plugInfo.json`; probe avif = 1 |
 | `tif tiff tx ptx` | **none** (`PXR_BUILD_OPENIMAGEIO_PLUGIN OFF`; no `hioOiio`) | no | no | probe: tif/tiff/tx/ptx = 0; `Options.cmake:16` |
 
-Reading details: stb path supports only `subimage == 0 && mip == 0` (`stbImage.cpp:387`), `GetNumMipLevels()` returns 1 (`:352`); Storm itself ignores `GetNumMipLevels` and probes successive `mip` indices until dimensions stop shrinking (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/textureUtils.cpp:429-441`). stb sources vendored in OpenUSD are `stb_image v2.29`, `stb_image_write v1.16`, `stb_image_resize2 v2.07` (patched) and are **private headers — not installed** (`hio/CMakeLists.txt` lists them under `PRIVATE_HEADERS`; `ls include/pxr/imaging/hio` has no `stb/`). If usdGen needs raw stb (e.g. resize), vendor its own copy (MIT/public-domain dual license, `stb_image.h:7962-7981`).
+Reading details: stb path supports only `subimage == 0 && mip == 0` (`stbImage.cpp:387`), `GetNumMipLevels()` returns 1 (`:352`); Storm itself ignores `GetNumMipLevels` and probes successive `mip` indices until dimensions stop shrinking (`<openusd-src>/pxr/imaging/hdSt/textureUtils.cpp:429-441`). stb sources vendored in OpenUSD are `stb_image v2.29`, `stb_image_write v1.16`, `stb_image_resize2 v2.07` (patched) and are **private headers — not installed** (`hio/CMakeLists.txt` lists them under `PRIVATE_HEADERS`; `ls include/pxr/imaging/hio` has no `stb/`). If usdGen needs raw stb (e.g. resize), vendor its own copy (MIT/public-domain dual license, `stb_image.h:7962-7981`).
 
 ### 3.3 Writing images (for a paint/bake tool)
 
@@ -473,8 +473,8 @@ Reading details: stb path supports only `subimage == 0 && mip == 0` (`stbImage.c
 | Option | What it gives | License | Cost | Evidence |
 |---|---|---|---|---|
 | **SeExpr's own** (`Noise.h` templates + `ExprBuiltins.h` `noise/snoise/vnoise/fbm/vfbm/turbulence/cellnoise/pnoise/voronoi/hash`) | identical results in expressions **and** in C++ stylers (frizz/noise modifiers), 1-4D in, 1-3D out, periodic, fbm/turbulence, cellular, voronoi (7-arg, with fbm distortion) | Apache-2.0 (modified) | already linked; `Noise.cpp` 247 lines + 2124-line tables; scalar (no SIMD) | `.../thirdparty/seexpr/src/SeExpr2/Noise.h:23-36`, `ExprBuiltins.cpp:461-727, 840-908` |
-| MaterialX stdlib noise (installed) | `mx_noise2d/3d`, `mx_cellnoise`, `mx_worleynoise`, fractal3d GLSL/OSL sources | Apache-2.0 | GPU-side only (shader code); useful if a viewport hair shader wants procedural color | `/home/burkard/work/OpenUSD_26_08/libraries/stdlib/genglsl/mx_noise3d_float.glsl` etc. |
-| OpenUSD itself | **none** — no CPU noise in pxr (grep for perlin/simplex/cellnoise/voronoi finds only unrelated hits) | – | – | `grep -rli` over `/home/burkard/work/OpenUSD/pxr` |
+| MaterialX stdlib noise (installed) | `mx_noise2d/3d`, `mx_cellnoise`, `mx_worleynoise`, fractal3d GLSL/OSL sources | Apache-2.0 | GPU-side only (shader code); useful if a viewport hair shader wants procedural color | `$USD/libraries/stdlib/genglsl/mx_noise3d_float.glsl` etc. |
+| OpenUSD itself | **none** — no CPU noise in pxr (grep for perlin/simplex/cellnoise/voronoi finds only unrelated hits) | – | – | `grep -rli` over `<openusd-src>/pxr` |
 | FastNoiseLite (`Cpp/FastNoiseLite.h`) | OpenSimplex2/2S, Cellular, Perlin, Value/ValueCubic, FBm/Ridged/PingPong fractals, domain warp; single header; SIMD-friendly | MIT | fast, but results differ from SeExpr's builtins | https://github.com/Auburn/FastNoiseLite (latest tag v1.1.1) |
 | `stb_perlin.h` v0.5 | `stb_perlin_noise3(_seed)`, `_fbm_noise3`, `_turbulence_noise3`, `_ridge_noise3`, wrap/period | public domain / MIT | tiny | https://raw.githubusercontent.com/nothings/stb/master/stb_perlin.h |
 | OSL noise | full production set (gabor, simplex, usimplex, cell, hash) | BSD-3 | requires OSL + OIIO + LLVM — far too heavy | UNVERIFIED sizes; not installed |
@@ -493,7 +493,7 @@ Needs in the plan: nearest guides per root (guide interpolation), clump-center a
 | OpenUSD | no kd-tree / spatial index (`grep -rli "nanoflann\|kdtree\|KdTree"` over pxr → nothing) | grep |
 | Own implementation | a 3-D static kd-tree or uniform grid over roots is ~200 lines; grid hashing is often faster for uniformly dense hair roots | UNVERIFIED perf claim |
 
-Recommendation: vendor `nanoflann.hpp` (single header, BSD-2, pin 1.12.1) for kNN/radius queries over guide roots and clump centres; implement the RBF solve on top of it with a small dense solver (usdRig already has `libs/rigExecMath/sparseSolve.cpp`, `/home/burkard/work/usdRig/CMakeLists.txt` target `rigExecMath`) — usdGen can link `rigExec::rigExecMath` if it consumes the rigExec package, or copy the needed kernels to stay decoupled.
+Recommendation: vendor `nanoflann.hpp` (single header, BSD-2, pin 1.12.1) for kNN/radius queries over guide roots and clump centres; implement the RBF solve on top of it with a small dense solver (usdRig already has `libs/rigExecMath/sparseSolve.cpp`, `<usdrig-src>/CMakeLists.txt` target `rigExecMath`) — usdGen can link `rigExec::rigExecMath` if it consumes the rigExec package, or copy the needed kernels to stay decoupled.
 
 ---
 
@@ -503,17 +503,17 @@ Recommendation: vendor `nanoflann.hpp` (single header, BSD-2, pin 1.12.1) for kN
 
 | Mechanism | usdRig evidence |
 |---|---|
-| `set(USD_INSTALL_DIR ".../usd-install" CACHE PATH ...)` then `find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)`; `CMAKE_CXX_STANDARD 17` | `/home/burkard/work/usdRig/CMakeLists.txt:6-11` |
-| Build script passes `-DCMAKE_PREFIX_PATH="$USD"` because `pxrConfig.cmake`'s `find_dependency(OpenSubdiv 3.6.1 CONFIG)` / `find_dependency(MaterialX)` do not inherit `PATHS` | `/home/burkard/work/usdRig/bin/build_rigexec.sh` (comment + cmake line); `/home/burkard/work/OpenUSD_26_08/pxrConfig.cmake` |
-| pxr targets are plain names (`usd`, `sdf`, `hd`, `hdSt`, `exec`, `vdf` …), with TBB provided as `TBB::tbb` imported from the USD prefix when `PXR_FIND_TBB_IN_CONFIG` is OFF (this install) | `pxrConfig.cmake` (`add_library(TBB::tbb SHARED IMPORTED)` block); `/home/burkard/work/OpenUSD_26_08/cmake/pxrTargets.cmake:585-590` (`hdSt` links `TBB::tbb;OpenSubdiv::osdCPU;OpenSubdiv::osdGPU;MaterialX*`) |
+| `set(USD_INSTALL_DIR ".../usd-install" CACHE PATH ...)` then `find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)`; `CMAKE_CXX_STANDARD 17` | `<usdrig-src>/CMakeLists.txt:6-11` |
+| Build script passes `-DCMAKE_PREFIX_PATH="$USD"` because `pxrConfig.cmake`'s `find_dependency(OpenSubdiv 3.6.1 CONFIG)` / `find_dependency(MaterialX)` do not inherit `PATHS` | `<usdrig-src>/bin/build_rigexec.sh` (comment + cmake line); `$USD/pxrConfig.cmake` |
+| pxr targets are plain names (`usd`, `sdf`, `hd`, `hdSt`, `exec`, `vdf` …), with TBB provided as `TBB::tbb` imported from the USD prefix when `PXR_FIND_TBB_IN_CONFIG` is OFF (this install) | `pxrConfig.cmake` (`add_library(TBB::tbb SHARED IMPORTED)` block); `$USD/cmake/pxrTargets.cmake:585-590` (`hdSt` links `TBB::tbb;OpenSubdiv::osdCPU;OpenSubdiv::osdGPU;MaterialX*`) |
 | Install layout mirrors USD: libs in `lib/`, plugins in `lib/usd/<name>/resources/plugInfo.json`, Python in `lib/python/`, CMake package in `lib/cmake/rigExec` | `CMakeLists.txt:31-39` |
 | rpath `$ORIGIN` (+ `@loader_path` on macOS) and `CMAKE_INSTALL_RPATH_USE_LINK_PATH ON` so the Plug-loaded imaging library finds siblings and the USD libs | `CMakeLists.txt:48-54` |
-| Plugin `plugInfo.json` for a *library* plugin is generated from a `.in` with `$<TARGET_FILE_NAME:rigExecImaging>` (`"LibraryPath": "../../@RIGEXEC_IMAGING_LIBRARY_FILENAME@"`, `"Type": "library"`, base `UsdImagingSceneIndexPlugin`), written to `build/usd/rigExecImaging/resources/` so the same relative hop works in build and install trees | `CMakeLists.txt:506-517`; `/home/burkard/work/usdRig/plugin/rigExecImaging/resources/plugInfo.json.in` |
+| Plugin `plugInfo.json` for a *library* plugin is generated from a `.in` with `$<TARGET_FILE_NAME:rigExecImaging>` (`"LibraryPath": "../../@RIGEXEC_IMAGING_LIBRARY_FILENAME@"`, `"Type": "library"`, base `UsdImagingSceneIndexPlugin`), written to `build/usd/rigExecImaging/resources/` so the same relative hop works in build and install trees | `CMakeLists.txt:506-517`; `<usdrig-src>/plugin/rigExecImaging/resources/plugInfo.json.in` |
 | Codeless schema plugInfo is rewritten at configure time from `"Type": "resource"` to `"Type": "library"` with a `LibraryPath` so Plug can dlopen it (needed for `implementsComputeExtent`) | `CMakeLists.txt:410-460` |
-| usdview python plugin: `"Type": "python"`, `bases: ["pxr.Usdviewq.plugin.PluginContainer"]` | `/home/burkard/work/usdRig/plugin/rigExecUsdview/plugInfo.json` |
-| Runtime env: `PXR_PLUGINPATH_NAME=<build>/usd/rigExecSchema/resources:<build>/usd/rigExecImaging/resources:<src>/plugin/rigExecUsdview`, `PYTHONPATH` includes plugin dirs and USD site-packages | `/home/burkard/work/usdRig/bin/_env.sh` |
-| Exported package: `install(EXPORT rigExecTargets NAMESPACE rigExec::)`, `configure_package_config_file` with `PATH_VARS`, `write_basic_package_version_file(... SameMinorVersion)`; the config re-finds pxr inside a `block()` that appends the USD prefix to `CMAKE_PREFIX_PATH`, and publishes `rigExec_PLUGINPATHS` | `CMakeLists.txt:522-534`; `/home/burkard/work/usdRig/cmake/rigExecConfig.cmake.in:8-51` |
-| Python bindings are pybind11 (optional, auto-detected via `python -m pybind11 --cmakedir`) coexisting with USD's Boost.Python modules | `CMakeLists.txt:272-305`; `/home/burkard/work/usdRig/python/CMakeLists.txt` |
+| usdview python plugin: `"Type": "python"`, `bases: ["pxr.Usdviewq.plugin.PluginContainer"]` | `<usdrig-src>/plugin/rigExecUsdview/plugInfo.json` |
+| Runtime env: `PXR_PLUGINPATH_NAME=<build>/usd/rigExecSchema/resources:<build>/usd/rigExecImaging/resources:<src>/plugin/rigExecUsdview`, `PYTHONPATH` includes plugin dirs and USD site-packages | `<usdrig-src>/bin/_env.sh` |
+| Exported package: `install(EXPORT rigExecTargets NAMESPACE rigExec::)`, `configure_package_config_file` with `PATH_VARS`, `write_basic_package_version_file(... SameMinorVersion)`; the config re-finds pxr inside a `block()` that appends the USD prefix to `CMAKE_PREFIX_PATH`, and publishes `rigExec_PLUGINPATHS` | `CMakeLists.txt:522-534`; `<usdrig-src>/cmake/rigExecConfig.cmake.in:8-51` |
+| Python bindings are pybind11 (optional, auto-detected via `python -m pybind11 --cmakedir`) coexisting with USD's Boost.Python modules | `CMakeLists.txt:272-305`; `<usdrig-src>/python/CMakeLists.txt` |
 
 ### 6.2 Recommended shape for usdGen
 
@@ -542,7 +542,7 @@ Notes and rules:
 3. SeExpr's `src/SeExpr2/CMakeLists.txt:86` hardcodes `SHARED` on non-Windows; either vendor with a modified one-liner, or after `FetchContent_MakeAvailable` build a second `STATIC` target from `${seexpr_SOURCE_DIR}/src/SeExpr2/*.cpp` minus `ExprLLVMCodeGeneration.cpp` plus the bison/flex outputs. bison/flex are hard requirements on Linux/macOS (§1.2); document `apt install bison flex`.
 4. **ABI/TBB**: everything must compile with the same `-std=c++17`, same libstdc++ ABI, same TBB headers (`include/tbb` from the USD prefix, TBB 2020.3, interface 11103) — do not let FetchContent pull oneTBB 2021 (SeExpr and Ptex do not use TBB, so this is only a concern for usdGen's own code; link `TBB::tbb` from pxrConfig). SeExpr uses `pthread`/`dl`; Ptex uses `Threads::Threads`.
 5. **Windows**: SeExpr builds STATIC there; Ptex fine; bison/flex must come from `winflexbison` or ship pre-generated parser files (KSeExpr has `USE_PREGENERATED_FILES` as precedent). Mark as later work.
-6. **Python bindings**: `pip install pybind11 numpy` is required in `/home/burkard/.venv` before enabling `USDGEN_BUILD_PYTHON` (neither is installed today).
+6. **Python bindings**: `pip install pybind11 numpy` is required in `$VENV` before enabling `USDGEN_BUILD_PYTHON` (neither is installed today).
 7. Ninja is not installed; scripts should default to `Unix Makefiles` or check `ninja`.
 
 ---
@@ -551,7 +551,7 @@ Notes and rules:
 
 | Component | License | Copyleft? | Notes |
 |---|---|---|---|
-| OpenUSD 26.08 | Tomorrow Open Source Technology License 1.0 (Apache-2.0 with modified §6 Trademarks) | no | `/home/burkard/work/OpenUSD_26_08/LICENSE.txt:1-9` |
+| OpenUSD 26.08 | Tomorrow Open Source Technology License 1.0 (Apache-2.0 with modified §6 Trademarks) | no | `$USD/LICENSE.txt:1-9` |
 | OpenSubdiv 3.6.1 | Apache-2.0 with modification (§6) | no | `include/opensubdiv/version.h` header |
 | MaterialX 1.39.5 | Apache-2.0 | no | UNVERIFIED locally (well known) |
 | oneTBB 2020.3 | Apache-2.0 | no | UNVERIFIED locally |
@@ -560,7 +560,7 @@ Notes and rules:
 | **Ptex v2.4.3 / v2.5.x** | BSD-3-Clause (Disney variant, no-endorsement clause names Disney) | no | `.../ptex/LICENSE:1-8` |
 | zlib (system 1.3) | zlib license | no | UNVERIFIED text; standard |
 | libdeflate (if Ptex ≥ 2.5) | MIT | no | https://github.com/ebiggers/libdeflate |
-| stb (`stb_image*`, `stb_perlin`) | MIT **or** public domain (dual) | no | `/home/burkard/work/OpenUSD/pxr/imaging/hio/stb/stb_image.h:7962-7981` |
+| stb (`stb_image*`, `stb_perlin`) | MIT **or** public domain (dual) | no | `<openusd-src>/pxr/imaging/hio/stb/stb_image.h:7962-7981` |
 | nanoflann 1.12.1 | BSD-2-Clause | no | `COPYING` (Muja/Lowe/Blanco) |
 | FastNoiseLite v1.1.1 | MIT | no | repo page |
 | LLVM (if SeExpr JIT ever enabled) | Apache-2.0 with LLVM exceptions | no | UNVERIFIED; not installed |
@@ -572,10 +572,10 @@ All recommended components are permissive and compatible with shipping usdGen un
 
 ## Key facts
 
-- The OpenUSD 26.08 install has **no Ptex, no OpenImageIO**: `grep -rn PTEX /home/burkard/work/OpenUSD_26_08/pxrConfig.cmake cmake/` empty; `ls include | grep -i ptex` empty; options default OFF at `/home/burkard/work/OpenUSD/cmake/defaults/Options.cmake:16,36`.
-- A probe linked against the installed `libusd_hdSt.so` returns `HdStIsSupportedPtexTexture("a.ptx") = 0` and `HioImage::IsSupportedImageFile` = 1 for png/jpg/bmp/tga/hdr/exr/avif, 0 for tif/tiff/tx/ptx (`/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/ptexprobe/probe.cpp`).
-- With Ptex disabled, a `.ptx` in a Storm material becomes a 1×1 black fallback silently: `_Load` body is `#ifdef PXR_PTEX_SUPPORT_ENABLED` (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/ptexTextureObject.cpp:121-231`), fallback at `:233-268`.
-- Storm's Ptex path (when enabled) keys off sdr metadata `isPtex` (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/materialNetwork.cpp:684-686`), uses `patchCoord.w + ptexFaceOffset` as face id (`shaders/mesh.glslfx:1445-1456`), and the only shipped node is deprecated `HwPtexTexture_1` (`/home/burkard/work/OpenUSD/pxr/usd/usdHydra/shaders/shaderDefs.usda:3-29`).
+- The OpenUSD 26.08 install has **no Ptex, no OpenImageIO**: `grep -rn PTEX $USD/pxrConfig.cmake cmake/` empty; `ls include | grep -i ptex` empty; options default OFF at `<openusd-src>/cmake/defaults/Options.cmake:16,36`.
+- A probe linked against the installed `libusd_hdSt.so` returns `HdStIsSupportedPtexTexture("a.ptx") = 0` and `HioImage::IsSupportedImageFile` = 1 for png/jpg/bmp/tga/hdr/exr/avif, 0 for tif/tiff/tx/ptx (`<session-scratch>`).
+- With Ptex disabled, a `.ptx` in a Storm material becomes a 1×1 black fallback silently: `_Load` body is `#ifdef PXR_PTEX_SUPPORT_ENABLED` (`<openusd-src>/pxr/imaging/hdSt/ptexTextureObject.cpp:121-231`), fallback at `:233-268`.
+- Storm's Ptex path (when enabled) keys off sdr metadata `isPtex` (`<openusd-src>/pxr/imaging/hdSt/materialNetwork.cpp:684-686`), uses `patchCoord.w + ptexFaceOffset` as face id (`shaders/mesh.glslfx:1445-1456`), and the only shipped node is deprecated `HwPtexTexture_1` (`<openusd-src>/pxr/usd/usdHydra/shaders/shaderDefs.usda:3-29`).
 - SeExpr upstream: namespace/library `SeExpr2`, package version "2.0", last tag v3.0.1 (2019-11-19), main commit 8f8c8f2 (2026-01-27) sets C++17 (`.../thirdparty/seexpr/CMakeLists.txt:22-24,197`; https://github.com/wdas/SeExpr/tags; commits page).
 - SeExpr license is Apache-2.0 with §6 Trademarks replaced (`.../thirdparty/seexpr/LICENSE:1-11`); KSeExpr is GPL-3.0-or-later and namespace `KSeExpr` (its `src/KSeExpr/Expression.h` SPDX header) — not usable.
 - SeExpr builds interpreter-only on this aarch64 host with `ENABLE_LLVM_BACKEND=OFF ENABLE_QT5=OFF ENABLE_SSE4=OFF USE_PYTHON=OFF`; `ENABLE_SSE4` (default TRUE) adds `-msse4.1` (`CMakeLists.txt:98,202`); bison/flex/sed are required because `src/SeExpr2/generated/` is empty in git (`src/SeExpr2/CMakeLists.txt:31-40`).
@@ -583,26 +583,26 @@ All recommended components are permissive and compatible with shipping usdGen un
 - Embedding API: subclass `Expression`, override `resolveVar` (`Expression.h:199`) returning `ExprVarRef` whose `eval(double*)` must write exactly `type().dim()` doubles (`Expression.h:64`; corruption verified otherwise), `resolveFunc` (`:202`) returning `ExprFunc` wrapping an `ExprFuncSimple` with `prep/evalConstant/eval` (`ExprFuncX.h:111-113`); `evalFP(VarBlock*)` (`:189`), `isValid/parseError` (`:133/140`), `isVec` (`:177`), `isThreadSafe` (`:162`).
 - Thread model: `evalFP` on one `Expression` writes shared `_interpreter->d` unless a `VarBlock` with `threadSafe=true` is passed, which memcpy's the interpreter state per eval (`Expression.cpp:304-309`, `Interpreter.cpp:31-43`, `VarBlock.h:65,121`). Verified 8-thread evaluation gives 50 M evals/s aggregate.
 - Measured interpreter cost: 13 ns (`$u*$v+1`), 34 ns (custom `map()` + `hash`), 106–117 ns (noise+fbm / cellnoise+voronoi) per eval; prep 7–53 µs (`.../thirdparty/bench/seexpr_bench.cpp`).
-- `rand()` is **not** a SeExpr2 builtin ("Function rand has no definition" at runtime; `ExprBuiltins.cpp:1719-1849` registers `hash` but no `rand`) although XGen and the SeExpr userdoc list it — usdGen must add `rand`.
-- XGen globals/functions to emulate: `$u $v $id $faceId $patchId $frame $cLength $cWidth $cDepth $P/$Pg/$Pref/$Prefg(+w) $dPdu* $dPdv* $N/$Ng/$Nref/$Nrefg $Cs $As`, `map("name"[,s,t][,channel])`, `rand([min,max][,seed])`, XGen `noise` is −1..1 while SeExpr `noise` is 0..1 (Autodesk 2014/2018 reference pages; `noise($P*4)` at integer P printed 0.5 locally). Painted maps are `map('${DESC}/paintmaps/length/'); #3dpaint, 200` (directory of per-patch Ptex files).
+- `rand()` is **not** a SeExpr2 builtin ("Function rand has no definition" at runtime; `ExprBuiltins.cpp:1719-1849` registers `hash` but no `rand`) although a host groomer and the SeExpr userdoc list it — usdGen must add `rand`.
+- a host groomer globals/functions to emulate: `$u $v $id $faceId $patchId $frame $cLength $cWidth $cDepth $P/$Pg/$Pref/$Prefg(+w) $dPdu* $dPdv* $N/$Ng/$Nref/$Nrefg $Cs $As`, `map("name"[,s,t][,channel])`, `rand([min,max][,seed])`, a host groomer `noise` is −1..1 while SeExpr `noise` is 0..1 (Autodesk 2014/2018 reference pages; `noise($P*4)` at integer P printed 0.5 locally). Painted maps are `map('${DESC}/paintmaps/length/'); #3dpaint, 200` (directory of per-patch Ptex files).
 - Ptex: tags v2.5.2 (2026-04-11) … v2.4.3 (2024-06-11); v2.5.0 switched zlib→libdeflate; v2.4.3 uses `find_package(ZLIB REQUIRED)` and defaults to C++98 unless `CMAKE_CXX_STANDARD` is set (`.../thirdparty/ptex/CMakeLists.txt:11-17,36`); libdeflate headers are absent on this host.
-- Ptex v2.4.3 built here; exports `Ptex::Ptex_static` (defines `PTEX_STATIC`, links `Threads::Threads;ZLIB::ZLIB`) and `Ptex::Ptex_dynamic` in `lib/cmake/Ptex/ptex-config.cmake` (`.../thirdparty/install/lib/cmake/Ptex/ptex-exports.cmake:59-72`) — the same names `hdSt` expects (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/CMakeLists.txt:35-38`).
+- Ptex v2.4.3 built here; exports `Ptex::Ptex_static` (defines `PTEX_STATIC`, links `Threads::Threads;ZLIB::ZLIB`) and `Ptex::Ptex_dynamic` in `lib/cmake/Ptex/ptex-config.cmake` (`.../thirdparty/install/lib/cmake/Ptex/ptex-exports.cmake:59-72`) — the same names `hdSt` expects (`<openusd-src>/pxr/imaging/hdSt/CMakeLists.txt:35-38`).
 - Ptex API signatures: `PtexCache::create(int maxFiles, size_t maxMem, bool premultiply=false, ...)` (`Ptexture.h:711`), `cache->get(path, err)` (`:757`), `PtexTexture::getData(faceid, buffer, stride)` (`:551`), `getPixel(faceid,u,v,result,firstchan,nchannels)` (`:592`), `PtexFilter::getFilter(tx, Options{f_point|f_bilinear|f_box|f_gaussian|f_bicubic|f_bspline|f_catmullrom|f_mitchell, lerp, sharpness, noedgeblend})` (`:971`), `eval(result, firstchan, nchannels, faceid, u, v, uw1, vw1, uw2, vw2, width=1, blur=0)` (`:997`), `PtexWriter::open(path, MeshType, DataType, nchannels, alphachan, nfaces, err, genmipmaps=true)` (`:827`), `writeFace(faceid, FaceInfo, data, stride=0)` (`:907`), `close(err)` (`:919`).
 - Ptex threading: cache "fully multi-threaded ... protected with internal locks" (`Ptexture.h:678-681`; lock-free reads per `PtexCache.cpp:61-66`); `PtexSeparableFilter` has `float* _result; float _weight; // temp result` scratch state (`PtexSeparableFilter.h:80-81`) → one filter per thread. Verified 8-thread lookups: 228 M/s aggregate; single-thread bilinear 23 ns.
-- Ptex face ids: sequential from 0 in Face Info order; non-quads in a quad file are "subdivided once" into n subfaces (`flag_subface`); quad (u,v) origin bottom-left, v-major storage; edges `e_bottom,e_right,e_top,e_left` (`Ptexture.h:94-99`; https://ptex.us/PtexFile.html). USD→Ptex mapping and adjacency come from installed `Far::PtexIndices::GetFaceId/GetAdjacency` (`/home/burkard/work/OpenUSD_26_08/include/opensubdiv/far/ptexIndices.h:63-88`) via `PxOsdRefinerFactory::Create` (`/home/burkard/work/OpenUSD/pxr/imaging/pxOsd/refinerFactory.h:34-41`); Storm's coarse-quad convention "ptexId matches the primitiveID" (`/home/burkard/work/OpenUSD/pxr/imaging/hdSt/codeGen.cpp:5620-5621`).
-- Hio: dispatch by lower-cased extension through plugInfo `imageTypes`/`precedence` (`/home/burkard/work/OpenUSD/pxr/imaging/hio/imageRegistry.cpp:43-60`, `rankedTypeMap.h:131-137`); stb plugin (`bmp jpg jpeg png tga hdr`, mip 0 only, `stbImage.cpp:387`), EXR via built-in nanoexr (read+write half/float, `OpenEXRImage.cpp:831-938`), AVIF read; stb writes quantize float to 8-bit except `.hdr` (`stbImage.cpp:615-700`); stb headers are private, not installed.
-- usdRig's consumer pattern to mirror: `find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)` + `-DCMAKE_PREFIX_PATH=$USD` (`/home/burkard/work/usdRig/CMakeLists.txt:6-11`, `bin/build_rigexec.sh`), install layout `lib/`, `lib/usd/<name>/resources`, `lib/python`, `lib/cmake/rigExec` (`CMakeLists.txt:31-39`), `$ORIGIN` rpath (`:48-54`), generated library-plugin `plugInfo.json` with `$<TARGET_FILE_NAME:>` (`:506-517`), exported `rigExec::` targets + `rigExec_PLUGINPATHS` (`cmake/rigExecConfig.cmake.in:8-51`).
+- Ptex face ids: sequential from 0 in Face Info order; non-quads in a quad file are "subdivided once" into n subfaces (`flag_subface`); quad (u,v) origin bottom-left, v-major storage; edges `e_bottom,e_right,e_top,e_left` (`Ptexture.h:94-99`; https://ptex.us/PtexFile.html). USD→Ptex mapping and adjacency come from installed `Far::PtexIndices::GetFaceId/GetAdjacency` (`$USD/include/opensubdiv/far/ptexIndices.h:63-88`) via `PxOsdRefinerFactory::Create` (`<openusd-src>/pxr/imaging/pxOsd/refinerFactory.h:34-41`); Storm's coarse-quad convention "ptexId matches the primitiveID" (`<openusd-src>/pxr/imaging/hdSt/codeGen.cpp:5620-5621`).
+- Hio: dispatch by lower-cased extension through plugInfo `imageTypes`/`precedence` (`<openusd-src>/pxr/imaging/hio/imageRegistry.cpp:43-60`, `rankedTypeMap.h:131-137`); stb plugin (`bmp jpg jpeg png tga hdr`, mip 0 only, `stbImage.cpp:387`), EXR via built-in nanoexr (read+write half/float, `OpenEXRImage.cpp:831-938`), AVIF read; stb writes quantize float to 8-bit except `.hdr` (`stbImage.cpp:615-700`); stb headers are private, not installed.
+- usdRig's consumer pattern to mirror: `find_package(pxr REQUIRED CONFIG PATHS "${USD_INSTALL_DIR}" NO_DEFAULT_PATH)` + `-DCMAKE_PREFIX_PATH=$USD` (`<usdrig-src>/CMakeLists.txt:6-11`, `bin/build_rigexec.sh`), install layout `lib/`, `lib/usd/<name>/resources`, `lib/python`, `lib/cmake/rigExec` (`CMakeLists.txt:31-39`), `$ORIGIN` rpath (`:48-54`), generated library-plugin `plugInfo.json` with `$<TARGET_FILE_NAME:>` (`:506-517`), exported `rigExec::` targets + `rigExec_PLUGINPATHS` (`cmake/rigExecConfig.cmake.in:8-51`).
 - Host toolchain: GCC 13.3 (same as the USD build), CMake 3.28.3, bison 3.8.2, flex 2.6.4, zlib dev present; **no ninja, no LLVM dev, no libdeflate dev, no pybind11/numpy in the venv**.
 - No CPU noise or kd-tree exists in OpenUSD; SeExpr's `Noise.h` templates (`Noise/PNoise/FBM/CellNoise`, `.../seexpr/src/SeExpr2/Noise.h:23-36`) can serve both expressions and C++ stylers; nanoflann 1.12.1 (BSD-2, header-only) is the spatial-query pick.
 
 ## Open questions
 
-- Exact XGen 2024+ function list beyond the 2014 reference (whether `vmap()`, `cvar()`, `ptex()` exist and their signatures) — the 2023/2026 Autodesk reference pages returned HTTP 503/partial content; treat as UNVERIFIED.
+- Exact a host groomer 2024+ function list beyond the 2014 reference (whether `vmap()`, `cvar()`, `ptex()` exist and their signatures) — the 2023/2026 Autodesk reference pages returned HTTP 503/partial content; treat as UNVERIFIED.
 - Ptex triangle-face (u,v)↔vertex convention and the odd/even texel packing — only "w = 1 - u - v" and "square resolution" were verifiable; needed before supporting `mt_triangle` files for painted maps on triangle meshes.
 - Whether SeExpr's LLVM backend (LLVM ≥ 3.8; not installed) is worth it for usdGen — no measurement possible here; interpreter numbers (0.1 µs/eval) suggest not.
 - SeExpr on Windows/macOS: pre-generated parser sources and STATIC-only build on Windows (`src/SeExpr2/CMakeLists.txt:89`) — untested; KSeExpr's `USE_PREGENERATED_FILES` is a template.
-- Symbol-clash behaviour when a DCC (Maya/Houdini/Katana) that ships its own SeExpr/Ptex loads usdGen — mitigated by static+hidden linking but not tested.
+- Symbol-clash behaviour when a host application that ships its own SeExpr/Ptex loads usdGen — mitigated by static+hidden linking but not tested.
 - Ptex ≥ 2.5 (libdeflate) vs 2.4.3 (zlib): whether any site-installed, Ptex-enabled OpenUSD build would expect a particular Ptex SOVERSION (2.4 vs 2.5) if usdGen ever exposed Ptex dynamically — irrelevant with static linking.
 - `hioAvif` write support and `Hio_OpenEXRImage` mip/subimage semantics for writing multi-level maps were not exercised.
-- Precision/semantics of XGen `$ptexId`, `$fitR`, `$cid` (search snippets only).
+- Precision/semantics of a host groomer `$ptexId`, `$fitR`, `$cid` (search snippets only).
 - Whether `HdStPtexMipmapTextureLoader`-style packing (2DArray + layout texture) is worth re-implementing in usdGen's own Storm shader for surface-space *color* maps if a site enables Ptex in OpenUSD — deferred until a Ptex-enabled build is available.

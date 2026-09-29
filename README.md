@@ -1,6 +1,6 @@
 # usdGen — Hair/Fur Grooming for OpenUSD
 
-An XGen-like procedural hair/fur grooming and instancing plugin for
+A procedural hair/fur grooming and instancing plugin for
 OpenUSD 26.08 and Hydra 2.0.
 
 **Status: M1 near-exit (plan v2).** The repository builds; the codeless schema
@@ -26,14 +26,19 @@ SculptLayer + Freeze kernels, C3 freeze, Hydra-sourced graph builder).
   build environment when needed and reports a missing `pxrConfig.cmake`
   before configuring.
 
-      export PATH=/home/burkard/.venv/bin:$PATH
+      export PATH="$VENV/bin:$PATH"
 
 ## Build
 
-    export PATH=/home/burkard/.venv/bin:$PATH
+Set `USD` to an OpenUSD install prefix and, when the tools' Python is in a
+virtualenv, set `VENV` as well.
+
+    export USD=/path/to/OpenUSD
+    export VENV=/path/to/venv
+    export PATH="$VENV/bin:$PATH"
     cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DUSD_INSTALL_DIR=/home/burkard/work/OpenUSD_26_08 \
+        -DUSD_INSTALL_DIR="$USD" \
         -DUSDGEN_WITH_RIGEXEC=OFF
     ninja -C build -j16
 
@@ -105,7 +110,7 @@ every M0 test — no by-name bridge is needed.
 The M0 fixture flattens with the codeless types resolved. `usdcat` is a native
 binary in the OpenUSD prefix, so no Python is involved:
 
-    export USD=/home/burkard/work/OpenUSD_26_08
+    export USD=/path/to/OpenUSD
     export PXR_PLUGINPATH_NAME="$PWD/build/usd/usdGenSchema/resources:$PWD/build/usd/usdGenImaging/resources:$USD/plugin/usd"
     export LD_LIBRARY_PATH="$USD/lib:$PWD/build"
     "$USD/bin/usdcat" --flatten tests/scenes/scene_empty_groom.usda
@@ -180,7 +185,7 @@ the diff before committing.
 
 ## Install
 
-    cmake --install build --prefix /home/burkard/work/usdGen-install
+    cmake --install build --prefix /path/to/usdGen-install
 
 Produces `lib/libusdGen*.so`, `include/usdGen*`, and the plugin resources under
 `lib/usd/usdGenSchema/resources` and `lib/usd/usdGenImaging/resources`.
@@ -217,3 +222,15 @@ scene index over the real `UsdImagingCreateSceneIndices` chain).
 later milestones — T2 (Storm/EGL on the GB10), T3 (Xvfb), and the T4
 workstation protocols (`docs/workstation-protocol.md` §§1–11, written at M0;
 runner built at M7) run on real hardware, never GitHub.
+
+## License
+
+usdGen is [MIT](LICENSE), Copyright (c) 2026 Nick Burkard.
+
+Third-party code keeps its own license. OpenUSD is a build dependency under
+the [Tomorrow Open Source Technology License](https://openusd.org/license).
+SeExpr, Ptex, nanoflann, and zlib are vendored under `thirdparty/` with their
+upstream notices. `usdNoodles/` includes Meta's MIT noodles tree, SIL OFL
+Poppins atlases, and a Baskerville atlas; files in that directory that are
+not in the public noodles tree are project MIT. See [NOTICE](NOTICE) and
+[THIRD_PARTY.md](THIRD_PARTY.md).

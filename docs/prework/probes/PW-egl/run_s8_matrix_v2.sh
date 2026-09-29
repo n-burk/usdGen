@@ -2,8 +2,9 @@
 # PW-2 (S-8) benchmark matrix v2 (perturbed-tangent republish for variant B)
 set -u
 cd "$(dirname "$0")"
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-export PXR_PLUGINPATH_NAME="$PWD:/home/burkard/work/OpenUSD_26_08/plugin/usd"
+: "${USD:?Set USD to the OpenUSD install prefix}"
+export LD_LIBRARY_PATH="$USD/lib"
+export PXR_PLUGINPATH_NAME="$PWD:$USD/plugin/usd"
 LOG=results_s8_v2.txt
 : > "$LOG"
 run() { # label scene deform repub [env...]

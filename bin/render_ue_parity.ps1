@@ -10,11 +10,11 @@ param(
     [int] $Msaa = 0
 )
 
-# Renders the UE-parity comparison set: both cameras of
+# Renders the strand-hair comparison set: both cameras of
 # examples/head-hair-closeup.usda plus examples/styled-fur-plane.usda, into
-# renders/ue-parity/<label>_<scene>_<camera>.png. Run with different -Label
-# values (e.g. "baseline", then "current") to build before/after sets with
-# one command each.
+# renders/ue-parity/<label>_<scene>_<camera>.png (gitignored). Run with
+# different -Label values (e.g. "baseline", then "current") to build
+# before/after sets with one command each.
 #
 #   .\bin\render_ue_parity.ps1 -Label baseline
 
@@ -58,13 +58,3 @@ Render $headHair "head-hair-closeup" "/World/HeadCam" "head" -NoCameraLight
 # comment: usdview/usdrecord's camera headlight is the point), so it keeps
 # the default headlight.
 Render (Join-Path $examples "styled-fur-plane.usda") "styled-fur-plane" "/World/Cam" "cam"
-
-# metahuman-hair-parity-render.usda sublayers metahuman-hair-parity.usda
-# (which in turn sublayers examples/production/metahuman-hair/male_hair_01/hair.usda
-# without modifying it) and adds the backdrop sphere, same reasoning as
-# head-hair-closeup-render.usda. Its Groom/cameras/lights are NOT under
-# /World (see make_metahuman_parity.py), so the camera paths here are at the
-# stage root, not /World/TempleCam.
-$metahuman = Join-Path $examples "metahuman-hair-parity-render.usda"
-Render $metahuman "metahuman" "/TempleCam" "temple" -NoCameraLight
-Render $metahuman "metahuman" "/HeadCam" "head" -NoCameraLight

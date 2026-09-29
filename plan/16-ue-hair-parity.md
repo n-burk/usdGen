@@ -1,24 +1,20 @@
-# 16 — Unreal-parity strand hair shading on stock Storm
+# 16 — Strand hair shading on stock Storm
 
-Target: `renders/ue-parity/target_metahuman.png` (MetaHuman close-up: dense dark
-combed hair, soft deep self-shadow, broad low-contrast sheen, lighter flyaways,
-sub-pixel strands that fade instead of aliasing, skin visible through the
-temple fade, hair shadow on the scalp).
+Target look: dense dark combed hair, soft deep self-shadow, broad low-contrast
+sheen, lighter flyaways, sub-pixel strands that fade instead of aliasing, skin
+visible through the temple fade, hair shadow on the scalp.
 
 Comparison harness: `examples/head-hair-closeup.usda` (generator
-`examples/tools/make_head_hair.py`), `bin/render_ue_parity.ps1 -Label <x>` ->
-`renders/ue-parity/<x>_*.png`. Baselines are `baseline_*.png`.
+`examples/tools/make_head_hair.py`). `bin/render_ue_parity.ps1 -Label <x>`
+writes captures under `renders/ue-parity/`, which is gitignored.
 
 Constraint (unchanged): stock OpenUSD Storm, no renderer plugin, no OpenUSD
 patch. Everything is a glslfx material + primvars published by the engine.
 The C5-frozen inputs of `UsdGenHairPreview*` are NOT touched.
 
-UE research notes: see `docs/research/ue-hair-rendering.md` (copied from the
-research agent's report when it lands).
+## What the host renderer does, and our stock-Storm equivalent
 
-## What UE does, and our stock-Storm equivalent
-
-| UE HairStrands | Here |
+| the host renderer HairStrands | Here |
 |---|---|
 | Karis 2016 Marschner approximation (`HairShading`: R, TT, TRT with `Hair_g` normalized Gaussians, shifts -2a/a/4a with a=0.035, variances r^2, r^2/2, 2r^2, n=1.55 Fresnel, closed-form N terms, absorption `pow(BaseColor, k/cosThetaD)`), inputs BaseColor/Roughness/Specular/Scatter/Backlit | WS1: new glslfx `UsdGenHairStrands`, exact port |
 | Dual scattering (Zinke 2008) driven by hair count from deep-opacity / voxel density; global forward-scatter transmittance + spread, local back-scatter term; replaces the `Scatter` diffuse fake when strands have hair-count data | WS1 shader + WS2 data: directional hair count = our baked optical depth (expected fibre crossings) |
@@ -37,32 +33,32 @@ implementation; `usdGenHairStrands.glslfx` (opaque) and
 `...Translucent.glslfx` (OIT) import it and differ only in `materialTag` and
 the stochastic-coverage selector that follows from it. 5th and 6th entries in
 `shaderDefs.usda`, outside C5 — the three frozen files are untouched and
-`checkC5.py` still passes. Variant A tangent, NEGATED: UE's `N` points toward
+`checkC5.py` still passes. Variant A tangent, NEGATED: the host renderer's `N` points toward
 the ROOT and Storm's is the root-to-tip parameter derivative.
 
-19 inputs, UE's names: `baseColor`, `tipColor`, `colorRamp`, `useMelanin`(0),
+19 inputs, the host renderer's names: `baseColor`, `tipColor`, `colorRamp`, `useMelanin`(0),
 `melanin`(0.5), `redness`(0), `dyeColor`(1,1,1), `roughness`(0.35),
 `specular`(0.5), `scatter`(**0.0**), `backlit`(1.0), `opacity`(1),
 `randomHue`, `randomValue`, `randomRoughness`, `selfShadow`(1.0),
 `hairCoverageScale`(1.0), `minPixelWidth` informational, texture
 `baseColorMap`.
 
-`scatter` defaults to 0, not the 1.0 this plan first specified: it is UE's own
+`scatter` defaults to 0, not the 1.0 this plan first specified: it is the host renderer's own
 default and what `HairSampleToGBufferData` forces on the strands path, and at
-1.0 the Kajiya term — which UE adds on top of dual scattering, un-attenuated,
+1.0 the Kajiya term — which the host renderer adds on top of dual scattering, un-attenuated,
 as `sqrt(BaseColor)` — replaces the authored dark coat with a flat pale mass
 (`renders/ue-parity/ws1_scatter{0,1}_temple.png`).
 
-Implemented: the Karis lobes line for line with UE's constants, in UE's energy
+Implemented: the Karis lobes line for line with the host renderer's constants, in the host renderer's energy
 units (no extra NoL, no artist budget, no tonemap, `light.diffuse.rgb` as
 radiance in the same convention `previewSurface.glslfx` uses); Zinke dual
 scattering from the baked directional hair count, with `a_f`/`a_b` as
-39-coefficient angle-resolved fits of UE's LUT integrand rather than a shipped
+39-coefficient angle-resolved fits of the host renderer's LUT integrand rather than a shipped
 texture; the sky evaluated through the BSDF as a normalised 8-tap fibre-frame
-quadrature; UE's coverage compensation; and the pixel footprint as UE's `Area`
+quadrature; the host renderer's coverage compensation; and the pixel footprint as the host renderer's `Area`
 variance widening.
 
-The one thing that is not a port: UE spends coverage through a per-sample
+The one thing that is not a port: the host renderer spends coverage through a per-sample
 visibility buffer, and neither of Storm's compositing modes can. The opaque
 file therefore drives `gl_SampleMask` itself — a hashed subset whose popcount
 is `alpha * multisampleCount`, stochastically rounded, rotated per strand — and
@@ -83,7 +79,7 @@ per description; (d) more directions than 6 if the SSBO budget allows (pack
 as additional vec3 primvars; limit noted in docs/storm-fur.md) — evaluate
 L1 SH of optical depth (4 coeffs = 1 vec4) vs. 6/14 fixed directions and pick
 by render comparison; (e) publish hair COUNT semantics explicitly so the
-shader's dual scattering constants match UE's.
+shader's dual scattering constants match the host renderer's.
 Tests: extend `tests/testUsdGenFurOcclusion.cpp`.
 
 ### WS3 — default binding, look plumbing, shadows (Opus/Sonnet)
@@ -120,7 +116,7 @@ sheets; `docs/storm-fur.md` carries the measurements and the limits.
 
 ### WS5 — strand anti-aliasing (Opus) — SHIPPED, mostly as negative results
 
-UE hides strand aliasing behind 8x MSAA with per-sample visibility plus TAA/TSR.
+the host renderer hides strand aliasing behind 8x MSAA with per-sample visibility plus TAA/TSR.
 Stock Storm has none of that, and at the old 4x default a sub-pixel strand had
 five coverage levels to spend, so the coat read as speckle and broken dashes.
 
@@ -154,7 +150,7 @@ The two profile/per-sample results have the same cause and it is worth keeping:
 the shipped mask lights *exactly* k of N samples, so it is stratified; both
 alternatives redistribute the same expected coverage with higher variance. A
 strand wider than a pixel also already gets exact edge coverage from the
-rasterizer, so any shader-side profile double-softens it. UE can afford
+rasterizer, so any shader-side profile double-softens it. the host renderer can afford
 per-sample because its visibility buffer resolves coverage analytically rather
 than stochastically.
 

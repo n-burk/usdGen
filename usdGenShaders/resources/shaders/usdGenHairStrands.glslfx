@@ -4,8 +4,8 @@
 // usdGenHairStrands.glslfx   (opaque + alpha-to-coverage; the usdGen tile default)
 //
 // A Storm (HdSt) surface shader for hair/fur on basisCurves prims that
-// reproduces Unreal Engine's strand-hair shading as closely as stock Storm
-// allows. The model, the constants and the parameter names below are UE's; see
+// reproduces a host renderer's strand-hair shading as closely as stock Storm
+// allows. The model, the constants and the parameter names below are the host renderer's; see
 // usdGenHairStrandsBsdf.glslfx (which this file imports and which holds the
 // whole implementation) and docs/research/ue-hair-rendering.md.
 //
@@ -24,7 +24,7 @@
 // materialTag: "defaultMaterialTag", so hair draws in the opaque pass with
 // alpha-to-coverage enabled (HdxTaskController::_SetBlendStateForMaterialTag,
 // pxr/imaging/hdx/taskController.cpp:392-398). That is what turns this file's
-// UE coverage compensation into antialiasing rather than into a constant fade:
+// the host renderer coverage compensation into antialiasing rather than into a constant fade:
 // a sub-pixel strand keeps its widened 1px footprint but writes only the
 // samples its true width earns. Ship UsdGenHairStrandsTranslucent when you
 // want true OIT instead.

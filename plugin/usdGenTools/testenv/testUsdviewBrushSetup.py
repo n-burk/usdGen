@@ -400,7 +400,7 @@ def run(appController):
           "the inner ring is hardness * radius (%.1f of %.1f px)"
           % (rings[3] if rings else -1.0, rings[2] if rings else -1.0))
 
-    # -- F drag-adjust (Blender style) -----------------------------------
+    # -- F drag-adjust (a DCC style) -----------------------------------
     from pxr.Usdviewq.qt import QtCore
     Key = QtCore.Qt.Key
     radiusBefore = state.radiusWorld

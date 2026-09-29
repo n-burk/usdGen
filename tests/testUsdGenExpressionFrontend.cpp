@@ -126,7 +126,7 @@ void CheckLanguage()
 void CheckFunctionTable()
 {
     const auto functions = Frontend::SupportedFunctions();
-    Check(functions.size() > 80, "the function table covers the XGen/SeExpr set");
+    Check(functions.size() > 80, "the function table covers the host-groomer/SeExpr set");
     std::set<std::string> names, categories;
     for (auto const &info : functions) {
         Check(names.insert(info.name).second, "function appears once: " + info.name);
@@ -147,7 +147,7 @@ void CheckFunctionTable()
         Check(categories.count(category) == 1,
               std::string("the table has a ") + category + " category");
     Check(categories.size() == 7, "the table has no category outside the documented seven");
-    // Names a user coming from XGen or SeExpr will try, each with its own
+    // Names a user coming from a host groomer or SeExpr will try, each with its own
     // reason rather than the generic list.
     Refuses("printf(\"%f\", $t)", "printf");
     Refuses("sprintf(\"%f\", $t)", "printf");

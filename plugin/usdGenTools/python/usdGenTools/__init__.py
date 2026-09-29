@@ -21,7 +21,7 @@ def container():
 
     The palette, the viewport controller and the T3 scripts all need the
     one brush state and loop; usdview hands the container to nobody, so it
-    publishes itself here (the usdGenTonicTools.container() arrangement)."""
+    publishes itself here (the usdGenPomadeTools.container() arrangement)."""
     return _CONTAINER
 
 # The factors the menu offers. 2x is the useful one for hair; 4x is a

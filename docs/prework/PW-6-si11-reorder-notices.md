@@ -1,6 +1,6 @@
 # PW-6 / SI-11: Notice Behavior for `reorder nameChildren` (Record Only)
 
-Host: headless aarch64, OpenUSD 26.08 (`/home/burkard/work/OpenUSD_26_08`), usdGen build-tree
+Host: headless aarch64, OpenUSD 26.08 (`$USD`), usdGen build-tree
 plugins. All artifacts: `docs/prework/probes/PW-6/`.
 
 ## 1. What Was Asked
@@ -58,9 +58,9 @@ double-free seen in `probeReorder` (probe artifact, see §7).
 **Commands** (exact):
 
 ```bash
-cd /home/burkard/work/usdGen/docs/prework/probes/PW-6
-export LD_LIBRARY_PATH=/home/burkard/work/OpenUSD_26_08/lib
-export PXR_PLUGINPATH_NAME="/home/burkard/work/usdGen/build/usd/usdGenImaging/resources:/home/burkard/work/usdGen/build/usd/usdGenSchema/resources:/home/burkard/work/OpenUSD_26_08/plugin/usd:/home/burkard/work/OpenUSD_26_08/lib/usd"
+cd <usdgen-src>/docs/prework/probes/PW-6
+export LD_LIBRARY_PATH=$USD/lib
+export PXR_PLUGINPATH_NAME="<usdgen-src>/build/usd/usdGenImaging/resources:<usdgen-src>/build/usd/usdGenSchema/resources:$USD/plugin/usd:$USD/lib/usd"
 
 ./probeReorder ./usdGenReorder.usda      # full notice capture -> run2.txt (reproduced as rerun.txt)
 ./probeReorder ./vanillaReorder.usda     # vanilla control    -> vanilla_run.txt

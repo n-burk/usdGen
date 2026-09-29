@@ -7,7 +7,7 @@
     Built by overlaying the stock usdRig example, which is not modified.
     """
     subLayers = [
-        @/home/burkard/work/usdRig/examples/06_LatticeBulge.usda@
+        @<usdrig-src>/examples/06_LatticeBulge.usda@
     ]
     defaultPrim = "LatticeAsset"
     startTimeCode = 1001

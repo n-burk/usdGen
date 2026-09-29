@@ -47,9 +47,9 @@ Two facts about the 26.08 toolchain shape every command here:
 
 ```sh
 # --- machine constants (export once per session) ---------------------------
-export USD=/home/burkard/work/OpenUSD_26_08            # OpenUSD 26.08 install prefix
-export PY=/home/burkard/.venv/bin/python3              # python 3.12 with the USD python stack
-export GEN=/home/burkard/work/usdGen                   # usdGen repo (source + build tree)
+export USD=$USD            # OpenUSD 26.08 install prefix
+export PY=$VENV/bin/python3              # python 3.12 with the USD python stack
+export GEN=<usdgen-src>                   # usdGen repo (source + build tree)
 
 # --- sanity (run once; every section assumes it passes) ---------------------
 test -x "$USD/bin/usdcat"
@@ -283,7 +283,7 @@ Vulkan and Metal legs run through the stock **GL** render engine:
 `usdrecord -r GL` on a `--vulkan` prefix renders on Vulkan, and `usdrecord
 -r GL` on a macOS build renders on Metal.
 
-**Dev-host caveat (this aarch64 box):** `/home/burkard/work/OpenUSD_26_08`
+**Dev-host caveat (this aarch64 box):** `$USD`
 was built without `--vulkan` and is not a macOS build, so its prefix ships
 `libusd_hgiGL.so` and `libusd_hgiInterop.so` but **no** `libusd_hgiVulkan.so`
 / `libusd_hgiMetal.so` — `HGI_ENABLE_VULKAN=1` would hit the

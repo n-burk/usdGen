@@ -57,6 +57,7 @@
 #include "pxr/usdImaging/usdImaging/sceneIndices.h"
 #include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -73,10 +74,14 @@ namespace {
 void
 RegisterUsdGenPlugins()
 {
-    static const std::vector<std::string> kPaths = {
-        "/home/burkard/work/usdGen/build/usd/usdGenSchema/resources",
-        "/home/burkard/work/usdGen/build/usd/usdGenImaging/resources"};
-    PlugRegistry::GetInstance().RegisterPlugins(kPaths);
+    const char* gen = std::getenv("GEN");
+    if (!gen || !gen[0]) {
+        gen = std::getenv("USDGEN_SRC");
+    }
+    const std::string root = (gen && gen[0]) ? gen : ".";
+    PlugRegistry::GetInstance().RegisterPlugins(std::vector<std::string>{
+        root + "/build/usd/usdGenSchema/resources",
+        root + "/build/usd/usdGenImaging/resources"});
 }
 
 const SdfPath kOps = SdfPath("/Groom/Description/Ops");

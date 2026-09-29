@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-04 · **Host:** Linux 6.17 aarch64, 20 CPUs, GCC 13.3.0, CMake 3.28.3
 **usdRig HEAD:** `c92c040` (`git status --porcelain` empty before *and* after this work — the tree was never modified)
-**OpenUSD install:** `/home/burkard/work/OpenUSD_26_08` (source mirror at `/home/burkard/work/OpenUSD`, tag v26.08)
+**OpenUSD install:** `$USD` (source mirror at `<openusd-src>`, tag v26.08)
 
 Bottom line: **usdRig builds clean on Linux/aarch64 in 21.5 s and 26 of 27 CTest suites pass.**
 Both of the initial failures were diagnosed to root cause; one is a toolchain-flag issue with a
@@ -16,14 +16,14 @@ contrary is wrong — which changes what later probes can measure.
 
 | ENVIRONMENT.md claim | Reality (command + output) |
 |---|---|
-| line 16-17: "`pybind11` and `numpy` are NOT installed" | **Both are installed.** `python3 -m pybind11 --cmakedir` → `/home/burkard/.venv/lib/python3.12/site-packages/pybind11/share/cmake/pybind11`; `pybind11.__version__` = `3.1.0`; `numpy.__version__` = `2.5.2`. Python dev headers present: `/usr/include/python3.12/Python.h`. **`RIGEXEC_BUILD_PYTHON` therefore auto-enables and the bindings build.** |
-| line 29: "ninja available" | **`ninja` was NOT on the system.** `which ninja ninja-build` → nothing; `find /usr /opt /home/burkard -maxdepth 8 -name 'ninja*'` → only `/usr/share/vim/vim91/syntax/ninja.vim`. |
+| line 16-17: "`pybind11` and `numpy` are NOT installed" | **Both are installed.** `python3 -m pybind11 --cmakedir` → `$VENV/lib/python3.12/site-packages/pybind11/share/cmake/pybind11`; `pybind11.__version__` = `3.1.0`; `numpy.__version__` = `2.5.2`. Python dev headers present: `/usr/include/python3.12/Python.h`. **`RIGEXEC_BUILD_PYTHON` therefore auto-enables and the bindings build.** |
+| line 29: "ninja available" | **`ninja` was NOT on the system.** `which ninja ninja-build` → nothing; `find /usr /opt $HOME -maxdepth 8 -name 'ninja*'` → only `/usr/share/vim/vim91/syntax/ninja.vim`. |
 | lines 37-42: "What CANNOT be run here … usdview, usdrecord --renderer GL, Storm shader compilation" | **False as stated.** See §6 — a user-space Xvfb + Mesa llvmpipe gives a working GLX/GL 4.5-core context; `usdrecord --renderer GL` and `testusdview` both run. |
 
 The network is reachable (`pip`/`apt-get download` both work), which is what made the fixes possible.
 
 **Side effects on the machine** (outside the usdRig/OpenUSD trees, disclosed for the record):
-`pip install ninja` into `/home/burkard/.venv` (ninja 1.13.2 → `/home/burkard/.venv/bin/ninja`).
+`pip install ninja` into `$VENV` (ninja 1.13.2 → `$VENV/bin/ninja`).
 Nothing else was installed system-wide; Xvfb/mesa-utils were `dpkg-deb -x`'d into the scratchpad only.
 
 ---
@@ -31,15 +31,15 @@ Nothing else was installed system-wide; Xvfb/mesa-utils were `dpkg-deb -x`'d int
 ## 2. Exact commands and timings
 
 ```sh
-export PATH=/home/burkard/.venv/bin:$PATH          # for ninja
-SC=/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad
+export PATH=$VENV/bin:$PATH          # for ninja
+SC=<session-scratch>
 
-cmake -S /home/burkard/work/usdRig -B $SC/usdRigBuild -G Ninja \
+cmake -S <usdrig-src> -B $SC/usdRigBuild -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DUSD_INSTALL_DIR=/home/burkard/work/OpenUSD_26_08 \
-  -DCMAKE_PREFIX_PATH=/home/burkard/work/OpenUSD_26_08 \
-  -DPython3_EXECUTABLE=/home/burkard/.venv/bin/python3 \
-  -DCMAKE_MAKE_PROGRAM=/home/burkard/.venv/bin/ninja \
+  -DUSD_INSTALL_DIR=$USD \
+  -DCMAKE_PREFIX_PATH=$USD \
+  -DPython3_EXECUTABLE=$VENV/bin/python3 \
+  -DCMAKE_MAKE_PROGRAM=$VENV/bin/ninja \
   -DCMAKE_CXX_FLAGS="-ffp-contract=off"            # <-- REQUIRED on GCC, see §4
 
 ninja -C $SC/usdRigBuild -j16
@@ -62,7 +62,7 @@ is present, the probe at `CMakeLists.txt:262-277` succeeds, and the bindings bui
 | `rigExecPose ArmShotAnim.usda --frames 1001,1024,1048 --joints --targets` | **0.03 s**, exit 0 | 9 mover applications, digest `4626813684588943253` |
 | `probeImagingPipeline examples/` | **0.07 s**, `PASS` | 36 assertions, real `UsdImagingCreateSceneIndices` chain |
 
-Build tree 31 MB. Everything lives under the scratchpad; nothing was written into `/home/burkard/work`.
+Build tree 31 MB. Everything lives under the scratchpad; nothing was written into `$HOME/work`.
 
 ---
 
@@ -101,8 +101,8 @@ Two non-CTest probes were run by hand (they need `PXR_PLUGINPATH_NAME`, which is
 
 | Probe | Command | Result |
 |---|---|---|
-| `probeImagingPipeline` | `$B/probeImagingPipeline /home/burkard/work/usdRig/examples` | `probeImagingPipeline: PASS` (exit 0) |
-| `probeCodingError` | `$B/probeCodingError /home/burkard/work/usdRig/examples` | 5 phases all `CLEAN`, exit 0. **It requires `argv[1]`** (`tests/probeCodingError.cpp:52` reads it unguarded) and aborts with `basic_string: construction from null` if omitted. |
+| `probeImagingPipeline` | `$B/probeImagingPipeline <usdrig-src>/examples` | `probeImagingPipeline: PASS` (exit 0) |
+| `probeCodingError` | `$B/probeCodingError <usdrig-src>/examples` | 5 phases all `CLEAN`, exit 0. **It requires `argv[1]`** (`tests/probeCodingError.cpp:52` reads it unguarded) and aborts with `basic_string: construction from null` if omitted. |
 
 **There are no `testusdview` CTest entries.** The `testusdview` suites are the nine
 `bin/run_testusdview*.sh` shell scripts, outside CTest entirely. They *did* run here — see §6.
@@ -118,7 +118,7 @@ TestProfileMoverOnCurvedSurface
   tube cut: 192 faces from 192, 528 samples, 0 cracks, 36 traced, 3 failed, 0 lost,
             residual 0.07926, 164 unknowns
   warning: 3 curvenet segment(s) could not be traced across the surface and were not cut
-FAIL /home/burkard/work/usdRig/tests/testRigExecCurvenet.cpp:1056: 3 traces failed on the tube
+FAIL <usdrig-src>/tests/testRigExecCurvenet.cpp:1056: 3 traces failed on the tube
 testRigExecCurvenet: 1 failure(s)
 ```
 
@@ -150,18 +150,18 @@ tolerances were tuned on AppleClang and are not portable as authored.
 ```
 pxr.Tf.ErrorException: Error in
 'pxrInternal_v0_26_8__pxrReserved__::Usd_PrimFlagsPredicate::operator()' at line 24 in file
-/home/burkard/work/OpenUSD/pxr/usd/usd/primFlags.cpp : 'Applying predicate to invalid prim.'
+<openusd-src>/pxr/usd/usd/primFlags.cpp : 'Applying predicate to invalid prim.'
 AssertionError: RemovePrim posted an error with a compiled evaluator attached
-  (/home/burkard/work/usdRig/tests/python/test_rigexec_stage_edits.py:54)
+  (<usdrig-src>/tests/python/test_rigexec_stage_edits.py:54)
 ```
 
 The chain, verified in the OpenUSD source:
 
 | File:line | Code |
 |---|---|
-| `/home/burkard/work/OpenUSD/pxr/exec/esfUsd/stageData.cpp:350` | `const UsdPrim resyncedPrim = _stage->GetPrimAtPath(resyncedPath);` |
+| `<openusd-src>/pxr/exec/esfUsd/stageData.cpp:350` | `const UsdPrim resyncedPrim = _stage->GetPrimAtPath(resyncedPath);` |
 | `…/stageData.cpp:360` | `if (!UsdPrimDefaultPredicate(resyncedPrim)) {` — **no validity check first** |
-| `/home/burkard/work/OpenUSD/pxr/usd/usd/primFlags.cpp:21-25` | `if (!prim) { TF_CODING_ERROR("Applying predicate to invalid prim."); return false; }` |
+| `<openusd-src>/pxr/usd/usd/primFlags.cpp:21-25` | `if (!prim) { TF_CODING_ERROR("Applying predicate to invalid prim."); return false; }` |
 | `…/stageData.cpp:686, 691` | `_UpdateForResync(path, …)` called for every resynced path from the `UsdNotice::ObjectsChanged` listener |
 
 I isolated it to OpenUSD with **no usdRig code in the process at all**:
@@ -254,7 +254,7 @@ Two host-side prerequisites that a fresh Linux user will hit:
 1. `RIGEXEC_IMAGING_DLL` must be set for an **out-of-tree build**. `rigExecUsdview.ImagingLibraryPath()`
    (`plugin/rigExecUsdview/rigExecUsdview.py:52-59`) only searches `<repo>/librigExecImaging.so` and
    `<repo>/build/librigExecImaging.so`; with the build elsewhere it returns the first candidate and
-   `ctypes.CDLL` raises `OSError: /home/burkard/work/usdRig/librigExecImaging.so: cannot open shared
+   `ctypes.CDLL` raises `OSError: <usdrig-src>/librigExecImaging.so: cannot open shared
    object file`. `_env.sh:34-38` documents the override but does not set it.
 2. `tests/testUsdviewRigExec.py:65-71` and `:114-120` build the plugin container with
    `RigExecUsdviewContainer.__new__` and set only 5 of the 12 attributes that
@@ -273,7 +273,7 @@ drift out of sync with `registerPlugins`.
 
 ## 7. Where the artifacts are, and the env snippet
 
-Build dir: `/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild`
+Build dir: `<session-scratch>`
 
 | Artifact | Absolute path |
 |---|---|
@@ -300,12 +300,12 @@ carries `"LibraryPath": "../../librigExecImaging.so"` and registers
 ### Env snippet (`scratchpad/probes/B-build/rigexec_env.sh`, source it)
 
 ```sh
-export USD=/home/burkard/work/OpenUSD_26_08
-export RIG=/home/burkard/work/usdRig
-export RIGBUILD=/tmp/claude-1000/-home-burkard-work-usdRig/887eb74a-2f4d-45ff-88d7-6c9ab67fd9a7/scratchpad/usdRigBuild
+export USD=$USD
+export RIG=<usdrig-src>
+export RIGBUILD=<session-scratch>
 export PY_SITE="$USD/lib/python3.12/site-packages"     # NOT lib/python
 
-export PATH="$RIGBUILD:$USD/bin:/home/burkard/.venv/bin:$PATH"
+export PATH="$RIGBUILD:$USD/bin:$VENV/bin:$PATH"
 export LD_LIBRARY_PATH="$USD/lib:$RIGBUILD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$RIGBUILD/python:$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$PY_SITE${PYTHONPATH:+:$PYTHONPATH}"
 export PXR_PLUGINPATH_NAME="$RIGBUILD/usd/rigExecSchema/resources:$RIGBUILD/usd/rigExecImaging/resources:$RIG/plugin/rigExecUsdview${PXR_PLUGINPATH_NAME:+:$PXR_PLUGINPATH_NAME}"
@@ -316,7 +316,7 @@ export DISPLAY=:77                                      # the Xvfb from §6
 ```
 
 `LD_LIBRARY_PATH` is belt-and-braces on Linux: `readelf -d librigExecImaging.so` already shows
-`RUNPATH: /home/burkard/work/OpenUSD_26_08/lib:<build dir>` (from `CMAKE_INSTALL_RPATH_USE_LINK_PATH ON`
+`RUNPATH: $USD/lib:<build dir>` (from `CMAKE_INSTALL_RPATH_USE_LINK_PATH ON`
 plus `$ORIGIN`, `CMakeLists.txt:47-54`), so binaries in the build tree resolve without it. It is
 still needed for `ctypes.CDLL` from Python and for anything launched with a scrubbed environment.
 Note `_env.sh:25` exports **`DYLD_LIBRARY_PATH`** only — the checked-in helper is macOS-only on this
@@ -327,7 +327,7 @@ Verified working from this env, with **no direct link to rigExecImaging**:
 ```
 rigExecSchema    found=True  …/usdRigBuild/librigExecImaging.so   loaded=False
 rigExecImaging   found=True  …/usdRigBuild/librigExecImaging.so   loaded=False
-rigExecUsdview   found=True  /home/burkard/work/usdRig/plugin/rigExecUsdview
+rigExecUsdview   found=True  <usdrig-src>/plugin/rigExecUsdview
 RigExecControl concrete: True     RigExecCurvenet concrete: True
 UsdImagingSceneIndexPlugin subtypes: ['RigExecUsdImagingSceneIndexPlugin',
                                       'UsdSkelImagingResolvingSceneIndexPlugin']
@@ -352,7 +352,7 @@ consumerProbe: PASS (linked rigExec + rigExecImaging out of tree)
 does — the configure aborts:
 
 ```
-CMake Error at /home/burkard/work/OpenUSD_26_08/pxrConfig.cmake:58 (add_library):
+CMake Error at $USD/pxrConfig.cmake:58 (add_library):
   add_library cannot create imported target "TBB::tbb" because another target
   with the same name already exists.
 Call Stack:
@@ -389,8 +389,8 @@ pxr dependency in `if (NOT TARGET usd)`.
 - **The Python bindings build and pass** — pybind11 3.1.0 and numpy 2.5.2 *are* installed
   (`python3 -m pybind11 --cmakedir` succeeds), contradicting ENVIRONMENT.md:16-17. No
   `RIGEXEC_BUILD_PYTHON=OFF` was needed.
-- **`ninja` was not installed**; `pip install ninja` (1.13.2) into `/home/burkard/.venv` was the fix,
-  passed to CMake as `-DCMAKE_MAKE_PROGRAM=/home/burkard/.venv/bin/ninja`.
+- **`ninja` was not installed**; `pip install ninja` (1.13.2) into `$VENV` was the fix,
+  passed to CMake as `-DCMAKE_MAKE_PROGRAM=$VENV/bin/ninja`.
 - **26/27 CTest suites pass.** The `testusdview` suites are shell scripts, not CTest tests.
 - **`-ffp-contract=off` is required on GCC.** Without it `testRigExecCurvenet` fails at
   `tests/testRigExecCurvenet.cpp:1056` with `3 traces failed on the tube`; with it, identical source
