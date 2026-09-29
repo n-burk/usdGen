@@ -1084,7 +1084,7 @@ no matrix inverse, no tree.
 (density = `1/clumpSize²`) or by an authored curve set or a clump map. Capture assigns
 `clumpId[level]` per hair by nearest-centre kd-tree query and a `stray` coin flip; evaluate lerps
 each CV toward the clump curve's CV in the root frame. Multi-level clumping (`levels > 1`, a host groomer and
-a DCC both do this, A7 §9.1) makes level L's centres a *derived* reference set: when
+A DCC both do this, A7 §9.1) makes level L's centres a *derived* reference set: when
 `goalFeedback = 1` the level-L clump curves come from level-(L−1)'s output, which means the
 reference lane has its own small topological order. Level barriers are `tbb::parallel_for` fences,
 not per-chunk dependencies.

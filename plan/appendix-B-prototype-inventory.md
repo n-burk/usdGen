@@ -772,7 +772,7 @@ both are safe from TBB workers.
 | File | One line |
 |---|---|
 | `se_min.cpp` | the minimum viable embedding: an `Expression` subclass, an `ExprVarRef`, parse-error reporting, construct/eval/destroy |
-| `seexpr_bench.cpp` | the a host groomer-shaped harness: `$u $v $id $P` custom vars, a custom `map()` `ExprFuncSimple`, 8-thread evaluation with one `VarBlock` per worker |
+| `seexpr_bench.cpp` | the host groomer-shaped harness: `$u $v $id $P` custom vars, a custom `map()` `ExprFuncSimple`, 8-thread evaluation with one `VarBlock` per worker |
 | `ptex_test.cpp` | writes a quad `.ptx` (per-face resolutions, adjacency, mipmaps) and a triangle `.ptx`, reads back through `PtexCache`, filters across the shared edge, times 8-thread lookups |
 
 **9.3 Build and run.** No CMake here; both libraries are built first (verified commands,

@@ -619,7 +619,7 @@ transform (S4, §4.6), so the choice is invariant under the surface's world matr
 recorded per curve at capture so it cannot flip between frames. The hair then follows the normal and
 never the parameterisation, and both poses use the same rule, so there is no pop at `blend = 0`.
 
-`rbf` (a displacement field from ≤100 surface samples, the a host renderer binding shape) and `pointDeform`
+`rbf` (a displacement field from ≤100 surface samples, the host renderer binding shape) and `pointDeform`
 (per-CV weights over surface points, a DCC's capture-and-deform) are **v2** (A7 §9.1 G7). They
 exist in the token now so that a v2 upgrade is a value edit, not a prim swap.
 

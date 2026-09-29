@@ -83,7 +83,7 @@ MaskPreset = collections.namedtuple(
     "MaskPreset",
     ("id", "label", "mapName", "primvar", "defaultValue", "channels"))
 
-# Scalar grooming masks in the a host groomer igroom attribute sense: one preset is
+# Scalar grooming masks in the host groomer igroom attribute sense: one preset is
 # one PaintMap plus the primvar it bakes, readable in expressions through
 # ptex("<input>") once the expression's input:<name> targets the map. v1
 # presets are all single-channel; the default is the unpainted value,

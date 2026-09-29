@@ -10,7 +10,7 @@
 // callers, so HdxShadowTask is dropped from the task list outright. Hair
 // therefore cannot shadow the scalp through the renderer, and the gaps between
 // clumps show fully lit skin -- the single largest remaining difference from
-// the a host renderer reference, where the scalp under hair is dark.
+// the host renderer reference, where the scalp under hair is dark.
 //
 // So the engine publishes the shadow as geometry. UsdGenGroomSceneIndex adds
 // one synthetic Mesh, <description>/__usdGenRender/scalpShadow: the haired part

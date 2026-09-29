@@ -16,7 +16,7 @@ This collector composes geometry and preview materials/lights/camera. It does no
 
 Validation: every animated point sample and guide width sample was compared against its transformed Alembic source; rest positions, guide IDs and topology correspondence were checked; the collector was reopened successfully. Interactive rendering and RBF deformation were not tested. See conversion_report.json for counts and file sizes.
 
-Rebuild script: <scratch>/convert_cabybara.py (a DCC 22 hython). It refuses existing output files. Source Alembics are unchanged.
+Rebuild script: <scratch>/convert_cabybara.py (the host application hython). It refuses existing output files. Source Alembics are unchanged.
 
 ## RBF hookup
 

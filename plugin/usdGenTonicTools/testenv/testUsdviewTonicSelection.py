@@ -623,7 +623,7 @@ def checkNavigation(appController, context):
         cvPixel, kindKey, kind, positionOf = frameTarget()
         spot = (cvPixel[0] + 120.0, cvPixel[1] + 120.0)
 
-        # 1. a DCC (the default): a plain MMB/RMB click and drag is Tonic's
+        # 1. A DCC (the default): a plain MMB/RMB click and drag is Tonic's
         # and inert -- no prim pick, no context menu, no camera move.
         check(styleWas == "maya", "FB-03: Maya navigation is the default")
         if state.activeMode != "sculpt":
@@ -644,7 +644,7 @@ def checkNavigation(appController, context):
         check(tonicCamera.resolve(view).viewProj == cameraBefore,
               "FB-03: a Maya-style plain MMB drag leaves the camera alone")
 
-        # 2. a DCC: plain MMB orbits usdview's free camera.
+        # 2. A DCC: plain MMB orbits usdview's free camera.
         state.navigationStyle = "blender"
         sendMouse(view, PRESS, spot, MIDDLE, MIDDLE)
         QtWidgets.QApplication.processEvents()

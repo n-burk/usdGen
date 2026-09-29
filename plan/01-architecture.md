@@ -179,7 +179,7 @@ error, not a tuning problem: Storm has already spent the rest of the frame.
 
 usdGen names the artist's model once and never re-names it downstream (`design/proposal-artist.md` §2,
 ADR §2.1-2.2). An a host groomer artist thinks *description -> generator -> modifiers -> guides -> maps -> a look*;
-a DCC artist thinks *a chain of SOPs with masks*. Both land on the same five nouns, and every
+A DCC artist thinks *a chain of SOPs with masks*. Both land on the same five nouns, and every
 concrete usdGen prim type in ADR §2.1's hierarchy is an instance of one of them.
 
 | Artist noun | usdGen prim | Hydra consequence |

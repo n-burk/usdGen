@@ -87,7 +87,7 @@ scatter from Poisson to at-guides is then one **attribute edit** (structural, bu
 not a prim delete plus create — which
 would be a resync, a rewire of `usdGen:input`, a lost mask block and a walk into the
 `RemovePrim`-under-OpenExec defect (`pxr/exec/esfUsd/stageData.cpp:361`, S41, MEASURED
-`research/G-freeze-bake-undo-and-frozen-reentry.md` §1.4). a host groomer ships **one** Generator whose
+`research/G-freeze-bake-undo-and-frozen-reentry.md` §1.4). A host groomer ships **one** Generator whose
 `Generate Primitives` attribute selects "Randomly across the surface" / "In uniform rows and
 columns" / "At specified locations" / "At guide locations", for the same reason
 (`research/A7-prior-art-grooming.md` §1.1). A7 §9.1's four separate `Scatter*` operators are the
@@ -303,7 +303,7 @@ surface frame; `UsdGenCollide` and `UsdGenWind` are v3 and need deformed-space s
 **`UsdGenFreeze`.** Caps the chain at a snapshot: `usdGen:frozen:mode = "frozen"` reads the frozen
 `BasisCurves` and does not evaluate upstream; `"live"` passes the input through and keeps the
 snapshot as a stale artefact. Upstream operators stay authored and stay in the stack, greyed —
-a host groomer's "Groom Bake deactivates all modifiers below it", reversibly, by one token
+A host groomer's "Groom Bake deactivates all modifiers below it", reversibly, by one token
 (`research/A7-prior-art-grooming.md` §9.3).
 
 **`UsdGenSculptLayer`.** Per-CV deltas in the root frame keyed by stable `curveId`, at a layer
@@ -350,7 +350,7 @@ kernels are `04-operators.md`.
 | `UsdGenCollide` | v3 | Push or rotate strands out of colliders and the skin. |
 | `UsdGenWind` | v3 | Time-dependent force field with gust and shear terms. |
 | `UsdGenImageMap` | v1 | Sample a UV-mapped image through the surface's `st`. |
-| `UsdGenExprMap` | v1 | Evaluate a SeExpr expression over the a host groomer variable set. |
+| `UsdGenExprMap` | v1 | Evaluate a SeExpr expression over the host groomer variable set. |
 | `UsdGenPaintMap` | v1 | Read a primvar the paint brush writes on the surface during the session. |
 | `UsdGenNoiseMap` | v1 | Procedural fBm/noise field, using SeExpr's noise as the single implementation (S38). |
 | `UsdGenCombineMap` | v1 | Combine several maps (multiply, add, max, …) — usdRig's weight-object shape. |

@@ -29,7 +29,7 @@ struct UsdGenFurOcclusionParams
     /// resolution of a head.
     std::vector<UsdGenFurOccluder> occluders;
 
-    /// Target voxel edge in world units when `resolution` is 0. a host renderer uses
+    /// Target voxel edge in world units when `resolution` is 0. A host renderer uses
     /// 0.3 cm (`Voxelization.Virtual.VoxelWorldSize`) and this scene
     /// convention is centimetres. The bake never chooses a voxel coarser than
     /// the historical 48-cube fitted to the longest axis, and never a grid

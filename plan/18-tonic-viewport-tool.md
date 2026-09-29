@@ -31,7 +31,7 @@ only, and every later phase's usdview exit was met at the ABI, not in the viewpo
 
 One dockable **Tonic workspace**, one **viewport controller**, six modes on a shelf with number keys,
 everything the artist looks at drawn by Hydra through the Tonic scene index, and three menu items.
-a DCC/Tonic conventions: left-click acts in the current mode, `Alt`/`Meta` drags always belong to the
+A DCC/Tonic conventions: left-click acts in the current mode, `Alt`/`Meta` drags always belong to the
 camera, `Escape` cancels the live gesture, `Ctrl+Z`/`Ctrl+Y` undo/redo the model, number keys switch
 modes, letters switch sub-modes inside a mode, `[`/`]` change the brush radius.
 

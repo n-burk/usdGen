@@ -510,7 +510,7 @@ hero-bake control, not something to leave on.
 
 The Tube gizmo is the RigExec manipulator (`../usdRig/usdRig`
 `gizmoScreen.py`, vendored as `tonicGizmoScreen.py`), so it behaves the way
-a DCC and a DCC hands expect:
+A DCC and a DCC hands expect:
 
 * **Hit priority.** A handle under the cursor wins the press — centre, then
   planes, then axes, then rings — even when a CV dot sits inside its

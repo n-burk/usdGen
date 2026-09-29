@@ -581,7 +581,7 @@ class UsdGenWidth "UsdGenWidth" (
     )
 }
 
-# UsdGenDirection — XGen Tilt.
+# UsdGenDirection — host-groomer Tilt.
 class UsdGenDirection "UsdGenDirection" (
     inherits = </UsdGenStyler>
     customData = {

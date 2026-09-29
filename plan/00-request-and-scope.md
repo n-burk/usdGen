@@ -92,7 +92,7 @@ decides the requirement is met (gate families in §5.4).
 | R4b (instancing, from the request framing; no brief R-number) | `UsdGenInstance` emits a real Hydra `instancer` with hand-authored `instancedBy` (exactly one path) and prototypes as namespace children (S33); grooms on natively instanced scalps resolve per propagated prototype (S34); a click on an instance resolves through `primOrigin`. | `06-imaging.md`, `04-operators.md` | T-INST-1, T-INST-2 |
 | R5 | usdGen reads `points` after every upstream deformer, including UsdSkel ext-computation points, through its private `HdSiExtComputationPrimvarPruningSceneIndex` wrapper (S3), with no change to usdRig. | `06-imaging.md` | SI-5 and `testUsdGenSkelInterop` (`11-roadmap.md` §2.3, M2) |
 | R6 | The shipped `usdGenHairPreview.glslfx` renders from the same `UsdShade` inputs that the MaterialX and `UsdPreviewSurface` terminals carry (S35, S36), with the tangent strategy decided by measurement. | `07-look-maps-expressions.md` | S-8, L-1, L-2 |
-| R7 | `UsdGenImageMap`/`UsdGenPtexMap`/`UsdGenExprMap`/`UsdGenPaintMap` sample on the CPU at capture and bake to per-curve/per-CV primvars (S37); SeExpr2 carries the a host groomer variable and function set (S38). | `07-look-maps-expressions.md` | L-3, L-4, L-5; T-EXPR-1, T-PTEX-1; E-8 re-run at M4 + the M4 exit criteria (`11-roadmap.md` §2.5: golden per-curve values for a density map, a length expression and a Ptex mask; paint round-trip primvar → EXR → `UsdGenImageMap` and primvar → `.ptx` → `UsdGenPtexMap` at ≤ 1e-4; `ReloadMaps` changes the groom and nothing else does) |
+| R7 | `UsdGenImageMap`/`UsdGenPtexMap`/`UsdGenExprMap`/`UsdGenPaintMap` sample on the CPU at capture and bake to per-curve/per-CV primvars (S37); SeExpr2 carries the host groomer variable and function set (S38). | `07-look-maps-expressions.md` | L-3, L-4, L-5; T-EXPR-1, T-PTEX-1; E-8 re-run at M4 + the M4 exit criteria (`11-roadmap.md` §2.5: golden per-curve values for a density map, a length expression and a Ptex mask; paint round-trip primvar → EXR → `UsdGenImageMap` and primvar → `.ptx` → `UsdGenPtexMap` at ≤ 1e-4; `ReloadMaps` changes the groom and nothing else does) |
 | R8 | A parameter edit re-runs only the dirty sub-graph on the dirty chunks and dirties only the leaves that changed, with exactly one cook per edit. | `03-execution-engine.md`, `09-performance-and-benchmarks.md` | E-2, E-3, SI-2, SI-3 |
 | R9 | A freeze is one token edit, a brush drag costs no stage traffic per move, and release writes once inside an undo bracket. | `08-tools.md` | T-1, T-4 |
 
@@ -136,7 +136,7 @@ bake must round-trip (`design/proposal-artist.md` §2, with the ADR's type names
 
 ### 1.2 Parity summary
 
-The catalogue with parameter lists and the a host groomer/a DCC/a host renderer column lives in **`04-operators.md`**;
+The catalogue with parameter lists and the host groomer/a DCC/a host renderer column lives in **`04-operators.md`**;
 `research/A7-prior-art-grooming.md` §9 is its source of truth. The summary an outside reader needs:
 
 | Family | What usdGen takes |
@@ -149,16 +149,16 @@ The catalogue with parameter lists and the a host groomer/a DCC/a host renderer 
 
 "a host renderer-curve-modifier-like" means the *modifier* semantics, not a host renderer's runtime: a chain of
 per-curve / per-CV operations with an envelope (`float usdGen:blend = 1`) and stable ids, on the CPU.
-a host renderer has no styling modifier stack of its own (`research/A7-prior-art-grooming.md` §6 feature
+A host renderer has no styling modifier stack of its own (`research/A7-prior-art-grooming.md` §6 feature
 matrix, a host renderer column: clump, clump noise/copy/cut, noise/frizz, curl, bend/lift/direction and
 smooth/straighten are all ○; §7, masks: "none per operator"), so the stack shape comes from a host groomer and
-a DCC and only the attribute vocabulary comes from a host renderer.
+A DCC and only the attribute vocabulary comes from a host renderer.
 
 ### 1.3 What is deliberately not copied
 
-a host groomer's Groomable Splines, which "do not follow deforming or animated meshes"
+A host groomer's Groomable Splines, which "do not follow deforming or animated meshes"
 (`research/A7-prior-art-grooming.md` §1.1): the equivalent is `UsdGenFreeze` plus
-`UsdGenSculptLayer`, which do. a host groomer's `.xpd`/`.xuv` sidecars: freeze tiers are `.usdc` session layer,
+`UsdGenSculptLayer`, which do. A host groomer's `.xpd`/`.xuv` sidecars: freeze tiers are `.usdc` session layer,
 sublayer or payload, never `.usda` (S42).
 
 ---
@@ -312,7 +312,7 @@ implementation, `UsdGenPrimAdapterBase`, behind five registered one-line subclas
 
 ### 3.7 Non-goals
 
-No DCC bridge (a DCC, a DCC, a DCC) in v1–v3; the C ABI and the pxr_boost module are the
+No DCC bridge in v1–v3; the C ABI and the pxr_boost module are the
 integration surface if one is ever written. No simulation solver — `UsdGenCurveSource` consumes sim
 caches, it does not produce them. No GPU evaluation in v1/v2. No third-party operator ABI before v3
 (`UsdGenOpRegistry` is internal, ADR §3). No authored output from the evaluator, so no `.usda` bakes

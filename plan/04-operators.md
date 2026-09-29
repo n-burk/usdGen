@@ -221,7 +221,7 @@ Distinct salts are what keep two different operators drawing different numbers f
 decorrelate two prims of the *same* type: two `UsdGenClump` prims at the same level, with the same
 authored `usdGen:seed` and the same input id set, draw identical numbers, because nothing in
 `UsdGenDraw01(seed, curveId, kSaltClump + L)` distinguishes them. That is deliberate and matches
-a host groomer's `Generator Seed` and a DCC's per-node seeds: **the artist varies `usdGen:seed`**, and the
+A host groomer's `Generator Seed` and a DCC's per-node seeds: **the artist varies `usdGen:seed`**, and the
 tool authors a distinct random seed on every operator prim it creates, so the default case is
 already decorrelated. A per-node term derived from the prim path was rejected — it would make a
 rename a silent look change, defeat `usdGen:algorithmVersion` (§7) and break freeze reproducibility
@@ -867,7 +867,7 @@ UsdSkel, or any other modifier upstream in the scene index (R5, S1, S3).
 |---|---|---|---|
 | `usdGen:mode` | `uniform token` | `"rigidFrame"` | `rigidFrame` (v1, per-root frame transport) \| `rbf` (v2, an a host renderer-style displacement field from ≤ `rbfSamples` surface samples) \| `pointDeform` (v2, per-CV weights over the nearest surface points). An unimplemented mode is a compile error naming the prim and the mode, never a silent downgrade (`05-static-curves-and-deformation.md` §4.1) |
 | `usdGen:twistAware` | `bool` | `true` | build the root frame from `dPdu` so the strand twists with the surface |
-| `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only; ≤ 100, the a host renderer binding arity. Cost class B |
+| `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only; ≤ 100, the host renderer binding arity. Cost class B |
 | `usdGen:preserveShape` | `float` | `0.0` | 0 = off. `> 0` runs the Cosserat stretch/bend relaxation (A7 §9.1 G7, §3.5). **v2**; in v1 a non-zero value is one warning and is ignored |
 | `usdGen:preserveShape:iterations` | `int` | `0` | Cosserat iteration count, v2 |
 | `usdGen:lockRoots` | `bool` | `true` | pin CV 0 exactly to the deformed root position (A7 §9.1 G7) |
@@ -1182,7 +1182,7 @@ rule).
 **Capture.** Per-root frames and, for a map-driven direction, the sampled vectors. **Evaluate:**
 project the target into the tangent plane at the root, build the rotation about `N_root` (plus the
 lift rotation about `N_root × T`), and either apply it rigidly to every CV or accumulate it per
-segment weighted by the ramp. a host groomer's Tilt U / Tilt V / Tilt N / Around N are the same operator: those four axis angles named
+segment weighted by the ramp. A host groomer's Tilt U / Tilt V / Tilt N / Around N are the same operator: those four axis angles named
 directly, with `direction`/`lift` the general form they compose into — one prim type, not four.
 
 ### 2.14 `UsdGenScale` — global length multiplier (A7 §9.2 S13)
@@ -1477,7 +1477,7 @@ It exists because it is one slider drag rather than a ramp edit
 
 `UsdGenGuideProximityMap` (`rel usdGen:guides`, `float proximity:radius`, `float proximity:decay`)
 yields the normalised distance from each root to the nearest guide root — the mask for "fade this
-styler out near hand-placed guides". `UsdGenExprMap` supplies the a host groomer SeExpr variable set
+styler out near hand-placed guides". `UsdGenExprMap` supplies the host groomer SeExpr variable set
 (`$u $v $id $faceId $P $N $dPdu $dPdv $Pref $Nref $t $frame $cLength`) with `map()`, `ptex()` and the
 added `rand()`, which is **not** a SeExpr2 builtin (MEASURED absent,
 `research/A8-seexpr-ptex-libs.md` §1.7: "`Function rand has no definition`"; ADR §6 adds it). One

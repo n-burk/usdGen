@@ -71,7 +71,7 @@ from .tonicLoops import (COMPONENT_PICK_RADIUS_PX, ToolLoop, selectBand,
                          selectItems, selectModeFor)
 
 # The gizmo's on-screen size: axes this many pixels long, whatever the zoom
-# (plan/18 section 2.4a). a DCC's translate manipulator is about this long on
+# (plan/18 section 2.4a). A DCC's translate manipulator is about this long on
 # a 1080p viewport, and it has to stay clear of the 8 px CV dots it sits
 # among without covering the tube it moves.  LOGICAL pixels, the RigExec
 # manipulator size (tonicGizmoScreen.GIZMO_PIXELS).
@@ -84,7 +84,7 @@ SOFT_RADIUS_STEP = 0.05
 PINNED_ROOT_STATUS = ("Root CV is pinned: Rotate/Scale act on CVs above the "
                       "root. Select the tube (F8) to transform it whole.")
 # GZ-07: Shift held mid-drag moves the handle this fraction of the pointer
-# travel (a DCC/a DCC precision), from the sample where it went down.
+# travel (host-application precision), from the sample where it went down.
 PRECISION_FACTOR = 0.1
 # GZ-07: the live drag readout reaches the status line at most this often
 # (seconds); the viewport label repaints with every sample regardless.

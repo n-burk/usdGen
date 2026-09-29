@@ -48,10 +48,10 @@ things, and every design choice below is traceable to one of them:
    stack in namespace under the character rather than in a separate "groom file" that references
    the scalp.
 2. **ASSUMPTION** — The primary artist application is usdview plus the usdGen plugin. A DCC
-   bridge (a DCC/a DCC) is out of scope for v1–v3; the C ABI and pxr_boost module (S39) are the
+   bridge between host applications is out of scope for v1–v3; the C ABI and pxr_boost module (S39) are the
    integration surface if one is written later.
 3. **ASSUMPTION** — Units are the stage's `metersPerUnit`; `density` is *hairs per square stage
-   unit* on the **rest** surface, which is the only definition stable under deformation. a host groomer
+   unit* on the **rest** surface, which is the only definition stable under deformation. A host groomer
    quotes density per unit²; A7 §9.1 keeps the same.
 4. **ASSUMPTION** — v1 targets ≤ 1 M rendered curves and ≤ 200 k interactive curves per
    description. 200 k × 8 CV at refineLevel 2 is 23.9 ms/frame on this GB10 (S31, MEASURED), so
@@ -59,7 +59,7 @@ things, and every design choice below is traceable to one of them:
 5. **ASSUMPTION** — The `UsdGenMask` abstract prim base named in S9's parenthetical is realised
    here as (a) an applied API schema `UsdGenMaskAPI` — the per-operator mask *slot* — plus (b)
    the abstract prim base `UsdGenMap` for the field that feeds it. Rationale from the lens: an
-   artist authors a mask as a block on the operator (a host groomer, a DCC, a DCC all do), and the only
+   artist authors a mask as a block on the operator (a host groomer and other host applications all do), and the only
    thing that deserves its own prim is the *field* (an image, a Ptex, an expression, a paint
    layer). S9's normative content — codeless schemas, a common abstract base — is honoured.
 6. **ASSUMPTION** — Operator prims are non-imageable (`UsdTyped` base). They must still appear in
@@ -859,7 +859,7 @@ Both need queries beyond a chunk, and both are solved in **capture**, never in e
 
 * **Guide interpolation.** Capture builds a kd-tree (nanoflann 1.12.1, S38) over guide roots in
   *rest* space, filters candidates by angle, region and parting lines, and stores per curve
-  `guideIdx[maxGuides]` + `guideW[maxGuides]` — the a host renderer `groom_closest_guides`/
+  `guideIdx[maxGuides]` + `guideW[maxGuides]` — the host renderer `groom_closest_guides`/
   `groom_guide_weights` shape (A7 §9.1 G6). Evaluate is then per-curve embarrassingly parallel
   (cost class A) reading a *whole-buffer* guide array that lives outside the chunk system, because
   guides are a separate, small node (typically 100–2000 curves) evaluated to completion before any
@@ -1014,7 +1014,7 @@ public:
 `Sample` reads through the private pruning wrapper so UsdSkel-skinned scalps (blocked
 `primvars/points`, ext-computation points) work under Storm as well as hdPrman (S3), and it reads
 rest points from `usdGen/rest/points` (S12), falling back to an authored `primvars:rest` (S12,
-a DCC convention). Everything read is post-flattening: `xform/matrix` is world with
+A DCC convention). Everything read is post-flattening: `xform/matrix` is world with
 `resetXformStack=true`, and dirtiness is per prim, never hierarchical (S4).
 
 ### 5.5 Output spaces and invalidation
@@ -1659,7 +1659,7 @@ this design assumes usdGen runs after every deformer.
 ## 12. Out of scope (deliberately)
 
 Simulation (usdGen consumes sim caches through `UsdGenCurveSource`, it does not run a solver);
-a DCC bridge; GPU evaluation of the curve chain (the data plane is CPU; Storm only draws);
+A DCC bridge; GPU evaluation of the curve chain (the data plane is CPU; Storm only draws);
 per-instance material binding (Storm has none — S33); XPD/Alembic import (a converter, not a
 plugin feature); authoring by the evaluator (R1: nothing the evaluator computes is ever written to
 the stage except through an explicit freeze/bake action).

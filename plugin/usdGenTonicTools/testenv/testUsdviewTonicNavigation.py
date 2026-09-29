@@ -394,7 +394,7 @@ def checkHover(ctx):
 
 
 # ---------------------------------------------------------------------------
-# 2. a DCC: Alt drags
+# 2. A DCC: Alt drags
 # ---------------------------------------------------------------------------
 
 def checkMayaCamera(ctx):
@@ -560,7 +560,7 @@ def checkStyleCombo(ctx):
 
 
 # ---------------------------------------------------------------------------
-# 4. a DCC: MMB orbit / Shift+MMB pan / Ctrl+MMB dolly
+# 4. A DCC: MMB orbit / Shift+MMB pan / Ctrl+MMB dolly
 # ---------------------------------------------------------------------------
 
 def checkBlenderCamera(ctx):

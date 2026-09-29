@@ -23,7 +23,7 @@
 #   Also available: $P, $Pref, $rootP, $rootPref, $cLength, $cWidth, $id,
 #   $primIndex, $primCount, $pointIndex, $pointCount, $frame, $time, $seed.
 #
-#   Functions: the SeExpr2 builtin library, which is what XGen expressions are
+#   Functions: the SeExpr2 builtin library, which is what host-groomer expressions are
 #   written against -- math (abs .. trunc, plus fit/mix/remap/bias/contrast and
 #   the four step functions), noise (noise, snoise, fbm, turbulence, cellnoise,
 #   voronoi and their v/c/p spellings, hash, rand), vector (dist, length, dot,
@@ -238,7 +238,7 @@ $value * mix($tipWidth, $rootWidth, $profile)"""
                 # stays a legal weight:
                 #   $fade       no frizz at u = 0, full frizz at u = 1, so the
                 #               effect ramps across the plane;
-                #   $variation  rand(1234) is XGen's rand, not SeExpr's: it is
+                #   $variation  rand(1234) is the host groomer's rand, not SeExpr's: it is
                 #               hashed from the operator's $seed, the strand's
                 #               $id and this call site, so it is a different
                 #               number per strand and the SAME number on every

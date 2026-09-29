@@ -1465,7 +1465,7 @@ registered type (shares gate **SI-7**).
 
 ## 10. Out of scope
 
-* **Other hosts.** a DCC, a DCC, Katana, Nuke, Solaris. The C ABI and `_usdGen` are host-agnostic on
+* **Other hosts.** Any host application. The C ABI and `_usdGen` are host-agnostic on
   purpose, but a second host is a v3 conversation.
 * **GPU brushes.** Every kernel is CPU numpy over a zero-copy view; a compute-shader brush needs the
   evaluator's buffers on the GPU, which is the v3 "GPU tail" (ADR §6).

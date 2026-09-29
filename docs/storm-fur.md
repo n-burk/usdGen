@@ -263,7 +263,7 @@ objects and mesh shadows on fur. CPU bake costs are unsuitable for large animate
 grooms every frame. Metal/Vulkan are untested, and the variant-A tangent still
 depends on Storm's GL curve-patch layout.
 
-a host renderer's groom pipeline uses density voxelization and optional dedicated deep
+A host renderer's groom pipeline uses density voxelization and optional dedicated deep
 shadow maps, with view-dependent voxel sizing and specialized visibility and
 composition passes. Achieving or exceeding that full feature/quality envelope
 requires renderer integration and matched scenes/hardware benchmarks, beyond
@@ -706,7 +706,7 @@ Pinned by `tests/testUsdGenLookPrimvars.cpp`.
 
 ## Hair shadowing the scalp
 
-The largest remaining difference from the a host renderer reference, once the strand
+The largest remaining difference from the host renderer reference, once the strand
 material was in, was not the hair: it was the skin. Every gap between clumps
 showed fully lit scalp, so the temple fade read as hairs pasted onto a bright
 surface rather than as hair growing out of a shadowed one.

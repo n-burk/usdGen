@@ -126,7 +126,7 @@ void CheckLanguage()
 void CheckFunctionTable()
 {
     const auto functions = Frontend::SupportedFunctions();
-    Check(functions.size() > 80, "the function table covers the XGen/SeExpr set");
+    Check(functions.size() > 80, "the function table covers the host-groomer/SeExpr set");
     std::set<std::string> names, categories;
     for (auto const &info : functions) {
         Check(names.insert(info.name).second, "function appears once: " + info.name);

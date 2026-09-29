@@ -60,7 +60,7 @@ nouns, named once (§2), each with an obvious Hydra consequence; reserved namesp
   `mode = random|uniform|points|atGuides` instead of four types means switching from a Poisson
   scatter to "at guides" is a value edit. In the other two proposals it is a prim delete + create:
   a resync, a re-wire of `usdGen:input`, a lost mask block, and a walk straight into S41's
-  `RemovePrim`-under-OpenExec trap (`esfUsd/stageData.cpp:360`). a host groomer has one generator with a mode
+  `RemovePrim`-under-OpenExec trap (`esfUsd/stageData.cpp:360`). A host groomer has one generator with a mode
   for exactly this reason (A7 §9.1 key facts).
 * **`usdGen:enabled` is explicitly non-structural** (§4.6): the node stays in the graph and becomes a
   memcpy pass-through, so toggling a modifier costs one tail re-run, not a recompile and not a
@@ -151,7 +151,7 @@ stated, and a totals table that answers the question a production asks: *S0–S5
 20 weeks*.
 
 **D4 (9).** The most faithful implementation of A7 §9. `UsdGenClump` in v1 carries the full
-a host groomer/IGS parameter set including `copy`, `copyVariance`, `cut`, `flatness`, `offset`, `curl`,
+A host groomer/IGS parameter set including `copy`, `copyVariance`, `cut`, `flatness`, `offset`, `curl`,
 `crossover`, `goalFeedback`, `sizeReduction`, `tightnessReduction`, `levels`, `stray{Amount,Rate,
 Falloff}`, `volumize`, `preserveLength`. `UsdGenGuideInterpolate` carries `regionMap` **and**
 `clumpCrossover` in v1 — the only proposal that ships region maps in the first release. `Smooth` and

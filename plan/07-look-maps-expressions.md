@@ -1286,7 +1286,7 @@ here as they appear in an expression (with the `$`); `registerVariable` takes th
 | `$cLength`, `$cWidth`, `$cDepth` | float | the curve's computed length, width and depth *so far* in the chain |
 | `$Cs`, `$As` | vec3, float | the **surface's own** `primvars:displayColor` / `displayOpacity` sampled at the root — never the `UsdGenLookAPI` result. Inside a `UsdGenExprMap` reached from `usdGen:look:colorMap` they carry the surface value, so the §1.2 look bake never depends on its own output; `(1,1,1)` and `1.0` when the surface authors neither |
 
-a host groomer's world-space aliases (`$Pw`, `$Prefw`) are deliberately absent: usdGen reads post-flattening,
+A host groomer's world-space aliases (`$Pw`, `$Prefw`) are deliberately absent: usdGen reads post-flattening,
 so deformed space already carries the world transform and ADR §9.2 R9 recognises no separate world
 space (S4). A porting note covers it; a second name for the same vector would not.
 
@@ -1318,7 +1318,7 @@ space (S4). A porting note covers it; a second name for the same vector would no
 > `primitive`, `point`), and a variable used outside its domain is a compile
 > error naming the variable and the domain, not a zero.
 
-This is otherwise the a host groomer dialect artists expect (`research/A7-prior-art-grooming.md` §1.3,
+This is otherwise the host groomer dialect artists expect (`research/A7-prior-art-grooming.md` §1.3,
 `research/A8-seexpr-ptex-libs.md` §1.8). Variables an expression does not reference cost nothing:
 they are registered on the creator but never filled.
 
@@ -1842,7 +1842,7 @@ decision, material tag/OIT, lights), §3 (MaterialX), §4 (UsdPreviewSurface + u
 (shading routes), §5 (three colour-map routes), §6 (Hio formats), §7 (per-frame cost).
 `research/A8-seexpr-ptex-libs.md` §0 (host inventory), §1.1–1.10 (SeExpr), §2.1–2.9 (Ptex), §3
 (Hio), §4 (noise libraries), §6 (dependency strategy), §7 (licensing).
-`research/A7-prior-art-grooming.md` §1.3 (the a host groomer expression dialect), §5.1–5.4 (hair shading
+`research/A7-prior-art-grooming.md` §1.3 (the host groomer expression dialect), §5.1–5.4 (hair shading
 references, the MaterialX hair nodes in this install, BasisCurves conventions), §9.4 (map inputs).
 `research/G-storm-throughput-and-prim-granularity.md` §2 "Topology strategy" item 5 and Key facts
 (interpolation choices, varying widths), §1.11 (batching). `research/G-tool-loop-array-transport-and-cv-picking.md` §5 (live primvar paint).

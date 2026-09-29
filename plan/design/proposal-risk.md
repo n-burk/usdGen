@@ -261,7 +261,7 @@ exactly right once (A7 §7 recommendation).
 | `usdGen:mask:noise:seed` | `int` | `0` |
 
 Semantics: per-curve weight `w(h) = clamp(amount × map(rootUV) × noise(rootRest) , 0, 1)`, inverted
-if asked; per-CV weight `w(h) × ramp(t)` with the a DCC four-parameter shortcut applied when the
+if asked; per-CV weight `w(h) × ramp(t)` with the host application four-parameter shortcut applied when the
 ramp has fewer than two authored knots. Evaluated **once per capture** and cached as a
 `VtFloatArray` (S25).
 
@@ -301,7 +301,7 @@ multiple map prims. Reload is the explicit `UsdGenImaging_ReloadMaps()` action (
 
 ### 3.7 Freeze and sculpt
 
-`UsdGenFreeze` — the a host groomer *Groom Bake* analogue (A7 §1.4): everything upstream is deactivated while
+`UsdGenFreeze` — the host groomer *Groom Bake* analogue (A7 §1.4): everything upstream is deactivated while
 the freeze is live; everything downstream reads the frozen buffer (A7 §9.3).
 
 | Property | Type | Default | Meaning |
@@ -1099,7 +1099,7 @@ SDF queries per CV. Space: `R` = restSpace, `D` = deformedSpace (re-runs per mot
 | `UsdGenScale` | styler R | A | `scale` | S4 |
 
 Emitted primvars: `Clump` writes `clumpId_<level>` (uniform int) for shading (a host renderer `Clump ID`);
-`GuideInterpolate` writes `guideIndex[3]`/`guideWeight[3]` (the a host renderer `groom_closest_guides` /
+`GuideInterpolate` writes `guideIndex[3]`/`guideWeight[3]` (the host renderer `groom_closest_guides` /
 `groom_guide_weights` arity, A7 §2.1) so a bake round-trips.
 
 ### 6.2 v2 — Slices 6–8
@@ -1210,7 +1210,7 @@ in Storm's GLSL, so a `.ptx` never reaches a Storm material.
 **SeExpr** (S38, A8 §1): vendored `wdas/SeExpr` main@8f8c8f2, interpreter only, static + hidden.
 One `VarBlockCreator` per compiled expression; **one thread-safe `VarBlock` per TBB worker**.
 
-Variable set (the a host groomer dialect artists expect, A7 §1.3, A8 §1.8):
+Variable set (the host groomer dialect artists expect, A7 §1.3, A8 §1.8):
 
 ```
 $u $v            surface parameters at the root
@@ -1235,7 +1235,7 @@ plus three usdGen additions:
 
 `noise()` keeps SeExpr's 0..1 range, not a host groomer's −1..1; `snoise` is the signed form and the difference
 is documented in one line of the user docs. **ASSUMPTION**: matching SeExpr semantics beats matching
-a host groomer's, because SeExpr's own noise is the single implementation shared by the C++ stylers (S38) and
+A host groomer's, because SeExpr's own noise is the single implementation shared by the C++ stylers (S38) and
 having `noise()` mean two things in one product is worse than a one-line porting note.
 
 Measured cost: 13 ns (`$u*$v+1`), 34 ns (`map()` + `hash`), 106–117 ns (noise + fbm) per eval; 50 M
@@ -1558,7 +1558,7 @@ exceeds 20 % of the frame at 1 M curves, the fallback is to widen chunks for clu
 **S4 — Maps and expressions · 3 weeks · 8 eng-weeks**
 
 Deliver: vendored SeExpr + Ptex (static, hidden, `-ffp-contract=off` not needed there);
-`UsdGenImageMap`/`PtexMap`/`ExprMap`/`PaintMap`; the `map()`/`ptex()`/`rand()` functions and the a host groomer
+`UsdGenImageMap`/`PtexMap`/`ExprMap`/`PaintMap`; the `map()`/`ptex()`/`rand()` functions and the host groomer
 variable set; `UsdGenLookAPI` colour baking; `UsdGenImaging_ReloadMaps`.
 
 *Exit criteria.* (1) A density map, a length expression and a Ptex mask each change the groom, with
