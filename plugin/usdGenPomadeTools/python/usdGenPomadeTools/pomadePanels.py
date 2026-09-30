@@ -767,9 +767,12 @@ def _tubeDescriptors(state):
             "displaySegments", "Curve smoothness (display)", "int",
             "displaySegments", int, "Pomade_GetDisplaySegments",
             "Pomade_SetDisplaySegments", min=1, max=8, step=1,
-            tooltip="Extra drawn points between center CVs so tubes look "
-                    "smooth in the viewport. Display only: the saved "
-                    "groom does not change."),
+            tooltip="Drawn spans between each pair of section rings. "
+                    "6, the default, places five extra rings along each "
+                    "interval so the shell follows the sections, including "
+                    "the open root on the scalp. Display only: the saved "
+                    "groom does not change, and the selectable rings stay "
+                    "on the authored sections."),
         _descriptor("ringCvCount", "Ring CVs for new tubes", "enum",
                    _ringCvCountGet, _ringCvCountSet,
                    choices=pomadeTube.REGION_RING_VERT_CHOICES,

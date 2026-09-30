@@ -27,6 +27,8 @@
 // Ring geometry is read back out of the staged surface grid rather than
 // re-evaluated: a ring curve is the grid row the section sits on, so the
 // rings an artist drags can never drift from the surface they bound.
+// Display spans between those rows refine the shell only; the ring stride
+// keeps one selectable ring per authored section.
 #ifndef USDGEN_POMADE_PUBLISH_H
 #define USDGEN_POMADE_PUBLISH_H
 
@@ -58,7 +60,7 @@ struct USDGENPOMADE_API PomadeTubeSlice {
     uint64_t contentHash = 0;
     int ringCount = 0;   // grid rows
     int ringVerts = 0;   // verts per row
-    int ringStride = 1;  // grid rows per authored section (display segments)
+    int ringStride = 1;  // grid rows per authored section (display spans)
     int pointOffset = 0;  // in vertices, into the level's point array
     int pointCount = 0;
     int faceOffset = 0;   // in faces

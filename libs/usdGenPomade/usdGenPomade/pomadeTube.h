@@ -305,9 +305,13 @@ float PomadeSectionMeanRadius(PomadeTubeSection const &section);
 
 // -- K5: Hermite tube tessellation ------------------------------------------
 // Output grid: ((nSec - 1) * segmentsPerSpan + 1) rings x ringVerts verts,
-// ring-major. Sections interpolate along t by cubic Hermite of the section
-// CV vectors (central differences inside, one-sided at the ends — the
-// PomadeEvalCenter rule); scale and twist take the same path as scalars.
+// ring-major. Each authored interval gets `segmentsPerSpan` spans, and the
+// row at the start of interval k is exactly section k (PomadeTessellationRingT),
+// so a scalp root and every later section stay flush with the shell even
+// when section parameters are not uniform. Sections interpolate along that
+// t by cubic Hermite of the section CV vectors (central differences inside,
+// one-sided at the ends — the PomadeEvalCenter rule); scale and twist take
+// the same path as scalars.
 bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
                         std::vector<PomadeFrame> const &frames,
                         int segmentsPerSpan, std::vector<float> *positions,
@@ -562,6 +566,38 @@ USDGEN_POMADE_HD inline float PomadeHermite(float a, float b, float m0,
     return (2.0f * u3 - 3.0f * u2 + 1.0f) * a +
            (u3 - 2.0f * u2 + u) * m0 + (-2.0f * u3 + 3.0f * u2) * b +
            (u3 - u2) * m1;
+}
+
+// Parameter of display ring `ring` on a tube with `sectionCount` authored
+// sections. Interval k owns rings [k * segmentsPerSpan, (k + 1) * segmentsPerSpan],
+// and the shared endpoint is section k (or the tip, on the last ring). Knot
+// rows therefore match the authored section polygons; intermediate rows
+// sample the same Hermite the section edges follow, instead of a single
+// chord that leaves those edges.
+USDGEN_POMADE_HD inline float PomadeTessellationRingT(float const *sectionT,
+                                                    int sectionCount,
+                                                    int segmentsPerSpan,
+                                                    int ring)
+{
+    if (!sectionT || sectionCount < 2 || segmentsPerSpan < 1) {
+        return 0.0f;
+    }
+    int const intervals = sectionCount - 1;
+    int const lastRing = intervals * segmentsPerSpan;
+    if (ring >= lastRing) {
+        return sectionT[sectionCount - 1];
+    }
+    if (ring <= 0) {
+        return sectionT[0];
+    }
+    int const span = ring / segmentsPerSpan;
+    int const step = ring - span * segmentsPerSpan;
+    float const a = sectionT[span];
+    if (step <= 0) {
+        return a;
+    }
+    float const b = sectionT[span + 1];
+    return a + (b - a) * (float(step) / float(segmentsPerSpan));
 }
 
 // Catmull-Rom tangent at CV i (clamped ends), normalised. Coincident

@@ -711,7 +711,7 @@ __global__ void _TubeTessellateKernel(
     float const *cx, float const *cy, float const *cz, int nCv,
     PomadeFrame const *frames, float const *secT, float const *secU,
     float const *secV, float const *secScale, float const *secTwist, int nSec,
-    int ringVerts, int nRings, float t0, float span, float *positions,
+    int ringVerts, int nRings, int segmentsPerSpan, float *positions,
     float *normals, float *ringT)
 {
     int const v = blockIdx.x * blockDim.x + threadIdx.x;
@@ -720,7 +720,8 @@ __global__ void _TubeTessellateKernel(
     }
     int const r = v / ringVerts;
     int const s = v % ringVerts;
-    float const t = t0 + span * float(r) / float(nRings - 1);
+    float const t =
+        PomadeTessellationRingT(secT, nSec, segmentsPerSpan, r);
     if (s == 0) {
         ringT[r] = t;
     }
@@ -1349,21 +1350,6 @@ bool PomadeLaunchTubeTessellate(
         }
         return false;
     }
-    // The ring parameter range comes from the host-side section list (the
-    // same t0/span the CPU twin uses); copying two floats keeps the kernel
-    // from re-deriving them per thread.
-    float t0 = 0.0f, t1 = 1.0f;
-    if (cudaMemcpyAsync(&t0, deviceSectionT, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-        cudaMemcpyAsync(&t1, deviceSectionT + nSec - 1, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-        cudaStreamSynchronize(stream) != cudaSuccess) {
-        if (errBuf && errBufLen > 0) {
-            std::snprintf(errBuf, errBufLen, "section range readback failed");
-        }
-        return false;
-    }
-    float const span = t1 > t0 ? t1 - t0 : 1.0f;
     int const nRings = (nSec - 1) * segmentsPerSpan + 1;
     int const vertexCount = nRings * ringVerts;
     int const block = 256;
@@ -1371,8 +1357,8 @@ bool PomadeLaunchTubeTessellate(
     _TubeTessellateKernel<<<grid, block, 0, stream>>>(
         deviceCenterX, deviceCenterY, deviceCenterZ, nCv, deviceFrames,
         deviceSectionT, deviceSectionU, deviceSectionV, deviceSectionScale,
-        deviceSectionTwist, nSec, ringVerts, nRings, t0, span, devicePositions,
-        deviceNormals, deviceRingT);
+        deviceSectionTwist, nSec, ringVerts, nRings, segmentsPerSpan,
+        devicePositions, deviceNormals, deviceRingT);
     cudaError_t const launch = cudaGetLastError();
     if (launch != cudaSuccess) {
         if (errBuf && errBufLen > 0) {

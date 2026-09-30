@@ -549,6 +549,20 @@ void _FillGuides(std::vector<float> const &points,
     _Bounds(staged->guidePoints, &staged->guideMin, &staged->guideMax);
 }
 
+// K5 shells store `segments` rows per authored interval, and the selectable
+// ring is the row the section sits on. The legacy cylinder is one row per
+// center ring; striding that mesh by the display span count would drop
+// every ring but the root.
+int _RingStride(PomadeTubeDesc const &desc, int ringCount, int segments)
+{
+    int const refined =
+        PomadeTessellatedRingCount(desc, std::max(segments, 1));
+    if (refined >= 2 && ringCount == refined) {
+        return std::max(segments, 1);
+    }
+    return 1;
+}
+
 }  // namespace
 
 float
@@ -751,11 +765,13 @@ PomadePublisher::Stage(PomadeModel const &model)
                     continue;
                 }
                 slice.ringCount = verts / slice.ringVerts;
-                slice.ringStride = desc.sections.empty() ? 1 : segments;
+                slice.ringStride =
+                    _RingStride(desc, slice.ringCount, segments);
             } else {
                 slice.ringVerts = desc.ringVerts;
                 slice.ringCount = PomadeTessellatedRingCount(desc, segments);
-                slice.ringStride = segments;
+                slice.ringStride =
+                    _RingStride(desc, slice.ringCount, segments);
             }
             slice.centerCount = int(desc.centerX.size());
             if (slice.ringCount < 2 || slice.ringVerts < 3 ||

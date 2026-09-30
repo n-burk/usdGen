@@ -8,6 +8,9 @@
 //   * K5: section rings land on their circles, twist rotates, scale
 //     scales, Hermite mid-spans interpolate, ring counts follow the span
 //     rule, degenerate input fails loudly;
+//   * the display shell puts five extra spans between each authored
+//     section, keeps those section rows flush (including a non-uniform
+//     parameter), and leaves selectable rings on the authored knots;
 //   * K8: disc counts are exact, roots sit in the unit disc, the stream
 //     is deterministic per (tubeId, seed), freeze keeps the prefix;
 //   * K9: root CVs sit on their roots, edgeBias pushes/pulls the radius,
@@ -34,6 +37,7 @@
 #include "usdGenPomade/pomadeApi.h"
 #include "usdGenPomade/pomadeApiStage.h"
 #include "usdGenPomade/pomadeModel.h"
+#include "usdGenPomade/pomadePublish.h"
 #include "usdGenPomade/pomadeTube.h"
 
 #ifdef USDGEN_POMADE_HAS_CUDA
@@ -2713,12 +2717,153 @@ void CheckPerTubeAbi()
     Check(Pomade_Destroy(ctx) == POMADE_OK, "per-tube ABI: the model destroys");
 }
 
+void CheckDisplayShellFlush()
+{
+    using namespace usdGenPomade;
+    Check(PomadeModel::kDisplayExtraSpans == 5 &&
+              PomadeModel::kDefaultDisplaySegments ==
+                  1 + PomadeModel::kDisplayExtraSpans,
+          "display: five extra spans between each pair of sections");
+
+    // Section 1 sits at t=0.12 and is much smaller than its neighbours.
+    // A uniform parameter across the whole tube would draw that grid row
+    // at t=0.5, off the authored edge.
+    PomadeTubeDesc tube;
+    tube.centerX = {0.0f, 0.0f, 0.0f};
+    tube.centerY = {0.0f, 2.0f, 4.0f};
+    tube.centerZ = {0.0f, 0.0f, 0.0f};
+    tube.ringVerts = 8;
+    float const sectionT[3] = {0.0f, 0.12f, 1.0f};
+    float const sectionScale[3] = {1.0f, 0.25f, 1.0f};
+    float const twoPi = 6.28318530717958647692f;
+    for (int k = 0; k < 3; ++k) {
+        PomadeTubeSection section;
+        section.t = sectionT[k];
+        section.scale = sectionScale[k];
+        section.u.resize(8);
+        section.v.resize(8);
+        for (int i = 0; i < 8; ++i) {
+            float const angle = twoPi * float(i) / 8.0f;
+            section.u[size_t(i)] = 0.5f * std::cos(angle);
+            section.v[size_t(i)] = 0.5f * std::sin(angle);
+        }
+        tube.sections.push_back(std::move(section));
+    }
+    std::vector<PomadeFrame> frames = FramesFor(tube);
+    int const spans = PomadeModel::kDefaultDisplaySegments;
+    std::vector<float> pos, nrm, ringT;
+    std::string err;
+    bool tessellated =
+        PomadeTessellateCpu(tube, frames, spans, &pos, &nrm, &ringT, &err);
+    int const nRings = PomadeTessellatedRingCount(tube, spans);
+    Check(tessellated && nRings == (3 - 1) * spans + 1 &&
+              ringT.size() == size_t(nRings),
+          "display: each interval is tessellated (" + err + ")");
+    bool flush = tessellated;
+    for (int section = 0; flush && section < 3; ++section) {
+        int const row = section * spans;
+        flush = flush && row < nRings &&
+                Near(ringT[size_t(row)], tube.sections[size_t(section)].t,
+                     1e-6f);
+        std::vector<float> sampled;
+        flush = flush &&
+                PomadeSampleTubeRingCpu(tube, frames,
+                                       tube.sections[size_t(section)].t,
+                                       &sampled, &err) &&
+                sampled.size() == 8 * 3;
+        for (int slot = 0; flush && slot < 8; ++slot) {
+            size_t const mesh = (size_t(row) * 8 + size_t(slot)) * 3;
+            size_t const sample = size_t(slot) * 3;
+            for (int c = 0; c < 3; ++c) {
+                flush = flush &&
+                        Near(pos[mesh + size_t(c)], sampled[sample + size_t(c)],
+                             1e-5f);
+            }
+        }
+    }
+    Check(flush, "display: root and later section edges stay flush (" + err +
+                     ")");
+    bool earlySection = tessellated && pos.size() > (size_t(spans) * 8 + 1) * 3;
+    if (earlySection) {
+        float const x = pos[(size_t(spans) * 8) * 3 + 0];
+        float const z = pos[(size_t(spans) * 8) * 3 + 2];
+        float const radius = std::sqrt(x * x + z * z);
+        // scale 0.25 on a 0.5 ring is radius 0.125. The old uniform row
+        // at t=0.5 is a blend back toward the full ring.
+        earlySection = radius > 0.10f && radius < 0.16f;
+    }
+    Check(earlySection,
+          "display: the early section is not pulled toward mid-tube");
+
+    PomadeTubeDesc straight = MakeTube();
+    std::vector<PomadeFrame> straightFrames = FramesFor(straight);
+    std::vector<float> straightPos, straightNrm, straightT;
+    bool straightOk = PomadeTessellateCpu(straight, straightFrames, spans,
+                                         &straightPos, &straightNrm, &straightT,
+                                         &err);
+    int const straightRings = (2 - 1) * spans + 1;
+    bool ruling = straightOk && straightRings >= 2 &&
+                  straightPos.size() == size_t(straightRings) * 8 * 3;
+    for (int slot = 0; ruling && slot < 8; ++slot) {
+        float const *a = &straightPos[size_t(slot) * 3];
+        float const *b =
+            &straightPos[(size_t(straightRings - 1) * 8 + size_t(slot)) * 3];
+        float const ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+        float const ab2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+        ruling = ruling && ab2 > 1e-8f;
+        for (int ring = 1; ruling && ring < straightRings - 1; ++ring) {
+            float const *p =
+                &straightPos[(size_t(ring) * 8 + size_t(slot)) * 3];
+            float const ap[3] = {p[0] - a[0], p[1] - a[1], p[2] - a[2]};
+            float const t =
+                (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / ab2;
+            float d2 = 0.0f;
+            for (int c = 0; c < 3; ++c) {
+                float const d = p[c] - (a[c] + ab[c] * t);
+                d2 += d * d;
+            }
+            ruling = ruling && d2 < 1e-8f;
+        }
+    }
+    Check(ruling, "display: straight section edges stay on their rulings");
+
+    PomadeModel model;
+    bool legacy =
+        model.BuildTestTube() &&
+        model.GetDisplaySegments() == PomadeModel::kDefaultDisplaySegments &&
+        model.GetHostMesh().positions.size() / 3 == 40 &&
+        model.SetRingDisplay(PomadeModel::Rings_All);
+    PomadePublisher legacyPub;
+    legacy = legacy && legacyPub.Stage(model);
+    auto const legacyLevel = legacyPub.Current().levels.find(1);
+    Check(legacy && legacyLevel != legacyPub.Current().levels.end() &&
+              legacyLevel->second.points.size() == 40 &&
+              legacyLevel->second.ringVertexCounts.size() == 5,
+          "display: the legacy cylinder keeps one selectable ring per "
+          "center ring");
+    bool refined = legacy && model.MoveSectionCV(1, 0, 0.0f, 0.0f);
+    int const k5Rings = (5 - 1) * spans + 1;
+    refined = refined &&
+              model.GetHostMesh().positions.size() / 3 == size_t(k5Rings) * 8;
+    PomadePublisher refinedPub;
+    refined = refined && refinedPub.Stage(model);
+    auto const refinedLevel = refinedPub.Current().levels.find(1);
+    Check(refined && refinedLevel != refinedPub.Current().levels.end() &&
+              refinedLevel->second.points.size() == size_t(k5Rings) * 8 &&
+              refinedLevel->second.tubes.size() == 1 &&
+              refinedLevel->second.tubes[0].ringStride == spans &&
+              refinedLevel->second.ringVertexCounts.size() == 5,
+          "display: K5 shell is refined and selectable rings stay on the "
+          "five authored sections");
+}
+
 }  // namespace
 
 int main()
 {
     CheckK4();
     CheckK5();
+    CheckDisplayShellFlush();
     CheckCenterCoreHandle();
     CheckRigidTubeTransport();
     CheckK8();

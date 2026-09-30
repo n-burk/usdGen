@@ -344,8 +344,11 @@ start World, Rotate Tube), **Step snap (hold J)**, **Step size** (1.0 for
 Move, 15° for Rotate, 0.1 for Scale), **Free rotate ball (Rotate)**,
 **Prevent negative scale (Scale)**, **Grid size (hold X)** (1.0),
 **Manipulator size (+ / -)** (90 px, 20–400), **Soft selection falloff**,
-**Curve smoothness (display)**, **Ring CVs for new tubes**, **Selected
-section scale** (uniform scale for the selected rings, greyed with none).
+**Curve smoothness (display)** (default 6 spans between each pair of
+section rings: the old chord plus five extra samples, so the shell follows
+the sections and the open root stays on the scalp), **Ring CVs for new
+tubes**, **Selected section scale** (uniform scale for the selected rings,
+greyed with none).
 Gizmo settings are per session and not saved. Actions: **Match surface**
 (snaps each tube's root CV onto the scalp, the rest of the curve stays),
 **Relax** (smooths kinks out of the center curve, root and tip held),
@@ -794,6 +797,16 @@ the new stage: bind a scalp mesh to continue.`
   `powershell -File bin/launch_usdview.ps1 -TestScript
   plugin/usdGenPomadeTools/testenv/testUsdviewPomadeTube.py
   examples/pomade-graph-scalp.usda`.
+* **Tube shell:** launch usdview on `examples/pomade-graph-scalp.usda`
+  (`bin/launch_usdview.ps1`, or `"$PY" "$USD/bin/usdview"` after
+  `source bin/_env.sh`), then **usdGen → Pomade → Open workspace**, bind
+  the scalp, draw a region and grow a tube. The shell should meet the
+  scalp along the root ring and show several facets between section rings
+  (six spans by default). Tube mode's Ring sub-mode draws one
+  selectable ring per authored section. **Curve smoothness (display)**
+  is that span count; a lower value draws a coarser shell. The headless
+  check is `testUsdGenPomadeTubes`
+  (`CheckDisplayShellFlush`).
 * **Staged package:** T3 tests and the launcher import the package staged
   under `build/python`, not the source tree. After editing plugin python
   (or adding a test file) re-run the CMake configure

@@ -740,11 +740,17 @@ bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
     positions->resize(size_t(nRings) * size_t(rv) * 3);
     normals->resize(size_t(nRings) * size_t(rv) * 3);
     ringT->resize(size_t(nRings));
-    float const t0 = tube.sections.front().t;
-    float const t1 = tube.sections.back().t;
-    float const span = t1 > t0 ? t1 - t0 : 1.0f;
+    // Packed so the ring parameter matches the CUDA twin, which reads the
+    // same section-t buffer. Uniform spacing across the whole tube misses
+    // a section that is not evenly spaced, and the shell then leaves that
+    // section's edge.
+    std::vector<float> sectionT(size_t(nSec));
+    for (int i = 0; i < nSec; ++i) {
+        sectionT[size_t(i)] = tube.sections[size_t(i)].t;
+    }
     for (int r = 0; r < nRings; ++r) {
-        float const t = t0 + span * float(r) / float(nRings - 1);
+        float const t = PomadeTessellationRingT(sectionT.data(), nSec,
+                                               segmentsPerSpan, r);
         (*ringT)[size_t(r)] = t;
         int k = 0;
         while (k + 1 < nSec - 1 && tube.sections[size_t(k + 1)].t < t) {

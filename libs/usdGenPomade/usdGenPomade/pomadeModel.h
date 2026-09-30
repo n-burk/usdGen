@@ -413,6 +413,9 @@ public:
     void GetSoftSelection(float *center, float *radius) const;
     bool RelaxCenter(float strength, int iterations);
     bool SnapRootToScalp();
+    // Display-shell spans between authored sections, in [1, 16]. The
+    // default (kDefaultDisplaySegments) is the single ruling plus
+    // kDisplayExtraSpans. It does not move section or CV manipulators.
     bool SetDisplaySegments(int segments);
     int GetDisplaySegments() const;
     // The scalp-graph region this tube is rooted in (-1 = unrooted, disc
@@ -809,6 +812,12 @@ public:
     // other level behind it.
     static constexpr float kDefaultXrayOpacity = 0.25f;
     static constexpr float kFaintXrayOpacity = 0.10f;
+    // Drawn spans between each pair of authored sections. One span is the
+    // old straight ruling; five more sample the section interpolation so
+    // the shell stays on those edges, including the open root on the scalp.
+    // Selectable rings stay on the authored knots (the publish stride).
+    static constexpr int kDisplayExtraSpans = 5;
+    static constexpr int kDefaultDisplaySegments = 1 + kDisplayExtraSpans;
     // Per-level (1-based) visibility and x-ray. A change marks Display
     // dirty and bumps the version; an untouched level reads the default
     // (visible, opaque). Levels below 1 are rejected.
@@ -1285,7 +1294,7 @@ private:
     std::vector<PomadeTubeSection> _sections;
     std::vector<PomadeFrame> _frames;
     bool _useSections = false;
-    int _segmentsPerSpan = 1;
+    int _segmentsPerSpan = kDefaultDisplaySegments;
     float _softCenter = 0.0f;
     float _softRadius = 0.0f;
     // P3 guide cache: full-density roots + guides, refilled explicitly.

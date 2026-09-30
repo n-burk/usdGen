@@ -138,9 +138,11 @@ bool PomadeLaunchCenterFrames(float const *deviceCenterX,
 // -- K5: Hermite tube tessellation ------------------------------------------
 //
 // One thread per vertex over the ((nSec - 1) * segmentsPerSpan + 1) x
-// ringVerts grid, ring-major. Sections arrive as device arrays (t, packed
-// u/v rows of ringVerts, scale, twist); frames come from K4. CPU twin:
-// PomadeTessellateCpu (tolerance: twist trigonometry).
+// ringVerts grid, ring-major. Ring parameters come from
+// PomadeTessellationRingT, so each authored section is an exact row.
+// Sections arrive as device arrays (t, packed u/v rows of ringVerts, scale,
+// twist); frames come from K4. CPU twin: PomadeTessellateCpu (tolerance:
+// twist trigonometry).
 bool PomadeLaunchTubeTessellate(
     float const *deviceCenterX, float const *deviceCenterY,
     float const *deviceCenterZ, int nCv, PomadeFrame const *deviceFrames,
