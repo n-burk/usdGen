@@ -26,6 +26,8 @@
 //   * a child edit refreshes the parent toward the edit (bottom-up
 //     propagation smoke);
 //   * edge mode splits along the drawn line and round-trips too.
+//   * a hung, off-axis pinned tube keeps its root roll through subdivide:
+//     children do not pick up a PomadePerp3 right-angle flip at the base.
 //
 // K6 (top-down re-derivation with delta re-application, length kept to
 // 1e-4, lockChildren rigid with frozen deltas) and K6-K7 stability (both
@@ -1343,6 +1345,207 @@ void CheckV0bHierarchyRecords()
 
 }  // namespace
 
+// Sphere-flank braid: the support normal is off axis, and the shaft's first
+// chord leaves that normal the way a hung tube does. Subdivide used to keep
+// the pinned root and then rebuild later frames from PomadePerp3 of the
+// child's offset tangent, which flips onto another least axis. One of the
+// three strands then twisted about 90 degrees between the scalp ring and
+// the next section. The roll of every later frame, measured from the pinned
+// root and from the parent frame at the same CV, stays at zero.
+void CheckSubdivideBaseRoll()
+{
+    auto dot = [](float const a[3], float const b[3]) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    auto len = [&](float const a[3]) { return std::sqrt(dot(a, a)); };
+    auto normalize = [&](float a[3]) {
+        float const l = len(a);
+        a[0] /= l;
+        a[1] /= l;
+        a[2] /= l;
+    };
+    auto rollDeg = [&](PomadeFrame const &from, PomadeFrame const &to) {
+        float n[3] = {from.nx, from.ny, from.nz};
+        float const t[3] = {to.tx, to.ty, to.tz};
+        float const d = dot(n, t);
+        n[0] -= d * t[0];
+        n[1] -= d * t[1];
+        n[2] -= d * t[2];
+        float const l = len(n);
+        if (!(l > 1e-8f)) {
+            return 180.0f;
+        }
+        n[0] /= l;
+        n[1] /= l;
+        n[2] /= l;
+        float const c = n[0] * to.nx + n[1] * to.ny + n[2] * to.nz;
+        float const s = n[0] * to.bx + n[1] * to.by + n[2] * to.bz;
+        return std::atan2(s, c) * (180.0f / 3.14159265f);
+    };
+
+    // Same material basis BuildTubeFromRegion writes: local tangent
+    // (1, 2, 3) so PomadePerp3's least-axis choice is stable on a straight
+    // spine, mapped onto (support normal, polygon U, polygon V).
+    float pn[3] = {-0.75f, -0.35f, 0.45f};
+    normalize(pn);
+    float axisU[3] = {0.0f, 1.0f, 0.0f};
+    float const alongU = dot(axisU, pn);
+    axisU[0] -= alongU * pn[0];
+    axisU[1] -= alongU * pn[1];
+    axisU[2] -= alongU * pn[2];
+    normalize(axisU);
+    float axisV[3] = {pn[1] * axisU[2] - pn[2] * axisU[1],
+                      pn[2] * axisU[0] - pn[0] * axisU[2],
+                      pn[0] * axisU[1] - pn[1] * axisU[0]};
+    normalize(axisV);
+    float localT[3] = {1.0f, 2.0f, 3.0f};
+    normalize(localT);
+    float localN[3];
+    PomadePerp3(localT, localN);
+    float localB[3];
+    PomadeCross3(localT, localN, localB);
+
+    PomadeTubeDesc parent;
+    parent.tubeId = 0;
+    parent.level = 1;
+    parent.ringVerts = 8;
+    parent.rootFramePinned = true;
+    parent.rootFrame.tx = pn[0];
+    parent.rootFrame.ty = pn[1];
+    parent.rootFrame.tz = pn[2];
+    parent.rootFrame.nx = axisU[0];
+    parent.rootFrame.ny = axisU[1];
+    parent.rootFrame.nz = axisU[2];
+    parent.rootFrame.bx = axisV[0];
+    parent.rootFrame.by = axisV[1];
+    parent.rootFrame.bz = axisV[2];
+    for (int row = 0; row < 3; ++row) {
+        parent.frameReference[size_t(row * 3 + 0)] =
+            pn[row] * localT[0] + axisU[row] * localN[0] +
+            axisV[row] * localB[0];
+        parent.frameReference[size_t(row * 3 + 1)] =
+            pn[row] * localT[1] + axisU[row] * localN[1] +
+            axisV[row] * localB[1];
+        parent.frameReference[size_t(row * 3 + 2)] =
+            pn[row] * localT[2] + axisU[row] * localN[2] +
+            axisV[row] * localB[2];
+    }
+    int const nCv = 5;
+    float const length = 2.0f;
+    parent.centerX.resize(size_t(nCv));
+    parent.centerY.resize(size_t(nCv));
+    parent.centerZ.resize(size_t(nCv));
+    parent.sections.resize(size_t(nCv));
+    for (int i = 0; i < nCv; ++i) {
+        float const s = float(i) / float(nCv - 1);
+        // First chord already leaves the support normal, toward world down.
+        float const drop = length * 1.4f * s * s;
+        parent.centerX[size_t(i)] = pn[0] * length * s;
+        parent.centerY[size_t(i)] = pn[1] * length * s - drop;
+        parent.centerZ[size_t(i)] = pn[2] * length * s;
+        PomadeTubeSection &section = parent.sections[size_t(i)];
+        section.t = s;
+        section.scale = 1.0f;
+        section.twist = 0.0f;
+        section.u.resize(8);
+        section.v.resize(8);
+        for (int k = 0; k < 8; ++k) {
+            float const a = 6.2831853f * float(k) / 8.0f;
+            section.u[size_t(k)] = 0.35f * std::cos(a);
+            section.v[size_t(k)] = 0.35f * std::sin(a);
+        }
+    }
+
+    std::string err;
+    std::vector<PomadeFrame> parentFrames;
+    bool parentOk = PomadeTubeFramesCpu(parent, &parentFrames, &err) &&
+                    parentFrames.size() == size_t(nCv);
+    float parentRoll = 0.0f;
+    for (size_t i = 0; parentOk && i < parentFrames.size(); ++i) {
+        parentRoll = std::max(parentRoll,
+                              std::fabs(rollDeg(parentFrames[0], parentFrames[i])));
+        parentOk = parentOk &&
+                   std::fabs(parentFrames[0].tx - parent.rootFrame.tx) < 1e-5f;
+    }
+    Check(parentOk && parentRoll < 1.0f,
+          "base roll: hung pinned parent keeps the support roll along the "
+          "shaft (" + std::to_string(parentRoll) + " deg, " + err + ")");
+    if (!parentOk) {
+        return;
+    }
+
+    float worst = parentRoll;
+    int splits = 0;
+    for (int seed = 0; seed < 8; ++seed) {
+        PomadeSubdivideDesc params;
+        params.count = 3;
+        params.seed = seed;
+        params.splitMode = PomadeSplit_KMeans;
+        std::vector<PomadeTubeDesc> kids;
+        if (!PomadeSubdivideTubeCpu(parent, parentFrames, params, &kids,
+                                   &err) ||
+            kids.size() != 3) {
+            Check(false, "base roll: seed " + std::to_string(seed) +
+                             " subdivides (" + err + ")");
+            return;
+        }
+        ++splits;
+        for (PomadeTubeDesc const &kid : kids) {
+            std::vector<PomadeFrame> frames;
+            if (!PomadeTubeFramesCpu(kid, &frames, &err) ||
+                frames.size() != parentFrames.size() ||
+                kid.sections.size() != parent.sections.size()) {
+                Check(false, "base roll: child frames (" + err + ")");
+                return;
+            }
+            bool twistFree = kid.rootFramePinned &&
+                             kid.sections.front().twist == 0.0f;
+            for (size_t i = 0; i < frames.size(); ++i) {
+                float const fromRoot =
+                    std::fabs(rollDeg(frames[0], frames[i]));
+                float const vsParent =
+                    std::fabs(rollDeg(parentFrames[i], frames[i]));
+                worst = std::max(worst, std::max(fromRoot, vsParent));
+                twistFree = twistFree && fromRoot < 1.0f && vsParent < 1.0f;
+            }
+            if (!twistFree) {
+                Check(false,
+                      "base roll: child " + std::to_string(kid.childIndex) +
+                          " seed " + std::to_string(seed) +
+                          " twists at the base (" + std::to_string(worst) +
+                          " deg)");
+                return;
+            }
+        }
+    }
+    PomadeSubdivideDesc edge;
+    edge.count = 2;
+    edge.seed = 3;
+    edge.splitMode = PomadeSplit_Edge;
+    edge.edgeA = 0.37f;
+    edge.edgeB = -0.81f;
+    edge.edgeC = 0.19f;
+    std::vector<PomadeTubeDesc> halves;
+    bool edgeOk = PomadeSubdivideTubeCpu(parent, parentFrames, edge, &halves,
+                                        &err) &&
+                  halves.size() == 2;
+    for (PomadeTubeDesc const &kid : halves) {
+        std::vector<PomadeFrame> frames;
+        edgeOk = edgeOk && PomadeTubeFramesCpu(kid, &frames, &err) &&
+                 frames.size() == parentFrames.size();
+        for (size_t i = 0; edgeOk && i < frames.size(); ++i) {
+            float const fromRoot = std::fabs(rollDeg(frames[0], frames[i]));
+            float const vsParent =
+                std::fabs(rollDeg(parentFrames[i], frames[i]));
+            worst = std::max(worst, std::max(fromRoot, vsParent));
+            edgeOk = edgeOk && fromRoot < 1.0f && vsParent < 1.0f;
+        }
+    }
+    Check(splits == 8 && edgeOk && worst < 1.0f,
+          "base roll: subdivided children inherit the parent root roll (" +
+              std::to_string(worst) + " deg)");
+}
+
 void CheckK6MoveBudget();  // defined after main (needs no fixtures)
 
 int main()
@@ -1360,6 +1563,7 @@ int main()
     CheckK6EqualLayoutSectionResidual();
     CheckSubdivideCarriedPartition();
     CheckAlignSectionRing();
+    CheckSubdivideBaseRoll();
     CheckV0bHierarchyRecords();
     CheckK6MoveBudget();
     std::printf("%d failure(s)\n", g_failures);

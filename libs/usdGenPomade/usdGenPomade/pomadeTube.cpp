@@ -268,7 +268,74 @@ bool PomadeTubeFramesCpu(PomadeTubeDesc const &tube,
     f.bx = b[0];
     f.by = b[1];
     f.bz = b[2];
+    // K4's initial normal is PomadePerp3 of the material-space root tangent.
+    // frameReference is built so a spine exactly along the support normal
+    // hits a tangent with three distinct components and that choice matches
+    // the pinned axes. A hung shaft, or a child center offset inside one,
+    // moves the root tangent onto another least-axis tie. PomadePerp3 then
+    // rolls the whole chain by about a right angle. Replacing only frame 0
+    // left the root ring on the scalp and twisted the first span — the base
+    // twist after Hierarchy Subdivide. Rotation-minimising frames of one
+    // curve differ by a constant angle, so roll the carried chain onto the
+    // pinned normal. An already-aligned chain is left bit-identical.
+    PomadeFrame const carried = (*frames)[0];
     (*frames)[0] = f;
+    float tCurve[3] = {carried.tx, carried.ty, carried.tz};
+    float nPin[3] = {f.nx, f.ny, f.nz};
+    float const alongCurve = PomadeDot3(nPin, tCurve);
+    nPin[0] -= alongCurve * tCurve[0];
+    nPin[1] -= alongCurve * tCurve[1];
+    nPin[2] -= alongCurve * tCurve[2];
+    float const pinLen = PomadeLen3(nPin);
+    if (!(pinLen > 1e-8f)) {
+        return true;
+    }
+    nPin[0] /= pinLen;
+    nPin[1] /= pinLen;
+    nPin[2] /= pinLen;
+    float carriedN[3] = {carried.nx, carried.ny, carried.nz};
+    float carriedB[3] = {carried.bx, carried.by, carried.bz};
+    float const cosTheta = PomadeDot3(carriedN, nPin);
+    float const sinTheta = PomadeDot3(carriedB, nPin);
+    float const mag =
+        std::sqrt(cosTheta * cosTheta + sinTheta * sinTheta);
+    if (!(mag > 1e-8f)) {
+        return true;
+    }
+    float const c = cosTheta / mag;
+    float const s = sinTheta / mag;
+    // A few ulps of Q^T round-trip must not rotate a straight spine. A real
+    // least-axis flip is tens of degrees and still takes the correction.
+    if (c > 0.0f && std::fabs(s) < 1e-5f) {
+        return true;
+    }
+    for (int i = 1; i < nCv; ++i) {
+        PomadeFrame &fr = (*frames)[size_t(i)];
+        float fn[3] = {fr.nx, fr.ny, fr.nz};
+        float fb[3] = {fr.bx, fr.by, fr.bz};
+        float rn[3] = {c * fn[0] + s * fb[0], c * fn[1] + s * fb[1],
+                       c * fn[2] + s * fb[2]};
+        float rt[3] = {fr.tx, fr.ty, fr.tz};
+        float const rd = PomadeDot3(rn, rt);
+        rn[0] -= rd * rt[0];
+        rn[1] -= rd * rt[1];
+        rn[2] -= rd * rt[2];
+        float const rnl = PomadeLen3(rn);
+        if (!(rnl > 1e-12f)) {
+            continue;
+        }
+        rn[0] /= rnl;
+        rn[1] /= rnl;
+        rn[2] /= rnl;
+        float rb[3];
+        PomadeCross3(rt, rn, rb);
+        fr.nx = rn[0];
+        fr.ny = rn[1];
+        fr.nz = rn[2];
+        fr.bx = rb[0];
+        fr.by = rb[1];
+        fr.bz = rb[2];
+    }
     return true;
 }
 

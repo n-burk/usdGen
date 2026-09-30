@@ -251,8 +251,10 @@ bool PomadeCenterFramesCpu(float const *cx, float const *cy, float const *cz,
 // Descriptor-aware frame path. Identity frameReference preserves raw K4;
 // a transported descriptor evaluates K4 in its material frame then maps it
 // to world. A region-rooted descriptor still replaces frame zero with its
-// stored support-plane frame. All display, guide, pick and commit paths that
-// start from a PomadeTubeDesc must use this rather than raw K4 directly.
+// stored support-plane frame, and rolls every later frame so the chain
+// continues that root normal instead of PomadePerp3's least-axis choice.
+// All display, guide, pick and commit paths that start from a PomadeTubeDesc
+// must use this rather than raw K4 directly.
 bool PomadeTubeFramesCpu(PomadeTubeDesc const &tube,
                         std::vector<PomadeFrame> *frames, std::string *err);
 
