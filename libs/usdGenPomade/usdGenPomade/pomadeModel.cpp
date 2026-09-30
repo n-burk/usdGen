@@ -2953,14 +2953,68 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
                                0.5f * (a.v + b.v)});
     }
 
+    double mean = 0.0;
+    for (_RingPoint const &point : ring) {
+        mean += std::sqrt(double(point.u) * point.u +
+                          double(point.v) * point.v);
+    }
+    mean /= double(ring.size());
+    float const fittedRadius = float(mean);
+
+    // World down, projected into the support plane, is the hang. A scalp
+    // that faces up or down has no such direction; the region's in-plane
+    // axis still puts the second section perpendicular to the normal.
+    float const kWorldDown[3] = {0.0f, -1.0f, 0.0f};
+    float const downAlong = PomadeDot3(kWorldDown, pn);
+    float hang[3] = {kWorldDown[0] - pn[0] * downAlong,
+                     kWorldDown[1] - pn[1] * downAlong,
+                     kWorldDown[2] - pn[2] * downAlong};
+    float const hangLen = PomadeLen3(hang);
+    if (hangLen > 0.25f) {
+        hang[0] /= hangLen;
+        hang[1] /= hangLen;
+        hang[2] /= hangLen;
+    } else {
+        hang[0] = axisU[0];
+        hang[1] = axisU[1];
+        hang[2] = axisU[2];
+    }
+
+    // The first center clears the scalp along the normal and stays small
+    // (PomadeBraidSectionScale at t = 0). The second center has already
+    // run along the hang, so it sits below a vertical scalp and
+    // perpendicular to the normal. Later centers continue that hang. A
+    // small outward bow keeps the tube off the surface.
+    float const kRootLift = 0.07f;
+    float const kOutBow = 0.05f;
+    float const kSecondHang = 0.22f;
+    float const kTipHang = 0.98f;
+    float const lift = std::max(kRootLift * length, 0.40f * fittedRadius);
     out->centerX.assign(size_t(centerCount), 0.0f);
     out->centerY.assign(size_t(centerCount), 0.0f);
     out->centerZ.assign(size_t(centerCount), 0.0f);
     for (int i = 0; i < centerCount; ++i) {
-        float const s = float(i) / float(centerCount - 1);
-        out->centerX[size_t(i)] = float(cx) + pn[0] * length * s;
-        out->centerY[size_t(i)] = float(cy) + pn[1] * length * s;
-        out->centerZ[size_t(i)] = float(cz) + pn[2] * length * s;
+        float const u = float(i) / float(centerCount - 1);
+        float const bow = std::sin(u * 3.14159265f);
+        float const alongN = lift + length * kOutBow * bow;
+        float alongH = 0.0f;
+        if (i > 0) {
+            if (centerCount < 3) {
+                alongH = length * kTipHang;
+            } else if (i == 1) {
+                alongH = length * kSecondHang;
+            } else {
+                float const span = float(i - 1) / float(centerCount - 2);
+                alongH = length *
+                         (kSecondHang + (kTipHang - kSecondHang) * span);
+            }
+        }
+        out->centerX[size_t(i)] =
+            float(cx) + pn[0] * alongN + hang[0] * alongH;
+        out->centerY[size_t(i)] =
+            float(cy) + pn[1] * alongN + hang[1] * alongH;
+        out->centerZ[size_t(i)] =
+            float(cz) + pn[2] * alongN + hang[2] * alongH;
     }
     // Build Q from a reference tangent with three distinct magnitudes. A
     // local +Y spine would tie PomadePerp3's X/Z least-axis choice; after a
@@ -3006,9 +3060,9 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
     for (int r = 0; r < centerCount; ++r) {
         PomadeTubeSection &section = out->sections[size_t(r)];
         section.t = float(r) / float(centerCount - 1);
-        // Root t is 0, so this scale is exactly 1 and the root ring stays
-        // on the graph loop. Later sections belly out, then ease toward
-        // a smaller tip.
+        // t = 0 is the small root. Later sections belly out, then ease
+        // toward a smaller tip. The center column, not this scale, is
+        // what lifts the root off the scalp and drops the next ring.
         section.scale = PomadeBraidSectionScale(section.t);
         section.twist = 0.0f;
         section.u.resize(ring.size());
@@ -3018,14 +3072,8 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
             section.v[s] = ring[s].v;
         }
     }
-    double mean = 0.0;
-    for (_RingPoint const &point : ring) {
-        mean += std::sqrt(double(point.u) * point.u +
-                          double(point.v) * point.v);
-    }
-    mean /= double(ring.size());
     _diagnostic.clear();
-    *outRadius = float(mean);
+    *outRadius = fittedRadius;
     return true;
 }
 

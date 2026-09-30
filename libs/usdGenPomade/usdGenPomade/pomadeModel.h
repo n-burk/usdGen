@@ -363,12 +363,14 @@ public:
     // graph-loop CV count; an explicit 3..32 resolves to at least that many
     // slots, adding only edge samples so every drawn corner remains exact.
     // A loop needing more than 32 slots is refused.
-    // Section scales follow PomadeBraidSectionScale (root flush with the
-    // region, belly through the middle, smaller tip). When this is the
-    // first stub and the scalp has a single region that is a small patch
-    // on a large surface, the region's nodes are moved outward on the
-    // scalp first so the root footprint is a wide cap. Undo of that stub
-    // restores the region.
+    // Section scales follow PomadeBraidSectionScale (small root, belly
+    // through the middle, smaller tip). The first center sits off the
+    // scalp along the surface normal; the second runs perpendicular to
+    // that normal, world-down when down lies in the tangent plane. When
+    // this is the first stub and the scalp has a single region that is a
+    // small patch on a large surface, the region's nodes are moved
+    // outward on the scalp first so the tint covers a wide cap. Undo of
+    // that stub restores the region.
     // Pushes ONE undo step; it no longer clears the stack.
     bool BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                              float length);
@@ -819,8 +821,8 @@ public:
     static constexpr float kDefaultXrayOpacity = 0.25f;
     static constexpr float kFaintXrayOpacity = 0.10f;
     // Drawn spans between each pair of authored sections. One span is the
-    // old straight ruling; five more sample the section interpolation so
-    // the shell stays on those edges, including the open root on the scalp.
+    // chord; five more sample that same chord so the shell holds a hard
+    // edge at each authored ring instead of rounding through it.
     // Selectable rings stay on the authored knots (the publish stride).
     static constexpr int kDisplayExtraSpans = 5;
     static constexpr int kDefaultDisplaySegments = 1 + kDisplayExtraSpans;
@@ -984,7 +986,7 @@ public:
     // publish. GetUndoLabel(depth): depth 0 is the step Ctrl+Z would undo,
     // and NEGATIVE depths address the redo stack (-1 is the step Ctrl+Y
     // would redo), which is exactly what an Edit strip shows.
-    bool Redo(uint32_t *outDirty);
+    bool Redo(uint32_t *outDirty = nullptr);
     int GetRedoDepth() const;
     bool GetUndoLabel(int depth, std::string *out) const;
 
@@ -1011,12 +1013,14 @@ private:
     std::vector<int> _RegionKeyLocked(int regionId) const;
     // Root placement + boundary-fitted root section for a region: the
     // area-weighted centroid and normal of its claimed faces, a center
-    // column of `centerCount` CVs along that normal, and a root ring whose
-    // `ringVerts` CVs sit on the region boundary in the root plane (plan/17
-    // §5.2 "fitted to the boundary shape", plan/18 §7 G12).
+    // column of `centerCount` CVs (root lifted along that normal, the rest
+    // along the hang), and a root ring whose `ringVerts` CVs sit on the
+    // region boundary in the root plane (plan/17 §5.2 "fitted to the
+    // boundary shape", plan/18 §7 G12).
     // `outRadius` receives the mean fitted radius (the display width scale).
-    // Section scales follow PomadeBraidSectionScale. The root stays at 1
-    // so it remains flush with the region loop.
+    // Section scales follow PomadeBraidSectionScale. The root scale is
+    // small. The center column lifts that ring off the scalp and drops
+    // the next one along the hang.
     bool _RegionTubeDescLocked(int regionId, int centerCount, int ringVerts,
                                float length, PomadeTubeDesc *out,
                                float *outRadius);

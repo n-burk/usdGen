@@ -273,14 +273,20 @@ when it changes. Regions with more than 32 CVs keep their authored graph and
 report the 32-CV construction limit.
 
 A new region stub is a braid profile, written into the section scales the
-committer stores. The root ring stays at scale 1, flush with the region.
-Scale rises to a belly through the middle, then eases to a smaller tip.
-When the scalp has one region and that region is a small patch on a large
-surface, building the stub first moves the region's graph nodes outward on
-the scalp, so the tint and the tube root cover a wide cap. A region that
-already covers a fair share of the scalp stays where it was drawn, and so
-does a region that shares its boundary with another region. Undo of the
-stub puts the moved region back.
+committer stores. The first ring is small and sits off the scalp along the
+surface normal. The second ring is already larger and runs perpendicular
+to that normal — world-down when down lies in the tangent plane — and the
+rest of the tube continues that hang. Scale rises to a belly through the
+middle, then eases to a smaller tip. The display shell holds a hard edge
+at each authored ring: the spans between rings follow the chord, so the
+surface corners on the ring. When the scalp
+has one region and that region is a small patch on a large surface,
+building the stub first moves the region's graph nodes outward on the
+scalp, so the tint covers a wide cap. The first ring stays smaller than
+that patch and clear of the surface. A region that already covers a fair
+share of the scalp stays where it was drawn, and so does a region that
+shares its boundary with another region. Undo of the stub puts the moved
+region back.
 
 The component row picks what a click selects: **Whole tube** (`F8`, the
 body), **Center CV** (`F9`, the default), **Ring** (`F10`) or **Section CV**
@@ -355,8 +361,8 @@ Move, 15° for Rotate, 0.1 for Scale), **Free rotate ball (Rotate)**,
 **Prevent negative scale (Scale)**, **Grid size (hold X)** (1.0),
 **Manipulator size (+ / -)** (90 px, 20–400), **Soft selection falloff**,
 **Curve smoothness (display)** (default 6 spans between each pair of
-section rings: the old chord plus five extra samples, so the shell follows
-the sections and the open root stays on the scalp), **Ring CVs for new
+section rings: the chord plus five extra samples, holding a hard edge at
+each authored ring), **Ring CVs for new
 tubes**, **Selected section scale** (uniform scale for the selected rings,
 greyed with none).
 Gizmo settings are per session and not saved. Actions: **Match surface**
@@ -810,16 +816,19 @@ the new stage: bind a scalp mesh to continue.`
 * **Tube shell:** launch usdview on `examples/pomade-graph-scalp.usda`
   (`bin/launch_usdview.ps1`, or `"$PY" "$USD/bin/usdview"` after
   `source bin/_env.sh`), then **usdGen → Pomade → Open workspace**, bind
-  the scalp, draw a region and grow a tube. The shell should meet the
-  scalp along the root ring and show several facets between section rings
-  (six spans by default). Tube mode's Ring sub-mode draws one
-  selectable ring per authored section. **Curve smoothness (display)**
-  is that span count; a lower value draws a coarser shell. On
-  `examples/pomade-sphere-scalp.usda`, bind `/Scalp`, draw a small region
-  and grow the stub: the tinted patch and the tube root should cover a
-  wide cap of the sphere, and the shell should bulge through the middle
-  and taper toward the tip. The headless check is `testUsdGenPomadeTubes`
-  (`CheckDisplayShellFlush`, `CheckBraidSectionProfile`).
+  the scalp, draw a region and grow a tube. The shell should show a crisp
+  edge at each authored section ring, with several facets between those
+  rings (six spans by default: the chord plus five extra samples). Tube
+  mode's Ring sub-mode draws one selectable ring per authored section.
+  **Curve smoothness (display)** is that span count; a lower value draws
+  a coarser shell. On `examples/pomade-sphere-scalp.usda`, bind `/Scalp`,
+  draw a small region and grow the stub: the tinted patch should cover a
+  wide cap of the sphere, the first ring should be small and clear of the
+  scalp, and the next ring should sit below it, perpendicular to the
+  surface. The shell should corner on those rings, bulge through the
+  middle, and taper toward the tip. The headless check is
+  `testUsdGenPomadeTubes` (`CheckDisplayShellFlush`,
+  `CheckBraidSectionProfile`).
 * **Staged package:** T3 tests and the launcher import the package staged
   under `build/python`, not the source tree. After editing plugin python
   (or adding a test file) re-run the CMake configure

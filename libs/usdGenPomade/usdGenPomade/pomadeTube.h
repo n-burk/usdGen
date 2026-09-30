@@ -112,10 +112,11 @@ USDGEN_POMADE_HD inline float PomadeSoftWeight(float t, float center,
     return w * w * (3.0f - 2.0f * w);
 }
 
-// Section scale of a region stub along t in [0, 1]. The root is exactly 1
-// so the root ring stays on the graph loop. The value rises to a belly and
-// settles to a smaller tip. Hermite interpolation between authored sections
-// carries the same silhouette into the shell and into a committed groom.
+// Section scale of a region stub along t in [0, 1]. The root is small, so
+// the first ring is narrower than the region loop. The value rises to a
+// belly and settles to a smaller tip. Display tessellation holds a hard
+// edge at each authored sample of this curve (PomadeHeldLerp); it does not
+// round those knots together.
 USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
 {
     if (t < 0.0f) {
@@ -123,7 +124,7 @@ USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
     } else if (t > 1.0f) {
         t = 1.0f;
     }
-    float const kRoot = 1.0f;
+    float const kRoot = 0.38f;
     float const kPeak = 2.15f;
     float const kTip = 1.28f;
     float const kPeakT = 0.42f;
@@ -335,11 +336,10 @@ float PomadeSectionMeanRadius(PomadeTubeSection const &section);
 // Output grid: ((nSec - 1) * segmentsPerSpan + 1) rings x ringVerts verts,
 // ring-major. Each authored interval gets `segmentsPerSpan` spans, and the
 // row at the start of interval k is exactly section k (PomadeTessellationRingT),
-// so a scalp root and every later section stay flush with the shell even
-// when section parameters are not uniform. Sections interpolate along that
-// t by cubic Hermite of the section CV vectors (central differences inside,
-// one-sided at the ends — the PomadeEvalCenter rule); scale and twist take
-// the same path as scalars.
+// so every authored section stays on the shell even when section parameters
+// are not uniform. Between those rows the shell follows the chord
+// (PomadeHeldLerp / PomadeEvalCenterHeld): the ring is a hard edge, and the
+// extra spans sample that ruling instead of a curve that rounds through it.
 bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
                         std::vector<PomadeFrame> const &frames,
                         int segmentsPerSpan, std::vector<float> *positions,
@@ -596,6 +596,15 @@ USDGEN_POMADE_HD inline float PomadeHermite(float a, float b, float m0,
            (u3 - u2) * m1;
 }
 
+// Chord between two authored values. Display spans use this so a section
+// ring is a corner: the incoming slope is the previous chord and the
+// outgoing slope is the next one, and every sample between the rings lies
+// on that chord.
+USDGEN_POMADE_HD inline float PomadeHeldLerp(float a, float b, float u)
+{
+    return a + (b - a) * u;
+}
+
 // Parameter of display ring `ring` on a tube with `sectionCount` authored
 // sections. Interval k owns rings [k * segmentsPerSpan, (k + 1) * segmentsPerSpan],
 // and the shared endpoint is section k (or the tip, on the last ring). Knot
@@ -752,6 +761,33 @@ USDGEN_POMADE_HD inline void PomadeEvalCenter(float const *cx, float const *cy,
     out[0] = PomadeHermite(cx[i1], cx[i2], m0x, m1x, f);
     out[1] = PomadeHermite(cy[i1], cy[i2], m0y, m1y, f);
     out[2] = PomadeHermite(cz[i1], cz[i2], m0z, m1z, f);
+}
+
+// Polyline through the center CVs in the same parameterisation as
+// PomadeEvalCenter. An interior CV keeps the corner between its two
+// chords. A straight run stays on that line, matching PomadeEvalCenter.
+USDGEN_POMADE_HD inline void PomadeEvalCenterHeld(float const *cx,
+                                                float const *cy,
+                                                float const *cz, int n,
+                                                float t, float out[3])
+{
+    float const tc = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    if (n < 2) {
+        out[0] = n > 0 ? cx[0] : 0.0f;
+        out[1] = n > 0 ? cy[0] : 0.0f;
+        out[2] = n > 0 ? cz[0] : 0.0f;
+        return;
+    }
+    float const seg = tc * float(n - 1);
+    int i1 = int(seg);
+    if (i1 >= n - 1) {
+        i1 = n - 2;
+    }
+    int const i2 = i1 + 1;
+    float const f = seg - float(i1);
+    out[0] = PomadeHeldLerp(cx[i1], cx[i2], f);
+    out[1] = PomadeHeldLerp(cy[i1], cy[i2], f);
+    out[2] = PomadeHeldLerp(cz[i1], cz[i2], f);
 }
 
 // Normalised-lerp of the bracketing K4 frames at t in [0,1],

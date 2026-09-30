@@ -758,56 +758,28 @@ bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
         }
         PomadeTubeSection const &s0 = tube.sections[size_t(k)];
         PomadeTubeSection const &s1 = tube.sections[size_t(k + 1)];
-        PomadeTubeSection const &sP = tube.sections[size_t(k > 0 ? k - 1 : k)];
-        PomadeTubeSection const &sN =
-            tube.sections[size_t(k + 2 < nSec ? k + 2 : k + 1)];
         float const dt = s1.t > s0.t ? s1.t - s0.t : 1.0f;
         float f = (t - s0.t) / dt;
         f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-        // Central differences inside, one-sided at the ends (matches
-        // PomadeEvalCenter; straight tapers reproduce exactly).
-        bool const first = (k == 0);
-        bool const last = (k + 1 == nSec - 1);
-        float const m0sc = first ? s1.scale - s0.scale
-                                 : 0.5f * (s1.scale - sP.scale);
-        float const m1sc = last ? s1.scale - s0.scale
-                                : 0.5f * (sN.scale - s0.scale);
-        float const m0tw = first ? s1.twist - s0.twist
-                                 : 0.5f * (s1.twist - sP.twist);
-        float const m1tw = last ? s1.twist - s0.twist
-                                : 0.5f * (sN.twist - s0.twist);
-        float sc = PomadeHermite(s0.scale, s1.scale, m0sc, m1sc, f);
-        float tw = PomadeHermite(s0.twist, s1.twist, m0tw, m1tw, f);
+        // Chord between the two authored sections. A central-difference
+        // tangent would round the shell through the ring; the corner is
+        // the hard edge, and the extra spans stay on the ruling.
+        float sc = PomadeHeldLerp(s0.scale, s1.scale, f);
+        float tw = PomadeHeldLerp(s0.twist, s1.twist, f);
         if (!(sc > 1e-6f)) {
             sc = 1e-6f;
         }
         float const ct = std::cos(tw), st = std::sin(tw);
         float cp[3];
+        PomadeEvalCenterHeld(tube.centerX.data(), tube.centerY.data(),
+                            tube.centerZ.data(), nCv, t, cp);
         PomadeFrame fr;
-        std::string derr;
-        if (!PomadeSampleCenterCpu(tube, frames, t, &cp[0], &cp[1], &cp[2],
-                                 &fr, &derr)) {
-            return fail(derr.c_str());
-        }
+        PomadeNlerpFrame(frames.data(), nCv, t, &fr);
         float nA[3] = {fr.nx, fr.ny, fr.nz};
         float bA[3] = {fr.bx, fr.by, fr.bz};
         for (int s = 0; s < rv; ++s) {
-            float const m0u =
-                first ? s1.u[size_t(s)] - s0.u[size_t(s)]
-                      : 0.5f * (s1.u[size_t(s)] - sP.u[size_t(s)]);
-            float const m1u =
-                last ? s1.u[size_t(s)] - s0.u[size_t(s)]
-                     : 0.5f * (sN.u[size_t(s)] - s0.u[size_t(s)]);
-            float const m0v =
-                first ? s1.v[size_t(s)] - s0.v[size_t(s)]
-                      : 0.5f * (s1.v[size_t(s)] - sP.v[size_t(s)]);
-            float const m1v =
-                last ? s1.v[size_t(s)] - s0.v[size_t(s)]
-                     : 0.5f * (sN.v[size_t(s)] - s0.v[size_t(s)]);
-            float uu =
-                PomadeHermite(s0.u[size_t(s)], s1.u[size_t(s)], m0u, m1u, f);
-            float vv =
-                PomadeHermite(s0.v[size_t(s)], s1.v[size_t(s)], m0v, m1v, f);
+            float uu = PomadeHeldLerp(s0.u[size_t(s)], s1.u[size_t(s)], f);
+            float vv = PomadeHeldLerp(s0.v[size_t(s)], s1.v[size_t(s)], f);
             uu *= sc;
             vv *= sc;
             float const ru = uu * ct - vv * st;

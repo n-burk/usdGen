@@ -1459,11 +1459,18 @@ void CheckAutoTube()
         float x0 = 0, y0 = 0, z0 = 0, x3 = 0, y3 = 0, z3 = 0;
         model.GetCenterCV(0, &x0, &y0, &z0);
         model.GetCenterCV(3, &x3, &y3, &z3);
-        Check(Near(x0, 2.0f, 0.6f) && Near(z0, 2.0f, 0.6f),
-              "auto-tube: the root sits over the region centroid");
-        Check(y3 > y0 + 2.0f && Near(x3, x0, 1e-3f) &&
-                  Near(z3, z0, 1e-3f),
-              "auto-tube: the center rises along +Y (the grid normal)");
+        Check(Near(x0, 2.0f, 0.6f) && Near(z0, 2.0f, 0.6f) && y0 > 0.15f,
+              "auto-tube: the root sits over the region and clears the scalp");
+        float x1 = 0, y1 = 0, z1 = 0;
+        model.GetCenterCV(1, &x1, &y1, &z1);
+        float const legX = x1 - x0, legY = y1 - y0, legZ = z1 - z0;
+        float const leg = std::sqrt(legX * legX + legY * legY + legZ * legZ);
+        float const across =
+            std::sqrt(legX * legX + legZ * legZ);
+        Check(leg > 0.4f && across > 0.7f * leg &&
+                  std::fabs(legY) < 0.45f * leg,
+              "auto-tube: the second center is perpendicular to the grid "
+              "normal");
         // Mesh fill roots on the claimed faces.
         PomadeModel::FillParams params;
         params.density = 4.0f;
@@ -1637,16 +1644,17 @@ bool SectionScalesFollowBraid(usdGenPomade::PomadeModel const &model)
             tip = section.scale;
         }
     }
-    return Near(root, 1.0f, 1e-6f) && belly > root && belly > tip &&
-           tip > root;
+    return Near(root, PomadeBraidSectionScale(0.0f), 1e-5f) && root < 0.5f &&
+           belly > root && belly > tip && tip > root;
 }
 
 void CheckBraidSectionProfile()
 {
     using namespace usdGenPomade;
-    Check(Near(PomadeBraidSectionScale(0.0f), 1.0f, 1e-6f) &&
-              Near(PomadeBraidSectionScale(-0.4f), 1.0f, 1e-6f),
-          "braid scale: the root, and anything before it, is exactly 1");
+    Check(Near(PomadeBraidSectionScale(0.0f), 0.38f, 1e-6f) &&
+              Near(PomadeBraidSectionScale(-0.4f), 0.38f, 1e-6f) &&
+              PomadeBraidSectionScale(0.0f) < 0.5f,
+          "braid scale: the root, and anything before it, is small");
     Check(Near(PomadeBraidSectionScale(0.42f), 2.15f, 1e-5f) &&
               Near(PomadeBraidSectionScale(1.0f), 1.28f, 1e-5f) &&
               Near(PomadeBraidSectionScale(1.5f), 1.28f, 1e-5f),
@@ -1739,6 +1747,65 @@ void CheckBraidSectionProfile()
                   model.GetCenterCVCount() == 5 &&
                   SectionScalesFollowBraid(model),
               "braid scale: redo restores the wide cap and the profile");
+    }
+
+    // A vertical wall (normal along Z). The second center drops in world
+    // -Y, perpendicular to the surface, and the root is small and lifted
+    // off the wall.
+    {
+        Grid wall;
+        int const n = 8;
+        int const side = n + 1;
+        for (int iy = 0; iy < side; ++iy) {
+            for (int ix = 0; ix < side; ++ix) {
+                wall.points.push_back(float(ix));
+                wall.points.push_back(float(iy));
+                wall.points.push_back(0.0f);
+            }
+        }
+        for (int ix = 0; ix < n; ++ix) {
+            for (int iy = 0; iy < n; ++iy) {
+                wall.counts.push_back(4);
+                int const v00 = iy * side + ix;
+                wall.indices.push_back(v00);
+                wall.indices.push_back(v00 + side);
+                wall.indices.push_back(v00 + side + 1);
+                wall.indices.push_back(v00 + 1);
+            }
+        }
+        PomadeModel model;
+        float const inward[3] = {0.0f, 0.0f, -1.0f};
+        float const corners[4][3] = {
+            {3.0f, 3.0f, 2.0f},
+            {5.0f, 3.0f, 2.0f},
+            {5.0f, 5.0f, 2.0f},
+            {3.0f, 5.0f, 2.0f},
+        };
+        std::vector<int> ids;
+        bool placed = model.BindScalp(wall.points, wall.counts, wall.indices);
+        for (int i = 0; placed && i < 4; ++i) {
+            PomadeHit const hit = model.Raycast(corners[i], inward);
+            int const id = hit.hit ? model.GraphAddNode(hit) : -1;
+            placed = placed && id >= 0;
+            ids.push_back(id);
+        }
+        for (int i = 0; placed && i < 4; ++i) {
+            placed = placed &&
+                     model.GraphConnect(ids[size_t(i)],
+                                        ids[size_t((i + 1) % 4)]) >= 0;
+        }
+        placed = placed && model.Rasterise() &&
+                 model.GetGraph().RegionCount() == 1 &&
+                 model.BuildTubeFromRegion(0, 5, 0, 4.0f);
+        float x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+        PomadeTubeSection root, second;
+        placed = placed && model.GetCenterCV(0, &x0, &y0, &z0) &&
+                 model.GetCenterCV(1, &x1, &y1, &z1) &&
+                 model.GetSection(0, &root) && model.GetSection(1, &second);
+        Check(placed && std::fabs(z0) > 0.2f && root.scale < 0.5f &&
+                  second.scale > root.scale * 2.0f && y1 < y0 - 0.5f,
+              "braid layout: the root is small and off the wall, and the "
+              "second section hangs below it");
     }
 }
 
@@ -3086,6 +3153,80 @@ void CheckDisplayShellFlush()
         }
     }
     Check(ruling, "display: straight section edges stay on their rulings");
+
+    // An interior pinch must stay a corner. The sample one span before the
+    // middle ring lies on the chord (scale 0.375 on a 0.5 ring → radius
+    // 0.1875). A central-difference Hermite eases in and lands nearer 0.14.
+    {
+        PomadeTubeDesc pinch = tube;
+        std::vector<float> pinchPos, pinchNrm, pinchT;
+        bool pinchOk =
+            PomadeTessellateCpu(pinch, frames, spans, &pinchPos, &pinchNrm,
+                               &pinchT, &err);
+        auto ringRadius = [&](int ring) {
+            float const x = pinchPos[(size_t(ring) * 8) * 3 + 0];
+            float const z = pinchPos[(size_t(ring) * 8) * 3 + 2];
+            return std::sqrt(x * x + z * z);
+        };
+        int const mid = spans;
+        bool corner =
+            pinchOk && mid > 1 &&
+            size_t(mid + 1) * 8 * 3 < pinchPos.size();
+        if (corner) {
+            float const before = ringRadius(mid - 1);
+            float const at = ringRadius(mid);
+            float const after = ringRadius(mid + 1);
+            corner = before > 0.17f && before < 0.21f && after > 0.17f &&
+                     after < 0.21f && at > 0.10f && at < 0.16f &&
+                     before > at + 0.04f && after > at + 0.04f;
+        }
+        Check(corner,
+              "display: an interior section ring stays a hard corner");
+    }
+
+    // A right-angle center keeps the corner. The sample one span before
+    // the middle CV stays on the incoming chord (x = 0, y = 5/6), rather
+    // than the Catmull-Rom that leaves that chord.
+    {
+        PomadeTubeDesc bent;
+        bent.centerX = {0.0f, 0.0f, 1.0f};
+        bent.centerY = {0.0f, 1.0f, 1.0f};
+        bent.centerZ = {0.0f, 0.0f, 0.0f};
+        bent.ringVerts = 4;
+        float const twoPiBend = 6.28318530717958647692f;
+        for (int k = 0; k < 3; ++k) {
+            PomadeTubeSection section;
+            section.t = float(k) / 2.0f;
+            section.scale = 1.0f;
+            section.u.resize(4);
+            section.v.resize(4);
+            for (int i = 0; i < 4; ++i) {
+                float const angle = twoPiBend * float(i) / 4.0f;
+                section.u[size_t(i)] = 0.01f * std::cos(angle);
+                section.v[size_t(i)] = 0.01f * std::sin(angle);
+            }
+            bent.sections.push_back(std::move(section));
+        }
+        std::vector<PomadeFrame> bentFrames = FramesFor(bent);
+        std::vector<float> bentPos, bentNrm, bentT;
+        bool bentOk = PomadeTessellateCpu(bent, bentFrames, spans, &bentPos,
+                                         &bentNrm, &bentT, &err);
+        int const row = spans - 1;
+        double mx = 0.0, my = 0.0;
+        bool held = bentOk && row > 0 &&
+                    bentPos.size() >= size_t(row + 1) * 4 * 3;
+        if (held) {
+            for (int slot = 0; slot < 4; ++slot) {
+                size_t const o = (size_t(row) * 4 + size_t(slot)) * 3;
+                mx += bentPos[o + 0];
+                my += bentPos[o + 1];
+            }
+            mx /= 4.0;
+            my /= 4.0;
+            held = std::fabs(mx) < 0.02 && my > 0.80 && my < 0.86;
+        }
+        Check(held, "display: a center corner stays on its incoming chord");
+    }
 
     PomadeModel model;
     bool legacy =

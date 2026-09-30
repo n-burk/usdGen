@@ -729,49 +729,28 @@ __global__ void _TubeTessellateKernel(
     while (k + 1 < nSec - 1 && secT[k + 1] < t) {
         ++k;
     }
-    int const kP = k > 0 ? k - 1 : k;
-    int const kN = k + 2 < nSec ? k + 2 : k + 1;
     float const dt = secT[k + 1] > secT[k] ? secT[k + 1] - secT[k] : 1.0f;
     float f = (t - secT[k]) / dt;
     f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-    // Central differences inside, one-sided at the ends (matches the CPU
-    // twin exactly; straight tapers reproduce in every span).
-    bool const first = (k == 0);
-    bool const last = (k + 1 == nSec - 1);
-    float const m0sc = first ? secScale[k + 1] - secScale[k]
-                             : 0.5f * (secScale[k + 1] - secScale[kP]);
-    float const m1sc = last ? secScale[k + 1] - secScale[k]
-                            : 0.5f * (secScale[kN] - secScale[k]);
-    float const m0tw = first ? secTwist[k + 1] - secTwist[k]
-                             : 0.5f * (secTwist[k + 1] - secTwist[kP]);
-    float const m1tw = last ? secTwist[k + 1] - secTwist[k]
-                            : 0.5f * (secTwist[kN] - secTwist[k]);
-    float sc = PomadeHermite(secScale[k], secScale[k + 1], m0sc, m1sc, f);
-    float tw = PomadeHermite(secTwist[k], secTwist[k + 1], m0tw, m1tw, f);
+    // Chord between the two authored sections, matching PomadeTessellateCpu.
+    // The ring is a hard edge; the spans between it and the next ring stay
+    // on that ruling.
+    float sc = PomadeHeldLerp(secScale[k], secScale[k + 1], f);
+    float tw = PomadeHeldLerp(secTwist[k], secTwist[k + 1], f);
     if (!(sc > 1e-6f)) {
         sc = 1e-6f;
     }
     float const ct = cosf(tw), st = sinf(tw);
     float cp[3];
-    PomadeEvalCenter(cx, cy, cz, nCv, t, cp);
+    PomadeEvalCenterHeld(cx, cy, cz, nCv, t, cp);
     PomadeFrame fr;
     PomadeNlerpFrame(frames, nCv, t, &fr);
     float nA[3] = {fr.nx, fr.ny, fr.nz};
     float bA[3] = {fr.bx, fr.by, fr.bz};
     size_t const oU = size_t(k) * size_t(ringVerts) + size_t(s);
     size_t const oU1 = size_t(k + 1) * size_t(ringVerts) + size_t(s);
-    size_t const oUP = size_t(kP) * size_t(ringVerts) + size_t(s);
-    size_t const oUN = size_t(kN) * size_t(ringVerts) + size_t(s);
-    float const m0u =
-        first ? secU[oU1] - secU[oU] : 0.5f * (secU[oU1] - secU[oUP]);
-    float const m1u =
-        last ? secU[oU1] - secU[oU] : 0.5f * (secU[oUN] - secU[oU]);
-    float const m0v =
-        first ? secV[oU1] - secV[oU] : 0.5f * (secV[oU1] - secV[oUP]);
-    float const m1v =
-        last ? secV[oU1] - secV[oU] : 0.5f * (secV[oUN] - secV[oU]);
-    float uu = PomadeHermite(secU[oU], secU[oU1], m0u, m1u, f) * sc;
-    float vv = PomadeHermite(secV[oU], secV[oU1], m0v, m1v, f) * sc;
+    float uu = PomadeHeldLerp(secU[oU], secU[oU1], f) * sc;
+    float vv = PomadeHeldLerp(secV[oU], secV[oU1], f) * sc;
     float const ru = uu * ct - vv * st;
     float const rvv = uu * st + vv * ct;
     size_t const o = size_t(v) * 3;
