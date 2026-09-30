@@ -422,8 +422,9 @@ public:
     bool RelaxCenter(float strength, int iterations);
     bool SnapRootToScalp();
     // Display-shell spans between authored sections, in [1, 16]. The
-    // default (kDefaultDisplaySegments) is the single ruling plus
-    // kDisplayExtraSpans. It does not move section or CV manipulators.
+    // default (kDefaultDisplaySegments) interpolates the chord between
+    // those rings and holds a hard edge on each authored knot. It does
+    // not move section or CV manipulators.
     bool SetDisplaySegments(int segments);
     int GetDisplaySegments() const;
     // The scalp-graph region this tube is rooted in (-1 = unrooted, disc
@@ -820,11 +821,11 @@ public:
     // other level behind it.
     static constexpr float kDefaultXrayOpacity = 0.25f;
     static constexpr float kFaintXrayOpacity = 0.10f;
-    // Drawn spans between each pair of authored sections. One span is the
-    // chord; five more sample that same chord so the shell holds a hard
-    // edge at each authored ring instead of rounding through it.
-    // Selectable rings stay on the authored knots (the publish stride).
-    static constexpr int kDisplayExtraSpans = 5;
+    // Drawn spans between each pair of authored sections. Four samples of
+    // the chord hold a hard edge at each authored ring and interpolate
+    // between them, without the denser six-span shell. Selectable rings
+    // stay on the authored knots (the publish stride).
+    static constexpr int kDisplayExtraSpans = 3;
     static constexpr int kDefaultDisplaySegments = 1 + kDisplayExtraSpans;
     // Per-level (1-based) visibility and x-ray. A change marks Display
     // dirty and bumps the version; an untouched level reads the default
@@ -1013,14 +1014,14 @@ private:
     std::vector<int> _RegionKeyLocked(int regionId) const;
     // Root placement + boundary-fitted root section for a region: the
     // area-weighted centroid and normal of its claimed faces, a center
-    // column of `centerCount` CVs (root lifted along that normal, the rest
-    // along the hang), and a root ring whose `ringVerts` CVs sit on the
-    // region boundary in the root plane (plan/17 §5.2 "fitted to the
+    // column of `centerCount` CVs (the root seated on that centroid, the
+    // rest along the hang), and a root ring whose `ringVerts` CVs sit on
+    // the region boundary in the root plane (plan/17 §5.2 "fitted to the
     // boundary shape", plan/18 §7 G12).
     // `outRadius` receives the mean fitted radius (the display width scale).
     // Section scales follow PomadeBraidSectionScale. The root scale is
-    // small. The center column lifts that ring off the scalp and drops
-    // the next one along the hang.
+    // small and its center stays on the growth surface. The next center
+    // drops along the hang.
     bool _RegionTubeDescLocked(int regionId, int centerCount, int ringVerts,
                                float length, PomadeTubeDesc *out,
                                float *outRadius);

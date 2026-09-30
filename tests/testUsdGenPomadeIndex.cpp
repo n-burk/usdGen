@@ -1200,10 +1200,28 @@ main(int argc, char **argv)
                   "Tube/Section shows every ring");
         }
 
-        // Tube / Center, Hierarchy, Sculpt: the ladder of two x-ray
-        // strengths, centers everywhere.
-        char const *ladder[3][2] = {
-            {"tube", "center"}, {"hierarchy", ""}, {"sculpt", ""}};
+        // Tube / Center: the default tube view. The focused body is opaque
+        // so the shell reads as a solid mesh; center dots stay on, and the
+        // levels behind it ghost.
+        {
+            PomadeModel::LevelDisplay const focused =
+                policy("tube", "center", 2, 2);
+            PomadeModel::LevelDisplay const other =
+                policy("tube", "center", 1, 2);
+            Check(!focused.xray && focused.centers && focused.centerCVDots &&
+                      !focused.ringCVDots,
+                  "Tube/Center keeps the focused level opaque with center dots");
+            Check(other.xray &&
+                      other.xrayOpacity == PomadeModel::kFaintXrayOpacity &&
+                      other.centers,
+                  "Tube/Center x-rays the levels behind it at 10 %");
+            Check(rings("tube", "center") == PomadeModel::Rings_Selected,
+                  "Tube/Center rings follow the selection");
+        }
+
+        // Hierarchy, Sculpt: the ladder of two x-ray strengths, centers
+        // everywhere.
+        char const *ladder[2][2] = {{"hierarchy", ""}, {"sculpt", ""}};
         for (auto const &pair : ladder) {
             PomadeModel::LevelDisplay const focused =
                 policy(pair[0], pair[1], 2, 2);
@@ -1972,8 +1990,9 @@ main(int argc, char **argv)
               "V9: Tube/Object hides all component dots");
         Check(Pomade_SetDisplayPolicy(dc, "tube", "center", 2) == POMADE_OK &&
                   Pomade_Publish(dc, 0) >= 1 &&
-                  visibleOf(dCVs2) && !visibleOf(dRingCVs2),
-              "V9: Tube/Center shows only center CV dots");
+                  visibleOf(dCVs2) && !visibleOf(dRingCVs2) &&
+                  xrayOf(dTubes2) == 0.0f,
+              "V9: Tube/Center shows only center CV dots on an opaque body");
 
         // Tube / Ring: focused opaque with every ring, others ghosted, and
         // only section vertices are displayed as point controls.

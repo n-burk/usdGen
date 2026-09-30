@@ -48,8 +48,8 @@ failures = 0
 # x in [1, 3], z in [1, 3] square, which covers the four middle faces.
 RECT = ((1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0))
 CENTRE = (2.0, 2.0)
-# pomadeTube.DEFAULT_RINGS / DEFAULT_LENGTH: what the G14 stub builds with.
-STUB_CVS = 5
+# pomadeTube.BRAID_SECTIONS / DEFAULT_LENGTH: what the G14 stub builds with.
+STUB_CVS = 4
 STUB_LENGTH = 4.0
 
 

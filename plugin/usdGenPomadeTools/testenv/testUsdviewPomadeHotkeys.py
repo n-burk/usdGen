@@ -50,7 +50,7 @@ def testenvDir():
 
 
 RECT = ((1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0))
-STUB_CVS = 5
+STUB_CVS = 4
 
 # The sub-mode letters each mode documents (pomadeModes tables), as
 # (key, sub-mode id). Hierarchy's W/E/R are Tube jumps, not letters.

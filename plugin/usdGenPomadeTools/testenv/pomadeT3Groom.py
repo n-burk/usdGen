@@ -4,7 +4,7 @@
 # TubeActions starts the same way the artist does: select /Scalp, open the
 # workspace, bind it, then press-drag-release a Draw stroke round the
 # middle square of examples/pomade-graph-scalp.usda, which leaves
-# graphCounts() == (4, 4, 1) and a 5-CV L1 stub (G14). pomadeT3 (TS-01)
+# graphCounts() == (4, 4, 1) and a 4-CV L1 stub (G14). pomadeT3 (TS-01)
 # supplies the drivers; this module only strings them into that fixture so
 # the four scripts do not each grow their own copy of it.
 #
@@ -21,7 +21,7 @@ from pomadeT3 import check, info, wait
 # The scalp is the 4x4 quad grid in XZ at y = 0; the stroke is the middle
 # square, which covers the four middle faces.
 RECT = ((1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0))
-STUB_CVS = 5
+STUB_CVS = 4
 
 
 class Groom(object):
@@ -161,7 +161,7 @@ class Groom(object):
         return self.session.graphCounts()
 
     def build(self):
-        """Bind, then stroke RECT: (4, 4, 1) and the 5-CV stub."""
+        """Bind, then stroke RECT: (4, 4, 1) and the 4-CV stub."""
         if not self.open():
             return False
         counts = self.stroke()

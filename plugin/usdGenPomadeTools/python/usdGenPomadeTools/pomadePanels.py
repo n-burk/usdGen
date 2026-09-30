@@ -768,11 +768,10 @@ def _tubeDescriptors(state):
             "displaySegments", int, "Pomade_GetDisplaySegments",
             "Pomade_SetDisplaySegments", min=1, max=8, step=1,
             tooltip="Drawn spans between each pair of section rings. "
-                    "6, the default, places five extra rings along each "
-                    "interval so the shell follows the sections, including "
-                    "the open root on the scalp. Display only: the saved "
-                    "groom does not change, and the selectable rings stay "
-                    "on the authored sections."),
+                    "4, the default, interpolates the chord between those "
+                    "rings and holds a hard edge at each authored section. "
+                    "Display only: the saved groom does not change, and the "
+                    "selectable rings stay on the authored sections."),
         _descriptor("ringCvCount", "Ring CVs for new tubes", "enum",
                    _ringCvCountGet, _ringCvCountSet,
                    choices=pomadeTube.REGION_RING_VERT_CHOICES,

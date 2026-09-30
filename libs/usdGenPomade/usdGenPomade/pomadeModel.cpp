@@ -2980,23 +2980,22 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
         hang[2] = axisU[2];
     }
 
-    // The first center clears the scalp along the normal and stays small
-    // (PomadeBraidSectionScale at t = 0). The second center has already
-    // run along the hang, so it sits below a vertical scalp and
-    // perpendicular to the normal. Later centers continue that hang. A
-    // small outward bow keeps the tube off the surface.
-    float const kRootLift = 0.07f;
+    // The root center is the scalp point itself: the first ring is small
+    // (PomadeBraidSectionScale at t = 0) and seated on the growth surface.
+    // The second center has already run along the hang, so it sits below a
+    // vertical scalp and perpendicular to the normal. Later centers
+    // continue that hang. A small outward bow, starting after the root,
+    // keeps the body off the surface without opening a gap at the wall.
     float const kOutBow = 0.05f;
     float const kSecondHang = 0.22f;
     float const kTipHang = 0.98f;
-    float const lift = std::max(kRootLift * length, 0.40f * fittedRadius);
     out->centerX.assign(size_t(centerCount), 0.0f);
     out->centerY.assign(size_t(centerCount), 0.0f);
     out->centerZ.assign(size_t(centerCount), 0.0f);
     for (int i = 0; i < centerCount; ++i) {
         float const u = float(i) / float(centerCount - 1);
         float const bow = std::sin(u * 3.14159265f);
-        float const alongN = lift + length * kOutBow * bow;
+        float const alongN = (i == 0) ? 0.0f : length * kOutBow * bow;
         float alongH = 0.0f;
         if (i > 0) {
             if (centerCount < 3) {
@@ -3060,9 +3059,10 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
     for (int r = 0; r < centerCount; ++r) {
         PomadeTubeSection &section = out->sections[size_t(r)];
         section.t = float(r) / float(centerCount - 1);
-        // t = 0 is the small root. Later sections belly out, then ease
-        // toward a smaller tip. The center column, not this scale, is
-        // what lifts the root off the scalp and drops the next ring.
+        // t = 0 is the small root, seated on the growth surface. Later
+        // sections belly out, then ease toward a smaller tip. The center
+        // column drops the next ring along the hang; it does not lift
+        // the root.
         section.scale = PomadeBraidSectionScale(section.t);
         section.twist = 0.0f;
         section.u.resize(ring.size());
@@ -11188,8 +11188,17 @@ PomadePolicyLevelDisplay(int displayMode, int level, int focusLevel)
         out.xrayOpacity = PomadeModel::kDefaultXrayOpacity;
         return out;
     case PomadeDisplayMode_TubeCenter:
+        // The default Tube view. The focused body is a solid shaded mesh;
+        // center curves stay published, and a selected tube's rings stay
+        // on the surface so they can still be picked. Levels behind the
+        // focus ghost, so a parent does not hide the child.
         out.centerCVDots = true;
         out.ringCVDots = false;
+        if (!focused) {
+            out.xray = true;
+            out.xrayOpacity = PomadeModel::kFaintXrayOpacity;
+        }
+        return out;
     case PomadeDisplayMode_Hierarchy:
     case PomadeDisplayMode_Sculpt:
         out.xray = true;

@@ -6,11 +6,12 @@
 //   * K4: straight tube frames (T=+Y, orthonormal), bent tube frames vary
 //     smoothly and stay orthonormal, coincident CVs keep the normal;
 //   * K5: section rings land on their circles, twist rotates, scale
-//     scales, Hermite mid-spans interpolate, ring counts follow the span
+//     scales, chord spans interpolate, ring counts follow the span
 //     rule, degenerate input fails loudly;
-//   * the display shell puts five extra spans between each authored
-//     section, keeps those section rows flush (including a non-uniform
-//     parameter), and leaves selectable rings on the authored knots;
+//   * the display shell puts three extra spans between each authored
+//     section (four spans in all), keeps those section rows flush
+//     (including a non-uniform parameter), and leaves selectable rings
+//     on the authored knots;
 //   * K8: disc counts are exact, roots sit in the unit disc, the stream
 //     is deterministic per (tubeId, seed), freeze keeps the prefix;
 //   * K9: root CVs sit on their roots, edgeBias pushes/pulls the radius,
@@ -1459,8 +1460,9 @@ void CheckAutoTube()
         float x0 = 0, y0 = 0, z0 = 0, x3 = 0, y3 = 0, z3 = 0;
         model.GetCenterCV(0, &x0, &y0, &z0);
         model.GetCenterCV(3, &x3, &y3, &z3);
-        Check(Near(x0, 2.0f, 0.6f) && Near(z0, 2.0f, 0.6f) && y0 > 0.15f,
-              "auto-tube: the root sits over the region and clears the scalp");
+        Check(Near(x0, 2.0f, 0.6f) && Near(z0, 2.0f, 0.6f) &&
+                  std::fabs(y0) < 1e-3f,
+              "auto-tube: the root sits over the region, seated on the scalp");
         float x1 = 0, y1 = 0, z1 = 0;
         model.GetCenterCV(1, &x1, &y1, &z1);
         float const legX = x1 - x0, legY = y1 - y0, legZ = z1 - z0;
@@ -1687,11 +1689,12 @@ void CheckBraidSectionProfile()
             model.Rasterise() && model.GetGraph().RegionCount() == 1;
         std::vector<std::array<float, 3>> const before =
             NodePositions(model, ids);
-        Check(placed && model.BuildTubeFromRegion(0, 5, 0, 3.0f) &&
+        Check(placed && model.BuildTubeFromRegion(0, 4, 0, 3.0f) &&
+                  model.GetSectionCount() == 4 &&
                   NodesUnmoved(model, ids, before) &&
                   SectionScalesFollowBraid(model),
               "braid scale: a fair-sized region keeps its footprint and "
-              "takes the profile");
+              "takes the four-section profile");
     }
 
     // Two tiny regions share the scalp, so neither footprint moves.
@@ -1708,11 +1711,12 @@ void CheckBraidSectionProfile()
         ids.insert(ids.end(), second.begin(), second.end());
         std::vector<std::array<float, 3>> const before =
             NodePositions(model, ids);
-        Check(placed && model.BuildTubeFromRegion(0, 5, 0, 3.0f) &&
+        Check(placed && model.BuildTubeFromRegion(0, 4, 0, 3.0f) &&
+                  model.GetSectionCount() == 4 &&
                   NodesUnmoved(model, ids, before) &&
                   SectionScalesFollowBraid(model),
               "braid scale: a shared boundary stays put while the stub "
-              "still takes the profile");
+              "still takes the four-section profile");
     }
 
     // One tiny patch on a large scalp grows before the stub is built.
@@ -1729,7 +1733,7 @@ void CheckBraidSectionProfile()
         int const beforeFaces = ClaimedRegionFaces(model, 0);
         std::vector<std::array<float, 3>> const before =
             NodePositions(model, ids);
-        bool const built = placed && model.BuildTubeFromRegion(0, 5, 0, 4.0f);
+        bool const built = placed && model.BuildTubeFromRegion(0, 4, 0, 4.0f);
         float const afterRadius = MeanNodeRadius(model, ids);
         int const afterFaces = ClaimedRegionFaces(model, 0);
         Check(built && beforeRadius > 0.0f &&
@@ -1744,14 +1748,16 @@ void CheckBraidSectionProfile()
               "braid scale: undo of the stub restores the small region");
         Check(model.Redo() &&
                   MeanNodeRadius(model, ids) >= beforeRadius * 2.5f &&
-                  model.GetCenterCVCount() == 5 &&
+                  model.GetCenterCVCount() == 4 &&
+                  model.GetSectionCount() == 4 &&
                   SectionScalesFollowBraid(model),
-              "braid scale: redo restores the wide cap and the profile");
+              "braid scale: redo restores the wide cap and the four-section "
+              "profile");
     }
 
     // A vertical wall (normal along Z). The second center drops in world
-    // -Y, perpendicular to the surface, and the root is small and lifted
-    // off the wall.
+    // -Y, perpendicular to the surface. The root stays small and seated
+    // on the wall: no normal lift.
     {
         Grid wall;
         int const n = 8;
@@ -1796,16 +1802,18 @@ void CheckBraidSectionProfile()
         }
         placed = placed && model.Rasterise() &&
                  model.GetGraph().RegionCount() == 1 &&
-                 model.BuildTubeFromRegion(0, 5, 0, 4.0f);
+                 model.BuildTubeFromRegion(0, 4, 0, 4.0f);
         float x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
         PomadeTubeSection root, second;
         placed = placed && model.GetCenterCV(0, &x0, &y0, &z0) &&
                  model.GetCenterCV(1, &x1, &y1, &z1) &&
                  model.GetSection(0, &root) && model.GetSection(1, &second);
-        Check(placed && std::fabs(z0) > 0.2f && root.scale < 0.5f &&
-                  second.scale > root.scale * 2.0f && y1 < y0 - 0.5f,
-              "braid layout: the root is small and off the wall, and the "
-              "second section hangs below it");
+        Check(placed && model.GetSectionCount() == 4 &&
+                  model.GetCenterCVCount() == 4 && std::fabs(z0) < 1e-3f &&
+                  root.scale < 0.5f && second.scale > root.scale * 2.0f &&
+                  y1 < y0 - 0.5f,
+              "braid layout: four sections, the root small and seated on "
+              "the wall, the second section hanging below it");
     }
 }
 
@@ -3047,10 +3055,11 @@ void CheckPerTubeAbi()
 void CheckDisplayShellFlush()
 {
     using namespace usdGenPomade;
-    Check(PomadeModel::kDisplayExtraSpans == 5 &&
+    Check(PomadeModel::kDisplayExtraSpans == 3 &&
+              PomadeModel::kDefaultDisplaySegments == 4 &&
               PomadeModel::kDefaultDisplaySegments ==
                   1 + PomadeModel::kDisplayExtraSpans,
-          "display: five extra spans between each pair of sections");
+          "display: four spans between each pair of sections");
 
     // Section 1 sits at t=0.12 and is much smaller than its neighbours.
     // A uniform parameter across the whole tube would draw that grid row
@@ -3185,8 +3194,8 @@ void CheckDisplayShellFlush()
     }
 
     // A right-angle center keeps the corner. The sample one span before
-    // the middle CV stays on the incoming chord (x = 0, y = 5/6), rather
-    // than the Catmull-Rom that leaves that chord.
+    // the middle CV stays on the incoming chord (x = 0, y = (spans-1)/spans),
+    // rather than a smooth interpolant that leaves that chord.
     {
         PomadeTubeDesc bent;
         bent.centerX = {0.0f, 0.0f, 1.0f};
@@ -3223,7 +3232,9 @@ void CheckDisplayShellFlush()
             }
             mx /= 4.0;
             my /= 4.0;
-            held = std::fabs(mx) < 0.02 && my > 0.80 && my < 0.86;
+            double const along =
+                double(spans - 1) / double(spans);
+            held = std::fabs(mx) < 0.02 && std::fabs(my - along) < 0.03;
         }
         Check(held, "display: a center corner stays on its incoming chord");
     }

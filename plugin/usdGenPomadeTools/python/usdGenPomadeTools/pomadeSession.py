@@ -1755,7 +1755,7 @@ class PomadeSession:
             # A region that claims no face (it lost its interior to a link,
             # or K3 has not reached it) refuses; the rest still build.
             if self.dll.Pomade_BuildTubeFromRegion(
-                    self._model, regionId, pomadeTube.DEFAULT_RINGS,
+                    self._model, regionId, pomadeTube.BRAID_SECTIONS,
                     ringVerts,
                     ctypes.c_float(pomadeTube.DEFAULT_LENGTH)) \
                     == pomadeLib.POMADE_OK:

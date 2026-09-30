@@ -420,7 +420,7 @@ def run(appController):
           "the drag stroked the outer closed region (%r)"
           % (session.graphCounts(),))
     cvCount = int(session.dll.Pomade_GetCenterCVCount(session.model))
-    check(cvCount == 5,
+    check(cvCount == 4,
           "G14: the closed region got a tube stub on the graph release "
           "(%d center CVs)" % cvCount)
     check(int(session.dll.Pomade_GetTubeRegionId(session.model)) == 0,
@@ -485,8 +485,8 @@ def run(appController):
     check(levelInfo(session, 2) is None,
           "and there is no L2 anywhere")
     for t in sibs:
-        check(len(tubeCenters(session, t)) == 5,
-              "sibling %d is a 5-CV stub" % t)
+        check(len(tubeCenters(session, t)) == 4,
+              "sibling %d is a 4-CV stub" % t)
 
     # The region map regions the tube interiors: with the tubes hidden,
     # each quadrant tints in its own clump colour, all four distinct.

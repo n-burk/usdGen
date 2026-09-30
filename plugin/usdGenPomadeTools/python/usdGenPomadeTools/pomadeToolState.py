@@ -72,7 +72,7 @@ class PomadeToolState:
     gizmoSettings:  object = None
     softCenter:     float = 0.0          # soft-selection center in t
     softRadius:     float = 0.0          # 0 = exact CV only
-    displaySegments: int = 6             # spans between sections (1 ruling + 5)
+    displaySegments: int = 4             # spans between sections (1 ruling + 3)
     showGeneratedCurves: bool = True     # persistent guide-curve visibility
     # Fill mode (P3, plan/17 section 5.3).
     fillSubMode:    str = ""             # "" = none; one of FILL_SUBMODES
