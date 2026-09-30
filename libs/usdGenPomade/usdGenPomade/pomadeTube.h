@@ -167,6 +167,10 @@ struct PomadeTubeDesc {
     // region.  Ordinary and legacy tubes leave this false and use pure K4.
     bool rootFramePinned = false;
     PomadeFrame rootFrame;
+    // Derived from the bound growth surface, never serialized. The planar
+    // authoring chart is retained, while its displayed root boundary follows
+    // the scalp in 3D. Recomputed after hydrate, edits and hierarchy splits.
+    std::vector<float> rootSurfaceOffsets;  // ringVerts world-space XYZ deltas
     // Proper local-to-world K4 material-frame reference.  Identity preserves
     // the historic world-axis bootstrap bit-for-bit.  A rigid region move
     // composes its rotation on the left, so K4's local chart and every
@@ -186,6 +190,26 @@ struct PomadeTubeDesc {
     // and unrelated parent slots untouched.
     std::vector<PomadeParentBoundaryBinding> inheritedBoundaryBindings;
 };
+
+// The first/last constructed rows are holding edges close to the end rings.
+// They do not add controls or alter the exact authored-row stride.
+USDGEN_POMADE_HD inline float PomadeDisplaySpanFraction(
+    int row, int segments, int span, int spanCount)
+{
+    float const f = float(row) / float(segments);
+    if (segments < 3) return f;
+    if (span == 0 && row == 1) return 0.25f / float(segments);
+    if (span == spanCount - 1 && row == segments - 1)
+        return 1.0f - 0.25f / float(segments);
+    return f;
+}
+
+USDGEN_POMADE_HD inline float PomadeRootAttachmentWeight(float t, float end)
+{
+    if (!(end > 0.0f) || t >= end) return 0.0f;
+    float const f = t > 0.0f ? t / end : 0.0f;
+    return 1.0f - f * f * (3.0f - 2.0f * f);
+}
 
 // Fill parameters (plan/17 §2.1 FillParams, P3 form with edgeBias).
 enum class PomadeGuideSampler : uint8_t {
@@ -274,8 +298,9 @@ bool PomadeSampleCenterCpu(PomadeTubeDesc const &tube,
 
 // Evaluate one exact K5 cross-section at t. The output is ringVerts world
 // positions in authored slot order, including Hermite U/V, scale and twist.
-// It is shared by tube tessellation, guide material sampling and sparse
-// output rails so each consumer agrees at section endpoints and interiors.
+// Guide material sampling and sparse output rails share this authoring chart.
+// Display tessellation additionally applies surface attachment and end holding
+// rows; those corrections do not change the stored chart or guide bindings.
 bool PomadeSampleTubeRingCpu(PomadeTubeDesc const &tube,
                             std::vector<PomadeFrame> const &frames, float t,
                             std::vector<float> *positions,
@@ -296,6 +321,12 @@ bool PomadeTriangulateSectionSlotsCpu(
 // inside its visible core rather than from an outer cage edge.
 bool PomadeCenterHandlePointCpu(PomadeTubeDesc const &tube, int centerCV,
                                float *px, float *py, float *pz,
+                               std::string *err);
+// Batch callers reuse frames from this exact descriptor instead of rebuilding
+// the complete transported frame column for every center handle.
+bool PomadeCenterHandlePointCpu(PomadeTubeDesc const &tube,
+                               std::vector<PomadeFrame> const &frames,
+                               int centerCV, float *px, float *py, float *pz,
                                std::string *err);
 
 // Mean ring radius of one section (used to normalise root coordinates).

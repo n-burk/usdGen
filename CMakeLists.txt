@@ -1936,7 +1936,7 @@ target_link_libraries(testUsdGenSurfaceCageInterpolate PRIVATE usdGen usdGen_pte
 add_test(NAME testUsdGenSurfaceCageInterpolate COMMAND testUsdGenSurfaceCageInterpolate)
 set_tests_properties(testUsdGenSurfaceCageInterpolate PROPERTIES
     LABELS "T0;maps;sources" TIMEOUT 120)
-# The function library against Disney's own SeExpr2. This is the only test that
+# The function library against upstream SeExpr2. This is the only test that
 # links the vendored frontend archive directly: expressions/exprMath.h claims to
 # reproduce SeExpr2's builtins for the device, and the claim is only worth
 # something if it is checked against the original. The include directory is
@@ -2411,6 +2411,15 @@ if(_usdgen_test_python AND EXISTS "${USD_INSTALL_DIR}/bin/testusdview")
             "${CMAKE_CURRENT_SOURCE_DIR}/examples/pomade-single-quad.usda")
     set_tests_properties(testUsdviewPomadeCvRegions PROPERTIES
         LABELS "T3;pomade;tools;usdview;cv-regions" TIMEOUT 300
+        FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
+        ENVIRONMENT_MODIFICATION "${_usdgen_pomade_plugin_env};${_usdgen_pomade_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPomade>")
+    add_test(NAME testUsdviewPomadeTubeProfile
+        COMMAND "${_usdgen_test_python}" "${USD_INSTALL_DIR}/bin/testusdview"
+            --testScript "${CMAKE_CURRENT_SOURCE_DIR}/plugin/usdGenPomadeTools/testenv/testUsdviewPomadeTubeProfile.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/examples/pomade-sphere-scalp.usda")
+    set_tests_properties(testUsdviewPomadeTubeProfile PROPERTIES
+        LABELS "T3;pomade;tools;usdview;tube-profile" TIMEOUT 180
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         FAIL_REGULAR_EXPRESSION "FAIL:|Traceback"
         ENVIRONMENT_MODIFICATION "${_usdgen_pomade_plugin_env};${_usdgen_pomade_python_env};PATH=path_list_prepend:$<TARGET_FILE_DIR:usdGenPomade>")
     # SS-01: File > Reopen keeps the live model (graph, undo stack and the

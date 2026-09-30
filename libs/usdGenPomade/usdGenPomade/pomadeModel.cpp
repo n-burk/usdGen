@@ -41,6 +41,7 @@ struct PomadeModel::_Device {
     usdGen::gpu::DeviceBuffer<float> sectionV;
     usdGen::gpu::DeviceBuffer<float> sectionScale;
     usdGen::gpu::DeviceBuffer<float> sectionTwist;
+    usdGen::gpu::DeviceBuffer<float> rootSurfaceOffsets;
     usdGen::gpu::DeviceBuffer<float> ringT;
     // K11 production pick caches (TN-2): guide CVs uploaded once per
     // guide generation, reduction scratch sized per pick (same-size
@@ -855,6 +856,7 @@ PomadeModel::_DropDeviceLocked(char const *reason)
     _device->sectionV.release();
     _device->sectionScale.release();
     _device->sectionTwist.release();
+    _device->rootSurfaceOffsets.release();
     _device->ringT.release();
     _device->guideCVs.release();
     _device->guideCVsVersion = 0;
@@ -2649,6 +2651,7 @@ PomadeModel::_SyncSectionsDevice()
         _device->sectionV.reset(size_t(nSec) * size_t(rv)) != cudaSuccess ||
         _device->sectionScale.reset(size_t(nSec)) != cudaSuccess ||
         _device->sectionTwist.reset(size_t(nSec)) != cudaSuccess ||
+        _device->rootSurfaceOffsets.reset(size_t(rv) * 3) != cudaSuccess ||
         _device->ringT.reset(size_t(nRings)) != cudaSuccess) {
         _DropDeviceLocked("PomadeModel: device buffer allocation failed");
         return true;
@@ -2697,6 +2700,13 @@ PomadeModel::_SyncSectionsDevice()
     }
     char errBuf[256] = {0};
     PomadeFrame *frames = reinterpret_cast<PomadeFrame *>(_device->frames.data());
+    bool const attached = tube.rootSurfaceOffsets.size() == size_t(rv) * 3;
+    if (attached && !upload(_device->rootSurfaceOffsets.data(),
+                            tube.rootSurfaceOffsets.data(),
+                            sizeof(float) * tube.rootSurfaceOffsets.size())) {
+        _DropDeviceLocked("PomadeModel: root attachment upload failed");
+        return true;
+    }
     if (!PomadeLaunchCenterFrames(_device->centerX.data(),
                                  _device->centerY.data(),
                                  _device->centerZ.data(), nCv, frames, stream,
@@ -2732,7 +2742,8 @@ PomadeModel::_SyncSectionsDevice()
             _device->sectionV.data(), _device->sectionScale.data(),
             _device->sectionTwist.data(), nSec, rv, _segmentsPerSpan,
             _device->positions.data(), _device->normals.data(),
-            _device->ringT.data(), stream, errBuf, sizeof(errBuf))) {
+            _device->ringT.data(), stream, errBuf, sizeof(errBuf),
+            attached ? _device->rootSurfaceOffsets.data() : nullptr)) {
         std::string const why =
             std::string("PomadeModel: tube tessellate kernel failed: ") +
             errBuf;
@@ -4201,7 +4212,66 @@ PomadeModel::_BuildTubeDescLocked() const
     desc.rootFramePinned = _rootFramePinned;
     desc.rootFrame = _rootFrame;
     desc.frameReference = _frameReference;
+    _AttachTubeRootLocked(&desc);
     return desc;
+}
+
+void PomadeModel::_AttachTubeRootLocked(PomadeTubeDesc *desc) const
+{
+    desc->rootSurfaceOffsets.clear();
+    if (!_scalp || !_bvh.valid || !desc->rootFramePinned ||
+        desc->regionId < 0 || desc->centerX.empty() || desc->sections.empty())
+        return;
+    // An intentional whole-tube lift remains an edit. Surface attachment
+    // applies while the owning L1 support is on the scalp; child root
+    // centers may themselves lie above a curved scalp's planar chart.
+    float support[3] = {desc->centerX[0], desc->centerY[0], desc->centerZ[0]};
+    int parent = desc->parentTubeId;
+    while (parent >= 0) {
+        if (parent == 0) {
+            support[0] = _host.centerX[0]; support[1] = _host.centerY[0];
+            support[2] = _host.centerZ[0];
+            break;
+        }
+        auto const it = _tubes.find(parent);
+        if (it == _tubes.end() || it->second.actual.centerX.empty()) return;
+        auto const &p = it->second.actual;
+        support[0] = p.centerX[0]; support[1] = p.centerY[0];
+        support[2] = p.centerZ[0];
+        parent = p.parentTubeId;
+    }
+    auto const &section = desc->sections.front();
+    float const reach = std::max(2.0f * PomadeSectionMeanRadius(section), 0.01f);
+    PomadeHit const supportHit = PomadeClosestPointCpu(*_scalp, support);
+    if (!supportHit.hit || supportHit.t > reach * 1e-3f) return;
+    auto const &frame = desc->rootFrame;
+    float const direction[3] = {-frame.tx, -frame.ty, -frame.tz};
+    float const ct = std::cos(section.twist), st = std::sin(section.twist);
+    if (section.u.size() != size_t(desc->ringVerts) ||
+        section.v.size() != section.u.size()) return;
+    desc->rootSurfaceOffsets.resize(size_t(desc->ringVerts) * 3, 0.0f);
+    for (int s = 0; s < desc->ringVerts; ++s) {
+        float const u = section.u[size_t(s)] * section.scale;
+        float const v = section.v[size_t(s)] * section.scale;
+        float const ru = u * ct - v * st, rv = u * st + v * ct;
+        float const p[3] = {
+            desc->centerX[0] + frame.nx * ru + frame.bx * rv,
+            desc->centerY[0] + frame.ny * ru + frame.by * rv,
+            desc->centerZ[0] + frame.nz * ru + frame.bz * rv};
+        float const origin[3] = {p[0] + frame.tx * reach,
+                                 p[1] + frame.ty * reach,
+                                 p[2] + frame.tz * reach};
+        PomadeHit hit = PomadeRaycastCpu(*_scalp, _bvh, origin, direction);
+        // A concavity or open mesh edge can miss the normal ray. Keep that
+        // slot attached to the nearest support instead of leaving a gap.
+        if (!hit.hit || hit.t >= 2.0f * reach)
+            hit = PomadeClosestPointCpu(*_scalp, p);
+        if (hit.hit) {
+            desc->rootSurfaceOffsets[size_t(s) * 3] = hit.px - p[0];
+            desc->rootSurfaceOffsets[size_t(s) * 3 + 1] = hit.py - p[1];
+            desc->rootSurfaceOffsets[size_t(s) * 3 + 2] = hit.pz - p[2];
+        }
+    }
 }
 
 std::vector<PomadeFrame>
@@ -5111,11 +5181,14 @@ PomadeModel::_BuildPickSetsLocked(_PickScratch *scratch,
         scratch->center.reserve(_host.centerX.size() * 3);
         scratch->centerTubeIds.reserve(_host.centerX.size());
         scratch->centerCvIds.reserve(_host.centerX.size());
+        std::vector<PomadeFrame> frames;
+        std::string err;
+        bool const haveFrames = PomadeTubeFramesCpu(rootDesc, &frames, &err);
         for (size_t i = 0; i < _host.centerX.size(); ++i) {
             float x = _host.centerX[i], y = _host.centerY[i],
                   z = _host.centerZ[i];
-            std::string err;
-            PomadeCenterHandlePointCpu(rootDesc, int(i), &x, &y, &z, &err);
+            if (haveFrames)
+                PomadeCenterHandlePointCpu(rootDesc, frames, int(i), &x, &y, &z, &err);
             scratch->center.push_back(x);
             scratch->center.push_back(y);
             scratch->center.push_back(z);
@@ -5134,11 +5207,14 @@ PomadeModel::_BuildPickSetsLocked(_PickScratch *scratch,
             !tubePickable(desc, /*mesh*/ false)) {
             continue;
         }
+        std::vector<PomadeFrame> frames;
+        std::string err;
+        bool const haveFrames = PomadeTubeFramesCpu(desc, &frames, &err);
         for (size_t i = 0; i < desc.centerX.size(); ++i) {
             float x = desc.centerX[i], y = desc.centerY[i],
                   z = desc.centerZ[i];
-            std::string err;
-            PomadeCenterHandlePointCpu(desc, int(i), &x, &y, &z, &err);
+            if (haveFrames)
+                PomadeCenterHandlePointCpu(desc, frames, int(i), &x, &y, &z, &err);
             scratch->center.push_back(x);
             scratch->center.push_back(y);
             scratch->center.push_back(z);
@@ -5182,9 +5258,14 @@ PomadeModel::_BuildPickSetsLocked(_PickScratch *scratch,
                 float const v = s.v[slot] * s.scale;
                 float const ru = u * ct - v * st;
                 float const rv = u * st + v * ct;
-                float const px = cp[0] + fr.nx * ru + fr.bx * rv;
-                float const py = cp[1] + fr.ny * ru + fr.by * rv;
-                float const pz = cp[2] + fr.nz * ru + fr.bz * rv;
+                bool const attached = ring == 0 &&
+                    desc.rootSurfaceOffsets.size() == s.u.size() * 3;
+                float const px = cp[0] + fr.nx * ru + fr.bx * rv +
+                    (attached ? desc.rootSurfaceOffsets[slot * 3] : 0.0f);
+                float const py = cp[1] + fr.ny * ru + fr.by * rv +
+                    (attached ? desc.rootSurfaceOffsets[slot * 3 + 1] : 0.0f);
+                float const pz = cp[2] + fr.nz * ru + fr.bz * rv +
+                    (attached ? desc.rootSurfaceOffsets[slot * 3 + 2] : 0.0f);
                 scratch->section.push_back(px);
                 scratch->section.push_back(py);
                 scratch->section.push_back(pz);
@@ -5828,6 +5909,9 @@ PomadeModel::_ItemPositionLocked(PomadeSelectionItem const &item,
             p[0] = cp[0] + frame.nx * ru + frame.bx * rv;
             p[1] = cp[1] + frame.ny * ru + frame.by * rv;
             p[2] = cp[2] + frame.nz * ru + frame.bz * rv;
+            if (ring == 0 && desc.rootSurfaceOffsets.size() == section.u.size() * 3)
+                for (int axis = 0; axis < 3; ++axis)
+                    p[axis] += desc.rootSurfaceOffsets[i * 3 + size_t(axis)];
         };
         if (!center) {
             point(size_t(slot), o);
@@ -6426,6 +6510,7 @@ bool PomadeModel::_TubeDescLocked(int tubeId, PomadeTubeDesc *out) const
         return false;
     }
     *out = it->second.actual;
+    _AttachTubeRootLocked(out);
     return true;
 }
 
@@ -10321,6 +10406,7 @@ PomadeModel::SnapshotTubes() const
     for (auto const &kv : _tubes) {
         TubeView view;
         view.desc = kv.second.actual;
+        _AttachTubeRootLocked(&view.desc);
         view.desc.tubeId = kv.first;
         view.imported = kv.second.imported;
         view.persistent = kv.second.persistent;

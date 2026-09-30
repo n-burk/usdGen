@@ -844,6 +844,16 @@ share their boundary, not merely touch).
 > whatever ring it was modelled with, and refusing to import it would be
 > worse than accepting a triangle cross-section.
 
+> **2026-09-29 (tube display).** Sparse section rings remain exact rows at
+> every display density, including uneven parameter spacing. Eight display
+> segments per span expose the cubic profile; longitudinal CV rails are hard
+> and each strip is shaded smoothly along its length. Close holding rows
+> retain both end footprints. The editable root chart remains planar, while
+> a derived, nonserialized displacement conforms the displayed root boundary
+> to the bound growth surface and eases away through the first span. Child
+> roots use the same attachment. An intentional whole-tube lift remains an
+> authored edit; increasing display subdivision does not cause a lift.
+
 ### 5.3 Fill mode (contract 5)
 
 * Per tube or per selection: density, CV count, length profile ramp, edge bias, seed.

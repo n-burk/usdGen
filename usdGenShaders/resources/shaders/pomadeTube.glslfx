@@ -7,7 +7,8 @@
 // publishes under /__usdGenPomade: the per-level tube meshes and, through the
 // overlay material, the center curves, section rings and CV dots.
 //
-// The look is opaque, smoothly shaded tube volumes, ONE saturated colour
+// The look is opaque tube volumes, smooth along each longitudinal strip
+// with hard section-CV rails supplied by face-varying normals, ONE saturated colour
 // per clump, no wireframe and no level tint. So this shader
 // reads a per-face `clumpColor` primvar and lights it; the level/region
 // colouring that used to live here (levelColor1..3 + a tubeId hue shift)

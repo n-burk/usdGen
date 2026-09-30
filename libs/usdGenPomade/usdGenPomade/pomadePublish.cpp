@@ -56,6 +56,56 @@ uint64_t _HashFloats(uint64_t h, std::vector<float> const &v)
 
 // -- small geometry helpers ------------------------------------------------
 
+// Each polygon edge sweeps a longitudinal strip. Share its normals along
+// the length, including across sparse control rings, but never with the
+// neighbouring strip: those boundaries are the selectable CV rails.
+// Face-varying normals retain the shared mesh/pick topology and describe
+// the actual taper, bend and twist instead of a radial cylinder normal.
+void _FillStripNormals(VtVec3fArray const &points, int base, int rings,
+                       int rv, int faceOffset, VtVec3fArray *normals)
+{
+    std::vector<GfVec3f> faces(size_t((rings - 1) * rv));
+    auto unit = [](GfVec3f n) {
+        float const length = n.GetLength();
+        return length > 1e-12f ? n / length : GfVec3f(0.0f);
+    };
+    for (int r = 0; r < rings - 1; ++r) {
+        for (int s = 0; s < rv; ++s) {
+            int const next = (s + 1) % rv;
+            GfVec3f const &a = points[size_t(base + r * rv + s)];
+            GfVec3f const &b = points[size_t(base + r * rv + next)];
+            GfVec3f const &c = points[size_t(base + (r + 1) * rv + next)];
+            GfVec3f const &d = points[size_t(base + (r + 1) * rv + s)];
+            faces[size_t(r * rv + s)] =
+                unit(GfCross(b - a, d - a) + GfCross(c - b, d - b));
+        }
+    }
+    for (int r = 0; r < rings; ++r) {
+        for (int s = 0; s < rv; ++s) {
+            GfVec3f n(0.0f);
+            if (r > 0) n += faces[size_t((r - 1) * rv + s)];
+            if (r + 1 < rings) n += faces[size_t(r * rv + s)];
+            n = unit(n);
+            if (n.GetLengthSq() < 1e-12f) {
+                // Collapsed or folded strips must still publish finite,
+                // nonzero normals; prefer either incident nonzero face.
+                n = faces[size_t(std::min(r, rings - 2) * rv + s)];
+                if (n.GetLengthSq() < 1e-12f && r > 0)
+                    n = faces[size_t((r - 1) * rv + s)];
+                if (n.GetLengthSq() < 1e-12f) n = GfVec3f(0, 1, 0);
+            }
+            if (r + 1 < rings) {
+                size_t const q = size_t(faceOffset + r * rv + s) * 4;
+                (*normals)[q] = (*normals)[q + 1] = n;
+            }
+            if (r > 0) {
+                size_t const q = size_t(faceOffset + (r - 1) * rv + s) * 4;
+                (*normals)[q + 2] = (*normals)[q + 3] = n;
+            }
+        }
+    }
+}
+
 void _Extend(GfVec3f *mn, GfVec3f *mx, GfVec3f const &p)
 {
     for (int a = 0; a < 3; ++a) {
@@ -230,7 +280,6 @@ void _FillRingArrays(std::vector<float> const &positions,
 // which case the arrays are shared (VtArray is refcounted) and only the
 // widths are re-derived.
 void _FillLevelArrays(std::vector<float> const &positions,
-                      std::vector<float> const &normals,
                       std::vector<PomadeTubeDesc const *> const &descs,
                       PomadeStagedLevel const *reuse, bool reuseRings,
                       PomadeStagedLevel *staged)
@@ -290,10 +339,9 @@ void _FillLevelArrays(std::vector<float> const &positions,
     int const centerTotal = last.centerOffset + last.centerCount;
 
     staged->points.resize(size_t(pointTotal));
-    staged->normals.resize(size_t(pointTotal));
+    staged->normals.resize(size_t(faceTotal) * 4);
     for (int v = 0; v < pointTotal; ++v) {
         staged->points[size_t(v)] = _Point(positions, v);
-        staged->normals[size_t(v)] = _Point(normals, v);
     }
     _Bounds(staged->points, &staged->extentMin, &staged->extentMax);
 
@@ -322,6 +370,8 @@ void _FillLevelArrays(std::vector<float> const &positions,
         // Quad strip between adjacent grid rows, CCW from outside — the
         // spelling both model tessellation paths use.
         int const rv = slice.ringVerts;
+        _FillStripNormals(staged->points, slice.pointOffset, slice.ringCount,
+                          rv, slice.faceOffset, &staged->normals);
         for (int r = 0; r < slice.ringCount - 1; ++r) {
             for (int s = 0; s < rv; ++s) {
                 int const q = slice.faceOffset + r * rv + s;
@@ -343,16 +393,19 @@ void _FillLevelArrays(std::vector<float> const &positions,
         staged->centerVertexCounts[t] = slice.centerCount;
         staged->centerCurveColor[t] = slice.clumpColor;
         staged->centerCurveTubeId[t] = slice.tubeId;
+        std::vector<PomadeFrame> frames;
+        std::string err;
+        bool const haveFrames = PomadeTubeFramesCpu(desc, &frames, &err);
         for (int c = 0; c < slice.centerCount; ++c) {
             size_t const o = size_t(slice.centerOffset + c);
             float x = desc.centerX[size_t(c)];
             float y = desc.centerY[size_t(c)];
             float z = desc.centerZ[size_t(c)];
-            std::string err;
             // The core line and its dots must sit inside the visible tube.
             // A malformed imported section keeps the legacy raw cage point;
             // the model pick path uses the same fallback.
-            PomadeCenterHandlePointCpu(desc, c, &x, &y, &z, &err);
+            if (haveFrames)
+                PomadeCenterHandlePointCpu(desc, frames, c, &x, &y, &z, &err);
             staged->centerPoints[o] = GfVec3f(x, y, z);
             staged->centerIndices[o] = int(o);
             staged->centerCVColor[o] = slice.clumpColor;
@@ -574,6 +627,7 @@ PomadeTubeContentHash(PomadeTubeDesc const &desc, int displaySegments,
     h = _HashFloats(h, desc.centerX);
     h = _HashFloats(h, desc.centerY);
     h = _HashFloats(h, desc.centerZ);
+    h = _HashFloats(h, desc.rootSurfaceOffsets);
     h = _HashInt(h, int(desc.sections.size()));
     for (PomadeTubeSection const &s : desc.sections) {
         h = _HashFloat(h, s.t);
@@ -615,14 +669,14 @@ PomadeStageTestTubeMesh(PomadeTubeShape const &shape, PomadeStagedTubeMesh *out)
     int const quadCount = PomadeTubeQuadCount(used);
     PomadeStagedTubeMesh staged;
     staged.points.resize(size_t(vertexCount));
-    staged.normals.resize(size_t(vertexCount));
+    staged.normals.resize(size_t(quadCount) * 4);
     for (int v = 0; v < vertexCount; ++v) {
         PomadeTessellatedVertex const tv =
             PomadeTessellateVertex(used, v, cx.data(), cy.data(), cz.data());
         staged.points[size_t(v)] = GfVec3f(tv.px, tv.py, tv.pz);
-        staged.normals[size_t(v)] = GfVec3f(tv.nx, tv.ny, tv.nz);
     }
     staged.faceVertexCounts.assign(size_t(quadCount), 4);
+    _FillStripNormals(staged.points, 0, rings, rv, 0, &staged.normals);
     staged.faceVertexIndices.resize(size_t(quadCount) * 4);
     for (int r = 0; r < rings - 1; ++r) {
         for (int s = 0; s < rv; ++s) {
@@ -751,7 +805,10 @@ PomadePublisher::Stage(PomadeModel const &model)
                     continue;
                 }
                 slice.ringCount = verts / slice.ringVerts;
-                slice.ringStride = desc.sections.empty() ? 1 : segments;
+                // The legacy test tube keeps its unsampled host grid until
+                // a section edit switches it to K5.
+                slice.ringStride = slice.ringCount ==
+                    PomadeTessellatedRingCount(desc, segments) ? segments : 1;
             } else {
                 slice.ringVerts = desc.ringVerts;
                 slice.ringCount = PomadeTessellatedRingCount(desc, segments);
@@ -923,7 +980,7 @@ PomadePublisher::Stage(PomadeModel const &model)
             layoutKept && !rebuiltMirror && levelRestaged == 0;
         bool const ringsKept =
             geometryKept && prev->ringHash == staged.ringHash;
-        _FillLevelArrays(mirror.positions, mirror.normals, kept,
+        _FillLevelArrays(mirror.positions, kept,
                          geometryKept ? prev : nullptr, ringsKept, &staged);
         // The selection arrays are rewritten only when the selection that
         // touches this level changed; otherwise the reuse path above has

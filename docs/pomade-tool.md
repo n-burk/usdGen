@@ -355,6 +355,16 @@ selected, as one undo step; a click that moves nothing says `no change` and
 leaves no undo step — and **Reset transform tool** (the current tool's step
 and snap settings back to defaults).
 
+Tube surfaces keep a hard longitudinal edge through each selectable section
+CV. Shading is smooth along the strips between those edges, including across
+control rings. **Curve smoothness (display)** defaults to 8 segments per
+sparse span, revealing the cubic profile's eased pinches and bulges without
+adding editable CVs. Unevenly spaced rings remain exactly on the surface.
+Close holding rows preserve the root and tip footprints. While a tube's
+support stays attached, its displayed root boundary follows the growth
+surface, including on curved meshes and after child subdivision. Increasing
+display smoothness cannot lift that boundary off the surface.
+
 ### Fill — guide density and the length ramp
 
 Entering Fill with no guides grows them, so there is something to see.

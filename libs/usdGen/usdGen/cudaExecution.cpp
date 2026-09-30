@@ -236,7 +236,7 @@ bool ValidateNoise(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
 
 bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) {
     if (!node.mode.IsEmpty())
-        return Fail(diagnostics, "Deform has no mode property; it is always RBF");
+        return Fail(diagnostics, "Deform mode requires the CPU lane; CUDA supports default surface RBF");
     if (node.surfaces.size() != 1 || !node.references.empty() || !node.curves.empty() ||
         !node.maps.empty() || !node.mapBindings.empty())
         return Fail(diagnostics, "RBF Deform requires exactly one surface and no guide/map inputs "
@@ -248,6 +248,12 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
         if (name == "rbfSamples")
             valid &= param.value.IsHolding<int>() && param.value.UncheckedGet<int>() >= 4 && param.value.UncheckedGet<int>() <= 46336;
         else if (name == "lockRoots") valid &= param.value.IsHolding<bool>();
+        // The schema supplies this empty curveWrap-only default even for
+        // surface RBF. Accept the inert default without admitting guide
+        // partitioning, which remains a CPU capability.
+        else if (name == "guideRegions")
+            valid &= param.value.IsHolding<VtIntArray>() &&
+                param.value.UncheckedGet<VtIntArray>().empty();
         else if (name == "mask")
             valid &= param.value.IsHolding<float>() && std::isfinite(param.value.UncheckedGet<float>()) &&
                 param.value.UncheckedGet<float>() >= 0 && param.value.UncheckedGet<float>() <= 1;

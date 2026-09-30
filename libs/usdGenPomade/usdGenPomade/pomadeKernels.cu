@@ -711,8 +711,8 @@ __global__ void _TubeTessellateKernel(
     float const *cx, float const *cy, float const *cz, int nCv,
     PomadeFrame const *frames, float const *secT, float const *secU,
     float const *secV, float const *secScale, float const *secTwist, int nSec,
-    int ringVerts, int nRings, float t0, float span, float *positions,
-    float *normals, float *ringT)
+    int ringVerts, int nRings, int segmentsPerSpan, float *positions,
+    float *normals, float *ringT, float const *rootOffsets)
 {
     int const v = blockIdx.x * blockDim.x + threadIdx.x;
     if (v >= nRings * ringVerts) {
@@ -720,21 +720,23 @@ __global__ void _TubeTessellateKernel(
     }
     int const r = v / ringVerts;
     int const s = v % ringVerts;
-    float const t = t0 + span * float(r) / float(nRings - 1);
+    int const k = min(r / segmentsPerSpan, nSec - 2);
+    int const localRow = r - k * segmentsPerSpan;
+    float const sample = PomadeDisplaySpanFraction(
+        localRow, segmentsPerSpan, k, nSec - 1);
+    float const t = sample == 1.0f ? secT[k + 1]
+        : secT[k] + (secT[k + 1] - secT[k]) * sample;
+    bool const rootHold = segmentsPerSpan >= 3 && k == 0 && localRow == 1;
+    bool const tipHold = segmentsPerSpan >= 3 && k == nSec - 2 &&
+                         localRow == segmentsPerSpan - 1;
+    float const f = rootHold ? 0.0f : (tipHold ? 1.0f : sample);
     if (s == 0) {
         ringT[r] = t;
     }
-    int k = 0;
-    while (k + 1 < nSec - 1 && secT[k + 1] < t) {
-        ++k;
-    }
     int const kP = k > 0 ? k - 1 : k;
     int const kN = k + 2 < nSec ? k + 2 : k + 1;
-    float const dt = secT[k + 1] > secT[k] ? secT[k + 1] - secT[k] : 1.0f;
-    float f = (t - secT[k]) / dt;
-    f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
     // Central differences inside, one-sided at the ends (matches the CPU
-    // twin exactly; straight tapers reproduce in every span).
+    // twin exactly, including the explicit end holding rows).
     bool const first = (k == 0);
     bool const last = (k + 1 == nSec - 1);
     float const m0sc = first ? secScale[k + 1] - secScale[k]
@@ -777,6 +779,12 @@ __global__ void _TubeTessellateKernel(
     positions[o + 0] = cp[0] + nA[0] * ru + bA[0] * rvv;
     positions[o + 1] = cp[1] + nA[1] * ru + bA[1] * rvv;
     positions[o + 2] = cp[2] + nA[2] * ru + bA[2] * rvv;
+    if (rootOffsets) {
+        float const weight = rootHold ? 1.0f :
+            PomadeRootAttachmentWeight(t - secT[0], secT[1] - secT[0]);
+        for (int axis = 0; axis < 3; ++axis)
+            positions[o + axis] += weight * rootOffsets[size_t(s) * 3 + axis];
+    }
     float nn[3] = {nA[0] * ru + bA[0] * rvv, nA[1] * ru + bA[1] * rvv,
                    nA[2] * ru + bA[2] * rvv};
     float const nl = PomadeLen3(nn);
@@ -1337,7 +1345,8 @@ bool PomadeLaunchTubeTessellate(
     float const *deviceSectionV, float const *deviceSectionScale,
     float const *deviceSectionTwist, int nSec, int ringVerts,
     int segmentsPerSpan, float *devicePositions, float *deviceNormals,
-    float *deviceRingT, cudaStream_t stream, char *errBuf, size_t errBufLen)
+    float *deviceRingT, cudaStream_t stream, char *errBuf, size_t errBufLen,
+    float const *deviceRootOffsets)
 {
     if (!deviceCenterX || !deviceCenterY || !deviceCenterZ || !deviceFrames ||
         !deviceSectionT || !deviceSectionU || !deviceSectionV ||
@@ -1349,21 +1358,6 @@ bool PomadeLaunchTubeTessellate(
         }
         return false;
     }
-    // The ring parameter range comes from the host-side section list (the
-    // same t0/span the CPU twin uses); copying two floats keeps the kernel
-    // from re-deriving them per thread.
-    float t0 = 0.0f, t1 = 1.0f;
-    if (cudaMemcpyAsync(&t0, deviceSectionT, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-        cudaMemcpyAsync(&t1, deviceSectionT + nSec - 1, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream) != cudaSuccess ||
-        cudaStreamSynchronize(stream) != cudaSuccess) {
-        if (errBuf && errBufLen > 0) {
-            std::snprintf(errBuf, errBufLen, "section range readback failed");
-        }
-        return false;
-    }
-    float const span = t1 > t0 ? t1 - t0 : 1.0f;
     int const nRings = (nSec - 1) * segmentsPerSpan + 1;
     int const vertexCount = nRings * ringVerts;
     int const block = 256;
@@ -1371,8 +1365,8 @@ bool PomadeLaunchTubeTessellate(
     _TubeTessellateKernel<<<grid, block, 0, stream>>>(
         deviceCenterX, deviceCenterY, deviceCenterZ, nCv, deviceFrames,
         deviceSectionT, deviceSectionU, deviceSectionV, deviceSectionScale,
-        deviceSectionTwist, nSec, ringVerts, nRings, t0, span, devicePositions,
-        deviceNormals, deviceRingT);
+        deviceSectionTwist, nSec, ringVerts, nRings, segmentsPerSpan, devicePositions,
+        deviceNormals, deviceRingT, deviceRootOffsets);
     cudaError_t const launch = cudaGetLastError();
     if (launch != cudaSuccess) {
         if (errBuf && errBufLen > 0) {

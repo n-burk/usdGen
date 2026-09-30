@@ -320,6 +320,9 @@ bool PomadeRigidTransformTubeCpu(PomadeTubeDesc const &source,
     if (after.rootFramePinned) {
         _TransformFrame(transform, &after.rootFrame);
     }
+    for (size_t i = 0; i + 2 < after.rootSurfaceOffsets.size(); i += 3)
+        _TransformVector(transform, before.rootSurfaceOffsets.data() + i,
+                          after.rootSurfaceOffsets.data() + i);
     // Q maps the K4 material frame to world.  Under a rigid pose change the
     // local curve is unchanged: Q' = R*Q.  Leaving all chart controls alone
     // preserves every interpolated K5 sample, rather than merely matching
@@ -486,6 +489,16 @@ bool
 PomadeCenterHandlePointCpu(PomadeTubeDesc const &tube, int centerCV, float *px,
                           float *py, float *pz, std::string *err)
 {
+    std::vector<PomadeFrame> frames;
+    if (!PomadeTubeFramesCpu(tube, &frames, err)) return false;
+    return PomadeCenterHandlePointCpu(tube, frames, centerCV, px, py, pz, err);
+}
+
+bool
+PomadeCenterHandlePointCpu(PomadeTubeDesc const &tube,
+                          std::vector<PomadeFrame> const &frames, int centerCV,
+                          float *px, float *py, float *pz, std::string *err)
+{
     auto fail = [&](char const *what) {
         if (err) {
             *err = what;
@@ -498,7 +511,7 @@ PomadeCenterHandlePointCpu(PomadeTubeDesc const &tube, int centerCV, float *px,
     if (!px || !py || !pz || centerCV < 0 || centerCV >= nCv || nCv < 2 ||
         nSec < 2 || rv < 3 ||
         tube.centerY.size() != size_t(nCv) ||
-        tube.centerZ.size() != size_t(nCv)) {
+        tube.centerZ.size() != size_t(nCv) || frames.size() != size_t(nCv)) {
         return fail("PomadeCenterHandlePointCpu: malformed tube or CV");
     }
     for (PomadeTubeSection const &section : tube.sections) {
@@ -507,11 +520,6 @@ PomadeCenterHandlePointCpu(PomadeTubeDesc const &tube, int centerCV, float *px,
         }
     }
 
-    std::vector<PomadeFrame> frames;
-    std::string frameErr;
-    if (!PomadeTubeFramesCpu(tube, &frames, &frameErr)) {
-        return fail(frameErr.c_str());
-    }
     float const t = float(centerCV) / float(nCv - 1);
     int k = 0;
     while (k + 1 < nSec - 1 && tube.sections[size_t(k + 1)].t < t) {
@@ -673,26 +681,27 @@ bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
     positions->resize(size_t(nRings) * size_t(rv) * 3);
     normals->resize(size_t(nRings) * size_t(rv) * 3);
     ringT->resize(size_t(nRings));
-    float const t0 = tube.sections.front().t;
-    float const t1 = tube.sections.back().t;
-    float const span = t1 > t0 ? t1 - t0 : 1.0f;
     for (int r = 0; r < nRings; ++r) {
-        float const t = t0 + span * float(r) / float(nRings - 1);
-        (*ringT)[size_t(r)] = t;
-        int k = 0;
-        while (k + 1 < nSec - 1 && tube.sections[size_t(k + 1)].t < t) {
-            ++k;
-        }
+        // Subdivide each authored span, not the entire parameter domain:
+        // the sparse rings must remain exact rows even with uneven knots.
+        int const k = std::min(r / segmentsPerSpan, nSec - 2);
         PomadeTubeSection const &s0 = tube.sections[size_t(k)];
         PomadeTubeSection const &s1 = tube.sections[size_t(k + 1)];
         PomadeTubeSection const &sP = tube.sections[size_t(k > 0 ? k - 1 : k)];
         PomadeTubeSection const &sN =
             tube.sections[size_t(k + 2 < nSec ? k + 2 : k + 1)];
-        float const dt = s1.t > s0.t ? s1.t - s0.t : 1.0f;
-        float f = (t - s0.t) / dt;
-        f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+        int const localRow = r - k * segmentsPerSpan;
+        float const sample = PomadeDisplaySpanFraction(
+            localRow, segmentsPerSpan, k, nSec - 1);
+        float const t = sample == 1.0f ? s1.t
+            : s0.t + (s1.t - s0.t) * sample;
+        bool const rootHold = segmentsPerSpan >= 3 && k == 0 && localRow == 1;
+        bool const tipHold = segmentsPerSpan >= 3 && k == nSec - 2 &&
+                             localRow == segmentsPerSpan - 1;
+        float const f = rootHold ? 0.0f : (tipHold ? 1.0f : sample);
+        (*ringT)[size_t(r)] = t;
         // Central differences inside, one-sided at the ends (matches
-        // PomadeEvalCenter; straight tapers reproduce exactly).
+        // PomadeEvalCenter, except for the explicit end holding rows).
         bool const first = (k == 0);
         bool const last = (k + 1 == nSec - 1);
         float const m0sc = first ? s1.scale - s0.scale
@@ -743,6 +752,14 @@ bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
             (*positions)[o + 0] = cp[0] + nA[0] * ru + bA[0] * rvv;
             (*positions)[o + 1] = cp[1] + nA[1] * ru + bA[1] * rvv;
             (*positions)[o + 2] = cp[2] + nA[2] * ru + bA[2] * rvv;
+            if (tube.rootSurfaceOffsets.size() == size_t(rv) * 3) {
+                float const weight = rootHold ? 1.0f :
+                    PomadeRootAttachmentWeight(t - tube.sections.front().t,
+                        tube.sections[1].t - tube.sections.front().t);
+                for (int axis = 0; axis < 3; ++axis)
+                    (*positions)[o + size_t(axis)] += weight *
+                        tube.rootSurfaceOffsets[size_t(s) * 3 + size_t(axis)];
+            }
             float nn[3] = {nA[0] * ru + bA[0] * rvv, nA[1] * ru + bA[1] * rvv,
                            nA[2] * ru + bA[2] * rvv};
             float const nl = PomadeLen3(nn);

@@ -292,6 +292,10 @@ bool CaptureTubeGeometry(usdGenPomade::PomadeModel const &model, int tubeId,
     if (!out || !model.GetTubeDesc(tubeId, &out->desc)) {
         return false;
     }
+    // K6/K7 and rigid-transport expectations below concern the authored
+    // chart. Surface attachment is a derived display correction, tested
+    // independently against the scalp by CheckCurvedRootAttachment.
+    out->desc.rootSurfaceOffsets.clear();
     std::vector<usdGenPomade::PomadeFrame> frames;
     std::vector<float> normals, ringT;
     std::string error;
@@ -336,6 +340,7 @@ bool CaptureDescGeometry(usdGenPomade::PomadeTubeDesc const &desc,
         return false;
     }
     out->desc = desc;
+    out->desc.rootSurfaceOffsets.clear();
     std::vector<usdGenPomade::PomadeFrame> frames;
     std::vector<float> normals, ringT;
     std::string error;
@@ -916,10 +921,8 @@ void CheckRegionBoundaryRootSections()
               "region root: oblique refined K5 rails keep every projected corner offset without first-span roll");
     }
 
-    // On a curved support, a graph corner cannot generally remain in one
-    // common root plane. The fitting contract projects each canonical corner
-    // to the pinned support plane; no radial re-fit or averaged intersection
-    // may replace it.
+    // The editable chart remains planar on a curved support. The derived
+    // display boundary is checked separately against the actual scalp.
     {
         std::vector<float> const curvedPoints = {
             0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f,
@@ -936,8 +939,9 @@ void CheckRegionBoundaryRootSections()
         int const root = setup ? model.TubeForRegion(region) : -1;
         PomadeTubeDesc desc;
         bool columns = false;
-        bool const matched = setup && root >= 0 &&
-            model.GetTubeDesc(root, &desc) && desc.ringVerts == 3 &&
+        bool const got = setup && root >= 0 && model.GetTubeDesc(root, &desc);
+        desc.rootSurfaceOffsets.clear();
+        bool const matched = got && desc.ringVerts == 3 &&
             RootMatchesRegionLoop(model, region, desc,
                                   /*requireEverySlotOnBoundary=*/true,
                                   &columns);
@@ -946,6 +950,68 @@ void CheckRegionBoundaryRootSections()
         Check(matched && columns,
               "region root: curved auto base matches projected canonical corners and normal columns");
     }
+}
+
+void CheckCurvedRootAttachment()
+{
+    using namespace usdGenPomade;
+    PomadeModel model;
+    std::vector<float> const points = {
+        0, 0, 0, 2, 0, 0, 2, 0.9f, 2, 0, -0.7f, 2};
+    float const up[3] = {0, 1, 0};
+    int region = -1;
+    Check(model.BindScalp(points, {4}, {0, 3, 2, 1}) &&
+              BuildRegionLoop(&model, {{0.16f, 0.17f}, {0.85f, 0.31f},
+                                      {0.39f, 0.78f}}, up, &region) &&
+              model.BuildTubeFromRegion(region, 4, 0, 1.5f),
+          "attachment: curved growth surface and four-ring tube build");
+    auto const scalp = model.GetScalp();
+    int const root = model.TubeForRegion(region);
+    auto attached = [&](int id, int segments) {
+        PomadeTubeDesc tube;
+        std::vector<PomadeFrame> frames;
+        std::vector<float> p, n, t;
+        std::string error;
+        if (!model.GetTubeDesc(id, &tube) ||
+            tube.rootSurfaceOffsets.size() != size_t(tube.ringVerts) * 3 ||
+            !PomadeTubeFramesCpu(tube, &frames, &error) ||
+            !PomadeTessellateCpu(tube, frames, segments, &p, &n, &t, &error))
+            return false;
+        for (int s = 0; s < tube.ringVerts; ++s) {
+            PomadeHit const hit = PomadeClosestPointCpu(*scalp, p.data() + s * 3);
+            if (!hit.hit || hit.t > 2e-4f) return false;
+        }
+        return true;
+    };
+    bool density = true;
+    for (int segments : {1, 2, 4, 8, 16})
+        density &= model.SetDisplaySegments(segments) && attached(root, segments);
+    Check(density, "attachment: increasing display subdivision never lifts the root from the scalp");
+    std::vector<int> children;
+    bool split = model.SubdivideTube(root, 2, "kmeans", 211, &children) &&
+                 children.size() == 2;
+    for (int child : children) split &= attached(child, 8);
+    Check(split, "attachment: subdivided child boundaries stay on the growth surface");
+    PomadeModel edgeModel;
+    int edgeRegion = -1;
+    bool const edgeSetup = edgeModel.BindScalp(points, {4}, {0, 3, 2, 1}) &&
+        BuildRegionLoop(&edgeModel, {{0.16f, 0.17f}, {0.85f, 0.31f},
+                                     {0.39f, 0.78f}}, up, &edgeRegion) &&
+        edgeModel.BuildTubeFromRegion(edgeRegion, 4, 0, 1.5f) &&
+        edgeModel.ScaleSectionRing(0, 4.0f);
+    PomadeTubeDesc edgeTube;
+    std::vector<PomadeFrame> edgeFrames;
+    std::vector<float> edgeP, edgeN, edgeT;
+    std::string edgeError;
+    bool edgeAttached = edgeSetup && edgeModel.GetTubeDesc(0, &edgeTube) &&
+        PomadeTubeFramesCpu(edgeTube, &edgeFrames, &edgeError) &&
+        PomadeTessellateCpu(edgeTube, edgeFrames, 8, &edgeP, &edgeN, &edgeT,
+                            &edgeError);
+    for (int s = 0; edgeAttached && s < edgeTube.ringVerts; ++s) {
+        auto const hit = PomadeClosestPointCpu(*scalp, edgeP.data() + s * 3);
+        edgeAttached &= hit.hit && hit.t < 2e-4f;
+    }
+    Check(edgeAttached, "attachment: an open mesh boundary cannot leave root CVs floating");
 }
 
 void CheckPinnedRegionRoot()
@@ -2243,6 +2309,7 @@ int main()
 {
     CheckRegionBoundaryRootSections();
     CheckPinnedRegionRoot();
+    CheckCurvedRootAttachment();
     CheckTubeZeroEdgeSplitPropagation();
     CheckInternalChildCvKeepsCurvedParentExact();
     CheckAutoRegionSculptPropagation();

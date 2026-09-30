@@ -306,6 +306,52 @@ void CheckK5()
           "K5: ragged rings fail");
 }
 
+void CheckSparseProfile()
+{
+    using namespace usdGenPomade;
+    PomadeTubeDesc tube = MakeTube();
+    auto const section = tube.sections.front();
+    tube.sections.assign(4, section);
+    for (int i = 0; i < 4; ++i) {
+        tube.sections[size_t(i)].t = float(i) / 3.0f;
+        tube.sections[size_t(i)].scale = i % 2 ? 0.3f : 1.0f;
+    }
+    auto const frames = FramesFor(tube);
+    std::vector<float> p, n, t;
+    std::string err;
+    int const spans = 8;
+    Check(PomadeTessellateCpu(tube, frames, spans, &p, &n, &t, &err),
+          "profile: wide/thin/wide/thin tessellates");
+    auto radius = [&](int row) {
+        size_t const o = size_t(row * tube.ringVerts) * 3;
+        return std::sqrt(p[o] * p[o] + p[o + 2] * p[o + 2]);
+    };
+    Check(t.size() == 25 && Near(radius(0), 0.5f) &&
+              Near(radius(8), 0.15f) && Near(radius(16), 0.5f) &&
+              Near(radius(24), 0.15f),
+          "profile: four sparse rings are exact, with eight segments per span");
+    Check(Near(radius(1), radius(0)) && Near(radius(23), radius(24)) &&
+              t[1] < 0.02f && t[23] > 0.98f,
+          "profile: close holding edges retain the root and tip footprints");
+    Check(Near(radius(10), 0.15f + 0.35f * 0.15625f) &&
+              Near(radius(14), 0.15f + 0.35f * 0.84375f) &&
+              radius(9) - radius(8) < radius(12) - radius(11) &&
+              radius(16) - radius(15) < radius(12) - radius(11),
+          "profile: the inner span eases out of the pinch and into the bulge");
+    tube.sections[1].t = 0.17f;
+    tube.sections[2].t = 0.71f;
+    Check(PomadeTessellateCpu(tube, frames, spans, &p, &n, &t, &err),
+          "profile: uneven sparse knots tessellate");
+    bool exact = true;
+    for (int i = 0; i < 4; ++i) {
+        float const ti = tube.sections[size_t(i)].t;
+        exact &= Near(t[size_t(i * spans)], ti) &&
+                 Near(p[size_t(i * spans * tube.ringVerts) * 3 + 1], 4 * ti) &&
+                 Near(radius(i * spans), i % 2 ? 0.15f : 0.5f);
+    }
+    Check(exact, "profile: uneven control rings remain on their surface rows");
+}
+
 void CheckCenterCoreHandle()
 {
     using namespace usdGenPomade;
@@ -327,9 +373,9 @@ void CheckCenterCoreHandle()
                                &raw[2], &frame, &err),
           "core handle: sample the authored midpoint");
     float handle[3] = {0.0f, 0.0f, 0.0f};
-    Check(PomadeCenterHandlePointCpu(tube, 1, &handle[0], &handle[1],
+    Check(PomadeCenterHandlePointCpu(tube, frames, 1, &handle[0], &handle[1],
                                     &handle[2], &err),
-          "core handle: off-centre section resolves");
+          "core handle: off-centre section resolves with reused frames");
     float const expected[3] = {
         raw[0] + frame.nx * 0.37f + frame.bx * -0.19f,
         raw[1] + frame.ny * 0.37f + frame.by * -0.19f,
@@ -340,6 +386,9 @@ void CheckCenterCoreHandle()
                !Near(handle[2], raw[2])),
           "core handle: polygon area centroid is inside the shifted tube, "
           "not its raw center cage");
+    Check(!PomadeCenterHandlePointCpu(tube, std::vector<PomadeFrame>{}, 1,
+                                      &handle[0], &handle[1], &handle[2], &err),
+          "core handle: an incomplete frame column is refused");
 
     // A zero-area but offset ring is still visible as a line; use its mean
     // rather than snapping the handle back to an unrelated raw center.
@@ -390,6 +439,9 @@ void CheckRigidTubeTransport()
     source.rootFrame.nz = 0.0f;
     source.rootFrame.bx = 0.0f; source.rootFrame.by = 1.0f;
     source.rootFrame.bz = 0.0f;
+    source.rootSurfaceOffsets.resize(size_t(source.ringVerts) * 3);
+    for (size_t i = 0; i < source.rootSurfaceOffsets.size(); ++i)
+        source.rootSurfaceOffsets[i] = 0.03f * float(i % 5);
 
     std::vector<PomadeFrame> beforeFrames;
     std::vector<float> before, normals, ringT;
@@ -1969,6 +2021,10 @@ void CheckCudaParity()
     PomadeTubeDesc tube = MakeTube();
     tube.sections[1].twist = 0.3f;
     tube.sections[1].scale = 1.5f;
+    // Uneven knots exercise per-span sampling on the GPU as well.
+    tube.sections.push_back(tube.sections[0]);
+    tube.sections[1].t = 0.23f;
+    tube.sections[2].t = 1.0f;
     int const nCv = int(tube.centerX.size());
     int const nSec = int(tube.sections.size());
     int const rv = tube.ringVerts;
@@ -2043,17 +2099,24 @@ void CheckCudaParity()
     }
     Check(k4, "TN-6: K4 frames match bit-exactly");
     // K5: tolerance (twist trigonometry).
-    int const seg = 2;
+    int const seg = 8;
     int const nRings = (nSec - 1) * seg + 1;
-    float *dPos = nullptr, *dNrm = nullptr, *dRingT = nullptr;
+    float *dPos = nullptr, *dNrm = nullptr, *dRingT = nullptr,
+          *dRootOffsets = nullptr;
+    tube.rootSurfaceOffsets.resize(size_t(rv) * 3);
+    for (size_t i = 0; i < tube.rootSurfaceOffsets.size(); ++i)
+        tube.rootSurfaceOffsets[i] = -0.025f * float(i % 7);
+    cudaMalloc(&dRootOffsets, sizeof(float) * tube.rootSurfaceOffsets.size());
+    cudaMemcpy(dRootOffsets, tube.rootSurfaceOffsets.data(),
+               sizeof(float) * tube.rootSurfaceOffsets.size(), cudaMemcpyHostToDevice);
     cudaMalloc(&dPos, sizeof(float) * size_t(nRings) * size_t(rv) * 3);
     cudaMalloc(&dNrm, sizeof(float) * size_t(nRings) * size_t(rv) * 3);
     cudaMalloc(&dRingT, sizeof(float) * size_t(nRings));
     Check(PomadeLaunchTubeTessellate(
               dCx, dCy, dCz, nCv, dFrames, dSecT, dSecU, dSecV, dSecS,
               dSecTw, nSec, rv, seg, dPos, dNrm, dRingT, stream, err,
-              sizeof(err)),
-          "TN-6: K5 launches");
+              sizeof(err), dRootOffsets),
+          "TN-6: K5 launches with root attachment and end holding rows");
     std::vector<float> hPos, hNrm, hRingT;
     std::string herr;
     Check(PomadeTessellateCpu(tube, hFrames, seg, &hPos, &hNrm, &hRingT,
@@ -2077,6 +2140,8 @@ void CheckCudaParity()
                 worstN);
     Check(worstP < 1e-4f && worstN < 1e-4f,
           "TN-6: K5 tessellation matches within 1e-4");
+    Check(hRingT == dRingTOut, "TN-6: authored and holding row parameters match");
+    cudaFree(dRootOffsets);
     // K8 disc: tolerance (sqrt/trigonometry in the draws; the rejection
     // boundary is a float comparison, so borderline candidates could in
     // principle diverge — with 32 roots the chance is ~1e-5 and the
@@ -2719,6 +2784,7 @@ int main()
 {
     CheckK4();
     CheckK5();
+    CheckSparseProfile();
     CheckCenterCoreHandle();
     CheckRigidTubeTransport();
     CheckK8();

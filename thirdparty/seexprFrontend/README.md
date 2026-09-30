@@ -10,7 +10,8 @@ separate from `thirdparty/seexpr`, whose reduced contents are used by the
 existing noise implementation. The upstream `Noise.cpp`/`Noise.h` were not
 replaced; they differ and require a separate compatibility decision.
 
-The upstream license is preserved in `LICENSE` (Disney-modified Apache 2.0).
+The upstream license is preserved in `LICENSE` (Apache 2.0 with a modified
+trademarks section).
 Core-only validation performed from a clean temporary checkout:
 
 ```sh

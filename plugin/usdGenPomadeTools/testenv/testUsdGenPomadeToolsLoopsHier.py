@@ -92,8 +92,9 @@ def makeFakes(base):
                          "Pomade_SetActiveCutEnabled",
                          "Pomade_GetActiveCutEnabled", "Pomade_SetTubeExpanded",
                          "Pomade_GetTubeExpanded", "Pomade_IsTubeVisible"):
-                setattr(self, name, Entry(getattr(self, "_" + name[6].lower()
-                                                  + name[7:])))
+                method = name[len("Pomade_"):]
+                setattr(self, name, Entry(getattr(
+                    self, "_" + method[0].lower() + method[1:])))
 
         # -- reads the V5 code asks for --------------------------------
         def Pomade_GetPreviewFraction(self, _ctx):

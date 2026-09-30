@@ -47,7 +47,7 @@ GCC 13.3, CMake 3.28.3) to turn "should work" into "does work":
 | Main-branch project version string | `project(seexpr2)`, `set(${PROJECT_NAME}_VERSION "2.0")` — i.e. the CMake *package* is versioned 2.0 even though git tags reach v3.0.1 | `.../thirdparty/seexpr/CMakeLists.txt:22-24` |
 | Naming | "v3" is the *generation* (typed vars, LLVM, VarBlocks); the C++ namespace and library are **`SeExpr2`** so v1 and v2/v3 can coexist. "In order to allow both older and newer versions of SeExpr to coexist, all classes were renamed and an 'SeExpr2' namespace was added." | https://wdas.github.io/SeExpr/doxygen/html/SeExpr2_api_porting.html |
 | Recent activity | 2026-01-27 "maint: add tags.yaml for TWDC"; 2026-01-08 "build: allow disabling LLVM using make ENABLE_LLVM_BACKEND=OFF"; 2026-01-07 "cmake: set the C++ standard to c++17"; before that Sept 2023 | https://github.com/wdas/SeExpr/commits/main |
-| License | **Apache 2.0 with Section 6 (Trademarks) replaced** (Disney's "modified Apache" — same form as OpenUSD's TOST and OpenSubdiv's license) | `.../thirdparty/seexpr/LICENSE:1-11`: "Licensed under the Apache License, Version 2.0 ... and the following modification to it: Section 6 Trademarks. deleted and replaced with: 6. Trademarks. This License does not grant permission to use the trade names, trademarks..." |
+| License | **Apache 2.0 with Section 6 (Trademarks) replaced** (upstream modified Apache license — same form as OpenUSD's TOST and OpenSubdiv's license) | `.../thirdparty/seexpr/LICENSE:1-11`: "Licensed under the Apache License, Version 2.0 ... and the following modification to it: Section 6 Trademarks. deleted and replaced with: 6. Trademarks. This License does not grant permission to use the trade names, trademarks..." |
 
 ### 1.2 Build system, dependencies and options (verified locally)
 
@@ -250,7 +250,7 @@ Implication for usdGen: the "variables" are all things a groom evaluator already
 |---|---|
 | Repo https://invent.kde.org/graphics/kseexpr ; "The embeddable expression engine fork for Krita"; created 2020 (GSoC) | WebFetch |
 | Tags: `v6.0.0.0` (2025-01-09, "Qt6 release"), `v4.0.4.0` (2021-12-14), `v4.0.0.0` (2020-11-12), `v3.4.4.0` (2020-09-28), plus upstream `v3.0.1`, `v1.58.2` | https://invent.kde.org/graphics/kseexpr/-/tags |
-| License: **GPL-3.0-or-later** for the fork's changes, layered on Disney's modified Apache 2.0; headers carry both SPDX tags | `src/KSeExpr/Expression.h` header: `SPDX-License-Identifier: LicenseRef-Apache-2.0` and `SPDX-License-Identifier: GPL-3.0-or-later` |
+| License: **GPL-3.0-or-later** for the fork's changes, layered on upstream modified Apache 2.0; headers carry both SPDX tags | `src/KSeExpr/Expression.h` header: `SPDX-License-Identifier: LicenseRef-Apache-2.0` and `SPDX-License-Identifier: GPL-3.0-or-later` |
 | Namespace renamed to `KSeExpr`; "not ABI-compatible with projects using upstream SeExpr"; Qt ≥ 5.9 is a **core** requirement; C++14; LLVM optional; adds `USE_PREGENERATED_FILES` | README (WebFetch) |
 
 GPL-3 is incompatible with shipping a permissively licensed USD plugin, and the hard Qt dependency is undesirable in a Hydra scene-index library. Use upstream `wdas/SeExpr` `main`. (Krita's fork does show the upstream code base is portable and that pre-generated parser files are a solved problem if Windows builds ever matter.)
@@ -267,12 +267,12 @@ Vendor upstream `wdas/SeExpr` at commit `8f8c8f2c5e27e96fae70d6b82ac1ff4f4811d6d
 
 | Fact | Evidence |
 |---|---|
-| Repo https://github.com/wdas/ptex; "Ptex is a texture mapping system developed by Walt Disney Animation Studios for production-quality rendering"; layout `src/ptex` (library), `src/utils` (`ptxinfo`), `src/tests`, `src/doc`, `src/build` | WebFetch |
+| Repo https://github.com/wdas/ptex; Ptex is a texture mapping system for production rendering; layout `src/ptex` (library), `src/utils` (`ptxinfo`), `src/tests`, `src/doc`, `src/build` | WebFetch |
 | Tags: **v2.5.2** (2026-04-11), v2.5.1 (2025-12-12), v2.5.0 (2025-12-09), **v2.4.3** (2024-06-11), v2.4.2 (2022-08-05), v2.4.1, v2.4.0 (2021-05-19), v2.3.2 (2019) | https://github.com/wdas/ptex/tags (GitHub "Releases" page is empty) |
 | **v2.5.0 replaced zlib with libdeflate** (`find_package(libdeflate REQUIRED)` on `main`; Fedora heads-up "ptex 2.5.0 soversion change", commit `99d7a3b3`) — v2.4.3 uses `find_package(ZLIB REQUIRED)` | `main` CMakeLists (WebFetch) vs `.../thirdparty/ptex/CMakeLists.txt:36` (`find_package(ZLIB REQUIRED)`); http://www.mail-archive.com/devel@lists.fedoraproject.org/msg210559.html |
 | C++ standard: v2.4.3 defaults to **C++98** unless `CMAKE_CXX_STANDARD`/`CXXFLAGS_STD` is set (`CMakeLists.txt:11-17`); `main` defaults to C++17 | local clone; WebFetch of main |
 | Options: `PTEX_BUILD_STATIC_LIBS ON`, `PTEX_BUILD_SHARED_LIBS ON`, `PTEX_BUILD_DOCS ON` (needs Doxygen), `PRMAN_15_COMPATIBLE_PTEX OFF` | `.../thirdparty/ptex/CMakeLists.txt:4-7` |
-| License: **BSD-3-Clause, Disney variant** ("PTEX SOFTWARE Copyright 2014 Disney Enterprises, Inc." … third clause: the names Disney/Walt Disney Pictures/WDAS "may NOT be used to endorse or promote products derived from this software without specific prior written permission") | `.../thirdparty/ptex/LICENSE:1-8`; https://raw.githubusercontent.com/wdas/ptex/main/LICENSE |
+| License: **BSD-3-Clause with an upstream non-endorsement clause**; preserve the copyright attribution and named-party restrictions in the upstream license | `.../thirdparty/ptex/LICENSE:1-8`; https://raw.githubusercontent.com/wdas/ptex/main/LICENSE |
 
 ### 2.2 Build and CMake package (verified locally, v2.4.3)
 
@@ -555,9 +555,9 @@ Notes and rules:
 | OpenSubdiv 3.6.1 | Apache-2.0 with modification (§6) | no | `include/opensubdiv/version.h` header |
 | MaterialX 1.39.5 | Apache-2.0 | no | UNVERIFIED locally (well known) |
 | oneTBB 2020.3 | Apache-2.0 | no | UNVERIFIED locally |
-| **SeExpr (wdas, main)** | Apache-2.0 with §6 (Trademarks) replaced — no Disney names for endorsement | no | `.../seexpr/LICENSE:1-11` |
+| **SeExpr (wdas, main)** | Apache-2.0 with §6 (Trademarks) replaced — no upstream names for endorsement | no | `.../seexpr/LICENSE:1-11` |
 | KSeExpr | GPL-3.0-or-later (+ upstream Apache) | **yes** | avoid |
-| **Ptex v2.4.3 / v2.5.x** | BSD-3-Clause (Disney variant, no-endorsement clause names Disney) | no | `.../ptex/LICENSE:1-8` |
+| **Ptex v2.4.3 / v2.5.x** | BSD-3-Clause with an upstream non-endorsement clause | no | `.../ptex/LICENSE:1-8` |
 | zlib (system 1.3) | zlib license | no | UNVERIFIED text; standard |
 | libdeflate (if Ptex ≥ 2.5) | MIT | no | https://github.com/ebiggers/libdeflate |
 | stb (`stb_image*`, `stb_perlin`) | MIT **or** public domain (dual) | no | `<openusd-src>/pxr/imaging/hio/stb/stb_image.h:7962-7981` |
@@ -566,7 +566,7 @@ Notes and rules:
 | LLVM (if SeExpr JIT ever enabled) | Apache-2.0 with LLVM exceptions | no | UNVERIFIED; not installed |
 | OpenImageIO (not used) | Apache-2.0 | no | not installed |
 
-All recommended components are permissive and compatible with shipping usdGen under a TOST/Apache-style license; only the two Disney "no endorsement / trademark" clauses need a NOTICE entry.
+All recommended components are permissive and compatible with shipping usdGen under a TOST/Apache-style license; the upstream non-endorsement and trademark clauses need a NOTICE entry.
 
 ---
 

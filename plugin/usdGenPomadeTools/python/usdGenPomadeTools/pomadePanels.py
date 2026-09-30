@@ -767,8 +767,9 @@ def _tubeDescriptors(state):
             "displaySegments", "Curve smoothness (display)", "int",
             "displaySegments", int, "Pomade_GetDisplaySegments",
             "Pomade_SetDisplaySegments", min=1, max=8, step=1,
-            tooltip="Extra drawn points between center CVs so tubes look "
-                    "smooth in the viewport. Display only: the saved "
+            tooltip="Segments between sparse section rings (8 by default). "
+                    "Smooth along the tube, with hard section-CV rails. "
+                    "Display only: the saved "
                     "groom does not change."),
         _descriptor("ringCvCount", "Ring CVs for new tubes", "enum",
                    _ringCvCountGet, _ringCvCountSet,

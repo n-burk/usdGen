@@ -114,7 +114,8 @@ int main() {
     session.SetGraphDesc(rbfDesc);
     auto deformed = session.Commit(24, UsdGenCommitReason::SetTime);
     for (auto const& error : session.LastDiagnostics().errors) std::fprintf(stderr, "%s\n", error.c_str());
-    CHECK(deformed && deformed != generation && deformed->device && deformed->tiles.empty());
+    CHECK(!session.LastDiagnostics().HasErrors());
+    CHECK(deformed && deformed != currentGeneration && deformed->device && deformed->tiles.empty());
     CHECK(deformed->device->Geometry().alreadyDeformed);
     auto deformedLease = gpu::AcquireGeometry(deformed->device, nullptr);
     CHECK(deformedLease && deformedLease.Geometry().pointCount == 5);

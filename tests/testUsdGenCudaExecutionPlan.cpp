@@ -369,6 +369,27 @@ int main() {
     if (!plan || diagnostics.HasErrors()) for (auto const& error : diagnostics.errors)
         std::fprintf(stderr, "compile diagnostic: %s\n", error.c_str());
     CHECK(plan && !diagnostics.HasErrors());
+    {
+        // Stage/Hydra descriptors carry the schema's empty curveWrap-only
+        // default on surface RBF nodes. It must not disable CUDA deformation.
+        auto defaults = desc;
+        defaults.nodes.back().params.push_back(
+            {TfToken("guideRegions"), VtValue(VtIntArray{}), false});
+        UsdGenDiagnostics defaultDiagnostics;
+        CHECK(CompileCudaGraph(defaults, &defaultDiagnostics) &&
+              !defaultDiagnostics.HasErrors());
+        for (VtValue const& invalid : {VtValue(VtIntArray{7}),
+                                      VtValue(VtFloatArray{}), VtValue(7)}) {
+            auto malformed = defaults;
+            malformed.nodes.back().params.back().value = invalid;
+            UsdGenDiagnostics rejected;
+            CHECK(!CompileCudaGraph(malformed, &rejected) && rejected.HasErrors());
+        }
+        defaults.nodes.back().mode = TfToken("curveWrap");
+        UsdGenDiagnostics modeDiagnostics;
+        CHECK(!CompileCudaGraph(defaults, &modeDiagnostics) &&
+              modeDiagnostics.HasErrors());
+    }
     auto metadata = GetCudaExecutionPlanMetadata(*plan);
     CHECK(metadata && metadata->Backend() == "cuda" &&
           metadata->CapabilityVersion() == matrix.Version() &&

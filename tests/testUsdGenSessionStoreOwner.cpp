@@ -156,6 +156,11 @@ int main(int argc, char **argv)
         // g_exitCheck verifies that after main returns.
         auto session = store.Attach(Key(90));
         (void)session;
+        // Initialize the cook path before CRT teardown starts. On Windows,
+        // lazy static initialization on a worker can wait for the exit lock
+        // held by ExitCheck's destructor. The batch below must still remain
+        // outstanding when main returns; only runtime startup is warmed here.
+        store.SetTime(0.0);
         constexpr int pendingCount = 64;
         auto counters = g_exitCheck.counters;
         for (int i = 0; i < pendingCount; ++i) {

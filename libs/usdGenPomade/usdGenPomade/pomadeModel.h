@@ -980,6 +980,7 @@ private:
     // runs under the caller's lock, so the locking BuildTubeDesc would
     // deadlock here).
     PomadeTubeDesc _BuildTubeDescLocked() const;
+    void _AttachTubeRootLocked(PomadeTubeDesc *desc) const;
     // P4 hierarchy store (guarded by _mutex like the rest). Holds every
     // tube but the first L1 root: subdivided children, imports, on-the-fly
     // parents AND the second and later L1 roots (parentTubeId -1, level 1).
@@ -1285,7 +1286,7 @@ private:
     std::vector<PomadeTubeSection> _sections;
     std::vector<PomadeFrame> _frames;
     bool _useSections = false;
-    int _segmentsPerSpan = 1;
+    int _segmentsPerSpan = 8;
     float _softCenter = 0.0f;
     float _softRadius = 0.0f;
     // P3 guide cache: full-density roots + guides, refilled explicitly.

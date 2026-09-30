@@ -82,7 +82,7 @@ struct USDGENPOMADE_API PomadeStagedLevel {
     // what Storm rejects on a multi-face mesh, and why the P3 index
     // hard-coded `constant` instead).
     VtVec3fArray points;
-    VtVec3fArray normals;
+    VtVec3fArray normals;  // faceVarying: hard CV rails, smooth along strips
     VtIntArray faceVertexCounts;
     VtIntArray faceVertexIndices;
     VtIntArray faceTubeId;

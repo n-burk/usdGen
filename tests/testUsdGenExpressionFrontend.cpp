@@ -2,7 +2,7 @@
 // it says so.
 //
 // Evaluation lives in testUsdGenExpressionCpuEval (values) and
-// testUsdGenSeExprOracle (agreement with Disney's SeExpr2). This file is about
+// testUsdGenSeExprOracle (agreement with upstream SeExpr2). This file is about
 // compilation only: every source below either must compile or must be refused
 // with a diagnostic a user can act on.
 #include "usdGen/expressions/cpuEvaluator.h"

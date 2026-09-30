@@ -78,6 +78,7 @@ TfToken const _materialType("material");
 
 TfToken const _tokPoints("points");
 TfToken const _tokNormals("normals");
+TfToken const _tokFaceVarying("faceVarying");
 TfToken const _tokWidths("widths");
 TfToken const _tokDisplayColor("displayColor");
 TfToken const _tokPrimvars("primvars");
@@ -391,7 +392,7 @@ _BuildLevelMeshDataSource(usdGenPomade::PomadeStagedLevel const &level,
     _Add(&pvNames, &pvValues, _tokPoints,
          _Primvar(_Samp(level.points), _tokVertex, _tokPointRole));
     _Add(&pvNames, &pvValues, _tokNormals,
-         _Primvar(_Samp(level.normals), _tokVertex, _tokNormalRole));
+         _Primvar(_Samp(level.normals), _tokFaceVarying, _tokNormalRole));
     _Add(&pvNames, &pvValues, _tokTubeId,
          _Primvar(_Samp(level.faceTubeId), _tokUniform));
     _Add(&pvNames, &pvValues, _tokClumpColor,
@@ -678,7 +679,7 @@ _BuildTestTubeDataSource(usdGenPomade::PomadeStagedTubeMesh const &tube,
     _Add(&pvNames, &pvValues, _tokPoints,
          _Primvar(_Samp(tube.points), _tokVertex, _tokPointRole));
     _Add(&pvNames, &pvValues, _tokNormals,
-         _Primvar(_Samp(tube.normals), _tokVertex, _tokNormalRole));
+         _Primvar(_Samp(tube.normals), _tokFaceVarying, _tokNormalRole));
     _Add(&pvNames, &pvValues, _tokTubeId,
          _Primvar(_Samp(VtIntArray(faceCount, 0)), _tokUniform));
     _Add(&pvNames, &pvValues, _tokClumpColor,

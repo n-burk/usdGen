@@ -148,7 +148,8 @@ bool PomadeLaunchTubeTessellate(
     float const *deviceSectionV, float const *deviceSectionScale,
     float const *deviceSectionTwist, int nSec, int ringVerts,
     int segmentsPerSpan, float *devicePositions, float *deviceNormals,
-    float *deviceRingT, cudaStream_t stream, char *errBuf, size_t errBufLen);
+    float *deviceRingT, cudaStream_t stream, char *errBuf, size_t errBufLen,
+    float const *deviceRootOffsets = nullptr);
 
 // Plain-C mirror of PomadeGuideRoot for the K8/K9 device lane.
 struct PomadeDeviceRoot {

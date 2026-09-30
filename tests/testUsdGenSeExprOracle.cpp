@@ -1,4 +1,4 @@
-// usdGen — the function library against Disney's own SeExpr2, which is the
+// usdGen — the function library against upstream SeExpr2, which is the
 // definition of "a host groomer parity" for everything except a host groomer's own rand().
 //
 // expressions/exprMath.h re-implements SeExpr2's builtins as `__host__

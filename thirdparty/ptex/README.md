@@ -14,8 +14,8 @@ needs is vendored next to it in `thirdparty/zlib`.
 
 Contents: `ptex/` holds only the library sources and headers of upstream
 `src/ptex/` (the ten `.cpp` files the upstream library target compiles plus
-every header). The upstream license is preserved in `LICENSE` (Disney
-BSD-style).
+every header). The upstream license is preserved in `LICENSE` (BSD-3-Clause
+with an upstream non-endorsement clause).
 
 Local changes:
 

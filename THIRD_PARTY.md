@@ -21,8 +21,8 @@ relicense. Link against an OpenUSD build you supply (`USD` or
 
 | Path | Upstream | License |
 | --- | --- | --- |
-| `thirdparty/seexpr`, `thirdparty/seexprFrontend` | Walt Disney Animation Studios SeExpr | Apache-2.0 with Section 6 (Trademarks) replaced. Disney copyright stays. Terms are in each header and in `thirdparty/seexprFrontend/LICENSE`. `thirdparty/seexpr` has no separate `LICENSE` file; the grant is the header block, which points at http://www.apache.org/licenses/LICENSE-2.0 |
-| `thirdparty/ptex` | Ptex | BSD-3-Clause, Disney non-endorsement clause. `thirdparty/ptex/LICENSE` |
+| `thirdparty/seexpr`, `thirdparty/seexprFrontend` | SeExpr | Apache-2.0 with Section 6 (Trademarks) replaced. Upstream copyright notices stay. Terms are in each header and in `thirdparty/seexprFrontend/LICENSE`. `thirdparty/seexpr` has no separate `LICENSE` file; the grant is the header block, which points at http://www.apache.org/licenses/LICENSE-2.0 |
+| `thirdparty/ptex` | Ptex | BSD-3-Clause with an upstream non-endorsement clause. `thirdparty/ptex/LICENSE` |
 | `thirdparty/nanoflann/nanoflann.hpp` | nanoflann | BSD-2-Clause, in the header |
 | `thirdparty/zlib` | zlib | zlib License. `thirdparty/zlib/LICENSE` |
 

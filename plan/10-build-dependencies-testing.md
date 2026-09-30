@@ -302,12 +302,12 @@ interpreter half waits for M4, when `UsdGenExprMap` needs it. `UsdGenPtexMap` is
 
 | Component | Pin | Licence | Copyleft | Link form | Installed? |
 |---|---|---|---|---|---|
-| wdas/SeExpr | branch `main` @ `8f8c8f2` (2026-01-27) | Apache-2.0 with §6 Trademarks replaced (no Disney endorsement) | no | STATIC + hidden inside `libusdGen.so` | never |
-| Ptex | `v2.4.3` (2024-06-11) | BSD-3-Clause, Disney no-endorsement variant | no | STATIC + hidden | never |
+| wdas/SeExpr | branch `main` @ `8f8c8f2` (2026-01-27) | Apache-2.0 with §6 Trademarks replaced (no upstream endorsement) | no | STATIC + hidden inside `libusdGen.so` | never |
+| Ptex | `v2.4.3` (2024-06-11) | BSD-3-Clause with an upstream non-endorsement clause | no | STATIC + hidden | never |
 | nanoflann | `1.12.1` | BSD-2-Clause | no | header-only INTERFACE | headers never installed |
 
 Licence evidence: `research/A8-seexpr-ptex-libs.md` §7 (SeExpr `LICENSE:1-11`, Ptex `LICENSE:1-8`,
-nanoflann `COPYING`). All three are permissive; the two Disney trademark clauses require a `NOTICE`
+nanoflann `COPYING`). All three are permissive; the upstream trademark clauses require a `NOTICE`
 entry, which usdGen ships at the repository root and installs to `share/usdGen/NOTICE`.
 **KSeExpr is GPL-3.0-or-later and is not usable** (`research/A8-seexpr-ptex-libs.md` §1.9).
 
@@ -394,7 +394,7 @@ profiles (`ADR §9.1 R1`).
 ### 2.5 NOTICE and licence audit
 
 `NOTICE` lists OpenUSD (Tomorrow Open Source Technology License 1.0), OpenSubdiv, MaterialX, oneTBB,
-SeExpr, Ptex, nanoflann, zlib and stb with their SPDX identifiers and the two Disney trademark
+SeExpr, Ptex, nanoflann, zlib and stb with their SPDX identifiers and the upstream trademark
 clauses verbatim. `testUsdGenNotice` (T0) asserts every entry in `cmake/usdGenThirdParty.cmake`'s pin
 table has a matching stanza, so a dependency cannot be added without a licence line.
 

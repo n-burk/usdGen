@@ -1416,7 +1416,7 @@ is the whole reason expressions are capture-time.
 >   hook, never through the process-wide `ExprFunc::define` table (§7.3 below).
 >
 > **Parity.** `tests/testUsdGenSeExprOracle.cpp` links the vendored SeExpr2
-> archive and asserts exact double equality between `exprMath.h` and Disney's
+> archive and asserts exact double equality between `exprMath.h` and upstream
 > own `Noise.cpp`/`ExprBuiltins.cpp`/`Curve.cpp`, for the lattices themselves
 > and for compiled expressions run through the real interpreter.
 > `tests/testUsdGenCudaExpressionParity.cpp` then asserts the two execution

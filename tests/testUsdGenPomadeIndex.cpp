@@ -273,6 +273,38 @@ HdDataSourceLocator const kVisibility(TfToken("visibility"),
 int
 main(int argc, char **argv)
 {
+    {
+        using namespace usdGenPomade;
+        PomadeModel model;
+        Check(model.GetDisplaySegments() == 8,
+              "new models reveal the cubic profile by default");
+        PomadeTubeShape shape;
+        shape.rings = 4;
+        Check(model.BuildTestTube(shape) && model.ScaleSectionRing(1, 0.3f) &&
+                  model.ScaleSectionRing(3, 0.3f),
+              "four-ring profile builds through model editing");
+        PomadePublisher publisher;
+        Check(publisher.Stage(model), "four-ring profile publishes");
+        auto const &level = publisher.Current().levels.at(1);
+        Check(level.points.size() == 25 * 8 && level.normals.size() == 24 * 8 * 4,
+              "live profile publishes dense geometry and face-varying normals");
+        bool smooth = true, hard = true, finite = true;
+        for (int r = 0; r < 24; ++r) {
+            for (int s = 0; s < 8; ++s) {
+                size_t const q = size_t(r * 8 + s) * 4;
+                size_t const next = size_t(r * 8 + (s + 1) % 8) * 4;
+                hard &= GfDot(level.normals[q + 1], level.normals[next]) < 0.99f;
+                if (r < 23)
+                    smooth &= level.normals[q + 3] == level.normals[q + 32];
+                finite &= std::abs(level.normals[q].GetLength() - 1.0f) < 1e-5f;
+            }
+        }
+        Check(hard && smooth && finite,
+              "live profile: hard rails, smooth row joins and finite unit normals");
+        Check(std::abs(level.normals[4 * 8 * 4][1]) > 0.05f &&
+                  level.normals[4 * 8 * 4][1] * level.normals[12 * 8 * 4][1] < 0,
+              "surface normals follow the narrowing and widening slopes");
+    }
     // The default (and USDGENPOMADE_TEST_TUBE=0, what record_usd.ps1 sets):
     // the constructor publishes nothing — no tube under the root, GetPrim
     // empty. The ctest entry testUsdGenPomadeIndexNoTestTube drives this
@@ -366,8 +398,22 @@ main(int argc, char **argv)
                       std::abs(points[36][2]) < 1e-5f,
                   "ring-4 slot-4 point is (-0.5, 4, 0)");
         }
-        Check(ArraySize<VtVec3fArray>(*pomade, testTube, "normals", 40),
-              "test tube has 40 normals");
+        VtVec3fArray normals;
+        Check(ArraySize(*pomade, testTube, "normals", 128, &normals),
+              "test tube has one normal per face corner");
+        auto interpolation = SampledAt(prim.dataSource,
+            HdDataSourceLocator(TfToken("primvars"), TfToken("normals"),
+                                TfToken("interpolation")));
+        Check(interpolation && interpolation->GetValue(0.0f) ==
+                  VtValue(TfToken("faceVarying")),
+              "tube normals are face-varying in Hydra");
+        if (normals.size() == 128) {
+            Check(GfDot(normals[1], normals[4]) < 0.9f &&
+                      GfDot(normals[0], normals[29]) < 0.9f,
+                  "adjacent CV rails are hard, including the wrap seam");
+            Check(normals[3] == normals[32] && normals[2] == normals[33],
+                  "normals are shared along the longitudinal strip");
+        }
         // Uniform means per face: 32 entries, not the single-element
         // `constant` the P3 index published.
         Check(ArraySize<VtIntArray>(*pomade, testTube, "tubeId", 32),
