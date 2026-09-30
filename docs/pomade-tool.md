@@ -272,6 +272,16 @@ preserving the region corners; existing sculpted tubes are not regenerated
 when it changes. Regions with more than 32 CVs keep their authored graph and
 report the 32-CV construction limit.
 
+A new region stub is a braid profile, written into the section scales the
+committer stores. The root ring stays at scale 1, flush with the region.
+Scale rises to a belly through the middle, then eases to a smaller tip.
+When the scalp has one region and that region is a small patch on a large
+surface, building the stub first moves the region's graph nodes outward on
+the scalp, so the tint and the tube root cover a wide cap. A region that
+already covers a fair share of the scalp stays where it was drawn, and so
+does a region that shares its boundary with another region. Undo of the
+stub puts the moved region back.
+
 The component row picks what a click selects: **Whole tube** (`F8`, the
 body), **Center CV** (`F9`, the default), **Ring** (`F10`) or **Section CV**
 (`F11`). Selecting or hovering a component also highlights its owning tube,
@@ -804,9 +814,12 @@ the new stage: bind a scalp mesh to continue.`
   scalp along the root ring and show several facets between section rings
   (six spans by default). Tube mode's Ring sub-mode draws one
   selectable ring per authored section. **Curve smoothness (display)**
-  is that span count; a lower value draws a coarser shell. The headless
-  check is `testUsdGenPomadeTubes`
-  (`CheckDisplayShellFlush`).
+  is that span count; a lower value draws a coarser shell. On
+  `examples/pomade-sphere-scalp.usda`, bind `/Scalp`, draw a small region
+  and grow the stub: the tinted patch and the tube root should cover a
+  wide cap of the sphere, and the shell should bulge through the middle
+  and taper toward the tip. The headless check is `testUsdGenPomadeTubes`
+  (`CheckDisplayShellFlush`, `CheckBraidSectionProfile`).
 * **Staged package:** T3 tests and the launcher import the package staged
   under `build/python`, not the source tree. After editing plugin python
   (or adding a test file) re-run the CMake configure

@@ -744,7 +744,7 @@ bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
     // same section-t buffer. Uniform spacing across the whole tube misses
     // a section that is not evenly spaced, and the shell then leaves that
     // section's edge.
-    std::vector<float> sectionT(size_t(nSec));
+    std::vector<float> sectionT(size_t(nSec), 0.0f);
     for (int i = 0; i < nSec; ++i) {
         sectionT[size_t(i)] = tube.sections[size_t(i)].t;
     }

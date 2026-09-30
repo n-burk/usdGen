@@ -363,6 +363,12 @@ public:
     // graph-loop CV count; an explicit 3..32 resolves to at least that many
     // slots, adding only edge samples so every drawn corner remains exact.
     // A loop needing more than 32 slots is refused.
+    // Section scales follow PomadeBraidSectionScale (root flush with the
+    // region, belly through the middle, smaller tip). When this is the
+    // first stub and the scalp has a single region that is a small patch
+    // on a large surface, the region's nodes are moved outward on the
+    // scalp first so the root footprint is a wide cap. Undo of that stub
+    // restores the region.
     // Pushes ONE undo step; it no longer clears the stack.
     bool BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                              float length);
@@ -1009,9 +1015,16 @@ private:
     // `ringVerts` CVs sit on the region boundary in the root plane (plan/17
     // §5.2 "fitted to the boundary shape", plan/18 §7 G12).
     // `outRadius` receives the mean fitted radius (the display width scale).
+    // Section scales follow PomadeBraidSectionScale. The root stays at 1
+    // so it remains flush with the region loop.
     bool _RegionTubeDescLocked(int regionId, int centerCount, int ringVerts,
                                float length, PomadeTubeDesc *out,
                                float *outRadius);
+    // Expand a lone tiny growth region before its first stub. Moves the
+    // loop outward on the scalp and refreshes the region maps. Returns
+    // false when the region is left as drawn. Caller holds _mutex. Does
+    // not push undo and does not call Rasterise (that retakes the lock).
+    bool _WidenTinyGrowthRegionLocked(int regionId);
     // L1TubeIds under the caller's lock.
     std::vector<int> _L1TubeIdsLocked() const;
     // True when any descendant of `tubeId` carries a non-zero shape delta

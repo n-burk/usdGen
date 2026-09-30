@@ -3006,7 +3006,10 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
     for (int r = 0; r < centerCount; ++r) {
         PomadeTubeSection &section = out->sections[size_t(r)];
         section.t = float(r) / float(centerCount - 1);
-        section.scale = 1.0f;
+        // Root t is 0, so this scale is exactly 1 and the root ring stays
+        // on the graph loop. Later sections belly out, then ease toward
+        // a smaller tip.
+        section.scale = PomadeBraidSectionScale(section.t);
         section.twist = 0.0f;
         section.u.resize(ring.size());
         section.v.resize(ring.size());
@@ -3177,6 +3180,289 @@ PomadeModel::_NextL1TubeIdLocked() const
     }
 }
 
+namespace {
+
+// Radius of the active scalp about its vertex centroid. A lone region is
+// "tiny" when its fitted loop is a small fraction of this.
+float ScalpBoundingRadius(PomadeScalpMesh const &mesh)
+{
+    size_t const pointCount = mesh.points.size() / 3;
+    size_t const faceCount = mesh.faceVertexCounts.size();
+    if (pointCount == 0 || mesh.faceOffsets.size() < faceCount) {
+        return 0.0f;
+    }
+    std::vector<char> used(pointCount, 0);
+    size_t usedCount = 0;
+    for (size_t face = 0; face < faceCount; ++face) {
+        if (!PomadeScalpFaceActive(mesh, int(face))) {
+            continue;
+        }
+        int const begin = mesh.faceOffsets[face];
+        int const count = mesh.faceVertexCounts[face];
+        if (begin < 0 || count < 0) {
+            continue;
+        }
+        for (int k = 0; k < count; ++k) {
+            size_t const slot = size_t(begin) + size_t(k);
+            if (slot >= mesh.faceVertexIndices.size()) {
+                break;
+            }
+            int const index = mesh.faceVertexIndices[slot];
+            if (index < 0 || size_t(index) >= pointCount ||
+                used[size_t(index)]) {
+                continue;
+            }
+            used[size_t(index)] = 1;
+            ++usedCount;
+        }
+    }
+    if (usedCount == 0) {
+        return 0.0f;
+    }
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (size_t i = 0; i < pointCount; ++i) {
+        if (!used[i]) {
+            continue;
+        }
+        cx += mesh.points[i * 3 + 0];
+        cy += mesh.points[i * 3 + 1];
+        cz += mesh.points[i * 3 + 2];
+    }
+    cx /= double(usedCount);
+    cy /= double(usedCount);
+    cz /= double(usedCount);
+    double max2 = 0.0;
+    for (size_t i = 0; i < pointCount; ++i) {
+        if (!used[i]) {
+            continue;
+        }
+        double const dx = double(mesh.points[i * 3 + 0]) - cx;
+        double const dy = double(mesh.points[i * 3 + 1]) - cy;
+        double const dz = double(mesh.points[i * 3 + 2]) - cz;
+        double const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > max2) {
+            max2 = d2;
+        }
+    }
+    return float(std::sqrt(max2));
+}
+
+// Mean distance of the region's loop nodes from the support-plane origin
+// used by _RegionTubeDescLocked (boundary centroid, snapped to the scalp).
+struct RegionLoopFit {
+    float centroid[3] = {0.0f, 0.0f, 0.0f};
+    float normal[3] = {0.0f, 1.0f, 0.0f};
+    float meanRadius = 0.0f;
+    std::vector<int> loopIds;
+};
+
+bool MeasureRegionLoop(PomadeScalpGraph const &graph,
+                       PomadeScalpMesh const &scalp, int regionId,
+                       RegionLoopFit *fit)
+{
+    if (!fit || regionId < 0 || regionId >= graph.RegionCount()) {
+        return false;
+    }
+    PomadeGraphRegion const &region = graph.Regions()[size_t(regionId)];
+    size_t const boundaryCount = region.boundary.size() / 3;
+    if (boundaryCount < 3 || region.loop.size() < 3) {
+        return false;
+    }
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (size_t i = 0; i < boundaryCount; ++i) {
+        cx += region.boundary[i * 3 + 0];
+        cy += region.boundary[i * 3 + 1];
+        cz += region.boundary[i * 3 + 2];
+    }
+    cx /= double(boundaryCount);
+    cy /= double(boundaryCount);
+    cz /= double(boundaryCount);
+    float centroid[3] = {float(cx), float(cy), float(cz)};
+    PomadeHit const surface = PomadeClosestPointCpu(scalp, centroid);
+    if (!surface.hit) {
+        return false;
+    }
+    float normal[3] = {0.0f, 0.0f, 0.0f};
+    for (size_t i = 0; i < boundaryCount; ++i) {
+        float const *p0 = &region.boundary[i * 3];
+        float const *p1 =
+            &region.boundary[((i + 1) % boundaryCount) * 3];
+        normal[0] += (p0[1] - p1[1]) * (p0[2] + p1[2]);
+        normal[1] += (p0[2] - p1[2]) * (p0[0] + p1[0]);
+        normal[2] += (p0[0] - p1[0]) * (p0[1] + p1[1]);
+    }
+    float const nl = PomadeLen3(normal);
+    if (!(nl > 1e-12f)) {
+        return false;
+    }
+    normal[0] /= nl;
+    normal[1] /= nl;
+    normal[2] /= nl;
+    if (normal[0] * surface.nx + normal[1] * surface.ny +
+            normal[2] * surface.nz <
+        0.0f) {
+        normal[0] = -normal[0];
+        normal[1] = -normal[1];
+        normal[2] = -normal[2];
+    }
+    double mean = 0.0;
+    std::vector<int> ids;
+    ids.reserve(region.loop.size());
+    for (int nodeId : region.loop) {
+        PomadeGraphNode const *node = graph.FindNode(nodeId);
+        if (!node || !node->alive) {
+            return false;
+        }
+        float d[3] = {node->p[0] - surface.px, node->p[1] - surface.py,
+                      node->p[2] - surface.pz};
+        float const along = PomadeDot3(d, normal);
+        d[0] -= along * normal[0];
+        d[1] -= along * normal[1];
+        d[2] -= along * normal[2];
+        mean += double(PomadeLen3(d));
+        ids.push_back(nodeId);
+    }
+    if (ids.empty()) {
+        return false;
+    }
+    mean /= double(ids.size());
+    fit->centroid[0] = surface.px;
+    fit->centroid[1] = surface.py;
+    fit->centroid[2] = surface.pz;
+    fit->normal[0] = normal[0];
+    fit->normal[1] = normal[1];
+    fit->normal[2] = normal[2];
+    fit->meanRadius = float(mean);
+    fit->loopIds = std::move(ids);
+    return fit->meanRadius > 0.0f;
+}
+
+}  // namespace
+
+bool
+PomadeModel::_WidenTinyGrowthRegionLocked(int regionId)
+{
+    // One region only: a shared boundary must not be dragged. A refresh of
+    // a tube that already owns the region keeps the footprint the artist
+    // (or an earlier stub) left there.
+    if (!_scalp || !_scalp->finalized || _graph.RegionCount() != 1 ||
+        regionId != 0) {
+        return false;
+    }
+    if (_regionTube.find(regionId) != _regionTube.end()) {
+        return false;
+    }
+    if (_host.centerX.size() >= 2 &&
+        (_tubeRegionId < 0 || _tubeRegionId == regionId)) {
+        return false;
+    }
+    float const scalpRadius = ScalpBoundingRadius(*_scalp);
+    if (!(scalpRadius > 1e-4f)) {
+        return false;
+    }
+    RegionLoopFit fit;
+    if (!MeasureRegionLoop(_graph, *_scalp, regionId, &fit)) {
+        return false;
+    }
+    float const original = fit.meanRadius;
+    // Under a fifth of the scalp radius counts as the tiny patch. The
+    // target is about a third of that radius, and one edit never
+    // stretches the loop by more than kMaxFactor.
+    float const kTinyFraction = 0.20f;
+    float const kTargetFraction = 0.32f;
+    float const kMaxFactor = 3.2f;
+    float const kMinGrowth = 1.6f;
+    if (!(original > 1e-5f) ||
+        !(original < kTinyFraction * scalpRadius)) {
+        return false;
+    }
+    float const capRadius = original * kMaxFactor;
+    float const goal =
+        std::min(kTargetFraction * scalpRadius, capRadius);
+    PomadeScalpGraph const saved = _graph;
+    auto restore = [&]() { _graph = saved; };
+    for (int iter = 0; iter < 4; ++iter) {
+        if (!MeasureRegionLoop(_graph, *_scalp, regionId, &fit)) {
+            restore();
+            return false;
+        }
+        if (fit.meanRadius >= goal * 0.92f) {
+            break;
+        }
+        float grow = goal / fit.meanRadius;
+        if (grow > 1.85f) {
+            grow = 1.85f;
+        }
+        if (fit.meanRadius * grow > capRadius) {
+            grow = capRadius / fit.meanRadius;
+        }
+        if (!(grow > 1.02f)) {
+            break;
+        }
+        std::vector<int> const ids = fit.loopIds;
+        std::vector<PomadeHit> hits;
+        hits.reserve(ids.size());
+        bool placed = true;
+        for (int nodeId : ids) {
+            PomadeGraphNode const *node = _graph.FindNode(nodeId);
+            if (!node) {
+                placed = false;
+                break;
+            }
+            float d[3] = {node->p[0] - fit.centroid[0],
+                          node->p[1] - fit.centroid[1],
+                          node->p[2] - fit.centroid[2]};
+            float const along = PomadeDot3(d, fit.normal);
+            d[0] -= along * fit.normal[0];
+            d[1] -= along * fit.normal[1];
+            d[2] -= along * fit.normal[2];
+            if (!(PomadeLen3(d) > 1e-6f)) {
+                placed = false;
+                break;
+            }
+            float const target[3] = {fit.centroid[0] + d[0] * grow,
+                                     fit.centroid[1] + d[1] * grow,
+                                     fit.centroid[2] + d[2] * grow};
+            PomadeHit const hit = PomadeClosestPointCpu(*_scalp, target);
+            if (!hit.hit) {
+                placed = false;
+                break;
+            }
+            hits.push_back(hit);
+        }
+        if (!placed || !_graph.MoveNodes(*_scalp, ids, hits) ||
+            _graph.RegionCount() != 1) {
+            restore();
+            return false;
+        }
+    }
+    if (!MeasureRegionLoop(_graph, *_scalp, regionId, &fit) ||
+        !(fit.meanRadius >= original * kMinGrowth)) {
+        restore();
+        return false;
+    }
+    // Rasterise into temporaries. The live maps stay put until both
+    // writes succeed, and Rasterise() itself is not called: it retakes
+    // _mutex and would re-enter tube sync.
+    PomadeRegionMaps maps;
+    PomadeRegionLoops loops;
+    std::string err;
+    if (!PomadeRasteriseRegionsCpu(*_scalp, _graph, &maps, &err) ||
+        !PomadeFlattenLoops(_graph, &loops, &err)) {
+        restore();
+        _diagnostic = err;
+        return false;
+    }
+    _maps = std::move(maps);
+    _loops = std::move(loops);
+    // The undo snapshot for this stub was taken before the move. Drop
+    // the cached pre-move graph so a later snapshot copies this one.
+    _graphUndoCache.reset();
+    _graphUndoCacheMap = ~uint64_t(0);
+    _dirty |= PomadeDirty_Graph | PomadeDirty_Regions;
+    return true;
+}
+
 bool
 PomadeModel::BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                                 float length)
@@ -3187,10 +3473,17 @@ PomadeModel::BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                       "0 (match authored region corners) or 3..32";
         return false;
     }
+    // Snapshot before a footprint move so a failed install, and undo of
+    // the stub, both put the small region back.
+    HierarchyRollback const snap = _SnapshotHierarchyLocked();
+    bool const widened = _WidenTinyGrowthRegionLocked(regionId);
     PomadeTubeDesc desc;
     float fitted = 0.0f;
     if (!_RegionTubeDescLocked(regionId, centerCount, ringVerts, length,
                                &desc, &fitted)) {
+        if (widened) {
+            _RestoreHierarchyLocked(snap);
+        }
         return false;
     }
     // Which tube owns this region? An existing owner is refreshed in
@@ -3212,10 +3505,12 @@ PomadeModel::BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
     if (target != 0 && _SubtreeCarriesDeltasLocked(target)) {
         _diagnostic = "PomadeModel::BuildTubeFromRegion: the region's tube "
                       "carries child deltas; merge the children first";
+        if (widened) {
+            _RestoreHierarchyLocked(snap);
+        }
         return false;
     }
     desc.tubeId = target;
-    HierarchyRollback const snap = _SnapshotHierarchyLocked();
     bool ok = true;
     if (target == 0) {
         _shape.length = length;

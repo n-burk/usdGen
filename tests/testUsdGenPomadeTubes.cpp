@@ -28,6 +28,8 @@
 //     own params into an ascending merged set with per-guide tube
 //     attribution, freeze is per tube, merge resumes the parent;
 //   * auto-tube from a graph region (root fit + normal seeding);
+//   * region stubs author a small-large-smaller section scale, and a
+//     lone tiny region on a large scalp is widened before that stub;
 //   * the P3 C ABI drives the same tube (plus its error paths);
 //   * TN-6 parity (CUDA builds with a device only): all six device lanes
 //     match their CPU twins (bit-exact where arithmetic-only).
@@ -1388,6 +1390,31 @@ Grid MakeGrid()
     return grid;
 }
 
+// An n-by-n quad lattice in the XZ plane, spanning [0, n].
+Grid MakeLattice(int n)
+{
+    Grid grid;
+    int const side = n + 1;
+    for (int iz = 0; iz < side; ++iz) {
+        for (int ix = 0; ix < side; ++ix) {
+            grid.points.push_back(float(ix));
+            grid.points.push_back(0.0f);
+            grid.points.push_back(float(iz));
+        }
+    }
+    for (int ix = 0; ix < n; ++ix) {
+        for (int iz = 0; iz < n; ++iz) {
+            grid.counts.push_back(4);
+            int const v00 = iz * side + ix;
+            grid.indices.push_back(v00);
+            grid.indices.push_back(v00 + side);
+            grid.indices.push_back(v00 + side + 1);
+            grid.indices.push_back(v00 + 1);
+        }
+    }
+    return grid;
+}
+
 void CheckAutoTube()
 {
     using namespace usdGenPomade;
@@ -1480,6 +1507,239 @@ void CheckAutoTube()
           "auto-tube: centerCount < 2 fails");
     Check(!model.BuildTubeFromRegion(0, 4, 2, 3.0f),
           "auto-tube: ringVerts < 3 fails");
+}
+
+int ClaimedRegionFaces(usdGenPomade::PomadeModel const &model, int regionId)
+{
+    int claimed = 0;
+    for (int id : model.GetRegionMaps().faceRegionId) {
+        if (id == regionId) {
+            ++claimed;
+        }
+    }
+    return claimed;
+}
+
+float MeanNodeRadius(usdGenPomade::PomadeModel const &model,
+                     std::vector<int> const &ids)
+{
+    if (ids.empty()) {
+        return 0.0f;
+    }
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    for (int id : ids) {
+        usdGenPomade::PomadeGraphNode const *node =
+            model.GetGraph().FindNode(id);
+        if (!node) {
+            return 0.0f;
+        }
+        cx += node->p[0];
+        cy += node->p[1];
+        cz += node->p[2];
+    }
+    cx /= double(ids.size());
+    cy /= double(ids.size());
+    cz /= double(ids.size());
+    double mean = 0.0;
+    for (int id : ids) {
+        usdGenPomade::PomadeGraphNode const *node =
+            model.GetGraph().FindNode(id);
+        double const dx = node->p[0] - cx;
+        double const dy = node->p[1] - cy;
+        double const dz = node->p[2] - cz;
+        mean += std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return float(mean / double(ids.size()));
+}
+
+bool PlaceSquare(usdGenPomade::PomadeModel *model, float x0, float z0,
+                 float x1, float z1, std::vector<int> *ids)
+{
+    float const down[3] = {0.0f, -1.0f, 0.0f};
+    float const corners[4][3] = {
+        {x0, 2.0f, z0}, {x1, 2.0f, z0}, {x1, 2.0f, z1}, {x0, 2.0f, z1},
+    };
+    ids->clear();
+    for (int i = 0; i < 4; ++i) {
+        usdGenPomade::PomadeHit const hit = model->Raycast(corners[i], down);
+        if (!hit.hit) {
+            return false;
+        }
+        int const id = model->GraphAddNode(hit);
+        if (id < 0) {
+            return false;
+        }
+        ids->push_back(id);
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (model->GraphConnect((*ids)[size_t(i)],
+                                (*ids)[size_t((i + 1) % 4)]) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool NodesUnmoved(usdGenPomade::PomadeModel const &model,
+                  std::vector<int> const &ids,
+                  std::vector<std::array<float, 3>> const &before)
+{
+    if (ids.size() != before.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < ids.size(); ++i) {
+        usdGenPomade::PomadeGraphNode const *node =
+            model.GetGraph().FindNode(ids[i]);
+        if (!node || node->p[0] != before[i][0] || node->p[1] != before[i][1] ||
+            node->p[2] != before[i][2]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::array<float, 3>> NodePositions(
+    usdGenPomade::PomadeModel const &model, std::vector<int> const &ids)
+{
+    std::vector<std::array<float, 3>> out;
+    for (int id : ids) {
+        usdGenPomade::PomadeGraphNode const *node = model.GetGraph().FindNode(id);
+        if (!node) {
+            out.push_back({{0.0f, 0.0f, 0.0f}});
+            continue;
+        }
+        out.push_back({{node->p[0], node->p[1], node->p[2]}});
+    }
+    return out;
+}
+
+bool SectionScalesFollowBraid(usdGenPomade::PomadeModel const &model)
+{
+    using namespace usdGenPomade;
+    int const count = model.GetSectionCount();
+    if (count < 3) {
+        return false;
+    }
+    float root = 0.0f, belly = 0.0f, tip = 0.0f;
+    for (int ring = 0; ring < count; ++ring) {
+        PomadeTubeSection section;
+        if (!model.GetSection(ring, &section) ||
+            !Near(section.scale, PomadeBraidSectionScale(section.t), 1e-5f)) {
+            return false;
+        }
+        if (ring == 0) {
+            root = section.scale;
+        }
+        if (ring == count / 2) {
+            belly = section.scale;
+        }
+        if (ring == count - 1) {
+            tip = section.scale;
+        }
+    }
+    return Near(root, 1.0f, 1e-6f) && belly > root && belly > tip &&
+           tip > root;
+}
+
+void CheckBraidSectionProfile()
+{
+    using namespace usdGenPomade;
+    Check(Near(PomadeBraidSectionScale(0.0f), 1.0f, 1e-6f) &&
+              Near(PomadeBraidSectionScale(-0.4f), 1.0f, 1e-6f),
+          "braid scale: the root, and anything before it, is exactly 1");
+    Check(Near(PomadeBraidSectionScale(0.42f), 2.15f, 1e-5f) &&
+              Near(PomadeBraidSectionScale(1.0f), 1.28f, 1e-5f) &&
+              Near(PomadeBraidSectionScale(1.5f), 1.28f, 1e-5f),
+          "braid scale: the belly peaks at 2.15 and the tip settles at 1.28");
+    bool rising = true;
+    bool falling = true;
+    float previous = PomadeBraidSectionScale(0.0f);
+    for (int i = 1; i <= 100; ++i) {
+        float const t = float(i) / 100.0f;
+        float const scale = PomadeBraidSectionScale(t);
+        if (t <= 0.42f) {
+            rising = rising && scale + 1e-5f >= previous;
+        } else {
+            falling = falling && scale <= previous + 1e-5f;
+        }
+        previous = scale;
+    }
+    Check(rising && falling,
+          "braid scale: the profile rises to the belly, then falls to the tip");
+
+    // A region that already covers a fair share of its scalp keeps its
+    // nodes. Its sections still take the braid profile.
+    {
+        Grid grid = MakeGrid();
+        PomadeModel model;
+        std::vector<int> ids;
+        bool const placed =
+            model.BindScalp(grid.points, grid.counts, grid.indices) &&
+            PlaceSquare(&model, 1.2f, 1.2f, 2.8f, 2.8f, &ids) &&
+            model.Rasterise() && model.GetGraph().RegionCount() == 1;
+        std::vector<std::array<float, 3>> const before =
+            NodePositions(model, ids);
+        Check(placed && model.BuildTubeFromRegion(0, 5, 0, 3.0f) &&
+                  NodesUnmoved(model, ids, before) &&
+                  SectionScalesFollowBraid(model),
+              "braid scale: a fair-sized region keeps its footprint and "
+              "takes the profile");
+    }
+
+    // Two tiny regions share the scalp, so neither footprint moves.
+    {
+        Grid grid = MakeLattice(16);
+        PomadeModel model;
+        std::vector<int> first, second;
+        bool const placed =
+            model.BindScalp(grid.points, grid.counts, grid.indices) &&
+            PlaceSquare(&model, 2.2f, 2.2f, 2.8f, 2.8f, &first) &&
+            PlaceSquare(&model, 12.2f, 12.2f, 12.8f, 12.8f, &second) &&
+            model.Rasterise() && model.GetGraph().RegionCount() == 2;
+        std::vector<int> ids = first;
+        ids.insert(ids.end(), second.begin(), second.end());
+        std::vector<std::array<float, 3>> const before =
+            NodePositions(model, ids);
+        Check(placed && model.BuildTubeFromRegion(0, 5, 0, 3.0f) &&
+                  NodesUnmoved(model, ids, before) &&
+                  SectionScalesFollowBraid(model),
+              "braid scale: a shared boundary stays put while the stub "
+              "still takes the profile");
+    }
+
+    // One tiny patch on a large scalp grows before the stub is built.
+    // Undo puts the patch back; redo restores the wide cap and the tube.
+    {
+        Grid grid = MakeLattice(16);
+        PomadeModel model;
+        std::vector<int> ids;
+        bool const placed =
+            model.BindScalp(grid.points, grid.counts, grid.indices) &&
+            PlaceSquare(&model, 7.7f, 7.7f, 8.3f, 8.3f, &ids) &&
+            model.Rasterise() && model.GetGraph().RegionCount() == 1;
+        float const beforeRadius = MeanNodeRadius(model, ids);
+        int const beforeFaces = ClaimedRegionFaces(model, 0);
+        std::vector<std::array<float, 3>> const before =
+            NodePositions(model, ids);
+        bool const built = placed && model.BuildTubeFromRegion(0, 5, 0, 4.0f);
+        float const afterRadius = MeanNodeRadius(model, ids);
+        int const afterFaces = ClaimedRegionFaces(model, 0);
+        Check(built && beforeRadius > 0.0f &&
+                  afterRadius >= beforeRadius * 2.5f &&
+                  afterFaces > beforeFaces && afterFaces >= 4 &&
+                  SectionScalesFollowBraid(model),
+              "braid scale: a lone tiny region widens, claims more scalp, "
+              "and the stub follows the profile");
+        Check(model.Undo() && NodesUnmoved(model, ids, before) &&
+                  model.GetCenterCVCount() == 0 &&
+                  ClaimedRegionFaces(model, 0) == beforeFaces,
+              "braid scale: undo of the stub restores the small region");
+        Check(model.Redo() &&
+                  MeanNodeRadius(model, ids) >= beforeRadius * 2.5f &&
+                  model.GetCenterCVCount() == 5 &&
+                  SectionScalesFollowBraid(model),
+              "braid scale: redo restores the wide cap and the profile");
+    }
 }
 
 void CheckCApi()
@@ -2874,6 +3134,7 @@ int main()
     CheckModelFillMode();
     CheckModelPerTubeFill();
     CheckAutoTube();
+    CheckBraidSectionProfile();
     CheckCApi();
     CheckProbes();
     CheckPerTubeOps();

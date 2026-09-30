@@ -112,6 +112,34 @@ USDGEN_POMADE_HD inline float PomadeSoftWeight(float t, float center,
     return w * w * (3.0f - 2.0f * w);
 }
 
+// Section scale of a region stub along t in [0, 1]. The root is exactly 1
+// so the root ring stays on the graph loop. The value rises to a belly and
+// settles to a smaller tip. Hermite interpolation between authored sections
+// carries the same silhouette into the shell and into a committed groom.
+USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
+{
+    if (t < 0.0f) {
+        t = 0.0f;
+    } else if (t > 1.0f) {
+        t = 1.0f;
+    }
+    float const kRoot = 1.0f;
+    float const kPeak = 2.15f;
+    float const kTip = 1.28f;
+    float const kPeakT = 0.42f;
+    float bump;
+    if (t <= kPeakT) {
+        float const u = t / kPeakT;
+        bump = u * u * (3.0f - 2.0f * u);
+    } else {
+        float const u = (t - kPeakT) / (1.0f - kPeakT);
+        float const down = u * u * (3.0f - 2.0f * u);
+        float const tipBump = (kTip - kRoot) / (kPeak - kRoot);
+        bump = 1.0f + (tipBump - 1.0f) * down;
+    }
+    return kRoot + (kPeak - kRoot) * bump;
+}
+
 // One rotation-minimising frame: tangent, normal, binormal (orthonormal).
 struct PomadeFrame {
     float tx = 0.0f, ty = 1.0f, tz = 0.0f;
