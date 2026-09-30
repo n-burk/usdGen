@@ -1469,10 +1469,8 @@ void CheckAutoTube()
         float const leg = std::sqrt(legX * legX + legY * legY + legZ * legZ);
         float const across =
             std::sqrt(legX * legX + legZ * legZ);
-        Check(leg > 0.4f && across > 0.7f * leg &&
-                  std::fabs(legY) < 0.45f * leg,
-              "auto-tube: the second center is perpendicular to the grid "
-              "normal");
+        Check(leg > 0.8f && legY > 0.55f * leg && across > 0.15f * leg,
+              "auto-tube: the second center stands off the scalp and hangs");
         // Mesh fill roots on the claimed faces.
         PomadeModel::FillParams params;
         params.density = 4.0f;
@@ -1646,21 +1644,28 @@ bool SectionScalesFollowBraid(usdGenPomade::PomadeModel const &model)
             tip = section.scale;
         }
     }
-    return Near(root, PomadeBraidSectionScale(0.0f), 1e-5f) && root < 0.5f &&
-           belly > root && belly > tip && tip > root;
+    return Near(root, PomadeBraidSectionScale(0.0f), 1e-5f) &&
+           root > 0.75f && root < 1.15f && belly > root * 2.0f &&
+           belly > tip && tip > root;
 }
 
 void CheckBraidSectionProfile()
 {
     using namespace usdGenPomade;
-    Check(Near(PomadeBraidSectionScale(0.0f), 0.38f, 1e-6f) &&
-              Near(PomadeBraidSectionScale(-0.4f), 0.38f, 1e-6f) &&
-              PomadeBraidSectionScale(0.0f) < 0.5f,
-          "braid scale: the root, and anything before it, is small");
-    Check(Near(PomadeBraidSectionScale(0.42f), 2.15f, 1e-5f) &&
-              Near(PomadeBraidSectionScale(1.0f), 1.28f, 1e-5f) &&
-              Near(PomadeBraidSectionScale(1.5f), 1.28f, 1e-5f),
-          "braid scale: the belly peaks at 2.15 and the tip settles at 1.28");
+    Check(Near(PomadeBraidSectionScale(0.0f), 0.90f, 1e-6f) &&
+              Near(PomadeBraidSectionScale(-0.4f), 0.90f, 1e-6f) &&
+              PomadeBraidSectionScale(0.0f) > 0.75f,
+          "braid scale: the root matches the footprint, not a pinched neck");
+    Check(Near(PomadeBraidSectionScale(0.42f), 2.45f, 1e-5f) &&
+              Near(PomadeBraidSectionScale(1.0f), 1.50f, 1e-5f) &&
+              Near(PomadeBraidSectionScale(1.5f), 1.50f, 1e-5f) &&
+              PomadeBraidSectionScale(0.42f) > PomadeBraidSectionScale(0.0f) * 2.0f,
+          "braid scale: the belly peaks at 2.45 and the tip stays plump at 1.50");
+    Check(Near(PomadeBraidSectionT(0, 4), 0.0f, 1e-6f) &&
+              Near(PomadeBraidSectionT(1, 4), 0.30f, 1e-6f) &&
+              Near(PomadeBraidSectionT(2, 4), 0.50f, 1e-6f) &&
+              Near(PomadeBraidSectionT(3, 4), 1.0f, 1e-6f),
+          "braid scale: four rings put the belly early and leave a long taper");
     bool rising = true;
     bool falling = true;
     float previous = PomadeBraidSectionScale(0.0f);
@@ -1737,7 +1742,7 @@ void CheckBraidSectionProfile()
         float const afterRadius = MeanNodeRadius(model, ids);
         int const afterFaces = ClaimedRegionFaces(model, 0);
         Check(built && beforeRadius > 0.0f &&
-                  afterRadius >= beforeRadius * 2.5f &&
+                  afterRadius >= beforeRadius * 5.0f &&
                   afterFaces > beforeFaces && afterFaces >= 4 &&
                   SectionScalesFollowBraid(model),
               "braid scale: a lone tiny region widens, claims more scalp, "
@@ -1747,7 +1752,7 @@ void CheckBraidSectionProfile()
                   ClaimedRegionFaces(model, 0) == beforeFaces,
               "braid scale: undo of the stub restores the small region");
         Check(model.Redo() &&
-                  MeanNodeRadius(model, ids) >= beforeRadius * 2.5f &&
+                  MeanNodeRadius(model, ids) >= beforeRadius * 5.0f &&
                   model.GetCenterCVCount() == 4 &&
                   model.GetSectionCount() == 4 &&
                   SectionScalesFollowBraid(model),
@@ -1755,9 +1760,9 @@ void CheckBraidSectionProfile()
               "profile");
     }
 
-    // A vertical wall (normal along Z). The second center drops in world
-    // -Y, perpendicular to the surface. The root stays small and seated
-    // on the wall: no normal lift.
+    // A vertical wall (normal along Z). The root stays seated on the
+    // wall. The next ring is already the wide shoulder: off the wall
+    // along the normal, and down the hang.
     {
         Grid wall;
         int const n = 8;
@@ -1810,10 +1815,12 @@ void CheckBraidSectionProfile()
                  model.GetSection(0, &root) && model.GetSection(1, &second);
         Check(placed && model.GetSectionCount() == 4 &&
                   model.GetCenterCVCount() == 4 && std::fabs(z0) < 1e-3f &&
-                  root.scale < 0.5f && second.scale > root.scale * 2.0f &&
-                  y1 < y0 - 0.5f,
-              "braid layout: four sections, the root small and seated on "
-              "the wall, the second section hanging below it");
+                  root.scale > 0.75f && root.scale < 1.15f &&
+                  second.scale > root.scale * 2.0f && y1 < y0 - 0.4f &&
+                  z1 > z0 + 0.8f,
+              "braid layout: four sections, the root seated on the wall "
+              "at the footprint, the next ring wide, off the wall, and "
+              "hanging below");
     }
 }
 
@@ -3185,9 +3192,16 @@ void CheckDisplayShellFlush()
             float const before = ringRadius(mid - 1);
             float const at = ringRadius(mid);
             float const after = ringRadius(mid + 1);
-            corner = before > 0.17f && before < 0.21f && after > 0.17f &&
-                     after < 0.21f && at > 0.10f && at < 0.16f &&
-                     before > at + 0.04f && after > at + 0.04f;
+            // One span before the pinch lies on the chord from scale 1
+            // to scale 0.25. The window follows the span count, so four
+            // spans (fraction 3/4, radius 0.21875) still count as a corner.
+            float const frac = float(spans - 1) / float(spans);
+            float const chord =
+                0.5f * (1.0f + (0.25f - 1.0f) * frac);
+            corner = std::fabs(before - chord) < 0.02f &&
+                     std::fabs(after - chord) < 0.02f && at > 0.10f &&
+                     at < 0.16f && before > at + 0.04f &&
+                     after > at + 0.04f;
         }
         Check(corner,
               "display: an interior section ring stays a hard corner");

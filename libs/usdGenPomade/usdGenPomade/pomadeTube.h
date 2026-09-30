@@ -112,11 +112,34 @@ USDGEN_POMADE_HD inline float PomadeSoftWeight(float t, float center,
     return w * w * (3.0f - 2.0f * w);
 }
 
-// Section scale of a region stub along t in [0, 1]. The root is small, so
-// the first ring is narrower than the region loop. The value rises to a
-// belly and settles to a smaller tip. Display tessellation holds a hard
-// edge at each authored sample of this curve (PomadeHeldLerp); it does not
-// round those knots together.
+// Where the four authored rings of a region stub sit along t. The wide
+// rings cluster through the upper half (shoulder, then belly) and the
+// last span is the long plump taper. Other section counts stay uniform.
+USDGEN_POMADE_HD inline float PomadeBraidSectionT(int index, int count)
+{
+    if (count == 4) {
+        float const knots[4] = {0.0f, 0.30f, 0.50f, 1.0f};
+        if (index <= 0) {
+            return knots[0];
+        }
+        if (index >= 3) {
+            return knots[3];
+        }
+        return knots[index];
+    }
+    if (count <= 1) {
+        return 0.0f;
+    }
+    float const u = float(index) / float(count - 1);
+    return u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+}
+
+// Section scale of a region stub along t in [0, 1]. The root is nearly
+// the growth footprint, so the tube leaves the scalp as a base rather
+// than a pinched neck. The value rises to a wide belly and settles to a
+// still-plump tip. Display tessellation holds a hard edge at each
+// authored sample of this curve (PomadeHeldLerp); it does not round
+// those knots together.
 USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
 {
     if (t < 0.0f) {
@@ -124,9 +147,9 @@ USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
     } else if (t > 1.0f) {
         t = 1.0f;
     }
-    float const kRoot = 0.38f;
-    float const kPeak = 2.15f;
-    float const kTip = 1.28f;
+    float const kRoot = 0.90f;
+    float const kPeak = 2.45f;
+    float const kTip = 1.50f;
     float const kPeakT = 0.42f;
     float bump;
     if (t <= kPeakT) {

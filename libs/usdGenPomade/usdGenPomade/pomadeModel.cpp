@@ -2980,34 +2980,25 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
         hang[2] = axisU[2];
     }
 
-    // The root center is the scalp point itself: the first ring is small
-    // (PomadeBraidSectionScale at t = 0) and seated on the growth surface.
-    // The second center has already run along the hang, so it sits below a
-    // vertical scalp and perpendicular to the normal. Later centers
-    // continue that hang. A small outward bow, starting after the root,
-    // keeps the body off the surface without opening a gap at the wall.
-    float const kOutBow = 0.05f;
-    float const kSecondHang = 0.22f;
-    float const kTipHang = 0.98f;
+    // The root center is the scalp point. Later centers stand off the
+    // wall by about one local ring radius, so a wide belly clears the
+    // scalp instead of sleeving along it, and they drop along the hang
+    // so the bulb sits below a vertical surface. The root itself is
+    // never lifted.
+    float const kClear = 1.08f;
     out->centerX.assign(size_t(centerCount), 0.0f);
     out->centerY.assign(size_t(centerCount), 0.0f);
     out->centerZ.assign(size_t(centerCount), 0.0f);
     for (int i = 0; i < centerCount; ++i) {
-        float const u = float(i) / float(centerCount - 1);
-        float const bow = std::sin(u * 3.14159265f);
-        float const alongN = (i == 0) ? 0.0f : length * kOutBow * bow;
-        float alongH = 0.0f;
-        if (i > 0) {
-            if (centerCount < 3) {
-                alongH = length * kTipHang;
-            } else if (i == 1) {
-                alongH = length * kSecondHang;
-            } else {
-                float const span = float(i - 1) / float(centerCount - 2);
-                alongH = length *
-                         (kSecondHang + (kTipHang - kSecondHang) * span);
-            }
-        }
+        float const u = PomadeBraidSectionT(i, centerCount);
+        float const sectionScale = PomadeBraidSectionScale(u);
+        float const alongN =
+            (i == 0) ? 0.0f : fittedRadius * sectionScale * kClear;
+        // Slow at the shoulder, then the lower half drops. Zero at the
+        // root so the first ring stays seated.
+        float const hangFrac =
+            (i == 0) ? 0.0f : (0.42f * u + 0.55f * u * u);
+        float const alongH = length * hangFrac;
         out->centerX[size_t(i)] =
             float(cx) + pn[0] * alongN + hang[0] * alongH;
         out->centerY[size_t(i)] =
@@ -3058,11 +3049,11 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
     out->sections.resize(size_t(centerCount));
     for (int r = 0; r < centerCount; ++r) {
         PomadeTubeSection &section = out->sections[size_t(r)];
-        section.t = float(r) / float(centerCount - 1);
-        // t = 0 is the small root, seated on the growth surface. Later
-        // sections belly out, then ease toward a smaller tip. The center
-        // column drops the next ring along the hang; it does not lift
-        // the root.
+        section.t = PomadeBraidSectionT(r, centerCount);
+        // t = 0 matches the growth footprint and stays seated. Later
+        // sections swell to the belly, then ease to a plump tip. The
+        // center column carries that belly off the wall; it does not
+        // lift the root.
         section.scale = PomadeBraidSectionScale(section.t);
         section.twist = 0.0f;
         section.u.resize(ring.size());
@@ -3413,12 +3404,13 @@ PomadeModel::_WidenTinyGrowthRegionLocked(int regionId)
         return false;
     }
     float const original = fit.meanRadius;
-    // Under a fifth of the scalp radius counts as the tiny patch. The
-    // target is about a third of that radius, and one edit never
-    // stretches the loop by more than kMaxFactor.
-    float const kTinyFraction = 0.20f;
-    float const kTargetFraction = 0.32f;
-    float const kMaxFactor = 3.2f;
+    // A patch under about a quarter of the scalp radius is the tiny
+    // one. The target is a broad cap — the braid grows out of that
+    // footprint — and one edit may stretch a pinpoint far enough to
+    // reach it.
+    float const kTinyFraction = 0.28f;
+    float const kTargetFraction = 0.58f;
+    float const kMaxFactor = 7.0f;
     float const kMinGrowth = 1.6f;
     if (!(original > 1e-5f) ||
         !(original < kTinyFraction * scalpRadius)) {

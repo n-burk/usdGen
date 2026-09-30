@@ -273,18 +273,22 @@ when it changes. Regions with more than 32 CVs keep their authored graph and
 report the 32-CV construction limit.
 
 A new region stub is a braid profile, written into the section scales the
-committer stores. It authors four section rings. The first ring is small
-and its center sits on the growth surface. The second ring is already
-larger and runs perpendicular to the surface normal — world-down when down lies
-in the tangent plane — and the rest of the tube continues that hang. Scale
-rises to a belly through the middle, then eases to a smaller tip. The
-display shell holds a hard edge at each authored ring and interpolates the
-chord between them, four spans by default, so the surface corners on the
-ring and reads as a solid shaded mesh in Tube mode. When the scalp
+committer stores. It authors four section rings: at the root, a shoulder
+at t = 0.30, the belly at t = 0.50, and the tip. The first ring is about
+nine tenths of the growth footprint and its center sits on the growth
+surface, so the tube leaves the scalp as a base rather than a pinched
+neck. Scale then rises to 2.45 at the belly and eases to a still-plump
+1.50 at the tip. Each later center stands off the surface by about one
+local ring radius, and drops along the hang — world-down when down lies
+in the tangent plane — so the belly clears the scalp instead of sleeving
+along it. The display shell holds a hard edge at each authored ring and
+interpolates the chord between them, four spans by default, so the
+surface corners on the ring and reads as a solid shaded mesh in Tube
+mode. When the scalp
 has one region and that region is a small patch on a large surface,
 building the stub first moves the region's graph nodes outward on the
-scalp, so the tint covers a wide cap. The first ring stays smaller than
-that patch and seated on the surface. A region that already covers a fair
+scalp, so the tint covers a broad cap (about three fifths of the scalp
+radius). The first ring stays seated on that cap. A region that already covers a fair
 share of the scalp stays where it was drawn, and so does a region that
 shares its boundary with another region. Undo of the stub puts the moved
 region back.
@@ -827,10 +831,11 @@ the new stage: bind a scalp mesh to continue.`
   **Curve smoothness (display)** is that span count; a lower value draws
   a coarser shell. On `examples/pomade-sphere-scalp.usda`, bind `/Scalp`,
   draw a small region and grow the stub: the tinted patch should cover a
-  wide cap of the sphere, the first ring should be small and seated on the
-  scalp, and the next ring should sit below it, perpendicular to the
-  surface. The shell should corner on those four rings, bulge through the
-  middle, and taper toward the tip, as a solid shaded mesh. The headless check is
+  broad cap of the sphere, the first ring should sit on that cap with no
+  gap and no pinched neck, and the belly should stand well off the scalp,
+  wider than the root and fuller than a column. The shell should corner
+  on those four rings and taper plump toward the tip, as a solid shaded
+  mesh. The headless check is
   `testUsdGenPomadeTubes` (`CheckDisplayShellFlush`,
   `CheckBraidSectionProfile`).
 * **Staged package:** T3 tests and the launcher import the package staged

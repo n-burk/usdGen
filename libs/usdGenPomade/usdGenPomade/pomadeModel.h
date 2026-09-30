@@ -363,14 +363,14 @@ public:
     // graph-loop CV count; an explicit 3..32 resolves to at least that many
     // slots, adding only edge samples so every drawn corner remains exact.
     // A loop needing more than 32 slots is refused.
-    // Section scales follow PomadeBraidSectionScale (small root, belly
-    // through the middle, smaller tip). The first center sits off the
-    // scalp along the surface normal; the second runs perpendicular to
-    // that normal, world-down when down lies in the tangent plane. When
-    // this is the first stub and the scalp has a single region that is a
-    // small patch on a large surface, the region's nodes are moved
-    // outward on the scalp first so the tint covers a wide cap. Undo of
-    // that stub restores the region.
+    // Section scales follow PomadeBraidSectionScale (a base near the
+    // footprint, a wide belly, a plump tip). The first center sits on
+    // the scalp. Later centers stand off the surface by about one local
+    // ring radius and drop along the hang, world-down when down lies in
+    // the tangent plane. When this is the first stub and the scalp has a
+    // single region that is a small patch on a large surface, the
+    // region's nodes are moved outward on the scalp first so the tint
+    // covers a broad cap. Undo of that stub restores the region.
     // Pushes ONE undo step; it no longer clears the stack.
     bool BuildTubeFromRegion(int regionId, int centerCount, int ringVerts,
                              float length);
@@ -1019,9 +1019,9 @@ private:
     // the region boundary in the root plane (plan/17 §5.2 "fitted to the
     // boundary shape", plan/18 §7 G12).
     // `outRadius` receives the mean fitted radius (the display width scale).
-    // Section scales follow PomadeBraidSectionScale. The root scale is
-    // small and its center stays on the growth surface. The next center
-    // drops along the hang.
+    // Section scales follow PomadeBraidSectionScale. The root stays on
+    // the growth surface at nearly the footprint width. Later centers
+    // stand off by about one ring radius and drop along the hang.
     bool _RegionTubeDescLocked(int regionId, int centerCount, int ringVerts,
                                float length, PomadeTubeDesc *out,
                                float *outRadius);
