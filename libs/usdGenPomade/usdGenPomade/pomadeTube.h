@@ -112,20 +112,21 @@ USDGEN_POMADE_HD inline float PomadeSoftWeight(float t, float center,
     return w * w * (3.0f - 2.0f * w);
 }
 
-// Where the four authored rings of a region stub sit along t. The wide
-// rings cluster through the upper half (shoulder, then belly) and the
-// last span is the long plump taper. Other section counts stay uniform.
+// Where the authored rings of a region stub sit along t. The braid stub
+// is three rings — root, belly, tip — spaced with the center CVs so each
+// ring sits on its CV. The belly between them is the display interpolant,
+// not another authored ring. Other counts stay uniform in the same way.
 USDGEN_POMADE_HD inline float PomadeBraidSectionT(int index, int count)
 {
-    if (count == 4) {
-        float const knots[4] = {0.0f, 0.30f, 0.50f, 1.0f};
+    if (count == 3) {
+        float const knots[3] = {0.0f, 0.50f, 1.0f};
         if (index <= 0) {
             return knots[0];
         }
-        if (index >= 3) {
-            return knots[3];
+        if (index >= 2) {
+            return knots[2];
         }
-        return knots[index];
+        return knots[1];
     }
     if (count <= 1) {
         return 0.0f;
@@ -134,12 +135,12 @@ USDGEN_POMADE_HD inline float PomadeBraidSectionT(int index, int count)
     return u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
 }
 
-// Section scale of a region stub along t in [0, 1]. The root is nearly
-// the growth footprint, so the tube leaves the scalp as a base rather
-// than a pinched neck. The value rises to a wide belly and settles to a
-// still-plump tip. Display tessellation holds a hard edge at each
-// authored sample of this curve (PomadeHeldLerp); it does not round
-// those knots together.
+// Section scale of a region stub along t in [0, 1]. The root is the
+// growth footprint (a little over it, so the ring seats across the cap).
+// The middle sample is the wide belly and the tip stays plump. Display
+// tessellation does not connect these three samples with a straight
+// taper: PomadePlumpBlend holds the wider radius across each span, which
+// is what fills the bulb between the rings.
 USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
 {
     if (t < 0.0f) {
@@ -147,10 +148,10 @@ USDGEN_POMADE_HD inline float PomadeBraidSectionScale(float t)
     } else if (t > 1.0f) {
         t = 1.0f;
     }
-    float const kRoot = 0.90f;
-    float const kPeak = 2.45f;
-    float const kTip = 1.50f;
-    float const kPeakT = 0.42f;
+    float const kRoot = 1.05f;
+    float const kPeak = 3.40f;
+    float const kTip = 2.00f;
+    float const kPeakT = 0.50f;
     float bump;
     if (t <= kPeakT) {
         float const u = t / kPeakT;
@@ -360,9 +361,10 @@ float PomadeSectionMeanRadius(PomadeTubeSection const &section);
 // ring-major. Each authored interval gets `segmentsPerSpan` spans, and the
 // row at the start of interval k is exactly section k (PomadeTessellationRingT),
 // so every authored section stays on the shell even when section parameters
-// are not uniform. Between those rows the shell follows the chord
-// (PomadeHeldLerp / PomadeEvalCenterHeld): the ring is a hard edge, and the
-// extra spans sample that ruling instead of a curve that rounds through it.
+// are not uniform. Between those rows the radius eases toward the wider
+// ring (PomadePlumpBlend) and the center follows the smooth curve
+// (PomadeEvalCenter), so three authored rings can still draw a plump
+// shell. Ring CVs and twist stay on the chord between the two sections.
 bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
                         std::vector<PomadeFrame> const &frames,
                         int segmentsPerSpan, std::vector<float> *positions,
@@ -619,13 +621,34 @@ USDGEN_POMADE_HD inline float PomadeHermite(float a, float b, float m0,
            (u3 - u2) * m1;
 }
 
-// Chord between two authored values. Display spans use this so a section
-// ring is a corner: the incoming slope is the previous chord and the
-// outgoing slope is the next one, and every sample between the rings lies
-// on that chord.
+// Chord between two authored values. Ring CVs and twist use this so a
+// section polygon interpolates in its own plane.
 USDGEN_POMADE_HD inline float PomadeHeldLerp(float a, float b, float u)
 {
     return a + (b - a) * u;
+}
+
+// Radius blend between two authored section scales. The sample hits both
+// ends, and it spends the span near the wider end: growing eases out
+// (the belly arrives early) and shrinking eases in (the belly holds, then
+// drops). A straight lerp would leave the mid-span as a thin taper even
+// when the three authored rings are already the bulb's root, belly and tip.
+USDGEN_POMADE_HD inline float PomadePlumpBlend(float a, float b, float u)
+{
+    if (u <= 0.0f) {
+        return a;
+    }
+    if (u >= 1.0f) {
+        return b;
+    }
+    float s;
+    if (b >= a) {
+        float const v = 1.0f - u;
+        s = 1.0f - v * v * v;
+    } else {
+        s = u * u * u;
+    }
+    return a + (b - a) * s;
 }
 
 // Parameter of display ring `ring` on a tube with `sectionCount` authored

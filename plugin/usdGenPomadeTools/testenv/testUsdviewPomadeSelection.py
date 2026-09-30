@@ -10,7 +10,7 @@ failures = 0
 
 # A clockwise square in the middle of the 4x4 XZ scalp fixture.
 RECT = ((1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0))
-STUB_CVS = 4
+STUB_CVS = 3
 
 
 def frameComponentTargets(stage, view):

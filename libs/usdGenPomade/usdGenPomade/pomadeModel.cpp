@@ -2980,24 +2980,25 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
         hang[2] = axisU[2];
     }
 
-    // The root center is the scalp point. Later centers stand off the
-    // wall by about one local ring radius, so a wide belly clears the
-    // scalp instead of sleeving along it, and they drop along the hang
-    // so the bulb sits below a vertical surface. The root itself is
-    // never lifted.
-    float const kClear = 1.08f;
+    // The root center is the scalp point and is never lifted. The next
+    // center leaves along the surface normal, with almost no hang, so
+    // the first span stays in the tangent plane and the root ring does
+    // not tear off the cap. The tip carries the hang. Width is the
+    // section scale; the shell between the three rings is the interpolant.
     out->centerX.assign(size_t(centerCount), 0.0f);
     out->centerY.assign(size_t(centerCount), 0.0f);
     out->centerZ.assign(size_t(centerCount), 0.0f);
     for (int i = 0; i < centerCount; ++i) {
-        float const u = PomadeBraidSectionT(i, centerCount);
-        float const sectionScale = PomadeBraidSectionScale(u);
-        float const alongN =
-            (i == 0) ? 0.0f : fittedRadius * sectionScale * kClear;
-        // Slow at the shoulder, then the lower half drops. Zero at the
-        // root so the first ring stays seated.
-        float const hangFrac =
-            (i == 0) ? 0.0f : (0.42f * u + 0.55f * u * u);
+        float alongN = 0.0f;
+        float hangFrac = 0.0f;
+        if (i > 0 && i + 1 == centerCount) {
+            alongN = fittedRadius * 1.35f;
+            hangFrac = 0.92f;
+        } else if (i > 0) {
+            float const depth = float(i) / float(centerCount - 1);
+            alongN = fittedRadius * (0.70f + 0.25f * depth);
+            hangFrac = 0.04f * depth;
+        }
         float const alongH = length * hangFrac;
         out->centerX[size_t(i)] =
             float(cx) + pn[0] * alongN + hang[0] * alongH;
@@ -3050,10 +3051,8 @@ PomadeModel::_RegionTubeDescLocked(int regionId, int centerCount,
     for (int r = 0; r < centerCount; ++r) {
         PomadeTubeSection &section = out->sections[size_t(r)];
         section.t = PomadeBraidSectionT(r, centerCount);
-        // t = 0 matches the growth footprint and stays seated. Later
-        // sections swell to the belly, then ease to a plump tip. The
-        // center column carries that belly off the wall; it does not
-        // lift the root.
+        // Root, belly, tip. The display shell swells between these
+        // three; the root center stays on the scalp.
         section.scale = PomadeBraidSectionScale(section.t);
         section.twist = 0.0f;
         section.u.resize(ring.size());
@@ -3404,13 +3403,12 @@ PomadeModel::_WidenTinyGrowthRegionLocked(int regionId)
         return false;
     }
     float const original = fit.meanRadius;
-    // A patch under about a quarter of the scalp radius is the tiny
-    // one. The target is a broad cap — the braid grows out of that
-    // footprint — and one edit may stretch a pinpoint far enough to
-    // reach it.
-    float const kTinyFraction = 0.28f;
-    float const kTargetFraction = 0.58f;
-    float const kMaxFactor = 7.0f;
+    // A lone patch under about two fifths of the scalp radius is the
+    // small one (a fair region on the test grid sits just above this).
+    // The target is a broad cap — the braid grows out of that footprint.
+    float const kTinyFraction = 0.38f;
+    float const kTargetFraction = 0.70f;
+    float const kMaxFactor = 10.0f;
     float const kMinGrowth = 1.6f;
     if (!(original > 1e-5f) ||
         !(original < kTinyFraction * scalpRadius)) {

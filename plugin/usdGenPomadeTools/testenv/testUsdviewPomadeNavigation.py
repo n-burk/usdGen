@@ -55,7 +55,7 @@ def testenvDir():
 
 
 RECT = ((1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0))
-STUB_CVS = 4
+STUB_CVS = 3
 
 
 def run(appController):

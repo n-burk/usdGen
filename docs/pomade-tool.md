@@ -273,21 +273,21 @@ when it changes. Regions with more than 32 CVs keep their authored graph and
 report the 32-CV construction limit.
 
 A new region stub is a braid profile, written into the section scales the
-committer stores. It authors four section rings: at the root, a shoulder
-at t = 0.30, the belly at t = 0.50, and the tip. The first ring is about
-nine tenths of the growth footprint and its center sits on the growth
-surface, so the tube leaves the scalp as a base rather than a pinched
-neck. Scale then rises to 2.45 at the belly and eases to a still-plump
-1.50 at the tip. Each later center stands off the surface by about one
-local ring radius, and drops along the hang — world-down when down lies
-in the tangent plane — so the belly clears the scalp instead of sleeving
-along it. The display shell holds a hard edge at each authored ring and
-interpolates the chord between them, four spans by default, so the
-surface corners on the ring and reads as a solid shaded mesh in Tube
-mode. When the scalp
+committer stores. It authors three section rings: the root at t = 0, the
+belly at t = 0.50, and the tip. The first ring is the growth footprint
+(scale 1.05) and its center sits on the growth surface, so the tube
+leaves the scalp as a base rather than a pinched neck. Scale peaks at
+3.40 on the belly ring and settles to a still-plump 2.00 at the tip.
+The belly center leaves along the surface normal, so the root ring stays
+in the tangent plane. The tip drops along the hang — world-down when down
+lies in the tangent plane. The bulb between those three rings is the
+display interpolant: the radius eases toward the wider ring, and the
+center follows a smooth curve, eight spans by default, so the shell fills
+out instead of ruling a straight taper. In Tube mode the focused body is
+a solid shaded mesh. When the scalp
 has one region and that region is a small patch on a large surface,
 building the stub first moves the region's graph nodes outward on the
-scalp, so the tint covers a broad cap (about three fifths of the scalp
+scalp, so the tint covers a broad cap (about seven tenths of the scalp
 radius). The first ring stays seated on that cap. A region that already covers a fair
 share of the scalp stays where it was drawn, and so does a region that
 shares its boundary with another region. Undo of the stub puts the moved
@@ -365,9 +365,9 @@ start World, Rotate Tube), **Step snap (hold J)**, **Step size** (1.0 for
 Move, 15° for Rotate, 0.1 for Scale), **Free rotate ball (Rotate)**,
 **Prevent negative scale (Scale)**, **Grid size (hold X)** (1.0),
 **Manipulator size (+ / -)** (90 px, 20–400), **Soft selection falloff**,
-**Curve smoothness (display)** (default 4 spans between each pair of
-section rings: the chord interpolated three more times, holding a hard
-edge at each authored ring), **Ring CVs for new
+**Curve smoothness (display)** (default 8 spans between each pair of
+section rings: the shell swells between those rings, and each authored
+section stays on its own row), **Ring CVs for new
 tubes**, **Selected section scale** (uniform scale for the selected rings,
 greyed with none).
 Gizmo settings are per session and not saved. Actions: **Match surface**
@@ -823,19 +823,18 @@ the new stage: bind a scalp mesh to continue.`
 * **Tube shell:** launch usdview on `examples/pomade-graph-scalp.usda`
   (`bin/launch_usdview.ps1`, or `"$PY" "$USD/bin/usdview"` after
   `source bin/_env.sh`), then **usdGen → Pomade → Open workspace**, bind
-  the scalp, draw a region and grow a tube. The shell should show a crisp
-  edge at each authored section ring, with the chord interpolated between
-  those rings (four spans by default). In Tube mode the focused body is a
-  solid shaded mesh. Ring sub-mode draws one selectable ring per authored
-  section.
+  the scalp, draw a region and grow a tube. The shell should swell
+  between the authored section rings (eight spans by default) and still
+  land on each ring. In Tube mode the focused body is a solid shaded
+  mesh. Ring sub-mode draws one selectable ring per authored section.
   **Curve smoothness (display)** is that span count; a lower value draws
   a coarser shell. On `examples/pomade-sphere-scalp.usda`, bind `/Scalp`,
   draw a small region and grow the stub: the tinted patch should cover a
-  broad cap of the sphere, the first ring should sit on that cap with no
-  gap and no pinched neck, and the belly should stand well off the scalp,
-  wider than the root and fuller than a column. The shell should corner
-  on those four rings and taper plump toward the tip, as a solid shaded
-  mesh. The headless check is
+  broad cap of the sphere, the first of the three rings should sit on
+  that cap with no gap and no pinched neck, and the shell between the
+  root, the belly and the tip should fill out into a plump bulb, wider
+  than the root and fuller than a column, as a solid shaded mesh. The
+  headless check is
   `testUsdGenPomadeTubes` (`CheckDisplayShellFlush`,
   `CheckBraidSectionProfile`).
 * **Staged package:** T3 tests and the launcher import the package staged

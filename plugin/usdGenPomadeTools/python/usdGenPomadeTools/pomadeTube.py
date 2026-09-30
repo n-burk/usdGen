@@ -42,10 +42,10 @@ PICK_KIND_NAMES = {
 
 # The default test-tube shape (mirrors pomadeTessellate.h).
 DEFAULT_RINGS = 5
-# A new region stub authors four section rings. The display shell
-# interpolates between them. The generic cylinder fixture stays at
-# DEFAULT_RINGS.
-BRAID_SECTIONS = 4
+# A new region stub authors three section rings (root, belly, tip).
+# The display shell swells between them. The generic cylinder fixture
+# stays at DEFAULT_RINGS.
+BRAID_SECTIONS = 3
 DEFAULT_RING_VERTS = 8
 # Region-authored roots use the native auto sentinel: the backend resolves it
 # to the region loop's CV count, preserving the artist's contour corners.

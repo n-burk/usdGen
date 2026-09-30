@@ -732,17 +732,15 @@ __global__ void _TubeTessellateKernel(
     float const dt = secT[k + 1] > secT[k] ? secT[k + 1] - secT[k] : 1.0f;
     float f = (t - secT[k]) / dt;
     f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-    // Chord between the two authored sections, matching PomadeTessellateCpu.
-    // The ring is a hard edge; the spans between it and the next ring stay
-    // on that ruling.
-    float sc = PomadeHeldLerp(secScale[k], secScale[k + 1], f);
+    // Match PomadeTessellateCpu: plump radius, smooth center, chord twist.
+    float sc = PomadePlumpBlend(secScale[k], secScale[k + 1], f);
     float tw = PomadeHeldLerp(secTwist[k], secTwist[k + 1], f);
     if (!(sc > 1e-6f)) {
         sc = 1e-6f;
     }
     float const ct = cosf(tw), st = sinf(tw);
     float cp[3];
-    PomadeEvalCenterHeld(cx, cy, cz, nCv, t, cp);
+    PomadeEvalCenter(cx, cy, cz, nCv, t, cp);
     PomadeFrame fr;
     PomadeNlerpFrame(frames, nCv, t, &fr);
     float nA[3] = {fr.nx, fr.ny, fr.nz};

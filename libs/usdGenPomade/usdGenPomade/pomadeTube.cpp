@@ -761,18 +761,19 @@ bool PomadeTessellateCpu(PomadeTubeDesc const &tube,
         float const dt = s1.t > s0.t ? s1.t - s0.t : 1.0f;
         float f = (t - s0.t) / dt;
         f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
-        // Chord between the two authored sections. A central-difference
-        // tangent would round the shell through the ring; the corner is
-        // the hard edge, and the extra spans stay on the ruling.
-        float sc = PomadeHeldLerp(s0.scale, s1.scale, f);
+        // Wider ring wins the span, so the shell between three authored
+        // rings fills out instead of ruling a straight taper. The center
+        // is the smooth curve through the CVs. Ring CVs and twist stay
+        // on the chord; the authored row (f == 0) is still that section.
+        float sc = PomadePlumpBlend(s0.scale, s1.scale, f);
         float tw = PomadeHeldLerp(s0.twist, s1.twist, f);
         if (!(sc > 1e-6f)) {
             sc = 1e-6f;
         }
         float const ct = std::cos(tw), st = std::sin(tw);
         float cp[3];
-        PomadeEvalCenterHeld(tube.centerX.data(), tube.centerY.data(),
-                            tube.centerZ.data(), nCv, t, cp);
+        PomadeEvalCenter(tube.centerX.data(), tube.centerY.data(),
+                        tube.centerZ.data(), nCv, t, cp);
         PomadeFrame fr;
         PomadeNlerpFrame(frames.data(), nCv, t, &fr);
         float nA[3] = {fr.nx, fr.ny, fr.nz};

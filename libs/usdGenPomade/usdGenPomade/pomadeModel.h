@@ -363,12 +363,13 @@ public:
     // graph-loop CV count; an explicit 3..32 resolves to at least that many
     // slots, adding only edge samples so every drawn corner remains exact.
     // A loop needing more than 32 slots is refused.
-    // Section scales follow PomadeBraidSectionScale (a base near the
-    // footprint, a wide belly, a plump tip). The first center sits on
-    // the scalp. Later centers stand off the surface by about one local
-    // ring radius and drop along the hang, world-down when down lies in
-    // the tangent plane. When this is the first stub and the scalp has a
-    // single region that is a small patch on a large surface, the
+    // Section scales follow PomadeBraidSectionScale (a base at the
+    // footprint, a wide belly, a plump tip). The stub authors three
+    // rings. The first center sits on the scalp; the belly center leaves
+    // along the surface normal; the tip drops along the hang, world-down
+    // when down lies in the tangent plane. The display shell swells
+    // between those rings. When this is the first stub and the scalp has
+    // a single region that is a small patch on a large surface, the
     // region's nodes are moved outward on the scalp first so the tint
     // covers a broad cap. Undo of that stub restores the region.
     // Pushes ONE undo step; it no longer clears the stack.
@@ -422,9 +423,9 @@ public:
     bool RelaxCenter(float strength, int iterations);
     bool SnapRootToScalp();
     // Display-shell spans between authored sections, in [1, 16]. The
-    // default (kDefaultDisplaySegments) interpolates the chord between
-    // those rings and holds a hard edge on each authored knot. It does
-    // not move section or CV manipulators.
+    // default (kDefaultDisplaySegments) samples the plump radius blend
+    // and the smooth center between those rings. It does not move
+    // section or CV manipulators.
     bool SetDisplaySegments(int segments);
     int GetDisplaySegments() const;
     // The scalp-graph region this tube is rooted in (-1 = unrooted, disc
@@ -821,11 +822,11 @@ public:
     // other level behind it.
     static constexpr float kDefaultXrayOpacity = 0.25f;
     static constexpr float kFaintXrayOpacity = 0.10f;
-    // Drawn spans between each pair of authored sections. Four samples of
-    // the chord hold a hard edge at each authored ring and interpolate
-    // between them, without the denser six-span shell. Selectable rings
-    // stay on the authored knots (the publish stride).
-    static constexpr int kDisplayExtraSpans = 3;
+    // Drawn spans between each pair of authored sections. Eight samples
+    // of the plump blend and the smooth center, so three authored rings
+    // read as a shell rather than two straight frustums. Selectable
+    // rings stay on the authored knots (the publish stride).
+    static constexpr int kDisplayExtraSpans = 7;
     static constexpr int kDefaultDisplaySegments = 1 + kDisplayExtraSpans;
     // Per-level (1-based) visibility and x-ray. A change marks Display
     // dirty and bumps the version; an untouched level reads the default
@@ -1020,8 +1021,8 @@ private:
     // boundary shape", plan/18 §7 G12).
     // `outRadius` receives the mean fitted radius (the display width scale).
     // Section scales follow PomadeBraidSectionScale. The root stays on
-    // the growth surface at nearly the footprint width. Later centers
-    // stand off by about one ring radius and drop along the hang.
+    // the growth surface at the footprint width. The belly center leaves
+    // along the normal; the tip drops along the hang.
     bool _RegionTubeDescLocked(int regionId, int centerCount, int ringVerts,
                                float length, PomadeTubeDesc *out,
                                float *outRadius);

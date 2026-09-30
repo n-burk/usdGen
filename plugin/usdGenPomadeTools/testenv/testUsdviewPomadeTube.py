@@ -49,7 +49,7 @@ failures = 0
 RECT = ((1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0))
 CENTRE = (2.0, 2.0)
 # pomadeTube.BRAID_SECTIONS / DEFAULT_LENGTH: what the G14 stub builds with.
-STUB_CVS = 4
+STUB_CVS = 3
 STUB_LENGTH = 4.0
 
 
