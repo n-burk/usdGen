@@ -1449,19 +1449,14 @@ PomadeDefaultSections(PomadeModel::TubeSnapshot const &snapshot);
 PomadeTubeDesc USDGENPOMADE_API
 PomadeTubeDescFromSnapshot(PomadeModel::TubeSnapshot const &snapshot);
 
-// -- V0 clump palette (plan/18 §2.4a) -----------------------------------------
+// -- Region and clump colours ----------------------------------------------
 //
-// 16 saturated hues, the plan's sRGB list converted to linear once. Every
-// consumer reads this one table — the tube shader's `clumpColor` primvar and
-// the scalp tint's `displayColor` — so a region's patch on the head and the
-// tube rooted in it are the same colour, which is what the Pomade stills show.
-//
-// Slot = regionId modulo 16 (negative ids wrap positively; an unrooted tube
-// is regionId -1 and lands in slot 15). Children keep their L1 ancestor's hue
-// and step in lightness by childIndex, so one lock reads as one hue family:
-// childIndex 0 lightens one step, 1 darkens one, 2 lightens two, and so on,
-// with the step halved per level below 2 so an L3 sibling stays inside its
-// L2 parent's band.
+// Rooted tubes and scalp patches share PomadeRegionColor, converted from
+// sRGB to linear RGB for Hydra. Children inherit their L1 region id and vary
+// lightness by childIndex: 0 lightens, 1 darkens, 2 lightens further, etc.
+// The variation shrinks by 0.8 per level below 2 and preserves the hue.
+// The legacy 16-entry palette remains available for unrooted tubes (region
+// -1 wraps to slot 15); valid region colours do not wrap every 16 entries.
 struct PomadeRgb {
     float r = 0.0f, g = 0.0f, b = 0.0f;
 };

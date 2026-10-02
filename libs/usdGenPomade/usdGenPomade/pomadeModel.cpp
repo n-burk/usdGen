@@ -10794,7 +10794,18 @@ PomadeClumpPaletteEntry(int slot)
 PomadeRgb
 PomadeClumpColor(int regionId, int level, int childIndex)
 {
-    PomadeRgb base = PomadeClumpPaletteEntry(regionId);
+    PomadeRgb base;
+    if (regionId >= 0) {
+        // Use the graph's persisted region colour for both the scalp patch
+        // and its tubes. A separate tube palette changes the colour family
+        // and repeats it after 16 regions. Hydra consumes linear RGB.
+        float rgb[3];
+        PomadeRegionColor(regionId, rgb);
+        base = {_SrgbToLinear(rgb[0]), _SrgbToLinear(rgb[1]),
+                _SrgbToLinear(rgb[2])};
+    } else {
+        base = PomadeClumpPaletteEntry(regionId);
+    }
     if (level <= 1 || childIndex < 0) {
         return base;
     }

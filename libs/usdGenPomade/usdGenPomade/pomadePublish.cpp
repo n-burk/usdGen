@@ -275,6 +275,73 @@ void _FillRingArrays(std::vector<float> const &positions,
     _Bounds(staged->ringPoints, &staged->ringMin, &staged->ringMax);
 }
 
+// Two nearby rails bracket every authored longitudinal corner. Four straight
+// spans fill the broad side between them without bowing the cross-section.
+// Add a holding row at each end even at the lowest display density.
+// Pin every end vertex: boundary interpolation alone can shrink a curved
+// root polygon away from its surface attachment.
+void _FillSubdivisionCage(PomadeStagedLevel *level)
+{
+    auto &cage = level->subdivision;
+    constexpr float hold = 0.05f;
+    constexpr float radial[] = {0.0f, hold, 0.275f, 0.5f, 0.725f, 1.0f - hold};
+    constexpr int samples = int(sizeof(radial) / sizeof(radial[0]));
+    size_t endVertices = 0;
+    for (auto const &tube : level->tubes)
+        endVertices += size_t(2 * samples * tube.ringVerts);
+    cage.points.reserve(level->points.size() * samples + endVertices);
+    size_t const faces = level->faceVertexCounts.size() * samples + endVertices;
+    cage.faceVertexCounts.reserve(faces);
+    cage.faceVertexIndices.reserve(faces * 4);
+    cage.sourceFaces.reserve(faces);
+    cage.cornerIndices.reserve(endVertices);
+    cage.cornerSharpnesses.reserve(endVertices);
+    for (auto const &tube : level->tubes) {
+        int const rv = tube.ringVerts;
+        int const columns = samples * rv;
+        int const rows = tube.ringCount + 2;
+        int const base = int(cage.points.size());
+        for (int r = 0; r < rows; ++r) {
+            int row = std::max(0, std::min(r - 1, tube.ringCount - 1));
+            float blend = 0.0f;
+            if (r == 1) {
+                blend = hold;
+            } else if (r == rows - 2) {
+                row = tube.ringCount - 2;
+                blend = 1.0f - hold;
+            }
+            auto point = [&](int s) {
+                int const at = tube.pointOffset + row * rv + s;
+                GfVec3f const p = level->points[size_t(at)];
+                return blend == 0.0f ? p :
+                    p * (1.0f - blend) + level->points[size_t(at + rv)] * blend;
+            };
+            for (int s = 0; s < rv; ++s) {
+                GfVec3f const a = point(s), b = point((s + 1) % rv);
+                for (float f : radial) {
+                    if (r == 0 || r == rows - 1) {
+                        cage.cornerIndices.push_back(int(cage.points.size()));
+                        cage.cornerSharpnesses.push_back(10.0f); // infinite in OpenSubdiv
+                    }
+                    cage.points.push_back(a * (1.0f - f) + b * f);
+                }
+            }
+        }
+        for (int r = 0; r < rows - 1; ++r) {
+            int const sourceRow = std::max(0, std::min(r - 1, tube.ringCount - 2));
+            for (int c = 0; c < columns; ++c) {
+                int const next = (c + 1) % columns;
+                cage.faceVertexCounts.push_back(4);
+                cage.faceVertexIndices.push_back(base + r * columns + c);
+                cage.faceVertexIndices.push_back(base + r * columns + next);
+                cage.faceVertexIndices.push_back(base + (r + 1) * columns + next);
+                cage.faceVertexIndices.push_back(base + (r + 1) * columns + c);
+                cage.sourceFaces.push_back(tube.faceOffset + sourceRow * rv + c / samples);
+            }
+        }
+    }
+}
+
 // Build every Hydra array of one level from the host mirror. `reuse` is the
 // previous snapshot when nothing about this level's geometry changed, in
 // which case the arrays are shared (VtArray is refcounted) and only the
@@ -289,7 +356,7 @@ void _FillLevelArrays(std::vector<float> const &positions,
             staged->tubes[t].radius = reuse->tubes[t].radius;
         }
         staged->points = reuse->points;
-        staged->normals = reuse->normals;
+        staged->subdivision = reuse->subdivision;
         staged->faceVertexCounts = reuse->faceVertexCounts;
         staged->faceVertexIndices = reuse->faceVertexIndices;
         staged->faceTubeId = reuse->faceTubeId;
@@ -339,7 +406,6 @@ void _FillLevelArrays(std::vector<float> const &positions,
     int const centerTotal = last.centerOffset + last.centerCount;
 
     staged->points.resize(size_t(pointTotal));
-    staged->normals.resize(size_t(faceTotal) * 4);
     for (int v = 0; v < pointTotal; ++v) {
         staged->points[size_t(v)] = _Point(positions, v);
     }
@@ -370,8 +436,6 @@ void _FillLevelArrays(std::vector<float> const &positions,
         // Quad strip between adjacent grid rows, CCW from outside — the
         // spelling both model tessellation paths use.
         int const rv = slice.ringVerts;
-        _FillStripNormals(staged->points, slice.pointOffset, slice.ringCount,
-                          rv, slice.faceOffset, &staged->normals);
         for (int r = 0; r < slice.ringCount - 1; ++r) {
             for (int s = 0; s < rv; ++s) {
                 int const q = slice.faceOffset + r * rv + s;
@@ -414,6 +478,8 @@ void _FillLevelArrays(std::vector<float> const &positions,
         }
 
     }
+    _FillSubdivisionCage(staged);
+    _Bounds(staged->subdivision.points, &staged->extentMin, &staged->extentMax);
     _Bounds(staged->centerPoints, &staged->centerMin, &staged->centerMax);
     _FillRingArrays(positions, staged);
     _FillWidths(staged);

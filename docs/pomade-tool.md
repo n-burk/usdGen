@@ -355,12 +355,15 @@ selected, as one undo step; a click that moves nothing says `no change` and
 leaves no undo step — and **Reset transform tool** (the current tool's step
 and snap settings back to defaults).
 
-Tube surfaces keep a hard longitudinal edge through each selectable section
-CV. Shading is smooth along the strips between those edges, including across
-control rings. **Curve smoothness (display)** defaults to 8 segments per
-sparse span, revealing the cubic profile's eased pinches and bulges without
-adding editable CVs. Unevenly spaced rings remain exactly on the surface.
-Close holding rows preserve the root and tip footprints. While a tube's
+Tube surfaces use Catmull–Clark subdivision with two close support edges
+beside each longitudinal CV rail. These holding edges give the corners a
+small rounded bevel. Four straight spans between each pair of holding edges
+divide the broad side without adding a bow across the section. These spans
+are display geometry; the sparse editable CVs stay unchanged. **Curve smoothness
+(display)** defaults to 8 segments per sparse span, revealing the cubic
+profile's eased pinches and bulges.
+Close holding rows and pinned end boundaries preserve the root and tip
+footprints under subdivision. While a tube's
 support stays attached, its displayed root boundary follows the growth
 surface, including on curved meshes and after child subdivision. Increasing
 display smoothness cannot lift that boundary off the surface.
@@ -635,12 +638,13 @@ regrown after a step. Not covered: the selection itself.
 
 The viewport draws the authoring model directly:
 
-* **Tubes** are opaque and smoothly shaded, one saturated colour per clump
-  (a fixed 16-entry palette by L1 region id; children shift lightness
-  within the parent's hue), no wireframe, no level tint. X-rayed levels
-  draw at a quarter opacity, same hue.
-* **Scalp regions** paint in the same palette, so a scalp patch and its
-  rooted tube match.
+* **Tubes** inherit the colour of their underlying scalp region.
+  Subdivided children use lighter or darker shades of that region's hue,
+  including nested subdivisions. Tubes are opaque and smoothly shaded,
+  with no wireframe or level tint. X-rayed levels draw at a quarter opacity,
+  same hue.
+* **Scalp regions** and their rooted tubes use the graph's stored region
+  colours, so the patch and tube match. Colours do not repeat every 16 regions.
 * **Graph mode** hides tube geometry so the scalp patches and graph edges
   read cleanly.
 * **Center curves** are thick in the clump colour on the focused level,

@@ -61,6 +61,9 @@
 #include "pxr/imaging/hd/retainedSceneIndex.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 
+#include <opensubdiv/far/topologyDescriptor.h>
+#include <opensubdiv/far/primvarRefiner.h>
+
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -268,6 +271,83 @@ HdDataSourceLocator const kExtentMax(TfToken("extent"), TfToken("max"));
 HdDataSourceLocator const kVisibility(TfToken("visibility"),
                                       TfToken("visibility"));
 
+struct SubdivisionPoint {
+    GfVec3f p = GfVec3f(0.0f);
+    void Clear() { p = GfVec3f(0.0f); }
+    void AddWithWeight(SubdivisionPoint const &other, float weight)
+    { p += other.p * weight; }
+};
+
+void CheckSubdivision(usdGenPomade::PomadeSubdivisionCage const &cage,
+                      int bevelVertex, int columns, bool straightProfile = false)
+{
+    bool straightSpans = true;
+    for (size_t row = 0; row < cage.points.size(); row += size_t(columns)) {
+        for (int side = 0; side < columns; side += 6) {
+            GfVec3f const a = cage.points[row + size_t(side)];
+            GfVec3f const edge = cage.points[row + size_t((side + 6) % columns)] - a;
+            float const lengthSq = edge.GetLengthSq();
+            float previousFraction = 0.0f;
+            for (int span = 1; span < 6; ++span) {
+                GfVec3f const offset = cage.points[row + size_t(side + span)] - a;
+                float const fraction = GfDot(offset, edge) / lengthSq;
+                straightSpans &= (offset - edge * fraction).GetLength() < 1e-6f &&
+                                 fraction > previousFraction && fraction < 1.0f;
+                previousFraction = fraction;
+            }
+        }
+    }
+    Check(straightSpans,
+          "all cross-section spans stay ordered on straight sides between authored CV rails");
+    namespace Far = OpenSubdiv::Far;
+    namespace Sdc = OpenSubdiv::Sdc;
+    Far::TopologyDescriptor desc;
+    desc.numVertices = int(cage.points.size());
+    desc.numFaces = int(cage.faceVertexCounts.size());
+    desc.numVertsPerFace = cage.faceVertexCounts.cdata();
+    desc.vertIndicesPerFace = cage.faceVertexIndices.cdata();
+    desc.numCorners = int(cage.cornerIndices.size());
+    desc.cornerVertexIndices = cage.cornerIndices.cdata();
+    desc.cornerWeights = cage.cornerSharpnesses.cdata();
+    Sdc::Options options;
+    options.SetVtxBoundaryInterpolation(Sdc::Options::VTX_BOUNDARY_EDGE_AND_CORNER);
+    using Factory = Far::TopologyRefinerFactory<Far::TopologyDescriptor>;
+    std::unique_ptr<Far::TopologyRefiner> refiner(
+        Factory::Create(desc, Factory::Options(Sdc::SCHEME_CATMARK, options)));
+    Check(bool(refiner), "support cage is valid Catmull-Clark topology");
+    if (!refiner) return;
+    refiner->RefineUniform(Far::TopologyRefiner::UniformOptions(3));
+    std::vector<SubdivisionPoint> previous(cage.points.size());
+    for (size_t i = 0; i < previous.size(); ++i) previous[i].p = cage.points[i];
+    std::vector<int> held(cage.cornerIndices.begin(), cage.cornerIndices.end());
+    GfVec3f const corner = cage.points[size_t(bevelVertex)];
+    int sideVertex = bevelVertex + 3;
+    GfVec3f const chordMidpoint =
+        (corner + cage.points[size_t(bevelVertex + 6)]) * 0.5f;
+    bool pinned = true;
+    for (int level = 1; level <= 3; ++level) {
+        std::vector<SubdivisionPoint> next(size_t(refiner->GetLevel(level).GetNumVertices()));
+        SubdivisionPoint *destination = next.data();
+        Far::PrimvarRefiner(*refiner).Interpolate(level, previous.data(), destination);
+        auto const &parent = refiner->GetLevel(level - 1);
+        for (size_t i = 0; i < held.size(); ++i) {
+            held[i] = parent.GetVertexChildVertex(held[i]);
+            pinned &= (next[size_t(held[i])].p -
+                cage.points[size_t(cage.cornerIndices[i])]).GetLength() < 1e-7f;
+        }
+        bevelVertex = parent.GetVertexChildVertex(bevelVertex);
+        sideVertex = parent.GetVertexChildVertex(sideVertex);
+        previous = std::move(next);
+    }
+    Check(pinned, "three actual subdivision levels preserve every root/tip boundary vertex");
+    float const rounding = (previous[size_t(bevelVertex)].p - corner).GetLength();
+    Check(rounding > 1e-5f && rounding < 0.03f,
+          "longitudinal support edges allow a small rounded bevel without collapsing the profile");
+    if (straightProfile)
+        Check((previous[size_t(sideVertex)].p - chordMidpoint).GetLength() < 1e-6f,
+              "actual Catmull-Clark subdivision keeps the broad straight side flat");
+}
+
 } // namespace
 
 int
@@ -286,24 +366,43 @@ main(int argc, char **argv)
         PomadePublisher publisher;
         Check(publisher.Stage(model), "four-ring profile publishes");
         auto const &level = publisher.Current().levels.at(1);
-        Check(level.points.size() == 25 * 8 && level.normals.size() == 24 * 8 * 4,
-              "live profile publishes dense geometry and face-varying normals");
-        bool smooth = true, hard = true, finite = true;
-        for (int r = 0; r < 24; ++r) {
-            for (int s = 0; s < 8; ++s) {
-                size_t const q = size_t(r * 8 + s) * 4;
-                size_t const next = size_t(r * 8 + (s + 1) % 8) * 4;
-                hard &= GfDot(level.normals[q + 1], level.normals[next]) < 0.99f;
-                if (r < 23)
-                    smooth &= level.normals[q + 3] == level.normals[q + 32];
-                finite &= std::abs(level.normals[q].GetLength() - 1.0f) < 1e-5f;
-            }
+        Check(level.points.size() == 25 * 8,
+              "the sampled profile retains its authored CV indexing");
+        auto const &cage = level.subdivision;
+        Check(cage.points.size() == 27 * 48 &&
+                  cage.faceVertexCounts.size() == 26 * 48 &&
+                  cage.cornerIndices.size() == 96,
+              "profile cage adds holding rails, four spans across each side and two end holding rows");
+        Check((cage.points[1] - (level.points[0] * 0.95f +
+                                level.points[1] * 0.05f)).GetLength() < 1e-7f &&
+                  (cage.points[5] - (level.points[0] * 0.05f +
+                                     level.points[1] * 0.95f)).GetLength() < 1e-7f,
+              "support rails sit tightly on both sides of each corner");
+        CheckSubdivision(cage, 13 * 48, 48);
+    }
+    {
+        using namespace usdGenPomade;
+        PomadeModel model;
+        PomadeTubeShape shape;
+        shape.rings = 4;
+        shape.ringVerts = 4;
+        bool built = model.BuildTestTube(shape);
+        for (int ring = 0; ring < 4; ++ring)
+            built &= model.TwistSectionRing(ring, 0.78539816339f);
+        PomadePublisher publisher;
+        Check(built && publisher.Stage(model), "an aligned square tube builds for side interpolation");
+        auto const &level = publisher.Current().levels.at(1);
+        float rawMaxX = -1e30f;
+        for (auto const &p : level.points) rawMaxX = std::max(rawMaxX, p[0]);
+        bool bounded = true;
+        for (auto const &p : level.subdivision.points) {
+            for (int axis = 0; axis < 3; ++axis)
+                bounded &= p[axis] >= level.extentMin[axis] &&
+                           p[axis] <= level.extentMax[axis] && std::isfinite(p[axis]);
         }
-        Check(hard && smooth && finite,
-              "live profile: hard rails, smooth row joins and finite unit normals");
-        Check(std::abs(level.normals[4 * 8 * 4][1]) > 0.05f &&
-                  level.normals[4 * 8 * 4][1] * level.normals[12 * 8 * 4][1] < 0,
-              "surface normals follow the narrowing and widening slopes");
+        Check(bounded && std::abs(level.extentMax[0] - rawMaxX) < 1e-7f,
+              "added spans stay inside the authored square without an outward bulge");
+        CheckSubdivision(level.subdivision, 13 * 24, 24, true);
     }
     // The default (and USDGENPOMADE_TEST_TUBE=0, what record_usd.ps1 sets):
     // the constructor publishes nothing — no tube under the root, GetPrim
@@ -472,13 +571,24 @@ main(int argc, char **argv)
     // -- the L1 payload ----------------------------------------------------
     Check(pomade->GetPrim(tubesL1).primType == TfToken("mesh"),
           "tubes/L1 primType is mesh");
-    Check(ArraySize<VtVec3fArray>(*pomade, tubesL1, "points", 40),
-          "tubes/L1 carries the tube's 40 points");
-    Check(ArraySize<VtIntArray>(*pomade, tubesL1, "tubeId", 32),
+    {
+        auto mesh = pomade->GetPrim(tubesL1).dataSource;
+        auto scheme = SampledAt(mesh, HdDataSourceLocator(
+            TfToken("mesh"), TfToken("subdivisionScheme")));
+        auto corners = SampledAt(mesh, HdDataSourceLocator(
+            TfToken("mesh"), TfToken("subdivisionTags"), TfToken("cornerIndices")));
+        Check(scheme && scheme->GetValue(0.0f) == VtValue(TfToken("catmullClark")) &&
+                  corners && corners->GetValue(0.0f).Get<VtIntArray>().size() == 96 &&
+                  !Primvar(*pomade, tubesL1, "normals"),
+              "Hydra receives Catmull-Clark, pinned ends and smooth limit normals");
+    }
+    Check(ArraySize<VtVec3fArray>(*pomade, tubesL1, "points", 336),
+          "tubes/L1 carries 336 support-cage points");
+    Check(ArraySize<VtIntArray>(*pomade, tubesL1, "tubeId", 288),
           "tubes/L1 tubeId is uniform, one per face");
-    Check(ArraySize<VtVec3fArray>(*pomade, tubesL1, "clumpColor", 32),
+    Check(ArraySize<VtVec3fArray>(*pomade, tubesL1, "clumpColor", 288),
           "tubes/L1 clumpColor is uniform, one per face");
-    Check(ArraySize<VtFloatArray>(*pomade, tubesL1, "selected", 32),
+    Check(ArraySize<VtFloatArray>(*pomade, tubesL1, "selected", 288),
           "tubes/L1 selected is uniform, one per face");
     {
         VtIntArray level;
@@ -540,8 +650,8 @@ main(int argc, char **argv)
         int faces = 0, points = 0, tubes = 0;
         Check(Pomade_GetPublishedLevelInfo(ctx, 1, &faces, &points, &tubes) ==
                       POMADE_OK &&
-                  faces == 32 && points == 40 && tubes == 1,
-              "Pomade_GetPublishedLevelInfo reports L1 as 32/40/1");
+                  faces == 288 && points == 336 && tubes == 1,
+              "Pomade_GetPublishedLevelInfo reports L1 as 288/336/1");
         Check(Pomade_GetPublishedLevelInfo(ctx, 7, &faces, &points, &tubes) ==
                   POMADE_ERROR,
               "Pomade_GetPublishedLevelInfo fails for an unpublished level");
@@ -556,7 +666,7 @@ main(int argc, char **argv)
           "a move sends no added/removed");
     {
         HdDataSourceLocatorSet const expected{
-            Pv("points"), Pv("normals"), kExtentMin, kExtentMax,
+            Pv("points"), kExtentMin, kExtentMax,
         };
         Check(rec->DirtiedFor(tubesL1) == expected,
               "the move dirties tubes/L1 leaf-exactly: " +
@@ -574,10 +684,10 @@ main(int argc, char **argv)
           "the move re-tessellated exactly one tube");
     {
         VtVec3fArray points;
-        ArraySize(*pomade, tubesL1, "points", 40, &points);
-        Check(points.size() == 40 &&
-                  std::abs(points[16][0] - 1.5f) < 1e-5f &&
-                  std::abs(points[16][1] - 2.0f) < 1e-6f,
+        ArraySize(*pomade, tubesL1, "points", 336, &points);
+        Check(points.size() == 336 &&
+                  std::abs(points[144][0] - 1.5f) < 1e-5f &&
+                  std::abs(points[144][1] - 2.0f) < 1e-6f,
               "ring-2 slot-0 point moved to (1.5, 2, 0)");
     }
 
@@ -613,8 +723,8 @@ main(int argc, char **argv)
             Pomade_GetTubeSection(ctx, kids[i], 0, &t, uv, 128, &cvCount,
                                  &scale, &twist);
             int const rings = (sections - 1) * segments + 1;
-            expectFaces += (rings - 1) * cvCount;
-            expectPoints += rings * cvCount;
+            expectFaces += (rings + 1) * cvCount * 6;
+            expectPoints += (rings + 2) * cvCount * 6;
         }
         Check(expectFaces > 0 && faces == expectFaces &&
                   points == expectPoints,
@@ -750,7 +860,7 @@ main(int argc, char **argv)
                   Pomade_Publish(ctx, 0) == 1,
               "selection: L2 visible again");
         VtVec3fArray l1PaletteBefore;
-        Check(ArraySize(*pomade, tubesL1, "clumpColor", 32,
+        Check(ArraySize(*pomade, tubesL1, "clumpColor", 288,
                         &l1PaletteBefore),
               "selection: capture the unselected L1 clump palette");
         rec->Clear();
@@ -783,7 +893,7 @@ main(int argc, char **argv)
               "selecting an L1 tube leaves L2 alone");
         {
             VtFloatArray selected;
-            Check(ArraySize(*pomade, tubesL1, "selected", 32, &selected) &&
+            Check(ArraySize(*pomade, tubesL1, "selected", 288, &selected) &&
                       selected[0] == 1.0f && selected[31] == 1.0f,
                   "tubes/L1 `selected` reads 1 on every face of the tube");
             // V9: float, like the mesh's. `selected` is one of the three
@@ -804,7 +914,7 @@ main(int argc, char **argv)
               "selection: hover the same tube");
         {
             VtFloatArray selected;
-            Check(ArraySize(*pomade, tubesL1, "selected", 32, &selected) &&
+            Check(ArraySize(*pomade, tubesL1, "selected", 288, &selected) &&
                       selected[0] == 2.0f,
                   "a hovered tube reads 2, not 1");
             HdDataSourceLocatorSet const expected{Pv("selected")};
@@ -831,10 +941,10 @@ main(int argc, char **argv)
                   "the selected CV dot is white and its neighbour is not");
         VtFloatArray ownerSelected;
         VtVec3fArray ownerPalette;
-        Check(ArraySize(*pomade, tubesL1, "selected", 32, &ownerSelected) &&
+        Check(ArraySize(*pomade, tubesL1, "selected", 288, &ownerSelected) &&
                       ownerSelected[0] == 1.0f &&
                       ownerSelected[31] == 1.0f &&
-                      ArraySize(*pomade, tubesL1, "clumpColor", 32,
+                      ArraySize(*pomade, tubesL1, "clumpColor", 288,
                                 &ownerPalette) &&
                       ownerPalette == l1PaletteBefore,
                   "a selected center CV highlights its owner tube without "
@@ -842,7 +952,7 @@ main(int argc, char **argv)
         Check(Pomade_SetHover(ctx, usdGenPomade::PomadePick_CenterCV, 0, 2,
                              -1) == POMADE_OK &&
                   Pomade_Publish(ctx, 0) == 1 &&
-                  ArraySize(*pomade, tubesL1, "selected", 32,
+                  ArraySize(*pomade, tubesL1, "selected", 288,
                             &ownerSelected) &&
                   ownerSelected[0] == 2.0f && ownerSelected[31] == 2.0f,
               "hovering a center CV gives its owner tube the hover cue");
@@ -871,7 +981,7 @@ main(int argc, char **argv)
                       l2[size_t(faces) - 1] == 1.0f,
                   "every face of every L2 tube reads selected");
             VtFloatArray l1;
-            Check(ArraySize(*pomade, tubesL1, "selected", 32, &l1) &&
+            Check(ArraySize(*pomade, tubesL1, "selected", 288, &l1) &&
                       l1[0] == 0.0f,
                   "the L1 tube is not selected by a level-2 selection");
         }
@@ -880,7 +990,7 @@ main(int argc, char **argv)
               "selection: clear everything");
         {
             VtFloatArray selected;
-            Check(ArraySize(*pomade, tubesL1, "selected", 32, &selected) &&
+            Check(ArraySize(*pomade, tubesL1, "selected", 288, &selected) &&
                       selected[0] == 0.0f,
                   "clearing the selection puts `selected` back to 0");
         }
@@ -972,8 +1082,8 @@ main(int argc, char **argv)
                   .IsEmpty(),
               "NoticesFor(clean) is empty");
         Check(LocatorSetSize(UsdGenPomadeSceneIndex::NoticesFor(
-                  usdGenPomade::PomadeDirty_Points)) == 4,
-              "NoticesFor(points) has 4 leaves");
+                  usdGenPomade::PomadeDirty_Points)) == 3,
+              "NoticesFor(points) has 3 leaves (subdivision derives normals)");
         Check(LocatorSetSize(UsdGenPomadeSceneIndex::NoticesFor(
                   usdGenPomade::PomadeDirty_Topology)) == 8,
               "NoticesFor(topology) has 8 leaves");
@@ -1072,18 +1182,32 @@ main(int argc, char **argv)
                   ToString(rec->DirtiedFor(guidesL2)));
     }
 
-    // -- the clump palette is one table ------------------------------------
+    // -- tubes use the graph's region colour, in Hydra's linear space ------
     {
         Check(usdGenPomade::PomadeClumpPaletteSize() == 16,
-              "the clump palette holds 16 entries");
-        usdGenPomade::PomadeRgb const a = usdGenPomade::PomadeClumpColor(0, 1, -1);
-        usdGenPomade::PomadeRgb const b = usdGenPomade::PomadeClumpColor(1, 1, -1);
-        usdGenPomade::PomadeRgb const wrapped =
-            usdGenPomade::PomadeClumpColor(16, 1, -1);
-        Check(a.r != b.r || a.g != b.g || a.b != b.b,
-              "neighbouring region ids take different palette slots");
-        Check(a.r == wrapped.r && a.g == wrapped.g && a.b == wrapped.b,
-              "region ids wrap every 16 slots");
+              "the fallback clump palette holds 16 entries");
+        bool matchesGraph = true;
+        for (int region = 0; region < 32; ++region) {
+            float srgb[3];
+            usdGenPomade::PomadeRegionColor(region, srgb);
+            usdGenPomade::PomadeRgb const color =
+                usdGenPomade::PomadeClumpColor(region, 1, -1);
+            float const linear[3] = {color.r, color.g, color.b};
+            for (int channel = 0; channel < 3; ++channel) {
+                // Round trip the published linear value to graph sRGB.
+                float const v = linear[channel];
+                float const encoded = v <= 0.0031308f ? v * 12.92f
+                    : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+                matchesGraph &= std::fabs(encoded - srgb[channel]) < 1e-6f;
+            }
+        }
+        Check(matchesGraph,
+              "tube colours match graph region colours, including ids above 15");
+        auto const fallback = usdGenPomade::PomadeClumpColor(-1, 1, -1);
+        auto const slot15 = usdGenPomade::PomadeClumpPaletteEntry(15);
+        Check(fallback.r == slot15.r && fallback.g == slot15.g &&
+                  fallback.b == slot15.b,
+              "unrooted tubes retain their fallback colour");
         usdGenPomade::PomadeRgb const child0 =
             usdGenPomade::PomadeClumpColor(3, 2, 0);
         usdGenPomade::PomadeRgb const child1 =
@@ -1514,6 +1638,19 @@ main(int argc, char **argv)
         Check(matched,
               "V8: every claimed face is painted the clumpColor of the tube "
               "rooted in its region");
+        float graphRgb[3] = {};
+        int colorCount = 0;
+        bool graphMatched = Pomade_ReadRegionColors(sc, graphRgb, 1,
+                                                    &colorCount) == POMADE_OK &&
+                            colorCount == 1 && !clump.empty();
+        for (int c = 0; graphMatched && c < 3; ++c) {
+            float const v = clump[0][c];
+            float const encoded = v <= 0.0031308f ? v * 12.92f
+                : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+            graphMatched &= std::fabs(encoded - graphRgb[c]) < 1e-6f;
+        }
+        Check(graphMatched,
+              "the published tube and patch use the persisted graph colour");
         {
             // Uncovered faces keep their own warning colour, so the match
             // above is a statement about the region and not about the mesh
@@ -1817,6 +1954,43 @@ main(int argc, char **argv)
                       Pomade_IsTubeVisible(patchCtx, cutGrandkids[0]) == 1 &&
                       Pomade_IsTubeVisible(patchCtx, cutGrandkids[1]) == 1,
                   "cut: L1, L2 and L3 batches contain only their frontier members");
+            auto tubeHasRegionShade = [&](int tubeId, int level,
+                                          int regionId, int childIndex) {
+                SdfPath const path = UsdGenPomadeSceneIndex::TubesPath(level);
+                auto colors = Primvar(*pomade, path, "clumpColor");
+                auto ids = Primvar(*pomade, path, "tubeId");
+                if (!colors || !ids) {
+                    return false;
+                }
+                VtValue const cv = colors->GetValue(0.0f);
+                VtValue const iv = ids->GetValue(0.0f);
+                if (!cv.IsHolding<VtVec3fArray>() || !iv.IsHolding<VtIntArray>()) {
+                    return false;
+                }
+                auto const &rgb = cv.UncheckedGet<VtVec3fArray>();
+                auto const &tubeIds = iv.UncheckedGet<VtIntArray>();
+                if (rgb.size() != tubeIds.size()) {
+                    return false;
+                }
+                auto const shade = usdGenPomade::PomadeClumpColor(
+                    regionId, level, childIndex);
+                bool found = false;
+                for (size_t i = 0; i < tubeIds.size(); ++i) {
+                    if (tubeIds[i] == tubeId) {
+                        found = true;
+                        if ((rgb[i] - GfVec3f(shade.r, shade.g, shade.b))
+                                .GetLength() > 1e-6f) {
+                            return false;
+                        }
+                    }
+                }
+                return found;
+            };
+            Check(tubeHasRegionShade(cutRootB, 1, 1, -1) &&
+                      tubeHasRegionShade(cutKids[1], 2, 0, 1) &&
+                      tubeHasRegionShade(cutGrandkids[0], 3, 0, 0) &&
+                      tubeHasRegionShade(cutGrandkids[1], 3, 0, 1),
+                  "mixed-depth tubes retain their underlying region's colour family");
             Check(ArraySize<VtVec3fArray>(*pomade, centersL1, "points", 5) &&
                       ArraySize<VtVec3fArray>(*pomade, centersL2, "points", 5) &&
                       ArraySize<VtVec3fArray>(*pomade, centersL3, "points", 10) &&

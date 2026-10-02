@@ -18,6 +18,8 @@
 #include "pxr/imaging/hd/materialSchema.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
+#include "pxr/imaging/hd/subdivisionTagsSchema.h"
+#include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
@@ -331,9 +333,11 @@ _MaterialBinding(SdfPath const &path)
 }
 
 HdContainerDataSourceHandle
-_MeshTopology(VtIntArray const &counts, VtIntArray const &indices)
+_MeshTopology(VtIntArray const &counts, VtIntArray const &indices,
+              usdGenPomade::PomadeSubdivisionCage const *cage = nullptr)
 {
-    return HdMeshSchema::Builder()
+    HdMeshSchema::Builder builder;
+    builder
         .SetTopology(HdMeshTopologySchema::Builder()
                          .SetFaceVertexCounts(
                              HdRetainedTypedSampledDataSource<VtIntArray>::
@@ -343,9 +347,27 @@ _MeshTopology(VtIntArray const &counts, VtIntArray const &indices)
                                  New(indices))
                          .SetOrientation(_Tok(HdTokens->rightHanded))
                          .Build())
-        .SetSubdivisionScheme(_Tok(UsdGeomTokens->none))
-        .SetDoubleSided(HdRetainedTypedSampledDataSource<bool>::New(true))
-        .Build();
+        .SetSubdivisionScheme(_Tok(cage ? UsdGeomTokens->catmullClark
+                                        : UsdGeomTokens->none))
+        .SetDoubleSided(HdRetainedTypedSampledDataSource<bool>::New(true));
+    if (cage) {
+        builder.SetSubdivisionTags(HdSubdivisionTagsSchema::Builder()
+            .SetInterpolateBoundary(_Tok(UsdGeomTokens->edgeAndCorner))
+            .SetCornerIndices(HdRetainedTypedSampledDataSource<VtIntArray>::New(
+                cage->cornerIndices))
+            .SetCornerSharpnesses(HdRetainedTypedSampledDataSource<VtFloatArray>::New(
+                cage->cornerSharpnesses)).Build());
+    }
+    return builder.Build();
+}
+
+template <class T>
+VtArray<T> _CageFaceValues(VtArray<T> const &values, VtIntArray const &sourceFaces)
+{
+    VtArray<T> result(sourceFaces.size());
+    for (size_t i = 0; i < sourceFaces.size(); ++i)
+        result[i] = values[size_t(sourceFaces[i])];
+    return result;
 }
 
 HdContainerDataSourceHandle
@@ -364,7 +386,7 @@ _CurvesTopology(VtIntArray const &counts, VtIntArray const &indices,
     return HdBasisCurvesSchema::Builder().SetTopology(b.Build()).Build();
 }
 
-// The mesh data source for one level: topology, points/normals, the
+// The mesh data source for one level: subdivision cage, end tags, the
 // per-face identity primvars and the level's display state. Purpose is
 // deliberately omitted (an absent purpose resolves to the geometry render
 // tag; authoring purpose="default" would match no collection and Storm
@@ -383,20 +405,22 @@ HdContainerDataSourceHandle
 _BuildLevelMeshDataSource(usdGenPomade::PomadeStagedLevel const &level,
                           SdfPath const &materialPath)
 {
-    VtFloatArray selected(level.faceSelected.size());
-    for (size_t i = 0; i < level.faceSelected.size(); ++i) {
-        selected[i] = float(level.faceSelected[i]);
-    }
+    auto const &cage = level.subdivision;
+    VtFloatArray selected(cage.sourceFaces.size());
+    for (size_t i = 0; i < selected.size(); ++i)
+        selected[i] = float(level.faceSelected[size_t(cage.sourceFaces[i])]);
     std::vector<TfToken> pvNames;
     std::vector<HdDataSourceBaseHandle> pvValues;
     _Add(&pvNames, &pvValues, _tokPoints,
-         _Primvar(_Samp(level.points), _tokVertex, _tokPointRole));
-    _Add(&pvNames, &pvValues, _tokNormals,
-         _Primvar(_Samp(level.normals), _tokFaceVarying, _tokNormalRole));
+         _Primvar(_Samp(cage.points), _tokVertex, _tokPointRole));
+    // Let subdivision generate smooth limit normals, including the bevel.
+    // The old face-varying strip normals would split that rounded surface.
     _Add(&pvNames, &pvValues, _tokTubeId,
-         _Primvar(_Samp(level.faceTubeId), _tokUniform));
+         _Primvar(_Samp(_CageFaceValues(level.faceTubeId, cage.sourceFaces)),
+                  _tokUniform));
     _Add(&pvNames, &pvValues, _tokClumpColor,
-         _Primvar(_Samp(level.faceClumpColor), _tokUniform, _tokColorRole));
+         _Primvar(_Samp(_CageFaceValues(level.faceClumpColor, cage.sourceFaces)),
+                  _tokUniform, _tokColorRole));
     _Add(&pvNames, &pvValues, _tokSelected,
          _Primvar(_Samp(selected), _tokUniform));
     _Add(&pvNames, &pvValues, _tokHierarchyLevel,
@@ -414,7 +438,10 @@ _BuildLevelMeshDataSource(usdGenPomade::PomadeStagedLevel const &level,
     std::vector<TfToken> names;
     std::vector<HdDataSourceBaseHandle> values;
     _Add(&names, &values, _tokMesh,
-         _MeshTopology(level.faceVertexCounts, level.faceVertexIndices));
+         _MeshTopology(cage.faceVertexCounts, cage.faceVertexIndices, &cage));
+    _Add(&names, &values, HdLegacyDisplayStyleSchemaTokens->displayStyle,
+         HdLegacyDisplayStyleSchema::Builder().SetRefineLevel(
+             HdRetainedTypedSampledDataSource<int>::New(2)).Build());
     _Add(&names, &values, _tokPrimvars,
          _Container(std::move(pvNames), std::move(pvValues)));
     _Add(&names, &values, _tokExtent,
@@ -1397,10 +1424,10 @@ UsdGenPomadeSceneIndex::PublishedLevelInfo(int level, int *outFaceCount,
         return false;
     }
     if (outFaceCount) {
-        *outFaceCount = int(it->second.faceVertexCounts.size());
+        *outFaceCount = int(it->second.subdivision.faceVertexCounts.size());
     }
     if (outPointCount) {
-        *outPointCount = int(it->second.points.size());
+        *outPointCount = int(it->second.subdivision.points.size());
     }
     if (outTubeCount) {
         *outTubeCount = int(it->second.tubes.size());
@@ -1439,13 +1466,13 @@ UsdGenPomadeSceneIndex::NoticesFor(uint32_t dirty)
     HdDataSourceLocatorSet locators;
     if (dirty & usdGenPomade::PomadeDirty_Topology) {
         locators.insert(HdDataSourceLocator(_tokMesh, _tokTopology));
+        locators.insert(HdDataSourceLocator(_tokMesh,
+                                            HdMeshSchemaTokens->subdivisionTags));
     }
     if (dirty & (usdGenPomade::PomadeDirty_Points |
                  usdGenPomade::PomadeDirty_Topology)) {
         locators.insert(
             HdDataSourceLocator(_tokPrimvars, _tokPoints, _tokPrimvarValue));
-        locators.insert(
-            HdDataSourceLocator(_tokPrimvars, _tokNormals, _tokPrimvarValue));
         locators.insert(HdDataSourceLocator(_tokExtent, _tokMin));
         locators.insert(HdDataSourceLocator(_tokExtent, _tokMax));
     }

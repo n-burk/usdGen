@@ -153,6 +153,18 @@ sizeWorld)`), unit-tested Qt-free.
 
 ### 2.4a The viewport look
 
+**2026-10-01 surface update:** live tube meshes use a render-only Catmull–Clark
+cage. Each longitudinal CV rail is bracketed by support rails at 5% of its
+neighbouring edges, producing a small rounded bevel. Four straight spans between
+the holding rails divide each sampled section side using linear interpolation.
+The authored sections and existing interpolation along the tube define the
+profile; the added cross-section spans introduce no bow. Extra holding rows near
+both ends and sharp corner tags on every end-boundary vertex prevent footprint
+shrinkage. Hydra derives the smooth surface normals; editable CV indexing and
+the CPU/CUDA sample grid are unchanged. The graph's stored region colour now
+supplies both scalp patches and tube colours, with related shades for children;
+this supersedes the separate 16-entry tube palette in the historical table below.
+
 The scene index draws the authoring model in its own terms. There is no external
 still, film frame, or local PDF to match. What the index draws:
 

@@ -6,7 +6,7 @@
 // level — few fat prims, plan/17 R2 — and hands the scene index Hydra-ready
 // arrays:
 //
-//   tubes/L<n>      one mesh holding every tube at level n (K5 tessellation)
+//   tubes/L<n>      one supported subdivision cage per level, from K5 samples
 //   centers/L<n>    one linear basisCurves per tube, through its center CVs
 //   centerCVs/L<n>  the center CVs as a points prim
 //   rings/L<n>      the cross-section rings, closed linear curves
@@ -71,23 +71,32 @@ struct USDGENPOMADE_API PomadeTubeSlice {
     float radius = 0.5f;  // mean root-ring radius; sets overlay widths
 };
 
+// Render-only support cage. Authored CVs and the CPU/CUDA sample grid keep
+// their original indexing; support vertices are never editable handles.
+struct PomadeSubdivisionCage {
+    VtVec3fArray points;
+    VtIntArray faceVertexCounts;
+    VtIntArray faceVertexIndices;
+    VtIntArray sourceFaces;  // cage face -> sampled-grid face for primvars
+    VtIntArray cornerIndices;  // pinned root and tip boundary vertices
+    VtFloatArray cornerSharpnesses;
+};
+
 // One level's Hydra-ready arrays.
 struct USDGENPOMADE_API PomadeStagedLevel {
     int level = 0;
     std::vector<PomadeTubeSlice> tubes;
 
-    // tubes/L<n> (mesh). tubeId/clumpColor/selected are uniform: Hydra
-    // uniform means one value per FACE, so they are expanded to the real
-    // face count rather than published as a single-element array (which is
-    // what Storm rejects on a multi-face mesh, and why the P3 index
-    // hard-coded `constant` instead).
+    // Sampled grid and per-face metadata. Publication maps the uniform
+    // tubeId/clumpColor/selected values to subdivision.sourceFaces, keeping
+    // support faces in the same tube's colour and selection state.
     VtVec3fArray points;
-    VtVec3fArray normals;  // faceVarying: hard CV rails, smooth along strips
     VtIntArray faceVertexCounts;
     VtIntArray faceVertexIndices;
     VtIntArray faceTubeId;
     VtVec3fArray faceClumpColor;
     VtIntArray faceSelected;
+    PomadeSubdivisionCage subdivision;
     GfVec3f extentMin = GfVec3f(0.0f);
     GfVec3f extentMax = GfVec3f(0.0f);
 
