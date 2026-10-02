@@ -1,9 +1,0 @@
-{
-  "scene": "g3_head100k", "tier": "T2", "gate": "S-6",
-  "host": "spark", "resolution": [1280, 720],
-  "refineLevel": 2, "tiles": 0, "threads": 20,
-  "frames": 60, "warmup": 10, "repeats": 3,
-  "ms": { "median": 0.212223, "p90": 0.260904, "min": 0.162325 },
-  "counters": { "drawCalls": 1, "drawBatches": 1, "rebuildBatches": null, "vboRelocated": null, "itemsDrawn": 1, "sourcesCommitted": null, "copyBufferCpuToGpu": null, "gpuMemoryUsed": 5.27033e+06 },
-  "usdGenStats": { "commits": null, "cookedChunks": null, "publishedTiles": null, "interleavedBytes": null, "recompiles": null, "evictions": null }
-}
