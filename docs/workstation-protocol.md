@@ -460,7 +460,9 @@ export LD_LIBRARY_PATH="$USD/lib:$GEN/build"
 
 # M4 fixture (lands with the M4 Ptex-capture pipeline):
 export FIX="$GEN/bench/ptex_baked_groom.usda"
-# M0 smoke substitute (exists today):
+# M0 smoke substitute (regenerate; the .usda outputs are not committed):
+"$PY" "$GEN/plan/prototypes/storm-hair-look/make_scene.py"
+"$PY" "$GEN/plan/prototypes/storm-hair-look/make_scene_preview.py"
 test -f "$FIX" || export FIX="$GEN/plan/prototypes/storm-hair-look/hair_scene_preview.usda"
 test -f "$FIX"
 mkdir -p "$GEN/out/t4/§6"

@@ -4,6 +4,7 @@ Requires NumPy and OpenImageIO maketx; the tiled, mipmapped EXR works in both
 Storm and Moonray. This is a procedural lighting environment, not a photograph.
 """
 from pathlib import Path
+import os
 import shutil
 import subprocess
 import numpy as np
@@ -39,7 +40,9 @@ def main():
     with scratch.open('wb') as file:
         file.write(('PF\n%d %d\n-1.0\n' % (w, h)).encode())
         file.write(hdr[::-1].astype('<f4').tobytes())
-    maketx = shutil.which('maketx') or 'D:/vcpkg/installed/x64-windows/tools/openimageio/maketx.exe'
+    maketx = os.environ.get('MAKETX') or shutil.which('maketx')
+    if not maketx:
+        raise SystemExit('maketx not found: install OpenImageIO or set MAKETX to its path')
     output = here / 'textures' / 'studio_contrast.exr'
     subprocess.run([maketx, '--oiio', '--envlatl', '-d', 'half', '--format', 'openexr',
                     str(scratch), '-o', str(output)], check=True)

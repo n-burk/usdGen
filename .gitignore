@@ -28,6 +28,12 @@ renders/ue-parity/
 .omc/
 notes/
 
+# Agent worktree scratch
+.claude/
+
+# Benchmark run output (benchUsdGenStorm's default jsonOut, written to CWD)
+usdGenBench.json
+
 # CMake generated
 CMakeUserPresets.json
 *.user
@@ -84,3 +90,10 @@ tests/scenes/*.usda
 # Generated G1-G5 fixtures (regenerate with usd/fixtures/make_fixtures.py)
 usd/fixtures/*.usda
 bin/launch_env/__pycache__/
+
+# Regenerable scene outputs (the generator beside each file is the source of
+# truth; the outputs are not committed)
+renders/fur/*.usda
+usdGenShaders/test/scenes/*.usda
+plan/prototypes/storm-hair-look/hair_scene.usda
+plan/prototypes/storm-hair-look/hair_scene_preview.usda
