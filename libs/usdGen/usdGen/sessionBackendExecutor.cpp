@@ -1,12 +1,19 @@
 #include "usdGen/sessionBackendExecutor.h"
 
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+#include "usdGen/vulkan/defaultProvider.h"
+#endif
+
 #include <stdexcept>
+#include <thread>
+#include <string>
 #include <utility>
 
 namespace usdGen {
 namespace {
 
-class SessionBackendExecutor final : public UsdGenSessionBackendExecutor {
+class SessionBackendExecutor final : public UsdGenSessionBackendExecutor,
+                                     public std::enable_shared_from_this<SessionBackendExecutor> {
 public:
     SessionBackendExecutor(int threadLimit, size_t cacheBytes,
                            std::shared_ptr<UsdGenExecutionCacheDomain> domain,
@@ -17,7 +24,13 @@ public:
 
     bool CanRoute(UsdGenExecutionBackend backend) const noexcept override {
         if (backend == UsdGenExecutionBackend::CpuReference) return true;
-        if (backend == UsdGenExecutionBackend::Vulkan) return bool(_provider);
+        if (backend == UsdGenExecutionBackend::Vulkan) {
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+            return true;
+#else
+            return bool(_provider);
+#endif
+        }
 #ifdef USDGEN_ENABLE_CUDA
         if (backend == UsdGenExecutionBackend::Cuda) return true;
 #endif
@@ -64,7 +77,63 @@ public:
 
             if (backend == UsdGenExecutionBackend::Vulkan) {
                 if (!request.runtime || !request.deviceReturnBinder)
-                    throw std::runtime_error("injected device Session executor has no runtime/return route");
+                    throw std::runtime_error("device Session executor has no runtime/return route");
+                auto provider = _provider;
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+                // The async work gate retains this executor and excludes any
+                // later cooker mutation until completion. Native construction
+                // and canonical registry resolution run externally, so neither
+                // the Session owner nor its worker waits for initialization.
+                if (!provider) {
+                    // Context loss can arrive through Session's separate
+                    // serialized loss work before the next cook request. A
+                    // fresh default provider starts at epoch zero; consult
+                    // its loss latch even when this request has no loss list.
+                    bool contextLost = _defaultProvider &&
+                        _defaultProvider->Identity().contextEpoch != 0;
+                    for (auto const& loss : request.contextLosses) {
+                        if (_defaultProvider && loss.serial > _defaultLossSerial &&
+                            loss.backend == UsdGenDeviceBackend::Vulkan &&
+                            (loss.deviceIndex < 0 || loss.deviceIndex ==
+                                _defaultProvider->Identity().deviceIndex)) {
+                            _defaultLossSerial = loss.serial;
+                            contextLost = true;
+                        }
+                    }
+                    if (contextLost) {
+                        _defaultProvider->Shutdown();
+                        _defaultProvider.reset();
+                        _cooker.SetDeviceProvider({});
+                        fail(std::make_exception_ptr(std::runtime_error(
+                            "Vulkan device context was lost; retry creates a fresh context")));
+                        return;
+                    }
+                    if (!_defaultProvider) {
+                        auto self = shared_from_this();
+                        auto completion = request.completion;
+                        auto previous = request.previous;
+                        try {
+                            std::thread([self, request=std::move(request)]() mutable {
+                                std::string reason;
+                                auto created = vulkan::CreateDefaultVulkanSessionProvider(&reason);
+                                if (!created) {
+                                    if (request.completion) request.completion(request.previous,
+                                        std::make_exception_ptr(std::runtime_error(
+                                            "Vulkan execution backend factory is unavailable: " + reason)));
+                                    return;
+                                }
+                                self->_defaultProvider = std::move(created);
+                                self->_cooker.SetDeviceProvider(self->_defaultProvider);
+                                self->Submit(std::move(request));
+                            }).detach();
+                        } catch (...) {
+                            if (completion) completion(std::move(previous), std::current_exception());
+                        }
+                        return;
+                    }
+                    provider = _defaultProvider;
+                }
+#endif
                 auto completion = request.completion;
                 _cooker.CookDeviceAsync(*request.runtime, request.cancellation,
                     std::move(request.desc), request.context,
@@ -72,7 +141,7 @@ public:
                     request.frame, request.reason, std::move(request.previous),
                     std::move(request.publishedStats), request.invalidateValues,
                     request.previousPublishedWorkerEpoch, request.callerDevice,
-                    _provider, std::move(request.deviceReturnBinder),
+                    provider, std::move(request.deviceReturnBinder),
                     std::move(completion), std::move(request.coalescedHooks));
                 return;
             }
@@ -114,11 +183,19 @@ public:
     }
 
     void Shutdown() noexcept override {
-        // The owner guarantees that every async CUDA completion has returned
-        // before this object is destroyed.  Coalesced followers are cancelled
-        // by Session before pipeline shutdown; silence a leftover registration
-        // without allowing a callback to reenter a dying command owner.
+        // The owner guarantees that every async device completion has
+        // returned before this object is destroyed. Coalesced followers are
+        // cancelled by Session before pipeline shutdown; silence a leftover
+        // registration without allowing a callback to reenter a dying
+        // command owner. The injected provider stays caller-owned; only the
+        // lazily created default is shut down here.
         _cooker.AbandonCoalesced(false);
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+        try {
+            if (_defaultProvider) _defaultProvider->Shutdown();
+        } catch (...) {}
+        _defaultProvider.reset();
+#endif
     }
 
     UsdGenSessionCooker &Cooker() noexcept override { return _cooker; }
@@ -127,6 +204,10 @@ public:
 private:
     UsdGenSessionCooker _cooker;
     std::shared_ptr<UsdGenSessionDeviceProvider> _provider;
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    std::shared_ptr<UsdGenSessionDeviceProvider> _defaultProvider;
+    uint64_t _defaultLossSerial = 0;
+#endif
 };
 
 } // namespace

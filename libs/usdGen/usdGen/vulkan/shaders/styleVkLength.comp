@@ -1,0 +1,127 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// styleVkLength.comp — Vulkan port of the CUDA LengthKernel plus the
+// ValidateOffsets pre-pass (gpu/styleOps.cu). Root anchored: output[i] =
+// root + (points[i]-root)*scale. One thread per curve.
+//
+// Error model mirrors CUDA exactly: 0=clean, 1=kBadOffsets, 2=kNonFinite,
+// 3=kBadValue, first-writer-wins. Phase 0 validates offsets; phase 1 exits
+// before any offset-derived point read when validation failed. Unlike
+// lengthScale.comp there is deliberately no factor==1 copy shortcut: CUDA
+// always evaluates the expression, and bitwise parity requires the same
+// operations in the same order (`precise` pins them; CUDA uses --fmad=false).
+//
+// Field domains match NoisePipeline: Groom=1, Primitive=2, Point=4.
+// A groom field with data reads index 0 (CUDA ReadField default).
+//
+// ABI — push constants (6 words, 24 bytes):
+//   uint curves, points, phase
+//   float scaleLiteral; uint scaleDomain, scaleHasData
+// Bindings (float3 planes are packed scalar float[], 12-byte stride):
+//   0 points    float[3*pointCount]
+//   1 offsets   uint[curveCount+1]
+//   2 scaleData float[...] (field data or 4-byte fallback, never read when
+//                          scaleHasData == 0)
+//   3 output    float[3*pointCount] OUT
+//   4 status    uint OUT
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Points { float v[]; } points;
+layout(set = 0, binding = 1, std430) readonly buffer Offsets { uint v[]; } offsets;
+layout(set = 0, binding = 2, std430) readonly buffer Scale { float v[]; } scaleData;
+layout(set = 0, binding = 3, std430) buffer Out { float v[]; } outputPoints;
+layout(set = 0, binding = 4, std430) buffer Status { uint error; } status;
+
+layout(push_constant) uniform C {
+    uint curves;
+    uint points;
+    uint phase;
+    float scaleLiteral;
+    uint scaleDomain;
+    uint scaleHasData;
+} c;
+
+const uint kBadOffsets = 1u;
+const uint kNonFinite = 2u;
+const uint kBadValue = 3u;
+const uint kDomainGroom = 1u;
+const uint kDomainPrimitive = 2u;
+const uint kDomainPoint = 4u;
+
+bool finite(float value) { return !isnan(value) && !isinf(value); }
+bool finiteV3(float x, float y, float z) {
+    return finite(x) && finite(y) && finite(z);
+}
+void fail(uint code) { atomicCompSwap(status.error, 0u, code); }
+
+bool readScale(uint curve, uint point, out float value) {
+    if (c.scaleHasData == 0u) {
+        value = c.scaleLiteral;
+    } else {
+        uint index = 0u;
+        if (c.scaleDomain == kDomainPrimitive) index = curve;
+        else if (c.scaleDomain == kDomainPoint) index = point;
+        else if (c.scaleDomain != kDomainGroom) {
+            fail(kBadValue);
+            return false;
+        }
+        value = scaleData.v[index];
+    }
+    if (!finite(value)) {
+        fail(kNonFinite);
+        return false;
+    }
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (c.phase == 0u) {
+        if (i <= c.curves) {
+            uint offset = offsets.v[i];
+            if ((i == 0u && offset != 0u) ||
+                (i == c.curves && offset != c.points)) fail(kBadOffsets);
+            if (i < c.curves) {
+                if (offset >= offsets.v[i + 1u]) fail(kBadOffsets);
+                if (offsets.v[i + 1u] > c.points) fail(kBadOffsets);
+            }
+        }
+        return;
+    }
+
+    if (atomicAdd(status.error, 0u) != 0u || i >= c.curves) return;
+
+    uint begin = offsets.v[i];
+    uint end = offsets.v[i + 1u];
+    uint rootBase = 3u * begin;
+    float rootX = points.v[rootBase];
+    float rootY = points.v[rootBase + 1u];
+    float rootZ = points.v[rootBase + 2u];
+    if (!finiteV3(rootX, rootY, rootZ)) {
+        fail(kNonFinite);
+        return;
+    }
+    for (uint point = begin; point < end; ++point) {
+        uint base = 3u * point;
+        float px = points.v[base];
+        float py = points.v[base + 1u];
+        float pz = points.v[base + 2u];
+        float factor = 0.0;
+        if (!finiteV3(px, py, pz)) {
+            fail(kNonFinite);
+            continue;
+        }
+        if (!readScale(i, point, factor)) continue;
+        precise float x = rootX + (px - rootX) * factor;
+        precise float y = rootY + (py - rootY) * factor;
+        precise float z = rootZ + (pz - rootZ) * factor;
+        if (!finiteV3(x, y, z)) fail(kNonFinite);
+        else {
+            outputPoints.v[base] = x;
+            outputPoints.v[base + 1u] = y;
+            outputPoints.v[base + 2u] = z;
+        }
+    }
+}

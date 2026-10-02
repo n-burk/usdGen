@@ -1,0 +1,247 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// rootFrames.comp — Vulkan port of the CUDA BuildFrames kernel.
+// Computes per-root-primitive origin/tangent/binormal/normal frames plus a
+// valid/drop lane and root-badness accounting. Semantic validation of root
+// primitive shapes and authored matrices is handled host-side in Begin; the
+// shader still reproduces every CUDA in-kernel status branch so the error
+// code (first writer wins) is exact.
+//
+// ABI — push constants (24 bytes, std430/vec alignment safe):
+//   u32 curves       number of root primitives (grid-stride domain)
+//   u32 faceCount    number of faces (faceOffsets entries = faceCount+1)
+//   u32 vertexCount  length of restVerts
+//   u32 indexCount   length of faceIndices
+//   u32 normalDomain 0=None(geometric) 1=Constant 2=Uniform 3=Vertex 4=FaceVarying
+//   u32 hasNormals   !=0 when normals is meaningful (host forces normalDomain=0 when absent)
+// Descriptor bindings (all readonly except where noted):
+//   0  restVerts   f32 vec3[]
+//   1  faceOffsets u32[]        (faceCount+1 entries)
+//   2  faceIndices u32[]
+//   3  rootPrim    i32[]        (curves entries)
+//   4  rootUV      f32 vec2[]   (curves entries)
+//   5  normals     f32 vec3[]   (sized per domain; unused when normalDomain==0)
+//   6  origin      vec3[]       OUT
+//   7  tangent     vec3[]       OUT
+//   8  binormal    vec3[]       OUT
+//   9  normal      vec3[]       OUT
+//  10  valid       u32[]        OUT (0/1; one u32 lane per curve — packing choice)
+//  11  drop        u32[]        OUT (0/1 per curve)
+//  12  badRootCount u32         OUT (accumulated via atomicAdd)
+//  13  status      u32          OUT (first-writer atomicCompSwap from 0)
+// Status codes (mirror CUDA): 0 Ok, 3 BadShape/BadTopology (face index
+// out of range / bad topology / invalid index), 4 BadRoot (bad face, bad UV,
+// barycentric out of range).
+//
+// Known CUDA-vs-Vulkan deviation (last-bit only, documented): CUDA uses
+// rsqrtf() for vector normalization; this port intentionally uses the exact
+// square root plus a reciprocal multiply (out = v * (1.0/sqrt(l2))) for
+// cross-API determinism. The CPU oracle used to check Vulkan frame outputs
+// applies the same formula so tests are self-consistent.
+//
+// Grid-stride over curves exactly like the CUDA for..loop; typically one
+// iteration since dispatch covers curves with ceil(curves/256) groups.
+
+#version 450
+
+layout(local_size_x = 256) in;
+
+// Packed float3 planes: scalar float[] with 3*i indexing (12-byte stride —
+// std430 vec3[] would stride 16 and break the host/CUDA plane ABI).
+layout(std430, binding = 0) readonly buffer RestVerts { float restVerts[]; };
+layout(std430, binding = 1) readonly buffer FaceOffsets { uint faceOffsets[]; };
+layout(std430, binding = 2) readonly buffer FaceIndices { uint faceIndices[]; };
+layout(std430, binding = 3) readonly buffer RootPrim { int rootPrim[]; };
+layout(std430, binding = 4) readonly buffer RootUV { vec2 rootUV[]; };
+layout(std430, binding = 5) readonly buffer NormalsBuf { float normals[]; };
+layout(std430, binding = 6) buffer OriginBuf { float origin[]; };
+layout(std430, binding = 7) buffer TangentBuf { float tangent[]; };
+layout(std430, binding = 8) buffer BinormalBuf { float binormal[]; };
+layout(std430, binding = 9) buffer NormalBuf { float normal[]; };
+layout(std430, binding = 10) buffer ValidBuf { uint valid[]; };
+layout(std430, binding = 11) buffer DropBuf { uint drop[]; };
+layout(std430, binding = 12) buffer BadRootCountBuf { uint badRootCount; };
+layout(std430, binding = 13) buffer StatusBuf { uint status; };
+
+layout(push_constant) uniform Push {
+    uint curves;
+    uint faceCount;
+    uint vertexCount;
+    uint indexCount;
+    uint normalDomain;
+    uint hasNormals;
+} push;
+
+// finite() replaces GLSL isfinite, which is unavailable in this toolchain
+// (see widthBlend.comp for the repo's shared helper).
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite(vec3 v) { return finite(v.x) && finite(v.y) && finite(v.z); }
+
+// Packed-plane accesses are inlined at call sites (3u*i indexing) because
+// GLSL forbids unsized-array function parameters in this toolchain.
+
+// EXACT nesting per CUDA Add/Mul port:
+//   count==3: a=1-u-w; Add(Add(Mul(v0,a),Mul(v1,u)),Mul(v2,w))
+//   count==4: a=(1-u)*(1-w), b=u*(1-w), c=u*w, d=(1-u)*w;
+//             Add(Add(Mul(v0,a),Mul(v1,b)),Add(Mul(v2,c),Mul(v3,d)))
+// For count==3 the caller passes v3 (unused); GLSL left-associativity of * and
+// + yields exactly the Add(...) nesting above.
+vec3 Interpolate(vec3 v0, vec3 v1, vec3 v2, vec3 v3, float u, float w, uint count) {
+    if (count == 3u) {
+        float a = 1.0 - u - w;
+        return (v0 * a + v1 * u) + v2 * w;
+    }
+    float a = (1.0 - u) * (1.0 - w);
+    float b = u * (1.0 - w);
+    float c = u * w;
+    float d = (1.0 - u) * w;
+    return (v0 * a + v1 * b) + (v2 * c + v3 * d);
+}
+
+// normalization with exact sqrt + per-component divide (CUDA deviation:
+// rsqrtf is not bit-reproducible; the tolerance gate measures the spread).
+bool Normalize(vec3 v, out vec3 outv) {
+    float l2 = dot(v, v);
+    if (!finite(l2) || l2 < 1e-12) {  // kEpsilon=1e-6, squared
+        return false;
+    }
+    float length = sqrt(l2);
+    outv = vec3(v.x/length, v.y/length, v.z/length);
+    return true;
+}
+
+vec3 GeometricNormal(uint b, uint count) {
+    vec3 p0 = vec3(restVerts[3u*faceIndices[b]], restVerts[3u*faceIndices[b]+1u], restVerts[3u*faceIndices[b]+2u]);
+    vec3 p1 = vec3(restVerts[3u*faceIndices[b+1u]], restVerts[3u*faceIndices[b+1u]+1u], restVerts[3u*faceIndices[b+1u]+2u]);
+    vec3 p2 = vec3(restVerts[3u*faceIndices[b+2u]], restVerts[3u*faceIndices[b+2u]+1u], restVerts[3u*faceIndices[b+2u]+2u]);
+    vec3 n = cross(p1 - p0, p2 - p0);
+    if (count == 4u) {
+        vec3 p3 = vec3(restVerts[3u*faceIndices[b+3u]], restVerts[3u*faceIndices[b+3u]+1u], restVerts[3u*faceIndices[b+3u]+2u]);
+        n = n + cross(p2 - p0, p3 - p0);
+    }
+    return n;
+}
+
+vec3 LoadNormal(uint idx) { return vec3(normals[3u*idx], normals[3u*idx+1u], normals[3u*idx+2u]); }
+
+vec3 AuthoredNormal(uint face, uint b, uint count, float u, float w) {
+    if (push.normalDomain == 1u) {           // Constant
+        return LoadNormal(0u);
+    }
+    if (push.normalDomain == 2u) {           // Uniform
+        return LoadNormal(face);
+    }
+    if (push.normalDomain == 3u) {           // Vertex
+        vec3 v0 = LoadNormal(faceIndices[b]);
+        vec3 v1 = LoadNormal(faceIndices[b + 1u]);
+        vec3 v2 = LoadNormal(faceIndices[b + 2u]);
+        vec3 v3 = (count == 3u) ? vec3(0.0) : LoadNormal(faceIndices[b + 3u]);
+        return Interpolate(v0, v1, v2, v3, u, w, count);
+    }
+    // FaceVarying: normals[begin..begin+count], local indices 0..3
+    vec3 v0 = LoadNormal(b);
+    vec3 v1 = LoadNormal(b + 1u);
+    vec3 v2 = LoadNormal(b + 2u);
+    vec3 v3 = (count == 3u) ? vec3(0.0) : LoadNormal(b + 3u);
+    return Interpolate(v0, v1, v2, v3, u, w, count);
+}
+
+void StatusErr(uint code) {
+    // First writer wins; one call site per error branch (CUDA contract).
+    atomicCompSwap(status, 0u, code);
+}
+
+void main() {
+    const uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint c = gl_GlobalInvocationID.x; c < push.curves; c += total) {
+        int face = rootPrim[c];
+        vec2 uv = rootUV[c];
+        if (face < 0 || uint(face) >= push.faceCount ||
+            !finite(uv.x) || !finite(uv.y) || uv.x < 0.0 || uv.y < 0.0) {
+            StatusErr(4u);                                  // kBadRoot
+            continue;
+        }
+        uint b = faceOffsets[uint(face)];
+        uint e = faceOffsets[uint(face) + 1u];
+        uint count = e - b;
+        if (e > push.indexCount || (count != 3u && count != 4u)) {
+            StatusErr(3u);                                  // kBadShape/kBadTopology
+            continue;
+        }
+        if ((count == 3u && uv.x + uv.y > 1.0) ||
+            (count == 4u && (uv.x > 1.0 || uv.y > 1.0))) {
+            StatusErr(4u);                                  // kBadRoot
+            continue;
+        }
+        // CUDA does NOT continue inside the index check; it flags each bad
+        // index and falls through. Replicate: flag, then single statusErr.
+        bool badIndex = false;
+        for (uint j = b; j < e; ++j) {
+            if (faceIndices[j] >= push.vertexCount) { badIndex = true; }
+        }
+        if (badIndex) {
+            StatusErr(3u);                                  // kBadShape
+            continue;
+        }
+
+        float u = uv.x;
+        float w = uv.y;
+        vec3 rawNormal = (push.normalDomain == 0u)
+            ? GeometricNormal(b, count)
+            : AuthoredNormal(uint(face), b, count, u, w);
+        vec3 n;
+        if (!Normalize(rawNormal, n)) {
+            valid[c] = 0u; drop[c] = 1u;
+            atomicAdd(badRootCount, 1u);
+            continue;
+        }
+
+        // DpDu derivative (packed restVerts; v0/v1 inline 3*i loads).
+        vec3 v0 = vec3(restVerts[3u*faceIndices[b]], restVerts[3u*faceIndices[b]+1u], restVerts[3u*faceIndices[b]+2u]);
+        vec3 v1 = vec3(restVerts[3u*faceIndices[b+1u]], restVerts[3u*faceIndices[b+1u]+1u], restVerts[3u*faceIndices[b+1u]+2u]);
+        vec3 deriv;
+        if (count == 3u) {
+            deriv = v1 - v0;
+        } else {
+            // (p1-p0)*(1-w) + (p2-p3)*w
+            vec3 v2 = vec3(restVerts[3u*faceIndices[b+2u]], restVerts[3u*faceIndices[b+2u]+1u], restVerts[3u*faceIndices[b+2u]+2u]);
+            vec3 v3 = vec3(restVerts[3u*faceIndices[b+3u]], restVerts[3u*faceIndices[b+3u]+1u], restVerts[3u*faceIndices[b+3u]+2u]);
+            deriv = (v1 - v0) * (1.0 - w) + (v2 - v3) * w;
+        }
+        // projected = deriv - n * dot(n, deriv)  (Add form)
+        vec3 projected = deriv - n * dot(n, deriv);
+        vec3 t;
+        if (!Normalize(projected, t)) {
+            vec3 edge = v1 - v0;
+            projected = edge - n * dot(n, edge);
+            if (!Normalize(projected, t)) {
+                valid[c] = 0u; drop[c] = 1u;
+                atomicAdd(badRootCount, 1u);
+                continue;
+            }
+        }
+        vec3 bin = cross(n, t);
+        if (!Normalize(bin, bin)) {
+            valid[c] = 0u; drop[c] = 1u;
+            atomicAdd(badRootCount, 1u);
+            continue;
+        }
+        vec3 o2 = vec3(restVerts[3u*faceIndices[b+2u]], restVerts[3u*faceIndices[b+2u]+1u], restVerts[3u*faceIndices[b+2u]+2u]);
+        vec3 o3 = (count == 3u) ? vec3(0.0)
+            : vec3(restVerts[3u*faceIndices[b+3u]], restVerts[3u*faceIndices[b+3u]+1u], restVerts[3u*faceIndices[b+3u]+2u]);
+        vec3 ori = Interpolate(v0, v1, o2, o3, u, w, count);
+        if (!finite(ori)) {
+            valid[c] = 0u; drop[c] = 1u;
+            atomicAdd(badRootCount, 1u);
+            continue;
+        }
+
+        origin[3u*c] = ori.x; origin[3u*c+1u] = ori.y; origin[3u*c+2u] = ori.z;
+        tangent[3u*c] = t.x; tangent[3u*c+1u] = t.y; tangent[3u*c+2u] = t.z;
+        binormal[3u*c] = bin.x; binormal[3u*c+1u] = bin.y; binormal[3u*c+2u] = bin.z;
+        normal[3u*c] = n.x; normal[3u*c+1u] = n.y; normal[3u*c+2u] = n.z;
+        valid[c] = 1u;
+        drop[c] = 0u;
+    }
+}

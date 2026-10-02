@@ -1,0 +1,172 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// PicktileVkFootprint: device-only screen-space footprint builder. Port of the
+// footprint half of usdGen::gpu::CudaPicking (gpu/picking.cu): ValidateGeometry
+// + MarkFootprint + ExclusiveSum + ScatterFootprint + FootprintCount.
+//
+// Output order is exactly ascending flat index (like the CUB scan + scatter),
+// never atomic-claim order. The scan is a fully device-side ping-pong
+// Hillis-Steele inclusive scan (one dispatch per stride, device barriers
+// between), so Finish-equivalent readback stays scalar (error + count).
+//
+// Conventions match picktileVkPick.comp: flat float point planes, no isfinite,
+// first-writer uint status (1 = bad geometry, 2 = non-finite).
+//
+// ABI:
+//   push constant (20B, std430): {u32 pointCount; u32 curveCount; u32 phase; u32 stride; u32 srcIsB}
+//     phase 0 = validate + mark + seed scanA with flags
+//     phase 1 = one Hillis-Steele scan step (stride from push; src/dst by srcIsB)
+//     phase 2 = finalize: exclusive-convert + ascending scatter + count
+//   set 0:
+//     b0 points     float[3*pointCount]  borrowed points (read-only)
+//     b1 offsets    uint[curveCount+1]   borrowed curve offsets (read-only)
+//     b2 flags      uint[pointCount]     scratch hit flags
+//     b3 scanA      uint[pointCount]     ping-pong scan plane A
+//     b4 scanB      uint[pointCount]     ping-pong scan plane B
+//     b5 output     int[pointCount]      ascending flat indices
+//     b6 query      {float vp[16]; uint width,height; float x,y,radius}
+//     b7 state      {uint error; uint count}
+//
+// Host pre-fill: error = 0, count = 0. Phase 2 leaves output/count untouched
+// when error != 0, so a failed op publishes nothing (CUDA Finish parity: the
+// previous successful footprint stays live at the API level).
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint pointCount;
+    uint curveCount;
+    uint phase;
+    uint stride;
+    uint srcIsB;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer PointsBlock { float points[]; };
+layout(std430, set = 0, binding = 1) readonly buffer OffsetsBlock { uint offsets[]; };
+layout(std430, set = 0, binding = 2) buffer FlagsBlock { uint flags[]; };
+layout(std430, set = 0, binding = 3) buffer ScanABlock { uint scanA[]; };
+layout(std430, set = 0, binding = 4) buffer ScanBBlock { uint scanB[]; };
+layout(std430, set = 0, binding = 5) buffer OutBlock { int outputIndices[]; };
+layout(std430, set = 0, binding = 6) readonly buffer QueryBlock {
+    float vp[16];
+    uint qwidth;
+    uint qheight;
+    float qx;
+    float qy;
+    float qradius;
+};
+layout(std430, set = 0, binding = 7) buffer StateBlock {
+    uint error;
+    uint count;
+} st;
+
+const uint kBadGeometry = 1u;
+const uint kNonFinite = 2u;
+
+bool gfinite(float x) { return !isnan(x) && !isinf(x); }
+bool gfinite3(float a, float b, float c) { return gfinite(a) && gfinite(b) && gfinite(c); }
+
+bool project_(vec3 p, out vec2 screen) {
+    float inn[4];
+    float clip[4];
+    inn[0] = p.x; inn[1] = p.y; inn[2] = p.z; inn[3] = 1.0;
+    clip[0] = 0.0; clip[1] = 0.0; clip[2] = 0.0; clip[3] = 0.0;
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i)
+            clip[j] += inn[i] * vp[i * 4 + j];
+    if (!gfinite(clip[0]) || !gfinite(clip[1]) || !gfinite(clip[2]) ||
+        !gfinite(clip[3]) || clip[3] <= 0.0 ||
+        clip[2] < -clip[3] || clip[2] > clip[3]) return false;
+    float nx = clip[0] / clip[3];
+    float ny = clip[1] / clip[3];
+    if (!gfinite(nx) || !gfinite(ny)) return false;
+    screen.x = (nx + 1.0) * 0.5 * float(qwidth);
+    screen.y = (1.0 - ny) * 0.5 * float(qheight);
+    return gfinite(screen.x) && gfinite(screen.y);
+}
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    const float rr = qradius * qradius;
+
+    if (pc.phase == 0u) {
+        for (uint i = idx; i <= pc.curveCount; i += stride) {
+            uint o = offsets[i];
+            bool bad = (i == 0u && o != 0u) ||
+                (i == pc.curveCount && o != pc.pointCount);
+            // Nested ifs (never short-circuit or ternary indexing): neighbor
+            // reads must be unreachable out of bounds on every driver.
+            if (i > 0u && i < pc.curveCount) {
+                if (o <= offsets[i - 1u]) bad = true;
+            }
+            if (i < pc.curveCount) {
+                if (o >= offsets[i + 1u]) bad = true;
+            }
+            if (bad) atomicCompSwap(st.error, 0u, kBadGeometry);
+        }
+        for (uint i = idx; i < pc.pointCount; i += stride) {
+            vec3 p = vec3(points[3u * i], points[3u * i + 1u], points[3u * i + 2u]);
+            bool hit = false;
+            if (!gfinite3(p.x, p.y, p.z)) {
+                atomicCompSwap(st.error, 0u, kNonFinite);
+            } else {
+                vec2 screen;
+                if (project_(p, screen)) {
+                    float dx = screen.x - qx;
+                    float dy = screen.y - qy;
+                    float d = dx * dx + dy * dy;
+                    if (!gfinite(d)) {
+                        atomicCompSwap(st.error, 0u, kNonFinite);
+                    } else {
+                        hit = d <= rr;
+                    }
+                }
+            }
+            flags[i] = hit ? 1u : 0u;
+            scanA[i] = hit ? 1u : 0u;
+        }
+    } else if (pc.phase == 1u) {
+        // One Hillis-Steele step: dst[i] = src[i] + (i >= stride ? src[i-stride] : 0).
+        // Counts fit u32 (pointCount <= INT32_MAX is host-enforced), so no
+        // saturation is needed here (unlike the index scan).
+        if (pc.srcIsB == 0u) {
+            for (uint i = idx; i < pc.pointCount; i += stride) {
+                uint v = scanA[i];
+                if (i >= pc.stride) v += scanA[i - pc.stride];
+                scanB[i] = v;
+            }
+        } else {
+            for (uint i = idx; i < pc.pointCount; i += stride) {
+                uint v = scanB[i];
+                if (i >= pc.stride) v += scanB[i - pc.stride];
+                scanA[i] = v;
+            }
+        }
+    } else {
+        // Final inclusive plane is selected by srcIsB (reused as finalIsB).
+        // Gated on error so a failed op publishes nothing.
+        if (st.error != 0u) return;
+        if (pc.srcIsB == 0u) {
+            for (uint i = idx; i < pc.pointCount; i += stride) {
+                uint flag = flags[i];
+                if (flag != 0u) outputIndices[scanA[i] - flag] = int(i);
+            }
+            if (idx == 0u) {
+                if (pc.pointCount != 0u) st.count = scanA[pc.pointCount - 1u];
+                else st.count = 0u;
+            }
+        } else {
+            for (uint i = idx; i < pc.pointCount; i += stride) {
+                uint flag = flags[i];
+                if (flag != 0u) outputIndices[scanB[i] - flag] = int(i);
+            }
+            if (idx == 0u) {
+                if (pc.pointCount != 0u) st.count = scanB[pc.pointCount - 1u];
+                else st.count = 0u;
+            }
+        }
+    }
+}

@@ -1,0 +1,140 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// PicktileVkBounds: conservative per-tile AABB reduction (device half). Port
+// of the validate + reduce passes of usdGen::gpu::BuildCurveTileBounds
+// (gpu/curveTileBounds.cu): ValidateKernel + ReduceKernel.
+//
+// Structural deviation (documented): finalization runs on the host in
+// double with directed rounding (picktileVk.cpp), because the CUDA finalize
+// math needs directed-rounding double ops with no portable Vulkan equivalent
+// on factory contexts; the device publishes only validated scratch. Publish
+// stays aggregate-status-gated: the host writes no output unless status == 0
+// and every tile finalizes, so any device failure leaves both output ranges
+// untouched, exactly like the CUDA publish pass.
+//
+// One workgroup per tile (256 threads), matching the CUDA grid. Points are
+// flat float planes (3*i); spans are 5xu32 {tile,firstCurve,curveCount,
+// firstPoint,pointCount} of which only the point range is consumed.
+//
+// ABI:
+//   push constant (12B, std430): {u32 pointDomain; u32 tileCount; u32 phase}
+//     phase 0 = validate, 1 = reduce
+//   set 0:
+//     b0 points     float[3*pointDomain] borrowed points (read-only)
+//     b1 widths     float[pointDomain]   borrowed widths (read-only)
+//     b2 spans      uint[5*tileCount]    borrowed spans (read-only)
+//     b3 scratchMin float[3*tileCount]   per-tile minimum (reduce output)
+//     b4 scratchMax float[3*tileCount]   per-tile maximum (reduce output)
+//     b5 scratchW   float[tileCount]     per-tile max width (reduce output)
+//     b6 status     uint
+//
+// Host pre-fill: status = 0. Phase 1 runs after a device barrier and reduces
+// nothing when status != 0.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint pointDomain;
+    uint tileCount;
+    uint phase;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer PointsBlock { float points[]; };
+layout(std430, set = 0, binding = 1) readonly buffer WidthsBlock { float widths[]; };
+layout(std430, set = 0, binding = 2) readonly buffer SpansBlock { uint spans[]; };
+layout(std430, set = 0, binding = 3) buffer MinBlock { float scratchMin[]; };
+layout(std430, set = 0, binding = 4) buffer MaxBlock { float scratchMax[]; };
+layout(std430, set = 0, binding = 5) buffer WidthBlock { float scratchW[]; };
+layout(std430, set = 0, binding = 6) buffer StatusBlock { uint status; } st;
+
+shared float shMin[256 * 3];
+shared float shMax[256 * 3];
+shared float shW[256];
+
+float kPosInf() { return uintBitsToFloat(0x7F800000u); }
+float kNegInf() { return uintBitsToFloat(0xFF800000u); }
+
+bool gfinite(float x) { return !isnan(x) && !isinf(x); }
+bool gfinite3(float a, float b, float c) { return gfinite(a) && gfinite(b) && gfinite(c); }
+void fail() { atomicCompSwap(st.status, 0u, 1u); }
+
+void main() {
+    const uint lid = gl_LocalInvocationID.x;
+    const uint tile = gl_WorkGroupID.x;
+    if (tile >= pc.tileCount) return;
+    const uint first = spans[5u * tile + 3u];
+    const uint count = spans[5u * tile + 4u];
+
+    if (pc.phase == 0u) {
+        // first + count in emulated u64: carry iff the u32 sum wrapped.
+        uint sum = first + count;
+        uint carry = (sum < first) ? 1u : 0u;
+        bool inRange = carry == 0u && sum <= pc.pointDomain;
+        if (!inRange) {
+            if (lid == 0u) fail();
+            return;
+        }
+        for (uint p = lid; p < count; p += 256u) {
+            float px = points[3u * (first + p)];
+            float py = points[3u * (first + p) + 1u];
+            float pz = points[3u * (first + p) + 2u];
+            float w = widths[first + p];
+            if (!gfinite3(px, py, pz) || !gfinite(w) || w < 0.0) fail();
+        }
+    } else {
+        if (st.status != 0u) return;
+        if (count == 0u) {
+            if (lid == 0u) {
+                scratchMin[3u * tile] = 0.0;
+                scratchMin[3u * tile + 1u] = 0.0;
+                scratchMin[3u * tile + 2u] = 0.0;
+                scratchMax[3u * tile] = 0.0;
+                scratchMax[3u * tile + 1u] = 0.0;
+                scratchMax[3u * tile + 2u] = 0.0;
+                scratchW[tile] = 0.0;
+            }
+            return;
+        }
+        // Validate-after-barrier guarantees finite inputs here, so plain
+        // min/max match fminf/fmaxf (which differ only on NaN).
+        float mnx = kPosInf(), mny = kPosInf(), mnz = kPosInf();
+        float mxx = kNegInf(), mxy = kNegInf(), mxz = kNegInf();
+        float mw = 0.0;
+        for (uint p = lid; p < count; p += 256u) {
+            float px = points[3u * (first + p)];
+            float py = points[3u * (first + p) + 1u];
+            float pz = points[3u * (first + p) + 2u];
+            float w = widths[first + p];
+            mnx = min(mnx, px); mny = min(mny, py); mnz = min(mnz, pz);
+            mxx = max(mxx, px); mxy = max(mxy, py); mxz = max(mxz, pz);
+            mw = max(mw, w);
+        }
+        shMin[3u * lid] = mnx; shMin[3u * lid + 1u] = mny; shMin[3u * lid + 2u] = mnz;
+        shMax[3u * lid] = mxx; shMax[3u * lid + 1u] = mxy; shMax[3u * lid + 2u] = mxz;
+        shW[lid] = mw;
+        barrier();
+        for (uint s = 128u; s != 0u; s >>= 1u) {
+            if (lid < s) {
+                shMin[3u * lid] = min(shMin[3u * lid], shMin[3u * (lid + s)]);
+                shMin[3u * lid + 1u] = min(shMin[3u * lid + 1u], shMin[3u * (lid + s) + 1u]);
+                shMin[3u * lid + 2u] = min(shMin[3u * lid + 2u], shMin[3u * (lid + s) + 2u]);
+                shMax[3u * lid] = max(shMax[3u * lid], shMax[3u * (lid + s)]);
+                shMax[3u * lid + 1u] = max(shMax[3u * lid + 1u], shMax[3u * (lid + s) + 1u]);
+                shMax[3u * lid + 2u] = max(shMax[3u * lid + 2u], shMax[3u * (lid + s) + 2u]);
+                shW[lid] = max(shW[lid], shW[lid + s]);
+            }
+            barrier();
+        }
+        if (lid == 0u) {
+            scratchMin[3u * tile] = shMin[0u];
+            scratchMin[3u * tile + 1u] = shMin[1u];
+            scratchMin[3u * tile + 2u] = shMin[2u];
+            scratchMax[3u * tile] = shMax[0u];
+            scratchMax[3u * tile + 1u] = shMax[1u];
+            scratchMax[3u * tile + 2u] = shMax[2u];
+            scratchW[tile] = shW[0u];
+        }
+    }
+}

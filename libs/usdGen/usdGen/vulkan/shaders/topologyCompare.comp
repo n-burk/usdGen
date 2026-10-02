@@ -1,0 +1,83 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// TopologyCompare: compares only the layout identity of two curve sets.
+// Port of usdGen::gpu::CompareKernel (gpu/topology.cu).  Per-point channels
+// (including positions) are deliberately not inspected.
+//
+// ABI:
+//   push constant (16B, std430): {u32 curvesA; u32 curvesB; u32 pointsA; u32 pointsB}
+//   set 0:
+//     b0 aOffs  u32  [curvesA+1]   curve offsets of A
+//     b1 aIds   uvec2[curvesA]     stable ids of A (u64 split hi/lo)
+//     b2 bOffs  u32  [curvesB+1]
+//     b3 bIds   uvec2[curvesB]
+//     b4 result       {u32 error; u32 equal}   - filled before dispatch:
+//                                                  [0,4) = 0, [4,8) = 1
+// The host zero-fills error[0,4) and sets equal[4,8)=1 before this dispatch;
+// the shader only ever downgrades equal to 0 or raises error to 1 (first
+// writer via atomicCompSwap).  No other widening is performed here.
+//
+// Semantics mirror CompareKernel exactly:
+//   * per curve (both sets): offsets[c+1] <= offsets[c] or offsets[c+1] >
+//     pointCount  -> error (single code 1)
+//   * index==0 extra: first offset must be 0 and last must equal pointCount
+//     for both sets (so an empty set accepts the canonical {0} offset array)
+//   * equal compares per curve i < min(curves): ids differ or offsets[i] or
+//     offsets[i+1] differ -> equal = 0
+//   * index==0: curveCount or pointCount mismatch -> equal = 0
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint curvesA;
+    uint curvesB;
+    uint pointsA;
+    uint pointsB;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer AOffsBlock { uint aOffs[]; };
+layout(std430, set = 0, binding = 1) readonly buffer AIdsBlock  { uvec2 aIds[]; };
+layout(std430, set = 0, binding = 2) readonly buffer BOffsBlock { uint bOffs[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BIdsBlock  { uvec2 bIds[]; };
+layout(std430, set = 0, binding = 4) buffer ResultBlock {
+    uint error;
+    uint equal;
+} res;
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+
+    // A-side span validation (exhaustive; any element may flag).
+    for (uint c = idx; c < pc.curvesA; c += stride) {
+        const uint b = aOffs[c];
+        const uint e = aOffs[c + 1u];
+        if (e <= b || e > pc.pointsA) atomicCompSwap(res.error, 0u, 1u);
+    }
+    // B-side span validation.
+    for (uint c = idx; c < pc.curvesB; c += stride) {
+        const uint b = bOffs[c];
+        const uint e = bOffs[c + 1u];
+        if (e <= b || e > pc.pointsB) atomicCompSwap(res.error, 0u, 1u);
+    }
+    // Boundary sentinels; checked by one lane so an empty curve set accepts
+    // the canonical one-element offset array {0}.
+    if (idx == 0u) {
+        if (aOffs[0u] != 0u || aOffs[pc.curvesA] != pc.pointsA ||
+            bOffs[0u] != 0u || bOffs[pc.curvesB] != pc.pointsB)
+            atomicCompSwap(res.error, 0u, 1u);
+    }
+
+    // Layout identity over the shared prefix.
+    const uint curves = min(pc.curvesA, pc.curvesB);
+    for (uint c = idx; c < curves; c += stride) {
+        if (aIds[c] != bIds[c] ||
+            aOffs[c] != bOffs[c] ||
+            aOffs[c + 1u] != bOffs[c + 1u])
+            atomicExchange(res.equal, 0u);
+    }
+    if (idx == 0u && (pc.curvesA != pc.curvesB || pc.pointsA != pc.pointsB))
+        atomicExchange(res.equal, 0u);
+}

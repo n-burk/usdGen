@@ -682,16 +682,17 @@ UsdGenSessionCooker::UsdGenSessionCooker(int threadLimit,
 UsdGenSessionCooker::~UsdGenSessionCooker() = default;
 
 bool UsdGenSessionCooker::_SelectExecutionCacheDomain(
-    UsdGenDeviceBackend backend, int32_t deviceIndex)
+    UsdGenDeviceBackend backend, int32_t deviceIndex, uint64_t contextIdentity)
 {
-    UsdGenExecutionCacheDomainKey key{backend, deviceIndex, 0};
+    UsdGenExecutionCacheDomainKey key{backend, deviceIndex, contextIdentity};
     auto selectedDomain = std::atomic_load(&_executionCacheDomain);
     if (selectedDomain) {
         auto const& selected = selectedDomain->Key();
         // contextIdentity is the adapter-owned stable identity of this
         // domain. The cooker selects only backend/device and must preserve a
         // nonzero identity supplied by an explicit Metal/Vulkan/CUDA owner.
-        if (selected.backend == backend && selected.deviceIndex == deviceIndex)
+        if (selected.backend == backend && selected.deviceIndex == deviceIndex &&
+            (!contextIdentity || selected.contextIdentity == contextIdentity))
             return true;
     }
     if (_cacheDomainExplicit) {
@@ -1273,7 +1274,8 @@ void UsdGenSessionCooker::CookDeviceAsync(UsdGenExecutionRuntime& runtime,
         completion(_store.Get(), {}); return;
     }
     _activeDeviceIdentity = identity;
-    if (!_SelectExecutionCacheDomain(identity.backend, identity.deviceIndex) ||
+    if (!_SelectExecutionCacheDomain(identity.backend, identity.deviceIndex,
+                                    identity.logicalContextIdentity) ||
         !_ObserveExecutionCacheDomainEpoch()) { completion(_store.Get(), {}); return; }
     auto domain = _executionCacheDomain;
     if (!domain || domain->Key().contextIdentity != identity.logicalContextIdentity) {
@@ -1352,6 +1354,16 @@ void UsdGenSessionCooker::CookDeviceAsync(UsdGenExecutionRuntime& runtime,
     auto handler = [this, provider, domain, key, frame, identity, source, final, intermediates, expectedTopology,
                     completion](
         std::shared_ptr<const UsdGenSessionDeviceResult> result) mutable {
+        if (result && result->error) {
+            try { std::rethrow_exception(result->error); }
+            catch (std::exception const& error) {
+                _lastDiagnostics.Error(std::string("Vulkan device execution failed: ") + error.what());
+            } catch (...) {
+                _lastDiagnostics.Error("Vulkan device execution failed with an unknown error");
+            }
+            completion(_store.Get(), result->error);
+            return;
+        }
         if (!result || result->error || !result->generation || result->identity != identity ||
             provider->Identity() != identity ||
             result->revisions.topologyVersion != source ||
@@ -1378,6 +1390,7 @@ void UsdGenSessionCooker::CookDeviceAsync(UsdGenExecutionRuntime& runtime,
     UsdGenSessionDeviceRequest request;
     request.plan = std::move(plan); request.identity = identity;
     request.publicationGeneration = final;
+    request.evaluationFrame = frame;
     request.authoritativeRevisions = UsdGenSessionDeviceRevisions{source, source, final, std::move(intermediates)};
     request.cancellation = cancellation;
     request.tool.snapshotVersion = final;

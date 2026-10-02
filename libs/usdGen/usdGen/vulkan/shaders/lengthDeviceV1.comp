@@ -1,0 +1,203 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "float32Envelope.glsl"
+// Versioned CUDA-compatible evaluated-field Length edit.  The output buffer is a fresh staging
+// channel; status prevents its publication after any semantic rejection.
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer P { float v[]; } points;
+layout(set=0,binding=1,std430) readonly buffer O { uint v[]; } offsets;
+layout(set=0,binding=2,std430) buffer R { float v[]; } outputPoints;
+layout(set=0,binding=3,std430) buffer S { uint error; } status;
+layout(set=0,binding=4,std430) readonly buffer H { float v[]; } hairT;
+layout(set=0,binding=5,std430) readonly buffer I { uvec2 v[]; } stableIds;
+layout(set=0,binding=6,std430) readonly buffer V { float v[]; } valueField;
+layout(set=0,binding=7,std430) readonly buffer A { vec2 v[]; } randomField;
+layout(set=0,binding=8,std430) readonly buffer M { float v[]; } minimumField;
+layout(set=0,binding=9,std430) readonly buffer E { float v[]; } maskField;
+layout(set=0,binding=10,std430) readonly buffer T { float v[]; } thresholdField;
+layout(set=0,binding=11,std430) readonly buffer B { uint v[]; } enabledField;
+layout(set=0,binding=12,std430) buffer K { uint v[]; } keep;
+layout(push_constant) uniform C {
+    uint curves; uint points; uint phase; float value;
+    uint hasHairT; float minimum; uint method; uint rebuild;
+    float randomLo; float randomHi; uint seedBits; uint hasStableIds;
+    float blend; float maskAmount; float threshold; uint enabled;
+    uint valueDom; uint randomDom; uint minimumDom; uint maskDom;
+    uint thresholdDom; uint enabledDom;
+} c;
+
+// Words are {low, high}; modulo-2^64 arithmetic without shaderInt64.
+uvec2 add64(uvec2 a,uvec2 b) {
+    uint lo=a.x+b.x;
+    return uvec2(lo,a.y+b.y+uint(lo<a.x));
+}
+uvec2 shr64(uvec2 a,uint n) {
+    // Hash finalizer shifts are exclusively in [1,31].
+    return uvec2((a.x>>n)|(a.y<<(32u-n)),a.y>>n);
+}
+uvec2 mul64(uvec2 a,uvec2 b) {
+    uint hi,lo;
+    umulExtended(a.x,b.x,hi,lo);
+    return uvec2(lo,hi+a.x*b.y+a.y*b.x);
+}
+uvec2 hash64(uvec2 key) {
+    const uvec2 golden=uvec2(0x7F4A7C15u,0x9E3779B9u);
+    const uvec2 salt=uvec2(0x4C656E67u,0u);
+    uvec2 z=add64(key^mul64(salt,golden),golden);
+    z=mul64(z^shr64(z,30u),uvec2(0x1CE4E5B9u,0xBF58476Du));
+    z=mul64(z^shr64(z,27u),uvec2(0x133111EBu,0x94D049BBu));
+    return z^shr64(z,31u);
+}
+float draw01(uint curve) {
+    uvec2 id=c.hasStableIds!=0u?stableIds.v[curve]:uvec2(curve,0u);
+    uvec2 key=hash64(uvec2(c.seedBits,0u))^id;
+    return float(hash64(key).y>>8u)*(1.0/16777216.0);
+}
+
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite3(float x,float y,float z) { return finite(x)&&finite(y)&&finite(z); }
+void fail() { atomicOr(status.error,1u); }
+void copyPoint(uint i) { uint p=3u*i; outputPoints.v[p]=points.v[p]; outputPoints.v[p+1u]=points.v[p+1u]; outputPoints.v[p+2u]=points.v[p+2u]; }
+
+// CUDA SampleArc, retained as a single routine so both rebuild variants use
+// precisely the same zero-span and final-segment decisions.
+void sampleArc(uint begin,uint end,float distance,out float x,out float y,out float z) {
+    uint p=3u*begin; x=points.v[p]; y=points.v[p+1u]; z=points.v[p+2u];
+    if (end<=begin+1u) return;
+    precise float remaining=distance;
+    for(uint k=begin+1u;k<end;++k) {
+        uint a=3u*(k-1u),b=3u*k;
+        precise float dx=points.v[b]-points.v[a],dy=points.v[b+1u]-points.v[a+1u],dz=points.v[b+2u]-points.v[a+2u];
+        precise float segment=sqrt(dx*dx+dy*dy+dz*dz);
+        if (!finite(segment)) { fail(); return; }
+        if (remaining<=segment || k+1u==end) {
+            precise float u=segment>0.0?min(1.0,max(0.0,remaining/segment)):0.0;
+            x=points.v[a]+dx*u; y=points.v[a+1u]+dy*u; z=points.v[a+2u]+dz*u;
+            return;
+        }
+        remaining-=segment;
+        if (!finite(remaining)) { fail(); return; }
+    }
+}
+
+uint indexFor(uint dom,uint curve,uint point) { return dom==4u?point:(dom==2u?curve:0u); }
+float readValue(uint curve,uint point) { return c.valueDom==0u?c.value:valueField.v[indexFor(c.valueDom,curve,point)]; }
+float readMinimum(uint curve,uint point) { return c.minimumDom==0u?c.minimum:minimumField.v[indexFor(c.minimumDom,curve,point)]; }
+float readMask(uint curve,uint point) { return c.maskDom==0u?c.maskAmount:maskField.v[indexFor(c.maskDom,curve,point)]; }
+bool nonnegative(float x) { return finite(x)&&x>=0.0; }
+
+void main() {
+    uint curve=gl_GlobalInvocationID.x;
+    if(c.phase==0u) {
+        if(curve<=c.curves) {
+            uint o=offsets.v[curve];
+            if((curve==0u&&o!=0u)||(curve==c.curves&&o!=c.points)) fail();
+            if(curve<c.curves&&o>=offsets.v[curve+1u]) fail();
+        }
+        if(curve<c.points) {
+            uint p=3u*curve;
+            if(!finite3(points.v[p],points.v[p+1u],points.v[p+2u])) fail();
+            if(c.hasHairT!=0u&&(!finite(hairT.v[curve])||hairT.v[curve]<0.0||hairT.v[curve]>1.0)) fail();
+        }
+        return;
+    }
+    if(atomicAdd(status.error,0u)!=0u||curve>=c.curves) return;
+    uint begin=offsets.v[curve],end=offsets.v[curve+1u];
+    precise float current=0.0;
+    for(uint j=begin+1u;j<end;++j) {
+        uint a=3u*(j-1u),b=3u*j;
+        precise float dx=points.v[b]-points.v[a],dy=points.v[b+1u]-points.v[a+1u],dz=points.v[b+2u]-points.v[a+2u];
+        current+=sqrt(dx*dx+dy*dy+dz*dz);
+    }
+    if(!finite(current)){fail();return;}
+    vec2 range=c.randomDom==0u?vec2(c.randomLo,c.randomHi):randomField.v[indexFor(c.randomDom,curve,begin)];
+    float rootValue=readValue(curve,begin),rootMin=readMinimum(curve,begin);
+    float threshold=c.thresholdDom==0u?c.threshold:thresholdField.v[indexFor(c.thresholdDom,curve,begin)];
+    if(!nonnegative(range.x)||!nonnegative(range.y)||!nonnegative(rootValue)||!nonnegative(rootMin)||!nonnegative(threshold)){fail();return;}
+    precise float lo=min(range.x,range.y),hi=max(range.x,range.y);
+    precise float multiplier=lo+(hi-lo)*draw01(curve);
+    if(!finite(multiplier)){fail();return;}
+    uint enabled=c.enabledDom==0u?c.enabled:enabledField.v[indexFor(c.enabledDom,curve,begin)];
+    if(enabled>1u){fail();return;}
+    bool allZero=true;
+    if(c.phase==3u) {
+        for(uint j=begin;j<end;++j) {
+            float amount=readMask(curve,j);
+            if(!nonnegative(amount)||amount>1.0){fail();return;}
+            uint envelopeBits=multiplyBits(floatBitsToUint(amount),floatBitsToUint(c.blend));
+            if((envelopeBits&0x7fffffffu)!=0u) allZero=false;
+            copyPoint(j);
+        }
+        keep.v[curve]=(enabled==0u||allZero||current>=threshold)?1u:0u;
+        return;
+    }
+    if(enabled==0u) {
+        for(uint j=begin;j<end;++j) copyPoint(j);
+        keep.v[curve]=1u;return;
+    }
+    uint root=3u*begin;
+    for(uint j=begin;j<end;++j) {
+        precise float value=readValue(curve,j),minimum=readMinimum(curve,j),amount=readMask(curve,j);
+        if(!nonnegative(value)||!nonnegative(minimum)||!nonnegative(amount)||amount>1.0){fail();return;}
+        // Integer binary32 arithmetic preserves subnormal envelope values.
+        uint envelopeBits=multiplyBits(floatBitsToUint(amount),floatBitsToUint(c.blend));
+        if((envelopeBits&0x7fffffffu)==0u){copyPoint(j);continue;}
+        precise float scaled=c.phase==1u?current*value:value;
+        precise float rawTarget=scaled*multiplier;
+        precise float target=isnan(rawTarget)?minimum:max(rawTarget,minimum);
+        if(!finite(target)||(current==0.0&&target>0.0)){fail();return;}
+        precise float factor=current>0.0?target/current:1.0;
+        if(!nonnegative(factor)){fail();return;}
+        uint p=3u*j;
+        precise float x,y,z;
+        if(c.method==0u) {
+            x=points.v[root]+(points.v[p]-points.v[root])*factor;
+            y=points.v[root+1u]+(points.v[p+1u]-points.v[root+1u])*factor;
+            z=points.v[root+2u]+(points.v[p+2u]-points.v[root+2u])*factor;
+        } else {
+            precise float distance=0.0;
+            if(c.rebuild==1u) {
+                float t=c.hasHairT!=0u?hairT.v[j]:(end>begin+1u?float(j-begin)/float(end-begin-1u):0.0);
+                distance=t*target;
+            } else {
+                for(uint k=begin+1u;k<=j;++k) {
+                    uint a=3u*(k-1u),b=3u*k;
+                    precise float dx=points.v[b]-points.v[a],dy=points.v[b+1u]-points.v[a+1u],dz=points.v[b+2u]-points.v[a+2u];
+                    distance+=sqrt(dx*dx+dy*dy+dz*dz);
+                }
+                distance=min(distance,target);
+            }
+            if(target>current&&j+1u==end) distance=target;
+            if(target>current&&distance>current&&end>begin+1u) {
+                bool found=false;precise float dx=0.0,dy=0.0,dz=0.0,norm=0.0;
+                for(uint k=end-1u;k>begin;--k) {
+                    uint a=3u*(k-1u),b=3u*k;
+                    dx=points.v[b]-points.v[a];dy=points.v[b+1u]-points.v[a+1u];dz=points.v[b+2u]-points.v[a+2u];
+                    norm=sqrt(dx*dx+dy*dy+dz*dz);
+                    if(norm>1.0e-12){found=true;break;}
+                }
+                uint tip=3u*(end-1u);
+                precise float extra=distance-current;
+                if(found){x=points.v[tip]+dx/norm*extra;y=points.v[tip+1u]+dy/norm*extra;z=points.v[tip+2u]+dz/norm*extra;}
+                else {x=points.v[tip];y=points.v[tip+1u];z=points.v[tip+2u];}
+            } else sampleArc(begin,end,distance,x,y,z);
+        }
+        // CUDA always blends a positive envelope, including factor==1.
+        x=blendPoint(points.v[p],x,envelopeBits);
+        y=blendPoint(points.v[p+1u],y,envelopeBits);
+        z=blendPoint(points.v[p+2u],z,envelopeBits);
+        if(!finite3(x,y,z)){fail();return;}
+        outputPoints.v[p]=x;outputPoints.v[p+1u]=y;outputPoints.v[p+2u]=z;
+        allZero=false;
+    }
+    precise float resulting=0.0;
+    for(uint j=begin+1u;j<end;++j) {
+        uint a=3u*(j-1u),b=3u*j;
+        precise float dx=outputPoints.v[b]-outputPoints.v[a],dy=outputPoints.v[b+1u]-outputPoints.v[a+1u],dz=outputPoints.v[b+2u]-outputPoints.v[a+2u];
+        resulting+=sqrt(dx*dx+dy*dy+dz*dz);
+    }
+    if(!finite(resulting)){fail();return;}
+    keep.v[curve]=(allZero||resulting>=threshold)?1u:0u;
+}

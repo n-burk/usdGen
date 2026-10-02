@@ -1,0 +1,67 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// rbfVkExtent.comp — Vulkan port of the CUDA RBF extentKernel (rbf.cu:29-36).
+//
+// One thread per rest sample. Atomically folds the sample into the running
+// min/max extent (float bit-cast CAS loop, mirroring CUDA atomicMinFloat /
+// atomicMaxFloat) and records a non-finite flag via atomicOr. The host
+// initializes extents to [+inf x3, -inf x3] and flag to 0 with
+// vkCmdFillBuffer, then reads all seven words back after the fence: the
+// center/scale derivation stays host-side, exactly as in CudaRbfBinding.
+//
+// ABI — descriptors:
+//   0 rest    float[3*n] RO
+//   1 extents uint[6]       RW (bit-cast floats: min.xyz then max.xyz)
+//   2 flag    int[1]        RW (atomicOr, 0 == clean)
+//   3 UBO     RbfVkSolveUbo (64 bytes; uses nmc.x = n)
+//
+// Dispatch: local_size_x=256, groups=ceil(n/256).
+
+#version 460
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Rest    { float rest[]; };
+layout(std430, binding = 1) buffer Extents          { uint extents[]; };
+layout(std430, binding = 2) buffer Flag             { int flag; };
+
+layout(std140, binding = 3) uniform Params {
+    ivec4  nmc;       // x = n (samples), y = m (n+4), z = count, w = reserved
+    double cx;
+    double cy;
+    double cz;
+    double invScale;
+    double scale;
+    double lambda;    // smoothing (buildMatrix diagonal only)
+} params;
+
+bool Finite(float v) { return !(isinf(v) || isnan(v)); }
+
+// Port of rbf.cu atomicMinFloat/atomicMaxFloat (int-CAS retry loop).
+void AtomicMinF(uint idx, float v) {
+    uint assumed = extents[idx];
+    for (;;) {
+        if (uintBitsToFloat(assumed) <= v) break;
+        uint prev = atomicCompSwap(extents[idx], assumed, floatBitsToUint(v));
+        if (prev == assumed) break;
+        assumed = prev;
+    }
+}
+void AtomicMaxF(uint idx, float v) {
+    uint assumed = extents[idx];
+    for (;;) {
+        if (uintBitsToFloat(assumed) >= v) break;
+        uint prev = atomicCompSwap(extents[idx], assumed, floatBitsToUint(v));
+        if (prev == assumed) break;
+        assumed = prev;
+    }
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(params.nmc.x)) return;
+    float x = rest[3u * i], y = rest[3u * i + 1u], z = rest[3u * i + 2u];
+    if (!Finite(x) || !Finite(y) || !Finite(z)) { atomicOr(flag, 1); return; }
+    AtomicMinF(0u, x); AtomicMinF(1u, y); AtomicMinF(2u, z);
+    AtomicMaxF(3u, x); AtomicMaxF(4u, y); AtomicMaxF(5u, z);
+}

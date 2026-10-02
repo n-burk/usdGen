@@ -108,6 +108,8 @@ int main(int argc, char** argv) {
     CHECK(metadata && ((withLength || culledNoiseGrow) ? metadata->MemoryEstimate().runtimeRefinementAvailable
                                   : metadata->MemoryEstimate().memoryAvailable));
     auto oldWorkspace = CreateCudaExecutionWorkspace(device, &diagnostics);
+    if (!oldWorkspace)
+        for (auto const& error : diagnostics.errors) std::fprintf(stderr, "%s\n", error.c_str());
     CHECK(oldWorkspace);
     auto previous = ExecuteCudaGraph(*plan, *oldWorkspace, 1, 1, &diagnostics);
     CHECK(previous);

@@ -1,0 +1,189 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+
+// resampleVk — indexed-CV curve resampling. Vulkan port of
+// gpu/curveResample.cu (CudaCurveResample::Resample) plus the resample-mode
+// half of gpu/namedChannelTopology.cu (TransformFloat indexed interpolation,
+// TransformInt nearest-CV selection, Primitive/Groom verbatim copy).
+//
+// Every output curve has exactly `target` CVs; the curve count is unchanged.
+// Output point gid maps to (curve = gid / target, point = gid % target) and
+// the source position uses the exact CUDA double-precision formula:
+//
+//   t = double(point) * double(inputCount - 1) / double(target - 1)
+//   lower = min(uint(t), inputCount - 1), upper = min(lower + 1, inputCount - 1)
+//   fraction = float(t - double(lower))
+//   out = float(double(a) + (double(b) - double(a)) * double(fraction))
+//
+// Int32 point planes copy the nearest source CV instead:
+//   nearest = min(uint(floor(t + 0.5)), inputCount - 1)
+// which matches TransformInt exactly, including the ties-round-up rule.
+//
+// Requires shaderFloat64 (the host pipeline rejects contexts without it,
+// following the NoisePipeline precedent). Preserve the float fraction
+// rounding and the CUDA build's separate multiply/add operations. HairT
+// parity is checked bit-for-bit; other float planes retain their numerical
+// tolerance checks.
+//
+// Phases share one descriptor layout; the host rebinds (srcWords, dstWords)
+// per plane. Phase 0 (validate) runs first; phases 1-3 are gated on
+// status[0] so a failed validation can never launch a payload write.
+// status[0] is the sole semantic flag: 0 clean, 1 invalid (any phase).
+//
+// Push constants (std430, 32 bytes):
+//   uint curves, srcPoints, target, phase, stride, flags, srcBytes, dstBytes
+// phase: 0 validate, 1 float point resample, 2 int point nearest, 3 copy.
+// flags (content checks, mirror the CUDA kBadValue rules):
+//   0 floatFinite (points/rest), 1 floatNonNeg (widths), 2 floatUnit (hairT),
+//   3 intNonNeg (rootPrim), 4 floatUnitVec (rootUV), 5 floatPlain (generic
+//   float point planes; CUDA TransformFloat performs no content checks),
+//   6 copyPlain (int-nearest payload, verbatim primitive copies).
+// Phase 1 accepts flags {0,1,2,5}; phase 2 requires 6; phase 3 accepts
+// {3,4,6}. Anything else fails closed.
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer SrcOffsets { uint srcOffsets[]; };
+layout(set = 0, binding = 1, std430) readonly buffer SrcWords { uint srcWords[]; };
+layout(set = 0, binding = 2, std430) buffer DstWords { uint dstWords[]; };
+layout(set = 0, binding = 3, std430) buffer Status { uint status[]; };
+layout(push_constant) uniform Controls {
+    uint curves;
+    uint srcPoints;
+    uint target;
+    uint phase;
+    uint stride;
+    uint flags;
+    uint srcBytes;
+    uint dstBytes;
+} p;
+
+void invalid() { atomicOr(status[0], 1u); }
+bool finiteFloat(float v) { return !isnan(v) && !isinf(v); }
+
+bool checkFloat(float v) {
+    if (p.flags == 0u || p.flags == 5u) return p.flags == 5u ? true : finiteFloat(v);
+    if (p.flags == 1u) return finiteFloat(v) && v >= 0.0;
+    if (p.flags == 2u) return finiteFloat(v) && v >= 0.0 && v <= 1.0;
+    return false;
+}
+
+// Round a finite [0,1] double to float, including subnormal results. A
+// double->float->double expression can lose its intermediate rounding on
+// some Vulkan drivers even with precise arithmetic. Forming the float bits
+// explicitly preserves the CUDA fraction boundary and ties-to-even rule.
+float roundedFraction(double value) {
+    uvec2 bits = unpackDouble2x32(value);
+    uint exponent = (bits.y >> 20u) & 0x7ffu;
+    if (exponent < 873u) return 0.0; // Below half the smallest float.
+    uint high = (bits.y & 0xfffffu) | 0x100000u;
+    uint shift = exponent >= 897u ? 29u : 926u - exponent;
+    uint significand;
+    bool roundUp;
+    if (shift < 32u) {
+        significand = (high << (32u - shift)) | (bits.x >> shift);
+        uint remainder = bits.x & ((1u << shift) - 1u);
+        uint halfway = 1u << (shift - 1u);
+        roundUp = remainder > halfway ||
+            (remainder == halfway && (significand & 1u) != 0u);
+    } else if (shift == 32u) {
+        significand = high;
+        roundUp = bits.x > 0x80000000u ||
+            (bits.x == 0x80000000u && (significand & 1u) != 0u);
+    } else {
+        uint highShift = shift - 32u;
+        significand = high >> highShift;
+        uint remainder = high & ((1u << highShift) - 1u);
+        uint halfway = 1u << (highShift - 1u);
+        roundUp = remainder > halfway ||
+            (remainder == halfway && (bits.x != 0u || (significand & 1u) != 0u));
+    }
+    if (roundUp) ++significand;
+    uint biasedExponent = exponent >= 897u ? (exponent - 897u) << 23u : 0u;
+    return uintBitsToFloat(biasedExponent + significand);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (p.phase == 0u) {
+        // Topology validation only; srcWords/dstWords are unbound dummies.
+        if (i == 0u) {
+            if (p.target < 2u) invalid();
+            if (p.curves == 0u) {
+                if (p.srcPoints != 0u) invalid();
+            }
+            if (srcOffsets[0] != 0u) invalid();
+            if (srcOffsets[p.curves] != p.srcPoints) invalid();
+        }
+        if (i >= p.curves) return;
+        uint begin = srcOffsets[i], end = srcOffsets[i + 1u];
+        // CUDA kBadShape rule: ordered offsets spanning srcPoints with at
+        // least two CVs per curve. Empty/degenerate curves fail closed here
+        // exactly as CudaCurveResample::Apply validation rejects them.
+        if (begin > end || end > p.srcPoints || end - begin < 2u) invalid();
+        return;
+    }
+    // A compute->compute barrier separates validation from every payload
+    // phase. A semantic failure cannot launch payload writes.
+    if (atomicOr(status[0], 0u) != 0u) return;
+    if (p.phase == 1u) {
+        if (p.flags != 0u && p.flags != 1u && p.flags != 2u && p.flags != 5u) { invalid(); return; }
+        if (p.stride == 0u || p.stride % 4u != 0u) { invalid(); return; }
+        uint total = p.curves * p.target;
+        if (i >= total) return;
+        uint lanes = p.stride / 4u;
+        uint curve = i / p.target;
+        uint point = i - curve * p.target;
+        uint begin = srcOffsets[curve];
+        uint inputCount = srcOffsets[curve + 1u] - begin;
+        if (inputCount < 2u || p.target < 2u) { invalid(); return; }
+        precise double t = double(point) * double(inputCount - 1u) / double(p.target - 1u);
+        uint lower = min(uint(t), inputCount - 1u);
+        uint upper = min(lower + 1u, inputCount - 1u);
+        precise float fraction = roundedFraction(t - double(lower));
+        for (uint lane = 0u; lane < lanes; ++lane) {
+            float a = uintBitsToFloat(srcWords[(begin + lower) * lanes + lane]);
+            float b = uintBitsToFloat(srcWords[(begin + upper) * lanes + lane]);
+            if (!checkFloat(a) || !checkFloat(b)) { invalid(); return; }
+            precise float blended = float(double(a) + (double(b) - double(a)) * double(fraction));
+            if (!checkFloat(blended)) { invalid(); return; }
+            dstWords[i * lanes + lane] = floatBitsToUint(blended);
+        }
+        return;
+    }
+    if (p.phase == 2u) {
+        if (p.flags != 6u) { invalid(); return; }
+        if (p.stride == 0u || p.stride % 4u != 0u) { invalid(); return; }
+        uint total = p.curves * p.target;
+        if (i >= total) return;
+        uint words = p.stride / 4u;
+        uint curve = i / p.target;
+        uint point = i - curve * p.target;
+        uint begin = srcOffsets[curve];
+        uint inputCount = srcOffsets[curve + 1u] - begin;
+        if (inputCount < 2u || p.target < 2u) { invalid(); return; }
+        precise double t = double(point) * double(inputCount - 1u) / double(p.target - 1u);
+        uint nearest = min(uint(floor(t + 0.5)), inputCount - 1u);
+        uint srcBase = (begin + nearest) * words;
+        uint dstBase = i * words;
+        for (uint w = 0u; w < words; ++w) dstWords[dstBase + w] = srcWords[srcBase + w];
+        return;
+    }
+    if (p.phase == 3u) {
+        // Verbatim primitive copy with CUDA root-channel validation. The
+        // curve count is unchanged by resampling, so extents must be equal.
+        if (p.flags != 3u && p.flags != 4u && p.flags != 6u) { invalid(); return; }
+        if (p.dstBytes % 4u != 0u || p.srcBytes != p.dstBytes) { invalid(); return; }
+        if (i >= p.dstBytes / 4u) return;
+        uint w = srcWords[i];
+        if (p.flags == 3u) {
+            if (int(w) < 0) { invalid(); return; }
+        } else if (p.flags == 4u) {
+            float v = uintBitsToFloat(w);
+            if (!finiteFloat(v) || v < 0.0 || v > 1.0) { invalid(); return; }
+        }
+        dstWords[i] = w;
+        return;
+    }
+    invalid();
+}

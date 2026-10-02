@@ -1,0 +1,177 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// Versioned CUDA-compatible literal random/minimum length edit.  The output buffer is a fresh staging
+// channel; status prevents its publication after any semantic rejection.
+layout(local_size_x = 256) in;
+layout(set=0,binding=0,std430) readonly buffer P { float v[]; } points;
+layout(set=0,binding=1,std430) readonly buffer O { uint v[]; } offsets;
+layout(set=0,binding=2,std430) buffer R { float v[]; } outputPoints;
+layout(set=0,binding=3,std430) buffer S { uint error; } status;
+layout(set=0,binding=4,std430) readonly buffer H { float v[]; } hairT;
+layout(set=0,binding=5,std430) readonly buffer I { uvec2 v[]; } stableIds;
+layout(push_constant) uniform C { uint curves; uint points; uint phase; float value;
+    uint hasHairT; float minimum; uint method; uint rebuild;
+    float randomLo; float randomHi; uint seedBits; uint hasStableIds; } c;
+
+// Words are {low, high}; modulo-2^64 arithmetic without shaderInt64.
+uvec2 add64(uvec2 a,uvec2 b) {
+    uint lo=a.x+b.x;
+    return uvec2(lo,a.y+b.y+uint(lo<a.x));
+}
+uvec2 shr64(uvec2 a,uint n) {
+    // Hash finalizer shifts are exclusively in [1,31].
+    return uvec2((a.x>>n)|(a.y<<(32u-n)),a.y>>n);
+}
+uvec2 mul64(uvec2 a,uvec2 b) {
+    uint hi,lo;
+    umulExtended(a.x,b.x,hi,lo);
+    return uvec2(lo,hi+a.x*b.y+a.y*b.x);
+}
+uvec2 hash64(uvec2 key) {
+    const uvec2 golden=uvec2(0x7F4A7C15u,0x9E3779B9u);
+    const uvec2 salt=uvec2(0x4C656E67u,0u);
+    uvec2 z=add64(key^mul64(salt,golden),golden);
+    z=mul64(z^shr64(z,30u),uvec2(0x1CE4E5B9u,0xBF58476Du));
+    z=mul64(z^shr64(z,27u),uvec2(0x133111EBu,0x94D049BBu));
+    return z^shr64(z,31u);
+}
+float draw01(uint curve) {
+    uvec2 id=c.hasStableIds!=0u?stableIds.v[curve]:uvec2(curve,0u);
+    uvec2 key=hash64(uvec2(c.seedBits,0u))^id;
+    return float(hash64(key).y>>8u)*(1.0/16777216.0);
+}
+
+bool finite(float x) { return !isnan(x) && !isinf(x); }
+bool finite3(float x,float y,float z) { return finite(x)&&finite(y)&&finite(z); }
+void fail() { atomicOr(status.error,1u); }
+void copyPoint(uint i) { uint p=3u*i; outputPoints.v[p]=points.v[p]; outputPoints.v[p+1u]=points.v[p+1u]; outputPoints.v[p+2u]=points.v[p+2u]; }
+
+// CUDA SampleArc, retained as a single routine so both rebuild variants use
+// precisely the same zero-span and final-segment decisions.
+void sampleArc(uint begin,uint end,float distance,out float x,out float y,out float z) {
+    uint p=3u*begin; x=points.v[p]; y=points.v[p+1u]; z=points.v[p+2u];
+    if (end<=begin+1u) return;
+    precise float remaining=distance;
+    for(uint k=begin+1u;k<end;++k) {
+        uint a=3u*(k-1u),b=3u*k;
+        precise float dx=points.v[b]-points.v[a],dy=points.v[b+1u]-points.v[a+1u],dz=points.v[b+2u]-points.v[a+2u];
+        precise float segment=sqrt(dx*dx+dy*dy+dz*dz);
+        if (!finite(segment)) { fail(); return; }
+        if (remaining<=segment || k+1u==end) {
+            precise float u=segment>0.0?min(1.0,max(0.0,remaining/segment)):0.0;
+            x=points.v[a]+dx*u; y=points.v[a+1u]+dy*u; z=points.v[a+2u]+dz*u;
+            return;
+        }
+        remaining-=segment;
+        if (!finite(remaining)) { fail(); return; }
+    }
+}
+
+void main() {
+    uint curve=gl_GlobalInvocationID.x;
+    if(c.phase==0u) {
+        if(!finite(c.value)||c.value<0.0||!finite(c.minimum)||c.minimum<0.0||c.method>1u||c.rebuild>1u) fail();
+        if(!finite(c.randomLo)||c.randomLo<0.0||!finite(c.randomHi)||c.randomHi<0.0) fail();
+        if(curve<=c.curves) {
+            uint o=offsets.v[curve];
+            if((curve==0u&&o!=0u)||(curve==c.curves&&o!=c.points)) fail();
+            if(curve<c.curves&&o>=offsets.v[curve+1u]) fail();
+        }
+        if(curve<c.points) {
+            uint p=3u*curve;
+            if(!finite3(points.v[p],points.v[p+1u],points.v[p+2u])) fail();
+            if(c.hasHairT!=0u&&(!finite(hairT.v[curve])||hairT.v[curve]<0.0||hairT.v[curve]>1.0)) fail();
+        }
+        return;
+    }
+    if(atomicAdd(status.error,0u)!=0u||curve>=c.curves) return;
+    uint begin=offsets.v[curve],end=offsets.v[curve+1u];
+    precise float current=0.0;
+    for(uint j=begin+1u;j<end;++j) {
+        uint a=3u*(j-1u),b=3u*j;
+        precise float dx=points.v[b]-points.v[a],dy=points.v[b+1u]-points.v[a+1u],dz=points.v[b+2u]-points.v[a+2u];
+        precise float segment=sqrt(dx*dx+dy*dy+dz*dz);
+        if(!finite(segment)){fail();return;} current+=segment;
+    }
+    if(!finite(current)){fail();return;}
+    precise float lo=min(c.randomLo,c.randomHi),hi=max(c.randomLo,c.randomHi);
+    precise float multiplier=lo+(hi-lo)*draw01(curve);
+    if(!finite(multiplier)){fail();return;}
+    precise float scaled=c.phase==1u?current*c.value:c.value;
+    precise float rawTarget=scaled*multiplier;
+    // CUDA fmaxf recovers a finite floor from NaN, including overflow * zero.
+    precise float target=isnan(rawTarget)?c.minimum:max(rawTarget,c.minimum);
+    if(!finite(target)||target<0.0){fail();return;}
+    precise float factor=current>0.0?target/current:1.0;
+    if(!finite(factor)||factor<0.0){fail();return;}
+    if(current==0.0&&target>0.0){fail();return;}
+
+    if(c.method==0u) {
+        uint root=3u*begin;
+        precise float rx=points.v[root],ry=points.v[root+1u],rz=points.v[root+2u];
+        for(uint j=begin;j<end;++j) {
+            uint p=3u*j;
+            if(factor==1.0) { copyPoint(j); continue; }
+            precise float x=rx+(points.v[p]-rx)*factor,y=ry+(points.v[p+1u]-ry)*factor,z=rz+(points.v[p+2u]-rz)*factor;
+            if(!finite3(x,y,z)){fail();return;}
+            outputPoints.v[p]=x;outputPoints.v[p+1u]=y;outputPoints.v[p+2u]=z;
+        }
+    } else if(c.rebuild==0u) {
+        // keepParam: exact no-op policy, prefix samples on cuts, tip-only extension.
+        if(target==current) { for(uint j=begin;j<end;++j) copyPoint(j); }
+        else if(target<current) {
+            precise float prefix=0.0;
+            copyPoint(begin);
+            for(uint j=begin+1u;j<end;++j) {
+                uint a=3u*(j-1u),b=3u*j;
+                precise float dx=points.v[b]-points.v[a],dy=points.v[b+1u]-points.v[a+1u],dz=points.v[b+2u]-points.v[a+2u];
+                precise float segment=sqrt(dx*dx+dy*dy+dz*dz);
+                if(!finite(segment)){fail();return;}
+                precise float x,y,z; sampleArc(begin,end,min(prefix+segment,target),x,y,z);
+                if(atomicAdd(status.error,0u)!=0u||!finite3(x,y,z)){fail();return;}
+                outputPoints.v[b]=x;outputPoints.v[b+1u]=y;outputPoints.v[b+2u]=z;
+                prefix+=segment; if(!finite(prefix)){fail();return;}
+            }
+        } else {
+            for(uint j=begin;j+1u<end;++j) copyPoint(j);
+            uint tip=end-1u; bool found=false;
+            precise float dx=0.0,dy=0.0,dz=0.0,norm=0.0;
+            for(uint k=end-1u;k>begin;--k) { uint a=3u*(k-1u),b=3u*k;
+                precise float tx=points.v[b]-points.v[a],ty=points.v[b+1u]-points.v[a+1u],tz=points.v[b+2u]-points.v[a+2u];
+                precise float tn=sqrt(tx*tx+ty*ty+tz*tz); if(!finite(tn)){fail();return;}
+                if(tn>1.0e-12){dx=tx;dy=ty;dz=tz;norm=tn;found=true;break;} }
+            if(!found) copyPoint(tip); else { uint p=3u*tip; precise float extra=target-current;
+                precise float x=points.v[p]+dx/norm*extra,y=points.v[p+1u]+dy/norm*extra,z=points.v[p+2u]+dz/norm*extra;
+                if(!finite3(x,y,z)){fail();return;} outputPoints.v[p]=x;outputPoints.v[p+1u]=y;outputPoints.v[p+2u]=z; }
+        }
+    } else {
+        // reparam: no equal-target shortcut; non-monotone supplied t values are valid.
+        for(uint j=begin;j<end;++j) {
+            precise float t=c.hasHairT!=0u?hairT.v[j]:(end>begin+1u?float(j-begin)/float(end-begin-1u):0.0);
+            if(!finite(t)||t<0.0||t>1.0){fail();return;}
+            precise float distance=t*target;
+            if(!finite(distance)){fail();return;}
+            if(target>current&&j+1u==end) distance=target;
+            precise float x,y,z;
+            if(distance>current&&end>begin+1u) {
+                bool found=false; precise float dx=0.0,dy=0.0,dz=0.0,norm=0.0;
+                for(uint k=end-1u;k>begin;--k){uint a=3u*(k-1u),b=3u*k;
+                    precise float tx=points.v[b]-points.v[a],ty=points.v[b+1u]-points.v[a+1u],tz=points.v[b+2u]-points.v[a+2u];
+                    precise float tn=sqrt(tx*tx+ty*ty+tz*tz);if(!finite(tn)){fail();return;}
+                    if(tn>1.0e-12){dx=tx;dy=ty;dz=tz;norm=tn;found=true;break;}}
+                if(found){uint p=3u*(end-1u);precise float extra=distance-current;
+                    x=points.v[p]+dx/norm*extra;y=points.v[p+1u]+dy/norm*extra;z=points.v[p+2u]+dz/norm*extra;}
+                else {uint p=3u*(end-1u);x=points.v[p];y=points.v[p+1u];z=points.v[p+2u];}
+            } else sampleArc(begin,end,distance,x,y,z);
+            if(atomicAdd(status.error,0u)!=0u||!finite3(x,y,z)){fail();return;}
+            uint p=3u*j;outputPoints.v[p]=x;outputPoints.v[p+1u]=y;outputPoints.v[p+2u]=z;
+        }
+    }
+    precise float resulting=0.0;
+    for(uint j=begin+1u;j<end;++j){uint a=3u*(j-1u),b=3u*j;
+        precise float dx=outputPoints.v[b]-outputPoints.v[a],dy=outputPoints.v[b+1u]-outputPoints.v[a+1u],dz=outputPoints.v[b+2u]-outputPoints.v[a+2u];
+        precise float segment=sqrt(dx*dx+dy*dy+dz*dz);if(!finite(segment)){fail();return;} resulting+=segment;}
+    if(!finite(resulting)) fail();
+}

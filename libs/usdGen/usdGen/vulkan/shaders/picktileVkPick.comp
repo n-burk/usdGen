@@ -1,0 +1,197 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// PicktileVkPick: device-only screen-space CV picker. Port of the pick half of
+// usdGen::gpu::CudaPicking (gpu/picking.cu): ValidateGeometry + PickCandidates
+// + ArgMin + FinalizePick.
+//
+// Geometry planes are FLAT SCALAR float arrays indexed as 3*i (repo-wide
+// convention; std430 vec3[] stride 16 would break the packed CUDA float3
+// planes). Stable ids are u64 lanes read as uvec2 (x = low word on
+// little-endian). Status is a uint first-writer via atomicCompSwap (0 -> code),
+// never an unconditional store.
+//
+// Repo convention (see widthBlend.comp): this toolchain has no isfinite;
+// finiteness uses !isnan && !isinf.
+//
+// ABI:
+//   push constant (16B, std430): {u32 pointCount; u32 curveCount; u32 phase; u32 hasIds}
+//     phase 0 = validate + candidates + best-distance reduce (atomicMin)
+//     phase 1 = claim best index (atomicMin over exact-best in-radius threads)
+//     phase 2 = finalize (lane 0 only)
+//   set 0:
+//     b0 points     float[3*pointCount]  borrowed points (read-only)
+//     b1 offsets    uint[curveCount+1]   borrowed curve offsets (read-only)
+//     b2 stableIds  uvec2[curveCount]    borrowed ids, read only when hasIds
+//     b3 distances  float[pointCount]    scratch squared distances
+//     b4 query      {float vp[16]; uint width,height; float x,y,radius}
+//     b5 result     {uint hit,curve,cv,flatIndex,stableLo,stableHi; float distance}
+//     b6 state      {uint error; uint bestBits; uint bestIndex}
+//
+// Host pre-fill: error = 0, bestBits = 0x7F800000, bestIndex = 0xFFFFFFFF,
+// result = {0, UINT32_MAX x3, 0, 0, 0.0f}. Phase 2 runs only after a device
+// barrier; it leaves result untouched unless error == 0 with an in-radius
+// best index, so a failed op preserves the caller's previous result exactly
+// like CudaPicking::Finish. Error codes mirror picking.cu: 1 = bad geometry,
+// 2 = non-finite. Ties resolve to the lowest flat index (atomicMin).
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint pointCount;
+    uint curveCount;
+    uint phase;
+    uint hasIds;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer PointsBlock { float points[]; };
+layout(std430, set = 0, binding = 1) readonly buffer OffsetsBlock { uint offsets[]; };
+layout(std430, set = 0, binding = 2) readonly buffer IdsBlock { uvec2 stableIds[]; };
+layout(std430, set = 0, binding = 3) buffer DistBlock { float distances[]; };
+layout(std430, set = 0, binding = 4) readonly buffer QueryBlock {
+    float vp[16];
+    uint qwidth;
+    uint qheight;
+    float qx;
+    float qy;
+    float qradius;
+};
+layout(std430, set = 0, binding = 5) buffer ResultBlock {
+    uint hit;
+    uint curve;
+    uint cv;
+    uint flatIndex;
+    uint stableLo;
+    uint stableHi;
+    float distance;
+} res;
+layout(std430, set = 0, binding = 6) buffer StateBlock {
+    uint error;
+    uint bestBits;
+    uint bestIndex;
+} st;
+
+const uint kBadGeometry = 1u;
+const uint kNonFinite = 2u;
+const uint kNoIndex = 0xFFFFFFFFu;
+float kInf() { return uintBitsToFloat(0x7F800000u); }
+
+bool gfinite(float x) { return !isnan(x) && !isinf(x); }
+bool gfinite3(float a, float b, float c) { return gfinite(a) && gfinite(b) && gfinite(c); }
+
+// Row-vector convention: clip[j] = sum_i p[i] * M[i*4+j]. Top-left pixel
+// origin. Mirrors Project() in gpu/picking.cu operation-for-operation.
+bool project_(vec3 p, out vec2 screen) {
+    float inn[4];
+    float clip[4];
+    inn[0] = p.x; inn[1] = p.y; inn[2] = p.z; inn[3] = 1.0;
+    clip[0] = 0.0; clip[1] = 0.0; clip[2] = 0.0; clip[3] = 0.0;
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i)
+            clip[j] += inn[i] * vp[i * 4 + j];
+    if (!gfinite(clip[0]) || !gfinite(clip[1]) || !gfinite(clip[2]) ||
+        !gfinite(clip[3]) || clip[3] <= 0.0 ||
+        clip[2] < -clip[3] || clip[2] > clip[3]) return false;
+    float nx = clip[0] / clip[3];
+    float ny = clip[1] / clip[3];
+    if (!gfinite(nx) || !gfinite(ny)) return false;
+    screen.x = (nx + 1.0) * 0.5 * float(qwidth);
+    screen.y = (1.0 - ny) * 0.5 * float(qheight);
+    return gfinite(screen.x) && gfinite(screen.y);
+}
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    const float rr = qradius * qradius;
+
+    if (pc.phase == 0u) {
+        // Offset topology validation (mirrors ValidateGeometry's offset loop).
+        for (uint i = idx; i <= pc.curveCount; i += stride) {
+            uint o = offsets[i];
+            bool bad = (i == 0u && o != 0u) ||
+                (i == pc.curveCount && o != pc.pointCount);
+            // Nested ifs (never short-circuit or ternary indexing): neighbor
+            // reads must be unreachable out of bounds on every driver.
+            if (i > 0u && i < pc.curveCount) {
+                if (o <= offsets[i - 1u]) bad = true;
+            }
+            if (i < pc.curveCount) {
+                if (o >= offsets[i + 1u]) bad = true;
+            }
+            if (bad) atomicCompSwap(st.error, 0u, kBadGeometry);
+        }
+        // Point validation + projection + best-distance reduce.
+        for (uint i = idx; i < pc.pointCount; i += stride) {
+            distances[i] = kInf();
+            vec3 p = vec3(points[3u * i], points[3u * i + 1u], points[3u * i + 2u]);
+            if (!gfinite3(p.x, p.y, p.z)) {
+                atomicCompSwap(st.error, 0u, kNonFinite);
+                continue;
+            }
+            vec2 screen;
+            if (!project_(p, screen)) continue;
+            float dx = screen.x - qx;
+            float dy = screen.y - qy;
+            float d = dx * dx + dy * dy;
+            if (!gfinite(d)) {
+                atomicCompSwap(st.error, 0u, kNonFinite);
+                continue;
+            }
+            if (d <= rr) {
+                distances[i] = d;
+                atomicMin(st.bestBits, floatBitsToUint(d));
+            }
+        }
+    } else if (pc.phase == 1u) {
+        // Runs after a device barrier: st.error/st.bestBits are final.
+        // Non-negative float bit order matches value order, so the atomicMin
+        // winner is the minimum squared distance; claiming threads re-check
+        // the radius so an all-miss INF best claims nothing.
+        if (st.error == 0u) {
+            for (uint i = idx; i < pc.pointCount; i += stride) {
+                float d = distances[i];
+                if (d <= rr && floatBitsToUint(d) == st.bestBits)
+                    atomicMin(st.bestIndex, i);
+            }
+        }
+    } else {
+        // Finalize (mirrors FinalizePick). Lane 0 only. The miss record is
+        // written explicitly, including distance +inf: FinalizePick always
+        // stores the full record on the error-free path, so a miss must not
+        // leave the host pre-fill (distance 0) behind.
+        if (idx == 0u && st.error == 0u && pc.curveCount != 0u) {
+            res.hit = 0u;
+            res.curve = kNoIndex;
+            res.cv = kNoIndex;
+            res.flatIndex = kNoIndex;
+            res.stableLo = 0u;
+            res.stableHi = 0u;
+            res.distance = kInf();
+            uint bi = st.bestIndex;
+            if (bi == kNoIndex || bi >= pc.pointCount) return;
+            float d = distances[bi];
+            if (!gfinite(d) || d > rr) return;
+            uint lo = 0u, hi = pc.curveCount;
+            while (lo + 1u < hi) {
+                uint mid = (lo + hi) / 2u;
+                if (offsets[mid] <= bi) lo = mid;
+                else hi = mid;
+            }
+            uint begin = offsets[lo];
+            res.hit = 1u;
+            res.curve = lo;
+            res.cv = bi - begin;
+            res.flatIndex = bi;
+            if (pc.hasIds != 0u) {
+                res.stableLo = stableIds[lo].x;
+                res.stableHi = stableIds[lo].y;
+            } else {
+                res.stableLo = lo;
+                res.stableHi = 0u;
+            }
+            res.distance = sqrt(d);
+        }
+    }
+}

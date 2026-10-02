@@ -1,0 +1,1243 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// exprVkEvaluate.comp — Vulkan port of the CUDA expression kernel
+// (gpu/expression.cu Execute) plus the shared IR interpreter it runs
+// (expressions/irExec.h ExecuteElement/Store/ReadVariable) and the SeExpr2
+// builtin library it dispatches to (expressions/exprMath.h).
+//
+// The numeric values of IROp/IRFunc/Variable/Domain/ScalarType below are the
+// uploaded device encoding; vulkan/exprVkProgram.cpp static_asserts every one
+// of them against the C++ headers, so an enum reorder breaks the build, not
+// parity. The noise/hash tables are NOT transcribed here: the host uploads
+// the very arrays expressions/exprNoiseTables.h emits (tables::kNoiseG3Host,
+// kNoiseP514Host, kHashP256Host) into the program buffer, so the tables
+// cannot drift.
+//
+// Parity rule (same as irExec.h): everything is double; +, -, *, /, sqrt,
+// floor, ceil, fmod, fabs, min and max are IEEE-754 correctly rounded and
+// therefore bit-identical with the CUDA lane. This shader runs the exact set
+// ONLY: Vulkan exposes no double-precision transcendentals (GLSL.std.450
+// restricts Sin/Cos/Tan/Asin/Acos/Atan/Sinh/Cosh/Tanh/Exp/Log/Pow/Atan2 to
+// 16/32-bit; spirv-val rejects the 64-bit forms and glslang exposes no
+// overloads), so the host splits programs at transcendental instructions,
+// runs exact prefixes here, and evaluates each transcendental step itself
+// with expressions/exprMath.h and <cmath> — the same calls the CPU reference
+// lane makes on bit-identical inputs. The combination is bit-identical with
+// the CPU lane for every program, hence bit-identical with CUDA on the exact
+// set and within the CUDA test's own 1e-12 contract on transcendental ones.
+// Host-injected values arrive through field-table slots >= 33 (one per
+// transcendental step); outType 9 (Raw64) preserves intermediate bits
+// without Store validation.
+//
+// ABI — descriptor set 0, all std430:
+//   binding 0  program   uint[]  header (96 bytes, see offsets below) then
+//                        instructions (24 bytes each), the field table
+//                        (16 bytes x varCount), then noise tables:
+//                        G3 514x3 doubles, P514 514 int32, P256 256 words.
+//   binding 1  fields    double[]  packed variable data (offsets in doubles).
+//   binding 2  owners    uint[]  point -> primitive map (point domain).
+//   binding 3  output    uint[]  2 words per scalar slot; slot s of element i
+//                        component c is s = i*outComponents + c. Low word
+//                        carries the value bits (f32/bool/i32/u32/f16), both
+//                        words for f64/i64/u64 (little-endian: low word first).
+//   binding 4  status    uint  atomicOr(1) when a value cannot be represented
+//                        (the CUDA lane's InvalidValue).
+//
+// Program header byte offsets:
+//   0 instructionCount  4 resultReg  8 outputRegs[4]  24 outputCount
+//   28 outType  32 outComponents  36 count  40 primitiveCount  44 domain
+//   48 seed  52 descId  56 varCount  60 tableOffsetBytes  64 frame (double)
+//   72 time (double)  80 codeOffsetBytes  84 noiseG3OffsetBytes
+//   88 noiseP514OffsetBytes  92 hashP256OffsetBytes
+//
+// Instruction (24 bytes): w0 op, w1 dst|a<<16, w2 b|c<<16,
+// w3 variable|compare<<16|component<<24, d immediate (double at +16).
+// Field table entry (16 bytes): u64 offsetDoubles (UINT64_MAX =
+// unmaterialized, reads NaN), u32 count, u32 domain|components<<8.
+//
+// Requires shaderFloat64 and shaderInt64 on the device (the host pipeline
+// Create rejects contexts without both).
+//
+// Dispatch: local_size_x = 256, groups = ceil(count/256). The host skips
+// zero-count dispatches with a pre-zeroed status (CUDA: no kernel, Ok).
+
+#version 460
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Program { uint words[]; };
+layout(std430, binding = 1) readonly buffer Fields { double fieldData[]; };
+layout(std430, binding = 2) readonly buffer Owners { uint owners[]; };
+layout(std430, binding = 3) buffer Output { uint outWords[]; };
+layout(std430, binding = 4) buffer Status { uint status; };
+
+// Program header (see above).
+uint RdU(uint byteOffset) { return words[byteOffset >> 2u]; }
+uint64_t RdU64(uint byteOffset) {
+    uint w = byteOffset >> 2u;
+    return (uint64_t(words[w + 1u]) << 32u) | uint64_t(words[w]);
+}
+precise double RdD(uint byteOffset) { return uint64BitsToDouble(RdU64(byteOffset)); }
+precise double QNaN() {
+    return uint64BitsToDouble(uint64_t(0x7FF80000u) << 32u);
+}
+uint G_instructionCount;
+uint G_outputCount;
+uint G_outType;
+uint G_outComponents;
+uint G_count;
+uint G_primitiveCount;
+uint G_domain;
+int G_seed;
+uint G_descId;
+uint G_varCount;
+uint G_tableOffset;
+double G_frame;
+double G_time;
+uint G_codeOffset;
+uint G_g3Offset;
+uint G_p514Offset;
+uint G_p256Offset;
+
+// Noise tables (uploaded from expressions/exprNoiseTables.h).
+precise double NoiseG3(int lookup, int k) {
+    return RdD(G_g3Offset + uint(lookup * 3 + k) * 8u);
+}
+int NoiseP514(int i) {
+    return int(words[(G_p514Offset >> 2u) + uint(i)]);
+}
+uint HashP256(int i) {
+    return words[(G_p256Offset >> 2u) + uint(i)];
+}
+
+// ---------------------------------------------------------------------------
+// Primitives (exprMath.h, verbatim semantics)
+// ---------------------------------------------------------------------------
+
+bool ExprFinite(double value) { return !isnan(value) && !isinf(value); }
+
+int ExprInt(double v) {
+    if (!(v > -2147483649.0LF)) return -2147483647 - 1;
+    if (!(v < 2147483648.0LF)) return 2147483647;
+    return int(v);
+}
+
+uint ExprUInt32Wrap(double v) {
+    if (!(v > -4.611686018427388e18LF)) return 0u;
+    if (!(v < 4.611686018427388e18LF)) return 0xFFFFFFFFu;
+    return uint(int64_t(v));
+}
+
+// double(static_cast<float>(x)) by hand. SeExpr2 narrows two double flows to
+// float in-shader (the voronoi type-5 scalefactor and the curve knot
+// positions; the rotate angle and midhsi mask are host-split and narrow in
+// exact host code), and the narrowing is load-bearing: voronoi type 5 feeds
+// it to a smoothstep edge. A plain double(float(x)) round trip does NOT
+// narrow on every driver (llvmpipe folds it to x, keeping all 52 bits), so
+// this emulates RNE float rounding with integer ops: overflow -> inf,
+// gradual subnormal underflow, NaN payload preserved and quieted as C++ does.
+double NarrowToFloat(double x) {
+    uint64_t u = doubleBitsToUint64(x);
+    uint hi = uint(u >> 32u);
+    uint lo = uint(u & uint64_t(0xFFFFFFFFu));
+    uint exp = (hi >> 20u) & 0x7FFu;
+    uint64_t sign = uint64_t(hi & 0x80000000u) << 32u;
+    if (exp == 0x7FFu) {
+        if ((hi & 0xFFFFFu) == 0u && lo == 0u) return x; // +-inf narrows to itself
+        uint fm = ((((hi & 0xFFFFFu) << 3u) | (lo >> 29u)) & 0x7FFFFFu) | 0x400000u;
+        return uint64BitsToDouble(sign | (uint64_t(0x7FFu) << 52u) | (uint64_t(fm) << 29u));
+    }
+    int e = int(exp) - 1023;
+    // Past FLT_MAX + half ulp everything rounds to inf (2^128 - FLT_MAX is a
+    // full float ulp, so the midpoint sits below 2^128).
+    if (e > 127)
+        return uint64BitsToDouble(sign | (uint64_t(0x7FFu) << 52u));
+    if (e >= -126) {
+        uint round = (lo >> 28u) & 1u;
+        uint sticky = lo & 0xFFFFFFFu;
+        uint lsb = (lo >> 29u) & 1u;
+        uint64_t w = u;
+        if (round != 0u && (sticky != 0u || lsb != 0u))
+            w += uint64_t(1u) << 29u;
+        // Rounding may carry the exponent 127 -> 128, which is real overflow.
+        if ((uint(w >> 52u) & 0x7FFu) > 1150u)
+            return uint64BitsToDouble(sign | (uint64_t(0x7FFu) << 52u));
+        return uint64BitsToDouble(w & ~(uint64_t(0x1FFFFFFFu)));
+    }
+    // Subnormal float or signed zero: x = m * 2^E, k = RNE(x / 2^-149).
+    uint64_t m = (uint64_t(hi & 0xFFFFFu) << 32u) | uint64_t(lo);
+    int E;
+    if (exp == 0u) {
+        if (m == uint64_t(0u)) return x; // +-0
+        E = -1074;
+    } else {
+        m |= uint64_t(1u) << 52u;
+        E = e - 52;
+    }
+    int r = -(E + 149); // >= 30 throughout this branch
+    uint k = 0u;
+    if (r <= 54) {
+        uint64_t halfway = uint64_t(1u) << (uint(r) - 1u);
+        uint64_t rem = m & ((uint64_t(1u) << uint(r)) - uint64_t(1u));
+        k = uint(m >> uint(r));
+        if (rem > halfway || (rem == halfway && (k & 1u) != 0u)) k += 1u;
+    }
+    if (k == 0u) return uint64BitsToDouble(sign);
+    if (k == 0x800000u) // rounded up to 2^-126, the smallest normal float
+        return uint64BitsToDouble(sign | (uint64_t(1u) << 52u));
+    // k < 2^23: value k * 2^-149, a normal double (doubles reach 2^-1022).
+    // Normalize: M = k << (52 - msb) in [2^52, 2^53), exponent msb - 149 + 1023.
+    int msb = findMSB(k);
+    uint64_t M = uint64_t(k) << uint(52 - msb);
+    uint expF = uint(msb + 874);
+    uint64_t mantMask = (uint64_t(1u) << 52u) - uint64_t(1u);
+    return uint64BitsToDouble(sign | (uint64_t(expF) << 52u) | (M & mantMask));
+}
+
+precise double ExprClamp(double x, double lo, double hi) {
+    return x < lo ? lo : x > hi ? hi : x;
+}
+
+precise double ExprRound(double x) {
+    return x < 0.0LF ? ceil(x - 0.5LF) : floor(x + 0.5LF);
+}
+
+// ---------------------------------------------------------------------------
+// Blending / remapping (ExprBuiltins.cpp, verbatim)
+// ---------------------------------------------------------------------------
+
+precise double ExprExpand(double x, double lo, double hi) {
+    if (lo == hi) return x < lo ? 0.0LF : 1.0LF;
+    return (x - lo) / (hi - lo);
+}
+// NOTE: bias/contrast/gaussstep/remap/angle/rotate/up/midhsi reach a
+// double-precision transcendental (pow/log/acos/sin/cos). Vulkan exposes no
+// f64 transcendentals (GLSL.std.450 restricts Sin/Cos/.../Pow/Atan2 to 16/32
+// bit; spirv-val rejects the 64-bit forms), so the host splits programs at
+// those Call instructions and evaluates the step itself with expressions/
+// exprMath.h (bit-identical to the CPU reference lane). Their ExprCall cases
+// below are absent on purpose: reaching one yields NaN poison (fail-closed).
+precise double ExprBoxStep(double x, double a) { return x < a ? 0.0LF : 1.0LF; }
+precise double ExprLinearStep(double x, double a, double b) {
+    if (a < b) return x < a ? 0.0LF : (x > b ? 1.0LF : (x - a) / (b - a));
+    if (a > b) return 1.0LF - (x < b ? 0.0LF : (x > a ? 1.0LF : (x - b) / (a - b)));
+    return ExprBoxStep(x, a);
+}
+precise double ExprSmoothStep(double x, double a, double b) {
+    if (a < b) {
+        if (x < a) return 0.0LF;
+        if (x >= b) return 1.0LF;
+        x = (x - a) / (b - a);
+    } else if (a > b) {
+        if (x <= b) return 1.0LF;
+        if (x > a) return 0.0LF;
+        x = 1.0LF - (x - b) / (a - b);
+    } else {
+        return ExprBoxStep(x, a);
+    }
+    return x * x * (3.0LF - 2.0LF * x);
+}
+// ExprGaussStep/ExprRemap: host-evaluated (see above).
+precise double ExprCycle(double index, double loRange, double hiRange) {
+    int lo = ExprInt(loRange);
+    int hi = ExprInt(hiRange);
+    int range = hi - lo + 1;
+    if (range <= 0) return double(lo);
+    int result = ExprInt(index) % range;
+    if (result < 0) result += range;
+    return double(lo + result);
+}
+
+// ---------------------------------------------------------------------------
+// Vectors (ExprBuiltins.cpp)
+// ---------------------------------------------------------------------------
+
+precise double ExprLength3(double v[3]) {
+    return sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+precise double ExprDist(double a[3], double b[3]) {
+    precise double x = a[0] - b[0];
+    precise double y = a[1] - b[1];
+    precise double z = a[2] - b[2];
+    return sqrt(x * x + y * y + z * z);
+}
+precise double ExprHypot(double x, double y) {
+    return sqrt(x * x + y * y);
+}
+precise double ExprDot(double a[3], double b[3]) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+void ExprCross(double a[3], double b[3], out precise double o[3]) {
+    o[0] = a[1] * b[2] - a[2] * b[1];
+    o[1] = a[2] * b[0] - a[0] * b[2];
+    o[2] = a[0] * b[1] - a[1] * b[0];
+}
+void ExprNorm(double a[3], out precise double o[3]) {
+    precise double len = ExprLength3(a);
+    if (len == 0.0LF) { o[0] = 0.0LF; o[1] = 0.0LF; o[2] = 0.0LF; return; }
+    precise double scale = 1.0LF / len;
+    o[0] = a[0] * scale; o[1] = a[1] * scale; o[2] = a[2] * scale;
+}
+// ExprAngle/ExprRotate/ExprUp: host-evaluated (see above).
+void ExprOrtho(double a[3], double b[3], out precise double o[3]) {
+    precise double c[3];
+    ExprCross(a, b, c);
+    ExprNorm(c, o);
+}
+// ---------------------------------------------------------------------------
+// Colour (ExprBuiltins.cpp)
+// ---------------------------------------------------------------------------
+
+void ExprRgbToHsl(double rgb[3], out precise double o[3]) {
+    precise double R = rgb[0];
+    precise double G = rgb[1];
+    precise double B = rgb[2];
+    precise double x = R < G ? (R < B ? R : B) : (G < B ? G : B);
+    precise double y = R > G ? (R > B ? R : B) : (G > B ? G : B);
+    precise double sum = x + y;
+    precise double diff = y - x;
+    precise double L = sum / 2.0LF;
+    if (diff < 1e-6LF) { o[0] = 0.0LF; o[1] = 0.0LF; o[2] = L; return; }
+    precise double S;
+    if (L <= 0.5LF) S = x < 0.0LF ? 1.0LF - x : diff / sum;
+    else            S = y > 1.0LF ? y : diff / (2.0LF - sum);
+    precise double H;
+    if (R == y)      H = (G - B) / diff;
+    else if (G == y) H = (B - R) / diff + 2.0LF;
+    else             H = (R - G) / diff + 4.0LF;
+    H *= 1.0LF / 6.0LF;
+    H -= floor(H);
+    o[0] = H; o[1] = S; o[2] = L;
+}
+precise double ExprHslValue(double x, double y, double H) {
+    H -= floor(H);
+    if (H < 1.0LF / 6.0LF) return x + (y - x) * H * 6.0LF;
+    if (H < 3.0LF / 6.0LF) return y;
+    if (H < 4.0LF / 6.0LF) return x + (y - x) * (4.0LF / 6.0LF - H) * 6.0LF;
+    return x;
+}
+void ExprHslToRgb(double hsl[3], out precise double o[3]) {
+    precise double H = hsl[0];
+    precise double S = hsl[1];
+    precise double L = hsl[2];
+    if (S <= 0.0LF) { o[0] = L; o[1] = L; o[2] = L; return; }
+    precise double y;
+    if (L < 0.5LF) y = S > 1.0LF ? 2.0LF * L + S - 1.0LF : L + L * S;
+    else           y = S > 1.0LF ? S : L + S - L * S;
+    precise double x = 2.0LF * L - y;
+    o[0] = ExprHslValue(x, y, H + (1.0LF / 3.0LF));
+    o[1] = ExprHslValue(x, y, H);
+    o[2] = ExprHslValue(x, y, H - (1.0LF / 3.0LF));
+}
+void ExprSaturate(double Cin[3], double amt, out precise double o[3]) {
+    precise double lum0 = 0.2126LF;
+    precise double lum1 = 0.7152LF;
+    precise double lum2 = 0.0722LF;
+    precise double d = Cin[0] * lum0 + Cin[1] * lum1 + Cin[2] * lum2;
+    for (int i = 0; i < 3; ++i) {
+        o[i] = d * (1.0LF - amt) + Cin[i] * amt;
+        if (o[i] < 0.0LF) o[i] = 0.0LF;
+    }
+}
+void ExprHsiAdjust(double rgb[3], double h, double s, double i, out precise double o[3]) {
+    precise double hsl[3];
+    ExprRgbToHsl(rgb, hsl);
+    hsl[0] += h * (1.0LF / 360.0LF);
+    hsl[1] *= s;
+    ExprHslToRgb(hsl, o);
+    o[0] *= i; o[1] *= i; o[2] *= i;
+}
+void ExprHsi(double rgb[3], double h, double s, double i, double m, out precise double o[3]) {
+    h *= m;
+    s = (s - 1.0LF) * m + 1.0LF;
+    i = (i - 1.0LF) * m + 1.0LF;
+    ExprHsiAdjust(rgb, h, s, i, o);
+}
+// ExprMidHsi: host-evaluated (see above).
+
+// ---------------------------------------------------------------------------
+// Noise (SeExpr2/Noise.cpp, the double instantiation)
+// ---------------------------------------------------------------------------
+
+precise double ExprSCurve(double t) {
+    return t * t * t * (t * (6.0LF * t - 15.0LF) + 10.0LF);
+}
+
+uint ExprHashReduceChar3(int index[3]) {
+    uint seed = 0u;
+    for (int k = 0; k < 3; k++) {
+        uint M = 1664525u;
+        uint C = 1013904223u;
+        seed = seed * M + uint(index[k]) + C;
+    }
+    seed ^= (seed >> 11u);
+    seed ^= (seed << 7u) & 0x9d2c5680u;
+    seed ^= (seed << 15u) & 0xefc60000u;
+    seed ^= (seed >> 18u);
+    return ((((seed & 0xff0000u) >> 4u) + (seed & 0xffu)) & 0xffu);
+}
+
+uint ExprHashReduce3(uint index[3]) {
+    uint i = 0u;
+    for (int k = 0; k < 3; k++) {
+        uint M = 1664525u;
+        uint C = 1013904223u;
+        i = i * M + index[k] + C;
+    }
+    i ^= (i >> 11u);
+    i ^= (i << 7u) & 0x9d2c5680u;
+    i ^= (i << 15u) & 0xefc60000u;
+    i ^= (i >> 18u);
+    uint c0 = i & 0xffu;
+    uint c1 = (i >> 8u) & 0xffu;
+    uint c2 = (i >> 16u) & 0xffu;
+    uint c3 = (i >> 24u) & 0xffu;
+    uint o3 = uint(NoiseP514(int(c0)));
+    uint o2 = uint(NoiseP514(int(c1) + int(o3 & 0xffu)));
+    uint o1 = uint(NoiseP514(int(c2) + int(o2 & 0xffu)));
+    uint o0 = uint(NoiseP514(int(c3) + int(o1 & 0xffu)));
+    return ((o3 & 0xffu) << 24u) | ((o2 & 0xffu) << 16u) | ((o1 & 0xffu) << 8u) | (o0 & 0xffu);
+}
+
+precise double ExprNoiseHelper3(double X[3], int period[3], bool hasPeriod) {
+    precise double weights0[3];
+    precise double weights1[3];
+    int index[3];
+    for (int k = 0; k < 3; k++) {
+        precise double f = floor(X[k]);
+        index[k] = ExprInt(f);
+        if (hasPeriod) {
+            index[k] %= period[k];
+            if (index[k] < 0) index[k] += period[k];
+        }
+        weights0[k] = X[k] - f;
+        weights1[k] = weights0[k] - 1.0LF;
+    }
+    precise double vals[8];
+    for (int dummy = 0; dummy < 8; dummy++) {
+        int latticeIndex[3];
+        int offset[3];
+        for (int k = 0; k < 3; k++) {
+            offset[k] = ((dummy & (1 << k)) != 0) ? 1 : 0;
+            latticeIndex[k] = index[k] + offset[k];
+        }
+        int lookup = int(ExprHashReduceChar3(latticeIndex));
+        precise double val = 0.0LF;
+        for (int k = 0; k < 3; k++) {
+            precise double w = offset[k] != 0 ? weights1[k] : weights0[k];
+            val += NoiseG3(lookup, k) * w;
+        }
+        vals[dummy] = val;
+    }
+    precise double alphas[3];
+    for (int k = 0; k < 3; k++) alphas[k] = ExprSCurve(weights0[k]);
+    for (int newd = 2; newd >= 0; newd--) {
+        int newnum = 1 << newd;
+        int k = (3 - newd - 1);
+        precise double alpha = alphas[k];
+        precise double beta = 1.0LF - alphas[k];
+        for (int dummy = 0; dummy < newnum; dummy++) {
+            int i = dummy * (1 << (3 - newd));
+            int otherIndex = i + (1 << k);
+            vals[i] = beta * vals[i] + alpha * vals[otherIndex];
+        }
+    }
+    return vals[0];
+}
+
+void ExprNoise3(double inArg[3], int dOut, out precise double o[3]) {
+    precise double P[3];
+    P[0] = inArg[0]; P[1] = inArg[1]; P[2] = inArg[2];
+    int unused[3];
+    unused[0] = 0; unused[1] = 0; unused[2] = 0;
+    int i = 0;
+    while (true) {
+        o[i] = ExprNoiseHelper3(P, unused, false);
+        if (++i >= dOut) break;
+        for (int k = 0; k < dOut; k++) P[k] += 1000.0LF;
+    }
+}
+
+precise double ExprPNoise3(double inArg[3], double period[3]) {
+    int p[3];
+    for (int k = 0; k < 3; ++k) {
+        int truncated = ExprInt(period[k]);
+        p[k] = truncated < 1 ? 1 : truncated;
+    }
+    precise double P[3];
+    P[0] = inArg[0]; P[1] = inArg[1]; P[2] = inArg[2];
+    return ExprNoiseHelper3(P, p, true);
+}
+
+void ExprCellNoise3(double inArg[3], int dOut, out precise double o[3]) {
+    uint index[3];
+    for (int k = 0; k < 3; k++) index[k] = ExprUInt32Wrap(floor(inArg[k]));
+    int dim = 0;
+    while (true) {
+        o[dim] = double(ExprHashReduce3(index)) * (1.0LF / 4294967295.0LF);
+        if (++dim >= dOut) break;
+        for (int k = 0; k < 3; k++) index[k] += 1000u;
+    }
+}
+
+void ExprFbm3(double inArg[3], int dOut, bool turbulence, int octaves,
+              double lacunarity, double gain, out precise double o[3]) {
+    precise double P[3];
+    P[0] = inArg[0]; P[1] = inArg[1]; P[2] = inArg[2];
+    precise double scale = 1.0LF;
+    for (int k = 0; k < dOut; k++) o[k] = 0.0LF;
+    int octave = 0;
+    while (true) {
+        precise double localResult[3];
+        localResult[0] = 0.0LF; localResult[1] = 0.0LF; localResult[2] = 0.0LF;
+        ExprNoise3(P, dOut, localResult);
+        for (int k = 0; k < dOut; k++)
+            o[k] += (turbulence ? abs(localResult[k]) : localResult[k]) * scale;
+        if (++octave >= octaves) break;
+        scale *= gain;
+        for (int k = 0; k < 3; k++) { P[k] *= lacunarity; P[k] += 1234.0LF; }
+    }
+}
+
+// The Call argument block lives in this global so variadic builtins never
+// copy it through value array parameters.
+double g_argv[256];
+int g_argn;
+
+precise double ExprHashBlock(int n) {
+    uint seed = 0u;
+    for (int i = 0; i < n; i++) {
+        int exponent = 0;
+        precise double frac = frexp(g_argv[i] * (2.71828182845904523536LF * 3.14159265358979323846LF), exponent);
+        uint s = ExprUInt32Wrap(frac * 4294967295.0LF) ^ uint(exponent);
+        uint M = 1664525u;
+        uint C = 1013904223u;
+        seed = seed * M + s + C;
+    }
+    seed ^= (seed >> 11u);
+    seed ^= (seed << 7u) & 0x9d2c5680u;
+    seed ^= (seed << 15u) & 0xefc60000u;
+    seed ^= (seed >> 18u);
+    uint c0 = seed & 0xffu;
+    uint c1 = (seed >> 8u) & 0xffu;
+    uint c2 = (seed >> 16u) & 0xffu;
+    uint c3 = (seed >> 24u) & 0xffu;
+    uint o3 = HashP256(int(c0));
+    uint o2 = HashP256((int(c1) + int(o3)) & 0xff);
+    uint o1 = HashP256((int(c2) + int(o2)) & 0xff);
+    uint o0 = HashP256((int(c3) + int(o1)) & 0xff);
+    uint o = (o3 << 24u) | (o2 << 16u) | (o1 << 8u) | o0;
+    return double(o) * (1.0LF / 4294967295.0LF);
+}
+
+// ---------------------------------------------------------------------------
+// Voronoi
+// ---------------------------------------------------------------------------
+
+double g_vpoints[27 * 3];
+
+void ExprVoronoiPoints(double cell[3], double jitter) {
+    int n = 0;
+    for (int di = -1; di <= 1; ++di)
+        for (int dj = -1; dj <= 1; ++dj)
+            for (int dk = -1; dk <= 1; ++dk, ++n) {
+                precise double testcell[3];
+                testcell[0] = cell[0] + double(di);
+                testcell[1] = cell[1] + double(dj);
+                testcell[2] = cell[2] + double(dk);
+                precise double cc[3];
+                cc[0] = 0.0LF; cc[1] = 0.0LF; cc[2] = 0.0LF;
+                ExprCellNoise3(testcell, 3, cc);
+                for (int c = 0; c < 3; ++c)
+                    g_vpoints[n * 3 + c] = testcell[c] + jitter * (cc[c] - 0.5LF);
+            }
+}
+
+void ExprVoronoiF1(double p[3], double jitter, out double f1, out precise double pos1[3]) {
+    // Define the out-param on every path: `out` lowers to an uninitialized
+    // temp, and the NaN-input path below never stores (callers read
+    // unconditionally). Zero matches the callers' pre-zero intent.
+    pos1[0] = 0.0LF; pos1[1] = 0.0LF; pos1[2] = 0.0LF;
+    precise double thiscell[3];
+    thiscell[0] = floor(p[0]) + 0.5LF;
+    thiscell[1] = floor(p[1]) + 0.5LF;
+    thiscell[2] = floor(p[2]) + 0.5LF;
+    ExprVoronoiPoints(thiscell, jitter);
+    precise double best = 1000.0LF;
+    for (int i = 0; i < 27; ++i) {
+        precise double ox = g_vpoints[i * 3 + 0] - p[0];
+        precise double oy = g_vpoints[i * 3 + 1] - p[1];
+        precise double oz = g_vpoints[i * 3 + 2] - p[2];
+        precise double d = ox * ox + oy * oy + oz * oz;
+        if (d < best) {
+            best = d;
+            pos1[0] = g_vpoints[i * 3 + 0];
+            pos1[1] = g_vpoints[i * 3 + 1];
+            pos1[2] = g_vpoints[i * 3 + 2];
+        }
+    }
+    f1 = sqrt(best);
+}
+
+void ExprVoronoiF1F2(double p[3], double jitter, out double f1, out precise double pos1[3],
+                     out double f2, out precise double pos2[3]) {
+    // Define the out-params on every path: iteration 0 copies pos1 into
+    // pos2 before pos1 is stored, and NaN inputs store nothing (callers
+    // read unconditionally). Zero matches the callers' pre-zero intent.
+    pos1[0] = 0.0LF; pos1[1] = 0.0LF; pos1[2] = 0.0LF;
+    pos2[0] = 0.0LF; pos2[1] = 0.0LF; pos2[2] = 0.0LF;
+    precise double thiscell[3];
+    thiscell[0] = floor(p[0]) + 0.5LF;
+    thiscell[1] = floor(p[1]) + 0.5LF;
+    thiscell[2] = floor(p[2]) + 0.5LF;
+    ExprVoronoiPoints(thiscell, jitter);
+    precise double b1 = 1000.0LF;
+    precise double b2 = 1000.0LF;
+    for (int i = 0; i < 27; ++i) {
+        precise double ox = g_vpoints[i * 3 + 0] - p[0];
+        precise double oy = g_vpoints[i * 3 + 1] - p[1];
+        precise double oz = g_vpoints[i * 3 + 2] - p[2];
+        precise double d = ox * ox + oy * oy + oz * oz;
+        if (d < b1) {
+            b2 = b1;
+            pos2[0] = pos1[0]; pos2[1] = pos1[1]; pos2[2] = pos1[2];
+            b1 = d;
+            pos1[0] = g_vpoints[i * 3 + 0];
+            pos1[1] = g_vpoints[i * 3 + 1];
+            pos1[2] = g_vpoints[i * 3 + 2];
+        } else if (d < b2) {
+            b2 = d;
+            pos2[0] = g_vpoints[i * 3 + 0];
+            pos2[1] = g_vpoints[i * 3 + 1];
+            pos2[2] = g_vpoints[i * 3 + 2];
+        }
+    }
+    f1 = sqrt(b1);
+    f2 = sqrt(b2);
+}
+
+void ExprVoronoiWarp(double p[3], double fbmScale, double fbmOctaves,
+                     double fbmLacunarity, double fbmGain, out precise double o[3]) {
+    o[0] = p[0]; o[1] = p[1]; o[2] = p[2];
+    if (!(fbmScale > 0.0LF)) return;
+    precise double doubled[3];
+    doubled[0] = 2.0LF * p[0]; doubled[1] = 2.0LF * p[1]; doubled[2] = 2.0LF * p[2];
+    precise double warp[3];
+    warp[0] = 0.0LF; warp[1] = 0.0LF; warp[2] = 0.0LF;
+    ExprFbm3(doubled, 3, false, ExprInt(ExprClamp(fbmOctaves, 1.0LF, 8.0LF)),
+             fbmLacunarity, fbmGain, warp);
+    for (int i = 0; i < 3; ++i) o[i] += fbmScale * warp[i];
+}
+
+precise double ExprVoronoi(double v[3], double typeArg, double jitterArg, double fbmScale,
+                   double fbmOctaves, double fbmLacunarity, double fbmGain) {
+    int type = ExprInt(typeArg);
+    precise double jitter = ExprClamp(jitterArg, 1e-3LF, 1.0LF);
+    precise double p[3];
+    ExprVoronoiWarp(v, fbmScale, fbmOctaves, fbmLacunarity, fbmGain, p);
+    precise double f1 = 0.0LF;
+    precise double f2 = 0.0LF;
+    precise double pos1[3];
+    precise double pos2[3];
+    pos1[0] = 0.0LF; pos1[1] = 0.0LF; pos1[2] = 0.0LF;
+    pos2[0] = 0.0LF; pos2[1] = 0.0LF; pos2[2] = 0.0LF;
+    if (type >= 3) ExprVoronoiF1F2(p, jitter, f1, pos1, f2, pos2);
+    else           ExprVoronoiF1(p, jitter, f1, pos1);
+    if (type == 1) {
+        precise double shifted[3];
+        shifted[0] = pos1[0] + 10.0LF; shifted[1] = pos1[1]; shifted[2] = pos1[2];
+        precise double cell = 0.0LF;
+        precise double cellOut[3];
+        cellOut[0] = 0.0LF; cellOut[1] = 0.0LF; cellOut[2] = 0.0LF;
+        ExprCellNoise3(shifted, 1, cellOut);
+        cell = cellOut[0];
+        return cell;
+    }
+    if (type == 2) return f1;
+    if (type == 3) return f2;
+    if (type == 4) return f2 - f1;
+    if (type == 5) {
+        precise double d21[3];
+        precise double d1p[3];
+        precise double d2p[3];
+        d21[0] = pos2[0] - pos1[0]; d21[1] = pos2[1] - pos1[1]; d21[2] = pos2[2] - pos1[2];
+        d1p[0] = pos1[0] - p[0]; d1p[1] = pos1[1] - p[1]; d1p[2] = pos1[2] - p[2];
+        d2p[0] = pos2[0] - p[0]; d2p[1] = pos2[1] - p[1]; d2p[2] = pos2[2] - p[2];
+        precise double scalefactor =
+            NarrowToFloat(ExprLength3(d21) / (ExprLength3(d1p) + ExprLength3(d2p)));
+        return ExprSmoothStep(f2 - f1, 0.0LF, 0.1LF * scalefactor);
+    }
+    return 0.0LF;
+}
+
+void ExprCVoronoi(double v[3], double typeArg, double jitterArg, double fbmScale,
+                  double fbmOctaves, double fbmLacunarity, double fbmGain,
+                  out precise double o[3]) {
+    int type = ExprInt(typeArg);
+    precise double jitter = ExprClamp(jitterArg, 1e-3LF, 1.0LF);
+    precise double p[3];
+    ExprVoronoiWarp(v, fbmScale, fbmOctaves, fbmLacunarity, fbmGain, p);
+    precise double f1 = 0.0LF;
+    precise double f2 = 0.0LF;
+    precise double pos1[3];
+    precise double pos2[3];
+    pos1[0] = 0.0LF; pos1[1] = 0.0LF; pos1[2] = 0.0LF;
+    pos2[0] = 0.0LF; pos2[1] = 0.0LF; pos2[2] = 0.0LF;
+    if (type >= 3) ExprVoronoiF1F2(p, jitter, f1, pos1, f2, pos2);
+    else           ExprVoronoiF1(p, jitter, f1, pos1);
+    precise double color[3];
+    color[0] = 0.0LF; color[1] = 0.0LF; color[2] = 0.0LF;
+    ExprCellNoise3(pos1, 3, color);
+    if (type == 1) { o[0] = color[0]; o[1] = color[1]; o[2] = color[2]; return; }
+    if (type == 2) { for (int i = 0; i < 3; ++i) o[i] = f1 * color[i]; return; }
+    if (type == 3) { for (int i = 0; i < 3; ++i) o[i] = f2 * color[i]; return; }
+    if (type == 4) { for (int i = 0; i < 3; ++i) o[i] = (f2 - f1) * color[i]; return; }
+    if (type == 5) {
+        precise double d21[3];
+        precise double d1p[3];
+        precise double d2p[3];
+        d21[0] = pos2[0] - pos1[0]; d21[1] = pos2[1] - pos1[1]; d21[2] = pos2[2] - pos1[2];
+        d1p[0] = pos1[0] - p[0]; d1p[1] = pos1[1] - p[1]; d1p[2] = pos1[2] - p[2];
+        d2p[0] = pos2[0] - p[0]; d2p[1] = pos2[1] - p[1]; d2p[2] = pos2[2] - p[2];
+        precise double scalefactor =
+            NarrowToFloat(ExprLength3(d21) / (ExprLength3(d1p) + ExprLength3(d2p)));
+        precise double blend = ExprSmoothStep(f2 - f1, 0.0LF, 0.1LF * scalefactor);
+        for (int i = 0; i < 3; ++i) o[i] = blend * color[i];
+        return;
+    }
+    o[0] = 0.0LF; o[1] = 0.0LF; o[2] = 0.0LF;
+}
+
+void ExprPVoronoi(double v[3], double jitterArg, double fbmScale, double fbmOctaves,
+                  double fbmLacunarity, double fbmGain, out precise double o[3]) {
+    precise double jitter = ExprClamp(jitterArg, 1e-3LF, 1.0LF);
+    precise double p[3];
+    ExprVoronoiWarp(v, fbmScale, fbmOctaves, fbmLacunarity, fbmGain, p);
+    precise double f1 = 0.0LF;
+    ExprVoronoiF1(p, jitter, f1, o);
+}
+
+// ---------------------------------------------------------------------------
+// Variations over the Call argument block (g_argv, n = g_argn)
+// ---------------------------------------------------------------------------
+
+precise double ExprSplineBlock(int n) {
+    if (n < 5) return 0.0LF;
+    precise double u = ExprClamp(g_argv[0], 0.0LF, 1.0LF);
+    if (u == 0.0LF) return g_argv[2];
+    if (u == 1.0LF) return g_argv[n - 2];
+    int nsegs = n - 4;
+    precise double seg = 0.0LF;
+    u = modf(u * double(nsegs), seg);
+    precise double p0 = g_argv[ExprInt(seg) + 1];
+    precise double p1 = g_argv[ExprInt(seg) + 2];
+    precise double p2 = g_argv[ExprInt(seg) + 3];
+    precise double p3 = g_argv[ExprInt(seg) + 4];
+    precise double u2 = u * u;
+    precise double u3 = u2 * u;
+    return 0.5LF * (p0 * (-u3 + 2.0LF * u2 - u) + p1 * (3.0LF * u3 - 5.0LF * u2 + 2.0LF) +
+                  p2 * (-3.0LF * u3 + 4.0LF * u2 + u) + p3 * (u3 - u2));
+}
+
+precise double ExprChooseBlock(int n) {
+    if (n < 3) return 0.0LF;
+    precise double key = g_argv[0];
+    if (key != key) return 0.0LF;
+    int nvals = n - 1;
+    return g_argv[1 + ExprInt(ExprClamp(key * double(nvals), 0.0LF, double(nvals - 1)))];
+}
+
+precise double WChooseCutoff(int upto) {
+    precise double sum = 0.0LF;
+    for (int k = 0; k <= upto; ++k) sum += g_argv[k * 2 + 2];
+    return sum;
+}
+
+precise double ExprWChooseBlock(int n) {
+    if (n < 5) return 0.0LF;
+    precise double key = g_argv[0];
+    if (key != key) return 0.0LF;
+    int nvals = (n - 1) / 2;
+    precise double total = 0.0LF;
+    for (int i = 0; i < nvals; i++) total += g_argv[i * 2 + 2];
+    if (total == 0.0LF) return g_argv[1];
+    key *= total;
+    int lo = 0;
+    int hi = nvals - 1;
+    while (lo < hi) {
+        int m = (lo + hi) / 2;
+        if (key <= WChooseCutoff(m)) hi = m; else lo = m + 1;
+    }
+    if (g_argv[lo * 2 + 2] == 0.0LF) {
+        if (lo > 0 && WChooseCutoff(lo) > 0.0LF) { while (--lo > 0 && g_argv[lo * 2 + 2] == 0.0LF) {} }
+        else if (lo < nvals - 1) { while (++lo < nvals - 1 && g_argv[lo * 2 + 2] == 0.0LF) {} }
+    }
+    return g_argv[lo * 2 + 1];
+}
+
+precise double ExprPickBlock(int n) {
+    if (n < 3) return 0.0LF;
+    int savedN = g_argn;
+    g_argn = 1;
+    precise double hashIndex = ExprHashBlock(1);
+    g_argn = savedN;
+    precise double index = hashIndex;
+    int loRange = ExprInt(g_argv[1]);
+    int hiRange = ExprInt(g_argv[2]);
+    int range = hiRange - loRange + 1;
+    if (range <= 0 || range > 4096) return double(loRange);
+    int numWeights = n - 3;
+    if (numWeights > range) numWeights = range;
+    precise double total = 0.0LF;
+    for (int i = 0; i < range; i++) total += i < numWeights ? g_argv[i + 3] : 1.0LF;
+    if (total == 0.0LF) return double(loRange);
+    index *= total;
+    int lo = 0;
+    int hi = range - 1;
+    while (lo < hi) {
+        int m = (lo + hi) / 2;
+        precise double sum = 0.0LF;
+        for (int k = 0; k <= m; ++k) sum += k < numWeights ? g_argv[k + 3] : 1.0LF;
+        if (index <= sum) hi = m; else lo = m + 1;
+    }
+    precise double wlo = lo < numWeights ? g_argv[lo + 3] : 1.0LF;
+    if (wlo == 0.0LF) {
+        precise double closum = 0.0LF;
+        for (int k = 0; k <= lo; ++k) closum += k < numWeights ? g_argv[k + 3] : 1.0LF;
+        if (lo > 0 && closum > 0.0LF) {
+            bool stop = false;
+            while (--lo > 0 && !stop) {
+                precise double w = lo < numWeights ? g_argv[lo + 3] : 1.0LF;
+                if (w != 0.0LF) stop = true;
+            }
+        } else if (lo < range - 1) {
+            bool stop = false;
+            while (++lo < range - 1 && !stop) {
+                precise double w = lo < numWeights ? g_argv[lo + 3] : 1.0LF;
+                if (w != 0.0LF) stop = true;
+            }
+        }
+    }
+    return double(loRange + lo);
+}
+
+// ---------------------------------------------------------------------------
+// curve()/ccurve() over the Call argument block
+// ---------------------------------------------------------------------------
+
+precise double ExprCurveBlock(int n, int stride, int channel) {
+    if (stride < 4 || n < 2 + 2 * stride) return 0.0LF;
+    int channels = (stride - 2) / 2;
+    if (channel < 0 || channel >= channels) return 0.0LF;
+    precise double param = g_argv[0];
+    int count = ExprInt(g_argv[1]);
+    if (count < 2 || 2 + count * stride > n) return 0.0LF;
+    int index = count;
+    for (int i = 0; i < count; ++i) {
+        if (param < g_argv[2 + i * stride + 0]) { index = i; break; }
+    }
+    if (index < 1) index = 1;
+    if (index > count - 1) index = count - 1;
+    // The host keeps the narrowed knots in float variables and ExprCurveEval
+    // subtracts them in float ((t1 - t0) is a 32-bit op); the division and
+    // the numerator are double. NarrowToFloat recovers the narrowed values
+    // bit-exactly, and the subtraction below stays in float to match.
+    // float() of an already-float-exact double is value-preserving on every
+    // driver (there is no rounding left to fold away); only the widenings
+    // and the genuine f32 subtraction remain, exactly like the Store path.
+    float t0 = float(NarrowToFloat(g_argv[2 + (index - 1) * stride + 0]));
+    float t1 = float(NarrowToFloat(g_argv[2 + index * stride + 0]));
+    precise double k0 = g_argv[2 + (index - 1) * stride + 2 + channel];
+    precise double k1 = g_argv[2 + index * stride + 2 + channel];
+    int interp = ExprInt(g_argv[2 + (index - 1) * stride + 1]);
+    if (interp == 0) return k0;
+    if (interp == 1) {
+        precise double u = (param - double(t0)) / double(t1 - t0);
+        return k0 + u * (k1 - k0);
+    }
+    if (interp == 2) {
+        precise double u = (param - double(t0)) / double(t1 - t0);
+        return k0 * (u - 1.0LF) * (u - 1.0LF) * (2.0LF * u + 1.0LF) + k1 * u * u * (3.0LF - 2.0LF * u);
+    }
+    if (interp == 3 || interp == 4) {
+        precise double x = param - g_argv[2 + (index - 1) * stride + 0];
+        precise double h = g_argv[2 + index * stride + 0] - g_argv[2 + (index - 1) * stride + 0];
+        precise double y = k0;
+        precise double delta = k1 - k0;
+        precise double d1 = g_argv[2 + (index - 1) * stride + 2 + channels + channel];
+        precise double d2 = g_argv[2 + index * stride + 2 + channels + channel];
+        return (x * (delta * (3.0LF * h - 2.0LF * x) * x + h * (-h + x) * (-(d1 * h) + (d1 + d2) * x))) /
+                   (h * h * h) + y;
+    }
+    return 0.0LF;
+}
+
+void Block3(uint base, out precise double v[3]) {
+    v[0] = g_argv[base]; v[1] = g_argv[base + 1u]; v[2] = g_argv[base + 2u];
+}
+
+// One SeExpr2 builtin over g_argv (irExec.h ExprCall, verbatim case order).
+precise double ExprCall(uint func, uint component) {
+    precise double v[3];
+    v[0] = 0.0LF; v[1] = 0.0LF; v[2] = 0.0LF;
+    precise double a[3];
+    precise double b[3];
+    if (func == 1u) return ExprExpand(g_argv[0], g_argv[1], g_argv[2]);
+    if (func == 4u) return ExprBoxStep(g_argv[0], g_argv[1]);
+    if (func == 5u) return ExprLinearStep(g_argv[0], g_argv[1], g_argv[2]);
+    if (func == 6u) return ExprSmoothStep(g_argv[0], g_argv[1], g_argv[2]);
+    if (func == 9u) return ExprCycle(g_argv[0], g_argv[1], g_argv[2]);
+    if (func == 10u) return ExprHashBlock(g_argn);
+    if (func == 11u) { Block3(0u, a); ExprNoise3(a, 1, v); return 0.5LF * v[0] + 0.5LF; }
+    if (func == 12u) { Block3(0u, a); ExprNoise3(a, 1, v); return v[0]; }
+    if (func == 13u) { Block3(0u, a); ExprNoise3(a, 3, v); return v[component]; }
+    if (func == 14u) { Block3(0u, a); ExprNoise3(a, 3, v); return 0.5LF * v[component] + 0.5LF; }
+    if (func == 15u) { Block3(0u, a); Block3(3u, b); return ExprPNoise3(a, b); }
+    if (func == 16u) { Block3(0u, a); ExprCellNoise3(a, 1, v); return v[0]; }
+    if (func == 17u) { Block3(0u, a); ExprCellNoise3(a, 3, v); return v[component]; }
+    if (func == 18u) {
+        Block3(0u, a);
+        ExprFbm3(a, 1, false, ExprInt(ExprClamp(g_argv[3], 1.0LF, 8.0LF)), g_argv[4], g_argv[5], v);
+        return 0.5LF * v[0] + 0.5LF;
+    }
+    if (func == 19u) {
+        Block3(0u, a);
+        ExprFbm3(a, 3, false, ExprInt(ExprClamp(g_argv[3], 1.0LF, 8.0LF)), g_argv[4], g_argv[5], v);
+        return v[component];
+    }
+    if (func == 20u) {
+        Block3(0u, a);
+        ExprFbm3(a, 3, false, ExprInt(ExprClamp(g_argv[3], 1.0LF, 8.0LF)), g_argv[4], g_argv[5], v);
+        return v[component] * 0.5LF + 0.5LF;
+    }
+    if (func == 21u) {
+        Block3(0u, a);
+        ExprFbm3(a, 1, true, ExprInt(ExprClamp(g_argv[3], 1.0LF, 8.0LF)), g_argv[4], g_argv[5], v);
+        return 0.5LF * v[0] + 0.5LF;
+    }
+    if (func == 22u) {
+        Block3(0u, a);
+        ExprFbm3(a, 3, true, ExprInt(ExprClamp(g_argv[3], 1.0LF, 8.0LF)), g_argv[4], g_argv[5], v);
+        return v[component];
+    }
+    if (func == 23u) {
+        Block3(0u, a);
+        ExprFbm3(a, 3, true, ExprInt(ExprClamp(g_argv[3], 1.0LF, 8.0LF)), g_argv[4], g_argv[5], v);
+        return v[component] * 0.5LF + 0.5LF;
+    }
+    if (func == 24u) {
+        Block3(0u, a);
+        return ExprVoronoi(a, g_argv[3], g_argv[4], g_argv[5], g_argv[6], g_argv[7], g_argv[8]);
+    }
+    if (func == 25u) {
+        Block3(0u, a);
+        ExprCVoronoi(a, g_argv[3], g_argv[4], g_argv[5], g_argv[6], g_argv[7], g_argv[8], v);
+        return v[component];
+    }
+    if (func == 26u) {
+        Block3(0u, a);
+        ExprPVoronoi(a, g_argv[3], g_argv[4], g_argv[5], g_argv[6], g_argv[7], v);
+        return v[component];
+    }
+    if (func == 27u) { Block3(0u, a); Block3(3u, b); return ExprDist(a, b); }
+    if (func == 28u) { Block3(0u, a); return ExprLength3(a); }
+    if (func == 29u) { Block3(0u, a); Block3(3u, b); return ExprDot(a, b); }
+    if (func == 30u) { Block3(0u, a); Block3(3u, b); ExprCross(a, b, v); return v[component]; }
+    if (func == 31u) { Block3(0u, a); ExprNorm(a, v); return v[component]; }
+    if (func == 33u) { Block3(0u, a); Block3(3u, b); ExprOrtho(a, b, v); return v[component]; }
+    if (func == 36u) { Block3(0u, a); ExprRgbToHsl(a, v); return v[component]; }
+    if (func == 37u) { Block3(0u, a); ExprHslToRgb(a, v); return v[component]; }
+    if (func == 38u) { Block3(0u, a); ExprSaturate(a, g_argv[3], v); return v[component]; }
+    if (func == 39u) {
+        Block3(0u, a);
+        ExprHsi(a, g_argv[3], g_argv[4], g_argv[5], g_argv[6], v);
+        return v[component];
+    }
+    // funcs 2,3,7,8,32,34,35,40 are host-evaluated (see above).
+    if (func == 41u) return ExprSplineBlock(g_argn);
+    if (func == 42u) return ExprChooseBlock(g_argn);
+    if (func == 43u) return ExprWChooseBlock(g_argn);
+    if (func == 44u) return ExprPickBlock(g_argn);
+    if (func == 45u) return ExprCurveBlock(g_argn, 4, 0);
+    if (func == 46u) return ExprCurveBlock(g_argn, 8, int(component));
+    return QNaN();
+}
+
+// ---------------------------------------------------------------------------
+// Variable reads (irExec.h ReadVariable)
+// ---------------------------------------------------------------------------
+
+precise double ReadVariable(uint variable, uint component, uint index) {
+    if (variable == 2u) return G_frame;
+    if (variable == 3u) return G_time;
+    if (variable == 4u) return double(index);
+    if (variable == 5u) return double(G_count);
+    if (variable == 6u) return double(G_seed);
+    if (variable == 7u) return double(G_descId);
+    if (variable == 0u || variable >= G_varCount)
+        return QNaN();
+    uint entry = G_tableOffset + variable * 16u;
+    uint offLo = RdU(entry);
+    uint offHi = RdU(entry + 4u);
+    uint fieldCount = RdU(entry + 8u);
+    uint domComp = RdU(entry + 12u);
+    uint fieldDomain = domComp & 0xffu;
+    uint fieldComponents = (domComp >> 8u) & 0xffu;
+    if (offLo != 0xFFFFFFFFu || offHi != 0xFFFFFFFFu) {
+        if (component >= fieldComponents)
+            return QNaN();
+        uint element = index;
+        if (fieldDomain == 1u) {
+            element = 0u;
+        } else if (fieldDomain == 2u && G_domain == 4u) {
+            if (index >= G_count)
+                return QNaN();
+            element = owners[index];
+        } else if (fieldDomain != G_domain) {
+            return QNaN();
+        }
+        uint64_t base = (uint64_t(offHi) << 32u) | uint64_t(offLo);
+        uint64_t at = base + uint64_t(element) * uint64_t(fieldComponents) + uint64_t(component);
+        if (element < fieldCount) return fieldData[uint(at)];
+    }
+    return QNaN();
+}
+
+// ---------------------------------------------------------------------------
+// Destination conversion (irExec.h Store). Only finite inputs reach the
+// half conversion; an overflow returns the infinity encoding so the caller
+// rejects exactly as the device lane does.
+// ---------------------------------------------------------------------------
+
+precise double RoundEven(double x) {
+    precise double f = floor(x);
+    precise double d = x - f;
+    if (d < 0.5LF) return f;
+    if (d > 0.5LF) return f + 1.0LF;
+    precise double q = f / 2.0LF;
+    return (q == floor(q)) ? f : f + 1.0LF;
+}
+
+uint DoubleToHalfBits(double value) {
+    uint64_t dbits = doubleBitsToUint64(value);
+    uint sign = ((uint(dbits >> 32u) & 0x80000000u) != 0u) ? 0x8000u : 0u;
+    precise double mag = abs(value);
+    if (mag == 0.0LF) return sign;
+    int E = 0;
+    frexp(mag, E);
+    int e = E - 1;
+    if (e < -14) e = -15;
+    precise double scaled = RoundEven(ldexp(mag, 10 - e));
+    if (scaled >= 2048.0LF) { scaled *= 0.5LF; e += 1; }
+    if (e > 15) return sign | 0x7C00u;
+    uint mant = uint(scaled) & 0x3FFu;
+    if (e == -15 && scaled < 1024.0LF) return sign | mant;
+    return sign | (uint(e + 15) << 10u) | mant;
+}
+
+void Store64(uint slot, uint lo, uint hi) {
+    outWords[slot * 2u] = lo;
+    outWords[slot * 2u + 1u] = hi;
+}
+
+// Writes slot s; returns false for a value the destination cannot represent.
+bool Store(double value, uint s) {
+    if (G_outType == 9u) {
+        uint64_t raw = doubleBitsToUint64(value);
+        Store64(s, uint(raw & uint64_t(0xFFFFFFFFu)), uint(raw >> 32u));
+        return true;
+    }
+    if (!ExprFinite(value)) return false;
+    if (G_outType == 1u) {
+        if (value != 0.0LF && value != 1.0LF) return false;
+        Store64(s, value != 0.0LF ? 1u : 0u, 0u);
+        return true;
+    }
+    if (G_outType == 2u) {
+        if (trunc(value) != value || value < -2147483648.0LF || value > 2147483647.0LF)
+            return false;
+        Store64(s, uint(int(value)), 0u);
+        return true;
+    }
+    if (G_outType == 3u) {
+        if (trunc(value) != value || value < 0.0LF || value > 4294967295.0LF)
+            return false;
+        Store64(s, uint(value), 0u);
+        return true;
+    }
+    if (G_outType == 4u || G_outType == 5u) {
+        if (G_outType == 4u) {
+            if (trunc(value) != value || abs(value) > 9007199254740992.0LF) return false;
+        } else {
+            if (trunc(value) != value || value < 0.0LF || value > 9007199254740992.0LF)
+                return false;
+        }
+        precise double hi = floor(value / 4294967296.0LF);
+        precise double lo = value - hi * 4294967296.0LF;
+        uint hi32 = hi < 0.0LF ? uint(hi + 4294967296.0LF) : uint(hi);
+        Store64(s, uint(lo), hi32);
+        return true;
+    }
+    if (G_outType == 6u) {
+        uint halfBits = DoubleToHalfBits(value);
+        if ((halfBits & 0x7C00u) == 0x7C00u) return false;
+        Store64(s, halfBits, 0u);
+        return true;
+    }
+    if (G_outType == 7u) {
+        float converted = float(value);
+        if (isnan(converted) || isinf(converted)) return false;
+        Store64(s, floatBitsToUint(converted), 0u);
+        return true;
+    }
+    if (G_outType == 8u) {
+        uint64_t db = doubleBitsToUint64(value);
+        Store64(s, uint(db & uint64_t(0xFFFFFFFFu)), uint(db >> 32u));
+        return true;
+    }
+    return false;
+}
+
+// Trunc-based remainder (libm fmod). GLSL mod() is floor-based and differs
+// for opposite-sign operands. This expansion is bit-exact whenever x/y, n*y
+// and x-n*y are all exactly representable (every small-integer use, which is
+// what SeExpr programs pass); a libm-grade correctly rounded remainder for
+// huge operands would need multi-precision mantissa arithmetic, so those may
+// differ in the last bit. NaN/zero/inf edges match fmod: fmod(+-0,y)=+-0,
+// fmod(inf,y)=NaN, fmod(x,0)=NaN, fmod(x,inf)=x.
+precise double FmodD(double x, double y) {
+    if (isnan(x) || isnan(y)) return x + y;
+    if (isinf(x) || y == 0.0LF)
+        return QNaN();
+    if (x == 0.0LF) return x;
+    if (isinf(y)) return x;
+    precise double n = trunc(x / y);
+    return x - n * y;
+}
+
+// ---------------------------------------------------------------------------
+// ExecuteElement (irExec.h): runs the whole program for one element.
+// ---------------------------------------------------------------------------
+
+void main() {
+    G_instructionCount = RdU(0u);
+    uint resultReg = RdU(4u);
+    uint outReg0 = RdU(8u);
+    uint outReg1 = RdU(12u);
+    uint outReg2 = RdU(16u);
+    uint outReg3 = RdU(20u);
+    G_outputCount = RdU(24u);
+    G_outType = RdU(28u);
+    G_outComponents = RdU(32u);
+    G_count = RdU(36u);
+    G_primitiveCount = RdU(40u);
+    G_domain = RdU(44u);
+    G_seed = int(RdU(48u));
+    G_descId = RdU(52u);
+    G_varCount = RdU(56u);
+    G_tableOffset = RdU(60u);
+    G_frame = RdD(64u);
+    G_time = RdD(72u);
+    G_codeOffset = RdU(80u);
+    G_g3Offset = RdU(84u);
+    G_p514Offset = RdU(88u);
+    G_p256Offset = RdU(92u);
+
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= G_count) return;
+
+    precise double qnan = QNaN();
+    precise double r[256];
+    for (uint i = 0u; i < 256u; ++i) r[i] = qnan;
+
+    for (uint pc = 0u; pc < G_instructionCount; ++pc) {
+        uint base = G_codeOffset + pc * 24u;
+        uint op = RdU(base);
+        uint w1 = RdU(base + 4u);
+        uint w2 = RdU(base + 8u);
+        uint w3 = RdU(base + 12u);
+        precise double imm = RdD(base + 16u);
+        uint dst = w1 & 0xffffu;
+        uint a = (w1 >> 16u) & 0xffffu;
+        uint b = w2 & 0xffffu;
+        uint c = (w2 >> 16u) & 0xffffu;
+        uint variable = w3 & 0xffffu;
+        uint compare = (w3 >> 16u) & 0xffu;
+        uint component = (w3 >> 24u) & 0xffu;
+        precise double value = qnan;
+        if (op == 0u) {
+            value = imm;
+        } else if (op == 1u) {
+            value = ReadVariable(variable, component, index);
+        } else if (op == 24u) {
+            value = r[a];
+        } else if (op == 2u) {
+            value = r[a] + r[b];
+        } else if (op == 3u) {
+            value = r[a] - r[b];
+        } else if (op == 4u) {
+            value = r[a] * r[b];
+        } else if (op == 5u) {
+            value = r[a] / r[b];
+        } else if (op == 6u) {
+            value = -r[a];
+        } else if (op == 7u) {
+            if (ExprFinite(r[a]) && ExprFinite(r[b])) {
+                if (compare == 60u) value = r[a] < r[b] ? 1.0LF : 0.0LF;
+                else if (compare == 62u) value = r[a] > r[b] ? 1.0LF : 0.0LF;
+                else if (compare == 108u) value = r[a] <= r[b] ? 1.0LF : 0.0LF;
+                else if (compare == 103u) value = r[a] >= r[b] ? 1.0LF : 0.0LF;
+                else if (compare == 61u) value = r[a] == r[b] ? 1.0LF : 0.0LF;
+                else if (compare == 33u) value = r[a] != r[b] ? 1.0LF : 0.0LF;
+            }
+        } else if (op == 8u) {
+            if (ExprFinite(r[a])) value = r[a] != 0.0LF ? r[b] : r[c];
+        } else if (op == 9u) {
+            if (ExprFinite(r[a]) && ExprFinite(r[b])) value = min(r[a], r[b]);
+        } else if (op == 10u) {
+            if (ExprFinite(r[a]) && ExprFinite(r[b])) value = max(r[a], r[b]);
+        } else if (op == 11u) {
+            if (ExprFinite(r[a]) && ExprFinite(r[b]) && ExprFinite(r[c]) && r[b] <= r[c])
+                value = min(r[c], max(r[b], r[a]));
+        } else if (op == 12u) {
+            value = abs(r[a]);
+        } else if (op == 16u) {
+            value = sqrt(r[a]);
+        } else if (op == 19u) {
+            value = floor(r[a]);
+        } else if (op == 20u) {
+            value = ceil(r[a]);
+        } else if (op == 21u) {
+            value = FmodD(r[a], r[b]);
+        } else if (op == 33u) {
+            value = ExprRound(r[a]);
+        } else if (op == 34u) {
+            value = trunc(r[a]);
+        } else if (op == 35u) {
+            value = ExprHypot(r[a], r[b]);
+        } else if (op == 36u) {
+            for (uint i = 0u; i < b; ++i) g_argv[i] = r[a + i];
+            g_argn = int(b);
+            value = ExprCall(c, component);
+        }
+        // Host-evaluated ops (13,14,15,17,18,22,23,25-32) and op 37
+        // (Sample, no device table) fall through to NaN poison: the host
+        // splitter never sends them, and a poisoned NaN fails closed.
+        r[dst] = value;
+    }
+
+    uint outRegs[4];
+    outRegs[0] = outReg0; outRegs[1] = outReg1;
+    outRegs[2] = outReg2; outRegs[3] = outReg3;
+    for (uint k = 0u; k < G_outComponents; ++k) {
+        // Raw64 segments dump a consecutive register range for a host step;
+        // cooked segments publish the resolved output registers.
+        uint reg = G_outType == 9u ? outRegs[0] + k
+                                   : (k < G_outputCount ? outRegs[k] : resultReg);
+        if (!Store(r[reg], index * G_outComponents + k)) atomicOr(status, 1u);
+    }
+}

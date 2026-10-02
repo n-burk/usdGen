@@ -10,10 +10,12 @@
 
 namespace usdGen {
 
-// Defined by executionBackendCudaProvider.cpp.  Keeping this tiny provider
-// separate means the neutral backend contract does not include the CUDA
-// adapter header or know its capability-matrix type.
+// Defined by executionBackendCudaProvider.cpp /
+// executionBackendVulkanProvider.cpp. Keeping these tiny providers separate
+// means the neutral backend contract does not include a concrete adapter
+// header or know its capability-matrix type.
 uint32_t UsdGenCudaCapabilityVersionForBackendContract() noexcept;
+uint32_t UsdGenVulkanCapabilityVersionForBackendContract() noexcept;
 
 namespace {
 
@@ -159,9 +161,16 @@ UsdGenExecutionBackendContract GetUsdGenExecutionBackendContract(
                 "no Metal execution factory is linked", 0,
                 UsdGenExecutionBackendAvailability::Unavailable};
     case UsdGenExecutionBackend::Vulkan:
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+        return {backend, UsdGenDeviceBackend::Vulkan, "vulkan", "",
+                UsdGenVulkanCapabilityVersionForBackendContract(),
+                UsdGenExecutionBackendAvailability::Available};
+#else
         return {backend, UsdGenDeviceBackend::Vulkan, "vulkan",
-                "no Vulkan execution factory is linked", 0,
+                "Vulkan support was not enabled in this build",
+                UsdGenVulkanCapabilityVersionForBackendContract(),
                 UsdGenExecutionBackendAvailability::Unavailable};
+#endif
     case UsdGenExecutionBackend::Invalid: break;
     }
     return InvalidContract();

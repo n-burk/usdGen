@@ -112,7 +112,16 @@ struct UsdGenExecutionPipeline::Impl {
     const uint64_t commandCapacity;
     std::shared_ptr<void> commandIdentity = std::make_shared<char>();
     std::shared_ptr<std::atomic<bool>> closing = std::make_shared<std::atomic<bool>>(false);
-    tbb::flow::graph graph;
+    // External producers can post a completion while Drain observes an idle
+    // graph. TBB's default wait temporarily drops its root guard to zero and
+    // then resets it to one; admission in that gap can free the graph root.
+    // concurrent_wait preserves that guard through wait completion. Public
+    // Drain/Shutdown still require one external waiter, and user exceptions
+    // remain caught by the owner/worker bodies rather than cancelling TBB.
+    tbb::task_group_context graphContext{
+        tbb::task_group_context::isolated,
+        tbb::task_group_context::default_traits | tbb::task_group_context::concurrent_wait};
+    tbb::flow::graph graph{graphContext};
     Node owner;
     Node worker;
     // Owner-only state. The worker itself has an unbounded TBB input queue, so

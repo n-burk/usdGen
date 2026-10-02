@@ -1,0 +1,284 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// exprVkContext.comp — Vulkan port of the CUDA expression context kernels
+// (gpu/expressionContext.cu: Validate, BuildOwnersAndArc, BuildFields).
+//
+// One shader, two phases (host records phase 0, a compute barrier, phase 1):
+//   phase 0  validates geometry/channels, builds the point->primitive owners
+//            map and the per-point arc-length prefix (one thread per curve,
+//            sequential prefix within the curve, exactly as CUDA).
+//   phase 1  materializes one domain-specialized field set into the packed
+//            field buffer (one thread per element).
+//
+// The host owns materialization (which variables exist, at which doubles
+// offset): a table entry of UINT64_MAX means "unmaterialized, skip the
+// write", so reads of it stay NaN poison exactly as on CUDA (null field).
+// Reads of absent optional channels are gated by presentFlags; absent
+// channels bind a 4-byte dummy buffer that is never read.
+//
+// ABI — descriptor set 0, all std430:
+//   binding 0  params   uint[]  [0]=curveCount [1]=pointCount [2]=count
+//                        [3]=domain [4]=presentFlags [5]=phase [6]=varCount
+//                        [7]=reserved; field table at byte 32, 16 bytes per
+//                        variable: u64 offsetDoubles, u32 count,
+//                        u32 domain|components<<8.
+//                        presentFlags: 1 rest, 2 widths, 4 hairT, 8 rootUV,
+//                        16 rootN, 32 rootT, 64 rootB, 128 rootPrim.
+//   binding 1  points      float[3*pointCount]
+//   binding 2  rest        float[3*pointCount] (or dummy)
+//   binding 3  widths      float[pointCount] (or dummy)
+//   binding 4  offsets     uint[curveCount+1]
+//   binding 5  stableIds   uint[2*curveCount] (lo,hi words)
+//   binding 6  hairT       float[pointCount] (or dummy)
+//   binding 7  rootUV      float[2*curveCount] (or dummy)
+//   binding 8  rootN       float[3*curveCount] (or dummy)
+//   binding 9  rootT       float[3*curveCount] (or dummy)
+//   binding 10 rootB       float[3*curveCount] (or dummy)
+//   binding 11 rootPrim    int[curveCount] (or dummy)
+//   binding 12 fields     double[] OUT (packed field data)
+//   binding 13 owners     uint[pointCount] OUT
+//   binding 14 arc        double[pointCount] (scratch prefix)
+//   binding 15 status     uint (first-writer code: 1 BadGeometry, 2 BadChannel)
+//
+// Status codes match CUDA (kBadGeometry=1, kBadChannel=2) and the host maps
+// them to InvalidGeometry/InvalidChannel exactly as FinishStatus does.
+//
+// Dispatch: local_size_x = 256. Phase 0 runs max(1, ceil(max(curves,points)/
+// 256)) groups (CUDA always launches Validate); phase 1 runs
+// ceil(count/256) and is skipped for count 0.
+
+#version 460
+
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Params { uint params[]; };
+layout(std430, binding = 1) readonly buffer Points { float points[]; };
+layout(std430, binding = 2) readonly buffer Rest { float rest[]; };
+layout(std430, binding = 3) readonly buffer Widths { float widths[]; };
+layout(std430, binding = 4) readonly buffer Offsets { uint offsets[]; };
+layout(std430, binding = 5) readonly buffer StableIds { uint stableIds[]; };
+layout(std430, binding = 6) readonly buffer HairT { float hairT[]; };
+layout(std430, binding = 7) readonly buffer RootUV { float rootUV[]; };
+layout(std430, binding = 8) readonly buffer RootN { float rootN[]; };
+layout(std430, binding = 9) readonly buffer RootT { float rootT[]; };
+layout(std430, binding = 10) readonly buffer RootB { float rootB[]; };
+layout(std430, binding = 11) readonly buffer RootPrim { int rootPrim[]; };
+layout(std430, binding = 12) buffer Fields { double fields[]; };
+layout(std430, binding = 13) buffer Owners { uint owners[]; };
+layout(std430, binding = 14) buffer Arc { double arc[]; };
+layout(std430, binding = 15) buffer Status { uint status; };
+
+uint G_curveCount;
+uint G_pointCount;
+uint G_count;
+uint G_domain;
+uint G_present;
+uint G_varCount;
+
+void Fail(uint code) { atomicCompSwap(status, 0u, code); }
+uint Error() { return atomicAdd(status, 0u); }
+bool Finite(float v) { return !isnan(v) && !isinf(v); }
+
+// Field-table entry for variable v; returns false when unmaterialized.
+bool FieldBase(uint v, out uint base, out uint fcount, out uint fcomp) {
+    uint entry = 32u + v * 16u;
+    uint w = entry >> 2u;
+    uint offLo = params[w];
+    uint offHi = params[w + 1u];
+    fcount = params[w + 2u];
+    uint domComp = params[w + 3u];
+    fcomp = (domComp >> 8u) & 0xffu;
+    base = offLo;
+    if (offLo == 0xFFFFFFFFu && offHi == 0xFFFFFFFFu) return false;
+    return true;
+}
+
+void Set1(uint v, uint i, double value) {
+    uint base;
+    uint fcount;
+    uint fcomp;
+    if (!FieldBase(v, base, fcount, fcomp)) return;
+    fields[base + i * fcomp] = value;
+}
+
+void Set3(uint v, uint i, float x, float y, float z) {
+    uint base;
+    uint fcount;
+    uint fcomp;
+    if (!FieldBase(v, base, fcount, fcomp)) return;
+    fields[base + i * fcomp + 0u] = double(x);
+    fields[base + i * fcomp + 1u] = double(y);
+    fields[base + i * fcomp + 2u] = double(z);
+}
+
+void Phase0(uint i) {
+    if (i == 0u) {
+        if (offsets[0] != 0u || offsets[G_curveCount] != G_pointCount)
+            Fail(1u);
+    }
+    if (i < G_curveCount) {
+        uint a = offsets[i];
+        uint b = offsets[i + 1u];
+        if (a >= b || b > G_pointCount) Fail(1u);
+    }
+    if (i < G_pointCount) {
+        if (!Finite(points[i * 3u]) || !Finite(points[i * 3u + 1u]) ||
+            !Finite(points[i * 3u + 2u]))
+            Fail(1u);
+        if ((G_present & 1u) != 0u &&
+            (!Finite(rest[i * 3u]) || !Finite(rest[i * 3u + 1u]) ||
+             !Finite(rest[i * 3u + 2u])))
+            Fail(1u);
+        if ((G_present & 2u) != 0u && !Finite(widths[i])) Fail(1u);
+        if ((G_present & 4u) != 0u &&
+            (!Finite(hairT[i]) || hairT[i] < 0.0 || hairT[i] > 1.0))
+            Fail(2u);
+    }
+    if ((G_present & 4u) != 0u && i < G_curveCount) {
+        uint begin = offsets[i];
+        uint end = offsets[i + 1u];
+        if (begin < end && end <= G_pointCount && end > begin + 1u &&
+            (hairT[begin] != 0.0 || hairT[end - 1u] != 1.0))
+            Fail(2u);
+    }
+    if (i < G_curveCount) {
+        if ((G_present & 8u) != 0u &&
+            (!Finite(rootUV[i * 2u]) || !Finite(rootUV[i * 2u + 1u])))
+            Fail(2u);
+        if ((G_present & 16u) != 0u &&
+            (!Finite(rootN[i * 3u]) || !Finite(rootN[i * 3u + 1u]) ||
+             !Finite(rootN[i * 3u + 2u])))
+            Fail(2u);
+        if ((G_present & 32u) != 0u &&
+            (!Finite(rootT[i * 3u]) || !Finite(rootT[i * 3u + 1u]) ||
+             !Finite(rootT[i * 3u + 2u])))
+            Fail(2u);
+        if ((G_present & 64u) != 0u &&
+            (!Finite(rootB[i * 3u]) || !Finite(rootB[i * 3u + 1u]) ||
+             !Finite(rootB[i * 3u + 2u])))
+            Fail(2u);
+    }
+    // Owners + arc prefix (BuildOwnersAndArc, one thread per curve).
+    if (i >= G_curveCount || Error() != 0u) return;
+    uint begin = offsets[i];
+    uint end = offsets[i + 1u];
+    double total = 0.0LF;
+    for (uint p = begin; p < end; ++p) {
+        owners[p] = i;
+        if (p > begin) {
+            double dx = double(points[p * 3u]) - double(points[(p - 1u) * 3u]);
+            double dy = double(points[p * 3u + 1u]) - double(points[(p - 1u) * 3u + 1u]);
+            double dz = double(points[p * 3u + 2u]) - double(points[(p - 1u) * 3u + 2u]);
+            total += sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        arc[p] = total;
+    }
+}
+
+double HairTAt(uint c, uint p) {
+    if ((G_present & 4u) != 0u) return double(hairT[p]);
+    uint end = offsets[c + 1u];
+    double total = arc[end - 1u];
+    return total > 0.0LF ? arc[p] / total : 0.0LF;
+}
+
+void IdParts(uint curve, uint i) {
+    uint lo = stableIds[curve * 2u];
+    uint hi = stableIds[curve * 2u + 1u];
+    Set1(10u, i, double(lo));
+    Set1(11u, i, double(hi));
+    uint64_t id = (uint64_t(hi) << 32u) | uint64_t(lo);
+    Set1(12u, i, double(id));
+}
+
+void Phase1Prim(uint i) {
+    uint p = offsets[i];
+    Set3(16u, i, points[p * 3u], points[p * 3u + 1u], points[p * 3u + 2u]);
+    Set3(18u, i, points[p * 3u], points[p * 3u + 1u], points[p * 3u + 2u]);
+    if ((G_present & 1u) != 0u) {
+        Set3(17u, i, rest[p * 3u], rest[p * 3u + 1u], rest[p * 3u + 2u]);
+        Set3(19u, i, rest[p * 3u], rest[p * 3u + 1u], rest[p * 3u + 2u]);
+    }
+    if ((G_present & 2u) != 0u) Set1(30u, i, double(widths[p]));
+    Set1(26u, i, 0.0LF);
+    Set1(8u, i, double(i));
+    Set1(9u, i, double(G_curveCount));
+    Set1(29u, i, arc[offsets[i + 1u] - 1u]);
+    IdParts(i, i);
+    if ((G_present & 8u) != 0u) {
+        Set1(13u, i, double(rootUV[i * 2u]));
+        Set1(14u, i, double(rootUV[i * 2u + 1u]));
+    }
+    if ((G_present & 128u) != 0u) Set1(15u, i, double(rootPrim[i]));
+    if ((G_present & 16u) != 0u) {
+        Set3(20u, i, rootN[i * 3u], rootN[i * 3u + 1u], rootN[i * 3u + 2u]);
+        Set3(21u, i, rootN[i * 3u], rootN[i * 3u + 1u], rootN[i * 3u + 2u]);
+    }
+    if ((G_present & 32u) != 0u) {
+        Set3(22u, i, rootT[i * 3u], rootT[i * 3u + 1u], rootT[i * 3u + 2u]);
+        Set3(24u, i, rootT[i * 3u], rootT[i * 3u + 1u], rootT[i * 3u + 2u]);
+    }
+    if ((G_present & 64u) != 0u) {
+        Set3(23u, i, rootB[i * 3u], rootB[i * 3u + 1u], rootB[i * 3u + 2u]);
+        Set3(25u, i, rootB[i * 3u], rootB[i * 3u + 1u], rootB[i * 3u + 2u]);
+    }
+}
+
+void Phase1Point(uint i) {
+    uint c = owners[i];
+    uint root = offsets[c];
+    Set3(16u, i, points[i * 3u], points[i * 3u + 1u], points[i * 3u + 2u]);
+    Set3(18u, i, points[root * 3u], points[root * 3u + 1u], points[root * 3u + 2u]);
+    if ((G_present & 1u) != 0u) {
+        Set3(17u, i, rest[i * 3u], rest[i * 3u + 1u], rest[i * 3u + 2u]);
+        Set3(19u, i, rest[root * 3u], rest[root * 3u + 1u], rest[root * 3u + 2u]);
+    }
+    if ((G_present & 2u) != 0u) Set1(30u, i, double(widths[i]));
+    Set1(26u, i, HairTAt(c, i));
+    Set1(8u, i, double(c));
+    Set1(9u, i, double(G_curveCount));
+    Set1(29u, i, arc[offsets[c + 1u] - 1u]);
+    Set1(27u, i, double(i - root));
+    Set1(28u, i, double(offsets[c + 1u] - root));
+    if ((G_present & 8u) != 0u) {
+        Set1(13u, i, double(rootUV[c * 2u]));
+        Set1(14u, i, double(rootUV[c * 2u + 1u]));
+    }
+    if ((G_present & 128u) != 0u) Set1(15u, i, double(rootPrim[c]));
+    if ((G_present & 16u) != 0u) {
+        Set3(20u, i, rootN[c * 3u], rootN[c * 3u + 1u], rootN[c * 3u + 2u]);
+        Set3(21u, i, rootN[c * 3u], rootN[c * 3u + 1u], rootN[c * 3u + 2u]);
+    }
+    if ((G_present & 32u) != 0u) {
+        Set3(22u, i, rootT[c * 3u], rootT[c * 3u + 1u], rootT[c * 3u + 2u]);
+        Set3(24u, i, rootT[c * 3u], rootT[c * 3u + 1u], rootT[c * 3u + 2u]);
+    }
+    if ((G_present & 64u) != 0u) {
+        Set3(23u, i, rootB[c * 3u], rootB[c * 3u + 1u], rootB[c * 3u + 2u]);
+        Set3(25u, i, rootB[c * 3u], rootB[c * 3u + 1u], rootB[c * 3u + 2u]);
+    }
+    IdParts(c, i);
+}
+
+void main() {
+    G_curveCount = params[0];
+    G_pointCount = params[1];
+    G_count = params[2];
+    G_domain = params[3];
+    G_present = params[4];
+    uint phase = params[5];
+    G_varCount = params[6];
+    uint i = gl_GlobalInvocationID.x;
+    if (phase == 0u) {
+        if (i >= G_curveCount && i >= G_pointCount) return;
+        Phase0(i);
+    } else {
+        if (Error() != 0u || i >= G_count) return;
+        if (G_domain == 2u) Phase1Prim(i);
+        else if (G_domain == 4u) Phase1Point(i);
+    }
+}

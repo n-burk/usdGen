@@ -33,7 +33,7 @@ export LD_LIBRARY_PATH="$USD/lib:$GENBUILD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
 
 # Python tools: usdGen build-tree python package + OpenUSD's site-packages.
-PY_SITE="$(ls -d "$USD"/lib/python*/site-packages 2>/dev/null | head -1)"
+PY_SITE="$(ls -d "$USD"/lib/python*/site-packages 2>/dev/null | head -1 || true)"
 if [ -n "$PY_SITE" ]; then
     export PYTHONPATH="$GENBUILD/python:$PY_SITE${PYTHONPATH:+:$PYTHONPATH}"
 fi

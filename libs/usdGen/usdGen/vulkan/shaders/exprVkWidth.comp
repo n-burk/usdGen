@@ -1,0 +1,160 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+// CUDA Width application, with expression fields encoded in 8-byte slots.
+// Bindings 0..7 retain the field ABI; 8 profile[257], 9 hairT, 10 offsets.
+// The 56-byte push block names optional geometry inputs explicitly.
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InWidths { float inWidths[]; };
+layout(std430, binding = 1) buffer OutWidths { float outWidths[]; };
+layout(std430, binding = 2) readonly buffer Owners { uint owners[]; };
+layout(std430, binding = 3) readonly buffer WidthData { uint widthData[]; };
+layout(std430, binding = 4) readonly buffer MaskData { uint maskData[]; };
+layout(std430, binding = 5) readonly buffer ReplaceData { uint replaceData[]; };
+layout(std430, binding = 6) readonly buffer EnabledData { uint enabledData[]; };
+layout(std430, binding = 7) buffer Status { uint status; };
+layout(std430, binding = 8) readonly buffer Profile { float profile[]; };
+layout(std430, binding = 9) readonly buffer HairT { float hairT[]; };
+layout(std430, binding = 10) readonly buffer Offsets { uint offsets[]; };
+
+layout(push_constant) uniform Controls {
+    uint pointCount;
+    uint curveCount;
+    float widthLiteral;
+    float maskLiteral;
+    uint widthDom;
+    uint maskDom;
+    uint replaceDom;
+    uint enabledDom;
+    uint replaceLiteral;
+    uint enabledLiteral;
+    float baseLiteral;
+    uint hasProfile;
+    uint hasHairT;
+    uint hasOffsets;
+} controls;
+
+bool Finite(float v) { return !isnan(v) && !isinf(v); }
+
+// Slot index for dom (0 is handled by the caller via the literal).
+bool SlotIndex(uint dom, uint curve, uint point, uint fieldCount, out uint slot) {
+    if (dom == 1u) slot = 0u;
+    else if (dom == 2u) slot = curve;
+    else if (dom == 4u) slot = point;
+    else return false;
+    return slot < fieldCount;
+}
+
+uint FieldCount(uint dom) {
+    if (dom == 1u) return 1u;
+    if (dom == 2u) return controls.curveCount;
+    return controls.pointCount;
+}
+
+void main() {
+    uint point = gl_GlobalInvocationID.x;
+    // Validate the complete profile and topology, including entries that
+    // are not sampled by an output CV. Failed candidates never publish.
+    if (controls.hasProfile != 0u && point < 257u) {
+        if (!Finite(profile[point])) atomicOr(status, 2u);
+        else if (profile[point] < 0.0) atomicOr(status, 3u);
+    }
+    if (controls.hasOffsets != 0u) {
+        if (point == 0u && (offsets[0] != 0u ||
+                offsets[controls.curveCount] != controls.pointCount)) atomicOr(status, 1u);
+        if (point < controls.curveCount && (offsets[point] >= offsets[point + 1u] ||
+                offsets[point + 1u] > controls.pointCount)) atomicOr(status, 1u);
+    }
+    if (point >= controls.pointCount) return;
+    uint curve = owners[point];
+    if (curve >= controls.curveCount) { atomicOr(status, 3u); return; }
+
+    precise float t = 0.0;
+    if (controls.hasHairT != 0u) t = hairT[point];
+    else if (controls.hasOffsets != 0u) {
+        uint begin = offsets[curve], end = offsets[curve + 1u];
+        if (begin >= end || end > controls.pointCount || point < begin || point >= end) {
+            atomicOr(status, 1u); return;
+        }
+        t = end - begin > 1u ? float(point - begin) / float(end - begin - 1u) : 0.0;
+    }
+    if (!Finite(t)) { atomicOr(status, 2u); return; }
+    if (t < 0.0 || t > 1.0) { atomicOr(status, 3u); return; }
+    float inputWidth = inWidths[point];
+    if (!Finite(inputWidth)) { atomicOr(status, 2u); return; }
+    if (inputWidth < 0.0) { atomicOr(status, 3u); return; }
+
+    float width = controls.widthLiteral;
+    if (controls.widthDom != 0u) {
+        uint slot = 0u;
+        if (!SlotIndex(controls.widthDom, curve, point, FieldCount(controls.widthDom), slot)) {
+            atomicOr(status, 3u);
+            return;
+        }
+        width = uintBitsToFloat(widthData[slot * 2u]);
+        if (!Finite(width)) { atomicOr(status, 2u); return; }
+    }
+    float mask = controls.maskLiteral;
+    if (controls.maskDom != 0u) {
+        uint slot = 0u;
+        if (!SlotIndex(controls.maskDom, curve, point, FieldCount(controls.maskDom), slot)) {
+            atomicOr(status, 3u);
+            return;
+        }
+        mask = uintBitsToFloat(maskData[slot * 2u]);
+        if (!Finite(mask)) { atomicOr(status, 2u); return; }
+    }
+    bool replace = controls.replaceLiteral != 0u;
+    if (controls.replaceDom != 0u) {
+        uint slot = 0u;
+        if (!SlotIndex(controls.replaceDom, curve, point, FieldCount(controls.replaceDom), slot)) {
+            atomicOr(status, 3u);
+            return;
+        }
+        uint raw = replaceData[slot * 2u] & 0xffu;
+        if (raw > 1u) { atomicOr(status, 3u); return; }
+        replace = raw != 0u;
+    }
+    bool enabled = controls.enabledLiteral != 0u;
+    if (controls.enabledDom != 0u) {
+        uint slot = 0u;
+        if (!SlotIndex(controls.enabledDom, curve, point, FieldCount(controls.enabledDom), slot)) {
+            atomicOr(status, 3u);
+            return;
+        }
+        uint raw = enabledData[slot * 2u] & 0xffu;
+        if (raw > 1u) { atomicOr(status, 3u); return; }
+        enabled = raw != 0u;
+    }
+    if (width < 0.0 || mask < 0.0 || mask > 1.0) {
+        atomicOr(status, 3u);
+        return;
+    }
+    if (!enabled || mask == 0.0) {
+        outWidths[point] = inputWidth;
+        return;
+    }
+    precise float scale = 1.0;
+    if (controls.hasProfile != 0u) {
+        precise float coordinate = t * 256.0;
+        uint lower = uint(floor(coordinate));
+        if (lower >= 256u) scale = profile[256];
+        else {
+            precise float fraction = coordinate - float(lower);
+            scale = profile[lower] + (profile[lower + 1u] - profile[lower]) * fraction;
+        }
+    }
+    precise float target = (controls.baseLiteral * width) * scale;
+    precise float result;
+    if (replace)
+        result = inputWidth + (target - inputWidth) * mask;
+    else
+        result = inputWidth * (1.0 + (target - 1.0) * mask);
+    if (!Finite(target) || !Finite(result) || target < 0.0 || result < 0.0) {
+        atomicOr(status, (!Finite(target) || !Finite(result)) ? 2u : 3u);
+        return;
+    }
+    outWidths[point] = result;
+}

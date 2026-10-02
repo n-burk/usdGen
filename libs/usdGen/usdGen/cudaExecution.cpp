@@ -269,6 +269,10 @@ bool ValidateDeform(UsdGenNodeDesc const& node, UsdGenDiagnostics* diagnostics) 
 bool ValidateScatterGrow(UsdGenGraphDesc const& desc, uint32_t source, uint32_t terminal,
                          UsdGenDiagnostics* diagnostics, bool c3 = false) {
     auto const& scatter = desc.nodes[source];
+    // Scatter's source program is immutable root capture, not the connected
+    // CurveSource parameter evaluator. Reject fields this route cannot read.
+    if (!c3 && !scatter.expressionBindings.empty())
+        return Fail(diagnostics, "CUDA Scatter does not support connected expression controls");
     for(auto const& param:scatter.params)
         if(param.name==TfToken("subdivisionLevel") &&
            (!param.value.IsHolding<int>() || param.value.UncheckedGet<int>()!=0))
@@ -500,13 +504,38 @@ struct CudaRbfPendingPublication {
 };
 
 namespace {
+std::string CudaStatusText(cudaError_t status) {
+    return std::string(cudaGetErrorName(status)) + " (" +
+        std::to_string(static_cast<int>(status)) + ": " +
+        cudaGetErrorString(status) + ")";
+}
+std::string CurveSourceStatusText(gpu::CurveSourceStatus status) {
+    char const* name = "Unknown";
+    switch (status) {
+    case gpu::CurveSourceStatus::Ok: name = "Ok"; break;
+    case gpu::CurveSourceStatus::InvalidArgument: name = "InvalidArgument"; break;
+    case gpu::CurveSourceStatus::NonFiniteInput: name = "NonFiniteInput"; break;
+    case gpu::CurveSourceStatus::InvalidTopology: name = "InvalidTopology"; break;
+    case gpu::CurveSourceStatus::DuplicateStableId: name = "DuplicateStableId"; break;
+    case gpu::CurveSourceStatus::NoPendingUpdate: name = "NoPendingUpdate"; break;
+    case gpu::CurveSourceStatus::CudaError: name = "CudaError"; break;
+    }
+    return std::string(name) + " (" + std::to_string(static_cast<int>(status)) + ")";
+}
 struct CudaDeviceScope {
     int previous = -1;
     bool selected = false;
+    cudaError_t status = cudaSuccess;
+    char const* operation = "cudaGetDevice";
     explicit CudaDeviceScope(int device) {
-        selected = cudaGetDevice(&previous) == cudaSuccess &&
-            cudaSetDevice(device) == cudaSuccess;
+        status = cudaGetDevice(&previous);
+        if (status == cudaSuccess) {
+            operation = "cudaSetDevice";
+            status = cudaSetDevice(device);
+        }
+        selected = status == cudaSuccess;
     }
+    std::string FailureDetail() const { return std::string(operation) + " returned " + CudaStatusText(status); }
     void Restore() noexcept { if (selected) { cudaSetDevice(previous); selected = false; } }
     ~CudaDeviceScope() { Restore(); }
 };
@@ -1142,10 +1171,13 @@ bool PrepareCudaJobSource(ExecutionState& state,
                           cudaStream_t stream, UsdGenDiagnostics* diagnostics,
                           bool finish = true) {
     state.source = std::make_unique<gpu::CudaCurveSource>();
-    if (state.source->Set(prepared.Input(), stream,
-            state.memoryReservation) != gpu::CurveSourceStatus::Ok ||
-        (finish && state.source->Finish(stream) != gpu::CurveSourceStatus::Ok))
-        return Fail(diagnostics, "source upload failed; previous generation retained");
+    auto sourceStatus = state.source->Set(prepared.Input(), stream, state.memoryReservation);
+    if (sourceStatus == gpu::CurveSourceStatus::Ok && finish)
+        sourceStatus = state.source->Finish(stream);
+    if (sourceStatus != gpu::CurveSourceStatus::Ok)
+        return Fail(diagnostics, "source upload failed (CurveSourceStatus " +
+            CurveSourceStatusText(sourceStatus) +
+            "); previous generation retained");
     if (!finish) return true;
     if (options.resampleTo) {
         state.resampled = std::make_unique<gpu::CudaCurveResample>();
@@ -1391,17 +1423,25 @@ void UsdGenCudaExecutionWorkspace::MarkContextLost() noexcept {
 std::unique_ptr<UsdGenCudaExecutionWorkspace> CreateCudaExecutionWorkspace(
     int device, UsdGenDiagnostics* diagnostics) {
 #ifdef USDGEN_ENABLE_CUDA
-    if (device < -1 || (device == -1 && cudaGetDevice(&device) != cudaSuccess)) {
-        Fail(diagnostics, "cannot capture CUDA workspace device"); return {};
+    if (device < -1) {
+        Fail(diagnostics, "cannot capture CUDA workspace device: invalid device " + std::to_string(device)); return {};
+    }
+    if (device == -1) {
+        auto const status = cudaGetDevice(&device);
+        if (status != cudaSuccess) {
+            Fail(diagnostics, "cannot capture CUDA workspace device: cudaGetDevice returned " + CudaStatusText(status)); return {};
+        }
     }
     CudaDeviceScope selected(device);
-    if (!selected.selected) { Fail(diagnostics, "cannot select CUDA workspace device"); return {}; }
+    if (!selected.selected) { Fail(diagnostics, "cannot select CUDA workspace device " + std::to_string(device) + ": " + selected.FailureDetail()); return {}; }
     auto workspace = std::unique_ptr<UsdGenCudaExecutionWorkspace>(new UsdGenCudaExecutionWorkspace);
-    if (cudaStreamCreateWithFlags(&workspace->impl_->stream, cudaStreamNonBlocking) != cudaSuccess) {
-        Fail(diagnostics, "cannot create CUDA workspace stream"); return {};
+    auto const streamStatus = cudaStreamCreateWithFlags(&workspace->impl_->stream, cudaStreamNonBlocking);
+    if (streamStatus != cudaSuccess) {
+        Fail(diagnostics, "cannot create CUDA workspace stream: " + CudaStatusText(streamStatus)); return {};
     }
     for (auto& stream : workspace->impl_->widthStreams) {
-        if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess)
+        auto const branchStatus = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+        if (branchStatus == cudaSuccess)
             continue;
         for (auto& created : workspace->impl_->widthStreams) {
             if (created) cudaStreamDestroy(created);
@@ -1409,7 +1449,7 @@ std::unique_ptr<UsdGenCudaExecutionWorkspace> CreateCudaExecutionWorkspace(
         }
         cudaStreamDestroy(workspace->impl_->stream);
         workspace->impl_->stream = nullptr;
-        Fail(diagnostics, "cannot create CUDA Width branch stream"); return {};
+        Fail(diagnostics, "cannot create CUDA Width branch stream: " + CudaStatusText(branchStatus)); return {};
     }
     try {
         workspace->impl_->widthBlendGraph = std::make_unique<CudaWidthBlendGraphCache>(device);
@@ -4240,6 +4280,9 @@ struct SourceRelayService {
             if (phaseOk) {
                 CudaDeviceScope selected(job->workspace->impl_->device);
                 phaseOk = selected.selected;
+                if (!phaseOk)
+                    Fail(job->diagnostics, "cannot select CUDA device for source control phase " +
+                        std::to_string(phase) + ": " + selected.FailureDetail());
                 auto const stream = phaseOk ? job->workspace->impl_->stream : nullptr;
                 if (phaseOk && phase == SourceContexts)
                     phaseOk = relay->controls &&
@@ -4285,6 +4328,8 @@ struct SourceRelayService {
             else {
                 CudaDeviceScope launcherDevice(job->workspace->impl_->device);
                 if (!launcherDevice.selected) {
+                    Fail(job->diagnostics, "cannot select CUDA device for source callback installation: " +
+                        launcherDevice.FailureDetail());
                     relay->quarantine.store(true,std::memory_order_release);
                     relay->failure.store(true, std::memory_order_release);
                 } else {
@@ -4316,11 +4361,19 @@ struct SourceRelayService {
                     slots[index].scalarReturnGate.store(gate.get(), std::memory_order_release);
                 }
                 bool installFailed=failInstall[next].exchange(false,std::memory_order_acq_rel);
-                if (!installFailed && next == SourceUpload)
-                    installFailed=job->state.source->FinishFreshAsync(stream,SourceCallback,
-                        &slots[index].callback[SourceUpload]) != gpu::CurveSourceStatus::Ok;
-                else if (!installFailed)
-                    installFailed=cudaStreamAddCallback(stream,SourceCallback,&slots[index].callback[next],0)!=cudaSuccess;
+                if (!installFailed && next == SourceUpload) {
+                    auto const status = job->state.source->FinishFreshAsync(stream,SourceCallback,
+                        &slots[index].callback[SourceUpload]);
+                    installFailed = status != gpu::CurveSourceStatus::Ok;
+                    if (installFailed)
+                        Fail(job->diagnostics, "source async callback installation failed: CurveSourceStatus " +
+                            CurveSourceStatusText(status));
+                } else if (!installFailed) {
+                    auto const status = cudaStreamAddCallback(stream,SourceCallback,&slots[index].callback[next],0);
+                    installFailed = status != cudaSuccess;
+                    if (installFailed)
+                        Fail(job->diagnostics, "source control callback installation failed: " + CudaStatusText(status));
+                }
                 if (installFailed) {
                     relay->quarantine.store(true,std::memory_order_release);
                     slots[index].Signal(next,cudaErrorUnknown);
@@ -4437,9 +4490,25 @@ struct SourceRelayService {
             return;
         }
         if (!ok) {
+            bool const jobWasFailed = job && job->failed.load(std::memory_order_acquire);
             if (job) { job->failed = true; job->sourceAsyncInFlight = false; }
-            if (job && job->diagnostics)
-                Fail(job->diagnostics, "source async upload failed; previous generation retained");
+            if (job && job->diagnostics) {
+                static char const* const phaseNames[] = {
+                    "contexts", "programs", "scalars", "upload", "resample", "named topology"};
+                auto const nativeStatus = cudaError_t(slots[index].status[phase].load(std::memory_order_acquire));
+                Fail(job->diagnostics, "source async upload failed; previous generation retained (phase=" +
+                    std::string(phaseNames[phase]) + ", callback=" + CudaStatusText(nativeStatus) +
+                    ", relayFailure=" + std::to_string(relay->failure.load(std::memory_order_acquire)) +
+                    ", quarantine=" + std::to_string(relay->quarantine.load(std::memory_order_acquire)) +
+                    ", jobFailed=" + std::to_string(jobWasFailed) +
+                    ", workspacePoisoned=" + std::to_string(job->workspace && job->workspace->impl_->poisoned.load(std::memory_order_acquire)) +
+                    ", sourceUploadPending=" + std::to_string(job->state.sourceUploadPending) +
+                    ", sourcePresent=" + std::to_string(bool(job->state.source)) +
+                    ", sourceUnproven=" + std::to_string(job->state.source && job->state.source->HasUnprovenUpload()) +
+                    ", controlGateTimeout=" + std::to_string(!controlGatesOK) +
+                    ", gateTimeout=" + std::to_string(relay->gate && relay->gate->timedOut.load(std::memory_order_acquire)) +
+                    ", resampleReturnTimeout=" + std::to_string(relay->resampleReturnGate && relay->resampleReturnGate->timedOut.load(std::memory_order_acquire)) + ")");
+            }
             // This lambda is invoked before user code and is created in the
             // launcher, where private workspace access is valid.
             bool const unsafe = relay->quarantine.load(std::memory_order_acquire) ||
@@ -4625,8 +4694,13 @@ bool ExecuteCudaJobSourceAsync(std::shared_ptr<UsdGenCudaExecutionJob> job,
     // work.  FinishFreshAsync repeats this check as its low-level boundary.
     CudaDeviceScope selected(job->workspace->impl_->device);
     cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
-    if (!selected.selected || cudaStreamIsCapturing(job->workspace->impl_->stream, &capture) != cudaSuccess ||
-        capture != cudaStreamCaptureStatusNone) return false;
+    if (!selected.selected)
+        return Fail(job->diagnostics, "cannot select CUDA device for source async launch: " + selected.FailureDetail());
+    auto const captureStatus = cudaStreamIsCapturing(job->workspace->impl_->stream, &capture);
+    if (captureStatus != cudaSuccess)
+        return Fail(job->diagnostics, "cannot query CUDA source stream capture: " + CudaStatusText(captureStatus));
+    if (capture != cudaStreamCaptureStatusNone)
+        return Fail(job->diagnostics, "CUDA source async launch rejected stream capture status " + std::to_string(static_cast<int>(capture)));
     auto* relay = SourceRelays().Reserve(job, std::move(completion));
     if (!relay) return false;
     size_t const relaySlot = relay->slot;
@@ -4813,10 +4887,14 @@ bool ExecuteCudaJobSourceAsync(std::shared_ptr<UsdGenCudaExecutionJob> job,
             SourceRelays().slots[relaySlot].ReturnFromLauncher(SourceUpload); return true;
         }
     }
-    if (SourceRelays().failInstall[SourceUpload].exchange(false, std::memory_order_acq_rel) ||
+    bool const injectInstall = SourceRelays().failInstall[SourceUpload].exchange(false, std::memory_order_acq_rel);
+    auto const uploadStatus = injectInstall ? gpu::CurveSourceStatus::Ok :
         job->state.source->FinishFreshAsync(stream, SourceCallback,
-            &SourceRelays().slots[relaySlot].callback[SourceUpload]) !=
-        gpu::CurveSourceStatus::Ok) {
+            &SourceRelays().slots[relaySlot].callback[SourceUpload]);
+    if (injectInstall || uploadStatus != gpu::CurveSourceStatus::Ok) {
+        if (!injectInstall)
+            Fail(job->diagnostics, "source async callback installation failed: CurveSourceStatus " +
+                CurveSourceStatusText(uploadStatus));
         relay->quarantine.store(true, std::memory_order_release); SourceRelays().slots[relaySlot].Signal(SourceUpload, cudaErrorUnknown);
         SourceRelays().slots[relaySlot].ReturnFromLauncher(SourceUpload);
         return true;
@@ -8568,11 +8646,16 @@ bool ExecutionState::Prepare(UsdGenCudaExecutionPlan const& plan,
 
 bool ExecutionState::CommitSourceUpload(UsdGenCudaExecutionWorkspace& workspace,
     UsdGenDiagnostics* diagnostics) {
-    if (!sourceUploadPending || !source || workspace.impl_->poisoned.load()) return false;
+    if (!sourceUploadPending || !source || workspace.impl_->poisoned.load())
+        return Fail(diagnostics, "source async commit precondition failed (sourceUploadPending=" +
+            std::to_string(sourceUploadPending) + ", sourcePresent=" + std::to_string(bool(source)) +
+            ", workspacePoisoned=" + std::to_string(workspace.impl_->poisoned.load()) + ")");
     CudaDeviceScope selected(workspace.impl_->device);
-    if (!selected.selected) return Fail(diagnostics, "cannot select CUDA device for source completion");
-    if (source->CommitFreshFinish() != gpu::CurveSourceStatus::Ok)
-        return Fail(diagnostics, "source async commit failed; previous generation retained");
+    if (!selected.selected) return Fail(diagnostics, "cannot select CUDA device for source completion: " + selected.FailureDetail());
+    auto const status = source->CommitFreshFinish();
+    if (status != gpu::CurveSourceStatus::Ok)
+        return Fail(diagnostics, "source async commit failed; previous generation retained (CurveSourceStatus " +
+            CurveSourceStatusText(status) + ")");
     if (sourceOptions.resampleTo) {
         return true;
     }

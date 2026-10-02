@@ -21,6 +21,8 @@
 #   build-release      configure + ninja -j$(nproc) (Release) + usdcat smoke;
 #                      caches the build tree so t0-t1 does not rebuild.
 #   t0-t1              ctest -L '^T[01]$' -j8 against the build-release tree.
+#   vulkan             native runtime/shader build, software-device execution
+#                      with synchronization validation, installed shader check.
 #   install-check      cmake --install into a scratch prefix; verify the
 #                      layout and python3-validate both installed
 #                      plugInfo.json files.
@@ -173,6 +175,81 @@ jobs:
   # testUsdGenOfflineConfigure (T0) joins the ctest label set once the
   # CMake lane registers it.
   # --------------------------------------------------------------------------
+  vulkan:
+    name: Vulkan (software device and validation)
+    runs-on: ubuntu-24.04
+    needs: openusd
+    timeout-minutes: 90
+    steps:
+      - name: Checkout usdGen
+        uses: actions/checkout@v4
+      - name: Install Vulkan build and runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libgl1-mesa-dev xorg-dev libvulkan-dev \
+            glslang-tools spirv-tools mesa-vulkan-drivers vulkan-validationlayers
+      - name: Restore OpenUSD install prefix
+        uses: actions/cache/restore@v4
+        with:
+          path: usd-install
+          key: openusd-${{ runner.os }}-${{ runner.arch }}-${{ needs.openusd.outputs.openusd-sha }}-usdimg-gl-nopy-v1
+          fail-on-cache-miss: true
+      - name: Build Vulkan runtime and tests
+        run: |
+          cmake -S . -B build-vulkan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSD_INSTALL_DIR="${GITHUB_WORKSPACE}/usd-install" \
+            -DUSDGEN_ENABLE_CUDA=OFF \
+            -DUSDGEN_ENABLE_VULKAN_RUNTIME=ON \
+            -DUSDGEN_BUILD_VULKAN_TESTS=ON -DUSDGEN_BUILD_TESTS=ON
+          cmake --build build-vulkan --parallel 2
+      - name: Validate software Vulkan execution
+        env:
+          USDGEN_VULKAN_ALLOW_SOFTWARE: "1"
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        run: |
+          export USD="${GITHUB_WORKSPACE}/usd-install"
+          export GENBUILD="${GITHUB_WORKSPACE}/build-vulkan"
+          source bin/_env.sh
+          ctest --test-dir "$GENBUILD" -L '^vulkan$' --no-tests=error --output-on-failure \
+            --output-junit "$GENBUILD/vulkan-software.xml"
+          "$PY" - "$GENBUILD/vulkan-software.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          # CUDA comparisons and optional native features may skip; these
+          # software-capable cases must prove that Vulkan actually executed.
+          required = {
+              "testUsdGenVulkanDefaultSession",
+              "testUsdGenVulkanDefaultSessionDiscovery",
+              "testUsdGenVulkanDefaultSessionLifecycle",
+              "testUsdGenVulkanWidthPipeline",
+              "testUsdGenVulkanSession",
+              "testUsdGenVulkanLifecycle",
+              "testUsdGenVulkanCompletionServiceClosePending",
+          }
+          tests = {test.get("name"): test for test in
+                   ET.parse(sys.argv[1]).iter("testcase")}
+          missing = sorted(required - tests.keys())
+          incomplete = sorted(name for name in required & tests.keys()
+                              if tests[name].get("status") != "run" or
+                              any(tests[name].find(tag) is not None
+                                  for tag in ("skipped", "failure", "error")))
+          if missing or incomplete:
+              sys.exit("Software Vulkan execution is unproven: " + "; ".join(
+                  label + ": " + ", ".join(names) for label, names in
+                  (("missing", missing), ("skipped or failed", incomplete)) if names))
+          print(f"Software Vulkan execution: {len(required)} required tests passed")
+          PY
+      - name: Verify installed shader bundle
+        run: |
+          cmake --install build-vulkan --prefix "$RUNNER_TEMP/usdGen-install"
+          test -s "$RUNNER_TEMP/usdGen-install/share/usdGen/vulkan/width.spv"
+          test -s "$RUNNER_TEMP/usdGen-install/share/usdGen/vulkan/exprVkEvaluate.spv"
+
   configure-offline:
     name: configure-offline (FETCHCONTENT_FULLY_DISCONNECTED)
     runs-on: ubuntu-24.04

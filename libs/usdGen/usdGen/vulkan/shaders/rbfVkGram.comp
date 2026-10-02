@@ -1,0 +1,51 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// rbfVkGram.comp — Vulkan port of the CUDA RBF polynomialGram kernel
+// (rbf.cu:40-45): accumulates the 4x4 polynomial Gram P^T P over the rest
+// samples in double precision.
+//
+// Unlike CUDA's double atomicAdd accumulation (unavailable portably in
+// Vulkan GLSL), a single invocation folds all n samples serially in exact
+// host order, so the gram is bitwise identical to the deformRbfHost.h
+// reference. The rank
+// TEST itself stays host-side (fullAffineRank), exactly as in
+// CudaRbfBinding::Bind, which copies the gram back before testing.
+//
+// ABI — descriptors:
+//   0 rest float[3*n]  RO
+//   1 gram double[16]  W (row-major 4x4)
+//   2 UBO  RbfVkSolveUbo (64 bytes; uses n, cx, cy, cz, invScale)
+//
+// Dispatch: local_size_x=1, groups=(1,1,1).
+
+#version 460
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer Rest { float rest[]; };
+layout(std430, binding = 1) buffer Gram           { double gram[]; };
+
+layout(std140, binding = 2) uniform Params {
+    ivec4  nmc;       // x = n (samples), y = m (n+4), z = count, w = reserved
+    double cx;
+    double cy;
+    double cz;
+    double invScale;
+    double scale;
+    double lambda;    // smoothing (buildMatrix diagonal only)
+} params;
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+    int n = params.nmc.x;
+    for (int k = 0; k < 16; ++k) gram[k] = 0.0;
+    for (int i = 0; i < n; ++i) {
+        double vx[4];
+        vx[0] = 1.0;
+        vx[1] = (double(rest[3 * i]) - params.cx) * params.invScale;
+        vx[2] = (double(rest[3 * i + 1]) - params.cy) * params.invScale;
+        vx[3] = (double(rest[3 * i + 2]) - params.cz) * params.invScale;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) gram[r * 4 + c] += vx[r] * vx[c];
+    }
+}

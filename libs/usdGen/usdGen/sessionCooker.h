@@ -147,7 +147,8 @@ private:
         std::shared_ptr<const UsdGenDeviceGeneration>,
         std::shared_ptr<UsdGenExecutionCacheDomain> const&,
         UsdGenExecutionCacheKey const&, double frame);
-    bool _SelectExecutionCacheDomain(UsdGenDeviceBackend, int32_t);
+    bool _SelectExecutionCacheDomain(UsdGenDeviceBackend, int32_t,
+                                    uint64_t contextIdentity = 0);
     bool _ObserveExecutionCacheDomainEpoch();
     void _BeginCoalesced(std::shared_ptr<UsdGenExecutionCacheDomain> const&,
                          UsdGenExecutionCacheKey const&, CoalescedHooks const&);

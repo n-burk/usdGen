@@ -86,9 +86,16 @@ int main() {
     Check(metal.IsValid() && !metal.Available() &&
               metal.deviceBackend == UsdGenDeviceBackend::Metal,
           "Metal is an explicit unavailable factory contract");
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    Check(vulkan.IsValid() && vulkan.Available() &&
+              vulkan.deviceBackend == UsdGenDeviceBackend::Vulkan &&
+              vulkan.capabilityVersion == 1,
+          "Vulkan availability mirrors the CUDA transitional legacy path");
+#else
     Check(vulkan.IsValid() && !vulkan.Available() &&
               vulkan.deviceBackend == UsdGenDeviceBackend::Vulkan,
           "Vulkan is an explicit unavailable factory contract");
+#endif
     auto const cuda = GetUsdGenExecutionBackendContract(
         UsdGenExecutionBackend::Cuda);
     Check(cuda.capabilityVersion == GetCudaExecutionCapabilityMatrix().Version(),
@@ -114,12 +121,21 @@ int main() {
                   "Metal execution backend factory is unavailable") != std::string::npos,
           "Metal reports precise unavailability without fallback");
     diagnostics.errors.clear();
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    Check(ValidateUsdGenExecutionBackend(UsdGenExecutionBackend::Vulkan,
+                                         &diagnostics) &&
+              diagnostics.errors.empty(),
+          "Vulkan-enabled build validates the Vulkan backend");
+#else
     Check(!ValidateUsdGenExecutionBackend(UsdGenExecutionBackend::Vulkan,
                                           &diagnostics) &&
               diagnostics.errors.size() == 1 &&
               diagnostics.errors.front().find(
-                  "Vulkan execution backend factory is unavailable") != std::string::npos,
+                  "Vulkan execution backend factory is unavailable") != std::string::npos &&
+              diagnostics.errors.front().find(
+                  "Vulkan support was not enabled in this build") != std::string::npos,
           "Vulkan reports precise unavailability without fallback");
+#endif
 
     auto const metalContext = MakeUsdGenExecutionContext(
         UsdGenExecutionBackend::Metal, 17, 3, 99, UsdGenContext::Render);
@@ -150,26 +166,48 @@ int main() {
     width.inputs = {source.path};
     baseline.nodes.push_back(width);
     baseline.terminal = width.path;
-    for (auto backend : {UsdGenExecutionBackend::Metal,
-                         UsdGenExecutionBackend::Vulkan}) {
+    {
         auto requested = baseline;
-        requested.executionBackend = backend;
+        requested.executionBackend = UsdGenExecutionBackend::Metal;
         UsdGenGraph candidate;
         UsdGenCompileResult result = UsdGenCompiler().Compile(requested, &candidate);
-        std::string needle = UsdGenExecutionBackendName(backend);
-        needle[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(needle[0])));
-        needle += " execution backend factory is unavailable";
         bool precise = std::any_of(result.errors.begin(), result.errors.end(),
-            [&](std::string const &error) { return error.find(needle) != std::string::npos; });
-        Check(!result.ok && precise,
-              backend == UsdGenExecutionBackend::Metal
-                  ? "Metal compiler rejection is precise"
-                  : "Vulkan compiler rejection is precise");
+            [&](std::string const &error) {
+                return error.find("Metal execution backend factory is unavailable") !=
+                    std::string::npos;
+            });
+        Check(!result.ok && precise, "Metal compiler rejection is precise");
         Check(candidate.NodeCount() == 0,
-              backend == UsdGenExecutionBackend::Metal
-                  ? "Metal rejection does not produce a CPU graph"
-                  : "Vulkan rejection does not produce a CPU graph");
+              "Metal rejection does not produce a CPU graph");
     }
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    {
+        // A built Vulkan backend validates like CUDA: direct compilation
+        // succeeds and execution routes through the Session device provider.
+        auto requested = baseline;
+        requested.executionBackend = UsdGenExecutionBackend::Vulkan;
+        UsdGenGraph candidate;
+        UsdGenCompileResult result = UsdGenCompiler().Compile(requested, &candidate);
+        Check(result.ok, "Vulkan-enabled build compiles the Vulkan descriptor");
+    }
+#else
+    {
+        auto requested = baseline;
+        requested.executionBackend = UsdGenExecutionBackend::Vulkan;
+        UsdGenGraph candidate;
+        UsdGenCompileResult result = UsdGenCompiler().Compile(requested, &candidate);
+        bool precise = std::any_of(result.errors.begin(), result.errors.end(),
+            [&](std::string const &error) {
+                return error.find("Vulkan execution backend factory is unavailable") !=
+                        std::string::npos &&
+                    error.find("Vulkan support was not enabled in this build") !=
+                        std::string::npos;
+            });
+        Check(!result.ok && precise, "Vulkan compiler rejection is precise");
+        Check(candidate.NodeCount() == 0,
+              "Vulkan rejection does not produce a CPU graph");
+    }
+#endif
 
     // The registry is exercised only after the built-in unavailable checks:
     // this probe advertises no executable implementation and must not be
@@ -228,9 +266,17 @@ int main() {
           "CUDA-disabled private Session executor fails closed");
 #endif
     Check(sessionExecutor &&
-              !sessionExecutor->CanRoute(UsdGenExecutionBackend::Metal) &&
+              !sessionExecutor->CanRoute(UsdGenExecutionBackend::Metal),
+          "private Session executor keeps Metal fail-closed");
+#ifdef USDGEN_ENABLE_VULKAN_RUNTIME
+    Check(sessionExecutor &&
+              sessionExecutor->CanRoute(UsdGenExecutionBackend::Vulkan),
+          "private Session executor routes Vulkan requests without injection");
+#else
+    Check(sessionExecutor &&
               !sessionExecutor->CanRoute(UsdGenExecutionBackend::Vulkan),
-          "private Session executor keeps Metal and Vulkan fail-closed");
+          "Vulkan-disabled private Session executor fails closed without injection");
+#endif
     if (sessionExecutor) sessionExecutor->Shutdown();
 
     std::printf("testUsdGenExecutionBackend: %s\n",

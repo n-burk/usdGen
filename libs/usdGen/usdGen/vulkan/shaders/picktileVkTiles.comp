@@ -1,0 +1,191 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// PicktileVkTiles: stable capture-order tile ranges. Port of
+// usdGen::gpu::BuildCurveTiles (gpu/curveTiles.cu): ValidateKernel +
+// EmitKernel. Invalid device data sets status = 1 and leaves spans untouched;
+// invalid shapes are rejected on the host before any dispatch.
+//
+// Stable ids are u64 lanes read as uvec2 (x = low word on little-endian); all
+// id ordering is lexicographic (hi, lo). All ordinal arithmetic is u32 with
+// overflow-free min-of-product helpers (host guarantees captureN <= UINT32_MAX
+// but tile*chunksPerTile can exceed u32 for gigantic shapes, where CUDA uses
+// 64-bit size_t).
+//
+// ABI:
+//   push constant (36B, std430): {u32 captureN, survivorN, pointCount, order,
+//     chunkCount, tileCount, chunksPerTile, chunkSize, phase}
+//     order: 0 = SortedSurvivorSubset, 1 = IdentityCaptureOrder,
+//            2 = CaptureOrderSurvivorSubset
+//     phase 0 = validate, 1 = emit
+//   set 0:
+//     b0 captureIds     uvec2[captureN]
+//     b1 survivorIds    uvec2[survivorN]
+//     b2 survivorOffsets uint[survivorN+1]
+//     b3 sortedIds      uvec2[captureN]  (order 2 only; placeholder otherwise)
+//     b4 sortedOrdinals uint[captureN]   (order 2 only; placeholder otherwise)
+//     b5 spans          uint[5*tileCount] {tile,firstCurve,curveCount,firstPoint,pointCount}
+//     b6 status         uint
+//
+// Host pre-fill: status = 0. Phase 1 runs after a device barrier and emits
+// nothing when status != 0.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint captureN;
+    uint survivorN;
+    uint pointCount;
+    uint order;
+    uint chunkCount;
+    uint tileCount;
+    uint chunksPerTile;
+    uint chunkSize;
+    uint phase;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer CaptureBlock { uvec2 captureIds[]; };
+layout(std430, set = 0, binding = 1) readonly buffer SurvivorBlock { uvec2 survivorIds[]; };
+layout(std430, set = 0, binding = 2) readonly buffer OffsetsBlock { uint survivorOffsets[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SortedBlock { uvec2 sortedIds[]; };
+layout(std430, set = 0, binding = 4) readonly buffer OrdinalsBlock { uint sortedOrdinals[]; };
+layout(std430, set = 0, binding = 5) buffer SpansBlock { uint spans[]; };
+layout(std430, set = 0, binding = 6) buffer StatusBlock { uint status; } st;
+
+bool u64lt(uvec2 a, uvec2 b) { return a.y < b.y || (a.y == b.y && a.x < b.x); }
+bool u64eq(uvec2 a, uvec2 b) { return a.x == b.x && a.y == b.y; }
+bool u64le(uvec2 a, uvec2 b) { return !u64lt(b, a); }
+void fail() { atomicCompSwap(st.status, 0u, 1u); }
+
+// min(a*b, n) without u32 overflow (b > 0): a*b <= n iff a <= n/b.
+uint umulMin(uint a, uint b, uint n) {
+    if (a <= n / b) return a * b;
+    return n;
+}
+
+uint lowerBoundCapture(uvec2 key) {
+    uint first = 0u, count = pc.captureN;
+    while (count != 0u) {
+        uint step = count / 2u, probe = first + step;
+        if (u64lt(captureIds[probe], key)) { first = probe + 1u; count -= step + 1u; }
+        else count = step;
+    }
+    return first;
+}
+
+uint lowerBoundSurvivor(uvec2 key) {
+    uint first = 0u, count = pc.survivorN;
+    while (count != 0u) {
+        uint step = count / 2u, probe = first + step;
+        if (u64lt(survivorIds[probe], key)) { first = probe + 1u; count -= step + 1u; }
+        else count = step;
+    }
+    return first;
+}
+
+uint captureOrdinal(uvec2 id) {
+    uint first = 0u, count = pc.captureN;
+    while (count != 0u) {
+        uint step = count / 2u, probe = first + step;
+        if (u64lt(sortedIds[probe], id)) { first = probe + 1u; count -= step + 1u; }
+        else count = step;
+    }
+    if (first == pc.captureN || !u64eq(sortedIds[first], id)) return pc.captureN;
+    return sortedOrdinals[first];
+}
+
+uint survivorOrdinalLowerBound(uint ordinal) {
+    uint first = 0u, count = pc.survivorN;
+    while (count != 0u) {
+        uint step = count / 2u, probe = first + step;
+        if (captureOrdinal(survivorIds[probe]) < ordinal) { first = probe + 1u; count -= step + 1u; }
+        else count = step;
+    }
+    return first;
+}
+
+void main() {
+    const uint idx = gl_GlobalInvocationID.x;
+    const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+
+    if (pc.phase == 0u) {
+        if (idx == 0u) {
+            if (survivorOffsets[0u] != 0u ||
+                survivorOffsets[pc.survivorN] != pc.pointCount) fail();
+        }
+        // Nested ifs throughout (never short-circuit or ternary indexing):
+        // every indexed read must be unreachable out of bounds on any driver.
+        if (pc.order == 0u) {
+            for (uint c = idx; c < pc.captureN; c += stride) {
+                if (c != 0u) {
+                    if (u64le(captureIds[c], captureIds[c - 1u])) fail();
+                }
+            }
+        } else if (pc.order == 2u) {
+            for (uint c = idx; c < pc.captureN; c += stride) {
+                uvec2 id = sortedIds[c];
+                uint ord = sortedOrdinals[c];
+                if (c != 0u) {
+                    if (u64le(id, sortedIds[c - 1u])) fail();
+                }
+                if (ord >= pc.captureN) fail();
+                else if (!u64eq(captureIds[ord], id)) fail();
+            }
+        }
+        for (uint c = idx; c < pc.survivorN; c += stride) {
+            uint first = survivorOffsets[c];
+            uint last = survivorOffsets[c + 1u];
+            if (last <= first || last > pc.pointCount) fail();
+            uvec2 id = survivorIds[c];
+            if (pc.order == 1u) {
+                if (pc.captureN != pc.survivorN) fail();
+                else if (!u64eq(id, captureIds[c])) fail();
+            } else if (pc.order == 2u) {
+                uint ord = captureOrdinal(id);
+                if (ord >= pc.captureN) fail();
+                else if (c != 0u) {
+                    if (ord <= captureOrdinal(survivorIds[c - 1u])) fail();
+                }
+            } else {
+                if (c != 0u) {
+                    if (u64le(id, survivorIds[c - 1u])) fail();
+                }
+                uint found = lowerBoundCapture(id);
+                if (found == pc.captureN) fail();
+                else if (!u64eq(captureIds[found], id)) fail();
+            }
+        }
+    } else {
+        // Emit (mirrors EmitKernel). Reserve one capture chunk per remaining
+        // tile so the clamp floor never creates phantom initial tiles.
+        uint tile = idx;
+        if (tile >= pc.tileCount || st.status != 0u) return;
+        uint tailStart = pc.chunkCount - (pc.tileCount - tile);
+        uint tailEnd = pc.chunkCount - (pc.tileCount - (tile + 1u));
+        uint startChunk = umulMin(tile, pc.chunksPerTile, tailStart);
+        uint endChunk = umulMin(tile + 1u, pc.chunksPerTile, tailEnd);
+        uint start = umulMin(startChunk, pc.chunkSize, pc.captureN);
+        uint end = umulMin(endChunk, pc.chunkSize, pc.captureN);
+        uint firstCurve, lastCurve;
+        if (pc.order == 1u) {
+            firstCurve = start;
+            lastCurve = end;
+        } else if (pc.order == 2u) {
+            firstCurve = survivorOrdinalLowerBound(start);
+            lastCurve = survivorOrdinalLowerBound(end);
+        } else {
+            if (start == pc.captureN) firstCurve = pc.survivorN;
+            else firstCurve = lowerBoundSurvivor(captureIds[start]);
+            if (end == pc.captureN) lastCurve = pc.survivorN;
+            else lastCurve = lowerBoundSurvivor(captureIds[end]);
+        }
+        uint firstPoint = survivorOffsets[firstCurve];
+        uint lastPoint = survivorOffsets[lastCurve];
+        spans[5u * tile] = tile;
+        spans[5u * tile + 1u] = firstCurve;
+        spans[5u * tile + 2u] = lastCurve - firstCurve;
+        spans[5u * tile + 3u] = firstPoint;
+        spans[5u * tile + 4u] = lastPoint - firstPoint;
+    }
+}

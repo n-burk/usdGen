@@ -26,7 +26,7 @@ This repository does not integrate usdOrchestrator.
 
 ## Quick start
 
-You need CMake 3.26 or newer, a C++17 compiler, and an OpenUSD 26.08 install. Ninja is recommended. CUDA 12.8 or newer is optional; without it the build is CPU-only and a cook that asks for the CUDA backend is refused at runtime.
+You need CMake 3.26 or newer, a C++17 compiler, and an OpenUSD 26.08 install. Ninja is recommended. CUDA 12.8 or newer and Vulkan 1.2 are optional execution backends. A cook that asks for a backend omitted from the build is refused at runtime.
 
 From the repository root:
 
@@ -68,6 +68,53 @@ cmake --install build --prefix /path/to/usdGen-install
 That writes the libraries, headers, and plugin resources under the prefix.
 
 Turn the groom scene index off for one process with `USDGEN_ENABLE=0`.
+
+## Vulkan execution and CUDA parity
+
+Build the Vulkan Session runtime with a Vulkan SDK, `glslangValidator` (or
+`glslc`), and `spirv-val` available:
+
+```sh
+cmake -S . -B build-vulkan -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DUSD_INSTALL_DIR="$USD" \
+    -DUSDGEN_ENABLE_VULKAN_RUNTIME=ON -DUSDGEN_BUILD_VULKAN_TESTS=ON \
+    -DUSDGEN_BUILD_TESTS=ON
+cmake --build build-vulkan
+export GENBUILD="$PWD/build-vulkan"
+source bin/_env.sh
+ctest --test-dir "$GENBUILD" -L '^vulkan$' --output-on-failure
+```
+
+The runtime finds its shader bundle relative to the library, including after
+installation under `share/usdGen/vulkan`. `USDGEN_VULKAN_SHADER_DIR` overrides
+that location. Native Vulkan consumers link the exported
+`usdGen::usdGenVulkanNative` target and use `GetVulkanGenerationAccess` to hold
+the generation and its queue owner while consuming device buffers.
+
+The default Vulkan memory pool follows CUDA's policy: use the initial available
+device-local memory and reserve the greater of 1 GiB or 20% as headroom.
+`VK_EXT_memory_budget`, when available, supplies the driver budget minus usage;
+otherwise the initial estimate uses heap capacity. External allocations can
+still race that estimate, so native allocation failures remain authoritative.
+Sessions share the first pool for each device UUID. Applications can establish
+an explicit pool configuration through `DeviceFactory::ResolveAsync` before
+creating a default provider; later automatic snapshots reuse that configuration.
+
+The software Vulkan CI job checks Vulkan execution and validation diagnostics.
+It sets `USDGEN_VULKAN_ALLOW_SOFTWARE=1` to permit a CPU Vulkan driver; normal
+device selection prefers hardware GPUs and excludes software drivers.
+To compare actual CUDA and Vulkan execution on a machine with both backends,
+also configure `-DUSDGEN_ENABLE_CUDA=ON`, build, and run:
+
+```sh
+bin/check_cuda_vulkan_parity.sh build-vulkan
+```
+
+This hardware gate requires `vulkaninfo` and the Khronos validation layer,
+enables synchronization validation, and fails if a selected comparison skips.
+Tests read back results for comparison; production Session geometry stays on
+the device. GPU Sessions require a device-aware consumer. Stock Storm's scene
+index path currently lacks that consumer for both CUDA and Vulkan.
 
 ## More documentation
 

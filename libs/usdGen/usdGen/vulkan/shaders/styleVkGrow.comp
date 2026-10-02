@@ -1,0 +1,158 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// styleVkGrow.comp — Vulkan port of the CUDA GrowKernel plus the
+// ValidateOffsets pre-pass (gpu/styleOps.cu). Uses supplied per-curve roots
+// and normals: output = root + normalize(normal) * length * t. One thread
+// per curve.
+//
+// Error model mirrors CUDA exactly: 0=clean, 1=kBadOffsets, 2=kNonFinite,
+// 3=kBadValue, first-writer-wins. Phase 0 validates offsets; phase 1 exits
+// before any offset-derived point read when validation failed. The normal
+// length uses CUDA's computation order (x*x + y*y + z*z, then sqrt, then
+// three scalar divides); `precise` pins it (CUDA uses --fmad=false).
+//
+// Field domains match NoisePipeline: Groom=1, Primitive=2, Point=4.
+// A groom field with data reads index 0 (CUDA ReadField default).
+//
+// ABI — push constants (7 words, 28 bytes):
+//   uint curves, points, phase, flags (bit0 = hasHairT)
+//   float lengthLiteral; uint lengthDomain, lengthHasData
+// Bindings (float3 planes are packed scalar float[], 12-byte stride):
+//   0 offsets    uint[curveCount+1]
+//   1 roots      float[3*curveCount]
+//   2 normals    float[3*curveCount]
+//   3 lengthData float[...] (field data or 4-byte fallback, never read when
+//                           lengthHasData == 0)
+//   4 hairT      float[pointCount] (4-byte fallback unless flags & 1)
+//   5 output     float[3*pointCount] OUT
+//   6 status     uint OUT
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Offsets { uint v[]; } offsets;
+layout(set = 0, binding = 1, std430) readonly buffer Roots { float v[]; } roots;
+layout(set = 0, binding = 2, std430) readonly buffer Normals { float v[]; } normals;
+layout(set = 0, binding = 3, std430) readonly buffer Lengths { float v[]; } lengthData;
+layout(set = 0, binding = 4, std430) readonly buffer HairT { float v[]; } hairT;
+layout(set = 0, binding = 5, std430) buffer Out { float v[]; } outputPoints;
+layout(set = 0, binding = 6, std430) buffer Status { uint error; } status;
+
+layout(push_constant) uniform C {
+    uint curves;
+    uint points;
+    uint phase;
+    uint flags;
+    float lengthLiteral;
+    uint lengthDomain;
+    uint lengthHasData;
+} c;
+
+const uint kBadOffsets = 1u;
+const uint kNonFinite = 2u;
+const uint kBadValue = 3u;
+const uint kDomainGroom = 1u;
+const uint kDomainPrimitive = 2u;
+const uint kDomainPoint = 4u;
+const uint kFlagHairT = 1u;
+
+bool finite(float value) { return !isnan(value) && !isinf(value); }
+bool finiteV3(float x, float y, float z) {
+    return finite(x) && finite(y) && finite(z);
+}
+void fail(uint code) { atomicCompSwap(status.error, 0u, code); }
+
+bool readLength(uint curve, uint point, out float value) {
+    if (c.lengthHasData == 0u) {
+        value = c.lengthLiteral;
+    } else {
+        uint index = 0u;
+        if (c.lengthDomain == kDomainPrimitive) index = curve;
+        else if (c.lengthDomain == kDomainPoint) index = point;
+        else if (c.lengthDomain != kDomainGroom) {
+            fail(kBadValue);
+            return false;
+        }
+        value = lengthData.v[index];
+    }
+    if (!finite(value)) {
+        fail(kNonFinite);
+        return false;
+    }
+    return true;
+}
+
+bool readHairT(uint point, float fallback, out float t) {
+    t = ((c.flags & kFlagHairT) != 0u) ? hairT.v[point] : fallback;
+    if (!finite(t)) {
+        fail(kNonFinite);
+        return false;
+    }
+    if (t < 0.0 || t > 1.0) {
+        fail(kBadValue);
+        return false;
+    }
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (c.phase == 0u) {
+        if (i <= c.curves) {
+            uint offset = offsets.v[i];
+            if ((i == 0u && offset != 0u) ||
+                (i == c.curves && offset != c.points)) fail(kBadOffsets);
+            if (i < c.curves) {
+                if (offset >= offsets.v[i + 1u]) fail(kBadOffsets);
+                if (offsets.v[i + 1u] > c.points) fail(kBadOffsets);
+            }
+        }
+        return;
+    }
+
+    if (atomicAdd(status.error, 0u) != 0u || i >= c.curves) return;
+
+    uint base = 3u * i;
+    float rootX = roots.v[base];
+    float rootY = roots.v[base + 1u];
+    float rootZ = roots.v[base + 2u];
+    float normalX = normals.v[base];
+    float normalY = normals.v[base + 1u];
+    float normalZ = normals.v[base + 2u];
+    if (!finiteV3(rootX, rootY, rootZ) ||
+        !finiteV3(normalX, normalY, normalZ)) {
+        fail(kNonFinite);
+        return;
+    }
+    precise float normalLength =
+        sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+    if (!finite(normalLength) || normalLength == 0.0) {
+        fail(kBadValue);
+        return;
+    }
+    precise float unitX = normalX / normalLength;
+    precise float unitY = normalY / normalLength;
+    precise float unitZ = normalZ / normalLength;
+
+    uint begin = offsets.v[i];
+    uint end = offsets.v[i + 1u];
+    float denominator = float(end - begin - 1u);
+    for (uint point = begin; point < end; ++point) {
+        float fallback = denominator > 0.0
+            ? float(point - begin) / denominator : 0.0;
+        float t = 0.0, amount = 0.0;
+        if (!readHairT(point, fallback, t) ||
+            !readLength(i, point, amount)) continue;
+        precise float distance = amount * t;
+        precise float x = rootX + unitX * distance;
+        precise float y = rootY + unitY * distance;
+        precise float z = rootZ + unitZ * distance;
+        if (!finiteV3(x, y, z)) fail(kNonFinite);
+        else {
+            uint outBase = 3u * point;
+            outputPoints.v[outBase] = x;
+            outputPoints.v[outBase + 1u] = y;
+            outputPoints.v[outBase + 2u] = z;
+        }
+    }
+}

@@ -1,0 +1,156 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+#version 450
+// styleVkWidthRamp.comp — Vulkan port of the CUDA WidthRampKernel plus the
+// ValidateOffsets pre-pass (gpu/styleOps.cu). One thread per curve; each
+// curve's points are processed sequentially.
+//
+// Error model mirrors CUDA exactly: 0=clean, 1=kBadOffsets, 2=kNonFinite,
+// 3=kBadValue, first-writer-wins (atomicCompSwap from 0). Phase 0 validates
+// offsets; phase 1 exits before any offset-derived point read when a
+// malformed offset was found (atomicAdd gate). Host validation guarantees
+// field bounds; the device keeps the domain/finiteness guards.
+//
+// Field domains match NoisePipeline: Groom=1, Primitive=2, Point=4.
+// A groom field with data reads index 0 (CUDA ReadField default).
+//
+// ABI — push constants (10 words, 40 bytes):
+//   uint curves, points, phase, flags (bit0 = hasHairT)
+//   float rootLiteral; uint rootDomain, rootHasData
+//   float tipLiteral;  uint tipDomain,  tipHasData
+// Bindings (float planes are packed scalar float[]):
+//   0 offsets   uint[curveCount+1]
+//   1 rootData  float[...] (field data or 4-byte fallback, never read when
+//                          rootHasData == 0)
+//   2 tipData   float[...] (same fallback rule)
+//   3 hairT     float[pointCount] (4-byte fallback unless flags & 1)
+//   4 output    float[pointCount] OUT
+//   5 status    uint OUT
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Offsets { uint v[]; } offsets;
+layout(set = 0, binding = 1, std430) readonly buffer Root { float v[]; } rootData;
+layout(set = 0, binding = 2, std430) readonly buffer Tip { float v[]; } tipData;
+layout(set = 0, binding = 3, std430) readonly buffer HairT { float v[]; } hairT;
+layout(set = 0, binding = 4, std430) buffer Out { float v[]; } outputWidths;
+layout(set = 0, binding = 5, std430) buffer Status { uint error; } status;
+
+layout(push_constant) uniform C {
+    uint curves;
+    uint points;
+    uint phase;
+    uint flags;
+    float rootLiteral;
+    uint rootDomain;
+    uint rootHasData;
+    float tipLiteral;
+    uint tipDomain;
+    uint tipHasData;
+} c;
+
+const uint kBadOffsets = 1u;
+const uint kNonFinite = 2u;
+const uint kBadValue = 3u;
+const uint kDomainGroom = 1u;
+const uint kDomainPrimitive = 2u;
+const uint kDomainPoint = 4u;
+const uint kFlagHairT = 1u;
+
+bool finite(float value) { return !isnan(value) && !isinf(value); }
+void fail(uint code) { atomicCompSwap(status.error, 0u, code); }
+
+bool readRoot(uint curve, uint point, out float value) {
+    if (c.rootHasData == 0u) {
+        value = c.rootLiteral;
+    } else {
+        uint index = 0u;
+        if (c.rootDomain == kDomainPrimitive) index = curve;
+        else if (c.rootDomain == kDomainPoint) index = point;
+        else if (c.rootDomain != kDomainGroom) {
+            fail(kBadValue);
+            return false;
+        }
+        value = rootData.v[index];
+    }
+    if (!finite(value)) {
+        fail(kNonFinite);
+        return false;
+    }
+    return true;
+}
+
+bool readTip(uint curve, uint point, out float value) {
+    if (c.tipHasData == 0u) {
+        value = c.tipLiteral;
+    } else {
+        uint index = 0u;
+        if (c.tipDomain == kDomainPrimitive) index = curve;
+        else if (c.tipDomain == kDomainPoint) index = point;
+        else if (c.tipDomain != kDomainGroom) {
+            fail(kBadValue);
+            return false;
+        }
+        value = tipData.v[index];
+    }
+    if (!finite(value)) {
+        fail(kNonFinite);
+        return false;
+    }
+    return true;
+}
+
+bool readHairT(uint point, float fallback, out float t) {
+    t = ((c.flags & kFlagHairT) != 0u) ? hairT.v[point] : fallback;
+    if (!finite(t)) {
+        fail(kNonFinite);
+        return false;
+    }
+    if (t < 0.0 || t > 1.0) {
+        fail(kBadValue);
+        return false;
+    }
+    return true;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (c.phase == 0u) {
+        if (i <= c.curves) {
+            uint offset = offsets.v[i];
+            if ((i == 0u && offset != 0u) ||
+                (i == c.curves && offset != c.points)) fail(kBadOffsets);
+            if (i < c.curves) {
+                if (offset >= offsets.v[i + 1u]) fail(kBadOffsets);
+                if (offsets.v[i + 1u] > c.points) fail(kBadOffsets);
+            }
+        }
+        return;
+    }
+
+    // GPU-visible gate: malformed offsets (or any phase-0 surprise) prevent
+    // every offset-derived point read below.
+    if (atomicAdd(status.error, 0u) != 0u || i >= c.curves) return;
+
+    uint begin = offsets.v[i];
+    uint end = offsets.v[i + 1u];
+    float denominator = float(end - begin - 1u);
+    for (uint point = begin; point < end; ++point) {
+        float fallback = denominator > 0.0
+            ? float(point - begin) / denominator : 0.0;
+        float t = 0.0;
+        if (!readHairT(point, fallback, t)) continue;
+        float rootWidth = 0.0, tipWidth = 0.0;
+        if (!readRoot(i, point, rootWidth) ||
+            !readTip(i, point, tipWidth)) continue;
+        if (rootWidth < 0.0 || tipWidth < 0.0) {
+            fail(kBadValue);
+            continue;
+        }
+        // CUDA order rootWidth + (tipWidth - rootWidth) * t; `precise`
+        // pins it against contraction (CUDA builds with --fmad=false).
+        precise float value = rootWidth + (tipWidth - rootWidth) * t;
+        if (!finite(value)) fail(kNonFinite);
+        else outputWidths.v[point] = value;
+    }
+}

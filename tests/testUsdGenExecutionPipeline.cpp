@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <future>
 #include <stdexcept>
 #include <thread>
@@ -628,5 +629,54 @@ int main() {
             CHECK(closing.PostCommand([&] { ++completedCommands; }, [&] { ++cancelledCommands; }));
     }
     CHECK(completedCommands + cancelledCommands == 128);
+
+    // A native completion producer can resume an idle owner while an external
+    // lifecycle boundary drains it. Keep one waiter, but race admission with
+    // repeated idle-to-active transitions so the graph root must stay alive.
+    {
+        constexpr unsigned commandCount = 10000;
+        Pipeline concurrentDrain(runtime, 2, 2);
+        std::vector<unsigned> commandHits(commandCount, 0);
+        std::atomic<unsigned> completed{0}, drainCycles{0};
+        std::atomic<bool> producerDone{false}, drainerDone{false}, rejected{false};
+        std::thread drainer([&] {
+            do {
+                concurrentDrain.Drain();
+                drainCycles.fetch_add(1, std::memory_order_release);
+                std::this_thread::yield();
+            } while (!producerDone.load(std::memory_order_acquire));
+            concurrentDrain.Drain();
+            drainerDone.store(true, std::memory_order_release);
+        });
+        std::thread producer([&] {
+            for (unsigned index = 0; index != commandCount; ++index) {
+                // Each command follows a drain and the preceding callback.
+                // The waiter continues independently during admission.
+                while (drainCycles.load(std::memory_order_acquire) <= index)
+                    std::this_thread::yield();
+                if (!concurrentDrain.PostCommand([&, index] {
+                    ++commandHits[index];
+                    completed.fetch_add(1, std::memory_order_release);
+                })) {
+                    rejected.store(true, std::memory_order_release);
+                    break;
+                }
+                while (completed.load(std::memory_order_acquire) != index + 1)
+                    std::this_thread::yield();
+            }
+            producerDone.store(true, std::memory_order_release);
+        });
+        if (!Until([&] { return drainerDone.load(std::memory_order_acquire); })) {
+            // A damaged root can leave Drain spinning forever. Fail this
+            // bounded regression without joining that blocked waiter.
+            std::fprintf(stderr, "concurrent admission/Drain exceeded its deadline\n");
+            std::abort();
+        }
+        producer.join();
+        drainer.join();
+        CHECK(!rejected && completed == commandCount && drainCycles >= commandCount);
+        for (auto hits : commandHits) CHECK(hits == 1);
+        CHECK(concurrentDrain.OutstandingCommands() == 0);
+    }
     return 0;
 }

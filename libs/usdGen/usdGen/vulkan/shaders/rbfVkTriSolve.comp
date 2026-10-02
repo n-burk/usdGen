@@ -1,0 +1,55 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// rbfVkTriSolve.comp — device replacement for the cuSOLVER Dgetrs call in
+// CudaRbfBinding::Solve (rbf.cu:485): forward/back substitution of the
+// LU-factored bordered system for all three right-hand sides.
+//
+// One invocation per column (3 active in a single workgroup, no barriers
+// needed): gather the permuted RHS, solve L y = P b, then U x = y, in
+// exact SolveRbf order (deformRbfHost.h section 5). Output is column-major
+// m x 3: coef[k*m + i].
+//
+// ABI — descriptors:
+//   0 lu   double[m*m] RO (row-major LU from rbfVkLu)
+//   1 rhs  double[3*m] RO (column-major m x 3 from rbfVkRhs)
+//   2 coef double[3*m] W  (column-major m x 3 solution)
+//   3 perm int[m]      RO (row permutation from rbfVkLu)
+//   4 UBO  RbfVkSolveUbo (64 bytes; uses m)
+//
+// Dispatch: local_size_x=64, groups=(1,1,1).
+
+#version 460
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Lu   { double lu[]; };
+layout(std430, binding = 1) readonly buffer Rhs  { double rhs[]; };
+layout(std430, binding = 2) buffer Coef          { double coef[]; };
+layout(std430, binding = 3) readonly buffer Perm { int perm[]; };
+
+layout(std140, binding = 4) uniform Params {
+    ivec4  nmc;       // x = n (samples), y = m (n+4), z = count, w = reserved
+    double cx;
+    double cy;
+    double cz;
+    double invScale;
+    double scale;
+    double lambda;    // smoothing (buildMatrix diagonal only)
+} params;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= 3u) return;
+    int m = params.nmc.y;
+    uint base = k * uint(m);
+    for (int i = 0; i < m; ++i) {
+        double s = rhs[base + uint(perm[i])];
+        for (int j = 0; j < i; ++j) s -= lu[i * m + j] * coef[base + uint(j)];
+        coef[base + uint(i)] = s;
+    }
+    for (int i = m - 1; i >= 0; --i) {
+        double s = coef[base + uint(i)];
+        for (int j = i + 1; j < m; ++j) s -= lu[i * m + j] * coef[base + uint(j)];
+        coef[base + uint(i)] = s / lu[i * m + i];
+    }
+}

@@ -1,0 +1,113 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// exprVkExprOp.comp — UsdGenExprOp application for the Vulkan lane.
+// Mirrors UsdGenExprOp::Evaluate (ops/exprOp.cpp) exactly: the expression
+// field arrives evaluated (per-CV or per-curve, 3 components for
+// displacement, 1 for width) and the mask arrives as a literal or a
+// connected float field. Displacement adds field*mask to the points with an
+// exact-zero bit-preserving pass-through; width sets
+// max(0, input+(field-input)*mask).
+//
+// Like the CPU Evaluate, this performs no value validation: the captured
+// field and mask are finite by construction (exprVkEvaluate's Store rejects
+// anything else, and the host validates literals), so there is nothing to
+// fail. Status reports host-shape defects only (owners/slot out of range).
+// min/max/clamp are spelled as ternaries so NaN behaves exactly as the
+// std::clamp/std::max calls they mirror. All blend arithmetic is
+// `precise`: CUDA builds --fmad=false and the CPU twin builds
+// -ffp-contract=off, so an FMA contraction here is a 1-ulp bitwise
+// divergence (observed deterministically on NVIDIA, never on llvmpipe).
+//
+// ABI — descriptor set 0, all std430:
+//   binding 0  inPoints   float[3*pointCount]
+//   binding 1  outPoints  float[3*pointCount] OUT
+//   binding 2  inWidths   float[pointCount]
+//   binding 3  outWidths  float[pointCount] OUT
+//   binding 4  owners     uint[pointCount]
+//   binding 5  fieldData  uint[] field slots (count*components slots)
+//   binding 6  maskData   uint[] mask slots (or 1 dummy word when literal)
+//   binding 7  status     uint OUT (0 ok, 1 index out of range)
+// Push constants (24 bytes): pointCount, curveCount, returnType
+// (0 displacement, 1 width), rate (0 perCV, 1 perCurve), maskDom
+// (0 literal, else 1 groom, 2 primitive, 4 point), maskLiteral (float).
+//
+// Dispatch: local_size_x = 256, groups = ceil(pointCount/256).
+
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InPoints { float inPoints[]; };
+layout(std430, binding = 1) buffer OutPoints { float outPoints[]; };
+layout(std430, binding = 2) readonly buffer InWidths { float inWidths[]; };
+layout(std430, binding = 3) buffer OutWidths { float outWidths[]; };
+layout(std430, binding = 4) readonly buffer Owners { uint owners[]; };
+layout(std430, binding = 5) readonly buffer FieldData { uint fieldData[]; };
+layout(std430, binding = 6) readonly buffer MaskData { uint maskData[]; };
+layout(std430, binding = 7) buffer Status { uint status; };
+
+layout(push_constant) uniform Controls {
+    uint pointCount;
+    uint curveCount;
+    uint returnType;
+    uint rate;
+    uint maskDom;
+    float maskLiteral;
+} controls;
+
+void main() {
+    uint point = gl_GlobalInvocationID.x;
+    if (point >= controls.pointCount) return;
+    uint curve = owners[point];
+    if (curve >= controls.curveCount) { atomicOr(status, 1u); return; }
+    if (controls.returnType > 1u || controls.rate > 1u) {
+        atomicOr(status, 1u);
+        return;
+    }
+
+    float mask = controls.maskLiteral;
+    if (controls.maskDom != 0u) {
+        uint slot = 0u;
+        uint fieldCount = 1u;
+        if (controls.maskDom == 1u) { slot = 0u; fieldCount = 1u; }
+        else if (controls.maskDom == 2u) { slot = curve; fieldCount = controls.curveCount; }
+        else if (controls.maskDom == 4u) { slot = point; fieldCount = controls.pointCount; }
+        else { atomicOr(status, 1u); return; }
+        if (slot >= fieldCount) { atomicOr(status, 1u); return; }
+        mask = uintBitsToFloat(maskData[slot * 2u]);
+    }
+    // std::clamp(mask, 0, 1), spelled out for NaN-identical behavior.
+    float mc = mask < 0.0 ? 0.0 : (1.0 < mask ? 1.0 : mask);
+
+    float inputWidth = inWidths[point];
+    float px = inPoints[point * 3u];
+    float py = inPoints[point * 3u + 1u];
+    float pz = inPoints[point * 3u + 2u];
+    uint e = controls.rate == 0u ? point : curve;
+    if (controls.returnType == 0u) {
+        precise float dx = uintBitsToFloat(fieldData[(e * 3u) * 2u]) * mc;
+        precise float dy = uintBitsToFloat(fieldData[(e * 3u + 1u) * 2u]) * mc;
+        precise float dz = uintBitsToFloat(fieldData[(e * 3u + 2u) * 2u]) * mc;
+        if (dx == 0.0 && dy == 0.0 && dz == 0.0) {
+            outPoints[point * 3u] = px;
+            outPoints[point * 3u + 1u] = py;
+            outPoints[point * 3u + 2u] = pz;
+        } else {
+            precise float ox = px + dx;
+            precise float oy = py + dy;
+            precise float oz = pz + dz;
+            outPoints[point * 3u] = ox;
+            outPoints[point * 3u + 1u] = oy;
+            outPoints[point * 3u + 2u] = oz;
+        }
+        outWidths[point] = inputWidth;
+    } else {
+        outPoints[point * 3u] = px;
+        outPoints[point * 3u + 1u] = py;
+        outPoints[point * 3u + 2u] = pz;
+        float field = uintBitsToFloat(fieldData[e * 2u]);
+        precise float w = inputWidth + (field - inputWidth) * mc;
+        outWidths[point] = 0.0 < w ? w : 0.0;
+    }
+}

@@ -1,0 +1,656 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// noiseGenerate.comp — Vulkan port of the CUDA noiseNoise kernel (noise.cu).
+// One thread per curve; each curve's points are processed sequentially
+// (required by the cumulative / preserveLength recurrence). Computes a
+// SeExpr-vfbm vector field per point, projects it through the rest root
+// frame, scales by magnitude/ramp/envelope, and applies optional length
+// preservation.  Mirrors CUDA noise.cu NoiseKernel bit-for-bit (float outer,
+// double inner accumulation) so results match the CUDA operator and its
+// SeExpr CPU oracle within the documented 2e-3 tolerance.
+//
+// Error model: the generate dispatch only runs after a synchronous validate
+// dispatch proved the inputs clean (status==0). The kernel still guards with
+// LoadError so a device-side surprise records the first-writer code without
+// touching outputs. Codes match CUDA: 1=BadOffsets, 2=NonFinite, 3=BadValue.
+//
+// ABI — push constants (std430, 20 bytes):
+//   uint curveCount, pointCount, frameCount, offsetsCount, flags
+//   flags bit0 = hasHairT, bit1 = hasFrameStableIds
+//
+// Descriptor bindings (packed float3 planes = scalar float[] 12-byte stride;
+// u64 id planes = uint[] little-endian lo/hi):
+//   0 points            float[3*pointCount]
+//   1 restPoints        float[3*pointCount]
+//   2 curveOffsets      uint[curveCount+1]
+//   3 stableIds         uint[2*curveCount]
+//   4 hairT             float[pointCount]
+//   5 frameTangent      float[3*frameCount]
+//   6 frameBinormal     float[3*frameCount]
+//   7 frameNormal       float[3*frameCount]
+//   8 frameStableIds    uint[2*frameCount]
+//   9 magnitudeProfile  float[257]
+//   10 magnitudeData    float[...]   (field data or empty)
+//   11 frequencyData    float[...]
+//   12 correlationData  float[...]
+//   13 octavesData      int[...]
+//   14 lacunarityData   float[...]
+//   15 gainData         float[...]
+//   16 preserveLengthData float[...]
+//   17 maskData         float[...]
+//   18 enabledData      uint[...]
+//   19 cumulativeData   uint[...]
+//   20 seedData         int[...]
+//   21 outPoints        float[3*pointCount] OUT
+//   22 status           uint OUT
+// UBO binding 23: field descriptors {literal, hasData, domain, pad} per field.
+// Domain values: Groom=1, Primitive=2, Point=4.
+
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0)  readonly buffer Points    { float points[]; };
+layout(std430, binding = 1)  readonly buffer Rest      { float rest[]; };
+layout(std430, binding = 2)  readonly buffer Offsets   { uint curveOffsets[]; };
+layout(std430, binding = 3)  readonly buffer StableIds { uint ids[]; };
+layout(std430, binding = 4)  readonly buffer HairT     { float hairT[]; };
+layout(std430, binding = 5)  readonly buffer FrameTan  { float frameTangent[]; };
+layout(std430, binding = 6)  readonly buffer FrameBin  { float frameBinormal[]; };
+layout(std430, binding = 7)  readonly buffer FrameNrm  { float frameNormal[]; };
+layout(std430, binding = 8)  readonly buffer FrameIds  { uint frameIds[]; };
+layout(std430, binding = 9)  readonly buffer Profile   { float magnitudeProfile[]; };
+layout(std430, binding = 10) readonly buffer MagD      { float magnitudeData[]; };
+layout(std430, binding = 11) readonly buffer FreqD     { float frequencyData[]; };
+layout(std430, binding = 12) readonly buffer CorrD     { float correlationData[]; };
+layout(std430, binding = 13) readonly buffer OctD      { int octavesData[]; };
+layout(std430, binding = 14) readonly buffer LacD      { float lacunarityData[]; };
+layout(std430, binding = 15) readonly buffer GainD     { float gainData[]; };
+layout(std430, binding = 16) readonly buffer PresD     { float preserveLengthData[]; };
+layout(std430, binding = 17) readonly buffer MaskD     { float maskData[]; };
+layout(std430, binding = 18) readonly buffer EnabD     { uint enabledData[]; };
+layout(std430, binding = 19) readonly buffer CumD      { uint cumulativeData[]; };
+layout(std430, binding = 20) readonly buffer SeedD     { int seedData[]; };
+layout(std430, binding = 21) buffer OutPoints         { float outPoints[]; };
+layout(std430, binding = 22) buffer Status            { uint status; };
+
+layout(std140, binding = 23) uniform FieldDescs {
+    vec4  magnitude;      // x literal, y hasData, z domain, w pad
+    vec4  frequency;
+    vec4  correlation;
+    ivec4 octaves;        // x literal(int), y hasData, z domain, w pad
+    vec4  lacunarity;
+    vec4  gain;
+    vec4  preserveLength;
+    vec4  mask;
+    vec4  enabled;
+    vec4  cumulative;
+    ivec4 seed;
+} fields;
+
+layout(push_constant) uniform Push {
+    uint curveCount;
+    uint pointCount;
+    uint frameCount;
+    uint offsetsCount;
+    uint flags;
+} push;
+
+const uint FLAG_HAIR_T    = 1u;
+const uint FLAG_FRAME_IDS = 2u;
+const uint D_GROOM   = 1u;
+const uint D_PRIM    = 2u;
+const uint D_POINT   = 4u;
+const uint SALT_NOISE = 0x4E01523Eu;
+
+uint GridStride() { return uint(gl_WorkGroupSize.x) * uint(gl_NumWorkGroups.x); }
+void StatusErr(uint code) { atomicCompSwap(status, 0u, code); }
+bool Finite(float v) { return !(isinf(v) || isnan(v)); }
+bool FiniteD(double v) { return !(isinf(v) || isnan(v)); }
+bool FiniteV3(vec3 v) { return Finite(v.x) && Finite(v.y) && Finite(v.z); }
+#define P3(a, i) vec3((a)[3u*(i)], (a)[3u*(i)+1u], (a)[3u*(i)+2u])
+
+
+// ---- SeExpr3 Perlin (float in/out, double inner accumulation) ----
+
+// GENERATED from thirdparty/seexpr/SeExpr2/NoiseTables.h NOISE_TABLES<3>::g
+// (via ops/noise_tables_gen.cuh). SeExpr3 Perlin gradient table, first 256 rows
+// (HashReduceChar returns a byte). Do not edit.
+const double G[256][3] = {
+  {0.703937,0.671213,0.232264},
+  {0.244363,0.69386,-0.677381},
+  {-0.331423,0.848405,-0.412756},
+  {0.126499,0.962872,0.238487},
+  {0.466958,-0.483874,0.740146},
+  {0.176755,0.860964,0.476969},
+  {0.886366,0.406782,-0.221099},
+  {0.0185006,0.775828,0.630673},
+  {-0.470088,0.0605037,0.880543},
+  {-0.773492,0.626673,-0.0948238},
+  {-0.857512,0.288094,-0.426232},
+  {0.150081,0.415784,0.896995},
+  {-0.872249,-0.218042,0.437766},
+  {-0.0861065,-0.839216,-0.536938},
+  {0.349644,-0.0680964,-0.934405},
+  {-0.0398576,0.898367,0.437433},
+  {0.468223,-0.875571,-0.118926},
+  {-0.103358,0.963883,0.24545},
+  {0.337089,-0.875548,0.346102},
+  {-0.0221145,0.424378,-0.905215},
+  {0.0437806,0.910029,-0.412227},
+  {-0.708037,0.621613,-0.335084},
+  {-0.582809,0.409583,-0.701837},
+  {0.449608,-0.880991,0.147335},
+  {0.894835,-0.444366,0.0425467},
+  {0.612009,-0.290472,-0.735576},
+  {0.327684,0.528202,0.783343},
+  {-0.954306,-0.0592497,0.292897},
+  {-0.787289,-0.592354,0.17115},
+  {-0.532847,0.754446,-0.383257},
+  {0.967865,0.202682,-0.148851},
+  {-0.154359,0.666301,0.729532},
+  {0.815913,-0.378909,0.436708},
+  {-0.33297,-0.903445,-0.270035},
+  {0.473239,-0.483413,-0.736449},
+  {-0.575346,0.601649,-0.554071},
+  {-0.0318239,0.27278,0.96155},
+  {0.265315,0.13551,-0.954591},
+  {-0.631428,-0.24433,-0.735935},
+  {0.660881,-0.728335,-0.181008},
+  {0.213022,0.525664,-0.823589},
+  {-0.584948,-0.498582,0.639729},
+  {0.326382,0.886109,0.329069},
+  {-0.639737,-0.0281372,0.768078},
+  {0.0488475,0.780061,-0.623793},
+  {-0.162389,0.939152,-0.302694},
+  {0.743029,0.329622,-0.582459},
+  {-0.0392915,0.998263,0.0438991},
+  {-0.184122,0.684116,-0.705751},
+  {0.649173,-0.486517,-0.584701},
+  {-0.797453,-0.508998,-0.324021},
+  {-0.692277,0.00421333,-0.721619},
+  {0.736423,-0.0850594,-0.671153},
+  {0.185898,0.982543,-0.00722356},
+  {0.0127172,0.618041,-0.786043},
+  {0.552496,0.831102,0.0633782},
+  {0.931649,0.086932,0.352808},
+  {0.16589,0.183359,0.968948},
+  {-0.563792,-0.466113,-0.681819},
+  {-0.227157,0.970054,-0.0859935},
+  {0.143632,-0.772967,-0.617973},
+  {0.80845,-0.55899,-0.184227},
+  {-0.259797,-0.315267,0.91275},
+  {-0.210642,-0.9083,0.361416},
+  {0.111219,-0.900813,-0.419723},
+  {0.271668,-0.442262,-0.854752},
+  {-0.82864,0.0821824,-0.553717},
+  {-0.375708,0.718987,-0.584723},
+  {-0.280864,-0.0848669,0.955988},
+  {0.40012,0.909678,-0.111309},
+  {0.982483,0.139306,0.123782},
+  {-0.945762,-0.253865,0.2027},
+  {-0.980597,-0.195914,-0.0068499},
+  {0.35892,0.311644,0.879804},
+  {-0.150533,0.0281254,-0.988205},
+  {0.942365,0.333462,0.0274149},
+  {0.0915656,-0.977007,-0.192542},
+  {0.482284,0.138992,-0.864918},
+  {0.910838,0.310947,0.271452},
+  {0.621993,0.639092,0.452422},
+  {-0.847242,-0.424279,0.319637},
+  {0.491705,0.587825,0.642408},
+  {-0.892862,0.392122,0.221445},
+  {0.604611,-0.268798,0.749796},
+  {-0.750032,-0.369835,0.548338},
+  {0.832349,0.0323993,0.553304},
+  {0.768444,0.48877,-0.413035},
+  {0.520619,-0.0862026,0.849426},
+  {0.0382017,-0.5973,0.801108},
+  {-0.462935,0.762886,0.451326},
+  {0.847687,0.528653,-0.0441998},
+  {-0.379082,-0.618955,0.687889},
+  {-0.405669,0.550519,-0.729631},
+  {-0.221196,-0.34563,-0.911928},
+  {0.431557,0.83464,-0.342248},
+  {-0.648354,-0.596692,-0.472859},
+  {-0.370907,0.105338,-0.922677},
+  {-0.0718653,-0.849552,0.522587},
+  {-0.347969,-0.919283,0.183948},
+  {-0.271436,0.146575,0.95123},
+  {0.809606,-0.531526,0.249035},
+  {0.354965,0.926855,0.122231},
+  {0.11355,-0.586723,-0.801787},
+  {0.428599,0.539449,-0.724774},
+  {0.671071,0.133191,-0.729331},
+  {-0.691673,-0.722188,0.00581921},
+  {0.210179,-0.958281,0.193709},
+  {-0.902243,-0.426146,0.0660138},
+  {-0.404368,0.338777,-0.849539},
+  {0.795005,-0.464171,-0.390528},
+  {-0.608185,0.590394,0.530609},
+  {0.398167,-0.316797,0.860873},
+  {-0.652399,0.754199,0.0745617},
+  {0.692765,-0.0251959,0.720723},
+  {-0.111766,-0.935697,-0.334633},
+  {-0.0339944,-0.412959,0.910115},
+  {0.534409,0.379982,0.754997},
+  {0.77425,-0.632123,0.0309428},
+  {-0.707191,-0.566922,0.42247},
+  {-0.212727,-0.529147,0.821432},
+  {0.296734,-0.914603,-0.274681},
+  {-0.218053,0.496506,-0.840199},
+  {0.422297,-0.273784,-0.864122},
+  {0.591333,0.787304,-0.17458},
+  {-0.443239,-0.305043,-0.842904},
+  {0.661367,-0.639136,-0.392553},
+  {-0.468663,-0.182573,0.864305},
+  {-0.516925,-0.0670702,-0.853399},
+  {-0.710741,0.375331,0.594957},
+  {0.423102,0.759161,0.494631},
+  {0.247216,0.839627,-0.483643},
+  {-0.916356,-0.364994,-0.164534},
+  {-0.970304,0.237044,0.0481746},
+  {-0.508056,-0.773006,-0.379922},
+  {0.717762,0.696189,0.0117958},
+  {-0.879854,0.0374545,0.473766},
+  {-0.141238,-0.706546,0.69343},
+  {-0.302912,-0.8224,-0.481563},
+  {-0.52973,-0.679401,0.507741},
+  {-0.995612,0.00112916,0.0935721},
+  {0.770279,-0.290515,-0.567689},
+  {0.831609,0.267528,0.486678},
+  {0.145521,-0.277545,0.949628},
+  {0.507867,-0.636986,0.579931},
+  {0.890254,-0.268962,-0.367569},
+  {0.0181128,0.983902,-0.177786},
+  {0.967931,-0.127579,-0.216412},
+  {-0.868754,-0.306667,-0.388872},
+  {0.102164,-0.0286481,-0.994355},
+  {-0.67944,-0.692457,-0.24262},
+  {0.899886,-0.148992,0.409886},
+  {0.824701,0.114807,-0.553794},
+  {-0.223681,0.35753,0.906719},
+  {-0.735341,0.453771,-0.503355},
+  {-0.319217,0.519664,0.792496},
+  {0.360392,0.0842246,0.928991},
+  {0.0285471,-0.397916,-0.916978},
+  {0.748567,0.623001,-0.226975},
+  {-0.938623,0.104478,-0.328743},
+  {0.439054,0.708447,-0.552571},
+  {-0.138696,-0.983299,-0.117838},
+  {0.102764,-0.75416,0.648601},
+  {-0.792884,0.589741,0.15343},
+  {-0.614839,0.222451,0.75663},
+  {0.662237,-0.437329,0.608429},
+  {-0.435869,-0.413395,0.799451},
+  {-0.290422,0.886642,0.359889},
+  {-0.628215,-0.27459,0.727974},
+  {0.783055,0.483628,0.391061},
+  {-0.46599,-0.659429,-0.589921},
+  {-0.96489,-0.139979,-0.222248},
+  {-0.262613,-0.693507,-0.670882},
+  {-0.941807,0.283267,-0.180997},
+  {0.517647,-0.766618,0.379919},
+  {0.91527,-0.365825,-0.168683},
+  {0.880251,0.267538,-0.391894},
+  {0.497402,-0.797527,-0.341384},
+  {-0.201279,0.268824,-0.941924},
+  {-0.36178,-0.513064,-0.778383},
+  {-0.0622299,-0.190018,-0.979806},
+  {0.920058,-0.313354,0.235163},
+  {0.611315,0.534067,-0.584009},
+  {-0.900076,-0.0891747,-0.42651},
+  {-0.488622,0.841614,0.230075},
+  {-0.765284,0.132044,0.630004},
+  {0.0566041,-0.997883,0.032038},
+  {0.221663,-0.463196,0.858088},
+  {-0.136397,-0.537233,-0.832332},
+  {0.188996,-0.239227,-0.952392},
+  {-0.0692875,-0.184642,0.98036},
+  {0.324608,-0.767909,0.552218},
+  {0.561478,-0.0737953,-0.824195},
+  {-0.818049,-0.567854,-0.0913143},
+  {0.977631,-0.0847148,0.192515},
+  {0.00137412,-0.957845,0.287284},
+  {-0.650958,0.691099,0.314063},
+  {-0.223262,0.801023,0.555442},
+  {-0.773378,0.500316,0.38932},
+  {0.578787,0.345454,-0.738693},
+  {0.610163,0.684089,-0.399654},
+  {0.32642,-0.806744,-0.492559},
+  {0.228387,0.93919,-0.25644},
+  {0.54976,0.152703,0.821246},
+  {0.678923,0.438401,0.588955},
+  {-0.850488,0.279179,0.44579},
+  {0.0130521,0.183984,-0.982843},
+  {-0.566217,0.17794,-0.804821},
+  {0.709054,0.21427,0.671812},
+  {0.49716,-0.664111,-0.55838},
+  {-0.347565,-0.936701,-0.0423009},
+  {0.17422,0.333029,-0.926682},
+  {-0.776182,-0.123523,0.618291},
+  {-0.308091,-0.131397,-0.942239},
+  {-0.530185,-0.835661,-0.14344},
+  {-0.448458,-0.820814,0.353766},
+  {0.26657,0.717597,0.643425},
+  {-0.533719,-0.839756,0.0997717},
+  {0.386265,0.345329,-0.855305},
+  {-0.0646575,0.505187,0.860585},
+  {0.975145,-0.221327,0.0103059},
+  {-0.785106,-0.170651,-0.595388},
+  {-0.991786,0.0543184,-0.115802},
+  {0.94534,0.0632803,-0.319889},
+  {0.683011,-0.587613,0.433828},
+  {-0.634975,-0.724176,0.269027},
+  {0.876185,-0.0834622,-0.474694},
+  {0.287078,-0.625462,0.725523},
+  {-0.395736,0.661196,0.637348},
+  {0.843124,0.509441,0.172079},
+  {-0.468808,0.8833,-0.000465431},
+  {-0.947066,0.172266,0.270906},
+  {0.531331,0.798747,0.282294},
+  {-0.0477147,-0.703516,-0.709076},
+  {-0.435629,0.300855,0.848359},
+  {-0.293093,0.947852,0.12519},
+  {0.609435,-0.792271,0.029926},
+  {-0.40416,0.89042,-0.209302},
+  {0.104886,0.622757,0.775353},
+  {0.13811,-0.884292,0.446042},
+  {-0.531316,0.462603,0.709719},
+  {-0.0749454,0.0546115,0.995691},
+  {-0.307886,-0.782869,0.540668},
+  {-0.145564,0.832899,-0.533938},
+  {-0.734822,-0.395011,-0.551364},
+  {-0.892592,0.45057,-0.0163148},
+  {-0.611459,0.774063,-0.164148},
+  {0.313613,-0.644045,-0.697749},
+  {0.286015,-0.957831,-0.0274987},
+  {-0.149122,-0.981781,0.117763},
+  {0.656373,-0.718632,0.229658},
+  {-0.844891,0.464422,-0.265466},
+  {0.316523,-0.132894,0.93923},
+  {0.998767,0.00915237,-0.0487939},
+  {-0.724761,0.251606,-0.641417},
+  {0.773361,-0.209935,0.598197},
+  {0.124979,-0.0345928,0.991556},
+};
+
+// ---- 64-bit integer helpers (SplitMix64) ----
+uint mul_hi(uint a, uint b) {
+    uint a0 = a & 0xFFFFu, a1 = a >> 16;
+    uint b0 = b & 0xFFFFu, b1 = b >> 16;
+    uint p0 = a0 * b0;
+    uint p1 = a0 * b1;
+    uint p2 = a1 * b0;
+    uint p3 = a1 * b1;
+    uint mid = (p0 >> 16) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu);
+    return p3 + (p1 >> 16) + (p2 >> 16) + (mid >> 16);
+}
+uvec2 add64(uvec2 a, uvec2 b) {
+    uint lo = a.x + b.x;
+    return uvec2(lo, a.y + b.y + (lo < a.x ? 1u : 0u));
+}
+uvec2 mul64(uvec2 a, uvec2 b) {
+    // low 64 bits of a*b
+    uint lo = a.x * b.x;
+    uint hi = mul_hi(a.x, b.x) + a.x * b.y + a.y * b.x;
+    return uvec2(lo, hi);
+}
+uvec2 shr64u(uvec2 a, uint n) {
+    // returns full 64-bit result of (a >> n)
+    if (n >= 32u) return uvec2(0u, a.y >> (n - 32u));
+    return uvec2((a.x >> n) | (a.y << (32u - n)), a.y >> n);
+}
+uvec2 Smix64(uvec2 key, uint salt) {
+    uvec2 c  = uvec2(0x7F4A7C15u, 0x9E3779B9u);
+    uvec2 m1 = uvec2(0x1CE4E5B9u, 0xBF58476Du);
+    uvec2 m2 = uvec2(0x133111EBu, 0x94D049BBu);
+    uvec2 s = uvec2(salt, 0u);
+    uvec2 z = add64(key ^ mul64(s, c), c);
+    z = mul64(z ^ shr64u(z, 30u), m1);
+    z = mul64(z ^ shr64u(z, 27u), m2);
+    return z ^ shr64u(z, 31u);
+}
+float Draw01(int seed, uvec2 cid, uint salt) {
+    uvec2 s64 = uvec2(uint(uint(seed)), 0u);
+    uvec2 key = Smix64(s64, salt) ^ cid;
+    uvec2 h = Smix64(key, salt);
+    return float(h.y >> 8u) * float(1u) / float(1u << 24u);
+}
+// ---- SeExpr3 Perlin (float in/out, double inner accumulation) ----
+
+double hashReduceChar(int x, int y, int z) {
+    // returns the byte; cast to double for G indexing
+    uint seed = 0u;
+    seed = seed * 1664525u + uint(x) + 1013904223u;
+    seed = seed * 1664525u + uint(y) + 1013904223u;
+    seed = seed * 1664525u + uint(z) + 1013904223u;
+    seed ^= (seed >> 11u);
+    seed ^= (seed << 7u) & 0x9d2c5680u;
+    seed ^= (seed << 15u) & 0xefc60000u;
+    seed ^= (seed >> 18u);
+    return float(((((seed & 0xff0000u) >> 4u) + (seed & 0xffu)) & 0xffu));
+}
+
+double SCurve(float x) {
+    double t = x;
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+float Noise3(float x, float y, float z) {
+    vec3 X = vec3(x, y, z);
+    vec3 f = floor(X);
+    ivec3 index = ivec3(f);
+    vec3 w0 = X - f;
+    vec3 w1 = w0 - vec3(1.0);
+    float vals[8];
+    for (int dummy = 0; dummy < 8; dummy++) {
+        int off0 = (dummy >> 0) & 1;
+        int off1 = (dummy >> 1) & 1;
+        int off2 = (dummy >> 2) & 1;
+        ivec3 lidx = index + ivec3(off0, off1, off2);
+        uint lookup = uint(hashReduceChar(lidx.x, lidx.y, lidx.z));
+        float val = 0.0;
+        val = float(double(val) + G[lookup][0] * double(off0 != 0 ? w1.x : w0.x));
+        val = float(double(val) + G[lookup][1] * double(off1 != 0 ? w1.y : w0.y));
+        val = float(double(val) + G[lookup][2] * double(off2 != 0 ? w1.z : w0.z));
+        vals[dummy] = val;
+    }
+    float alphas[3];
+    alphas[0] = float(SCurve(w0.x));
+    alphas[1] = float(SCurve(w0.y));
+    alphas[2] = float(SCurve(w0.z));
+    for (int newd = 2; newd >= 0; newd--) {
+        int newnum = 1 << newd;
+        int k = 3 - newd - 1;
+        float alpha = alphas[k];
+        float beta = 1.0 - alphas[k];
+        for (int dummy = 0; dummy < newnum; dummy++) {
+            int index2 = dummy * (1 << (3 - newd));
+            int otherIndex = index2 + (1 << k);
+            vals[index2] = beta * vals[index2] + alpha * vals[otherIndex];
+        }
+    }
+    return vals[0];
+}
+
+bool SupportedLatticeCoordinate(float value) {
+    if (!Finite(value)) return false;
+    double cell = floor(double(value));
+    return cell >= -2147483648.0 && cell < 2147483647.0;
+}
+bool SupportedNoisePoint(float x, float y, float z) {
+    return SupportedLatticeCoordinate(x) && SupportedLatticeCoordinate(y) &&
+           SupportedLatticeCoordinate(z);
+}
+
+bool Vfbm3(float x, float y, float z, int octaves, float lacunarity,
+           float gain, out vec3 result) {
+    result = vec3(0.0);
+    float scale = 1.0;
+    for (int octave = 0; octave < octaves; ++octave) {
+        float x1 = x + 1000.0, y1 = y + 1000.0, z1 = z + 1000.0;
+        float x2 = x + 2000.0, y2 = y + 2000.0, z2 = z + 2000.0;
+        if (!SupportedNoisePoint(x, y, z) || !SupportedNoisePoint(x1, y1, z1) ||
+            !SupportedNoisePoint(x2, y2, z2)) return false;
+        result.x += Noise3(x, y, z) * scale;
+        result.y += Noise3(x1, y1, z1) * scale;
+        result.z += Noise3(x2, y2, z2) * scale;
+        if (octave + 1 == octaves) break;
+        scale *= gain;
+        x = x * lacunarity + 1234.0;
+        y = y * lacunarity + 1234.0;
+        z = z * lacunarity + 1234.0;
+        if (!Finite(x) || !Finite(y) || !Finite(z) || !Finite(scale))
+            return false;
+    }
+    return FiniteV3(result);
+}
+
+float ComputeHairT(uint point, uint begin, uint end) {
+    float result = end > begin + 1u ? float(point - begin) / float(end - begin - 1u) : 0.0;
+    if ((push.flags & FLAG_HAIR_T) != 0u) result = hairT[point];
+    return result;
+}
+
+float Sample257(float t) {
+    float coordinate = t * 256.0;
+    int lower = min(255, max(0, int(floor(coordinate))));
+    float fraction = coordinate - float(lower);
+    return magnitudeProfile[lower] + (magnitudeProfile[lower + 1] -
+                                      magnitudeProfile[lower]) * fraction;
+}
+
+// Field readers. Domain values: Groom=1, Primitive=2, Point=4. Host
+// validates domain/size legality; the shader indexes accordingly.
+#define FIELD_IDX(domain, curve, point) \
+    (((domain) == D_PRIM ? (curve) : ((domain) == D_POINT ? (point) : 0u)))
+// General scalar/int reader: literal when hasData==0, else data[domain index].
+#define READ_FIELD(field, curve, point, data) \
+    (int((field).y) == 0 ? (field).x : (data)[FIELD_IDX(uint((field).z), (curve), (point))])
+// Bool reader (enabled/cumulative): Groom or Primitive only, per CUDA ReadBool.
+#define READ_BOOL(curve, field, data) \
+    (int((field).y) == 0 ? uint((field).x) : (data)[(uint((field).z) == D_PRIM ? (curve) : 0u)])
+
+void main() {
+    uint stride = GridStride();
+    for (uint curve = gl_GlobalInvocationID.x; curve < push.curveCount; curve += stride) {
+        if (status != 0u) continue;
+        uint begin = curveOffsets[curve];
+        uint end = curveOffsets[curve + 1u];
+
+        bool enabled = READ_BOOL(curve, fields.enabled, enabledData) != 0u;
+        uint cumRaw = READ_BOOL(curve, fields.cumulative, cumulativeData);
+        if (cumRaw > 1u) { StatusErr(3u); continue; }
+        bool cumulative = cumRaw != 0u;
+        int seed = READ_FIELD(fields.seed, curve, 0u, seedData);
+
+        uint frameCurve = curve;
+        if ((push.flags & FLAG_FRAME_IDS) != 0u) {
+            uint tlo = ids[2u * curve], thi = ids[2u * curve + 1u];
+            uint lo = 0u, hi = push.frameCount;
+            while (lo < hi) {
+                uint mid = lo + (hi - lo) / 2u;
+                bool lt = frameIds[2u*mid + 1u] < thi ||
+                          (frameIds[2u*mid + 1u] == thi && frameIds[2u*mid] < tlo);
+                if (lt) lo = mid + 1u; else hi = mid;
+            }
+            if (lo == push.frameCount ||
+                frameIds[2u*lo] != tlo || frameIds[2u*lo+1u] != thi) {
+                StatusErr(3u); continue;
+            }
+            frameCurve = lo;
+        }
+        vec3 tangent = P3(frameTangent, frameCurve);
+        vec3 binormal = P3(frameBinormal, frameCurve);
+        vec3 normal = P3(frameNormal, frameCurve);
+        vec3 rootRest = P3(rest, begin);
+        uvec2 stableId = uvec2(ids[2u * curve], ids[2u * curve + 1u]);
+        vec3 hash = vec3(
+            Draw01(seed, stableId, SALT_NOISE),
+            Draw01(seed, stableId, SALT_NOISE + 1u),
+            Draw01(seed, stableId, SALT_NOISE + 2u));
+        vec3 running = vec3(0.0);
+        vec3 previousOutput = P3(points, begin);
+        for (uint point = begin; point < end; ++point) {
+            float magnitude = READ_FIELD(fields.magnitude, curve, point, magnitudeData);
+            float frequency = READ_FIELD(fields.frequency, curve, point, frequencyData);
+            float correlation = READ_FIELD(fields.correlation, curve, point, correlationData);
+            int octaves = READ_FIELD(fields.octaves, curve, point, octavesData);
+            float lacunarity = READ_FIELD(fields.lacunarity, curve, point, lacunarityData);
+            float gain = READ_FIELD(fields.gain, curve, point, gainData);
+            float preserve = READ_FIELD(fields.preserveLength, curve, point, preserveLengthData);
+            float mask = READ_FIELD(fields.mask, curve, point, maskData);
+
+            if (!Finite(magnitude) || !Finite(frequency) || !Finite(correlation) ||
+                !Finite(lacunarity) || !Finite(gain) || !Finite(preserve) ||
+                !Finite(mask)) { StatusErr(2u); continue; }
+            if (octaves < 1 || octaves > 6 ||
+                magnitude < 0.0 || frequency <= 0.0 || correlation < 0.0 ||
+                correlation > 1.0 || lacunarity <= 1.0 || gain < 0.0 || gain > 1.0 ||
+                preserve < 0.0 || preserve > 1.0 || mask < 0.0 || mask > 1.0) {
+                StatusErr(3u); continue;
+            }
+            float t = ComputeHairT(point, begin, end);
+            if (!Finite(t) || t < 0.0 || t > 1.0) {
+                StatusErr(Finite(t) ? 3u : 2u); continue;
+            }
+            float magnitudeRamp = Sample257(t);
+            float envelope = mask;
+            if (!FiniteD(magnitudeRamp)) { StatusErr(2u); continue; }
+            if (envelope < 0.0 || envelope > 1.0) { StatusErr(3u); continue; }
+            vec3 src = P3(points, point);
+            if (!enabled) {
+                outPoints[3u*point] = src.x; outPoints[3u*point+1u] = src.y;
+                outPoints[3u*point+2u] = src.z;
+                previousOutput = src;
+                continue;
+            }
+            float baseX = rootRest.x * correlation + hash.x * (1.0 - correlation);
+            float baseY = rootRest.y * correlation + hash.y * (1.0 - correlation);
+            float baseZ = rootRest.z * correlation + hash.z * (1.0 - correlation) + t * frequency;
+            vec3 field;
+            if (!Vfbm3(baseX, baseY, baseZ, octaves, lacunarity, gain, field)) {
+                StatusErr(3u); continue;
+            }
+            vec3 accumulatedField = field;
+            if (cumulative) {
+                running = running + field;
+                accumulatedField = running;
+            }
+            if (magnitude == 0.0 || magnitudeRamp == 0.0 || envelope == 0.0) {
+                outPoints[3u*point] = src.x; outPoints[3u*point+1u] = src.y;
+                outPoints[3u*point+2u] = src.z;
+                previousOutput = src;
+                continue;
+            }
+            vec3 displacement = accumulatedField * (magnitude * magnitudeRamp * envelope);
+            vec3 worldDisplacement = tangent * displacement.x +
+                                     binormal * displacement.y +
+                                     normal * displacement.z;
+            vec3 displaced = src + worldDisplacement;
+            if (!FiniteV3(displaced)) { StatusErr(2u); continue; }
+            vec3 restored = displaced;
+            if (point > begin && preserve != 0.0) {
+                vec3 restP = P3(rest, point);
+                vec3 restPrev = P3(rest, point - 1u);
+                float restLength = length(restP - restPrev);
+                float displacedLength = length(displaced - previousOutput);
+                if (!Finite(restLength) || !Finite(displacedLength)) {
+                    StatusErr(2u); continue;
+                }
+                if (restLength == 0.0) restored = previousOutput;
+                else if (displacedLength == 0.0) { StatusErr(3u); continue; }
+                else restored = previousOutput +
+                    (displaced - previousOutput) * (restLength / displacedLength);
+            }
+            vec3 result = preserve == 0.0 ? displaced :
+                displaced * (1.0 - preserve) + restored * preserve;
+            if (!FiniteV3(result)) { StatusErr(2u); continue; }
+            outPoints[3u*point] = result.x; outPoints[3u*point+1u] = result.y;
+            outPoints[3u*point+2u] = result.z;
+            previousOutput = result;
+        }
+    }
+}

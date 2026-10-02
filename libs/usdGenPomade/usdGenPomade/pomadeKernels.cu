@@ -2944,7 +2944,7 @@ __global__ void _HParentSectionKernel(
     } else if (m > rv) {
         for (int i = 0; i < rv; ++i) {
             int const idx =
-                int((long long(i) * long long(m)) / long long(rv)) % m;
+                int((static_cast<long long>(i) * static_cast<long long>(m)) / static_cast<long long>(rv)) % m;
             s_cloud[i] = s_ring[idx];
         }
         for (int i = 0; i < rv; ++i) {

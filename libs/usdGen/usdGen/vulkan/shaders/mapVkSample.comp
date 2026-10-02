@@ -1,0 +1,148 @@
+#version 450
+
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+// Vulkan twin of gpu/imageSampler.cu, compiled with --fmad=false.
+// Keep each multiply and add separately rounded and preserve CUDA's
+// association. precise propagates NoContraction to these operations so
+// hardware and software Vulkan devices obey the same bitwise contract.
+// Filtering uses texel buffers to avoid hardware interpolation rounding.
+//
+// Like the CUDA kernel this dispatch grid-strides: the host caps the group
+// count at maxComputeWorkGroupCount[0] and every invocation loops with
+// stride gl_NumWorkGroups.x * 256, so batches past the 65,535-group cap
+// still write their tail element.
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Texels {
+    float values[];
+} texels;
+layout(set = 0, binding = 1, std430) readonly buffer Uv {
+    vec2 values[];
+} uv;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+    float values[];
+} outputValues;
+layout(set = 0, binding = 3, std430) buffer Status {
+    uint error;
+} status;
+layout(push_constant) uniform Controls {
+    uint sampleCount;
+    uint width;
+    uint height;
+    uint channels;
+    uint orientation; // 0 top-down, 1 bottom-up (UsdGenImageRowOrientation order)
+    uint filterMode;  // 0 nearest, 1 bilinear (UsdGenImageFilter order)
+    uint wrap;        // 0 clamp, 1 repeat, 2 mirror, 3 black (UsdGenImageWrap order)
+    uint channel;     // 0..3 R..A, 4 luminance (UsdGenImageChannel order)
+    float scale;
+    float offset;
+    uint clampOutput;
+    float outputMin;
+    float outputMax;
+    float defaultValue;
+} controls;
+
+float mapVkWrap(float value, uint mode, out bool outside) {
+    outside = false;
+    if (isnan(value) || isinf(value)) { outside = true; return 0.0f; }
+    if (mode == 0u) return min(1.0f, max(0.0f, value));
+    if (mode == 1u) return value - floor(value);
+    if (mode == 2u) {
+        precise float folded = value - 2.0f * floor(value * 0.5f);
+        return folded <= 1.0f ? folded : 2.0f - folded;
+    }
+    if (value < 0.0f || value > 1.0f) outside = true;
+    return value;
+}
+
+int mapVkIndex(int value, int extent, uint mode, out bool outside) {
+    // Every path must define the out-param: glslang lowers it to an
+    // uninitialized temp whose copy-back feeds `if (xo || yo)` below.
+    outside = false;
+    if (value >= 0 && value < extent) return value;
+    if (mode == 0u) return min(extent - 1, max(0, value));
+    if (mode == 1u) {
+        int result = value % extent;
+        return result < 0 ? result + extent : result;
+    }
+    if (mode == 2u) {
+        // Reachable inputs are provably in [0, extent]: RawSample wraps both
+        // UVs into [0,1] before scaling (Black returns early), IEEE
+        // round-to-nearest cannot push the wrapped coordinate or the scaled
+        // position outside that range (see the host proof comment), so the
+        // nearest index and x0/x1/y0/y1 never escape it. On that domain the
+        // CUDA int64 period reduction folds extent to extent - 1 exactly.
+        if (value < 0 || value > extent) { outside = true; return 0; }
+        return value < extent ? value : extent - 1;
+    }
+    outside = true;
+    return 0;
+}
+
+float mapVkTexel(int x, int y, out bool outside) {
+    bool xo = false, yo = false;
+    int ix = mapVkIndex(x, int(controls.width), controls.wrap, xo);
+    int iy = mapVkIndex(y, int(controls.height), controls.wrap, yo);
+    if (xo || yo) { outside = true; return controls.defaultValue; }
+    uint row = controls.orientation == 0u
+        ? controls.height - 1u - uint(iy) : uint(iy);
+    // The host proves texel bytes fit maxStorageBufferRange, so this 32-bit
+    // index cannot overflow (see mapVkImage.cpp).
+    uint base = (row * controls.width + uint(ix)) * controls.channels;
+    if (controls.channel == 4u) {
+        precise float luma = texels.values[base] * 0.2126f +
+            texels.values[base + 1u] * 0.7152f +
+            texels.values[base + 2u] * 0.0722f;
+        return luma;
+    }
+    return texels.values[base + controls.channel];
+}
+
+float mapVkRawSample(float u, float v) {
+    bool uo = false, vo = false;
+    u = mapVkWrap(u, controls.wrap, uo);
+    v = mapVkWrap(v, controls.wrap, vo);
+    if (uo || vo) return controls.defaultValue;
+    float x = u * float(controls.width - 1u);
+    float y = v * float(controls.height - 1u);
+    bool outside = false;
+    if (controls.filterMode == 0u)
+        return mapVkTexel(int(floor(x + 0.5f)), int(floor(y + 0.5f)), outside);
+    int x0 = int(floor(x));
+    int y0 = int(floor(y));
+    int x1 = x0 + 1, y1 = y0 + 1;
+    float fx = x - float(x0), fy = y - float(y0);
+    float a = mapVkTexel(x0, y0, outside);
+    float b = mapVkTexel(x1, y0, outside);
+    float c = mapVkTexel(x0, y1, outside);
+    float d = mapVkTexel(x1, y1, outside);
+    precise float ab = a + (b - a) * fx;
+    precise float cd = c + (d - c) * fx;
+    precise float result = ab + (cd - ab) * fy;
+    return result;
+}
+
+void main() {
+    // Defensive configuration check; the host validates the same contract
+    // before dispatch (dims/channels/options), so bit 0 stays clear.
+    if (controls.width == 0u || controls.height == 0u ||
+        controls.channels == 0u || controls.channels > 4u ||
+        controls.orientation > 1u || controls.filterMode > 1u ||
+        controls.wrap > 3u || controls.channel > 4u ||
+        (controls.channel < 4u && controls.channel >= controls.channels) ||
+        (controls.channel == 4u && controls.channels < 3u)) {
+        atomicOr(status.error, 1u);
+        return;
+    }
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint index = gl_GlobalInvocationID.x; index < controls.sampleCount;) {
+        float value = mapVkRawSample(uv.values[index].x, uv.values[index].y);
+        precise float transformed = value * controls.scale + controls.offset;
+        value = transformed;
+        if (controls.clampOutput != 0u)
+            value = min(controls.outputMax, max(controls.outputMin, value));
+        outputValues.values[index] = value;
+        if (index > controls.sampleCount - stride) break;
+        index += stride;
+    }
+}

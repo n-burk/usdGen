@@ -77,6 +77,10 @@ struct UsdGenSessionDeviceRequest {
     // Optional caller-owned state retained through terminal publication.
     std::shared_ptr<const void> requestLifetime;
     UsdGenSessionDeviceReturn returnTransport;
+    // Evaluation time belongs to this immutable request. Plans are cached
+    // across SetTime commits and must not freeze expression clocks.
+    std::optional<double> evaluationFrame;
+
 };
 
 class UsdGenSessionDeviceProvider {
