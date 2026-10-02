@@ -1,3 +1,5 @@
+# Configure and build; -Vulkan -Test also builds and runs the Vulkan tests.
+# Vulkan SDK discovery uses VULKAN_SDK or the system toolchain via CMake.
 param(
     [switch] $Test,
     [string] $Build = "",
@@ -5,10 +7,14 @@ param(
     [string] $Generator = "",
     [switch] $Cuda,
     [switch] $NoCuda,
-    [string] $CudaToolkitDir = ""
+    [string] $CudaToolkitDir = "",
+    [switch] $Vulkan,
+    [switch] $NoVulkan
 )
 
 $ErrorActionPreference = "Stop"
+if ($Cuda -and $NoCuda) { throw "-Cuda and -NoCuda are mutually exclusive." }
+if ($Vulkan -and $NoVulkan) { throw "-Vulkan and -NoVulkan are mutually exclusive." }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot ".."))
 if (-not $Build) { $Build = Join-Path $Root "build" }
 
@@ -29,14 +35,14 @@ $UsdInstallDir = (Resolve-Path $UsdInstallDir).Path
 # A configured build must use the Visual Studio installation recorded in its
 # CMake cache.  Mixing a VS 2019 compiler with VS 2022 STL headers produces
 # STL1001, while a plain PowerShell has neither set of include paths.
-if ($Cuda -and $NoCuda) { throw "-Cuda and -NoCuda are mutually exclusive." }
-
 $CachedVsDevCmd = $null
 $CachedVCToolsDir = $null
 $CachedUsdInstallDir = $null
 $CachedBuildTests = $null
 $CachedEnableCuda = $null
 $CachedCudaCompiler = $null
+$CachedEnableVulkan = $null
+$CachedBuildVulkanTests = $null
 $CachePath = Join-Path $Build "CMakeCache.txt"
 if (Test-Path $CachePath) {
     $cacheLines = Get-Content $CachePath
@@ -68,6 +74,14 @@ if (Test-Path $CachePath) {
         $_ -match '^CMAKE_CUDA_COMPILER:'
     } | Select-Object -First 1
     if ($cachedNvccLine) { $CachedCudaCompiler = $cachedNvccLine.Split('=', 2)[1] }
+    $cachedVulkanLine = $cacheLines | Where-Object {
+        $_ -match '^USDGEN_ENABLE_VULKAN_RUNTIME:'
+    } | Select-Object -First 1
+    if ($cachedVulkanLine) { $CachedEnableVulkan = $cachedVulkanLine.Split('=', 2)[1] }
+    $cachedVulkanTestsLine = $cacheLines | Where-Object {
+        $_ -match '^USDGEN_BUILD_VULKAN_TESTS:'
+    } | Select-Object -First 1
+    if ($cachedVulkanTestsLine) { $CachedBuildVulkanTests = $cachedVulkanTestsLine.Split('=', 2)[1] }
 }
 
 # USD_INSTALL_DIR only takes effect at configure time, and find_package caches
@@ -86,7 +100,7 @@ if ($CachedUsdInstallDir) {
 # needed so the wrapper works from either ordinary or Developer PowerShell.
 $VsDevCmd = $null
 $activeVCToolsDir = if ($env:VCToolsInstallDir) {
-    $env:VCToolsInstallDir.TrimEnd('\\', '/')
+    $env:VCToolsInstallDir.TrimEnd('\', '/')
 } else {
     $null
 }
@@ -342,6 +356,16 @@ $DesiredEnableCuda = if ($EnableCuda) { 'ON' } else { 'OFF' }
 if ($CachedEnableCuda -and $CachedEnableCuda -ne $DesiredEnableCuda) {
     $NeedsConfigure = $true
 }
+# No Vulkan switch preserves CMake's first-configure auto-detection and any
+# cached choice. Explicit switches also work on already-configured trees.
+$DesiredEnableVulkan = if ($Vulkan) { 'ON' } elseif ($NoVulkan) { 'OFF' } else { $null }
+$DesiredBuildVulkanTests = if ($Vulkan -and $Test) { 'ON' } elseif ($NoVulkan) { 'OFF' } else { $null }
+if ($DesiredEnableVulkan -and $CachedEnableVulkan -ne $DesiredEnableVulkan) {
+    $NeedsConfigure = $true
+}
+if ($DesiredBuildVulkanTests -and $CachedBuildVulkanTests -ne $DesiredBuildVulkanTests) {
+    $NeedsConfigure = $true
+}
 if ($NeedsConfigure) {
     $configureArguments = @('-S', $Root, '-B', $Build, '-G', $Generator,
         '-DCMAKE_BUILD_TYPE=Release', "-DUSD_INSTALL_DIR=$UsdInstallDir",
@@ -353,10 +377,21 @@ if ($NeedsConfigure) {
             "-DCUDAToolkit_ROOT=$($CudaToolkit.Root.Replace('\', '/'))")
     }
     if ($Test) { $configureArguments += '-DUSDGEN_BUILD_TESTS=ON' }
+    if ($DesiredEnableVulkan) {
+        # Keep the compatibility alias in sync when toggling a cached build.
+        $configureArguments += @(
+            "-DUSDGEN_ENABLE_VULKAN_RUNTIME=$DesiredEnableVulkan",
+            "-DUSDGEN_ENABLE_VULKAN=$DesiredEnableVulkan")
+    }
+    if ($DesiredBuildVulkanTests) {
+        $configureArguments += "-DUSDGEN_BUILD_VULKAN_TESTS=$DesiredBuildVulkanTests"
+    }
     Invoke-CMake $configureArguments
 }
 
 Invoke-CMake @('--build', $Build, '--config', 'Release', '--parallel')
 if ($Test) {
-    ctest --test-dir $Build -L 'T0|T1' --output-on-failure --parallel
+    $testLabels = if ($Vulkan) { '^(T0|T1|vulkan)$' } else { '^T[01]$' }
+    ctest --test-dir $Build -C Release -L $testLabels --output-on-failure --parallel
+    if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
 }

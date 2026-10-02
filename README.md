@@ -85,6 +85,20 @@ source bin/_env.sh
 ctest --test-dir "$GENBUILD" -L '^vulkan$' --output-on-failure
 ```
 
+On Windows, install the [Vulkan SDK](https://vulkan.lunarg.com/doc/view/latest/windows/getting_started.html)
+and open a new PowerShell so its `VULKAN_SDK` environment variable is available:
+
+```powershell
+.\bin\build_usdgen.ps1 -Build build-vulkan -UsdInstallDir $env:USD -Vulkan -NoCuda -Test
+```
+
+`-Vulkan` enables the runtime even in a previously configured build. With
+`-Test`, it also enables and runs the Vulkan tests alongside T0/T1. Omit
+`-NoCuda` to keep the script's CUDA detection, or use `-Cuda` to require both
+backends. `-NoVulkan` disables the Vulkan runtime and its tests. With neither
+Vulkan switch, CMake retains its cached choice or detects the SDK on the first
+configure.
+
 The runtime finds its shader bundle relative to the library, including after
 installation under `share/usdGen/vulkan`. `USDGEN_VULKAN_SHADER_DIR` overrides
 that location. Native Vulkan consumers link the exported
