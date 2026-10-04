@@ -97,6 +97,17 @@ UsdGenCurveSetDesc const *FindCurves(UsdGenGraphDesc const *desc, SdfPath const 
     return nullptr;
 }
 
+/// A posed surface point into current groom space. Affine matrices project
+/// with w exactly 1, so TransformAffine skips the divide with identical
+/// results (its xyz matches Transform term for term; Solve rejects a
+/// non-finite pose the same way under either spelling). Projective layouts
+/// keep Transform.
+inline GfVec3d XformSurfacePoint(GfMatrix4d const &relative, bool affine, GfVec3f const &point)
+{
+    return affine ? relative.TransformAffine(GfVec3d(point))
+                  : relative.Transform(GfVec3d(point));
+}
+
 /// Where the drivers' points live relative to the description: their prim's
 /// world matrix, brought into the description's space. A transform animation
 /// moves rest and pose together; animate the points to deform.
@@ -240,8 +251,22 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     // --- driver samples, in the description's space --------------------------
     auto const solveField = [&]() -> bool {
         TRACE_SCOPE("usdGen deform: bind and solve the field");
+        // Full driver vectors, for the wrap bind and for re-selection. The
+        // steady-state RBF pose path never materializes them: only the
+        // chosen samples are converted and transformed (Solve consumes no
+        // other driver element, so the values are unchanged).
         std::vector<GfVec3d> driverRest, driverNow;
         std::string driverLabel;
+        // Subset sources for the re-selection path below, set by whichever
+        // driver branch runs.
+        UsdGenSurfaceDesc const *surfaceSrc = nullptr;
+        GfMatrix4d surfaceRelative;
+        bool surfaceAffine = true;
+        UsdGenCurveBuffer const *guideSrc = nullptr;
+        GfMatrix4d guideToGroom;
+        std::vector<GfVec3d> rest, now;
+        std::vector<size_t> chosen;
+        bool subsetsReady = false;
         if (surfaceDriven) {
             if (!ctx.desc || ctx.surface >= ctx.desc->surfaces.size())
                 return fail("surface-driven RBF requires one bound usdGen:surface");
@@ -255,19 +280,39 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             // hierarchy. Map posed drivers into current groom space. Shared
             // ancestor motion cancels here and is applied once by publication;
             // a separately parented groom receives that motion through the field.
-            GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
-            driverRest.assign(surface.restPoints.begin(), surface.restPoints.end());
-            driverNow.reserve(surface.points.size());
-            // Affine matrices project with w exactly 1, so TransformAffine
-            // skips the divide with identical results (its xyz matches
-            // Transform term for term; Solve rejects a non-finite pose the
-            // same way under either spelling). Projective layouts keep
-            // Transform.
-            bool const affine = relative[0][3] == 0.0 && relative[1][3] == 0.0 &&
-                relative[2][3] == 0.0 && relative[3][3] == 1.0;
-            for (GfVec3f const &point : surface.points)
-                driverNow.push_back(affine ? relative.TransformAffine(GfVec3d(point))
-                                           : relative.Transform(GfVec3d(point)));
+            surfaceSrc = &surface;
+            surfaceRelative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
+            surfaceAffine = surfaceRelative[0][3] == 0.0 && surfaceRelative[1][3] == 0.0 &&
+                surfaceRelative[2][3] == 0.0 && surfaceRelative[3][3] == 1.0;
+            if (wrap) {
+                driverRest.assign(surface.restPoints.begin(), surface.restPoints.end());
+                driverNow.reserve(surface.points.size());
+                for (GfVec3f const &point : surface.points)
+                    driverNow.push_back(
+                        XformSurfacePoint(surfaceRelative, surfaceAffine, point));
+            } else {
+                // Bitwise on the float bytes (not operator==): identical NaN
+                // bits still hit, and float->double conversion is injective
+                // so unchanged bytes mean unchanged rest drivers.
+                auto const &rp = surface.restPoints;
+                bool const hit = surfaceValid_ && surfaceBudget_ == size_t(budget) &&
+                    surfaceRest_.size() == rp.size() &&
+                    std::memcmp(surfaceRest_.data(), rp.cdata(),
+                                rp.size() * sizeof(GfVec3f)) == 0;
+                if (hit) {
+                    chosen = surfaceSelection_;
+                    rest.resize(chosen.size());
+                    now.resize(chosen.size());
+                    for (size_t k = 0; k < chosen.size(); ++k) {
+                        rest[k] = GfVec3d(surfaceRest_[chosen[k]]);
+                        now[k] = XformSurfacePoint(surfaceRelative, surfaceAffine,
+                                                   surface.points[chosen[k]]);
+                    }
+                    subsetsReady = true;
+                } else {
+                    driverRest.assign(rp.begin(), rp.end());
+                }
+            }
         } else {
             UsdGenResolvedReferenceValue const &reference = *ctx.resolvedReferences[0];
             driverLabel = "usdGen:guides " + reference.path.GetString();
@@ -296,11 +341,17 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             if (drivers.px.size() != drivers.totalCvs || drivers.py.size() != drivers.totalCvs ||
                 drivers.pz.size() != drivers.totalCvs)
                 return fail("the driver curves' point planes do not match their CV count");
-            GfMatrix4d const toGroom = DriverToGroom(ctx.desc, reference.path);
-            driverRest.resize(drivers.totalCvs); driverNow.resize(drivers.totalCvs);
-            for (size_t i = 0; i < drivers.totalCvs; ++i) {
-                driverRest[i] = toGroom.Transform(GfVec3d(opUtil::RestPoint(drivers, i)));
-                driverNow[i] = toGroom.Transform(GfVec3d(opUtil::Point(drivers, i)));
+            guideSrc = &drivers;
+            guideToGroom = DriverToGroom(ctx.desc, reference.path);
+            driverRest.resize(drivers.totalCvs);
+            for (size_t i = 0; i < drivers.totalCvs; ++i)
+                driverRest[i] = guideToGroom.Transform(GfVec3d(opUtil::RestPoint(drivers, i)));
+            // The RBF path transforms only the chosen posed samples after
+            // selection; wrap binds whole spans, so it keeps the full fill.
+            if (wrap) {
+                driverNow.resize(drivers.totalCvs);
+                for (size_t i = 0; i < drivers.totalCvs; ++i)
+                    driverNow[i] = guideToGroom.Transform(GfVec3d(opUtil::Point(drivers, i)));
             }
         }
         if (wrap) {
@@ -314,37 +365,62 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             }
             return true;
         }
-        // Bitwise compare (not operator==): identical NaN bits still hit.
-        bool const restUnchanged = selectionValid_ && selectionBudget_ == size_t(budget) &&
-            selectRest_.size() == driverRest.size() &&
-            std::memcmp(selectRest_.data(), driverRest.data(),
-                        driverRest.size() * sizeof(GfVec3d)) == 0;
-        // The extent feeds only the re-selection epsilon, so a cache hit
-        // skips the pass; the values are unchanged whenever it runs.
-        double const epsilon = restUnchanged ? 0.0 : [&] {
-            GfRange3d extent;
-            for (GfVec3d const &point : driverRest) extent.UnionWith(point);
-            double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
-            return std::max(1e-12, size * 1e-7);
-        }();
-        std::vector<size_t> const chosen = restUnchanged
-            ? selection_
-            : rbf::SelectSamples(driverRest, size_t(budget), epsilon);
-        if (!restUnchanged) {
-            selectRest_ = driverRest;
-            selection_ = chosen;
-            selectionBudget_ = size_t(budget);
-            selectionValid_ = true;
+        if (!subsetsReady) {
+            // Bitwise compare (not operator==): identical NaN bits still
+            // hit. A surface hit takes the subset path above, so reaching
+            // here surface-driven always re-selects.
+            bool const restUnchanged = surfaceDriven ? false
+                : selectionValid_ && selectionBudget_ == size_t(budget) &&
+                    selectRest_.size() == driverRest.size() &&
+                    std::memcmp(selectRest_.data(), driverRest.data(),
+                                driverRest.size() * sizeof(GfVec3d)) == 0;
+            // The extent feeds only the re-selection epsilon, so a cache hit
+            // skips the pass; the values are unchanged whenever it runs.
+            double const epsilon = restUnchanged ? 0.0 : [&] {
+                GfRange3d extent;
+                for (GfVec3d const &point : driverRest) extent.UnionWith(point);
+                double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
+                return std::max(1e-12, size * 1e-7);
+            }();
+            chosen = restUnchanged
+                ? selection_
+                : rbf::SelectSamples(driverRest, size_t(budget), epsilon);
+            if (surfaceDriven) {
+                auto const &rp = surfaceSrc->restPoints;
+                surfaceRest_.assign(rp.cdata(), rp.cdata() + rp.size());
+                surfaceSelection_ = chosen;
+                surfaceBudget_ = size_t(budget);
+                surfaceValid_ = true;
+            } else if (!restUnchanged) {
+                selectRest_ = driverRest;
+                selection_ = chosen;
+                selectionBudget_ = size_t(budget);
+                selectionValid_ = true;
+            }
+            rest.resize(chosen.size());
+            now.resize(chosen.size());
+            if (surfaceDriven) {
+                for (size_t k = 0; k < chosen.size(); ++k) {
+                    rest[k] = driverRest[chosen[k]];
+                    now[k] = XformSurfacePoint(surfaceRelative, surfaceAffine,
+                                               surfaceSrc->points[chosen[k]]);
+                }
+            } else {
+                // On a hit selectRest_ is bitwise the driver rest, so either
+                // source gathers the same values.
+                GfVec3d const *restSrc =
+                    restUnchanged ? selectRest_.data() : driverRest.data();
+                for (size_t k = 0; k < chosen.size(); ++k) {
+                    rest[k] = restSrc[chosen[k]];
+                    now[k] = guideToGroom.Transform(
+                        GfVec3d(opUtil::Point(*guideSrc, chosen[k])));
+                }
+            }
         }
         if (chosen.size() < 4)
             return fail(driverLabel + " has " +
                         std::to_string(chosen.size()) +
                         " distinct samples; the RBF needs at least four that span 3D");
-        std::vector<GfVec3d> rest(chosen.size()), now(chosen.size());
-        for (size_t k = 0; k < chosen.size(); ++k) {
-            rest[k] = driverRest[chosen[k]];
-            now[k] = driverNow[chosen[k]];
-        }
         std::string error;
         if (!field_.Bound() || rest != boundRest_) {
             boundRest_.clear();

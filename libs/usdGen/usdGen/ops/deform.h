@@ -5,6 +5,7 @@
 #include "usdGen/ops/rbfField.h"
 
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/vec3f.h"
 
 #include <vector>
 
@@ -68,6 +69,14 @@ private:
    std::vector<size_t> selection_;
    size_t selectionBudget_ = 0;
    bool selectionValid_ = false;
+   // The surface-driven twin of the selection cache, keyed by the rest
+   // points' float bytes (float->double conversion is injective, so equal
+   // bytes mean equal rest drivers). A hit skips the conversion and
+   // transforms only the chosen posed samples instead of every driver.
+   std::vector<GfVec3f> surfaceRest_;
+   std::vector<size_t> surfaceSelection_;
+   size_t surfaceBudget_ = 0;
+   bool surfaceValid_ = false;
 };
 
 }  // namespace usdGen
