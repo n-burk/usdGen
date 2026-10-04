@@ -253,7 +253,10 @@ UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const& ctx) const
     d.Mix(ctx.upstreamGeneration);
     if (ctx.referenceCount == 0 && ctx.desc && ctx.surface < ctx.desc->surfaces.size()) {
         auto const &surface = ctx.desc->surfaces[ctx.surface];
-        MixArray(&d, surface.restPoints.cdata(), surface.restPoints.size() * sizeof(GfVec3f));
+        // Memoized: the rest points are static while the posed points move.
+        // This folds one word instead of the sequential byte mix, so the
+        // epoch values differ from before; epochs compare for equality only.
+        d.Mix(restDigest_.Digest(surface.restPoints));
         MixArray(&d, surface.points.cdata(), surface.points.size() * sizeof(GfVec3f));
         d.Mix(uint64_t(surface.restFromCurrentPoints));
         GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
@@ -269,7 +272,7 @@ UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const& ctx) const
         MixArray(&d, b.px.cdata(), b.px.size() * sizeof(float));
         MixArray(&d, b.py.cdata(), b.py.size() * sizeof(float));
         MixArray(&d, b.pz.cdata(), b.pz.size() * sizeof(float));
-        MixArray(&d, b.rest.cdata(), b.rest.size() * sizeof(GfVec3f));
+        d.Mix(restDigest_.Digest(b.rest));
         GfMatrix4d const m = DriverToGroom(ctx.desc, value->path);
         MixArray(&d, m.GetArray(), 16 * sizeof(double));
     }

@@ -2,6 +2,7 @@
 #define USDGEN_OP_DEFORM_H
 
 #include "usdGen/op.h"
+#include "usdGen/ops/opUtil.h"
 #include "usdGen/ops/rbfField.h"
 
 #include "pxr/base/gf/vec3d.h"
@@ -77,6 +78,10 @@ private:
    std::vector<size_t> surfaceSelection_;
    size_t surfaceBudget_ = 0;
    bool surfaceValid_ = false;
+   // The rest drivers' digest contribution, memoized across poses (the posed
+   // drivers still hash every frame). Shared by the surface and guide
+   // branches; a rewire misses once and rehashes.
+   mutable opUtil::ContentDigestCache<VtVec3fArray> restDigest_;
 };
 
 }  // namespace usdGen
