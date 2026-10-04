@@ -34,6 +34,7 @@
 #include "pxr/base/trace/trace.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -458,6 +459,11 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     cap.result.resize(totalCvs * 3);
     rbf::CubicField const &field = field_;
     std::vector<float> &result = cap.result;
+    // The non-finite refusal checks the stored floats while they are still
+    // in registers, instead of re-reading the whole result serially: every
+    // stored triple is checked exactly once, so the verdict and the message
+    // match the retired scan.
+    std::atomic<bool> nonFinite{false};
     ParallelFor(ctx.dispatcher, R, [&](size_t c) {
         auto displacement = [&](GfVec3d const &x) {
             return wrap ? wrapFields[driverForCurve[c]].Map(x)-x : field.Displacement(x);
@@ -472,13 +478,18 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             GfVec3d const x(opUtil::Point(upstream, cv));
             GfVec3d const moved =
                 x + (cv == first ? rootDisplacement : displacement(x)) - shift;
-            result[cv * 3] = float(moved[0]);
-            result[cv * 3 + 1] = float(moved[1]);
-            result[cv * 3 + 2] = float(moved[2]);
+            float const f0 = float(moved[0]);
+            float const f1 = float(moved[1]);
+            float const f2 = float(moved[2]);
+            result[cv * 3] = f0;
+            result[cv * 3 + 1] = f1;
+            result[cv * 3 + 2] = f2;
+            if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
+                nonFinite.store(true, std::memory_order_relaxed);
         }
     });
-    for (float v : result)
-        if (!std::isfinite(v)) return fail("the deformation produced a non-finite point");
+    if (nonFinite.load(std::memory_order_relaxed))
+        return fail("the deformation produced a non-finite point");
     return true;
 }
 
