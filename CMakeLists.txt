@@ -2824,6 +2824,22 @@ add_test(NAME benchUsdGenRbfDeform COMMAND benchUsdGenRbfDeform)
 set_tests_properties(benchUsdGenRbfDeform PROPERTIES
     LABELS "T0;perf;rbf;deform"
     TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
+if(USDGEN_ENABLE_VULKAN_RUNTIME)
+    target_compile_definitions(benchUsdGenRbfDeform PRIVATE USDGEN_BENCH_VULKAN)
+    target_link_libraries(benchUsdGenRbfDeform PRIVATE usdGenVulkanNative)
+    target_sources(benchUsdGenRbfDeform PRIVATE
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}"
+        "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}"
+        "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}"
+        "${_usdgen_vulkan_rbfvk_evaluate_spv}")
+    add_test(NAME benchUsdGenRbfDeformVulkan COMMAND benchUsdGenRbfDeform
+        --vulkan-spv "${CMAKE_CURRENT_BINARY_DIR}/vulkan")
+    set_tests_properties(benchUsdGenRbfDeformVulkan PROPERTIES
+        LABELS "T1;perf;vulkan;rbf;deform" RESOURCE_LOCK usdgen_gpu
+        TIMEOUT 600 SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77"
+        FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
+endif()
 add_executable(benchUsdGenSurfaceBindings tests/perf/benchUsdGenSurfaceBindings.cpp)
 target_link_libraries(benchUsdGenSurfaceBindings PRIVATE usdGenTestUtils)
 add_test(NAME benchUsdGenSurfaceBindings COMMAND benchUsdGenSurfaceBindings)

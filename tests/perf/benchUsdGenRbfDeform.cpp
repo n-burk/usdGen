@@ -7,7 +7,7 @@
 // width over a wavy 400x250 grid surface (spans 3D so the RBF binds), plus a
 // direct rbf::CubicField microbench that isolates Bind/Solve/Displacement.
 //
-// Usage: benchUsdGenRbfDeform [--threads N] [--curves N]
+// Usage: benchUsdGenRbfDeform [--threads N] [--density D] [--vulkan-spv dir]
 // Output: one "METRIC <name>=<value_ms>" line per measured quantity
 // (median of 9, fixture built once outside every timing window), plus
 // CHECKSUM lines (FNV-1a over float bits) for bit-identity tracking.
@@ -16,6 +16,12 @@
 //
 // With USDGEN_BENCH_CUDA the CUDA CudaRbfBinding path is measured too
 // (Bind/Solve/Evaluate via CUDA events, n=100 samples, 1M CVs).
+//
+// With USDGEN_BENCH_VULKAN and --vulkan-spv <dir> (a directory holding the
+// deformEvaluate/deformApply/rbfVk*.spv files), the Vulkan DeformPipeline
+// per-pose time (1M CVs, n=100) and the RbfVkBinding Bind/Solve/
+// EvaluateHost times (n=400, 1M CVs) are measured too. Without the flag
+// the Vulkan legs are skipped; an unavailable device skips (exit 77).
 
 #include "usdGen/compiler.h"
 #include "usdGen/graph.h"
@@ -44,6 +50,16 @@
 #ifdef USDGEN_BENCH_CUDA
 #include "usdGen/gpu/rbf.h"
 #include <cuda_runtime.h>
+#endif
+
+#ifdef USDGEN_BENCH_VULKAN
+#include "usdGen/vulkan/chargedBuffer.h"
+#include "usdGen/vulkan/deformPipeline.h"
+#include "usdGen/vulkan/deviceContext.h"
+#include "usdGen/vulkan/rbfVkBinding.h"
+#include "../vulkanNativeFixture.h"
+#include "../vulkanReadbackFixture.h"
+#include <fstream>
 #endif
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -187,6 +203,271 @@ UsdGenGraphDesc MakeD1(double density)
     return d;
 }
 
+#ifdef USDGEN_BENCH_VULKAN
+// --- Vulkan legs -------------------------------------------------------------
+
+std::vector<uint32_t> LoadSpv(std::string const &path)
+{
+    std::ifstream f(path, std::ios::binary);
+    std::vector<char> b((std::istreambuf_iterator<char>(f)), {});
+    if (b.empty() || b.size() % 4) return {};
+    std::vector<uint32_t> r(b.size() / 4);
+    std::memcpy(r.data(), b.data(), b.size());
+    return r;
+}
+
+bool ProveQueue(std::shared_ptr<NativeOwner> const &native)
+{
+    if (vkResetFences(native->device, 1, &native->fence) != VK_SUCCESS) return false;
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    return vkQueueSubmit(native->queue, 1, &submit, native->fence) == VK_SUCCESS &&
+        vkWaitForFences(native->device, 1, &native->fence, VK_TRUE, 10000000000ull) == VK_SUCCESS;
+}
+
+std::shared_ptr<const vulkan::ChargedBuffer> UploadHost(
+    std::shared_ptr<vulkan::DeviceContext> const &c, void const *data, VkDeviceSize bytes)
+{
+    VkBufferCreateInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = bytes ? bytes : 4;
+    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    auto b = vulkan::ChargedBuffer::Create(c, bi,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        UsdGenExecutionResourceKind::Scratch);
+    if (!b) return {};
+    if (bytes) {
+        void *p = nullptr;
+        if (vkMapMemory(c->device(), b->memory(), 0, bytes, 0, &p) != VK_SUCCESS) return {};
+        std::memcpy(p, data, bytes);
+        vkUnmapMemory(c->device(), b->memory());
+    }
+    return b;
+}
+
+// Main path: DeformPipeline per-pose (Begin + proof + apply + Poll) over
+// 100k curves x 10 CVs with 100 RBF samples. CHECKSUM covers the last
+// pose's deformed points.
+int VulkanDeformLeg(std::string const &spvDir)
+{
+    std::vector<uint32_t> const evalSpv = LoadSpv(spvDir + "/deformEvaluate.spv");
+    std::vector<uint32_t> const applySpv = LoadSpv(spvDir + "/deformApply.spv");
+    if (evalSpv.empty() || applySpv.empty()) {
+        std::printf("Vulkan deform leg: spirv not found in %s\n", spvDir.c_str());
+        return 1;
+    }
+    bool unavailable = false;
+    VkPhysicalDeviceFeatures fp64 = {};
+    fp64.shaderFloat64 = VK_TRUE;
+    auto native = CreateNative(&unavailable, {}, nullptr, &fp64);
+    if (unavailable || !native) {
+        std::printf("Vulkan deform leg: no fp64 device\n");
+        return 77;
+    }
+    VkPhysicalDeviceFeatures feats{};
+    vkGetPhysicalDeviceFeatures(native->physical, &feats);
+    if (!feats.shaderFloat64) {
+        std::printf("Vulkan deform leg: no fp64 device\n");
+        return 77;
+    }
+    vulkan::DeviceContext::CreateInfo ci;
+    ci.instance = native->instance;
+    ci.physicalDevice = native->physical;
+    ci.device = native->device;
+    ci.computeQueue = native->queue;
+    ci.computeQueueFamily = native->family;
+    ci.physicalIndex = native->physicalIndex;
+    ci.resourceDeviceId = 8020;
+    ci.nativeLifetime = native;
+    ci.resources = {size_t{512} << 20, 0};
+    ci.shaderFloat64Enabled = true;
+    auto context = vulkan::DeviceContext::Create(ci);
+    if (!context) {
+        std::printf("Vulkan deform leg: context creation failed\n");
+        return 1;
+    }
+    VkResult status = VK_SUCCESS;
+    auto pipe = vulkan::DeformPipeline::Create(context, evalSpv, applySpv, &status);
+    if (!pipe || status != VK_SUCCESS) {
+        std::printf("Vulkan deform leg: pipeline creation failed\n");
+        return 1;
+    }
+    uint32_t const curves = 100000, perCurve = 10, points = curves * perCurve;
+    int const n = 100;
+    std::vector<float> pointsData(size_t(points) * 3);
+    for (uint32_t i = 0; i < points; ++i)
+        for (int a = 0; a < 3; ++a)
+            pointsData[size_t(i) * 3 + size_t(a)] =
+                float(2 * Hash01(1001 + size_t(i) * 3 + size_t(a)) - 1);
+    std::vector<uint32_t> offsets(curves + 1);
+    for (uint32_t c = 0; c <= curves; ++c) offsets[c] = c * perCurve;
+    std::vector<float> targets(size_t(curves) * 3);
+    for (uint32_t c = 0; c < curves; ++c)
+        for (int a = 0; a < 3; ++a)
+            targets[size_t(c) * 3 + size_t(a)] =
+                pointsData[size_t(c) * perCurve * 3 + size_t(a)];
+    std::vector<float> restSamples(size_t(n) * 3), posedSamples(size_t(n) * 3);
+    for (int i = 0; i < n; ++i) {
+        float const rx = float(2 * Hash01(size_t(i) * 3) - 1);
+        float const ry = float(2 * Hash01(size_t(i) * 3 + 1) - 1);
+        float const rz = float(2 * Hash01(size_t(i) * 3 + 2) - 1);
+        restSamples[size_t(i) * 3] = rx;
+        restSamples[size_t(i) * 3 + 1] = ry;
+        restSamples[size_t(i) * 3 + 2] = rz;
+        posedSamples[size_t(i) * 3] = rx + 0.1f * float(std::sin(double(i)));
+        posedSamples[size_t(i) * 3 + 1] = ry - 0.05f * float(i % 7);
+        posedSamples[size_t(i) * 3 + 2] = rz + 0.07f * float(std::cos(2.0 * double(i)));
+    }
+    auto pointsBuf = UploadHost(context, pointsData.data(), pointsData.size() * sizeof(float));
+    auto offsetsBuf = UploadVulkanDeviceBytes(native, context, offsets.data(),
+                                              offsets.size() * sizeof(uint32_t));
+    auto targetsBuf = UploadHost(context, targets.data(), targets.size() * sizeof(float));
+    if (!pointsBuf || !offsetsBuf || !targetsBuf) {
+        std::printf("Vulkan deform leg: upload failed\n");
+        return 1;
+    }
+    std::vector<double> tPose;
+    uint64_t checksum = 0;
+    for (int iter = 0; iter < 11; ++iter) {
+        std::vector<float> posed = posedSamples;
+        float const w = 0.01f * float(iter);
+        for (int i = 0; i < n; ++i) posed[size_t(i) * 3] += w * float(i % 5);
+        vulkan::DeformPipeline::BeginInfo info;
+        info.points = pointsBuf;
+        info.curveOffsets = offsetsBuf;
+        info.rootTargets = targetsBuf;
+        info.curveCount = curves;
+        info.pointCount = points;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = n;
+        info.smoothing = 0.0;
+        info.mask = {1.0f, 1, nullptr, 0};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+        double const t0 = NowMs();
+        vulkan::DeformSemantic sem = vulkan::DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        if (!c || status != VK_SUCCESS || !ProveQueue(native) ||
+            c->Poll(&sem) != VK_SUCCESS || sem != vulkan::DeformSemantic::Ok || !c->succeeded()) {
+            std::printf("Vulkan deform leg: pose %d failed\n", iter);
+            return 1;
+        }
+        if (iter >= 2) tPose.push_back(NowMs() - t0);
+        if (iter == 10) {
+            auto o = c->output();
+            std::vector<uint8_t> bytes;
+            if (!ReadVulkanBytes(native, context, o.points->buffer(), o.points->sizeBytes(),
+                                 o.points, &bytes)) {
+                std::printf("Vulkan deform leg: readback failed\n");
+                return 1;
+            }
+            checksum = Fnv1a(bytes.data(), bytes.size());
+        }
+    }
+    EmitMetric("vk_deform_pose_1m", Median(tPose));
+    std::printf("CHECKSUM vk_deform_pose=%016llx\n", (unsigned long long)checksum);
+    return 0;
+}
+
+// Device path: RbfVkBinding Bind/Solve/EvaluateHost, n=400, 1M CVs.
+int VulkanBindLeg(std::string const &spvDir)
+{
+    vulkan::RbfVkBindingSpirv spirv;
+    spirv.extent = LoadSpv(spvDir + "/rbfVkExtent.spv");
+    spirv.gram = LoadSpv(spvDir + "/rbfVkGram.spv");
+    spirv.buildMatrix = LoadSpv(spvDir + "/rbfVkBuildMatrix.spv");
+    spirv.lu = LoadSpv(spvDir + "/rbfVkLu.spv");
+    spirv.rhs = LoadSpv(spvDir + "/rbfVkRhs.spv");
+    spirv.triSolve = LoadSpv(spvDir + "/rbfVkTriSolve.spv");
+    spirv.evaluate = LoadSpv(spvDir + "/rbfVkEvaluate.spv");
+    if (spirv.extent.empty() || spirv.evaluate.empty()) {
+        std::printf("Vulkan bind leg: spirv not found in %s\n", spvDir.c_str());
+        return 1;
+    }
+    bool unavailable = false;
+    VkPhysicalDeviceFeatures fp64{};
+    fp64.shaderFloat64 = VK_TRUE;
+    auto native = CreateNative(&unavailable, {}, nullptr, &fp64);
+    if (unavailable || !native) {
+        std::printf("Vulkan bind leg: no fp64 device\n");
+        return 77;
+    }
+    vulkan::DeviceContext::CreateInfo ci;
+    ci.instance = native->instance;
+    ci.physicalDevice = native->physical;
+    ci.device = native->device;
+    ci.computeQueue = native->queue;
+    ci.computeQueueFamily = native->family;
+    ci.physicalIndex = native->physicalIndex;
+    ci.resourceDeviceId = 8021;
+    ci.nativeLifetime = native;
+    ci.resources = {size_t{256} << 20, size_t{4} << 20};
+    ci.shaderFloat64Enabled = true;
+    auto context = vulkan::DeviceContext::Create(ci);
+    if (!context) {
+        std::printf("Vulkan bind leg: context creation failed\n");
+        return 1;
+    }
+    VkResult status = VK_SUCCESS;
+    auto binding = vulkan::RbfVkBinding::Create(context, spirv, &status);
+    if (!binding || status != VK_SUCCESS) {
+        std::printf("Vulkan bind leg: binding creation failed\n");
+        return 1;
+    }
+    int const n = 400;
+    uint32_t const cvs = 1000000;
+    std::vector<float> rest(size_t(n) * 3), posed(size_t(n) * 3);
+    for (int i = 0; i < n; ++i) {
+        float const rx = float(2 * Hash01(size_t(i) * 3) - 1);
+        float const ry = float(2 * Hash01(size_t(i) * 3 + 1) - 1);
+        float const rz = float(2 * Hash01(size_t(i) * 3 + 2) - 1);
+        rest[size_t(i) * 3] = rx;
+        rest[size_t(i) * 3 + 1] = ry;
+        rest[size_t(i) * 3 + 2] = rz;
+        posed[size_t(i) * 3] = rx + 0.1f * float(std::sin(double(i)));
+        posed[size_t(i) * 3 + 1] = ry - 0.05f * float(i % 7);
+        posed[size_t(i) * 3 + 2] = rz + 0.07f * float(std::cos(2.0 * double(i)));
+    }
+    std::vector<float> cv(size_t(cvs) * 3);
+    for (uint32_t i = 0; i < cvs; ++i)
+        for (int a = 0; a < 3; ++a)
+            cv[size_t(i) * 3 + size_t(a)] =
+                float(2 * Hash01(1001 + size_t(i) * 3 + size_t(a)) - 1);
+    std::vector<float> out;
+    out.resize(size_t(cvs) * 3);
+    std::vector<double> tBind, tSolve, tEval;
+    for (int i = 0; i < 5; ++i) {
+        double t0 = NowMs();
+        if (binding->Bind(rest.data(), n, 0.0) != vulkan::RbfVkStatus::Ok) {
+            std::printf("Vulkan bind leg: bind failed: %s\n", binding->diagnostic());
+            return 1;
+        }
+        tBind.push_back(NowMs() - t0);
+        t0 = NowMs();
+        if (binding->Solve(posed.data(), n) != vulkan::RbfVkStatus::Ok) {
+            std::printf("Vulkan bind leg: solve failed: %s\n", binding->diagnostic());
+            return 1;
+        }
+        tSolve.push_back(NowMs() - t0);
+        t0 = NowMs();
+        if (binding->EvaluateHost(cv.data(), out.data(), cvs) != vulkan::RbfVkStatus::Ok) {
+            std::printf("Vulkan bind leg: evaluate failed: %s\n", binding->diagnostic());
+            return 1;
+        }
+        tEval.push_back(NowMs() - t0);
+    }
+    EmitMetric("vk_rbf_bind400", Median(tBind));
+    EmitMetric("vk_rbf_solve400", Median(tSolve));
+    EmitMetric("vk_rbf_evaluate_1m", Median(tEval));
+    std::printf("CHECKSUM vk_rbf_eval=%016llx\n",
+                (unsigned long long)Fnv1a(out.data(), out.size() * sizeof(float)));
+    return 0;
+}
+#endif  // USDGEN_BENCH_VULKAN
+
 // Deterministic animated pose k over the rest surface (smooth bend).
 void PoseSurface(UsdGenSurfaceDesc *s, int k)
 {
@@ -206,9 +487,11 @@ int main(int argc, char **argv)
 {
     int threads = 8;
     double density = 25.0;   // ~25k curves, 225k CVs at 8 segments
+    std::string vulkanSpvDir;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--threads" && i + 1 < argc) threads = std::atoi(argv[++i]);
         if (std::string(argv[i]) == "--density" && i + 1 < argc) density = std::atof(argv[++i]);
+        if (std::string(argv[i]) == "--vulkan-spv" && i + 1 < argc) vulkanSpvDir = argv[++i];
     }
     usdGenRegisterM1Operators();
 
@@ -333,6 +616,9 @@ int main(int argc, char **argv)
 
 #ifdef USDGEN_BENCH_CUDA
     // ---- CUDA: direct CudaRbfBinding Bind/Solve/Evaluate --------------------
+    // 77 (no usable device) records a skip and continues to the Vulkan
+    // legs; bind/solve/evaluate errors are hard failures.
+    int cudaLegExit = [&]() {
     {
         const int n = 100, cvs = 1000000, m = n + 4;
         std::vector<float3> rest(n), posed(n), cv(cvs);
@@ -357,8 +643,10 @@ int main(int argc, char **argv)
             cudaMalloc(&dPosed, size_t(n) * sizeof(float3)) != cudaSuccess ||
             cudaMalloc(&dCv, size_t(cvs) * sizeof(float3)) != cudaSuccess ||
             cudaMalloc(&dOut, size_t(cvs) * sizeof(float3)) != cudaSuccess) {
-            std::printf("CUDA setup failed\n");
-            return 1;
+            // Environment, not code: no usable device (or no free memory).
+            // Bind/solve/evaluate errors below stay hard failures.
+            std::printf("CUDA setup unavailable; skipping CUDA leg\n");
+            return 77;
         }
         cudaMemcpy(dRest, rest.data(), size_t(n) * sizeof(float3), cudaMemcpyHostToDevice);
         cudaMemcpy(dPosed, posed.data(), size_t(n) * sizeof(float3), cudaMemcpyHostToDevice);
@@ -416,10 +704,37 @@ int main(int argc, char **argv)
         cudaFree(dPosed);
         cudaFree(dCv);
         cudaFree(dOut);
+        return 0;
+    }
+    }();
+    if (cudaLegExit != 0 && cudaLegExit != 77) return cudaLegExit;
+#endif
+
+#ifdef USDGEN_BENCH_VULKAN
+    // ---- Vulkan legs (need --vulkan-spv <dir>) ------------------------------
+    int vulkanLegExit = 0;
+    if (!vulkanSpvDir.empty()) {
+        vulkanLegExit = VulkanDeformLeg(vulkanSpvDir);
+        if (vulkanLegExit == 0) vulkanLegExit = VulkanBindLeg(vulkanSpvDir);
+        if (vulkanLegExit != 0 && vulkanLegExit != 77) return vulkanLegExit;
+    } else {
+        std::printf("Vulkan legs skipped (no --vulkan-spv dir)\n");
     }
 #endif
 
     if (g_hardFail) return 1;
+#ifdef USDGEN_BENCH_CUDA
+    if (cudaLegExit == 77) {
+        std::printf("rbf-deform bench: partial skip (CUDA leg unavailable)\n");
+        return 77;
+    }
+#endif
+#ifdef USDGEN_BENCH_VULKAN
+    if (!vulkanSpvDir.empty() && vulkanLegExit == 77) {
+        std::printf("rbf-deform bench: partial skip (Vulkan legs unavailable)\n");
+        return 77;
+    }
+#endif
     std::printf("rbf-deform bench: done\n");
     return 0;
 }
