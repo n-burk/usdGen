@@ -167,6 +167,9 @@ struct RbfVkBinding::Native {
     // on the host with no fence. solvePending stays the pending flag, so
     // every refusal and HasPendingSolve is unchanged.
     bool hostBindStaged = false;
+    // A factor-cache hit: BeginBind adopted stored factors, so AdvanceBind
+    // stages without submitting and Factor consume skips the readbacks.
+    bool bindAdopted = false;
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
@@ -176,6 +179,7 @@ struct RbfVkBinding::Native {
         cachedM = 0; cachedLuValid = false;
         hostPosed.clear(); hostPosePending = false;
         hostBindStaged = false;
+        bindAdopted = false;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -540,6 +544,42 @@ VkResult Submit(std::shared_ptr<DeviceContext> const& context,
 
 } // namespace
 
+std::shared_ptr<RbfVkFactorCache::Entry const> RbfVkFactorCache::Lookup(
+    DeviceContext* context, int n, double smoothing, float const* rest) {
+    uint64_t smoothingBits = 0;
+    static_assert(sizeof(smoothingBits) == sizeof(smoothing), "");
+    std::memcpy(&smoothingBits, &smoothing, sizeof(smoothing));
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!entry_ || entry_->context != context || entry_->n != n ||
+        entry_->smoothingBits != smoothingBits ||
+        entry_->rest.size() != size_t(n) * 3 ||
+        std::memcmp(entry_->rest.data(), rest, size_t(n) * 3 * sizeof(float)) != 0)
+        return nullptr;
+    return entry_;
+}
+
+void RbfVkFactorCache::Store(DeviceContext* context, int n, double smoothing,
+                             std::vector<float> const& rest,
+                             std::vector<double> const& lu,
+                             std::vector<int> const& perm, int m) {
+    uint64_t smoothingBits = 0;
+    std::memcpy(&smoothingBits, &smoothing, sizeof(smoothing));
+    auto entry = std::make_shared<Entry>();
+    entry->context = context;
+    entry->n = n;
+    entry->m = m;
+    entry->smoothingBits = smoothingBits;
+    entry->rest = rest;
+    entry->lu = lu;
+    entry->perm = perm;
+    std::lock_guard<std::mutex> lock(mutex_);
+    entry_ = std::move(entry);
+}
+
+void RbfVkBinding::SetFactorCache(std::shared_ptr<RbfVkFactorCache> cache) {
+    factorCache_ = std::move(cache);
+}
+
 RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
                                      BeforeSubmit beforeSubmit) {
     if (native_->solvePending)
@@ -591,6 +631,26 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     } catch (std::bad_alloc const&) {
         return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
     }
+    // Factor-cache hit: adopt the stored factors and skip the gram +
+    // buildMatrix + LU submit in AdvanceBind. Only successful binds are
+    // stored, and the key covers the device, count, smoothing bits, and
+    // rest bytes, so the adopted factors are bitwise what a fresh bind
+    // would read back. Buffer state, the admission hooks, and the
+    // Begin/Poll protocol are unchanged.
+    native.bindAdopted = false;
+    if (factorCache_) {
+        auto adopted = factorCache_->Lookup(native.context.get(), n, smoothing, rest);
+        if (adopted) {
+            try {
+                native.cachedLu = adopted->lu;
+                native.cachedPerm = adopted->perm;
+            } catch (std::bad_alloc const&) {
+                return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
+            }
+            native.cachedM = adopted->m;
+            native.bindAdopted = true;
+        }
+    }
 
     // G1: extent.
     {
@@ -633,6 +693,26 @@ RbfVkStatus RbfVkBinding::AdvanceBind(BeforeSubmit beforeSubmit) {
     auto& native = *native_;
     if (native.solvePending || native.phase != Native::Phase::FactorReady)
         return fail(RbfVkStatus::InvalidArgument, "RBF factorization requires extent proof");
+    if (native.bindAdopted) {
+        // Adopted factors: no factor submit. The admission hook keeps its
+        // Submit mapping, then the bind stages for Factor consume with no
+        // fence, like the host-staged extent.
+        if (beforeSubmit) {
+            VkResult hr = VK_SUCCESS;
+            try {
+                if (!beforeSubmit()) hr = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+            } catch (...) {
+                hr = VK_ERROR_UNKNOWN;
+            }
+            native.lastResult = hr;
+            if (hr != VK_SUCCESS)
+                return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic query failed");
+        }
+        native.phase = Native::Phase::Factor;
+        native.hostBindStaged = true;
+        native.solvePending = true;
+        return RbfVkStatus::Ok;
+    }
     int const m = native.solveUbo.m;
     VkPhysicalDeviceProperties physical{};
     vkGetPhysicalDeviceProperties(native.context->physicalDevice(), &physical);
@@ -803,17 +883,19 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             return RbfVkStatus::Ok;
         }
         if (native.phase == Native::Phase::Factor) {
-            double gram[16] = {};
-            int info = 0;
-            if (ReadBytes(d, *native.gramBuf, 128, gram) != VK_SUCCESS ||
-                ReadBytes(d, *native.infoBuf, 4, &info) != VK_SUCCESS)
-                return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
-            if (!fullAffineRank(gram))
-                return fail(RbfVkStatus::RankDeficient, "RBF samples lack numerically full affine 3D support");
-            if (info > 0)
-                return fail(RbfVkStatus::RankDeficient, "RBF augmented LU is singular (including coplanar affine support)");
-            if (info < 0)
-                return fail(RbfVkStatus::SolverError, "RBF LU invalid argument");
+            if (!native.bindAdopted) {
+                double gram[16] = {};
+                int info = 0;
+                if (ReadBytes(d, *native.gramBuf, 128, gram) != VK_SUCCESS ||
+                    ReadBytes(d, *native.infoBuf, 4, &info) != VK_SUCCESS)
+                    return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+                if (!fullAffineRank(gram))
+                    return fail(RbfVkStatus::RankDeficient, "RBF samples lack numerically full affine 3D support");
+                if (info > 0)
+                    return fail(RbfVkStatus::RankDeficient, "RBF augmented LU is singular (including coplanar affine support)");
+                if (info < 0)
+                    return fail(RbfVkStatus::SolverError, "RBF LU invalid argument");
+            }
             // Identity solved state, host side: Evaluate copies the staging
             // buffer over coefBuf on every dispatch, so a bind without a
             // solve must stage zeros just as the device zeroes coefBuf.
@@ -825,18 +907,35 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
                 return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
             }
             // Cache the factors for the host-side pose solves.
-            try {
-                native.cachedLu.resize(size_t(m) * size_t(m));
-                native.cachedPerm.resize(size_t(m));
-                if (ReadBytes(d, *native.matrixBuf, VkDeviceSize(m) * size_t(m) * 8u,
-                              native.cachedLu.data()) != VK_SUCCESS ||
-                    ReadBytes(d, *native.permBuf, VkDeviceSize(m) * 4u,
-                              native.cachedPerm.data()) != VK_SUCCESS)
-                    return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+            if (native.bindAdopted) {
+                // Adopted in BeginBind; the stored bind already proved the
+                // rank, so no gram/info readback runs.
                 native.cachedM = m;
                 native.cachedLuValid = true;
-            } catch (std::bad_alloc const&) {
-                return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+            } else {
+                try {
+                    native.cachedLu.resize(size_t(m) * size_t(m));
+                    native.cachedPerm.resize(size_t(m));
+                    if (ReadBytes(d, *native.matrixBuf, VkDeviceSize(m) * size_t(m) * 8u,
+                                  native.cachedLu.data()) != VK_SUCCESS ||
+                        ReadBytes(d, *native.permBuf, VkDeviceSize(m) * 4u,
+                                  native.cachedPerm.data()) != VK_SUCCESS)
+                        return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+                    native.cachedM = m;
+                    native.cachedLuValid = true;
+                } catch (std::bad_alloc const&) {
+                    return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+                }
+                // Publish successful binds to the shared factor cache (a
+                // store failure degrades to the next miss, never an error).
+                if (factorCache_) {
+                    try {
+                        factorCache_->Store(native.context.get(), n,
+                                            native.solveUbo.lambda, native.cachedRest,
+                                            native.cachedLu, native.cachedPerm, m);
+                    } catch (...) {
+                    }
+                }
             }
             sampleCount_ = n;
             order_ = m;

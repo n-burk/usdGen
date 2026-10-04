@@ -54,6 +54,9 @@ DeformSemantic MapBindStatus(RbfVkStatus status) {
 struct RbfVkDeformPipeline::Native {
     std::shared_ptr<DeviceContext> context;
     RbfVkBindingSpirv bindingSpirv; // immutable programs; each candidate owns its solve
+    // Rest is static across poses: fresh per-candidate bindings share one
+    // factor cache so only the first pose pays the LU submit.
+    std::shared_ptr<RbfVkFactorCache> factorCache = std::make_shared<RbfVkFactorCache>();
     VkShaderModule applyShader = VK_NULL_HANDLE;
     VkDescriptorSetLayout applyLayout = VK_NULL_HANDLE;
     VkPipelineLayout applyPipelineLayout = VK_NULL_HANDLE;
@@ -390,6 +393,7 @@ std::unique_ptr<RbfVkDeformPipeline::Candidate> RbfVkDeformPipeline::Begin(
     VkResult bindingResult = VK_SUCCESS;
     auto binding = RbfVkBinding::Create(context, native_->bindingSpirv, &bindingResult);
     if (!binding) { finish(bindingResult); return {}; }
+    binding->SetFactorCache(native_->factorCache);
 
     try {
         auto s = std::make_shared<Candidate::State>();

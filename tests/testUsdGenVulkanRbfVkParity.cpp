@@ -626,6 +626,72 @@ int main(int argc, char** argv) {
         std::puts("RBF pending evaluation ownership: PASS");
     }
 
+    // B8: the shared factor cache adopts bitwise-identical factors on a
+    // hit and recomputes on rest/smoothing changes; failures stay failures.
+    {
+        const std::vector<float> restA{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1};
+        std::vector<float> restB = restA;
+        restB[0] = 0.5f;
+        std::vector<float> posedA(15), posedB(15);
+        AffinePose(restA.data(), posedA.data(), 5);
+        AffinePose(restB.data(), posedB.data(), 5);
+        auto evalAll = [&](std::shared_ptr<RbfVkBinding> const& b, float const* rs,
+                           float const* ps, double smoothing,
+                           std::vector<float>& out) -> bool {
+            CHECK(b->Bind(rs, 5, smoothing) == RbfVkStatus::Ok);
+            CHECK(b->Solve(ps, 5) == RbfVkStatus::Ok);
+            RbfVkStatus es = b->EvaluateHost(rs, out.data(), 5);
+            CHECK(es == RbfVkStatus::Ok);
+            return true;
+        };
+        auto sameBits = [&](std::vector<float> const& a, std::vector<float> const& b) {
+            return a.size() == b.size() &&
+                   std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+        };
+        // Uncached oracles for both rests.
+        auto plain = RbfVkBinding::Create(context, spirv, &status);
+        CHECK(plain && status == VK_SUCCESS);
+        std::vector<float> oracleA(15), oracleB(15);
+        evalAll(plain, restA.data(), posedA.data(), 0.0, oracleA);
+        evalAll(plain, restB.data(), posedB.data(), 0.0, oracleB);
+        CHECK(!sameBits(oracleA, oracleB));
+        // Cached binding: miss, hit, evict, re-miss; all bitwise vs oracle.
+        auto cached = RbfVkBinding::Create(context, spirv, &status);
+        CHECK(cached && status == VK_SUCCESS);
+        auto cache = std::make_shared<RbfVkFactorCache>();
+        cached->SetFactorCache(cache);
+        std::vector<float> got(15);
+        evalAll(cached, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
+        evalAll(cached, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
+        evalAll(cached, restB.data(), posedB.data(), 0.0, got);
+        CHECK(sameBits(got, oracleB));
+        evalAll(cached, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
+        // A second binding sharing the cache hits too.
+        auto cached2 = RbfVkBinding::Create(context, spirv, &status);
+        CHECK(cached2 && status == VK_SUCCESS);
+        cached2->SetFactorCache(cache);
+        evalAll(cached2, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
+        // Failures are never adopted: rank-deficient rest still fails, and
+        // a later good bind still succeeds.
+        const std::vector<float> plane{0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0.2f, 0.3f, 0};
+        CHECK(cached->Bind(plane.data(), 5, 0.0) == RbfVkStatus::RankDeficient);
+        evalAll(cached, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
+        // A smoothing change keys a different entry and still matches uncached.
+        // (No assertion that smoothing moves the float bits: on this tiny
+        // near-affine fixture the weights are ~0, so 1e-3 vs 0.0 smoothing
+        // can be bit-identical. The cache property is cached == uncached.)
+        std::vector<float> oracleS(15);
+        evalAll(plain, restA.data(), posedA.data(), 1e-3, oracleS);
+        evalAll(cached, restA.data(), posedA.data(), 1e-3, got);
+        CHECK(sameBits(got, oracleS));
+        std::puts("B8 (factor cache): PASS");
+    }
+
     // ================= B1: n=5 (the CUDA test's own fixture) =================
     {
         const std::vector<float> rest{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1};

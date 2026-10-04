@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,42 @@ enum class RbfVkStatus {
 };
 
 char const* RbfVkStatusName(RbfVkStatus status) noexcept;
+
+// Persistent LU-factor cache shared across RbfVkBindings on one device.
+// Rest samples are static across poses while only the posed samples move,
+// so a gap-range groom re-factors an identical matrix on every pose
+// (41ms on GB10 for n=400). A hit adopts the stored factors and skips
+// the gram + buildMatrix + LU submit and its readbacks; the Bind/Poll
+// protocol, admission hooks, and buffer state are unchanged. Only
+// successful binds are stored (failures re-run and fail as before), and
+// the key covers the device, count, smoothing bits, and rest bytes, so a
+// hit adopts bitwise what a fresh bind would compute. Thread-safe;
+// single-entry (one rest at a time, like the CPU boundRest_ skip).
+class RbfVkFactorCache {
+public:
+    RbfVkFactorCache() = default;
+    RbfVkFactorCache(RbfVkFactorCache const&) = delete;
+    RbfVkFactorCache& operator=(RbfVkFactorCache const&) = delete;
+
+    struct Entry {
+        DeviceContext* context = nullptr;
+        int n = 0, m = 0;
+        uint64_t smoothingBits = 0;
+        std::vector<float> rest;
+        std::vector<double> lu;
+        std::vector<int> perm;
+    };
+
+private:
+    friend class RbfVkBinding;
+    std::shared_ptr<Entry const> Lookup(DeviceContext* context, int n,
+                                        double smoothing, float const* rest);
+    void Store(DeviceContext* context, int n, double smoothing,
+               std::vector<float> const& rest, std::vector<double> const& lu,
+               std::vector<int> const& perm, int m);
+    std::mutex mutex_;
+    std::shared_ptr<Entry const> entry_;
+};
 
 struct RbfVkBindingSpirv {
     std::vector<uint32_t> extent;
@@ -128,12 +165,16 @@ public:
     double center(int axis) const noexcept;
     double scale() const noexcept;
     char const* diagnostic() const noexcept;
+    // Optional factor cache (null clears). The cache must outlive the
+    // binding's binds; entries are device-specific and immutable.
+    void SetFactorCache(std::shared_ptr<RbfVkFactorCache> cache);
 
 private:
     struct Native;
     explicit RbfVkBinding(std::shared_ptr<Native> native);
     RbfVkStatus fail(RbfVkStatus status, char const* what);
     std::shared_ptr<Native> native_;
+    std::shared_ptr<RbfVkFactorCache> factorCache_;
     int sampleCount_ = 0, order_ = 0;
     bool solved_ = false;
     bool evalPending_ = false;

@@ -417,6 +417,10 @@ int VulkanBindLeg(std::string const &spvDir)
         std::printf("Vulkan bind leg: binding creation failed\n");
         return 1;
     }
+    // Steady state, like production gap poses: rest is static across binds,
+    // so the shared factor cache adopts the LU after the first bind.
+    auto factorCache = std::make_shared<vulkan::RbfVkFactorCache>();
+    binding->SetFactorCache(factorCache);
     int const n = 400;
     uint32_t const cvs = 1000000;
     std::vector<float> rest(size_t(n) * 3), posed(size_t(n) * 3);
