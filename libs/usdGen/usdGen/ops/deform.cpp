@@ -314,15 +314,19 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             }
             return true;
         }
-        GfRange3d extent;
-        for (GfVec3d const &point : driverRest) extent.UnionWith(point);
-        double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
-        double const epsilon = std::max(1e-12, size * 1e-7);
         // Bitwise compare (not operator==): identical NaN bits still hit.
         bool const restUnchanged = selectionValid_ && selectionBudget_ == size_t(budget) &&
             selectRest_.size() == driverRest.size() &&
             std::memcmp(selectRest_.data(), driverRest.data(),
                         driverRest.size() * sizeof(GfVec3d)) == 0;
+        // The extent feeds only the re-selection epsilon, so a cache hit
+        // skips the pass; the values are unchanged whenever it runs.
+        double const epsilon = restUnchanged ? 0.0 : [&] {
+            GfRange3d extent;
+            for (GfVec3d const &point : driverRest) extent.UnionWith(point);
+            double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
+            return std::max(1e-12, size * 1e-7);
+        }();
         std::vector<size_t> const chosen = restUnchanged
             ? selection_
             : rbf::SelectSamples(driverRest, size_t(budget), epsilon);
