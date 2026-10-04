@@ -16,6 +16,7 @@
 
 #include "usdGen/opParams.h"
 #include "usdGen/limitSurface.h"
+#include "usdGen/ops/opUtil.h"
 #include "usdGenMath/usdGenMath/hash.h"
 #include "usdGenMath/usdGenMath/kernels.h"
 
@@ -128,12 +129,14 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     if (desc && ctx.surface < desc->surfaces.size()) {
         auto const &surface = desc->surfaces[ctx.surface];
         auto array = [&](char const *name, auto const &values) {
-            uint64_t hash = 1469598103934665603ULL;
-            auto const *bytes = reinterpret_cast<unsigned char const *>(values.cdata());
-            for (size_t i = 0; i < values.size() * sizeof(*values.cdata()); ++i) {
-                hash ^= bytes[i]; hash *= 0x100000001b3ULL;
-            }
-            feed(name, hash); feed(name, uint64_t(values.size()));
+            // Word-at-a-time FNV-1a (opUtil::Digest::MixBytes): one round
+            // per 8 bytes instead of one per byte. The epoch values differ
+            // from byte mixing, but epochs are only compared for equality
+            // within a process.
+            opUtil::Digest digest;
+            digest.MixBytes(values.cdata(),
+                            values.size() * sizeof(*values.cdata()));
+            feed(name, digest.h); feed(name, uint64_t(values.size()));
         };
         array("restPoints", surface.restPoints);
         array("faceCounts", surface.faceVertexCounts);
@@ -147,15 +150,9 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
         // back the cached pre-stroke roots.
         auto const &mult = desc->surfaces[ctx.surface].densityMultiplier;
         feed("densityMultSize", uint64_t(mult.size()));
-        uint64_t mh = 1469598103934665603ULL;
-        for (float v : mult) {
-            uint32_t bits = 0;
-            static_assert(sizeof(bits) == sizeof(v), "float is 32 bits");
-            std::memcpy(&bits, &v, sizeof(bits));
-            mh ^= uint64_t(bits);
-            mh *= 0x100000001b3ULL;
-        }
-        feed("densityMult", mh);
+        opUtil::Digest multDigest;
+        multDigest.MixBytes(mult.cdata(), mult.size() * sizeof(float));
+        feed("densityMult", multDigest.h);
     }
 
     return {h, h ^ 0x9E3779B97F4A7C15ull};
