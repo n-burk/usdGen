@@ -105,6 +105,10 @@ __global__ void evalKernel(const float3* cvs, float3* out, int c, const double* 
     // sn holds (sample-center)*invScale per axis (normalizeSamples, once per
     // bind): the same doubles the inline normalization computed, so every
     // iteration below is bitwise what it was, minus 3 converts + 9 flops.
+// Rolled on purpose: sm_121 lowers each sqrt to a software-routine call
+    // that serializes the warp, so unrolling only spends registers (50 at
+    // 4x, 40 rolled) and costs occupancy. The op order is unchanged.
+#pragma unroll 1
     for(int j=0;j<n;++j){ double dx=x-sn[j],dy=y-sn[n+j],dz=z-sn[2*n+j]; double r=sqrt(dx*dx+dy*dy+dz*dz); r*=r*r; ox+=coef[j]*r;oy+=coef[m+j]*r;oz+=coef[2*m+j]*r; }
     out[i]=make_float3((float)(ox*scale+cx),(float)(oy*scale+cy),(float)(oz*scale+cz));
 }
