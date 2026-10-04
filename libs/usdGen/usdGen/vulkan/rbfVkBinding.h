@@ -84,9 +84,11 @@ public:
     using BeforeSubmit = std::function<bool()>;
     // Owner-driven production path: one submit per Begin/Advance and Poll
     // consumes only an exact fence proof. No Vulkan wait occurs here.
-    // BeginSolve is the exception: the pose solve runs on the host
-    // (bitwise the retired rhs + triSolve submits), so it completes
-    // synchronously and the following PollSolve is a no-op success.
+    // BeginSolve is the exception: it stages the pose and runs the
+    // admission hook, and the following PollSolve runs the solve on the
+    // host (bitwise the retired rhs + triSolve submits) with no fence.
+    // The pending protocol is unchanged: a staged pose reports pending
+    // until PollSolve consumes it, exactly like a fenced submit.
     RbfVkStatus BeginBind(float const*, int, double, BeforeSubmit = {});
     RbfVkStatus AdvanceBind(BeforeSubmit = {});
     RbfVkStatus BeginSolve(float const*, int, BeforeSubmit = {});

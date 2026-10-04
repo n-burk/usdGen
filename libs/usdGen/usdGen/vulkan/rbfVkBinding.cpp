@@ -133,6 +133,11 @@ struct RbfVkBinding::Native {
     std::vector<float> cachedRest;
     int cachedM = 0;
     bool cachedLuValid = false;
+    // A staged host pose: BeginSolve stashes the posed samples and the
+    // admission hook runs there, but the RHS + triangular solve wait for
+    // PollSolve, so the Begin/Poll pending protocol is unchanged.
+    std::vector<float> hostPosed;
+    bool hostPosePending = false;
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
@@ -140,6 +145,7 @@ struct RbfVkBinding::Native {
         coefStagingBuf.reset(); bufferSamples = 0;
         cachedLu.clear(); cachedPerm.clear(); cachedRest.clear();
         cachedM = 0; cachedLuValid = false;
+        hostPosed.clear(); hostPosePending = false;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -288,7 +294,9 @@ RbfVkStatus RbfVkBinding::fail(RbfVkStatus s, char const* why) {
     return s;
 }
 bool RbfVkBinding::HasPendingEvaluate() const noexcept { return evalPending_; }
-bool RbfVkBinding::HasPendingSolve() const noexcept { return native_->solvePending; }
+bool RbfVkBinding::HasPendingSolve() const noexcept {
+    return native_->solvePending || native_->hostPosePending;
+}
 VkResult RbfVkBinding::lastResult() const noexcept { return native_->lastResult; }
 int RbfVkBinding::sampleCount() const noexcept { return sampleCount_; }
 int RbfVkBinding::order() const noexcept { return order_; }
@@ -515,6 +523,7 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     native_->lastResult = VK_SUCCESS;
     native_->phase = Native::Phase::Idle;
     native_->cachedLuValid = false;
+    native_->hostPosePending = false;
     if (!rest || n < 4 || n > kRbfVkMaxSamples || !std::isfinite(smoothing) || smoothing < 0.0)
         return fail(RbfVkStatus::InvalidArgument,
                     "RBF requires 4+ samples and finite non-negative smoothing");
@@ -627,7 +636,67 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
     if (status) *status = RbfVkStatus::Ok;
     auto& native = *native_;
     auto d = native.context->device();
-    if (!native.solvePending) return VK_SUCCESS;
+    if (!native.solvePending && !native.hostPosePending) return VK_SUCCESS;
+    if (native.hostPosePending) {
+        // Host pose consume: no fence to prove. The RHS in exact
+        // rbfVkRhs.comp order against the cached rest samples, then the
+        // triangular solve in exact rbfVkTriSolve.comp order against the
+        // cached factors; the staged coefficients are bitwise what the
+        // retired submits wrote.
+        int const hn = native.solveUbo.n, hm = native.solveUbo.m;
+        auto hostConsume = [&]() -> RbfVkStatus {
+            // Consumed once, like the fenced path (which clears
+            // solvePending before consuming): a retry needs a new Begin.
+            native.hostPosePending = false;
+            double const invScale = native.solveUbo.invScale;
+            float const* posed = native.hostPosed.data();
+            std::vector<double> rhs(size_t(3) * size_t(hm), 0.0);
+            for (int i = 0; i < hn; ++i) {
+                float const bx = posed[size_t(3) * size_t(i)];
+                float const by = posed[size_t(3) * size_t(i) + 1];
+                float const bz = posed[size_t(3) * size_t(i) + 2];
+                if (!std::isfinite(bx) || !std::isfinite(by) || !std::isfinite(bz))
+                    return fail(RbfVkStatus::NonFiniteInput,
+                                "RBF current samples contain non-finite values");
+                rhs[size_t(i)] =
+                    (double(bx) - double(native.cachedRest[size_t(3) * size_t(i)])) * invScale;
+                rhs[size_t(hm) + size_t(i)] =
+                    (double(by) - double(native.cachedRest[size_t(3) * size_t(i) + 1])) * invScale;
+                rhs[size_t(2) * size_t(hm) + size_t(i)] =
+                    (double(bz) - double(native.cachedRest[size_t(3) * size_t(i) + 2])) * invScale;
+            }
+            double const* luPtr = native.cachedLu.data();
+            int const* permPtr = native.cachedPerm.data();
+            std::vector<double> coef(size_t(3) * size_t(hm));
+            for (int k = 0; k < 3; ++k) {
+                size_t const base = size_t(k) * size_t(hm);
+                for (int i = 0; i < hm; ++i) {
+                    double s = rhs[base + size_t(permPtr[i])];
+                    for (int j = 0; j < i; ++j) s -= luPtr[size_t(i) * size_t(hm) + size_t(j)] * coef[base + size_t(j)];
+                    coef[base + size_t(i)] = s;
+                }
+                for (int i = hm - 1; i >= 0; --i) {
+                    double s = coef[base + size_t(i)];
+                    for (int j = i + 1; j < hm; ++j) s -= luPtr[size_t(i) * size_t(hm) + size_t(j)] * coef[base + size_t(j)];
+                    coef[base + size_t(i)] = s / luPtr[size_t(i) * size_t(hm) + size_t(i)];
+                }
+            }
+            if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(hm) * 24u, coef.data()) != VK_SUCCESS)
+                return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+            solved_ = true;
+            native.phase = Native::Phase::Idle;
+            return RbfVkStatus::Ok;
+        };
+        RbfVkStatus consumed = RbfVkStatus::Ok;
+        try {
+            consumed = hostConsume();
+        } catch (std::bad_alloc const&) {
+            consumed = fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+        }
+        if (status) *status = consumed;
+        if (consumed == RbfVkStatus::DeviceError) return native.lastResult = VK_ERROR_MEMORY_MAP_FAILED;
+        return VK_SUCCESS;
+    }
     VkResult r = vkGetFenceStatus(d, native.solveFence);
     if (r != VK_SUCCESS) { native.lastResult = r; return r; }
     native.solvePending = false;
@@ -755,7 +824,7 @@ RbfVkStatus RbfVkBinding::Bind(float const* rest, int n, double smoothing) {
 
 RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
                                       BeforeSubmit beforeSubmit) {
-    if (native_->solvePending)
+    if (native_->solvePending || native_->hostPosePending)
         return fail(RbfVkStatus::DeviceError, "RBF solve completion proof unavailable");
     if (evalPending_)
         return fail(RbfVkStatus::InvalidArgument,
@@ -766,7 +835,6 @@ RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
     int const n = sampleCount_;
     int const m = native_->solveUbo.m;
     auto& native = *native_;
-    auto d = native.context->device();
     if (!native.cachedLuValid || native.cachedM != m ||
         native.cachedRest.size() != size_t(n) * 3)
         return fail(RbfVkStatus::DeviceError, "RBF solve completion proof unavailable");
@@ -784,50 +852,15 @@ RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
         if (r != VK_SUCCESS)
             return fail(RbfVkStatus::DeviceError, "RBF input validation failed");
     }
-    // The whole pose solve runs on the host: the RHS in exact
-    // rbfVkRhs.comp order against the cached rest samples, then the
-    // triangular solve in exact rbfVkTriSolve.comp order against the
-    // cached factors. No submit, no fence, no re-read; the staged
-    // coefficients are bitwise what the retired submits wrote.
+    // Stage only: the RHS + triangular solve wait for PollSolve, so the
+    // Begin/Poll pending protocol (and error timing) is unchanged.
     try {
-        double const invScale = native.solveUbo.invScale;
-        std::vector<double> rhs(size_t(3) * size_t(m), 0.0);
-        for (int i = 0; i < n; ++i) {
-            float const bx = posed[size_t(3) * size_t(i)];
-            float const by = posed[size_t(3) * size_t(i) + 1];
-            float const bz = posed[size_t(3) * size_t(i) + 2];
-            if (!std::isfinite(bx) || !std::isfinite(by) || !std::isfinite(bz))
-                return fail(RbfVkStatus::NonFiniteInput,
-                            "RBF current samples contain non-finite values");
-            rhs[size_t(i)] = (double(bx) - double(native.cachedRest[size_t(3) * size_t(i)])) * invScale;
-            rhs[size_t(m) + size_t(i)] =
-                (double(by) - double(native.cachedRest[size_t(3) * size_t(i) + 1])) * invScale;
-            rhs[size_t(2) * size_t(m) + size_t(i)] =
-                (double(bz) - double(native.cachedRest[size_t(3) * size_t(i) + 2])) * invScale;
-        }
-        double const* luPtr = native.cachedLu.data();
-        int const* permPtr = native.cachedPerm.data();
-        std::vector<double> coef(size_t(3) * size_t(m));
-        for (int k = 0; k < 3; ++k) {
-            size_t const base = size_t(k) * size_t(m);
-            for (int i = 0; i < m; ++i) {
-                double s = rhs[base + size_t(permPtr[i])];
-                for (int j = 0; j < i; ++j) s -= luPtr[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
-                coef[base + size_t(i)] = s;
-            }
-            for (int i = m - 1; i >= 0; --i) {
-                double s = coef[base + size_t(i)];
-                for (int j = i + 1; j < m; ++j) s -= luPtr[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
-                coef[base + size_t(i)] = s / luPtr[size_t(i) * size_t(m) + size_t(i)];
-            }
-        }
-        if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(m) * 24u, coef.data()) != VK_SUCCESS)
-            return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+        native.hostPosed.assign(posed, posed + size_t(n) * 3);
     } catch (std::bad_alloc const&) {
-        return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+        return fail(RbfVkStatus::DeviceError, "RBF current sample copy failed");
     }
-    solved_ = true;
-    native.phase = Native::Phase::Idle;
+    native.hostPosePending = true;
+    native.phase = Native::Phase::Pose;
     native.lastResult = VK_SUCCESS;
     return RbfVkStatus::Ok;
 }
@@ -835,8 +868,8 @@ RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
 RbfVkStatus RbfVkBinding::Solve(float const* posed, int posedCount) {
     auto status = BeginSolve(posed, posedCount);
     if (status != RbfVkStatus::Ok) return status;
-    // Host-synchronous: nothing was submitted, so there is no fence to
-    // wait on; PollSolve simply reports the completed state.
+    // The pose runs on the host in PollSolve: nothing was submitted, so
+    // there is no fence to wait on.
     auto r = PollSolve(&status);
     return r == VK_SUCCESS ? status : RbfVkStatus::DeviceError;
 }
