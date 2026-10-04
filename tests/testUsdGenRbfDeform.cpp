@@ -22,6 +22,7 @@
 #include "usdGen/compiler.h"
 #include "usdGen/graph.h"
 #include "usdGen/opRegistry.h"
+#include "usdGen/ops/deform.h"
 #include "usdGen/ops/rbfField.h"
 #include "usdGen/ops/curveWrap.h"
 #include "usdGen/scheduler.h"
@@ -358,6 +359,45 @@ void CheckSurfaceExample(bool outside = false)
     prim.RemoveProperty(TfToken("primvars:rest"));
     Cooked const missing = cook(38);
     Check(!missing.ok,"surface RBF refuses missing Default-time rest data");
+}
+
+// Finite drivers, but the field overflows float at a far CV: the capture
+// must fail with the non-finite diagnostic, not publish infinities.
+void CheckNonFiniteCapture()
+{
+    UsdGenGraphDesc desc;
+    UsdGenSurfaceDesc surface;
+    surface.path = SdfPath("/surface");
+    int const N = 5;
+    surface.restPoints = VtVec3fArray(N * N);
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i) {
+            float const x = float(i) * 0.1f, y = float(j) * 0.1f;
+            surface.restPoints[j * N + i] =
+                GfVec3f(x, y, 2.0f * std::sin(x * 0.3f) * std::cos(y * 0.3f));
+        }
+    surface.points = surface.restPoints;
+    surface.points[0] = surface.restPoints[0] + GfVec3f(1e10f, 0.0f, 0.0f);
+    desc.surfaces.push_back(surface);
+
+    UsdGenCurveBuffer upstream;
+    upstream.totalCurves = 1;
+    upstream.totalCvs = 2;
+    upstream.px = VtFloatArray(2);
+    upstream.py = VtFloatArray(2);
+    upstream.pz = VtFloatArray(2);
+    upstream.px[1] = 1e20f;  // the cubic kernel overflows float here
+
+    UsdGenCaptureContext ctx;
+    ctx.desc = &desc;
+    ctx.surface = 0;
+    UsdGenDeformOp op;
+    auto capture = op.CreateCapture();
+    UsdGenDiagnostics diagnostics;
+    bool const ok = op.Capture(ctx, upstream, capture.get(), &diagnostics);
+    bool const refused = !ok && !diagnostics.errors.empty() &&
+        diagnostics.errors[0].find("non-finite") != std::string::npos;
+    Check(refused, "a deformation that overflows float is refused, not published");
 }
 
 void CheckCurveWrapField()
@@ -775,6 +815,7 @@ int main()
     CheckExample();
     CheckSurfaceExample();
     CheckSurfaceExample(true);
+    CheckNonFiniteCapture();
     CheckBraidExamples();
     CheckSingleCenterExample();
     CheckRegionExamples();
