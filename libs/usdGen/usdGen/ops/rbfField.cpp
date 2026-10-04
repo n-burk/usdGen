@@ -79,6 +79,7 @@ bool CubicField::Bind(std::vector<GfVec3d> const &rest, std::string *error)
     _scale = std::max(hi[0] - lo[0], std::max(hi[1] - lo[1], hi[2] - lo[2]));
     if (!(_scale > 0.0) || !std::isfinite(_scale))
         return fail("the RBF rest samples have zero extent");
+    _invScale = 1.0 / _scale;
     _rest.resize(n);
     for (size_t i = 0; i < n; ++i) _rest[i] = (rest[i] - _centre) / _scale;
     if (!FullAffineRank(_rest))
@@ -173,7 +174,7 @@ GfVec3d CubicField::Displacement(GfVec3d const &x) const
 {
     size_t const n = _rest.size(), m = _order;
     if (!m) return GfVec3d(0.0);
-    GfVec3d const y = (x - _centre) / _scale;
+    GfVec3d const y = (x - _centre) * _invScale;
     double const *cx = &_coefficients[0], *cy = &_coefficients[m], *cz = &_coefficients[2 * m];
 
     // The kernel row gets a loop of its own, which the compiler vectorizes

@@ -48,6 +48,11 @@ private:
     std::vector<double> _restX, _restY, _restZ;   // the same, one array per axis
     GfVec3d _centre{0.0};
     double _scale = 1.0;
+    // 1/_scale, computed once per bind: Displacement normalises every query
+    // by _scale, and the compiler lowers that to a reciprocal plus three
+    // multiplies, so caching the reciprocal bit-for-bit (same IEEE divide,
+    // run once) removes a fully exposed fdiv from every query.
+    double _invScale = 1.0;
     size_t _order = 0;                 // n + 4
     std::vector<double> _lu;           // row-major LU of the augmented matrix
     std::vector<size_t> _pivot;
