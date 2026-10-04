@@ -123,11 +123,23 @@ struct RbfVkBinding::Native {
     SolveUbo solveUbo;
     VkResult lastResult = VK_SUCCESS;
     int bufferSamples = 0;
+    // Rest-only host state for the host-side pose solve: the factored
+    // matrix and permutation (read back once per bind) plus the rest
+    // samples (copied from BeginBind). A pose then pays no submit, fence,
+    // or re-read; the bytes and the arithmetic match the retired rhs +
+    // triSolve submits exactly.
+    std::vector<double> cachedLu;
+    std::vector<int> cachedPerm;
+    std::vector<float> cachedRest;
+    int cachedM = 0;
+    bool cachedLuValid = false;
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
         infoBuf.reset(); permBuf.reset(); uboBuf.reset(); normBuf.reset();
         coefStagingBuf.reset(); bufferSamples = 0;
+        cachedLu.clear(); cachedPerm.clear(); cachedRest.clear();
+        cachedM = 0; cachedLuValid = false;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -502,6 +514,7 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     diagnostic_.clear();
     native_->lastResult = VK_SUCCESS;
     native_->phase = Native::Phase::Idle;
+    native_->cachedLuValid = false;
     if (!rest || n < 4 || n > kRbfVkMaxSamples || !std::isfinite(smoothing) || smoothing < 0.0)
         return fail(RbfVkStatus::InvalidArgument,
                     "RBF requires 4+ samples and finite non-negative smoothing");
@@ -531,6 +544,13 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     }
     if (WriteBytes(d, *native.restBuf, VkDeviceSize(n) * 12u, rest) != VK_SUCCESS)
         return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
+    // Host copy for the host-side pose solve (after AllocateBuffers, which
+    // resets the caches when the size changes).
+    try {
+        native.cachedRest.assign(rest, rest + size_t(n) * 3);
+    } catch (std::bad_alloc const&) {
+        return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
+    }
 
     // G1: extent.
     {
@@ -688,51 +708,30 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             } catch (std::bad_alloc const&) {
                 return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
             }
+            // Cache the factors for the host-side pose solves.
+            try {
+                native.cachedLu.resize(size_t(m) * size_t(m));
+                native.cachedPerm.resize(size_t(m));
+                if (ReadBytes(d, *native.matrixBuf, VkDeviceSize(m) * size_t(m) * 8u,
+                              native.cachedLu.data()) != VK_SUCCESS ||
+                    ReadBytes(d, *native.permBuf, VkDeviceSize(m) * 4u,
+                              native.cachedPerm.data()) != VK_SUCCESS)
+                    return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+                native.cachedM = m;
+                native.cachedLuValid = true;
+            } catch (std::bad_alloc const&) {
+                return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+            }
             sampleCount_ = n;
             order_ = m;
             solved_ = true;
             native.phase = Native::Phase::Idle;
             return RbfVkStatus::Ok;
         }
-        int flag = 0;
-        if (ReadBytes(d, *native.flagBuf, 4, &flag) != VK_SUCCESS)
-            return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
-        if (flag)
-            return fail(RbfVkStatus::NonFiniteInput, "RBF current samples contain non-finite values");
-        // Host triangular solve in exact rbfVkTriSolve.comp order (forward
-        // per column, then back), so the staged coefficients are bitwise
-        // what the device shader wrote.
-        try {
-            std::vector<double> lu(size_t(m) * size_t(m));
-            std::vector<double> rhs(size_t(3) * size_t(m));
-            std::vector<int> perm;
-            perm.resize(size_t(m));
-            std::vector<double> coef(size_t(3) * size_t(m));
-            if (ReadBytes(d, *native.matrixBuf, VkDeviceSize(m) * size_t(m) * 8u, lu.data()) != VK_SUCCESS ||
-                ReadBytes(d, *native.rhsBuf, VkDeviceSize(m) * 24u, rhs.data()) != VK_SUCCESS ||
-                ReadBytes(d, *native.permBuf, VkDeviceSize(m) * 4u, perm.data()) != VK_SUCCESS)
-                return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
-            for (int k = 0; k < 3; ++k) {
-                size_t const base = size_t(k) * size_t(m);
-                for (int i = 0; i < m; ++i) {
-                    double s = rhs[base + size_t(perm[i])];
-                    for (int j = 0; j < i; ++j) s -= lu[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
-                    coef[base + size_t(i)] = s;
-                }
-                for (int i = m - 1; i >= 0; --i) {
-                    double s = coef[base + size_t(i)];
-                    for (int j = i + 1; j < m; ++j) s -= lu[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
-                    coef[base + size_t(i)] = s / lu[size_t(i) * size_t(m) + size_t(i)];
-                }
-            }
-            if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(m) * 24u, coef.data()) != VK_SUCCESS)
-                return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
-        } catch (std::bad_alloc const&) {
-            return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
-        }
-        solved_ = true;
-        native.phase = Native::Phase::Idle;
-        return RbfVkStatus::Ok;
+        // The pose solve runs on the host inside BeginSolve, so no fenced
+        // Pose submit exists anymore; reaching consume outside the Extent /
+        // Factor phases means the phase machine itself diverged.
+        return fail(RbfVkStatus::DeviceError, "RBF solve completion proof unavailable");
     };
     RbfVkStatus consumed = consume();
     if (status) *status = consumed;
@@ -765,39 +764,80 @@ RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
     if (!sampleCount_ || !posed || posedCount != sampleCount_)
         return fail(RbfVkStatus::InvalidArgument, "RBF Solve samples do not match binding");
     int const n = sampleCount_;
+    int const m = native_->solveUbo.m;
     auto& native = *native_;
     auto d = native.context->device();
-    if (WriteBytes(d, *native.posedBuf, VkDeviceSize(n) * 12u, posed) != VK_SUCCESS)
-        return fail(RbfVkStatus::DeviceError, "RBF current sample copy failed");
-    // The submit builds only the RHS on-device; the triangular solve runs
-    // on the host in PollSolve (3 GPU threads of serial O(m^2) work take
-    // ~20ms at m=404, the same loop on the CPU takes well under one).
-    VkResult r = Submit(native.context, native.solveCommands, native.solveFence, native.solvePending,
-                         [&](VkCommandBuffer cmd) {
-        vkCmdFillBuffer(cmd, native.flagBuf->buffer(), 0, 4, 0u);
-        BeforeBarrier(cmd);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.rhsPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            native.rhsPipelineLayout, 0, 1, &native.rhsSet, 0, nullptr);
-        vkCmdDispatch(cmd, Groups(uint32_t(n)), 1, 1);
-        AfterBarrier(cmd);
-        return VK_SUCCESS;
-    }, beforeSubmit);
-    native.lastResult = r;
-    if (r != VK_SUCCESS)
-        return fail(RbfVkStatus::DeviceError, "RBF input validation failed");
-    native.phase = Native::Phase::Pose;
-    native.lastResult = r;
+    if (!native.cachedLuValid || native.cachedM != m ||
+        native.cachedRest.size() != size_t(n) * 3)
+        return fail(RbfVkStatus::DeviceError, "RBF solve completion proof unavailable");
+    // Admission hook first, as before the retired submit.
+    if (beforeSubmit) {
+        bool admitted = false;
+        VkResult r = VK_SUCCESS;
+        try {
+            admitted = beforeSubmit();
+        } catch (...) {
+            r = VK_ERROR_UNKNOWN;
+        }
+        if (!admitted && r == VK_SUCCESS) r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        native.lastResult = r;
+        if (r != VK_SUCCESS)
+            return fail(RbfVkStatus::DeviceError, "RBF input validation failed");
+    }
+    // The whole pose solve runs on the host: the RHS in exact
+    // rbfVkRhs.comp order against the cached rest samples, then the
+    // triangular solve in exact rbfVkTriSolve.comp order against the
+    // cached factors. No submit, no fence, no re-read; the staged
+    // coefficients are bitwise what the retired submits wrote.
+    try {
+        double const invScale = native.solveUbo.invScale;
+        std::vector<double> rhs(size_t(3) * size_t(m), 0.0);
+        for (int i = 0; i < n; ++i) {
+            float const bx = posed[size_t(3) * size_t(i)];
+            float const by = posed[size_t(3) * size_t(i) + 1];
+            float const bz = posed[size_t(3) * size_t(i) + 2];
+            if (!std::isfinite(bx) || !std::isfinite(by) || !std::isfinite(bz))
+                return fail(RbfVkStatus::NonFiniteInput,
+                            "RBF current samples contain non-finite values");
+            rhs[size_t(i)] = (double(bx) - double(native.cachedRest[size_t(3) * size_t(i)])) * invScale;
+            rhs[size_t(m) + size_t(i)] =
+                (double(by) - double(native.cachedRest[size_t(3) * size_t(i) + 1])) * invScale;
+            rhs[size_t(2) * size_t(m) + size_t(i)] =
+                (double(bz) - double(native.cachedRest[size_t(3) * size_t(i) + 2])) * invScale;
+        }
+        double const* luPtr = native.cachedLu.data();
+        int const* permPtr = native.cachedPerm.data();
+        std::vector<double> coef(size_t(3) * size_t(m));
+        for (int k = 0; k < 3; ++k) {
+            size_t const base = size_t(k) * size_t(m);
+            for (int i = 0; i < m; ++i) {
+                double s = rhs[base + size_t(permPtr[i])];
+                for (int j = 0; j < i; ++j) s -= luPtr[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
+                coef[base + size_t(i)] = s;
+            }
+            for (int i = m - 1; i >= 0; --i) {
+                double s = coef[base + size_t(i)];
+                for (int j = i + 1; j < m; ++j) s -= luPtr[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
+                coef[base + size_t(i)] = s / luPtr[size_t(i) * size_t(m) + size_t(i)];
+            }
+        }
+        if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(m) * 24u, coef.data()) != VK_SUCCESS)
+            return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+    } catch (std::bad_alloc const&) {
+        return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+    }
+    solved_ = true;
+    native.phase = Native::Phase::Idle;
+    native.lastResult = VK_SUCCESS;
     return RbfVkStatus::Ok;
 }
 
 RbfVkStatus RbfVkBinding::Solve(float const* posed, int posedCount) {
     auto status = BeginSolve(posed, posedCount);
     if (status != RbfVkStatus::Ok) return status;
-    auto r = vkWaitForFences(native_->context->device(), 1, &native_->solveFence,
-                            VK_TRUE, kFenceTimeoutNs);
-    if (r != VK_SUCCESS) return fail(RbfVkStatus::DeviceError, "RBF input validation failed");
-    r = PollSolve(&status);
+    // Host-synchronous: nothing was submitted, so there is no fence to
+    // wait on; PollSolve simply reports the completed state.
+    auto r = PollSolve(&status);
     return r == VK_SUCCESS ? status : RbfVkStatus::DeviceError;
 }
 
