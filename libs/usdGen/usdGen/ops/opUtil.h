@@ -81,6 +81,37 @@ struct Digest
     UsdGenEpoch Epoch(uint64_t salt) const { return {h, h ^ salt}; }
 };
 
+/// Memoized MixBytes for a rest/topology array that is usually static across
+/// poses. The key is the shared buffer's identity (pointer + size), not its
+/// content: the cache holds a VtArray reference, and VtArray is
+/// copy-on-write, so any in-place edit detaches the writer to a new buffer
+/// and the key misses. A hit therefore proves the bytes are unchanged, and a
+/// miss rehashes exactly as before, so the epochs are unchanged. For use from
+/// const CaptureDigest (mutable member); digests run per node, never
+/// concurrently on one op.
+template <class VtArrayT>
+class ContentDigestCache
+{
+public:
+    uint64_t Digest(VtArrayT const &values)
+    {
+        if (valid_ && values.size() == array_.size() &&
+            (values.empty() || values.cdata() == array_.cdata()))
+            return digest_;
+        opUtil::Digest d;
+        d.MixBytes(values.cdata(), values.size() * sizeof(*values.cdata()));
+        array_ = values;
+        digest_ = d.h;
+        valid_ = true;
+        return digest_;
+    }
+
+private:
+    VtArrayT array_;
+    uint64_t digest_ = 0;
+    bool valid_ = false;
+};
+
 /// Curve spans [spans[c], spans[c+1]) of a uniform or ragged buffer.
 inline bool CurveSpans(UsdGenCurveBuffer const &buffer, std::vector<uint32_t> *spans,
                        std::string *error)

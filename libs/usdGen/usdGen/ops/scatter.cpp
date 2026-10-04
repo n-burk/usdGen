@@ -95,6 +95,48 @@ uint32_t UsdGenScatterOp::PlanesTouched() const
     return kPlanePoints | kPlaneHairT;
 }
 
+uint64_t UsdGenScatterOp::SubdivisionDigestCache::Digest(
+    UsdGenSurfaceDesc const &surface)
+{
+    auto same = [](auto const &a, auto const &b) {
+        return a.size() == b.size() && (a.empty() || a.cdata() == b.cdata());
+    };
+    if (valid_ && same(surface.faceVertexCounts, counts_) &&
+        same(surface.faceVertexIndices, indices_) &&
+        same(surface.holeIndices, holes_) &&
+        same(surface.creaseIndices, creaseIndices_) &&
+        same(surface.creaseLengths, creaseLengths_) &&
+        same(surface.creaseSharpnesses, creaseSharpnesses_) &&
+        same(surface.cornerIndices, cornerIndices_) &&
+        same(surface.cornerSharpnesses, cornerSharpnesses_) &&
+        surface.subdivisionScheme == scheme_ &&
+        surface.orientation == orientation_ &&
+        surface.interpolateBoundary == interpolateBoundary_ &&
+        surface.faceVaryingLinearInterpolation ==
+            faceVaryingLinearInterpolation_ &&
+        surface.creaseMethod == creaseMethod_ &&
+        surface.triangleSubdivisionRule == triangleSubdivisionRule_)
+        return digest_;
+    counts_ = surface.faceVertexCounts;
+    indices_ = surface.faceVertexIndices;
+    holes_ = surface.holeIndices;
+    creaseIndices_ = surface.creaseIndices;
+    creaseLengths_ = surface.creaseLengths;
+    creaseSharpnesses_ = surface.creaseSharpnesses;
+    cornerIndices_ = surface.cornerIndices;
+    cornerSharpnesses_ = surface.cornerSharpnesses;
+    scheme_ = surface.subdivisionScheme;
+    orientation_ = surface.orientation;
+    interpolateBoundary_ = surface.interpolateBoundary;
+    faceVaryingLinearInterpolation_ =
+        surface.faceVaryingLinearInterpolation;
+    creaseMethod_ = surface.creaseMethod;
+    triangleSubdivisionRule_ = surface.triangleSubdivisionRule;
+    digest_ = UsdGenSubdivisionDigest(surface);
+    valid_ = true;
+    return digest_;
+}
+
 bool UsdGenScatterOp::Bind(UsdGenParamView const &params, UsdGenDiagnostics *diag)
 {
     int const level=params.GetInt(TfToken("subdivisionLevel"),0);
@@ -128,31 +170,27 @@ UsdGenEpoch UsdGenScatterOp::CaptureDigest(UsdGenCaptureContext const &ctx) cons
     UsdGenGraphDesc const *desc = ctx.desc;
     if (desc && ctx.surface < desc->surfaces.size()) {
         auto const &surface = desc->surfaces[ctx.surface];
-        auto array = [&](char const *name, auto const &values) {
+        auto array = [&](char const *name, auto &cache, auto const &values) {
             // Word-at-a-time FNV-1a (opUtil::Digest::MixBytes): one round
             // per 8 bytes instead of one per byte. The epoch values differ
             // from byte mixing, but epochs are only compared for equality
             // within a process.
-            opUtil::Digest digest;
-            digest.MixBytes(values.cdata(),
-                            values.size() * sizeof(*values.cdata()));
-            feed(name, digest.h); feed(name, uint64_t(values.size()));
+            feed(name, cache.Digest(values));
+            feed(name, uint64_t(values.size()));
         };
-        array("restPoints", surface.restPoints);
-        array("faceCounts", surface.faceVertexCounts);
-        array("faceIndices", surface.faceVertexIndices);
-        array("subset", surface.subsetFaces);
+        array("restPoints", restPointsDigest_, surface.restPoints);
+        array("faceCounts", faceCountsDigest_, surface.faceVertexCounts);
+        array("faceIndices", faceIndicesDigest_, surface.faceVertexIndices);
+        array("subset", subsetFacesDigest_, surface.subsetFaces);
         feed("isSubset", surface.isSubset ? 1u : 0u);
-        array("uv", surface.uv);
-        feed("subdivision", UsdGenSubdivisionDigest(surface));
+        array("uv", uvDigest_, surface.uv);
+        feed("subdivision", subdivisionDigest_.Digest(surface));
         // The paint primvar edits no generation, so the multiplier content
         // itself joins the digest: without this a paint stroke would read
         // back the cached pre-stroke roots.
         auto const &mult = desc->surfaces[ctx.surface].densityMultiplier;
         feed("densityMultSize", uint64_t(mult.size()));
-        opUtil::Digest multDigest;
-        multDigest.MixBytes(mult.cdata(), mult.size() * sizeof(float));
-        feed("densityMult", multDigest.h);
+        feed("densityMult", densityMultDigest_.Digest(mult));
     }
 
     return {h, h ^ 0x9E3779B97F4A7C15ull};
