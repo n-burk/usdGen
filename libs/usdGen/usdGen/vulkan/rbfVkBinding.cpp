@@ -108,7 +108,7 @@ struct RbfVkBinding::Native {
         rhsPipeline = VK_NULL_HANDLE, triSolvePipeline = VK_NULL_HANDLE,
         evaluatePipeline = VK_NULL_HANDLE;
     std::shared_ptr<ChargedBuffer> restBuf, posedBuf, matrixBuf, rhsBuf, coefBuf,
-        gramBuf, extentBuf, flagBuf, infoBuf, permBuf, uboBuf;
+        gramBuf, extentBuf, flagBuf, infoBuf, permBuf, uboBuf, normBuf;
     VkDescriptorPool solvePool = VK_NULL_HANDLE, evalPool = VK_NULL_HANDLE;
     VkDescriptorSet extentSet = VK_NULL_HANDLE, gramSet = VK_NULL_HANDLE,
         buildMatrixSet = VK_NULL_HANDLE, luSet = VK_NULL_HANDLE,
@@ -126,7 +126,7 @@ struct RbfVkBinding::Native {
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
-        infoBuf.reset(); permBuf.reset(); uboBuf.reset(); bufferSamples = 0;
+        infoBuf.reset(); permBuf.reset(); uboBuf.reset(); normBuf.reset(); bufferSamples = 0;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -152,6 +152,8 @@ struct RbfVkBinding::Native {
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         if (!mkBuf(VkDeviceSize(count) * 12u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                    host, UsdGenExecutionResourceKind::Scratch, &n->restBuf) ||
+            !mkBuf(VkDeviceSize(count) * 24u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                   host, UsdGenExecutionResourceKind::Scratch, &n->normBuf) ||
             !mkBuf(VkDeviceSize(count) * 12u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                    host, UsdGenExecutionResourceKind::Scratch, &n->posedBuf) ||
             !mkBuf(VkDeviceSize(m) * m * 8u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -637,6 +639,27 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             if (WriteBytes(d, *native.uboBuf, 64, &ubo) != VK_SUCCESS)
                 return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
 
+            // Center the rest samples for the evaluate shader once per bind:
+            // the shader used to reload every float sample and subtract the
+            // center for every CV. Bitwise the subexpression it computed
+            // (double(float) - center); the * invScale stays in-shader so
+            // the driver's FMA contraction keeps its shape and bits.
+            try {
+                std::vector<float> samples(size_t(3) * size_t(n));
+                std::vector<double> centered(size_t(3) * size_t(n));
+                if (ReadBytes(d, *native.restBuf, VkDeviceSize(n) * 12u, samples.data()) != VK_SUCCESS)
+                    return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+                for (int j = 0; j < n; ++j) {
+                    centered[size_t(3 * j)] = double(samples[size_t(3 * j)]) - center_[0];
+                    centered[size_t(3 * j + 1)] = double(samples[size_t(3 * j + 1)]) - center_[1];
+                    centered[size_t(3 * j + 2)] = double(samples[size_t(3 * j + 2)]) - center_[2];
+                }
+                if (WriteBytes(d, *native.normBuf, VkDeviceSize(n) * 24u, centered.data()) != VK_SUCCESS)
+                    return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+            } catch (std::bad_alloc const&) {
+                return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+            }
+
             native.phase = Native::Phase::FactorReady;
             return RbfVkStatus::Ok;
         }
@@ -798,7 +821,7 @@ RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
     VkDescriptorBufferInfo infos[6] = {
         {cvs->buffer(), 0, VkDeviceSize(count) * 12u},
         {out->buffer(), 0, VkDeviceSize(count) * 12u},
-        {native.restBuf->buffer(), 0, VkDeviceSize(sampleCount_) * 12u},
+        {native.normBuf->buffer(), 0, VkDeviceSize(sampleCount_) * 24u},
         {native.coefBuf->buffer(), 0, VkDeviceSize(order_) * 24u},
         {native.uboBuf->buffer(), 0, 64},
         {native.flagBuf->buffer(), 0, 4},
