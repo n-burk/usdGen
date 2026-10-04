@@ -258,8 +258,16 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
             driverRest.assign(surface.restPoints.begin(), surface.restPoints.end());
             driverNow.reserve(surface.points.size());
+            // Affine matrices project with w exactly 1, so TransformAffine
+            // skips the divide with identical results (its xyz matches
+            // Transform term for term; Solve rejects a non-finite pose the
+            // same way under either spelling). Projective layouts keep
+            // Transform.
+            bool const affine = relative[0][3] == 0.0 && relative[1][3] == 0.0 &&
+                relative[2][3] == 0.0 && relative[3][3] == 1.0;
             for (GfVec3f const &point : surface.points)
-                driverNow.push_back(relative.Transform(GfVec3d(point)));
+                driverNow.push_back(affine ? relative.TransformAffine(GfVec3d(point))
+                                           : relative.Transform(GfVec3d(point)));
         } else {
             UsdGenResolvedReferenceValue const &reference = *ctx.resolvedReferences[0];
             driverLabel = "usdGen:guides " + reference.path.GetString();
