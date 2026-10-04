@@ -389,6 +389,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
     SolveRbf(reinterpret_cast<float3 const*>(info.restSamples.data()),
              reinterpret_cast<float3 const*>(info.posedSamples.data()),
              n, info.smoothing, rstate);
+    double const invScale = 1.0 / rstate.scale;
     if (rstate.status != RbfStatus::Code::Ok) {
         DeformSemantic sem;
         switch (rstate.status) {
@@ -496,8 +497,14 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             std::memcpy(data, rstate.coef, coefBytes);
             vkUnmapMemory(d, s->coefBuf->memory());
         }
-        // samplesBuf: HOST_VISIBLE, 3*n floats.
-        VkDeviceSize const samplesBytes = VkDeviceSize(n) * 12u;
+        // samplesBuf: HOST_VISIBLE, 3*n doubles, centered on the host.
+        // The evaluate shader used to reload every float sample and subtract
+        // the center for every CV; the stored doubles are bitwise what that
+        // computed (double(float) - center). The * invScale stays in the
+        // shader deliberately: the driver FMA-contracts x - sn*invScale, and
+        // keeping the expression shape keeps that contraction (and the bits)
+        // identical.
+        VkDeviceSize const samplesBytes = VkDeviceSize(n) * 24u;
         {
             VkBufferCreateInfo bi{};
             bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -508,10 +515,16 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 UsdGenExecutionResourceKind::Scratch, &r);
             if (!s->samplesBuf) { finish(r); return {}; }
+            std::vector<double> norm(size_t(3) * size_t(n));
+            for (int j = 0; j < n; ++j) {
+                norm[size_t(3 * j)] = double(info.restSamples[size_t(3 * j)]) - rstate.center[0];
+                norm[size_t(3 * j + 1)] = double(info.restSamples[size_t(3 * j + 1)]) - rstate.center[1];
+                norm[size_t(3 * j + 2)] = double(info.restSamples[size_t(3 * j + 2)]) - rstate.center[2];
+            }
             void* data = nullptr;
             r = vkMapMemory(d, s->samplesBuf->memory(), 0, samplesBytes, 0, &data);
             if (r != VK_SUCCESS) { finish(r); return {}; }
-            std::memcpy(data, info.restSamples.data(), samplesBytes);
+            std::memcpy(data, norm.data(), size_t(samplesBytes));
             vkUnmapMemory(d, s->samplesBuf->memory());
         }
         // evalUbo: HOST_VISIBLE, 64B.
@@ -529,7 +542,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             e.n_m[0] = n; e.n_m[1] = m;
             e.counts[0] = points; e.counts[1] = 0;
             e.cx = rstate.center[0]; e.cy = rstate.center[1]; e.cz = rstate.center[2];
-            e.invScale = 1.0 / rstate.scale;
+            e.invScale = invScale;
             e.scale = rstate.scale;
             e._pad2 = 0.0;
             void* data = nullptr;
