@@ -403,7 +403,8 @@ int main(int argc, char **argv)
         EmitMetric("cuda_rbf_bind", Median(tBind));
         EmitMetric("cuda_rbf_solve", Median(tSolve));
         EmitMetric("cuda_rbf_evaluate_1m", Median(tEval));
-        std::vector<float3> out(size_t(cvs));
+        std::vector<float3> out;
+        out.resize(size_t(cvs));
         cudaMemcpy(out.data(), dOut, size_t(cvs) * sizeof(float3), cudaMemcpyDeviceToHost);
         uint64_t h = Fnv1a(out.data(), size_t(cvs) * sizeof(float3));
         std::printf("CHECKSUM cuda_rbf_eval=%016llx\n", (unsigned long long)h);
