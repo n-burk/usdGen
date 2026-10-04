@@ -36,8 +36,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <string>
 
 namespace usdGen {
@@ -50,9 +52,77 @@ namespace {
 const TfToken sRbfSamples{"rbfSamples"}, sLockRoots{"lockRoots"}, sMask{"mask"},
     sGuides{"guides"};
 
+// The strands loop overwrites every element, so the result buffer must not
+// pay for zero-fill: std::vector::resize memsets 3 floats per CV (measured
+// 0.17ms at 218k CVs) only to have them overwritten. This buffer resizes
+// without initializing; every read below follows a write of the same triple.
+class UninitFloatBuffer
+{
+public:
+    UninitFloatBuffer() = default;
+    UninitFloatBuffer(UninitFloatBuffer const &other) { assign(other); }
+    UninitFloatBuffer(UninitFloatBuffer &&other) noexcept
+        : data_(other.data_), size_(other.size_), capacity_(other.capacity_)
+    {
+        other.data_ = nullptr;
+        other.size_ = other.capacity_ = 0;
+    }
+    UninitFloatBuffer &operator=(UninitFloatBuffer const &other)
+    {
+        if (this != &other) assign(other);
+        return *this;
+    }
+    UninitFloatBuffer &operator=(UninitFloatBuffer &&other) noexcept
+    {
+        if (this != &other) {
+            std::free(data_);
+            data_ = other.data_;
+            size_ = other.size_;
+            capacity_ = other.capacity_;
+            other.data_ = nullptr;
+            other.size_ = other.capacity_ = 0;
+        }
+        return *this;
+    }
+    ~UninitFloatBuffer() { std::free(data_); }
+    void clear() { size_ = 0; }
+    void resizeUninit(size_t n)
+    {
+        if (n > capacity_) {
+            float *grown =
+                static_cast<float *>(std::realloc(data_, n * sizeof(float)));
+            if (!grown) throw std::bad_alloc();
+            data_ = grown;
+            capacity_ = n;
+        }
+        size_ = n;
+    }
+    size_t size() const { return size_; }
+    float *data() { return data_; }
+    float const *data() const { return data_; }
+    float &operator[](size_t i) { return data_[i]; }
+    float const &operator[](size_t i) const { return data_[i]; }
+
+private:
+    void assign(UninitFloatBuffer const &other)
+    {
+        if (capacity_ < other.size_) {
+            float *grown = static_cast<float *>(
+                std::realloc(data_, other.size_ * sizeof(float)));
+            if (!grown && other.size_) throw std::bad_alloc();
+            data_ = grown;
+            capacity_ = other.size_;
+        }
+        size_ = other.size_;
+        std::memcpy(data_, other.data_, size_ * sizeof(float));
+    }
+    float *data_ = nullptr;
+    size_t size_ = 0, capacity_ = 0;
+};
+
 struct UsdGenDeformCapture final : public UsdGenCapture
 {
-    std::vector<float> result;                    // 3 * totalCvs
+    UninitFloatBuffer result;                     // 3 * totalCvs
     uint64_t upstreamTopologyVersion = 0;
     uint64_t upstreamValueVersion = 0;
     uint32_t upstreamCurves = 0;
@@ -456,9 +526,9 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
         ? p->GetScalarField(sLockRoots, p->GetBool(sLockRoots, true) ? 1.0 : 0.0)
         : UsdGenParamField{1.0};
 
-    cap.result.resize(totalCvs * 3);
+    cap.result.resizeUninit(totalCvs * 3);
     rbf::CubicField const &field = field_;
-    std::vector<float> &result = cap.result;
+    UninitFloatBuffer &result = cap.result;
     // The non-finite refusal checks the stored floats while they are still
     // in registers, instead of re-reading the whole result serially: every
     // stored triple is checked exactly once, so the verdict and the message
