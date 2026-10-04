@@ -471,11 +471,15 @@ int VulkanBindLeg(std::string const &spvDir)
 // Deterministic animated pose k over the rest surface (smooth bend).
 void PoseSurface(UsdGenSurfaceDesc *s, int k)
 {
-    size_t const n = s->restPoints.size();
+    // Read rest through a const reference: s is non-const, so s->restPoints[i]
+    // would take the mutating subscript and detach (deep-copy) the shared
+    // 1.2MB rest buffer on every pose.
+    VtVec3fArray const &rp = s->restPoints;
+    size_t const n = rp.size();
     s->points.resize(n);
     double const t = 0.35 * double(k);
     for (size_t i = 0; i < n; ++i) {
-        GfVec3f const r = s->restPoints[i];
+        GfVec3f const r = rp[i];
         float const bend = float(0.6 * std::sin(0.05 * r[0] + t) * std::cos(0.04 * r[1] - 0.5 * t));
         s->points[i] = GfVec3f(r[0], r[1], r[2] + bend);
     }
