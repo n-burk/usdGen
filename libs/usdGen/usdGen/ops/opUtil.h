@@ -34,13 +34,42 @@ struct Digest
     }
     void Mix(TfToken const &t) { for (char const *p = t.GetText(); *p; ++p) Mix(uint64_t(uint8_t(*p))); }
     void Mix(VtValue const &v) { Mix(uint64_t(v.IsEmpty() ? 0 : v.GetHash())); }
-    /// FNV-1a over a byte range, one round per 8-byte word. Faster than a
-    /// byte loop; the epoch values differ from byte mixing, but epochs are
-    /// only compared for equality within a process.
+    /// FNV-1a over a byte range, one round per 8-byte word. The multiply
+    /// chain is the bottleneck, so groups of four words run as four
+    /// independent lanes (distinct seeds, folded back in order). Faster
+    /// than a serial word loop; the epoch values differ from serial
+    /// mixing, but epochs are only compared for equality within a process.
     void MixBytes(void const *data, size_t bytes)
     {
         auto const *p = static_cast<unsigned char const *>(data);
-        while (bytes >= 8) {
+        size_t words = bytes / 8;
+        if (words >= 4) {
+            uint64_t l0 = 1469598103934665603ULL;
+            uint64_t l1 = l0 ^ 0x9e3779b97f4a7c15ULL;
+            uint64_t l2 = l0 ^ 0xbf58476d1ce4e5b9ULL;
+            uint64_t l3 = l0 ^ 0x94d049bb133111ebULL;
+            size_t const groups = words / 4;
+            for (size_t g = 0; g < groups; ++g) {
+                uint64_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+                std::memcpy(&w0, p + g * 32, sizeof(w0));
+                std::memcpy(&w1, p + g * 32 + 8, sizeof(w1));
+                std::memcpy(&w2, p + g * 32 + 16, sizeof(w2));
+                std::memcpy(&w3, p + g * 32 + 24, sizeof(w3));
+                l0 ^= w0; l0 *= 0x100000001b3ULL;
+                l1 ^= w1; l1 *= 0x100000001b3ULL;
+                l2 ^= w2; l2 *= 0x100000001b3ULL;
+                l3 ^= w3; l3 *= 0x100000001b3ULL;
+            }
+            Mix(l0);
+            Mix(l1);
+            Mix(l2);
+            Mix(l3);
+            size_t const done = groups * 32;
+            p += done;
+            bytes -= done;
+            words -= groups * 4;
+        }
+        while (words-- > 0) {
             uint64_t word = 0;
             std::memcpy(&word, p, sizeof(word));
             Mix(word);
