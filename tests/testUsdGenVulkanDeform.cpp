@@ -541,6 +541,32 @@ int main(int argc, char** argv) {
         CHECK(sem == DeformSemantic::NonFinite);
         std::puts("Case 8b (reject NaN samples): PASS");
     }
+    // 8c: the same coplanar rest twice rejects identically. The first Begin
+    // binds and fails; the second replays the cached bind failure.
+    {
+        std::vector<float> flatSamples = restSamples;
+        for (size_t i = 0; i < 5; ++i) flatSamples[i * 3 + 2] = 0.0f;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            DeformPipeline::BeginInfo info;
+            info.points = pointsBuf;
+            info.curveOffsets = offsetsBuf;
+            info.rootTargets = targetsBuf;
+            info.curveCount = 2;
+            info.pointCount = 6;
+            info.restSamples = flatSamples;
+            info.posedSamples = restSamples;
+            info.sampleCount = 5;
+            info.mask = {1.0f, 1, nullptr, 0};
+            info.enabled = {1, 1, nullptr, 0};
+            info.lockRoots = {0, 1, nullptr, 0};
+
+            DeformSemantic sem = DeformSemantic::Ok;
+            auto c = pipe->Begin(std::move(info), &status, &sem);
+            CHECK(!c && status == VK_ERROR_INITIALIZATION_FAILED);
+            CHECK(sem == DeformSemantic::RankDeficient);
+        }
+        std::puts("Case 8c (repeat coplanar rest rejects twice): PASS");
+    }
 
     std::puts("Vulkan deform pipeline: PASS");
     return 0;

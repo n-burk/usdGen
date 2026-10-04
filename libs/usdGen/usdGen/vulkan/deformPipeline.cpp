@@ -9,7 +9,9 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
+#include <vector>
 
 namespace usdGen::vulkan {
 
@@ -79,6 +81,17 @@ struct DeformPipeline::Native {
     VkDescriptorSetLayout applyLayout = VK_NULL_HANDLE;
     VkPipelineLayout applyPipelineLayout = VK_NULL_HANDLE;
     VkPipeline applyPipeline = VK_NULL_HANDLE;
+    // The rest-only factorization survives poses that keep the same rest
+    // samples and smoothing; a pose then pays only the right-hand side and
+    // the triangular solves. Guarded: Begin may run on several threads.
+    std::mutex factorMutex;
+    struct FactorCache {
+        std::vector<float> rest;
+        double smoothing = 0.0;
+        int n = 0;
+        bool valid = false;
+        RbfFactorization factor;
+    } factorCache;
     ~Native() {
         if (!context) return;
         auto d = context->device();
@@ -384,11 +397,32 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
     // Device-resident topology is validated by the apply shader; only its
     // scalar diagnostic is read back before exposing any output.
 
-    // CPU solve.
+    // CPU solve, with the factorization cached while rest and smoothing
+    // are unchanged (a bitwise hit replays exactly what a rebind would
+    // compute, including bind-phase failures).
     RbfState rstate;
-    SolveRbf(reinterpret_cast<float3 const*>(info.restSamples.data()),
-             reinterpret_cast<float3 const*>(info.posedSamples.data()),
-             n, info.smoothing, rstate);
+    {
+        float3 const* rest = reinterpret_cast<float3 const*>(info.restSamples.data());
+        float3 const* posed = reinterpret_cast<float3 const*>(info.posedSamples.data());
+        std::lock_guard<std::mutex> lock(native_->factorMutex);
+        auto& cache = native_->factorCache;
+        size_t const restBytes = info.restSamples.size() * sizeof(float);
+        bool const hit = cache.valid && cache.n == n &&
+            cache.smoothing == info.smoothing &&
+            cache.rest.size() == info.restSamples.size() &&
+            std::memcmp(cache.rest.data(), info.restSamples.data(), restBytes) == 0;
+        if (!hit) {
+            cache.rest = info.restSamples;
+            cache.n = n;
+            cache.smoothing = info.smoothing;
+            BindRbf(rest, n, info.smoothing, cache.factor);
+            cache.valid = true;
+        }
+        if (cache.factor.status != RbfStatus::Code::Ok)
+            rstate.status = cache.factor.status;
+        else
+            SolveRbfPosed(cache.factor, rest, posed, rstate);
+    }
     double const invScale = 1.0 / rstate.scale;
     if (rstate.status != RbfStatus::Code::Ok) {
         DeformSemantic sem;
