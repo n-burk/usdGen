@@ -108,7 +108,7 @@ struct RbfVkBinding::Native {
         rhsPipeline = VK_NULL_HANDLE, triSolvePipeline = VK_NULL_HANDLE,
         evaluatePipeline = VK_NULL_HANDLE;
     std::shared_ptr<ChargedBuffer> restBuf, posedBuf, matrixBuf, rhsBuf, coefBuf,
-        gramBuf, extentBuf, flagBuf, infoBuf, permBuf, uboBuf, normBuf;
+        gramBuf, extentBuf, flagBuf, infoBuf, permBuf, uboBuf, normBuf, coefStagingBuf;
     VkDescriptorPool solvePool = VK_NULL_HANDLE, evalPool = VK_NULL_HANDLE;
     VkDescriptorSet extentSet = VK_NULL_HANDLE, gramSet = VK_NULL_HANDLE,
         buildMatrixSet = VK_NULL_HANDLE, luSet = VK_NULL_HANDLE,
@@ -126,7 +126,8 @@ struct RbfVkBinding::Native {
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
-        infoBuf.reset(); permBuf.reset(); uboBuf.reset(); normBuf.reset(); bufferSamples = 0;
+        infoBuf.reset(); permBuf.reset(); uboBuf.reset(); normBuf.reset();
+        coefStagingBuf.reset(); bufferSamples = 0;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -157,12 +158,14 @@ struct RbfVkBinding::Native {
             !mkBuf(VkDeviceSize(count) * 12u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                    host, UsdGenExecutionResourceKind::Scratch, &n->posedBuf) ||
             !mkBuf(VkDeviceSize(m) * m * 8u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &n->matrixBuf) ||
+                   host, UsdGenExecutionResourceKind::Active, &n->matrixBuf) ||
             !mkBuf(VkDeviceSize(m) * 24u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &n->rhsBuf) ||
+                   host, UsdGenExecutionResourceKind::Active, &n->rhsBuf) ||
             !mkBuf(VkDeviceSize(m) * 24u,
                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &n->coefBuf) ||
+            !mkBuf(VkDeviceSize(m) * 24u, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                   host, UsdGenExecutionResourceKind::Scratch, &n->coefStagingBuf) ||
             !mkBuf(128u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                    host, UsdGenExecutionResourceKind::Scratch, &n->gramBuf) ||
             !mkBuf(24u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -172,7 +175,7 @@ struct RbfVkBinding::Native {
             !mkBuf(4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                    host, UsdGenExecutionResourceKind::Scratch, &n->infoBuf) ||
             !mkBuf(VkDeviceSize(m) * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &n->permBuf) ||
+                   host, UsdGenExecutionResourceKind::Active, &n->permBuf) ||
             !mkBuf(64u, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                    host, UsdGenExecutionResourceKind::Scratch, &n->uboBuf)) {
             ResetBuffers();
@@ -675,6 +678,16 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
                 return fail(RbfVkStatus::RankDeficient, "RBF augmented LU is singular (including coplanar affine support)");
             if (info < 0)
                 return fail(RbfVkStatus::SolverError, "RBF LU invalid argument");
+            // Identity solved state, host side: Evaluate copies the staging
+            // buffer over coefBuf on every dispatch, so a bind without a
+            // solve must stage zeros just as the device zeroes coefBuf.
+            try {
+                std::vector<double> zeros(size_t(3) * size_t(m), 0.0);
+                if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(m) * 24u, zeros.data()) != VK_SUCCESS)
+                    return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+            } catch (std::bad_alloc const&) {
+                return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+            }
             sampleCount_ = n;
             order_ = m;
             solved_ = true;
@@ -686,6 +699,37 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
         if (flag)
             return fail(RbfVkStatus::NonFiniteInput, "RBF current samples contain non-finite values");
+        // Host triangular solve in exact rbfVkTriSolve.comp order (forward
+        // per column, then back), so the staged coefficients are bitwise
+        // what the device shader wrote.
+        try {
+            std::vector<double> lu(size_t(m) * size_t(m));
+            std::vector<double> rhs(size_t(3) * size_t(m));
+            std::vector<int> perm;
+            perm.resize(size_t(m));
+            std::vector<double> coef(size_t(3) * size_t(m));
+            if (ReadBytes(d, *native.matrixBuf, VkDeviceSize(m) * size_t(m) * 8u, lu.data()) != VK_SUCCESS ||
+                ReadBytes(d, *native.rhsBuf, VkDeviceSize(m) * 24u, rhs.data()) != VK_SUCCESS ||
+                ReadBytes(d, *native.permBuf, VkDeviceSize(m) * 4u, perm.data()) != VK_SUCCESS)
+                return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+            for (int k = 0; k < 3; ++k) {
+                size_t const base = size_t(k) * size_t(m);
+                for (int i = 0; i < m; ++i) {
+                    double s = rhs[base + size_t(perm[i])];
+                    for (int j = 0; j < i; ++j) s -= lu[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
+                    coef[base + size_t(i)] = s;
+                }
+                for (int i = m - 1; i >= 0; --i) {
+                    double s = coef[base + size_t(i)];
+                    for (int j = i + 1; j < m; ++j) s -= lu[size_t(i) * size_t(m) + size_t(j)] * coef[base + size_t(j)];
+                    coef[base + size_t(i)] = s / lu[size_t(i) * size_t(m) + size_t(i)];
+                }
+            }
+            if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(m) * 24u, coef.data()) != VK_SUCCESS)
+                return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+        } catch (std::bad_alloc const&) {
+            return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
+        }
         solved_ = true;
         native.phase = Native::Phase::Idle;
         return RbfVkStatus::Ok;
@@ -725,6 +769,9 @@ RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
     auto d = native.context->device();
     if (WriteBytes(d, *native.posedBuf, VkDeviceSize(n) * 12u, posed) != VK_SUCCESS)
         return fail(RbfVkStatus::DeviceError, "RBF current sample copy failed");
+    // The submit builds only the RHS on-device; the triangular solve runs
+    // on the host in PollSolve (3 GPU threads of serial O(m^2) work take
+    // ~20ms at m=404, the same loop on the CPU takes well under one).
     VkResult r = Submit(native.context, native.solveCommands, native.solveFence, native.solvePending,
                          [&](VkCommandBuffer cmd) {
         vkCmdFillBuffer(cmd, native.flagBuf->buffer(), 0, 4, 0u);
@@ -733,11 +780,6 @@ RbfVkStatus RbfVkBinding::BeginSolve(float const* posed, int posedCount,
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
             native.rhsPipelineLayout, 0, 1, &native.rhsSet, 0, nullptr);
         vkCmdDispatch(cmd, Groups(uint32_t(n)), 1, 1);
-        BeforeBarrier(cmd); // RHS writes -> triangular solve reads
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.triSolvePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            native.triSolvePipelineLayout, 0, 1, &native.triSolveSet, 0, nullptr);
-        vkCmdDispatch(cmd, 1, 1, 1);
         AfterBarrier(cmd);
         return VK_SUCCESS;
     }, beforeSubmit);
@@ -857,6 +899,22 @@ RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
         // evaluation is pending; stacked submissions accumulate into it.
         if (!evalPending_)
             vkCmdFillBuffer(cmd, native.flagBuf->buffer(), 0, 4, 0u);
+        // Host-solved coefficients into device-local coef (replaces the
+        // retired device triSolve write).
+        VkMemoryBarrier stageVisible{};
+        stageVisible.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        stageVisible.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        stageVisible.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &stageVisible, 0, nullptr, 0, nullptr);
+        VkBufferCopy coefCopy{0, 0, VkDeviceSize(order_) * 24u};
+        vkCmdCopyBuffer(cmd, native.coefStagingBuf->buffer(), native.coefBuf->buffer(), 1, &coefCopy);
+        VkMemoryBarrier coefReady{};
+        coefReady.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        coefReady.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        coefReady.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &coefReady, 0, nullptr, 0, nullptr);
         BeforeBarrier(cmd);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.evaluatePipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
