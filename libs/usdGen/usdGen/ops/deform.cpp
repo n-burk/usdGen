@@ -41,6 +41,9 @@
 
 namespace usdGen {
 
+static_assert(sizeof(GfVec3d) == 3 * sizeof(double),
+              "the selection cache memcmps rest drivers bitwise");
+
 namespace {
 
 const TfToken sRbfSamples{"rbfSamples"}, sLockRoots{"lockRoots"}, sMask{"mask"},
@@ -307,8 +310,21 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
         GfRange3d extent;
         for (GfVec3d const &point : driverRest) extent.UnionWith(point);
         double const size = extent.IsEmpty() ? 0.0 : extent.GetSize().GetLength();
-        std::vector<size_t> const chosen =
-            rbf::SelectSamples(driverRest, size_t(budget), std::max(1e-12, size * 1e-7));
+        double const epsilon = std::max(1e-12, size * 1e-7);
+        // Bitwise compare (not operator==): identical NaN bits still hit.
+        bool const restUnchanged = selectionValid_ && selectionBudget_ == size_t(budget) &&
+            selectRest_.size() == driverRest.size() &&
+            std::memcmp(selectRest_.data(), driverRest.data(),
+                        driverRest.size() * sizeof(GfVec3d)) == 0;
+        std::vector<size_t> const chosen = restUnchanged
+            ? selection_
+            : rbf::SelectSamples(driverRest, size_t(budget), epsilon);
+        if (!restUnchanged) {
+            selectRest_ = driverRest;
+            selection_ = chosen;
+            selectionBudget_ = size_t(budget);
+            selectionValid_ = true;
+        }
         if (chosen.size() < 4)
             return fail(driverLabel + " has " +
                         std::to_string(chosen.size()) +

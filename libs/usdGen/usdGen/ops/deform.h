@@ -60,6 +60,14 @@ private:
    // The factored system survives poses that keep the same rest samples.
    rbf::CubicField field_;
    std::vector<GfVec3d> boundRest_;
+   // The farthest-point selection is a pure function of the rest drivers, so
+   // it is reused while they are bitwise unchanged (the steady-state pose
+   // path); any rest edit re-selects. selectRest_ holds the drivers the
+   // cached selection was made from.
+   std::vector<GfVec3d> selectRest_;
+   std::vector<size_t> selection_;
+   size_t selectionBudget_ = 0;
+   bool selectionValid_ = false;
 };
 
 }  // namespace usdGen
