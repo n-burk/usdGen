@@ -86,8 +86,7 @@ void ParallelFor(UsdGenWorkDispatcher *dispatcher, size_t count, F const &body)
 
 void MixArray(opUtil::Digest *d, void const *data, size_t bytes)
 {
-    auto const *p = static_cast<unsigned char const *>(data);
-    for (size_t i = 0; i < bytes; ++i) d->Mix(uint64_t(p[i]));
+    d->MixBytes(data, bytes);
 }
 
 UsdGenCurveSetDesc const *FindCurves(UsdGenGraphDesc const *desc, SdfPath const &path)

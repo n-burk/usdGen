@@ -34,6 +34,21 @@ struct Digest
     }
     void Mix(TfToken const &t) { for (char const *p = t.GetText(); *p; ++p) Mix(uint64_t(uint8_t(*p))); }
     void Mix(VtValue const &v) { Mix(uint64_t(v.IsEmpty() ? 0 : v.GetHash())); }
+    /// FNV-1a over a byte range, one round per 8-byte word. Faster than a
+    /// byte loop; the epoch values differ from byte mixing, but epochs are
+    /// only compared for equality within a process.
+    void MixBytes(void const *data, size_t bytes)
+    {
+        auto const *p = static_cast<unsigned char const *>(data);
+        while (bytes >= 8) {
+            uint64_t word = 0;
+            std::memcpy(&word, p, sizeof(word));
+            Mix(word);
+            p += 8;
+            bytes -= 8;
+        }
+        for (size_t i = 0; i < bytes; ++i) Mix(uint64_t(p[i]));
+    }
     UsdGenEpoch Epoch(uint64_t salt) const { return {h, h ^ salt}; }
 };
 
