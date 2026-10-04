@@ -31,8 +31,6 @@ namespace {
 constexpr uint32_t kLocalSize = 256;
 constexpr uint32_t kMaxEvalStack = 16;
 constexpr uint64_t kFenceTimeoutNs = 10000000000ull;
-constexpr uint32_t kPlusInfBits = 0x7F800000u;
-constexpr uint32_t kMinusInfBits = 0xFF800000u;
 
 // Shared 64-byte solve UBO: identical declaration in all seven solve/eval
 // shaders (each reads its subset at these offsets).
@@ -87,6 +85,32 @@ VkResult WriteBytes(VkDevice device, ChargedBuffer const& buffer,
     return VK_SUCCESS;
 }
 
+// HostExtent — exact host port of rbfVkExtent.comp: min/max over the
+// finite rest samples (non-finite samples set the flag and are skipped,
+// as the shader's early return does). Min/max over floats involves no
+// rounding, so the host fold matches the device atomics bit for bit,
+// except for mixed-sign zeros, which cannot observably diverge: an
+// all-zero extent is rank-deficient either way, and adding +-0 to a
+// nonzero bound is exact. (The gram/matrix/LU stay on the device: the
+// software rasterizer's sqrt/FMA codegen differs from the host
+// compiler's by 1 ULP, so a host factorization cannot be bit-identical.)
+void HostExtent(float const* rest, int n, float e[6], int* flag) {
+    e[0] = e[1] = e[2] = HUGE_VALF;
+    e[3] = e[4] = e[5] = -HUGE_VALF;
+    *flag = 0;
+    for (int i = 0; i < n; ++i) {
+        float const x = rest[size_t(3) * size_t(i)];
+        float const y = rest[size_t(3) * size_t(i) + 1];
+        float const z = rest[size_t(3) * size_t(i) + 2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            *flag = 1;
+            continue;
+        }
+        e[0] = std::min(e[0], x); e[1] = std::min(e[1], y); e[2] = std::min(e[2], z);
+        e[3] = std::max(e[3], x); e[4] = std::max(e[4], y); e[5] = std::max(e[5], z);
+    }
+}
+
 } // namespace
 
 struct RbfVkBinding::Native {
@@ -138,6 +162,11 @@ struct RbfVkBinding::Native {
     // PollSolve, so the Begin/Poll pending protocol is unchanged.
     std::vector<float> hostPosed;
     bool hostPosePending = false;
+    // A staged host extent: BeginBind stashes nothing beyond the rest
+    // samples and runs the admission hook, and PollSolve runs the extent
+    // on the host with no fence. solvePending stays the pending flag, so
+    // every refusal and HasPendingSolve is unchanged.
+    bool hostBindStaged = false;
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
@@ -146,6 +175,7 @@ struct RbfVkBinding::Native {
         cachedLu.clear(); cachedPerm.clear(); cachedRest.clear();
         cachedM = 0; cachedLuValid = false;
         hostPosed.clear(); hostPosePending = false;
+        hostBindStaged = false;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -524,6 +554,7 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     native_->phase = Native::Phase::Idle;
     native_->cachedLuValid = false;
     native_->hostPosePending = false;
+    native_->hostBindStaged = false;
     if (!rest || n < 4 || n > kRbfVkMaxSamples || !std::isfinite(smoothing) || smoothing < 0.0)
         return fail(RbfVkStatus::InvalidArgument,
                     "RBF requires 4+ samples and finite non-negative smoothing");
@@ -571,22 +602,28 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
         if (WriteBytes(d, *native.uboBuf, 64, &ubo) != VK_SUCCESS)
             return fail(RbfVkStatus::DeviceError, "RBF extent query failed");
     }
-    VkResult r = Submit(native.context, native.solveCommands, native.solveFence, native.solvePending,
-                         [&](VkCommandBuffer cmd) {
-        vkCmdFillBuffer(cmd, native.extentBuf->buffer(), 0, 12, kPlusInfBits);
-        vkCmdFillBuffer(cmd, native.extentBuf->buffer(), 12, 12, kMinusInfBits);
-        vkCmdFillBuffer(cmd, native.flagBuf->buffer(), 0, 4, 0u);
-        BeforeBarrier(cmd);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, native.extentPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            native.extentPipelineLayout, 0, 1, &native.extentSet, 0, nullptr);
-        vkCmdDispatch(cmd, Groups(uint32_t(n)), 1, 1);
-        AfterBarrier(cmd);
-        return VK_SUCCESS;
-    }, beforeSubmit);
-    native.lastResult = r;
-    if (r != VK_SUCCESS)
-        return fail(RbfVkStatus::DeviceError, "RBF extent query failed");
+    // The extent runs on the host (exact min/max port, no submits): the
+    // admission hook keeps the Submit mapping (false ->
+    // OUT_OF_DEVICE_MEMORY, throw -> UNKNOWN), and the extent itself waits
+    // for PollSolve, so the Begin/Poll pending protocol (and error timing)
+    // is unchanged. The extent pipeline, buffers, and SPV API stay in
+    // place for compatibility.
+    if (beforeSubmit) {
+        bool admitted = false;
+        VkResult hr = VK_SUCCESS;
+        try {
+            admitted = beforeSubmit();
+        } catch (...) {
+            hr = VK_ERROR_UNKNOWN;
+        }
+        if (!admitted && hr == VK_SUCCESS) hr = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        native.lastResult = hr;
+        if (hr != VK_SUCCESS)
+            return fail(RbfVkStatus::DeviceError, "RBF extent query failed");
+    }
+    native.hostBindStaged = true;
+    native.solvePending = true;
+    native.lastResult = VK_SUCCESS;
     native.phase = Native::Phase::Extent;
     return RbfVkStatus::Ok;
 }
@@ -697,19 +734,26 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
         if (consumed == RbfVkStatus::DeviceError) return native.lastResult = VK_ERROR_MEMORY_MAP_FAILED;
         return VK_SUCCESS;
     }
-    VkResult r = vkGetFenceStatus(d, native.solveFence);
-    if (r != VK_SUCCESS) { native.lastResult = r; return r; }
-    native.solvePending = false;
-    r = vkResetCommandPool(d, native.solveCommands, 0);
-    if (r != VK_SUCCESS) { native.lastResult = r; return r; }
+    // A host-staged bind phase was never submitted, so there is no fence
+    // to prove; consumed once, like the fenced path (which clears
+    // solvePending before consuming): a retry needs a new Begin.
+    bool const hostStaged = native.hostBindStaged;
+    if (hostStaged) {
+        native.solvePending = false;
+        native.hostBindStaged = false;
+    } else {
+        VkResult r = vkGetFenceStatus(d, native.solveFence);
+        if (r != VK_SUCCESS) { native.lastResult = r; return r; }
+        native.solvePending = false;
+        r = vkResetCommandPool(d, native.solveCommands, 0);
+        if (r != VK_SUCCESS) { native.lastResult = r; return r; }
+    }
     int const n = native.solveUbo.n, m = native.solveUbo.m;
     auto consume = [&]() -> RbfVkStatus {
         if (native.phase == Native::Phase::Extent) {
             float e[6] = {};
             int flag = 0;
-            if (ReadBytes(d, *native.extentBuf, 24, e) != VK_SUCCESS ||
-                ReadBytes(d, *native.flagBuf, 4, &flag) != VK_SUCCESS)
-                return fail(RbfVkStatus::DeviceError, "RBF extent query failed");
+            HostExtent(native.cachedRest.data(), n, e, &flag);
             if (flag)
                 return fail(RbfVkStatus::NonFiniteInput, "RBF rest samples contain non-finite values");
             center_[0] = double(e[0]) + (double(e[3]) - double(e[0])) * .5;
@@ -739,8 +783,11 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             try {
                 std::vector<float> samples(size_t(3) * size_t(n));
                 std::vector<double> centered(size_t(3) * size_t(n));
-                if (ReadBytes(d, *native.restBuf, VkDeviceSize(n) * 12u, samples.data()) != VK_SUCCESS)
-                    return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+                // cachedRest holds the same bytes restBuf does (no writer
+                // touches restBuf after BeginBind), so the host extent
+                // skips the readback; a failed copy reports the same
+                // status.
+                samples = native.cachedRest;
                 for (int j = 0; j < n; ++j) {
                     centered[size_t(3 * j)] = double(samples[size_t(3 * j)]) - center_[0];
                     centered[size_t(3 * j + 1)] = double(samples[size_t(3 * j + 1)]) - center_[1];
@@ -812,10 +859,15 @@ RbfVkStatus RbfVkBinding::Bind(float const* rest, int n, double smoothing) {
     auto status = BeginBind(rest, n, smoothing);
     if (status != RbfVkStatus::Ok) return status;
     for (int phase = 0; phase < 2; ++phase) {
-        auto r = vkWaitForFences(native_->context->device(), 1, &native_->solveFence,
-                                VK_TRUE, kFenceTimeoutNs);
-        if (r != VK_SUCCESS) return fail(RbfVkStatus::DeviceError, "RBF bind completion query failed");
-        r = PollSolve(&status);
+        // A host-staged bind phase was never submitted, so there is no
+        // fence to wait on (like the host pose in Solve).
+        if (!native_->hostBindStaged) {
+            auto w = vkWaitForFences(native_->context->device(), 1, &native_->solveFence,
+                                     VK_TRUE, kFenceTimeoutNs);
+            if (w != VK_SUCCESS)
+                return fail(RbfVkStatus::DeviceError, "RBF bind completion query failed");
+        }
+        auto r = PollSolve(&status);
         if (r != VK_SUCCESS || status != RbfVkStatus::Ok) return status == RbfVkStatus::Ok ? RbfVkStatus::DeviceError : status;
         if (phase == 0) { status = AdvanceBind(); if (status != RbfVkStatus::Ok) return status; }
     }

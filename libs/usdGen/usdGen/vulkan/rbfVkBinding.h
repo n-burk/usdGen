@@ -84,11 +84,14 @@ public:
     using BeforeSubmit = std::function<bool()>;
     // Owner-driven production path: one submit per Begin/Advance and Poll
     // consumes only an exact fence proof. No Vulkan wait occurs here.
-    // BeginSolve is the exception: it stages the pose and runs the
-    // admission hook, and the following PollSolve runs the solve on the
-    // host (bitwise the retired rhs + triSolve submits) with no fence.
-    // The pending protocol is unchanged: a staged pose reports pending
-    // until PollSolve consumes it, exactly like a fenced submit.
+    // BeginSolve is staged, not submitted: it stashes the pose and runs
+    // the admission hook, and the following PollSolve runs the solve on
+    // the host (bitwise the retired rhs + triSolve submits) with no fence.
+    // BeginBind is likewise staged: PollSolve runs the extent on the host
+    // (exact min/max port of the retired extent submit) with no fence,
+    // while AdvanceBind still submits the gram/matrix/LU. The pending
+    // protocol is unchanged: a staged phase reports pending until
+    // PollSolve consumes it, exactly like a fenced submit.
     RbfVkStatus BeginBind(float const*, int, double, BeforeSubmit = {});
     RbfVkStatus AdvanceBind(BeforeSubmit = {});
     RbfVkStatus BeginSolve(float const*, int, BeforeSubmit = {});
@@ -97,9 +100,10 @@ public:
     bool HasPendingSolve() const noexcept;
     VkResult lastResult() const noexcept;
 
-    // Uploads rest samples, runs extent/gram/matrix/LU on the device, and
-    // establishes the identity (zero-coefficient) solved state. Mirrors
-    // CudaRbfBinding::Bind, including the n<4 InvalidArgument result.
+    // Uploads rest samples, runs the extent on the host and the
+    // gram/matrix/LU on the device, and establishes the identity
+    // (zero-coefficient) solved state. Mirrors CudaRbfBinding::Bind,
+    // including the n<4 InvalidArgument result.
     RbfVkStatus Bind(float const* restSamples, int sampleCount, double smoothing);
 
     // Uploads posed samples, builds the RHS and triangular-solves on the
