@@ -92,7 +92,7 @@ private:
     cusolverDnHandle_t solver_ = nullptr;
     cudaEvent_t stateReady_ = nullptr, evalReady_ = nullptr; // cross-stream state/output ordering
     DeviceBuffer<float3> rest_, current_;
-    DeviceBuffer<double> matrix_, work_, coefficients_;
+    DeviceBuffer<double> matrix_, work_, coefficients_, normSamples_;
     DeviceBuffer<double> gram_;
     DeviceBuffer<int> pivots_, info_, flags_, evalFlags_;
     std::unique_ptr<FreshState> fresh_, acceptedFresh_, freshSolve_, freshEval_;

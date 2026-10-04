@@ -90,14 +90,22 @@ __global__ void rhsKernel(const float3* rest, const float3* current, double* rhs
     rhs[i]=((double)b.x-a.x)*invScale; rhs[i+m]=((double)b.y-a.y)*invScale; rhs[i+2*m]=((double)b.z-a.z)*invScale;
 }
 __global__ void zeroTail(double* rhs, int n, int m) { int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<4) rhs[n+i]=rhs[m+n+i]=rhs[2*m+n+i]=0.0; }
-__global__ void evalKernel(const float3* cvs, float3* out, int c, const float3* samples, const double* coef, int n, int m, double cx, double cy, double cz, double invScale, double scale, int* flags) {
+__global__ void normalizeSamples(const float3* p, double* sn, int n, double cx, double cy, double cz, double invScale) {
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
+    float3 s=p[i];
+    sn[i]=(s.x-cx)*invScale; sn[n+i]=(s.y-cy)*invScale; sn[2*n+i]=(s.z-cz)*invScale;
+}
+__global__ void evalKernel(const float3* cvs, float3* out, int c, const double* sn, const double* coef, int n, int m, double cx, double cy, double cz, double invScale, double scale, int* flags) {
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=c) return; float3 p=cvs[i];
     if(!isfinite(p.x)||!isfinite(p.y)||!isfinite(p.z)){mark(flags,1);return;}
     double x=(p.x-cx)*invScale,y=(p.y-cy)*invScale,z=(p.z-cz)*invScale;
     double ox=x+coef[n]+coef[n+1]*x+coef[n+2]*y+coef[n+3]*z;
     double oy=y+coef[m+n]+coef[m+n+1]*x+coef[m+n+2]*y+coef[m+n+3]*z;
     double oz=z+coef[2*m+n]+coef[2*m+n+1]*x+coef[2*m+n+2]*y+coef[2*m+n+3]*z;
-    for(int j=0;j<n;++j){ float3 s=samples[j]; double dx=x-(s.x-cx)*invScale,dy=y-(s.y-cy)*invScale,dz=z-(s.z-cz)*invScale; double r=sqrt(dx*dx+dy*dy+dz*dz); r*=r*r; ox+=coef[j]*r;oy+=coef[m+j]*r;oz+=coef[2*m+j]*r; }
+    // sn holds (sample-center)*invScale per axis (normalizeSamples, once per
+    // bind): the same doubles the inline normalization computed, so every
+    // iteration below is bitwise what it was, minus 3 converts + 9 flops.
+    for(int j=0;j<n;++j){ double dx=x-sn[j],dy=y-sn[n+j],dz=z-sn[2*n+j]; double r=sqrt(dx*dx+dy*dy+dz*dz); r*=r*r; ox+=coef[j]*r;oy+=coef[m+j]*r;oz+=coef[2*m+j]*r; }
     out[i]=make_float3((float)(ox*scale+cx),(float)(oy*scale+cy),(float)(oz*scale+cz));
 }
 inline bool ok(cudaError_t e) { return e==cudaSuccess; }
@@ -142,7 +150,7 @@ struct CudaRbfBinding::FreshState {
     enum class Phase { Extent, ExtentReady, Rank, RankReady, Lu, SolveInput,
                        SolveInputReady, Solve, Evaluate, Complete };
     DeviceBuffer<float3> rest, current;
-    DeviceBuffer<double> matrix, work, coefficients, gram;
+    DeviceBuffer<double> matrix, work, coefficients, gram, norm;
     DeviceBuffer<int> pivots, info, flags;
     DeviceBuffer<float> extents;
     cusolverDnHandle_t solver = nullptr;
@@ -163,7 +171,7 @@ struct CudaRbfBinding::FreshState {
         if (got && old != device) cudaSetDevice(old);
     }
     void abandon() noexcept {
-        rest.quarantine(); current.quarantine(); matrix.quarantine(); work.quarantine(); coefficients.quarantine(); gram.quarantine();
+        rest.quarantine(); current.quarantine(); matrix.quarantine(); work.quarantine(); coefficients.quarantine(); gram.quarantine(); norm.quarantine();
         pivots.quarantine(); info.quarantine(); flags.quarantine(); extents.quarantine();
         solver = nullptr; host = nullptr; hostPermit.Abandon();
     }
@@ -216,7 +224,7 @@ RbfStatus CudaRbfBinding::BeginFreshBind(DeviceView<const float3> samples, doubl
     if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&fresh->host), sizeof(*fresh->host), cudaHostAllocDefault) != cudaSuccess)
         return fail(RbfStatus::CudaError, "fresh RBF proof packet allocation failed");
     fresh->hostPermit = std::move(*permit);
-    if (!ok(fresh->rest.reset(fresh->n, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->matrix.reset(size_t(fresh->m)*fresh->m, reservation, UsdGenExecutionResourceKind::Cache)) ||
+    if (!ok(fresh->rest.reset(fresh->n, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->norm.reset(3*size_t(fresh->n), reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->matrix.reset(size_t(fresh->m)*fresh->m, reservation, UsdGenExecutionResourceKind::Cache)) ||
         !ok(fresh->coefficients.reset(size_t(fresh->m)*3, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->pivots.reset(fresh->m, reservation, UsdGenExecutionResourceKind::Cache)) ||
         !ok(fresh->info.reset(1, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->flags.reset(1, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->gram.reset(16, reservation, UsdGenExecutionResourceKind::Cache)) ||
         !ok(fresh->extents.reset(6, reservation, UsdGenExecutionResourceKind::Cache)) || cusolverDnCreate(&fresh->solver) != CUSOLVER_STATUS_SUCCESS ||
@@ -257,6 +265,7 @@ RbfStatus CudaRbfBinding::BeginFreshBindLu(cudaStream_t stream) {
     if (!fresh_ || fresh_->phase != FreshState::Phase::RankReady || HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF rank not committed");
     auto& f=*fresh_; int d=-1; if (validateFreshPointer(nullptr,0,stream,&d)!=cudaSuccess || d!=f.device) return fail(RbfStatus::InvalidArgument,"fresh RBF stream invalid");
     f.unproven=true; f.phase=FreshState::Phase::Lu;
+    normalizeSamples<<<(f.n+255)/256,256,0,stream>>>(f.rest.data(),f.norm.data(),f.n,f.center[0],f.center[1],f.center[2],1./f.scale);
     buildMatrix<<<(f.m*f.m+255)/256,256,0,stream>>>(f.rest.data(),f.matrix.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.smoothing,f.flags.data());
     if (cudaGetLastError()!=cudaSuccess || cusolverDnSetStream(f.solver,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(f.solver,f.m,f.m,f.matrix.data(),f.m,f.work.data(),f.pivots.data(),f.info.data())!=CUSOLVER_STATUS_SUCCESS || !ok(cudaMemsetAsync(f.coefficients.data(),0,f.coefficients.size()*sizeof(double),stream)) || !ok(cudaMemcpyAsync(&f.host->info,f.info.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::SolverError,"fresh RBF LU submit failed"); }
     return RbfStatus::Ok;
@@ -416,7 +425,7 @@ RbfStatus CudaRbfBinding::BeginFreshEvaluate(DeviceView<const float3> cvs, Devic
     auto& f=*acceptedFresh_;
     freshEval_=std::move(packet); auto& e=*freshEval_;
     if (!ok(cudaMemsetAsync(f.flags.data(),0,sizeof(int),stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation status reset failed"); }
-    evalKernel<<<(cvs.size+255)/256,256,0,stream>>>(cvs.data,output.data,(int)cvs.size,f.rest.data(),f.coefficients.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.scale,f.flags.data());
+    evalKernel<<<(cvs.size+255)/256,256,0,stream>>>(cvs.data,output.data,(int)cvs.size,f.norm.data(),f.coefficients.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.scale,f.flags.data());
     if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(&e.host->flag,f.flags.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation submit failed"); }
     if (failFreshEvaluateAfterSubmit.exchange(false, std::memory_order_acq_rel)) { e.failed=true; return fail(RbfStatus::CudaError,"forced fresh RBF evaluation post-submit failure"); }
     return RbfStatus::Ok;
@@ -450,7 +459,7 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if (!stateReady_ && !ok(cudaEventCreateWithFlags(&stateReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF state event creation failed");
     if (!evalReady_ && !ok(cudaEventCreateWithFlags(&evalReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF evaluation event creation failed");
     if (!solver_ && cusolverDnCreate(&solver_) != CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER create failed");
-    if (!ok(rest_.reset(n)) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(info_.reset(1)) || !ok(flags_.reset(1)) || !ok(evalFlags_.reset(1)) || !ok(work_.reset(size_t(m)*m)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
+    if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(info_.reset(1)) || !ok(flags_.reset(1)) || !ok(evalFlags_.reset(1)) || !ok(work_.reset(size_t(m)*m)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
     if (!ok(cudaMemcpyAsync(rest_.data(),samples.data,n*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF rest copy failed");
     DeviceBuffer<float> extents; if(!ok(extents.reset(6))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
     initExtent<<<1,1,0,stream>>>(extents.data(),flags_.data()); extentKernel<<<32,128,0,stream>>>(rest_.data(),n,extents.data(),flags_.data());
@@ -459,6 +468,8 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if(flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
     center_[0]=(double)e[0] + ((double)e[3]-(double)e[0])*.5; center_[1]=(double)e[1] + ((double)e[4]-(double)e[1])*.5; center_[2]=(double)e[2] + ((double)e[5]-(double)e[2])*.5; scale_=std::max((double)e[3]-e[0],std::max((double)e[4]-e[1],(double)e[5]-e[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
+    normalizeSamples<<<(n+255)/256,256,0,stream>>>(rest_.data(),normSamples_.data(),n,center_[0],center_[1],center_[2],1.0/scale_);
+    if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF sample normalization failed");
     if(!ok(cudaMemsetAsync(gram_.data(),0,16*sizeof(double),stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic reset failed");
     polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),center_[0],center_[1],center_[2],1.0/scale_);
     double gram[16]; if(!ok(cudaMemcpyAsync(gram,gram_.data(),sizeof(gram),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic query failed");
@@ -488,7 +499,7 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
 RbfStatus CudaRbfBinding::Evaluate(DeviceView<const float3> cvs, DeviceView<float3> out, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
     if(!sampleCount_ || !solved_ || !cvs.data || !out.data || !cvs.size || cvs.size!=out.size || cvs.size>size_t(INT_MAX)) return fail(RbfStatus::InvalidArgument,"RBF Evaluate requires a solved binding and equal non-empty bounded device views");
-    if(!ok(cudaStreamWaitEvent(stream,stateReady_,0)) || (!evalPending_ && !ok(cudaMemsetAsync(evalFlags_.data(),0,sizeof(int),stream)))) return fail(RbfStatus::CudaError,"RBF evaluation state setup failed"); evalKernel<<<(cvs.size+255)/256,256,0,stream>>>(cvs.data,out.data,(int)cvs.size,rest_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,center_[0],center_[1],center_[2],1.0/scale_,scale_,evalFlags_.data());
+    if(!ok(cudaStreamWaitEvent(stream,stateReady_,0)) || (!evalPending_ && !ok(cudaMemsetAsync(evalFlags_.data(),0,sizeof(int),stream)))) return fail(RbfStatus::CudaError,"RBF evaluation state setup failed"); evalKernel<<<(cvs.size+255)/256,256,0,stream>>>(cvs.data,out.data,(int)cvs.size,normSamples_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,center_[0],center_[1],center_[2],1.0/scale_,scale_,evalFlags_.data());
     if(cudaGetLastError()!=cudaSuccess || !ok(cudaEventRecord(stateReady_,stream)) || !ok(cudaEventRecord(evalReady_,stream))) return fail(RbfStatus::CudaError,"RBF evaluation launch failed"); evalPending_=true; return RbfStatus::Ok;
 }
 RbfStatus CudaRbfBinding::Finish(cudaStream_t stream) {
