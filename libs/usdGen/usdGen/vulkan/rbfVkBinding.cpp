@@ -790,19 +790,41 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             }
             double const* luPtr = native.cachedLu.data();
             int const* permPtr = native.cachedPerm.data();
+            // The three columns are independent (disjoint coef lanes over
+            // shared read-only factors), so they run interleaved: each
+            // column keeps its exact rbfVkTriSolve.comp op sequence (same
+            // operations in the same order), giving the dependent
+            // accumulation chain three times the ILP with bitwise-identical
+            // coefficients.
             std::vector<double> coef(size_t(3) * size_t(hm));
-            for (int k = 0; k < 3; ++k) {
-                size_t const base = size_t(k) * size_t(hm);
-                for (int i = 0; i < hm; ++i) {
-                    double s = rhs[base + size_t(permPtr[i])];
-                    for (int j = 0; j < i; ++j) s -= luPtr[size_t(i) * size_t(hm) + size_t(j)] * coef[base + size_t(j)];
-                    coef[base + size_t(i)] = s;
+            size_t const hmz = size_t(hm), hm2 = size_t(2) * size_t(hm);
+            for (int i = 0; i < hm; ++i) {
+                size_t const p = size_t(permPtr[i]);
+                double s0 = rhs[p], s1 = rhs[hmz + p], s2 = rhs[hm2 + p];
+                for (int j = 0; j < i; ++j) {
+                    double const l = luPtr[size_t(i) * hmz + size_t(j)];
+                    s0 -= l * coef[size_t(j)];
+                    s1 -= l * coef[hmz + size_t(j)];
+                    s2 -= l * coef[hm2 + size_t(j)];
                 }
-                for (int i = hm - 1; i >= 0; --i) {
-                    double s = coef[base + size_t(i)];
-                    for (int j = i + 1; j < hm; ++j) s -= luPtr[size_t(i) * size_t(hm) + size_t(j)] * coef[base + size_t(j)];
-                    coef[base + size_t(i)] = s / luPtr[size_t(i) * size_t(hm) + size_t(i)];
+                coef[size_t(i)] = s0;
+                coef[hmz + size_t(i)] = s1;
+                coef[hm2 + size_t(i)] = s2;
+            }
+            for (int i = hm - 1; i >= 0; --i) {
+                double s0 = coef[size_t(i)];
+                double s1 = coef[hmz + size_t(i)];
+                double s2 = coef[hm2 + size_t(i)];
+                for (int j = i + 1; j < hm; ++j) {
+                    double const l = luPtr[size_t(i) * hmz + size_t(j)];
+                    s0 -= l * coef[size_t(j)];
+                    s1 -= l * coef[hmz + size_t(j)];
+                    s2 -= l * coef[hm2 + size_t(j)];
                 }
+                double const d = luPtr[size_t(i) * hmz + size_t(i)];
+                coef[size_t(i)] = s0 / d;
+                coef[hmz + size_t(i)] = s1 / d;
+                coef[hm2 + size_t(i)] = s2 / d;
             }
             if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(hm) * 24u, coef.data()) != VK_SUCCESS)
                 return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");

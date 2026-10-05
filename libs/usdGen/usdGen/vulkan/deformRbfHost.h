@@ -183,22 +183,49 @@ inline void SolveRbfPosed(RbfFactorization const& bind, float3 const* rest,
         }
     }
 
-    // 5. Solve L X = P b, then U X = that, for all three columns.
+    // 5. Solve L X = P b, then U X = that, for all three columns. The
+    // columns are independent (disjoint lanes over shared read-only
+    // factors), so they run interleaved: each column keeps its exact op
+    // sequence (same operations in the same order), giving the dependent
+    // accumulation chain three times the ILP with bitwise-identical
+    // coefficients.
     std::vector<double> X(m * 3, 0.0);
-    std::vector<double> bvec(m);
-    for (int k = 0; k < 3; ++k) {
-        for (int i = 0; i < m; ++i) bvec[i] = B[bind.perm[i] * 3 + k];
-        for (int i = 0; i < m; ++i) {  // forward substitution with L
-            double s = 0.0;
-            for (int j = 0; j < i; ++j) s += bind.lu[i * m + j] * bvec[j];
-            bvec[i] -= s;
+    std::vector<double> bv(size_t(m) * 3);
+    for (int i = 0; i < m; ++i) {
+        size_t const row = size_t(bind.perm[i]) * 3;
+        bv[size_t(i) * 3] = B[row];
+        bv[size_t(i) * 3 + 1] = B[row + 1];
+        bv[size_t(i) * 3 + 2] = B[row + 2];
+    }
+    for (int i = 0; i < m; ++i) {  // forward substitution with L
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+        for (int j = 0; j < i; ++j) {
+            double const l = bind.lu[size_t(i) * size_t(m) + size_t(j)];
+            s0 += l * bv[size_t(j) * 3];
+            s1 += l * bv[size_t(j) * 3 + 1];
+            s2 += l * bv[size_t(j) * 3 + 2];
         }
-        for (int i = m - 1; i >= 0; --i) {  // back substitution with U
-            double s = 0.0;
-            for (int j = i + 1; j < m; ++j) s += bind.lu[i * m + j] * bvec[j];
-            bvec[i] = (bvec[i] - s) / bind.lu[i * m + i];
+        bv[size_t(i) * 3] -= s0;
+        bv[size_t(i) * 3 + 1] -= s1;
+        bv[size_t(i) * 3 + 2] -= s2;
+    }
+    for (int i = m - 1; i >= 0; --i) {  // back substitution with U
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+        for (int j = i + 1; j < m; ++j) {
+            double const l = bind.lu[size_t(i) * size_t(m) + size_t(j)];
+            s0 += l * bv[size_t(j) * 3];
+            s1 += l * bv[size_t(j) * 3 + 1];
+            s2 += l * bv[size_t(j) * 3 + 2];
         }
-        for (int i = 0; i < m; ++i) X[i * 3 + k] = bvec[i];
+        double const d = bind.lu[size_t(i) * size_t(m) + size_t(i)];
+        bv[size_t(i) * 3] = (bv[size_t(i) * 3] - s0) / d;
+        bv[size_t(i) * 3 + 1] = (bv[size_t(i) * 3 + 1] - s1) / d;
+        bv[size_t(i) * 3 + 2] = (bv[size_t(i) * 3 + 2] - s2) / d;
+    }
+    for (int i = 0; i < m; ++i) {
+        X[size_t(i) * 3] = bv[size_t(i) * 3];
+        X[size_t(i) * 3 + 1] = bv[size_t(i) * 3 + 1];
+        X[size_t(i) * 3 + 2] = bv[size_t(i) * 3 + 2];
     }
 
     // Column-major output: coef[k*m + i] = X[i][k].
