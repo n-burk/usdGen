@@ -16,6 +16,8 @@ std::atomic<bool> failFreshSolveAllocation{false}, failFreshSolveAfterInputSubmi
 std::atomic<bool> failFreshEvaluateAllocation{false}, failFreshEvaluateAfterSubmit{false};
 std::atomic<bool> failFreshResolvePreflight{false}, failFreshResolveCommit{false};
 std::atomic<uint64_t> freshAcceptAttempts{0}, freshRollbackAttempts{0};
+std::atomic<bool> disableEvalCache{false};
+std::atomic<uint64_t> evalCacheHits{0}, evalCacheMisses{0};
 __device__ inline void mark(int* f, int v) { atomicOr(f, v); }
 // Each thread folds its grid stride into registers and each warp reduces
 // with shuffles; the 4 warp folds then combine through shared memory
@@ -149,6 +151,53 @@ __global__ void rhsKernel(const float3* rest, const float3* current, double* rhs
 // 256-wide (11.98 -> 11.91ms; 64 is no faster). One thread per CV either
 // way, so the grouping is bitwise-transparent.
 constexpr int kEvalBlock = 128;
+// Total device bytes (R words plus the two proof copies) below which the
+// direct Evaluate caches the pose-invariant radii across calls. 1M CVs at
+// n=100 need 812MB, so the production and bench shapes engage; anything
+// larger keeps today's direct kernel with no added work.
+constexpr size_t kEvalCacheMaxBytes = size_t(1) << 30;
+// Bitwise device memcmp: sets *flag iff any word differs. Plain stores
+// race benignly (every writer stores 1); the caller zeroes first and
+// reads after the stream syncs.
+__global__ void verifyKernel(const int* a, const int* b, size_t words, int* flag) {
+    size_t const stride = size_t(blockDim.x) * gridDim.x;
+    for (size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + threadIdx.x; i < words; i += stride)
+        if (a[i] != b[i]) *flag = 1;
+}
+// Fills the R cache: R[j*count+i] is the radius-cubed kernel value for CV
+// i and sample j. The r expression is evalKernel's text verbatim (same
+// operations in the same order), so every cached word is bitwise what the
+// eval loop computed; only the grid is transposed (one thread per (i,j)
+// with consecutive threads on consecutive CVs) so the 8-byte writes
+// coalesce. Deliberately no finiteness check: a non-finite CV writes a
+// NaN word the cached evaluator never reads (it returns before the loop,
+// exactly like evalKernel), and the evaluator still raises the flag.
+__global__ void rFillKernel(const float3* cvs, const double* sn, double* r, size_t count, int n, double cx, double cy, double cz, double invScale) {
+    size_t i = size_t(blockIdx.x) * size_t(blockDim.x) + threadIdx.x;
+    int j = blockIdx.y;
+    if (i >= count || j >= n) return;
+    float3 p = cvs[i];
+    double x = (p.x - cx) * invScale, y = (p.y - cy) * invScale, z = (p.z - cz) * invScale;
+    double dx = x - sn[j], dy = y - sn[n + j], dz = z - sn[2 * n + j];
+    double rr = sqrt(dx * dx + dy * dy + dz * dz);
+    rr *= rr * rr;
+    r[size_t(j) * count + i] = rr;
+}
+// Cached-R evaluation: evalKernel with the radius-cubed loop carried by
+// the cache instead of recomputed. Every other expression (normalize,
+// polynomial, accumulate, output, flag) is evalKernel's text verbatim,
+// so a verified cache evaluates bitwise what the direct kernel did.
+__global__ void evalCachedKernel(const float3* cvs, float3* out, int c, const double* r, const double* coef, int n, int m, double cx, double cy, double cz, double invScale, double scale, int* flags) {
+    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=c) return; float3 p=cvs[i];
+    if(!isfinite(p.x)||!isfinite(p.y)||!isfinite(p.z)){mark(flags,1);return;}
+    double x=(p.x-cx)*invScale,y=(p.y-cy)*invScale,z=(p.z-cz)*invScale;
+    double ox=x+coef[n]+coef[n+1]*x+coef[n+2]*y+coef[n+3]*z;
+    double oy=y+coef[m+n]+coef[m+n+1]*x+coef[m+n+2]*y+coef[m+n+3]*z;
+    double oz=z+coef[2*m+n]+coef[2*m+n+1]*x+coef[2*m+n+2]*y+coef[2*m+n+3]*z;
+#pragma unroll 1
+    for(int j=0;j<n;++j){ double rr=r[size_t(j)*size_t(c)+size_t(i)]; ox+=coef[j]*rr;oy+=coef[m+j]*rr;oz+=coef[2*m+j]*rr; }
+    out[i]=make_float3((float)(ox*scale+cx),(float)(oy*scale+cy),(float)(oz*scale+cz));
+}
 __global__ void evalKernel(const float3* cvs, float3* out, int c, const double* sn, const double* coef, int n, int m, double cx, double cy, double cz, double invScale, double scale, int* flags) {
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=c) return; float3 p=cvs[i];
     if(!isfinite(p.x)||!isfinite(p.y)||!isfinite(p.z)){mark(flags,1);return;}
@@ -180,6 +229,9 @@ void TestFailNextFreshRbfResolvePreflight() noexcept { failFreshResolvePreflight
 void TestFailNextFreshRbfResolveCommit() noexcept { failFreshResolveCommit.store(true, std::memory_order_release); }
 uint64_t FreshRbfAcceptAttemptCountForTesting() noexcept { return freshAcceptAttempts.load(std::memory_order_acquire); }
 uint64_t FreshRbfRollbackAttemptCountForTesting() noexcept { return freshRollbackAttempts.load(std::memory_order_acquire); }
+void TestDisableCudaRbfEvalCache(bool disable) noexcept { disableEvalCache.store(disable, std::memory_order_release); }
+uint64_t CudaRbfEvalCacheHitsForTesting() noexcept { return evalCacheHits.load(std::memory_order_acquire); }
+uint64_t CudaRbfEvalCacheMissesForTesting() noexcept { return evalCacheMisses.load(std::memory_order_acquire); }
 
 cudaError_t GetCudaRbfLuWorkspaceElements(size_t sampleCount,
                                           size_t* elements) noexcept {
@@ -624,7 +676,57 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
 RbfStatus CudaRbfBinding::Evaluate(DeviceView<const float3> cvs, DeviceView<float3> out, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
     if(!sampleCount_ || !solved_ || !cvs.data || !out.data || !cvs.size || cvs.size!=out.size || cvs.size>size_t(INT_MAX)) return fail(RbfStatus::InvalidArgument,"RBF Evaluate requires a solved binding and equal non-empty bounded device views");
-    if(!ok(cudaStreamWaitEvent(stream,stateReady_,0)) || (!evalPending_ && !ok(cudaMemsetAsync(evalFlags_.data(),0,sizeof(int),stream)))) return fail(RbfStatus::CudaError,"RBF evaluation state setup failed"); evalKernel<<<(cvs.size+kEvalBlock-1)/kEvalBlock,kEvalBlock,0,stream>>>(cvs.data,out.data,(int)cvs.size,normSamples_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,center_[0],center_[1],center_[2],1.0/scale_,scale_,evalFlags_.data());
+    if(!ok(cudaStreamWaitEvent(stream,stateReady_,0)) || (!evalPending_ && !ok(cudaMemsetAsync(evalFlags_.data(),0,sizeof(int),stream)))) return fail(RbfStatus::CudaError,"RBF evaluation state setup failed");
+    // Pose-invariant radii: R depends only on the CVs, the rest samples,
+    // and the rest-derived center/scale, all verified bitwise below, so a
+    // hit evaluates through the cache and a miss refills it first. The
+    // checks above bound cvs.size to INT_MAX and Bind bounds n to 46336,
+    // so the products below cannot overflow 64 bits. Over the cap (or
+    // with the test seam set) the direct kernel runs exactly as before.
+    int const n = (int)sampleCount_;
+    size_t const count = cvs.size;
+    size_t const rBytes = count * size_t(n) * sizeof(double);
+    size_t const copyBytes = count * sizeof(float3) + size_t(n) * sizeof(float3);
+    bool const cacheable = !disableEvalCache.load(std::memory_order_relaxed) &&
+        rBytes > 0 && rBytes + copyBytes <= kEvalCacheMaxBytes;
+    bool cached = false;
+    if (cacheable) {
+        bool const shapeOk = rValid_ && rN_ == n && rCount_ == count;
+        bool hit = false;
+        if (shapeOk) {
+            if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
+            proofHost_->flag = 0;
+            verifyKernel<<<(3 * count + 255) / 256, 256, 0, stream>>>(
+                reinterpret_cast<int const*>(cvs.data), reinterpret_cast<int const*>(rCvs_.data()),
+                3 * count, &proofDev_->flag);
+            verifyKernel<<<(size_t(3) * size_t(n) + 255) / 256, 256, 0, stream>>>(
+                reinterpret_cast<int const*>(rest_.data()), reinterpret_cast<int const*>(rRest_.data()),
+                size_t(3) * size_t(n), &proofDev_->flag);
+            if(cudaGetLastError()!=cudaSuccess || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF evaluation cache verification failed");
+            hit = (proofHost_->flag == 0);
+        }
+        if (!shapeOk) {
+            if(!ok(rCache_.reset(count * size_t(n))) || !ok(rCvs_.reset(count)) || !ok(rRest_.reset(size_t(n)))) return fail(RbfStatus::CudaError,"RBF evaluation cache allocation failed");
+            rN_ = n;
+            rCount_ = count;
+        }
+        if (!shapeOk || !hit) {
+            rValid_ = false;
+            if(!ok(cudaMemcpyAsync(rCvs_.data(),cvs.data,count * sizeof(float3),cudaMemcpyDeviceToDevice,stream)) || !ok(cudaMemcpyAsync(rRest_.data(),rest_.data(),size_t(n) * sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF evaluation cache proof copy failed");
+            dim3 const fillGrid(static_cast<unsigned int>((count + 255) / 256), static_cast<unsigned int>(n));
+            rFillKernel<<<fillGrid, 256, 0, stream>>>(cvs.data,normSamples_.data(),rCache_.data(),count,n,center_[0],center_[1],center_[2],1.0/scale_);
+            if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF evaluation cache fill failed");
+            rValid_ = true;
+            evalCacheMisses.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            evalCacheHits.fetch_add(1, std::memory_order_relaxed);
+        }
+        cached = true;
+    }
+    if (cached)
+        evalCachedKernel<<<(count+kEvalBlock-1)/kEvalBlock,kEvalBlock,0,stream>>>(cvs.data,out.data,(int)count,rCache_.data(),coefficients_.data(),n,(int)order_,center_[0],center_[1],center_[2],1.0/scale_,scale_,evalFlags_.data());
+    else
+        evalKernel<<<(count+kEvalBlock-1)/kEvalBlock,kEvalBlock,0,stream>>>(cvs.data,out.data,(int)count,normSamples_.data(),coefficients_.data(),n,(int)order_,center_[0],center_[1],center_[2],1.0/scale_,scale_,evalFlags_.data());
     if(cudaGetLastError()!=cudaSuccess || !ok(cudaEventRecord(stateReady_,stream)) || !ok(cudaEventRecord(evalReady_,stream))) return fail(RbfStatus::CudaError,"RBF evaluation launch failed"); evalPending_=true; return RbfStatus::Ok;
 }
 RbfStatus CudaRbfBinding::Finish(cudaStream_t stream) {

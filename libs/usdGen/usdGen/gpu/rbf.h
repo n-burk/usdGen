@@ -21,6 +21,15 @@ void TestFailNextFreshRbfResolvePreflight() noexcept;
 void TestFailNextFreshRbfResolveCommit() noexcept;
 uint64_t FreshRbfAcceptAttemptCountForTesting() noexcept;
 uint64_t FreshRbfRollbackAttemptCountForTesting() noexcept;
+// Test-only direct-evaluate cache seam. While disabled, Evaluate runs the
+// uncached kernel and leaves the cache state untouched, so a test can
+// compare the cached and uncached paths bitwise on the same binding.
+void TestDisableCudaRbfEvalCache(bool disable) noexcept;
+// Test-only direct-evaluate cache path counters (global across bindings;
+// tests assert deltas). A hit evaluates through the cache, a miss refills
+// it first; the over-cap fallback increments neither.
+uint64_t CudaRbfEvalCacheHitsForTesting() noexcept;
+uint64_t CudaRbfEvalCacheMissesForTesting() noexcept;
 
 // Queries the selected CUDA implementation's legacy dense-LU workspace
 // without allocating matrix storage or submitting device work.
@@ -97,6 +106,17 @@ private:
     DeviceBuffer<double> matrix_, work_, coefficients_, normSamples_;
     DeviceBuffer<double> gram_;
     DeviceBuffer<int> pivots_, evalFlags_;
+    // Direct-evaluate R cache: the radius-cubed kernel values are
+    // pose-invariant (they depend only on the CVs, the rest samples, and
+    // the rest-derived center/scale), so a verified cache turns the
+    // sqrt-bound evaluate into a streaming FMA pass. rCvs_/rRest_ are the
+    // bitwise proof copies: a hit requires both device memcmps to match,
+    // so no host trust and no caller versioning is involved.
+    DeviceBuffer<double> rCache_;
+    DeviceBuffer<float3> rCvs_, rRest_;
+    int rN_ = 0;
+    size_t rCount_ = 0;
+    bool rValid_ = false;
     // Zero-copy direct-path proofs: one mapped allocation, read on the host
     // after the stream syncs, so no D2H node (and its ~7us drain bubble)
     // separates the phases. proofDev_ is re-queried if the binding moves.
