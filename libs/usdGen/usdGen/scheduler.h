@@ -85,7 +85,7 @@ public:
 private:
     tbb::task_arena _arena;
     int _threadLimit;
-    // Heterogeneous-core placement (scheduler.cpp): on big.LITTLE Linux
+    // Heterogeneous-core placement (tbbFastCores.h): on big.LITTLE Linux
     // the arena workers prefer max-frequency cores. Null when homogeneous,
     // undetectable, or disabled. Declared after _arena so it detaches first.
     std::unique_ptr<tbb::task_scheduler_observer> _affinityObserver;
