@@ -599,13 +599,18 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
     // Zero-copy proofs: the flag and info words live in mapped host memory,
     // so neither proof needs a D2H node (each carried a ~7us drain bubble).
     // The host zeroes the flag directly (was: a device memset node) and reads
-    // both words after the stream syncs, which stay exactly where they were.
+    // both words after the single sync below.
     if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
     proofHost_->flag = 0;
     rhsKernel<<<(sampleCount_+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,1.0/scale_,&proofDev_->flag);
-    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF input validation failed"); if(proofHost_->flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values");
+    // The triangular solve submits before the flag is known, so one sync
+    // proves both words: the mapped proofs removed the D2H nodes that used
+    // to pin a drain bubble here. The flag is checked first after the sync,
+    // so error precedence (NonFinite before SolverError) and every
+    // success-path byte are unchanged; cuSOLVER completes normally on
+    // non-finite RHS, so the error path just wastes one submit.
     if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrs(solver_,CUBLAS_OP_N,(int)order_,3,matrix_.data(),(int)order_,pivots_.data(),coefficients_.data(),(int)order_,&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS)return fail(RbfStatus::SolverError,"cuSOLVER triangular solve failed");
-    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF solve status query failed"); if(proofHost_->info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
+    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF solve status query failed"); if(proofHost_->flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values"); if(proofHost_->info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
 }
 RbfStatus CudaRbfBinding::Evaluate(DeviceView<const float3> cvs, DeviceView<float3> out, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
