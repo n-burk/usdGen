@@ -44,6 +44,13 @@ int main(){
   check(cudaStreamSynchronize(s)); assert(nanStaged.CommitFreshBindExtent()==RbfStatus::NonFiniteInput);
   check(cudaMemcpyAsync(dr,rest.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));
   assert(nanDirect.Bind({dr,5},0,s)==RbfStatus::Ok);
+  // A non-finite posed sample is rejected by the direct solve flag proof,
+  // and the binding stays usable afterwards.
+  std::vector<float3> nanPose=rest; nanPose[1].z=NAN;
+  check(cudaMemcpyAsync(dp,nanPose.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));
+  assert(nanDirect.Solve({dp,5},s)==RbfStatus::NonFiniteInput);
+  check(cudaMemcpyAsync(dp,rest.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));
+  assert(nanDirect.Solve({dp,5},s)==RbfStatus::Ok);
   // Fresh binding has three externally-proved, host-only commit boundaries.
   // These calls deliberately synchronize only in the test as the parent's
   // native-completion proof stand-in; production must not do so in commits.

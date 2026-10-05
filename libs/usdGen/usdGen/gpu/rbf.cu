@@ -191,6 +191,13 @@ cudaError_t GetCudaRbfLuWorkspaceElements(size_t sampleCount,
     return cudaSuccess;
 }
 
+struct CudaRbfBinding::DirectProofs {
+    float extent[6];
+    int flag;
+    double gram[16];
+    int info;
+};
+
 struct CudaRbfBinding::FreshState {
     enum class Phase { Extent, ExtentReady, Rank, RankReady, Lu, SolveInput,
                        SolveInputReady, Solve, Evaluate, Complete };
@@ -507,11 +514,33 @@ CudaRbfBinding::CudaRbfBinding() = default;
 CudaRbfBinding::~CudaRbfBinding() {
     // A fresh candidate is independently quarantined; never turn destruction
     // into an implicit proof wait for that submission.
+    // The direct-path proofs are never referenced by fresh candidates, so
+    // they free on every destruction path, including a fresh abandon.
+    if (proofHost_) { cudaFreeHost(proofHost_); proofHost_ = nullptr; }
     if (HasUnprovenWork()) { AbandonFresh(); return; }
     if (stateReady_) { cudaEventSynchronize(stateReady_); cudaEventDestroy(stateReady_); }
     if (evalReady_) cudaEventDestroy(evalReady_); if (solver_) cusolverDnDestroy(solver_);
 }
 RbfStatus CudaRbfBinding::fail(RbfStatus s, const char* why) { diagnostic_=why; return s; }
+bool CudaRbfBinding::ensureProofs() {
+    int device = -1;
+    if (!ok(cudaGetDevice(&device))) return false;
+    if (!proofHost_) {
+        void* p = nullptr;
+        if (!ok(cudaHostAlloc(&p, sizeof(DirectProofs),
+                              cudaHostAllocMapped | cudaHostAllocPortable)))
+            return false;
+        proofHost_ = static_cast<DirectProofs*>(p);
+        proofDevice_ = -1;
+    }
+    if (device != proofDevice_) {
+        void* d = nullptr;
+        if (!ok(cudaHostGetDevicePointer(&d, proofHost_, 0))) return false;
+        proofDev_ = static_cast<DirectProofs*>(d);
+        proofDevice_ = device;
+    }
+    return true;
+}
 
 RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothing, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");
@@ -567,10 +596,16 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
     if(!sampleCount_ || posed.size!=sampleCount_ || !posed.data) return fail(RbfStatus::InvalidArgument,"RBF Solve samples do not match binding");
     if(!ok(cudaStreamWaitEvent(stream,stateReady_,0))) return fail(RbfStatus::CudaError,"RBF state wait failed");
     if(!ok(current_.reset(sampleCount_)) || !ok(cudaMemcpyAsync(current_.data(),posed.data,sampleCount_*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF current sample copy failed");
-    if(!ok(cudaMemsetAsync(flags_.data(),0,sizeof(int),stream))) return fail(RbfStatus::CudaError,"RBF solve flag reset failed"); rhsKernel<<<(sampleCount_+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,1.0/scale_,flags_.data());
-    int flag=0; if(!ok(cudaMemcpyAsync(&flag,flags_.data(),sizeof(flag),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF input validation failed"); if(flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values");
-    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrs(solver_,CUBLAS_OP_N,(int)order_,3,matrix_.data(),(int)order_,pivots_.data(),coefficients_.data(),(int)order_,info_.data())!=CUSOLVER_STATUS_SUCCESS)return fail(RbfStatus::SolverError,"cuSOLVER triangular solve failed");
-    int info=0; if(!ok(cudaMemcpyAsync(&info,info_.data(),sizeof(info),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF solve status query failed"); if(info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
+    // Zero-copy proofs: the flag and info words live in mapped host memory,
+    // so neither proof needs a D2H node (each carried a ~7us drain bubble).
+    // The host zeroes the flag directly (was: a device memset node) and reads
+    // both words after the stream syncs, which stay exactly where they were.
+    if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
+    proofHost_->flag = 0;
+    rhsKernel<<<(sampleCount_+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,1.0/scale_,&proofDev_->flag);
+    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF input validation failed"); if(proofHost_->flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values");
+    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrs(solver_,CUBLAS_OP_N,(int)order_,3,matrix_.data(),(int)order_,pivots_.data(),coefficients_.data(),(int)order_,&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS)return fail(RbfStatus::SolverError,"cuSOLVER triangular solve failed");
+    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF solve status query failed"); if(proofHost_->info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
 }
 RbfStatus CudaRbfBinding::Evaluate(DeviceView<const float3> cvs, DeviceView<float3> out, cudaStream_t stream) {
     if (HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF proof is pending");

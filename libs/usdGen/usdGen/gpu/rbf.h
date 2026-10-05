@@ -84,7 +84,9 @@ public:
     const char* diagnostic() const { return diagnostic_.c_str(); }
 private:
     struct FreshState;
+    struct DirectProofs;
     RbfStatus fail(RbfStatus status, const char* what);
+    bool ensureProofs();
     size_t sampleCount_ = 0, order_ = 0;
     bool solved_ = false, evalPending_ = false;
     double smoothing_ = 0.0, center_[3] = {}, scale_ = 1.0;
@@ -96,6 +98,12 @@ private:
     DeviceBuffer<double> gram_;
     DeviceBuffer<float> extents_;
     DeviceBuffer<int> pivots_, info_, flags_, evalFlags_;
+    // Zero-copy direct-path proofs: one mapped allocation, read on the host
+    // after the stream syncs, so no D2H node (and its ~7us drain bubble)
+    // separates the phases. proofDev_ is re-queried if the binding moves.
+    DirectProofs* proofHost_ = nullptr;
+    DirectProofs* proofDev_ = nullptr;
+    int proofDevice_ = -1;
     std::unique_ptr<FreshState> fresh_, acceptedFresh_, freshSolve_, freshEval_;
     std::unique_ptr<FreshState> retiredFresh_, retiredSolve_, retiredEval_;
     bool freshSolvePendingAcceptance_ = false;
