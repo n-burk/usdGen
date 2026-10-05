@@ -216,13 +216,23 @@ std::vector<uint32_t> LoadSpv(std::string const &path)
     return r;
 }
 
-bool ProveQueue(std::shared_ptr<NativeOwner> const &native)
+// Spin a deform candidate to completion. Production never blocks on the
+// apply fence (sourceWidthJob drives Poll from its completion service and
+// returns on VK_NOT_READY), so the bench must not either: the old empty
+// submit plus blocking vkWaitForFences measured the futex wakeup lottery
+// (~180us median, +-125us jitter over the ~144us of real apply work)
+// instead of the GPU and host work. A pure spin observes the fence within
+// one vkGetFenceStatus of the signal; the 30s deadline only trips on a
+// wedged device (well under the ctest timeout) and fails the leg.
+VkResult PollUntilReady(vulkan::DeformPipeline::Candidate *c,
+                        vulkan::DeformSemantic *sem)
 {
-    if (vkResetFences(native->device, 1, &native->fence) != VK_SUCCESS) return false;
-    VkSubmitInfo submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    return vkQueueSubmit(native->queue, 1, &submit, native->fence) == VK_SUCCESS &&
-        vkWaitForFences(native->device, 1, &native->fence, VK_TRUE, 10000000000ull) == VK_SUCCESS;
+    double const deadline = NowMs() + 30000.0;
+    for (;;) {
+        VkResult const r = c->Poll(sem);
+        if (r != VK_NOT_READY) return r;
+        if (NowMs() > deadline) return VK_TIMEOUT;
+    }
 }
 
 std::shared_ptr<const vulkan::ChargedBuffer> UploadHost(
@@ -246,7 +256,7 @@ std::shared_ptr<const vulkan::ChargedBuffer> UploadHost(
     return b;
 }
 
-// Main path: DeformPipeline per-pose (Begin + proof + apply + Poll) over
+// Main path: DeformPipeline per-pose (Begin + spin-poll to completion) over
 // 100k curves x 10 CVs with 100 RBF samples. CHECKSUM covers the last
 // pose's deformed points.
 int VulkanDeformLeg(std::string const &spvDir)
@@ -350,8 +360,10 @@ int VulkanDeformLeg(std::string const &spvDir)
         double const t0 = NowMs();
         vulkan::DeformSemantic sem = vulkan::DeformSemantic::Ok;
         auto c = pipe->Begin(std::move(info), &status, &sem);
-        if (!c || status != VK_SUCCESS || !ProveQueue(native) ||
-            c->Poll(&sem) != VK_SUCCESS || sem != vulkan::DeformSemantic::Ok || !c->succeeded()) {
+        VkResult const pr =
+            (c && status == VK_SUCCESS) ? PollUntilReady(c.get(), &sem) : VK_NOT_READY;
+        if (!c || status != VK_SUCCESS ||
+            pr != VK_SUCCESS || sem != vulkan::DeformSemantic::Ok || !c->succeeded()) {
             std::printf("Vulkan deform leg: pose %d failed\n", iter);
             return 1;
         }
