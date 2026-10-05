@@ -260,7 +260,8 @@ UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const& ctx) const
         // This folds one word instead of the sequential byte mix, so the
         // epoch values differ from before; epochs compare for equality only.
         d.Mix(restDigest_.Digest(surface.restPoints));
-        MixArray(&d, surface.points.cdata(), surface.points.size() * sizeof(GfVec3f));
+        if (!MixChosenPosed(&d, ctx, surface))
+            MixArray(&d, surface.points.cdata(), surface.points.size() * sizeof(GfVec3f));
         d.Mix(uint64_t(surface.restFromCurrentPoints));
         GfMatrix4d const relative = surface.worldMatrix * ctx.desc->xformMatrix.GetInverse();
         MixArray(&d, relative.GetArray(), 16 * sizeof(double));
@@ -280,6 +281,34 @@ UsdGenEpoch UsdGenDeformOp::CaptureDigest(UsdGenCaptureContext const& ctx) const
         MixArray(&d, m.GetArray(), 16 * sizeof(double));
     }
     return d.Epoch(0x446566726dull);
+}
+
+bool UsdGenDeformOp::MixChosenPosed(opUtil::Digest *d, UsdGenCaptureContext const &ctx,
+                                     UsdGenSurfaceDesc const &surface) const
+{
+    UsdGenParamView const *p = ctx.params;
+    if (p && p->node && p->node->mode == TfToken("curveWrap")) return false;
+    // An unbound field (the last bind failed) or a degenerate selection
+    // (fewer than four drivers) means Capture fails: the full hash keeps
+    // the failure cadence what it was instead of skipping silently.
+    if (!field_.Bound()) return false;
+    int const budget = p ? p->GetInt(sRbfSamples, 100) : 100;
+    // The capture's key, verbatim: a hit there reads posed[chosen] alone,
+    // so the same hit here hashes exactly what the capture will read.
+    auto const &rp = surface.restPoints;
+    bool const hit = surfaceValid_ && surfaceBudget_ == size_t(budget) &&
+        rp.size() == surfaceRestRef_.size() &&
+        (rp.empty() || rp.cdata() == surfaceRestRef_.cdata());
+    if (!hit || surface.points.size() != rp.size()) return false;
+    if (surfaceSelection_.size() < 4) return false;
+    // cdata, not operator[]: ctx.desc is shared, and a mutating subscript
+    // would detach the 1.2MB posed buffer to hash 100 points out of it.
+    GfVec3f const *posed = surface.points.cdata();
+    d->Mix(uint64_t(surfaceSelection_.size()));
+    for (size_t k : surfaceSelection_)
+        d->MixBytes(&posed[k], sizeof(GfVec3f));
+    ++chosenDigestHits_;
+    return true;
 }
 
 std::unique_ptr<UsdGenCapture> UsdGenDeformOp::CreateCapture() const {

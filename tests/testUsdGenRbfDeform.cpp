@@ -442,6 +442,142 @@ void CheckNonFiniteCapture()
     Check(refused, "a deformation that overflows float is refused, not published");
 }
 
+// The surface-driven capture digest hashes only the posed drivers the
+// capture reads: rest decides the farthest-point selection, so a move
+// outside the chosen set must neither re-capture nor change the output,
+// while a move at a chosen driver must re-capture to new output.
+void CheckDeformChosenDigest()
+{
+    UsdGenGraphDesc desc;
+    desc.description = SdfPath("/groom");
+    desc.terminal = SdfPath("/groom/deform");
+    desc.time = 0.0;
+    UsdGenSurfaceDesc s;
+    s.path = SdfPath("/groom/surface");
+    s.id = 0;
+    int const NX = 15, NY = 15;
+    s.restPoints = VtVec3fArray((NX + 1) * (NY + 1));
+    s.uv = VtVec2fArray((NX + 1) * (NY + 1));
+    for (int j = 0; j <= NY; ++j)
+        for (int i = 0; i <= NX; ++i) {
+            int const k = j * (NX + 1) + i;
+            float const x = float(i) * 0.1f, y = float(j) * 0.1f;
+            s.restPoints[k] = GfVec3f(x, y, 2.0f * std::sin(x * 0.3f) * std::cos(y * 0.3f));
+            s.uv[k] = GfVec2f(float(i) / NX, float(j) / NY);
+        }
+    s.points = s.restPoints;
+    s.faceVertexCounts = VtIntArray(NX * NY, 4);
+    s.faceVertexIndices = VtIntArray(NX * NY * 4);
+    for (int j = 0; j < NY; ++j)
+        for (int i = 0; i < NX; ++i) {
+            int const a = j * (NX + 1) + i, o = (j * NX + i) * 4;
+            s.faceVertexIndices[o] = a;
+            s.faceVertexIndices[o + 1] = a + 1;
+            s.faceVertexIndices[o + 2] = a + NX + 2;
+            s.faceVertexIndices[o + 3] = a + NX + 1;
+        }
+    desc.surfaces.push_back(s);
+    auto addNode = [&](std::string const &name, TfToken type, std::string const &input, int seed) {
+        UsdGenNodeDesc n;
+        n.path = SdfPath("/groom/" + name);
+        n.type = type;
+        n.enabled = true;
+        n.seed = seed;
+        if (!input.empty()) n.inputs.push_back(SdfPath("/groom/" + input));
+        if (type == TfToken("UsdGenScatter") || type == TfToken("UsdGenDeform"))
+            n.surfaces.push_back(SdfPath("/groom/surface"));
+        desc.nodes.push_back(std::move(n));
+    };
+    addNode("scatter", TfToken("UsdGenScatter"), "", 42);
+    addNode("grow", TfToken("UsdGenGrow"), "scatter", 43);
+    addNode("deform", TfToken("UsdGenDeform"), "grow", 44);
+    auto setp = [&](std::string const &name, TfToken p, VtValue v) {
+        for (auto &n : desc.nodes)
+            if (n.path == SdfPath("/groom/" + name))
+                n.params.push_back(UsdGenParamValue{p, v, false});
+    };
+    setp("scatter", TfToken("density"), VtValue(25.0));
+    setp("grow", TfToken("segments"), VtValue(2));
+    setp("grow", TfToken("length"), VtValue(1.0));
+    setp("deform", TfToken("rbfSamples"), VtValue(100));
+    setp("deform", TfToken("lockRoots"), VtValue(true));
+
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    UsdGenCompileResult const compiled = compiler.Compile(desc, &graph);
+    Check(compiled.ok, "the digest fixture compiles");
+    if (!compiled.ok) return;
+    UsdGenNodeId const deformId = graph.NodeIdForPath(SdfPath("/groom/deform"));
+    auto *deformOp = static_cast<UsdGenDeformOp *>(graph.Node(deformId).op.get());
+    UsdGenScheduler scheduler(2);
+    UsdGenEvalContext ctx;
+    uint64_t gen = 0;
+    auto runPose = [&]() -> bool {
+        UsdGenCompileResult const rr = compiler.Recompile(desc, &graph);
+        ctx.desc = &graph.Desc();
+        UsdGenRunResult const run = scheduler.Run(graph, ctx, ++gen);
+        return rr.ok && !run.diagnostics.HasErrors();
+    };
+    auto outputBits = [&]() {
+        UsdGenCurveBuffer const &b = graph.Node(deformId).buffer;
+        std::vector<float> bits;
+        bits.reserve(b.px.size() + b.py.size() + b.pz.size() + 2);
+        bits.push_back(float(b.totalCurves));
+        bits.push_back(float(b.totalCvs));
+        bits.insert(bits.end(), b.px.begin(), b.px.end());
+        bits.insert(bits.end(), b.py.begin(), b.py.end());
+        bits.insert(bits.end(), b.pz.begin(), b.pz.end());
+        return bits;
+    };
+
+    Check(runPose(), "the digest fixture cooks its rest pose");
+    if (graph.Node(deformId).buffer.totalCurves == 0) {
+        Check(false, "the digest fixture grows curves");
+        return;
+    }
+    std::vector<float> const restBits = outputBits();
+    std::vector<size_t> const selection = deformOp->SurfaceSelectionForTesting();
+    bool selectionSane = selection.size() == 100;
+    for (size_t k : selection) selectionSane &= k < desc.surfaces[0].restPoints.size();
+    Check(selectionSane, "the rest pose settles a 100-driver selection");
+    Check(deformOp->ChosenDigestHitsForTesting() == 0,
+          "the first digest hashes the whole posed surface (no cache yet)");
+    if (!selectionSane) return;
+    std::vector<char> chosenMark(desc.surfaces[0].restPoints.size(), 0);
+    for (size_t k : selection) chosenMark[k] = 1;
+
+    // Half the unchosen drivers jump: the digest must not move, so the
+    // output is the rest output bit for bit. Rest is read through a const
+    // reference: desc is non-const, so a direct restPoints[v] would take
+    // the mutating subscript and detach the shared rest buffer, and the
+    // selection cache (keyed on that buffer's identity) would miss.
+    VtVec3fArray const &rest = desc.surfaces[0].restPoints;
+    int moved = 0;
+    for (size_t v = 0; v < chosenMark.size() && moved < 50; ++v) {
+        if (chosenMark[v]) continue;
+        desc.surfaces[0].points[v] = rest[v] + GfVec3f(50.0f, 0.0f, 0.0f);
+        ++moved;
+    }
+    Check(moved == 50, "the fixture has unchosen drivers to move");
+    Check(runPose(), "the unchosen-move pose cooks");
+    Check(outputBits() == restBits, "moving only unchosen drivers leaves the output bitwise alone");
+    Check(deformOp->ChosenDigestHitsForTesting() == 1,
+          "the unchosen-move digest hashed only the chosen drivers");
+    Check(deformOp->SurfaceSelectionForTesting() == selection,
+          "posed-only motion keeps the rest-decided selection");
+
+    // One chosen driver jumps: the digest must move and re-capture to
+    // output that differs.
+    desc.surfaces[0].points = desc.surfaces[0].restPoints;
+    desc.surfaces[0].points[selection[0]] = rest[selection[0]] + GfVec3f(50.0f, 0.0f, 0.0f);
+    Check(runPose(), "the chosen-move pose cooks");
+    Check(outputBits() != restBits, "moving a chosen driver re-captures to new output");
+    Check(deformOp->ChosenDigestHitsForTesting() == 2,
+          "the chosen-move digest hashed only the chosen drivers");
+    Check(deformOp->SurfaceSelectionForTesting() == selection,
+          "the re-capture reuses the rest-decided selection");
+}
+
 void CheckCurveWrapField()
 {
     curveWrap::Field field;
@@ -854,6 +990,7 @@ int main()
     usdGenRegisterM1Operators();
     CheckField();
     CheckBatchBitwise();
+    CheckDeformChosenDigest();
     CheckCurveWrapField();
     CheckExample();
     CheckSurfaceExample();
