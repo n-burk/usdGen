@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <climits>
+#include <cstddef>
 #include <limits>
 #include <atomic>
 
@@ -192,7 +193,9 @@ struct CudaRbfBinding::FreshState {
     DeviceBuffer<int> pivots, info, flags;
     DeviceBuffer<float> extents;
     cusolverDnHandle_t solver = nullptr;
-    struct Packet { float extent[6]; double gram[16]; int flag = 0, info = 0; } *host = nullptr;
+    // Extent and flag stay adjacent so one proof copy returns both.
+    struct Packet { float extent[6]; int flag = 0; double gram[16]; int info = 0; } *host = nullptr;
+    static_assert(offsetof(Packet, flag) == sizeof(Packet::extent), "extent proof must be one contiguous copy");
     UsdGenExecutionResourcePermit hostPermit;
     FreshState* factorOwner = nullptr;
     int device = -1, n = 0, m = 0, lwork = 0;
@@ -265,14 +268,15 @@ RbfStatus CudaRbfBinding::BeginFreshBind(DeviceView<const float3> samples, doubl
     if (!ok(fresh->rest.reset(fresh->n, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->norm.reset(3*size_t(fresh->n), reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->matrix.reset(size_t(fresh->m)*fresh->m, reservation, UsdGenExecutionResourceKind::Cache)) ||
         !ok(fresh->coefficients.reset(size_t(fresh->m)*3, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->pivots.reset(fresh->m, reservation, UsdGenExecutionResourceKind::Cache)) ||
         !ok(fresh->info.reset(1, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->flags.reset(1, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(fresh->gram.reset(16, reservation, UsdGenExecutionResourceKind::Cache)) ||
-        !ok(fresh->extents.reset(6, reservation, UsdGenExecutionResourceKind::Cache)) || cusolverDnCreate(&fresh->solver) != CUSOLVER_STATUS_SUCCESS ||
+        !ok(fresh->extents.reset(7, reservation, UsdGenExecutionResourceKind::Cache)) || cusolverDnCreate(&fresh->solver) != CUSOLVER_STATUS_SUCCESS ||
         cusolverDnDgetrf_bufferSize(fresh->solver, fresh->m, fresh->m, fresh->matrix.data(), fresh->m, &fresh->lwork) != CUSOLVER_STATUS_SUCCESS ||
         !ok(fresh->work.reset(fresh->lwork, reservation, UsdGenExecutionResourceKind::Cache))) return fail(RbfStatus::CudaError, "fresh RBF candidate allocation failed");
     fresh_ = std::move(fresh); auto& f = *fresh_;
     f.unproven = true; f.phase = FreshState::Phase::Extent;
     if (!ok(cudaMemcpyAsync(f.rest.data(), samples.data, f.n*sizeof(float3), cudaMemcpyDeviceToDevice, stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF rest copy failed"); }
-    initExtent<<<1,1,0,stream>>>(f.extents.data(), f.flags.data()); extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,f.extents.data(),f.flags.data());
-    if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(f.host->extent,f.extents.data(),sizeof(f.host->extent),cudaMemcpyDeviceToHost,stream)) || !ok(cudaMemcpyAsync(&f.host->flag,f.flags.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF extent submit failed"); }
+    float* ex = f.extents.data(); int* exFlag = reinterpret_cast<int*>(ex + 6);
+    initExtent<<<1,1,0,stream>>>(ex, exFlag); extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,ex,exFlag);
+    if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(f.host->extent,f.extents.data(),sizeof(f.host->extent)+sizeof(f.host->flag),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF extent submit failed"); }
     if (failFreshBindAfterSubmit.exchange(false, std::memory_order_acq_rel)) { f.failed=true; return fail(RbfStatus::CudaError,"forced fresh RBF bind post-submit failure"); }
     return RbfStatus::Ok;
 }
@@ -502,12 +506,19 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // pre-query work_ sizing cost two cudaMalloc/cudaFree pairs (with event
     // churn) on every steady-state bind, idling the GPU. work_ sizes once
     // below, after the bufferSize query; nothing reads it before that.
-    if(!ok(extents_.reset(6))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
-    initExtent<<<1,1,0,stream>>>(extents_.data(),flags_.data()); extentKernel<<<1,128,0,stream>>>(rest_.data(),n,extents_.data(),flags_.data());
-    float e[6]; int flag=0;
-    if(!ok(cudaMemcpyAsync(e,extents_.data(),sizeof(e),cudaMemcpyDeviceToHost,stream)) || !ok(cudaMemcpyAsync(&flag,flags_.data(),sizeof(flag),cudaMemcpyDeviceToHost,stream)) || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
-    if(flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
-    center_[0]=(double)e[0] + ((double)e[3]-(double)e[0])*.5; center_[1]=(double)e[1] + ((double)e[4]-(double)e[1])*.5; center_[2]=(double)e[2] + ((double)e[5]-(double)e[2])*.5; scale_=std::max((double)e[3]-e[0],std::max((double)e[4]-e[1],(double)e[5]-e[2]));
+    // Word 6 of the extent buffer carries the non-finite flag, so one
+    // 28-byte proof copy returns extent and flag together. flags_ keeps
+    // its stale value until Solve resets it; buildMatrix ignores its flags
+    // argument and nothing else reads flags_ in between.
+    if(!ok(extents_.reset(7))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
+    float* ex = extents_.data(); int* exFlag = reinterpret_cast<int*>(ex + 6);
+    initExtent<<<1,1,0,stream>>>(ex,exFlag); extentKernel<<<1,128,0,stream>>>(rest_.data(),n,ex,exFlag);
+    struct Proof { float e[6]; int flag; };
+    static_assert(sizeof(Proof) == 7 * sizeof(float) && offsetof(Proof, flag) == 6 * sizeof(float), "extent proof must be one contiguous copy");
+    Proof proof;
+    if(!ok(cudaMemcpyAsync(&proof,ex,sizeof(proof),cudaMemcpyDeviceToHost,stream)) || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
+    if(proof.flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
+    center_[0]=(double)proof.e[0] + ((double)proof.e[3]-(double)proof.e[0])*.5; center_[1]=(double)proof.e[1] + ((double)proof.e[4]-(double)proof.e[1])*.5; center_[2]=(double)proof.e[2] + ((double)proof.e[5]-(double)proof.e[2])*.5; scale_=std::max((double)proof.e[3]-proof.e[0],std::max((double)proof.e[4]-proof.e[1],(double)proof.e[5]-proof.e[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
     normalizeSamples<<<(n+255)/256,256,0,stream>>>(rest_.data(),normSamples_.data(),n,center_[0],center_[1],center_[2],1.0/scale_);
     if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF sample normalization failed");

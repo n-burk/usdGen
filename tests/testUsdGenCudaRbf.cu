@@ -34,6 +34,16 @@ int main(){
   pose[0].x=NAN; check(cudaMemcpyAsync(dp,pose.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));assert(r.Evaluate({dp,5},{do_,5},s)==RbfStatus::Ok);assert(r.Evaluate({dr,5},{do_,5},s2)==RbfStatus::Ok);assert(r.Finish(s2)==RbfStatus::NonFiniteInput);assert(r.Evaluate({dr,5},{do_,5},s)==RbfStatus::InvalidArgument);
   // A planar binding is rejected even with smoothing: polynomial rank is absent.
   std::vector<float3> plane={f(0,0,0),f(1,0,0),f(0,1,0),f(1,1,0),f(.2f,.3f,0)};check(cudaMemcpyAsync(dr,plane.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));CudaRbfBinding bad;assert(bad.Bind({dr,5},1e-3,s)==RbfStatus::RankDeficient);
+  // A non-finite rest sample is rejected at the extent proof on both the
+  // direct and fresh paths, and the binding stays usable afterwards.
+  std::vector<float3> nanRest=rest; nanRest[2].y=NAN;
+  check(cudaMemcpyAsync(dr,nanRest.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));
+  CudaRbfBinding nanDirect; assert(nanDirect.Bind({dr,5},0,s)==RbfStatus::NonFiniteInput);
+  CudaRbfBinding nanStaged;
+  assert(nanStaged.BeginFreshBind({dr,5},0,s)==RbfStatus::Ok);
+  check(cudaStreamSynchronize(s)); assert(nanStaged.CommitFreshBindExtent()==RbfStatus::NonFiniteInput);
+  check(cudaMemcpyAsync(dr,rest.data(),5*sizeof(float3),cudaMemcpyHostToDevice,s));
+  assert(nanDirect.Bind({dr,5},0,s)==RbfStatus::Ok);
   // Fresh binding has three externally-proved, host-only commit boundaries.
   // These calls deliberately synchronize only in the test as the parent's
   // native-completion proof stand-in; production must not do so in commits.
