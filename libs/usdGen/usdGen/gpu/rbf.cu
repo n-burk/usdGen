@@ -83,13 +83,19 @@ __global__ void buildMatrix(const float3* p, double* a, int n, int m, double cx,
     else if (col < n) { float3 x=p[col]; int q=row-n; value=q==0?1.0:(q==1?(x.x-cx)*invScale:(q==2?(x.y-cy)*invScale:(x.z-cz)*invScale)); }
     a[k]=value;
 }
+// The polynomial-tail zeroing rides in the RHS kernel (threads 0-3 write
+// the twelve tail slots before the bounds check): the two launches wrote
+// disjoint addresses, so one launch writes bitwise the same RHS and saves
+// a launch + a grid teardown on every solve. n >= 4 always, so threads
+// 0-3 exist in the RHS grid.
 __global__ void rhsKernel(const float3* rest, const float3* current, double* rhs, int n, int m, double invScale, int* flags) {
-    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i<4) rhs[n+i]=rhs[m+n+i]=rhs[2*m+n+i]=0.0;
+    if(i>=n) return;
     float3 a=rest[i], b=current[i];
     if(!isfinite(b.x)||!isfinite(b.y)||!isfinite(b.z)) { mark(flags,1); return; }
     rhs[i]=((double)b.x-a.x)*invScale; rhs[i+m]=((double)b.y-a.y)*invScale; rhs[i+2*m]=((double)b.z-a.z)*invScale;
 }
-__global__ void zeroTail(double* rhs, int n, int m) { int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<4) rhs[n+i]=rhs[m+n+i]=rhs[2*m+n+i]=0.0; }
 __global__ void normalizeSamples(const float3* p, double* sn, int n, double cx, double cy, double cz, double invScale) {
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
     float3 s=p[i];
@@ -318,7 +324,6 @@ RbfStatus CudaRbfBinding::BeginFreshSolve(DeviceView<const float3> posed, cudaSt
     }
     rhsKernel<<<(c.n + 255) / 256, 256, 0, stream>>>(f.rest.data(), c.current.data(), c.coefficients.data(),
         c.n, c.m, 1.0 / f.scale, c.flags.data());
-    zeroTail<<<1, 4, 0, stream>>>(c.coefficients.data(), c.n, c.m);
     if (cudaGetLastError() != cudaSuccess ||
         !ok(cudaMemcpyAsync(&c.host->flag, c.flags.data(), sizeof(int), cudaMemcpyDeviceToHost, stream))) {
         c.failed = true; return fail(RbfStatus::CudaError, "fresh RBF posed-input proof submit failed");
@@ -499,7 +504,7 @@ RbfStatus CudaRbfBinding::Solve(DeviceView<const float3> posed, cudaStream_t str
     if(!sampleCount_ || posed.size!=sampleCount_ || !posed.data) return fail(RbfStatus::InvalidArgument,"RBF Solve samples do not match binding");
     if(!ok(cudaStreamWaitEvent(stream,stateReady_,0))) return fail(RbfStatus::CudaError,"RBF state wait failed");
     if(!ok(current_.reset(sampleCount_)) || !ok(cudaMemcpyAsync(current_.data(),posed.data,sampleCount_*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF current sample copy failed");
-    if(!ok(cudaMemsetAsync(flags_.data(),0,sizeof(int),stream))) return fail(RbfStatus::CudaError,"RBF solve flag reset failed"); rhsKernel<<<(sampleCount_+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,1.0/scale_,flags_.data()); zeroTail<<<1,4,0,stream>>>(coefficients_.data(),(int)sampleCount_,(int)order_);
+    if(!ok(cudaMemsetAsync(flags_.data(),0,sizeof(int),stream))) return fail(RbfStatus::CudaError,"RBF solve flag reset failed"); rhsKernel<<<(sampleCount_+255)/256,256,0,stream>>>(rest_.data(),current_.data(),coefficients_.data(),(int)sampleCount_,(int)order_,1.0/scale_,flags_.data());
     int flag=0; if(!ok(cudaMemcpyAsync(&flag,flags_.data(),sizeof(flag),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF input validation failed"); if(flag)return fail(RbfStatus::NonFiniteInput,"RBF current samples contain non-finite values");
     if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrs(solver_,CUBLAS_OP_N,(int)order_,3,matrix_.data(),(int)order_,pivots_.data(),coefficients_.data(),(int)order_,info_.data())!=CUSOLVER_STATUS_SUCCESS)return fail(RbfStatus::SolverError,"cuSOLVER triangular solve failed");
     int info=0; if(!ok(cudaMemcpyAsync(&info,info_.data(),sizeof(info),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF solve status query failed"); if(info)return fail(RbfStatus::SolverError,"RBF solve returned an error"); if(!ok(cudaEventRecord(stateReady_,stream)))return fail(RbfStatus::CudaError,"RBF solve event failed"); solved_=true; return RbfStatus::Ok;
