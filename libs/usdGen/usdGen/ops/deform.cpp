@@ -548,8 +548,25 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     size_t const R = upstream.totalCurves;
     size_t const totalCvs = upstream.totalCvs;
     if (R == 0) return true;
+    // Uniform grooms (Grow's output: no cvOffsets) need no spans vector:
+    // span c is [c*perCurve, (c+1)*perCurve) by the same arithmetic
+    // CurveSpans fills the vector with, so spanAt reads the same values
+    // without the 27k-entry build. The check mirrors _UsdGenCurveSpans
+    // exactly (same condition, same message); ragged buffers keep the
+    // vector path below.
     std::vector<uint32_t> spans;
-    if (!opUtil::CurveSpans(upstream, &spans, &error)) return fail(error);
+    size_t perCurve = 0;
+    bool const uniform = upstream.cvOffsets.empty();
+    if (uniform) {
+        if (totalCvs % R != 0)
+            return fail("uniform extra-plane topology has non-integral CV count");
+        perCurve = totalCvs / R;
+    } else {
+        if (!opUtil::CurveSpans(upstream, &spans, &error)) return fail(error);
+    }
+    auto spanAt = [&](size_t c) -> size_t {
+        return uniform ? c * perCurve : spans[c];
+    };
     if (upstream.px.size() != totalCvs || upstream.py.size() != totalCvs ||
         upstream.pz.size() != totalCvs)
         return fail("input point planes do not match the CV count");
@@ -589,14 +606,14 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             size_t qoff[kGroupStrands];
             size_t total = 0;
             for (size_t c = c0; c < c1; ++c) {
-                size_t const first = spans[c], last = spans[c + 1];
+                size_t const first = spanAt(c), last = spanAt(c + 1);
                 qoff[c - c0] = total;
                 if (last > first) total += last - first;
             }
             batchQ.resize(total);
             batchD.resize(total);
             for (size_t c = c0; c < c1; ++c) {
-                size_t const first = spans[c], last = spans[c + 1];
+                size_t const first = spanAt(c), last = spanAt(c + 1);
                 if (first >= last) continue;
                 size_t const o = qoff[c - c0];
                 for (size_t cv = first; cv < last; ++cv)
@@ -604,7 +621,7 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             }
             field.DisplaceBatch(batchQ.data(), batchD.data(), total);
             for (size_t c = c0; c < c1; ++c) {
-                size_t const first = spans[c], last = spans[c + 1];
+                size_t const first = spanAt(c), last = spanAt(c + 1);
                 if (first >= last) continue;
                 size_t const o = qoff[c - c0];
                 GfVec3d const shift =
@@ -625,7 +642,7 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
             return;
         }
         for (size_t c = c0; c < c1; ++c) {
-            size_t const first = spans[c], last = spans[c + 1];
+            size_t const first = spanAt(c), last = spanAt(c + 1);
             if (first >= last) continue;
             auto displacement = [&](GfVec3d const &x) {
                 return wrapFields[driverForCurve[c]].Map(x)-x;
