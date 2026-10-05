@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -83,13 +84,21 @@ inline bool ReadOutput(std::shared_ptr<NativeOwner> const& native,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s deformEvaluate.spv deformApply.spv\n", argv[0]);
+    if (argc != 6) {
+        std::fprintf(stderr, "usage: %s deformEvaluate.spv deformApply.spv "
+                             "deformEvaluateVerify.spv deformEvaluateFill.spv "
+                             "deformEvaluateCached.spv\n",
+                     argv[0]);
         return 1;
     }
     auto evalSpv = Code(argv[1]);
     auto applySpv = Code(argv[2]);
     CHECK(!evalSpv.empty() && !applySpv.empty());
+    DeformEvalCacheSpirv cacheSpv;
+    cacheSpv.verify = Code(argv[3]);
+    cacheSpv.fill = Code(argv[4]);
+    cacheSpv.cached = Code(argv[5]);
+    CHECK(!cacheSpv.verify.empty() && !cacheSpv.fill.empty() && !cacheSpv.cached.empty());
 
     bool unavailable = false;
     VkPhysicalDeviceFeatures fp64 = {};
@@ -833,6 +842,433 @@ int main(int argc, char** argv) {
             CHECK(Near(got, exp, 1e-4f));
         }
         std::puts("Case 9c (ragged indivisible mask): PASS");
+    }
+
+    // ---- Cases 11-18: cached-R evaluate ----
+    // One cached pipe on a funded context; each case compares the cached
+    // path against the direct path (via the disable seam) bitwise and
+    // asserts the hit/miss/bypass/unfunded counter deltas.
+    {
+        DeviceContext::CreateInfo bigCi;
+        bigCi.instance = native->instance;
+        bigCi.physicalDevice = native->physical;
+        bigCi.device = native->device;
+        bigCi.computeQueue = native->queue;
+        bigCi.computeQueueFamily = native->family;
+        bigCi.physicalIndex = native->physicalIndex;
+        bigCi.resourceDeviceId = 8030;
+        bigCi.nativeLifetime = native;
+        bigCi.resources = {size_t{1024} << 20, 0};
+        bigCi.shaderFloat64Enabled = true;
+        auto bigContext = DeviceContext::Create(bigCi);
+        CHECK(bigContext);
+        VkResult cstatus = VK_SUCCESS;
+        std::shared_ptr<DeformPipeline> cachedPipe;
+        auto freshPipe = [&]() {
+            cachedPipe = DeformPipeline::Create(bigContext, evalSpv, applySpv, &cstatus, cacheSpv);
+            return cachedPipe && cstatus == VK_SUCCESS;
+        };
+        CHECK(freshPipe());
+        // A partial cache set is a wiring bug, failed loudly.
+        DeformEvalCacheSpirv partial = cacheSpv;
+        partial.fill.clear();
+        CHECK(!DeformPipeline::Create(bigContext, evalSpv, applySpv, &cstatus, partial));
+
+        auto bigUpload = [&](void const* data, VkDeviceSize bytes) {
+            VkBufferCreateInfo bi{};
+            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bi.size = bytes ? bytes : 4;
+            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            auto b = ChargedBuffer::Create(bigContext, bi,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                UsdGenExecutionResourceKind::Scratch);
+            if (!b) return std::shared_ptr<ChargedBuffer>{};
+            if (bytes) {
+                void* p = nullptr;
+                if (vkMapMemory(bigContext->device(), b->memory(), 0, bytes, 0, &p) !=
+                    VK_SUCCESS)
+                    return std::shared_ptr<ChargedBuffer>{};
+                std::memcpy(p, data, bytes);
+                vkUnmapMemory(bigContext->device(), b->memory());
+            }
+            return b;
+        };
+        auto rewrite = [&](std::shared_ptr<ChargedBuffer> const& b, void const* data,
+                            VkDeviceSize bytes) {
+            void* p = nullptr;
+            if (vkMapMemory(bigContext->device(), b->memory(), 0, bytes, 0, &p) != VK_SUCCESS)
+                return false;
+            std::memcpy(p, data, bytes);
+            vkUnmapMemory(bigContext->device(), b->memory());
+            return true;
+        };
+        auto runPose = [&](DeformPipeline::BeginInfo info, std::vector<float>* out,
+                            DeformSemantic* semOut) {
+            DeformSemantic sem = DeformSemantic::Ok;
+            VkResult st = VK_SUCCESS;
+            auto c = cachedPipe->Begin(std::move(info), &st, &sem);
+            if (!c || st != VK_SUCCESS) return false;
+            if (!Prove(native)) return false;
+            if (c->Poll(&sem) != VK_SUCCESS) return false;
+            if (semOut) *semOut = sem;
+            if (sem != DeformSemantic::Ok || !c->succeeded()) return false;
+            return ReadOutput(native, bigContext, c, out);
+        };
+        auto runDirect = [&](DeformPipeline::BeginInfo info, std::vector<float>* out) {
+            TestDisableDeformEvalCache(true);
+            DeformSemantic sem = DeformSemantic::Ok;
+            auto c = cachedPipe->Begin(std::move(info), &cstatus, &sem);
+            bool ok = c && cstatus == VK_SUCCESS && Prove(native) &&
+                c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok && c->succeeded() &&
+                ReadOutput(native, bigContext, c, out);
+            TestDisableDeformEvalCache(false);
+            return ok;
+        };
+        auto bitEq = [](std::vector<float> const& a, std::vector<float> const& b) {
+            return a.size() == b.size() &&
+                std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+        };
+
+        // 12 CVs over 4 curves, n=5 (the file's rest set).
+        const std::vector<float> cPoints{
+            0.0f, 0.0f, 0.0f, 0.1f, 0.0f, 0.1f, 0.2f, 0.0f, 0.2f,
+            1.0f, 0.0f, 0.0f, 1.1f, 0.0f, 0.1f, 1.2f, 0.0f, 0.2f,
+            2.0f, 0.0f, 0.0f, 2.1f, 0.0f, 0.1f, 2.2f, 0.0f, 0.2f,
+            3.0f, 0.0f, 0.0f, 3.1f, 0.0f, 0.1f, 3.2f, 0.0f, 0.2f,
+        };
+        const std::vector<uint32_t> cOffsets{0, 3, 6, 9, 12};
+        const std::vector<float> cTargets{
+            0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+            2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+        };
+        std::vector<float> cPosed = restSamples;
+        for (size_t i = 0; i < cPosed.size(); i += 3) cPosed[i] += 0.5f;
+        auto cPointsBuf = bigUpload(cPoints.data(), cPoints.size() * sizeof(float));
+        auto cOffsetsBuf = UploadVulkanDeviceBytes(native, bigContext, cOffsets.data(),
+            cOffsets.size() * sizeof(uint32_t));
+        auto cTargetsBuf = bigUpload(cTargets.data(), cTargets.size() * sizeof(float));
+        CHECK(cPointsBuf && cOffsetsBuf && cTargetsBuf);
+        auto makeInfo = [&](std::vector<float> const& rest, std::vector<float> const& posed,
+                            int n) {
+            DeformPipeline::BeginInfo info;
+            info.points = cPointsBuf;
+            info.curveOffsets = cOffsetsBuf;
+            info.rootTargets = cTargetsBuf;
+            info.curveCount = 4;
+            info.pointCount = 12;
+            info.restSamples = rest;
+            info.posedSamples = posed;
+            info.sampleCount = n;
+            info.smoothing = 0.0;
+            info.mask = {1.0f, 1, nullptr, 0};
+            info.enabled = {1, 1, nullptr, 0};
+            info.lockRoots = {0, 1, nullptr, 0};
+            info.groomEnvelope = 1.0f;
+            return info;
+        };
+
+        // Case 11: fill then hit, both bitwise the direct path.
+        {
+            uint64_t h0 = DeformEvalCacheHitsForTesting();
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            std::vector<float> fillOut, hitOut, directOut;
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &fillOut, nullptr));
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &hitOut, nullptr));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 1);
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 1);
+            CHECK(runDirect(makeInfo(restSamples, cPosed, 5), &directOut));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 1);
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 1);
+            CHECK(bitEq(fillOut, directOut));
+            CHECK(bitEq(hitOut, directOut));
+            std::puts("Case 11 (cache fill/hit bitwise direct): PASS");
+        }
+
+        // Case 12: a CV change (same buffer, rewritten bytes) mismatch-refills,
+        // bitwise direct. The repeat between the fills resets the miss
+        // streak so no bypass engages.
+        {
+            CHECK(freshPipe());
+            uint64_t h0 = DeformEvalCacheHitsForTesting();
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            uint64_t b0 = DeformEvalCacheBypassedForTesting();
+            std::vector<float> moved = cPoints;
+            for (size_t i = 0; i < moved.size(); i += 3) moved[i] += 0.25f;
+            CHECK(rewrite(cPointsBuf, moved.data(), moved.size() * sizeof(float)));
+            std::vector<float> fillOut, hitOut, refillOut, hit2Out, directOut;
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &fillOut, nullptr));
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &hitOut, nullptr));
+            CHECK(rewrite(cPointsBuf, cPoints.data(), cPoints.size() * sizeof(float)));
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &refillOut, nullptr));
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &hit2Out, nullptr));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 2);
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 2);
+            CHECK(DeformEvalCacheBypassedForTesting() - b0 == 0);
+            CHECK(runDirect(makeInfo(restSamples, cPosed, 5), &directOut));
+            CHECK(bitEq(refillOut, directOut));
+            CHECK(bitEq(hit2Out, directOut));
+            std::puts("Case 12 (CV refill bitwise direct): PASS");
+        }
+
+        // Case 13: rest, n-grow, and n-shrink changes force, bitwise direct.
+        // Each force is followed by a repeat hit so no bypass engages.
+        {
+            CHECK(freshPipe());
+            uint64_t h0 = DeformEvalCacheHitsForTesting();
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            uint64_t b0 = DeformEvalCacheBypassedForTesting();
+            std::vector<float> rest2 = restSamples;
+            rest2[0] += 0.125f;
+            std::vector<float> posed2 = cPosed;
+            posed2[0] += 0.125f;
+            std::vector<float> got, direct;
+            CHECK(runPose(makeInfo(rest2, posed2, 5), &got, nullptr));
+            CHECK(runPose(makeInfo(rest2, posed2, 5), &got, nullptr));
+            CHECK(runDirect(makeInfo(rest2, posed2, 5), &direct));
+            CHECK(bitEq(got, direct));
+            // n = 8 (grow: R reallocates) then n = 5 (shrink: rows reused).
+            std::vector<float> rest8 = restSamples;
+            const float extra[9] = {2.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f};
+            rest8.insert(rest8.end(), extra, extra + 9);
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.5f;
+            CHECK(runPose(makeInfo(rest8, posed8, 8), &got, nullptr));
+            CHECK(runPose(makeInfo(rest8, posed8, 8), &got, nullptr));
+            CHECK(runDirect(makeInfo(rest8, posed8, 8), &direct));
+            CHECK(bitEq(got, direct));
+            CHECK(runPose(makeInfo(rest2, posed2, 5), &got, nullptr));
+            CHECK(runPose(makeInfo(rest2, posed2, 5), &got, nullptr));
+            CHECK(runDirect(makeInfo(rest2, posed2, 5), &direct));
+            CHECK(bitEq(got, direct));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 3);
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 3);
+            CHECK(DeformEvalCacheBypassedForTesting() - b0 == 0);
+            std::puts("Case 13 (rest/n-change force bitwise direct): PASS");
+        }
+
+        // Case 14: point-count growth forces, bitwise direct.
+        {
+            CHECK(freshPipe());
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            std::vector<float> pts24 = cPoints;
+            pts24.insert(pts24.end(), cPoints.begin(), cPoints.end());
+            std::vector<uint32_t> off24{0, 3, 6, 9, 12, 15, 18, 21, 24};
+            std::vector<float> tgt24 = cTargets;
+            tgt24.insert(tgt24.end(), cTargets.begin(), cTargets.end());
+            auto ptsBuf = bigUpload(pts24.data(), pts24.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, bigContext, off24.data(),
+                off24.size() * sizeof(uint32_t));
+            auto tgtBuf = bigUpload(tgt24.data(), tgt24.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto info24 = makeInfo(restSamples, cPosed, 5);
+            info24.points = ptsBuf;
+            info24.curveOffsets = offBuf;
+            info24.rootTargets = tgtBuf;
+            info24.curveCount = 8;
+            info24.pointCount = 24;
+            std::vector<float> got, direct;
+            // Fill at 12 points first so the 24-point pose is a growth
+            // force (24 > filled 12), not just a first-use force.
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &got, nullptr));
+            CHECK(runPose(info24, &got, nullptr));
+            auto direct24 = makeInfo(restSamples, cPosed, 5);
+            direct24.points = ptsBuf;
+            direct24.curveOffsets = offBuf;
+            direct24.rootTargets = tgtBuf;
+            direct24.curveCount = 8;
+            direct24.pointCount = 24;
+            CHECK(runDirect(std::move(direct24), &direct));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 2);
+            CHECK(bitEq(got, direct));
+            std::puts("Case 14 (growth force bitwise direct): PASS");
+        }
+
+        // Case 15: NaN CVs flag NonFinite on the cached path, then recovery.
+        {
+            CHECK(freshPipe());
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            uint64_t b0 = DeformEvalCacheBypassedForTesting();
+            std::vector<float> nanPts = cPoints;
+            nanPts[4] = std::numeric_limits<float>::quiet_NaN();
+            CHECK(rewrite(cPointsBuf, nanPts.data(), nanPts.size() * sizeof(float)));
+            DeformSemantic sem = DeformSemantic::Ok;
+            VkResult st = VK_SUCCESS;
+            auto c = cachedPipe->Begin(makeInfo(restSamples, cPosed, 5), &st, &sem);
+            CHECK(!c && sem == DeformSemantic::NonFinite);
+            CHECK(rewrite(cPointsBuf, cPoints.data(), cPoints.size() * sizeof(float)));
+            // Recovery: the NaN fill neither poisons the cache nor the
+            // output. (Two consecutive refills arm the bypass, so the
+            // second recovery pose runs direct; both agree bitwise.)
+            std::vector<float> got, direct;
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &got, nullptr));
+            CHECK(runDirect(makeInfo(restSamples, cPosed, 5), &direct));
+            CHECK(bitEq(got, direct));
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &got, nullptr));
+            CHECK(bitEq(got, direct));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 2);
+            CHECK(DeformEvalCacheBypassedForTesting() - b0 == 1);
+            std::puts("Case 15 (NaN flags, then recovers): PASS");
+        }
+
+        // Case 16: two consecutive refills bypass; a proof-matching probe resumes.
+        {
+            CHECK(freshPipe());
+            uint64_t h0 = DeformEvalCacheHitsForTesting();
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            uint64_t b0 = DeformEvalCacheBypassedForTesting();
+            std::vector<float> cvA = cPoints, cvB = cPoints;
+            for (size_t i = 0; i < cvB.size(); i += 3) cvB[i] += 1.5f;
+            CHECK(rewrite(cPointsBuf, cvA.data(), cvA.size() * sizeof(float)));
+            std::vector<float> got, direct;
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &got, nullptr));
+            CHECK(runDirect(makeInfo(restSamples, cPosed, 5), &direct));
+            CHECK(bitEq(got, direct));
+            CHECK(rewrite(cPointsBuf, cvB.data(), cvB.size() * sizeof(float)));
+            CHECK(runPose(makeInfo(restSamples, cPosed, 5), &got, nullptr));
+            auto infoB = makeInfo(restSamples, cPosed, 5);
+            CHECK(runDirect(std::move(infoB), &direct));
+            CHECK(bitEq(got, direct));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 2);
+            // 32 churning poses run direct under backoff.
+            for (int k = 0; k < 32; ++k) {
+                std::vector<float> cvK = cPoints;
+                for (size_t i = 0; i < cvK.size(); i += 3)
+                    cvK[i] += 3.0f + 0.5f * float(k);
+                CHECK(rewrite(cPointsBuf, cvK.data(), cvK.size() * sizeof(float)));
+                CHECK(runPose(makeInfo(restSamples, cPosed, 5), &got, nullptr));
+                auto infoK = makeInfo(restSamples, cPosed, 5);
+                CHECK(runDirect(std::move(infoK), &direct));
+                CHECK(bitEq(got, direct));
+            }
+            CHECK(DeformEvalCacheBypassedForTesting() - b0 == 32);
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 2);
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 0);
+            // Probe with the last-filled CVs: verify matches, hits resume.
+            CHECK(rewrite(cPointsBuf, cvB.data(), cvB.size() * sizeof(float)));
+            auto infoP = makeInfo(restSamples, cPosed, 5);
+            CHECK(runPose(std::move(infoP), &got, nullptr));
+            auto infoQ = makeInfo(restSamples, cPosed, 5);
+            CHECK(runDirect(std::move(infoQ), &direct));
+            CHECK(bitEq(got, direct));
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 1);
+            CHECK(rewrite(cPointsBuf, cPoints.data(), cPoints.size() * sizeof(float)));
+            std::puts("Case 16 (bypass then probe resumes): PASS");
+        }
+
+        // Case 17: past-prefix suffix (600k points) bitwise direct.
+        {
+            CHECK(freshPipe());
+            uint64_t h0 = DeformEvalCacheHitsForTesting();
+            uint64_t m0 = DeformEvalCacheMissesForTesting();
+            uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
+            int const n = 8;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x12345678u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            std::vector<float> rest8{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                0.5f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f,
+                0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f,
+            };
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
+            auto ptsBuf = bigUpload(pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, bigContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = bigUpload(tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkBig = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest8;
+                info.posedSamples = posed8;
+                info.sampleCount = n;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            std::vector<float> fillOut, hitOut, directOut;
+            CHECK(runPose(mkBig(), &fillOut, nullptr));
+            CHECK(runPose(mkBig(), &hitOut, nullptr));
+            CHECK(DeformEvalCacheMissesForTesting() - m0 == 1);
+            CHECK(DeformEvalCacheHitsForTesting() - h0 == 1);
+            CHECK(runDirect(mkBig(), &directOut));
+            CHECK(bitEq(fillOut, directOut));
+            CHECK(bitEq(hitOut, directOut));
+            std::puts("Case 17 (600k suffix bitwise direct): PASS");
+        }
+
+        // Case 18: over budget runs direct (unfunded), bitwise direct.
+        {
+            uint64_t u0 = DeformEvalCacheUnfundedForTesting();
+            VkResult st2 = VK_SUCCESS;
+            auto smallPipe =
+                DeformPipeline::Create(context, evalSpv, applySpv, &st2, cacheSpv);
+            CHECK(smallPipe && st2 == VK_SUCCESS);
+            // n = 100 needs a 400MiB R: never funded under the 32MiB budget.
+            std::vector<float> rest100(size_t(100) * 3);
+            for (int i = 0; i < 100; ++i) {
+                rest100[size_t(i) * 3] = float(i % 10);
+                rest100[size_t(i) * 3 + 1] = float((i / 10) % 10);
+                rest100[size_t(i) * 3 + 2] = float(i % 3);
+            }
+            std::vector<float> posed100 = rest100;
+            for (size_t i = 0; i < posed100.size(); i += 3) posed100[i] += 0.1f;
+            DeformPipeline::BeginInfo info;
+            info.points = pointsBuf;
+            info.curveOffsets = offsetsBuf;
+            info.rootTargets = targetsBuf;
+            info.curveCount = 2;
+            info.pointCount = 6;
+            info.restSamples = rest100;
+            info.posedSamples = posed100;
+            info.sampleCount = 100;
+            info.smoothing = 0.0;
+            info.mask = {1.0f, 1, nullptr, 0};
+            info.enabled = {1, 1, nullptr, 0};
+            info.lockRoots = {0, 1, nullptr, 0};
+            info.groomEnvelope = 1.0f;
+            DeformSemantic sem = DeformSemantic::Ok;
+            auto c = smallPipe->Begin(info, &st2, &sem);
+            CHECK(c && st2 == VK_SUCCESS);
+            CHECK(Prove(native));
+            CHECK(c->Poll(&sem) == VK_SUCCESS);
+            CHECK(sem == DeformSemantic::Ok && c->succeeded());
+            std::vector<float> got;
+            CHECK(ReadOutput(native, context, c, &got));
+            CHECK(DeformEvalCacheUnfundedForTesting() - u0 == 1);
+            // The direct-only pipe on the same context agrees bitwise.
+            DeformSemantic sem2 = DeformSemantic::Ok;
+            auto c2 = pipe->Begin(std::move(info), &st2, &sem2);
+            CHECK(c2 && st2 == VK_SUCCESS);
+            CHECK(Prove(native));
+            CHECK(c2->Poll(&sem2) == VK_SUCCESS);
+            CHECK(sem2 == DeformSemantic::Ok && c2->succeeded());
+            std::vector<float> direct;
+            CHECK(ReadOutput(native, context, c2, &direct));
+            CHECK(got.size() == direct.size());
+            CHECK(std::memcmp(got.data(), direct.data(), got.size() * sizeof(float)) == 0);
+            std::puts("Case 18 (unfunded runs direct): PASS");
+        }
     }
 
     std::puts("Vulkan deform pipeline: PASS");

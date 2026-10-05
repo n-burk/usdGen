@@ -1102,6 +1102,9 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME OR (USDGEN_BUILD_TESTS AND USDGEN_BUILD_VULKAN_T
     _usdgen_compile_vulkan_shader(noise_generate noiseGenerate)
     _usdgen_compile_vulkan_shader(deform_evaluate deformEvaluate)
     _usdgen_compile_vulkan_shader(deform_apply deformApply)
+    _usdgen_compile_vulkan_shader(deform_evaluate_verify deformEvaluateVerify)
+    _usdgen_compile_vulkan_shader(deform_evaluate_fill deformEvaluateFill)
+    _usdgen_compile_vulkan_shader(deform_evaluate_cached deformEvaluateCached)
     _usdgen_compile_vulkan_shader(overlap widthOverlapWitness)
     _usdgen_compile_vulkan_shader(resample_vk resampleVk)
     _usdgen_compile_vulkan_shader(mapvk_sample mapVkSample)
@@ -1574,10 +1577,14 @@ if(USDGEN_BUILD_VULKAN_TESTS)
         LABELS "T1;parity;cuda;vulkan;operators;style" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 120 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
     add_executable(testUsdGenVulkanDeform tests/testUsdGenVulkanDeform.cpp
-        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_deform_evaluate_verify_spv}" "${_usdgen_vulkan_deform_evaluate_fill_spv}"
+        "${_usdgen_vulkan_deform_evaluate_cached_spv}")
     target_link_libraries(testUsdGenVulkanDeform PRIVATE usdGenVulkanNative usdGenMath)
     add_test(NAME testUsdGenVulkanDeform COMMAND testUsdGenVulkanDeform
-        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}")
+        "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_deform_evaluate_verify_spv}" "${_usdgen_vulkan_deform_evaluate_fill_spv}"
+        "${_usdgen_vulkan_deform_evaluate_cached_spv}")
     set_tests_properties(testUsdGenVulkanDeform PROPERTIES
         LABELS "T1;vulkan;operators;deform" RESOURCE_LOCK usdgen_gpu
         TIMEOUT 60 SKIP_RETURN_CODE 77 FAIL_REGULAR_EXPRESSION "Validation Error;VUID-;SYNC-HAZARD")
@@ -2835,6 +2842,8 @@ if(USDGEN_ENABLE_VULKAN_RUNTIME)
     target_link_libraries(benchUsdGenRbfDeform PRIVATE usdGenVulkanNative)
     target_sources(benchUsdGenRbfDeform PRIVATE
         "${_usdgen_vulkan_deform_evaluate_spv}" "${_usdgen_vulkan_deform_apply_spv}"
+        "${_usdgen_vulkan_deform_evaluate_verify_spv}" "${_usdgen_vulkan_deform_evaluate_fill_spv}"
+        "${_usdgen_vulkan_deform_evaluate_cached_spv}"
         "${_usdgen_vulkan_rbfvk_extent_spv}" "${_usdgen_vulkan_rbfvk_gram_spv}"
         "${_usdgen_vulkan_rbfvk_build_matrix_spv}" "${_usdgen_vulkan_rbfvk_lu_spv}"
         "${_usdgen_vulkan_rbfvk_rhs_spv}" "${_usdgen_vulkan_rbfvk_trisolve_spv}"

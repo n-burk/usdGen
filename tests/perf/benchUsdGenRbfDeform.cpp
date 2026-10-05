@@ -263,7 +263,12 @@ int VulkanDeformLeg(std::string const &spvDir)
 {
     std::vector<uint32_t> const evalSpv = LoadSpv(spvDir + "/deformEvaluate.spv");
     std::vector<uint32_t> const applySpv = LoadSpv(spvDir + "/deformApply.spv");
-    if (evalSpv.empty() || applySpv.empty()) {
+    vulkan::DeformEvalCacheSpirv cacheSpv;
+    cacheSpv.verify = LoadSpv(spvDir + "/deformEvaluateVerify.spv");
+    cacheSpv.fill = LoadSpv(spvDir + "/deformEvaluateFill.spv");
+    cacheSpv.cached = LoadSpv(spvDir + "/deformEvaluateCached.spv");
+    if (evalSpv.empty() || applySpv.empty() || cacheSpv.verify.empty() ||
+        cacheSpv.fill.empty() || cacheSpv.cached.empty()) {
         std::printf("Vulkan deform leg: spirv not found in %s\n", spvDir.c_str());
         return 1;
     }
@@ -298,7 +303,7 @@ int VulkanDeformLeg(std::string const &spvDir)
         return 1;
     }
     VkResult status = VK_SUCCESS;
-    auto pipe = vulkan::DeformPipeline::Create(context, evalSpv, applySpv, &status);
+    auto pipe = vulkan::DeformPipeline::Create(context, evalSpv, applySpv, &status, cacheSpv);
     if (!pipe || status != VK_SUCCESS) {
         std::printf("Vulkan deform leg: pipeline creation failed\n");
         return 1;
