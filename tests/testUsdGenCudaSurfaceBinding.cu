@@ -215,6 +215,31 @@ int main() {
     for (size_t i = 0; i < preAdoptTargets.size(); ++i)
         CHECK(adoptedTargets[i].x == preAdoptTargets[i].x && adoptedTargets[i].y == preAdoptTargets[i].y &&
               adoptedTargets[i].z == preAdoptTargets[i].z);
+    // Fresh error paths through the fused update kernel: rejection statuses
+    // match the unfused sequence and the publication is retained.
+    DeviceBuffer<float3> freshBadCurrent;
+    auto freshNonFinite = changed;
+    freshNonFinite[1].z = std::numeric_limits<float>::infinity();
+    CHECK(Upload(freshBadCurrent, freshNonFinite));
+    CHECK(fresh.BeginFreshUpdate(ConstView(freshBadCurrent), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(fresh.CommitFreshUpdate() == SurfaceBindingStatus::NonFiniteInput);
+    DeviceBuffer<int> freshBadPrim;
+    CHECK(Upload(freshBadPrim, std::vector<int>{0, 99}));
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(freshBadPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(fresh.CommitFreshUpdate() == SurfaceBindingStatus::InvalidRootBinding);
+    float2* freshBadUv = nullptr;
+    CHECK(UploadUv(&freshBadUv, std::vector<float2>{make_float2(.25f, .25f),
+                    make_float2(std::numeric_limits<float>::quiet_NaN(), .5f)}));
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {freshBadUv, 2}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+    CHECK(fresh.CommitFreshUpdate() == SurfaceBindingStatus::InvalidRootBinding);
+    CHECK(cudaFree(freshBadUv) == cudaSuccess);
+    CHECK(Download(fresh.currentSamples(), &adoptedSamples) && adoptedSamples.size() == preAdoptSamples.size());
+    for (size_t i = 0; i < preAdoptSamples.size(); ++i)
+        CHECK(adoptedSamples[i].x == preAdoptSamples[i].x && adoptedSamples[i].y == preAdoptSamples[i].y &&
+              adoptedSamples[i].z == preAdoptSamples[i].z);
     CHECK(fresh.BeginFreshUpdate({}, ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::InvalidArgument);
     CHECK(!fresh.HasUnprovenFreshWork());
     cudaGraph_t captured = nullptr;

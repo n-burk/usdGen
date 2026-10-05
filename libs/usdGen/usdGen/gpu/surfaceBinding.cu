@@ -167,33 +167,6 @@ __global__ void GatherSamples(DeviceView<const float3> vertices,
     }
 }
 
-__global__ void ValidateRoots(DeviceView<const int32_t> skinPrim,
-                              DeviceView<const float2> uv,
-                              DeviceView<const uint32_t> offsets,
-                              size_t faceCount,
-                              DeviceView<const uint32_t> indices,
-                              int* error) {
-    size_t stride = size_t(blockDim.x) * gridDim.x;
-    for (size_t root = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-         root < skinPrim.size; root += stride) {
-        int32_t face = skinPrim.data[root];
-        float2 value = uv.data[root];
-        if (face < 0 || size_t(face) >= faceCount ||
-            !isfinite(value.x) || !isfinite(value.y)) {
-            mark(error, kBadRoot);
-            continue;
-        }
-        uint32_t begin = offsets.data[face];
-        uint32_t end = offsets.data[size_t(face) + 1];
-        size_t count = end >= begin ? size_t(end - begin) : 0;
-        if ((count != 3 && count != 4) || end < begin ||
-            size_t(end) > indices.size || value.x < 0.0f || value.x > 1.0f ||
-            value.y < 0.0f || value.y > 1.0f ||
-            (count == 3 && value.x + value.y > 1.0f))
-            mark(error, kBadRoot);
-    }
-}
-
 __device__ float3 RootPosition(DeviceView<const float3> vertices,
                                DeviceView<const uint32_t> offsets,
                                DeviceView<const uint32_t> indices,
@@ -220,20 +193,76 @@ __device__ float3 RootPosition(DeviceView<const float3> vertices,
                            c.z * uv.x * uv.y + d.z * u0 * uv.y);
 }
 
-__global__ void GatherRoots(DeviceView<const float3> vertices,
-                            DeviceView<const int32_t> skinPrim,
-                            DeviceView<const float2> uv,
-                            DeviceView<const uint32_t> offsets,
-                            DeviceView<const uint32_t> indices,
-                            DeviceView<float3> output, int* error) {
-    if (atomicAdd(error, 0) != 0) return;
+// Single-launch update validation+gather. One launch replaces the
+// ValidateSurface + GatherSamples + ValidateRoots + GatherRoots sequence
+// in Update: four grid-teardown round-trips become one, and the roots
+// pass reads skinPrim/uv/offsets once instead of twice. Bit-identity:
+// every mark is an atomicOr of a deterministic per-element predicate, so
+// the final flag is the same union whatever order blocks run in; when
+// the flag is zero no whole-kernel early-out could have triggered, so
+// every output element is written with the same formula. Roots are
+// validated per element before their own dereference (no cross-block
+// early-out exists inside one launch), so invalid roots still never
+// dereference, exactly as before.
+__global__ void ValidateAndGatherUpdate(DeviceView<const float3> vertices,
+                                        DeviceView<const uint32_t> sampleIndices,
+                                        DeviceView<float3> samplesOut,
+                                        DeviceView<const int32_t> skinPrim,
+                                        DeviceView<const float2> uv,
+                                        DeviceView<const uint32_t> offsets,
+                                        size_t faceCount,
+                                        DeviceView<const uint32_t> indices,
+                                        DeviceView<float3> rootsOut, int* error) {
     size_t stride = size_t(blockDim.x) * gridDim.x;
-    for (size_t root = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-         root < output.size; root += stride) {
-        float3 value = RootPosition(vertices, offsets, indices,
-                                    skinPrim.data[root], uv.data[root]);
+    size_t lane = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    for (size_t i = lane; i < vertices.size; i += stride) {
+        if (!finite3(vertices.data[i])) mark(error, kNonFinite);
+    }
+    for (size_t i = lane; i < indices.size; i += stride) {
+        if (indices.data[i] >= vertices.size) mark(error, kBadTopology);
+    }
+    for (size_t face = lane; face < faceCount; face += stride) {
+        uint32_t begin = offsets.data[face];
+        uint32_t end = offsets.data[face + 1];
+        size_t count = end >= begin ? size_t(end - begin) : 0;
+        if (end < begin || size_t(end) > indices.size ||
+            (count != 3 && count != 4))
+            mark(error, kBadTopology);
+    }
+    if (lane == 0 &&
+        (offsets.data[0] != 0 || size_t(offsets.data[faceCount]) != indices.size))
+        mark(error, kBadTopology);
+    for (size_t i = lane; i < samplesOut.size; i += stride) {
+        uint32_t index = sampleIndices.data[i];
+        if (size_t(index) >= vertices.size) {
+            mark(error, kBadTopology);
+            continue;
+        }
+        float3 value = vertices.data[index];
         if (!finite3(value)) mark(error, kNonFinite);
-        else output.data[root] = value;
+        else samplesOut.data[i] = value;
+    }
+    for (size_t root = lane; root < skinPrim.size; root += stride) {
+        int32_t face = skinPrim.data[root];
+        float2 value = uv.data[root];
+        if (face < 0 || size_t(face) >= faceCount ||
+            !isfinite(value.x) || !isfinite(value.y)) {
+            mark(error, kBadRoot);
+            continue;
+        }
+        uint32_t begin = offsets.data[face];
+        uint32_t end = offsets.data[size_t(face) + 1];
+        size_t count = end >= begin ? size_t(end - begin) : 0;
+        if ((count != 3 && count != 4) || end < begin ||
+            size_t(end) > indices.size || value.x < 0.0f || value.x > 1.0f ||
+            value.y < 0.0f || value.y > 1.0f ||
+            (count == 3 && value.x + value.y > 1.0f)) {
+            mark(error, kBadRoot);
+            continue;
+        }
+        float3 gathered = RootPosition(vertices, offsets, indices, face, value);
+        if (!finite3(gathered)) mark(error, kNonFinite);
+        else rootsOut.data[root] = gathered;
     }
 }
 
@@ -692,33 +721,17 @@ SurfaceBindingStatus CudaSurfaceBinding::Update(
     if (cudaStreamWaitEvent(stream, ready_, 0) != cudaSuccess ||
         cudaMemsetAsync(error_.data(), 0, sizeof(int), stream) != cudaSuccess)
         return abort(SurfaceBindingStatus::CudaError, "surface update ordering failed");
-    size_t work = std::max(currentVertices.size, skinPrim.size);
-    ValidateSurface<<<Blocks(currentVertices.size), 256, 0, stream>>>(
-        currentVertices, {faceOffsets_.data(), faceOffsets_.size()}, faceCount_,
-        {faceIndices_.data(), faceIndices_.size()}, error_.data());
+    size_t work = currentVertices.size;
+    if (sampleCount_ > work) work = sampleCount_;
+    if (skinPrim.size > work) work = skinPrim.size;
+    ValidateAndGatherUpdate<<<Blocks(work), 256, 0, stream>>>(
+        currentVertices, {sampleIndices_.data(), sampleIndices_.size()},
+        pendingCurrentSamples_.view(), skinPrim, skinPrimUv,
+        {faceOffsets_.data(), faceOffsets_.size()}, faceCount_,
+        {faceIndices_.data(), faceIndices_.size()},
+        pendingRootTargets_.view(), error_.data());
     if (cudaGetLastError() != cudaSuccess)
-        return abort(SurfaceBindingStatus::CudaError, "current surface validation launch failed");
-    if (sampleCount_) {
-        GatherSamples<<<Blocks(sampleCount_), 256, 0, stream>>>(
-            currentVertices, {sampleIndices_.data(), sampleIndices_.size()},
-            pendingCurrentSamples_.view(), error_.data());
-        if (cudaGetLastError() != cudaSuccess)
-            return abort(SurfaceBindingStatus::CudaError, "current sample gather launch failed");
-    }
-    if (skinPrim.size) {
-        ValidateRoots<<<Blocks(work), 256, 0, stream>>>(
-            skinPrim, skinPrimUv, {faceOffsets_.data(), faceOffsets_.size()}, faceCount_,
-            {faceIndices_.data(), faceIndices_.size()}, error_.data());
-        if (cudaGetLastError() != cudaSuccess)
-            return abort(SurfaceBindingStatus::CudaError, "root validation launch failed");
-        GatherRoots<<<Blocks(skinPrim.size), 256, 0, stream>>>(
-            currentVertices, skinPrim, skinPrimUv,
-            {faceOffsets_.data(), faceOffsets_.size()},
-            {faceIndices_.data(), faceIndices_.size()},
-            pendingRootTargets_.view(), error_.data());
-        if (cudaGetLastError() != cudaSuccess)
-            return abort(SurfaceBindingStatus::CudaError, "root target gather launch failed");
-    }
+        return abort(SurfaceBindingStatus::CudaError, "surface update validation launch failed");
     if (cudaEventRecord(ready_, stream) != cudaSuccess)
         return abort(SurfaceBindingStatus::CudaError, "surface update event record failed");
     return SurfaceBindingStatus::Ok;
