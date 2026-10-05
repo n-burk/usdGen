@@ -5,6 +5,7 @@
 #include "fencePool.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <cmath>
@@ -39,6 +40,25 @@ constexpr uint32_t kEvalStorage = 5;
 constexpr uint32_t kApplyStorage = 9;
 
 uint32_t Groups(uint32_t n) { return (n + kLocalSize - 1) / kLocalSize; }
+
+// Scratch pooling: a pose allocates 8 buffers and frees them at candidate
+// destruction, and vkAllocateMemory/vkFreeMemory cost ~70/80us (median) each
+// on the qualified driver, so ~1.2ms of every pose is allocation lifecycle.
+// Seven of the eight are reusable across poses: the proof/eval status words,
+// the eval/apply UBOs, the coefficient/sample uploads, and the warped
+// staging buffer are all GPU-idle once the candidate proves (the apply fence
+// signals after the last read) and none is read on the host afterwards.
+// Only outPoints stays per-pose: it is exposed through Candidate::output()
+// and the caller may read it indefinitely. The coefficient/sample buffers
+// are allocated at their max (sampleCount is rejected above 100) so a pooled
+// set fits any pose; the warped buffer must match the pose's point count
+// exactly. Like the fence pool, only proven-idle sets rejoin: a set from a
+// failed or unproven submission stays with its owner for quarantine or
+// destruction, never pooled.
+constexpr int kMaxRbfSamples = 100;
+constexpr VkDeviceSize kMaxCoefBytes = VkDeviceSize(kMaxRbfSamples + 4) * 24u;
+constexpr VkDeviceSize kMaxSamplesBytes = VkDeviceSize(kMaxRbfSamples) * 24u;
+constexpr size_t kMaxIdleScratchSets = 2;
 
 // Domain codes (deformApply.comp constants).
 enum : uint32_t {
@@ -98,6 +118,23 @@ struct DeformPipeline::Native {
     // of creating. Candidates hold Native by shared_ptr, so the pool
     // outlives every checkout.
     VulkanFencePool fencePool;
+    // Idle per-pose scratch sets (everything but outPoints): allocation
+    // lifecycle costs ~150us per buffer per pose, so proven-idle sets are
+    // checked out by the next Begin instead of allocating. Guarded: Begin
+    // may run on several threads. At most kMaxIdleScratchSets are kept;
+    // surplus sets are destroyed on release. Members destroy after the body
+    // with context (declared first) still alive, so no explicit clear.
+    struct ScratchSet {
+        std::shared_ptr<ChargedBuffer> warped;
+        std::shared_ptr<ChargedBuffer> status;
+        std::shared_ptr<ChargedBuffer> evalStatus;
+        std::shared_ptr<ChargedBuffer> coefBuf;
+        std::shared_ptr<ChargedBuffer> samplesBuf;
+        std::shared_ptr<ChargedBuffer> evalUbo;
+        std::shared_ptr<ChargedBuffer> applyUbo;
+    };
+    std::mutex scratchMutex;
+    std::vector<ScratchSet> scratchIdle;
     ~Native() {
         if (!context) return;
         auto d = context->device();
@@ -130,9 +167,54 @@ struct DeformPipeline::Candidate::State {
     bool pending = false, lost = false, proved = false;
     uint32_t semantic = UINT32_MAX;
     uint32_t pointCount = 0;
+    // Exactly-once guard for the scratch release below: Poll returns the
+    // set early (so the next Begin reuses it while this candidate is still
+    // alive), and the destructor returns it when Poll never ran. Atomic:
+    // two threads may Poll the same candidate concurrently.
+    std::atomic<bool> scratchReturned{false};
     std::unique_ptr<std::shared_ptr<State>> quarantine;
+    // Moves the scratch set back to the pool when it is complete and
+    // pool-sized; anything else (the empty-topology early-out, a failure
+    // path's partial set) is destroyed with the state. The caller proves
+    // GPU idleness: Poll after the apply fence signaled, or the destructor
+    // when nothing is pending. Never throws.
+    void ReturnScratch() noexcept {
+        Native::ScratchSet set;
+        set.warped = std::move(warped);
+        set.status = std::move(status);
+        set.evalStatus = std::move(evalStatus);
+        set.coefBuf = std::move(coefBuf);
+        set.samplesBuf = std::move(samplesBuf);
+        set.evalUbo = std::move(evalUbo);
+        set.applyUbo = std::move(applyUbo);
+        if (!set.warped || !set.status || !set.evalStatus || !set.coefBuf ||
+            !set.samplesBuf || !set.evalUbo || !set.applyUbo)
+            return;
+        // Pool-sized: the fixed buffers fit every pose at or above their
+        // nominal size (descriptors range the actual bytes); the warped
+        // buffer is matched exactly at checkout.
+        if (set.status->sizeBytes() < 4 || set.evalStatus->sizeBytes() < 4 ||
+            set.evalUbo->sizeBytes() < kEvalUboBytes ||
+            set.applyUbo->sizeBytes() < kApplyUboBytes ||
+            set.coefBuf->sizeBytes() < kMaxCoefBytes ||
+            set.samplesBuf->sizeBytes() < kMaxSamplesBytes)
+            return;
+        try {
+            std::lock_guard<std::mutex> lock(native->scratchMutex);
+            if (native->scratchIdle.size() < kMaxIdleScratchSets)
+                native->scratchIdle.push_back(std::move(set));
+        } catch (...) {
+        }
+    }
     ~State() {
         auto d = native->context->device();
+        // A candidate destroyed without Poll still owns a GPU-idle set when
+        // nothing is pending (rejected before submit, or the proof wait
+        // passed and the apply never submitted): rejoin it, else a pending
+        // or lost set stays here for quarantine/destruction, never pooled.
+        if (!scratchReturned.exchange(true, std::memory_order_acq_rel) &&
+            !pending && !lost)
+            ReturnScratch();
         // This runs only when nothing is pending (else the Candidate
         // quarantines instead of destroying), so a proven fence is idle
         // and rejoins the pool; an unproven one is destroyed as before.
@@ -307,6 +389,12 @@ VkResult DeformPipeline::Candidate::Poll(DeformSemantic* semantic) {
         vkUnmapMemory(d, s.status->memory());
         s.pending = false;
         s.proved = true;
+        // The apply fence signaled, so the scratch set is GPU-idle and no
+        // host reader remains (Poll copied the only scalar): rejoin the
+        // pool now, while this candidate is still alive, so the next pose's
+        // Begin reuses it. Exactly once; concurrent Polls share the guard.
+        if (!s.scratchReturned.exchange(true, std::memory_order_acq_rel))
+            s.ReturnScratch();
     }
     if (semantic) *semantic = static_cast<DeformSemantic>(s.semantic);
     return VK_SUCCESS;
@@ -458,9 +546,31 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         auto candidate = std::unique_ptr<Candidate>(new Candidate(s));
         auto d = context->device();
         VkResult r;
+        VkDeviceSize const outBytes = points ? VkDeviceSize(points) * 12u : 4u;
+
+        // Check out a proven-idle scratch set whose warped buffer matches
+        // this pose's point count; anything missing is allocated fresh
+        // below (at pool sizes, so it rejoins the pool in turn). The
+        // empty-topology pose needs no scratch and skips the checkout.
+        if (curves != 0) {
+            std::lock_guard<std::mutex> lock(native_->scratchMutex);
+            for (auto it = native_->scratchIdle.begin();
+                 it != native_->scratchIdle.end(); ++it) {
+                if (it->warped && it->warped->sizeBytes() == outBytes) {
+                    s->warped = std::move(it->warped);
+                    s->status = std::move(it->status);
+                    s->evalStatus = std::move(it->evalStatus);
+                    s->coefBuf = std::move(it->coefBuf);
+                    s->samplesBuf = std::move(it->samplesBuf);
+                    s->evalUbo = std::move(it->evalUbo);
+                    s->applyUbo = std::move(it->applyUbo);
+                    native_->scratchIdle.erase(it);
+                    break;
+                }
+            }
+        }
 
         // outPoints: DEVICE_LOCAL.
-        VkDeviceSize const outBytes = points ? VkDeviceSize(points) * 12u : 4u;
         {
             VkBufferCreateInfo bi{};
             bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -474,16 +584,18 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
         // status: 4B host-visible.
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = 4;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->status = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            if (!s->status) { finish(r); return {}; }
+            if (!s->status) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = 4;
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->status = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    UsdGenExecutionResourceKind::Scratch, &r);
+                if (!s->status) { finish(r); return {}; }
+            }
             void* data = nullptr;
             r = vkMapMemory(d, s->status->memory(), 0, 4, 0, &data);
             if (r != VK_SUCCESS) { finish(r); return {}; }
@@ -492,16 +604,18 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
         // evalStatus: 4B host-visible.
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = 4;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->evalStatus = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            if (!s->evalStatus) { finish(r); return {}; }
+            if (!s->evalStatus) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = 4;
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->evalStatus = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    UsdGenExecutionResourceKind::Scratch, &r);
+                if (!s->evalStatus) { finish(r); return {}; }
+            }
             void* data = nullptr;
             r = vkMapMemory(d, s->evalStatus->memory(), 0, 4, 0, &data);
             if (r != VK_SUCCESS) { finish(r); return {}; }
@@ -519,27 +633,33 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
 
         // warped: DEVICE_LOCAL.
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = outBytes;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->warped = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &r);
-            if (!s->warped) { finish(r); return {}; }
+            if (!s->warped) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = outBytes;
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->warped = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &r);
+                if (!s->warped) { finish(r); return {}; }
+            }
         }
-        // coefBuf: HOST_VISIBLE, 3*m doubles.
+        // coefBuf: HOST_VISIBLE, 3*m doubles. Fresh buffers are allocated
+        // at the max so the set rejoins the pool at any sample count; the
+        // upload and the descriptor range stay at this pose's actual bytes.
         VkDeviceSize const coefBytes = VkDeviceSize(m) * 24u;
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = coefBytes;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->coefBuf = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            if (!s->coefBuf) { finish(r); return {}; }
+            if (!s->coefBuf) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = std::max(coefBytes, kMaxCoefBytes);
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->coefBuf = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    UsdGenExecutionResourceKind::Scratch, &r);
+                if (!s->coefBuf) { finish(r); return {}; }
+            }
             void* data = nullptr;
             r = vkMapMemory(d, s->coefBuf->memory(), 0, coefBytes, 0, &data);
             if (r != VK_SUCCESS) { finish(r); return {}; }
@@ -555,15 +675,17 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         // identical.
         VkDeviceSize const samplesBytes = VkDeviceSize(n) * 24u;
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = samplesBytes;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->samplesBuf = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            if (!s->samplesBuf) { finish(r); return {}; }
+            if (!s->samplesBuf) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = std::max(samplesBytes, kMaxSamplesBytes);
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->samplesBuf = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    UsdGenExecutionResourceKind::Scratch, &r);
+                if (!s->samplesBuf) { finish(r); return {}; }
+            }
             std::vector<double> norm(size_t(3) * size_t(n));
             for (int j = 0; j < n; ++j) {
                 norm[size_t(3 * j)] = double(info.restSamples[size_t(3 * j)]) - rstate.center[0];
@@ -578,15 +700,17 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
         // evalUbo: HOST_VISIBLE, 64B.
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = kEvalUboBytes;
-            bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->evalUbo = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            if (!s->evalUbo) { finish(r); return {}; }
+            if (!s->evalUbo) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = kEvalUboBytes;
+                bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->evalUbo = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    UsdGenExecutionResourceKind::Scratch, &r);
+                if (!s->evalUbo) { finish(r); return {}; }
+            }
             EvalUbo e;
             e.n_m[0] = n; e.n_m[1] = m;
             e.counts[0] = points; e.counts[1] = 0;
@@ -602,15 +726,17 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
         // applyUbo: HOST_VISIBLE, 80B.
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = kApplyUboBytes;
-            bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->applyUbo = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            if (!s->applyUbo) { finish(r); return {}; }
+            if (!s->applyUbo) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = kApplyUboBytes;
+                bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->applyUbo = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    UsdGenExecutionResourceKind::Scratch, &r);
+                if (!s->applyUbo) { finish(r); return {}; }
+            }
             ApplyUbo a = {};
             a.counts[0] = curves; a.counts[1] = points; a.counts[2] = n;
             a.groomEnvelope = info.groomEnvelope;
