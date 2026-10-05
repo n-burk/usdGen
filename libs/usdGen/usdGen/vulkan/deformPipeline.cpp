@@ -944,38 +944,17 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             r = vkEndCommandBuffer(cmds[0]);
         }
         if (r != VK_SUCCESS) { finish(r); return {}; }
-        s->proofFence = native_->fencePool.Acquire(d, &r);
-        if (!s->proofFence) { finish(r); return {}; }
-        VkSubmitInfo submit{};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1; submit.pCommandBuffers = &cmds[0];
-        s->pending = true; // proof owns the same allocations as the final submit
-        r = vkQueueSubmit(context->computeQueue(), 1, &submit, s->proofFence);
-        if (r == VK_SUCCESS)
-            r = vkWaitForFences(d, 1, &s->proofFence, VK_TRUE, 10000000000ull);
-        if (r != VK_SUCCESS) { candidate->Quarantine(); finish(r); return {}; }
-        s->pending = false;
-        uint32_t st = 0;
-        if (r == VK_SUCCESS) {
-            void* data = nullptr;
-            r = vkMapMemory(d, s->evalStatus->memory(), 0, 4, 0, &data);
-            if (r == VK_SUCCESS) {
-                std::memcpy(&st, data, 4);
-                vkUnmapMemory(d, s->evalStatus->memory());
-            }
-        }
-        // The proof wait above succeeded, so the fence is idle and rejoins
-        // the pool even when the status readback fails.
-        native_->fencePool.Release(d, s->proofFence);
-        s->proofFence = VK_NULL_HANDLE;
-        if (r != VK_SUCCESS) { finish(r); return {}; }
-        if (st != 0) return reject(DeformSemantic::NonFinite);
-
-        // cmd1: apply (async on candidate fence). No zero-fill: every
-        // apply thread writes its point or reports a status first (each
-        // early return calls StatusErr), so status 0 implies every point
-        // was written, and any other status discards the output; the fill
-        // is never read.
+        // cmd1 is recorded before the eval proof runs, not after it: the
+        // recording touches only host-side handles and counts (applySet,
+        // the pipelines, curves/points), so it needs nothing the eval
+        // produces, and the driver record calls then overlap the 13ms eval
+        // instead of serializing behind the proof wait. A failed proof
+        // discards the recording with the command pool; the submit below
+        // still gates on the proof, the fence, and beforeSubmit.
+        // No zero-fill: every apply thread writes its point or reports a
+        // status first (each early return calls StatusErr), so status 0
+        // implies every point was written, and any other status discards
+        // the output; the fill is never read.
         r = vkBeginCommandBuffer(cmds[1], &begin);
         if (r == VK_SUCCESS) {
             VkMemoryBarrier before{};
@@ -1005,6 +984,35 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             r = vkEndCommandBuffer(cmds[1]);
         }
         if (r != VK_SUCCESS) { finish(r); return {}; }
+        s->proofFence = native_->fencePool.Acquire(d, &r);
+        if (!s->proofFence) { finish(r); return {}; }
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1; submit.pCommandBuffers = &cmds[0];
+        s->pending = true; // proof owns the same allocations as the final submit
+        r = vkQueueSubmit(context->computeQueue(), 1, &submit, s->proofFence);
+        if (r == VK_SUCCESS)
+            r = vkWaitForFences(d, 1, &s->proofFence, VK_TRUE, 10000000000ull);
+        if (r != VK_SUCCESS) { candidate->Quarantine(); finish(r); return {}; }
+        s->pending = false;
+        uint32_t st = 0;
+        if (r == VK_SUCCESS) {
+            void* data = nullptr;
+            r = vkMapMemory(d, s->evalStatus->memory(), 0, 4, 0, &data);
+            if (r == VK_SUCCESS) {
+                std::memcpy(&st, data, 4);
+                vkUnmapMemory(d, s->evalStatus->memory());
+            }
+        }
+        // The proof wait above succeeded, so the fence is idle and rejoins
+        // the pool even when the status readback fails.
+        native_->fencePool.Release(d, s->proofFence);
+        s->proofFence = VK_NULL_HANDLE;
+        if (r != VK_SUCCESS) { finish(r); return {}; }
+        if (st != 0) return reject(DeformSemantic::NonFinite);
+
+        // cmd1 was recorded before the eval submit (see above); the submit
+        // below still gates on the proof, the fence, and beforeSubmit.
         s->fence = native_->fencePool.Acquire(d, &r);
         if (!s->fence) { finish(r); return {}; }
         if (beforeSubmit) {
