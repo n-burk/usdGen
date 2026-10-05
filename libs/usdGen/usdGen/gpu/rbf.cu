@@ -337,16 +337,26 @@ RbfStatus CudaRbfBinding::BeginFreshSolve(DeviceView<const float3> posed, cudaSt
     if (validateFreshPointer(posed.data, posed.size, stream, &ownerDevice) != cudaSuccess ||
         ownerDevice != acceptedFresh_->device)
         return fail(RbfStatus::InvalidArgument, "fresh RBF posed input/stream provenance invalid");
-    auto candidate = std::make_unique<FreshState>();
+    // The retired solve packet's storage is private to this binding and is
+    // fully overwritten below (posed D2D, rhsKernel, getrs, both proof
+    // D2Hs), so the new candidate adopts it instead of freeing and
+    // re-allocating four device buffers plus a host packet every pose.
+    // reset() still re-sizes (or re-creates abandoned buffers), so a
+    // rebind, a device move, or a quarantine behaves exactly as before,
+    // and the forced-allocation seam still fires first, as before.
+    auto candidate = std::move(retiredSolve_);
+    if (!candidate) candidate = std::make_unique<FreshState>();
     candidate->device = ownerDevice; candidate->n = acceptedFresh_->n; candidate->m = acceptedFresh_->m;
     candidate->factorOwner = acceptedFresh_.get();
-    retiredSolve_.reset();
+    candidate->failed = false;
     if (failFreshSolveAllocation.exchange(false, std::memory_order_acq_rel))
         return fail(RbfStatus::CudaError, "forced fresh RBF solve allocation failure");
-    auto permit = TryReserveCudaExecutionBytes(sizeof(FreshState::Packet), UsdGenExecutionResourceKind::Cache, reservation);
-    if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&candidate->host), sizeof(*candidate->host), cudaHostAllocDefault) != cudaSuccess)
-        return fail(RbfStatus::CudaError, "fresh RBF solve proof packet allocation failed");
-    candidate->hostPermit = std::move(*permit);
+    if (!candidate->host) {
+        auto permit = TryReserveCudaExecutionBytes(sizeof(FreshState::Packet), UsdGenExecutionResourceKind::Cache, reservation);
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&candidate->host), sizeof(*candidate->host), cudaHostAllocDefault) != cudaSuccess)
+            return fail(RbfStatus::CudaError, "fresh RBF solve proof packet allocation failed");
+        candidate->hostPermit = std::move(*permit);
+    }
     if (!ok(candidate->current.reset(candidate->n, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(candidate->coefficients.reset(size_t(candidate->m) * 3, reservation, UsdGenExecutionResourceKind::Cache)) ||
         !ok(candidate->flags.reset(1, reservation, UsdGenExecutionResourceKind::Cache)) || !ok(candidate->info.reset(1, reservation, UsdGenExecutionResourceKind::Cache)))
         return fail(RbfStatus::CudaError, "fresh RBF solve candidate allocation failed");
