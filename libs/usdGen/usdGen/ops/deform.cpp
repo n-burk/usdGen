@@ -365,20 +365,23 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                     driverNow.push_back(
                         XformSurfacePoint(surfaceRelative, surfaceAffine, point));
             } else {
-                // Bitwise on the float bytes (not operator==): identical NaN
-                // bits still hit, and float->double conversion is injective
-                // so unchanged bytes mean unchanged rest drivers.
+                // Buffer identity (not operator==, not a 1.2MB memcmp): the
+                // cache holds a VtArray reference and VtArray is
+                // copy-on-write, so an in-place edit detaches the writer to
+                // a new buffer and the key misses; a hit therefore proves
+                // the bytes are unchanged, and float->double conversion is
+                // injective so unchanged bytes mean unchanged rest drivers.
+                // Identical NaN bits still hit.
                 auto const &rp = surface.restPoints;
                 bool const hit = surfaceValid_ && surfaceBudget_ == size_t(budget) &&
-                    surfaceRest_.size() == rp.size() &&
-                    std::memcmp(surfaceRest_.data(), rp.cdata(),
-                                rp.size() * sizeof(GfVec3f)) == 0;
+                    rp.size() == surfaceRestRef_.size() &&
+                    (rp.empty() || rp.cdata() == surfaceRestRef_.cdata());
                 if (hit) {
                     chosen = surfaceSelection_;
                     rest.resize(chosen.size());
                     now.resize(chosen.size());
                     for (size_t k = 0; k < chosen.size(); ++k) {
-                        rest[k] = GfVec3d(surfaceRest_[chosen[k]]);
+                        rest[k] = GfVec3d(rp[chosen[k]]);
                         now[k] = XformSurfacePoint(surfaceRelative, surfaceAffine,
                                                    surface.points[chosen[k]]);
                     }
@@ -460,8 +463,7 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 ? selection_
                 : rbf::SelectSamples(driverRest, size_t(budget), epsilon);
             if (surfaceDriven) {
-                auto const &rp = surfaceSrc->restPoints;
-                surfaceRest_.assign(rp.cdata(), rp.cdata() + rp.size());
+                surfaceRestRef_ = surfaceSrc->restPoints;
                 surfaceSelection_ = chosen;
                 surfaceBudget_ = size_t(budget);
                 surfaceValid_ = true;

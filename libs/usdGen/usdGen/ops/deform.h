@@ -71,10 +71,16 @@ private:
    size_t selectionBudget_ = 0;
    bool selectionValid_ = false;
    // The surface-driven twin of the selection cache, keyed by the rest
-   // points' float bytes (float->double conversion is injective, so equal
-   // bytes mean equal rest drivers). A hit skips the conversion and
+   // points' shared-buffer identity (pointer + size, the ContentDigestCache
+   // rule) instead of a 1.2MB memcmp. The cache holds a VtArray reference,
+   // and VtArray is copy-on-write, so any in-place edit detaches the
+   // writer to a new buffer and the key misses; a hit therefore proves the
+   // bytes are unchanged and reads them straight from the surface
+   // (float->double conversion is injective, so equal bytes mean equal
+   // rest drivers). The held reference also keeps the buffer alive, so a
+   // recycled address can never false-hit. A hit skips the conversion and
    // transforms only the chosen posed samples instead of every driver.
-   std::vector<GfVec3f> surfaceRest_;
+   VtVec3fArray surfaceRestRef_;
    std::vector<size_t> surfaceSelection_;
    size_t surfaceBudget_ = 0;
    bool surfaceValid_ = false;
