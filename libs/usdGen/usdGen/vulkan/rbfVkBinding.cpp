@@ -963,23 +963,25 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             // center for every CV. Bitwise the subexpression it computed
             // (double(float) - center); the * invScale stays in-shader so
             // the driver's FMA contraction keeps its shape and bits.
-            try {
-                std::vector<float> samples(size_t(3) * size_t(n));
-                std::vector<double> centered(size_t(3) * size_t(n));
-                // cachedRest holds the same bytes restBuf does (no writer
-                // touches restBuf after BeginBind), so the host extent
-                // skips the readback; a failed copy reports the same
-                // status.
-                samples = native.cachedRest;
-                for (int j = 0; j < n; ++j) {
-                    centered[size_t(3 * j)] = double(samples[size_t(3 * j)]) - center_[0];
-                    centered[size_t(3 * j + 1)] = double(samples[size_t(3 * j + 1)]) - center_[1];
-                    centered[size_t(3 * j + 2)] = double(samples[size_t(3 * j + 2)]) - center_[2];
-                }
-                if (WriteBytes(d, *native.normBuf, VkDeviceSize(n) * 24u, centered.data()) != VK_SUCCESS)
+            // Centered straight into the mapped normBuf: the old code
+            // allocated samples+centered, copied cachedRest into samples,
+            // centered into the second buffer, and memcpied that across.
+            // cachedRest holds the same bytes restBuf does (no writer
+            // touches restBuf after BeginBind), so the center reads it
+            // directly; the device receives bitwise the same doubles.
+            {
+                void* mapped = nullptr;
+                if (vkMapMemory(d, native.normBuf->memory(), 0,
+                                VkDeviceSize(n) * 24u, 0, &mapped) != VK_SUCCESS)
                     return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
-            } catch (std::bad_alloc const&) {
-                return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+                double* centered = static_cast<double*>(mapped);
+                float const* rest = native.cachedRest.data();
+                for (int j = 0; j < n; ++j) {
+                    centered[size_t(3 * j)] = double(rest[size_t(3 * j)]) - center_[0];
+                    centered[size_t(3 * j + 1)] = double(rest[size_t(3 * j + 1)]) - center_[1];
+                    centered[size_t(3 * j + 2)] = double(rest[size_t(3 * j + 2)]) - center_[2];
+                }
+                vkUnmapMemory(d, native.normBuf->memory());
             }
 
             native.phase = Native::Phase::FactorReady;
@@ -1002,12 +1004,16 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             // Identity solved state, host side: Evaluate copies the staging
             // buffer over coefBuf on every dispatch, so a bind without a
             // solve must stage zeros just as the device zeroes coefBuf.
-            try {
-                std::vector<double> zeros(size_t(3) * size_t(m), 0.0);
-                if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(m) * 24u, zeros.data()) != VK_SUCCESS)
+            // Zeros straight into the mapped staging buffer: the same
+            // bytes the old allocated-and-zeroed vector uploaded, without
+            // the per-bind allocation.
+            {
+                void* mapped = nullptr;
+                if (vkMapMemory(d, native.coefStagingBuf->memory(), 0,
+                                VkDeviceSize(m) * 24u, 0, &mapped) != VK_SUCCESS)
                     return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
-            } catch (std::bad_alloc const&) {
-                return fail(RbfVkStatus::DeviceError, "RBF LU status query failed");
+                std::memset(mapped, 0, size_t(VkDeviceSize(m) * 24u));
+                vkUnmapMemory(d, native.coefStagingBuf->memory());
             }
             // Cache the factors for the host-side pose solves.
             if (native.bindAdopted) {
