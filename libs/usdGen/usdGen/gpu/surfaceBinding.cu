@@ -447,21 +447,33 @@ SurfaceBindingStatus CudaSurfaceBinding::BeginFreshBind(
     if (validateCommon(vertices, offsets, faces, indices) != SurfaceBindingStatus::Ok ||
         validateStream(stream) != SurfaceBindingStatus::Ok)
         return fail(SurfaceBindingStatus::InvalidArgument, "fresh Bind preflight failed");
-    discardPending(); discardFreshProof(false);
+    discardPending();
     retiredSampleIndices_.release(); retiredRestSamples_.release(); retiredCurrentSamples_.release();
     retiredRootTargets_.release(); retiredRootCount_ = 0; retiredFaceOffsets_.release(); retiredFaceIndices_.release();
-    auto codePermit = TryReserveCudaExecutionBytes(sizeof(int), UsdGenExecutionResourceKind::Cache, reservation);
-    auto actualPermit = TryReserveCudaExecutionBytes(sizeof(uint32_t), UsdGenExecutionResourceKind::Cache, reservation);
-    if (s_failFreshProofAllocation.exchange(false, std::memory_order_acq_rel) || !codePermit || !actualPermit ||
-        cudaHostAlloc(reinterpret_cast<void**>(&freshCode_), sizeof(int), cudaHostAllocDefault) != cudaSuccess) {
+    // The previous pose's proof packets are pooled, not freed: their words
+    // are fully overwritten below (proof D2Hs), so the new candidate adopts
+    // them instead of freeing and re-allocating every pose. Only the flags
+    // reset here; later failures still discard (free) as before, and the
+    // forced-allocation seam still fires first, as before. Permits attach
+    // to the storage, not the operation, so a reused packet keeps its
+    // original permit and consumes nothing further.
+    freshMode_ = freshPending_ = freshUnproven_ = false;
+    if (s_failFreshProofAllocation.exchange(false, std::memory_order_acq_rel))
         return fail(SurfaceBindingStatus::CudaError, "surface fresh proof allocation failed");
+    if (!freshCode_) {
+        auto codePermit = TryReserveCudaExecutionBytes(sizeof(int), UsdGenExecutionResourceKind::Cache, reservation);
+        if (!codePermit || cudaHostAlloc(reinterpret_cast<void**>(&freshCode_), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return fail(SurfaceBindingStatus::CudaError, "surface fresh proof allocation failed");
+        freshCodePermit_ = std::move(*codePermit);
     }
-    freshCodePermit_ = std::move(*codePermit);
-    if (cudaHostAlloc(reinterpret_cast<void**>(&freshActual_), sizeof(uint32_t), cudaHostAllocDefault) != cudaSuccess) {
-        discardFreshProof(false);
-        return fail(SurfaceBindingStatus::CudaError, "surface fresh proof allocation failed");
+    if (!freshActual_) {
+        auto actualPermit = TryReserveCudaExecutionBytes(sizeof(uint32_t), UsdGenExecutionResourceKind::Cache, reservation);
+        if (!actualPermit || cudaHostAlloc(reinterpret_cast<void**>(&freshActual_), sizeof(uint32_t), cudaHostAllocDefault) != cudaSuccess) {
+            discardFreshProof(false);
+            return fail(SurfaceBindingStatus::CudaError, "surface fresh proof allocation failed");
+        }
+        freshActualPermit_ = std::move(*actualPermit);
     }
-    freshActualPermit_ = std::move(*actualPermit);
     freshReservation_ = reservation;
     freshMode_ = true; freshLaunching_ = true; freshPending_ = true; freshUnproven_ = true;
     auto status = Bind(vertices, offsets, faces, indices, budget, stream);
@@ -486,11 +498,19 @@ SurfaceBindingStatus CudaSurfaceBinding::BeginFreshUpdate(
     if (pending_ || freshPending_ || freshMode_ || freshUpdatePendingAcceptance_ || !bound_) return fail(SurfaceBindingStatus::InvalidArgument, "fresh Update requires no pending operation");
     if (validateStream(stream) != SurfaceBindingStatus::Ok || vertices.size != vertexCount_ || roots.size != uv.size)
         return fail(SurfaceBindingStatus::InvalidArgument, "fresh Update preflight failed");
-    discardPending(); discardFreshProof(false); retiredCurrentSamples_.release(); retiredRootTargets_.release(); retiredRootCount_ = 0;
-    auto codePermit = TryReserveCudaExecutionBytes(sizeof(int), UsdGenExecutionResourceKind::Cache, reservation);
-    if (s_failFreshProofAllocation.exchange(false, std::memory_order_acq_rel) || !codePermit || cudaHostAlloc(reinterpret_cast<void**>(&freshCode_), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+    discardPending(); retiredCurrentSamples_.release(); retiredRootTargets_.release(); retiredRootCount_ = 0;
+    // Same proof-packet pooling as BeginFreshBind (see above): only the
+    // flags reset here, the seam fires first, and storage is adopted.
+    freshMode_ = freshPending_ = freshUnproven_ = false;
+    if (s_failFreshProofAllocation.exchange(false, std::memory_order_acq_rel))
         return fail(SurfaceBindingStatus::CudaError, "surface fresh proof allocation failed");
-    freshCodePermit_ = std::move(*codePermit); freshReservation_ = reservation;
+    if (!freshCode_) {
+        auto codePermit = TryReserveCudaExecutionBytes(sizeof(int), UsdGenExecutionResourceKind::Cache, reservation);
+        if (!codePermit || cudaHostAlloc(reinterpret_cast<void**>(&freshCode_), sizeof(int), cudaHostAllocDefault) != cudaSuccess)
+            return fail(SurfaceBindingStatus::CudaError, "surface fresh proof allocation failed");
+        freshCodePermit_ = std::move(*codePermit);
+    }
+    freshReservation_ = reservation;
     freshMode_ = true; freshLaunching_ = true; freshPending_ = true; freshUnproven_ = true;
     auto status = Update(vertices, roots, uv, stream);
     freshLaunching_ = false; freshReservation_ = nullptr;
