@@ -446,7 +446,7 @@ void CheckNonFiniteCapture()
 // capture reads: rest decides the farthest-point selection, so a move
 // outside the chosen set must neither re-capture nor change the output,
 // while a move at a chosen driver must re-capture to new output.
-void CheckDeformChosenDigest()
+UsdGenGraphDesc MakeSmallSurfaceDeformDesc()
 {
     UsdGenGraphDesc desc;
     desc.description = SdfPath("/groom");
@@ -501,6 +501,12 @@ void CheckDeformChosenDigest()
     setp("grow", TfToken("length"), VtValue(1.0));
     setp("deform", TfToken("rbfSamples"), VtValue(100));
     setp("deform", TfToken("lockRoots"), VtValue(true));
+    return desc;
+}
+
+void CheckDeformChosenDigest()
+{
+    UsdGenGraphDesc desc = MakeSmallSurfaceDeformDesc();
 
     UsdGenCompiler compiler;
     UsdGenGraph graph;
@@ -576,6 +582,141 @@ void CheckDeformChosenDigest()
           "the chosen-move digest hashed only the chosen drivers");
     Check(deformOp->SurfaceSelectionForTesting() == selection,
           "the re-capture reuses the rest-decided selection");
+}
+
+void CheckDeformEvaluateViewShapes()
+{
+    // Deform Evaluate must be view-shape transparent: one real capture,
+    // re-evaluated through a whole-groom uniform view, a ragged view over
+    // identical spans, and an offset chunk, agrees with the cooked
+    // terminal bitwise on every path (full-mask copy and partial-mask
+    // blend). No goldens: every comparison is within this run, so the
+    // test holds on any platform. This pins the contract a future
+    // uniform fast path must satisfy.
+    UsdGenGraphDesc desc = MakeSmallSurfaceDeformDesc();
+    // Smooth bend so the capture displaces nearly every CV.
+    VtVec3fArray const &rest = desc.surfaces[0].restPoints;
+    desc.surfaces[0].points.resize(rest.size());
+    for (size_t i = 0; i < rest.size(); ++i) {
+        GfVec3f const r = rest[i];
+        float const bend =
+            float(0.6 * std::sin(0.05 * r[0] + 0.35) * std::cos(0.04 * r[1] - 0.175));
+        desc.surfaces[0].points[i] = GfVec3f(r[0], r[1], r[2] + bend);
+    }
+    UsdGenCompiler compiler;
+    UsdGenGraph graph;
+    Check(compiler.Compile(desc, &graph).ok, "the view-shape fixture compiles");
+    UsdGenNodeId const deformId = graph.NodeIdForPath(SdfPath("/groom/deform"));
+    auto *op = static_cast<UsdGenDeformOp *>(graph.Node(deformId).op.get());
+    UsdGenScheduler scheduler(2);
+    UsdGenEvalContext ctx;
+    uint64_t gen = 0;
+    UsdGenCompileResult const rr = compiler.Recompile(desc, &graph);
+    ctx.desc = &graph.Desc();
+    UsdGenRunResult const run = scheduler.Run(graph, ctx, ++gen);
+    Check(rr.ok && !run.diagnostics.HasErrors(), "the view-shape pose cooks");
+    UsdGenCurveBuffer const &term = graph.Node(deformId).buffer;
+    UsdGenCurveBuffer const &up = graph.Node(graph.Node(deformId).input).buffer;
+    if (term.totalCurves < 2 || term.totalCvs == 0 || up.px.size() != term.totalCvs ||
+        term.totalCvs % term.totalCurves != 0 || !term.cvOffsets.empty()) {
+        Check(false, "the view-shape fixture grows a uniform groom");
+        return;
+    }
+    // Vacuity guard: the pose must actually move points.
+    bool moved = false;
+    for (size_t i = 0; i < term.totalCvs && !moved; ++i)
+        moved = term.px[i] != up.px[i] || term.py[i] != up.py[i] || term.pz[i] != up.pz[i];
+    Check(moved, "the view-shape pose displaces points");
+    if (!moved) return;
+    size_t const curves = term.totalCurves, perCurve = term.totalCvs / curves;
+    auto same = [](std::vector<float> const &a, std::vector<float> const &b) {
+        return a.size() == b.size() &&
+            std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+    };
+    UsdGenChunkDesc fullDesc;
+    fullDesc.firstCurve = 0;
+    fullDesc.curveCount = uint32_t(curves);
+    fullDesc.firstCv = 0;
+    fullDesc.cvCount = uint32_t(perCurve);
+    auto makeView = [&](UsdGenChunkDesc *d, float *px, float *py, float *pz,
+                        size_t inBase, uint32_t nCurves, uint32_t cvCount,
+                        int const *cvOffsets) {
+        UsdGenChunkView v{};
+        v.desc = d;
+        v.px = px;
+        v.py = py;
+        v.pz = pz;
+        v.inPx = up.px.cdata() + inBase;
+        v.inPy = up.py.cdata() + inBase;
+        v.inPz = up.pz.cdata() + inBase;
+        v.curveCount = nCurves;
+        v.cvCount = cvCount;
+        v.cvOffsets = cvOffsets;
+        return v;
+    };
+    UsdGenEvalContext evalCtx; // params null: default mask 1.0
+    std::vector<float> uniPx(term.totalCvs), uniPy(term.totalCvs), uniPz(term.totalCvs);
+    UsdGenChunkView uniView = makeView(&fullDesc, uniPx.data(), uniPy.data(), uniPz.data(),
+                                       0, uint32_t(curves), uint32_t(perCurve), nullptr);
+    op->Evaluate(evalCtx, *graph.Node(deformId).capture, &uniView);
+    auto plane = [&](VtFloatArray const &p) {
+        return std::vector<float>(p.begin(), p.end());
+    };
+    Check(same(uniPx, plane(term.px)) && same(uniPy, plane(term.py)) &&
+              same(uniPz, plane(term.pz)),
+          "a whole-groom uniform re-evaluate matches the terminal bitwise");
+    // Ragged view, identical spans: the ragged path must agree bitwise.
+    std::vector<int> offsets(curves + 1);
+    for (size_t c = 0; c <= curves; ++c) offsets[c] = int(c * perCurve);
+    UsdGenChunkDesc raggedDesc = fullDesc;
+    raggedDesc.cvCount = 0;
+    std::vector<float> ragPx(term.totalCvs), ragPy(term.totalCvs), ragPz(term.totalCvs);
+    UsdGenChunkView ragView = makeView(&raggedDesc, ragPx.data(), ragPy.data(), ragPz.data(),
+                                       0, uint32_t(curves), 0, offsets.data());
+    op->Evaluate(evalCtx, *graph.Node(deformId).capture, &ragView);
+    Check(same(uniPx, ragPx) && same(uniPy, ragPy) && same(uniPz, ragPz),
+          "ragged and uniform views agree bitwise at full mask");
+    // Offset chunk (second half of the curves): the firstCv math.
+    size_t const half = curves / 2;
+    UsdGenChunkDesc tailDesc;
+    tailDesc.firstCurve = uint32_t(half);
+    tailDesc.curveCount = uint32_t(curves - half);
+    tailDesc.firstCv = uint32_t(half * perCurve);
+    tailDesc.cvCount = uint32_t(perCurve);
+    size_t const tailCvs = (curves - half) * perCurve;
+    std::vector<float> tailPx(tailCvs), tailPy(tailCvs), tailPz(tailCvs);
+    UsdGenChunkView tailView = makeView(&tailDesc, tailPx.data(), tailPy.data(), tailPz.data(),
+                                        half * perCurve, uint32_t(curves - half),
+                                        uint32_t(perCurve), nullptr);
+    op->Evaluate(evalCtx, *graph.Node(deformId).capture, &tailView);
+    bool tailOk = true;
+    for (size_t i = 0; i < tailCvs && tailOk; ++i) {
+        size_t const o = half * perCurve + i;
+        tailOk = tailPx[i] == uniPx[o] && tailPy[i] == uniPy[o] && tailPz[i] == uniPz[o];
+    }
+    Check(tailOk, "an offset chunk matches its slice of the full evaluate");
+    // Partial uniform mask: ragged and uniform agree on the blend path too.
+    UsdGenNodeDesc maskNode;
+    maskNode.params.push_back(UsdGenParamValue{TfToken("mask"), VtValue(0.5), false});
+    UsdGenParamView maskView;
+    maskView.node = &maskNode;
+    UsdGenEvalContext maskCtx;
+    maskCtx.params = &maskView;
+    std::vector<float> blendUniPx(term.totalCvs), blendUniPy(term.totalCvs),
+        blendUniPz(term.totalCvs);
+    UsdGenChunkView blendUniView =
+        makeView(&fullDesc, blendUniPx.data(), blendUniPy.data(), blendUniPz.data(), 0,
+                 uint32_t(curves), uint32_t(perCurve), nullptr);
+    op->Evaluate(maskCtx, *graph.Node(deformId).capture, &blendUniView);
+    std::vector<float> blendRagPx(term.totalCvs), blendRagPy(term.totalCvs),
+        blendRagPz(term.totalCvs);
+    UsdGenChunkView blendRagView =
+        makeView(&raggedDesc, blendRagPx.data(), blendRagPy.data(), blendRagPz.data(), 0,
+                 uint32_t(curves), 0, offsets.data());
+    op->Evaluate(maskCtx, *graph.Node(deformId).capture, &blendRagView);
+    Check(same(blendUniPx, blendRagPx) && same(blendUniPy, blendRagPy) &&
+              same(blendUniPz, blendRagPz),
+          "ragged and uniform views agree bitwise at partial mask");
 }
 
 void CheckCurveWrapField()
@@ -991,6 +1132,7 @@ int main()
     CheckField();
     CheckBatchBitwise();
     CheckDeformChosenDigest();
+    CheckDeformEvaluateViewShapes();
     CheckCurveWrapField();
     CheckExample();
     CheckSurfaceExample();
