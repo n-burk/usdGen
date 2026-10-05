@@ -44,6 +44,64 @@ static_assert(offsetof(SolveUbo, cx) == 16);
 
 uint32_t Groups(uint32_t n) { return (n + kLocalSize - 1) / kLocalSize; }
 
+// Forward substitution over G-row groups (host pose solve): rows i+1..i+G-1's
+// terms over j < i never touch coef[i..i+G-2], so the group accumulates its
+// G x 3 chains together and each row finishes with its coef terms after the
+// earlier rows store. Each accumulator runs its exact scalar op sequence
+// (j ascending, then finishing terms in row order), so any G is
+// bitwise-identical; a short tail keeps the scalar loop.
+template <int G>
+void ForwardSolveGrouped(double const *luPtr, int const *permPtr, double const *rhs,
+                         double *coef, int hm)
+{
+    size_t const hmz = size_t(hm), hm2 = size_t(2) * size_t(hm);
+    int i = 0;
+    for (; i + G - 1 < hm; i += G) {
+        double acc[G][3];
+        for (int g = 0; g < G; ++g) {
+            size_t const p = size_t(permPtr[i + g]);
+            acc[g][0] = rhs[p];
+            acc[g][1] = rhs[hmz + p];
+            acc[g][2] = rhs[hm2 + p];
+        }
+        for (int j = 0; j < i; ++j) {
+            double const c0 = coef[size_t(j)];
+            double const c1 = coef[hmz + size_t(j)];
+            double const c2 = coef[hm2 + size_t(j)];
+            for (int g = 0; g < G; ++g) {
+                double const l = luPtr[size_t(i + g) * hmz + size_t(j)];
+                acc[g][0] -= l * c0;
+                acc[g][1] -= l * c1;
+                acc[g][2] -= l * c2;
+            }
+        }
+        for (int g = 0; g < G; ++g) {
+            for (int k = 0; k < g; ++k) {
+                double const l = luPtr[size_t(i + g) * hmz + size_t(i + k)];
+                acc[g][0] -= l * coef[size_t(i + k)];
+                acc[g][1] -= l * coef[hmz + size_t(i + k)];
+                acc[g][2] -= l * coef[hm2 + size_t(i + k)];
+            }
+            coef[size_t(i + g)] = acc[g][0];
+            coef[hmz + size_t(i + g)] = acc[g][1];
+            coef[hm2 + size_t(i + g)] = acc[g][2];
+        }
+    }
+    for (; i < hm; ++i) {
+        size_t const p = size_t(permPtr[i]);
+        double s0 = rhs[p], s1 = rhs[hmz + p], s2 = rhs[hm2 + p];
+        for (int j = 0; j < i; ++j) {
+            double const l = luPtr[size_t(i) * hmz + size_t(j)];
+            s0 -= l * coef[size_t(j)];
+            s1 -= l * coef[hmz + size_t(j)];
+            s2 -= l * coef[hm2 + size_t(j)];
+        }
+        coef[size_t(i)] = s0;
+        coef[hmz + size_t(i)] = s1;
+        coef[hm2 + size_t(i)] = s2;
+    }
+}
+
 void BeforeBarrier(VkCommandBuffer cmd) {
     VkMemoryBarrier before{};
     before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -802,93 +860,15 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             // column keeps its exact rbfVkTriSolve.comp op sequence (same
             // operations in the same order), giving the dependent
             // accumulation chain three times the ILP with bitwise-identical
-            // coefficients. Forward rows group the same way: rows i+1..i+3's
-            // terms over j < i do not touch coef[i..i+2] (only their
-            // finishing terms do), so the group accumulates together and
-            // each row finishes with its coef terms after the earlier rows
-            // store; each accumulator's op sequence is unchanged, so the
-            // twelve chains stay bitwise-identical. Backward rows cannot
-            // group: each row's FIRST term needs the previous row's result.
+            // coefficients. The forward rows run grouped (see
+            // ForwardSolveGrouped): eight rows x three columns give the
+            // dependent accumulation chain twenty-four lanes with
+            // bitwise-identical coefficients. Backward rows cannot group:
+            // each row's FIRST term needs the previous row's result.
             std::vector<double> coef(size_t(3) * size_t(hm));
             size_t const hmz = size_t(hm), hm2 = size_t(2) * size_t(hm);
-            int i = 0;
-            for (; i + 3 < hm; i += 4) {
-                size_t const p0 = size_t(permPtr[i]);
-                size_t const p1 = size_t(permPtr[i + 1]);
-                size_t const p2 = size_t(permPtr[i + 2]);
-                size_t const p3 = size_t(permPtr[i + 3]);
-                double s0 = rhs[p0], s1 = rhs[hmz + p0], s2 = rhs[hm2 + p0];
-                double t0 = rhs[p1], t1 = rhs[hmz + p1], t2 = rhs[hm2 + p1];
-                double u0 = rhs[p2], u1 = rhs[hmz + p2], u2 = rhs[hm2 + p2];
-                double v0 = rhs[p3], v1 = rhs[hmz + p3], v2 = rhs[hm2 + p3];
-                for (int j = 0; j < i; ++j) {
-                    double const l0 = luPtr[size_t(i) * hmz + size_t(j)];
-                    double const l1 = luPtr[size_t(i + 1) * hmz + size_t(j)];
-                    double const l2 = luPtr[size_t(i + 2) * hmz + size_t(j)];
-                    double const l3 = luPtr[size_t(i + 3) * hmz + size_t(j)];
-                    s0 -= l0 * coef[size_t(j)];
-                    s1 -= l0 * coef[hmz + size_t(j)];
-                    s2 -= l0 * coef[hm2 + size_t(j)];
-                    t0 -= l1 * coef[size_t(j)];
-                    t1 -= l1 * coef[hmz + size_t(j)];
-                    t2 -= l1 * coef[hm2 + size_t(j)];
-                    u0 -= l2 * coef[size_t(j)];
-                    u1 -= l2 * coef[hmz + size_t(j)];
-                    u2 -= l2 * coef[hm2 + size_t(j)];
-                    v0 -= l3 * coef[size_t(j)];
-                    v1 -= l3 * coef[hmz + size_t(j)];
-                    v2 -= l3 * coef[hm2 + size_t(j)];
-                }
-                coef[size_t(i)] = s0;
-                coef[hmz + size_t(i)] = s1;
-                coef[hm2 + size_t(i)] = s2;
-                double const f10 = luPtr[size_t(i + 1) * hmz + size_t(i)];
-                t0 -= f10 * coef[size_t(i)];
-                t1 -= f10 * coef[hmz + size_t(i)];
-                t2 -= f10 * coef[hm2 + size_t(i)];
-                coef[size_t(i + 1)] = t0;
-                coef[hmz + size_t(i + 1)] = t1;
-                coef[hm2 + size_t(i + 1)] = t2;
-                double const f20 = luPtr[size_t(i + 2) * hmz + size_t(i)];
-                double const f21 = luPtr[size_t(i + 2) * hmz + size_t(i + 1)];
-                u0 -= f20 * coef[size_t(i)];
-                u1 -= f20 * coef[hmz + size_t(i)];
-                u2 -= f20 * coef[hm2 + size_t(i)];
-                u0 -= f21 * coef[size_t(i + 1)];
-                u1 -= f21 * coef[hmz + size_t(i + 1)];
-                u2 -= f21 * coef[hm2 + size_t(i + 1)];
-                coef[size_t(i + 2)] = u0;
-                coef[hmz + size_t(i + 2)] = u1;
-                coef[hm2 + size_t(i + 2)] = u2;
-                double const f30 = luPtr[size_t(i + 3) * hmz + size_t(i)];
-                double const f31 = luPtr[size_t(i + 3) * hmz + size_t(i + 1)];
-                double const f32 = luPtr[size_t(i + 3) * hmz + size_t(i + 2)];
-                v0 -= f30 * coef[size_t(i)];
-                v1 -= f30 * coef[hmz + size_t(i)];
-                v2 -= f30 * coef[hm2 + size_t(i)];
-                v0 -= f31 * coef[size_t(i + 1)];
-                v1 -= f31 * coef[hmz + size_t(i + 1)];
-                v2 -= f31 * coef[hm2 + size_t(i + 1)];
-                v0 -= f32 * coef[size_t(i + 2)];
-                v1 -= f32 * coef[hmz + size_t(i + 2)];
-                v2 -= f32 * coef[hm2 + size_t(i + 2)];
-                coef[size_t(i + 3)] = v0;
-                coef[hmz + size_t(i + 3)] = v1;
-                coef[hm2 + size_t(i + 3)] = v2;
-            }
-            for (; i < hm; ++i) {
-                size_t const p = size_t(permPtr[i]);
-                double s0 = rhs[p], s1 = rhs[hmz + p], s2 = rhs[hm2 + p];
-                for (int j = 0; j < i; ++j) {
-                    double const l = luPtr[size_t(i) * hmz + size_t(j)];
-                    s0 -= l * coef[size_t(j)];
-                    s1 -= l * coef[hmz + size_t(j)];
-                    s2 -= l * coef[hm2 + size_t(j)];
-                }
-                coef[size_t(i)] = s0;
-                coef[hmz + size_t(i)] = s1;
-                coef[hm2 + size_t(i)] = s2;
-            }
+            ForwardSolveGrouped<8>(luPtr, permPtr, rhs.data(), coef.data(), hm);
+            int i = hm;
             for (i = hm - 1; i >= 0; --i) {
                 double s0 = coef[size_t(i)];
                 double s1 = coef[hmz + size_t(i)];
