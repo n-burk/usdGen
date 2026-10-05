@@ -1276,7 +1276,7 @@ here as they appear in an expression (with the `$`); `registerVariable` takes th
 |---|---|---|
 | `$u`, `$v` | float | the root's surface parameters in the map's uv set |
 | `$id` | float | the stable curve id. SeExpr has only doubles, and `curveId` is 64-bit (ADR §9.2 R12), so the slot carries `double(curveId)` — exact to 2^53 and the value `rand($id)`/`hash($id)` are seeded from. Never compare `$id` for equality against an id printed elsewhere above that bound |
-| `$faceId` | float | parent-mesh face index (§5.2); `$faceid` is accepted as an a host groomer-compatible alias |
+| `$faceId` | float | parent-mesh face index (§5.2); `$faceid` is accepted as a host-groomer-compatible alias |
 | `$patchId` | float | the surface index within the description's surface table |
 | `$descId` | float | a stable hash of the `UsdGenDescription` path |
 | `$P`, `$N`, `$dPdu`, `$dPdv` | vec3 | deformed surface point, normal and derivatives at the root |

@@ -1043,7 +1043,7 @@ UsdSkel, or any other modifier upstream in the scene index (R5, S1, S3).
 
 | Property | Type | Default | Doc |
 |---|---|---|---|
-| `usdGen:mode` | `uniform token` | `"rigidFrame"` | `rigidFrame` (v1, per-root frame transport) \| `rbf` (v2, an a host renderer-style displacement field from ≤ `rbfSamples` surface samples) \| `pointDeform` (v2, per-CV weights over the nearest surface points). An unimplemented mode is a compile error naming the prim and the mode, never a silent downgrade (`05-static-curves-and-deformation.md` §4.1) |
+| `usdGen:mode` | `uniform token` | `"rigidFrame"` | `rigidFrame` (v1, per-root frame transport) \| `rbf` (v2, a host-renderer-style displacement field from ≤ `rbfSamples` surface samples) \| `pointDeform` (v2, per-CV weights over the nearest surface points). An unimplemented mode is a compile error naming the prim and the mode, never a silent downgrade (`05-static-curves-and-deformation.md` §4.1) |
 | `usdGen:twistAware` | `bool` | `true` | build the root frame from `dPdu` so the strand twists with the surface |
 | `usdGen:rbfSamples` | `int` | `100` | `mode = "rbf"` only; ≤ 100, the host renderer binding arity. Cost class B |
 | `usdGen:preserveShape` | `float` | `0.0` | 0 = off. `> 0` runs the Cosserat stretch/bend relaxation (A7 §9.1 G7, §3.5). **v2**; in v1 a non-zero value is one warning and is ignored |

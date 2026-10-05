@@ -33,8 +33,8 @@ if USD_PYTHON.exists():
     os.environ["PATH"] = os.pathsep.join((str(BUILD), str(USD_PREFIX / "bin"),
                                              str(USD_PREFIX / "lib"), os.environ["PATH"]))
     plugin_dirs = [BUILD / "usd" / leaf / "resources" for leaf in (
-        "usdGenSchema", "usdGenImaging", "usdGenShaders", "usdGenTools",
-        "usdGenPomade", "usdGenPomadeTools")]
+        "usdGenSchema", "usdGenImaging", "usdGenShaders",
+        "usdGenPomade", "usdNoodles")]
     plugin_dirs += [USD_PREFIX / "plugin/usd", USD_PREFIX / "lib/usd"]
     os.environ["PXR_PLUGINPATH_NAME"] = os.pathsep.join(str(p) for p in plugin_dirs if p.exists())
 

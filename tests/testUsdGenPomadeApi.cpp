@@ -1167,7 +1167,7 @@ main()
             Check(usdGenPomade::PomadeBuildGizmoCurves(record, &curves) &&
                       curves.CurveCount() == 19 &&
                       curves.points.size() == 50 * 3,
-                  "V1: a translate gizmo has Maya axes, arrows and move squares");
+                  "V1: a translate gizmo has colored axes, arrows and move squares");
             bool activeMatches = true;
             bool foundActive = false;
             for (size_t i = 0; i < curves.handleIds.size(); ++i) {

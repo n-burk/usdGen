@@ -225,5 +225,5 @@ hdPrman itself reads that value from the terminal SI: `HdUtils::GetCurrentFrame(
 - No consumer of `HdSceneIndexCreateArgsSchema::GetMotionBlurSupport` exists in `pxr/` (grep); whether UsdImaging is meant to suppress time samples for Storm based on it is UNVERIFIED (currently it does not).
 - Whether the Hybrid ordering actually resolves as traced in §2.2 when hdPrman's JSON `after: hd:sceneAssembly`/`hd:sceneGlobals` tags (which no entry carries) are present was derived by reading the algorithm, not by running `LoadAndGetSceneIndexPluginIds` with hdPrman loaded — no hdPrman binary exists here.
 - Cost of `HdSiExtComputationPrimvarPruningSceneIndex` re-skinning on every `GetValue` under hdPrman for large scalps is asserted from code structure (`:243-…` builds a fresh value store); not measured.
-- Whether Solaris/Katana hosts pass a non-empty `appName` on the legacy path (affecting `loadWithApps`) is outside this tree.
+- Whether host applications hosts pass a non-empty `appName` on the legacy path (affecting `loadWithApps`) is outside this tree.
 - The hdPrman 2.0 observer path (`HD_PRMAN_EXPERIMENTAL_RILEY_SCENE_INDEX_OBSERVER=1`, `RileyConversionSceneIndex`) was not analysed for its own points/motion sampling; the legacy rprim path documented in §3 is the default.

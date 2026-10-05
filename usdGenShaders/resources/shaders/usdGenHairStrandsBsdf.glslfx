@@ -8,10 +8,9 @@
 // The two shipped files differ only in their `materialTag` metadata and import
 // this one, exactly as usdGenHairPreview*.glslfx share usdGenFurScattering.glslfx.
 //
-// WHAT THIS IS A PORT OF (docs/research/ue-hair-rendering.md carries the
-// verbatim the host renderer sources these sections quote):
+// WHAT THIS IS A PORT OF:
 //
-//   * Engine/Shaders/Private/HairBsdf.ush `HairShading()` — Brian Karis,
+//   * `HairShading()` — Brian Karis,
 //     "Physically Based Hair Shading in a host renderer", SIGGRAPH 2016 Physically
 //     Based Shading course. R / TT / TRT with Gaussian longitudinal terms in
 //     sin(theta) space, closed-form azimuthal terms, n = 1.55 Schlick Fresnel
@@ -20,7 +19,7 @@
 //   * HairStrandsDeepTransmittanceDualScattering.ush
 //     `ComputeDualScatteringTerms()` — Zinke & Yuksel 2008 dual scattering,
 //     driven by a hair COUNT (the expected number of fibres between the shaded
-//     point and the light). Ported as UsdGenStrandsDualScattering(). the host renderer reads
+//     point and the light). Ported as UsdGenStrandsDualScattering(). The host renderer reads
 //     the average forward/backward attenuation a_f / a_b from a 3D LUT built
 //     by HairStrandsLUT.usf; we evaluate closed-form fits of the same
 //     integrals instead (usdGenShaders/test/fit_hair_scattering.py).
@@ -36,7 +35,7 @@
 //   * HairShadingCommon.ush `GetHairColorFromMelanin()` and the Chiang 2016
 //     absorption <-> colour mapping.
 //
-// ENERGY UNITS. the host renderer's hair BSDF carries no extra NoL: HairBxDF returns
+// ENERGY UNITS. The host renderer's hair BSDF carries no extra NoL: HairBxDF returns
 // `AreaLight.FalloffColor * Falloff * HairShading(...)`. Storm's own
 // previewSurface.glslfx treats `light.diffuse.rgb` as radiance and puts the
 // 1/PI inside the BRDF (evaluateDirectDiffuse() == 1/PI), and its dome
@@ -172,7 +171,7 @@ vec3 UsdGenStrandsHueShift(vec3 c, float amount)
 // primvar and the same projection arithmetic Storm used
 // (WorldToPixelWidth, basisCurves.glslfx:52-73), and feed the ratio into alpha.
 //
-// HOW THE COVERAGE IS SPENT. the host renderer spends it through a per-sample visibility
+// HOW THE COVERAGE IS SPENT. The host renderer spends it through a per-sample visibility
 // buffer, which stock Storm has no equivalent of: `hd_SampleMask` is declared
 // as a stage output only for PRIM_POINTS (codeGen.cpp:2931-2941), and on a
 // curve patch ApplyDiskSampleMask() resolves to PointDisk.Fragment.None, so a
@@ -441,7 +440,7 @@ vec3 UsdGenStrandsShading(UsdGenStrandsGeometry g, vec3 baseColor,
     return -min(-S, vec3(0.0));
 }
 
-// KajiyaKayDiffuseAttenuation, HairBsdf.ush. the host renderer runs this only where dual
+// KajiyaKayDiffuseAttenuation, HairBsdf.ush. The host renderer runs this only where dual
 // scattering is unavailable (cards/meshes; GBuffer.Metallic IS the material's
 // `Scatter` input, and HairSampleToGBufferData zeroes it on the strands path).
 // Same rule here: this is the fallback for curves with no furTau primvars.
@@ -503,7 +502,7 @@ vec3 UsdGenStrandsScatterFake(vec3 T, vec3 L, vec3 V, vec3 baseColor,
 // Mass of a lobe Gaussian of width b left inside |sin(theta_L)| <= 1 once its
 // centre leaves the sphere at grazing incidence. This is the shape that makes
 // the angle dependence fittable at all; smoothstep stands in for the normal
-// CDF. the host renderer has no analogue because it stores the whole 3D table.
+// CDF. The host renderer has no analogue because it stores the whole 3D table.
 float UsdGenStrandsLobeEdge(float t, float b, float alpha)
 {
     return smoothstep(-3.0, 3.0, (1.0 - alpha + t) / b)
@@ -609,7 +608,7 @@ struct UsdGenStrandsDual
 // an already broad back-scatter lobe:
 //   * delta_b: the paper's eq. is alpha_b*(1 - 2*ab^2/(1-af^2)^2)
 //                              + alpha_f*(2*(1-af^2)^2 + 4*af^2*ab^2)/(1-af^2)^3
-//     — a SUM. the host renderer multiplies the two halves.
+//     — a SUM. The host renderer multiplies the two halves.
 //   * sigma_b: the paper's second numerator term is ab^3*sqrt(2*Bf^2 + 3*Bb^2);
 //     the host renderer repeats sqrt(2*Bf^2 + Bb^2) there.
 UsdGenStrandsDual UsdGenStrandsDualScattering(float hairCount, float roughness,
@@ -640,7 +639,7 @@ UsdGenStrandsDual UsdGenStrandsDualScattering(float hairCount, float roughness,
 
     // "Add a min/max roughness for dual scattering ... adhoc": the lower bound
     // keeps the BSDF from being narrow enough to spark, the upper one keeps it
-    // from going flat. the host renderer's numbers.
+    // from going flat. The host renderer's numbers.
     float r = clamp(roughness, 0.18, 0.6);
     float betaR   = UsdGenStrandsPow2(r);
     float betaTT  = UsdGenStrandsPow2(r * 0.5);
@@ -715,7 +714,7 @@ UsdGenStrandsDual UsdGenStrandsDualScattering(float hairCount, float roughness,
 // gated on the absence of dual-scattering data — it is gated on
 // GBuffer.Metallic, which IS the material's `Scatter` pin
 // (MaterialAttributeDefinitionMap.cpp maps MP_Metallic to the hair label
-// "Scatter"). the host renderer's strands path is dark there only because
+// "Scatter"). The host renderer's strands path is dark there only because
 // HairSampleToGBufferData hardcodes `Out.Metallic = 0`, so the host renderer strands are this
 // function at scatter = 0, and cards/meshes are it at whatever the artist
 // authored. We keep it as the input it is.
@@ -915,7 +914,7 @@ vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
             // The Kajiya term is NOT carried through the normalised quadrature:
             // it is not part of the single-scattering `den`, so where the lobes
             // are dim (a strand oblique to the view) num/den would run away
-            // with it. the host renderer evaluates the environment at one imaginary direction
+            // with it. The host renderer evaluates the environment at one imaginary direction
             // anyway (EvaluateEnvHair uses L = normalize(V - N*dot(V,N))), so
             // the fake is added once there, against the mean tap radiance.
             result += domeAlbedo * num / max(den, vec3(1e-4)) * light.diffuse.rgb
@@ -958,7 +957,7 @@ vec4 surfaceShader(vec4 Peye, vec3 Neye, vec4 color, vec4 patchCoord)
     // pixel position alone, so N overlapping strands that all carry coverage a
     // select the SAME samples and composite to a instead of 1-(1-a)^N: a dense
     // coat reads as thin as one strand and the scalp shows through its own
-    // hair. the host renderer spends its coverage through a per-sample visibility buffer, and
+    // hair. The host renderer spends its coverage through a per-sample visibility buffer, and
     // the closest stock-Storm equivalent is to drive the sample mask directly:
     // write gl_SampleMask ourselves with a hashed subset whose popcount is
     // alpha*samples, stochastically rounded, so overlapping strands take

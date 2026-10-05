@@ -4,9 +4,8 @@
     python examples/tools/make_examples.py
 
 The scenes are plain text so they diff well; the grid mesh and the guide
-curves are generated here instead of by hand. The Ptex maps they read are
-baked by examples/tools/bake_maps.ps1 (usdGenBakePtex) from the meshes this
-script writes, so run this first.
+curves are generated here instead of by hand. Ptex maps they read live
+beside the scenes.
 """
 
 import math
@@ -15,8 +14,8 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES = os.path.dirname(HERE)
 
-# Key + a DomeLight fill so the physically based default hair material (a the host renderer
-# port) doesn't render near-black under only usdrecord's camera headlight.
+# Key + a DomeLight fill so the strand shader doesn't render near-black
+# under only usdrecord's camera headlight.
 # inputs:normalize = 1 is required on the DistantLight: HdSt otherwise
 # multiplies intensity by its (tiny, 0.53deg-default) solid angle, so an
 # un-normalized "intensity 3" comes out around 2e-4 and the light is
@@ -222,8 +221,7 @@ def write_guide_example():
 # View it:   .\\bin\\launch_usdview.ps1 examples\\guide-interpolate-plane.usda
 # Record it: .\\bin\\record_usd.ps1 -Scene examples\\guide-interpolate-plane.usda `
 #                -Output out.png -Camera /World/Cam -Complexity veryhigh
-# Regenerate: python examples\\tools\\make_examples.py, then
-#             .\\examples\\tools\\bake_maps.ps1
+# Regenerate: python examples\\tools\\make_examples.py
 
 def Xform "World"
 {{
@@ -416,8 +414,7 @@ def write_clump_example():
 # have already been clumped once. The clumpId_0 / clumpId_1 primvars carry the
 # cell per strand for shading.
 #
-# Maps are baked from this file's skin by examples/tools/bake_maps.ps1
-# (usdGenBakePtex). Edit usdGen:map:file, or the maps themselves plus
+# Maps live beside this scene. Edit usdGen:map:file, or the maps themselves plus
 # usdGen:map:* on the map prims, and the clumps recook.
 #
 # View it:   .\\bin\\launch_usdview.ps1 examples\\clump-ptex-plane.usda

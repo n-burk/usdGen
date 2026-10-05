@@ -37,7 +37,7 @@ intentionally left off so usdGen can generate the groom.
 
 The source outfit's `full_ao_texture` points to a UDIM name absent from the
 Techvar archive. Preparation sets that one material input to neutral
-occlusion 1. Flattening also removes ALab-specific Maya metadata fields that
+occlusion 1. Flattening also removes ALab-specific host metadata fields that
 OpenUSD 26.08 does not recognize; it preserves renderable geometry, materials,
 and skinning data. Texture paths are rewritten to relative sidecars and all
 authored paths are checked before the package is emitted.

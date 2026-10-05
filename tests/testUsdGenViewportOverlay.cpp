@@ -21,7 +21,7 @@
 //     <description>/__usdGenRender/material_storm, which must be a reachable
 //     `material` prim with TWO networks: the `glslfx` one, whose surface
 //     terminal is the Sdr id
-//     UsdGenTilePublisher::DefaultMaterialIdentifier() (the host renderer-parity WS1: UsdGenHairStrandsTranslucent),
+//     UsdGenTilePublisher::DefaultMaterialIdentifier() (strand-hair WS1: UsdGenHairStrandsTranslucent),
 //     and the universal one, a UsdPreviewSurface reading displayColor
 //     through a primvar reader, which is what hdMoonray (and every other
 //     non-Storm delegate) falls back to (docs/moonray-fur.md).

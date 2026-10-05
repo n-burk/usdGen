@@ -1,11 +1,12 @@
-/* usdGenImaging/usdGenToolsApi.h — the C ABI the usdview authoring tools call.
+/* usdGenImaging/usdGenToolsApi.h — the C ABI external authoring tools call.
  *
  * Separate from cApi.h on purpose. cApi.h is the frozen C4 contract for the
  * interactive grooming session (18 entry points, plan/08-tools.md governs);
- * this header is the small, additive surface the SeExpr expression editor
- * needs to compile and describe an expression without embedding a copy of the
- * language in Python. It carries no session state, touches no stage and no
- * GPU, and is safe to call from any thread at any time.
+ * this header is the small, additive surface an expression editor needs to
+ * compile and describe an expression without embedding a copy of the language
+ * in Python. It carries no session state, touches no stage and no GPU, and
+ * is safe to call from any thread at any time. The editor itself is not in
+ * this repository.
  *
  * Every entry point is extern "C" and never lets an exception cross the
  * boundary. Strings are UTF-8 and always NUL-terminated on success.

@@ -1,6 +1,6 @@
 # Judge report — artist / TD usability lens
 
-**Panel seat:** would an a host groomer or a DCC groomer understand and like this schema and tool set? Is the
+**Panel seat:** would a host groomer or a DCC groomer understand and like this schema and tool set? Is the
 operator vocabulary complete for real production (parting lines, clump maps, region maps, LOD,
 render density multiplier)? Is the interactive loop believable?
 

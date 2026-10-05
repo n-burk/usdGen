@@ -5,8 +5,8 @@ sheen, lighter flyaways, sub-pixel strands that fade instead of aliasing, skin
 visible through the temple fade, hair shadow on the scalp.
 
 Comparison harness: `examples/head-hair-closeup.usda` (generator
-`examples/tools/make_head_hair.py`). `bin/render_ue_parity.ps1 -Label <x>`
-writes captures under `renders/ue-parity/`, which is gitignored.
+`examples/tools/make_head_hair.py`). `bin/render_hair_parity.ps1 -Label <x>`
+writes captures under `renders/hair-parity/`, which is gitignored.
 
 Constraint (unchanged): stock OpenUSD Storm, no renderer plugin, no OpenUSD
 patch. Everything is a glslfx material + primvars published by the engine.
@@ -47,7 +47,7 @@ the ROOT and Storm's is the root-to-tip parameter derivative.
 default and what `HairSampleToGBufferData` forces on the strands path, and at
 1.0 the Kajiya term — which the host renderer adds on top of dual scattering, un-attenuated,
 as `sqrt(BaseColor)` — replaces the authored dark coat with a flat pale mass
-(`renders/ue-parity/ws1_scatter{0,1}_temple.png`).
+(`renders/hair-parity/ws1_scatter{0,1}_temple.png`).
 
 Implemented: the Karis lobes line for line with the host renderer's constants, in the host renderer's energy
 units (no extra NoL, no artist budget, no tonemap, `light.diffuse.rgb` as
@@ -111,7 +111,7 @@ It works under usdview's default headlight + dome, where a shadow map would
 have nothing to offer. `USDGEN_SCALP_SHADOW=0` publishes no cap.
 
 Cost: +20 ms on the head groom's bake (one extra hair-only sweep plus the cap),
-+2.6 ms of frame time. `renders/ue-parity/ws3_*` plus three before/after crop
++2.6 ms of frame time. `renders/hair-parity/ws3_*` plus three before/after crop
 sheets; `docs/storm-fur.md` carries the measurements and the limits.
 
 ### WS5 — strand anti-aliasing (Opus) — SHIPPED, mostly as negative results
@@ -150,7 +150,7 @@ The two profile/per-sample results have the same cause and it is worth keeping:
 the shipped mask lights *exactly* k of N samples, so it is stratified; both
 alternatives redistribute the same expected coverage with higher variance. A
 strand wider than a pixel also already gets exact edge coverage from the
-rasterizer, so any shader-side profile double-softens it. the host renderer can afford
+rasterizer, so any shader-side profile double-softens it. The host renderer can afford
 per-sample because its visibility buffer resolves coverage analytically rather
 than stochastically.
 
@@ -161,7 +161,7 @@ it needs more samples or a temporal filter, and Storm has no temporal filter.
 ### WS4 — verification (Sonnet)
 `checkC5.py` still passes for the frozen three; new Sdr checks for the new
 defs; `validate_fur.py` extended to the new material; ctest T0/T1 green;
-`render_ue_parity.ps1 -Label <stage>` after each workstream; update
+`render_hair_parity.ps1 -Label <stage>` after each workstream; update
 `docs/storm-fur.md` and `examples/README.md`.
 
 ## Order

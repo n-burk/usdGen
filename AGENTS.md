@@ -4,7 +4,7 @@ Instructions for coding agents working in this repository. Humans should start a
 
 ## Purpose
 
-usdGen is an OpenUSD 26.08 plugin that generates and grooms hair and fur and publishes the result through a Hydra scene index. Pomade (`usdGenPomade` / `usdGenPomadeTools`) is the in-tree hierarchical authoring tool. usdRig is an optional link (`USDGEN_WITH_RIGEXEC`). This tree does not reference usdOrchestrator; do not add that integration unless asked.
+usdGen is an OpenUSD 26.08 plugin that generates and grooms hair and fur and publishes the result through a Hydra scene index. Pomade (`libs/usdGenPomade`, `plugin/usdGenPomade`) is the in-tree groom model and scene index. `plugin/usdNoodles` is the in-tree Noodles editor. The Pomade usdview shelf, the expression editor, and the offline CLI utilities are not in this tree. usdRig is an optional link (`USDGEN_WITH_RIGEXEC`). This tree does not reference usdOrchestrator; do not add that integration unless asked.
 
 ## Layout
 
@@ -13,15 +13,15 @@ usdGen is an OpenUSD 26.08 plugin that generates and grooms hair and fur and pub
 | `libs/usdGen`, `libs/usdGenMath` | Stage-free groom engine. Gate B-1 forbids linking `usd`/`hd` from `libusdGen`. |
 | `libs/usdGenImaging`, `plugin/usdGenImaging` | Hydra scene index, tile publisher, brush and expression C ABI |
 | `libs/usdGenSchema`, `plugin/usdGenSchema` | Hand-written `schema.usda` and the checked-in generated resources |
-| `libs/usdGenPomade`, `plugin/usdGenPomade`, `plugin/usdGenPomadeTools` | Pomade model, scene index, and usdview tool |
-| `plugin/usdGenTools` | SeExpr editor usdview plugin |
+| `libs/usdGenPomade`, `plugin/usdGenPomade` | Pomade model and scene index |
+| `plugin/usdNoodles` | Noodles usdview editor. Upstream noodles stay in `usdNoodles/` |
 | `usdGenShaders` | Storm glslfx materials |
 | `examples/` | Scenes. See `examples/README.md` |
 | `tests/` | C++ ctest sources and `tests/checks/` Python checks |
 | `bin/` | `build_usdgen.sh`, `build_usdgen.ps1`, `_env.sh`, `gen_schema.sh`, launchers |
-| `docs/` | User docs (`pomade-tool.md`, `storm-fur.md`, `moonray-fur.md`) and historical notes (`review/`, `prework/`, `m1/`, `freezes/`) |
+| `docs/` | User docs (`pomade-tool.md`, `storm-fur.md`, `moonray-fur.md`, `docs/site/`) and historical notes (`review/`, `prework/`, `m1/`, `freezes/`) |
 | `plan/` | Design record. Read before a large behavior change. Not a status dashboard |
-| `tools/` | Scene generators and capture helpers |
+| `tools/` | Manual build, scene generators, and capture helpers |
 | `thirdparty/` | SeExpr, Ptex, nanoflann, zlib. Do not relicense |
 | `usdNoodles/` | Vendored noodles plus a few project files. Upstream files stay under their MIT header |
 
@@ -38,7 +38,7 @@ ctest --test-dir build --output-on-failure
 
 Useful cache variables: `USDGEN_BUILD_TESTS` (default ON on Unix), `USDGEN_ENABLE_CUDA`, `USDGEN_WITH_RIGEXEC` (default OFF), `USDGEN_FP_CONTRACT`.
 
-There is no pytest suite. C++ tests are ctest. Python checks are plain scripts (`tests/checks/check_pomade_docs.py`, `plugin/usdGenPomadeTools/testenv/testUsdGenPomadeToolsGizmoScreen.py`) that do not import `pxr`. T0/T1 labels are the headless gates; `ctest -L '^T[01]$'` is the usual agent run when a build exists. `.github/workflows/usdgen.yml` is the CI definition. Do not treat milestone prose in `plan/` as the list of jobs that exist today.
+There is no pytest suite. C++ tests are ctest. Python checks are plain scripts under `tests/checks/` that do not import `pxr`. T0/T1 labels are the headless gates; `ctest -L '^T[01]$'` is the usual agent run when a build exists. `.github/workflows/usdgen.yml` is the CI definition. Do not treat milestone prose in `plan/` as the list of jobs that exist today.
 
 Schema, only after editing `libs/usdGenSchema/schema.usda`:
 
@@ -62,13 +62,12 @@ That runs OpenUSD's `usdGenSchema` (the tool in `$USD/bin`, not the `usdGenSchem
 
 ## Do not commit
 
-Build trees (`build/`, `workusdGenbuild*/`), `*.o`, `*.os`, `*.obj`, `*.a`, `*.so`, `*.dylib`, `*.dll`, `*.pyc`, `renders/ue-parity/`, secrets, and local capture dumps. `.gitignore` lists the usual artifacts.
+Build trees (`build/`, `workusdGenbuild*/`), `*.o`, `*.os`, `*.obj`, `*.a`, `*.so`, `*.dylib`, `*.dll`, `*.pyc`, `renders/hair-parity/`, secrets, and local capture dumps. `.gitignore` lists the usual artifacts.
 
 ## Read before a large change
 
 1. [README.md](README.md) and [docs/README.md](docs/README.md)
 2. [plan/README.md](plan/README.md), then the overlay that owns the area (`plan/13-codebase-alignment.md` for plan-versus-code, `plan/15-resource-aware-execution.md` for the CUDA execution overlay, `plan/17-pomade-authoring-tool.md` for Pomade)
-3. The user doc for the surface you are changing (`docs/pomade-tool.md`, `docs/storm-fur.md`)
-4. `tests/checks/check_pomade_docs.py` if you edit Pomade hotkeys or `docs/pomade-tool.md`
+3. The user doc for the surface you are changing (`docs/storm-fur.md`)
 
 `plan/research/ENVIRONMENT.md` is a neutralized snapshot of one old measurement host. It is not a setup guide.

@@ -244,7 +244,7 @@ scene.append('    metersPerUnit = 1')
 scene.append('    upAxis = "Y"')
 scene.append('    doc = "Head-hair close-up: a dense, dark, combed groom on a head-sized '
              'ellipsoid, fading to bare skin at a scalp-cap boundary -- a '
-             'render-comparison scene for a character groom (renders/ue-parity)."')
+             'render-comparison scene for a character groom (renders/hair-parity)."')
 scene.append(')')
 scene.append('')
 scene.append('# Numbers are centimetres by convention (as in styled-fur-plane.usda: hair')
@@ -270,7 +270,7 @@ scene.append('# Two cameras: TempleCam frames the crown/fade transition like the
 scene.append('# reference photo, HeadCam is a medium shot of the whole head.')
 scene.append('#')
 scene.append('# View it:   .\\bin\\launch_usdview.ps1 examples\\head-hair-closeup.usda')
-scene.append('# Record it: .\\bin\\render_ue_parity.ps1 -Label current')
+scene.append('# Record it: .\\bin\\render_hair_parity.ps1 -Label current')
 scene.append('')
 scene.append('def Xform "World"')
 scene.append('{')
@@ -305,7 +305,7 @@ scene.append('')
 # from the camera basis, not a guessed Euler triple -- see
 # light_transform_from_camera above); a much weaker rim from the opposite
 # side keeps the far edge of the hair mass from going flat black now that
-# the camera headlight is off (render_ue_parity.ps1 -NoCameraLight).
+# the camera headlight is off (render_hair_parity.ps1 -NoCameraLight).
 #
 # SHADOWS: tried (ShadowAPI + inputs:shadow:enable = 1), to see hair self-
 # shadowing the scalp. An initial A/B render appeared to show a rectangular
@@ -564,7 +564,7 @@ print("head faces: %d" % len(counts))
 
 # ---------------------------------------------------------------------------
 # Render-only wrapper: sublayers the viewable scene above and adds back just
-# the pale-grey backdrop sphere, for offline renders (bin/render_ue_parity.ps1
+# the pale-grey backdrop sphere, for offline renders (bin/render_hair_parity.ps1
 # points at this file, not head-hair-closeup.usda). Kept out of the main file
 # so usdview's FreeCamera bbox-derived clipping isn't blown out by a 260-unit
 # sphere sitting around a 17-unit head (Usdviewq/freeCamera.py

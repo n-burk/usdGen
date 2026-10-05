@@ -14,7 +14,7 @@
 # Proposed extension: operator-expressions.md beside this file defines the
 # new UsdGenExpression type, connections and per-attribute evaluation metadata.
 # gpu-execution.md defines the CUDA, tool and renderer buffer contract.
-# rbf-deformation.md records Unreal/HiPhy research and the animation contract.
+# rbf-deformation.md records a host renderer/HiPhy research and the animation contract.
 # The schema/adapters and a limited CUDA execution subset are implemented;
 # the full operator network below still exceeds that executable subset.
 # See cuda-width-network.usda for the tested source/Width tool-consumer path.

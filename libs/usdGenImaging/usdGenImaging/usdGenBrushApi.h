@@ -1,13 +1,12 @@
 /* usdGenImaging/usdGenBrushApi.h — the C ABI behind the usdview attribute brush.
  *
- * The brush tool (plugin/usdGenTools/python/usdGenTools/brush*.py) used to do
- * everything per element in Python: the pick, the dab kernel, the footprint
- * spill onto neighbouring faces, the corner extraction and the preview
- * colours, each touching O(faces) Python objects per mouse move. This header
- * moves that hot path into C++ behind opaque handles, in the style of
- * usdGenToolsApi.h / pomadeApi.h, and adds the viewport overlay the preview
- * draws through (attributePreviewSceneIndex.h), so a move writes nothing to
- * the stage.
+ * The brush used to do everything per element in Python: the pick, the dab
+ * kernel, the footprint spill onto neighbouring faces, the corner extraction
+ * and the preview colours, each touching O(faces) Python objects per mouse
+ * move. This header moves that hot path into C++ behind opaque handles, in
+ * the style of usdGenToolsApi.h / pomadeApi.h, and adds the viewport overlay
+ * the preview draws through (attributePreviewSceneIndex.h), so a move writes
+ * nothing to the stage.
  *
  * Handles:
  *   mesh   — a world-space quad-mesh snapshot plus a uniform-grid face index
@@ -22,7 +21,7 @@
  *            replayed through the same kernel) reproduces the working grid
  *            exactly. A stroke keeps its mesh alive.
  *
- * Conventions (shared with brushPick.py / brushAuthor.py): quads only;
+ * Conventions: quads only;
  * face-local (u, v) with corners v0..v3 at (0,0),(1,0),(1,1),(0,1); corner
  * arrays are laid out [face][corner][channel]; floats are float32, points
  * double. Every entry point is extern "C", never throws, and returns 0 or a

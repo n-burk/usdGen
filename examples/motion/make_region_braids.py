@@ -1,11 +1,10 @@
 """Two strands and two dense braids: one description, Ptex-partitioned drivers.
 
-Requires the usdGen/OpenUSD Python environment and build/usdGenBakePtex.
+Requires the usdGen/OpenUSD Python environment. Writes the USDA scenes.
+The categorical Ptex maps under maps/ are inputs; this script does not bake them.
 """
 import math
-import os
 from pathlib import Path
-import subprocess
 from pxr import Gf, Sdf, UsdGeom, UsdShade
 from make_animated_sphere import build_sphere
 from make_motion_examples import curves
@@ -111,11 +110,6 @@ def main():
     for dense,name in [(False,'two_curves_ptex_regions'),(True,'two_braids_ptex_regions')]:
         out=HERE/(name+'.usda');stage=make(dense,simulated)
         stage.GetRootLayer().Export(str(out));print(out)
-    exe=HERE.parents[1]/'build'/('usdGenBakePtex.exe' if os.name=='nt' else 'usdGenBakePtex')
-    scene=HERE/'two_curves_ptex_regions.usda'
-    for name,seeds in [('two_regions','/World/Motion/Drivers'),('two_regions_swapped','/World/RegionSeedsReverse')]:
-        subprocess.run([str(exe),str(scene),'/World/Motion/Scalp',str(HERE/'maps'/(name+'.ptx')),
-                        '--res','6','--pattern','voronoi','--seeds-prim',seeds,'--values','index'],check=True)
     # Same partition as the categorical Ptex file, for an unambiguous visual key.
     from PIL import Image
     im=Image.new('RGB',(64,64));im.putdata([(235,175,45) if x<32 else (45,160,205) for y in range(64) for x in range(64)])

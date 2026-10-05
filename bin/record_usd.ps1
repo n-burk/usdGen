@@ -29,23 +29,7 @@ param(
     # HDX_MSAA_SAMPLE_COUNT; the default is 4). The strand material's sample
     # mask scales with whatever it actually gets, so raising this raises the
     # number of coverage levels a sub-pixel strand can spend.
-    [int] $Msaa = 0,
-    # Record with the Pomade TOOL LIVE instead of through usdrecord: hydrate
-    # the scene's committed groom into a model, focus a level, activate and
-    # publish, so the frame carries the tubes, level colours, center curves
-    # and CV dots the artist edits. usdrecord cannot do this -- it never
-    # creates a model, so the Pomade scene index publishes nothing (plan/18
-    # F1/F2). bin/record_pomade.py does the work; tests/golden/pomade-*.png
-    # are recorded through the same function.
-    [switch] $Pomade,
-    # With -Pomade: record the stage alone. For a groom the tool cannot
-    # open -- the example ponytail carries hand-posed guides and no scalp
-    # graph shell, so PomadeHydrateModel refuses it by design.
-    [switch] $PomadeOff,
-    # The level -Pomade focuses (thick center curves, large CV dots).
-    [int] $PomadeLevel = 2,
-    # The groom prim -Pomade hydrates.
-    [string] $PomadeGroom = "/PomadeGroom"
+    [int] $Msaa = 0
 )
 
 # Headless render of a usdGen scene with the plugins from this build tree:
@@ -71,9 +55,7 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenSchema\resources"),
     (Join-Path $Build "usd\usdGenImaging\resources"),
     (Join-Path $Build "usd\usdGenShaders\resources"),
-    (Join-Path $Build "usd\usdGenTools\resources"),
     (Join-Path $Build "usd\usdGenPomade\resources"),
-    (Join-Path $Build "usd\usdGenPomadeTools\resources"),
     (Join-Path $UsdInstallDir "plugin\usd"),
     (Join-Path $UsdInstallDir "lib\usd")
 ) | Where-Object { Test-Path $_ }
@@ -88,10 +70,8 @@ $env:PXR_PLUGINPATH_NAME = ($pluginDirs -join ';')
 # patch -- HdxTaskController reads it -- so set it only if the caller has not.
 if (-not $env:HDX_MSAA_SAMPLE_COUNT) { $env:HDX_MSAA_SAMPLE_COUNT = "8" }
 
-# The Pomade tool's scene index publishes a static P0 test tube on
-# construction; no tool drives the model in a headless record, so the
-# scaffolding would land in every frame. Opt out (interactive usdview
-# keeps it: the tool hydrates the model on activation).
+# The Pomade scene index publishes a static test tube on construction
+# unless this is 0. A headless record has no model, so opt out.
 $env:USDGENPOMADE_TEST_TUBE = "0"
 
 
@@ -130,30 +110,6 @@ $RenderWidth = $Width * $Supersample
 $RenderTarget = $Output
 if ($Supersample -gt 1) {
     $RenderTarget = [System.IO.Path]::ChangeExtension($Output, ".ss$Supersample.png")
-}
-
-# -Pomade replaces usdrecord entirely: the tool has to be live in the
-# recording process, which means creating and publishing a model, and
-# usdrecord has no hook for that. Everything above still applies -- the
-# same plugin path, the same DLL path, the same test-tube opt-out.
-if ($Pomade) {
-    if ($Supersample -gt 1) { throw "-Supersample is not supported with -Pomade." }
-    if ($Frame -ge 0) { throw "-Frame is not supported with -Pomade (default time only)." }
-    $pomadeArgs = @((Join-Path $PSScriptRoot "record_pomade.py"),
-                   (Resolve-Path $Scene).Path, $Output,
-                   "--width", $RenderWidth, "--renderer", $Renderer,
-                   "--level", $PomadeLevel, "--groom", $PomadeGroom)
-    if ($Camera) { $pomadeArgs += @("--camera", $Camera) }
-    if ($Complexity) { $pomadeArgs += @("--complexity", $Complexity) }
-    if ($PomadeOff) { $pomadeArgs += "--no-tool" }
-    $oldEap = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        & $python @pomadeArgs
-    } finally {
-        $ErrorActionPreference = $oldEap
-    }
-    exit $LASTEXITCODE
 }
 
 # usdrecord wants a "###" placeholder in the output name when frames are

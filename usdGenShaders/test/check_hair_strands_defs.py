@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Sdr validation of the two the host renderer-parity strand-hair shader defs.
+"""Sdr validation of the two strand-hair shader defs.
 
 The counterpart of checkC5.py for `UsdGenHairStrands` /
-`UsdGenHairStrandsTranslucent` (plan/16-ue-hair-parity.md WS1). Those two are
+`UsdGenHairStrandsTranslucent` (plan/16-hair-shading-parity.md WS1). Those two are
 NOT part of the C5 freeze -- C5 covers the `inputs:` block of the three
 `UsdGenHairPreview*` files and nothing else -- so they get their own check
 rather than being folded into checkC5.py, which must keep asserting exactly

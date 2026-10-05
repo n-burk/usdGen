@@ -8,8 +8,8 @@
 
 # POMADE BRAID HIERARCHY (plan/17 P4 / plan/18 V0b exit)
 #
-# COMMITTER OUTPUT. Regenerate with:
-#     python examples/tools/gen_pomade_braid_hierarchy.py
+# COMMITTER OUTPUT. The generator that wrote this file is not in this
+# repository.
 # Nothing below /PomadeGroom is hand-authored: PomadeCommitter wrote the tube
 # hierarchy (nested prims, childIndex, subdivide:*, deltas, the
 # UsdGenTubeHierarchyAPI on the kept on-the-fly parent) and the Guides

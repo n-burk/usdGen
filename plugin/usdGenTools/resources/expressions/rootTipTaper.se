@@ -1,5 +1,0 @@
-# domain: point
-# Narrows a strand from root to tip. $tip is the fraction of the root width
-# the tip keeps, so 1 is a cylinder and 0 a needle.
-$tip = 0.15; # 0, 1
-$value * fit(smoothstep($t, 0.0, 1.0), 0, 1, 1.0, $tip)

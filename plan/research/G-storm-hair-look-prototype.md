@@ -50,7 +50,7 @@ produced by `$P/build/render_hair` and `$P/build/bench_hair`. `usdrecord` still 
 | Route | Compiles in Storm 26.08? | Looks like hair? | Recommendation |
 |---|---|---|---|
 | **(1) Plugin glslfx surface shader** (`$P/usdGenHairPreview.glslfx`) | **Yes — rendered, 0 warnings** | **Yes** (`$P/hair_pv_tangent.png`) | **v1 look.** Ship two copies: `defaultMaterialTag` (opaque + alpha-to-coverage) and `translucent` (OIT). |
-| **(2) MaterialX `chiang_hair_bsdf`** | **Yes — compiles and renders, no crash, no warning** | **No.** Near-black even at melanin 0.03 (`$P/hair_mtlx_light.png`) because Storm's MaterialX lighting only integrates a reflection closure and `Tworld` is a fake tangent | Not v1. Author it in the USD material anyway as the *render-time* look (hdPrman/Karma consume it correctly); Storm shows route 1. |
+| **(2) MaterialX `chiang_hair_bsdf`** | **Yes — compiles and renders, no crash, no warning** | **No.** Near-black even at melanin 0.03 (`$P/hair_mtlx_light.png`) because Storm's MaterialX lighting only integrates a reflection closure and `Tworld` is a fake tangent | Not v1. Author it in the USD material anyway as the *render-time* look (hdPrman and a host renderer consume it correctly); Storm shows route 1. |
 | **(3) UsdPreviewSurface + uniform `st` + `UsdUVTexture`** | **Yes** | Colour maps work perfectly (`$P/hair_preview_tex.png`), but shading is isotropic GGX — no strand highlight | **Ship as the fallback/compat material** for non-Storm delegates and for "no plugin installed". |
 
 ---
@@ -187,7 +187,7 @@ Three tangent sources, all tested:
 **Decision: the plugin authors a `vertex vec3 hairTangent` primvar; the glslfx uses it under
 `#ifdef HD_HAS_hairTangent` and falls back to the derivative path, and never touches `inData`.** That is
 what `$P/usdGenHairPreview.glslfx` does. Cost: 12 B/CV (1.6 M CVs → 19 MB), and it is renderer-agnostic
-(hdPrman/Karma/Cycles can all read a tangent primvar).
+(hdPrman and other curve renderers can all read a tangent primvar).
 
 ### 2.6 Material tag, opacity and OIT — measured
 
@@ -267,7 +267,7 @@ The look is wrong for two independent reasons:
    instrument `closureData.closureType` — but the melanin sweep rules out "it's just dark hair".
 
 **Plan consequence:** author the MaterialX hair network in the USD material as the *render-time* look
-(hdPrman/Karma read it correctly — see `G-hdprman-and-usdrecord-render-time-chain.md`), and bind the
+(hdPrman and a host renderer read it correctly — see `G-hdprman-and-usdrecord-render-time-chain.md`), and bind the
 plugin glslfx as the Storm-specific opinion. UsdShade supports exactly this: `outputs:surface` (glslfx
 terminal) alongside `outputs:mtlx:surface` and `outputs:ri:surface` on the same `Material` prim, and
 Storm's declared shader source types are `glslfx` then `mtlx`
@@ -404,7 +404,7 @@ same `uniform st` and `uniform displayColor` primvars.
 
 **Route 2 is the render-time look**, authored on `outputs:mtlx:surface` of the same `Material` prim, with
 an explicit `ND_geompropvalue_vector3(geomprop="hairTangentWorld")` into `curve_direction` (world space!)
-so it is correct for hdPrman/Karma and does not silently pick up `cross(N,(0,1,0))`.
+so it is correct for hdPrman and a host renderer and does not silently pick up `cross(N,(0,1,0))`.
 
 ## Key facts
 

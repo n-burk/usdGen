@@ -11,8 +11,7 @@
 //
 // Codes may be combined (TF_DEBUG="USDGEN_*"). The engine also emits
 // TRACE_SCOPE events for the same stages: record them with
-// `usdview --traceToFile trace.json --traceFormat chrome` or
-// bin/trace_playback.ps1.
+// `usdview --traceToFile trace.json --traceFormat chrome`.
 #ifndef USDGEN_DEBUG_CODES_H
 #define USDGEN_DEBUG_CODES_H
 

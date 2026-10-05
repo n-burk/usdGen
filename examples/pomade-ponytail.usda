@@ -20,7 +20,7 @@
 # View it:   .\bin\launch_usdview.ps1 examples\pomade-ponytail.usda
 # Record it: .\bin\record_usd.ps1 -Scene examples\pomade-ponytail.usda `
 #                -Output out.png -Camera /World/Cam -Complexity veryhigh
-# Regenerate: python examples\tools\gen_pomade_ponytail.py
+# The generator that wrote this file is not in this repository.
 
 def Xform "World"
 {

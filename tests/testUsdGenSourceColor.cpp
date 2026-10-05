@@ -1,6 +1,6 @@
 // testUsdGenSourceColor — the colour a tile publishes, and where it came from.
 //
-// Precedence (02 §2.14, plan/16-ue-hair-parity.md):
+// Precedence (02 §2.14, plan/16-hair-shading-parity.md):
 //   1. an AUTHORED usdGen:look on the description wins;
 //   2. else the source curves' own primvars:displayColor, forwarded verbatim;
 //   3. else the look's schema defaults.

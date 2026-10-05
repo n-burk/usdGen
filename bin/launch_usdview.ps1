@@ -3,16 +3,16 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
     # Render the viewport at N x the window and box-downsample it in linear
-    # light on present (usdGenTools; see docs/storm-fur.md). Cost goes as N^2,
+    # light on present. Cost goes as N^2,
     # so this is a look-dev switch: 2 is the useful one, 4 is a hero still.
-    # It can also be changed in the usdGen > Viewport Supersampling menu.
+    # Sets USDGEN_USDVIEW_SUPERSAMPLE. The viewer plugin that reads it is not
+    # in this repository.
     [ValidateRange(1, 8)]
     [int] $Supersample = 0,
     # Run the prefix's testusdview on this script instead of opening
     # usdview interactively. The environment is the same either way,
-    # which is the point: the T3 pomade scripts and the workspace
-    # screenshot need exactly the plugin, python and DLL paths this
-    # launcher already assembles.
+    # which is the point: a script sees the same plugin, python and DLL
+    # paths this launcher already assembles.
     [string] $TestScript = "",
     # Print the assembled viewer environment as JSON and exit without
     # launching. Headless hook for tests: usdview/testusdview need GL,
@@ -96,9 +96,7 @@ $pluginDirs = @(
     (Join-Path $Build "usd\usdGenSchema\resources"),
     (Join-Path $Build "usd\usdGenImaging\resources"),
     (Join-Path $Build "usd\usdGenShaders\resources"),
-    (Join-Path $Build "usd\usdGenTools\resources"),
     (Join-Path $Build "usd\usdGenPomade\resources"),
-    (Join-Path $Build "usd\usdGenPomadeTools\resources"),
     (Join-Path $Build "usd\usdNoodles\resources")
 ) + $moonrayPluginDirs + @(
     (Join-Path $UsdInstallDir "plugin\usd"),
@@ -115,8 +113,7 @@ $env:PXR_PLUGINPATH_NAME = ($pluginDirs -join ';')
 # patch -- HdxTaskController reads it -- so set it only if the caller has not.
 if (-not $env:HDX_MSAA_SAMPLE_COUNT) { $env:HDX_MSAA_SAMPLE_COUNT = "8" }
 
-# Viewport supersampling, read by the usdGenTools usdview plugin. -Supersample
-# wins over the environment; without either, the viewport renders 1:1.
+# Viewport supersampling. -Supersample wins over the environment.
 if ($Supersample -gt 0) { $env:USDGEN_USDVIEW_SUPERSAMPLE = "$Supersample" }
 
 

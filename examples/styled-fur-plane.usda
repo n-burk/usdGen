@@ -43,7 +43,7 @@ def Xform "World"
     }
 
     # Key + a DomeLight fill so the physically based default hair material
-    # (a UE port) doesn't render near-black under only usdrecord's camera
+    # (the strand shader) doesn't render near-black under only usdrecord's camera
     # headlight. inputs:normalize = 1 is required on the DistantLight: HdSt
     # otherwise multiplies intensity by its (tiny, 0.53deg-default) solid
     # angle, so an un-normalized "intensity 3" comes out around 2e-4 and the

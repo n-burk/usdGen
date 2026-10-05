@@ -31,36 +31,6 @@ files. An animated scene renders one frame at a time; `usdrecord` wants a
     .\bin\record_usd.ps1 -Scene examples\rbf-guides-plane.usda `
         -Output out.###.png -Camera /World/Cam -Complexity veryhigh -Frame 20
 
-## Profiling playback
-
-`bin/trace_playback.ps1` plays a scene and writes an OpenUSD trace
-(`build/traces/<scene>/` unless `-OutDir` says otherwise):
-
-    .\bin\trace_playback.ps1 -Scene examples\rbf-guides-plane.usda -Pull
-    .\bin\trace_playback.ps1 -Scene examples\rbf-guides-plane.usda -Usdview -TraceFormat trace
-
-The first runs `usdGenTracePlayback`, which steps the frames through the groom
-scene index the way usdview does, and writes these files:
-
-* `playback.log`: a table of the time spent in each frame, and a hash of the
-  published points to compare two builds with. For each cook it also says:
-  * why it compiled;
-  * which operators re-captured, and why;
-  * how many chunks each evaluated;
-  * where the cook's time went;
-  * which dirty locators reached Hydra.
-* `trace.json`: for `chrome://tracing` or https://ui.perfetto.dev.
-* `report.txt`: OpenUSD's aggregate tree.
-
-`-Quiet` keeps only the table. `-Usdview` plays the scene in testusdview
-instead and adds Storm's sync and draw to the trace. Its table splits each
-frame into `setFrame`, `paintGL` and the rest of Qt's work (widget updates,
-compositing, and a buffer swap that waits for vsync). A Chrome trace of Storm
-is hundreds of MB; `-TraceFormat trace` writes the aggregate tree instead.
-The per-cook lines are `TF_DEBUG` codes, so any host can print them:
-
-    $env:TF_DEBUG = "USDGEN_COMMIT USDGEN_SCHEDULE USDGEN_INGRESS"
-
 ## Sampling external data in expressions
 
 An expression reads data outside its own strand only through a relationship
@@ -92,20 +62,9 @@ consuming operators. Both functions run on the CPU lane only.
 
 ## Seeing a value on the hair
 
-The SeExpr editor's **Colour hair by value** group (usdview, `Ctrl+Shift+E`)
-replaces the hair material with a flat preview and colours every strand by:
-
-* the edited expression, evaluated per strand, per CV or once;
-* a Ptex map the expression reads (`Distinct ids` shows one colour per clump
-  or region cell);
-* the attribute the expression drives, or any operator attribute through
-  **Show on hair** in the Connections tab: the values the operator was cooked
-  with, or its authored value when nothing drives it (`usdGen:mask`, say).
-
-With **Follow edits** on, every edit that compiles is previewed as you type.
-The editor writes `usdGen:preview:source`, `colorMap`, `range`, `evaluation`
-and `shading` on the description in the session layer only; the same
-properties can be authored by hand:
+A description can carry a flat value preview in the session layer. Author
+`usdGen:preview:source`, `colorMap`, `range`, `evaluation` and `shading`
+on the description:
 
     over "Fur"
     {
@@ -128,12 +87,11 @@ Look colour is authored as `usdGen:look:rootColor` and `tipColor` on the
 description. See "Binding your own material loses half the look" in
 `docs/storm-fur.md` before binding a different material.
 
-    .\bin\render_ue_parity.ps1 -Label <name>              # renders\ue-parity\<name>_*
-    .\bin\render_ue_parity.ps1 -Label ref -Supersample 4  # converged reference, offline only
+    .\bin\render_hair_parity.ps1 -Label <name>              # renders\hair-parity\<name>_*
+    .\bin\render_hair_parity.ps1 -Label ref -Supersample 4  # converged reference, offline only
 
 ## Regenerating
 
-    python examples\tools\make_examples.py       # the two procedural scenes
+    python examples\tools\make_examples.py       # the procedural scenes
     python examples\tools\make_head_hair.py      # head-hair-closeup{,-render}.usda
-    .\examples\tools\bake_maps.ps1                # examples\maps\*.ptx (usdGenBakePtex)
     .\examples\tools\render_examples.ps1          # renders\examples\*.png

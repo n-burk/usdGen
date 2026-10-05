@@ -8,7 +8,7 @@
 //
 // Usage: testUsdGenPtexMap [file.ptx]. With a path, the test only prints the
 // distinct nearest-sampled values of that file per face (a smoke check for
-// usdGenBakePtex output) and exits.
+// a baked ptx) and exits.
 #include "usdGen/maps/ptexMap.h"
 
 // The test authors its fixture through the vendored library directly.

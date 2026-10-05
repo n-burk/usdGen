@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Storm render check for the host renderer-parity strand-hair material.
+"""Storm render check for the strand-hair material.
 
 Proves, on a real GL context, that `UsdGenHairStrands` /
 `UsdGenHairStrandsTranslucent` COMPILE and that the pieces the port depends on
