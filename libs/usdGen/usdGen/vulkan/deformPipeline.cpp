@@ -47,11 +47,15 @@ constexpr uint32_t kEvalStorage = 5;
 constexpr uint32_t kApplyStorage = 9;
 // Cached-R evaluate: the first kEvalCachePrefixCVs CVs run through the
 // cached radius-cubed rows (P*n doubles); points past the prefix run the
-// direct shader with a base offset. 512k CVs at n=100 need 400MiB of R
-// plus a 6MiB proof snapshot, inside the 512MiB bench budget with room
-// for the pose scratch and idle sets; smaller budgets run the direct
-// shader with no added work.
-constexpr uint32_t kEvalCachePrefixCVs = 524288;
+// direct shader with a base offset. 598016 CVs at n=100 need 456.25MiB
+// of R plus a 6.8MiB proof snapshot: 499MiB next to the ~36MiB of pose
+// scratch and uploads, ~13MiB inside the 512MiB bench budget (the pool
+// charges exact bytes, so the margin is deterministic run to run). Each
+// CV moved off the fp64-sqrt suffix (~13.1ns) onto the streaming prefix
+// (~3.2ns) saves ~9.9ns. Stays below 600000 so the 600k-point test still
+// covers the suffix dispatch; smaller budgets run the direct shader with
+// no added work.
+constexpr uint32_t kEvalCachePrefixCVs = 598016;
 constexpr uint32_t kVerifyLocalSize = 256;
 constexpr uint32_t kFillLocalSize = 256;
 constexpr uint32_t kCachedLocalSize = 128;
