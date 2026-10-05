@@ -170,41 +170,8 @@ bool CubicField::Solve(std::vector<GfVec3d> const &current, std::string *error)
     return true;
 }
 
-GfVec3d CubicField::Displacement(GfVec3d const &x) const
-{
-    size_t const n = _rest.size(), m = _order;
-    if (!m) return GfVec3d(0.0);
-    GfVec3d const y = (x - _centre) * _invScale;
-    double const *cx = &_coefficients[0], *cy = &_coefficients[m], *cz = &_coefficients[2 * m];
-
-    // The kernel row gets a loop of its own, which the compiler vectorizes
-    // (the square root dominates a deform). The sums below depend on their
-    // order, so they stay sample by sample and the result is unchanged.
-    constexpr size_t kStackSamples = 256;
-    double stackKernel[kStackSamples];
-    double *k = stackKernel;
-    if (n > kStackSamples) {
-        thread_local std::vector<double> heapKernel;
-        heapKernel.resize(n);
-        k = heapKernel.data();
-    }
-    double const *rx = _restX.data(), *ry = _restY.data(), *rz = _restZ.data();
-    double const px = y[0], py = y[1], pz = y[2];
-    for (size_t i = 0; i < n; ++i) {
-        double const dx = px - rx[i], dy = py - ry[i], dz = pz - rz[i];
-        k[i] = Cube(std::sqrt(dx * dx + dy * dy + dz * dz));
-    }
-
-    double ox = cx[n] + cx[n + 1] * px + cx[n + 2] * py + cx[n + 3] * pz;
-    double oy = cy[n] + cy[n + 1] * px + cy[n + 2] * py + cy[n + 3] * pz;
-    double oz = cz[n] + cz[n + 1] * px + cz[n + 2] * py + cz[n + 3] * pz;
-    for (size_t i = 0; i < n; ++i) {
-        ox += cx[i] * k[i];
-        oy += cy[i] * k[i];
-        oz += cz[i] * k[i];
-    }
-    return GfVec3d(ox, oy, oz) * _scale;
-}
+// CubicField::Displacement lives in rbfField.h (inlined at the per-CV call
+// sites); see there.
 
 std::vector<size_t> SelectSamples(std::vector<GfVec3d> const &points, size_t budget,
                                   double epsilon)
