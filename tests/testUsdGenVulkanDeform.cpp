@@ -1156,9 +1156,52 @@ int main(int argc, char** argv) {
             std::puts("Case 16 (bypass then probe resumes): PASS");
         }
 
-        // Case 17: past-prefix suffix (600k points) bitwise direct.
+        // Case 17: past-prefix suffix (600k points) bitwise direct. The
+        // 48MiB budget funds only a ~340k prefix at n=8 (~8.1MiB of inputs
+        // plus ~14.4MiB of pose scratch charge first, then ~24.5MiB funds
+        // R+proof at 76B/CV), so the suffix dispatch covers the remaining
+        // ~260k points; the funded-prefix seam pins that the suffix ran
+        // (a full prefix would silently drop that coverage).
         {
-            CHECK(freshPipe());
+            DeviceContext::CreateInfo suffixCi;
+            suffixCi.instance = native->instance;
+            suffixCi.physicalDevice = native->physical;
+            suffixCi.device = native->device;
+            suffixCi.computeQueue = native->queue;
+            suffixCi.computeQueueFamily = native->family;
+            suffixCi.physicalIndex = native->physicalIndex;
+            suffixCi.resourceDeviceId = 8031;
+            suffixCi.nativeLifetime = native;
+            suffixCi.resources = {size_t{48} << 20, 0};
+            suffixCi.shaderFloat64Enabled = true;
+            auto suffixContext = DeviceContext::Create(suffixCi);
+            CHECK(suffixContext);
+            VkResult sstatus = VK_SUCCESS;
+            auto suffixPipe = DeformPipeline::Create(suffixContext, evalSpv, applySpv,
+                &sstatus, cacheSpv);
+            CHECK(suffixPipe && sstatus == VK_SUCCESS);
+            auto runSuffix = [&](DeformPipeline::BeginInfo info,
+                                 std::vector<float>* out) {
+                DeformSemantic sem = DeformSemantic::Ok;
+                VkResult st = VK_SUCCESS;
+                auto c = suffixPipe->Begin(std::move(info), &st, &sem);
+                if (!c || st != VK_SUCCESS) return false;
+                if (!Prove(native)) return false;
+                if (c->Poll(&sem) != VK_SUCCESS) return false;
+                if (sem != DeformSemantic::Ok || !c->succeeded()) return false;
+                return ReadOutput(native, suffixContext, c, out);
+            };
+            auto runSuffixDirect = [&](DeformPipeline::BeginInfo info,
+                                       std::vector<float>* out) {
+                TestDisableDeformEvalCache(true);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = suffixPipe->Begin(std::move(info), &sstatus, &sem);
+                bool ok = c && sstatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, suffixContext, c, out);
+                TestDisableDeformEvalCache(false);
+                return ok;
+            };
             uint64_t h0 = DeformEvalCacheHitsForTesting();
             uint64_t m0 = DeformEvalCacheMissesForTesting();
             uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
@@ -1184,10 +1227,10 @@ int main(int argc, char** argv) {
             };
             std::vector<float> posed8 = rest8;
             for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
-            auto ptsBuf = bigUpload(pts.data(), pts.size() * sizeof(float));
-            auto offBuf = UploadVulkanDeviceBytes(native, bigContext, off.data(),
+            auto ptsBuf = Upload(suffixContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, suffixContext, off.data(),
                 off.size() * sizeof(uint32_t));
-            auto tgtBuf = bigUpload(tgt.data(), tgt.size() * sizeof(float));
+            auto tgtBuf = Upload(suffixContext, tgt.data(), tgt.size() * sizeof(float));
             CHECK(ptsBuf && offBuf && tgtBuf);
             auto mkBig = [&]() {
                 DeformPipeline::BeginInfo info;
@@ -1207,24 +1250,56 @@ int main(int argc, char** argv) {
                 return info;
             };
             std::vector<float> fillOut, hitOut, directOut;
-            CHECK(runPose(mkBig(), &fillOut, nullptr));
-            CHECK(runPose(mkBig(), &hitOut, nullptr));
+            CHECK(runSuffix(mkBig(), &fillOut));
+            CHECK(runSuffix(mkBig(), &hitOut));
             CHECK(DeformEvalCacheMissesForTesting() - m0 == 1);
             CHECK(DeformEvalCacheHitsForTesting() - h0 == 1);
-            CHECK(runDirect(mkBig(), &directOut));
+            uint32_t const funded = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded >= 4096 && funded < points);
+            CHECK(runSuffixDirect(mkBig(), &directOut));
             CHECK(bitEq(fillOut, directOut));
             CHECK(bitEq(hitOut, directOut));
             std::puts("Case 17 (600k suffix bitwise direct): PASS");
         }
 
         // Case 18: over budget runs direct (unfunded), bitwise direct.
+        // The 1MiB budget cannot fund the 4096-CV floor at n=100 (the 1MiB
+        // funding margin alone meets what is free), so the pose runs the
+        // direct shader with no vkAllocateMemory probes.
         {
             uint64_t u0 = DeformEvalCacheUnfundedForTesting();
+            DeviceContext::CreateInfo tinyCi;
+            tinyCi.instance = native->instance;
+            tinyCi.physicalDevice = native->physical;
+            tinyCi.device = native->device;
+            tinyCi.computeQueue = native->queue;
+            tinyCi.computeQueueFamily = native->family;
+            tinyCi.physicalIndex = native->physicalIndex;
+            tinyCi.resourceDeviceId = 8032;
+            tinyCi.nativeLifetime = native;
+            tinyCi.resources = {size_t{1} << 20, 0};
+            tinyCi.shaderFloat64Enabled = true;
+            auto tinyContext = DeviceContext::Create(tinyCi);
+            CHECK(tinyContext);
             VkResult st2 = VK_SUCCESS;
             auto smallPipe =
-                DeformPipeline::Create(context, evalSpv, applySpv, &st2, cacheSpv);
+                DeformPipeline::Create(tinyContext, evalSpv, applySpv, &st2, cacheSpv);
             CHECK(smallPipe && st2 == VK_SUCCESS);
-            // n = 100 needs a 400MiB R: never funded under the 32MiB budget.
+            const std::vector<float> tinyPts{
+                0.0f, 0.0f, 0.0f, 0.1f, 0.0f, 0.1f, 0.2f, 0.0f, 0.2f,
+                1.0f, 0.0f, 0.0f, 1.1f, 0.0f, 0.1f, 1.2f, 0.0f, 0.2f,
+            };
+            const std::vector<uint32_t> tinyOff{0, 3, 6};
+            const std::vector<float> tinyTgt{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+            };
+            auto tinyPtsBuf =
+                Upload(tinyContext, tinyPts.data(), tinyPts.size() * sizeof(float));
+            auto tinyOffBuf = UploadVulkanDeviceBytes(native, tinyContext, tinyOff.data(),
+                tinyOff.size() * sizeof(uint32_t));
+            auto tinyTgtBuf =
+                Upload(tinyContext, tinyTgt.data(), tinyTgt.size() * sizeof(float));
+            CHECK(tinyPtsBuf && tinyOffBuf && tinyTgtBuf);
             std::vector<float> rest100(size_t(100) * 3);
             for (int i = 0; i < 100; ++i) {
                 rest100[size_t(i) * 3] = float(i % 10);
@@ -1234,9 +1309,9 @@ int main(int argc, char** argv) {
             std::vector<float> posed100 = rest100;
             for (size_t i = 0; i < posed100.size(); i += 3) posed100[i] += 0.1f;
             DeformPipeline::BeginInfo info;
-            info.points = pointsBuf;
-            info.curveOffsets = offsetsBuf;
-            info.rootTargets = targetsBuf;
+            info.points = tinyPtsBuf;
+            info.curveOffsets = tinyOffBuf;
+            info.rootTargets = tinyTgtBuf;
             info.curveCount = 2;
             info.pointCount = 6;
             info.restSamples = rest100;
@@ -1254,20 +1329,148 @@ int main(int argc, char** argv) {
             CHECK(c->Poll(&sem) == VK_SUCCESS);
             CHECK(sem == DeformSemantic::Ok && c->succeeded());
             std::vector<float> got;
-            CHECK(ReadOutput(native, context, c, &got));
+            CHECK(ReadOutput(native, tinyContext, c, &got));
             CHECK(DeformEvalCacheUnfundedForTesting() - u0 == 1);
-            // The direct-only pipe on the same context agrees bitwise.
+            // The disable seam on the same pipe agrees bitwise.
+            TestDisableDeformEvalCache(true);
             DeformSemantic sem2 = DeformSemantic::Ok;
-            auto c2 = pipe->Begin(std::move(info), &st2, &sem2);
-            CHECK(c2 && st2 == VK_SUCCESS);
-            CHECK(Prove(native));
-            CHECK(c2->Poll(&sem2) == VK_SUCCESS);
-            CHECK(sem2 == DeformSemantic::Ok && c2->succeeded());
+            auto c2 = smallPipe->Begin(std::move(info), &st2, &sem2);
+            bool directOk = c2 && st2 == VK_SUCCESS && Prove(native) &&
+                c2->Poll(&sem2) == VK_SUCCESS && sem2 == DeformSemantic::Ok &&
+                c2->succeeded();
             std::vector<float> direct;
-            CHECK(ReadOutput(native, context, c2, &direct));
-            CHECK(got.size() == direct.size());
-            CHECK(std::memcmp(got.data(), direct.data(), got.size() * sizeof(float)) == 0);
+            directOk = directOk && ReadOutput(native, tinyContext, c2, &direct);
+            TestDisableDeformEvalCache(false);
+            CHECK(directOk);
+            CHECK(bitEq(got, direct));
             std::puts("Case 18 (unfunded runs direct): PASS");
+        }
+
+        // Case 19: a pose its own cache starves evicts and succeeds. The
+        // 20MiB budget funds a ~12k prefix for the 200k-point pose (~9.6MiB
+        // of inputs and scratch charge first at n=100), leaving ~1MiB free;
+        // the 150k-point pose's scratch then misses the pool checkout and
+        // would fail, so Begin evicts the cache, retries, and refounds a
+        // smaller prefix instead of failing. Bitwise direct throughout.
+        {
+            DeviceContext::CreateInfo evictCi;
+            evictCi.instance = native->instance;
+            evictCi.physicalDevice = native->physical;
+            evictCi.device = native->device;
+            evictCi.computeQueue = native->queue;
+            evictCi.computeQueueFamily = native->family;
+            evictCi.physicalIndex = native->physicalIndex;
+            evictCi.resourceDeviceId = 8033;
+            evictCi.nativeLifetime = native;
+            evictCi.resources = {size_t{20} << 20, 0};
+            evictCi.shaderFloat64Enabled = true;
+            auto evictContext = DeviceContext::Create(evictCi);
+            CHECK(evictContext);
+            VkResult estatus = VK_SUCCESS;
+            auto evictPipe = DeformPipeline::Create(evictContext, evalSpv, applySpv,
+                &estatus, cacheSpv);
+            CHECK(evictPipe && estatus == VK_SUCCESS);
+            int const n = 100;
+            std::vector<float> rest100(size_t(n) * 3);
+            for (int i = 0; i < n; ++i) {
+                rest100[size_t(i) * 3] = float(i % 10);
+                rest100[size_t(i) * 3 + 1] = float((i / 10) % 10);
+                rest100[size_t(i) * 3 + 2] = float(i % 3);
+            }
+            std::vector<float> posed100 = rest100;
+            for (size_t i = 0; i < posed100.size(); i += 3) posed100[i] += 0.1f;
+            auto makeShape = [&](uint32_t curves, uint32_t perCurve) {
+                DeformPipeline::BeginInfo info;
+                uint32_t const points = curves * perCurve;
+                std::vector<float> pts(size_t(points) * 3);
+                uint64_t state = 0x9e3779b9u;
+                for (auto& v : pts) {
+                    state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                    v = float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+                }
+                std::vector<uint32_t> off(curves + 1);
+                for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+                std::vector<float> tgt(size_t(curves) * 3);
+                for (uint32_t i = 0; i < curves; ++i)
+                    for (int a = 0; a < 3; ++a)
+                        tgt[size_t(i) * 3 + size_t(a)] =
+                            pts[size_t(i) * perCurve * 3 + size_t(a)];
+                info.points = Upload(evictContext, pts.data(), pts.size() * sizeof(float));
+                info.curveOffsets = UploadVulkanDeviceBytes(native, evictContext, off.data(),
+                    off.size() * sizeof(uint32_t));
+                info.rootTargets =
+                    Upload(evictContext, tgt.data(), tgt.size() * sizeof(float));
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest100;
+                info.posedSamples = posed100;
+                info.sampleCount = n;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            auto runEvict = [&](DeformPipeline::BeginInfo info,
+                                std::vector<float>* out) {
+                DeformSemantic sem = DeformSemantic::Ok;
+                VkResult st = VK_SUCCESS;
+                auto c = evictPipe->Begin(std::move(info), &st, &sem);
+                if (!c || st != VK_SUCCESS) return false;
+                if (!Prove(native)) return false;
+                if (c->Poll(&sem) != VK_SUCCESS) return false;
+                if (sem != DeformSemantic::Ok || !c->succeeded()) return false;
+                return ReadOutput(native, evictContext, c, out);
+            };
+            auto info1 = makeShape(20000, 10);
+            auto info2 = makeShape(15000, 10);
+            CHECK(info1.points && info1.curveOffsets && info1.rootTargets);
+            CHECK(info2.points && info2.curveOffsets && info2.rootTargets);
+            // Saved for the direct comparison (no re-upload: the budget is full).
+            auto pts2 = info2.points;
+            auto off2 = info2.curveOffsets;
+            auto tgt2 = info2.rootTargets;
+            uint64_t u0 = DeformEvalCacheUnfundedForTesting();
+            std::vector<float> got1, got2;
+            // By copy: both shapes' inputs stay alive across both poses,
+            // so pose 2's scratch genuinely does not fit next to the cache
+            // pose 1 funded (moved-from inputs would free early and the
+            // eviction would never engage).
+            CHECK(runEvict(info1, &got1));
+            uint32_t const funded1 = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded1 >= 10000 && funded1 < 200000);
+            CHECK(runEvict(info2, &got2));
+            // Exactly the eviction: the refound pose runs cached, not direct.
+            CHECK(DeformEvalCacheUnfundedForTesting() - u0 == 1);
+            uint32_t const funded2 = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded2 >= 4096 && funded2 < 150000);
+            DeformPipeline::BeginInfo directInfo;
+            directInfo.points = pts2;
+            directInfo.curveOffsets = off2;
+            directInfo.rootTargets = tgt2;
+            directInfo.curveCount = 15000;
+            directInfo.pointCount = 150000;
+            directInfo.restSamples = rest100;
+            directInfo.posedSamples = posed100;
+            directInfo.sampleCount = n;
+            directInfo.smoothing = 0.0;
+            directInfo.mask = {1.0f, 1, nullptr, 0};
+            directInfo.enabled = {1, 1, nullptr, 0};
+            directInfo.lockRoots = {0, 1, nullptr, 0};
+            directInfo.groomEnvelope = 1.0f;
+            TestDisableDeformEvalCache(true);
+            DeformSemantic sem2 = DeformSemantic::Ok;
+            auto c2 = evictPipe->Begin(std::move(directInfo), &estatus, &sem2);
+            bool directOk = c2 && estatus == VK_SUCCESS && Prove(native) &&
+                c2->Poll(&sem2) == VK_SUCCESS && sem2 == DeformSemantic::Ok &&
+                c2->succeeded();
+            std::vector<float> direct;
+            directOk = directOk && ReadOutput(native, evictContext, c2, &direct);
+            TestDisableDeformEvalCache(false);
+            CHECK(directOk);
+            CHECK(bitEq(got2, direct));
+            std::puts("Case 19 (eviction succeeds, bitwise direct): PASS");
         }
     }
 

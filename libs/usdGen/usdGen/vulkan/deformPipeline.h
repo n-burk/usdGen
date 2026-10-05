@@ -57,12 +57,14 @@ struct DeformEvalCacheSpirv {
 // global across pipelines; tests assert deltas. A hit evaluates through
 // the cache without refilling, a miss refills it first (forced refills
 // count as misses), a bypassed pose runs direct under miss backoff, and
-// an unfunded pose runs direct for lack of budget.
+// an unfunded pose runs direct for lack of budget. The funded prefix is
+// the last R/proof capacity the cache funded (0 after an eviction).
 void TestDisableDeformEvalCache(bool disable) noexcept;
 uint64_t DeformEvalCacheHitsForTesting() noexcept;
 uint64_t DeformEvalCacheMissesForTesting() noexcept;
 uint64_t DeformEvalCacheBypassedForTesting() noexcept;
 uint64_t DeformEvalCacheUnfundedForTesting() noexcept;
+uint32_t DeformEvalCacheFundedPrefixForTesting() noexcept;
 
 class DeformPipeline final : public std::enable_shared_from_this<DeformPipeline> {
 public:

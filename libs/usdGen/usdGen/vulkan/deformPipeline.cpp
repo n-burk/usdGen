@@ -45,17 +45,20 @@ constexpr uint32_t kApplyUboBytes = 80;
 constexpr uint32_t kEvalStorage = 5;
 // Apply set: bindings 0..8 = 9 storage + binding 9 = 1 uniform.
 constexpr uint32_t kApplyStorage = 9;
-// Cached-R evaluate: the first kEvalCachePrefixCVs CVs run through the
-// cached radius-cubed rows (P*n doubles); points past the prefix run the
-// direct shader with a base offset. 598016 CVs at n=100 need 456.25MiB
-// of R plus a 6.8MiB proof snapshot: 499MiB next to the ~36MiB of pose
-// scratch and uploads, ~13MiB inside the 512MiB bench budget (the pool
-// charges exact bytes, so the margin is deterministic run to run). Each
-// CV moved off the fp64-sqrt suffix (~13.1ns) onto the streaming prefix
-// (~3.2ns) saves ~9.9ns. Stays below 600000 so the 600k-point test still
-// covers the suffix dispatch; smaller budgets run the direct shader with
-// no added work.
-constexpr uint32_t kEvalCachePrefixCVs = 598016;
+// Cached-R evaluate: the first P CVs run through the cached
+// radius-cubed rows (P*n doubles); points past the prefix run the direct
+// shader with a base offset. P is sized from the pool budget at funding
+// time (AffordableCachePrefix), not fixed: the 512MiB bench budget funds
+// ~613k CVs at n=100 (~468MiB of R plus a ~7MiB proof next to the ~36MiB
+// of pose scratch and inputs), while production budgets (~100GiB usable)
+// fund any groom fully, moving the whole pose off the fp64-sqrt suffix
+// (~13.1ns/CV) onto the streaming prefix (~3.2ns/CV). Each CV moved saves
+// ~9.9ns. Budgets below the floor run the direct shader with no added
+// work (pure arithmetic: no vkAllocateMemory probes on the miss path).
+constexpr uint32_t kEvalCacheMinPrefixCVs = 4096;
+constexpr uint32_t kEvalCacheMaxPrefixCVs = 715827882; // INT32_MAX/3: 3*active fits the int32 verify word count
+constexpr size_t kEvalCacheFundingMargin = size_t{1} << 20;
+constexpr uint64_t kEvalCacheFundingAlign = 65536;
 constexpr uint32_t kVerifyLocalSize = 256;
 constexpr uint32_t kFillLocalSize = 256;
 constexpr uint32_t kCachedLocalSize = 128;
@@ -76,6 +79,7 @@ constexpr int kEvalCacheBypassPoses = 32;
 std::atomic<bool> disableEvalCache{false};
 std::atomic<uint64_t> evalCacheHits{0}, evalCacheMisses{0};
 std::atomic<uint64_t> evalCacheBypassed{0}, evalCacheUnfunded{0};
+std::atomic<uint32_t> evalCacheFundedPrefix{0};
 
 uint32_t Groups(uint32_t n, uint32_t size) { return (n + size - 1) / size; }
 
@@ -169,6 +173,9 @@ uint64_t DeformEvalCacheBypassedForTesting() noexcept {
 uint64_t DeformEvalCacheUnfundedForTesting() noexcept {
     return evalCacheUnfunded.load(std::memory_order_acquire);
 }
+uint32_t DeformEvalCacheFundedPrefixForTesting() noexcept {
+    return evalCacheFundedPrefix.load(std::memory_order_acquire);
+}
 
 struct DeformPipeline::Native {
     std::shared_ptr<DeviceContext> context;
@@ -216,11 +223,12 @@ struct DeformPipeline::Native {
     // runs under cacheMutex so a force commit is atomic with its fill.
     std::mutex cacheMutex;
     struct EvalCache {
-        std::shared_ptr<ChargedBuffer> r;     // R rows, P*rowsAlloc doubles
-        std::shared_ptr<ChargedBuffer> proof; // prefix CV snapshot, P float3s
+        std::shared_ptr<ChargedBuffer> r;     // R rows, rowsFunded*rowsAlloc doubles
+        std::shared_ptr<ChargedBuffer> proof; // prefix CV snapshot, rowsFunded float3s
         std::vector<float> rest;              // rest proof (host)
         int n = 0;                            // n at the last fill
         int rowsAlloc = 0;                    // R rows allocated
+        uint32_t rowsFunded = 0;              // R/proof capacity (CVs), sized from the budget
         uint32_t filled = 0;                  // valid R/proof prefix (CVs)
         int missStreak = 0;                   // consecutive refills
         int bypassLeft = 0;                   // direct poses left in backoff
@@ -620,6 +628,38 @@ VkResult DeformPipeline::Candidate::Poll(DeformSemantic* semantic) {
 
 // ============================ Begin ============================
 
+namespace {
+
+// Affordable R-cache capacity (CVs) for n samples given this many free
+// pool bytes: both buffers' 64KB-aligned charges must fit under the free
+// bytes minus the funding margin. 0 means the budget cannot fund the
+// floor, so the pose runs direct. Pure arithmetic on a snapshot
+// (usedBytes is one coherent atomic; the margin plus the halving retry
+// at the funding site cover races and wider-than-assumed driver
+// alignments), so an unfunded pose costs no vkAllocateMemory. The caller
+// clamps the capacity to the pose's point count: the floor gates the
+// budget, not small poses (a 12-point pose on a big budget funds 12).
+uint32_t AffordableCachePrefix(size_t freeBytes, int n) {
+    if (freeBytes <= kEvalCacheFundingMargin) return 0;
+    size_t const free = freeBytes - kEvalCacheFundingMargin;
+    auto aligned = [](uint64_t bytes) {
+        return (bytes + kEvalCacheFundingAlign - 1) / kEvalCacheFundingAlign *
+            kEvalCacheFundingAlign;
+    };
+    uint64_t p = free / (uint64_t(n) * 8u + 12u);
+    if (p > kEvalCacheMaxPrefixCVs) p = kEvalCacheMaxPrefixCVs;
+    while (p >= kEvalCacheMinPrefixCVs) {
+        uint64_t const charged =
+            aligned(p * 12u) + aligned(p * uint64_t(n) * 8u);
+        if (charged <= free) break;
+        p = (p > 64) ? p - 64 : 0;
+    }
+    if (p < kEvalCacheMinPrefixCVs) return 0;
+    return uint32_t(p);
+}
+
+} // namespace
+
 std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
     BeginInfo info, VkResult* result, DeformSemantic* semantic, BeforeSubmit beforeSubmit) {
     auto finish = [&](VkResult r) { if (result) *result = r; };
@@ -765,6 +805,42 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         auto d = context->device();
         VkResult r;
         VkDeviceSize const outBytes = points ? VkDeviceSize(points) * 12u : 4u;
+        // Evicts a funded R cache to make room for pose scratch. Under
+        // cacheMutex, so no in-flight evaluate references the buffers
+        // (every pose's evaluate completes under the same lock before it
+        // releases it), and the cache buffers are never MarkSubmitted, so
+        // dropping them frees the storage and returns the charge. False
+        // when nothing was funded. Called only while no lock is held.
+        auto evictCacheForRoom = [&]() -> bool {
+            std::lock_guard<std::mutex> lock(native_->cacheMutex);
+            auto& cache = native_->evalCache;
+            if (!cache.r && !cache.proof) return false;
+            cache.r.reset();
+            cache.proof.reset();
+            cache.rest.clear();
+            cache.n = 0;
+            cache.rowsAlloc = 0;
+            cache.rowsFunded = 0;
+            cache.filled = 0;
+            cache.missStreak = 0;
+            cache.bypassLeft = 0;
+            cache.everFilled = false;
+            evalCacheUnfunded.fetch_add(1, std::memory_order_relaxed);
+            evalCacheFundedPrefix.store(0, std::memory_order_relaxed);
+            return true;
+        };
+        // Pose-scratch funding with one eviction retry: a failed charge
+        // first drops the R cache (if any) and retries, so a pose the
+        // cache starved runs direct instead of failing.
+        auto createScratch = [&](std::shared_ptr<ChargedBuffer>& slot,
+                                 VkBufferCreateInfo const& bi,
+                                 VkMemoryPropertyFlags props,
+                                 UsdGenExecutionResourceKind kind) {
+            slot = ChargedBuffer::Create(context, bi, props, kind, &r);
+            if (!slot && evictCacheForRoom())
+                slot = ChargedBuffer::Create(context, bi, props, kind, &r);
+            return bool(slot);
+        };
 
         // Check out a proven-idle scratch set whose warped buffer matches
         // this pose's point count; anything missing is allocated fresh
@@ -814,9 +890,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->outPoints = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &r);
-                if (!s->outPoints) { finish(r); return {}; }
+                if (!createScratch(s->outPoints, bi,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        UsdGenExecutionResourceKind::Active)) { finish(r); return {}; }
             }
         }
         // status: 4B host-visible.
@@ -828,10 +904,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->status = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    UsdGenExecutionResourceKind::Scratch, &r);
-                if (!s->status) { finish(r); return {}; }
+                if (!createScratch(s->status, bi,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
             void* data = nullptr;
             r = vkMapMemory(d, s->status->memory(), 0, 4, 0, &data);
@@ -848,10 +923,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->evalStatus = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    UsdGenExecutionResourceKind::Scratch, &r);
-                if (!s->evalStatus) { finish(r); return {}; }
+                if (!createScratch(s->evalStatus, bi,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
             void* data = nullptr;
             r = vkMapMemory(d, s->evalStatus->memory(), 0, 4, 0, &data);
@@ -868,73 +942,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             return candidate;
         }
 
-        // Cached-R decision. The whole cached proof phase below (uploads,
-        // descriptors, recording, submit, wait, bookkeeping) runs under
-        // cacheMutex so a force commit is atomic with its fill; early
-        // returns unlock via the guard's destructor. The direct path only
-        // borrows the mutex for the bypass countdown.
-        bool useCache = false;
-        bool forceFill = false;
-        uint32_t cacheActive = 0;
-        std::unique_lock<std::mutex> cacheLock(native_->cacheMutex, std::defer_lock);
-        if (native_->cachedPipeline != VK_NULL_HANDLE &&
-            !disableEvalCache.load(std::memory_order_relaxed)) {
-            cacheLock.lock();
-            auto& cache = native_->evalCache;
-            cacheActive = std::min(points, kEvalCachePrefixCVs);
-            if (cache.bypassLeft > 0) {
-                cache.bypassLeft--;
-                evalCacheBypassed.fetch_add(1, std::memory_order_relaxed);
-                cacheLock.unlock();
-            } else {
-                // Ensure the R rows and the proof snapshot (lazy: the first
-                // cached pose funds them, later poses reuse; R grows to a
-                // high-water n and shrinks never reallocate). Any failure
-                // runs this pose direct and retries next pose; whatever
-                // succeeded stays funded.
-                VkResult cr = VK_SUCCESS;
-                if (!cache.proof) {
-                    VkBufferCreateInfo bi{};
-                    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                    bi.size = VkDeviceSize(kEvalCachePrefixCVs) * 12u;
-                    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-                    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                    cache.proof = ChargedBuffer::Create(context, bi,
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                        UsdGenExecutionResourceKind::Cache, &cr);
-                }
-                if (cache.proof && n > cache.rowsAlloc) {
-                    VkBufferCreateInfo bi{};
-                    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                    bi.size = VkDeviceSize(kEvalCachePrefixCVs) *
-                        VkDeviceSize(n) * 8u;
-                    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-                    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                    auto grown = ChargedBuffer::Create(context, bi,
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                        UsdGenExecutionResourceKind::Cache, &cr);
-                    if (grown) {
-                        cache.r = std::move(grown);
-                        cache.rowsAlloc = n;
-                    }
-                }
-                if (!cache.proof || !cache.r || n > cache.rowsAlloc) {
-                    evalCacheUnfunded.fetch_add(1, std::memory_order_relaxed);
-                    cacheLock.unlock();
-                } else {
-                    size_t const restBytes = info.restSamples.size() * sizeof(float);
-                    bool const restMatch = cache.everFilled &&
-                        cache.rest.size() == info.restSamples.size() &&
-                        std::memcmp(cache.rest.data(), info.restSamples.data(),
-                                   restBytes) == 0;
-                    forceFill = !cache.everFilled || !restMatch ||
-                        n != cache.n || cacheActive > cache.filled;
-                    useCache = true;
-                    // Stays locked through the proof phase below.
-                }
-            }
-        }
-
+        // Pose scratch funds before the cache decision below, so a funded
+        // cache can never starve the current pose: whatever the estimate
+        // sizes the prefix to, this pose's scratch is already charged.
         // warped: DEVICE_LOCAL.
         {
             if (!s->warped) {
@@ -943,9 +953,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.size = outBytes;
                 bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->warped = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &r);
-                if (!s->warped) { finish(r); return {}; }
+                if (!createScratch(s->warped, bi,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        UsdGenExecutionResourceKind::Active)) { finish(r); return {}; }
             }
         }
         // coefBuf: HOST_VISIBLE, 3*m doubles. Fresh buffers are allocated
@@ -959,10 +969,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.size = std::max(coefBytes, kMaxCoefBytes);
                 bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->coefBuf = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    UsdGenExecutionResourceKind::Scratch, &r);
-                if (!s->coefBuf) { finish(r); return {}; }
+                if (!createScratch(s->coefBuf, bi,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
             void* data = nullptr;
             r = vkMapMemory(d, s->coefBuf->memory(), 0, coefBytes, 0, &data);
@@ -985,10 +994,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.size = std::max(samplesBytes, kMaxSamplesBytes);
                 bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->samplesBuf = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    UsdGenExecutionResourceKind::Scratch, &r);
-                if (!s->samplesBuf) { finish(r); return {}; }
+                if (!createScratch(s->samplesBuf, bi,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
             std::vector<double> norm(size_t(3) * size_t(n));
             for (int j = 0; j < n; ++j) {
@@ -1002,7 +1010,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             std::memcpy(data, norm.data(), size_t(samplesBytes));
             vkUnmapMemory(d, s->samplesBuf->memory());
         }
-        // evalUbo: HOST_VISIBLE, 64B.
+        // evalUbo: HOST_VISIBLE, 64B. Funded here with the rest of the
+        // pose scratch; filled after the cache decision below (the base
+        // word depends on it).
         {
             if (!s->evalUbo) {
                 VkBufferCreateInfo bi{};
@@ -1010,26 +1020,10 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.size = kEvalUboBytes;
                 bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->evalUbo = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    UsdGenExecutionResourceKind::Scratch, &r);
-                if (!s->evalUbo) { finish(r); return {}; }
+                if (!createScratch(s->evalUbo, bi,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
-            EvalUbo e;
-            e.n_m[0] = n; e.n_m[1] = m;
-            // On the cached path this UBO feeds only the past-prefix
-            // suffix dispatch (base=P); the direct dispatch keeps base=0.
-            e.counts[0] = points;
-            e.counts[1] = useCache ? int32_t(kEvalCachePrefixCVs) : 0;
-            e.cx = rstate.center[0]; e.cy = rstate.center[1]; e.cz = rstate.center[2];
-            e.invScale = invScale;
-            e.scale = rstate.scale;
-            e._pad2 = 0.0;
-            void* data = nullptr;
-            r = vkMapMemory(d, s->evalUbo->memory(), 0, kEvalUboBytes, 0, &data);
-            if (r != VK_SUCCESS) { finish(r); return {}; }
-            std::memcpy(data, &e, sizeof(e));
-            vkUnmapMemory(d, s->evalUbo->memory());
         }
         // applyUbo: HOST_VISIBLE, 80B.
         {
@@ -1039,10 +1033,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 bi.size = kApplyUboBytes;
                 bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                s->applyUbo = ChargedBuffer::Create(context, bi,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    UsdGenExecutionResourceKind::Scratch, &r);
-                if (!s->applyUbo) { finish(r); return {}; }
+                if (!createScratch(s->applyUbo, bi,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
             ApplyUbo a = {};
             a.counts[0] = curves; a.counts[1] = points; a.counts[2] = n;
@@ -1085,10 +1078,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             bi.size = bytes;
             bi.usage = usage;
             bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            slot = ChargedBuffer::Create(context, bi,
+            return createScratch(slot, bi,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                UsdGenExecutionResourceKind::Scratch, &r);
-            return bool(slot);
+                UsdGenExecutionResourceKind::Scratch);
         };
         if (!allocUbo(s->verifyUbo, kVerifyUboBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
             !allocUbo(s->fillUbo, kFillUboBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
@@ -1097,6 +1089,175 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)) {
             finish(r);
             return {};
+        }
+
+        // Cached-R decision. The whole cached proof phase below (uploads,
+        // descriptors, recording, submit, wait, bookkeeping) runs under
+        // cacheMutex so a force commit is atomic with its fill; early
+        // returns unlock via the guard's destructor. The direct path only
+        // borrows the mutex for the bypass countdown.
+        bool useCache = false;
+        bool forceFill = false;
+        uint32_t cacheActive = 0;
+        uint32_t fundedPrefix = 0;
+        std::unique_lock<std::mutex> cacheLock(native_->cacheMutex, std::defer_lock);
+        if (native_->cachedPipeline != VK_NULL_HANDLE &&
+            !disableEvalCache.load(std::memory_order_relaxed)) {
+            cacheLock.lock();
+            auto& cache = native_->evalCache;
+            if (cache.bypassLeft > 0) {
+                cache.bypassLeft--;
+                evalCacheBypassed.fetch_add(1, std::memory_order_relaxed);
+                cacheLock.unlock();
+            } else {
+                auto poolFree = [&]() {
+                    auto snap = context->resources()->Snapshot();
+                    return snap.usableBytes > snap.usedBytes
+                        ? snap.usableBytes - snap.usedBytes : size_t(0);
+                };
+                // Funds fresh R rows plus the proof snapshot at the given
+                // prefix, halving down to the floor while the charges miss
+                // (a race, or a wider-than-assumed driver alignment). All
+                // or nothing: a partial pair is destroyed, never kept.
+                // Returns the funded prefix, or 0. Below-floor targets
+                // (small poses clamped to their point count) get one
+                // attempt: a race there retries next pose, not smaller.
+                auto fundFresh = [&](uint32_t p) -> uint32_t {
+                    uint32_t const lo = std::min(p, kEvalCacheMinPrefixCVs);
+                    while (p >= lo && p != 0) {
+                        VkBufferCreateInfo bi{};
+                        bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                        bi.size = VkDeviceSize(p) * VkDeviceSize(n) * 8u;
+                        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                        VkResult cr = VK_SUCCESS;
+                        auto rBuf = ChargedBuffer::Create(context, bi,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                            UsdGenExecutionResourceKind::Cache, &cr);
+                        if (rBuf) {
+                            bi.size = VkDeviceSize(p) * 12u;
+                            auto proofBuf = ChargedBuffer::Create(context, bi,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                UsdGenExecutionResourceKind::Cache, &cr);
+                            if (proofBuf) {
+                                cache.r = std::move(rBuf);
+                                cache.proof = std::move(proofBuf);
+                                cache.rowsAlloc = n;
+                                cache.rowsFunded = p;
+                                cache.filled = 0;
+                                cache.everFilled = false;
+                                evalCacheFundedPrefix.store(p, std::memory_order_relaxed);
+                                return p;
+                            }
+                        }
+                        p /= 2;
+                    }
+                    return 0;
+                };
+                // First cached pose funds the prefix from the pool budget;
+                // later poses reuse it. Any failure runs this pose direct
+                // and retries next pose.
+                bool funded = cache.proof && cache.r;
+                if (!funded) {
+                    uint32_t const cap = AffordableCachePrefix(poolFree(), n);
+                    uint32_t const p = std::min(points, cap);
+                    funded = p != 0 && fundFresh(p) != 0;
+                }
+                // R grows to a high-water n; shrinks never reallocate. A
+                // failed grow keeps the old rows and runs direct.
+                if (funded && n > cache.rowsAlloc) {
+                    VkBufferCreateInfo bi{};
+                    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                    bi.size = VkDeviceSize(cache.rowsFunded) *
+                        VkDeviceSize(n) * 8u;
+                    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                    VkResult cr = VK_SUCCESS;
+                    auto grown = ChargedBuffer::Create(context, bi,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        UsdGenExecutionResourceKind::Cache, &cr);
+                    if (grown) {
+                        cache.r = std::move(grown);
+                        cache.rowsAlloc = n;
+                    }
+                    funded = n <= cache.rowsAlloc;
+                }
+                if (funded) {
+                    uint32_t const want = std::min(points, kEvalCacheMaxPrefixCVs);
+                    if (want > cache.rowsFunded) {
+                        // Points outgrew the funded prefix (or a race
+                        // underfunded it): regrow while the budget admits
+                        // more. The old rows stay live until the swap, so
+                        // the estimate excludes their charge; on failure
+                        // the pose keeps the old prefix with a bigger
+                        // suffix (still cached, still correct).
+                        size_t const freeExcl = poolFree() +
+                            cache.proof->allocationBytes() + cache.r->allocationBytes();
+                        uint32_t const target = std::min(
+                            want, AffordableCachePrefix(freeExcl, n));
+                        if (target > cache.rowsFunded) {
+                            VkBufferCreateInfo bi{};
+                            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                            bi.size = VkDeviceSize(target) * VkDeviceSize(n) * 8u;
+                            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                            VkResult cr = VK_SUCCESS;
+                            auto grownR = ChargedBuffer::Create(context, bi,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                UsdGenExecutionResourceKind::Cache, &cr);
+                            std::shared_ptr<ChargedBuffer> grownProof;
+                            if (grownR) {
+                                bi.size = VkDeviceSize(target) * 12u;
+                                grownProof = ChargedBuffer::Create(context, bi,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                    UsdGenExecutionResourceKind::Cache, &cr);
+                            }
+                            if (grownR && grownProof) {
+                                cache.r = std::move(grownR);
+                                cache.proof = std::move(grownProof);
+                                cache.rowsAlloc = n;
+                                cache.rowsFunded = target;
+                                cache.filled = 0;
+                                evalCacheFundedPrefix.store(target,
+                                    std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                    cacheActive = std::min(points, cache.rowsFunded);
+                    fundedPrefix = cache.rowsFunded;
+                    size_t const restBytes = info.restSamples.size() * sizeof(float);
+                    bool const restMatch = cache.everFilled &&
+                        cache.rest.size() == info.restSamples.size() &&
+                        std::memcmp(cache.rest.data(), info.restSamples.data(),
+                                   restBytes) == 0;
+                    forceFill = !cache.everFilled || !restMatch ||
+                        n != cache.n || cacheActive > cache.filled;
+                    useCache = true;
+                    // Stays locked through the proof phase below.
+                } else {
+                    evalCacheUnfunded.fetch_add(1, std::memory_order_relaxed);
+                    cacheLock.unlock();
+                }
+            }
+        }
+
+        // evalUbo fill (see the funding above): on the cached path this
+        // UBO feeds only the past-prefix suffix dispatch (base=active);
+        // the direct dispatch keeps base=0.
+        {
+            EvalUbo e;
+            e.n_m[0] = n; e.n_m[1] = m;
+            e.counts[0] = points;
+            e.counts[1] = useCache ? int32_t(cacheActive) : 0;
+            e.cx = rstate.center[0]; e.cy = rstate.center[1]; e.cz = rstate.center[2];
+            e.invScale = invScale;
+            e.scale = rstate.scale;
+            e._pad2 = 0.0;
+            void* data = nullptr;
+            r = vkMapMemory(d, s->evalUbo->memory(), 0, kEvalUboBytes, 0, &data);
+            if (r != VK_SUCCESS) { finish(r); return {}; }
+            std::memcpy(data, &e, sizeof(e));
+            vkUnmapMemory(d, s->evalUbo->memory());
         }
         if (useCache) {
             // The verify/fill/cached UBO contents plus the indirect args
@@ -1108,12 +1269,12 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             v.words_n[2] = 0; v.words_n[3] = 0;
             FillUbo f;
             f.shape[0] = n; f.shape[1] = int32_t(cacheActive);
-            f.shape[2] = int32_t(kEvalCachePrefixCVs); f.shape[3] = 0;
+            f.shape[2] = int32_t(fundedPrefix); f.shape[3] = 0;
             f.cx = rstate.center[0]; f.cy = rstate.center[1]; f.cz = rstate.center[2];
             f.invScale = invScale;
             CachedUbo c;
             c.nmcs[0] = n; c.nmcs[1] = m;
-            c.nmcs[2] = int32_t(cacheActive); c.nmcs[3] = int32_t(kEvalCachePrefixCVs);
+            c.nmcs[2] = int32_t(cacheActive); c.nmcs[3] = int32_t(fundedPrefix);
             c.cx = rstate.center[0]; c.cy = rstate.center[1]; c.cz = rstate.center[2];
             c.invScale = invScale;
             c.scale = rstate.scale;
@@ -1141,7 +1302,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
 
         // Descriptor pool + sets.
-        bool const hasSuffix = useCache && points > kEvalCachePrefixCVs;
+        bool const hasSuffix = useCache && points > fundedPrefix;
         VkDescriptorPoolSize sizes[2] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, useCache
                  ? kVerifyFillStorage + kVerifyFillStorage + kEvalStorage +
@@ -1350,7 +1511,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                     vkCmdBindDescriptorSets(cmds[0], VK_PIPELINE_BIND_POINT_COMPUTE,
                         native_->evalPipelineLayout, 0, 1, &suffixSet, 0, nullptr);
                     vkCmdDispatch(cmds[0],
-                        Groups(points - kEvalCachePrefixCVs, kEvalLocalSize), 1, 1);
+                        Groups(points - cacheActive, kEvalLocalSize), 1, 1);
                 }
             } else {
                 vkCmdBindPipeline(cmds[0], VK_PIPELINE_BIND_POINT_COMPUTE,

@@ -8,6 +8,10 @@
 // direct rbf::CubicField microbench that isolates Bind/Solve/Displacement.
 //
 // Usage: benchUsdGenRbfDeform [--threads N] [--density D] [--vulkan-spv dir]
+//   [--vulkan-budget-mb MB]
+// --vulkan-budget-mb sizes the deform leg's pool (default 512); larger
+// budgets show what the budget-adaptive R-cache prefix does at
+// production scale (a 2048MiB budget funds the full 1M-CV prefix).
 // Output: one "METRIC <name>=<value_ms>" line per measured quantity
 // (median of 9, fixture built once outside every timing window), plus
 // CHECKSUM lines (FNV-1a over float bits) for bit-identity tracking.
@@ -259,7 +263,7 @@ std::shared_ptr<const vulkan::ChargedBuffer> UploadHost(
 // Main path: DeformPipeline per-pose (Begin + spin-poll to completion) over
 // 100k curves x 10 CVs with 100 RBF samples. CHECKSUM covers the last
 // pose's deformed points.
-int VulkanDeformLeg(std::string const &spvDir)
+int VulkanDeformLeg(std::string const &spvDir, size_t budgetBytes)
 {
     std::vector<uint32_t> const evalSpv = LoadSpv(spvDir + "/deformEvaluate.spv");
     std::vector<uint32_t> const applySpv = LoadSpv(spvDir + "/deformApply.spv");
@@ -295,7 +299,7 @@ int VulkanDeformLeg(std::string const &spvDir)
     ci.physicalIndex = native->physicalIndex;
     ci.resourceDeviceId = 8020;
     ci.nativeLifetime = native;
-    ci.resources = {size_t{512} << 20, 0};
+    ci.resources = {budgetBytes, 0};
     ci.shaderFloat64Enabled = true;
     auto context = vulkan::DeviceContext::Create(ci);
     if (!context) {
@@ -513,11 +517,15 @@ int main(int argc, char **argv)
     int threads = 8;
     double density = 25.0;   // ~25k curves, 225k CVs at 8 segments
     std::string vulkanSpvDir;
+    size_t vulkanBudgetMb = 512;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--threads" && i + 1 < argc) threads = std::atoi(argv[++i]);
         if (std::string(argv[i]) == "--density" && i + 1 < argc) density = std::atof(argv[++i]);
         if (std::string(argv[i]) == "--vulkan-spv" && i + 1 < argc) vulkanSpvDir = argv[++i];
+        if (std::string(argv[i]) == "--vulkan-budget-mb" && i + 1 < argc)
+            vulkanBudgetMb = size_t(std::atoll(argv[++i]));
     }
+    if (vulkanBudgetMb < 1) vulkanBudgetMb = 1;
     usdGenRegisterM1Operators();
 
     // ---- field microbench: Bind / Solve / Displacement ----------------------
@@ -743,7 +751,7 @@ int main(int argc, char **argv)
     // ---- Vulkan legs (need --vulkan-spv <dir>) ------------------------------
     int vulkanLegExit = 0;
     if (!vulkanSpvDir.empty()) {
-        vulkanLegExit = VulkanDeformLeg(vulkanSpvDir);
+        vulkanLegExit = VulkanDeformLeg(vulkanSpvDir, vulkanBudgetMb << 20);
         if (vulkanLegExit == 0) vulkanLegExit = VulkanBindLeg(vulkanSpvDir);
         if (vulkanLegExit != 0 && vulkanLegExit != 77) return vulkanLegExit;
     } else {
