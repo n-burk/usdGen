@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "deformPipeline.h"
+#include "fencePool.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -92,9 +93,15 @@ struct DeformPipeline::Native {
         bool valid = false;
         RbfFactorization factor;
     } factorCache;
+    // Idle submit fences: fence create/destroy costs ~0.7ms each on the
+    // qualified driver, so per-pose submits check out of this pool instead
+    // of creating. Candidates hold Native by shared_ptr, so the pool
+    // outlives every checkout.
+    VulkanFencePool fencePool;
     ~Native() {
         if (!context) return;
         auto d = context->device();
+        fencePool.Clear(d);
         if (evalPipeline) vkDestroyPipeline(d, evalPipeline, nullptr);
         if (evalPipelineLayout) vkDestroyPipelineLayout(d, evalPipelineLayout, nullptr);
         if (evalLayout) vkDestroyDescriptorSetLayout(d, evalLayout, nullptr);
@@ -126,7 +133,15 @@ struct DeformPipeline::Candidate::State {
     std::unique_ptr<std::shared_ptr<State>> quarantine;
     ~State() {
         auto d = native->context->device();
-        if (fence) vkDestroyFence(d, fence, nullptr);
+        // This runs only when nothing is pending (else the Candidate
+        // quarantines instead of destroying), so a proven fence is idle
+        // and rejoins the pool; an unproven one is destroyed as before.
+        // proofFence is pooled or destroyed inside Begin; a leftover here
+        // is unproven by construction.
+        if (fence) {
+            if (proved) native->fencePool.Release(d, fence);
+            else vkDestroyFence(d, fence, nullptr);
+        }
         if (proofFence) vkDestroyFence(d, proofFence, nullptr);
         if (commands) vkDestroyCommandPool(d, commands, nullptr);
         if (descriptors) vkDestroyDescriptorPool(d, descriptors, nullptr);
@@ -743,10 +758,8 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             r = vkEndCommandBuffer(cmds[0]);
         }
         if (r != VK_SUCCESS) { finish(r); return {}; }
-        VkFenceCreateInfo fi{};
-        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        r = vkCreateFence(d, &fi, nullptr, &s->proofFence);
-        if (r != VK_SUCCESS) { finish(r); return {}; }
+        s->proofFence = native_->fencePool.Acquire(d, &r);
+        if (!s->proofFence) { finish(r); return {}; }
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1; submit.pCommandBuffers = &cmds[0];
@@ -765,7 +778,9 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 vkUnmapMemory(d, s->evalStatus->memory());
             }
         }
-        vkDestroyFence(d, s->proofFence, nullptr);
+        // The proof wait above succeeded, so the fence is idle and rejoins
+        // the pool even when the status readback fails.
+        native_->fencePool.Release(d, s->proofFence);
         s->proofFence = VK_NULL_HANDLE;
         if (r != VK_SUCCESS) { finish(r); return {}; }
         if (st != 0) return reject(DeformSemantic::NonFinite);
@@ -798,8 +813,8 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             r = vkEndCommandBuffer(cmds[1]);
         }
         if (r != VK_SUCCESS) { finish(r); return {}; }
-        r = vkCreateFence(d, &fi, nullptr, &s->fence);
-        if (r != VK_SUCCESS) { finish(r); return {}; }
+        s->fence = native_->fencePool.Acquire(d, &r);
+        if (!s->fence) { finish(r); return {}; }
         if (beforeSubmit) {
             bool admitted = false;
             try { admitted = beforeSubmit(); }
