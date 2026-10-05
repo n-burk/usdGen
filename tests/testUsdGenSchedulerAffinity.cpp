@@ -1,0 +1,163 @@
+// Copyright (c) 2026 Nick Burkard
+// SPDX-License-Identifier: MIT
+
+// testUsdGenSchedulerAffinity — T0: on heterogeneous big.LITTLE Linux,
+// UsdGenScheduler pins its TBB arena workers to max-frequency cores.
+// Skips (77) on non-Linux, homogeneous, unreadable-topology, or
+// too-few-fast-core hosts.
+//
+// Asserted (heterogeneous Linux only):
+//   1. A parallel region runs tasks on at least two distinct worker
+//      threads (parallelism actually happened).
+//   2. Every observed worker thread's affinity mask is exactly the
+//      process-allowed max-frequency set (fast cores, never widened).
+//   3. The calling thread's affinity is unchanged (never pinned).
+
+#include "usdGen/scheduler.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <set>
+#include <string>
+#include <vector>
+
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <pthread.h>
+#include <sched.h>
+#endif
+
+using namespace usdGen;
+
+namespace {
+
+int g_failures = 0;
+
+void Check(bool ok, std::string const &what)
+{
+    if (!ok) {
+        ++g_failures;
+        std::printf("FAIL: %s\n", what.c_str());
+    } else {
+        std::printf("ok:   %s\n", what.c_str());
+    }
+}
+
+#if defined(__linux__) && !defined(__ANDROID__)
+long CpuMaxFreqKhz(int cpu)
+{
+    char path[128];
+    std::snprintf(path, sizeof(path),
+                  "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+    FILE *f = std::fopen(path, "r");
+    if (!f) return -1;
+    long freq = -1;
+    if (std::fscanf(f, "%ld", &freq) != 1) freq = -1;
+    std::fclose(f);
+    return freq;
+}
+
+struct TaskSlot {
+    pthread_t thread;
+    cpu_set_t mask;
+};
+
+void Burn()
+{
+    for (volatile int k = 0; k < 4000; ++k) {
+    }
+}
+
+void RecordBody(size_t i, void *payload)
+{
+    Burn();  // keep every arena worker occupied so all of them join
+    auto *slots = static_cast<std::vector<TaskSlot> *>(payload);
+    TaskSlot slot;
+    slot.thread = pthread_self();
+    CPU_ZERO(&slot.mask);
+    sched_getaffinity(0, sizeof(slot.mask), &slot.mask);
+    (*slots)[i] = slot;
+}
+#endif  // defined(__linux__) && !defined(__ANDROID__)
+
+}  // namespace
+
+int main()
+{
+#if !defined(__linux__) || defined(__ANDROID__)
+    std::printf("SKIP: fast-core affinity is Linux-only\n");
+    return 77;
+#else
+    // Force-enable even if the outer environment disables the feature: this
+    // test owns the scheduler under test.
+    setenv("USDGEN_NO_FAST_CORE_PIN", "0", 1);
+
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        std::printf("SKIP: cannot read process affinity\n");
+        return 77;
+    }
+    long maxFreq = -1;
+    int allowedCount = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &allowed)) continue;
+        ++allowedCount;
+        long const freq = CpuMaxFreqKhz(cpu);
+        if (freq <= 0) {
+            std::printf("SKIP: unreadable CPU topology\n");
+            return 77;
+        }
+        if (freq > maxFreq) maxFreq = freq;
+    }
+    cpu_set_t fast;
+    CPU_ZERO(&fast);
+    int fastCount = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+        if (!CPU_ISSET(cpu, &allowed)) continue;
+        if (CpuMaxFreqKhz(cpu) == maxFreq) {
+            CPU_SET(cpu, &fast);
+            ++fastCount;
+        }
+    }
+    if (fastCount == allowedCount) {
+        std::printf("SKIP: homogeneous frequencies\n");
+        return 77;
+    }
+    int const workers = 8;
+    if (fastCount < workers) {
+        std::printf("SKIP: only %d fast cores for %d workers\n", fastCount, workers);
+        return 77;
+    }
+
+    cpu_set_t mainBefore;
+    CPU_ZERO(&mainBefore);
+    sched_getaffinity(0, sizeof(mainBefore), &mainBefore);
+    pthread_t const mainThread = pthread_self();
+
+    UsdGenScheduler scheduler(workers);
+    UsdGenWorkDispatcher dispatcher = scheduler.MakeWorkDispatcher();
+    size_t const tasks = 20000;
+    std::vector<TaskSlot> slots(tasks);
+    dispatcher.ParallelFor(tasks, RecordBody, &slots);
+
+    std::set<pthread_t> workerThreads;
+    bool masksOk = true;
+    for (TaskSlot const &slot : slots) {
+        if (pthread_equal(slot.thread, mainThread)) continue;
+        workerThreads.insert(slot.thread);
+        if (!CPU_EQUAL(&slot.mask, &fast)) masksOk = false;
+    }
+    Check(workerThreads.size() >= 2, "at least two distinct worker threads ran tasks");
+    Check(masksOk, "every worker mask equals the allowed fast-core set");
+
+    cpu_set_t mainAfter;
+    CPU_ZERO(&mainAfter);
+    sched_getaffinity(0, sizeof(mainAfter), &mainAfter);
+    Check(CPU_EQUAL(&mainBefore, &mainAfter) != 0, "calling thread affinity unchanged");
+
+    if (g_failures) return 1;
+    std::printf("testUsdGenSchedulerAffinity: PASS\n");
+    return 0;
+#endif
+}

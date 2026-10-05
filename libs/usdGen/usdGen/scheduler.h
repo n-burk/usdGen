@@ -15,11 +15,13 @@
 #include "usdGen/types.h"
 
 #include <tbb/task_arena.h>
+#include <tbb/task_scheduler_observer.h>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -83,6 +85,10 @@ public:
 private:
     tbb::task_arena _arena;
     int _threadLimit;
+    // Heterogeneous-core placement (scheduler.cpp): on big.LITTLE Linux
+    // the arena workers prefer max-frequency cores. Null when homogeneous,
+    // undetectable, or disabled. Declared after _arena so it detaches first.
+    std::unique_ptr<tbb::task_scheduler_observer> _affinityObserver;
 };
 
 /// One-shot process calibration (03 §5.3): sweeps concurrencies {2,4,8,16,

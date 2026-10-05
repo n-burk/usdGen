@@ -1241,6 +1241,12 @@ add_executable(testUsdGenExecutionSequenceWindow tests/testUsdGenExecutionSequen
 target_link_libraries(testUsdGenExecutionSequenceWindow PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionSequenceWindow COMMAND testUsdGenExecutionSequenceWindow)
 set_tests_properties(testUsdGenExecutionSequenceWindow PROPERTIES LABELS "T0;scheduling;resources" TIMEOUT 30)
+add_executable(testUsdGenSchedulerAffinity tests/testUsdGenSchedulerAffinity.cpp)
+target_link_libraries(testUsdGenSchedulerAffinity PRIVATE usdGen)
+add_test(NAME testUsdGenSchedulerAffinity COMMAND testUsdGenSchedulerAffinity)
+set_tests_properties(testUsdGenSchedulerAffinity PROPERTIES
+    LABELS "T0;scheduling;affinity" TIMEOUT 60
+    SKIP_RETURN_CODE "77" NOT_RUN_RETURN_VALUES "77")
 add_executable(testUsdGenExecutionTaskGraph tests/testUsdGenExecutionTaskGraph.cpp)
 target_link_libraries(testUsdGenExecutionTaskGraph PRIVATE usdGen)
 add_test(NAME testUsdGenExecutionTaskGraph COMMAND testUsdGenExecutionTaskGraph)
