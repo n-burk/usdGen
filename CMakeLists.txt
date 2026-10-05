@@ -424,6 +424,14 @@ target_sources(usdGen PRIVATE
 set_source_files_properties(libs/usdGen/usdGen/expressions/frontend.cpp PROPERTIES
     COMPILE_DEFINITIONS "SeExpr2=UsdGenSeExprFrontend;SeExprInternal2=UsdGenSeExprFrontendInternal;USDGEN_SEEXPR_SANDBOX"
     INCLUDE_DIRECTORIES "${_usdgen_frontend_dir}")
+# The host suffix port (deformEvaluateCpu.h, inlined into
+# deformPipeline.cpp) needs sqrt vectorized: with math-errno the vectorizer
+# keeps the explicit-fma loop's sqrt scalar and the suffix runs ~2x slower.
+# Values are unchanged (errno only); nothing in the library reads errno.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(libs/usdGen/usdGen/vulkan/deformPipeline.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-math-errno")
+endif()
 target_include_directories(usdGen PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs/usdGen>
     $<INSTALL_INTERFACE:include>)

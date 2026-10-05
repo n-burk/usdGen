@@ -3,6 +3,7 @@
 
 #include "usdGen/vulkan/deviceContext.h"
 #include "usdGen/vulkan/chargedBuffer.h"
+#include "usdGen/vulkan/deformEvaluateCpu.h"
 #include "usdGen/vulkan/deformPipeline.h"
 #include "usdGen/vulkan/deformRbfHost.h"
 
@@ -1471,6 +1472,555 @@ int main(int argc, char** argv) {
             CHECK(directOk);
             CHECK(bitEq(got2, direct));
             std::puts("Case 19 (eviction succeeds, bitwise direct): PASS");
+        }
+
+        // Case 20: forced hetero vs forced GPU bitwise on the 600k/48MiB
+        // suffix shape (fill + hit). The run counter pins that both hetero
+        // poses ran the host suffix; the funded-prefix seam pins that a
+        // suffix existed to run.
+        {
+            DeviceContext::CreateInfo hetCi;
+            hetCi.instance = native->instance;
+            hetCi.physicalDevice = native->physical;
+            hetCi.device = native->device;
+            hetCi.computeQueue = native->queue;
+            hetCi.computeQueueFamily = native->family;
+            hetCi.physicalIndex = native->physicalIndex;
+            hetCi.resourceDeviceId = 8034;
+            hetCi.nativeLifetime = native;
+            hetCi.resources = {size_t{48} << 20, 0};
+            hetCi.shaderFloat64Enabled = true;
+            auto hetContext = DeviceContext::Create(hetCi);
+            CHECK(hetContext);
+            VkResult hstatus = VK_SUCCESS;
+            auto hetPipe = DeformPipeline::Create(hetContext, evalSpv, applySpv,
+                &hstatus, cacheSpv);
+            CHECK(hetPipe && hstatus == VK_SUCCESS);
+            auto runForced = [&](int force, DeformPipeline::BeginInfo info,
+                                 std::vector<float>* out) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = hetPipe->Begin(std::move(info), &hstatus, &sem);
+                bool ok = c && hstatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, hetContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
+            int const n = 8;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x12345678u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            std::vector<float> rest8{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                0.5f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f,
+                0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f,
+            };
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
+            auto ptsBuf = Upload(hetContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, hetContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(hetContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkHet = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest8;
+                info.posedSamples = posed8;
+                info.sampleCount = n;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> hetFill, hetHit, gpuHit;
+            CHECK(runForced(1, mkHet(), &hetFill));
+            CHECK(runForced(1, mkHet(), &hetHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            uint32_t const funded = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded >= 4096 && funded < points);
+            CHECK(runForced(-1, mkHet(), &gpuHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            CHECK(bitEq(hetFill, gpuHit));
+            CHECK(bitEq(hetHit, gpuHit));
+            std::puts("Case 20 (forced hetero bitwise forced GPU): PASS");
+        }
+
+        // Case 21: adversarial hetero. 100007 points (odd: block + TBB tails),
+        // n=100, exact zeros, subnormals-adjacent tinies, larges, and
+        // near-coincident CVs in both the prefix and the suffix.
+        {
+            DeviceContext::CreateInfo advCi;
+            advCi.instance = native->instance;
+            advCi.physicalDevice = native->physical;
+            advCi.device = native->device;
+            advCi.computeQueue = native->queue;
+            advCi.computeQueueFamily = native->family;
+            advCi.physicalIndex = native->physicalIndex;
+            advCi.resourceDeviceId = 8035;
+            advCi.nativeLifetime = native;
+            advCi.resources = {size_t{32} << 20, 0};
+            advCi.shaderFloat64Enabled = true;
+            auto advContext = DeviceContext::Create(advCi);
+            CHECK(advContext);
+            VkResult astatus = VK_SUCCESS;
+            auto advPipe = DeformPipeline::Create(advContext, evalSpv, applySpv,
+                &astatus, cacheSpv);
+            CHECK(advPipe && astatus == VK_SUCCESS);
+            auto runForced = [&](int force, DeformPipeline::BeginInfo info,
+                                 std::vector<float>* out) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = advPipe->Begin(std::move(info), &astatus, &sem);
+                bool ok = c && astatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, advContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            std::vector<float> rest100(size_t(100) * 3);
+            for (int i = 0; i < 100; ++i) {
+                rest100[size_t(i) * 3] = float(i % 10);
+                rest100[size_t(i) * 3 + 1] = float((i / 10) % 10);
+                rest100[size_t(i) * 3 + 2] = float(i % 3);
+            }
+            std::vector<float> posed100 = rest100;
+            for (size_t i = 0; i < posed100.size(); i += 3) posed100[i] += 0.1f;
+            uint32_t const curves = 10001, points = 100007;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0xabcdef01u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 18.0f - 9.0f;
+            };
+            for (auto& v : pts) v = next();
+            pts[0] = 0.0f; pts[1] = 0.0f; pts[2] = 0.0f;
+            pts[3] = -0.0f; pts[4] = 1e-20f; pts[5] = -1e-20f;
+            pts[6] = 1e-30f; pts[7] = -1e-30f; pts[8] = 1e4f;
+            for (int a = 0; a < 3; ++a) {
+                pts[9 + a] = rest100[a] + 1e-7f;
+                pts[size_t(90000) * 3 + size_t(a)] = rest100[size_t(5) * 3 + size_t(a)] + 1e-7f;
+            }
+            pts[size_t(99999) * 3] = -1e4f;
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i < curves; ++i) off[i] = i * 10;
+            off[curves] = points;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * 10 * 3 + size_t(a)];
+            auto ptsBuf = Upload(advContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, advContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(advContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkAdv = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest100;
+                info.posedSamples = posed100;
+                info.sampleCount = 100;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> hetFill, hetHit, gpuHit;
+            CHECK(runForced(1, mkAdv(), &hetFill));
+            CHECK(runForced(1, mkAdv(), &hetHit));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 2);
+            uint32_t const funded = DeformEvalCacheFundedPrefixForTesting();
+            CHECK(funded >= 4096 && funded < points);
+            CHECK(runForced(-1, mkAdv(), &gpuHit));
+            CHECK(bitEq(hetFill, gpuHit));
+            CHECK(bitEq(hetHit, gpuHit));
+            std::puts("Case 21 (adversarial hetero bitwise GPU): PASS");
+        }
+
+        // Case 22: the host port is partition-transparent: one range, odd
+        // splits, and TBB-sized chunks evaluate bitwise identically, with
+        // matching flags. Empty ranges no-op; NaN CVs flag and stay
+        // unwritten, like the shader's early return.
+        {
+            int const n = 100, m = n + 4;
+            std::vector<double> samples(size_t(3) * size_t(n));
+            std::vector<double> coef(size_t(3) * size_t(m));
+            uint64_t state = 0x5bd1e995u;
+            auto nextD = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return double(state >> 11) * 0x1p-53 * 20.0 - 10.0;
+            };
+            for (auto& v : samples) v = nextD();
+            for (auto& v : coef) v = nextD() * 0.01;
+            DeformEvalCpuParams p;
+            p.samples = samples.data();
+            p.coef = coef.data();
+            p.n = n; p.m = m;
+            p.cx = 1.5; p.cy = -2.5; p.cz = 0.5;
+            p.invScale = 0.25; p.scale = 4.0;
+            uint32_t const count = 100007;
+            std::vector<float> qs(size_t(count) * 3);
+            for (auto& v : qs) v = float(nextD());
+            qs[0] = 0.0f; qs[1] = -0.0f; qs[2] = 1e-30f;
+            std::vector<float> whole(size_t(count) * 3, 12345.0f);
+            uint32_t flagWhole = 0;
+            CHECK(DeformEvaluateCpu(p, qs.data(), whole.data(), count, &flagWhole));
+            CHECK(flagWhole == 0);
+            auto runSplit = [&](std::vector<uint32_t> const& cuts,
+                               std::vector<float>* out, uint32_t* flag) {
+                out->assign(size_t(count) * 3, 12345.0f);
+                *flag = 0;
+                uint32_t prev = 0;
+                for (uint32_t cut : cuts) {
+                    uint32_t f = 0;
+                    if (!DeformEvaluateCpu(p, qs.data() + size_t(prev) * 3,
+                            out->data() + size_t(prev) * 3, cut - prev, &f))
+                        return false;
+                    *flag |= f;
+                    prev = cut;
+                }
+                return true;
+            };
+            std::vector<float> oddOut;
+            uint32_t oddFlag = 0;
+            CHECK(runSplit({7, 65537, count}, &oddOut, &oddFlag));
+            CHECK(oddFlag == flagWhole);
+            CHECK(bitEq(oddOut, whole));
+            std::vector<uint32_t> grains;
+            for (uint32_t o = 2048; o < count; o += 2048) grains.push_back(o);
+            grains.push_back(count);
+            std::vector<float> chunkedOut;
+            uint32_t chunkedFlag = 0;
+            CHECK(runSplit(grains, &chunkedOut, &chunkedFlag));
+            CHECK(chunkedFlag == flagWhole);
+            CHECK(bitEq(chunkedOut, whole));
+            std::vector<float> emptyOut(3, 7.0f);
+            uint32_t emptyFlag = 0;
+            CHECK(DeformEvaluateCpu(p, qs.data(), emptyOut.data(), 0, &emptyFlag));
+            CHECK(emptyFlag == 0 && emptyOut[0] == 7.0f);
+            std::vector<float> nanQ{0.0f, 0.0f, 0.0f,
+                std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+            std::vector<float> nanD(6, 765.0f);
+            uint32_t nanFlag = 0;
+            CHECK(DeformEvaluateCpu(p, nanQ.data(), nanD.data(), 2, &nanFlag));
+            CHECK(nanFlag == 1);
+            CHECK(nanD[3] == 765.0f && nanD[4] == 765.0f && nanD[5] == 765.0f);
+            std::puts("Case 22 (host port partition-transparent): PASS");
+        }
+
+        // Case 23: a NaN CV in the suffix flags NonFinite on hetero exactly
+        // like GPU, then recovery matches after the rewrite.
+        {
+            DeviceContext::CreateInfo nanCi;
+            nanCi.instance = native->instance;
+            nanCi.physicalDevice = native->physical;
+            nanCi.device = native->device;
+            nanCi.computeQueue = native->queue;
+            nanCi.computeQueueFamily = native->family;
+            nanCi.physicalIndex = native->physicalIndex;
+            nanCi.resourceDeviceId = 8036;
+            nanCi.nativeLifetime = native;
+            nanCi.resources = {size_t{8} << 20, 0};
+            nanCi.shaderFloat64Enabled = true;
+            auto nanContext = DeviceContext::Create(nanCi);
+            CHECK(nanContext);
+            VkResult nstatus = VK_SUCCESS;
+            auto nanPipe = DeformPipeline::Create(nanContext, evalSpv, applySpv,
+                &nstatus, cacheSpv);
+            CHECK(nanPipe && nstatus == VK_SUCCESS);
+            auto runForcedSem = [&](int force, DeformPipeline::BeginInfo info,
+                                    std::vector<float>* out, DeformSemantic* semOut) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = nanPipe->Begin(std::move(info), &nstatus, &sem);
+                bool submitted = c && nstatus == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS;
+                *semOut = sem;
+                bool ok = submitted && sem == DeformSemantic::Ok && c->succeeded() &&
+                    ReadOutput(native, nanContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            uint32_t const curves = 10000, perCurve = 10, points = curves * perCurve;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x2545f491u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            std::vector<float> rest8{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                0.5f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f,
+                0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f,
+            };
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
+            auto ptsBuf = Upload(nanContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, nanContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(nanContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkNan = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest8;
+                info.posedSamples = posed8;
+                info.sampleCount = 8;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            auto poison = [&](uint32_t cv, float v) {
+                void* mm = nullptr;
+                if (vkMapMemory(nanContext->device(), ptsBuf->memory(),
+                        VkDeviceSize(cv) * 12u, 4, 0, &mm) != VK_SUCCESS)
+                    return false;
+                std::memcpy(mm, &v, 4);
+                vkUnmapMemory(nanContext->device(), ptsBuf->memory());
+                return true;
+            };
+            uint32_t funded = 0;
+            {
+                std::vector<float> tmp;
+                DeformSemantic s = DeformSemantic::Ok;
+                CHECK(runForcedSem(1, mkNan(), &tmp, &s));
+                CHECK(s == DeformSemantic::Ok);
+                funded = DeformEvalCacheFundedPrefixForTesting();
+            }
+            CHECK(funded >= 4096 && funded < points);
+            uint32_t const badCv = funded + (points - funded) / 2;
+            float const nan = std::numeric_limits<float>::quiet_NaN();
+            CHECK(poison(badCv, nan));
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> noOut;
+            DeformSemantic hetSem = DeformSemantic::Ok, gpuSem = DeformSemantic::Ok;
+            CHECK(!runForcedSem(1, mkNan(), &noOut, &hetSem));
+            CHECK(hetSem == DeformSemantic::NonFinite);
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 1);
+            CHECK(!runForcedSem(-1, mkNan(), &noOut, &gpuSem));
+            CHECK(gpuSem == DeformSemantic::NonFinite);
+            CHECK(poison(badCv, pts[size_t(badCv) * 3]));
+            std::vector<float> hetOut, gpuOut;
+            CHECK(runForcedSem(1, mkNan(), &hetOut, &hetSem));
+            CHECK(hetSem == DeformSemantic::Ok);
+            CHECK(runForcedSem(-1, mkNan(), &gpuOut, &gpuSem));
+            CHECK(gpuSem == DeformSemantic::Ok);
+            CHECK(bitEq(hetOut, gpuOut));
+            std::puts("Case 23 (suffix NaN flags both, recovers): PASS");
+        }
+
+        // Case 24: forced hetero on an unfunded pose still runs GPU direct
+        // (no suffix path without a cache), bitwise the forced GPU pose.
+        {
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            DeviceContext::CreateInfo tinyCi;
+            tinyCi.instance = native->instance;
+            tinyCi.physicalDevice = native->physical;
+            tinyCi.device = native->device;
+            tinyCi.computeQueue = native->queue;
+            tinyCi.computeQueueFamily = native->family;
+            tinyCi.physicalIndex = native->physicalIndex;
+            tinyCi.resourceDeviceId = 8037;
+            tinyCi.nativeLifetime = native;
+            tinyCi.resources = {size_t{1} << 20, 0};
+            tinyCi.shaderFloat64Enabled = true;
+            auto tinyContext = DeviceContext::Create(tinyCi);
+            CHECK(tinyContext);
+            VkResult st2 = VK_SUCCESS;
+            auto smallPipe =
+                DeformPipeline::Create(tinyContext, evalSpv, applySpv, &st2, cacheSpv);
+            CHECK(smallPipe && st2 == VK_SUCCESS);
+            const std::vector<float> tinyPts{
+                0.0f, 0.0f, 0.0f, 0.1f, 0.0f, 0.1f, 0.2f, 0.0f, 0.2f,
+                1.0f, 0.0f, 0.0f, 1.1f, 0.0f, 0.1f, 1.2f, 0.0f, 0.2f,
+            };
+            const std::vector<uint32_t> tinyOff{0, 3, 6};
+            const std::vector<float> tinyTgt{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+            };
+            auto tinyPtsBuf =
+                Upload(tinyContext, tinyPts.data(), tinyPts.size() * sizeof(float));
+            auto tinyOffBuf = UploadVulkanDeviceBytes(native, tinyContext, tinyOff.data(),
+                tinyOff.size() * sizeof(uint32_t));
+            auto tinyTgtBuf =
+                Upload(tinyContext, tinyTgt.data(), tinyTgt.size() * sizeof(float));
+            CHECK(tinyPtsBuf && tinyOffBuf && tinyTgtBuf);
+            std::vector<float> rest100(size_t(100) * 3);
+            for (int i = 0; i < 100; ++i) {
+                rest100[size_t(i) * 3] = float(i % 10);
+                rest100[size_t(i) * 3 + 1] = float((i / 10) % 10);
+                rest100[size_t(i) * 3 + 2] = float(i % 3);
+            }
+            std::vector<float> posed100 = rest100;
+            for (size_t i = 0; i < posed100.size(); i += 3) posed100[i] += 0.1f;
+            auto mkTiny = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = tinyPtsBuf;
+                info.curveOffsets = tinyOffBuf;
+                info.rootTargets = tinyTgtBuf;
+                info.curveCount = 2;
+                info.pointCount = 6;
+                info.restSamples = rest100;
+                info.posedSamples = posed100;
+                info.sampleCount = 100;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            auto runForced = [&](int force, std::vector<float>* out) {
+                TestForceDeformHeteroSuffix(force);
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = smallPipe->Begin(mkTiny(), &st2, &sem);
+                bool ok = c && st2 == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, tinyContext, c, out);
+                TestForceDeformHeteroSuffix(0);
+                return ok;
+            };
+            std::vector<float> hetOut, gpuOut;
+            CHECK(runForced(1, &hetOut));
+            CHECK(DeformHeteroSuffixRunsForTesting() - r0 == 0);
+            CHECK(runForced(-1, &gpuOut));
+            CHECK(bitEq(hetOut, gpuOut));
+            std::puts("Case 24 (unfunded forced hetero runs GPU): PASS");
+        }
+
+        // Case 25: the automatic policy is correct whatever it picks: three
+        // auto poses match the forced-GPU reference bitwise. (Engagement is
+        // timing-dependent, so only correctness is asserted.)
+        {
+            DeviceContext::CreateInfo autoCi;
+            autoCi.instance = native->instance;
+            autoCi.physicalDevice = native->physical;
+            autoCi.device = native->device;
+            autoCi.computeQueue = native->queue;
+            autoCi.computeQueueFamily = native->family;
+            autoCi.physicalIndex = native->physicalIndex;
+            autoCi.resourceDeviceId = 8038;
+            autoCi.nativeLifetime = native;
+            autoCi.resources = {size_t{48} << 20, 0};
+            autoCi.shaderFloat64Enabled = true;
+            auto autoContext = DeviceContext::Create(autoCi);
+            CHECK(autoContext);
+            VkResult st3 = VK_SUCCESS;
+            auto autoPipe = DeformPipeline::Create(autoContext, evalSpv, applySpv,
+                &st3, cacheSpv);
+            CHECK(autoPipe && st3 == VK_SUCCESS);
+            uint32_t const curves = 60000, perCurve = 10, points = curves * perCurve;
+            std::vector<float> pts(size_t(points) * 3);
+            uint64_t state = 0x12345678u;
+            auto next = [&]() {
+                state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+                return float((state >> 11) & 0xffffff) / float(0xffffff) * 2.0f - 1.0f;
+            };
+            for (auto& v : pts) v = next();
+            std::vector<uint32_t> off(curves + 1);
+            for (uint32_t i = 0; i <= curves; ++i) off[i] = i * perCurve;
+            std::vector<float> tgt(size_t(curves) * 3);
+            for (uint32_t i = 0; i < curves; ++i)
+                for (int a = 0; a < 3; ++a)
+                    tgt[size_t(i) * 3 + size_t(a)] = pts[size_t(i) * perCurve * 3 + size_t(a)];
+            std::vector<float> rest8{
+                0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                0.5f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f,
+                0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 2.0f,
+            };
+            std::vector<float> posed8 = rest8;
+            for (size_t i = 0; i < posed8.size(); i += 3) posed8[i] += 0.25f;
+            auto ptsBuf = Upload(autoContext, pts.data(), pts.size() * sizeof(float));
+            auto offBuf = UploadVulkanDeviceBytes(native, autoContext, off.data(),
+                off.size() * sizeof(uint32_t));
+            auto tgtBuf = Upload(autoContext, tgt.data(), tgt.size() * sizeof(float));
+            CHECK(ptsBuf && offBuf && tgtBuf);
+            auto mkAuto = [&]() {
+                DeformPipeline::BeginInfo info;
+                info.points = ptsBuf;
+                info.curveOffsets = offBuf;
+                info.rootTargets = tgtBuf;
+                info.curveCount = curves;
+                info.pointCount = points;
+                info.restSamples = rest8;
+                info.posedSamples = posed8;
+                info.sampleCount = 8;
+                info.smoothing = 0.0;
+                info.mask = {1.0f, 1, nullptr, 0};
+                info.enabled = {1, 1, nullptr, 0};
+                info.lockRoots = {0, 1, nullptr, 0};
+                info.groomEnvelope = 1.0f;
+                return info;
+            };
+            auto runAuto = [&](std::vector<float>* out) {
+                DeformSemantic sem = DeformSemantic::Ok;
+                auto c = autoPipe->Begin(mkAuto(), &st3, &sem);
+                return c && st3 == VK_SUCCESS && Prove(native) &&
+                    c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                    c->succeeded() && ReadOutput(native, autoContext, c, out);
+            };
+            uint64_t r0 = DeformHeteroSuffixRunsForTesting();
+            std::vector<float> a0, a1, a2, ref;
+            CHECK(runAuto(&a0));
+            CHECK(runAuto(&a1));
+            CHECK(runAuto(&a2));
+            TestForceDeformHeteroSuffix(-1);
+            DeformSemantic sem = DeformSemantic::Ok;
+            auto c = autoPipe->Begin(mkAuto(), &st3, &sem);
+            bool ok = c && st3 == VK_SUCCESS && Prove(native) &&
+                c->Poll(&sem) == VK_SUCCESS && sem == DeformSemantic::Ok &&
+                c->succeeded() && ReadOutput(native, autoContext, c, &ref);
+            TestForceDeformHeteroSuffix(0);
+            CHECK(ok);
+            CHECK(bitEq(a0, ref));
+            CHECK(bitEq(a1, ref));
+            CHECK(bitEq(a2, ref));
+            std::printf("(auto hetero runs over 3 poses: %llu)\n",
+                (unsigned long long)(DeformHeteroSuffixRunsForTesting() - r0));
+            std::puts("Case 25 (auto policy correct): PASS");
         }
     }
 

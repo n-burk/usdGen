@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: MIT
 
 #include "deformPipeline.h"
+#include "deformEvaluateCpu.h"
 #include "fencePool.h"
+#include "usdGen/tbbFastCores.h"
+
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <cmath>
 #include <limits>
@@ -80,6 +87,25 @@ std::atomic<bool> disableEvalCache{false};
 std::atomic<uint64_t> evalCacheHits{0}, evalCacheMisses{0};
 std::atomic<uint64_t> evalCacheBypassed{0}, evalCacheUnfunded{0};
 std::atomic<uint32_t> evalCacheFundedPrefix{0};
+// Heterogeneous suffix: the past-prefix suffix evaluates on the host
+// (deformEvaluateCpu.h, bitwise the direct shader) while the proof submit
+// runs the cached prefix on the device. 10 workers fill this host's fast
+// cores (8: 3.3ms, 10: 2.9ms); 2048-CV grains balance TBB dispatch
+// against work-stealing under contention. The fixed overhead covers the
+// extra copy submit + fence waits + TBB dispatch. The seed throughputs
+// are the measured GB10 figures (see the prefix comment above); the
+// policy replaces them with per-GPU measurements after the first poses.
+constexpr int kHeteroWorkers = 10;
+constexpr uint32_t kHeteroGrainsize = 2048;
+constexpr uint32_t kHeteroCalibCvs = 8192;
+constexpr double kHeteroFixedOverheadNs = 100000.0;
+constexpr double kHeteroSeedGpuDirectNsPerCv = 13.1;
+constexpr double kHeteroSeedCachedNsPerCv = 3.2;
+constexpr double kHeteroEmaAlpha = 0.3;
+constexpr int kHeteroProbeBase = 64;
+constexpr int kHeteroProbeMax = 1024;
+std::atomic<int> forceHeteroSuffix{0};
+std::atomic<uint64_t> heteroRuns{0};
 
 uint32_t Groups(uint32_t n, uint32_t size) { return (n + size - 1) / size; }
 
@@ -176,6 +202,12 @@ uint64_t DeformEvalCacheUnfundedForTesting() noexcept {
 uint32_t DeformEvalCacheFundedPrefixForTesting() noexcept {
     return evalCacheFundedPrefix.load(std::memory_order_acquire);
 }
+void TestForceDeformHeteroSuffix(int force) noexcept {
+    forceHeteroSuffix.store(force, std::memory_order_relaxed);
+}
+uint64_t DeformHeteroSuffixRunsForTesting() noexcept {
+    return heteroRuns.load(std::memory_order_acquire);
+}
 
 struct DeformPipeline::Native {
     std::shared_ptr<DeviceContext> context;
@@ -234,6 +266,29 @@ struct DeformPipeline::Native {
         int bypassLeft = 0;                   // direct poses left in backoff
         bool everFilled = false;
     } evalCache;
+    // Heterogeneous suffix execution: a pinned TBB arena plus the adaptive
+    // policy. The device copies the suffix CVs into the idle warped suffix
+    // (byte staging, no extra buffer) while the host evaluates the suffix
+    // (bitwise the direct shader) during the prefix proof. Guarded: Begin
+    // may run on several threads. Lock order is cacheMutex -> heteroMutex
+    // (the policy updates inside the cached proof phase); heteroMutex never
+    // nests the other way.
+    tbb::task_arena heteroArena{kHeteroWorkers};
+    std::unique_ptr<tbb::task_scheduler_observer> heteroPinning;
+    std::mutex heteroMutex;
+    struct HeteroPolicy {
+        double cpuNsPerCv = 0.0;   // host suffix throughput (EMA), 0 = uncalibrated
+        double gpuNsPerCv = 0.0;   // device suffix throughput, 0 = seed
+        double prefixProofNs = 0.0;// prefix-only proof fence wait (EMA)
+        bool armed = false;        // hetero engaged
+        bool everProbed = false;   // a hetero pose has run (estimates are live)
+        int probeIn = 0;           // eligible GPU poses until the next probe
+        int probeInterval = kHeteroProbeBase;
+    } hetero;
+    // The hetero arming decision (see the definition below). Caller holds
+    // heteroMutex.
+    static bool HeteroWants(HeteroPolicy& hp, uint32_t suffixCvs,
+                            uint32_t prefixCvs);
     // Idle submit fences: fence create/destroy costs ~0.7ms each on the
     // qualified driver, so per-pose submits check out of this pool instead
     // of creating. Candidates hold Native by shared_ptr, so the pool
@@ -247,6 +302,10 @@ struct DeformPipeline::Native {
     // with context (declared first) still alive, so no explicit clear.
     struct ScratchSet {
         std::shared_ptr<ChargedBuffer> warped;
+        // The warped memory type the set was allocated with: hetero poses
+        // need host-visible (the host reads the staged CVs and writes the
+        // suffix), GPU poses prefer device-local. Matched at checkout.
+        bool warpedHostVisible = false;
         std::shared_ptr<ChargedBuffer> status;
         std::shared_ptr<ChargedBuffer> evalStatus;
         std::shared_ptr<ChargedBuffer> coefBuf;
@@ -310,6 +369,9 @@ struct DeformPipeline::Candidate::State {
     std::shared_ptr<ChargedBuffer> fillUbo;
     std::shared_ptr<ChargedBuffer> cachedUbo;
     std::shared_ptr<ChargedBuffer> fillArgs;
+    // The warped memory type (see ScratchSet): recorded at checkout-time
+    // so the returned set re-pools under the same tag.
+    bool warpedHostVisible = false;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     VkCommandPool commands = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE, proofFence = VK_NULL_HANDLE;
@@ -330,6 +392,7 @@ struct DeformPipeline::Candidate::State {
     void ReturnScratch() noexcept {
         Native::ScratchSet set;
         set.warped = std::move(warped);
+        set.warpedHostVisible = warpedHostVisible;
         set.status = std::move(status);
         set.evalStatus = std::move(evalStatus);
         set.coefBuf = std::move(coefBuf);
@@ -561,6 +624,7 @@ std::shared_ptr<DeformPipeline> DeformPipeline::Create(
         if (wantCache && r == VK_SUCCESS)
             r = mkPipeline(n->cachedShader, n->evalPipelineLayout, &n->cachedPipeline);
         if (r != VK_SUCCESS) { finish(r); return {}; }
+        n->heteroPinning = ObserveFastCores(n->heteroArena, kHeteroWorkers);
         auto pipeline = std::shared_ptr<DeformPipeline>(new DeformPipeline(std::move(n)));
         finish(VK_SUCCESS);
         return pipeline;
@@ -658,7 +722,96 @@ uint32_t AffordableCachePrefix(size_t freeBytes, int n) {
     return uint32_t(p);
 }
 
+// Runs the past-prefix suffix [begin, end) on the hetero arena. `cvs` and
+// `warped` are the mapped warped buffer base (the device staged the suffix
+// CV bytes into warped[begin, end) first); the range writes its own warped
+// triples and ORs the non-finite flag. Every query is independent, so any
+// partition is bitwise the direct shader. Returns false only on a
+// programming error (nulls, bad n/m), which the caller quarantines: a
+// silent partial suffix must never reach apply.
+bool RunHeteroSuffix(tbb::task_arena& arena, DeformEvalCpuParams const& p,
+                     float const* cvs, float* warped,
+                     uint32_t begin, uint32_t end, uint32_t* flag)
+{
+    if (begin >= end) return true;
+    std::atomic<uint32_t> bad{0};
+    std::atomic<bool> ok{true};
+    arena.execute([&] {
+        tbb::parallel_for(
+            tbb::blocked_range<uint32_t>(begin, end, kHeteroGrainsize),
+            [&](tbb::blocked_range<uint32_t> const& r) {
+                uint32_t f = 0;
+                if (!DeformEvaluateCpu(p, cvs + size_t(r.begin()) * 3,
+                            warped + size_t(r.begin()) * 3, r.size(), &f))
+                    ok.store(false, std::memory_order_relaxed);
+                if (f) bad.fetch_or(f, std::memory_order_relaxed);
+            });
+    });
+    if (bad.load(std::memory_order_relaxed)) *flag |= 1u;
+    return ok.load(std::memory_order_relaxed);
+}
+
+// One-time host throughput calibration over synthetic normal-range CVs
+// (timing only; values never escape). Runs on the calling thread ahead of
+// the first eligible pose's tentative decision.
+double CalibrateHeteroCpu(double const* samplesNorm, double const* coef,
+                           int n, int m, double const center[3],
+                           double invScale, double scale)
+{
+    std::vector<float> qs(size_t(kHeteroCalibCvs) * 3), ds(size_t(kHeteroCalibCvs) * 3);
+    uint64_t s = 0x243f6a8885a308d3ull;
+    for (float& v : qs) {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        v = float(double(s >> 11) * 0x1p-53 * 4.0 - 2.0);
+    }
+    DeformEvalCpuParams p;
+    p.samples = samplesNorm;
+    p.coef = coef;
+    p.n = n;
+    p.m = m;
+    p.cx = center[0];
+    p.cy = center[1];
+    p.cz = center[2];
+    p.invScale = invScale;
+    p.scale = scale;
+    uint32_t flag = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    DeformEvaluateCpu(p, qs.data(), ds.data(), kHeteroCalibCvs, &flag);
+    double ns = std::chrono::duration<double, std::nano>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count();
+    double per = ns / double(kHeteroCalibCvs);
+    return per > 0.0 ? per : 0.0;
+}
+
 } // namespace
+
+bool DeformPipeline::Native::HeteroWants(HeteroPolicy& hp,
+                                         uint32_t suffixCvs,
+                                         uint32_t prefixCvs)
+{
+    int const force = forceHeteroSuffix.load(std::memory_order_relaxed);
+    if (force > 0) return true;
+    if (force < 0) return false;
+    if (hp.cpuNsPerCv <= 0.0) return false;
+    double const cpuEst = double(suffixCvs) * hp.cpuNsPerCv /
+            double(kHeteroWorkers) +
+        kHeteroFixedOverheadNs;
+    double const gpuSuffix = hp.gpuNsPerCv > 0.0
+        ? double(suffixCvs) * hp.gpuNsPerCv
+        : double(suffixCvs) * kHeteroSeedGpuDirectNsPerCv;
+    double const prefix = hp.prefixProofNs > 0.0 ? hp.prefixProofNs
+                                                 : double(prefixCvs) * kHeteroSeedCachedNsPerCv;
+    if (hp.armed) return cpuEst < gpuSuffix + prefix;
+    if (hp.probeIn > 0) return false;
+    // First probe is margin-gated (fresh calibration and seeds); re-probes
+    // run blind, since a stale estimate must never veto the measurement
+    // that would refresh it.
+    if (!hp.everProbed) return cpuEst < (gpuSuffix + prefix) * 0.9;
+    return true;
+}
 
 std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
     BeginInfo info, VkResult* result, DeformSemantic* semantic, BeforeSubmit beforeSubmit) {
@@ -795,6 +948,48 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         return reject(sem);
     }
 
+    // Host-centered samples, once per pose: the shader's samples[] input
+    // (double(float) - center), shared by the samplesBuf upload and the
+    // hetero suffix so both consume identical doubles. Pure host math on
+    // already-validated inputs, hoisted before scratch funding so the
+    // hetero calibration below can use it.
+    std::vector<double> samplesNorm(size_t(3) * size_t(n));
+    for (int j = 0; j < n; ++j) {
+        samplesNorm[size_t(3 * j)] =
+            double(info.restSamples[size_t(3 * j)]) - rstate.center[0];
+        samplesNorm[size_t(3 * j + 1)] =
+            double(info.restSamples[size_t(3 * j + 1)]) - rstate.center[1];
+        samplesNorm[size_t(3 * j + 2)] =
+            double(info.restSamples[size_t(3 * j + 2)]) - rstate.center[2];
+    }
+
+    // Tentative hetero decision (finalized after the cache decision): the
+    // warped memory type funds with the scratch, so the policy answers
+    // from the funded-prefix estimate. Steady poses estimate exactly
+    // (cacheActive equals min(points, rowsFunded) absent regrow); pose 0
+    // has no prefix. Lock order cache -> hetero, never nested otherwise.
+    bool const heteroStatic = native_->cachedPipeline != VK_NULL_HANDLE &&
+        !disableEvalCache.load(std::memory_order_relaxed) &&
+        info.points &&
+        (info.points->usage() & VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    bool wantHeteroTent = false;
+    {
+        uint32_t tentPrefix = 0;
+        {
+            std::lock_guard<std::mutex> clock(native_->cacheMutex);
+            tentPrefix = native_->evalCache.rowsFunded;
+        }
+        uint32_t const tentSuffix = points > tentPrefix ? points - tentPrefix : 0;
+        std::lock_guard<std::mutex> hlock(native_->heteroMutex);
+        auto& hp = native_->hetero;
+        if (heteroStatic && tentSuffix > 0 && hp.cpuNsPerCv <= 0.0) {
+            hp.cpuNsPerCv = CalibrateHeteroCpu(samplesNorm.data(), rstate.coef,
+                n, m, rstate.center, invScale, rstate.scale);
+        }
+        wantHeteroTent = heteroStatic && tentSuffix > 0 &&
+            Native::HeteroWants(hp, tentSuffix, std::min(points, tentPrefix));
+    }
+
     try {
         auto s = std::make_shared<Candidate::State>();
         s->native = native_;
@@ -846,11 +1041,13 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         // this pose's point count; anything missing is allocated fresh
         // below (at pool sizes, so it rejoins the pool in turn). The
         // empty-topology pose needs no scratch and skips the checkout.
+        s->warpedHostVisible = wantHeteroTent;
         if (curves != 0) {
             std::lock_guard<std::mutex> lock(native_->scratchMutex);
             for (auto it = native_->scratchIdle.begin();
                  it != native_->scratchIdle.end(); ++it) {
-                if (it->warped && it->warped->sizeBytes() == outBytes) {
+                if (it->warped && it->warped->sizeBytes() == outBytes &&
+                    it->warpedHostVisible == wantHeteroTent) {
                     s->warped = std::move(it->warped);
                     s->status = std::move(it->status);
                     s->evalStatus = std::move(it->evalStatus);
@@ -945,16 +1142,23 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         // Pose scratch funds before the cache decision below, so a funded
         // cache can never starve the current pose: whatever the estimate
         // sizes the prefix to, this pose's scratch is already charged.
-        // warped: DEVICE_LOCAL.
+        // warped: hetero poses take host-visible (the host reads the staged
+        // suffix CVs and writes the suffix back through the mapping); GPU
+        // poses keep device-local. TRANSFER_DST on both (the hetero copy
+        // target); usage bits alone never move the pool or the speed.
         {
             if (!s->warped) {
                 VkBufferCreateInfo bi{};
                 bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
                 bi.size = outBytes;
-                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-                if (!createScratch(s->warped, bi,
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                VkMemoryPropertyFlags const warpedProps = wantHeteroTent
+                    ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                    : VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                if (!createScratch(s->warped, bi, warpedProps,
                         UsdGenExecutionResourceKind::Active)) { finish(r); return {}; }
             }
         }
@@ -998,16 +1202,10 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                         UsdGenExecutionResourceKind::Scratch)) { finish(r); return {}; }
             }
-            std::vector<double> norm(size_t(3) * size_t(n));
-            for (int j = 0; j < n; ++j) {
-                norm[size_t(3 * j)] = double(info.restSamples[size_t(3 * j)]) - rstate.center[0];
-                norm[size_t(3 * j + 1)] = double(info.restSamples[size_t(3 * j + 1)]) - rstate.center[1];
-                norm[size_t(3 * j + 2)] = double(info.restSamples[size_t(3 * j + 2)]) - rstate.center[2];
-            }
             void* data = nullptr;
             r = vkMapMemory(d, s->samplesBuf->memory(), 0, samplesBytes, 0, &data);
             if (r != VK_SUCCESS) { finish(r); return {}; }
-            std::memcpy(data, norm.data(), size_t(samplesBytes));
+            std::memcpy(data, samplesNorm.data(), size_t(samplesBytes));
             vkUnmapMemory(d, s->samplesBuf->memory());
         }
         // evalUbo: HOST_VISIBLE, 64B. Funded here with the rest of the
@@ -1241,6 +1439,21 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             }
         }
 
+        // Final hetero decision: the tentative call reserved a host-visible
+        // warped; the exact suffix confirms. A tentative hetero that lands
+        // here GPU (concurrent policy flip, regrow surprise) runs the GPU
+        // suffix on its host-visible warped: correct, transiently typed.
+        bool const heteroEligible =
+            heteroStatic && useCache && points > cacheActive;
+        bool useHetero = heteroEligible && wantHeteroTent;
+        if (useHetero) {
+            std::lock_guard<std::mutex> hlock(native_->heteroMutex);
+            useHetero = Native::HeteroWants(native_->hetero,
+                points - cacheActive, cacheActive);
+        }
+        if (useHetero)
+            heteroRuns.fetch_add(1, std::memory_order_relaxed);
+
         // evalUbo fill (see the funding above): on the cached path this
         // UBO feeds only the past-prefix suffix dispatch (base=active);
         // the direct dispatch keeps base=0.
@@ -1302,7 +1515,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         }
 
         // Descriptor pool + sets.
-        bool const hasSuffix = useCache && points > fundedPrefix;
+        bool const hasSuffix = useCache && points > fundedPrefix && !useHetero;
         VkDescriptorPoolSize sizes[2] = {
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, useCache
                  ? kVerifyFillStorage + kVerifyFillStorage + kEvalStorage +
@@ -1453,8 +1666,8 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         VkCommandBufferAllocateInfo ca{};
         ca.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         ca.commandPool = s->commands; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ca.commandBufferCount = 2;
-        VkCommandBuffer cmds[2];
+        ca.commandBufferCount = useHetero ? 3u : 2u;
+        VkCommandBuffer cmds[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
         r = vkAllocateCommandBuffers(d, &ca, cmds);
         if (r != VK_SUCCESS) { finish(r); return {}; }
         VkCommandBufferBeginInfo begin{};
@@ -1571,15 +1784,115 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             r = vkEndCommandBuffer(cmds[1]);
         }
         if (r != VK_SUCCESS) { finish(r); return {}; }
+        // cmds[2] (hetero only): stage the suffix CV bytes into the idle
+        // warped suffix for the host. Submitted before the proof so its
+        // fence delivers the CVs while the prefix still runs; the proof's
+        // barrier orders it against the cached writes (disjoint ranges).
+        if (useHetero) {
+            r = vkBeginCommandBuffer(cmds[2], &begin);
+            if (r == VK_SUCCESS) {
+                VkMemoryBarrier copyBefore{};
+                copyBefore.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                copyBefore.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT |
+                    VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                copyBefore.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmds[2],
+                    VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &copyBefore,
+                    0, nullptr, 0, nullptr);
+                VkBufferCopy region{};
+                region.srcOffset = VkDeviceSize(cacheActive) * 12u;
+                region.dstOffset = VkDeviceSize(cacheActive) * 12u;
+                region.size = VkDeviceSize(points - cacheActive) * 12u;
+                vkCmdCopyBuffer(cmds[2], info.points->buffer(),
+                    s->warped->buffer(), 1, &region);
+                r = vkEndCommandBuffer(cmds[2]);
+            }
+            if (r != VK_SUCCESS) { finish(r); return {}; }
+        }
         s->proofFence = native_->fencePool.Acquire(d, &r);
         if (!s->proofFence) { finish(r); return {}; }
+        VkFence copyFence = VK_NULL_HANDLE;
+        if (useHetero) {
+            copyFence = native_->fencePool.Acquire(d, &r);
+            if (!copyFence) { finish(r); return {}; }
+        }
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1; submit.pCommandBuffers = &cmds[0];
+        submit.commandBufferCount = 1;
         s->pending = true; // proof owns the same allocations as the final submit
-        r = vkQueueSubmit(context->computeQueue(), 1, &submit, s->proofFence);
+        bool copySubmitted = false;
+        if (useHetero) {
+            submit.pCommandBuffers = &cmds[2];
+            r = vkQueueSubmit(context->computeQueue(), 1, &submit, copyFence);
+            copySubmitted = (r == VK_SUCCESS);
+        }
+        auto tProofSubmit = std::chrono::steady_clock::now();
+        if (r == VK_SUCCESS) {
+            submit.pCommandBuffers = &cmds[0];
+            r = vkQueueSubmit(context->computeQueue(), 1, &submit, s->proofFence);
+        }
+        if (r != VK_SUCCESS) {
+            // A submit failed: prove in-flight work idle, then release the
+            // proven fence and destroy the rest (pool contract), exactly as
+            // the proof fence path below does via quarantine.
+            if (copyFence) {
+                bool proven = false;
+                if (copySubmitted)
+                    proven = vkWaitForFences(d, 1, &copyFence, VK_TRUE,
+                                             10000000000ull) == VK_SUCCESS;
+                if (proven)
+                    native_->fencePool.Release(d, copyFence);
+                else
+                    vkDestroyFence(d, copyFence, nullptr);
+            }
+            candidate->Quarantine();
+            finish(r);
+            return {};
+        }
+        double heteroCpuNs = 0.0;
+        uint32_t heteroFlag = 0;
+        if (useHetero) {
+            // Wait the staged CVs, run the suffix on the arena while the
+            // prefix proof runs, then wait the proof. A failed map runs the
+            // quarantine path like any proof failure: no output escapes.
+            r = vkWaitForFences(d, 1, &copyFence, VK_TRUE, 10000000000ull);
+            if (r == VK_SUCCESS) {
+                native_->fencePool.Release(d, copyFence);
+                copyFence = VK_NULL_HANDLE;
+                void* warpMap = nullptr;
+                r = vkMapMemory(d, s->warped->memory(), 0, outBytes, 0, &warpMap);
+                if (r == VK_SUCCESS) {
+                    DeformEvalCpuParams xp;
+                    xp.samples = samplesNorm.data();
+                    xp.coef = rstate.coef;
+                    xp.n = n; xp.m = m;
+                    xp.cx = rstate.center[0];
+                    xp.cy = rstate.center[1];
+                    xp.cz = rstate.center[2];
+                    xp.invScale = invScale;
+                    xp.scale = rstate.scale;
+                    auto tCpu0 = std::chrono::steady_clock::now();
+                    bool suffixOk = RunHeteroSuffix(native_->heteroArena, xp,
+                        static_cast<float const*>(warpMap),
+                        static_cast<float*>(warpMap),
+                        cacheActive, points, &heteroFlag);
+                    heteroCpuNs = std::chrono::duration<double, std::nano>(
+                        std::chrono::steady_clock::now() - tCpu0).count();
+                    vkUnmapMemory(d, s->warped->memory());
+                    if (!suffixOk) r = VK_ERROR_UNKNOWN;
+                }
+            } else if (copyFence) {
+                vkDestroyFence(d, copyFence, nullptr);
+                copyFence = VK_NULL_HANDLE;
+            }
+        }
         if (r == VK_SUCCESS)
             r = vkWaitForFences(d, 1, &s->proofFence, VK_TRUE, 10000000000ull);
+        // Submit-to-signal: the GPU prefix (plus the GPU suffix on direct
+        // poses) regardless of host overlap. Drives the hetero policy.
+        double const proofNs = std::chrono::duration<double, std::nano>(
+            std::chrono::steady_clock::now() - tProofSubmit).count();
         if (r != VK_SUCCESS) { candidate->Quarantine(); finish(r); return {}; }
         s->pending = false;
         uint32_t st = 0;
@@ -1591,6 +1904,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 vkUnmapMemory(d, s->evalStatus->memory());
             }
         }
+        st |= heteroFlag;
         // The indirect args double as the miss signal: nonzero x means the
         // refill ran (forced or by mismatch). A free 12B read on the
         // already-synchronized proof path.
@@ -1629,6 +1943,53 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             } else {
                 evalCacheHits.fetch_add(1, std::memory_order_relaxed);
                 cache.missStreak = 0;
+            }
+            if (heteroEligible) {
+                // Hetero policy, still under cacheMutex (heteroMutex nests
+                // inside by the lock order). Hit-only proof EMAs: fills
+                // pollute the proof wait, while the CPU suffix measures
+                // clean every hetero pose. A GPU hit against a known prefix
+                // derives the device suffix rate; until then the seed
+                // decides, and the first hetero pose corrects it.
+                std::lock_guard<std::mutex> hlock(native_->heteroMutex);
+                auto& hp = native_->hetero;
+                bool const hit = (argsX == 0);
+                uint32_t const suffixCvs = points - cacheActive;
+                auto ema = [](double oldV, double newV) {
+                    return oldV <= 0.0 ? newV
+                        : oldV + kHeteroEmaAlpha * (newV - oldV);
+                };
+                if (useHetero) {
+                    if (suffixCvs > 0)
+                        hp.cpuNsPerCv = ema(hp.cpuNsPerCv, heteroCpuNs *
+                            double(kHeteroWorkers) / double(suffixCvs));
+                    hp.everProbed = true;
+                    if (hit)
+                        hp.prefixProofNs = ema(hp.prefixProofNs, proofNs);
+                    double const cpuEst = double(suffixCvs) * hp.cpuNsPerCv /
+                            double(kHeteroWorkers) +
+                        kHeteroFixedOverheadNs;
+                    double const gpuSuffix = hp.gpuNsPerCv > 0.0
+                        ? double(suffixCvs) * hp.gpuNsPerCv
+                        : double(suffixCvs) * kHeteroSeedGpuDirectNsPerCv;
+                    if (cpuEst < gpuSuffix + hp.prefixProofNs) {
+                        hp.armed = true;
+                        hp.probeInterval = kHeteroProbeBase;
+                    } else {
+                        hp.armed = false;
+                        hp.probeIn = hp.probeInterval;
+                        if (hp.probeInterval < kHeteroProbeMax)
+                            hp.probeInterval *= 2;
+                    }
+                } else {
+                    if (hp.probeIn > 0) --hp.probeIn;
+                    if (hit && hp.prefixProofNs > 0.0 && suffixCvs > 0) {
+                        double const gpuSuffix = proofNs - hp.prefixProofNs;
+                        if (gpuSuffix > 0.0)
+                            hp.gpuNsPerCv = ema(hp.gpuNsPerCv,
+                                gpuSuffix / double(suffixCvs));
+                    }
+                }
             }
             // End of the cached proof phase; the apply submit below (and
             // its beforeSubmit hook) runs unlocked, as before.

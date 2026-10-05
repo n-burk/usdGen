@@ -66,6 +66,17 @@ uint64_t DeformEvalCacheBypassedForTesting() noexcept;
 uint64_t DeformEvalCacheUnfundedForTesting() noexcept;
 uint32_t DeformEvalCacheFundedPrefixForTesting() noexcept;
 
+// Test-only heterogeneous-suffix seams. The force mode overrides the
+// adaptive policy: 0 is automatic, 1 forces the host suffix, -1 forces the
+// GPU suffix. Forcing hetero on an ineligible pose (no cache, no suffix,
+// unreadable inputs) still runs the GPU suffix; the run counter tells
+// which path ran. The counter is global across pipelines; tests assert
+// deltas. An eligible forced-hetero pose always runs hetero (the tentative
+// call reserves the mapping the final call confirms), so there is no
+// fallback counter.
+void TestForceDeformHeteroSuffix(int force) noexcept;
+uint64_t DeformHeteroSuffixRunsForTesting() noexcept;
+
 class DeformPipeline final : public std::enable_shared_from_this<DeformPipeline> {
 public:
     class Candidate;
