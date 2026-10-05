@@ -568,6 +568,113 @@ int main(int argc, char** argv) {
         std::puts("Case 8c (repeat coplanar rest rejects twice): PASS");
     }
 
+    // ---- Case 9: ragged spans (1, 2, 3 points) with per-curve fields ----
+    // The per-point apply binary-searches offsets for its curve; ragged
+    // spans (including a span of 1) plus primitive-domain fields pin the
+    // mapping (groom literals are curve-independent and cannot). Under a
+    // rigid translation d: a primitive mask of [0, 1, 0] holds curves 0
+    // and 2 at their input bitwise while curve 1 moves by d; a primitive
+    // lock of [1, 0, 1] holds the locked curves at their roots while the
+    // unlocked one moves by d.
+    {
+        const std::vector<float> rPoints{
+            0.0f, 0.0f, 0.0f,
+            1.0f, 0.0f, 0.0f, 1.1f, 0.0f, 0.1f,
+            2.0f, 0.0f, 0.0f, 2.1f, 0.0f, 0.1f, 2.2f, 0.0f, 0.2f,
+        };
+        const std::vector<uint32_t> rOffsets{0, 1, 3, 6};
+        const std::vector<float> rTargets{
+            0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+        };
+        const std::vector<float> rMask{0.0f, 1.0f, 0.0f};
+        const std::vector<uint32_t> rLock{1u, 0u, 1u};
+        auto rPointsBuf = Upload(context, rPoints.data(), rPoints.size() * sizeof(float));
+        auto rOffsetsBuf = UploadVulkanDeviceBytes(native, context, rOffsets.data(),
+            rOffsets.size() * sizeof(uint32_t));
+        auto rTargetsBuf = Upload(context, rTargets.data(), rTargets.size() * sizeof(float));
+        auto rMaskBuf = Upload(context, rMask.data(), rMask.size() * sizeof(float));
+        auto rLockBuf = Upload(context, rLock.data(), rLock.size() * sizeof(uint32_t));
+        CHECK(rPointsBuf && rOffsetsBuf && rTargetsBuf && rMaskBuf && rLockBuf);
+        const float d[3] = {0.3f, -0.2f, 0.5f};
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i)
+            for (int ax = 0; ax < 3; ++ax)
+                posed[size_t(i * 3 + ax)] = restSamples[size_t(i * 3 + ax)] + d[ax];
+
+        // 9a: primitive mask [0, 1, 0].
+        DeformPipeline::BeginInfo info;
+        info.points = rPointsBuf;
+        info.curveOffsets = rOffsetsBuf;
+        info.rootTargets = rTargetsBuf;
+        info.curveCount = 3;
+        info.pointCount = 6;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {0.0f, 2, rMaskBuf, 3};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 18);
+        // Mask-0 curves pass the input through bitwise.
+        CHECK(std::memcmp(out.data(), rPoints.data(), 3 * sizeof(float)) == 0);
+        CHECK(std::memcmp(out.data() + 9, rPoints.data() + 9, 9 * sizeof(float)) == 0);
+        for (int i = 1; i < 3; ++i) {
+            float3 got = V(out[size_t(i * 3)], out[size_t(i * 3 + 1)], out[size_t(i * 3 + 2)]);
+            float3 exp = V(rPoints[size_t(i * 3)] + d[0], rPoints[size_t(i * 3 + 1)] + d[1],
+                           rPoints[size_t(i * 3 + 2)] + d[2]);
+            CHECK(Near(got, exp, 1e-4f));
+        }
+        std::puts("Case 9a (ragged primitive mask): PASS");
+
+        // 9b: primitive lock [1, 0, 1].
+        DeformPipeline::BeginInfo info2;
+        info2.points = rPointsBuf;
+        info2.curveOffsets = rOffsetsBuf;
+        info2.rootTargets = rTargetsBuf;
+        info2.curveCount = 3;
+        info2.pointCount = 6;
+        info2.restSamples = restSamples;
+        info2.posedSamples = posed;
+        info2.sampleCount = 5;
+        info2.smoothing = 0.0;
+        info2.mask = {1.0f, 1, nullptr, 0};
+        info2.enabled = {1, 1, nullptr, 0};
+        info2.lockRoots = {0, 2, rLockBuf, 3};
+        info2.groomEnvelope = 1.0f;
+        auto c2 = pipe->Begin(std::move(info2), &status, &sem);
+        CHECK(c2 && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c2->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c2->succeeded());
+        std::vector<float> out2;
+        CHECK(ReadOutput(native, context, c2, &out2));
+        CHECK(out2.size() == 18);
+        for (int i = 0; i < 6; ++i) {
+            bool const locked = (i < 1 || i >= 3);
+            float3 got = V(out2[size_t(i * 3)], out2[size_t(i * 3 + 1)], out2[size_t(i * 3 + 2)]);
+            float3 exp = locked ? V(rPoints[size_t(i * 3)], rPoints[size_t(i * 3 + 1)],
+                                          rPoints[size_t(i * 3 + 2)])
+                                : V(rPoints[size_t(i * 3)] + d[0], rPoints[size_t(i * 3 + 1)] + d[1],
+                                    rPoints[size_t(i * 3 + 2)] + d[2]);
+            CHECK(Near(got, exp, 1e-4f));
+        }
+        std::puts("Case 9b (ragged primitive lock): PASS");
+    }
+
     std::puts("Vulkan deform pipeline: PASS");
     return 0;
 }
