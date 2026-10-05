@@ -30,6 +30,9 @@ char const* RbfVkStatusName(RbfVkStatus s) noexcept {
 namespace {
 
 constexpr uint32_t kLocalSize = 256;
+// The fp64 evaluate loop runs faster at 128-wide groups (same finding as
+// the deformEvaluate shader); the bind-path kernels keep 256.
+constexpr uint32_t kEvalLocalSize = 128;
 constexpr uint32_t kMaxEvalStack = 16;
 constexpr uint64_t kFenceTimeoutNs = 10000000000ull;
 
@@ -43,6 +46,7 @@ static_assert(sizeof(SolveUbo) == 64);
 static_assert(offsetof(SolveUbo, cx) == 16);
 
 uint32_t Groups(uint32_t n) { return (n + kLocalSize - 1) / kLocalSize; }
+uint32_t EvalGroups(uint32_t n) { return (n + kEvalLocalSize - 1) / kEvalLocalSize; }
 
 // Forward substitution over G-row groups (host pose solve): rows i+1..i+G-1's
 // terms over j < i never touch coef[i..i+G-2], so the group accumulates its
@@ -1153,7 +1157,7 @@ RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
     vkGetPhysicalDeviceProperties(native.context->physicalDevice(), &physical);
     if (VkDeviceSize(count) * 12u > physical.limits.maxStorageBufferRange)
         return fail(RbfVkStatus::InvalidArgument, "RBF evaluation exceeds Vulkan maxStorageBufferRange");
-    uint32_t groups = Groups(count);
+    uint32_t groups = EvalGroups(count);
     uint32_t groupsX = std::min(groups, physical.limits.maxComputeWorkGroupCount[0]);
     uint32_t groupsY = (groups + groupsX - 1) / groupsX;
     if (groupsY > physical.limits.maxComputeWorkGroupCount[1])
