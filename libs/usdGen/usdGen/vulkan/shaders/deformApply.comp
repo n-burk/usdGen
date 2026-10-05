@@ -5,11 +5,13 @@
 // (deformCurves.cu:74-134). One thread per POINT: adjacent threads read
 // and write adjacent points, so the src/warped/output traffic is fully
 // coalesced; one thread per curve strided by the span (10 points in the
-// bench) and ran the memory system at 1/32 efficiency. Each thread
-// binary-searches `offsets` for its curve (17 steps at 100k curves,
-// L1-resident, data-independent trip count) and then runs the identical
-// per-point math, so outputs are bitwise what the per-curve version
-// wrote. Span validation stays per-curve: thread i also checks span i
+// bench) and ran the memory system at 1/32 efficiency. Each thread maps
+// its point to a curve by division when the UBO stride candidate
+// verifies against `offsets` (the uniform case: one division plus two
+// L1 loads instead of a 17-step binary search at 100k curves) and
+// binary-searches otherwise, then runs the identical per-point math, so
+// outputs are bitwise what the per-curve version wrote.
+// Span validation stays per-curve: thread i also checks span i
 // (when i < curves), so an empty or overrunning span that no point maps
 // to still reports BadOffsets exactly as before; the dispatch covers
 // max(points, curves) threads so every span is checked.
@@ -29,7 +31,7 @@
 //   6 enabledData uint[...]  RO (fallback 4B buffer when literal)
 //   7 lockData   uint[...]   RO (fallback 4B buffer when literal)
 //   8 status     int[1]      OUT (atomicCompSwap first-writer, 0 == clean)
-//   9 UBO        Params (std140, 96 bytes)
+//   9 UBO        Params (std140, 80 bytes)
 //
 // Dispatch: local_size_x=256, groups=ceil(max(pointCount,curveCount)/256).
 // Domain codes: Groom=1, Primitive=2, Point=4.
@@ -54,6 +56,10 @@ layout(std140, binding = 9) uniform Params {
     vec4  enabledF;      // x literal, y hasData, z domain, w pad
     vec4  lockF;         // x literal, y hasData, z domain, w pad
     uvec3 fieldCounts;   // x maskCount, y enabledCount, z lockCount
+    uint strideCandidate; // points/curves when curves divides points, else 0:
+                          // a uniformity CANDIDATE, verified against offsets
+                          // at every use (a failed check falls back to the
+                          // search), so no host trust is involved
 } params;
 
 const uint D_GROOM = 1u, D_PRIM = 2u, D_POINT = 4u;
@@ -82,17 +88,33 @@ void main() {
     }
     if (i >= points) return;
     uint point = i;
-    // Curve of this point: the greatest c with offsets[c] <= point. The
-    // interval halves every step, so this terminates on any offset
-    // content; curve lands in [0, curves), so the reads below are in
-    // bounds even for non-monotone offsets, and the span check then
-    // rejects them exactly as the per-curve version did.
-    uint lo = 0u, hi = curves;
-    while (lo + 1u < hi) {
-        uint mid = (lo + hi) >> 1;
-        if (offsets[mid] <= point) lo = mid; else hi = mid;
+    // Curve of this point: the greatest c with offsets[c] <= point. A
+    // nonzero stride candidate answers by division, verified against the
+    // actual offsets before use; anything else runs the binary search.
+    // The check names the search's own answer whenever the offsets pass
+    // validation (they are then strictly increasing: any adjacent
+    // inversion trips a span check), and on rejected offsets the output
+    // is discarded anyway while the candidate stays in bounds
+    // (point < points implies point/stride < curves). The search below
+    // is also the fallback for a failed check, so the mapping is the
+    // search's on every input.
+    uint stride = params.strideCandidate;
+    uint c = stride != 0u ? point / stride : curves;
+    uint curve;
+    if (c < curves && offsets[c] <= point && point < offsets[c + 1u]) {
+        curve = c;
+    } else {
+        // The interval halves every step, so this terminates on any
+        // offset content; curve lands in [0, curves), so the reads below
+        // are in bounds even for non-monotone offsets, and the span
+        // check then rejects them exactly as the per-curve version did.
+        uint lo = 0u, hi = curves;
+        while (lo + 1u < hi) {
+            uint mid = (lo + hi) >> 1;
+            if (offsets[mid] <= point) lo = mid; else hi = mid;
+        }
+        curve = lo;
     }
-    uint curve = lo;
     uint begin = offsets[curve];
     uint end = offsets[curve + 1u];
     if (begin >= end || end > points) { StatusErr(1); return; }

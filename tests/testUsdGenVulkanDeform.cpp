@@ -769,6 +769,72 @@ int main(int argc, char** argv) {
         std::puts("Case 9b (ragged primitive lock): PASS");
     }
 
+    // ---- Case 9c: ragged spans (1, 2, 4 points), indivisible count ----
+    // 7 points over 3 curves leave a remainder, so the stride candidate
+    // is 0 and every point runs the pure binary search (cases 9a/9b
+    // divide evenly and mix division with the search fallback). Same
+    // rigid translation and primitive mask shape as 9a.
+    {
+        const std::vector<float> rPoints{
+            0.0f, 0.0f, 0.0f,
+            1.0f, 0.0f, 0.0f, 1.1f, 0.0f, 0.1f,
+            2.0f, 0.0f, 0.0f, 2.1f, 0.0f, 0.1f, 2.2f, 0.0f, 0.2f, 2.3f, 0.0f, 0.3f,
+        };
+        const std::vector<uint32_t> rOffsets{0, 1, 3, 7};
+        const std::vector<float> rTargets{
+            0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+        };
+        const std::vector<float> rMask{0.0f, 1.0f, 0.0f};
+        auto rPointsBuf = Upload(context, rPoints.data(), rPoints.size() * sizeof(float));
+        auto rOffsetsBuf = UploadVulkanDeviceBytes(native, context, rOffsets.data(),
+            rOffsets.size() * sizeof(uint32_t));
+        auto rTargetsBuf = Upload(context, rTargets.data(), rTargets.size() * sizeof(float));
+        auto rMaskBuf = Upload(context, rMask.data(), rMask.size() * sizeof(float));
+        CHECK(rPointsBuf && rOffsetsBuf && rTargetsBuf && rMaskBuf);
+        const float d[3] = {0.3f, -0.2f, 0.5f};
+        std::vector<float> posed(15);
+        for (int i = 0; i < 5; ++i)
+            for (int ax = 0; ax < 3; ++ax)
+                posed[size_t(i * 3 + ax)] = restSamples[size_t(i * 3 + ax)] + d[ax];
+
+        DeformPipeline::BeginInfo info;
+        info.points = rPointsBuf;
+        info.curveOffsets = rOffsetsBuf;
+        info.rootTargets = rTargetsBuf;
+        info.curveCount = 3;
+        info.pointCount = 7;
+        info.restSamples = restSamples;
+        info.posedSamples = posed;
+        info.sampleCount = 5;
+        info.smoothing = 0.0;
+        info.mask = {0.0f, 2, rMaskBuf, 3};
+        info.enabled = {1, 1, nullptr, 0};
+        info.lockRoots = {0, 1, nullptr, 0};
+        info.groomEnvelope = 1.0f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto c = pipe->Begin(std::move(info), &status, &sem);
+        CHECK(c && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(c->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok);
+        CHECK(c->succeeded());
+
+        std::vector<float> out;
+        CHECK(ReadOutput(native, context, c, &out));
+        CHECK(out.size() == 21);
+        // Mask-0 curves pass the input through bitwise.
+        CHECK(std::memcmp(out.data(), rPoints.data(), 3 * sizeof(float)) == 0);
+        CHECK(std::memcmp(out.data() + 9, rPoints.data() + 9, 12 * sizeof(float)) == 0);
+        for (int i = 1; i < 3; ++i) {
+            float3 got = V(out[size_t(i * 3)], out[size_t(i * 3 + 1)], out[size_t(i * 3 + 2)]);
+            float3 exp = V(rPoints[size_t(i * 3)] + d[0], rPoints[size_t(i * 3 + 1)] + d[1],
+                           rPoints[size_t(i * 3 + 2)] + d[2]);
+            CHECK(Near(got, exp, 1e-4f));
+        }
+        std::puts("Case 9c (ragged indivisible mask): PASS");
+    }
+
     std::puts("Vulkan deform pipeline: PASS");
     return 0;
 }

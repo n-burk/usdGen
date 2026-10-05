@@ -85,7 +85,7 @@ struct ApplyUbo {
     float enabledF[4];       // vec4: offset 32
     float lockF[4];          // vec4: offset 48
     uint32_t fieldCounts[3]; // uvec3: 12B in std140, offset 64
-    uint32_t _pad;           // offset 76; total 80, 16B-aligned block
+    uint32_t strideCandidate; // offset 76; total 80, 16B-aligned block
 };
 static_assert(sizeof(ApplyUbo) == 80);
 static_assert(offsetof(ApplyUbo, groomEnvelope) == 12);
@@ -798,6 +798,13 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             a.fieldCounts[0] = info.mask.count;
             a.fieldCounts[1] = info.enabled.count;
             a.fieldCounts[2] = info.lockRoots.count;
+            // Uniform-stride candidate for the apply shader's point->curve
+            // map (verified against the offsets at every use; 0 disables
+            // it). Pure scalar math on already-known counts: no producer
+            // trust, no scan. The empty-topology pose returns before this
+            // fill, so curves is nonzero; the guard is belt and braces.
+            a.strideCandidate =
+                curves > 0 && points % curves == 0 ? points / curves : 0;
             void* data = nullptr;
             r = vkMapMemory(d, s->applyUbo->memory(), 0, kApplyUboBytes, 0, &data);
             if (r != VK_SUCCESS) { finish(r); return {}; }
