@@ -36,7 +36,16 @@ __device__ inline void atomicMaxFloat(float* address, float value) {
 // grid; mixed-sign zeros can only name a zero extent, which fails
 // identically either way. Threads beyond n fold neutrally, and the
 // shuffle mask is the converged warp so partial blocks stay correct.
+// Lane 0 also seeds the extent and flag words behind one block barrier,
+// retiring the old initExtent launch. That seed is why this kernel takes
+// single-block launches only: every caller below uses <<<1,128>>>.
+// The barrier publishes exactly what the old stream-ordered init wrote,
+// so the fold reads bitwise the same starting values.
 __global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
+    if (threadIdx.x == 0) {
+        e[0]=e[1]=e[2]=INFINITY; e[3]=e[4]=e[5]=-INFINITY; *flags=0;
+    }
+    __syncthreads();
     float mnx = INFINITY, mny = INFINITY, mnz = INFINITY;
     float mxx = -INFINITY, mxy = -INFINITY, mxz = -INFINITY;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
@@ -58,9 +67,6 @@ __global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
         atomicMinFloat(&e[0], mnx); atomicMinFloat(&e[1], mny); atomicMinFloat(&e[2], mnz);
         atomicMaxFloat(&e[3], mxx); atomicMaxFloat(&e[4], mxy); atomicMaxFloat(&e[5], mxz);
     }
-}
-__global__ void initExtent(float* e, int* flags) {
-    if (threadIdx.x == 0) { e[0]=e[1]=e[2]=INFINITY; e[3]=e[4]=e[5]=-INFINITY; *flags=0; }
 }
 __global__ void polynomialGram(const float3* p, int n, double* gram, double cx, double cy, double cz, double invScale) {
     for (int i=blockIdx.x*blockDim.x+threadIdx.x;i<n;i+=blockDim.x*gridDim.x) {
@@ -275,7 +281,7 @@ RbfStatus CudaRbfBinding::BeginFreshBind(DeviceView<const float3> samples, doubl
     f.unproven = true; f.phase = FreshState::Phase::Extent;
     if (!ok(cudaMemcpyAsync(f.rest.data(), samples.data, f.n*sizeof(float3), cudaMemcpyDeviceToDevice, stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF rest copy failed"); }
     float* ex = f.extents.data(); int* exFlag = reinterpret_cast<int*>(ex + 6);
-    initExtent<<<1,1,0,stream>>>(ex, exFlag); extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,ex,exFlag);
+    extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,ex,exFlag);
     if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(f.host->extent,f.extents.data(),sizeof(f.host->extent)+sizeof(f.host->flag),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF extent submit failed"); }
     if (failFreshBindAfterSubmit.exchange(false, std::memory_order_acq_rel)) { f.failed=true; return fail(RbfStatus::CudaError,"forced fresh RBF bind post-submit failure"); }
     return RbfStatus::Ok;
@@ -512,7 +518,7 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // argument and nothing else reads flags_ in between.
     if(!ok(extents_.reset(7))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
     float* ex = extents_.data(); int* exFlag = reinterpret_cast<int*>(ex + 6);
-    initExtent<<<1,1,0,stream>>>(ex,exFlag); extentKernel<<<1,128,0,stream>>>(rest_.data(),n,ex,exFlag);
+    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,ex,exFlag);
     struct Proof { float e[6]; int flag; };
     static_assert(sizeof(Proof) == 7 * sizeof(float) && offsetof(Proof, flag) == 6 * sizeof(float), "extent proof must be one contiguous copy");
     Proof proof;
