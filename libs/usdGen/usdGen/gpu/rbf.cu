@@ -470,15 +470,23 @@ RbfStatus CudaRbfBinding::BeginFreshEvaluate(DeviceView<const float3> cvs, Devic
     if (validateFreshPointer(cvs.data,cvs.size,stream,&ownerDevice) != cudaSuccess ||
         validateFreshPointer(output.data,output.size,stream,&ownerDevice) != cudaSuccess || ownerDevice != acceptedFresh_->device)
         return fail(RbfStatus::InvalidArgument,"fresh RBF evaluation provenance invalid");
-    auto packet = std::make_unique<FreshState>();
+    // Same adoption as the solve packet (see BeginFreshSolve): the eval
+    // packet holds only a host proof packet, fully overwritten by the flag
+    // D2H below, so it is reused across evaluations instead of freed and
+    // re-allocated every time.
+    auto packet = std::move(retiredEval_);
+    if (!packet) packet = std::make_unique<FreshState>();
     packet->device = ownerDevice;
-    retiredEval_.reset();
+    packet->failed = false;
     if (failFreshEvaluateAllocation.exchange(false, std::memory_order_acq_rel))
         return fail(RbfStatus::CudaError,"forced fresh RBF evaluation allocation failure");
-    auto permit=TryReserveCudaExecutionBytes(sizeof(FreshState::Packet),UsdGenExecutionResourceKind::Cache,reservation);
-    if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&packet->host),sizeof(*packet->host),cudaHostAllocDefault)!=cudaSuccess)
-        return fail(RbfStatus::CudaError,"fresh RBF evaluation packet allocation failed");
-    packet->hostPermit=std::move(*permit); packet->unproven=true; packet->phase=FreshState::Phase::Evaluate;
+    if (!packet->host) {
+        auto permit=TryReserveCudaExecutionBytes(sizeof(FreshState::Packet),UsdGenExecutionResourceKind::Cache,reservation);
+        if (!permit || cudaHostAlloc(reinterpret_cast<void**>(&packet->host),sizeof(*packet->host),cudaHostAllocDefault)!=cudaSuccess)
+            return fail(RbfStatus::CudaError,"fresh RBF evaluation packet allocation failed");
+        packet->hostPermit=std::move(*permit);
+    }
+    packet->unproven=true; packet->phase=FreshState::Phase::Evaluate;
     auto& f=*acceptedFresh_;
     freshEval_=std::move(packet); auto& e=*freshEval_;
     if (!ok(cudaMemsetAsync(f.flags.data(),0,sizeof(int),stream))) { e.failed=true; return fail(RbfStatus::CudaError,"fresh RBF evaluation status reset failed"); }
