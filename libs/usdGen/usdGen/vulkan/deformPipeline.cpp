@@ -927,7 +927,10 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 native_->applyPipeline);
             vkCmdBindDescriptorSets(cmds[1], VK_PIPELINE_BIND_POINT_COMPUTE,
                 native_->applyPipelineLayout, 0, 1, &applySet, 0, nullptr);
-            vkCmdDispatch(cmds[1], Groups(curves), 1, 1);
+            // Per-point apply: one thread per point (plus curve-span
+            // validation for thread i < curves), so the dispatch covers
+            // whichever domain is larger.
+            vkCmdDispatch(cmds[1], Groups(std::max(curves, points)), 1, 1);
             VkMemoryBarrier after{};
             after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
