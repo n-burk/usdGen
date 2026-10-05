@@ -3,6 +3,7 @@
 
 #include "rbfVkBinding.h"
 #include "deformRbfHost.h"
+#include "fencePool.h"
 
 #include <algorithm>
 #include <climits>
@@ -141,6 +142,10 @@ struct RbfVkBinding::Native {
     VkFence solveFence = VK_NULL_HANDLE;
     std::vector<VkFence> evalFences;
     std::vector<std::shared_ptr<const ChargedBuffer>> evalOwners;
+    // Idle eval-submit fences: fence create/destroy costs ~0.7ms each on
+    // the qualified driver, so per-evaluation submits check out of this
+    // pool instead of creating.
+    VulkanFencePool fencePool;
     bool solvePending = false;
     enum class Phase { Idle, Extent, FactorReady, Factor, Pose };
     Phase phase = Phase::Idle;
@@ -287,6 +292,7 @@ struct RbfVkBinding::Native {
         if (!context) return;
         auto d = context->device();
         for (VkFence f : evalFences) if (f) vkDestroyFence(d, f, nullptr);
+        fencePool.Clear(d);
         if (solveFence) vkDestroyFence(d, solveFence, nullptr);
         if (solveCommands) vkDestroyCommandPool(d, solveCommands, nullptr);
         if (evalCommands) vkDestroyCommandPool(d, evalCommands, nullptr);
@@ -1152,22 +1158,21 @@ RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
         releaseSet();
         return fail(RbfVkStatus::DeviceError, "RBF evaluation launch failed");
     }
-    VkFenceCreateInfo fi{};
-    fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    VkFence fence = VK_NULL_HANDLE;
-    r = vkCreateFence(d, &fi, nullptr, &fence);
-    if (r != VK_SUCCESS) {
+    VkFence fence = native.fencePool.Acquire(d, &r);
+    if (!fence) {
         vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
         releaseSet();
         return fail(RbfVkStatus::DeviceError, "RBF evaluation launch failed");
     }
     // Allocate retention records before submission; no host allocation can
     // fail after work becomes pending and leave its owners untracked.
+    // The fence was never submitted on these paths, so it is idle and
+    // rejoins the pool.
     try {
         native.evalFences.reserve(native.evalFences.size() + 1);
         native.evalOwners.reserve(native.evalOwners.size() + 2);
     } catch (std::bad_alloc const&) {
-        vkDestroyFence(d, fence, nullptr);
+        native.fencePool.Release(d, fence);
         vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
         releaseSet();
         return fail(RbfVkStatus::DeviceError, "RBF evaluation launch failed");
@@ -1177,7 +1182,7 @@ RbfVkStatus RbfVkBinding::Evaluate(std::shared_ptr<const ChargedBuffer> cvs,
         catch (...) { r = VK_ERROR_UNKNOWN; }
         if (r != VK_SUCCESS) {
             native.lastResult = r;
-            vkDestroyFence(d, fence, nullptr);
+            native.fencePool.Release(d, fence);
             vkFreeCommandBuffers(d, native.evalCommands, 1, &cmd);
             releaseSet();
             return fail(RbfVkStatus::DeviceError, "RBF evaluation submission rejected");
@@ -1211,7 +1216,9 @@ VkResult RbfVkBinding::PollEvaluate(RbfVkStatus* status) {
     int flag = 0;
     if (r == VK_SUCCESS) r = ReadBytes(d, *native.flagBuf, 4, &flag) == VK_SUCCESS
         ? VK_SUCCESS : VK_ERROR_DEVICE_LOST;
-    for (VkFence f : native.evalFences) if (f) vkDestroyFence(d, f, nullptr);
+    // Every fence above polled VK_SUCCESS, so each is idle and rejoins the
+    // pool even when the flag readback fails.
+    for (VkFence f : native.evalFences) if (f) native.fencePool.Release(d, f);
     native.evalFences.clear();
     native.evalOwners.clear();
     (void)vkResetCommandPool(d, native.evalCommands, 0);
