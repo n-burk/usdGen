@@ -162,6 +162,100 @@ int main(int argc, char** argv) {
         return p;
     };
 
+    // ---- Case 10: a caller-held Output keeps its bytes across reuse ----
+    // Runs first, against an empty pool: the outPoints pool reuses a
+    // destroyed candidate's buffer for the next same-size pose, but only
+    // while the pool owns it alone. An Output held past destruction pins
+    // its buffer (the next pose allocates fresh), and dropping the pin lets
+    // a later pose reuse it with correct output.
+    {
+        const std::vector<float> points12{
+            0.0f, 0.0f, 0.0f, 0.1f, 0.0f, 0.1f, 0.2f, 0.0f, 0.2f,
+            1.0f, 0.0f, 0.0f, 1.1f, 0.0f, 0.1f, 1.2f, 0.0f, 0.2f,
+            2.0f, 0.0f, 0.0f, 2.1f, 0.0f, 0.1f, 2.2f, 0.0f, 0.2f,
+            3.0f, 0.0f, 0.0f, 3.1f, 0.0f, 0.1f, 3.2f, 0.0f, 0.2f,
+        };
+        const std::vector<uint32_t> offsets12{0, 3, 6, 9, 12};
+        const std::vector<float> roots12{
+            0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+            2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f,
+        };
+        auto pointsBuf12 = Upload(context, points12.data(), points12.size() * sizeof(float));
+        auto offsetsBuf12 = UploadVulkanDeviceBytes(native, context, offsets12.data(),
+            offsets12.size() * sizeof(uint32_t));
+        auto targetsBuf12 = Upload(context, roots12.data(), roots12.size() * sizeof(float));
+        CHECK(pointsBuf12 && offsetsBuf12 && targetsBuf12);
+        auto makeInfo = [&](std::vector<float> const& posed) {
+            DeformPipeline::BeginInfo info;
+            info.points = pointsBuf12;
+            info.curveOffsets = offsetsBuf12;
+            info.rootTargets = targetsBuf12;
+            info.curveCount = 4;
+            info.pointCount = 12;
+            info.restSamples = restSamples;
+            info.posedSamples = posed;
+            info.sampleCount = 5;
+            info.smoothing = 0.0;
+            info.mask = {1.0f, 1, nullptr, 0};
+            info.enabled = {1, 1, nullptr, 0};
+            info.lockRoots = {0, 1, nullptr, 0};
+            info.groomEnvelope = 1.0f;
+            return info;
+        };
+        auto runPose = [&](std::vector<float> const& posed, std::vector<float>* out) {
+            DeformSemantic sem = DeformSemantic::Ok;
+            auto c = pipe->Begin(makeInfo(posed), &status, &sem);
+            if (!c || status != VK_SUCCESS) return false;
+            if (!Prove(native)) return false;
+            if (c->Poll(&sem) != VK_SUCCESS) return false;
+            if (sem != DeformSemantic::Ok || !c->succeeded()) return false;
+            return ReadOutput(native, context, c, out);
+        };
+        std::vector<float> posedA = restSamples, posedB = restSamples;
+        for (size_t i = 0; i < posedA.size(); i += 3) posedA[i] += 0.5f;
+        for (size_t i = 0; i < posedB.size(); i += 3) posedB[i] -= 0.25f;
+
+        DeformSemantic sem = DeformSemantic::Ok;
+        auto cA = pipe->Begin(makeInfo(posedA), &status, &sem);
+        CHECK(cA && status == VK_SUCCESS);
+        CHECK(Prove(native));
+        CHECK(cA->Poll(&sem) == VK_SUCCESS);
+        CHECK(sem == DeformSemantic::Ok && cA->succeeded());
+        auto held = cA->output();   // pins A's buffer past cA's death
+        CHECK(held.points);
+        std::vector<float> outA;
+        CHECK(ReadOutput(native, context, cA, &outA));
+        cA.reset();                 // A's buffer rejoins the pool, still shared
+
+        std::vector<float> outB;
+        CHECK(runPose(posedB, &outB));
+        CHECK(outB.size() == outA.size() && outA.size() == 36 && outB != outA);
+        for (int i = 0; i < 12; ++i) {
+            CHECK(Near(V(outA[size_t(i * 3)], outA[size_t(i * 3 + 1)], outA[size_t(i * 3 + 2)]),
+                       V(points12[size_t(i * 3)] + 0.5f, points12[size_t(i * 3 + 1)],
+                         points12[size_t(i * 3 + 2)]), 1e-3f));
+            CHECK(Near(V(outB[size_t(i * 3)], outB[size_t(i * 3 + 1)], outB[size_t(i * 3 + 2)]),
+                       V(points12[size_t(i * 3)] - 0.25f, points12[size_t(i * 3 + 1)],
+                         points12[size_t(i * 3 + 2)]), 1e-3f));
+        }
+        // The held Output still reads pose A's bytes: B must have allocated
+        // fresh (or reused an older idle buffer), never A's pinned buffer.
+        std::vector<uint8_t> bytesA;
+        CHECK(ReadVulkanBytes(native, context, held.points->buffer(),
+                              held.points->sizeBytes(), held.points, &bytesA));
+        CHECK(bytesA.size() == outA.size() * sizeof(float));
+        CHECK(std::memcmp(bytesA.data(), outA.data(), bytesA.size()) == 0);
+        // Dropping the pin lets a later same-size pose reuse A's buffer;
+        // the output is bitwise the earlier pose-B output, so no stale byte
+        // survives the reuse.
+        held.points.reset();
+        std::vector<float> outC;
+        CHECK(runPose(posedB, &outC));
+        CHECK(outC.size() == outB.size());
+        CHECK(std::memcmp(outC.data(), outB.data(), outC.size() * sizeof(float)) == 0);
+        std::puts("Case 10 (held Output survives reuse): PASS");
+    }
+
     // ---- Case 1: Empty topology ----
     {
         DeformPipeline::BeginInfo info;

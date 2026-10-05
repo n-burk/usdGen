@@ -44,12 +44,15 @@ uint32_t Groups(uint32_t n) { return (n + kLocalSize - 1) / kLocalSize; }
 // Scratch pooling: a pose allocates 8 buffers and frees them at candidate
 // destruction, and vkAllocateMemory/vkFreeMemory cost ~70/80us (median) each
 // on the qualified driver, so ~1.2ms of every pose is allocation lifecycle.
-// Seven of the eight are reusable across poses: the proof/eval status words,
-// the eval/apply UBOs, the coefficient/sample uploads, and the warped
-// staging buffer are all GPU-idle once the candidate proves (the apply fence
-// signals after the last read) and none is read on the host afterwards.
-// Only outPoints stays per-pose: it is exposed through Candidate::output()
-// and the caller may read it indefinitely. The coefficient/sample buffers
+// All eight are reusable across poses: the proof/eval status words, the
+// eval/apply UBOs, the coefficient/sample uploads, the warped staging
+// buffer, and outPoints are all GPU-idle once the candidate proves (the
+// apply fence signals after the last read) and none is read on the host
+// afterwards, except outPoints through a live Output.
+// outPoints rejoins its own pool at State destruction rather than at Poll:
+// it is exposed through Candidate::output() and the caller may read it
+// until the Candidate dies, so Poll-time return would hand a live buffer
+// to the next pose. The coefficient/sample buffers
 // are allocated at their max (sampleCount is rejected above 100) so a pooled
 // set fits any pose; the warped buffer must match the pose's point count
 // exactly. Like the fence pool, only proven-idle sets rejoin: a set from a
@@ -59,6 +62,7 @@ constexpr int kMaxRbfSamples = 100;
 constexpr VkDeviceSize kMaxCoefBytes = VkDeviceSize(kMaxRbfSamples + 4) * 24u;
 constexpr VkDeviceSize kMaxSamplesBytes = VkDeviceSize(kMaxRbfSamples) * 24u;
 constexpr size_t kMaxIdleScratchSets = 2;
+constexpr size_t kMaxIdleOutPoints = 2;
 
 // Domain codes (deformApply.comp constants).
 enum : uint32_t {
@@ -135,6 +139,13 @@ struct DeformPipeline::Native {
     };
     std::mutex scratchMutex;
     std::vector<ScratchSet> scratchIdle;
+    // Idle outPoints buffers, exact-size matched at checkout: allocation
+    // lifecycle costs ~150us per pose, and the buffer is provably idle at
+    // State destruction (see ReturnOutPoints). The caller may hold
+    // Output::points past the Candidate's death, so a pooled buffer is
+    // reused only while the pool is its sole owner; anything still shared
+    // stays idle and the pose allocates fresh. Capped; scratchMutex-held.
+    std::vector<std::shared_ptr<ChargedBuffer>> outPointsIdle;
     ~Native() {
         if (!context) return;
         auto d = context->device();
@@ -206,6 +217,22 @@ struct DeformPipeline::Candidate::State {
         } catch (...) {
         }
     }
+    // Returns outPoints to the idle pool. Only the destructor calls this:
+    // between Poll and destruction the caller may still read output(), so
+    // Poll-time return would hand a live buffer to the next pose. The
+    // caller requires !pending && !lost (GPU-idle, like ReturnScratch:
+    // the apply fence proved the write complete, or nothing submitted);
+    // Outputs the caller kept past destruction stay shared, and checkout
+    // only reuses sole-owned buffers. Never throws.
+    void ReturnOutPoints() noexcept {
+        if (!outPoints) return;
+        try {
+            std::lock_guard<std::mutex> lock(native->scratchMutex);
+            if (native->outPointsIdle.size() < kMaxIdleOutPoints)
+                native->outPointsIdle.push_back(std::move(outPoints));
+        } catch (...) {
+        }
+    }
     ~State() {
         auto d = native->context->device();
         // A candidate destroyed without Poll still owns a GPU-idle set when
@@ -215,6 +242,10 @@ struct DeformPipeline::Candidate::State {
         if (!scratchReturned.exchange(true, std::memory_order_acq_rel) &&
             !pending && !lost)
             ReturnScratch();
+        // outPoints rejoins its pool at destruction, not at Poll (Output
+        // readers may outlive the proof). Exactly once: this runs once.
+        if (!pending && !lost)
+            ReturnOutPoints();
         // This runs only when nothing is pending (else the Candidate
         // quarantines instead of destroying), so a proven fence is idle
         // and rejoins the pool; an unproven one is destroyed as before.
@@ -568,19 +599,34 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                     break;
                 }
             }
+            // outPoints: exact-size reuse, but only while the pool is the
+            // sole owner — a caller-held Output keeps its buffer shared,
+            // and then the pose allocates fresh below. A buffer the pool
+            // owns alone has no caller reader: new Outputs only come from
+            // live states, never from the pool.
+            for (auto it = native_->outPointsIdle.begin();
+                 it != native_->outPointsIdle.end(); ++it) {
+                if ((*it)->sizeBytes() == outBytes && (*it).use_count() == 1) {
+                    s->outPoints = std::move(*it);
+                    native_->outPointsIdle.erase(it);
+                    break;
+                }
+            }
         }
 
         // outPoints: DEVICE_LOCAL.
         {
-            VkBufferCreateInfo bi{};
-            bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bi.size = outBytes;
-            bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            s->outPoints = ChargedBuffer::Create(context, bi,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &r);
-            if (!s->outPoints) { finish(r); return {}; }
+            if (!s->outPoints) {
+                VkBufferCreateInfo bi{};
+                bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bi.size = outBytes;
+                bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                s->outPoints = ChargedBuffer::Create(context, bi,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, UsdGenExecutionResourceKind::Active, &r);
+                if (!s->outPoints) { finish(r); return {}; }
+            }
         }
         // status: 4B host-visible.
         {
