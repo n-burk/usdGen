@@ -802,10 +802,43 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             // column keeps its exact rbfVkTriSolve.comp op sequence (same
             // operations in the same order), giving the dependent
             // accumulation chain three times the ILP with bitwise-identical
-            // coefficients.
+            // coefficients. Forward rows pair up the same way: row i+1's
+            // terms over j < i do not touch coef[i] (only its last term
+            // does), so the pair accumulates together and the second row
+            // finishes with its coef[i] term after the first row stores;
+            // each accumulator's op sequence is unchanged, so the six
+            // chains stay bitwise-identical. Backward rows cannot pair:
+            // each row's FIRST term needs the previous row's result.
             std::vector<double> coef(size_t(3) * size_t(hm));
             size_t const hmz = size_t(hm), hm2 = size_t(2) * size_t(hm);
-            for (int i = 0; i < hm; ++i) {
+            int i = 0;
+            for (; i + 1 < hm; i += 2) {
+                size_t const p = size_t(permPtr[i]);
+                size_t const q = size_t(permPtr[i + 1]);
+                double s0 = rhs[p], s1 = rhs[hmz + p], s2 = rhs[hm2 + p];
+                double t0 = rhs[q], t1 = rhs[hmz + q], t2 = rhs[hm2 + q];
+                for (int j = 0; j < i; ++j) {
+                    double const l0 = luPtr[size_t(i) * hmz + size_t(j)];
+                    double const l1 = luPtr[size_t(i + 1) * hmz + size_t(j)];
+                    s0 -= l0 * coef[size_t(j)];
+                    s1 -= l0 * coef[hmz + size_t(j)];
+                    s2 -= l0 * coef[hm2 + size_t(j)];
+                    t0 -= l1 * coef[size_t(j)];
+                    t1 -= l1 * coef[hmz + size_t(j)];
+                    t2 -= l1 * coef[hm2 + size_t(j)];
+                }
+                coef[size_t(i)] = s0;
+                coef[hmz + size_t(i)] = s1;
+                coef[hm2 + size_t(i)] = s2;
+                double const l1 = luPtr[size_t(i + 1) * hmz + size_t(i)];
+                t0 -= l1 * coef[size_t(i)];
+                t1 -= l1 * coef[hmz + size_t(i)];
+                t2 -= l1 * coef[hm2 + size_t(i)];
+                coef[size_t(i + 1)] = t0;
+                coef[hmz + size_t(i + 1)] = t1;
+                coef[hm2 + size_t(i + 1)] = t2;
+            }
+            for (; i < hm; ++i) {
                 size_t const p = size_t(permPtr[i]);
                 double s0 = rhs[p], s1 = rhs[hmz + p], s2 = rhs[hm2 + p];
                 for (int j = 0; j < i; ++j) {
@@ -818,7 +851,7 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
                 coef[hmz + size_t(i)] = s1;
                 coef[hm2 + size_t(i)] = s2;
             }
-            for (int i = hm - 1; i >= 0; --i) {
+            for (i = hm - 1; i >= 0; --i) {
                 double s0 = coef[size_t(i)];
                 double s1 = coef[hmz + size_t(i)];
                 double s2 = coef[hm2 + size_t(i)];
