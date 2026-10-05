@@ -160,6 +160,12 @@ struct RbfVkBinding::Native {
     std::vector<double> cachedLu;
     std::vector<int> cachedPerm;
     std::vector<float> cachedRest;
+    // A factor-cache hit adopts the entry itself instead of copying its
+    // 1.3MB of factors: entries are immutable and shared-owned, so the
+    // pose solve reads bitwise the same doubles with no copy and the
+    // entry stays alive while the binding references it. Null except
+    // between an adopted BeginBind and the next bind or reset.
+    std::shared_ptr<RbfVkFactorCache::Entry const> adoptedLu;
     int cachedM = 0;
     bool cachedLuValid = false;
     // A staged host pose: BeginSolve stashes the posed samples and the
@@ -181,6 +187,7 @@ struct RbfVkBinding::Native {
         infoBuf.reset(); permBuf.reset(); uboBuf.reset(); normBuf.reset();
         coefStagingBuf.reset(); bufferSamples = 0;
         cachedLu.clear(); cachedPerm.clear(); cachedRest.clear();
+        adoptedLu.reset();
         cachedM = 0; cachedLuValid = false;
         hostPosed.clear(); hostPosePending = false;
         hostBindStaged = false;
@@ -599,6 +606,7 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     native_->lastResult = VK_SUCCESS;
     native_->phase = Native::Phase::Idle;
     native_->cachedLuValid = false;
+    native_->adoptedLu.reset();
     native_->hostPosePending = false;
     native_->hostBindStaged = false;
     if (!rest || n < 4 || n > kRbfVkMaxSamples || !std::isfinite(smoothing) || smoothing < 0.0)
@@ -647,12 +655,9 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
     if (factorCache_) {
         auto adopted = factorCache_->Lookup(native.context.get(), n, smoothing, rest);
         if (adopted) {
-            try {
-                native.cachedLu = adopted->lu;
-                native.cachedPerm = adopted->perm;
-            } catch (std::bad_alloc const&) {
-                return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
-            }
+            // Shared, not copied: the entry is immutable, and the pose
+            // solve below reads the same doubles either way.
+            native.adoptedLu = adopted;
             native.cachedM = adopted->m;
             native.bindAdopted = true;
         }
@@ -788,8 +793,10 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
                 rhs[size_t(2) * size_t(hm) + size_t(i)] =
                     (double(bz) - double(native.cachedRest[size_t(3) * size_t(i) + 2])) * invScale;
             }
-            double const* luPtr = native.cachedLu.data();
-            int const* permPtr = native.cachedPerm.data();
+            double const* luPtr = native.adoptedLu ? native.adoptedLu->lu.data()
+                                                  : native.cachedLu.data();
+            int const* permPtr = native.adoptedLu ? native.adoptedLu->perm.data()
+                                                  : native.cachedPerm.data();
             // The three columns are independent (disjoint coef lanes over
             // shared read-only factors), so they run interleaved: each
             // column keeps its exact rbfVkTriSolve.comp op sequence (same
