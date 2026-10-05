@@ -498,7 +498,22 @@ SurfaceBindingStatus CudaSurfaceBinding::BeginFreshUpdate(
     if (pending_ || freshPending_ || freshMode_ || freshUpdatePendingAcceptance_ || !bound_) return fail(SurfaceBindingStatus::InvalidArgument, "fresh Update requires no pending operation");
     if (validateStream(stream) != SurfaceBindingStatus::Ok || vertices.size != vertexCount_ || roots.size != uv.size)
         return fail(SurfaceBindingStatus::InvalidArgument, "fresh Update preflight failed");
-    discardPending(); retiredCurrentSamples_.release(); retiredRootTargets_.release(); retiredRootCount_ = 0;
+    discardPending();
+    // The retired publication is stale garbage here (the prologue rejects
+    // any acceptance-pending update), and Update fully overwrites both
+    // buffers below (GatherSamples/GatherRoots cover every element), so a
+    // size-matching retired buffer is adopted as the new pending storage
+    // instead of freed and re-malloc'd. reset() still re-sizes on groom
+    // or budget changes, so rebinds and quarantines behave as before.
+    if (retiredCurrentSamples_.size() == sampleCount_)
+        pendingCurrentSamples_ = std::move(retiredCurrentSamples_);
+    else
+        retiredCurrentSamples_.release();
+    if (retiredRootTargets_.size() == roots.size)
+        pendingRootTargets_ = std::move(retiredRootTargets_);
+    else
+        retiredRootTargets_.release();
+    retiredRootCount_ = 0;
     // Same proof-packet pooling as BeginFreshBind (see above): only the
     // flags reset here, the seam fires first, and storage is adopted.
     freshMode_ = freshPending_ = freshUnproven_ = false;

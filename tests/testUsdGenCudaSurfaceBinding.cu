@@ -164,6 +164,11 @@ int main() {
         CHECK(freshAfter[i].x == freshPrior[i].x && freshAfter[i].y == freshPrior[i].y && freshAfter[i].z == freshPrior[i].z);
     CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
     CHECK(cudaStreamSynchronize(stream) == cudaSuccess && fresh.CommitFreshUpdate() == SurfaceBindingStatus::Ok);
+    // Reference outputs before any retired-storage adoption (same inputs as
+    // the adopted update below, so the comparison is bitwise).
+    std::vector<float3> preAdoptSamples, preAdoptTargets;
+    CHECK(Download(fresh.currentSamples(), &preAdoptSamples) && preAdoptSamples.size() == 4);
+    CHECK(Download(fresh.rootTargets(), &preAdoptTargets) && preAdoptTargets.size() == 2);
     CHECK(fresh.CanAcceptFreshUpdate() && fresh.CanRollbackFreshUpdate());
     // A proved update is visible to a following fresh solve but remains a
     // transaction: a second update/rebind cannot overtake it, and rollback
@@ -182,6 +187,34 @@ int main() {
     CHECK(fresh.CanAcceptFreshUpdate() && fresh.CanRollbackFreshUpdate());
     CHECK(fresh.AcceptFreshUpdate() == SurfaceBindingStatus::Ok);
     CHECK(!fresh.CanAcceptFreshUpdate() && !fresh.CanRollbackFreshUpdate());
+    // The update above ran on adopted retired storage: its outputs must be
+    // bitwise identical to the pre-adoption reference over the same inputs.
+    std::vector<float3> adoptedSamples, adoptedTargets;
+    CHECK(Download(fresh.currentSamples(), &adoptedSamples) && adoptedSamples.size() == preAdoptSamples.size());
+    CHECK(Download(fresh.rootTargets(), &adoptedTargets) && adoptedTargets.size() == preAdoptTargets.size());
+    for (size_t i = 0; i < preAdoptSamples.size(); ++i)
+        CHECK(adoptedSamples[i].x == preAdoptSamples[i].x && adoptedSamples[i].y == preAdoptSamples[i].y &&
+              adoptedSamples[i].z == preAdoptSamples[i].z);
+    for (size_t i = 0; i < preAdoptTargets.size(); ++i)
+        CHECK(adoptedTargets[i].x == preAdoptTargets[i].x && adoptedTargets[i].y == preAdoptTargets[i].y &&
+              adoptedTargets[i].z == preAdoptTargets[i].z);
+    // A root-count change falls back to release/realloc and still publishes
+    // exact outputs; returning to the prior count re-adopts retired storage.
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), {}, {}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && fresh.CommitFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(fresh.AcceptFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(fresh.rootTargets().size == 0 && fresh.currentSamples().size == 4);
+    CHECK(fresh.BeginFreshUpdate(ConstView(current), ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::Ok);
+    CHECK(cudaStreamSynchronize(stream) == cudaSuccess && fresh.CommitFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(fresh.AcceptFreshUpdate() == SurfaceBindingStatus::Ok);
+    CHECK(Download(fresh.currentSamples(), &adoptedSamples) && adoptedSamples.size() == preAdoptSamples.size());
+    CHECK(Download(fresh.rootTargets(), &adoptedTargets) && adoptedTargets.size() == preAdoptTargets.size());
+    for (size_t i = 0; i < preAdoptSamples.size(); ++i)
+        CHECK(adoptedSamples[i].x == preAdoptSamples[i].x && adoptedSamples[i].y == preAdoptSamples[i].y &&
+              adoptedSamples[i].z == preAdoptSamples[i].z);
+    for (size_t i = 0; i < preAdoptTargets.size(); ++i)
+        CHECK(adoptedTargets[i].x == preAdoptTargets[i].x && adoptedTargets[i].y == preAdoptTargets[i].y &&
+              adoptedTargets[i].z == preAdoptTargets[i].z);
     CHECK(fresh.BeginFreshUpdate({}, ConstView(skinPrim), {skinUv, uvHost.size()}, stream) == SurfaceBindingStatus::InvalidArgument);
     CHECK(!fresh.HasUnprovenFreshWork());
     cudaGraph_t captured = nullptr;
