@@ -160,8 +160,10 @@ void CheckField()
 }
 
 // DisplaceBatch is bitwise Displacement, through every cascade width (8,
-// 4, tail singles), past the single-query path's 256-sample stack row, and
-// for the unbound field.
+// 4, tail singles), past the single-query path's 256-sample stack row,
+// through the grouped-strand counts the deform strands loop issues (up to
+// 300, covering the 256-query full group and its tail shapes), and for
+// the unbound field.
 void CheckBatchBitwise()
 {
     for (size_t samples : {size_t(12), size_t(100), size_t(300)}) {
@@ -177,7 +179,7 @@ void CheckBatchBitwise()
             Check(false, "batch fixture binds (" + std::to_string(samples) + " samples)");
             continue;
         }
-        std::vector<GfVec3d> const queries = Cloud(40, 1001);
+        std::vector<GfVec3d> const queries = Cloud(300, 1001);
         size_t worst = 0;
         for (size_t count = 0; count <= queries.size(); ++count) {
             std::vector<GfVec3d> batched(count), single(count);

@@ -145,7 +145,10 @@ struct UsdGenDeformCapture final : public UsdGenCapture
 template <class F>
 void ParallelFor(UsdGenWorkDispatcher *dispatcher, size_t count, F const &body)
 {
-    if (!dispatcher || count < 64) {
+    // Bodies are strand groups (~19us at 32 strands), so a few groups
+    // already outweigh the parallel-region overhead; under 3 groups the
+    // groom has at most 64 strands, the old per-strand serial bound.
+    if (!dispatcher || count < 3) {
         for (size_t i = 0; i < count; ++i) body(i);
         return;
     }
@@ -539,25 +542,73 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     // stored triple is checked exactly once, so the verdict and the message
     // match the retired scan.
     std::atomic<bool> nonFinite{false};
-    ParallelFor(ctx.dispatcher, R, [&](size_t c) {
-        size_t const first = spans[c], last = spans[c + 1];
-        if (first >= last) return;
+    // Strands displace in groups of kGroupStrands through one DisplaceBatch
+    // call: batch boundaries are bitwise-transparent per query (each query
+    // runs the same operations whatever its batch position), so the group
+    // pays the per-call, per-resize, and per-task overhead once instead of
+    // once per strand. 32 keeps the group's batchQ/batchD (~12KB at 8 CVs
+    // per strand) L1-resident.
+    size_t constexpr kGroupStrands = 32;
+    size_t const groups = (R + kGroupStrands - 1) / kGroupStrands;
+    ParallelFor(ctx.dispatcher, groups, [&](size_t g) {
+        size_t const c0 = g * kGroupStrands, c1 = std::min(c0 + kGroupStrands, R);
         if (!wrap) {
-            // The RBF path displaces the whole strand, root included, in
-            // one batch: batch element 0 is the root's displacement, which
-            // doubles as the lockRoots shift exactly as in the loop below.
+            // The RBF path displaces the whole group, roots included, in
+            // one batch: each strand's root element doubles as its
+            // lockRoots shift exactly as in the loop below.
             thread_local std::vector<GfVec3d> batchQ, batchD;
-            size_t const count = last - first;
-            batchQ.resize(count);
-            batchD.resize(count);
-            for (size_t cv = first; cv < last; ++cv)
-                batchQ[cv - first] = GfVec3d(opUtil::Point(upstream, cv));
-            field.DisplaceBatch(batchQ.data(), batchD.data(), count);
-            GfVec3d const shift =
-                lock.Value(c, first) != 0.0 ? batchD[0] : GfVec3d(0.0);
+            size_t qoff[kGroupStrands];
+            size_t total = 0;
+            for (size_t c = c0; c < c1; ++c) {
+                size_t const first = spans[c], last = spans[c + 1];
+                qoff[c - c0] = total;
+                if (last > first) total += last - first;
+            }
+            batchQ.resize(total);
+            batchD.resize(total);
+            for (size_t c = c0; c < c1; ++c) {
+                size_t const first = spans[c], last = spans[c + 1];
+                if (first >= last) continue;
+                size_t const o = qoff[c - c0];
+                for (size_t cv = first; cv < last; ++cv)
+                    batchQ[o + cv - first] = GfVec3d(opUtil::Point(upstream, cv));
+            }
+            field.DisplaceBatch(batchQ.data(), batchD.data(), total);
+            for (size_t c = c0; c < c1; ++c) {
+                size_t const first = spans[c], last = spans[c + 1];
+                if (first >= last) continue;
+                size_t const o = qoff[c - c0];
+                GfVec3d const shift =
+                    lock.Value(c, first) != 0.0 ? batchD[o] : GfVec3d(0.0);
+                for (size_t cv = first; cv < last; ++cv) {
+                    GfVec3d const x(opUtil::Point(upstream, cv));
+                    GfVec3d const moved = x + batchD[o + cv - first] - shift;
+                    float const f0 = float(moved[0]);
+                    float const f1 = float(moved[1]);
+                    float const f2 = float(moved[2]);
+                    result[cv * 3] = f0;
+                    result[cv * 3 + 1] = f1;
+                    result[cv * 3 + 2] = f2;
+                    if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
+                        nonFinite.store(true, std::memory_order_relaxed);
+                }
+            }
+            return;
+        }
+        for (size_t c = c0; c < c1; ++c) {
+            size_t const first = spans[c], last = spans[c + 1];
+            if (first >= last) continue;
+            auto displacement = [&](GfVec3d const &x) {
+                return wrapFields[driverForCurve[c]].Map(x)-x;
+            };
+            // The root's displacement serves as both the root CV's own and,
+            // with usdGen:lockRoots, the shift of the whole strand.
+            GfVec3d const rootDisplacement = displacement(GfVec3d(opUtil::Point(upstream, first)));
+            GfVec3d const shift = lock.Value(c, first) != 0.0 ? rootDisplacement : GfVec3d(0.0);
             for (size_t cv = first; cv < last; ++cv) {
                 GfVec3d const x(opUtil::Point(upstream, cv));
-                GfVec3d const moved = x + batchD[cv - first] - shift;
+                GfVec3d const moved =
+                    x + (cv == first ? rootDisplacement : displacement(x)) - shift;
                 float const f0 = float(moved[0]);
                 float const f1 = float(moved[1]);
                 float const f2 = float(moved[2]);
@@ -567,27 +618,6 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
                 if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
                     nonFinite.store(true, std::memory_order_relaxed);
             }
-            return;
-        }
-        auto displacement = [&](GfVec3d const &x) {
-            return wrapFields[driverForCurve[c]].Map(x)-x;
-        };
-        // The root's displacement serves as both the root CV's own and,
-        // with usdGen:lockRoots, the shift of the whole strand.
-        GfVec3d const rootDisplacement = displacement(GfVec3d(opUtil::Point(upstream, first)));
-        GfVec3d const shift = lock.Value(c, first) != 0.0 ? rootDisplacement : GfVec3d(0.0);
-        for (size_t cv = first; cv < last; ++cv) {
-            GfVec3d const x(opUtil::Point(upstream, cv));
-            GfVec3d const moved =
-                x + (cv == first ? rootDisplacement : displacement(x)) - shift;
-            float const f0 = float(moved[0]);
-            float const f1 = float(moved[1]);
-            float const f2 = float(moved[2]);
-            result[cv * 3] = f0;
-            result[cv * 3 + 1] = f1;
-            result[cv * 3 + 2] = f2;
-            if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
-                nonFinite.store(true, std::memory_order_relaxed);
         }
     });
     if (nonFinite.load(std::memory_order_relaxed))
