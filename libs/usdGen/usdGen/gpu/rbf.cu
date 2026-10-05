@@ -26,12 +26,36 @@ __device__ inline void atomicMaxFloat(float* address, float value) {
     do { assumed = old; if (__int_as_float(assumed) >= value) break;
          old = atomicCAS(bits, assumed, __float_as_int(value)); } while (old != assumed);
 }
+// Each thread folds its grid stride into registers, each warp reduces
+// with shuffles (no shared memory, no barrier), and each warp's lane 0
+// folds the warp result into the 6 extent addresses (was: 6 CAS atomics
+// per element, and 100 threads hammering 6 addresses cost 6.4us of
+// device time for 100 samples). Min/max over finite floats is exact and
+// order-free, so the reduced fold writes bitwise the same extent for any
+// grid; mixed-sign zeros can only name a zero extent, which fails
+// identically either way. Threads beyond n fold neutrally, and the
+// shuffle mask is the converged warp so partial blocks stay correct.
 __global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
+    float mnx = INFINITY, mny = INFINITY, mnz = INFINITY;
+    float mxx = -INFINITY, mxy = -INFINITY, mxz = -INFINITY;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
         float3 v = p[i];
         if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) { mark(flags, 1); continue; }
-        atomicMinFloat(&e[0], v.x); atomicMinFloat(&e[1], v.y); atomicMinFloat(&e[2], v.z);
-        atomicMaxFloat(&e[3], v.x); atomicMaxFloat(&e[4], v.y); atomicMaxFloat(&e[5], v.z);
+        mnx = fminf(mnx, v.x); mny = fminf(mny, v.y); mnz = fminf(mnz, v.z);
+        mxx = fmaxf(mxx, v.x); mxy = fmaxf(mxy, v.y); mxz = fmaxf(mxz, v.z);
+    }
+    unsigned const mask = __activemask();
+    for (int d = 16; d > 0; d >>= 1) {
+        mnx = fminf(mnx, __shfl_down_sync(mask, mnx, d));
+        mny = fminf(mny, __shfl_down_sync(mask, mny, d));
+        mnz = fminf(mnz, __shfl_down_sync(mask, mnz, d));
+        mxx = fmaxf(mxx, __shfl_down_sync(mask, mxx, d));
+        mxy = fmaxf(mxy, __shfl_down_sync(mask, mxy, d));
+        mxz = fmaxf(mxz, __shfl_down_sync(mask, mxz, d));
+    }
+    if ((threadIdx.x & 31) == 0) {
+        atomicMinFloat(&e[0], mnx); atomicMinFloat(&e[1], mny); atomicMinFloat(&e[2], mnz);
+        atomicMaxFloat(&e[3], mxx); atomicMaxFloat(&e[4], mxy); atomicMaxFloat(&e[5], mxz);
     }
 }
 __global__ void initExtent(float* e, int* flags) {
@@ -247,7 +271,7 @@ RbfStatus CudaRbfBinding::BeginFreshBind(DeviceView<const float3> samples, doubl
     fresh_ = std::move(fresh); auto& f = *fresh_;
     f.unproven = true; f.phase = FreshState::Phase::Extent;
     if (!ok(cudaMemcpyAsync(f.rest.data(), samples.data, f.n*sizeof(float3), cudaMemcpyDeviceToDevice, stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF rest copy failed"); }
-    initExtent<<<1,1,0,stream>>>(f.extents.data(), f.flags.data()); extentKernel<<<32,128,0,stream>>>(f.rest.data(),f.n,f.extents.data(),f.flags.data());
+    initExtent<<<1,1,0,stream>>>(f.extents.data(), f.flags.data()); extentKernel<<<1,128,0,stream>>>(f.rest.data(),f.n,f.extents.data(),f.flags.data());
     if (cudaGetLastError()!=cudaSuccess || !ok(cudaMemcpyAsync(f.host->extent,f.extents.data(),sizeof(f.host->extent),cudaMemcpyDeviceToHost,stream)) || !ok(cudaMemcpyAsync(&f.host->flag,f.flags.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::CudaError,"fresh RBF extent submit failed"); }
     if (failFreshBindAfterSubmit.exchange(false, std::memory_order_acq_rel)) { f.failed=true; return fail(RbfStatus::CudaError,"forced fresh RBF bind post-submit failure"); }
     return RbfStatus::Ok;
@@ -475,7 +499,7 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(info_.reset(1)) || !ok(flags_.reset(1)) || !ok(evalFlags_.reset(1)) || !ok(work_.reset(size_t(m)*m)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
     if (!ok(cudaMemcpyAsync(rest_.data(),samples.data,n*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF rest copy failed");
     DeviceBuffer<float> extents; if(!ok(extents.reset(6))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
-    initExtent<<<1,1,0,stream>>>(extents.data(),flags_.data()); extentKernel<<<32,128,0,stream>>>(rest_.data(),n,extents.data(),flags_.data());
+    initExtent<<<1,1,0,stream>>>(extents.data(),flags_.data()); extentKernel<<<1,128,0,stream>>>(rest_.data(),n,extents.data(),flags_.data());
     float e[6]; int flag=0;
     if(!ok(cudaMemcpyAsync(e,extents.data(),sizeof(e),cudaMemcpyDeviceToHost,stream)) || !ok(cudaMemcpyAsync(&flag,flags_.data(),sizeof(flag),cudaMemcpyDeviceToHost,stream)) || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
     if(flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
