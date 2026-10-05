@@ -681,6 +681,19 @@ int main(int argc, char** argv) {
         CHECK(cached->Bind(plane.data(), 5, 0.0) == RbfVkStatus::RankDeficient);
         evalAll(cached, restA.data(), posedA.data(), 0.0, got);
         CHECK(sameBits(got, oracleA));
+        // Repeat failures stay failures (and stay exact): the per-binding
+        // upload memo never skips validation, so a repeated bad rest fails
+        // identically and the next good bind still matches bitwise.
+        CHECK(cached->Bind(plane.data(), 5, 0.0) == RbfVkStatus::RankDeficient);
+        CHECK(cached->Bind(plane.data(), 5, 0.0) == RbfVkStatus::RankDeficient);
+        evalAll(cached, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
+        std::vector<float> nanRest = restA;
+        nanRest[3] = std::numeric_limits<float>::quiet_NaN();
+        CHECK(cached->Bind(nanRest.data(), 5, 0.0) == RbfVkStatus::NonFiniteInput);
+        CHECK(cached->Bind(nanRest.data(), 5, 0.0) == RbfVkStatus::NonFiniteInput);
+        evalAll(cached, restA.data(), posedA.data(), 0.0, got);
+        CHECK(sameBits(got, oracleA));
         // A smoothing change keys a different entry and still matches uncached.
         // (No assertion that smoothing moves the float bits: on this tiny
         // near-affine fixture the weights are ~0, so 1e-3 vs 0.0 smoothing

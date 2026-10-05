@@ -250,6 +250,13 @@ struct RbfVkBinding::Native {
     // A factor-cache hit: BeginBind adopted stored factors, so AdvanceBind
     // stages without submitting and Factor consume skips the readbacks.
     bool bindAdopted = false;
+    // A per-binding upload memo: BeginBind sets this when (n, smoothing
+    // bits, rest bytes) all match the previous bind, in which case the
+    // rest/ubo/norm uploads are skipped (the buffers already hold the
+    // same bytes). Validation still runs; only device writes are
+    // skipped. Independent of the shared factor cache: a memo hit with
+    // a factor miss still recomputes from the current buffers.
+    bool bindUploadsCurrent = false;
     void ResetBuffers() noexcept {
         restBuf.reset(); posedBuf.reset(); matrixBuf.reset(); rhsBuf.reset();
         coefBuf.reset(); gramBuf.reset(); extentBuf.reset(); flagBuf.reset();
@@ -262,6 +269,7 @@ struct RbfVkBinding::Native {
         hostRhs.clear(); hostCoef.clear();
         hostBindStaged = false;
         bindAdopted = false;
+        bindUploadsCurrent = false;
     }
     // The owner has proved every previous submit before reallocating or
     // rewriting descriptor sets. Failed admission leaves no partial charge.
@@ -706,14 +714,31 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
                         ? "RBF buffers exceed the Vulkan resource budget or device memory"
                         : "RBF per-binding buffer allocation failed");
     }
-    if (WriteBytes(d, *native.restBuf, VkDeviceSize(n) * 12u, rest) != VK_SUCCESS)
-        return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
-    // Host copy for the host-side pose solve (after AllocateBuffers, which
-    // resets the caches when the size changes).
-    try {
-        native.cachedRest.assign(rest, rest + size_t(n) * 3);
-    } catch (std::bad_alloc const&) {
-        return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
+    // Upload memo (see bindUploadsCurrent): same (n, smoothing bits,
+    // rest bytes) as the previous bind means restBuf, uboBuf, and normBuf
+    // already hold this bind's bytes, so the uploads are skipped.
+    // AllocateBuffers no-ops on the same count (buffers kept) and clears
+    // cachedRest on a size change (memo misses), so the memo needs no
+    // other invalidation. Smoothing compares by bits, like the factor
+    // cache key, so -0.0/+0.0 takes the full path.
+    uint64_t smoothingBits = 0, lastLambdaBits = 0;
+    static_assert(sizeof(smoothingBits) == sizeof(smoothing), "");
+    std::memcpy(&smoothingBits, &smoothing, sizeof(smoothing));
+    std::memcpy(&lastLambdaBits, &native.solveUbo.lambda, sizeof(smoothing));
+    native.bindUploadsCurrent =
+        native.solveUbo.n == n && lastLambdaBits == smoothingBits &&
+        native.cachedRest.size() == size_t(n) * 3 &&
+        std::memcmp(native.cachedRest.data(), rest, size_t(n) * 3 * sizeof(float)) == 0;
+    if (!native.bindUploadsCurrent) {
+        if (WriteBytes(d, *native.restBuf, VkDeviceSize(n) * 12u, rest) != VK_SUCCESS)
+            return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
+        // Host copy for the host-side pose solve (after AllocateBuffers, which
+        // resets the caches when the size changes).
+        try {
+            native.cachedRest.assign(rest, rest + size_t(n) * 3);
+        } catch (std::bad_alloc const&) {
+            return fail(RbfVkStatus::DeviceError, "RBF rest copy failed");
+        }
     }
     // Factor-cache hit: adopt the stored factors and skip the gram +
     // buildMatrix + LU submit in AdvanceBind. Only successful binds are
@@ -733,8 +758,10 @@ RbfVkStatus RbfVkBinding::BeginBind(float const* rest, int n, double smoothing,
         }
     }
 
-    // G1: extent.
-    {
+    // G1: extent. On an upload-memo hit the member already holds
+    // (n, m, smoothing) — verified above — and the buffer holds the
+    // same bytes, so both writes are skipped.
+    if (!native.bindUploadsCurrent) {
         SolveUbo ubo;
         ubo.n = n;
         ubo.m = m;
@@ -959,8 +986,12 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             ubo.invScale = 1.0 / scale_;
             ubo.scale = scale_;
             native.solveUbo = ubo;
-            if (WriteBytes(d, *native.uboBuf, 64, &ubo) != VK_SUCCESS)
-                return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+            // Upload memo: the extent validation above still ran; only the
+            // device writes below are skipped (same rest/center, same bytes).
+            if (!native.bindUploadsCurrent) {
+                if (WriteBytes(d, *native.uboBuf, 64, &ubo) != VK_SUCCESS)
+                    return fail(RbfVkStatus::DeviceError, "RBF rank diagnostic reset failed");
+            }
 
             // Center the rest samples for the evaluate shader once per bind:
             // the shader used to reload every float sample and subtract the
@@ -973,7 +1004,8 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             // cachedRest holds the same bytes restBuf does (no writer
             // touches restBuf after BeginBind), so the center reads it
             // directly; the device receives bitwise the same doubles.
-            {
+            // Skipped on an upload-memo hit (same rest/center, same bytes).
+            if (!native.bindUploadsCurrent) {
                 void* mapped = nullptr;
                 if (vkMapMemory(d, native.normBuf->memory(), 0,
                                 VkDeviceSize(n) * 24u, 0, &mapped) != VK_SUCCESS)
