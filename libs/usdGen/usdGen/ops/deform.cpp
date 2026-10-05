@@ -688,17 +688,28 @@ void UsdGenDeformOp::Evaluate(UsdGenEvalContext const& ctx, UsdGenCapture const&
         for (size_t i = 0; i < n; ++i) {
             size_t const o = g + i;
             size_t const cv = firstCv + o;
-            float const in[3] = {view->inPx[o], view->inPy[o], view->inPz[o]};
             float const m = ready
                 ? std::clamp(float(maskField.Value(curve, cv)), 0.0f, 1.0f) : 0.0f;
             if (m == 0.0f || cv * 3 + 2 >= cap.result.size()) {
-                view->px[o] = in[0]; view->py[o] = in[1]; view->pz[o] = in[2];
+                view->px[o] = view->inPx[o];
+                view->py[o] = view->inPy[o];
+                view->pz[o] = view->inPz[o];
                 continue;
             }
             float const *r = &cap.result[cv * 3];
-            view->px[o] = m == 1.0f ? r[0] : in[0] + (r[0] - in[0]) * m;
-            view->py[o] = m == 1.0f ? r[1] : in[1] + (r[1] - in[1]) * m;
-            view->pz[o] = m == 1.0f ? r[2] : in[2] + (r[2] - in[2]) * m;
+            // The full-mask store skips the input planes: the old loop
+            // loaded in[3] before the mask test and discarded it here, so
+            // the stores are unchanged while the loop reads a third less.
+            if (m == 1.0f) {
+                view->px[o] = r[0]; view->py[o] = r[1]; view->pz[o] = r[2];
+                continue;
+            }
+            float const in0 = view->inPx[o];
+            float const in1 = view->inPy[o];
+            float const in2 = view->inPz[o];
+            view->px[o] = in0 + (r[0] - in0) * m;
+            view->py[o] = in1 + (r[1] - in1) * m;
+            view->pz[o] = in2 + (r[2] - in2) * m;
         }
     }
 }
