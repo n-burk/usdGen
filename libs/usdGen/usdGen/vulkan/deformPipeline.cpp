@@ -911,10 +911,13 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
         if (r != VK_SUCCESS) { finish(r); return {}; }
         if (st != 0) return reject(DeformSemantic::NonFinite);
 
-        // cmd1: fill output + apply (async on candidate fence).
+        // cmd1: apply (async on candidate fence). No zero-fill: every
+        // apply thread writes its point or reports a status first (each
+        // early return calls StatusErr), so status 0 implies every point
+        // was written, and any other status discards the output; the fill
+        // is never read.
         r = vkBeginCommandBuffer(cmds[1], &begin);
         if (r == VK_SUCCESS) {
-            vkCmdFillBuffer(cmds[1], s->outPoints->buffer(), 0, VK_WHOLE_SIZE, 0u);
             VkMemoryBarrier before{};
             before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT |
