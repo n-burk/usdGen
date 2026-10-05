@@ -31,7 +31,14 @@ char const* DeformSemanticName(DeformSemantic s) noexcept {
 
 namespace {
 
-constexpr uint32_t kLocalSize = 256;
+// Workgroup widths, each matched to its shader's local_size_x and each at
+// its measured best (spin-observed GPU times, stable to +-2us): the fp64
+// eval loop runs ~80us faster per 1M-CV pose at 128-wide groups (13.25
+// -> 13.17ms; 64 and 32 are no faster), and the memory-bound apply is
+// ~4us faster at 256 (0.167 -> 0.163ms), so each dispatch keeps its own
+// width.
+constexpr uint32_t kEvalLocalSize = 128;
+constexpr uint32_t kApplyLocalSize = 256;
 constexpr uint32_t kEvalUboBytes = 64;
 constexpr uint32_t kApplyUboBytes = 80;
 // Eval set: bindings 0,1,2,3,5 = 5 storage + binding 4 = 1 uniform.
@@ -39,7 +46,7 @@ constexpr uint32_t kEvalStorage = 5;
 // Apply set: bindings 0..8 = 9 storage + binding 9 = 1 uniform.
 constexpr uint32_t kApplyStorage = 9;
 
-uint32_t Groups(uint32_t n) { return (n + kLocalSize - 1) / kLocalSize; }
+uint32_t Groups(uint32_t n, uint32_t size) { return (n + size - 1) / size; }
 
 // Scratch pooling: a pose allocates 8 buffers and frees them at candidate
 // destruction, and vkAllocateMemory/vkFreeMemory cost ~70/80us (median) each
@@ -283,8 +290,8 @@ std::shared_ptr<DeformPipeline> DeformPipeline::Create(
     if (!context->shaderFloat64Enabled()) return {};
     VkPhysicalDeviceProperties physical{};
     vkGetPhysicalDeviceProperties(context->physicalDevice(), &physical);
-    if (physical.limits.maxComputeWorkGroupInvocations < kLocalSize ||
-        physical.limits.maxComputeWorkGroupSize[0] < kLocalSize ||
+    if (physical.limits.maxComputeWorkGroupInvocations < kApplyLocalSize ||
+        physical.limits.maxComputeWorkGroupSize[0] < kApplyLocalSize ||
         physical.limits.maxPerStageDescriptorStorageBuffers < kApplyStorage ||
         physical.limits.maxDescriptorSetStorageBuffers < kApplyStorage) return {};
     try {
@@ -925,7 +932,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
                 native_->evalPipeline);
             vkCmdBindDescriptorSets(cmds[0], VK_PIPELINE_BIND_POINT_COMPUTE,
                 native_->evalPipelineLayout, 0, 1, &evalSet, 0, nullptr);
-            vkCmdDispatch(cmds[0], Groups(points), 1, 1);
+            vkCmdDispatch(cmds[0], Groups(points, kEvalLocalSize), 1, 1);
             VkMemoryBarrier after{};
             after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -986,7 +993,7 @@ std::unique_ptr<DeformPipeline::Candidate> DeformPipeline::Begin(
             // Per-point apply: one thread per point (plus curve-span
             // validation for thread i < curves), so the dispatch covers
             // whichever domain is larger.
-            vkCmdDispatch(cmds[1], Groups(std::max(curves, points)), 1, 1);
+            vkCmdDispatch(cmds[1], Groups(std::max(curves, points), kApplyLocalSize), 1, 1);
             VkMemoryBarrier after{};
             after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;

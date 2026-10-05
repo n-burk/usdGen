@@ -19,10 +19,12 @@
 //   4 UBO      Params (std140, 64 bytes)
 //   5 evalFlag int[1]         OUT     (atomicOr, 0 == clean)
 //
-// Dispatch: local_size_x=256, groups=ceil(pointCount/256).
+// Dispatch: local_size_x=128, groups=ceil(pointCount/128). 128-wide groups
+// run the fp64 loop ~80us faster per 1M-CV pose than 256-wide (64 and 32
+// are no faster); the apply shader stays 256-wide, where it is fastest.
 
 #version 460
-layout(local_size_x = 256) in;
+layout(local_size_x = 128) in;
 
 layout(std430, binding = 0) readonly buffer Cvs     { float cvs[]; };
 layout(std430, binding = 1) buffer Warped            { float warped[]; };
