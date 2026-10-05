@@ -17,40 +17,29 @@ std::atomic<bool> failFreshEvaluateAllocation{false}, failFreshEvaluateAfterSubm
 std::atomic<bool> failFreshResolvePreflight{false}, failFreshResolveCommit{false};
 std::atomic<uint64_t> freshAcceptAttempts{0}, freshRollbackAttempts{0};
 __device__ inline void mark(int* f, int v) { atomicOr(f, v); }
-__device__ inline void atomicMinFloat(float* address, float value) {
-    int* bits = reinterpret_cast<int*>(address); int old = *bits, assumed;
-    do { assumed = old; if (__int_as_float(assumed) <= value) break;
-         old = atomicCAS(bits, assumed, __float_as_int(value)); } while (old != assumed);
-}
-__device__ inline void atomicMaxFloat(float* address, float value) {
-    int* bits = reinterpret_cast<int*>(address); int old = *bits, assumed;
-    do { assumed = old; if (__int_as_float(assumed) >= value) break;
-         old = atomicCAS(bits, assumed, __float_as_int(value)); } while (old != assumed);
-}
-// Each thread folds its grid stride into registers, each warp reduces
-// with shuffles (no shared memory, no barrier), and each warp's lane 0
-// folds the warp result into the 6 extent addresses (was: 6 CAS atomics
-// per element, and 100 threads hammering 6 addresses cost 6.4us of
-// device time for 100 samples). Min/max over finite floats is exact and
-// order-free, so the reduced fold writes bitwise the same extent for any
-// grid; mixed-sign zeros can only name a zero extent, which fails
-// identically either way. Threads beyond n fold neutrally, and the
-// shuffle mask is the converged warp so partial blocks stay correct.
-// Lane 0 also seeds the extent and flag words behind one block barrier,
-// retiring the old initExtent launch. That seed is why this kernel takes
-// single-block launches only: every caller below uses <<<1,128>>>.
-// The barrier publishes exactly what the old stream-ordered init wrote,
-// so the fold reads bitwise the same starting values.
+// Each thread folds its grid stride into registers and each warp reduces
+// with shuffles; the 4 warp folds then combine through shared memory
+// and lane 0 lands the 7 words with plain stores (was: 24 CAS atomics
+// from the warp leaders, which cost 14us once the extent moved to mapped
+// host memory). Min/max over finite floats is exact and order-free, so
+// the shared fold writes bitwise the same extent for any combination
+// order; mixed-sign zeros can only name a zero extent, which fails
+// identically either way. The non-finite flag reduces the same way (a
+// warp OR, then a 4-way lane-0 OR): 1 iff any element was non-finite,
+// exactly what the old atomicOr wrote. Threads beyond n fold
+// neutrally, and the shuffle mask is the converged warp so partial
+// blocks stay correct. Single-block launches only: every caller below
+// uses <<<1,128>>>, so warps 0-3 are exactly the block.
 __global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
-    if (threadIdx.x == 0) {
-        e[0]=e[1]=e[2]=INFINITY; e[3]=e[4]=e[5]=-INFINITY; *flags=0;
-    }
-    __syncthreads();
+    __shared__ float red[4][6];
+    __shared__ int bad[4];
+    int const tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     float mnx = INFINITY, mny = INFINITY, mnz = INFINITY;
     float mxx = -INFINITY, mxy = -INFINITY, mxz = -INFINITY;
+    int localBad = 0;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += blockDim.x * gridDim.x) {
         float3 v = p[i];
-        if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) { mark(flags, 1); continue; }
+        if (!isfinite(v.x) || !isfinite(v.y) || !isfinite(v.z)) { localBad = 1; continue; }
         mnx = fminf(mnx, v.x); mny = fminf(mny, v.y); mnz = fminf(mnz, v.z);
         mxx = fmaxf(mxx, v.x); mxy = fmaxf(mxy, v.y); mxz = fmaxf(mxz, v.z);
     }
@@ -62,10 +51,25 @@ __global__ void extentKernel(const float3* p, int n, float* e, int* flags) {
         mxx = fmaxf(mxx, __shfl_down_sync(mask, mxx, d));
         mxy = fmaxf(mxy, __shfl_down_sync(mask, mxy, d));
         mxz = fmaxf(mxz, __shfl_down_sync(mask, mxz, d));
+        localBad |= __shfl_down_sync(mask, localBad, d);
     }
-    if ((threadIdx.x & 31) == 0) {
-        atomicMinFloat(&e[0], mnx); atomicMinFloat(&e[1], mny); atomicMinFloat(&e[2], mnz);
-        atomicMaxFloat(&e[3], mxx); atomicMaxFloat(&e[4], mxy); atomicMaxFloat(&e[5], mxz);
+    if (lane == 0) {
+        red[warp][0] = mnx; red[warp][1] = mny; red[warp][2] = mnz;
+        red[warp][3] = mxx; red[warp][4] = mxy; red[warp][5] = mxz;
+        bad[warp] = localBad;
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float ax = INFINITY, ay = INFINITY, az = INFINITY;
+        float ix = -INFINITY, iy = -INFINITY, iz = -INFINITY;
+        int f = 0;
+        for (int w = 0; w < 4; ++w) {
+            ax = fminf(ax, red[w][0]); ay = fminf(ay, red[w][1]); az = fminf(az, red[w][2]);
+            ix = fmaxf(ix, red[w][3]); iy = fmaxf(iy, red[w][4]); iz = fmaxf(iz, red[w][5]);
+            f |= bad[w];
+        }
+        e[0] = ax; e[1] = ay; e[2] = az; e[3] = ix; e[4] = iy; e[5] = iz;
+        *flags = f;
     }
 }
 __global__ void polynomialGram(const float3* p, int n, double* gram, double cx, double cy, double cz, double invScale) {
@@ -73,6 +77,14 @@ __global__ void polynomialGram(const float3* p, int n, double* gram, double cx, 
         float3 q=p[i]; double v[4]={1.,(q.x-cx)*invScale,(q.y-cy)*invScale,(q.z-cz)*invScale};
         for(int r=0;r<4;++r) for(int c=0;c<4;++c) atomicAdd(&gram[r*4+c],v[r]*v[c]);
     }
+}
+// Lands the 16-word gram into mapped proof memory. The polynomialGram
+// atomics stay on device memory (host atomics would serialize over the
+// interconnect); this single-block copy replaces the gram D2H node and
+// its ~7us drain bubble, with bitwise the same gram bytes.
+__global__ void landGram(const double* gram, double* mapped) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < 16) mapped[i] = gram[i];
 }
 bool fullAffineRank(double g[16]) {
     // Scaled Gaussian elimination on P^T P.  A relative threshold catches
@@ -553,37 +565,35 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if (!stateReady_ && !ok(cudaEventCreateWithFlags(&stateReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF state event creation failed");
     if (!evalReady_ && !ok(cudaEventCreateWithFlags(&evalReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF evaluation event creation failed");
     if (!solver_ && cusolverDnCreate(&solver_) != CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER create failed");
-    if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(info_.reset(1)) || !ok(flags_.reset(1)) || !ok(evalFlags_.reset(1)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
+    if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(evalFlags_.reset(1)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
     if (!ok(cudaMemcpyAsync(rest_.data(),samples.data,n*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF rest copy failed");
-    // Persistent scratch: the old per-bind local extent buffer plus the
-    // pre-query work_ sizing cost two cudaMalloc/cudaFree pairs (with event
-    // churn) on every steady-state bind, idling the GPU. work_ sizes once
-    // below, after the bufferSize query; nothing reads it before that.
-    // Word 6 of the extent buffer carries the non-finite flag, so one
-    // 28-byte proof copy returns extent and flag together. flags_ keeps
-    // its stale value until Solve resets it; buildMatrix ignores its flags
-    // argument and nothing else reads flags_ in between.
-    if(!ok(extents_.reset(7))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
-    float* ex = extents_.data(); int* exFlag = reinterpret_cast<int*>(ex + 6);
-    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,ex,exFlag);
-    struct Proof { float e[6]; int flag; };
-    static_assert(sizeof(Proof) == 7 * sizeof(float) && offsetof(Proof, flag) == 6 * sizeof(float), "extent proof must be one contiguous copy");
-    Proof proof;
-    if(!ok(cudaMemcpyAsync(&proof,ex,sizeof(proof),cudaMemcpyDeviceToHost,stream)) || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
-    if(proof.flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
-    center_[0]=(double)proof.e[0] + ((double)proof.e[3]-(double)proof.e[0])*.5; center_[1]=(double)proof.e[1] + ((double)proof.e[4]-(double)proof.e[1])*.5; center_[2]=(double)proof.e[2] + ((double)proof.e[5]-(double)proof.e[2])*.5; scale_=std::max((double)proof.e[3]-proof.e[0],std::max((double)proof.e[4]-proof.e[1],(double)proof.e[5]-proof.e[2]));
+    // Zero-copy proofs (see Solve): the extent, gram, and info words live
+    // in mapped host memory, read after the stream syncs, so no D2H node
+    // (each carried a ~7us drain bubble) separates the phases. work_ still
+    // sizes once below, after the bufferSize query; nothing reads it before
+    // that. buildMatrix ignores its flags argument (hence nullptr).
+    if(!ensureProofs()) return fail(RbfStatus::CudaError,"RBF proof allocation failed");
+    extentKernel<<<1,128,0,stream>>>(rest_.data(),n,proofDev_->extent,&proofDev_->flag);
+    if(!ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
+    if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
+    center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
     normalizeSamples<<<(n+255)/256,256,0,stream>>>(rest_.data(),normSamples_.data(),n,center_[0],center_[1],center_[2],1.0/scale_);
     if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF sample normalization failed");
     if(!ok(cudaMemsetAsync(gram_.data(),0,16*sizeof(double),stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic reset failed");
     polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),center_[0],center_[1],center_[2],1.0/scale_);
-    double gram[16]; if(!ok(cudaMemcpyAsync(gram,gram_.data(),sizeof(gram),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic query failed");
-    if(!fullAffineRank(gram)) return fail(RbfStatus::RankDeficient,"RBF samples lack numerically full affine 3D support");
-    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,center_[0],center_[1],center_[2],1.0/scale_,smoothing,flags_.data());
+    landGram<<<1,32,0,stream>>>(gram_.data(),proofDev_->gram);
+    // The rank proof and the LU share one synchronization: buildMatrix and
+    // getrf submit before the gram is known, and the rank decision is
+    // checked first after the single sync, so error precedence (rank before
+    // LU status) and every success-path byte are unchanged.
+    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,center_[0],center_[1],center_[2],1.0/scale_,smoothing,nullptr);
     int lwork=0; if(cusolverDnDgetrf_bufferSize(solver_,m,m,matrix_.data(),m,&lwork)!=CUSOLVER_STATUS_SUCCESS || !ok(work_.reset(lwork))) return fail(RbfStatus::SolverError,"cuSOLVER LU workspace failed");
-    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(solver_,m,m,matrix_.data(),m,work_.data(),pivots_.data(),info_.data())!=CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER LU failed");
-    int info=0; if(!ok(cudaMemcpyAsync(&info,info_.data(),sizeof(info),cudaMemcpyDeviceToHost,stream))||!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF LU status query failed");
-    if(info>0) return fail(RbfStatus::RankDeficient,"RBF augmented LU is singular (including coplanar affine support)"); if(info<0)return fail(RbfStatus::SolverError,"RBF LU invalid argument");
+    if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(solver_,m,m,matrix_.data(),m,work_.data(),pivots_.data(),&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER LU failed");
+    if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF LU status query failed");
+    double gram[16]; for(int i=0;i<16;++i) gram[i]=proofHost_->gram[i]; // fullAffineRank eliminates in place
+    if(!fullAffineRank(gram)) return fail(RbfStatus::RankDeficient,"RBF samples lack numerically full affine 3D support");
+    if(proofHost_->info>0) return fail(RbfStatus::RankDeficient,"RBF augmented LU is singular (including coplanar affine support)"); if(proofHost_->info<0)return fail(RbfStatus::SolverError,"RBF LU invalid argument");
     // A newly bound field has the mathematically defined rest (identity) state.
     if(!ok(cudaMemsetAsync(coefficients_.data(),0,coefficients_.size()*sizeof(double),stream)) || !ok(cudaEventRecord(stateReady_,stream))) return fail(RbfStatus::CudaError,"RBF identity-state initialization failed");
     sampleCount_=n; order_=m; smoothing_=smoothing; solved_=true; return RbfStatus::Ok;

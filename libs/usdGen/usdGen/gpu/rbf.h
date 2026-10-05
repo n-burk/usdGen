@@ -96,8 +96,7 @@ private:
     DeviceBuffer<float3> rest_, current_;
     DeviceBuffer<double> matrix_, work_, coefficients_, normSamples_;
     DeviceBuffer<double> gram_;
-    DeviceBuffer<float> extents_;
-    DeviceBuffer<int> pivots_, info_, flags_, evalFlags_;
+    DeviceBuffer<int> pivots_, evalFlags_;
     // Zero-copy direct-path proofs: one mapped allocation, read on the host
     // after the stream syncs, so no D2H node (and its ~7us drain bubble)
     // separates the phases. proofDev_ is re-queried if the binding moves.
