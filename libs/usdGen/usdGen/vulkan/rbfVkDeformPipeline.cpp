@@ -324,7 +324,10 @@ std::unique_ptr<RbfVkDeformPipeline::Candidate> RbfVkDeformPipeline::Begin(
 
     VkPhysicalDeviceProperties physical{};
     vkGetPhysicalDeviceProperties(context->physicalDevice(), &physical);
-    uint32_t const applyGroups = Groups(curves);
+    // Per-point apply: one thread per point (plus curve-span
+    // validation for thread i < curves), so the dispatch covers
+    // whichever domain is larger.
+    uint32_t const applyGroups = Groups(std::max(curves, points));
     uint32_t const applyX = std::min(applyGroups, physical.limits.maxComputeWorkGroupCount[0]);
     uint32_t const applyY = applyX ? (applyGroups + applyX - 1) / applyX : 0;
     if (applyY > physical.limits.maxComputeWorkGroupCount[1]) return reject(DeformSemantic::BadValue);
