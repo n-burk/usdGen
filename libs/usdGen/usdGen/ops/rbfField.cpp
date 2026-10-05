@@ -144,29 +144,62 @@ bool CubicField::Solve(std::vector<GfVec3d> const &current, std::string *error)
         if (error) *error = "the RBF pose has a different sample count than its rest";
         return false;
     }
-    std::vector<double> rhs(m);
-    for (int d = 0; d < 3; ++d) {
-        for (size_t i = 0; i < n; ++i) {
-            if (!Finite(current[i])) {
-                if (error) *error = "the RBF pose contains non-finite values";
-                return false;
-            }
-            rhs[i] = (current[i][d] - _centre[d]) / _scale - _rest[i][d];
+    // One pass: Finite checks the whole sample, so the old d-outer loop
+    // re-checked every sample three times; the first failure and the
+    // message are unchanged.
+    for (size_t i = 0; i < n; ++i) {
+        if (!Finite(current[i])) {
+            if (error) *error = "the RBF pose contains non-finite values";
+            return false;
         }
-        std::fill(rhs.begin() + n, rhs.end(), 0.0);
-        for (size_t c = 0; c < m; ++c) std::swap(rhs[c], rhs[_pivot[c]]);
-        for (size_t r = 1; r < m; ++r) {           // L (unit diagonal)
-            double s = rhs[r];
-            for (size_t k = 0; k < r; ++k) s -= _lu[r * m + k] * rhs[k];
-            rhs[r] = s;
-        }
-        for (size_t r = m; r-- > 0;) {             // U
-            double s = rhs[r];
-            for (size_t k = r + 1; k < m; ++k) s -= _lu[r * m + k] * rhs[k];
-            rhs[r] = s / _lu[r * m + r];
-        }
-        std::copy(rhs.begin(), rhs.end(), _coefficients.begin() + d * m);
     }
+    // The three columns are independent (disjoint lanes over shared
+    // read-only factors), so they run interleaved: each column keeps its
+    // exact op sequence (same operations in the same order), giving the
+    // dependent accumulation chain three times the ILP with
+    // bitwise-identical coefficients.
+    std::vector<double> w(size_t(3) * m);
+    double *w0 = w.data(), *w1 = w.data() + m, *w2 = w.data() + size_t(2) * m;
+    for (size_t i = 0; i < n; ++i) {
+        w0[i] = (current[i][0] - _centre[0]) / _scale - _rest[i][0];
+        w1[i] = (current[i][1] - _centre[1]) / _scale - _rest[i][1];
+        w2[i] = (current[i][2] - _centre[2]) / _scale - _rest[i][2];
+    }
+    std::fill(w0 + n, w0 + m, 0.0);
+    std::fill(w1 + n, w1 + m, 0.0);
+    std::fill(w2 + n, w2 + m, 0.0);
+    for (size_t c = 0; c < m; ++c) {
+        size_t const p = _pivot[c];
+        std::swap(w0[c], w0[p]);
+        std::swap(w1[c], w1[p]);
+        std::swap(w2[c], w2[p]);
+    }
+    for (size_t r = 1; r < m; ++r) {           // L (unit diagonal)
+        double s0 = w0[r], s1 = w1[r], s2 = w2[r];
+        for (size_t k = 0; k < r; ++k) {
+            double const l = _lu[r * m + k];
+            s0 -= l * w0[k];
+            s1 -= l * w1[k];
+            s2 -= l * w2[k];
+        }
+        w0[r] = s0;
+        w1[r] = s1;
+        w2[r] = s2;
+    }
+    for (size_t r = m; r-- > 0;) {             // U
+        double s0 = w0[r], s1 = w1[r], s2 = w2[r];
+        for (size_t k = r + 1; k < m; ++k) {
+            double const l = _lu[r * m + k];
+            s0 -= l * w0[k];
+            s1 -= l * w1[k];
+            s2 -= l * w2[k];
+        }
+        double const d = _lu[r * m + r];
+        w0[r] = s0 / d;
+        w1[r] = s1 / d;
+        w2[r] = s2 / d;
+    }
+    std::copy(w.begin(), w.end(), _coefficients.begin());
     return true;
 }
 
