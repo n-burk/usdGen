@@ -47,6 +47,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -156,6 +157,45 @@ void CheckField()
         for (size_t b = a + 1; b < some.size(); ++b)
             spread = std::min(spread, (points[some[a]] - points[some[b]]).GetLength());
     Check(spread > 0.4, "farthest-point samples are spread out (" + std::to_string(spread) + ")");
+}
+
+// DisplaceBatch is bitwise Displacement, through every cascade width (8,
+// 4, tail singles), past the single-query path's 256-sample stack row, and
+// for the unbound field.
+void CheckBatchBitwise()
+{
+    for (size_t samples : {size_t(12), size_t(100), size_t(300)}) {
+        std::vector<GfVec3d> const rest = Cloud(samples, 7 + samples);
+        std::vector<GfVec3d> moved(rest.size());
+        for (size_t i = 0; i < rest.size(); ++i)
+            moved[i] = rest[i] + GfVec3d(0.2 * std::sin(3.0 * rest[i][1]),
+                                         0.1 * rest[i][0] * rest[i][2],
+                                         -0.15 * std::cos(2.0 * rest[i][0]));
+        rbf::CubicField field;
+        std::string error;
+        if (!field.Bind(rest, &error) || !field.Solve(moved, &error)) {
+            Check(false, "batch fixture binds (" + std::to_string(samples) + " samples)");
+            continue;
+        }
+        std::vector<GfVec3d> const queries = Cloud(40, 1001);
+        size_t worst = 0;
+        for (size_t count = 0; count <= queries.size(); ++count) {
+            std::vector<GfVec3d> batched(count), single(count);
+            field.DisplaceBatch(queries.data(), batched.data(), count);
+            for (size_t t = 0; t < count; ++t) single[t] = field.Displacement(queries[t]);
+            if (count && !worst && std::memcmp(batched.data(), single.data(),
+                                                count * sizeof(GfVec3d)) != 0)
+                worst = count;
+        }
+        Check(worst == 0, "DisplaceBatch is bitwise Displacement (" +
+                               std::to_string(samples) + " samples" +
+                               (worst ? ", first diff at count " + std::to_string(worst) : "") + ")");
+    }
+    rbf::CubicField unbound;
+    std::vector<GfVec3d> zeros(10, GfVec3d(1.0)), expect(10, GfVec3d(0.0));
+    unbound.DisplaceBatch(zeros.data(), zeros.data(), zeros.size());
+    Check(std::memcmp(zeros.data(), expect.data(), zeros.size() * sizeof(GfVec3d)) == 0,
+          "an unbound field batches zeros");
 }
 
 // --- the example, through the engine ---------------------------------------------
@@ -811,6 +851,7 @@ int main()
 {
     usdGenRegisterM1Operators();
     CheckField();
+    CheckBatchBitwise();
     CheckCurveWrapField();
     CheckExample();
     CheckSurfaceExample();

@@ -47,6 +47,16 @@ public:
     /// order), so inlined queries are bitwise what the call returned.
     inline GfVec3d Displacement(GfVec3d const &x) const;
 
+    /// A run of queries: ds[t] is bitwise Displacement(qs[t]) for every t.
+    ///
+    /// The single-query loop above is bound by its three serial FMA chains
+    /// and the kernel row's round trip through the stack; blocking eight
+    /// queries over one sample pass keeps every query's operations in the
+    /// same order (so the bits match) while the samples load once and the
+    /// accumulators overlap. Defined out of line; tails fall back to
+    /// Displacement, and an unbound field fills zeros.
+    void DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) const;
+
     bool Bound() const { return _order != 0; }
     size_t SampleCount() const { return _rest.size(); }
 

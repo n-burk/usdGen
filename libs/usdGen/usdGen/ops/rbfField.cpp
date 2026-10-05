@@ -206,6 +206,82 @@ bool CubicField::Solve(std::vector<GfVec3d> const &current, std::string *error)
 // CubicField::Displacement lives in rbfField.h (inlined at the per-CV call
 // sites); see there.
 
+namespace {
+
+// One fixed-width block of DisplaceBatch: W queries share a single sample
+// pass. Every query runs Displacement's operations in Displacement's order
+// (the same expression text, so the same FMA contraction applies), which
+// is what keeps the block bitwise; the accumulators stay one array per
+// query so the vectorizer contracts across lanes instead of splitting mul
+// and add. Eight is the measured sweet spot on ARM64 (four leaves FMA
+// latency exposed, sixteen spills).
+template <size_t W>
+void DisplaceBlocked(GfVec3d const &centre, double invScale, double scale,
+                     double const *restX, double const *restY, double const *restZ,
+                     double const *cx, double const *cy, double const *cz,
+                     size_t n, GfVec3d const *qs, GfVec3d *ds)
+{
+    double p[W][3];
+    for (size_t t = 0; t < W; ++t) {
+        p[t][0] = (qs[t][0] - centre[0]) * invScale;
+        p[t][1] = (qs[t][1] - centre[1]) * invScale;
+        p[t][2] = (qs[t][2] - centre[2]) * invScale;
+    }
+    double o[W][3];
+    for (size_t t = 0; t < W; ++t) {
+        o[t][0] = cx[n] + cx[n + 1] * p[t][0] + cx[n + 2] * p[t][1] + cx[n + 3] * p[t][2];
+        o[t][1] = cy[n] + cy[n + 1] * p[t][0] + cy[n + 2] * p[t][1] + cy[n + 3] * p[t][2];
+        o[t][2] = cz[n] + cz[n + 1] * p[t][0] + cz[n + 2] * p[t][1] + cz[n + 3] * p[t][2];
+    }
+    for (size_t i = 0; i < n; ++i) {
+        double const sx = restX[i], sy = restY[i], sz = restZ[i];
+        double kk[W];
+        for (size_t t = 0; t < W; ++t) {
+            double const dx = p[t][0] - sx, dy = p[t][1] - sy, dz = p[t][2] - sz;
+            double const rr = std::sqrt(dx * dx + dy * dy + dz * dz);
+            kk[t] = rr * rr * rr;
+        }
+        for (size_t t = 0; t < W; ++t) {
+            o[t][0] += cx[i] * kk[t];
+            o[t][1] += cy[i] * kk[t];
+            o[t][2] += cz[i] * kk[t];
+        }
+    }
+    for (size_t t = 0; t < W; ++t)
+        ds[t] = GfVec3d(o[t][0] * scale, o[t][1] * scale, o[t][2] * scale);
+}
+
+}  // namespace
+
+void CubicField::DisplaceBatch(GfVec3d const *qs, GfVec3d *ds, size_t count) const
+{
+    if (count == 0) return;
+    size_t const n = _rest.size(), m = _order;
+    if (!m) {
+        for (size_t t = 0; t < count; ++t) ds[t] = GfVec3d(0.0);
+        return;
+    }
+    double const *cx = &_coefficients[0];
+    double const *cy = &_coefficients[m];
+    double const *cz = &_coefficients[2 * m];
+    double const *rx = _restX.data(), *ry = _restY.data(), *rz = _restZ.data();
+    while (count >= 8) {
+        DisplaceBlocked<8>(_centre, _invScale, _scale, rx, ry, rz,
+                           cx, cy, cz, n, qs, ds);
+        qs += 8;
+        ds += 8;
+        count -= 8;
+    }
+    if (count >= 4) {
+        DisplaceBlocked<4>(_centre, _invScale, _scale, rx, ry, rz,
+                           cx, cy, cz, n, qs, ds);
+        qs += 4;
+        ds += 4;
+        count -= 4;
+    }
+    for (size_t t = 0; t < count; ++t) ds[t] = Displacement(qs[t]);
+}
+
 std::vector<size_t> SelectSamples(std::vector<GfVec3d> const &points, size_t budget,
                                   double epsilon)
 {

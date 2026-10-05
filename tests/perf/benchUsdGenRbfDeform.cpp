@@ -518,6 +518,7 @@ int main(int argc, char **argv)
         EmitMetric("cpu_rbf_bind", bindMs);
 
         std::vector<double> tSolve, tDisp;
+        std::vector<GfVec3d> disp(f.queries.size());
         uint64_t checksum = 0;
         for (int i = 0; i < 9; ++i) {
             t0 = NowMs();
@@ -527,9 +528,12 @@ int main(int argc, char **argv)
             }
             tSolve.push_back(NowMs() - t0);
             t0 = NowMs();
+            // The production batch API over the same 200k queries; the
+            // accumulation below runs in query order as before, so the
+            // checksum is comparable across the change.
+            field.DisplaceBatch(f.queries.data(), disp.data(), f.queries.size());
             double acc[3] = {0, 0, 0};
-            for (GfVec3d const &q : f.queries) {
-                GfVec3d const d = field.Displacement(q);
+            for (GfVec3d const &d : disp) {
                 acc[0] += d[0]; acc[1] += d[1]; acc[2] += d[2];
             }
             tDisp.push_back(NowMs() - t0);

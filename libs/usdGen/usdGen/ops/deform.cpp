@@ -540,11 +540,38 @@ bool UsdGenDeformOp::Capture(UsdGenCaptureContext const& ctx, UsdGenCurveBuffer 
     // match the retired scan.
     std::atomic<bool> nonFinite{false};
     ParallelFor(ctx.dispatcher, R, [&](size_t c) {
-        auto displacement = [&](GfVec3d const &x) {
-            return wrap ? wrapFields[driverForCurve[c]].Map(x)-x : field.Displacement(x);
-        };
         size_t const first = spans[c], last = spans[c + 1];
         if (first >= last) return;
+        if (!wrap) {
+            // The RBF path displaces the whole strand, root included, in
+            // one batch: batch element 0 is the root's displacement, which
+            // doubles as the lockRoots shift exactly as in the loop below.
+            thread_local std::vector<GfVec3d> batchQ, batchD;
+            size_t const count = last - first;
+            batchQ.resize(count);
+            batchD.resize(count);
+            for (size_t cv = first; cv < last; ++cv)
+                batchQ[cv - first] = GfVec3d(opUtil::Point(upstream, cv));
+            field.DisplaceBatch(batchQ.data(), batchD.data(), count);
+            GfVec3d const shift =
+                lock.Value(c, first) != 0.0 ? batchD[0] : GfVec3d(0.0);
+            for (size_t cv = first; cv < last; ++cv) {
+                GfVec3d const x(opUtil::Point(upstream, cv));
+                GfVec3d const moved = x + batchD[cv - first] - shift;
+                float const f0 = float(moved[0]);
+                float const f1 = float(moved[1]);
+                float const f2 = float(moved[2]);
+                result[cv * 3] = f0;
+                result[cv * 3 + 1] = f1;
+                result[cv * 3 + 2] = f2;
+                if (!std::isfinite(f0) || !std::isfinite(f1) || !std::isfinite(f2))
+                    nonFinite.store(true, std::memory_order_relaxed);
+            }
+            return;
+        }
+        auto displacement = [&](GfVec3d const &x) {
+            return wrapFields[driverForCurve[c]].Map(x)-x;
+        };
         // The root's displacement serves as both the root CV's own and,
         // with usdGen:lockRoots, the shift of the whole strand.
         GfVec3d const rootDisplacement = displacement(GfVec3d(opUtil::Point(upstream, first)));
