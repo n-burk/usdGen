@@ -231,6 +231,13 @@ struct RbfVkBinding::Native {
     // PollSolve, so the Begin/Poll pending protocol is unchanged.
     std::vector<float> hostPosed;
     bool hostPosePending = false;
+    // Host-solve scratch, reused across poses: the old locals allocated
+    // 2x3m doubles and zeroed both every pose, while steady-state resizes
+    // below are no-ops. Only the 3x(m-n) RHS tail elements need zeroing
+    // (the RHS loop writes the first n of each column and the permuted
+    // solve reads every element); the forward pass overwrites every
+    // coefficient before any read, so hostCoef needs no initialization.
+    std::vector<double> hostRhs, hostCoef;
     // A staged host extent: BeginBind stashes nothing beyond the rest
     // samples and runs the admission hook, and PollSolve runs the extent
     // on the host with no fence. solvePending stays the pending flag, so
@@ -248,6 +255,7 @@ struct RbfVkBinding::Native {
         adoptedLu.reset();
         cachedM = 0; cachedLuValid = false;
         hostPosed.clear(); hostPosePending = false;
+        hostRhs.clear(); hostCoef.clear();
         hostBindStaged = false;
         bindAdopted = false;
     }
@@ -836,7 +844,9 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             native.hostPosePending = false;
             double const invScale = native.solveUbo.invScale;
             float const* posed = native.hostPosed.data();
-            std::vector<double> rhs(size_t(3) * size_t(hm), 0.0);
+            size_t const hmz0 = size_t(hm);
+            native.hostRhs.resize(size_t(3) * hmz0);
+            double* rhs = native.hostRhs.data();
             for (int i = 0; i < hn; ++i) {
                 float const bx = posed[size_t(3) * size_t(i)];
                 float const by = posed[size_t(3) * size_t(i) + 1];
@@ -846,11 +856,17 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
                                 "RBF current samples contain non-finite values");
                 rhs[size_t(i)] =
                     (double(bx) - double(native.cachedRest[size_t(3) * size_t(i)])) * invScale;
-                rhs[size_t(hm) + size_t(i)] =
+                rhs[hmz0 + size_t(i)] =
                     (double(by) - double(native.cachedRest[size_t(3) * size_t(i) + 1])) * invScale;
-                rhs[size_t(2) * size_t(hm) + size_t(i)] =
+                rhs[size_t(2) * hmz0 + size_t(i)] =
                     (double(bz) - double(native.cachedRest[size_t(3) * size_t(i) + 2])) * invScale;
             }
+            // The retired local zeroed the whole RHS; the loop above wrote
+            // the first hn of each column, so only the tails are stale.
+            size_t const hnz = size_t(hn);
+            std::fill(rhs + hnz, rhs + hmz0, 0.0);
+            std::fill(rhs + hmz0 + hnz, rhs + size_t(2) * hmz0, 0.0);
+            std::fill(rhs + size_t(2) * hmz0 + hnz, rhs + size_t(3) * hmz0, 0.0);
             double const* luPtr = native.adoptedLu ? native.adoptedLu->lu.data()
                                                   : native.cachedLu.data();
             int const* permPtr = native.adoptedLu ? native.adoptedLu->perm.data()
@@ -865,9 +881,10 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
             // dependent accumulation chain twenty-four lanes with
             // bitwise-identical coefficients. Backward rows cannot group:
             // each row's FIRST term needs the previous row's result.
-            std::vector<double> coef(size_t(3) * size_t(hm));
-            size_t const hmz = size_t(hm), hm2 = size_t(2) * size_t(hm);
-            ForwardSolveGrouped<8>(luPtr, permPtr, rhs.data(), coef.data(), hm);
+            native.hostCoef.resize(size_t(3) * hmz0);
+            double* coef = native.hostCoef.data();
+            size_t const hmz = hmz0, hm2 = size_t(2) * hmz0;
+            ForwardSolveGrouped<8>(luPtr, permPtr, rhs, coef, hm);
             int i = hm;
             for (i = hm - 1; i >= 0; --i) {
                 double s0 = coef[size_t(i)];
@@ -884,7 +901,7 @@ VkResult RbfVkBinding::PollSolve(RbfVkStatus* status) {
                 coef[hmz + size_t(i)] = s1 / d;
                 coef[hm2 + size_t(i)] = s2 / d;
             }
-            if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(hm) * 24u, coef.data()) != VK_SUCCESS)
+            if (WriteBytes(d, *native.coefStagingBuf, VkDeviceSize(hm) * 24u, coef) != VK_SUCCESS)
                 return fail(RbfVkStatus::DeviceError, "RBF solve status query failed");
             solved_ = true;
             native.phase = Native::Phase::Idle;
