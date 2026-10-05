@@ -94,6 +94,7 @@ private:
     DeviceBuffer<float3> rest_, current_;
     DeviceBuffer<double> matrix_, work_, coefficients_, normSamples_;
     DeviceBuffer<double> gram_;
+    DeviceBuffer<float> extents_;
     DeviceBuffer<int> pivots_, info_, flags_, evalFlags_;
     std::unique_ptr<FreshState> fresh_, acceptedFresh_, freshSolve_, freshEval_;
     std::unique_ptr<FreshState> retiredFresh_, retiredSolve_, retiredEval_;

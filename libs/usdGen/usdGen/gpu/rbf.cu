@@ -496,12 +496,16 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if (!stateReady_ && !ok(cudaEventCreateWithFlags(&stateReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF state event creation failed");
     if (!evalReady_ && !ok(cudaEventCreateWithFlags(&evalReady_,cudaEventDisableTiming))) return fail(RbfStatus::CudaError,"RBF evaluation event creation failed");
     if (!solver_ && cusolverDnCreate(&solver_) != CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER create failed");
-    if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(info_.reset(1)) || !ok(flags_.reset(1)) || !ok(evalFlags_.reset(1)) || !ok(work_.reset(size_t(m)*m)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
+    if (!ok(rest_.reset(n)) || !ok(normSamples_.reset(3*size_t(n))) || !ok(matrix_.reset(size_t(m)*m)) || !ok(coefficients_.reset(size_t(m)*3)) || !ok(pivots_.reset(m)) || !ok(info_.reset(1)) || !ok(flags_.reset(1)) || !ok(evalFlags_.reset(1)) || !ok(gram_.reset(16))) return fail(RbfStatus::CudaError,"RBF device allocation failed");
     if (!ok(cudaMemcpyAsync(rest_.data(),samples.data,n*sizeof(float3),cudaMemcpyDeviceToDevice,stream))) return fail(RbfStatus::CudaError,"RBF rest copy failed");
-    DeviceBuffer<float> extents; if(!ok(extents.reset(6))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
-    initExtent<<<1,1,0,stream>>>(extents.data(),flags_.data()); extentKernel<<<1,128,0,stream>>>(rest_.data(),n,extents.data(),flags_.data());
+    // Persistent scratch: the old per-bind local extent buffer plus the
+    // pre-query work_ sizing cost two cudaMalloc/cudaFree pairs (with event
+    // churn) on every steady-state bind, idling the GPU. work_ sizes once
+    // below, after the bufferSize query; nothing reads it before that.
+    if(!ok(extents_.reset(6))) return fail(RbfStatus::CudaError,"RBF extent allocation failed");
+    initExtent<<<1,1,0,stream>>>(extents_.data(),flags_.data()); extentKernel<<<1,128,0,stream>>>(rest_.data(),n,extents_.data(),flags_.data());
     float e[6]; int flag=0;
-    if(!ok(cudaMemcpyAsync(e,extents.data(),sizeof(e),cudaMemcpyDeviceToHost,stream)) || !ok(cudaMemcpyAsync(&flag,flags_.data(),sizeof(flag),cudaMemcpyDeviceToHost,stream)) || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
+    if(!ok(cudaMemcpyAsync(e,extents_.data(),sizeof(e),cudaMemcpyDeviceToHost,stream)) || !ok(cudaMemcpyAsync(&flag,flags_.data(),sizeof(flag),cudaMemcpyDeviceToHost,stream)) || !ok(cudaStreamSynchronize(stream))) return fail(RbfStatus::CudaError,"RBF extent query failed");
     if(flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
     center_[0]=(double)e[0] + ((double)e[3]-(double)e[0])*.5; center_[1]=(double)e[1] + ((double)e[4]-(double)e[1])*.5; center_[2]=(double)e[2] + ((double)e[5]-(double)e[2])*.5; scale_=std::max((double)e[3]-e[0],std::max((double)e[4]-e[1],(double)e[5]-e[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
