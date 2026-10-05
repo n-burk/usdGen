@@ -113,7 +113,12 @@ cudaError_t validateFreshPointer(const void* p, size_t count, cudaStream_t strea
         return cudaErrorInvalidDevicePointer;
     return cudaSuccess;
 }
-__global__ void buildMatrix(const float3* p, double* a, int n, int m, double cx, double cy, double cz, double invScale, double lambda, int* flags) {
+// The sample normalization rides in the matrix build (threads k<n write
+// the normalized samples the old normalizeSamples launch wrote): the two
+// launches wrote disjoint addresses, so one launch writes bitwise the
+// same matrix and samples and saves a launch + a grid teardown on every
+// bind. m*m > n always, so threads 0..n-1 exist in the build grid.
+__global__ void buildMatrix(const float3* p, double* a, int n, int m, double cx, double cy, double cz, double invScale, double lambda, int* flags, double* sn) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= m*m) return;
     int row = k % m, col = k / m; // column major
@@ -125,6 +130,7 @@ __global__ void buildMatrix(const float3* p, double* a, int n, int m, double cx,
     } else if (row < n) { float3 x=p[row]; int q=col-n; value=q==0?1.0:(q==1?(x.x-cx)*invScale:(q==2?(x.y-cy)*invScale:(x.z-cz)*invScale)); }
     else if (col < n) { float3 x=p[col]; int q=row-n; value=q==0?1.0:(q==1?(x.x-cx)*invScale:(q==2?(x.y-cy)*invScale:(x.z-cz)*invScale)); }
     a[k]=value;
+    if (k < n) { float3 s=p[k]; sn[k]=(s.x-cx)*invScale; sn[n+k]=(s.y-cy)*invScale; sn[2*n+k]=(s.z-cz)*invScale; }
 }
 // The polynomial-tail zeroing rides in the RHS kernel (threads 0-3 write
 // the twelve tail slots before the bounds check): the two launches wrote
@@ -138,11 +144,6 @@ __global__ void rhsKernel(const float3* rest, const float3* current, double* rhs
     float3 a=rest[i], b=current[i];
     if(!isfinite(b.x)||!isfinite(b.y)||!isfinite(b.z)) { mark(flags,1); return; }
     rhs[i]=((double)b.x-a.x)*invScale; rhs[i+m]=((double)b.y-a.y)*invScale; rhs[i+2*m]=((double)b.z-a.z)*invScale;
-}
-__global__ void normalizeSamples(const float3* p, double* sn, int n, double cx, double cy, double cz, double invScale) {
-    int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=n) return;
-    float3 s=p[i];
-    sn[i]=(s.x-cx)*invScale; sn[n+i]=(s.y-cy)*invScale; sn[2*n+i]=(s.z-cz)*invScale;
 }
 // 128-wide blocks run the fp64 eval loop ~70us faster per 1M CVs than
 // 256-wide (11.98 -> 11.91ms; 64 is no faster). One thread per CV either
@@ -332,8 +333,7 @@ RbfStatus CudaRbfBinding::BeginFreshBindLu(cudaStream_t stream) {
     if (!fresh_ || fresh_->phase != FreshState::Phase::RankReady || HasUnprovenWork()) return fail(RbfStatus::InvalidArgument,"fresh RBF rank not committed");
     auto& f=*fresh_; int d=-1; if (validateFreshPointer(nullptr,0,stream,&d)!=cudaSuccess || d!=f.device) return fail(RbfStatus::InvalidArgument,"fresh RBF stream invalid");
     f.unproven=true; f.phase=FreshState::Phase::Lu;
-    normalizeSamples<<<(f.n+255)/256,256,0,stream>>>(f.rest.data(),f.norm.data(),f.n,f.center[0],f.center[1],f.center[2],1./f.scale);
-    buildMatrix<<<(f.m*f.m+255)/256,256,0,stream>>>(f.rest.data(),f.matrix.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.smoothing,f.flags.data());
+    buildMatrix<<<(f.m*f.m+255)/256,256,0,stream>>>(f.rest.data(),f.matrix.data(),f.n,f.m,f.center[0],f.center[1],f.center[2],1./f.scale,f.smoothing,f.flags.data(),f.norm.data());
     if (cudaGetLastError()!=cudaSuccess || cusolverDnSetStream(f.solver,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(f.solver,f.m,f.m,f.matrix.data(),f.m,f.work.data(),f.pivots.data(),f.info.data())!=CUSOLVER_STATUS_SUCCESS || !ok(cudaMemsetAsync(f.coefficients.data(),0,f.coefficients.size()*sizeof(double),stream)) || !ok(cudaMemcpyAsync(&f.host->info,f.info.data(),sizeof(int),cudaMemcpyDeviceToHost,stream))) { f.failed=true; return fail(RbfStatus::SolverError,"fresh RBF LU submit failed"); }
     return RbfStatus::Ok;
 }
@@ -578,8 +578,7 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     if(proofHost_->flag) return fail(RbfStatus::NonFiniteInput,"RBF rest samples contain non-finite values");
     center_[0]=(double)proofHost_->extent[0] + ((double)proofHost_->extent[3]-(double)proofHost_->extent[0])*.5; center_[1]=(double)proofHost_->extent[1] + ((double)proofHost_->extent[4]-(double)proofHost_->extent[1])*.5; center_[2]=(double)proofHost_->extent[2] + ((double)proofHost_->extent[5]-(double)proofHost_->extent[2])*.5; scale_=std::max((double)proofHost_->extent[3]-proofHost_->extent[0],std::max((double)proofHost_->extent[4]-proofHost_->extent[1],(double)proofHost_->extent[5]-proofHost_->extent[2]));
     if(!std::isfinite(scale_) || scale_ <= 0.0) return fail(RbfStatus::RankDeficient,"RBF rest samples have zero extent");
-    normalizeSamples<<<(n+255)/256,256,0,stream>>>(rest_.data(),normSamples_.data(),n,center_[0],center_[1],center_[2],1.0/scale_);
-    if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF sample normalization failed");
+    if(cudaGetLastError()!=cudaSuccess) return fail(RbfStatus::CudaError,"RBF extent launch failed");
     if(!ok(cudaMemsetAsync(gram_.data(),0,16*sizeof(double),stream))) return fail(RbfStatus::CudaError,"RBF rank diagnostic reset failed");
     polynomialGram<<<32,128,0,stream>>>(rest_.data(),n,gram_.data(),center_[0],center_[1],center_[2],1.0/scale_);
     landGram<<<1,32,0,stream>>>(gram_.data(),proofDev_->gram);
@@ -587,7 +586,7 @@ RbfStatus CudaRbfBinding::Bind(DeviceView<const float3> samples, double smoothin
     // getrf submit before the gram is known, and the rank decision is
     // checked first after the single sync, so error precedence (rank before
     // LU status) and every success-path byte are unchanged.
-    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,center_[0],center_[1],center_[2],1.0/scale_,smoothing,nullptr);
+    buildMatrix<<<(m*m+255)/256,256,0,stream>>>(rest_.data(),matrix_.data(),n,m,center_[0],center_[1],center_[2],1.0/scale_,smoothing,nullptr,normSamples_.data());
     int lwork=0; if(cusolverDnDgetrf_bufferSize(solver_,m,m,matrix_.data(),m,&lwork)!=CUSOLVER_STATUS_SUCCESS || !ok(work_.reset(lwork))) return fail(RbfStatus::SolverError,"cuSOLVER LU workspace failed");
     if(cusolverDnSetStream(solver_,stream)!=CUSOLVER_STATUS_SUCCESS || cusolverDnDgetrf(solver_,m,m,matrix_.data(),m,work_.data(),pivots_.data(),&proofDev_->info)!=CUSOLVER_STATUS_SUCCESS) return fail(RbfStatus::SolverError,"cuSOLVER LU failed");
     if(!ok(cudaStreamSynchronize(stream)))return fail(RbfStatus::CudaError,"RBF LU status query failed");
