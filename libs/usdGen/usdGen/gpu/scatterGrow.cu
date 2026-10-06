@@ -235,7 +235,7 @@ __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
     float3 const* rootBIn, float3 const* rootNIn, uint32_t curves, uint32_t cvCount,
     int seed, double length, double lo, double hi, float lift, float azimuth, float azimuthRandom, float width,
     ScatterGrowDirection direction, float3 literal,
-    float3* points, float3* rest, float* widths, float* hairT, uint32_t* offsets,
+    float3* points, float* widths, float* hairT, uint32_t* offsets,
     uint64_t* outIds, int32_t* rootPrim, float2* rootUV, float3* rootT,
     float3* rootB, float3* rootN, int* error) {
     uint32_t c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -261,7 +261,7 @@ __global__ void GrowKernel(float3 const* roots, uint64_t const* ids,
         if (!FiniteDevice(d)) { atomicCAS(error, 0, kNonFinite); return; }
         float3 p = make_float3(roots[c].x + dir.x*d, roots[c].y + dir.y*d, roots[c].z + dir.z*d);
         if (!FiniteDevice(p)) { atomicCAS(error, 0, kNonFinite); return; }
-        points[first+i] = rest[first+i] = p; widths[first+i] = width; hairT[first+i] = t;
+        points[first+i] = p; widths[first+i] = width; hairT[first+i] = t;
     }
     outIds[c] = ids[c]; rootPrim[c] = rootPrimIn[c]; rootUV[c] = rootUVIn[c];
     rootT[c] = rootTIn[c]; rootB[c] = rootBIn[c]; rootN[c] = rootNIn[c];
@@ -741,8 +741,13 @@ ScatterGrowStatus CudaScatterGrow::BeginFresh(
         if (e != cudaSuccess) return Status(e);
         return ScatterGrowStatus::Ok;
     }
-    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pendingInput_.stableIds.data(),pendingInput_.rootPrim.data(),pendingInput_.rootUV.data(),pendingInput_.rootT.data(),pendingInput_.rootB.data(),pendingInput_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.azimuth,controls.azimuthRandom,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.restPoints.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),error_.data());
-    e=cudaGetLastError(); if(e!=cudaSuccess)return Status(e); return ScatterGrowStatus::Ok;
+    GrowKernel<<<(unsigned(pendingCurves_)+127)/128,128,0,stream>>>(pendingInput_.points.data(),pendingInput_.stableIds.data(),pendingInput_.rootPrim.data(),pendingInput_.rootUV.data(),pendingInput_.rootT.data(),pendingInput_.rootB.data(),pendingInput_.rootN.data(),uint32_t(pendingCurves_),controls.cvCount,controls.seed,controls.length,controls.randomLo,controls.randomHi,controls.lift,controls.azimuth,controls.azimuthRandom,controls.fallbackWidth,controls.direction,controls.literalDirection,pending_.points.data(),pending_.widths.data(),pending_.hairT.data(),pending_.offsets.data(),pending_.stableIds.data(),pending_.rootPrim.data(),pending_.rootUV.data(),pending_.rootT.data(),pending_.rootB.data(),pending_.rootN.data(),error_.data());
+    e=cudaGetLastError(); if(e!=cudaSuccess)return Status(e);
+    // rest == points elementwise: a streaming D2D copy replaces the kernel's
+    // second strided float3 write stream. Identical bytes on the success path
+    // (every element written before the copy); the error path discards both.
+    e=cudaMemcpyAsync(pending_.restPoints.data(),pending_.points.data(),pendingPoints_*sizeof(float3),cudaMemcpyDeviceToDevice,stream);
+    if(e!=cudaSuccess)return Status(e); return ScatterGrowStatus::Ok;
 }
 
 ScatterGrowStatus CudaScatterGrow::FinishFreshAsync(
