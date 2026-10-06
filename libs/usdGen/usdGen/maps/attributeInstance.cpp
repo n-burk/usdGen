@@ -38,12 +38,58 @@ bool UsdGenAttributeCookInstances(UsdGenAttributeInstanceInput const &input,
     cooked.prototype.resize(count);
     cooked.instanceIndices.resize(size_t(input.numPrototypes));
 
+    // Inline UsdGenAttributeMap::Sample Bilinear (attributeMap.cpp is
+    // canonical): same checks, same clamp, same node math, same lerp
+    // order, without the out-of-line call per root. The channel was
+    // validated once above and value is never null, so those checks
+    // drop out; Bilinear with res == 1 takes Sample's Nearest path.
+    float const *texels = input.map->Data();
+    int const numFaces = input.map->NumFaces();
+    int const res = input.map->Resolution();
+    int const channels = input.map->Channels();
+    int const channel = input.channel;
+    auto texel = [&](int face, int s, int t) -> float {
+        s = std::min(res - 1, std::max(0, s));
+        t = std::min(res - 1, std::max(0, t));
+        return texels[((size_t(face) * size_t(res) + size_t(t)) * size_t(res) +
+                        size_t(s)) *
+                        size_t(channels) +
+                    size_t(channel)];
+    };
     for (size_t i = 0; i < count; ++i) {
         UsdGenAttributeInstanceRoot const &root = input.roots[i];
         float value = input.defaultValue;
-        bool const sampled =
-            input.map->Sample(root.face, root.u, root.v, input.channel,
-                              UsdGenAttributeMapInterp::Bilinear, &value);
+        bool sampled = false;
+        float u = root.u, v = root.v;
+        if (root.face >= 0 && root.face < numFaces && std::isfinite(u) &&
+            std::isfinite(v)) {
+            u = std::min(1.0f, std::max(0.0f, u));
+            v = std::min(1.0f, std::max(0.0f, v));
+            if (res == 1) {
+                int const s = std::min(
+                    res - 1,
+                    static_cast<int>(std::floor(double(u) * (res - 1) + 0.5)));
+                int const t = std::min(
+                    res - 1,
+                    static_cast<int>(std::floor(double(v) * (res - 1) + 0.5)));
+                value = texel(root.face, s, t);
+            } else {
+                double const x = double(u) * (res - 1);
+                double const y = double(v) * (res - 1);
+                int const s0 = static_cast<int>(std::floor(x));
+                int const t0 = static_cast<int>(std::floor(y));
+                double const fx = std::min(1.0, std::max(0.0, x - s0));
+                double const fy = std::min(1.0, std::max(0.0, y - t0));
+                double const v00 = texel(root.face, s0, t0);
+                double const v10 = texel(root.face, s0 + 1, t0);
+                double const v01 = texel(root.face, s0, t0 + 1);
+                double const v11 = texel(root.face, s0 + 1, t0 + 1);
+                value = static_cast<float>((v00 * (1.0 - fx) + v10 * fx) *
+                                               (1.0 - fy) +
+                                           (v01 * (1.0 - fx) + v11 * fx) * fy);
+            }
+            sampled = true;
+        }
         if (!sampled) value = input.defaultValue;
         cooked.values[i] = value;
         bool const kept = sampled && value >= input.threshold;

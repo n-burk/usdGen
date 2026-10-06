@@ -135,6 +135,25 @@ void CheckSamplingParity()
         parity = result.values[i] == want;  // same call, bitwise
     }
     CHECK(parity, "cooked values match bilinear Sample bitwise");
+    // res == 1 takes Sample's Nearest path; out-of-range uv clamps.
+    auto one = TwoFaceMap(1);
+    one->SetTexel(0, 0, 0, 0, 0.25f);
+    one->SetTexel(1, 0, 0, 0, 0.75f);
+    UsdGenAttributeInstanceInput input1 = CookInput(one);
+    input1.roots = {Root(0, -0.5f, 2.0f), Root(1, 0.5f, 0.5f)};
+    input1.threshold = -1.0f;
+    UsdGenAttributeInstanceResult result1;
+    CHECK(UsdGenAttributeCookInstances(input1, &result1, &error),
+          "res-1 cook accepts");
+    bool parity1 = result1.values.size() == 2;
+    for (size_t i = 0; i < input1.roots.size() && parity1; ++i) {
+        float want = 0.0f;
+        one->Sample(input1.roots[i].face, input1.roots[i].u,
+                    input1.roots[i].v, 0, UsdGenAttributeMapInterp::Bilinear,
+                    &want);
+        parity1 = result1.values[i] == want;
+    }
+    CHECK(parity1, "res-1 cooked values match Sample bitwise");
 }
 
 void CheckThreshold()
