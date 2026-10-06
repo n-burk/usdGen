@@ -447,10 +447,15 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
     if (curves.curveId.size() != n)
         return _Fail("instance: curveId is not per-curve", error);
 
+    // Hoisted orient dispatch (bit-identical): params.orient is
+    // loop-invariant, so the token comparisons (out-of-line calls) run once
+    // instead of once per curve.
+    bool const orientWorld = (params.orient == OrientWorld());
+    bool const orientSurface = (params.orient == OrientSurfaceFrame());
     // Root frames are required exactly when consumed: every frame-relative
     // orient, plus any nonzero normalOffset (which pushes along rootN).
     bool const needFrames =
-        params.orient != OrientWorld() || params.normalOffset != 0.0f;
+        !orientWorld || params.normalOffset != 0.0f;
     // Spheres ignore orientation, but a frame-relative orient still selects
     // its (discarded) frame path only for cards; spheres skip frames unless
     // the offset needs them.
@@ -580,9 +585,9 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
         // Cards: orientation frame + twist about the length axis.
         GfVec3d xAxis(1.0, 0.0, 0.0), yAxis(0.0, 1.0, 0.0),
             zAxis(0.0, 0.0, 1.0);
-        if (params.orient == OrientWorld()) {
+        if (orientWorld) {
             // Identity basis: nothing to derive.
-        } else if (params.orient == OrientSurfaceFrame()) {
+        } else if (orientSurface) {
             bool ok = false;
             yAxis = _Normalized(GfVec3d(curves.rootB[c]), &ok);
             if (!ok)
@@ -639,7 +644,7 @@ UsdGenInstancer::Bake(UsdGenInstanceParams const &params,
             twDeg =
                 params.twist + params.twistRandom * (tDraw * 2.0f - 1.0f);
         }
-        if (params.orient != OrientWorld() && twDeg != 0.0f) {
+        if (!orientWorld && twDeg != 0.0f) {
             // Local-space post-rotation by R_y(+tw): newX = M*(ca,0,-sa),
             // newZ = M*(sa,0,ca). twist = +90 about Y sends local X to -Z.
             double ca, sa;
