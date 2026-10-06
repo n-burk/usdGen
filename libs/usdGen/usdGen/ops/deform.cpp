@@ -148,6 +148,10 @@ void ParallelFor(UsdGenWorkDispatcher *dispatcher, size_t count, F const &body)
     // Bodies are strand groups (~19us at 32 strands), so a few groups
     // already outweigh the parallel-region overhead; under 3 groups the
     // groom has at most 64 strands, the old per-strand serial bound.
+    // Single-group claims: at ~19us a body the default 4-group quantum
+    // strands measurable wall past the last full round, while each group
+    // streams its own queries (no cross-group reuse for coarser claims
+    // to preserve), so the fetch_add traffic is pure profit.
     if (!dispatcher || count < 3) {
         for (size_t i = 0; i < count; ++i) body(i);
         return;
@@ -155,7 +159,7 @@ void ParallelFor(UsdGenWorkDispatcher *dispatcher, size_t count, F const &body)
     struct Payload { F const *body; } payload{&body};
     dispatcher->ParallelFor(count, [](size_t i, void *p) {
         (*static_cast<Payload *>(p)->body)(i);
-    }, &payload);
+    }, &payload, 1);
 }
 
 void MixArray(opUtil::Digest *d, void const *data, size_t bytes)

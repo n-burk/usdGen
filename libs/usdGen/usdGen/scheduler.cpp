@@ -713,7 +713,7 @@ UsdGenScheduler::~UsdGenScheduler() = default;
 int UsdGenScheduler::ThreadLimit() const noexcept { return _threadLimit; }
 
 void UsdGenWorkDispatcher::ParallelFor(
-    size_t count, void (*body)(size_t, void *), void *payload)
+    size_t count, void (*body)(size_t, void *), void *payload, size_t claimChunk)
 {
     // Every parallel region runs over the scheduler's worker pool (never
     // pxr work::, which honours the process-global PXR_WORK_THREAD_LIMIT
@@ -724,7 +724,7 @@ void UsdGenWorkDispatcher::ParallelFor(
         for (size_t i = 0; i < count; ++i) body(i, payload);
         return;
     }
-    _pool->ParallelFor(count, body, payload);
+    _pool->ParallelFor(count, body, payload, claimChunk);
 }
 
 UsdGenWorkDispatcher UsdGenScheduler::MakeWorkDispatcher() const

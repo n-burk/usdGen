@@ -58,7 +58,10 @@ public:
     explicit UsdGenWorkDispatcher(UsdGenWorkerPool *pool) : _pool(pool) {}
     /// Run a per-index body 0..count-1 over the scheduler's worker pool
     /// (capture phase). A null pool runs the body inline, serially.
-    void ParallelFor(size_t count, void (*body)(size_t, void *), void *payload);
+    /// claimChunk overrides the pool's claim heuristic (0 keeps it); see
+    /// UsdGenWorkerPool::ParallelFor.
+    void ParallelFor(size_t count, void (*body)(size_t, void *), void *payload,
+                     size_t claimChunk = 0);
 private:
     UsdGenWorkerPool *_pool;
 };

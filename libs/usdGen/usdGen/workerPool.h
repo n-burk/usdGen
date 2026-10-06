@@ -49,7 +49,13 @@ public:
     /// Runs body(i, payload) for i in [0, count), joined before return.
     /// Empty ranges return without dispatching. Rethrows the first worker
     /// exception, if any, after every chunk completed.
-    void ParallelFor(size_t count, void (*body)(size_t, void *), void *payload);
+    /// claimChunk is the indices per atomic claim (0 selects the default
+    /// heuristic, currently ~4): smaller chunks de-quantize big-body
+    /// regions (a 40-index quantum strands up to a full chunk per worker
+    /// past the last full round), while the default preserves locality
+    /// for small locality-sensitive bodies.
+    void ParallelFor(size_t count, void (*body)(size_t, void *), void *payload,
+                     size_t claimChunk = 0);
 
 private:
     struct State;

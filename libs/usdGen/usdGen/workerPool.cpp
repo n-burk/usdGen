@@ -211,7 +211,7 @@ UsdGenWorkerPool::~UsdGenWorkerPool()
 }
 
 void UsdGenWorkerPool::ParallelFor(size_t count, void (*body)(size_t, void *),
-                                   void *payload)
+                                   void *payload, size_t claimChunk)
 {
     if (count == 0 || !body) return;
     if (!_state) {
@@ -224,11 +224,13 @@ void UsdGenWorkerPool::ParallelFor(size_t count, void (*body)(size_t, void *),
     }
     // Publish the dispatch before the release-store hands it over.
     // Claim chunks of ~4 indices: a stacked worker's straggler bound is
-    // one chunk, and the fetch_add traffic is one op per chunk.
+    // one chunk, and the fetch_add traffic is one op per chunk. An
+    // explicit claimChunk overrides the heuristic for callers whose
+    // bodies are big enough that the quantum strands measurable wall.
     _state->body = body;
     _state->payload = payload;
     _state->count = count;
-    _state->chunk = std::max<size_t>(
+    _state->chunk = claimChunk != 0 ? claimChunk : std::max<size_t>(
         1, std::min<size_t>(4, (count + size_t(_state->workers) - 1) /
                                    size_t(_state->workers)));
     _state->next.store(0, std::memory_order_relaxed);

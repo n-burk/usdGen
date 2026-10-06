@@ -15,6 +15,8 @@
 //   4. Repeated dispatches are all correct (generation counter wraps
 //      safely over 300 back-to-back regions with gaps).
 //   5. A single-wide pool runs inline (no threads needed for Dispatch).
+//   6. An explicit claim chunk keeps every-index-once (prime counts,
+//      chunk 1 and a chunk past the count).
 
 #include "usdGen/workerPool.h"
 
@@ -64,6 +66,24 @@ void ThrowBody(size_t i, void *p)
     auto *hits = static_cast<std::atomic<int> *>(p);
     hits[i].fetch_add(1, std::memory_order_relaxed);
     if (i == 5) throw std::runtime_error("pool test throw");
+}
+
+void CheckCountsChunk(UsdGenWorkerPool &pool, size_t count, size_t chunk,
+                      char const *what)
+{
+    std::vector<std::atomic<int>> hits(count);
+    for (auto &h : hits) h.store(0, std::memory_order_relaxed);
+    std::set<std::thread::id> threads;
+    std::mutex threadsMutex;
+    CountPayload pl{count ? hits.data() : nullptr, &threads, &threadsMutex};
+    pool.ParallelFor(count, CountBody, &pl, chunk);
+    bool once = true;
+    for (auto &h : hits)
+        if (h.load(std::memory_order_relaxed) != 1) once = false;
+    Check(once, std::string("every index runs exactly once (") + what + ")");
+    if (count > 1 && pool.Workers() > 1)
+        Check(threads.size() >= 2,
+              std::string("at least two workers ran tasks (") + what + ")");
 }
 
 void CheckCounts(UsdGenWorkerPool &pool, size_t count, char const *what)
@@ -180,6 +200,29 @@ int main()
         Check(threads.size() == 1 &&
                   *threads.begin() == std::this_thread::get_id(),
               "a single-wide pool runs inline on the caller");
+    }
+
+    if (g_failures) return 1;
+
+    // Explicit claim chunks keep the contract (prime counts defeat even
+    // splits; a chunk past the count still covers every index once, on
+    // one worker, since a single claim takes the whole range).
+    {
+        UsdGenWorkerPool pool(8);
+        CheckCountsChunk(pool, 101, 1, "chunk 1 over prime 101");
+        CheckCountsChunk(pool, 101, 7, "chunk 7 over prime 101");
+        {
+            std::vector<std::atomic<int>> hits(17);
+            for (auto &h : hits) h.store(0, std::memory_order_relaxed);
+            std::set<std::thread::id> threads;
+            std::mutex threadsMutex;
+            CountPayload pl{hits.data(), &threads, &threadsMutex};
+            pool.ParallelFor(17, CountBody, &pl, 64);
+            bool once = true;
+            for (auto &h : hits)
+                if (h.load(std::memory_order_relaxed) != 1) once = false;
+            Check(once, "every index runs exactly once (chunk past the count)");
+        }
     }
 
     if (g_failures) return 1;
