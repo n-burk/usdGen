@@ -62,6 +62,9 @@ struct ScatterGrowRequirements {
 // Exact explicit payload sizes, available before selecting a device.  The
 // statusBytes field includes one device word and one pinned host relay word;
 // native events and other driver allocations are outside this ledger.
+// inputBytes is the transient input staging (root positions); ids, prims,
+// uvs, and frames upload directly into their published output buffers and
+// are counted in outputBytes.
 ScatterGrowStatus GetScatterGrowRequirements(size_t curveCount, uint32_t cvCount,
                                             ScatterGrowRequirements* result);
 
