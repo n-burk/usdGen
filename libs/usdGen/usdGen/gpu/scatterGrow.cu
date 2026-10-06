@@ -481,9 +481,93 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         }
         return lim;
     };
+    // Fused positions scan (verdict-identical): the bounded-math fast
+    // path below needs max |position| over a superset of [0, mLim), and
+    // this scan already streams every positions word, so it accumulates
+    // that max over the same loads instead of re-streaming positions.
+    // Integer max over sign-cleared bits equals the old fmax chain on
+    // finite lanes (magnitude order is integer order, subnormals and
+    // +-0 included), so clean inputs take the identical branch. The
+    // scanned prefix always covers [0, mLim): mLim <= fBad <= the
+    // first-bad root, and a clean scan covers all n. A non-finite lane
+    // in the prefix (exponent 0xFF, the integer maximum) fails the
+    // bound check toward the slow path, which is the verdict reference.
+    auto firstBadRootMax = [](uint32_t const *u, size_t roots, size_t stride,
+                              size_t lim, uint32_t *maxBits) -> size_t {
+        size_t const words = std::min(roots, lim) * stride;
+        size_t base = 0;
+        size_t const w16 = words & ~size_t(15);
+#if defined(__aarch64__) && defined(__GNUC__)
+        typedef uint32_t u32x4 __attribute__((vector_size(16)));
+        u32x4 macc = {0u, 0u, 0u, 0u};
+#endif
+        uint32_t mx = 0;
+        for (; base < w16; base += 16) {
+#if defined(__aarch64__) && defined(__GNUC__)
+            u32x4 v0, v1, v2, v3;
+            std::memcpy(&v0, u + base + 0, sizeof(v0));
+            std::memcpy(&v1, u + base + 4, sizeof(v1));
+            std::memcpy(&v2, u + base + 8, sizeof(v2));
+            std::memcpy(&v3, u + base + 12, sizeof(v3));
+            u32x4 const o = v0 | v1 | v2 | v3;
+            uint32_t const acc = o[0] | o[1] | o[2] | o[3];
+            u32x4 const m0 = v0 & 0x7FFFFFFFu;
+            u32x4 const m1 = v1 & 0x7FFFFFFFu;
+            u32x4 const m2 = v2 & 0x7FFFFFFFu;
+            u32x4 const m3 = v3 & 0x7FFFFFFFu;
+            u32x4 const hi01 = m0 > m1 ? m0 : m1;
+            u32x4 const hi23 = m2 > m3 ? m2 : m3;
+            u32x4 const hi = hi01 > hi23 ? hi01 : hi23;
+            macc = macc > hi ? macc : hi;
+#else
+            uint32_t acc = 0;
+            for (size_t k = 0; k < 16; ++k) {
+                uint32_t const w = u[base + k];
+                acc |= w;
+                uint32_t const mag = w & 0x7FFFFFFFu;
+                mx = mag > mx ? mag : mx;
+            }
+#endif
+            if ((acc & 0x7F800000u) == 0x7F800000u) {
+#if defined(__aarch64__) && defined(__GNUC__)
+                uint32_t lanes[4];
+                std::memcpy(lanes, &macc, sizeof(lanes));
+                for (int q = 0; q < 4; ++q)
+                    mx = lanes[q] > mx ? lanes[q] : mx;
+#endif
+                for (size_t k = 0; k < 16; ++k) {
+                    uint32_t const w = u[base + k];
+                    uint32_t const mag = w & 0x7FFFFFFFu;
+                    mx = mag > mx ? mag : mx;
+                    if ((w & 0x7F800000u) == 0x7F800000u) {
+                        *maxBits = mx;
+                        return (base + k) / stride;
+                    }
+                }
+            }
+        }
+        for (; base < words; ++base) {
+            uint32_t const w = u[base];
+            uint32_t const mag = w & 0x7FFFFFFFu;
+            mx = mag > mx ? mag : mx;
+            if ((w & 0x7F800000u) == 0x7F800000u) {
+                *maxBits = mx;
+                return base / stride;
+            }
+        }
+#if defined(__aarch64__) && defined(__GNUC__)
+        uint32_t lanes[4];
+        std::memcpy(lanes, &macc, sizeof(lanes));
+        for (int q = 0; q < 4; ++q) mx = lanes[q] > mx ? lanes[q] : mx;
+#endif
+        *maxBits = mx;
+        return lim;
+    };
     size_t fBad = n;
-    fBad = firstBadRoot(
-        reinterpret_cast<uint32_t const *>(r->positions.data()), n, 3, fBad);
+    uint32_t posMaxBits = 0;
+    fBad = firstBadRootMax(
+        reinterpret_cast<uint32_t const *>(r->positions.data()), n, 3, fBad,
+        &posMaxBits);
     fBad = firstBadRoot(
         reinterpret_cast<uint32_t const *>(r->rootUV.data()), n, 2, fBad);
     fBad = firstBadRoot(
@@ -525,28 +609,15 @@ ScatterGrowStatus CudaScatterGrow::ValidateRoots(
         double(std::numeric_limits<float>::max()) / 8.0;
     size_t mRun = mLim;
     if (tBound <= kTargetLim) {
-        // Max |position| over all roots (a superset of [0, mLim), so a
-        // conservative bound): four fmax lanes over the strided roots.
-        // std::fmax ignores NaN lanes, so faults still break the bound
-        // check below toward the slow path instead of poisoning Pmax.
-        float m0 = 0.0f, m1 = 0.0f, m2 = 0.0f, m3 = 0.0f;
-        size_t i = 0;
-        size_t const n4 = n & ~size_t(3);
-        auto lane = [](float m, float3 p) {
-            m = std::fmax(m, std::fabs(p.x));
-            m = std::fmax(m, std::fabs(p.y));
-            m = std::fmax(m, std::fabs(p.z));
-            return m;
-        };
-        for (; i < n4; i += 4) {
-            m0 = lane(m0, r->positions[i + 0]);
-            m1 = lane(m1, r->positions[i + 1]);
-            m2 = lane(m2, r->positions[i + 2]);
-            m3 = lane(m3, r->positions[i + 3]);
-        }
-        for (; i < n; ++i) m0 = lane(m0, r->positions[i]);
-        double const posMax =
-            double(std::fmax(std::fmax(m0, m1), std::fmax(m2, m3)));
+        // Max |position| comes from the fused positions scan above (a
+        // superset of [0, mLim), so a conservative bound): integer max
+        // over sign-cleared bits, equal to the old fmax chain on
+        // finite lanes. A non-finite lane in the prefix poisons the
+        // bits toward Inf/NaN, which fails the check below toward the
+        // slow path instead of taking the fast path.
+        float posMaxF = 0.0f;
+        std::memcpy(&posMaxF, &posMaxBits, sizeof(float));
+        double const posMax = double(posMaxF);
         constexpr double kOutLim =
             double(std::numeric_limits<float>::max()) / 4.0;
         if (posMax + 128.0 * tBound <= kOutLim) mRun = 0;

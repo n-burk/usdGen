@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <random>
 #include <string>
@@ -462,6 +463,199 @@ int main()
             sawNonFinite += want == ScatterGrowStatus::NonFiniteInput;
         }
         CHECK(sawOk > 100 && sawNonFinite > 100);
+    }
+    // Fused positions scan at vector scale: the finite/max fusion must
+    // agree with the reference when faults land on 16-word group edges,
+    // when max candidates are subnormal or signed zero, at the Pmax
+    // fast/slow boundary, and when duplicates precede finite faults
+    // (precedence through the poisoned fused prefix).
+    {
+        float const fmax = std::numeric_limits<float>::max();
+        float const denorm = std::numeric_limits<float>::denorm_min();
+        float const inf = std::numeric_limits<float>::infinity();
+        float const qnan = std::numeric_limits<float>::quiet_NaN();
+        float const snan = std::numeric_limits<float>::signaling_NaN();
+        auto check = [&](std::shared_ptr<ScatterGrowRoots> const &r,
+                         ScatterGrowControls const &c, char const *what) {
+            size_t tRef = 0, tGot = 0;
+            ScatterGrowStatus const want = ReferenceValidate(r, c, &tRef);
+            ScatterGrowStatus const got =
+                CudaScatterGrow::ValidateRoots(r, c, &tGot);
+            if (want != got ||
+                (want == ScatterGrowStatus::Ok && tRef != tGot)) {
+                std::fprintf(stderr, "FUSED mismatch (%s): want %d got %d\n",
+                             what, int(want), int(got));
+                return 1;
+            }
+            return 0;
+        };
+        // Single positions faults on group edges: words 15/16/17 split
+        // the first two 16-word groups; stride 3 crosses lanes mid-group.
+        size_t const n = 100;  // 300 words: 18 groups + 12-word tail
+        size_t const words[] = {0, 1, 2, 3, 13, 14, 15, 16, 17, 18,
+                                31, 32, 33, 47, 48, 49, 63, 64, 65,
+                                143, 144, 145, 191, 192, 193, 287, 288,
+                                289, 296, 297, 298, 299};
+        float const faults[] = {qnan, snan, inf, -inf};
+        for (size_t w : words) {
+            for (float fv : faults) {
+                size_t const bad = w / 3;
+                // No duplicates: the finite fault decides.
+                {
+                    auto r = Roots(n);
+                    reinterpret_cast<float *>(r->positions.data())[w] = fv;
+                    if (check(r, Controls(), "edge")) return 1;
+                }
+                // Duplicate strictly before the fault: dup wins even
+                // though the fused max is poisoned past it.
+                if (bad > 1) {
+                    auto r = Roots(n);
+                    reinterpret_cast<float *>(r->positions.data())[w] = fv;
+                    r->stableIds[bad - 1] = r->stableIds[0];
+                    if (check(r, Controls(), "edge-dup-before")) return 1;
+                }
+                // Duplicate strictly after the fault: finite wins.
+                if (bad + 2 < n) {
+                    auto r = Roots(n);
+                    reinterpret_cast<float *>(r->positions.data())[w] = fv;
+                    r->stableIds[n - 1] = r->stableIds[bad + 1];
+                    if (check(r, Controls(), "edge-dup-after")) return 1;
+                }
+            }
+        }
+        // Max-candidate sweep: the fused integer max must order
+        // subnormals, signed zeros, and huge finites exactly like fmax.
+        {
+            float const cands[] = {0.0f, -0.0f, denorm, -denorm,
+                                   1.0f, -1.0f, 1e30f, fmax / 4.0f,
+                                   fmax / 2.0f, fmax};
+            for (float mc : cands) {
+                auto r = Roots(64);  // 192 words: 12 groups, no tail
+                // Plant the candidate pair at a group-edge lane pair;
+                // everything else stays small and unique.
+                reinterpret_cast<float *>(r->positions.data())[16] = mc;
+                reinterpret_cast<float *>(r->positions.data())[17] = -mc;
+                if (check(r, Controls(), "maxcand")) return 1;
+            }
+        }
+        // Pmax fast/slow boundary: posMax + 128*tBound against
+        // FLT_MAX/4 from both sides, with and without an early dup.
+        {
+            double const outLim = double(fmax) / 4.0;
+            double const tB = 1.0 * 1.2;  // length * max(lo, hi)
+            double const edge = outLim - 128.0 * tB;
+            float const bounds[] = {float(edge * (1.0 - 1e-6)), float(edge),
+                                    float(edge * (1.0 + 1e-6)),
+                                    float(edge - 1.0e31),
+                                    float(edge + 1.0e31)};
+            for (float pb : bounds) {
+                auto r = Roots(n);
+                r->positions[37] = make_float3(pb, 0.0f, 0.0f);
+                if (check(r, Controls(), "pbound")) return 1;
+                // Early dup + slow path: math over [0, mLim) must
+                // still clear toward DuplicateStableId.
+                auto rd = Roots(n);
+                rd->positions[37] = make_float3(pb, 0.0f, 0.0f);
+                rd->stableIds[50] = rd->stableIds[0];
+                if (check(rd, Controls(), "pbound-dup")) return 1;
+            }
+        }
+        // Integer-max claim the fusion rests on: max over sign-cleared
+        // bits must equal the fmax chain bit-for-bit on finite lanes
+        // (magnitude order is integer order), and any non-finite lane
+        // must poison the max toward exponent 0xFF (slow path).
+        {
+            auto chain = [](uint32_t const *ws, size_t count) {
+                float m = 0.0f;
+                for (size_t i = 0; i < count; ++i) {
+                    float f = 0.0f;
+                    uint32_t w = ws[i];
+                    std::memcpy(&f, &w, sizeof(float));
+                    m = std::fmax(m, std::fabs(f));
+                }
+                return m;
+            };
+            auto bits = [](uint32_t const *ws, size_t count) {
+                uint32_t mx = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    uint32_t const mag = ws[i] & 0x7FFFFFFFu;
+                    mx = mag > mx ? mag : mx;
+                }
+                return mx;
+            };
+            auto equal = [&](uint32_t const *ws, size_t count) {
+                float f = 0.0f;
+                uint32_t b = bits(ws, count);
+                std::memcpy(&f, &b, sizeof(float));
+                float c = chain(ws, count);
+                uint32_t cb = 0, fb = 0;
+                std::memcpy(&cb, &c, sizeof(float));
+                std::memcpy(&fb, &f, sizeof(float));
+                return cb == fb;
+            };
+            uint32_t const directed[] = {
+                0x00000000u, 0x80000000u, 0x00000001u, 0x80000001u,
+                0x007FFFFFu, 0x807FFFFFu, 0x00800000u, 0x80800000u,
+                0x3F800000u, 0xBF800000u, 0x7F7FFFFFu, 0xFF7FFFFFu,
+                0x7F800000u, 0xFF800000u, 0x7FC00000u, 0xFFC00000u,
+                0x7F800001u, 0xFF800001u};
+            CHECK(equal(directed, 12));  // finite lanes: bitwise equal
+            // Any non-finite lane poisons the max to exponent 0xFF.
+            CHECK((bits(directed, 18) & 0x7F800000u) == 0x7F800000u);
+            CHECK((bits(directed + 12, 2) & 0x7F800000u) == 0x7F800000u);
+            CHECK((bits(directed + 14, 2) & 0x7F800000u) == 0x7F800000u);
+            CHECK((bits(directed + 16, 2) & 0x7F800000u) == 0x7F800000u);
+            std::mt19937_64 brng(0xb17ac517ac517abu);
+            for (int trial = 0; trial < 20000; ++trial) {
+                uint32_t ws[17];
+                for (int k = 0; k < 17; ++k) {
+                    uint32_t w = uint32_t(brng());
+                    // Mix exponents densely near boundaries too.
+                    if ((brng() & 7) == 0)
+                        w = (w & 0x807FFFFFu) |
+                            (uint32_t(brng() % 3 == 0 ? 0x00 : 0xFE) << 23);
+                    ws[k] = w;
+                }
+                bool anyBad = false;
+                for (int k = 0; k < 17; ++k)
+                    anyBad |= (ws[k] & 0x7F800000u) == 0x7F800000u;
+                if (anyBad)
+                    CHECK((bits(ws, 17) & 0x7F800000u) == 0x7F800000u);
+                else
+                    CHECK(equal(ws, 17));
+            }
+        }
+        // Randomized multi-fault sweep at vector scale: faults and
+        // dups scattered across groups must keep exact precedence.
+        {
+            std::mt19937_64 rng(0x5ca1ab1e5ca1ab1eull);
+            auto pick = [&](std::initializer_list<float> vs) {
+                return *(vs.begin() + size_t(rng() % vs.size()));
+            };
+            for (int trial = 0; trial < 2000; ++trial) {
+                size_t const m = 200;
+                auto r = std::make_shared<ScatterGrowRoots>();
+                uint64_t const pool = 1 + size_t(rng() % 199);
+                for (size_t i = 0; i < m; ++i) {
+                    float const px = pick({0.0f, -0.0f, 1.0f, -2.0f,
+                                           denorm, -denorm, 1e30f, fmax,
+                                           inf, -inf, qnan, snan});
+                    float const py = pick({0.0f, 1.0f, -1.0f, inf, qnan});
+                    r->positions.push_back(make_float3(px, py, 0.0f));
+                    r->stableIds.push_back(rng() % pool);
+                    r->rootPrim.push_back(0);
+                    float const uv = pick({0.0f, 0.5f, inf, qnan});
+                    r->rootUV.push_back(make_float2(uv, 0.0f));
+                    float const fz = pick({0.0f, 1.0f, qnan});
+                    r->rootT.push_back(make_float3(1.0f, 0.0f, 0.0f));
+                    r->rootB.push_back(make_float3(0.0f, 1.0f, fz));
+                    r->rootN.push_back(make_float3(0.0f, 0.0f, 1.0f));
+                }
+                auto c = Controls();
+                c.length = pick({1.0f, 1e30f, fmax});
+                if (check(r, c, "scale-fuzz")) return 1;
+            }
+        }
     }
     std::printf("testUsdGenCudaScatterGrowValidate: PASS\n");
     return 0;
